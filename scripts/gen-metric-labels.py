@@ -238,6 +238,20 @@ GEO_DESC = {
     "geo_compliance_pass": "#OGC topology fixtures (sf/eh/rcc8) matching the spec truth value",
 }
 
+# [OPUS-4.8] (sq-ustq) Full-text-search workloads -> human descriptions. These are FIXED
+# workload names emitted by examples/bench_text (the FTS corpus is synthetic, generated
+# in-process — there are no *.rq / *.ttl input files to glob), driving the ADVISORY metric
+# names text_<workload>_us (per-query latency) + text_build_s (index build). The deterministic
+# gate (hit counts + fts_bytes_per_doc) lives in bench/fts/run.sh's self-assertion + the
+# fts_bytes_per_doc mode:auto ratchet (bench/perf-baseline.json), not on the dashboard.
+FTS_DESC = {
+    "and_terms": "text:matches — docs containing BOTH terms (AND)",
+    "or_terms": "text:matchesAny — docs containing at least one term (OR)",
+    "prefix4": "text:matches 'abcd*' — 4-char prefix (autocomplete)",
+    "phrase": "text:phrase — two adjacent in-order terms",
+    "near_slop2": "text:near (slop 2) — two in-order terms within gap 2",
+}
+
 
 def stems(subdir, ext=".rq"):
     """Sorted file stems under bench/<subdir> with the given extension (default *.rq, matching
@@ -422,7 +436,33 @@ def build():
             "query": desc, "mode": "validate", "unit": "µs",
         }
 
-    # 11) GeoSPARQL suite (sq-tf8n, design §3.5). The ci-bench hook emits `geo_<name>_us`
+    # 11) Full-text-search suite (sq-ustq, design §3.4) -> one ADVISORY per-query-latency metric
+    # per workload (text_<workload>_us; dashboard strips the _us for the label key) + the index
+    # build time (text_build_s). The corpus is synthetic (in-process), so the workload names are
+    # FIXED (not file stems). The deterministic gates (hit counts + fts_bytes_per_doc) live in
+    # bench/fts/run.sh's self-assertion + the fts_bytes_per_doc mode:auto ratchet, not here.
+    FTS_DATASET = ("synthetic FTS corpus — 100k 8-word literals, ~10k-term Zipf vocab, "
+                   "BM25 positions-enabled index (bench/fts/gen.sh)")
+    for s, desc in FTS_DESC.items():
+        labels["text_%s" % s] = {
+            "label": "Full-Text %s — %s, query" % (s, desc),
+            "suite": "Full-Text", "dataset": FTS_DATASET,
+            "query": desc, "mode": "query", "unit": "µs",
+        }
+    labels["text_build_s"] = {
+        "label": "Full-Text — BM25 index build time",
+        "suite": "Full-Text", "dataset": FTS_DATASET,
+        "query": "build the positions-enabled BM25 inverted index over the corpus",
+        "mode": "build", "unit": "s",
+    }
+    labels["fts_bytes_per_doc"] = {
+        "label": "Full-Text — index bytes per document",
+        "suite": "Full-Text", "dataset": FTS_DATASET,
+        "query": "deterministic index heap_bytes()/len() (mode:auto ratchet gate)",
+        "mode": "bytes", "unit": "bytes",
+    }
+
+    # 12) GeoSPARQL suite (sq-tf8n, design §3.5). The ci-bench hook emits `geo_<name>_us`
     # (ADVISORY trend timing) per bench_geo workload — the dashboard strips `_us` for the
     # label key. The deterministic gates (result-set sizes) live in bench/geo/run.sh's
     # self-assertion; the compliance ratchet is the HARD-gated DEFICIT geo_compliance_deficit

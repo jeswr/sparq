@@ -11,6 +11,7 @@ use crate::manifest::{CircuitId, FieldHex, FilterOp, ProofInputs};
 use sparq_zk::commit::GraphCommitment;
 use sparq_zk::encode::encode_term;
 use sparq_zk::field::{field_to_be_bytes_32, field_to_hex, Fr};
+use sparq_zk::sig::join_value_commitment;
 use oxrdf::{NamedNode, Term};
 
 /// Compiled slot buckets (`n`) of the scan family, ascending.
@@ -371,4 +372,159 @@ fn subj_term(t: &oxrdf::Triple) -> Term {
         oxrdf::NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
         oxrdf::NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.clone()),
     }
+}
+
+// === Hidden cross-credential JOIN (sq-bwwl / sq-r2s8, step 4 proving path) ====
+// [OPUS-4.8] sq-r2s8: assemble the `join_eq` witness for proving — the host
+// analogue of `build_scan`. Mirrors the scan build_* pattern: re-encode each
+// witnessed graph's canonical triples (same salt convention the commitment used,
+// so the in-circuit `commit_fold` recompute reproduces `C(G)`), locate the two
+// rows whose chosen slots carry the SAME join value, and bind that value under a
+// per-presentation blinder into the public hiding `join_commitment`. The join
+// VALUE and both rows are PRIVATE witnesses; only the two commitments, the hiding
+// commitment, and the two query-bound slots are public.
+
+/// The private witnesses a `join_eq` proof needs but the manifest never carries —
+/// exactly the `main` PRIVATE parameters of `join_eq_na{n_a}_nb{n_b}` (in
+/// declaration order): the two graphs' per-slot encodings + active counts, the two
+/// joined rows, and the per-presentation blinder. `build` does NOT pad to the
+/// circuit's `N` slots; [`crate::toml::join_prover_toml`] pads `enc_a`/`enc_b` to
+/// the member's bucket exactly as `prover_toml_for`'s scan arm pads `enc`.
+// [OPUS-4.8] sq-r2s8: hidden cross-credential JOIN witness (mirrors ScanWitness).
+#[derive(Debug, Clone)]
+pub struct JoinWitness {
+    /// Graph-A per-slot term encodings of every canonical triple (active leaves).
+    pub enc_a: Vec<[FieldHex; 3]>,
+    /// Active triple count of graph A (`<= n_a`).
+    pub counts_a: u32,
+    /// Graph-B per-slot term encodings.
+    pub enc_b: Vec<[FieldHex; 3]>,
+    /// Active triple count of graph B (`<= n_b`).
+    pub counts_b: u32,
+    /// The joined row of graph A (the row whose `slot_a` carries the join value).
+    pub row_a: [FieldHex; 3],
+    /// The joined row of graph B (the row whose `slot_b` carries the join value).
+    pub row_b: [FieldHex; 3],
+    /// The per-presentation blinder folded into the public `join_commitment`.
+    pub blinding: FieldHex,
+}
+
+/// A built hidden-join proof: the public inputs ([`ProofInputs::JoinEq`]) + the
+/// private witness ([`JoinWitness`]). Mirrors [`BuiltScan`].
+// [OPUS-4.8] sq-r2s8.
+#[derive(Debug, Clone)]
+pub struct BuiltJoin {
+    pub inputs: ProofInputs,
+    pub witness: JoinWitness,
+}
+
+/// One graph's canonical triples re-encoded both as field elements (to locate the
+/// joined rows) and as hex (the witness the toml emits). [OPUS-4.8] sq-r2s8.
+type EncodedGraph = (Vec<[Fr; 3]>, Vec<[FieldHex; 3]>);
+
+/// Re-encode every canonical triple of `c` under its recorded salt — the same
+/// re-derivation [`build_scan`] performs. `None` if a term is not committable.
+// [OPUS-4.8] sq-r2s8.
+fn encode_join_graph(c: &GraphCommitment) -> Option<EncodedGraph> {
+    let salt = c.salt;
+    let mut fr = Vec::with_capacity(c.canonical.triples.len());
+    let mut hex = Vec::with_capacity(c.canonical.triples.len());
+    for t in &c.canonical.triples {
+        let s = encode_term(&subj_term(t), &salt)?;
+        let p = encode_term(&Term::NamedNode(t.predicate.clone()), &salt)?;
+        let o = encode_term(&t.object, &salt)?;
+        fr.push([s, p, o]);
+        hex.push([hexf(&s), hexf(&p), hexf(&o)]);
+    }
+    Some((fr, hex))
+}
+
+/// Build a hidden cross-credential JOIN proof's inputs + witness from the two
+/// graph commitments and the two query-bound join slots, blinding the joined
+/// value with `blinding` (sq-bwwl / sq-r2s8, design §2.2/§3.2).
+///
+/// `slot_a`/`slot_b` (in `{0,1,2}` for s/p/o) are the query-derived positions the
+/// shared variable occupies in each pattern — the SAME slots the verifier's
+/// `bind_joins` gate pins (design §4.4). This builder finds the first `(row_a,
+/// row_b)` whose `row_a[slot_a] == row_b[slot_b]` (the join value), so an honest
+/// caller need only supply the two committed graphs and the slots. Both graphs
+/// must use the salt convention recorded in their [`GraphCommitment`] (the
+/// in-circuit `commit_fold` recomputes `C(G)` from the re-encoded leaves — a wrong
+/// encoding would fail that recompute, so this re-derivation is sound by
+/// construction, exactly as in [`build_scan`]).
+///
+/// Returns `None` if: either slot is out of `{0,1,2}`; no row pair shares a value
+/// at the chosen slots (no honest join — the prover has no satisfying witness); or
+/// either graph's size has no compiled [`JOIN_EQ_N_BUCKETS`] member
+/// ([`derive_join_eq_id`] => `None`, a clean error, never a wrong-N member).
+///
+/// `blinding` is a per-presentation random field element; two presentations of the
+/// same join value under different blinders produce UNLINKABLE `join_commitment`s
+/// (design §2.4 R4). The caller draws it (e.g. from its CSPRNG mapped into the
+/// field), exactly as the ingest salt is drawn.
+// [OPUS-4.8] sq-r2s8: hidden cross-credential JOIN builder.
+pub fn build_join(
+    commit_a: &GraphCommitment,
+    slot_a: u32,
+    commit_b: &GraphCommitment,
+    slot_b: u32,
+    blinding: Fr,
+) -> Option<BuiltJoin> {
+    if slot_a > 2 || slot_b > 2 {
+        return None;
+    }
+
+    // Re-encode each graph's canonical triples under its recorded salt — the same
+    // re-derivation `build_scan` does (the leaf is `h3(enc)`, so a wrong encoding
+    // fails the in-circuit commitment recompute). The field form locates the joined
+    // rows; the hex form is the witness the toml emits.
+    let (fr_a, enc_a) = encode_join_graph(commit_a)?;
+    let (fr_b, enc_b) = encode_join_graph(commit_b)?;
+    let counts_a = fr_a.len() as u32;
+    let counts_b = fr_b.len() as u32;
+
+    let id = derive_join_eq_id(counts_a, counts_b)?;
+
+    // Locate the join: the first row pair whose chosen slots carry the same value.
+    // `slot_a`/`slot_b` are bounds-checked above, so the indexing is in range.
+    let (sa, sb) = (slot_a as usize, slot_b as usize);
+    let mut joined: Option<(usize, usize, Fr)> = None;
+    'outer: for (ia, ra) in fr_a.iter().enumerate() {
+        for (ib, rb) in fr_b.iter().enumerate() {
+            if ra[sa] == rb[sb] {
+                joined = Some((ia, ib, ra[sa]));
+                break 'outer;
+            }
+        }
+    }
+    let (ia, ib, value) = joined?;
+
+    let row_a = enc_a[ia].clone();
+    let row_b = enc_b[ib].clone();
+
+    // Bind the join value under the per-presentation blinder — the in-circuit step
+    // 5 recomputes this identically (single source of truth: the Rust + Noir
+    // `join_value_commitment` agree byte-for-byte), so the public `join_commitment`
+    // matches what the proof binds.
+    let join_commitment = hexf(&join_value_commitment(&value, &blinding));
+
+    Some(BuiltJoin {
+        inputs: ProofInputs::JoinEq {
+            id,
+            commit_a: hexf(&commit_a.commitment),
+            commit_b: hexf(&commit_b.commitment),
+            join_commitment,
+            slot_a,
+            slot_b,
+        },
+        witness: JoinWitness {
+            enc_a,
+            counts_a,
+            enc_b,
+            counts_b,
+            row_a,
+            row_b,
+            blinding: hexf(&blinding),
+        },
+    })
 }

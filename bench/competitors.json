@@ -196,6 +196,45 @@
       "version_env_metadata": "PostGIS_Full_Version() + the host env block, if ever gathered.",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "postgis"
+    },
+    {
+      "id": "jena-text",
+      "name": "Apache Jena Fuseki + jena-text (Lucene SAIL)",
+      "kind": "http-sparql",
+      "role": "[OPUS-4.8 sq-ustq] The ONLY like-for-like full-text-search-over-SPARQL comparator: Fuseki with the jena-text text-index assembler exposes `text:query` over a Lucene index, the surface analogue of sparq-text's `text:matches`. Apache-2.0. Adapter kind `http-sparql` (POST a SPARQL query with a text:query clause -> parse SPARQL-results-JSON -> count), reusing scripts/bench-adapters/http_sparql_adapter.py so the hit count is directly comparable to sparq-text's search().len(). The DASHBOARD FTS peer. Solr/Elasticsearch are deliberately NOT registered — they have no RDF/SPARQL surface (RDF4J even deprecated its Solr backend), so they are off the dashboard.",
+      "pinned_version": "apache-jena-fuseki + jena-text (pin the Fuseki distribution version or the stain/jena-fuseki Docker image DIGEST at gather time)",
+      "version_source": "the Fuseki distribution version, or the Docker image DIGEST, recorded in the gather results file.",
+      "install_recipe": "download apache-jena-fuseki-<ver>.tar.gz (Apache-2.0), configure a TDB2 dataset + a jena-text text-index assembler (Lucene), load the FTS corpus as RDF literals, OR use a `stain/jena-fuseki` Docker image (Docker-based -> gather-only on a Docker EC2 box, like QLever; zero recurring CI cost). gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
+      "run_recipe": "start Fuseki with the jena-text assembler over the loaded corpus, then scripts/gather-competitors.sh --run --only jena-text with the endpoint URL set; the dispatch calls scripts/bench-adapters/http_sparql_adapter.py with each text:query rewrite of the bench/fts query set.",
+      "adapter": {
+        "endpoint_env": "JENA_TEXT_ENDPOINT",
+        "note": "POST `SELECT (COUNT(?s) AS ?n) WHERE { ?s text:query (rdfs:comment \"<terms>\") }` (the jena-text analogue of text:matches); parse SPARQL-results-JSON, read ?n. Scope to AND/OR/prefix/phrase — match sparq-text's BM25 k1=1.2/b=0.75 where Fuseki exposes it."
+      },
+      "comparable_suites": [
+        { "sparq_suite": "text-index-bench", "note": "same corpus loaded as RDF literals; cross-check the HIT COUNT (text:query result size vs sparq-text search().len()) before trusting any timing. jena-text ranking/analyzer differs from sparq-text's UAX#29-tokenized BM25, so scope the comparison to AND/OR/prefix/phrase result SETS, not score order." }
+      ],
+      "version_env_metadata": "gather records the Fuseki version (or Docker image digest) + java -version + the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "jena-text"
+    },
+    {
+      "id": "lucene-anserini",
+      "name": "Lucene (embedded) via Anserini — BM25 kernel reference",
+      "kind": "python-lib",
+      "role": "[OPUS-4.8 sq-ustq] KERNEL BM25 reference: the EMBEDDED Lucene library (NOT Solr/Elasticsearch the servers — a server adds an unfair network layer; sparq-text is embedded), driven via Anserini for standard BM25 on BEIR. Apache-2.0. LABELLED 'sub-component, not an RDF benchmark' — it has NO SPARQL/RDF surface, so it is kept OFF the dashboard and lives in its OWN IR harness, not a SPARQL-suite reuse. Scope to what sparq-text implements (token AND/OR, prefix, phrase, proximity/slop, BM25 k1=1.2/b=0.75) or the comparison is unfair.",
+      "pinned_version": "anserini (pin the exact release/Maven coordinate + Lucene version at gather time)",
+      "version_source": "the Anserini release version + bundled Lucene version, recorded in the gather results file.",
+      "install_recipe": "Anserini (Apache-2.0) via its fatjar / pyserini, plus a BEIR cut (SciFact or TREC-COVID + qrels) downloaded at gather time. gather-only — NOT committed; the BEIR corpus is NOT redistributable in-repo (see the text-index-bench BEIR follow-up bead).",
+      "run_recipe": "Anserini's OWN IR harness: index the BEIR corpus, run BM25 retrieval against the qrels, report Recall@100 / nDCG@10 + latency. This is the IR-quality oracle for sparq-text's BEIR axis once that axis is wired (currently gather-only).",
+      "adapter": {
+        "kind_note": "Lucene/Anserini is a kernel IR sub-component with its own harness (not the shared http-sparql/report-cli path); its results are the BM25 quality oracle, comparable ONLY on the IR-quality axis (Recall@100/nDCG@10), never as a SPARQL benchmark."
+      },
+      "comparable_suites": [
+        { "sparq_suite": "text-index-bench", "note": "KERNEL-ONLY, IR-quality axis: compare Recall@100/nDCG@10 on the same BEIR cut + qrels. NOT a SPARQL benchmark (no RDF surface) and NOT on the dashboard. Scope to AND/OR/prefix/phrase/slop + BM25 k1=1.2/b=0.75 to stay fair." }
+      ],
+      "version_env_metadata": "gather records the Anserini + Lucene versions, the BEIR cut + qrels checksum, java -version, and the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": null
     }
   ],
 

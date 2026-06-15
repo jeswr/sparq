@@ -531,17 +531,20 @@ status      = "ok"
 # GENAI / AUX-INDEX measurement harnesses (crate examples)
 # =============================================================================
 
+# [OPUS-4.8] (sq-ustq, design §3.4) FULL-TEXT-SEARCH suite — exercises sparq-text (BM25 inverted
+# index + text: magic predicates: matches/matchesAny/prefix/phrase/near). Two axes: a deterministic
+# latency-axis STRUCTURE gate (per-commit) + an IR-quality BEIR axis (gather-only, not yet wired).
 [[benchmark]]
 id          = "text-index-bench"
-name        = "sparq-text full-text index build + query"
+name        = "Full-text search — synthetic BM25 corpus (text:matches/phrase/near)"
 category    = "query"
-measures    = "build time, index size, AND/OR/prefix query latency on synthetic literal-heavy data"
-invoke      = "cargo run --release -p sparq-text --example bench_text"
-source      = "crates/sparq-text/examples/bench_text.rs"
-dataset     = "N seeded Zipf-flavoured sentences over ~10k-word vocab, loaded as N-Triples in-example"
-quiet_box_sensitive = true
-pinning     = "seeded generator"
-records_to  = "stdout; sparq-text crate README"
+measures    = "per-workload query latency (us) for and_terms/or_terms/prefix4/phrase/near_slop2 over a synthetic BM25 index, plus the advisory index build time. run.sh carries a HARD self-asserting gate: each workload's TOTAL hit count (summed over a FIXED 200-query set, drawn from an independent seed) AND the integer index bytes-per-doc are asserted vs expected.tsv (deterministic at the pinned corpus; exit 1 on drift). The bytes-per-doc additionally has a mode:auto ratchet (fts_bytes_per_doc in bench/perf-baseline.json). Timing is ADVISORY (mode:noise, trend-only)"
+invoke      = "cargo build --release -p sparq-text --example bench_text && bench/fts/run.sh   # self-contained: synthetic in-process corpus (N=100000 seed=0), assert hit counts + bytes_per_doc vs expected.tsv; CI runs it via scripts/ci-bench.sh -> text_<workload>_us + fts_bytes_per_doc"
+source      = "bench/fts/{gen.sh,run.sh,expected.tsv,README.md}; crates/sparq-text/examples/bench_text.rs (the G1 TSV-emitting runner); scripts/ci-bench.sh (fts hook); competitors bench/competitors.json (jena-text http-sparql / lucene-anserini python-lib)"
+dataset     = "SYNTHETIC, generated in-process (no external generator): N seeded 8-word literals over a ~10k-term Zipf-skewed vocab, loaded as N-Triples; per-commit N=100000 seed=0, heavy/latency tier N=1000000. The hit counts + bytes-per-doc are deterministic constants at the pinned (N, seed); the FIXED query set is drawn from an INDEPENDENT seed so counts shift only on search-semantics changes. IR-quality (BEIR Recall@100/nDCG@10) axis is gather-only, not yet wired (follow-up bead)"
+quiet_box_sensitive = true  # wall-clock query/build time trend-only, NOT in scripts/perf-gate.py; the hit-count + bytes_per_doc diff IS a hard gate (deterministic, load-robust)
+pinning     = "N=100000 seed=0 (the corpus PIN; expected.tsv binds to it); FIXED 200-query set seeded independently; fts_bytes_per_doc floor in bench/perf-baseline.json. Solr/ES are NOT SPARQL competitors and are kept off the dashboard; surface peer is Fuseki+jena-text (http-sparql), kernel ref is Lucene/Anserini (labelled sub-component, not an RDF benchmark)"
+records_to  = "stdout (TSV); CI emits text_<workload>_us + text_build_s (advisory) and fts_bytes_per_doc (gated) into benchmark-data via scripts/ci-bench.sh; deterministic gates in bench/fts/expected.tsv"
 status      = "ok"
 
 [[benchmark]]

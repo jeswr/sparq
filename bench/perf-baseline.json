@@ -53,6 +53,11 @@
       "threshold": 0.12,
       "mode": "noise"
     },
+    "fts_bytes_per_doc": {
+      "floor": 371,
+      "threshold": 0.02,
+      "mode": "auto"
+    },
     "geo_compliance_deficit": {
       "floor": 0,
       "threshold": 0.02,
