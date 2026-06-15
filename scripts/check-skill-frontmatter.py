@@ -71,7 +71,12 @@ def check_file(path: str) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        text = open(path, encoding="utf-8").read()
+        # [OPUS-4.8] Context manager (no leaked fd). A non-UTF-8 SKILL.md must be a
+        # per-file failure, not a script-wide crash, so catch UnicodeDecodeError too.
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except UnicodeDecodeError as e:
+        return [f"not valid UTF-8 (cannot decode): {e}"], []
     except OSError as e:
         return [f"could not read: {e}"], []
 
