@@ -52,7 +52,11 @@
 //!   exactly once after dedup.
 //! - **alternation** `(p1|p2|...)` per hop — each hop position expands over its
 //!   alternatives; a length-`ℓ` chain of an `a`-way alternation unrolls to `a^ℓ`
-//!   fixed chains (design §2.4), all unioned and deduped.
+//!   fixed chains (design §2.4), all unioned and deduped. Because that count is
+//!   exponential in the PUBLIC bound, the unroller refuses any repetition whose
+//!   projected chain count exceeds [`MAX_UNROLL_CHAINS`] (a controlled
+//!   `MpcError::Protocol`, checked BEFORE any allocation), so a large public
+//!   `{m,k}`/alternation cannot become a CPU/memory denial-of-service.
 //!
 //! Composition: a [`BoundedRepetition`] is a repetition `{m,k}` of a single
 //! [`PathStep`] (a named predicate or an alternation of named predicates); a
@@ -162,6 +166,51 @@ impl PathForm {
     pub fn sequence(preds: impl IntoIterator<Item = NamedNode>) -> Self {
         PathForm::Sequence(preds.into_iter().map(|p| PathForm::exact(p, 1)).collect())
     }
+}
+
+/// Maximum number of fixed-length BGP chains a single bounded repetition may
+/// unroll to before we refuse the path with [`MpcError::Protocol`]. `[OPUS-4.8]`
+///
+/// A repetition `(step){m,k}` over an `a`-way alternation unrolls to
+/// `Σ_{ℓ=m..=k} a^ℓ` fixed chains (design §2.4). That sum is **exponential in `k`**
+/// and **polynomial-of-degree-`k` in `a`**, so a modest-looking public bound — e.g.
+/// a 4-way alternation with `k = 16` — already projects to billions of chains.
+/// Each chain is then evaluated as a multi-hop join fold, so an unchecked unroll is
+/// a CPU/memory denial-of-service on this **public** API surface (the reviewer's
+/// `alternatives^length` blowup). Because the bound `k` and the alternation arity
+/// are PUBLIC plan parameters (design §1.2/§4.1), the projected chain count is
+/// computable in closed form WITHOUT touching any holder data — so we can reject an
+/// over-cap path *before* allocating or evaluating anything.
+///
+/// The cap is a deliberately generous-but-finite ceiling: large enough that every
+/// realistic disclosed-key bounded path (small `k`, small alternations) passes, far
+/// below the point where the chain set would exhaust memory. It is a protocol
+/// guard, not a tuning knob; a query that exceeds it is malformed/abusive for this
+/// regime, not merely slow.
+pub const MAX_UNROLL_CHAINS: u64 = 1 << 20; // 1_048_576
+
+/// Closed-form count of fixed-length chains a single `(step){m,k}` repetition
+/// unrolls to: `Σ_{ℓ=m..=k} a^ℓ` where `a = alternatives.len()` (length-0 adds the
+/// reflexive identity arm, which is NOT a chain — it is handled separately — so it
+/// contributes nothing here). Returns `None` on `u64` overflow so the caller can
+/// reject the path with a controlled error instead of risking a wrapping/huge
+/// allocation. `[OPUS-4.8]`
+fn projected_chain_count(alternatives: usize, min: usize, max: usize) -> Option<u64> {
+    let a = alternatives as u64;
+    let mut total: u64 = 0;
+    for length in min..=max {
+        if length == 0 {
+            // The reflexive identity arm is not an unrolled chain.
+            continue;
+        }
+        // a^length, checked.
+        let mut term: u64 = 1;
+        for _ in 0..length {
+            term = term.checked_mul(a)?;
+        }
+        total = total.checked_add(term)?;
+    }
+    Some(total)
 }
 
 /// Reserved subject-end variable name the unroller projects onto (`?__pp_a`).
@@ -375,6 +424,33 @@ fn eval_repetition(
         ));
     }
 
+    // UNROLL-SIZE GUARD (sq-py8h.1, reviewer thread): `(step){m,k}` over an
+    // `a`-way alternation unrolls to `Σ_{ℓ=m..=k} a^ℓ` fixed chains, which is
+    // exponential in the PUBLIC bound `k`. Compute that projected chain count in
+    // closed form FIRST (no holder data touched, no allocation) and reject an
+    // over-cap path with a controlled `MpcError::Protocol` *before* generating or
+    // evaluating any chain — otherwise a large public `{m,k}`/alternation is a
+    // CPU/memory DoS (huge `Vec` growth, or a `usize` overflow in a `with_capacity`)
+    // on this public API surface. `[OPUS-4.8]`
+    let projected = projected_chain_count(rep.step.alternatives.len(), rep.min, rep.max);
+    match projected {
+        Some(count) if count <= MAX_UNROLL_CHAINS => {}
+        _ => {
+            return Err(MpcError::Protocol(format!(
+                "bounded path {{{},{}}} over a {}-way alternation would unroll to {} \
+                 fixed chains, exceeding the MAX_UNROLL_CHAINS cap of {} — refusing \
+                 to evaluate (would be a CPU/memory denial-of-service)",
+                rep.min,
+                rep.max,
+                rep.step.alternatives.len(),
+                projected
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "an amount that overflows u64".to_string()),
+                MAX_UNROLL_CHAINS,
+            )));
+        }
+    }
+
     // Accumulate the union of all chain lengths as raw (a,b) rows; dedup happens
     // once at the top.
     let mut union_rows: Vec<Vec<Option<Term>>> = Vec::new();
@@ -413,8 +489,10 @@ fn alternation_chains(step: &PathStep, length: usize) -> Vec<Vec<NamedNode>> {
         // `with_capacity`: that product is `alternatives^length`, which can
         // overflow `usize` or request an enormous allocation for large unrolls,
         // turning a should-be-controlled protocol error into a panic/abort on a
-        // public API surface. Let the `Vec` grow amortised instead; any genuine
-        // unroll-size limit belongs to a higher-level guard, not here.
+        // public API surface. Let the `Vec` grow amortised instead. The genuine
+        // unroll-size limit is enforced upstream by `eval_repetition`'s
+        // `MAX_UNROLL_CHAINS` guard (which runs BEFORE this function is reached),
+        // so by the time we get here the total chain count is provably bounded.
         let mut next: Vec<Vec<NamedNode>> = Vec::new();
         for prefix in &chains {
             for alt in &step.alternatives {
