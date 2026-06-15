@@ -117,19 +117,66 @@ pub enum AdversaryModel {
     /// *caught with probability ε* (Aumann–Lindell'07); a PVC variant adds a
     /// publicly-verifiable cheating certificate (see [`PublicVerifiability`]).
     /// The genuine middle tier between semi-honest and malicious — absent from
-    /// the old enums. `deterrence_num / deterrence_den` is ε as an exact
-    /// rational (e.g. `1/2`), avoiding a float in a security descriptor.
+    /// the old enums. ε is carried as an exact rational `deterrence_num /
+    /// deterrence_den` (e.g. `1/2`), avoiding a float in a security descriptor.
+    ///
+    /// **Invariant (now enforced, not just documented).** ε must be a valid
+    /// probability in `(0, 1]`: `deterrence_den > 0` and `deterrence_num <=
+    /// deterrence_den`. The fields are PRIVATE and the variant carries a private
+    /// witness token, so it is unbuildable except through [`AdversaryModel::covert`],
+    /// which range-checks and returns `None` on a nonsensical ε. Read the ε back
+    /// via [`AdversaryModel::deterrence`]. This mirrors the Cleve type-invariant on
+    /// [`OutputGuarantee`]. `[OPUS-4.8]` (Copilot review #87).
     Covert {
-        /// Numerator of the deterrence probability ε.
+        /// Numerator of the deterrence probability ε. Private — set only by the
+        /// range-checking [`AdversaryModel::covert`] constructor.
         deterrence_num: u32,
-        /// Denominator of the deterrence probability ε (`> 0`,
-        /// `>= deterrence_num`).
+        /// Denominator of the deterrence probability ε. Private; the constructor
+        /// guarantees `> 0` and `>= deterrence_num`.
         deterrence_den: u32,
+        /// Zero-sized witness that [`AdversaryModel::covert`] validated the ε
+        /// invariant — its private type bars any struct-literal escape hatch.
+        _checked: private::CovertEpsilonProof,
     },
     /// **Active / malicious.** A corrupt party may deviate from the protocol
     /// arbitrarily. The output guarantee under this adversary is determined by
     /// AXIS-2 ([`OutputGuarantee`]) and constrained by AXIS-3 (Cleve).
     Malicious,
+}
+
+impl AdversaryModel {
+    /// Construct [`AdversaryModel::Covert`] with deterrence probability
+    /// ε = `num / den`, range-checking the invariant: `den > 0` and `num <= den`,
+    /// so ε is a valid probability in `(0, 1]`. Returns `None` for a nonsensical ε
+    /// (zero denominator, or ε > 1) instead of silently building a descriptor that
+    /// misrepresents the deterrence security parameter. This is the ONLY way to
+    /// obtain a `Covert` value (its fields and witness token are private).
+    /// `num == 0` (ε = 0, i.e. no deterrence at all) is rejected too: that is the
+    /// semi-honest regime — use [`AdversaryModel::SemiHonest`]. `[OPUS-4.8]`
+    pub fn covert(num: u32, den: u32) -> Option<Self> {
+        if den == 0 || num == 0 || num > den {
+            return None;
+        }
+        Some(AdversaryModel::Covert {
+            deterrence_num: num,
+            deterrence_den: den,
+            _checked: private::CovertEpsilonProof(()),
+        })
+    }
+
+    /// The deterrence probability ε = `(num, den)` if this is a covert adversary,
+    /// else `None`. The returned pair always satisfies the constructor invariant
+    /// (`den > 0`, `0 < num <= den`). `[OPUS-4.8]`
+    pub fn deterrence(self) -> Option<(u32, u32)> {
+        match self {
+            AdversaryModel::Covert {
+                deterrence_num,
+                deterrence_den,
+                ..
+            } => Some((deterrence_num, deterrence_den)),
+            _ => None,
+        }
+    }
 }
 
 /// The flavour of an `abort` output guarantee (research §1.1 rows 3/4): what the
@@ -202,6 +249,13 @@ mod private {
     /// checked. `[OPUS-4.8]`
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct HonestMajorityProof(pub(super) ());
+
+    /// Zero-sized proof that the covert ε invariant (`den > 0`, `num <= den`) was
+    /// range-checked. Only [`super::AdversaryModel::covert`] can mint one, so its
+    /// presence in a `Covert` value is evidence ε is a valid probability in
+    /// `(0, 1]`. `[OPUS-4.8]`
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CovertEpsilonProof(pub(super) ());
 }
 
 impl OutputGuarantee {
@@ -340,6 +394,23 @@ impl SecurityDescriptor {
     /// without duplicating the Cleve plumbing. `[OPUS-4.8]`
     pub fn shamir_degree_recon(n: usize, t: usize, robust_cheaters: usize) -> Self {
         let threshold = CorruptionThreshold::from_n_t(n, t);
+        // FAIL-CLOSED under a dishonest majority (`n <= 2t`). The RS-redundancy
+        // detect-and-abort / Berlekamp–Welch correction this constructor encodes
+        // is an *honest-majority-specific* claim: the bound `e = ⌊(n−t−1)/2⌋` and
+        // the "any tampering is detected" guarantee both assume a strict honest
+        // majority on the reconstruction. With `n <= 2t` there is not enough
+        // honest redundancy to back that claim, so emitting an `Abort(Unanimous)`
+        // here would over-claim — and would project (via `malicious_security`) to
+        // `HonestMajorityAbort` while `trust_model()` reports `DishonestMajority`,
+        // an internally contradictory `BackendInfo`. The legacy `MaliciousSecurity`
+        // enum cannot represent dishonest-majority active security without
+        // over-claiming, so this honest-majority constructor degrades to the
+        // semi-honest-only baseline there. A genuine dishonest-majority active
+        // backend (SPDZ/MASCOT: MAC-checked abort) is a *different* construction
+        // and would build its descriptor directly, not via this helper. `[OPUS-4.8]`
+        if !threshold.is_honest_majority() {
+            return SecurityDescriptor::semi_honest_only(n, t);
+        }
         // The honest-majority Shamir backend is semi-honest among cooperating
         // holders; the RS-checked reconstruction adds a detect/correct step. We
         // surface it as semi-honest adversary with the *output guarantee* the RS
@@ -687,14 +758,34 @@ mod axis_tests {
     #[test]
     fn adversary_model_three_tiers_construct() {
         assert_eq!(AdversaryModel::SemiHonest, AdversaryModel::SemiHonest);
-        // Covert carries an exact rational deterrence ε = 1/2.
-        let covert = AdversaryModel::Covert {
-            deterrence_num: 1,
-            deterrence_den: 2,
-        };
+        // Covert carries an exact rational deterrence ε = 1/2, via the checked
+        // constructor (the only way to build the variant).
+        let covert = AdversaryModel::covert(1, 2).expect("ε = 1/2 is a valid probability");
         assert_ne!(covert, AdversaryModel::SemiHonest);
         assert_ne!(covert, AdversaryModel::Malicious);
         assert_ne!(AdversaryModel::Malicious, AdversaryModel::SemiHonest);
+        assert_eq!(covert.deterrence(), Some((1, 2)));
+        assert_eq!(AdversaryModel::SemiHonest.deterrence(), None);
+        assert_eq!(AdversaryModel::Malicious.deterrence(), None);
+    }
+
+    // The covert ε invariant (`den > 0`, `0 < num <= den`) is ENFORCED by the
+    // constructor, not merely documented — a nonsensical ε returns `None` rather
+    // than building a descriptor that misrepresents the deterrence parameter.
+    // `[OPUS-4.8]` (Copilot review #87).
+    #[test]
+    fn covert_constructor_enforces_epsilon_invariant() {
+        // Valid: ε in (0, 1].
+        assert!(AdversaryModel::covert(1, 2).is_some());
+        assert!(AdversaryModel::covert(1, 1).is_some()); // ε = 1 (always caught)
+        assert!(AdversaryModel::covert(3, 4).is_some());
+        // Invalid: zero denominator (division by zero / undefined ε).
+        assert_eq!(AdversaryModel::covert(1, 0), None);
+        // Invalid: ε > 1 (num > den) — not a probability.
+        assert_eq!(AdversaryModel::covert(3, 2), None);
+        // Invalid: ε = 0 (num == 0) — that is the semi-honest regime, not covert.
+        assert_eq!(AdversaryModel::covert(0, 2), None);
+        assert_eq!(AdversaryModel::covert(0, 0), None);
     }
 
     // --- AXIS-3: CorruptionThreshold carries t and classifies the regime. ---
@@ -851,5 +942,44 @@ mod axis_tests {
         // And the new descriptor is preserved verbatim.
         assert_eq!(info.security.adversary, AdversaryModel::SemiHonest);
         assert!(info.security.output_guarantee.requires_honest_majority());
+    }
+
+    // FAIL-CLOSED: `shamir_degree_recon` with a dishonest-majority `(n, t)`
+    // (`n <= 2t`) must NOT emit an honest-majority active-security claim. The
+    // RS-redundancy detect-and-abort it would otherwise encode is honest-majority
+    // specific; under a dishonest majority it degrades to the semi-honest-only
+    // baseline, so the projection stays internally consistent (no
+    // `trust_model = DishonestMajority` + `malicious_security = HonestMajority…`).
+    // `[OPUS-4.8]` sq-mq8q (Copilot review #87).
+    #[test]
+    fn shamir_degree_recon_fails_closed_under_dishonest_majority() {
+        // n = 2, t = 1 → DishonestMajority (n <= 2t). Even with robust_cheaters = 0
+        // (the detect-and-abort case) this must not claim honest-majority security.
+        let desc = SecurityDescriptor::shamir_degree_recon(2, 1, 0);
+        assert_eq!(desc.threshold, CorruptionThreshold::DishonestMajority { t: 1 });
+        assert_eq!(desc.trust_model(), TrustModel::DishonestMajority);
+        assert_eq!(desc.adversary, AdversaryModel::SemiHonest);
+        // Degrades to the no-detection selective-abort baseline...
+        assert_eq!(
+            desc.output_guarantee,
+            OutputGuarantee::Abort(AbortKind::Selective)
+        );
+        // ...so the back-compat projection is SemiHonestOnly, NOT HonestMajorityAbort.
+        // The two projections are now mutually consistent.
+        assert_eq!(desc.malicious_security(0), MaliciousSecurity::SemiHonestOnly);
+        assert!(!desc.malicious_security(0).is_malicious_secure());
+
+        // Even a non-zero correction budget cannot resurrect an honest-majority
+        // claim under a dishonest majority (Cleve already blocks GOD; the abort
+        // path is blocked here).
+        let desc_budget = SecurityDescriptor::shamir_degree_recon(3, 2, 1);
+        assert_eq!(
+            desc_budget.threshold,
+            CorruptionThreshold::DishonestMajority { t: 2 }
+        );
+        assert_eq!(
+            desc_budget.malicious_security(1),
+            MaliciousSecurity::SemiHonestOnly
+        );
     }
 }

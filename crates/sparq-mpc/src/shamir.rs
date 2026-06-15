@@ -221,13 +221,19 @@ impl ShamirBackend {
     /// backend-level bit would lie. Surfaced via [`MpcBackend::operator_security`].
     pub fn operator_descriptor(&self, operator: OperatorClass) -> SecurityDescriptor {
         match operator {
-            // Linear aggregate: degree-`t` open. Always has redundancy under the
-            // honest-majority `t = ⌊(n−1)/2⌋`, so it never degrades to the
-            // no-redundancy `semi_honest_only` path.
-            OperatorClass::LinearAggregate => {
-                let e = self.rs_correction_budget(self.t).unwrap_or(0);
-                SecurityDescriptor::shamir_degree_recon(self.n, self.t, e)
-            }
+            // Linear aggregate: degree-`t` open. Has redundancy for every valid
+            // honest-majority `t = ⌊(n−1)/2⌋`, so in practice it never hits the
+            // no-redundancy branch — but we still match `None` explicitly rather
+            // than collapsing it into `e = 0`. `unwrap_or(0)` would map the
+            // no-redundancy case (tampering information-theoretically undetectable)
+            // onto the SAME `e = 0` detect-and-abort descriptor as the
+            // one-redundant-share case, over-claiming detection where there is
+            // none. Mirror the `EqualityJoin` arm: `None` → `semi_honest_only`.
+            // `[OPUS-4.8]` (Copilot review #87).
+            OperatorClass::LinearAggregate => match self.rs_correction_budget(self.t) {
+                None => SecurityDescriptor::semi_honest_only(self.n, self.t),
+                Some(e) => SecurityDescriptor::shamir_degree_recon(self.n, self.t, e),
+            },
             // Equality / hidden-value join: degree-`2t` open. No redundancy at
             // `n = 2t+1` (odd-`n` honest majority) → semi-honest-only; otherwise
             // the RS budget at degree `2t` decides detect-and-abort vs robust.
