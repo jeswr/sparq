@@ -58,7 +58,7 @@ conventions first, then a per-category map that points at the registry, then a
 
 | category | what it covers | registry ids |
 |---|---|---|
-| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
+| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
 | **parse** | text-format parse throughput (MB/s) | `parse-baseline` |
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
@@ -113,6 +113,17 @@ Notes on a few that need care:
   asserting BOTH tiers' counts vs `expected-rows.tsv`. CI emits `lubm_<query>_count_us`
   (trend-only) and fails on any count mismatch (reasoner OR engine regression). Full-scale
   **LUBM(1000)** (~133M triples) is the EC2/nightly tier (`bench/lubm/gen.sh 1000 0`).
+- **`shacl-validate-bench` is the SHACL VALIDATION suite** — see
+  [`bench/shacl/README.md`](./shacl/README.md). It REUSES the LUBM(1) ABox as its data substrate
+  (so it shares the `javac`/`rapper` guard) × the **5 committed shape graphs** under
+  `bench/shacl/shapes/` (`cardinality`, `datatype_range`, `class_nodekind`, `node_paths`,
+  `sparql_constraint`). `run.sh` is self-asserting: it validates with the `bench_shacl` example and
+  asserts each workload's **violations / conforms / focus_nodes** vs `expected.tsv` (deterministic
+  at the pinned corpus + shapes; exit 1 on drift). The W3C core pass-count ratchet (98/98) lives in
+  `crates/sparq-shacl/tests/w3c_core.rs` (`BASELINE_PASS`, only-tightens). CI emits
+  `shacl_<workload>_validate_us` (trend-only, advisory). Heavy tiers: `univ=5`/`univ=10`. The
+  cleanest competitor surface — Jena-SHACL / pySHACL / rdf-validate-shacl run the *identical*
+  `(data, shapes)` pair (see the competitor map below + `scripts/bench-adapters/`).
 - **`deep-taxonomy` (DeepTaxonomy) is the rule-heavy N3 REASONING suite** — see
   [`bench/deep-taxonomy/README.md`](./deep-taxonomy/README.md). `run.sh` is self-asserting and
   REUSES the existing generator `bench/inference/gen_deeptaxonomy.py` (1 instance + a depth-deep
@@ -151,7 +162,10 @@ Notes on a few that need care:
   Comparable-suite map (registry-driven): **Oxigraph** ↔ `sparq-bench-compare`,
   `sp2b`, `watdiv`, `bsbm`, `dbpsb`, `lubm` (extensional only); **QLever** ↔
   `qlever-olympics`, `qlever-synthetic-10m/100m`, `watdiv`, `bsbm`, `lubm`
-  (extensional); **eye** ↔ `inference-eye-comparison` + `deep-taxonomy` (DeepTaxonomy/anc500/grid30).
+  (extensional); **eye** ↔ `inference-eye-comparison` + `deep-taxonomy` (DeepTaxonomy/anc500/grid30);
+  **Jena-SHACL / pySHACL / rdf-validate-shacl** ↔ `shacl-validate-bench` (identical data×shapes;
+  cross-check `#violations`/`conforms` per-engine before trusting timing — `report-cli`/`js-lib`
+  adapter kinds in `scripts/bench-adapters/`, gather-only on a Docker EC2 box).
   HONESTY NOTE (per parent `sq-i0nm`): a gh-runner gather is noisy and not
   comparable to the EC2/quiet-box reference band — the recorded `env.quiet_box`
   flag lets the dashboard label it distinctly (see the QUIET-BOX convention above).
@@ -173,6 +187,7 @@ CUT=$(bench/dbpsb/fetch.sh 750000)   && ./target/release/sparq-cli bench "$CUT" 
 bench/watdiv/run.sh 1                 # WatDiv SF=1 (g++ + Boost): gen + count/materialize/json + row diff
 bench/bsbm/run.sh                     # BSBM Explore -pc 300 (JRE + unzip): gen + materialize + row diff
 bench/lubm/run.sh                     # LUBM(1) (javac + rapper): gen + OWL-RL closure + both tiers + row diff
+bench/shacl/run.sh                    # SHACL (javac + rapper): LUBM ABox x 5 shapes + violations/conforms/focus_nodes diff
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
 
 # --- selective bind-join + u64 value-id probes ---

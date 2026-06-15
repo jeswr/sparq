@@ -1,0 +1,34 @@
+# [OPUS-4.8] (sq-7iai) SHACL benchmark workload 5: SPARQL_CONSTRAINT.
+# A SHACL-SPARQL (sh:sparql, W3C SHACL §5.2) constraint routed through sparq-engine —
+# the validation path unique to sparq's architecture (a SELECT run per focus node with
+# $this pre-bound). Kept as a SEPARATE workload, NOT the headline (engines differ on
+# sh:sparql coverage; see README competitor caveat).
+#
+# Targets ub:GraduateStudent. The SELECT fires (one solution per offending value) when a
+# student takes a ub:GraduateCourse via ub:takesCourse. The LUBM generator gives grad
+# students takesCourse edges to GraduateCourses, so this produces a FIXED number of
+# solutions across the population at the pinned corpus. expected.tsv holds the constant;
+# run.sh asserts it.
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix ub:  <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:  <http://example.org/shacl-bench/> .
+
+ex:GradCourseLoadShape a sh:NodeShape ;
+    sh:targetClass ub:GraduateStudent ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:prefixes ex:benchPrefixes ;
+        sh:message "GraduateStudent takes a GraduateCourse" ;
+        sh:select """
+            SELECT $this ?value WHERE {
+                $this ub:takesCourse ?value .
+                ?value a ub:GraduateCourse .
+            }
+        """ ;
+    ] .
+
+ex:benchPrefixes sh:declare [
+    sh:prefix "ub" ;
+    sh:namespace "http://swat.cse.lehigh.edu/onto/univ-bench.owl#"^^xsd:anyURI ;
+] .

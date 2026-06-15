@@ -1,0 +1,35 @@
+# [OPUS-4.8] (sq-7iai) SHACL benchmark workload 4: NODE_PATHS.
+# sh:node (inter-shape recursion, Trav-SHACL's hard case) + sequence/inverse paths.
+# Targets ub:GraduateStudent. Each grad student has exactly one ub:advisor (a professor)
+# and a ub:memberOf department.
+#   - sh:node ex:DeptHeadShape on the value of ub:advisor: the advisor must be the head
+#     of some department (ub:headOf). Only 15 professors are department heads in LUBM(1),
+#     so the vast majority of advisors are NOT heads -> a large deterministic violation
+#     count over the grad-student population (recursive sh:node walk per focus node).
+#   - a SEQUENCE path (ub:memberOf / ub:subOrganizationOf) with sh:minCount 1 reaching the
+#     student's university: every student's department is a sub-organisation of a
+#     university, so this contributes ZERO violations (a deterministic-negative control
+#     exercising the multi-hop path walk).
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix ub:  <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix ex:  <http://example.org/shacl-bench/> .
+
+ex:GradStudentPathShape a sh:NodeShape ;
+    sh:targetClass ub:GraduateStudent ;
+    # The advisor must conform to ex:DeptHeadShape (be a department head).
+    sh:property [
+        sh:path ub:advisor ;
+        sh:node ex:DeptHeadShape ;
+    ] ;
+    # Sequence path memberOf/subOrganizationOf reaches a university -> never empty.
+    sh:property [
+        sh:path ( ub:memberOf ub:subOrganizationOf ) ;
+        sh:minCount 1 ;
+    ] .
+
+# Inner shape: a department head has at least one ub:headOf edge.
+ex:DeptHeadShape a sh:NodeShape ;
+    sh:property [
+        sh:path ub:headOf ;
+        sh:minCount 1 ;
+    ] .

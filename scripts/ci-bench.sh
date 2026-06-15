@@ -94,6 +94,15 @@ LUBM_RUN=bench/lubm/run.sh
 # (deep-taxonomy); details: bench/deep-taxonomy/README.md. (sq-1hgz)
 DEEPTAX_RUN=bench/deep-taxonomy/run.sh
 DEEPTAX_DEPTHS="${DEEPTAX_DEPTHS:-1000 10000}"
+# [OPUS-4.8] SHACL VALIDATION suite (sq-7iai, design §3.1) — the cleanest competitor surface.
+# Reuses the LUBM(1) ABox as its data substrate (so it shares the javac/rapper guard) x the 5
+# committed shape graphs in bench/shacl/shapes/. Like LUBM, run.sh is the self-asserting entry
+# point: it validates with examples/bench_shacl, asserts each workload's violations/conforms/
+# focus_nodes vs expected.tsv internally (exit 1 on drift), and prints the
+# `<workload>\t<violations>\t<validate_us>` contract on stdout, harvested below into the ADVISORY
+# `shacl_<workload>_validate_us` (trend-only, NOT in scripts/perf-gate.py). Registry:
+# bench/benchmarks.toml (shacl-validate-bench); details: bench/shacl/README.md.
+SHACL_RUN=bench/shacl/run.sh
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -408,6 +417,40 @@ if command -v python3 >/dev/null 2>&1 && [ -x "$DEEPTAX_RUN" ]; then
   fi
 else
   echo "note: deep-taxonomy skipped (python3 not on PATH)" >&2
+fi
+
+# [OPUS-4.8] SHACL validation suite per-commit (sq-7iai). Reuses the LUBM(1) ABox, so it shares
+# the javac + rapper guard (gen.sh delegates to bench/lubm/gen.sh). run.sh is the self-asserting
+# entry point: it validates the ABox against the 5 committed shape graphs with examples/bench_shacl
+# and asserts each workload's violations/conforms/focus_nodes vs expected.tsv internally (exit 1 on
+# any drift). The example is built on demand (sparq-shacl is isolated — not a sparq-cli dependency —
+# so the bench runner is its own --example binary). We harvest run.sh's `<workload>\t<violations>\t
+# <validate_us>` stdout into the ADVISORY `shacl_<workload>_validate_us` (trend-only, NOT in
+# scripts/perf-gate.py). run.sh failing (a SHACL correctness regression) fails the whole ci-bench
+# run, exactly like LUBM. Skipped gracefully when javac/rapper are absent (PRs install no toolchain).
+SHACL_BIN=target/release/examples/bench_shacl
+if command -v javac >/dev/null 2>&1 && command -v rapper >/dev/null 2>&1 && [ -x "$SHACL_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE
+  # bench_shacl. Let cargo's own staleness detection decide (a no-op rebuild is cheap), and do
+  # NOT swallow the build error (`|| true`) — a real compile failure must fail the gate, not
+  # silently skip the SHACL correctness check on main. Mirrors how the other suites assume a
+  # freshly-built binary.
+  if ! cargo build --release -q -p sparq-shacl --example bench_shacl; then
+    echo "ERROR: bench_shacl example failed to build" >&2
+    exit 1
+  fi
+  if BENCH_SHACL="$SHACL_BIN" ITERS=3 bash "$SHACL_RUN" > "$TMP/shacl.tsv" 2>"$TMP/shacl.err"; then
+    while IFS=$'\t' read -r name violations us; do
+      [ "${violations:-}" = "ERROR" ] && continue
+      [ -n "${us:-}" ] && add "shacl_${name}_validate_us" us "$us"
+    done < "$TMP/shacl.tsv"
+  else
+    echo "ERROR: shacl run.sh failed (correctness regression)" >&2
+    cat "$TMP/shacl.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: shacl skipped (javac/rapper not on PATH)" >&2
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.
