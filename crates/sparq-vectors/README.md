@@ -50,6 +50,11 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
 
 - **`VectorStore`** — memory-mapped `.spqv` store; `get` is one binary search + a contiguous
   `&[f32]`; corrupt files are rejected up front. `open_from_bytes` for filesystem-less use.
+- **Graph-staleness guard** — stores are keyed by dictionary id, so a store built against one
+  graph silently mis-resolves after a dict-id-shifting rebuild. Both `.spqv`/`.spqg` headers
+  embed a graph **fingerprint** (`with_fingerprint` / `build_for`); the checked query paths
+  (`nearest_term_exact_checked`, `DiskAnnIndex::nearest_term_checked`, `check_graph`) return a
+  descriptive error on a mismatch instead of wrong neighbours.
 - **`StreamingWriter`** — build stores bigger than RAM with O(1) build-phase memory;
   byte-identical output to the in-RAM builder.
 - **Search** — `nearest_exact` (ground-truth baseline), in-RAM HNSW (`VectorIndex`), and the
