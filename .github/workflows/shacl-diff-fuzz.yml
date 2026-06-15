@@ -1,0 +1,96 @@
+# [OPUS-4.8] Differential SHACL fuzz gate (bead sq-55c1).
+#
+# WHAT: generates random but VALID SHACL shapes + data graphs, validates each
+# through `sparq-shacl` AND through a reference SHACL engine (pySHACL — the
+# canonical reference implementation), and asserts the reports agree on the
+# `sh:conforms` bit and the per-focus-node violated-constraint set. A disagreement
+# is a candidate sparq-shacl correctness bug; the harness prints the seed + the
+# reproducing Turtle so it replays deterministically. See
+# crates/sparq-shacl/tests/diff_fuzz.rs.
+#
+# TRIGGER — NIGHTLY/HEAVY tier ONLY. Deliberately NOT on pull_request / push /
+# merge_group: it installs a Python reference engine and runs thousands of
+# validations, which is too heavy + too slow for the per-PR fast path, and the
+# `#[ignore]`d test is excluded from `cargo nextest run` anyway. Running only on
+# `schedule` + `workflow_dispatch` means this workflow never produces a check-run
+# on a PR head commit, so the `ci-summary / gate` aggregator never sees it and the
+# per-PR gate is unaffected (the intended heavy-lane isolation).
+#
+# Third-party actions are pinned by full commit SHA (supply-chain hardening); the
+# trailing `# vX.Y.Z` comment is what Dependabot follows to bump the pin. The pins
+# here match those already used by .github/workflows/fuzz.yml / ci.yml.
+name: shacl-diff-fuzz
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "number of seeds (cases) to run"
+        required: false
+        default: "2000"
+  # Daily heavy tier. 05:11 UTC — offset from fuzz.yml (04:23) and ci.yml's coverage
+  # cron (03:17) so the heavy nightly lanes do not contend for the same runner window.
+  schedule:
+    - cron: "11 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shacl-diff-fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # pySHACL release pinned so the reference engine is reproducible and a future
+  # pySHACL change cannot silently break (or silently "fix") the differential; bump
+  # deliberately. rdflib comes in as its dependency.
+  PYSHACL_VERSION: "0.31.0"
+
+jobs:
+  diff-fuzz:
+    name: SHACL differential fuzz (sparq-shacl vs pySHACL)
+    runs-on: ubuntu-latest
+    # Generous ceiling: ~thousands of cases × a per-case Python subprocess. A hung
+    # run fails with a clear timeout rather than running away.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable via toolchain input
+        with:
+          toolchain: stable
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install pySHACL (reference engine) in a venv
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/shacl-ref-venv"
+          "$RUNNER_TEMP/shacl-ref-venv/bin/pip" install --quiet --upgrade pip
+          "$RUNNER_TEMP/shacl-ref-venv/bin/pip" install --quiet "pyshacl==${PYSHACL_VERSION}"
+          "$RUNNER_TEMP/shacl-ref-venv/bin/python" -c "import pyshacl, rdflib; print('pyshacl', pyshacl.__version__, 'rdflib', rdflib.__version__)"
+          echo "SHACL_DIFF_PYTHON=$RUNNER_TEMP/shacl-ref-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Pick seed count for this trigger
+        id: budget
+        run: |
+          set -euo pipefail
+          # workflow_dispatch carries an input; schedule uses the nightly default.
+          count="${{ github.event.inputs.count }}"
+          if [ -z "$count" ]; then count=2000; fi
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "SHACL diff-fuzz seed count for '${{ github.event_name }}': $count"
+      # Build the test binary first so a compile error is reported distinctly from a
+      # fuzzing disagreement.
+      - name: Build the differential test
+        run: cargo build -p sparq-shacl --test diff_fuzz
+      - name: Run the differential fuzz (bounded; fails on any disagreement)
+        env:
+          SHACL_DIFF_SEED_START: "0"
+          SHACL_DIFF_COUNT: ${{ steps.budget.outputs.count }}
+        run: |
+          cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
