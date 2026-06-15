@@ -9,7 +9,7 @@
 set -euo pipefail
 
 COMPOSE_DIR="$(cd "$(dirname "$0")/../../../zk/compose" && pwd)"
-MEMBERS=(scan_k1_n16_r4 scan_k2_n16_r8 scan_k2_n64_r8 filter_int_d1 filter_int_d2 filter_int_d4 filter_f64)
+MEMBERS=(scan_k1_n16_r4 scan_k2_n16_r8 scan_k2_n64_r8 filter_int_d1 filter_int_d2 filter_int_d4 filter_f64 join_eq_na16_nb16)
 
 cd "$COMPOSE_DIR"
 nargo compile --workspace >/dev/null 2>&1

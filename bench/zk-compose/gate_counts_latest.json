@@ -10,6 +10,7 @@
     "filter_int_d1": { "circuit_size": 17416 },
     "filter_int_d2": { "circuit_size": 17416 },
     "filter_int_d4": { "circuit_size": 17416 },
-    "filter_f64": { "circuit_size": 3113 }
+    "filter_f64": { "circuit_size": 3113 },
+    "join_eq_na16_nb16": { "circuit_size": 7025 }
   }
 }

@@ -19,6 +19,7 @@
     "filter_f64_d4": 17416,
     "revoke_unset_d10": 899,
     "hidden_issuer_d4": 16932,
-    "holder_pok": 10334
+    "holder_pok": 10334,
+    "join_eq_na16_nb16": 7025
   }
 }
