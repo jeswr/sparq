@@ -35,8 +35,10 @@ libfuzzer-sys = "0.4"
 sparq-core = { path = "../crates/sparq-core", features = ["mmap", "parallel"] }
 sparq-engine = { path = "../crates/sparq-engine" }
 # SHACL validation under test (bead sq-o4pi). Opt-in crate (the sparq-reason isolation
-# pattern); pulled in here ONLY for the `validate_shacl` target, never by the workspace
-# default build. [OPUS-4.8]
+# pattern). Used by the `validate_shacl` target. Like every entry here it is a
+# package-wide dependency — Cargo deps are not scoped per [[bin]] target — but it stays
+# out of the workspace default build because this fuzz crate is excluded from the root
+# workspace (see the header note). [OPUS-4.8]
 sparq-shacl = { path = "../crates/sparq-shacl" }
 # Temp store directories for the `Graph::open` hostile-bytes target.
 tempfile = "3"

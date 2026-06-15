@@ -22,10 +22,9 @@
 //     BOTH the shapes graph and the data graph. A SHACL shapes document is itself valid
 //     RDF, so as the corpus grows toward real SHACL Turtle this reaches the deepest
 //     shape-parse + traversal code WITHOUT depending on a lucky split (the shapes parse,
-//     and their own triples become focus nodes the traversal walks). `Graph` is not
-//     `Clone` (it owns a WAL / file handles), so we re-parse the buffer for the second
-//     graph rather than cloning — the parse is the path under test and is cheap for the
-//     small inputs the fuzzer mutates.
+//     and their own triples become focus nodes the traversal walks). `validate` borrows
+//     both graphs immutably, so a single parsed graph is shared as both arguments — one
+//     parse, two `&` borrows; no clone (`Graph` is not `Clone`) and no redundant re-parse.
 //
 // We feed bytes as `&str` via `from_utf8_lossy` (the public `Graph::load_str` takes
 // `&str`) and Turtle as the format (the SHACL-idiomatic serialisation that exercises the
@@ -57,10 +56,13 @@ fuzz_target!(|data: &[u8]| {
 
     if ctrl & 1 == 0 {
         // SPLIT mode: carve a shapes chunk + a data chunk at a fuzz-chosen split point.
-        // The remaining control bits choose the split fraction over the BORROWED body so
-        // the two chunks vary in size across the corpus (incl. one side empty).
-        let split = (ctrl as usize >> 1) * body.len() / 128;
-        let split = split.min(body.len());
+        // The remaining 7 control bits index a position in `0..=body.len()` so the two
+        // chunks vary in size across the corpus AND both extremes are reachable: split==0
+        // (empty shapes) and split==body.len() (empty data). Modulo by `body.len() + 1`
+        // (never zero — body is non-empty here) keeps this overflow-safe under
+        // overflow-checks, unlike a `(ctrl >> 1) * body.len()` multiply which could
+        // overflow `usize` for fuzz-sized inputs and abort as a false-positive crash. [OPUS-4.8]
+        let split = (ctrl as usize >> 1) % (body.len() + 1);
         let (shapes_bytes, data_bytes) = body.split_at(split);
 
         let shapes = Graph::load_str(&String::from_utf8_lossy(shapes_bytes), "turtle");
@@ -71,16 +73,15 @@ fuzz_target!(|data: &[u8]| {
             let _ = sparq_shacl::validate(&data, &shapes);
         }
     } else {
-        // SELF mode: parse the whole body once as the shapes graph; if it parses, parse it
-        // again as the data graph and validate the document against its own shapes — the
-        // deepest reach into shape-parse + traversal with no split-luck dependence.
+        // SELF mode: parse the whole body once and validate the document against its own
+        // shapes — the deepest reach into shape-parse + traversal with no split-luck
+        // dependence. `validate(&Graph, &Graph)` borrows both args immutably and does not
+        // mutate, so the SAME graph serves as both the data and the shapes graph: one
+        // parse, two shared `&` borrows (no clone — Graph is not Clone — and no redundant
+        // second parse of identical bytes). [OPUS-4.8]
         let text = String::from_utf8_lossy(body);
-        if let Ok(shapes) = Graph::load_str(&text, "turtle") {
-            // Re-parse (Graph is not Clone) for the data graph. Same bytes => same parse;
-            // if it failed here it would have failed above, so this Ok is expected.
-            if let Ok(data) = Graph::load_str(&text, "turtle") {
-                let _ = sparq_shacl::validate(&data, &shapes);
-            }
+        if let Ok(graph) = Graph::load_str(&text, "turtle") {
+            let _ = sparq_shacl::validate(&graph, &graph);
         }
     }
 });
