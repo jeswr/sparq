@@ -70,7 +70,7 @@
       "kind": "docker-image",
       "role": "External on-disk engine reference (scales to billions; compressed on-disk index). Compared COLD, cache cleared each run; COUNT VALUES + result SIZES cross-checked, not just row==row.",
       "pinned_version": "docker.io/adfreiburg/qlever@<DIGEST>",
-      "version_source": "bench/qlever-*/Qleverfile (IMAGE = docker.io/adfreiburg/qlever:latest). NOTE: `:latest` is NOT a pin — the gather script resolves and records the image DIGEST + the server's reported build version at run time; record that digest here when you fix a reference.",
+      "version_source": "bench/qlever-*/Qleverfile (IMAGE = docker.io/adfreiburg/qlever:latest). NOTE: `:latest` is NOT a pin — the gather script resolves and records the image DIGEST at run time (the digest IS the version identifier; compare.py reports no server build string); record that digest here when you fix a reference.",
       "version_pin_followup": "replace `:latest` with a sha256 digest pin in the Qleverfiles once a reference image is chosen — tracked as bead sq-l9yt.",
       "install_recipe": "docker pull docker.io/adfreiburg/qlever:latest  (or the qlever-control CLI: pipx install qlever; `qlever` reads a Qleverfile). Docker is NOT installed on the dev box — this competitor is gather-only on a box that has Docker.",
       "run_recipe": "in a bench/qlever-* dir: `qlever get-data && qlever index && qlever start`, then `python3 compare.py <iters> <endtoend|compute>` (drives sparq-cli AND the QLever HTTP endpoint; min-of-N cold).",
@@ -82,7 +82,7 @@
         { "sparq_suite": "bsbm",                   "note": "BSBM Explore corpus via a Qleverfile" },
         { "sparq_suite": "lubm",                   "note": "LUBM extensional tier (QLever does not materialize OWL-RL — entailed tier not comparable)" }
       ],
-      "version_env_metadata": "the gather script records (a) the resolved image DIGEST (`docker inspect --format '{{index .RepoDigests 0}}'`), (b) the server-reported version, and (c) the host env block. Stored QLever reference numbers + machine spec live in bench/qlever-baselines.md.",
+      "version_env_metadata": "the gather script records (a) the resolved image DIGEST (`docker inspect --format '{{index .RepoDigests 0}}'`) — this digest IS the recorded version identifier — and (b) the host env block. compare.py reports only timings + correctness, no server build string, so there is no separate 'server-reported version' to capture; `--run` refuses a live qlever gather when the digest cannot be resolved (no Docker / image not pulled) rather than writing an unversioned result. Stored QLever reference numbers + machine spec live in bench/qlever-baselines.md.",
       "stored_baselines": "bench/qlever-baselines.md (we do NOT re-run QLever every sparq iteration — re-measure only when its version or the dataset changes; record date + version there).",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "qlever"

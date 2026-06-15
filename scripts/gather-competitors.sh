@@ -23,9 +23,12 @@
 #   scripts/gather-competitors.sh --only oxigraph      # dry-run, one engine
 #   scripts/gather-competitors.sh --run --only oxigraph [--scale N] [--iters K]
 #   scripts/gather-competitors.sh --run --only eye
-#   scripts/gather-competitors.sh --run --only qlever --suite olympics
+#   scripts/gather-competitors.sh --run --only qlever --suite olympics [--pass compute|endtoend]
 #   scripts/gather-competitors.sh --list               # list registry + exit
 #   scripts/gather-competitors.sh --help
+#
+# qlever --pass selects the compare.py pass: `compute` (engine-only, the default)
+# or `endtoend` (compute + full SPARQL-JSON serialisation).
 #
 # What a real (--run) gather does, per engine:
 #   oxigraph : cargo run -p sparq-bench --release -- --scale N --iters K
@@ -35,10 +38,12 @@
 #   eye      : delegates to bench/inference/eye-comparison.sh (sparq vs EYE N3
 #              closure, min-of-N wall seconds). Records `eye --version` + env.
 #   qlever   : delegates to bench/qlever-<suite>/compare.py against a running
-#              QLever server (Docker image). Records the image DIGEST + the
-#              server build version + env. Requires Docker + a started server;
-#              the script tells you the exact prep commands rather than starting
-#              a multi-GB server itself.
+#              QLever server (Docker image). Records the resolved image DIGEST
+#              (the version pin) + env. compare.py does not report a server build
+#              string, so the digest IS the version identifier; --run refuses a
+#              live gather when the digest cannot be resolved (no Docker / image
+#              not pulled). Requires Docker + a started server; the script tells
+#              you the exact prep commands rather than starting a multi-GB server.
 #
 # Output (only with --run): one JSON results file per engine/suite under
 #   bench/competitor-results/  (GIT-IGNORED, regenerable — see bench/CATALOG.md
@@ -64,6 +69,7 @@ RESULTS_DIR="bench/competitor-results"
 DO_RUN=0                 # 0 = dry-run (safe default); 1 = actually run
 ONLY=""                  # comma list of engine ids; empty = all
 SUITE="olympics"         # which qlever-* suite (olympics|synthetic|100m)
+PASS="compute"           # qlever compare.py pass (compute|endtoend)
 SCALE="${SCALE:-20000}"  # oxigraph synthetic entities (capped below)
 ITERS="${ITERS:-3}"      # min-of-K
 MAX_SCALE="${MAX_SCALE:-200000}"   # hard cap on --scale (disk/cpu guard)
@@ -72,7 +78,9 @@ EYE_BIN="${EYE:-eye}"
 SPARQ_CLI="${SPARQ_CLI:-target/release/sparq-cli}"
 
 usage() {
-  sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # print the header comment block (lines 2 .. the line before `set -euo pipefail`)
+  local last; last="$(grep -n '^set -euo pipefail' "${BASH_SOURCE[0]}" | head -1 | cut -d: -f1)"
+  sed -n "2,$((last - 2))p" "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -83,17 +91,40 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# require_int <flag-name> <value> [min] — fail with a clear message (not a raw
+# `integer expression expected` from a later `[ ... -gt ... ]`) when a numeric
+# knob is empty / non-numeric (digits only — these knobs are all non-negative) /
+# below a floor.
+require_int() {
+  local name="$1" val="$2" min="${3:-}"
+  case "$val" in
+    ''|*[!0-9]*) die "$name must be a non-negative integer (got '${val}')" ;;
+  esac
+  if [ -n "$min" ] && [ "$val" -lt "$min" ]; then
+    die "$name must be >= $min (got '$val')"
+  fi
+}
+
+# need_val <flag> <count-remaining> — clear error when a value-taking flag has no
+# argument. Without it, the inner `shift` would consume the flag and the loop's
+# trailing `shift` would then run on an empty arg list, which under `set -e`
+# aborts the script SILENTLY (no message) — the same cryptic failure mode the
+# numeric guards below avoid.
+need_val() { [ "$2" -ge 2 ] || die "$1 requires a value (e.g. $1 <value>)"; }
+
 # --- arg parse ---------------------------------------------------------------
 while [ $# -gt 0 ]; do
   case "$1" in
     --run)    DO_RUN=1 ;;
-    --only)   ONLY="${2:-}"; shift ;;
+    --only)   need_val "$1" "$#"; ONLY="$2"; shift ;;
     --only=*) ONLY="${1#*=}" ;;
-    --suite)  SUITE="${2:-}"; shift ;;
+    --suite)  need_val "$1" "$#"; SUITE="$2"; shift ;;
     --suite=*) SUITE="${1#*=}" ;;
-    --scale)  SCALE="${2:-}"; shift ;;
+    --pass)   need_val "$1" "$#"; PASS="$2"; shift ;;
+    --pass=*) PASS="${1#*=}" ;;
+    --scale)  need_val "$1" "$#"; SCALE="$2"; shift ;;
     --scale=*) SCALE="${1#*=}" ;;
-    --iters)  ITERS="${2:-}"; shift ;;
+    --iters)  need_val "$1" "$#"; ITERS="$2"; shift ;;
     --iters=*) ITERS="${1#*=}" ;;
     --list)   ACTION_LIST=1 ;;
     -h|--help) usage 0 ;;
@@ -101,6 +132,21 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# --- validate numeric knobs up front -----------------------------------------
+# Without this, an empty/non-numeric value (e.g. `--scale` with no argument, or
+# SCALE=abc) would reach a `[ ... -gt ... ]` and, under `set -e`, abort with a
+# cryptic `integer expression expected` instead of a clear message.
+require_int "--scale"   "$SCALE"       1
+require_int "--iters"   "$ITERS"       1
+require_int "MAX_SCALE" "$MAX_SCALE"   1
+require_int "MIN_FREE_GB" "$MIN_FREE_GB" 0
+
+# --- validate the qlever compare.py pass -------------------------------------
+case "$PASS" in
+  compute|endtoend) ;;
+  *) die "--pass must be 'compute' or 'endtoend' (got '$PASS')" ;;
+esac
 
 # --- cap the synthetic scale (disk/cpu guard) --------------------------------
 if [ "$SCALE" -gt "$MAX_SCALE" ]; then
@@ -139,7 +185,13 @@ env_json() {
   # host_class: best-effort label — "github-runner" if GITHUB_ACTIONS, else hostname.
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then host_class="github-runner"; else host_class="$(hostname 2>/dev/null || echo local)"; fi
   # quiet_box: only EC2/dedicated quiet boxes give trustworthy absolute wall-clock.
-  quiet="${QUIET_BOX:-false}"
+  # Normalize to a strict JSON boolean — QUIET_BOX is emitted UNQUOTED below, so a
+  # non-boolean value (e.g. QUIET_BOX=1) would otherwise produce invalid JSON.
+  # Treat 1/true/yes/on (any case) as true; everything else (incl. unset) as false.
+  case "$(printf '%s' "${QUIET_BOX:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) quiet="true" ;;
+    *)             quiet="false" ;;
+  esac
   printf '{"host_class":"%s","cpu_model":"%s","nproc":%s,"os":"%s","kernel":"%s","quiet_box":%s,"gathered_at_utc":"%s","git_commit":"%s"}' \
     "$host_class" "$cpu" "${nproc_n:-0}" "$os" "$kernel" "$quiet" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -263,22 +315,32 @@ if want qlever; then
   log "  suite: bench/qlever-${SUITE}  (olympics|synthetic|100m)"
   log "  PREP (you run these — heavy, multi-GB, NOT auto-started here):"
   log "    cd bench/qlever-${SUITE} && qlever get-data && qlever index && qlever start"
-  log "  would run: python3 bench/qlever-${SUITE}/compare.py $ITERS compute"
+  log "  would run: python3 bench/qlever-${SUITE}/compare.py $ITERS $PASS"
   log "  comparable sparq suites: qlever-${SUITE}, watdiv, bsbm, lubm(extensional)"
   if [ "$DO_RUN" -eq 1 ]; then
     have python3 || die "python3 not found — needed by compare.py"
     CMP="bench/qlever-${SUITE}/compare.py"
     [ -f "$CMP" ] || die "no harness for suite '$SUITE' ($CMP missing); valid: olympics|synthetic|100m"
     [ -x "$SPARQ_CLI" ] || die "sparq-cli not built at '$SPARQ_CLI' — run: cargo build -p sparq-cli --release"
+    # The DIGEST is the only version identifier we can record (compare.py reports
+    # no server build string), so a result with a sentinel digest would not be
+    # "versioned". Refuse a live gather unless the digest resolved — fail fast
+    # with the actionable prep instead of writing an unversioned result file.
+    case "$Q_DIGEST" in
+      docker-not-installed)
+        die "qlever --run needs Docker to resolve the image digest (the version pin); install Docker, then: docker pull docker.io/adfreiburg/qlever:latest" ;;
+      image-not-pulled)
+        die "qlever image not pulled — cannot record a version digest. Run: docker pull docker.io/adfreiburg/qlever:latest  (then start the server per PREP above)" ;;
+    esac
     # We do NOT pull/start a multi-GB QLever server automatically. compare.py needs
     # a server already running on its PORT; it fails fast (HTTP error) if not.
     warn "qlever gather assumes a QLever server is already running for suite '$SUITE'"
     warn "  (run the PREP commands above first). compare.py will error out if not."
-    OUT="$(python3 "$CMP" "$ITERS" compute 2>&1)" \
+    OUT="$(python3 "$CMP" "$ITERS" "$PASS" 2>&1)" \
       || { warn "compare.py failed (server not up? see PREP above):\n$OUT"; OUT="FAILED: $OUT"; }
     PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.dumps({"raw": sys.stdin.read()}))' 2>/dev/null \
       || printf '{"raw":"see stderr"}')"
-    write_result qlever "qlever-${SUITE}" "$Q_DIGEST" "$PAYLOAD"
+    write_result qlever "qlever-${SUITE}-${PASS}" "$Q_DIGEST" "$PAYLOAD"
     check_df
   fi
 fi
@@ -288,7 +350,7 @@ if [ "$DO_RUN" -eq 0 ]; then
   log "Dry-run only — nothing was executed. To gather for real:"
   log "  scripts/gather-competitors.sh --run --only oxigraph --scale 50000 --iters 4"
   log "  scripts/gather-competitors.sh --run --only eye"
-  log "  scripts/gather-competitors.sh --run --only qlever --suite olympics   (server must be up)"
+  log "  scripts/gather-competitors.sh --run --only qlever --suite olympics --pass compute   (server must be up)"
   log "Results land (git-ignored) in $RESULTS_DIR/ ; commit a dashboard snapshot"
   log "into bench/competitors.json (engines/values) only deliberately, from a reviewed result."
 fi
