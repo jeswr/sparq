@@ -103,6 +103,21 @@ pub enum MpcError {
     /// tampering is information-theoretically undetectable and this is NEVER
     /// returned there — see [`crate::robust::reconstruct_robust`].
     Tampered { detail: String, cheaters: Vec<u64> },
+    /// **No registered backend satisfies the stated security requirement** — the
+    /// fail-closed result of [`crate::backend::BackendRegistry::select`] (sq-a6p1).
+    /// A federation states its [`crate::backend::SecurityRequirement`] UP FRONT
+    /// and the registry matches it against each backend's
+    /// [`crate::backend::BackendInfo`]; if none qualifies the request is
+    /// truthfully REFUSED here rather than silently served by a weaker backend.
+    /// This is the negotiation-layer twin of [`MpcError::NotYetImplemented`]: a
+    /// dishonest-majority-malicious request over the SPARQL pipeline returns this,
+    /// never a downgraded answer. `requirement` is the human-readable requirement
+    /// that could not be met; `considered` is how many backends were inspected and
+    /// rejected. `[OPUS-4.8]`
+    NoBackendSatisfies {
+        requirement: String,
+        considered: usize,
+    },
 }
 
 impl MpcError {
@@ -128,6 +143,16 @@ impl std::fmt::Display for MpcError {
                 write!(
                     f,
                     "tampered share(s) detected: {detail} (suspect evaluation points: {cheaters:?})"
+                )
+            }
+            MpcError::NoBackendSatisfies {
+                requirement,
+                considered,
+            } => {
+                write!(
+                    f,
+                    "no registered MPC backend satisfies the security requirement \
+                     [{requirement}] (refused fail-closed after considering {considered} backend(s))"
                 )
             }
         }
