@@ -359,3 +359,148 @@ fn var_graph_with_using_clause_falls_back_to_conservative() {
     assert!(r.is_err(), "USING/WITH variable-graph op falls back to conservative deny: {r:?}");
     assert_eq!(graph_len(&s, TEAM2_DOC), before, "conservative fallback applied nothing");
 }
+
+// --- [OPUS-4.8] sq-3jtd.2: fail-closed-BEFORE-apply — a DENIED update mutates NOTHING ---
+//
+// The tests above assert per-graph triple COUNTS are unchanged on a deny. This block
+// strengthens that to a WHOLE-STORE canonical-equality check: serialize EVERY graph
+// (default + every named graph, including the team2 `.acl` docs) into a deterministic,
+// sorted snapshot and assert it is identical before vs after a denied update. A count-only
+// check could miss a delta that removes one triple and adds another (net-zero count); the
+// canonical snapshot catches any mutation at all.
+//
+// The KEY case (`multi_op_one_unauthorized_*`) is a `;`-separated multi-operation body
+// where ONE op is unauthorized: the invariant is that `update_inner` authorizes the WHOLE
+// parsed update via `update::check` BEFORE ever calling `sparq_engine::update_in_place`, so
+// the authorized op must NOT partially apply. Structurally `check` returns `Err` before any
+// apply runs, so this is fail-closed-before-apply; these tests are the regression guard.
+
+/// A single S/P/O triple as canonical strings.
+type TripleStr = (String, String, String);
+/// A whole-store snapshot: (graph-name -> sorted triples), default graph keyed by "".
+type StoreSnapshot = Vec<(String, Vec<TripleStr>)>;
+
+/// A deterministic snapshot of the ENTIRE store: the default graph (key "") plus every
+/// named graph, each rendered as a sorted vector of canonical N-Triples-style S/P/O
+/// strings. Equality of two snapshots => the store's quad set is unchanged (canonical
+/// equality, independent of internal id assignment or row order).
+fn store_snapshot(store: &PodStore) -> StoreSnapshot {
+    fn dump_graph(g: &sparq_core::Graph) -> Vec<TripleStr> {
+        let pat: sparq_core::store::Pattern = [None, None, None];
+        let scan = g.store.scan(&pat);
+        let mut v: Vec<TripleStr> = scan
+            .rows
+            .iter()
+            .map(|r| {
+                let spo = scan.to_spo(r);
+                (
+                    g.dict.term(spo[0]).to_string(),
+                    g.dict.term(spo[1]).to_string(),
+                    g.dict.term(spo[2]).to_string(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+    let mut out: StoreSnapshot = vec![(String::new(), dump_graph(&store.graph))];
+    for (name, sub) in &store.graph.named {
+        out.push((name.to_string(), dump_graph(sub)));
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn denied_single_op_leaves_store_canonically_identical() {
+    // BOB has no grant on priv0 -> a single-op INSERT is denied. The WHOLE store (every
+    // graph) must be canonically identical before vs after.
+    let mut s = wac_store();
+    let doc = "https://pod.ex/priv0/c4/g0/d0.ttl";
+    let before = store_snapshot(&s);
+    let r = s.update_as(&sess(Some(BOB)), &insert_tag(doc, "bob"));
+    assert!(r.is_err(), "bob denied on priv0: {r:?}");
+    assert_eq!(
+        store_snapshot(&s),
+        before,
+        "denied update mutated the store"
+    );
+}
+
+/// A `;`-separated TWO-operation update body: an INSERT into `auth_graph` (which the actor
+/// MAY write) followed by an INSERT into `denied_graph` (which the actor may NOT write).
+fn multi_op_body(auth_graph: &str, denied_graph: &str) -> String {
+    format!(
+        "INSERT DATA {{ GRAPH <{auth_graph}> {{ <{auth_graph}#it> <{TAG}> \"authorized-op\" }} }} ; \
+         INSERT DATA {{ GRAPH <{denied_graph}> {{ <{denied_graph}#it> <{TAG}> \"unauthorized-op\" }} }}"
+    )
+}
+
+#[test]
+fn multi_op_one_unauthorized_denies_whole_body_no_partial_apply() {
+    // THE key fail-closed-before-apply case. CAROL may write team2 but NOT priv0. A two-op
+    // `;`-separated body inserts into team2 (authorized) AND priv0 (unauthorized). The
+    // WHOLE update must be refused and the AUTHORIZED op must NOT partially apply — the
+    // store stays canonically identical.
+    let mut s = wac_store();
+    let auth_graph = "https://pod.ex/team2/c3/g0/d0.ttl"; // carol: write
+    let denied_graph = "https://pod.ex/priv0/c4/g0/d0.ttl"; // carol: no grant
+    let before = store_snapshot(&s);
+    let body = multi_op_body(auth_graph, denied_graph);
+
+    let r = s.update_as(&sess(Some(CAROL)), &body);
+    assert!(
+        r.is_err(),
+        "multi-op body with one unauthorized op must be denied wholesale: {r:?}"
+    );
+    // Critically: the authorized first op did NOT slip through before the denial.
+    assert_eq!(
+        store_snapshot(&s),
+        before,
+        "fail-closed-before-apply violated: an authorized op in a denied multi-op body \
+         partially applied — this would be a REAL BUG (sq-3jtd.2)"
+    );
+}
+
+#[test]
+fn multi_op_denied_when_second_op_is_a_delete_too() {
+    // Mix operation kinds: an authorized INSERT into team2 followed by an unauthorized
+    // DELETE DATA against priv0. Still one unauthorized target -> whole body refused,
+    // nothing applied.
+    let mut s = wac_store();
+    let auth_graph = "https://pod.ex/team2/c3/g0/d0.ttl";
+    let denied_graph = "https://pod.ex/priv0/c4/g0/d0.ttl";
+    let before = store_snapshot(&s);
+    let body = format!(
+        "INSERT DATA {{ GRAPH <{auth_graph}> {{ <{auth_graph}#it> <{TAG}> \"x\" }} }} ; \
+         DELETE DATA {{ GRAPH <{denied_graph}> {{ <{denied_graph}#it> <{TITLE}> \"doc 0-4-0-0\" }} }}"
+    );
+    let r = s.update_as(&sess(Some(CAROL)), &body);
+    assert!(
+        r.is_err(),
+        "authorized INSERT + unauthorized DELETE denied wholesale: {r:?}"
+    );
+    assert_eq!(
+        store_snapshot(&s),
+        before,
+        "no partial apply of the authorized INSERT"
+    );
+}
+
+#[test]
+fn positive_control_fully_authorized_multi_op_body_applies() {
+    // Positive control: the SAME two-op `;`-separated shape, but BOTH targets are graphs
+    // CAROL may write (two distinct team2 docs). This DOES apply — proving the denied
+    // tests above exercise a real allow/deny boundary, not a path that no-ops regardless.
+    let mut s = wac_store();
+    let g1 = "https://pod.ex/team2/c3/g0/d0.ttl";
+    let g2 = "https://pod.ex/team2/c3/g0/d1.ttl";
+    let before1 = graph_len(&s, g1);
+    let before2 = graph_len(&s, g2);
+    let body = multi_op_body(g1, g2);
+
+    s.update_as(&sess(Some(CAROL)), &body)
+        .expect("fully-authorized multi-op body applies");
+    assert_eq!(graph_len(&s, g1), before1 + 1, "first op applied");
+    assert_eq!(graph_len(&s, g2), before2 + 1, "second op applied");
+}
