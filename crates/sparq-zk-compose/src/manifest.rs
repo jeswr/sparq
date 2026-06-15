@@ -16,7 +16,11 @@
 //! without a schema change.
 
 use serde::{Deserialize, Serialize};
-use sparq_zk::field::{field_to_hex, field_from_hex_str, Fr};
+use sparq_zk::field::{field_from_hex_str, field_to_hex, Fr};
+// [OPUS-4.8] sq-h8rg (HolderPoP T2): the holder-key digest from the T1 message
+// family (`commitment_message_with_holder`) is computed via `holder_key_digest`;
+// the attested-holder-binding schema below wires it through the manifest.
+use sparq_zk::sig::{holder_key_digest, public_key_from_hex, HolderKeyError, PublicKey};
 
 /// Field element rendered as `0x`-prefixed 64-nibble hex — the same
 /// representation `<urn:sparq:zk>` registry literals use, so commitments and
@@ -137,6 +141,33 @@ impl BindingMode {
             BindingMode::HolderPop { challenge, .. } => challenge,
         }
     }
+
+    /// The disclosed holder verification key of a [`BindingMode::HolderPop`]
+    /// binding, parsed (compressed Baby-JubJub point). `None` for a
+    /// [`BindingMode::Challenge`] binding or a malformed `holder` hex.
+    // [OPUS-4.8] sq-h8rg (HolderPoP T2): expose the presented holder key.
+    pub fn holder_key(&self) -> Option<PublicKey> {
+        match self {
+            BindingMode::HolderPop { holder, .. } => public_key_from_hex(holder),
+            BindingMode::Challenge { .. } => None,
+        }
+    }
+
+    /// The [`sparq_zk::sig::holder_key_digest`] of the disclosed
+    /// [`BindingMode::HolderPop`] holder key — the T1 digest wired through the
+    /// binding path so a verifier (T3/sq-z8s7) can cross-check the PRESENTED key
+    /// against a [`CommitmentAttestation`]'s issuer-attested
+    /// [`AttestedHolderBinding::holder_pk_digest`]. `None` for a
+    /// [`BindingMode::Challenge`] binding, a malformed key, or the identity key
+    /// (fail-closed — [`HolderKeyError::IdentityKey`]).
+    ///
+    /// This is wiring only; the actual fail-closed equality gate lives in T3.
+    // [OPUS-4.8] sq-h8rg (HolderPoP T2): digest of the presented holder key.
+    pub fn holder_key_digest(&self) -> Option<Fr> {
+        self.holder_key()
+            .as_ref()
+            .and_then(|pk| holder_key_digest(pk).ok())
+    }
 }
 
 /// An issuer attestation over one per-graph commitment `C(G)` (audit #3): the
@@ -197,6 +228,33 @@ pub struct CommitmentAttestation {
     // [OPUS-4.8] audit #12: issuer-attested status-list reference.
     #[serde(default)]
     pub status: Option<AttestedStatusRef>,
+    /// The ISSUER-ATTESTED holder binding (sq-h8rg, HolderPoP T2): when present,
+    /// the issuer signed the HOLDER-bound message variant
+    /// ([`sparq_zk::sig::commitment_message_with_holder`], the distinct `ZKSIG_C4`
+    /// domain tag) instead of the status-only message — so the credential carries
+    /// a cryptographic fact tying THIS commitment to a SPECIFIC holder key `H`
+    /// (the [`AttestedHolderBinding::holder_pk_digest`]). This is the strict
+    /// analogue of [`Self::status`] (audit #12): exactly one signed-message shape
+    /// per attestation, here folding one more field — the holder digest — into the
+    /// same Schnorr-signed object. It closes the trusted-holder gap that the
+    /// nonce-only [`BindingMode::HolderPop`] left open (it bound the *nonce*, not
+    /// the *credential*; see `research/zk-holder-pop-design.md` §0).
+    ///
+    /// Absent => a NON-holder-bound (bearer / status-only audit #3/#9/#12)
+    /// attestation — still valid; this field is PURELY ADDITIVE.
+    ///
+    /// # Verifier enforcement is T3 (sq-z8s7), NOT here
+    /// This T2 deliverable adds the SCHEMA and wires the digest through
+    /// construction/parse. The fail-closed verifier gates — requiring a
+    /// `holder-pop` presentation's disclosed key to match this attested digest,
+    /// requiring the issuer signature to verify over `commitment_message_with_holder`,
+    /// and refusing to honour a holder-pop claim over a bearer attestation
+    /// (`HolderBindingMissing`/`HolderKeyMismatch`) — are sq-z8s7 (T3). Until then
+    /// the presence of this field changes no verifier decision.
+    // [OPUS-4.8] sq-h8rg (HolderPoP T2): issuer-attested holder binding (schema +
+    // digest wiring; verifier enforcement deferred to T3/sq-z8s7).
+    #[serde(default)]
+    pub holder: Option<AttestedHolderBinding>,
 }
 
 /// The index + version of a credential's status-list reference as bound under
@@ -231,6 +289,97 @@ pub struct AttestedStatusRef {
     /// (audit #12) path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_commitment: Option<FieldHex>,
+}
+
+/// The ISSUER-ATTESTED holder binding carried by a [`CommitmentAttestation`]
+/// (sq-h8rg, HolderPoP T2). It records the holder public key the issuer bound
+/// into THIS credential, as the issuer signed it: the
+/// [`Self::holder_pk_digest`] = [`sparq_zk::sig::holder_key_digest`]`(hpk)` that
+/// the issuer folded into [`sparq_zk::sig::commitment_message_with_holder`] (the
+/// `ZKSIG_C4` message variant). It is the strict analogue of
+/// [`AttestedStatusRef`] (audit #12): the manifest carries the issuer-signed
+/// value so the verifier can recompute the holder-bound signed message and
+/// cross-check the presented holder key against it.
+///
+/// # Construction (digest wiring from T1)
+/// Build it from a holder [`PublicKey`] with [`Self::from_holder_key`], which
+/// computes the digest via [`sparq_zk::sig::holder_key_digest`] (the SINGLE
+/// source of truth, shared with the issuer's
+/// [`sparq_zk::sig::SecretKey::sign_commitment_with_holder`] and, in T3, the
+/// verifier) — so the digest the manifest carries is byte-for-byte the one the
+/// issuer signed. The identity holder key is rejected fail-closed
+/// ([`HolderKeyError::IdentityKey`]), exactly as `holder_key_digest` does.
+///
+/// # Clear vs hidden tier
+/// [`Self::holder_pk_digest`] is the only MANDATORY field — it is sufficient for
+/// the hidden-key tier (design §2.B-B2), where the clear `hpk` is never
+/// disclosed and only the digest is public. The optional [`Self::holder_public_key`]
+/// carries the clear `hpk` hex for the clear-key tier (design §2.B-B1), where the
+/// verifier recomputes the digest from the disclosed key and cross-checks it.
+/// When `holder_public_key` is present, [`Self::from_holder_key`] guarantees it
+/// is consistent with `holder_pk_digest`.
+///
+/// # Verifier enforcement is T3 (sq-z8s7)
+/// This struct is the SCHEMA only. The fail-closed cross-checks (disclosed key
+/// vs digest; issuer signature over `commitment_message_with_holder`) are T3.
+/// See `research/zk-holder-pop-design.md` §3.2 / §6 step 2 (this) and step 3 (T3).
+// [OPUS-4.8] sq-h8rg (HolderPoP T2): attested-holder-binding schema + digest wiring.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestedHolderBinding {
+    /// The issuer-attested holder-key DIGEST,
+    /// [`sparq_zk::sig::holder_key_digest`]`(hpk) = Poseidon2([ZKSIG_HK, hpk.x, hpk.y])`,
+    /// hex. This is the value the issuer folded into
+    /// [`sparq_zk::sig::commitment_message_with_holder`]; the verifier (T3) binds
+    /// it (clear-tier cross-check, or hidden-tier public input). The mandatory
+    /// field of the binding — present in BOTH the clear and the hidden tier.
+    pub holder_pk_digest: FieldHex,
+    /// OPTIONAL clear holder verification key (compressed Baby-JubJub point, hex)
+    /// for the clear-key tier (design §2.B-B1). When present, the verifier (T3)
+    /// recomputes [`sparq_zk::sig::holder_key_digest`] from it and requires it to
+    /// equal [`Self::holder_pk_digest`]; it is also the key the
+    /// [`BindingMode::HolderPop`] PoP is checked under. Absent => the hidden-key
+    /// tier (design §2.B-B2): only the digest is public, the clear key never
+    /// disclosed (no linkability channel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_public_key: Option<String>,
+}
+
+impl AttestedHolderBinding {
+    /// Build a binding from a holder [`PublicKey`], wiring the T1
+    /// [`sparq_zk::sig::holder_key_digest`] as the single source of the digest.
+    /// `disclose_key` selects the tier: `true` records the clear `hpk` hex
+    /// ([`Self::holder_public_key`]) for the clear-key tier (design §2.B-B1);
+    /// `false` carries only the digest for the hidden-key tier (§2.B-B2).
+    ///
+    /// Returns [`HolderKeyError::IdentityKey`] for the identity key (fail-closed —
+    /// it has no usable digest and is never a valid holder key), exactly as
+    /// [`sparq_zk::sig::holder_key_digest`].
+    // [OPUS-4.8] sq-h8rg (HolderPoP T2): digest wiring from the holder key.
+    pub fn from_holder_key(hpk: &PublicKey, disclose_key: bool) -> Result<Self, HolderKeyError> {
+        let digest = holder_key_digest(hpk)?;
+        Ok(AttestedHolderBinding {
+            holder_pk_digest: FieldHex::from_field(&digest),
+            holder_public_key: disclose_key.then(|| sparq_zk::sig::public_key_to_hex(hpk)),
+        })
+    }
+
+    /// The issuer-attested holder-key digest as a field element. `None` if the
+    /// stored hex is malformed (fail-closed — the verifier in T3 treats an
+    /// unparseable digest as no valid binding).
+    // [OPUS-4.8] sq-h8rg (HolderPoP T2).
+    pub fn digest(&self) -> Option<Fr> {
+        self.holder_pk_digest.to_field()
+    }
+
+    /// The disclosed clear holder key (clear-key tier), parsed. `None` when the
+    /// binding is hidden-tier (no clear key) OR the hex is malformed. The T3
+    /// verifier cross-checks `holder_key_digest(this) == digest()`.
+    // [OPUS-4.8] sq-h8rg (HolderPoP T2).
+    pub fn holder_key(&self) -> Option<PublicKey> {
+        self.holder_public_key
+            .as_deref()
+            .and_then(public_key_from_hex)
+    }
 }
 
 /// A credential's revocation reference (plan §S2.6, Bitstring/StatusList2021
@@ -746,5 +895,234 @@ impl ProofManifest {
 
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
+    }
+}
+
+// [OPUS-4.8] sq-h8rg (HolderPoP T2): AttestedHolderBinding schema + digest-wiring tests.
+#[cfg(test)]
+mod holder_binding_tests {
+    use super::*;
+    use sparq_zk::sig::{holder_key_digest, public_key_to_hex, SecretKey};
+
+    fn holder_pk(seed: u64) -> PublicKey {
+        SecretKey::from_seed(seed).public_key()
+    }
+
+    /// A non-holder-bound (bearer) `CommitmentAttestation` — the existing
+    /// audit-#3/#9/#12 shape, with `holder: None`. Used to assert additivity.
+    fn bearer_attestation() -> CommitmentAttestation {
+        let sk = SecretKey::from_seed(11);
+        let commitment = Fr::from(7u64);
+        CommitmentAttestation {
+            commitment: FieldHex::from_field(&commitment),
+            issuer_public_key: public_key_to_hex(&sk.public_key()),
+            signature: sk.sign_commitment(&commitment),
+            cryptosuite: "https://sparq.dev/ns/zk#poseidon2-schnorr-v1".to_string(),
+            salt: None,
+            status: None,
+            holder: None,
+        }
+    }
+
+    /// The new schema round-trips through serde (both tiers), and the wired
+    /// digest equals T1's `holder_key_digest` for the given holder key.
+    #[test]
+    fn attested_holder_binding_round_trips_and_wires_t1_digest() {
+        let hpk = holder_pk(42);
+        let expected = holder_key_digest(&hpk).expect("non-identity holder key");
+
+        // Clear-key tier (discloses hpk).
+        let clear = AttestedHolderBinding::from_holder_key(&hpk, true)
+            .expect("non-identity holder key builds");
+        assert_eq!(
+            clear.digest(),
+            Some(expected),
+            "wired digest must equal T1 holder_key_digest"
+        );
+        assert_eq!(
+            clear.holder_key(),
+            Some(hpk),
+            "clear tier exposes the disclosed holder key"
+        );
+        let json = serde_json::to_string(&clear).expect("serializes");
+        let back: AttestedHolderBinding = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, clear, "clear-tier binding round-trips");
+
+        // Hidden-key tier (digest only; no clear hpk).
+        let hidden = AttestedHolderBinding::from_holder_key(&hpk, false)
+            .expect("non-identity holder key builds");
+        assert_eq!(
+            hidden.digest(),
+            Some(expected),
+            "hidden tier carries the same digest"
+        );
+        assert_eq!(
+            hidden.holder_public_key, None,
+            "hidden tier discloses no clear key"
+        );
+        assert_eq!(
+            hidden.holder_key(),
+            None,
+            "hidden tier exposes no clear key"
+        );
+        let json = serde_json::to_string(&hidden).expect("serializes");
+        // The clear key is omitted from the JSON entirely (skip_serializing_if).
+        assert!(
+            !json.contains("holder_public_key"),
+            "hidden tier omits the clear-key field"
+        );
+        let back: AttestedHolderBinding = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, hidden, "hidden-tier binding round-trips");
+    }
+
+    /// `from_holder_key` propagates T1's identity-key rejection fail-closed. The
+    /// identity `PublicKey` itself cannot be CONSTRUCTED in this crate (no `ark`
+    /// dep, and `public_key_from_hex` rejects it at parse — codex #3), and T1
+    /// already proves `holder_key_digest(identity) == Err(IdentityKey)`
+    /// (`sparq_zk::sig` `identity_holder_key_digest_rejected`); the binding builder
+    /// is a thin `?`-propagating wrapper over it, so the rejection holds by
+    /// construction. Asserted here only at the type level (the builder returns a
+    /// `Result<_, HolderKeyError>`, never an infallible value).
+    #[test]
+    fn from_holder_key_is_fallible_on_the_holder_key_digest() {
+        // A non-identity key is the success path; the only error variant the
+        // wrapper can yield is the identity rejection forwarded from T1.
+        let ok: Result<AttestedHolderBinding, HolderKeyError> =
+            AttestedHolderBinding::from_holder_key(&holder_pk(7), false);
+        assert!(ok.is_ok(), "a real holder key builds a binding");
+    }
+
+    /// A full `ProofManifest` carrying a holder-bound `CommitmentAttestation`
+    /// round-trips through `to_json`/`from_json` and exposes BOTH the issuer
+    /// signature (the attestation's `signature`) and the holder digest.
+    #[test]
+    fn manifest_with_attested_holder_binding_round_trips_and_exposes_digest_and_signature() {
+        let issuer = SecretKey::from_seed(3);
+        let hpk = holder_pk(99);
+        let commitment = Fr::from(123u64);
+        let salt = Fr::from(456u64);
+        let list_id = sparq_zk::sig::status_list_id_to_field("urn:sparq:status:list:1");
+        let status_ref = sparq_zk::sig::status_ref_digest(&list_id, 5, 1);
+        let holder_digest = holder_key_digest(&hpk).expect("non-identity holder key");
+
+        // The issuer signs the T1 holder-bound message variant (ZKSIG_C4).
+        let signature =
+            issuer.sign_commitment_with_holder(&commitment, &salt, &status_ref, &holder_digest);
+
+        let att = CommitmentAttestation {
+            commitment: FieldHex::from_field(&commitment),
+            issuer_public_key: public_key_to_hex(&issuer.public_key()),
+            signature: signature.clone(),
+            cryptosuite: "https://sparq.dev/ns/zk#poseidon2-schnorr-v1".to_string(),
+            salt: Some(FieldHex::from_field(&salt)),
+            status: Some(AttestedStatusRef {
+                index: Some(5),
+                version: 1,
+                index_commitment: None,
+            }),
+            holder: AttestedHolderBinding::from_holder_key(&hpk, true).ok(),
+        };
+
+        let manifest = ProofManifest {
+            r#type: default_type(),
+            query: "ASK {}".to_string(),
+            issuers: vec![],
+            key_set: vec![public_key_to_hex(&issuer.public_key())],
+            commitment_attestations: vec![att],
+            attributions: vec![],
+            join_obligations: vec![],
+            entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
+            binding: BindingMode::HolderPop {
+                challenge: FieldHex::from_field(&Fr::from(0x2au64)),
+                holder: public_key_to_hex(&hpk),
+                pop: SecretKey::from_seed(99).sign_holder_pop(&Fr::from(0x2au64)),
+                cryptosuite: default_holder_cryptosuite(),
+            },
+            revocation: None,
+            status_snapshots: vec![],
+            sub_proofs: vec![],
+            binding_edges: vec![],
+            hidden_revocation: None,
+            hidden_issuer_attestations: vec![],
+        };
+
+        let json = manifest.to_json();
+        let back = ProofManifest::from_json(&json).expect("manifest round-trips");
+        assert_eq!(back, manifest, "manifest with holder binding round-trips");
+
+        // The parsed manifest exposes the issuer signature and the holder digest.
+        let binding = back.commitment_attestations[0]
+            .holder
+            .as_ref()
+            .expect("attestation carries an attested holder binding");
+        assert_eq!(
+            binding.digest(),
+            Some(holder_digest),
+            "parsed binding exposes the issuer-attested holder digest"
+        );
+        assert_eq!(
+            back.commitment_attestations[0].signature, signature,
+            "parsed attestation exposes the (holder-bound) issuer signature"
+        );
+
+        // The disclosed holder key in the binding-mode PoP wires through to the
+        // SAME T1 digest the attestation carries (the T3 cross-check anchor).
+        assert_eq!(
+            back.binding.holder_key_digest(),
+            Some(holder_digest),
+            "presented holder key digest matches the issuer-attested digest"
+        );
+        assert_eq!(back.binding.holder_key(), Some(hpk));
+    }
+
+    /// Back-compat: an OLD manifest JSON whose attestation has NO `holder` field
+    /// (and a manifest with no `holder` key anywhere) still parses, with the new
+    /// field defaulting to `None`. The schema addition is purely additive.
+    #[test]
+    fn old_manifest_without_holder_field_still_parses() {
+        // Attestation-level back-compat: serialize a bearer attestation, confirm
+        // it carries no `holder` JSON key when None is omitted on deserialize...
+        let att = bearer_attestation();
+        let json = serde_json::to_string(&att).expect("serializes");
+        // `holder: None` serializes (no skip on the field) but a JSON missing it
+        // must still parse via #[serde(default)].
+        let stripped = json
+            .replace(",\"holder\":null", "")
+            .replace("\"holder\":null,", "");
+        assert!(
+            !stripped.contains("\"holder\""),
+            "stripped the holder field"
+        );
+        let back: CommitmentAttestation =
+            serde_json::from_str(&stripped).expect("old attestation (no holder field) parses");
+        assert_eq!(back.holder, None, "absent holder field defaults to None");
+        assert_eq!(back, att, "back-compat parse equals the bearer attestation");
+
+        // Manifest-level back-compat: a hand-written legacy manifest with no
+        // holder field anywhere parses, and the attestation's holder is None.
+        let legacy = r#"{
+            "type": "urn:sparq:zk:ProofManifest",
+            "query": "ASK {}",
+            "commitment_attestations": [{
+                "commitment": "0x0000000000000000000000000000000000000000000000000000000000000007",
+                "issuer_public_key": "00",
+                "signature": "00",
+                "cryptosuite": "https://sparq.dev/ns/zk#poseidon2-schnorr-v1"
+            }],
+            "attributions": [],
+            "entailment_regime": "simple",
+            "binding": { "mode": "challenge", "challenge": "0x2a" },
+            "sub_proofs": []
+        }"#;
+        let parsed = ProofManifest::from_json(legacy).expect("legacy manifest parses");
+        assert_eq!(
+            parsed.commitment_attestations[0].holder, None,
+            "legacy attestation has no holder binding"
+        );
+        assert!(
+            matches!(parsed.binding, BindingMode::Challenge { .. }),
+            "legacy bearer/challenge binding remains valid"
+        );
     }
 }
