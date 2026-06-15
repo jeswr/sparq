@@ -465,3 +465,255 @@ fn need_label(n: Need) -> &'static str {
         Need::Write => "write",
     }
 }
+
+// --- [OPUS-4.8] sq-3jtd.1: differential test — PodStore's precise variable-GRAPH write set
+//     EQUALS the engine's actual write set ----------------------------------------------------
+//
+// The security invariant the rest of this module rests on (module docs, line 26ff): for a
+// `DELETE/INSERT … WHERE` with a `GRAPH ?var` slot, `resolve_var_graphs` must enumerate
+// EXACTLY the set of named graphs `sparq_engine::update_in_place` will actually write — no
+// MORE (an over-approximation only costs a false denial) and crucially no LESS (an
+// under-approximation = a write that escapes authorization = a security hole).
+//
+// These tests are the differential GUARD around that invariant (and around sq-cnor's
+// USING/WITH precision work): they compute the precise set from `resolve_var_graphs` AND the
+// real write set from `sparq_engine::update_in_place_capturing` (whose `UpdateEffect::Delta`
+// records the slot of every graph the engine actually touched) and assert the two are EQUAL —
+// or, for the cases `resolve_var_graphs` deliberately bails on (USING/WITH), assert the
+// fallback is an OVER-approximation of the real write set (sound: a superset can only deny,
+// never leak).
+//
+// Shapes mirror PSS's `setAclPointer`/`putContainer` (gh-47): a `DELETE/INSERT … WHERE` whose
+// WHERE has an OPTIONAL (the binding may or may not match → the graph set varies), including a
+// case where the OPTIONAL does NOT bind (a naive resolver could over- or under-count), and a
+// WITH-clause variant (WITH re-scopes the operation's default graph).
+#[cfg(test)]
+mod differential_writeset_tests {
+    use super::*;
+    use sparq_core::Graph;
+    use sparq_engine::{update_in_place_capturing, QueryBudget, UpdateEffect};
+    use std::collections::BTreeSet;
+
+    /// A tiny PSS-shaped pod: two resource graphs (`r1`, `r2`) each holding a `title`; only
+    /// `r1` ALSO holds the optional `aclPointer` triple that PSS's `setAclPointer` keys its
+    /// OPTIONAL off. A third graph `r3` holds an unrelated triple (no title) so a title-keyed
+    /// WHERE never binds it — present to prove the resolver does not over-count the store.
+    fn pss_dataset() -> Graph {
+        let nq = "\
+<https://pod.ex/r1#it> <https://ex.dev/ns#title> \"r1\" <https://pod.ex/r1> .
+<https://pod.ex/r1#it> <https://ex.dev/ns#aclPointer> <https://pod.ex/r1.acl> <https://pod.ex/r1> .
+<https://pod.ex/r2#it> <https://ex.dev/ns#title> \"r2\" <https://pod.ex/r2> .
+<https://pod.ex/r3#it> <https://ex.dev/ns#other> \"r3\" <https://pod.ex/r3> .
+";
+        Graph::load_dataset(nq, "nquads").expect("fixture loads")
+    }
+
+    /// The set of named graphs `sparq_engine::update_in_place` ACTUALLY writes for `sparql`,
+    /// observed via the engine's own resolved effect log (`UpdateEffect::Delta { slot, … }`
+    /// records every graph slot the engine touched). Default-graph writes (slot `None`) are
+    /// reported separately via the bool — none of these PSS shapes target the default graph.
+    fn engine_write_set(graph: &mut Graph, sparql: &str) -> (BTreeSet<String>, bool) {
+        let effects = update_in_place_capturing(graph, sparql, &QueryBudget::unlimited())
+            .expect("engine applies the update");
+        let mut named = BTreeSet::new();
+        let mut touched_default = false;
+        for e in &effects {
+            if let UpdateEffect::Delta { slot, .. } = e {
+                match slot {
+                    Some(Term::NamedNode(n)) => {
+                        named.insert(n.as_str().to_owned());
+                    }
+                    Some(Term::BlankNode(_)) => {} // not authorizable; not exercised here
+                    Some(_) => {}
+                    None => touched_default = true,
+                }
+            }
+        }
+        (named, touched_default)
+    }
+
+    /// PodStore's PRECISE variable-GRAPH target set for `sparql`, as computed by
+    /// `resolve_var_graphs` over `graph`. `Some(set)` is the precise resolution; `None` means
+    /// the resolver bailed to the conservative all-graphs wildcard (USING/WITH, blank-node
+    /// binding, or an un-evaluable WHERE) — i.e. it demands write on EVERY store graph.
+    fn resolve_var_graph_set(graph: &Graph, sparql: &str) -> Option<BTreeSet<String>> {
+        let upd = SparqlParser::new().parse_update(sparql).expect("parses");
+        let reqs = analyze(&upd);
+        assert!(
+            !reqs.var_graphs.is_empty(),
+            "test update must carry a GRAPH ?var slot"
+        );
+        let mut out = BTreeSet::new();
+        for r in &reqs.var_graphs {
+            match resolve_var_graphs(graph, r) {
+                Ok(resolved) => {
+                    for (n, _need) in resolved {
+                        out.insert(n.as_str().to_owned());
+                    }
+                }
+                // Any operation that fell back to the wildcard makes the WHOLE update's
+                // precise set undefined — report the fallback.
+                Err(_) => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// CASE 1 — OPTIONAL that BINDS, no re-scope: the precise resolver set must EQUAL the
+    /// engine write set exactly. PSS `setAclPointer` shape: rewrite the pointer of every
+    /// resource that has one. `?g` binds to the resources where the OPTIONAL matched.
+    #[test]
+    fn optional_bound_precise_set_equals_engine_write_set() {
+        // DELETE the old pointer / INSERT a new one, keyed on the resource carrying a title;
+        // the pointer triple sits behind an OPTIONAL, so `?p` is bound only for r1.
+        let upd = "\
+            DELETE { GRAPH ?g { ?s <https://ex.dev/ns#aclPointer> ?p } } \
+            INSERT { GRAPH ?g { ?s <https://ex.dev/ns#aclPointer> <https://pod.ex/new.acl> } } \
+            WHERE  { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t . \
+                                OPTIONAL { ?s <https://ex.dev/ns#aclPointer> ?p } } }";
+
+        let graph = pss_dataset();
+        let precise = resolve_var_graph_set(&graph, upd).expect("no re-scope -> precise");
+
+        let mut applied = pss_dataset();
+        let (written, default) = engine_write_set(&mut applied, upd);
+        assert!(!default, "no default-graph write in this shape");
+
+        // The DELETE half only produces a quad for r1 (where OPTIONAL bound `?p`); the INSERT
+        // half produces a quad for r1 AND r2 (both have a title). The engine writes r1 and r2.
+        // resolve_var_graphs must enumerate EXACTLY {r1, r2} — never r3 (no title), never the
+        // whole store.
+        assert_eq!(
+            precise, written,
+            "precise resolve_var_graphs set must EQUAL the engine's actual write set"
+        );
+        let expect: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2"]
+            .map(String::from)
+            .into();
+        assert_eq!(written, expect, "engine wrote exactly r1+r2");
+    }
+
+    /// CASE 2 — OPTIONAL that does NOT bind for some rows: the precise set must still equal the
+    /// engine write set. A naive resolver that counted the OPTIONAL's graph even when it is
+    /// unbound (or skipped a graph because the OPTIONAL didn't match) would over/under-count.
+    /// Here the DELETE template references the OPTIONAL var `?p`: for r2 (no pointer) `?p` is
+    /// unbound, so the engine drops the DELETE quad — r2 is written ONLY via the INSERT half.
+    #[test]
+    fn optional_unbound_precise_set_equals_engine_write_set() {
+        // DELETE keyed on the (possibly-unbound) OPTIONAL var; INSERT keyed on the title.
+        // r1: OPTIONAL binds -> delete + insert. r2: OPTIONAL unbound -> insert only. r3: no
+        // title -> never bound at all.
+        let upd = "\
+            DELETE { GRAPH ?g { ?s <https://ex.dev/ns#aclPointer> ?p } } \
+            INSERT { GRAPH ?g { ?s <https://ex.dev/ns#mark> \"x\" } } \
+            WHERE  { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t . \
+                                OPTIONAL { ?s <https://ex.dev/ns#aclPointer> ?p } } }";
+
+        let graph = pss_dataset();
+        let precise = resolve_var_graph_set(&graph, upd).expect("no re-scope -> precise");
+
+        let mut applied = pss_dataset();
+        let (written, default) = engine_write_set(&mut applied, upd);
+        assert!(!default);
+
+        // `?g` binds to r1 and r2 (both have a title). The engine writes both — r1 via
+        // delete+insert, r2 via insert only (its DELETE quad is dropped, `?p` unbound). r3 is
+        // never bound. The precise set must be exactly that, with NO phantom r3 and NO
+        // escalation to all-store.
+        assert_eq!(
+            precise, written,
+            "OPTIONAL-unbound: precise set must EQUAL the engine write set"
+        );
+        let expect: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2"]
+            .map(String::from)
+            .into();
+        assert_eq!(written, expect, "engine wrote exactly r1+r2 (r3 unbound)");
+    }
+
+    /// CASE 3 — an OPTIONAL whose WHERE key is ABSENT everywhere, so `?g` binds to NOTHING:
+    /// the precise set must be EMPTY and equal the engine's (empty) write set. A resolver that
+    /// fell back to the wildcard here would wrongly demand write on the whole store for a
+    /// no-op update.
+    #[test]
+    fn optional_empty_binding_precise_set_equals_empty_engine_write_set() {
+        // No resource carries `<ex:missing>`, so `?g` never binds; the update is a no-op.
+        let upd = "\
+            DELETE { GRAPH ?g { ?s <https://ex.dev/ns#aclPointer> ?p } } \
+            WHERE  { GRAPH ?g { ?s <https://ex.dev/ns#missing> ?t . \
+                                OPTIONAL { ?s <https://ex.dev/ns#aclPointer> ?p } } }";
+
+        let graph = pss_dataset();
+        let precise = resolve_var_graph_set(&graph, upd).expect("no re-scope -> precise");
+
+        let mut applied = pss_dataset();
+        let (written, default) = engine_write_set(&mut applied, upd);
+        assert!(!default);
+
+        assert!(written.is_empty(), "engine writes nothing (no binding)");
+        assert_eq!(
+            precise, written,
+            "empty binding -> empty precise set, no wildcard"
+        );
+    }
+
+    /// CASE 4 — the WITH-clause variant (PSS shapes can carry `WITH`). `resolve_var_graphs`
+    /// DELIBERATELY bails to the conservative all-graphs wildcard whenever a USING/WITH
+    /// re-scope is present (`update.rs` ~line 305; root-caused in sq-cnor): a plain serialized
+    /// SELECT cannot reproduce the apply's `build_using` dataset (`WITH` keeps ALL store named
+    /// graphs, a query's `FROM NAMED` of `named: None` keeps NONE), so a precise resolution
+    /// could UNDER-count and open a hole. We therefore verify the SECURITY property directly:
+    /// the conservative target (every store named graph) is a SUPERSET of what the engine
+    /// actually writes. A superset can only DENY (never leak) — sound, the invariant holds in
+    /// the safe direction. (When sq-cnor tightens this to a precise set, this test's superset
+    /// check still holds and the equality below documents the tightening target.)
+    #[test]
+    fn with_clause_falls_back_to_sound_over_approximation() {
+        // WITH re-scopes the operation's DEFAULT graph to r1; the GRAPH ?g slot still ranges
+        // over named graphs. The resolver sees a re-scope and bails (USING is Some).
+        let upd = "\
+            WITH <https://pod.ex/r1> \
+            DELETE { GRAPH ?g { ?s <https://ex.dev/ns#aclPointer> ?p } } \
+            INSERT { GRAPH ?g { ?s <https://ex.dev/ns#aclPointer> <https://pod.ex/new.acl> } } \
+            WHERE  { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t . \
+                                OPTIONAL { ?s <https://ex.dev/ns#aclPointer> ?p } } }";
+
+        let graph = pss_dataset();
+        // resolve_var_graphs returns Err(_) -> the precise set is undefined; PodStore falls
+        // back to the all-graphs wildcard.
+        assert!(
+            resolve_var_graph_set(&graph, upd).is_none(),
+            "WITH/USING re-scope must trigger the conservative wildcard fallback"
+        );
+
+        // The conservative target set is EVERY named graph in the store.
+        let conservative: BTreeSet<String> = store_named_graphs(&graph)
+            .iter()
+            .map(|n| n.as_str().to_owned())
+            .collect();
+
+        let mut applied = pss_dataset();
+        let (written, _default) = engine_write_set(&mut applied, upd);
+
+        // SECURITY invariant in the safe direction: the authorization target (all store
+        // graphs) is a SUPERSET of the engine's actual write set — never an under-approximation
+        // (which would let a write escape auth). Over-approximation is sound; it only denies.
+        assert!(
+            written.is_subset(&conservative),
+            "fallback wildcard must COVER every graph the engine writes (no under-approx hole): \
+             engine wrote {written:?}, wildcard covers {conservative:?}"
+        );
+        // Document the precision gap (sq-cnor): the engine actually writes only r1+r2, but the
+        // wildcard demands write on the whole store -> the fallback is a strict over-approx here.
+        let real: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2"]
+            .map(String::from)
+            .into();
+        assert_eq!(
+            written, real,
+            "engine's real WITH write set is exactly r1+r2"
+        );
+        assert!(
+            real.is_subset(&conservative) && conservative.len() > real.len(),
+            "wildcard is a STRICT over-approximation of the engine write set (the sq-cnor gap)"
+        );
+    }
+}
