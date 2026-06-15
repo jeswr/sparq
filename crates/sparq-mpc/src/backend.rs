@@ -723,6 +723,40 @@ pub trait MpcBackend {
     /// holder's single private integer and Shamir-shares it across the parties.
     fn share_private_input(&self, holder: &Holder) -> Result<Vec<Self::Share>, MpcError>;
 
+    /// [OPUS-4.8] sq-dwb5 — **batched / vector** secret-sharing of a holder's
+    /// private contribution: the holder surfaces a `Vec` of private integers (a
+    /// per-row hidden-value / salary vector / per-graph commitment column) via a
+    /// caller-supplied fragment, each row is Shamir-shared, and the result is
+    /// *positionally* row-bound — output index `i` is the sharing of the holder's
+    /// `i`-th private row. This generalises [`Self::share_private_input`] (which is
+    /// the `k = 1` special case) to MORE than one secret value per source, so the
+    /// secure aggregate / hidden-value join can range over many rows per holder.
+    ///
+    /// **Row-binding contract.** The binding is POSITIONAL: every holder evaluates
+    /// the SAME `fragment` projecting one integer column, ordered DETERMINISTICALLY
+    /// (the implementation sorts the holder's rows by their disclosed value so two
+    /// holders' batches line up by position regardless of local row order — see
+    /// [`crate::shamir::ShamirBackend::share_private_inputs`]). Downstream
+    /// (per-row secure aggregate, hidden join) correlate across holders by output
+    /// index. For a KEYED binding (element `i` ↔ a disclosed row id), pair the
+    /// returned batch with the holder's disclosed key column out-of-band.
+    ///
+    /// Returns one trait-`Share` PER ROW (so a single-scalar contribution is the
+    /// `k = 1` case). Each `Self::Share` is the per-party sharing of one private
+    /// value; index `i` is row `i` under the row-binding above.
+    ///
+    /// Default impl: the single-scalar fallback so existing backends/stubs keep
+    /// compiling — it returns a length-1 batch via [`Self::share_private_input`]
+    /// (the `share_private_input` result is itself one trait-`Share`).
+    /// [`crate::shamir::ShamirBackend`] overrides it with the real vector path.
+    fn share_private_inputs(
+        &self,
+        holder: &Holder,
+        _fragment: &str,
+    ) -> Result<Vec<Self::Share>, MpcError> {
+        self.share_private_input(holder)
+    }
+
     /// Run the secure computation over secret-shared inputs from all holders
     /// (e.g. the cumulative-salary aggregate whose per-source addends stay
     /// private). Returns the shares of the result.
@@ -739,7 +773,10 @@ pub trait MpcBackend {
     ///
     /// Implemented by [`crate::shamir::ShamirBackend`] (M3) via Lagrange
     /// interpolation of the result sharing at `x = 0`.
-    fn reconstruct_disclosed(&self, result_shares: &[Self::Share]) -> Result<PartialResult, MpcError>;
+    fn reconstruct_disclosed(
+        &self,
+        result_shares: &[Self::Share],
+    ) -> Result<PartialResult, MpcError>;
 }
 
 // =============================================================================
@@ -1378,7 +1415,10 @@ mod axis_tests {
         // n = 2, t = 1 → DishonestMajority (n <= 2t). Even with robust_cheaters = 0
         // (the detect-and-abort case) this must not claim honest-majority security.
         let desc = SecurityDescriptor::shamir_degree_recon(2, 1, 0);
-        assert_eq!(desc.threshold, CorruptionThreshold::DishonestMajority { t: 1 });
+        assert_eq!(
+            desc.threshold,
+            CorruptionThreshold::DishonestMajority { t: 1 }
+        );
         assert_eq!(desc.trust_model(), TrustModel::DishonestMajority);
         assert_eq!(desc.adversary, AdversaryModel::SemiHonest);
         // Degrades to the no-detection selective-abort baseline...
@@ -1388,7 +1428,10 @@ mod axis_tests {
         );
         // ...so the back-compat projection is SemiHonestOnly, NOT HonestMajorityAbort.
         // The two projections are now mutually consistent.
-        assert_eq!(desc.malicious_security(0), MaliciousSecurity::SemiHonestOnly);
+        assert_eq!(
+            desc.malicious_security(0),
+            MaliciousSecurity::SemiHonestOnly
+        );
         assert!(!desc.malicious_security(0).is_malicious_secure());
 
         // Even a non-zero correction budget cannot resurrect an honest-majority
