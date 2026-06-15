@@ -847,6 +847,61 @@ fn provides_cheater_attribution(desc: &SecurityDescriptor) -> bool {
     )
 }
 
+/// FAIL-CLOSED adversary-axis check: does a backend whose adversary model is
+/// `desc` meet a requirement floor of `req`? Strength is the coarse
+/// weakest→strongest rank ([`adversary_rank`]) AND — when BOTH are covert —
+/// the backend's deterrence ε must be at least the required ε.
+///
+/// The coarse rank alone is unsound for the covert tier: every `Covert{..}` ranks
+/// 1 regardless of its ε, so a requirement of covert(ε=1/2) would otherwise be
+/// satisfied by a much weaker covert(ε=1/100) backend — silently accepting a
+/// lower deterrence than asked for (Copilot review #92). When both sides are
+/// covert we additionally require `desc_ε >= req_ε`, compared as exact rationals
+/// via cross-multiplication (`desc_num·req_den >= req_num·desc_den`, both
+/// denominators `> 0` by the [`AdversaryModel::covert`] invariant) so no float
+/// enters a security decision. A strictly stronger adversary model (malicious)
+/// outranks any covert floor and needs no ε comparison; a covert backend never
+/// satisfies a malicious floor (rank 1 < 2). The products are widened to `u64`
+/// so the `u32 × u32` cross-multiply cannot overflow. `[OPUS-4.8]`
+fn adversary_satisfies(desc: AdversaryModel, req: AdversaryModel) -> bool {
+    if adversary_rank(desc) > adversary_rank(req) {
+        // Strictly stronger adversary model dominates (e.g. malicious >= covert).
+        return true;
+    }
+    if adversary_rank(desc) < adversary_rank(req) {
+        return false;
+    }
+    // Equal rank. For the covert tier the rank is ε-blind, so compare ε exactly.
+    match (desc.deterrence(), req.deterrence()) {
+        (Some((d_num, d_den)), Some((r_num, r_den))) => {
+            // desc_ε >= req_ε  ⇔  d_num/d_den >= r_num/r_den
+            //                  ⇔  d_num·r_den >= r_num·d_den   (denominators > 0)
+            u64::from(d_num) * u64::from(r_den) >= u64::from(r_num) * u64::from(d_den)
+        }
+        // Same non-covert rank (both semi-honest or both malicious): rank suffices.
+        _ => true,
+    }
+}
+
+/// FAIL-CLOSED corruption-axis check: does a backend at corruption threshold
+/// `desc` meet a requirement of `req`? The backend must survive AT LEAST as
+/// adverse a *regime* ([`threshold_rank`]) AND tolerate AT LEAST as many corrupt
+/// parties (`desc.t >= req.t`).
+///
+/// The coarse regime rank alone is unsound: it deliberately ignores the concrete
+/// `t`, so a requirement of `HonestMajority{t=3}` (stay secure with up to 3
+/// corrupt parties) would otherwise be satisfied by a backend at
+/// `HonestMajority{t=1}` that a *second* corrupt party already breaks — silently
+/// accepting a weaker concrete threshold than asked for (Copilot review #92).
+/// Requiring `desc.t >= req.t` closes that: a backend must tolerate at least the
+/// requested corruption count in addition to surviving at least the requested
+/// regime. (A higher-rank regime with a lower `t` is therefore NOT accepted for a
+/// higher-`t` floor — correctly, since it tolerates fewer corruptions.)
+/// `[OPUS-4.8]`
+fn corruption_satisfies(desc: CorruptionThreshold, req: CorruptionThreshold) -> bool {
+    threshold_rank(desc) >= threshold_rank(req) && desc.threshold() >= req.threshold()
+}
+
 /// A federation's **security requirement**, stated UP FRONT, that a backend must
 /// meet before it is allowed to run any part of the SPARQL pipeline (research
 /// §1.3(b)). Each field is a *floor* on one axis of the three-axis
@@ -932,10 +987,15 @@ impl SecurityRequirement {
     /// [`SecurityRequirement::satisfies`] (backend-level) and the per-operator
     /// path. `[OPUS-4.8]`
     pub fn satisfied_by(&self, desc: &SecurityDescriptor) -> bool {
-        adversary_rank(desc.adversary) >= adversary_rank(self.min_adversary)
+        // AXIS-1 honours the covert deterrence ε (not just the coarse tier rank)
+        // and AXIS-3 honours the concrete corruption count `t` (not just the
+        // regime rank), so neither axis can silently accept a weaker guarantee
+        // than requested — see [`adversary_satisfies`] / [`corruption_satisfies`]
+        // (Copilot review #92). `[OPUS-4.8]`
+        adversary_satisfies(desc.adversary, self.min_adversary)
             && output_guarantee_rank(desc.output_guarantee)
                 >= output_guarantee_rank(self.min_output_guarantee)
-            && threshold_rank(desc.threshold) >= threshold_rank(self.max_corruption)
+            && corruption_satisfies(desc.threshold, self.max_corruption)
             && (!self.require_cheater_attribution || provides_cheater_attribution(desc))
             && (!self.require_public_verifiability || desc.public_verifiability.0)
     }
@@ -969,10 +1029,16 @@ impl SecurityRequirement {
             OutputGuarantee::Fairness(_) => "fairness",
             OutputGuarantee::GuaranteedOutput(_) => "guaranteed-output",
         };
+        // Include the concrete corruption count `t`: now that `satisfied_by`
+        // ENFORCES `desc.t >= req.t` (Copilot review #92), two requirements that
+        // differ only in `t` are genuinely different floors, so the refusal
+        // message must distinguish them or it is ambiguous to debug. `[OPUS-4.8]`
         let regime = match self.max_corruption {
-            CorruptionThreshold::DishonestMajority { .. } => "dishonest-majority",
-            CorruptionThreshold::HonestMajority { .. } => "honest-majority",
-            CorruptionThreshold::SuperHonestMajority { .. } => "super-honest-majority",
+            CorruptionThreshold::DishonestMajority { t } => format!("dishonest-majority(t={t})"),
+            CorruptionThreshold::HonestMajority { t } => format!("honest-majority(t={t})"),
+            CorruptionThreshold::SuperHonestMajority { t } => {
+                format!("super-honest-majority(t={t})")
+            }
         };
         format!(
             "adversary>={adversary}, output>={guarantee}, corruption<={regime}, \
@@ -1698,5 +1764,108 @@ mod selection_tests {
         assert!(s.contains("malicious"));
         assert!(s.contains("dishonest-majority"));
         assert!(s.contains("attribution=true"));
+    }
+
+    // === FAIL-CLOSED on the covert-ε and concrete-`t` sub-axes (Copilot #92) ===
+
+    /// A requirement for covert(ε=1/2) must NOT be satisfied by a weaker
+    /// covert(ε=1/100) backend — the coarse tier rank is ε-blind, so the ε must
+    /// be compared exactly. A stronger covert ε, an equal ε, and a malicious
+    /// backend all satisfy it; a weaker covert ε and a semi-honest backend do not.
+    /// `[OPUS-4.8]`
+    #[test]
+    fn satisfies_covert_epsilon_is_not_silently_downgraded() {
+        let req = SecurityRequirement {
+            min_adversary: AdversaryModel::covert(1, 2).expect("ε=1/2 valid"),
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Selective),
+            max_corruption: CorruptionThreshold::HonestMajority { t: 1 },
+            require_cheater_attribution: false,
+            require_public_verifiability: false,
+        };
+        let mk = |adv| {
+            BackendInfo::new(
+                "x",
+                SecurityDescriptor {
+                    adversary: adv,
+                    ..honest_semi_abort()
+                },
+                0,
+            )
+        };
+        // Weaker deterrence ε = 1/100 < 1/2 → REFUSED (the bug this fix closes).
+        assert!(
+            !req.satisfies(&mk(AdversaryModel::covert(1, 100).unwrap())),
+            "covert(ε=1/100) must NOT satisfy a covert(ε=1/2) floor"
+        );
+        // Equal ε = 1/2 (and an equivalent 2/4) → accepted.
+        assert!(req.satisfies(&mk(AdversaryModel::covert(1, 2).unwrap())));
+        assert!(req.satisfies(&mk(AdversaryModel::covert(2, 4).unwrap())));
+        // Stronger ε = 3/4 > 1/2 → accepted.
+        assert!(req.satisfies(&mk(AdversaryModel::covert(3, 4).unwrap())));
+        // Strictly stronger adversary model (malicious) → accepted (rank dominates).
+        assert!(req.satisfies(&mk(AdversaryModel::Malicious)));
+        // Weaker adversary model (semi-honest) → refused (rank 0 < 1).
+        assert!(!req.satisfies(&mk(AdversaryModel::SemiHonest)));
+    }
+
+    /// A requirement to tolerate up to `t=3` corruptions must NOT be satisfied by
+    /// a backend that tolerates only `t=1`, even in the same (or a stronger)
+    /// regime — the coarse regime rank ignores the concrete `t`. `[OPUS-4.8]`
+    #[test]
+    fn satisfies_concrete_threshold_t_is_not_silently_downgraded() {
+        let req = SecurityRequirement {
+            min_adversary: AdversaryModel::SemiHonest,
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Selective),
+            max_corruption: CorruptionThreshold::HonestMajority { t: 3 },
+            require_cheater_attribution: false,
+            require_public_verifiability: false,
+        };
+        let mk = |threshold| {
+            BackendInfo::new(
+                "x",
+                SecurityDescriptor {
+                    threshold,
+                    ..honest_semi_abort()
+                },
+                0,
+            )
+        };
+        // Same regime but fewer tolerated corruptions (t=1 < 3) → REFUSED.
+        assert!(
+            !req.satisfies(&mk(CorruptionThreshold::HonestMajority { t: 1 })),
+            "honest-majority(t=1) must NOT satisfy an honest-majority(t=3) floor"
+        );
+        // Same regime, t=3 → accepted.
+        assert!(req.satisfies(&mk(CorruptionThreshold::HonestMajority { t: 3 })));
+        // Stronger regime AND enough t (dishonest-majority tolerates more corruption,
+        // t=3 >= 3) → accepted.
+        assert!(req.satisfies(&mk(CorruptionThreshold::DishonestMajority { t: 3 })));
+        // Stronger regime but too few corruptions (dishonest-majority{t=1}) → REFUSED:
+        // a higher regime rank does not excuse a lower concrete threshold.
+        assert!(
+            !req.satisfies(&mk(CorruptionThreshold::DishonestMajority { t: 1 })),
+            "a stronger regime with t=1 still fails a t=3 floor"
+        );
+    }
+
+    /// The fail-closed refusal message distinguishes requirements that differ
+    /// ONLY in the concrete `t` — otherwise the `NoBackendSatisfies` string would
+    /// be ambiguous to debug now that `t` is enforced (Copilot #92). `[OPUS-4.8]`
+    #[test]
+    fn describe_distinguishes_requirements_by_concrete_t() {
+        let r1 = SecurityRequirement {
+            max_corruption: CorruptionThreshold::HonestMajority { t: 1 },
+            ..SecurityRequirement::v1_honest_majority_semi_honest()
+        };
+        let r3 = SecurityRequirement {
+            max_corruption: CorruptionThreshold::HonestMajority { t: 3 },
+            ..SecurityRequirement::v1_honest_majority_semi_honest()
+        };
+        assert_ne!(
+            r1.describe(),
+            r3.describe(),
+            "requirements differing only in t must render differently"
+        );
+        assert!(r3.describe().contains("honest-majority(t=3)"));
     }
 }
