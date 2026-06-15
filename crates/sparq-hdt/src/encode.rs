@@ -148,60 +148,82 @@ struct Roles {
 /// Builds the [`FourSectDict`] for `graph` (the dictionary partition + PFC sections)
 /// and returns it alongside the per-triple HDT id list (already SPO, unsorted).
 ///
-/// The HDT string of every term is computed ONCE and cached, so each distinct term
-/// is rendered a single time even when it appears in many triples / both positions.
+/// [OPUS-4.8] sq-ashy (memory restructure): the encoder needs only (a) the four PFC
+/// dictionary sections — the DISTINCT rendered terms per role — and (b) the SPO
+/// triple-id stream for BitmapTriples. Neither needs all three rendered strings of
+/// every triple held at once, so this no longer materialises an
+/// `O(#triples) Vec<(String,String,String)>`. Instead:
+///   * every DISTINCT sparq id is rendered into the cache ONCE (one owned `String`
+///     per distinct term, not per occurrence), and
+///   * the triples are carried as their cheap sparq id triples (the `scan` rows we
+///     already hold), translated to HDT ids in a second pass via the cache — so peak
+///     extra heap is the distinct-term dictionary, back at the streaming baseline.
+///
+/// The cache is a SINGLE `Id -> String` map shared across all three positions, so a
+/// term appearing as both subject and object (the HDT `shared` section) is rendered
+/// exactly once — the doc claim above now holds for real (was previously three
+/// independent per-position caches, which re-rendered shared terms).
 fn build_dict_and_triples(graph: &Graph) -> Result<(FourSectDict, Vec<TripleId>), Error> {
-    // Scan the default graph once; record each term's HDT string and the positions it
-    // appears in. Predicates are tracked separately (their own id space).
+    // Scan the default graph once. `scan.rows` already holds the triples as cheap
+    // `[Id; 3]` sparq ids (borrowed or a single owned overlay-merged Vec); we keep
+    // those and never clone a per-triple string tuple out of them.
     let scan = graph.store.scan(&[None, None, None]);
 
-    // sparq Id -> (cached HDT string, roles). A BTreeMap keeps the per-id render
-    // memoised; the *section* sets below dedupe by string (HDT dedupes by term).
-    let mut s_cache: BTreeMap<Id, String> = BTreeMap::new();
-    let mut p_cache: BTreeMap<Id, String> = BTreeMap::new();
-    let mut o_cache: BTreeMap<Id, String> = BTreeMap::new();
-    let mut roles: BTreeMap<String, Roles> = BTreeMap::new();
-    let mut predicate_terms: BTreeSet<String> = BTreeSet::new();
+    // ONE sparq Id -> rendered HDT string cache, shared across S/P/O positions: each
+    // DISTINCT term is rendered a single time even when it appears in many triples or
+    // in both subject and object position.
+    let mut render_cache: BTreeMap<Id, String> = BTreeMap::new();
+    // Roles per distinct sparq id (subject and/or object). Predicates have their own
+    // HDT id space, so they are tracked by a separate distinct-id set.
+    let mut roles: BTreeMap<Id, Roles> = BTreeMap::new();
+    let mut predicate_ids: BTreeSet<Id> = BTreeSet::new();
 
-    // Resolve (and cache) the HDT string for a term id in a given position.
-    let render = |dict: &Dict, cache: &mut BTreeMap<Id, String>, id: Id| -> Result<String, Error> {
-        if let Some(s) = cache.get(&id) {
-            return Ok(s.clone());
+    // Resolve (and memoise) the HDT string for a term id, rendering it at most once.
+    let render = |dict: &Dict, cache: &mut BTreeMap<Id, String>, id: Id| -> Result<(), Error> {
+        if let std::collections::btree_map::Entry::Vacant(e) = cache.entry(id) {
+            e.insert(hdt_term_string(dict, id)?);
         }
-        let s = hdt_term_string(dict, id)?;
-        cache.insert(id, s.clone());
-        Ok(s)
+        Ok(())
     };
 
-    // First pass: collect the term strings + roles. We hold the rendered (s,p,o)
-    // strings per row so the second pass needs no re-render.
-    let mut rows: Vec<(String, String, String)> = Vec::with_capacity(scan.rows.len());
+    // First pass: discover the distinct terms + their roles. Render each distinct id
+    // exactly once (the cache guards re-render); record subject/object roles by id and
+    // collect the distinct predicate ids. No per-triple string tuples are kept.
     for row in scan.rows.iter() {
         let [s, p, o] = scan.to_spo(row);
-        let ss = render(&graph.dict, &mut s_cache, s)?;
-        let ps = render(&graph.dict, &mut p_cache, p)?;
-        let os = render(&graph.dict, &mut o_cache, o)?;
-        roles.entry(ss.clone()).or_default().subject = true;
-        roles.entry(os.clone()).or_default().object = true;
-        predicate_terms.insert(ps.clone());
-        rows.push((ss, ps, os));
+        render(&graph.dict, &mut render_cache, s)?;
+        render(&graph.dict, &mut render_cache, p)?;
+        render(&graph.dict, &mut render_cache, o)?;
+        roles.entry(s).or_default().subject = true;
+        roles.entry(o).or_default().object = true;
+        predicate_ids.insert(p);
     }
 
-    // Partition by role: shared (S∧O), subject-only (S∖O), object-only (O∖S).
+    // Partition by role: shared (S∧O), subject-only (S∖O), object-only (O∖S). HDT
+    // dedupes the dictionary by TERM STRING, so a `BTreeSet<&str>` keyed on the cached
+    // render collapses any two distinct sparq ids that render to the same HDT string
+    // into one section entry (the inverse-of-intern is injective in practice, but this
+    // keeps the partition string-keyed exactly as before — and the sets borrow the
+    // cache's `String`s, so no extra owned copies are made).
     let mut shared: BTreeSet<&str> = BTreeSet::new();
     let mut subjects_only: BTreeSet<&str> = BTreeSet::new();
     let mut objects_only: BTreeSet<&str> = BTreeSet::new();
-    for (term, r) in &roles {
+    for (id, r) in &roles {
+        // Every id in `roles` was rendered in the first pass, so the cache hit holds.
+        let term = render_cache[id].as_str();
         match (r.subject, r.object) {
-            (true, true) => shared.insert(term.as_str()),
-            (true, false) => subjects_only.insert(term.as_str()),
-            (false, true) => objects_only.insert(term.as_str()),
+            (true, true) => shared.insert(term),
+            (true, false) => subjects_only.insert(term),
+            (false, true) => objects_only.insert(term),
             // A term recorded with neither role cannot occur (every entry is set by a
             // subject or object insert above); skip defensively.
             (false, false) => false,
         };
     }
-    let predicates: BTreeSet<&str> = predicate_terms.iter().map(String::as_str).collect();
+    let predicates: BTreeSet<&str> = predicate_ids
+        .iter()
+        .map(|id| render_cache[id].as_str())
+        .collect();
 
     let dict = FourSectDict {
         shared: DictSectPFC::compress(&shared, BLOCK_SIZE),
@@ -210,17 +232,22 @@ fn build_dict_and_triples(graph: &Graph) -> Result<(FourSectDict, Vec<TripleId>)
         objects: DictSectPFC::compress(&objects_only, BLOCK_SIZE),
     };
 
-    // Map each rendered row to its HDT triple ids via the freshly-built dictionary —
-    // the same `string_to_id` numbering `decode.rs::map_so` inverts on read.
-    let mut encoded: Vec<TripleId> = Vec::with_capacity(rows.len());
-    for (s, p, o) in &rows {
-        let sid = dict.string_to_id(s, IdKind::Subject);
-        let pid = dict.string_to_id(p, IdKind::Predicate);
-        let oid = dict.string_to_id(o, IdKind::Object);
+    // Second pass: stream the triple ids. Each sparq id resolves to its HDT id via the
+    // cached render string + the freshly-built dictionary — the same `string_to_id`
+    // numbering `decode.rs::map_so` inverts on read. We feed `string_to_id` the cached
+    // `&str` (no clone); the result order does not affect output bytes (the ids are
+    // sorted + deduped before `from_triples`), so the scan order is fine.
+    let mut encoded: Vec<TripleId> = Vec::with_capacity(scan.rows.len());
+    for row in scan.rows.iter() {
+        let [s, p, o] = scan.to_spo(row);
+        let (sr, pr, or) = (&render_cache[&s], &render_cache[&p], &render_cache[&o]);
+        let sid = dict.string_to_id(sr, IdKind::Subject);
+        let pid = dict.string_to_id(pr, IdKind::Predicate);
+        let oid = dict.string_to_id(or, IdKind::Object);
         if sid == 0 || pid == 0 || oid == 0 {
             // Should be unreachable: every term was just compressed into the dict.
             return Err(Error::Term(format!(
-                "term not found in freshly-built HDT dictionary ({s}, {p}, {o})",
+                "term not found in freshly-built HDT dictionary ({sr}, {pr}, {or})",
             )));
         }
         encoded.push([sid, pid, oid]);
