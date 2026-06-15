@@ -22,6 +22,8 @@ pub mod build;
 // [OPUS-4.8] sq-314: derivation steps + entailment-regime enforcement.
 pub mod derivation;
 pub mod driver;
+// [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK host-side wiring (B2).
+pub mod holder;
 pub mod issuer;
 pub mod manifest;
 pub mod revocation;
@@ -43,6 +45,9 @@ pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitn
 pub use issuer::{
     hidden_issuer_prover_toml, key_membership_witness, key_set_root, HiddenIssuerWitness,
 };
+// [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK host helpers (the
+// B2 hidden-key tier — `hpk = hsk·G` + holder-key-digest binding).
+pub use holder::{holder_pok_prover_toml, holder_pok_witness, HolderPokWitness};
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
 // [OPUS-4.8] sq-aih: FileSeenNonces is the DURABLE (restart-surviving) store;
 // InMemorySeenNonces is NON-DURABLE / test-only.

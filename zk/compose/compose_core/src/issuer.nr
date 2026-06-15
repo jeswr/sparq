@@ -62,9 +62,11 @@ use poseidon::poseidon2::Poseidon2;
 global BJJ_D: Field =
     9706598848417545097372247223557719406784115219466060233080913168975159366771;
 // Generator G = (GENERATOR_X, GENERATOR_Y) (ark-ed-on-bn254 curves/mod.rs).
-global BJJ_GX: Field =
+// `pub` so the holder-PoK member (`holder.nr`) reuses the SAME generator verbatim
+// (design S3.4: holder_pok reuses issuer.nr's gadgets, no reimplementation).
+pub global BJJ_GX: Field =
     19698561148652590122159747500897617769866003486955115824547446575314762165298;
-global BJJ_GY: Field =
+pub global BJJ_GY: Field =
     19298250018296453272277890825869354524455968081175474282777126169995084727839;
 // Scalar-field order L (ark-ed-on-bn254 fields/fr.rs modulus). ~2^251.
 global BJJ_L: Field =
@@ -111,7 +113,8 @@ fn point_add(p: Point, q: Point) -> Point {
 /// constrains every bit beyond the width to zero). Starts from the neutral
 /// `(0, 1)` and, processing bits MSB-first, doubles then conditionally adds the
 /// base -- the standard left-to-right double-and-add.
-fn scalar_mul(scalar: Field, base: Point) -> Point {
+// `pub` so the holder-PoK member reuses this scalar-mul verbatim (design S3.4).
+pub fn scalar_mul(scalar: Field, base: Point) -> Point {
     // to_le_bits constrains the decomposition to be canonical AND bounds the
     // scalar to < 2^SCALAR_BITS (bits beyond the width are forced to zero).
     let bits: [bool; SCALAR_BITS] = scalar.to_le_bits();
@@ -135,7 +138,8 @@ fn scalar_mul(scalar: Field, base: Point) -> Point {
 /// caller passes PRIVATE `R` and `pk` through here so an off-curve witness (a
 /// small-subgroup / twist point a forger might use to satisfy the equation
 /// off-curve) is rejected -- mirroring `sig::verify`'s `is_on_curve` guard.
-fn assert_on_curve(p: Point) {
+// `pub` so the holder-PoK member reuses this on-curve guard verbatim (design S3.4).
+pub fn assert_on_curve(p: Point) {
     let xx = p.x * p.x;
     let yy = p.y * p.y;
     assert(xx + yy == 1 + BJJ_D * xx * yy, "point is not on Baby-JubJub");
@@ -165,7 +169,8 @@ fn challenge_scalar(r: Point, pk: Point, m: Field, e: Field, e_k: Field) -> Fiel
 /// decompose to `SCALAR_BITS` bits, so both are in `[0, 2^SCALAR_BITS)` and their
 /// sum is `L - 1`, forcing `value <= L - 1 < L`. (`L < 2^SCALAR_BITS` so the
 /// complement cannot wrap.)
-fn assert_lt_l(value: Field) {
+// `pub` so the holder-PoK member reuses this `< L` range bind verbatim (design S3.4).
+pub fn assert_lt_l(value: Field) {
     // value in [0, 2^SCALAR_BITS)
     value.assert_max_bit_size::<SCALAR_BITS>();
     // (L - 1 - value) in [0, 2^SCALAR_BITS) <=> value <= L - 1.
