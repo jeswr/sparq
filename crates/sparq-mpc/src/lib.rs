@@ -113,6 +113,12 @@ pub mod holder;
 pub mod join;
 pub mod metrics;
 pub mod partial;
+// [OPUS-4.8] sq-6y92: the end-to-end federated MPC pipeline DRIVER — the glue
+// that composes holder → share → join → secure-threshold → reconstruct →
+// ProofStatement into one worked four-flatmates federated response (architecture
+// §4.3 steps 1–6), with the per-operator disclosed-vs-hidden routing (RQ2a) made
+// explicit. Composes EXISTING primitives only; proof.prove stays the honest stub.
+pub mod pipeline;
 pub mod proof;
 // [OPUS-4.8] sq-1vt: the CSPRNG masking seam (production SecureRng + test-only
 // InsecureTestRng). The real protocol's secret-sharing randomness lives here.
@@ -183,6 +189,11 @@ pub use oblivious::{
     SortByResult, SortCost, SortWithKeysResult, SortingNetwork, Switch, WaksmanNetwork,
 };
 pub use partial::{HolderId, MpcError, PartialResult};
+// [OPUS-4.8] sq-6y92: the federated-pipeline driver surface (architecture §4.3).
+pub use pipeline::{
+    federation_holder_id, run_federated, FederatedQuery, FederatedResponse, Flatmate,
+    OperatorRouting, Routing,
+};
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
 // [OPUS-4.8] sq-jnkm: the oblivious set-returning output path surface.
 pub use oblivious_join::{
