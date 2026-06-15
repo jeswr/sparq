@@ -100,6 +100,45 @@ table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem
 }
 .chart-card canvas { height: 140px !important; width: 100% !important; }
 
+/* [OPUS-4.8] sq-rltn: capability FAMILIES — the summary-first view. A nav chip row makes every
+   query type visible at a glance; each family is a prominent section with a summary table and a
+   lazily-loaded <details> trends grid. An empty family shows a muted "not yet reported" note. */
+.family-nav {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px;
+}
+.family-chip {
+  display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--head);
+  font-size: 0.82rem; font-weight: 600; color: var(--fg); text-decoration: none;
+}
+.family-chip:hover { border-color: var(--accent); text-decoration: none; }
+.family-chip .family-chip-count {
+  display: inline-block; min-width: 20px; text-align: center; padding: 0 6px;
+  border-radius: 999px; background: var(--accent); color: #fff; font-size: 0.72rem; font-weight: 700;
+}
+.family-chip-empty { opacity: 0.55; }
+.family-chip-empty .family-chip-count { background: var(--na); color: var(--muted); }
+
+.family-section { margin: 0 0 26px; scroll-margin-top: 16px; }
+.family-section:last-child { margin-bottom: 0; }
+.family-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 10px;
+  padding-bottom: 6px; border-bottom: 2px solid var(--line); }
+.family-title {
+  margin: 0; font-size: 0.95rem; font-weight: 700; letter-spacing: 0.01em; color: var(--fg);
+}
+/* the capability surfaces get an accent stripe so they don't feel buried under the SPARQL volume. */
+.family-section.family-capability .family-head { border-bottom-color: var(--accent); }
+.family-meta { font-size: 0.78rem; color: var(--muted); }
+.family-empty { margin: 6px 0 0; }
+
+.family-trends { margin-top: 12px; }
+.family-trends > summary {
+  cursor: pointer; font-size: 0.8rem; font-weight: 650; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 0; list-style: revert;
+}
+.family-trends > summary:hover { text-decoration: underline; }
+.family-trends[open] > summary { margin-bottom: 10px; }
+
 /* [OPUS-4.8] sq-xvow: featured well-known suites at the top. One table per suite, with sparq's
    latest value + optional competitor columns (the sq-t0c3 seam). Reuses .summary-table styling. */
 #featured-card .featured-suite { margin-bottom: 22px; }

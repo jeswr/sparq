@@ -272,6 +272,17 @@ jobs:
           # /(root) the dashboard renders at https://jeswr.github.io/sparq/dev/bench (see header).
           gh-pages-branch: benchmark-data
           benchmark-data-dir-path: dev/bench
+          # [OPUS-4.8] sq-3g6q: CAP the retained history. github-action-benchmark accumulates EVERY
+          # commit's point with NO bound by default, so dev/bench/data.js grew unbounded (was 4.4 MB /
+          # ~160k lines → slow dashboard load). max-items-in-chart slices entries["sparq engine"] to the
+          # most-recent N COMMITS (one entry per commit; each entry carries ALL metrics, so N commits =
+          # N points per metric for the trend charts). N is deliberately modest because each entry is
+          # heavy: the suite now reports ~270 metrics/commit (~28 KB serialized), so the COMMIT COUNT —
+          # not a notional total-point count — is what drives file size. N=20 keeps a 20-commit trend
+          # window for every metric while holding data.js well under 1 MB (~0.74 MB). The dashboard
+          # (bench/dashboard/dashboard.js) renders the latest values + trend sparklines from exactly
+          # this bounded window. Matches the one-time prune of the existing benchmark-data history.
+          max-items-in-chart: 20
           # Comment + job-summary on EVERY run (incl. PRs) so the comparison table is always visible
           # pre-merge, not only when an alert fires. [OPUS-4.8]
           comment-always: true
@@ -316,7 +327,10 @@ jobs:
           # [OPUS-4.8] vendor/Chart.min.js (sq-0rv3) is loaded by index.html now that the
           # CDN dep is dropped — seed it (in its subdir) so the published Pages dashboard
           # doesn't 404. The path has a dirname, so mkdir -p before copying.
-          for f in index.html dashboard.js dashboard.css metric-labels.json vendor/Chart.min.js; do
+          # [OPUS-4.8] competitors.json (sq-kehk) is FETCHED by dashboard.js boot() (sq-rltn / #200)
+          # as the single competitor-data sink — copy it alongside metric-labels.json so the live
+          # fetch resolves instead of 404ing into the empty embedded COMPETITORS_DATA mirror.
+          for f in index.html dashboard.js dashboard.css metric-labels.json competitors.json vendor/Chart.min.js; do
             if [ ! -f "$tmp/dev/bench/$f" ] || ! cmp -s "$src/$f" "$tmp/dev/bench/$f"; then
               mkdir -p "$(dirname "$tmp/dev/bench/$f")"
               cp "$src/$f" "$tmp/dev/bench/$f"
@@ -339,7 +353,7 @@ jobs:
           git -C "$tmp" -c user.name='github-actions[bot]' \
                         -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
                         add index.html dev/bench/index.html dev/bench/dashboard.js dev/bench/dashboard.css \
-                            dev/bench/metric-labels.json dev/bench/vendor/Chart.min.js
+                            dev/bench/metric-labels.json dev/bench/competitors.json dev/bench/vendor/Chart.min.js
           git -C "$tmp" -c user.name='github-actions[bot]' \
                         -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
                         commit -q -m "chore(bench): seed/update Pages dashboard (dev/bench + root redirect) [skip ci]"
