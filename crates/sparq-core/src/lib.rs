@@ -1976,6 +1976,32 @@ impl Graph {
         Graph::open(&sub_dir).map_err(|e| e.to_string())
     }
 
+    /// [OPUS-4.8] (sq-7cxr, gh-44) Returns the index of the named sub-graph called `name`,
+    /// CREATING it if absent. The created sub-graph is DURABLE (its own `dir/named/<i>/` +
+    /// per-graph WAL + manifest entry) whenever this parent graph is itself directory-backed
+    /// (opened via [`open`](Self::open)); for an in-memory parent it is a plain in-memory
+    /// sub-graph (`wal: None`), byte-identical to the previous `named.push((name, empty()))`
+    /// behaviour. This is the durability seam the SPARQL-Update path needs: a `GRAPH <g> { … }`
+    /// INSERT that first touches a brand-new named graph on a persisted server must give that
+    /// graph its own WAL so its triples survive a restart, exactly as a default-graph or
+    /// already-existing-named-graph mutation does. An in-memory parent is unaffected.
+    ///
+    /// Without the `mmap` feature there is no directory/WAL machinery at all, so this always
+    /// creates an in-memory sub-graph (the parent can never be directory-backed).
+    pub fn ensure_named(&mut self, name: &Term) -> Result<usize, String> {
+        if let Some(i) = self.named.iter().position(|(n, _)| n == name) {
+            return Ok(i);
+        }
+        #[cfg(feature = "mmap")]
+        if let Some(dir) = self.wal.as_ref().map(|w| w.dir.clone()) {
+            let g = self.create_durable_named(&dir, name)?;
+            self.named.push((name.clone(), g));
+            return Ok(self.named.len() - 1);
+        }
+        self.named.push((name.clone(), Graph::from_parts(Dict::new(), Vec::new())));
+        Ok(self.named.len() - 1)
+    }
+
     /// The in-memory half of [`apply_delta`](Self::apply_delta) (no WAL append) — also
     /// the target the WAL replays into on [`open`](Self::open).
     fn apply_delta_mem(&mut self, inserts: &[[Term; 3]], deletes: &[[Term; 3]]) {

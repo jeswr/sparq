@@ -535,10 +535,13 @@ fn apply_slot_delta(
             if inserts.is_empty() {
                 return Ok(()); // deleting from an absent graph is a no-op
             }
-            let mut g = empty_graph();
-            g.apply_delta(inserts, &[])?;
-            graph.named.push((name.clone(), g));
-            Ok(())
+            // [OPUS-4.8] (sq-7cxr, gh-44) Route NEW named-graph creation through
+            // `Graph::ensure_named` so that on a DIRECTORY-BACKED parent the sub-graph is
+            // born durable (its own WAL + manifest entry) — its first triples then persist
+            // across a restart like any other write. For an in-memory parent this is the
+            // unchanged `empty_graph()` path.
+            let i = graph.ensure_named(name)?;
+            graph.named[i].1.apply_delta(inserts, &[])
         }
     }
 }
@@ -620,10 +623,11 @@ pub fn update_in_place_with_budget(
                 }
             },
             GraphUpdateOperation::Create { graph: name, .. } => {
+                // [OPUS-4.8] (sq-7cxr, gh-44) `ensure_named` makes the new graph DURABLE on a
+                // directory-backed parent (empty graphs are persisted via the manifest, so an
+                // empty CREATE survives a restart) and is a no-op when it already exists.
                 let name = Term::NamedNode(name.clone());
-                if !graph.named.iter().any(|(g, _)| *g == name) {
-                    graph.named.push((name, empty_graph()));
-                }
+                graph.ensure_named(&name)?;
             }
             GraphUpdateOperation::Load { silent, source, destination } => {
                 match load_document(source.as_str()) {
