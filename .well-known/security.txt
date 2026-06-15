@@ -3,7 +3,7 @@
 #
 # NOTE — Expires is a FIXED date and must be refreshed annually (RFC 9116 §2.5.5
 # requires it to be in the future). When you bump it, also re-confirm the Contact and
-# Policy URLs still resolve. The canonical served path is /.well-known/security.txt.
+# Policy URLs still resolve. The intended served path is /.well-known/security.txt.
 # sparq-server is a SPARQL-protocol API and does not serve static files, so this file
 # is published from the repository root (and from any future project site at its root).
 
@@ -12,4 +12,4 @@ Contact: mailto:jesse@jeswr.org
 Expires: 2027-06-15T00:00:00.000Z
 Preferred-Languages: en
 Policy: https://github.com/jeswr/sparq/blob/main/SECURITY.md
-Canonical: https://github.com/jeswr/sparq/blob/main/.well-known/security.txt
+Canonical: https://raw.githubusercontent.com/jeswr/sparq/main/.well-known/security.txt

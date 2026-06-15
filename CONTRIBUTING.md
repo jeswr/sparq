@@ -66,8 +66,9 @@ gate lives in [`AGENTS.md`](./AGENTS.md) and the workflows under
 - **Justify every `unsafe` site.** A new `unsafe` block needs an inline `// SAFETY:` comment
   stating the invariant you rely on and why it holds. Adding `unsafe` is visible in CI: the
   `unsafe report (cargo-geiger, informational)` step in [`ci.yml`](./.github/workflows/ci.yml)
-  surfaces the count in the run summary, and the per-site justification register (gap GX-5)
-  is the single place those invariants are recorded — add your site to it.
+  surfaces the count in the run summary. (A consolidated per-site justification register is a
+  tracked gap, GX-5, not yet a file in the repo — until it lands, the inline `// SAFETY:`
+  comment at the site is the register of record.)
 - **Run it under the UB lanes.** Pure-Rust `unsafe` in `sparq-core` is exercised by the
   `miri` lane ([`miri.yml`](./.github/workflows/miri.yml)) and the parser/loader fuzzers
   ([`fuzz.yml`](./.github/workflows/fuzz.yml)). The mmap sites that Miri cannot reach are
@@ -101,7 +102,10 @@ gate lives in [`AGENTS.md`](./AGENTS.md) and the workflows under
 
 A contribution lands only when the gate in **"The gate"** above is green: `cargo build` /
 `cargo test`, `cargo clippy --workspace --all-targets -- -D warnings` (a hard gate),
-`cargo fmt --check`, and the W3C conformance + performance/coverage ratchets (never lowered).
+and the W3C conformance + performance/coverage ratchets (never lowered). `cargo fmt --all
+--check` also runs in CI but is currently **informational** (`continue-on-error: true`),
+to be flipped to a hard gate once the one-time `cargo fmt --all` reformat lands; format your
+code anyway.
 Security-specific lanes also run: **CodeQL** SAST
 ([`codeql.yml`](./.github/workflows/codeql.yml), `security-and-quality` queries), **miri**,
 **fuzz**, **supply-chain**, and the **OpenSSF Scorecard** analysis
