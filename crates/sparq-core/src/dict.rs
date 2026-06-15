@@ -1194,15 +1194,14 @@ impl Dict {
     }
 
     /// Interns a borrowed term (already-split components) without building a `Term` or
-    /// concatenating the IRI — the fast path used by the sharded parallel merge.
+    /// concatenating the IRI — the fast path used by the sharded parallel merge for LEAF
+    /// terms.
     ///
-    /// Triple terms are NOT supported here: `TermParts::Triple` carries ids of the
-    /// SOURCE dict, which are meaningless in another dict. [OPUS-4.8] (sq-hxgb) The
-    /// byte-level N-Triples parser now ACCEPTS `<<( … )>>` triple-term objects, so a
-    /// partial dict CAN contain one — but the loader detects that (`has_triple_terms`)
-    /// and routes such documents to the SERIAL `merge_remap` (which interns triple terms
-    /// structurally), so the sharded parts-based path is never reached for them. This
-    /// remains a loud guard, not a path.
+    /// Triple terms are NOT handled here: `TermParts::Triple` carries ids of the SOURCE
+    /// dict, meaningless in another dict. [OPUS-4.8] (sq-t3rt) The sharded merge no longer
+    /// reaches this with a triple term — `ShardedDict::intern_partials` SKIPS triple terms
+    /// in the (hash-routed) leaf pass and interns them structurally into a dedicated triple
+    /// shard via `intern_triple_ids` instead. This stays a loud guard, not a path.
     #[inline]
     fn intern_parts(&mut self, tp: &TermParts) -> Id {
         match tp {
@@ -1210,7 +1209,7 @@ impl Dict {
             TermParts::Lit { value, datatype, lang } => self.intern_lit(value, datatype, *lang),
             TermParts::Blank(b) => self.intern_blank(b),
             TermParts::Triple(_) => {
-                panic!("RDF-star triple terms are not supported by the sharded (parts-based) bulk interner; use the serial loader")
+                panic!("RDF-star triple terms must be interned structurally (intern_triple_ids), not via the parts-based leaf path")
             }
         }
     }
@@ -2016,19 +2015,43 @@ fn stored_owned_bytes(s: &Stored) -> usize {
 // integer ids (≥ INLINE_BASE) are global and never enter a shard.
 
 /// A hash-sharded interner — see the module comment above.
+///
+/// [OPUS-4.8] (sq-t3rt) RDF 1.2 triple terms `<<( s p o )>>` cannot be hash-routed like leaf
+/// terms: a triple term's content IS its components' ids, and those final ids are only known
+/// after every leaf consolidates (a component may live in any shard). So `shards` holds
+/// `n_leaf` LEAF shards (`shards[0..n_leaf]`, routed by `hash % n_leaf`, unchanged) PLUS one
+/// extra TRIPLE-TERM shard (`shards[n_leaf]`) interned in a serial second pass: its entries
+/// are `Stored::Triple([temp_s, temp_p, temp_o])` content-addressed by their components' TEMP
+/// ids, resolved to final ids in `into_merged`. The triple shard sorts LAST (highest `base`),
+/// so every triple term's final id exceeds every leaf's — a triple term can only reference
+/// already-finalised leaf / earlier-triple ids, exactly the children-first ordering serial
+/// `merge_remap` relies on. `stride` is sized for `n_leaf + 1` shards so the triple shard's
+/// temp ids stay below `INLINE_BASE`; FINAL ids are `base[shard] + local`, which is
+/// stride-INDEPENDENT, so leaf-only output stays byte-identical to before.
 pub struct ShardedDict {
+    /// `n_leaf` leaf shards followed by one triple-term shard (`shards[n_leaf]`).
     shards: Vec<Dict>,
+    /// Number of LEAF shards (`shards.len() - 1`); leaves route to `hash % n_leaf`.
+    n_leaf: usize,
     stride: u32,
 }
 
 impl ShardedDict {
     pub fn new(n: usize) -> ShardedDict {
-        let n = n.max(1);
-        ShardedDict { shards: (0..n).map(|_| Dict::new()).collect(), stride: INLINE_BASE / n as u32 }
+        let n_leaf = n.max(1);
+        // `n_leaf` leaf shards + 1 triple-term shard. `stride = INLINE_BASE / (n_leaf + 1)`
+        // reserves the top stride-band for the triple shard so its temp ids stay below
+        // INLINE_BASE; leaf shards' FINAL ids are unaffected (final = base + local).
+        ShardedDict {
+            shards: (0..n_leaf + 1).map(|_| Dict::new()).collect(),
+            n_leaf,
+            stride: INLINE_BASE / (n_leaf as u32 + 1),
+        }
     }
 
+    /// The number of LEAF shards (the historical shard count; the triple shard is internal).
     pub fn n(&self) -> usize {
-        self.shards.len()
+        self.n_leaf
     }
 
     /// Route + intern a batch of `(tag, idx, term)` items (the terms must be NON-inline —
@@ -2040,7 +2063,9 @@ impl ShardedDict {
     /// the triple, breaking the term↔id bijection on merge); the N-Triples bulk loaders
     /// that feed it reject RDF-star syntax before it could reach here.
     pub fn intern_terms(&mut self, items: Vec<(u32, Id, Term)>) -> Vec<(u32, Id, Id)> {
-        let n = self.shards.len();
+        // Leaves route across the `n_leaf` LEAF shards only; the trailing triple shard is
+        // reserved for `intern_partials`'s structural second pass (see the type doc).
+        let n = self.n_leaf;
         let stride = self.stride;
         let mut buckets: Vec<Vec<(u32, Id, Term)>> = (0..n).map(|_| Vec::new()).collect();
         for (tag, idx, t) in items {
@@ -2101,18 +2126,28 @@ impl ShardedDict {
     /// to the old serial-routed version), and each shard scatters its temp ids straight
     /// into the shared remap table (disjoint writes: a term instance `(partial, local-id)`
     /// is hash-routed to exactly one shard).
+    ///
+    /// [OPUS-4.8] (sq-t3rt) RDF 1.2 triple terms (`Stored::Triple`) are handled in a SERIAL
+    /// second pass into the dedicated triple shard (`shards[n_leaf]`): they cannot be
+    /// hash-routed (their content is their components' ids, only resolvable once the leaves
+    /// are interned), so each is content-addressed by its components' already-known TEMP ids
+    /// (children precede the triple in a partial's arena — `intern` pushes them first — so
+    /// the per-partial remap entry of each component, leaf or nested triple, is already
+    /// filled when the triple is reached). Triple terms are reification metadata (rare), so
+    /// the serial pass is not on the hot path.
     pub fn intern_partials(&mut self, partials: &[(Dict, Vec<[Id; 3]>)]) -> Vec<Vec<Id>> {
-        let n = self.shards.len();
+        let n = self.n_leaf;
         let stride = self.stride;
-        // Route each partial's terms to per-shard sub-buckets (parallel over partials).
+        // Route each partial's LEAF terms to per-leaf-shard sub-buckets (parallel over
+        // partials). Triple terms (`TermParts::Triple`) are skipped here — they take the
+        // serial second pass below.
         fn route<'a>(pd: &'a Dict, n: usize) -> Vec<Vec<(Id, TermParts<'a>)>> {
             let mut b: Vec<Vec<(Id, TermParts<'a>)>> = (0..n).map(|_| Vec::with_capacity(pd.len() / n + 1)).collect();
             for i in 1..=pd.len() as Id {
                 let tp = pd.term_parts(i);
-                debug_assert!(
-                    !matches!(tp, TermParts::Triple(_)),
-                    "RDF-star triple terms are not supported by the sharded bulk interner"
-                );
+                if matches!(tp, TermParts::Triple(_)) {
+                    continue; // a triple term — interned structurally in the serial pass
+                }
                 let s = (hash_termparts(&tp) % n as u64) as usize;
                 b[s].push((i, tp));
             }
@@ -2130,16 +2165,18 @@ impl ShardedDict {
         let mut remaps: Vec<Vec<Id>> = partials.iter().map(|(pd, _)| vec![0 as Id; pd.len() + 1]).collect();
         // Raw view of `remaps` so each shard can write its own (partial, local-id) slots
         // from a parallel context. SAFETY (disjointness): the hash routing above assigns
-        // every (pidx, i) slot to exactly ONE shard, so no two shards write the same slot,
-        // and nobody reads until the parallel scope ends.
+        // every (pidx, i) leaf slot to exactly ONE leaf shard, so no two shards write the
+        // same slot, and nobody reads until the parallel scope ends. (Triple-term slots are
+        // written afterwards by the serial pass, never concurrently.)
         #[derive(Clone, Copy)]
         struct SlotPtr(*mut Id, usize);
         unsafe impl Send for SlotPtr {}
         unsafe impl Sync for SlotPtr {}
         let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| SlotPtr(v.as_mut_ptr(), v.len())).collect();
 
-        // Intern each shard's terms in parallel (single-writer per shard → no contention),
-        // walking partials in order so per-shard id assignment matches the serial routing.
+        // Intern each LEAF shard's terms in parallel (single-writer per shard → no
+        // contention), walking partials in order so per-shard id assignment matches the
+        // serial routing.
         let intern_shard = |s: usize, shard: &mut Dict| {
             for (pidx, per_partial) in routed.iter().enumerate() {
                 let SlotPtr(ptr, len) = scatter[pidx];
@@ -2151,19 +2188,54 @@ impl ShardedDict {
                     assert!(lid < stride, "shard {s} exceeded STRIDE ({stride}) — raise shard count / widen Id");
                     debug_assert!((*i as usize) < len);
                     // SAFETY: i < len (local ids are 1..=pd.len() < pd.len()+1) and this
-                    // (pidx, i) slot is written by exactly this shard — see RemapScatter.
+                    // (pidx, i) slot is written by exactly this shard — see SlotPtr.
                     unsafe { ptr.add(*i as usize).write((s as u32) * stride + lid) };
                 }
             }
         };
+        // Only the `n_leaf` leaf shards take the parallel pass; the triple shard (index
+        // `n_leaf`) is filled serially below.
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            self.shards.par_iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
+            self.shards[..n].par_iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
         }
         #[cfg(not(feature = "parallel"))]
-        self.shards.iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
+        self.shards[..n].iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
+
+        // [OPUS-4.8] (sq-t3rt) Serial second pass — triple terms into the triple shard.
+        self.intern_triple_terms(partials, &mut remaps);
         remaps
+    }
+
+    /// [OPUS-4.8] (sq-t3rt) Intern every partial's RDF 1.2 triple terms into the dedicated
+    /// triple shard (`shards[n_leaf]`), filling their slots in `remaps`. Runs AFTER the leaf
+    /// pass, so every component's temp id is already in `remaps` (children precede their
+    /// triple in a partial's arena). Each triple is content-addressed by its components'
+    /// TEMP ids, so identical triple terms across partials share one triple-shard id (the
+    /// term↔id bijection the hash-routed path could not preserve). Serial: triple-shard id
+    /// assignment must follow first-occurrence (partial, then arena) order deterministically,
+    /// and triple terms are rare metadata.
+    fn intern_triple_terms(&mut self, partials: &[(Dict, Vec<[Id; 3]>)], remaps: &mut [Vec<Id>]) {
+        let tshard_idx = self.n_leaf; // the triple shard
+        let stride = self.stride;
+        // Resolve a component LOCAL id to its TEMP id via this partial's remap. Inline
+        // integers (≥ INLINE_BASE) are global and pass through unchanged. A component is a
+        // leaf (filled by the parallel pass) or a NESTED triple term (filled earlier in this
+        // same ordered walk — children always precede their parent in arena order).
+        for (pidx, (pd, _)) in partials.iter().enumerate() {
+            for i in 1..=pd.len() as Id {
+                if let TermParts::Triple(local_ids) = pd.term_parts(i) {
+                    let rm = &remaps[pidx];
+                    let resolve = |id: Id| if is_inline(id) { id } else { rm[id as usize] };
+                    let temp_ids = [resolve(local_ids[0]), resolve(local_ids[1]), resolve(local_ids[2])];
+                    let lid = self.shards[tshard_idx].intern_triple_ids(temp_ids);
+                    // The triple shard, like every shard, must not overflow its STRIDE band.
+                    assert!(lid < stride, "triple shard exceeded STRIDE ({stride}) — raise shard count / widen Id");
+                    remaps[pidx][i as usize] = (tshard_idx as u32) * stride + lid;
+                }
+            }
+        }
     }
 
     /// `base[s]` = number of terms in shards `< s` (the final id of shard `s`'s local 1 is
@@ -2244,9 +2316,19 @@ impl ShardedDict {
                     Stored::Iri { prefix, suffix } => Stored::Iri { prefix: pr[prefix as usize], suffix },
                     Stored::Lit { value, datatype, lang } => Stored::Lit { value, datatype: dr[datatype as usize], lang },
                     Stored::Blank(b) => Stored::Blank(b),
-                    // Guarded out at `intern_terms` / `intern_parts` — a shard can never
-                    // hold a triple term (see the `intern_terms` doc comment).
-                    Stored::Triple(_) => unreachable!("triple terms cannot enter the sharded interner"),
+                    // [OPUS-4.8] (sq-t3rt) A triple term lives only in the triple shard
+                    // (`shards[n_leaf]`); its component ids are TEMP ids (leaf or earlier
+                    // nested-triple temps) — resolve each to its FINAL dense id with the same
+                    // order-preserving `remap_sharded` the perm files use. Children sort
+                    // before parents (lower base / earlier triple-shard local), so every
+                    // component's final id is already well-defined.
+                    Stored::Triple(ids) => {
+                        Stored::Triple([
+                            remap_sharded(ids[0], &base, stride),
+                            remap_sharded(ids[1], &base, stride),
+                            remap_sharded(ids[2], &base, stride),
+                        ])
+                    }
                 }
             };
             #[cfg(feature = "parallel")]
