@@ -51,6 +51,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::{json, Value};
 
@@ -85,18 +86,22 @@ impl SubscriptionCounters {
 /// `subscribe` and released on `unsubscribe`/termination; `Drop` releases whatever is
 /// still held, so a socket that disconnects (or a handler that panics) can never leak
 /// global capacity.
-struct ConnSlots {
+///
+/// [OPUS-4.8] sq-bxog: `pub(crate)` so the SSE transport ([`crate::subscriptions::sse`])
+/// reuses the SAME global-cap accounting as the WebSocket path — one stream holds one slot,
+/// released on disconnect by `Drop` exactly like a WS connection's slots.
+pub(crate) struct ConnSlots {
     counters: Arc<SubscriptionCounters>,
     held: usize,
 }
 
 impl ConnSlots {
-    fn new(counters: Arc<SubscriptionCounters>) -> Self {
+    pub(crate) fn new(counters: Arc<SubscriptionCounters>) -> Self {
         Self { counters, held: 0 }
     }
 
     /// Tries to take one global slot (CAS loop so concurrent connections never overshoot).
-    fn try_acquire(&mut self, max_global: usize) -> bool {
+    pub(crate) fn try_acquire(&mut self, max_global: usize) -> bool {
         let ok = self
             .counters
             .active
@@ -108,7 +113,7 @@ impl ConnSlots {
         ok
     }
 
-    fn release_one(&mut self) {
+    pub(crate) fn release_one(&mut self) {
         debug_assert!(self.held > 0);
         self.held -= 1;
         self.counters.active.fetch_sub(1, Ordering::AcqRel);
@@ -136,7 +141,11 @@ pub async fn subscriptions_endpoint(State(state): State<AppState>, ws: WebSocket
 
 /// One active subscription: the query, its identity, and the last seen result keyed by
 /// canonical row encoding (the diff baseline).
-struct Subscription {
+///
+/// [OPUS-4.8] sq-bxog: `pub(crate)` (with [`Subscription::reevaluate_step`]) so the SSE
+/// transport drives the SAME re-evaluate + diff state machine as the WebSocket path — only
+/// the wire framing differs.
+pub(crate) struct Subscription {
     alias: Option<String>,
     query: String,
     /// Per-subscription notification sequence; 0 is the initial full result.
@@ -144,6 +153,49 @@ struct Subscription {
     vars: Vec<String>,
     /// canonical row key (serialised binding object) → binding object.
     rows: HashMap<String, Value>,
+}
+
+/// [OPUS-4.8] sq-bxog: the outcome of one [`Subscription::reevaluate_step`] — the
+/// transport-agnostic core that both `/subscriptions` (WS) and `/subscriptions/sse` reuse.
+pub(crate) enum ReevalStep {
+    /// The result is unchanged (or only coalesced no-ops): emit nothing.
+    Unchanged,
+    /// The result changed: emit this `notification` JSON (added/removed diff).
+    Notify(Value),
+    /// Re-evaluation failed (timeout / max-rows overflow): the caller must drop the
+    /// subscription and emit this terminating `error` JSON.
+    Terminate(Value),
+}
+
+impl Subscription {
+    /// Re-evaluates this subscription against the latest snapshot and advances its diff
+    /// baseline, returning the JSON to emit (or [`ReevalStep::Unchanged`]). This is the
+    /// single source of truth for the re-evaluate + diff semantics shared by both
+    /// transports — see the module docs. On a [`ReevalStep::Terminate`] the baseline is NOT
+    /// advanced (the caller drops the subscription).
+    pub(crate) async fn reevaluate_step(&mut self, id: u64, state: &AppState) -> ReevalStep {
+        match evaluate(state, self.query.clone()).await {
+            Ok((vars, new_rows)) => {
+                let added: Vec<&Value> =
+                    sorted_pairs(new_rows.iter().filter(|(k, _)| !self.rows.contains_key(*k)));
+                let removed: Vec<&Value> =
+                    sorted_pairs(self.rows.iter().filter(|(k, _)| !new_rows.contains_key(*k)));
+                if added.is_empty() && removed.is_empty() {
+                    return ReevalStep::Unchanged; // result unchanged — coalesced no-ops included
+                }
+                self.sequence += 1;
+                let msg = notification(id, self.alias.as_deref(), self.sequence, &vars, &added, &removed);
+                self.vars = vars;
+                self.rows = new_rows;
+                ReevalStep::Notify(msg)
+            }
+            Err(e) => ReevalStep::Terminate(error_msg(
+                &format!("re-evaluation failed, subscription terminated: {}", e.message),
+                Some(id),
+                self.alias.as_deref(),
+            )),
+        }
+    }
 }
 
 /// The per-connection driver: a single task owns the socket and its subscription table,
@@ -221,6 +273,99 @@ async fn handle_client_message(
     .is_ok()
 }
 
+/// [OPUS-4.8] sq-bxog: a successfully-registered subscription, ready to stream. The
+/// transport-agnostic product of [`subscribe_init`]: the live [`Subscription`] (its diff
+/// baseline holds the initial full result), its server-wide `id`, and the two opening
+/// frames a client expects — the `subscribed` ack and the sequence-0 notification (the full
+/// result as `addedResults`). A global slot is held on `slots` for it.
+pub(crate) struct NewSubscription {
+    pub(crate) id: u64,
+    pub(crate) subscription: Subscription,
+    pub(crate) subscribed: Value,
+    pub(crate) initial: Value,
+}
+
+/// [OPUS-4.8] sq-bxog (Copilot #120): a subscription-registration refusal, carrying BOTH the
+/// `error` JSON to emit AND the HTTP status the SSE transport must surface — classified at the
+/// point of refusal so the SSE path is consistent with the `/sparql` endpoint's status
+/// semantics ([`crate::http::engine_error_response`]):
+///
+///   * malformed / non-SELECT query → **400** (the client's request is wrong);
+///   * the initial evaluation overflowing `--max-results` / `--max-query-rows` (the row cap)
+///     → **413** PAYLOAD_TOO_LARGE — EXACTLY as `/sparql` maps `query budget exceeded
+///     (max-rows)`, instead of the previous blanket 503;
+///   * the initial evaluation timing out, OR subscription-slot exhaustion (per-connection /
+///     server-wide cap) → **503** SERVICE_UNAVAILABLE — genuine capacity / overload, mirroring
+///     `/sparql`'s timeout 503;
+///   * any other engine error (e.g. a denied SERVICE) → **500**, mirroring `/sparql`'s
+///     `execution_error`.
+///
+/// The WebSocket transport ignores `status` (it has no HTTP response, only the `error` frame);
+/// only the SSE GET, which must set a real status BEFORE the stream opens, consults it.
+pub(crate) struct Refusal {
+    pub(crate) error: Value,
+    pub(crate) status: StatusCode,
+}
+
+/// [OPUS-4.8] sq-bxog: the transport-agnostic "register a subscription" core, shared by the
+/// WebSocket `subscribe` frame and the SSE `GET /subscriptions/sse` handler. Validates the
+/// query (SELECT-only), enforces the per-connection then the global cap (acquiring one slot
+/// on `slots`), runs the initial evaluation (refusing on timeout / max-rows overflow,
+/// mirroring the HTTP 503/413 semantics), allocates the server-wide id, and builds the two
+/// opening frames. On refusal it returns the `error` JSON to emit and holds NO slot.
+pub(crate) async fn subscribe_init(
+    state: &AppState,
+    slots: &mut ConnSlots,
+    current_conn_subs: usize,
+    query: &str,
+    alias: Option<String>,
+) -> Result<NewSubscription, Refusal> {
+    // [OPUS-4.8] sq-bxog (Copilot #120): carry the HTTP status alongside the `error` JSON so the
+    // SSE transport surfaces the SAME status `/sparql` would (400 client / 413 row-cap / 503
+    // capacity-or-timeout / 500 other) — see [`Refusal`].
+    let refuse = |msg: String, status: StatusCode| Refusal { error: error_msg(&msg, None, alias.as_deref()), status };
+
+    // Only SELECT is subscribable: the diff is defined over solution bindings. A wrong-form or
+    // malformed query is the client's error → 400, exactly like a `/sparql` parse error.
+    match prepare(query) {
+        Ok(p) if p.form == QueryForm::Select => {}
+        Ok(_) => return Err(refuse("only SELECT queries can be subscribed".into(), StatusCode::BAD_REQUEST)),
+        Err(PrepareError::Malformed(e)) => return Err(refuse(format!("malformed query: {e}"), StatusCode::BAD_REQUEST)),
+    }
+
+    // Limits: per-connection first (cheap), then the global slot. Both are genuine
+    // capacity/overload (subscription-slot exhaustion) → 503, NOT a payload refusal.
+    let config = state.config();
+    if current_conn_subs >= config.max_subscriptions_per_conn {
+        let max = config.max_subscriptions_per_conn;
+        return Err(refuse(format!("subscription limit reached for this connection ({max}); unsubscribe first or raise --max-subscriptions-per-conn"), StatusCode::SERVICE_UNAVAILABLE));
+    }
+    if !slots.try_acquire(config.max_subscriptions) {
+        let max = config.max_subscriptions;
+        return Err(refuse(format!("server-wide subscription limit reached ({max}); retry later or raise --max-subscriptions"), StatusCode::SERVICE_UNAVAILABLE));
+    }
+
+    // Initial evaluation. Failure refuses the subscription with the SAME status `/sparql` would
+    // give the equivalent engine error: a row-cap overflow (`--max-results` / `--max-query-rows`)
+    // is a 413 (mirroring `crate::http::engine_error_response`), a timeout is a 503, else a 500.
+    let (vars, rows) = match evaluate(state, query.to_string()).await {
+        Ok(r) => r,
+        Err(e) => {
+            slots.release_one();
+            return Err(refuse(format!("initial evaluation failed: {}", e.message), e.status()));
+        }
+    };
+
+    let id = state.subs.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    let subscription = Subscription { alias, query: query.to_string(), sequence: 0, vars, rows };
+
+    // {"subscribed": ...} then the sequence-0 notification: full result as added, empty removed.
+    let subscribed = with_alias(json!({ "subscribed": { "id": id } }), "subscribed", subscription.alias.as_deref());
+    let added: Vec<&Value> = sorted_bindings(&subscription.rows);
+    let initial = notification(id, subscription.alias.as_deref(), 0, &subscription.vars, &added, &[]);
+    Ok(NewSubscription { id, subscription, subscribed, initial })
+}
+
 async fn handle_subscribe(
     socket: &mut WebSocket,
     state: &AppState,
@@ -229,57 +374,25 @@ async fn handle_subscribe(
     req: &Value,
 ) -> bool {
     let alias = req.get("alias").and_then(Value::as_str).map(str::to_string);
-    let refuse = |msg: String| error_msg(&msg, None, alias.as_deref());
 
     let Some(query) = req.get("query").and_then(Value::as_str) else {
-        return send(socket, &refuse("subscribe requires a string 'query' field".into())).await.is_ok();
-    };
-    // Only SELECT is subscribable: the diff is defined over solution bindings.
-    match prepare(query) {
-        Ok(p) if p.form == QueryForm::Select => {}
-        Ok(_) => {
-            return send(socket, &refuse("only SELECT queries can be subscribed".into())).await.is_ok();
-        }
-        Err(PrepareError::Malformed(e)) => {
-            return send(socket, &refuse(format!("malformed query: {e}"))).await.is_ok();
-        }
-    }
-
-    // Limits: per-connection first (cheap), then the global slot.
-    let config = state.config();
-    if subs.len() >= config.max_subscriptions_per_conn {
-        let max = config.max_subscriptions_per_conn;
-        return send(socket, &refuse(format!("subscription limit reached for this connection ({max}); unsubscribe first or raise --max-subscriptions-per-conn"))).await.is_ok();
-    }
-    if !slots.try_acquire(config.max_subscriptions) {
-        let max = config.max_subscriptions;
-        return send(socket, &refuse(format!("server-wide subscription limit reached ({max}); retry later or raise --max-subscriptions"))).await.is_ok();
-    }
-
-    // Initial evaluation. Failure (parse-at-engine, timeout, max-rows overflow) refuses
-    // the subscription — mirroring the HTTP endpoint's 400/503/413 semantics.
-    let (vars, rows) = match evaluate(state, query.to_string()).await {
-        Ok(r) => r,
-        Err(e) => {
-            slots.release_one();
-            return send(socket, &refuse(format!("initial evaluation failed: {e}"))).await.is_ok();
-        }
+        return send(socket, &error_msg("subscribe requires a string 'query' field", None, alias.as_deref())).await.is_ok();
     };
 
-    let id = state.subs.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-    let sub = Subscription { alias, query: query.to_string(), sequence: 0, vars, rows };
+    let new = match subscribe_init(state, slots, subs.len(), query, alias).await {
+        Ok(n) => n,
+        // [OPUS-4.8] sq-bxog (Copilot #120): the WS transport has no HTTP status — it just emits
+        // the `error` frame (the refusal's `status` is for the SSE GET only).
+        Err(refusal) => return send(socket, &refusal.error).await.is_ok(),
+    };
 
-    // {"subscribed": ...} then the sequence-0 notification: full result as added, empty removed.
-    let subscribed = with_alias(json!({ "subscribed": { "id": id } }), "subscribed", sub.alias.as_deref());
-    if send(socket, &subscribed).await.is_err() {
+    if send(socket, &new.subscribed).await.is_err() {
         return false;
     }
-    let added: Vec<&Value> = sorted_bindings(&sub.rows);
-    let initial = notification(id, sub.alias.as_deref(), 0, &sub.vars, &added, &[]);
-    if send(socket, &initial).await.is_err() {
+    if send(socket, &new.initial).await.is_err() {
         return false;
     }
-    subs.insert(id, sub);
+    subs.insert(new.id, new.subscription);
     true
 }
 
@@ -315,34 +428,19 @@ async fn reevaluate_all(
     let mut ids: Vec<u64> = subs.keys().copied().collect();
     ids.sort_unstable();
     for id in ids {
-        let query = subs[&id].query.clone();
-        match evaluate(state, query).await {
-            Ok((vars, new_rows)) => {
-                let sub = subs.get_mut(&id).expect("subscription vanished mid-batch");
-                let added: Vec<&Value> =
-                    sorted_pairs(new_rows.iter().filter(|(k, _)| !sub.rows.contains_key(*k)));
-                let removed: Vec<&Value> =
-                    sorted_pairs(sub.rows.iter().filter(|(k, _)| !new_rows.contains_key(*k)));
-                if added.is_empty() && removed.is_empty() {
-                    continue; // result unchanged — no notification (coalesced no-ops included)
-                }
-                sub.sequence += 1;
-                let msg = notification(id, sub.alias.as_deref(), sub.sequence, &vars, &added, &removed);
+        // [OPUS-4.8] sq-bxog: the re-evaluate + diff core is `Subscription::reevaluate_step`,
+        // shared verbatim with the SSE transport; the WS path only handles the framing.
+        let sub = subs.get_mut(&id).expect("subscription vanished mid-batch");
+        match sub.reevaluate_step(id, state).await {
+            ReevalStep::Unchanged => {}
+            ReevalStep::Notify(msg) => {
                 if send(socket, &msg).await.is_err() {
                     return false;
                 }
-                sub.vars = vars;
-                sub.rows = new_rows;
             }
-            Err(e) => {
-                let alias = subs[&id].alias.clone();
+            ReevalStep::Terminate(msg) => {
                 subs.remove(&id);
                 slots.release_one();
-                let msg = error_msg(
-                    &format!("re-evaluation failed, subscription terminated: {e}"),
-                    Some(id),
-                    alias.as_deref(),
-                );
                 if send(socket, &msg).await.is_err() {
                     return false;
                 }
@@ -356,10 +454,43 @@ async fn reevaluate_all(
 // Evaluation + diff primitives
 // ---------------------------------------------------------------------------
 
+/// [OPUS-4.8] sq-bxog (Copilot #120): a categorised initial-evaluation failure — the
+/// human-readable `message` (named after the same limits a `/sparql` 413/503 would name) plus a
+/// [`RefuseKind`] so the refusal status mirrors the HTTP surface
+/// ([`crate::http::engine_error_response`]) instead of collapsing everything into 503.
+struct EvalError {
+    message: String,
+    kind: RefuseKind,
+}
+
+/// [OPUS-4.8] sq-bxog (Copilot #120): the cause of an initial-evaluation failure, classified from
+/// the engine's budget-violation string EXACTLY as [`crate::http::engine_error_response`] does, so
+/// the SSE status is consistent with `/sparql`.
+enum RefuseKind {
+    /// `query budget exceeded (timeout)` → 503 (genuine overload), matching `/sparql`'s timeout.
+    Timeout,
+    /// `query budget exceeded (max-rows)` → 413 (the result is too large, NOT a capacity problem).
+    RowCap,
+    /// Any other engine error (a denied SERVICE, a worker panic) → 500, like `execution_error`.
+    Other,
+}
+
+impl EvalError {
+    /// The HTTP status the SSE transport surfaces for this failure — the SAME mapping
+    /// [`crate::http::engine_error_response`] applies on `/sparql`.
+    fn status(&self) -> StatusCode {
+        match self.kind {
+            RefuseKind::Timeout => StatusCode::SERVICE_UNAVAILABLE,
+            RefuseKind::RowCap => StatusCode::PAYLOAD_TOO_LARGE,
+            RefuseKind::Other => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
 /// Runs the SELECT on the blocking pool under the server budget (deadline + row cap),
 /// with the same hard await-cap as the HTTP path. Returns the head vars and the result
 /// keyed by canonical row encoding.
-async fn evaluate(state: &AppState, query: String) -> Result<(Vec<String>, HashMap<String, Value>), String> {
+async fn evaluate(state: &AppState, query: String) -> Result<(Vec<String>, HashMap<String, Value>), EvalError> {
     let config = state.config().clone();
     let budget = make_budget(&config, true);
     // Pin the current generation for this evaluation (lock-free; never blocked by the
@@ -378,22 +509,24 @@ async fn evaluate(state: &AppState, query: String) -> Result<(Vec<String>, HashM
     match joined {
         Ok(Ok(r)) => Ok(r),
         Ok(Err(e)) => Err(budget_error(&e, &config)),
-        Err(_) => Err("query worker panicked".into()),
+        Err(_) => Err(EvalError { message: "query worker panicked".into(), kind: RefuseKind::Other }),
     }
 }
 
-/// Maps the engine's budget-violation strings onto the messages the HTTP layer uses
-/// (so a refused subscription names the same limits as a 503/413 would).
-fn budget_error(e: &str, config: &ServerConfig) -> String {
+/// Maps the engine's budget-violation strings onto the messages the HTTP layer uses (so a refused
+/// subscription names the same limits as a 503/413 would) AND classifies the cause ([`RefuseKind`])
+/// so the SSE status matches `/sparql` ([`crate::http::engine_error_response`]): timeout → 503,
+/// row cap → 413, else → 500.
+fn budget_error(e: &str, config: &ServerConfig) -> EvalError {
     if e.contains("query budget exceeded (timeout)") {
         let secs = config.query_timeout.map(|t| t.as_secs()).unwrap_or(0);
-        return format!("query timed out (server limit: {secs}s)");
+        return EvalError { message: format!("query timed out (server limit: {secs}s)"), kind: RefuseKind::Timeout };
     }
     if e.contains("query budget exceeded (max-rows)") {
         let max = config.max_results.unwrap_or(0);
-        return format!("result exceeds the server's max-results limit ({max} rows)");
+        return EvalError { message: format!("result exceeds the server's max-results limit ({max} rows)"), kind: RefuseKind::RowCap };
     }
-    e.to_string()
+    EvalError { message: e.to_string(), kind: RefuseKind::Other }
 }
 
 /// Evaluates the SELECT and canonicalises each solution row to its SPARQL-JSON binding
@@ -516,6 +649,173 @@ fn error_msg(message: &str, id: Option<u64>, alias: Option<&str>) -> Value {
 async fn send(socket: &mut WebSocket, msg: &Value) -> Result<(), axum::Error> {
     // [OPUS-4.8] axum 0.8: ws Message::Text wraps Utf8Bytes; String converts via Into.
     socket.send(Message::Text(msg.to_string().into())).await
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-bxog: SSE (Server-Sent Events) transport
+// ---------------------------------------------------------------------------
+
+/// SSE (`text/event-stream`) transport for SPARQL update subscriptions, ALONGSIDE the
+/// WebSocket `/subscriptions` endpoint. Both transports share ONE notification source —
+/// [`subscribe_init`] (register + initial result) and [`Subscription::reevaluate_step`]
+/// (re-evaluate + diff), driven by the same commit-generation `watch` channel
+/// ([`AppState::subscribe_commits`]) and the same global/per-connection slot accounting
+/// ([`ConnSlots`]). Only the wire framing differs: SSE emits `event:`/`data:`/`id:` frames
+/// instead of WebSocket JSON text frames.
+///
+/// Because SSE is a one-way GET stream (no client→server channel after the request),
+/// each connection carries exactly ONE subscription, identified by the `query` (and
+/// optional `alias`) query-string parameters — the natural REST shape, versus the WS
+/// path's multiplexed many-subscriptions-per-socket protocol. There is no `unsubscribe`
+/// frame: a client unsubscribes by closing the stream, which drops the per-stream state
+/// (releasing its global slot via [`ConnSlots`]'s `Drop`) with no leak.
+pub mod sse {
+    use std::collections::HashMap;
+
+    use axum::extract::{Query, State};
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::{IntoResponse, Response};
+    use futures_util::Stream;
+    use serde_json::Value;
+
+    use super::{subscribe_init, ConnSlots, ReevalStep, Subscription};
+    use crate::http::AppState;
+
+    /// SSE keep-alive comment interval (`: ping\n\n` every 15 s) — holds idle connections
+    /// open across proxies/load balancers that would otherwise reap a silent stream.
+    const KEEP_ALIVE_SECS: u64 = 15;
+
+    /// The per-stream state threaded through the [`futures_util::stream::unfold`] generator.
+    /// Dropping it (on client disconnect, when axum stops polling the body) drops `_slots`,
+    /// releasing the global subscription slot — the leak-free disconnect path, mirroring the
+    /// WebSocket connection task's `ConnSlots` drop.
+    struct StreamState {
+        id: u64,
+        subscription: Subscription,
+        commits: tokio::sync::watch::Receiver<u64>,
+        state: AppState,
+        /// Opening frames (subscribed ack, then the sequence-0 notification) and any
+        /// terminating error, queued FIFO so each `unfold` step yields exactly one event.
+        pending: std::collections::VecDeque<Event>,
+        /// Once a `Terminate` (re-evaluation failure) has been queued, the stream ends after
+        /// draining `pending`.
+        finished: bool,
+        /// Held for the stream's lifetime; `Drop` releases the global slot on disconnect.
+        _slots: ConnSlots,
+    }
+
+    /// `GET /subscriptions/sse?query=<SELECT>[&alias=<x>]` — registers ONE SPARQL update
+    /// subscription and streams notifications as Server-Sent Events.
+    ///
+    /// Auth: this mirrors the WebSocket `/subscriptions` path, which is itself NOT
+    /// auth-gated today — gating the subscription transports behind the read token is
+    /// tracked under bead `sq-cxk5`. When that lands, both transports must gate together.
+    ///
+    /// A registration refusal is returned as a normal JSON HTTP error BEFORE the event-stream
+    /// opens — SSE cannot set a status once the stream is flowing — classified to match the
+    /// `/sparql` endpoint ([`crate::http::engine_error_response`]): missing/non-SELECT/malformed
+    /// query → **400**; the initial evaluation over the row cap (`--max-results` /
+    /// `--max-query-rows`) → **413**; the initial evaluation timing out, or subscription-slot
+    /// exhaustion → **503**; any other engine error → **500**. The status is carried on the
+    /// [`super::Refusal`]. On success the response is `text/event-stream` and the first two
+    /// frames are the `subscribed` ack and the full initial result.
+    pub async fn sse_endpoint(State(state): State<AppState>, Query(params): Query<HashMap<String, String>>) -> Response {
+        let Some(query) = params.get("query") else {
+            return crate::http::json_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "the 'query' query-string parameter is required (the SELECT to subscribe)",
+            );
+        };
+        let alias = params.get("alias").cloned();
+
+        let mut slots = ConnSlots::new(state.subs.clone());
+        // One subscription per SSE stream, so the per-connection count starts at 0.
+        let new = match subscribe_init(&state, &mut slots, 0, query, alias).await {
+            Ok(n) => n,
+            Err(refusal) => {
+                // [OPUS-4.8] sq-bxog (Copilot #120): the refusal already carries the HTTP status,
+                // classified at the point of refusal to match the `/sparql` endpoint (400 client /
+                // 413 row-cap / 503 capacity-or-timeout / 500 other) — see [`super::Refusal`].
+                let msg = refusal.error["error"]["message"].as_str().unwrap_or("subscription refused").to_string();
+                return crate::http::json_error(refusal.status, &msg);
+            }
+        };
+
+        // Drop generations committed before this stream existed: the initial frame already
+        // reflects the current graph (same `mark_unchanged` discipline as the WS task).
+        let mut commits = state.subscribe_commits();
+        commits.mark_unchanged();
+
+        let mut pending = std::collections::VecDeque::with_capacity(2);
+        pending.push_back(json_event("subscribed", &new.subscribed));
+        pending.push_back(notification_event(&new.initial));
+
+        let init = StreamState {
+            id: new.id,
+            subscription: new.subscription,
+            commits,
+            state,
+            pending,
+            finished: false,
+            _slots: slots,
+        };
+
+        Sse::new(into_event_stream(init))
+            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(KEEP_ALIVE_SECS)).text("ping"))
+            .into_response()
+    }
+
+    /// Builds the infallible `Stream<Item = Result<Event, Infallible>>` axum's [`Sse`]
+    /// wants. Each `unfold` step first drains any queued frame (the opening pair, or a
+    /// terminating error); when empty, it awaits the next commit and re-evaluates,
+    /// emitting one diff `notification` (or terminating on failure). Returning `None`
+    /// ends the stream; the watch channel closing (server shutdown) ends it too.
+    fn into_event_stream(init: StreamState) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
+        futures_util::stream::unfold(init, |mut st| async move {
+            loop {
+                if let Some(ev) = st.pending.pop_front() {
+                    return Some((Ok(ev), st));
+                }
+                if st.finished {
+                    return None; // terminating error already drained — close the stream
+                }
+                // Block until a commit advances the published generation (the watch
+                // channel coalesces bursts — see the module docs), then re-evaluate.
+                if st.commits.changed().await.is_err() {
+                    return None; // server shutting down
+                }
+                let id = st.id;
+                match st.subscription.reevaluate_step(id, &st.state).await {
+                    ReevalStep::Unchanged => continue, // no diff — keep waiting (no frame)
+                    ReevalStep::Notify(msg) => return Some((Ok(notification_event(&msg)), st)),
+                    ReevalStep::Terminate(msg) => {
+                        st.finished = true;
+                        return Some((Ok(json_event("error", &msg)), st));
+                    }
+                }
+            }
+        })
+    }
+
+    /// A `notification` SSE frame: `event: notification`, the JSON as `data:`, and the
+    /// per-subscription `sequence` as the SSE `id:` (so a client can track ordering /
+    /// `Last-Event-ID` resumption semantics at the application layer).
+    fn notification_event(msg: &Value) -> Event {
+        let ev = json_event("notification", msg);
+        match msg["notification"]["sequence"].as_u64() {
+            Some(seq) => ev.id(seq.to_string()),
+            None => ev,
+        }
+    }
+
+    /// A typed SSE frame: `event: <name>` with the JSON value serialised as the `data:`
+    /// payload (single line — `serde_json` never emits a bare newline, so SSE framing is
+    /// preserved without escaping). The on-the-wire framing (`event:`/`data:`/`id:`/`\n\n`)
+    /// is asserted end-to-end in `tests/subscriptions_sse.rs`, which reads the raw bytes
+    /// (axum's [`Event`] finalises to bytes internally and exposes no inspection API).
+    fn json_event(name: &str, value: &Value) -> Event {
+        Event::default().event(name).data(value.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
