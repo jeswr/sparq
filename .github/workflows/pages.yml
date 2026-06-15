@@ -1,0 +1,131 @@
+# [OPUS-4.8] sq-40y0 — deploy the sparq feature-showcase site (site/) to GitHub Pages.
+#
+# WHAT THIS PUBLISHES: the Next.js static export under the Pages base path /sparq,
+# PLUS the existing benchmark dashboard preserved at /sparq/dev/. The dashboard tree
+# (`dev/`) lives on the `benchmark-data` branch (written by bench.yml); this workflow
+# fetches that tree and OVERLAYS it into the export's `out/dev/` before upload, so a
+# single Pages artifact serves both the new showcase root and the unchanged dashboard
+# at /sparq/dev/bench/.
+#
+# HOW /dev/bench IS PRESERVED (traced):
+#   1. Pages is served at https://jeswr.github.io/sparq/. Today (build_type: legacy)
+#      the source is the `benchmark-data` branch root: a root index.html redirect +
+#      a dev/ tree (dev/bench/{index.html,dashboard.js,dashboard.css,data.js,...}).
+#   2. This workflow does NOT touch the `benchmark-data` branch — bench.yml keeps
+#      writing data.js + dev/bench/* there exactly as before. We only READ it.
+#   3. After `next build` writes the showcase to out/ (with its OWN root index.html),
+#      we `git archive` the `benchmark-data` branch's `dev/` directory into `out/dev/`.
+#      The showcase root replaces the old redirect; the dashboard is carried forward
+#      verbatim, so https://jeswr.github.io/sparq/dev/bench/ keeps working.
+#   4. `out/.nojekyll` disables Jekyll so `_next/` (underscore-prefixed) assets serve.
+#
+# ONE-TIME PAGES SETTING (needs:user): the repo's Pages source must be switched from
+# "Deploy from a branch" (legacy) to "GitHub Actions" in Settings → Pages for this
+# workflow's deploy step to publish. Until that flip, the existing legacy dashboard
+# keeps serving untouched and this workflow's deploy step is a no-op/failure that
+# never modifies the live site. (The alternative — committing out/ onto benchmark-data —
+# was rejected: it couples site source to the data branch and races bench.yml's root
+# index.html seed.)
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least-privilege (Scorecard TokenPermissions): read by default; the deploy job
+# opts into the Pages/OIDC writes it needs.
+permissions:
+  contents: read
+
+# Never cancel an in-flight Pages deploy; queue instead so a half-uploaded artifact
+# can't leave the site broken.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Gate the publish to main only (PRs build nothing here).
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Need the benchmark-data branch too, to overlay its dev/ tree.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pages-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      # Build the lean wasm bundle (crates/sparq-wasm → js/wasm) that the live REPL loads.
+      - name: Build sparq wasm bundle
+        working-directory: js
+        run: |
+          npm ci
+          npm run build:wasm
+
+      - name: Build static site
+        working-directory: site
+        run: |
+          npm ci
+          npm run build   # prebuild copies js/wasm → site/public/wasm, then next build → out/
+
+      # ---- Preserve the existing benchmark dashboard at /sparq/dev/ ----
+      - name: Overlay benchmark dashboard (dev/) from benchmark-data
+        working-directory: site
+        run: |
+          set -euo pipefail
+          if git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet origin/benchmark-data >/dev/null; then
+            echo "Overlaying dev/ from origin/benchmark-data into out/dev/"
+            mkdir -p out/dev
+            # Extract ONLY the dev/ subtree of benchmark-data straight into out/dev/.
+            git -C "$GITHUB_WORKSPACE" archive origin/benchmark-data dev \
+              | tar -x --strip-components=1 -C out/dev
+            test -f out/dev/bench/index.html \
+              && echo "OK: out/dev/bench/index.html present (dashboard preserved)" \
+              || { echo "ERROR: dashboard index missing after overlay"; exit 1; }
+          else
+            echo "::warning::origin/benchmark-data not found — dashboard NOT overlaid this run."
+          fi
+          # Static-export hygiene: disable Jekyll so _next/ assets are served.
+          touch out/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/out
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Pages deployment requires these two writes; everything else stays read-only.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
