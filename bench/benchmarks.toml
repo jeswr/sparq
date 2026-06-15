@@ -192,6 +192,19 @@ records_to  = "stdout (TSV); CI emits shacl_<workload>_validate_us into benchmar
 status      = "ok"
 
 [[benchmark]]
+id          = "geo-bench"
+name        = "GeoSPARQL — fixed ~100k CRS84 point corpus x within/nearest/geof: workloads"
+category    = "query"
+measures    = "per-workload query time (us) over a FIXED ~100k-point CRS84 corpus: within10km/within50km (geof:within great-circle), nearest_k10/nearest_k100 (nearest-k), geof_within (geof:sfWithin filter path), geo_compliance_pass (OGC topology fixtures). run.sh carries a HARD self-asserting gate on each workload's result-set SIZE / compliance pass COUNT vs expected.tsv (COUNTS-NOT-COORDINATES: float geometry is not bit-stable, so only sizes + pass/fail are gated; exit 1 on drift). The compliance ratchet is the HARD-gated DEFICIT geo_compliance_deficit (= 25 - passing, mode:auto in bench/perf-baseline.json, only-tightens). Timing is ADVISORY (trend-only)"
+invoke      = "cargo build --release -p sparq-geo --example bench_geo && bench/geo/run.sh   # self-contained: generate the fixed point corpus (bench/geo/gen.sh -> bench_geo gen), run bench mode, assert expected.tsv; CI runs it via scripts/ci-bench.sh -> geo_<name>_us + geo_compliance_deficit"
+source      = "bench/geo/{gen.sh,run.sh,expected.tsv,README.md}; crates/sparq-geo/examples/bench_geo.rs (the G1 TSV-emitting runner; `gen`/`bench` subcommands); scripts/ci-bench.sh (geo hook); OGC ratchet crates/sparq-geo/tests/ogc_compliance_ratchet.rs; competitors bench/competitors.json (geosparql-jena/postgis)"
+dataset     = "FIXED CRS84 point corpus: 100000 seeded random POINT(lon lat) wktLiterals (seed 20260615, 8°x8° France-ish window), generated DETERMINISTICALLY by bench_geo gen so expected.tsv counts and the in-process fallback are byte-identical. gitignored+regenerable corpus (/tmp/geo); no external download/toolchain (pure Rust)"
+quiet_box_sensitive = true  # wall-clock query time trend-only, NOT in scripts/perf-gate.py; the result-set-size + compliance-pass diff IS a hard correctness gate (deterministic counts, load-robust); geo_compliance_deficit is the only HARD perf-gate metric (integer, runner-immune)
+pinning     = "fixed corpus (seed 20260615, n=100000, window/query-center pinned in bench_geo.rs); expected.tsv COUNTS derived by running (not guessed); compliance MAX=25 fixtures (kept in sync between bench_geo FIXTURES + run.sh GEO_COMPLIANCE_MAX). COUNTS-NOT-COORDINATES — never gate a float coordinate"
+records_to  = "stdout (TSV); CI emits geo_<name>_us (advisory) + geo_compliance_deficit (hard-gated) into benchmark-data (dev/bench) via scripts/ci-bench.sh; deterministic gates in bench/geo/expected.tsv"
+status      = "ok"
+
+[[benchmark]]
 id          = "deep-taxonomy"
 name        = "Deep Taxonomy (DeepTaxonomy) — rule-heavy N3 forward-closure reasoning"
 category    = "inference"
@@ -533,11 +546,11 @@ status      = "ok"
 
 [[benchmark]]
 id          = "geo-index-bench"
-name        = "sparq-geo spatial index build + query"
+name        = "sparq-geo spatial index build + query (human-readable latency probe)"
 category    = "query"
-measures    = "build + within_distance/nearest/intersects query latency on ~100k random CRS84 points"
+measures    = "build + within_distance/nearest/intersects query latency on ~100k random CRS84 points. This is the bench_geo REPORT mode (no args): a human-readable latency dump for the crate README. The self-asserting, CI-gated GeoSPARQL suite with deterministic count gates is geo-bench (bench/geo/, design §3.5) — bench_geo's `bench` subcommand"
 invoke      = "cargo run --release -p sparq-geo --example bench_geo"
-source      = "crates/sparq-geo/examples/bench_geo.rs"
+source      = "crates/sparq-geo/examples/bench_geo.rs (report mode); see geo-bench for the gated suite"
 dataset     = "N seeded random points over an 8x8 degree window, geo:asWKT N-Triples, in-example"
 quiet_box_sensitive = true
 pinning     = "seeded generator"

@@ -219,7 +219,7 @@
   var GROUP_ORDER = [
     'Pipeline', 'Memory / Size',
     'Synthetic (qlever-style)', 'Operators',
-    'WatDiv', 'LUBM (reasoning)', 'SHACL validation', 'SP2Bench', 'BSBM', 'DBPSB'
+    'WatDiv', 'LUBM (reasoning)', 'SHACL validation', 'GeoSPARQL', 'SP2Bench', 'BSBM', 'DBPSB'
   ];
 
   function buildSummary(entries) {
@@ -274,6 +274,8 @@
     { key: 'Deep Taxonomy', title: 'Deep Taxonomy', aliases: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy'] },
     // [OPUS-4.8] sq-7iai: SHACL validation suite (LUBM ABox x 5 hand-authored shape graphs).
     { key: 'SHACL',         title: 'SHACL validation', aliases: ['shacl', 'shacl validation'] },
+    // [OPUS-4.8] sq-tf8n: GeoSPARQL suite (fixed ~100k CRS84 point corpus; within/nearest/geof:).
+    { key: 'GeoSPARQL',     title: 'GeoSPARQL',     aliases: ['geosparql', 'geo'] },
     { key: 'BSBM',          title: 'BSBM',          aliases: ['bsbm'] },
     { key: 'DBPSB',         title: 'DBPSB',         aliases: ['dbpsb', 'dbpedia sparql benchmark'] },
     // [OPUS-4.8] sq-i0nm: the synthetic qlever-style suite carries the one in-repo competitor

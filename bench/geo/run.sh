@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# [OPUS-4.8] (sq-tf8n) GeoSPARQL per-commit runner — the self-asserting entry point CI
+# calls, mirroring bench/shacl/run.sh + bench/lubm/run.sh. Self-contained:
+#   1. ensure the FIXED CRS84 point corpus exists (gen.sh).
+#   2. run examples/bench_geo in `bench` mode over the corpus (count + advisory timing).
+#   3. ASSERT each workload's result-set SIZE / compliance pass count vs expected.tsv
+#      (exit 1 on any drift — the HARD correctness gate lives here, so harvested timings
+#      stay advisory). COUNTS-NOT-COORDINATES: float geometry is not bit-stable, so only
+#      sizes + pass/fail are gated, never coordinate values. This is the geo analogue of
+#      LUBM's count diff.
+#   4. emit on STDOUT the 3-column `<name>\t<count>\t<us>` contract the ci-bench hook
+#      consumes. The hook harvests `geo_<name>_us` (advisory) and ALSO routes the
+#      `geo_compliance_pass` row to the HARD-gated deficit `geo_compliance_deficit`
+#      (= GEO_COMPLIANCE_MAX - passed; mode:auto ratchet in bench/perf-baseline.json,
+#      so coverage only tightens). Correctness lives in expected.tsv, NOT in extra stdout
+#      columns — exactly like LUBM / SHACL.
+#
+# Usage: bench/geo/run.sh   (run from anywhere; honours $BENCH_GEO / $ITERS overrides)
+set -euo pipefail
+
+# The OGC compliance fixture count (the ratchet MAX). Kept in sync with the FIXTURES
+# table in crates/sparq-geo/examples/bench_geo.rs; the deficit gate is MAX - passed.
+GEO_COMPLIANCE_MAX="${GEO_COMPLIANCE_MAX:-25}"
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+ITERS="${ITERS:-3}"
+GEN="$ROOT/bench/geo/gen.sh"
+EXP="$ROOT/bench/geo/expected.tsv"
+# The G1 TSV-emitting runner: a sparq-geo example (the crate stays isolated — not a
+# dependency of sparq-cli). Override with $BENCH_GEO for a custom build.
+BIN="${BENCH_GEO:-$ROOT/target/release/examples/bench_geo}"
+
+if [ ! -x "$BIN" ]; then
+  echo "[geo] ERROR: bench_geo not found at $BIN" >&2
+  echo "[geo]   build: cargo build --release -p sparq-geo --example bench_geo" >&2
+  exit 1
+fi
+
+# ---- 1. ensure the fixed corpus (gen.sh emits one path: the corpus N-Triples) -----------
+CORPUS="$("$GEN" 100000)"
+echo "[geo] corpus=$CORPUS" >&2
+
+# ---- 2. run bench mode (3-column: name count us) ----------------------------------------
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+"$BIN" bench "$CORPUS" "$ITERS" > "$TMP/geo.tsv"
+
+# ---- 3. assert each COUNT vs expected.tsv (exit 1 on any mismatch) -----------------------
+fail=0
+seen=0
+while IFS=$'\t' read -r name count us; do
+  [ -n "$name" ] || continue
+  exp="$(awk -F'\t' -v k="$name" '$1==k{print $2}' "$EXP")"
+  if [ -z "$exp" ]; then
+    echo "[geo] ERROR: $name has no expected.tsv entry" >&2; fail=1; continue
+  fi
+  if [ "$count" != "$exp" ]; then
+    echo "[geo] ERROR: $name count=$count expected=$exp (correctness regression)" >&2; fail=1
+  fi
+  # geo_compliance_pass may only TIGHTEN: a pass count BELOW expected is a coverage
+  # regression even if expected.tsv has not been re-pinned (defence in depth).
+  if [ "$name" = "geo_compliance_pass" ] && [ "$count" -lt "$exp" ] 2>/dev/null; then
+    echo "[geo] ERROR: compliance regressed: passed=$count < $exp" >&2; fail=1
+  fi
+  seen=$((seen+1))
+  # ---- 4. forward the 3-column hook contract on STDOUT ----
+  printf '%s\t%s\t%s\n' "$name" "$count" "$us"
+done < "$TMP/geo.tsv"
+
+# Every committed workload must have run (a vanished workload is itself a regression).
+exp_workloads=$(grep -cvE '^#|^$' "$EXP")
+if [ "$seen" != "$exp_workloads" ]; then
+  echo "[geo] ERROR: ran $seen workloads, expected $exp_workloads (a workload vanished)" >&2; fail=1
+fi
+
+if [ "$fail" = 0 ]; then
+  echo "[geo] OK: all $seen workloads match expected.tsv (result-set sizes + compliance pass; counts-not-coords)" >&2
+else
+  echo "[geo] FAILED: one or more counts diverged from expected.tsv" >&2
+fi
+exit "$fail"

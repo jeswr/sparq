@@ -58,7 +58,7 @@ conventions first, then a per-category map that points at the registry, then a
 
 | category | what it covers | registry ids |
 |---|---|---|
-| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
+| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `geo-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
 | **parse** | text-format parse throughput (MB/s) | `parse-baseline` |
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
@@ -124,6 +124,17 @@ Notes on a few that need care:
   `shacl_<workload>_validate_us` (trend-only, advisory). Heavy tiers: `univ=5`/`univ=10`. The
   cleanest competitor surface — Jena-SHACL / pySHACL / rdf-validate-shacl run the *identical*
   `(data, shapes)` pair (see the competitor map below + `scripts/bench-adapters/`).
+- **`geo-bench` is the GeoSPARQL VALIDATION suite** — see [`bench/geo/README.md`](./geo/README.md).
+  A **fixed ~100k-point CRS84 corpus** (`bench/geo/gen.sh` → `bench_geo gen`; pure Rust, no
+  `javac`/`rapper`/Docker) × within/nearest/`geof:` workloads (`within10km`, `within50km`,
+  `nearest_k10`, `nearest_k100`, `geof_within`, `geo_compliance_pass`). `run.sh` is self-asserting:
+  it asserts each workload's **result-set SIZE / compliance pass COUNT** vs `expected.tsv`
+  (**COUNTS-NOT-COORDINATES** — float geometry is not bit-stable, so only sizes + pass/fail are
+  gated; exit 1 on drift). The OGC compliance ratchet is the **hard-gated DEFICIT**
+  `geo_compliance_deficit` (= 25 − passing, `mode:auto` in `bench/perf-baseline.json`, only-tightens;
+  the related fixture ratchet lives in `crates/sparq-geo/tests/ogc_compliance_ratchet.rs`). CI emits
+  `geo_<name>_us` (trend-only, advisory). Competitor: GeoSPARQL-Jena/Fuseki (full GML+WKT compliance
+  bar, `http-sparql`); PostGIS as a loose non-SPARQL lower bound (see the competitor map below).
 - **`deep-taxonomy` (DeepTaxonomy) is the rule-heavy N3 REASONING suite** — see
   [`bench/deep-taxonomy/README.md`](./deep-taxonomy/README.md). `run.sh` is self-asserting and
   REUSES the existing generator `bench/inference/gen_deeptaxonomy.py` (1 instance + a depth-deep
@@ -165,7 +176,12 @@ Notes on a few that need care:
   (extensional); **eye** ↔ `inference-eye-comparison` + `deep-taxonomy` (DeepTaxonomy/anc500/grid30);
   **Jena-SHACL / pySHACL / rdf-validate-shacl** ↔ `shacl-validate-bench` (identical data×shapes;
   cross-check `#violations`/`conforms` per-engine before trusting timing — `report-cli`/`js-lib`
-  adapter kinds in `scripts/bench-adapters/`, gather-only on a Docker EC2 box).
+  adapter kinds in `scripts/bench-adapters/`, gather-only on a Docker EC2 box);
+  **GeoSPARQL-Jena / Fuseki-geosparql** ↔ `geo-bench` (the COMPLIANCE bar — the only triplestore
+  with full GML+WKT, like-for-like since sparq-geo does both; `http-sparql` adapter, gather-only on
+  a Docker EC2 box; cross-check result-set SIZE before timing), and **PostGIS** as a LOOSE non-SPARQL
+  lower bound (relational `rstar`-style sub-component, NOT a `geof:`/graph-join competitor — match
+  CRS/op semantics or omit).
   HONESTY NOTE (per parent `sq-i0nm`): a gh-runner gather is noisy and not
   comparable to the EC2/quiet-box reference band — the recorded `env.quiet_box`
   flag lets the dashboard label it distinctly (see the QUIET-BOX convention above).
@@ -188,6 +204,7 @@ bench/watdiv/run.sh 1                 # WatDiv SF=1 (g++ + Boost): gen + count/m
 bench/bsbm/run.sh                     # BSBM Explore -pc 300 (JRE + unzip): gen + materialize + row diff
 bench/lubm/run.sh                     # LUBM(1) (javac + rapper): gen + OWL-RL closure + both tiers + row diff
 bench/shacl/run.sh                    # SHACL (javac + rapper): LUBM ABox x 5 shapes + violations/conforms/focus_nodes diff
+bench/geo/run.sh                      # GeoSPARQL (cargo only): fixed ~100k point corpus + within/nearest/geof: result-set-size + compliance-pass diff (counts-not-coords)
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
 
 # --- selective bind-join + u64 value-id probes ---

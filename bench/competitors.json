@@ -164,6 +164,38 @@
       "version_env_metadata": "gather records the resolved npm version + node --version + the host env block.",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "rdf-validate-shacl"
+    },
+    {
+      "id": "geosparql-jena",
+      "name": "GeoSPARQL-Jena / Fuseki-geosparql",
+      "kind": "http-sparql",
+      "role": "[OPUS-4.8 sq-tf8n] GeoSPARQL COMPLIANCE bar for the geo suite (galbiston/geosparql-jena; Apache-2.0). The only triplestore with FULL GML + WKT support; since sparq-geo does both, Jena is the right like-for-like for COVERAGE. Adapter kind `http-sparql` (POST a SELECT (COUNT) query -> parse SPARQL-JSON -> count) reusing scripts/bench-adapters/http_sparql_adapter.py, so the result-set SIZE is directly comparable to sparq-geo's within/nearest/geof: counts. COUNTS-NOT-COORDINATES: cross-check the SIZE before any timing (float geometry is not bit-stable).",
+      "pinned_version": "apache-jena-fuseki + jena-geosparql (pin the exact distribution or the Docker image DIGEST at gather time)",
+      "version_source": "the Jena/Fuseki distribution version, or the Docker image DIGEST, recorded in the gather results file; the SPARQL endpoint reports no build string, so the digest/distribution version IS the recorded identifier.",
+      "install_recipe": "run Fuseki with the jena-geosparql assembler (Apache-2.0), load the geo corpus (bench/geo/gen.sh), and build the spatial index; OR use a geosparql-fuseki Docker image (Docker-based -> gather-only on a Docker EC2 box, like QLever; zero recurring CI cost). gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
+      "run_recipe": "scripts/gather-competitors.sh --run --only geosparql-jena  with SPARQL_ENDPOINT=<fuseki geosparql endpoint> SPARQL_QUERY_FILE=bench/geo/queries/<workload>.rq set; the dispatch calls scripts/bench-adapters/http_sparql_adapter.py (POST query -> parse SPARQL-JSON -> count).",
+      "comparable_suites": [
+        { "sparq_suite": "geo-bench", "note": "same fixed CRS84 point corpus x the queries/*.rq within/geof: workloads; cross-check the result-set SIZE (counts-not-coords — float geometry is not bit-stable) before trusting any timing. The all-WKT subset is fully like-for-like; GML+WKT support is the compliance comparison." }
+      ],
+      "version_env_metadata": "gather records the Jena/Fuseki version (or Docker image digest) + java -version + the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "geosparql-jena"
+    },
+    {
+      "id": "postgis",
+      "name": "PostGIS",
+      "kind": "http-sparql",
+      "role": "[OPUS-4.8 sq-tf8n] LOOSE NON-SPARQL lower bound for the geo suite — relational R-tree spatial index (the rstar-style sub-component sparq-geo's GeoIndex builds on), NOT a geof:/SPARQL-graph-join competitor. Listed for an honest spatial-index lower bound ONLY: it must match CRS/operation semantics (sparq-geo great-circle vs PostGIS geodesic/projected ST_DWithin) or be OMITTED — it is apples-to-oranges in the LOOSE direction (the geo analogue of FTS's Lucene kernel; the design's honesty ladder, §4.2). PostGIS has no SPARQL endpoint of its own, so any comparison is bespoke (ST_DWithin SQL over the same points) and NOT wired into gather-competitors.sh; this entry is a NON-DASHBOARD reference marker. `kind` is set to http-sparql only so the registry shares the same enum; do NOT gather it as a SPARQL engine or render it as a peer column.",
+      "pinned_version": "postgis (pin the exact PostgreSQL+PostGIS version at gather time)",
+      "version_source": "`SELECT PostGIS_Full_Version()` recorded in the gather results file, if ever gathered.",
+      "install_recipe": "postgis/postgis Docker image (gather-only). NOT a committed dependency. NOTE: PostGIS is a relational store, not a SPARQL engine — there is no like-for-like geof: path; treat as a sub-component lower bound only.",
+      "run_recipe": "bespoke (NOT gather-competitors.sh): load the same POINT corpus into a geometry column with a GiST index, run ST_DWithin over the MATCHED CRS/metric, record the row count + latency.",
+      "comparable_suites": [
+        { "sparq_suite": "geo-bench", "note": "LOOSE lower bound on the spatial-index sub-component (GiST R-tree vs sparq-geo's rstar) ONLY; match CRS/operation semantics (great-circle vs geodesic/projected) or omit. NOT a SPARQL/geof: competitor — apples-to-oranges; never put on the dashboard as a peer." }
+      ],
+      "version_env_metadata": "PostGIS_Full_Version() + the host env block, if ever gathered.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "postgis"
     }
   ],
 

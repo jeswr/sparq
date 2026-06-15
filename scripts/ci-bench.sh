@@ -103,6 +103,15 @@ DEEPTAX_DEPTHS="${DEEPTAX_DEPTHS:-1000 10000}"
 # `shacl_<workload>_validate_us` (trend-only, NOT in scripts/perf-gate.py). Registry:
 # bench/benchmarks.toml (shacl-validate-bench); details: bench/shacl/README.md.
 SHACL_RUN=bench/shacl/run.sh
+# [OPUS-4.8] GeoSPARQL suite (sq-tf8n, design §3.5). A FIXED ~100k-point CRS84 corpus
+# (bench/geo/gen.sh -> bench_geo gen; pure Rust, no javac/rapper/Docker) x within/nearest/
+# geof: workloads. Like LUBM/SHACL, run.sh is the self-asserting entry point: it asserts each
+# workload's result-set SIZE / compliance pass COUNT vs expected.tsv (counts-not-coords, since
+# float geometry is not bit-stable; exit 1 on drift), and prints `<name>\t<count>\t<us>`. The
+# hook harvests `geo_<name>_us` (ADVISORY) and routes geo_compliance_pass to the HARD-gated
+# DEFICIT geo_compliance_deficit (mode:auto in bench/perf-baseline.json). Registry:
+# bench/benchmarks.toml (geo-bench); details: bench/geo/README.md.
+GEO_RUN=bench/geo/run.sh
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -451,6 +460,46 @@ if command -v javac >/dev/null 2>&1 && command -v rapper >/dev/null 2>&1 && [ -x
   fi
 else
   echo "note: shacl skipped (javac/rapper not on PATH)" >&2
+fi
+
+# [OPUS-4.8] GeoSPARQL suite per-commit (sq-tf8n). Unlike SHACL/LUBM this suite needs NO
+# heavyweight toolchain — only cargo (the corpus is pure Rust via bench_geo gen). run.sh is the
+# self-asserting entry point: it ensures the fixed ~100k-point corpus (bench/geo/gen.sh), runs
+# bench_geo in `bench` mode, and asserts each workload's result-set SIZE / compliance pass COUNT
+# vs expected.tsv (counts-not-coords; exit 1 on drift). The example is built on demand (sparq-geo
+# is isolated — not a sparq-cli dependency — so the runner is its own --example). We harvest the
+# `<name>\t<count>\t<us>` stdout into the ADVISORY `geo_<name>_us` (trend-only, NOT in
+# scripts/perf-gate.py) and ALSO route the geo_compliance_pass row to the HARD-gated DEFICIT
+# `geo_compliance_deficit` (= GEO_COMPLIANCE_MAX - passed; mode:auto in bench/perf-baseline.json,
+# so geo compliance can only TIGHTEN). run.sh failing (a geo correctness regression) fails the
+# whole ci-bench run, exactly like LUBM/SHACL. Skipped gracefully when cargo is absent.
+GEO_BIN=target/release/examples/bench_geo
+GEO_COMPLIANCE_MAX=25
+if command -v cargo >/dev/null 2>&1 && [ -x "$GEO_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE
+  # bench_geo. Let cargo's staleness detection decide (a no-op rebuild is cheap); do NOT
+  # swallow the build error — a real compile failure must fail the gate, not silently skip.
+  if ! cargo build --release -q -p sparq-geo --example bench_geo; then
+    echo "ERROR: bench_geo example failed to build" >&2
+    exit 1
+  fi
+  if BENCH_GEO="$GEO_BIN" ITERS=3 bash "$GEO_RUN" > "$TMP/geo.tsv" 2>"$TMP/geo.err"; then
+    while IFS=$'\t' read -r name count us; do
+      [ "${count:-}" = "ERROR" ] && continue
+      [ -n "${us:-}" ] && add "geo_${name}_us" us "$us"   # TREND-ONLY (advisory)
+      # Route the compliance pass count to the HARD-gated deficit (max - passed): a
+      # smaller-is-better integer that mode:auto ratchets DOWN, so coverage only tightens (G4).
+      if [ "$name" = "geo_compliance_pass" ]; then
+        add geo_compliance_deficit count "$((GEO_COMPLIANCE_MAX - count))"
+      fi
+    done < "$TMP/geo.tsv"
+  else
+    echo "ERROR: geo run.sh failed (correctness regression)" >&2
+    cat "$TMP/geo.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: geo skipped (cargo not on PATH)" >&2
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.
