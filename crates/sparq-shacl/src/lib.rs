@@ -88,6 +88,34 @@ pub fn graph_from_triples<I: IntoIterator<Item = Triple>>(triples: I) -> Graph {
     Graph::from_parts(dict, ids)
 }
 
+/// [OPUS-4.8] (sq-7iai) The number of DISTINCT focus nodes the model's targeted
+/// shapes select over `data` — i.e. the size of the union of every targeted
+/// shape's focus-node set, deduplicated exactly as the validator's own
+/// `focus_nodes` enumeration does. This is a deterministic *target-selection*
+/// statistic (independent of how many constraints those nodes violate), used by
+/// the SHACL benchmark suite as a target-selection regression detector alongside
+/// the violation count.
+///
+/// It reuses the public [`view::GraphView`] target-selection primitives
+/// (`instances_of`/`subjects_of`/`objects_of`), so it stays in lock-step with
+/// the validator without exposing internals.
+pub fn count_focus_nodes(data: &Graph, model: &ShapesModel) -> usize {
+    use oxrdf::Term;
+    let g = view::GraphView::new(data);
+    let mut all: Vec<Term> = Vec::new();
+    for &sid in &model.targeted {
+        for t in &model.shapes[sid].targets {
+            match t {
+                Target::Node(n) => all.push(n.clone()),
+                Target::Class(c) | Target::ImplicitClass(c) => all.extend(g.instances_of(c)),
+                Target::SubjectsOf(p) => all.extend(g.subjects_of(p)),
+                Target::ObjectsOf(p) => all.extend(g.objects_of(p)),
+            }
+        }
+    }
+    view::dedup(all).len()
+}
+
 /// Loads a Turtle document into a [`Graph`], resolving relative IRIs against
 /// `base`.
 pub fn load_turtle_with_base(text: &str, base: &str) -> Result<Graph, String> {
@@ -164,6 +192,31 @@ mod tests {
         assert!(comps
             .iter()
             .any(|c| c.ends_with("MinInclusiveConstraintComponent")));
+    }
+
+    /// [OPUS-4.8] (sq-7iai) `count_focus_nodes` counts the DISTINCT focus nodes the
+    /// targeted shapes select (independent of how many constraints they violate) —
+    /// the SHACL benchmark suite's target-selection gate.
+    #[test]
+    fn focus_node_count_is_distinct_target_union() {
+        let data = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person ; ex:age 30 ; ex:name "Alice" .
+            ex:bob   a ex:Person ; ex:age 40 ; ex:name "Bob" .
+            ex:carol a ex:Person .
+            ex:notaperson a ex:Robot .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let shapes = Graph::load_str(SHAPES, "turtle").unwrap();
+        let model = ShapesModel::parse(&shapes);
+        // Three ex:Person instances are the focus nodes; ex:Robot is not targeted.
+        assert_eq!(count_focus_nodes(&data, &model), 3);
+        // A graph with no instances of the targeted class selects zero focus nodes.
+        let empty = Graph::load_str("@prefix ex: <http://example.org/> . ex:x a ex:Other .", "turtle").unwrap();
+        assert_eq!(count_focus_nodes(&empty, &model), 0);
     }
 
     /// The Turtle rendering must itself be valid Turtle.

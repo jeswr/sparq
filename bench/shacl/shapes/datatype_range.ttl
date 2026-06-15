@@ -1,0 +1,26 @@
+# [OPUS-4.8] (sq-7iai) SHACL benchmark workload 2: DATATYPE_RANGE.
+# sh:datatype + sh:pattern over XSD lexical space. The LUBM ABox stores ub:name and
+# ub:emailAddress as plain (xsd:string) literals, so:
+#   - sh:datatype xsd:integer on ub:name: violated by EVERY GraduateStudent's name
+#     (a plain-literal name is not an xsd:integer).
+#   - sh:pattern "^[^@]+@.+$" on ub:emailAddress: the LUBM email lexical form always
+#     matches, so this constraint contributes ZERO violations (a deterministic-negative
+#     control that the pattern engine runs without firing).
+# Deterministic at the pinned corpus; counts in expected.tsv.
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix ub:  <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:  <http://example.org/shacl-bench/> .
+
+ex:GradStudentLiteralShape a sh:NodeShape ;
+    sh:targetClass ub:GraduateStudent ;
+    # Names are plain string literals -> every one violates xsd:integer.
+    sh:property [
+        sh:path ub:name ;
+        sh:datatype xsd:integer ;
+    ] ;
+    # Well-formed email lexical form -> matches the pattern -> no violation.
+    sh:property [
+        sh:path ub:emailAddress ;
+        sh:pattern "^[^@]+@.+$" ;
+    ] .

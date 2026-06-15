@@ -1,0 +1,23 @@
+# [OPUS-4.8] (sq-7iai) SHACL benchmark workload 3: CLASS_NODEKIND.
+# sh:class (target-selection at scale) + sh:nodeKind. The LUBM ABox types every
+# ub:FullProfessor's ub:worksFor object as a ub:Department (never a ub:University), and
+# every such object is an IRI, so:
+#   - sh:class ub:University on ub:worksFor: violated by EVERY professor (the value is a
+#     Department, not a University) -> a deterministic positive at the pinned corpus.
+#   - sh:nodeKind sh:IRI on ub:worksFor: all values are IRIs -> ZERO violations (a
+#     deterministic-negative control exercising the nodeKind path).
+# sh:class uses the rdfs:subClassOf* target closure in sparq-shacl; Department is not a
+# subclass of University in the raw ABox, so the count is stable without reasoning.
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix ub:  <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix ex:  <http://example.org/shacl-bench/> .
+
+ex:ProfessorAffiliationShape a sh:NodeShape ;
+    sh:targetClass ub:FullProfessor ;
+    sh:property [
+        sh:path ub:worksFor ;
+        # worksFor points at a Department, never a University -> violated by all.
+        sh:class ub:University ;
+        # ...but it IS always an IRI -> the nodeKind constraint never fires.
+        sh:nodeKind sh:IRI ;
+    ] .
