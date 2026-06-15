@@ -86,7 +86,7 @@ asserts byte-equality with `art.public_inputs` (`verifier.rs:3237-3240`). The se
 was verified EXACTLY against the Noir circuits' `main` signatures:
 
 - `scan_k{k}_n{n}_r{r}`: challenge, commitments[k], pattern_is_const[3], pattern_const_enc[3],
-  rows[r][3] (row-major, padded to r), row_count, attribution[k] — matches
+  `rows[r][3]` (row-major, padded to r), row_count, attribution[k] — matches
   `zk/compose/scan_k1_n16_r4/src/main.nr:10-16` exactly; all listed params are genuinely
   `pub`, the private `counts`/`enc` are correctly omitted, and there is NO `-> pub` return
   to append (the highest-risk omission — confirmed absent across all members).
@@ -343,7 +343,7 @@ gap, not a present hole. **Recommend:** add probe-captured anchors for f64 + k2 
 toolchain-gated CI lane that runs the `#[ignore]`d forge/anchor suite. (Strongly complements
 sq-1gir.)
 
-### NEW-2. (LOW, privacy/binding deferral, already documented) HolderPoP is not yet credential-bound; clear-index + list-version are disclosed
+### NEW-2. (LOW, privacy/binding deferral, already documented) HolderPop is not yet credential-bound; clear-index + list-version are disclosed
 
 Two honestly-documented deferrals that a relying party must understand: (a) `bind_holder_pop`
 proves possession of a trusted holder key over the nonce but does NOT bind it to the specific
@@ -368,7 +368,7 @@ soundness finding, so these are NEW + test-infra hardening.)
    `forge_pubinput_*` / real-bb e2e cases in a nargo/bb-available CI job so audit-#1
    serialization drift and the crypto-chain gates are regression-protected, not just
    code-read. Companion to sq-1gir.
-2. **[feature, P2] Issuer-attested holder binding (credential-bound HolderPoP)** (NEW-2a).
+2. **[feature, P2] Issuer-attested holder binding (credential-bound HolderPop)** (NEW-2a).
    `area:sparq-zk-compose, zk`. Bind the holder key into the credential commitment message so
    the PoP attests possession of THIS credential's holder key, closing the
    trusted-holder-A-presents-B's-credential gap.
