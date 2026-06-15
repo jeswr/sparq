@@ -91,6 +91,13 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod backend;
+// [OPUS-4.8] sq-rrz4: secure secret-shared greater-than / threshold over Fp that
+// opens ONLY the boolean verdict bit, never the operands. Bit-decomposition
+// MSB-first comparison chaining multiplications via mul_shares_raw + the landed
+// BGW degree-reduction (sq-dvuc). Realises the §4.3 four-flatmates "cumulative
+// salary > £100k" disclosing only the verdict. Honest-majority, semi-honest (NOT
+// malicious) — reported as OperatorClass::Comparison. See the module docs.
+pub mod compare;
 // [OPUS-4.8] sq-sxm: the (security model × N × query class) benchmark MATRIX
 // harness + its deterministic communication/round/multiplication counter — the
 // IN-PROCESS counting tier (Tier 1). New modules, isolated from the protocol
@@ -162,16 +169,21 @@ pub use backend::{
 pub use bench::{
     cell, run_matrix, CellSecurity, MatrixCell, MatrixResults, QueryClass, DEFAULT_PARTIES,
 };
-pub use metrics::{CommCounter, FIELD_BYTES};
+// [OPUS-4.8] sq-rrz4: the secure-comparison surface (verdict-only disclosure).
+pub use compare::{
+    disclose_threshold_verdict, open_verdict, secure_greater_than, secure_threshold, COMPARE_BITS,
+    COMPARE_MAX_EXCLUSIVE,
+};
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, JoinPlan};
-pub use partial::{HolderId, MpcError, PartialResult};
-pub use proof::{Attestation, CollaborativeProof, ProofStatement};
+pub use metrics::{CommCounter, FIELD_BYTES};
 pub use oblivious::{
     shuffle, sort_by, sort_with_keys, AccessPattern, Comparator, SecretColumn, ShuffleCost,
     SortByResult, SortCost, SortWithKeysResult, SortingNetwork, Switch, WaksmanNetwork,
 };
+pub use partial::{HolderId, MpcError, PartialResult};
+pub use proof::{Attestation, CollaborativeProof, ProofStatement};
 // [OPUS-4.8] sq-jnkm: the oblivious set-returning output path surface.
 pub use oblivious_join::{
     oblivious_join_output, oblivious_set_output, oblivious_set_output_hidden_keys, Candidate,

@@ -73,8 +73,13 @@ Top-level re-exports (`use sparq_mpc::...`):
   - `oblivious_set_output(backend, candidates, payload_arity, bound) -> Result<(Vec<OutputSlot>, ObliviousOutputCost), MpcError>` — reveals exactly `bound` (`B`) `OutputSlot::{ Row(..), Dummy }` slots in oblivious-shuffled order; matched rows survive, non-matches/padding become `Dummy`. The parties learn only `B` and `≤ B` (not the true count, not which slots matched). **Fails closed** if `bound < candidates.len()` (never truncates a match).
   - `oblivious_join_output(backend, candidates, out_vars, bound) -> Result<(PartialResult, ObliviousOutputCost), MpcError>` — the `PartialResult`-shaped wrapper (dummies filtered, `federation`-attributed, canonical order).
   - `oblivious_set_output_hidden_keys(..)` — the truly-private-key variant; returns `NotYetImplemented` gated on `sq-rrz4`/`sq-dvuc` (a secure equality-to-SHARED-bit that is never opened per-pair; the existing `secure_equal` only *opens* the bit, which is the L2 leak). The output **transform** + the disclosed-key path are sound today.
+- **Secure comparison / threshold (sq-rrz4, `compare` module)** — secret-shared `>` over `Fp` that opens **only the boolean verdict bit**, never the operands or their difference (the disclosure-minimising counterpart to `reconstruct_disclosed`, which opens the integer). Bit-decomposition MSB-first comparison; chains multiplications via `mul_shares_raw` + the BGW `degree_reduce` (sq-dvuc), so it is a genuine depth-`O(L)` mult chain. **Honest-majority, semi-honest — NOT malicious** (reported as `OperatorClass::Comparison` → `SemiHonestOnly`). Operands must be `< 2^60` (`COMPARE_MAX_EXCLUSIVE`); `n >= 2t+1`; both fail-closed. Round-per-bit (LAN-fine, WAN-poor); the constant-round Rabbit/DGK/edaBits family is future work.
+  - `secure_greater_than(dealer: &mut ShamirDealer, a: Fp, b: Fp) -> Result<Vec<Share>, MpcError>` — a degree-`t` sharing of the bit `a > b`; operands secret-shared internally and never reconstructed.
+  - `secure_threshold(dealer, secret: Fp, threshold: Fp) -> Result<Vec<Share>, MpcError>` — the £100k path: threshold is PUBLIC (its bits are constants, no extra mult round), returns the sharing of `secret > threshold`.
+  - `open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, MpcError>` — opens ONLY the verdict bit (refuses a non-0/1 reconstruction).
+  - `disclose_threshold_verdict(backend, sum_shares: &[Share], public_threshold: u64) -> Result<PartialResult, MpcError>` — the four-flatmates path end-to-end: from a secret-shared sum, discloses a one-cell `?over_threshold` **boolean** partial — the exact sum is never in the output.
 - `Fp` — field element over `F_p`, `p = 2^61 - 1`. `Fp::new(u64)`, `Fp::value() -> u64`, `Fp::zero()`, `Fp::one()`.
-- `Share { x: u64, y: Fp }`; field/share helpers in `sparq_mpc::shamir` (`add_shares`, `sub_shares`, `mul_shares_raw`, `add_constant`, `scale`, `reconstruct_degree`).
+- `Share { x: u64, y: Fp }`; field/share helpers in `sparq_mpc::shamir` (`add_shares`, `sub_shares`, `mul_shares_raw`, `add_constant`, `scale`, `reconstruct_degree`). `ShamirDealer::degree_reduce(&[Share])` reduces a degree-`2t` product back to degree-`t` so multiplications chain (depth>1).
 - `MpcError::{ LocalEval { holder, message }, Protocol(String), NotYetImplemented { what, gated_on }, Tampered { detail, cheaters }, NoBackendSatisfies { requirement, considered } }` — the honest error channels: `NotYetImplemented` for deferred crypto, `Tampered` for a detected active deviation on a redundant reconstruction, and `NoBackendSatisfies` for a fail-closed selection refusal.
 - `CollaborativeProof<B: MpcBackend>`, `Attestation`, `ProofStatement`, `Proof`, `AttestationShare` — **interface only**; every method is a stub returning `NotYetImplemented`.
 - `SecureRng` / `MpcRng` — the CSPRNG masking seam (you rarely touch these directly).
@@ -98,9 +103,24 @@ let summed = backend.run_secure(&shares)?;               // cumulative sum over 
 let out = backend.reconstruct_disclosed(&summed)?;       // -> PartialResult: one ?cumulative integer (75000)
 # Ok::<(), sparq_mpc::MpcError>(())
 ```
-> `share_private_input` expects the holder's data to yield exactly **one row, one integer column** for `SELECT ?salary WHERE { ?p ex:salary ?salary }`; anything else is a `Protocol` error (it never guesses). The verifier recomputes any threshold like `sum > £100k` *outside* the crypto.
+> `share_private_input` expects the holder's data to yield exactly **one row, one integer column** for `SELECT ?salary WHERE { ?p ex:salary ?salary }`; anything else is a `Protocol` error (it never guesses). To disclose a threshold like `sum > £100k` while revealing ONLY the boolean (not the exact total), use the secure comparison (`disclose_threshold_verdict`, recipe 2) instead of `reconstruct_disclosed` — the latter opens the integer for an out-of-crypto recompute.
 
-### 2. Hidden-value join on a private key (circuit-PSI core)
+### 2. Threshold verdict only — `sum > £100k` without revealing the sum (the four-flatmates disclosure-minimisation)
+The secure comparison opens ONLY the boolean. Reuse the secret-shared sum from recipe 1; the exact total is never reconstructed.
+
+```rust
+use sparq_mpc::{ShamirBackend, MpcBackend, disclose_threshold_verdict, Fp};
+
+let backend = ShamirBackend::new(5)?;                 // n >= 2t+1 (comparison is a mult chain)
+let salaries = [30_000u64, 28_000, 26_000, 24_000];   // sums to 108_000
+let shared: Vec<_> = salaries.iter().map(|&s| backend.dealer().share(Fp::new(s))).collect();
+let summed = backend.run_secure(&shared)?;            // secret-shared cumulative sum
+let out = disclose_threshold_verdict(&backend, &summed[0], 100_000)?;
+// out: one ?over_threshold = "true"^^xsd:boolean — the £108k total NEVER appears.
+# Ok::<(), sparq_mpc::MpcError>(())
+```
+
+### 3. Hidden-value join on a private key (circuit-PSI core)
 Join two holders on a key WITHOUT revealing the key — only the matched payload columns are disclosed.
 
 ```rust
@@ -120,7 +140,7 @@ let joined = HiddenValueJoin::new(backend).join(&left, &right)?;
 # Ok::<(), sparq_mpc::MpcError>(())
 ```
 
-### 3. Multi-holder chain join on disclosed global IRIs
+### 4. Multi-holder chain join on disclosed global IRIs
 `DisclosedKeyJoin` folds pairwise; chain joins by feeding the result back in with the next shared variable.
 
 ```rust
@@ -133,7 +153,7 @@ let abc = DisclosedKeyJoin.join(&[ab, pc], &JoinPlan { join_var: v("y"), key_dis
 # Ok::<(), sparq_mpc::MpcError>(())
 ```
 
-### 4. Inspect a backend's guarantees before trusting it
+### 5. Inspect a backend's guarantees before trusting it
 A federation should refuse a backend whose guarantees don't match its threat model.
 
 ```rust
@@ -167,7 +187,7 @@ assert!(matches!(refused, Err(MpcError::NoBackendSatisfies { .. })));
 # Ok::<(), sparq_mpc::MpcError>(())
 ```
 
-### 5. Reproducible tests/benches (predictable masks — never production)
+### 6. Reproducible tests/benches (predictable masks — never production)
 ```toml
 [dev-dependencies]            # or [dependencies] only if you understand the risk
 sparq-mpc = { path = "crates/sparq-mpc", features = ["insecure-test-rng"] }
@@ -177,7 +197,7 @@ let backend = sparq_mpc::ShamirBackend::new_seeded(3, 0xBEEF)?;   // determinist
 # Ok::<(), sparq_mpc::MpcError>(())
 ```
 
-### 6. Handle deferred crypto honestly
+### 7. Handle deferred crypto honestly
 The collaborative proof and the hidden-key path of `DisclosedKeyJoin` are gated; match the error rather than assuming success.
 
 ```rust
