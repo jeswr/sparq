@@ -11,7 +11,7 @@
 
 use sparq_core::Graph;
 use std::collections::BTreeSet;
-use std::path::Path;
+use tempfile::TempDir;
 
 /// Canonical comparable triple set (N-Triples term rendering) — same helper as
 /// `tests/roundtrip.rs`.
@@ -48,10 +48,15 @@ const ZOO: &str = concat!(
     "_:b1 <http://xmlns.com/foaf/0.1/name> \"anon\" .\n",
 );
 
-fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-write");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join(name)
+/// [OPUS-4.8] sq-117n: a UNIQUE, auto-cleaned scratch directory, one per call.
+///
+/// These tests `save` archives to disk and read them back. Previously every test
+/// shared one fixed `CARGO_TARGET_TMPDIR/sparq-hdt-write` directory (distinguished
+/// only by per-call FILE names); a unique `tempfile::tempdir()` per test removes any
+/// chance of cross-test contention on the shared directory and auto-cleans on drop.
+/// Bind the returned `TempDir` to a local and join names off `dir.path()`.
+fn scratch_dir() -> TempDir {
+    tempfile::tempdir().expect("creating a unique scratch directory")
 }
 
 /// Core contract: Graph -> `save` .hdt -> `load` .hdt == the original Graph,
@@ -59,7 +64,8 @@ fn scratch(name: &str) -> std::path::PathBuf {
 #[test]
 fn save_then_load_round_trips_the_term_zoo() {
     let original = Graph::load_str(ZOO, "ntriples").unwrap();
-    let path = scratch("zoo.hdt");
+    let dir = scratch_dir();
+    let path = dir.path().join("zoo.hdt");
     sparq_hdt::save(&original, &path).expect("saving Graph to .hdt");
 
     let reloaded = sparq_hdt::load(&path).expect("loading the saved .hdt");
@@ -87,7 +93,8 @@ fn save_then_load_round_trips_the_term_zoo() {
 #[test]
 fn saved_archive_loads_via_upstream_oracle_too() {
     let original = Graph::load_str(ZOO, "ntriples").unwrap();
-    let path = scratch("zoo-oracle.hdt");
+    let dir = scratch_dir();
+    let path = dir.path().join("zoo-oracle.hdt");
     sparq_hdt::save(&original, &path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -104,6 +111,7 @@ fn saved_archive_loads_via_upstream_oracle_too() {
 fn save_honours_compression_containers() {
     let original = Graph::load_str(ZOO, "ntriples").unwrap();
     let reference = triple_set(&original);
+    let dir = scratch_dir();
 
     // Magic bytes the reader sniffs: gzip 1f 8b, zstd 28 b5 2f fd, bzip2 "BZh".
     for (name, magic) in [
@@ -111,7 +119,7 @@ fn save_honours_compression_containers() {
         ("zoo.hdt.zst", &[0x28, 0xb5, 0x2f, 0xfd][..]),
         ("zoo.hdt.bz2", &[0x42, 0x5a, 0x68][..]),
     ] {
-        let path = scratch(name);
+        let path = dir.path().join(name);
         sparq_hdt::save(&original, &path).unwrap_or_else(|e| panic!("[{name}] save: {e}"));
 
         // The file really is wrapped in the requested container.
@@ -127,7 +135,7 @@ fn save_honours_compression_containers() {
     }
 
     // A bare `.hdt` writes the uncompressed `$HDT` cookie.
-    let bare = scratch("zoo-bare.hdt");
+    let bare = dir.path().join("zoo-bare.hdt");
     sparq_hdt::save(&original, &bare).unwrap();
     let head = std::fs::read(&bare).unwrap();
     assert_eq!(
@@ -157,7 +165,8 @@ fn save_round_trips_multiblock_graph() {
         writeln!(nt, "<http://example.org/e{i}> {label} \"name {i}\"@en .").unwrap();
     }
     let original = Graph::load_str(&nt, "ntriples").unwrap();
-    let path = scratch("multiblock.hdt");
+    let dir = scratch_dir();
+    let path = dir.path().join("multiblock.hdt");
     sparq_hdt::save(&original, &path).unwrap();
 
     let reloaded = sparq_hdt::load(&path).unwrap();
@@ -170,7 +179,8 @@ fn save_round_trips_multiblock_graph() {
 #[test]
 fn save_empty_graph() {
     let empty = Graph::load_str("", "ntriples").unwrap();
-    let path = scratch("empty.hdt");
+    let dir = scratch_dir();
+    let path = dir.path().join("empty.hdt");
     sparq_hdt::save(&empty, &path).unwrap();
     let reloaded = sparq_hdt::load(&path).unwrap();
     assert_eq!(reloaded.store.len(), 0);
@@ -182,10 +192,11 @@ fn save_empty_graph() {
 #[test]
 fn save_is_idempotent_on_content() {
     let original = Graph::load_str(ZOO, "ntriples").unwrap();
-    let p1 = scratch("idem-1.hdt");
+    let dir = scratch_dir();
+    let p1 = dir.path().join("idem-1.hdt");
     sparq_hdt::save(&original, &p1).unwrap();
     let g1 = sparq_hdt::load(&p1).unwrap();
-    let p2 = scratch("idem-2.hdt");
+    let p2 = dir.path().join("idem-2.hdt");
     sparq_hdt::save(&g1, &p2).unwrap();
     let g2 = sparq_hdt::load(&p2).unwrap();
     assert_eq!(triple_set(&g1), triple_set(&g2));
@@ -200,9 +211,10 @@ fn save_is_idempotent_on_content() {
 fn direct_encoder_writes_no_temp_files() {
     const SAVES: usize = 30;
     let original = Graph::load_str(ZOO, "ntriples").unwrap();
+    let dir = scratch_dir();
     let before = count_scratch_nt();
     for i in 0..SAVES {
-        sparq_hdt::save(&original, scratch(&format!("cleanup-{i}.hdt"))).unwrap();
+        sparq_hdt::save(&original, dir.path().join(format!("cleanup-{i}.hdt"))).unwrap();
     }
     let after = count_scratch_nt();
     // The direct encoder creates none, so the count cannot grow with `SAVES`.
@@ -243,15 +255,16 @@ fn count_scratch_nt() -> usize {
 #[test]
 fn direct_encode_matches_upstream_builder() {
     let original = Graph::load_str(ZOO, "ntriples").unwrap();
+    let dir = scratch_dir();
 
     // Ours: the direct in-memory encoder.
-    let direct_path = scratch("equiv-direct.hdt");
+    let direct_path = dir.path().join("equiv-direct.hdt");
     sparq_hdt::save(&original, &direct_path).unwrap();
     let direct_bytes = std::fs::read(&direct_path).unwrap();
 
     // Oracle: render the SAME graph to N-Triples, build via the upstream crate's
     // `read_nt`, write via `Hdt::write` (the retired round-trip path's machinery).
-    let nt_path = scratch("equiv-oracle.nt");
+    let nt_path = dir.path().join("equiv-oracle.nt");
     {
         use std::io::Write as _;
         let mut f = std::io::BufWriter::new(std::fs::File::create(&nt_path).unwrap());

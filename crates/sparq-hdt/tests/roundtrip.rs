@@ -4,9 +4,29 @@
 use sparq_core::Graph;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+/// [OPUS-4.8] sq-117n: a UNIQUE, auto-cleaned scratch directory, one per call.
+///
+/// The tests here materialize `.hdt` archives by writing an N-Triples file to disk
+/// (`src.nt` / `zoo.nt` / …) and reading it back with `hdt::Hdt::read_nt`. Previously
+/// each test (and the shared `valid_corruptible_hdt()` / `nt_to_hdt_bytes` helpers)
+/// joined `CARGO_TARGET_TMPDIR` with a FIXED subdir name, so sibling tests running
+/// concurrently under `cargo test` raced on the same file — one test writing/replacing
+/// `src.nt` while another read it back, which intermittently flaked the rejection-oracle
+/// tests (`rejection_oracle_*` all funneled through one `sparq-hdt-corrupt` dir).
+/// `tempfile::tempdir()` returns a fresh, uniquely-named directory under the OS temp
+/// dir that is removed when the returned `TempDir` is dropped, so no two test
+/// invocations can ever collide. Callers must keep the `TempDir` alive for as long as
+/// they use the path (binding it to a local does this).
+fn scratch_dir() -> TempDir {
+    tempfile::tempdir().expect("creating a unique scratch directory")
 }
 
 /// Dumps a graph as a canonical, comparable triple set (N-Triples term rendering).
@@ -16,7 +36,11 @@ fn triple_set(g: &Graph) -> BTreeSet<[String; 3]> {
         .iter()
         .map(|r| {
             let [s, p, o] = scan.to_spo(r);
-            [g.dict.term(s).to_string(), g.dict.term(p).to_string(), g.dict.term(o).to_string()]
+            [
+                g.dict.term(s).to_string(),
+                g.dict.term(p).to_string(),
+                g.dict.term(o).to_string(),
+            ]
         })
         .collect()
 }
@@ -64,10 +88,9 @@ fn generated_hdt_round_trips() {
         "_:b1 <http://xmlns.com/foaf/0.1/name> \"anon\" .\n",
     );
 
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-roundtrip");
-    std::fs::create_dir_all(&dir).unwrap();
-    let nt_path = dir.join("zoo.nt");
-    let hdt_path = dir.join("zoo.hdt");
+    let dir = scratch_dir();
+    let nt_path = dir.path().join("zoo.nt");
+    let hdt_path = dir.path().join("zoo.hdt");
     std::fs::write(&nt_path, nt).unwrap();
 
     // N-Triples -> HDT archive on disk (FourSectDict PFC + BitmapTriples).
@@ -126,11 +149,13 @@ fn gzipped_hdt_loads_transparently() {
     // Through a reader…
     let g = sparq_hdt::load_reader(std::io::Cursor::new(gz.clone())).unwrap();
     assert_eq!(g.store.len(), 328);
-    assert_eq!(triple_set(&g), triple_set(&sparq_hdt::load(fixture("snikmeta.hdt")).unwrap()));
+    assert_eq!(
+        triple_set(&g),
+        triple_set(&sparq_hdt::load(fixture("snikmeta.hdt")).unwrap())
+    );
     // …and through a path with NO .gz extension (content sniffing, not names).
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-gz");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("disguised.hdt");
+    let dir = scratch_dir();
+    let path = dir.path().join("disguised.hdt");
     std::fs::write(&path, &gz).unwrap();
     assert_eq!(sparq_hdt::load(&path).unwrap().store.len(), 328);
 }
@@ -173,9 +198,8 @@ fn zstd_hdt_loads_transparently() {
     let g = sparq_hdt::load_reader(std::io::Cursor::new(zst.clone())).unwrap();
     assert_eq!(g.store.len(), 328);
     assert_eq!(triple_set(&g), triple_set(&plain));
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-zst");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("disguised.hdt"); // sniffed by content, not name
+    let dir = scratch_dir();
+    let path = dir.path().join("disguised.hdt"); // sniffed by content, not name
     std::fs::write(&path, &zst).unwrap();
     assert_eq!(sparq_hdt::load(&path).unwrap().store.len(), 328);
 }
@@ -189,9 +213,8 @@ fn bzip2_hdt_loads_transparently() {
     let g = sparq_hdt::load_reader(std::io::Cursor::new(bz.clone())).unwrap();
     assert_eq!(g.store.len(), 328);
     assert_eq!(triple_set(&g), triple_set(&plain));
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-bz2");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("disguised.hdt"); // sniffed by content, not name
+    let dir = scratch_dir();
+    let path = dir.path().join("disguised.hdt"); // sniffed by content, not name
     std::fs::write(&path, &bz).unwrap();
     assert_eq!(sparq_hdt::load(&path).unwrap().store.len(), 328);
 }
@@ -232,21 +255,36 @@ fn header_exposes_dataset_metadata() {
 /// Loads `bytes` both ways (direct decoder vs upstream oracle) and asserts the two
 /// graphs are triple-for-triple identical and have the same distinct-term count.
 fn assert_direct_matches_upstream(bytes: &[u8], min_triples: usize) {
-    let direct = sparq_hdt::load_reader(std::io::Cursor::new(bytes.to_vec()))
-        .expect("direct decoder load");
+    let direct =
+        sparq_hdt::load_reader(std::io::Cursor::new(bytes.to_vec())).expect("direct decoder load");
     let upstream = sparq_hdt::load_reader_via_upstream(std::io::Cursor::new(bytes.to_vec()))
         .expect("upstream-oracle load");
 
     let d = triple_set(&direct);
     let u = triple_set(&upstream);
-    assert!(d.len() >= min_triples, "expected >= {min_triples} triples, got {}", d.len());
-    assert_eq!(d, u, "direct decoder and upstream oracle must agree triple-for-triple");
-    assert_eq!(direct.store.len(), upstream.store.len(), "same stored triple count");
+    assert!(
+        d.len() >= min_triples,
+        "expected >= {min_triples} triples, got {}",
+        d.len()
+    );
+    assert_eq!(
+        d, u,
+        "direct decoder and upstream oracle must agree triple-for-triple"
+    );
+    assert_eq!(
+        direct.store.len(),
+        upstream.store.len(),
+        "same stored triple count"
+    );
     // The id-translation must intern the same set of distinct terms. The exact
     // sparq ids depend only on first-appearance order, which is identical because
     // both walk SPO order; comparing distinct-term counts plus the triple-set
     // equality above pins the dictionary translation.
-    assert_eq!(direct.dict.len(), upstream.dict.len(), "same number of distinct interned terms");
+    assert_eq!(
+        direct.dict.len(),
+        upstream.dict.len(),
+        "same number of distinct interned terms"
+    );
 }
 
 /// snikmeta.hdt: a real archive (NOT produced by our writer), 328 triples, whose
@@ -282,19 +320,27 @@ fn direct_decoder_matches_upstream_generated_multiblock() {
     let height = "<http://example.org/height>";
     for i in 0..N {
         // chain: e{i} knows e{i+1} -> e{i} appears as both subject and object (shared)
-        writeln!(nt, "<http://example.org/e{i}> {knows} <http://example.org/e{}> .", i + 1).unwrap();
+        writeln!(
+            nt,
+            "<http://example.org/e{i}> {knows} <http://example.org/e{}> .",
+            i + 1
+        )
+        .unwrap();
         // language-tagged + datatyped + plain literals, object-only section, many blocks
         writeln!(nt, "<http://example.org/e{i}> {label} \"name {i}\"@en .").unwrap();
-        writeln!(nt, "<http://example.org/e{i}> {age} \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer> .").unwrap();
+        writeln!(
+            nt,
+            "<http://example.org/e{i}> {age} \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer> ."
+        )
+        .unwrap();
         writeln!(nt, "<http://example.org/e{i}> {height} \"{i}.5\"^^<http://www.w3.org/2001/XMLSchema#decimal> .").unwrap();
     }
     // A couple of blank nodes (subject + object positions).
     writeln!(nt, "_:anon0 {knows} <http://example.org/e0> .").unwrap();
     writeln!(nt, "<http://example.org/e0> {knows} _:anon1 .").unwrap();
 
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-multiblock");
-    std::fs::create_dir_all(&dir).unwrap();
-    let nt_path = dir.join("multiblock.nt");
+    let dir = scratch_dir();
+    let nt_path = dir.path().join("multiblock.nt");
     std::fs::write(&nt_path, &nt).unwrap();
 
     let written = hdt::Hdt::read_nt(&nt_path).expect("building multi-block HDT");
@@ -302,8 +348,14 @@ fn direct_decoder_matches_upstream_generated_multiblock() {
     written.write(&mut buf).expect("serializing HDT");
 
     // Sanity: confirm the fixture really is multi-block + shared-heavy.
-    assert!(written.dict.objects.num_strings > written.dict.objects.block_size, "objects must span >1 block");
-    assert!(written.dict.shared.num_strings > written.dict.shared.block_size, "shared must span >1 block");
+    assert!(
+        written.dict.objects.num_strings > written.dict.objects.block_size,
+        "objects must span >1 block"
+    );
+    assert!(
+        written.dict.shared.num_strings > written.dict.shared.block_size,
+        "shared must span >1 block"
+    );
 
     assert_direct_matches_upstream(&buf, 4 * N);
 
@@ -340,19 +392,24 @@ fn all_codecs_decode_to_identical_triple_set() {
     let knows = "<http://xmlns.com/foaf/0.1/knows>";
     let label = "<http://www.w3.org/2000/01/rdf-schema#label>";
     for i in 0..N {
-        writeln!(nt, "<http://example.org/e{i}> {knows} <http://example.org/e{}> .", i + 1).unwrap();
+        writeln!(
+            nt,
+            "<http://example.org/e{i}> {knows} <http://example.org/e{}> .",
+            i + 1
+        )
+        .unwrap();
         writeln!(nt, "<http://example.org/e{i}> {label} \"name {i}\"@en .").unwrap();
     }
 
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-codecs");
-    std::fs::create_dir_all(&dir).unwrap();
-    let nt_path = dir.join("codecs.nt");
+    let dir = scratch_dir();
+    let nt_path = dir.path().join("codecs.nt");
     std::fs::write(&nt_path, &nt).unwrap();
     let written = hdt::Hdt::read_nt(&nt_path).expect("building HDT");
     let mut plain: Vec<u8> = Vec::new();
     written.write(&mut plain).expect("serializing HDT");
 
-    let reference = triple_set(&sparq_hdt::load_reader(std::io::Cursor::new(plain.clone())).unwrap());
+    let reference =
+        triple_set(&sparq_hdt::load_reader(std::io::Cursor::new(plain.clone())).unwrap());
     assert!(reference.len() >= 2 * N);
 
     // gzip
@@ -369,7 +426,11 @@ fn all_codecs_decode_to_identical_triple_set() {
     for (codec, bytes) in [("gzip", gz), ("zstd", zst), ("bzip2", bz)] {
         let g = sparq_hdt::load_reader(std::io::Cursor::new(bytes))
             .unwrap_or_else(|e| panic!("{codec} decode failed: {e}"));
-        assert_eq!(triple_set(&g), reference, "{codec} must decode to the identical triple set as plain .hdt");
+        assert_eq!(
+            triple_set(&g),
+            reference,
+            "{codec} must decode to the identical triple set as plain .hdt"
+        );
     }
 }
 
@@ -381,9 +442,8 @@ fn direct_decoder_matches_upstream_tiny() {
         "", // empty graph: zero strings in every section, zero triples
         "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
     ] {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-tiny");
-        std::fs::create_dir_all(&dir).unwrap();
-        let nt_path = dir.join("tiny.nt");
+        let dir = scratch_dir();
+        let nt_path = dir.path().join("tiny.nt");
         std::fs::write(&nt_path, nt).unwrap();
         let written = hdt::Hdt::read_nt(&nt_path).expect("building tiny HDT");
         let mut buf: Vec<u8> = Vec::new();
@@ -413,10 +473,14 @@ fn direct_decoder_matches_upstream_tiny() {
 /// Materializes `nt` as an in-process `.hdt` archive (the crate's existing
 /// fixture-write path: N-Triples -> FourSectDict PFC + BitmapTriples via the `hdt`
 /// crate's `read_nt` + `write`) and returns the archive bytes.
-fn nt_to_hdt_bytes(nt: &str, scratch: &str) -> Vec<u8> {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(scratch);
-    std::fs::create_dir_all(&dir).unwrap();
-    let nt_path = dir.join("src.nt");
+///
+/// [OPUS-4.8] sq-117n: each call gets its OWN unique, auto-cleaned scratch dir
+/// (`scratch_dir()`), so concurrent callers can never race on the same `src.nt`.
+/// The `TempDir` lives only for this call: `read_nt` reads the whole file and the
+/// archive is returned in memory, so the directory is safely removed on return.
+fn nt_to_hdt_bytes(nt: &str) -> Vec<u8> {
+    let dir = scratch_dir();
+    let nt_path = dir.path().join("src.nt");
     std::fs::write(&nt_path, nt).unwrap();
     let written = hdt::Hdt::read_nt(&nt_path).expect("building HDT from N-Triples");
     let mut buf: Vec<u8> = Vec::new();
@@ -477,7 +541,7 @@ fn hdt_load_matches_ntriples_load() {
     ];
 
     for (name, nt) in graphs {
-        let hdt_bytes = nt_to_hdt_bytes(nt, &format!("sparq-hdt-diff-{name}"));
+        let hdt_bytes = nt_to_hdt_bytes(nt);
         let from_hdt = sparq_hdt::load_reader(std::io::Cursor::new(hdt_bytes))
             .unwrap_or_else(|e| panic!("[{name}] loading generated HDT: {e}"));
         let from_nt = Graph::load_str(nt, "ntriples")
@@ -501,7 +565,7 @@ fn hdt_load_matches_ntriples_load() {
         // (2) The SAME archive gzipped must term-equal the plain archive (the
         // streaming `.hdt.gz` path feeds the identical decoder), exercised on each
         // differential graph rather than only the snikmeta fixture.
-        let plain = nt_to_hdt_bytes(nt, &format!("sparq-hdt-diff-{name}"));
+        let plain = nt_to_hdt_bytes(nt);
         use std::io::Write as _;
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         gz.write_all(&plain).unwrap();
@@ -537,7 +601,7 @@ fn pfc_dictionary_edges_translate_identically() {
               <http://example.org/path/to/resource/aaab> <http://example.org/p> <http://example.org/path/to/resource/aaac> .\n\
               <http://example.org/path/to/resource/a> <http://example.org/empty> \"\" .\n";
 
-    let hdt_bytes = nt_to_hdt_bytes(nt, "sparq-hdt-pfc-edges");
+    let hdt_bytes = nt_to_hdt_bytes(nt);
     let from_hdt = sparq_hdt::load_reader(std::io::Cursor::new(hdt_bytes.clone())).unwrap();
     let from_nt = Graph::load_str(nt, "ntriples").unwrap();
     assert_eq!(
@@ -604,7 +668,7 @@ fn valid_corruptible_hdt() -> Vec<u8> {
               _:b0 <http://xmlns.com/foaf/0.1/knows> <http://example.org/alice> .\n\
               _:b0 <http://example.org/link> _:b1 .\n\
               _:b1 <http://xmlns.com/foaf/0.1/name> \"anon\" .\n";
-    nt_to_hdt_bytes(nt, "sparq-hdt-corrupt")
+    nt_to_hdt_bytes(nt)
 }
 
 /// Named, targeted corruptions: bad magic and a truncation landing in each of the
