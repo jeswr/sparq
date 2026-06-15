@@ -94,6 +94,9 @@ standard it implements.
   [RSP-QL](https://www.w3.org/community/rsp/) ([guide](skills/streaming-rsp/SKILL.md)).
 - **Solid access control** — enforce [Solid WAC](https://solidproject.org/TR/wac) and
   [ACP](https://solidproject.org/TR/acp) authorisation ([crate](crates/sparq-solid/)).
+- **RDF Dataset Canonicalization** — deterministic, blank-node-relabelled canonical form for
+  hashing/signing/diffing with [RDFC-1.0](https://www.w3.org/TR/rdf-canon/)
+  ([guide](skills/rdf-canon/SKILL.md)).
 - **Zero-knowledge query proofs** — prove a query result is correct without revealing the data
   ([guide](skills/zk-query-proofs/SKILL.md)).
 - **Federated MPC** — evaluate SPARQL across parties with secure multi-party computation

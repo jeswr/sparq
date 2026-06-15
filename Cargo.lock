@@ -3266,6 +3266,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-canon"
+version = "0.1.0"
+dependencies = [
+ "digest 0.10.7",
+ "oxrdf 0.2.4",
+ "oxrdf 0.3.3",
+ "oxttl 0.1.8",
+ "oxttl 0.2.3",
+ "rdf-canon",
+ "serde_json",
+ "sha2 0.10.9",
+ "sparq-core",
+ "sparq-engine",
+]
+
+[[package]]
 name = "sparq-cli"
 version = "0.1.0"
 dependencies = [
@@ -3584,14 +3600,9 @@ dependencies = [
  "ark-std",
  "blake3",
  "getrandom 0.2.17",
- "oxrdf 0.2.4",
  "oxrdf 0.3.3",
- "oxttl 0.1.8",
- "oxttl 0.2.3",
- "rdf-canon",
- "serde_json",
- "sha2 0.10.9",
  "spargebra",
+ "sparq-canon",
  "sparq-core",
  "sparq-engine",
 ]
