@@ -77,7 +77,9 @@
 //! duplicates (and thus reuses) a CSPRNG keystream. Each `dealer()` call gets
 //! independent randomness.
 
-use crate::backend::{BackendInfo, MaliciousSecurity, MpcBackend, TrustModel};
+use crate::backend::{
+    BackendInfo, MaliciousSecurity, MpcBackend, OperatorClass, SecurityDescriptor,
+};
 use crate::field::Fp;
 use crate::holder::Holder;
 use crate::partial::{HolderId, MpcError, PartialResult};
@@ -194,6 +196,58 @@ impl ShamirBackend {
             MaliciousSecurity::HonestMajorityAbort
         } else {
             MaliciousSecurity::HonestMajorityRobust { max_cheaters }
+        }
+    }
+
+    /// [OPUS-4.8] sq-mq8q — the RS/Berlekamp–Welch correction budget
+    /// `e = ⌊(n − degree − 1)/2⌋` at a given reconstruction `degree`, or `None`
+    /// when there is NO redundancy (`n <= degree + 1`, so tampering is
+    /// information-theoretically undetectable). Shared by the per-operator
+    /// reporting below: the linear aggregate opens at `degree = t`, the equality
+    /// join at `degree = 2t`.
+    fn rs_correction_budget(&self, degree: usize) -> Option<usize> {
+        if self.n <= degree + 1 {
+            None
+        } else {
+            Some((self.n - degree - 1) / 2)
+        }
+    }
+
+    /// [OPUS-4.8] sq-mq8q — the three-axis [`SecurityDescriptor`] for one
+    /// [`OperatorClass`] at THIS `(n, t)`. Guarantees genuinely differ per
+    /// operator (the degree-`t` aggregate carries RS redundancy for every valid
+    /// honest-majority `(n, t)` and is robust; the degree-`2t` equality open has
+    /// ZERO redundancy at `n = 2t+1` and is semi-honest-only there), so one
+    /// backend-level bit would lie. Surfaced via [`MpcBackend::operator_security`].
+    pub fn operator_descriptor(&self, operator: OperatorClass) -> SecurityDescriptor {
+        match operator {
+            // Linear aggregate: degree-`t` open. Has redundancy for every valid
+            // honest-majority `t = ⌊(n−1)/2⌋`, so in practice it never hits the
+            // no-redundancy branch — but we still match `None` explicitly rather
+            // than collapsing it into `e = 0`. `unwrap_or(0)` would map the
+            // no-redundancy case (tampering information-theoretically undetectable)
+            // onto the SAME `e = 0` detect-and-abort descriptor as the
+            // one-redundant-share case, over-claiming detection where there is
+            // none. Mirror the `EqualityJoin` arm: `None` → `semi_honest_only`.
+            // `[OPUS-4.8]` (Copilot review #87).
+            OperatorClass::LinearAggregate => match self.rs_correction_budget(self.t) {
+                None => SecurityDescriptor::semi_honest_only(self.n, self.t),
+                Some(e) => SecurityDescriptor::shamir_degree_recon(self.n, self.t, e),
+            },
+            // Equality / hidden-value join: degree-`2t` open. No redundancy at
+            // `n = 2t+1` (odd-`n` honest majority) → semi-honest-only; otherwise
+            // the RS budget at degree `2t` decides detect-and-abort vs robust.
+            OperatorClass::EqualityJoin => match self.rs_correction_budget(2 * self.t) {
+                None => SecurityDescriptor::semi_honest_only(self.n, self.t),
+                Some(e) => SecurityDescriptor::shamir_degree_recon(self.n, self.t, e),
+            },
+            // Comparison (`<`,`≤`,`>`) is not realized in-crypto in the crate
+            // (disclosed operands are recomputed by the verifier outside the
+            // crypto). Report the honest "no in-crypto guarantee" baseline so a
+            // federation sees the gap rather than an over-claim. (Realizing it
+            // in-crypto is tracked separately — see the operator matrix in
+            // research/mpc-security-models-and-benchmarks.md §3.)
+            OperatorClass::Comparison => SecurityDescriptor::semi_honest_only(self.n, self.t),
         }
     }
 
@@ -473,28 +527,35 @@ impl MpcBackend for ShamirBackend {
     type Share = ShareVec;
 
     fn info(&self) -> BackendInfo {
-        BackendInfo {
-            name: "shamir-honest-majority",
-            trust_model: TrustModel::HonestMajority,
-            // The REAL active-security guarantee the WI-1 RS-checked degree-`t`
-            // reconstruction delivers for THIS `(n, t)`, reported precisely (it
-            // does not over-claim — the n=t+1 / n=2t+1 boundaries are unchanged,
-            // we only surface the guarantee). Shamir shares are an [n, t+1] RS
-            // codeword, so `reconstruct` (degree `t`):
-            //   - n == t+1 (NO redundancy)  → no detection possible → None.
-            //   - n  > t+1, e == 0          → detect-and-abort       → Abort.
-            //   - n  > t+1, e >= 1          → robust up to e cheaters → Robust{e}.
-            // NB: with the honest-majority t = ⌊(n−1)/2⌋, every valid n >= 2 has
-            // n > t+1, so the `None` branch is UNREACHABLE here (it is real only
-            // for the no-redundancy degree-`2t` equality open / a stub backend).
-            // where e = ⌊(n − t − 1)/2⌋ is the RS/Berlekamp–Welch correction
-            // bound (see `crate::robust::reconstruct_robust`). Honest scope: this
-            // is the LINEAR / cumulative-aggregate reconstruction guarantee at
-            // degree `t`; the degree-`2t` equality open (`reconstruct_degree`)
-            // has its OWN, weaker boundary (no redundancy at n=2t+1), already
-            // documented at its call site and NOT claimed here. `[OPUS-4.8]`
-            malicious_security: self.malicious_security(),
-        }
+        // [OPUS-4.8] sq-mq8q — the backend-level descriptor describes the PRIMARY
+        // (degree-`t` linear-aggregate) reconstruction path. `BackendInfo::new`
+        // derives the back-compat `trust_model` / `malicious_security` projection
+        // from it, threading the degree-`t` RS correction budget `e` so the old
+        // enum's `max_cheaters` stays faithful (this PRESERVES the exact prior
+        // `info().malicious_security` value — `self.malicious_security()`). The
+        // weaker degree-`2t` equality-open guarantee is NOT smuggled into the
+        // backend-level bit; it is reported per-operator via `operator_security`.
+        // Shamir shares are an [n, t+1] RS codeword, so `reconstruct` (degree `t`):
+        //   - n == t+1 (NO redundancy)  → no detection possible → SemiHonestOnly.
+        //   - n  > t+1, e == 0          → detect-and-abort       → Abort.
+        //   - n  > t+1, e >= 1          → robust up to e cheaters → Robust{e}.
+        // NB: with the honest-majority t = ⌊(n−1)/2⌋, every valid n >= 2 has
+        // n > t+1, so the no-redundancy branch is UNREACHABLE for the aggregate
+        // (it is real only for the degree-`2t` equality open / a stub backend).
+        let e_t = self.rs_correction_budget(self.t).unwrap_or(0);
+        BackendInfo::new(
+            "shamir-honest-majority",
+            self.operator_descriptor(OperatorClass::LinearAggregate),
+            e_t,
+        )
+    }
+
+    /// [OPUS-4.8] sq-mq8q — per-operator security: the degree-`t` aggregate is
+    /// robust while the degree-`2t` equality open is semi-honest-only at
+    /// `n = 2t+1`, so this reports each [`OperatorClass`] precisely rather than
+    /// letting one backend-level bit lie. Delegates to [`Self::operator_descriptor`].
+    fn operator_security(&self, operator: OperatorClass) -> SecurityDescriptor {
+        self.operator_descriptor(operator)
     }
 
     /// Secret-share a holder's *private* contribution. For the cumulative-
