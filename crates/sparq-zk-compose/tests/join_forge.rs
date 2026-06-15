@@ -173,12 +173,20 @@ fn commitment_hex(inputs: &ProofInputs) -> FieldHex {
 
 /// A `join_eq` sub-proof's public inputs (witness-only — empty `proof_hex`), built
 /// directly so the STRUCTURAL forge tests can tamper individual public fields.
+///
+/// [OPUS-4.8] `join_commitment` is the REAL hiding commitment
+/// `h3(DOMAIN, join_value_enc(), blinding())` (via the host `join_value_commitment`),
+/// NOT a placeholder. The structural privacy pin asserts this field is the hiding
+/// IMAGE of the join value (and not a bare encoding of it); a constant here would
+/// make that assertion vacuous. Toolchain-free (no nargo/bb) — just the host hash.
 fn join_eq_inputs(commit_a: FieldHex, commit_b: FieldHex, slot_a: u32, slot_b: u32) -> ProofInputs {
+    let join_commitment =
+        FieldHex::from_field(&sparq_zk::sig::join_value_commitment(&join_value_enc(), &blinding()));
     ProofInputs::JoinEq {
         id: CircuitId::JoinEq { n_a: 16, n_b: 16 },
         commit_a,
         commit_b,
-        join_commitment: FieldHex("0x0c".to_string()),
+        join_commitment,
         slot_a,
         slot_b,
     }
