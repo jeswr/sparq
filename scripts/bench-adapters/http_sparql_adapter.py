@@ -42,8 +42,16 @@ def parse_sparql_json(text):
     Raises ValueError on a document that is neither a SELECT nor an ASK result."""
     obj = text if isinstance(text, dict) else json.loads(text)
     if "boolean" in obj:
-        b = bool(obj["boolean"])
-        return {"count": 1 if b else 0, "boolean": b, "count_value": None}
+        # [OPUS-4.8] Per the SPARQL 1.1 Query Results JSON rec the ASK "boolean"
+        # member is a JSON boolean. Reject anything else (e.g. the string "false",
+        # which bool() would wrongly coerce to True) as an invalid document rather
+        # than silently mis-counting it.
+        raw = obj["boolean"]
+        if not isinstance(raw, bool):
+            raise ValueError(
+                "SPARQL-JSON 'boolean' is not a JSON boolean: %r" % (raw,)
+            )
+        return {"count": 1 if raw else 0, "boolean": raw, "count_value": None}
     results = obj.get("results")
     if results is None or "bindings" not in results:
         raise ValueError("not a SPARQL SELECT/ASK results document")

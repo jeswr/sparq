@@ -29,7 +29,8 @@
 #     "cmd": ["pyshacl", "-s", "{shapes}", "-f", "turtle", "-o", "{report}", "{data}"],
 #     "report_format": "turtle",      # rdflib format of the produced report
 #     "report_to": "file",            # "file" (engine writes {report}) | "stdout"
-#     "version_cmd": ["pyshacl", "--version"]
+#     "version_cmd": ["pyshacl", "--version"],
+#     "timeout_s": 600                # per-invocation wall-clock cap (default 600)
 #   }
 # {data}/{shapes} are the input paths; {report} is a temp path the adapter creates
 # when report_to == "file" (omit {report} from cmd for report_to == "stdout").
@@ -39,6 +40,11 @@ import subprocess
 import sys
 import tempfile
 import time
+
+# [OPUS-4.8] Default per-invocation wall-clock cap so a hung/interactive external
+# CLI cannot hang the whole long-running gather indefinitely. Overridable per
+# engine via the recipe's "timeout_s".
+DEFAULT_TIMEOUT_S = 600
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -74,6 +80,7 @@ def run_report_cli(recipe, data_path, shapes_path, engine="engine", iters=1):
     report_format = recipe.get("report_format", "turtle")
     report_to = recipe.get("report_to", "file")
     cmd_template = recipe["cmd"]
+    timeout_s = recipe.get("timeout_s", DEFAULT_TIMEOUT_S)
     version = _resolve_version(recipe.get("version_cmd"))
 
     best_us = None
@@ -86,7 +93,15 @@ def run_report_cli(recipe, data_path, shapes_path, engine="engine", iters=1):
             if report_to == "file" and os.path.exists(report_path):
                 os.remove(report_path)
             t0 = time.perf_counter()
-            proc = subprocess.run(argv, capture_output=True, text=True)
+            try:
+                proc = subprocess.run(
+                    argv, capture_output=True, text=True, timeout=timeout_s
+                )
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(
+                    "%s timed out after %ss (override via recipe \"timeout_s\")"
+                    % (engine, timeout_s)
+                ) from e
             dt_us = (time.perf_counter() - t0) * 1e6
             # pySHACL exits non-zero (1) when the data does NOT conform — that is a
             # VALID report, not an engine error. So we do not treat a non-zero exit

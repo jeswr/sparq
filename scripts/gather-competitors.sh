@@ -403,11 +403,20 @@ run_report_cli_engine() { # <id>
     have python3 || die "python3 needed for the report-cli adapter"
     python3 -c 'import rdflib' 2>/dev/null || die "report-cli adapter needs rdflib (pip install rdflib)"
     { [ -n "${SHACL_DATA:-}" ] && [ -n "${SHACL_SHAPES:-}" ]; } || die "report-cli --run needs SHACL_DATA + SHACL_SHAPES"
+    # [OPUS-4.8] The adapter's --json sidecar (stderr) carries the RESOLVED engine
+    # version + the conforms bit; capture it (not /dev/null) so the results
+    # envelope records what the engine actually reported, per the script header
+    # and the adapter design — rather than the pinned_version placeholder.
+    local errf; errf="$(mktemp)"
     OUT="$(python3 "$ADAPTERS_DIR/report_cli_adapter.py" --recipe "$recipe" \
-            --data "$SHACL_DATA" --shapes "$SHACL_SHAPES" --engine "$id" --iters "$ITERS" --json 2>/dev/null)" \
-      || die "report-cli adapter failed for $id"
-    PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,v,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"violations":int(v),"validate_us":int(u)}))')"
-    write_result "$id" "shacl-validate-bench" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+            --data "$SHACL_DATA" --shapes "$SHACL_SHAPES" --engine "$id" --iters "$ITERS" --json 2>"$errf")" \
+      || { rm -f "$errf"; die "report-cli adapter failed for $id"; }
+    PAYLOAD="$(tail -n1 "$errf" | jq -c '{engine,version,conforms,violations,validate_us}' 2>/dev/null)"
+    rm -f "$errf"
+    [ -n "$PAYLOAD" ] || PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,v,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"violations":int(v),"validate_us":int(u)}))')"
+    local rcver; rcver="$(printf '%s' "$PAYLOAD" | jq -r '.version // empty' 2>/dev/null)"
+    [ -n "$rcver" ] || rcver="$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")"
+    write_result "$id" "shacl-validate-bench" "$rcver" "$PAYLOAD"
     check_df
   fi
 }
@@ -419,12 +428,21 @@ run_js_lib_engine() { # <id>
   log "  node harness: $ADAPTERS_DIR/js_shacl_adapter.mjs (engine=$jsengine; same count semantics as report-cli)"
   if [ "$DO_RUN" -eq 1 ]; then
     have node || die "node needed for the js-lib adapter"
+    have jq || die "jq needed for the js-lib adapter (to build the result payload)"
     { [ -n "${SHACL_DATA:-}" ] && [ -n "${SHACL_SHAPES:-}" ]; } || die "js-lib --run needs SHACL_DATA + SHACL_SHAPES"
     local mdir; mdir="${JS_MODULES_DIR:-$PWD}"
+    # [OPUS-4.8] Build the payload from the adapter's --json sidecar (stderr,
+    # well-formed JSON) via jq — not a python3 TSV reparse (python3 was never
+    # required for js-lib) and not a printf %s of raw $OUT (whose unescaped
+    # trailing newline/tab would emit invalid JSON and fail write_result's
+    # validation under set -euo pipefail).
+    local errf; errf="$(mktemp)"
     OUT="$(node "$ADAPTERS_DIR/js_shacl_adapter.mjs" --data "$SHACL_DATA" --shapes "$SHACL_SHAPES" \
-            --engine "$jsengine" --modules-dir "$mdir" --iters "$ITERS" --json 2>/dev/null)" \
-      || die "js-lib adapter failed for $id (npm i $jsengine in $mdir?)"
-    PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,v,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"violations":int(v),"validate_us":int(u)}))' 2>/dev/null || printf '{"raw":"%s"}' "$OUT")"
+            --engine "$jsengine" --modules-dir "$mdir" --iters "$ITERS" --json 2>"$errf")" \
+      || { rm -f "$errf"; die "js-lib adapter failed for $id (npm i $jsengine in $mdir?)"; }
+    PAYLOAD="$(tail -n1 "$errf" | jq -c '{engine,conforms,violations,validate_us}' 2>/dev/null)"
+    rm -f "$errf"
+    [ -n "$PAYLOAD" ] || die "js-lib adapter produced no parseable --json sidecar for $id"
     write_result "$id" "shacl-validate-bench" "$jsengine" "$PAYLOAD"
     check_df
   fi

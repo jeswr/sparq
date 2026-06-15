@@ -63,6 +63,14 @@ def test_http():
     except ValueError:
         check("http.bad-doc-raises", True, True)
 
+    # [OPUS-4.8] A non-boolean "boolean" member (e.g. the string "false") is an
+    # invalid SPARQL-JSON ASK result and must be rejected, not coerced via bool().
+    try:
+        http.parse_sparql_json('{"head":{},"boolean":"false"}')
+        check("http.non-bool-boolean-raises", False, True)
+    except ValueError:
+        check("http.non-bool-boolean-raises", True, True)
+
 
 # --- vector recall scoring ---------------------------------------------------
 def test_vector():

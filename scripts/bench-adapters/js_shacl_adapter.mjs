@@ -212,4 +212,10 @@ async function main() {
   if (args.json) process.stderr.write(JSON.stringify(res) + '\n');
 }
 
-main();
+// [OPUS-4.8] Attach a rejection handler so an uncaught error inside the async
+// main() reliably exits non-zero with a clear message, rather than relying on
+// Node's version-dependent unhandled-rejection exit behaviour.
+main().catch((e) => {
+  process.stderr.write(`js_shacl_adapter: fatal: ${e && e.stack ? e.stack : e}\n`);
+  process.exit(1);
+});
