@@ -747,7 +747,14 @@ def self_test():
 
     def _run_main(metrics_cfg, current_metrics):
         """Write a baseline + current-results JSON to temp files and run main() (no remeasure).
-        Returns (exit_code, captured_stdout)."""
+        Returns (exit_code, captured_stdout).
+
+        [OPUS-4.8] (Copilot #139) HERMETIC: main() reads PERF_GATE_ALLOW from the ambient env, which
+        would let a developer's shell `PERF_GATE_ALLOW=parse_ns_per_byte` mark this case's timing
+        regression as an ALLOWED re-floor instead of the advisory WARNING the assertions expect (a
+        false pass/fail). We temporarily clear PERF_GATE_ALLOW for the duration of the main() call —
+        equivalent to an explicit empty allow-list — and restore the original env afterwards, so the
+        self-test exercises the gate's intrinsic exit-code contract regardless of the caller's shell."""
         with tempfile.TemporaryDirectory() as td:
             base_path = os.path.join(td, "baseline.json")
             cur_path = os.path.join(td, "current.json")
@@ -756,8 +763,13 @@ def self_test():
             with open(cur_path, "w") as fh:
                 json.dump([{"name": n, "unit": "x", "value": v} for n, v in current_metrics.items()], fh)
             buf = io.StringIO()
-            with redirect_stdout(buf):
-                rc = main(["perf-gate.py", cur_path, base_path])
+            saved_allow = os.environ.pop("PERF_GATE_ALLOW", None)
+            try:
+                with redirect_stdout(buf):
+                    rc = main(["perf-gate.py", cur_path, base_path])
+            finally:
+                if saved_allow is not None:
+                    os.environ["PERF_GATE_ALLOW"] = saved_allow
             return rc, buf.getvalue()
 
     cfg_mixed = {
