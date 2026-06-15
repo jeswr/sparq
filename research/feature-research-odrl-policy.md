@@ -292,5 +292,3 @@ FIT legend: `clear-fit:<component>` = lands in an existing/obvious crate;
 - sparq internal: `research/mpc-zkp-research-and-architecture.md`, `research/zk-soundness-audit.md`,
   `crates/sparq-solid/src/{lib,rewrite}.rs`, `crates/sparq-mpc/src/lib.rs`,
   `crates/sparq-zk-compose/README.md`.
-</content>
-</invoke>
