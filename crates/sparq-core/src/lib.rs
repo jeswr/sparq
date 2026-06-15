@@ -1982,24 +1982,72 @@ impl Graph {
     /// stays free of `mmap`-only fields.
     #[cfg(feature = "mmap")]
     fn drop_named_durable_dir(&mut self, idx: usize, dir: &std::path::Path) -> Result<bool, String> {
-        // Drop the entry in memory first; `self.named` is now the SURVIVING set in final order.
+        // [OPUS-4.8] (Copilot #123, Issue 1) Drop the entry in memory first; `self.named` is now
+        // the SURVIVING set in final order. RELEASE the removed sub-graph's mmap/WAL handles
+        // IMMEDIATELY (it is gone) so no live map points into `named/<idx>/` before the directory
+        // is removed/renamed below — required on Windows (a mapped file blocks dir removal), cheap
+        // and correct everywhere else.
         let removed = self.named.remove(idx);
+        drop(removed);
+        // Re-persist the renumbered survivor set in ONE staging swap (or tear the whole sub-tree
+        // down when none survive). Shared with the batch drop-all path.
+        self.persist_named_after_drop(dir)?;
+        Ok(true)
+    }
+
+    /// [OPUS-4.8] (sq-glw2, Copilot #123) DURABLY removes EVERY named graph in ONE manifest
+    /// rewrite + one staging swap — the batch DROP NAMED / named-part-of DROP ALL. Replaces the
+    /// engine's old loop that called [`drop_named_durable`](Self::drop_named_durable) once per
+    /// graph: each of those rebuilt the ENTIRE surviving named set (renumber + manifest rewrite),
+    /// making DROP ALL O(n²) in the number of named graphs. Clearing the whole set is O(n) — one
+    /// pass to release every sub-graph's handles, one manifest removal, one sub-tree removal — so
+    /// this routes straight through the no-survivors arm of [`persist_named_after_drop`].
+    ///
+    /// In-memory parent (or a non-`mmap` build): just clears the entries, matching the old
+    /// `self.named.clear()`. Idempotent — a no-op when there are no named graphs.
+    pub fn drop_all_named_durable(&mut self) -> Result<(), String> {
+        if self.named.is_empty() {
+            return Ok(());
+        }
+        // Release every sub-graph's mmap/WAL handles before any directory is touched (Issue 1/2:
+        // no live map may point into `named/<i>/` across the removal — correct on every platform,
+        // required on Windows where a mapped file blocks `remove_dir_all`/`rename`).
+        self.named.clear();
+        #[cfg(feature = "mmap")]
+        if let Some(dir) = self.wal.as_ref().map(|w| w.dir.clone()) {
+            return self.persist_named_after_drop(&dir);
+        }
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-glw2, Copilot #123) Crash-safe persistence of `self.named` AFTER a drop has
+    /// shrunk it (one entry, or all of them). `self.named` is already the SURVIVING set in final
+    /// order; the dropped sub-graphs' handles must already be released by the caller so no live
+    /// mmap/WAL points into the `named/` sub-tree being removed/renamed (cross-platform-safe;
+    /// required on Windows). Two cases:
+    ///
+    /// - NO survivors: the whole sub-tree + manifest go away (a default-only dir). The manifest is
+    ///   removed FIRST as the commit point, then the sub-tree — a crash after it leaves an orphan
+    ///   `named/` that `open_named` ignores (no manifest ⇒ no named graphs); `recover_named_drop`
+    ///   cleans up any staging siblings on the next open.
+    /// - SOME survivors: the renumbered survivors are written into a staging `named.drop-new/`,
+    ///   fsync'd, then swapped in (`named` → `drop-old`, `drop-new` → `named`) and the shrunk
+    ///   manifest rewritten — the same rollback-safe protocol as [`compact`](Self::compact),
+    ///   recovered by [`recover_named_drop`]. The survivors' OWN handles are released before the
+    ///   rename and re-acquired by re-`open`ing each from its new directory afterwards, so a live
+    ///   map never points into the directory being renamed (Issue 2; Windows-safe).
+    #[cfg(feature = "mmap")]
+    fn persist_named_after_drop(&mut self, dir: &std::path::Path) -> Result<(), String> {
         let named_dir = dir.join(NAMED_SUBDIR);
         let new_dir = named_dir.with_extension("drop-new");
         let old_dir = named_dir.with_extension("drop-old");
 
         if self.named.is_empty() {
-            // No survivors: the whole named sub-tree and manifest go away (a default-only dir).
-            // REMOVE the manifest as the commit point, then drop the sub-tree. Removing the
-            // manifest first means a crash after it leaves an orphan `named/` sub-tree that
-            // `open_named` ignores (no manifest ⇒ no named graphs); `recover_named_drop` cleans
-            // up any leftover staging siblings on the next open.
             remove_named_manifest(dir).map_err(|e| e.to_string())?;
             std::fs::remove_dir_all(&named_dir).ok();
             std::fs::remove_dir_all(&new_dir).ok();
             std::fs::remove_dir_all(&old_dir).ok();
-            drop(removed);
-            return Ok(true);
+            return Ok(());
         }
 
         // Build the renumbered survivor sub-tree in a fresh staging dir, fsync it, then swap.
@@ -2007,13 +2055,22 @@ impl Graph {
         std::fs::remove_dir_all(&old_dir).ok();
         std::fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
         // Close every survivor's WAL before copying its directory so no open append handle is
-        // mid-flight across the swap (the re-open below re-acquires a fresh, correctly-indexed
-        // WAL). Then persist each survivor — folding any overlay — into its NEW positional slot.
-        for (i, (_, sub)) in self.named.iter_mut().enumerate() {
+        // mid-flight across the swap. Then persist each survivor — folding any overlay — into its
+        // NEW positional slot, capturing its name for the rebuilt manifest.
+        let mut names: Vec<Term> = Vec::with_capacity(self.named.len());
+        for (i, (name, sub)) in self.named.iter_mut().enumerate() {
             sub.wal = None;
             sub.save(&new_dir.join(i.to_string())).map_err(|e| e.to_string())?;
+            names.push(name.clone());
         }
         fsync_dir(&new_dir).map_err(|e| e.to_string())?;
+        // [OPUS-4.8] (Copilot #123, Issue 2) RELEASE every survivor's live mmap/WAL handles
+        // BEFORE the rename: each is now fully persisted under `new_dir`, so drop the in-memory
+        // `Graph`s (mmaps into the OLD `named/<i>/` included) and re-open from the new directories
+        // after the swap. Renaming/removing a directory with mapped files into it fails on
+        // Windows; releasing first makes the swap safe on every platform (mirrors `compact`, which
+        // likewise drops its handles via `*self = Graph::open(..)` after its swap).
+        self.named.clear();
         // Rollback-safe swap (mirrors `compact`): old aside, new in, parent fsync each rename.
         std::fs::rename(&named_dir, &old_dir).map_err(|e| e.to_string())?;
         fsync_dir(dir).map_err(|e| e.to_string())?;
@@ -2021,15 +2078,15 @@ impl Graph {
         fsync_dir(dir).map_err(|e| e.to_string())?;
         // The sub-tree is now the renumbered survivors. Commit the new set by rewriting the
         // manifest (atomic temp+rename, fsyncs the parent dir) — the commit point for the set.
-        let names: Vec<Term> = self.named.iter().map(|(n, _)| n.clone()).collect();
         write_named_manifest(dir, &names).map_err(|e| e.to_string())?;
         std::fs::remove_dir_all(&old_dir).ok();
-        // Re-open survivors from their NEW directories so each carries a correctly-indexed WAL.
-        for (i, (_, sub)) in self.named.iter_mut().enumerate() {
-            *sub = Graph::open(&named_dir.join(i.to_string())).map_err(|e| e.to_string())?;
+        // Re-open survivors from their NEW directories so each carries a correctly-indexed WAL
+        // (and a fresh, correctly-targeted mmap into the swapped-in `named/`).
+        for (i, name) in names.into_iter().enumerate() {
+            let sub = Graph::open(&named_dir.join(i.to_string())).map_err(|e| e.to_string())?;
+            self.named.push((name, sub));
         }
-        drop(removed);
-        Ok(true)
+        Ok(())
     }
 
     /// [`apply_delta`](Self::apply_delta) over the whole DATASET, parsing the batch
@@ -5934,6 +5991,55 @@ mod tests {
         let g2 = Graph::open(&dir).unwrap();
         assert_eq!(g2.named.len(), 0, "no named graphs resurrected; default graph intact");
         assert_eq!(g2.len(), 1, "the default-graph triple survives");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-glw2, Copilot #123) The BATCH `drop_all_named_durable` (DROP NAMED / the
+    /// named part of DROP ALL) removes EVERY named sub-graph and the manifest durably in ONE
+    /// pass — no survivor renumbering — and leaves the directory as a clean default-only store
+    /// across a reopen. Exercises the O(n) batch path on a directory-backed dataset with several
+    /// named graphs: all gone after restart, default graph intact. (The old engine loop dropped
+    /// them one at a time, O(n²); this asserts the single-rewrite batch path produces the same
+    /// durable end-state.)
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn drop_all_named_durable_batch_survives_restart() {
+        let dir = std::env::temp_dir().join(format!("sparq_drop_all_named_batch_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_dataset(
+            "<http://ex/d> <http://ex/p> <http://ex/e> .\n\
+             <http://ex/a1> <http://ex/p> <http://ex/o> <http://ex/g1> .\n\
+             <http://ex/a2> <http://ex/p> <http://ex/o> <http://ex/g2> .\n\
+             <http://ex/a3> <http://ex/p> <http://ex/o> <http://ex/g3> .\n\
+             <http://ex/a4> <http://ex/p> <http://ex/o> <http://ex/g4> .",
+            "nquads",
+        )
+        .unwrap()
+        .save(&dir)
+        .unwrap();
+        // Four positional sub-dirs + manifest before the batch drop.
+        assert!(dir.join("named.bin").exists());
+        for i in 0..4 {
+            assert!(dir.join("named").join(i.to_string()).exists(), "sub-dir {i} present before DROP ALL");
+        }
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            assert_eq!(g.named.len(), 4);
+            // ONE batch call drops all four (no per-graph renumber/manifest-rewrite loop).
+            g.drop_all_named_durable().unwrap();
+            assert_eq!(g.named.len(), 0, "every named graph gone in memory after the batch drop");
+            // A second batch drop is an idempotent no-op (nothing left to remove).
+            g.drop_all_named_durable().unwrap();
+            assert_eq!(g.named.len(), 0);
+        }
+        // The whole named sub-tree + manifest are gone on disk (no staging siblings left behind).
+        assert!(!dir.join("named.bin").exists(), "manifest removed by the batch drop");
+        assert!(!dir.join("named").exists(), "named/ sub-tree removed by the batch drop");
+        assert!(!dir.join("named.drop-new").exists() && !dir.join("named.drop-old").exists());
+        // Restart: all named graphs stay gone; the default graph survives.
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g2.named.len(), 0, "no named graph resurrected after restart");
+        assert_eq!(g2.len(), 1, "the default-graph triple survives the batch DROP ALL");
         std::fs::remove_dir_all(&dir).ok();
     }
 

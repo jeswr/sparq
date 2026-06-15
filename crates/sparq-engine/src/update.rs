@@ -850,16 +850,15 @@ fn clear_all_named_durable(graph: &mut Graph) -> Result<(), String> {
     Ok(())
 }
 
-/// [OPUS-4.8] (sq-glw2) DURABLY removes EVERY named graph (DROP NAMED / the named part of DROP
-/// ALL). Each [`Graph::drop_named_durable`] renumbers the surviving sub-tree, so dropping by
-/// the head name each iteration is robust to the index shifts; on a directory-backed parent
-/// every removal's manifest update is fsync'd before the ack.
+/// [OPUS-4.8] (sq-glw2, Copilot #123) DURABLY removes EVERY named graph (DROP NAMED / the named
+/// part of DROP ALL) in ONE batch. The old implementation looped, calling
+/// [`Graph::drop_named_durable`] once per graph — but EACH such call rebuilds the entire surviving
+/// named set (renumber + manifest rewrite + per-survivor save/re-open), making DROP ALL O(n²) in
+/// the number of named graphs. [`Graph::drop_all_named_durable`] tears the whole sub-tree down in
+/// a single manifest removal + single sub-tree removal (no survivors to renumber), which is O(n)
+/// — one pass to release every sub-graph's handles, then two unlinks.
 fn drop_all_named_durable(graph: &mut Graph) -> Result<(), String> {
-    while let Some((name, _)) = graph.named.first() {
-        let name = name.clone();
-        graph.drop_named_durable(&name)?;
-    }
-    Ok(())
+    graph.drop_all_named_durable()
 }
 
 #[cfg(test)]
