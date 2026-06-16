@@ -26,6 +26,12 @@ extend-exclude = [
 [default]
 # Keep typos' default checks; we only extend the dictionaries below.
 
+# Ignore sparq bead IDs (`sq-<base36 suffix>`). typos splits these on the hyphen and
+# flags the suffix (e.g. `sq-iy3p` → `iy3p`/`iy`, `sq-1gir` → `gir`). Beads are
+# referenced by the dozen in compliance/research docs, so per-token allowlisting does
+# not scale — match the whole bead-id token shape instead. [OPUS-4.8]
+extend-ignore-re = ["\\bsq-[0-9a-z]{3,}\\b"]
+
 [default.extend-identifiers]
 iy3p = "iy3p"            # [OPUS-4.8] bead id `sq-iy3p` — typos splits on `-`, flags "iy"->"it"
 "1gir" = "1gir"           # [OPUS-4.8] bead id `sq-1gir` — typos splits on `-`, flags "gir"->"git"
