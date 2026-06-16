@@ -30,6 +30,14 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
         Benchmarks
       </NavLink>
 
+      <NavLink
+        href="/papers"
+        active={isActive("/papers")}
+        onNavigate={onNavigate}
+      >
+        Papers
+      </NavLink>
+
       <Section label="Showcase">
         {FLAGSHIPS.map((f) => (
           <NavLink

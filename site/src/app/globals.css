@@ -176,3 +176,55 @@
 @utility measure {
   max-width: 65ch;
 }
+
+/* [OPUS-4.8] sq-gum8 — scoped styling for the build-time Typst HTML export rendered on a
+   per-paper page (components/papers/paper-html.tsx). Typst's HTML export emits plain
+   semantic tags (h2/h3/p/table/strong/em/code), so we style them here rather than ship a
+   WASM compiler to the browser. Headings are de-numbered visually since Typst's numbering is
+   layout-only and dropped in HTML export. */
+@layer components {
+  .paper-prose {
+    max-width: 65ch;
+    margin-inline: auto;
+    line-height: 1.7;
+    color: var(--foreground);
+  }
+  .paper-prose h2 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-top: 1.75rem;
+    margin-bottom: 0.5rem;
+  }
+  .paper-prose h3 {
+    font-size: 0.98rem;
+    font-weight: 600;
+    margin-top: 1.5rem;
+    margin-bottom: 0.4rem;
+  }
+  .paper-prose p {
+    margin-bottom: 0.85rem;
+  }
+  .paper-prose code {
+    font-size: 0.85em;
+    background-color: var(--muted);
+    padding: 0.05rem 0.3rem;
+    border-radius: 0.25rem;
+  }
+  .paper-prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9em;
+  }
+  .paper-prose th,
+  .paper-prose td {
+    border: 1px solid var(--border);
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  .paper-prose th {
+    background-color: color-mix(in oklch, var(--muted) 60%, transparent);
+    font-weight: 600;
+  }
+}
