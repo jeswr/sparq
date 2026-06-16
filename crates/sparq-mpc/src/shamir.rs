@@ -87,7 +87,14 @@ use crate::rng::{MpcRng, SecureRng};
 
 /// A single Shamir share: the polynomial evaluated at a party's nonzero point.
 /// `x` is the party index (1-based; the secret sits at `x = 0`), `y = f(x)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// [OPUS-4.8] sq-u8a8: derives [`zeroize::Zeroize`] so secret share material
+/// (`y = f(x)`, and for the MAC sharing `[α]`/`[α·x]`, every share `y`) can be
+/// scrubbed by the secret containers that own it. `Share` is `Copy`, so it cannot
+/// itself implement `Drop`; the zeroize-on-drop lives on the owning secret type
+/// (e.g. `MacKey`). Hygiene only — `Zeroize` adds a scrub method, it changes no
+/// sharing/reconstruction arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, zeroize::Zeroize)]
 pub struct Share {
     /// The evaluation point (party index, always `>= 1`). `x = 0` is reserved
     /// for the secret and is never handed to a party.
@@ -627,6 +634,20 @@ impl std::fmt::Debug for MacSession<'_> {
             .field("alpha", &"<secret session MAC key α>")
             .field("key", &self.key)
             .finish()
+    }
+}
+
+// [OPUS-4.8] sq-u8a8: zeroize the cleartext session MAC key α on drop. `alpha`
+// is the most sensitive secret in the MPC estate — it is the SPDZ-family
+// authenticator that must never be opened (acceptance (2)) — so when the session
+// ends we scrub it from memory rather than leaving it in freed stack/heap. The
+// secret-shared `[α]` inside `key` (a `MacKey`) is scrubbed by `MacKey`'s own
+// `Drop`. This is HYGIENE: it runs only at end-of-life, after every `α·x` MAC has
+// already been minted, so it changes no protocol behaviour.
+impl Drop for MacSession<'_> {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.alpha.zeroize();
     }
 }
 

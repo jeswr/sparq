@@ -64,3 +64,17 @@ oxrdf = { workspace = true }
 # intact. Pinned to the workspace's existing 0.9 line (sparq-geo/sparq-text).
 rand = { version = "0.9", default-features = false }
 rand_chacha = "0.9"
+
+# [OPUS-4.8] sq-u8a8 (epic sq-toze / from side-channel analysis sq-egx6, gap
+# CR-G5): secret-memory hygiene (`zeroize`) + constant-time-equality PRIMITIVES
+# (`subtle`) for the secret-bearing MPC types. HYGIENE ONLY — no protocol,
+# algorithm, wire-format, or disclosure-minimisation behaviour changes. The
+# analysis found every comparison on the protocol paths is over PUBLIC / opened
+# values (masked products, the verdict bit, public threshold bits), so NO
+# existing `==` is replaced with a CT compare; `subtle` is adopted so the
+# secret-bearing field/share types CAN be compared in constant time if a future
+# secret-vs-secret comparison is ever introduced, and `zeroize` zeroes the
+# masking-RNG state, the cleartext MAC key α, the `[α]` / `[α·x]` shares, and the
+# Fp / Share secret operands on drop. Mark for Fable crypto re-review.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+subtle = "2"

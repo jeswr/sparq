@@ -34,7 +34,14 @@
 pub const P: u64 = (1u64 << 61) - 1;
 
 /// An element of `F_p`, always kept canonical in `[0, P)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// [OPUS-4.8] sq-u8a8: derives [`zeroize::Zeroize`] so a secret-bearing `Fp`
+/// (a Shamir share value, the cleartext MAC key `α`, a masking coefficient) can
+/// be scrubbed from memory by the containers that own it. `Fp` is `Copy`, so it
+/// cannot itself implement `Drop`/`ZeroizeOnDrop`; the zeroize-on-drop happens in
+/// the owning secret container (e.g. `MacSession`, `MacKey`). This is memory
+/// HYGIENE — `Zeroize` adds a scrub method, it changes no arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, zeroize::Zeroize)]
 pub struct Fp(u64);
 
 // Inherent `add`/`sub`/`mul`/`neg` are deliberate: field arithmetic reads
@@ -124,6 +131,25 @@ impl Fp {
         }
         acc
     }
+
+    /// [OPUS-4.8] sq-u8a8: constant-time equality on the canonical representative,
+    /// via [`subtle::ConstantTimeEq`]. Because every `Fp` is kept canonical in
+    /// `[0, P)`, comparing the `u64` values in constant time is equivalent to
+    /// `self == other` but does not leak (through timing) whether the two values
+    /// differ in their low or high bits.
+    ///
+    /// This is a **defensive PRIMITIVE**, not a replacement for any existing
+    /// comparison. The side-channel analysis (CR-G5) found every equality on the
+    /// MPC protocol paths is over PUBLIC / opened values — the masked product
+    /// `m == 0` (which is exactly the disclosed match/zero bit), the verdict bit,
+    /// and public threshold bits — so NO live `==` is secret-dependent and none is
+    /// changed. `ct_eq` exists so a FUTURE secret-vs-secret field comparison can be
+    /// constant-time by construction. The returned [`subtle::Choice`] is `1` iff
+    /// `self == other`, identical to the boolean `==`.
+    pub fn ct_eq(self, other: Fp) -> subtle::Choice {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0)
+    }
 }
 
 /// Reduce a 128-bit product modulo the Mersenne prime `p = 2^61 - 1` using the
@@ -183,6 +209,39 @@ mod tests {
             let a = Fp::new(v);
             assert_eq!(a.mul(a.inv()), Fp::one(), "inv of {v}");
         }
+    }
+
+    // [OPUS-4.8] sq-u8a8: the constant-time equality primitive returns the SAME
+    // boolean as the plain `==` on a spread of representative inputs (equal,
+    // unequal, boundary values). This is the "CT-eq agrees with the prior `==`"
+    // gate from the bead — proving the hygiene primitive does not change any
+    // comparison outcome.
+    #[test]
+    fn ct_eq_agrees_with_value_eq() {
+        use subtle::ConstantTimeEq;
+        let samples = [0u64, 1, 2, 7, 12345, P / 2, P - 2, P - 1];
+        for &a in &samples {
+            for &b in &samples {
+                let fa = Fp::new(a);
+                let fb = Fp::new(b);
+                let ct: bool = fa.ct_eq(fb).into();
+                assert_eq!(ct, fa == fb, "ct_eq disagrees with == for {a} vs {b}");
+                // Also exercise the underlying u64 CT primitive directly.
+                let raw: bool = fa.value().ct_eq(&fb.value()).into();
+                assert_eq!(raw, fa == fb);
+            }
+        }
+    }
+
+    // [OPUS-4.8] sq-u8a8: a compile-and-behaviour check that `Fp` implements
+    // `Zeroize` and that scrubbing leaves the additive identity (so a secret-
+    // bearing `Fp` owned by a container can be wiped).
+    #[test]
+    fn fp_zeroizes_to_zero() {
+        use zeroize::Zeroize;
+        let mut x = Fp::new(0x1234_5678_9abc);
+        x.zeroize();
+        assert_eq!(x, Fp::zero(), "zeroized Fp must be the additive identity");
     }
 
     #[test]

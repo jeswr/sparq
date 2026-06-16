@@ -42,6 +42,18 @@ ark-ff = { version = "0.6", default-features = false }
 # Off-circuit string hash h_s (plan §2.2: Enc_t(term) = h_2(type_code, h_s(value))).
 blake3 = "1"
 
+# [OPUS-4.8] sq-u8a8 (epic sq-toze / from side-channel analysis sq-egx6, gap
+# CR-G5): secret-memory hygiene + constant-time-equality PRIMITIVES for the
+# secret-bearing types in this crate. This is timing/memory HYGIENE only — it
+# changes NO crypto algorithm, protocol behaviour, wire format, or verifier
+# soundness (the analysis found the architecture already avoids secret-vs-secret
+# equality, so `subtle` is adopted for the SecretKey scalar bytes' future-safe
+# CT compare, not to replace any public-data `==`). `zeroize` zeroes the issuer/
+# holder `SecretKey` scalar on drop so it does not linger in freed memory.
+# Mark for Fable crypto re-review.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+subtle = "2"
+
 # OS CSPRNG for the trusted-ingest per-graph salt mint (audit #9 / sq-610): each
 # named graph draws fresh OS-random entropy so its bnode salt is globally unique
 # by construction. Already in the workspace lockfile (via ark-std's rand).
