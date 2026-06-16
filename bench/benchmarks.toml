@@ -602,6 +602,25 @@ pinning     = "N_TRIPLES const = 1_000_000"
 records_to  = "stdout"
 status      = "ok"
 
+# [OPUS-4.8] sq-q6a1 (epic sq-4wo; research/parsing-perf-delta.md M2). The bench-hdt
+# task of parse-baseline, extended with the plan §4 measurement gaps: a 3-way DIRECT
+# per-stage split (dict decode / triple+id scan / Graph::build, via the measurement-only
+# sparq_hdt::graph_from_reader_timed) plus an NT-vs-HDT A/B row (loads <file>.nt via the
+# fast Graph::load_reader_parallel). Measurement TOOLING ONLY — no decoder behaviour
+# change; the existing HDT roundtrip differential stays green.
+[[benchmark]]
+id          = "hdt-stage-split"
+name        = "HDT direct-decode 3-way stage split + NT-vs-HDT A/B"
+category    = "ingest"
+measures    = "wall s + Mtriples/s: DIRECT decode split into (a) dict decode / (b) triple+id scan / (c) Graph::build, the existing direct-vs-upstream-wavelet A/B + per-path peak RSS, and an NT-vs-HDT A/B (HDT direct vs load_reader_parallel on the same triples); median of 3"
+invoke      = "cd bench/parse && cargo build --release && ./target/release/parse-baseline gen-hdt <data.nt> <data.hdt> && ./target/release/parse-baseline bench-hdt <data.hdt>   # the <data.nt> companion drives the NT A/B row"
+source      = "bench/parse/src/main.rs (bench_hdt); crates/sparq-hdt/src/decode.rs (graph_from_reader_timed/StageTimings)"
+dataset     = "any .nt slice -> .hdt via gen-hdt; the same .nt is reloaded for the NT A/B (companion absent => A/B row skipped, not an error). bench/parse/data/ gitignored"
+quiet_box_sensitive = true
+pinning     = "dataset slice size; mimalloc + fat LTO build to match shipped ingest; ratios are the load-robust claim, not absolute MB/s"
+records_to  = "stdout (canonical runner); not baked into docs/tests"
+status      = "ok"
+
 [[benchmark]]
 id          = "rsp-throughput"
 name        = "sparq-rsp continuous-query throughput"
