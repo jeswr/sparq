@@ -56,13 +56,15 @@
 //! scan per side) — the difference is the execution discipline (emit-as-you-go, bounded
 //! memory), not the cost. Setting the threshold to `f64::INFINITY` disables it.
 //!
-//! ## DEFERRED (not in this slice)
+//! ## Adaptive re-planning (sq-7s4z)
 //!
-//! Live **adaptive re-planning** (mid-execution plan switching) remains out of scope —
-//! this is still a static plan; sq-vf7q adds the streaming *operator* the plan can name,
-//! not mid-flight adaptivity. See the roadmap bead filed from sq-vf7q (epic sq-3183).
+//! `plan_bgp` itself stays a **static** planner — it commits to one order from the
+//! estimates it is given. Live **mid-execution re-planning** (re-invoking the planner on
+//! the remaining patterns when observed cardinalities diverge) lives in [`crate::adaptive`]
+//! behind the opt-in `adaptive-replan` feature, which re-uses this module's cost model via
+//! the crate-internal `cost_join_pub`. Mid-*operator* swaps remain deferred.
 //!
-//! [OPUS-4.8] sq-a35t / sq-vf7q.
+//! [OPUS-4.8] sq-a35t / sq-vf7q / sq-7s4z.
 
 use crate::descriptor::SourceDescriptor;
 use crate::pattern::{Bgp, Term, Var};
@@ -264,6 +266,36 @@ pub fn plan_bgp(
 
     let total_cost = sum_cost(&root);
     Some(JoinTree { root, total_cost })
+}
+
+/// [OPUS-4.8] sq-7s4z. Crate-internal re-export of [`cost_join`] so the adaptive
+/// re-planner ([`crate::adaptive`]) costs a re-planned suffix with the **identical** cost
+/// model the static planner uses — there is exactly one cost function, so a re-plan and the
+/// original plan are always comparable on the same scale.
+#[cfg(feature = "adaptive-replan")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cost_join_pub(
+    bgp: &Bgp,
+    cur_card: f64,
+    joined: &[usize],
+    cand: usize,
+    leaf_card: &[f64],
+    descriptors: &[SourceDescriptor],
+    selection: &[PatternSources],
+    opts: &PlanOptions,
+    connected: bool,
+) -> (f64, f64, JoinAlgo) {
+    cost_join(
+        bgp,
+        cur_card,
+        joined,
+        cand,
+        leaf_card,
+        descriptors,
+        selection,
+        opts,
+        connected,
+    )
 }
 
 /// Estimates `(output_cardinality, cost, algo)` for joining leaf pattern `cand` onto a

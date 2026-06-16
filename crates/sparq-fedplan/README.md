@@ -97,10 +97,46 @@ println!("estimated total cost: {}", plan.total_cost);
 | Source selection (HiBISCuS prune + CostFed cardinality) | ✅ covered here |
 | Bind-vs-hash decision + greedy join order + CS star cardinality | ✅ covered here |
 | ANAPSID-style non-blocking streaming join with operator spill (`StreamJoin`) | ✅ covered here (sq-vf7q) |
-| Live adaptive re-planning mid-execution | ⏳ deferred (roadmap bead, epic sq-3183) |
+| Live adaptive re-planning at stage boundaries (`AdaptiveExecutor`) | ✅ covered here, opt-in `adaptive-replan` (sq-7s4z) |
+| Mid-*operator* swap (tear down an in-flight join) + live source failover | ⏳ deferred (roadmap bead, epic sq-3183) |
 
-The plan is still computed up front (static); sq-vf7q adds the streaming + spill *operator*
-the plan can name. Mid-execution adaptive re-planning is filed as a bead under epic sq-3183.
+`plan_bgp` itself is still a **static** planner — it commits to one order from the estimates
+it is given. The opt-in `adaptive-replan` feature adds an `AdaptiveExecutor` on top that
+reacts at run time (next section). sq-vf7q added the streaming + spill *operator* the plan
+can name; mid-*operator* adaptivity remains a bead under epic sq-3183.
+
+## Adaptive re-planning (opt-in `adaptive-replan` feature, sq-7s4z)
+
+Behind the **off-by-default** `adaptive-replan` cargo feature (which implies `fedplan`), the
+crate adds live **mid-execution plan switching** — the reactive half of ANAPSID adaptivity.
+A build that does not enable the feature compiles **zero** adaptive code (the module is
+`#[cfg]`-gated out), so the lean default build and the `fedplan`-only build are unaffected.
+
+- **Capture actual stats** — `RuntimeStats` records the *observed* per-pattern leaf
+  cardinality (real row counts the sources returned) and per-source latency, fed in by the
+  executor as each stage completes.
+- **Re-plan trigger** — at each **stage boundary** (between two leaf joins of the left-deep
+  plan), if a *not-yet-executed* pattern's observed cardinality `o` diverges from its
+  estimate `e` past `ReplanPolicy::divergence_factor` `k` in either direction (`o > k·e` or
+  `e > k·o`; default `k = 4`), the planner is re-invoked on the **remaining** patterns with
+  the observed cardinalities substituted in (`corrected_selection`). Source *membership* is
+  never re-pruned — only the order changes — so recall-safety is preserved.
+- **Hysteresis / anti-thrash** — the re-planned suffix is adopted **only** if its estimated
+  remaining cost beats the current suffix's by more than `ReplanPolicy::improvement_margin`
+  (default 10%) and there is a hard `max_replans` budget (default 8). Stable-but-noisy stats
+  therefore never cause the plan to flap; `maybe_replan` returns a `ReplanOutcome`
+  (`NoDivergence` / `KeptWithinHysteresis` / `Switched` / `BudgetExhausted`).
+
+**Soundness boundary** — re-planning reorders only the not-yet-started **suffix**; it is
+**not** a mid-operator swap (a join already producing output is never torn down). Because a
+BGP is a conjunction of triple patterns, its answer is the natural join of the per-pattern
+solution multisets, which is **commutative and associative** — any order over the same
+patterns yields the **same** result multiset. The already-produced prefix is carried across
+the switch unchanged, so no binding is lost or duplicated. This result-equivalence is proven
+in `adaptive::tests::replan_result_equals_static` (a mid-execution re-plan that genuinely
+flips the order yields the identical multiset to the static plan), backed by an exhaustive
+all-permutations order-independence test. Mid-*operator* adaptivity and live source failover
+are deferred (epic sq-3183).
 
 ## Streaming join (quick use)
 

@@ -1,6 +1,6 @@
 ---
 name: federated-planning
-description: "Cost-based federated SPARQL source selection + bind-vs-hash join planning over already-fetched source descriptors, plus an ANAPSID-style non-blocking streaming join with operator spill, via the opt-in sparq-fedplan crate. Use when planning a federated BGP across multiple SPARQL endpoints from their served statistics (VoID property/class partitions + mined scs: characteristic sets): deciding which sources can contribute to each triple pattern (HiBISCuS recall-safe pruning + CostFed skew-aware cardinality), choosing a join order with per-join bind-vs-hash-vs-streaming algorithm selection (characteristic-set star cardinality for intermediate sizes), and executing a memory-bounded non-blocking symmetric hash join over incrementally-arriving sub-results (StreamJoin, spill to a backing store, result multiset-equal to a blocking join). Pure + deterministic planning, no network I/O. Off by default; does not touch sparq-core/sparq-engine's lean build. NOT for live adaptive RE-planning mid-execution (ANAPSID adaptivity — deferred)."
+description: "Cost-based federated SPARQL source selection + bind-vs-hash join planning over already-fetched source descriptors, plus an ANAPSID-style non-blocking streaming join with operator spill, via the opt-in sparq-fedplan crate. Use when planning a federated BGP across multiple SPARQL endpoints from their served statistics (VoID property/class partitions + mined scs: characteristic sets): deciding which sources can contribute to each triple pattern (HiBISCuS recall-safe pruning + CostFed skew-aware cardinality), choosing a join order with per-join bind-vs-hash-vs-streaming algorithm selection (characteristic-set star cardinality for intermediate sizes), and executing a memory-bounded non-blocking symmetric hash join over incrementally-arriving sub-results (StreamJoin, spill to a backing store, result multiset-equal to a blocking join). Pure + deterministic planning, no network I/O. Off by default; does not touch sparq-core/sparq-engine's lean build. Also covers live adaptive RE-planning at stage boundaries (mid-execution plan switching when observed cardinalities diverge from estimates) via the further opt-in adaptive-replan feature (AdaptiveExecutor) — sound because BGP join is order-independent, with mid-operator swap + live source failover deferred."
 ---
 
 # sparq-fedplan — cost-based federated source selection + join planning
@@ -134,11 +134,46 @@ inputs `L + R` exceed `PlanOptions::stream_threshold` (default 100 000 rows; set
 `f64::INFINITY` to always use plain hash) — large joins run non-blocking + spillable rather
 than materialising a side up front.
 
+## Live adaptive re-planning (opt-in `adaptive-replan` feature, sq-7s4z)
+
+Behind the **off-by-default** `adaptive-replan` cargo feature (which implies `fedplan`), the
+crate adds the reactive half of ANAPSID adaptivity: **mid-execution plan switching**. A build
+that does not enable the feature compiles **zero** adaptive code (`#[cfg]`-gated out), so the
+lean default build and the `fedplan`-only build are byte-unchanged.
+
+`AdaptiveExecutor` models execution as a sequence of **stages** (the left-deep join order)
+and holds, at all times, the patterns already joined (the **prefix**) and the patterns still
+to join (the **suffix**).
+
+- **Capture** — `RuntimeStats` records the *observed* per-pattern leaf cardinality (real row
+  counts the sources returned) and per-source latency, fed in as each stage completes.
+- **Trigger** — at each **stage boundary**, `maybe_replan(&stats)` checks whether a
+  *not-yet-executed* pattern's observed cardinality `o` diverges from its estimate `e` past
+  `ReplanPolicy::divergence_factor` `k` either way (`o > k·e` or `e > k·o`; default `k = 4`).
+  If so it re-invokes the cost model on the **remaining** patterns with the observed
+  cardinalities substituted in (`corrected_selection`). Source *membership* is never
+  re-pruned — only the order changes — so HiBISCuS recall-safety is preserved.
+- **Hysteresis** — the re-planned suffix is adopted **only** if its estimated remaining cost
+  beats the current suffix's by more than `ReplanPolicy::improvement_margin` (default 10%),
+  with a hard `max_replans` budget (default 8). Stable-but-noisy stats never thrash;
+  `maybe_replan` returns `ReplanOutcome::{NoDivergence, KeptWithinHysteresis, Switched,
+  BudgetExhausted}`.
+
+**Soundness boundary (load-bearing).** Re-planning reorders only the not-yet-started
+**suffix** — it is **NOT** a mid-operator swap (an in-flight join is never torn down). A BGP
+answer is the natural join of the per-pattern solution multisets, which is **commutative and
+associative**: any order over the same patterns yields the **same** result multiset, and the
+already-produced prefix is carried across the switch unchanged (no binding lost or
+duplicated). Proven by `adaptive::tests::replan_result_equals_static` (a re-plan that
+genuinely flips the order yields the identical multiset to the static plan) plus an
+exhaustive all-permutations order-independence test.
+
 ## Deferred (NOT here)
 
-**Live adaptive RE-planning** — switching the join algorithm or source mid-execution when
-observed rates diverge from the estimate (the harder half of ANAPSID's adaptivity) — is out
-of scope. The plan is still computed up front; sq-vf7q adds the streaming + spill *operator*
-the plan can name, not mid-flight re-planning. Filed as a roadmap bead under epic **sq-3183**.
+**Mid-*operator* adaptivity** (tearing down a join while it is producing output and resuming
+its half-built hash tables under a new algorithm) and **live source failover** (switching to
+a replica mid-stage when a source goes dark — the latency capture exists but the live
+multi-source execution layer does not live in this pure crate) are out of scope. Filed as
+roadmap beads under epic **sq-3183**.
 
-[OPUS-4.8] sq-a35t / sq-vf7q — flag for Fable re-review.
+[OPUS-4.8] sq-a35t / sq-vf7q / sq-7s4z — flag for Fable re-review.
