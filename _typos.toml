@@ -30,7 +30,19 @@ extend-exclude = [
 # flags the suffix (e.g. `sq-iy3p` → `iy3p`/`iy`, `sq-1gir` → `gir`). Beads are
 # referenced by the dozen in compliance/research docs, so per-token allowlisting does
 # not scale — match the whole bead-id token shape instead. [OPUS-4.8]
-extend-ignore-re = ["\\bsq-[0-9a-z]{3,}\\b"]
+#
+# [OPUS-4.8] (bead sq-hyzq) Ignore the recurring "ALL-CAPS SPARQL keyword + lowercase
+# English suffix" false-positive family: DELETEd, INSERTed, SELECTed, CONSTRUCTed,
+# DESCRIBEd, CLEARed, LOADed, UNIONed, MATCHed, "3 OPTIONALs", … Authors write these in
+# prose all the time; typos splits at the case boundary and flags the keyword-minus-tail
+# (DELET→DELETE, OPTIONA→OPTIONAL) or the dangling 3-char fragment (Ded/Ned), forcing a
+# pointless reword round-trip on every doc PR. One regex pins the whole shape instead of
+# enumerating dozens of fragments. It is deliberately narrow — it matches ONLY a run of
+# >=3 capitals immediately followed by 1-3 lowercase letters with no break, so a genuine
+# ALL-CAPS misspelling (e.g. `RECIEVE`) and ordinary lowercase typos (`teh`, `hte`) STILL
+# fire and the gate keeps its teeth. Verified across the whole tree: every token this
+# newly silences is a keyword-suffix split, zero real misspellings.
+extend-ignore-re = ["\\bsq-[0-9a-z]{3,}\\b", "\\b[A-Z]{3,}[a-z]{1,3}\\b"]
 
 [default.extend-identifiers]
 iy3p = "iy3p"            # [OPUS-4.8] bead id `sq-iy3p` — typos splits on `-`, flags "iy"->"it"
@@ -66,6 +78,7 @@ Rotat = "Rotat"         # "RotatE" KG-embedding model name (wraps to "Rotat")
 criticals = "criticals"  # audit jargon: "the audit's criticals"
 unparseable = "unparseable" # accepted variant spelling used in skills docs
 unstalled = "unstalled"  # "proceeding unstalled" (= not stalled) — intentional
+invokable = "invokable"  # [OPUS-4.8] (sq-hyzq) accepted variant of "invocable" used in CLI/API docs (e.g. "invokable from the CLI") — recurring typos false-positive
 # --- domain acronyms / dataset + crypto names ---
 SME = "SME"              # [OPUS-4.8] "Subject Matter Expert" — role acronym in CRA incident runbook
 ANE = "ANE"              # Apple Neural Engine
