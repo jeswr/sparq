@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Play, Loader2, Database, Zap } from "lucide-react";
+import { Play, Loader2, Database, Zap, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -15,35 +15,98 @@ import {
 import { cn } from "@/lib/utils";
 import {
   loadSparq,
+  prewarmSparq,
+  storeToNTriples,
   formatTerm,
   type SparqlResults,
   type WasmStore,
 } from "@/lib/sparq-wasm";
-import { SAMPLE_TURTLE, EXAMPLE_QUERIES } from "@/data/sample-graph";
+import { EXAMPLE_QUERIES, BUILTIN_DATASETS } from "@/data/sample-graph";
+import {
+  DatasetControls,
+  DatasetViewer,
+  type ActiveDataset,
+} from "@/components/repl-datasets";
 
 type RunState =
   | { kind: "idle" }
-  | { kind: "loading" }
   | { kind: "running" }
   | { kind: "select"; results: SparqlResults; ms: number }
   | { kind: "boolean"; value: boolean; ms: number }
   | { kind: "error"; message: string };
 
+// [OPUS-4.8] Engine warm-up lifecycle, surfaced as a subtle indicator. The wasm fetch +
+// instantiate is kicked off on mount (prewarmSparq) so the first "Run query" is instant.
+type EngineState = "cold" | "warming" | "ready" | "error";
+
+const DEFAULT_DATASET = BUILTIN_DATASETS[0];
+
 export function Repl() {
   const [sparql, setSparql] = React.useState(EXAMPLE_QUERIES[0].sparql);
   const [state, setState] = React.useState<RunState>({ kind: "idle" });
   const [size, setSize] = React.useState<number | null>(null);
+  const [engine, setEngine] = React.useState<EngineState>("cold");
+  const [viewerOpen, setViewerOpen] = React.useState(false);
+  const [active, setActive] = React.useState<ActiveDataset>({
+    label: DEFAULT_DATASET.label,
+    description: DEFAULT_DATASET.description,
+  });
+  const [activeBuiltinId, setActiveBuiltinId] = React.useState<string | null>(
+    DEFAULT_DATASET.id,
+  );
   const storeRef = React.useRef<WasmStore | null>(null);
 
+  // Build (or rebuild) the store from RDF text + format. Centralises error handling so
+  // every load path (default, picker, upload, URL) reports failures the same way.
+  const buildStore = React.useCallback(
+    async (text: string, format: string): Promise<WasmStore> => {
+      const Store = await loadSparq();
+      const store = Store.load(text, format);
+      storeRef.current = store;
+      setSize(store.size);
+      return store;
+    },
+    [],
+  );
+
+  // Pre-warm the engine AND parse the default dataset eagerly on mount, off the render
+  // path. The first "Run query" then runs against an already-built store with no cold
+  // start. A failure resets the indicator so a later run can retry via ensureStore.
+  React.useEffect(() => {
+    let cancelled = false;
+    setEngine("warming");
+    prewarmSparq()
+      .then(async () => {
+        if (cancelled || storeRef.current) return;
+        await buildStore(DEFAULT_DATASET.text, DEFAULT_DATASET.format);
+      })
+      .then(() => {
+        if (!cancelled) setEngine("ready");
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setEngine("error");
+        toast.error("Engine failed to load", {
+          description: e instanceof Error ? e.message : String(e),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [buildStore]);
+
+  // Guarantees a store exists before a query runs — the safety net if pre-warm hasn't
+  // finished (or failed): never lets "Run query" no-op or throw on a cold engine.
   const ensureStore = React.useCallback(async (): Promise<WasmStore> => {
     if (storeRef.current) return storeRef.current;
-    setState({ kind: "loading" });
-    const Store = await loadSparq();
-    const store = Store.load(SAMPLE_TURTLE, "turtle");
-    storeRef.current = store;
-    setSize(store.size);
+    setEngine("warming");
+    const store = await buildStore(
+      DEFAULT_DATASET.text,
+      DEFAULT_DATASET.format,
+    );
+    setEngine("ready");
     return store;
-  }, []);
+  }, [buildStore]);
 
   const run = React.useCallback(async () => {
     try {
@@ -65,7 +128,71 @@ export function Repl() {
     }
   }, [ensureStore, sparql]);
 
-  const busy = state.kind === "loading" || state.kind === "running";
+  // Switch to a built-in dataset: reload the store, reset the count + active descriptor.
+  const selectBuiltin = React.useCallback(
+    async (id: string) => {
+      const ds = BUILTIN_DATASETS.find((d) => d.id === id);
+      if (!ds) return;
+      try {
+        await buildStore(ds.text, ds.format);
+        setActiveBuiltinId(ds.id);
+        setActive({ label: ds.label, description: ds.description });
+        setState({ kind: "idle" });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        toast.error("Could not load dataset", { description: message });
+      }
+    },
+    [buildStore],
+  );
+
+  // Load a custom RDF document (upload / URL). "replace" swaps the store; "add" merges
+  // by concatenating both graphs' N-Triples and re-parsing — format-agnostic and correct.
+  const loadText = React.useCallback(
+    async (
+      text: string,
+      format: string,
+      label: string,
+      mode: "replace" | "add",
+    ) => {
+      try {
+        const Store = await loadSparq();
+        // Parse the incoming doc first so a parse error aborts BEFORE mutating state.
+        const incoming = Store.load(text, format);
+        if (mode === "add" && storeRef.current) {
+          const merged =
+            storeToNTriples(storeRef.current) +
+            "\n" +
+            storeToNTriples(incoming);
+          await buildStore(merged, "ntriples");
+          setActive((a) => ({
+            label: `${a.label} + ${label}`,
+            description: `Merged graph (${size ?? 0} + new triples).`,
+          }));
+        } else {
+          storeRef.current = incoming;
+          setSize(incoming.size);
+          setActive({
+            label,
+            description: `Custom ${format} dataset loaded in your tab.`,
+          });
+        }
+        setActiveBuiltinId(null);
+        setState({ kind: "idle" });
+        toast.success("Dataset loaded", {
+          description: `${label} — ${storeRef.current.size} triples`,
+        });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        toast.error("Could not parse dataset", { description: message });
+        throw e; // let the URL dialog surface it inline too
+      }
+    },
+    [buildStore, size],
+  );
+
+  const busy = state.kind === "running";
+  const controlsDisabled = engine === "warming" || engine === "cold";
 
   return (
     <Card>
@@ -75,15 +202,32 @@ export function Repl() {
           Live SPARQL REPL
         </CardTitle>
         <div className="flex items-center gap-2">
-          <Badge variant="success">Live in your tab</Badge>
+          <EngineIndicator engine={engine} />
           {size !== null && (
-            <Badge variant="muted" className="tabular">
-              <Database className="size-3" /> {size} triples
-            </Badge>
+            <button
+              type="button"
+              onClick={() => setViewerOpen(true)}
+              aria-label={`View the ${size} triples in the loaded dataset`}
+              className="rounded-4xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+            >
+              <Badge
+                variant="muted"
+                className="tabular cursor-pointer transition-colors hover:bg-muted-foreground/20"
+              >
+                <Database className="size-3" /> {size} triples
+              </Badge>
+            </button>
           )}
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        <DatasetControls
+          activeBuiltinId={activeBuiltinId}
+          onSelectBuiltin={selectBuiltin}
+          onLoadText={loadText}
+          disabled={controlsDisabled}
+        />
+
         <div className="flex flex-wrap gap-1.5">
           {EXAMPLE_QUERIES.map((q) => (
             <Button
@@ -116,23 +260,53 @@ export function Repl() {
             ) : (
               <Play className="size-4" />
             )}
-            {state.kind === "loading" ? "Loading engine…" : "Run query"}
+            Run query
           </Button>
-          <p
-            aria-live="polite"
-            className="text-xs text-muted-foreground"
-          >
+          <p aria-live="polite" className="text-xs text-muted-foreground">
             {state.kind === "select" &&
               `${state.results.results.bindings.length} rows · ${state.ms.toFixed(1)} ms`}
             {state.kind === "boolean" && `${state.ms.toFixed(1)} ms`}
-            {state.kind === "loading" && "Fetching the wasm bundle…"}
             {state.kind === "running" && "Running on the wasm engine…"}
+            {state.kind === "idle" &&
+              engine === "warming" &&
+              "Pre-warming the wasm engine…"}
           </p>
         </div>
 
         <ResultPanel state={state} />
       </CardContent>
+
+      <DatasetViewer
+        open={viewerOpen}
+        onOpenChange={setViewerOpen}
+        store={storeRef.current}
+        size={size}
+        active={active}
+      />
     </Card>
+  );
+}
+
+// [OPUS-4.8] Subtle engine-readiness pill. Reuses the badge tokens; never blocks the UI.
+function EngineIndicator({ engine }: { engine: EngineState }) {
+  if (engine === "ready") {
+    return (
+      <Badge variant="success" aria-live="polite">
+        <CheckCircle2 className="size-3" /> Engine ready
+      </Badge>
+    );
+  }
+  if (engine === "error") {
+    return (
+      <Badge variant="warning" aria-live="polite">
+        Engine failed — retries on run
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="muted" aria-live="polite">
+      <Loader2 className="size-3 animate-spin" /> Engine loading…
+    </Badge>
   );
 }
 
