@@ -110,11 +110,31 @@ jobs:
             crate: sparq-server
             features: federation-descriptors,service,time-travel,geo,test-seams
             test: true
+          # [OPUS-4.8] sq-21kp: the OPT-IN per-query access audit log (CDMC CD-2 /
+          # ISO 27001 A.8.15 / EU CRA logging) — exercises tests/audit_log.rs, which is
+          # `#![cfg(feature = "audit-log")]` and so never ran under the default build.
+          # `audit-log` pulls `server` (it operates on the async HTTP Response + tracing);
+          # composed with the same server feature set as the leg above so it compiles + the
+          # gated test is discovered and actually executes.
+          - name: sparq-server (audit-log + server features)
+            crate: sparq-server
+            features: audit-log,federation-descriptors,service,time-travel,geo,test-seams
+            test: true
           # sparq-vectors: the vec: magic predicates (pulls sparq-engine), and the
           # /v1/embeddings provider request/response shape (serde only, no socket).
           - name: sparq-vectors (vec-predicate, provider)
             crate: sparq-vectors
             features: vec-predicate,provider
+            test: true
+          # [OPUS-4.8] sq-wuft (actionable part): predicate-constrained (filtered) ANN.
+          # tests/filtered_bgp.rs + tests/filtered_bgp_transitive.rs are
+          # `#![cfg(all(feature = "vec-predicate", feature = "filtered-ann"))]`, so BOTH
+          # features must be ON together for the engine-side BGP→IdMask wiring tests to run.
+          # The existing `(vec-predicate, provider)` leg lacks `filtered-ann`, so those
+          # suites were never exercised in CI — this leg runs them.
+          - name: sparq-vectors (vec-predicate, filtered-ann)
+            crate: sparq-vectors
+            features: vec-predicate,filtered-ann
             test: true
           # sparq-geo: pure-Rust coordinate reprojection into CRS84.
           - name: sparq-geo (reproject)
