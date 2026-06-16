@@ -27,22 +27,37 @@
 # `open_validated`, so proving the in-memory path proves the B5 validator without Kani having
 # to model `mmap` / file I/O / FFI (which it cannot).
 #
-# WHY THE VECTORS VALIDATOR AND NOT THE DICT MMAP VALIDATOR (honest scope): MappedDict::
-# validate (sparq-core/src/dict.rs) is the other B5 validator, but it has NO mmap-free public
-# entry point — it is reachable only through `Dict::open_mmap`, which requires a live
-# `memmap2::Mmap` (Kani cannot model file-backed mappings, the same reason Miri cannot — see
-# miri.yml), and it pulls in the term-record parser + the prefix/datatype tables + a Vec of
-# collected triples. A Kani proof of it would first need a refactor to lift `validate` onto a
-# plain `&[u8]` (an in-memory `open_from_bytes`-style seam) — tracked as follow-up work, not
-# this lane. The vectors validator is the tractable, self-contained first proof.
+# AND — the `#[cfg(all(kani, feature = "mmap"))]` harnesses in crates/sparq-core/src/dict.rs:
+#   • validate_dict_bytes_never_panics          : for ALL four byte regions + term count up to
+#                                                 the harness bounds, the mmap dict validator
+#                                                 returns cleanly (Ok or Err), never panics /
+#                                                 OOB / UB.
+#   • validate_dict_bytes_sized_tail_never_panics: same, with the array LENGTHS pinned correct
+#                                                  for `len` so the budget targets the record-
+#                                                  parse + component-id + kind + hashid-range
+#                                                  tail.
+# `validate_dict_bytes` is the mmap-FREE seam (bead sq-ueuk) the mmap'd `MappedDict::validate`
+# now delegates to — a `memmap2::Mmap` derefs to the `&[u8]` it takes — so proving the seam
+# proves the dict B5 validator without Kani having to model `mmap` / file I/O / FFI. It is
+# built only under the `mmap` feature, so the run step passes `--features mmap`.
+#
+# HISTORY (honest scope, now closed): the dict validator USED to have no mmap-free entry point
+# (it was reachable only through `Dict::open_mmap`, which needs a live `memmap2::Mmap` that
+# Kani cannot model — the same reason Miri cannot; see miri.yml). Bead sq-ueuk lifted the
+# header/length/bounds/record logic onto a plain `&[u8]` (`validate_dict_bytes`), so the dict
+# validator is now proven here alongside the `.spqv` validator. The vectors validator remains
+# the first, self-contained proof.
 #
 # HOW (the documented Kani flow — https://model-checking.github.io/kani/install-guide.html):
-#   cargo install --locked kani-verifier   (the cargo-kani driver from crates.io)
-#   cargo kani setup                        (downloads the matching CBMC + Kani toolchain)
-#   cargo kani -p sparq-vectors             (model-checks every #[kani::proof] in the crate)
+#   cargo install --locked kani-verifier              (the cargo-kani driver from crates.io)
+#   cargo kani setup                                  (downloads the matching CBMC + Kani)
+#   cargo kani -p sparq-vectors                       (.spqv validator proofs)
+#   cargo kani -p sparq-core --features mmap          (mmap dict validator proofs)
 # Kani injects the `kani` cfg + the `kani` crate itself during model checking, so the harness
 # needs no dependency entry; under a normal build the `#[cfg(kani)]` module is stripped (the
-# `kani` cfg is registered in sparq-vectors/Cargo.toml [lints.rust] so `-D warnings` is happy).
+# `kani` cfg is registered in sparq-vectors/Cargo.toml AND sparq-core/Cargo.toml [lints.rust]
+# so `-D warnings` is happy). The dict harness is `#[cfg(all(kani, feature = "mmap"))]`, so
+# the `sparq-core` invocation passes `--features mmap`.
 #
 # UNTESTED-HERE: this lane has NOT been run in the authoring environment (Kani was not
 # installed). The harness is written against Kani's documented API and is VALIDATED ON THE
@@ -88,7 +103,7 @@ env:
 
 jobs:
   kani:
-    name: kani (.spqv validator bounded proof, informational)
+    name: kani (.spqv + mmap-dict validator bounded proofs, informational)
     runs-on: ubuntu-latest
     # `cargo kani setup` downloads CBMC + the Kani backend on a cold run, then the symbolic
     # exploration runs. Generous ceiling so a hung proof fails with a clear timeout rather
@@ -126,3 +141,8 @@ jobs:
       - name: Kani — .spqv on-disk-format validator bounded proof
         run: |
           cargo kani -p sparq-vectors
+      # Model-check the mmap-free dict validator seam (bead sq-ueuk). It is gated behind the
+      # `mmap` feature, so pass it; same failure semantics as above.
+      - name: Kani — mmap dict validator bounded proof
+        run: |
+          cargo kani -p sparq-core --features mmap

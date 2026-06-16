@@ -781,94 +781,237 @@ impl MappedDict {
     /// Any violation is a clean `InvalidData` error — never a panic, never UB.
     #[cfg(feature = "mmap")]
     fn validate(&self, len: usize, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> std::io::Result<()> {
-        let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("mmap dict: {m}"));
-        if self.offsets.len() != len.checked_mul(8).ok_or_else(|| bad("term count overflows offset-array size"))? {
-            return Err(bad("dict-offs.bin length is not term_count * 8 (corrupt or truncated)"));
-        }
-        if self.hashes.len() != len * 8 {
-            return Err(bad("dict-hash.bin length is not term_count * 8 (corrupt or truncated)"));
-        }
-        if self.hashids.len() != len.checked_mul(4).ok_or_else(|| bad("term count overflows hashid-array size"))? {
-            return Err(bad("dict-hid.bin length is not term_count * 4 (corrupt or truncated)"));
-        }
-        let len_id = u32::try_from(len).map_err(|_| bad("term count exceeds u32 id space"))?;
-        let blob: &[u8] = &self.blob;
-        // [OPUS-4.8] sq-cvug — quoted-triple `(own_id, subject, predicate)` ids collected
-        // during the parse pass, verified for KIND once every record offset is known in range.
-        let mut triple_sp: Vec<(Id, Id, Id)> = Vec::new();
-        for (idx, &off) in self.offsets().iter().enumerate() {
-            let own_id = (idx as Id) + 1; // records are stored in 1-based id order
-            let off = off as usize;
-            let rec = blob.get(off..).ok_or_else(|| bad("term offset is past the end of dict-terms.bin"))?;
-            let parsed = parse_stored_ref_checked(rec)
-                .ok_or_else(|| bad("a term record is malformed (bad tag/length or non-UTF-8 bytes)"))?;
-            // Range-check the table indices / component ids the record carries: these are
-            // attacker-controlled u32s in the blob, used unchecked as `prefixes[..]` /
-            // `datatypes[..]` indices and as ids when the term is reconstructed.
-            match parsed {
-                StoredRef::Iri { prefix, .. } => {
-                    if prefix as usize >= prefixes.len() {
-                        return Err(bad("an IRI record references an out-of-range prefix id"));
-                    }
+        // [OPUS-4.8] sq-ueuk — delegate to the mmap-free `&[u8]` seam below. The four
+        // mmap'd files are passed as plain byte slices (a `memmap2::Mmap` derefs to `&[u8]`),
+        // so ALL of the header/length/bounds/record/index logic lives in a pure function
+        // that has no `mmap`/file-I/O/FFI dependency and can be Kani-proof-harnessed (the
+        // MS-G4 follow-up the .spqv validator already enjoys — see .github/workflows/kani.yml).
+        validate_dict_bytes(&self.blob, &self.offsets, &self.hashes, &self.hashids, len, prefixes, datatypes)
+    }
+}
+
+/// [OPUS-4.8] sq-ueuk — the mmap-FREE core of [`MappedDict::validate`].
+///
+/// Takes the four on-disk regions as plain `&[u8]` (a `memmap2::Mmap` derefs to one) so the
+/// whole validator is a pure function of its byte inputs: no `mmap`, no file I/O, no FFI, no
+/// `unsafe`. That makes it BOTH unit-testable from in-memory buffers AND amenable to a Kani
+/// bounded proof (`#[cfg(kani)]` harness below), exactly like `VectorStore::open_from_bytes`
+/// is the mmap-free twin of the `.spqv` validator (the MS-G4 gap; sq-hkud, epic sq-toze).
+///
+/// The byte regions:
+///   * `blob`    — the concatenated term records (`dict-terms.bin`),
+///   * `offsets` — `len` little-endian `u64` byte offsets into `blob` (`dict-offs.bin`),
+///   * `hashes`  — `len` little-endian `u64` content hashes (`dict-hash.bin`); only its
+///     length is load-bearing here (it is binary-searched, not indexed, at query time),
+///   * `hashids` — `len` little-endian `u32` term ids parallel to `hashes` (`dict-hid.bin`).
+///
+/// `len` is the term count read from the (already magic/version-validated) meta file.
+/// We require:
+///   * `dict-offs.bin` is exactly `len * 8` bytes (one `u64` offset per term),
+///   * `dict-hash.bin` is exactly `len * 8` bytes and `dict-hid.bin` exactly `len * 4`
+///     (the parallel sorted lookup arrays — a mismatch would make `mapped_find`'s binary
+///     search read past the hashids array),
+///   * every offset is `<= blob.len()` AND the record at that offset parses fully with valid
+///     UTF-8 (via [`parse_stored_ref_checked`]),
+///   * every record's `prefix` / `datatype` index is within the prefix / datatype tables,
+///     and every `Triple` component id is a valid 1-based term id — otherwise a later
+///     `reconstruct_ref` / `hash_stored_ref` would index those tables out of bounds.
+///
+/// Any violation is a clean `InvalidData` error — never a panic, never UB.
+#[cfg(feature = "mmap")]
+fn validate_dict_bytes(
+    blob: &[u8],
+    offsets: &[u8],
+    hashes: &[u8],
+    hashids: &[u8],
+    len: usize,
+    prefixes: &[Box<str>],
+    datatypes: &[NamedNode],
+) -> std::io::Result<()> {
+    let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("mmap dict: {m}"));
+    if offsets.len() != len.checked_mul(8).ok_or_else(|| bad("term count overflows offset-array size"))? {
+        return Err(bad("dict-offs.bin length is not term_count * 8 (corrupt or truncated)"));
+    }
+    if hashes.len() != len * 8 {
+        return Err(bad("dict-hash.bin length is not term_count * 8 (corrupt or truncated)"));
+    }
+    if hashids.len() != len.checked_mul(4).ok_or_else(|| bad("term count overflows hashid-array size"))? {
+        return Err(bad("dict-hid.bin length is not term_count * 4 (corrupt or truncated)"));
+    }
+    let len_id = u32::try_from(len).map_err(|_| bad("term count exceeds u32 id space"))?;
+    // Read the `idx`-th little-endian `u64` offset directly from the byte region. The length
+    // check above guarantees `offsets` is exactly `len * 8` bytes, so `0..len` is in range;
+    // we still index via `get` so this stays panic-free for ANY input (the Kani obligation).
+    let offset_at = |idx: usize| -> Option<usize> {
+        let start = idx.checked_mul(8)?;
+        let end = start.checked_add(8)?;
+        let bytes: [u8; 8] = offsets.get(start..end)?.try_into().ok()?;
+        Some(u64::from_le_bytes(bytes) as usize)
+    };
+    // [OPUS-4.8] sq-cvug — quoted-triple `(own_id, subject, predicate)` ids collected
+    // during the parse pass, verified for KIND once every record offset is known in range.
+    let mut triple_sp: Vec<(Id, Id, Id)> = Vec::new();
+    for idx in 0..len {
+        let own_id = (idx as Id) + 1; // records are stored in 1-based id order
+        let off = offset_at(idx).ok_or_else(|| bad("offset-array index out of range (corrupt or truncated)"))?;
+        let rec = blob.get(off..).ok_or_else(|| bad("term offset is past the end of dict-terms.bin"))?;
+        let parsed = parse_stored_ref_checked(rec)
+            .ok_or_else(|| bad("a term record is malformed (bad tag/length or non-UTF-8 bytes)"))?;
+        // Range-check the table indices / component ids the record carries: these are
+        // attacker-controlled u32s in the blob, used unchecked as `prefixes[..]` /
+        // `datatypes[..]` indices and as ids when the term is reconstructed.
+        match parsed {
+            StoredRef::Iri { prefix, .. } => {
+                if prefix as usize >= prefixes.len() {
+                    return Err(bad("an IRI record references an out-of-range prefix id"));
                 }
-                StoredRef::Lit { datatype, .. } => {
-                    if datatype as usize >= datatypes.len() {
-                        return Err(bad("a literal record references an out-of-range datatype id"));
-                    }
+            }
+            StoredRef::Lit { datatype, .. } => {
+                if datatype as usize >= datatypes.len() {
+                    return Err(bad("a literal record references an out-of-range datatype id"));
                 }
-                StoredRef::Triple(ids) => {
-                    // A quoted-triple term's components are themselves dictionary ids; an
-                    // inline-integer id (>= INLINE_BASE) or a real term id (1..=len) is in
-                    // range, but 0 or a dangling id would later index OOB. Beyond range, a
-                    // validly-built store interns each component BEFORE the triple (see
-                    // `intern_triple_ids`), so a non-inline component id is always STRICTLY
-                    // LESS than the triple's own id. Enforcing that here rejects a tampered
-                    // self/forward/cyclic reference (e.g. a triple whose object id is the
-                    // triple itself), which would otherwise drive `reconstruct_triple` into
-                    // UNBOUNDED RECURSION → stack overflow → process abort (a DoS). [OPUS-4.8]
-                    if ids
-                        .iter()
-                        .any(|&c| c == 0 || (c < INLINE_BASE && (c > len_id || c >= own_id)))
-                    {
-                        return Err(bad("a quoted-triple record references an out-of-range, forward, or self component id"));
-                    }
-                    triple_sp.push((own_id, ids[0], ids[1]));
+            }
+            StoredRef::Triple(ids) => {
+                // A quoted-triple term's components are themselves dictionary ids; an
+                // inline-integer id (>= INLINE_BASE) or a real term id (1..=len) is in
+                // range, but 0 or a dangling id would later index OOB. Beyond range, a
+                // validly-built store interns each component BEFORE the triple (see
+                // `intern_triple_ids`), so a non-inline component id is always STRICTLY
+                // LESS than the triple's own id. Enforcing that here rejects a tampered
+                // self/forward/cyclic reference (e.g. a triple whose object id is the
+                // triple itself), which would otherwise drive `reconstruct_triple` into
+                // UNBOUNDED RECURSION → stack overflow → process abort (a DoS). [OPUS-4.8]
+                if ids
+                    .iter()
+                    .any(|&c| c == 0 || (c < INLINE_BASE && (c > len_id || c >= own_id)))
+                {
+                    return Err(bad("a quoted-triple record references an out-of-range, forward, or self component id"));
                 }
-                StoredRef::Blank(_) => {}
+                triple_sp.push((own_id, ids[0], ids[1]));
             }
+            StoredRef::Blank(_) => {}
         }
-        // [OPUS-4.8] sq-cvug — KIND check: a component id can be in range yet of the wrong
-        // kind (e.g. a literal where the subject must be IRI/blank or the predicate an IRI).
-        // `reconstruct_triple` now fails closed to a placeholder rather than panicking, but
-        // reject such an index here too so a corrupt store never opens. Resolving each id is
-        // safe now: every offset above was confirmed in range and every record parseable, so
-        // `record_kind` cannot OOB. (Inline-integer ids resolve to a literal — invalid in a
-        // subject/predicate slot.)
-        let record_kind = |c: Id| -> Option<u8> {
-            if is_inline(c) {
-                return Some(1); // inline integer => literal
-            }
-            let off = *self.offsets().get((c - 1) as usize)? as usize;
-            // tag byte: 0=IRI, 1=literal, 2=blank, 3=triple
-            blob.get(off).copied()
-        };
-        for (_own, s, p) in triple_sp {
-            match record_kind(s) {
-                Some(0 | 2) => {} // IRI or blank — valid subject
-                _ => return Err(bad("a quoted-triple subject component is not an IRI or blank node")),
-            }
-            match record_kind(p) {
-                Some(0) => {} // IRI — valid predicate
-                _ => return Err(bad("a quoted-triple predicate component is not an IRI")),
-            }
+    }
+    // [OPUS-4.8] sq-cvug — KIND check: a component id can be in range yet of the wrong
+    // kind (e.g. a literal where the subject must be IRI/blank or the predicate an IRI).
+    // `reconstruct_triple` now fails closed to a placeholder rather than panicking, but
+    // reject such an index here too so a corrupt store never opens. Resolving each id is
+    // safe now: every offset above was confirmed in range and every record parseable, so
+    // `record_kind` cannot OOB. (Inline-integer ids resolve to a literal — invalid in a
+    // subject/predicate slot.)
+    let record_kind = |c: Id| -> Option<u8> {
+        if is_inline(c) {
+            return Some(1); // inline integer => literal
         }
-        // Every id in the sorted lookup array must be a valid 1-based term id: `mapped_find`
-        // feeds it straight to `stored` (→ `offsets()[id-1]`), so `id == 0` (underflow) or
-        // `id > len` (OOB) would be an out-of-bounds read on a hostile dict-hid.bin.
-        if self.hashids().iter().any(|&id| id == 0 || id > len_id) {
+        let off = offset_at((c - 1) as usize)?;
+        // tag byte: 0=IRI, 1=literal, 2=blank, 3=triple
+        blob.get(off).copied()
+    };
+    for (_own, s, p) in triple_sp {
+        match record_kind(s) {
+            Some(0 | 2) => {} // IRI or blank — valid subject
+            _ => return Err(bad("a quoted-triple subject component is not an IRI or blank node")),
+        }
+        match record_kind(p) {
+            Some(0) => {} // IRI — valid predicate
+            _ => return Err(bad("a quoted-triple predicate component is not an IRI")),
+        }
+    }
+    // Every id in the sorted lookup array must be a valid 1-based term id: `mapped_find`
+    // feeds it straight to `stored` (→ `offsets()[id-1]`), so `id == 0` (underflow) or
+    // `id > len` (OOB) would be an out-of-bounds read on a hostile dict-hid.bin. Read each
+    // little-endian `u32` from the byte region; the length check above guarantees the slice
+    // is exactly `len * 4` bytes, and `chunks_exact(4)` never panics on a short tail.
+    for chunk in hashids.chunks_exact(4) {
+        let id = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        if id == 0 || id > len_id {
             return Err(bad("dict-hid.bin contains an out-of-range term id (corrupt lookup index)"));
         }
-        Ok(())
+    }
+    Ok(())
+}
+
+// [OPUS-4.8] sq-ueuk (epic sq-toze, gap MS-G4) — Kani bounded proof of the mmap dict
+// validator, now that the `&[u8]` seam above lets Kani reach the header/length/bounds/record
+// logic WITHOUT a real `mmap` (which Kani — like Miri — cannot model; see the WHY scope note
+// in .github/workflows/kani.yml). This is the dict-side twin of `sparq-vectors`'
+// `open_from_bytes_*` harnesses: it model-checks that `validate_dict_bytes` is TOTAL over a
+// bounded symbolic byte domain — it always returns `Ok`/`Err`, never panics, never reads out
+// of bounds, never hits UB — for EVERY hostile input in that domain.
+//
+// UNTESTED-HERE: Kani is not installed in the authoring environment, so this harness has NOT
+// been run; it is written against Kani's documented API (`kani::any()`, `kani::assume()`,
+// `#[kani::proof]`, `#[kani::unwind]`) and is VALIDATED ON THE FIRST CI RUN of the `kani`
+// lane. It is `#[cfg(kani)]`, so the normal `cargo build`/`clippy`/`test` never compile it.
+// The `kani` cfg is registered in crates/sparq-core/Cargo.toml [lints.rust] so `-D warnings`
+// (unexpected_cfgs) is happy on the normal build.
+#[cfg(all(kani, feature = "mmap"))]
+mod kani_proofs {
+    use super::*;
+
+    /// Symbolic buffer ceiling. The four byte regions are independently symbolic but length-
+    /// coupled to `len` by the early size checks, so a small `len` plus a small blob exercises
+    /// every branch — the size-arithmetic rejections, the record parse + table-index range
+    /// checks, the quoted-triple component/kind checks, and the hashid range loop — while
+    /// keeping the bounded exploration tractable.
+    const MAX_LEN: usize = 2; // up to 2 terms
+    const MAX_BLOB: usize = 24; // a couple of small records / one quoted-triple (1+12) + slack
+
+    /// Fills a `Vec<u8>` of a symbolic length `<= cap` with symbolic bytes.
+    fn symbolic_bytes(cap: usize) -> Vec<u8> {
+        let n: usize = kani::any();
+        kani::assume(n <= cap);
+        let mut v = vec![0u8; n];
+        for b in v.iter_mut() {
+            *b = kani::any();
+        }
+        v
+    }
+
+    /// PROPERTY: `validate_dict_bytes` never panics / OOB / UB for ANY four byte regions and
+    /// term count up to the bounds, with empty prefix/datatype tables. Empty tables make every
+    /// non-zero IRI-prefix / literal-datatype index out of range (so that rejection branch is
+    /// exercised) and keep the symbolic surface minimal.
+    #[kani::proof]
+    #[kani::unwind(28)] // > MAX_BLOB so every bounded record/slice loop fully unrolls.
+    fn validate_dict_bytes_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= MAX_LEN);
+        let blob = symbolic_bytes(MAX_BLOB);
+        let offsets = symbolic_bytes(MAX_LEN * 8);
+        let hashes = symbolic_bytes(MAX_LEN * 8);
+        let hashids = symbolic_bytes(MAX_LEN * 4);
+        // The property is simply: this call returns (must not panic / OOB / UB). Both `Ok`
+        // and `Err` are correct outcomes; the harness proves the validator is TOTAL over the
+        // bounded input domain.
+        let _ = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, len, &[], &[]);
+    }
+
+    /// PROPERTY (focused): with the array LENGTHS already correct for `len`, the record-parse,
+    /// component-id, kind, and hashid-range tail still never panics. Pinning the lengths past
+    /// the size checks spends Kani's budget on the loop/arithmetic logic the corpus is least
+    /// likely to have exhausted, with one prefix + one datatype so the in-range index branch
+    /// is also taken.
+    #[kani::proof]
+    #[kani::unwind(28)]
+    fn validate_dict_bytes_sized_tail_never_panics() {
+        const LEN: usize = 1;
+        let blob = symbolic_bytes(MAX_BLOB);
+        let mut offsets = vec![0u8; LEN * 8];
+        for b in offsets.iter_mut() {
+            *b = kani::any();
+        }
+        let mut hashes = vec![0u8; LEN * 8];
+        for b in hashes.iter_mut() {
+            *b = kani::any();
+        }
+        let mut hashids = vec![0u8; LEN * 4];
+        for b in hashids.iter_mut() {
+            *b = kani::any();
+        }
+        let prefixes: [Box<str>; 1] = [Box::from("p")];
+        let datatypes = [NamedNode::new_unchecked("http://example.org/dt")];
+        let _ = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, LEN, &prefixes, &datatypes);
     }
 }
 
@@ -2900,6 +3043,90 @@ mod tests {
         assert!(err.to_string().contains("legacy"), "clear rebuild error: {err}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] sq-ueuk — exercise the mmap-FREE `&[u8]` validator seam directly from
+    /// in-memory buffers (no real `mmap`, no file I/O), the same seam the Kani harness proves
+    /// over a bounded symbolic domain. Builds a well-formed two-term store in RAM (one IRI +
+    /// one literal) and then mutates each region to hit every rejection branch.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn validate_dict_bytes_seam_accepts_valid_and_rejects_corruption() {
+        // A well-formed store: ids 1 = IRI(prefix 0, suffix "a"), 2 = literal "v" of datatype 0.
+        let prefixes: Vec<Box<str>> = vec![Box::from("http://ex/")];
+        let datatypes = vec![NamedNode::new_unchecked("http://ex/dt")];
+        let recs = [
+            StoredRef::Iri { prefix: 0, suffix: "a" },
+            StoredRef::Lit { value: "v", datatype: 0, lang: None },
+        ];
+        let mut blob: Vec<u8> = Vec::new();
+        let mut offsets: Vec<u8> = Vec::new();
+        for r in &recs {
+            offsets.extend_from_slice(&(blob.len() as u64).to_le_bytes());
+            write_record(&mut blob, r).unwrap();
+        }
+        let len = recs.len();
+        // Sorted lookup arrays: hashes are not indexed here (length-only), ids must be 1..=len.
+        let hashes: Vec<u8> = vec![0u8; len * 8];
+        let mut hashids: Vec<u8> = Vec::new();
+        hashids.extend_from_slice(&1u32.to_le_bytes());
+        hashids.extend_from_slice(&2u32.to_le_bytes());
+
+        // (a) The well-formed buffers validate.
+        validate_dict_bytes(&blob, &offsets, &hashes, &hashids, len, &prefixes, &datatypes)
+            .expect("a well-formed in-memory store validates");
+
+        // (b) Wrong offset-array length (truncated dict-offs.bin) is rejected.
+        let err = validate_dict_bytes(&blob, &offsets[..8], &hashes, &hashids, len, &prefixes, &datatypes)
+            .expect_err("a truncated offset array must be rejected");
+        assert!(err.to_string().contains("dict-offs.bin"), "{err}");
+
+        // (c) An offset past the end of the blob is rejected (no panic / OOB).
+        let mut bad_offsets = offsets.clone();
+        bad_offsets[0..8].copy_from_slice(&((blob.len() + 1) as u64).to_le_bytes());
+        let err = validate_dict_bytes(&blob, &bad_offsets, &hashes, &hashids, len, &prefixes, &datatypes)
+            .expect_err("an out-of-range offset must be rejected");
+        assert!(err.to_string().contains("past the end"), "{err}");
+
+        // (d) An out-of-range prefix id is rejected (empty prefix table makes prefix 0 invalid).
+        let err = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, len, &[], &datatypes)
+            .expect_err("an out-of-range prefix id must be rejected");
+        assert!(err.to_string().contains("prefix id"), "{err}");
+
+        // (e) A hashid of 0 (would underflow `offsets[id-1]`) is rejected.
+        let mut bad_hashids = hashids.clone();
+        bad_hashids[0..4].copy_from_slice(&0u32.to_le_bytes());
+        let err = validate_dict_bytes(&blob, &offsets, &hashes, &bad_hashids, len, &prefixes, &datatypes)
+            .expect_err("a zero hashid must be rejected");
+        assert!(err.to_string().contains("dict-hid.bin"), "{err}");
+
+        // (f) A hashid > len (would index past the offset array) is rejected.
+        let mut over_hashids = hashids.clone();
+        over_hashids[4..8].copy_from_slice(&(len as u32 + 1).to_le_bytes());
+        let err = validate_dict_bytes(&blob, &offsets, &hashes, &over_hashids, len, &prefixes, &datatypes)
+            .expect_err("an out-of-range hashid must be rejected");
+        assert!(err.to_string().contains("dict-hid.bin"), "{err}");
+
+        // (g) Totally-empty inputs with len 0 validate (vacuously well-formed).
+        validate_dict_bytes(&[], &[], &[], &[], 0, &[], &[]).expect("an empty store validates");
+    }
+
+    /// [OPUS-4.8] sq-ueuk — the seam must reject a tampered quoted-triple whose component id
+    /// forward-references (or self-references) its own id, which would otherwise drive the
+    /// reconstruct recursion unbounded. Build a single triple term whose subject id equals its
+    /// own id and confirm it is refused at the `&[u8]` boundary (no panic / no stack blowup).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn validate_dict_bytes_seam_rejects_self_referential_triple() {
+        // id 1 = Triple([1, 1, 1]) — every component is the triple's own id (forward/self).
+        let mut blob: Vec<u8> = Vec::new();
+        write_record(&mut blob, &StoredRef::Triple([1, 1, 1])).unwrap();
+        let offsets = 0u64.to_le_bytes().to_vec();
+        let hashes = vec![0u8; 8];
+        let hashids = 1u32.to_le_bytes().to_vec();
+        let err = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, 1, &[], &[])
+            .expect_err("a self/forward-referential quoted-triple must be rejected");
+        assert!(err.to_string().contains("quoted-triple"), "{err}");
     }
 
     #[test]
