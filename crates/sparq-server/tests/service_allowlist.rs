@@ -104,12 +104,16 @@ async fn empty_allowlist_refuses_service_before_any_network_call() {
         .await
         .unwrap();
     // A non-SILENT SERVICE that is refused fails the query — the server maps an engine
-    // execution error to a non-2xx. (500 here; the body names the egress refusal.)
+    // execution error to a non-2xx (500 here). The egress/allowlist detail names the
+    // refused host, so the server SANITIZES it (see `sanitized_error`/`execution_error`
+    // in http.rs, #241): the body carries only the stable generic class, and the host
+    // detail goes to the server log. The non-2xx status plus the "no socket dialled"
+    // assertion below are the load-bearing proof of the strict pre-DNS refusal.
     assert!(!resp.status().is_success(), "blocked SERVICE must not 200; got {}", resp.status());
     let body = resp.text().await.unwrap().to_lowercase();
     assert!(
-        body.contains("egress") || body.contains("allowlist") || body.contains("service"),
-        "expected an egress/allowlist refusal in the body, got: {body}"
+        body.contains("query execution error"),
+        "expected the sanitized engine-error class in the body, got: {body}"
     );
     // The query has already returned; give any in-flight dial a brief window, then assert
     // the live listener accepted NOTHING — i.e. the refusal happened before any socket
