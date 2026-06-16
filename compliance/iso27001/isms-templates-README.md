@@ -65,7 +65,7 @@ organization supplies every *decision* and *sign-off*.
 - **No org decisions pre-made.** Every applicability, risk, acceptance, and sign-off cell is a
   `<FILL-IN>` placeholder. sparq does not, and cannot, make these for an organization.
 - **A.8.24 / ZK-MPC.** The `sparq-zk` / `sparq-zk-compose` / `sparq-mpc` estate is documented
-  **NOT cryptographically sound** (`SECURITY.md`, `research/zk-soundness-audit.md`). It is
+  **NOT cryptographically sound** (`SECURITY.md`, `research/zk-soundness-audit.md`). It is <!-- privacy-claims-allow: negative usage (documented NOT-sound, excluded as a control); sq-toze.35 -->
   **excluded** from every cryptographic-control claim across all five templates; no SoA or risk
   register completion may credit it as a control.
 

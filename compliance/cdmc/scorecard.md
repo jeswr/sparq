@@ -79,7 +79,7 @@ security controls — 4s; the cataloguing surface (2.1) is now a CI-gated **4** 
 `federation-descriptors` feature is built/tested/clippied on every PR — #244) and **deliberately weak where the capability is a
 governance *decision* an operator must make** (ownership, classification taxonomy, retention
 policy, residency — 2s). The single most important honesty statement: **the ZK/MPC estate is
-documented as NOT cryptographically sound** (`research/zk-soundness-audit.md`, `SECURITY.md`) and
+documented as NOT cryptographically sound** (`research/zk-soundness-audit.md`, `SECURITY.md`) and <!-- privacy-claims-allow: negative usage (documented NOT-sound); sq-toze.35 -->
 contributes **zero** to any protection-by-cryptography maturity here. Any future scorer who credits
 ZK/MPC as a privacy control is overclaiming.
 

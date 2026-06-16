@@ -61,7 +61,7 @@ List the issues that affect the ISMS outcomes. The sparq-relevant seeds are pre-
 | 1 | `<FILL-IN: e.g. regulatory regime(s) the deployed service operates under — GDPR/CRA/sector rules>` | External | Drives clause-4.2 requirements + Annex A A.5.31 (legal) | `<FILL-IN>` |
 | 2 | **Use of sparq as a third-party open-source data engine** (supplier dependency) | External | A.5.19–A.5.22 supplier controls; the org inherits sparq's supply-chain posture but owns its *own* dependency policy | `<FILL-IN>` |
 | 3 | **sparq's documented no-authentication boundary (B3)** — `sparq-server` ships with no per-user authz | External (component design) | The org **must** front it with an authenticating/TLS gateway; names this in 4.3 interfaces | `<FILL-IN>` |
-| 4 | **sparq's ZK/MPC estate is documented NOT cryptographically sound** (`SECURITY.md`, `research/zk-soundness-audit.md`) | External (component limitation) | The org must **not** rely on it for any confidentiality/integrity guarantee; record as an explicit exclusion | `<FILL-IN>` |
+| 4 | **sparq's ZK/MPC estate is documented NOT cryptographically sound** (`SECURITY.md`, `research/zk-soundness-audit.md`) | External (component limitation) | The org must **not** rely on it for any confidentiality/integrity guarantee; record as an explicit exclusion | `<FILL-IN>` | <!-- privacy-claims-allow: negative usage (documented NOT-sound, exclusion); sq-toze.35 -->
 | 5 | `<FILL-IN: internal — team structure, skills, change-rate, hosting model (cloud/on-prem)>` | Internal | Affects resourcing (clause 7) + operator-owned controls | `<FILL-IN>` |
 | 6 | `<FILL-IN: data sensitivity of the RDF the org loads into sparq>` | Internal | Drives A.5.12 classification + privacy scope (`compliance/dpia.md`) | `<FILL-IN>` |
 

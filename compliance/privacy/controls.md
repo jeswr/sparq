@@ -61,7 +61,7 @@ operator's PIMS/an external auditor · `OPERATOR` = property of the deployment, 
 
 > **No privacy capability claimed in this table rests on the ZK or MPC estate.**
 >
-> sparq ships `sparq-zk`, `sparq-zk-compose`, and `sparq-mpc`, which *model* privacy-preserving
+> sparq ships `sparq-zk`, `sparq-zk-compose`, and `sparq-mpc`, which *model* privacy-preserving <!-- privacy-claims-allow: hedged ("*model*", "If sound, these would be", "not yet sound"); sq-toze.35 -->
 > query proofs (zero-knowledge: prove a result without revealing the data) and multi-party
 > computation (compute over data split across distrusting parties without pooling it). **If
 > sound, these would be powerful privacy-by-cryptography controls.** They are **not yet sound**:

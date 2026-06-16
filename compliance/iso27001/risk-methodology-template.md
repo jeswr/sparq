@@ -115,7 +115,7 @@ sparq GHSA advisory). Retain results as documented information.
 
 > **Honesty constraint on R-6 (load-bearing).** No completion of this register may list the
 > `sparq-zk` / `sparq-zk-compose` / `sparq-mpc` estate as a *risk-reducing control*. Its
-> documented verdict is **NOT cryptographically sound**; the only valid treatment is to **not
+> documented verdict is **NOT cryptographically sound**; the only valid treatment is to **not <!-- privacy-claims-allow: negative usage (documented NOT-sound, not a control); sq-toze.35 -->
 > depend on it** for any security property. Crediting it as a mitigation would be the exact
 > overclaim the honesty contract (and `controls.md` A.8.24) forbids.
 

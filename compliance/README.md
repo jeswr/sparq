@@ -108,7 +108,7 @@ operator-deployment; mmap files are plaintext) · 6.2 data lineage (CD-1).
 | 6 — Technical Architecture | ~3.0 | Architecture a strength **(4)**; lineage the weak axis (2) |
 
 The single most important honesty statement, restated by both the CDMC scorecard and the crypto-review
-register: **the ZK/MPC estate is documented as NOT cryptographically sound** and contributes **zero**
+register: **the ZK/MPC estate is documented as NOT cryptographically sound** and contributes **zero** <!-- privacy-claims-allow: negative usage (documented NOT-sound); sq-toze.35 -->
 to any protection-by-cryptography maturity. Any future scorer crediting ZK/MPC as a privacy control is
 overclaiming — flag it against the consolidated register's headline.
 
