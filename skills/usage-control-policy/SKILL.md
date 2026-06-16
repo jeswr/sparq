@@ -74,7 +74,16 @@ assert_eq!(d.matched_rules.len(), 1);  // the granting permission, for audit
 
 ## Building the request
 
-`Request::new(action_iri)` then chain `.on(target)`, `.by(party)`, `.with(left_operand_iri, Value)` for each context dimension (`dateTime`, `purpose`, `recipient`, `count`, `spatial`, …), and `.discharge(duty_action_iri)` per discharged duty. `Value` is `Iri` | `Str` | `Num(f64)` | `DateTime(String)`.
+`Request::new(action_iri)` then chain `.on(target)`, `.by(party)`, `.with(left_operand_iri, Value)` for each context dimension (`dateTime`, `purpose`, `recipient`, `count`, `spatial`, …), and `.discharge(duty_action_iri)` per discharged duty. `Value` is `Iri` | `Str` | `Num(f64)` | `DateTime(String)`. For purpose specifically, prefer the first-class `.for_purpose(Value)` (sugar over `.with(ODRL_PURPOSE, ..)`); read it back via `req.purpose()`.
+
+## `odrl:purpose` enforcement (faithful, fail-closed) — [OPUS-4.8] sq-q56r
+
+A purpose constraint restricts a rule to a stated *purpose of use*. The request carries its purpose as **evidence** (`.for_purpose(Value)`), and it is gated through the **same** `evaluate` constraint path as every other dimension — so it is actually checked end-to-end (no claimed-but-unchecked enforcement), including through the opt-in bridge's real `accessible` / `query_as` path.
+
+- **Match → grant; mismatch → deny; missing purpose → fail-closed.** A request stating **no** purpose is *unprovable*: a purpose-gated permission does **not** grant, and a purpose-gated prohibition is **not** withdrawn. "No purpose stated" is **never** treated as "any purpose allowed".
+- **Match semantics (the boundary — do not over-claim):** **exact** IRI/string equality (`eq`/`isA`), or membership in the explicit `isPartOf` purpose *set* the constraint names, or `neq` (≠ the named one; still requires a stated purpose). There is **no** purpose hierarchy / DPV subsumption — a narrower/broader purpose IRI is not matched against a constraint naming a different one. (DPV taxonomy / hierarchy match is a deferred bead.)
+- **Audit:** `purpose_status(&rule, &request) -> PurposeMatch` reports exactly what the evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` / `NotConstrained`.
+- Through the bridge, purpose stays **one-shot** (checked once at materialization; see the mapping table below) — it has no re-checked-condition analogue, so a changed purpose is re-evaluated on the next `refresh_odrl_grant`.
 
 ## Bridge to WAC/ACP enforcement (opt-in `odrl-bridge`) — [OPUS-4.8] sq-h3uk
 

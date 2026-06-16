@@ -1335,3 +1335,160 @@ fn policy_refresh_deny_overrides_composition() {
         "deny dropped + allow re-applied → write restored under deny-overrides",
     );
 }
+
+// ===========================================================================
+// [OPUS-4.8] sq-q56r — faithful odrl:purpose enforcement THROUGH THE REAL
+// enforcement path (PodStore::accessible / query_as). A purpose-gated permission
+// grants ONLY when the request states a matching purpose; a mismatch denies; a
+// MISSING purpose fails closed (no grant); the prohibition dual carves out only on
+// a matching stated purpose, and a missing purpose does NOT withdraw the carve-out.
+// Match is exact (no hierarchy). All assertions go through accessible / query_as.
+// ===========================================================================
+
+const RESEARCH: &str = "urn:purpose/research";
+const MARKETING: &str = "urn:purpose/marketing";
+
+/// alice MAY read n1, gated on purpose = research (exact IRI).
+fn purpose_read_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/purp> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <urn:purpose/research> ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+fn reads_n1(store: &mut PodStore, agent: &str) -> bool {
+    let s = Session { agent: Some(agent), client: None };
+    store.accessible(&s, Mode::Read).iter().any(|g| g.as_str() == N1)
+}
+
+// 28. purpose MATCH grants through the real enforcement path; mismatch + missing deny.
+#[test]
+fn purpose_match_grants_through_enforcement() {
+    let pol = purpose_read_policy();
+    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    let alice = Session { agent: Some(ALICE), client: None };
+
+    // (a) Matching purpose → grant → alice reads through accessible AND query_as.
+    let mut store = PodStore::new(pod());
+    let ok = Request::new(odrl("read"))
+        .on(N1)
+        .by(ALICE)
+        .for_purpose(Value::Iri(RESEARCH.to_owned()));
+    assert!(store.materialize_odrl_permission(&pol, &ok).granted, "matching purpose grants");
+    assert!(reads_n1(&mut store, ALICE), "alice reads with matching purpose");
+    assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
+
+    // (b) Mismatched purpose → no grant, nothing readable.
+    let mut store2 = PodStore::new(pod());
+    let bad = Request::new(odrl("read"))
+        .on(N1)
+        .by(ALICE)
+        .for_purpose(Value::Iri(MARKETING.to_owned()));
+    assert!(!store2.materialize_odrl_permission(&pol, &bad).granted, "mismatch denies");
+    assert!(!reads_n1(&mut store2, ALICE), "no access on purpose mismatch");
+    assert_eq!(store2.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 0);
+}
+
+// 29. THE honesty test: a MISSING purpose fails closed — no grant, no access. "No
+//     purpose stated" is never silently treated as "any purpose allowed".
+#[test]
+fn missing_purpose_fails_closed_through_enforcement() {
+    let mut store = PodStore::new(pod());
+    let no_purpose = Request::new(odrl("read")).on(N1).by(ALICE); // no purpose evidence
+    let out = store.materialize_odrl_permission(&purpose_read_policy(), &no_purpose);
+    assert!(!out.granted, "missing purpose must NOT grant: {out:?}");
+    assert!(!reads_n1(&mut store, ALICE), "no access when purpose is unstated");
+    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 0);
+}
+
+// 30. Match is EXACT — a narrower sub-purpose IRI is not subsumed (no hierarchy).
+#[test]
+fn purpose_match_is_exact_through_enforcement() {
+    let mut store = PodStore::new(pod());
+    let sub = Request::new(odrl("read"))
+        .on(N1)
+        .by(ALICE)
+        .for_purpose(Value::Iri("urn:purpose/research/clinical".to_owned()));
+    assert!(
+        !store.materialize_odrl_permission(&purpose_read_policy(), &sub).granted,
+        "exact-match only: a sub-purpose IRI is not subsumed",
+    );
+    assert!(!reads_n1(&mut store, ALICE));
+}
+
+// 31. The DUAL — a purpose-gated PROHIBITION carves out (denies) only on a matching
+//     stated purpose; a different purpose does NOT carve out; a MISSING purpose does
+//     NOT withdraw the carve-out (deny stays — fail-closed). All via accessible.
+#[test]
+fn purpose_prohibition_dual_through_enforcement() {
+    // A standalone permit (any purpose) so the prohibition has an allow to override.
+    let permit = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/p> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    // alice is PROHIBITED from reading n1 FOR purpose = marketing.
+    let prohib = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/pp> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <urn:purpose/marketing> ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+
+    // (a) Stated marketing purpose → prohibition carves out → DENY beats the allow.
+    let mut store = PodStore::new(pod());
+    let unconstrained = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&permit, &unconstrained).granted);
+    assert!(reads_n1(&mut store, ALICE), "allow live before the deny");
+    let marketing = Request::new(odrl("read"))
+        .on(N1)
+        .by(ALICE)
+        .for_purpose(Value::Iri(MARKETING.to_owned()));
+    let out = store.materialize_odrl_prohibition(&prohib, &marketing);
+    assert!(out.prohibited, "matching purpose carves out: {out:?}");
+    assert!(!reads_n1(&mut store, ALICE), "deny-overrides: marketing purpose denied");
+
+    // (b) Stated a DIFFERENT purpose → prohibition does NOT carve out (no deny).
+    let mut store2 = PodStore::new(pod());
+    assert!(store2.materialize_odrl_permission(&permit, &unconstrained).granted);
+    let research = Request::new(odrl("read"))
+        .on(N1)
+        .by(ALICE)
+        .for_purpose(Value::Iri(RESEARCH.to_owned()));
+    let out2 = store2.materialize_odrl_prohibition(&prohib, &research);
+    assert!(!out2.prohibited, "a non-marketing purpose is not carved out: {out2:?}");
+    assert!(reads_n1(&mut store2, ALICE), "allow survives: research purpose not prohibited");
+
+    // (c) NO purpose stated → the carve-out is *unprovable*, so materialize_prohibition
+    //     emits NO deny: it materializes a deny only when the prohibition DEFINITELY
+    //     matches (the matched_prohibition boundary). The deny is materialized once a
+    //     request actually states the banned purpose. The *deny-retraction* direction —
+    //     where unprovable must NOT restore an existing deny — is prohibition_status's
+    //     job (ProhibitionStatus::Ambiguous keeps it; asserted in sparq-policy's tests).
+    let mut store3 = PodStore::new(pod());
+    assert!(store3.materialize_odrl_permission(&permit, &unconstrained).granted);
+    let out3 = store3.materialize_odrl_prohibition(&prohib, &unconstrained);
+    assert!(!out3.prohibited, "no purpose evidence → no definite carve-out materialized");
+}

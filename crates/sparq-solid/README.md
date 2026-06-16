@@ -141,6 +141,20 @@ and the recipient-of-data *is* the session agent — so an agent matcher re-chec
 identical semantics. Purpose/time/count have no stateless `(agent, client)` analogue, so
 persisting them would require a looser approximation that could over-grant — rejected.
 
+**`odrl:purpose` enforcement through the bridge (faithful, fail-closed)** — [OPUS-4.8] sq-q56r.
+Purpose has no re-checked-condition analogue (above), so it stays **one-shot**: the bound is
+checked **once**, against the request's stated purpose, by the same `sparq_policy::evaluate`
+the one-shot `materialize_odrl_permission` / `materialize_odrl_prohibition` run — then a grant
+(or `auth:deny*`) is materialized only if it held. So a purpose-gated rule is enforced
+end-to-end through the *real* `accessible` / `query_as` path, never claimed-but-unchecked:
+a **matching** stated purpose grants; a **mismatch** denies; a **missing** purpose is
+*unprovable* → fail-closed (the permission does not grant; the prohibition is not carved out
+— "no purpose stated" is never "any purpose allowed"). **Match is exact** (IRI/string
+equality, or `isPartOf` over the named set, or `neq`) — **no** purpose hierarchy / DPV
+subsumption. Because the check is one-shot, a purpose-gated grant is scoped to the request
+party it was materialized for; a *changed* stated purpose is re-evaluated on the next
+`refresh_odrl_grant` (sq-dpk4). A DPV purpose taxonomy / hierarchy match is a deferred bead.
+
 **Fail-safe on mixed constraints:** a condition is persisted **only** when *every* constraint
 on the rule maps faithfully. A rule mixing a mappable recipient with an unmappable
 `dateTime`/`purpose`/`count` falls back **entirely** to the one-shot path — persisting only
