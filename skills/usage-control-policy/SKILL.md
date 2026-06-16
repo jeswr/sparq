@@ -144,6 +144,21 @@ store.materialize_odrl_permission_conditional(&policy, &req); // policy: recipie
 
 **Why only recipient/assignee maps:** the ACP session re-check carries exactly `(agent, client)`. The recipient-of-data is precisely the session **agent**, so an agent matcher re-checks it with identical semantics. Purpose, time, and count have **no** stateless `(agent, client)` analogue, so persisting them would require either freezing the check (= the one-shot path, already correct) or a looser approximation that could over-grant — rejected.
 
+### Refresh / REVOCATION of bridged grants on policy change — [OPUS-4.8] sq-dpk4
+
+The `materialize_odrl_*` calls only ever **append**. When the underlying ODRL policy changes — a permission is **withdrawn**, a **time window lapses**, or a re-evaluation now **Denies** — the previously-materialized grant would otherwise stay in the auth view, so access that should be gone persists (the sq-h3uk/#280 correctness gap). And a wholesale static WAC/ACP re-materialization rebuilds `<urn:sparq:auth>` and would drop every bridged grant. Both are reconciled by a **bridge ledger** + a refresh entry point.
+
+- **Provenance.** Every auth triple the bridge writes into `<urn:sparq:auth>` is mirrored verbatim into a separate reserved graph `<urn:sparq:auth-bridged>` (`AUTH_BRIDGED_GRAPH`). A triple is **bridged** iff it appears there, **static** otherwise — so bridged and static grants are structurally distinguishable without inspecting predicate shape, and the enforcement reader (`AuthIndex`) is unchanged (it still reads `<urn:sparq:auth>`). The provenance graph is in the reserved `urn:sparq:` space, so a loaded dataset cannot forge it.
+- **Refresh / retract.** `PodStore::refresh_odrl_grant(&new_policy, &new_request, kind)` updates the tracked grant slot `(kind, target, party)` with the new policy / request context, then rebuilds the view as `static_baseline ∪ replay(still-valid bridged entries)`: it resets `<urn:sparq:auth>` to the static baseline captured at the last `materialize_wac`/`materialize_acp`, clears the provenance graph, and re-evaluates every tracked `(policy, request)` through its original bridge entry point. An entry that no longer holds emits nothing → it is **retracted** (access gone). `refresh_odrl_grants()` (no args) replays everything as-tracked (used to reconcile after a static re-materialization, which is automatic).
+- **Fail-closed (security-sensitive — access retraction).** A withdrawn / lapsed / now-Denied / now-prohibited / ambiguous re-evaluation loses access; the underlying evaluator is fail-closed, so on any doubt the grant is retracted, never left stale. A **static** WAC/ACP grant is never in the ledger, never re-evaluated, and always in the captured baseline (captured as the `install_auth_view` output verbatim, not by subtracting provenance — so a static grant byte-identical to a bridged one still survives) — refresh can neither widen nor drop it.
+
+```rust,ignore
+// alice was bridged a read grant; the policy then WITHDRAWS the permission.
+let (matched, retracted) =
+    store.refresh_odrl_grant(&withdrawn_policy, &req, BridgeKind::Permission);
+// matched == true, retracted == 1 → alice can no longer read (through accessible/query_as).
+```
+
 ## Learn more
 
 - Crate README: [`crates/sparq-policy/README.md`](../../crates/sparq-policy/README.md)
