@@ -54,6 +54,21 @@ test-seams = []
 # `#[cfg]`-stripped, so a request pays exactly ZERO — byte-identical to before. Needs the
 # `server` feature (it works on the async HTTP `Response` + `tracing`).
 audit-log = ["server"]
+# [OPUS-4.8] (sq-gos8, epic sq-toze) `access-audit` (default OFF): compiles the OPT-IN RICHER
+# STRUCTURED access-audit sink (ASVS V7 / ISO 27001 A.8.15 / CDMC CD-2 logging). Where
+# `audit-log` emits a flat `tracing` event, this emits a TYPED, self-describing access RECORD
+# (actor / action / resource / decision + policy-basis / timestamp / request fingerprint) as
+# JSON-Lines through a PLUGGABLE sink (`access_audit::AuditSink`); the default sink writes to a
+# configured file or stderr (heavy/external sinks — SIEM, OTel — stay out of core, an embedder
+# implements the trait). STILL OFF AT RUNTIME by default even when compiled in: the operator
+# must additionally configure a sink target (`--access-audit <file|stderr>` /
+# `SPARQ_ACCESS_AUDIT`), so `AppState`'s sink is `None` unless deliberately turned on. PRIVACY
+# BOUNDARY: it records identities (WebID / token fingerprint) + resource IRIs BY DESIGN (that is
+# the audit trail) but the query CONTENT only as a NON-reversible fingerprint, never the raw
+# text (the #241 / sq-toze.34 redaction posture). Without the feature the module + every call
+# site is `#[cfg]`-stripped, so a request pays exactly ZERO. Needs `server` (it hooks the async
+# enforcement seam) and reuses the already-present `serde_json` for the JSON-Lines records.
+access-audit = ["server"]
 # [OPUS-4.8] (sq-7cxr, gh-44) `server` turns on `sparq-core/mmap` so the binary can use the
 # engine's durable directory-backed `Graph` (`Graph::open`/`save` + the per-graph write-ahead
 # log + named-graph persistence) behind the `--persist <DIR>` flag — the QLever `--persist-updates`

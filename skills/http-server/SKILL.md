@@ -457,6 +457,7 @@ env overrides the default.
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
 | `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, Hydra controls, read-only) — see "Triple Pattern Fragments" |
 | `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |
+| `--access-audit <file\|stderr>` | `SPARQ_ACCESS_AUDIT` | off | (feature `access-audit`) richer **structured access-audit sink** (typed JSON-Lines: actor / action / resource / decision+basis / ts / fingerprint) — see "Structured access-audit sink" |
 
 In a library: `AppState::with_config(graph, ServerConfig { max_concurrent: 64, ..Default::default() })`
 then `router(state)`, or `harden(my_router, &config)`.
@@ -579,6 +580,45 @@ an adversary still learns *that* a request of roughly-this-size hit *this* endpo
 time and (via `fp`) that the same query recurred. That metadata is not erased. It is also NOT
 the ZK/MPC privacy story — purely operator-log hygiene, complementary to error-body sanitisation
 (`sq-kfel`/#241) and the audit fingerprint. See `crates/sparq-server/src/redact.rs`.
+
+### Structured access-audit sink — opt-in pluggable JSON-Lines trail (`sq-gos8`, epic sq-toze, ASVS V7 / ISO 27001 A.8.15 / CDMC CD-2)
+
+A **richer, structured** sibling of the `audit-log` trail above, for compliance audit trails that
+need a TYPED, self-describing access record per ENFORCED decision rather than a flat `tracing`
+line. **Opt-in:** compile with the `access-audit` cargo feature, then configure a sink with
+`--access-audit <file|stderr>` (env `SPARQ_ACCESS_AUDIT`; the literal `stderr` writes to stderr,
+any other value is a file path). Off (no feature, or no sink configured), the module + every call
+site are `#[cfg]`-stripped / short-circuited (`Option` check) — a request pays essentially zero.
+
+It hooks the **real enforcement seam** (the same `auth_gate` that actually allows/denies the
+request), so the recorded decision is the one the server enforced — never a claimed-but-
+disconnected one. Each event is emitted through a pluggable **`AuditSink` trait** (the default
+`WriterSink` writes one JSON object per line; heavy/external sinks — a SIEM client, an OTel
+exporter — stay OUT of core, an embedder implements the trait and installs an
+`Arc<dyn AuditSink>`). Record fields:
+
+| field | meaning |
+| --- | --- |
+| `ts` | RFC-3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SS.mmmZ`) |
+| `actor` | `anonymous`, `token:<fnv1a>` (Bearer fingerprint, **never the raw token**), or `webid:<iri>` (an authenticated WebID/agent IRI — recorded verbatim) |
+| `action` | `query` / `update` / `graph_read` / `graph_write` |
+| `resource` + `resource_kind` | the dataset (`/sparql`) or the named-**graph IRI** the request addressed (`named_graph`) |
+| `decision` | `allow` / `deny` (the ACTUALLY-enforced outcome) |
+| `policy_basis` | the enforcement reason (`bearer-auth: allowed` / `bearer-auth: missing or invalid token`) |
+| `fingerprint` | FNV-1a hash (hex) of the trimmed query/update — **not the query text** (`-` for a GSP body) |
+| `status` | the HTTP status the client saw |
+| `duration_us` | handler wall-clock, microseconds |
+
+**Privacy boundary — stated honestly:** an audit trail exists to record WHO accessed WHAT, so —
+**by design, and unlike the request log** — this sink **records identities and resource IRIs**
+(the actor + the named-graph IRI are first-class fields; that is the operator's deliberate opt-in
+choice). What it does **NOT** record is query **CONTENT**: the query/update text is logged only as
+its non-reversible `fingerprint`, never raw, because a query body can carry PII (a patient IRI in a
+`FILTER`, an email literal) — the #241 / sq-toze.34 redaction posture. It does **not** double-log
+the content the redaction work just protected. One line: **identities + resources are logged;
+content stays fingerprinted.** Library callers set `ServerConfig { access_audit:
+Some(SinkTarget::File(path)), .. }` (field present only with the feature). See
+`crates/sparq-server/src/access_audit.rs`.
 
 ## Gotchas / feature flags / prerequisites
 
