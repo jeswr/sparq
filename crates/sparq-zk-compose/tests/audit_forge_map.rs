@@ -202,6 +202,7 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     (m, commitment, salt)
 }
@@ -409,6 +410,7 @@ fn scan_plus_filter_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     }
 }
 
@@ -586,6 +588,7 @@ fn finding_08_attribution_collapse_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match verify_full(&m, "f08_attr_collapse") {
         Err(CheckError::AttributionUnderDeclared { pattern: 0, .. }) => {}
@@ -649,6 +652,7 @@ fn finding_09_salt_reused_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match verify_full(&m, "f09_salt_reuse") {
         Err(CheckError::SaltReused { .. }) => {}
@@ -879,6 +883,7 @@ fn composed_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     }
 }
 
@@ -1061,6 +1066,7 @@ fn finding_11_n_relabel_bb_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     // The n-relabel is closed by the canonical-vk recompute (bb verify rejects
     // the n=64 proof against the n=16 vk) and/or the public-input length mismatch.

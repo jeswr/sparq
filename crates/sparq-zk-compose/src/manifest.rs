@@ -931,6 +931,29 @@ pub struct ProofManifest {
     // [OPUS-4.8] sq-z9l: hidden-issuer attestation proofs (privacy upgrade).
     #[serde(default)]
     pub hidden_issuer_attestations: Vec<HiddenIssuerAttestation>,
+    /// OPTIONAL in-circuit holder Proof-of-Possession proofs (sq-c2ql, HolderPoP
+    /// T6 / B2 — the HIDDEN-key tier). Each proves, in zero knowledge, knowledge of
+    /// the holder secret whose public key hashes to the issuer-attested
+    /// `holder_pk_digest` of the credential covering [`HolderPokProof::commitment`]
+    /// — WITHOUT disclosing the holder key. The verifier
+    /// ([`crate::verifier::bind_holder_pok`]) binds the proof's public digest to the
+    /// ISSUER-SIGNED digest (the binding edge: the digest must verify under the
+    /// external trusted `K` over [`sparq_zk::sig::commitment_message_with_holder`]),
+    /// reconstructs the public inputs from its own nonce + that digest, and `bb
+    /// verify`s. The hidden-key analogue of the clear-key
+    /// [`BindingMode::HolderPop`]+[`AttestedHolderBinding`] gate (T3/sq-z8s7 B1,
+    /// `bind_holder_binding`), which remains the clear-tier holder gate; this is the
+    /// additive privacy layer. Empty for a manifest with no in-circuit PoK (defaults
+    /// so legacy manifests parse). Gated by an opt-in
+    /// [`crate::verifier::HolderBindingPolicy`].
+    ///
+    /// NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2): this wires the
+    /// binding edge, it does NOT make the verifier sound. No soundness/ZK-privacy
+    /// claim. See [`HolderPokProof`].
+    // [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): in-circuit holder PoK proofs. Opt-in,
+    // NOT-yet-sound.
+    #[serde(default)]
+    pub holder_pok_proofs: Vec<HolderPokProof>,
 }
 
 /// A hidden-index revocation (bit-unset) proof (sq-3e5 / sq-h2v): the bb proof
@@ -1030,6 +1053,66 @@ pub struct HiddenIssuerAttestation {
     pub salt: Option<FieldHex>,
     /// The bb proof blob (hex), same `len|proof|len|pi|vk` layout as a
     /// [`SubProof::proof_hex`].
+    pub proof_hex: String,
+}
+
+/// An in-circuit holder Proof-of-Possession (sq-c2ql, HolderPoP T6 / B2 — the
+/// HIDDEN-key tier): a bb proof produced by the `holder_pok` circuit member
+/// ([`crate::CircuitId::HolderPok`]) that the prover knows a holder secret `hsk`
+/// whose public key `hpk = hsk·G` hashes to `Poseidon2([ZKSIG_HK, hpk.x, hpk.y]) =
+/// holder_pk_digest` — WITHOUT disclosing `hsk` OR `hpk` (only the digest is
+/// public). The hidden-key analogue of the clear-key
+/// [`BindingMode::HolderPop`]+[`AttestedHolderBinding`] path
+/// ([`crate::verifier::bind_holder_binding`], T3/sq-z8s7 B1): there the presenter
+/// discloses `hpk` and the verifier recomputes the digest host-side; here `hpk`
+/// stays private and possession is proved in zero knowledge.
+///
+/// # The binding edge (the load-bearing tie — sq-c2ql)
+/// `holder_pk_digest` is the proof's PUBLIC input, but it is NOT trusted as a
+/// prover claim. The verifier ([`crate::verifier::bind_holder_pok`]) reads the
+/// digest from the ISSUER-ATTESTED [`AttestedHolderBinding::holder_pk_digest`] on
+/// the attestation COVERING this credential's scan-referenced `commitment`, and —
+/// crucially — anchors that digest in the issuer's Schnorr signature (it must
+/// verify over [`sparq_zk::sig::commitment_message_with_holder`], the same
+/// ZKSIG_C4 anchor T3/B1 uses, under the EXTERNAL trusted `K`). The verifier then
+/// reconstructs the proof's public inputs from the verifier nonce + THAT
+/// issuer-signed digest and requires the proof's public inputs to byte-equal them.
+/// So the proven holder key is cryptographically bound to the issuer-attested
+/// credential: a malicious holder A who does NOT hold `hsk_B` cannot produce a
+/// satisfying `holder_pok` witness for B's issuer-signed digest (DL-hardness on
+/// Baby-JubJub + proof soundness), and cannot substitute its own digest without
+/// invalidating the issuer's EUF-CMA signature.
+///
+/// `challenge` is the proof's OTHER public input (the verifier's fresh nonce, the
+/// audit-#4 replay binding shared by the whole circuit family); the verifier feeds
+/// its own nonce, never the prover's declared bytes.
+///
+/// Absent => no in-circuit holder PoK is presented; the clear-key
+/// [`BindingMode::HolderPop`] path remains the holder gate (additive, like
+/// [`HiddenIssuerAttestation`] over the clear-key attestation path). Gated by an
+/// opt-in relying-party policy ([`crate::verifier::HolderBindingPolicy`]).
+///
+/// # SOUNDNESS (load-bearing, NOT a security claim)
+/// This wires the binding edge; it does NOT make the composition verifier sound.
+/// The verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2) and
+/// this member inherits that — a passing proof is NOT a guarantee under an
+/// adversarial prover, and there is NO external accredited-cryptographer sign-off
+/// (sq-qhy4 pending). Research-grade, opt-in. No soundness/ZK-privacy claim is made.
+// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): in-circuit holder PoK + issuer-attested
+// credential binding edge. NOT-yet-sound (sq-qhy4); opt-in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolderPokProof {
+    /// The commitment this holder PoK covers — must match a scan sub-proof's
+    /// `commitments[g]`, so the verifier can resolve the COVERING issuer
+    /// attestation (and thus the issuer-signed `holder_pk_digest` the proof's
+    /// public input must equal). A PoK over a commitment no verified scan
+    /// references is a dangling proof, rejected fail-closed.
+    pub commitment: FieldHex,
+    /// The bb proof blob (hex), same `len|proof|len|pi|vk` layout as a
+    /// [`SubProof::proof_hex`] (see [`crate::verifier::encode_artifacts`]). Its
+    /// public inputs are `[challenge, holder_pk_digest]` in `holder_pok` main's
+    /// declaration order; the verifier reconstructs them from its own nonce + the
+    /// issuer-attested digest and byte-compares.
     pub proof_hex: String,
 }
 
@@ -1234,6 +1317,7 @@ mod holder_binding_tests {
             join_edges: vec![],
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
         };
 
         let json = manifest.to_json();
@@ -1507,6 +1591,7 @@ mod canonical_edge_tests {
             join_edges: joins,
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
         }
     }
 
