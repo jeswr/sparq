@@ -1,0 +1,56 @@
+# [OPUS-4.8] sq-s1uy (epic sq-dnko / sq-3183): Phase 0 skeleton of the OPT-IN
+# streaming federation CLIENT. This crate is the query *consumer* that fans out to
+# heterogeneous remote RDF sources (full SPARQL endpoints, brTPF, TPF, the local
+# engine), discovers each source's capability, plans a federated execution (REUSING
+# sparq-fedplan), and streams results back. See research/federation-client-design.md
+# (§4 architecture, §6 phased plan). This Phase-0 slice ships the COMPILING SKELETON
+# + the public module layout + the load-bearing dependency-boundary proof ONLY — no
+# federation logic yet.
+[package]
+name = "sparq-fedclient"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Streaming federation CLIENT over heterogeneous remote RDF sources (endpoint/brTPF/TPF/local) — opt-in, reuses sparq-fedplan planning + sparq-engine SERVICE transport"
+# OPT-IN, lean core. NOTHING in the workspace's default build depends on this crate:
+# it is a standalone member (like `sparq-fedplan` / `sparq-canon` / `sparq-prov`), so
+# `sparq-core`'s default build and the wasm artifact are byte-identical with or without
+# it. `publish = false` marks it an intentional Phase-0 stub (gate G1 escape hatch:
+# exempt from the bench + SKILL artifact requirements; README still shipped). The
+# dependency arrow points one-way INTO sparq-engine — the engine NEVER depends on the
+# client — and that boundary is enforced by scripts/fedclient-boundary-guard.sh and the
+# `boundary` integration test. [OPUS-4.8] sq-s1uy.
+publish = false
+
+[features]
+# The whole client is feature-gated so even a crate that DOES depend on sparq-fedclient
+# pays zero for it unless `fedclient` is enabled. OFF by default — a build that does not
+# enable it compiles an empty crate (mirrors sparq-fedplan's `fedplan = []`).
+default = []
+# `fedclient` turns on the (currently stub) module surface. It pulls in sparq-fedplan's
+# `fedplan` planner and sparq-engine's `service` transport — the two REUSE seams §4 names.
+# Phase 0 ships the module layout only; the logic lands in Phases 1-7 (epic sq-dnko).
+fedclient = [
+    "dep:sparq-fedplan",
+    "sparq-fedplan/fedplan",
+    "dep:sparq-engine",
+    "sparq-engine/service",
+    "dep:oxrdf",
+    "dep:spargebra",
+]
+
+[dependencies]
+# REUSE: the cost-based planner + StreamJoin operator (planner-bridge §4.2, physical
+# exec §4.4). Optional + only enabled by `fedclient` so the default build pulls nothing.
+sparq-fedplan = { path = "../sparq-fedplan", optional = true }
+# REUSE: the SERVICE SRJ transport + VALUES bind-join + SSRF egress guard + local BGP
+# eval (source adapters §4.1, pushdown §4.3). The arrow points INTO the engine only.
+sparq-engine = { path = "../sparq-engine", optional = true }
+# Term model + SPARQL algebra (already in the tree) for the source/query surface.
+oxrdf = { workspace = true, optional = true }
+spargebra = { workspace = true, optional = true }

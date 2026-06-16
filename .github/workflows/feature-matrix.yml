@@ -299,6 +299,20 @@ jobs:
             crate: sparq-fedplan
             features: adaptive-replan
             test: true
+          # [OPUS-4.8] sq-s1uy (epic sq-dnko): the OPT-IN streaming federation CLIENT.
+          # The whole crate is `#[cfg(feature = "fedclient")]` behind `default = []`, so
+          # ci.yml's default-feature archive compiles it EMPTY and lists ZERO of its
+          # tests. This leg builds + clippies the Phase-0 skeleton with the feature ON
+          # (the real gate) and runs `cargo test`, which includes the load-bearing
+          # `tests/boundary.rs` dependency-boundary proof (it reads `cargo metadata`'s
+          # resolve graph, so it gates regardless of feature state). The crate's one-way
+          # edges into sparq-engine `service` + sparq-fedplan `fedplan` are pulled by the
+          # `fedclient` feature; the boundary in the OTHER direction (core/engine must NOT
+          # depend on the client) is the dedicated `fedclient-boundary` job below.
+          - name: sparq-fedclient (fedclient)
+            crate: sparq-fedclient
+            features: fedclient
+            test: true
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install Rust (stable)
@@ -317,3 +331,27 @@ jobs:
         run: cargo test -p ${{ matrix.crate }} --features ${{ matrix.features }}
       - name: Clippy (--all-targets -D warnings)
         run: cargo clippy -p ${{ matrix.crate }} --features ${{ matrix.features }} --all-targets -- -D warnings
+
+  # [OPUS-4.8] sq-s1uy (epic sq-dnko): THE load-bearing Phase-0 deliverable. Assert the
+  # lean core (sparq-core + sparq-engine) has NO dependency edge to the OPT-IN federation
+  # client sparq-fedclient — in BOTH feature states (the guard resolves --all-features, so
+  # an edge added under any feature is caught). The dependency arrow points ONE WAY into
+  # the engine; this job fails the merge if a future edit reverses it. The job NAME is
+  # free of the words "advisory"/"informational", so the single required `ci-summary /
+  # gate` aggregator auto-discovers it as a REQUIRED check (no edit to ci-summary.yml).
+  fedclient-boundary:
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    name: fedclient dependency-boundary guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: fedclient-boundary
+      - name: Assert sparq-core/sparq-engine have no edge to sparq-fedclient
+        run: scripts/fedclient-boundary-guard.sh
