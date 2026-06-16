@@ -44,14 +44,21 @@ governed outcome. Inflating a score by crediting sparq for an operator decision 
 | 1 Governance & Accountability | ~2.7 | Engine governance strong; data-ownership is operator-accountable. |
 | 2 Cataloguing & Classification | ~3.5 | VoID/SD catalogue + SHACL classification hooks are real; catalogue (2.1) is now **CI-gated** (`feature-matrix.yml` builds+tests+clippies `federation-descriptors`, #244 / bead `sq-kzfi`) → level 4, lifting the component to 3.5. |
 | 3 Accessibility & Usage | ~2.5 | Access control real (WAC/ACP + token); access audit + ODRL are gaps. |
-| 4 Protection & Privacy | ~2.7 | Security **excellent (4)**; privacy/crypto deliberately **low (2)** — ZK/MPC NOT sound. |
+| 4 Protection & Privacy | ~2.7 | Security **excellent (4)**; privacy/crypto deliberately **low (2)** — ZK/MPC remediated but NOT externally audited (no production guarantee). |
 | 5 Data Lifecycle | ~3.0 | Solid lifecycle mechanism (UPDATE/WAL/retention); policy operator-owned. |
 | 6 Technical Architecture | ~3.0 | Architecture **strength (4)**; lineage the weak axis (2). |
 
 ## Honesty contract (binding)
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 - **ZK/MPC is excluded** from every protection-by-cryptography maturity. `research/zk-soundness-audit.md`
-  found the v1 verifier **NOT sound**; `SECURITY.md` codifies it. No CDMC rating may contradict that.
+  originally found the v1 verifier unsound; the `sq-1s2` binding layer has since landed and the
+  internal re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found it "sound as landed for the
+  assumed threat model" — **but** external accredited-cryptographer sign-off is still PENDING
+  (`sq-qhy4`, P0) and there is **no production guarantee**, so the estate stays excluded from any
+  crypto-protection credit; `SECURITY.md` codifies this (§"`sparq-zk` and `sparq-zk-compose` — ZK
+  verifier: remediated, but NOT externally audited"). No CDMC rating may credit it as a production
+  privacy/crypto control. [OPUS-4.8]
 - Operator-owned capabilities are **not** scored as sparq strengths; they are scored on sparq's hook.
 - Status of the codebase at the head of `cert-cdmc`; **re-scored at consolidation** if material
   `crates/` changes land (notably the lineage/access-audit recommendations).

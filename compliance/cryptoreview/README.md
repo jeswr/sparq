@@ -68,16 +68,24 @@ cryptographer's sign-off.**
 | **`sparq-zk` + `sparq-zk-compose`** (+ Noir circuits under `zk/`) | A zero-knowledge proof that a SPARQL query result is faithfully derived from issuer-attested RDF credentials, without revealing the underlying graph. | **NOT externally verified.** An internal 2026-06-13 audit found the v1 verifier **BROKEN** (12 findings, 5 CRITICAL — `research/zk-soundness-audit.md`). A subsequent internal *re-audit* of the remediated verifier (`research/zk-verifier-reaudit.md`, bead `sq-gbp4`) found it **"sound as landed for the assumed threat model"** — **but that re-audit is itself internal, single-model (Opus 4.8, Fable unavailable, self-flagged "re-review when Fable returns"), read-only, with the cryptographic-chain forge tests `#[ignore]`d out of default CI.** Self-review is **necessary but not sufficient.** See [`controls.md`](./controls.md) CR-2/CR-3 for the precise calibration. |
 | **`sparq-mpc`** | Multi-party computation over federated SPARQL (confidentiality / correctness / attestation / malicious-security across distrusting holders). | **NO security guarantee — explicitly deferred.** Honest-majority semi-honest Shamir sharing exists (M0–M3), but malicious security, the collaborative-proof / distributed-signature core (M4, Q1), and authenticated-input MPC are **DEFERRED behind honest `NotYetImplemented` stubs** (`crates/sparq-mpc`, `research/mpc-m4-distributed-sig-feasibility.md`). Per `SECURITY.md`: "no confidentiality, correctness, attestation, or malicious-security guarantee today." |
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 ## 2. The canonical public posture (do not contradict)
 
-`SECURITY.md` is sparq's canonical, published security posture. It states the v1 ZK verifier
-is **NOT sound** and that a relying party must **"treat any 'verified' result from it as
-untrusted,"** and that `sparq-mpc` provides **no guarantee**. This document **does not
-override** `SECURITY.md`. The internal re-audit's more favourable "sound as landed" verdict
-is recorded here as *internal evidence of remediation progress*, **not** as a basis to soften
-the published disclaimer — because (a) it is internal/self-review and (b) external sign-off
-(CR-G1) has not happened. **Until CR-G1 closes, `SECURITY.md`'s conservative posture is the
-one a relying party must follow.**
+`SECURITY.md` is sparq's canonical, published security posture. As reconciled with the
+post-remediation re-audit, its ZK heading is now §"`sparq-zk` and `sparq-zk-compose` — ZK
+verifier: remediated, but NOT externally audited" — it records that the **original** audit
+found the v1 verifier BROKEN, that the `sq-1s2` remediation has since **landed** the
+verifier-side binding layer, and that the internal re-audit found the verifier **"SOUND as
+landed for the threat model the prior audit assumed."** Crucially, it still instructs a
+relying party: **"Do not present a 'verified' result from this estate as a production-grade
+guarantee to a relying party until the external cryptographer audit (`sq-qhy4`) completes,"**
+and that `sparq-mpc` provides **no guarantee**. This document **does not override**
+`SECURITY.md`. The internal re-audit's favourable "sound as landed" verdict is recorded here
+(and in `SECURITY.md`) as *internal evidence of remediation progress*, **not** as a basis to
+present a verified result as a production guarantee — because (a) it is internal/single-model
+self-review and (b) external sign-off (CR-G1 / `sq-qhy4`, P0) has **not** happened. **Until
+CR-G1 closes, `SECURITY.md`'s conservative posture — remediated but externally unaudited, no
+production soundness guarantee — is the one a relying party must follow.** [OPUS-4.8]
 
 ## 3. What is in / out of scope for this framework
 

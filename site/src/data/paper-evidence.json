@@ -1,0 +1,64 @@
+{
+  "_comment": "[OPUS-4.8] sq-gum8 — paper-bound EVIDENCE for the academic paper factory. Distinct from benchmarks.generated.json (which is per-commit TIMING, all environment=indicative on the dev work-box). Every record here is a DETERMINISTIC, machine-INDEPENDENT metric (recall floor / answer-safety invariant / cost-model crossover) lifted from a real test in crates/sparq-vectors/tests, so environment=canonical. The honesty gate in scripts/build-papers.mjs FAILS the build if a paper-bound headline table references an environment=indicative record. To add a number a paper may cite as a headline, it MUST appear here as environment=canonical and trace to a named test (the `source` field).",
+  "schemaVersion": 1,
+  "records": {
+    "filtered_ann.recall_at_10_floor": {
+      "value": 0.90,
+      "unit": "recall@10",
+      "environment": "canonical",
+      "kind": "deterministic-floor",
+      "n_vectors": 20000,
+      "dim": 32,
+      "k": 10,
+      "n_queries": 100,
+      "mask_selectivity": "~0.50",
+      "source": "crates/sparq-vectors/tests/filtered.rs::filtered_traversal_recall_vs_exact_on_broad_mask",
+      "note": "Asserted floor: filtered-traversal recall@10 vs the EXACT-filtered ground truth (nearest_exact_filtered) is gated >= 0.90 on a 20k synthetic set under a ~50% mask. Machine-independent (a deterministic seed + an assertion threshold), not a timing."
+    },
+    "ann.recall_at_10_floor": {
+      "value": 0.95,
+      "unit": "recall@10",
+      "environment": "canonical",
+      "kind": "deterministic-floor",
+      "n_vectors": 50000,
+      "dim": 32,
+      "k": 10,
+      "n_queries": 100,
+      "source": "crates/sparq-vectors/tests/recall.rs::hnsw_recall_at_10_vs_brute_force_on_50k",
+      "note": "Asserted floor: unfiltered HNSW recall@10 vs exact brute force is gated >= 0.95 on a 50k random set. The underlying ANN machinery is unmodified prior art; this floor bounds the approximation the filter operates over."
+    },
+    "filtered_ann.prefilter_equals_postfilter": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "source": "crates/sparq-vectors/tests/filtered_bgp.rs::filtered_equals_postfilter_and_is_subset",
+      "note": "Proven by assert_eq: the filtered top-k is byte-identical (same ids, same order) to post-filtering the unfiltered top-k by the same BGP constraint, and is a subset of the unfiltered top-k. This is the answer-safety claim: pre-filtering narrows, never widens, and never changes the answer."
+    },
+    "filtered_ann.transitive_equals_postfilter": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "source": "crates/sparq-vectors/tests/filtered_bgp_transitive.rs",
+      "note": "A multi-hop constraint (?node :owns ?x . ?x a :Vehicle) restricts ?node to the projection of the join-connected sub-BGP and matches post-filtering the unfiltered top-k by that same transitive constraint; a disconnected pattern does not affect the mask."
+    },
+    "filtered_ann.cyclic_equals_postfilter": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "source": "crates/sparq-vectors/tests/filtered_bgp_cyclic.rs",
+      "note": "Connected-component mask derivation terminates (fixpoint worklist) and stays answer-equal to post-filter even when the constraining sub-BGP contains a cycle (?node :owns ?x . ?x :ownedBy ?node)."
+    },
+    "filtered_ann.prefilter_crossover": {
+      "value": 0.5,
+      "unit": "mask-selectivity-fraction",
+      "environment": "canonical",
+      "kind": "cost-model-crossover",
+      "scatter_penalty": 2.0,
+      "source": "crates/sparq-vectors/src/cost.rs::CostModel::decision_crossover_default_penalty (tests/cost_model.rs)",
+      "note": "Deterministic decision rule (not a measured latency): pre-filter is chosen iff m*scatter_penalty <= n, i.e. with the default scatter_penalty 2.0, iff the mask admits <= half the store. Whichever branch is picked the returned top-k is identical, so a mis-estimate costs throughput, never correctness."
+    }
+  }
+}

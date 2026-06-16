@@ -72,8 +72,14 @@ returning only false-positive comment matches. That is gap **GX-12** (bead **sq-
 
 ## Honesty note (carried from the contract)
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 This slice makes **no** claim about the ZK/MPC estate. The `sparq-zk`/`sparq-mpc` crates are
-research scaffolds; the documented verdict (`SECURITY.md`, `research/zk-soundness-audit.md`) is
-"**v1 ZK verifier is NOT sound**". No CIS Safeguard here is satisfied by, or implies a guarantee
-from, that estate. CIS is about the *deliverable artifact's* hygiene (image, dependencies, build,
-disclosure), which is independent of the crypto soundness question.
+research scaffolds with **no production security guarantee**. [OPUS-4.8] The v1 ZK verifier was
+**originally found unsound** (`research/zk-soundness-audit.md`, kept on record); `sq-1s2` then
+landed the verifier-side binding layer and an **internal post-remediation re-audit**
+(`research/zk-verifier-reaudit.md`, `sq-gbp4`) found the prior findings closed → **"sound as
+landed for the assumed threat model"** — but that verdict is **internal / single-model
+self-review only, with external accredited-cryptographer sign-off still PENDING (`sq-qhy4`, P0)
+and NO production guarantee** (`SECURITY.md`). No CIS Safeguard here is satisfied by, or implies a
+guarantee from, that estate. CIS is about the *deliverable artifact's* hygiene (image,
+dependencies, build, disclosure), which is independent of the crypto soundness question.

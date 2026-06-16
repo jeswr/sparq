@@ -34,7 +34,10 @@ model). The org owns the scoring, the acceptance decision, and the sign-off.
 ## Where sparq helps and where the org must decide
 
 - **sparq supplies risk *inputs*:** the asset inventory and trust boundaries (B1–B5) in
-  `research/threat-model.md`, the documented limitations (B3 no-auth; ZK/MPC NOT sound), and
+  `research/threat-model.md`, the documented limitations (B3 no-auth; the ZK/MPC estate carries
+  **no production guarantee** — v1 ZK verifier originally found NOT sound then remediated
+  (`sq-1s2`) with an **internal** re-audit ("sound as landed for the assumed threat model"),
+  external sign-off STILL PENDING `sq-qhy4` [OPUS-4.8]), and
   the per-control technical evidence in [`controls.md`](./controls.md) (which lowers the
   likelihood/impact of several component-level risks).
 - **The org owns the risk *decisions*:** its risk-acceptance criteria, the likelihood/impact
@@ -110,14 +113,18 @@ sparq GHSA advisory). Retain results as documented information.
 | R-3 | Unauthenticated access to query/update API (T-HTTP-EoP, B3) | AS-4 | **No sparq-side authz by design**; optional `SPARQ_AUTH_TOKEN`; mitigation is **operator-owned** (front with authn/TLS gateway); `controls.md` A.5.15/A.8.3/A.8.5; gap GAP-ISO-2 | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN: Treat — org deploys fronting gateway>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | R-4 | Sensitive data / path leak in HTTP error body (T-Info) | AS-4 | Error-body sanitization shipped (PR #241) + no-echo regression tests; `controls.md` A.8.12 | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | R-5 | Vulnerable / malicious dependency (supply chain) | AS-6 | `cargo deny` advisories/bans/licenses/sources GATING; daily advisory watchdog; Dependabot; SBOM + SLSA provenance; `controls.md` A.5.19–A.5.22 / A.8.8 | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| R-6 | **Misplaced reliance on the ZK/MPC estate for confidentiality/integrity** | AS-4, AS-1 | **NO mitigation — the estate is documented NOT sound** (`SECURITY.md`, `research/zk-soundness-audit.md`). The treatment is **do not rely on it**; record as accepted-by-avoidance, not as a control | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN: Treat by exclusion — do NOT use ZK/MPC for any guarantee>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
+| R-6 | **Misplaced reliance on the ZK/MPC estate for confidentiality/integrity** | AS-4, AS-1 | **NO production-grade mitigation to credit — the estate carries NO production guarantee.** The v1 ZK verifier was originally found NOT sound (`research/zk-soundness-audit.md`); `sq-1s2` landed the binding layer + an **internal** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed → "sound as landed for the assumed threat model," but external sign-off is **STILL PENDING** (`sq-qhy4`, P0) and there is no production guarantee (`SECURITY.md`) [OPUS-4.8]. The treatment is **do not rely on it**; record as accepted-by-avoidance, not as a control | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN: Treat by exclusion — do NOT use ZK/MPC for any guarantee>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | R-n | `<FILL-IN: org/deployment-specific risks — key management, gateway misconfig, backup, data retention>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 
 > **Honesty constraint on R-6 (load-bearing).** No completion of this register may list the
-> `sparq-zk` / `sparq-zk-compose` / `sparq-mpc` estate as a *risk-reducing control*. Its
-> documented verdict is **NOT cryptographically sound**; the only valid treatment is to **not <!-- privacy-claims-allow: negative usage (documented NOT-sound, not a control); sq-toze.35 -->
-> depend on it** for any security property. Crediting it as a mitigation would be the exact
-> overclaim the honesty contract (and `controls.md` A.8.24) forbids.
+> `sparq-zk` / `sparq-zk-compose` / `sparq-mpc` estate as a *risk-reducing control*. Even though
+> the verifier was remediated (`sq-1s2`) and an **internal** re-audit
+> (`research/zk-verifier-reaudit.md`, `sq-gbp4`) judged it "sound as landed for the assumed
+> threat model," that re-audit is internal/single-model/read-only, **external sign-off is STILL
+> PENDING** (`sq-qhy4`, P0) and there is **no production guarantee**; the only valid treatment is
+> to **not depend on it** for any security property. Crediting it as a mitigation would be the
+> exact overclaim the honesty contract (and `controls.md` A.8.24) forbids. [OPUS-4.8]
+> <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 
 ---
 

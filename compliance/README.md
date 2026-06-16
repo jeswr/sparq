@@ -7,9 +7,13 @@ Per-framework certification evidence for `sparq` (a Rust RDF/SPARQL data-engine 
 crypto estate consumed as a dependency in high-security settings). All **12** framework slices are on
 `main`; each went through an adversarial **engineer↔auditor** audit (epic **sq-toze**).
 
-> **Honesty contract.** Every control claim cites concrete evidence (file/test/CI). The ZK/MPC estate
-> is documented as **NOT yet sound** (`SECURITY.md`, `research/zk-soundness-audit.md`) and is
-> **excluded** from every security/privacy guarantee claim. No framework claims a *deployment*
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+> **Honesty contract.** Every control claim cites concrete evidence (file/test/CI). The ZK verifier
+> was originally found **unsound** (`research/zk-soundness-audit.md`); `sq-1s2` landed the binding
+> layer and the **internal, single-model** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`)
+> found all findings closed ("sound as landed for the assumed threat model"), but external sign-off is
+> **still pending** (`SECURITY.md`; `sq-qhy4`, P0) and there is **no production guarantee** — so the
+> ZK/MPC estate is **excluded** from every security/privacy guarantee claim. No framework claims a *deployment*
 > property (e.g. "sparq is GDPR compliant") — only the technical capabilities the engine provides.
 
 ## Certification readiness (start here)
@@ -28,7 +32,7 @@ external cryptographer / organisational act. **They must never be presented as s
 
 | Residual | Framework | Who must act | Tracking |
 |---|---|---|---|
-| **External accredited-cryptographer audit of the ZK/MPC estate** — v1 ZK verifier documented **NOT sound**, `sparq-mpc` **no guarantee**; all current assurance is internal single-model self-review | cryptoreview | external cryptographer | **`sq-qhy4` (P0, CRITICAL)** |
+| **External accredited-cryptographer audit of the ZK/MPC estate** — v1 ZK verifier originally **unsound**; `sq-1s2` landed the binding layer and the **internal, single-model** re-audit (`sq-gbp4`) found all findings closed ("sound as landed for the assumed threat model"), but external sign-off is **pending** and `sparq-mpc` carries **no guarantee**; all current assurance is internal self-review | cryptoreview | external cryptographer | **`sq-qhy4` (P0, CRITICAL)** |
 | **ISMS / Statement-of-Applicability** org act (scope, risk treatment, SoA, management review) | iso27001 | deploying org | GAP-ISO-1 (P1) |
 | **External penetration test** + accredited ASVS L2 assessor of a deployed server | asvs (cis) | accredited assessor | AUDIT-READY |
 | **CE marking / EU Declaration of Conformity / Article-14 reporting** | cra | commercialising party | CRA-CA.2/CA.3 |
@@ -71,7 +75,7 @@ honestly — single-model Opus 4.8 authorship, non-canonical timing).
 | **ISO/IEC 27001** | [`iso27001/`](./iso27001/) | Annex A control mapping + **org-adoptable ISMS template set** (clauses 4–10 + full SoA) + **operator deployment-security doc (B3)**, not a certificate | **Zero open Annex-A control gaps**; GAP-ISO-1 templates **delivered** + GAP-ISO-2 operator-doc **addressed**; only residual is the external certificate act | ISMS/SoA + certificate **org act** (GAP-ISO-1 residual, external) |
 | **EU CRA** | [`cra/`](./cra/) | Annex I essential requirements + vuln-handling for a product w/ digital elements | Vuln-handling **substance + secure-by-default** met | CE marking / DoC / Article-14 (org act) |
 | **Privacy** (GDPR + 27701 + SOC2-Privacy) | [`privacy/`](./privacy/) | Engine privacy capabilities under operator-controller / engine-processor split | Substantively **AUDIT-READY** (error-hygiene fixed, PR #241) | Operator PIMS + external auditor; ZK/MPC gated |
-| **Cryptoreview (ZK/MPC)** | [`cryptoreview/`](./cryptoreview/) | Assurance-split of the crypto estate (sound Tier-A vs research Tier-B) | **Readiness doc** — ZK/MPC documented **NOT sound** | **External cryptographer audit (`sq-qhy4`, P0)** |
+| **Cryptoreview (ZK/MPC)** | [`cryptoreview/`](./cryptoreview/) | Assurance-split of the crypto estate (sound Tier-A vs research Tier-B) | **Readiness doc** — verifier remediated (`sq-1s2`) + **internally** re-audited "sound as landed" (`sq-gbp4`), but **not externally audited**; no production guarantee | **External cryptographer audit (`sq-qhy4`, P0)** |
 | **CDMC** | [`cdmc/`](./cdmc/) | EDM Council data-management maturity (6 components / 14 capabilities) | Engine-strong (two 4s), honest 3s, deliberate 2s | Lineage (CD-1) + access-audit (CD-2) P0 data-maturity |
 
 ## CDMC maturity overview (the headline)
@@ -94,8 +98,8 @@ CI lane: bead `sq-kzfi`) · 2.2 classification (SHACL/RDFS/OWL/N3) · 3.1 entitl
 5.1 lifecycle (SPARQL 1.1 UPDATE) · 5.2 data quality (SHACL validation).
 
 **The 2s** — deliberately low, where the capability is an operator governance *decision* or rests on
-unsound crypto: 1.2 data ownership · 3.2 access audit trail (CD-2) · **4.2 privacy framework** (ZK/MPC
-**NOT sound** — contributes **zero**) · **4.3 sensitive-data encryption** (at-rest/in-transit is
+crypto carrying no production assurance: 1.2 data ownership · 3.2 access audit trail (CD-2) · **4.2 privacy framework** (ZK/MPC
+remediated + internally re-audited but **not externally audited / no production guarantee** — contributes **zero**) · **4.3 sensitive-data encryption** (at-rest/in-transit is
 operator-deployment; mmap files are plaintext) · 6.2 data lineage (CD-1).
 
 | Component | Avg maturity | Verdict |
@@ -103,14 +107,16 @@ operator-deployment; mmap files are plaintext) · 6.2 data lineage (CD-1).
 | 1 — Governance & Accountability | ~2.7 | Engine governance strong; data-ownership/sourcing operator-accountable |
 | 2 — Cataloguing & Classification | ~3.0 | Real VoID/SD catalogue + SHACL hooks; catalogue held off 4 by not being CI-gated (`sq-kzfi`) |
 | 3 — Accessibility & Usage | ~2.5 | Access *control* real (WAC/ACP/token); access *audit* + ODRL are gaps |
-| 4 — Protection & Privacy | ~2.7 | Security **excellent (4)**; privacy/crypto **deliberately low (2)** — ZK/MPC NOT sound |
+| 4 — Protection & Privacy | ~2.7 | Security **excellent (4)**; privacy/crypto **deliberately low (2)** — ZK/MPC not externally audited (no production guarantee) |
 | 5 — Data Lifecycle | ~3.0 | Solid lifecycle *mechanism*; lifecycle *policy* operator-owned |
 | 6 — Technical Architecture | ~3.0 | Architecture a strength **(4)**; lineage the weak axis (2) |
 
 The single most important honesty statement, restated by both the CDMC scorecard and the crypto-review
-register: **the ZK/MPC estate is documented as NOT cryptographically sound** and contributes **zero** <!-- privacy-claims-allow: negative usage (documented NOT-sound); sq-toze.35 -->
-to any protection-by-cryptography maturity. Any future scorer crediting ZK/MPC as a privacy control is
-overclaiming — flag it against the consolidated register's headline.
+register: the ZK verifier was remediated (`sq-1s2`) and an **internal, single-model** re-audit
+(`sq-gbp4`) judged it "sound as landed for the assumed threat model", but it is **not externally
+audited** (`sq-qhy4`, P0, pending) and carries **no production guarantee** — so the ZK/MPC estate still
+contributes **zero** to any protection-by-cryptography maturity. Any future scorer crediting ZK/MPC as a
+privacy control before external sign-off is overclaiming — flag it against the consolidated register's headline.
 
 ## Shared cross-framework artifacts (owned by the Privacy engineer)
 

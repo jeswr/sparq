@@ -83,11 +83,29 @@ jobs:
           npm ci
           npm run build:wasm
 
+      # [OPUS-4.8] sq-gum8 — install the Typst CLI so the paper-factory build step
+      # (site/scripts/build-papers.mjs, run by `prebuild`) can compile site/papers/*.typ
+      # into the downloadable PDFs + the in-site HTML renders. Pinned to a release tag +
+      # SHA-256-verified so the toolchain is reproducible. (ubuntu-latest is x86_64.)
+      - name: Install Typst CLI
+        run: |
+          set -euo pipefail
+          TYPST_VERSION=v0.15.0
+          TYPST_SHA256=59b207df01be2dab9f13e80f73d04d7ff8273ffd46b3dd1b9eef5c60f3eeabea
+          url="https://github.com/typst/typst/releases/download/${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz"
+          curl -sSfL -o /tmp/typst.tar.xz "$url"
+          echo "${TYPST_SHA256}  /tmp/typst.tar.xz" | sha256sum -c -
+          tar -xf /tmp/typst.tar.xz -C /tmp
+          mkdir -p "$HOME/.local/bin"
+          cp /tmp/typst-x86_64-unknown-linux-musl/typst "$HOME/.local/bin/typst"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/typst" --version
+
       - name: Build static site
         working-directory: site
         run: |
           npm ci
-          npm run build   # prebuild copies js/wasm → site/public/wasm, then next build → out/
+          npm run build   # prebuild copies js/wasm → site/public/wasm + builds papers, then next build → out/
 
       # ---- Preserve the existing benchmark dashboard at /sparq/dev/ ----
       - name: Overlay benchmark dashboard (dev/) from benchmark-data

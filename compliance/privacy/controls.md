@@ -57,6 +57,7 @@ operator's PIMS/an external auditor · `OPERATOR` = property of the deployment, 
 
 ---
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 ## ZK/MPC privacy story — EXPLICIT carve-out (honesty contract)
 
 > **No privacy capability claimed in this table rests on the ZK or MPC estate.**
@@ -64,19 +65,26 @@ operator's PIMS/an external auditor · `OPERATOR` = property of the deployment, 
 > sparq ships `sparq-zk`, `sparq-zk-compose`, and `sparq-mpc`, which *model* privacy-preserving <!-- privacy-claims-allow: hedged ("*model*", "If sound, these would be", "not yet sound"); sq-toze.35 -->
 > query proofs (zero-knowledge: prove a result without revealing the data) and multi-party
 > computation (compute over data split across distrusting parties without pooling it). **If
-> sound, these would be powerful privacy-by-cryptography controls.** They are **not yet sound**:
+> production-grade, these would be powerful privacy-by-cryptography controls.** They are
+> **remediated but NOT externally audited — no production guarantee yet**:
 >
-> - The **v1 ZK verifier (`verify_manifest`) provides NO meaningful soundness guarantee** — a
->   prover that controls its own side can make it accept arbitrary false results
->   (`SECURITY.md`; `research/zk-soundness-audit.md` — 12 confirmed issues, 6 critical).
+> - The **v1 ZK verifier (`verify_manifest`)** was originally found unsound; the `sq-1s2`
+>   binding layer has since landed and the internal re-audit (`research/zk-verifier-reaudit.md`,
+>   `sq-gbp4`) found it "sound as landed for the assumed threat model" — **but** that re-audit is
+>   internal/single-model only, external accredited-cryptographer sign-off is still PENDING
+>   (`sq-qhy4`, P0), and `SECURITY.md` directs a relying party **not** to present a "verified"
+>   result as a production-grade guarantee until that sign-off completes
+>   (`SECURITY.md` §"`sparq-zk` and `sparq-zk-compose` — ZK verifier: remediated, but NOT
+>   externally audited"; original audit `research/zk-soundness-audit.md`, 12 findings / 5 CRITICAL).
 > - **`sparq-mpc` provides no confidentiality/correctness/attestation/malicious-security
 >   guarantee** — the MPC cryptography is deferred and not implemented (`SECURITY.md`).
 >
-> Therefore: **the ZK/MPC estate is presented as a research scaffold with NO privacy guarantee**,
-> and any future "privacy by cryptography" claim is **GATED on the soundness fix** (bead
-> **sq-toze.35**). A control table or maturity score that implied these provide a working privacy
-> guarantee would be an automatic high-severity overclaim. They are **out of scope** for every
-> IMPL/AUDIT-READY label above and appear here only to be explicitly excluded.
+> Therefore: **the ZK/MPC estate is presented as a research scaffold with NO production privacy
+> guarantee**, and any future "privacy by cryptography" claim is **GATED on the external
+> cryptographer sign-off** (`sq-qhy4`; tracked via bead **sq-toze.35**). A control table or
+> maturity score that implied these provide a working privacy guarantee would be an automatic
+> high-severity overclaim. They are **out of scope** for every IMPL/AUDIT-READY label above and
+> appear here only to be explicitly excluded. [OPUS-4.8]
 
 ---
 

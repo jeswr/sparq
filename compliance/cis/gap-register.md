@@ -75,4 +75,10 @@ The CIS slice has **no remaining P1 technical gap** — GX-12 (image-CVE-scan + 
 now addressed (see above) — leaving one P3 minor gap (GX-13, HEALTHCHECK). The `Dockerfile`
 hardening itself is verified PASS against the actual file; the closed gap was *automated
 scanning/linting* coverage, not a hardening deficiency. Nothing here is satisfied by the ZK/MPC
-estate, and no CIS claim contradicts the documented "v1 ZK verifier NOT sound" verdict.
+estate. [OPUS-4.8] Its v1 ZK verifier was originally found unsound
+(`research/zk-soundness-audit.md`), then `sq-1s2` landed the binding layer and an internal
+re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found the prior findings closed → "sound
+as landed for the assumed threat model" — but **internal/single-model only, external sign-off
+PENDING (`sq-qhy4`), no production guarantee** (`SECURITY.md`); no CIS claim credits a production
+ZK guarantee.
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->

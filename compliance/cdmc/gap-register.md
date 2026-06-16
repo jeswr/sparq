@@ -31,8 +31,11 @@ framework slices); they are **data-management-maturity** gaps specific to CDMC.
 ## Explicitly NOT gaps (auditor anchors — do not re-open)
 
 - **ZK/MPC not contributing to 4.2/4.3.** This is **correct by the honesty contract**, not a gap to
-  close by crediting the scaffold. `research/zk-soundness-audit.md` is binding. The crypto remediation
-  itself is tracked by the existing ZK remediation beads, **not** by CDMC.
+  close by crediting the scaffold. <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> The estate is **remediated but NOT externally audited**
+  (originally unsound; `sq-1s2` landed; internal re-audit "sound as landed for the assumed threat
+  model"; external sign-off `sq-qhy4` PENDING; no production guarantee — `research/zk-soundness-audit.md`,
+  `research/zk-verifier-reaudit.md`); this is binding. The remaining crypto remediation + the external
+  sign-off are tracked by the ZK remediation beads + `sq-qhy4`, **not** by CDMC.
 - **No per-user authentication in `sparq-server`.** Documented architectural decision (threat-model
   **B3**: "front with a gateway / sparq-solid"). The optional bearer-token write gate (sq-zcby) +
   `sparq-solid` WAC/ACP are the in-scope entitlement controls; full user auth is operator-owned.

@@ -87,8 +87,9 @@ and the server warns that reads remain open. Loopback binds are always allowed.
 
 ### Security response headers (always on)
 
-Every response — success, streamed and error alike — carries a standard hardening header set
-(ASVS V14.4; bead `sq-cmvh`), stamped by a `map_response` layer in `harden()`:
+Every response — success, streamed, error and auth-gated (`401`) alike — carries a standard
+hardening header set (ASVS V14.4 / ASVS-G1; beads `sq-cmvh`, `sq-2bhm`), stamped by a
+`map_response` layer in `harden()`:
 
 | Header | Value | Why |
 | --- | --- | --- |
@@ -102,10 +103,12 @@ Each header is only added when absent, so a handler may override a specific one.
 belongs on the fronting TLS proxy, setting it here is meaningless or wrongly pins a host);
 `X-XSS-Protection` (deprecated, a no-op/harmful in modern browsers, superseded by CSP); and CORS
 / `Cross-Origin-*` / `Permissions-Policy` (browser-document policies with no meaning for a
-no-CORS data API — adding CORS would *widen* the surface). No blanket `Cache-Control: no-store`
+no-CORS data API — adding CORS would *widen* the surface). No *blanket* `Cache-Control: no-store`
 is forced: query results are uncached by default (no `ETag` / `Cache-Control: public` is ever
 set), so there is nothing to tighten, and a blanket value would wrongly override `/health` and
-`/metrics`.
+`/metrics`. **The one targeted exception (`sq-2bhm`):** the sensitive auth-refusal — the `401`
+from a gated request without a valid Bearer token — carries `Cache-Control: no-store` so a
+shared cache / proxy never retains it.
 
 ### SERVICE federation + DoS guards
 

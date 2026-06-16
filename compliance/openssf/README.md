@@ -51,9 +51,15 @@ that do not, and why, are recorded inline:
   check now credits. The crates.io / npm / PyPI publishes are **manual** (not automated in
   `release.yml`); registry-side signing (crates.io has no first-party artifact signature
   scheme; npm provenance is possible) is recorded as a gap nuance, not a silent pass.
-- **The ZK/MPC crypto estate is out of scope for *any* security claim here.** Per
-  `SECURITY.md` + `research/zk-soundness-audit.md`, the v1 ZK verifier is **NOT sound** and
-  `sparq-mpc` provides **no guarantee**. No OpenSSF control row implies otherwise; the
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+- **The ZK/MPC crypto estate is out of scope for *any* security claim here.** [OPUS-4.8] The v1
+  ZK verifier was **originally found unsound** (`research/zk-soundness-audit.md`, kept on record),
+  then `sq-1s2` landed the verifier-side binding layer and an **internal post-remediation
+  re-audit** (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found the prior findings closed →
+  **"sound as landed for the assumed threat model"** — but that verdict is **internal /
+  single-model self-review only, with external accredited-cryptographer sign-off still PENDING
+  (`sq-qhy4`, P0) and NO production guarantee**; `sparq-mpc` is semi-honest-only with no
+  guarantee (`SECURITY.md`). No OpenSSF control row implies a production crypto guarantee; the
   Best-Practices `crypto_*` criteria are answered about sparq's *own* use of cryptography
   (release attestation, TLS at the operator boundary), explicitly **not** about the
   research scaffolds.

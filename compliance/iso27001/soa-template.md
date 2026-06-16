@@ -48,9 +48,13 @@ gap (see [`gap-register.md`](./gap-register.md)).
 > status — it states what sparq-the-component already evidences. An org **must not** copy an
 > `IMPL` into its own `Status in org ISMS` without recording its own verification, and **must
 > not** treat `AUDIT-READY` as "implemented." **A.8.24 makes NO claim over the `sparq-zk` /
-> `sparq-zk-compose` / `sparq-mpc` estate** — documented **NOT sound** (`SECURITY.md`,
-> `research/zk-soundness-audit.md`). No SoA completion may credit that estate as a
-> cryptographic control.
+> `sparq-zk-compose` / `sparq-mpc` estate** — the v1 ZK verifier was **originally found NOT
+> sound** (`research/zk-soundness-audit.md`), but `sq-1s2` landed the binding layer and an
+> **internal** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed
+> → "sound as landed for the assumed threat model," with **external accredited-cryptographer
+> sign-off STILL PENDING** (`sq-qhy4`, P0) and **NO production guarantee** (`SECURITY.md`)
+> [OPUS-4.8]. No SoA completion may credit that estate as a cryptographic control.
+> <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 
 ---
 
@@ -166,7 +170,7 @@ gap (see [`gap-register.md`](./gap-register.md)).
 | A.8.21 | Security of network services | N/A(op) | Operator-owned (the gateway fronting sparq-server) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.22 | Segregation of networks | N/A(op) | Operator deployment topology | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.23 | Web filtering | N/A(op) | Operator network control | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| A.8.24 | **Use of cryptography** | AUDIT-READY (scoped) | **Operationally relied-on crypto ONLY:** release artifacts Sigstore/SLSA-attested (`release.yml`); TLS is operator's gateway. **EXPLICITLY EXCLUDED: the `sparq-zk`/`sparq-zk-compose`/`sparq-mpc` estate makes NO guarantee — v1 ZK verifier NOT sound** (`SECURITY.md`, `research/zk-soundness-audit.md`; `compliance/cryptoreview/`). Crypto-key-mgmt policy is an org act | `<FILL-IN>` | `<FILL-IN: org MUST NOT cite the ZK/MPC estate as a control>` | `<FILL-IN>` | `<FILL-IN>` |
+| A.8.24 | **Use of cryptography** | AUDIT-READY (scoped) | **Operationally relied-on crypto ONLY:** release artifacts Sigstore/SLSA-attested (`release.yml`); TLS is operator's gateway. **EXPLICITLY EXCLUDED: the `sparq-zk`/`sparq-zk-compose`/`sparq-mpc` estate makes NO production guarantee** — v1 ZK verifier **originally found NOT sound** (`research/zk-soundness-audit.md`), but `sq-1s2` landed the binding layer + an **internal** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed → "sound as landed for the assumed threat model"; **external sign-off STILL PENDING** (`sq-qhy4`, P0), **NO production guarantee** [OPUS-4.8] (`SECURITY.md`; `compliance/cryptoreview/`). Crypto-key-mgmt policy is an org act <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> | `<FILL-IN>` | `<FILL-IN: org MUST NOT cite the ZK/MPC estate as a control>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.25 | Secure development life cycle | IMPL | `CONTRIBUTING.md` §Secure coding + SDLC touchpoints; CI gate stack; threat model. `compliance/ssdf/` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.26 | Application security requirements | IMPL | `research/threat-model.md` (boundaries B1–B5, STRIDE); `SECURITY.md`; ASVS re-scope (`compliance/asvs/`) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.27 | Secure system architecture & engineering principles | IMPL | `#![forbid(unsafe_code)]` in 20/25 crates; boundary threat model; defense-in-depth gate stack; `compliance/memsafety/unsafe-register.md` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |

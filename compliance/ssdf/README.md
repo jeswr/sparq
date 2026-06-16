@@ -58,6 +58,12 @@ separate framework task; see the footnote in `controls.md`). <!-- [OPUS-4.8] sq-
 standard (RV.1 has 3 tasks) + 1 local row = 42 rows; status tally 28/13/1 unchanged. -->
 The single technical gap is **PW.6.2 reproducible-build
 evidence** (GX-8, bead **sq-toze.9**). No row presents the `sparq-zk*` / `sparq-mpc`
-research scaffold as a met security control — its documented **"v1 verifier is NOT sound"**
-verdict (`SECURITY.md`, `research/zk-soundness-audit.md`) is a correctly-disclosed
-limitation, and SSDF PW.4/PW.5/PW.8 are scored on the engine, never on the crypto scaffold.
+research scaffold as a met security control. [OPUS-4.8] The v1 ZK verifier was **originally found
+unsound** (`research/zk-soundness-audit.md`, kept on record), then `sq-1s2` landed the binding
+layer and an **internal post-remediation re-audit** (`research/zk-verifier-reaudit.md`, `sq-gbp4`)
+found the prior findings closed → **"sound as landed for the assumed threat model"** — but that
+verdict is **internal / single-model self-review only, with external accredited-cryptographer
+sign-off still PENDING (`sq-qhy4`, P0) and NO production guarantee** (`SECURITY.md`). That
+remediated-but-externally-unaudited posture is a correctly-disclosed limitation, and SSDF
+PW.4/PW.5/PW.8 are scored on the engine, never on the crypto scaffold.
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
