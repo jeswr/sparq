@@ -571,40 +571,51 @@ fn run_knn(
     }
 }
 
-/// [OPUS-4.8] (sq-bvmd) Builds the candidate [`IdMask`] for `node` from the surrounding
-/// BGP `constraint` patterns — the dictionary ids of every binding `node` takes when the
-/// constraining sub-BGP is evaluated against `graph`.
+/// [OPUS-4.8] (sq-3tjd, epic sq-3183) Builds the candidate [`IdMask`] for `node` from the
+/// surrounding BGP `constraint` patterns — the dictionary ids of every binding `node` takes
+/// when the **join-connected** constraining sub-BGP is evaluated against `graph`, then
+/// projected back onto `node`.
 ///
-/// Only the patterns that actually mention `node` form the constraint (an unrelated
-/// pattern in the same BGP does not narrow the neighbour set — it would be joined as a
-/// cartesian product, which never *removes* a candidate). If `node` is unconstrained
-/// the function returns `Ok(None)` and the caller runs the plain unfiltered search,
-/// preserving the existing `vec:` semantics exactly.
+/// The constraining sub-BGP is the **connected component of the BGP join-graph** that
+/// contains `node`: starting from the patterns that mention `node`, follow shared variables
+/// transitively into the patterns those reach, and so on. This generalises the original
+/// single-variable (#281/sq-bvmd) rule — a *direct-mention-only* component reduces to exactly
+/// the old behaviour — to **transitive / multi-variable** constraints: `?node :owns ?x .
+/// ?x a :Vehicle` restricts `?node` to subjects that own a `:Vehicle` even though the second
+/// pattern never names `?node`.
 ///
-/// The constraining sub-BGP is evaluated through the standard engine (the same seam the
-/// outer query uses), so FILTERs / shared join variables are honoured correctly: the
-/// mask is exactly the set the engine would bind to `node`, hence the filtered top-k is
-/// identical to post-filtering the unfiltered top-k by that same set (the correctness
-/// invariant — see tests/filtered_bgp.rs).
+/// Patterns *not* reachable from `node` through shared variables are deliberately excluded:
+/// a disconnected pattern joins as a cartesian product, which never *removes* a `node`
+/// binding, so pulling it in could only widen (a cross-product can drop a binding only if it
+/// is empty — but an empty disconnected BGP would zero the whole join in the outer query too,
+/// which is a different concern handled by the engine, not a mask we may narrow with). We
+/// only ever **narrow**, never widen: the projected `node` set of the connected component is
+/// a superset of (or equal to) the set the full outer BGP would bind, so the filtered top-k
+/// stays a subset of the unfiltered top-k and equals post-filtering by the (now transitive)
+/// constraint. If `node` is unconstrained (no pattern mentions it) the function returns
+/// `Ok(None)` and the caller runs the plain unfiltered search, preserving the existing
+/// `vec:` semantics exactly.
+///
+/// The connected sub-BGP is evaluated through the standard engine (the same seam the outer
+/// query uses), so shared join variables are honoured correctly: the mask is exactly the set
+/// the engine binds to `node` for that component.
 #[cfg(feature = "filtered-ann")]
 fn derive_mask(
     node: &Variable,
     constraint: &[TriplePattern],
     graph: &Graph,
 ) -> Result<Option<IdMask>, String> {
-    // Keep only the patterns that mention `node`; the rest cannot narrow the candidate
-    // set (they would join as a cross product, never dropping a `node` binding).
-    let sub: Vec<TriplePattern> = constraint
-        .iter()
-        .filter(|tp| pattern_mentions(tp, node))
-        .cloned()
-        .collect();
+    // The connected component of the BGP join-graph that contains `node`: every pattern
+    // join-reachable from `node` through shared variables. A direct-mention-only BGP yields
+    // exactly the same patterns the old single-variable rule did (strict no-regression).
+    let sub = connected_component(node, constraint);
     if sub.is_empty() {
         return Ok(None);
     }
 
-    // SELECT ?node WHERE { <constraining sub-BGP> } — evaluate the constraint through the
-    // engine and collect the ids it binds to `node`.
+    // SELECT ?node WHERE { <connected sub-BGP> } — evaluate the constraint through the engine
+    // and collect the ids it binds to `node`. Projecting `node` discards the intermediate
+    // join variables (e.g. `?x` above), so the mask is precisely the eligible neighbour set.
     let select = Query::Select {
         dataset: None,
         pattern: GraphPattern::Project {
@@ -627,10 +638,69 @@ fn derive_mask(
     Ok(Some(mask))
 }
 
-/// [OPUS-4.8] (sq-bvmd) Does `tp` mention `node` in any term position?
+/// [OPUS-4.8] (sq-3tjd) The connected component of the BGP join-graph containing `node`.
+///
+/// Models the BGP as a graph whose nodes are *variables* and whose edges link the variables
+/// that co-occur in a triple pattern; the component is every pattern reachable from `node`
+/// through shared variables. Implemented as a worklist over a frontier of "live" variables:
+/// seed with `node`, and repeatedly admit any not-yet-taken pattern that mentions a live
+/// variable, adding that pattern's own variables to the frontier — a transitive closure that
+/// terminates because each pass either consumes a pattern or grows no further.
+///
+/// Returns the patterns in the component (empty iff no pattern mentions `node`, i.e. `node`
+/// is unconstrained). The order mirrors the input BGP for determinism.
 #[cfg(feature = "filtered-ann")]
-fn pattern_mentions(tp: &TriplePattern, node: &Variable) -> bool {
-    let in_term = |t: &TermPattern| matches!(t, TermPattern::Variable(v) if v == node);
-    let in_named = matches!(&tp.predicate, NamedNodePattern::Variable(v) if v == node);
-    in_term(&tp.subject) || in_named || in_term(&tp.object)
+fn connected_component(node: &Variable, patterns: &[TriplePattern]) -> Vec<TriplePattern> {
+    // Live variables whose patterns are (transitively) part of the component.
+    let mut live: Vec<Variable> = vec![node.clone()];
+    // `taken[i]` once pattern `i` has been pulled into the component.
+    let mut taken = vec![false; patterns.len()];
+
+    loop {
+        let mut grew = false;
+        for (i, tp) in patterns.iter().enumerate() {
+            if taken[i] {
+                continue;
+            }
+            let vars = pattern_vars(tp);
+            if vars.iter().any(|v| live.contains(v)) {
+                taken[i] = true;
+                grew = true;
+                // Promote this pattern's other variables into the live frontier so the
+                // closure follows the join transitively.
+                for v in vars {
+                    if !live.contains(&v) {
+                        live.push(v);
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    patterns
+        .iter()
+        .zip(&taken)
+        .filter(|(_, &t)| t)
+        .map(|(tp, _)| tp.clone())
+        .collect()
+}
+
+/// [OPUS-4.8] (sq-3tjd) The variables `tp` mentions, in any term position (subject,
+/// predicate, object).
+#[cfg(feature = "filtered-ann")]
+fn pattern_vars(tp: &TriplePattern) -> Vec<Variable> {
+    let mut out = Vec::with_capacity(3);
+    if let TermPattern::Variable(v) = &tp.subject {
+        out.push(v.clone());
+    }
+    if let NamedNodePattern::Variable(v) = &tp.predicate {
+        out.push(v.clone());
+    }
+    if let TermPattern::Variable(v) = &tp.object {
+        out.push(v.clone());
+    }
+    out
 }
