@@ -216,20 +216,43 @@ prior WAL segments after a later `DELETE` removes it from the live store. Specif
   **next compaction** — so until then, the dropped graph's data can still be on disk in the WAL.
 
 **Consequence:** a complete Art. 17 erasure of the *persisted* store requires the SPARQL
-`DELETE`/`DROP` **AND** a durable-store purge. Until sparq ships an explicit
-`compact`/`vacuum` admin command (deferred — see gap below), the operator's purge procedure is:
+`DELETE`/`DROP` **AND** a durable-store purge.
 
-1. **Quiesce writes** (stop accepting data-subject-request and ingest traffic, or take the
-   instance out of rotation).
-2. **Re-seed from a clean snapshot.** Export the *current* (already-erased) live store with a
-   `CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }` (per named graph), then start a **fresh**
-   `--persist` directory seeded from that export. The fresh WAL contains no superseded inserts.
+**The purge is now a one-step admin operation (bead sq-x32t, [OPUS-4.8]).** After the logical
+`DELETE`/`DROP`, invoke the **WAL compaction / vacuum**:
+
+- **Online (running server):** `POST /admin/compact` — gated by the **write** auth token
+  (`--auth-token`), the same gate as SPARQL Update. It runs on the writer thread, strictly between
+  batches, so it never races a concurrent write; the live triple set is preserved exactly, so no
+  generation is published and reads keep being served throughout. Returns `200` on success, `409`
+  on an in-memory (non-`--persist`) server, `503` on a transient durable-write error (retryable).
+- **Offline (operator command):** `sparq-cli compact <persist-dir>` — stop the server, run it on
+  the `--persist` directory, restart.
+
+Both rewrite the on-disk store to contain **only the current live triples**, with a fresh,
+re-interned dictionary, then **atomically swap** the directory (rollback-safe two-rename, parent
+dir fsync'd between renames, WAL truncated; an interrupted swap is healed deterministically on the
+next open). So a superseded `INSERT`, a `DELETE`d triple's *value*, and a `DROP`ped graph's data —
+including a deleted **literal value** that becomes orphaned — are **physically removed** from the
+engine's on-disk segments and dictionary, not merely hidden by the delta-overlay. Verified by
+`crates/sparq-core/src/lib.rs` (`vacuum_erases_deleted_data_bytes_on_disk`, which asserts the
+deleted bytes are present on disk before and absent after) and
+`crates/sparq-server/tests/persist.rs` (`admin_compact_physically_erases_deleted_data`).
+
+**Scope (honest):** compaction scrubs the engine's own on-disk segments + dictionary. It **cannot**
+reach bytes already copied **off-box** — filesystem snapshots, block-level COW history, or external
+backups — which remain the operator's responsibility (see §7b / §7c). The manual quiesce → export →
+re-seed → destroy procedure below is **no longer required** for engine-side erasure (it is
+superseded by the admin op) but remains a valid belt-and-braces approach when the operator also
+wants a brand-new directory inode (e.g. to combine with crypto-erase of the old one):
+
+1. **Quiesce writes** (take the instance out of rotation).
+2. **Re-seed from a clean snapshot** (`CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }` per graph → fresh
+   `--persist` dir).
 3. **Destroy the old persist directory** (see §7c for at-rest/physical destruction).
 
-This is operationally heavy; partitioning per subject into a named graph (§6) plus periodic
-re-seeding minimises how often it is needed. Tracked as **PR-G3** in
-[`gap-register.md`](./gap-register.md); the deferred `compact`/`vacuum` admin command that would
-make this a one-step operation is bead **sq-x32t**.
+Tracked as **PR-G3** in [`gap-register.md`](./gap-register.md) (now CLOSED by sq-x32t for the
+engine-side purge; the off-box-residue portion stays with §7b/§7c).
 
 ### 7b. Operator backups retain data until rotated
 
