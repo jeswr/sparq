@@ -217,7 +217,32 @@ corrective measures; and the close-out. These feed the Annex VII technical docum
 (CRA-CA.4) the manufacturer/steward retains. Retention period: `<FILL-IN: per the CRA / org
 records-retention policy>`.
 
-## 9. Honesty statement (restated)
+## 9. Cross-reference into the canonical governance doc `[OPUS-4.8]`
+
+`SECURITY.md` (repo root) governs the **upstream** coordinated-disclosure (CVD) flow but is a
+**governance-owned** file outside the `compliance/cra` tree's write-scope, so it is not edited
+from this worktree. To make the Article 14 escalation path discoverable from the canonical
+governance document, the maintainer/steward should add the following **one-line pointer** to
+`SECURITY.md` (suggested location: at the end of the **"What to expect (response expectation)"**
+section, where the disclosure flow is described). Proposed text:
+
+> **CRA Article 14 (manufacturers / stewards).** The above is `sparq`'s coordinated-disclosure
+> flow. A party that **places a product incorporating `sparq` on the EU market** (manufacturer)
+> — or an open-source-software **steward of record** — additionally owes the EU Cyber
+> Resilience Act **Article 14** duty to report **actively-exploited vulnerabilities** and
+> **severe incidents** to ENISA/the coordinating CSIRT (early warning 24h / notification 72h /
+> final report). An adoptable runbook for that obligation lives at
+> [`compliance/cra/incident-reporting-runbook.md`](compliance/cra/incident-reporting-runbook.md).
+> This duty is **additional to**, not a replacement for, the disclosure flow above, and is the
+> adopting party's organizational/legal responsibility — not the `sparq` project's.
+
+This residual one-line pointer is tracked as bead **sq-zbb5** (epic `sq-toze`); until it lands,
+the SECURITY.md→runbook leg of the cross-reference is **residual (governance-owned)** — see
+[`evidence.md`](./evidence.md) §E8. The reverse direction (runbook→`SECURITY.md`) and the
+controls.md / gap-register.md / evidence.md cross-references are already complete (this section,
+§7, the §References block, controls.md CRA-CA.5, gap-register.md GX-CRA-2).
+
+## 10. Honesty statement (restated)
 
 - This is an **adoptable runbook + template**, not a certification artifact and not a
   statement that any report has been or must be made by the `sparq` project itself.
