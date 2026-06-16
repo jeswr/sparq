@@ -59,18 +59,31 @@
 //!    streamed + spilled result is **multiset-equal** to the equivalent blocking hash join
 //!    ([`blocking_hash_join`]) for any interleaving and any budget.
 //!
-//! ## Deferred (NOT in this slice — tracked as a roadmap bead)
+//! ## Live adaptive re-planning (sq-7s4z) — opt-in
 //!
-//! **Live adaptive re-planning** — switching the join algorithm or source mid-execution
-//! when observed cardinalities/rates diverge from the estimate (the harder half of
-//! ANAPSID's adaptivity) — remains out of scope. This slice adds the non-blocking
-//! operator + bounded spill (sq-vf7q) on top of the static plan; mid-execution
-//! re-planning is filed as a roadmap bead under epic sq-3183.
+//! 4. `AdaptiveExecutor` — **mid-execution plan switching** behind the separate
+//!    `adaptive-replan` cargo feature (OFF by default; implies `fedplan`). It captures the
+//!    *observed* runtime statistics (`RuntimeStats`: real per-pattern cardinality +
+//!    per-source latency) as execution proceeds, and at **stage boundaries** — between two
+//!    leaf joins of the left-deep plan — re-invokes the planner on the **remaining** (not-
+//!    yet-executed) patterns when an observation diverges from its estimate past a policy
+//!    factor (`ReplanPolicy::divergence_factor`), adopting the new suffix order only when
+//!    it wins by a hysteresis margin (`ReplanPolicy::improvement_margin`) so stable-but-
+//!    noisy stats never thrash. **Soundness boundary**: re-planning reorders only the
+//!    not-yet-started suffix (never a mid-operator swap); because BGP join is
+//!    commutative/associative, any order over the same patterns yields the *same* result
+//!    multiset — proven by `adaptive::tests::replan_result_equals_static` against an
+//!    order-driven reference executor. Mid-operator adaptivity + live source failover are
+//!    deferred (beaded under epic sq-3183).
 //!
-//! [OPUS-4.8] sq-a35t / sq-vf7q — flagged for Fable re-review.
+//! [OPUS-4.8] sq-a35t / sq-vf7q / sq-7s4z — flagged for Fable re-review.
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-a35t: crate has zero `unsafe`.
 #![cfg_attr(not(feature = "fedplan"), allow(dead_code, unused_imports))]
 
+// [OPUS-4.8] sq-7s4z: live adaptive mid-execution re-planning. Gated behind the
+// `adaptive-replan` feature (which implies `fedplan`); compiled out entirely otherwise.
+#[cfg(feature = "adaptive-replan")]
+mod adaptive;
 #[cfg(feature = "fedplan")]
 mod descriptor;
 #[cfg(feature = "fedplan")]
@@ -98,3 +111,6 @@ pub use selection::{select_sources, PatternSources, SourceCandidate};
 pub use stream::{
     blocking_hash_join, run_streaming, SpillStore, StreamJoin, StreamJoinOptions, Tuple,
 };
+// [OPUS-4.8] sq-7s4z: live adaptive mid-execution re-planning surface.
+#[cfg(feature = "adaptive-replan")]
+pub use adaptive::{exec_oracle, AdaptiveExecutor, ReplanOutcome, ReplanPolicy, RuntimeStats};

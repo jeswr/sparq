@@ -27,6 +27,10 @@ publish = false
 # pays zero for it unless `fedplan` is enabled. OFF by default.
 default = []
 fedplan = []
+# [OPUS-4.8] sq-7s4z: live adaptive mid-execution re-planning. OFF by default; IMPLIES
+# `fedplan` (it re-invokes the static planner on the remaining plan). A build that does not
+# enable it compiles zero adaptive code — the adaptive module is `#[cfg]`-gated out.
+adaptive-replan = ["fedplan"]
 
 [dependencies]
 # Term model (oxrdf 0.3 re-export) — used only to type the public IRI surface and to
