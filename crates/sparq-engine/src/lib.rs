@@ -170,11 +170,18 @@ pub fn with_functions<T>(fns: &FunctionRegistry, f: impl FnOnce() -> T) -> T {
 mod aggregate;
 #[cfg(feature = "window-functions")]
 pub mod window;
+// Inline `OVER(…)` window-clause SYNTAX (sq-h564) — a source-rewrite front end over
+// the programmatic `window` pass, on the dedicated `query_over` entry point only. It
+// does NOT touch the (conformance-tracking) vendored spargebra parser. [OPUS-4.8]
+#[cfg(feature = "window-functions")]
+mod window_syntax;
 #[cfg(feature = "window-functions")]
 pub use aggregate::{
     query_with_aggregates, query_with_aggregates_and_budget, with_aggregates, AggFn,
     CustomAggregateRegistry,
 };
+#[cfg(feature = "window-functions")]
+pub use window_syntax::{query_over, query_over_with_budget};
 
 // ---- Spatial pushdown seam (sq-mg9) -----------------------------------------
 //

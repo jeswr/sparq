@@ -104,7 +104,9 @@ Extension functions (SPARQL 17.6) and dataset views:
 - *(opt-in `window-functions`)* `CustomAggregateRegistry::new()` + `.register(iri, |members:
   &[Option<Term>]| -> Result<Option<Term>, String>)`; `query_with_aggregates(&Graph, &str, &reg)`
   (+ `_and_budget`) parses+installs, `with_aggregates(&reg, || …)` scopes it. Window functions:
-  `window::{WindowSpec, WindowFunction, WindowAggregate, SortKey, apply_window}` (programmatic pass).
+  `window::{WindowSpec, WindowFunction, WindowAggregate, SortKey, apply_window}` (programmatic pass),
+  or `query_over(&Graph, &str)` (+ `_with_budget`) for the inline `OVER(…)` query syntax (a source
+  rewrite over the engine; covers `ROW_NUMBER`/`RANK`/`DENSE_RANK` with `PARTITION BY`/`ORDER BY`).
 
 Introspection: `explain(&Graph, &str)` (plan-only) and `explain_analyze(&Graph, &str)` (plan + per-
 operator execution trace).
@@ -203,10 +205,13 @@ let r = query_with_aggregates(&g,
 ```
 
 **Window functions** (opt-in `window-functions` feature) — **NON-STANDARD extension**: SPARQL has no
-W3C-REC `OVER (PARTITION BY … ORDER BY …)` syntax, so sparq exposes windowing as a *programmatic pass
-over a `QueryResult`* whose semantics follow the SQL:2003 window model (the surface Stardog / AnzoGraph
-expose). Run an ordinary SELECT, then apply a `WindowSpec` (`ROW_NUMBER` / `RANK` / `DENSE_RANK`, or a
-windowed aggregate over the whole partition). One column is appended; row order is preserved:
+W3C-REC `OVER (PARTITION BY … ORDER BY …)` syntax, so sparq exposes windowing two ways, both following
+the SQL:2003 window model (the surface Stardog / AnzoGraph expose) and neither touching the engine's
+W3C-conformance SPARQL surface.
+
+*(a) Programmatic pass over a `QueryResult`* — the full surface. Run an ordinary SELECT, then apply a
+`WindowSpec` (`ROW_NUMBER` / `RANK` / `DENSE_RANK`, or a windowed aggregate over the whole partition).
+One column is appended; row order is preserved:
 
 ```rust
 use sparq_engine::window::{apply_window, SortKey, WindowFunction, WindowSpec};
@@ -222,6 +227,30 @@ let spec = WindowSpec {
 let ranked = apply_window(&result, &spec).unwrap(); // ?rank appended; RANK has gaps after ties
 // Windowed aggregate (whole-partition frame): WindowFunction::Aggregate { agg: WindowAggregate::Sum, of }
 ```
+
+*(b) Inline `OVER(…)` query syntax* (sq-h564) — write the window directly in the SELECT projection and
+run it with `query_over` / `query_over_with_budget`. This is a **source rewrite in front of the engine**
+(it does NOT change the vendored `spargebra` parser): `query_over` lifts each `(FN() OVER (…) AS ?out)`
+item out of the projection, runs the window-stripped SELECT through the ordinary engine, applies the
+programmatic pass above, then reprojects. **Covered subset:** `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`
+(case-insensitive), `PARTITION BY ?v …`, `ORDER BY` over projected variables in both `DESC(?v)` and
+`?v DESC` spellings, multiple window columns, and `SELECT *`. A query with no `OVER` clause is run
+unchanged (so `query_over` is a strict superset of `query` for non-window queries):
+
+```rust
+// Cargo.toml: sparq-engine = { version = "0.1", features = ["window-functions"] }
+let r = sparq_engine::query_over(&g,
+    "PREFIX ex: <http://ex/> \
+     SELECT ?emp (ROW_NUMBER() OVER (PARTITION BY ?dept ORDER BY DESC(?sales)) AS ?rn) \
+     WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }").unwrap(); // ?rn = per-?dept rank, descending by ?sales
+```
+
+**Inline-OVER caveats (HONEST):** the `OVER` surface is a sparq extension, not W3C SPARQL, recognised
+ONLY on the `query_over` entry point (a `(… OVER …)` clause is still a parse error on `query`/the
+standard surface). The function call must be empty (`ROW_NUMBER()`), the `AS ?out` alias is required,
+and `ORDER BY` keys must be projected variables. **Deferred (programmatic API only, beaded):** inline
+windowed AGGREGATES (`SUM(?x) OVER (…)`), explicit frames (`ROWS BETWEEN …`), `LAG`/`LEAD`/`NTILE`, a
+named `WINDOW` clause, and ordering by a computed expression.
 
 **Budgets / timeouts / ASK-style early exit** — a `QueryBudget` is checked cooperatively at coarse
 sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"`:
@@ -283,12 +312,16 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   (default ~50). The knob never changes results — only the remote-request count vs per-request size.
 - **Window functions + custom aggregate registry** are the non-default `window-functions` cargo
   feature. **Window functions are a NON-STANDARD extension** — there is no W3C-REC SPARQL `OVER`
-  syntax — so they are a programmatic pass over a `QueryResult` (the SQL:2003 model Stardog/AnzoGraph
-  expose), `ROW_NUMBER`/`RANK`/`DENSE_RANK` + a whole-partition windowed aggregate, NOT inline query
-  syntax (the engine's SPARQL surface stays exactly SPARQL 1.1, so conformance is unaffected). The
-  custom-aggregate side DOES ride real SPARQL `GROUP BY` (a declared aggregate IRI is part of the
-  SPARQL 1.1 extension grammar). When the feature is off, zero window/aggregate-registry code compiles
-  and the default build is byte-identical (no new dependencies). See the recipes above.
+  syntax. sparq exposes them as a programmatic pass over a `QueryResult` (the SQL:2003 model
+  Stardog/AnzoGraph expose), `ROW_NUMBER`/`RANK`/`DENSE_RANK` + a whole-partition windowed aggregate,
+  AND as an inline `OVER(…)` query syntax via the dedicated `query_over` entry point (a *source rewrite*
+  in front of the engine — it does NOT change the vendored parser, so the standard `query`/`ask`/… surface
+  stays exactly SPARQL 1.1 and conformance is unaffected; `OVER` is a parse error everywhere except
+  `query_over`). The inline syntax covers the three ranking functions with `PARTITION BY`/`ORDER BY`;
+  windowed aggregates, frames, `LAG`/`LEAD`/`NTILE` and a named `WINDOW` clause are inline-deferred (use
+  the programmatic API). The custom-aggregate side DOES ride real SPARQL `GROUP BY` (a declared aggregate
+  IRI is part of the SPARQL 1.1 extension grammar). When the feature is off, zero window/aggregate-registry
+  code compiles and the default build is byte-identical (no new dependencies). See the recipes above.
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`
   powers MD5/SHA*; `parallel` enables rayon scan/join/sort/aggregate. The **wasm** crate
   (`sparq-wasm`) disables defaults, so on `wasm32-unknown-unknown` REGEX/hash builtins and

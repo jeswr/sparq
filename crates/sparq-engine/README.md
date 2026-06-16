@@ -42,12 +42,16 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   see [`docs/extension-functions.md`](../../docs/extension-functions.md).
 - **Custom aggregates + window functions** *(opt-in `window-functions` feature, OFF by default)* —
   register a named user aggregate (`CustomAggregateRegistry`) callable from a real SPARQL `GROUP BY`,
-  and a programmatic window-function pass (`window::apply_window` — `ROW_NUMBER` / `RANK` /
-  `DENSE_RANK` + a windowed aggregate, with `PARTITION BY` + `ORDER BY` specs). **Window functions
-  are a NON-STANDARD extension** — SPARQL has no W3C-REC `OVER` syntax, so they are exposed as an
-  explicit API over a result table (the SQL:2003 model Stardog / AnzoGraph expose), NOT inline query
-  syntax; the engine's SPARQL surface stays exactly SPARQL 1.1. When the feature is off, zero
-  window/aggregate-registry code compiles and the default build is byte-identical (no new deps).
+  and a window-function surface (`ROW_NUMBER` / `RANK` / `DENSE_RANK` + a windowed aggregate, with
+  `PARTITION BY` + `ORDER BY`) available two ways: a programmatic pass (`window::apply_window` over a
+  `QueryResult`) and an inline `OVER(…)` query syntax (`query_over` — `(ROW_NUMBER() OVER (PARTITION BY
+  ?x ORDER BY ?y) AS ?rn)` in the SELECT). **Window functions are a NON-STANDARD extension** — SPARQL
+  has no W3C-REC `OVER` syntax. The inline form is a *source rewrite* in front of the engine recognised
+  ONLY on `query_over` (it does NOT change the vendored parser), so the standard `query`/`ask`/… surface
+  stays exactly SPARQL 1.1 and conformance is unaffected. Inline covers the three ranking functions;
+  windowed aggregates / frames / `LAG`/`LEAD`/`NTILE` are inline-deferred (use the programmatic API).
+  When the feature is off, zero window/aggregate-registry code compiles and the default build is
+  byte-identical (no new deps).
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
