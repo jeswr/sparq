@@ -214,3 +214,42 @@ this vendored tree once the fixes land in a released spargebra.
 > crate ships no `tests/` dir), so this patch also adds an explicit `[[test]]`
 > target entry for `tests/recursion_depth.rs`. Like the `[workspace]` table and
 > the `rand` pin (§7), that is a vendoring artifact, not an upstream change.
+
+## 9. Custom-aggregate `DISTINCT` is unreachable in `iriOrFunction` [OPUS-4.8]
+
+- **Spec / intent**: SPARQL 1.1 §11.6 makes custom aggregates an extension point
+  (`Aggregate ::= … | FunctionCall`). spargebra goes a step further and already
+  has an `Aggregate` grammar alternative for `<agg>(DISTINCT expr)` over a
+  *registered* custom-aggregate IRI (`parser.rs`, the `name:iri() "(" DISTINCT
+  Expression ")"` arm) — so the DISTINCT modifier on a custom aggregate is an
+  intended, supported form. It just never parsed.
+- **Bug**: in `PrimaryExpression`, `iriOrFunction()` is tried *before*
+  `BuiltInCall()` (which owns `Aggregate()`). `iriOrFunction = iri() ArgList()?`
+  has an OPTIONAL argument list. For `<agg>(DISTINCT ?x)` the regular `ArgList`
+  cannot parse `(DISTINCT ?x)` (DISTINCT is not an `Expression`), so `ArgList()?`
+  matches `None` and the rule greedily succeeds treating the bare IRI as a
+  standalone term. Because `iriOrFunction` already succeeded, PEG never
+  backtracks into the `Aggregate` rule, and the parse then fails downstream at
+  the unexpected `(` with a misleading `expected ENCODE_FOR_URI`. The
+  DISTINCT-free form (`<agg>(?x)`) was unaffected: there the regular `ArgList`
+  *does* parse, `iriOrFunction` errors ("…is an aggregate function and not a
+  regular function"), and PEG backtracks into `Aggregate` as designed.
+- **Fix**: in `iriOrFunction`'s `else` branch (no `ArgList` parsed), reject a
+  bare IRI that is a *registered custom aggregate* with the same
+  "…is an aggregate function and not a regular function" error the with-args
+  branch uses. That failure makes PEG backtrack into `BuiltInCall → Aggregate`,
+  whose custom-IRI arms then parse both `(DISTINCT expr)` and `(expr)`. A bare
+  aggregate IRI used as a standalone term is not valid SPARQL, so the rejection
+  removes nothing legitimate; non-aggregate IRIs are untouched.
+- **Tests**: `vendor/spargebra/tests/custom_aggregate_distinct.rs` — the
+  prefixed-name and full-IRI DISTINCT forms must parse, the DISTINCT-free form
+  must still parse, the `DISTINCT` flag must survive into the algebra
+  (`Display`), and DISTINCT in a call to an *undeclared* (regular) IRI must
+  remain an error. Engine-level WITH/WITHOUT-DISTINCT evaluation coverage lives
+  in `crates/sparq-engine/src/aggregate.rs` (bead sq-fldo).
+- **Upstream**: candidate for oxigraph/oxigraph — the `Aggregate` rule's intent
+  is plainly to support `<agg>(DISTINCT …)`, which the rule-ordering defeats.
+
+> Manifest note: as in §8, `autotests = false` means the new
+> `tests/custom_aggregate_distinct.rs` target is declared explicitly in
+> `Cargo.toml`. A vendoring artifact, not an upstream change.
