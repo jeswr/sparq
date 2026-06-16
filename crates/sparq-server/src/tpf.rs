@@ -361,8 +361,13 @@ pub fn parse_bindings(payload: &str) -> Result<Vec<Binding>, ParseError> {
 ///
 /// `total_estimate` is the EXACT size of the deduplicated union (this is a count of the real
 /// restricted result, so we can be exact and still advertise it as `hydra:totalItems`); the
-/// page slices `[page*page_size, …)` of that union in canonical `[s,p,o]` order — the same
-/// deterministic order plain TPF pages in, so the union pages consistently.
+/// page slices `[page*page_size, …)` of that union in numeric `[s,p,o]` id-lexicographic order
+/// (the `BTreeSet` order). That order is DETERMINISTIC and INTRA-RESULT CONSISTENT across this
+/// fragment's pages — the property paging actually needs (page boundaries never overlap and the
+/// pages partition the result). It is NOT necessarily the same order plain [`evaluate`] uses:
+/// plain TPF slices the chosen INDEX's scan order, which for a given bound-position shape may
+/// sort on a different id permutation. Both orders are deterministic; they just need not be
+/// identical to each other.
 ///
 /// An EMPTY binding set means "no restriction" and is delegated to the plain [`evaluate`] — a
 /// brTPF request with zero mappings is exactly a TPF request (the spec's μ₀-only case).
