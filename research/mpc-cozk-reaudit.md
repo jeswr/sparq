@@ -264,6 +264,24 @@ These obligations are **necessary, not claimed sufficient** — they encode the 
 precondition and the bind-the-validated-witness discipline; full soundness still additionally
 requires the external multi-prover audit (below).
 
+> **[OPUS-4.8] Encoded as a test obligation (bead sq-7leq) — status: OPEN, documented-gap.**
+> R-WV / T1–T4 are now ENCODED in the crate test suite at
+> `crates/sparq-mpc/src/witness_validation_tests.rs`, NOT merely documented here. The
+> disposition is **OPEN, not MET**: there is no built collaborative prover to validate a
+> witness against (every `CollaborativeProof::prove` returns `NotYetImplemented`), so the
+> validate-before-prove precondition cannot be met today. The encoding is two-tier:
+> (a) a **PASSING** meta-test (`gate_state::deferred_prover_never_proves_over_any_witness`)
+> pins the current honest fail-closed posture — `prove` refuses with a gate-naming error and
+> never opens a witness-derived value or emits a proof, so no prove-over-invalid-witness path
+> exists today (vacuously, because no prover exists); it is the regression anchor that fires if
+> a future `prove` starts returning `Ok(..)` while R-WV is still unmet. (b) the **T1–T4** suite
+> is `#[ignore]`d (documented OPEN obligation, each citing sq-9hrn / sq-qhy4), written against
+> a `WitnessValidatingProver` contract the future prover (sq-f7bu / sq-bjl, M-E) MUST satisfy,
+> and lifted into its suite — un-ignored — when that prover lands. This does NOT close any lens
+> and makes NO soundness claim; it converts the precondition from documentary caveat into a
+> build-time-measurable gate. Clause C remains a documentary/CI obligation (not yet a runtime
+> test — no construction is adopted to record).
+
 ---
 
 ## 4. Overall verdict — GATES the production claim
