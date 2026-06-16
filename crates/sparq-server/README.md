@@ -131,6 +131,27 @@ internal-type `Debug` / secret survives into any error body for the main failure
 `tests/tpf.rs`. The auth `401` is additionally byte-identical for a missing vs a wrong token, so
 it is not a differential-error oracle.
 
+### Stable error/status contract — transient vs permanent (for retry classifiers)
+
+A client that retries on "transient" failures needs to know exactly which status codes sparq
+emits and which are worth retrying. The **authoritative, versioned contract** is the
+[`status_contract`](https://docs.rs/sparq-server/latest/sparq_server/status_contract/) crate
+doc (asserted by `tests/status_contract.rs`, so it cannot drift). In brief:
+
+| Class | Statuses | Retry the identical request? |
+| --- | --- | --- |
+| **Transient** | `429` (concurrency shed — request never ran) · `503` (query/UPDATE timeout, durable-write refusal, subscription capacity) | **yes** — back off and retry |
+| **Permanent** | `400` (malformed query/UPDATE/RDF) · `401` (auth) · `404` · `405` · `410` (aged-out generation) · `413` (body cap **and** result/row cap) · `415` | **no** — fix the request |
+| **Defect** | `500` (caught panic / unclassified internal error) | a server bug — surface it; do not hot-retry |
+
+The bit a `5xx`-only classifier (e.g. one written for a different server) gets wrong against
+sparq: a **`413` result/row cap is a PERMANENT honest refusal** (narrow the query / add `LIMIT`),
+*not* a transient load signal and *not* a silent truncation; and a **timeout is a `503`**, not a
+`5xx`-generic. **Classify on the status code** — bodies are sanitised generic class strings, never
+the caller's input (the only message substrings to rely on are the documented generic sentinels,
+e.g. a `503` timeout body contains `timed out`). There is currently **no `Retry-After` header**;
+the client picks its own back-off. See the `status_contract` doc for the full table and rationale.
+
 ### SERVICE federation + DoS guards
 
 - SPARQL `SERVICE` federation is **OFF in the default build** (the `service` cargo feature).
