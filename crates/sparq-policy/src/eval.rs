@@ -18,6 +18,11 @@
 use crate::model::{Action, Constraint, Operator, Policy, Rule, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The `odrl:purpose` left-operand IRI — the dimension a *purpose constraint*
+/// restricts (the purpose of use a permission/prohibition is gated on, e.g.
+/// `odrl:purpose eq <urn:purpose/research>`). [OPUS-4.8] sq-q56r.
+pub const ODRL_PURPOSE: &str = "http://www.w3.org/ns/odrl/2/purpose";
+
 /// An access request evaluated against a [`Policy`]: who wants to do what, to
 /// what, in what context (the "evaluation request" + "state of the world" of the
 /// ODRL Formal Semantics, folded into one node-local view).
@@ -71,6 +76,33 @@ impl Request {
     pub fn discharge(mut self, duty_action: impl Into<String>) -> Request {
         self.discharged_duties.insert(duty_action.into());
         self
+    }
+
+    /// Declare the **purpose of use** this request carries as evidence (chainable)
+    /// — the `odrl:purpose` left-operand value a purpose-gated rule is checked
+    /// against. [OPUS-4.8] sq-q56r.
+    ///
+    /// This is first-class sugar over [`Request::with`]`(ODRL_PURPOSE, ..)`: it
+    /// makes the *evidence the requester supplies* explicit (and auditable via
+    /// [`Request::purpose`]) instead of relying on a magic context key. A request
+    /// that does NOT call this carries **no** purpose evidence, so a permission
+    /// gated on purpose does not grant and a prohibition gated on purpose is not
+    /// withdrawn (fail-closed — see [`purpose_status`]).
+    ///
+    /// The value is stored verbatim: a DPV/purpose-taxonomy IRI as [`Value::Iri`]
+    /// (`Value::Iri(..)`) or a purpose code as [`Value::Str`]. Matching is **exact**
+    /// (IRI/string equality) — there is no hierarchy/subsumption (see
+    /// [`purpose_status`]).
+    pub fn for_purpose(self, purpose: Value) -> Request {
+        self.with(ODRL_PURPOSE, purpose)
+    }
+
+    /// The purpose-of-use evidence this request carries (`odrl:purpose`), or `None`
+    /// if the request supplied none. The auditable answer to *"did the request
+    /// actually state a purpose?"* — the question faithful purpose enforcement turns
+    /// on. [OPUS-4.8] sq-q56r.
+    pub fn purpose(&self) -> Option<&Value> {
+        self.context.get(ODRL_PURPOSE)
     }
 }
 
@@ -298,6 +330,100 @@ pub enum ProhibitionStatus {
     /// constraint that is *definitely* false given the evidence — the only case in
     /// which a materialized deny may be RETRACTED (access restored).
     Withdrawn,
+}
+
+/// The three-valued verdict of a rule's `odrl:purpose` constraints against the
+/// purpose evidence a request carries — a FAITHFUL report of exactly what
+/// [`evaluate`] checks for purpose (it reuses the same [`constraint_status`] the
+/// evaluator's purpose constraints go through). [OPUS-4.8] sq-q56r.
+///
+/// The honesty contract: this never claims a stronger verdict than the evaluator
+/// would act on. `Satisfied`/`Unprovable`/`DefinitelyUnsatisfied` map 1:1 onto the
+/// evaluator's gating — a `Satisfied` purpose is the *only* verdict under which a
+/// purpose-gated permission can grant, and anything other than `DefinitelyUnsatisfied`
+/// (i.e. `Satisfied` OR `Unprovable`) keeps a purpose-gated prohibition in force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurposeMatch {
+    /// The rule has no `odrl:purpose` constraint — purpose places no restriction on
+    /// it (the rule's other attributes/constraints decide).
+    NotConstrained,
+    /// The rule constrains purpose AND the request's stated purpose **matches** every
+    /// purpose constraint (exact IRI/string equality, the only matching this checks).
+    Satisfied,
+    /// The rule constrains purpose but the request carries **no** purpose evidence —
+    /// *unprovable*. Fail-closed: a permission does NOT grant on this; a prohibition is
+    /// NOT withdrawn. (Never silently read as "any purpose allowed".)
+    Unprovable,
+    /// The rule constrains purpose and the request's stated purpose **does not match**
+    /// — a definite mismatch (a permission does not grant; a prohibition no longer
+    /// carves *this* purpose out).
+    DefinitelyUnsatisfied,
+}
+
+/// Report how `rule`'s `odrl:purpose` constraint(s) stand against the purpose
+/// evidence `request` carries — the auditable surface of faithful purpose
+/// enforcement. [OPUS-4.8] sq-q56r.
+///
+/// This does NOT re-implement matching: it runs the request through the SAME
+/// [`constraint_status`] every `odrl:purpose` constraint goes through inside
+/// [`evaluate`], so the verdict it reports is exactly what the evaluator acts on —
+/// the whole point of the bead (no claimed enforcement that isn't actually checked).
+///
+/// **Match semantics (the boundary, not over-claimed):** a purpose matches by
+/// **exact** IRI/string equality (an `eq`/`isA` purpose constraint), or by membership
+/// in an explicit `isPartOf` purpose *set* (the `|`/space/comma-separated right
+/// operand). There is **no** purpose hierarchy / DPV subsumption: a request purpose is
+/// not matched against broader/narrower purposes — only the exact value(s) the
+/// constraint names. A `neq` purpose constraint is honoured (purpose ≠ the named one).
+/// Several purpose constraints on one rule are ANDed (every one must hold), mirroring
+/// the evaluator's constraint conjunction.
+///
+/// Returns [`PurposeMatch::NotConstrained`] when the rule has no purpose constraint.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_policy::{purpose_status, PurposeMatch, parse_policy_str, Request, Value};
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/p> a odrl:Set ; odrl:permission [
+///     odrl:action odrl:use ; odrl:target <urn:asset/x> ;
+///     odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+///                       odrl:rightOperand <urn:purpose/research> ] ] .
+/// "#, "turtle").unwrap();
+/// let rule = &pol.permissions[0];
+/// let base = Request::new("http://www.w3.org/ns/odrl/2/use").on("urn:asset/x");
+///
+/// // Stated purpose matches exactly → Satisfied.
+/// let ok = base.clone().for_purpose(Value::Iri("urn:purpose/research".into()));
+/// assert_eq!(purpose_status(rule, &ok), PurposeMatch::Satisfied);
+/// // Stated a different purpose → DefinitelyUnsatisfied.
+/// let bad = base.clone().for_purpose(Value::Iri("urn:purpose/marketing".into()));
+/// assert_eq!(purpose_status(rule, &bad), PurposeMatch::DefinitelyUnsatisfied);
+/// // NO purpose evidence → Unprovable (fail-closed; not "any purpose").
+/// assert_eq!(purpose_status(rule, &base), PurposeMatch::Unprovable);
+/// ```
+pub fn purpose_status(rule: &Rule, request: &Request) -> PurposeMatch {
+    let mut constrained = false;
+    let mut any_unprovable = false;
+    for c in &rule.constraints {
+        if c.left != ODRL_PURPOSE {
+            continue;
+        }
+        constrained = true;
+        match constraint_status(c, request) {
+            ConstraintStatus::Satisfied => {}
+            ConstraintStatus::DefinitelyUnsatisfied => return PurposeMatch::DefinitelyUnsatisfied,
+            ConstraintStatus::Unprovable => any_unprovable = true,
+        }
+    }
+    if !constrained {
+        PurposeMatch::NotConstrained
+    } else if any_unprovable {
+        PurposeMatch::Unprovable
+    } else {
+        PurposeMatch::Satisfied
+    }
 }
 
 /// How one prohibition rule re-evaluates against a request, distinguishing a

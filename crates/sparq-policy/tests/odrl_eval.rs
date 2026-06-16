@@ -11,7 +11,8 @@
 //! blank-node constraints).
 
 use sparq_policy::{
-    evaluate, parse_policy_str, prohibition_status, Decision, ProhibitionStatus, Request, Value,
+    evaluate, parse_policy_str, prohibition_status, purpose_status, Decision, ProhibitionStatus,
+    PurposeMatch, Request, Value,
 };
 
 const ODRL: &str = "http://www.w3.org/ns/odrl/2/";
@@ -461,4 +462,194 @@ fn prohibition_status_ambiguous_only_if_no_other_match() {
         .on("urn:asset/x")
         .by("https://alice.ex/me");
     assert_eq!(prohibition_status(&p, &req), ProhibitionStatus::Applies);
+}
+
+// ===========================================================================
+// [OPUS-4.8] sq-q56r — faithful odrl:purpose enforcement: a purpose constraint
+// grants ONLY when the request carries a matching purpose; a missing purpose is
+// Unprovable → fail-closed (permission does not grant; prohibition not withdrawn);
+// a mismatch is a definite no. Match is EXACT (no hierarchy/subsumption). The
+// `purpose_status` helper REPORTS exactly what `evaluate` checks (the honesty point).
+// ===========================================================================
+
+const RESEARCH: &str = "urn:purpose/research";
+const MARKETING: &str = "urn:purpose/marketing";
+
+/// alice MAY use asset-X, gated on purpose = research (exact IRI).
+fn purpose_permission() -> sparq_policy::Policy {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/purp> a odrl:Set ; odrl:permission [
+    odrl:action odrl:use ; odrl:target <urn:asset/x> ; odrl:assignee <https://alice.ex/me> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <{RESEARCH}> ] ] .
+"#
+    );
+    parse_policy_str(&ttl, "turtle").unwrap()
+}
+
+#[test]
+fn purpose_match_grants() {
+    let p = purpose_permission();
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        .for_purpose(Value::Iri(RESEARCH.into()));
+    assert!(evaluate(&p, &req).allow, "matching purpose grants");
+    assert_eq!(purpose_status(&p.permissions[0], &req), PurposeMatch::Satisfied);
+    // The request's purpose is auditable as exactly what it stated.
+    assert_eq!(req.purpose().map(Value::as_str), Some(RESEARCH));
+}
+
+#[test]
+fn purpose_mismatch_denies() {
+    let p = purpose_permission();
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        .for_purpose(Value::Iri(MARKETING.into()));
+    assert!(!evaluate(&p, &req).allow, "a different purpose must not grant");
+    assert_eq!(
+        purpose_status(&p.permissions[0], &req),
+        PurposeMatch::DefinitelyUnsatisfied
+    );
+}
+
+#[test]
+fn missing_purpose_fails_closed() {
+    // THE honesty test: no purpose stated → Unprovable → permission does NOT grant.
+    // "No purpose stated" is never treated as "any purpose allowed".
+    let p = purpose_permission();
+    let no_purpose = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me");
+    assert!(
+        !evaluate(&p, &no_purpose).allow,
+        "missing purpose must fail closed (not grant)"
+    );
+    assert_eq!(no_purpose.purpose(), None, "no purpose evidence supplied");
+    assert_eq!(
+        purpose_status(&p.permissions[0], &no_purpose),
+        PurposeMatch::Unprovable
+    );
+}
+
+#[test]
+fn purpose_match_is_exact_no_hierarchy() {
+    // Match is EXACT — a narrower/broader purpose IRI is NOT subsumed. Documents the
+    // boundary so the helper never over-claims hierarchy matching it does not perform.
+    let p = purpose_permission(); // gated on <urn:purpose/research>
+    let subpurpose = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        // a plausibly-narrower purpose IRI — NOT matched (no subsumption).
+        .for_purpose(Value::Iri("urn:purpose/research/clinical".into()));
+    assert!(
+        !evaluate(&p, &subpurpose).allow,
+        "exact-match only: a sub-purpose IRI is not subsumed"
+    );
+    assert_eq!(
+        purpose_status(&p.permissions[0], &subpurpose),
+        PurposeMatch::DefinitelyUnsatisfied
+    );
+}
+
+#[test]
+fn purpose_set_is_part_of() {
+    // An explicit isPartOf purpose set is honoured (membership), but it is still the
+    // exact set the constraint names — not a hierarchy.
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/ps> a odrl:Set ; odrl:permission [
+    odrl:action odrl:use ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand "{RESEARCH}|{MARKETING}" ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let base = Request::new(left("use")).on("urn:asset/x");
+    assert!(evaluate(&p, &base.clone().for_purpose(Value::Str(RESEARCH.into()))).allow);
+    assert!(evaluate(&p, &base.clone().for_purpose(Value::Str(MARKETING.into()))).allow);
+    // Outside the set → deny; missing → Unprovable (fail-closed).
+    assert!(!evaluate(&p, &base.clone().for_purpose(Value::Str("urn:purpose/ads".into()))).allow);
+    assert!(!evaluate(&p, &base).allow);
+}
+
+#[test]
+fn purpose_neq_constraint() {
+    // odrl:neq purpose: granted for ANY purpose except the named one — but a stated
+    // purpose is still REQUIRED (missing → Unprovable → fail-closed).
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/pn> a odrl:Set ; odrl:permission [
+    odrl:action odrl:use ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:neq ;
+                      odrl:rightOperand <{MARKETING}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let base = Request::new(left("use")).on("urn:asset/x");
+    assert!(evaluate(&p, &base.clone().for_purpose(Value::Iri(RESEARCH.into()))).allow);
+    assert!(!evaluate(&p, &base.clone().for_purpose(Value::Iri(MARKETING.into()))).allow);
+    // Missing purpose is unprovable, NOT "any purpose ≠ marketing" → fail-closed.
+    assert!(!evaluate(&p, &base).allow, "neq purpose still needs evidence");
+}
+
+#[test]
+fn purpose_prohibition_dual() {
+    // The dual: a prohibition gated on purpose carves the request out ONLY when the
+    // stated purpose matches; a different purpose does NOT carve out; a MISSING purpose
+    // keeps the carve-out ambiguous (the deny is NOT withdrawn — fail-closed).
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/pp> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:use ; odrl:target <urn:asset/x> ; odrl:assignee <https://alice.ex/me> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <{MARKETING}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let prohib = &p.prohibitions[0];
+    let base = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me");
+
+    // Stated marketing purpose → the prohibition applies (carve-out).
+    let marketing = base.clone().for_purpose(Value::Iri(MARKETING.into()));
+    assert_eq!(purpose_status(prohib, &marketing), PurposeMatch::Satisfied);
+    assert_eq!(prohibition_status(&p, &marketing), ProhibitionStatus::Applies);
+
+    // Stated a DIFFERENT purpose → the prohibition definitely no longer carves THIS out.
+    let research = base.clone().for_purpose(Value::Iri(RESEARCH.into()));
+    assert_eq!(
+        purpose_status(prohib, &research),
+        PurposeMatch::DefinitelyUnsatisfied
+    );
+    assert_eq!(prohibition_status(&p, &research), ProhibitionStatus::Withdrawn);
+
+    // NO purpose stated → ambiguous: the deny is NOT withdrawn (fail-closed).
+    assert_eq!(purpose_status(prohib, &base), PurposeMatch::Unprovable);
+    assert_eq!(prohibition_status(&p, &base), ProhibitionStatus::Ambiguous);
+}
+
+#[test]
+fn purpose_not_constrained_when_absent() {
+    // A rule with no purpose constraint reports NotConstrained (purpose places no bound).
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/np> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let req = Request::new(left("read")).on("urn:asset/x");
+    assert_eq!(
+        purpose_status(&p.permissions[0], &req),
+        PurposeMatch::NotConstrained
+    );
 }

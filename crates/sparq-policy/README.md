@@ -82,6 +82,26 @@ assert!(!evaluate(&policy, &outside).allow);
   `xsd:dateTime`/`date` operands compare by magnitude/instant; everything else
   by IRI/string value. Constraints over `purpose` / `recipient` / `dateTime` /
   `count` / `spatial` left-operands are all supported.
+- **`odrl:purpose` enforcement (faithful, fail-closed)** — [OPUS-4.8] sq-q56r. A
+  purpose constraint restricts a rule to a stated *purpose of use*. A request carries
+  its purpose evidence via `Request::for_purpose(Value)` (sugar over
+  `.with(ODRL_PURPOSE, ..)`), readable back via `Request::purpose()`. The purpose is
+  gated through the **same** `evaluate` constraint path as every other dimension, so it
+  is actually checked end-to-end — never claimed-but-unchecked:
+  - **Match → grant; mismatch → deny; missing purpose → fail-closed.** A request that
+    states **no** purpose is *unprovable*, so a purpose-gated permission does **not**
+    grant and a purpose-gated prohibition is **not** withdrawn — "no purpose stated" is
+    **never** read as "any purpose allowed".
+  - **Match semantics (the boundary — not over-claimed):** **exact** IRI/string
+    equality (`eq`/`isA`), or membership in the explicit `isPartOf` purpose *set* the
+    constraint names, or `neq` (purpose ≠ the named one). There is **no** purpose
+    hierarchy / DPV subsumption: a narrower or broader purpose IRI is *not* matched
+    against a constraint that names a different one. `neq` still requires a stated
+    purpose (missing → fail-closed). A DPV-style purpose taxonomy / `isPartOf`-over-a-
+    hierarchy is a deferred bead.
+  - `purpose_status(&rule, &request) -> PurposeMatch` reports exactly what the evaluator
+    checks for a rule's purpose constraints — `Satisfied` / `DefinitelyUnsatisfied` /
+    `Unprovable` / `NotConstrained` — the auditable surface of this enforcement.
 - **Duties as obligations** — a permission's `odrl:duty` must appear in the
   request's discharged-duty set, or the permission is denied (the usage-control
   kernel pure access control lacks).
