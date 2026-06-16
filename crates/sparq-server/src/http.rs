@@ -1761,11 +1761,13 @@ fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option
     let endpoint_iri = format!("{base}/sparql");
     let dataset_iri = format!("{base}/.well-known/void#dataset");
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
+    let caps = service_capabilities(state.config());
     Some(
         match crate::descriptors::service_description(
             &endpoint_iri,
             &endpoint_iri,
             &dataset_iri,
+            &caps,
             accept,
         ) {
             Ok(d) => text_response(StatusCode::OK, d.content_type, d.body, false),
@@ -1778,6 +1780,42 @@ fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option
             ),
         },
     )
+}
+
+/// [OPUS-4.8] sq-qfcb: derive the server's ACTUAL capability profile for the Service
+/// Description from this build's cargo features + the running config — never a fiction.
+///
+///   * `update` — advertise `sd:SPARQL11Update` only when an anonymous client could run one:
+///     the write path is always compiled in, but a configured write-token
+///     ([`ServerConfig::auth_token`]) makes anonymous Update impossible, so we suppress the
+///     advertisement in that case (the operator who holds the token still knows it works).
+///   * `federated_query` — `true` exactly when built with the `service` feature (the engine's
+///     `SERVICE` evaluation is compiled in); otherwise a `SERVICE` clause errors at execution.
+///   * `extension_functions` — the IRIs the engine has ACTUALLY registered. With the `geo`
+///     feature that is sparq-geo's `geof:` registry, read back through
+///     [`sparq_engine::FunctionRegistry::iris`] so the list can never drift from what runs;
+///     without it, no extension functions are registered, so the list is empty.
+#[cfg(feature = "federation-descriptors")]
+fn service_capabilities(config: &ServerConfig) -> crate::descriptors::Capabilities {
+    // Anonymous Update is possible iff no write-token gates the write surface.
+    let update = config.auth_token.is_none();
+    let federated_query = cfg!(feature = "service");
+    #[cfg(feature = "geo")]
+    let extension_functions: Vec<String> = {
+        static GEOF: std::sync::OnceLock<sparq_engine::FunctionRegistry> =
+            std::sync::OnceLock::new();
+        GEOF.get_or_init(sparq_geo::geof_registry)
+            .iris()
+            .map(str::to_string)
+            .collect()
+    };
+    #[cfg(not(feature = "geo"))]
+    let extension_functions: Vec<String> = Vec::new();
+    crate::descriptors::Capabilities {
+        update,
+        federated_query,
+        extension_functions,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2018,7 +2056,8 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
         // target (path verbatim, query string => `<redacted len=N fp=…>`). With
         // --log-full-requests the bare TraceLayer is used, logging the URI verbatim as before.
         if config.redact_logs {
-            routes.layer(TraceLayer::new_for_http().make_span_with(crate::redact::RedactingMakeSpan))
+            routes
+                .layer(TraceLayer::new_for_http().make_span_with(crate::redact::RedactingMakeSpan))
         } else {
             routes.layer(TraceLayer::new_for_http())
         }
@@ -2588,7 +2627,10 @@ async fn admin_compact(State(state): State<AppState>, headers: HeaderMap) -> Res
             "compaction failed (retryable)",
             &e,
         ),
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "compaction worker panicked"),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "compaction worker panicked",
+        ),
     }
 }
 

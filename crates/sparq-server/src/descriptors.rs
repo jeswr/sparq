@@ -50,16 +50,21 @@ const VOID_NS: &str = "http://rdfs.org/ns/void#";
 const DCTERMS_NS: &str = "http://purl.org/dc/terms/";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
-/// The W3C IRIs for the SPARQL query languages the engine accepts (advertised via
-/// `sd:supportedLanguage`). The engine evaluates SPARQL 1.1 Query; UPDATE is also supported
-/// on the protocol's write path, so both are advertised.
-const SD_LANGUAGES: &[&str] = &[
-    "http://www.w3.org/ns/sparql-service-description#SPARQL11Query",
-    "http://www.w3.org/ns/sparql-service-description#SPARQL11Update",
-];
+/// `sd:SPARQL11Query` — the SPARQL 1.1 Query language the engine evaluates.
+const SD_SPARQL11_QUERY: &str = "http://www.w3.org/ns/sparql-service-description#SPARQL11Query";
+/// `sd:SPARQL11Update` — the SPARQL 1.1 Update language the protocol's write path executes.
+const SD_SPARQL11_UPDATE: &str = "http://www.w3.org/ns/sparql-service-description#SPARQL11Update";
+
+/// [OPUS-4.8] sq-qfcb: `sd:BasicFederatedQuery` — the SPARQL 1.1 Federated Query feature
+/// (the `SERVICE` clause). Advertised ONLY when the server is built with the `service`
+/// cargo feature (the engine's `SERVICE` evaluation is compiled in); without it a `SERVICE`
+/// clause errors at execution, so advertising the feature would be a fiction. See
+/// [`Capabilities::federated_query`].
+const SD_BASIC_FEDERATED_QUERY: &str =
+    "http://www.w3.org/ns/sparql-service-description#BasicFederatedQuery";
 
 /// The W3C media-type IRIs (`<https://www.w3.org/ns/formats/...>`) for the result/RDF
-/// serialisations the server can return, advertised via `sd:resultFormat`. These mirror the
+/// serialisations the server can RETURN, advertised via `sd:resultFormat`. These mirror the
 /// formats [`crate::negotiate`] produces (SELECT/ASK results + CONSTRUCT/DESCRIBE graphs).
 const SD_RESULT_FORMATS: &[&str] = &[
     // SPARQL results
@@ -68,6 +73,18 @@ const SD_RESULT_FORMATS: &[&str] = &[
     "http://www.w3.org/ns/formats/SPARQL_Results_CSV",
     "http://www.w3.org/ns/formats/SPARQL_Results_TSV",
     // RDF graph serialisations (CONSTRUCT / DESCRIBE / GSP read)
+    "http://www.w3.org/ns/formats/Turtle",
+    "http://www.w3.org/ns/formats/N-Triples",
+    "http://www.w3.org/ns/formats/RDF_XML",
+];
+
+/// [OPUS-4.8] sq-qfcb: the W3C media-type IRIs for the RDF serialisations the server can
+/// PARSE on the way IN — the Graph-Store-Protocol write surface and `LOAD` accept these.
+/// Advertised via `sd:inputFormat`. The server parses Turtle / N-Triples / RDF-XML (the same
+/// three [`crate::negotiate::GraphFormat`]s it serialises), so input and result RDF formats
+/// coincide here, but they are kept as a separate list because the SD distinguishes the two
+/// and a future asymmetry (e.g. parse-only or write-only formats) must not silently drift.
+const SD_INPUT_FORMATS: &[&str] = &[
     "http://www.w3.org/ns/formats/Turtle",
     "http://www.w3.org/ns/formats/N-Triples",
     "http://www.w3.org/ns/formats/RDF_XML",
@@ -101,10 +118,13 @@ fn negotiate_descriptor(accept: Option<&str>) -> GraphFormat {
 /// `*/*`, `*/*;q=0.8`, `*/* , */*;q=0.1` — all wildcard-only. A single concrete type
 /// anywhere (e.g. `text/turtle, */*`) makes it non-wildcard so the client preference wins.
 fn is_wildcard_only(accept: &str) -> bool {
-    accept.split(',').filter(|r| !r.trim().is_empty()).all(|range| {
-        // Strip parameters (`;q=…`, `;charset=…`) and compare the media range itself.
-        range.split(';').next().unwrap_or("").trim() == "*/*"
-    })
+    accept
+        .split(',')
+        .filter(|r| !r.trim().is_empty())
+        .all(|range| {
+            // Strip parameters (`;q=…`, `;charset=…`) and compare the media range itself.
+            range.split(';').next().unwrap_or("").trim() == "*/*"
+        })
 }
 
 /// Serialises a triple list in the negotiated [`GraphFormat`], reusing the crate's graph
@@ -157,6 +177,34 @@ pub fn void_descriptor(
     Ok(Descriptor { content_type, body })
 }
 
+/// [OPUS-4.8] sq-qfcb: the server's ACTUAL, build-and-config-determined capabilities, so the
+/// Service Description advertises exactly what this binary can do — never a hard-coded fiction.
+///
+/// Every field reflects a genuine capability the running server has:
+///
+///   * `update` — whether the server will EXECUTE a SPARQL Update. The protocol write path is
+///     always compiled in, but the operator can make the surface effectively read-only (the
+///     [`auth_token`](crate::ServerConfig::auth_token) write gate). We advertise
+///     `sd:SPARQL11Update` only when an anonymous client could actually run an update — i.e.
+///     no write-token is configured. When a write-token gates updates, an unauthenticated SD
+///     reader cannot use Update, so advertising it would over-promise; the operator who holds
+///     the token knows it is available.
+///   * `federated_query` — `true` only with the `service` cargo feature (engine `SERVICE`
+///     evaluation compiled in). Advertised as `sd:feature sd:BasicFederatedQuery`.
+///   * `extension_functions` — the IRIs of the extension functions ACTUALLY registered
+///     (the `geof:` GeoSPARQL set with the `geo` feature; empty otherwise), advertised one
+///     `sd:extensionFunction` each. Sourced from the live registry's
+///     [`iris`](sparq_engine::FunctionRegistry::iris) so it can never drift from what runs.
+#[derive(Debug, Clone, Default)]
+pub struct Capabilities {
+    /// Advertise `sd:SPARQL11Update` (an anonymous client can run an Update).
+    pub update: bool,
+    /// Advertise `sd:feature sd:BasicFederatedQuery` (the `SERVICE` clause is compiled in).
+    pub federated_query: bool,
+    /// `sd:extensionFunction` IRIs — exactly the functions the engine has registered.
+    pub extension_functions: Vec<String>,
+}
+
 /// Builds the SPARQL Service Description for the endpoint, serialised per `accept`.
 ///
 /// * `service_iri` names the `sd:Service` (conventionally the endpoint URL, e.g.
@@ -166,17 +214,22 @@ pub fn void_descriptor(
 ///   `sd:defaultDataset`'s `sd:defaultGraph` (typed as a `void:Dataset`) and via
 ///   `dcterms:source` to the VoID document, so a federation client can discover counts from
 ///   one descriptor and the capability profile from the other.
+/// * `caps` are the server's ACTUAL capabilities (see [`Capabilities`]) — every advertised
+///   feature/language/function reflects something this binary genuinely supports.
 ///
-/// The SD advertises: the endpoint, `sd:Service` typing, the supported query languages
-/// ([`SD_LANGUAGES`]), the supported result formats ([`SD_RESULT_FORMATS`]), and the default
-/// dataset/graph linked to the VoID dataset IRI.
+/// The SD advertises: the endpoint, `sd:Service` typing, the supported query language(s)
+/// (`sd:SPARQL11Query`, plus `sd:SPARQL11Update` when [`Capabilities::update`]), the supported
+/// result + input RDF formats ([`SD_RESULT_FORMATS`] / [`SD_INPUT_FORMATS`]), the federated-query
+/// feature when compiled in, the registered extension functions, and the default dataset/graph
+/// linked to the VoID dataset IRI.
 pub fn service_description(
     service_iri: &str,
     endpoint_iri: &str,
     dataset_iri: &str,
+    caps: &Capabilities,
     accept: Option<&str>,
 ) -> Result<Descriptor, String> {
-    let nt = sd_ntriples(service_iri, endpoint_iri, dataset_iri);
+    let nt = sd_ntriples(service_iri, endpoint_iri, dataset_iri, caps);
     let triples = parse_ntriples(&nt)?;
     let fmt = negotiate_descriptor(accept);
     let (content_type, body) = serialise(&triples, fmt);
@@ -186,7 +239,12 @@ pub fn service_description(
 /// Renders the Service Description as N-Triples (the syntactic subset every serialiser can
 /// re-emit). Hand-written rather than via a builder dependency — the SD is a small fixed
 /// shape, so a few `writeln!`s keep it dependency-free and auditable.
-fn sd_ntriples(service_iri: &str, endpoint_iri: &str, dataset_iri: &str) -> String {
+fn sd_ntriples(
+    service_iri: &str,
+    endpoint_iri: &str,
+    dataset_iri: &str,
+    caps: &Capabilities,
+) -> String {
     use std::fmt::Write as _;
     let sd = |local: &str| format!("{SD_NS}{local}");
     // oxrdf NamedNode Display is N-Triples-safe (escapes/brackets correctly). Use the
@@ -194,7 +252,9 @@ fn sd_ntriples(service_iri: &str, endpoint_iri: &str, dataset_iri: &str) -> Stri
     // derived from the request `Host` header, and although the HTTP layer now validates
     // the base IRI, we defend in depth here so an invalid IRI can never emit malformed
     // N-Triples (which would fail re-parse → a 500). An invalid value falls back to a
-    // fixed safe IRI rather than corrupting the document.
+    // fixed safe IRI rather than corrupting the document. The same checked constructor
+    // guards an extension-function IRI (sourced from the live registry, so always valid,
+    // but defended in depth all the same).
     const SAFE_IRI: &str = "http://localhost/invalid-iri";
     let iri = |s: &str| {
         oxrdf::NamedNode::new(s)
@@ -205,14 +265,56 @@ fn sd_ntriples(service_iri: &str, endpoint_iri: &str, dataset_iri: &str) -> Stri
     let svc = iri(service_iri);
     let mut out = String::new();
 
-    // ---- The sd:Service: typing, endpoint, supported languages, supported result formats.
+    // ---- The sd:Service: typing + endpoint.
     let _ = writeln!(out, "{svc} <{RDF_TYPE}> <{}> .", sd("Service"));
     let _ = writeln!(out, "{svc} <{}> {} .", sd("endpoint"), iri(endpoint_iri));
-    for lang in SD_LANGUAGES {
-        let _ = writeln!(out, "{svc} <{}> {} .", sd("supportedLanguage"), iri(lang));
+
+    // ---- Supported query language(s). SPARQL 1.1 Query is always supported; SPARQL 1.1
+    // Update is advertised only when an anonymous client can actually run one (no write gate).
+    let _ = writeln!(
+        out,
+        "{svc} <{}> {} .",
+        sd("supportedLanguage"),
+        iri(SD_SPARQL11_QUERY)
+    );
+    if caps.update {
+        let _ = writeln!(
+            out,
+            "{svc} <{}> {} .",
+            sd("supportedLanguage"),
+            iri(SD_SPARQL11_UPDATE)
+        );
     }
+
+    // ---- Result formats the server can RETURN, and input RDF formats it can PARSE.
     for f in SD_RESULT_FORMATS {
         let _ = writeln!(out, "{svc} <{}> {} .", sd("resultFormat"), iri(f));
+    }
+    for f in SD_INPUT_FORMATS {
+        let _ = writeln!(out, "{svc} <{}> {} .", sd("inputFormat"), iri(f));
+    }
+
+    // ---- sd:feature — only genuinely-compiled features. Federated query (the SERVICE
+    // clause) is the one this server gates on a cargo feature; advertise it only when on.
+    if caps.federated_query {
+        let _ = writeln!(
+            out,
+            "{svc} <{}> {} .",
+            sd("feature"),
+            iri(SD_BASIC_FEDERATED_QUERY)
+        );
+    }
+
+    // ---- sd:extensionFunction — EXACTLY the functions the engine has registered. Sorted so
+    // the document is deterministic regardless of the registry's hash-map iteration order.
+    let mut fns: Vec<&str> = caps
+        .extension_functions
+        .iter()
+        .map(String::as_str)
+        .collect();
+    fns.sort_unstable();
+    for f in fns {
+        let _ = writeln!(out, "{svc} <{}> {} .", sd("extensionFunction"), iri(f));
     }
 
     // ---- The default dataset (a blank node) → default graph → the VoID dataset.
@@ -347,9 +449,18 @@ mod tests {
             );
         }
         // A concrete type alongside a wildcard still honours the concrete preference.
-        let d = void_descriptor(&graph(), "http://host/ds", Some("application/n-triples, */*"))
-            .unwrap();
+        let d = void_descriptor(
+            &graph(),
+            "http://host/ds",
+            Some("application/n-triples, */*"),
+        )
+        .unwrap();
         assert_eq!(d.content_type, "application/n-triples; charset=utf-8");
+    }
+
+    /// A capability profile for tests: read-only, no federation, no extension functions.
+    fn read_only_caps() -> Capabilities {
+        Capabilities::default()
     }
 
     #[test]
@@ -361,6 +472,7 @@ mod tests {
             "http://bad host/sparql", // space ⇒ invalid IRI
             "http://bad host/sparql",
             "http://host/ds",
+            &read_only_caps(),
             Some("application/n-triples"),
         )
         .expect("invalid Host-derived IRI must fall back, not error/500");
@@ -378,6 +490,7 @@ mod tests {
             "http://host/sparql",
             "http://host/sparql",
             "http://host/.well-known/void#dataset",
+            &read_only_caps(),
             Some("application/n-triples"),
         )
         .unwrap();
@@ -387,11 +500,12 @@ mod tests {
         assert!(b.contains("<http://www.w3.org/ns/sparql-service-description#Service>"));
         assert!(b.contains("<http://www.w3.org/ns/sparql-service-description#endpoint>"));
         assert!(b.contains("<http://host/sparql>"));
-        // supportedLanguage SPARQL11Query.
+        // supportedLanguage SPARQL11Query (always).
         assert!(b.contains("SPARQL11Query"));
-        // a result format.
+        // result formats AND input formats.
         assert!(b.contains("SPARQL_Results_JSON"));
         assert!(b.contains("/formats/Turtle"));
+        assert!(b.contains("<http://www.w3.org/ns/sparql-service-description#inputFormat>"));
         // defaultDataset link + dcterms:source to the VoID document.
         assert!(b.contains("#defaultDataset"));
         assert!(b.contains("<http://purl.org/dc/terms/source>"));
@@ -399,12 +513,117 @@ mod tests {
     }
 
     #[test]
+    fn sd_update_language_is_conditional() {
+        // [OPUS-4.8] sq-qfcb: SPARQL11Update is advertised only when the server reports the
+        // update capability — never when an anonymous client cannot run an update.
+        let read_only = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &read_only_caps(),
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        assert!(
+            !read_only.body.contains("SPARQL11Update"),
+            "read-only profile must NOT advertise SPARQL11Update: {}",
+            read_only.body
+        );
+
+        let writable = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &Capabilities {
+                update: true,
+                ..Capabilities::default()
+            },
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        assert!(
+            writable.body.contains("SPARQL11Update"),
+            "writable profile must advertise SPARQL11Update: {}",
+            writable.body
+        );
+    }
+
+    #[test]
+    fn sd_federated_query_and_extension_functions_only_when_present() {
+        // [OPUS-4.8] sq-qfcb: BasicFederatedQuery and extension functions are advertised
+        // ONLY when the capability is genuinely present — honesty, not aspiration.
+        let absent = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &read_only_caps(),
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        assert!(
+            !absent.body.contains("BasicFederatedQuery"),
+            "{}",
+            absent.body
+        );
+        assert!(
+            !absent.body.contains("extensionFunction"),
+            "{}",
+            absent.body
+        );
+
+        let present = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &Capabilities {
+                update: false,
+                federated_query: true,
+                extension_functions: vec![
+                    "http://www.opengis.net/def/function/geosparql/distance".to_string()
+                ],
+            },
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        assert!(
+            present
+                .body
+                .contains("<http://www.w3.org/ns/sparql-service-description#BasicFederatedQuery>"),
+            "{}",
+            present.body
+        );
+        assert!(
+            present
+                .body
+                .contains("<http://www.w3.org/ns/sparql-service-description#extensionFunction>"),
+            "{}",
+            present.body
+        );
+        assert!(
+            present
+                .body
+                .contains("<http://www.opengis.net/def/function/geosparql/distance>"),
+            "{}",
+            present.body
+        );
+    }
+
+    #[test]
     fn sd_reparses_as_turtle() {
-        // Turtle serialisation must be well-formed (round-trips through oxttl).
+        // Turtle serialisation must be well-formed (round-trips through oxttl). Use the
+        // richest profile so every advertised triple shape is exercised.
         let d = service_description(
             "http://host/sparql",
             "http://host/sparql",
             "http://host/ds",
+            &Capabilities {
+                update: true,
+                federated_query: true,
+                extension_functions: vec![
+                    "http://www.opengis.net/def/function/geosparql/distance".to_string(),
+                    "http://www.opengis.net/def/function/geosparql/buffer".to_string(),
+                ],
+            },
             Some("text/turtle"),
         )
         .unwrap();

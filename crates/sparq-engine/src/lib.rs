@@ -127,6 +127,14 @@ impl FunctionRegistry {
         self.map.get(iri)
     }
 
+    /// [OPUS-4.8] sq-qfcb: iterates the IRIs of every registered extension function
+    /// (unspecified order). Lets a caller advertise EXACTLY the functions actually
+    /// installed (e.g. the SPARQL Service Description's `sd:extensionFunction`) without
+    /// hand-maintaining a parallel list that could drift from the registry.
+    pub fn iris(&self) -> impl Iterator<Item = &str> {
+        self.map.keys().map(String::as_str)
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }

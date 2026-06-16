@@ -241,6 +241,250 @@ async fn service_description_ntriples() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-qfcb: parse the SD as RDF and assert the MANDATORY structure +
+// that the advertised capabilities match what the server genuinely serves.
+// ---------------------------------------------------------------------------
+
+const SD: &str = "http://www.w3.org/ns/sparql-service-description#";
+const FMT: &str = "http://www.w3.org/ns/formats/";
+
+/// Fetches the SD as N-Triples and parses it into a `(subject, predicate, object)` triple
+/// vector (term Display strings), so a test can assert over the parsed graph rather than raw
+/// substrings. Asserts the body is well-formed RDF in the process.
+async fn fetch_sd_triples(base: &str) -> Vec<(String, String, String)> {
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .header("Accept", "application/n-triples")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    let mut out = Vec::new();
+    for t in oxttl::NTriplesParser::new().for_slice(body.as_bytes()) {
+        let t = t.expect("SD must be valid N-Triples (parse-and-assert, not substring)");
+        out.push((
+            t.subject.to_string(),
+            t.predicate.to_string(),
+            t.object.to_string(),
+        ));
+    }
+    assert!(!out.is_empty(), "SD must contain triples");
+    out
+}
+
+/// The set of object IRIs (Display, sans `<>`) for `(p)` on any subject of type `sd:Service`.
+fn objects_of(triples: &[(String, String, String)], predicate: &str) -> Vec<String> {
+    let pred = format!("<{predicate}>");
+    triples
+        .iter()
+        .filter(|(_, p, _)| *p == pred)
+        .map(|(_, _, o)| o.trim_matches(|c| c == '<' || c == '>').to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn sd_parses_and_carries_mandatory_terms() {
+    let base = spawn(true).await;
+    let triples = fetch_sd_triples(&base).await;
+
+    // There is exactly one sd:Service, typed as such, with an sd:endpoint.
+    let rdf_type = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>";
+    let service_subjects: Vec<&String> = triples
+        .iter()
+        .filter(|(_, p, o)| p == rdf_type && *o == format!("<{SD}Service>"))
+        .map(|(s, _, _)| s)
+        .collect();
+    assert_eq!(
+        service_subjects.len(),
+        1,
+        "exactly one sd:Service: {triples:?}"
+    );
+
+    let endpoints = objects_of(&triples, &format!("{SD}endpoint"));
+    assert_eq!(endpoints.len(), 1, "exactly one sd:endpoint");
+    assert!(
+        endpoints[0].ends_with("/sparql"),
+        "endpoint is this /sparql: {}",
+        endpoints[0]
+    );
+
+    // sd:supportedLanguage includes SPARQL11Query (always).
+    let langs = objects_of(&triples, &format!("{SD}supportedLanguage"));
+    assert!(
+        langs.contains(&format!("{SD}SPARQL11Query")),
+        "SPARQL11Query advertised: {langs:?}"
+    );
+
+    // sd:resultFormat advertises the four SPARQL-results serialisations + the three RDF ones.
+    let result_formats = objects_of(&triples, &format!("{SD}resultFormat"));
+    for f in [
+        "SPARQL_Results_JSON",
+        "SPARQL_Results_XML",
+        "SPARQL_Results_CSV",
+        "SPARQL_Results_TSV",
+        "Turtle",
+        "N-Triples",
+        "RDF_XML",
+    ] {
+        assert!(
+            result_formats.contains(&format!("{FMT}{f}")),
+            "result format {f} advertised: {result_formats:?}"
+        );
+    }
+    // sd:inputFormat advertises the RDF serialisations the GSP write path parses.
+    let input_formats = objects_of(&triples, &format!("{SD}inputFormat"));
+    for f in ["Turtle", "N-Triples", "RDF_XML"] {
+        assert!(
+            input_formats.contains(&format!("{FMT}{f}")),
+            "input format {f} advertised: {input_formats:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sd_advertised_result_formats_match_what_server_serves() {
+    // [OPUS-4.8] sq-qfcb: HONEST advertising — for every SPARQL-results format the SD
+    // advertises, a real SELECT with the matching Accept header must come back in that
+    // format's Content-Type. (If the SD over-promised, this would fail.)
+    let base = spawn(true).await;
+    let triples = fetch_sd_triples(&base).await;
+    let result_formats = objects_of(&triples, &format!("{SD}resultFormat"));
+
+    let pairs = [
+        ("SPARQL_Results_JSON", "application/sparql-results+json"),
+        ("SPARQL_Results_XML", "application/sparql-results+xml"),
+        ("SPARQL_Results_CSV", "text/csv"),
+        ("SPARQL_Results_TSV", "text/tab-separated-values"),
+    ];
+    for (fmt_iri, accept) in pairs {
+        assert!(
+            result_formats.contains(&format!("{FMT}{fmt_iri}")),
+            "{fmt_iri} must be advertised"
+        );
+        let resp = client()
+            .get(format!("{base}/sparql"))
+            .query(&[("query", "SELECT ?s WHERE { ?s a <http://ex/Person> }")])
+            .header("Accept", accept)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "format {fmt_iri}");
+        let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
+        assert!(
+            ct.starts_with(accept),
+            "advertised {fmt_iri} but Accept {accept} returned Content-Type {ct}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sd_update_language_suppressed_when_write_gated() {
+    // [OPUS-4.8] sq-qfcb: when a write-token gates the write surface, an anonymous client
+    // CANNOT run an Update, so the SD must NOT advertise sd:SPARQL11Update.
+    let graph = Graph::load_str(DATA, "turtle").unwrap();
+    let config = ServerConfig {
+        federation_descriptors: true,
+        auth_token: Some("s3cret".to_string()),
+        ..ServerConfig::default()
+    };
+    let app = router(AppState::with_config(graph, config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+
+    let triples = fetch_sd_triples(&base).await;
+    let langs = objects_of(&triples, &format!("{SD}supportedLanguage"));
+    assert!(
+        langs.contains(&format!("{SD}SPARQL11Query")),
+        "Query still advertised: {langs:?}"
+    );
+    assert!(
+        !langs.contains(&format!("{SD}SPARQL11Update")),
+        "Update must NOT be advertised when write-gated: {langs:?}"
+    );
+}
+
+#[tokio::test]
+async fn sd_update_language_advertised_when_open() {
+    // The default (no write token) server lets anyone Update, so it advertises SPARQL11Update.
+    let base = spawn(true).await;
+    let triples = fetch_sd_triples(&base).await;
+    let langs = objects_of(&triples, &format!("{SD}supportedLanguage"));
+    assert!(
+        langs.contains(&format!("{SD}SPARQL11Update")),
+        "open server must advertise SPARQL11Update: {langs:?}"
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "geo")]
+async fn sd_advertises_registered_geo_extension_functions() {
+    // [OPUS-4.8] sq-qfcb: with the `geo` feature, the SD must advertise EXACTLY the geof:
+    // functions the engine actually registered — sourced from the live registry, so the
+    // advertisement cannot drift from what runs. Spot-check a few real ones.
+    let base = spawn(true).await;
+    let triples = fetch_sd_triples(&base).await;
+    let fns = objects_of(&triples, &format!("{SD}extensionFunction"));
+    let registered: Vec<String> = sparq_geo::geof_registry()
+        .iris()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !registered.is_empty(),
+        "geo registry must register functions"
+    );
+    // Every advertised function is genuinely registered (no fabrication)...
+    for f in &fns {
+        assert!(
+            registered.contains(f),
+            "advertised extension function {f} is NOT in the live registry"
+        );
+    }
+    // ...and every registered function is advertised (no omission).
+    for f in &registered {
+        assert!(
+            fns.contains(f),
+            "registered function {f} was NOT advertised in the SD"
+        );
+    }
+    assert!(fns
+        .iter()
+        .any(|f| f == "http://www.opengis.net/def/function/geosparql/distance"));
+}
+
+#[tokio::test]
+#[cfg(feature = "service")]
+async fn sd_advertises_basic_federated_query_when_service_feature_on() {
+    // [OPUS-4.8] sq-qfcb: with the `service` feature the SERVICE clause is compiled in, so
+    // the SD honestly advertises sd:feature sd:BasicFederatedQuery.
+    let base = spawn(true).await;
+    let triples = fetch_sd_triples(&base).await;
+    let features = objects_of(&triples, &format!("{SD}feature"));
+    assert!(
+        features.contains(&format!("{SD}BasicFederatedQuery")),
+        "service feature on => BasicFederatedQuery advertised: {features:?}"
+    );
+}
+
+#[tokio::test]
+#[cfg(not(feature = "service"))]
+async fn sd_omits_basic_federated_query_without_service_feature() {
+    // Without the `service` feature a SERVICE clause errors at execution, so advertising the
+    // feature would be a fiction — it must be absent.
+    let base = spawn(true).await;
+    let triples = fetch_sd_triples(&base).await;
+    let features = objects_of(&triples, &format!("{SD}feature"));
+    assert!(
+        !features.contains(&format!("{SD}BasicFederatedQuery")),
+        "no service feature => BasicFederatedQuery must be absent: {features:?}"
+    );
+}
+
 #[tokio::test]
 async fn sparql_query_still_works_with_descriptors_on() {
     // The SD only intercepts the no-query GET; a real query is unaffected.
