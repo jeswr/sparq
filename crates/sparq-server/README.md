@@ -248,9 +248,17 @@ matrix under "Security posture".
   `GET /.well-known/void` and a [SPARQL 1.1 Service Description](https://www.w3.org/TR/sparql11-service-description/)
   for a `GET /sparql` with no `query`. Content-negotiated RDF. See the SKILL's "Federation
   discovery" section.
+- **Triple Pattern Fragments / LDF source** — opt-in (`tpf` feature + `--tpf` flag, both off by
+  default; read-only): a paged [Triple Pattern Fragments](https://www.hydra-cg.com/spec/latest/triple-pattern-fragments/)
+  / [Linked Data Fragments](http://linkeddatafragments.org/) endpoint at
+  `GET /tpf?subject=&predicate=&object=` that lets a TPF client drive a join cheaply against this
+  server. Each page carries Hydra controls (`hydra:totalItems` from the engine's cheap cardinality
+  estimate, `hydra:next`/`hydra:previous` paging, the `hydra:search` template). Content-negotiated
+  RDF (Turtle default). See the SKILL's "Triple Pattern Fragments" section.
 - **Opt-in features** — `time-travel` (`?generation=N` snapshot pinning), `geo` (sparq-geo
   `geof:` functions), `service` (SERVICE federation, default-deny), `federation-descriptors`
-  (VoID + Service Description discovery endpoints — see "Federation discovery"), `zlib-ng`
+  (VoID + Service Description discovery endpoints — see "Federation discovery"), `tpf` (Triple
+  Pattern Fragments / LDF source endpoint — see "Triple Pattern Fragments / LDF source"), `zlib-ng`
   (native-only faster zlib-ng C backend for `Content-Encoding: gzip` request inflate; off by
   default, pure-Rust `miniz_oxide` otherwise; never in the wasm build).
 

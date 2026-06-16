@@ -354,6 +354,39 @@ curl http://127.0.0.1:3030/.well-known/void                         # VoID (Turt
 curl -H 'Accept: application/n-triples' http://127.0.0.1:3030/sparql # Service Description (no query)
 ```
 
+**5d. Triple Pattern Fragments / LDF source endpoint (OPT-IN, `sq-bzh1`).** A server can expose
+itself as a low-cost [Linked Data Fragments](http://linkeddatafragments.org/) /
+[Triple Pattern Fragments](https://www.hydra-cg.com/spec/latest/triple-pattern-fragments/)
+**source** that a TPF client (Comunica / the LDF client) drives a join against — far cheaper per
+request than a full SPARQL endpoint:
+
+- `GET /tpf?subject=&predicate=&object=` — a **paged** RDF fragment of the triples matching one
+  triple pattern. Each of `subject` / `predicate` / `object` is an **N-Triples term**
+  (`<iri>`, `"lit"`, `"lit"@en`, `"lit"^^<dt>`); an absent / empty parameter is a variable
+  (unbound). `page=N` (0-based) selects the page; the page size is bounded (default 100).
+- The fragment carries **Hydra controls**: `hydra:totalItems` / `void:triples` (the matched-triple
+  count, reusing the engine's cheap cardinality **estimate** — NOT a full scan),
+  `hydra:itemsPerPage`, `hydra:next` / `hydra:previous` paging controls (present only when a
+  next / previous page exists), and a `hydra:search` / `hydra:template` /`hydra:mapping`
+  control describing the `{subject,predicate,object}` URI template so a generic client can
+  request any other pattern.
+
+**Double opt-in**, OFF by default and **READ-only** (no write path): compiled only with the `tpf`
+cargo feature **and** served only when `--tpf` / `SPARQ_TPF=1` is also set (mirrors
+`federation-descriptors`). Without the feature, zero cost (no route); with the feature but not
+the flag, `/tpf` is `404`. Content-negotiates `Accept: text/turtle` (default) /
+`application/n-triples` / `application/rdf+xml`; reads are gated by `--auth-token-read` like any
+GET. The fragment/dataset/template IRIs self-describe the `Host` the client used.
+
+```sh
+cargo run -p sparq-server --features tpf -- data.ttl --tpf
+# all triples with predicate ex:knows, page 0 (Turtle by default)
+curl 'http://127.0.0.1:3030/tpf?predicate=%3Chttp%3A%2F%2Fex%2Fknows%3E'
+# a fully-bound pattern, as N-Triples
+curl -H 'Accept: application/n-triples' \
+  'http://127.0.0.1:3030/tpf?subject=%3Chttp%3A%2F%2Fex%2Falice%3E&predicate=%3Chttp%3A%2F%2Fex%2Fknows%3E'
+```
+
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
 env overrides the default.
 
@@ -376,6 +409,7 @@ env overrides the default.
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
+| `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, Hydra controls, read-only) — see "Triple Pattern Fragments" |
 | `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |
 
 In a library: `AppState::with_config(graph, ServerConfig { max_concurrent: 64, ..Default::default() })`
