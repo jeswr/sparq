@@ -233,8 +233,10 @@ run it with `query_over` / `query_over_with_budget`. This is a **source rewrite 
 (it does NOT change the vendored `spargebra` parser): `query_over` lifts each `(FN() OVER (…) AS ?out)`
 item out of the projection, runs the window-stripped SELECT through the ordinary engine, applies the
 programmatic pass above, then reprojects. **Covered subset:** `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`
-(case-insensitive), `PARTITION BY ?v …`, `ORDER BY` over projected variables in both `DESC(?v)` and
-`?v DESC` spellings, multiple window columns, and `SELECT *`. A query with no `OVER` clause is run
+(case-insensitive), `PARTITION BY ?v …`, `ORDER BY` over projected variables **or computed expressions**
+(sq-c1jv) — e.g. `ORDER BY (?a + ?b)`, `DESC(?sales + 0)`, `STRLEN(?s)`; each expression is bound to a
+fresh helper var in the rewritten inner SELECT and dropped from the output — in both `DESC(…)` and
+`… DESC` spellings, multiple window columns, and `SELECT *`. A query with no `OVER` clause is run
 unchanged (so `query_over` is a strict superset of `query` for non-window queries):
 
 ```rust
@@ -248,9 +250,10 @@ let r = sparq_engine::query_over(&g,
 **Inline-OVER caveats (HONEST):** the `OVER` surface is a sparq extension, not W3C SPARQL, recognised
 ONLY on the `query_over` entry point (a `(… OVER …)` clause is still a parse error on `query`/the
 standard surface). The function call must be empty (`ROW_NUMBER()`), the `AS ?out` alias is required,
-and `ORDER BY` keys must be projected variables. **Deferred (programmatic API only, beaded):** inline
-windowed AGGREGATES (`SUM(?x) OVER (…)`), explicit frames (`ROWS BETWEEN …`), `LAG`/`LEAD`/`NTILE`, a
-named `WINDOW` clause, and ordering by a computed expression.
+`ORDER BY` keys may be projected variables OR computed expressions (sq-c1jv) but `PARTITION BY` keys must
+be projected variables. **Deferred (programmatic API only, beaded):** inline windowed AGGREGATES
+(`SUM(?x) OVER (…)`), explicit frames (`ROWS BETWEEN …`), `LAG`/`LEAD`/`NTILE`, a named `WINDOW` clause,
+and `PARTITION BY` over a computed expression.
 
 **Budgets / timeouts / ASK-style early exit** — a `QueryBudget` is checked cooperatively at coarse
 sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"`:
