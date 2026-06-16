@@ -430,10 +430,45 @@ request than a full SPARQL endpoint:
   (unbound). `page=N` (0-based) selects the page; the page size is bounded (default 100).
 - The fragment carries **Hydra controls**: `hydra:totalItems` / `void:triples` (the matched-triple
   count, reusing the engine's cheap cardinality **estimate** — NOT a full scan),
-  `hydra:itemsPerPage`, `hydra:next` / `hydra:previous` paging controls (present only when a
-  next / previous page exists), and a `hydra:search` / `hydra:template` /`hydra:mapping`
-  control describing the `{subject,predicate,object}` URI template so a generic client can
-  request any other pattern.
+  `hydra:itemsPerPage`, the full `PartialCollectionView` paging vocabulary —
+  `hydra:next` / `hydra:previous` (present only when a next / previous page exists) plus
+  `hydra:first` / `hydra:last` (emitted on EVERY page so a client can jump to either end of the
+  view from anywhere; `first` is always page 0, `last` is the page holding the final match —
+  derived from the same estimate as `totalItems`/`next`) — and a `hydra:search` / `hydra:template`
+  / `hydra:mapping` control describing the `{subject,predicate,object}` URI template so a generic
+  client can request any other pattern.
+
+**5d-bis. brTPF — bind-restricted Triple Pattern Fragments (OPT-IN, `sq-dxhb`; feature `brtpf`,
+implies `tpf`).** brTPF ([Hartig & Buil-Aranda, ODBASE 2016](http://olafhartig.de/files/HartigBuilAranda_ODBASE2016_Preprint.pdf))
+extends the SAME `/tpf` endpoint so a client can attach a **set of solution mappings** and the
+server returns only the page of pattern matches COMPATIBLE WITH AT LEAST ONE supplied binding —
+pushing a bind-join's semi-join down to the source, so far less data crosses the wire than
+re-fetching the whole pattern once per binding.
+
+- The binding set rides the `values` query parameter (`GET`) or — preferred for a large set —
+  the request **body** of a `POST /tpf`. The wire format is one mapping per line; within a line,
+  whitespace-separated `position=term` pairs where `position` is `subject`/`predicate`/`object`
+  (or short `s`/`p`/`o`) and `term` is the SAME N-Triples-term grammar as the pattern parameters
+  (e.g. `s=<http://ex/alice>`). A blank line / empty payload is the no-restriction (plain-TPF)
+  case; a malformed payload is a sanitized `400` (the offending input is NOT echoed).
+- The fragment is the **deduplicated union** of each mapping's specialised-pattern matches.
+  `hydra:totalItems` and the paging window reflect the bindings-RESTRICTED result, not the
+  unrestricted pattern, and the `hydra:search` control advertises an extra `hydra:mapping` for the
+  `values` variable so a client discovers the dataset accepts a restriction.
+- A `tpf`-only build is **byte-identical** to before: the `values` parsing + the `POST` route are
+  `#[cfg]`-stripped, so a stray `values` parameter is just an ignored unknown parameter (plain
+  TPF). Still governed by the same `--tpf` runtime flag and read-auth (`POST /tpf` is a READ — it
+  returns a fragment, it never writes).
+
+```sh
+cargo run -p sparq-server --features brtpf -- data.ttl --tpf
+# restrict `?s ex:knows ?o` to a single subject via the `values` parameter
+curl 'http://127.0.0.1:3030/tpf?predicate=%3Chttp%3A%2F%2Fex%2Fknows%3E&values=s%3D%3Chttp%3A%2F%2Fex%2Fcarol%3E'
+# a larger binding set in a POST body (one `position=term` mapping per line)
+curl -X POST -H 'Accept: application/n-triples' \
+  --data $'s=<http://ex/alice>\ns=<http://ex/carol>' \
+  'http://127.0.0.1:3030/tpf?predicate=%3Chttp%3A%2F%2Fex%2Fknows%3E'
+```
 
 **Double opt-in**, OFF by default and **READ-only** (no write path): compiled only with the `tpf`
 cargo feature **and** served only when `--tpf` / `SPARQ_TPF=1` is also set (mirrors
@@ -474,7 +509,7 @@ env overrides the default.
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
-| `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, Hydra controls, read-only) — see "Triple Pattern Fragments" |
+| `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, full Hydra paging incl. `first`/`last`, read-only); same flag also serves brTPF bind-restricted fragments (`values` param / `POST` body) when built with the `brtpf` feature — see "Triple Pattern Fragments" |
 | `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |
 | `--access-audit <file\|stderr>` | `SPARQ_ACCESS_AUDIT` | off | (feature `access-audit`) richer **structured access-audit sink** (typed JSON-Lines: actor / action / resource / decision+basis / ts / fingerprint) — see "Structured access-audit sink" |
 

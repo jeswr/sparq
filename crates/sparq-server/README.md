@@ -355,9 +355,20 @@ matrix under "Security posture".
   default; read-only): a paged [Triple Pattern Fragments](https://www.hydra-cg.com/spec/latest/triple-pattern-fragments/)
   / [Linked Data Fragments](http://linkeddatafragments.org/) endpoint at
   `GET /tpf?subject=&predicate=&object=` that lets a TPF client drive a join cheaply against this
-  server. Each page carries Hydra controls (`hydra:totalItems` from the engine's cheap cardinality
-  estimate, `hydra:next`/`hydra:previous` paging, the `hydra:search` template). Content-negotiated
-  RDF (Turtle default). See the SKILL's "Triple Pattern Fragments" section.
+  server. Each page carries the full Hydra `PartialCollectionView` paging vocabulary
+  (`hydra:totalItems` from the engine's cheap cardinality estimate, plus
+  `hydra:first`/`hydra:previous`/`hydra:next`/`hydra:last` — `first`/`last` on every page so a
+  client can jump to either end of the view) and the `hydra:search` template. Content-negotiated
+  RDF (Turtle default). With the additional `brtpf` feature the SAME endpoint also speaks
+  **bind-restricted Triple Pattern Fragments (brTPF — Hartig & Buil-Aranda, ODBASE 2016)**: a
+  client attaches a set of solution mappings (the `values` query parameter, or — for a large set —
+  a `POST` body of one `position=term` mapping per line) and the server returns only the page of
+  matches COMPATIBLE WITH AT LEAST ONE supplied binding, pushing a bind-join's semi-join down to
+  the source so far less data crosses the wire than re-fetching the whole pattern per binding. The
+  fragment advertises the restriction through an extra `hydra:mapping` for the `values` variable,
+  and `hydra:totalItems` reflects the bindings-restricted result (not the unrestricted pattern). A
+  `tpf`-only build is byte-identical to before (a stray `values` parameter is just an ignored
+  unknown parameter — plain TPF). See the SKILL's "Triple Pattern Fragments" section.
 - **Access-audit trails** — opt-in, off by default: `audit-log` (flat `tracing` event per request)
   and `access-audit` (richer typed JSON-Lines records via a pluggable sink — actor / action /
   resource / decision+basis / timestamp / fingerprint, hooked at the real enforcement seam).
@@ -366,7 +377,8 @@ matrix under "Security posture".
 - **Opt-in features** — `time-travel` (`?generation=N` snapshot pinning), `geo` (sparq-geo
   `geof:` functions), `service` (SERVICE federation, default-deny), `federation-descriptors`
   (VoID + Service Description discovery endpoints — see "Federation discovery"), `tpf` (Triple
-  Pattern Fragments / LDF source endpoint — see "Triple Pattern Fragments / LDF source"),
+  Pattern Fragments / LDF source endpoint — see "Triple Pattern Fragments / LDF source"), `brtpf`
+  (implies `tpf`; bind-restricted Triple Pattern Fragments — the `values`/POST bindings extension),
   `audit-log` / `access-audit` (access-audit trails — see "Access-audit trails"), `zlib-ng`
   (native-only faster zlib-ng C backend for `Content-Encoding: gzip` request inflate; off by
   default, pure-Rust `miniz_oxide` otherwise; never in the wasm build).

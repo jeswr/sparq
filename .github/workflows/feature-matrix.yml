@@ -161,6 +161,28 @@ jobs:
             crate: sparq-server
             features: audit-log,federation-descriptors,service,time-travel,geo,test-seams
             test: true
+          # [OPUS-4.8] sq-dxhb: the Triple Pattern Fragments / Linked Data Fragments READ-ONLY
+          # source endpoint (`GET /tpf`). The handler + the Hydra paging vocabulary + the
+          # `tpf::evaluate` pager + the in-module `tpf` unit tests are all `#[cfg(feature =
+          # "tpf")]`, so the DEFAULT build never compiled, clippy'd or tested this code. This
+          # leg builds it, runs `clippy --all-targets -D warnings` with the feature ON (the real
+          # gate), and runs the crate's tests — which now include the gated `tpf` page/Hydra
+          # suites. `tpf` pulls `server`, so the full async server compiles under it.
+          - name: sparq-server (tpf)
+            crate: sparq-server
+            features: tpf
+            test: true
+          # [OPUS-4.8] sq-dxhb: bind-restricted Triple Pattern Fragments (brTPF). `brtpf` implies
+          # `tpf` and additionally compiles `tpf::evaluate_brtpf`, the `values`/POST bindings
+          # parser, the `merge_term`/`merge_predicate` semi-join pushdown and the extra
+          # `hydra:mapping` control — all `#[cfg(feature = "brtpf")]`. The in-module `brtpf` test
+          # mod (binding restriction, dedup union, empty-bindings==plain-TPF, page partitioning)
+          # is gated the same way, so it only runs when this feature is on. This leg is what
+          # actually compiles + clippies + tests the brTPF + Hydra-paging code the PR adds.
+          - name: sparq-server (brtpf)
+            crate: sparq-server
+            features: brtpf
+            test: true
           # sparq-vectors: the vec: magic predicates (pulls sparq-engine), and the
           # /v1/embeddings provider request/response shape (serde only, no socket).
           - name: sparq-vectors (vec-predicate, provider)

@@ -251,3 +251,135 @@ async fn malformed_term_does_not_echo_input() {
         "TPF term parse error echoed caller input: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-dxhb — Hydra first/last paging controls (the fuller paging vocabulary).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn fragment_carries_first_and_last_paging_controls() {
+    // page=1 over the default page size: every page links hydra:first (page 0) and hydra:last.
+    let base = spawn(true).await;
+    let resp = client()
+        .get(format!("{base}/tpf"))
+        .query(&[("page", "1")])
+        .header("Accept", "application/n-triples")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("hydra/core#first"),
+        "fragment must link hydra:first: {body}"
+    );
+    assert!(
+        body.contains("hydra/core#last"),
+        "fragment must link hydra:last: {body}"
+    );
+    // first → page 0; with 7 triples in one default page, last is also page 0.
+    assert!(body.contains("page=0"), "first/last should reference page 0: {body}");
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-dxhb — brTPF bindings-restricted fragments (only with the `brtpf` feature).
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "brtpf")]
+#[tokio::test]
+async fn brtpf_values_query_param_restricts_the_fragment() {
+    let base = spawn(true).await;
+    // ?s ex:knows ?o → alice→bob, carol→alice (2). Restrict via `values` to {?s=carol}: 1.
+    let resp = client()
+        .get(format!("{base}/tpf"))
+        .query(&[
+            ("predicate", "<http://ex/knows>"),
+            ("values", "s=<http://ex/carol>"),
+        ])
+        .header("Accept", "application/n-triples")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    // Only carol→alice, NOT alice→bob.
+    assert!(
+        body.contains("<http://ex/carol> <http://ex/knows> <http://ex/alice>"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob>"),
+        "the restriction must exclude the alice→bob triple: {body}"
+    );
+    // The bindings-restricted count is 1 (NOT the unrestricted 2).
+    assert!(body.contains("totalItems> \"1\""), "{body}");
+    // The brTPF `values` control is advertised in the Hydra search template/mapping.
+    assert!(body.contains("subject,predicate,object,values"), "{body}");
+    assert!(body.contains("brtpf#values"), "{body}");
+}
+
+#[cfg(feature = "brtpf")]
+#[tokio::test]
+async fn brtpf_post_body_carries_a_binding_set() {
+    let base = spawn(true).await;
+    // POST the binding set in the body (the conventional brTPF transport for a large set).
+    let resp = client()
+        .post(format!("{base}/tpf"))
+        .query(&[("predicate", "<http://ex/knows>")])
+        .header("Accept", "application/n-triples")
+        .body("s=<http://ex/alice>\ns=<http://ex/carol>")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    // Both knows triples (the union of the two bindings).
+    assert!(
+        body.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<http://ex/carol> <http://ex/knows> <http://ex/alice>"),
+        "{body}"
+    );
+    assert!(body.contains("totalItems> \"2\""), "{body}");
+}
+
+#[cfg(feature = "brtpf")]
+#[tokio::test]
+async fn brtpf_empty_values_is_plain_tpf() {
+    // An empty `values` ⇒ no restriction: identical to a plain TPF request (all knows triples).
+    let base = spawn(true).await;
+    let resp = client()
+        .get(format!("{base}/tpf"))
+        .query(&[("predicate", "<http://ex/knows>"), ("values", "")])
+        .header("Accept", "application/n-triples")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("totalItems> \"2\""), "unrestricted count: {body}");
+}
+
+#[cfg(feature = "brtpf")]
+#[tokio::test]
+async fn brtpf_malformed_bindings_is_400_and_no_echo() {
+    const SENTINEL: &str = "brtpf_secret_sentinel";
+    let base = spawn(true).await;
+    // A malformed term value carrying the sentinel — the parse error quotes it server-side, but
+    // the sanitized HTTP body must NOT echo it (same info-leak posture as the TPF term parse).
+    let resp = client()
+        .post(format!("{base}/tpf"))
+        .body(format!("s=not_a_valid_term_{SENTINEL}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.starts_with("{\"error\":"), "structured JSON error: {body}");
+    assert!(
+        !body.contains(SENTINEL),
+        "brTPF binding parse error echoed caller input: {body}"
+    );
+}
