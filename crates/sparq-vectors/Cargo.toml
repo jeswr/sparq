@@ -27,6 +27,16 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
+# [OPUS-4.8] sq-1wc1: predicate-constrained (filtered) ANN — the RDF-native vector
+# differentiator. A SPARQL BGP carves out a candidate dict-id set (the "visit mask") and the
+# nearest-neighbour search returns only neighbours inside it. OPT-IN and OFF by default; it is a
+# LEAN feature — it adds NO new dependency (the mask reuses the in-tree `rustc-hash` set) and pulls
+# in NEITHER the engine NOR any heavy crate, so the default `sparq-vectors` build (and the core
+# query path) carry zero filtered-ANN code. The feature gates `filter.rs` (the `IdMask` +
+# `FilterConfig` + exact pre-filter) and the `DiskAnnIndex::nearest_filtered*` traversal path. The
+# engine-side BGP → mask wiring is a separate, deferred bead (see sq-1wc1); this feature is the core
+# sparq-vectors filtered API.
+filtered-ann = []
 # [OPUS-4.8] sq-k6ex (epic sq-3183): the `vec:` magic predicates — vector KNN
 # search expressed INSIDE plain SPARQL, mirroring sparq-text's `text:` rewrite.
 # OPT-IN and OFF by default: only this feature pulls `sparq-engine` (+ spargebra)

@@ -651,6 +651,129 @@ impl DiskAnnIndex {
         working.into_iter().map(|c| (c.slot, 1.0 - c.dist / 2.0)).collect()
     }
 
+    /// [OPUS-4.8] (sq-1wc1) **Filtered** greedy beam search: traverse the Vamana graph
+    /// *predicate-agnostically* (expand through every neighbour, beam-truncated toward `query` —
+    /// exactly as [`search_slots`](Self::search_slots) does, so connectivity is preserved) but only
+    /// **accept** into the result the slots whose dictionary id passes `accept`. ACORN / NaviX-style
+    /// predicate-aware acceptance. Returns the `k` accepted slots closest to `query`, best first.
+    ///
+    /// `accept` is the slot→keep predicate (the caller closes over an [`IdMask`](crate::IdMask),
+    /// translating slot to id once per visited node). The traversal beam is `beam`; because accepted
+    /// nodes are a subset of visited nodes, the caller widens `beam` over the unfiltered default so
+    /// `k` accepted nodes can still be collected (see [`FilterConfig`](crate::FilterConfig)).
+    #[cfg(feature = "filtered-ann")]
+    fn search_slots_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        beam: usize,
+        accept: impl Fn(u32) -> bool,
+    ) -> Vec<(u32, f32)> {
+        if self.count == 0 {
+            return Vec::new();
+        }
+        let beam = beam.max(k).max(1);
+        // `working`: the traversal frontier (ALL nodes, mask-agnostic — drives expansion exactly as
+        // the unfiltered search, so the graph's short paths are kept). `accepted`: masked nodes seen
+        // so far, kept separately so a masked hit is never lost when the beam truncates it out.
+        let mut working: Vec<Cand> = Vec::with_capacity(beam + self.degree);
+        let mut accepted: Vec<Cand> = Vec::new();
+        let mut in_working = vec![false; self.count];
+        let mut expanded = vec![false; self.count];
+        let consider = |slot: u32, dist: f32, accepted: &mut Vec<Cand>| {
+            if accept(slot) {
+                accepted.push(Cand { dist, slot });
+            }
+        };
+        let start = self.medoid;
+        let start_d = sq_dist(query, self.node_vector(start));
+        working.push(Cand { dist: start_d, slot: start });
+        in_working[start as usize] = true;
+        consider(start, start_d, &mut accepted);
+        loop {
+            let next = working.iter().filter(|c| !expanded[c.slot as usize]).min().copied();
+            let Some(cur) = next else { break };
+            expanded[cur.slot as usize] = true;
+            let neighbours: Vec<u32> = self.node_neighbours(cur.slot).collect();
+            for nbr in neighbours {
+                if in_working[nbr as usize] {
+                    continue;
+                }
+                in_working[nbr as usize] = true;
+                let d = sq_dist(query, self.node_vector(nbr));
+                consider(nbr, d, &mut accepted);
+                working.push(Cand { dist: d, slot: nbr });
+            }
+            if working.len() > beam {
+                working.sort_unstable();
+                working.truncate(beam);
+            }
+        }
+        accepted.sort_unstable();
+        accepted.dedup_by_key(|c| c.slot);
+        accepted.truncate(k);
+        // d² over unit vectors → cosine: cos = 1 − d²/2.
+        accepted.into_iter().map(|c| (c.slot, 1.0 - c.dist / 2.0)).collect()
+    }
+
+    /// [OPUS-4.8] (sq-1wc1) **Predicate-constrained (filtered) approximate top-`k`**: like
+    /// [`nearest`](Self::nearest) but the result is restricted to ids the `mask` permits — the
+    /// RDF-native filtered-ANN path. The mask is the candidate id-set a SPARQL BGP selects (e.g.
+    /// `?node a :Car`); only neighbours in it are returned, while the traversal still hops through
+    /// non-matching nodes for connectivity.
+    ///
+    /// Strategy is chosen by the mask's **selectivity** ([`FilterConfig`](crate::FilterConfig)):
+    /// a *very selective* mask is served by an exact **pre-filter** scan over just the masked ids
+    /// (cheaper and exact than touching the whole graph), a *broad* mask by **filtered traversal**
+    /// of the Vamana graph. Both honour the mask; see the [`filter`](crate::filter) module docs and
+    /// `tests/filtered.rs` for the measured recall. Uses [`FilterConfig::default`]; for a custom
+    /// threshold/beam use [`nearest_filtered_with`](Self::nearest_filtered_with).
+    ///
+    /// An empty mask returns no results (the BGP matched nothing); an all-zero query returns no
+    /// results (same degenerate contract as [`nearest`](Self::nearest)).
+    #[cfg(feature = "filtered-ann")]
+    pub fn nearest_filtered(
+        &self,
+        query: &[f32],
+        mask: &crate::IdMask,
+        store: &VectorStore,
+        k: usize,
+    ) -> Vec<(Id, f32)> {
+        self.nearest_filtered_with(query, mask, store, k, crate::FilterConfig::default())
+    }
+
+    /// [OPUS-4.8] (sq-1wc1) [`nearest_filtered`](Self::nearest_filtered) with an explicit
+    /// [`FilterConfig`](crate::FilterConfig) (pre-filter ↔ traversal crossover and the traversal
+    /// beam factor). The `store` is needed for the pre-filter strategy (it scans the masked vectors
+    /// directly); for the traversal strategy it is unused, but the method takes it unconditionally so
+    /// the strategy choice stays an internal detail.
+    #[cfg(feature = "filtered-ann")]
+    pub fn nearest_filtered_with(
+        &self,
+        query: &[f32],
+        mask: &crate::IdMask,
+        store: &VectorStore,
+        k: usize,
+        cfg: crate::FilterConfig,
+    ) -> Vec<(Id, f32)> {
+        assert_eq!(query.len(), self.dim, "query dim {} != index dim {}", query.len(), self.dim);
+        if mask.is_empty() {
+            return Vec::new();
+        }
+        // Selective mask → exact pre-filter scan over just the masked ids (exact AND cheaper than
+        // walking the whole graph to accept a handful of nodes; also avoids a graph-connectivity
+        // miss to an isolated accepted node). Broad mask → filtered traversal.
+        if cfg.prefer_prefilter(mask.len(), self.count) {
+            return crate::filter::nearest_exact_filtered(store, query, mask, k);
+        }
+        let Some(q) = normalized(query) else { return Vec::new() };
+        let beam = (self.search_beam.max(k)) * cfg.traversal_beam_factor.max(1);
+        self.search_slots_filtered(&q, k, beam, |slot| mask.contains(self.node_id(slot)))
+            .into_iter()
+            .map(|(slot, cos)| (self.node_id(slot), cos))
+            .collect()
+    }
+
     /// Approximate top-`k` ids by cosine similarity to `query`, best first. An all-zero
     /// `query` returns no results (same contract as [`nearest_exact`](crate::ann::nearest_exact)
     /// and [`VectorIndex::nearest`](crate::ann::VectorIndex::nearest)).
