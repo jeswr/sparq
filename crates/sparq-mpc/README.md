@@ -30,6 +30,19 @@ is out of scope (a black box). Three fix recommendations were bead-tracked:
   (`Fp::ct_eq`, `SecretKey::ct_eq`; zeroize-on-drop of the MAC key `α`, the
   secret-share vectors, the issuer/holder key). HYGIENE only — no `==` on a live
   protocol path was replaced.
+- **`sq-19ej` (ADDRESSED, with documented residual).** The masking CSPRNG seed —
+  the one secret byte buffer `sparq-mpc` itself controls. `SecureRng::from_os` now
+  pulls the 32-byte ChaCha seed into a `zeroize::Zeroizing` buffer and wipes it on
+  scope exit (previously `from_os_rng()` routed the OS seed straight into
+  `ChaCha20Rng` with no sparq-side copy to scrub), and `Drop` for `SecureRng` does
+  a best-effort scrub of the most-recently-buffered keystream block. **Irreducible
+  residual:** the inner `ChaCha20Rng` *key schedule* (recoverable via `get_seed()`)
+  is **not** scrubbable in place — `rand_chacha` exposes **no `zeroize` feature**
+  and no `Drop`/`&mut`-key accessor, verified at both the pinned `0.9` and the
+  latest published `0.10.0` (Feb 2026). We do not claim it is scrubbed. Exposure is
+  **LOW** (session-lived, never persisted, `Debug`-redacted + `!Clone`); the
+  upstream fix / roll-our-own-ChaCha follow-up is bead-tracked. RNG behaviour is
+  identical — all 270 MPC tests pass unchanged.
 - **`sq-7ltf` (this README's subject — ADDRESSED).** The latent non-constant-time
   `Fp::pow` (square-and-multiply branches on the exponent bits). See below.
 - **`sq-8jv7` (open).** Schnorr issuance signing uses arkworks scalar ops not

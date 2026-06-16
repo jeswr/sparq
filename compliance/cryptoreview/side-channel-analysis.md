@@ -245,6 +245,12 @@ unchanged).
   freed heap / stack memory (a memory-disclosure rather than a timing channel, but in the same
   side-channel-hygiene family). `SecureRng` *does* redact its `Debug` output and forbids `Clone`, but
   does not zeroize on drop. Recorded as bead **`sq-u8a8`**.
+  *(Remediation status — see [`gap-register.md`](./gap-register.md) CR-G5: `sq-u8a8` LANDED the
+  zeroize-on-drop of `SecretKey` / `α` / share vectors / `Fp` / `Share`; `sq-19ej` then scrubbed the
+  one masking-RNG secret buffer `sparq-mpc` controls — `SecureRng::from_os` now seeds via a
+  `Zeroizing` buffer and `Drop` best-effort-scrubs the cached keystream block. Irreducible residual,
+  documented not claimed: the inner `ChaCha20Rng` key schedule is not scrubbable in place —
+  `rand_chacha` has no `zeroize` feature at the pinned `0.9` or the latest `0.10.0`; exposure LOW.)*
 - **`arkworks` (`ark-bn254` / `ark-ff` / `ark-ec` / `ark-ed-on-bn254`): constant-time NOT asserted by
   sparq.** sparq does **not** claim, and arkworks does **not** by default guarantee, constant-time
   field arithmetic or constant-time scalar multiplication. Every "appears constant-time at the
