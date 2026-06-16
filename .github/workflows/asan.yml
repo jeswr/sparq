@@ -1,0 +1,145 @@
+# asan — standalone AddressSanitizer lane over the mmap CORRUPTION CORPUS (bead sq-hybl,
+# epic sq-toze; closes memsafety gap MS-G3). [OPUS-4.8] authored while Fable unavailable —
+# re-review when Fable returns.
+#
+# WHY (the MS-G3 gap, from compliance/memsafety/gap-register.md): AddressSanitizer already
+# runs INSIDE the cargo-fuzz build (MS-9, fuzz.yml) — but only as deep as the libFuzzer
+# corpus reaches, and the DETERMINISTIC corruption corpus (the mmap_corruption_oracle, MS-7)
+# runs in ci.yml WITHOUT a sanitizer. So a heap out-of-bounds READ / use-after-free in the
+# mmap on-disk-format validators that the oracle's hand-built corrupt fixtures hit — but
+# whose memory error is INVISIBLE without instrumentation because the read lands inside the
+# same mmap page (no Rust panic, no Miri — Miri cannot run file-backed mappings at all,
+# miri.yml header) — would go undetected. This lane runs the deterministic corruption corpus
+# UNDER AddressSanitizer so any OOB/UAF/UB on a malformed on-disk file is caught.
+#
+# WHAT IT RUNS — the existing deterministic "mmap corruption corpus" (no new fixtures needed;
+# the corpus already exists as the oracle + the vector/diskann corruption-rejection tests):
+#   • crates/sparq-core/tests/mmap_corruption_oracle.rs (trust boundary B5): takes a VALID
+#     saved on-disk store and systematically TRUNCATES + BIT-FLIPS every on-disk section
+#     (header, offsets, length fields, the dict blob, the compressed-perm blocks), then opens
+#     + fully materialises the result — asserting it is always a clean `Err` or an in-bounds
+#     graph, NEVER a panic / OOB / abort. Run under --features mmap,dict-spill (the exact
+#     features Miri CANNOT run — see miri.yml). These corrupt-fixture constructors
+#     (corrupt_truncate / corrupt_flip / corruption_sweep) ARE the corruption corpus.
+#   • crates/sparq-vectors/tests/store.rs + diskann.rs: the VectorStore / DiskAnnIndex
+#     open-validation corpus — truncated files, wrong magic, oversized index lengths
+#     (open_rejects_corrupt_index, open_rejects_corrupt_and_wrong_magic, the truncation
+#     tests). These read their own mmap/on-disk format and are the sparq-vectors half of B5.
+#
+# HOW (the documented Rust ASan flow — https://github.com/rust-lang/rust/blob/master/src/doc/unstable-book/src/compiler-flags/sanitizer.md):
+#   RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target <host-gnu-triple>
+#   • -Zsanitizer=address  : instruments codegen with ASan (nightly-only, hence the nightly
+#                            toolchain + the schedule trigger, mirroring fuzz.yml / miri.yml).
+#   • -Zbuild-std          : REQUIRED — the prebuilt std is NOT sanitizer-instrumented, so std
+#                            code (incl. the slice bounds + the mmap byte reads via std) must
+#                            be rebuilt from source with the same -Zsanitizer flag. Needs the
+#                            `rust-src` component (installed below).
+#   • --target x86_64-unknown-linux-gnu : ASan needs an EXPLICIT target so -Zbuild-std kicks
+#                            in, and the GNU (dynamic-libc) triple — NOT musl, which ASan
+#                            rejects ("sanitizer is incompatible with statically linked
+#                            libc"), the same reason fuzz.yml pins the gnu target.
+#   ASAN_OPTIONS=detect_leaks=0 : LeakSanitizer (bundled with ASan) reports rayon's global
+#                            thread-pool daemon threads + the long-lived mmaps as "leaks" at
+#                            exit — a lifecycle artefact, not a defect (cf. miri.yml's
+#                            -Zmiri-ignore-leaks). We want the OOB/UAF signal, not leak noise;
+#                            ASan's heap-buffer-overflow / use-after-free detection is
+#                            unaffected by this.
+#
+# TRIGGER (deliberately OFF the per-PR critical path — like miri.yml + the nightly fuzz tier):
+# -Zbuild-std recompiles the whole standard library under ASan instrumentation, so a cold run
+# is many minutes; this is a NIGHTLY UB safety net, not a per-PR tax.
+#   • schedule (nightly) — the standing ASan safety net over the corruption corpus.
+#   • workflow_dispatch  — on demand.
+# There is intentionally NO pull_request / merge_group / push trigger, so this workflow
+# creates NO check-run on a PR head or merge-queue ref — the required `ci-summary / gate`
+# aggregator (which POLLS sibling check-runs on the head commit) therefore never discovers it
+# and never waits on it. This lane is INFORMATIONAL / NON-BLOCKING, exactly the
+# nightly-safety-net posture of miri.yml + the nightly fuzz tier. (It is ALSO belt-and-braces
+# named "…, informational" so that even if it were ever wired onto a PR ref it would be
+# excluded from the gate by the ci-summary `\b(advisory|informational)\b` name rule.)
+#
+# Third-party actions are pinned by full commit SHA (supply-chain hardening); the trailing
+# `# vX.Y.Z` comment is what Dependabot follows to bump the pin. Pins + the pinned nightly
+# date match miri.yml / fuzz.yml so a toolchain bump moves all three together.
+name: asan
+
+on:
+  workflow_dispatch:
+  # Nightly safety net at 05:41 UTC — offset from ci.yml (03:17), fuzz/zk-toolchain (04:23),
+  # and miri (05:11) so the heavy nightly lanes do not contend for the same runner window.
+  schedule:
+    - cron: "41 5 * * *"
+
+# Least-privilege: this lane only reads the repo + runs tests.
+permissions:
+  contents: read
+
+concurrency:
+  group: asan-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Build for the host GNU triple. ASan needs an explicit --target (so -Zbuild-std applies)
+  # and the GNU (dynamic-libc) triple — the musl static-libc target is ASan-incompatible (the
+  # same constraint fuzz.yml documents). On an x86_64 Linux runner this is also the host
+  # triple, so it is the cheapest to build.
+  ASAN_TARGET: x86_64-unknown-linux-gnu
+  # See the header. ASan codegen instrumentation; std rebuilt under the same flag via
+  # -Zbuild-std below.
+  RUSTFLAGS: "-Zsanitizer=address"
+  RUSTDOCFLAGS: "-Zsanitizer=address"
+  # LeakSanitizer noise from rayon's daemon threads + the long-lived mmaps is a lifecycle
+  # artefact, not a defect — silence it so the run fails only on a genuine OOB/UAF/UB.
+  ASAN_OPTIONS: "detect_leaks=0"
+
+jobs:
+  asan:
+    name: asan (mmap corruption corpus, informational)
+    runs-on: ubuntu-latest
+    # -Zbuild-std recompiles std under ASan from cold on the first run; the two test suites
+    # then run instrumented. Generous ceiling so a hung run fails with a clear timeout rather
+    # than running away (matches miri.yml's posture).
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # ASan via -Zsanitizer ships ONLY on nightly. Pin the nightly channel by DATE so the
+      # lane is reproducible and a future nightly regression cannot silently break it; bump
+      # the date deliberately (same pinned dtolnay action + nightly date as miri.yml /
+      # fuzz.yml). `rust-src` is REQUIRED: -Zbuild-std rebuilds the standard library from
+      # source under the same ASan instrumentation. The gnu target is installed so its std
+      # metadata is present (build-std still recompiles it under ASan).
+      - name: Install Rust (nightly, pinned) + rust-src
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly via toolchain input
+        with:
+          toolchain: nightly-2026-06-11
+          components: rust-src
+          targets: x86_64-unknown-linux-gnu
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # ASan uses a distinct instrumented target tree (different RUSTFLAGS + build-std);
+          # key the cache so it is not confused with the stable workspace build in ci.yml or
+          # the miri sysroot.
+          key: asan
+      # The sparq-core half of the corruption corpus: the deterministic
+      # mmap_corruption_oracle (truncate + bit-flip sweep over every on-disk section) under
+      # --features mmap,dict-spill — the exact B5 mmap surface Miri structurally cannot run.
+      # -Zbuild-std rebuilds std under ASan; --target makes that apply. A heap OOB / UAF / UB
+      # in the validators on a corrupt fixture fails the run with an ASan report.
+      - name: ASan — sparq-core mmap corruption oracle
+        run: |
+          cargo +nightly-2026-06-11 test -Zbuild-std \
+            --target "$ASAN_TARGET" \
+            -p sparq-core --features mmap,dict-spill \
+            --test mmap_corruption_oracle
+      # The sparq-vectors half: the VectorStore + DiskAnnIndex open-validation corpus
+      # (truncated files / wrong magic / oversized lengths). These read their own mmap/
+      # on-disk format and need no extra feature. Same ASan + build-std instrumentation.
+      - name: ASan — sparq-vectors store + diskann corruption corpus
+        run: |
+          cargo +nightly-2026-06-11 test -Zbuild-std \
+            --target "$ASAN_TARGET" \
+            -p sparq-vectors \
+            --test store --test diskann
