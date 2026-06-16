@@ -16,6 +16,17 @@
 use crate::dict::{Dict, Id};
 use std::borrow::Cow;
 
+/// [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Maximum nesting depth of RDF 1.2 triple terms
+/// `<<( s p o )>>` accepted by the byte-level N-Triples/N-Quads parser before it returns a
+/// clean parse error instead of recursing until the native stack overflows and aborts the
+/// process. `object_term`/`triple_term` (and the no-intern `span_object`/`span_triple_term`
+/// graph-scan mirror) recurse once per `<<(` nesting level on the OBJECT axis; an adversarial
+/// input such as `<<( <<( … )>> )>>` repeated 10k deep would otherwise blow the stack. The cap
+/// is far deeper than any real RDF-star data nests (triple-term nesting beyond a handful of
+/// levels is unheard of in practice) yet shallow enough to keep recursion within the stack.
+/// Kept in step with spargebra's `MAX_RECURSION_DEPTH` (the SPARQL side of the same control).
+const MAX_TRIPLE_TERM_DEPTH: usize = 128;
+
 /// [OPUS-4.8] (sq-25r3) The identity of an N-Quads quad's GRAPH field (4th term): an absolute
 /// IRI or a blank-node label, decoded (escapes resolved) so two byte-different-but-equal graph
 /// references route to the SAME graph. `None` (the default graph) is represented by the absence
@@ -188,8 +199,15 @@ fn span_term(b: &[u8], i: usize) -> Result<usize, String> {
 /// term `<<( … )>>`). Mirrors [`object_term`]'s grammar.
 #[cfg(feature = "parallel")]
 fn span_object(b: &[u8], i: usize) -> Result<usize, String> {
+    span_object_depth(b, i, 0)
+}
+
+/// [OPUS-4.8] (sq-53s1) `span_object` carrying the triple-term nesting `depth` so the no-intern
+/// graph-scan walk is bounded identically to the interning path (`object_term_depth`).
+#[cfg(feature = "parallel")]
+fn span_object_depth(b: &[u8], i: usize, depth: usize) -> Result<usize, String> {
     if b.get(i) == Some(&b'<') && b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') {
-        span_triple_term(b, i)
+        span_triple_term(b, i, depth)
     } else {
         span_term(b, i)
     }
@@ -198,13 +216,19 @@ fn span_object(b: &[u8], i: usize) -> Result<usize, String> {
 /// [OPUS-4.8] (sq-25r3) Index just past an RDF 1.2 triple term `<<( s p o )>>`, recursing through
 /// its nested object. Mirrors [`triple_term`].
 #[cfg(feature = "parallel")]
-fn span_triple_term(b: &[u8], i: usize) -> Result<usize, String> {
+fn span_triple_term(b: &[u8], i: usize, depth: usize) -> Result<usize, String> {
+    // [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Mirror the interning path's depth bound (`triple_term`).
+    if depth >= MAX_TRIPLE_TERM_DEPTH {
+        return Err(format!(
+            "N-Quads: RDF 1.2 triple term nested more than {MAX_TRIPLE_TERM_DEPTH} levels deep at byte {i}"
+        ));
+    }
     let mut j = skip_ws(b, i + 3);
     let k = span_term(b, j)?;
     j = skip_ws(b, k);
     let k = span_term(b, j)?;
     j = skip_ws(b, k);
-    let k = span_object(b, j)?;
+    let k = span_object_depth(b, j, depth + 1)?;
     j = skip_ws(b, k);
     if b.get(j) == Some(&b')') && b.get(j + 1) == Some(&b'>') && b.get(j + 2) == Some(&b'>') {
         Ok(j + 3)
@@ -317,8 +341,16 @@ fn term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
 /// N-Triples permits a triple term `<<( s p o )>>`. The `<<(` opener disambiguates a triple
 /// term from a plain IRIREF (`<…>`); anything else falls through to the shared [`term`] path.
 fn object_term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
+    object_term_depth(b, i, dict, 0)
+}
+
+/// [OPUS-4.8] (sq-53s1) `object_term` carrying the current triple-term nesting `depth` so a
+/// pathologically nested `<<( … )>>` chain returns a clean parse error at `MAX_TRIPLE_TERM_DEPTH`
+/// instead of overflowing the stack. `depth` is the number of `<<(` openers already entered above
+/// this call (0 at the top-level object position).
+fn object_term_depth(b: &[u8], i: usize, dict: &mut Dict, depth: usize) -> Result<(Id, usize), String> {
     if b.get(i) == Some(&b'<') && b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') {
-        triple_term(b, i, dict)
+        triple_term(b, i, dict, depth)
     } else {
         term(b, i, dict)
     }
@@ -330,14 +362,21 @@ fn object_term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), Strin
 /// so the two loaders content-address triple terms identically). The subject is an IRI or
 /// blank node, the predicate an IRI, and the object any term — including a NESTED triple term
 /// (recursion through `object_term`). Returns the interned id and the index past the `>>`.
-fn triple_term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
+fn triple_term(b: &[u8], i: usize, dict: &mut Dict, depth: usize) -> Result<(Id, usize), String> {
+    // [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Bound the triple-term nesting before recursing into the
+    // object, so deeply-nested input yields a clean parse error rather than a stack overflow.
+    if depth >= MAX_TRIPLE_TERM_DEPTH {
+        return Err(format!(
+            "N-Triples: RDF 1.2 triple term nested more than {MAX_TRIPLE_TERM_DEPTH} levels deep at byte {i}"
+        ));
+    }
     // Skip the `<<(` opener.
     let mut j = skip_ws(b, i + 3);
     let (s, k) = term(b, j, dict)?;
     j = skip_ws(b, k);
     let (p, k) = term(b, j, dict)?;
     j = skip_ws(b, k);
-    let (o, k) = object_term(b, j, dict)?;
+    let (o, k) = object_term_depth(b, j, dict, depth + 1)?;
     j = skip_ws(b, k);
     // Closer `)>>`.
     if b.get(j) == Some(&b')') && b.get(j + 1) == Some(&b'>') && b.get(j + 2) == Some(&b'>') {
@@ -584,6 +623,84 @@ mod tests {
         let obj = b"<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> .\n";
         let mut d = Dict::new();
         assert!(parse_chunk(obj, &mut d).is_ok(), "the same triple term in object position must parse");
+    }
+
+    // [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Builds one N-Triples line whose OBJECT is `depth` levels
+    // of nested RDF 1.2 triple terms `<<( s p <<( … )>> )>>`. Each level wraps the previous object
+    // in a fresh triple term; the innermost object is a plain IRI.
+    fn nested_triple_term_line(depth: usize) -> Vec<u8> {
+        let mut line = b"<http://ex/s> <http://ex/p> ".to_vec();
+        for _ in 0..depth {
+            line.extend_from_slice(b"<<( <http://ex/a> <http://ex/b> ");
+        }
+        line.extend_from_slice(b"<http://ex/leaf>");
+        for _ in 0..depth {
+            line.extend_from_slice(b" )>>");
+        }
+        line.extend_from_slice(b" .\n");
+        line
+    }
+
+    #[test]
+    fn deeply_nested_triple_term_returns_clean_error_not_stack_overflow() {
+        // 10k levels of `<<( … )>>` nesting must NOT recurse until the native stack overflows
+        // (which would abort the whole process); it must return a normal parse `Err`.
+        let line = nested_triple_term_line(10_000);
+        let mut d = Dict::new();
+        let e = parse_chunk(&line, &mut d).expect_err("deeply-nested triple terms must be rejected, not overflow the stack");
+        assert!(
+            e.contains("nested more than") && e.contains("levels deep"),
+            "must be the depth-limit error, got: {e}"
+        );
+        // Sanitized per the #241 posture: the error reports the limit and a byte offset, never
+        // echoes the (attacker-controlled) offending input.
+        assert!(!e.contains("http://ex/leaf"), "error must not echo the offending input");
+    }
+
+    #[test]
+    fn nested_triple_term_at_limit_parses() {
+        // One level below the cap must still parse cleanly — the bound is high enough that no
+        // real RDF-star data is rejected. `MAX_TRIPLE_TERM_DEPTH` is the number of `<<(` levels,
+        // so a line nested exactly `MAX_TRIPLE_TERM_DEPTH` deep is accepted.
+        let line = nested_triple_term_line(MAX_TRIPLE_TERM_DEPTH);
+        let mut d = Dict::new();
+        assert!(
+            parse_chunk(&line, &mut d).is_ok(),
+            "nesting up to the cap ({MAX_TRIPLE_TERM_DEPTH}) must parse"
+        );
+
+        // One level beyond the cap is the first rejected depth.
+        let over = nested_triple_term_line(MAX_TRIPLE_TERM_DEPTH + 1);
+        let mut d = Dict::new();
+        assert!(
+            parse_chunk(&over, &mut d).is_err(),
+            "nesting one beyond the cap must be rejected"
+        );
+    }
+
+    // [OPUS-4.8] (sq-53s1) The N-Quads fast path uses a separate no-intern span walk
+    // (`span_object`/`span_triple_term`) to locate the graph field; it must be bounded too.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn deeply_nested_triple_term_in_nquads_span_returns_clean_error() {
+        let mut line = b"<http://ex/s> <http://ex/p> ".to_vec();
+        for _ in 0..10_000 {
+            line.extend_from_slice(b"<<( <http://ex/a> <http://ex/b> ");
+        }
+        line.extend_from_slice(b"<http://ex/leaf>");
+        for _ in 0..10_000 {
+            line.extend_from_slice(b" )>>");
+        }
+        // N-Quads: explicit graph field after the object.
+        line.extend_from_slice(b" <http://ex/g> .\n");
+        let e = match parse_quads_chunk(&line) {
+            Err(e) => e,
+            Ok(_) => panic!("deeply-nested triple terms in N-Quads must be rejected, not overflow"),
+        };
+        assert!(
+            e.contains("nested more than") && e.contains("levels deep"),
+            "must be the depth-limit error, got: {e}"
+        );
     }
 }
 
