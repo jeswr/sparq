@@ -14,15 +14,55 @@ architecture, §6 phased build plan, §7 honest risks).
 > Model: Opus 4.8 (Fable unavailable — flag for re-review when Fable returns).
 > Bead **sq-s1uy** · epic **sq-dnko** / **sq-3183** (streaming federation client).
 
-## Phase 0 — what this is, and what it is NOT
+## What has landed, and what is still ahead
 
-This crate is currently the **Phase-0 skeleton** (design §6, Phase 0): a compiling
-crate that establishes the public module layout, the opt-in feature, and the
-dependency-boundary proof — **before any federation logic**. There is **no discovery, no
-source adapters, no planner bridge, no pushdown, and no streaming operators yet**; those
-land in Phases 1-7 (each a future bead under epic sq-dnko). The modules exist as
-`todo!()`-free placeholders so the public surface is visible and the boundary is provable
-now.
+The crate began as the **Phase-0 skeleton** (design §6) — the public module layout, the
+opt-in feature, and the dependency-boundary proof, before any federation logic. Landed
+since (each behind the same default-OFF `fedclient` feature):
+
+- **Phase 1 — capability discovery** (`sq-nfxl`): the `discovery` module GETs a source's
+  SPARQL Service Description + `/.well-known/void`, parses them to a `Capability` +
+  `SourceDescriptor`, with a FedX-style ASK-probe fallback, all behind an SSRF-guarded
+  fetch seam.
+- **Phase 2 — source-type abstraction + Endpoint adapter** (`sq-rsxf`): the `source` module
+  — `SourceType` (`Endpoint | BrTpf | Tpf | Local`), the `FederatedSource` trait, the
+  fine-grained `Capability` descriptor, and the real `Endpoint` SRJ adapter over a
+  `Transport` seam behind a **default-deny SSRF egress guard**.
+- **Phase 6 — brTPF + TPF fragment adapters** (`sq-2qze`): the real Triple-Pattern-Fragments
+  adapters (see below).
+
+Still ahead (future beads under epic sq-dnko): the planner bridge (§4.2), capability-aware
+pushdown (§4.3), the streaming operators (§4.4 / §5), and adaptive re-planning (§7).
+
+## brTPF + TPF fragment adapters (Phase 6, `source` module)
+
+A single triple pattern is the access unit of a Triple Pattern Fragments server. Both
+adapters wrap a `FragmentTransport` seam (fetch one fragment page for a pattern, optionally
+with an attached binding block → matched triples + the page's `hydra:totalItems` count + an
+optional `hydra:next` token) and return a **complete** answer for one pattern as typed
+`FragBinding`s:
+
+- **`TpfSource` (plain TPF)** — fetches the fragment to exhaustion (follows `hydra:next`),
+  binds every matched triple into the pattern's variables, and returns the whole (selective)
+  fragment. There is no bind-join: a plain-TPF source shifts every join client-side, so the
+  planner hash-joins the materialised fragments locally, driven by the count metadata.
+- **`BrTpfSource` (bindings-restricted TPF)** — additionally pushes a block of *at most
+  `maxMpR`* upstream bindings with each request (the standardised brTPF bind-join). It
+  chunks the upstream bindings into `maxMpR`-sized blocks, issues one paginated request per
+  block, and concatenates the per-block matches — complete by construction, and the block
+  size never exceeds `maxMpR`.
+- **Count-metadata cardinality** — both expose `cardinality(pattern)` and a one-pattern
+  `SourceDescriptor` from `discover()` seeded with the fragment's `hydra:totalItems`, so the
+  `sparq-fedplan` CostFed estimate keys on the *served* count. For brTPF the descriptor uses
+  the unbound-pattern count (a recall-safe upper bound the bound block only narrows).
+
+A fragment server speaks triples, not SPARQL-Results-JSON, so the adapters answer through
+the typed `solutions(...)` methods; their `FederatedSource::execute` (the SRJ entry point)
+is a deliberate `Unsupported` that points the caller at `solutions` — no lossy SRJ
+re-serialisation, no overclaim. The adapters are tested against an in-memory fixture
+fragment server (real fetch → parse → bind → paginate → bind-join, zero network); the
+native HTTP `FragmentTransport` (ureq + the default-deny SSRF resolver, Hydra URI-template
+serialisation, Turtle/TriG fragment parsing) lands with the streaming phase.
 
 ## Public module layout (design §4)
 
@@ -75,11 +115,11 @@ cargo test -p sparq-fedclient --features fedclient --test boundary
 
 ## Status / roadmap
 
-Phase 0 (this crate): skeleton + boundary proof. Phases 1-7 (discovery, source
-abstraction + Endpoint adapter, planner bridge, capability-aware pushdown, streaming
-operators, brTPF/TPF adapters, adaptive re-planning) are tracked as future beads under
-epic **sq-dnko**. No performance numbers appear here: any "better than Comunica" claim in
-the design record is an *architectural prediction* to be validated head-to-head before
-being asserted as fact.
+Landed: Phase 0 (skeleton + boundary proof, `sq-s1uy`), Phase 1 (discovery, `sq-nfxl`),
+Phase 2 (source abstraction + Endpoint adapter, `sq-rsxf`), Phase 6 (brTPF/TPF adapters,
+`sq-2qze`). Still ahead under epic **sq-dnko**: the planner bridge (§4.2), capability-aware
+pushdown (§4.3), the streaming operators (§4.4 / §5), and adaptive re-planning (§7). No
+performance numbers appear here: any "better than Comunica" claim in the design record is an
+*architectural prediction* to be validated head-to-head before being asserted as fact.
 
 [OPUS-4.8] sq-s1uy — flagged for Fable re-review.

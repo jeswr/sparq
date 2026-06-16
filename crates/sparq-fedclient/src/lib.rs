@@ -76,6 +76,11 @@ pub use source::{
     FederatedSource, FilterClass, Interface, LocalSource, SourceType, SubQuery, TpfSource,
     Transport,
 };
+// [OPUS-4.8] sq-2qze: re-export the Phase-6 brTPF/TPF fragment surface at the crate root.
+#[cfg(feature = "fedclient")]
+pub use source::{
+    FragBinding, FragPattern, FragTerm, FragTriple, FragmentPage, FragmentTransport, PatternTerm,
+};
 
 /// §4.1 — **capability discovery** (Phase 1, bead sq-nfxl): GET `/.well-known/void` + the
 /// Service Description per endpoint, parse VoID+`scs:` via the existing
