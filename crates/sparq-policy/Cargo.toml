@@ -33,3 +33,13 @@ rustdoc-args = ["--cfg", "docsrs"]
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0", default-features = false }
 oxrdf.workspace = true
+
+[features]
+# [OPUS-4.8] sq-zi5w: STATEFUL `odrl:count` constraint enforcement — a usage-counter
+# store + an atomic exercise path that increments per use and denies once the limit is
+# reached. OFF by default (lean core): the default evaluator treats `odrl:count` as the
+# stateless numeric constraint it always was (the caller supplies the count in the
+# request context). Turning this on adds ONLY the `count` module (an injectable
+# `UsageCounterStore` trait + an in-memory `Mutex`-backed default impl, std-only — no
+# new deps); it does NOT change the stateless `evaluate` path.
+count-enforcement = []

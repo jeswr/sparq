@@ -133,13 +133,24 @@ analogue keep the one-shot behaviour.
 | `odrl:recipient` / `odrl:assignee` | `neq` / order | — (needs per-session `noneOf`) | one-shot (frozen) |
 | `odrl:purpose` | any | — (ACP session has no purpose) | one-shot (frozen) |
 | `odrl:dateTime` / time window | any | — (ACP has no "now") | one-shot (frozen) |
-| `odrl:count` | any | — (ACP is stateless) | one-shot (frozen) |
+| `odrl:count` | any | — (ACP is stateless; no per-session usage counter) | one-shot (frozen) in the bridge¹ |
 | *no constraint* | — | `auth:agent auth:Public` | re-checked (public) |
 
 **Why only recipient/assignee:** the ACP session re-check carries exactly `(agent, client)`,
 and the recipient-of-data *is* the session agent — so an agent matcher re-checks it with
 identical semantics. Purpose/time/count have no stateless `(agent, client)` analogue, so
 persisting them would require a looser approximation that could over-grant — rejected.
+
+¹ **Stateful `odrl:count` enforcement** — [OPUS-4.8] sq-zi5w. `odrl:count` limits the *number
+of times* a permission may be exercised; faithful enforcement is **stateful** (a usage counter
+persisting across requests), which ACP — stateless, with static matcher accept-sets and no
+per-session counter — cannot express, so the bridge keeps it **one-shot** (the limit is checked
+once against any count value the request supplies, at materialization). The actual stateful
+enforcement lives in `sparq-policy`'s opt-in `count-enforcement` feature
+(`evaluate_and_exercise` + the injectable `UsageCounterStore`; atomic `try_consume`,
+fail-closed on an unavailable counter — see the [`sparq-policy` README](../sparq-policy/README.md)).
+Wiring that path *through* this stateless ACP bridge — so a bridged grant self-retracts once the
+count is reached — is a distinct, more invasive change and is a **deferred bead**.
 
 **`odrl:purpose` enforcement through the bridge (faithful, fail-closed)** — [OPUS-4.8] sq-q56r.
 Purpose has no re-checked-condition analogue (above), so it stays **one-shot**: the bound is

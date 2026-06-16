@@ -102,6 +102,34 @@ assert!(!evaluate(&policy, &outside).allow);
   - `purpose_status(&rule, &request) -> PurposeMatch` reports exactly what the evaluator
     checks for a rule's purpose constraints — `Satisfied` / `DefinitelyUnsatisfied` /
     `Unprovable` / `NotConstrained` — the auditable surface of this enforcement.
+- **`odrl:count` enforcement (stateful, opt-in, fail-closed)** — [OPUS-4.8] sq-zi5w.
+  `odrl:count` limits the **number of times** a permission may be exercised ("may read
+  at most 5 times"). Unlike the stateless constraints above, this is **stateful** — the
+  count lives in a usage counter that persists across requests. Behind the
+  `count-enforcement` feature (OFF by default; the default build is unchanged and treats
+  `odrl:count` as the stateless numeric comparison), `evaluate_and_exercise(&policy,
+  &request, &store) -> ExerciseDecision` runs the **real** `evaluate` decision and, on a
+  grant, **atomically consumes** one unit of the applicable count budget:
+  - **First *N* exercises grant; the *(N+1)*th denies.** A *denied* request burns **no**
+    budget. `lteq N`/`eq N` = at most *N*; `lt N` = at most *N-1*.
+  - **Counter-store seam.** `UsageCounterStore` is an injectable trait; the in-memory
+    default `InMemoryCounterStore` is the reference impl. The budget key is
+    `(rule_id, party, target)` (`CountKey`) — per-assignee, per-asset, per-rule.
+  - **Atomicity / concurrency boundary.** The single mutating op is the atomic
+    `try_consume` (check-and-consume under one lock in the in-memory store), **not** a
+    read-then-increment — so the in-process TOCTOU race is closed (a concurrency test
+    asserts exactly the limit is granted, never one more). A **distributed** store
+    (Redis `INCR`, SQL `UPDATE … WHERE consumed < limit`) is the operator's concern and
+    MUST provide the same atomicity; cross-process atomicity is a deferred bead.
+  - **Fail-closed.** An *unavailable* counter (`ConsumeResult::Unavailable`) or a
+    *malformed* limit denies — never silently treated as "unlimited".
+    `count_status(&rule, &request, &store) -> CountStatus` is the side-effect-free audit
+    surface (`Satisfied{consumed,limit}` / `DefinitelyUnsatisfied{..}` / `Unprovable` /
+    `NotConstrained`), the count dual of `purpose_status`.
+  - **Deferred (honest):** the stateless `sparq-solid` ODRL→ACP bridge does **not** wire
+    this stateful path — a bridged ACP grant does not self-retract on count exhaustion;
+    the bridge keeps `odrl:count` one-shot/unmappable. This crate provides the
+    evaluator + store seam such a bridge would build on.
 - **Duties as obligations** — a permission's `odrl:duty` must appear in the
   request's discharged-duty set, or the permission is denied (the usage-control
   kernel pure access control lacks).
@@ -122,8 +150,12 @@ lexical form; mixed-offset normalization, DPV `purpose` hierarchies, and
 `materialize_odrl_permission_conditional` persists a `odrl:recipient`/`odrl:assignee`
 constraint (`eq`/`isA`/`isPartOf`) as a **re-checked** ACP `auth:ConditionalGrant`
 (agent matcher) — the only constraint with a faithful stateless `(agent, client)`
-analogue. `odrl:purpose`/`dateTime`/`count` have none and stay **one-shot** (checked
-once at materialization). Mapping table: the
+analogue. `odrl:purpose`/`dateTime`/`count` have no *stateless* ACP analogue and stay
+**one-shot** in the bridge (checked once at materialization). Stateful `odrl:count`
+enforcement itself (the usage counter) lives in this crate's `count-enforcement`
+feature (`evaluate_and_exercise` + `UsageCounterStore`); wiring it *through* the
+stateless ACP bridge so a bridged grant self-retracts on exhaustion is a deferred bead.
+Mapping table: the
 [`usage-control-policy`](../../skills/usage-control-policy/SKILL.md) skill +
 [`sparq-solid` README](../sparq-solid/README.md).
 
