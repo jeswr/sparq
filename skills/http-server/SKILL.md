@@ -527,6 +527,18 @@ and `update_in_place_with_budget`, and wrap calls in
   `Content-Type: application/json` (the `405` keeps its `Allow` header). POST query
   requires `Content-Type: application/sparql-query` or `application/x-www-form-urlencoded`
   (else `415`); a GET without `query=` is `400`.
+- **Error bodies are sanitized — no information leak (sq-cz89 / sq-j9zs).** On the
+  no-auth-by-default path an error body carries only a **stable, generic CLASS message**
+  (e.g. `malformed query`, `malformed RDF body`, `malformed gzip body`,
+  `query execution error`, `update failed: invalid SPARQL update`). It deliberately does
+  **NOT** echo the caller's submitted query/UPDATE/RDF text, a fragment of the loaded RDF
+  (parsers like `oxttl`/`spargebra` quote the offending token — that would confirm loaded
+  triples), or any server-side filesystem path (e.g. a `--persist` mirror's path inside a
+  transient durable-write `503`). The full detailed cause is preserved for the **operator**
+  via the server-side `tracing` log (target `sparq_server`), surfaced only through the
+  opt-in `--verbose` / `RUST_LOG` subscriber — never the HTTP response. Status semantics
+  (the `400`/`413`/`415`/`503`/`500` classification) are unchanged; only the prose detail
+  is withheld. Regression tests assert a sentinel token never appears in any error body.
 - **mimalloc** is the binary's global allocator (matters under concurrent load).
 
 ## See also
