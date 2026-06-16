@@ -251,6 +251,10 @@ fn inverse_symmetric_equivalence_hand_checked() {
 
 /// Randomized ontology exercising every counting-mode feature (mirrors
 /// tests/incremental_owl_prop.rs).
+// [OPUS-4.8] test fixture builder: the 5-tuple is an ad-hoc bundle of the generated
+// vocab + base triples + the three id pools the assertions index into; a named struct
+// would add ceremony for a test-only helper, so the lint is allowed locally.
+#[allow(clippy::type_complexity)]
 fn build(dict: &mut Dict, rng: &mut Rng, with_transitive: bool) -> (V, Vec<[Id; 3]>, Vec<Id>, Vec<Id>, Vec<Id>) {
     let v = vocab(dict);
     let mut base: Vec<[Id; 3]> = Vec::new();
