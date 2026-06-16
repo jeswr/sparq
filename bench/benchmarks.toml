@@ -20,6 +20,16 @@
 #   pinning             SHA/seed/dataset-version that must be fixed, if any
 #   records_to          where results land
 #   status              ok | stale | broken | external-cost | planning
+#   featured            OPTIONAL bool. Set `featured = false` to mark a suite an
+#                       intentionally-UNFEATURED capability suite (internal harness
+#                       / micro-bench / external-cost / spike) so the merge-time
+#                       gate G3 (scripts/check-new-bench-registered.py, soft-launch
+#                       advisory) does NOT require a FEATURED_SUITES row in
+#                       bench/dashboard/dashboard.js for it. Omit it (the default)
+#                       for a capability suite that SHOULD be promoted on the
+#                       dashboard. Non-capability families (cli-*/hw/ci/serve/
+#                       memtier/parse/compress/wikidata/…) are exempt from the
+#                       dashboard requirement without needing this flag. [OPUS-4.8]
 
 # =============================================================================
 # QUERY — engine compute + differential correctness vs reference engines
