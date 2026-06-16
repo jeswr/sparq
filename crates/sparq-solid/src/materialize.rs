@@ -25,9 +25,13 @@ const ACP_C: &str = include_str!("../rules/acp-c.n3");
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const EXCEPT_MATCHER: &str = "https://sparq.dev/ns/auth#exceptMatcher";
 /// solidx facts copied into the auth view for matchers referenced by conditional
-/// grants (the session layer evaluates `exceptMatcher`s from these).
-const MATCHER_FACTS: [&str; 2] =
-    ["https://sparq.dev/ns/solidx#acceptsAgentP", "https://sparq.dev/ns/solidx#acceptsClientP"];
+/// grants (the session layer evaluates `exceptMatcher`s from these). [OPUS-4.8]
+/// sq-3jtd.6 adds `acceptsIssuerP` — the noneOf exception check is three-dimensional.
+const MATCHER_FACTS: [&str; 3] = [
+    "https://sparq.dev/ns/solidx#acceptsAgentP",
+    "https://sparq.dev/ns/solidx#acceptsClientP",
+    "https://sparq.dev/ns/solidx#acceptsIssuerP",
+];
 
 /// What a `materialize_*` run produced: auth-view size, per-stratum closure sizes,
 /// and wall-clock time. Purely informational (logging / benchmarking) — the result
@@ -134,7 +138,7 @@ pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
 /// assert_eq!(stats.strata_facts.len(), 3); // accepts → rejections → grants
 ///
 /// let index = sparq_solid::AuthIndex::from_graph(&graph);
-/// let alice = sparq_solid::Session { agent: Some("https://alice.ex/card#me"), client: None };
+/// let alice = sparq_solid::Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
 /// assert_eq!(index.accessible(&alice, sparq_solid::Mode::Read).len(), 2); // n1 + notes/
 /// # Ok::<(), String>(())
 /// ```

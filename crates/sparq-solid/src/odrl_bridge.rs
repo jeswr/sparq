@@ -676,7 +676,7 @@ fn recipient_principal_allowed(p: &str) -> bool {
 ///
 /// ```text
 /// <grant> a auth:ConditionalGrant ; auth:effect auth:Allow ;
-///         auth:agent <recipient> ; auth:client auth:AnyClient ;
+///         auth:agent <recipient> ; auth:client auth:AnyClient ; auth:issuer auth:AnyIssuer ;
 ///         auth:mode acl:<Mode> ; auth:graph <target> .
 /// ```
 ///
@@ -1029,6 +1029,12 @@ fn append_conditional_grants(
     let agent_p = NamedNode::new_unchecked(format!("{AUTH_NS}agent"));
     let client_p = NamedNode::new_unchecked(format!("{AUTH_NS}client"));
     let any_client = NamedNode::new_unchecked(crate::authindex::ANY_CLIENT);
+    // [OPUS-4.8] sq-3jtd.6: a bridged grant carries no issuer constraint, so it spans the
+    // issuer-dimension top — exactly as it spans the client top. The head MUST state this
+    // explicitly: the session layer treats a conditional grant whose `auth:issuer` head is
+    // absent as fail-closed (it never applies), matching the `auth:client` convention.
+    let issuer_p = NamedNode::new_unchecked(format!("{AUTH_NS}issuer"));
+    let any_issuer = NamedNode::new_unchecked(crate::authindex::ANY_ISSUER);
     let mode_p = NamedNode::new_unchecked(format!("{AUTH_NS}mode"));
     let mode_o = NamedNode::new_unchecked(mode_iri(mode));
     let graph_p = NamedNode::new_unchecked(format!("{AUTH_NS}graph"));
@@ -1036,15 +1042,26 @@ fn append_conditional_grants(
     let except_p = NamedNode::new_unchecked(format!("{AUTH_NS}exceptMatcher"));
     let accepts_agent_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsAgentP"));
     let accepts_client_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsClientP"));
+    let accepts_issuer_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsIssuerP"));
 
     // One deterministic exception matcher per carved-out principal, shared across the
     // grant heads (its accept-set is the same regardless of which positive head it
-    // attaches to). Each accepts (agent = X, client = any) → suppresses the grant for X.
-    let except_matchers: Vec<(String, [Term; 2])> = excepts
+    // attaches to). Each accepts (agent = X, client = any, issuer = any) → suppresses the
+    // grant for X. [OPUS-4.8] sq-3jtd.6: the issuer accept (auth:AnyIssuer) makes the
+    // carve-out span the issuer dimension too — without it the three-dimensional
+    // matcher_accepts would never fire (it requires all three dimensions to accept).
+    let except_matchers: Vec<(String, [Term; 3])> = excepts
         .iter()
         .map(|x| {
             let m = format!("urn:sparq:odrl-except?agent={}", sparq_reason::n3::encode_for_uri(x));
-            (m, [Term::NamedNode(NamedNode::new_unchecked(x)), Term::NamedNode(any_client.clone())])
+            (
+                m,
+                [
+                    Term::NamedNode(NamedNode::new_unchecked(x)),
+                    Term::NamedNode(any_client.clone()),
+                    Term::NamedNode(any_issuer.clone()),
+                ],
+            )
         })
         .collect();
 
@@ -1073,15 +1090,17 @@ fn append_conditional_grants(
             [g.clone(), Term::NamedNode(effect_p.clone()), Term::NamedNode(effect_o.clone())],
             [g.clone(), Term::NamedNode(agent_p.clone()), agent_o],
             [g.clone(), Term::NamedNode(client_p.clone()), Term::NamedNode(any_client.clone())],
+            [g.clone(), Term::NamedNode(issuer_p.clone()), Term::NamedNode(any_issuer.clone())],
             [g.clone(), Term::NamedNode(mode_p.clone()), Term::NamedNode(mode_o.clone())],
             [g.clone(), Term::NamedNode(graph_p.clone()), Term::NamedNode(graph_o.clone())],
         ];
         // Wire each exception matcher onto the grant + materialize its accept-set facts.
-        for (m, [agent_accept, client_accept]) in &except_matchers {
+        for (m, [agent_accept, client_accept, issuer_accept]) in &except_matchers {
             let m_node = Term::NamedNode(NamedNode::new_unchecked(m));
             head.push([g.clone(), Term::NamedNode(except_p.clone()), m_node.clone()]);
             head.push([m_node.clone(), Term::NamedNode(accepts_agent_p.clone()), agent_accept.clone()]);
-            head.push([m_node, Term::NamedNode(accepts_client_p.clone()), client_accept.clone()]);
+            head.push([m_node.clone(), Term::NamedNode(accepts_client_p.clone()), client_accept.clone()]);
+            head.push([m_node, Term::NamedNode(accepts_issuer_p.clone()), issuer_accept.clone()]);
         }
         for t in head {
             if !emitted.contains(&t) {

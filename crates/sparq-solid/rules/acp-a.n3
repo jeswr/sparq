@@ -1,19 +1,23 @@
 # ACP (https://solidproject.org/TR/acp) — STRATUM A (monotone + input-only negation):
 # effective policies, matcher accept-sets over the principal lattice, candidate
-# (agent, client) pairs. Strata B/C (separate reason_n3 calls) add the NAF layers; see
-# research/solid-access-control-design.md §3.4–3.5.
+# (agent, client, issuer) triples. Strata B/C (separate reason_n3 calls) add the NAF
+# layers; see research/solid-access-control-design.md §3.4–3.5.
 #
 # Principal lattice: auth:Public ⊒ auth:Authenticated ⊒ concrete WebID;
-# auth:AnyClient ⊒ concrete client id. A matcher "accepts" a principal iff it accepts
-# EVERY context the principal denotes, so surviving candidates are sound grants.
+# auth:AnyClient ⊒ concrete client id; auth:AnyIssuer ⊒ concrete issuer (OIDC IdP).
+# [OPUS-4.8] sq-3jtd.6: the issuer dimension is the exact twin of the client dimension
+# (design doc §3.6 — "acp:issuer is the same shape as acp:client"). A matcher "accepts" a
+# principal iff it accepts EVERY context the principal denotes, so surviving candidates
+# are sound grants.
 #
 # Loader-synthesized inputs (besides common.n3's): <R> solidx:ownAcr <R.acr> ;
 # <A> solidx:isWebId true for concrete agent IRIs seen in ACR/group docs.
 #
 # Outputs (stratum B's inputs): ?pol solidx:appliesToResource ?r (ACP §"Effective
 # Policies": own accessControl + cumulative ancestor memberAccessControl);
-# ?m solidx:acceptsAgentP/acceptsClientP ?p (matcher accept-sets, ACP §"Matchers");
-# ?pol solidx:candPair ?k with solidx:pairAgent/pairClient (candidate principals).
+# ?m solidx:acceptsAgentP/acceptsClientP/acceptsIssuerP ?p (matcher accept-sets, ACP
+# §"Matchers"); ?pol solidx:candTriple ?k with solidx:pairAgent/pairClient/pairIssuer
+# (candidate principals).
 
 @prefix acp:    <http://www.w3.org/ns/solid/acp#> .
 @prefix auth:   <https://sparq.dev/ns/auth#> .
@@ -41,6 +45,11 @@
 { ?m solidx:isMatcher true . ?m acp:client ?c . ?c log:notEqualTo acp:PublicClient . }
 => { ?m solidx:clientValP ?c . } .
 { ?m acp:client acp:PublicClient . }      => { ?m solidx:clientValP auth:AnyClient . } .
+# [OPUS-4.8] sq-3jtd.6: acp:issuer — a concrete OIDC issuer IRI is its own principal value
+# (there is no ACP "public issuer" special; an absent acp:issuer means issuer-unconstrained,
+# handled by the accept-set top rule below, exactly like an absent acp:client).
+{ ?m solidx:isMatcher true . ?m acp:issuer ?i . }
+=> { ?m solidx:issuerValP ?i . } .
 
 # ── accept-sets: downward-closed over the principal lattice ────────────────────────────
 { ?m solidx:agentValP ?a . } => { ?m solidx:acceptsAgentP ?a . } .
@@ -58,21 +67,34 @@
 { ?m solidx:acceptsClientP auth:AnyClient . ?c solidx:isCandClient true . }
 => { ?m solidx:acceptsClientP ?c . } .
 
+# [OPUS-4.8] sq-3jtd.6: issuer accept-set, the twin of the client one above.
+{ ?m solidx:issuerValP ?i . } => { ?m solidx:acceptsIssuerP ?i . } .
+{ ?m solidx:isMatcher true . ?UNSCOPED log:notIncludes { ?m acp:issuer ?x . } . }
+=> { ?m solidx:acceptsIssuerP auth:AnyIssuer . } .
+{ ?m solidx:acceptsIssuerP auth:AnyIssuer . ?i solidx:isCandIssuer true . }
+=> { ?m solidx:acceptsIssuerP ?i . } .
+
 # ── candidates per policy: its matchers' values + the dimension tops ───────────────────
 # (the tops require >=1 allOf/anyOf matcher — encodes ACP's "at least one matcher" rule)
 { ?pol solidx:hasMatcher ?m . ?m solidx:agentValP ?a . }  => { ?pol solidx:candAgent ?a . } .
 { ?pol solidx:hasMatcher ?m . ?m solidx:clientValP ?c . } => { ?pol solidx:candClient ?c . } .
+{ ?pol solidx:hasMatcher ?m . ?m solidx:issuerValP ?i . } => { ?pol solidx:candIssuer ?i . } .
 { ?pol solidx:hasMatcher ?m . }
-=> { ?pol solidx:candAgent auth:Public . ?pol solidx:candClient auth:AnyClient . } .
+=> { ?pol solidx:candAgent auth:Public . ?pol solidx:candClient auth:AnyClient .
+     ?pol solidx:candIssuer auth:AnyIssuer . } .
 { ?pol solidx:candAgent ?a . ?a solidx:isWebId true . }       => { ?a solidx:isCandAgent true . } .
 { ?pol solidx:candClient ?c . ?c log:notEqualTo auth:AnyClient . } => { ?c solidx:isCandClient true . } .
+{ ?pol solidx:candIssuer ?i . ?i log:notEqualTo auth:AnyIssuer . } => { ?i solidx:isCandIssuer true . } .
 
-# ── candidate (agent, client) pairs, minted deterministically ──────────────────────────
-# (components percent-encoded — string:encodeForUri — so distinct (pol, agent, client)
-#  triples can never concatenate to the same candidate key)
-{ ?pol solidx:candAgent ?pa . ?pol solidx:candClient ?pc .
-  ?pol log:uri ?pols . ?pa log:uri ?pas . ?pc log:uri ?pcs .
-  ?pols string:encodeForUri ?pole . ?pas string:encodeForUri ?pae . ?pcs string:encodeForUri ?pce .
-  ("urn:sparq:cand?pol=" ?pole "&agent=" ?pae "&client=" ?pce) string:concatenation ?ks .
+# ── candidate (agent, client, issuer) triples, minted deterministically ────────────────
+# (components percent-encoded — string:encodeForUri — so distinct (pol, agent, client,
+#  issuer) tuples can never concatenate to the same candidate key)
+{ ?pol solidx:candAgent ?pa . ?pol solidx:candClient ?pc . ?pol solidx:candIssuer ?pi .
+  ?pol log:uri ?pols . ?pa log:uri ?pas . ?pc log:uri ?pcs . ?pi log:uri ?pis .
+  ?pols string:encodeForUri ?pole . ?pas string:encodeForUri ?pae .
+  ?pcs string:encodeForUri ?pce . ?pis string:encodeForUri ?pie .
+  ("urn:sparq:cand?pol=" ?pole "&agent=" ?pae "&client=" ?pce "&issuer=" ?pie)
+      string:concatenation ?ks .
   ?k log:uri ?ks . }
-=> { ?pol solidx:candPair ?k . ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc . } .
+=> { ?pol solidx:candTriple ?k .
+     ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc . ?k solidx:pairIssuer ?pi . } .

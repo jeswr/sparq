@@ -103,14 +103,14 @@ fn round_trip_through_enforcement() {
     let out = store.materialize_odrl_permission(&read_policy(), &req);
     assert!(out.granted);
 
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     // alice can READ n1 via the materialized grant…
     assert!(store.accessible(&alice, Mode::Read).iter().any(|gph| gph.as_str() == N1));
     // …but NOT write (the bridge only materialized a read grant — fail-closed)…
     assert!(store.accessible(&alice, Mode::Write).is_empty());
 
     // …and a DIFFERENT agent gets nothing (the grant is scoped to alice's WebID).
-    let mallory = Session { agent: Some("https://mallory.ex/card#me"), client: None };
+    let mallory = Session { agent: Some("https://mallory.ex/card#me"), client: None, issuer: None };
     assert!(store.accessible(&mallory, Mode::Read).is_empty());
     // anonymous likewise.
     assert!(store.accessible(&Session::default(), Mode::Read).is_empty());
@@ -135,9 +135,9 @@ fn deny_materializes_nothing() {
     assert!(out.grant_triple.is_none());
 
     // Nobody gains access — the auth view holds no bridged grant.
-    let mallory = Session { agent: Some("https://mallory.ex/card#me"), client: None };
+    let mallory = Session { agent: Some("https://mallory.ex/card#me"), client: None, issuer: None };
     assert!(store.accessible(&mallory, Mode::Read).is_empty());
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Read).is_empty());
 }
 
@@ -170,7 +170,7 @@ fn unsatisfied_constraint_materializes_nothing() {
         .with(odrl("dateTime"), Value::DateTime("2026-06-16T00:00:00Z".to_owned()));
     let out = store.materialize_odrl_permission(&pol, &req);
     assert!(!out.granted, "out-of-window must not grant: {out:?}");
-    assert!(store.accessible(&Session { agent: Some(ALICE), client: None }, Mode::Read).is_empty());
+    assert!(store.accessible(&Session { agent: Some(ALICE), client: None, issuer: None }, Mode::Read).is_empty());
 
     // And the SAME policy with NO dateTime evidence also fails closed.
     let mut store2 = PodStore::new(pod());
@@ -259,7 +259,7 @@ fn bridge_preserves_existing_wac_grants() {
 
     // Does `agent` have read on n1 through the store's current enforcement view?
     fn reads_n1(s: &mut PodStore, agent: &str) -> bool {
-        let sess = Session { agent: Some(agent), client: None };
+        let sess = Session { agent: Some(agent), client: None, issuer: None };
         s.accessible(&sess, Mode::Read).iter().any(|g| g.as_str() == N1)
     }
 
@@ -340,7 +340,7 @@ fn deny_overrides_allow_through_enforcement() {
     let wreq = Request::new(odrl("modify")).on(N1).by(ALICE);
     assert!(store.materialize_odrl_permission(&permit, &wreq).granted);
 
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     // Sanity: the allow grant is live through the real enforcement path.
     assert!(
         store.accessible(&alice, Mode::Write).iter().any(|g| g.as_str() == N1),
@@ -401,7 +401,7 @@ fn permit_plus_prohibition_same_subject_is_denied() {
     assert!(out.deny_triple.is_some());
 
     // Net effect through the real enforcement: alice is DENIED.
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(
         store.accessible(&alice, Mode::Write).is_empty(),
         "deny-overrides: a permission + prohibition on the same subject denies",
@@ -486,7 +486,7 @@ fn permit_only_regression_via_policy() {
     // End-to-end through the enforcement path: alice reads, deny absent.
     let mut store = PodStore::new(pod());
     assert!(store.materialize_odrl_policy(&read_policy(), &req).granted);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
 }
 
@@ -498,7 +498,7 @@ fn permit_only_regression_via_policy() {
 use sparq_solid::materialize_permission_conditional;
 
 fn reads(store: &mut PodStore, agent: &str) -> bool {
-    let s = Session { agent: Some(agent), client: None };
+    let s = Session { agent: Some(agent), client: None, issuer: None };
     store.accessible(&s, Mode::Read).iter().any(|g| g.as_str() == N1)
 }
 
@@ -563,8 +563,8 @@ fn recipient_constraint_persists_as_rechecked_condition() {
 
     // End-to-end through query_as: only carol sees the content.
     let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
-    let carol = Session { agent: Some(CAROL), client: None };
-    let alice = Session { agent: Some(ALICE), client: None };
+    let carol = Session { agent: Some(CAROL), client: None, issuer: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
     assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 0);
 }
@@ -775,7 +775,7 @@ fn withdrawn_permission_loses_access_after_refresh() {
 
     // Materialize → alice has read.
     assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(
         store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1),
         "bridged grant is live before withdrawal",
@@ -826,7 +826,7 @@ fn lapsed_time_window_loses_access_after_refresh() {
         .by(ALICE)
         .with(odrl("dateTime"), Value::DateTime("2025-06-01T00:00:00Z".to_owned()));
     assert!(store.materialize_odrl_permission(&pol, &in_window).granted);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
 
     // The window LAPSES: re-evaluate with a NOW past the bound (same policy, new ctx).
@@ -861,7 +861,7 @@ fn reeval_now_denies_loses_access_after_refresh() {
     .unwrap();
     let req = Request::new(odrl("modify")).on(N1).by(ALICE);
     assert!(store.materialize_odrl_policy(&permit, &req).granted);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Write).iter().any(|g| g.as_str() == N1));
 
     // The policy now ADDS a prohibition on the same action → re-eval Denies.
@@ -893,7 +893,7 @@ fn valid_bridged_grant_survives_refresh() {
     let mut store = PodStore::new(pod());
     let req = Request::new(odrl("read")).on(N1).by(ALICE);
     assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
 
     // Plain refresh (policy unchanged) re-evaluates and KEEPS the still-valid grant.
@@ -927,7 +927,7 @@ fn static_grant_not_dropped_by_refresh() {
     store.materialize_wac().expect("wac materializes");
 
     fn reads_n1(s: &mut PodStore, agent: &str) -> bool {
-        let sess = Session { agent: Some(agent), client: None };
+        let sess = Session { agent: Some(agent), client: None, issuer: None };
         s.accessible(&sess, Mode::Read).iter().any(|g| g.as_str() == N1)
     }
 
@@ -996,7 +996,7 @@ fn static_rematerialization_preserves_valid_bridged_grant() {
     assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
 
     fn reads_n1(s: &mut PodStore, agent: &str) -> bool {
-        let sess = Session { agent: Some(agent), client: None };
+        let sess = Session { agent: Some(agent), client: None, issuer: None };
         s.accessible(&sess, Mode::Read).iter().any(|g| g.as_str() == N1)
     }
     assert!(reads_n1(&mut store, ALICE), "alice bridged before re-materialize");
@@ -1021,7 +1021,7 @@ fn ambiguous_reeval_retracts_fail_closed() {
         .by(ALICE)
         .with(odrl("dateTime"), Value::DateTime("2025-06-01T00:00:00Z".to_owned()));
     assert!(store.materialize_odrl_permission(&pol, &in_window).granted);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
 
     // Refresh with NO dateTime evidence → constraint cannot be proven → fail-closed Deny.
@@ -1095,7 +1095,7 @@ fn withdrawn_prohibition_restores_access_after_refresh() {
     assert!(store.materialize_odrl_permission(&permit, &wreq).granted);
     assert!(store.materialize_odrl_prohibition(&write_prohibition(), &wreq).prohibited);
 
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(
         store.accessible(&alice, Mode::Write).is_empty(),
         "deny-overrides: alice is denied write while the prohibition holds",
@@ -1132,7 +1132,7 @@ fn withdrawn_standalone_deny_grants_no_access() {
     let mut store = PodStore::new(pod());
     let wreq = Request::new(odrl("modify")).on(N1).by(ALICE);
     assert!(store.materialize_odrl_prohibition(&write_prohibition(), &wreq).prohibited);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Write).is_empty(), "no grant → denied");
 
     // Withdraw the prohibition; the deny is retracted but there was never an allow.
@@ -1153,7 +1153,7 @@ fn applicable_prohibition_survives_refresh() {
     let mut store = PodStore::new(pod());
     let wreq = Request::new(odrl("modify")).on(N1).by(ALICE);
     assert!(store.materialize_odrl_prohibition(&write_prohibition(), &wreq).prohibited);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Write).is_empty());
 
     // Plain refresh (policy unchanged) → the prohibition still matches → deny KEPT.
@@ -1184,7 +1184,7 @@ fn ambiguous_prohibition_reeval_keeps_deny_fail_closed() {
     assert!(store
         .materialize_odrl_prohibition(&windowed_write_prohibition(), &in_window)
         .prohibited);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Write).is_empty(), "denied while window holds");
 
     // Refresh with NO dateTime evidence → we CANNOT prove the window lapsed → AMBIGUOUS.
@@ -1235,7 +1235,7 @@ fn definitely_lapsed_prohibition_retracts_deny() {
     assert!(store
         .materialize_odrl_prohibition(&windowed_write_prohibition(), &in_window)
         .prohibited);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Write).is_empty(), "denied while window holds");
 
     // Refresh with evidence the window has PROVABLY lapsed (now >= 2026-01-01 bound,
@@ -1272,7 +1272,7 @@ fn static_grant_never_dropped_by_deny_refresh() {
     store.materialize_wac().expect("wac materializes");
 
     fn reads_n1(s: &mut PodStore, agent: &str) -> bool {
-        let sess = Session { agent: Some(agent), client: None };
+        let sess = Session { agent: Some(agent), client: None, issuer: None };
         s.accessible(&sess, Mode::Read).iter().any(|g| g.as_str() == N1)
     }
     assert!(reads_n1(&mut store, BOB), "bob static read before");
@@ -1314,7 +1314,7 @@ fn policy_refresh_deny_overrides_composition() {
     .unwrap();
     let req = Request::new(odrl("modify")).on(N1).by(ALICE);
     assert!(store.materialize_odrl_policy(&both, &req).prohibited);
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert!(store.accessible(&alice, Mode::Write).is_empty(), "deny-overrides denies");
 
     // Refresh against a Policy that keeps the permission but DROPS the prohibition.
@@ -1366,7 +1366,7 @@ fn purpose_read_policy() -> sparq_policy::Policy {
 }
 
 fn reads_n1(store: &mut PodStore, agent: &str) -> bool {
-    let s = Session { agent: Some(agent), client: None };
+    let s = Session { agent: Some(agent), client: None, issuer: None };
     store.accessible(&s, Mode::Read).iter().any(|g| g.as_str() == N1)
 }
 
@@ -1375,7 +1375,7 @@ fn reads_n1(store: &mut PodStore, agent: &str) -> bool {
 fn purpose_match_grants_through_enforcement() {
     let pol = purpose_read_policy();
     let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
 
     // (a) Matching purpose → grant → alice reads through accessible AND query_as.
     let mut store = PodStore::new(pod());
@@ -1408,7 +1408,7 @@ fn missing_purpose_fails_closed_through_enforcement() {
     assert!(!out.granted, "missing purpose must NOT grant: {out:?}");
     assert!(!reads_n1(&mut store, ALICE), "no access when purpose is unstated");
     let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None };
     assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 0);
 }
 
@@ -1575,8 +1575,8 @@ fn recipient_neq_grants_everyone_except_named_party() {
 
     // End-to-end via query_as: bob sees nothing, carol sees the content.
     let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
-    let bob = Session { agent: Some(BOB), client: None };
-    let carol = Session { agent: Some(CAROL), client: None };
+    let bob = Session { agent: Some(BOB), client: None, issuer: None };
+    let carol = Session { agent: Some(CAROL), client: None, issuer: None };
     assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 0);
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
 }
@@ -1712,8 +1712,8 @@ fn recipient_eq_and_neq_grants_only_carol() {
 
     // End-to-end via query_as: only carol sees the content.
     let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
-    let carol = Session { agent: Some(CAROL), client: None };
-    let bob = Session { agent: Some(BOB), client: None };
+    let carol = Session { agent: Some(CAROL), client: None, issuer: None };
+    let bob = Session { agent: Some(BOB), client: None, issuer: None };
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
     assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 0);
 }
@@ -1800,8 +1800,8 @@ fn conditional_deny_overrides_allow_for_carved_party() {
     assert!(reads(&mut store, BOB), "bob keeps the allow (only carol is denied)");
     // End-to-end query_as: carol sees nothing, bob sees the content.
     let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
-    let carol = Session { agent: Some(CAROL), client: None };
-    let bob = Session { agent: Some(BOB), client: None };
+    let carol = Session { agent: Some(CAROL), client: None, issuer: None };
+    let bob = Session { agent: Some(BOB), client: None, issuer: None };
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 0);
     assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 1);
 }
