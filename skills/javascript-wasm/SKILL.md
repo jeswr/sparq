@@ -70,6 +70,9 @@ count(sparql): number                                // solution count, no mater
 queryBindingsStream(sparql): Generator<Bindings>     // stream solutions, for...of / for await...of
 queryJsonChunks(sparql): Generator<string>           // raw ~64 KiB JSON chunks (concat == queryJson)
 
+// SHACL validation (data graph vs shapes graph) — typed report; needs a shacl bundle (shipped by default)
+validate(data: string, shapes: string, format?: RdfFormat): ValidationReport  // { conforms, results[] }; stateless
+
 // RDF/JS quad lookup (null/undefined/Variable = wildcard; generated SELECT under the hood)
 match(s?, p?, o?, g?): Quad[]
 countQuads(s?, p?, o?, g?): number
@@ -86,7 +89,7 @@ free(): void                                         // also Symbol.dispose
 
 Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNode`, `blankNode`, `literal`, `variable`, `quad`, ...) and term classes `NamedNode/BlankNode/Literal/Variable/DefaultGraph/Quad`; `init` (idempotent wasm bootstrap); compression helpers `decompress / decompressToString / sniffCodec`; SPARQL helpers `termFromSparqlJson / termToNT / quadsToNQuads / detectQueryForm / askToSelect / SparqlJsonRowsParser`; and the `SparqDictionaryClient` (server dictionary-fetch protocol).
 
-Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
+Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
 
 ## Common recipes
 
@@ -148,29 +151,29 @@ const trace = raw.explainAnalyze('PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s e
 // plan + per-operator output rows (wall times read 0 on wasm32 — no monotonic clock)
 ```
 
-**SHACL validation (opt-in `shacl` feature, raw wasm only).** `Store.validate(data, shapes, format)` runs `sparq-shacl`'s SHACL Core + SHACL-SPARQL (`sh:sparql`) engine and returns a JSON validation report — a drop-in for `rdf-validate-shacl`. It is **stateless** (does not consult the receiver's triples) and only compiles when the wasm bundle is built with `--features shacl` (off in the default shipped bundle; build your own with it, or `--features shacl-af` to also get `sh:rule`). `format` is the same set `load` accepts.
+**SHACL validation (`SparqStore.validate`, shipped by default).** `validate(data, shapes, format?)` validates an RDF **data graph** against a SHACL **shapes graph** and returns a typed `ValidationReport` (the JSON the wasm binding emits, parsed for you). It runs `sparq-shacl`'s SHACL Core + SHACL-SPARQL (`sh:sparql`) engine inside wasm — a drop-in for `rdf-validate-shacl`. It is **stateless** (does not consult the store's own triples). `format` defaults to `'turtle'` and accepts the same set as `fromString`.
 
-```js
-import init, { Store } from '../wasm/sparq_wasm.js'; // a bundle built with --features shacl
-await init();
-const store = Store.load('', 'turtle');             // validate ignores the receiver
-const report = JSON.parse(store.validate(dataTurtle, shapesTurtle, 'turtle'));
-// { conforms: boolean,
-//   results: [{ focusNode, path, value, sourceShape,
-//               sourceConstraintComponent, severity, message }] }
+```ts
+import { SparqStore, type ValidationReport } from '@jeswr/sparq';
+
+const store = await SparqStore.fromString('', 'turtle'); // validate ignores the receiver
+const report: ValidationReport = store.validate(dataTurtle, shapesTurtle); // format defaults to 'turtle'
+// ValidationReport = { conforms: boolean;
+//   results: Array<{ focusNode; path; value; sourceShape;
+//                    sourceConstraintComponent; severity; message }> }
 report.conforms;                                     // false if ANY result (incl. Warning/Info)
 const violations = report.results.filter(
   r => r.severity === 'http://www.w3.org/ns/shacl#Violation');   // violations-only gate
 ```
 
-`focusNode`/`value`/`sourceShape` are N-Triples term strings; `path` is a SHACL Turtle path expression; `severity`/`sourceConstraintComponent` are full IRIs; `message` is the first `sh:message` text (or a generated default). `path`/`value`/`message` are `null` when absent. Only a graph parse failure throws (a `JsError`); malformed shapes are skipped, not surfaced. For large data graphs validate server-side via the `sparq-server` HTTP `validate` endpoint instead (the other half of the #162 decision). See the `shacl-validation` skill for the engine's SHACL coverage.
+The raw `Store.validate(data, shapes, format)` returns the same report as a JSON **string** (`JSON.parse` it yourself). `focusNode`/`value`/`sourceShape` are N-Triples term strings; `path` is a SHACL Turtle path expression; `severity`/`sourceConstraintComponent` are full IRIs; `message` is the first `sh:message` text (or a generated default). `path`/`value`/`message` are `null` when absent. Only a graph parse failure throws; malformed shapes are skipped, not surfaced. For large data graphs validate server-side via the `sparq-server` HTTP `validate` endpoint instead (the other half of the #162 decision). See the `shacl-validation` skill for the engine's SHACL coverage.
 
 ## Gotchas / feature flags / prerequisites
 
 - **ESM only, Node >= 18.** The package is `"type": "module"`; `init()` is idempotent and runs automatically on the first `SparqStore.from*` call (in Node it reads the wasm bytes from disk; in the browser/Deno it `fetch`es relative to the module). One runtime dep: `fzstd` (~8 KB, dynamically imported only when decoding zstd).
 - **`SparqStore` exposes SELECT/ASK only.** Its `query()` returns `Bindings[]` (SELECT) or `boolean` (ASK). CONSTRUCT/DESCRIBE and federated (`SERVICE`) queries are **not** exposed at the JS wrapper layer — use the raw `Store.queryQuads` for CONSTRUCT/DESCRIBE.
 - **`REGEX` / `REPLACE` are compiled out** of the wasm build (the engine's non-default `regex` cargo feature is off to keep the bundle small). Use `CONTAINS`/`STRSTARTS`/`STRENDS`/... or a custom wasm build with `--features regex`.
-- **SHACL `Store.validate` needs a `--features shacl` bundle.** The default shipped wasm bundle carries **zero** SHACL code (opt-in feature, off by default); `validate(data, shapes, format)` exists only in a bundle built with `--features shacl` (or `shacl-af` for `sh:rule`). It is on the raw `Store`, not `SparqStore`. Validation is in-process and best for small documents (~10–100 triples); large graphs should use the server-side HTTP `validate` path.
+- **SHACL is on `SparqStore.validate` (typed) AND raw `Store.validate` (JSON string), shipped by default.** The published bundle is built with `--features shacl`, so `validate` works out of the box. SHACL is **not free in the binary** — it pulls in the SHACL engine + `regex` + the `sh:sparql` query path, which roughly **doubles** the `.wasm` (measured ~1.21 MiB → ~2.19 MiB, +~1.0 MiB / +85%, pre-gzip). Size-sensitive consumers can build the lean variant (`npm run build:wasm:lean`, equivalently `wasm-pack build … --release` with no `--features`), which omits SHACL — `SparqStore.validate` then throws a clear "requires a SHACL-enabled wasm bundle" error. Use `--features shacl-af` to also compile `sh:rule`. Validation is in-process and best for small documents (~10–100 triples); large graphs should use the server-side HTTP `validate` path.
 - **`options.dataset` is not combinable with `options.compressed`** — there is no compressed dataset loader yet (the constructor throws). `compact-index` (3 permutations, ~half the memory) is auto-selected for wasm32 regardless; `compressed` adds block compression on top.
 - **`size` / `heapBytes` report the DEFAULT graph only.** For dataset totals use `countQuads()` (its graph wildcard spans named graphs).
 - **Mutation is overlay-based.** `update()` / `applyDelta()` write through an append-only delta overlay: the dictionary only grows, and deletes are tombstones until the wasm store is reloaded. Blank nodes in `applyDelta`/`removeQuads` are matched **by label** (so bnode triples can be retracted — impossible via SPARQL `DELETE DATA`).
