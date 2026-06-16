@@ -101,6 +101,19 @@ BENCH_EXEMPT_CRATES = frozenset(
 # Bench FAMILIES (leading id token) that the design (§5.D) accepts as
 # intentionally unfeatured on the capability dashboard: internal harness
 # runners, SPIKES, external-cost suites, and the raw ingest micro-benches.
+# [OPUS-4.8] sq-ncvq.16: crates whose crate-local conformance ratchet is now
+# CONSOLIDATED into the central sparq-conformance scoreboard registry
+# (crates/sparq-conformance/src/scoreboard.rs `SUITES`). Their runners stay
+# crate-local (they depend on sparq-shacl / sparq-geo, which the dev-only
+# conformance crate must not take on as deps), but the central scoreboard now
+# REPORTS them alongside SPARQL/inference with their ratchet floors, and a guard
+# test (crates/sparq-conformance/tests/scoreboard_floors.rs) keeps the floors in
+# lock-step. So these are no longer a `conformance-split` drift — the split the
+# §5.E finding flagged is closed. The scanner derives the live set from the
+# registry source (so adding a crate to `SUITES` auto-exempts it), falling back to
+# this literal set if the registry can't be read.
+CONFORMANCE_CONSOLIDATED_FALLBACK = frozenset({"sparq-shacl", "sparq-geo"})
+
 DASHBOARD_EXEMPT_FAMILIES = frozenset(
     {
         "cli",  # CLI query-suite runners (cli-bench-*, cli-ingest, …)
@@ -378,21 +391,46 @@ def scan_dashboard_row(root: Path) -> list[DriftItem]:
     return items
 
 
+def consolidated_conformance_crates(root: Path) -> set[str]:
+    """[OPUS-4.8] sq-ncvq.16 — crates whose crate-local conformance ratchet is now
+    registered in the central scoreboard registry
+    (crates/sparq-conformance/src/scoreboard.rs `SUITES`). Parsed textually from the
+    `Runner::CrateTest { krate: "<crate>", ... }` rows so adding a crate to the
+    registry auto-exempts it here; falls back to the literal set if the source is
+    unreadable (e.g. a fixture tree without the registry)."""
+    reg = root / "crates" / "sparq-conformance" / "src" / "scoreboard.rs"
+    try:
+        text = reg.read_text(encoding="utf-8")
+    except OSError:
+        return set(CONFORMANCE_CONSOLIDATED_FALLBACK)
+    found = set(re.findall(r'CrateTest\s*\{\s*krate:\s*"([^"]+)"', text))
+    # Belt-and-braces: never report LESS coverage than the known fallback.
+    return found | set(CONFORMANCE_CONSOLIDATED_FALLBACK) if found else set(
+        CONFORMANCE_CONSOLIDATED_FALLBACK
+    )
+
+
 def scan_conformance_split(root: Path) -> list[DriftItem]:
     """§5.E — conformance ratchets living OUTSIDE the central sparq-conformance
     scoreboard. We detect crate-local `tests/*.rs` files whose names mark them as
     a conformance/compliance ratchet (w3c_*, ogc_*, *compliance*, *conformance*)
-    in any crate OTHER than sparq-conformance."""
+    in any crate OTHER than sparq-conformance — EXCEPT crates whose ratchet is now
+    consolidated INTO the central scoreboard registry (sq-ncvq.16: the SHACL + geo
+    ratchets are reported there alongside SPARQL/inference, so they are no longer a
+    split even though their runners stay crate-local)."""
     items: list[DriftItem] = []
     crates_dir = root / "crates"
     if not crates_dir.is_dir():
         return items
+    consolidated = consolidated_conformance_crates(root)
     name_pat = re.compile(
         r"(w3c[_-]|ogc[_-]|compliance|conformance)", re.IGNORECASE
     )
     for crate in list_crates(root):
         if crate == "sparq-conformance":
             continue  # the central scoreboard itself
+        if crate in consolidated:
+            continue  # ratchet registered in the central scoreboard (sq-ncvq.16)
         tests = crates_dir / crate / "tests"
         if not tests.is_dir():
             continue

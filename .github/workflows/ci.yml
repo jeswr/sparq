@@ -355,10 +355,18 @@ jobs:
       - name: Fetch W3C test suites (pinned)
         run: ./scripts/fetch-conformance.sh
       - name: Run conformance suites
-        # [OPUS-4.8] --bin is REQUIRED: the crate now ships two binaries
-        # (sparq-conformance + sparq-inference-conformance, added in 058bdbf5),
-        # so a bare `cargo run -p sparq-conformance` is ambiguous and exits 101.
+        # [OPUS-4.8] --bin is REQUIRED: the crate now ships three binaries
+        # (sparq-conformance + sparq-inference-conformance + the consolidated
+        # sparq-conformance-scoreboard), so a bare `cargo run -p sparq-conformance`
+        # is ambiguous and exits 101.
         run: cargo run --release -p sparq-conformance --bin sparq-conformance
+      - name: Consolidated conformance scoreboard (all suites + floors)
+        # [OPUS-4.8] sq-ncvq.16: surface the ONE central index of every conformance
+        # ratchet across crates (SPARQL + inference + SHACL + GeoSPARQL) at the top
+        # of the primary conformance job's summary, then the detailed SPARQL report.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Summarize
         run: cat conformance-report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Enforce ratchet (pass+divergence count must not regress)
@@ -423,6 +431,53 @@ jobs:
         with:
           name: shacl-conformance
           path: shacl-conformance.out
+
+  geo-conformance:
+    # [OPUS-4.8] sq-ncvq.16 — OGC GeoSPARQL conformance RATCHET, promoted to a
+    # DEDICATED gating job so it is surfaced in the central conformance scoreboard
+    # alongside SPARQL / inference / SHACL (it formerly ran only inside the generic
+    # `cargo test --workspace` shards, invisible as a conformance check). The
+    # ratchet itself is the in-source corpus in
+    # crates/sparq-geo/tests/ogc_compliance_ratchet.rs (NOT fixture-gated — no fetch
+    # needed): the runner asserts `fail == 0` AND a pass-count FLOOR
+    # (OGC_RATCHET_FLOOR) that may only RISE. This job runs that runner with
+    # --nocapture and re-checks the printed `pass N / fail M (floor F)` line as the
+    # same belt-and-braces `>= floor` gate the SHACL/SPARQL jobs use. Never lower
+    # the floor (raise OGC_RATCHET_FLOOR as the corpus grows).
+    name: W3C/OGC GeoSPARQL conformance (ratchet — topology pass >= 119)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Run OGC GeoSPARQL topology compliance ratchet
+        # The runner asserts its own floor (OGC_RATCHET_FLOOR) + fail==0; capture the
+        # scoreboard so the grep gate below re-checks the pass count.
+        run: |
+          cargo test -p sparq-geo --test ogc_compliance_ratchet -- --nocapture \
+            | tee geo-conformance.out
+      - name: Enforce ratchet (topology pass count must not regress)
+        run: |
+          GEO_FLOOR=119
+          # runner prints: "pass <n> / fail <m> (floor <f>)"
+          GEO_PASS=$(grep -oE 'pass [0-9]+ / fail' geo-conformance.out | grep -oE '[0-9]+' | head -1)
+          echo "OGC GeoSPARQL topology pass: ${GEO_PASS:-unknown} (floor $GEO_FLOOR)"
+          [ -n "$GEO_PASS" ] && [ "$GEO_PASS" -ge "$GEO_FLOOR" ] || { echo "::error::OGC GeoSPARQL regressed below the ratchet (${GEO_PASS:-?} < $GEO_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # [OPUS-4.8] sq-ncvq.16: render the ONE central scoreboard index (all suites
+        # + floors across crates) into this job's step summary, so the GeoSPARQL job
+        # surfaces where it sits in the whole conformance picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: geo-conformance
+          path: |
+            geo-conformance.out
+            conformance-scoreboard.md
 
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL

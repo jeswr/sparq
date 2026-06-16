@@ -234,15 +234,51 @@ class ConformanceSplitTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
 
-    def test_flags_crate_local_ratchet(self):
+    def _register_in_scoreboard(self, *crates: str) -> None:
+        """[OPUS-4.8] sq-ncvq.16 — write a minimal scoreboard registry whose
+        `Runner::CrateTest { krate: "<crate>" }` rows mark the given crates as
+        CONSOLIDATED into the central scoreboard (so they're no longer a split)."""
+        rows = "\n".join(
+            f'    Runner::CrateTest {{ krate: "{c}", target: "t" }},' for c in crates
+        )
+        _write(
+            self.root,
+            "crates/sparq-conformance/src/scoreboard.rs",
+            f"pub const SUITES: &[Suite] = &[\n{rows}\n];\n",
+        )
+
+    def test_flags_unconsolidated_crate_local_ratchet(self):
+        # A crate with a conformance-named ratchet that is NOT registered in the
+        # central scoreboard IS still a split.
+        make_crate(self.root, "sparq-other")
+        _write(self.root, "crates/sparq-other/tests/w3c_thing.rs", "// ratchet")
+        items = drift_scan.scan_conformance_split(self.root)
+        keys = {it.dedup_key for it in items}
+        self.assertIn("conformance-split:sparq-other", keys)
+
+    def test_consolidated_crates_not_flagged(self):
+        # sq-ncvq.16: SHACL + geo ratchets are registered in the central scoreboard
+        # registry, so they are NO LONGER a conformance-split even though their
+        # runners stay crate-local.
         make_crate(self.root, "sparq-shacl")
         _write(self.root, "crates/sparq-shacl/tests/w3c_core.rs", "// ratchet")
         make_crate(self.root, "sparq-geo")
         _write(self.root, "crates/sparq-geo/tests/ogc_compliance_ratchet.rs", "// ratchet")
+        self._register_in_scoreboard("sparq-shacl", "sparq-geo")
         items = drift_scan.scan_conformance_split(self.root)
         keys = {it.dedup_key for it in items}
-        self.assertIn("conformance-split:sparq-shacl", keys)
-        self.assertIn("conformance-split:sparq-geo", keys)
+        self.assertNotIn("conformance-split:sparq-shacl", keys)
+        self.assertNotIn("conformance-split:sparq-geo", keys)
+
+    def test_fallback_exempts_known_crates_without_registry(self):
+        # Even with no registry source present, the literal fallback exempts the
+        # known consolidated crates (so a fixture tree without the registry behaves).
+        make_crate(self.root, "sparq-shacl")
+        _write(self.root, "crates/sparq-shacl/tests/w3c_core.rs", "// ratchet")
+        items = drift_scan.scan_conformance_split(self.root)
+        self.assertNotIn(
+            "conformance-split:sparq-shacl", {it.dedup_key for it in items}
+        )
 
     def test_central_scoreboard_exempt(self):
         make_crate(self.root, "sparq-conformance")
@@ -302,8 +338,11 @@ class MainDryRunTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         make_crate(self.root, "sparq-nlq")
-        make_crate(self.root, "sparq-shacl")
-        _write(self.root, "crates/sparq-shacl/tests/w3c_core.rs", "// ratchet")
+        # An UNCONSOLIDATED crate-local conformance ratchet (sq-ncvq.16: sparq-shacl
+        # is now exempt, so use a crate that is genuinely a split to exercise the
+        # conformance-split class end-to-end).
+        make_crate(self.root, "sparq-other")
+        _write(self.root, "crates/sparq-other/tests/w3c_thing.rs", "// ratchet")
         make_registry(self.root, sources=["crates/sparq-cli/src/main.rs"])
 
     def test_dry_run_prints_and_writes_json(self):
