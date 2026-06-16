@@ -209,6 +209,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // GET /sparql with no query. Off by default (env SPARQ_FEDERATION_DESCRIPTORS=1).
             #[cfg(feature = "federation-descriptors")]
             "--federation-descriptors" => config.federation_descriptors = true,
+            // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source
+            // endpoint — serve a paged RDF fragment of a triple pattern at GET /tpf with Hydra
+            // controls. Read-only. Off by default (env SPARQ_TPF=1).
+            #[cfg(feature = "tpf")]
+            "--tpf" => config.tpf = true,
             // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).

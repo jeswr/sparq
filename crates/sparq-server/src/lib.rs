@@ -37,6 +37,17 @@ pub mod audit;
 #[cfg(feature = "federation-descriptors")]
 pub mod descriptors;
 
+/// [OPUS-4.8] (sq-bzh1, epic sq-3183) OPT-IN Triple Pattern Fragments (TPF) / Linked Data
+/// Fragments (Hartig LDF) READ-ONLY source endpoint (`GET /tpf?subject=&predicate=&object=`) —
+/// a paged RDF fragment of the triples matching one triple pattern, with Hydra controls
+/// (`hydra:totalItems` from the cheap cardinality ESTIMATE, `hydra:next`/`hydra:previous`
+/// paging, the `hydra:search` template). Pure (no async); the async handler is in
+/// [`http`] (`tpf_endpoint`). Compiled only behind the `tpf` feature, and served only when
+/// [`ServerConfig::tpf`] is also set (`--tpf` / `SPARQ_TPF=1`) — the same double-opt-in as
+/// [`descriptors`]. See the module docs.
+#[cfg(feature = "tpf")]
+pub mod tpf;
+
 /// Prometheus metrics — hand-rolled text exposition at `GET /metrics` (T22).
 #[cfg(feature = "server")]
 pub mod metrics;
