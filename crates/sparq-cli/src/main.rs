@@ -849,25 +849,33 @@ fn load(path: &str, format: &str) -> sparq_core::Graph {
     g
 }
 
-/// [OPUS-4.8] (sq-678h) `dump <file[.gz|.bz2|.zst]> <in-format> <out-format>` — load an RDF
-/// document and re-serialize the whole graph (default + named graphs) into one of the writer
-/// matrix formats and print it to stdout. `out-format` ∈ {turtle, trig, nquads, ntriples}.
-/// Turtle emits only the default graph (named graphs need a dataset format); trig/nquads emit
-/// the full dataset. Behind the opt-in `serialize-rdf` cargo feature.
+/// [OPUS-4.8] (sq-678h, sq-e3pj) `dump <file[.gz|.bz2|.zst]> <in-format> <out-format>` — load an
+/// RDF document and re-serialize the whole graph (default + named graphs) into one of the writer
+/// matrix formats and print it to stdout. `out-format` ∈ {turtle, trig, nquads, ntriples,
+/// jsonld[-expanded|-flattened|-compacted]}. Turtle emits only the default graph (named graphs
+/// need a dataset format); trig/nquads/jsonld emit the full dataset. JSON-LD defaults to the
+/// expanded form; `jsonld-flattened` / `jsonld-compacted` select the other 1.1 document forms.
+/// Behind the opt-in `serialize-rdf` cargo feature.
 #[cfg(feature = "serialize-rdf")]
 fn cmd_dump(args: &[String]) {
     let (path, in_fmt, out_fmt) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(i), Some(o)) => (p.as_str(), i.as_str(), o.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli dump <file[.gz|.bz2|.zst]> <in-format> <out-format>\n  out-format: turtle | trig | nquads | ntriples");
+            eprintln!("usage: sparq-cli dump <file[.gz|.bz2|.zst]> <in-format> <out-format>\n  out-format: turtle | trig | nquads | ntriples | jsonld[-expanded|-flattened|-compacted]");
             std::process::exit(2);
         }
     };
     let g = load_quiet(path, in_fmt);
+    use sparq_engine::serialize::JsonLdForm;
     let serialized = match out_fmt {
         "turtle" | "ttl" => sparq_engine::serialize::graph_to_turtle(&g),
         "trig" => sparq_engine::serialize::graph_to_trig(&g),
         "nquads" | "n-quads" => sparq_engine::serialize::graph_to_nquads(&g),
+        "jsonld" | "json-ld" | "jsonld-expanded" => {
+            sparq_engine::serialize::graph_to_jsonld(&g, JsonLdForm::Expanded)
+        }
+        "jsonld-flattened" => sparq_engine::serialize::graph_to_jsonld(&g, JsonLdForm::Flattened),
+        "jsonld-compacted" => sparq_engine::serialize::graph_to_jsonld(&g, JsonLdForm::Compacted),
         // N-Triples stays on the always-on writer (the default graph as `s p o .` lines).
         "ntriples" | "n-triples" => {
             let triples: Vec<oxrdf::Triple> = g
@@ -894,7 +902,7 @@ fn cmd_dump(args: &[String]) {
             sparq_engine::triples_to_ntriples(&triples)
         }
         other => {
-            eprintln!("unknown out-format '{other}' (known: turtle | trig | nquads | ntriples)");
+            eprintln!("unknown out-format '{other}' (known: turtle | trig | nquads | ntriples | jsonld[-expanded|-flattened|-compacted])");
             std::process::exit(2);
         }
     };

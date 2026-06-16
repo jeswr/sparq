@@ -106,3 +106,9 @@ rayon.workspace = true
 # The cs-planner q-error gate builds its characteristic-set tables through the
 # dict-id accessor (dev-only; the library never depends on introspection).
 sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
+# [OPUS-4.8] (sq-e3pj) The JSON-LD writer's round-trip tests parse the emitted document
+# back to RDF to assert isomorphism. serde_json reads the JSON DOM in the test only — it
+# is a DEV dependency, so the opt-in `serialize-rdf` feature itself stays dependency-free
+# (the native writer emits JSON by hand and pulls in nothing). serde_json is already in
+# the workspace tree (sparq-server / the `service` feature).
+serde_json = "1"
