@@ -72,7 +72,7 @@ watch item).
 ### ASVS — applicable controls PASS; external verification AUDIT-READY
 | ID | Gap | Sev | Bead |
 |---|---|---|---|
-| ASVS-G1 | `sparq-server` sets no security response headers (min `X-Content-Type-Options: nosniff`; no CSP/X-Frame-Options/HSTS) | Medium | `sq-cmvh` |
+| ASVS-G1 | ~~`sparq-server` sets no security response headers (min `X-Content-Type-Options: nosniff`; no CSP/X-Frame-Options/HSTS)~~ **Resolved** ([OPUS-4.8] `sq-cmvh`, residual auth-path `Cache-Control: no-store` + auth-gated test under `sq-2bhm`) — central `map_response` layer in `harden()` stamps `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` on every response (success / streamed / error / auth-gated 401), and the sensitive 401 additionally carries `Cache-Control: no-store`; asserted by `tests/hardening.rs::security_headers_*`. | Medium | `sq-cmvh`, `sq-2bhm` |
 | ASVS-G2 | No first-party CORS allowlist option (documented safe-default decision, not a vuln) | Low | `sq-o7o0` |
 | ASVS-G3 | (Error-body info-leak) no test asserting no FS-path/internal-host leak — **FIX SHIPPED (PR #241)**; regression bead open | Medium | `sq-j9zs` (parent `sq-cz89`) |
 | ASVS-G4 | No explicit SPARQL parse-depth bound (nested-input DoS bounded only by `--max-body-bytes`) | Low | `sq-53s1` |

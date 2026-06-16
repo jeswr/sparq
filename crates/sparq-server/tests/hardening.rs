@@ -661,3 +661,40 @@ async fn security_headers_on_streamed_response() {
     assert_eq!(resp.status(), 200);
     assert_security_headers(resp.headers());
 }
+
+/// [OPUS-4.8] sq-2bhm (ASVS-G1): the headers must also land on an AUTH-GATED refusal, and the
+/// auth-refusal — a sensitive response — must additionally carry `Cache-Control: no-store` so a
+/// shared cache never retains a 401. Gate the whole surface (write token + `--auth-token-read`)
+/// and hit a read with no token: a `401` that is still fully hardened.
+#[tokio::test]
+async fn security_headers_on_auth_gated_response() {
+    let cfg = ServerConfig {
+        auth_token: Some("s3cr3t-token".to_string()),
+        auth_token_read: true,
+        ..ServerConfig::default()
+    };
+    let base = spawn_with(DATA, cfg).await;
+    // A read with NO Authorization header — gated → 401.
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?s WHERE { ?s <http://ex/age> ?a }")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(
+        resp.headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer")
+    );
+    assert_security_headers(resp.headers());
+    // Sensitive auth response: no shared cache may retain it.
+    assert_eq!(
+        resp.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "auth-refusal must carry Cache-Control: no-store"
+    );
+}
