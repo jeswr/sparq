@@ -91,6 +91,28 @@ jobs:
       - name: cargo-vet check — GATING
         run: cargo vet --locked
 
+  # ---- VEX ↔ deny.toml drift gate ----
+  # [OPUS-4.8] sq-toze.29 (GS-5): the published VEX (supply-chain/vex.cdx.json) and the
+  # ACTUAL cargo-deny gate (deny.toml [advisories].ignore) name the same set of tolerated
+  # advisories; they were kept in step by a "KEEP THIS IN SYNC" comment + manual review.
+  # This job makes the invariant a CI gate: it fails if the deny.toml ignore-id set and the
+  # VEX vulnerabilities[].id set drift apart (so the public exploitability story can never
+  # silently disagree with the gate that's actually enforced). Source of truth is deny.toml.
+  # Pure-stdlib Python (tomllib/json on the runner's 3.12); also runs the hermetic self-test
+  # so a regression in the check itself is caught. NOTE: the job name has NO "advisory"/
+  # "informational" WHOLE WORD, so the ci-summary aggregator treats it as GATING (intentional
+  # — see ci-summary.yml's \b(advisory|informational)\b rule; "advisories" plural here is in
+  # the comment, not the name).
+  vex-deny-sync:
+    name: VEX ↔ deny.toml sync (GS-5) — GATING
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: VEX ↔ deny.toml drift self-test
+        run: python3 scripts/tests/test_vex_deny_drift.py
+      - name: VEX ↔ deny.toml drift check — GATING
+        run: python3 scripts/check-vex-deny-drift.py
+
   # ---- CycloneDX SBOM ----
   sbom:
     name: generate CycloneDX SBOM

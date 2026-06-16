@@ -48,7 +48,7 @@ NTIA-completeness gap (GS-1). N6 is met at tool-author granularity (the NTIA-int
 |---|---|---|---|---|
 | VEX-1 | A VEX document exists | **Implemented & verified** | `supply-chain/vex.cdx.json` (CycloneDX 1.5, 2 vulnerabilities). | SPARQ |
 | VEX-2 | VEX states exploitability for **every** ignored advisory | **Implemented & verified** | VEX covers `RUSTSEC-2024-0436` + `RUSTSEC-2025-0134`, each with `analysis.state=not_affected` + a CycloneDX `justification` (`code_not_reachable` / `vulnerable_code_not_in_execute_path`) + detail. | SPARQ |
-| VEX-3 | VEX kept **1:1 in sync** with the dependency-policy ignore list | **Implemented & verified** | `deny.toml` `[advisories].ignore` = exactly the same two RUSTSEC IDs (`deny.toml:L31,L35`); the VEX `_comment` mandates the 1:1 invariant. Verified by inspection this branch (both lists = {2024-0436, 2025-0134}). **Drift-check automation is a P2 gap — GS-5.** | SPARQ |
+| VEX-3 | VEX kept **1:1 in sync** with the dependency-policy ignore list | **Implemented & verified** | `deny.toml` `[advisories].ignore` = exactly the same two RUSTSEC IDs (`deny.toml:L31,L35`); the VEX `_comment` mandates the 1:1 invariant. **Now CI-enforced (GS-5 RESOLVED, sq-toze.29):** `scripts/check-vex-deny-drift.py` set-equates the deny.toml ignore-id set (parsed via `tomllib`, robust to the `{id,reason}` form) with the VEX `vulnerabilities[].id` set and exits non-zero on unjustified drift; wired as the GATING job `.github/workflows/supply-chain.yml#vex-deny-sync`, which also runs the hermetic self-test `scripts/tests/test_vex_deny_drift.py`. Source of truth = deny.toml (the enforced gate). Verified: in sync this branch (both = {2024-0436, 2025-0134}); negative test confirms removing either deny.toml ignore makes the check fail (exit 1). | SPARQ |
 | VEX-4 | Per-release VEX published with the version stamped | **Audit-ready** (config-verified; operating-verification pending first release) | `scripts/gen-sbom-vex.sh#L49-67` stamps the released version + timestamp into `sparq-<version>.vex.cdx.json`; attached to the Release by `release.yml#release`. The script + wiring are reviewed and the **checked-in** VEX is verified, but **no per-release VEX has been published yet** (0 releases, 2026-06-15). | SPARQ |
 
 ## D. Signed / attested SBOM
@@ -118,13 +118,13 @@ NTIA-completeness gap (GS-1). N6 is met at tool-author granularity (the NTIA-int
   the corrected probe), INT-3/GS-2 (reproducible build, GX-8, bead sq-toze.9). (CDX-3/GS-4, spec
   version, is now RESOLVED — sq-toze.28 — SBOM at CycloneDX 1.5.)
 
-**Tracked open gap *items* (gap-register.md) — 4 (GS-1,2,3,5):** GS-1 (N1 supplier, bead sq-toze.26),
+**Tracked open gap *items* (gap-register.md) — 3 (GS-1,2,3):** GS-1 (N1 supplier, bead sq-toze.26),
 GS-2/GX-8 (reproducible build, bead sq-toze.9 — maps to control row INT-3), GS-3 (JS-lockfile SBOM,
-bead sq-toze.27 — a *scope* item with **no control row**), GS-5 (VEX↔deny drift automation, bead
-sq-toze.29 — a P2 sub-gap *behind* control VEX-3, which is otherwise Implemented & verified). Plus the
-**RESOLVED** GS-6 / sq-toze.30 (F-6: SBOM root `bom-ref` abs-path leak — sanitised) and GS-4 /
-sq-toze.28 (spec version — SBOM now 1.5). So the open gap *items* ≠ the gap *rows*: GS-3 has no row,
-and GS-5 sits behind an otherwise-met control.
+bead sq-toze.27 — a *scope* item with **no control row**). Plus the **RESOLVED** GS-6 / sq-toze.30
+(F-6: SBOM root `bom-ref` abs-path leak — sanitised), GS-4 / sq-toze.28 (spec version — SBOM now 1.5),
+and GS-5 / sq-toze.29 (VEX↔deny drift automation — now the GATING CI job
+`supply-chain.yml#vex-deny-sync`, so VEX-3 is fully Implemented & verified with no residual sub-gap).
+So the open gap *items* ≠ the gap *rows*: GS-3 has no row.
 
 - **Overclaim audit:** none. Every "Implemented & verified" row cites a file path, CI job, or a
   recorded probe; the release-gated rows are downgraded to **Audit-ready** rather than overclaiming

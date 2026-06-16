@@ -21,8 +21,10 @@ operating-verified** — no `v*` tag / Release / attestation exists yet (verifie
 attested artifacts have never been produced. The 2 **gap** rows are N1/GS-1 (per-component Supplier
 Name slot — partial; the `author` field is present on 144/166 components) and INT-3/GS-2 (reproducible
 build). CDX-3/GS-4 (spec version) is now **RESOLVED** ([OPUS-4.8], sq-toze.28 — SBOM emitted as
-CycloneDX **1.5**, matching the VEX, with `metadata.lifecycles` populated). Separately, **4 tracked
-open gap *items*** (GS-1,2,3,5) plus the RESOLVED GS-6/sq-toze.30 and GS-4/sq-toze.28 are recorded in
-[`gap-register.md`](gap-register.md), each with a severity + a bead — note GS-3 (JS-lockfile SBOM) is a
-scope item with no control row and GS-5 (VEX drift-check automation) sits behind the otherwise-met
-control VEX-3, so the gap *items* ≠ the gap *rows*. No control is overclaimed.
+CycloneDX **1.5**, matching the VEX, with `metadata.lifecycles` populated). Separately, **3 tracked
+open gap *items*** (GS-1,2,3) plus the RESOLVED GS-6/sq-toze.30, GS-4/sq-toze.28, and GS-5/sq-toze.29
+are recorded in [`gap-register.md`](gap-register.md), each with a severity + a bead — note GS-3
+(JS-lockfile SBOM) is a scope item with no control row. GS-5 (VEX↔deny drift-check automation) is now
+**RESOLVED** ([OPUS-4.8], sq-toze.29 — the GATING CI job `supply-chain.yml#vex-deny-sync`), so VEX-3 is
+fully Implemented & verified with no residual sub-gap. So the gap *items* ≠ the gap *rows*. No control
+is overclaimed.
