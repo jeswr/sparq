@@ -1,4 +1,7 @@
 #![doc = include_str!("../README.md")]
+// [OPUS-4.8] MS-G2 (sq-8wbn): make `// SAFETY:` mandatory on every first-party unsafe
+// block. Mechanically enforces the per-site argument the unsafe-register documents.
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod compress;
 pub mod dict;
@@ -4390,6 +4393,9 @@ fn remap_perm_file(path: &std::path::Path, base: &[u64], stride: u32) -> Result<
     }
     // SAFETY: read-write mapping of a freshly-written perm file of whole [u32;3] rows.
     let mut mmap = unsafe { memmap2::MmapMut::map_mut(&f) }.map_err(|e| e.to_string())?;
+    // SAFETY: the mmap base is page-aligned (≥ 4-byte u32 align) and the file is a whole
+    // number of [u32;3] rows, so `len/4` u32 cells are in-bounds; the `MmapMut` is
+    // exclusively owned here and the rayon writes below are disjoint by index. [OPUS-4.8 sq-8wbn]
     let ids: &mut [u32] = unsafe { std::slice::from_raw_parts_mut(mmap.as_mut_ptr().cast::<u32>(), len / 4) };
     use rayon::prelude::*;
     ids.par_iter_mut().for_each(|id| *id = dict::remap_sharded(*id, base, stride));
@@ -6228,6 +6234,8 @@ mod tests {
         // SAFETY: single-threaded test; we restore/remove the var before returning.
         unsafe { std::env::set_var("SPARQ_QUADS_SPILL_MAX_OPEN", "4") };
         let build = Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64);
+        // SAFETY: single-threaded test; removes the var set above before returning so the
+        // process env is left clean. Edition-2024 made `remove_var` `unsafe`. [OPUS-4.8 sq-8wbn]
         unsafe { std::env::remove_var("SPARQ_QUADS_SPILL_MAX_OPEN") };
         build.expect("bounded-writer-pool build must succeed with a tiny FD budget");
 
