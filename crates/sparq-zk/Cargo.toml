@@ -22,15 +22,13 @@ publish = false
 sparq-core = { path = "../sparq-core" }
 sparq-engine = { path = "../sparq-engine", features = ["zk"] }
 oxrdf = { workspace = true }
-oxttl = { workspace = true }
 spargebra = { workspace = true }
 
-# RDFC10 (W3C RDF Dataset Canonicalization). Maintained zkp-ld implementation;
-# it speaks oxrdf 0.2, so we bridge from sparq's oxrdf 0.3 via canonical
-# N-Quads text (see src/canon.rs for why this is the clean seam).
-rdf-canon = "0.15.3"
-oxrdf02 = { package = "oxrdf", version = "0.2.4" }
-oxttl01 = { package = "oxttl", version = "0.1.8" }
+# RDFC-1.0 (W3C RDF Dataset Canonicalization) — single-sourced in the opt-in
+# `sparq-canon` crate (the public canonicalization surface; sq-0qip). It owns
+# the oxrdf 0.3 <-> 0.2 bridge and the rdf-canon dependency, so `sparq-zk`'s
+# `canon` module is now just a re-export. [OPUS-4.8]
+sparq-canon = { path = "../sparq-canon" }
 
 # BN254 scalar field (the Noir `Field`) for Poseidon2.
 # [OPUS-4.8] The whole arkworks stack (ark-bn254/ark-ff/ark-ec/ark-serialize/ark-ed-on-bn254/
@@ -54,11 +52,5 @@ ark-ec = { version = "0.6", default-features = false }
 ark-serialize = { version = "0.6", default-features = false }
 ark-std = { version = "0.6", default-features = false, features = ["std"] }
 
-[dev-dependencies]
-serde_json = "1"
-# SHA-384 parameterized-hash cases of the W3C rdf-canon suite (test075).
-# [OPUS-4.8] Pinned to 0.10 (NOT 0.11): rdf-canon 0.15.3 exposes a `Digest` bound from
-# digest 0.10, and the test feeds `sha2::Sha384` straight into canonicalize_quads_with::<D>.
-# Bumping this crate's sha2 to 0.11 (digest 0.11) makes the type fail rdf-canon's 0.10 bound.
-# Lift only once rdf-canon publishes a digest-0.11 release. See Dependabot PR #17 / bead.
-sha2 = "0.10"
+# [dev-dependencies] removed: the W3C rdf-canon suite (and its serde_json/sha2
+# deps) moved to `sparq-canon` with the canonicalization surface (sq-0qip).

@@ -404,14 +404,32 @@
   // (normalised lower-case); `prefixes` are a structural fallback matched against the raw metric
   // name's leading token so a not-yet-labelled metric (e.g. a future `vectors_*`) still lands in
   // the right family. Pure + node-testable.
+  //
+  // [OPUS-4.8] sq-ncvq.15 / drift-scan §5.D: the dashboard previously covered only the suites that
+  // already FLOW to benchmark-data via scripts/ci-bench.sh (core/sparql + the four capability
+  // surfaces + reasoning). The drift scan flagged that MANY registered benchmark families
+  // (bench/benchmarks.toml) had NO dashboard row at all — most notably the entire ZK estate
+  // (zk / zk-trace / zk-compose), plus Solid/WAC access-control, HDT ingest, RSP streaming,
+  // GenAI (similarity / introspection) and the GPU kernel experiment. These are stdout/criterion
+  // benches today (they do NOT yet emit into ci-bench.sh's customSmallerIsBetter feed), so the rows
+  // below render as "not yet reported" until a ci-bench hook lands — which is exactly the dashboard's
+  // HONEST graceful-degradation contract (buildFamilies keeps every family, count 0 -> a nav chip +
+  // a "not yet reported" section). When a hook DOES start emitting (e.g. `zk_commit_us`,
+  // `hdt_load_s`, …), the metric lands in the right family automatically via these prefixes — no
+  // further dashboard change. The headline gap (ZK) is listed FIRST among the new families.
   var FAMILIES = [
     { key: 'core',     title: 'Core (load · dict · memory)', kind: 'core',
       suites: ['pipeline', 'memory / size'],
       prefixes: ['load', 'parse', 'store', 'dict', 'wasm', 'rdfs'] },
     { key: 'sparql',   title: 'SPARQL query suites', kind: 'sparql',
+      // [OPUS-4.8] sq-ncvq.15: selective (index-nested-loop / bind join) + u64 (inline value-id /
+      // dict-resolve) are SPARQL micro-suites run through the same cli `bench` runner (q01_* stems).
+      // They emit no dashboard metric today; recognise their suite names + `selective`/`u64` prefixes
+      // so a future hook groups them under SPARQL, not orphaned.
       suites: ['sp2bench', 'watdiv', 'lubm (reasoning)', 'bsbm', 'dbpsb',
-               'synthetic (qlever-style)', 'operators'],
-      prefixes: ['sp2b', 'watdiv', 'lubm', 'bsbm', 'dbpsb', 'op', 'q01', 'q02', 'q03', 'q04',
+               'synthetic (qlever-style)', 'operators', 'selective', 'u64 / value-ids'],
+      prefixes: ['sp2b', 'watdiv', 'lubm', 'bsbm', 'dbpsb', 'op', 'selective', 'u64',
+                 'q01', 'q02', 'q03', 'q04',
                  'q05', 'q06', 'q07', 'q08', 'q09', 'q10', 'q11', 'q12'] },
     { key: 'shacl',    title: 'SHACL validation', kind: 'capability',
       suites: ['shacl validation', 'shacl'], prefixes: ['shacl'] },
@@ -422,9 +440,34 @@
     { key: 'vector',   title: 'Vector / ANN', kind: 'capability',
       suites: ['vector', 'vector / ann', 'vectors', 'ann'],
       prefixes: ['vector', 'vectors', 'vec', 'ann', 'knn', 'hnsw', 'diskann'] },
-    { key: 'reasoning', title: 'Reasoning (Deep Taxonomy)', kind: 'capability',
-      suites: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy'],
-      prefixes: ['deeptax', 'deep'] }
+    { key: 'reasoning', title: 'Reasoning (N3 · RDFS · OWL-RL)', kind: 'capability',
+      // [OPUS-4.8] sq-ncvq.15: broaden beyond Deep Taxonomy — the inference estate also has the
+      // RDFS/OWL-RL materialization (owl-bench) + incremental-maintenance benches. Recognise their
+      // likely hook prefixes so they share the Reasoning section if/when they start emitting.
+      // NB: `rdfs_infer_s` stays in Core — its label-map suite is "Pipeline" (suiteFor wins over the
+      // prefix pass), and we deliberately do NOT claim the bare `rdfs` token here to avoid ambiguity.
+      suites: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy', 'reasoning', 'inference'],
+      prefixes: ['deeptax', 'deep', 'owl', 'infer', 'incremental', 'reason'] },
+    // ---- newly-promoted capability families (sq-ncvq.15 / drift-scan §5.D) ------------------------
+    // [OPUS-4.8] ZK is the HEADLINE gap: the whole commitment + trace + circuit estate (the zk,
+    // zk-trace and zk-compose benchmark suites) had no dashboard presence at all. Prefixes cover the
+    // likely ci-bench emit names (zk_commit_us / zk_canon_* / zktrace_* / zkcompose_gates / …).
+    { key: 'zk', title: 'Zero-knowledge (commit · trace · circuit)', kind: 'capability',
+      suites: ['zk', 'zk-trace', 'zk trace', 'zk-compose', 'zk compose', 'zero-knowledge'],
+      prefixes: ['zk', 'zktrace', 'zkcompose', 'poseidon2', 'rdfc10', 'commitment'] },
+    { key: 'solid', title: 'Solid / access control (WAC · ACP)', kind: 'capability',
+      suites: ['solid', 'wac', 'acp', 'access control'],
+      prefixes: ['solid', 'wac', 'acp'] },
+    { key: 'hdt', title: 'HDT archive ingest', kind: 'capability',
+      suites: ['hdt'], prefixes: ['hdt'] },
+    { key: 'rsp', title: 'RDF Stream Processing (continuous queries)', kind: 'capability',
+      suites: ['rsp', 'rdf stream processing', 'streaming'],
+      prefixes: ['rsp', 'stream', 'window'] },
+    { key: 'genai', title: 'GenAI (similarity · introspection)', kind: 'capability',
+      suites: ['similarity', 'introspect', 'introspection', 'genai'],
+      prefixes: ['sim', 'similarity', 'introspect'] },
+    { key: 'gpu', title: 'GPU kernels (experimental)', kind: 'capability',
+      suites: ['gpu'], prefixes: ['gpu'] }
   ];
 
   // The top-level family a metric belongs to. Consults suiteFor() (label-map driven) FIRST, then a

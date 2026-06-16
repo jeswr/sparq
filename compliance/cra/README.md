@@ -1,0 +1,107 @@
+<!-- [OPUS-4.8] EU Cyber Resilience Act (CRA) framework intro + scope. Bead sq-toze.18 (epic sq-toze). -->
+# EU Cyber Resilience Act (CRA) — sparq readiness
+
+> **Status legend:** *implemented & verified* (a technical control in the codebase/CI with
+> passing evidence) · *audit-ready* (control + documentation in place, but the formal act —
+> CE marking, conformity assessment, EU declaration of conformity — needs the **manufacturer's
+> organizational sign-off**, not something an agent or the source tree can substitute) ·
+> *gap* (not met; tracked in [`gap-register.md`](./gap-register.md) + a `bd` bead) ·
+> *N/A* (not applicable to a Rust library/server distributed as a dependency).
+
+## What the CRA is
+
+Regulation (EU) 2024/2847 — the **Cyber Resilience Act** — sets horizontal cybersecurity
+requirements for **products with digital elements (PDEs)** made available on the EU market. It
+binds the **manufacturer** (the party that places the product on the market under its own
+name) to:
+
+- the **essential cybersecurity requirements** of **Annex I, Part I** (secure-by-design /
+  secure-by-default properties of the product), and
+- the **vulnerability-handling requirements** of **Annex I, Part II** (a process: SBOM,
+  coordinated disclosure, timely security updates, a support period), plus
+- **information and instructions to the user** (**Annex II**), and
+- conformity assessment + the **EU declaration of conformity** + **CE marking** (the formal
+  acts — Articles 13, 28, and Annexes IV/V).
+
+Key dates: the Regulation entered into force **2024-12-10**; the **vulnerability-handling and
+reporting obligations** (Article 14 — reporting actively exploited vulnerabilities and severe
+incidents to ENISA/CSIRTs) apply from **2026-09-11**; the **main body of obligations** applies
+from **2027-12-11**.
+
+## How sparq maps onto the CRA — and the load-bearing nuances
+
+sparq is a **Rust RDF/SPARQL data-engine library** (`sparq-core`, `sparq-engine`, …) plus an
+**HTTP server** (`sparq-server`), a **WASM port**, and a **ZK/MPC crypto estate**, distributed
+on crates.io / npm / PyPI / ghcr.io. That shape drives four scoping decisions:
+
+1. **CRA applies to the act of placing on the market, not to the source tree.** sparq's
+   repository can hold *evidence* that the essential requirements (Annex I Part I) and the
+   process requirements (Annex I Part II) are met — the SBOM, the advisory gate, the
+   coordinated-disclosure channel, signed provenance. It **cannot** produce the conformity
+   assessment, the EU declaration of conformity, or the CE marking; those are **the
+   manufacturer's organizational acts**. Every such item is labelled *audit-ready*, never
+   *implemented & verified*, and this document **does not claim CE conformity**.
+
+2. **Open-source-steward nuance.** The CRA distinguishes a commercial **manufacturer** from an
+   **open-source software steward** (Article 24 + Recitals 18–19): a person/entity that
+   supports the development of *free and open-source software intended for commercial
+   activities* but **does not monetise it**. A steward carries a **lighter-touch** regime —
+   principally a **duty to put in place and document a cybersecurity policy**, to **cooperate
+   with market-surveillance authorities**, and to **report actively-exploited vulnerabilities
+   and severe incidents** — rather than the full manufacturer conformity-assessment +
+   CE-marking burden. sparq today is a **non-monetised research/open-source project** (MIT,
+   pre-1.0, "experimental research RDF triplestore" — see [`SECURITY.md`](../../SECURITY.md)),
+   so the **steward** path is the realistic frame. **However**, the moment a party
+   *commercialises* sparq — sells it, bundles it into a paid product, or offers it as a paid
+   service in the EU — **that party becomes the manufacturer for their offering** and inherits
+   the full obligation. This document is written so it serves **either** reading: the technical
+   evidence (Annex I) is the same; only the conformity-assessment/CE-marking layer differs, and
+   that layer is explicitly the deploying/commercialising party's responsibility.
+
+3. **The "no authentication" boundary is the operator's, by documented design.** `sparq-server`
+   ships with **optional** Bearer-token auth and a **fail-closed non-loopback bind** (it refuses
+   to listen on a non-loopback address unless the operator explicitly opts in *or* authenticates
+   the surface), but it has **no per-user authz / session management** — threat-model boundary
+   **B3** ("front with a gateway / sparq-solid"). For CRA Annex I (2)(d) "protect from
+   unauthorised access" this is an **architectural decision + operator-responsibility split**,
+   documented and surfaced at runtime (a loud no-auth startup warning), not a silent gap.
+
+4. **The ZK/MPC estate provides NO security property today and is excluded from every CRA
+   security claim.** The v1 ZK verifier is documented as **NOT sound** and `sparq-mpc` as a
+   deferred research scaffold (see [`SECURITY.md`](../../SECURITY.md) §"research scaffolds with
+   NO security guarantee" and [`research/zk-soundness-audit.md`](../../research/zk-soundness-audit.md)).
+   No CRA Annex I "confidentiality/integrity" claim in this mapping rests on the ZK/MPC crates;
+   to do so would launder a research scaffold into a regulatory assurance and is an explicit
+   honesty-contract violation.
+
+## Scope — what is in / out for a library + server
+
+| In scope (sparq's responsibility) | Out of scope (operator / deploying-party responsibility) |
+|---|---|
+| Secure-by-default config of the binary (`sparq-server` defaults, bind posture, DoS limits) | The *deployment* environment (TLS termination, network firewalling, the reverse-proxy gateway, OS patching) |
+| The vulnerability-handling **process** (advisory gate, coordinated disclosure, SBOM, security updates via releases) | Authentication of *end users* and per-user authorization (boundary B3 → gateway / sparq-solid) |
+| Supply-chain integrity of what sparq ships (cargo-deny, cargo-vet, SLSA provenance, signed releases) | The **conformity assessment**, **EU declaration of conformity**, and **CE marking** (a manufacturer organizational act) |
+| Information & instructions to the user (Annex II): SECURITY.md, READMEs, the support/EOL statement | Article 14 **reporting to ENISA/CSIRTs** of actively-exploited vulns (an organizational/legal duty of whoever is the manufacturer/steward of record) |
+| The honest "no known exploitable vulnerability at ship" claim, resting on the real PR-time advisory gate | The risk acceptance for *whatever RDF data the operator loads* (sparq is a data engine; the operator is the data controller) |
+
+## Deliverables in this folder
+
+- [`controls.md`](./controls.md) — the Annex I (Part I + Part II) and Annex II requirement →
+  status → evidence → owner table. **This is the spine the auditor checks.**
+- [`evidence.md`](./evidence.md) — the consolidated evidence pack (file paths, CI jobs, scans)
+  each control row points at, with the verification commands.
+- [`gap-register.md`](./gap-register.md) — open gaps, severity, remediation, target, and the
+  `bd` bead under epic `sq-toze` that tracks each.
+
+## Honest one-line posture
+
+sparq **already satisfies the substance of the CRA Annex I vulnerability-handling process and
+most of the secure-by-default essential requirements** — coordinated disclosure
+(`SECURITY.md` + RFC 9116 `security.txt`), an SBOM (per-release CycloneDX + VEX), a **gating**
+PR-time advisory check (cargo-deny advisories un-degraded, `supply-chain.yml`), signed
+provenance on releases, and documented secure-by-default server limits. The remaining work is
+**(a)** a small set of release-completeness gaps (SLSA provenance on the `dist.yml` lane and
+published-package provenance for crates.io/npm/PyPI; a container-image vuln scan), and
+**(b)** the **audit-ready** organizational layer the CRA reserves to the manufacturer/steward
+(the documented cybersecurity policy, the formal EU declaration of conformity + CE marking, and
+the Article 14 reporting workflow) — which an agent cannot and must not self-certify.

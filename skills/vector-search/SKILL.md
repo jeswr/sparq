@@ -1,6 +1,6 @@
 ---
 name: vector-search
-description: "Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, fuse with another ranked signal (RRF / score blend) for hybrid retrieval, and — behind the opt-in `vec-predicate` feature — run k-NN INSIDE plain SPARQL via the `vec:nearest` / `vec:search` magic predicates. Use when adding embedding/semantic-search/nearest-neighbour over a sparq Graph in the sparq-vectors crate."
+description: "Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, fuse with another ranked signal (RRF / score blend) for hybrid retrieval, run predicate-constrained (filtered) ANN over a BGP-selected dict-id mask behind the opt-in `filtered-ann` feature, and — behind the opt-in `vec-predicate` feature — run k-NN INSIDE plain SPARQL via the `vec:nearest` / `vec:search` magic predicates. Use when adding embedding/semantic-search/nearest-neighbour over a sparq Graph in the sparq-vectors crate."
 ---
 
 # sparq-vector-search
@@ -112,6 +112,17 @@ impl DiskAnnIndex { fn nearest(&self, &[f32], k) -> Vec<(Id, f32)>; fn nearest_t
                     fn fingerprint() -> Option<Fingerprint>; fn check_graph(&store, &Graph) -> Result<(), String>;
                     fn nearest_term_checked(&Term, &Graph, &store, k) -> Result<Vec<(Term, f32)>, String> }
 sibling_graph_path(&Path) -> PathBuf                                            // foo.spqv -> foo.spqg
+
+// --- predicate-constrained (filtered) ANN (src/filter.rs) --- feature = "filtered-ann" ONLY; LEAN, no new dep [OPUS-4.8] sq-1wc1
+IdMask::new() / ::from_ids(impl IntoIterator<Item=Id>) / FromIterator<Id>   // the BGP-selected "visit mask" of permitted dict-ids
+impl IdMask { fn insert(&mut self, Id) -> &mut Self; fn contains(Id)->bool; fn len()/is_empty(); fn iter() -> impl Iterator<Item=Id> }
+nearest_exact_filtered(&VectorStore, query: &[f32], &IdMask, k) -> Vec<(Id, f32)>   // EXACT ground truth = pre-filter strategy (scan only the mask)
+FilterConfig { prefilter_fraction: f32 /*0.01*/, prefilter_floor: usize /*256*/, traversal_beam_factor: usize /*4*/ }
+impl FilterConfig { fn prefer_prefilter(mask_len, store_len) -> bool }       // selectivity crossover: <= max(frac*store, floor) -> pre-filter
+impl DiskAnnIndex { fn nearest_filtered(&self, &[f32], &IdMask, &VectorStore, k) -> Vec<(Id, f32)>     // ACORN/NaviX filtered traversal OR pre-filter, by selectivity
+                    fn nearest_filtered_with(&self, &[f32], &IdMask, &VectorStore, k, FilterConfig) -> Vec<(Id, f32)> }
+impl VectorIndex  { fn nearest_filtered(&self, &[f32], &IdMask, &VectorStore, k) -> Vec<(Id, f32)> }   // HNSW: exact pre-filter only (instant-distance adjacency not exposed)
+// empty mask -> no results; full mask -> equals the unfiltered search; every returned id is guaranteed in the mask
 
 // --- quantization for large stores (src/quant.rs) ---
 ScalarQuantizer::fit(dim, vectors: impl IntoIterator<Item=&[f32]>) -> Result<ScalarQuantizer, String>   // f32->u8, 4x
@@ -353,6 +364,49 @@ literal's dimension must match the store; any other `vec:` IRI is unknown. An ab
 seed IRI yields no rows. Search is the **exact** `nearest_exact` scan (deterministic, the HNSW/
 DiskANN approximate indexes are not yet wired into the predicate — recorded follow-up).
 
+### 9. Predicate-constrained (filtered) ANN — only neighbours a BGP admits (opt-in, feature = `filtered-ann`)
+
+The RDF-native vector differentiator: a SPARQL BGP carves out the *eligible* graph nodes (e.g.
+`?node a :Car ; :seats ?s`), and the nearest-neighbour search returns only neighbours **inside that
+candidate set**. You compute the exact id-set from the BGP (via `graph.id_of` / the permutation
+indexes / a `query`'s solution `?node` column) and hand it to the search as an `IdMask` — the
+"visit mask". OPT-IN and OFF by default; the feature is **lean** — it adds *no new dependency* (the
+mask reuses the in-tree `rustc-hash` set) and pulls in neither the engine nor any heavy crate.
+
+```toml
+sparq-vectors = { path = "../sparq-vectors", features = ["filtered-ann"] }
+```
+
+```rust
+use sparq_vectors::{nearest_exact_filtered, DiskAnnIndex, IdMask, VectorIndex, VectorStore};
+
+let store = VectorStore::open("entities.spqv")?;
+
+// 1. Build the mask from whatever the BGP selected — here, ids of nodes typed :Car.
+let car_ids = /* graph.query("SELECT ?node { ?node a :Car }") -> ?node column -> graph.id_of */;
+let mask: IdMask = car_ids.into_iter().collect();          // empty mask => no results
+
+// 2a. Exact filtered (ground truth; the pre-filter strategy) — scans only the masked ids:
+let hits = nearest_exact_filtered(&store, query, &mask, 10); // every id is guaranteed in the mask
+
+// 2b. On-disk DiskANN filtered: picks the strategy by SELECTIVITY (FilterConfig::default):
+//   selective mask (<= 1% of store, or <= 256) -> exact pre-filter scan;
+//   broad mask -> ACORN/NaviX filtered traversal (walk the graph through ALL nodes for
+//   connectivity, ACCEPT only masked ones; the beam is widened so k accepted hits are collected).
+let idx = DiskAnnIndex::open("entities.spqg")?;
+let approx = idx.nearest_filtered(query, &mask, &store, 10); // recall@10 vs exact-filtered ~0.998 on a ~50% mask
+
+// 2c. In-RAM HNSW filtered: instant-distance adjacency is NOT exposed, so this is the exact
+//     pre-filter (the right path for a selective mask; use DiskAnnIndex for a broad mask):
+let vidx = VectorIndex::build(&store);
+let hnsw = vidx.nearest_filtered(query, &mask, &store, 10);
+```
+
+Tune the crossover / beam with `nearest_filtered_with(query, &mask, &store, k, FilterConfig { .. })`.
+The engine-side automatic BGP → mask wiring (a filtered form of the `vec:` predicate) is a recorded
+follow-up bead — for now you build the mask yourself, which keeps the filtered API a pure
+sparq-vectors surface with zero engine coupling.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
@@ -361,7 +415,8 @@ DiskANN approximate indexes are not yet wired into the predicate — recorded fo
   SPARQL-level integration is the optional `vec:` magic predicate (recipe 8 below), behind
   the **non-default `vec-predicate`** feature; with it OFF this crate has zero `sparq-engine`
   dependency and the base engine/core query path is byte-identical (see recipe 8). There is
-  still no `SERVICE`/function binding.
+  still no `SERVICE`/function binding. Predicate-constrained (filtered) ANN (recipe 9) is a
+  separate **non-default `filtered-ann`** feature — also lean (no new dep, no engine pull).
 - **`HashEmbedder` is TEST-ONLY.** It is lexical n-gram hashing with **no semantics**
   ("car" and "automobile" are unrelated). Use it to exercise the store/ANN/pipeline; bring
   a real `Embedder` for actual retrieval.
@@ -397,6 +452,16 @@ DiskANN approximate indexes are not yet wired into the predicate — recorded fo
   (`quant.rs`) exists and is tested but is **not yet wired into** `search_slots` (recorded
   follow-up in the crate's open beads, `bd list -l area:sparq-vectors`); run the PQ-filter + re-rank loop yourself
   (recipe 4).
+- **Filtered ANN (`filtered-ann` feature):** predicate-constrained search returns only ids in the
+  `IdMask`, and **every returned id is guaranteed in the mask**. An **empty** mask -> no results
+  (distinct from passing no mask = an unfiltered search); a **full** mask -> identical to the
+  unfiltered search. `DiskAnnIndex::nearest_filtered` is **exact** when it pre-filters (selective
+  mask) and **approximate** when it traverses (broad mask) — but pre-filter is exact, so erring
+  toward it (the conservative default crossover) only costs mild throughput, never recall. The
+  in-RAM `VectorIndex::nearest_filtered` is **always** the exact pre-filter (instant-distance
+  adjacency is not exposed, so the HNSW graph cannot be walked with predicate-aware acceptance);
+  use `DiskAnnIndex` for filtered traversal over a broad mask. Lean feature: no new dependency, no
+  engine pull. NON-CANONICAL timing.
 - **Little-endian only.** `.spqv`/`.spqg` reject big-endian targets at create/open.
 - **Determinism:** ties break on ascending id (searchers) or first appearance (fusion);
   HNSW/Vamana/PQ seeds are fixed by default so builds are reproducible.

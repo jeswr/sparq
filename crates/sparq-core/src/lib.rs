@@ -3624,25 +3624,21 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
 /// global `Dict` + remapped triples — the merge stage shared by the in-memory N-Triples loader
 /// ([`parse_ntriples_parallel`]) and the per-graph N-Quads loader ([`Graph::load_nquads_parallel`],
 /// which calls this once per graph). Sharded on ≥2 threads (the parallel dict consolidation that
-/// breaks the measured serial-`merge_remap` ceiling); serial `merge_remap` on one thread or when
-/// any partial carries an RDF 1.2 triple term (the sharded interner cannot represent those — see
-/// `ShardedDict::intern_partials`).
+/// breaks the measured serial-`merge_remap` ceiling); serial `merge_remap` on one thread.
 #[cfg(feature = "parallel")]
 fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
     let total: usize = partials.iter().map(|(_, t)| t.len()).sum();
-    // [OPUS-4.8] (sq-hxgb) The SHARDED merge cannot consolidate RDF 1.2 triple terms
-    // (a triple term's components are hash-routed to a shard AND referenced structurally
-    // by the triple, breaking the term↔id bijection across shards — see
-    // `ShardedDict::intern_partials`). The byte parser now accepts `<<( … )>>` object
-    // terms, so a document MAY contain them; when any partial does, take the serial
-    // `merge_remap` path, which interns triple terms structurally and correctly. Triple
-    // terms are rare (reification metadata), and detection is a single arena scan per
-    // partial (`Dict::has_triple_terms`) — no cost on the common triple-term-free input.
-    let has_triple_terms = partials.iter().any(|(d, _)| d.has_triple_terms());
-    // One rayon thread (or any triple-term partial): the sharded merge would only add
-    // routing/consolidation overhead (or cannot run at all) — keep the proven serial
-    // merge (also the byte-reference the differential tests pin).
-    if rayon::current_num_threads() <= 1 || has_triple_terms {
+    // [OPUS-4.8] (sq-87bq) RDF 1.2 triple terms are now consolidated by the SHARDED merge
+    // too: `ShardedDict::intern_partials` interns them structurally into a dedicated triple
+    // shard (a serial second pass keyed on their components' already-routed temp ids — see
+    // `intern_triple_terms`), preserving the cross-shard term↔id bijection. This is the SAME
+    // machinery the sharded external builder (sq-t3rt, #91) and the pipelined in-RAM loader
+    // (`load_ntriples_pipelined`) already use successfully with triple terms; the earlier
+    // `has_triple_terms ⇒ serial` guard here (added by sq-hxgb before that path was wired in)
+    // is therefore stale and removed, so RDF-star bulk loads keep full parse parallelism.
+    // One rayon thread: the sharded merge would only add routing/consolidation overhead —
+    // keep the proven serial merge (also the byte-reference the differential tests pin).
+    if rayon::current_num_threads() <= 1 {
         let cap = partials.iter().map(|(d, _)| d.len()).max().unwrap_or(0);
         let mut global = Dict::with_capacity(cap);
         let mut all = Vec::with_capacity(total);
@@ -3658,10 +3654,12 @@ fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
     // ceiling — load plateaued at ~1.8× on 4 identical cores — was exactly this stage).
     let mut sd = dict::ShardedDict::new(default_shards());
     let mut all: Vec<[Id; 3]> = Vec::with_capacity(total);
-    // [OPUS-4.8] `sharded_extend` can only `Err` on a malformed triple term, but the guard
-    // above (`has_triple_terms` ⇒ serial path) means this branch is triple-term-free — so an
-    // error here is an internal invariant breach, not recoverable input. Surface it loudly.
-    sharded_extend(&mut sd, &partials, &mut all).expect("sharded merge: triple-term-free path must not error");
+    // [OPUS-4.8] (sq-87bq) `sharded_extend` (well-formed input, incl. RDF 1.2 triple terms)
+    // only `Err`s on a MALFORMED triple term — a component id out of the partial's range or
+    // referencing an unpopulated slot. `parse_block` produces well-formed partials (children
+    // precede their parent triple in arena order), so an error here is an internal invariant
+    // breach, not recoverable input. Surface it loudly.
+    sharded_extend(&mut sd, &partials, &mut all).expect("sharded merge: well-formed partials must not error");
     finish_sharded(sd, all)
 }
 
@@ -4742,6 +4740,84 @@ mod tests {
         let (p, s) = differential(&boundary, 32, true);
         assert_eq!(p, s);
         assert_eq!(p, 801, "400 pre + 1 quoted + 400 post");
+    }
+
+    /// [OPUS-4.8] (sq-87bq) END-TO-END semantics of the RDF 1.2 Turtle reification surface
+    /// (the SPARQL-1.2 annotation sugar) through `Graph::load_str`: the reifying-triple
+    /// `<< s p o >>` (subject AND object position) and the annotation block `{| … |}` must
+    /// load to the standard desugaring — an `rdf:reifies <<( s p o )>>` reifier statement plus
+    /// any asserted base / annotation triples — with the triple TERM `<<( s p o )>>` a
+    /// first-class `Term::Triple` object. Pins the supported surface (oxttl-desugared), not
+    /// just chunked==serial parse equality.
+    #[test]
+    fn turtle_rdf12_reification_surface_loads_desugared() {
+        const REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+        // The triple TERM both forms desugar their reifier onto.
+        let tt = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::NamedNode::new("http://ex/s").unwrap(),
+            oxrdf::NamedNode::new("http://ex/p").unwrap(),
+            Term::NamedNode(oxrdf::NamedNode::new("http://ex/o").unwrap()),
+        )));
+        let dump = |g: &Graph| {
+            let scan = g.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+
+        // (1) NAMED reifier `<< s p o ~ ex:r >>`: deterministic reifier id, no anon bnode.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . << ex:s ex:p ex:o ~ ex:r >> ex:certainty 0.9 .",
+            "turtle",
+        )
+        .unwrap();
+        // The reifier `ex:r` carries `rdf:reifies <<( ex:s ex:p ex:o )>>` and the annotation.
+        let r = g.dict.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r").unwrap()));
+        let reifies = g.dict.lookup(&Term::NamedNode(oxrdf::NamedNode::new(REIFIES).unwrap()));
+        let tt_id = g.dict.lookup(&tt);
+        assert!(tt_id != 0, "the triple term `<<( ex:s ex:p ex:o )>>` must be a first-class dict term");
+        let reifies_rows = g.store.scan(&[Some(r), Some(reifies), Some(tt_id)]).rows.len();
+        assert_eq!(reifies_rows, 1, "named reifier must carry exactly one `rdf:reifies <<( … )>>`");
+        // The annotation triple `ex:r ex:certainty 0.9` is present.
+        let cert = g.dict.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/certainty").unwrap()));
+        assert_eq!(g.store.scan(&[Some(r), Some(cert), None]).rows.len(), 1, "annotation triple must load");
+
+        // (2) Annotation block `{| … |}` desugars to: the ASSERTED base triple + a reifier
+        //     (anon) `rdf:reifies <<( … )>>` + the annotation triple. The base triple is
+        //     asserted (unlike the bare `<< … >>` reifier, which does NOT assert it).
+        let g2 =
+            Graph::load_str("@prefix ex: <http://ex/> . ex:s ex:p ex:o {| ex:certainty 0.9 |} .", "turtle").unwrap();
+        let rows2 = dump(&g2);
+        assert!(
+            rows2.iter().any(|(s, p, o)| s == "<http://ex/s>" && p == "<http://ex/p>" && o == "<http://ex/o>"),
+            "annotation block must ASSERT the base triple, got {rows2:?}"
+        );
+        assert!(
+            rows2.iter().any(|(_, p, _)| p == &format!("<{REIFIES}>")),
+            "annotation block must emit an `rdf:reifies` reifier, got {rows2:?}"
+        );
+        assert!(g2.dict.lookup(&tt) != 0, "the annotated base triple must appear as a triple TERM object");
+
+        // (3) reifiedTriple in SUBJECT position `<< s p o >> p2 o2` (a Turtle construct the
+        //     legacy custom NT parser cannot express, here handled by the Turtle loader): the
+        //     reifier is the SUBJECT of the annotation, the base triple is NOT asserted.
+        let g3 = Graph::load_str("@prefix ex: <http://ex/> . << ex:s ex:p ex:o >> ex:src ex:doc1 .", "turtle").unwrap();
+        let rows3 = dump(&g3);
+        assert!(
+            !rows3.iter().any(|(s, p, o)| s == "<http://ex/s>" && p == "<http://ex/p>" && o == "<http://ex/o>"),
+            "a bare `<< … >>` reifier must NOT assert the base triple, got {rows3:?}"
+        );
+        assert!(
+            rows3.iter().any(|(_, p, o)| p == &format!("<{REIFIES}>") && o.starts_with("<<(")),
+            "subject-position reifier must carry `rdf:reifies <<( … )>>`, got {rows3:?}"
+        );
     }
 
     /// Decodes a parsed triple sequence to strings with blank nodes renumbered by FIRST
@@ -6573,6 +6649,86 @@ mod tests {
             v
         };
         assert_eq!(dump(&par), dump(&seq));
+    }
+
+    /// [OPUS-4.8] (sq-87bq) The NON-streaming in-memory merge (`merge_partials`, behind
+    /// `parse_ntriples_parallel` / the per-graph N-Quads merge) must consolidate RDF 1.2
+    /// triple terms through the SHARDED path — its earlier `has_triple_terms ⇒ serial`
+    /// guard was stale (the sharded interner gained structural triple-term support in
+    /// sq-t3rt). This test FORCES the sharded branch (≥2 threads in a scoped rayon pool) on
+    /// triple-term partials and pins the result to the serial `merge_remap` reference, so the
+    /// fix is covered deterministically regardless of the ambient thread count.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn merge_partials_sharded_consolidates_triple_terms() {
+        // Several blocks' worth of triples with interleaved reification metadata, components
+        // in distinct namespaces (different leaf shards), a shared triple term (cross-shard
+        // dedup), a blank-node component, and a nested triple term.
+        let mut nt = String::new();
+        for i in 0..4000u32 {
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 211,
+                i % 13,
+                i % 700
+            ));
+            if i % 700 == 0 {
+                // Same triple term referenced by two statements -> must dedup to one id.
+                nt.push_str("<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
+                nt.push_str("<http://ex/r1b> <http://ex/sameAs> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
+            }
+        }
+        nt.push_str("<http://ex/r2> <http://ex/about> <<( _:b0 <http://ex/p> \"v\" )>> .\n");
+        nt.push_str("<http://ex/r3> <http://ex/nested> <<( <http://gamma.example/x> <http://delta.example/q> <<( <http://eps.example/a> <http://zeta.example/b> <http://eta.example/c> )>> )>> .\n");
+        let bytes = nt.as_bytes();
+
+        // Round-trip a (dict, triples) pair to its sorted term-set (recursively expanding
+        // triple terms via `Dict::term`), so the comparison is id-assignment-order
+        // independent.
+        let dump = |dict: &Dict, triples: &[[Id; 3]]| {
+            let mut v: Vec<(String, String, String)> = triples
+                .iter()
+                .map(|&[s, p, o]| (dict.term(s).to_string(), dict.term(p).to_string(), dict.term(o).to_string()))
+                .collect();
+            v.sort();
+            v
+        };
+
+        // Reference: serial `merge_remap` consolidation (single thread -> serial branch).
+        let serial = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| merge_partials(parse_block(bytes).unwrap()));
+        // Under test: the SHARDED branch (>=2 threads).
+        let sharded = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(|| merge_partials(parse_block(bytes).unwrap()));
+
+        assert_eq!(sharded.1.len(), serial.1.len(), "sharded triple count differs from serial");
+        assert_eq!(sharded.0.len(), serial.0.len(), "sharded dict size differs from serial");
+        assert_eq!(
+            dump(&sharded.0, &sharded.1),
+            dump(&serial.0, &serial.1),
+            "sharded merge_partials differs from serial reference on triple-term input"
+        );
+
+        // Cross-shard dedup is OBSERVABLE: the triple term shared by <r1>/<r1b> is ONE dict
+        // entry, so both statements' objects carry the same id.
+        let tt = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::NamedNode::new("http://alpha.example/alice").unwrap(),
+            oxrdf::NamedNode::new("http://beta.example/age").unwrap(),
+            Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER)),
+        )));
+        let tt_id = sharded.0.lookup(&tt);
+        assert!(tt_id != 0, "the shared triple term must be in the sharded dict");
+        let r1 = sharded.0.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1").unwrap()));
+        let r1b = sharded.0.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1b").unwrap()));
+        let obj_of = |subj: Id| sharded.1.iter().find(|t| t[0] == subj).map(|t| t[2]);
+        assert_eq!(obj_of(r1), Some(tt_id), "<r1>'s object is the shared triple term");
+        assert_eq!(obj_of(r1b), Some(tt_id), "<r1b>'s object is the SAME shared triple-term id");
     }
 
     /// The streaming pipelined loader must be byte-exact against the serial loader for
