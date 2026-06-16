@@ -103,6 +103,14 @@ pub fn header(path: impl AsRef<Path>) -> Result<Graph, Error>       // HDT heade
 pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error>
 // also: load_reader_via_upstream (differential oracle), graph_from_hdt, graph_from_reader
 
+// MEASUREMENT-ONLY (bench/parse's 3-way HDT stage split — NOT a production loader):
+// identical decode to graph_from_reader, but records a per-stage wall-clock split.
+// Production callers use the plain loaders above; the decode is byte-for-byte the
+// same (timing only reads Instant::now() at the existing stage boundaries), so
+// decoder behaviour is unchanged.
+pub struct StageTimings { pub dict: Duration, pub scan: Duration, pub build: Duration }
+pub fn graph_from_reader_timed<R: BufRead>(reader: R, t: &mut StageTimings) -> Result<Graph, Error>
+
 // WRITE (opt-in `write` feature): Graph -> .hdt (honours .gz/.zst/.bz2 by extension)
 #[cfg(feature = "write")]
 pub fn save(graph: &Graph, path: impl AsRef<Path>) -> Result<(), Error>
