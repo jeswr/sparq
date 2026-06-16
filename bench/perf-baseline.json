@@ -33,7 +33,14 @@
     "src/diskann.rs Vamana, src/quant.rs PQ k-means), floors DERIVED BY RUNNING examples/bench_vectors",
     "on the pinned N=50000 seed=0 corpus (NOT guessed). hnsw_recall_at10 is INTENTIONALLY ABSENT here:",
     "the instant-distance HNSW build is rayon-parallel (+/-1 deficit float-reduction jitter), so it is",
-    "floor-gated in bench/vector/run.sh only, never cross-commit ratcheted (a flaky ratchet is dishonest)."
+    "floor-gated in bench/vector/run.sh only, never cross-commit ratcheted (a flaky ratchet is dishonest).",
+    "[OPUS-4.8] (sq-ncvq.14) 2026-06-16: wasm_bundle_bytes floor RAISED 1579288 -> 1656470 (+4.89%). This is",
+    "an EXPLICIT, reviewed feature bump (the protocol bullet above: 'a wasm bundle bump from a new feature').",
+    "PR #269 adds Store::explain / Store::explainAnalyze to the wasm surface, linking in the engine's",
+    "EXPLAIN / EXPLAIN ANALYZE plan-formatting + analyze-trace code paths (sparq_engine::explain /",
+    "explain_analyze) that the prior bundle never reached. 1656470 is the exact CI-measured wasm-pack",
+    "release bundle size on this branch (run 27592086692, the 'run + track benchmarks' lane), not a guess.",
+    "Bundle-growth beyond +2% of THIS new floor must again be an explicit raise."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -52,7 +59,7 @@
       "mode": "auto"
     },
     "wasm_bundle_bytes": {
-      "floor": 1579288,
+      "floor": 1656470,
       "threshold": 0.02,
       "mode": "auto"
     },
