@@ -1,6 +1,6 @@
 ---
 name: access-control
-description: "Graph-level Solid-style access control over a sparq RDF dataset with the opt-in sparq-solid crate: store pods as named-graph-per-document, keep WAC (.acl) / ACP (.acr) documents as queryable triples, materialize their semantics to a queryable authorization view (urn:sparq:auth) via N3 rules, then filter every SPARQL query/update per (WebID, client) session to the authorized graph set — fail-closed. Use when gating which named graphs a session may read/append/write, mapping WAC/ACP to an allow-deny model, or querying the materialized auth view. RESEARCH/architecture track — this is the authorization LAYER, NOT a production Solid Pod HTTP server, and it does NOT authenticate (the caller asserts the WebID)."
+description: "Graph-level Solid-style access control over a sparq RDF dataset with the opt-in sparq-solid crate: store pods as named-graph-per-document, keep WAC (.acl) / ACP (.acr) documents as queryable triples, materialize their semantics to a queryable authorization view (urn:sparq:auth) via N3 rules, then filter every SPARQL query/update per (WebID, client, issuer) session to the authorized graph set — fail-closed. Use when gating which named graphs a session may read/append/write, mapping WAC/ACP to an allow-deny model, or querying the materialized auth view. RESEARCH/architecture track — this is the authorization LAYER, NOT a production Solid Pod HTTP server, and it does NOT authenticate (the caller asserts the WebID, client, and issuer)."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -15,20 +15,28 @@ sparq RDF dataset at the **named-graph** granularity. A pod is stored as
 documents stay as plain queryable triples; their semantics are encoded as **N3 rules**
 (run by `sparq-reason`) that **materialize** a queryable authorization view in the
 reserved `<urn:sparq:auth>` graph. Every query/update is then filtered per
-`(WebID, client)` session to the named graphs that session may access — **fail-closed**,
-with zero Solid-specific code in the engine itself (the crate is a dependency of nothing
-in the workspace).
+`(WebID, client, issuer)` session to the named graphs that session may access —
+**fail-closed**, with zero Solid-specific code in the engine itself (the crate is a
+dependency of nothing in the workspace).
 
 ## What this is — and is NOT (read first)
 
 This is an **architecture / research-track** layer, not a deployable Solid server.
 
-- It is the **authorization** half only. It answers *"may this `(WebID, client)`
+- It is the **authorization** half only. It answers *"may this `(WebID, client, issuer)`
   session read/append/write named graph G?"* by materializing WAC/ACP into a queryable
   view and filtering the dataset. It does **NOT authenticate**: a `Session.agent` is a
   caller-asserted WebID string — there is **no WebID-OIDC / DPoP / token verification**.
   The relying application is responsible for authenticating the WebID before it hands one
   to `query_as`. Treat a `Session` as a trusted claim, not a verified one.
+- The `Session.issuer` field (ACP `acp:issuer`) does **NOT** add WebID-OIDC
+  authentication. It is one more **caller-asserted** matcher dimension: the caller states
+  *which OIDC issuer it claims vouched for the WebID*, and an ACP `acp:issuer` matcher
+  decides whether that asserted issuer is acceptable. sparq-solid never contacts an IdP,
+  validates an ID token, or verifies the issuer binding — it only string-matches the
+  asserted issuer against the grant. As with `agent`, the relying application must verify
+  the issuer↔WebID binding before asserting it. WAC has no issuer notion, so a WAC pod
+  ignores the field entirely.
 - It is **NOT a Solid Pod HTTP server.** There is no HTTP resource protocol, no LDP
   container CRUD, no `Link rel=acl` discovery over the wire, no Solid notifications. The
   document→named-graph naming is a storage convention (design §2.2), not an HTTP server.
@@ -63,8 +71,8 @@ store.materialize_wac()?;                 // run the N3 rules → install <urn:s
 
 let q = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
 
-// WebID is CALLER-ASSERTED — sparq-solid does NOT authenticate it.
-let alice = Session { agent: Some("https://alice.ex/card#me"), client: None };
+// WebID / client / issuer are all CALLER-ASSERTED — sparq-solid does NOT authenticate them.
+let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
 let authorized = store.query_as(&alice, Mode::Read, q)?;            // alice's authorized graphs
 let public_only = store.query_as(&Session::default(), Mode::Read, q)?; // anonymous: public graphs only
 let _ = (authorized.rows.len(), public_only.rows.len());
@@ -130,9 +138,23 @@ Materialize the authorization view from the access-control documents, then enfor
   Withdrawn`); an *ambiguous* re-eval **keeps** the deny (never restore access on missing
   evidence). A retracted deny may re-expose an allow grant — correct, since the prohibition
   is genuinely gone.
-- `Session { agent: Option<&str>, client: Option<&str> }` (caller-asserted WebID +
-  `acl:origin`/`acp:client`; `None` = anonymous / any client); `Mode::{Read, Write,
-  Append, Control}`; `wac_fixture()` / `acp_fixture()` (bundled demo pods).
+- `Session { agent: Option<&str>, client: Option<&str>, issuer: Option<&str> }`
+  (all three caller-asserted: WebID + `acl:origin`/`acp:client` + the OIDC `acp:issuer`;
+  `None` = anonymous / any client / any issuer respectively). [OPUS-4.8] sq-3jtd.6: the
+  `issuer` field is the third matcher dimension (ACP only — WAC ignores it) and is a
+  STRING MATCH on a caller-asserted issuer, **not** an authentication step (see
+  "What this is — and is NOT"). `Mode::{Read, Write, Append, Control}`; `wac_fixture()` /
+  `acp_fixture()` (bundled demo pods).
+- `triple_principal(agent, client, issuer) -> String` / `pair_principal(agent, client) ->
+  String` — the deterministic minted principal IRIs (`urn:sparq:triple?…` /
+  `urn:sparq:pair?…`) that the ACP/WAC N3 rules emit for an issuer- / client-constrained
+  grant, kept in sync with the rules. Both use RFC 3986 percent-encoding and are
+  INJECTIVE, so no agent/client/issuer value can smuggle a `&client=`/`&issuer=`
+  delimiter into another principal's term. Exposed for inspection/round-trip tests.
+- `ANY_ISSUER` / `ANY_CLIENT` / `PUBLIC` / `AUTHENTICATED` — the principal-lattice top
+  IRIs (`https://sparq.dev/ns/auth#AnyIssuer` etc.). [OPUS-4.8] sq-3jtd.6: an ACP grant
+  with no `acp:issuer` matcher is issuer-unconstrained ⇒ `ANY_ISSUER` (the issuer-dimension
+  top); a session with `issuer: None` matches it.
 
 The materialized view is itself just triples — *"who can read G?"* is one SPARQL
 pattern: `GRAPH <urn:sparq:auth> { ?who <https://sparq.dev/ns/auth#read> ?doc }`.
@@ -143,9 +165,17 @@ pattern: `GRAPH <urn:sparq:auth> { ?who <https://sparq.dev/ns/auth#read> ?doc }`
   `acl:AuthenticatedAgent`, `acl:agentGroup`, `acl:default` inheritance, the
   `acl:Read/Write/Append/Control` modes.
 - **ACP** (`.acr`) — policies / matchers with the `allOf` / `anyOf` / `noneOf`
-  combinators and normative **deny-overrides**.
-- Principal lattice: `Public ⊒ Authenticated ⊒ concrete-WebID` and
-  `AnyClient ⊒ concrete-client`.
+  combinators and normative **deny-overrides**. [OPUS-4.8] sq-3jtd.6: matchers may now
+  also constrain on `acp:issuer` (the caller-asserted OIDC issuer), the third principal
+  dimension.
+- Principal lattice — three independent dimensions (agent, client, issuer):
+  `Public ⊒ Authenticated ⊒ concrete-WebID`, `AnyClient ⊒ concrete-client`, and
+  ([OPUS-4.8] sq-3jtd.6) `AnyIssuer ⊒ concrete-issuer`. A session expands to the agent
+  principals, plus — when a client is given — the minted `(agent, client)` pair, plus —
+  when an issuer is given — the minted `(agent, client, issuer)` triple (with
+  `AnyClient` as the client component when no client was supplied), for ≤12 grant lookups.
+  Only an issuer-CONSTRAINED grant mints a triple principal; an issuer-unconstrained grant
+  (`AnyIssuer`) reuses the agent / pair term, so issuer-blind pods are unaffected.
 
 ## Security posture — fail-closed
 
@@ -153,8 +183,11 @@ Absence of a grant means a graph is **invisible**, and a non-authorized graph is
 indistinguishable from an absent one. The reasoner is fed only ACL/ACR + structural
 facts — **never pod content** — so no writable document can grant itself access; the
 reserved `urn:sparq:` namespace is rejected on input and any forged `<urn:sparq:auth>`
-graph is stripped at load. (Again: this is the *authorization* boundary — authentication
-of the WebID is the relying application's job.)
+graph is stripped at load. A session whose `agent`/`client`/`issuer` falls inside the
+reserved `urn:sparq:` encoding (or carries the `&client=`/`&issuer=` delimiter) fails
+CLOSED — it cannot impersonate a minted pair/triple principal. (Again: this is the
+*authorization* boundary — authenticating the WebID **and verifying the issuer↔WebID
+binding** are the relying application's job.)
 
 ## Related skills
 
@@ -171,9 +204,12 @@ _(status: RESEARCH / architecture track. The crate is `shipped` per the design r
 (`research/solid-access-control-design.md`) — the zero-copy `DatasetView` query path and
 the write-gating path are implemented and tested (`tests/update.rs` + the crate suite) —
 but the SCOPE is the graph-level authorization layer ONLY: it does NOT authenticate (the
-WebID is caller-asserted) and it is NOT a Solid Pod HTTP server (no HTTP/LDP/OIDC). Verified
-against `crates/sparq-solid/src/{lib,authindex,fixture}.rs` + README on branch
-`feat-skill-drift-catchup` (2026-06-16); workspace v0.1.0, opt-in (depends on nothing in
+WebID, client, and `acp:issuer` are all caller-asserted — the issuer dimension matches a
+presented credential issuer, it does NOT add WebID-OIDC authentication) and it is NOT a
+Solid Pod HTTP server (no HTTP/LDP/OIDC). Verified against
+`crates/sparq-solid/src/{lib,authindex,fixture}.rs` + README on branch
+`feat/sq-3jtd-acp-issuer` (2026-06-16; the (agent, client, issuer) three-dimension
+principal model, sq-3jtd.6); workspace v0.1.0, opt-in (depends on nothing in
 the workspace), native-side. Conservative WAC/ACP sub-cases are noted in design §4.4; perf
 is measured by `cargo run -p sparq-solid --example bench` and NOT baked into docs. Code
 carries [OPUS-4.8] review markers pending re-review.)_
