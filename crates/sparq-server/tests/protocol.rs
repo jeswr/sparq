@@ -735,8 +735,14 @@ async fn gsp_indirect_requires_graph_selector() {
 }
 
 // ---------------------------------------------------------------------------
-// dataset params accepted (no effect with a single default graph)
+// protocol dataset-override params accepted (not yet applied — see exec.rs)
 // ---------------------------------------------------------------------------
+//
+// [OPUS-4.8] The engine DOES support named graphs — `GRAPH` / `FROM` / `FROM NAMED` and
+// cross-graph joins all execute (see `tests/named_graphs.rs`, sq-fh4z). What is not yet
+// wired is the *protocol-level* dataset override: the `default-graph-uri` /
+// `named-graph-uri` request parameters are accepted and recorded but do not currently
+// re-scope the query's active dataset, so they must not error and (today) have no effect.
 
 #[tokio::test]
 async fn default_graph_uri_param_is_accepted() {
@@ -750,7 +756,8 @@ async fn default_graph_uri_param_is_accepted() {
         .send()
         .await
         .unwrap();
-    // accepted + threaded through; with one default graph it has no effect but must not error
+    // Accepted + recorded; the protocol dataset-override is not yet applied, so it has no
+    // effect here — but it must not error. (In-query GRAPH/FROM is the supported path.)
     assert_eq!(resp.status(), 200);
 }
 
