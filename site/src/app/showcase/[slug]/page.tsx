@@ -5,7 +5,10 @@ import { SurfacePlaceholder } from "@/components/surface-placeholder";
 import { FLAGSHIPS } from "@/data/surfaces";
 
 export function generateStaticParams() {
-  return FLAGSHIPS.map((s) => ({ slug: s.slug }));
+  // Flagships with a hand-built page (e.g. zk-car-hire) own their own route under
+  // /showcase/<slug>/page.tsx, so they must NOT also be generated here — a static
+  // route and a dynamic param for the same path collide at export.
+  return FLAGSHIPS.filter((s) => !s.built).map((s) => ({ slug: s.slug }));
 }
 
 export const dynamicParams = false;

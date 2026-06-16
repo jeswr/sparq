@@ -80,6 +80,7 @@ export const FLAGSHIPS: Surface[] = [
       "Prove you may hire a car — age ≥ 25, valid non-revoked licence, same holder across two credentials — without revealing your documents.",
     tier: "live-bbjs",
     icon: ShieldCheck,
+    built: true,
   },
   {
     slug: "mpc-100k",
