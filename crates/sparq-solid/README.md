@@ -147,6 +147,34 @@ on the rule maps faithfully. A rule mixing a mappable recipient with an unmappab
 the recipient would silently drop the other bound and over-grant. Reserved-encoded recipient
 IRIs are dropped from the grant head (anti-impersonation).
 
+### Refresh / revocation of bridged grants — [OPUS-4.8] sq-dpk4
+
+The `materialize_odrl_*` calls only **append**. When the ODRL policy changes — a permission is
+**withdrawn**, a **time window lapses**, or a re-evaluation now **Denies** — a previously
+materialized grant must lose access (the sq-h3uk/#280 correctness gap), and a wholesale static
+WAC/ACP re-materialization must not silently clobber a still-valid bridged grant. A `PodStore`
+tracks each bridged grant in a **ledger** and provides a refresh entry point:
+
+- **Provenance.** Every bridged auth triple is mirrored verbatim into a separate reserved graph
+  `<urn:sparq:auth-bridged>` (`AUTH_BRIDGED_GRAPH`): a triple is **bridged** iff it appears
+  there, **static** otherwise. The enforcement reader (`AuthIndex`) is unchanged — it still
+  reads `<urn:sparq:auth>`. The provenance graph lives in the reserved `urn:sparq:` space, so a
+  loaded dataset cannot forge it.
+- **Refresh / retract.** `PodStore::refresh_odrl_grant(&policy, &request, kind)` updates the
+  tracked grant slot `(kind, target, party)` with the new policy / request context, then
+  rebuilds the view as `static_baseline ∪ replay(still-valid bridged entries)`: it resets
+  `<urn:sparq:auth>` to the static baseline captured at the last `materialize_wac`/`_acp`,
+  clears the provenance graph, and re-evaluates every tracked `(policy, request)` through its
+  original bridge entry point. An entry that no longer holds emits nothing → it is **retracted**
+  (access gone). `refresh_odrl_grants()` (no args) replays everything as-tracked; a static
+  re-materialization auto-reconciles (valid bridged grants are replayed back on top).
+- **Fail-closed (access retraction).** A withdrawn / lapsed / now-Denied / now-prohibited /
+  ambiguous re-evaluation loses access — the underlying evaluator is fail-closed, so on doubt
+  the grant is retracted, never left stale. A **static** WAC/ACP grant is never in the ledger,
+  never re-evaluated, and always in the captured baseline (captured as the materializer output
+  verbatim, not by subtracting provenance — so a static grant byte-identical to a bridged one
+  still survives a refresh) — refresh can neither widen nor drop it.
+
 ## Security posture — fail-closed
 
 Absence of a grant means a graph is **invisible**, and a non-authorized graph is
