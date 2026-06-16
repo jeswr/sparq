@@ -93,8 +93,10 @@ sq-toze.28 — `cargo cyclonedx … --spec-version 1.5`), matching the VEX (`1.5
 > the **CI runner's absolute path**. The **published** SBOMs are now post-processed by
 > `scripts/sbom-normalize.jq` (invoked from `scripts/gen-sbom-vex.sh` for the two released-binary SBOMs,
 > and from `supply-chain.yml#sbom` over every CI-uploaded `*.cdx.json`), which rewrites each such ref to
-> the canonical, host-independent `pkg:cargo/<name>@<version>` form and strips the `download_url=file://…`
-> purl query, while rewriting the dependency graph (root `bom-ref`, nested build-target sub-components,
+> the canonical, host-independent `pkg:cargo/<name>@<version>` form and strips the whole
+> `download_url=file://…` purl qualifier together with any trailing build-target `#src/…` subpath
+> (the latter extended in bead `sq-uujh`, [OPUS-4.8] — it was the only residual non-canonical purl,
+> e.g. `pkg:cargo/sparq-cli@0.1.0#src/main.rs`), while rewriting the dependency graph (root `bom-ref`, nested build-target sub-components,
 > and every `dependencies[].ref` / `dependsOn[]` edge) in lock-step so all internal references still
 > resolve. The transform is deterministic (pure function of the input — no time/host/RNG) and idempotent
 > (a second pass is byte-identical). Both `gen-sbom-vex.sh` and `supply-chain.yml#sbom` additionally

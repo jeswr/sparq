@@ -45,12 +45,20 @@ def canon_ref:
     .
   end;
 
-# Canonicalise a purl: strip the workspace-local ?download_url=file://... query (the only
-# file:// a purl carries), preserving any trailing #fragment. Registry purls have no such
-# query and are returned unchanged.
+# Canonicalise a purl. cargo-cyclonedx attaches, ONLY to workspace / path components, a
+# `?download_url=file://<host-path>` qualifier — and, on the root build-target components
+# (bin-target-N), additionally a `#<src-file>` subpath (e.g. `#src/main.rs`). Both encode the
+# CI runner's filesystem layout and neither belongs in a *package* purl: the canonical cargo
+# purl is `pkg:cargo/<name>@<version>`. We strip both, but ONLY when the workspace-local
+# download_url qualifier is present, so registry purls
+#   (pkg:cargo/<name>@<version>, no qualifier, no subpath) are returned byte-for-byte unchanged.
+# [OPUS-4.8] sq-uujh: extend GS-6/sq-toze.30 to the build-target `#src/...` subpath, which the
+# original filter left behind (it stripped the query up to `#` but preserved the fragment),
+# leaving the only non-canonical purls in the SBOM and a purl/bom-ref mismatch on those rows.
 def canon_purl:
   if type == "string" and test("[?&]download_url=file://") then
-    sub("[?&]download_url=file://[^#]*"; "")
+    # Drop the download_url qualifier together with any trailing host-derived #subpath.
+    sub("[?&]download_url=file://.*$"; "")
   else
     .
   end;
