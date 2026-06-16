@@ -58,8 +58,14 @@ All entry points take `&Graph` + `&str` and return `Result<_, String>` (parse + 
 
 - `pub struct QueryResult { pub vars: Vec<oxrdf::Variable>, pub rows: Vec<Vec<Option<oxrdf::Term>>> }`
   — `len()` / `is_empty()` count solution rows.
-- `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize> }`
-  — `QueryBudget::unlimited()` is the no-op default.
+- `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize>, pub max_bytes: Option<usize> }`
+  — `QueryBudget::unlimited()` is the no-op default. `max_rows` caps the working-set ROW count;
+  `max_bytes` (`sq-s5is`) is the byte-accounted companion — it prices row WIDTH
+  (`rows × vars × size_of::<Id>()`) plus the bytes of query-computed (BIND/aggregate/CONSTRUCT)
+  literals, so a few very wide rows or a huge computed literal is bounded where the row cap is
+  blind. Both are coarse cooperative ceilings (checked at operator entry / per outer loop), a
+  conservative LOWER bound on heap — not an exact RSS quota; whichever trips first aborts with
+  `query budget exceeded (max-rows|max-bytes)`.
 
 SELECT/ASK entry points (each has `_prepared`, `_with_budget`, and `_view` variants):
 
@@ -256,12 +262,14 @@ be projected variables. **Deferred (programmatic API only, beaded):** inline win
 and `PARTITION BY` over a computed expression.
 
 **Budgets / timeouts / ASK-style early exit** — a `QueryBudget` is checked cooperatively at coarse
-sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"`:
+sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"` /
+`"... (max-bytes)"`:
 
 ```rust
 use sparq_engine::QueryBudget;
 let budget = QueryBudget {
     max_rows: Some(10_000),
+    max_bytes: Some(64 << 20), // byte-accounted companion (sq-s5is); None = off
     #[cfg(not(target_arch = "wasm32"))]
     deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(2)),
 };

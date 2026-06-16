@@ -136,7 +136,8 @@ pub struct ServerConfig {
     /// in *time*: the budget is checked at coarse sites (operator entry / per outer loop
     /// iteration), so a single uninstrumented stretch can transiently exceed it before the
     /// next check. Treat it as a blunt anti-OOM circuit-breaker, NOT an RSS quota. `None`
-    /// (the default) disables it. A true byte-accounted allocator cap is deferred (bead).
+    /// (the default) disables it. For the byte-accounted companion that DOES price row
+    /// width and computed-literal size, see [`max_query_bytes`](Self::max_query_bytes).
     ///
     /// Distinct from [`max_results`]: this caps the working set on *all* forms, whereas
     /// `max_results` is folded into the budget only on the paths that pass
@@ -145,6 +146,31 @@ pub struct ServerConfig {
     /// `make_budget(_, false)` paths — ASK and GSP-read — nor to UPDATE (`update_budget`,
     /// which has no projection). When both apply, the effective cap is the tighter of the two.
     pub max_query_rows: Option<usize>,
+    /// [OPUS-4.8] (sq-s5is) **Byte-accounted memory cap.** The byte-accounted companion to
+    /// [`max_query_rows`](Self::max_query_rows): an upper bound, in BYTES, on the engine's
+    /// estimated working-set size for ONE query, on EVERY form (SELECT / ASK / CONSTRUCT /
+    /// DESCRIBE / GSP-read / UPDATE-WHERE), enforced via [`QueryBudget::max_bytes`]. A query
+    /// whose estimate crosses it aborts (413) at the next coarse cooperative check.
+    ///
+    /// **Why it exists — the row cap's blind spots:** `--max-query-rows` counts ROWS, so it
+    /// under-prices (a) FEW but very WIDE rows (many projected variables → more bytes per row)
+    /// and (b) huge query-COMPUTED literals (BIND / aggregate / CONSTRUCT scratch interned
+    /// into the per-query local vocabulary — non-row allocations). This cap prices BOTH:
+    /// `rows × width × size_of::<Id>()` for each materialised intermediate PLUS the bytes of
+    /// the computed terms. A 10-column join and a 1-column join with the same row count now
+    /// have different byte budgets, and a `BIND(CONCAT(…huge…))` over a handful of rows is
+    /// caught even though the row count is tiny.
+    ///
+    /// **Honest scope — still a coarse circuit-breaker, NOT an exact RSS quota.** The
+    /// estimate is a portable LOWER bound on real heap (it ignores allocator overhead,
+    /// `SmallVec` inline-vs-spill, and the graph dictionary / index memory that pre-exists the
+    /// query); it is checked at the SAME coarse sites as the row cap, so a single
+    /// uninstrumented stretch can transiently overshoot before the next check; and it bounds
+    /// the QUERY working set, not process RSS. It is strictly TIGHTER and more
+    /// width/literal-aware than the row cap, not a hardware-enforced quota. `None` (the
+    /// default) disables it; it composes with `--max-query-rows` and `--max-results`
+    /// (whichever ceiling trips first aborts).
+    pub max_query_bytes: Option<usize>,
     /// [OPUS-4.8] (sq-ebii) **Decompression-ratio cap (zip-bomb guard).** When a request
     /// body arrives `Content-Encoding: gzip` (the GSP write / RDF-load path), the server
     /// streams the inflate but refuses once the decompressed size would exceed
@@ -324,6 +350,8 @@ impl Default for ServerConfig {
             // [OPUS-4.8] sq-ebii: memory cap OFF by default (no surprise refusals on an
             // unconfigured server); an operator exposing the endpoint opts a ceiling in.
             max_query_rows: None,
+            // [OPUS-4.8] sq-s5is: byte-accounted cap likewise OFF by default; opt-in ceiling.
+            max_query_bytes: None,
             // [OPUS-4.8] sq-ebii: 20× decompressed:compressed is a permissive-but-bounded
             // default (well above real RDF gzip ratios ~3–8×, far below a bomb's ~1000×+).
             max_decompress_ratio: 20,
@@ -403,6 +431,11 @@ impl ServerConfig {
         // 0 / unset disables it.
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_QUERY_ROWS") {
             cfg.max_query_rows = (n > 0).then_some(n);
+        }
+        // [OPUS-4.8] sq-s5is: byte-accounted memory cap (prices row width + computed
+        // literals, on every form); 0 / unset disables it.
+        if let Some(n) = env_parse::<usize>("SPARQ_MAX_QUERY_BYTES") {
+            cfg.max_query_bytes = (n > 0).then_some(n);
         }
         // [OPUS-4.8] sq-ebii: decompression-ratio cap (zip-bomb guard); 0 disables
         // ratio-capped decompression (a Content-Encoding body is then refused outright).
@@ -2889,6 +2922,9 @@ pub(crate) fn make_budget(config: &ServerConfig, apply_max_results: bool) -> Que
     QueryBudget {
         deadline: config.query_timeout.map(|t| std::time::Instant::now() + t),
         max_rows: tighter(config.max_query_rows, results_cap),
+        // [OPUS-4.8] (sq-s5is) byte-accounted cap applies on every form (it has no
+        // `--max-results` analogue — it bounds the working set, not the projection).
+        max_bytes: config.max_query_bytes,
     }
 }
 
@@ -2901,6 +2937,8 @@ fn update_budget(config: &ServerConfig) -> QueryBudget {
     QueryBudget {
         deadline: config.query_timeout.map(|t| std::time::Instant::now() + t),
         max_rows: config.max_query_rows,
+        // [OPUS-4.8] (sq-s5is) the byte cap reaches the UPDATE's WHERE evaluation too.
+        max_bytes: config.max_query_bytes,
     }
 }
 
@@ -3061,6 +3099,15 @@ fn engine_error_response(e: &str, config: &ServerConfig, apply_max_results: bool
         return json_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             &format!("result exceeds the server's working-set row limit ({max} rows, {which}); narrow the query (e.g. add LIMIT) or raise the limit"),
+        );
+    }
+    // [OPUS-4.8] (sq-s5is) the byte-accounted cap tripped — an honest 413, same class as the
+    // row cap, naming the byte knob (this path applies on EVERY form, so no `--max-results`).
+    if e.contains("query budget exceeded (max-bytes)") {
+        let max = config.max_query_bytes.unwrap_or(0);
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("result exceeds the server's working-set byte limit ({max} bytes, --max-query-bytes (memory cap)); narrow the query (e.g. project fewer variables, add LIMIT) or raise the limit"),
         );
     }
     execution_error(e)

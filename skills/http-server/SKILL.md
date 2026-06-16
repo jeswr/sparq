@@ -137,11 +137,14 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   (**`time-travel` feature only**).
 - `struct ServerConfig { query_timeout: Option<Duration>, max_body_bytes: usize,
   max_concurrent: usize, max_results: Option<usize>, max_query_rows: Option<usize>,
+  max_query_bytes: Option<usize>,
   max_decompress_ratio: usize, max_subscriptions: usize, max_subscriptions_per_conn: usize,
   verbose: bool, redact_logs: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
   service_allow: ServiceAllowlist, /* + time_travel_* under feature, + audit_log under audit-log feature */ }` with
   `ServerConfig::default()` and `ServerConfig::from_env()`.
-  (`max_query_rows` = coarse memory cap; `max_decompress_ratio` = zip-bomb guard — `sq-ebii`.)
+  (`max_query_rows` = coarse memory cap; `max_query_bytes` = byte-accounted memory cap that
+  also prices row WIDTH + computed-literal size — `sq-s5is`; `max_decompress_ratio` =
+  zip-bomb guard — `sq-ebii`.)
   `auth_token` (set: gates the write surface with a Bearer token, constant-time compared;
   `None`: no write auth) and `auth_token_read` (gate reads too) are honoured by the library
   `router` itself — embedders get the gate for free (`sq-zcby`).
@@ -501,7 +504,8 @@ env overrides the default.
 | `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` | body cap → `413` |
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | in-flight cap, load-shed → `429` |
 | `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0`=off) | result/solution cap (SELECT + CONSTRUCT/DESCRIBE WHERE-solutions + EXPLAIN ANALYZE; not ASK/GSP-read/UPDATE) → honest `413` (not truncation) |
-| `--max-query-rows N` | `SPARQ_MAX_QUERY_ROWS` | unlimited (`0`=off) | **memory cap** (coarse): working-set row ceiling on **every** form → honest `413` (`sq-ebii`) |
+| `--max-query-rows N` | `SPARQ_MAX_QUERY_ROWS` | unlimited (`0`=off) | **memory cap** (coarse): working-set ROW ceiling on **every** form → honest `413` (`sq-ebii`) |
+| `--max-query-bytes N` | `SPARQ_MAX_QUERY_BYTES` | unlimited (`0`=off) | **byte-accounted memory cap**: prices working-set row WIDTH (`rows × vars × id-size`) + computed-literal bytes on **every** form → honest `413` (`sq-s5is`) |
 | `--max-decompress-ratio N` | `SPARQ_MAX_DECOMPRESS_RATIO` | `20` (`0`=refuse gzip) | **zip-bomb guard**: cap on decompressed:compressed for a `Content-Encoding: gzip` body → `413` (`sq-ebii`) |
 | `--max-subscriptions N` | `SPARQ_MAX_SUBSCRIPTIONS` | `256` | server-wide subs |
 | `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | per-socket subs |
@@ -522,12 +526,13 @@ env overrides the default.
 In a library: `AppState::with_config(graph, ServerConfig { max_concurrent: 64, ..Default::default() })`
 then `router(state)`, or `harden(my_router, &config)`.
 
-### Server hardening — the four DoS/SSRF limits (`sq-ebii` + `sq-4w18`)
+### Server hardening — the DoS/SSRF limits (`sq-ebii` + `sq-4w18` + `sq-s5is`)
 
-The threat model (a public, unauthenticated endpoint behind a gateway) calls for four
+The threat model (a public, unauthenticated endpoint behind a gateway) calls for these
 distinct limits. **Be precise about what each bounds** — only the body-size and ratio caps
-are byte-hard; the timeout and memory cap are *cooperative* (approximate in time), and the
-memory cap is a *cardinality* ceiling, not an RSS quota:
+are byte-hard; the timeout and both memory caps are *cooperative* (approximate in time), and
+the memory caps are coarse working-set ceilings (row count / estimated bytes), not an RSS
+quota:
 
 1. **Query timeout** (`--query-timeout`, `SPARQ_QUERY_TIMEOUT`, default `30s`, `0`=off).
    The engine's cooperative `QueryBudget.deadline` stops the worker at its next coarse check
@@ -552,9 +557,22 @@ memory cap is a *cardinality* ceiling, not an RSS quota:
    is also approximate in time (coarse checks). Treat it as a blunt anti-OOM breaker, **not**
    an RSS quota. Distinct from `--max-results` (the result/solution cap, folded into the
    budget on SELECT / CONSTRUCT/DESCRIBE / EXPLAIN ANALYZE — but not ASK / GSP-read / UPDATE);
-   on a path where both apply, the effective cap is the tighter of the two. A true
-   byte-accounted allocator cap is deferred
-   (`sq-s5is`); writer-queue head-of-line blocking from a slow UPDATE is deferred (`sq-nulp`).
+   on a path where both apply, the effective cap is the tighter of the two. For the row cap's
+   width/literal blind spots, see the byte-accounted companion (2b); writer-queue
+   head-of-line blocking from a slow UPDATE is deferred (`sq-nulp`).
+2b. **Byte-accounted memory cap** (`--max-query-bytes`, `SPARQ_MAX_QUERY_BYTES`, default
+   **off**, `0`=off; `sq-s5is`). The byte-accounted twin of (2): instead of counting ROWS it
+   costs the estimated working-set BYTES — `rows × width × size_of::<Id>()` for each
+   materialised intermediate (so it prices the WIDTH the row cap is blind to) PLUS the bytes
+   of query-COMPUTED terms (BIND / aggregate / CONSTRUCT scratch interned into the per-query
+   local vocab — the non-row allocations the row cap misses). Enforced via
+   `QueryBudget.max_bytes` on **every** form (incl. an UPDATE's WHERE), at the same coarse
+   cooperative sites, honest `413` on overflow. *Bounds:* the QUERY working set, estimated as
+   a portable **lower** bound on real heap (ignores allocator overhead, `SmallVec`
+   inline-vs-spill, and the pre-existing dictionary/index memory) — so it is strictly tighter
+   and more width/literal-aware than the row cap, but still a coarse circuit-breaker, **not**
+   an exact RSS quota. Composes with (2) and `--max-results`: whichever ceiling trips first
+   aborts.
 3. **Decompression-ratio cap** (`--max-decompress-ratio`, `SPARQ_MAX_DECOMPRESS_RATIO`,
    default `20`×, `0`=refuse gzip). When a GSP write body arrives `Content-Encoding: gzip`
    the server inflates it with a hard ceiling of
@@ -577,10 +595,10 @@ memory cap is a *cardinality* ceiling, not an RSS quota:
    (DNS-rebinding-safe), uniformly across queries / ASK / CONSTRUCT/DESCRIBE / subscriptions
    / federated `INSERT … WHERE`.
 
-Library callers set all four on `ServerConfig` (`query_timeout`, `max_query_rows`,
-`max_decompress_ratio`, `service_allow`). Embedders driving the engine directly thread a
-`sparq_engine::QueryBudget { deadline, max_rows }` into `*_with_budget` query entry points
-and `update_in_place_with_budget`, and wrap calls in
+Library callers set these on `ServerConfig` (`query_timeout`, `max_query_rows`,
+`max_query_bytes`, `max_decompress_ratio`, `service_allow`). Embedders driving the engine
+directly thread a `sparq_engine::QueryBudget { deadline, max_rows, max_bytes }` into
+`*_with_budget` query entry points and `update_in_place_with_budget`, and wrap calls in
 `sparq_engine::with_service_egress_policy(strict, [host], || …)`.
 
 ### Access audit log — opt-in per-query audit trail (`sq-0bxp`, CDMC CD-2)

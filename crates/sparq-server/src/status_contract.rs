@@ -47,7 +47,7 @@
 //! | `404 Not Found` | unknown route / GSP `GET` of a named graph that does not exist | **permanent** | -- |
 //! | `405 Method Not Allowed` | method not allowed on the route; carries `Allow` | **permanent** | use a listed method |
 //! | `410 Gone` | (`time-travel` feature) `?generation=N` aged out of the retention window | **permanent** | the snapshot is gone; do not retry that pin |
-//! | `413 Payload Too Large` | request **body** over `--max-body-bytes`; **result** over `--max-results` / `--max-query-rows` working-set cap; gzip body over the `--max-decompress-ratio` zip-bomb cap | **permanent for the identical request** | narrow the query (e.g. add `LIMIT`) or shrink the body -- retrying the same request fails identically |
+//! | `413 Payload Too Large` | request **body** over `--max-body-bytes`; **result** over `--max-results` / `--max-query-rows` (row) / `--max-query-bytes` (byte-accounted, `sq-s5is`) working-set cap; gzip body over the `--max-decompress-ratio` zip-bomb cap | **permanent for the identical request** | narrow the query (e.g. add `LIMIT` / project fewer variables) or shrink the body -- retrying the same request fails identically |
 //! | `415 Unsupported Media Type` | POST query/update with an unsupported `Content-Type` | **permanent** | send a supported content type |
 //! | `429 Too Many Requests` | in-flight concurrency cap (`--max-concurrent`) tripped; the request was **shed, never started** | **TRANSIENT** | back off and retry -- the work was not done |
 //! | `503 Service Unavailable` | query/UPDATE **timeout** (`--query-timeout`); **durable-write** error on the `--persist` mirror (write refused, NOT applied); a subscription registration refused for capacity | **TRANSIENT** | back off and retry; a timeout may also warrant simplifying the query |
@@ -83,7 +83,8 @@
 //! - **Classify on status, not body text.** Bodies are sanitised generic class strings. The
 //!   only message substrings a client may match are the *stable generic* ones this contract
 //!   names (e.g. a `503` timeout body contains `timed out`; a row-cap `413` body contains
-//!   `row limit`) -- and even those are a convenience on top of the authoritative status code,
+//!   `row limit`; a byte-cap `413` body contains `byte limit`) -- and even those are a
+//!   convenience on top of the authoritative status code,
 //!   never a substitute for it. Never match on engine/RDF/path detail: sparq never puts it in
 //!   the body.
 //! - **GSP created-vs-replaced (`201` vs `200`/`204`) is advisory.** PUT/POST sample graph
