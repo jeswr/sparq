@@ -5,9 +5,10 @@
   "description": "sparq feature-showcase website — a live-interactive demonstration of the sparq RDF + SPARQL engine, statically exported for GitHub Pages.",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/sync-wasm.mjs && next dev",
+    "dev": "node scripts/sync-wasm.mjs && node scripts/sync-benchmarks.mjs && next dev",
     "sync-wasm": "node scripts/sync-wasm.mjs",
-    "prebuild": "node scripts/sync-wasm.mjs",
+    "sync-benchmarks": "node scripts/sync-benchmarks.mjs",
+    "prebuild": "node scripts/sync-wasm.mjs && node scripts/sync-benchmarks.mjs",
     "build": "next build",
     "start": "npx --yes serve out",
     "lint": "next lint"

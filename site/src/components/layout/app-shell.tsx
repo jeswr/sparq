@@ -2,8 +2,10 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { Github, Menu } from "lucide-react";
 
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -16,6 +18,25 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
 
 const REPO_URL = "https://github.com/jeswr/sparq";
+
+function TopTab({ href, children }: { href: string; children: React.ReactNode }) {
+  const pathname = usePathname();
+  const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
+  return (
+    <Link
+      href={href}
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "rounded-md px-3 py-1.5 text-sm transition-colors",
+        active
+          ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+          : "text-foreground/70 hover:bg-muted hover:text-foreground",
+      )}
+    >
+      {children}
+    </Link>
+  );
+}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = React.useState(false);
@@ -67,6 +88,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Link href="/" className="flex items-center lg:hidden" aria-label="sparq home">
               <Logo className="h-6 w-auto" />
             </Link>
+
+            {/* Top-bar tabs (desktop) — quick jumps alongside the persistent sidebar. */}
+            <nav className="hidden items-center gap-1 lg:flex" aria-label="Primary">
+              <TopTab href="/">Showcase</TopTab>
+              <TopTab href="/benchmarks">Benchmarks</TopTab>
+              <TopTab href="/about">About</TopTab>
+            </nav>
 
             <div className="ml-auto flex items-center gap-1">
               <Button variant="ghost" size="icon" asChild>
