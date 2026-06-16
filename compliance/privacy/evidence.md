@@ -114,23 +114,42 @@ graph and asserts only `install_auth_view` may create `urn:sparq:*` terms;
 `reserved_session_values_fail_closed` (`:63`) rejects a spoofed `urn:sparq:pair?agent=…` session
 value.
 
-## P-12 — Error/log hygiene (generic bodies; one honest caveat)
+## P-12 — Error/log hygiene (PARTIAL — corrected per audit F-1/F-2)
 
-`crates/sparq-server/src/http.rs` error bodies are **generic structured JSON** via
-`json_error(status, msg)` (`:2802`):
+> **Correction (audit F-1, HIGH).** An earlier draft of this section claimed "no query text /
+> RDF content echoed" and called the UPDATE path "the one exception." **That was an overclaim.**
+> Several parse/validation error bodies echo caller input — including, on the RDF-body load path,
+> **fragments of the loaded RDF data** to an **unauthenticated** caller. This section now states
+> exactly which bodies are hygienic and which echo caller input. The code fix is bead **sq-cz89**;
+> the regression test (audit F-3) is **sq-zg0u**.
+
+**Hygienic (verified) — these `crates/sparq-server/src/http.rs` bodies echo no caller input:**
 - `:1429` `"internal server error (panic)"`; `:1776` `"update worker panicked"`;
   `:1963` `"query worker panicked"`; `:1374` `"not found"`;
   `:1435` `"server is at its concurrent-request limit, retry later"`.
 - Budget errors name **limits**, not data: `engine_error_response` (`:2076`) maps a max-rows hit
   to `"result exceeds the server's working-set row limit (N rows, --max-query-rows …)"` — no
   query text, no rows.
-- `json_error_bodies` middleware (`:2828`) normalises even extractor rejections (e.g. the 413
+- `json_error_bodies` middleware (`:2828`) normalises extractor rejections (e.g. the 413
   body-size reject) into the same structured shape.
+- Metrics (`crates/sparq-server/src/metrics.rs`) carry no PII (P-2).
 
-**Honest caveat (PR-G1):** `update_rejection_response` (`:2118`) returns a parse/semantic UPDATE
-failure as `bad_request(&format!("update failed: {e}"))`, where `{e}` is the parser diagnostic —
-which can echo a **fragment of the malformed query text** (not loaded RDF data). Low-severity
-residual; tracked in [`gap-register.md`](./gap-register.md) PR-G1.
+**NOT hygienic (the overclaim — these bodies echo caller input via the parser diagnostic):**
+- `:1812` `bad_request(&format!("malformed query: {msg}"))` — echoes **SPARQL query text** on a
+  query-parse failure.
+- `:2293` `bad_request(&format!("malformed RDF body: {e}"))` and `:2302` `"malformed RDF/XML body:
+  {e}"` — echo **fragments of the loaded RDF data** (the diagnostic comes from
+  `Graph::load_str`→`e.to_string()`, `crates/sparq-core/src/lib.rs:632`). **Because the bare
+  server has no auth (boundary B3), this returns loaded-data fragments to an unauthenticated
+  caller** — the load-bearing reason F-2 raised PR-G1 from Low to Medium.
+- `:2116` `bad_request(&format!("update failed: {e}"))` — echoes UPDATE parse/semantic text.
+- `:2860` `"query execution error: {msg}"` — echoes the engine's execution diagnostic.
+
+**Mechanism.** Each site wraps an underlying parser/engine error string verbatim into the 400/500
+body. The fix (sq-cz89) is to return a **generic** body by default (parity with the panic/budget
+path) and gate the verbose diagnostic behind `--verbose` (opt-in, like request logging), with a
+regression test (sq-zg0u) asserting the default-mode body contains no echoed query/RDF fragment.
+Tracked in [`gap-register.md`](./gap-register.md) **PR-G1** (Medium).
 
 ## P-13 — SSRF / exfiltration guard (default-deny SERVICE allowlist)
 
