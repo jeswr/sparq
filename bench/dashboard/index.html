@@ -52,13 +52,16 @@
 
     <!-- [OPUS-4.8] sq-rltn: capability FAMILIES — the primary, summary-first view. dashboard.js
          paints #families SYNCHRONOUSLY from window.BENCHMARK_DATA (no Chart.js, no label fetch) so
-         the WHOLE picture appears immediately and visibly covers ALL query types: a family nav chip
-         row, then one section per family (Core · SPARQL query suites · SHACL validation · GeoSPARQL ·
-         Full-Text · Vector/ANN · Reasoning), each with a latest-value-per-metric summary table.
+         the WHOLE picture appears immediately and visibly covers ALL benchmarked families: a family
+         nav chip row, then one section per family (Core · SPARQL query suites · SHACL validation ·
+         GeoSPARQL · Full-Text · Vector/ANN · Reasoning · Zero-knowledge · Solid/access-control · HDT ·
+         RSP streaming · GenAI · GPU), each with a latest-value-per-metric summary table.
          Trend charts inside each section are LAZY — built only when the section's "Trends" disclosure
          is expanded / scrolls into view (IntersectionObserver), so first paint never instantiates the
          thousands of SPARQL series. A family with no data yet still shows ("not yet reported") so the
-         coverage is honest. -->
+         coverage is honest — the ZK estate (zk / zk-trace / zk-compose) and the Solid/HDT/RSP/GenAI/GPU
+         families are registered here even though they are stdout/criterion benches that do not yet emit
+         into the per-commit feed; a metric appears the moment a ci-bench hook starts emitting it. -->
     <section class="card" id="families-card">
       <h2>Benchmark families</h2>
       <p class="hint">Every query type sparq benchmarks, grouped into capability families. The table
