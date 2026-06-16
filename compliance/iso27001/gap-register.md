@@ -25,18 +25,26 @@ otherwise appear are correctly classified one of two ways (and so are *not* gaps
 2. **N/A (operator)** — physical/operational controls of a *deployed* environment, owned by
    the adopting operator, not by sparq's source.
 
-What *does* remain are **two readiness gaps**: the organizational ISMS artifact set
-(needed for an actual audit, GAP-ISO-1) and an explicit operator-deployment-security
-guidance doc (so the N/A(operator) controls aren't left implicit, GAP-ISO-2). These are
-**documentation/templates**, not code controls. One earlier suspected gap (CODEOWNERS) was
-verified **false** and is recorded as resolved-on-inspection below.
+What *does* remain is **one open readiness gap**: the organizational ISMS artifact set
+(needed for an actual audit, GAP-ISO-1). A second readiness gap — an explicit
+operator-deployment-security guidance doc so the N/A(operator) controls aren't left implicit
+(GAP-ISO-2) — has been **ADDRESSED** by
+[`operator-deployment-security.md`](./operator-deployment-security.md) (sq-v48f); it is
+recorded in the addressed section below. These are **documentation/templates**, not code
+controls. One earlier suspected gap (CODEOWNERS) was verified **false** and is recorded as
+resolved-on-inspection below.
 
 ## OPEN gaps
 
 | ID | Gap | Sev | Remediation | Bead (to create) |
 |---|---|---|---|---|
 | **GAP-ISO-1** | **No organizational ISMS artifact set.** ISO 27001 certification needs the management-system artifacts that no repo file can be: a documented **ISMS scope statement**, a **risk assessment + risk-treatment plan**, a **Statement of Applicability (SoA)** mapping each of the 93 Annex A controls to applicable/justification/status, a **management-review** record, and an **internal-audit programme**. The repo has the *technical evidence* and *docs-of-record* (`SECURITY.md`, threat model, `CONTRIBUTING.md`, this mapping) that an SoA would cite, but the SoA + ISMS clauses 4–10 are an org act. | **High** (blocks certification, not security) | Provide org-adoptable **policy + SoA templates** under `compliance/policies/` (ISMS scope, risk-treatment, an SoA skeleton seeded from `controls.md`, incident-response plan), clearly marked **templates needing org sign-off**. This mapping (`controls.md`) is the SoA's applicability column; the templates are the remaining clauses-4–10 scaffolding. **No accredited certificate is in agent scope** — label it external. | `iso27001: org-adoptable ISMS policy + SoA templates (clauses 4-10 scaffold)` (P1, sq-toze) |
-| **GAP-ISO-2** | **The N/A(operator) controls are implicit, not documented in one place for the operator.** 42 Annex A controls are correctly the adopting *operator's* responsibility (A.7 physical, access-control families under boundary B3, runtime monitoring/backup/availability, network controls). They are flagged per-row in `controls.md`, but there is no single **operator security-deployment guidance** doc telling an operator "to run sparq-server safely you MUST: front it with an authenticating/TLS-terminating gateway (B3), set resource/`QueryBudget` limits, run it non-root in the distroless image, restrict network exposure, own backup/monitoring of your data." Without it, the operator-vs-sparq split is asserted but not actionable. | **Medium** | Author `compliance/iso27001/operator-responsibilities.md` (or fold into the cross-cutting `compliance/threat-model.md` + `compliance/data-flow.md` the privacy worktree owns) enumerating the operator-owned controls with the concrete action for each, anchored on the Dockerfile guidance + boundary B3 + `QueryBudget`. Cross-reference from `controls.md` N/A(op) rows. | `iso27001: operator deployment-security responsibilities doc (B3 + N/A(op) controls)` (P2, sq-toze) |
+
+## ADDRESSED in this directory
+
+| ID | Gap | Sev | How addressed |
+|---|---|---|---|
+| **GAP-ISO-2** | **The N/A(operator) controls were implicit, not documented in one place for the operator.** 42 Annex A controls are correctly the adopting *operator's* responsibility (A.7 physical, access-control families under boundary B3, runtime monitoring/backup/availability, network controls). They were flagged per-row in `controls.md`, but there was no single **operator security-deployment guidance** doc making the operator-vs-sparq split actionable. | **Medium** | **ADDRESSED** (sq-v48f) by [`operator-deployment-security.md`](./operator-deployment-security.md): a 9-section operator-responsibility doc enumerating network/TLS, authN/authZ (boundary B3), secrets, OS/container hardening, resource/DoS limits, logging/PII, backup/durability, and patch cadence — each stating what sparq ships built-in (citing the real flag/feature) vs what the operator MUST supply, mapped to Annex A. It is an **operator-responsibility doc, NOT a certification claim**, and it states sparq's auth/crypto limits honestly (one coarse static Bearer token, no per-user authz; ZK/MPC NOT sound). Cross-referenced from `controls.md` (the B3 / N/A(op) rows already point at GAP-ISO-2). |
 
 ## Resolved on inspection (recorded so the auditor sees the check was made)
 

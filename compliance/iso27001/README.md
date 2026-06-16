@@ -19,6 +19,12 @@ Physical, A.8 Technological).
 - [`soa-template.md`](./soa-template.md) — a **Statement of Applicability + ISMS
   clauses-4–10 scaffold** *template* for an adopting organization (remediation of
   GAP-ISO-1). A template, **not** a certificate.
+- [`operator-deployment-security.md`](./operator-deployment-security.md) — the
+  **operator deployment-security responsibilities** doc (remediation of GAP-ISO-2 /
+  boundary **B3**): what the organisation *deploying* sparq-server must do (network/TLS,
+  authN/authZ, secrets, OS/container hardening, DoS limits, logging/PII, backup, patch
+  cadence), each stating what sparq ships built-in vs what the operator MUST supply. An
+  **operator-responsibility doc, NOT a certification claim**.
 
 ## The single most important honesty point
 
