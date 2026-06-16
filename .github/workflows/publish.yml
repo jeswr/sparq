@@ -1,0 +1,171 @@
+# Published-package provenance (GX-10 / sq-toze.24).
+#
+# Complements release.yml (#367 / sq-toze.23), which attests the GitHub-Release ARCHIVES +
+# the ghcr.io container. This workflow covers the bytes a CONSUMER actually installs:
+#   - the `@jeswr/sparq` npm client (crates/sparq-wasm wrapper in js/)
+#   - the packaged crates.io `.crate` artifacts
+#
+# HONEST SCOPE BOUNDARY (see compliance/slsa/):
+#   * npm     — native provenance. `npm publish --provenance` runs in this GitHub Actions
+#               OIDC context (id-token: write); npm's registry records a Sigstore-signed
+#               in-toto SLSA provenance statement bound to this workflow run. A consumer
+#               verifies it with `npm audit signatures`. THIS IS THE PROVENANCE-EMITTING PATH.
+#   * crates.io — crates.io has NO published-package provenance mechanism upstream as of this
+#               writing (no equivalent of npm `--provenance`). The tractable equivalent we CAN
+#               do is attest the packaged `.crate` artifact (the exact bytes `cargo publish`
+#               uploads) with the same `actions/attest-build-provenance` mechanism release.yml
+#               uses, and publish that attestation as a release-adjacent artifact + via Sigstore.
+#               This does NOT put a provenance link on the crates.io page (that needs upstream
+#               support) — it gives consumers an out-of-band attestation they can `gh attestation
+#               verify` against the downloaded `.crate`. The crates.io-native sub-gap stays OPEN
+#               and is tracked as an EXTERNAL sub-gap of GX-10 / sq-toze.24.
+#
+# TRIGGER: this is a MAINTAINER-DRIVEN publish. It fires on `release: published` (the release
+# created by release.yml is published) and on manual `workflow_dispatch`. The npm publish step
+# is what carries provenance forward: the NEXT publish a maintainer triggers emits it. Each job
+# is gated behind an input/secret so a tag alone never force-publishes (see per-job `if:`).
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      publish_npm:
+        description: "Publish @jeswr/sparq to npm with provenance"
+        type: boolean
+        default: false
+      attest_crates:
+        description: "Package + attest publishable crates (crates.io bytes)"
+        type: boolean
+        default: true
+
+# Default read-only; jobs opt into the OIDC token (id-token: write) + attestation write below.
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- npm: @jeswr/sparq with native Sigstore provenance ----
+  # Runs only when a maintainer asks for it (manual input) OR on a published release where the
+  # NPM_TOKEN secret is configured. `npm publish --provenance` requires the OIDC token + a
+  # registry-url; npm then records a signed SLSA provenance statement for the version.
+  npm:
+    name: npm publish (--provenance)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_npm)
+    permissions:
+      contents: read
+      id-token: write # OIDC token npm uses to mint the provenance attestation
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          # registry-url is REQUIRED for provenance + sets up the auth env for NODE_AUTH_TOKEN.
+          registry-url: "https://registry.npmjs.org"
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Install npm dependencies
+        run: npm ci
+      # `prepack` (build:wasm + build:ts + bundle skills) runs automatically on `npm publish`,
+      # producing the same tree `npm pack --dry-run` validates in js.yml. We require a modern npm
+      # (>=11.5.1 ships with node 22) so --provenance is supported.
+      - name: Publish to npm with provenance
+        # provenance: emit the Sigstore-signed SLSA build-provenance statement bound to this run.
+        # access public: @jeswr/sparq is a scoped package; scoped packages default to restricted.
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Verify the just-published version actually carries a registry provenance attestation, so a
+      # misconfigured publish (missing OIDC / old npm) fails the job instead of silently shipping an
+      # unattested package. `npm view <pkg>@<ver> dist.attestations` returns the registry-recorded
+      # attestation bundle URL + provenance predicate type when provenance was attached.
+      - name: Verify published provenance attestation
+        run: |
+          set -euo pipefail
+          ver=$(node -p "require('./package.json').version")
+          echo "Inspecting registry attestations for @jeswr/sparq@${ver}"
+          att=$(npm view "@jeswr/sparq@${ver}" dist.attestations 2>/dev/null || true)
+          echo "$att"
+          if [ -z "$att" ] || [ "$att" = "undefined" ]; then
+            echo "::error::no provenance attestation recorded for @jeswr/sparq@${ver} — publish was not provenance-bearing"
+            exit 1
+          fi
+          echo "Provenance attestation present. Consumers verify with: npm audit signatures"
+
+  # ---- crates.io: attest the packaged .crate artifacts (provenance over the publish bytes) ----
+  # crates.io has no native provenance; we attest the `cargo package` output (identical bytes to
+  # what `cargo publish` uploads) with the SAME mechanism release.yml uses. This does NOT publish
+  # to crates.io (the maintainer does that manually, in dependency order) — it produces a
+  # verifiable attestation of the artifacts and uploads them for the maintainer to verify
+  # before/after publishing. crates.io-native provenance stays an OPEN external sub-gap.
+  crates:
+    name: attest crate packages
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.attest_crates)
+    permissions:
+      contents: read
+      id-token: write # OIDC token for the Sigstore attestation
+      attestations: write # write the attestation to the repo's attestation store
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # Package every publishable crate (publish = false crates are skipped by cargo package
+      # when run per-package; we package the workspace and collect the resulting .crate files).
+      # --no-verify avoids a full from-scratch compile of every crate on the runner; the bytes
+      # are identical to `cargo publish`'s upload (publish runs verify itself). We package each
+      # publishable crate individually so a single unpublishable/dev crate cannot fail the lot.
+      - name: Package publishable crates
+        run: |
+          set -euo pipefail
+          mkdir -p crate-pkgs
+          # Crates whose Cargo.toml does NOT set `publish = false`.
+          for manifest in crates/*/Cargo.toml; do
+            if grep -q '^publish = false' "$manifest"; then
+              echo "skip (publish=false): $manifest"
+              continue
+            fi
+            pkg=$(grep -m1 '^name' "$manifest" | sed -E 's/.*"(.*)".*/\1/')
+            echo "::group::cargo package -p $pkg"
+            # --no-verify: skip the rebuild-from-extracted-tarball check (CI already builds/tests
+            # the workspace); --allow-dirty is unnecessary on a clean checkout. Failures on a
+            # single crate (e.g. an unpublished path-dep not yet on crates.io) are surfaced but
+            # do not abort the others — we record which packaged and which did not.
+            if cargo package -p "$pkg" --no-verify --locked 2>&1; then
+              find target/package -maxdepth 1 -name "${pkg}-*.crate" -exec cp {} crate-pkgs/ \;
+            else
+              echo "::warning::cargo package failed for $pkg (likely an unpublished path-dependency); skipped"
+            fi
+            echo "::endgroup::"
+          done
+          echo "Packaged crates:"; ls -l crate-pkgs/ || true
+          # Fail only if NOTHING packaged — that means the step is broken, not a single-crate skip.
+          if [ -z "$(ls -A crate-pkgs/ 2>/dev/null)" ]; then
+            echo "::error::no .crate artifacts produced"; exit 1
+          fi
+      # Same SHA-pinned attest action + version as release.yml — one signed SLSA provenance
+      # predicate per .crate, binding its digest to this workflow run.
+      - name: Attest crate-package provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: crate-pkgs/*.crate
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crate-packages
+          path: crate-pkgs/*.crate
+          if-no-files-found: error
