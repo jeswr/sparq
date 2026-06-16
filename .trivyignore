@@ -6,7 +6,8 @@
 # runs `trivy image` failing on FIXABLE HIGH/CRITICAL OS+library vulnerabilities. This
 # file is the ALLOWLIST: one CVE id per line suppresses that finding. The base is
 # gcr.io/distroless/cc-debian12:nonroot (glibc + libgcc only, no shell / package manager),
-# so the OS surface is tiny — this list is EXPECTED to stay empty or near-empty.
+# so the OS surface is tiny — every entry below is an UNFIXABLE (no Debian-12 fix) glibc/
+# libssl finding, NOT a silenced fixable HIGH/CRITICAL.
 #
 # POLICY for adding an entry (keep VEX-aligned with the supply-chain slice, GX-2):
 #   * Only add a CVE that is genuinely non-applicable or unfixable (no fixed version yet),
@@ -17,6 +18,71 @@
 #     acceptance is temporary. Mirror the rationale into supply-chain/vex.cdx.json where the
 #     finding overlaps a Rust-dependency advisory so the SBOM/VEX and the image allowlist agree.
 #
-# (Empty by design: the distroless base carried no fixable HIGH/CRITICAL OS/lib findings at
-# authoring time. If CI later flags one, triage it here WITH a justification or fix the base —
-# do not blanket-suppress.)
+# ── Accepted findings ────────────────────────────────────────────────────────────────────
+# Every entry below is an OS-package CVE in the distroless cc-debian12 base (glibc / libgcc /
+# libstdc++ / libssl). ALL have NO fixed version for Debian 12 bookworm (verified against the
+# Debian security tracker: each is "no-dsa — minor issue" or has no fixed release), so a base
+# digest bump CANNOT remediate them — the base is already SHA-pinned to the latest
+# cc-debian12:nonroot, and Debian itself has shipped no fix. None is a fixable HIGH/CRITICAL:
+# all are LOW or MEDIUM, and each is additionally non-reachable in sparq-server's actual code
+# path (justified per-line). Re-audit when Debian ships a fixed package — drop the entry and
+# the gate re-flags it. [OPUS-4.8] sq-toze.31 — re-review when Fable returns.
+
+# --- glibc legacy / long-standing won't-fix (libc6, libgomp1, libgcc-s1, gcc-12-base, libstdc++6) ---
+# CVE-2022-27943: libiberty/cplus-dem.c stack exhaustion via crafted C++ symbol demangling
+#   (binutils/GCC support lib). Debian: no-dsa, no fixed version. sparq-server never demangles
+#   untrusted symbols at runtime; not reachable. Accepted (unfixable, not-affected).
+CVE-2022-27943
+# CVE-2019-9192: glibc regexec infinite recursion on a crafted extended regex. Debian: no fix;
+#   the upstream position is that this is not a security bug (untrusted regexes are the caller's
+#   risk). sparq compiles no attacker-supplied POSIX regex via glibc. Accepted (unfixable).
+CVE-2019-9192
+# CVE-2019-1010022: glibc stack-guard protection bypass (disputed by upstream — requires the
+#   application to already have a separate overflow). Debian: no fix, marked not-affected-style.
+#   Accepted (unfixable, disputed).
+CVE-2019-1010022
+# CVE-2019-1010023: glibc run-time loader LD_PRELOAD audit bypass (local, requires control of
+#   the binary's environment). Debian: no fix. No untrusted local exec inside the container.
+#   Accepted (unfixable, not-reachable).
+CVE-2019-1010023
+# CVE-2019-1010024: glibc ASLR weakness via stack/heap proximity (local info-leak aid). Debian:
+#   no fix; upstream disputes it as a vulnerability. Accepted (unfixable, disputed).
+CVE-2019-1010024
+# CVE-2019-1010025: glibc ASLR weakness via heap mmap-base randomisation (local). Debian: no
+#   fix; upstream disputes it as a vulnerability. Accepted (unfixable, disputed).
+CVE-2019-1010025
+# CVE-2018-20796: glibc regexec uncontrolled recursion (same class as CVE-2019-9192). Debian:
+#   no fix; not a security bug per upstream. No attacker-supplied glibc regex. Accepted.
+CVE-2018-20796
+# CVE-2010-4756: glibc glob() resource exhaustion via GLOB_BRACE (a 2010 issue, won't-fix).
+#   Debian: no fix. sparq-server runs no untrusted glob() expansion. Accepted (unfixable).
+CVE-2010-4756
+
+# --- glibc 2026 disclosures: deprecated/debug DNS-print + narrow stdio edge cases (libc6) ---
+# All four are Debian bookworm "no-dsa (minor issue)" with NO fixed version, MEDIUM severity.
+# CVE-2026-6238 / CVE-2026-5435: ns_printrrf/ns_printrr/fp_nquery — DEPRECATED (since glibc
+#   2.34, Aug 2021) debug-only DNS record printers that mis-handle RDATA length for LOC/CERT/
+#   TKEY/TSIG records. Not on the standard resolver path; sparq-server does not call these
+#   legacy debug functions. Accepted (unfixable, not-reachable).
+CVE-2026-6238
+CVE-2026-5435
+# CVE-2026-5928: ungetwc() out-of-bounds read for charsets with single/multi-byte encoding
+#   overlap. Debian: no-dsa, no fix. sparq-server does not use wide-char ungetwc on untrusted
+#   multibyte streams. Accepted (unfixable, not-reachable).
+CVE-2026-5928
+# CVE-2026-5450: scanf %mc with an explicit field width >1024 — one-byte heap overflow. Debian:
+#   no-dsa, no fix. sparq-server does not parse untrusted input through the scanf %mc family.
+#   Accepted (unfixable, not-reachable).
+CVE-2026-5450
+
+# --- OpenSSL (libssl3 3.0.20-1~deb12u2 — already the latest Debian 12 release) ---
+# CVE-2026-42767: NULL-pointer deref in the OpenSSL CMP *client* when an attacker-controlled
+#   CMP server returns a crafted response (DoS). Debian: bookworm no-dsa (fix only in upstream
+#   3.0.21, not yet released for bookworm). sparq-server is NOT a CMP client — it never speaks
+#   RFC 4210 CMP. Accepted (unfixable on bookworm today, not-reachable; re-audit on deb12u3).
+CVE-2026-42767
+# CVE-2025-27587: Minerva timing side-channel in ECDSA signing — EXPLOITABLE ONLY ON POWERPC,
+#   and DISPUTED by OpenSSL (the attack needs the attacker's process on the same physical host,
+#   outside OpenSSL's threat model). Debian: no fix. sparq ships on x86_64 / aarch64, not ppc.
+#   Accepted (unfixable, not-affected — wrong architecture + out-of-threat-model).
+CVE-2025-27587

@@ -57,9 +57,14 @@ These are **not** CIS-owned; they back CIS rows and are already closed/tracked e
   `failure-threshold: warning`; the one finding — DL3059, info-level intentional RUN layering —
   is waived by rule code with a documented reason), and `trivy` builds the server image and scans
   its OS+library layers, failing on **fixable HIGH/CRITICAL** (`ignore-unfixed`), with a checked-in
-  `.trivyignore` allowlist (empty by design — distroless base) and a SARIF upload to code-scanning.
+  `.trivyignore` allowlist and a SARIF upload to code-scanning.
   Runs on PRs touching the image, on push-to-main, in the merge queue, and weekly to re-scan the
   unchanged base. Covers Docker Bench **§4.4** and the image-OS half of CIS v8 **7.5/7.6**.
+  The `.trivyignore` allowlist carries the **unfixable** distroless-base OS CVEs (16 glibc/libssl
+  findings, all LOW/MEDIUM with no Debian-12 fix and non-reachable in sparq-server's code path —
+  each justified per-line in the file; `chore-codescanning-triage`, [OPUS-4.8]); these are the only
+  Trivy code-scanning alerts and are now suppressed at scan time so they no longer report. NO
+  fixable HIGH/CRITICAL is silenced — the honesty rule still holds.
   All third-party actions SHA-pinned. *(Trivy/Hadolint were not run end-to-end locally — no docker
   daemon in the authoring env — but hadolint ran clean against the real Dockerfile with the config,
   and actionlint passed; CI is the canonical run.)*

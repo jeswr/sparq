@@ -42,6 +42,18 @@ default = ["server"]
 # integration test. Production builds never enable it (the seam field + constructor
 # vanish), so production behaviour is byte-identical to a build without this feature.
 test-seams = []
+# [OPUS-4.8] (sq-0bxp) `audit-log` (default OFF): compiles the OPT-IN per-query access
+# audit log (CDMC CD-2 / ISO 27001 A.8.15 / EU CRA logging). With the feature on, the
+# server can emit a structured `tracing` record under target `sparq_server::audit` for
+# every query / update / Graph-Store request — requester identity (a token fingerprint or
+# `anonymous`, never the secret), operation class, a NON-reversible query fingerprint (NOT
+# the full query text — the #241 info-leak posture), the access decision, the HTTP status /
+# row count and the duration. STILL OFF AT RUNTIME by default even when compiled in: the
+# operator must additionally set `--audit-log` / `SPARQ_AUDIT_LOG=1`
+# (`ServerConfig::audit_log`). Without the feature the audit module + every call site is
+# `#[cfg]`-stripped, so a request pays exactly ZERO — byte-identical to before. Needs the
+# `server` feature (it works on the async HTTP `Response` + `tracing`).
+audit-log = ["server"]
 # [OPUS-4.8] (sq-7cxr, gh-44) `server` turns on `sparq-core/mmap` so the binary can use the
 # engine's durable directory-backed `Graph` (`Graph::open`/`save` + the per-graph write-ahead
 # log + named-graph persistence) behind the `--persist <DIR>` flag — the QLever `--persist-updates`

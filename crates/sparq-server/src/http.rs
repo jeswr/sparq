@@ -40,7 +40,9 @@ use tower_http::trace::TraceLayer;
 
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
-use sparq_serve::{ApplyUpdates, Generation, GenerationRing, GraphApplier, PodId, WriteError, Writer, WriterConfig};
+use sparq_serve::{
+    ApplyUpdates, Generation, GenerationRing, GraphApplier, PodId, WriteError, Writer, WriterConfig,
+};
 
 use crate::exec::{prepare, PrepareError, QueryForm};
 use crate::negotiate::{negotiate, negotiate_graph, Format, GraphFormat};
@@ -170,6 +172,21 @@ pub struct ServerConfig {
     pub time_travel_max_age: Option<Duration>,
     /// Log every request/response via `tower_http::trace::TraceLayer`.
     pub verbose: bool,
+    /// [OPUS-4.8] (sq-0bxp) **Per-query access audit log** runtime switch (CDMC CD-2 / ISO
+    /// 27001 A.8.15 / EU CRA logging). When `true`, every query / update / Graph-Store request
+    /// emits a structured `tracing` record under the dedicated `target: "sparq_server::audit"`
+    /// — requester identity (a Bearer-token fingerprint or `anonymous`, NEVER the secret),
+    /// operation class, a NON-reversible query fingerprint (NOT the full query text — the #241
+    /// info-leak posture), the access decision (allowed / denied + reason), the HTTP status /
+    /// result-row count and the duration. Operators route the target to their compliance sink
+    /// via `RUST_LOG`. `false` (the default) emits nothing — the audit instrumentation is a
+    /// single boolean check before any record is built, so an audit-disabled request pays
+    /// essentially zero. Set by `--audit-log` / `SPARQ_AUDIT_LOG=1`. Present only with the
+    /// `audit-log` cargo feature; without it the field, the flag and every call site are
+    /// compiled out, so a request pays EXACTLY zero (byte-identical to before). See
+    /// [`crate::audit`].
+    #[cfg(feature = "audit-log")]
+    pub audit_log: bool,
     /// [OPUS-4.8] sq-o4qf: explicit opt-in to bind a **non-loopback** address.
     ///
     /// By default the server has **no authentication** on any endpoint — including the
@@ -274,6 +291,10 @@ impl Default for ServerConfig {
             #[cfg(feature = "time-travel")]
             time_travel_max_age: None,
             verbose: false,
+            // [OPUS-4.8] sq-0bxp: audit log OFF by default even when the feature is compiled in
+            // (the operator opts in deliberately via --audit-log / SPARQ_AUDIT_LOG=1).
+            #[cfg(feature = "audit-log")]
+            audit_log: false,
             allow_remote: false, // [OPUS-4.8] sq-o4qf: safe default — refuse non-loopback bind unless opted in
             // [OPUS-4.8] sq-zcby: safe default — no token => no write auth (back-compat).
             auth_token: None,
@@ -347,6 +368,12 @@ impl ServerConfig {
                 cfg.time_travel_max_age = (secs > 0).then(|| Duration::from_secs(secs));
             }
         }
+        // [OPUS-4.8] sq-0bxp: SPARQ_AUDIT_LOG truthy ("1"/"true"/"yes"/"on") turns the per-query
+        // access audit log on at runtime (only when the `audit-log` feature is compiled in).
+        #[cfg(feature = "audit-log")]
+        if let Ok(v) = std::env::var("SPARQ_AUDIT_LOG") {
+            cfg.audit_log = env_truthy(&v);
+        }
         // [OPUS-4.8] sq-o4qf: SPARQ_ALLOW_REMOTE truthy ("1"/"true"/"yes"/"on", case-insensitive)
         // opts in to a non-loopback bind. Anything else (incl. unset / "0" / "false") leaves the
         // safe default of refusing to expose the unauthenticated surface beyond loopback.
@@ -392,7 +419,10 @@ impl ServerConfig {
 /// [OPUS-4.8] sq-o4qf: parse a boolean-ish env value. Truthy: `1`, `true`, `yes`, `on`
 /// (case-insensitive, trimmed); everything else (including empty) is false.
 fn env_truthy(v: &str) -> bool {
-    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -611,10 +641,17 @@ pub(crate) const WS_BEARER_SUBPROTOCOL_PREFIX: &str = "bearer.";
 pub(crate) fn subprotocol_bearer_token(headers: &HeaderMap) -> Option<(&str, &str)> {
     // A client may send multiple `Sec-WebSocket-Protocol` header lines, each itself a
     // comma-separated list; scan every entry across all lines.
-    headers.get_all(header::SEC_WEBSOCKET_PROTOCOL).iter().find_map(|v| {
-        let raw = v.to_str().ok()?;
-        raw.split(',').map(str::trim).find_map(|proto| proto.strip_prefix(WS_BEARER_SUBPROTOCOL_PREFIX).map(|tok| (proto, tok)))
-    })
+    headers
+        .get_all(header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .find_map(|v| {
+            let raw = v.to_str().ok()?;
+            raw.split(',').map(str::trim).find_map(|proto| {
+                proto
+                    .strip_prefix(WS_BEARER_SUBPROTOCOL_PREFIX)
+                    .map(|tok| (proto, tok))
+            })
+        })
 }
 
 /// [OPUS-4.8] sq-zcby / sq-cxk5: the per-request auth decision core. Returns `None` to proceed,
@@ -626,7 +663,11 @@ pub(crate) fn subprotocol_bearer_token(headers: &HeaderMap) -> Option<(&str, &st
 /// `Authorization: Bearer` header on plain HTTP, or ALSO the `bearer.<token>` WebSocket
 /// subprotocol — sq-cxk5). The 401 is byte-identical for a missing vs a wrong token, so it never
 /// leaks which.
-pub(crate) fn auth_check(config: &ServerConfig, op: Operation, presented: Option<&str>) -> Option<Response> {
+pub(crate) fn auth_check(
+    config: &ServerConfig,
+    op: Operation,
+    presented: Option<&str>,
+) -> Option<Response> {
     let token = config.auth_token.as_deref()?; // no token configured => never gated
     let gated = match op {
         Operation::Write => true,
@@ -647,7 +688,11 @@ pub(crate) fn auth_check(config: &ServerConfig, op: Operation, presented: Option
 /// `Authorization: Bearer <token>` header against the configured posture. See [`auth_check`].
 /// The SSE subscription GET (`/subscriptions/sse`) uses this exactly like the other GET routes
 /// (sq-cxk5): it is a plain GET, so the Bearer header is the only channel.
-pub(crate) fn auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Operation) -> Option<Response> {
+pub(crate) fn auth_gate(
+    config: &ServerConfig,
+    headers: &HeaderMap,
+    op: Operation,
+) -> Option<Response> {
     auth_check(config, op, bearer_token(headers))
 }
 
@@ -660,8 +705,13 @@ pub(crate) fn auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Operatio
 /// upgrade is unchanged (open) — back-compatible. The `Authorization` header is preferred when
 /// present; the subprotocol is the fallback so a browser is not penalised for offering an
 /// unrelated subprotocol alongside `bearer.<token>`.
-pub(crate) fn ws_auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Operation) -> Option<Response> {
-    let presented = bearer_token(headers).or_else(|| subprotocol_bearer_token(headers).map(|(_, tok)| tok));
+pub(crate) fn ws_auth_gate(
+    config: &ServerConfig,
+    headers: &HeaderMap,
+    op: Operation,
+) -> Option<Response> {
+    let presented =
+        bearer_token(headers).or_else(|| subprotocol_bearer_token(headers).map(|(_, tok)| tok));
     auth_check(config, op, presented)
 }
 
@@ -669,8 +719,14 @@ pub(crate) fn ws_auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Opera
 /// Bearer` plus the server's standard JSON error body. Identical for a missing vs a wrong
 /// token (the body carries no hint either way), so it never leaks which.
 pub(crate) fn unauthorized() -> Response {
-    let mut resp = json_error(StatusCode::UNAUTHORIZED, "authentication required: present a valid Bearer token");
-    resp.headers_mut().insert(header::WWW_AUTHENTICATE, header::HeaderValue::from_static("Bearer"));
+    let mut resp = json_error(
+        StatusCode::UNAUTHORIZED,
+        "authentication required: present a valid Bearer token",
+    );
+    resp.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        header::HeaderValue::from_static("Bearer"),
+    );
     resp
 }
 
@@ -796,7 +852,9 @@ fn touched_pods(sparql: &str) -> Vec<PodId> {
             GraphUpdateOperation::Clear { graph: target, .. }
             | GraphUpdateOperation::Drop { graph: target, .. } => match target {
                 GraphTarget::NamedNode(n) => acc.named(n.as_str()),
-                GraphTarget::DefaultGraph | GraphTarget::NamedGraphs | GraphTarget::AllGraphs => acc.global(),
+                GraphTarget::DefaultGraph | GraphTarget::NamedGraphs | GraphTarget::AllGraphs => {
+                    acc.global()
+                }
             },
             // CREATE makes one empty named graph — touches only it.
             GraphUpdateOperation::Create { graph, .. } => acc.named(graph.as_str()),
@@ -804,11 +862,17 @@ fn touched_pods(sparql: &str) -> Vec<PodId> {
             // scopable; a variable graph name (or a default-graph slot) is not, so it
             // widens to global. Reads (WHERE / USING) do not affect invalidation scope.
             GraphUpdateOperation::DeleteInsert { delete, insert, .. } => {
-                for slot in delete.iter().map(|q| &q.graph_name).chain(insert.iter().map(|q| &q.graph_name)) {
+                for slot in delete
+                    .iter()
+                    .map(|q| &q.graph_name)
+                    .chain(insert.iter().map(|q| &q.graph_name))
+                {
                     match slot {
                         GraphNamePattern::NamedNode(n) => acc.named(n.as_str()),
                         // Default graph or a dynamically-bound graph name: unscopable → global.
-                        GraphNamePattern::DefaultGraph | GraphNamePattern::Variable(_) => acc.global(),
+                        GraphNamePattern::DefaultGraph | GraphNamePattern::Variable(_) => {
+                            acc.global()
+                        }
                     }
                 }
             }
@@ -876,9 +940,16 @@ fn open_or_create_durable(dir: &std::path::Path, seed: Graph) -> Result<Graph, S
     }
     // Fresh: persist the seed, then open it so the returned graph is directory-backed
     // (carries its own WAL) and ready for WAL-durable updates.
-    std::fs::create_dir_all(dir).map_err(|e| format!("creating persist dir {}: {e}", dir.display()))?;
-    seed.save(dir).map_err(|e| format!("initialising persist dir {}: {e}", dir.display()))?;
-    Graph::open(dir).map_err(|e| format!("opening freshly-initialised persist dir {}: {e}", dir.display()))
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("creating persist dir {}: {e}", dir.display()))?;
+    seed.save(dir)
+        .map_err(|e| format!("initialising persist dir {}: {e}", dir.display()))?;
+    Graph::open(dir).map_err(|e| {
+        format!(
+            "opening freshly-initialised persist dir {}: {e}",
+            dir.display()
+        )
+    })
 }
 
 /// [OPUS-4.8] (sq-vpx4) Internal marker prefixed onto the error string of a
@@ -962,7 +1033,11 @@ impl DurableStore {
 
 impl ServerApplier {
     fn new(config: Arc<ServerConfig>) -> Self {
-        Self { inner: GraphApplier::default(), config, durable: None }
+        Self {
+            inner: GraphApplier::default(),
+            config,
+            durable: None,
+        }
     }
 
     /// [OPUS-4.8] (sq-7cxr, gh-44) An applier whose committed batches are also mirrored to
@@ -1014,7 +1089,9 @@ impl ApplyUpdates for ServerApplier {
             // update is never persisted (it is not published either).
             d.batch.extend(effects);
         } else {
-            with_engine_scope(&self.config, || sparq_engine::update_in_place_with_budget(working, update, &budget))?;
+            with_engine_scope(&self.config, || {
+                sparq_engine::update_in_place_with_budget(working, update, &budget)
+            })?;
         }
         Ok(())
     }
@@ -1194,7 +1271,11 @@ impl AppState {
             }
             None => ServerApplier::new(config.clone()),
         };
-        let writer = Arc::new(Writer::spawn(ring.clone(), applier, WriterConfig::default()));
+        let writer = Arc::new(Writer::spawn(
+            ring.clone(),
+            applier,
+            WriterConfig::default(),
+        ));
         Ok(Self {
             ring,
             writer,
@@ -1296,10 +1377,16 @@ pub fn router(state: AppState) -> Router {
         // [OPUS-4.8] axum 0.8 (matchit 0.8) wildcard-capture syntax: `/*path` -> `/{*path}`.
         .route("/graphs/{*path}", any(graph_store_direct))
         // SEPA-style SPARQL subscriptions over WebSocket (T23).
-        .route("/subscriptions", get(crate::subscriptions::subscriptions_endpoint))
+        .route(
+            "/subscriptions",
+            get(crate::subscriptions::subscriptions_endpoint),
+        )
         // [OPUS-4.8] sq-bxog: the same subscription engine over Server-Sent Events
         // (text/event-stream) — one subscription per stream, query in the query string.
-        .route("/subscriptions/sse", get(crate::subscriptions::sse::sse_endpoint))
+        .route(
+            "/subscriptions/sse",
+            get(crate::subscriptions::sse::sse_endpoint),
+        )
         // Liveness.
         .route("/health", get(|| async { "ok" }))
         // Prometheus metrics (T22).
@@ -1315,7 +1402,10 @@ pub fn router(state: AppState) -> Router {
     // The metrics middleware wraps the WHOLE hardened stack so shed requests
     // (429), body-limit rejections (413) and panics (500) are counted with the
     // status the client actually saw.
-    harden(routes, &config).layer(axum::middleware::from_fn_with_state(state, crate::metrics::track))
+    harden(routes, &config).layer(axum::middleware::from_fn_with_state(
+        state,
+        crate::metrics::track,
+    ))
 }
 
 /// `GET /metrics` — Prometheus text exposition (T22). The gauges (graph triple
@@ -1324,7 +1414,12 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Response {
     let triples = state.current().snapshot().len();
     let subs = state.subs.active_count();
     let body = state.metrics().render(subs, triples);
-    text_response(StatusCode::OK, "text/plain; version=0.0.4; charset=utf-8", body, false)
+    text_response(
+        StatusCode::OK,
+        "text/plain; version=0.0.4; charset=utf-8",
+        body,
+        false,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1425,9 +1520,14 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
     let routes = routes.layer(
         ServiceBuilder::new()
             // Panic in any inner layer/handler => 500 with a JSON body, not a dead socket.
-            .layer(CatchPanicLayer::custom(|_: Box<dyn std::any::Any + Send>| {
-                json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error (panic)")
-            }))
+            .layer(CatchPanicLayer::custom(
+                |_: Box<dyn std::any::Any + Send>| {
+                    json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal server error (panic)",
+                    )
+                },
+            ))
             // [OPUS-4.8] sq-cmvh (ASVS V14.4): stamp the security hardening headers onto EVERY
             // response. Placed second so it runs LAST on the response path (after the
             // panic-catcher, the load-shed 429 mapper and `json_error_bodies`), guaranteeing the
@@ -1438,9 +1538,15 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
             // (mapped to 429) instead of queueing unboundedly.
             .layer(HandleErrorLayer::new(|err: BoxError| async move {
                 if err.is::<tower::load_shed::error::Overloaded>() {
-                    json_error(StatusCode::TOO_MANY_REQUESTS, "server is at its concurrent-request limit, retry later")
+                    json_error(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "server is at its concurrent-request limit, retry later",
+                    )
                 } else {
-                    json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("middleware error: {err}"))
+                    json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("middleware error: {err}"),
+                    )
                 }
             }))
             .load_shed()
@@ -1486,7 +1592,10 @@ fn explain_mode(
     body_params: Option<&HashMap<String, String>>,
     headers: &HeaderMap,
 ) -> ExplainMode {
-    if let Some(v) = body_params.and_then(|m| m.get("explain")).or_else(|| url_params.get("explain")) {
+    if let Some(v) = body_params
+        .and_then(|m| m.get("explain"))
+        .or_else(|| url_params.get("explain"))
+    {
         return match v.to_ascii_lowercase().as_str() {
             "false" | "0" | "off" | "no" => ExplainMode::Off,
             "analyze" | "analyse" => ExplainMode::Analyze,
@@ -1530,13 +1639,18 @@ fn resolve_pin(
     url_params: &HashMap<String, String>,
     body_params: Option<&HashMap<String, String>>,
 ) -> Result<PinnedGen, Response> {
-    let raw = match body_params.and_then(|m| m.get("generation")).or_else(|| url_params.get("generation")) {
+    let raw = match body_params
+        .and_then(|m| m.get("generation"))
+        .or_else(|| url_params.get("generation"))
+    {
         Some(raw) => raw,
         None => return Ok(state.current()),
     };
-    let number: u64 = raw
-        .parse()
-        .map_err(|_| bad_request(&format!("invalid 'generation' parameter '{raw}': expected a generation number")))?;
+    let number: u64 = raw.parse().map_err(|_| {
+        bad_request(&format!(
+            "invalid 'generation' parameter '{raw}': expected a generation number"
+        ))
+    })?;
     let current = state.current();
     if number > current.number() {
         return Err(bad_request(&format!(
@@ -1612,17 +1726,43 @@ async fn sparql_endpoint(
             // GET without a `query` parameter is a malformed request (400). A GET is always a
             // READ (the protocol has no GET update), so it is gated only under --auth-token-read.
             // [OPUS-4.8] sq-zcby.
+            // [OPUS-4.8] sq-0bxp: begin an access-audit record for the GET query (always a
+            // read; fingerprint the `query=` param if present).
+            #[cfg(feature = "audit-log")]
+            let audit = crate::audit::enabled(state.config()).then(|| {
+                crate::audit::AuditRecord::begin(
+                    crate::audit::AuditOp::Query,
+                    bearer_token(&headers),
+                    url_params.get("query").map(String::as_str),
+                )
+            });
             if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+                #[cfg(feature = "audit-log")]
+                if let Some(a) = audit {
+                    a.emit(&resp);
+                }
                 return resp;
             }
             match url_params.get("query") {
                 Some(q) => {
                     let pin = match resolve_pin(&state, &url_params, None) {
                         Ok(pin) => pin,
-                        Err(resp) => return resp,
+                        Err(resp) => {
+                            #[cfg(feature = "audit-log")]
+                            if let Some(a) = audit {
+                                a.emit(&resp);
+                            }
+                            return resp;
+                        }
                     };
                     let explain = explain_mode(&url_params, None, &headers);
-                    run_query(&state, q, &headers, method == Method::HEAD, explain, pin).await
+                    let resp =
+                        run_query(&state, q, &headers, method == Method::HEAD, explain, pin).await;
+                    #[cfg(feature = "audit-log")]
+                    if let Some(a) = audit {
+                        a.emit(&resp);
+                    }
+                    resp
                 }
                 // [OPUS-4.8] sq-d3d8: per SPARQL Protocol §2.1.2, a GET with no `query` may
                 // serve the endpoint's Service Description (OPT-IN — only when the
@@ -1658,16 +1798,47 @@ async fn handle_post(
             Ok(s) => s,
             Err(_) => return bad_request("request body is not valid UTF-8"),
         };
-        let op = if payload_mutates(s) { Operation::Write } else { Operation::Read };
+        let op = if payload_mutates(s) {
+            Operation::Write
+        } else {
+            Operation::Read
+        };
+        // [OPUS-4.8] sq-0bxp: audit the direct-POST query/update (op keys on whether it mutates).
+        #[cfg(feature = "audit-log")]
+        let audit = crate::audit::enabled(state.config()).then(|| {
+            crate::audit::AuditRecord::begin(
+                crate::audit::AuditOp::from_sparql(op),
+                bearer_token(headers),
+                Some(s),
+            )
+        });
         if let Some(resp) = auth_gate(state.config(), headers, op) {
+            #[cfg(feature = "audit-log")]
+            if let Some(a) = audit {
+                a.emit(&resp);
+            }
             return resp;
         }
+        // NB: a write smuggled through the query Content-Type still goes to `run_query` (the
+        // historical behaviour — it parses as a non-query and returns the existing error); the
+        // audit op already records it as an `update` for the access trail.
         let pin = match resolve_pin(state, url_params, None) {
             Ok(pin) => pin,
-            Err(resp) => return resp,
+            Err(resp) => {
+                #[cfg(feature = "audit-log")]
+                if let Some(a) = audit {
+                    a.emit(&resp);
+                }
+                return resp;
+            }
         };
         let explain = explain_mode(url_params, None, headers);
-        run_query(state, s, headers, false, explain, pin).await
+        let resp = run_query(state, s, headers, false, explain, pin).await;
+        #[cfg(feature = "audit-log")]
+        if let Some(a) = audit {
+            a.emit(&resp);
+        }
+        resp
     } else if ct.starts_with(FORM_CT) {
         // POST url-encoded — `query=` (read) or `update=` (write) in the body. [OPUS-4.8]
         // sq-zcby: classify on the payload for the ambiguous `query=` path; an `update=` form
@@ -1695,7 +1866,24 @@ async fn handle_post(
                 None => Operation::Read,
             }
         };
+        // [OPUS-4.8] sq-0bxp: audit the url-encoded form request (fingerprint the update= or
+        // query= payload it carries).
+        #[cfg(feature = "audit-log")]
+        let audit = crate::audit::enabled(state.config()).then(|| {
+            crate::audit::AuditRecord::begin(
+                crate::audit::AuditOp::from_sparql(op),
+                bearer_token(headers),
+                params
+                    .get("update")
+                    .or_else(|| params.get("query"))
+                    .map(String::as_str),
+            )
+        });
         if let Some(resp) = auth_gate(state.config(), headers, op) {
+            #[cfg(feature = "audit-log")]
+            if let Some(a) = audit {
+                a.emit(&resp);
+            }
             return resp;
         }
         // The SPARQL 1.1 Protocol url-encoded UPDATE operation (`update=` form) submits through
@@ -1703,28 +1891,62 @@ async fn handle_post(
         if let Some(u) = params.get("update") {
             #[cfg(feature = "time-travel")]
             if url_params.contains_key("generation") {
-                return bad_request(
+                let resp = bad_request(
                     "the 'generation' parameter pins queries to a retained generation; \
                      updates always apply to the current generation",
                 );
+                #[cfg(feature = "audit-log")]
+                if let Some(a) = audit {
+                    a.emit(&resp);
+                }
+                return resp;
             }
-            return run_update(state, u.clone()).await;
+            let resp = run_update(state, u.clone()).await;
+            #[cfg(feature = "audit-log")]
+            if let Some(a) = audit {
+                a.emit(&resp);
+            }
+            return resp;
         }
-        match params.get("query") {
+        let resp = match params.get("query") {
             Some(q) => {
                 let pin = match resolve_pin(state, url_params, Some(&params)) {
                     Ok(pin) => pin,
-                    Err(resp) => return resp,
+                    Err(resp) => {
+                        #[cfg(feature = "audit-log")]
+                        if let Some(a) = audit {
+                            a.emit(&resp);
+                        }
+                        return resp;
+                    }
                 };
                 let explain = explain_mode(url_params, Some(&params), headers);
                 run_query(state, q, headers, false, explain, pin).await
             }
             None => bad_request("missing 'query' or 'update' parameter in url-encoded body"),
+        };
+        #[cfg(feature = "audit-log")]
+        if let Some(a) = audit {
+            a.emit(&resp);
         }
+        resp
     } else if ct.starts_with("application/sparql-update") {
         // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
         // [OPUS-4.8] sq-zcby: an UPDATE is always a write — gate it before doing any work.
+        // [OPUS-4.8] sq-0bxp: audit the update (fingerprint the body if it is valid UTF-8).
+        #[cfg(feature = "audit-log")]
+        let audit = crate::audit::enabled(state.config()).then(|| {
+            crate::audit::AuditRecord::begin(
+                crate::audit::AuditOp::Update,
+                bearer_token(headers),
+                std::str::from_utf8(body).ok(),
+            )
+        });
         if let Some(resp) = auth_gate(state.config(), headers, Operation::Write) {
+            #[cfg(feature = "audit-log")]
+            if let Some(a) = audit {
+                a.emit(&resp);
+            }
             return resp;
         }
         // `apply_update` blocks for the writer's group-commit ack (window + batch
@@ -1734,15 +1956,25 @@ async fn handle_post(
         // a silent ignore.
         #[cfg(feature = "time-travel")]
         if url_params.contains_key("generation") {
-            return bad_request(
+            let resp = bad_request(
                 "the 'generation' parameter pins queries to a retained generation; \
                  updates always apply to the current generation",
             );
+            #[cfg(feature = "audit-log")]
+            if let Some(a) = audit {
+                a.emit(&resp);
+            }
+            return resp;
         }
-        match std::str::from_utf8(body) {
+        let resp = match std::str::from_utf8(body) {
             Ok(u) => run_update(state, u.to_string()).await,
             Err(_) => bad_request("request body is not valid UTF-8"),
+        };
+        #[cfg(feature = "audit-log")]
+        if let Some(a) = audit {
+            a.emit(&resp);
         }
+        resp
     } else {
         // Unsupported media type for the POST query operation.
         json_error(
@@ -1855,7 +2087,9 @@ async fn run_query_pinned(
                 }
             });
             match r {
-                Ok(text) => text_response(StatusCode::OK, "text/plain; charset=utf-8", text, head_only),
+                Ok(text) => {
+                    text_response(StatusCode::OK, "text/plain; charset=utf-8", text, head_only)
+                }
                 // ANALYZE of a non-SELECT/ASK form is a client error, not a server one.
                 Err(e) if e.contains("EXPLAIN ANALYZE supports") => bad_request(&e),
                 // EXPLAIN ANALYZE used `make_budget(_, true)` → max_results applied.
@@ -1864,9 +2098,7 @@ async fn run_query_pinned(
         });
         return await_worker(task, &config).await;
     }
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok());
+    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
     let fmt = negotiate(accept);
     let config = state.config.clone();
 
@@ -1877,20 +2109,24 @@ async fn run_query_pinned(
             let budget = make_budget(&config, !is_ask);
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
-                with_engine_scope(&cfg, || if is_ask {
-                    match sparq_engine::ask_with_budget(gen.snapshot(), &select, &budget) {
-                        Ok(value) => {
-                            let (body, ct) = match fmt {
-                                Format::Xml => (results::ask_to_xml(value), fmt.ask_content_type()),
-                                _ => (results::ask_to_json(value), fmt.ask_content_type()),
-                            };
-                            text_response(StatusCode::OK, ct, body, head_only)
+                with_engine_scope(&cfg, || {
+                    if is_ask {
+                        match sparq_engine::ask_with_budget(gen.snapshot(), &select, &budget) {
+                            Ok(value) => {
+                                let (body, ct) = match fmt {
+                                    Format::Xml => {
+                                        (results::ask_to_xml(value), fmt.ask_content_type())
+                                    }
+                                    _ => (results::ask_to_json(value), fmt.ask_content_type()),
+                                };
+                                text_response(StatusCode::OK, ct, body, head_only)
+                            }
+                            // ASK used `make_budget(_, false)` → max_results did NOT apply.
+                            Err(e) => engine_error_response(&e, &cfg, false),
                         }
-                        // ASK used `make_budget(_, false)` → max_results did NOT apply.
-                        Err(e) => engine_error_response(&e, &cfg, false),
+                    } else {
+                        render_select(&gen, &select, fmt, head_only, &budget, &cfg)
                     }
-                } else {
-                    render_select(&gen, &select, fmt, head_only, &budget, &cfg)
                 })
             });
             await_worker(task, &config).await
@@ -1909,7 +2145,9 @@ async fn run_query_pinned(
                 // [OPUS-4.8] sq-rt6v: produce the triple list once, then serialise it in the
                 // negotiated graph syntax — N-Triples (default), prefix-compacting Turtle, or
                 // RDF/XML — rather than always emitting N-Triples.
-                match with_engine_scope(&cfg, || sparq_engine::construct_or_describe_with_budget(gen.snapshot(), &query, &budget)) {
+                match with_engine_scope(&cfg, || {
+                    sparq_engine::construct_or_describe_with_budget(gen.snapshot(), &query, &budget)
+                }) {
                     Ok(triples) => {
                         let body = serialise_graph_triples(&triples, gfmt);
                         text_response(StatusCode::OK, gfmt.content_type(), body, head_only)
@@ -1936,7 +2174,11 @@ async fn run_query_pinned(
 /// have no projection to cap). Both map onto the single engine `max_rows` budget, so the
 /// effective ceiling on a path where both apply is their min.
 pub(crate) fn make_budget(config: &ServerConfig, apply_max_results: bool) -> QueryBudget {
-    let results_cap = if apply_max_results { config.max_results } else { None };
+    let results_cap = if apply_max_results {
+        config.max_results
+    } else {
+        None
+    };
     QueryBudget {
         deadline: config.query_timeout.map(|t| std::time::Instant::now() + t),
         max_rows: tighter(config.max_query_rows, results_cap),
@@ -1976,8 +2218,13 @@ async fn await_worker(task: tokio::task::JoinHandle<Response>, config: &ServerCo
     };
     match joined {
         Ok(resp) => resp,
-        Err(e) if e.is_panic() => json_error(StatusCode::INTERNAL_SERVER_ERROR, "query worker panicked"),
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "query worker was cancelled"),
+        Err(e) if e.is_panic() => {
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "query worker panicked")
+        }
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "query worker was cancelled",
+        ),
     }
 }
 
@@ -2053,7 +2300,9 @@ fn render_select(
     let body = match fmt {
         // SELECT projections fold in --max-results (`make_budget(_, true)`) → name it.
         Format::Json => match sparq_engine::query_json_chunks_with_budget(graph, select, budget) {
-            Ok(chunks) => return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone()),
+            Ok(chunks) => {
+                return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone())
+            }
             Err(e) => return engine_error_response(&e, config, true),
         },
         _ => {
@@ -2149,7 +2398,9 @@ fn timeout_response(config: &ServerConfig) -> Response {
     let secs = config.query_timeout.map(|t| t.as_secs()).unwrap_or(0);
     json_error(
         StatusCode::SERVICE_UNAVAILABLE,
-        &format!("query timed out (server limit: {secs}s); simplify the query or raise --query-timeout"),
+        &format!(
+            "query timed out (server limit: {secs}s); simplify the query or raise --query-timeout"
+        ),
     )
 }
 
@@ -2188,7 +2439,11 @@ async fn graph_store_indirect(
         // POST to the GSP endpoint with no graph selector creates a fresh graph (spec
         // §5.5); other write verbs and reads still require an explicit selector.
         (false, None) if method == Method::POST => GraphRef::Named(mint_graph_iri()),
-        (false, None) => return bad_request("indirect graph identification requires '?default' or '?graph=<uri>'"),
+        (false, None) => {
+            return bad_request(
+                "indirect graph identification requires '?default' or '?graph=<uri>'",
+            )
+        }
     };
     graph_store(&state, &method, graph, &headers, body).await
 }
@@ -2237,7 +2492,13 @@ fn mint_graph_iri() -> String {
 /// [OPUS-4.8] (sq-gxsj) Shared GSP dispatcher across direct + indirect identification.
 /// READ (`GET`/`HEAD`) serialises the addressed graph; WRITE (`PUT`/`POST`/`DELETE`)
 /// translates into a SPARQL Update submitted through the sequenced writer.
-async fn graph_store(state: &AppState, method: &Method, graph: GraphRef, headers: &HeaderMap, body: Bytes) -> Response {
+async fn graph_store(
+    state: &AppState,
+    method: &Method,
+    graph: GraphRef,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Response {
     // [OPUS-4.8] sq-zcby: the GSP write methods (PUT/POST/DELETE, and PATCH which we 405) are
     // as powerful as an UPDATE, so they are gated as writes; GET/HEAD are reads (gated only
     // under --auth-token-read). Any other method is gated as a write too (fail-closed). The
@@ -2247,10 +2508,24 @@ async fn graph_store(state: &AppState, method: &Method, graph: GraphRef, headers
         Method::GET | Method::HEAD => Operation::Read,
         _ => Operation::Write,
     };
+    // [OPUS-4.8] sq-0bxp: begin an access-audit record for the GSP request (the Graph-Store
+    // surface has no query text to fingerprint — only the operation class + graph access).
+    #[cfg(feature = "audit-log")]
+    let audit = crate::audit::enabled(state.config()).then(|| {
+        crate::audit::AuditRecord::begin(
+            crate::audit::AuditOp::from_graph(op),
+            bearer_token(headers),
+            None,
+        )
+    });
     if let Some(resp) = auth_gate(state.config(), headers, op) {
+        #[cfg(feature = "audit-log")]
+        if let Some(a) = audit {
+            a.emit(&resp);
+        }
         return resp;
     }
-    match *method {
+    let resp = match *method {
         Method::GET | Method::HEAD => {
             let head_only = *method == Method::HEAD;
             serialise_graph(state, graph, headers, head_only).await
@@ -2259,8 +2534,19 @@ async fn graph_store(state: &AppState, method: &Method, graph: GraphRef, headers
         Method::POST => gsp_post(state, graph, headers, &body).await,
         Method::DELETE => gsp_delete(state, graph).await,
         // PATCH is not part of the Graph Store HTTP Protocol.
-        _ => method_not_allowed(&[Method::GET, Method::HEAD, Method::PUT, Method::POST, Method::DELETE]),
+        _ => method_not_allowed(&[
+            Method::GET,
+            Method::HEAD,
+            Method::PUT,
+            Method::POST,
+            Method::DELETE,
+        ]),
+    };
+    #[cfg(feature = "audit-log")]
+    if let Some(a) = audit {
+        a.emit(&resp);
     }
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -2306,7 +2592,11 @@ fn rdf_format_for(content_type: &str) -> Option<BodyFormat> {
 // clippy: Err is axum's `Response` (the idiomatic handler error, as in `resolve_pin`);
 // boxing it would only desync this from the rest of the handler error convention.
 #[allow(clippy::result_large_err)]
-fn body_to_ntriples(body: &Bytes, content_type: &str, base: Option<&str>) -> Result<String, Response> {
+fn body_to_ntriples(
+    body: &Bytes,
+    content_type: &str,
+    base: Option<&str>,
+) -> Result<String, Response> {
     let format = match rdf_format_for(content_type) {
         Some(f) => f,
         None => {
@@ -2318,7 +2608,8 @@ fn body_to_ntriples(body: &Bytes, content_type: &str, base: Option<&str>) -> Res
     };
     match format {
         BodyFormat::Core(format) => {
-            let text = std::str::from_utf8(body).map_err(|_| bad_request("request body is not valid UTF-8"))?;
+            let text = std::str::from_utf8(body)
+                .map_err(|_| bad_request("request body is not valid UTF-8"))?;
             // [OPUS-4.8] (sq-cz89/sq-j9zs) `oxttl` echoes the offending body token verbatim
             // (e.g. an invalid subject quotes the loaded term) — withhold it; the operator
             // gets the full parse error in the server log.
@@ -2415,7 +2706,9 @@ async fn apply_gsp_update(state: &AppState, update: String, success: StatusCode)
             }
         }
         UpdateOutcome::TimedOut => timeout_response(&state.config),
-        UpdateOutcome::Panicked => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
+        UpdateOutcome::Panicked => {
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked")
+        }
     }
 }
 
@@ -2450,14 +2743,23 @@ async fn gsp_put(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &
         let block = graph_data_block(&graph, &ntriples);
         format!("{clear} ;\nINSERT DATA {{ {block} }}")
     };
-    let success = if existed { StatusCode::NO_CONTENT } else { StatusCode::CREATED };
+    let success = if existed {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CREATED
+    };
     apply_gsp_update(state, update, success).await
 }
 
 /// `POST <graph>` — MERGE (additive) the request body into the graph (GSP §5). Maps to
 /// `INSERT DATA { GRAPH <g> { … } }`. 201 when the merge created the graph (a selector-less
 /// POST, or a POST to an absent named graph), 204 when it added to an existing graph.
-async fn gsp_post(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &Bytes) -> Response {
+async fn gsp_post(
+    state: &AppState,
+    graph: GraphRef,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Response {
     // [OPUS-4.8] sq-ebii: inflate a gzip body under the decompression-ratio cap first.
     let body = match decode_request_body(body, headers, state.config()) {
         Ok(b) => b,
@@ -2473,9 +2775,17 @@ async fn gsp_post(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: 
     // the empty graph so a subsequent read addresses it (201).
     let update = if ntriples.is_empty() {
         match &graph {
-            GraphRef::Default => return with_generation_header(StatusCode::NO_CONTENT.into_response(), state.current().number()),
+            GraphRef::Default => {
+                return with_generation_header(
+                    StatusCode::NO_CONTENT.into_response(),
+                    state.current().number(),
+                )
+            }
             GraphRef::Named(_) if existed => {
-                return with_generation_header(StatusCode::NO_CONTENT.into_response(), state.current().number())
+                return with_generation_header(
+                    StatusCode::NO_CONTENT.into_response(),
+                    state.current().number(),
+                )
             }
             GraphRef::Named(iri) => format!("CREATE SILENT GRAPH <{}>", escape_iri(iri)),
         }
@@ -2483,7 +2793,11 @@ async fn gsp_post(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: 
         let block = graph_data_block(&graph, &ntriples);
         format!("INSERT DATA {{ {block} }}")
     };
-    let success = if existed { StatusCode::NO_CONTENT } else { StatusCode::CREATED };
+    let success = if existed {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CREATED
+    };
     apply_gsp_update(state, update, success).await
 }
 
@@ -2493,10 +2807,15 @@ async fn gsp_post(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: 
 /// `CLEAR DEFAULT`.
 async fn gsp_delete(state: &AppState, graph: GraphRef) -> Response {
     match &graph {
-        GraphRef::Default => apply_gsp_update(state, "CLEAR DEFAULT".to_string(), StatusCode::NO_CONTENT).await,
+        GraphRef::Default => {
+            apply_gsp_update(state, "CLEAR DEFAULT".to_string(), StatusCode::NO_CONTENT).await
+        }
         GraphRef::Named(iri) => {
             if !graph_exists(state, &graph) {
-                return json_error(StatusCode::NOT_FOUND, &format!("graph <{iri}> does not exist"));
+                return json_error(
+                    StatusCode::NOT_FOUND,
+                    &format!("graph <{iri}> does not exist"),
+                );
             }
             let update = format!("DROP GRAPH <{}>", escape_iri(iri));
             apply_gsp_update(state, update, StatusCode::NO_CONTENT).await
@@ -2528,7 +2847,12 @@ fn graph_exists(state: &AppState, graph: &GraphRef) -> bool {
 /// RDF/XML is newly offered). CPU-bound (a full-graph dump), so it runs on the blocking pool
 /// under the request timeout (no row cap: a dump is inherently graph-sized). A named graph
 /// that does not exist serialises as the empty graph (200, empty body) per GSP read.
-async fn serialise_graph(state: &AppState, graph: GraphRef, headers: &HeaderMap, head_only: bool) -> Response {
+async fn serialise_graph(
+    state: &AppState,
+    graph: GraphRef,
+    headers: &HeaderMap,
+    head_only: bool,
+) -> Response {
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
     let gfmt = negotiate_graph(accept);
     let ct = gfmt.content_type().to_string();
@@ -2537,10 +2861,17 @@ async fn serialise_graph(state: &AppState, graph: GraphRef, headers: &HeaderMap,
     // Pinned for the whole dump: the serialisation is consistent with request start.
     let gen = state.current();
     let cfg = config.clone();
-    let task = tokio::task::spawn_blocking(move || match graph_dump_triples(gen.snapshot(), &graph, &budget) {
-        Ok(triples) => text_response(StatusCode::OK, &ct, serialise_graph_triples(&triples, gfmt), head_only),
-        // GSP-read used `make_budget(_, false)` → max_results did NOT apply.
-        Err(e) => engine_error_response(&e, &cfg, false),
+    let task = tokio::task::spawn_blocking(move || {
+        match graph_dump_triples(gen.snapshot(), &graph, &budget) {
+            Ok(triples) => text_response(
+                StatusCode::OK,
+                &ct,
+                serialise_graph_triples(&triples, gfmt),
+                head_only,
+            ),
+            // GSP-read used `make_budget(_, false)` → max_results did NOT apply.
+            Err(e) => engine_error_response(&e, &cfg, false),
+        }
     });
     await_worker(task, &config).await
 }
@@ -2561,15 +2892,24 @@ fn serialise_graph_triples(triples: &[oxrdf::Triple], gfmt: GraphFormat) -> Stri
 /// materialised terms — `?s ?p ?o` for the default graph, `GRAPH <g> { ?s ?p ?o }` for a
 /// named graph — so no private store API is needed. [OPUS-4.8] sq-rt6v: returns `Vec<Triple>`
 /// (was N-Triples text) so the caller can serialise in any RDF syntax.
-fn graph_dump_triples(graph: &Graph, target: &GraphRef, budget: &QueryBudget) -> Result<Vec<oxrdf::Triple>, String> {
+fn graph_dump_triples(
+    graph: &Graph,
+    target: &GraphRef,
+    budget: &QueryBudget,
+) -> Result<Vec<oxrdf::Triple>, String> {
     let select = match target {
         GraphRef::Default => "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
-        GraphRef::Named(iri) => format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{}> {{ ?s ?p ?o }} }}", escape_iri(iri)),
+        GraphRef::Named(iri) => format!(
+            "SELECT ?s ?p ?o WHERE {{ GRAPH <{}> {{ ?s ?p ?o }} }}",
+            escape_iri(iri)
+        ),
     };
     let r = sparq_engine::query_with_budget(graph, &select, budget)?;
     let mut triples = Vec::with_capacity(r.rows.len());
     for row in &r.rows {
-        let (Some(s), Some(p), Some(o)) = (&row[0], &row[1], &row[2]) else { continue };
+        let (Some(s), Some(p), Some(o)) = (&row[0], &row[1], &row[2]) else {
+            continue;
+        };
         // A triple from a real RDF graph always has a NamedNode/BlankNode subject and a
         // NamedNode predicate; a row that somehow violates that (it cannot, for `?s ?p ?o`
         // over a graph) is skipped rather than panicked on.
@@ -2589,7 +2929,9 @@ fn row_to_triple(s: &oxrdf::Term, p: &oxrdf::Term, o: &oxrdf::Term) -> Option<ox
         Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b.clone()),
         _ => return None,
     };
-    let Term::NamedNode(predicate) = p else { return None };
+    let Term::NamedNode(predicate) = p else {
+        return None;
+    };
     Some(oxrdf::Triple::new(subject, predicate.clone(), o.clone()))
 }
 
@@ -2604,7 +2946,9 @@ fn nt_dump_select(graph: &Graph, select: &str, budget: &QueryBudget) -> Result<S
     let r = sparq_engine::query_with_budget(graph, select, budget)?;
     let mut out = String::with_capacity(r.rows.len() * 64);
     for row in &r.rows {
-        let (Some(s), Some(p), Some(o)) = (&row[0], &row[1], &row[2]) else { continue };
+        let (Some(s), Some(p), Some(o)) = (&row[0], &row[1], &row[2]) else {
+            continue;
+        };
         nt_term(&mut out, s);
         out.push(' ');
         nt_term(&mut out, p);
@@ -2747,7 +3091,11 @@ impl DecodeError {
 /// ceiling is `min(max_decompress_ratio × compressed_len, max_body_bytes)` (see
 /// [`decode_gzip_bounded`]) — so the decompressed output is itself capped at `max_body_bytes`,
 /// never `max_body_bytes × max_decompress_ratio`.
-fn decode_request_body(body: &Bytes, headers: &HeaderMap, config: &ServerConfig) -> Result<Bytes, DecodeError> {
+fn decode_request_body(
+    body: &Bytes,
+    headers: &HeaderMap,
+    config: &ServerConfig,
+) -> Result<Bytes, DecodeError> {
     let encoding = headers
         .get(header::CONTENT_ENCODING)
         .and_then(|v| v.to_str().ok())
@@ -2808,7 +3156,12 @@ fn decode_gzip_bounded(body: &Bytes, config: &ServerConfig) -> Result<Bytes, Dec
 /// Builds a `text`-ish response with the given content type; for HEAD, omits the body but
 /// keeps the `Content-Type` (and an accurate `Content-Length` via the header) so HEAD
 /// mirrors GET.
-fn text_response(status: StatusCode, content_type: &str, body: String, head_only: bool) -> Response {
+fn text_response(
+    status: StatusCode,
+    content_type: &str,
+    body: String,
+    head_only: bool,
+) -> Response {
     let len = body.len();
     // For HEAD we advertise the same Content-Length the GET would have, with an empty body.
     let out_body = if head_only { String::new() } else { body };
@@ -2832,17 +3185,23 @@ fn text_response(status: StatusCode, content_type: &str, body: String, head_only
 /// — the ring can never let the snapshot's memory go while the body is in flight. Today
 /// the chunks are fully materialised strings, so this is belt-and-braces; it becomes
 /// load-bearing the moment chunks evaluate lazily (Wave D push/pull streaming).
-fn chunked_response(status: StatusCode, content_type: &str, chunks: Vec<String>, head_only: bool, pin: PinnedGen) -> Response {
+fn chunked_response(
+    status: StatusCode,
+    content_type: &str,
+    chunks: Vec<String>,
+    head_only: bool,
+    pin: PinnedGen,
+) -> Response {
     let len: usize = chunks.iter().map(String::len).sum();
     let body = if head_only {
         axum::body::Body::empty()
     } else {
-        axum::body::Body::from_stream(futures_util::stream::iter(
-            chunks.into_iter().map(move |c| {
+        axum::body::Body::from_stream(futures_util::stream::iter(chunks.into_iter().map(
+            move |c| {
                 let _pinned_for_stream_lifetime = &pin;
                 Ok::<_, std::convert::Infallible>(Bytes::from(c.into_bytes()))
-            }),
-        ))
+            },
+        )))
     };
     Response::builder()
         .status(status)
@@ -2898,7 +3257,9 @@ async fn json_error_bodies(resp: Response) -> Response {
     }
     let (mut parts, body) = resp.into_parts();
     // Error bodies are short; cap the read defensively.
-    let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
     let msg = String::from_utf8_lossy(&bytes);
     let json = json_error(status, msg.trim());
     parts.headers.remove(header::CONTENT_TYPE);
@@ -2964,7 +3325,10 @@ fn bad_request(msg: &str) -> Response {
 /// single source of truth so the integration test and the middleware agree on the exact set.
 pub(crate) const SECURITY_HEADERS: &[(header::HeaderName, &str)] = &[
     (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-    (header::CONTENT_SECURITY_POLICY, "default-src 'none'; frame-ancestors 'none'"),
+    (
+        header::CONTENT_SECURITY_POLICY,
+        "default-src 'none'; frame-ancestors 'none'",
+    ),
     (header::X_FRAME_OPTIONS, "DENY"),
     (header::REFERRER_POLICY, "no-referrer"),
 ];
@@ -3025,7 +3389,11 @@ fn execution_error(msg: &str) -> Response {
 }
 
 fn method_not_allowed(allow: &[Method]) -> Response {
-    let allow_value = allow.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ");
+    let allow_value = allow
+        .iter()
+        .map(|m| m.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     Response::builder()
         .status(StatusCode::METHOD_NOT_ALLOWED)
         .header(header::ALLOW, allow_value)
@@ -3047,7 +3415,10 @@ mod touched_pods_tests {
 
     /// The set of pod-id strings a given update touches (order-independent).
     fn pods(update: &str) -> std::collections::BTreeSet<String> {
-        touched_pods(update).into_iter().map(|p| p.as_str().to_string()).collect()
+        touched_pods(update)
+            .into_iter()
+            .map(|p| p.as_str().to_string())
+            .collect()
     }
 
     fn has(update: &str, iri: &str) -> bool {
@@ -3062,13 +3433,24 @@ mod touched_pods_tests {
     /// and never any OTHER graph (the A-not-B property at the extraction layer).
     #[test]
     fn graph_scoped_data_ops_are_scoped() {
-        let ins = "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } }";
-        assert_eq!(pods(ins), ["http://ex/g/A".to_string()].into_iter().collect());
-        assert!(!is_global(ins), "a single-graph write must not bump the global pod");
+        let ins =
+            "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } }";
+        assert_eq!(
+            pods(ins),
+            ["http://ex/g/A".to_string()].into_iter().collect()
+        );
+        assert!(
+            !is_global(ins),
+            "a single-graph write must not bump the global pod"
+        );
         assert!(!has(ins, "http://ex/g/B"), "a write to A must not touch B");
 
-        let del = "DELETE DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } }";
-        assert_eq!(pods(del), ["http://ex/g/A".to_string()].into_iter().collect());
+        let del =
+            "DELETE DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } }";
+        assert_eq!(
+            pods(del),
+            ["http://ex/g/A".to_string()].into_iter().collect()
+        );
     }
 
     /// Multiple GRAPH blocks in one operation each contribute their own pod; no global.
@@ -3076,7 +3458,12 @@ mod touched_pods_tests {
     fn multiple_named_graphs_each_get_a_pod() {
         let u = "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } \
                               GRAPH <http://ex/g/B> { <http://ex/s> <http://ex/p> <http://ex/o> } }";
-        assert_eq!(pods(u), ["http://ex/g/A".to_string(), "http://ex/g/B".to_string()].into_iter().collect());
+        assert_eq!(
+            pods(u),
+            ["http://ex/g/A".to_string(), "http://ex/g/B".to_string()]
+                .into_iter()
+                .collect()
+        );
         assert!(!is_global(u));
     }
 
@@ -3085,15 +3472,24 @@ mod touched_pods_tests {
     #[test]
     fn default_graph_data_op_is_global() {
         let u = "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }";
-        assert!(is_global(u), "a default-graph write must bump the global pod");
+        assert!(
+            is_global(u),
+            "a default-graph write must bump the global pod"
+        );
         assert_eq!(pods(u), [GLOBAL_POD.to_string()].into_iter().collect());
     }
 
     /// CLEAR/DROP of a single named graph is scoped; DEFAULT/NAMED/ALL widen to global.
     #[test]
     fn clear_drop_scoping() {
-        assert_eq!(pods("CLEAR GRAPH <http://ex/g/A>"), ["http://ex/g/A".to_string()].into_iter().collect());
-        assert_eq!(pods("DROP GRAPH <http://ex/g/A>"), ["http://ex/g/A".to_string()].into_iter().collect());
+        assert_eq!(
+            pods("CLEAR GRAPH <http://ex/g/A>"),
+            ["http://ex/g/A".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            pods("DROP GRAPH <http://ex/g/A>"),
+            ["http://ex/g/A".to_string()].into_iter().collect()
+        );
         assert!(is_global("CLEAR DEFAULT"));
         assert!(is_global("CLEAR NAMED"));
         assert!(is_global("CLEAR ALL"));
@@ -3103,7 +3499,10 @@ mod touched_pods_tests {
     /// CREATE touches only the new graph.
     #[test]
     fn create_is_scoped() {
-        assert_eq!(pods("CREATE GRAPH <http://ex/g/new>"), ["http://ex/g/new".to_string()].into_iter().collect());
+        assert_eq!(
+            pods("CREATE GRAPH <http://ex/g/new>"),
+            ["http://ex/g/new".to_string()].into_iter().collect()
+        );
     }
 
     /// DELETE/INSERT … WHERE with CONCRETE template graphs is scoped to exactly the
@@ -3113,8 +3512,14 @@ mod touched_pods_tests {
         let u = "INSERT { GRAPH <http://ex/g/dst> { ?s ?p ?o } } \
                  WHERE  { GRAPH <http://ex/g/src> { ?s ?p ?o } }";
         // Only the write target (dst) is invalidation-relevant; the read source (src) is not.
-        assert_eq!(pods(u), ["http://ex/g/dst".to_string()].into_iter().collect());
-        assert!(!has(u, "http://ex/g/src"), "the WHERE read source must not be invalidated");
+        assert_eq!(
+            pods(u),
+            ["http://ex/g/dst".to_string()].into_iter().collect()
+        );
+        assert!(
+            !has(u, "http://ex/g/src"),
+            "the WHERE read source must not be invalidated"
+        );
         assert!(!is_global(u));
     }
 
@@ -3123,7 +3528,10 @@ mod touched_pods_tests {
     #[test]
     fn delete_insert_variable_graph_target_is_global() {
         let u = "INSERT { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }";
-        assert!(is_global(u), "a dynamically-scoped write target must bump the global pod");
+        assert!(
+            is_global(u),
+            "a dynamically-scoped write target must bump the global pod"
+        );
     }
 
     /// A default-graph DELETE/INSERT template is the catch-all pod.
@@ -3137,10 +3545,14 @@ mod touched_pods_tests {
     /// the named pod AND global — finer scoping is additive over the catch-all.
     #[test]
     fn mixed_named_and_global_bumps_both() {
-        let u = "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } \
+        let u =
+            "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } \
                               <http://ex/d> <http://ex/p> <http://ex/o> }";
         assert!(has(u, "http://ex/g/A"));
-        assert!(is_global(u), "the default-graph half must still bump global");
+        assert!(
+            is_global(u),
+            "the default-graph half must still bump global"
+        );
     }
 
     /// LOAD into a named graph is scoped; LOAD into the default graph is global. (The LOAD
@@ -3151,7 +3563,10 @@ mod touched_pods_tests {
             pods("LOAD <file:///x.ttl> INTO GRAPH <http://ex/g/A>"),
             ["http://ex/g/A".to_string()].into_iter().collect()
         );
-        assert!(is_global("LOAD <file:///x.ttl>"), "LOAD into the default graph is global");
+        assert!(
+            is_global("LOAD <file:///x.ttl>"),
+            "LOAD into the default graph is global"
+        );
     }
 
     /// An unparsable update is tagged global so extraction is total and never
@@ -3183,8 +3598,16 @@ mod bind_posture_tests {
     #[test]
     fn loopback_proceeds_regardless_of_flag() {
         for a in ["127.0.0.1:3030", "127.0.0.5:80", "[::1]:3030"] {
-            assert_eq!(bind_posture(&addr(a), false, AuthPosture::None), BindPosture::Loopback, "{a} (no opt-in)");
-            assert_eq!(bind_posture(&addr(a), true, AuthPosture::None), BindPosture::Loopback, "{a} (opt-in)");
+            assert_eq!(
+                bind_posture(&addr(a), false, AuthPosture::None),
+                BindPosture::Loopback,
+                "{a} (no opt-in)"
+            );
+            assert_eq!(
+                bind_posture(&addr(a), true, AuthPosture::None),
+                BindPosture::Loopback,
+                "{a} (opt-in)"
+            );
         }
     }
 
@@ -3192,12 +3615,24 @@ mod bind_posture_tests {
     fn non_loopback_without_optin_is_refused() {
         // 0.0.0.0 / :: (all-interfaces), an RFC1918 address, a link-local, and the cloud
         // metadata IP all fail closed without --allow-remote (and with no auth).
-        for a in ["0.0.0.0:3030", "[::]:3030", "10.0.0.1:8080", "169.254.169.254:80", "192.168.1.5:3030"] {
+        for a in [
+            "0.0.0.0:3030",
+            "[::]:3030",
+            "10.0.0.1:8080",
+            "169.254.169.254:80",
+            "192.168.1.5:3030",
+        ] {
             match bind_posture(&addr(a), false, AuthPosture::None) {
                 BindPosture::RemoteRefused { message } => {
                     assert!(message.contains("refusing to bind"), "{a}: {message}");
-                    assert!(message.contains("--allow-remote"), "{a}: must name the opt-in flag");
-                    assert!(message.contains("authentication"), "{a}: must explain the no-auth risk");
+                    assert!(
+                        message.contains("--allow-remote"),
+                        "{a}: must name the opt-in flag"
+                    );
+                    assert!(
+                        message.contains("authentication"),
+                        "{a}: must explain the no-auth risk"
+                    );
                 }
                 other => panic!("{a} must be refused without opt-in, got {other:?}"),
             }
@@ -3210,7 +3645,10 @@ mod bind_posture_tests {
             BindPosture::RemoteAllowed { warning } => {
                 assert!(warning.contains("WARNING"), "{warning}");
                 assert!(warning.contains("READ AND WRITE"), "{warning}");
-                assert!(warning.contains("0.0.0.0:3030"), "must name the address: {warning}");
+                assert!(
+                    warning.contains("0.0.0.0:3030"),
+                    "must name the address: {warning}"
+                );
             }
             other => panic!("opt-in must allow with a warning, got {other:?}"),
         }
@@ -3226,9 +3664,14 @@ mod bind_posture_tests {
         match bind_posture(&addr("0.0.0.0:3030"), false, AuthPosture::WriteOnly) {
             BindPosture::RemoteRefused { message } => {
                 assert!(message.contains("refusing to bind"), "{message}");
-                assert!(message.contains("--auth-token-read"), "must name the read-gate flag: {message}");
+                assert!(
+                    message.contains("--auth-token-read"),
+                    "must name the read-gate flag: {message}"
+                );
             }
-            other => panic!("a write-only token must still be refused without opt-in, got {other:?}"),
+            other => {
+                panic!("a write-only token must still be refused without opt-in, got {other:?}")
+            }
         }
     }
 
@@ -3238,7 +3681,10 @@ mod bind_posture_tests {
         match bind_posture(&addr("0.0.0.0:3030"), true, AuthPosture::WriteOnly) {
             BindPosture::RemoteAllowed { warning } => {
                 assert!(warning.contains("WARNING"), "{warning}");
-                assert!(warning.to_ascii_uppercase().contains("READS"), "must warn reads are open: {warning}");
+                assert!(
+                    warning.to_ascii_uppercase().contains("READS"),
+                    "must warn reads are open: {warning}"
+                );
             }
             other => panic!("write-only + opt-in must allow with a warning, got {other:?}"),
         }
@@ -3253,7 +3699,10 @@ mod bind_posture_tests {
         match bind_posture(&addr("0.0.0.0:3030"), false, AuthPosture::ReadAndWrite) {
             BindPosture::RemoteAllowed { warning } => {
                 assert!(warning.contains("WARNING"), "{warning}");
-                assert!(warning.contains("--auth-token"), "must name the gate: {warning}");
+                assert!(
+                    warning.contains("--auth-token"),
+                    "must name the gate: {warning}"
+                );
             }
             other => panic!("full auth must allow a remote bind without opt-in, got {other:?}"),
         }
@@ -3310,7 +3759,10 @@ mod auth_tests {
             assert_eq!(bearer_token(&headers_with_auth(v)), Some("t0k"), "{v:?}");
         }
         // Trailing/leading space around the token is trimmed.
-        assert_eq!(bearer_token(&headers_with_auth("Bearer  t0k  ")), Some("t0k"));
+        assert_eq!(
+            bearer_token(&headers_with_auth("Bearer  t0k  ")),
+            Some("t0k")
+        );
     }
 
     #[test]
@@ -3343,7 +3795,10 @@ mod auth_tests {
             assert!(payload_mutates(u), "{u:?} must be a write");
         }
         // Garbage that parses as neither is fail-closed to a write.
-        assert!(payload_mutates("this is not sparql"), "unparsable must fail closed to a write");
+        assert!(
+            payload_mutates("this is not sparql"),
+            "unparsable must fail closed to a write"
+        );
     }
 
     #[test]
@@ -3369,9 +3824,15 @@ mod auth_tests {
 
     #[test]
     fn auth_gate_write_only_gates_writes_not_reads() {
-        let cfg = ServerConfig { auth_token: Some("secret".into()), ..ServerConfig::default() };
+        let cfg = ServerConfig {
+            auth_token: Some("secret".into()),
+            ..ServerConfig::default()
+        };
         // Writes need the token.
-        assert!(auth_gate(&cfg, &HeaderMap::new(), Operation::Write).is_some(), "missing token => 401");
+        assert!(
+            auth_gate(&cfg, &HeaderMap::new(), Operation::Write).is_some(),
+            "missing token => 401"
+        );
         assert!(
             auth_gate(&cfg, &headers_with_auth("Bearer wrong"), Operation::Write).is_some(),
             "wrong token => 401"
@@ -3381,7 +3842,10 @@ mod auth_tests {
             "correct token => proceed"
         );
         // Reads stay open (no read gate).
-        assert!(auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_none(), "reads open in write-only mode");
+        assert!(
+            auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_none(),
+            "reads open in write-only mode"
+        );
     }
 
     #[test]
@@ -3391,7 +3855,10 @@ mod auth_tests {
             auth_token_read: true,
             ..ServerConfig::default()
         };
-        assert!(auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_some(), "read gated => 401");
+        assert!(
+            auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_some(),
+            "read gated => 401"
+        );
         assert!(
             auth_gate(&cfg, &headers_with_auth("bearer secret"), Operation::Read).is_none(),
             "correct token (lowercase scheme) => proceed"
@@ -3403,7 +3870,9 @@ mod auth_tests {
         let resp = unauthorized();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
-            resp.headers().get(header::WWW_AUTHENTICATE).and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok()),
             Some("Bearer")
         );
     }
@@ -3412,29 +3881,44 @@ mod auth_tests {
 
     fn headers_with_subprotocol(value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert(header::SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_str(value).unwrap());
+        h.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_str(value).unwrap(),
+        );
         h
     }
 
     #[test]
     fn subprotocol_bearer_token_extracts_the_bearer_subprotocol() {
         // The matched subprotocol AND the token after the `bearer.` prefix are returned.
-        assert_eq!(subprotocol_bearer_token(&headers_with_subprotocol("bearer.t0k")), Some(("bearer.t0k", "t0k")));
+        assert_eq!(
+            subprotocol_bearer_token(&headers_with_subprotocol("bearer.t0k")),
+            Some(("bearer.t0k", "t0k"))
+        );
         // First bearer.* entry wins, even alongside other offered subprotocols.
         assert_eq!(
             subprotocol_bearer_token(&headers_with_subprotocol("graphql-ws, bearer.t0k, other")),
             Some(("bearer.t0k", "t0k"))
         );
         // The token body is exact (no trimming) — a subprotocol value carries no spaces anyway.
-        assert_eq!(subprotocol_bearer_token(&headers_with_subprotocol("bearer.")), Some(("bearer.", "")));
+        assert_eq!(
+            subprotocol_bearer_token(&headers_with_subprotocol("bearer.")),
+            Some(("bearer.", ""))
+        );
     }
 
     #[test]
     fn subprotocol_bearer_token_absent_without_the_prefix() {
-        assert_eq!(subprotocol_bearer_token(&headers_with_subprotocol("graphql-ws, chat")), None);
+        assert_eq!(
+            subprotocol_bearer_token(&headers_with_subprotocol("graphql-ws, chat")),
+            None
+        );
         assert_eq!(subprotocol_bearer_token(&HeaderMap::new()), None);
         // A scheme other than the `bearer.` subprotocol prefix is not a match.
-        assert_eq!(subprotocol_bearer_token(&headers_with_subprotocol("token.t0k")), None);
+        assert_eq!(
+            subprotocol_bearer_token(&headers_with_subprotocol("token.t0k")),
+            None
+        );
     }
 
     #[test]
@@ -3442,30 +3926,66 @@ mod auth_tests {
         let cfg = ServerConfig::default();
         assert!(ws_auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_none());
         // Even an offered bearer subprotocol proceeds when nothing is configured.
-        assert!(ws_auth_gate(&cfg, &headers_with_subprotocol("bearer.anything"), Operation::Read).is_none());
+        assert!(ws_auth_gate(
+            &cfg,
+            &headers_with_subprotocol("bearer.anything"),
+            Operation::Read
+        )
+        .is_none());
     }
 
     #[test]
     fn ws_auth_gate_read_gate_accepts_header_or_subprotocol() {
-        let cfg = ServerConfig { auth_token: Some("secret".into()), auth_token_read: true, ..ServerConfig::default() };
+        let cfg = ServerConfig {
+            auth_token: Some("secret".into()),
+            auth_token_read: true,
+            ..ServerConfig::default()
+        };
         // Neither channel => 401.
-        assert!(ws_auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_some(), "no credentials => 401");
+        assert!(
+            ws_auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_some(),
+            "no credentials => 401"
+        );
         // The Authorization: Bearer header is accepted (non-browser clients).
-        assert!(ws_auth_gate(&cfg, &headers_with_auth("Bearer secret"), Operation::Read).is_none(), "header token => proceed");
+        assert!(
+            ws_auth_gate(&cfg, &headers_with_auth("Bearer secret"), Operation::Read).is_none(),
+            "header token => proceed"
+        );
         // The Sec-WebSocket-Protocol bearer.<token> subprotocol is accepted (browsers).
-        assert!(ws_auth_gate(&cfg, &headers_with_subprotocol("bearer.secret"), Operation::Read).is_none(), "subprotocol token => proceed");
+        assert!(
+            ws_auth_gate(
+                &cfg,
+                &headers_with_subprotocol("bearer.secret"),
+                Operation::Read
+            )
+            .is_none(),
+            "subprotocol token => proceed"
+        );
         // A WRONG subprotocol token is VALIDATED, not echoed — 401.
-        assert!(ws_auth_gate(&cfg, &headers_with_subprotocol("bearer.wrong"), Operation::Read).is_some(), "wrong subprotocol token => 401");
+        assert!(
+            ws_auth_gate(
+                &cfg,
+                &headers_with_subprotocol("bearer.wrong"),
+                Operation::Read
+            )
+            .is_some(),
+            "wrong subprotocol token => 401"
+        );
     }
 
     #[test]
     fn ws_auth_gate_write_only_leaves_ws_read_open() {
         // A write-only token (no --auth-token-read) does not gate the WS read upgrade.
-        let cfg = ServerConfig { auth_token: Some("secret".into()), ..ServerConfig::default() };
-        assert!(ws_auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_none(), "WS read open in write-only mode");
+        let cfg = ServerConfig {
+            auth_token: Some("secret".into()),
+            ..ServerConfig::default()
+        };
+        assert!(
+            ws_auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_none(),
+            "WS read open in write-only mode"
+        );
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-4w18 — SERVICE egress allowlist config wiring tests
@@ -3508,7 +4028,10 @@ mod hardening_unit_tests {
         let cfg = ServerConfig::default();
         let body = Bytes::from_static(b"hello");
         // No Content-Encoding and explicit identity both pass verbatim.
-        assert_eq!(decode_request_body(&body, &headers_with_encoding(None), &cfg).unwrap(), body);
+        assert_eq!(
+            decode_request_body(&body, &headers_with_encoding(None), &cfg).unwrap(),
+            body
+        );
         assert_eq!(
             decode_request_body(&body, &headers_with_encoding(Some("identity")), &cfg).unwrap(),
             body
@@ -3517,7 +4040,10 @@ mod hardening_unit_tests {
 
     #[test]
     fn gzip_within_ratio_decodes() {
-        let cfg = ServerConfig { max_decompress_ratio: 100, ..ServerConfig::default() };
+        let cfg = ServerConfig {
+            max_decompress_ratio: 100,
+            ..ServerConfig::default()
+        };
         let plain = b"some moderately repetitive payload payload payload";
         let body = gz(plain);
         let out = decode_request_body(&body, &headers_with_encoding(Some("gzip")), &cfg).unwrap();
@@ -3527,17 +4053,26 @@ mod hardening_unit_tests {
     #[test]
     fn high_ratio_gzip_is_refused() {
         // A 1 MiB run of zeros gzips to a tiny body — ratio far above 2× → refused.
-        let cfg = ServerConfig { max_decompress_ratio: 2, max_body_bytes: 1 << 30, ..ServerConfig::default() };
+        let cfg = ServerConfig {
+            max_decompress_ratio: 2,
+            max_body_bytes: 1 << 30,
+            ..ServerConfig::default()
+        };
         let body = gz(&vec![0u8; 1 << 20]);
-        let err = decode_request_body(&body, &headers_with_encoding(Some("gzip")), &cfg).unwrap_err();
+        let err =
+            decode_request_body(&body, &headers_with_encoding(Some("gzip")), &cfg).unwrap_err();
         assert!(matches!(err, super::DecodeError::TooLarge(_)));
     }
 
     #[test]
     fn ratio_zero_refuses_gzip() {
-        let cfg = ServerConfig { max_decompress_ratio: 0, ..ServerConfig::default() };
+        let cfg = ServerConfig {
+            max_decompress_ratio: 0,
+            ..ServerConfig::default()
+        };
         let body = gz(b"x");
-        let err = decode_request_body(&body, &headers_with_encoding(Some("gzip")), &cfg).unwrap_err();
+        let err =
+            decode_request_body(&body, &headers_with_encoding(Some("gzip")), &cfg).unwrap_err();
         assert!(matches!(err, super::DecodeError::TooLarge(_)));
     }
 
@@ -3577,7 +4112,10 @@ mod service_allow_config_tests {
         let mut e = cfg.service_allow.engine_entries();
         e.sort();
         // Exact host verbatim; the wildcard in the engine's leading-dot form.
-        assert_eq!(e, vec![".internal".to_string(), "sparql.example.org".to_string()]);
+        assert_eq!(
+            e,
+            vec![".internal".to_string(), "sparql.example.org".to_string()]
+        );
     }
 }
 
@@ -3606,7 +4144,9 @@ mod durable_degrade_tests {
         // client-facing JSON — raw OR JSON-escaped (`json_error` escapes the U+0001 control
         // chars to ``) — is caught here. The human-readable detail after the marker
         // is expected to survive; only the marker bytes must be stripped.
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(
             !body.contains(DURABLE_UNAVAILABLE_PREFIX),
