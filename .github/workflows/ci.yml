@@ -149,20 +149,20 @@ jobs:
       # .tar.zst is self-contained (binaries + the metadata nextest needs to run them
       # on another runner with `--archive-file`), so the shards never recompile.
       #
-      # [OPUS-4.8] (#363) `--features approx-ann,filtered-ann,vec-predicate` is LOAD-BEARING.
-      # sparq-vectors' accuracy/recall gates are gated behind these opt-in features at the
-      # MODULE level (`#![cfg(feature = ...)]` in tests/recall.rs, tests/overfetch.rs,
-      # tests/filtered*.rs, …). Without the features the gated test binaries compile EMPTY,
-      # so the dedicated heavy-hnsw shard's exact filter `test(=hnsw_recall_…on_50k)` matches
-      # ZERO tests and nextest exits 4 ("no tests to run") — the failure this fixes. These
-      # are the THREE features that gate sparq-vectors tests (approx-ann → HNSW recall +
-      # throughput + olympics + hybrid; filtered-ann → filtered + over-fetch; vec-predicate
-      # → the `vec:`-predicate BGP tests + cost_model). `provider`/`embeddings` gate NO test
-      # (API-shape + HTTP deps only), so they stay OFF. This is the TEST build only — it does
-      # not change any crate's default/shipped feature set; the opt-in features simply have to
-      # be ON for their gate tests to exist. The shard filters/partition are unchanged: the
-      # two recall tests are the known heavies, the rest (incl. the now-compiled gated tests)
-      # ride the bulk `not ( $HEAVY )` partition.
+      # [OPUS-4.8] The archive runs `--features approx-ann,filtered-ann,vec-predicate`
+      # (#363, LOAD-BEARING): sparq-vectors' heavy recall/over-fetch/vec-predicate tests are
+      # MODULE-gated (`#![cfg(feature = ...)]`) and MUST run in this sharded lane — without
+      # these the gated binaries compile EMPTY and the heavy-hnsw shard's exact filter matches
+      # ZERO tests (nextest exit 4). These three are the ONLY opt-in features carried here.
+      # GUARD (sq-vya1): the archive carries NO OTHER opt-in features (we deliberately avoid
+      # `--all-features` — cross-crate conflicts + heavy/native/network deps would not even
+      # resolve; see feature-matrix.yml's SCOPE). Any test behind a DEFAULT-OFF feature OTHER
+      # than those three compiles EMPTY here and runs SILENTLY-zero in the shards — its coverage
+      # is the JOB OF feature-matrix.yml (per-leg `cargo test -p <crate> --features <set>`,
+      # gated by ci-summary). When you add/feature-gate a test: a sparq-vectors recall/vec test
+      # rides these archive features; ANYTHING ELSE must be wired into a feature-matrix.yml leg
+      # (read that file's GUARD block). Prove a suite is reached: `cargo nextest list -p <crate>
+      # --features <set>` must SHOW its test names.
       - name: Build + archive test binaries (nextest archive)
         run: cargo nextest archive --workspace --all-targets --features approx-ann,filtered-ann,vec-predicate --archive-file nextest.tar.zst
       # [OPUS-4.8] Upload the archive immediately after the build, BEFORE doctests, so
