@@ -68,6 +68,13 @@
 /// Endpoint adapter over the engine's existing SRJ transport; Phase 6 adds brTPF/TPF.
 #[cfg(feature = "fedclient")]
 pub mod source;
+// [OPUS-4.8] sq-rsxf: re-export the Phase-2 §4.1 source surface at the crate root.
+#[cfg(feature = "fedclient")]
+pub use source::{
+    is_forbidden_ip, BindJoin, BrTpfSource, Capability, EgressGuard, Endpoint, FedError,
+    FederatedSource, FilterClass, Interface, LocalSource, SourceType, SubQuery, TpfSource,
+    Transport,
+};
 
 /// §4.1 — **capability discovery**: GET `/.well-known/void` + the Service Description per
 /// endpoint, parse VoID+`scs:` via the existing
