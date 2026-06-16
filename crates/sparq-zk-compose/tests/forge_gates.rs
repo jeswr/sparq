@@ -180,6 +180,7 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     (m, commitment, salt)
 }
@@ -347,6 +348,7 @@ fn forge_attribution_under_declared_rejected() {
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match verify_full(&m, "forge_attr_collapse") {
         Err(CheckError::AttributionUnderDeclared { pattern: 0, .. }) => {}
@@ -557,6 +559,7 @@ fn composed_manifest(
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 
@@ -699,6 +702,7 @@ fn k2_scan_only_manifest(
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 

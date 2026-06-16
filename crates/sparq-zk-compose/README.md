@@ -212,6 +212,26 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
   under the opt-in `HolderBindingPolicy::require_in_circuit_pok()`, a holder-bound
   credential with no matching PoK is `HolderPokMissing`. The clear-key (B1) path is
   unchanged and remains the default holder gate; B2 is the additive privacy layer.
+- **Hidden-holder-SET anonymity tier** — IMPLEMENTED ([OPUS-4.8] sq-3c00), opt-in,
+  **NOT-yet-sound** (see below): prove the holder is a MEMBER of a holder set WITHOUT
+  revealing WHICH holder — the holder analogue of `hidden_issuer`'s
+  `key_set_membership`, reusing the same Poseidon2 Merkle gadget + the `holder_pok`
+  key-pair / on-curve / identity / `< L` gadgets. The privacy upgrade over B2's
+  clear-digest `holder_pok` (which makes `holder_pk_digest` public, so a verifier
+  still learns the holder is the specific hidden-key party). A manifest may carry
+  `HolderSetProof`s, each a `bb` proof of the `holder_set_d{depth}` member (knowledge
+  of `hsk` with `hpk = hsk·G` AND `holder_key_digest(hpk)` a Merkle member of the
+  committed holder set; `hsk`/`hpk`/index/path all private — only `holder_set_root`
+  is public). The verifier gate `verifier::bind_holder_set` does NOT trust the
+  proof's public `holder_set_root`: it recomputes the AUTHORITATIVE root from its OWN
+  `HolderRegistry` (opt in with `HolderRegistry::with_hidden_holder_set_depth`),
+  reconstructs the public inputs from the verifier nonce + that root, byte-compares +
+  `bb verify`s — so "in the set" is bound to the relying party's holder registry,
+  only WHICH holder is hidden. Fail-closed reasons: `HolderSetNotEnabled` /
+  `HolderSetDepthMismatch` / `HolderSetRootUnavailable` / `HolderSetRootMismatch` /
+  `HolderSetUnreferencedCommitment` / `HolderSetProofRejected` /
+  `HolderSetMalformedProof`. The clear/clear-digest holder paths are unchanged; this
+  is the additive hidden-holder privacy layer.
 
 ## sparq-zk API gaps noted
 

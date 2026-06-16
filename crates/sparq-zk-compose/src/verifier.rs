@@ -297,6 +297,12 @@ impl KeySet {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HolderRegistry {
     holders: BTreeSet<String>,
+    /// [OPUS-4.8] sq-3c00: when `Some(depth)`, the relying party has OPTED IN to the
+    /// hidden-holder-SET tier — a `manifest.holder_set_proofs` entry is accepted and
+    /// bound to the depth-`depth` holder-set Merkle root this registry derives. MUST
+    /// equal the `holder_set_d{depth}` member the prover used. `None` => disabled (a
+    /// `holder_set_proofs` entry is rejected `HolderSetNotEnabled`, fail-closed).
+    hidden_holder_set_depth: Option<u32>,
 }
 
 impl HolderRegistry {
@@ -304,7 +310,7 @@ impl HolderRegistry {
     /// (`HolderRegistryEmpty`) — the explicit "holder binding not in use" anchor
     /// and the test default. (A `Challenge` binding is unaffected.)
     pub fn empty() -> Self {
-        HolderRegistry { holders: BTreeSet::new() }
+        HolderRegistry { holders: BTreeSet::new(), hidden_holder_set_depth: None }
     }
 
     /// Build a registry from the relying party's authorised holder public keys
@@ -320,7 +326,62 @@ impl HolderRegistry {
             .into_iter()
             .filter_map(|h| public_key_from_hex(h.as_ref()).map(|_| normalize_hex(h.as_ref())))
             .collect();
-        HolderRegistry { holders }
+        HolderRegistry { holders, hidden_holder_set_depth: None }
+    }
+
+    /// [OPUS-4.8] sq-3c00: OPT IN to the hidden-holder-SET anonymity tier at Merkle
+    /// `depth` — a `manifest.holder_set_proofs` proof whose PUBLIC root matches the
+    /// depth-`depth` root this registry derives is then accepted (the holder proves
+    /// membership in this set WITHOUT disclosing which holder). MUST equal the
+    /// `holder_set_d{depth}` member the prover used. The clear-key / clear-digest
+    /// holder paths are unaffected (additive). Builder-style.
+    ///
+    /// NOT-yet-sound (sq-qhy4); opt-in. Enabling this only changes a decision when a
+    /// `holder_set_proofs` entry is presented.
+    pub fn with_hidden_holder_set_depth(mut self, depth: u32) -> Self {
+        self.hidden_holder_set_depth = Some(depth);
+        self
+    }
+
+    /// The opt-in hidden-holder-set depth, if enabled (sq-3c00). `None` => disabled
+    /// (a `manifest.holder_set_proofs` entry is not accepted).
+    fn hidden_holder_set_depth(&self) -> Option<u32> {
+        self.hidden_holder_set_depth
+    }
+
+    /// The trusted holders in the canonical leaf order for the hidden-holder-set
+    /// Merkle tree (sq-3c00): the normalized-hex set's sorted order (`BTreeSet`
+    /// iteration), exactly mirroring [`KeySet::ordered_keys`]. Both the relying
+    /// party (deriving the authoritative `holder_set_root`) and the prover (building
+    /// its membership path) commit the set in THIS order, so the roots agree.
+    // [OPUS-4.8] sq-3c00: canonical leaf order for the holder-set commitment.
+    fn ordered_holders(&self) -> Vec<sparq_zk::sig::PublicKey> {
+        self.holders
+            .iter()
+            .filter_map(|h| public_key_from_hex(h))
+            .collect()
+    }
+
+    /// The authoritative hidden-holder-set Merkle root (sq-3c00) over the trusted
+    /// holders in canonical order, at depth `depth`. This is the TRUST ANCHOR the
+    /// relying party derives from its OWN registry (exactly as
+    /// [`KeySet::hidden_issuer_root`] derives the key-set root), and which a
+    /// `manifest.holder_set_proofs` proof's PUBLIC `holder_set_root` must byte-equal.
+    /// `None` if the set overflows the tree, `depth` is implausible, or any holder
+    /// key is the identity (fail-closed). Leaf = `holder_key_digest(hpk)`.
+    // [OPUS-4.8] sq-3c00.
+    pub fn hidden_holder_set_root(&self, depth: u32) -> Option<Fr> {
+        crate::holder::holder_set_root(&self.ordered_holders(), depth)
+    }
+
+    /// The 0-based index of `holder_hex` in the canonical leaf order, if it is a
+    /// member — the slot the prover proves membership at. (Prover-side convenience;
+    /// the verifier never needs the index, which stays private.) Mirrors
+    /// [`KeySet::member_index`].
+    // [OPUS-4.8] sq-3c00.
+    pub fn member_index(&self, holder_hex: &str) -> Option<usize> {
+        let target = normalize_hex(holder_hex);
+        self.holders.iter().position(|h| *h == target)
     }
 
     /// The registry trusts no holder.
@@ -1303,6 +1364,41 @@ pub enum CheckError {
     /// malformed (non-hex / truncated length prefix), or its declared commitment /
     /// the recovered digest is not a field element — rejected before any bb call.
     HolderPokMalformedProof,
+    /// [OPUS-4.8] sq-3c00 (hidden-holder-SET tier): a
+    /// [`crate::manifest::HolderSetProof`] was presented but the relying party has
+    /// NOT enabled the hidden-holder-set path (no
+    /// [`HolderRegistry::with_hidden_holder_set_depth`]): the verifier cannot derive
+    /// an authoritative holder-set root to bind the proof to. Rejected fail-closed.
+    HolderSetNotEnabled,
+    /// [OPUS-4.8] sq-3c00: a [`crate::manifest::HolderSetProof`] declared a Merkle
+    /// depth that does NOT match the registry policy depth: the trees (and roots)
+    /// would be over different leaf layouts. Rejected fail-closed.
+    HolderSetDepthMismatch { declared: u32, policy: u32 },
+    /// [OPUS-4.8] sq-3c00: the relying party enabled the hidden-holder-set path but
+    /// the authoritative holder-set root could not be derived (the registry
+    /// overflows the tree at the policy depth, the depth is implausible, or a
+    /// holder key is the identity). Rejected fail-closed.
+    HolderSetRootUnavailable,
+    /// [OPUS-4.8] sq-3c00: a [`crate::manifest::HolderSetProof`]'s PUBLIC
+    /// `holder_set_root` does NOT byte-equal the root the verifier derives from its
+    /// OWN authoritative [`HolderRegistry`]: the proof was produced against a
+    /// different (e.g. prover-forged) holder set. Rejected fail-closed (the trust
+    /// anchor, mirroring [`Self::HiddenIssuerRootMismatch`]).
+    HolderSetRootMismatch,
+    /// [OPUS-4.8] sq-3c00: a [`crate::manifest::HolderSetProof`] covers a commitment
+    /// that no verified scan sub-proof references — a dangling set-membership proof.
+    /// Rejected fail-closed (mirrors [`Self::HolderPokUnreferencedCommitment`]).
+    HolderSetUnreferencedCommitment { commitment: String },
+    /// [OPUS-4.8] sq-3c00: `bb verify` REJECTED the hidden-holder set-membership
+    /// proof against the canonical `holder_set_d{depth}` vk + the reconstructed
+    /// public inputs (verifier nonce + authoritative root) — the prover does not
+    /// know a holder secret whose key digest is a member of the committed set, or
+    /// the public inputs were tampered. Rejected.
+    HolderSetProofRejected { commitment: String },
+    /// [OPUS-4.8] sq-3c00: a [`crate::manifest::HolderSetProof`] blob is malformed
+    /// (non-hex / truncated length prefix), or its declared commitment / root is not
+    /// a field element — rejected before any bb call.
+    HolderSetMalformedProof,
     /// The manifest's binding is `HolderPop` but the relying party supplied NO
     /// holder registry (an empty [`HolderRegistry`]) (sq-cwq): the verifier has no
     /// trust anchor to check the holder key against, so it cannot accept a holder
@@ -1640,6 +1736,34 @@ impl std::fmt::Display for CheckError {
             CheckError::HolderPokMalformedProof => write!(
                 f,
                 "in-circuit holder PoK proof blob is malformed (sq-c2ql)"
+            ),
+            CheckError::HolderSetNotEnabled => write!(
+                f,
+                "hidden-holder set-membership proof present but the relying party has not enabled the hidden-holder-set path (no HolderRegistry::with_hidden_holder_set_depth) (sq-3c00)"
+            ),
+            CheckError::HolderSetDepthMismatch { declared, policy } => write!(
+                f,
+                "hidden-holder set-membership proof depth {declared} does not match the registry policy depth {policy} (sq-3c00)"
+            ),
+            CheckError::HolderSetRootUnavailable => write!(
+                f,
+                "the relying party's authoritative holder-set root could not be derived (overflow / implausible depth / identity holder key) (sq-3c00)"
+            ),
+            CheckError::HolderSetRootMismatch => write!(
+                f,
+                "hidden-holder set-membership proof's public holder_set_root does not equal the relying party's authoritative root (sq-3c00: proved against a different holder set, fail-closed)"
+            ),
+            CheckError::HolderSetUnreferencedCommitment { commitment } => write!(
+                f,
+                "hidden-holder set-membership proof covers commitment {commitment} which no verified scan sub-proof references (sq-3c00: dangling set-membership proof)"
+            ),
+            CheckError::HolderSetProofRejected { commitment } => write!(
+                f,
+                "bb rejected the hidden-holder set-membership proof for commitment {commitment} (sq-3c00: the zero-knowledge holder-possession + set-membership statement did not verify)"
+            ),
+            CheckError::HolderSetMalformedProof => write!(
+                f,
+                "hidden-holder set-membership proof blob is malformed (sq-3c00)"
             ),
             CheckError::HolderRegistryEmpty => write!(
                 f,
@@ -3147,6 +3271,149 @@ fn bind_holder_pok(
     Ok(())
 }
 
+/// [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): the hidden-holder
+/// set-membership cryptographic gate — the structural twin of
+/// [`bind_hidden_issuer_attestations`] (sq-z9l) on the HOLDER axis, and the
+/// hidden-holder upgrade over the clear-digest [`bind_holder_pok`] (sq-c2ql).
+///
+/// # What it proves (and what it hides)
+/// `bind_holder_pok` makes the issuer-attested `holder_pk_digest` PUBLIC, so a
+/// verifier learns the holder is the SPECIFIC (hidden-key) party bound to one
+/// credential. This gate instead hides WHICH holder: the prover supplies a
+/// [`crate::manifest::HolderSetProof`] — a bb proof of the `hidden_holder_set`
+/// relation (knowledge of `hsk` with `hpk = hsk·G`, on-curve / non-identity /
+/// `< L`, AND `holder_key_digest(hpk)` a Merkle MEMBER of the committed holder
+/// set, with `hsk`/`hpk`/index/path all PRIVATE). Only `holder_set_root` is public,
+/// exactly as `hidden_issuer` publishes `key_set_root` instead of the issuer key.
+///
+/// # Trust anchor (mirrors the audit #3 external-K anchor — load-bearing)
+/// `holder_set_root` is a prover-committed public input, NOT trusted as a claim:
+/// the verifier derives the AUTHORITATIVE root from its OWN [`HolderRegistry`]
+/// (canonical order) at the policy's `hidden_holder_set_depth`, and REQUIRES the
+/// proof's public root to byte-equal it. A prover that proves membership in its OWN
+/// (forged) holder set fails this equality. The proof is also tied to a
+/// scan-referenced commitment (no dangling proof), so it is bound to a credential
+/// the relying party can name.
+///
+/// # Fail-closed contract
+/// - No `holder_set_proofs` => nothing to check (the clear holder paths remain the
+///   holder gate); returns `Ok`.
+/// - An entry present but the registry has NOT enabled the hidden-holder-set path
+///   (`hidden_holder_set_depth == None`) => REJECT [`CheckError::HolderSetNotEnabled`].
+/// - A depth mismatch, an unresolvable root, a root mismatch, an unreferenced
+///   commitment, a malformed blob, or a bb rejection all REJECT.
+///
+/// # SOUNDNESS (load-bearing, NOT a security claim)
+/// This wires the membership gate; it does NOT make the composition verifier sound.
+/// The verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2) and
+/// `holder_set_d{depth}` inherits that — a passing proof is NOT, under an
+/// adversarial prover, a guarantee the holder relation holds, and there is NO
+/// external accredited-cryptographer sign-off (sq-qhy4 pending). Research-grade,
+/// opt-in. No soundness / ZK-privacy property is asserted as achieved.
+// [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier). Opt-in, NOT-yet-sound (sq-qhy4).
+fn bind_holder_set(
+    manifest: &ProofManifest,
+    holder_registry: &HolderRegistry,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    challenge: &FieldHex,
+) -> Result<(), CheckError> {
+    if manifest.holder_set_proofs.is_empty() {
+        // No set-membership proofs; the clear holder paths are the holder gate.
+        return Ok(());
+    }
+    // The relying party must have OPTED IN; otherwise it has no authoritative
+    // holder-set root to bind the proof to and rejects fail-closed.
+    let Some(depth) = holder_registry.hidden_holder_set_depth() else {
+        return Err(CheckError::HolderSetNotEnabled);
+    };
+    // Derive the AUTHORITATIVE holder-set root from the relying party's OWN registry
+    // (canonical order) — the trust anchor every entry's public root must equal.
+    let auth_root = holder_registry
+        .hidden_holder_set_root(depth)
+        .ok_or(CheckError::HolderSetRootUnavailable)?;
+
+    let challenge_fr = challenge
+        .to_field()
+        .ok_or(CheckError::HolderSetMalformedProof)?;
+
+    // The set of commitments a VERIFIED scan sub-proof references (as field
+    // elements, so 0x-padding cannot slip a mismatch) — a set-membership proof is
+    // only meaningful for a credential the presentation actually uses.
+    let mut referenced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for sp in &manifest.sub_proofs {
+        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
+            continue;
+        };
+        for c in commitments {
+            if let Some(c_fr) = c.to_field() {
+                referenced.insert(field_to_hex(&c_fr));
+            }
+        }
+    }
+
+    for (i, hs) in manifest.holder_set_proofs.iter().enumerate() {
+        if hs.depth != depth {
+            return Err(CheckError::HolderSetDepthMismatch {
+                declared: hs.depth,
+                policy: depth,
+            });
+        }
+        // The covered commitment must be referenced by a verified scan.
+        let Some(c_fr) = hs.commitment.to_field() else {
+            return Err(CheckError::HolderSetUnreferencedCommitment {
+                commitment: hs.commitment.0.clone(),
+            });
+        };
+        if !referenced.contains(&field_to_hex(&c_fr)) {
+            return Err(CheckError::HolderSetUnreferencedCommitment {
+                commitment: hs.commitment.0.clone(),
+            });
+        }
+
+        let blob = hex_decode(&hs.proof_hex).ok_or(CheckError::HolderSetMalformedProof)?;
+        let art = decode_artifacts(&blob).ok_or(CheckError::HolderSetMalformedProof)?;
+
+        // Public-input layout for holder_set_d{depth} main: challenge, holder_set_root
+        // (two 32-byte BE field words, declaration order). We feed OUR nonce + the
+        // AUTHORITATIVE root — never the prover's declared bytes — so a proof
+        // committed under a different challenge OR over a non-authoritative holder
+        // set cannot byte-match (the trust anchor).
+        let mut reconstructed: Vec<u8> = Vec::with_capacity(64);
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&challenge_fr));
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&auth_root));
+        if reconstructed != art.public_inputs {
+            // Diagnose the root word distinctly (the trust anchor): if the proof's
+            // second public-input word is not the authoritative root, it is a root
+            // mismatch; otherwise the challenge word (or the blob length) diverged.
+            let pi = &art.public_inputs;
+            if pi.len() == 64 && pi[32..64] != field_to_be_bytes_32(&auth_root) {
+                return Err(CheckError::HolderSetRootMismatch);
+            }
+            return Err(CheckError::HolderSetProofRejected {
+                commitment: hs.commitment.0.clone(),
+            });
+        }
+
+        // Recompute the canonical holder_set_d{depth} vk verifier-side (audit #2)
+        // and bb verify over OUR reconstructed public inputs.
+        let id = CircuitId::HolderSet { depth };
+        let sub_work = work_dir.join(format!("holder_set_{i}"));
+        let canonical_vk = prover
+            .canonical_vk(&id, &sub_work.join("vk"))
+            .map_err(CheckError::Driver)?;
+        let ok = prover
+            .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+            .map_err(CheckError::Driver)?;
+        if !ok {
+            return Err(CheckError::HolderSetProofRejected {
+                commitment: hs.commitment.0.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The per-graph salt the verifier uses to recompute a scan commitment's
 /// issuer-signed message, resolved from EITHER a clear [`CommitmentAttestation`]
 /// over `c_fr` OR — for a HIDDEN-ONLY commitment (sq-xxg) — the
@@ -4417,6 +4684,17 @@ pub fn verify_manifest(
         work_dir,
         &challenge,
     )?;
+
+    // --- sq-3c00: hidden-holder SET-membership cryptographic gate. ---
+    // If the manifest carries hidden-holder set-membership proofs, verify each
+    // against the relying party's OWN authoritative holder-set Merkle root (derived
+    // from its HolderRegistry) and the verifier's nonce, then bb verify. The
+    // clear-key / clear-digest holder gates (bind_holder_pop, bind_holder_pok,
+    // above) are UNCHANGED and still run; this is the additive hidden-holder
+    // anonymity tier (hides WHICH holder). NOT-yet-sound (sq-qhy4); opt-in. The
+    // challenge fed here is the verifier's nonce (audit #4), identical to the
+    // sub-proof loop's binding.
+    bind_holder_set(manifest, holder_registry, prover, work_dir, &challenge)?;
 
     Ok(())
 }

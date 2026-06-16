@@ -254,6 +254,7 @@ fn holder_pok_unreferenced_commitment_rejected() {
             commitment: FieldHex::from_field(&fixture_commitment()),
             proof_hex: String::new(),
         }],
+        holder_set_proofs: vec![],
     };
     let prover = CircuitProver::from_crate_root();
     match verify_manifest(
@@ -313,6 +314,7 @@ fn holder_pok_malformed_commitment_rejected() {
             commitment: FieldHex("0xnot-a-field".into()),
             proof_hex: String::new(),
         }],
+        holder_set_proofs: vec![],
     };
     let prover = CircuitProver::from_crate_root();
     match verify_manifest(
@@ -367,6 +369,7 @@ fn holder_pok_absent_and_not_required_is_noop() {
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
         holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     };
     let prover = CircuitProver::from_crate_root();
     // allow_bearer (the back-compat default) + no PoK present + no PoK required: the
@@ -493,6 +496,7 @@ fn full_manifest(
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
         holder_pok_proofs: pok_proofs,
+        holder_set_proofs: vec![],
     }
 }
 

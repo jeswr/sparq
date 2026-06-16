@@ -399,6 +399,7 @@ fn proof_manifest_json_round_trips_and_defaults_type() {
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     let json = manifest.to_json();
     let back = ProofManifest::from_json(&json).expect("round-trips");
