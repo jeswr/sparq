@@ -100,6 +100,13 @@ use sparq_engine::{PreparedQuery, QueryBudget, QueryResult};
 // behaves EXACTLY as before (plain unfiltered `nearest_exact`).
 #[cfg(feature = "filtered-ann")]
 use crate::filter::{nearest_exact_filtered, IdMask};
+// [OPUS-4.8] (sq-36ol, epic sq-3183) The derived-mask cache: a `vec:` predicate that shares its
+// neighbour variable with constraining patterns re-evaluates that sub-BGP (a full SELECT through
+// the engine) on EVERY prepare to build the `IdMask`. Against an unchanged graph the answer is
+// identical every time, so we cache it keyed by (constraining sub-BGP, graph fingerprint) — see
+// `mask_cache` below. Gated on `filtered-ann` (the only feature with a mask to cache).
+#[cfg(feature = "filtered-ann")]
+use crate::fingerprint::Fingerprint;
 
 /// `rdf:first`, `rdf:rest`, `rdf:nil` — the collection vocabulary spargebra
 /// lowers `( … )` argument lists into.
@@ -613,6 +620,25 @@ fn derive_mask(
         return Ok(None);
     }
 
+    // [OPUS-4.8] (sq-36ol) The mask the connected sub-BGP derives is a pure function of (the
+    // sub-BGP, the graph) — re-deriving it for the SAME sub-BGP against the SAME graph always
+    // yields the same ids. So cache it keyed by (sub-BGP terms, graph fingerprint). Crucially the
+    // sub-BGP here is the **connected component** (sq-3tjd) `connected_component` computed above,
+    // so a cached entry corresponds to the full TRANSITIVE constraint — caching wraps the
+    // transitive derivation, not the old single-variable one. The fingerprint folds dict_len +
+    // triple_count + an id-ordered content hash (see `crate::fingerprint`), so ANY mutation that
+    // could change which ids the sub-BGP binds — an added/removed triple, a shifted dict id, a
+    // changed term — changes the fingerprint and therefore MISSES the cache (recompute). The query
+    // variable `?node` is normalised to a fixed name so two queries that differ only in the
+    // neighbour variable's name share the entry (the derived id-set is independent of that name).
+    // A cache HIT returns an `IdMask` byte-identical to a fresh derivation; a MISS recomputes
+    // through the engine as before.
+    let fp = Fingerprint::of(graph);
+    let key = mask_cache::key(&sub, node);
+    if let Some(mask) = mask_cache::get(&key, fp) {
+        return Ok(Some(mask));
+    }
+
     // SELECT ?node WHERE { <connected sub-BGP> } — evaluate the constraint through the engine
     // and collect the ids it binds to `node`. Projecting `node` discards the intermediate
     // join variables (e.g. `?x` above), so the mask is precisely the eligible neighbour set.
@@ -635,7 +661,112 @@ fn derive_mask(
         .filter_map(|row| row.first().and_then(|c| c.as_ref()))
         .filter_map(|term| graph.id_of(term))
         .collect();
+    mask_cache::put(key, fp, mask.clone());
     Ok(Some(mask))
+}
+
+/// [OPUS-4.8] (sq-36ol, epic sq-3183) Cross-prepare cache for the filtered-ANN `IdMask` that
+/// [`derive_mask`] computes from a constraining sub-BGP. Keyed by **(canonical sub-BGP, graph
+/// [`Fingerprint`])**; reused on a hit, invalidated — by construction — on any graph change.
+///
+/// # Why the invalidation is SOUND (the load-bearing property)
+///
+/// The cached value is the set of dictionary ids the sub-BGP binds to the neighbour variable
+/// against a specific graph. That set is a pure function of (sub-BGP, graph content). The
+/// [`Fingerprint`] folds the graph's `dict_len`, `triple_count`, and an **id-ordered content
+/// hash** over every dictionary term (see [`crate::fingerprint`]). Any mutation that could
+/// change which ids the sub-BGP binds necessarily changes one of those: adding/removing a triple
+/// bumps `triple_count`; adding/removing/changing a term changes `dict_len` and/or the content
+/// hash; even a pure dict-id *shift* (same terms, different interning order) changes the content
+/// hash because each term's id is folded in. A changed fingerprint is a DIFFERENT key, so a
+/// post-mutation lookup MISSES and recomputes — a stale mask can never be served. When in doubt
+/// we miss: the fingerprint is conservative (it can differ for two graphs that happen to bind the
+/// same ids), which only ever costs a recompute, never correctness.
+///
+/// The cache lives in a `thread_local!` so it needs no change to the `&Graph`/`&VectorStore`
+/// shared-reference API and stays internal to the `vec:` rewrite — `sparq-core`/`sparq-engine`
+/// are untouched. It is bounded (LRU-ish capacity cap) so a long-lived process running many
+/// distinct queries cannot grow it without bound.
+#[cfg(feature = "filtered-ann")]
+mod mask_cache {
+    use super::{Fingerprint, IdMask, TriplePattern, Variable};
+    use spargebra::term::TermPattern;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// Cache key: the canonicalised constraining sub-BGP. The neighbour variable is renamed to a
+    /// fixed placeholder so two otherwise-identical constraints that differ only in the neighbour
+    /// variable's *name* share an entry — the derived id-set does not depend on that name.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub(super) struct Key {
+        patterns: Vec<TriplePattern>,
+    }
+
+    /// Builds a [`Key`] from the constraining `sub` patterns, normalising occurrences of `node`
+    /// to a fixed variable name so the entry is shared across neighbour-variable renamings.
+    pub(super) fn key(sub: &[TriplePattern], node: &Variable) -> Key {
+        let placeholder = Variable::new_unchecked("\u{0}vec_node");
+        let rename = |t: &TermPattern| -> TermPattern {
+            match t {
+                TermPattern::Variable(v) if v == node => TermPattern::Variable(placeholder.clone()),
+                other => other.clone(),
+            }
+        };
+        let patterns = sub
+            .iter()
+            .map(|tp| TriplePattern {
+                subject: rename(&tp.subject),
+                predicate: match &tp.predicate {
+                    spargebra::term::NamedNodePattern::Variable(v) if v == node => {
+                        spargebra::term::NamedNodePattern::Variable(placeholder.clone())
+                    }
+                    other => other.clone(),
+                },
+                object: rename(&tp.object),
+            })
+            .collect();
+        Key { patterns }
+    }
+
+    /// Soft cap on distinct cached entries. A long-lived process issuing many distinct
+    /// constraint/graph combinations clears the cache wholesale on overflow rather than growing
+    /// unbounded — correctness is unaffected (a cleared entry just re-derives).
+    const CAPACITY: usize = 256;
+
+    thread_local! {
+        // (Key, Fingerprint) → mask. The fingerprint is PART of the key so an entry for a stale
+        // graph can never be read — a changed graph yields a different fingerprint, hence a miss.
+        static CACHE: RefCell<HashMap<(Key, Fingerprint), IdMask>> = RefCell::new(HashMap::new());
+    }
+
+    /// Returns the cached mask for `(key, fp)`, or `None` on a miss (different sub-BGP OR a
+    /// different graph fingerprint — i.e. any graph mutation).
+    pub(super) fn get(key: &Key, fp: Fingerprint) -> Option<IdMask> {
+        CACHE.with(|c| c.borrow().get(&(key.clone(), fp)).cloned())
+    }
+
+    /// Inserts the freshly-derived mask under `(key, fp)`.
+    pub(super) fn put(key: Key, fp: Fingerprint, mask: IdMask) {
+        CACHE.with(|c| {
+            let mut m = c.borrow_mut();
+            if m.len() >= CAPACITY {
+                m.clear();
+            }
+            m.insert((key, fp), mask);
+        });
+    }
+
+    /// Test-only: drop all entries so a test starts from a known-cold cache.
+    #[cfg(test)]
+    pub(super) fn clear() {
+        CACHE.with(|c| c.borrow_mut().clear());
+    }
+
+    /// Test-only: number of live entries (to assert a hit reused rather than re-inserted).
+    #[cfg(test)]
+    pub(super) fn len() -> usize {
+        CACHE.with(|c| c.borrow().len())
+    }
 }
 
 /// [OPUS-4.8] (sq-3tjd) The connected component of the BGP join-graph containing `node`.
@@ -703,4 +834,219 @@ fn pattern_vars(tp: &TriplePattern) -> Vec<Variable> {
         out.push(v.clone());
     }
     out
+}
+
+// [OPUS-4.8] (sq-36ol, epic sq-3183) Unit tests for the derived-mask cache. These reach the
+// PRIVATE `mask_cache` (entry count, clear) so they can assert a HIT *reused* rather than
+// re-derived, and that a graph mutation *misses*. The end-to-end public-API behaviour is also
+// covered in tests/filtered_bgp.rs. Gated on both features (the cache only exists with them).
+#[cfg(all(test, feature = "filtered-ann"))]
+mod mask_cache_tests {
+    use super::*;
+    use sparq_core::dict::Id;
+
+    /// A constraining sub-BGP `?node <kind> :Car` over the given variable name.
+    fn car_constraint(node: &str) -> (Variable, Vec<TriplePattern>) {
+        let node = Variable::new_unchecked(node);
+        let tp = TriplePattern {
+            subject: TermPattern::Variable(node.clone()),
+            predicate: NamedNodePattern::NamedNode(NamedNode::new("http://ex/kind").unwrap()),
+            object: TermPattern::NamedNode(NamedNode::new("http://ex/Car").unwrap()),
+        };
+        (node, vec![tp])
+    }
+
+    /// Sorted ids of a mask, for an order-independent identity comparison (IdMask is a set).
+    fn sorted(mask: &IdMask) -> Vec<Id> {
+        let mut v: Vec<Id> = mask.iter().collect();
+        v.sort_unstable();
+        v
+    }
+
+    fn cars_graph() -> Graph {
+        Graph::load_str(
+            "<http://ex/a> <http://ex/kind> <http://ex/Car> .\n\
+             <http://ex/b> <http://ex/kind> <http://ex/Car> .\n\
+             <http://ex/d> <http://ex/kind> <http://ex/Boat> .\n",
+            "ntriples",
+        )
+        .unwrap()
+    }
+
+    /// A HIT returns a mask byte-identical (same id set) to a fresh derivation, and reuses the
+    /// SAME entry (no second insertion) — proving the second prepare didn't re-run the engine.
+    #[test]
+    fn hit_returns_identical_mask_without_reinserting() {
+        mask_cache::clear();
+        let g = cars_graph();
+        let (node, sub) = car_constraint("node");
+
+        let first = derive_mask(&node, &sub, &g).unwrap().unwrap();
+        let after_first = mask_cache::len();
+        assert_eq!(after_first, 1, "first derivation must populate one entry");
+
+        let second = derive_mask(&node, &sub, &g).unwrap().unwrap();
+        assert_eq!(
+            mask_cache::len(),
+            after_first,
+            "a HIT must reuse the entry, not insert another"
+        );
+        assert_eq!(
+            sorted(&first),
+            sorted(&second),
+            "the cached mask must be identical to the freshly-derived one"
+        );
+        // {a, b} are the Cars.
+        assert_eq!(sorted(&first).len(), 2, "two Cars in the fixture");
+    }
+
+    /// ADVERSARIAL invalidation: the same constraining sub-BGP against a MUTATED graph must NOT
+    /// serve the stale mask. We construct a second graph that adds a Car (`c`) — the mask must
+    /// now include it. Because the fingerprint folds triple_count + an id-ordered content hash,
+    /// the post-mutation lookup is a different key → a miss → a recompute → the CHANGED mask.
+    ///
+    /// The mutation is deliberately the hard case: the new graph keeps every original triple AND
+    /// every original (a, b, d) dict id binding, adding only `c`. A naive cache keyed on the
+    /// sub-BGP alone (or on triple_count alone, had the change been a pure dict-id permutation)
+    /// would wrongly hit. The full fingerprint catches it.
+    #[test]
+    fn mutation_invalidates_and_recomputes_changed_mask() {
+        mask_cache::clear();
+        let (node, sub) = car_constraint("node");
+
+        let g1 = cars_graph();
+        let mask1 = derive_mask(&node, &sub, &g1).unwrap().unwrap();
+        assert_eq!(sorted(&mask1).len(), 2, "g1 has two Cars (a, b)");
+
+        // Mutation: add a third Car `c` (a new triple AND a new term). Anything that could change
+        // the bound id-set changes the fingerprint.
+        let g2 = Graph::load_str(
+            "<http://ex/a> <http://ex/kind> <http://ex/Car> .\n\
+             <http://ex/b> <http://ex/kind> <http://ex/Car> .\n\
+             <http://ex/c> <http://ex/kind> <http://ex/Car> .\n\
+             <http://ex/d> <http://ex/kind> <http://ex/Boat> .\n",
+            "ntriples",
+        )
+        .unwrap();
+
+        let mask2 = derive_mask(&node, &sub, &g2).unwrap().unwrap();
+        assert_eq!(
+            sorted(&mask2).len(),
+            3,
+            "after adding Car c the mask must include it — NOT the stale 2-Car set"
+        );
+        // The stale mask must never be served: the new mask differs from the old one.
+        assert_ne!(
+            sorted(&mask1),
+            sorted(&mask2),
+            "the post-mutation mask must differ from the pre-mutation (stale) one"
+        );
+        // And it resolves to the live graph's Car ids (soundness against g2's dictionary).
+        for iri in ["http://ex/a", "http://ex/b", "http://ex/c"] {
+            let id = g2
+                .id_of(&Term::NamedNode(NamedNode::new(iri).unwrap()))
+                .unwrap();
+            assert!(mask2.contains(id), "{iri} must be admitted by the g2 mask");
+        }
+    }
+
+    /// ADVERSARIAL: two graphs that bind the SAME Car IRIs but have DIFFERENT fingerprints must
+    /// occupy distinct cache entries — the fingerprint is PART of the key, so the cache can never
+    /// serve g1's mask for a query against g2 even when the constraining sub-BGP is byte-identical.
+    /// Here g2 adds an unrelated triple (`x p y`): the Car set {a,b} is unchanged but the
+    /// fingerprint (triple_count + content hash) differs, which is the exact soundness property —
+    /// the cache keys on the WHOLE-graph fingerprint, conservatively missing whenever it changes.
+    #[test]
+    fn different_fingerprint_same_constraint_misses() {
+        mask_cache::clear();
+        let (node, sub) = car_constraint("node");
+
+        let g1 = Graph::load_str(
+            "<http://ex/a> <http://ex/kind> <http://ex/Car> .\n\
+             <http://ex/b> <http://ex/kind> <http://ex/Car> .\n",
+            "ntriples",
+        )
+        .unwrap();
+        // g2: same two Cars PLUS an unrelated triple → same Car id-set, DIFFERENT fingerprint.
+        let g2 = Graph::load_str(
+            "<http://ex/a> <http://ex/kind> <http://ex/Car> .\n\
+             <http://ex/b> <http://ex/kind> <http://ex/Car> .\n\
+             <http://ex/x> <http://ex/p> <http://ex/y> .\n",
+            "ntriples",
+        )
+        .unwrap();
+        // Precondition: the two graphs genuinely differ in fingerprint (the cache key's graph half).
+        assert_ne!(
+            Fingerprint::of(&g1),
+            Fingerprint::of(&g2),
+            "the two graphs must have distinct fingerprints for this test to be meaningful"
+        );
+
+        let _m1 = derive_mask(&node, &sub, &g1).unwrap().unwrap();
+        let entries_after_g1 = mask_cache::len();
+        let m2 = derive_mask(&node, &sub, &g2).unwrap().unwrap();
+        // A different fingerprint → a second, distinct entry (the g1 mask was not served).
+        assert_eq!(
+            mask_cache::len(),
+            entries_after_g1 + 1,
+            "a different graph fingerprint must MISS and insert a fresh entry (never reuse a stale one)"
+        );
+        // The g2 mask must resolve to g2's own ids for a and b.
+        for iri in ["http://ex/a", "http://ex/b"] {
+            let id = g2
+                .id_of(&Term::NamedNode(NamedNode::new(iri).unwrap()))
+                .unwrap();
+            assert!(m2.contains(id), "{iri} must be admitted against g2's dict");
+        }
+    }
+
+    /// The key distinguishes DIFFERENT sub-BGPs against the same graph: a `:Car` constraint and a
+    /// `:Boat` constraint must not share an entry, and must yield different masks.
+    #[test]
+    fn distinct_sub_bgps_do_not_collide() {
+        mask_cache::clear();
+        let g = cars_graph();
+
+        let (node, car_sub) = car_constraint("node");
+        let boat_sub = vec![TriplePattern {
+            subject: TermPattern::Variable(node.clone()),
+            predicate: NamedNodePattern::NamedNode(NamedNode::new("http://ex/kind").unwrap()),
+            object: TermPattern::NamedNode(NamedNode::new("http://ex/Boat").unwrap()),
+        }];
+
+        let car_mask = derive_mask(&node, &car_sub, &g).unwrap().unwrap();
+        let boat_mask = derive_mask(&node, &boat_sub, &g).unwrap().unwrap();
+        assert_eq!(
+            mask_cache::len(),
+            2,
+            "two distinct sub-BGPs must occupy two distinct entries"
+        );
+        assert_ne!(
+            sorted(&car_mask),
+            sorted(&boat_mask),
+            "the Car and Boat constraints must derive different masks"
+        );
+        assert_eq!(sorted(&car_mask).len(), 2); // a, b
+        assert_eq!(sorted(&boat_mask).len(), 1); // d
+    }
+
+    /// Two queries that differ ONLY in the neighbour variable's name share an entry (the derived
+    /// id-set is independent of that name) — the key normalises the neighbour variable.
+    #[test]
+    fn neighbour_variable_rename_shares_entry() {
+        mask_cache::clear();
+        let g = cars_graph();
+
+        let (node_a, sub_a) = car_constraint("node");
+        let (node_b, sub_b) = car_constraint("entity"); // same shape, different var name
+
+        let ma = derive_mask(&node_a, &sub_a, &g).unwrap().unwrap();
+        let mb = derive_mask(&node_b, &sub_b, &g).unwrap().unwrap();
+        assert_eq!(
+            mask_cache::len(),
+            1,
+            "a neighbour-variable rename must share the cache entry"
+        );
+        assert_eq!(sorted(&ma), sorted(&mb));
+    }
 }
