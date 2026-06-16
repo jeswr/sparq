@@ -285,6 +285,29 @@ ok(typeof D.buildFamilies === 'function', 'dashboard.js exports buildFamilies');
   ok(D.FAMILIES.some(function (f) { return f.key === k; }), 'FAMILIES includes the ' + k + ' family');
 });
 
+// [OPUS-4.8] sq-ncvq.15 / drift-scan §5.D: the newly-promoted families that close the dashboard
+// coverage gap — the ZK estate (headline) plus Solid/HDT/RSP/GenAI/GPU. They have NO flowing data
+// yet (stdout/criterion benches), so they render as "not yet reported"; assert they EXIST in the
+// taxonomy AND that a representative (still unlabelled) metric routes to each via the prefix
+// fallback, so when a ci-bench hook starts emitting, the metric lands in the right family.
+['zk', 'solid', 'hdt', 'rsp', 'genai', 'gpu'].forEach(function (k) {
+  ok(D.FAMILIES.some(function (f) { return f.key === k; }), 'FAMILIES includes the new ' + k + ' family (coverage gap closed)');
+});
+eq(D.familyOf('zk_commit_us').key, 'zk', 'unlabelled zk-commit metric -> ZK family (headline gap)');
+eq(D.familyOf('zktrace_bgp_us').key, 'zk', 'unlabelled zk-trace metric -> ZK family');
+eq(D.familyOf('zkcompose_gates').key, 'zk', 'unlabelled zk-compose gate-count metric -> ZK family');
+eq(D.familyOf('solid_wac_materialize_us').key, 'solid', 'unlabelled solid/WAC metric -> Solid family');
+eq(D.familyOf('hdt_load_s').key, 'hdt', 'unlabelled HDT-load metric -> HDT family');
+eq(D.familyOf('rsp_throughput').key, 'rsp', 'unlabelled RSP-throughput metric -> RSP family');
+eq(D.familyOf('sim_most_similar_us').key, 'genai', 'unlabelled similarity metric -> GenAI family');
+eq(D.familyOf('introspect_build_s').key, 'genai', 'unlabelled introspection metric -> GenAI family');
+eq(D.familyOf('gpu_filter_us').key, 'gpu', 'unlabelled GPU-kernel metric -> GPU family');
+// selective + u64 are SPARQL micro-suites (cli `bench` q01_* stems) — recognise them under SPARQL.
+eq(D.familyOf('selective_q01_count_us').key, 'sparql', 'unlabelled selective-join metric -> SPARQL family');
+eq(D.familyOf('u64_q03_materialize_us').key, 'sparql', 'unlabelled u64 value-id metric -> SPARQL family');
+// the existing capability routings must be UNCHANGED by the new families (no mis-bucketing).
+eq(D.familyOf('rdfs_infer_s').key, 'core', 'rdfs_infer_s still routes to Core (Pipeline suite wins)');
+
 // familyOf: each query type lands in its OWN family (SPARQL volume must not swallow capabilities).
 eq(D.familyOf('watdiv_S1_count_us').key, 'sparql', 'watdiv -> SPARQL family');
 eq(D.familyOf('sp2b_q1_count_us').key, 'sparql', 'sp2b -> SPARQL family');
