@@ -479,6 +479,51 @@ def scan_all(root: Path) -> list[DriftItem]:
 
 
 # --------------------------------------------------------------------------- #
+# CI guard (bead sq-z0se)
+# --------------------------------------------------------------------------- #
+# [OPUS-4.8] An accidental dev-box run of this scanner minted 20 spurious GitHub
+# issues (#397-416). This guard makes the ISSUE-MINTING path refuse to run
+# anywhere but CI: it gates on the standard CI markers (`GITHUB_ACTIONS=true`,
+# set by GitHub Actions, or a truthy `CI`). It is checked ONLY on the write path
+# — `--dry-run` (which makes zero `gh` calls) stays runnable anywhere, so local
+# audits and the hermetic test-suite are unaffected. An explicit
+# `DRIFT_SCAN_ALLOW_LOCAL=1` escape hatch exists for the rare deliberate manual
+# mint, so the guard is a guard-rail, not a hard wall.
+CI_ENV_VARS = ("GITHUB_ACTIONS", "CI")
+ALLOW_LOCAL_ENV_VAR = "DRIFT_SCAN_ALLOW_LOCAL"
+
+
+def _is_truthy(val: str | None) -> bool:
+    return val is not None and val.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def running_in_ci(env: dict[str, str] | None = None) -> bool:
+    """True iff a recognised CI marker is set (GITHUB_ACTIONS or CI)."""
+    e = os.environ if env is None else env
+    return any(_is_truthy(e.get(v)) for v in CI_ENV_VARS)
+
+
+def require_ci(env: dict[str, str] | None = None) -> None:
+    """Refuse to mint issues outside CI (bead sq-z0se).
+
+    Raises SystemExit(2) with a clear message unless a CI marker is set or the
+    explicit `DRIFT_SCAN_ALLOW_LOCAL` escape hatch is truthy. Only the write
+    path calls this — `--dry-run` never does."""
+    e = os.environ if env is None else env
+    if running_in_ci(e) or _is_truthy(e.get(ALLOW_LOCAL_ENV_VAR)):
+        return
+    print(
+        "drift-scan: refusing to file GitHub issues outside CI "
+        f"(no {' / '.join(CI_ENV_VARS)} env var set). This guard exists because "
+        "an accidental dev-box run minted 20 spurious issues (#397-416, bead "
+        "sq-z0se). Use --dry-run to preview the drift report locally, or set "
+        f"{ALLOW_LOCAL_ENV_VAR}=1 only if you really intend to file issues from here.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+# --------------------------------------------------------------------------- #
 # gh I/O (mirrors flow-on.py exactly so the two halves behave identically)
 # --------------------------------------------------------------------------- #
 def key_marker(dedup_key: str) -> str:
@@ -604,6 +649,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         return 0
+
+    # Issue-minting path: refuse outside CI (bead sq-z0se).
+    require_ci()
 
     created = 0
     skipped = 0

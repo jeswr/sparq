@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import os
 import sys
+import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -393,6 +395,84 @@ class DryRunTest(unittest.TestCase):
             out = buf.getvalue()
         self.assertEqual(rc, 0)
         self.assertIn("skill-sync-pr-251", out)
+
+
+# --------------------------------------------------------------------------- #
+# CI guard (bead sq-z0se) — refuse to MINT issues outside CI
+# --------------------------------------------------------------------------- #
+class CiGuardTest(unittest.TestCase):
+    """The issue-MINTING path must refuse to run outside CI; an accidental
+    dev-box run of the sibling drift scanner minted 20 spurious issues
+    (#397-416). --dry-run is NEVER guarded (it makes zero gh calls)."""
+
+    def _clear_ci_env(self) -> None:
+        backup = {k: os.environ.get(k) for k in ("GITHUB_ACTIONS", "CI",
+                                                 "FLOW_ON_ALLOW_LOCAL")}
+
+        def restore() -> None:
+            for k, v in backup.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        self.addCleanup(restore)
+        for k in backup:
+            os.environ.pop(k, None)
+
+    def _firing_inputs(self, td: str) -> list[str]:
+        # A net pub-API change to a watched surface fires the skill-sync rule, so
+        # `follow_ons` is non-empty and the guard is reached on the write path.
+        changed = Path(td) / "changed.txt"
+        changed.write_text("crates/sparq-cli/src/main.rs\n")
+        pub = Path(td) / "pub.txt"
+        pub.write_text("crates/sparq-cli/src/main.rs\n")
+        return ["--pr", "999", "--changed-files", str(changed),
+                "--pub-diff-file", str(pub), "--title", "add --explain flag"]
+
+    def test_running_in_ci_detects_markers(self):
+        self.assertTrue(flow_on.running_in_ci({"GITHUB_ACTIONS": "true"}))
+        self.assertTrue(flow_on.running_in_ci({"CI": "1"}))
+
+    def test_running_in_ci_false_when_unset_or_falsey(self):
+        self.assertFalse(flow_on.running_in_ci({}))
+        self.assertFalse(flow_on.running_in_ci({"CI": ""}))
+
+    def test_require_ci_passes_in_ci(self):
+        flow_on.require_ci({"GITHUB_ACTIONS": "true"})  # no raise
+
+    def test_require_ci_passes_with_escape_hatch(self):
+        flow_on.require_ci({"FLOW_ON_ALLOW_LOCAL": "1"})  # no raise
+
+    def test_require_ci_refuses_outside_ci(self):
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            flow_on.require_ci({})
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("refusing to file GitHub issues outside CI", err.getvalue())
+
+    def test_main_mint_path_refuses_outside_ci_before_any_gh_call(self):
+        # A real (non-dry-run) run that triggers a rule must SystemExit on the
+        # guard rather than shelling out to `gh` to mint issues.
+        self._clear_ci_env()
+        with tempfile.TemporaryDirectory() as td:
+            buf, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(err), self.assertRaises(
+                SystemExit
+            ) as cm:
+                flow_on.main(self._firing_inputs(td))  # NO --dry-run
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("refusing to file GitHub issues outside CI", err.getvalue())
+
+    def test_main_dry_run_never_guarded_outside_ci(self):
+        # --dry-run must succeed with no CI markers (local previews / tests).
+        self._clear_ci_env()
+        with tempfile.TemporaryDirectory() as td:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = flow_on.main(self._firing_inputs(td) + ["--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertIn("skill-sync-pr-999", buf.getvalue())
 
 
 if __name__ == "__main__":

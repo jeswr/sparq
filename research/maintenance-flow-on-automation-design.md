@@ -281,6 +281,15 @@ jobs:
 it never blocks — it only mints follow-on beads. If a created bead must itself
 trigger further automation, swap to a PAT, per the GITHUB_TOKEN loop-guard.)
 
+**CI-only guard (bead sq-z0se).** Both issue-minting tools — `flow-on.py` and the
+periodic `drift-scan.py` — REFUSE to file GitHub issues unless a CI marker
+(`GITHUB_ACTIONS` or `CI`) is set; their `main()` calls `require_ci()` on the
+write path only. This exists because an accidental dev-box run of `drift-scan.py`
+once minted 20 spurious issues (#397-416). `--dry-run` is *never* guarded (it
+makes zero `gh` calls), so local previews and the hermetic test-suite are
+unaffected; a deliberate manual mint can set `DRIFT_SCAN_ALLOW_LOCAL=1` /
+`FLOW_ON_ALLOW_LOCAL=1` as an explicit escape hatch.
+
 ### 2.3 Why this split is the right altitude
 
 - The **gates** stop the gap from ever landing on `main` — the highest leverage,
