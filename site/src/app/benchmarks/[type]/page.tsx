@@ -11,6 +11,7 @@ import { ArrowLeft } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { SuiteGroup } from "@/components/benchmarks/suite-group";
+import { ZkCircuitCostBreakdown } from "@/components/benchmarks/zk-circuit-costs";
 import {
   FAMILIES,
   LATEST,
@@ -65,11 +66,28 @@ export default async function BenchmarkTypePage({
         </p>
       </header>
 
+      {/* [OPUS-4.8] sq-1s2 — the ZK family carries a deterministic circuit gate/time cost
+          breakdown sourced from src/data/zk-circuit-costs.json, ABOVE the CI-feed groups
+          (which are empty until a ci-bench hook emits zk_* metrics). It is the snapshot of
+          record for the family's per-member gate counts, independent of the CI feed. */}
+      {family.key === "zk" && <ZkCircuitCostBreakdown />}
+
       {groups.length === 0 ? (
         <div className="rounded-lg bg-muted/40 p-6 text-sm text-muted-foreground">
-          No metrics are reported for this benchmark type yet. The CI benchmark workflow
-          will populate it as soon as it emits — this section is kept visible so coverage
-          is honest, never fabricated.
+          {family.key === "zk" ? (
+            <>
+              No CI-feed timing metrics are reported for this benchmark type yet (the
+              gate/time breakdown above is the committed snapshot). The CI benchmark
+              workflow will add live <code className="font-mono">zk_*</code> metrics as
+              soon as it emits — kept visible so coverage is honest, never fabricated.
+            </>
+          ) : (
+            <>
+              No metrics are reported for this benchmark type yet. The CI benchmark workflow
+              will populate it as soon as it emits — this section is kept visible so coverage
+              is honest, never fabricated.
+            </>
+          )}
         </div>
       ) : (
         <div className="space-y-3">

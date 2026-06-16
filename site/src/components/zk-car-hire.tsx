@@ -42,8 +42,11 @@ import {
   ELIGIBILITY_QUERY,
   DISCLOSURE,
   CIRCUIT_FAMILY,
+  CIRCUIT_FAMILY_EXPLAINER,
   PUBLIC_INPUT_LABELS,
+  type FamilyStatus,
 } from "@/data/zk-car-hire";
+import { ZK_MEMBERS } from "@/data/zk-circuit-costs";
 
 type Phase =
   | { kind: "idle" }
@@ -260,6 +263,9 @@ export function ZkCarHire() {
       {/* ── Reveal vs hide ── */}
       <DisclosurePanel />
 
+      {/* ── What each circuit-family member proves (public vs hidden + live-vs-designed) ── */}
+      <WhatThisProvesPanel />
+
       {/* ── The composed circuit family ── */}
       <CircuitFamilyPanel />
 
@@ -465,6 +471,130 @@ function DisclosurePanel() {
   );
 }
 
+// [OPUS-4.8] sq-1s2 — the CRITICAL HONESTY rendering: what each circuit-family member
+// verifies, in plain language, with an explicit PUBLIC-vs-HIDDEN split and a LIVE /
+// WIRED / DESIGNED status. Gate counts are joined live from the deterministic snapshot
+// (src/data/zk-circuit-costs.json) via the representative member id — never hard-coded
+// here. This panel must NEVER imply the deployed demo verifies signatures, scans, joins,
+// revocation or holder keys: only the age-gate FILTER (filter_int_d2) is proven live.
+function statusLabel(s: FamilyStatus): string {
+  return s === "live" ? "live in your tab" : s === "wired" ? "wired (native)" : "designed";
+}
+
+function StatusBadge({ status }: { status: FamilyStatus }) {
+  if (status === "live") {
+    return (
+      <Badge variant="success">
+        <CircleCheck className="size-3" /> {statusLabel(status)}
+      </Badge>
+    );
+  }
+  // wired + designed are BOTH "not proven live in your browser" — keep them visibly
+  // distinct from "live" so no reader mistakes a composed member for a live one.
+  return (
+    <Badge variant={status === "wired" ? "muted" : "warning"}>
+      {status === "designed" && <CircleAlert className="size-3" />}
+      {statusLabel(status)}
+    </Badge>
+  );
+}
+
+function WhatThisProvesPanel() {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">
+          What each circuit proves — public vs hidden
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="measure text-sm text-muted-foreground">
+          A full car-hire presentation composes one sub-proof per relation. Each member
+          binds its statement to a public commitment and proves one SPARQL-shaped
+          primitive over <strong>committed</strong> credential graphs. Below: what each
+          verifies, what the desk sees (public) versus what stays the holder’s secret
+          (hidden), and — the honest part — whether it runs <strong>live in your tab</strong>{" "}
+          today or is only compiled / composed.
+        </p>
+
+        {/* The load-bearing live-vs-designed distinction, stated up-front. */}
+        <div className="rounded-lg bg-[color-mix(in_oklch,var(--warning)_10%,transparent)] p-3 text-sm ring-1 ring-[var(--warning)]/25">
+          <p className="flex items-start gap-2 text-foreground">
+            <CircleAlert className="mt-0.5 size-4 shrink-0 text-[var(--warning)]" />
+            <span>
+              <strong>Live vs designed.</strong> Exactly one statement is proven live in
+              your browser: the age-gate <code className="font-mono">FILTER</code>{" "}
+              (<code className="font-mono">filter_int_d2</code>). The other members are{" "}
+              <strong>wired</strong> (compiled + gate-counted + exercised by native tests)
+              or <strong>designed</strong> (gadget complete, with a documented open seam) —
+              <strong> not</strong> run in-browser. The full six-member cross-credential
+              composition has <strong>never been assembled and verified as one unit</strong>.
+              The deployed demo does <strong>not</strong> verify any signature, scan, join,
+              revocation or holder key.
+            </span>
+          </p>
+        </div>
+
+        <div className="space-y-3">
+          {CIRCUIT_FAMILY_EXPLAINER.map((f) => {
+            const m = ZK_MEMBERS.find((x) => x.member === f.representative);
+            return (
+              <div key={f.family} className="rounded-lg border bg-card p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold capitalize">{f.family}</span>
+                    <code className="font-mono text-[11.5px] text-muted-foreground">
+                      {f.representative}
+                    </code>
+                    {m && (
+                      <span className="tabular text-[11px] text-muted-foreground">
+                        · {m.gate_count.toLocaleString()} gates
+                      </span>
+                    )}
+                  </div>
+                  <StatusBadge status={f.status} />
+                </div>
+                <p className="mt-1.5 text-sm">{f.proves}</p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                    <Eye className="mt-0.5 size-3.5 shrink-0 text-[var(--success)]" />
+                    <span>
+                      <span className="font-medium text-foreground">Public:</span>{" "}
+                      {f.publicInputs}
+                    </span>
+                  </p>
+                  <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                    <EyeOff className="mt-0.5 size-3.5 shrink-0" />
+                    <span>
+                      <span className="font-medium text-foreground">Hidden:</span>{" "}
+                      {f.hidden}
+                    </span>
+                  </p>
+                </div>
+                <p className="mt-2 text-[11.5px] text-muted-foreground">
+                  <span className="font-medium">Primitive:</span> {f.primitive}
+                </p>
+                <p className="mt-1 text-[11.5px] text-muted-foreground">
+                  <span className="font-medium">Status:</span> {f.statusNote}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          “Proves” statements are <em>as designed / as landed</em>, not an audited
+          guarantee. The composition verifier is{" "}
+          <strong className="text-foreground">not yet sound</strong>{" "}
+          (<code className="font-mono">sq-qhy4</code>) and the estate is research-grade and{" "}
+          <strong className="text-foreground">not externally audited</strong> — see the
+          honest-limits note below.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 function CircuitFamilyPanel() {
   return (
     <Card>
@@ -491,20 +621,26 @@ function CircuitFamilyPanel() {
               </tr>
             </thead>
             <tbody>
-              {CIRCUIT_FAMILY.map((c) => (
-                <tr key={c.name} className="border-t align-top">
-                  <td className="px-4 py-2.5 font-mono text-[12.5px]">{c.name}</td>
-                  <td className="px-4 py-2.5 text-muted-foreground">{c.role}</td>
-                  <td className="tabular px-4 py-2.5">{c.gates.toLocaleString()}</td>
-                  <td className="px-4 py-2.5">
-                    {c.live ? (
-                      <Badge variant="success">live</Badge>
-                    ) : (
-                      <Badge variant="muted">composed</Badge>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {CIRCUIT_FAMILY.map((c) => {
+                // Gate count is sourced live from the deterministic snapshot JSON, not
+                // re-typed here — the row's own `gates` is a build-time consistency check.
+                const snapshot = ZK_MEMBERS.find((m) => m.member === c.name);
+                const gates = snapshot ? snapshot.gate_count : c.gates;
+                return (
+                  <tr key={c.name} className="border-t align-top">
+                    <td className="px-4 py-2.5 font-mono text-[12.5px]">{c.name}</td>
+                    <td className="px-4 py-2.5 text-muted-foreground">{c.role}</td>
+                    <td className="tabular px-4 py-2.5">{gates.toLocaleString()}</td>
+                    <td className="px-4 py-2.5">
+                      {c.live ? (
+                        <Badge variant="success">live</Badge>
+                      ) : (
+                        <Badge variant="muted">composed</Badge>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
