@@ -2619,6 +2619,18 @@ parser! {
                 } else {
                     Ok(Expression::FunctionCall(Function::Custom(i), a))
                 }
+            } else if state.custom_aggregate_functions.contains(&i) {
+                // [OPUS-4.8] (sq-fldo) A registered custom-aggregate IRI whose argument
+                // list the regular `ArgList` could not parse — notably the extension
+                // form `<agg>(DISTINCT ?x)`, where `DISTINCT` is not a valid `Expression`
+                // so `ArgList()?` matched `None`. Without this guard the rule greedily
+                // succeeds treating the bare IRI as a standalone term, so PEG never
+                // backtracks into the `Aggregate` rule that owns the `(DISTINCT expr)`
+                // form — and the DISTINCT modifier silently fails to parse. Rejecting
+                // here forces that backtrack so a custom aggregate honours DISTINCT
+                // exactly as the builtins do. A bare aggregate IRI used as a plain term
+                // is not valid SPARQL, so this rejection loses nothing legitimate.
+                Err("This custom function is an aggregate function and not a regular function")
             } else {
                 Ok(i.into())
             }

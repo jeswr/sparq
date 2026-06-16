@@ -70,6 +70,13 @@ impl CustomAggregateRegistry {
     /// registration). The IRI is both what the query writes — `<iri>(?x)` in a
     /// projection over a `GROUP BY` — and what the parser is told to treat as an
     /// aggregate rather than a scalar function.
+    ///
+    /// [OPUS-4.8] (sq-fldo) `DISTINCT` is honoured by the ENGINE, not the
+    /// closure: `<iri>(DISTINCT ?x)` de-duplicates the materialised member
+    /// multiset (by `Option<Term>` equality, so two unbound members collapse to
+    /// one) before `f` is called, matching the built-in `COUNT(DISTINCT ?x)` /
+    /// `SUM(DISTINCT ?x)` semantics. `f` therefore always folds an already-
+    /// de-duplicated slice and never has to implement DISTINCT itself.
     pub fn register(
         &mut self,
         iri: impl Into<String>,
@@ -222,5 +229,95 @@ mod tests {
         let q = "PREFIX ex: <http://ex/> SELECT (<http://ex/agg#nope>(?s) AS ?p) \
                  WHERE { ?x ex:sales ?s } GROUP BY ?x";
         assert!(query_with_aggregates(&g(), q, &reg).is_err());
+    }
+
+    /// [OPUS-4.8] (sq-fldo) A dataset whose `ex:tag` column has DUPLICATE values
+    /// WITHIN a single (one-row-per-subject) group, so an aggregate that folds the
+    /// argument multiset gives a DIFFERENT result with vs without DISTINCT. `ex:t`
+    /// has three rows but only two distinct tag values ("x","x","y").
+    const DUP_DATA: &str = r#"
+        @prefix ex: <http://ex/> .
+        ex:t1 ex:grp "g" ; ex:tag "x" .
+        ex:t2 ex:grp "g" ; ex:tag "x" .
+        ex:t3 ex:grp "g" ; ex:tag "y" .
+    "#;
+
+    fn gd() -> Graph {
+        Graph::load_str(DUP_DATA, "turtle").unwrap()
+    }
+
+    /// A member-COUNTING custom aggregate (counts the `Option<Term>`s it is
+    /// handed) demonstrates the DISTINCT contract for custom aggregates: the
+    /// engine de-duplicates the materialised member multiset BEFORE the closure
+    /// runs, so the SAME registered aggregate sees 3 members without DISTINCT but
+    /// only 2 (the distinct tag values "x","y") with DISTINCT — matching the
+    /// built-in `COUNT(?x)` vs `COUNT(DISTINCT ?x)` semantics. Both forms are run
+    /// against the same registry/graph so the only difference is the modifier.
+    #[test]
+    fn custom_aggregate_distinct_dedups_members() {
+        let mut reg = CustomAggregateRegistry::new();
+        reg.register("http://ex/agg#cnt", |members: &[Option<Term>]| {
+            Ok(Some(Term::Literal(Literal::from(members.len() as i64))))
+        });
+        let graph = gd();
+
+        // WITHOUT DISTINCT: the aggregate sees all 3 group members.
+        let q_all = "PREFIX ex: <http://ex/> PREFIX agg: <http://ex/agg#> \
+                     SELECT (agg:cnt(?t) AS ?c) WHERE { ?x ex:grp ?g ; ex:tag ?t } \
+                     GROUP BY ?g";
+        let all = query_with_aggregates(&graph, q_all, &reg).unwrap();
+        let all_c = all.rows[0][0].as_ref().unwrap().to_string();
+        assert!(all_c.contains("\"3\""), "without DISTINCT should count 3 members, got {all_c:?}");
+
+        // WITH DISTINCT: members are de-duplicated to the 2 distinct tag values first.
+        let q_distinct = "PREFIX ex: <http://ex/> PREFIX agg: <http://ex/agg#> \
+                          SELECT (agg:cnt(DISTINCT ?t) AS ?c) WHERE { ?x ex:grp ?g ; ex:tag ?t } \
+                          GROUP BY ?g";
+        let distinct = query_with_aggregates(&graph, q_distinct, &reg).unwrap();
+        let distinct_c = distinct.rows[0][0].as_ref().unwrap().to_string();
+        assert!(distinct_c.contains("\"2\""), "with DISTINCT should count 2 distinct members, got {distinct_c:?}");
+    }
+
+    /// [OPUS-4.8] (sq-fldo) A SUM-style custom aggregate over a column with a
+    /// repeated VALUE confirms DISTINCT de-duplicates the materialised member
+    /// terms (not just adjacent ones) before the fold. `ex:n` over the group is
+    /// {10, 10, 20}: the plain sum is 40, the DISTINCT sum is 30.
+    #[test]
+    fn custom_aggregate_distinct_sum_dedups_repeated_value() {
+        let mut reg = CustomAggregateRegistry::new();
+        reg.register("http://ex/agg#sum", |members: &[Option<Term>]| {
+            let mut acc: i64 = 0;
+            for m in members {
+                if let Some(Term::Literal(l)) = m {
+                    acc += l.value().parse::<i64>().map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(Some(Term::Literal(Literal::from(acc))))
+        });
+        let data = r#"
+            @prefix ex: <http://ex/> .
+            ex:r1 ex:grp "g" ; ex:n 10 .
+            ex:r2 ex:grp "g" ; ex:n 10 .
+            ex:r3 ex:grp "g" ; ex:n 20 .
+        "#;
+        let graph = Graph::load_str(data, "turtle").unwrap();
+
+        let q_all = "PREFIX ex: <http://ex/> PREFIX agg: <http://ex/agg#> \
+                     SELECT (agg:sum(?n) AS ?s) WHERE { ?x ex:grp ?g ; ex:n ?n } GROUP BY ?g";
+        let all = query_with_aggregates(&graph, q_all, &reg).unwrap();
+        assert!(
+            all.rows[0][0].as_ref().unwrap().to_string().contains("\"40\""),
+            "without DISTINCT sum should be 10+10+20=40, got {:?}",
+            all.rows[0][0]
+        );
+
+        let q_distinct = "PREFIX ex: <http://ex/> PREFIX agg: <http://ex/agg#> \
+                          SELECT (agg:sum(DISTINCT ?n) AS ?s) WHERE { ?x ex:grp ?g ; ex:n ?n } GROUP BY ?g";
+        let distinct = query_with_aggregates(&graph, q_distinct, &reg).unwrap();
+        assert!(
+            distinct.rows[0][0].as_ref().unwrap().to_string().contains("\"30\""),
+            "with DISTINCT sum should de-dup the repeated 10 -> 10+20=30, got {:?}",
+            distinct.rows[0][0]
+        );
     }
 }
