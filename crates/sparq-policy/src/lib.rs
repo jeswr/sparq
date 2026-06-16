@@ -5,6 +5,8 @@ mod eval;
 pub mod model;
 mod parse;
 
-pub use eval::{evaluate, matched_prohibition, Decision, Request};
+pub use eval::{
+    evaluate, matched_prohibition, prohibition_status, Decision, ProhibitionStatus, Request,
+};
 pub use model::{Action, Constraint, Duty, Operator, Policy, Rule, Value, ODRL_NS};
 pub use parse::{parse_policy, parse_policy_str};

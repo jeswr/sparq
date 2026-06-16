@@ -1035,3 +1035,303 @@ fn ambiguous_reeval_retracts_fail_closed() {
         "FAIL-CLOSED: no evidence the window holds → access retracted",
     );
 }
+
+// ===========================================================================
+// [OPUS-4.8] sq-2pcf — DENY RETRACTION on prohibition withdrawal. The symmetric
+// dual of sq-dpk4's grant retraction, but with the OPPOSITE fail-closed bias: a
+// materialized `auth:deny*` is retracted (access restored) ONLY when the underlying
+// ODRL Prohibition is DEFINITELY withdrawn / lapsed — on an *ambiguous* re-eval the
+// deny is KEPT (never restore access on missing evidence). These tests drive the
+// real enforcement path (`accessible` / `query_as` / `update_as`).
+// ===========================================================================
+
+/// alice is prohibited from writing n1 ONLY while a window holds (dateTime < bound).
+/// Used to exercise definite-lapse vs ambiguous (no-evidence) deny retraction.
+fn windowed_write_prohibition() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/winprohib> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:modify ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+                      odrl:rightOperand "2026-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// A policy that prohibits NOTHING (the prohibition has been WITHDRAWN entirely).
+fn empty_prohibition_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> . <urn:pol/prohib> a odrl:Set ."#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+// 28. WITHDRAWN PROHIBITION → DENY RETRACTED → access RESTORED through the real
+//     enforcement path — but ONLY because a still-valid allow grant re-exposes the
+//     slot. A standalone deny that is withdrawn restores nothing (test 29).
+#[test]
+fn withdrawn_prohibition_restores_access_after_refresh() {
+    let mut store = PodStore::new(pod());
+    let wreq = Request::new(odrl("modify")).on(N1).by(ALICE);
+
+    // alice has a (still-valid, unconstrained) WRITE permit AND a matching prohibition
+    // → deny-overrides denies write now.
+    let permit = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/w> a odrl:Set ; odrl:permission [
+    odrl:action odrl:modify ; odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    assert!(store.materialize_odrl_permission(&permit, &wreq).granted);
+    assert!(store.materialize_odrl_prohibition(&write_prohibition(), &wreq).prohibited);
+
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(
+        store.accessible(&alice, Mode::Write).is_empty(),
+        "deny-overrides: alice is denied write while the prohibition holds",
+    );
+
+    // The Prohibition is WITHDRAWN entirely → refresh the deny entry against the empty
+    // policy. The deny is DEFINITELY gone (no prohibition structurally names the request).
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty_prohibition_policy(), &wreq, BridgeKind::Prohibition);
+    assert!(matched, "the tracked deny slot matched");
+    assert_eq!(retracted, 1, "the withdrawn prohibition's deny was retracted");
+
+    // ACCESS RESTORED: deny gone + the allow grant survives → alice can write again.
+    assert!(
+        store.accessible(&alice, Mode::Write).iter().any(|g| g.as_str() == N1),
+        "deny retracted + allow grant intact → write access restored",
+    );
+    // And the write-path update enforcement now permits it.
+    let ins = "INSERT DATA { GRAPH <https://pod.ex/notes/n1> { \
+        <https://pod.ex/notes/n1#it> <https://ex.dev/ns#tag> \"y\" } }";
+    assert!(store.update_as(&alice, ins).is_ok(), "restored write update succeeds");
+    // No residual deny triple in the auth view.
+    let leftover = "SELECT ?o WHERE { GRAPH <urn:sparq:auth> { \
+        <https://alice.ex/card#me> <https://sparq.dev/ns/auth#denyWrite> ?o } }";
+    assert_eq!(sparq_engine::query(&store.graph, leftover).unwrap().rows.len(), 0,
+        "no residual denyWrite after retraction");
+}
+
+// 29. WITHDRAWN STANDALONE DENY restores NOTHING: a deny with no underlying allow grant,
+//     when retracted, does not widen access (the lack of a grant still denies — the deny
+//     retraction is fail-closed by construction).
+#[test]
+fn withdrawn_standalone_deny_grants_no_access() {
+    let mut store = PodStore::new(pod());
+    let wreq = Request::new(odrl("modify")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_prohibition(&write_prohibition(), &wreq).prohibited);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Write).is_empty(), "no grant → denied");
+
+    // Withdraw the prohibition; the deny is retracted but there was never an allow.
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty_prohibition_policy(), &wreq, BridgeKind::Prohibition);
+    assert!(matched);
+    assert_eq!(retracted, 1, "the standalone deny is retracted");
+    assert!(
+        store.accessible(&alice, Mode::Write).is_empty(),
+        "retracting a standalone deny restores no access (no grant to re-expose)",
+    );
+}
+
+// 30. A STILL-APPLICABLE prohibition SURVIVES refresh — the deny is KEPT, access stays
+//     denied (no spurious restoration).
+#[test]
+fn applicable_prohibition_survives_refresh() {
+    let mut store = PodStore::new(pod());
+    let wreq = Request::new(odrl("modify")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_prohibition(&write_prohibition(), &wreq).prohibited);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Write).is_empty());
+
+    // Plain refresh (policy unchanged) → the prohibition still matches → deny KEPT.
+    assert_eq!(store.refresh_odrl_grants(), 0, "applicable deny not retracted");
+    assert!(
+        store.accessible(&alice, Mode::Write).is_empty(),
+        "still-applicable prohibition: deny survives refresh, access stays denied",
+    );
+    // Refresh against the SAME prohibition policy also keeps it.
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&write_prohibition(), &wreq, BridgeKind::Prohibition);
+    assert!(matched);
+    assert_eq!(retracted, 0, "deny kept on an unchanged, still-matching prohibition");
+    assert!(store.accessible(&alice, Mode::Write).is_empty(), "stays denied");
+}
+
+// 31. CORE sq-2pcf: AMBIGUOUS re-eval of a windowed prohibition KEEPS the deny
+//     (fail-closed) — access is NOT restored when we cannot prove the carve-out is gone.
+//     This is the asymmetry vs grant retraction (a windowed GRANT is dropped on ambiguity).
+#[test]
+fn ambiguous_prohibition_reeval_keeps_deny_fail_closed() {
+    let mut store = PodStore::new(pod());
+    // A windowed prohibition that holds at materialization time (now < bound).
+    let in_window = Request::new(odrl("modify"))
+        .on(N1)
+        .by(ALICE)
+        .with(odrl("dateTime"), Value::DateTime("2025-06-01T00:00:00Z".to_owned()));
+    assert!(store
+        .materialize_odrl_prohibition(&windowed_write_prohibition(), &in_window)
+        .prohibited);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Write).is_empty(), "denied while window holds");
+
+    // Refresh with NO dateTime evidence → we CANNOT prove the window lapsed → AMBIGUOUS.
+    // The deny must be KEPT (fail-closed: do NOT restore access on missing evidence).
+    let no_evidence = Request::new(odrl("modify")).on(N1).by(ALICE);
+    let (matched, retracted) = store.refresh_odrl_grant(
+        &windowed_write_prohibition(),
+        &no_evidence,
+        BridgeKind::Prohibition,
+    );
+    assert!(matched);
+    assert_eq!(retracted, 0, "AMBIGUOUS deny is KEPT, not retracted");
+    assert!(
+        store.accessible(&alice, Mode::Write).is_empty(),
+        "FAIL-CLOSED: no evidence the prohibition lapsed → deny kept → access stays denied",
+    );
+    // The denyWrite triple is still present in the auth view (re-emitted on refresh).
+    let still = "SELECT ?o WHERE { GRAPH <urn:sparq:auth> { \
+        <https://alice.ex/card#me> <https://sparq.dev/ns/auth#denyWrite> ?o } }";
+    assert_eq!(sparq_engine::query(&store.graph, still).unwrap().rows.len(), 1,
+        "ambiguous deny re-emitted (kept) in the enforcement view");
+}
+
+// 32. DEFINITELY-LAPSED window → deny RETRACTED: when the refresh request supplies
+//     evidence the window has PROVABLY lapsed (now >= bound), the carve-out is known
+//     gone → deny retracted. Paired with an allow grant → access restored.
+#[test]
+fn definitely_lapsed_prohibition_retracts_deny() {
+    let mut store = PodStore::new(pod());
+
+    // alice has a still-valid WRITE permit + a windowed prohibition (holds now).
+    let permit = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/w> a odrl:Set ; odrl:permission [
+    odrl:action odrl:modify ; odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let permit_req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&permit, &permit_req).granted);
+    let in_window = Request::new(odrl("modify"))
+        .on(N1)
+        .by(ALICE)
+        .with(odrl("dateTime"), Value::DateTime("2025-06-01T00:00:00Z".to_owned()));
+    assert!(store
+        .materialize_odrl_prohibition(&windowed_write_prohibition(), &in_window)
+        .prohibited);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Write).is_empty(), "denied while window holds");
+
+    // Refresh with evidence the window has PROVABLY lapsed (now >= 2026-01-01 bound,
+    // operator is `lt`, so now is NOT < bound → constraint definitely false → Withdrawn).
+    let now_lapsed = Request::new(odrl("modify"))
+        .on(N1)
+        .by(ALICE)
+        .with(odrl("dateTime"), Value::DateTime("2026-06-16T00:00:00Z".to_owned()));
+    let (matched, retracted) = store.refresh_odrl_grant(
+        &windowed_write_prohibition(),
+        &now_lapsed,
+        BridgeKind::Prohibition,
+    );
+    assert!(matched);
+    assert_eq!(retracted, 1, "provably-lapsed prohibition's deny is retracted");
+    assert!(
+        store.accessible(&alice, Mode::Write).iter().any(|g| g.as_str() == N1),
+        "provably-lapsed deny retracted + allow intact → write access restored",
+    );
+}
+
+// 33. A STATIC WAC grant is NEVER retracted by a bridged-deny refresh — only the bridged
+//     deny is. bob's static read grant survives the full ledger refresh.
+#[test]
+fn static_grant_never_dropped_by_deny_refresh() {
+    let nq = r#"
+<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/notes/n1> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/notes/n1.acl> .
+"#;
+    let mut store = PodStore::new(Graph::load_dataset(nq, "nquads").unwrap());
+    store.materialize_wac().expect("wac materializes");
+
+    fn reads_n1(s: &mut PodStore, agent: &str) -> bool {
+        let sess = Session { agent: Some(agent), client: None };
+        s.accessible(&sess, Mode::Read).iter().any(|g| g.as_str() == N1)
+    }
+    assert!(reads_n1(&mut store, BOB), "bob static read before");
+
+    // Bridge alice's WRITE prohibition (a bridged deny) on top of the static baseline.
+    let wreq = Request::new(odrl("modify")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_prohibition(&write_prohibition(), &wreq).prohibited);
+
+    // Withdraw alice's prohibition → refresh. The bridged deny is retracted; bob's STATIC
+    // grant (in the captured baseline, never in the ledger) is untouched.
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty_prohibition_policy(), &wreq, BridgeKind::Prohibition);
+    assert!(matched);
+    assert_eq!(retracted, 1, "only the bridged deny is retracted");
+    assert!(
+        reads_n1(&mut store, BOB),
+        "STATIC GRANT PRESERVED across a bridged-deny refresh",
+    );
+}
+
+// 34. DENY-OVERRIDES composition stays correct ACROSS a deny refresh: a permit + a
+//     prohibition bridged via a single Policy entry; the refresh re-applies the allow and
+//     re-evaluates the deny with the fail-closed deny rule. A withdrawn prohibition (in
+//     the refreshed Policy) drops the deny and re-exposes the allow.
+#[test]
+fn policy_refresh_deny_overrides_composition() {
+    let mut store = PodStore::new(pod());
+    let both = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/both> a odrl:Set ;
+    odrl:permission [ odrl:action odrl:modify ; odrl:target <https://pod.ex/notes/n1> ;
+        odrl:assignee <https://alice.ex/card#me> ] ;
+    odrl:prohibition [ odrl:action odrl:modify ; odrl:target <https://pod.ex/notes/n1> ;
+        odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_policy(&both, &req).prohibited);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Write).is_empty(), "deny-overrides denies");
+
+    // Refresh against a Policy that keeps the permission but DROPS the prohibition.
+    let permit_only = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/both> a odrl:Set ;
+    odrl:permission [ odrl:action odrl:modify ; odrl:target <https://pod.ex/notes/n1> ;
+        odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let (matched, _retracted) = store.refresh_odrl_grant(&permit_only, &req, BridgeKind::Policy);
+    assert!(matched);
+    assert!(
+        store.accessible(&alice, Mode::Write).iter().any(|g| g.as_str() == N1),
+        "deny dropped + allow re-applied → write restored under deny-overrides",
+    );
+}

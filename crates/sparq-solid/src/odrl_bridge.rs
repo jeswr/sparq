@@ -74,13 +74,50 @@
 //! grant AND every matched-Prohibition deny for the request, so a policy carrying both
 //! a permission and a prohibition on the same principal+target+mode emits both triples,
 //! and the deny **wins** at enforcement time.
+//!
+//! # Deny RETRACTION on prohibition withdrawal — [OPUS-4.8] sq-2pcf
+//!
+//! The sq-dpk4 [`BridgeLedger`] replays each tracked materialization on
+//! [`refresh`](BridgeLedger::refresh), dropping the ones that no longer hold. For an
+//! *allow* grant the rule is simple: re-evaluate, and a non-Permit (withdrawn / lapsed
+//! / now-Denied / **ambiguous**) emits nothing → the grant is dropped → access is GONE.
+//! Dropping on ambiguity is the right (fail-closed) call for an allow.
+//!
+//! A materialized **deny** is the mirror image, and so its retraction rule must be the
+//! mirror image too. A deny should be RETRACTED — restoring access — only when the
+//! underlying ODRL Prohibition is genuinely **withdrawn or lapses**. If we reused the
+//! allow rule (drop the deny whenever the prohibition no longer matches), an *ambiguous*
+//! re-evaluation — a prohibition that still structurally names the request but carries a
+//! constraint the refresh request supplies no evidence for — would silently retract the
+//! deny and **restore access on missing evidence: fail-OPEN**. That is exactly the trap
+//! this bead closes.
+//!
+//! So deny retraction consults [`sparq_policy::prohibition_status`], a three-valued
+//! refinement of [`matched_prohibition`]:
+//!
+//! | [`ProhibitionStatus`]                       | meaning                                                     | deny action        |
+//! |---------------------------------------------|-------------------------------------------------------------|--------------------|
+//! | [`Applies`](ProhibitionStatus::Applies)     | a prohibition still carves the request out                  | **keep** (re-emit) |
+//! | [`Ambiguous`](ProhibitionStatus::Ambiguous) | still structurally names it, but a constraint is unprovable | **keep** (re-emit) |
+//! | [`Withdrawn`](ProhibitionStatus::Withdrawn) | no prohibition names it, or every one is *definitely* false | **retract** (drop) |
+//!
+//! "Definitely false" means the refresh request DID supply evidence for the dimension
+//! and the comparison failed (e.g. a `dateTime < 2026-01-01` window with an actual time
+//! of `2026-06-01` — the window has provably lapsed). Only then is the carve-out known
+//! to be gone. A retracted deny composes with deny-overrides as expected: it may
+//! re-expose an allow grant for the same principal+target+mode — correct, *because the
+//! prohibition is genuinely gone*. Static (non-bridged) `auth:deny*` rules are never in
+//! the ledger and so are never re-evaluated or retracted by this path.
 
 use crate::authindex::{Mode, AUTHENTICATED, PUBLIC};
 use crate::{AUTH_BRIDGED_GRAPH, AUTH_GRAPH, AUTH_NS};
 use oxrdf::{NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
-use sparq_policy::{evaluate, matched_prohibition, Operator, Policy, Request, Rule, Value};
+use sparq_policy::{
+    evaluate, matched_prohibition, prohibition_status, Operator, Policy, ProhibitionStatus,
+    Request, Rule, Value,
+};
 
 /// The ODRL namespace prefix (`odrl:`), re-exported for caller convenience.
 pub const ODRL_NS: &str = sparq_policy::ODRL_NS;
@@ -1007,13 +1044,110 @@ impl BridgeLedger {
 
 /// Re-run a tracked entry's original bridge function against the current graph,
 /// re-evaluating its ODRL policy and re-emitting iff it still holds. [OPUS-4.8] sq-dpk4.
+///
+/// # Deny retraction is asymmetric to grant retraction — [OPUS-4.8] sq-2pcf
+///
+/// A grant replays straight through its `materialize_*`: any non-Permit (withdrawn /
+/// lapsed / now-Denied / ambiguous) emits nothing → the grant is dropped → access is
+/// GONE. That is fail-closed for an *allow*.
+///
+/// A **deny** must NOT use the same rule. [`materialize_prohibition`] re-emits only
+/// when [`matched_prohibition`] currently matches; on *any* non-match it emits nothing,
+/// so the deny would be retracted — restoring access. But `matched_prohibition` returns
+/// no-match both when the prohibition is genuinely withdrawn AND when it is merely
+/// *unprovable* (a constraint with no evidence in the refresh request). Retracting in
+/// the unprovable case is fail-OPEN. So for the deny side we consult
+/// [`prohibition_status`] and re-emit the deny on [`ProhibitionStatus::Ambiguous`] just
+/// as on [`ProhibitionStatus::Applies`]; the deny is retracted ONLY on a definite
+/// [`ProhibitionStatus::Withdrawn`].
 fn replay(graph: &mut Graph, entry: &BridgeEntry) -> BridgeOutcome {
     match entry.kind {
         BridgeKind::Permission => materialize_permission(graph, &entry.policy, &entry.request),
-        BridgeKind::Prohibition => materialize_prohibition(graph, &entry.policy, &entry.request),
-        BridgeKind::Policy => materialize_policy(graph, &entry.policy, &entry.request),
+        BridgeKind::Prohibition => refresh_prohibition(graph, &entry.policy, &entry.request),
+        BridgeKind::Policy => refresh_policy(graph, &entry.policy, &entry.request),
         BridgeKind::PermissionConditional => {
             materialize_permission_conditional(graph, &entry.policy, &entry.request)
         }
+    }
+}
+
+/// Re-evaluate a tracked **Prohibition** deny on refresh with the fail-closed
+/// deny-retraction rule (sq-2pcf): re-emit the `auth:deny*` triple unless the
+/// prohibition is *definitely* withdrawn. [OPUS-4.8] sq-2pcf.
+///
+/// - [`ProhibitionStatus::Applies`] — a prohibition still carves the request out:
+///   re-emit (identical to [`materialize_prohibition`]).
+/// - [`ProhibitionStatus::Ambiguous`] — a prohibition still structurally names the
+///   request but a constraint is unprovable for lack of evidence: **re-emit anyway**
+///   (KEEP the deny — never restore access on an unprovable carve-out).
+/// - [`ProhibitionStatus::Withdrawn`] — no prohibition names the request, or every one
+///   that does is *definitely* false given the evidence: emit nothing → the deny is
+///   retracted and access is restored (subject to deny-overrides composition).
+fn refresh_prohibition(graph: &mut Graph, policy: &Policy, request: &Request) -> BridgeOutcome {
+    match prohibition_status(policy, request) {
+        // Genuinely gone → behave exactly like the materialize path (which now also
+        // finds no match), emitting nothing so the deny is dropped.
+        ProhibitionStatus::Withdrawn => materialize_prohibition(graph, policy, request),
+        // Still applies → re-emit through the normal match path.
+        ProhibitionStatus::Applies => materialize_prohibition(graph, policy, request),
+        // Unprovable → KEEP the deny by re-emitting it directly (fail-closed).
+        ProhibitionStatus::Ambiguous => reemit_deny(graph, request),
+    }
+}
+
+/// Re-evaluate a tracked **Policy** (both sides) on refresh: the allow side keeps the
+/// fail-closed grant semantics ([`materialize_permission`]); the deny side uses the
+/// fail-closed deny-retraction rule ([`refresh_prohibition`]). Composed exactly as
+/// [`materialize_policy`] so deny-overrides still holds. [OPUS-4.8] sq-2pcf.
+fn refresh_policy(graph: &mut Graph, policy: &Policy, request: &Request) -> BridgeOutcome {
+    let allow = materialize_permission(graph, policy, request);
+    let deny = refresh_prohibition(graph, policy, request);
+
+    let mut reasons = allow.reasons;
+    reasons.extend(deny.reasons);
+    let mut emitted = allow.emitted;
+    emitted.extend(deny.emitted);
+    BridgeOutcome {
+        granted: allow.granted,
+        prohibited: deny.prohibited,
+        mode: deny.mode.or(allow.mode),
+        grant_triple: allow.grant_triple,
+        deny_triple: deny.deny_triple,
+        reasons,
+        emitted,
+    }
+}
+
+/// Re-emit the `principal auth:deny<Mode> target` deny for `request` WITHOUT consulting
+/// the prohibition match — used by [`refresh_prohibition`] on an *ambiguous* re-eval to
+/// KEEP a deny we cannot prove is gone (fail-closed). The deny triple is fully
+/// determined by the request (party + action→mode + target), the same one
+/// [`materialize_prohibition`] would emit when the prohibition matched. [OPUS-4.8] sq-2pcf.
+///
+/// If the request lacks a mappable action or a concrete party/target the deny cannot be
+/// reconstructed; that emits nothing (and so retracts) — but such an entry could never
+/// have been materialized in the first place (those are the exact fail-closed gates in
+/// [`materialize_prohibition`]), so this branch is unreachable for a tracked deny.
+fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
+    let Some(mode) = action_to_mode(&request.action) else {
+        return BridgeOutcome::denied(vec![
+            "ambiguous prohibition re-eval but action no longer maps; deny not re-emitted"
+                .to_owned(),
+        ]);
+    };
+    let (Some(party), Some(target)) = (request.party.as_deref(), request.target.as_deref()) else {
+        return BridgeOutcome::denied(vec![
+            "ambiguous prohibition re-eval but request lost its party/target; deny not re-emitted"
+                .to_owned(),
+        ]);
+    };
+    let pred = format!("{AUTH_NS}{}", deny_predicate(mode));
+    let triple = append_grant(graph, party, &pred, target);
+    BridgeOutcome {
+        prohibited: true,
+        mode: Some(mode),
+        deny_triple: Some((party.to_owned(), pred, target.to_owned())),
+        emitted: vec![triple],
+        ..BridgeOutcome::default()
     }
 }

@@ -121,10 +121,15 @@ Materialize the authorization view from the access-control documents, then enfor
   and still-valid bridged grants. Bridged triples are tracked in a ledger and mirrored into a
   provenance graph `<urn:sparq:auth-bridged>` (`AUTH_BRIDGED_GRAPH`) so they are structurally
   distinguishable from static grants; refresh rebuilds the view as `static_baseline ∪
-  replay(valid bridged entries)`. **Fail-closed**: any ambiguous re-eval retracts (access
-  never left stale); a static grant is never re-evaluated or dropped. A wholesale static
-  re-materialization (`materialize_wac`/`materialize_acp`) auto-reconciles — valid bridged
-  grants are replayed back on top.
+  replay(valid bridged entries)`. **Fail-closed**: any ambiguous re-eval of an *allow grant*
+  retracts (access never left stale); a static grant is never re-evaluated or dropped. A
+  wholesale static re-materialization (`materialize_wac`/`materialize_acp`) auto-reconciles —
+  valid bridged grants are replayed back on top. A bridged **deny** ([OPUS-4.8] sq-2pcf) is
+  the dual and uses the OPPOSITE fail-closed rule: a materialized `auth:deny*` is retracted
+  only when the ODRL Prohibition is **definitely** withdrawn/lapsed (`prohibition_status ==
+  Withdrawn`); an *ambiguous* re-eval **keeps** the deny (never restore access on missing
+  evidence). A retracted deny may re-expose an allow grant — correct, since the prohibition
+  is genuinely gone.
 - `Session { agent: Option<&str>, client: Option<&str> }` (caller-asserted WebID +
   `acl:origin`/`acp:client`; `None` = anonymous / any client); `Mode::{Read, Write,
   Append, Control}`; `wac_fixture()` / `acp_fixture()` (bundled demo pods).

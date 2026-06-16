@@ -169,11 +169,24 @@ tracks each bridged grant in a **ledger** and provides a refresh entry point:
   (access gone). `refresh_odrl_grants()` (no args) replays everything as-tracked; a static
   re-materialization auto-reconciles (valid bridged grants are replayed back on top).
 - **Fail-closed (access retraction).** A withdrawn / lapsed / now-Denied / now-prohibited /
-  ambiguous re-evaluation loses access — the underlying evaluator is fail-closed, so on doubt
-  the grant is retracted, never left stale. A **static** WAC/ACP grant is never in the ledger,
-  never re-evaluated, and always in the captured baseline (captured as the materializer output
-  verbatim, not by subtracting provenance — so a static grant byte-identical to a bridged one
-  still survives a refresh) — refresh can neither widen nor drop it.
+  ambiguous re-evaluation of an **allow grant** loses access — the underlying evaluator is
+  fail-closed, so on doubt the grant is retracted, never left stale. A **static** WAC/ACP grant
+  is never in the ledger, never re-evaluated, and always in the captured baseline (captured as
+  the materializer output verbatim, not by subtracting provenance — so a static grant
+  byte-identical to a bridged one still survives a refresh) — refresh can neither widen nor drop it.
+- **Deny retraction is asymmetric — [OPUS-4.8] sq-2pcf.** A bridged `auth:deny*` (a
+  `BridgeKind::Prohibition` / `Policy` entry) carves access *out*, so retracting it *restores*
+  access — that must happen only when the ODRL Prohibition is **definitely** withdrawn or
+  lapsed, never on doubt. Reusing the grant rule would be **fail-OPEN** (an unprovable carve-out
+  would restore access). Deny refresh therefore consults `sparq_policy::prohibition_status`
+  (`Applies` / `Ambiguous` / `Withdrawn`): the deny is **retracted only on `Withdrawn`** — no
+  prohibition structurally names the request, or every one carries a constraint that is
+  *definitely* false given the supplied evidence (e.g. a `dateTime < bound` window with an
+  actual time past the bound). On `Applies` **or** `Ambiguous` (a structurally-matching
+  prohibition whose constraint is unprovable for lack of evidence) the deny is **kept**
+  (re-emitted). A retracted deny may re-expose an allow grant for the same
+  principal+target+mode — correct, because the prohibition is genuinely gone. Static `auth:deny*`
+  rules are never in the ledger and so are never retracted.
 
 ## Security posture — fail-closed
 
