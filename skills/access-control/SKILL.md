@@ -100,6 +100,11 @@ Materialize the authorization view from the access-control documents, then enfor
   graph` grant into the auth view, then reindex — so this same enforcement path applies it.
   Fail-closed (Deny / unmapped action / partyless / targetless → no grant). See the
   [`usage-control-policy`](../usage-control-policy/SKILL.md) skill for the action→mode mapping.
+- `store.materialize_odrl_prohibition(&Policy, &Request)` / `materialize_odrl_policy(...)` —
+  same opt-in feature ([OPUS-4.8] sq-w693): a matched ODRL **Prohibition** materializes the dual
+  `principal auth:deny<Mode> graph` triple, honoured by this enforcement under **deny-overrides**
+  (`∪ allow ∖ ∪ deny` — a deny beats any allow for the same principal+target+mode). `…_policy`
+  does both sides at once. Same fail-closed rules; no new enforcement engine.
 - `Session { agent: Option<&str>, client: Option<&str> }` (caller-asserted WebID +
   `acl:origin`/`acp:client`; `None` = anonymous / any client); `Mode::{Read, Write,
   Append, Control}`; `wac_fixture()` / `acp_fixture()` (bundled demo pods).

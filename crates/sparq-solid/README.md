@@ -53,7 +53,9 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
   cargo feature, `materialize_permission` / `PodStore::materialize_odrl_permission` runs the
   [`sparq-policy`](../sparq-policy) ODRL evaluator and, on a **definite Permit**, materializes
   the equivalent WAC/ACP grant into the auth view — so the existing graph-level enforcement
-  honours it with **no new enforcement engine**. See below.
+  honours it with **no new enforcement engine**. A matched **Prohibition** materializes the dual
+  `auth:deny*` triple (`materialize_prohibition` / `materialize_policy`), and the existing
+  enforcement applies **deny-overrides** ([OPUS-4.8] sq-w693). See below.
 
 ## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge` feature) — [OPUS-4.8] sq-h3uk
 
@@ -82,6 +84,36 @@ concrete request).
 *and* a concrete party (WebID) + target graph. A Deny, an unsatisfied constraint, an
 undischarged duty, an unmapped action, or a partyless/targetless request materializes
 **nothing** — access is never widened on ambiguity.
+
+### Prohibitions → explicit `auth:deny*` (deny-overrides) — [OPUS-4.8] sq-w693
+
+A matched ODRL **Prohibition** is the dual of a Permit: `materialize_prohibition` /
+`PodStore::materialize_odrl_prohibition` materializes it as the explicit
+`principal auth:deny<Mode> graph` triple the enforcement already understands, via the **same**
+action→mode mapping above (`denyRead` / `denyWrite` / `denyAppend` / `denyControl`).
+`materialize_policy` / `PodStore::materialize_odrl_policy` does both sides at once.
+
+| ODRL Prohibition action (`odrl:`)             | materialized deny predicate |
+|-----------------------------------------------|-----------------------------|
+| `read`, `display`, `present`, `print`, `play` | `auth:denyRead`             |
+| `append`                                      | `auth:denyAppend`           |
+| `modify`, `delete`, `write`                   | `auth:denyWrite`            |
+| anything else (incl. the `odrl:use` umbrella) | **unmapped → no deny**      |
+
+**Deny-overrides:** the deny is honoured by the **existing, unchanged** enforcement — the
+session layer already computes `∪ allow ∖ ∪ deny` (`AuthIndex::accessible`) and `Mode::from_pred`
+already parses `auth:deny*`, so a materialized deny **beats any allow grant** for the same
+principal+target+mode. No new enforcement engine; the bridge only emits the triple. (Within a
+single policy the ODRL evaluator *also* applies deny-overrides upstream — the would-be Permit
+returns `allow == false`, so its allow triple is never even emitted when a prohibition carves
+the request out.)
+
+**Fail-closed (deny):** a deny is materialized **only** when a prohibition *matches* the request
+(decided by `sparq_policy::matched_prohibition` — the evaluator's own conflict test, *not*
+`Decision.allow == false`, which conflates a carve-out with a plain no-permission deny) *and* the
+action is mappable *and* the party+target are concrete. An unmatched / unmapped / partyless /
+targetless prohibition materializes **nothing**; an unmappable carve-out is *reported* in
+`reasons`, never silently dropped (dropping a deny would widen access).
 
 ## Security posture — fail-closed
 

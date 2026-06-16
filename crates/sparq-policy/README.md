@@ -64,6 +64,11 @@ assert!(!evaluate(&policy, &outside).allow);
   prohibition ⇒ DENY; a permission grants only when matched **and** all its
   duties are discharged. Prohibitions carve out permissions (ODRL conflict
   default). A malformed/unknown constraint becomes an unsatisfiable guard.
+  `matched_prohibition(&policy, &request) -> Option<&Rule>` exposes the
+  evaluator's own conflict test (the first prohibition that carves the request
+  out), so a downstream materializer can distinguish a *carve-out* deny from a
+  plain no-permission deny — `sparq-solid`'s ODRL bridge uses it to emit explicit
+  `auth:deny*` triples (deny-overrides). [OPUS-4.8] sq-w693.
 - **Constraint operators** — `eq`, `neq`, `lt`, `lteq`, `gt`, `gteq`,
   `isPartOf` (set membership), `isA`. Numeric (`xsd:integer`/`decimal`/…) and
   `xsd:dateTime`/`date` operands compare by magnitude/instant; everything else

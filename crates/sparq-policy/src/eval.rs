@@ -170,6 +170,45 @@ pub fn evaluate(policy: &Policy, request: &Request) -> Decision {
     Decision::deny(Vec::new(), caveats)
 }
 
+/// The first [`Prohibition`](crate::model::Rule) in `policy` that **matches**
+/// `request` (its action permits the requested action, its target/assignee agree,
+/// and every constraint is satisfied), or `None` if no prohibition carves the
+/// request out. [OPUS-4.8] sq-w693.
+///
+/// This is the same match test [`evaluate`] applies in step 1 (a matching
+/// prohibition overrides everything) — exposed so the `sparq-solid` ODRL→AUTH_GRAPH
+/// bridge can materialize a matched prohibition as an explicit `auth:deny*` triple
+/// (deny-overrides) WITHOUT re-implementing the match logic. A `Decision` with
+/// `allow == false` is NOT sufficient: it conflates a carve-out prohibition with a
+/// plain no-matching-permission deny, and only the former should materialize a deny.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_policy::{matched_prohibition, parse_policy_str, Request};
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/p> a odrl:Set ; odrl:prohibition [
+///     odrl:action odrl:write ;
+///     odrl:target <https://pod.ex/n1> ;
+///     odrl:assignee <https://alice.ex/card#me> ] .
+/// "#, "turtle").unwrap();
+/// let req = Request::new("http://www.w3.org/ns/odrl/2/write")
+///     .on("https://pod.ex/n1").by("https://alice.ex/card#me");
+/// assert!(matched_prohibition(&pol, &req).is_some());
+/// // a different party is not carved out
+/// let other = Request::new("http://www.w3.org/ns/odrl/2/write")
+///     .on("https://pod.ex/n1").by("https://bob.ex/card#me");
+/// assert!(matched_prohibition(&pol, &other).is_none());
+/// ```
+pub fn matched_prohibition<'p>(policy: &'p Policy, request: &Request) -> Option<&'p Rule> {
+    let req_action = Action(request.action.clone());
+    policy
+        .prohibitions
+        .iter()
+        .find(|rule| rule_matches(rule, request, &req_action).is_match)
+}
+
 /// Outcome of matching a single rule against a request.
 struct Match {
     is_match: bool,

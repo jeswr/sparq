@@ -97,6 +97,24 @@ assert!(!store.accessible(&Session { agent: Some("https://alice.ex/card#me"), cl
 
 **Fail-closed:** a grant is materialized only on a *definite Permit* AND a *mappable action* AND a *concrete party (WebID) + target graph*. A Deny, unsatisfied constraint, undischarged duty, unmapped action, or partyless/targetless request materializes **nothing**.
 
+### Prohibitions → explicit `auth:deny*` (deny-overrides) — [OPUS-4.8] sq-w693
+
+A matched ODRL **Prohibition** is materialized as the dual triple — `principal auth:deny<Mode> target` — via `materialize_odrl_prohibition` (or `materialize_odrl_policy`, which does both sides at once). The **same** action→mode mapping picks the mode, so the deny predicate is `auth:denyRead` / `auth:denyWrite` / `auth:denyAppend` / `auth:denyControl`.
+
+```rust,ignore
+// Prohibition side: appends `alice auth:denyWrite n1`, then reindexes.
+let dreq = Request::new("http://www.w3.org/ns/odrl/2/modify")
+    .on("https://pod.ex/notes/n1").by("https://alice.ex/card#me");
+let out = store.materialize_odrl_prohibition(&policy, &dreq);
+assert!(out.prohibited);
+// Both sides of a policy at once (permit grant + matched-prohibition deny):
+let out = store.materialize_odrl_policy(&policy, &req);
+```
+
+**Deny-overrides:** the deny is honoured by the **existing, unchanged** enforcement — the session layer already computes `∪ allow ∖ ∪ deny` (`AuthIndex::accessible`) and `Mode::from_pred` already parses `auth:deny*`, so a materialized deny **beats any allow grant** for the same principal+target+mode. No new enforcement engine; the bridge only emits the triple. (Within one policy the ODRL evaluator *also* applies deny-overrides upstream, so the permit allow triple is never even emitted when a prohibition carves the request out.)
+
+**Fail-closed (deny):** a deny is materialized only when a prohibition **matches** the request (decided by `sparq_policy::matched_prohibition` — the evaluator's own conflict test, *not* `Decision.allow == false`, which conflates a carve-out with a plain no-permission deny) AND the action is mappable AND the party+target are concrete. An unmatched / unmapped / partyless / targetless prohibition materializes **nothing** — and an unmappable carve-out is *reported* in `reasons`, never silently dropped (dropping a deny would widen access).
+
 ## Learn more
 
 - Crate README: [`crates/sparq-policy/README.md`](../../crates/sparq-policy/README.md)
