@@ -106,6 +106,22 @@ jobs:
       - name: Generate SBOM (CycloneDX JSON, whole workspace)
         # --all emits one SBOM per workspace member + an aggregate; JSON format.
         run: cargo cyclonedx --all --format json
+      - name: Normalize SBOM (strip host-revealing absolute build paths)
+        # [OPUS-4.8] sq-toze.30 (GS-6 / F-6): cargo-cyclonedx stamps the absolute build dir
+        # into every workspace/path-dependency bom-ref + purl, which would leak the CI
+        # runner's filesystem layout into this uploaded artifact. Rewrite each generated SBOM
+        # in place through the same deterministic, idempotent jq transform release.yml uses
+        # (scripts/sbom-normalize.jq), keeping the dependency graph internally consistent.
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' f; do
+            jq -f scripts/sbom-normalize.jq "$f" > "$f.norm"
+            mv "$f.norm" "$f"
+            if grep -qE 'path\+file://|download_url=file://|/home/' "$f"; then
+              echo "ERROR: host path leaked into $f after normalization" >&2
+              exit 1
+            fi
+          done < <(find . -name '*.cdx.json' -print0)
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
