@@ -33,11 +33,18 @@ them as evidence; don't pretend you added them. For every item, distinguish:
   Do **not** paper over it.
 
 Faking compliance is worse than an honest gap. The auditor will catch overclaiming, and **the most
-load-bearing honesty item in this repo is the documented "v1 ZK verifier is NOT sound" verdict**
-(`SECURITY.md`, `research/zk-soundness-audit.md`). Any control claim that contradicts that verdict —
-or any maturity score that implies the ZK/MPC estate provides a guarantee it explicitly disclaims —
-is an automatic high-severity finding. Preserve the disclaimer; never launder a research scaffold
-into a "verified" cryptographic control.
+load-bearing honesty item in this repo is the documented ZK-verifier posture: originally found
+unsound, since remediated (the `sq-1s2` binding layer landed) and internally re-audited as "sound as
+landed for the assumed threat model" — but external accredited-cryptographer sign-off is still
+PENDING (`sq-qhy4`, P0) and there is NO production security/privacy/integrity guarantee**
+(`SECURITY.md` §"`sparq-zk` and `sparq-zk-compose` — ZK verifier: remediated, but NOT externally
+audited"; `research/zk-soundness-audit.md` = original audit; `research/zk-verifier-reaudit.md`
+(`sq-gbp4`) = the re-audit). <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> Any control claim that presents the ZK/MPC estate as a delivered
+*production* cryptographic guarantee, any maturity score that implies it provides a guarantee it
+disclaims, or any wording that cites the internal re-audit as an external certification or drops the
+external-pending / no-production-guarantee caveat, is an automatic high-severity finding. Preserve
+the caveat; never launder a research scaffold (or internal remediation progress) into a "verified"
+production cryptographic control — internal self-review is not external sign-off.
 
 ## Scope — sparq's framework set
 

@@ -31,11 +31,15 @@ Standard primitives inventory: see CR-11.
 
 ## CR-2 — Original soundness audit preserved
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 `research/zk-soundness-audit.md` — the 2026-06-13 adversarial audit (59-agent fan-out).
 Assurance statement (verbatim, line 8): *"v1 verifier soundness is BROKEN. verify_manifest
 provides NO meaningful soundness guarantee to a relying party."* 12 confirmed issues, 5
-CRITICAL. Mirrored in `SECURITY.md` lines 65-92 (the `sparq-zk` caveat block). **This verdict
-is on the record and is the conservative posture this framework preserves.**
+CRITICAL. This **original** verdict is preserved as history in the `SECURITY.md` §"`sparq-zk`
+and `sparq-zk-compose` — ZK verifier: remediated, but NOT externally audited" caveat block (its
+"**Status — what changed**" paragraph records the predated-BROKEN finding, then the landed
+`sq-1s2` remediation, then the re-audit verdict). **The original verdict is on the record and
+the regression map for its now-closed findings is bead `sq-1gir`.** [OPUS-4.8]
 
 ---
 
@@ -76,8 +80,10 @@ soundness certificate — it would be dishonest to present it as one. The publis
 - **ZK (CR-4):** the 1:1 finding→forge→reject-path map is at `research/zk-verifier-reaudit.md`
   lines 385-398 (e.g. #1 → `PublicInputMismatch`; #2 → bb verify vs canonical vk; #3 →
   `UnattestedCommitment`/`IssuerKeyNotInKeySet`; #4 → `NonceReplay`/`NonceBindingMismatch`).
-  These are *internal* closure dispositions, not external certification. `SECURITY.md` lines
-  90-92 govern the relying-party stance.
+  These are *internal* closure dispositions, not external certification. The `SECURITY.md`
+  §"`sparq-zk` and `sparq-zk-compose` — ZK verifier: remediated, but NOT externally audited"
+  caveat block governs the relying-party stance: do **not** present a "verified" result as a
+  production-grade guarantee until the external cryptographer audit (`sq-qhy4`) completes. [OPUS-4.8]
 - **MPC (CR-5):** `crates/sparq-mpc/Cargo.toml` header documents M0–M3 (honest-majority
   semi-honest Shamir t-of-n + secret-shared equality join) as built and M4/Q1 (the
   distributed-signature-over-secret-shared-witness collaborative proof) as **DEFERRED behind

@@ -176,10 +176,15 @@ WebAssembly". The engine therefore runs **in the user's browser tab**; an embedd
 query personal RDF entirely client-side with no server round-trip — a structural data-transfer
 minimisation (the embedding app's own handling is its responsibility).
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 ## ZK/MPC exclusion (carve-out evidence)
 
-`SECURITY.md` §"`sparq-zk`/`sparq-zk-compose` — the v1 ZK verifier is NOT sound" and
-§"`sparq-mpc` — cryptography deferred", plus `research/zk-soundness-audit.md` (12 confirmed
-issues, 6 critical), are the design-of-record. **No control in this evidence pack cites the ZK
-or MPC crates as a privacy guarantee.** Bead **sq-toze.35** gates any future privacy-by-
-cryptography claim on the soundness fix.
+`SECURITY.md` §"`sparq-zk` and `sparq-zk-compose` — ZK verifier: remediated, but NOT externally
+audited" and §"`sparq-mpc` — cryptography deferred", plus `research/zk-soundness-audit.md` (the
+original 12-finding / 5-CRITICAL audit) and the post-remediation `research/zk-verifier-reaudit.md`
+(`sq-gbp4`), are the design-of-record. The ZK verifier was originally found unsound, has since
+been remediated (`sq-1s2` binding layer landed) and internally re-audited as "sound as landed for
+the assumed threat model" — **but** external accredited-cryptographer sign-off is still PENDING
+(`sq-qhy4`, P0) and there is **no production privacy/soundness guarantee** until it completes.
+**No control in this evidence pack cites the ZK or MPC crates as a privacy guarantee.** Bead
+**sq-toze.35** gates any future privacy-by-cryptography claim on that external sign-off. [OPUS-4.8]

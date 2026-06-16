@@ -23,10 +23,13 @@ reinterpret* is the load-bearing surface.
 - **OPEN-gap** — not met (or only partially); recorded in `gap-register.md` with a `bd`
   bead. **Not** papered over.
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 > Honesty note. This framework does **not** touch the ZK/MPC estate's soundness — that is
 > `cryptoreview`. The `sparq-zk-compose` advisory-lock `unsafe` (2 sites) is in scope here
 > only as *memory*-safety (a `libc::flock` FFI), **not** as a cryptographic guarantee. The
-> "v1 ZK verifier NOT sound" verdict (`SECURITY.md`) is untouched by any claim below.
+> ZK verifier's published posture (`SECURITY.md`: remediated but NOT externally audited — no
+> production guarantee until the external sign-off `sq-qhy4` completes) is untouched by any
+> claim below.
 
 ## Controls
 

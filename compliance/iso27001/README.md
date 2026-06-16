@@ -105,9 +105,19 @@ has three consequences for ISO 27001 scope:
 
 ## Cryptography honesty gate (load-bearing)
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 **A.8.24 (Use of cryptography) makes NO claim about the `sparq-zk` / `sparq-zk-compose` /
-`sparq-mpc` estate.** The documented verdict — **the v1 ZK verifier is NOT sound** and MPC
-provides **no guarantee** — stands (`SECURITY.md`, `research/zk-soundness-audit.md`). Any
+`sparq-mpc` estate.** The v1 ZK verifier was **originally found NOT sound**
+(`research/zk-soundness-audit.md`, 12 findings incl. 5 critical — kept on record for the
+`sq-1gir` regression map); the `sq-1s2` remediation then **landed the verifier-side binding
+layer**, and an **internal** post-remediation re-audit (`research/zk-verifier-reaudit.md`,
+`sq-gbp4`) found all prior findings closed, judging the verifier **"sound as landed for the
+assumed threat model"** [OPUS-4.8]. That re-audit is **internal, single-model (LLM/Opus 4.8),
+read-only, with forge tests `#[ignore]`d out of default CI** — an **external
+accredited-cryptographer sign-off is still PENDING** (`sq-qhy4`, P0, required before any
+production ZK claim) and the estate carries **NO production soundness/privacy/integrity
+guarantee** (still a research scaffold; `sparq-mpc` is semi-honest-only with **no guarantee**)
+(`SECURITY.md`). Any
 A.8.24 evidence here concerns only the cryptography sparq *relies on operationally* (TLS via
 the operator's gateway, the Sigstore/SLSA signing of release attestations, dependency
 crypto governed by the supply-chain lane). The soundness assessment of the ZK/MPC estate is

@@ -173,8 +173,11 @@ cargo deny check advisories bans sources licenses
    header-specific token — *not* bare `Access-Control`, which over-matches the Solid WAC
    English phrase) grep to **zero** hits in `crates/` (the basis for the V3 N/A, V14.4 GAP,
    and V14.5.3 documented-decision).
-2. **The ZK/MPC estate is excluded** from every claim. No V6/V8 row leans on it. Per
-   `SECURITY.md` + `research/zk-soundness-audit.md`, the v1 ZK verifier is **NOT sound**.
+2. **The ZK/MPC estate is excluded** from every claim. No V6/V8 row leans on it. <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> Per
+   `SECURITY.md` + `research/zk-soundness-audit.md` + `research/zk-verifier-reaudit.md`, the ZK
+   verifier is **remediated but NOT externally audited** (originally unsound; `sq-1s2` landed;
+   internal re-audit "sound as landed for the assumed threat model"; external sign-off `sq-qhy4`
+   PENDING; no production guarantee). [OPUS-4.8]
 3. **`sparq-serve/tests/tokens.rs` is NOT an auth test** — it covers read-your-writes
    *generation* tokens (consistency). It is deliberately **not** cited for V2/V13 auth.
 4. **External attestation residual:** an accredited ASVS L2 verification / pen-test of a

@@ -61,7 +61,7 @@ the engine's shipped mitigations, and the operator action that closes each. Seve
 | **B7** | **At-rest exposure** — plaintext persist WAL / archive on disk | None engine-side **by design** — at-rest encryption is the operator's | **Operator-owned** | Full-disk/volume encryption + FS permissions on the persist dir |
 | **B8** | **In-transit exposure** — plaintext HTTP | None engine-side **by design** — TLS is the operator's | **Operator-owned** | Terminate TLS at a gateway/reverse proxy |
 | **B9** | **Memory-safety breach of the on-disk loader** (a tampered index → UB) | Covered by `compliance/memsafety/` (the B5 mmap surface: register + Miri + oracle + fuzz) | **Low** (per memsafety attestation) | Control provenance of persisted index files |
-| **B10** | **False reliance on ZK/MPC for privacy** — an operator believes the ZK/MPC estate protects data | **Documented NOT sound** (`SECURITY.md`; `research/zk-soundness-audit.md`); excluded from every privacy claim | **N/A** (engine makes no such claim) | **Do not rely on `sparq-zk`/`sparq-mpc` for any privacy guarantee** — gated by sq-toze.35 |
+| **B10** | **False reliance on ZK/MPC for privacy** — an operator believes the ZK/MPC estate protects data | Verifier originally unsound (`research/zk-soundness-audit.md`), remediated (`sq-1s2`) + **internally** re-audited "sound as landed" (`research/zk-verifier-reaudit.md`, `sq-gbp4`) but **NOT externally audited / no production guarantee** (`SECURITY.md`; `sq-qhy4` pending); excluded from every privacy claim [OPUS-4.8] | **N/A** (engine makes no such claim) | **Do not rely on `sparq-zk`/`sparq-mpc` for any privacy guarantee** — gated by sq-toze.35 |
 
 ---
 
@@ -75,7 +75,9 @@ a data-minimising deployment.
 
 **What this DPIA does NOT conclude:** it does **not** conclude that any *specific deployment* is
 GDPR-compliant or low-risk — that depends entirely on Part A, which only the operator can complete.
-And it draws **no** privacy assurance from the ZK/MPC estate (B10).
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+And it draws **no** privacy assurance from the ZK/MPC estate (B10) — even after the `sq-1s2`
+remediation + internal re-audit, external sign-off is pending (`sq-qhy4`) and there is no production guarantee.
 
 **Sign-off:** the engine-side half (Part B/C) is the responsibility of the sparq maintainers
 (this framework). **Part A and the overall DPIA sign-off are the operator's DPO's** — this

@@ -8,8 +8,13 @@ Benchmark v1.x (§4 image-build half). See [`README.md`](./README.md) for the sc
 the status legend (PASS / AUDIT-READY / OPEN-gap / N/A-operator). Evidence paths are repo-relative;
 all of them are reproduced in [`evidence.md`](./evidence.md).
 
-> Honesty note. No row below is satisfied by the ZK/MPC estate; that estate's documented
-> "v1 verifier NOT sound" verdict (`SECURITY.md`) is untouched here. CIS is artifact-hygiene.
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+> Honesty note. No row below is satisfied by the ZK/MPC estate. [OPUS-4.8] Its v1 ZK verifier was
+> originally found unsound (`research/zk-soundness-audit.md`), then `sq-1s2` landed the binding
+> layer and an internal re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found the prior
+> findings closed → "sound as landed for the assumed threat model" — but **internal/single-model
+> only, external sign-off PENDING (`sq-qhy4`), no production guarantee** (`SECURITY.md`). CIS is
+> artifact-hygiene and credits no production crypto guarantee from that estate.
 
 ## Part A — CIS Docker Benchmark §4 (Container Images and Build File)
 

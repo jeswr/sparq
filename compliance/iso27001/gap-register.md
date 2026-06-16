@@ -56,7 +56,7 @@ never be claimed as closed**.
 
 | ID | Gap | Sev | How addressed |
 |---|---|---|---|
-| **GAP-ISO-2** | **The N/A(operator) controls were implicit, not documented in one place for the operator.** 42 Annex A controls are correctly the adopting *operator's* responsibility (A.7 physical, access-control families under boundary B3, runtime monitoring/backup/availability, network controls). They were flagged per-row in `controls.md`, but there was no single **operator security-deployment guidance** doc making the operator-vs-sparq split actionable. | **Medium** | **ADDRESSED** (sq-v48f) by [`operator-deployment-security.md`](./operator-deployment-security.md): a 9-section operator-responsibility doc enumerating network/TLS, authN/authZ (boundary B3), secrets, OS/container hardening, resource/DoS limits, logging/PII, backup/durability, and patch cadence — each stating what sparq ships built-in (citing the real flag/feature) vs what the operator MUST supply, mapped to Annex A. It is an **operator-responsibility doc, NOT a certification claim**, and it states sparq's auth/crypto limits honestly (one coarse static Bearer token, no per-user authz; ZK/MPC NOT sound). Cross-referenced from `controls.md` (the B3 / N/A(op) rows point at it). |
+| **GAP-ISO-2** | **The N/A(operator) controls were implicit, not documented in one place for the operator.** 42 Annex A controls are correctly the adopting *operator's* responsibility (A.7 physical, access-control families under boundary B3, runtime monitoring/backup/availability, network controls). They were flagged per-row in `controls.md`, but there was no single **operator security-deployment guidance** doc making the operator-vs-sparq split actionable. | **Medium** | **ADDRESSED** (sq-v48f) by [`operator-deployment-security.md`](./operator-deployment-security.md): a 9-section operator-responsibility doc enumerating network/TLS, authN/authZ (boundary B3), secrets, OS/container hardening, resource/DoS limits, logging/PII, backup/durability, and patch cadence — each stating what sparq ships built-in (citing the real flag/feature) vs what the operator MUST supply, mapped to Annex A. It is an **operator-responsibility doc, NOT a certification claim**, and it states sparq's auth/crypto limits honestly (one coarse static Bearer token, no per-user authz; ZK/MPC estate carries **no production guarantee** — v1 verifier originally found NOT sound then remediated (`sq-1s2`) + **internally** re-audited "sound as landed for the assumed threat model," external sign-off STILL PENDING `sq-qhy4`) [OPUS-4.8]. Cross-referenced from `controls.md` (the B3 / N/A(op) rows point at it). |
 
 ## ADDRESSED by the org-adoptable ISMS template set (in-repo deliverable; certificate stays external)
 
@@ -86,11 +86,16 @@ never be claimed as closed**.
   [`operator-deployment-security.md`](./operator-deployment-security.md) doc (GAP-ISO-2
   ADDRESSED). Re-raising it as a sparq code gap would contradict the cert plan §0 and the
   threat model.
-- **A.8.24 cryptography over the ZK/MPC estate** is **not a gap to "fix here"** — it is the
-  documented **NOT-sound** verdict (`SECURITY.md`, `research/zk-soundness-audit.md`),
-  assessed by the `cryptoreview` framework and remediated by the existing ZK soundness
+- **A.8.24 cryptography over the ZK/MPC estate** is **not a gap to "fix here"** — the v1 ZK
+  verifier was **originally found NOT sound** (`research/zk-soundness-audit.md`, kept on record
+  for the `sq-1gir` regression map); `sq-1s2` then landed the verifier-side binding layer and an
+  **internal** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed
+  → "sound as landed for the assumed threat model," with **external accredited-cryptographer
+  sign-off STILL PENDING** (`sq-qhy4`, P0) and **NO production guarantee** (`SECURITY.md`)
+  [OPUS-4.8]. It is assessed by the `cryptoreview` framework and tracked by the ZK soundness
   beads, **not** this epic. Treating it as an ISO 27001 control gap would mislabel a
   research-scaffold disclaimer as an ISMS finding.
+  <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 
 ## External / out-of-agent-scope (label, do not claim)
 

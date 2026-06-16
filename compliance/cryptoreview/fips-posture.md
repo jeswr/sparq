@@ -51,14 +51,18 @@ not FIPS compliance. Swapping them for FIPS-approved primitives would defeat the
 ZK design; the honest answer is therefore that this estate is **out of FIPS
 scope**, not "FIPS-pending".
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 > **Honesty linkage.** This document does **not** assert that the Tier-B crypto
 > is sound or production-safe — that is a *separate* and currently *open* question
 > gated on `CR-G1` (external accredited-cryptographer audit; see
-> [`gap-register.md`](./gap-register.md)) and on `SECURITY.md`'s published
-> "v1 ZK verifier is NOT sound" verdict. "Non-FIPS-approved" and "not externally
-> verified for soundness" are two independent statements; both are true. A FIPS
-> deployment constraint is one reason the estate is out of scope; the unverified
-> soundness is another, more load-bearing, reason.
+> [`gap-register.md`](./gap-register.md)) and on `SECURITY.md`'s published posture
+> (§"`sparq-zk` and `sparq-zk-compose` — ZK verifier: remediated, but NOT externally
+> audited"): the binding layer landed and the internal re-audit found it "sound as
+> landed for the assumed threat model," but no production guarantee may be presented
+> until the external sign-off (`sq-qhy4`) completes. "Non-FIPS-approved" and "not
+> externally verified for soundness" are two independent statements; both are true. A
+> FIPS deployment constraint is one reason the estate is out of scope; the externally
+> unverified soundness is another, more load-bearing, reason. [OPUS-4.8]
 
 ## 3. SHA-256: a FIPS 180-4 algorithm used *outside* any validated module
 

@@ -33,10 +33,15 @@ split. The operator's job is to close it.
 > **Crypto honesty gate.** Where this doc mentions cryptography (TLS, tokens, signing), it
 > concerns only the crypto sparq **relies on operationally** (operator-terminated TLS, the
 > constant-time token compare, Sigstore/SLSA release signing). The **`sparq-zk` /
-> `sparq-zk-compose` / `sparq-mpc` estate makes NO cryptographic guarantee** — the v1 ZK
-> verifier is documented **NOT sound** and MPC provides **no guarantee** (`SECURITY.md`,
-> `research/zk-soundness-audit.md`, assessed in [`../cryptoreview/`](../cryptoreview/)). An
-> operator MUST NOT treat any ZK/MPC feature as a privacy or integrity control.
+> `sparq-zk-compose` / `sparq-mpc` estate makes NO production cryptographic guarantee** — the v1
+> ZK verifier was **originally found NOT sound** (`research/zk-soundness-audit.md`), but `sq-1s2`
+> landed the verifier-side binding layer and an **internal** re-audit
+> (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed → "sound as landed for
+> the assumed threat model"; **external accredited-cryptographer sign-off is STILL PENDING**
+> (`sq-qhy4`, P0) and there is **NO production guarantee** (MPC semi-honest-only) — `SECURITY.md`,
+> assessed in [`../cryptoreview/`](../cryptoreview/) [OPUS-4.8]. An operator MUST NOT treat any
+> ZK/MPC feature as a privacy or integrity control.
+> <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 
 ## How to read each responsibility
 
@@ -332,8 +337,11 @@ checklist. The mapping:
 - It does **not** claim the built-in Bearer token is an authentication or authorisation
   *system* — it is one coarse shared secret with the limits stated in §2.
 - It does **not** claim any `sparq-zk` / `sparq-zk-compose` / `sparq-mpc` feature provides a
-  privacy or integrity guarantee — the v1 ZK verifier is documented **NOT sound**
-  (`SECURITY.md`, `research/zk-soundness-audit.md`).
+  privacy or integrity guarantee — the v1 ZK verifier was **originally found NOT sound**
+  (`research/zk-soundness-audit.md`), and although `sq-1s2` landed the binding layer and an
+  **internal** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed
+  ("sound as landed for the assumed threat model"), **external sign-off is STILL PENDING**
+  (`sq-qhy4`, P0) and there is **NO production guarantee** (`SECURITY.md`) [OPUS-4.8].
 - It does **not** transfer the operator's data-controller responsibility for loaded RDF onto
   sparq — that stays with the deploying operator ([`../data-flow.md`](../data-flow.md),
   [`../dpia.md`](../dpia.md)).

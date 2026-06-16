@@ -28,12 +28,18 @@ org-process artifact." Those are labelled **audit-ready** with the gate cited as
 The **producer = sparq project**; the **acquirer/operator = whoever deploys it** — the
 operator's own SSDF programme (their deployment, monitoring, IR) is out of sparq's scope.
 
-> The single most load-bearing honesty item in this repo is the documented verdict that
-> the **v1 ZK verifier is NOT sound** (`SECURITY.md`, `research/zk-soundness-audit.md`).
-> No SSDF row below claims the `sparq-zk*`/`sparq-mpc` estate provides a security guarantee
-> — PW.4/PW.5/PW.8 are scored on the *engine* (`sparq-core`/`-engine`/`-server`), and the
-> crypto scaffold's disclaimer is treated as a *correctly disclosed* limitation, not a met
-> control.
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+> The single most load-bearing honesty item in this repo is the documented ZK-verifier
+> verdict. [OPUS-4.8] The v1 verifier was **originally found unsound**
+> (`research/zk-soundness-audit.md`, kept on record); `sq-1s2` then landed the verifier-side
+> binding layer and an **internal post-remediation re-audit** (`research/zk-verifier-reaudit.md`,
+> `sq-gbp4`) found the prior findings closed → **"sound as landed for the assumed threat
+> model"** — but that is **internal / single-model self-review only, with external
+> accredited-cryptographer sign-off still PENDING (`sq-qhy4`, P0) and NO production guarantee**
+> (`SECURITY.md`). No SSDF row below claims the `sparq-zk*`/`sparq-mpc` estate provides a
+> production security guarantee — PW.4/PW.5/PW.8 are scored on the *engine*
+> (`sparq-core`/`-engine`/`-server`), and the crypto scaffold's remediated-but-externally-unaudited
+> status is treated as a *correctly disclosed* limitation, not a met control.
 
 ---
 
@@ -142,5 +148,9 @@ sq-toze.9). The **audit-ready** rows are the practices that are documented + aut
 whose *continuous operation* / *formal attestation* is an organizational act SSDF leaves to
 the producing org — for a single-maintainer volunteer project these are asserted with the
 gate/doc cited, not externally certified. No row overclaims, and none presents the
-`sparq-zk*`/`sparq-mpc` estate as a met cryptographic control — its no-guarantee disclaimer
-is a correctly-disclosed limitation (`SECURITY.md`, `research/zk-soundness-audit.md`).
+`sparq-zk*`/`sparq-mpc` estate as a met cryptographic control — its no-production-guarantee
+status is a correctly-disclosed limitation. [OPUS-4.8] The v1 ZK verifier was originally found
+unsound (`research/zk-soundness-audit.md`, kept on record), then `sq-1s2` landed the binding
+layer and an internal re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found the prior
+findings closed → "sound as landed for the assumed threat model" — but **internal/single-model
+only, external sign-off PENDING (`sq-qhy4`), no production guarantee** (`SECURITY.md`).

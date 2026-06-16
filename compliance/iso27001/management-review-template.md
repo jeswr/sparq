@@ -83,12 +83,17 @@ the org maps them into this log.
 | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 
 > **Worked example (illustrative, not a live org record).** The repo's own ZK-soundness audit
-> (`research/zk-soundness-audit.md`) found the v1 ZK verifier **NOT sound** — a textbook
-> nonconformity *if* an org had claimed it as a control. The honest disposition is **do not
-> claim the control** (recorded in `controls.md` A.8.24, `SECURITY.md`), with remediation
-> tracked as beads and an **external-cryptographer audit** as the required corrective action
-> (consolidated register `sq-qhy4`). This shows the loop working: detect → disclose → do not
-> overclaim → track remediation.
+> (`research/zk-soundness-audit.md`) **originally found the v1 ZK verifier NOT sound** — a
+> textbook nonconformity *if* an org had claimed it as a control. The honest disposition was
+> **do not claim the control** (recorded in `controls.md` A.8.24, `SECURITY.md`), with
+> remediation tracked as beads: `sq-1s2` then **landed the verifier-side binding layer**, and an
+> **internal** post-remediation re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all
+> prior findings closed → "sound as landed for the assumed threat model." Because that re-audit
+> is **internal, single-model, read-only**, an **external accredited-cryptographer audit remains
+> the required corrective action** (consolidated register `sq-qhy4`, P0) before any production ZK
+> claim, and the estate still carries **NO production guarantee**. This shows the loop working:
+> detect → disclose → do not overclaim → remediate → re-audit → still require external sign-off.
+> <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 
 ### 10.2 Continual improvement
 

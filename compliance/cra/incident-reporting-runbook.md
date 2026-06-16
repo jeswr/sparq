@@ -60,13 +60,18 @@ pre-release defect found and fixed before shipping.
 - A privately reported vulnerability with **no evidence of active exploitation** and no
   severe incident → ordinary coordinated disclosure + fix + GHSA, per `SECURITY.md`.
 - A defect found and remediated **before** the affected version is placed on the market.
-- A report concerning a **research-scaffold crate that carries no security guarantee**
-  (`sparq-zk`, `sparq-zk-compose`, `sparq-mpc`) — these provide **no** security property
-  today by documented design (see `SECURITY.md` and
-  [`../../research/zk-soundness-audit.md`](../../research/zk-soundness-audit.md)); a "break"
-  of a property they never claimed is **not** a CRA-reportable vulnerability of the shipped
-  product. (A memory-safety or DoS bug in `sparq-core`/`sparq-engine`/`sparq-server` reached
-  from untrusted input **is** in scope if actively exploited in a shipped product.)
+- A report concerning a **research-scaffold crate that carries no production security
+  guarantee** (`sparq-zk`, `sparq-zk-compose`, `sparq-mpc`) — these provide **no production**
+  security guarantee today by documented design. [OPUS-4.8] The v1 ZK verifier was originally
+  found unsound ([`../../research/zk-soundness-audit.md`](../../research/zk-soundness-audit.md)),
+  then `sq-1s2` landed the binding layer and an internal re-audit
+  ([`../../research/zk-verifier-reaudit.md`](../../research/zk-verifier-reaudit.md), `sq-gbp4`)
+  found the findings closed → "sound as landed for the assumed threat model" — but that is
+  **internal/single-model self-review only, with external sign-off still PENDING (`sq-qhy4`) and
+  no production guarantee** (see `SECURITY.md`). A "break" of a property they never claimed for
+  production is **not** a CRA-reportable vulnerability of the shipped product. (A memory-safety
+  or DoS bug in `sparq-core`/`sparq-engine`/`sparq-server` reached from untrusted input **is** in
+  scope if actively exploited in a shipped product.)
 
 > **Honesty note.** Whether a given event meets the legal threshold for "actively exploited"
 > or "severe incident" is a **judgement reserved to the adopting entity and its legal
@@ -242,6 +247,7 @@ the SECURITY.md→runbook leg of the cross-reference is **residual (governance-o
 controls.md / gap-register.md / evidence.md cross-references are already complete (this section,
 §7, the §References block, controls.md CRA-CA.5, gap-register.md GX-CRA-2).
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 ## 10. Honesty statement (restated)
 
 - This is an **adoptable runbook + template**, not a certification artifact and not a
@@ -252,7 +258,11 @@ controls.md / gap-register.md / evidence.md cross-references are already complet
   conformity** — those remain the organisational acts recorded as *audit-ready* in
   [`controls.md`](./controls.md) (CRA-CA.2/CA.3) and the consolidated register.
 - **No security claim here rests on the ZK/MPC crates**, which are documented as providing
-  **no** security guarantee (`SECURITY.md`, `research/zk-soundness-audit.md`).
+  **no production** security guarantee. [OPUS-4.8] The v1 ZK verifier was originally found
+  unsound (`research/zk-soundness-audit.md`), then `sq-1s2` landed the binding layer and an
+  internal re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found the findings closed →
+  "sound as landed for the assumed threat model" — but **internal/single-model only, external
+  sign-off PENDING (`sq-qhy4`), no production guarantee** (`SECURITY.md`).
 - Dates, deadlines, and platform/CSIRT routing are **non-canonical working aids**; confirm
   them against the official Regulation, implementing acts, and ENISA/CSIRT guidance before
   relying on them.
@@ -269,5 +279,10 @@ controls.md / gap-register.md / evidence.md cross-references are already complet
 - [`../../SECURITY.md`](../../SECURITY.md) — the coordinated vulnerability disclosure flow
   this runbook extends.
 - [`../../research/zk-soundness-audit.md`](../../research/zk-soundness-audit.md) — the
-  documented "v1 ZK verifier is NOT sound" verdict.
+  **original** "v1 ZK verifier is NOT sound" verdict (kept on record). [OPUS-4.8]
+- [`../../research/zk-verifier-reaudit.md`](../../research/zk-verifier-reaudit.md) — the
+  **internal post-remediation re-audit** (`sq-gbp4`) after `sq-1s2` landed the binding layer:
+  findings closed → "sound as landed for the assumed threat model", but **internal/single-model
+  only, external accredited-cryptographer sign-off still PENDING (`sq-qhy4`), no production
+  guarantee**.
 - Regulation (EU) 2024/2847 (Cyber Resilience Act), Article 14 and Annexes I/II/VII.
