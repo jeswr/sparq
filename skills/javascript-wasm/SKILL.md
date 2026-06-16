@@ -86,7 +86,7 @@ free(): void                                         // also Symbol.dispose
 
 Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNode`, `blankNode`, `literal`, `variable`, `quad`, ...) and term classes `NamedNode/BlankNode/Literal/Variable/DefaultGraph/Quad`; `init` (idempotent wasm bootstrap); compression helpers `decompress / decompressToString / sniffCodec`; SPARQL helpers `termFromSparqlJson / termToNT / quadsToNQuads / detectQueryForm / askToSelect / SparqlJsonRowsParser`; and the `SparqDictionaryClient` (server dictionary-fetch protocol).
 
-Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE or batch cursors. Methods return SPARQL-JSON / N-Triples **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
+Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
 
 ## Common recipes
 
@@ -139,6 +139,15 @@ const raw = Store.load(turtle, 'turtle');
 const nt  = raw.queryQuads('PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }');
 ```
 
+**EXPLAIN / EXPLAIN ANALYZE (query-plan introspection, raw wasm only).** Same plan text the Rust API (`sparq_engine::explain`) and the HTTP endpoint (`?explain` / `?explain=analyze`, or `Accept: text/x-sparq-explain`) return — returned to JS as a plain string. `explain` is a planning-only dry run (no execution; every query form); `explainAnalyze` runs the query (SELECT/ASK only) and appends a per-operator row-count trace.
+
+```js
+const plan = raw.explain('PREFIX ex: <http://ex/> SELECT ?n ?a WHERE { ?s ex:name ?n . ?s ex:age ?a }');
+// "EXPLAIN (SELECT) — planning-only dry run; nothing is executed.\n...Plan:\n  ..."
+const trace = raw.explainAnalyze('PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }');
+// plan + per-operator output rows (wall times read 0 on wasm32 — no monotonic clock)
+```
+
 ## Gotchas / feature flags / prerequisites
 
 - **ESM only, Node >= 18.** The package is `"type": "module"`; `init()` is idempotent and runs automatically on the first `SparqStore.from*` call (in Node it reads the wasm bytes from disk; in the browser/Deno it `fetch`es relative to the module). One runtime dep: `fzstd` (~8 KB, dynamically imported only when decoding zstd).
@@ -150,6 +159,7 @@ const nt  = raw.queryQuads('PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n }
 - **Browser gzip truncation.** Browsers silently truncate **multi-member gzip** to the first member; `fromCompressed` uses `node:zlib` in Node (loops members) and `DecompressionStream` in the browser (single-member only). Multi-frame **zstd** decodes fully everywhere via fzstd. fzstd cannot decode zstd **dictionary** frames — for those supply a dict-capable decoder via `SparqDictionaryClient`'s `decodeWithDictionary` hook.
 - **Lifetime.** Call `.free()` (or use `using`) to release wasm linear memory; the store and any held cursors must not be used afterward. wasm32 caps linear memory at 4 GB (a real tab is happier under ~2 GB): ~30 M triples raw, ~75 M with `compressed`.
 - **Raw `Store` budget knobs are wasm-portable only.** `askWithMaxRows` bounds the working set by row count; the engine's wall-clock deadline budget is native-only (`std::time::Instant` is unusable on wasm32).
+- **`explainAnalyze` wall times read 0 on wasm32.** There is no monotonic clock in the wasm bundle, so the per-operator trace reports 0 for every wall time; the per-operator **row counts are exact**. `explainAnalyze` executes the query (SELECT/ASK only) — CONSTRUCT/DESCRIBE/UPDATE are rejected; use `explain` (a non-executing dry run that accepts every query form) for those.
 
 ## See also
 

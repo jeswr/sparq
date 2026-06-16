@@ -1,0 +1,151 @@
+# feature-matrix — GATING build/test/clippy lane for the OPT-IN (default-OFF) cargo
+# features. [OPUS-4.8]
+#
+# WHY (CDMC cert finding sq-kzfi; bead labelled cert,ci,opt-in): ci.yml builds, tests
+# and clippies only the DEFAULT feature set of every crate. Several capabilities ship
+# behind default-OFF opt-in features (serializers, federation SERVICE + descriptors,
+# the vec:/text: rewrites, derivation explanations, the CS planner, the zk-trace seam,
+# coordinate reprojection, the seedable MPC test RNG, …). Code that CI never compiles
+# rots: a default-feature change can silently break an opt-in build/clippy and nobody
+# notices until a consumer enables it. The CDMC audit flagged exactly this (it's why
+# the catalogue capability scored 3 not 4). This lane compiles + clippies (and tests,
+# where dedicated offline tests exist) the opt-in features so they stay green.
+#
+# GATING: this workflow is PR/merge_group/push-triggered, and every job NAME here is
+# free of the words "advisory"/"informational", so the single required `ci-summary /
+# gate` aggregator (ci-summary.yml) auto-discovers each matrix leg as a REQUIRED check
+# and fails the merge if any opt-in build/clippy/test breaks. No edit to ci-summary.yml
+# is needed — the aggregator polls by name, not by a hard-coded list.
+#
+# SCOPE — what this lane deliberately does NOT cover, and why (each is a separate gate
+# or a documented exclusion, NOT an oversight):
+#   • `zlib-ng` (sparq-cli / sparq-server / sparq-parse / sparq-hdt): swaps flate2's
+#     backend for the zlib-ng C library — needs a C toolchain/cmake and is a pure
+#     perf backend with no first-party Rust code of its own, so compiling it here buys
+#     no rot-protection for sparq's own source. Left out to keep the lane fast + free
+#     of a C build dep.
+#   • `hdt` (sparq-cli) / sparq-hdt `write`: the wrapped `hdt` crate declares MSRV
+#     1.87 and pulls a heavy decode stack; sparq-hdt is already --exclude'd from the
+#     workspace MSRV/test jobs for that reason. Gating it needs its own toolchain lane
+#     (future bead) — not folded in here so this lane stays on the stable floor.
+#   • `live` (sparq-nlq) / `embeddings` (sparq-vectors): enable a REAL network client
+#     (reqwest against the Anthropic / OpenAI-compatible endpoints). They are off in CI
+#     by contract (the eval harness runs on recorded fixtures) and must not open a
+#     socket on a runner, so they are not built/tested here.
+#   • `mimalloc` (sparq-cli, default-ON) is not opt-in; it is exercised by the default
+#     build already.
+
+name: feature-matrix
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Merge queue: mirror the PR check-set onto the merge_group ref so the required
+  # ci-summary gate finds the same legs it finds on a PR (matches ci.yml/ci-summary.yml).
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feature-matrix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  opt-in-features:
+    # One matrix leg per crate + opt-in feature(group). Coexisting opt-in features of a
+    # single crate are combined into ONE `--features a,b,c` leg (e.g. the sparq-server
+    # federation/persistence/test seams) so the crate is compiled once per leg, not once
+    # per feature. fail-fast:false so one broken feature shows the full picture, not just
+    # the first to break. Each leg: build -> (test, where offline tests exist) -> clippy
+    # --all-targets -D warnings, on the SAME stable toolchain ci.yml's gates use.
+    name: opt-in ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # sparq-core: the compact 3-index browser build, and the native out-of-core
+          # mmap + spillable build-time dictionary.
+          - name: sparq-core (compact-index)
+            crate: sparq-core
+            features: compact-index
+            test: true
+          - name: sparq-core (mmap, dict-spill)
+            crate: sparq-core
+            features: mmap,dict-spill
+            test: true
+          # sparq-engine: RDF serializer matrix, CS-table star-join planner, zk-trace
+          # seam, and SPARQL 1.1 federated SERVICE (tests use loopback only — no net).
+          - name: sparq-engine (serialize-rdf)
+            crate: sparq-engine
+            features: serialize-rdf
+            test: true
+          - name: sparq-engine (cs-planner)
+            crate: sparq-engine
+            features: cs-planner
+            test: true
+          - name: sparq-engine (zk)
+            crate: sparq-engine
+            features: zk
+            test: true
+          - name: sparq-engine (service)
+            crate: sparq-engine
+            features: service
+            test: true
+          # sparq-cli: the `dump` re-serializer (forwards sparq-engine/serialize-rdf).
+          - name: sparq-cli (serialize-rdf)
+            crate: sparq-cli
+            features: serialize-rdf
+            test: true
+          # sparq-server: discoverable-federation descriptors, the SERVICE passthrough,
+          # time-travel reads, the geof: registry, and the durable-write test seam — all
+          # opt-in, combined into one compile of the async server.
+          - name: sparq-server (federation-descriptors, service, time-travel, geo, test-seams)
+            crate: sparq-server
+            features: federation-descriptors,service,time-travel,geo,test-seams
+            test: true
+          # sparq-vectors: the vec: magic predicates (pulls sparq-engine), and the
+          # /v1/embeddings provider request/response shape (serde only, no socket).
+          - name: sparq-vectors (vec-predicate, provider)
+            crate: sparq-vectors
+            features: vec-predicate,provider
+            test: true
+          # sparq-geo: pure-Rust coordinate reprojection into CRS84.
+          - name: sparq-geo (reproject)
+            crate: sparq-geo
+            features: reproject
+            test: true
+          # sparq-reason: derivation explanations ("proof trees").
+          - name: sparq-reason (explain)
+            crate: sparq-reason
+            features: explain
+            test: true
+          # sparq-mpc: the deterministic/seedable masking RNG seam (insecure-by-name).
+          - name: sparq-mpc (insecure-test-rng)
+            crate: sparq-mpc
+            features: insecure-test-rng
+            test: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Per-leg cache key so each crate+feature combination keeps its own warm
+          # target dir (the feature set changes the compiled artifacts).
+          shared-key: feature-matrix-${{ matrix.crate }}-${{ matrix.features }}
+      - name: Build (-p ${{ matrix.crate }} --features ${{ matrix.features }})
+        run: cargo build -p ${{ matrix.crate }} --features ${{ matrix.features }}
+      - name: Test (-p ${{ matrix.crate }} --features ${{ matrix.features }})
+        if: matrix.test
+        run: cargo test -p ${{ matrix.crate }} --features ${{ matrix.features }}
+      - name: Clippy (--all-targets -D warnings)
+        run: cargo clippy -p ${{ matrix.crate }} --features ${{ matrix.features }} --all-targets -- -D warnings

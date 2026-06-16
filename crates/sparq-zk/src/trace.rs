@@ -100,22 +100,11 @@ impl CommittedNamedGraph {
     }
 }
 
-/// RDFC10 issued-identifier map for a graph's content (input label →
-/// canonical `c14nN` label), through the same oxrdf-0.2 bridge as
-/// [`crate::canon`].
+/// RDFC-1.0 issued-identifier map for a graph's content (input label →
+/// canonical `c14nN` label). Single-sourced via the [`sparq_canon`] public API
+/// (same bridge as [`crate::canon`]). [OPUS-4.8] sq-0qip.
 fn issue_label_map(triples: &[Triple]) -> Result<HashMap<String, String>, crate::canon::CanonError> {
-    use crate::canon::CanonError;
-    let mut doc = String::new();
-    for t in triples {
-        doc.push_str(&format!("{} {} {} .\n", t.subject, t.predicate, t.object));
-    }
-    let mut quads02 = Vec::with_capacity(triples.len());
-    for item in oxttl01::NQuadsParser::new().for_reader(doc.as_bytes()) {
-        quads02.push(item.map_err(|e| CanonError::Bridge(e.to_string()))?);
-    }
-    let map = rdf_canon::issue_quads(&quads02)
-        .map_err(|e| CanonError::Canonicalization(e.to_string()))?;
-    Ok(map.into_iter().collect())
+    sparq_canon::issue_triples(triples)
 }
 
 /// Rewrites a triple's bnode labels through the issued-identifier map

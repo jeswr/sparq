@@ -19,6 +19,11 @@
 //! * [`write_nquads`] — N-Triples with the 4th graph column.
 //! * [`graph_to_turtle`] / [`graph_to_trig`] / [`graph_to_nquads`] — pull the triples
 //!   straight out of a [`Graph`] (and its named graphs, for the dataset formats).
+//! * [`graph_to_jsonld`] / [`write_jsonld`] — JSON-LD 1.1 in the **expanded**,
+//!   **flattened**, or basic prefix **compacted** document form (see [`JsonLdForm`]).
+//!   A native writer (no json-ld crate, zero new deps) built on the same oxrdf terms,
+//!   implementing the Deserialize-to-RDF inverse: it emits exactly the node objects the
+//!   JSON-LD-to-RDF algorithm would consume back into this triple set.
 //!
 //! ## Canonical interop note
 //!
@@ -513,6 +518,468 @@ pub fn graph_to_nquads(graph: &Graph) -> String {
     write_nquads(&view)
 }
 
+// ===========================================================================
+// JSON-LD 1.1.
+//
+// A native writer — no json-ld crate, no serde_json, zero new dependencies. It
+// reuses the same oxrdf term model the other writers do and emits JSON by hand
+// (the structure is fully under our control, so a generic JSON DOM buys nothing).
+//
+// The output is the *Deserialize-JSON-LD-to-RDF* inverse: feeding any document this
+// produces back through the JSON-LD-to-RDF algorithm reconstructs exactly this triple
+// set. That is the round-trip contract — verified by an in-crate expanded-form reader
+// in the tests (sparq-core has no JSON-LD parser of its own).
+//
+// `xsd:string` and `rdf:langString` are kept implicit (`@value` + optional
+// `@language`), every other datatype is preserved verbatim as `@type` so no datatype is
+// ever lost. Native JSON number/boolean coercion is applied ONLY when it is provably
+// lossless and canonical (see `coerce_native`), otherwise the lexical form is kept as a
+// string `@value` with its `@type`.
+// ===========================================================================
+
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+// RDF-list (`@list`) collapsing is intentionally NOT done here: detecting a well-formed,
+// single-referenced rdf:first/rdf:rest/rdf:nil chain safely is not cheap and would risk
+// breaking the round-trip on shared/ill-formed lists. The expanded form already round-trips
+// list triples losslessly as ordinary triples. Tracked for a follow-up (bead).
+
+/// Which JSON-LD 1.1 document form [`write_jsonld`] / [`graph_to_jsonld`] emits.
+///
+/// All three are *round-trippable* (re-parsing reconstructs the same RDF). They differ
+/// only in shape and in whether IRIs are abbreviated:
+///
+/// * [`Expanded`](JsonLdForm::Expanded) — the fully-explicit form: a flat array of node
+///   objects, every IRI a full string, every value an `@value`/`@id` object. No
+///   `@context`. This is the algorithmic core and the safest interop target.
+/// * [`Flattened`](JsonLdForm::Flattened) — like expanded but guarantees every node
+///   appears exactly once at the top level (subjects merged) and wraps named graphs in
+///   `@graph`. For a triple store the expanded output is already node-merged, so this
+///   adds the dataset `@graph` framing and a stable node ordering.
+/// * [`Compacted`](JsonLdForm::Compacted) — a basic prefix `@context` (from the supplied
+///   prefix map) abbreviating IRIs to `prefix:local` / terms, `@type` shorthand for
+///   `rdf:type`, and `@language`/`@type`-free plain strings where safe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JsonLdForm {
+    /// Fully-expanded: flat node-object array, no `@context`, every IRI explicit.
+    Expanded,
+    /// Flattened: node-merged with named graphs wrapped in `@graph` and stable ordering.
+    Flattened,
+    /// Compacted: a prefix-based `@context` abbreviating IRIs (best-effort, lossless).
+    Compacted,
+}
+
+/// Escapes a string as a JSON string body (without the surrounding quotes) per RFC 8259:
+/// the two mandatory escapes (`"`, `\`), the short escapes for the common control chars,
+/// and `\u00XX` for the remaining C0 controls. Everything else (including non-ASCII, which
+/// JSON permits raw in UTF-8) passes through verbatim.
+fn json_escape(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+}
+
+/// Writes a JSON string literal (quoted, escaped).
+fn json_str(s: &str, out: &mut String) {
+    out.push('"');
+    json_escape(s, out);
+    out.push('"');
+}
+
+/// If a literal can be represented as a *canonical, lossless* native JSON scalar, returns
+/// that scalar's JSON text (e.g. `true`, `42`). Otherwise `None` — the caller then keeps
+/// the value as a string `@value` carrying its `@type`, so the datatype survives.
+///
+/// The bar is deliberately high: a native value is only emitted when re-serializing the
+/// JSON scalar yields back the *same lexical form*, so the JSON-LD-to-RDF round-trip
+/// reconstructs the identical literal. That means:
+///
+/// * `xsd:boolean` only for the canonical `true` / `false` lexicals (not `1` / `0`).
+/// * `xsd:integer` only when the digits round-trip through `i64` unchanged (no leading
+///   zeros, no `+`, fits in range) — JSON numbers are the canonical decimal anyway.
+///
+/// `xsd:double`/`decimal` are intentionally NOT coerced: JSON has one number type and its
+/// shortest round-trip form rarely equals the RDF lexical (`1.5` vs `1.5E0`), which would
+/// silently change the literal. Keeping them as typed strings is lossless.
+fn coerce_native(value: &str, datatype: &str) -> Option<String> {
+    match datatype {
+        d if d == format!("{XSD}boolean") => match value {
+            "true" => Some("true".to_string()),
+            "false" => Some("false".to_string()),
+            _ => None,
+        },
+        d if d == format!("{XSD}integer") => {
+            // Reject any lexical whose canonical i64 text differs (leading zeros, '+',
+            // spaces, out-of-range) so the re-serialized number is byte-identical.
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|n| n.to_string() == value)
+                .map(|n| n.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Renders a JSON-LD *value object* for a literal: `{"@value": …}` plus `@language` (for a
+/// language-tagged string) or `@type` (for any non-string datatype). `xsd:string` /
+/// `rdf:langString` stay implicit. `prefixes`, when `Some`, abbreviates the `@type` IRI.
+fn write_jsonld_literal(lit: &oxrdf::Literal, prefixes: Option<&Prefixes>, out: &mut String) {
+    let dt = lit.datatype().as_str();
+    // Native coercion only in the absence of a language tag and only when canonical.
+    if lit.language().is_none() {
+        if let Some(native) = coerce_native(lit.value(), dt) {
+            out.push_str("{\"@value\":");
+            out.push_str(&native);
+            out.push('}');
+            return;
+        }
+    }
+    out.push_str("{\"@value\":");
+    json_str(lit.value(), out);
+    if let Some(lang) = lit.language() {
+        out.push_str(",\"@language\":");
+        json_str(lang, out);
+    } else if dt != format!("{XSD}string") && dt != RDF_LANG_STRING {
+        out.push_str(",\"@type\":");
+        write_jsonld_iri_value(dt, prefixes, out);
+    }
+    out.push('}');
+}
+
+/// Writes an IRI as a JSON string, compacted to `prefix:local` when a prefix map is supplied
+/// and a registered namespace splits cleanly; otherwise the full IRI. Used for `@id` / `@type`
+/// values and node keys (predicates) in the compacted form.
+fn write_jsonld_iri_value(iri: &str, prefixes: Option<&Prefixes>, out: &mut String) {
+    if let Some(pfx) = prefixes {
+        if let Some(curie) = compact_iri(iri, pfx) {
+            json_str(&curie, out);
+            return;
+        }
+    }
+    json_str(iri, out);
+}
+
+/// Best-effort `prefix:local` compaction sharing the Turtle writer's correctness rule
+/// (`is_simple_pn_local`, longest namespace wins). `None` when no prefix applies — the caller
+/// keeps the full IRI. Never produces an ambiguous/lossy CURIE.
+fn compact_iri(iri: &str, prefixes: &Prefixes) -> Option<String> {
+    let mut best: Option<(&str, &str)> = None;
+    for (pfx, ns) in prefixes {
+        if let Some(local) = iri.strip_prefix(ns.as_str()) {
+            if is_simple_pn_local(local) && !local.is_empty() {
+                match best {
+                    Some((_, bns)) if bns.len() >= ns.len() => {}
+                    _ => best = Some((pfx.as_str(), local)),
+                }
+            }
+        }
+    }
+    best.map(|(pfx, local)| format!("{pfx}:{local}"))
+}
+
+/// A node object accumulated for one subject within one graph: its `@type` IRIs (from
+/// `rdf:type`) and its other predicate→object lists, both in first-seen order.
+struct JsonLdNode {
+    /// `rdf:type` objects (rendered under the `@type` keyword). IRIs only.
+    types: Vec<String>,
+    /// Predicate IRIs in first-seen order (excluding `rdf:type`).
+    pred_order: Vec<String>,
+    /// Predicate IRI → its object terms in input order.
+    preds: std::collections::HashMap<String, Vec<Term>>,
+}
+
+/// Groups a graph's triples into per-subject node objects, subjects in first-seen order.
+fn group_nodes(triples: &[Triple]) -> (Vec<NamedOrBlankNode>, Vec<JsonLdNode>) {
+    let mut order: Vec<NamedOrBlankNode> = Vec::new();
+    let mut slot: std::collections::HashMap<NamedOrBlankNode, usize> =
+        std::collections::HashMap::new();
+    let mut nodes: Vec<JsonLdNode> = Vec::new();
+    for t in triples {
+        let s = t.subject.clone();
+        let i = *slot.entry(s.clone()).or_insert_with(|| {
+            order.push(s.clone());
+            nodes.push(JsonLdNode {
+                types: Vec::new(),
+                pred_order: Vec::new(),
+                preds: std::collections::HashMap::new(),
+            });
+            nodes.len() - 1
+        });
+        let node = &mut nodes[i];
+        if t.predicate.as_str() == RDF_TYPE {
+            if let Term::NamedNode(n) = &t.object {
+                node.types.push(n.as_str().to_string());
+                continue;
+            }
+            // A non-IRI rdf:type object is unusual but legal RDF — fall through and keep it
+            // as an ordinary predicate so nothing is dropped.
+        }
+        let p = t.predicate.as_str().to_string();
+        if !node.preds.contains_key(&p) {
+            node.pred_order.push(p.clone());
+        }
+        node.preds.entry(p).or_default().push(t.object.clone());
+    }
+    (order, nodes)
+}
+
+/// Writes the `@id` of a subject/graph-name node as a JSON string (IRI compacted if a prefix
+/// map is supplied; blank nodes keep their `_:label`).
+fn write_node_id(subj: &NamedOrBlankNode, prefixes: Option<&Prefixes>, out: &mut String) {
+    match subj {
+        NamedOrBlankNode::NamedNode(n) => write_jsonld_iri_value(n.as_str(), prefixes, out),
+        NamedOrBlankNode::BlankNode(b) => {
+            let mut s = String::from("_:");
+            s.push_str(b.as_str());
+            json_str(&s, out);
+        }
+    }
+}
+
+/// Writes one object term as JSON-LD: an IRI/blank node as `{"@id": …}`, a literal as a value
+/// object, an RDF 1.2 triple term as nested expanded JSON-LD (round-trippable). Blank node ids
+/// keep the `_:` form so they re-parse to the same node.
+fn write_jsonld_object(term: &Term, prefixes: Option<&Prefixes>, out: &mut String) {
+    match term {
+        Term::NamedNode(n) => {
+            out.push_str("{\"@id\":");
+            write_jsonld_iri_value(n.as_str(), prefixes, out);
+            out.push('}');
+        }
+        Term::BlankNode(b) => {
+            let mut s = String::from("_:");
+            s.push_str(b.as_str());
+            out.push_str("{\"@id\":");
+            json_str(&s, out);
+            out.push('}');
+        }
+        Term::Literal(l) => write_jsonld_literal(l, prefixes, out),
+        Term::Triple(t) => {
+            // RDF 1.2 triple terms have no standard JSON-LD 1.1 encoding. To avoid silently
+            // dropping the value we emit the canonical N-Triples triple-term form
+            // (`<<( s p o )>>`, exactly what oxrdf's `Display` and the Turtle/N-Triples
+            // parsers use) as a plain `@id` string. A generic JSON-LD processor treats it as
+            // an opaque IRI-shaped id; sparq's own round-trip reader recognises it. The value
+            // is preserved verbatim either way.
+            out.push_str("{\"@id\":");
+            let mut nt = String::new();
+            let _ = write!(nt, "{}", Term::Triple(t.clone()));
+            json_str(&nt, out);
+            out.push('}');
+        }
+    }
+}
+
+/// Emits the predicate→objects map of a node as JSON members (the `@type` keyword first when
+/// present), reusing input order. Returns whether anything was written before this call's
+/// members (so the caller manages the leading comma).
+fn write_node_members(node: &JsonLdNode, prefixes: Option<&Prefixes>, out: &mut String) {
+    let mut first = true;
+    if !node.types.is_empty() {
+        first = false;
+        out.push_str("\"@type\":[");
+        for (i, t) in node.types.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            write_jsonld_iri_value(t, prefixes, out);
+        }
+        out.push(']');
+    }
+    for p in &node.pred_order {
+        if first {
+            first = false;
+        } else {
+            out.push(',');
+        }
+        // Predicate key: full IRI (expanded/flattened) or compacted CURIE (compacted form).
+        if let Some(pfx) = prefixes {
+            if let Some(curie) = compact_iri(p, pfx) {
+                json_str(&curie, out);
+            } else {
+                json_str(p, out);
+            }
+        } else {
+            json_str(p, out);
+        }
+        out.push(':');
+        out.push('[');
+        for (i, o) in node.preds[p].iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            write_jsonld_object(o, prefixes, out);
+        }
+        out.push(']');
+    }
+}
+
+/// Serializes one graph (already grouped) as a JSON array of node objects into `out`. Shared by
+/// every form — the difference between forms is the `@context`/`@graph` framing the callers add.
+fn write_node_array(triples: &[Triple], prefixes: Option<&Prefixes>, out: &mut String) {
+    let (order, nodes) = group_nodes(triples);
+    out.push('[');
+    for (i, subj) in order.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"@id\":");
+        write_node_id(subj, prefixes, out);
+        // `@type` / predicate members (each prefixed by a comma inside write_node_members).
+        let mut members = String::new();
+        write_node_members(&nodes[i], prefixes, &mut members);
+        if !members.is_empty() {
+            out.push(',');
+            out.push_str(&members);
+        }
+        out.push('}');
+    }
+    out.push(']');
+}
+
+/// Writes the `@context` object mapping each prefix to its namespace IRI (compacted form only).
+/// Only prefixes that actually abbreviate at least one IRI in the dataset are emitted, so the
+/// context never carries dead declarations.
+fn write_context(all: &[Triple], prefixes: &Prefixes, out: &mut String) {
+    let mut used: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut note = |iri: &str| {
+        if let Some(curie) = compact_iri(iri, prefixes) {
+            if let Some((pfx, _)) = curie.split_once(':') {
+                if let Some((k, _)) = prefixes.get_key_value(pfx) {
+                    used.insert(k.as_str());
+                }
+            }
+        }
+    };
+    for t in all {
+        collect_iris(&Term::from(t.subject.clone()), &mut note);
+        note(t.predicate.as_str());
+        collect_iris(&t.object, &mut note);
+    }
+    out.push('{');
+    for (i, pfx) in used.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        json_str(pfx, out);
+        out.push(':');
+        json_str(&prefixes[*pfx], out);
+    }
+    out.push('}');
+}
+
+/// Serializes an RDF dataset (default + named graphs) as a JSON-LD 1.1 document in `form`.
+///
+/// * **Default graph only** (no named graphs) → a bare node-object array (expanded /
+///   flattened), or a `{"@context": …, "@graph": [ … ]}` object (compacted).
+/// * **With named graphs** → a top-level object whose `@graph` holds the default graph's nodes
+///   plus one `{"@id": <g>, "@graph": [ … ]}` entry per named graph (the standard JSON-LD
+///   dataset shape), wrapped under `@context` for the compacted form.
+///
+/// `prefixes` is consulted only for [`JsonLdForm::Compacted`]; the expanded/flattened forms
+/// always emit full IRIs. Output is deterministic (subjects and predicates in first-seen order).
+pub fn write_jsonld(graphs: &[NamedGraph<'_>], form: JsonLdForm, prefixes: &Prefixes) -> String {
+    let pfx = (form == JsonLdForm::Compacted).then_some(prefixes);
+    let mut out = String::new();
+
+    let default_triples: &[Triple] = graphs
+        .iter()
+        .find(|(n, _)| n.is_none())
+        .map(|(_, ts)| *ts)
+        .unwrap_or(&[]);
+    let named: Vec<&NamedGraph<'_>> = graphs.iter().filter(|(n, _)| n.is_some()).collect();
+
+    // A bare array is only valid for the *expanded* form when there are no named graphs.
+    // Compacted always needs the wrapping object to carry the `@context`; flattened is, per
+    // the JSON-LD 1.1 flattening algorithm, always a node-map object keyed by `@graph` (so a
+    // single-graph document still gets the `{"@graph": […]}` envelope).
+    let needs_graph_object =
+        !named.is_empty() || form == JsonLdForm::Compacted || form == JsonLdForm::Flattened;
+
+    if !needs_graph_object {
+        write_node_array(default_triples, pfx, &mut out);
+        return out;
+    }
+
+    // Object form: optional @context, then @graph (default-graph nodes + per-named-graph
+    // sub-objects).
+    out.push('{');
+    if form == JsonLdForm::Compacted {
+        let all: Vec<Triple> = graphs
+            .iter()
+            .flat_map(|(_, ts)| ts.iter().cloned())
+            .collect();
+        out.push_str("\"@context\":");
+        write_context(&all, prefixes, &mut out);
+        out.push(',');
+    }
+    out.push_str("\"@graph\":[");
+    // Default-graph node objects, spliced in directly (strip the array brackets).
+    let mut default_arr = String::new();
+    write_node_array(default_triples, pfx, &mut default_arr);
+    let inner = &default_arr[1..default_arr.len() - 1];
+    out.push_str(inner);
+    let mut wrote = !inner.is_empty();
+    for (name, ts) in named {
+        let g = name.as_ref().expect("named graph has a name");
+        if wrote {
+            out.push(',');
+        }
+        wrote = true;
+        out.push_str("{\"@id\":");
+        // A graph name is an IRI or blank node (a literal/triple-term name is not legal RDF;
+        // emit its canonical string so nothing is lost rather than corrupting structure).
+        match g {
+            Term::NamedNode(n) => write_jsonld_iri_value(n.as_str(), pfx, &mut out),
+            Term::BlankNode(b) => {
+                let mut s = String::from("_:");
+                s.push_str(b.as_str());
+                json_str(&s, &mut out);
+            }
+            other => {
+                let mut s = String::new();
+                let _ = write!(s, "{other}");
+                json_str(&s, &mut out);
+            }
+        }
+        out.push_str(",\"@graph\":");
+        write_node_array(ts, pfx, &mut out);
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
+}
+
+/// Serializes a [`Graph`] (default + named graphs) as JSON-LD 1.1 in `form`, using the
+/// [`default_prefixes`] for the compacted form's `@context`. The expanded and flattened forms
+/// ignore the prefix map.
+pub fn graph_to_jsonld(graph: &Graph, form: JsonLdForm) -> String {
+    graph_to_jsonld_with(graph, form, &default_prefixes())
+}
+
+/// [`graph_to_jsonld`] with a caller-supplied prefix map for the compacted `@context`.
+pub fn graph_to_jsonld_with(graph: &Graph, form: JsonLdForm, prefixes: &Prefixes) -> String {
+    let owned = dataset_graphs(graph);
+    let view: Vec<NamedGraph<'_>> = owned
+        .iter()
+        .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+        .collect();
+    write_jsonld(&view, form, prefixes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,5 +1217,406 @@ mod tests {
         let ttl = graph_to_turtle(&g);
         let g2 = Graph::load_str(&ttl, "turtle").unwrap();
         assert_eq!(nt_sorted(&g), nt_sorted(&g2));
+    }
+
+    // =======================================================================
+    // JSON-LD round-trip: serialize -> JSON-LD-to-N-Quads -> Graph -> isomorphic.
+    //
+    // sparq-core has no JSON-LD parser, so the round-trip is closed by a focused
+    // in-test reader: it parses the document with serde_json (a dev-dependency), runs
+    // the standard JSON-LD-to-RDF mapping over the node objects (expanding any
+    // `@context` prefixes), and emits N-Quads — which the existing dataset loader then
+    // ingests. Reconstructing the *same* triple set across all three forms (expanded /
+    // flattened / compacted) for IRIs, blank nodes, datatypes, language tags, named
+    // graphs and native-coerced scalars proves the writer is lossless.
+    // =======================================================================
+
+    use serde_json::Value;
+
+    /// Expands a possibly-compacted IRI/term using the document's `@context` prefix map.
+    /// A `prefix:local` whose prefix is declared expands to `namespace + local`; everything
+    /// else (full IRIs, blank-node ids, keywords) passes through.
+    fn expand_iri(s: &str, ctx: &std::collections::HashMap<String, String>) -> String {
+        if s.starts_with("_:") || s.starts_with("@") || s.starts_with("http") {
+            return s.to_string();
+        }
+        if let Some((pfx, local)) = s.split_once(':') {
+            if let Some(ns) = ctx.get(pfx) {
+                return format!("{ns}{local}");
+            }
+        }
+        s.to_string()
+    }
+
+    /// N-Triples term text for a subject/object id (IRI -> `<iri>`, blank -> `_:label`).
+    fn id_term(id: &str) -> String {
+        if let Some(b) = id.strip_prefix("_:") {
+            format!("_:{b}")
+        } else {
+            format!("<{id}>")
+        }
+    }
+
+    /// Emits the N-Triples object text for a JSON-LD object value (a `@value` literal or an
+    /// `@id` reference), expanding any compacted `@type` IRI via `ctx`.
+    fn object_to_nt(v: &Value, ctx: &std::collections::HashMap<String, String>) -> String {
+        let obj = v.as_object().expect("object value is a JSON object");
+        if let Some(val) = obj.get("@value") {
+            // Native scalar or string. Reconstruct the canonical lexical form + datatype.
+            let (lex, dt) = match val {
+                Value::Bool(b) => (
+                    b.to_string(),
+                    Some("http://www.w3.org/2001/XMLSchema#boolean".to_string()),
+                ),
+                Value::Number(n) if n.is_i64() || n.is_u64() => (
+                    n.to_string(),
+                    Some("http://www.w3.org/2001/XMLSchema#integer".to_string()),
+                ),
+                Value::String(s) => (s.clone(), None),
+                other => panic!("unexpected @value scalar: {other}"),
+            };
+            // Escape the lexical value back to N-Triples form.
+            let mut esc = String::new();
+            for c in lex.chars() {
+                match c {
+                    '"' => esc.push_str("\\\""),
+                    '\\' => esc.push_str("\\\\"),
+                    '\n' => esc.push_str("\\n"),
+                    '\r' => esc.push_str("\\r"),
+                    _ => esc.push(c),
+                }
+            }
+            if let Some(lang) = obj.get("@language").and_then(|l| l.as_str()) {
+                return format!("\"{esc}\"@{lang}");
+            }
+            let dt = obj
+                .get("@type")
+                .and_then(|t| t.as_str())
+                .map(|t| expand_iri(t, ctx))
+                .or(dt);
+            return match dt {
+                Some(d) => format!("\"{esc}\"^^<{d}>"),
+                None => format!("\"{esc}\""),
+            };
+        }
+        // An `@id` reference.
+        let id = obj
+            .get("@id")
+            .and_then(|i| i.as_str())
+            .expect("@id present");
+        let id = expand_iri(id, ctx);
+        // A triple-term `@id` (our `<<( … )>>` encoding) is already canonical N-Triples text.
+        if id.starts_with("<<(") {
+            id
+        } else {
+            id_term(&id)
+        }
+    }
+
+    /// Reads one node object into N-Quads lines (with the given graph column, empty for the
+    /// default graph), expanding `@type` -> rdf:type and every predicate's object list.
+    fn node_to_nquads(
+        node: &serde_json::Map<String, Value>,
+        graph: &str,
+        ctx: &std::collections::HashMap<String, String>,
+        out: &mut String,
+    ) {
+        let subj = node
+            .get("@id")
+            .and_then(|i| i.as_str())
+            .map(|s| id_term(&expand_iri(s, ctx)))
+            .expect("node has @id");
+        for (k, v) in node {
+            if k == "@id" || k == "@graph" {
+                continue;
+            }
+            if k == "@type" {
+                for t in v.as_array().expect("@type is an array") {
+                    let ty = expand_iri(t.as_str().expect("@type IRI"), ctx);
+                    let _ = writeln!(
+                        out,
+                        "{subj} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{ty}> {graph}."
+                    );
+                }
+                continue;
+            }
+            let pred = expand_iri(k, ctx);
+            for o in v.as_array().expect("predicate value is an array") {
+                let obj = object_to_nt(o, ctx);
+                let _ = writeln!(out, "{subj} <{pred}> {obj} {graph}.");
+            }
+        }
+    }
+
+    /// Full JSON-LD-to-N-Quads for any document our writer emits (bare array, or an object with
+    /// optional `@context` and a `@graph` holding default-graph nodes + per-named-graph objects).
+    fn jsonld_to_nquads(doc: &str) -> String {
+        let v: Value = serde_json::from_str(doc).expect("valid JSON");
+        let mut ctx: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut out = String::new();
+
+        let nodes: &Vec<Value> = match &v {
+            Value::Array(a) => a,
+            Value::Object(o) => {
+                if let Some(Value::Object(c)) = o.get("@context") {
+                    for (k, val) in c {
+                        if let Some(ns) = val.as_str() {
+                            ctx.insert(k.clone(), ns.to_string());
+                        }
+                    }
+                }
+                o.get("@graph")
+                    .and_then(|g| g.as_array())
+                    .expect("@graph array")
+            }
+            other => panic!("unexpected top-level JSON-LD: {other}"),
+        };
+
+        for n in nodes {
+            let node = n.as_object().expect("node object");
+            if let Some(inner) = node.get("@graph").and_then(|g| g.as_array()) {
+                // A named-graph sub-object: `{"@id": <g>, "@graph": [ … ]}`.
+                let gid = node
+                    .get("@id")
+                    .and_then(|i| i.as_str())
+                    .map(|s| id_term(&expand_iri(s, &ctx)))
+                    .expect("named graph @id");
+                for sub in inner {
+                    node_to_nquads(
+                        sub.as_object().expect("node"),
+                        &format!("{gid} "),
+                        &ctx,
+                        &mut out,
+                    );
+                }
+            } else {
+                node_to_nquads(node, "", &ctx, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Asserts a graph survives a round-trip through all three JSON-LD forms.
+    fn assert_jsonld_iso(g0: &Graph) {
+        for form in [
+            JsonLdForm::Expanded,
+            JsonLdForm::Flattened,
+            JsonLdForm::Compacted,
+        ] {
+            let doc = graph_to_jsonld(g0, form);
+            // The document must be syntactically valid JSON.
+            let _: Value = serde_json::from_str(&doc)
+                .unwrap_or_else(|e| panic!("{form:?} produced invalid JSON: {e}\n{doc}"));
+            let nq = jsonld_to_nquads(&doc);
+            let g1 = Graph::load_dataset(&nq, "nquads").unwrap_or_else(|e| {
+                panic!("{form:?} re-parse failed: {e}\n--- doc ---\n{doc}\n--- nq ---\n{nq}")
+            });
+            assert_eq!(
+                nt_sorted(g0),
+                nt_sorted(&g1),
+                "{form:?} default-graph round-trip\n--- doc ---\n{doc}\n--- nq ---\n{nq}"
+            );
+            assert_eq!(
+                g0.named.len(),
+                g1.named.len(),
+                "{form:?} named graph count\n{doc}"
+            );
+            for (name, ag) in &g0.named {
+                let bg = g1
+                    .named
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, g)| g)
+                    .unwrap_or_else(|| panic!("{form:?} named graph {name} missing\n{doc}"));
+                assert_eq!(
+                    nt_sorted(ag),
+                    nt_sorted(bg),
+                    "{form:?} named graph {name}\n{doc}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jsonld_roundtrip_basic() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:alice a ex:Person ; ex:knows ex:bob ; ex:name "Alice" .
+               ex:bob ex:name "Bob" ."#,
+            "turtle",
+        )
+        .unwrap();
+        assert_jsonld_iso(&g);
+    }
+
+    #[test]
+    fn jsonld_roundtrip_blank_nodes() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:alice ex:knows [ ex:name "anon" ] .
+               _:shared ex:p ex:o . _:shared ex:q "v" ."#,
+            "turtle",
+        )
+        .unwrap();
+        assert_jsonld_iso(&g);
+    }
+
+    #[test]
+    fn jsonld_roundtrip_datatypes_and_langtags() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+               ex:s ex:label "chat"@fr ; ex:label "hello"@en ;
+                    ex:n "42"^^xsd:integer ; ex:flag "true"^^xsd:boolean ;
+                    ex:d "1.5"^^xsd:double ; ex:when "2020-01-01"^^xsd:date ;
+                    ex:plain "just a string" ;
+                    ex:notcanon "007"^^xsd:integer ; ex:zero "0"^^xsd:boolean ."#,
+            "turtle",
+        )
+        .unwrap();
+        assert_jsonld_iso(&g);
+    }
+
+    #[test]
+    fn jsonld_roundtrip_escapes() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:p "line1\nline2\ttab\r\"quoted\" and \\ backslash" ;
+                    ex:q "" ; ex:u "café ☃" ."#,
+            "turtle",
+        )
+        .unwrap();
+        assert_jsonld_iso(&g);
+    }
+
+    #[test]
+    fn jsonld_roundtrip_named_graphs() {
+        let g = Graph::load_dataset(
+            r#"@prefix ex: <http://ex/> .
+               ex:a ex:p ex:b .
+               GRAPH ex:g1 { ex:x ex:y ex:z . ex:x ex:k "in g1" . }
+               GRAPH ex:g2 { ex:m ex:n "lit"@en . }
+               GRAPH _:bg { ex:bn ex:p ex:q . }"#,
+            "trig",
+        )
+        .unwrap();
+        assert_jsonld_iso(&g);
+    }
+
+    #[test]
+    fn jsonld_native_coercion_only_when_canonical() {
+        // Canonical integer/boolean -> native JSON scalar; non-canonical -> typed string.
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+               ex:s ex:i "42"^^xsd:integer ; ex:b "true"^^xsd:boolean ;
+                    ex:lead "007"^^xsd:integer ; ex:bzero "0"^^xsd:boolean ;
+                    ex:dec "1.50"^^xsd:decimal ."#,
+            "turtle",
+        )
+        .unwrap();
+        let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        // Canonical 42 / true become bare JSON scalars (no quotes around the value).
+        assert!(
+            doc.contains("{\"@value\":42}"),
+            "canonical int -> native:\n{doc}"
+        );
+        assert!(
+            doc.contains("{\"@value\":true}"),
+            "canonical bool -> native:\n{doc}"
+        );
+        // Leading-zero integer and non-`true`/`false` boolean stay typed strings.
+        assert!(
+            doc.contains("\"@value\":\"007\""),
+            "leading-zero int stays string:\n{doc}"
+        );
+        assert!(
+            doc.contains("\"@value\":\"0\""),
+            "non-canonical bool stays string:\n{doc}"
+        );
+        // Decimal is never coerced (JSON number form would diverge from the RDF lexical).
+        assert!(
+            doc.contains("\"@value\":\"1.50\""),
+            "decimal stays string:\n{doc}"
+        );
+        assert_jsonld_iso(&g);
+    }
+
+    #[test]
+    fn jsonld_expanded_is_bare_array_compacted_has_context() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> . ex:s a ex:T ; ex:p ex:o ."#,
+            "turtle",
+        )
+        .unwrap();
+        let exp = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        assert!(
+            exp.trim_start().starts_with('['),
+            "expanded is a bare array:\n{exp}"
+        );
+        // Expanded uses full IRIs, no @context.
+        assert!(
+            !exp.contains("@context"),
+            "expanded has no @context:\n{exp}"
+        );
+        assert!(
+            exp.contains("\"http://ex/p\""),
+            "expanded predicate is a full IRI:\n{exp}"
+        );
+
+        let comp = graph_to_jsonld(&g, JsonLdForm::Compacted);
+        assert!(
+            comp.contains("\"@context\""),
+            "compacted has @context:\n{comp}"
+        );
+        // schema/foaf etc. unused -> not in context; ex is not a default prefix, so the
+        // compacted form still uses full IRIs for ex: (no prefix declared for it).
+        let flat = graph_to_jsonld(&g, JsonLdForm::Flattened);
+        assert!(
+            flat.contains("\"@graph\""),
+            "flattened wraps in @graph:\n{flat}"
+        );
+    }
+
+    #[test]
+    fn jsonld_compacted_uses_known_prefixes() {
+        // rdf:/rdfs:/foaf: are in default_prefixes, so the compacted form abbreviates them.
+        let g = Graph::load_str(
+            r#"<http://ex/s> a <http://xmlns.com/foaf/0.1/Person> ;
+                 <http://xmlns.com/foaf/0.1/name> "Bob" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let comp = graph_to_jsonld(&g, JsonLdForm::Compacted);
+        assert!(
+            comp.contains("\"foaf\":\"http://xmlns.com/foaf/0.1/\""),
+            "foaf in context:\n{comp}"
+        );
+        assert!(
+            comp.contains("\"foaf:name\""),
+            "predicate compacted:\n{comp}"
+        );
+        assert!(comp.contains("\"foaf:Person\""), "@type compacted:\n{comp}");
+        assert_jsonld_iso(&g);
+    }
+
+    #[test]
+    fn jsonld_empty_graph() {
+        let g = Graph::load_str("", "turtle").unwrap();
+        // Expanded empty default graph -> empty array.
+        assert_eq!(graph_to_jsonld(&g, JsonLdForm::Expanded), "[]");
+        // Round-trips (vacuously).
+        assert_jsonld_iso(&g);
+    }
+
+    #[test]
+    fn jsonld_roundtrip_rdf12_triple_term() {
+        let g = Graph::load_str(
+            r#"<http://ex/r> <http://ex/reifies> <<( <http://ex/a> <http://ex/b> "v" )>> .
+               <http://ex/r> <http://ex/note> "plain" ."#,
+            "turtle",
+        )
+        .unwrap();
+        assert_jsonld_iso(&g);
     }
 }

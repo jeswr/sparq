@@ -1807,20 +1807,17 @@ impl Dict {
     }
 
     /// [OPUS-4.8] (sq-hxgb) Whether this dict stores any RDF 1.2 triple term
-    /// (`Stored::Triple`). The parallel N-Triples loader checks each parsed PARTIAL with
-    /// this to pick the merge path: the SHARDED merge cannot consolidate triple terms
-    /// (a triple's components are both hash-routed to a shard AND referenced by the
-    /// triple, breaking the term↔id bijection on merge — see `intern_partials`), so a
-    /// document that contains any triple term falls back to the serial `merge_remap`,
-    /// which interns triple terms structurally and correctly. Arena-mode (partial) dicts
-    /// only — that is all the loader ever inspects here.
+    /// (`Stored::Triple`), used to GUARD a path that cannot represent them.
     //
-    // [OPUS-4.8] (sq-qmth) Gated on `parallel`: the only callers are the parallel
-    // N-Triples loader (`parse_ntriples_parallel`) and the external-build triple-term
-    // guard, both `#[cfg(feature = "parallel")]`. Without this gate the method is dead
-    // code on the wasm build (no `parallel` feature), which the wasm32 `clippy -D warnings`
-    // job promotes to a hard error (`-D dead-code`).
-    #[cfg(feature = "parallel")]
+    // [OPUS-4.8] (sq-87bq) Since the sharded in-RAM/external merge gained structural
+    // triple-term support (sq-t3rt) and the in-memory `merge_partials` serial-fallback guard
+    // was removed, the SOLE remaining caller is the DICT-SPILL external builder's rejection
+    // (`reject_triple_terms_in_external_build`, `#[cfg(feature = "dict-spill")]`), whose
+    // content-only on-disk term records still cannot encode a triple term (tracked as sq-jvbr).
+    // Gated to `dict-spill` so the method is not dead code on the default / wasm builds, which
+    // `clippy -D warnings` (`-D dead-code`) would otherwise reject. (`any_triple_terms`, the
+    // implementation, stays ungated — `intern_partials` uses it on every build.)
+    #[cfg(feature = "dict-spill")]
     pub(crate) fn has_triple_terms(&self) -> bool {
         self.any_triple_terms()
     }
@@ -2189,7 +2186,13 @@ impl ShardedDict {
         // written afterwards by the serial pass, never concurrently.)
         #[derive(Clone, Copy)]
         struct SlotPtr(*mut Id, usize);
+        // SAFETY: `SlotPtr` (a `*mut Id`) only ever touches its own disjoint slot — the
+        // hash routing above assigns each (pidx, i) leaf slot to exactly one shard, so the
+        // raw-pointer handle can be sent/shared across the parallel scatter without
+        // aliasing; no reads happen until the parallel scope ends. [OPUS-4.8 sq-8wbn]
         unsafe impl Send for SlotPtr {}
+        // SAFETY: shared read of a `Copy` raw-pointer handle; the writes it performs are
+        // disjoint by the hash routing above (see the `Send` argument). [OPUS-4.8 sq-8wbn]
         unsafe impl Sync for SlotPtr {}
         let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| SlotPtr(v.as_mut_ptr(), v.len())).collect();
 

@@ -15,7 +15,6 @@ maturity/nice-to-have.
 
 | ID | Gap | Sev | CIS mapping | Remediation | Bead |
 |---|---|---|---|---|---|
-| **GX-12** | **No container-image vulnerability scan + no Dockerfile linter in CI.** The image is hardened and digest-pinned, and `docker-smoke` proves it *boots*, but no Trivy/Grype scans the built image for OS-layer CVEs and no Dockle/Hadolint lints the `Dockerfile` against the CIS Docker Benchmark. Verified absent (E-1). | **P1** | Docker Bench **§4.4**; CIS v8 **7.5/7.6** (image-OS half), **4.x** (artifact secure-config assurance), **16.x** (app-sec). | Add a PR-triggered CI job (so the `ci-summary` aggregator auto-discovers + gates it): (1) build the image, run **Trivy** (or Grype) image scan, fail on *fixable* HIGH/CRITICAL with a checked-in `.trivyignore` allowlist for triaged/non-applicable CVEs (VEX-aligned with the supply-chain slice); (2) run **Dockle**/**Hadolint** to assert non-root USER, pinned base, no secrets, COPY-not-ADD, minimal layers; (3) upload SARIF to code-scanning. Keep distroless → expect a small, mostly-glibc CVE surface; the allowlist documents each accepted item. | **sq-toze.31** |
 | **GX-13** | **No `HEALTHCHECK` instruction in the `Dockerfile`.** The server exposes `/health` (curled by `docker-smoke.sh`) but the image does not self-declare a healthcheck, so a bare `docker run` cannot report unhealthy-but-running. | **P3** (minor) | Docker Bench **§4.6**. | Add `HEALTHCHECK` against `127.0.0.1:3030/health`. **Constraint:** distroless has *no shell and no `wget`/`curl`*, so the check cannot be a shell command — it needs either a tiny static probe binary `COPY`d in or a `sparq-server --health-probe` subcommand invoked in exec-form. Track the small server addition in the bead. Orchestrators (k8s) typically use their own probes and ignore the image HEALTHCHECK, hence P3. | **sq-toze.36** |
 
 ## Explicitly NOT gaps (architectural decisions / operator responsibility)
@@ -50,10 +49,30 @@ These are **not** CIS-owned; they back CIS rows and are already closed/tracked e
 - **GX-3** (RFC 9116 `.well-known/security.txt`) — backs C-7.1. Closed (`sq-toze.4`).
 - **GX-7** (cargo-auditable + cargo-vet) — backs D-4.11 + C-2.6/16.11. Closed (`sq-toze.8`).
 
+## Addressed (closed by this slice)
+
+- **GX-12** (container-image vuln scan + Dockerfile linter) — **ADDRESSED** (`sq-toze.31`,
+  `.github/workflows/container-scan.yml`). The lane GATES via the `ci-summary` aggregator:
+  `hadolint` lints the `Dockerfile` against the CIS Docker Benchmark (config `.hadolint.yaml`,
+  `failure-threshold: warning`; the one finding — DL3059, info-level intentional RUN layering —
+  is waived by rule code with a documented reason), and `trivy` builds the server image and scans
+  its OS+library layers, failing on **fixable HIGH/CRITICAL** (`ignore-unfixed`), with a checked-in
+  `.trivyignore` allowlist and a SARIF upload to code-scanning.
+  Runs on PRs touching the image, on push-to-main, in the merge queue, and weekly to re-scan the
+  unchanged base. Covers Docker Bench **§4.4** and the image-OS half of CIS v8 **7.5/7.6**.
+  The `.trivyignore` allowlist carries the **unfixable** distroless-base OS CVEs (16 glibc/libssl
+  findings, all LOW/MEDIUM with no Debian-12 fix and non-reachable in sparq-server's code path —
+  each justified per-line in the file; `chore-codescanning-triage`, [OPUS-4.8]); these are the only
+  Trivy code-scanning alerts and are now suppressed at scan time so they no longer report. NO
+  fixable HIGH/CRITICAL is silenced — the honesty rule still holds.
+  All third-party actions SHA-pinned. *(Trivy/Hadolint were not run end-to-end locally — no docker
+  daemon in the authoring env — but hadolint ran clean against the real Dockerfile with the config,
+  and actionlint passed; CI is the canonical run.)*
+
 ## Honesty statement
 
-The CIS slice has **exactly one P1 technical gap** (GX-12, the missing image-CVE-scan + Dockerfile
-linter) and one P3 minor gap (GX-13, HEALTHCHECK). The `Dockerfile` hardening itself is verified
-PASS against the actual file; the gaps are *automated scanning/linting* coverage, not a hardening
-deficiency. Nothing here is satisfied by the ZK/MPC estate, and no CIS claim contradicts the
-documented "v1 ZK verifier NOT sound" verdict.
+The CIS slice has **no remaining P1 technical gap** — GX-12 (image-CVE-scan + Dockerfile linter) is
+now addressed (see above) — leaving one P3 minor gap (GX-13, HEALTHCHECK). The `Dockerfile`
+hardening itself is verified PASS against the actual file; the closed gap was *automated
+scanning/linting* coverage, not a hardening deficiency. Nothing here is satisfied by the ZK/MPC
+estate, and no CIS claim contradicts the documented "v1 ZK verifier NOT sound" verdict.

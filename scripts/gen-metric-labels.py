@@ -522,6 +522,81 @@ def build():
         "mode": "deficit", "unit": "fixtures",
     }
 
+    # 14) ZERO-KNOWLEDGE family (sq dashboard-data-feed; ci-bench ZK hooks). EVERY ZK metric
+    # name leads with the token `zk` so the dashboard's Zero-knowledge family prefix routing
+    # buckets it. Three feeds, each grounded in an EXISTING bench (bench/benchmarks.toml zk-*):
+    #   - zk_compose_<member>_gates : DETERMINISTIC ultra_honk circuit gate counts harvested
+    #     from the committed bench/zk-compose/gate_counts_latest.json (members FIXED in
+    #     bench/zk-compose/scripts/gate_counts.sh). The headline ZK measurement.
+    #   - zk_canon_/zk_commit_<shape>_<n> : sparq-zk commitment-pipeline criterion MEANS (µs)
+    #     from bench/zk/benches/zk_throughput.rs (canon + end-to-end commit, shapes iri/bnode
+    #     at n=64/256/1024; commit also has leaves+fold/<n>; plus poseidon2 permutation/hash40).
+    #   - zk_trace_<n>entities_<shape>_<arm> : zk-trace per-operator capture overhead criterion
+    #     MEANS (µs) from bench/zk-trace/benches/trace_overhead.rs (8 plan shapes x traced/
+    #     untraced at n=100/1000 entities). Wall-clock; trend-only (advisory), never a gate.
+    # The metric STEMS here MUST match what scripts/ci-bench.sh emits (criterion path tokens)
+    # so the gen-metric-labels --check drift gate stays green.
+    ZK_GATE_MEMBERS = [
+        "scan_k1_n16_r4", "scan_k2_n16_r8", "scan_k2_n64_r8",
+        "filter_int_d1", "filter_int_d2", "filter_int_d4", "filter_f64",
+        "join_eq_na16_nb16",
+    ]
+    ZK_GATES_DS = "compiled Noir circuits (zk/compose, nargo compile --workspace); bb gates -s ultra_honk"
+    for m in ZK_GATE_MEMBERS:
+        labels["zk_compose_%s_gates" % m] = {
+            "label": "zk/compose %s — ultra_honk circuit gate count" % m,
+            "suite": "Zero-knowledge", "dataset": ZK_GATES_DS,
+            "query": "deterministic circuit_size (bb gates); smaller is better",
+            "mode": "gates", "unit": "gates",
+        }
+    ZK_COMMIT_DS = ("synthetic graph shapes generated in-bench (iri = all-ground; "
+                    "bnode = bnode chain), credential scale")
+    for n in (64, 256, 1024):
+        for shape in ("iri", "bnode"):
+            labels["zk_canon_%s_%d" % (shape, n)] = {
+                "label": "sparq-zk RDFC10 canon — %s graph, %d triples" % (shape, n),
+                "suite": "Zero-knowledge", "dataset": ZK_COMMIT_DS,
+                "query": "RDFC-1.0 canonicalisation (criterion mean)", "mode": "canon", "unit": "µs"}
+            labels["zk_commit_%s_%d" % (shape, n)] = {
+                "label": "sparq-zk end-to-end commit — %s graph, %d triples" % (shape, n),
+                "suite": "Zero-knowledge", "dataset": ZK_COMMIT_DS,
+                "query": "RDFC10 + leaf encode + Poseidon2 fold (criterion mean)",
+                "mode": "commit", "unit": "µs"}
+        labels["zk_commit_leaves_fold_%d" % n] = {
+            "label": "sparq-zk recommit (leaves+fold) — precomputed canon, %d triples" % n,
+            "suite": "Zero-knowledge", "dataset": ZK_COMMIT_DS,
+            "query": "leaf encode + Poseidon2 fold over precomputed canonical form (criterion mean)",
+            "mode": "commit", "unit": "µs"}
+    labels["zk_poseidon2_permutation"] = {
+        "label": "sparq-zk Poseidon2-BN254 permutation",
+        "suite": "Zero-knowledge", "dataset": "fixed 4-element BN254 state",
+        "query": "one Poseidon2 permutation (criterion mean)", "mode": "perm", "unit": "µs"}
+    labels["zk_poseidon2_hash40"] = {
+        "label": "sparq-zk Poseidon2-BN254 hash — 40 elements",
+        "suite": "Zero-knowledge", "dataset": "fixed 40-element input",
+        "query": "Poseidon2 sponge over 40 field elements (criterion mean)", "mode": "hash", "unit": "µs"}
+    ZK_TRACE_DS = ("synthetic social graph (WatDiv-flavoured, ~9 triples/entity), "
+                   "generated in-bench")
+    ZK_TRACE_SHAPES = {
+        "bgp_star": "BGP star join (age/name/city on ?s)",
+        "bgp_chain": "BGP chain join (follows then age)",
+        "bgp_triangle": "BGP triangle (3-way follows cycle)",
+        "filter": "BGP + numeric FILTER(?a > 50)",
+        "optional": "left join (OPTIONAL follows)",
+        "union": "UNION of two single-pattern arms",
+        "distinct": "DISTINCT projection over city",
+        "count": "COUNT aggregate over age",
+    }
+    for n in (100, 1000):
+        for shape, desc in ZK_TRACE_SHAPES.items():
+            for arm, arm_desc in (("traced", "recorder armed + drained (proving path)"),
+                                  ("untraced", "default execution (no recorder)")):
+                labels["zk_trace_%dentities_%s_%s_%d" % (n, shape, arm, n)] = {
+                    "label": "zk-trace %s — %s, %s, %d entities" % (shape, desc, arm, n),
+                    "suite": "Zero-knowledge", "dataset": ZK_TRACE_DS,
+                    "query": "%s; %s (criterion mean)" % (desc, arm_desc),
+                    "mode": arm, "unit": "µs"}
+
     return labels
 
 

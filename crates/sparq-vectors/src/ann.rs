@@ -220,6 +220,26 @@ impl VectorIndex {
             .collect()
     }
 
+    /// [OPUS-4.8] (sq-1wc1) **Predicate-constrained (filtered) top-`k`** over the HNSW index:
+    /// returns only neighbours whose id the `mask` permits (the candidate id-set a SPARQL BGP
+    /// selects). `instant-distance`'s adjacency is **not exposed**, so — unlike
+    /// [`DiskAnnIndex::nearest_filtered`](crate::DiskAnnIndex::nearest_filtered), which can do
+    /// predicate-agnostic graph traversal — the in-RAM HNSW cannot be walked with predicate-aware
+    /// acceptance. This therefore uses the **exact pre-filter** strategy (scan only the masked ids):
+    /// exact, and the right choice for a selective mask; for a broad mask over a large store prefer
+    /// the on-disk index's filtered traversal. Empty mask / all-zero query → no results.
+    #[cfg(feature = "filtered-ann")]
+    pub fn nearest_filtered(
+        &self,
+        query: &[f32],
+        mask: &crate::IdMask,
+        store: &VectorStore,
+        k: usize,
+    ) -> Vec<(Id, f32)> {
+        assert_eq!(query.len(), self.dim, "query dim {} != store dim {}", query.len(), self.dim);
+        crate::filter::nearest_exact_filtered(store, query, mask, k)
+    }
+
     /// [OPUS-4.8] (sq-32i5) [`nearest_term`](Self::nearest_term) with the staleness check: returns
     /// `Err` if `store` was built against a different graph generation than `graph` (which would
     /// otherwise return silently-wrong neighbours), else `Ok` with the neighbours. The HNSW index

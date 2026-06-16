@@ -25,7 +25,7 @@ Read [`skills/SKILL.md`](skills/SKILL.md) first — it is the router skill that 
 - [`skills/javascript-wasm/SKILL.md`](skills/javascript-wasm/SKILL.md) — the `@jeswr/sparq` npm package.
 - [`skills/python/SKILL.md`](skills/python/SKILL.md) — the `sparq` Python package.
 
-The capability surfaces (reasoning, SHACL, full-text, vector, GeoSPARQL, streaming RSP-QL, ZK query proofs, MPC, GenAI retrieval) each have their own `skills/<surface>/SKILL.md` — the router in [`skills/SKILL.md`](skills/SKILL.md) enumerates them.
+The capability surfaces (reasoning, SHACL, full-text, vector, GeoSPARQL, streaming RSP-QL, RDFC-1.0 dataset canonicalization, ZK query proofs, MPC, GenAI retrieval) each have their own `skills/<surface>/SKILL.md` — the router in [`skills/SKILL.md`](skills/SKILL.md) enumerates them.
 
 If your agent runtime supports the Agent Skills standard, these load via progressive disclosure (name+description first, body on demand). If not, just read the SKILL.md files directly.
 
@@ -36,7 +36,7 @@ If your agent runtime supports the Agent Skills standard, these load via progres
 - Build: `cargo build --workspace`. Test: `cargo test --workspace`.
 - Lint is enforcing (CI gates on it): `cargo clippy --workspace --exclude sparq-py --all-targets -- -D warnings` and `cargo fmt --check` must pass. Run clippy over the **full workspace**, not a single crate — feature unification surfaces lints that an isolated-crate check misses. (`sparq-py` is excluded because it needs the Python/maturin toolchain.)
 - The core crates (`sparq-core`, `sparq-engine`) must stay dependency-free of the opt-in capability crates, and the wasm build must not regress — both are enforced in CI.
-- Conformance: the W3C SPARQL + inference suites must stay green and are **ratcheted** (the committed floor only goes up) — see `conformance-report.md` / `inference-conformance-report.md` and the CI ratchet. Performance is gated the same way against a best-ever floor (`bench/perf-baseline.json`).
+- Conformance: the W3C SPARQL, inference, W3C SHACL (core + SPARQL) and OGC GeoSPARQL suites must stay green and are each **ratcheted** (the committed floor only goes up). All of them are indexed in ONE central scoreboard — `cargo run -p sparq-conformance --bin sparq-conformance-scoreboard` (registry: `crates/sparq-conformance/src/scoreboard.rs`) — so a single artifact reports every suite + its floor + the CI job that gates it; the per-suite detail reports are `conformance-report.md` / `inference-conformance-report.md` / the SHACL+geo job scoreboards. Performance is gated the same way against a best-ever floor (`bench/perf-baseline.json`).
 - **Merge discipline:** the gate for landing any change is *full-workspace clippy + `cargo test` + the conformance/perf ratchets*, all green. When work is done in parallel git worktrees, gate and merge **one branch at a time** with a full re-gate between merges; never edit `.beads/` files inside a worktree (it conflicts at merge — `bd export` regenerates the JSONL).
 
 ## MAINTENANCE RULE (REQUIRED — read before changing any public surface)

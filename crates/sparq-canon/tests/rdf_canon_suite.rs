@@ -1,17 +1,19 @@
 //! W3C RDF Dataset Canonicalization (RDFC-1.0) test suite, manifest-driven
-//! over the vendored snapshot (`tests/rdf-canon-testdata/`, see
-//! PROVENANCE.md). This validates the `rdf-canon` dependency THROUGH
-//! sparq-zk's own bridge (`canon::canonicalize_triples` round-trips oxrdf 0.3
-//! → text → oxrdf 0.2 → canonical text), so a bridge bug fails the suite
-//! exactly like a canonicalization bug would.
+//! over the vendored snapshot (`tests/rdf-canon-testdata/`, see PROVENANCE.md).
+//!
+//! This drives sparq-canon's **public API** (`canonicalize` / `issue_quads` /
+//! the `*_with` SHA-384 profile, plus the single-graph `canonicalize_triples`
+//! the ZK commitment pipeline calls) over the official vectors — so the same
+//! oxrdf-0.3 <-> oxrdf-0.2 bridge the crate ships is what gets validated. A
+//! bridge bug fails the suite exactly like a canonicalization bug would.
 //!
 //! The manifest itself is parsed with sparq (dogfooding the engine).
 //!
 //! Test types:
 //! - `rdfc:RDFC10EvalTest`: canonical N-Quads must match byte-for-byte.
 //! - `rdfc:RDFC10MapTest`: the issued identifier map must match.
-//! - `rdfc:RDFC10NegativeEvalTest`: canonicalization must FAIL (poison
-//!   graphs; the HNDQ call-limit guard — plan §8's ingest fail-closed rule).
+//! - `rdfc:RDFC10NegativeEvalTest`: canonicalization must FAIL (poison graphs;
+//!   the HNDQ call-limit guard).
 
 use oxrdf::Triple;
 use sparq_core::Graph;
@@ -73,10 +75,9 @@ fn manifest_entries() -> Vec<Entry> {
     out
 }
 
-/// Loads a test input `.nq` as oxrdf 0.3 triples (all suite inputs are
-/// default-graph datasets... except some use named graphs — those quads keep
-/// their graph component through the rdf-canon API, so we canonicalize at
-/// the quad level here).
+/// Loads a test input `.nq` as oxrdf 0.3 quads (suite inputs include both
+/// default-graph and named-graph datasets; the public API canonicalizes at the
+/// dataset/quad level).
 fn load_quads(path: &Path) -> Vec<oxrdf::Quad> {
     let bytes = std::fs::read(path).unwrap();
     oxttl::NQuadsParser::new()
@@ -85,60 +86,25 @@ fn load_quads(path: &Path) -> Vec<oxrdf::Quad> {
         .unwrap()
 }
 
-/// Bridges oxrdf 0.3 quads to canonical N-Quads via the same text seam the
-/// crate uses, calling rdf-canon directly (the suite covers full datasets;
-/// `canon::canonicalize_triples` is the single-graph special case used by
-/// the commitment pipeline and is exercised by `default_graph_tests_via_crate_api`).
-/// N-Quads serialization of oxrdf 0.3 quads (explicit, because `GraphName`'s
-/// `Display` renders the default graph as the word `DEFAULT`).
-fn quads_doc(quads: &[oxrdf::Quad]) -> String {
-    let mut doc = String::new();
-    for q in quads {
-        match &q.graph_name {
-            oxrdf::GraphName::DefaultGraph => {
-                doc.push_str(&format!("{} {} {} .\n", q.subject, q.predicate, q.object));
-            }
-            g => {
-                doc.push_str(&format!("{} {} {} {} .\n", q.subject, q.predicate, q.object, g));
-            }
-        }
-    }
-    doc
-}
-
-fn canonicalize_quads_bridge(quads: &[oxrdf::Quad], sha384: bool) -> Result<String, String> {
-    let doc = quads_doc(quads);
-    let quads02: Vec<_> = oxttl01::NQuadsParser::new()
-        .for_reader(doc.as_bytes())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    let opts = rdf_canon::CanonicalizationOptions::default();
+/// Canonicalize through the crate's PUBLIC dataset API (default SHA-256, or the
+/// `*_with` SHA-384 profile for the parameterized cases).
+fn canonicalize(quads: &[oxrdf::Quad], sha384: bool) -> Result<String, String> {
     if sha384 {
-        rdf_canon::canonicalize_quads_with::<sha2::Sha384>(&quads02, &opts).map_err(|e| e.to_string())
+        sparq_canon::canonicalize_quads_with::<sha2::Sha384>(quads).map_err(|e| e.to_string())
     } else {
-        rdf_canon::canonicalize_quads(&quads02).map_err(|e| e.to_string())
+        sparq_canon::canonicalize(quads).map_err(|e| e.to_string())
     }
 }
 
-fn issue_quads_bridge(quads: &[oxrdf::Quad], sha384: bool) -> Result<HashMap<String, String>, String> {
-    let doc = quads_doc(quads);
-    let quads02: Vec<_> = oxttl01::NQuadsParser::new()
-        .for_reader(doc.as_bytes())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    let opts = rdf_canon::CanonicalizationOptions::default();
-    let m = if sha384 {
-        rdf_canon::issue_quads_with::<sha2::Sha384>(&quads02, &opts).map_err(|e| e.to_string())?
+fn issue(quads: &[oxrdf::Quad], sha384: bool) -> Result<HashMap<String, String>, String> {
+    if sha384 {
+        sparq_canon::issue_quads_with::<sha2::Sha384>(quads).map_err(|e| e.to_string())
     } else {
-        rdf_canon::issue_quads(&quads02).map_err(|e| e.to_string())?
-    };
-    Ok(m.into_iter().collect())
+        sparq_canon::issued_identifiers(quads).map_err(|e| e.to_string())
+    }
 }
 
 fn local_path(iri: &str) -> PathBuf {
-    // Manifest IRIs are relative references resolved against the manifest
-    // location; sparq resolves them to file-less relative IRIs or keeps them
-    // relative — extract the trailing `rdfc10/...` component.
     let tail = iri.rsplit_once("rdfc10/").map(|(_, t)| t).unwrap_or(iri);
     testdata().join("rdfc10").join(tail)
 }
@@ -151,12 +117,13 @@ fn w3c_rdf_canon_suite() {
 
     for e in &entries {
         let input = load_quads(&local_path(&e.action));
+        let sha384 = e.hash_algorithm.as_deref() == Some("SHA384");
         match e.kind.as_str() {
             t if t.ends_with("RDFC10EvalTest") => {
                 eval += 1;
                 let expected =
                     std::fs::read_to_string(local_path(e.result.as_ref().unwrap())).unwrap();
-                match canonicalize_quads_bridge(&input, e.hash_algorithm.as_deref() == Some("SHA384")) {
+                match canonicalize(&input, sha384) {
                     Ok(got) if got == expected => {}
                     Ok(got) => failures.push(format!(
                         "{}: canonical output mismatch\n  got:      {:?}\n  expected: {:?}",
@@ -171,7 +138,7 @@ fn w3c_rdf_canon_suite() {
                     std::fs::read_to_string(local_path(e.result.as_ref().unwrap())).unwrap();
                 let expected: HashMap<String, String> =
                     serde_json::from_str(&expected_json).unwrap();
-                match issue_quads_bridge(&input, e.hash_algorithm.as_deref() == Some("SHA384")) {
+                match issue(&input, sha384) {
                     Ok(got) if got == expected => {}
                     Ok(got) => failures.push(format!(
                         "{}: issued map mismatch\n  got:      {:?}\n  expected: {:?}",
@@ -182,7 +149,7 @@ fn w3c_rdf_canon_suite() {
             }
             t if t.ends_with("RDFC10NegativeEvalTest") => {
                 neg += 1;
-                if let Ok(got) = canonicalize_quads_bridge(&input, e.hash_algorithm.as_deref() == Some("SHA384")) {
+                if let Ok(got) = canonicalize(&input, sha384) {
                     failures.push(format!(
                         "{}: poison graph canonicalized (must fail closed): {} quads -> {} bytes",
                         e.name,
@@ -205,11 +172,11 @@ fn w3c_rdf_canon_suite() {
     );
 }
 
-/// The crate's own single-graph API (`canon::canonicalize_triples`, what the
-/// commitment pipeline calls) must agree with the suite on every
-/// default-graph-only eval test.
+/// The single-graph API (`canonicalize_triples`, what the ZK commitment
+/// pipeline calls) must agree with the suite on every default-graph-only eval
+/// test under the default SHA-256.
 #[test]
-fn default_graph_tests_via_crate_api() {
+fn default_graph_tests_via_single_graph_api() {
     let entries = manifest_entries();
     let mut covered = 0;
     for e in &entries {
@@ -217,7 +184,10 @@ fn default_graph_tests_via_crate_api() {
             continue; // the commitment pipeline canonicalizes with the default SHA-256
         }
         let quads = load_quads(&local_path(&e.action));
-        if !quads.iter().all(|q| q.graph_name == oxrdf::GraphName::DefaultGraph) {
+        if !quads
+            .iter()
+            .all(|q| q.graph_name == oxrdf::GraphName::DefaultGraph)
+        {
             continue; // named-graph datasets are not single-graph content
         }
         let triples: Vec<Triple> = quads
@@ -225,11 +195,13 @@ fn default_graph_tests_via_crate_api() {
             .map(|q| Triple::new(q.subject.clone(), q.predicate.clone(), q.object.clone()))
             .collect();
         let expected = std::fs::read_to_string(local_path(e.result.as_ref().unwrap())).unwrap();
-        let got = sparq_zk::canon::canonicalize_triples(&triples)
+        let got = sparq_canon::canonicalize_triples(&triples)
             .unwrap_or_else(|err| panic!("{}: {err}", e.name));
-        let got_doc: String = got.lines.iter().map(|l| format!("{l}\n")).collect();
-        assert_eq!(got_doc, expected, "{} via crate API", e.name);
+        assert_eq!(got.to_nquads(), expected, "{} via single-graph API", e.name);
         covered += 1;
     }
-    assert!(covered >= 40, "expected most eval tests to be default-graph-only, got {covered}");
+    assert!(
+        covered >= 40,
+        "expected most eval tests to be default-graph-only, got {covered}"
+    );
 }

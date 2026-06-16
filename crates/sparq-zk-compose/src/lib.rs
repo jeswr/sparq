@@ -1,4 +1,6 @@
 // [OPUS-4.8] written while Fable 5 unavailable — re-review when Fable returns.
+// [OPUS-4.8] MS-G2 (sq-8wbn): make `// SAFETY:` mandatory on every first-party unsafe block.
+#![warn(clippy::undocumented_unsafe_blocks)]
 //! # sparq-zk-compose — ZK proof composition for sparq (stage 2)
 //!
 //! Drives the per-property Noir circuit family at `zk/compose/` into a full

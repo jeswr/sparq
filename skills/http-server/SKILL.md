@@ -54,6 +54,22 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > the `169.254.169.254` cloud-metadata IP). The allowlist is enforced before any socket is
 > opened, on the *resolved* IP (DNS-rebinding-safe). See "SERVICE federation (egress
 > allowlist)" below.
+>
+> **Security response headers (always on, ASVS V14.4; bead `sq-cmvh`).** Every response —
+> success, streamed and error alike — carries a hardening header set, stamped by a
+> `map_response` layer in `harden()`:
+> `X-Content-Type-Options: nosniff`,
+> `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`,
+> `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`. These suit a SPARQL *data* API
+> (no HTML is rendered): the tightest CSP says the body loads/runs nothing, and `frame-ancestors`
+> + `X-Frame-Options: DENY` say it is never meant to be framed. Each header is only added when
+> absent, so a custom handler can override one. **Deliberately omitted:** `Strict-Transport-
+> Security` (the origin serves plain HTTP — HSTS belongs on the fronting TLS proxy);
+> `X-XSS-Protection` (deprecated, superseded by CSP); CORS / `Cross-Origin-*` / `Permissions-
+> Policy` (browser-app document policies, meaningless for a no-CORS data API — adding CORS would
+> *widen* the surface). No blanket `Cache-Control: no-store` is forced: results are uncached by
+> default (no `ETag`/`Cache-Control: public` is ever set), so there is nothing to tighten, and a
+> blanket value would wrongly override `/health` / `/metrics`.
 
 Point a client at it (the endpoint is `/sparql`):
 
@@ -112,7 +128,7 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   max_concurrent: usize, max_results: Option<usize>, max_query_rows: Option<usize>,
   max_decompress_ratio: usize, max_subscriptions: usize, max_subscriptions_per_conn: usize,
   verbose: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
-  service_allow: ServiceAllowlist, /* + time_travel_* under feature */ }` with
+  service_allow: ServiceAllowlist, /* + time_travel_* under feature, + audit_log under audit-log feature */ }` with
   `ServerConfig::default()` and `ServerConfig::from_env()`.
   (`max_query_rows` = coarse memory cap; `max_decompress_ratio` = zip-bomb guard — `sq-ebii`.)
   `auth_token` (set: gates the write surface with a Bearer token, constant-time compared;
@@ -360,6 +376,7 @@ env overrides the default.
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
+| `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |
 
 In a library: `AppState::with_config(graph, ServerConfig { max_concurrent: 64, ..Default::default() })`
 then `router(state)`, or `harden(my_router, &config)`.
@@ -424,6 +441,40 @@ Library callers set all four on `ServerConfig` (`query_timeout`, `max_query_rows
 `sparq_engine::QueryBudget { deadline, max_rows }` into `*_with_budget` query entry points
 and `update_in_place_with_budget`, and wrap calls in
 `sparq_engine::with_service_egress_policy(strict, [host], || …)`.
+
+### Access audit log — opt-in per-query audit trail (`sq-0bxp`, CDMC CD-2)
+
+A **per-query access audit log** for compliance regimes that need a per-subject / per-query
+trail (CDMC CD-2, ISO 27001 A.8.15, EU CRA logging) — distinct from the aggregate-only
+`/metrics`. **Doubly opt-in:** compile with the `audit-log` cargo feature, then turn it on at
+runtime with `--audit-log` (env `SPARQ_AUDIT_LOG=1`). Off (either), the module and every call
+site are `#[cfg]`-stripped or short-circuited before any record is built — a request pays
+essentially zero.
+
+For each query / update / Graph-Store request the server emits **one** structured `tracing`
+event under the dedicated `target: "sparq_server::audit"` (`tracing::info!`). Route it to your
+sink with the standard `RUST_LOG` machinery, independently of the `--verbose` request log:
+`RUST_LOG=sparq_server::audit=info`. (`--audit-log` installs a subscriber on its own if
+`--verbose` did not.) Fields:
+
+| field | meaning |
+| --- | --- |
+| `requester` | `anonymous`, or `token:<fnv1a-hash>` of the presented Bearer token — **never the raw token** |
+| `op` | `query` / `update` / `graph_read` / `graph_write` (operation class, keyed on whether it mutates) |
+| `fingerprint` | FNV-1a hash (hex) of the trimmed query/update text — **not the query text** |
+| `decision` | `allowed` or `denied` |
+| `reason` | denial reason (`auth: missing or invalid Bearer token`); empty when allowed |
+| `status` | the HTTP status the client saw (`200` / `401` / `413` / …) |
+| `rows` | result-row count when known (else absent — `status` is the authoritative outcome) |
+| `duration_us` | handler wall-clock in microseconds |
+
+**No-PII / no-info-leak posture (reuses the #241 lesson):** this is a **server-side** log under
+the operator's control — it is NEVER written to the HTTP response. It deliberately does **not**
+log the full query text (raw SPARQL can disclose loaded-data fragments or caller PII — the #241
+contract) nor the Bearer secret; only a stable, non-reversible fingerprint of each, enough to
+correlate repeated identical queries / a recurring caller across requests and restarts. Library
+callers set `ServerConfig { audit_log: true, .. }` (field present only with the feature). See
+`crates/sparq-server/src/audit.rs`.
 
 ## Gotchas / feature flags / prerequisites
 
@@ -527,6 +578,18 @@ and `update_in_place_with_budget`, and wrap calls in
   `Content-Type: application/json` (the `405` keeps its `Allow` header). POST query
   requires `Content-Type: application/sparql-query` or `application/x-www-form-urlencoded`
   (else `415`); a GET without `query=` is `400`.
+- **Error bodies are sanitized — no information leak (sq-cz89 / sq-j9zs).** On the
+  no-auth-by-default path an error body carries only a **stable, generic CLASS message**
+  (e.g. `malformed query`, `malformed RDF body`, `malformed gzip body`,
+  `query execution error`, `update failed: invalid SPARQL update`). It deliberately does
+  **NOT** echo the caller's submitted query/UPDATE/RDF text, a fragment of the loaded RDF
+  (parsers like `oxttl`/`spargebra` quote the offending token — that would confirm loaded
+  triples), or any server-side filesystem path (e.g. a `--persist` mirror's path inside a
+  transient durable-write `503`). The full detailed cause is preserved for the **operator**
+  via the server-side `tracing` log (target `sparq_server`), surfaced only through the
+  opt-in `--verbose` / `RUST_LOG` subscriber — never the HTTP response. Status semantics
+  (the `400`/`413`/`415`/`503`/`500` classification) are unchanged; only the prose detail
+  is withheld. Regression tests assert a sentinel token never appears in any error body.
 - **mimalloc** is the binary's global allocator (matters under concurrent load).
 
 ## See also

@@ -8,6 +8,9 @@
 //!   sparq-bench --mem sparq|oxigraph --scale N
 //!       # internal: build one engine, print peak RSS (used by the orchestrator)
 
+// [OPUS-4.8] MS-G2 (sq-8wbn): make `// SAFETY:` mandatory on every first-party unsafe block.
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 use std::process::Command;
 use std::time::{Duration, Instant};
 

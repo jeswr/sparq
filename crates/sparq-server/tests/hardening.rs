@@ -466,3 +466,198 @@ async fn errors_are_structured_json() {
     let body = resp.text().await.unwrap();
     assert!(body.starts_with("{\"error\":"), "got: {body}");
 }
+
+// ---------------------------------------------------------------------------
+// (6) Information-leak guard (sq-cz89 / sq-j9zs / sq-zg0u) [OPUS-4.8]
+//
+// On the no-auth-by-default path an error body MUST NOT echo the caller's submitted input,
+// a fragment of the loaded RDF, or a server-side filesystem path. Each test provokes an
+// error whose triggering content contains a SENTINEL token and asserts the sentinel does
+// NOT appear in the (still structured-JSON) error body. The detail is logged server-side
+// instead — never returned to the caller.
+// ---------------------------------------------------------------------------
+
+/// A token vanishingly unlikely to occur in any generic class message — its presence in a
+/// response body would mean the server echoed caller/loaded/path content back.
+const SENTINEL: &str = "secret_sentinel_value";
+
+#[tokio::test]
+async fn no_echo_query_parse_error() {
+    let base = spawn_with(DATA, ServerConfig::default()).await;
+    // A malformed query whose offending token is the sentinel — `spargebra` would normally
+    // quote it verbatim in the parse error.
+    let q = format!("SELECT * WHERE {{ {SENTINEL} }}");
+    let resp = client().get(format!("{base}/sparql")).query(&[("query", q.as_str())]).send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(!body.contains(SENTINEL), "query parse error echoed caller input: {body}");
+}
+
+#[tokio::test]
+async fn no_echo_update_parse_error() {
+    let base = spawn_with(DATA, ServerConfig::default()).await;
+    // A malformed UPDATE carrying the sentinel as a bare (invalid) token.
+    let upd = format!("INSERT DATA {{ {SENTINEL} }}");
+    let resp = client()
+        .post(format!("{base}/sparql"))
+        .header("content-type", "application/sparql-update")
+        .body(upd)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(!body.contains(SENTINEL), "update parse error echoed caller input: {body}");
+}
+
+#[tokio::test]
+async fn no_echo_rdf_body_parse_error() {
+    let base = spawn_with(DATA, ServerConfig::default()).await;
+    // Malformed N-Triples whose offending subject token is the sentinel — `oxttl` quotes
+    // the bad token verbatim (the exact leak the Privacy audit surfaced for loaded RDF).
+    let bad = format!("{SENTINEL} <http://ex/p> <http://ex/o> .\n");
+    let resp = client()
+        .put(format!("{base}/graphs/leak"))
+        .header("content-type", "application/n-triples")
+        .body(bad)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(!body.contains(SENTINEL), "RDF-body parse error echoed loaded-data fragment: {body}");
+}
+
+#[tokio::test]
+async fn no_echo_malformed_gzip_body() {
+    let base = spawn_with(DATA, ServerConfig::default()).await;
+    // A body that ADVERTISES gzip but is not a valid gzip stream — the decoder error can
+    // quote bytes of the (caller-supplied) body. Embed the sentinel in those bytes.
+    let mut not_gzip = vec![0x1f, 0x8b, 0x08, 0x00]; // gzip magic so it enters the decode path
+    not_gzip.extend_from_slice(SENTINEL.as_bytes());
+    not_gzip.extend_from_slice(&[0xff; 16]);
+    let resp = client()
+        .put(format!("{base}/graphs/gz"))
+        .header("content-type", "text/turtle")
+        .header("content-encoding", "gzip")
+        .body(not_gzip)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "a corrupt gzip stream is a 400");
+    let body = resp.text().await.unwrap();
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(!body.contains(SENTINEL), "gzip decode error echoed caller body bytes: {body}");
+}
+
+#[tokio::test]
+async fn no_echo_execution_error() {
+    let base = spawn_with(DATA, ServerConfig::default()).await;
+    // A syntactically valid query that fails at EXECUTION — the engine error string can
+    // embed term text drawn from the query/graph. Use a sentinel IRI in a construct so the
+    // engine error (if any) would quote it; assert it never reaches the body. Even when the
+    // query SUCCEEDS this is a no-op assertion (no error body), so it is robust either way.
+    let q = format!("SELECT * WHERE {{ ?s ?p ?o . FILTER(?s = <http://ex/{SENTINEL}> && SAMETERM(?s, 1/0)) }}");
+    let resp = client().get(format!("{base}/sparql")).query(&[("query", q.as_str())]).send().await.unwrap();
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains(SENTINEL), "execution error echoed query/graph content: {body}");
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-cmvh (ASVS V14.4) — security response headers on every response
+// ---------------------------------------------------------------------------
+
+/// The exact hardening header set the server must stamp on every response. Mirrors
+/// `http::SECURITY_HEADERS` (kept in lock-step by review); asserted on a success, an error
+/// and a streamed response below.
+const EXPECTED_SECURITY_HEADERS: &[(&str, &str)] = &[
+    ("x-content-type-options", "nosniff"),
+    ("content-security-policy", "default-src 'none'; frame-ancestors 'none'"),
+    ("x-frame-options", "DENY"),
+    ("referrer-policy", "no-referrer"),
+];
+
+fn assert_security_headers(headers: &reqwest::header::HeaderMap) {
+    for (name, expected) in EXPECTED_SECURITY_HEADERS {
+        let got = headers
+            .get(*name)
+            .unwrap_or_else(|| panic!("missing security header {name}"))
+            .to_str()
+            .unwrap();
+        assert_eq!(got, *expected, "security header {name} value");
+    }
+    // Headers we deliberately do NOT emit from the plain-HTTP origin (HSTS is the fronting
+    // TLS proxy's job; X-XSS-Protection is deprecated). Their absence is part of the contract.
+    assert!(
+        !headers.contains_key("strict-transport-security"),
+        "HSTS must not be set by the origin"
+    );
+    assert!(
+        !headers.contains_key("x-xss-protection"),
+        "deprecated X-XSS-Protection must not be set"
+    );
+}
+
+#[tokio::test]
+async fn security_headers_on_success_response() {
+    let base = spawn_with(DATA, ServerConfig::default()).await;
+    // A normal 200 SELECT.
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?s WHERE { ?s <http://ex/age> ?a }")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_security_headers(resp.headers());
+    // And on the trivial /health route, which goes through the same hardened stack.
+    let health = client().get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(health.status(), 200);
+    assert_security_headers(health.headers());
+}
+
+#[tokio::test]
+async fn security_headers_on_error_response() {
+    let base = spawn_with(DATA, ServerConfig::default()).await;
+    // A 400 (missing 'query' parameter) — an error envelope must be hardened identically.
+    let resp = client().get(format!("{base}/sparql")).send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+    assert_security_headers(resp.headers());
+
+    // A 413 produced INSIDE the middleware stack (body over the limit) — confirms the headers
+    // are stamped even on extractor-level rejections rewritten by `json_error_bodies`.
+    let cfg = ServerConfig { max_body_bytes: 16, ..ServerConfig::default() };
+    let base = spawn_with(DATA, cfg).await;
+    let big = "SELECT * WHERE { ?s ?p ?o }".repeat(64);
+    let resp = client()
+        .post(format!("{base}/sparql"))
+        .header("content-type", "application/sparql-query")
+        .body(big)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    assert_security_headers(resp.headers());
+}
+
+#[tokio::test]
+async fn security_headers_on_streamed_response() {
+    // A larger result set exercises the chunked/streamed SELECT body path; the headers
+    // (set by the response-path middleware) must be present there too.
+    let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+    for i in 0..500 {
+        ttl.push_str(&format!("ex:s{i} ex:age {i} .\n"));
+    }
+    let base = spawn_with(&ttl, ServerConfig::default()).await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?s ?a WHERE { ?s <http://ex/age> ?a }")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_security_headers(resp.headers());
+}

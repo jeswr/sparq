@@ -717,7 +717,12 @@ impl SpillInterner {
         let mut remaps: Vec<Vec<u64>> = partials.iter().map(|(pd, _)| vec![0u64; pd.len() + 1]).collect();
         #[derive(Clone, Copy)]
         struct SlotPtr(*mut u64, usize);
+        // SAFETY: `SlotPtr` (a `*mut u64`) only ever touches its own hash-routed slot —
+        // disjoint writes, no reads until the parallel scope ends (same argument as
+        // `ShardedDict::intern_partials`). [OPUS-4.8 sq-8wbn]
         unsafe impl Send for SlotPtr {}
+        // SAFETY: shared read of a `Copy` raw-pointer handle; the writes it performs are
+        // disjoint by hash routing (see the `Send` argument). [OPUS-4.8 sq-8wbn]
         unsafe impl Sync for SlotPtr {}
         let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| SlotPtr(v.as_mut_ptr(), v.len())).collect();
 
