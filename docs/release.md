@@ -228,3 +228,17 @@ informationally on pushes to main (`.github/workflows/python.yml`); release publ
    on any Rust panic).
 3. Publish with `maturin upload` (or `pypa/gh-action-pypi-publish` + trusted
    publishing) gated on the `v*` tag, mirroring the cargo/crates.io flow above.
+
+> [OPUS-4.8] **Update (sq-toze.37 / GX-10): the PyPI publish lane is now WIRED** in
+> [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) — jobs `pypi-build`
+> (maturin matrix: manylinux x86_64/aarch64, macOS arm64/x64, Windows x64), `pypi-sdist`,
+> and `pypi-publish` (uploads via PyPI **Trusted Publishing** with native **PEP-740
+> attestations** — `pypa/gh-action-pypi-publish` `attestations: true` + OIDC `id-token: write`,
+> GitHub `environment: pypi`). It fires on `release: published` or `workflow_dispatch` with
+> `publish_pypi: true`. **One maintainer prerequisite remains** (it cannot be a repo file): on
+> the `sparq-rdf` PyPI project, register a **Trusted Publisher** — owner `jeswr`, repo `sparq`,
+> workflow `publish.yml`, environment `pypi` (PyPI → project → *Publishing* → *Add a pending /
+> published publisher*). Until that one-time PyPI-account step is done the upload step correctly
+> fails to mint an OIDC token (no static API token is stored). Once registered, every published
+> release emits native PyPI provenance (the "Provenance" panel on the release-files page;
+> consumers verify with `pypi-attestations verify` / `gh attestation verify`).

@@ -165,7 +165,17 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
     **no provenance link** (no upstream mechanism) — `gh attestation verify` against a crate fetched
     via `cargo` will only succeed if you point it at the attested `.crate` artifact; the registry
     page carries no badge. This is the honest, expected boundary (external sub-gap), not a bug.
-  - **PyPI — still unattested** (no publish/PEP-740 lane yet; `python.yml` test-only).
+  - **PyPI `sparq-rdf` — PEP-740 lane WIRED, awaiting maintainer PyPI config (sq-toze.37).**
+    `publish.yml#pypi-build` (maturin matrix) + `#pypi-sdist` build the wheels+sdist; `#pypi-publish`
+    uploads them via PyPI **Trusted Publishing** with native **PEP-740 attestations**
+    (`pypa/gh-action-pypi-publish` `attestations: true`, OIDC `id-token: write`, GitHub `environment:
+    pypi`). PyPI then records an in-toto/Sigstore-signed provenance statement per file. **Verify
+    (consumer):** the "Provenance" panel on the PyPI release-files page, or `pypi-attestations verify`
+    / `gh attestation verify`. **NOT-yet-true caveat:** this lane only emits attestations once a
+    maintainer registers the Trusted Publisher on the `sparq-rdf` PyPI project (owner `jeswr`, repo
+    `sparq`, workflow `publish.yml`, env `pypi`) — a PyPI-account act that cannot be a tracked repo
+    file. Until then the upload step fails to mint a token by design (no static API token is stored).
+    Do NOT claim PyPI provenance is *emitted* until that registration is confirmed live.
 - **No Build L3** evidence exists: provenance is generated in the build job, not by an
   isolated trusted builder (GX-11). Do not interpret the L2 attestations as L3.
 - **No reproducible-build evidence** (GX-8 / sq-toze.9): there is no documented bit-for-bit
