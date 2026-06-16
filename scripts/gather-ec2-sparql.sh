@@ -23,9 +23,13 @@
 #
 # ORPHAN-PROOFING (agent-death-independent, 3h hard cap; identical to gather-ec2.sh):
 #   --instance-initiated-shutdown-behavior terminate + detached (sleep 10800; shutdown)
-#   + systemd-run --on-active=10800 shutdown. The gather writes results + /root/GATHER_DONE,
-#   then STOPS (never shuts down) — only the watchdog auto-terminates if the orchestrator
-#   dies. The orchestrator SSH-pulls results while the box is ALIVE, then terminates it.
+#   + systemd-run --on-active=10800 shutdown. The gather writes results + /root/GATHER_DONE
+#   (the DONE sentinel, written ONLY after BOTH the sparq AND oxigraph TSVs + the combined
+#   envelope are on disk), then STOPS (never shuts down) — only the watchdog auto-terminates
+#   if the orchestrator dies. The orchestrator SSH-polls for the sentinel while the box is
+#   ALIVE, pulls results, then terminates it. Teardown is SENTINEL-GATED, never fired on a
+#   fixed iteration bound that could race a still-running Oxigraph run (see sq-ays7 fix below);
+#   the launcher poll deadline sits BELOW the 3h watchdog so the watchdog stays the backstop.
 #
 # SAFETY: operates ONLY on the ONE instance it launches; NEVER touches prod
 # (i-090531b4ede8f2d3f) or the work box. Tag purpose=sparq-bench.
@@ -276,16 +280,40 @@ for i in $(seq 1 40); do ssh $SSHO "ubuntu@$IP" true 2>/dev/null && { log "ssh u
 [ "$SSH_UP" = 1 ] || die "sshd never became reachable on $IP after 40 attempts — aborting (cleanup trap terminates $INSTANCE_ID)"
 
 mkdir -p "$RESULTS_DIR"
-log "polling for /root/GATHER_DONE (build+gen+gather ~25-50 min; +QLever if enabled)…"
+# [OPUS-4.8] sq-ays7 — SENTINEL-GATED teardown (poll-bound bug fix).
+# PREVIOUS BUG: the poll loop was a FIXED `for i in $(seq 1 120)` @ sleep 30 = 60 min hard
+# bound. On the c7g.xlarge fallback, apt + docker + rustup + `cargo build --release` (two
+# crates) + sp2b corpus-gen + the sparq run consumed almost the whole 60 min, so the bound
+# expired while `sparq-bench bench-corpus` (Oxigraph) was STILL RUNNING — the cleanup trap
+# then terminated the box AFTER sparq.tsv was captured but BEFORE oxi.tsv was written and
+# BEFORE /root/GATHER_DONE was created. Result: dashboard showed sparq numbers, Oxigraph n/a.
+# FIX: the instance-side gather already writes /root/GATHER_DONE only AFTER BOTH sparq AND
+# oxigraph TSVs (+ the combined envelope) are on disk (see user-data, near "GATHER_DONE").
+# So here we WAIT for that sentinel and only THEN pull + let the trap terminate. The poll
+# budget is no longer a guess at the gather duration: it is a launcher-side ceiling
+# (POLL_DEADLINE_S) set safely BELOW the instance's 3h orphan-proof watchdog (10800 s), so a
+# ~10-15 min Oxigraph corpus-load+query run finishes with wide margin. The watchdog stays the
+# orphan-proof backstop ONLY — normal teardown is sentinel-gated, never bound-gated mid-gather.
+POLL_DEADLINE_S="${GATHER_POLL_DEADLINE_S:-9900}"   # 165 min; < 10800 s watchdog (keeps it the backstop)
+POLL_INTERVAL_S=30
+log "polling for /root/GATHER_DONE (build+gen+gather ~25-50 min; +QLever if enabled; deadline ${POLL_DEADLINE_S}s, below 3h watchdog)…"
 DONE=0
-for i in $(seq 1 120); do
-  sleep 30
+i=0
+POLL_START=$(date +%s)
+while :; do
+  ELAPSED=$(( $(date +%s) - POLL_START ))
+  if [ "$ELAPSED" -ge "$POLL_DEADLINE_S" ]; then
+    log "  poll deadline ${POLL_DEADLINE_S}s reached without sentinel — giving up (cleanup trap terminates)"
+    break
+  fi
+  sleep "$POLL_INTERVAL_S"
+  i=$(( i + 1 ))
   if ssh $SSHO "ubuntu@$IP" "sudo test -f /root/GATHER_DONE" 2>/dev/null; then
-    log "  [$i] sentinel present — pulling results"
+    log "  [$i / ${ELAPSED}s] sentinel present (both engines' TSVs written) — pulling results"
     DONE=1; break
   fi
   STATE=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown)
-  log "  [$i] state=$STATE; waiting for sentinel"
+  log "  [$i / ${ELAPSED}s] state=$STATE; waiting for sentinel"
   [ "$STATE" = "terminated" ] && { log "  instance terminated before sentinel — results may be lost"; break; }
 done
 
