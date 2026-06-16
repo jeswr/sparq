@@ -30,22 +30,27 @@
   // two in sync (the file carries the full rationale + HONESTY note). render() loads it into
   // window.COMPETITORS unless one was already injected externally (a future competitors.js/fetch can
   // still override). The featured table reads `engines`/`values` (the sq-xvow seam); `references`
-  // drives a per-suite external-reference baseline note. NO fabricated numbers: `values` is EMPTY by
-  // design (no in-repo competitor was measured at the dashboard's CI scale+machine+regime, so every
-  // per-metric cell shows "n/a (not gathered)"); `references` carries the real cited numbers that DO
-  // exist (QLever synthetic on a 2020 M1; EYE DeepTaxonomy closures on an M1) with their OWN
-  // scale/machine/source, shown SEPARATELY so a mismatched figure is never aligned into a same-row
-  // comparison. Sources: bench/qlever-baselines.md, bench/inference/eye-comparison.md, Cargo.lock
-  // (oxigraph 0.5.8), research/inference-sota.md (RDFox citations only). Gathered: 2026-06-15.
+  // drives a per-suite external-reference baseline note. NO fabricated numbers: the ONLY populated
+  // `values` cells are the SHACL columns (pyshacl + jena-shacl), MEASURED same-machine on a one-shot
+  // ephemeral EC2 box (sq-ays7, re-measuring sq-8dp3) against the SAME data x shapes as the dashboard
+  // SHACL suite, with #violations cross-checked per workload before recording timing. Every OTHER
+  // per-metric cell stays "n/a (not gathered)" — no in-repo competitor was measured at the dashboard's
+  // CI scale+machine+regime for the SPARQL suites (oxigraph WAS gathered live but only on the
+  // sparq-bench synthetic-compare path — different dataset/query-name set; qlever needs a multi-GB
+  // server not auto-started). `references` carries the real cited numbers that DO exist (QLever
+  // synthetic on a 2020 M1; EYE DeepTaxonomy closures on an M1) with their OWN scale/machine/source,
+  // shown SEPARATELY so a mismatched figure is never aligned into a same-row comparison. Sources:
+  // bench/qlever-baselines.md, bench/inference/eye-comparison.md, Cargo.lock (oxigraph 0.5.8),
+  // research/inference-sota.md (RDFox citations only). SHACL values gathered same-machine: 2026-06-16.
   var COMPETITORS_DATA = {
     schema_version: 1,
-    gathered_at_utc: '2026-06-15',
-    gathered_by: 'in-repo references (qlever/eye) + a LIVE ephemeral-EC2 gather of the SHACL engines (sq-8dp3): ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), quiet_box=true, commit fd219ba, against the committed bench/shacl suite (LUBM(1) ABox x 5 shape graphs). EPHEMERAL GATHER POINT for cross-engine ordering, NOT the pinned gh-runner CI band.',
+    gathered_at_utc: '2026-06-16',
+    gathered_by: 'in-repo references (qlever/eye) + a LIVE ephemeral-EC2 gather of the SHACL engines (sq-ays7, re-measuring the earlier sq-8dp3 point at the current HEAD): ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), quiet_box=true, commit f271b74, against the committed bench/shacl suite (LUBM(1) ABox x 5 shape graphs). EPHEMERAL GATHER POINT for cross-engine ordering, NOT the pinned gh-runner CI band. HONEST-N/A: oxigraph + qlever stay absent from values (oxigraph gathered live but only on the sparq-bench synthetic-compare path — different dataset/query-name set; qlever needs a multi-GB on-disk server not auto-started — only the M1 references exist). See competitors.json.',
     engines: [
       { id: 'qlever', label: 'QLever', version: '0.5.47',
         env: '2020 MacBook Air M1, 16GB, native', source: 'bench/qlever-baselines.md' },
       { id: 'oxigraph', label: 'Oxigraph', version: '0.5.8',
-        env: 'embedded Rust dev-dep; gathered live on ephemeral c7g.xlarge but on the in-process sparq-bench synthetic graph (different dataset/regime from any dashboard metric) — no same-row value cell',
+        env: 'embedded Rust dev-dep (Cargo.lock); gathered on ephemeral c7g.xlarge but on the in-process sparq-bench synthetic graph (50k entities) — a DIFFERENT dataset/regime/query-name set from any dashboard metric, so NO same-row value cell (would be apples-to-oranges); see oxigraph_compare_note',
         source: 'crates/sparq-bench Cargo.toml + Cargo.lock' },
       { id: 'eye', label: 'EYE', version: 'v11.24.4 (2026-05-12), SWI-Prolog 10.0.2',
         env: 'Apple M1 (fanless), macOS 25.4.0', source: 'bench/inference/eye-comparison.md' },
@@ -53,10 +58,10 @@
         version: 'not gathered (vendor/paper figures only — Oxford Semantic; AAAI-2014/ISWC-2015)',
         env: 'n/a — no head-to-head run in-repo', source: 'research/inference-sota.md §1.1' },
       { id: 'pyshacl', label: 'pySHACL', version: '0.31.0',
-        env: 'ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, quiet_box=true, commit fd219ba; gathered 2026-06-15 (sq-8dp3)',
+        env: 'ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)',
         source: 'live gather — scripts/gather-ec2.sh + report_cli_adapter.py' },
       { id: 'jena-shacl', label: 'Apache Jena SHACL', version: '5.2.0',
-        env: 'ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, OpenJDK, quiet_box=true, commit fd219ba; gathered 2026-06-15 (sq-8dp3)',
+        env: 'ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, OpenJDK (default-jdk), quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)',
         source: 'live gather — scripts/gather-ec2.sh + report_cli_adapter.py' }
     ],
     // [OPUS-4.8] sq-8dp3: SHACL per-workload validate latency (µs) from the live ephemeral-EC2 gather,
@@ -70,11 +75,11 @@
     // in sync with bench/dashboard/competitors.json.) oxigraph gathered too but on a different
     // dataset/regime -> no same-row cell (see competitors.json oxigraph_compare_note).
     values: {
-      'shacl_cardinality_validate':       { pyshacl: 2796571, 'jena-shacl': 1510265 },
-      'shacl_class_nodekind_validate':    { pyshacl: 2802497, 'jena-shacl': 1543484 },
-      'shacl_datatype_range_validate':    { pyshacl: 3625929, 'jena-shacl': 1719801 },
-      'shacl_node_paths_validate':        { pyshacl: 4463087, 'jena-shacl': 1808440 },
-      'shacl_sparql_constraint_validate': { pyshacl: 27811546, 'jena-shacl': 2292133 }
+      'shacl_cardinality_validate':       { pyshacl: 2770805, 'jena-shacl': 1468099 },
+      'shacl_class_nodekind_validate':    { pyshacl: 2774018, 'jena-shacl': 1482460 },
+      'shacl_datatype_range_validate':    { pyshacl: 3600595, 'jena-shacl': 1666635 },
+      'shacl_node_paths_validate':        { pyshacl: 4467148, 'jena-shacl': 1788495 },
+      'shacl_sparql_constraint_validate': { pyshacl: 27661760, 'jena-shacl': 2248361 }
     },
     references: [
       { suite: 'Synthetic (qlever-style)', engine: 'qlever', version: '0.5.47',
