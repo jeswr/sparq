@@ -31,7 +31,12 @@ Verdict: scaffold is GOOD; committed as baseline unchanged. Added `.gitignore`
 | member            | K | N  | R | relation        |
 |-------------------|---|----|---|-----------------|
 | scan_k1_n16_r4    | 1 | 16 | 4 | scan_check      |
+| scan_k1_n16_r8    | 1 | 16 | 8 | scan_check ([OPUS-4.8] sq-pzet) |
+| scan_k1_n64_r4    | 1 | 64 | 4 | scan_check ([OPUS-4.8] sq-pzet) |
+| scan_k1_n64_r8    | 1 | 64 | 8 | scan_check ([OPUS-4.8] sq-pzet) |
+| scan_k2_n16_r4    | 2 | 16 | 4 | scan_check ([OPUS-4.8] sq-pzet) |
 | scan_k2_n16_r8    | 2 | 16 | 8 | scan_check      |
+| scan_k2_n64_r4    | 2 | 64 | 4 | scan_check ([OPUS-4.8] sq-pzet) |
 | scan_k2_n64_r8    | 2 | 64 | 8 | scan_check      |
 | filter_int_d1     | — | —  | — | filter_int (D=1)|
 | filter_int_d2     | — | —  | — | filter_int (D=2)|
@@ -44,6 +49,35 @@ Verdict: scaffold is GOOD; committed as baseline unchanged. Added `.gitignore`
 | filter_f64_d4     | — | —  | — | filter_f64 composable (D=4; sq-q7e/sq-tat) |
 | revoke_unset_d10  | — | —  | — | revoke_unset (D=10, hidden-index revocation; sq-3e5/sq-h2v) |
 | hidden_issuer_d4  | — | —  | — | hidden_issuer (D=4, in-circuit Schnorr-over-BabyJubJub + hidden-key set membership; sq-z9l) |
+| holder_pok        | — | —  | — | holder_pok (in-circuit holder PoK; sq-xqfg) |
+| join_eq_na16_nb16 | — | —  | — | join_eq (N_A=16, N_B=16, hidden cross-credential JOIN; sq-bwwl/sq-r2s8) |
+| join_eq_na16_nb64 | — | —  | — | join_eq (N_A=16, N_B=64; [OPUS-4.8] sq-pzet) |
+| join_eq_na64_nb16 | — | —  | — | join_eq (N_A=64, N_B=16; [OPUS-4.8] sq-pzet) |
+| join_eq_na64_nb64 | — | —  | — | join_eq (N_A=64, N_B=64; [OPUS-4.8] sq-pzet) |
+
+### Circuit-family completion (sq-pzet, car-hire sq-8dx2) — wired, NOT-yet-sound
+
+[OPUS-4.8] Wired the REMAINING members the (k,n,r) / (n_a,n_b) lattices could
+derive but had no compiled package — the silent-unprovability gap (sq-wto class:
+`derive_scan_id` / `derive_join_eq_id` returned an id with no `zk/compose/<pkg>`).
+Five scan members (`scan_k1_n16_r8`, `scan_k1_n64_r4`, `scan_k1_n64_r8`,
+`scan_k2_n16_r4`, `scan_k2_n64_r4`) complete all eight `(k,n,r)` combinations;
+three join members (`join_eq_na16_nb64`, `na64_nb16`, `na64_nb64`) add the `64`
+graph-size bucket so a hidden join composes with an `n=64` scan. Each is a thin
+monomorphisation of the EXISTING generic relation (`scan::scan_check` /
+`join::join_eq_check`) — no new constraint logic, only new const-generic buckets;
+the host build/toml/derive/verify paths were already generic over them. Tests
+(`crates/sparq-zk-compose/tests/family_members_pzet.rs`): a no-toolchain
+family-completeness gate (every derivable id has a compiled package), per-new-member
+witness-satisfiable + invalid-witness-rejected, and full bb prove→verify→tamper
+round-trips (one new scan + one new join). Gate-count baselines added for all eight
+(this linux box; absorbed by the 3% tolerance).
+
+SOUNDNESS (load-bearing): this BUILDS circuits; it does NOT make the verifier sound.
+The composition verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic
+sq-1s2) and these members inherit that — a passing proof is NOT a guarantee the
+SPARQL statement holds under an adversarial prover. NO soundness/ZK-security claim
+was added and every standing not-sound disclaimer is preserved.
 
 ### Hidden-index revocation (sq-3e5 + sq-h2v) — DONE (representative, depth-10)
 
