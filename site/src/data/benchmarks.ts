@@ -170,6 +170,15 @@ export function unitFor(name: string, fallback: string): string {
 // suiteFor() (normalised lower-case); `prefixes` are a structural fallback on the raw
 // metric name's leading token. Order is the display order. A family with no data is KEPT
 // (shows "not yet reported") so coverage is honest, never fabricated.
+//
+// [OPUS-4.8] sq-p744: this list MUST stay in lock-step with the standalone
+// bench/dashboard/dashboard.js FAMILIES so the in-site Benchmarks section is not a strict
+// subset of the published dashboard. Full coverage = Core, SPARQL, SHACL, GeoSPARQL,
+// Full-Text, Vector/ANN, Reasoning, plus the capability families ZK / Solid / HDT / RSP /
+// GenAI / GPU (the latter six currently have NO data in benchmarks.generated.json — they
+// are stdout/criterion benches not yet wired into the CI customSmallerIsBetter feed — and
+// render "not yet reported" until a ci-bench hook lands; that harness work is tracked
+// separately, NOT fabricated here).
 
 export interface Family {
   key: string;
@@ -270,9 +279,84 @@ export const FAMILIES: Family[] = [
     suites: ["pipeline", "memory / size"],
     prefixes: ["load", "parse", "store", "dict", "wasm", "rdfs"],
   },
+  // [OPUS-4.8] sq-p744 (in-site capability-families gap; sq-vjn4) — register the capability
+  // families the standalone bench/dashboard already covers (dashboard.js FAMILIES) so the
+  // in-site Benchmarks section is no longer a strict subset. These are stdout/criterion
+  // benches today that do NOT yet emit into the github-action-benchmark customSmallerIsBetter
+  // CI feed, so their LATEST data is currently empty — every family below KEEPS its sidebar
+  // entry + page and renders "not yet reported" / a "soon" badge (the same honest graceful-
+  // degradation the existing empty families use), never a fabricated row. When a ci-bench hook
+  // starts emitting (e.g. `zk_commit_us`, `hdt_load_s`, `rsp_window_us`, …) the metric lands
+  // here automatically via these suites/prefixes — no further site change. Suites/prefixes are
+  // copied from the standalone dashboard so the two surfaces bucket identically.
+  {
+    key: "zk",
+    title: "Zero-knowledge (commit · trace · circuit)",
+    // HONESTY (privacy-claims gate, sq-qhy4): the v1 ZK query-proof verifier is research-grade
+    // and has NOT been externally audited; any figures here are indicative micro-benchmarks of
+    // the commitment / trace / circuit machinery, NOT an externally-verified soundness claim.
+    blurb:
+      "Commitment, trace-capture and circuit micro-benchmarks for the research-grade ZK estate (commit · canonicalisation · trace · circuit gates). Research-grade only — the v1 verifier is not externally audited, so these are indicative engineering numbers, not an audited cryptographic guarantee.",
+    suites: ["zk", "zk-trace", "zk trace", "zk-compose", "zk compose", "zero-knowledge"],
+    prefixes: ["zk", "zktrace", "zkcompose", "poseidon2", "rdfc10", "commitment"],
+  },
+  {
+    key: "solid",
+    title: "Solid / access control (WAC · ACP)",
+    blurb:
+      "Solid access-control evaluation latency — Web Access Control (WAC) and Access Control Policy (ACP) decision micro-benchmarks.",
+    suites: ["solid", "wac", "acp", "access control"],
+    prefixes: ["solid", "wac", "acp"],
+  },
+  {
+    key: "hdt",
+    title: "HDT archive ingest",
+    blurb:
+      "HDT (Header-Dictionary-Triples) archive ingest — decode + id-translation throughput when loading .hdt archives into a sparq Graph.",
+    suites: ["hdt"],
+    prefixes: ["hdt"],
+  },
+  {
+    key: "rsp",
+    title: "RDF Stream Processing (continuous queries)",
+    blurb:
+      "RDF Stream Processing — continuous-query and windowed-evaluation micro-benchmarks over streaming RDF.",
+    suites: ["rsp", "rdf stream processing", "streaming"],
+    prefixes: ["rsp", "stream", "window"],
+  },
+  {
+    key: "genai",
+    title: "GenAI (similarity · introspection)",
+    blurb:
+      "Generative-AI-adjacent micro-benchmarks — embedding similarity and graph introspection helpers.",
+    suites: ["similarity", "introspect", "introspection", "genai"],
+    prefixes: ["sim", "similarity", "introspect"],
+  },
+  {
+    key: "gpu",
+    title: "GPU kernels (experimental)",
+    blurb:
+      "Experimental GPU-kernel micro-benchmarks — an exploratory surface, reported as-is.",
+    suites: ["gpu"],
+    prefixes: ["gpu"],
+  },
 ];
 
-const CAPABILITY_KEYS = new Set(["shacl", "geo", "fts", "vector", "reasoning"]);
+// Capability families are prefix-matched BEFORE core/sparql so a generic `q*`/`op*` token
+// never mis-buckets them. Mirrors dashboard.js `kind: 'capability'`. [OPUS-4.8] sq-p744
+const CAPABILITY_KEYS = new Set([
+  "shacl",
+  "geo",
+  "fts",
+  "vector",
+  "reasoning",
+  "zk",
+  "solid",
+  "hdt",
+  "rsp",
+  "genai",
+  "gpu",
+]);
 
 export function familyOf(name: string): Family {
   const suite = suiteFor(name).toLowerCase();
