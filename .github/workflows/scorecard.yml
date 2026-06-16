@@ -1,8 +1,21 @@
 # OpenSSF Scorecard (sq-hdfn) — automated assessment of the repo's security
 # posture (branch protection, token permissions, pinned deps, SAST, etc.).
-# Results are uploaded as SARIF to the GitHub Security tab (code-scanning).
 #
-# Third-party actions pinned by full commit SHA. [OPUS-4.8]
+# [OPUS-4.8] sq-toze.15 — Scorecard's value here is the PUBLIC SCORE + BADGE
+# (`publish_results: true` → the OpenSSF dashboard / api.securityscorecards.dev),
+# NOT the GitHub Security tab. We DO NOT upload the SARIF to code-scanning: every
+# Scorecard "finding" is a posture SCORE, not a code vulnerability, and the ones
+# that score low here (Branch-Protection, Code-Review, Maintained) are INHERENT to
+# a solo-maintained, agent-driven repo with ruleset-based (not 2-reviewer) protection
+# — they are not actionable code-scanning alerts and merely polluted the dashboard
+# (the standing requirement is ZERO open code-scanning alerts). The `Vulnerabilities`
+# check likewise only re-surfaces the two `unmaintained` RustSec advisories already
+# triaged-with-beads in `deny.toml` (RUSTSEC-2024-0436 paste / sq-l8bv, RUSTSEC-
+# 2025-0134 rustls-pemfile / sq-g2xs) — no fixable advisory. So Scorecard stays as
+# the badge/score; it no longer feeds code-scanning. See compliance/openssf/
+# gap-register.md (GX-OSSF-3) and compliance/cis/gap-register.md.
+#
+# Third-party actions pinned by full commit SHA.
 name: scorecard
 
 on:
@@ -23,9 +36,10 @@ jobs:
     name: Scorecard analysis
     runs-on: ubuntu-latest
     permissions:
-      # Needed to upload the SARIF results to the code-scanning dashboard.
-      security-events: write
-      # Needed for GitHub OIDC token (Scorecard publishes the result).
+      # Needed for GitHub OIDC token (Scorecard publishes the result to the public
+      # OpenSSF dashboard, which backs the badge). No `security-events: write`: we no
+      # longer upload SARIF to code-scanning (see header — posture scores are not code
+      # alerts), so the job needs no Security-tab write scope.
       id-token: write
       contents: read
     steps:
@@ -43,7 +57,9 @@ jobs:
           # required for the Scorecard badge). Safe for public repos.
           publish_results: true
 
-      # Keep the raw SARIF as a build artifact (retention for offline review).
+      # Keep the raw SARIF as a build artifact (retention for offline review). The
+      # full posture detail stays available here and on the public OpenSSF dashboard;
+      # we deliberately do NOT upload it to code-scanning (see header).
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -51,9 +67,3 @@ jobs:
           path: results.sarif
           retention-days: 5
           if-no-files-found: error
-
-      # Surface the findings in the Security tab.
-      - name: Upload to code-scanning
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
-        with:
-          sarif_file: results.sarif

@@ -23,6 +23,31 @@ remediation lives in the supply-chain / slsa frameworks.
 |---|---|---|---|
 | **GX-8** | **No reproducible-build attestation.** Touches Badge `build_reproducible` (answered **Unmet** honestly in `evidence.md`; it is SUGGESTED-not-required at the passing level, so it does not block the bronze badge). | slsa / cra | (slsa gap-register; gap-fix under sq-toze) |
 
+## Decision record — Scorecard SARIF is no longer uploaded to code-scanning
+
+[OPUS-4.8] `chore-codescanning-triage`. The repo's standing requirement is **ZERO open
+code-scanning alerts**. `scorecard.yml` previously uploaded its SARIF to the GitHub Security
+tab, which surfaced five Scorecard *scores* as "alerts": `BranchProtection` (high),
+`CodeReview` (high), `Maintained` (high), `VulnerabilitiesID` (high), `CIIBestPractices`
+(low). **None is a code vulnerability** — they are posture scores, and four are inherent to
+this repo's operating model:
+
+| Scorecard check | Why it scores low (honest) | Disposition |
+|---|---|---|
+| `CodeReviewID` | Scorecard infers review from merged-PR history and discounts self-approval; this is a solo-maintained, agent-driven repo (Copilot + CODEOWNERS ruleset, not a 2-human-reviewer flow). | Inherent-by-design (GX-OSSF-3). Dismissed from code-scanning; not a fixable code issue. |
+| `BranchProtectionID` | The live ruleset (`docs/branch-protection.md`) is ruleset-based, not classic branch-protection; Scorecard scores classic settings (stale-review-dismissal, required approvers) the model intentionally does not use. | Inherent-by-design (GX-OSSF-3). Dismissed. |
+| `MaintainedID` | Scored 0 only because the repo is **<90 days old**; mechanical, self-resolves with age. | Time-based, not fixable now. Dismissed. |
+| `VulnerabilitiesID` | Re-surfaces the two **`unmaintained`** RustSec advisories already triaged-with-beads in `deny.toml` (RUSTSEC-2024-0436 `paste`/sq-l8bv; RUSTSEC-2025-0134 `rustls-pemfile`/sq-g2xs) + one transitive JS devDep advisory (GHSA-qx2v-qp2m-jg93, PostCSS, site tooling). **No fixable security advisory** — the cargo-deny advisory gate (GX-1, #210) is un-degraded and would FAIL on a real one. | Already-accepted informational; no new fix. Dismissed. |
+| `CIIBestPracticesID` | The OpenSSF Best-Practices badge is not filed (GX-4) — a human-owned external step. | Known gap GX-4 (sq-toze.5). Dismissed; tracked. |
+
+**Decision (option a):** keep Scorecard as the **public score + badge** (`publish_results:
+true` → OpenSSF dashboard) and **stop uploading its SARIF to code-scanning** (removed the
+`upload-sarif` step + the now-unneeded `security-events: write` scope). The full posture
+detail remains on the public dashboard and as the build artifact; it no longer pollutes the
+Security tab. The five pre-existing alerts were dismissed (`won't fix`) with the per-row
+reasons above. This loses no certification evidence — the score/badge is the OpenSSF
+artifact, the Security tab was redundant noise.
+
 ## Closed gaps (cite as evidence, do not re-open)
 
 | ID | Gap | Closed by | Evidence |
