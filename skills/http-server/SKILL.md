@@ -289,7 +289,7 @@ curl http://127.0.0.1:3030/health                               # -> "ok"
 curl http://127.0.0.1:3030/metrics                              # Prometheus text exposition
 
 # Admin WAL compaction / vacuum for ERASURE-COMPLETENESS (sq-x32t). POST-only; gated by the
-# WRITE token. Physically purges DELETEd / DROPped data (incl. orphaned literal VALUES) from the
+# WRITE token. Physically purges data removed by DELETE / DROP (incl. orphaned literal VALUES) from the
 # on-disk store so a logical erasure is followed by real erasure. 200 ok; 409 if in-memory
 # (no --persist, nothing to purge); 503 on a transient durable-write error (retryable):
 curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/compact
