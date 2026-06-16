@@ -180,7 +180,7 @@ Semantics:
 - **WAL compaction / vacuum for erasure-completeness (`sq-x32t`).** A logical `DELETE` /
   `DROP GRAPH` retracts data from the live view, but the superseded bytes linger in earlier WAL
   segments (and the dictionary) until a compaction folds the live state into a fresh base. Two
-  operator-invokable ways to physically purge them:
+  operator-invocable ways to physically purge them:
   - **Online:** `POST /admin/compact` — **POST-only**, gated by the **write** auth token
     (`--auth-token`), like an UPDATE. Runs on the writer thread strictly **between batches** (no
     race with a concurrent write), publishes **no** generation (the live triple set is preserved
