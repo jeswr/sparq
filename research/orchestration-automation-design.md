@@ -377,3 +377,139 @@ irreversible or judgment-laden action unattended.
    `main` currently carries only the 3 compliance agents in `.claude/agents/`.
    This design assumes a `merge-fixer` agent exists for E5; if that PR hasn't
    landed, Bead E's escalation target needs confirming.
+
+---
+
+## 8. The push-scheduler — the refill DECISION's mechanical substrate `[OPUS-4.8]`
+
+§1.1 T5 split *refill* into a **judgment** (which beads to dispatch, the brief, the
+one-branch-per-contended-surface rule) over a **mechanical substrate**. §5 Bead F
+shipped the first half of that substrate: `scripts/refill-candidates.sh`, which
+*groups* `bd ready` by inferred surface and *flags* contention — advisory only, no
+subtraction, no cap. That leaves the orchestrator to do the arithmetic by hand on
+every refill: subtract what's already in flight, pick at most one bead per
+collision surface, and stop at the build-farm's core budget. That arithmetic is
+**deterministic** and therefore belongs in a script. `scripts/push-frontier.sh`
+(bead `sq-o09o`) is that script: it turns the advisory candidate list into the
+**launchable frontier** — the exact set the orchestrator can hand straight to the
+one bounded Workflow (§4.3 / Bead I) without creating a conflict or over-subscribing
+the cores. It is still read-only and dispatch-free; the *choice to dispatch* and the
+*brief* stay with the orchestrator (T5 remains judgment). The script just makes the
+input to that judgment a single computed line-list instead of a manual derivation.
+
+### 8.1 The model
+
+```text
+   trigger:  the merge-watcher monitor (§2 Bead D) — "merged: PR #N (verified)"
+             ─▶ a slot freed ─▶ recompute the frontier ─▶ surface it to the orchestrator
+                                                          (the refill DECISION, T5)
+
+   frontier = bd ready                       (real edges — see §8.3; the unlock-frontier
+                                              is only true if the edges are accurate)
+            − epics                          (an epic is an umbrella, not a work unit —
+                                              you dispatch its child tasks, never "the epic")
+            − in-flight                       (a bead whose id backs an OPEN PR; see §8.2)
+            − conflict-collisions             (≤1 bead per conflict surface; the site and the
+                                              sparq-server http.rs auth path serialise to ≤1)
+            ⌈capped⌉ at the CPU ceiling        (min(16, nproc − 2) — the binding constraint, §8.4)
+```
+
+The merge-watcher is the *trigger*, not a poll: the frontier only changes when a PR
+merges (a surface frees) or a bead lands (`bd ready` grows). Recomputing on that
+event — rather than every 20-minute tick — is the same "push detection down,
+event-drive the wake" idiom as the rest of the design (§0). This is why the bead is
+"push-start unblocked beads on **every merge**": the merge is the edge that unblocks
+the next layer of `bd ready`, and the scheduler exists to make that unblock visible
+the instant it happens.
+
+### 8.2 Conflict-partition + the honest in-flight signal
+
+The collision partition assigns every ready bead a **conflict surface** (the unit
+that must serialise to ≤1 concurrent worktree):
+
+- each `sparq-<crate>` short-name under `crates/` (one launch per crate at a time);
+- **`site`** — the Next.js `site/` tree (`site:`/`page:`/`/surface/` beads): ≤1, because
+  parallel agents on the static export collide on the same `site/src` files and the
+  single export gate;
+- **`server-auth`** — the `sparq-server` `http.rs` auth path: ≤1. This is the hot
+  rebase seam called out across the agent briefs (two PRs both editing the auth
+  handler is the canonical *semantic* conflict, E5). It is a strict sub-lane of the
+  `sparq-server` crate cap, named explicitly so the scheduler never proposes a
+  second auth-path bead even when it would otherwise pick a different `sparq-server`
+  task.
+
+The **in-flight** subtraction has one honest subtlety, load-bearing enough to encode
+in the script and restate here: **`git branch -r` is not a usable in-flight signal in
+this repo.** Because PRs are *squash-merged*, a merged feature branch never becomes
+an ancestor of `main`, so `git branch -r --no-merged origin/main` reports ~all 370+
+historical branches as "unmerged" — using it would subtract essentially everything
+and the frontier would always be empty. The authoritative in-flight signal is
+therefore the set of **open PRs** (`gh pr list`): a bead is in flight iff its id
+appears in an open PR's head-branch name or title. A remote branch only counts when
+it also backs an open PR (so it collapses to the PR signal); stale merged branches
+are correctly ignored. A future reader must not "fix" this by trusting `--no-merged`.
+
+### 8.3 The frontier is only as good as the edges (deliverable 2)
+
+`bd ready` is the true unlock-frontier **only if** the dependency edges are real. In
+practice many edges lived only as prose in titles/descriptions — `… (dep X)`,
+`after Y`, `requires Z`, `blocked by …` — which `bd ready` cannot see, so a bead
+would show "ready" while a human reading the text knew it was blocked. Closing that
+gap is a prerequisite for the scheduler: a wrong frontier dispatches work that will
+immediately stall on an unbuilt prerequisite. The conservative rule applied: **add an
+edge only where the text justifies it** (an explicit `dep`/`after`/`requires`/`blocked
+by`/`builds on`/`deferred remainder of`, or an epic→phase membership), and only where
+the named blocker is itself still open/in-progress/deferred (a closed blocker is
+already satisfied and needs no edge); never invent an edge from adjacency or topical
+similarity. "Relates"/"complements"/"distinct from"/"related to" are explicitly **not**
+blocking edges and were left as-is. The fedclient (`sq-dnko`) phase chain was already
+correctly wired and was not touched.
+
+One structural limit surfaced: `bd` rejects a `blocks` edge between a task and an
+epic when *adding* it (`tasks can only block other tasks, not epics`), even though
+historical epic→task edges exist in the DB. A genuine "task gated until an epic
+lands" dependency (e.g. the privacy-fed-join task gated on the ZK-remediation epic)
+therefore cannot be expressed as a fresh `blocks` edge and needs epic *membership*
+(parent/child) or a dependency on the epic's terminal phase bead — a modeling
+decision left for the maintainer rather than forced.
+
+### 8.4 Identified blockers / binding constraints
+
+- **CPU ceiling = the binding constraint.** The launchable count is capped at
+  `min(16, nproc − 2)` because the work is `cargo` builds and the box cannot usefully
+  run more parallel compiles than it has cores (minus headroom for the orchestrator +
+  OS). On the current work box (`nproc` = 8) the cap is **6** — and the ready frontier
+  routinely *exceeds* it, so the cap, not the dependency graph, is what throttles
+  throughput today. Everything else (edge accuracy, conflict-partition) only matters
+  up to this number of slots.
+- **The EC2 build-farm is the scale lever.** The one way to lift the binding
+  constraint is more cores: an orphan-proof EC2 build-farm (the same self-terminating,
+  `purpose=sparq-bench`-tagged pattern the bench instances already use) would raise the
+  per-tick launchable count from ~6 toward the 16 hard ceiling. That ceiling is itself
+  deliberate — beyond ~16 parallel feature branches the *merge* side (conflict
+  resolution on shared seams like `http.rs`, the serialised `ci-summary` gate) becomes
+  the bottleneck, so unbounded fan-out buys nothing. Standing up the farm is an
+  EC2/cost decision (out of scope here, per the no-EC2 constraint), captured as the
+  scale lever rather than built.
+- **The merge gate stays discretionary for performance.** The scheduler deliberately
+  does **not** auto-merge and does **not** front-run the gate: it only proposes
+  launches. The merge decision (E1 review-for-fabrication, E2 arm-auto-merge) remains
+  the orchestrator's judgment (§1.3), and the `ci-summary` aggregator + branch
+  protection remain the server-side floor. Pushing more starts does not entitle the
+  system to push more merges; the merge side is rate-limited by review + the single
+  required gate by design, and trying to automate past that is the §6 critical
+  failure mode.
+
+### 8.5 Where it sits in the lifecycle
+
+`push-frontier.sh` is a **script** (§2.1) — the testable substrate, no lifecycle of
+its own, degrades to a manual command. It composes with the existing pieces rather
+than replacing them: `refill-candidates.sh` answers "*what's ready and where's the
+contention?*" (the briefing); `push-frontier.sh` answers "*given that, what is safe
+to launch right now?*" (the computed frontier); the orchestrator answers "*and which
+of those do I actually dispatch, with what brief?*" (the irreducible judgment, T5).
+The merge-watcher (Bead D) is its trigger; the bounded refill→verify Workflow (Bead I,
+§4.3) is its natural consumer — the frontier is exactly the *fixed bead list in* that
+the Workflow needs to stay bounded and non-runaway. It performs no mutation and no
+dispatch, so it sits squarely inside the meta-guardrail (§6): read-only / detection-
+only, waking a judgment, never taking an irreversible action unattended.
