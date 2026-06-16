@@ -57,7 +57,48 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # [OPUS-4.8] merge-throughput: path-filtered gate (same pattern as ci.yml's `changes`).
+  # The opt-in feature matrix only compiles/tests Rust, so a doc-only PR can skip it while
+  # the required ci-summary gate still resolves SUCCESS (the aggregator treats the skipped
+  # leg's `skipped` conclusion as non-failing). SAFE-BY-DEFAULT: rust_changed is forced
+  # 'true' on every event except `pull_request`, so the canonical push/merge_group/manual
+  # runs ALWAYS compile the full feature matrix — only a purely non-Rust PR diff skips.
+  changes:
+    name: detect rust changes (feature-matrix)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust_changed: ${{ steps.decide.outputs.rust_changed }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - '.github/workflows/feature-matrix.yml'
+      - name: Decide rust_changed (safe-by-default off the PR path)
+        id: decide
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "event=${{ github.event_name }} -> forcing rust_changed=true (full feature matrix)"
+          else
+            echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
+            echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }}"
+          fi
+
   opt-in-features:
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     # One matrix leg per crate + opt-in feature(group). Coexisting opt-in features of a
     # single crate are combined into ONE `--features a,b,c` leg (e.g. the sparq-server
     # federation/persistence/test seams) so the crate is compiled once per leg, not once
