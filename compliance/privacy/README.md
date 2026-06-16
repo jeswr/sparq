@@ -66,6 +66,36 @@ tree. What you *can* assess, and what this framework documents, is:
   and is **excluded** from every privacy-capability claim in this framework — see the explicit
   carve-out in [`controls.md`](./controls.md) §"ZK/MPC privacy story" and bead **sq-toze.35**.
 
+## ZK/MPC claim-honesty CI gate (sq-toze.35, ENFORCED)
+
+The standing-truth honesty constraint — *no doc may claim a ZK/MPC privacy or soundness
+property as a settled, achieved fact while the v1 verifier is pending external audit
+(**sq-qhy4**) and `sparq-mpc` is semi-honest only* — is now enforced **in CI**, not just in
+prose:
+
+- **Script:** [`scripts/check-privacy-claims.sh`](../../scripts/check-privacy-claims.sh) — a
+  grep-only, deterministic, network-free scanner. It greps the **outward claim surface**
+  (root docs, `skills/`, `site/` copy, the `compliance/` index, crate READMEs) for a fixed set
+  of forbidden unqualified-claim phrases (`zero-knowledge-secure`, `provably private/secure`, <!-- privacy-claims-allow: documents the gate's own phrase list; sq-toze.35 -->
+  `sound(ness) verifier/proof`, `privacy-preserving`, `malicious(ly)-secure`, <!-- privacy-claims-allow: documents the gate's own phrase list; sq-toze.35 -->
+  `cryptographically private/sound/secure`). <!-- privacy-claims-allow: documents the gate's own phrase list; sq-toze.35 -->
+- **CI wiring:** HARD gate job **`privacy-claims (ZK/MPC honesty gate)`** in
+  [`.github/workflows/docs-quality.yml`](../../.github/workflows/docs-quality.yml). The job name
+  carries no `advisory`/`informational` word, so the `ci-summary` aggregator (the single required
+  branch-protection check) gates on it — an unqualified claim **fails the merge**.
+- **Allow-list mechanism (the audit trail).** The phrase set is deliberately coarse, so it also
+  matches *legitimate* hedged / negative / "model"-qualified mentions (e.g. "**NOT** a sound
+  verifier", "documented **NOT** cryptographically sound", "which *model* privacy-preserving"). A <!-- privacy-claims-allow: documents legitimate hedged-usage examples; sq-toze.35 -->
+  matched line is exempted **only** if it carries the inline marker
+  `privacy-claims-allow: <one-line justification>` recording *why* that exact line is a
+  legitimate usage. Whole-file path exclusions are limited to the `research/` design records and
+  the `*audit*.md` documents (which must be free to name the properties to argue (un)soundness)
+  plus the gate's own files. Weakening the regex, or blanket-excluding a live outward doc surface,
+  to "make it pass" defeats the gate and is itself an honesty defect.
+- **Status:** the repo **passes the gate clean** after the sq-toze.35 fixes (the one real
+  outward overclaim was the top-level `README.md` ZK/MPC feature bullets, now caveated to point
+  at `SECURITY.md`).
+
 ## Deliverables in this framework
 
 | File | What |

@@ -83,7 +83,7 @@ not list them as gaps:
   no guarantee claimed" — there is no *overclaim* to correct, only a deferral to keep visible.
 - The privacy residuals (CR-G6) are **MEDIUM** because they are linkability/binding gaps in a
   system whose *soundness* (the load-bearing property) is separately argued — a privacy leak is
-  serious for a privacy-preserving system but does not let a forger pass a false result.
+  serious for a privacy-preserving system but does not let a forger pass a false result. <!-- privacy-claims-allow: descriptive of the system class under analysis (not a claim of an achieved property); sq-toze.35 -->
 
 > **Auditor note.** If any future framework (e.g. CDMC, privacy) assigns the ZK/MPC estate a
 > maturity score implying it provides a guarantee it disclaims, or cites the internal re-audit

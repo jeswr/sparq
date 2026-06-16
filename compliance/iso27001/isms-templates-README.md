@@ -65,7 +65,7 @@ organization supplies every *decision* and *sign-off*.
 - **No org decisions pre-made.** Every applicability, risk, acceptance, and sign-off cell is a
   `<FILL-IN>` placeholder. sparq does not, and cannot, make these for an organization.
 - **A.8.24 / ZK-MPC.** The `sparq-zk` / `sparq-zk-compose` / `sparq-mpc` estate was **originally
-  found NOT cryptographically sound** (`research/zk-soundness-audit.md`); `sq-1s2` then landed
+  found NOT cryptographically sound** (`research/zk-soundness-audit.md`); `sq-1s2` then landed <!-- privacy-claims-allow: historical/negated verdict ("found NOT cryptographically sound"), reconciled with the re-audit; not a current claim -->
   the verifier-side binding layer and an **internal** re-audit (`research/zk-verifier-reaudit.md`,
   `sq-gbp4`) found all findings closed → "sound as landed for the assumed threat model," but the
   re-audit is internal/single-model/read-only, **external accredited-cryptographer sign-off is

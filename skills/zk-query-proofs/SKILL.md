@@ -60,7 +60,7 @@ Stage 2 (`sparq-zk-compose`):
 - `toml::prover_toml_for(&ProofInputs, &FieldHex challenge, scan_counts: &[u32], scan_enc: &[Vec<[FieldHex;3]>], filter_digits: &[u8]) -> (CircuitId, String)`.
 - `driver::CircuitProver::{from_crate_root(), compile(&CircuitId), prove_in(&CircuitId, toml: &str, out_dir: &Path, tag: &str) -> Result<ProofArtifacts, DriverError>, gen_witness_tagged, canonical_vk, verify_with, verify}`.
 - `verifier::encode_artifacts(&ProofArtifacts) -> String` — the `proof_hex` blob (`len|proof|len|public_inputs|vk`) to put in a `SubProof`.
-- `verifier::verify_manifest(&ProofManifest, &CircuitProver, work_dir: &Path, &KeySet, &RevocationPolicy, &VerifierNonce, &dyn SeenNonces) -> Result<(), CheckError>` — **the sound entry point.** `prefilter_manifest_structure(&ProofManifest, &KeySet, &RevocationPolicy)` runs only the fast structural gate (no bb, binds nothing to a proof, enforces no freshness — **NOT a sound verifier on its own**).
+- `verifier::verify_manifest(&ProofManifest, &CircuitProver, work_dir: &Path, &KeySet, &RevocationPolicy, &VerifierNonce, &dyn SeenNonces) -> Result<(), CheckError>` — **the full-binding entry point** (the only path that runs every gate; an internal re-audit finds it sound-as-landed under its stated threat model, but it is **pending external cryptographer sign-off — treat it as NOT-yet-sound for production**, see [SECURITY.md](../../SECURITY.md) / sq-qhy4). `prefilter_manifest_structure(&ProofManifest, &KeySet, &RevocationPolicy)` runs only the fast structural gate (no bb, binds nothing to a proof, enforces no freshness — **NOT a sound verifier on its own**). <!-- privacy-claims-allow: negative usage ("NOT a sound verifier on its own") + pending-external-audit caveat; sq-toze.35 -->
 - Trust anchors / freshness: `KeySet::{empty, from_hex_keys(I), with_hidden_issuer_depth(u32)}`, `RevocationPolicy::{up_to(now, window), accept_version(v), with_snapshot(StatusListSnapshot), with_hidden_index_depth(u32)}`, `VerifierNonce::{from_hex, from_field}`, `FileSeenNonces::open(path)` (durable), `InMemorySeenNonces::new()` (test-only).
 - Manifest model: `manifest::{ProofManifest, ProofInputs::{Scan, FilterInt}, SubProof { inputs, proof_hex }, BindingEdge, BindingMode::Challenge { challenge }, CommitmentAttestation, AttestedStatusRef, RevocationStatus, StatusListSnapshot, EntailmentRegime::Simple, FilterOp, CircuitId, FieldHex}`. `ProofManifest::{to_json, from_json}` round-trip via serde.
 - Privacy upgrades (opt-in): `issuer::{key_set_root, key_membership_witness, hidden_issuer_prover_toml, HiddenIssuerWitness}` and `revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness}`.
@@ -157,7 +157,7 @@ let manifest = ProofManifest {
 let json = manifest.to_json(); // ships to the verifier
 ```
 
-### 4. Verify a manifest as a relying party (the sound path)
+### 4. Verify a manifest as a relying party (the full-binding path)
 ```rust
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::verifier::{verify_manifest, KeySet, RevocationPolicy, VerifierNonce, FileSeenNonces};
@@ -190,7 +190,7 @@ The nonce is **burned on presentation** (consumed even if verification then fail
 use sparq_zk_compose::verifier::{prefilter_manifest_structure, KeySet, RevocationPolicy};
 // Re-parses the query (Q6 cross-graph bnode-join guard + arity), re-derives circuit ids,
 // checks binding edges + issuer/key-set + revocation reference. NO bb, NO freshness.
-// NOT a sound verifier on its own — always follow with verify_manifest.
+// NOT a sound verifier on its own — always follow with verify_manifest. privacy-claims-allow: negative usage; sq-toze.35
 let _required = prefilter_manifest_structure(&manifest, &KeySet::empty(), &RevocationPolicy::accept_version(1))?;
 ```
 

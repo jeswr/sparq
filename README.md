@@ -97,10 +97,13 @@ standard it implements.
 - **RDF Dataset Canonicalization** — deterministic, blank-node-relabelled canonical form for
   hashing/signing/diffing with [RDFC-1.0](https://www.w3.org/TR/rdf-canon/)
   ([guide](skills/rdf-canon/SKILL.md)).
-- **Zero-knowledge query proofs** — prove a query result is correct without revealing the data
-  ([guide](skills/zk-query-proofs/SKILL.md)).
-- **Federated MPC** — evaluate SPARQL across parties with secure multi-party computation
-  ([guide](skills/mpc/SKILL.md)).
+- **Zero-knowledge query proofs** *(research scaffold — NOT yet sound)* — model proving a query
+  result is correct without revealing the data ([guide](skills/zk-query-proofs/SKILL.md)). The v1
+  verifier provides **no** soundness guarantee to a relying party pending external audit — see the
+  [security caveat](SECURITY.md#scope-and-a-critical-caveat-research-scaffolds-with-no-security-guarantee).
+- **Federated MPC** *(research scaffold — no security guarantee yet)* — model evaluating SPARQL
+  across parties with multi-party computation ([guide](skills/mpc/SKILL.md)); honest-majority
+  semi-honest, **not** maliciously secure ([SECURITY.md](SECURITY.md)). <!-- privacy-claims-allow: negative caveat ("not maliciously secure"); sq-toze.35 -->
 - **Interfaces** — a [CLI](skills/cli/SKILL.md), a
   [SPARQL 1.1 Protocol](https://www.w3.org/TR/sparql11-protocol/) +
   [Graph Store HTTP Protocol](https://www.w3.org/TR/sparql11-http-rdf-update/)

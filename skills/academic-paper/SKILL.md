@@ -16,7 +16,7 @@ not soften them.
 
 1. **No ZK/MPC security property may be claimed as proven.** The single-prover ZK verifier
    has no external audit (bead **sq-qhy4**, open); the multi-prover path is re-open
-   (**sq-9hrn**); the malicious-secure MPC layer is a stub. A ZK/MPC paper today is an
+   (**sq-9hrn**); the malicious-secure MPC layer is a stub. A ZK/MPC paper today is an <!-- privacy-claims-allow: "malicious-secure" here is a negation ("is a stub"), not an achieved-property claim -->
    **honest design / limitations / negative-result** contribution, arXiv/WIP only, and
    **must cite sq-qhy4**. Never write "secure" / "verifiable" / "private" as a *proven*
    property — only as a *design goal*.

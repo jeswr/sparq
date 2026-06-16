@@ -66,7 +66,7 @@ malicious-against-N−1**.
 
 - Every published **graph/SPARQL** crypto system (GOOSE, SMPG/PPMQ, GORAM) is
   semi-honest **and/or** confidentiality-only **and/or** conjunctive-only.
-  **Malicious-secure, attested-input, full-SPARQL federation has ZERO published
+  **Malicious-secure, attested-input, full-SPARQL federation has ZERO published <!-- privacy-claims-allow: negative literature statement (zero published instances); sq-toze.35 -->
   instances.** PPMQ's sub-ms numbers are single-desktop, co-located, no
   inter-party network — non-evidence for federation.
 - Relational MPC (Senate, Secrecy, Conclave, **ORQ SOSP'25** — first full TPC-H

@@ -10,7 +10,7 @@ import { ZkCarHire } from "@/components/zk-car-hire";
 export const metadata: Metadata = {
   title: "ZK car-hire — prove eligibility, reveal nothing",
   description:
-    "Prove you may hire a car — age ≥ 25 over hidden credential data — with a real zero-knowledge proof generated in your browser via Noir + Barretenberg UltraHonk. The exact age is never disclosed.",
+    "Research-grade (not externally audited): a real zero-knowledge proof — age ≥ 25 over hidden credential data — generated in your browser via Noir + Barretenberg UltraHonk. The exact age is never disclosed in-circuit; the v1 verifier carries no production soundness guarantee.",
 };
 
 export default function ZkCarHirePage() {

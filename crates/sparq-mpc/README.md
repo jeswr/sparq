@@ -22,7 +22,7 @@ The collaborative (multi-prover) zk-proof path is **deferred** — every
 gate (see `proof.rs` and the no-fake-crypto table in `adversarial_tests.rs`). The
 coZK re-audit (`research/mpc-cozk-reaudit.md`, bead `sq-9hrn`) against CRYPTO'25
 eprint 2025/1026 surfaced a **negative result**: the "honest-majority semi-honest
-⇒ malicious-secure for free" folklore holds for collaborative zk-SNARKs **only if
+⇒ malicious-secure for free" folklore holds for collaborative zk-SNARKs **only if <!-- privacy-claims-allow: hedged conditional ("only if … BEFORE …"), a negative-result caveat; sq-toze.35 -->
 the extended witness is validated for cross-holder consistency BEFORE the proving
 phase opens or commits to any value derived from it** (requirement **R-WV**).
 Proving over an inconsistent/maliciously-extended witness can **leak honest
