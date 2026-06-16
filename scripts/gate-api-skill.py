@@ -70,6 +70,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import subprocess
@@ -77,6 +78,24 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+# [OPUS-4.8] The `pub `-item multiset-diff logic now lives in ONE shared module
+# (scripts/pub_api_diff.py) so the reactive flow-on engine
+# (scripts/flow-on.py, rule `changed-public-feature-docs`) reuses the EXACT same
+# net-public-API-change test this gate uses — the two can no longer drift
+# (bead sq-l0a0). Loaded by path (the scripts dir is not an importable package).
+def _load_pub_api_diff():
+    spec = importlib.util.spec_from_file_location(
+        "pub_api_diff", REPO_ROOT / "scripts" / "pub_api_diff.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_pad = _load_pub_api_diff()
 
 # [OPUS-4.8] Binding / entry-point crates (sparq-cli/server/py/wasm). HISTORICALLY
 # any src/** change here was a public-surface change; that blanket rule
@@ -151,17 +170,12 @@ def crate_is_published(crate: str) -> bool:
     return re.search(r"^\s*publish\s*=\s*false\b", text, re.MULTILINE) is None
 
 
-# [OPUS-4.8] A line is a PUBLIC-ITEM signature iff, after the leading diff marker
-# (+/-) and any indentation, it begins with `pub ` (whitespace-separated) followed
-# by one of the exported item keywords. Requiring whitespace after `pub` excludes
-# restricted visibilities (`pub(crate)`/`pub(super)`/`pub(in …)`, all written
-# `pub(` with no space) — those are NOT the crate's public surface (AGENTS.md:
-# public API == exported items). The item-keyword anchor further excludes e.g. a
-# `pub` struct *field* (`pub name: T`) whose addition/removal is an internal-detail
-# edit, not a new exported path — only the eight item forms below count.
-_PUB_ITEM_RE = re.compile(
-    r"^[+-]\s*pub\s+(?:fn|struct|enum|trait|const|type|mod|use)\b"
-)
+# [OPUS-4.8] The PUBLIC-ITEM signature pattern + the diff scanner now live in the
+# shared scripts/pub_api_diff.py (so flow-on.py reuses the identical test). These
+# module-level aliases preserve the historical `_PUB_ITEM_RE` / `_scan_pub_diff`
+# names this gate (and test_gates.py) reference.
+_PUB_ITEM_RE = _pad.PUB_ITEM_RE
+_scan_pub_diff = _pad.scan_pub_diff
 
 
 def pub_diff_lines(path: str, base: str) -> tuple[list[str], list[str]]:
@@ -184,24 +198,6 @@ def pub_diff_lines(path: str, base: str) -> tuple[list[str], list[str]]:
     except subprocess.CalledProcessError:  # pragma: no cover - CI-only
         return [], []
     return _scan_pub_diff(out.splitlines())
-
-
-def _scan_pub_diff(diff_lines: list[str]) -> tuple[list[str], list[str]]:
-    """Pure helper: split unified-diff lines into (added, removed) public-item
-    signatures (marker stripped, inner whitespace normalised)."""
-    added: list[str] = []
-    removed: list[str] = []
-    for line in diff_lines:
-        # Skip file headers (`+++ b/…`, `--- a/…`) — never item signatures.
-        if line.startswith("+++") or line.startswith("---"):
-            continue
-        if not _PUB_ITEM_RE.match(line):
-            continue
-        # Normalise: drop the +/- marker, collapse inner whitespace so a moved
-        # signature matches itself regardless of re-indentation.
-        norm = " ".join(line[1:].split())
-        (added if line[0] == "+" else removed).append(norm)
-    return added, removed
 
 
 def pub_api_changed(path: str, base: str) -> bool:

@@ -46,50 +46,36 @@
 #   labels    = ["extra", "labels"]         # optional; `flow-on` + `auto` are ALWAYS added
 # ---------------------------------------------------------------------------
 
-# --- New crate / public surface → benchmark + README + SKILL.md ----------------
-# Trigger: a brand-new `crates/<x>/Cargo.toml` is ADDED. A new crate must ship a
-# registered benchmark and (if it is a public surface) a SKILL.md. The gateable
-# subset (README template) is handled by check-readme-template.py; this flow-on
-# captures the out-of-band bench registration + SKILL authoring.
-[[rule]]
-id = "new-crate-bench-and-skill"
-description = "A new crate landed; ensure it has a registered benchmark and (if public) a SKILL.md."
-when_new_paths = ["crates/*/Cargo.toml"]
-
-[[rule.create]]
-dedup_key = "new-crate-bench-{crate}"
-title = "bench: register a benchmark for new crate {crate}"
-labels = ["bench"]
-body = """
-Merged PR #{pr} ({pr_title}) added a new crate `crates/{crate}`.
-
-Per the maintenance flow-on rules, a new crate must have a registered benchmark
-so it is visible to CATALOG / CI / the dashboard. Add a `[[benchmark]]` entry in
-`bench/benchmarks.toml` (with `source = crates/{crate}`), or — if the crate is an
-intentional stub — mark it `publish = false` and record an exemption bead.
-"""
-
-[[rule.create]]
-dedup_key = "new-crate-skill-{crate}"
-title = "docs: add a SKILL.md surface for new crate {crate}"
-labels = ["docs", "cert"]
-body = """
-Merged PR #{pr} ({pr_title}) added a new crate `crates/{crate}`.
-
-If `crates/{crate}` exposes a public surface (CLI / HTTP route / Py·JS binding /
-public Rust API), it needs a `skills/<surface>/SKILL.md` and a conformance/cert
-plan (cf. the sparq-shacl crate-local W3C ratchet). If it is internal-only,
-record that decision explicitly so the gap is not re-flagged.
-"""
+# --- New crate → benchmark + README + SKILL.md  [REMOVED — owned by gate G1] ----
+# There is intentionally NO reactive "register a bench / add a SKILL for the new
+# crate {crate}" rule here. The PROACTIVE merge gate G1 (scripts/gate-new-crate.py,
+# merged #221) ALREADY enforces — and BLOCKS the merge on — a registered benchmark
+# + README + (for a public crate) a SKILL.md *in the same PR* that adds the crate.
+# So by the time a new-crate PR is MERGED, those artifacts are guaranteed present;
+# a post-merge follow-on issue would be pure noise (dogfooded: this rule minted the
+# redundant #245 / #246 / #264 / #265 bench+SKILL follow-ons — bead sq-l0a0).
+#
+# G1 is the single owner of new-crate completeness. The stub escape hatch
+# (`publish = false`) is likewise handled there. If G1 is ever relaxed to a
+# non-blocking advisory, restore a SAFETY-NET reactive rule here — but it must
+# CHECK that the crate genuinely lacks the bench/SKILL on `main` before creating
+# (don't blindly mint), not re-emit unconditionally as the old rule did.
 
 # --- Changed public feature → docs / SKILL.md update ---------------------------
 # Trigger: a change under a published crate's surface, the CLI, the HTTP server,
-# or the Py/WASM bindings, WITHOUT a corresponding SKILL.md edit. (flow-on.py only
-# fires this when no skills/** file is in the same diff — see SKILL_PATHS in
-# flow-on.py.) Keeps the AGENTS.md public-API→SKILL.md norm from silently drifting.
+# or the Py/WASM bindings, WITHOUT a corresponding SKILL.md edit.
+#
+# [OPUS-4.8] The `when_paths` glob is only a CHEAP PRE-FILTER. flow-on.py fires
+# this rule ONLY when, in addition, (a) no skills/** file is in the same diff
+# (SKILL_PATHS) AND (b) the PR's unified diff NET-changes a `pub `-exported item
+# under one of these surfaces — using the SAME pub-item multiset diff as gate G2
+# (scripts/pub_api_diff.py). A comment-only / lint-attribute-only / pure-relocation
+# edit therefore does NOT mint a follow-on (dogfooded: PR #250 mis-fired this rule
+# on a comment+lint-attr-only diff — bead sq-l0a0). Keeps the AGENTS.md
+# public-API → SKILL.md norm from drifting without flagging inert edits.
 [[rule]]
 id = "changed-public-feature-docs"
-description = "A public surface changed without a SKILL.md update in the same PR."
+description = "A NET public-API change to a surface without a SKILL.md update in the same PR."
 when_paths = [
   "crates/sparq-cli/src/**",
   "crates/sparq-server/src/**",

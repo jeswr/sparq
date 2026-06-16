@@ -45,7 +45,6 @@ class RuleLoadingTest(unittest.TestCase):
         ids = {r.id for r in rules}
         # The taxonomy rules the design requires must all be present.
         for required in (
-            "new-crate-bench-and-skill",
             "changed-public-feature-docs",
             "new-bench-dashboard-row",
             "competitor-feature-gather",
@@ -54,6 +53,11 @@ class RuleLoadingTest(unittest.TestCase):
             "new-zk-circuit-gatecount",
         ):
             self.assertIn(required, ids)
+        # [OPUS-4.8] (bead sq-l0a0) The new-crate bench/SKILL follow-on rule was
+        # REMOVED — merge gate G1 (scripts/gate-new-crate.py) already enforces a
+        # registered bench + README + SKILL in the SAME PR, so a post-merge
+        # follow-on for them was pure redundant noise (minted #245/#246/#264/#265).
+        self.assertNotIn("new-crate-bench-and-skill", ids)
         # Every rule has a trigger + at least one create template.
         for r in rules:
             self.assertTrue(
@@ -64,7 +68,10 @@ class RuleLoadingTest(unittest.TestCase):
 
 
 class NewCrateTest(unittest.TestCase):
-    """A PR that adds crates/sparq-foo/ must yield the bench + SKILL follow-ons."""
+    """[OPUS-4.8] (bead sq-l0a0) A new-crate PR must yield NO bench/SKILL
+    follow-on: merge gate G1 already guarantees a registered bench + README +
+    SKILL in the SAME PR, so the old reactive follow-on was pure redundant noise
+    (minted #245/#246/#264/#265). The rule was removed."""
 
     def setUp(self):
         self.rules = flow_on.load_rules(RULES)
@@ -74,31 +81,27 @@ class NewCrateTest(unittest.TestCase):
             self.rules, 42, title, changed, added, labels or []
         )
 
-    def test_new_crate_triggers_bench_and_skill(self):
+    def test_new_crate_with_bench_and_skill_yields_no_redundant_follow_on(self):
+        # A new crate that ships (as G1 requires) its bench + README + SKILL must
+        # NOT mint a bench/SKILL follow-on — G1 owns that, in-PR.
         added = [
             "crates/sparq-foo/Cargo.toml",
             "crates/sparq-foo/src/lib.rs",
             "crates/sparq-foo/README.md",
         ]
-        fos = self._eval(changed=added, added=added)
-        rule_ids = {fo.rule_id for fo in fos}
-        self.assertIn("new-crate-bench-and-skill", rule_ids)
-
+        changed = added + ["bench/benchmarks.toml", "skills/sparq-foo/SKILL.md"]
+        fos = self._eval(changed=changed, added=added)
         keys = {fo.dedup_key for fo in fos}
-        self.assertIn("new-crate-bench-sparq-foo", keys)
-        self.assertIn("new-crate-skill-sparq-foo", keys)
+        self.assertNotIn("new-crate-bench-sparq-foo", keys)
+        self.assertNotIn("new-crate-skill-sparq-foo", keys)
+        self.assertNotIn("new-crate-bench-and-skill", {fo.rule_id for fo in fos})
 
-        # The {crate} placeholder is expanded in titles + bodies.
-        bench_fo = next(fo for fo in fos if fo.dedup_key == "new-crate-bench-sparq-foo")
-        self.assertIn("sparq-foo", bench_fo.title)
-        self.assertIn("sparq-foo", bench_fo.body)
-        self.assertNotIn("{crate}", bench_fo.title)
-        self.assertNotIn("{crate}", bench_fo.body)
-
-        # Base labels always present; the idempotency marker is embedded.
-        self.assertIn("flow-on", bench_fo.labels)
-        self.assertIn("auto", bench_fo.labels)
-        self.assertIn(flow_on.key_marker("new-crate-bench-sparq-foo"), bench_fo.body)
+    def test_new_crate_alone_yields_no_redundant_follow_on(self):
+        # Even a bare new crate (which G1 would BLOCK at merge) mints no flow-on
+        # follow-on — the redundant rule is gone.
+        added = ["crates/sparq-foo/Cargo.toml", "crates/sparq-foo/src/lib.rs"]
+        fos = self._eval(changed=added, added=added)
+        self.assertNotIn("new-crate-bench-and-skill", {fo.rule_id for fo in fos})
 
     def test_modifying_existing_crate_file_does_not_fire_new_crate_rule(self):
         # Cargo.toml is CHANGED but not ADDED -> when_new_paths must not match.
@@ -112,15 +115,79 @@ class ChangedSurfaceTest(unittest.TestCase):
     def setUp(self):
         self.rules = flow_on.load_rules(RULES)
 
-    def test_cli_change_without_skill_fires_docs_rule(self):
+    def test_cli_pub_change_without_skill_fires_docs_rule(self):
+        # [OPUS-4.8] (bead sq-l0a0) A NET public-API change (the path is in
+        # pub_changed) without a SKILL.md DOES fire — the genuinely-useful case.
         changed = ["crates/sparq-cli/src/main.rs"]
-        fos = flow_on.evaluate(self.rules, 7, "add --explain flag", changed, [], [])
+        fos = flow_on.evaluate(
+            self.rules, 7, "add --explain flag", changed, [], [],
+            pub_changed={"crates/sparq-cli/src/main.rs"},
+        )
         self.assertIn("changed-public-feature-docs", {fo.rule_id for fo in fos})
 
-    def test_cli_change_with_skill_update_suppresses_docs_rule(self):
-        changed = ["crates/sparq-cli/src/main.rs", "skills/cli/SKILL.md"]
-        fos = flow_on.evaluate(self.rules, 8, "add --explain flag", changed, [], [])
+    def test_cli_comment_only_change_does_not_fire_docs_rule(self):
+        # [OPUS-4.8] (bead sq-l0a0) REGRESSION (mis-fired #250): a comment-only /
+        # lint-attribute-only edit to a public surface is NOT a net public-API
+        # change (the path is absent from pub_changed), so it mints NO skill-sync
+        # follow-on — even without a SKILL.md in the diff.
+        changed = ["crates/sparq-cli/src/main.rs"]
+        fos = flow_on.evaluate(
+            self.rules, 250, "add SAFETY comments + #![warn] attrs", changed, [], [],
+            pub_changed=set(),
+        )
         self.assertNotIn("changed-public-feature-docs", {fo.rule_id for fo in fos})
+
+    def test_cli_change_with_skill_update_suppresses_docs_rule(self):
+        # A SKILL.md in the same diff means the docs were synced → suppress, even
+        # on a real pub change.
+        changed = ["crates/sparq-cli/src/main.rs", "skills/cli/SKILL.md"]
+        fos = flow_on.evaluate(
+            self.rules, 8, "add --explain flag", changed, [], [],
+            pub_changed={"crates/sparq-cli/src/main.rs"},
+        )
+        self.assertNotIn("changed-public-feature-docs", {fo.rule_id for fo in fos})
+
+
+class PubApiDiffPlumbingTest(unittest.TestCase):
+    """[OPUS-4.8] (bead sq-l0a0) The docs rule reuses gate G2's shared pub-item
+    multiset diff (scripts/pub_api_diff.py). Verify the patch→pub_changed plumbing
+    distinguishes a genuine new `pub fn` from a comment/attr/relocation diff."""
+
+    def test_pub_changed_from_patch_detects_new_pub_fn(self):
+        patch = (
+            "diff --git a/crates/sparq-cli/src/main.rs b/crates/sparq-cli/src/main.rs\n"
+            "--- a/crates/sparq-cli/src/main.rs\n"
+            "+++ b/crates/sparq-cli/src/main.rs\n"
+            "@@ -1,0 +1,1 @@\n"
+            "+pub fn brand_new_flag() {}\n"
+        )
+        self.assertEqual(
+            flow_on.pub_changed_from_patch(patch),
+            {"crates/sparq-cli/src/main.rs"},
+        )
+
+    def test_pub_changed_from_patch_ignores_comment_and_attr_only(self):
+        patch = (
+            "diff --git a/crates/sparq-cli/src/main.rs b/crates/sparq-cli/src/main.rs\n"
+            "--- a/crates/sparq-cli/src/main.rs\n"
+            "+++ b/crates/sparq-cli/src/main.rs\n"
+            "@@ -1,0 +1,2 @@\n"
+            "+// SAFETY: this is sound because ...\n"
+            "+#![warn(clippy::all)]\n"
+        )
+        self.assertEqual(flow_on.pub_changed_from_patch(patch), set())
+
+    def test_pub_changed_from_patch_ignores_pure_relocation(self):
+        patch = (
+            "diff --git a/crates/sparq-cli/src/main.rs b/crates/sparq-cli/src/main.rs\n"
+            "--- a/crates/sparq-cli/src/main.rs\n"
+            "+++ b/crates/sparq-cli/src/main.rs\n"
+            "@@ -10,1 +10,0 @@\n"
+            "-pub fn moved() {}\n"
+            "@@ -40,0 +50,1 @@\n"
+            "+pub fn moved() {}\n"
+        )
+        self.assertEqual(flow_on.pub_changed_from_patch(patch), set())
 
 
 class CompetitorLabelTest(unittest.TestCase):
@@ -160,16 +227,18 @@ class IdempotencyTest(unittest.TestCase):
         self.rules = flow_on.load_rules(RULES)
 
     def test_dedup_key_stable_across_runs(self):
-        added = ["crates/sparq-foo/Cargo.toml"]
+        # [OPUS-4.8] (bead sq-l0a0) Repointed off the removed new-crate rule onto
+        # the new-bench-dashboard-row follow-on, which still fires and produces a
+        # stable, non-empty dedup key.
+        added = ["bench/widgets/benchmarks.toml"]
         a = flow_on.evaluate(self.rules, 42, "t", added, added, [])
         b = flow_on.evaluate(self.rules, 42, "t", added, added, [])
-        self.assertEqual(
-            sorted(fo.dedup_key for fo in a),
-            sorted(fo.dedup_key for fo in b),
-        )
+        keys_a = sorted(fo.dedup_key for fo in a)
+        self.assertIn("dashboard-row-widgets", keys_a)
+        self.assertEqual(keys_a, sorted(fo.dedup_key for fo in b))
 
     def test_marker_round_trips(self):
-        key = "new-crate-bench-sparq-foo"
+        key = "dashboard-row-widgets"
         body = "some body\n\n" + flow_on.key_marker(key)
         # open_issue_exists greps for exactly this marker substring.
         self.assertIn(flow_on.key_marker(key), body)
@@ -181,12 +250,14 @@ class DryRunTest(unittest.TestCase):
     We provide all inputs hermetically (changed-files/title) so fetch_pr_inputs
     is never reached, and --dry-run skips open_issue_exists/create_issue."""
 
-    def test_dry_run_on_new_crate_fixture(self):
+    def test_dry_run_on_new_bench_suite_fixture(self):
+        # [OPUS-4.8] (bead sq-l0a0) Repointed off the removed new-crate rule onto
+        # the surviving new-bench-suite → dashboard-row follow-on.
         import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             changed = Path(td) / "changed.txt"
-            changed.write_text("crates/sparq-foo/Cargo.toml\ncrates/sparq-foo/src/lib.rs\n")
+            changed.write_text("bench/widgets/benchmarks.toml\nbench/widgets/run.sh\n")
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = flow_on.main(
@@ -199,13 +270,47 @@ class DryRunTest(unittest.TestCase):
                         "--added-files",
                         str(changed),
                         "--title",
-                        "add sparq-foo crate",
+                        "add widgets bench suite",
                     ]
                 )
             out = buf.getvalue()
         self.assertEqual(rc, 0)
         self.assertIn("[dry-run] WOULD create", out)
-        self.assertIn("new-crate-bench-sparq-foo", out)
+        self.assertIn("dashboard-row-widgets", out)
+
+    def test_dry_run_on_new_crate_with_g1_artifacts_is_clean(self):
+        # [OPUS-4.8] (bead sq-l0a0) A new-crate PR that ships its G1 artifacts
+        # (bench + README + SKILL) triggers NO redundant flow-on follow-on.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            changed = Path(td) / "changed.txt"
+            changed.write_text(
+                "crates/sparq-foo/Cargo.toml\ncrates/sparq-foo/src/lib.rs\n"
+                "crates/sparq-foo/README.md\nbench/benchmarks.toml\n"
+                "skills/sparq-foo/SKILL.md\n"
+            )
+            added = Path(td) / "added.txt"
+            added.write_text("crates/sparq-foo/Cargo.toml\ncrates/sparq-foo/src/lib.rs\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = flow_on.main(
+                    [
+                        "--pr",
+                        "245",
+                        "--dry-run",
+                        "--changed-files",
+                        str(changed),
+                        "--added-files",
+                        str(added),
+                        "--title",
+                        "add sparq-foo crate (with bench+SKILL, as G1 requires)",
+                    ]
+                )
+            out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("new-crate-bench", out)
+        self.assertNotIn("new-crate-skill", out)
 
     def test_dry_run_no_match_is_clean(self):
         import tempfile
@@ -225,13 +330,13 @@ class DryRunTest(unittest.TestCase):
     def test_hermetic_without_added_files_does_not_fire_new_path_rules(self):
         # [OPUS-4.8] Regression: when --added-files is omitted, `added` must
         # default to EMPTY, not to all changed files — otherwise a MODIFIED
-        # crate Cargo.toml would falsely fire the new-crate (when_new_paths)
-        # rule. Here Cargo.toml is changed-but-not-added.
+        # benchmarks.toml would falsely fire the new-bench (when_new_paths)
+        # rule. Here it is changed-but-not-added.
         import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             changed = Path(td) / "changed.txt"
-            changed.write_text("crates/sparq-foo/Cargo.toml\n")
+            changed.write_text("bench/widgets/benchmarks.toml\n")
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = flow_on.main(
@@ -242,13 +347,52 @@ class DryRunTest(unittest.TestCase):
                         "--changed-files",
                         str(changed),
                         "--title",
-                        "tweak sparq-foo manifest",
+                        "tweak widgets bench",
                     ]
                 )
             out = buf.getvalue()
         self.assertEqual(rc, 0)
-        self.assertNotIn("new-crate-bench-sparq-foo", out)
+        self.assertNotIn("dashboard-row-widgets", out)
         self.assertIn("no rules triggered", out)
+
+    def test_hermetic_comment_only_public_surface_is_clean(self):
+        # [OPUS-4.8] (bead sq-l0a0) End-to-end via main(): a public-surface src
+        # change WITHOUT --pub-diff-file (so pub_changed defaults to empty) mints
+        # NO skill-sync follow-on — the #250 mis-fire is fixed at the CLI layer.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            changed = Path(td) / "changed.txt"
+            changed.write_text("crates/sparq-cli/src/main.rs\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = flow_on.main(
+                    ["--pr", "250", "--dry-run", "--changed-files", str(changed),
+                     "--title", "add SAFETY comments"]
+                )
+            out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("no rules triggered", out)
+
+    def test_hermetic_pub_change_fires_skill_sync(self):
+        # [OPUS-4.8] (bead sq-l0a0) With --pub-diff-file marking a net pub change,
+        # the skill-sync follow-on DOES fire (the useful case is preserved).
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            changed = Path(td) / "changed.txt"
+            changed.write_text("crates/sparq-cli/src/main.rs\n")
+            pub = Path(td) / "pub.txt"
+            pub.write_text("crates/sparq-cli/src/main.rs\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = flow_on.main(
+                    ["--pr", "251", "--dry-run", "--changed-files", str(changed),
+                     "--pub-diff-file", str(pub), "--title", "add --explain flag"]
+                )
+            out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("skill-sync-pr-251", out)
 
 
 if __name__ == "__main__":
