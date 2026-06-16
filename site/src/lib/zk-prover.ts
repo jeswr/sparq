@@ -81,24 +81,70 @@ interface BbModule {
   };
 }
 
-let circuitPromise: Promise<{ bytecode: string }> | null = null;
-
 function basePath(): string {
   return process.env.NEXT_PUBLIC_BASE_PATH ?? "/sparq";
 }
 
-/** Fetches the committed ACIR artifact once. */
-async function loadCircuit(): Promise<{ bytecode: string }> {
-  if (!circuitPromise) {
-    circuitPromise = fetch(`${basePath()}/zk/filter_int_d2.json`).then((r) => {
-      if (!r.ok) throw new Error(`circuit fetch failed: ${r.status}`);
-      return r.json();
-    });
-    circuitPromise.catch(() => {
-      circuitPromise = null;
+/**
+ * [OPUS-4.8] The cold-start cost of the in-browser prover, paid once and shared.
+ *
+ * Three expensive things must happen before the first proof can be produced, and
+ * none of them depend on the chosen age:
+ *   1. dynamic-import the `@noir-lang/noir_js` + `@aztec/bb.js` chunks (the ~MB WASM
+ *      glue, deliberately kept out of the main page bundle), and
+ *   2. fetch + parse the committed ACIR artifact (`/zk/filter_int_d2.json`), and
+ *   3. instantiate the Barretenberg WASM backend (`Barretenberg.new` — the dominant
+ *      cold cost) and build the `UltraHonkBackend` over the circuit bytecode.
+ *
+ * {@link prewarmProver} kicks this off in the background on ZK-route mount so the
+ * first "Generate ZK proof" click pays none of it. {@link proveAgeEligibility}
+ * awaits the SAME promise as a safety net, so a click that lands before pre-warm
+ * finishes (or when pre-warm was never called) is still correct — it simply waits.
+ */
+interface ProverContext {
+  Noir: NoirModule["Noir"];
+  backend: InstanceType<BbModule["UltraHonkBackend"]>;
+  circuit: { bytecode: string };
+  threads: number;
+}
+
+let proverPromise: Promise<ProverContext> | null = null;
+
+async function loadProver(): Promise<ProverContext> {
+  if (!proverPromise) {
+    proverPromise = (async () => {
+      const [{ Noir }, bb, circuit] = await Promise.all([
+        import(/* webpackChunkName: "noir-js" */ "@noir-lang/noir_js") as Promise<NoirModule>,
+        import(/* webpackChunkName: "bb-js" */ "@aztec/bb.js") as Promise<BbModule>,
+        fetch(`${basePath()}/zk/filter_int_d2.json`).then((r) => {
+          if (!r.ok) throw new Error(`circuit fetch failed: ${r.status}`);
+          return r.json() as Promise<{ bytecode: string }>;
+        }),
+      ]);
+
+      const threads = maxThreads();
+      const api = await bb.Barretenberg.new({ threads });
+      const backend = new bb.UltraHonkBackend(circuit.bytecode, api);
+      return { Noir, backend, circuit, threads };
+    })();
+    proverPromise.catch(() => {
+      proverPromise = null; // allow retry on transient failure (fetch/instantiate)
     });
   }
-  return circuitPromise;
+  return proverPromise;
+}
+
+/**
+ * [OPUS-4.8] Eagerly pre-warm the ZK prover (dynamic-import + circuit fetch + WASM
+ * backend instantiate) without blocking render. Safe to call on route mount and to
+ * call repeatedly — it shares the single {@link loadProver} promise, so the cold
+ * start happens at most once. Returns a promise that resolves when the prover is
+ * ready (or rejects on a load failure, which resets the cache so a later click can
+ * retry). This is a UX/perf measure only — it does not change what is proved, nor
+ * any security property of the proof.
+ */
+export function prewarmProver(): Promise<unknown> {
+  return loadProver();
 }
 
 /** Cross-origin isolation gates bb.js multithreading (SharedArrayBuffer). GitHub
@@ -128,11 +174,10 @@ export async function proveAgeEligibility(age: number): Promise<ProofResult> {
   }
   const eligible = age >= AGE_THRESHOLD;
 
-  const [{ Noir }, bb, circuit] = await Promise.all([
-    import(/* webpackChunkName: "noir-js" */ "@noir-lang/noir_js") as Promise<NoirModule>,
-    import(/* webpackChunkName: "bb-js" */ "@aztec/bb.js") as Promise<BbModule>,
-    loadCircuit(),
-  ]);
+  // Reuse the shared, pre-warmed prover context (dynamic imports + circuit fetch +
+  // instantiated UltraHonk backend). If pre-warm has not finished, this awaits the
+  // same in-flight promise — never a second cold start.
+  const { Noir, backend, circuit, threads } = await loadProver();
 
   const inputs = {
     challenge: "0x1", // per-presentation verifier nonce (fixed here for the demo)
@@ -146,10 +191,6 @@ export async function proveAgeEligibility(age: number): Promise<ProofResult> {
   const noir = new Noir(circuit);
   // For an under-age claim the verdict assertion fails here: no proof possible.
   const { witness } = await noir.execute(inputs);
-
-  const threads = maxThreads();
-  const api = await bb.Barretenberg.new({ threads });
-  const backend = new bb.UltraHonkBackend(circuit.bytecode, api);
 
   const t0 = performance.now();
   const proof = await backend.generateProof(witness);
