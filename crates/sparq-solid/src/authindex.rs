@@ -151,9 +151,10 @@ pub fn pair_principal(agent: &str, client: &str) -> String {
 /// percent-encoding makes the minting INJECTIVE, so no agent/client/issuer value can
 /// smuggle a `&client=`/`&issuer=` delimiter into another principal's term).
 ///
-/// The `client` component is `auth:AnyClient` ([`ANY_CLIENT`]) for a matcher that
-/// constrains the issuer but not the client; only an issuer-CONSTRAINED candidate mints a
-/// triple — an issuer-unconstrained grant reuses the agent / [`pair_principal`] term.
+/// The `client` component is `auth:AnyClient` (the crate-internal `ANY_CLIENT`) for a
+/// matcher that constrains the issuer but not the client; only an issuer-CONSTRAINED
+/// candidate mints a triple — an issuer-unconstrained grant reuses the agent /
+/// [`pair_principal`] term.
 ///
 /// ```
 /// use sparq_solid::triple_principal;
