@@ -37,6 +37,16 @@ pub const ODRL_COUNT: &str = "http://www.w3.org/ns/odrl/2/count";
 /// [`recipient_status`]). [OPUS-4.8] sq-5037.
 pub const ODRL_RECIPIENT: &str = "http://www.w3.org/ns/odrl/2/recipient";
 
+/// The `odrl:dateTime` left-operand IRI — the dimension a *temporal constraint*
+/// restricts (the instant a permission/prohibition is gated on, e.g.
+/// `odrl:dateTime lteq "2026-12-31T23:59:59Z"`, the upper edge of a validity
+/// window). The actual instant is the request's evaluation time, supplied as
+/// [`Value::DateTime`] evidence (see [`Request::at`] / [`datetime_status`]); a
+/// request that supplies **no** time carries no temporal evidence, so a temporal
+/// permission does not grant and a temporal prohibition is not withdrawn
+/// (fail-closed). [OPUS-4.8] sq-idnv.
+pub const ODRL_DATETIME: &str = "http://www.w3.org/ns/odrl/2/dateTime";
+
 /// An access request evaluated against a [`Policy`]: who wants to do what, to
 /// what, in what context (the "evaluation request" + "state of the world" of the
 /// ODRL Formal Semantics, folded into one node-local view).
@@ -132,6 +142,34 @@ impl Request {
     /// on. [OPUS-4.8] sq-q56r.
     pub fn purpose(&self) -> Option<&Value> {
         self.context.get(ODRL_PURPOSE)
+    }
+
+    /// Declare the **evaluation time** this request is made at as evidence
+    /// (chainable) — the `odrl:dateTime` left-operand value a temporal (time-window)
+    /// rule is checked against. [OPUS-4.8] sq-idnv.
+    ///
+    /// First-class sugar over [`Request::with`]`(ODRL_DATETIME, Value::DateTime(..))`:
+    /// it makes the *time evidence the requester supplies* explicit (and auditable via
+    /// [`Request::request_time`]) instead of relying on a magic context key. A request
+    /// that does NOT call this carries **no** time evidence, so a permission gated on a
+    /// time window does not grant and a prohibition gated on a time window is not
+    /// withdrawn (fail-closed — see [`datetime_status`]).
+    ///
+    /// The instant is stored verbatim as a normalized xsd:dateTime lexical key; it is
+    /// compared by magnitude under the lt/gt/lteq/gteq/eq/neq operators (the same
+    /// instant ordering the evaluator's `order`/`compare` applies — see the README
+    /// caveat on mixed timezone offsets).
+    pub fn at(self, instant: impl Into<String>) -> Request {
+        self.with(ODRL_DATETIME, Value::DateTime(instant.into()))
+    }
+
+    /// The evaluation-time evidence this request carries (`odrl:dateTime`), or `None`
+    /// if the request supplied none. The auditable answer to *"did the request supply
+    /// a time to check the window against?"* — the question faithful time-window
+    /// enforcement turns on (a missing time is Unprovable, not "any time").
+    /// [OPUS-4.8] sq-idnv.
+    pub fn request_time(&self) -> Option<&Value> {
+        self.context.get(ODRL_DATETIME)
     }
 }
 
@@ -546,6 +584,103 @@ pub fn recipient_status(rule: &Rule, request: &Request) -> RecipientMatch {
         RecipientMatch::Unprovable
     } else {
         RecipientMatch::Satisfied
+    }
+}
+
+/// The three-valued verdict of a rule's `odrl:dateTime` (time-window) constraints
+/// against the evaluation-time evidence a request carries — a FAITHFUL report of
+/// exactly what [`evaluate`] checks for the clock (it reuses the same
+/// [`constraint_status`] the evaluator's `odrl:dateTime` constraints go through).
+/// [OPUS-4.8] sq-idnv.
+///
+/// The honesty contract mirrors [`PurposeMatch`] / [`RecipientMatch`]: this never
+/// claims a stronger verdict than the evaluator acts on. `Satisfied` is the ONLY
+/// verdict under which a time-gated permission grants; anything other than
+/// `DefinitelyUnsatisfied` (i.e. `Satisfied` OR `Unprovable`) keeps a time-gated
+/// prohibition in force.
+///
+/// **The time-window shape:** a `dateTime lteq T` (or `lt`/`gteq`/`gt`/`eq`/`neq T`)
+/// constraint is `Satisfied` when the request's instant meets the bound,
+/// `DefinitelyUnsatisfied` when the request supplies an instant that fails the bound
+/// (e.g. a `lteq` upper edge that has provably lapsed), and `Unprovable` when the
+/// request supplies no time at all — fail-closed: a time-gated permission does NOT
+/// grant on an unknown clock, and a time-gated prohibition is NOT withdrawn. Several
+/// `dateTime` constraints on one rule are ANDed (a two-sided window `gteq lower` +
+/// `lteq upper` must both hold), mirroring the evaluator's constraint conjunction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateTimeMatch {
+    /// The rule has no `odrl:dateTime` constraint — time places no restriction on it.
+    NotConstrained,
+    /// The rule constrains time AND the request's instant **meets** every time
+    /// constraint (inside the window).
+    Satisfied,
+    /// The rule constrains time but the request carries **no** time evidence —
+    /// *unprovable*. Fail-closed: a permission does NOT grant; a prohibition is NOT
+    /// withdrawn. (Never silently read as "any time allowed".)
+    Unprovable,
+    /// The rule constrains time and the request's instant **fails** the window — a
+    /// definite no (the window has not opened yet, or has provably lapsed).
+    DefinitelyUnsatisfied,
+}
+
+/// Report how `rule`'s `odrl:dateTime` (time-window) constraint(s) stand against the
+/// evaluation-time evidence `request` carries — the auditable surface of faithful
+/// temporal enforcement. [OPUS-4.8] sq-idnv.
+///
+/// Like [`purpose_status`] / [`recipient_status`], this does NOT re-implement
+/// matching: it runs the request through the SAME [`constraint_status`] every
+/// `odrl:dateTime` constraint goes through inside [`evaluate`], so the verdict it
+/// reports is exactly what the evaluator acts on (no claimed enforcement that isn't
+/// actually checked — the whole point of the bead). The time evidence is the
+/// `odrl:dateTime` context value the request supplies (via [`Request::at`]).
+///
+/// Returns [`DateTimeMatch::NotConstrained`] when the rule has no time constraint.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_policy::{datetime_status, DateTimeMatch, parse_policy_str, Request};
+/// // "may read until 2026-12-31" (a half-open validity window).
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+/// <urn:pol/p> a odrl:Set ; odrl:permission [
+///     odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+///     odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+///                       odrl:rightOperand "2026-12-31T23:59:59Z"^^xsd:dateTime ] ] .
+/// "#, "turtle").unwrap();
+/// let rule = &pol.permissions[0];
+/// let base = Request::new("http://www.w3.org/ns/odrl/2/read").on("urn:asset/x");
+///
+/// // Inside the window → Satisfied.
+/// let inside = base.clone().at("2026-06-16T09:00:00Z");
+/// assert_eq!(datetime_status(rule, &inside), DateTimeMatch::Satisfied);
+/// // After the window → DefinitelyUnsatisfied.
+/// let lapsed = base.clone().at("2027-03-01T00:00:00Z");
+/// assert_eq!(datetime_status(rule, &lapsed), DateTimeMatch::DefinitelyUnsatisfied);
+/// // No time at all → Unprovable (fail-closed; not "any time").
+/// assert_eq!(datetime_status(rule, &base), DateTimeMatch::Unprovable);
+/// ```
+pub fn datetime_status(rule: &Rule, request: &Request) -> DateTimeMatch {
+    let mut constrained = false;
+    let mut any_unprovable = false;
+    for c in &rule.constraints {
+        if c.left != ODRL_DATETIME {
+            continue;
+        }
+        constrained = true;
+        match constraint_status(c, request) {
+            ConstraintStatus::Satisfied => {}
+            ConstraintStatus::DefinitelyUnsatisfied => return DateTimeMatch::DefinitelyUnsatisfied,
+            ConstraintStatus::Unprovable => any_unprovable = true,
+        }
+    }
+    if !constrained {
+        DateTimeMatch::NotConstrained
+    } else if any_unprovable {
+        DateTimeMatch::Unprovable
+    } else {
+        DateTimeMatch::Satisfied
     }
 }
 

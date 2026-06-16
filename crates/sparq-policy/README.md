@@ -118,6 +118,21 @@ assert!(!evaluate(&policy, &outside).allow);
     evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` /
     `NotConstrained` — the recipient dual of `purpose_status`. (In the `sparq-solid`
     bridge, `recipient neq X` maps to an ACP `noneOf` exception, re-checked per session.)
+  - **Combined `recipient eq A AND neq B` (one rule)** — the constraints are ANDed (the
+    recipient must BE `A` and must NOT BE `B`); in the bridge this emits one
+    `ConditionalGrant` headed by `A` carrying an `exceptMatcher` carving out `B`.
+- **`odrl:dateTime` time-window enforcement (faithful, fail-closed)** — [OPUS-4.8] sq-idnv.
+  A `dateTime` constraint gates a rule to a **time window** (`lteq T` / `lt T` / `gteq T`
+  / `gt T`, or a two-sided `gteq lower` + `lteq upper`, ANDed). The actual instant is the
+  request's evaluation time, supplied via the first-class `Request::at(instant)` sugar
+  (over `.with(ODRL_DATETIME, Value::DateTime(..))`; read back via `req.request_time()`).
+  Instants compare by magnitude. **Missing time → *unprovable* → fail-closed:** a
+  time-gated permission does not grant on an unknown clock; a time-gated prohibition is
+  not withdrawn.
+  - `datetime_status(&rule, &request) -> DateTimeMatch` reports exactly what the evaluator
+    checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` / `NotConstrained` — the
+    temporal dual of `purpose_status`/`recipient_status`. (In the `sparq-solid` bridge,
+    `dateTime` stays **one-shot** — ACP has no "now" dimension to re-check.)
 - **`odrl:count` enforcement (stateful, opt-in, fail-closed)** — [OPUS-4.8] sq-zi5w.
   `odrl:count` limits the **number of times** a permission may be exercised ("may read
   at most 5 times"). Unlike the stateless constraints above, this is **stateful** — the
