@@ -100,6 +100,7 @@ export const FLAGSHIPS: Surface[] = [
       "One Pod, one query — different result sets per (agent, client) pair, enforced by the engine's FROM NAMED dataset restriction, live in your tab.",
     tier: "live",
     icon: Network,
+    built: true,
   },
 ];
 
