@@ -10,7 +10,8 @@ references lives under epic `sq-1s2`.
 **Companion docs:** [`controls.md`](./controls.md) (control → status → evidence table),
 [`evidence.md`](./evidence.md) (per-claim file/line/test verification),
 [`gap-register.md`](./gap-register.md) (open gaps + the **external-cryptographer
-requirement** + beads).
+requirement** + beads), [`fips-posture.md`](./fips-posture.md) (the explicit
+**no-FIPS / no-CMVP** negative claim for a FIPS-constrained operator, CR-G4).
 
 > **This is a readiness document, not a certificate.** It inventories the crypto, separates
 > what is production-grade-and-sound from what is research-only-and-NOT-yet-externally-verified,
