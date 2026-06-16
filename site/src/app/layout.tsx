@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
+import Script from "next/script";
 import { Toaster } from "sonner";
 
 import "./globals.css";
@@ -35,6 +36,19 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* [OPUS-4.8] coi-serviceworker shim — synthesises COOP/COEP so
+            `window.crossOriginIsolated` becomes true on GitHub Pages (which cannot
+            set those headers itself). That unlocks SharedArrayBuffer, so @aztec/bb.js
+            can spin worker threads and the in-tab ZK prover multithreads (~4x). Loaded
+            beforeInteractive with an absolute, basePath-prefixed src so the service
+            worker registers from /sparq/coi-serviceworker.js with scope /sparq/. It
+            changes only thread count — never what any proof proves or its ZK property. */}
+        <Script
+          src="/sparq/coi-serviceworker.js"
+          strategy="beforeInteractive"
+        />
+      </head>
       <body className={`${inter.variable} font-sans antialiased`}>
         <ThemeProvider
           attribute="class"
