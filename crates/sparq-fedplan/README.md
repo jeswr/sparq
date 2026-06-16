@@ -1,0 +1,104 @@
+# sparq-fedplan
+
+Cost-based **federated source selection** + **bind-vs-hash join planning** over
+already-fetched source descriptors — a small, **opt-in** planner that consumes the
+statistics a sparq-server already serves, with **no network I/O**.
+
+Given a SPARQL Basic Graph Pattern (BGP) and a set of `SourceDescriptor`s — each
+carrying a remote endpoint's W3C VoID property/class partitions plus its mined
+**characteristic sets** (served under the `scs:` vocab) — this crate decides which
+sources can contribute to each pattern (HiBISCuS-style **recall-safe** pruning +
+CostFed-style skew-aware cardinality), then builds a join plan with a per-join
+**bind-vs-hash** decision and a greedy join order, using characteristic-set star-join
+cardinality to estimate intermediate-result sizes.
+
+The planner is **pure and deterministic**: it plans from descriptors a caller has
+already fetched; it never contacts the network. Timing here is **non-canonical**
+(work-box EC2) and is therefore not recorded.
+
+> Model: Opus 4.8 (Fable unavailable — flag for re-review when Fable returns).
+> Bead **sq-a35t** · epic **sq-3183** (cost-based federated source selection + join planning).
+
+## 🚀 Quickstart
+
+```rust
+use sparq_fedplan::{
+    Bgp, TriplePattern, Term, Var, SourceDescriptor, SourceId, PredPartition,
+    select_sources, plan_bgp, PlanOptions,
+};
+
+// A two-arm star: ?s foaf:knows ?o . ?s foaf:name ?n
+let bgp = Bgp::new(vec![
+    TriplePattern::new(Term::Var(Var::new("s")),
+        Term::Iri("http://xmlns.com/foaf/0.1/knows".into()), Term::Var(Var::new("o"))),
+    TriplePattern::new(Term::Var(Var::new("s")),
+        Term::Iri("http://xmlns.com/foaf/0.1/name".into()), Term::Var(Var::new("n"))),
+]);
+
+// A source described by its served VoID partitions (build programmatically or parse
+// the served N-Triples with `SourceDescriptor::from_void_nt`).
+let src = SourceDescriptor::builder(SourceId::new("https://endpoint.example/sparql"))
+    .total_triples(10_000)
+    .predicate(PredPartition { predicate: "http://xmlns.com/foaf/0.1/knows".into(),
+        triples: 2000, distinct_subjects: 1000, distinct_objects: 1800 })
+    .predicate(PredPartition { predicate: "http://xmlns.com/foaf/0.1/name".into(),
+        triples: 1000, distinct_subjects: 1000, distinct_objects: 990 })
+    .build();
+let sources = [src];
+
+// 1. Source selection (recall-safe prune + skew-aware cardinality).
+let selection = select_sources(&bgp, &sources);
+// 2. Join plan (bind-vs-hash decision + greedy join order).
+let plan = plan_bgp(&bgp, &selection, &sources, &PlanOptions::default()).unwrap();
+
+println!("join order: {:?}", plan.join_order());
+println!("estimated total cost: {}", plan.total_cost);
+```
+
+## ✨ Features
+
+- **HiBISCuS-style source selection** — prunes a source for a pattern only on positive
+  evidence it cannot contribute (a bound predicate absent from the source's complete
+  predicate partition set; a bound class absent from a *declared* class section; a bound
+  subject/object authority absent from a *complete* authority capability set). The
+  **recall-safety invariant** holds: a source that could return any binding is never
+  pruned — uncertainty always keeps the source. Proven by `recall_safe_*` tests.
+- **CostFed-style skew-aware cardinality** — per-(pattern, source) cardinality comes from
+  the served per-predicate triple count and average multiplicity, not a uniform guess, so
+  per-predicate skew and bound-position selectivity (subject/object) are preserved.
+- **Characteristic-set star cardinality** — joining star arms (`?s p₁ ?a . ?s p₂ ?b`) is
+  estimated with Neumann & Moerkotte's `Σ_{C⊇Q} count(C)·Π avg_mult`, capturing the
+  predicate *correlation* a per-predicate-independence product loses.
+- **Bind-vs-hash join decision** — each binary join picks a **bind join** (probe the
+  right with the left's bindings — cheap when the left is small + right selective) or a
+  **hash/symmetric join** (scan both sides once — cheap when the left is large), and the
+  decision *flips* at the expected cost threshold (tunable `PlanOptions::request_cost`).
+- **Opt-in, zero core overhead** — a standalone member (like `sparq-canon`/`sparq-prov`),
+  gated behind the `fedplan` cargo feature, **off by default**. Nothing in sparq's
+  default build or the wasm artifact depends on it; the lean core is byte-identical
+  without it. No `sparq-core`/`sparq-engine` dependency — it plans over descriptors only.
+- **Pure & deterministic** — no network I/O; same descriptors + same BGP ⇒ same plan.
+
+## Scope — covered vs deferred
+
+| Capability | Status |
+|---|---|
+| Source selection (HiBISCuS prune + CostFed cardinality) | ✅ covered here |
+| Bind-vs-hash decision + greedy join order + CS star cardinality | ✅ covered here |
+| ANAPSID-style non-blocking streaming joins with operator spill | ⏳ deferred (roadmap bead, epic sq-3183) |
+| Live adaptive re-planning mid-execution | ⏳ deferred (same bead) |
+
+This slice is a *static* plan computed up front; the deferred adaptive/streaming work is
+filed as a bead under epic sq-3183.
+
+## 📚 Learn more
+
+- Skill: `skills/federated-planning/SKILL.md`
+- Served source statistics: `crates/sparq-introspect` (VoID + `scs:` characteristic sets)
+- Federation discovery descriptors: `crates/sparq-server/src/descriptors.rs`
+- HiBISCuS (Saleem & Ngonga Ngomo, ESWC 2014); CostFed (Saleem et al., SEMANTiCS 2018);
+  characteristic sets (Neumann & Moerkotte, ICDE 2011); ANAPSID (Acosta et al., ISWC 2011).
+
+## License
+
+MIT — `publish = false` workspace member. [OPUS-4.8]
