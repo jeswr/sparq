@@ -101,6 +101,10 @@ Extension functions (SPARQL 17.6) and dataset views:
 - `DatasetView { base: &Graph, named: Arc<FxHashSet<Term>>, default: DefaultGraphMode }`;
   `query_view` / `ask_view` / `count_view` / `query_json_view` (+ `_with_budget`), or
   `with_view(&v, || …)`.
+- *(opt-in `window-functions`)* `CustomAggregateRegistry::new()` + `.register(iri, |members:
+  &[Option<Term>]| -> Result<Option<Term>, String>)`; `query_with_aggregates(&Graph, &str, &reg)`
+  (+ `_and_budget`) parses+installs, `with_aggregates(&reg, || …)` scopes it. Window functions:
+  `window::{WindowSpec, WindowFunction, WindowAggregate, SortKey, apply_window}` (programmatic pass).
 
 Introspection: `explain(&Graph, &str)` (plan-only) and `explain_analyze(&Graph, &str)` (plan + per-
 operator execution trace).
@@ -172,6 +176,53 @@ let r = query_with_functions(&g,
 // To use the registry with ANOTHER entry point: with_functions(&reg, || sparq_engine::ask(&g, q))
 ```
 
+**Custom aggregate registry** (opt-in `window-functions` feature) — register a Rust closure as a
+named aggregate IRI, then call it from a real SPARQL `GROUP BY`. Unlike a scalar extension function,
+the closure FOLDS the group's per-member values (`None` ≡ unbound for that member) into one term:
+
+```rust
+// Cargo.toml: sparq-engine = { version = "0.1", features = ["window-functions"] }
+use oxrdf::{Literal, Term};
+use sparq_engine::{query_with_aggregates, CustomAggregateRegistry};
+
+let mut reg = CustomAggregateRegistry::new();
+reg.register("http://ex/agg#product", |members: &[Option<Term>]| {
+    let mut acc: i64 = 1;
+    for m in members { if let Some(Term::Literal(l)) = m { acc *= l.value().parse::<i64>().map_err(|e| e.to_string())?; } }
+    Ok(Some(Term::Literal(Literal::from(acc))))
+});
+let r = query_with_aggregates(&g,
+    "PREFIX ex: <http://ex/> PREFIX agg: <http://ex/agg#> \
+     SELECT ?d (agg:product(?s) AS ?p) WHERE { ?x ex:dept ?d ; ex:sales ?s } GROUP BY ?d",
+    &reg).unwrap();
+// query_with_aggregates DECLARES every registry IRI to the parser (so `agg:product(?s)` parses as an
+// aggregate, not a scalar call) AND installs the registry for evaluation. `with_aggregates(&reg, ||..)`
+// is the scoped form (composes with with_functions / with_view).
+// CAVEAT: a `DISTINCT` custom aggregate (`agg:product(DISTINCT ?s)`) does not currently PARSE in the
+// vendored spargebra (a parser limitation, tracked as a follow-up bead); non-DISTINCT works.
+```
+
+**Window functions** (opt-in `window-functions` feature) — **NON-STANDARD extension**: SPARQL has no
+W3C-REC `OVER (PARTITION BY … ORDER BY …)` syntax, so sparq exposes windowing as a *programmatic pass
+over a `QueryResult`* whose semantics follow the SQL:2003 window model (the surface Stardog / AnzoGraph
+expose). Run an ordinary SELECT, then apply a `WindowSpec` (`ROW_NUMBER` / `RANK` / `DENSE_RANK`, or a
+windowed aggregate over the whole partition). One column is appended; row order is preserved:
+
+```rust
+use sparq_engine::window::{apply_window, SortKey, WindowFunction, WindowSpec};
+use oxrdf::Variable;
+
+let result = sparq_engine::query(&g, "SELECT ?emp ?dept ?sales WHERE { … }").unwrap();
+let spec = WindowSpec {
+    partition_by: vec![Variable::new("dept").unwrap()],
+    order_by: vec![SortKey::desc(Variable::new("sales").unwrap())],
+    function: WindowFunction::Rank,            // RANK() over (PARTITION BY ?dept ORDER BY ?sales DESC)
+    new_var: Variable::new("rank").unwrap(),
+};
+let ranked = apply_window(&result, &spec).unwrap(); // ?rank appended; RANK has gaps after ties
+// Windowed aggregate (whole-partition frame): WindowFunction::Aggregate { agg: WindowAggregate::Sum, of }
+```
+
 **Budgets / timeouts / ASK-style early exit** — a `QueryBudget` is checked cooperatively at coarse
 sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"`:
 
@@ -230,6 +281,14 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   size (distinct binding tuples per remote request): **opt-in** via
   `with_service_bound_join_block_size(n, || query(&g, q))` or the `SPARQ_SERVICE_BIND_BLOCK` env var
   (default ~50). The knob never changes results — only the remote-request count vs per-request size.
+- **Window functions + custom aggregate registry** are the non-default `window-functions` cargo
+  feature. **Window functions are a NON-STANDARD extension** — there is no W3C-REC SPARQL `OVER`
+  syntax — so they are a programmatic pass over a `QueryResult` (the SQL:2003 model Stardog/AnzoGraph
+  expose), `ROW_NUMBER`/`RANK`/`DENSE_RANK` + a whole-partition windowed aggregate, NOT inline query
+  syntax (the engine's SPARQL surface stays exactly SPARQL 1.1, so conformance is unaffected). The
+  custom-aggregate side DOES ride real SPARQL `GROUP BY` (a declared aggregate IRI is part of the
+  SPARQL 1.1 extension grammar). When the feature is off, zero window/aggregate-registry code compiles
+  and the default build is byte-identical (no new dependencies). See the recipes above.
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`
   powers MD5/SHA*; `parallel` enables rayon scan/join/sort/aggregate. The **wasm** crate
   (`sparq-wasm`) disables defaults, so on `wasm32-unknown-unknown` REGEX/hash builtins and
