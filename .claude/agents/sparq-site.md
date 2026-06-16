@@ -1,6 +1,6 @@
 ---
 name: sparq-site
-description: Implements front-end work in the sparq Next.js site (site/) — the statically-exported GitHub Pages app: benchmarks UI, /papers, the /try SPARQL playground, surface/showcase pages. Use for any site/ task. Gates on a green static export + lint + typecheck.
+description: "Implements front-end work in the sparq Next.js site (site/) — the statically-exported GitHub Pages app: benchmarks UI, /papers, the /try SPARQL playground, surface/showcase pages. Use for any site/ task. Gates on a green static export + lint + typecheck."
 model: opus
 ---
 
