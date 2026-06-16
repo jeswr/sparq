@@ -16,7 +16,10 @@ pub use authindex::{pair_principal, AuthIndex, Mode, Session};
 pub use fixture::{acp_fixture, wac_fixture};
 pub use materialize::{materialize_acp, materialize_wac, MaterializeStats};
 #[cfg(feature = "odrl-bridge")]
-pub use odrl_bridge::{action_to_mode, materialize_permission, BridgeOutcome};
+pub use odrl_bridge::{
+    action_to_mode, materialize_permission, materialize_policy, materialize_prohibition,
+    BridgeOutcome,
+};
 pub use rewrite::{rewrite_for, wrap_for_view};
 
 use oxrdf::{NamedNode, Term};
@@ -452,6 +455,55 @@ impl PodStore {
         let outcome = odrl_bridge::materialize_permission(&mut self.graph, policy, request);
         if outcome.granted {
             self.reindex(); // a new grant changes the auth view → rebuild index + drop cache
+        }
+        outcome
+    }
+
+    /// [OPUS-4.8] sq-w693 — evaluate an ODRL `policy`'s prohibitions against `request`
+    /// and, on a matched Prohibition that carves the request out, materialize the
+    /// equivalent `principal auth:deny<Mode> graph` DENY into this store's
+    /// `<urn:sparq:auth>` view, then rebuild the session index so the deny takes effect
+    /// on the next [`PodStore::accessible`] / [`PodStore::query_as`] call.
+    ///
+    /// The materialized deny is honoured by the EXISTING enforcement under
+    /// **deny-overrides**: the session layer computes `∪ allow ∖ ∪ deny`, so the deny
+    /// beats any allow grant for the same principal+target+mode — see
+    /// [`odrl_bridge::materialize_prohibition`].
+    ///
+    /// **Fail-closed:** no matching prohibition, an unmapped action, or a request
+    /// without a concrete party/target materializes NOTHING and leaves the auth view
+    /// (and session index) untouched.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn materialize_odrl_prohibition(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+    ) -> odrl_bridge::BridgeOutcome {
+        let outcome = odrl_bridge::materialize_prohibition(&mut self.graph, policy, request);
+        if outcome.prohibited {
+            self.reindex(); // a new deny changes the auth view → rebuild index + drop cache
+        }
+        outcome
+    }
+
+    /// [OPUS-4.8] sq-w693 — materialize **both** sides of an ODRL `policy` for
+    /// `request` into this store's `<urn:sparq:auth>` view: the Permit allow grant AND
+    /// the matched-Prohibition deny ([`odrl_bridge::materialize_policy`]), then rebuild
+    /// the session index if either materialized.
+    ///
+    /// A policy with both a permission and a prohibition for the same
+    /// principal+target+mode materializes both triples; the deny **wins** at
+    /// enforcement time (deny-overrides — the session layer subtracts `∪ deny` from
+    /// `∪ allow`). Each side is independently fail-closed.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn materialize_odrl_policy(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+    ) -> odrl_bridge::BridgeOutcome {
+        let outcome = odrl_bridge::materialize_policy(&mut self.graph, policy, request);
+        if outcome.granted || outcome.prohibited {
+            self.reindex(); // a new grant/deny changes the auth view → rebuild + drop cache
         }
         outcome
     }
