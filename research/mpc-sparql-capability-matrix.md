@@ -340,6 +340,7 @@ shaped WAN slowdown awaits the netem/EC2 run (`netprofiles.rs::wan()` + sq-hoaj)
 |---|---|---|---|
 | disclosed operands | **BUILT (crypto-free)** | verifier recomputes the comparison | `operator_descriptor(Comparison)` honestly reports "no in-crypto guarantee" (`shamir.rs:250`) |
 | SH, HM, hidden | **[RECONCILED 2026-06-16] BUILT** | **edaBits** (Crypto'20) for mixed arith/Boolean; **Rabbit** (eprint 2021/119) ~constant-round less-than; **DGK / bit-decomposition** for the classic O(log p)-bit route; constant-round (DGK-style) wins on **WAN**, bit-decomposition is fine on **LAN** | **BUILT** — `compare.rs::secure_greater_than`/`secure_threshold` (bit-decomposition over secret shares, consuming the landed `degree_reduce`), opening **only the verdict bit** (`open_verdict`); bead **sq-rrz4 CLOSED** |
+| SH, HM, **threshold over a secret-shared SUM** | **[2026-06-16] BUILT** | masked-open bit-decomposition (Damgård et al. TCC'06) of the *existing* sum sharing + in-protocol range proof + a random-bit sub-protocol so no party knows the mask | **BUILT** — `compare.rs::disclose_threshold_verdict` bit-decomposes the sum **in-MPC** (no `reconstruct(sum)`; `sq-g7t5`), with an in-protocol range proof `sum < 2^20` fail-closed (`sq-nx0s`) and the **square-protocol** mask generator `square_protocol_random_bit` (`sq-mnv5`, **this slice**) so no party knows `r`. `< 2^20` masked-open magnitude bound; semi-honest only |
 | Mal, HM, hidden | partial → KNOWN | same comparator with IT-MAC-checked opens | the comparator is BUILT semi-honest; malicious hardening rides the IT-MAC line (`sq-km34.*`, in flight) |
 
 **[RECONCILED 2026-06-16] This was named "the single most-requested missing primitive"; it is
@@ -348,6 +349,19 @@ comparator is available for every range FILTER, MIN/MAX, GROUP BY's is-new-group
 **The trade-off** carried forward: bit-decomposition is O(log p) rounds (bad on WAN), Rabbit/DGK
 are ~constant-round (WAN-friendly) but heavier per-round; the landed path is bit-decomposition
 (LAN-first). A constant-round/edaBits WAN variant remains future work (`sq-38zk`).
+
+**[OPUS-4.8] `sq-mnv5` — deployment-grade in-MPC bit-decomposition (random-bit slice landed).**
+`disclose_threshold_verdict`'s masked-open decomposition no longer relies on the in-process
+dealer dealing the mask `[r]` in cleartext (a simulation artefact: a real deployment cannot let
+any party know `r`). The solved-bits now come from the **square-protocol** random-bit generator —
+each bit is jointly generated from a random `[a]` by opening **only** `c = a²` (a quadratic
+residue independent of the bit, since `±a` square to the same `c`), then `[b] = (a·d⁻¹+1)·2⁻¹`
+for the public root `d = c^{(p+1)/4}` (valid because `p = 2^61−1 ≡ 3 (mod 4)`). **No party knows
+the mask or any bit.** This is **honest-majority, semi-honest only** (`sq-qhy4` external sign-off
+PENDING). Two `sq-mnv5` deployment residuals remain OPEN follow-ups: (a) **wider magnitude** — the
+`< 2^20` masked-open bound is forced by `p = 2^61−1`; lift via a larger field or a non-masked-open
+comparison (Rabbit, eprint 2021/119); (b) **malicious security** — thread IT-MACs (`sq-km34.*`)
+through the decomposition/comparison chain and MAC-check the verdict before open.
 
 #### MIN / MAX
 | Config | Tier | Most performant | sparq |

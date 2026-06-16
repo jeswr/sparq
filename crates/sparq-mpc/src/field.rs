@@ -33,6 +33,16 @@
 /// The field modulus `p = 2^61 - 1` (a Mersenne prime).
 pub const P: u64 = (1u64 << 61) - 1;
 
+/// [OPUS-4.8] sq-mnv5 — the Tonelli–Shanks shortcut exponent `(p + 1) / 4`, valid
+/// because `p ≡ 3 (mod 4)` (concretely `p = 2^61 − 1 ≡ 7 (mod 8)`). For any
+/// quadratic residue `c`, `c^((p+1)/4)` is a square root of `c` — i.e. `d² = c`.
+/// This is the public, in-circuit-cheap square-root the random-bit sub-protocol
+/// ([`crate::compare`] square-protocol) needs to derive the sign bit of a
+/// secret-shared random `a` from the OPENED public square `c = a²`. The exponent
+/// is a **public constant**, and its only use ([`Fp::sqrt_residue`]) is applied to
+/// a **public** opened value, so no secret-dependent timing is involved.
+pub const SQRT_EXP: u64 = (P + 1) / 4;
+
 /// An element of `F_p`, always kept canonical in `[0, P)`.
 ///
 /// [OPUS-4.8] sq-u8a8: derives [`zeroize::Zeroize`] so a secret-bearing `Fp`
@@ -213,6 +223,25 @@ impl Fp {
         use subtle::ConstantTimeEq;
         self.0.ct_eq(&other.0)
     }
+
+    /// [OPUS-4.8] sq-mnv5 — a square root of `self` for the `p ≡ 3 (mod 4)`
+    /// shortcut: `self^((p+1)/4)`. If `self` is a quadratic residue this returns a
+    /// `d` with `d² = self` (one of the two roots `±d`); if `self` is a
+    /// NON-residue the identity does not hold, so the caller MUST verify
+    /// `d.mul(d) == self` and treat a mismatch as "not a residue" (the random-bit
+    /// sub-protocol only ever calls this on `c = a²`, which is a residue by
+    /// construction, and re-checks anyway — fail-closed).
+    ///
+    /// # Public-value contract
+    ///
+    /// This routes through [`Fp::pow_vartime`] with the **public** exponent
+    /// [`SQRT_EXP`]. It MUST only be called on a **public / opened** `self` (as the
+    /// square-protocol does: it is applied to the opened `c = a²`, never to a
+    /// secret share), so the variable-time exponentiation leaks nothing secret —
+    /// the base and the exponent are both public.
+    pub fn sqrt_residue(self) -> Fp {
+        self.pow_vartime(SQRT_EXP)
+    }
 }
 
 /// [OPUS-4.8] sq-7ltf: constant-time conditional select on the canonical
@@ -349,6 +378,34 @@ mod tests {
             let a = Fp::new(v);
             assert_eq!(a.mul(a.inv()), Fp::one(), "inv (via pow_ct) of {v}");
         }
+    }
+
+    // [OPUS-4.8] sq-mnv5: the `p ≡ 3 (mod 4)` square-root shortcut. For every
+    // quadratic RESIDUE c = a², `c.sqrt_residue()` must square back to c (d² == c),
+    // and the precondition p ≡ 3 (mod 4) — which the shortcut relies on — holds for
+    // p = 2^61 − 1. The random-bit sub-protocol only ever calls this on c = a².
+    #[test]
+    fn sqrt_residue_squares_back_for_residues() {
+        // Precondition the shortcut rests on.
+        assert_eq!(P % 4, 3, "the (p+1)/4 sqrt shortcut needs p ≡ 3 (mod 4)");
+        for a in [1u64, 2, 3, 7, 12345, 1 << 30, P / 3, P / 2, P - 1] {
+            let fa = Fp::new(a);
+            let c = fa.mul(fa); // a residue by construction
+            let d = c.sqrt_residue();
+            assert_eq!(
+                d.mul(d),
+                c,
+                "sqrt_residue(a²) must square back to a² for a={a}"
+            );
+            // The recovered root is ±a (the two square roots of a²).
+            assert!(
+                d == fa || d == fa.neg(),
+                "sqrt_residue(a²) must be ±a for a={a} (got {})",
+                d.value()
+            );
+        }
+        // Zero is its own (trivial) root.
+        assert_eq!(Fp::zero().sqrt_residue(), Fp::zero());
     }
 
     #[test]
