@@ -95,11 +95,14 @@ use sparq_engine::{PreparedQuery, QueryBudget, QueryResult};
 // patterns carve out the eligible graph nodes (the candidate id-set), and the k-NN
 // search is restricted to that set — correct (and, for a selective constraint, faster)
 // than post-filtering the unfiltered neighbours. This needs the `filtered-ann` API
-// (`IdMask` + `nearest_exact_filtered`), so the whole derive-and-filter path is
-// additionally gated on `filtered-ann`; with that feature off the `vec:` predicate
-// behaves EXACTLY as before (plain unfiltered `nearest_exact`).
+// (`IdMask` + the cost-model `nearest_filtered_costed`, sq-7hx6, which picks pre-filter
+// vs post-filter by selectivity — identical answer either way), so the whole
+// derive-and-filter path is additionally gated on `filtered-ann`; with that feature off
+// the `vec:` predicate behaves EXACTLY as before (plain unfiltered `nearest_exact`).
 #[cfg(feature = "filtered-ann")]
-use crate::filter::{nearest_exact_filtered, IdMask};
+use crate::cost::{nearest_filtered_costed, CostModel};
+#[cfg(feature = "filtered-ann")]
+use crate::filter::IdMask;
 // [OPUS-4.8] (sq-36ol, epic sq-3183) The derived-mask cache: a `vec:` predicate that shares its
 // neighbour variable with constraining patterns re-evaluates that sub-BGP (a full SELECT through
 // the engine) on EVERY prepare to build the `IdMask`. Against an unchanged graph the answer is
@@ -548,7 +551,13 @@ fn run_knn(
                 // Filtered: search only BGP-admitted candidates. Over-fetch by one so
                 // dropping the seed (if it satisfies the constraint and so sits in the
                 // mask) still leaves up to k neighbours, matching the unfiltered form.
-                return Ok(nearest_exact_filtered(store, query, mask, req.k + 1)
+                // [OPUS-4.8] (sq-7hx6) The cost model picks pre-filter (scan the mask) vs
+                // post-filter (scan the whole store + drop non-members) by the mask's
+                // selectivity; BOTH branches return the identical top-(k+1), so the seed
+                // drop and the final answer are unchanged either way.
+                let (hits, _est) =
+                    nearest_filtered_costed(store, query, mask, req.k + 1, &CostModel::default());
+                return Ok(hits
                     .into_iter()
                     .filter(|&(n, _)| n != id)
                     .take(req.k)
@@ -571,7 +580,11 @@ fn run_knn(
             }
             #[cfg(feature = "filtered-ann")]
             if let Some(mask) = &mask {
-                return Ok(nearest_exact_filtered(store, v, mask, req.k));
+                // [OPUS-4.8] (sq-7hx6) Cost-model choice of pre-filter vs post-filter;
+                // identical answer either way.
+                let (hits, _est) =
+                    nearest_filtered_costed(store, v, mask, req.k, &CostModel::default());
+                return Ok(hits);
             }
             Ok(nearest_exact(store, v, req.k))
         }

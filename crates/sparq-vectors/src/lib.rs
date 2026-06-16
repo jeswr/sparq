@@ -3,6 +3,9 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod ann;
+// [OPUS-4.8] (sq-7hx6) Filtered-ANN pre-filter vs post-filter cost model — `filtered-ann` only.
+#[cfg(feature = "filtered-ann")]
+pub mod cost;
 pub mod diskann;
 pub mod embed;
 #[cfg(feature = "filtered-ann")]
@@ -40,6 +43,11 @@ pub use embed::{Embedder, HashEmbedder};
 // [OPUS-4.8] (sq-1wc1) Predicate-constrained (filtered) ANN — the `filtered-ann` feature only.
 #[cfg(feature = "filtered-ann")]
 pub use filter::{nearest_exact_filtered, FilterConfig, IdMask};
+// [OPUS-4.8] (sq-7hx6) Pre-filter vs post-filter cost model — the `filtered-ann` feature only.
+#[cfg(feature = "filtered-ann")]
+pub use cost::{
+    nearest_filtered_costed, overfetch_target, postfilter_exact, CostEstimate, CostModel, Strategy,
+};
 pub use fingerprint::{check_against, Artifact, CheckResult, Fingerprint, FINGERPRINT_LEN};
 pub use fuse::{fuse_rrf, fuse_rrf_weighted, fuse_scores, hybrid_search, Retriever, RRF_K};
 pub use import::{ImportBinding, ImportSpec, MAX_NPY_HEADER_LEN};

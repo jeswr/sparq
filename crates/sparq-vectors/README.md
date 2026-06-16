@@ -78,7 +78,12 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
   against an unchanged graph reuse the component's mask instead of re-running the constraint
   SELECT, and **any** graph change (added/removed/changed triple or term, or a dict-id shift)
   changes the fingerprint and misses the cache — so a stale mask is never served (the invalidation
-  is sound; when in doubt it recomputes). The cache is transparent (no API change).
+  is sound; when in doubt it recomputes). The cache is transparent (no API change). With the mask in
+  hand, a per-query **cost model** (`CostModel`, sq-7hx6) chooses **pre-filter** (scan only the mask)
+  vs **post-filter** (scan the whole store, drop non-members) by the mask's selectivity — pre-filter
+  iff `mask_len · scatter_penalty ≤ store_len` (default crossover ≈ half the store). Both branches
+  return the **byte-identical** top-k (asserted in tests), so the choice trades only throughput,
+  never the answer; it is a heuristic over a cost estimate, not an optimum.
 - **Verbalization** — `verbalize` / `embed_entities` render `<label>. a <type>. <description>`
   per entity (multilingual, char-budgeted); `embed_labels` is the label-only special case.
 - **Quantization** — `ScalarQuantizer` (4×) and `ProductQuantizer` (asymmetric distance) for
