@@ -271,6 +271,44 @@ This is the standing orchestration loop that ties the sections above together. R
 
 **Done when** `bd ready` minus `needs:user` is empty and no PR / agent / CI is in flight.
 
+### Orchestration automation scripts (manual-invoke; mechanical substrate for the loop)
+
+The deterministic, no-judgment parts of the loop above are factored into small shell
+scripts under `scripts/`. They follow the mechanical-vs-judgment boundary set out in
+`research/orchestration-automation-design.md` (PR #374): **automate the DETECTION and
+the bookkeeping; never automate the DECISION.** The first three (PR #374 Phases A/C/F)
+are shipped. They are **invoked manually for now** — there are deliberately **no
+auto-running mutating hooks or monitors wired yet**; wiring them (a `SessionStart`
+orphan-check hook, a merge-watcher monitor, a `PostToolUse` bead-export hook) is a
+documented follow-up in the design doc's phased plan (§5, Beads B/D/E + H), to be added
+only after the scripts are proven in manual use. Each script is `bash -n`/`shellcheck`
+clean and carries a `--dry-run-self-test` (hermetic; no network).
+
+- **`scripts/bead-close-on-merge.sh <pr> [--apply]`** (Phase A) — closes the bead a PR
+  maps to, but **only after verifying the merge against the API** (`gh pr view --json
+  mergedAt` must be non-null; a parsed log/monitor line is never the source of truth).
+  Resolves the bead id from an `sq-XXXX` token in the PR title or in a linked issue's
+  title/body. **Default is dry-run** (prints what it *would* close); acts only with
+  `--apply`; idempotent (a bead already closed is a no-op). The guardrail makes the
+  dangerous case — closing a bead for a PR that did **not** merge — impossible.
+- **`scripts/orphan-check-bench.sh [--apply] [--region r]`** (Phase C) — lists
+  running/pending EC2 instances carrying the **exact** tag `purpose=sparq-bench`
+  (allow-list semantics, not deny-list) and greps the local process table for in-flight
+  `gather-*` launchers. **Default is dry-run** (prints orphans only); `--apply`
+  terminates **only** tag-matched instances and **never** the prod (`i-090531b4ede8f2d3f`)
+  or dev (`i-00f76802f345b6b77`) box — those are a hard, unconditional exclusion list,
+  asserted by the self-test. Degrades to a graceful no-op when `aws` is unconfigured.
+- **`scripts/refill-candidates.sh`** (Phase F) — **read-only, advisory only.** Lists
+  `bd ready` beads grouped by inferred crate/surface and flags surfaces that already have
+  an open PR or in-flight worktree (contention). It is the **substrate** for the refill
+  decision (loop step 3), **not** the decision: it never dispatches, closes, or mutates
+  anything. Surface inference and contention flags are heuristic (free-form branch names)
+  and advisory by design.
+
+See `research/orchestration-automation-design.md` §1.3 (the five judgment behaviours that
+must stay with the orchestrator), §6 (failure modes + the guardrail behind each), and §5
+(the full phased stand-up plan with per-phase rollback).
+
 ## No hard-coded performance numbers
 
 Do not bake benchmark numbers (MB/s, ×-faster, recall, gate counts, latencies) into markdown. Reference the **generated structured data** instead (the benchmark harnesses emit JSON; CI publishes results). If you cite a number, cite where it was generated.
