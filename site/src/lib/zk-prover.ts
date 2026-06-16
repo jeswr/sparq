@@ -65,6 +65,16 @@ interface NoirModule {
     execute(inputs: Record<string, unknown>): Promise<{ witness: Uint8Array }>;
   };
 }
+/** Subset of `@aztec/bb.js`'s `UltraHonkBackendOptions` we use. We pass
+ *  `verifierTarget: 'evm'` (the keccak-oracle flavour) to BOTH prove and verify —
+ *  it leaves `disableZk` at its default `false`, so the proof stays FULLY
+ *  zero-knowledge (age-hiding), while shrinking the wire proof ~43% (14656 → 8384 B).
+ *  We NEVER pass any `*-no-zk` flavour: those set `disableZk:true` and strip the
+ *  ZK masking, which would make the private age recoverable in principle. */
+type VerifierTarget = "evm" | "noir-recursive" | "starknet";
+interface BbBackendOptions {
+  verifierTarget?: VerifierTarget;
+}
 interface BbModule {
   Barretenberg: { new: (opts: { threads: number }) => Promise<unknown> };
   UltraHonkBackend: new (
@@ -73,13 +83,34 @@ interface BbModule {
   ) => {
     generateProof(
       witness: Uint8Array,
+      options?: BbBackendOptions,
     ): Promise<{ proof: Uint8Array; publicInputs: string[] }>;
-    verifyProof(proof: {
-      proof: Uint8Array;
-      publicInputs: string[];
-    }): Promise<boolean>;
+    verifyProof(
+      proof: {
+        proof: Uint8Array;
+        publicInputs: string[];
+      },
+      options?: BbBackendOptions,
+    ): Promise<boolean>;
   };
 }
+
+/**
+ * [OPUS-4.8] The UltraHonk proving/verifying flavour. `verifierTarget: 'evm'` selects
+ * the keccak transcript oracle and yields a ~43% smaller proof (8384 B vs the default
+ * poseidon2 flavour's 14656 B) at no measured time cost, while keeping `disableZk`
+ * false — i.e. the proof is STILL zero-knowledge and the private age is still hidden
+ * (verified by a Node re-measurement: two proofs of the same witness differ, and the
+ * age digits never appear in the 5 public inputs).
+ *
+ * Prove and verify MUST be passed the SAME options or the in-tab self-verify fails.
+ *
+ * ⚠️ `@aztec/bb.js` is pinned to a NIGHTLY (see package.json). The `verifierTarget`
+ * option surface can shift between nightlies — RE-TEST this flavour (size still
+ * ~8384 B, `verified === true`, proofs still randomised, age still not public) on ANY
+ * bb.js version bump before trusting it. Never substitute a `*-no-zk` flavour.
+ */
+const PROOF_OPTIONS: BbBackendOptions = { verifierTarget: "evm" };
 
 function basePath(): string {
   return process.env.NEXT_PUBLIC_BASE_PATH ?? "/sparq";
@@ -193,11 +224,13 @@ export async function proveAgeEligibility(age: number): Promise<ProofResult> {
   const { witness } = await noir.execute(inputs);
 
   const t0 = performance.now();
-  const proof = await backend.generateProof(witness);
+  const proof = await backend.generateProof(witness, PROOF_OPTIONS);
   const proveMs = performance.now() - t0;
 
   const t1 = performance.now();
-  const verified = await backend.verifyProof(proof);
+  // Verify with the SAME options as prove (the keccak-oracle flavour) — a mismatch
+  // would make the in-tab self-verify reject a perfectly valid proof.
+  const verified = await backend.verifyProof(proof, PROOF_OPTIONS);
   const verifyMs = performance.now() - t1;
 
   return {

@@ -383,7 +383,13 @@ function VerdictPanel({ phase, age }: { phase: Phase; age: number }) {
 
         <div className="grid gap-3 sm:grid-cols-2">
           <Stat label="Proof verified in your tab" value={r.verified ? "yes" : "no"} />
-          <Stat label="Proof size (fields)" value={r.proofByteLength.toString()} />
+          {/* [OPUS-4.8] proofByteLength is BYTES (= fields × 32). Surface KB honestly
+              and derive the field count, instead of mislabelling raw bytes as "fields". */}
+          <Stat
+            label="Proof size"
+            value={`${(r.proofByteLength / 1024).toFixed(1)} KB`}
+            sub={`${Math.round(r.proofByteLength / 32)} fields`}
+          />
           <Stat label="Prove time" value={`${r.proveMs.toFixed(0)} ms`} sub="non-canonical" />
           <Stat label="Verify time" value={`${r.verifyMs.toFixed(0)} ms`} sub="non-canonical" />
         </div>
@@ -529,6 +535,22 @@ function HonestyPanel() {
           verified by <code className="font-mono">@aztec/bb.js</code> in your
           browser. The exact age is the private witness and never appears in the
           public inputs.
+        </p>
+        <p>
+          <strong className="text-foreground">On proof size and speed.</strong>{" "}
+          The proof is <strong>inherently KB-scale</strong>: UltraHonk is a
+          transparent, no-trusted-setup proof system whose proofs are kilobytes of
+          field elements — not the ~200&nbsp;byte single proof of a Groth16 SNARK, and
+          there is no compact mode (a sub-KB single proof would need recursive
+          aggregation, which is out of scope here). This page uses the keccak-oracle
+          flavour (<code className="font-mono">verifierTarget:&nbsp;&apos;evm&apos;</code>),
+          which is ~43% smaller than the default while staying{" "}
+          <strong>fully zero-knowledge</strong>. As a hard guardrail, the demo never
+          uses any <code className="font-mono">*-no-zk</code> flavour
+          (<code className="font-mono">disableZk:&nbsp;true</code>): those strip the
+          ZK masking and would make the private age recoverable in principle. On plain
+          GitHub Pages a service-worker shim is the only lever that unlocks
+          multithreaded proving (timings are non-canonical and host-dependent).
         </p>
         <p>
           <strong className="text-foreground">
