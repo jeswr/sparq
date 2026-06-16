@@ -2,7 +2,15 @@
 members = [
     "compose_core",
     "scan_k1_n16_r4",
+    # [OPUS-4.8] sq-pzet: remaining scan (k,n,r)-lattice members the family could
+    # derive but that had no compiled package (silent-unprovability gap, sq-wto
+    # class). NOT a soundness change (verifier remains NOT-yet-sound, sq-qhy4).
+    "scan_k1_n16_r8",
+    "scan_k1_n64_r4",
+    "scan_k1_n64_r8",
+    "scan_k2_n16_r4",
     "scan_k2_n16_r8",
+    "scan_k2_n64_r4",
     "scan_k2_n64_r8",
     "filter_int_d1",
     "filter_int_d2",
@@ -17,4 +25,9 @@ members = [
     "hidden_issuer_d4",
     "holder_pok",
     "join_eq_na16_nb16",
+    # [OPUS-4.8] sq-pzet: remaining hidden-join graph-size members (the N=64
+    # bucket) so a join composes with an n=64 scan.
+    "join_eq_na16_nb64",
+    "join_eq_na64_nb16",
+    "join_eq_na64_nb64",
 ]

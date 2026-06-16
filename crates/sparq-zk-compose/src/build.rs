@@ -40,12 +40,18 @@ pub const FILTER_F64_D_VALUES: &[u32] = &[1, 2, 3, 4];
 /// ascending (sq-bwwl / sq-fi03). The `join_eq_na{N_A}_nb{N_B}` member re-commits
 /// each witnessed graph with `[[Field; 3]; N]` slots (the `join_eq_check<N_A,
 /// N_B>` const generics), so a graph holding `<= N` triples is provable by the
-/// smallest compiled bucket `>= N` — exactly the scan `n`-bucket discipline. v1
-/// compiles the single symmetric `join_eq_na16_nb16` member, so only the `16`
-/// bucket exists; an out-of-family size derives `None` (clean error). The
-/// verifier gate that consumes the derived id is step 4 (sq-sfsi).
+/// smallest compiled bucket `>= N` — exactly the scan `n`-bucket discipline. The
+/// [`SCAN_N_BUCKETS`]-aligned `{16, 64}` set is compiled, in all four `(n_a, n_b)`
+/// combinations (`na16_nb16`, `na16_nb64`, `na64_nb16`, `na64_nb64`), so a join
+/// can compose with a scan over either scan-`n` bucket; an out-of-family size
+/// (`> 64`) derives `None` (a clean error, never a wrong-N member). The verifier
+/// gate that consumes the derived id is `bind_joins` (step 4, sq-sfsi).
 // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): compiled join_eq graph-size buckets.
-pub const JOIN_EQ_N_BUCKETS: &[u32] = &[16];
+// [OPUS-4.8] sq-pzet (sq-8dx2): add the `64` bucket — the remaining (na, nb)
+// members so a hidden join composes with the n=64 scan bucket. NOT a soundness
+// change (the verifier remains NOT-yet-sound, sq-qhy4 / sq-9hrn / sq-1s2): the
+// in-circuit relation is `join_eq_check` verbatim, only the bucket grows.
+pub const JOIN_EQ_N_BUCKETS: &[u32] = &[16, 64];
 
 fn smallest_bucket(buckets: &[u32], need: u32) -> Option<u32> {
     buckets.iter().copied().find(|&b| b >= need)
