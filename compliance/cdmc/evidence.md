@@ -70,13 +70,21 @@
   (413), `--max-decompress-ratio` (20, zip-bomb guard), plus subscription caps. Env-overridable.
 - `Dockerfile` — distroless, non-root, SHA-pinned base (the `cis` slice verifies the hardening).
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 ## E5 — Privacy / crypto exclusion (Component 4.2, maturity 2 — the honesty anchor)
 
-- `research/zk-soundness-audit.md` — **"v1 verifier soundness is BROKEN … verify_manifest provides
-  NO meaningful soundness guarantee … DO NOT present v1 as proving anything to a relying party."**
-  12 confirmed issues, ≥6 CRITICAL. This is binding: ZK/MPC contributes **zero** to any CDMC
-  protection-by-cryptography maturity.
-- `SECURITY.md` — codifies the ZK-not-sound + MPC-deferred caveats as the public security posture.
+- `research/zk-soundness-audit.md` — the **original** audit: **"v1 verifier soundness is BROKEN …
+  verify_manifest provides NO meaningful soundness guarantee … DO NOT present v1 as proving anything
+  to a relying party."** 12 confirmed issues, 5 CRITICAL. **That audit predated the remediation.**
+- `research/zk-verifier-reaudit.md` (`sq-gbp4`) — the post-remediation re-audit: the `sq-1s2`
+  binding layer has since landed and every prior finding is CLOSED with code evidence; verdict "sound
+  as landed for the threat model the prior audit assumed." **But it is internal/single-model only;
+  external accredited-cryptographer sign-off is still PENDING (`sq-qhy4`, P0); no production
+  guarantee.** This remains binding: ZK/MPC contributes **zero** to any CDMC protection-by-cryptography
+  maturity until that external sign-off completes.
+- `SECURITY.md` — codifies the "remediated, but NOT externally audited" ZK posture + the MPC-deferred
+  caveat as the public security posture (§"`sparq-zk` and `sparq-zk-compose` — ZK verifier:
+  remediated, but NOT externally audited"). [OPUS-4.8]
 - `compliance/data-flow.md` / `compliance/dpia.md` (privacy slice) — the operator-is-controller
   scoping; what the binary can touch (loaded RDF, query logs, WASM client surface).
 

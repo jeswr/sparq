@@ -29,7 +29,7 @@ main checkout — never hand-edited into `.beads/`).
 
 | ID | Item | Why it is not closeable in this framework | Bead |
 |---|---|---|---|
-| **PR-X1** | **ZK/MPC "privacy by cryptography" is NOT yet sound.** The estate models private query proofs / MPC but provides **no** guarantee (`SECURITY.md`; `research/zk-soundness-audit.md`). Any privacy claim resting on it would be a high-severity overclaim. | The soundness fix is **cryptographic work** tracked by the ZK remediation beads (epic sq-1s2) + the `cryptoreview` framework — **not** this privacy framework. This register only records that privacy claims are **gated** on it. We do **not** mark it "closed" or claim any privacy benefit from it. | **sq-toze.35** (gate) + epic **sq-1s2** (the crypto fixes) |
+| **PR-X1** | **ZK/MPC "privacy by cryptography" is remediated but NOT externally audited — no production guarantee yet.** <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> The estate models private query proofs / MPC; the ZK verifier was originally found unsound, the `sq-1s2` binding layer has landed, and the internal re-audit (`sq-gbp4`) found it "sound as landed for the assumed threat model" — **but** external accredited-cryptographer sign-off is still PENDING (`sq-qhy4`, P0), `sparq-mpc` provides **no** guarantee, and `SECURITY.md` directs a relying party not to present a "verified" result as a production-grade guarantee until that sign-off completes (`SECURITY.md`; `research/zk-soundness-audit.md`; `research/zk-verifier-reaudit.md`). Any privacy claim resting on it today would be a high-severity overclaim. | The external sign-off + any remaining soundness/privacy work is **cryptographic work** tracked by the ZK remediation beads (epic sq-1s2) + `sq-qhy4` + the `cryptoreview` framework — **not** this privacy framework. This register only records that privacy claims remain **gated** on the external sign-off. We do **not** mark it "closed" or claim any privacy benefit from it. | **sq-toze.35** (gate) + **sq-qhy4** (external audit, P0) + epic **sq-1s2** (the crypto fixes) |
 | **PR-X2** | **27701 / SOC 2 Privacy certificate** needs the operator's PIMS + an accredited external auditor. | The engine provides the technical levers (controls.md P-17/P-18); the *attestation* is a deployment property an agent cannot issue. Labelled **AUDIT-READY**, not a gap. | n/a (external) |
 
 ## NOT gaps (operator responsibilities, recorded so the auditor does not re-flag)
@@ -60,7 +60,7 @@ PR-G5, closing audit F-3). The remaining gaps are **lower-severity engine conven
 audit sink, PR-G3 WAL erasure-completeness, PR-G4 log redaction). None changes the headline
 verdict: **the engine *can* support a GDPR-compliant deployment** — but P-12 must be fixed (or its
 diagnostics gated behind `--verbose`) before the error-hygiene control can be claimed clean. The
-two non-engine items (PR-X1 ZK/MPC not-sound, PR-X2 external certificate) are **gated by design**
+two non-engine items (PR-X1 ZK/MPC remediated-but-externally-unaudited, PR-X2 external certificate) are **gated by design**
 and explicitly **not** claimed as privacy guarantees. The framework never asserts "sparq is GDPR
 compliant" (a deployment property) — only the technical capabilities, each cited; the one
 overclaim (P-12) has been corrected in `controls.md` + `evidence.md`.

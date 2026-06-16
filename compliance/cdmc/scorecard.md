@@ -47,7 +47,7 @@ capped at the maturity of sparq's *enabling hooks*, not the (absent) governed ou
 | 3 | Accessibility & Usage | 3.1 Data entitlements are managed, enforced & tracked | **3** | `sparq-solid` WAC/ACP fail-closed per-session enforcement + an optional constant-time bearer-token write gate; ODRL usage-control is roadmap only. |
 | 3 | Accessibility & Usage | 3.2 Data access is tracked, with audit trails | **2** | Prometheus request metrics + WAL of mutations exist; there is no per-subject/per-query access **audit log** with identity. Operator must front-log. |
 | 4 | Protection & Privacy | 4.1 Data is secured & controls are evidenced | **4** | Deep, CI-gated security estate: `#![forbid(unsafe_code)]` (20+ crates), Miri/fuzz, CodeQL, supply-chain attestation, DoS limits, distroless image. |
-| 4 | Protection & Privacy | 4.2 A data privacy framework is defined & operational | **2** | sparq processes no personal data of its own (operator is controller); the ZK/MPC privacy story is **documented NOT sound** and excluded from any crypto-protection score. |
+| 4 | Protection & Privacy | 4.2 A data privacy framework is defined & operational | **2** | sparq processes no personal data of its own (operator is controller); the ZK/MPC privacy story is **remediated but NOT externally audited** (no production guarantee — external sign-off `sq-qhy4` PENDING) and excluded from any crypto-protection score. |
 | 4 | Protection & Privacy | 4.3 Sensitive data is protected (incl. encryption) | **2** | At-rest/in-transit encryption is **operator-deployment** (no built-in TLS; mmap files are plaintext). SHACL/classification gives the hook; sparq adds no crypto protection. |
 | 5 | Data Lifecycle | 5.1 The data lifecycle is planned & managed | **3** | Full SPARQL 1.1 UPDATE (INSERT/DELETE/CLEAR/DROP/CREATE/LOAD) over the whole dataset, conformance-tested; lifecycle *policy* is the operator's. |
 | 5 | Data Lifecycle | 5.2 Data quality is managed | **3** | SHACL Core/SPARQL validation (differential-fuzzed) + reasoning give the operator a real quality-rule engine; sparq runs no standing quality program. |
@@ -70,7 +70,7 @@ the governed outcome. **No key control is rated above its real evidence.**
 | 1 — Governance & Accountability | ~2.7 | Engine governance strong; data-ownership/sourcing is operator-accountable. |
 | 2 — Cataloguing & Classification | ~3.5 | VoID/SD catalogue + SHACL classification hooks are real; the catalogue (2.1) is now **CI-gated** (`feature-matrix.yml` builds+tests+clippies `federation-descriptors`, #244 / bead `sq-kzfi`) → level 4, lifting the component to 3.5 (2.1 = 4, 2.2 = 3). |
 | 3 — Accessibility & Usage | ~2.5 | Access *control* is real (WAC/ACP, token); access *audit* and ODRL usage-control are gaps. |
-| 4 — Protection & Privacy | ~2.7 | Security is **excellent (4)**; privacy/crypto-protection is **deliberately low (2)** — ZK/MPC NOT sound, encryption is operator-deployment. |
+| 4 — Protection & Privacy | ~2.7 | Security is **excellent (4)**; privacy/crypto-protection is **deliberately low (2)** — ZK/MPC remediated but NOT externally audited (no production guarantee), encryption is operator-deployment. |
 | 5 — Data Lifecycle | ~3.0 | Solid lifecycle *mechanism* (UPDATE/WAL/retention); lifecycle *policy* is operator-owned. |
 | 6 — Technical Architecture | ~3.0 | **Engine architecture is a strength (4)**; lineage capture is the weak axis (2). |
 
@@ -79,9 +79,12 @@ security controls — 4s; the cataloguing surface (2.1) is now a CI-gated **4** 
 `federation-descriptors` feature is built/tested/clippied on every PR — #244) and **deliberately weak where the capability is a
 governance *decision* an operator must make** (ownership, classification taxonomy, retention
 policy, residency — 2s). The single most important honesty statement: **the ZK/MPC estate is
-documented as NOT cryptographically sound** (`research/zk-soundness-audit.md`, `SECURITY.md`) and
-contributes **zero** to any protection-by-cryptography maturity here. Any future scorer who credits
-ZK/MPC as a privacy control is overclaiming.
+documented as remediated but NOT externally audited — no production cryptographic guarantee**
+(originally found unsound, `sq-1s2` binding layer landed, internal re-audit "sound as landed for
+the assumed threat model," external sign-off `sq-qhy4` PENDING — `research/zk-soundness-audit.md`,
+`research/zk-verifier-reaudit.md`, `SECURITY.md`) and it contributes **zero** to any
+protection-by-cryptography maturity here. Any future scorer who credits ZK/MPC as a production
+privacy control before the external sign-off is overclaiming. <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 
 ## Recommendations
 

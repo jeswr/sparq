@@ -166,13 +166,23 @@ frameworks extend this; the `cryptoreview` framework owns the ZK/MPC verdict.
 
 ## Cryptography exclusion proof (A.8.24 honesty gate)
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 ```sh
-grep -n 'NOT sound\|no.*guarantee\|research scaffold' SECURITY.md
-sed -n '1,40p' research/zk-soundness-audit.md
+grep -nE 'remediated, but NOT externally audited|NO .*guarantee|research scaffold|external .*audit' SECURITY.md
+sed -n '1,40p' research/zk-soundness-audit.md       # original UNSOUND verdict (kept on record)
+sed -n '1,40p' research/zk-verifier-reaudit.md      # internal post-remediation re-audit
 ```
-→ Confirms the documented verdict the A.8.24 row must **not** contradict: the v1 ZK
-verifier is NOT sound; MPC provides no guarantee. The A.8.24 control claims **only**
-artifact-signing + operator TLS, never the ZK/MPC estate.
+→ Confirms the reconciled verdict the A.8.24 row must **not** contradict: the v1 ZK verifier
+was **originally found NOT sound** (`research/zk-soundness-audit.md`, kept on record for the
+`sq-1gir` regression map), but `sq-1s2` landed the verifier-side binding layer and an
+**internal** post-remediation re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all
+prior findings closed → "sound as landed for the assumed threat model" [OPUS-4.8]. SECURITY.md's
+heading now reads **"ZK verifier: remediated, but NOT externally audited"** (so the old grep for
+`NOT sound` no longer matches — match the reconciled wording above). The re-audit is
+**internal, single-model, read-only**; an **external accredited-cryptographer sign-off is STILL
+PENDING** (`sq-qhy4`, P0, required before any production ZK claim) and there is **NO production
+soundness/privacy/integrity guarantee** (`sparq-mpc` semi-honest-only). The A.8.24 control
+claims **only** artifact-signing + operator TLS, never the ZK/MPC estate.
 
 ## Supplier / IP / license governance (A.5.19 / A.5.32 / A.8.8)
 

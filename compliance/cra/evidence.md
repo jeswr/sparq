@@ -51,7 +51,7 @@ documentation) would inspect.
 
 | Evidence | Where | Verify |
 |---|---|---|
-| Coordinated vulnerability disclosure policy | `SECURITY.md` (GHSA + email, response targets, no-public-issue, scope/caveats) | Read; the ZK-not-sound + MPC-deferred caveats are explicit (honesty contract). |
+| Coordinated vulnerability disclosure policy | `SECURITY.md` (GHSA + email, response targets, no-public-issue, scope/caveats) | Read; the ZK "remediated-but-externally-unaudited, no production guarantee" + MPC semi-honest-only caveats are explicit (honesty contract). [OPUS-4.8] |
 | RFC 9116 machine-discoverable channel | `.well-known/security.txt` | Contact ×2, Policy, Canonical, Expires (2027-06-15) present + in the future. |
 | Public disclosure of fixed vulns | GitHub Security Advisories + `CHANGELOG.md` + release notes | GHSA list; changelog entries; release body links the changelog. |
 | Annex II info: identity, product, intended use, limitations, secure-use | `SECURITY.md`, `README.md`, `AGENTS.md`, `Dockerfile` header, `crates/sparq-server/README.md`, OCI image labels | Read; the "experimental, pre-1.0, NO-guarantee ZK/MPC" framing is consistent across all. |
@@ -72,7 +72,8 @@ documentation) would inspect.
 
 | Item | Statement | Where |
 |---|---|---|
-| ZK/MPC provides **no** security property | v1 ZK verifier NOT sound; `sparq-mpc` deferred — excluded from every CRA confidentiality/integrity claim. | `SECURITY.md`, `research/zk-soundness-audit.md`, [`README.md`](./README.md) §nuance 4 |
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+| ZK/MPC provides **no production** security guarantee | v1 ZK verifier originally found unsound, then `sq-1s2` landed the binding layer + internal re-audit (`sq-gbp4`) found findings closed → "sound as landed for the assumed threat model" — but **internal/single-model only, external sign-off PENDING (`sq-qhy4`), no production guarantee**; `sparq-mpc` semi-honest-only — excluded from every CRA confidentiality/integrity claim. | `SECURITY.md`, `research/zk-soundness-audit.md`, `research/zk-verifier-reaudit.md`, [`README.md`](./README.md) §nuance 4 |
 | End-user auth/authz is the **operator's** (B3) | Optional Bearer auth is sparq's; per-user authz → gateway/sparq-solid. | `research/threat-model.md`, `Dockerfile` header |
 | TLS/transport + at-rest encryption is the operator's | sparq emits a sniffable-token warning; TLS terminates at the operator's proxy. | `Dockerfile` header, `crates/sparq-server/README.md` |
 | CE marking / EU declaration of conformity is **not** claimed | A manufacturer organizational/legal act; this tree provides only the supporting evidence. | [`controls.md`](./controls.md) §"formal conformity layer" |

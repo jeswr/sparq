@@ -64,10 +64,15 @@ organization supplies every *decision* and *sign-off*.
 - **No certificate.** Nothing here is, or can be, an ISO 27001 certificate.
 - **No org decisions pre-made.** Every applicability, risk, acceptance, and sign-off cell is a
   `<FILL-IN>` placeholder. sparq does not, and cannot, make these for an organization.
-- **A.8.24 / ZK-MPC.** The `sparq-zk` / `sparq-zk-compose` / `sparq-mpc` estate is documented
-  **NOT cryptographically sound** (`SECURITY.md`, `research/zk-soundness-audit.md`). It is
-  **excluded** from every cryptographic-control claim across all five templates; no SoA or risk
-  register completion may credit it as a control.
+- **A.8.24 / ZK-MPC.** The `sparq-zk` / `sparq-zk-compose` / `sparq-mpc` estate was **originally
+  found NOT cryptographically sound** (`research/zk-soundness-audit.md`); `sq-1s2` then landed
+  the verifier-side binding layer and an **internal** re-audit (`research/zk-verifier-reaudit.md`,
+  `sq-gbp4`) found all findings closed → "sound as landed for the assumed threat model," but the
+  re-audit is internal/single-model/read-only, **external accredited-cryptographer sign-off is
+  STILL PENDING** (`sq-qhy4`, P0) and there is **NO production guarantee** (`SECURITY.md`)
+  [OPUS-4.8]. It is **excluded** from every cryptographic-control claim across all five
+  templates; no SoA or risk register completion may credit it as a control.
+  <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 
 ## Provenance
 

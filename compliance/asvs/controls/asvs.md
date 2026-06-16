@@ -64,7 +64,7 @@ or an in-module `#[test]` regresses, `.github/workflows/<wf>.yml` gates. Full re
 | ASVS | Control | Status | Evidence | Owner |
 |---|---|---|---|---|
 | V6.2.x | Constant-time comparison for secret material | **PASS** | `constant_time_eq()` (`http.rs:543`) for the auth token. | sparq |
-| V6.* (key management, approved algorithms, at-rest encryption) | Application cryptography | **N/A / operator** | sparq-server stores no secrets at rest and manages no key material; at-rest encryption of the loaded dataset is the operator's storage concern. **ZK/MPC crypto is EXCLUDED** — not a delivered control (`SECURITY.md`, `research/zk-soundness-audit.md`). | operator |
+| V6.* (key management, approved algorithms, at-rest encryption) | Application cryptography | **N/A / operator** | sparq-server stores no secrets at rest and manages no key material; at-rest encryption of the loaded dataset is the operator's storage concern. **ZK/MPC crypto is EXCLUDED** — not a delivered control: remediated but NOT externally audited, external sign-off `sq-qhy4` PENDING, no production guarantee (`SECURITY.md` §"`sparq-zk` and `sparq-zk-compose` — ZK verifier: remediated, but NOT externally audited"; `research/zk-soundness-audit.md`; `research/zk-verifier-reaudit.md`). <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> | operator |
 
 ## V7 — Error Handling & Logging (core)
 
@@ -165,4 +165,4 @@ The ASVS input-validation / DoS-limit / auth / SSRF / error-hygiene controls abo
 - **GAP:** V14.4 security headers (ASVS-G1), V14.5.3 first-party CORS allowlist (ASVS-G2),
   V7.1.1 engine-error-string leakage verification (ASVS-G3), V5.5.2 explicit SPARQL
   parse-depth bound (ASVS-G4). All in [`gap-register.md`](./gap-register.md) with beads.
-- **EXCLUDED (not a control):** the ZK/MPC estate — **NOT sound** per `SECURITY.md`.
+- **EXCLUDED (not a control):** the ZK/MPC estate — **remediated but NOT externally audited**, no production guarantee until external sign-off (`sq-qhy4`), per `SECURITY.md`. <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->

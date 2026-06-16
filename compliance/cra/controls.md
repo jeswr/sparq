@@ -7,9 +7,15 @@ Status values: **implemented & verified** · **audit-ready** · **gap** · **N/A
 Evidence paths are repo-relative. "Owner" = sparq (the project) or operator (the deploying /
 commercialising party) — the CRA manufacturer/steward distinction is in [`README.md`](./README.md).
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 > The ZK/MPC crates (`sparq-zk*`, `sparq-mpc`) are **excluded** from every confidentiality /
-> integrity claim below — they provide **no** security property today (see `SECURITY.md`,
-> `research/zk-soundness-audit.md`). No row's "met" status depends on them.
+> integrity claim below — they provide **no production** security guarantee today. [OPUS-4.8]
+> The v1 ZK verifier was originally found unsound (`research/zk-soundness-audit.md`), then `sq-1s2`
+> landed the binding layer and an internal re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`)
+> found the prior findings closed → "sound as landed for the assumed threat model" — but that is
+> **internal / single-model self-review only, with external accredited-cryptographer sign-off still
+> PENDING (`sq-qhy4`) and NO production guarantee** (see `SECURITY.md`). No row's "met" status
+> depends on them.
 
 ## Annex I, Part I — essential cybersecurity requirements
 
@@ -43,7 +49,7 @@ commercialising party) — the CRA manufacturer/steward distinction is in [`READ
 | II.2 | **Address and remediate** vulnerabilities **without delay**, including by providing security updates. | implemented & verified (process) | Security fixes land on `main` and ship in the next release of the affected artifact (`SECURITY.md` §"Supported versions"); Dependabot opens **ungrouped** per-advisory security PRs across 4 ecosystems (`.github/dependabot.yml`); daily advisory watchdog opens an idempotent tracking issue (`dependency-monitoring.yml`). Response targets (5/10 business-day ack/assessment) documented in `SECURITY.md`. | sparq |
 | II.3 | **Apply effective and regular tests/reviews** of the security of the product. | implemented & verified | CodeQL SAST (`security-and-quality` queries), Miri UB lane, cargo-fuzz (PR smoke + nightly), W3C conformance ratchets, OpenSSF Scorecard, the engineer↔auditor certification loop itself; secure-coding review per `CONTRIBUTING.md` + CODEOWNERS. | sparq |
 | II.4 | Once a security update is available, **publicly disclose information** about fixed vulnerabilities (description, impact, remediation). | implemented & verified | GitHub Security Advisories (GHSA) coordinated-disclosure flow + crediting (`SECURITY.md`); `CHANGELOG.md` records fixes; release notes link the changelog. | sparq |
-| II.5 | Put in place and enforce a **coordinated vulnerability disclosure** policy. | implemented & verified | `SECURITY.md` (private GHSA + email channels, response targets, no-public-issue rule, scope incl. the ZK-not-sound caveat); **RFC 9116** machine-discoverable `.well-known/security.txt` (sq-toze.4); `CONTRIBUTING.md` redirects security reports to the private channel. | sparq |
+| II.5 | Put in place and enforce a **coordinated vulnerability disclosure** policy. | implemented & verified | `SECURITY.md` (private GHSA + email channels, response targets, no-public-issue rule, scope incl. the ZK "remediated-but-externally-unaudited, no production guarantee" caveat [OPUS-4.8]); **RFC 9116** machine-discoverable `.well-known/security.txt` (sq-toze.4); `CONTRIBUTING.md` redirects security reports to the private channel. | sparq |
 | II.6 | **Facilitate sharing** of information about potential vulnerabilities (e.g. a contact address). | implemented & verified | Two contacts in `security.txt` + `SECURITY.md` (GHSA report URL + `mailto:`); `Policy` + `Canonical` + `Expires` fields present per RFC 9116. | sparq |
 | II.7 | Provide **mechanisms to securely distribute updates** to address/mitigate vulnerabilities **in a timely manner**. | implemented & verified (with raise) | Releases are integrity-protected: `SHA256SUMS` over every archive + SBOM + VEX, **SLSA build-provenance attestation** (`actions/attest-build-provenance`) on archives/SBOM and the ghcr image (`provenance: mode=max` + `sbom: true`) — `release.yml`; SHA-pinned actions; `cargo-auditable` embeds the dep manifest in the binary. Distribution channels are crates.io/npm/PyPI/ghcr. *(Gaps GX-9/GX-10/GX-12 raise assurance — see gap-register.)* | sparq |
 | II.8 | Where a security update is available, ensure it is **disseminated without delay and free of charge**, with **advisory messages**. | audit-ready (process documented) | Updates are free (MIT, public registries) and announced via GHSA + release notes + `CHANGELOG.md`. The *organizational commitment* to a defined dissemination SLA/support period is a **policy** the maintainer/steward adopts — template at `compliance/policies/` (privacy/SSDF worktrees own the template set); the **support-period statement** is a gap (GX-CRA-1). | sparq (org sign-off) |

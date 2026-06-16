@@ -94,6 +94,13 @@ cargo audit bin <path-to-sparq-cli>
   implementer-side practice framework — so "audit-ready" here means *evidenced and ready for
   an org to assert*, not "a cert is pending".
 - The `sparq-zk*` / `sparq-mpc` estate is **not** counted as a met security control
-  anywhere in this mapping; its no-guarantee disclaimer (`SECURITY.md`,
-  `research/zk-soundness-audit.md`) is a correctly-disclosed limitation. Any future control
-  claim that contradicts the "v1 verifier is NOT sound" verdict is out of bounds.
+  anywhere in this mapping; its no-production-guarantee status is a correctly-disclosed
+  limitation. [OPUS-4.8] The v1 ZK verifier was originally found unsound
+  (`research/zk-soundness-audit.md`, kept on record), then `sq-1s2` landed the binding layer and
+  an internal re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found the prior findings
+  closed → "sound as landed for the assumed threat model" — but that is **internal/single-model
+  self-review only, with external accredited-cryptographer sign-off still PENDING (`sq-qhy4`) and
+  NO production guarantee** (`SECURITY.md`). Any future control claim that asserts an
+  externally-validated or production ZK soundness/privacy guarantee is out of bounds until the
+  external sign-off lands.
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->

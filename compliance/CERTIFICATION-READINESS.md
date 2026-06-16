@@ -26,7 +26,7 @@ which is itself recorded honestly rather than presented as an independent second
 | **ISO 27001** | **Zero open Annex-A *control* gaps**; remaining is the **ISMS/SoA organisational act** (GAP-ISO-1) — a readiness pack, never a self-issued certificate. |
 | **EU CRA** | Substance of the **Annex I vuln-handling process + most secure-by-default** essential requirements met; **CE-marking / DoC / Article-14 reporting** is the manufacturer org act. |
 | **Privacy** (GDPR + 27701 + SOC2-Privacy) | Substantively **AUDIT-READY** — engine supports a compliant deployment; error-hygiene (P-12) **fixed (PR #241)**; certificate + controller duties are operator/external. |
-| **Cryptoreview (ZK/MPC)** | **Readiness doc, NOT a certificate.** ZK/MPC documented **NOT sound / research-only**; **external cryptographer audit REQUIRED** before any ZK/MPC security claim. |
+| **Cryptoreview (ZK/MPC)** | **Readiness doc, NOT a certificate.** ZK verifier originally found **unsound** (`research/zk-soundness-audit.md`); `sq-1s2` landed the verifier binding layer and the **internal** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed → **"sound as landed for the assumed threat model"** — but **external cryptographer audit STILL REQUIRED** (`sq-qhy4`, P0) before any ZK/MPC security claim; `sparq-mpc` semi-honest-only, **no guarantee**. [OPUS-4.8] |
 | **CDMC** | Engine-strong (two **4s**: security + architecture), honest **3s** (catalogue/classification/lifecycle), deliberate **2s** where the capability is an operator governance decision. |
 
 ## Genuinely demonstrable from the codebase / CI today
@@ -53,9 +53,11 @@ These are re-runnable, file-or-test-cited, and gating in CI — sparq can stand 
 
 ## Requires an external act (must NOT be presented as satisfied)
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+
 | External act | Framework | Tracking |
 |---|---|---|
-| **External accredited-cryptographer audit of the ZK/MPC estate** — the v1 ZK verifier is documented **NOT sound** and `sparq-mpc` carries **no guarantee**; all soundness assurance is internal single-model self-review. **No ZK/MPC result may be relied upon in production until this closes.** | cryptoreview | **`sq-qhy4` (P0)** |
+| **External accredited-cryptographer audit of the ZK/MPC estate** — the v1 ZK verifier was originally found **unsound** but `sq-1s2` landed the binding layer and the **internal, single-model** re-audit (`sq-gbp4`) found all findings closed ("sound as landed for the assumed threat model"); `sparq-mpc` carries **no guarantee**. All soundness assurance is still **internal self-review** — external sign-off is **pending**. **No ZK/MPC result may be relied upon in production until this closes.** | cryptoreview | **`sq-qhy4` (P0)** |
 | **ISMS / Statement-of-Applicability** sign-off + operating programme | iso27001 | GAP-ISO-1 (`soa-template.md` is the scaffold) |
 | **External penetration test** + accredited ASVS L2 assessor | asvs (cis) | AUDIT-READY |
 | **CE marking / EU Declaration of Conformity / Article-14 reporting** | cra | CRA-CA.2/CA.3 (org act) |
@@ -83,7 +85,8 @@ These are re-runnable, file-or-test-cited, and gating in CI — sparq can stand 
 sparq's **technical** security posture is genuinely strong and CI-gating, and every claim here is
 evidence-cited and re-runnable. The certification *gaps* are concentrated in (a) external assessor /
 accredited-body acts (the certificates themselves), (b) the **external cryptographer audit of the
-NOT-sound ZK/MPC estate** — the single most important honesty boundary repo-wide — and (c) a handful
+ZK/MPC estate** — remediated and internally re-audited as "sound as landed" (`sq-gbp4`) but **not
+externally signed off**, the single most important honesty boundary repo-wide — and (c) a handful
 of in-repo completeness items (reproducible build, container CVE scan, published-package provenance,
 the badge filing). **What sparq can honestly claim today:** a memory-safe, supply-chain-attested
 (SLSA L2), SAST/fuzz/Miri-gated Rust data engine with a documented vuln-handling process and a

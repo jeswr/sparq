@@ -44,10 +44,13 @@ Recorded so the auditor sees they were *considered and assigned*, not missed:
   **AUDIT-READY** (operator-owned config).
 - **V6 application crypto / V8 data classification** — the dataset's encryption +
   classification is the operator's (GDPR-controller) responsibility (`compliance/data-flow.md`).
-- **The ZK/MPC estate** — **EXCLUDED**, not a delivered control: the v1 ZK verifier is **NOT
-  sound** and the MPC layer carries **no guarantee** (`SECURITY.md`,
-  `research/zk-soundness-audit.md`). No ASVS claim depends on it. Any future claim that it
-  provides a security property is, per the honesty contract, a high-severity finding.
+- **The ZK/MPC estate** — **EXCLUDED**, not a delivered control: <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> the ZK verifier is
+  **remediated but NOT externally audited** (originally unsound; `sq-1s2` binding layer landed;
+  internal re-audit "sound as landed for the assumed threat model"; external sign-off `sq-qhy4`
+  PENDING; **no production guarantee**) and the MPC layer carries **no guarantee** (`SECURITY.md`,
+  `research/zk-soundness-audit.md`, `research/zk-verifier-reaudit.md`). No ASVS claim depends on
+  it. Any future claim that it provides a production security property before that external
+  sign-off is, per the honesty contract, a high-severity finding. [OPUS-4.8]
 
 ## Residual external attestation (cannot be self-issued)
 

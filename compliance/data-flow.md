@@ -87,12 +87,16 @@ per-request content and **no** personal data; metrics are aggregate-only; errors
 
 ## 6 — ZK/MPC privacy story (explicitly NOT a guarantee)
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 If sound, `sparq-zk`/`sparq-zk-compose` (zero-knowledge query proofs) and `sparq-mpc`
 (multi-party computation over data split across distrusting parties) would let an operator prove a
 query result *without revealing the data* / compute a federated result *without pooling* the
-inputs — a strong data-minimisation control. **They are NOT yet sound** (`SECURITY.md`;
-`research/zk-soundness-audit.md`): the v1 ZK verifier gives no meaningful soundness guarantee and
-`sparq-mpc` gives no confidentiality/correctness guarantee. **No data-flow protection in this
+inputs — a strong data-minimisation control. The v1 ZK verifier was originally found **unsound**
+(`research/zk-soundness-audit.md`); `sq-1s2` landed the binding layer and the **internal,
+single-model** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed
+("sound as landed for the assumed threat model"), but it is **NOT externally audited** (`SECURITY.md`;
+`sq-qhy4`, P0, pending) and carries **no production guarantee**; `sparq-mpc` is semi-honest-only and
+gives no confidentiality/correctness guarantee. **No data-flow protection in this
 document relies on them**; they appear only to be explicitly excluded. Gated: bead **sq-toze.35**.
 
 ## 7 — Summary

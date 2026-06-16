@@ -9,9 +9,16 @@ paste into the form when the maintainer files it, GX-4); **§Scorecard** is the 
 evidence narrative. Every claim cites a repo-relative artifact. Nothing here is asserted
 without a checkable source; where a criterion is *Met (justification)* or *Unmet* it says so.
 
-> Honesty anchor: sparq's ZK/MPC crypto is a **research scaffold with NO security
-> guarantee** (the v1 ZK verifier is **NOT sound**; `sparq-mpc` provides no guarantee — see
-> [`SECURITY.md`](../../SECURITY.md) and [`research/zk-soundness-audit.md`](../../research/zk-soundness-audit.md)).
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+> Honesty anchor: sparq's ZK/MPC crypto is a **research scaffold with NO production security
+> guarantee**. [OPUS-4.8] The v1 ZK verifier was **originally found unsound**
+> ([`research/zk-soundness-audit.md`](../../research/zk-soundness-audit.md), kept on record),
+> then `sq-1s2` landed the verifier-side binding layer and an **internal post-remediation
+> re-audit** ([`research/zk-verifier-reaudit.md`](../../research/zk-verifier-reaudit.md),
+> `sq-gbp4`) found the prior findings closed → **"sound as landed for the assumed threat
+> model"** — but that is **internal / single-model self-review only, with external
+> accredited-cryptographer sign-off still PENDING (`sq-qhy4`, P0) and NO production guarantee**;
+> `sparq-mpc` is semi-honest-only with no guarantee (see [`SECURITY.md`](../../SECURITY.md)).
 > The badge `crypto_*` answers below concern **only** sparq's own cryptographic use (the
 > Sigstore release-attestation / TLS-at-the-operator-boundary path). They make **no** claim
 > about the research scaffolds. Any answer that did would be a high-severity overclaim.
@@ -75,7 +82,7 @@ flag where sparq also satisfies **silver/gold**.
 - **`warnings_strict`** — Met — `cargo clippy --workspace --all-targets -- -D warnings` (full-workspace, all-targets) is the **hard gate** ([`ci.yml`](../../.github/workflows/ci.yml) `clippy (gate) + fmt (non-blocking)` job). *(This is the gold-level strict-warnings posture; the criterion rests on the clippy hard-gate. `cargo fmt --all --check` runs **informationally**, not gating — pending the deferred one-time `cargo fmt --all` reformat, per `ci.yml` header — so it is not cited as enforcing the criterion.)*
 
 ### Security
-- **`crypto_published`** — Met w/scope — sparq's *delivery* crypto is Sigstore/SLSA build-provenance (a published, standard scheme) over release assets ([`release.yml`](../../.github/workflows/release.yml)). **No claim is made about the `sparq-zk*`/`sparq-mpc` research scaffolds** (NOT sound — `SECURITY.md`).
+- **`crypto_published`** — Met w/scope — sparq's *delivery* crypto is Sigstore/SLSA build-provenance (a published, standard scheme) over release assets ([`release.yml`](../../.github/workflows/release.yml)). **No claim is made about the `sparq-zk*`/`sparq-mpc` research scaffolds** (remediated but **externally unaudited — internal re-audit only, external sign-off PENDING `sq-qhy4`, no production guarantee**; `SECURITY.md`). [OPUS-4.8]
 - **`crypto_call`** — Met w/justification — the release path calls Sigstore via the maintained `actions/attest-build-provenance`; it does not roll its own crypto. The ZK/MPC scaffolds are out of scope.
 - **`crypto_floss`** — Met — Sigstore + Rust crypto deps are FLOSS.
 - **`crypto_keylength`** / **`crypto_working`** / **`crypto_weaknesses`** — Met w/scope — apply to the Sigstore/TLS delivery path (modern defaults); explicitly **not** asserted about the scaffolds.

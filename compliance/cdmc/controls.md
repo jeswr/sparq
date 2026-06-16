@@ -37,7 +37,7 @@
 | Cap | Control theme | Status | Maturity | How sparq addresses it | Evidence |
 |---|---|---|---|---|---|
 | 4.1 | Data secured & controls evidenced | Implemented & verified | 4 | Deep, CI-gated security estate: `#![forbid(unsafe_code)]` in 20+ crates with a justified unsafe register (GX-5/#217), Miri + cargo-fuzz lanes, CodeQL SAST, OpenSSF Scorecard, cargo-deny, CycloneDX SBOM, SLSA build provenance, distroless non-root SHA-pinned image, four-limit DoS guards (timeout/body/concurrency/results). | `crates/*/src/lib.rs` (`forbid(unsafe_code)`); `.github/workflows/{miri,fuzz,codeql,scorecard,supply-chain}.yml`; `crates/sparq-server/src/main.rs` (DoS limits); `Dockerfile`; the `asvs`/`cis`/`sbom`/`slsa`/`memsafety` slices |
-| 4.2 | Privacy framework defined & operational | Operator-owned; Gap (crypto privacy) | 2 | sparq processes **no personal data of its own** (operator is the GDPR controller — see `compliance/data-flow.md`/`dpia.md`, privacy slice). The ZK/MPC "prove-without-disclosing" estate is **documented NOT cryptographically sound** and contributes **zero** here. | `research/zk-soundness-audit.md` (v1 verifier NOT sound); `SECURITY.md` (ZK-not-sound caveat); `compliance/data-flow.md` (privacy slice) |
+| 4.2 | Privacy framework defined & operational | Operator-owned; Gap (crypto privacy) | 2 | sparq processes **no personal data of its own** (operator is the GDPR controller — see `compliance/data-flow.md`/`dpia.md`, privacy slice). The ZK/MPC "prove-without-disclosing" estate is **documented as remediated but NOT externally audited — no production guarantee** (external sign-off `sq-qhy4` PENDING) and contributes **zero** here. <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> | `research/zk-soundness-audit.md` (original audit) + `research/zk-verifier-reaudit.md` (`sq-gbp4`, "sound as landed for the assumed threat model"); `SECURITY.md` §"`sparq-zk` and `sparq-zk-compose` — ZK verifier: remediated, but NOT externally audited"; `compliance/data-flow.md` (privacy slice) |
 | 4.3 | Sensitive data protected (encryption) | Operator-owned | 2 | At-rest (mmap `.spq`/dict files are **plaintext**) and in-transit (server is **plaintext HTTP**, no built-in TLS) encryption are **operator-deployment** concerns (TLS-terminating gateway + disk/KMS encryption). SHACL gives the classification hook; sparq adds no crypto protection. | `crates/sparq-core/src/store.rs` (plaintext mmap save); `crates/sparq-server/src/http.rs` (no TLS); threat-model B3/B5 — see CD-3 |
 
 ## Component 5 — Data Lifecycle
@@ -59,8 +59,12 @@
 - **No capability is scored above its evidence.** Operator-owned axes (1.2, 4.2, 4.3, the policy
   halves of 5.1/5.2) are capped at the maturity of sparq's *enabling hook*, never the governed
   outcome.
-- **ZK/MPC is excluded** from 4.x protection-by-crypto. The `research/zk-soundness-audit.md` verdict
-  (v1 verifier NOT sound; MPC NO guarantee) is binding; any row implying otherwise is a finding.
+- **ZK/MPC is excluded** from 4.x protection-by-crypto. <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> The estate is **remediated but NOT
+  externally audited** (originally unsound per `research/zk-soundness-audit.md`; `sq-1s2` landed;
+  internal re-audit `research/zk-verifier-reaudit.md` "sound as landed for the assumed threat
+  model"; external sign-off `sq-qhy4` PENDING; **no production guarantee**; MPC carries no
+  guarantee). This is binding; any row crediting it as a production crypto-privacy control before
+  the external sign-off is a finding.
 - The optional bearer-token write gate (3.1) is a **real, constant-time-compared** control
   (sq-zcby) — it does **not** contradict threat-model boundary **B3** ("no per-user auth; front with
   a gateway"); it is a coarse write/read gate, not user authentication, and is documented as such.

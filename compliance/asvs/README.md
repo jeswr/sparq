@@ -83,11 +83,16 @@ mapped as **implemented & verified**.
 
 ## What is explicitly OUT OF SCOPE here
 
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 - **The ZK/MPC crypto estate** (`sparq-zk`, `sparq-zk-compose`, `sparq-mpc`). Per
-  `SECURITY.md` and `research/zk-soundness-audit.md`, the v1 ZK verifier is **NOT sound** and
-  the MPC layer carries **no guarantee** — they are research scaffolds. They are **not** a
-  delivered security control and are **excluded** from every ASVS claim below. The
-  cryptographic review is its own framework (`cryptoreview`); the privacy story is `privacy`.
+  `SECURITY.md` (§"`sparq-zk` and `sparq-zk-compose` — ZK verifier: remediated, but NOT
+  externally audited") and `research/zk-soundness-audit.md` + `research/zk-verifier-reaudit.md`,
+  the ZK verifier was originally found unsound, the `sq-1s2` binding layer has landed, and the
+  internal re-audit found it "sound as landed for the assumed threat model" — **but** external
+  cryptographer sign-off is still PENDING (`sq-qhy4`, P0), there is **no production guarantee**,
+  and the MPC layer carries **no guarantee**. They remain research scaffolds, are **not** a
+  delivered security control, and are **excluded** from every ASVS claim below. The
+  cryptographic review is its own framework (`cryptoreview`); the privacy story is `privacy`. [OPUS-4.8]
 - **The full authentication / session / account lifecycle** (V2/V3/V4) — operator gateway
   responsibility per B3 (above).
 - **Memory-safety attestation** (the `unsafe` register, Miri, geiger ratchet) — its own

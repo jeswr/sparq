@@ -61,7 +61,7 @@ List the issues that affect the ISMS outcomes. The sparq-relevant seeds are pre-
 | 1 | `<FILL-IN: e.g. regulatory regime(s) the deployed service operates under — GDPR/CRA/sector rules>` | External | Drives clause-4.2 requirements + Annex A A.5.31 (legal) | `<FILL-IN>` |
 | 2 | **Use of sparq as a third-party open-source data engine** (supplier dependency) | External | A.5.19–A.5.22 supplier controls; the org inherits sparq's supply-chain posture but owns its *own* dependency policy | `<FILL-IN>` |
 | 3 | **sparq's documented no-authentication boundary (B3)** — `sparq-server` ships with no per-user authz | External (component design) | The org **must** front it with an authenticating/TLS gateway; names this in 4.3 interfaces | `<FILL-IN>` |
-| 4 | **sparq's ZK/MPC estate is documented NOT cryptographically sound** (`SECURITY.md`, `research/zk-soundness-audit.md`) | External (component limitation) | The org must **not** rely on it for any confidentiality/integrity guarantee; record as an explicit exclusion | `<FILL-IN>` |
+| 4 | **sparq's ZK/MPC estate carries NO production cryptographic guarantee** — v1 ZK verifier **originally found NOT sound** (`research/zk-soundness-audit.md`), then `sq-1s2` landed the binding layer + an **internal** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed → "sound as landed for the assumed threat model"; **external sign-off STILL PENDING** (`sq-qhy4`, P0), no production guarantee (`SECURITY.md`) [OPUS-4.8] | External (component limitation) | The org must **not** rely on it for any confidentiality/integrity guarantee; record as an explicit exclusion | `<FILL-IN>` |
 | 5 | `<FILL-IN: internal — team structure, skills, change-rate, hosting model (cloud/on-prem)>` | Internal | Affects resourcing (clause 7) + operator-owned controls | `<FILL-IN>` |
 | 6 | `<FILL-IN: data sensitivity of the RDF the org loads into sparq>` | Internal | Drives A.5.12 classification + privacy scope (`compliance/dpia.md`) | `<FILL-IN>` |
 
@@ -103,8 +103,12 @@ List the issues that affect the ISMS outcomes. The sparq-relevant seeds are pre-
 - **Supply-chain interface:** sparq is pulled as a dependency; the org's dependency-management
   policy (A.5.19–A.5.22) governs ingestion of sparq updates and sparq's own transitive deps.
 - **Excluded crypto interface:** the `sparq-zk` / `sparq-zk-compose` / `sparq-mpc` estate is
-  **excluded from any security guarantee** (documented NOT sound). State this as an exclusion
+  **excluded from any production security guarantee** — v1 ZK verifier originally found NOT
+  sound, then remediated (`sq-1s2`) with an **internal** re-audit (`research/zk-verifier-reaudit.md`,
+  `sq-gbp4`) judging it "sound as landed for the assumed threat model," but **external sign-off
+  STILL PENDING** (`sq-qhy4`) and no production guarantee [OPUS-4.8]. State this as an exclusion
   so no auditor or reader infers a cryptographic control from it.
+  <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 
 **Out of scope (with justification):** `<FILL-IN: e.g. corporate IT not touching the service;
 must justify under clause 4.3 that exclusions do not undermine the ISMS>`.

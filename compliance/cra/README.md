@@ -66,13 +66,21 @@ on crates.io / npm / PyPI / ghcr.io. That shape drives four scoping decisions:
    unauthorised access" this is an **architectural decision + operator-responsibility split**,
    documented and surfaced at runtime (a loud no-auth startup warning), not a silent gap.
 
-4. **The ZK/MPC estate provides NO security property today and is excluded from every CRA
-   security claim.** The v1 ZK verifier is documented as **NOT sound** and `sparq-mpc` as a
-   deferred research scaffold (see [`SECURITY.md`](../../SECURITY.md) §"research scaffolds with
-   NO security guarantee" and [`research/zk-soundness-audit.md`](../../research/zk-soundness-audit.md)).
-   No CRA Annex I "confidentiality/integrity" claim in this mapping rests on the ZK/MPC crates;
-   to do so would launder a research scaffold into a regulatory assurance and is an explicit
-   honesty-contract violation.
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+4. **The ZK/MPC estate provides NO production security guarantee today and is excluded from
+   every CRA security claim.** [OPUS-4.8] The v1 ZK verifier was **originally found unsound**
+   ([`research/zk-soundness-audit.md`](../../research/zk-soundness-audit.md), kept on record),
+   but the `sq-1s2` remediation **landed the verifier-side binding layer** and an **internal
+   post-remediation re-audit** ([`research/zk-verifier-reaudit.md`](../../research/zk-verifier-reaudit.md),
+   bead `sq-gbp4`) found all prior findings closed — verdict **"sound as landed for the assumed
+   threat model"**. That verdict is **internal / single-model self-review only**: an **external
+   accredited-cryptographer sign-off is still PENDING** (`sq-qhy4`, P0, required before any
+   production ZK claim), forge tests are `#[ignore]`d out of default CI, and there is **NO
+   production soundness/privacy/integrity guarantee** — it remains a research scaffold, and
+   `sparq-mpc` is semi-honest-only with no guarantee (see [`SECURITY.md`](../../SECURITY.md)
+   §"research scaffolds with NO security guarantee"). No CRA Annex I "confidentiality/integrity"
+   claim in this mapping rests on the ZK/MPC crates; to do so would launder a research scaffold
+   into a regulatory assurance and is an explicit honesty-contract violation.
 
 ## Scope — what is in / out for a library + server
 

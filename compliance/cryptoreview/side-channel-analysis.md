@@ -19,11 +19,15 @@
 > absence of a timing or microarchitectural channel (compiler lowering, the underlying `arkworks`
 > field arithmetic, and CPU behaviour are all out of source-level reach).
 >
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
 > A side-channel review **does not change** the headline of this framework: sparq's bespoke ZK/MPC
 > crypto is **research-grade and externally unaudited** (gap **CR-G1**, bead `sq-qhy4`). The v1 ZK
-> verifier is published as **NOT sound** (`SECURITY.md`); `sparq-mpc` carries **no security
+> verifier is published (`SECURITY.md`) as **remediated but NOT externally audited** — the binding
+> layer landed and the internal re-audit found it "sound as landed for the assumed threat model,"
+> but a relying party must **not** present a "verified" result as a production-grade guarantee
+> until the external cryptographer audit (`sq-qhy4`) completes; `sparq-mpc` carries **no security
 > guarantee**. Nothing in this analysis upgrades that posture, and a clean timing finding on an
-> unsound protocol is not a security claim.
+> externally-unaudited research-grade protocol is not a security claim. [OPUS-4.8]
 
 ## 0. Scope and method
 
@@ -282,8 +286,10 @@ unchanged).
    verified here. The algorithm-level CT verdicts assume nothing about the underlying field-op timing.
 3. **This does not touch protocol soundness.** A constant-time finding (or its absence) on an
    externally-unaudited, semi-honest, research-grade protocol is not a security claim. The governing
-   posture remains `SECURITY.md` + **CR-G1** (external cryptographer audit, `sq-qhy4`): treat the v1
-   ZK verifier as **NOT sound** and `sparq-mpc` as providing **no guarantee** until that closes.
+   posture remains `SECURITY.md` + **CR-G1** (external cryptographer audit, `sq-qhy4`): the v1 ZK
+   verifier is **remediated but NOT externally audited** — do not present a "verified" result as a
+   production-grade guarantee, and treat `sparq-mpc` as providing **no guarantee**, until that
+   external sign-off closes. [OPUS-4.8]
 4. **The fixes are bead-tracked, not applied.** This pass deliberately changed **no crypto code**;
    `sq-7ltf`, `sq-u8a8`, `sq-8jv7` track the recommended remediations for a separate, test-guarded
    pass.

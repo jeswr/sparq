@@ -23,19 +23,25 @@ governs every row below.
 - **OPEN-gap** — a residual hole (privacy, test-infra) recorded in `gap-register.md` with a
   bead.
 
-> **Honesty banner.** Per `SECURITY.md`, the v1 ZK verifier is published as **NOT sound** and
-> `sparq-mpc` as **NO guarantee**. No row below upgrades that posture. The favourable internal
-> re-audit (CR-3) is recorded as *progress evidence*, not as soundness certification — CR-G1
-> (external audit) is the gate, and it is OPEN.
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+> **Honesty banner.** Per `SECURITY.md` (§"`sparq-zk` and `sparq-zk-compose` — ZK verifier:
+> remediated, but NOT externally audited"), the verifier was originally found unsound, the
+> `sq-1s2` remediation has landed, and the internal re-audit found it **"sound as landed for
+> the threat model the prior audit assumed"** — but `SECURITY.md` still tells a relying party
+> not to present a "verified" result as a production-grade guarantee **until the external
+> cryptographer audit (`sq-qhy4`) completes**, and `sparq-mpc` carries **NO guarantee**. No
+> row below upgrades that posture. The favourable internal re-audit (CR-3) is recorded as
+> *progress evidence*, not as soundness certification — CR-G1 (external audit) is the gate, and
+> it is OPEN. [OPUS-4.8]
 
 ## Controls
 
 | # | Control | Status | Evidence (file / test / CI / bead) |
 |---|---|---|---|
 | **CR-1** | **Crypto-estate inventory exists** — every bespoke and standard primitive/library is enumerated with its assurance tier (sound vs research-only). | **PASS** | [`README.md`](./README.md) §1 (Tier-A/Tier-B tables); [`evidence.md`](./evidence.md) §CR-1. Manifests: `crates/sparq-zk/Cargo.toml`, `sparq-zk-compose/Cargo.toml`, `sparq-mpc/Cargo.toml`. |
-| **CR-2** | **The original soundness audit is preserved** — the verdict "v1 verifier is NOT sound (12 findings, 5 CRITICAL)" is on record and not laundered away. | **PASS (preserved)** | `research/zk-soundness-audit.md` (full 12-finding report). Cited verbatim in `SECURITY.md` §"`sparq-zk` — the v1 ZK verifier is NOT sound". |
+| **CR-2** | **The original soundness audit is preserved** — the original verdict "v1 verifier is NOT sound (12 findings, 5 CRITICAL)" is kept on record as history and not laundered away (the regression map for the closed findings is bead `sq-1gir`). | **PASS (preserved)** | `research/zk-soundness-audit.md` (full 12-finding report). The original verdict is preserved as history under `SECURITY.md` §"`sparq-zk` and `sparq-zk-compose` — ZK verifier: remediated, but NOT externally audited" (the "**Status — what changed**" paragraph records the predated-BROKEN finding before the remediation). [OPUS-4.8] |
 | **CR-3** | **Post-remediation review exists, HONESTLY CALIBRATED** — the remediated verifier was re-audited; its "sound as landed" verdict is recorded **only** as internal, single-model, self-review evidence (necessary, not sufficient), NOT as external certification. | **AUDIT-READY** (internal self-review only; external gate = CR-G1) | `research/zk-verifier-reaudit.md` (bead `sq-gbp4`, closed). **Honesty caveats made explicit:** (i) single-model (Opus 4.8, Fable unavailable, self-flagged "re-review when Fable returns"); (ii) read-only internal pass, not an external accredited audit; (iii) the crypto-chain forge tests (`forge_pubinput_*`) are `#[ignore]`d, so the closure rests on code-reading + one empirical anchor, not on default-CI execution. See [`evidence.md`](./evidence.md) §CR-3. |
-| **CR-4** | **ZK verifier-soundness — overall disposition** — what a relying party may rely on TODAY. | **NOT-SOUND (research-only) / EXTERNAL-REQUIRED** | The published posture (`SECURITY.md`) governs: treat any v1-verified result as untrusted until CR-G1 (external cryptographer audit) closes. Internal evidence of remediation: `research/zk-verifier-reaudit.md` + the forge suite (CR-6). The 12-finding 1:1 closed-disposition map is in `research/zk-verifier-reaudit.md` §"Recommended beads" table (bead `sq-1gir`). |
+| **CR-4** | **ZK verifier-soundness — overall disposition** — what a relying party may rely on TODAY. | **REMEDIATED, NOT EXTERNALLY AUDITED — research-only / EXTERNAL-REQUIRED** | The published posture (`SECURITY.md`) governs: the `sq-1s2` binding layer has landed and the internal re-audit found the verifier "sound as landed for the threat model the prior audit assumed," **but** do **not** present a "verified" result as a production-grade guarantee until CR-G1 (external cryptographer audit, `sq-qhy4`) closes — no production soundness/privacy/integrity guarantee until then. Internal evidence of remediation: `research/zk-verifier-reaudit.md` + the forge suite (CR-6). The 12-finding 1:1 closed-disposition map is in `research/zk-verifier-reaudit.md` §"Recommended beads" table (bead `sq-1gir`). [OPUS-4.8] |
 | **CR-5** | **MPC — overall disposition** — `sparq-mpc` provides no production security guarantee. | **NOT-SOUND (research-only)** | `SECURITY.md` §"`sparq-mpc` — cryptography deferred"; `crates/sparq-mpc/Cargo.toml` header ("crypto deferred", `NotYetImplemented` stubs for M4/Q1); `research/mpc-m4-distributed-sig-feasibility.md`; `research/mpc-malicious-security-design.md`. Honest-majority semi-honest Shamir (M0–M3) exists but malicious security / collaborative-proof are DEFERRED. |
 | **CR-6** | **Adversarial forge-and-verify negative-test suite exists** — each historical binding gate is proven to *reject* a one-binding-violation forge with the correct `CheckError`. | **PASS** (with `#[ignore]` caveat → CR-G2) | `crates/sparq-zk-compose/tests/forge_gates.rs` (bead `sq-ajl`, closed): `forge_pubinput_statement_substitution_rejected`, `forge_commitment_unsigned_rejected`, `forge_issuer_*`, `forge_nonce_*`, `forge_attribution_*`, `forge_revocation_*`. Plus `join_forge.rs`, `holder_pop_forge.rs`, `audit_forge_map.rs`, `verifier_errors.rs`, `differential_fuzz.rs` (bead `sq-61g`). **Caveat:** the bb-dependent forges are `#[ignore]`d (toolchain-gated) ⇒ OPEN-gap CR-G2. |
 | **CR-7** | **Differential prove→verify→cleartext fuzzer** — proven results are differentially checked against a cleartext SPARQL evaluation. | **PASS** | `crates/sparq-zk-compose/tests/differential_fuzz.rs` (bead `sq-61g`, closed). |

@@ -23,11 +23,19 @@ know what was *already* done vs what the engineer must add).
   evidence that malformed RDF is rejected safely — the fuzz target + the test that proves it is.
 - **Hunt overclaiming.** Anything marked "implemented & verified" that is really only "audit-ready" or
   a gap is a **high-severity** finding (misrepresentation is worse than a known gap).
-- **The ZK/MPC honesty tripwire.** The documented verdict is that the **v1 ZK verifier is NOT sound**
-  (`SECURITY.md`, `research/zk-soundness-audit.md`) and that `sparq-mpc` provides **no** guarantee. Any
-  control, evidence, or CDMC score that contradicts this — or that presents a research scaffold as a
-  delivered cryptographic guarantee — is an **automatic critical finding**. Verify the disclaimer is
-  intact and consistently referenced; a "verified crypto control" claim here is the worst failure mode.
+- **The ZK/MPC honesty tripwire.** <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> The documented posture is that the **v1 ZK verifier was
+  originally found unsound, has since been remediated (the `sq-1s2` binding layer landed), and the
+  internal re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found it "sound as landed for the
+  assumed threat model" — BUT external accredited-cryptographer sign-off is still PENDING (`sq-qhy4`,
+  P0) and there is NO production security/privacy/integrity guarantee** (`SECURITY.md` §"`sparq-zk`
+  and `sparq-zk-compose` — ZK verifier: remediated, but NOT externally audited";
+  `research/zk-soundness-audit.md` is the original audit, preserved as history). `sparq-mpc` provides
+  **no** guarantee (semi-honest-only). **The tripwire stands:** any control, evidence, or CDMC score
+  that presents the ZK/MPC estate as a *delivered production cryptographic guarantee*, that cites the
+  internal re-audit as if it were an external certification, or that drops the external-pending /
+  no-production-guarantee caveat, is an **automatic critical finding**. Verify the caveat is intact
+  and consistently referenced; a "verified production crypto control" claim here is the worst failure
+  mode. This is NOT a clean bill of health — internal remediation progress is not external sign-off.
 - **Check the mapping is complete**, not just the rows present: are the applicable ASVS L2 / Annex A /
   SSDF practice / CRA Annex I / TSC controls *all* accounted for, or are inconvenient ones quietly
   omitted? Is the library-vs-operator responsibility split honest, or is sparq dodging controls by

@@ -44,8 +44,12 @@ tracked in `privacy/gap-register.md`:
 
 ## ZK/MPC
 
-The ZK estate has its **own** adversarial threat model and audit
-(`research/zk-soundness-audit.md`, verdict: **v1 verifier NOT sound**); `sparq-mpc` is a deferred
+<!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
+The ZK estate has its **own** adversarial threat model and audit: the v1 verifier was originally found
+**unsound** (`research/zk-soundness-audit.md`); `sq-1s2` landed the binding layer and the **internal,
+single-model** re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all findings closed
+("sound as landed for the assumed threat model"), but it is **NOT externally audited** (`sq-qhy4`, P0,
+pending) and carries **no production guarantee**; `sparq-mpc` is a deferred, semi-honest-only
 scaffold. Neither is claimed as a privacy or security control anywhere in the compliance set — see
 `privacy/controls.md` §carve-out and bead **sq-toze.35**.
 
