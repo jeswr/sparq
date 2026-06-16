@@ -52,6 +52,10 @@ use std::path::Path;
 // for callers that already hold an `Hdt` (e.g. to also query its header).
 mod decode;
 pub use decode::graph_from_reader;
+// [OPUS-4.8] (sq-q6a1) Measurement-only: per-stage timed decode for bench/parse's
+// 3-way HDT split. Identical decode path; the production `graph_from_reader` times
+// nothing.
+pub use decode::{graph_from_reader_timed, StageTimings};
 
 // [OPUS-4.8] sq-2te / sq-ashy: HDT write support (sparq `Graph` -> `.hdt`). Opt-in
 // via the `write` feature (it pulls the wrapped crate's `sophia` feature for the
