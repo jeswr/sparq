@@ -20,7 +20,7 @@ SBOM that `scripts/gen-sbom-vex.sh` produces per released binary.
 
 | # | NTIA element | Status | Evidence | Owner |
 |---|---|---|---|---|
-| N1 | **Supplier name** (of each component) | **Gap (partial)** — see GS-1 | `cargo-cyclonedx` (v0.5.9) does **not** populate the per-component `supplier`/`publisher` slot from crates.io metadata; probe of `sparq-server.cdx.json` (re-run 2026-06-15) shows `supplier`/`publisher` empty on **all 166** components. The component **`author`** field — the 1.3-era carrier of originator identity, closest to NTIA "Supplier Name" — *is* populated on **144/166** components from each crate's `authors` metadata (the 22 without it are `sparq-core`/`sparq-engine`/`sparq-serve` + 19 deps such as `axum`/`crossbeam-*`/`rayon`). The *top-level* supplier IS present in the VEX (`supply-chain/vex.cdx.json` → `metadata.supplier` = "Jesse Wright"). The component **`name`** + crates.io **`purl`** transitively identify the supplier-of-record (crates.io). So the literal NTIA "Supplier Name" *slot* (`supplier`/`publisher`) is empty per component, while component-author identity is present on the majority — a **partial** gap, not a total absence. | SPARQ |
+| N1 | **Supplier name** (of each component) | **Implemented & verified** ([OPUS-4.8], sq-toze.26; GS-1 RESOLVED) | `cargo-cyclonedx` 0.5.9 leaves the per-component `supplier`/`publisher` slot empty, so `scripts/sbom-normalize.jq` now derives a per-component `supplier` (CycloneDX `organizationalEntity` = the NTIA Supplier-Name slot) **honestly** from each component's identity in the raw output: a crates.io-published crate (`registry+…`) → `supplier.name = "crates.io"` + its `crates.io/crates/<name>` URL (the distributor of record), with the crate's `author` carried into `publisher` where present (144/166); a first-party workspace crate (`path+file…/crates/sparq-*`) → `supplier = {name:"Jesse Wright", url:["https://github.com/jeswr/sparq"]}` (matching the VEX top-level supplier); a vendored `[patch.crates-io]` crate (`…/vendor/spargebra`) → `supplier.name = "crates.io"` (its supplier-of-record — **not** the sparq project, which would be fabrication); anything else → **omitted** (no fabrication — none occurs today, so coverage is 100%). Both `sparq-cli`/`sparq-server` SBOMs validate against the official CycloneDX 1.5 schema with `supplier.name` on **every** component (174/174, 166/166). CI-gated by `supply-chain.yml#sbom-supplier` (`scripts/check-sbom-supplier.py` + self-test). The component `name` + crates.io `purl` continue to transitively identify the supplier-of-record. See `evidence.md §3` + `§8`. | SPARQ |
 | N2 | **Component name** | **Implemented & verified** | Every component carries `components[].name` (probe: 166/166). `scripts/gen-sbom-vex.sh#L37` (`cargo cyclonedx --all`). | SPARQ |
 | N3 | **Version of the component** | **Implemented & verified** | `components[].version` populated for all (probe: 166/166, e.g. `sparq-core@0.1.0`). | SPARQ |
 | N4 | **Other unique identifiers** (PURL) | **Implemented & verified** | `components[].purl` = `pkg:cargo/<name>@<version>` for every component (probe: 166/166). | SPARQ |
@@ -28,10 +28,12 @@ SBOM that `scripts/gen-sbom-vex.sh` produces per released binary.
 | N6 | **Author of the SBOM data** | **Implemented & verified (tooling-attested)** | `metadata.tools` = `{vendor: CycloneDX, name: cargo-cyclonedx, version: 0.5.9}` identifies the SBOM author/tool. The *human/org* author is the supplier in the VEX + the `release.yml#sbom` workflow identity (Sigstore attestation binds it to the org's GitHub workflow). Note: per-NTIA this field is "author of the SBOM data" (the tool/identity that produced it), which IS present — distinct from N1 (supplier of each component). | SPARQ |
 | N7 | **Timestamp** | **Implemented & verified** | `metadata.timestamp` populated at generation (probe: an RFC-3339 instant, varies per run, e.g. `2026-06-15T23:49Z`); re-stamped per release in the VEX by `scripts/gen-sbom-vex.sh#L58`. | SPARQ |
 
-**NTIA verdict:** **6 of 7 elements met** (N2,N3,N4,N5,N6,N7); the single weakened element is
-**N1 (per-component Supplier Name)**, which is **partial** — the dedicated `supplier`/`publisher`
-slot is empty (0/166) but component-`author` identity is present on 144/166. This is the one genuine
-NTIA-completeness gap (GS-1). N6 is met at tool-author granularity (the NTIA-intended reading).
+**NTIA verdict:** **7 of 7 elements met** (N1,N2,N3,N4,N5,N6,N7). **N1 (per-component Supplier Name)
+is now RESOLVED** ([OPUS-4.8], sq-toze.26): `scripts/sbom-normalize.jq` derives a per-component
+`supplier` honestly from each component's identity (crates.io-published → `crates.io`; first-party
+workspace crate → the project; vendored upstream → `crates.io`; otherwise omitted, none today), so
+`supplier.name` is populated on **every** component (166/166, 174/174), schema-valid, CI-gated by
+`supply-chain.yml#sbom-supplier`. N6 is met at tool-author granularity (the NTIA-intended reading).
 
 ## B. CycloneDX completeness
 
@@ -113,11 +115,12 @@ NTIA-completeness gap (GS-1). N6 is met at tool-author granularity (the NTIA-int
 
 **35 control rows**, classified by the honesty-contract status legend:
 
-- **Implemented & verified — 27:** N2–N7, CDX-1/2/3/4, VEX-1/2/3, PUB-3/4, DEP-1..6, INT-1/2/4,
+- **Implemented & verified — 28:** N1–N7, CDX-1/2/3/4, VEX-1/2/3, PUB-3/4, DEP-1..6, INT-1/2/4,
   JS-1/2/3. Each runs on every push/PR (or is a checked-in artifact) and cites a file path, CI job, or
-  a recorded probe. (CDX-3 became Implemented & verified with sq-toze.28 — SBOM now CycloneDX 1.5.
-  INT-4 added with sq-tmyw — purl-canonicality CI assertion. JS-1/2/3 added with sq-toze.27 — JS/npm
-  SBOM for the published WASM client.)
+  a recorded probe. (N1 became Implemented & verified with sq-toze.26 — per-component supplier name
+  now derived honestly + CI-gated. CDX-3 became Implemented & verified with sq-toze.28 — SBOM now
+  CycloneDX 1.5. INT-4 added with sq-tmyw — purl-canonicality CI assertion. JS-1/2/3 added with
+  sq-toze.27 — JS/npm SBOM for the published WASM client.)
 - **Audit-ready (config-verified; operating-verification pending first `v*` release) — 6:**
   SIG-1/2/3, PUB-1/2, VEX-4. These are release-gated (`push: tags: v*`); the workflow wiring is
   reviewed and correct, but **no release/tag/attestation exists yet** (verified 2026-06-15), so no
@@ -125,12 +128,14 @@ NTIA-completeness gap (GS-1). N6 is met at tool-author granularity (the NTIA-int
   + the Docker path is CI-exercised, but the release-binary `cargo audit bin` round-trip awaits the
   first release (it is counted under Implemented & verified for its build step, with the qualifier in
   its row).
-- **Gap (recorded + beaded) — 2 control rows:** N1/GS-1 (per-component supplier slot, partial — see
-  the corrected probe), INT-3/GS-2 (reproducible build, GX-8, bead sq-toze.9). (CDX-3/GS-4, spec
-  version, is now RESOLVED — sq-toze.28 — SBOM at CycloneDX 1.5.)
+- **Gap (recorded + beaded) — 1 control row:** INT-3/GS-2 (reproducible build, GX-8, bead sq-toze.9).
+  (N1/GS-1, per-component supplier name, is now RESOLVED — sq-toze.26 — supplier on every component.
+  CDX-3/GS-4, spec version, is RESOLVED — sq-toze.28 — SBOM at CycloneDX 1.5.)
 
-**Tracked open gap *items* (gap-register.md) — 2 (GS-1,2):** GS-1 (N1 supplier, bead sq-toze.26),
-GS-2/GX-8 (reproducible build, bead sq-toze.9 — maps to control row INT-3). Plus the **RESOLVED**
+**Tracked open gap *items* (gap-register.md) — 1 (GS-2):** GS-2/GX-8 (reproducible build, bead
+sq-toze.9 — maps to control row INT-3). Plus the **RESOLVED**
+GS-1 / sq-toze.26 (N1 per-component supplier name — now derived honestly via `scripts/sbom-normalize.jq`,
+CI-gated `supply-chain.yml#sbom-supplier`),
 GS-3 / sq-toze.27 (JS-lockfile SBOM — now `JS-1/2/3` rows + `gen-js-sbom.sh` + CI/release wiring),
 GS-6 / sq-toze.30 (F-6: SBOM root `bom-ref` abs-path leak — sanitised), GS-7 / sq-uujh (workspace/
 build-target purls canonical, now also CI-asserted via INT-4 / sq-tmyw —
