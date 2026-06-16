@@ -8,10 +8,20 @@
 //!
 //! 1. The inner [`GraphPattern`] is wrapped as `SELECT * WHERE { <inner> }` using
 //!    spargebra's `Display` impl (which round-trips algebra → SPARQL syntax), so the
-//!    full pattern (BGPs, OPTIONAL, FILTER, sub-SELECT, …) is forwarded verbatim. We
-//!    do NOT push surrounding bindings down (no "BindingsRestricted" / VALUES
-//!    injection) — that is a correct, if not maximally-selective, evaluation: the
-//!    remote relation is materialised and joined locally by the caller.
+//!    full pattern (BGPs, OPTIONAL, FILTER, sub-SELECT, …) is forwarded.
+//!
+//!    **Bind-join (`VALUES` pushdown).** When the SERVICE is the right side of a join
+//!    (or `OPTIONAL`) whose join variables are already bound by the left side, the
+//!    caller (`exec::try_bound_join_service`) pushes a *block* of those bindings into
+//!    the wrapped query as a `VALUES` clause — `SELECT * WHERE { VALUES (?j…) { … }
+//!    <inner> }` — so the remote returns only the rows that can survive the local join
+//!    (the brTPF/FedX "bound join", bead sq-sjkj). This is ON by default and
+//!    correctness-preserving; it FALLS BACK to forwarding the bare pattern verbatim
+//!    when it does not apply (variable endpoint, no bound join var, a join key bound to
+//!    a blank node, …). The block size is the one OPT-IN tuning knob
+//!    ([`with_service_bound_join_block_size`] / `SPARQ_SERVICE_BIND_BLOCK`,
+//!    default [`DEFAULT_BIND_BLOCK`]). The remote relation that is NOT bound-joined is
+//!    still materialised and joined locally by the caller.
 //! 2. The query is sent over HTTP (form-encoded POST, `Accept:
 //!    application/sparql-results+json`).
 //! 3. The SPARQL-Results-JSON response is parsed into a [`ServiceRelation`]
@@ -67,6 +77,165 @@ pub(crate) fn eval_remote(
 ) -> Result<ServiceRelation, String> {
     let body = transport.fetch(endpoint, query)?;
     parse_srj(&body)
+}
+
+// ---------------------------------------------------------------------------
+// Bind-join (VALUES pushdown) into SERVICE — block size knob [OPUS-4.8] (sq-sjkj)
+// ---------------------------------------------------------------------------
+//
+// When a SERVICE sub-query is the right side of a join whose join variables are
+// already bound by the left side, we push a *block* of those bindings into the
+// remote query as a `VALUES` clause (SPARQL 1.1 §10.2.1) — one remote request per
+// block instead of materialising the whole remote relation and joining locally.
+// This is the brTPF/FedX "bound join" (bead sq-sjkj, research candidate C1): for a
+// selective join it slashes the data the endpoint returns and the rows we filter.
+//
+// The pushdown is a *correctness-preserving* optimisation of the existing SERVICE
+// path: injecting `VALUES (?j) { (v1) (v2) … }` restricts the remote pattern to
+// exactly the bound tuples, and the surrounding query joins the result back the
+// same way it joins the unbound relation — so the answer is identical. It is ON by
+// default (no new surface, zero downside on the applicable shape) and FALLS BACK to
+// the verbatim path whenever it does not apply (variable endpoint, no bound join
+// var, a join key bound to a blank node, an empty left side, …). The only TUNING
+// KNOB — the block size — is OPT-IN via [`with_service_bound_join_block_size`] /
+// the `SPARQ_SERVICE_BIND_BLOCK` env var; the default suits typical workloads.
+
+/// Default bind-join block size: how many distinct binding tuples are pushed into
+/// one remote `VALUES` request. ~50 mirrors FedX's default bound-join batch — large
+/// enough to amortise the per-request round-trip, small enough to keep the injected
+/// query (and the remote's VALUES-join fan-out) bounded.
+pub(crate) const DEFAULT_BIND_BLOCK: usize = 50;
+
+#[cfg(feature = "service")]
+mod bind_block {
+    use std::cell::Cell;
+
+    thread_local! {
+        // `None` => use the env / built-in default. A scope installs an override.
+        static OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    /// RAII override of the bind-join block size for the current scope.
+    pub(crate) struct Guard(Option<usize>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OVERRIDE.with(|o| o.set(self.0.take()));
+        }
+    }
+
+    pub(crate) fn install(n: usize) -> Guard {
+        // A zero block size would mean "never batch" — clamp to 1 so a tuple still
+        // gets pushed one-per-request rather than silently disabling correctness.
+        let n = n.max(1);
+        Guard(OVERRIDE.with(|o| o.replace(Some(n))))
+    }
+
+    /// The active block size: an installed scope override wins; otherwise the
+    /// `SPARQ_SERVICE_BIND_BLOCK` env var (parsed once is unnecessary — this is off
+    /// the hot path, called once per bound-join); otherwise the built-in default.
+    pub(crate) fn current() -> usize {
+        if let Some(n) = OVERRIDE.with(|o| o.get()) {
+            return n;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(s) = std::env::var("SPARQ_SERVICE_BIND_BLOCK") {
+            if let Ok(n) = s.trim().parse::<usize>() {
+                if n >= 1 {
+                    return n;
+                }
+            }
+        }
+        super::DEFAULT_BIND_BLOCK
+    }
+}
+
+/// The bind-join block size in force for the current scope. [OPUS-4.8] (sq-sjkj)
+#[cfg(feature = "service")]
+pub(crate) fn bind_block_size() -> usize {
+    bind_block::current()
+}
+
+/// Runs `f` with `n` as the SERVICE bind-join block size (how many distinct binding
+/// tuples are pushed into one remote `VALUES` request). OPT-IN tuning knob for the
+/// bound-join pushdown (bead sq-sjkj): the default (~50, or `SPARQ_SERVICE_BIND_BLOCK`)
+/// suits typical workloads, but a very selective or very fan-out join can benefit
+/// from a larger or smaller block. `n` is clamped to at least 1. The override is
+/// thread-local and restored on return/unwind, mirroring [`with_service_egress_allow`].
+///
+/// This knob does NOT change results — it only trades remote-request count against
+/// per-request size; the bound-join is correctness-preserving at any block size.
+///
+/// ```no_run
+/// # #[cfg(feature = "service")] {
+/// sparq_engine::with_service_bound_join_block_size(200, || {
+///     // ... run a federated query with large bound-join blocks
+/// });
+/// # }
+/// ```
+#[cfg(feature = "service")]
+pub fn with_service_bound_join_block_size<R>(n: usize, f: impl FnOnce() -> R) -> R {
+    let _guard = bind_block::install(n);
+    f()
+}
+
+/// Renders a `VALUES` block that binds `vars` to each tuple in `tuples`, in the
+/// SPARQL 1.1 syntax accepted inside a group graph pattern. [OPUS-4.8] (sq-sjkj)
+///
+/// Each term is emitted via its canonical N-Triples/Turtle form (oxrdf `Display`),
+/// which is valid SPARQL term syntax for IRIs and literals (the only kinds the
+/// caller pushes — see [`pushable_term`]). Single-variable blocks use the short
+/// `VALUES ?v { v1 v2 }` form; multi-variable blocks use the parenthesised
+/// `VALUES (?a ?b) { (a1 b1) (a2 b2) }` form. `UNDEF` is never emitted: the caller
+/// only pushes fully-bound tuples (a tuple with an unbound join var falls back to
+/// the verbatim path), so every cell is a concrete term.
+#[cfg(feature = "service")]
+pub(crate) fn render_values_block(vars: &[Variable], tuples: &[Vec<Term>]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    if vars.len() == 1 {
+        let _ = write!(s, "VALUES {} {{", vars[0]);
+        for t in tuples {
+            let _ = write!(s, " {}", t[0]);
+        }
+        s.push_str(" }");
+    } else {
+        s.push_str("VALUES (");
+        for (i, v) in vars.iter().enumerate() {
+            if i > 0 {
+                s.push(' ');
+            }
+            let _ = write!(s, "{v}");
+        }
+        s.push_str(") {");
+        for tuple in tuples {
+            s.push_str(" (");
+            for (i, t) in tuple.iter().enumerate() {
+                if i > 0 {
+                    s.push(' ');
+                }
+                let _ = write!(s, "{t}");
+            }
+            s.push(')');
+        }
+        s.push_str(" }");
+    }
+    s
+}
+
+/// Whether a `Term` may be pushed as a `VALUES` data value into a remote query.
+/// [OPUS-4.8] (sq-sjkj)
+///
+/// IRIs and literals are pushable (their `Display` is valid SPARQL term syntax and
+/// their identity is global). A **blank node** is NOT: blank-node labels are scoped
+/// to a single result document, so a local bnode label is meaningless to the remote
+/// endpoint — pushing it would silently change semantics. A **triple term** (RDF 1.2
+/// `<<( … )>>`) is conservatively excluded too: not every endpoint accepts it in
+/// VALUES, and a join key is rarely a quoted triple. When a join-key tuple contains
+/// any non-pushable term the caller abandons the bound-join for the verbatim path,
+/// preserving exact semantics.
+#[cfg(feature = "service")]
+pub(crate) fn pushable_term(t: &Term) -> bool {
+    matches!(t, Term::NamedNode(_) | Term::Literal(_))
 }
 
 // ---------------------------------------------------------------------------
