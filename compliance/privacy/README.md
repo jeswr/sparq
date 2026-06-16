@@ -73,6 +73,7 @@ tree. What you *can* assess, and what this framework documents, is:
 | [`controls.md`](./controls.md) | The control spine: each GDPR principle / 27701 clause / SOC 2 Privacy criterion → status → engine-capability-or-operator → evidence → owner. |
 | [`evidence.md`](./evidence.md) | Per-capability file/line/test verification the control table cites. |
 | [`gap-register.md`](./gap-register.md) | Open engine-side gaps + severity + remediation + `bd` bead. |
+| [`retention-erasure-runbook.md`](./retention-erasure-runbook.md) | **Operator runbook** (not a cert claim) — how an operator fulfils data-subject erasure (Art. 17) + retention (Art. 5(1)(e)) on a sparq deployment: locate → export → erase → verify, with the honest WAL/backup/physical-erasure caveats (PR-G3). |
 | [`../data-flow.md`](../data-flow.md) | **Shared** — every place the binary can touch data + the operator/engine responsibility split. |
 | [`../dpia.md`](../dpia.md) | **Shared** — a DPIA *template/skeleton* honestly scoped to engine risks; the operator completes the deployment-specific half. |
 | [`../threat-model.md`](../threat-model.md) | **Shared** — references the STRIDE model at `research/threat-model.md` (does not fork it) + the privacy-specific threats. |
