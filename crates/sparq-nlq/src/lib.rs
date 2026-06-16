@@ -50,6 +50,8 @@ pub use sparq_engine::{QueryBudget, QueryResult};
 #[cfg(feature = "live")]
 pub mod live;
 
+pub mod eval;
+
 // ---------------------------------------------------------------------------
 // The LLM boundary
 // ---------------------------------------------------------------------------
@@ -216,6 +218,15 @@ pub struct NlqConfig {
     /// Few-shot examples. The defaults are schema-agnostic (rdf:type / rdfs:label
     /// only) so one prompt template serves any dataset.
     pub examples: Vec<Example>,
+    /// Whether to include the introspect schema summary in the prompt. `true`
+    /// (default) is the grounded loop the committed fixtures were recorded under.
+    /// Set `false` for the **ungrounded baseline** the design doc requires
+    /// (`research/genai-design.md` §4, `sparq-nlq` row: exec-accuracy must beat
+    /// the same LLM WITHOUT grounding — "the grounding must pay for itself").
+    /// Construction still runs the introspection scan (it is cheap and the field
+    /// is read at prompt time), so one [`Nlq`] can be reconfigured grounded vs
+    /// ungrounded; the eval harness drives both off the same graph. [OPUS-4.8] sq-05rv
+    pub ground: bool,
 }
 
 impl Default for NlqConfig {
@@ -244,6 +255,7 @@ impl Default for NlqConfig {
                         .into(),
                 },
             ],
+            ground: true,
         }
     }
 }
@@ -355,25 +367,45 @@ impl<'g> Nlq<'g> {
 
     /// The grounding prompt for `question` — public (and deterministic) so that
     /// fixtures can be constructed and inspected outside the loop.
+    ///
+    /// When [`NlqConfig::ground`] is `false` the schema summary is omitted: this is
+    /// the **ungrounded baseline** prompt (`research/genai-design.md` §4 — the same
+    /// LLM with no schema deck). The two prompts are distinct strings, so a fixture
+    /// recorded for one does not collide with the other under [`ReplayLlm`].
     pub fn prompt_for(&self, question: &str) -> String {
         let mut p = String::new();
-        p.push_str(
-            "You are a SPARQL query writer. Given the schema summary of an RDF dataset and a \
-             question, write ONE SPARQL 1.1 SELECT or ASK query that answers the question.\n\
-             \n\
-             Rules:\n\
-             - Use only classes and predicates that appear in the schema summary.\n\
-             - Declare every prefix you use with PREFIX lines (expand them from the summary's \
-             prefix glossary).\n\
-             - Do not use property paths or federation.\n\
-             - Output exactly one ```sparql code block and nothing else.\n\
-             \n",
-        );
-        p.push_str(&self.schema_summary);
-        if !p.ends_with('\n') {
+        if self.config.ground {
+            p.push_str(
+                "You are a SPARQL query writer. Given the schema summary of an RDF dataset and a \
+                 question, write ONE SPARQL 1.1 SELECT or ASK query that answers the question.\n\
+                 \n\
+                 Rules:\n\
+                 - Use only classes and predicates that appear in the schema summary.\n\
+                 - Declare every prefix you use with PREFIX lines (expand them from the summary's \
+                 prefix glossary).\n\
+                 - Do not use property paths or federation.\n\
+                 - Output exactly one ```sparql code block and nothing else.\n\
+                 \n",
+            );
+            p.push_str(&self.schema_summary);
+            if !p.ends_with('\n') {
+                p.push('\n');
+            }
             p.push('\n');
+        } else {
+            // Ungrounded: no schema deck. The model must guess vocabulary — the
+            // baseline that grounding has to beat.
+            p.push_str(
+                "You are a SPARQL query writer. Given a question about an RDF dataset, write ONE \
+                 SPARQL 1.1 SELECT or ASK query that answers the question.\n\
+                 \n\
+                 Rules:\n\
+                 - Declare every prefix you use with PREFIX lines.\n\
+                 - Do not use property paths or federation.\n\
+                 - Output exactly one ```sparql code block and nothing else.\n\
+                 \n",
+            );
         }
-        p.push('\n');
         for ex in &self.config.examples {
             p.push_str(&format!(
                 "Question: {}\n```sparql\n{}\n```\n\n",

@@ -122,17 +122,56 @@ changes:
 cargo run -p sparq-nlq --example record_olympics --release
 ```
 
+## Exec-accuracy harness — answer-F1, oracle vs end-to-end, grounded vs not
+
+The [`eval`](src/eval.rs) module (`tests/exec_accuracy.rs`) is the design doc's
+accuracy gate (`research/genai-design.md` §4, `sparq-nlq` row): it grades the executed
+SPARQL the QALD way — **answer-set F1**, not query-string equality — by executing both
+the candidate query and a **gold query** on the *same* graph and comparing the
+resulting bind-row sets (`AnswerSet`). The gold answer is recomputed live from the gold
+query, so there is no checked-in answer blob to drift
+(`research/genai-nl-to-sparql.md` §4.3).
+
+It reports the two axes the design doc requires **separately**:
+
+| Axis | Values |
+|---|---|
+| Linking | **oracle** (the correct query is given — isolates the engine-side validate→execute→repair loop) vs **end-to-end** (the model writes the query) |
+| Grounding | **grounded** (`NlqConfig::ground = true`, the schema deck in the prompt) vs the **ungrounded baseline** (`false`, no deck) |
+
+`Comparison::headline_grounding_pays()` is the load-bearing check: grounded end-to-end
+macro-F1 **>** the *same LLM* ungrounded ("the grounding must pay for itself").
+
+Three layers, the first two run in CI with **no network**:
+
+| Layer | What | Runs in CI? |
+|---|---|---|
+| `harness_demonstrates_grounding_pays_in_memory` | tiny in-memory graph + scripted backends (a grounded model that answers from the deck; an ungrounded one that hallucinates a predicate) — proves the harness and the headline inequality | yes, always |
+| `olympics_exec_accuracy_replay` | answer-F1 on the real 1.78M-triple olympics dataset via the committed `ReplayLlm` fixture + oracle linking | yes, **skip-if-absent** dataset |
+| `live_exec_accuracy` | the real measurement: a live model via `--features live` + `RecordingLlm`, records replay fixtures, asserts the inequality | **no** — `#[cfg(feature = "live")]` **and** `#[ignore]`'d |
+
+Run the live measurement explicitly (network + key + dataset):
+
+```sh
+ANTHROPIC_API_KEY=sk-ant-... SPARQ_OLYMPICS_NT=/path/olympics.nt \
+  cargo test -p sparq-nlq --features live --release -- --ignored live_exec_accuracy
+```
+
 ## Honest status
 
-- **What is validated**: the engine-side loop — grounding, extraction, spargebra
-  validation, budgeted execution, repair plumbing, record/replay — end-to-end against
-  real data, with the design doc's LLM-excluded latency gate enforced in release.
-- **What is NOT yet validated**: live-model exec-accuracy. The recorded completions
-  are hand-written (as a competent LLM would answer given the grounding prompt); the
-  design doc's full accuracy gate — QALD-10-style harness, exec-accuracy ≥ the same
-  LLM without grounding ("the grounding must pay for itself") — is a documented
-  follow-up that runs through this same harness with `--features live` +
-  `RecordingLlm`, after which the recorded fixtures become the regression set.
+- **What is validated offline (the CI gate)**: the engine-side loop — grounding,
+  extraction, spargebra validation, budgeted execution, repair plumbing, record/replay
+  — end-to-end against real data; **and** the exec-accuracy harness itself: answer-F1
+  scoring, oracle-vs-end-to-end and grounded-vs-ungrounded reporting, and the
+  "grounding pays for itself" inequality, proven deterministically on an in-memory
+  graph with scripted backends (and on the olympics dataset when present, via the
+  committed grounded fixture).
+- **What is NOT yet measured against a real model**: live-model exec-accuracy
+  *numbers*. The in-memory and olympics scores use scripted / recorded completions, so
+  they demonstrate the *harness* and the *mechanism* of the headline claim, **not** a
+  real model's accuracy. The live measurement runs through the same harness with
+  `--features live` + `RecordingLlm` (`live_exec_accuracy`, `#[ignore]`'d); after a
+  live run the recorded fixtures become the offline regression set. <!-- [OPUS-4.8] sq-05rv -->
 - **Not yet wired**: entity/relation linking from `sparq-sim` (design §2 phase 3
   lists it as input to grounding; the schema summary alone is enough for the
   olympics-scale schema) — bead `sq-uw40`; and N2 grammar-constrained decoding
