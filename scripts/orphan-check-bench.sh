@@ -25,16 +25,30 @@
 #     server-side, so the prod/dev boxes never even enter the candidate set under normal
 #     conditions; the hard exclusion is the belt-and-braces second line.
 #
+# AWS auth: this account's credentials live under the `pss` named profile (region eu-west-2).
+# AWS_PROFILE defaults to pss when unset and is exported + passed to every aws call, so the
+# EC2 query actually authenticates instead of silently no-op'ing (dogfooding #376 / sq-b1fo).
+# Override by exporting AWS_PROFILE=<other> (or AWS_REGION) before invoking.
+#
 # Run:
 #   scripts/orphan-check-bench.sh                       # dry-run (default): list orphans
 #   scripts/orphan-check-bench.sh --apply               # terminate tag-matched orphans
 #   scripts/orphan-check-bench.sh --region us-east-1    # override region
+#   AWS_PROFILE=other scripts/orphan-check-bench.sh     # override the pss profile
 #   scripts/orphan-check-bench.sh --dry-run-self-test   # hermetic self-test (no aws)
 set -euo pipefail
 
 PROG="orphan-check-bench"
 log()  { printf '[%s] %s\n' "$PROG" "$*" >&2; }
 die()  { printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2; exit 1; }
+
+# AWS credentials live under the `pss` named profile on this account (the EC2 boxes are in
+# eu-west-2). Without this, every aws call here falls back to the default profile, finds no
+# usable credentials, and the EC2 query silently no-ops — so orphan bench boxes go undetected
+# (dogfooding finding #376, bead sq-b1fo). Default the profile to pss when unset and export it
+# so it is honoured by BOTH the describe-instances query and the --apply terminate call below.
+: "${AWS_PROFILE:=pss}"
+export AWS_PROFILE
 
 # The EXACT tag that marks a disposable bench box (allow-list key). Matches the gather
 # launchers' TAGSPEC (scripts/gather-ec2*.sh: Tags=[{Key=purpose,Value=sparq-bench}]).
@@ -130,16 +144,22 @@ command -v aws >/dev/null 2>&1 || {
   exit 0
 }
 
-log "querying EC2 (region=$REGION) for state in {running,pending} AND tag:$BENCH_TAG_KEY=$BENCH_TAG_VALUE"
+log "querying EC2 (profile=$AWS_PROFILE region=$REGION) for state in {running,pending} AND tag:$BENCH_TAG_KEY=$BENCH_TAG_VALUE"
 # Allow-list filter: ONLY instances carrying the exact tag are even returned.
+# We capture stderr to a temp file (instead of discarding it) so a credentials/token failure
+# surfaces a CLEAR message rather than silently no-op'ing and leaving real orphans undetected.
+aws_err="$(mktemp)"
+trap 'rm -f "$aws_err"' EXIT
 if ! INSTANCES_RAW="$(aws ec2 describe-instances \
+  --profile "$AWS_PROFILE" \
   --region "$REGION" \
   --filters "Name=tag:${BENCH_TAG_KEY},Values=${BENCH_TAG_VALUE}" \
             "Name=instance-state-name,Values=running,pending" \
   --query 'Reservations[].Instances[].InstanceId' \
-  --output text 2>/dev/null | tr '\t' '\n' | sed '/^$/d')"; then
-  log "aws describe-instances failed (credentials/region?) — no action taken."
-  exit 0
+  --output text 2>"$aws_err" | tr '\t' '\n' | sed '/^$/d')"; then
+  log "aws describe-instances failed (profile=$AWS_PROFILE region=$REGION) — no action taken. AWS said:"
+  sed 's/^/  aws: /' "$aws_err" >&2 || true
+  exit 1
 fi
 
 mapfile -t INSTANCES <<< "$INSTANCES_RAW"
@@ -180,8 +200,10 @@ fi
 
 # --- 3. --apply: terminate ONLY the kill set (tag-matched, prod/dev already removed) ---
 log "--apply: terminating orphan(s): ${KILL_SET[*]}"
-if aws ec2 terminate-instances --region "$REGION" --instance-ids "${KILL_SET[@]}" >/dev/null 2>&1; then
+if aws ec2 terminate-instances --profile "$AWS_PROFILE" --region "$REGION" --instance-ids "${KILL_SET[@]}" >/dev/null 2>"$aws_err"; then
   log "terminate-instances submitted for: ${KILL_SET[*]}"
 else
+  log "terminate-instances FAILED (profile=$AWS_PROFILE region=$REGION). AWS said:"
+  sed 's/^/  aws: /' "$aws_err" >&2 || true
   die "terminate-instances FAILED for: ${KILL_SET[*]}"
 fi
