@@ -16,10 +16,11 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -370,6 +371,84 @@ class MainDryRunTest(unittest.TestCase):
             rc = drift_scan.main(["--root", clean.name, "--dry-run"])
         self.assertEqual(0, rc)
         self.assertIn("no drift detected", buf.getvalue())
+
+
+# --------------------------------------------------------------------------- #
+# CI guard (bead sq-z0se) — refuse to MINT issues outside CI
+# --------------------------------------------------------------------------- #
+class CiGuardTest(unittest.TestCase):
+    """The issue-MINTING path must refuse to run outside CI; an accidental
+    dev-box run minted 20 spurious issues (#397-416). --dry-run is NEVER
+    guarded (it makes zero gh calls)."""
+
+    def _drift_fixture(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        make_crate(root, "sparq-nlq")
+        make_registry(root, sources=["crates/sparq-cli/src/main.rs"])
+        return root
+
+    def _clear_ci_env(self) -> None:
+        backup = {k: os.environ.get(k) for k in ("GITHUB_ACTIONS", "CI",
+                                                 "DRIFT_SCAN_ALLOW_LOCAL")}
+
+        def restore() -> None:
+            for k, v in backup.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        self.addCleanup(restore)
+        for k in backup:
+            os.environ.pop(k, None)
+
+    def test_running_in_ci_detects_markers(self):
+        self.assertTrue(drift_scan.running_in_ci({"GITHUB_ACTIONS": "true"}))
+        self.assertTrue(drift_scan.running_in_ci({"CI": "true"}))
+        self.assertTrue(drift_scan.running_in_ci({"CI": "1"}))
+
+    def test_running_in_ci_false_when_unset_or_falsey(self):
+        self.assertFalse(drift_scan.running_in_ci({}))
+        self.assertFalse(drift_scan.running_in_ci({"GITHUB_ACTIONS": "false"}))
+        self.assertFalse(drift_scan.running_in_ci({"CI": ""}))
+
+    def test_require_ci_passes_in_ci(self):
+        drift_scan.require_ci({"GITHUB_ACTIONS": "true"})  # no raise
+
+    def test_require_ci_passes_with_escape_hatch(self):
+        drift_scan.require_ci({"DRIFT_SCAN_ALLOW_LOCAL": "1"})  # no raise
+
+    def test_require_ci_refuses_outside_ci(self):
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            drift_scan.require_ci({})
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("refusing to file GitHub issues outside CI", err.getvalue())
+
+    def test_main_mint_path_refuses_outside_ci_before_any_gh_call(self):
+        # End-to-end: a real (non-dry-run) run with drift present must SystemExit
+        # on the guard. If the guard were absent it would instead shell out to
+        # `gh` to mint issues — exactly the #397-416 incident.
+        root = self._drift_fixture()
+        self._clear_ci_env()
+        buf, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err), self.assertRaises(
+            SystemExit
+        ) as cm:
+            drift_scan.main(["--root", str(root)])  # NO --dry-run
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("refusing to file GitHub issues outside CI", err.getvalue())
+
+    def test_main_dry_run_never_guarded_outside_ci(self):
+        # --dry-run must succeed even with no CI markers (local audits / tests).
+        root = self._drift_fixture()
+        self._clear_ci_env()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = drift_scan.main(["--root", str(root), "--dry-run"])
+        self.assertEqual(0, rc)
 
 
 if __name__ == "__main__":
