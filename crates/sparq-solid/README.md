@@ -130,7 +130,8 @@ analogue keep the one-shot behaviour.
 |---|---|---|---|
 | `odrl:recipient` / `odrl:assignee` | `eq` / `isA` | `auth:agent <webid>` (agent matcher) | **re-checked condition** |
 | `odrl:recipient` / `odrl:assignee` | `isPartOf` | one `auth:agent` head per set member | **re-checked condition** |
-| `odrl:recipient` / `odrl:assignee` | `neq` / order | — (needs per-session `noneOf`) | one-shot (frozen) |
+| `odrl:recipient` / `odrl:assignee` | `neq` ("everyone EXCEPT X") | `auth:Public` grant + `auth:exceptMatcher` carving out `X` (ACP `noneOf`) | **re-checked condition** ([OPUS-4.8] sq-5037) |
+| `odrl:recipient` / `odrl:assignee` | order (`lt`/`gt`/…) | — (not meaningful on a recipient) | one-shot (frozen) |
 | `odrl:purpose` | any | — (ACP session has no purpose) | one-shot (frozen) |
 | `odrl:dateTime` / time window | any | — (ACP has no "now") | one-shot (frozen) |
 | `odrl:count` | any | — (ACP is stateless; no per-session usage counter) | one-shot (frozen) in the bridge¹ |
@@ -140,6 +141,19 @@ analogue keep the one-shot behaviour.
 and the recipient-of-data *is* the session agent — so an agent matcher re-checks it with
 identical semantics. Purpose/time/count have no stateless `(agent, client)` analogue, so
 persisting them would require a looser approximation that could over-grant — rejected.
+
+**`recipient neq X` → ACP `noneOf` ("everyone EXCEPT X")** — [OPUS-4.8] sq-5037. A
+`recipient neq X` rule emits a `ConditionalGrant` whose head is the positive recipient set
+(or `auth:Public` when there is none) plus one `auth:exceptMatcher <m>` per excluded `X`;
+the matcher `<m>` carries the accept-set facts the session layer reads
+(`solidx:acceptsAgentP <X>` + `solidx:acceptsClientP auth:AnyClient`). `AuthIndex` then
+suppresses the grant for any session the matcher accepts — `X` under any client — so every
+session keeps the grant **except** `X`. This is byte-for-byte the shape the ACP `noneOf`
+rules (`rules/acp-c.n3`) emit, re-checked by the same `cond_applies` path. **Fail-closed:** a
+`neq` recipient inside the reserved pair encoding cannot become an enforceable matcher (it
+would impersonate a minted pair principal), so rather than emit an exception that silently
+fails to bite — which would re-admit `X` — the whole rule falls back to the one-shot path
+(never widen to a public everyone-except grant on an unenforceable exclusion).
 
 ¹ **Stateful `odrl:count` enforcement** — [OPUS-4.8] sq-zi5w. `odrl:count` limits the *number
 of times* a permission may be exercised; faithful enforcement is **stateful** (a usage counter

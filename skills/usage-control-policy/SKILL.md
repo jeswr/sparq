@@ -85,6 +85,15 @@ A purpose constraint restricts a rule to a stated *purpose of use*. The request 
 - **Audit:** `purpose_status(&rule, &request) -> PurposeMatch` reports exactly what the evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` / `NotConstrained`.
 - Through the bridge, purpose stays **one-shot** (checked once at materialization; see the mapping table below) — it has no re-checked-condition analogue, so a changed purpose is re-evaluated on the next `refresh_odrl_grant`.
 
+## `odrl:recipient` enforcement + `neq` / "everyone-except" — [OPUS-4.8] sq-5037
+
+A `recipient` constraint restricts **who the data may be disclosed to**. The recipient-of-data is the requesting party, so a request that names a party (`.by(webid)`) but supplies **no** explicit `odrl:recipient` context is read as `recipient = party` — i.e. a `recipient` rule gates on *who is asking*, end-to-end through the same `evaluate` constraint path as every other dimension. An explicit `.with(ODRL_RECIPIENT, Value)` still takes precedence (the disclosure target need not be the authenticated principal in every deployment).
+
+- **`recipient neq X` ("everyone EXCEPT X"):** grants/forbids for any recipient that is **not** `X`. A request whose recipient IS `X` is the carve-out (deny on a permission; the prohibition no longer carves *this* party out). **Missing identity (no `odrl:recipient` AND no party) is *unprovable* → fail-closed:** a `neq` permission does **not** grant to an unknown recipient, and a `neq` prohibition is **not** withdrawn.
+- **`eq`/`isA`** = recipient IS the named party; **`isPartOf`** = recipient ∈ static set. Match is **exact** IRI/string equality (no recipient hierarchy).
+- **Audit:** `recipient_status(&rule, &request) -> RecipientMatch` reports exactly what the evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` / `NotConstrained` (the recipient dual of `purpose_status`).
+- Through the bridge, `recipient neq X` maps to an ACP **`noneOf`** exception (see the mapping table + the bridge note below) — re-checked per session.
+
 ## `odrl:count` enforcement (stateful, opt-in `count-enforcement`) — [OPUS-4.8] sq-zi5w
 
 `odrl:count` limits the **number of times** a permission may be exercised ("read at most 5 times"). Unlike `purpose`/`dateTime`/`recipient` (stateless — a single test against evidence the request carries), a count limit is **stateful**: it lives in a usage counter that persists *across* requests. Behind the off-by-default `count-enforcement` feature on `sparq-policy` (the default build is unchanged — it treats `odrl:count` as the stateless numeric comparison), `evaluate_and_exercise` runs the **real** `evaluate` decision and, on a grant, **atomically consumes** one unit of budget.
@@ -162,12 +171,15 @@ store.materialize_odrl_permission_conditional(&policy, &req); // policy: recipie
 |---|---|---|---|---|
 | `odrl:recipient` / `odrl:assignee` | `eq` / `isA` | `auth:agent <webid>` on a `ConditionalGrant` (agent matcher) | ✅ recipient-of-data IS the session agent | **persisted, re-checked per session** |
 | `odrl:recipient` / `odrl:assignee` | `isPartOf` (static set) | one `auth:agent` head per member (OR) | ✅ set membership = agent ∈ set | **persisted** (one grant/member) |
-| `odrl:recipient` / `odrl:assignee` | `neq` / order | "everyone EXCEPT" needs a per-session `noneOf` | ❌ no faithful single-grant analogue | **one-shot** (frozen) |
+| `odrl:recipient` / `odrl:assignee` | `neq` ("everyone EXCEPT X") | `auth:Public` `ConditionalGrant` + `auth:exceptMatcher` carving out `X` (ACP `noneOf`) | ✅ everyone-except is exactly the ACP `noneOf` shape | **persisted, re-checked per session** ([OPUS-4.8] sq-5037) |
+| `odrl:recipient` / `odrl:assignee` | order (`lt`/`gt`/…) | (none — not meaningful on a recipient) | ❌ | **one-shot** (frozen) |
 | `odrl:purpose` | any | (none — a client app ≠ a purpose-of-use) | ❌ ACP session carries no purpose dimension; client-matcher would over-grant | **one-shot** (frozen) |
 | `odrl:dateTime` / time window | `lteq` / `lt` / `gteq` / `gt` | (none — matcher accept-sets are static; no "now") | ❌ ACP has no clock dimension to re-check | **one-shot** (frozen) |
 | `odrl:count` | any | (none — ACP is stateless; no per-session usage counter) | ❌ in the bridge | **one-shot** (frozen) in the bridge — stateful enforcement lives in `sparq-policy`'s `count-enforcement` feature (`evaluate_and_exercise`), not yet wired through ACP |
 | any unrecognised left-operand | any | (none) | ❌ | **one-shot** (frozen) |
 | *no constraint* | — | `auth:agent auth:Public` (action/target/duties already held) | ✅ | persisted (public) |
+
+**The `neq` / "everyone-except" → `noneOf` shape ([OPUS-4.8] sq-5037):** a `recipient neq X` rule emits a `ConditionalGrant` whose head is the positive recipient set (or `auth:Public` if there is none) plus one `auth:exceptMatcher <m>` per excluded `X`; the matcher `<m>` carries the accept-set facts the session layer reads (`solidx:acceptsAgentP <X>` + `solidx:acceptsClientP auth:AnyClient`). `AuthIndex` then suppresses the grant for any session the matcher accepts — i.e. for `X` under any client — so everyone keeps the grant **except** `X`. This is byte-for-byte the shape the ACP `noneOf` rules (`rules/acp-c.n3`) emit, re-checked by the same `cond_applies` code path. A `neq` recipient inside the reserved pair encoding **cannot** become an enforceable matcher (it would impersonate a minted pair principal), so rather than emit an exception that silently fails to bite (which would re-admit `X`), the whole rule falls back to the one-shot path — **fail-closed: never widen to a public everyone-except grant on an unenforceable exclusion**.
 
 **Fail-safe on mixed constraints:** a persisted condition is emitted ONLY when **every** constraint on the rule maps faithfully. A rule mixing a mappable recipient with an unmappable `dateTime`/`purpose`/`count` falls back **entirely** to the one-shot path — persisting only the recipient would silently drop the time/purpose/count bound and over-grant. Recipient IRIs inside the reserved pair encoding (`urn:sparq:` / `&client=`) are dropped from the grant head (anti-impersonation). The two ODRL "any recipient" sentinels fold onto auth principals: `odrl:All`/`odrl:Group` → `auth:Public`, `odrl:AllConnections` → `auth:Authenticated`.
 

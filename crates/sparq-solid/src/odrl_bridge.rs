@@ -110,7 +110,7 @@
 //! the ledger and so are never re-evaluated or retracted by this path.
 
 use crate::authindex::{Mode, AUTHENTICATED, PUBLIC};
-use crate::{AUTH_BRIDGED_GRAPH, AUTH_GRAPH, AUTH_NS};
+use crate::{AUTH_BRIDGED_GRAPH, AUTH_GRAPH, AUTH_NS, SOLIDX_NS};
 use oxrdf::{NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
@@ -568,9 +568,18 @@ const ODRL_ASSIGNEE: &str = "http://www.w3.org/ns/odrl/2/assignee";
 /// What [`map_constraints_to_agents`] concluded about a permission's constraints.
 enum AgentMapping {
     /// Every constraint maps faithfully to an agent-dimension matcher; persist a
-    /// `ConditionalGrant` whose `auth:agent` re-checks each of these principals.
-    /// Empty ⇒ no agent restriction (the grant applies to `auth:Public`).
-    Faithful(Vec<String>),
+    /// `ConditionalGrant` whose `auth:agent` re-checks each of these principals,
+    /// with the `except` principals carved out via an ACP `noneOf` exception matcher
+    /// (the "everyone-except-X" / `recipient neq X` shape). [OPUS-4.8] sq-5037.
+    Faithful {
+        /// Positive recipient principals (`eq`/`isA`/`isPartOf`). Empty ⇒ no positive
+        /// restriction → grant to `auth:Public` (everyone), narrowed only by `except`.
+        agents: Vec<String>,
+        /// Principals carved OUT (`recipient neq X`) — each becomes an ACP `noneOf`
+        /// exception matcher on the grant: a session matching the grant head is denied
+        /// the grant if it is one of these. Empty ⇒ no exception.
+        except: Vec<String>,
+    },
     /// At least one constraint has NO faithful ACP-condition analogue (purpose /
     /// dateTime window / count): the rule MUST stay one-shot (fail-closed — never
     /// approximate an unmappable constraint with a looser persisted condition).
@@ -586,16 +595,22 @@ enum AgentMapping {
 /// agent the ACP `auth:agent` head re-checks, so the persisted condition has the SAME
 /// semantics — it just re-evaluates per session instead of being frozen.
 ///
+/// **Faithful (→ noneOf exception):** an `odrl:recipient`/`odrl:assignee` constraint
+/// under `neq` (the recipient is everyone EXCEPT the named party — the
+/// "everyone-except-X" shape). This maps to an ACP `noneOf`: the grant head is the
+/// positive recipient set (or `auth:Public` if there is no positive constraint) with
+/// an `auth:exceptMatcher` carving out the named party, re-checked per session by the
+/// same machinery WAC/ACP `noneOf` already uses. [OPUS-4.8] sq-5037.
+///
 /// **Unmappable (→ stay one-shot):** `odrl:purpose` (ACP sessions carry no purpose —
 /// a client app is not a purpose-of-use, so mapping it to a client matcher would
 /// over-grant), `odrl:dateTime`/time windows (ACP has no "now" dimension — matcher
 /// accept-sets are static, so a persisted condition could not re-check the clock),
 /// `odrl:count` (ACP is stateless — no usage counter), and any unrecognised
-/// left-operand. A `neq` recipient (everyone EXCEPT one) has no faithful single-grant
-/// analogue either (it would need a `noneOf` exception matcher built per session) and
-/// is treated as unmappable. Any one such constraint forces the whole rule one-shot.
+/// left-operand. Any one such constraint forces the whole rule one-shot.
 fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
     let mut agents: Vec<String> = Vec::new();
+    let mut except: Vec<String> = Vec::new();
     for c in &rule.constraints {
         if c.left != ODRL_RECIPIENT && c.left != ODRL_ASSIGNEE {
             // purpose / dateTime / count / anything else → no faithful condition.
@@ -623,12 +638,18 @@ fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
                 }
                 agents.extend(members);
             }
-            // `neq`/order operators on a recipient have no faithful single-grant ACP
-            // analogue (an "everyone except" needs a per-session noneOf) → one-shot.
+            // recipient ≠ X (everyone EXCEPT X) → an ACP noneOf exception matcher
+            // carving out X from the grant. A numeric/dateTime right-operand is
+            // malformed → fail-closed. [OPUS-4.8] sq-5037.
+            Operator::Neq => match &c.right {
+                Value::Iri(s) | Value::Str(s) => except.push(s.clone()),
+                _ => return AgentMapping::Unmappable,
+            },
+            // order operators (lt/gt/…) on a recipient are not meaningful → one-shot.
             _ => return AgentMapping::Unmappable,
         }
     }
-    AgentMapping::Faithful(agents)
+    AgentMapping::Faithful { agents, except }
 }
 
 /// Whether a recipient principal IRI is safe to write as an `auth:agent` head: it
@@ -725,7 +746,7 @@ pub fn materialize_permission_conditional(
             continue;
         }
         match map_constraints_to_agents(rule) {
-            AgentMapping::Faithful(recipients) => {
+            AgentMapping::Faithful { agents: recipients, except } => {
                 let agents = condition_agents(rule, &recipients);
                 if agents.is_empty() {
                     // every recipient was reserved-encoded → fail-closed, nothing.
@@ -735,7 +756,20 @@ pub fn materialize_permission_conditional(
                     ));
                     continue;
                 }
-                let (first, emitted) = append_conditional_grants(graph, &agents, mode, target);
+                // `recipient neq X` → an ACP noneOf exception carving out X. A reserved-
+                // encoded exclusion would be silently un-enforceable as a matcher, which
+                // would WIDEN the grant (X regains access) — fail-closed: drop the whole
+                // rule to one-shot rather than emit an exception that cannot bite.
+                let excepts = condition_excepts(&except);
+                if excepts.len() != except.len() {
+                    fallback_reasons.push(format!(
+                        "permission {} has a reserved-encoded neq recipient; one-shot path",
+                        rule.id
+                    ));
+                    continue;
+                }
+                let (first, emitted) =
+                    append_conditional_grants(graph, &agents, &excepts, mode, target);
                 return BridgeOutcome {
                     granted: true,
                     mode: Some(mode),
@@ -779,6 +813,17 @@ fn condition_agents(_rule: &Rule, recipients: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The principal-space carve-out heads for a `recipient neq X` exception set, dropping
+/// any reserved-encoded principal (the caller treats a shortfall as fail-closed — a
+/// dropped exclusion would re-admit the carved-out party). [OPUS-4.8] sq-5037.
+fn condition_excepts(except: &[String]) -> Vec<String> {
+    except
+        .iter()
+        .filter(|r| recipient_principal_allowed(r))
+        .map(|r| normalise_recipient_principal(r))
+        .collect()
+}
+
 /// Map an ODRL recipient value to a principal-space `auth:agent` IRI. The two ODRL
 /// "any recipient" sentinels are folded onto the auth principals the session layer
 /// already understands; a concrete WebID passes through unchanged.
@@ -808,9 +853,19 @@ fn rule_action_target_match(rule: &Rule, request: &Request, _mode: Mode, target:
 /// `<urn:sparq:auth>` view and the bridged-provenance graph, preserving existing
 /// triples. Returns the `(agent, auth:effect, graph)` audit anchor of the first grant
 /// AND the full set of emitted head triples (for the bridge ledger). [OPUS-4.8] sq-dpk4.
+///
+/// `excepts` are the principals carved OUT (the `recipient neq X` / "everyone-except"
+/// shape — [OPUS-4.8] sq-5037). Each becomes an ACP `noneOf` exception: the grant gets
+/// an `auth:exceptMatcher <m>` and the matcher `<m>` is materialized with the accept-set
+/// facts the session layer reads (`solidx:acceptsAgentP <X>` + `solidx:acceptsClientP
+/// auth:AnyClient`). [`crate::AuthIndex::cond_applies`] then suppresses the grant for any
+/// session the matcher accepts — i.e. for `X` under any client — so `X` is denied while
+/// every other session keeps the grant. This is EXACTLY the shape the WAC/ACP `noneOf`
+/// rules (`rules/acp-c.n3`) emit, re-checked by the same code path.
 fn append_conditional_grants(
     graph: &mut Graph,
     agents: &[String],
+    excepts: &[String],
     mode: Mode,
     target: &str,
 ) -> ((String, String, String), Vec<[Term; 3]>) {
@@ -827,20 +882,41 @@ fn append_conditional_grants(
     let mode_o = NamedNode::new_unchecked(mode_iri(mode));
     let graph_p = NamedNode::new_unchecked(format!("{AUTH_NS}graph"));
     let graph_o = NamedNode::new_unchecked(target);
+    let except_p = NamedNode::new_unchecked(format!("{AUTH_NS}exceptMatcher"));
+    let accepts_agent_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsAgentP"));
+    let accepts_client_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsClientP"));
+
+    // One deterministic exception matcher per carved-out principal, shared across the
+    // grant heads (its accept-set is the same regardless of which positive head it
+    // attaches to). Each accepts (agent = X, client = any) → suppresses the grant for X.
+    let except_matchers: Vec<(String, [Term; 2])> = excepts
+        .iter()
+        .map(|x| {
+            let m = format!("urn:sparq:odrl-except?agent={}", sparq_reason::n3::encode_for_uri(x));
+            (m, [Term::NamedNode(NamedNode::new_unchecked(x)), Term::NamedNode(any_client.clone())])
+        })
+        .collect();
 
     let mut first: Option<(String, String, String)> = None;
     for agent in agents {
-        // A deterministic grant IRI keyed on (agent, mode, graph) so re-materializing
-        // the same condition is idempotent (no duplicate heads).
+        // A deterministic grant IRI keyed on (agent, mode, graph, excepts) so re-
+        // materializing the same condition is idempotent (no duplicate heads) and an
+        // exception-bearing grant never collides with an unconditional one.
+        let except_key = except_matchers
+            .iter()
+            .map(|(m, _)| sparq_reason::n3::encode_for_uri(m))
+            .collect::<Vec<_>>()
+            .join(",");
         let grant_iri = format!(
-            "urn:sparq:odrl-cond?agent={}&mode={}&graph={}",
+            "urn:sparq:odrl-cond?agent={}&mode={}&graph={}&except={}",
             sparq_reason::n3::encode_for_uri(agent),
             sparq_reason::n3::encode_for_uri(mode_iri(mode)),
             sparq_reason::n3::encode_for_uri(target),
+            except_key,
         );
         let g = Term::NamedNode(NamedNode::new_unchecked(&grant_iri));
         let agent_o = Term::NamedNode(NamedNode::new_unchecked(agent));
-        let head = [
+        let mut head = vec![
             [g.clone(), Term::NamedNode(type_p.clone()), Term::NamedNode(cond_class.clone())],
             [g.clone(), Term::NamedNode(effect_p.clone()), Term::NamedNode(allow_o.clone())],
             [g.clone(), Term::NamedNode(agent_p.clone()), agent_o],
@@ -848,6 +924,13 @@ fn append_conditional_grants(
             [g.clone(), Term::NamedNode(mode_p.clone()), Term::NamedNode(mode_o.clone())],
             [g.clone(), Term::NamedNode(graph_p.clone()), Term::NamedNode(graph_o.clone())],
         ];
+        // Wire each exception matcher onto the grant + materialize its accept-set facts.
+        for (m, [agent_accept, client_accept]) in &except_matchers {
+            let m_node = Term::NamedNode(NamedNode::new_unchecked(m));
+            head.push([g.clone(), Term::NamedNode(except_p.clone()), m_node.clone()]);
+            head.push([m_node.clone(), Term::NamedNode(accepts_agent_p.clone()), agent_accept.clone()]);
+            head.push([m_node, Term::NamedNode(accepts_client_p.clone()), client_accept.clone()]);
+        }
         for t in head {
             if !emitted.contains(&t) {
                 emitted.push(t);

@@ -1492,3 +1492,157 @@ fn purpose_prohibition_dual_through_enforcement() {
     let out3 = store3.materialize_odrl_prohibition(&prohib, &unconstrained);
     assert!(!out3.prohibited, "no purpose evidence → no definite carve-out materialized");
 }
+
+// ===========================================================================
+// [OPUS-4.8] sq-5037 — `odrl:recipient neq X` / "everyone-except-X" → an ACP
+// `noneOf` exception: the grant head is auth:Public with an auth:exceptMatcher
+// carving out X. RE-CHECKED per session: everyone reads EXCEPT X (and anonymous,
+// who fails the public head? no — public matches anonymous; X is excluded).
+// ===========================================================================
+
+const DAVE: &str = "https://dave.ex/card#me";
+
+/// "everyone EXCEPT bob may read n1" — recipient neq bob.
+fn recipient_neq_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/neq> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:neq ;
+                      odrl:rightOperand <https://bob.ex/card#me> ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// The `auth:exceptMatcher` IRIs carved out by ConditionalGrants in `graph`, paired
+/// with the agent each matcher accepts (the noneOf shape the session layer reads).
+fn except_matchers(graph: &Graph) -> Vec<(String, String)> {
+    let q = "SELECT ?m ?a WHERE { GRAPH <urn:sparq:auth> { \
+        ?g <https://sparq.dev/ns/auth#exceptMatcher> ?m . \
+        ?m <https://sparq.dev/ns/solidx#acceptsAgentP> ?a } }";
+    sparq_engine::query(graph, q)
+        .expect("query")
+        .rows
+        .iter()
+        .map(|r| (format!("{:?}", r[0]), format!("{:?}", r[1])))
+        .collect()
+}
+
+// 18. The noneOf BRIDGE SHAPE: a recipient-neq permission materializes a public
+//     ConditionalGrant with an exceptMatcher accepting (agent = bob, client = any).
+#[test]
+fn recipient_neq_emits_noneof_exception_shape() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &recipient_neq_policy(), &req);
+    assert!(out.granted, "recipient-neq maps to a noneOf condition: {out:?}");
+
+    // Exactly one public ConditionalGrant (the "everyone" head) — NOT one per agent.
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        1,
+        "everyone-except is a single public head"
+    );
+    // ... carrying an exception matcher that accepts bob (the carved-out party).
+    let ms = except_matchers(&g);
+    assert_eq!(ms.len(), 1, "one exceptMatcher: {ms:?}");
+    assert!(ms[0].1.contains("bob.ex"), "exception carves out bob: {ms:?}");
+}
+
+// 19. RE-CHECKED end-to-end through the enforcement path: everyone reads EXCEPT bob.
+//     Anonymous (public) reads; bob is denied; the materializing party (alice) reads.
+#[test]
+fn recipient_neq_grants_everyone_except_named_party() {
+    let pol = recipient_neq_policy();
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+
+    assert!(reads(&mut store, CAROL), "carol (not bob) granted");
+    assert!(reads(&mut store, DAVE), "dave (not bob) granted");
+    assert!(reads(&mut store, ALICE), "alice (not bob) granted");
+    assert!(!reads(&mut store, BOB), "bob is carved out by the noneOf exception");
+    // The public head matches anonymous too (no party named ⇒ everyone-except).
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).iter().any(|gr| gr.as_str() == N1),
+        "anonymous (public) is granted; only bob is excepted"
+    );
+
+    // End-to-end via query_as: bob sees nothing, carol sees the content.
+    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    let bob = Session { agent: Some(BOB), client: None };
+    let carol = Session { agent: Some(CAROL), client: None };
+    assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 0);
+    assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
+}
+
+// 20. The PROHIBITION dual: a prohibition `recipient neq bob` carves out everyone
+//     EXCEPT bob (deny-overrides). Per the bridge's deny-overrides check, ANY matching
+//     prohibition blocks the grant; here the conditional path emits nothing because the
+//     prohibition matches the request party (alice != bob → neq holds → carved out).
+#[test]
+fn recipient_neq_prohibition_blocks_grant() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/pneq> a odrl:Set ;
+  odrl:permission [ odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ;
+  odrl:prohibition [ odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ;
+      odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                        odrl:rightOperand <https://bob.ex/card#me> ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    // alice (≠ bob) → the prohibition's neq holds → deny-overrides → nothing granted.
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(!out.granted, "prohibition recipient-neq carves out non-bob: {out:?}");
+    assert_eq!(cond_grants_for(&g, None), 0, "deny-overrides → no conditional grant");
+}
+
+// 21. A reserved-encoded neq recipient cannot become an enforceable per-session matcher
+//     (it could otherwise impersonate a minted pair principal), so the bridge must NOT
+//     emit an "everyone-except" public noneOf grant for it — that would re-admit the
+//     carved-out party. Instead the rule falls back to the one-shot path, which checks
+//     the neq (frozen) against the materializing party and grants ONLY that party — no
+//     widening to public, and no unguarded public grant leaked.
+#[test]
+fn recipient_neq_reserved_encoded_does_not_widen_to_public() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/rsv> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                      odrl:rightOperand <urn:sparq:pair?agent=x&client=y> ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let mut g = pod();
+    // alice (≠ the reserved party) → the one-shot path proves the neq for alice and
+    // grants alice (frozen). Crucially NO public noneOf grant is emitted — the reserved
+    // exclusion cannot become a matcher, so access is NOT widened to everyone-except.
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "one-shot grants the (non-excluded) materializing party: {out:?}");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "reserved-encoded neq must NOT widen to a public everyone-except grant"
+    );
+    assert!(except_matchers(&g).is_empty(), "no unenforceable matcher emitted");
+
+    // Frozen, scoped to alice: a stranger is denied (no widening to public).
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(reads(&mut store, ALICE), "alice (the materializer, non-excluded) granted");
+    assert!(!reads(&mut store, CAROL), "no public widening from a reserved exclusion");
+}

@@ -102,6 +102,22 @@ assert!(!evaluate(&policy, &outside).allow);
   - `purpose_status(&rule, &request) -> PurposeMatch` reports exactly what the evaluator
     checks for a rule's purpose constraints — `Satisfied` / `DefinitelyUnsatisfied` /
     `Unprovable` / `NotConstrained` — the auditable surface of this enforcement.
+- **`odrl:recipient` enforcement + `neq` / "everyone-except"** — [OPUS-4.8] sq-5037.
+  A `recipient` constraint restricts **who the data is disclosed to**. The
+  recipient-of-data is the requesting party, so a request that names a party (`.by(..)`)
+  but supplies no explicit `odrl:recipient` context is read as `recipient = party` — a
+  `recipient` rule gates on *who is asking*, through the **same** `evaluate` constraint
+  path. An explicit `.with(ODRL_RECIPIENT, ..)` still takes precedence.
+  - **`recipient neq X` ("everyone EXCEPT X"):** grants/forbids for any recipient that is
+    **not** `X`; the recipient `X` is the carve-out. **Missing identity (no
+    `odrl:recipient` AND no party) is *unprovable* → fail-closed:** a `neq` permission
+    does **not** grant to an unknown recipient, and a `neq` prohibition is **not**
+    withdrawn. `eq`/`isA` = recipient IS the named party; `isPartOf` = recipient ∈ set.
+    Match is **exact** IRI/string equality (no recipient hierarchy).
+  - `recipient_status(&rule, &request) -> RecipientMatch` reports exactly what the
+    evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` /
+    `NotConstrained` — the recipient dual of `purpose_status`. (In the `sparq-solid`
+    bridge, `recipient neq X` maps to an ACP `noneOf` exception, re-checked per session.)
 - **`odrl:count` enforcement (stateful, opt-in, fail-closed)** — [OPUS-4.8] sq-zi5w.
   `odrl:count` limits the **number of times** a permission may be exercised ("may read
   at most 5 times"). Unlike the stateless constraints above, this is **stateful** — the
@@ -146,11 +162,14 @@ lexical form; mixed-offset normalization, DPV `purpose` hierarchies, and
 `Duty → proof-manifest` discharge are tracked as follow-on beads. See
 `research/feature-research-odrl-policy.md`.
 
-**Constraint persistence vs. one-shot** (sq-hiz4, in `sparq-solid`'s opt-in bridge):
-`materialize_odrl_permission_conditional` persists a `odrl:recipient`/`odrl:assignee`
-constraint (`eq`/`isA`/`isPartOf`) as a **re-checked** ACP `auth:ConditionalGrant`
-(agent matcher) — the only constraint with a faithful stateless `(agent, client)`
-analogue. `odrl:purpose`/`dateTime`/`count` have no *stateless* ACP analogue and stay
+**Constraint persistence vs. one-shot** (sq-hiz4 / sq-5037, in `sparq-solid`'s opt-in
+bridge): `materialize_odrl_permission_conditional` persists a
+`odrl:recipient`/`odrl:assignee` constraint as a **re-checked** ACP
+`auth:ConditionalGrant` — `eq`/`isA`/`isPartOf` as an agent matcher, and **`neq`
+("everyone EXCEPT X") as an ACP `noneOf` exception** (a public grant + an
+`auth:exceptMatcher` carving out `X`). These are the only constraints with a faithful
+stateless `(agent, client)` analogue. `odrl:purpose`/`dateTime`/`count` have no
+*stateless* ACP analogue and stay
 **one-shot** in the bridge (checked once at materialization). Stateful `odrl:count`
 enforcement itself (the usage counter) lives in this crate's `count-enforcement`
 feature (`evaluate_and_exercise` + `UsageCounterStore`); wiring it *through* the

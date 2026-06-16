@@ -29,6 +29,14 @@ pub const ODRL_PURPOSE: &str = "http://www.w3.org/ns/odrl/2/purpose";
 /// [OPUS-4.8] sq-zi5w.
 pub const ODRL_COUNT: &str = "http://www.w3.org/ns/odrl/2/count";
 
+/// The `odrl:recipient` left-operand IRI — the dimension a *recipient constraint*
+/// restricts (the party that data is disclosed to, e.g. `odrl:recipient neq <bob>`,
+/// the "everyone EXCEPT bob" shape). The recipient-of-data is the requesting party,
+/// so when a request carries **no** explicit `odrl:recipient` context value the
+/// evaluator reads its [`Request::party`] as the recipient evidence (see
+/// [`recipient_status`]). [OPUS-4.8] sq-5037.
+pub const ODRL_RECIPIENT: &str = "http://www.w3.org/ns/odrl/2/recipient";
+
 /// An access request evaluated against a [`Policy`]: who wants to do what, to
 /// what, in what context (the "evaluation request" + "state of the world" of the
 /// ODRL Formal Semantics, folded into one node-local view).
@@ -41,6 +49,14 @@ pub struct Request {
     /// The requesting party (the WebID / agent IRI — matched against
     /// `odrl:assignee`).
     pub party: Option<String>,
+    /// The requesting party as an [`Value::Iri`], kept in lock-step with [`party`]
+    /// (set by [`Request::by`]) so a `recipient` constraint with no explicit
+    /// `odrl:recipient` context can be re-checked against *who is asking* without an
+    /// allocation per constraint. Internal — [`party`] is the public field.
+    /// [OPUS-4.8] sq-5037.
+    ///
+    /// [`party`]: Request::party
+    pub(crate) recipient_party: Option<Value>,
     /// Context values keyed by ODRL `leftOperand` IRI (e.g. `odrl:dateTime`,
     /// `odrl:purpose`, `odrl:recipient`, `odrl:count`) — the state-of-the-world a
     /// constraint is evaluated against. Use [`Request::with`] to populate.
@@ -67,8 +83,15 @@ impl Request {
     }
 
     /// Set the requesting party (assignee) IRI.
+    ///
+    /// The party doubles as the default **recipient-of-data**: an `odrl:recipient`
+    /// constraint with no explicit context value is re-checked against this party
+    /// (see [`recipient_status`]), so a `recipient neq X` rule gates on who is asking.
+    /// [OPUS-4.8] sq-5037.
     pub fn by(mut self, party: impl Into<String>) -> Request {
-        self.party = Some(party.into());
+        let p = party.into();
+        self.recipient_party = Some(Value::Iri(p.clone()));
+        self.party = Some(p);
         self
     }
 
@@ -432,6 +455,100 @@ pub fn purpose_status(rule: &Rule, request: &Request) -> PurposeMatch {
     }
 }
 
+/// The three-valued verdict of a rule's `odrl:recipient` constraints against the
+/// recipient evidence a request carries — a FAITHFUL report of exactly what
+/// [`evaluate`] checks for recipient (it reuses the same [`constraint_status`] the
+/// evaluator's recipient constraints go through). [OPUS-4.8] sq-5037.
+///
+/// The honesty contract mirrors [`PurposeMatch`]: this never claims a stronger verdict
+/// than the evaluator acts on. `Satisfied` is the ONLY verdict under which a
+/// recipient-gated permission grants; anything other than `DefinitelyUnsatisfied`
+/// (i.e. `Satisfied` OR `Unprovable`) keeps a recipient-gated prohibition in force.
+///
+/// **The `neq` / "everyone-except" shape:** a `recipient neq X` constraint is
+/// `Satisfied` for any recipient that is NOT `X`, `DefinitelyUnsatisfied` for the
+/// recipient `X` (the carved-out party), and `Unprovable` when the request supplies
+/// no identity at all (no `odrl:recipient` context AND no [`Request::party`]) —
+/// fail-closed: a `neq` permission does NOT grant to an unknown recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecipientMatch {
+    /// The rule has no `odrl:recipient` constraint — recipient places no restriction.
+    NotConstrained,
+    /// The rule constrains recipient AND the request's recipient **satisfies** every
+    /// recipient constraint (for `neq X`: the recipient is some party other than `X`).
+    Satisfied,
+    /// The rule constrains recipient but the request carries **no** recipient evidence
+    /// (no `odrl:recipient` context and no requesting party) — *unprovable*.
+    /// Fail-closed: a permission does NOT grant; a prohibition is NOT withdrawn.
+    Unprovable,
+    /// The rule constrains recipient and the request's recipient **fails** the
+    /// constraint (for `neq X`: the recipient IS the carved-out party `X`).
+    DefinitelyUnsatisfied,
+}
+
+/// Report how `rule`'s `odrl:recipient` constraint(s) stand against the recipient
+/// evidence `request` carries — the auditable surface of faithful recipient (incl.
+/// `neq` / "everyone-except") enforcement. [OPUS-4.8] sq-5037.
+///
+/// Like [`purpose_status`], this does NOT re-implement matching: it runs the request
+/// through the SAME [`constraint_status`] every `odrl:recipient` constraint goes
+/// through inside [`evaluate`], so the verdict it reports is exactly what the
+/// evaluator acts on (no claimed enforcement that isn't actually checked). The
+/// recipient evidence is the explicit `odrl:recipient` context value, or — when none
+/// is set — the requesting [`Request::party`] (the recipient-of-data is who is asking;
+/// see [`resolve_actual`]).
+///
+/// Returns [`RecipientMatch::NotConstrained`] when the rule has no recipient constraint.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_policy::{recipient_status, RecipientMatch, parse_policy_str, Request};
+/// // "everyone EXCEPT bob may receive the data"
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/p> a odrl:Set ; odrl:permission [
+///     odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+///     odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+///                       odrl:rightOperand <https://bob.ex/card#me> ] ] .
+/// "#, "turtle").unwrap();
+/// let rule = &pol.permissions[0];
+/// let base = Request::new("http://www.w3.org/ns/odrl/2/read").on("urn:asset/x");
+///
+/// // Some other party → Satisfied (not the excluded one).
+/// let carol = base.clone().by("https://carol.ex/card#me");
+/// assert_eq!(recipient_status(rule, &carol), RecipientMatch::Satisfied);
+/// // The excluded party → DefinitelyUnsatisfied.
+/// let bob = base.clone().by("https://bob.ex/card#me");
+/// assert_eq!(recipient_status(rule, &bob), RecipientMatch::DefinitelyUnsatisfied);
+/// // No identity at all → Unprovable (fail-closed; not "any recipient").
+/// assert_eq!(recipient_status(rule, &base), RecipientMatch::Unprovable);
+/// ```
+pub fn recipient_status(rule: &Rule, request: &Request) -> RecipientMatch {
+    let mut constrained = false;
+    let mut any_unprovable = false;
+    for c in &rule.constraints {
+        if c.left != ODRL_RECIPIENT {
+            continue;
+        }
+        constrained = true;
+        match constraint_status(c, request) {
+            ConstraintStatus::Satisfied => {}
+            ConstraintStatus::DefinitelyUnsatisfied => {
+                return RecipientMatch::DefinitelyUnsatisfied
+            }
+            ConstraintStatus::Unprovable => any_unprovable = true,
+        }
+    }
+    if !constrained {
+        RecipientMatch::NotConstrained
+    } else if any_unprovable {
+        RecipientMatch::Unprovable
+    } else {
+        RecipientMatch::Satisfied
+    }
+}
+
 /// How one prohibition rule re-evaluates against a request, distinguishing a
 /// *definite* non-match from an *unprovable* one (missing-evidence constraint).
 /// [OPUS-4.8] sq-2pcf.
@@ -496,7 +613,7 @@ enum ConstraintStatus {
 }
 
 fn constraint_status(c: &Constraint, request: &Request) -> ConstraintStatus {
-    match request.context.get(&c.left) {
+    match resolve_actual(c, request) {
         None => ConstraintStatus::Unprovable,
         Some(actual) => {
             if compare(actual, c.operator, &c.right) {
@@ -506,6 +623,27 @@ fn constraint_status(c: &Constraint, request: &Request) -> ConstraintStatus {
             }
         }
     }
+}
+
+/// The *actual* world value a constraint's `leftOperand` is compared against, or
+/// `None` when the request supplies no evidence for that dimension (⇒ unprovable /
+/// fail-closed). [OPUS-4.8] sq-5037.
+///
+/// Dimensions take their value from [`Request::context`] keyed by the left operand —
+/// EXCEPT `odrl:recipient`, where the recipient-of-data IS the requesting party: a
+/// request that names a `party` but supplies no explicit `odrl:recipient` context is
+/// read as `recipient = party`. This is what makes a `recipient neq X` rule actually
+/// gate on *who is asking* end-to-end. An explicit `odrl:recipient` context value (if
+/// the caller sets one) still takes precedence — the disclosure target need not be the
+/// authenticated principal in every deployment.
+fn resolve_actual<'r>(c: &Constraint, request: &'r Request) -> Option<&'r Value> {
+    if let Some(v) = request.context.get(&c.left) {
+        return Some(v);
+    }
+    if c.left == ODRL_RECIPIENT {
+        return request.recipient_party.as_ref();
+    }
+    None
 }
 
 /// Outcome of matching a single rule against a request.
@@ -580,12 +718,14 @@ fn rule_matches(rule: &Rule, request: &Request, req_action: &Action) -> Match {
 /// Is a single constraint satisfied by the request context?
 ///
 /// The request supplies the *actual* value for the constraint's `leftOperand`
-/// (e.g. the actual request time for `odrl:dateTime`); the constraint's
-/// `rightOperand` is the bound. A constraint whose left operand has **no** value
-/// in the request context is **unsatisfied** (fail-closed: we cannot prove the
-/// world meets a constraint we have no evidence about).
+/// (e.g. the actual request time for `odrl:dateTime`, or the requesting party for
+/// `odrl:recipient` — see [`resolve_actual`]); the constraint's `rightOperand` is the
+/// bound. A constraint whose left operand has **no** value (no context value AND, for
+/// recipient, no party) is **unsatisfied** (fail-closed: we cannot prove the world
+/// meets a constraint we have no evidence about — including a `recipient neq X`
+/// constraint with no identity to compare).
 fn constraint_satisfied(c: &Constraint, request: &Request) -> bool {
-    let Some(actual) = request.context.get(&c.left) else {
+    let Some(actual) = resolve_actual(c, request) else {
         return false; // no evidence for this dimension → fail-closed
     };
     compare(actual, c.operator, &c.right)

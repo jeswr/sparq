@@ -11,8 +11,8 @@
 //! blank-node constraints).
 
 use sparq_policy::{
-    evaluate, parse_policy_str, prohibition_status, purpose_status, Decision, ProhibitionStatus,
-    PurposeMatch, Request, Value,
+    evaluate, parse_policy_str, prohibition_status, purpose_status, recipient_status, Decision,
+    ProhibitionStatus, PurposeMatch, RecipientMatch, Request, Value,
 };
 
 const ODRL: &str = "http://www.w3.org/ns/odrl/2/";
@@ -651,5 +651,111 @@ fn purpose_not_constrained_when_absent() {
     assert_eq!(
         purpose_status(&p.permissions[0], &req),
         PurposeMatch::NotConstrained
+    );
+}
+
+// ===========================================================================
+// [OPUS-4.8] sq-5037 — odrl:recipient `neq` / "everyone-except-X": a permission
+// (or prohibition) with `recipient neq X` matches a request iff the requesting
+// party is NOT X. Missing identity is Unprovable → fail-closed. The recipient is
+// resolved from the explicit `odrl:recipient` context OR the requesting party.
+// `recipient_status` REPORTS exactly what `evaluate` checks (the honesty point).
+// ===========================================================================
+
+const BOB: &str = "https://bob.ex/card#me";
+const CAROL: &str = "https://carol.ex/card#me";
+
+/// "everyone EXCEPT bob may read asset-X" — recipient neq bob.
+fn recipient_neq_permission() -> sparq_policy::Policy {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/neq> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                      odrl:rightOperand <{BOB}> ] ] .
+"#
+    );
+    parse_policy_str(&ttl, "turtle").unwrap()
+}
+
+#[test]
+fn recipient_neq_grants_everyone_except_named_party() {
+    let p = recipient_neq_permission();
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // carol is NOT bob → granted (party doubles as recipient).
+    assert!(evaluate(&p, &base.clone().by(CAROL)).allow, "non-excluded party granted");
+    // bob is the carved-out recipient → denied.
+    assert!(!evaluate(&p, &base.clone().by(BOB)).allow, "excluded party denied");
+}
+
+#[test]
+fn recipient_neq_fail_closed_on_missing_identity() {
+    let p = recipient_neq_permission();
+    // No party AND no explicit recipient context → unprovable → fail-closed DENY.
+    let anon = Request::new(left("read")).on("urn:asset/x");
+    assert!(!evaluate(&p, &anon).allow, "no identity → does NOT grant a neq permission");
+}
+
+#[test]
+fn recipient_neq_explicit_context_overrides_party() {
+    // An explicit odrl:recipient context value is the disclosure target even when a
+    // (different) party is present — the recipient-of-data need not be the principal.
+    let p = recipient_neq_permission();
+    let base = Request::new(left("read")).on("urn:asset/x").by(CAROL);
+    // explicit recipient = bob → DENY despite party=carol.
+    let to_bob = base.clone().with(left("recipient"), Value::Iri(BOB.into()));
+    assert!(!evaluate(&p, &to_bob).allow, "explicit recipient bob is carved out");
+    // explicit recipient = carol → granted.
+    let to_carol = base.with(left("recipient"), Value::Iri(CAROL.into()));
+    assert!(evaluate(&p, &to_carol).allow, "explicit non-excluded recipient granted");
+}
+
+#[test]
+fn recipient_neq_prohibition_dual() {
+    // "bob is PROHIBITED from reading unless he is NOT bob" — a prohibition with
+    // recipient neq bob carves out everyone EXCEPT bob (the dual of the permission).
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/pneq> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                      odrl:rightOperand <{BOB}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // carol (not bob) → the prohibition's neq holds → carved out → DENY.
+    assert_eq!(prohibition_status(&p, &base.clone().by(CAROL)), ProhibitionStatus::Applies);
+    // bob → neq is definitely false → NOT carved out by this prohibition → Withdrawn.
+    assert_eq!(prohibition_status(&p, &base.clone().by(BOB)), ProhibitionStatus::Withdrawn);
+    // no identity → unprovable → Ambiguous (deny is kept, fail-closed).
+    assert_eq!(prohibition_status(&p, &base), ProhibitionStatus::Ambiguous);
+}
+
+#[test]
+fn recipient_status_reports_what_evaluate_checks() {
+    let p = recipient_neq_permission();
+    let rule = &p.permissions[0];
+    let base = Request::new(left("read")).on("urn:asset/x");
+    assert_eq!(recipient_status(rule, &base.clone().by(CAROL)), RecipientMatch::Satisfied);
+    assert_eq!(
+        recipient_status(rule, &base.clone().by(BOB)),
+        RecipientMatch::DefinitelyUnsatisfied
+    );
+    assert_eq!(recipient_status(rule, &base), RecipientMatch::Unprovable);
+    // A rule with NO recipient constraint → NotConstrained.
+    let bare = parse_policy_str(
+        &format!(
+            r#"@prefix odrl: <{ODRL}> . <urn:pol/b> a odrl:Set ; odrl:permission [
+               odrl:action odrl:read ; odrl:target <urn:asset/x> ] ."#
+        ),
+        "turtle",
+    )
+    .unwrap();
+    assert_eq!(
+        recipient_status(&bare.permissions[0], &base.by(CAROL)),
+        RecipientMatch::NotConstrained
     );
 }
