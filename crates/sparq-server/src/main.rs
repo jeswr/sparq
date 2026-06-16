@@ -70,6 +70,15 @@
 //!                                                                        [20, env SPARQ_MAX_DECOMPRESS_RATIO]
 //!   --verbose                 per-request logging (TraceLayer)
 //!
+//! Access audit log (opt-in `audit-log` cargo feature — see skills/http-server/SKILL.md
+//! "Access audit log"; CDMC CD-2 / ISO 27001 A.8.15 / EU CRA logging):
+//!   --audit-log               emit a structured per-query access-audit `tracing` record under
+//!                             target `sparq_server::audit` (requester-token fingerprint /
+//!                             `anonymous`, op class, NON-reversible query fingerprint — never
+//!                             the full query text or token, the #241 posture —, decision,
+//!                             status/rows, duration). Route it with RUST_LOG. Off by default.
+//!                             [env SPARQ_AUDIT_LOG=1]
+//!
 //! Subscription limits (T23, the /subscriptions WebSocket — see SUBSCRIPTIONS.md):
 //!   --max-subscriptions N           server-wide active subscriptions [256, env SPARQ_MAX_SUBSCRIPTIONS]
 //!   --max-subscriptions-per-conn N  active subscriptions per socket  [16, env SPARQ_MAX_SUBSCRIPTIONS_PER_CONN]
@@ -124,7 +133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let secs: u64 = parse_flag(&mut args, "--query-timeout")?;
                 config.query_timeout = (secs > 0).then(|| Duration::from_secs(secs));
             }
-            "--max-body-bytes" => config.max_body_bytes = parse_flag(&mut args, "--max-body-bytes")?,
+            "--max-body-bytes" => {
+                config.max_body_bytes = parse_flag(&mut args, "--max-body-bytes")?
+            }
             "--max-concurrent" => {
                 let n: usize = parse_flag(&mut args, "--max-concurrent")?;
                 config.max_concurrent = n.max(1);
@@ -148,11 +159,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.max_subscriptions = parse_flag(&mut args, "--max-subscriptions")?;
             }
             "--max-subscriptions-per-conn" => {
-                config.max_subscriptions_per_conn = parse_flag(&mut args, "--max-subscriptions-per-conn")?;
+                config.max_subscriptions_per_conn =
+                    parse_flag(&mut args, "--max-subscriptions-per-conn")?;
             }
             #[cfg(feature = "time-travel")]
             "--time-travel-generations" => {
-                config.time_travel_generations = parse_flag(&mut args, "--time-travel-generations")?;
+                config.time_travel_generations =
+                    parse_flag(&mut args, "--time-travel-generations")?;
             }
             #[cfg(feature = "time-travel")]
             "--time-travel-max-age" => {
@@ -160,6 +173,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.time_travel_max_age = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--verbose" => config.verbose = true,
+            // [OPUS-4.8] sq-0bxp: opt in to the per-query access audit log (CDMC CD-2). Emits a
+            // structured `tracing` record per request under target `sparq_server::audit` (route
+            // it with RUST_LOG). Only present with the `audit-log` cargo feature.
+            #[cfg(feature = "audit-log")]
+            "--audit-log" => config.audit_log = true,
             // [OPUS-4.8] sq-7cxr (PSS gh-44): durable persistence directory (QLever
             // --persist-updates). Updates are WAL-durable to DIR before ack; a restart on the
             // same DIR restores all of them with no rebuild. Overrides SPARQ_PERSIST_DIR.
@@ -195,10 +213,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).
             "--service-allow" => {
-                service_allow_cli.push(args.next().ok_or("--service-allow requires a host/pattern")?);
+                service_allow_cli.push(
+                    args.next()
+                        .ok_or("--service-allow requires a host/pattern")?,
+                );
             }
             "--service-allow-file" => {
-                service_allow_file = Some(args.next().ok_or("--service-allow-file requires a path")?);
+                service_allow_file =
+                    Some(args.next().ok_or("--service-allow-file requires a path")?);
             }
             "-h" | "--help" => {
                 let time_travel = if cfg!(feature = "time-travel") {
@@ -250,7 +272,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // malformed entry or unreadable file is a hard startup error: better to refuse to
     // boot than to silently run with an allowlist narrower than the operator wrote.
     if let Some(path) = &service_allow_file {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("--service-allow-file {path}: {e}"))?;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("--service-allow-file {path}: {e}"))?;
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
             config.service_allow.add(line)?;
@@ -260,12 +283,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.service_allow.add(entry)?;
     }
 
-    if config.verbose {
+    // [OPUS-4.8] sq-0bxp: the per-query access audit log emits via `tracing`, so it needs a
+    // subscriber too — install one when --verbose OR --audit-log is set. The default filter
+    // when audit is on (and not verbose) routes the dedicated `sparq_server::audit` target at
+    // info so the audit trail surfaces without the noisier request log; RUST_LOG still wins.
+    #[cfg(feature = "audit-log")]
+    let want_subscriber = config.verbose || config.audit_log;
+    #[cfg(not(feature = "audit-log"))]
+    let want_subscriber = config.verbose;
+    if want_subscriber {
         // Default to request-level tracing; RUST_LOG still wins if set.
+        #[cfg(feature = "audit-log")]
+        let default_filter = if config.verbose {
+            "tower_http=debug,sparq_server=debug"
+        } else {
+            // Audit-only: surface the audit target (and warnings) without the debug request log.
+            "sparq_server::audit=info,warn"
+        };
+        #[cfg(not(feature = "audit-log"))]
+        let default_filter = "tower_http=debug,sparq_server=debug";
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "tower_http=debug,sparq_server=debug".into()),
+                    .unwrap_or_else(|_| default_filter.into()),
             )
             .init();
     }
@@ -280,7 +320,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .is_some_and(|d| d.join("dict-meta.bin").exists() || d.join("dict.bin").exists());
     let graph = match (&data_file, persist_has_store) {
         (_, true) => {
-            let dir = config.persist_dir.as_ref().expect("persist_has_store implies a dir");
+            let dir = config
+                .persist_dir
+                .as_ref()
+                .expect("persist_has_store implies a dir");
             eprintln!(
                 "--persist {}: opening existing durable store (replaying WAL; DATA_FILE, if any, ignored)",
                 dir.display()
@@ -302,12 +345,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "guards: query-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
          max-query-rows={} max-decompress-ratio={}x max-subscriptions={} \
          max-subscriptions-per-conn={}",
-        config.query_timeout.map_or("off".into(), |t| format!("{}s", t.as_secs())),
+        config
+            .query_timeout
+            .map_or("off".into(), |t| format!("{}s", t.as_secs())),
         config.max_body_bytes,
         config.max_concurrent,
         config.max_results.map_or("off".into(), |n| n.to_string()),
         // [OPUS-4.8] sq-ebii: memory cap + decompression-ratio cap in the startup guard line.
-        config.max_query_rows.map_or("off".into(), |n| n.to_string()),
+        config
+            .max_query_rows
+            .map_or("off".into(), |n| n.to_string()),
         config.max_decompress_ratio,
         config.max_subscriptions,
         config.max_subscriptions_per_conn,
@@ -324,7 +371,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sees whether (and where) federation can reach. Only meaningful with the `service`
     // build feature; without it a SERVICE clause errors at execution regardless.
     #[cfg(feature = "service")]
-    eprintln!("SERVICE egress allowlist: {}", config.service_allow.display());
+    eprintln!(
+        "SERVICE egress allowlist: {}",
+        config.service_allow.display()
+    );
     #[cfg(feature = "time-travel")]
     eprintln!(
         "time travel: ?generation=N enabled — generations={} max-age={} (each retained generation is a full graph)",
@@ -384,8 +434,11 @@ fn parse_flag<T: std::str::FromStr>(
     args: &mut impl Iterator<Item = String>,
     flag: &str,
 ) -> Result<T, String> {
-    let v = args.next().ok_or_else(|| format!("{flag} requires a value"))?;
-    v.parse().map_err(|_| format!("{flag}: invalid value '{v}'"))
+    let v = args
+        .next()
+        .ok_or_else(|| format!("{flag} requires a value"))?;
+    v.parse()
+        .map_err(|_| format!("{flag}: invalid value '{v}'"))
 }
 
 /// Resolves on SIGINT (Ctrl-C) or SIGTERM (the signal init systems / container runtimes
