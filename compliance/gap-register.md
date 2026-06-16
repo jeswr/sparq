@@ -1,0 +1,180 @@
+<!-- [OPUS-4.8] sq-toze — CONSOLIDATED cross-framework gap register. Lead-owned (consolidation).
+     Collects every open gap from the 12 framework slices, deduplicated. NON-CANONICAL timing;
+     no measured numbers baked here. -->
+
+# sparq compliance — consolidated cross-framework gap register
+
+> 🤖 SPARQ agent. This is the single deduplicated view of **every open gap** across the 12
+> certification frameworks (epic **sq-toze**). Each per-framework `gap-register.md` is authoritative
+> for its own slice; this file collapses the recurring cross-cutting gaps into one row each and
+> headlines the items that **only an external party can close**.
+
+Severity legend: **P0** blocks an honest high-value claim / is externally required · **P1** needed
+for a perfect-score / no-residual posture · **P2** raises maturity or hygiene · **P3** aspirational.
+
+---
+
+## HEADLINE — external-required residuals (no agent / no in-repo fix can close these)
+
+These are the items that, by definition, need an **external assessor, accredited body, external
+cryptographer, or an organisational act** outside the source tree. They are the true ceiling on what
+sparq can self-certify. **They must never be presented as already satisfied.**
+
+| ID | Residual | Framework(s) | Who must act | Tracking |
+|---|---|---|---|---|
+| **CR-G1** | **External accredited-cryptographer audit of the ZK/MPC estate** (verifier binding layer, Schnorr-over-Baby-JubJub issuer sig, Noir circuits, composition seam). All current soundness assurance is **internal, single-model (Opus 4.8) self-review**. Until it closes, `SECURITY.md`'s **"v1 ZK verifier NOT sound / `sparq-mpc` NO guarantee"** posture is the relying-party truth. | cryptoreview (privacy, cdmc gate on it) | external cryptographer | **`sq-qhy4` (P0, CRITICAL)** |
+| **GAP-ISO-1** | **ISMS / Statement-of-Applicability org act** — scope statement, risk assessment + treatment plan, SoA over the 93 Annex-A controls, management review, internal-audit programme. `iso27001/soa-template.md` is the scaffold; the operating ISMS + sign-off is organisational. | iso27001 | deploying organisation | bead to create (P1) |
+| **ASVS L2 external verification / penetration test** | Accredited ASVS L2 assessor verification and/or an external pentest of a *deployed* `sparq-server`. Cannot be self-issued. | asvs (cis AUDIT-READY rows) | accredited assessor / pentester | AUDIT-READY (external body) |
+| **CE-marking / conformity assessment** | EU Declaration of Conformity + CE marking + Article 14 reporting are a manufacturer/steward **organisational act**, deliberately NOT recorded as a fixable in-tree gap (CRA-CA.2 / CRA-CA.3). | cra | commercialising/deploying party | AUDIT-READY (external body) |
+| **SLSA Build L3** | Build **L2 is met and honestly claimed**; **L3 is NOT** — provenance is generated in-band (same job as the build), not by an isolated trusted builder. The certificate-grade L3 audit is external; the migration to a trusted builder is aspirational. | slsa | trusted-builder migration + accredited assessor | **`sq-toze.25` (P3, GX-11)** |
+| **ISO 27001 / SLSA-L3 / SOC2 / 27701 certificates** | Every *certificate* (vs readiness pack) is issued only by an accredited body after a Stage-1 + Stage-2 / equivalent audit of an **operating** programme over time. | iso27001, slsa, privacy | accredited certification body | external by definition |
+| **Memory-safety formal-methods / third-party audit** | Certificate-grade assurance of the unsafe mmap validators (Kani/Prusti proof) and an accredited third-party audit of the B5 surface are external. Current assurance is Miri + oracle + fuzz + per-site argument (a *defensible attestation, not a rubber stamp*). | memsafety | formal-methods / external auditor | **`sq-toze` MS-G4 (P2)** + external |
+
+**Human-owned external filings (one-step, no outside body but not self-issuable by an agent):**
+OpenSSF Best-Practices badge filing on bestpractices.dev (**GX-4 / `sq-toze.5`, P1**); first `v*`
+release + first Sigstore/SLSA attestation (SBOM publication/signing half is config-verified, not yet
+operating-verified); registry-publish provenance for crates.io / npm / PyPI (**`sq-toze.24` /
+`sq-jgt3`** — crates.io has **no upstream provenance mechanism**); live GitHub branch-protection
+ruleset verification against `docs/branch-protection.md` (**`sq-sto1`**).
+
+---
+
+## Cross-cutting gaps (recur across slices — one deduplicated row each)
+
+| ID | Gap | Sev | Framework(s) | Bead | Status |
+|---|---|---|---|---|---|
+| **GX-8** | **No reproducible-build evidence** — the SBOM↔binary integrity link is asserted (SLSA provenance + cargo-auditable), not independently reproducible; higher SLSA levels + CRA integrity want a documented bit-for-bit rebuild *or* an honest "not reproducible because X". Recurs as SBOM **GS-2**, SSDF **SSDF-G1 (PW.6.2)**, SLSA SL-B3-adjacent, OpenSSF Badge `build_reproducible`, CRA integrity. | P2 | sbom, ssdf, slsa, openssf, cra | **`sq-toze.9`** | OPEN |
+| **GX-9** | `dist.yml` tiered `sparq-cli` binaries built with **no provenance** (no id-token/attest step, no cargo-auditable) — dist/launcher binary unattested. | P1 | slsa (cited by cra) | **`sq-toze.23`** | OPEN |
+| **GX-10** | **Published packages carry no provenance** — there is no publish workflow at all (js/python lanes are test-only); crates.io/npm/PyPI artifacts are published out-of-CI and unattested. crates.io has no upstream provenance mechanism. | P1 | slsa (cited by cra), openssf (GX-OSSF-2) | **`sq-toze.24`** (npm/PyPI), **`sq-jgt3`** (registry signing) | OPEN |
+| **GX-11** | **SLSA Build L3 not met** — in-band provenance ceiling (compromised build step shares signing context); needs slsa-github-generator / isolated trusted builder. | P3 | slsa | **`sq-toze.25`** | OPEN (aspirational) |
+| **GX-12** | **No container-image CVE scan (Trivy/Grype) + no Dockerfile linter (Dockle/Hadolint) lane in CI** — only the docker-smoke test exists. | P1 | cis (cited by cra) | **`sq-toze.31`** | OPEN |
+| **GX-13** | No `HEALTHCHECK` in the Dockerfile (distroless has no shell; needs a static probe / `--health-probe` subcommand). | P3 | cis | **`sq-toze.36`** | OPEN |
+
+**Closed cross-cutting gaps (cited as evidence across slices — do NOT re-propose):** GX-1 cargo-deny
+advisories PR-gate (`sq-toze.2`, closed by #210; CVSS-4.0 blocker `sq-q8de` resolved) · GX-2 per-release
+SBOM + VEX (`sq-toze.3`) · GX-3 `.well-known/security.txt` RFC 9116 (`sq-toze.4`) · GX-5 unsafe-justification
+register + cargo-geiger ratchet (`sq-toze.6`, owned by memsafety) · GX-6 CONTRIBUTING secure-coding section
+(`sq-toze.7`) · GX-7 cargo-auditable / cargo-vet (`sq-toze.8`, landed via #210 — bead still open as a
+watch item).
+
+---
+
+## Per-framework open gaps
+
+### Memory-safety — substantively PASS (auditor SIGN-OFF, `FINDINGS: 0`)
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| MS-G2 | No first-party `clippy::undocumented_unsafe_blocks` lint (enforced by register + review + count ratchet; 6/56 sites use an adjacent block comment, not the literal `// SAFETY:` token) | P1 | `sq-toze` (memsafety: enable lint on the 5 unsafe crates) |
+| MS-G3 | No standalone AddressSanitizer lane outside cargo-fuzz (oracle MS-7 runs without ASan) | P2 | `sq-toze` (ASan over the corruption oracle) |
+| MS-G4 | No formal verification / model-checking of the unsafe mmap validators (Kani/Prusti) — assurance ceiling, not a defect | P2 | `sq-toze` (evaluate Kani bounded-proof) |
+| MS-G5 | Cross-doc unsafe-count drift (`research/threat-model.md` says 39, register/ratchet say 42) | P2 | `sq-toze` (sync threat-model count) |
+
+### ASVS — applicable controls PASS; external verification AUDIT-READY
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| ASVS-G1 | `sparq-server` sets no security response headers (min `X-Content-Type-Options: nosniff`; no CSP/X-Frame-Options/HSTS) | Medium | `sq-cmvh` |
+| ASVS-G2 | No first-party CORS allowlist option (documented safe-default decision, not a vuln) | Low | `sq-o7o0` |
+| ASVS-G3 | (Error-body info-leak) no test asserting no FS-path/internal-host leak — **FIX SHIPPED (PR #241)**; regression bead open | Medium | `sq-j9zs` (parent `sq-cz89`) |
+| ASVS-G4 | No explicit SPARQL parse-depth bound (nested-input DoS bounded only by `--max-body-bytes`) | Low | `sq-53s1` |
+
+### CIS — PASS / N/A(operator) except GX-12 (P1) + GX-13 (P3) — see cross-cutting table.
+
+### SBOM — 22 implemented & verified / 6 audit-ready / 3 gap (all P2)
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| GS-1 | Per-component Supplier Name (NTIA N1) not emitted (cargo-cyclonedx leaves `supplier`/`publisher` empty) | P2 | `sq-toze.26` |
+| GS-2 | = **GX-8** reproducible-build (cross-cutting) | P2 | `sq-toze.9` |
+| GS-3 | No npm/JS-lockfile SBOM for the WASM client (`sparq-wasm`, `js/`) | P2 | `sq-toze.27` |
+| GS-4 | Generated SBOM is CycloneDX 1.3 while VEX is 1.5 (mixed spec versions) | P2 | `sq-toze.28` |
+| GS-5 | VEX ↔ deny.toml sync enforced by comment + manual inspection, not CI | P2 | `sq-toze.29` |
+| GS-6 | SBOM root identity leaks the absolute build-machine path in `bom-ref` | P2 | `sq-toze.30` |
+
+### SSDF — 28 implemented & verified / 13 audit-ready / 1 gap
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| SSDF-G1 | = **GX-8** reproducible-build (PW.6.2) — the only technical gap | P2 | `sq-toze.9` |
+| (new) | Stand-alone Secure-SDLC policy template (PO.1.1; org-act deliverable, lifts PO.1.1/PO.2.1 from audit-ready) | — | `sq-5ty0` |
+
+### SLSA — Build L2 met; GX-9/GX-10/GX-8/GX-11 (all in cross-cutting table).
+
+### OpenSSF — strong; badge eligible-not-filed
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| GX-4 | OpenSSF Best-Practices (CII) badge not filed — questionnaire answer-ready at passing bar, but no bestpractices.dev entry, so Scorecard `CII-Best-Practices` scores 0 | P1 | `sq-toze.5` (blocks `sq-toze.15`) |
+| GX-OSSF-2 | Registry publishes not signing-attested (crates.io has no first-party scheme; npm `--provenance`, PyPI Trusted Publishing available) | P3 | `sq-jgt3` |
+| GX-OSSF-3 | Scorecard Code-Review/Branch-Protection depressed by solo-maintainer reality + live ruleset out-of-repo | P3 (partly external) | `sq-sto1` |
+
+### ISO 27001 — zero open Annex-A *control* gaps; two readiness gaps
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| GAP-ISO-1 | **ISMS / SoA org act** (see HEADLINE) | P1/High | bead to create |
+| GAP-ISO-2 | N/A(operator) controls implicit, not in one operator-facing deployment-security doc (42 Annex-A controls are the operator's) | P2 | bead to create |
+
+### CRA — substance of vuln-handling + secure-by-default met; org/CE layer audit-ready
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| GX-CRA-1 | No concrete support/EOL-period statement | P1 | `sq-f8tv` |
+| GX-CRA-2 | No Article 14 ENISA/CSIRT reporting runbook (24h/72h/final) | P1 | `sq-iy3p` |
+| GX-CRA-3 | No single named "cybersecurity policy" document (substance scattered) | P2 | `sq-d43g` |
+| (CE) | EU DoC + CE marking + conformity assessment — see HEADLINE | — | external (CRA-CA.2/CA.3) |
+
+### Privacy — substantively AUDIT-READY; one engine fix shipped this phase
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| PR-G1 | Error bodies echo caller input incl. loaded RDF to an unauthenticated caller (audit raised from Low) — **FIX SHIPPED (PR #241)** | Medium | `sq-cz89` (code) |
+| PR-G5 | No regression test pinning the error-body no-echo property — **SHIPPED with PR #241** | Low | `sq-zg0u` (test) |
+| PR-G2 | No built-in structured/queryable access/audit log (only `--verbose` tower-http traces) | Low | `sq-toze.32` |
+| PR-G3 | `--persist` WAL not erasure-complete (deleted triples persist in append-only segments until compaction; Art. 17) | Medium | `sq-toze.33` |
+| PR-G4 | No request-log redaction control (`--verbose` logs full SPARQL incl. embedded PII) | Low | `sq-toze.34` |
+| PR-X1 | Any privacy claim resting on ZK/MPC is **gated** — crypto NOT sound (gate, not a privacy fix) | — | `sq-toze.35` gate + epic `sq-1s2` |
+
+### Cryptoreview — readiness doc; ZK/MPC documented NOT sound
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| CR-G1 | **External accredited-cryptographer audit** — see HEADLINE | P0/CRITICAL | `sq-qhy4` |
+| CR-G2 | Crypto-chain forge tests `#[ignore]`d out of default CI | High | `sq-f9tl` (closed) |
+| CR-G3 | Public-input empirical anchors missing for `filter_f64_d*` + k=2 scan members | High | `sq-f9tl` (closed) |
+| CR-G4 | No FIPS 140-3 validated module; honest negative posture | Low | `sq-cu32` (P2) |
+| CR-G5 | No constant-time / side-channel analysis of secret-bearing paths (issuer signing, MPC share ops) | P2 | `sq-egx6` |
+| CR-G6 | Residual ZK privacy/binding deferrals (in-circuit salt binding; per-graph salt + list-IRI/version disclosed → linkability; `HolderPop` not credential-bound) — privacy, not soundness re-openings | Medium | `sq-hyhj`, `sq-93h`, `sq-i1dt`, `sq-42e3` (epic `sq-1s2`) |
+| CR-G7 | `sparq-mpc` malicious-security / collaborative-proof deferred (research-only) | High (for any MPC reliance) | `sq-bjl`, `sq-34ml`, `sq-ox16` |
+
+### CDMC — engine-strong (two 4s), governance-honest (the 2s)
+| ID | Gap | Sev | Bead |
+|---|---|---|---|
+| CD-1 | No first-class data lineage (no W3C-PROV ingest→graph→result capture) — caps 6.2 (2→3) | P0 | rec CD-R1 (bead under `sq-toze`) |
+| CD-2 | No per-query access audit trail (only aggregate Prometheus metrics) — cap 3.2 (2→3) | P0 | rec CD-R2 (bead under `sq-toze`) |
+| CD-8 | Catalogue capability not CI-gated (VoID + Service-Description behind default-OFF `federation-descriptors`; stock build 404s; holds 2.1 at 3) | P1 | **`sq-kzfi`** (+ feature-matrix lane) |
+| CD-3 | Classification taxonomy + encryption-at-rest silently operator-owned (no handoff doc) — caps 2.2/4.3 | P1 | rec CD-R3 |
+| CD-4 | No ODRL usage control (entitlements are access-control only) — cap 3.1 (3→4) | P1 | rec CD-R4 |
+| CD-5 | Retention not policy-driven (ring ages by age/count, not declarative TTL) — cap 5.1 (3→4) | P1 | rec CD-R5 |
+| CD-6 | No machine-readable dataset-ownership convention — cap 1.2 (2→3) | P2 | rec CD-R6 |
+| CD-7 | No published CDMC operator-responsibility split doc | P2 | rec CD-R7 |
+
+---
+
+## Consolidated count by severity (open gaps only)
+
+| Severity | Count | Notes |
+|---|---|---|
+| **P0 / CRITICAL** | **3** | CR-G1 (external cryptographer), CDMC CD-1 + CD-2 (lineage + access-audit data-maturity). CR-G1 is **external-required**. |
+| **P1 / High** | **~10** | GX-9, GX-10, GX-12, GX-4, GAP-ISO-1, GX-CRA-1, GX-CRA-2, MS-G2, CDMC CD-3/4/5/8 (P1 cluster). GAP-ISO-1 is an **org act**. |
+| **P2 / Medium** | **~17** | GX-8 (one row, recurs in 5 slices), GS-1/3/4/5/6, SSDF-G1(=GX-8), MS-G3/G4/G5, ASVS-G1/G3, GAP-ISO-2, GX-CRA-3, PR-G3, CR-G4/G5, CDMC CD-6/7. |
+| **P3 / Low** | **~8** | GX-11, GX-13, GX-OSSF-2/3, ASVS-G2/G4, PR-G2/G4/G5. |
+
+Counts collapse the recurring cross-cutting gaps (GX-8, GX-9, GX-10, GX-12) to **one row each**; the
+per-slice gap-registers list them once per framework. The only **P0** that is a hard external ceiling
+is **CR-G1** (`sq-qhy4`); the two CDMC P0s are data-management-maturity items closable in-repo.
+
+---
+
+## Honesty posture (binding across all frameworks)
+
+Every framework **excludes the unsound ZK/MPC crypto from its security/privacy claims** and the
+crypto-review auditor's tripwire confirmed **zero soundness overclaims**: the memsafety audit cleared
+its ZK honesty tripwire (the `sparq-zk-compose` flock sites are scoped as memory-safety FFI only, no
+crypto guarantee); CDMC scores ZK/MPC **zero** toward protection-by-cryptography (caps 4.2/4.3 held at
+2); privacy gates PR-X1 on it and claims no privacy benefit; ISO routes A.8.24 crypto to the
+cryptoreview verdict. No slice launders the ZK/MPC scaffold into an assurance. The canonical posture
+remains `SECURITY.md`: **the v1 ZK verifier is NOT sound and `sparq-mpc` carries no guarantee** until
+**CR-G1 / `sq-qhy4`** closes with an external cryptographer.
