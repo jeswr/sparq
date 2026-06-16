@@ -741,14 +741,26 @@ pub(crate) fn ws_auth_gate(
 /// [OPUS-4.8] sq-zcby: the 401 a gated request without a valid token gets — `WWW-Authenticate:
 /// Bearer` plus the server's standard JSON error body. Identical for a missing vs a wrong
 /// token (the body carries no hint either way), so it never leaks which.
+///
+/// [OPUS-4.8] sq-2bhm (ASVS-G1): this auth-refusal is a SENSITIVE response, so — unlike the
+/// general surface, where a blanket `Cache-Control` is deliberately NOT forced (results are
+/// uncached by default; see [`security_headers`]) — it carries `Cache-Control: no-store` so a
+/// shared cache / proxy never retains the 401 (or any future body it grows). This is the
+/// narrow, targeted use of `no-store` the security-header gap calls for, scoped to the auth
+/// path rather than imposed globally.
 pub(crate) fn unauthorized() -> Response {
     let mut resp = json_error(
         StatusCode::UNAUTHORIZED,
         "authentication required: present a valid Bearer token",
     );
-    resp.headers_mut().insert(
+    let headers = resp.headers_mut();
+    headers.insert(
         header::WWW_AUTHENTICATE,
         header::HeaderValue::from_static("Bearer"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
     );
     resp
 }

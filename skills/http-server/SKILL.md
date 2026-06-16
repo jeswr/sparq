@@ -55,9 +55,9 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > opened, on the *resolved* IP (DNS-rebinding-safe). See "SERVICE federation (egress
 > allowlist)" below.
 >
-> **Security response headers (always on, ASVS V14.4; bead `sq-cmvh`).** Every response —
-> success, streamed and error alike — carries a hardening header set, stamped by a
-> `map_response` layer in `harden()`:
+> **Security response headers (always on, ASVS V14.4 / ASVS-G1; beads `sq-cmvh`, `sq-2bhm`).**
+> Every response — success, streamed, error and auth-gated (`401`) alike — carries a hardening
+> header set, stamped by a `map_response` layer in `harden()`:
 > `X-Content-Type-Options: nosniff`,
 > `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`,
 > `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`. These suit a SPARQL *data* API
@@ -67,9 +67,11 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > Security` (the origin serves plain HTTP — HSTS belongs on the fronting TLS proxy);
 > `X-XSS-Protection` (deprecated, superseded by CSP); CORS / `Cross-Origin-*` / `Permissions-
 > Policy` (browser-app document policies, meaningless for a no-CORS data API — adding CORS would
-> *widen* the surface). No blanket `Cache-Control: no-store` is forced: results are uncached by
+> *widen* the surface). No *blanket* `Cache-Control: no-store` is forced: results are uncached by
 > default (no `ETag`/`Cache-Control: public` is ever set), so there is nothing to tighten, and a
-> blanket value would wrongly override `/health` / `/metrics`.
+> blanket value would wrongly override `/health` / `/metrics` — but the sensitive auth-refusal
+> (`401` from `unauthorized()`) **does** carry `Cache-Control: no-store` so a shared cache never
+> retains it (`sq-2bhm`).
 
 Point a client at it (the endpoint is `/sparql`):
 
