@@ -15,6 +15,41 @@ notes** that an auditor needs at a glance.
 > unaudited** (sq-qhy4). The ZK verifier it composes with is **not** sound
 > (`SECURITY.md` / CR-G1). Nothing here is a production security claim.
 
+## Collaborative-proof (coZK) — witness-validation-before-proving (sq-7leq)
+
+The collaborative (multi-prover) zk-proof path is **deferred** — every
+`CollaborativeProof::prove` / `verify` returns `NotYetImplemented` naming its
+gate (see `proof.rs` and the no-fake-crypto table in `adversarial_tests.rs`). The
+coZK re-audit (`research/mpc-cozk-reaudit.md`, bead `sq-9hrn`) against CRYPTO'25
+eprint 2025/1026 surfaced a **negative result**: the "honest-majority semi-honest
+⇒ malicious-secure for free" folklore holds for collaborative zk-SNARKs **only if
+the extended witness is validated for cross-holder consistency BEFORE the proving
+phase opens or commits to any value derived from it** (requirement **R-WV**).
+Proving over an inconsistent/maliciously-extended witness can **leak honest
+provers' inputs**, even when the verifier rejects the proof.
+
+That obligation is now **ENCODED as a test** (`src/witness_validation_tests.rs`),
+not just documented. **Status: OPEN (documented-gap), NOT met** — there is no
+built prover to validate a witness against, so the precondition cannot be
+satisfied today. The encoding is two-tier:
+
+- A **PASSING** meta-test pins the current honest fail-closed posture: the
+  deferred `prove` never proves over any witness (it refuses before touching one),
+  so no prove-over-invalid-witness path exists today — vacuously, because no
+  prover exists. It is the regression anchor that fires if a future `prove`
+  returns `Ok(..)` while R-WV is still unmet.
+- The **`#[ignore]`d T1–T4 suite** encodes R-WV concretely against the
+  `WitnessValidatingProver` contract the future prover (`sq-f7bu` / `sq-bjl`,
+  milestone M-E) MUST satisfy; it is un-ignored and lifted into that prover's
+  suite when it lands.
+
+This **makes no soundness claim** for the collaborative path. Per the re-audit,
+no production attestation/correctness claim may be made until R-WV is implemented,
+T1–T4 + clause C pass un-ignored, the honest-majority malicious-security line
+(`sq-km34.*`) lands, AND an **external cryptographer audit covers the MULTI-prover
+construction** — `sq-qhy4` audits only the single-prover verifier and does **not**
+discharge this.
+
 ## Constant-time / side-channel posture
 
 A **source-level** constant-time review of the secret-bearing paths exists at

@@ -205,6 +205,17 @@ pub mod transport;
 #[cfg(test)]
 mod adversarial_tests;
 
+// [OPUS-4.8] sq-7leq: encode the witness-validation-before-proving TEST
+// OBLIGATION for the collaborative-proof (coZK) path (re-audit §3, bead sq-9hrn).
+// Test-only. A PASSING meta-test pins the current honest fail-closed posture (the
+// deferred `prove` never proves over any witness), and an `#[ignore]`d R-WV /
+// T1–T4 suite encodes the OPEN soundness obligation against the future prover
+// (sq-f7bu/sq-bjl) so the gap is measurable, not silent. Does NOT claim the
+// collaborative path is sound (sq-qhy4 single-prover audit; multi-prover audit
+// still required). See the module docs.
+#[cfg(test)]
+mod witness_validation_tests;
+
 // [OPUS-4.8] sq-km34.1: the IT-MAC authenticated-sharing foundation surface.
 pub use authenticated::{
     auth_add, auth_add_constant, auth_scale, auth_sub, AuthenticatedShare, MacKey,
