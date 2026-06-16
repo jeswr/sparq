@@ -11,6 +11,7 @@
 export interface WasmStore {
   readonly size: number;
   query(sparql: string): string; // SPARQL 1.1 JSON results document
+  queryQuads(sparql: string): string; // CONSTRUCT/DESCRIBE -> N-Triples
 }
 
 interface WasmModule {
@@ -21,6 +22,15 @@ interface WasmModule {
   };
 }
 
+/**
+ * [OPUS-4.8] Serialises a store's whole default graph to N-Triples (a valid Turtle
+ * subset) via a CONSTRUCT. Used to merge two graphs format-agnostically when the user
+ * chooses "add to current": concatenate both stores' N-Triples and re-load as ntriples.
+ */
+export function storeToNTriples(store: WasmStore): string {
+  return store.queryQuads("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }");
+}
+
 let modulePromise: Promise<WasmModule> | null = null;
 
 function basePath(): string {
@@ -29,7 +39,12 @@ function basePath(): string {
   return process.env.NEXT_PUBLIC_BASE_PATH ?? "/sparq";
 }
 
-/** Loads + initialises the wasm engine once; subsequent calls reuse it. */
+/**
+ * [OPUS-4.8] Loads + initialises the wasm engine once; subsequent calls reuse it.
+ *
+ * The fetch + compile + instantiate is the expensive cold start. {@link prewarmSparq}
+ * kicks this off eagerly on route mount so the first `Run query` pays no cold start.
+ */
 export async function loadSparq(): Promise<WasmModule["Store"]> {
   if (!modulePromise) {
     modulePromise = (async () => {
@@ -48,6 +63,17 @@ export async function loadSparq(): Promise<WasmModule["Store"]> {
   }
   const mod = await modulePromise;
   return mod.Store;
+}
+
+/**
+ * [OPUS-4.8] Eagerly pre-warm the wasm engine (fetch + compile + instantiate) without
+ * blocking render. Safe to call on route mount and to call repeatedly — it shares the
+ * single {@link loadSparq} promise, so the cold start happens at most once. Returns a
+ * promise that resolves when the engine is ready (or rejects on a load failure, which
+ * resets the cache so a later `Run query` can retry).
+ */
+export function prewarmSparq(): Promise<unknown> {
+  return loadSparq();
 }
 
 // ---- minimal SPARQL 1.1 JSON shapes for rendering ----
