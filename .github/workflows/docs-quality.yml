@@ -134,13 +134,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   skill-frontmatter:
-    # [OPUS-4.8] HARD gate (bead sq-56im): every skills/**/SKILL.md must have YAML
-    # frontmatter that actually parses (yaml.safe_load) and carries non-empty string
-    # `name` + `description`. Catches the GitHub "mapping values are not allowed in
-    # this context" render error caused by an UNQUOTED colon in a description value
-    # (reported on full-text-search/SKILL.md). The validation itself is deterministic
-    # (no network); the one network touch is the version-pinned `pip install` of PyYAML
-    # below. Still a HARD gate. [OPUS-4.8]
+    # [OPUS-4.8] HARD gate (beads sq-56im + sq-tstv): every skills/**/SKILL.md AND
+    # every .claude/agents/*.md must have YAML frontmatter that actually parses
+    # (yaml.safe_load) and carries non-empty string `name` + `description`. Catches the
+    # GitHub "mapping values are not allowed in this context" render error caused by an
+    # UNQUOTED colon in a description value (reported on full-text-search/SKILL.md, and
+    # later on the sparq-site.md agent's "GitHub Pages app: …" — hence the agent-file
+    # coverage). The validation itself is deterministic (no network); the one network
+    # touch is the version-pinned `pip install` of PyYAML below. Still a HARD gate. [OPUS-4.8]
     name: skill-frontmatter (Agent-Skills YAML)
     runs-on: ubuntu-latest
     steps:
@@ -156,8 +157,14 @@ jobs:
         # sha256 against .github/requirements/docs-quality.txt before use. PyYAML has no
         # runtime deps, so that file is the full closure. See its header to bump/regenerate.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
-      - name: Validate SKILL.md frontmatter
+      - name: Validate SKILL.md + .claude/agents frontmatter
         run: python3 scripts/check-skill-frontmatter.py
+      # [OPUS-4.8] sq-tstv: hermetic self-test of the gate's classification — an
+      # unquoted-colon agent description must FAIL, a quoted one must PASS, and the
+      # default glob must cover both the skills/ and .claude/agents/ families. Runs in
+      # this same HARD job so a coverage regression also fails the ci-summary gate.
+      - name: Self-test the skill-frontmatter gate
+        run: python3 scripts/tests/test_skill_frontmatter.py
 
   privacy-claims:
     # [OPUS-4.8] HARD gate (bead sq-toze.35 + sq-qhy4): the empirical-honesty mandate
