@@ -189,6 +189,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // it with RUST_LOG). Only present with the `audit-log` cargo feature.
             #[cfg(feature = "audit-log")]
             "--audit-log" => config.audit_log = true,
+            // [OPUS-4.8] sq-gos8 (epic sq-toze): install the RICHER STRUCTURED access-audit sink
+            // — `--access-audit <file|stderr>`. Records every enforced access decision as a
+            // typed JSON-Lines record (actor / action / resource / decision + policy-basis /
+            // timestamp / request fingerprint). The literal `stderr` writes to stderr; any other
+            // value is a file path. Overrides SPARQ_ACCESS_AUDIT. Only with the `access-audit`
+            // cargo feature. PRIVACY: logs identities + resources by design; query content stays
+            // fingerprinted (never raw). See skills/http-server/SKILL.md.
+            #[cfg(feature = "access-audit")]
+            "--access-audit" => {
+                let target = args
+                    .next()
+                    .ok_or("--access-audit requires a target ('stderr' or a file path)")?;
+                if target.is_empty() {
+                    return Err("--access-audit target must not be empty".into());
+                }
+                config.access_audit = Some(sparq_server::access_audit::SinkTarget::parse(&target));
+            }
             // [OPUS-4.8] sq-7cxr (PSS gh-44): durable persistence directory (QLever
             // --persist-updates). Updates are WAL-durable to DIR before ack; a restart on the
             // same DIR restores all of them with no rebuild. Overrides SPARQ_PERSIST_DIR.

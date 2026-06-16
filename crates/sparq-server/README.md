@@ -174,6 +174,31 @@ hygiene. Complementary to the error-body sanitisation (`sq-kfel`/#241: detail to
 a generic class to the client) and the opt-in access audit log (which already logs only a query
 *fingerprint*, never the text).
 
+### Access-audit trails (opt-in — ASVS V7 / ISO 27001 A.8.15 / CDMC CD-2)
+
+Two opt-in, off-by-default per-request access trails for compliance regimes that need more than
+the aggregate `GET /metrics` counters:
+
+- **`audit-log`** (cargo feature + `--audit-log` / `SPARQ_AUDIT_LOG=1`) emits one flat structured
+  `tracing` event per request under target `sparq_server::audit` (requester fingerprint, op class,
+  query fingerprint, decision, status, duration) — route it with `RUST_LOG`.
+- **`access-audit`** (cargo feature + `--access-audit <file|stderr>` / `SPARQ_ACCESS_AUDIT`)
+  emits a **richer, typed JSON-Lines record** through a pluggable `AuditSink` trait, hooked at the
+  REAL enforcement seam so the recorded decision is the one actually enforced: **actor** (a WebID /
+  agent IRI when known, else a Bearer-token fingerprint, never the raw token), **action**
+  (query / update / graph read / graph write), **resource** (the named-graph IRI / dataset
+  touched), **decision + policy-basis**, an RFC-3339 timestamp, and a non-reversible request
+  fingerprint. The default sink writes a file or stderr; heavy/external sinks (SIEM, OTel) stay out
+  of core (implement the trait). Off (no feature or no sink), every call site is `#[cfg]`-stripped /
+  an `Option` check — zero cost.
+
+  **Privacy boundary (honest):** an audit trail's purpose is to record WHO accessed WHAT, so — by
+  design, unlike the request log — it **records identities and resource IRIs**. It does **NOT**
+  record query **content**: the query/update text is logged only as its fingerprint, never raw (a
+  query body can carry PII — the same #241 redaction posture as the error-leak guard above). One
+  line: identities + resources are logged; content stays fingerprinted. See the SKILL's
+  "Structured access-audit sink" section + `src/access_audit.rs`.
+
 ## 🚀 Quickstart
 
 ```sh
@@ -325,10 +350,16 @@ matrix under "Security posture".
   server. Each page carries Hydra controls (`hydra:totalItems` from the engine's cheap cardinality
   estimate, `hydra:next`/`hydra:previous` paging, the `hydra:search` template). Content-negotiated
   RDF (Turtle default). See the SKILL's "Triple Pattern Fragments" section.
+- **Access-audit trails** — opt-in, off by default: `audit-log` (flat `tracing` event per request)
+  and `access-audit` (richer typed JSON-Lines records via a pluggable sink — actor / action /
+  resource / decision+basis / timestamp / fingerprint, hooked at the real enforcement seam).
+  Identities + resources logged by design; query content stays fingerprinted. See "Access-audit
+  trails".
 - **Opt-in features** — `time-travel` (`?generation=N` snapshot pinning), `geo` (sparq-geo
   `geof:` functions), `service` (SERVICE federation, default-deny), `federation-descriptors`
   (VoID + Service Description discovery endpoints — see "Federation discovery"), `tpf` (Triple
-  Pattern Fragments / LDF source endpoint — see "Triple Pattern Fragments / LDF source"), `zlib-ng`
+  Pattern Fragments / LDF source endpoint — see "Triple Pattern Fragments / LDF source"),
+  `audit-log` / `access-audit` (access-audit trails — see "Access-audit trails"), `zlib-ng`
   (native-only faster zlib-ng C backend for `Content-Encoding: gzip` request inflate; off by
   default, pure-Rust `miniz_oxide` otherwise; never in the wasm build).
 
