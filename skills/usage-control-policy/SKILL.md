@@ -74,7 +74,7 @@ assert_eq!(d.matched_rules.len(), 1);  // the granting permission, for audit
 
 ## Building the request
 
-`Request::new(action_iri)` then chain `.on(target)`, `.by(party)`, `.with(left_operand_iri, Value)` for each context dimension (`dateTime`, `purpose`, `recipient`, `count`, `spatial`, …), and `.discharge(duty_action_iri)` per discharged duty. `Value` is `Iri` | `Str` | `Num(f64)` | `DateTime(String)`. For purpose specifically, prefer the first-class `.for_purpose(Value)` (sugar over `.with(ODRL_PURPOSE, ..)`); read it back via `req.purpose()`.
+`Request::new(action_iri)` then chain `.on(target)`, `.by(party)`, `.with(left_operand_iri, Value)` for each context dimension (`dateTime`, `purpose`, `recipient`, `count`, `spatial`, …), and `.discharge(duty_action_iri)` per discharged duty. `Value` is `Iri` | `Str` | `Num(f64)` | `DateTime(String)`. For purpose specifically, prefer the first-class `.for_purpose(Value)` (sugar over `.with(ODRL_PURPOSE, ..)`; read it back via `req.purpose()`); for the evaluation time prefer `.at(instant)` (sugar over `.with(ODRL_DATETIME, Value::DateTime(..))`; read it back via `req.request_time()`).
 
 ## `odrl:purpose` enforcement (faithful, fail-closed) — [OPUS-4.8] sq-q56r
 
@@ -92,7 +92,16 @@ A `recipient` constraint restricts **who the data may be disclosed to**. The rec
 - **`recipient neq X` ("everyone EXCEPT X"):** grants/forbids for any recipient that is **not** `X`. A request whose recipient IS `X` is the carve-out (deny on a permission; the prohibition no longer carves *this* party out). **Missing identity (no `odrl:recipient` AND no party) is *unprovable* → fail-closed:** a `neq` permission does **not** grant to an unknown recipient, and a `neq` prohibition is **not** withdrawn.
 - **`eq`/`isA`** = recipient IS the named party; **`isPartOf`** = recipient ∈ static set. Match is **exact** IRI/string equality (no recipient hierarchy).
 - **Audit:** `recipient_status(&rule, &request) -> RecipientMatch` reports exactly what the evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` / `NotConstrained` (the recipient dual of `purpose_status`).
+- **Combined `recipient eq A AND neq B` (one rule):** the constraints are ANDed — the recipient must BE `A` and must NOT BE `B`. Through the bridge this emits a single `ConditionalGrant` headed by `A` (positive) carrying an `exceptMatcher` carving out `B` (the per-head exception).
 - Through the bridge, `recipient neq X` maps to an ACP **`noneOf`** exception (see the mapping table + the bridge note below) — re-checked per session.
+
+## `odrl:dateTime` time-window enforcement (faithful, fail-closed) — [OPUS-4.8] sq-idnv
+
+A `dateTime` constraint gates a permission/prohibition to a **time window** — e.g. `dateTime lteq T` (valid until `T`), `dateTime gteq T` (valid from `T`), or a two-sided window (`gteq lower` + `lteq upper`, ANDed). The actual instant is the request's **evaluation time**, supplied as `xsd:dateTime` evidence via the first-class `Request::at(instant)` sugar (over `.with(ODRL_DATETIME, Value::DateTime(..))`); read it back via `req.request_time()`.
+
+- **Semantics:** inside the window → grant (permission) / carve-out applies (prohibition); outside → deny / carve-out gone. Instants compare by magnitude (the `lt`/`lteq`/`gt`/`gteq`/`eq`/`neq` ordering). **Missing time → *unprovable* → fail-closed:** a time-gated permission does **not** grant on an unknown clock; a time-gated prohibition is **not** withdrawn (never silently read as "any time").
+- **Audit:** `datetime_status(&rule, &request) -> DateTimeMatch` reports exactly what the evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` / `NotConstrained` (the temporal dual of `purpose_status`/`recipient_status`).
+- Through the bridge, `dateTime` stays **one-shot** (frozen at materialization — ACP matcher accept-sets are static, there is no "now" dimension to re-check; see the mapping table). A changed window is re-evaluated on the next `refresh_odrl_grant` — a lapsed window then retracts the grant. (`dateTime` ordering compares the lexical form — mixed-offset normalization is a deferred bead.)
 
 ## `odrl:count` enforcement (stateful, opt-in `count-enforcement`) — [OPUS-4.8] sq-zi5w
 
@@ -184,6 +193,14 @@ store.materialize_odrl_permission_conditional(&policy, &req); // policy: recipie
 **Fail-safe on mixed constraints:** a persisted condition is emitted ONLY when **every** constraint on the rule maps faithfully. A rule mixing a mappable recipient with an unmappable `dateTime`/`purpose`/`count` falls back **entirely** to the one-shot path — persisting only the recipient would silently drop the time/purpose/count bound and over-grant. Recipient IRIs inside the reserved pair encoding (`urn:sparq:` / `&client=`) are dropped from the grant head (anti-impersonation). The two ODRL "any recipient" sentinels fold onto auth principals: `odrl:All`/`odrl:Group` → `auth:Public`, `odrl:AllConnections` → `auth:Authenticated`.
 
 **Why only recipient/assignee maps:** the ACP session re-check carries exactly `(agent, client)`. The recipient-of-data is precisely the session **agent**, so an agent matcher re-checks it with identical semantics. Purpose, time, and count have **no** stateless `(agent, client)` analogue, so persisting them would require either freezing the check (= the one-shot path, already correct) or a looser approximation that could over-grant — rejected.
+
+### Constraint-conditional DENY (`materialize_odrl_prohibition_conditional`) — [OPUS-4.8] sq-4r70
+
+The dual of the conditional grant: a matched ODRL **prohibition** whose recipient/assignee constraints map faithfully is persisted as a re-checked `auth:ConditionalGrant` with **`auth:effect auth:Deny`** (rather than a frozen one-shot `auth:deny*`). The carve-out is re-verified per session through the SAME `accessible`/`query_as` path, and **composes with deny-overrides**: the session layer subtracts `∪ deny` from `∪ allow`, so a conditional deny that applies to a session removes the target from its accessible set — beating any allow for the same principal+target+mode.
+
+- A prohibition `recipient eq carol` → a deny condition headed by carol (only carol's sessions are denied); `recipient neq bob` → a deny on **everyone EXCEPT bob** (an `exceptMatcher` carving bob back IN to access). Same mapping table as the allow path (recipient/assignee `eq`/`isA`/`isPartOf`/`neq` are faithful; `purpose`/`dateTime`/`count` are unmappable).
+- **Fail-safe fallback:** a prohibition carrying an unmappable constraint (`purpose`/`dateTime`/`count`) falls back to the one-shot `materialize_odrl_prohibition` (frozen, materialized iff the prohibition currently matches) so the bound is still enforced — a persisted deny condition is emitted ONLY when every constraint maps faithfully. A reserved-encoded recipient cannot become a matcher, so the rule falls back to one-shot rather than emit a deny that silently fails to bite (which would FAIL OPEN — a dropped deny widens access).
+- **Refresh.** Tracked as `BridgeKind::ProhibitionConditional`. On refresh the recipient carve-out is re-checked per session, so the deny is re-emitted while the prohibition still structurally names the request; a withdrawn prohibition re-emits nothing → the deny condition is **retracted** → access restored. A one-shot fallback uses the asymmetric deny-retraction rule below (re-emit on `Ambiguous`, retract only on a definite `Withdrawn`).
 
 ### Refresh / REVOCATION of bridged grants on policy change — [OPUS-4.8] sq-dpk4
 

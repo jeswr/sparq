@@ -1646,3 +1646,242 @@ fn recipient_neq_reserved_encoded_does_not_widen_to_public() {
     assert!(reads(&mut store, ALICE), "alice (the materializer, non-excluded) granted");
     assert!(!reads(&mut store, CAROL), "no public widening from a reserved exclusion");
 }
+
+// ===========================================================================
+// [OPUS-4.8] sq-5037 follow-up — COMBINED recipient `eq A AND neq B` in ONE rule
+// through the BRIDGE. The bridge emits `agents=[A]` (positive head) + `except=[B]`
+// (a noneOf exceptMatcher) — both on the SAME ConditionalGrant. Structurally emitted
+// by sq-5037 but untested at the bridge level (the per-head exception path).
+// ===========================================================================
+
+/// "carol (and only carol), but never bob, may read n1" — recipient eq carol AND neq bob.
+fn recipient_eq_and_neq_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/comb> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <https://carol.ex/card#me> ] ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                      odrl:rightOperand <https://bob.ex/card#me> ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+// 22. The COMBINED bridge shape: a single ConditionalGrant whose positive head is carol
+//     AND which carries an exceptMatcher carving out bob (the per-head exception).
+#[test]
+fn recipient_eq_and_neq_emits_carol_head_with_bob_exception() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &recipient_eq_and_neq_policy(), &req);
+    assert!(out.granted, "combined eq+neq maps to a faithful condition: {out:?}");
+
+    // Exactly one ConditionalGrant, headed by carol (the positive eq constraint) — NOT
+    // a public head (the eq narrows it to carol).
+    assert_eq!(cond_grants_for(&g, Some(CAROL)), 1, "carol positive head present");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "eq carol means the head is carol, not public"
+    );
+    // ... carrying an exception matcher that carves out bob (the neq constraint).
+    let ms = except_matchers(&g);
+    assert_eq!(ms.len(), 1, "one exceptMatcher (the neq bob carve-out): {ms:?}");
+    assert!(ms[0].1.contains("bob.ex"), "exception carves out bob: {ms:?}");
+}
+
+// 23. RE-CHECKED end-to-end: only carol reads. Bob is excluded by BOTH the eq head (he
+//     is not carol) AND the neq exception; everyone else is excluded by the eq head.
+#[test]
+fn recipient_eq_and_neq_grants_only_carol() {
+    let pol = recipient_eq_and_neq_policy();
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+
+    assert!(reads(&mut store, CAROL), "carol satisfies the eq head and is not excepted");
+    assert!(!reads(&mut store, BOB), "bob is not carol AND is excepted");
+    assert!(!reads(&mut store, DAVE), "dave is not carol → eq head excludes him");
+    assert!(!reads(&mut store, ALICE), "the materializer is not auto-granted");
+    assert!(store.accessible(&Session::default(), Mode::Read).is_empty(), "anonymous denied");
+
+    // End-to-end via query_as: only carol sees the content.
+    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    let carol = Session { agent: Some(CAROL), client: None };
+    let bob = Session { agent: Some(BOB), client: None };
+    assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
+    assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 0);
+}
+
+// ===========================================================================
+// [OPUS-4.8] sq-4r70 — CONSTRAINT-CONDITIONAL DENY: an ACP-style deny that is
+// conditional on a recipient/assignee constraint (the dual of the conditional grant).
+// Materialized as a re-checked `auth:ConditionalGrant` with `auth:effect auth:Deny`,
+// composing with deny-overrides. The deny appears/retracts as the condition flips.
+// ===========================================================================
+use sparq_solid::materialize_prohibition_conditional;
+
+/// Count `auth:ConditionalGrant` heads with `auth:effect auth:Deny` naming `agent`
+/// (or any) in `graph`'s auth view (the conditional-DENY dual of `cond_grants_for`).
+fn cond_denies_for(graph: &Graph, agent: Option<&str>) -> usize {
+    let head = "?g <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+        <https://sparq.dev/ns/auth#ConditionalGrant> ; \
+        <https://sparq.dev/ns/auth#effect> <https://sparq.dev/ns/auth#Deny>";
+    let q = match agent {
+        Some(a) => format!(
+            "SELECT ?g WHERE {{ GRAPH <urn:sparq:auth> {{ {head} ; \
+             <https://sparq.dev/ns/auth#agent> <{a}> }} }}"
+        ),
+        None => format!("SELECT ?g WHERE {{ GRAPH <urn:sparq:auth> {{ {head} }} }}"),
+    };
+    sparq_engine::query(graph, &q).expect("query").rows.len()
+}
+
+/// "carol (recipient) is PROHIBITED from reading n1" — a recipient-eq prohibition that
+/// the conditional path maps to a per-session deny carving out exactly carol.
+fn prohibit_recipient_carol_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/pcond> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <https://carol.ex/card#me> ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+// 24. The conditional-deny BRIDGE SHAPE: a recipient-eq prohibition materializes a
+//     ConditionalGrant with auth:effect auth:Deny headed by carol (re-checked, NOT frozen).
+#[test]
+fn conditional_deny_emits_deny_effect_condition() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_prohibition_conditional(&mut g, &prohibit_recipient_carol_policy(), &req);
+    assert!(out.prohibited, "faithful recipient prohibition maps to a deny condition: {out:?}");
+    assert_eq!(cond_denies_for(&g, Some(CAROL)), 1, "carol deny condition present");
+    assert_eq!(cond_denies_for(&g, Some(ALICE)), 0, "no deny for the materializer");
+    // It is a DENY, not an allow (the audit anchor reports the effect predicate).
+    assert_eq!(out.deny_triple.as_ref().map(|t| t.1.as_str()),
+        Some("https://sparq.dev/ns/auth#effect"), "deny anchor: {out:?}");
+}
+
+// 25. RE-CHECKED end-to-end with DENY-OVERRIDES: a public allow grant is in force, and a
+//     conditional deny carves out carol. carol is denied (deny beats allow); everyone
+//     else keeps the allow. This composes the conditional deny with an existing allow.
+#[test]
+fn conditional_deny_overrides_allow_for_carved_party() {
+    let mut store = PodStore::new(pod());
+    // A public allow: everyone may read n1 (a bare permission, conditional path → Public).
+    let permit = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pub> a odrl:Set ; odrl:permission [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
+        "turtle",
+    )
+    .unwrap();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
+    assert!(reads(&mut store, CAROL), "everyone reads before the deny");
+    assert!(reads(&mut store, BOB), "bob reads before the deny");
+
+    // Now layer the conditional deny carving out carol.
+    let out = store.materialize_odrl_prohibition_conditional(&prohibit_recipient_carol_policy(), &req);
+    assert!(out.prohibited, "deny condition materialized: {out:?}");
+    assert!(!reads(&mut store, CAROL), "DENY-OVERRIDES: carol loses access");
+    assert!(reads(&mut store, BOB), "bob keeps the allow (only carol is denied)");
+    // End-to-end query_as: carol sees nothing, bob sees the content.
+    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    let carol = Session { agent: Some(CAROL), client: None };
+    let bob = Session { agent: Some(BOB), client: None };
+    assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 0);
+    assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 1);
+}
+
+// 26. The deny APPEARS/RETRACTS as the condition flips: a recipient-neq prohibition maps
+//     to a deny on everyone EXCEPT bob; when the prohibition is WITHDRAWN, refresh
+//     retracts the deny and access is restored (composes with sq-2pcf deny-retraction).
+#[test]
+fn conditional_deny_retracts_when_prohibition_withdrawn() {
+    let mut store = PodStore::new(pod());
+    // Baseline public allow so we can observe the deny biting and then lifting.
+    let permit = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pub> a odrl:Set ; odrl:permission [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
+        "turtle",
+    )
+    .unwrap();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
+
+    // "everyone EXCEPT bob is prohibited" → a deny condition with a bob exception.
+    let prohib = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pneq> a odrl:Set ; odrl:prohibition [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ;
+            odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                              odrl:rightOperand <https://bob.ex/card#me> ] ] ."#,
+        "turtle",
+    )
+    .unwrap();
+    assert!(store.materialize_odrl_prohibition_conditional(&prohib, &req).prohibited);
+    // The deny carves out everyone except bob: carol denied, bob keeps the allow.
+    assert!(!reads(&mut store, CAROL), "carol (not bob) is denied by the conditional deny");
+    assert!(reads(&mut store, BOB), "bob is excepted from the deny → keeps the allow");
+
+    // WITHDRAW the prohibition entirely → refresh → the deny is retracted → access back.
+    let empty = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> . <urn:pol/x> a odrl:Set ."#,
+        "turtle",
+    )
+    .unwrap();
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty, &req, BridgeKind::ProhibitionConditional);
+    assert!(matched, "the tracked deny slot matched");
+    assert_eq!(retracted, 1, "the withdrawn deny condition was retracted");
+    assert!(reads(&mut store, CAROL), "deny withdrawn → carol regains access");
+    assert_eq!(cond_denies_for(&store.graph, None), 0, "no residual deny condition");
+}
+
+// 27. MIXED / unmappable constraint falls back to ONE-SHOT: a recipient-eq + dateTime
+//     prohibition cannot persist the time bound as a condition (ACP has no clock), so it
+//     falls back to the one-shot deny (frozen, materialized iff the prohibition matches).
+#[test]
+fn conditional_deny_mixed_constraint_falls_back_one_shot() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/mix> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://carol.ex/card#me> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+                      odrl:rightOperand "2027-01-01T00:00:00Z"^^xsd:dateTime ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    // carol asking, with a time INSIDE the window → the one-shot deny materializes
+    // (frozen `auth:denyRead`), NOT a re-checked deny condition.
+    let mut g = pod();
+    let req = Request::new(odrl("read"))
+        .on(N1)
+        .by(CAROL)
+        .with(odrl("dateTime"), Value::DateTime("2026-06-16T00:00:00Z".to_owned()));
+    let out = materialize_prohibition_conditional(&mut g, &pol, &req);
+    assert!(out.prohibited, "one-shot deny materializes inside the window: {out:?}");
+    // No re-checked deny CONDITION emitted — the time bound forced the one-shot path.
+    assert_eq!(cond_denies_for(&g, None), 0, "unmappable dateTime → no deny condition");
+    // The frozen one-shot deny names carol via auth:denyRead.
+    assert_eq!(out.deny_triple.as_ref().map(|t| t.1.contains("denyRead")), Some(true), "{out:?}");
+}
