@@ -1809,7 +1809,17 @@ async fn run_query_pinned(
 ) -> Response {
     let prepared = match prepare(sparql) {
         Ok(p) => p,
-        Err(PrepareError::Malformed(msg)) => return bad_request(&format!("malformed query: {msg}")),
+        // [OPUS-4.8] (sq-cz89/sq-j9zs) The parser echoes the offending query token verbatim;
+        // withhold it from the body (it is caller input, but an info-leak contract regardless)
+        // — the operator gets the full parse error in the server log.
+        Err(PrepareError::Malformed(msg)) => {
+            return sanitized_error(
+                StatusCode::BAD_REQUEST,
+                "query-parse",
+                "malformed query",
+                &msg,
+            )
+        }
     };
     // The generation was pinned ONCE per request (the caller's `resolve_pin`: the
     // current generation, or — under the `time-travel` feature — the requested
@@ -2103,9 +2113,14 @@ fn update_rejection_response(e: &str, config: &ServerConfig) -> Response {
     // nothing was published or acked, the server is still serving reads, and the client should
     // retry. Sniffed before the budget/parse mapping so it always wins.
     if let Some(detail) = e.strip_prefix(DURABLE_UNAVAILABLE_PREFIX) {
-        return json_error(
+        // [OPUS-4.8] (sq-cz89/sq-j9zs) `detail` is the underlying I/O error, which carries the
+        // server's `--persist` filesystem path (e.g. an ENOSPC on the mirror) — withhold it
+        // from the client; the operator sees the path in the server log.
+        return sanitized_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            &format!("update not durably committed (transient durable-write error); the write was refused and NOT applied — retry: {detail}"),
+            "durable-unavailable",
+            "update not durably committed (transient durable-write error); the write was refused and NOT applied — retry",
+            detail,
         );
     }
     if e.contains("query budget exceeded") {
@@ -2113,7 +2128,15 @@ fn update_rejection_response(e: &str, config: &ServerConfig) -> Response {
         // so the 413 message must not consider `--max-results` → `apply_max_results = false`.
         return engine_error_response(e, config, false);
     }
-    bad_request(&format!("update failed: {e}"))
+    // [OPUS-4.8] (sq-cz89/sq-j9zs) A parse/semantic rejection echoes the offending UPDATE
+    // token (and, for a `DELETE/INSERT … WHERE`, can quote loaded data); withhold it — the
+    // full reason is in the server log.
+    sanitized_error(
+        StatusCode::BAD_REQUEST,
+        "update-parse",
+        "update failed: invalid SPARQL update",
+        e,
+    )
 }
 
 fn timeout_response(config: &ServerConfig) -> Response {
@@ -2290,7 +2313,17 @@ fn body_to_ntriples(body: &Bytes, content_type: &str, base: Option<&str>) -> Res
     match format {
         BodyFormat::Core(format) => {
             let text = std::str::from_utf8(body).map_err(|_| bad_request("request body is not valid UTF-8"))?;
-            let graph = Graph::load_str(text, format).map_err(|e| bad_request(&format!("malformed RDF body: {e}")))?;
+            // [OPUS-4.8] (sq-cz89/sq-j9zs) `oxttl` echoes the offending body token verbatim
+            // (e.g. an invalid subject quotes the loaded term) — withhold it; the operator
+            // gets the full parse error in the server log.
+            let graph = Graph::load_str(text, format).map_err(|e| {
+                sanitized_error(
+                    StatusCode::BAD_REQUEST,
+                    "rdf-body-parse",
+                    "malformed RDF body",
+                    &e,
+                )
+            })?;
             // Re-emit as canonical N-Triples via the engine scan — no private store API needed,
             // and the terms are exactly what `INSERT DATA` will re-intern.
             nt_dump(&graph, &QueryBudget::default()).map_err(|e| execution_error(&e))
@@ -2299,7 +2332,15 @@ fn body_to_ntriples(body: &Bytes, content_type: &str, base: Option<&str>) -> Res
         // `oxrdf`'s Display is canonical N-Triples term syntax, exactly what `INSERT DATA`
         // re-interns, so no Graph round-trip is needed (and RDF/XML is not a loader token).
         BodyFormat::RdfXml => {
-            let triples = crate::graph::parse_rdfxml(body, base).map_err(|e| bad_request(&format!("malformed RDF/XML body: {e}")))?;
+            // [OPUS-4.8] (sq-cz89/sq-j9zs) `oxrdfxml` echoes the offending body fragment — withhold it.
+            let triples = crate::graph::parse_rdfxml(body, base).map_err(|e| {
+                sanitized_error(
+                    StatusCode::BAD_REQUEST,
+                    "rdfxml-body-parse",
+                    "malformed RDF/XML body",
+                    &e,
+                )
+            })?;
             Ok(crate::graph::triples_to_ntriples(&triples))
         }
     }
@@ -2655,9 +2696,12 @@ enum DecodeError {
     /// `Content-Encoding` names a codec we do not decode (only `gzip`/`x-gzip` and
     /// `identity` are supported) → 415.
     Unsupported(String),
-    /// The decompressed image crossed the ratio/absolute ceiling → 413 (zip-bomb guard),
-    /// or the gzip stream was malformed → 400.
+    /// The decompressed image crossed the ratio/absolute ceiling → 413 (zip-bomb guard).
+    /// The message is server-constructed (sizes/knob names only — no caller content).
     TooLarge(String),
+    /// The gzip stream was malformed → 400. The payload is the underlying decoder error,
+    /// which can quote bytes of the caller's compressed body — it is the WITHHELD detail
+    /// ([OPUS-4.8] sq-cz89/sq-j9zs), routed to the server log, never the response body.
     Malformed(String),
 }
 
@@ -2666,7 +2710,13 @@ impl DecodeError {
         match self {
             DecodeError::Unsupported(m) => json_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, &m),
             DecodeError::TooLarge(m) => json_error(StatusCode::PAYLOAD_TOO_LARGE, &m),
-            DecodeError::Malformed(m) => bad_request(&m),
+            // [OPUS-4.8] (sq-cz89/sq-j9zs) Generic class to the client; decoder detail to the log.
+            DecodeError::Malformed(detail) => sanitized_error(
+                StatusCode::BAD_REQUEST,
+                "gzip-decode",
+                "malformed gzip body",
+                &detail,
+            ),
         }
     }
 }
@@ -2735,7 +2785,9 @@ fn decode_gzip_bounded(body: &Bytes, config: &ServerConfig) -> Result<Bytes, Dec
     let mut out = Vec::with_capacity(ceiling.min(64 * 1024));
     decoder
         .read_to_end(&mut out)
-        .map_err(|e| DecodeError::Malformed(format!("malformed gzip body: {e}")))?;
+        // [OPUS-4.8] (sq-cz89/sq-j9zs) Carry only the raw decoder detail; `into_response`
+        // logs it server-side and returns a generic "malformed gzip body" to the client.
+        .map_err(|e| DecodeError::Malformed(e.to_string()))?;
     if out.len() > ceiling {
         return Err(DecodeError::TooLarge(format!(
             "decompressed body exceeds the server's decompression-ratio cap (compressed {} bytes \
@@ -2856,8 +2908,45 @@ fn bad_request(msg: &str) -> Response {
     json_error(StatusCode::BAD_REQUEST, msg)
 }
 
+// ---------------------------------------------------------------------------
+// Information-leak guard (sq-cz89 / sq-j9zs / sq-zg0u) [OPUS-4.8]
+//
+// On the B3 no-auth-by-default path an unauthenticated caller could provoke an error
+// whose body echoed its own (or the loaded data's, or the server's filesystem path's)
+// content verbatim — parse errors from `oxttl` / `spargebra` quote the offending token,
+// `io::Error` carries paths, etc. That is an information leak: it confirms loaded triples
+// (e.g. `patient_alice_smith is not a valid subject`) and discloses server-side paths.
+//
+// Fix: HTTP error bodies carry only a STABLE, GENERIC class message — never the caller's
+// input, loaded-data fragments, or filesystem paths. The full detail is preserved for the
+// operator on the SERVER SIDE via `tracing` (surfaced by the existing opt-in `--verbose` /
+// RUST_LOG subscriber set up in `main.rs`), exactly the posture the TraceLayer request log
+// already uses. Detail in the log, class in the body.
+// ---------------------------------------------------------------------------
+
+/// Emits the full (potentially sensitive) `detail` to the server-side `tracing` log under
+/// the `sparq_server` target — visible only to the operator who opted into `--verbose` /
+/// `RUST_LOG` — and returns a SANITIZED [`Response`] carrying just `safe_msg`, which MUST NOT
+/// contain any caller-submitted input, loaded-data fragment, or filesystem path.
+///
+/// `class` names the error category for the log line so an operator can correlate a generic
+/// client-facing message back to its detailed cause.
+fn sanitized_error(status: StatusCode, class: &str, safe_msg: &str, detail: &str) -> Response {
+    // Detail (the echoed token / path / input) goes ONLY to the server log, gated behind the
+    // operator's opt-in subscriber — never into the response body.
+    tracing::warn!(target: "sparq_server", class = class, detail = %detail, "request error (detail withheld from client)");
+    json_error(status, safe_msg)
+}
+
 fn execution_error(msg: &str) -> Response {
-    json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("query execution error: {msg}"))
+    // Engine error strings can embed term text drawn from the loaded graph — withhold them
+    // from the client; the operator sees the full message in the server log.
+    sanitized_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "query-execution",
+        "query execution error",
+        msg,
+    )
 }
 
 fn method_not_allowed(allow: &[Method]) -> Response {
@@ -3453,9 +3542,17 @@ mod durable_degrade_tests {
             !body.contains("\\u0001"),
             "JSON-escaped internal marker leaked into the client-facing body: {body:?}",
         );
+        // [OPUS-4.8] (sq-cz89/sq-j9zs) The post-marker detail is the underlying I/O error,
+        // which can carry the server's `--persist` filesystem PATH (an info-leak). It is now
+        // WITHHELD from the client body (routed to the server log instead). The client gets
+        // only the stable, retry-actionable class message.
         assert!(
-            body.contains("injected ENOSPC"),
-            "the human-readable detail must still be reported to the client: {body:?}",
+            !body.contains("injected ENOSPC"),
+            "the underlying detail (may carry a server path) must NOT reach the client: {body:?}",
+        );
+        assert!(
+            body.contains("retry") && body.contains("NOT applied"),
+            "the client must still get the stable retry-actionable class message: {body:?}",
         );
     }
 

@@ -48,7 +48,7 @@ test-seams = []
 # equivalent. Feature unification means the `sparq-core` `sparq-engine` resolves also gains `mmap`,
 # so the WAL-durable `apply_delta` path is live on the shared graph. Without `--persist` the server
 # is in-memory exactly as before (the flag, not the feature, selects durability).
-server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
+server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library) for the server's `Content-Encoding: gzip` request
 # inflate (MultiGzDecoder) — a measured 1.5–3× at ~zero code change. The weak
@@ -142,6 +142,10 @@ tower = { version = "0.5", optional = true, features = ["limit", "load-shed", "u
 tower-http = { version = "0.6", optional = true, features = ["trace", "catch-panic"] }
 # Emits the TraceLayer request log when the binary runs with --verbose.
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["fmt", "env-filter"] }
+# [OPUS-4.8] (sq-cz89/sq-j9zs) Detailed error diagnostics (the offending query/RDF/path) are
+# emitted to the SERVER-SIDE `tracing` log instead of the HTTP response body, so they surface
+# only via the operator's opt-in `--verbose` / RUST_LOG subscriber — never leaking to callers.
+tracing = { version = "0.1", optional = true, default-features = false, features = ["std"] }
 # `stream::iter` feeds the streamed SELECT body (T16) — already in axum's dependency
 # graph, so this adds no new transitive code.
 futures-util = { version = "0.3", optional = true, default-features = false }
