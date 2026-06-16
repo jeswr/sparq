@@ -25,7 +25,7 @@ Read [`skills/SKILL.md`](skills/SKILL.md) first — it is the router skill that 
 - [`skills/javascript-wasm/SKILL.md`](skills/javascript-wasm/SKILL.md) — the `@jeswr/sparq` npm package.
 - [`skills/python/SKILL.md`](skills/python/SKILL.md) — the `sparq` Python package.
 
-The capability surfaces (reasoning, SHACL, full-text, vector, GeoSPARQL, streaming RSP-QL, ZK query proofs, MPC, GenAI retrieval) each have their own `skills/<surface>/SKILL.md` — the router in [`skills/SKILL.md`](skills/SKILL.md) enumerates them.
+The capability surfaces (reasoning, SHACL, full-text, vector, GeoSPARQL, streaming RSP-QL, RDFC-1.0 dataset canonicalization, ZK query proofs, MPC, GenAI retrieval) each have their own `skills/<surface>/SKILL.md` — the router in [`skills/SKILL.md`](skills/SKILL.md) enumerates them.
 
 If your agent runtime supports the Agent Skills standard, these load via progressive disclosure (name+description first, body on demand). If not, just read the SKILL.md files directly.
 
