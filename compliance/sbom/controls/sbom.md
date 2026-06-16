@@ -99,14 +99,25 @@ NTIA-completeness gap (GS-1). N6 is met at tool-author granularity (the NTIA-int
 | INT-1 | SBOM built from the **actually-shipped feature set** (not `--all-features`) | **Implemented & verified** | `scripts/gen-sbom-vex.sh#L19-22` uses **default** features, matching `release.yml` / `Dockerfile` which build `-p sparq-cli`/`-p sparq-server` without `--all-features`. | SPARQ |
 | INT-2 | SBOM evaluated against the **committed `Cargo.lock`** | **Implemented & verified** | Release/Docker builds use `--locked`; cargo-cyclonedx resolves the same `Cargo.lock`. cargo-vet runs `--locked`. | SPARQ |
 | INT-3 | **Reproducible build** linking SBOM → bit-identical binary | **Gap** — see GS-2 (GX-8) | No reproducible-build evidence; the SBOM↔binary link is asserted via provenance (SIG-1) + the embedded manifest (DEP-5), **not** independently reproducible. An auditor cannot today rebuild a bit-identical binary from the SBOM. P2. Bead sq-toze.9. | SPARQ / external |
+| INT-4 | **Canonical, host-independent purls** (no build-path / qualifier leak) — CI-asserted | **Implemented & verified** ([OPUS-4.8], sq-tmyw) | Every purl in the normalized SBOM matches `^pkg:cargo/[^?#]+@[^?#]+$`. Backstop for the GS-6/GS-7 normalizer: the GATING job `supply-chain.yml#sbom-purl-canonical` regenerates+normalizes the SBOM and runs `scripts/check-sbom-purl-canonical.py` (self-test `scripts/tests/test_sbom_purl_canonical.py`), so a future cargo-cyclonedx bump that re-introduces purl decoration FAILS the PR. Verified PASS this branch (all purls canonical); negative cases (download_url qualifier, `#src/…` subpath, a hypothetical future qualifier, non-cargo purl) FAIL in the self-test. See `evidence.md §6`. | SPARQ |
+
+## H. JS / npm SBOM (published WASM client — scope coverage)
+
+| ID | Control | Status | Evidence | Owner |
+|---|---|---|---|---|
+| JS-1 | A CycloneDX SBOM exists for the **published npm surface** (`js/` = `@jeswr/sparq`, the WASM client) | **Implemented & verified** ([OPUS-4.8], sq-toze.27; GS-3 RESOLVED) | `scripts/gen-js-sbom.sh` emits CycloneDX **1.5** from the committed `js/package-lock.json` (pinned `@cyclonedx/cyclonedx-npm@5.0.0`, `--package-lock-only`). Runtime tree (`--omit dev`): 1 component (`pkg:npm/fzstd@0.1.1`). Full build tree: 5 components. Wired GATING `supply-chain.yml#js-sbom` + per-release `release.yml#sbom`. See `evidence.md §7`. | SPARQ |
+| JS-2 | The JS SBOM **validates** against the CycloneDX 1.5 schema | **Implemented & verified** ([OPUS-4.8], sq-toze.27) | cyclonedx-npm built-in `--validate` (default on) + independent `jsonschema` check against the official `bom-1.5.schema.json` (+ referenced `spdx`/`jsf`): **VALID** for both runtime + full-tree SBOMs. `evidence.md §7`. | SPARQ |
+| JS-3 | **Scope is documented + honest** (what's in/out of the JS SBOM) | **Implemented & verified** ([OPUS-4.8], sq-toze.27) | `js/` (`@jeswr/sparq`) IN — published to npm. `site/` (`sparq-site`) OUT — `"private": true`, never published; the Next.js demo's dev tree is covered by npm Dependabot, not a shipped artifact. Rationale in `scripts/gen-js-sbom.sh` header + `gap-register.md` GS-3 + `evidence.md §7`. | SPARQ |
 
 ## Summary counts
 
-**31 control rows**, classified by the honesty-contract status legend:
+**35 control rows**, classified by the honesty-contract status legend:
 
-- **Implemented & verified — 23:** N2–N7, CDX-1/2/3/4, VEX-1/2/3, PUB-3/4, DEP-1..6, INT-1/2.
-  Each runs on every push/PR (or is a checked-in artifact) and cites a file path, CI job, or a
-  recorded probe. (CDX-3 became Implemented & verified with sq-toze.28 — SBOM now CycloneDX 1.5.)
+- **Implemented & verified — 27:** N2–N7, CDX-1/2/3/4, VEX-1/2/3, PUB-3/4, DEP-1..6, INT-1/2/4,
+  JS-1/2/3. Each runs on every push/PR (or is a checked-in artifact) and cites a file path, CI job, or
+  a recorded probe. (CDX-3 became Implemented & verified with sq-toze.28 — SBOM now CycloneDX 1.5.
+  INT-4 added with sq-tmyw — purl-canonicality CI assertion. JS-1/2/3 added with sq-toze.27 — JS/npm
+  SBOM for the published WASM client.)
 - **Audit-ready (config-verified; operating-verification pending first `v*` release) — 6:**
   SIG-1/2/3, PUB-1/2, VEX-4. These are release-gated (`push: tags: v*`); the workflow wiring is
   reviewed and correct, but **no release/tag/attestation exists yet** (verified 2026-06-15), so no
@@ -118,13 +129,14 @@ NTIA-completeness gap (GS-1). N6 is met at tool-author granularity (the NTIA-int
   the corrected probe), INT-3/GS-2 (reproducible build, GX-8, bead sq-toze.9). (CDX-3/GS-4, spec
   version, is now RESOLVED — sq-toze.28 — SBOM at CycloneDX 1.5.)
 
-**Tracked open gap *items* (gap-register.md) — 3 (GS-1,2,3):** GS-1 (N1 supplier, bead sq-toze.26),
-GS-2/GX-8 (reproducible build, bead sq-toze.9 — maps to control row INT-3), GS-3 (JS-lockfile SBOM,
-bead sq-toze.27 — a *scope* item with **no control row**). Plus the **RESOLVED** GS-6 / sq-toze.30
-(F-6: SBOM root `bom-ref` abs-path leak — sanitised), GS-4 / sq-toze.28 (spec version — SBOM now 1.5),
-and GS-5 / sq-toze.29 (VEX↔deny drift automation — now the GATING CI job
+**Tracked open gap *items* (gap-register.md) — 2 (GS-1,2):** GS-1 (N1 supplier, bead sq-toze.26),
+GS-2/GX-8 (reproducible build, bead sq-toze.9 — maps to control row INT-3). Plus the **RESOLVED**
+GS-3 / sq-toze.27 (JS-lockfile SBOM — now `JS-1/2/3` rows + `gen-js-sbom.sh` + CI/release wiring),
+GS-6 / sq-toze.30 (F-6: SBOM root `bom-ref` abs-path leak — sanitised), GS-7 / sq-uujh (workspace/
+build-target purls canonical, now also CI-asserted via INT-4 / sq-tmyw —
+`supply-chain.yml#sbom-purl-canonical`), GS-4 / sq-toze.28 (spec version — SBOM now 1.5), and
+GS-5 / sq-toze.29 (VEX↔deny drift automation — now the GATING CI job
 `supply-chain.yml#vex-deny-sync`, so VEX-3 is fully Implemented & verified with no residual sub-gap).
-So the open gap *items* ≠ the gap *rows*: GS-3 has no row.
 
 - **Overclaim audit:** none. Every "Implemented & verified" row cites a file path, CI job, or a
   recorded probe; the release-gated rows are downgraded to **Audit-ready** rather than overclaiming

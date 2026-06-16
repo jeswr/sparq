@@ -153,3 +153,78 @@ jobs:
           name: sbom-cyclonedx
           path: "**/*.cdx.json"
           if-no-files-found: error
+
+  # ---- purl-canonicality assertion ----
+  # [OPUS-4.8] sq-tmyw: BACKSTOP for the GS-6/GS-7 normalizer. cargo-cyclonedx 0.5.9
+  # decorates workspace/path purls with the runner's filesystem layout
+  # (`?download_url=file://…`, `#src/…`); scripts/sbom-normalize.jq strips that so the
+  # PUBLISHED SBOM carries only canonical `pkg:cargo/<name>@<version>` purls (sq-toze.30 +
+  # sq-uujh). That normalizer is hand-written against the EXACT shapes 0.5.9 emits — a
+  # future cargo-cyclonedx upgrade could re-introduce a DIFFERENT decoration the pattern
+  # misses, silently re-leaking a host path / non-canonical purl. This job regenerates the
+  # SBOM, runs it through the same normalizer, and asserts EVERY purl matches
+  # `^pkg:cargo/[^?#]+@[^?#]+$` (scripts/check-sbom-purl-canonical.py) — so a regression
+  # in the normalizer-vs-tool contract FAILS the PR instead of shipping. NOTE: the job name
+  # has NO `advisory`/`informational` WHOLE WORD, so the ci-summary aggregator treats it as
+  # GATING (intentional). Also runs the hermetic self-test so a regression in the check
+  # itself is caught.
+  sbom-purl-canonical:
+    name: SBOM purl-canonicality assertion (GS-6/GS-7) — GATING
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-cyclonedx
+      - name: purl-canonicality check self-test
+        run: python3 scripts/tests/test_sbom_purl_canonical.py
+      - name: Generate + normalize SBOM, then assert canonical purls — GATING
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --all --format json --spec-version 1.5
+          # cargo-cyclonedx writes <crate>.cdx.json next to each member's Cargo.toml, so
+          # the freshly-generated SBOMs live under crates/. Scope the normalize+assert to
+          # those (NOT the committed supply-chain/vex.cdx.json, which is a VEX, carries no
+          # component purls, and must not be mutated). Normalize through the SAME transform
+          # the publication path uses, then assert every purl in the normalized output is
+          # canonical.
+          mapfile -d '' -t generated < <(find crates -name '*.cdx.json' -print0)
+          if [ "${#generated[@]}" -eq 0 ]; then
+            echo "::error::no generated SBOM found under crates/ — cargo cyclonedx produced nothing"
+            exit 1
+          fi
+          for f in "${generated[@]}"; do
+            jq -f scripts/sbom-normalize.jq "$f" > "$f.norm"
+            mv "$f.norm" "$f"
+          done
+          python3 scripts/check-sbom-purl-canonical.py "${generated[@]}"
+
+  # ---- JS / npm-lockfile SBOM (published WASM client) ----
+  # [OPUS-4.8] sq-toze.27 (GS-3): SBOM the PUBLISHED npm surface (`js/` = @jeswr/sparq, the
+  # WASM client). The Rust workspace is SBOM'd above, but the JS lockfile tree was not.
+  # `site/` (Next.js demo) is `private: true` (never published) and intentionally OUT — see
+  # scripts/gen-js-sbom.sh for the scope rationale. Produces a runtime-tree SBOM (what a
+  # consumer installs) + a full build-tree SBOM (devDeps; SSDF parity), both CycloneDX 1.5,
+  # both schema-validated by cyclonedx-npm's built-in --validate (default on) and uploaded
+  # as an artifact. NOTE: the job name has NO `advisory`/`informational` whole word, so
+  # ci-summary gates it (a failure to enumerate the published JS supply chain is a real
+  # signal). `--package-lock-only` reads the committed lockfile — no network install.
+  js-sbom:
+    name: JS/npm CycloneDX SBOM (published WASM client)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+      - name: Generate JS SBOM (runtime + full tree)
+        run: scripts/gen-js-sbom.sh
+      - name: Upload JS SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-js-cyclonedx
+          path: sbom/sparq-js*.cdx.json
+          if-no-files-found: error
