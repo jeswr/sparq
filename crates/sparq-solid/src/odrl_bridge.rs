@@ -76,7 +76,7 @@
 //! and the deny **wins** at enforcement time.
 
 use crate::authindex::{Mode, AUTHENTICATED, PUBLIC};
-use crate::{AUTH_GRAPH, AUTH_NS};
+use crate::{AUTH_BRIDGED_GRAPH, AUTH_GRAPH, AUTH_NS};
 use oxrdf::{NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
@@ -169,6 +169,11 @@ pub struct BridgeOutcome {
     /// Human-readable reason a grant/deny was NOT materialized (the ODRL decision's
     /// caveats, an unmapped action, or a missing party/target). Empty on success.
     pub reasons: Vec<String>,
+    /// The exact auth-view triples this call materialized (allow grant, deny, and/or
+    /// the conditional-grant head triples), for the bridge ledger to track so a later
+    /// refresh can retract precisely these. Empty when nothing was materialized.
+    /// [OPUS-4.8] sq-dpk4.
+    pub(crate) emitted: Vec<[Term; 3]>,
 }
 
 impl BridgeOutcome {
@@ -269,12 +274,13 @@ pub fn materialize_permission(
 
     // 4. Materialize `party auth:<mode> target` into the auth view.
     let pred = format!("{AUTH_NS}{}", mode_predicate(mode));
-    append_grant(graph, party, &pred, target);
+    let triple = append_grant(graph, party, &pred, target);
 
     BridgeOutcome {
         granted: true,
         mode: Some(mode),
         grant_triple: Some((party.to_owned(), pred, target.to_owned())),
+        emitted: vec![triple],
         ..BridgeOutcome::default()
     }
 }
@@ -378,12 +384,13 @@ pub fn materialize_prohibition(
 
     // 4. Materialize `party auth:deny<Mode> target` into the auth view.
     let pred = format!("{AUTH_NS}{}", deny_predicate(mode));
-    append_grant(graph, party, &pred, target);
+    let triple = append_grant(graph, party, &pred, target);
 
     BridgeOutcome {
         prohibited: true,
         mode: Some(mode),
         deny_triple: Some((party.to_owned(), pred, target.to_owned())),
+        emitted: vec![triple],
         ..BridgeOutcome::default()
     }
 }
@@ -412,6 +419,8 @@ pub fn materialize_policy(graph: &mut Graph, policy: &Policy, request: &Request)
 
     let mut reasons = allow.reasons;
     reasons.extend(deny.reasons);
+    let mut emitted = allow.emitted;
+    emitted.extend(deny.emitted);
     BridgeOutcome {
         granted: allow.granted,
         prohibited: deny.prohibited,
@@ -420,41 +429,79 @@ pub fn materialize_policy(graph: &mut Graph, policy: &Policy, request: &Request)
         grant_triple: allow.grant_triple,
         deny_triple: deny.deny_triple,
         reasons,
+        emitted,
     }
 }
 
 /// Append a single `subject predicate object` triple to the `<urn:sparq:auth>`
-/// named graph, preserving the triples already there (the WAC/ACP grants). Rebuilds
-/// the auth sub-graph from its existing triples + the new one via [`Graph::from_parts`].
-fn append_grant(graph: &mut Graph, subject: &str, predicate: &str, object: &str) {
+/// named graph, preserving the triples already there (the WAC/ACP grants), and
+/// **mirror it into the bridged-provenance graph** ([`AUTH_BRIDGED_GRAPH`]) so the
+/// triple is structurally marked as bridged (vs static) — see [`mirror_bridged`].
+/// Returns the emitted triple so the caller can record it in its bridge ledger
+/// ([OPUS-4.8] sq-dpk4). Idempotent: an identical grant is not duplicated.
+fn append_grant(graph: &mut Graph, subject: &str, predicate: &str, object: &str) -> [Term; 3] {
     let s = Term::NamedNode(NamedNode::new_unchecked(subject));
     let p = Term::NamedNode(NamedNode::new_unchecked(predicate));
     let o = Term::NamedNode(NamedNode::new_unchecked(object));
-    let auth_name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
+    let triple = [s, p, o];
+    append_bridged_triples(graph, std::slice::from_ref(&triple));
+    triple
+}
 
-    // Collect the existing auth-view triples (if any) as terms, add the grant, then
-    // re-intern into a fresh sub-graph dictionary (matches install_auth_view).
-    let mut terms: Vec<[Term; 3]> = match graph.named.iter().find(|(n, _)| *n == auth_name) {
+/// Append `new_triples` to BOTH the `<urn:sparq:auth>` enforcement view and the
+/// `<urn:sparq:auth-bridged>` provenance graph, preserving existing triples in each
+/// and skipping duplicates (idempotent). Mirroring into the provenance graph is what
+/// lets a later refresh/static-re-materialization tell bridged triples apart from
+/// static WAC/ACP grants without ever inspecting predicate shape. [OPUS-4.8] sq-dpk4.
+fn append_bridged_triples(graph: &mut Graph, new_triples: &[[Term; 3]]) {
+    extend_named_graph(graph, AUTH_GRAPH, new_triples);
+    extend_named_graph(graph, AUTH_BRIDGED_GRAPH, new_triples);
+}
+
+/// Re-intern `name`'s existing triples plus `additions` (deduplicated) into a fresh
+/// sub-graph dictionary and swap it in (matches `install_auth_view`'s rebuild shape).
+fn extend_named_graph(graph: &mut Graph, name: &str, additions: &[[Term; 3]]) {
+    let g_name = Term::NamedNode(NamedNode::new_unchecked(name));
+    let mut terms: Vec<[Term; 3]> = match graph.named.iter().find(|(n, _)| *n == g_name) {
         Some((_, sub)) => crate::loader::graph_triples(sub),
         None => Vec::new(),
     };
-    // Idempotent: don't duplicate an identical grant triple.
-    let new_triple = [s, p, o];
-    if !terms.contains(&new_triple) {
-        terms.push(new_triple);
+    for t in additions {
+        if !terms.contains(t) {
+            terms.push(t.clone());
+        }
     }
+    install_triples(graph, name, terms);
+}
 
+/// Replace `name`'s sub-graph with exactly `terms` (re-interned into a fresh dict).
+/// When `terms` is empty the named graph is removed entirely (fail-closed: no empty
+/// shell left behind that a reader could otherwise treat as an existing-but-empty view).
+fn install_triples(graph: &mut Graph, name: &str, terms: Vec<[Term; 3]>) {
+    let g_name = Term::NamedNode(NamedNode::new_unchecked(name));
+    if terms.is_empty() {
+        graph.named.retain(|(n, _)| *n != g_name);
+        return;
+    }
     let mut dict = Dict::new();
     let ids: Vec<[sparq_core::dict::Id; 3]> = terms
         .iter()
         .map(|t| [dict.intern(&t[0]), dict.intern(&t[1]), dict.intern(&t[2])])
         .collect();
-    let auth = Graph::from_parts(dict, ids);
-
-    if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == auth_name) {
-        slot.1 = auth;
+    let sub = Graph::from_parts(dict, ids);
+    if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == g_name) {
+        slot.1 = sub;
     } else {
-        graph.named.push((auth_name, auth));
+        graph.named.push((g_name, sub));
+    }
+}
+
+/// The triples currently in a named graph (empty if absent).
+fn named_graph_triples(graph: &Graph, name: &str) -> Vec<[Term; 3]> {
+    let g_name = Term::NamedNode(NamedNode::new_unchecked(name));
+    match graph.named.iter().find(|(n, _)| *n == g_name) {
+        Some((_, sub)) => crate::loader::graph_triples(sub),
+        None => Vec::new(),
     }
 }
 
@@ -651,11 +698,12 @@ pub fn materialize_permission_conditional(
                     ));
                     continue;
                 }
-                let first = append_conditional_grants(graph, &agents, mode, target);
+                let (first, emitted) = append_conditional_grants(graph, &agents, mode, target);
                 return BridgeOutcome {
                     granted: true,
                     mode: Some(mode),
                     grant_triple: Some(first),
+                    emitted,
                     ..BridgeOutcome::default()
                 };
             }
@@ -719,20 +767,17 @@ fn rule_action_target_match(rule: &Rule, request: &Request, _mode: Mode, target:
 }
 
 
-/// Append `auth:ConditionalGrant` allow triples for each agent head onto the
-/// `<urn:sparq:auth>` view, preserving existing triples. Returns the
-/// `(agent, auth:effect, graph)` audit anchor of the first grant.
+/// Append `auth:ConditionalGrant` allow triples for each agent head onto BOTH the
+/// `<urn:sparq:auth>` view and the bridged-provenance graph, preserving existing
+/// triples. Returns the `(agent, auth:effect, graph)` audit anchor of the first grant
+/// AND the full set of emitted head triples (for the bridge ledger). [OPUS-4.8] sq-dpk4.
 fn append_conditional_grants(
     graph: &mut Graph,
     agents: &[String],
     mode: Mode,
     target: &str,
-) -> (String, String, String) {
-    let auth_name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
-    let mut terms: Vec<[Term; 3]> = match graph.named.iter().find(|(n, _)| *n == auth_name) {
-        Some((_, sub)) => crate::loader::graph_triples(sub),
-        None => Vec::new(),
-    };
+) -> ((String, String, String), Vec<[Term; 3]>) {
+    let mut emitted: Vec<[Term; 3]> = Vec::new();
 
     let type_p = NamedNode::new_unchecked(RDF_TYPE);
     let cond_class = NamedNode::new_unchecked(format!("{AUTH_NS}ConditionalGrant"));
@@ -767,8 +812,8 @@ fn append_conditional_grants(
             [g.clone(), Term::NamedNode(graph_p.clone()), Term::NamedNode(graph_o.clone())],
         ];
         for t in head {
-            if !terms.contains(&t) {
-                terms.push(t);
+            if !emitted.contains(&t) {
+                emitted.push(t);
             }
         }
         if first.is_none() {
@@ -780,20 +825,195 @@ fn append_conditional_grants(
         }
     }
 
-    let mut dict = Dict::new();
-    let ids: Vec<[sparq_core::dict::Id; 3]> = terms
-        .iter()
-        .map(|t| [dict.intern(&t[0]), dict.intern(&t[1]), dict.intern(&t[2])])
-        .collect();
-    let auth = Graph::from_parts(dict, ids);
-    if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == auth_name) {
-        slot.1 = auth;
-    } else {
-        graph.named.push((auth_name, auth));
-    }
-
-    first.expect("at least one agent head emitted")
+    append_bridged_triples(graph, &emitted);
+    (first.expect("at least one agent head emitted"), emitted)
 }
 
 /// `rdf:type` IRI, for the conditional-grant class triple.
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+
+// ============================================================================
+// [OPUS-4.8] sq-dpk4 — refresh / revocation of bridged ODRL grants.
+//
+// THE GAP this closes: the materialize_* functions above only ever APPEND. When the
+// underlying ODRL policy changes — a permission withdrawn, a time window lapsed, a
+// re-evaluation that now Denies — the previously-materialized grant stays in the auth
+// view, so access that should be GONE persists. And a wholesale static WAC/ACP
+// re-materialization (`install_auth_view`) rebuilds `<urn:sparq:auth>` and would drop
+// every bridged grant. Both are reconciled by tracking each bridged materialization in
+// a ledger and REPLAYING the ledger over a captured static baseline on demand.
+//
+// FAIL-CLOSED: refresh rebuilds the auth view as `static_baseline ∪ replay(ledger)`.
+// An entry whose ODRL re-evaluation no longer yields a grant emits NOTHING on replay,
+// so it is dropped — a withdrawn / lapsed / now-Denied grant LOSES access. The static
+// baseline is captured independently (the exact `install_auth_view` output), so a
+// static grant is never inspected, re-evaluated, or dropped by this path.
+// ============================================================================
+
+/// Which bridge entry point produced a tracked grant — replayed verbatim on refresh so
+/// the SAME fail-closed evaluation re-runs (a withdrawn/lapsed/now-Denied policy emits
+/// nothing → the entry is retracted). [OPUS-4.8] sq-dpk4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeKind {
+    /// [`materialize_permission`] — a definite-Permit allow grant.
+    Permission,
+    /// [`materialize_prohibition`] — a matched-Prohibition deny.
+    Prohibition,
+    /// [`materialize_policy`] — both sides of a policy at once.
+    Policy,
+    /// [`materialize_permission_conditional`] — a re-checked conditional grant (or its
+    /// one-shot fallback).
+    PermissionConditional,
+}
+
+/// One tracked bridged materialization: the originating ODRL `(policy, request, kind)`
+/// plus the auth triples it last emitted. The provenance that distinguishes a bridged
+/// grant from a static WAC/ACP one (those are never in the ledger), and the unit of
+/// retraction on refresh. [OPUS-4.8] sq-dpk4.
+#[derive(Debug, Clone)]
+pub struct BridgeEntry {
+    /// The ODRL policy this grant was bridged from.
+    pub policy: Policy,
+    /// The request `(action, target, party, context, duties)` it was evaluated against.
+    pub request: Request,
+    /// Which bridge entry point produced it (replayed verbatim).
+    pub kind: BridgeKind,
+}
+
+/// The ordered set of bridged materializations a [`crate::PodStore`] is tracking, plus
+/// the static-baseline auth view captured at the last static (WAC/ACP) materialization.
+///
+/// # The model (sq-dpk4)
+///
+/// - Each successful bridge call records a [`BridgeEntry`] (the `(policy, request, kind)`).
+/// - [`BridgeLedger::capture_static_baseline`] snapshots the EXACT `<urn:sparq:auth>`
+///   triples produced by a static WAC/ACP materialization — the grants the refresh must
+///   never touch. Capturing the install output directly (not by subtracting provenance)
+///   means a static grant byte-identical to a bridged one still survives a refresh.
+/// - [`BridgeLedger::refresh`] rebuilds the auth view as `static_baseline ∪
+///   replay(valid entries)`: it resets `<urn:sparq:auth>` to the baseline, clears the
+///   provenance graph, replays every entry, and DROPS the entries that re-evaluate to
+///   nothing (withdrawn permission / lapsed window / now-Deny / now-matching prohibition).
+///
+/// Fail-closed throughout: a retracted entry loses access immediately, and on any
+/// ambiguity the re-evaluation denies (the underlying evaluator is fail-closed), so the
+/// entry is dropped rather than left stale.
+#[derive(Debug, Clone, Default)]
+pub struct BridgeLedger {
+    entries: Vec<BridgeEntry>,
+    /// The static (WAC/ACP) `<urn:sparq:auth>` triples to rebuild from on refresh.
+    /// `None` until the first static materialization is captured (a store that only
+    /// ever bridged grants has an empty static baseline — refresh starts from nothing).
+    static_baseline: Option<Vec<[Term; 3]>>,
+}
+
+impl BridgeLedger {
+    /// A fresh, empty ledger.
+    pub fn new() -> BridgeLedger {
+        BridgeLedger::default()
+    }
+
+    /// The tracked bridged entries (for inspection/audit).
+    pub fn entries(&self) -> &[BridgeEntry] {
+        &self.entries
+    }
+
+    /// Record a successful bridge of `kind` for `(policy, request)`. Call this only when
+    /// the corresponding `materialize_*` returned a materialized outcome (`granted` /
+    /// `prohibited`). A no-op materialization is NOT tracked (nothing to retract).
+    ///
+    /// Idempotent on `(kind, target, party)`: re-recording the same grant slot REPLACES
+    /// the tracked `(policy, request)` rather than appending a duplicate, so a caller can
+    /// re-bridge with an updated policy/request and the ledger tracks exactly one entry
+    /// per logical grant.
+    pub fn record(&mut self, policy: &Policy, request: &Request, kind: BridgeKind) {
+        let slot = (kind, request.target.clone(), request.party.clone());
+        if let Some(e) = self.entries.iter_mut().find(|e| {
+            (e.kind, e.request.target.clone(), e.request.party.clone()) == slot
+        }) {
+            e.policy = policy.clone();
+            e.request = request.clone();
+            return;
+        }
+        self.entries.push(BridgeEntry { policy: policy.clone(), request: request.clone(), kind });
+    }
+
+    /// Replace the tracked `(policy, request)` for the grant slot matching
+    /// `(kind, request.target, request.party)` with the supplied (updated) ones, so the
+    /// next [`BridgeLedger::refresh`] re-evaluates against the NEW policy / request
+    /// context (a withdrawn permission, a lapsed window, a now-Deny). Returns `true` if a
+    /// tracked entry matched. A no-match returns `false` and changes nothing — there is
+    /// no bridged grant to refresh for that slot. [OPUS-4.8] sq-dpk4.
+    pub fn update(&mut self, policy: &Policy, request: &Request, kind: BridgeKind) -> bool {
+        let slot = (kind, request.target.clone(), request.party.clone());
+        match self.entries.iter_mut().find(|e| {
+            (e.kind, e.request.target.clone(), e.request.party.clone()) == slot
+        }) {
+            Some(e) => {
+                e.policy = policy.clone();
+                e.request = request.clone();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Snapshot the current `<urn:sparq:auth>` triples as the static baseline — the
+    /// grants a refresh rebuilds from and never re-evaluates. Call this right after a
+    /// static WAC/ACP materialization (which produced the view) and BEFORE replaying any
+    /// bridged grant on top.
+    pub fn capture_static_baseline(&mut self, graph: &Graph) {
+        self.static_baseline = Some(named_graph_triples(graph, AUTH_GRAPH));
+    }
+
+    /// Re-evaluate every tracked bridged grant against its (possibly changed) ODRL
+    /// policy and rebuild the auth view as `static_baseline ∪ replay(still-valid
+    /// entries)`, retracting the grants that no longer hold. [OPUS-4.8] sq-dpk4.
+    ///
+    /// Returns the number of entries RETRACTED (re-evaluated to nothing). The caller
+    /// ([`crate::PodStore::refresh_odrl_grants`]) reindexes afterward so the change
+    /// takes effect on the next `accessible`/`query_as`.
+    ///
+    /// # Fail-closed
+    ///
+    /// - The view is first reset to the static baseline (or empty if none captured) and
+    ///   the provenance graph cleared, so NO stale bridged triple can survive unless an
+    ///   entry re-emits it.
+    /// - Each entry is replayed through its original `materialize_*` function, which
+    ///   re-runs the fail-closed ODRL evaluation: a withdrawn permission, a lapsed time
+    ///   window, a now-matching prohibition, or any ambiguous re-eval emits nothing, and
+    ///   the entry is dropped.
+    /// - A static grant is never in `entries`, never re-evaluated, and always present in
+    ///   the baseline — refresh cannot widen or drop it.
+    pub fn refresh(&mut self, graph: &mut Graph) -> usize {
+        // 1. Reset the enforcement view to the captured static baseline, and clear ALL
+        //    bridged provenance — nothing bridged survives unless an entry re-emits it.
+        let baseline = self.static_baseline.clone().unwrap_or_default();
+        install_triples(graph, AUTH_GRAPH, baseline);
+        install_triples(graph, AUTH_BRIDGED_GRAPH, Vec::new());
+
+        // 2. Replay each entry; keep only those that still materialize something.
+        let entries = std::mem::take(&mut self.entries);
+        let before = entries.len();
+        for entry in entries {
+            let out = replay(graph, &entry);
+            if !out.emitted.is_empty() {
+                self.entries.push(entry);
+            }
+        }
+        before - self.entries.len()
+    }
+}
+
+/// Re-run a tracked entry's original bridge function against the current graph,
+/// re-evaluating its ODRL policy and re-emitting iff it still holds. [OPUS-4.8] sq-dpk4.
+fn replay(graph: &mut Graph, entry: &BridgeEntry) -> BridgeOutcome {
+    match entry.kind {
+        BridgeKind::Permission => materialize_permission(graph, &entry.policy, &entry.request),
+        BridgeKind::Prohibition => materialize_prohibition(graph, &entry.policy, &entry.request),
+        BridgeKind::Policy => materialize_policy(graph, &entry.policy, &entry.request),
+        BridgeKind::PermissionConditional => {
+            materialize_permission_conditional(graph, &entry.policy, &entry.request)
+        }
+    }
+}
