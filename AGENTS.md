@@ -277,7 +277,9 @@ The deterministic, no-judgment parts of the loop above are factored into small s
 scripts under `scripts/`. They follow the mechanical-vs-judgment boundary set out in
 `research/orchestration-automation-design.md` (PR #374): **automate the DETECTION and
 the bookkeeping; never automate the DECISION.** The first three (PR #374 Phases A/C/F)
-are shipped. They are **invoked manually for now** — there are deliberately **no
+are shipped; `worktree-gc.sh` (sq-6xdr) is a later addition that follows the same
+discipline (dry-run default, mutation behind `--apply`). They are **invoked manually for
+now** — there are deliberately **no
 auto-running mutating hooks or monitors wired yet**; wiring them (a `SessionStart`
 orphan-check hook, a merge-watcher monitor, a `PostToolUse` bead-export hook) is a
 documented follow-up in the design doc's phased plan (§5, Beads B/D/E + H), to be added
@@ -304,6 +306,22 @@ clean and carries a `--dry-run-self-test` (hermetic; no network).
   decision (loop step 3), **not** the decision: it never dispatches, closes, or mutates
   anything. Surface inference and contention flags are heuristic (free-form branch names)
   and advisory by design.
+- **`scripts/worktree-gc.sh [--dry-run | --apply]`** (sq-6xdr) — a **manual / idle-time**
+  broom for the harness's `.claude/worktrees/` dirs. The harness creates one git worktree
+  per agent but never auto-removes a finished one, so they pile up (366+ this session) and
+  each carries a multi-GB `target/` build dir that fills the disk. The script enumerates
+  `git worktree list --porcelain` and classifies a worktree SAFE-to-remove **only** if ALL
+  hold: its HEAD is already an ancestor of `origin/main` (merged — nothing to lose) **or**
+  its branch is gone-on-origin with HEAD still reachable from a remote ref; `git status
+  --porcelain` is empty (no uncommitted/untracked work); it has **no** unpushed commits
+  (a never-pushed branch is treated as unpushed ⇒ kept); and it is **not** the main
+  checkout (`/home/ubuntu/sparq`, a hard unconditional exclusion, asserted by the
+  self-test). It is **allow-list by location** (only paths under `.claude/worktrees/` are
+  ever candidates). **Default is dry-run** — prints the safe set with per-worktree reasons
+  and a `du -sh` reclaimable-size estimate; `--apply` does `git worktree remove --force`
+  the safe set then `git worktree prune`. Run `--apply` **at idle, not while sibling agents
+  are building** (the predicate cannot misclassify a busy worktree, but removing one
+  mid-build aborts that build). When in doubt it KEEPS.
 
 See `research/orchestration-automation-design.md` §1.3 (the five judgment behaviours that
 must stay with the orchestrator), §6 (failure modes + the guardrail behind each), and §5
