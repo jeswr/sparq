@@ -29,8 +29,53 @@ now CLOSED** by `.github/workflows/asan.yml` (sq-hybl).
 | ID | Gap | Sev | Remediation | Bead (to create) |
 |---|---|---|---|---|
 | ~~MS-G3~~ | ~~No standalone AddressSanitizer lane outside cargo-fuzz.~~ | ~~Low~~ | **CLOSED (sq-hybl, [OPUS-4.8]).** Added `.github/workflows/asan.yml` — a standalone ASan lane that runs the deterministic mmap corruption corpus (`crates/sparq-core/tests/mmap_corruption_oracle.rs` under `--features mmap,dict-spill`, plus the `sparq-vectors` `store`/`diskann` open-validation corpus) under `RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu`. So the B5 reads now execute under ASan against the *deterministic* corpus, not only as deep as the fuzz corpus reaches. **Nightly schedule + workflow_dispatch only** (no PR/merge_group trigger — `-Zbuild-std` rebuilds std under ASan, many minutes), so it is a non-blocking UB safety net (cf. miri.yml / the nightly fuzz tier) and the `ci-summary / gate` aggregator never discovers/waits on it; the job name also carries the `informational` token belt-and-braces. | — (done) |
-| **MS-G4** | **No formal verification / model checking of the unsafe core.** Assurance is Miri + oracle + fuzz + per-site argument (strong *testing/justification*) but not a *proof* of the mmap validators (`MappedDict::validate`, `VectorStore::open_validated`, DiskANN `open`). | **Low** (assurance ceiling, not a defect) | Evaluate Kani (bounded model checking of the offset/length validators) or a Prusti/Creusot annotation of the `validate` functions; treat as the certificate-grade external/formal-methods step. AUDIT-READY label stands until then. | `memsafety: evaluate Kani bounded-proof of the mmap validators` (P2, sq-toze) |
+| **MS-G4** | **No formal verification / model checking of the unsafe core.** Assurance is Miri + oracle + fuzz + per-site argument (strong *testing/justification*) but not a *proof* of the mmap validators (`MappedDict::validate`, `VectorStore::open_validated`, DiskANN `open`). | **Low** (assurance ceiling, not a defect) | **PARTLY ADDRESSED (sq-hkud, [OPUS-4.8]) — see the feasibility verdict below.** Kani is a *tractable + worthwhile* fit for the `.spqv` validator and a bounded proof now exists for it; the dict mmap validator needs a refactor first (scoped as follow-up). | sq-hkud (this work) + a follow-up bead for the dict-validator seam |
 | **MS-G5** | **Cross-doc unsafe-count drift.** `research/threat-model.md` says sparq-core has "39 sites"; the register/snapshot/ratchet say **42**. The register is authoritative; the threat-model prose is stale. | **Low** | One-line fix to `research/threat-model.md` (owned by the threat-model doc, not this framework) — update "39" → "42" (or reference the ratchet snapshot so it can't drift again). | `docs: sync threat-model unsafe-count to the ratchet snapshot (39→42)` (P2, sq-toze) |
+
+## MS-G4 — Kani feasibility verdict (sq-hkud, [OPUS-4.8])
+
+MS-G4 was an *evaluate-then-deliver* task: is a Kani bounded-proof of the mmap on-disk-format
+validators feasible and worthwhile against the existing Miri + oracle + fuzz + ASan coverage?
+
+**Verdict: tractable and worthwhile for the `.spqv` (vectors) validator — a bounded proof
+now exists for it; deferred-with-a-prerequisite for the dict mmap validator.**
+
+What Kani adds over the existing coverage. The Miri (UB), oracle (deterministic corruption
+sweep), fuzz (libFuzzer corpus) and ASan (sanitised corpus) lanes are all *execution-based*:
+they run the validator on **specific** inputs. None **proves** the validator is panic-/OOB-
+free for **every** hostile input. Kani model-checks the validator over **every** byte buffer
+up to a small bound, closing the residual "did the corpus miss a hostile header/index?" gap.
+It is a **complement, not a replacement** — Kani's bound is small (model checking is
+exponential), so fuzz/oracle/ASan still carry the unbounded + UB coverage.
+
+Why the `.spqv` validator is a good Kani target.
+`VectorStore::open_from_bytes` (`crates/sparq-vectors/src/store.rs`) is the **pure,
+mmap-free, FFI-free, syscall-free** in-memory twin of the mmap'd `open` — both call the same
+private `open_validated` header/length/bounds logic. Kani cannot model `mmap` / file I/O /
+FFI, but it does not need to: the in-memory entry point runs the identical validator. The
+state space is **boundable** — the checked size arithmetic ties `count`/`dim` to the buffer
+length, so a small symbolic buffer bounds every loop and the `vec![false; count]`
+allocation. Delivered: two `#[cfg(kani)]` harnesses (`open_from_bytes_never_panics`,
+`open_validated_v2_tail_never_panics`) + the nightly, non-blocking `kani` CI lane
+(`.github/workflows/kani.yml`, same posture as `miri.yml`/`asan.yml`). **UNTESTED-HERE:**
+Kani was not installed in the authoring environment; the harness is written to Kani's
+documented API and is validated on the lane's first run.
+
+Why the dict mmap validator (`MappedDict::validate`, `dict.rs`) is deferred — not because
+Kani is the wrong tool, but because it has **no mmap-free public entry point**: it is
+reachable only via `Dict::open_mmap`, which needs a live `memmap2::Mmap` (Kani cannot model
+file-backed mappings — the same structural reason Miri cannot, see `miri.yml`), and it pulls
+in the term-record parser + the prefix/datatype tables + a `Vec` of collected triples. A
+Kani proof of it first needs a refactor to lift `validate` onto a plain `&[u8]` (an
+`open_from_bytes`-style seam, mirroring what made the vectors validator tractable). That is
+**follow-up work**, recorded as a bead for the orchestrator to create.
+
+> **Bead to create** (`bd create … --epic sq-toze`): *"memsafety: lift `MappedDict::validate`
+> onto a plain `&[u8]` seam so a Kani bounded-proof can cover the dict mmap validator
+> (follow-up to sq-hkud / MS-G4)"* — P2.
+
+The certificate-grade *external* formal-methods review + accredited third-party B5 audit
+remain external by definition; the AUDIT-READY label stands.
 
 ## NOT gaps (decisions, recorded so the auditor does not re-flag them)
 

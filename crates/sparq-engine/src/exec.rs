@@ -319,6 +319,65 @@ pub(crate) mod functions {
     }
 }
 
+// ---- Custom aggregate registry (sq-5qz9) ----------------------------------------
+//
+// Mirrors `functions` exactly (install guard + rayon-worker snapshot/re-install)
+// so a custom `AggregateFunction::Custom` IRI in a `GROUP BY` is visible to the
+// off-thread group-evaluation path. The overwhelmingly common case is NO registry
+// installed, which makes the snapshot path free. NON-DEFAULT `window-functions`
+// feature: when off, this module does not compile and the default build is
+// byte-identical. [OPUS-4.8]
+#[cfg(feature = "window-functions")]
+pub(crate) mod aggregates {
+    use crate::CustomAggregateRegistry;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<CustomAggregateRegistry>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.with(|a| a.borrow_mut().take());
+        }
+    }
+
+    pub(crate) fn install(reg: &CustomAggregateRegistry) -> Guard {
+        ACTIVE.with(|a| *a.borrow_mut() = Some(Arc::new(reg.clone())));
+        Guard
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn snapshot() -> Option<Arc<CustomAggregateRegistry>> {
+        ACTIVE.with(|a| a.borrow().clone())
+    }
+
+    pub(crate) struct WorkerGuard(Option<Option<Arc<CustomAggregateRegistry>>>);
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.0.take() {
+                ACTIVE.with(|a| *a.borrow_mut() = prev);
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn worker_install(snap: &Option<Arc<CustomAggregateRegistry>>) -> WorkerGuard {
+        match snap {
+            None => WorkerGuard(None),
+            Some(reg) => WorkerGuard(Some(ACTIVE.with(|a| a.borrow_mut().replace(reg.clone())))),
+        }
+    }
+
+    /// The aggregate registered for `iri`, if a registry is installed and
+    /// contains it.
+    pub(crate) fn lookup(iri: &str) -> Option<crate::AggFn> {
+        ACTIVE.with(|a| a.borrow().as_ref().and_then(|reg| reg.get(iri).cloned()))
+    }
+}
+
 // ---- Spatial index (sq-mg9) ----------------------------------------------------
 //
 // The thread-local [`SpatialProvider`] installed by `with_spatial_index`. The
@@ -5199,6 +5258,10 @@ fn group_aggregate(
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
+        // [OPUS-4.8] (sq-5qz9) keep a custom-aggregate registry visible off-thread, like `fns`.
+        // (`self::` because the `aggregates` *parameter* below shadows the module name.)
+        #[cfg(feature = "window-functions")]
+        let aggs = self::aggregates::snapshot();
         // Process `members`/`order` in PAR_THRESHOLD-sized batches: evaluate + read-only
         // resolve each batch in parallel, then serially intern only that batch's genuinely
         // new terms and emit its rows. Peak `Value` footprint is one batch, not all groups.
@@ -5211,6 +5274,8 @@ fn group_aggregate(
                     let _fns = functions::worker_install(&fns);
                     let _vw = view::worker_install(&vw);
                     let _spx = spatial::worker_install(&spx);
+                    #[cfg(feature = "window-functions")]
+                    let _aggs = self::aggregates::worker_install(&aggs);
                     aggregates
                         .iter()
                         .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg).map(|v| value_to_id_readonly(graph, lv, &v)))
@@ -5268,6 +5333,17 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                     return Ok(v);
                 }
             }
+            // [OPUS-4.8] (sq-5qz9) A declared custom aggregate IRI: fold the group's
+            // per-member values through the installed registry. Unlike the builtins,
+            // the user aggregate sees the FULL member sequence (an unbound member is
+            // passed as `None`, not skipped) so it can implement count-style or
+            // unbound-sensitive aggregates; DISTINCT de-duplicates the materialised
+            // member terms first (treating two unbound members as equal). The closure
+            // works in `oxrdf::Term`, so the per-member value is materialised to a term.
+            #[cfg(feature = "window-functions")]
+            if let AggregateFunction::Custom(iri) = name {
+                return eval_custom_aggregate(graph, local, b, members, expr, *distinct, iri.as_str());
+            }
             // Collect the per-member values of `expr`. [OPUS-4.8] An UNBOUND member (a variable
             // with no binding in that row, e.g. an OPTIONAL one) is SKIPPED for every aggregate,
             // matching SPARQL "aggregate over the bound values": SUM/AVG over an OPTIONAL column
@@ -5317,6 +5393,48 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                 _ => Err("M2: unsupported aggregate".into()),
             }
         }
+    }
+}
+
+/// [OPUS-4.8] (sq-5qz9) Evaluate a declared custom aggregate IRI against the
+/// installed [`crate::CustomAggregateRegistry`]. Materialises each group member's
+/// value of `expr` to an `Option<Term>` (`None` ≡ unbound for that member —
+/// passed THROUGH, not skipped, so a user count-style aggregate can see it),
+/// applies DISTINCT over the materialised members, then folds via the closure.
+/// A missing registry / unregistered IRI is the same hard error the registry-free
+/// path raises; a closure `Err` is a SPARQL expression error (→ unbound result).
+#[cfg(feature = "window-functions")]
+fn eval_custom_aggregate(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    members: &[usize],
+    expr: &Expression,
+    distinct: bool,
+    iri: &str,
+) -> Result<Value, String> {
+    let Some(f) = aggregates::lookup(iri) else {
+        return Err(format!("unsupported SPARQL function: no custom aggregate registered for <{iri}>"));
+    };
+    let mut args: Vec<Option<Term>> = Vec::with_capacity(members.len());
+    for &ri in members {
+        let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
+        // A genuine expression error inside the argument makes the aggregate a
+        // SPARQL error (→ unbound), mirroring SUM/AVG; an unbound member is a
+        // first-class `None` argument the user aggregate decides how to treat.
+        if matches!(v, Value::Error) {
+            return Ok(Value::Error);
+        }
+        args.push(value_as_term(&v));
+    }
+    if distinct {
+        let mut seen: FxHashSet<Option<Term>> = FxHashSet::default();
+        args.retain(|t| seen.insert(t.clone()));
+    }
+    match f(&args) {
+        Ok(Some(t)) => Ok(Value::Term(t)),
+        Ok(None) => Ok(Value::Unbound),
+        Err(_) => Ok(Value::Error), // expression error → unbound aggregate (builtin discipline)
     }
 }
 

@@ -204,6 +204,19 @@ pub struct ServerConfig {
     /// [`crate::audit`].
     #[cfg(feature = "audit-log")]
     pub audit_log: bool,
+    /// [OPUS-4.8] (sq-gos8, epic sq-toze) **Richer STRUCTURED access-audit sink** target (ASVS
+    /// V7 / ISO 27001 A.8.15 / CDMC CD-2). `Some(target)` installs the default JSON-Lines sink
+    /// ([`crate::access_audit::WriterSink`]) writing to a file or stderr; every enforced access
+    /// decision is then recorded as a TYPED record (actor / action / resource / decision +
+    /// policy-basis / timestamp / non-reversible request fingerprint). `None` (the default)
+    /// installs no sink — every call site is a single `Option` check, so an audit-disabled
+    /// request pays essentially zero. Set by `--access-audit <file|stderr>` /
+    /// `SPARQ_ACCESS_AUDIT`. PRIVACY BOUNDARY: identities + resource IRIs are recorded by design
+    /// (the audit trail); query CONTENT only as a fingerprint, never the raw text. Present only
+    /// with the `access-audit` cargo feature; without it the field + every call site are
+    /// compiled out (byte-identical to before). See [`crate::access_audit`].
+    #[cfg(feature = "access-audit")]
+    pub access_audit: Option<crate::access_audit::SinkTarget>,
     /// [OPUS-4.8] sq-o4qf: explicit opt-in to bind a **non-loopback** address.
     ///
     /// By default the server has **no authentication** on any endpoint — including the
@@ -330,6 +343,10 @@ impl Default for ServerConfig {
             // (the operator opts in deliberately via --audit-log / SPARQ_AUDIT_LOG=1).
             #[cfg(feature = "audit-log")]
             audit_log: false,
+            // [OPUS-4.8] sq-gos8: no structured access-audit sink by default even when the
+            // feature is compiled in (the operator opts in via --access-audit / SPARQ_ACCESS_AUDIT).
+            #[cfg(feature = "access-audit")]
+            access_audit: None,
             allow_remote: false, // [OPUS-4.8] sq-o4qf: safe default — refuse non-loopback bind unless opted in
             // [OPUS-4.8] sq-zcby: safe default — no token => no write auth (back-compat).
             auth_token: None,
@@ -418,6 +435,17 @@ impl ServerConfig {
         // redaction ON — the privacy-respecting posture. Only meaningful together with --verbose.
         if let Ok(v) = std::env::var("SPARQ_LOG_FULL_REQUESTS") {
             cfg.redact_logs = !env_truthy(&v);
+        }
+        // [OPUS-4.8] sq-gos8: SPARQ_ACCESS_AUDIT=<file|stderr> installs the structured
+        // access-audit sink (only when the `access-audit` feature is compiled in). An empty /
+        // unset value leaves it off. The literal `stderr` selects the stderr sink; anything else
+        // is a file path the default JSON-Lines sink appends to.
+        #[cfg(feature = "access-audit")]
+        if let Ok(v) = std::env::var("SPARQ_ACCESS_AUDIT") {
+            let v = v.trim();
+            if !v.is_empty() {
+                cfg.access_audit = Some(crate::access_audit::SinkTarget::parse(v));
+            }
         }
         // [OPUS-4.8] sq-o4qf: SPARQ_ALLOW_REMOTE truthy ("1"/"true"/"yes"/"on", case-insensitive)
         // opts in to a non-loopback bind. Anything else (incl. unset / "0" / "false") leaves the
@@ -817,6 +845,69 @@ pub(crate) fn payload_mutates(sparql: &str) -> bool {
     // parses as neither) => fail-safe to a write (`is_err`). The two non-read cases share one
     // branch on purpose: both must be gated as a write, so distinguishing them changes nothing.
     spargebra::SparqlParser::new().parse_query(sparql).is_err()
+}
+
+/// [OPUS-4.8] (sq-gos8) Maps the auth-classifier [`Operation`] to the structured-audit
+/// [`Action`](crate::access_audit::Action) for the plain SPARQL surface (read => a query,
+/// write => an update).
+#[cfg(feature = "access-audit")]
+fn sparql_action(op: Operation) -> crate::access_audit::Action {
+    match op {
+        Operation::Read => crate::access_audit::Action::Query,
+        Operation::Write => crate::access_audit::Action::Update,
+    }
+}
+
+/// [OPUS-4.8] (sq-gos8) Begins a structured access-audit record IFF a sink is installed —
+/// snapshotting the actor (from the presented Bearer token), the action class, the resource and
+/// the (non-reversible) request fingerprint at the enforcement seam. Returns `None` (and builds
+/// nothing) when no sink is configured, so an audit-disabled request pays only the `Option`
+/// check. The returned [`AuditPending`] is `finish`ed once the enforced decision is known and
+/// handed to the sink via [`audit_access_finish`].
+#[cfg(feature = "access-audit")]
+fn audit_access_begin(
+    state: &AppState,
+    action: crate::access_audit::Action,
+    resource: crate::access_audit::Resource,
+    headers: &HeaderMap,
+    sparql: Option<&str>,
+) -> Option<crate::access_audit::AuditPending> {
+    state.access_audit_sink().map(|_| {
+        crate::access_audit::AuditPending::begin(
+            action,
+            crate::access_audit::Actor::from_token(bearer_token(headers)),
+            resource,
+            sparql,
+        )
+    })
+}
+
+/// [OPUS-4.8] (sq-gos8) Finishes a pending record and records it through the installed sink,
+/// deriving the ACTUALLY-enforced decision from the finished [`Response`]: a `401` is the auth
+/// gate's denial (`Deny` + the bearer-auth policy basis), anything else is the allowed-and-served
+/// outcome. So the recorded decision is the one the server enforced, never a claimed-but-
+/// disconnected one. A no-op when `pending` is `None` (no sink).
+#[cfg(feature = "access-audit")]
+fn audit_access_finish(
+    state: &AppState,
+    pending: Option<crate::access_audit::AuditPending>,
+    resp: &Response,
+) {
+    use crate::access_audit::AccessDecision;
+    let (Some(pending), Some(sink)) = (pending, state.access_audit_sink()) else {
+        return;
+    };
+    let status = resp.status();
+    let (decision, basis) = if status == StatusCode::UNAUTHORIZED {
+        (
+            AccessDecision::Deny,
+            "bearer-auth: missing or invalid token",
+        )
+    } else {
+        (AccessDecision::Allow, "bearer-auth: allowed")
+    };
+    let event = pending.finish(decision, basis, status.as_u16());
+    sink.record(&event);
 }
 
 fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
@@ -1274,6 +1365,10 @@ pub struct AppState {
     pub(crate) subs: Arc<crate::subscriptions::SubscriptionCounters>,
     /// Prometheus metrics (T22), exposed at `GET /metrics`.
     metrics: Arc<crate::metrics::Metrics>,
+    /// [OPUS-4.8] (sq-gos8) The opt-in structured access-audit sink. `None` unless the operator
+    /// configured one (`--access-audit` / `SPARQ_ACCESS_AUDIT`); shared across handlers.
+    #[cfg(feature = "access-audit")]
+    access_audit_sink: Option<Arc<dyn crate::access_audit::AuditSink>>,
 }
 
 impl AppState {
@@ -1386,6 +1481,17 @@ impl AppState {
             applier,
             WriterConfig::default(),
         ));
+        // [OPUS-4.8] sq-gos8: open the structured access-audit sink if one is configured. A
+        // failure to open (e.g. an unwritable audit-file path) is surfaced as a clean startup
+        // error rather than silently dropping the trail — the operator asked for an audit log.
+        #[cfg(feature = "access-audit")]
+        let access_audit_sink = match &config.access_audit {
+            Some(target) => Some(
+                crate::access_audit::make_sink(target)
+                    .map_err(|e| format!("access-audit sink open failed: {e}"))?,
+            ),
+            None => None,
+        };
         Ok(Self {
             ring,
             writer,
@@ -1393,6 +1499,8 @@ impl AppState {
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
             metrics: Arc::new(crate::metrics::Metrics::default()),
+            #[cfg(feature = "access-audit")]
+            access_audit_sink,
         })
     }
 
@@ -1491,6 +1599,14 @@ impl AppState {
 
     pub(crate) fn config(&self) -> &ServerConfig {
         &self.config
+    }
+
+    /// [OPUS-4.8] (sq-gos8) The installed structured access-audit sink, if any. `None` short-
+    /// circuits every audit call site (no record is built), so a request with no sink configured
+    /// pays only this `Option` check.
+    #[cfg(feature = "access-audit")]
+    pub(crate) fn access_audit_sink(&self) -> Option<&Arc<dyn crate::access_audit::AuditSink>> {
+        self.access_audit_sink.as_ref()
     }
 }
 
@@ -1645,11 +1761,13 @@ fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option
     let endpoint_iri = format!("{base}/sparql");
     let dataset_iri = format!("{base}/.well-known/void#dataset");
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
+    let caps = service_capabilities(state.config());
     Some(
         match crate::descriptors::service_description(
             &endpoint_iri,
             &endpoint_iri,
             &dataset_iri,
+            &caps,
             accept,
         ) {
             Ok(d) => text_response(StatusCode::OK, d.content_type, d.body, false),
@@ -1662,6 +1780,42 @@ fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option
             ),
         },
     )
+}
+
+/// [OPUS-4.8] sq-qfcb: derive the server's ACTUAL capability profile for the Service
+/// Description from this build's cargo features + the running config — never a fiction.
+///
+///   * `update` — advertise `sd:SPARQL11Update` only when an anonymous client could run one:
+///     the write path is always compiled in, but a configured write-token
+///     ([`ServerConfig::auth_token`]) makes anonymous Update impossible, so we suppress the
+///     advertisement in that case (the operator who holds the token still knows it works).
+///   * `federated_query` — `true` exactly when built with the `service` feature (the engine's
+///     `SERVICE` evaluation is compiled in); otherwise a `SERVICE` clause errors at execution.
+///   * `extension_functions` — the IRIs the engine has ACTUALLY registered. With the `geo`
+///     feature that is sparq-geo's `geof:` registry, read back through
+///     [`sparq_engine::FunctionRegistry::iris`] so the list can never drift from what runs;
+///     without it, no extension functions are registered, so the list is empty.
+#[cfg(feature = "federation-descriptors")]
+fn service_capabilities(config: &ServerConfig) -> crate::descriptors::Capabilities {
+    // Anonymous Update is possible iff no write-token gates the write surface.
+    let update = config.auth_token.is_none();
+    let federated_query = cfg!(feature = "service");
+    #[cfg(feature = "geo")]
+    let extension_functions: Vec<String> = {
+        static GEOF: std::sync::OnceLock<sparq_engine::FunctionRegistry> =
+            std::sync::OnceLock::new();
+        GEOF.get_or_init(sparq_geo::geof_registry)
+            .iris()
+            .map(str::to_string)
+            .collect()
+    };
+    #[cfg(not(feature = "geo"))]
+    let extension_functions: Vec<String> = Vec::new();
+    crate::descriptors::Capabilities {
+        update,
+        federated_query,
+        extension_functions,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1902,7 +2056,8 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
         // target (path verbatim, query string => `<redacted len=N fp=…>`). With
         // --log-full-requests the bare TraceLayer is used, logging the URI verbatim as before.
         if config.redact_logs {
-            routes.layer(TraceLayer::new_for_http().make_span_with(crate::redact::RedactingMakeSpan))
+            routes
+                .layer(TraceLayer::new_for_http().make_span_with(crate::redact::RedactingMakeSpan))
         } else {
             routes.layer(TraceLayer::new_for_http())
         }
@@ -2084,11 +2239,23 @@ async fn sparql_endpoint(
                     url_params.get("query").map(String::as_str),
                 )
             });
+            // [OPUS-4.8] sq-gos8: structured access-audit for the GET query (a read on the
+            // dataset; the `query=` param is fingerprinted, never recorded raw).
+            #[cfg(feature = "access-audit")]
+            let aa = audit_access_begin(
+                &state,
+                crate::access_audit::Action::Query,
+                crate::access_audit::Resource::Dataset("/sparql".to_string()),
+                &headers,
+                url_params.get("query").map(String::as_str),
+            );
             if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
                 #[cfg(feature = "audit-log")]
                 if let Some(a) = audit {
                     a.emit(&resp);
                 }
+                #[cfg(feature = "access-audit")]
+                audit_access_finish(&state, aa, &resp);
                 return resp;
             }
             match url_params.get("query") {
@@ -2100,6 +2267,8 @@ async fn sparql_endpoint(
                             if let Some(a) = audit {
                                 a.emit(&resp);
                             }
+                            #[cfg(feature = "access-audit")]
+                            audit_access_finish(&state, aa, &resp);
                             return resp;
                         }
                     };
@@ -2110,6 +2279,8 @@ async fn sparql_endpoint(
                     if let Some(a) = audit {
                         a.emit(&resp);
                     }
+                    #[cfg(feature = "access-audit")]
+                    audit_access_finish(&state, aa, &resp);
                     resp
                 }
                 // [OPUS-4.8] sq-d3d8: per SPARQL Protocol §2.1.2, a GET with no `query` may
@@ -2160,11 +2331,24 @@ async fn handle_post(
                 Some(s),
             )
         });
+        // [OPUS-4.8] sq-gos8: structured access-audit — the plain SPARQL surface names no
+        // per-graph resource at the request boundary, so the resource is the dataset (`/sparql`);
+        // the query body is fingerprinted, NEVER recorded raw (the privacy boundary).
+        #[cfg(feature = "access-audit")]
+        let aa = audit_access_begin(
+            state,
+            sparql_action(op),
+            crate::access_audit::Resource::Dataset("/sparql".to_string()),
+            headers,
+            Some(s),
+        );
         if let Some(resp) = auth_gate(state.config(), headers, op) {
             #[cfg(feature = "audit-log")]
             if let Some(a) = audit {
                 a.emit(&resp);
             }
+            #[cfg(feature = "access-audit")]
+            audit_access_finish(state, aa, &resp);
             return resp;
         }
         // NB: a write smuggled through the query Content-Type still goes to `run_query` (the
@@ -2177,6 +2361,8 @@ async fn handle_post(
                 if let Some(a) = audit {
                     a.emit(&resp);
                 }
+                #[cfg(feature = "access-audit")]
+                audit_access_finish(state, aa, &resp);
                 return resp;
             }
         };
@@ -2186,6 +2372,8 @@ async fn handle_post(
         if let Some(a) = audit {
             a.emit(&resp);
         }
+        #[cfg(feature = "access-audit")]
+        audit_access_finish(state, aa, &resp);
         resp
     } else if ct.starts_with(FORM_CT) {
         // POST url-encoded — `query=` (read) or `update=` (write) in the body. [OPUS-4.8]
@@ -2227,11 +2415,25 @@ async fn handle_post(
                     .map(String::as_str),
             )
         });
+        // [OPUS-4.8] sq-gos8: structured access-audit for the url-encoded form request.
+        #[cfg(feature = "access-audit")]
+        let aa = audit_access_begin(
+            state,
+            sparql_action(op),
+            crate::access_audit::Resource::Dataset("/sparql".to_string()),
+            headers,
+            params
+                .get("update")
+                .or_else(|| params.get("query"))
+                .map(String::as_str),
+        );
         if let Some(resp) = auth_gate(state.config(), headers, op) {
             #[cfg(feature = "audit-log")]
             if let Some(a) = audit {
                 a.emit(&resp);
             }
+            #[cfg(feature = "access-audit")]
+            audit_access_finish(state, aa, &resp);
             return resp;
         }
         // The SPARQL 1.1 Protocol url-encoded UPDATE operation (`update=` form) submits through
@@ -2247,6 +2449,8 @@ async fn handle_post(
                 if let Some(a) = audit {
                     a.emit(&resp);
                 }
+                #[cfg(feature = "access-audit")]
+                audit_access_finish(state, aa, &resp);
                 return resp;
             }
             let resp = run_update(state, u.clone()).await;
@@ -2254,6 +2458,8 @@ async fn handle_post(
             if let Some(a) = audit {
                 a.emit(&resp);
             }
+            #[cfg(feature = "access-audit")]
+            audit_access_finish(state, aa, &resp);
             return resp;
         }
         let resp = match params.get("query") {
@@ -2265,6 +2471,8 @@ async fn handle_post(
                         if let Some(a) = audit {
                             a.emit(&resp);
                         }
+                        #[cfg(feature = "access-audit")]
+                        audit_access_finish(state, aa, &resp);
                         return resp;
                     }
                 };
@@ -2277,6 +2485,8 @@ async fn handle_post(
         if let Some(a) = audit {
             a.emit(&resp);
         }
+        #[cfg(feature = "access-audit")]
+        audit_access_finish(state, aa, &resp);
         resp
     } else if ct.starts_with("application/sparql-update") {
         // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
@@ -2290,11 +2500,22 @@ async fn handle_post(
                 std::str::from_utf8(body).ok(),
             )
         });
+        // [OPUS-4.8] sq-gos8: structured access-audit for the SPARQL UPDATE body.
+        #[cfg(feature = "access-audit")]
+        let aa = audit_access_begin(
+            state,
+            crate::access_audit::Action::Update,
+            crate::access_audit::Resource::Dataset("/sparql".to_string()),
+            headers,
+            std::str::from_utf8(body).ok(),
+        );
         if let Some(resp) = auth_gate(state.config(), headers, Operation::Write) {
             #[cfg(feature = "audit-log")]
             if let Some(a) = audit {
                 a.emit(&resp);
             }
+            #[cfg(feature = "access-audit")]
+            audit_access_finish(state, aa, &resp);
             return resp;
         }
         // `apply_update` blocks for the writer's group-commit ack (window + batch
@@ -2312,6 +2533,8 @@ async fn handle_post(
             if let Some(a) = audit {
                 a.emit(&resp);
             }
+            #[cfg(feature = "access-audit")]
+            audit_access_finish(state, aa, &resp);
             return resp;
         }
         let resp = match std::str::from_utf8(body) {
@@ -2322,6 +2545,8 @@ async fn handle_post(
         if let Some(a) = audit {
             a.emit(&resp);
         }
+        #[cfg(feature = "access-audit")]
+        audit_access_finish(state, aa, &resp);
         resp
     } else {
         // Unsupported media type for the POST query operation.
@@ -2402,7 +2627,10 @@ async fn admin_compact(State(state): State<AppState>, headers: HeaderMap) -> Res
             "compaction failed (retryable)",
             &e,
         ),
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "compaction worker panicked"),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "compaction worker panicked",
+        ),
     }
 }
 
@@ -2926,11 +3154,31 @@ async fn graph_store(
             None,
         )
     });
+    // [OPUS-4.8] sq-gos8: begin the RICHER structured access-audit record. The GSP surface
+    // carries the resource at its highest fidelity — the named-graph IRI (or the default graph)
+    // the request addresses. There is no query body to fingerprint (the body is RDF, not a
+    // query); the action class distinguishes read vs write.
+    #[cfg(feature = "access-audit")]
+    let aa = audit_access_begin(
+        state,
+        match op {
+            Operation::Read => crate::access_audit::Action::GraphRead,
+            Operation::Write => crate::access_audit::Action::GraphWrite,
+        },
+        match &graph {
+            GraphRef::Default => crate::access_audit::Resource::Dataset("default".to_string()),
+            GraphRef::Named(iri) => crate::access_audit::Resource::NamedGraph(iri.clone()),
+        },
+        headers,
+        None,
+    );
     if let Some(resp) = auth_gate(state.config(), headers, op) {
         #[cfg(feature = "audit-log")]
         if let Some(a) = audit {
             a.emit(&resp);
         }
+        #[cfg(feature = "access-audit")]
+        audit_access_finish(state, aa, &resp);
         return resp;
     }
     let resp = match *method {
@@ -2954,6 +3202,8 @@ async fn graph_store(
     if let Some(a) = audit {
         a.emit(&resp);
     }
+    #[cfg(feature = "access-audit")]
+    audit_access_finish(state, aa, &resp);
     resp
 }
 

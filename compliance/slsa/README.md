@@ -11,8 +11,11 @@ Build track + Source/Provenance/Verification dimensions.
 > container image reach SLSA Build Level 2.** They carry signed, hosted-platform-generated
 > provenance (`actions/attest-build-provenance` / buildkit `provenance: mode=max`). sparq does
 > **not** claim Build L3 (provenance is generated in-band with the build, not by an isolated
-> trusted builder), and one tag-time build path (`dist.yml`) plus the crates.io/npm/PyPI
-> published packages are currently **unattested** — see `gap-register.md`.
+> trusted builder). The `dist.yml` tiered binaries are now attested (GX-9 closed). The
+> `@jeswr/sparq` **npm** package now carries native Sigstore provenance (`publish.yml#npm`) and
+> the crates.io `.crate` bytes get an out-of-band attestation (`publish.yml#crates`); **crates.io
+> has no native provenance-link mechanism upstream** and the **PyPI** lane is still unattested
+> (GX-10 partial) — see `gap-register.md`.
 
 This is a bounded, evidence-backed claim. We never publish "SLSA L3" or "all artifacts attested"
 because the provenance does not back it.
@@ -38,8 +41,10 @@ tokens); consumer-side verification documentation.
   documented verify command (`controls.md` SL-V-b).
 - **The SLSA-level *certificate*** — an accredited-assessor attestation is an external-body
   activity. This slice makes the controls + evidence **audit-ready**; the certificate is external.
-- **crates.io published-package provenance** — no upstream mechanism exists yet (folded into
-  GX-10 as an external sub-gap).
+- **crates.io published-package provenance (native link)** — crates.io has no upstream
+  provenance-link mechanism yet, so a provenance badge on the crates.io page is not closable from
+  our side (folded into GX-10 as an external sub-gap). sparq does emit an **out-of-band** SLSA
+  attestation over the `.crate` bytes (`publish.yml#crates`); the *registry-native* link is external.
 
 ## Files
 
@@ -53,9 +58,9 @@ tokens); consumer-side verification documentation.
 
 | Posture | Detail |
 |---|---|
-| **Implemented & verified** | Build L2 for release archives + container (signed provenance, hosted runner, cargo-auditable, attested SBOM/VEX); source-track integrity (pinned+locked deps, cargo-vet + cargo-deny GATING, least-privilege tokens, security.txt). |
+| **Implemented & verified** | Build L2 for release archives + container **+ the `dist.yml` tiered binaries** **+ the `@jeswr/sparq` npm package** (native Sigstore `npm publish --provenance` + `npm audit signatures` gate, `publish.yml#npm`, GX-10/sq-toze.24) (signed provenance, hosted runner, cargo-auditable, attested SBOM/VEX; GX-9 closed via sq-toze.23); source-track integrity (pinned+locked deps, cargo-vet + cargo-deny GATING, least-privilege tokens, security.txt). |
 | **Audit-ready** | Two-person review + protected-branch ruleset (configured out-of-repo, recorded in `docs/branch-protection.md`); consumer verification policy (operator-enforced); the SLSA-level certificate (external assessor). |
-| **Gap** | dist.yml binaries unattested (GX-9/sq-toze.23); no published-package provenance (GX-10/sq-toze.24); no reproducible-build evidence (GX-8/sq-toze.9); Build L3 not met — in-band provenance (GX-11/sq-toze.25). |
+| **Gap** | published-package provenance PARTIAL (GX-10/sq-toze.24): **npm CLOSED** (`publish.yml#npm`), **crates.io** has an out-of-band `.crate` attestation but the **registry-native link is external/OPEN**, **PyPI** PEP-740 still pending; no reproducible-build evidence (GX-8/sq-toze.9); Build L3 not met — in-band provenance (GX-11/sq-toze.25). *(GX-9 dist.yml binaries — CLOSED, now SLSA Build L2 / sq-toze.23.)* |
 
 ## Do-not-re-propose (already in the posture — cite, don't re-add)
 

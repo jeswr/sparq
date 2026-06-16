@@ -91,3 +91,11 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # only and never enters the published dependency graph.
 [dev-dependencies]
 sparq-sim = { path = "../sparq-sim" }
+
+# [OPUS-4.8] sq-hkud (epic sq-toze, gap MS-G4) — register the `kani` cfg so the
+# `#[cfg(kani)]` bounded-proof harness in `store.rs` does not trip `-D warnings`
+# (unexpected_cfgs) on the NORMAL build. `cargo kani` sets this cfg itself when it
+# model-checks; under a plain `cargo build`/`clippy`/`test` the cfg is simply off and the
+# harness is stripped, so registering it here is the only change the normal build sees.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

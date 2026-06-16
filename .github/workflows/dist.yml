@@ -22,6 +22,16 @@ jobs:
   build:
     name: ${{ matrix.tier }}
     runs-on: ${{ matrix.os }}
+    # [OPUS-4.8] sq-toze.23 (GX-9): the per-tier dist binaries the launcher's fat-package
+    # selects from must carry SLSA build provenance too — not only the release.yml archives.
+    # The OIDC token (`id-token: write`) is what Sigstore Fulcio signs the in-toto provenance
+    # with; `attestations: write` lets the run push the attestation to the GitHub store.
+    # Still read-only on the repo otherwise (no `contents: write`: dist uploads workflow
+    # artifacts, it does not create a Release).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -53,15 +63,33 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup target add ${{ matrix.target }}
+      # [OPUS-4.8] sq-toze.23 (GX-9): mirror release.yml#package — cargo-auditable embeds
+      # the resolved dependency manifest INTO the binary so the dist artifact is self-describing
+      # for post-build audit (`cargo audit bin <file>`), matching the attested release archives.
+      - name: Install cargo-auditable
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-auditable
       - name: Build (${{ matrix.cpu || 'default-cpu' }})
         shell: bash
         run: |
           FLAGS=""
           [ -n "${{ matrix.cpu }}" ] && FLAGS="-Ctarget-cpu=${{ matrix.cpu }}"
           [ "${{ matrix.tier }}" = "arm64-linux" ] && FLAGS="$FLAGS -Ctarget-feature=+lse"
-          RUSTFLAGS="$FLAGS" cargo build --release -p sparq-cli --target ${{ matrix.target }}
+          # `cargo auditable build` is a drop-in for `cargo build`; `--locked` pins the
+          # materials (Cargo.lock) so the build is fully described — same as release.yml.
+          RUSTFLAGS="$FLAGS" cargo auditable build --release --locked -p sparq-cli --target ${{ matrix.target }}
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}"
+      # [OPUS-4.8] sq-toze.23 (GX-9): SLSA build provenance over the per-tier dist binary.
+      # Same mechanism as release.yml#package — actions/attest-build-provenance emits a
+      # signed in-toto SLSA provenance predicate binding the binary's digest to this workflow
+      # run (Sigstore Fulcio cert keyed to the GitHub OIDC identity; Rekor inclusion proof).
+      # Verify with: gh attestation verify dist/sparq-cli-<tier> --repo <owner>/sparq
+      - name: Attest build provenance (dist binary)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sparq-cli-${{ matrix.tier }}

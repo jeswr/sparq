@@ -31,9 +31,34 @@
 //!
 //! Cardinality is not the only thing the static estimates get wrong: a source can be
 //! *slow* (contended, far, rate-limited) even when its row counts are exactly as predicted.
-//! [`RuntimeStats`] already captures the *observed* per-source latency; sq-b51o folds it
-//! into the cost model so the re-planner prefers orderings that defer sub-queries against
-//! an observably slow source.
+//! [`RuntimeStats`] captures the *observed* per-source latency; sq-b51o folds it into the
+//! cost model so the re-planner prefers orderings that defer sub-queries against an
+//! observably slow source.
+//!
+//! ## Latency EWMA smoothing (sq-b51o follow-up) — a HEURISTIC α, not optimal
+//!
+//! The cost model is fed not the **single last** latency observation but a per-source
+//! **exponentially-weighted moving average** (EWMA). Each call to
+//! [`RuntimeStats::record_source_latency`] folds the new observation into the running
+//! average for that source:
+//!
+//! > `ewma_new = α · observed + (1 − α) · ewma_prev`  (first observation seeds `ewma = observed`).
+//!
+//! The smoothing factor α ∈ (0, 1] is [`RuntimeStats::latency_alpha`], default `0.3` — a
+//! **hand-picked heuristic, not a derived optimum**: it weights the latest sample at 30% and
+//! the accumulated history at 70%, so a *single* transient spike moves the average only a
+//! fraction of the way and does **not**, on its own, clear the re-plan trigger — but a
+//! **sustained** shift (several consecutive high samples) does, as the average converges
+//! toward the new level. This is the cleaner anti-thrash discipline the follow-up replaces
+//! the bare single-sample-plus-clamp with: the EWMA itself absorbs noise; the absolute
+//! `latency_floor`/`latency_cap` clamp on the resulting cost factor is kept as a **final
+//! guard** (an outlier that *does* survive the average still cannot dominate the order).
+//! Higher α tracks faster but is twitchier; lower α is calmer but laggier — 0.3 is a middle
+//! bias, picked by hand, not tuned against a workload.
+//!
+//! The EWMA (not the raw last value) feeds **both** the latency cost factor *and* the
+//! re-plan trigger, so the whole latency path is smoothed consistently. A source with no
+//! observation has no EWMA and contributes `factor = 1.0` (inert), exactly as before.
 //!
 //! The weighting is deliberately simple and **honest about being a heuristic** (see
 //! [`ReplanPolicy::latency_weight`]): for a candidate pattern, take the **slowest** observed
@@ -183,23 +208,75 @@ impl ReplanPolicy {
 /// Observed runtime statistics, accumulated as execution proceeds. Distinct from the
 /// descriptor-derived *estimates*: every value here is a real count / measurement the
 /// executor fed in at a stage boundary.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuntimeStats {
     /// Observed leaf cardinality per pattern index (rows the pattern actually returned,
     /// union over its sources). Present only for patterns that have been (at least
     /// partially) evaluated.
     observed_leaf_card: HashMap<usize, f64>,
-    /// Observed per-source latency, in abstract time units (e.g. ms). [OPUS-4.8] sq-b51o:
-    /// folded into the cost model — a slow source's joins cost more, biasing the re-plan
-    /// toward faster sources / deferring the slow one (see [`ReplanPolicy::latency_weight`]).
-    /// Affects cost/ordering ONLY, never the result multiset.
+    /// Per-source **EWMA-smoothed** latency, in abstract time units (e.g. ms). [OPUS-4.8]
+    /// sq-b51o (+ follow-up): each [`Self::record_source_latency`] folds the new observation
+    /// into a per-source exponentially-weighted moving average rather than overwriting — this
+    /// is the value fed into the cost model + the re-plan trigger, so a single transient spike
+    /// is damped and only a *sustained* shift moves the planner. A slow source's joins cost
+    /// more, biasing the re-plan toward faster sources / deferring the slow one (see
+    /// [`ReplanPolicy::latency_weight`]). Affects cost/ordering ONLY, never the result multiset.
     observed_latency: HashMap<usize, f64>,
+    /// [OPUS-4.8] sq-b51o follow-up. EWMA smoothing factor α ∈ (0, 1] applied per source in
+    /// [`Self::record_source_latency`]: `ewma_new = α·observed + (1−α)·ewma_prev`. A
+    /// **hand-picked HEURISTIC**, default [`Self::DEFAULT_LATENCY_ALPHA`] (`0.3`) — see the
+    /// module docs. Lower = calmer/laggier, higher = twitchier/faster-tracking; not derived
+    /// from a workload. Clamped to `(0, 1]` on construction.
+    latency_alpha: f64,
+}
+
+impl Default for RuntimeStats {
+    fn default() -> Self {
+        RuntimeStats {
+            observed_leaf_card: HashMap::new(),
+            observed_latency: HashMap::new(),
+            latency_alpha: RuntimeStats::DEFAULT_LATENCY_ALPHA,
+        }
+    }
 }
 
 impl RuntimeStats {
-    /// A fresh, empty statistics store.
+    /// [OPUS-4.8] sq-b51o follow-up. Default per-source latency EWMA smoothing factor α — a
+    /// hand-picked heuristic (latest sample weighted 30%, history 70%): enough history to damp
+    /// a single transient spike below the re-plan trigger, enough recency to converge on a
+    /// sustained shift within a few samples. NOT a derived optimum.
+    pub const DEFAULT_LATENCY_ALPHA: f64 = 0.3;
+
+    /// A fresh, empty statistics store with the default latency EWMA α
+    /// ([`Self::DEFAULT_LATENCY_ALPHA`]).
     pub fn new() -> RuntimeStats {
         RuntimeStats::default()
+    }
+
+    /// [OPUS-4.8] sq-b51o follow-up. A fresh, empty statistics store with an explicit latency
+    /// EWMA smoothing factor `alpha` (clamped to `(0, 1]`). `alpha = 1.0` recovers the old
+    /// "single last observation" behaviour (no smoothing); the default
+    /// ([`Self::DEFAULT_LATENCY_ALPHA`]) is `0.3`.
+    pub fn with_latency_alpha(alpha: f64) -> RuntimeStats {
+        RuntimeStats {
+            latency_alpha: Self::clamp_alpha(alpha),
+            ..RuntimeStats::default()
+        }
+    }
+
+    /// The configured latency EWMA smoothing factor α (always in `(0, 1]`).
+    pub fn latency_alpha(&self) -> f64 {
+        self.latency_alpha
+    }
+
+    /// Clamp a requested α into the valid `(0, 1]` range (a degenerate `α ≤ 0` would freeze
+    /// the average at its seed; `α > 1` would over-shoot). Uses `f64::MIN_POSITIVE` as the
+    /// strictly-positive floor.
+    fn clamp_alpha(alpha: f64) -> f64 {
+        if alpha.is_nan() {
+            return Self::DEFAULT_LATENCY_ALPHA;
+        }
+        alpha.clamp(f64::MIN_POSITIVE, 1.0)
     }
 
     /// Record the *observed* cardinality of a pattern's leaf (the real row count its
@@ -208,9 +285,26 @@ impl RuntimeStats {
         self.observed_leaf_card.insert(pattern, observed.max(0.0));
     }
 
-    /// Record the *observed* latency of a source (abstract time units).
+    /// Record an *observed* latency sample for `source` (abstract time units), folding it into
+    /// that source's **EWMA**: `ewma_new = α·observed + (1−α)·ewma_prev`, where α is
+    /// [`Self::latency_alpha`]. The **first** sample for a source seeds the average
+    /// (`ewma = observed`); subsequent samples decay the history. The smoothed value — not the
+    /// raw sample — is what [`Self::observed_latency_of`] returns and the cost model/trigger
+    /// read, so a single transient spike is damped (anti-thrash) while a sustained shift
+    /// converges. [OPUS-4.8] sq-b51o follow-up. Affects cost/ordering ONLY, never results.
     pub fn record_source_latency(&mut self, source: usize, latency: f64) {
-        self.observed_latency.insert(source, latency.max(0.0));
+        let observed = latency.max(0.0);
+        let entry = self.observed_latency.entry(source);
+        match entry {
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                let prev = *o.get();
+                let next = self.latency_alpha * observed + (1.0 - self.latency_alpha) * prev;
+                o.insert(next);
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(observed);
+            }
+        }
     }
 
     /// The observed leaf cardinality for `pattern`, if recorded.
@@ -218,7 +312,9 @@ impl RuntimeStats {
         self.observed_leaf_card.get(&pattern).copied()
     }
 
-    /// The observed latency for `source`, if recorded.
+    /// The **EWMA-smoothed** observed latency for `source`, if any sample has been recorded.
+    /// This is the smoothed running average, not the last raw sample ([OPUS-4.8] sq-b51o
+    /// follow-up) — it is what the latency cost factor and the re-plan trigger consume.
     pub fn observed_latency_of(&self, source: usize) -> Option<f64> {
         self.observed_latency.get(&source).copied()
     }
@@ -427,10 +523,13 @@ impl<'a> AdaptiveExecutor<'a> {
                     (Some(&e), Some(o)) => diverges(e, o, &self.policy),
                     _ => false,
                 });
-        // [OPUS-4.8] sq-b51o: a not-yet-executed pattern bound to an observably slow source
-        // (slowest source past divergence_factor× baseline) is also enough to *consider* a
-        // re-plan — a latency-bound query reacts even when cardinalities are spot-on. The
-        // hysteresis margin still gates whether a switch is actually *adopted* (anti-thrash).
+        // [OPUS-4.8] sq-b51o (+ EWMA follow-up): a not-yet-executed pattern bound to an
+        // observably slow source — whose slowest source's EWMA-SMOOTHED latency is past
+        // divergence_factor× baseline — is also enough to *consider* a re-plan: a latency-bound
+        // query reacts even when cardinalities are spot-on. Reading the EWMA (not the raw last
+        // sample) means one transient spike does not move the smoothed value over the threshold,
+        // so the trigger is anti-thrashed at the source; only a sustained shift converges past
+        // it. The hysteresis margin still gates whether a switch is actually *adopted*.
         let lat_triggered = self.policy.latency_weight > 0.0
             && self.remaining.iter().any(|&p| {
                 pattern_relative_slowness(p, self.base_selection, stats, &self.policy)
@@ -1375,5 +1474,201 @@ mod tests {
             ..ReplanPolicy::default()
         };
         assert_eq!(off.latency_factor(9999.0), 1.0, "weight 0 ⇒ always neutral");
+    }
+
+    // ============================================================================
+    // [OPUS-4.8] sq-b51o follow-up — per-source latency EWMA smoothing.
+    // ============================================================================
+
+    // ---- EWMA mechanics + the default α are pinned. First sample seeds the average; each
+    //      subsequent sample folds in at α = 0.3 (latest 30%, history 70%).
+    #[test]
+    fn ewma_smoothing_constants() {
+        assert_eq!(
+            RuntimeStats::DEFAULT_LATENCY_ALPHA, 0.3,
+            "default latency EWMA α is the documented 0.3 heuristic"
+        );
+        let mut stats = RuntimeStats::new();
+        assert_eq!(stats.latency_alpha(), 0.3);
+        // First sample SEEDS the average (no history to decay).
+        stats.record_source_latency(0, 100.0);
+        assert_eq!(stats.observed_latency_of(0), Some(100.0), "first sample seeds EWMA");
+        // Second sample: 0.3·1000 + 0.7·100 = 300 + 70 = 370.
+        stats.record_source_latency(0, 1000.0);
+        assert_eq!(
+            stats.observed_latency_of(0),
+            Some(370.0),
+            "EWMA = α·observed + (1-α)·prev = 0.3·1000 + 0.7·100"
+        );
+        // Third sample at the same high level: 0.3·1000 + 0.7·370 = 300 + 259 = 559.
+        stats.record_source_latency(0, 1000.0);
+        assert_eq!(
+            stats.observed_latency_of(0),
+            Some(559.0),
+            "EWMA converges toward a sustained level across samples"
+        );
+        // α = 1.0 recovers the old "single last sample" behaviour (no smoothing).
+        let mut sharp = RuntimeStats::with_latency_alpha(1.0);
+        sharp.record_source_latency(0, 100.0);
+        sharp.record_source_latency(0, 1000.0);
+        assert_eq!(sharp.observed_latency_of(0), Some(1000.0), "α=1 ⇒ no smoothing");
+        // α is clamped into (0, 1]: a degenerate 0.0 / negative request never freezes the seed.
+        assert!(RuntimeStats::with_latency_alpha(0.0).latency_alpha() > 0.0);
+        assert_eq!(RuntimeStats::with_latency_alpha(5.0).latency_alpha(), 1.0);
+    }
+
+    // ---- ANTI-THRASH: a single TRANSIENT latency spike, after the source has an established
+    //      (baseline) EWMA history, does NOT move the smoothed latency past the trigger — so no
+    //      re-plan fires. This is the headline EWMA property the follow-up buys over the bare
+    //      single-sample-plus-clamp.
+    #[test]
+    fn transient_latency_spike_does_not_trigger_replan() {
+        let (bgp, srcs) = three_source_star();
+        let sel = select_sources(&bgp, &srcs);
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        let mut exec = AdaptiveExecutor::new(
+            &bgp,
+            &srcs,
+            &sel,
+            &plan,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        );
+        let _ = exec.advance(); // execute :a seed.
+
+        // Source 1 (serving :b) has been running at the baseline for a while: seed + several
+        // at-baseline samples ⇒ EWMA sits at 100.0.
+        let mut stats = RuntimeStats::new();
+        for _ in 0..5 {
+            stats.record_source_latency(1, 100.0);
+        }
+        // One transient spike of 1000.0 (10× baseline — which, as a RAW sample, would clear the
+        // 4× divergence trigger). Under EWMA it lifts the average only to 0.3·1000 + 0.7·100 =
+        // 370 < 400 (= divergence_factor × baseline), so the trigger stays silent.
+        stats.record_source_latency(1, 1000.0);
+        assert!(
+            stats.observed_latency_of(1).unwrap() < 400.0,
+            "one spike must not push the EWMA past the 4× trigger band"
+        );
+        assert_eq!(
+            exec.maybe_replan(&stats),
+            ReplanOutcome::NoDivergence,
+            "a single transient latency spike (damped by the EWMA) must NOT trigger a re-plan"
+        );
+        assert_eq!(
+            exec.remaining_order(),
+            &[1, 2],
+            "suffix order untouched by a transient spike"
+        );
+    }
+
+    // ---- SUSTAINED SHIFT: the SAME source held at the SAME high latency for several
+    //      consecutive samples DOES converge the EWMA past the trigger and re-plans — the EWMA
+    //      reacts to a real regime change, it just refuses to react to a one-off.
+    #[test]
+    fn sustained_latency_shift_does_trigger_replan() {
+        let (bgp, srcs) = three_source_star();
+        let sel = select_sources(&bgp, &srcs);
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        let mut exec = AdaptiveExecutor::new(
+            &bgp,
+            &srcs,
+            &sel,
+            &plan,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        );
+        let _ = exec.advance(); // execute :a seed.
+
+        // Same starting history as the transient test: source 1 established at baseline …
+        let mut stats = RuntimeStats::new();
+        for _ in 0..5 {
+            stats.record_source_latency(1, 100.0);
+        }
+        // … then a SUSTAINED jump to 1000.0 for several consecutive samples. The EWMA climbs
+        // 370 → 559 → 691 → 784 … crossing 400 (= 4× baseline) by the 2nd sustained sample.
+        stats.record_source_latency(1, 1000.0); // 370 — not yet over.
+        stats.record_source_latency(1, 1000.0); // 559 — over the 400 trigger band.
+        assert!(
+            stats.observed_latency_of(1).unwrap() > 400.0,
+            "a sustained shift must converge the EWMA past the trigger band"
+        );
+        let outcome = exec.maybe_replan(&stats);
+        assert_eq!(
+            outcome,
+            ReplanOutcome::Switched,
+            "a sustained latency shift (EWMA converged past the trigger) MUST re-plan + switch"
+        );
+        assert_eq!(
+            exec.remaining_order(),
+            &[2, 1],
+            "the sustainedly-slow :b arm is deferred behind the faster :c arm"
+        );
+    }
+
+    // ---- RESULT-EQUIVALENCE under an EWMA-driven (sustained-latency) reorder: the smoothed
+    //      latency path is still a pure suffix permutation — same result multiset as static.
+    //      Mirrors latency_replan_result_equals_static but drives the switch via the EWMA
+    //      (multiple samples), not a single raw value.
+    #[test]
+    fn ewma_replan_result_equals_static() {
+        let (bgp, srcs) = three_source_star();
+        let solutions: SolutionSets = vec![
+            vec![
+                t(&[("s", "s1"), ("x", "x1")]),
+                t(&[("s", "s2"), ("x", "x2")]),
+                t(&[("s", "s3"), ("x", "x3")]),
+            ],
+            vec![
+                t(&[("s", "s1"), ("y", "y1")]),
+                t(&[("s", "s1"), ("y", "y7")]),
+                t(&[("s", "s2"), ("y", "y2")]),
+            ],
+            vec![
+                t(&[("s", "s1"), ("z", "z1")]),
+                t(&[("s", "s3"), ("z", "z3")]),
+            ],
+        ];
+        let sel = select_sources(&bgp, &srcs);
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        let static_order = plan.join_order();
+        let static_result = evaluate(&bgp, &solutions, &static_order);
+
+        let mut exec = AdaptiveExecutor::new(
+            &bgp,
+            &srcs,
+            &sel,
+            &plan,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        );
+        let _seed = exec.advance().unwrap();
+        // Sustained slow :b, accumulated via the EWMA (several samples), converging past trigger.
+        let mut stats = RuntimeStats::new();
+        for _ in 0..6 {
+            stats.record_source_latency(1, 1000.0);
+        }
+        assert_eq!(
+            exec.maybe_replan(&stats),
+            ReplanOutcome::Switched,
+            "fixture is designed to switch on the EWMA-smoothed latency"
+        );
+        let mut adaptive_order = exec.executed_order().to_vec();
+        adaptive_order.extend_from_slice(exec.remaining_order());
+        assert_ne!(
+            adaptive_order, static_order,
+            "the EWMA-driven re-plan must actually change the order (non-vacuous)"
+        );
+        let mut a_sorted = adaptive_order.clone();
+        let mut s_sorted = static_order.clone();
+        a_sorted.sort();
+        s_sorted.sort();
+        assert_eq!(a_sorted, s_sorted, "EWMA re-plan preserves the pattern SET");
+        let adaptive_result = evaluate(&bgp, &solutions, &adaptive_order);
+        assert!(
+            multiset_eq(&static_result, &adaptive_result),
+            "EWMA-reordered result MUST equal the static plan's result multiset"
+        );
+        assert!(!static_result.is_empty(), "fixture must produce some rows");
     }
 }

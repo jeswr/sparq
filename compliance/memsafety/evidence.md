@@ -151,10 +151,13 @@ non-blocking UB safety net (`-Zbuild-std` is many minutes) and `ci-summary / gat
 discovers nor waits on it; the job name `asan (mmap corruption corpus, informational)` also
 carries the `informational` token belt-and-braces.
 
-**Honesty on local verification:** the ASan FLOW (flags, build-std, gnu target, leak-suppress)
-was exercised locally on the agent's `aarch64-unknown-linux-gnu` host (a valid ASan target);
-the lane pins the `x86_64-unknown-linux-gnu` runner triple. See the inconsistencies note below
-for the precise tested-vs-untested boundary.
+**Local verification (sparq-core half): PASSED.** The first lane command was RUN locally on
+the agent's `aarch64-unknown-linux-gnu` host (a valid ASan target): the ASan-instrumented
+`mmap_corruption_oracle` built (`-Zbuild-std` rebuilt std under `-Zsanitizer`) and the corpus
+ran clean — `test result: ok. 4 passed; 0 failed` with NO ASan report (no heap-OOB / UAF / UB
+on the truncate + bit-flip sweep). The lane PINS the `x86_64-unknown-linux-gnu` runner triple;
+the flow is identical across the two gnu triples. See the inconsistencies note below for the
+precise tested-vs-untested boundary.
 
 ## MS-10 — clippy `-D warnings`
 
@@ -192,11 +195,13 @@ The parser/planner/executor/reasoner/SHACL layers are in the MS-1 forbid list (o
 2. The register's `undocumented_unsafe_blocks` enforcement sentence is an overstatement
    (MS-G2) — corrected in MS-5/evidence and in the register itself.
 3. **ASan lane (MS-9b / asan.yml) — tested-vs-untested boundary (sq-hybl, honest).** The
-   ASan *flow* (`RUSTFLAGS=-Zsanitizer=address` + `-Zbuild-std` + a non-musl GNU `--target` +
-   `ASAN_OPTIONS=detect_leaks=0`) was exercised locally on the agent's
-   `aarch64-unknown-linux-gnu` host — a valid ASan target — to confirm the flag combination
-   compiles + runs the instrumented corruption-corpus tests. The lane itself pins the
-   `x86_64-unknown-linux-gnu` GitHub runner triple (matching `fuzz.yml`), which was NOT run
-   in this worktree (no x86_64 runner here). The flow is identical across the two gnu triples;
-   validate on the FIRST scheduled/dispatched CI run. The lane is non-blocking, so a
-   first-run hiccup cannot block any merge.
+   sparq-core lane command (`RUSTFLAGS=-Zsanitizer=address` + `-Zbuild-std` + a non-musl GNU
+   `--target` + `ASAN_OPTIONS=detect_leaks=0` over `mmap_corruption_oracle --features
+   mmap,dict-spill`) was actually RUN to completion locally on the agent's
+   `aarch64-unknown-linux-gnu` host (a valid ASan target): it built and the corpus passed
+   clean — `4 passed; 0 failed`, no ASan report. The sparq-vectors `store`/`diskann` command
+   was NOT separately run locally (same flow, no extra feature). The lane PINS the
+   `x86_64-unknown-linux-gnu` GitHub runner triple (matching `fuzz.yml`), which was not run in
+   this worktree (no x86_64 runner here); the flow is identical across the two gnu triples —
+   validate the x86_64 leg + the vectors leg on the FIRST scheduled/dispatched CI run. The
+   lane is non-blocking, so a first-run hiccup cannot block any merge.

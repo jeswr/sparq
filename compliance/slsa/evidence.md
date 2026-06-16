@@ -150,9 +150,22 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
 
 ## What the evidence does NOT support (read alongside `gap-register.md`)
 
-- **No provenance** is attached to `dist.yml`-built binaries (GX-9), nor to the
-  crates.io/npm/PyPI published packages (GX-10). `gh attestation verify` will **fail** on a
-  binary obtained via those paths — that is the honest, expected result, not a bug.
+- **`dist.yml` binaries are now attested** (GX-9 closed, sq-toze.23): `dist.yml#build` runs
+  `actions/attest-build-provenance` (+ cargo-auditable, `--locked`) with `id-token`/`attestations`
+  write, so `gh attestation verify dist/sparq-cli-<tier> --repo jeswr/sparq` succeeds.
+- **Published-package provenance — PARTIAL (GX-10 / sq-toze.24, `publish.yml`):**
+  - **npm `@jeswr/sparq` — provenance NOW EMITTED.** `publish.yml#npm` runs `npm publish
+    --provenance --access public` in the GitHub-Actions OIDC context; the registry stores a
+    Sigstore-signed SLSA provenance statement for the version, and the job's `npm audit signatures`
+    step fails if it is absent. **Verify (consumer):** `npm audit signatures` in a project that has
+    `@jeswr/sparq` installed, or inspect the "Provenance" panel on the npmjs.com version page.
+  - **crates.io — out-of-band attestation only.** `publish.yml#crates` attests the `cargo package`
+    `.crate` bytes with `attest-build-provenance`; **verify** with `gh attestation verify
+    <name>-<ver>.crate --repo jeswr/sparq` against the downloaded crate. crates.io itself stores
+    **no provenance link** (no upstream mechanism) — `gh attestation verify` against a crate fetched
+    via `cargo` will only succeed if you point it at the attested `.crate` artifact; the registry
+    page carries no badge. This is the honest, expected boundary (external sub-gap), not a bug.
+  - **PyPI — still unattested** (no publish/PEP-740 lane yet; `python.yml` test-only).
 - **No Build L3** evidence exists: provenance is generated in the build job, not by an
   isolated trusted builder (GX-11). Do not interpret the L2 attestations as L3.
 - **No reproducible-build evidence** (GX-8 / sq-toze.9): there is no documented bit-for-bit

@@ -36,6 +36,17 @@ pub mod http;
 #[cfg(feature = "audit-log")]
 pub mod audit;
 
+/// [OPUS-4.8] (sq-gos8, epic sq-toze) OPT-IN RICHER STRUCTURED access-audit sink (ASVS V7 /
+/// ISO 27001 A.8.15 / CDMC CD-2 logging). Compiled only behind the `access-audit` feature, and
+/// emitted only when a sink is configured (`--access-audit <file|stderr>` /
+/// `SPARQ_ACCESS_AUDIT`). Emits a TYPED access RECORD per enforced decision (actor / action /
+/// resource / decision + policy-basis / timestamp / request fingerprint) as JSON-Lines through
+/// the pluggable [`access_audit::AuditSink`] trait. PRIVACY BOUNDARY: identities + resource IRIs
+/// are recorded by design (the audit trail); the query CONTENT only as a non-reversible
+/// fingerprint, never the raw text. See the module docs.
+#[cfg(feature = "access-audit")]
+pub mod access_audit;
+
 /// [OPUS-4.8] (sq-d3d8, epic sq-3183) OPT-IN federation discovery descriptors — the W3C
 /// VoID dataset description (`GET /.well-known/void`) and the SPARQL 1.1 Service Description
 /// (a `GET /sparql` with no `query`). Compiled only behind the `federation-descriptors`

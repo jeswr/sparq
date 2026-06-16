@@ -32,6 +32,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   proveAgeEligibility,
+  prewarmProver,
   PROVABLE_AGES,
   AGE_THRESHOLD,
   type ProofResult,
@@ -53,9 +54,38 @@ type Phase =
   | { kind: "rejected"; message: string } // under-age → unsatisfiable
   | { kind: "error"; message: string };
 
+// [OPUS-4.8] Prover warm-up lifecycle, surfaced as a subtle indicator — mirrors the
+// SPARQL REPL's Engine pill. The dynamic-import + circuit fetch + Barretenberg WASM
+// instantiate is kicked off on mount (prewarmProver) so the first "Generate ZK proof"
+// pays no cold start. The proving path awaits the same shared promise as a safety net.
+type ProverState = "cold" | "warming" | "ready" | "error";
+
 export function ZkCarHire() {
   const [age, setAge] = React.useState(30);
   const [phase, setPhase] = React.useState<Phase>({ kind: "idle" });
+  const [prover, setProver] = React.useState<ProverState>("cold");
+
+  // Pre-warm the in-browser ZK prover in the background on mount, off the render path.
+  // A failure resets the indicator; proveAgeEligibility still awaits the shared init,
+  // so the button never silently no-ops or throws on a cold prover. Route-scoped (this
+  // component only renders on the ZK pages) so the ~MB bb.js WASM is never fetched on
+  // other routes — the prover assets stay off /try, /papers, /benchmarks, etc.
+  React.useEffect(() => {
+    let cancelled = false;
+    setProver("warming");
+    prewarmProver()
+      .then(() => {
+        if (!cancelled) setProver("ready");
+      })
+      .catch(() => {
+        // Transient load failure (fetch/instantiate) — the cache self-resets, so the
+        // next "Generate ZK proof" retries the cold start. Surface it on the pill only.
+        if (!cancelled) setProver("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const run = React.useCallback(async () => {
     try {
@@ -64,6 +94,8 @@ export function ZkCarHire() {
       await new Promise((r) => setTimeout(r, 0));
       setPhase({ kind: "proving" });
       const result = await proveAgeEligibility(age);
+      // The shared prover init resolved (proveAgeEligibility awaits it): reflect ready.
+      setProver("ready");
       setPhase({ kind: "verifying" });
       // verifyProof already ran inside proveAgeEligibility; reflect it.
       setPhase({ kind: "done", result });
@@ -148,9 +180,12 @@ export function ZkCarHire() {
               <ShieldCheck className="size-4 text-primary" />
               The desk’s eligibility query (public)
             </CardTitle>
-            <Badge variant="success">
-              <Cpu className="size-3" /> Live via bb.js
-            </Badge>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <ProverIndicator prover={prover} />
+              <Badge variant="success">
+                <Cpu className="size-3" /> Live via bb.js
+              </Badge>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <pre className="overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[11.5px] leading-relaxed">
@@ -231,6 +266,30 @@ export function ZkCarHire() {
       {/* ── Honesty ── */}
       <HonestyPanel />
     </div>
+  );
+}
+
+// [OPUS-4.8] Subtle prover-readiness pill. Reuses the badge tokens; never blocks the
+// UI and never alters any security claim — it only reports cold-start progress.
+function ProverIndicator({ prover }: { prover: ProverState }) {
+  if (prover === "ready") {
+    return (
+      <Badge variant="muted" aria-live="polite">
+        <CircleCheck className="size-3 text-[var(--success)]" /> Prover ready
+      </Badge>
+    );
+  }
+  if (prover === "error") {
+    return (
+      <Badge variant="warning" aria-live="polite">
+        <CircleAlert className="size-3" /> Prover load failed — retries on proof
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="muted" aria-live="polite">
+      <Loader2 className="size-3 animate-spin" /> Initializing ZK prover…
+    </Badge>
   );
 }
 
@@ -324,7 +383,13 @@ function VerdictPanel({ phase, age }: { phase: Phase; age: number }) {
 
         <div className="grid gap-3 sm:grid-cols-2">
           <Stat label="Proof verified in your tab" value={r.verified ? "yes" : "no"} />
-          <Stat label="Proof size (fields)" value={r.proofByteLength.toString()} />
+          {/* [OPUS-4.8] proofByteLength is BYTES (= fields × 32). Surface KB honestly
+              and derive the field count, instead of mislabelling raw bytes as "fields". */}
+          <Stat
+            label="Proof size"
+            value={`${(r.proofByteLength / 1024).toFixed(1)} KB`}
+            sub={`${Math.round(r.proofByteLength / 32)} fields`}
+          />
           <Stat label="Prove time" value={`${r.proveMs.toFixed(0)} ms`} sub="non-canonical" />
           <Stat label="Verify time" value={`${r.verifyMs.toFixed(0)} ms`} sub="non-canonical" />
         </div>
@@ -470,6 +535,22 @@ function HonestyPanel() {
           verified by <code className="font-mono">@aztec/bb.js</code> in your
           browser. The exact age is the private witness and never appears in the
           public inputs.
+        </p>
+        <p>
+          <strong className="text-foreground">On proof size and speed.</strong>{" "}
+          The proof is <strong>inherently KB-scale</strong>: UltraHonk is a
+          transparent, no-trusted-setup proof system whose proofs are kilobytes of
+          field elements — not the ~200&nbsp;byte single proof of a Groth16 SNARK, and
+          there is no compact mode (a sub-KB single proof would need recursive
+          aggregation, which is out of scope here). This page uses the keccak-oracle
+          flavour (<code className="font-mono">verifierTarget:&nbsp;&apos;evm&apos;</code>),
+          which is ~43% smaller than the default while staying{" "}
+          <strong>fully zero-knowledge</strong>. As a hard guardrail, the demo never
+          uses any <code className="font-mono">*-no-zk</code> flavour
+          (<code className="font-mono">disableZk:&nbsp;true</code>): those strip the
+          ZK masking and would make the private age recoverable in principle. On plain
+          GitHub Pages a service-worker shim is the only lever that unlocks
+          multithreaded proving (timings are non-canonical and host-dependent).
         </p>
         <p>
           <strong className="text-foreground">

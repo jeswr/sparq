@@ -127,6 +127,14 @@ impl FunctionRegistry {
         self.map.get(iri)
     }
 
+    /// [OPUS-4.8] sq-qfcb: iterates the IRIs of every registered extension function
+    /// (unspecified order). Lets a caller advertise EXACTLY the functions actually
+    /// installed (e.g. the SPARQL Service Description's `sd:extensionFunction`) without
+    /// hand-maintaining a parallel list that could drift from the registry.
+    pub fn iris(&self) -> impl Iterator<Item = &str> {
+        self.map.keys().map(String::as_str)
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -152,6 +160,21 @@ pub fn with_functions<T>(fns: &FunctionRegistry, f: impl FnOnce() -> T) -> T {
     let _guard = exec::functions::install(fns);
     f()
 }
+
+// ---- Custom aggregate registry + window functions (sq-5qz9) -----------------
+//
+// NON-DEFAULT `window-functions` feature. Two distinct, OPT-IN extension surfaces;
+// when the feature is off, NOTHING below compiles and the default build is
+// byte-identical (these add no dependencies). [OPUS-4.8]
+#[cfg(feature = "window-functions")]
+mod aggregate;
+#[cfg(feature = "window-functions")]
+pub mod window;
+#[cfg(feature = "window-functions")]
+pub use aggregate::{
+    query_with_aggregates, query_with_aggregates_and_budget, with_aggregates, AggFn,
+    CustomAggregateRegistry,
+};
 
 // ---- Spatial pushdown seam (sq-mg9) -----------------------------------------
 //
