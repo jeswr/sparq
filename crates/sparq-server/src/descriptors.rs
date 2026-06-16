@@ -137,14 +137,20 @@ fn parse_ntriples(nt: &str) -> Result<Vec<Triple>, String> {
 ///
 /// `dataset_iri` is the IRI that names the `void:Dataset` (conventionally the dataset's URL,
 /// e.g. `https://host/.well-known/void#dataset`). Generation delegates to
-/// [`Introspection::to_void`] (exact counts + class/property partitions); the only work here
-/// is re-serialising into the negotiated syntax.
+/// [`Introspection::to_void_with_cs`] — the standard VoID counts + class/property partitions,
+/// **plus** the characteristic-set source statistics (the sparq `scs:` extension; see
+/// [`Introspection::to_void_with_cs`] / sq-mr32, federation A3/Z2). The CS stats ride the
+/// same opt-in `federation-descriptors` gating as the rest of this module: a federation
+/// client polling `/.well-known/void` on a CS-aware sparq node gets per-entity-type predicate
+/// co-occurrence + multiplicity for sharp star/multi-join source selection, while a
+/// VoID-only client reads the unchanged standard partitions and ignores the rest. The only
+/// work here is re-serialising into the negotiated syntax.
 pub fn void_descriptor(
     graph: &Graph,
     dataset_iri: &str,
     accept: Option<&str>,
 ) -> Result<Descriptor, String> {
-    let nt = Introspection::build(graph).to_void(dataset_iri);
+    let nt = Introspection::build(graph).to_void_with_cs(dataset_iri);
     let triples = parse_ntriples(&nt)?;
     let fmt = negotiate_descriptor(accept);
     let (content_type, body) = serialise(&triples, fmt);
@@ -255,6 +261,65 @@ mod tests {
         // The raw VoID N-Triples carries the void:triples predicate.
         let nt = Introspection::build(&graph()).to_void("http://host/.well-known/void#dataset");
         assert!(nt.contains("<http://rdfs.org/ns/void#triples>"));
+    }
+
+    #[test]
+    fn void_descriptor_carries_characteristic_set_stats() {
+        // [OPUS-4.8] sq-mr32 (federation A3/Z2): the served VoID must now also carry the
+        // characteristic-set source statistics (sparq `scs:` extension), in valid RDF.
+        // N-Triples first (exact predicate IRIs), then Turtle (must re-parse).
+        let nt = void_descriptor(
+            &graph(),
+            "http://host/.well-known/void#dataset",
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        let b = &nt.body;
+        // Standard VoID is still present (CS rides ALONGSIDE, never replaces it).
+        assert!(b.contains("<http://rdfs.org/ns/void#Dataset>"), "{b}");
+        // Dataset links to characteristic sets + carries the EXACT distinct-set count.
+        assert!(
+            b.contains("<http://sparq.dev/ns/cs#characteristicSet>"),
+            "served VoID must link the dataset to characteristic sets: {b}"
+        );
+        assert!(
+            b.contains("<http://sparq.dev/ns/cs#distinctCharacteristicSets>"),
+            "served VoID must carry the distinct-set count: {b}"
+        );
+        // A CS node: typed, with subjects + per-predicate stat nodes (property + triples
+        // + avg multiplicity).
+        assert!(
+            b.contains("<http://sparq.dev/ns/cs#CharacteristicSet>"),
+            "{b}"
+        );
+        assert!(b.contains("<http://sparq.dev/ns/cs#subjects>"), "{b}");
+        assert!(b.contains("<http://sparq.dev/ns/cs#predicateStat>"), "{b}");
+        assert!(
+            b.contains("<http://sparq.dev/ns/cs#avgMultiplicity>"),
+            "{b}"
+        );
+        // Per-predicate stat reuses void:property/void:triples and names a real predicate.
+        assert!(b.contains("<http://rdfs.org/ns/void#property>"), "{b}");
+        assert!(
+            b.contains("<http://ex/knows>"),
+            "CS stat must name the predicate: {b}"
+        );
+
+        // Turtle serialisation of the same document must be well-formed RDF and still
+        // carry the CS extension namespace.
+        let tt = void_descriptor(&graph(), "http://host/ds", Some("text/turtle")).unwrap();
+        assert_eq!(tt.content_type, "text/turtle; charset=utf-8");
+        let mut n = 0usize;
+        for r in oxttl::TurtleParser::new().for_slice(tt.body.as_bytes()) {
+            r.expect("VoID+CS Turtle must be valid RDF");
+            n += 1;
+        }
+        assert!(n >= 10, "VoID+CS should have many triples, got {n}");
+        assert!(
+            tt.body.contains("sparq.dev/ns/cs#"),
+            "Turtle VoID must carry the CS extension vocab: {}",
+            tt.body
+        );
     }
 
     #[test]

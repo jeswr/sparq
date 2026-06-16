@@ -3353,6 +3353,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-fedplan"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "oxttl 0.2.3",
+ "rustc-hash 2.1.2",
+]
+
+[[package]]
 name = "sparq-geo"
 version = "0.1.0"
 dependencies = [
@@ -3566,6 +3575,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-policy",
  "sparq-reason",
 ]
 

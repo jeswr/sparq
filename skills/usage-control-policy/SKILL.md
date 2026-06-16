@@ -76,6 +76,27 @@ assert_eq!(d.matched_rules.len(), 1);  // the granting permission, for audit
 
 `Request::new(action_iri)` then chain `.on(target)`, `.by(party)`, `.with(left_operand_iri, Value)` for each context dimension (`dateTime`, `purpose`, `recipient`, `count`, `spatial`, …), and `.discharge(duty_action_iri)` per discharged duty. `Value` is `Iri` | `Str` | `Num(f64)` | `DateTime(String)`.
 
+## Bridge to WAC/ACP enforcement (opt-in `odrl-bridge`) — [OPUS-4.8] sq-h3uk
+
+`sparq-solid` can **materialize** a matched ODRL permission into its `<urn:sparq:auth>` AUTH_GRAPH so the existing graph-level WAC/ACP enforcement applies it — **no new enforcement engine**. Behind the off-by-default `odrl-bridge` cargo feature on `sparq-solid` (it pulls in `sparq-policy` only when enabled; the default solid build stays ODRL-free). This is the **single-node** bridge of epic sq-3183, **research-track**, NOT the (gated) federated/ZK-disclosure path.
+
+```rust,ignore
+// cargo: sparq-solid with --features odrl-bridge
+use sparq_solid::{PodStore, Session, Mode};
+use sparq_policy::Request;
+let req = Request::new("http://www.w3.org/ns/odrl/2/read")
+    .on("https://pod.ex/notes/n1").by("https://alice.ex/card#me");
+// On a definite Permit, appends `alice auth:read n1` to the auth view, then reindexes.
+let out = store.materialize_odrl_permission(&policy, &req);
+assert!(out.granted);
+// …now honoured by the unchanged enforcement path:
+assert!(!store.accessible(&Session { agent: Some("https://alice.ex/card#me"), client: None }, Mode::Read).is_empty());
+```
+
+**Action → mode** (the ODRL *request* action; conservative — narrowest mode only): `read`/`display`/`present`/`print`/`play` → `acl:Read`; `append` → `acl:Append`; `modify`/`delete`/`write` → `acl:Write`; **anything else (incl. the `odrl:use` umbrella) is unmapped → no grant**. `use` is left unmapped because it subsumes every action (mapping it would have to pick the widest mode) — request `odrl:read` explicitly; a `use` permission still grants that concrete request.
+
+**Fail-closed:** a grant is materialized only on a *definite Permit* AND a *mappable action* AND a *concrete party (WebID) + target graph*. A Deny, unsatisfied constraint, undischarged duty, unmapped action, or partyless/targetless request materializes **nothing**.
+
 ## Learn more
 
 - Crate README: [`crates/sparq-policy/README.md`](../../crates/sparq-policy/README.md)

@@ -124,6 +124,61 @@ async fn void_negotiates_ntriples() {
     );
 }
 
+#[tokio::test]
+async fn void_carries_characteristic_set_stats() {
+    // [OPUS-4.8] sq-mr32 (federation A3/Z2): the served VoID now also carries the
+    // characteristic-set source statistics (sparq `scs:` extension), end-to-end over the
+    // real HTTP server — so a federation client polling this node gets per-entity-type
+    // predicate co-occurrence + multiplicity, not just bare VoID counts.
+    let base = spawn(true).await;
+    let resp = client()
+        .get(format!("{base}/.well-known/void"))
+        .header("Accept", "application/n-triples")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    // Standard VoID still present (CS rides alongside, never replaces it).
+    assert!(
+        body.contains("<http://rdfs.org/ns/void#Dataset>"),
+        "VoID still present: {body}"
+    );
+    // Dataset links to characteristic sets + carries the exact distinct-set count.
+    assert!(
+        body.contains("<http://sparq.dev/ns/cs#characteristicSet>"),
+        "served VoID must link characteristic sets: {body}"
+    );
+    assert!(
+        body.contains("<http://sparq.dev/ns/cs#distinctCharacteristicSets>"),
+        "served VoID must carry the distinct-set count: {body}"
+    );
+    // A typed CS node with subjects + per-predicate stats (property/triples/avgMult).
+    assert!(
+        body.contains("<http://sparq.dev/ns/cs#CharacteristicSet>"),
+        "{body}"
+    );
+    assert!(body.contains("<http://sparq.dev/ns/cs#subjects>"), "{body}");
+    assert!(
+        body.contains("<http://sparq.dev/ns/cs#avgMultiplicity>"),
+        "{body}"
+    );
+    // The CS partition reuses void:property and names a real predicate from the graph.
+    assert!(
+        body.contains("<http://ex/knows>"),
+        "CS stat must name the predicate: {body}"
+    );
+    // The whole body must still be valid RDF (re-parses as N-Triples).
+    let n = oxttl::NTriplesParser::new()
+        .for_slice(body.as_bytes())
+        .filter(|t| t.is_ok())
+        .count();
+    assert!(
+        n >= 10,
+        "VoID+CS should re-parse to many triples, got {n}: {body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // SPARQL Service Description (GET /sparql with no query).
 // ---------------------------------------------------------------------------

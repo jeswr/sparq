@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import importlib.util
 import json
 import os
 import re
@@ -51,6 +52,29 @@ BASE_LABELS = ["flow-on", "auto"]
 # docs rule ONLY when no SKILL.md was touched in the same PR. A change anywhere
 # under skills/ counts as "the docs were synced", suppressing that rule.
 SKILL_PATHS = ("skills/",)
+
+# The reactive docs rule that the pub-API-diff gate below applies to.
+DOCS_RULE_ID = "changed-public-feature-docs"
+
+
+# [OPUS-4.8] The `changed-public-feature-docs` rule must fire ONLY on a NET
+# public-API change — never on a comment-only / lint-attribute-only / pure
+# relocation diff (dogfooded: PR #250 mis-minted a skill-sync follow-on for a
+# comment+lint-attr-only diff — bead sq-l0a0). We reuse the EXACT `pub `-item
+# multiset-diff used by merge gate G2, factored into scripts/pub_api_diff.py, so
+# the reactive engine and the proactive gate can never drift. Loaded by path
+# (the scripts dir is not an importable package).
+def _load_pub_api_diff():
+    spec = importlib.util.spec_from_file_location(
+        "pub_api_diff", REPO_ROOT / "scripts" / "pub_api_diff.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_pad = _load_pub_api_diff()
 
 
 @dataclass
@@ -176,7 +200,14 @@ def _any_glob_match(globs: list[str], paths: list[str]) -> bool:
     return False
 
 
-def rule_matches(rule: Rule, changed: list[str], added: list[str], labels: list[str], title: str) -> bool:
+def rule_matches(
+    rule: Rule,
+    changed: list[str],
+    added: list[str],
+    labels: list[str],
+    title: str,
+    pub_changed: set[str] | None = None,
+) -> bool:
     # ALL present predicates must pass; absent predicates are ignored.
     if rule.when_paths and not _any_glob_match(rule.when_paths, changed):
         return False
@@ -187,10 +218,27 @@ def rule_matches(rule: Rule, changed: list[str], added: list[str], labels: list[
     if rule.when_title is not None and not re.search(rule.when_title, title, re.IGNORECASE):
         return False
 
-    # Special case for the changed-public-feature docs rule: suppress it when the
-    # PR already touched a SKILL.md (the docs were synced in the same diff).
-    if rule.id == "changed-public-feature-docs":
+    # [OPUS-4.8] Special handling for the changed-public-feature docs rule
+    # (bead sq-l0a0). The when_paths glob is only a cheap pre-filter; on top of it
+    # two further conditions must hold for the follow-on to be genuine:
+    #   1. no SKILL.md was touched in the same diff (the docs were already synced
+    #      → suppress, identical to gate G2's SKILL suppression); AND
+    #   2. the PR's diff NET-changes a `pub `-exported item under one of the
+    #      matched surfaces (`pub_changed`), so a comment-only / lint-attr-only /
+    #      pure-relocation edit does NOT mint a redundant follow-on.
+    # `pub_changed` is the set of changed paths whose unified diff has a net
+    # public-API change. `None` means "diff not available" → conservatively treat
+    # as no net change (do NOT fire), so a caller that cannot inspect the diff
+    # never produces a false-positive follow-on.
+    if rule.id == DOCS_RULE_ID:
         if any(p.startswith(SKILL_PATHS) for p in changed):
+            return False
+        net = pub_changed or set()
+        # Fire only when at least one of THIS rule's matched surface paths has a
+        # net public-API change.
+        if not any(
+            _any_glob_match(rule.when_paths, [p]) and p in net for p in changed
+        ):
             return False
     return True
 
@@ -206,12 +254,13 @@ def evaluate(
     changed: list[str],
     added: list[str],
     labels: list[str],
+    pub_changed: set[str] | None = None,
 ) -> list[FollowOn]:
     ctx = build_context(pr, pr_title, changed, added)
     out: list[FollowOn] = []
     seen_keys: set[str] = set()
     for rule in rules:
-        if not rule_matches(rule, changed, added, labels, pr_title):
+        if not rule_matches(rule, changed, added, labels, pr_title, pub_changed):
             continue
         for tmpl in rule.creates:
             dedup_key = expand(tmpl.dedup_key, ctx)
@@ -249,23 +298,48 @@ def _gh(args: list[str]) -> str:
     return proc.stdout
 
 
-def fetch_pr_inputs(pr: int) -> tuple[str, list[str], list[str], list[str]]:
-    """Return (title, changed_files, added_files, labels) for a merged PR via gh."""
+def fetch_pr_inputs(pr: int) -> tuple[str, list[str], list[str], list[str], set[str]]:
+    """Return (title, changed_files, added_files, labels, pub_changed) for a
+    merged PR via gh. `pub_changed` is the set of changed paths whose unified diff
+    NET-changes a `pub `-exported item (used by the docs rule)."""
     info = json.loads(_gh(["pr", "view", str(pr), "--json", "title,labels,files"]))
     title = info.get("title", "")
     labels = [lbl["name"] for lbl in info.get("labels", [])]
     files = info.get("files", [])
     changed = [f["path"] for f in files]
-    # gh's files[].additions/deletions don't reveal status; use the diff to find
-    # purely-added files (status "A").
-    added = _added_files_via_diff(pr)
-    return title, changed, added, labels
-
-
-def _added_files_via_diff(pr: int) -> list[str]:
-    # `gh pr diff --name-only` lists changed files but not status. Use the patch
-    # and detect "new file mode" hunks for added-file paths.
+    # gh's files[].additions/deletions don't reveal status; parse the patch once
+    # for both purely-added files (status "A") and the per-file pub-API verdict.
     patch = _gh(["pr", "diff", str(pr)])
+    added = _added_files_from_patch(patch)
+    pub_changed = pub_changed_from_patch(patch)
+    return title, changed, added, labels, pub_changed
+
+
+def _split_patch_per_file(patch: str) -> dict[str, list[str]]:
+    """Split a unified `gh pr diff` patch into {dest_path: [diff lines]}.
+
+    The destination path is taken from each `+++ b/<path>` header; lines before
+    the first header are ignored. A deleted file (`+++ /dev/null`) is skipped."""
+    per_file: dict[str, list[str]] = {}
+    cur_path: str | None = None
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            cur_path = None
+            continue
+        if line.startswith("+++ b/"):
+            cur_path = line[len("+++ b/") :]
+            per_file.setdefault(cur_path, [])
+            continue
+        if line.startswith("+++ "):  # +++ /dev/null (deletion) — no dest path
+            cur_path = None
+            continue
+        if cur_path is not None:
+            per_file[cur_path].append(line)
+    return per_file
+
+
+def _added_files_from_patch(patch: str) -> list[str]:
+    # Detect "new file mode" hunks for added-file (status "A") paths.
     added: list[str] = []
     cur_new = False
     for line in patch.splitlines():
@@ -274,9 +348,22 @@ def _added_files_via_diff(pr: int) -> list[str]:
         elif line.startswith("new file mode"):
             cur_new = True
         elif line.startswith("+++ b/") and cur_new:
-            added.append(line[len("+++ b/"):])
+            added.append(line[len("+++ b/") :])
             cur_new = False
     return added
+
+
+def pub_changed_from_patch(patch: str) -> set[str]:
+    """Return the set of changed paths whose per-file diff NET-changes a
+    `pub `-exported item, using the shared gate-G2 multiset diff. Only
+    `crates/*/src/**` paths can qualify (matches the gate's scope)."""
+    out: set[str] = set()
+    for path, lines in _split_patch_per_file(patch).items():
+        if not re.match(r"^crates/[^/]+/src/.+", path):
+            continue
+        if _pad.diff_has_net_pub_change(lines):
+            out.add(path)
+    return out
 
 
 def open_issue_exists(dedup_key: str) -> bool:
@@ -359,6 +446,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--added-files", help="file with one ADDED path per line (subset of changed)")
     ap.add_argument("--labels-file", help="file with one PR label per line")
     ap.add_argument("--title", help="PR title")
+    # [OPUS-4.8] Hermetic injection of the "net public-API change" verdict used by
+    # the changed-public-feature-docs rule (bead sq-l0a0): one path per line, each
+    # a changed crate src file whose diff NET-changes a `pub `-item. When omitted
+    # in hermetic mode the set is EMPTY, so the docs rule does NOT fire (a
+    # comment-only diff mints nothing). The real gh path computes this from the
+    # PR patch via the shared gate-G2 pub-item multiset diff.
+    ap.add_argument(
+        "--pub-diff-file",
+        help="file with one changed src path per line that has a NET pub-API change",
+    )
     args = ap.parse_args(argv)
 
     rules = load_rules(Path(args.rules))
@@ -375,10 +472,11 @@ def main(argv: list[str] | None = None) -> int:
         added = _read_lines(args.added_files) if args.added_files else []
         labels = _read_lines(args.labels_file) if args.labels_file else []
         title = args.title
+        pub_changed = set(_read_lines(args.pub_diff_file)) if args.pub_diff_file else set()
     else:
-        title, changed, added, labels = fetch_pr_inputs(args.pr)
+        title, changed, added, labels, pub_changed = fetch_pr_inputs(args.pr)
 
-    follow_ons = evaluate(rules, args.pr, title, changed, added, labels)
+    follow_ons = evaluate(rules, args.pr, title, changed, added, labels, pub_changed)
 
     if not follow_ons:
         print(f"flow-on: no rules triggered for PR #{args.pr}.")

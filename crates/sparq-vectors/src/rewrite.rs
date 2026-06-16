@@ -90,6 +90,17 @@ use sparq_core::dict::Id;
 use sparq_core::Graph;
 use sparq_engine::{PreparedQuery, QueryBudget, QueryResult};
 
+// [OPUS-4.8] (sq-bvmd, epic sq-3183) Filtered-ANN BGP→IdMask wiring: when a `vec:`
+// request shares its neighbour variable with ordinary patterns in the SAME BGP, those
+// patterns carve out the eligible graph nodes (the candidate id-set), and the k-NN
+// search is restricted to that set — correct (and, for a selective constraint, faster)
+// than post-filtering the unfiltered neighbours. This needs the `filtered-ann` API
+// (`IdMask` + `nearest_exact_filtered`), so the whole derive-and-filter path is
+// additionally gated on `filtered-ann`; with that feature off the `vec:` predicate
+// behaves EXACTLY as before (plain unfiltered `nearest_exact`).
+#[cfg(feature = "filtered-ann")]
+use crate::filter::{nearest_exact_filtered, IdMask};
+
 /// `rdf:first`, `rdf:rest`, `rdf:nil` — the collection vocabulary spargebra
 /// lowers `( … )` argument lists into.
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
@@ -260,9 +271,19 @@ fn rewrite_bgp(
         return Ok(GraphPattern::Bgp { patterns: rest });
     }
 
+    // [OPUS-4.8] (sq-bvmd) The ordinary patterns that survive this BGP are also the
+    // patterns that *constrain* each `vec:` neighbour variable: the subjects they admit
+    // are the candidate id-set for a filtered ANN search. Derive that set from `rest`
+    // BEFORE it is moved into the output (the borrow ends with `mask_constraint`).
+    #[cfg(feature = "filtered-ann")]
+    let mask_constraint = rest.clone();
+
     // Join the hit tables onto the remaining ordinary patterns.
     let mut out = GraphPattern::Bgp { patterns: rest };
     for req in reqs {
+        #[cfg(feature = "filtered-ann")]
+        let hits = run_knn(&req, graph, store, &mask_constraint)?;
+        #[cfg(not(feature = "filtered-ann"))]
         let hits = run_knn(&req, graph, store)?;
         let mut variables = vec![req.node];
         if let Some(s) = &req.score {
@@ -488,7 +509,24 @@ fn term_to_ground(t: Term) -> Option<GroundTerm> {
 
 /// Runs the k-NN search for `req` and returns `(neighbour id, cosine score)`
 /// pairs, best first.
-fn run_knn(req: &KnnReq, graph: &Graph, store: &VectorStore) -> Result<Vec<(Id, f32)>, String> {
+///
+/// [OPUS-4.8] (sq-bvmd) When the `filtered-ann` feature is on, `constraint` is the
+/// BGP's surviving ordinary patterns; if any of them constrain `req.node`, the search
+/// is restricted to the candidate id-set those patterns admit (filtered ANN) instead
+/// of scanning the whole store and joining afterwards. When no pattern constrains the
+/// neighbour variable — or with `filtered-ann` off — this is the plain unfiltered
+/// `nearest_exact` path, byte-identical to the pre-sq-bvmd behaviour.
+fn run_knn(
+    req: &KnnReq,
+    graph: &Graph,
+    store: &VectorStore,
+    #[cfg(feature = "filtered-ann")] constraint: &[TriplePattern],
+) -> Result<Vec<(Id, f32)>, String> {
+    // Derive the candidate id-set (IdMask) from the patterns that constrain `req.node`.
+    // `None` => no constraining pattern => fall through to the unfiltered path.
+    #[cfg(feature = "filtered-ann")]
+    let mask = derive_mask(&req.node, constraint, graph)?;
+
     match &req.query {
         QueryArg::Node(iri) => {
             let term = Term::NamedNode(iri.clone());
@@ -498,6 +536,17 @@ fn run_knn(req: &KnnReq, graph: &Graph, store: &VectorStore) -> Result<Vec<(Id, 
             let Some(query) = store.get(id) else {
                 return Ok(Vec::new());
             };
+            #[cfg(feature = "filtered-ann")]
+            if let Some(mask) = &mask {
+                // Filtered: search only BGP-admitted candidates. Over-fetch by one so
+                // dropping the seed (if it satisfies the constraint and so sits in the
+                // mask) still leaves up to k neighbours, matching the unfiltered form.
+                return Ok(nearest_exact_filtered(store, query, mask, req.k + 1)
+                    .into_iter()
+                    .filter(|&(n, _)| n != id)
+                    .take(req.k)
+                    .collect());
+            }
             // Over-fetch by one and drop the seed itself.
             Ok(nearest_exact(store, query, req.k + 1)
                 .into_iter()
@@ -513,7 +562,75 @@ fn run_knn(req: &KnnReq, graph: &Graph, store: &VectorStore) -> Result<Vec<(Id, 
                     store.dim()
                 ));
             }
+            #[cfg(feature = "filtered-ann")]
+            if let Some(mask) = &mask {
+                return Ok(nearest_exact_filtered(store, v, mask, req.k));
+            }
             Ok(nearest_exact(store, v, req.k))
         }
     }
+}
+
+/// [OPUS-4.8] (sq-bvmd) Builds the candidate [`IdMask`] for `node` from the surrounding
+/// BGP `constraint` patterns — the dictionary ids of every binding `node` takes when the
+/// constraining sub-BGP is evaluated against `graph`.
+///
+/// Only the patterns that actually mention `node` form the constraint (an unrelated
+/// pattern in the same BGP does not narrow the neighbour set — it would be joined as a
+/// cartesian product, which never *removes* a candidate). If `node` is unconstrained
+/// the function returns `Ok(None)` and the caller runs the plain unfiltered search,
+/// preserving the existing `vec:` semantics exactly.
+///
+/// The constraining sub-BGP is evaluated through the standard engine (the same seam the
+/// outer query uses), so FILTERs / shared join variables are honoured correctly: the
+/// mask is exactly the set the engine would bind to `node`, hence the filtered top-k is
+/// identical to post-filtering the unfiltered top-k by that same set (the correctness
+/// invariant — see tests/filtered_bgp.rs).
+#[cfg(feature = "filtered-ann")]
+fn derive_mask(
+    node: &Variable,
+    constraint: &[TriplePattern],
+    graph: &Graph,
+) -> Result<Option<IdMask>, String> {
+    // Keep only the patterns that mention `node`; the rest cannot narrow the candidate
+    // set (they would join as a cross product, never dropping a `node` binding).
+    let sub: Vec<TriplePattern> = constraint
+        .iter()
+        .filter(|tp| pattern_mentions(tp, node))
+        .cloned()
+        .collect();
+    if sub.is_empty() {
+        return Ok(None);
+    }
+
+    // SELECT ?node WHERE { <constraining sub-BGP> } — evaluate the constraint through the
+    // engine and collect the ids it binds to `node`.
+    let select = Query::Select {
+        dataset: None,
+        pattern: GraphPattern::Project {
+            inner: Box::new(GraphPattern::Bgp { patterns: sub }),
+            variables: vec![node.clone()],
+        },
+        base_iri: None,
+    };
+    let result = sparq_engine::query_prepared(graph, &PreparedQuery::from(select))?;
+
+    // Map each bound `node` term back to its dictionary id. A row whose `node` is unbound
+    // (impossible for a BGP-only projection, but cheap to guard) or whose term is not in
+    // the dictionary contributes nothing — it cannot match a stored vector anyway.
+    let mask: IdMask = result
+        .rows
+        .iter()
+        .filter_map(|row| row.first().and_then(|c| c.as_ref()))
+        .filter_map(|term| graph.id_of(term))
+        .collect();
+    Ok(Some(mask))
+}
+
+/// [OPUS-4.8] (sq-bvmd) Does `tp` mention `node` in any term position?
+#[cfg(feature = "filtered-ann")]
+fn pattern_mentions(tp: &TriplePattern, node: &Variable) -> bool {
+    let in_term = |t: &TermPattern| matches!(t, TermPattern::Variable(v) if v == node);
+    let in_named = matches!(&tp.predicate, NamedNodePattern::Variable(v) if v == node);
+    in_term(&tp.subject) || in_named || in_term(&tp.object)
 }

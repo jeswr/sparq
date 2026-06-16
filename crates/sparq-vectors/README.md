@@ -59,6 +59,16 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
   byte-identical output to the in-RAM builder.
 - **Search** — `nearest_exact` (ground-truth baseline), in-RAM HNSW (`VectorIndex`), and the
   persistent on-disk `DiskAnnIndex` (`.spqg`, build once / open with no rebuild).
+- **Predicate-constrained (filtered) ANN (opt-in `filtered-ann`)** — restrict the search to the
+  graph nodes a SPARQL BGP admits: build an `IdMask` from the BGP-selected dict-ids and call
+  `nearest_exact_filtered` / `DiskAnnIndex::nearest_filtered`. Lean feature (no new dependency, no
+  engine pull). Every returned id is in the mask; empty mask → no results; full mask → the
+  unfiltered search.
+- **k-NN inside SPARQL (opt-in `vec-predicate`)** — the `vec:nearest` / `vec:search` magic
+  predicates run vector k-NN in plain SPARQL via a spargebra-algebra rewrite (the engine is
+  unchanged). Composed with `filtered-ann`, a `vec:` neighbour variable that is **also constrained
+  by ordinary BGP patterns** is searched as a *filtered* ANN automatically — the surrounding BGP
+  derives the candidate `IdMask`, so the filtered top-k equals post-filtering the unfiltered top-k.
 - **Verbalization** — `verbalize` / `embed_entities` render `<label>. a <type>. <description>`
   per entity (multilingual, char-budgeted); `embed_labels` is the label-only special case.
 - **Quantization** — `ScalarQuantizer` (4×) and `ProductQuantizer` (asymmetric distance) for

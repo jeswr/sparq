@@ -47,6 +47,26 @@ const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
 const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const VOID_NS: &str = "http://rdfs.org/ns/void#";
+/// [OPUS-4.8] sq-mr32 (federation A3/Z2): the **sparq characteristic-set** extension
+/// vocabulary. VoID has no native term for per-entity-type predicate co-occurrence
+/// statistics (the Neumann & Moerkotte characteristic sets sparq mines), so the served
+/// descriptor expresses them under this documented sparq namespace, alongside (not
+/// replacing) the standard VoID terms. A remote federation source-selector that does
+/// not understand it simply ignores these triples; one that does gets star/multi-join
+/// cardinality estimates far sharper than bare `void:propertyPartition` counts.
+///
+/// Terms (all under `<http://sparq.dev/ns/cs#>`):
+/// - `scs:CharacteristicSet` — the rdf:type of each characteristic-set node.
+/// - `scs:characteristicSet` — links the `void:Dataset` to one characteristic-set node.
+/// - `scs:distinctCharacteristicSets` — total distinct sets in the dataset (on the dataset).
+/// - `scs:subjects` — `count(C)`: subjects whose *exact* predicate set this is.
+/// - `scs:predicateStat` — links a set to one per-predicate statistic node.
+/// - `scs:avgMultiplicity` — `predicate_triples / subjects` for that predicate in the set.
+///
+/// Each per-predicate statistic node reuses `void:property` (the predicate IRI) and
+/// `void:triples` (Σ triples that predicate emits across the set's subjects), so a
+/// VoID-aware-but-cs-unaware client still reads a meaningful property partition.
+const CS_NS: &str = "http://sparq.dev/ns/cs#";
 
 /// Well-known vocabularies, recognised by namespace: `(prefix, namespace, title)`.
 /// Bundled (offline, WASM-safe) — no network lookup.
@@ -1000,6 +1020,87 @@ impl Introspection {
         out
     }
 
+    /// [OPUS-4.8] sq-mr32 (federation A3/Z2): the VoID description ([`to_void`]) **plus**
+    /// the characteristic-set source statistics, as one N-Triples document.
+    ///
+    /// This is the served federation-descriptor surface: it is a strict superset of
+    /// [`to_void`] — every standard VoID triple is emitted unchanged — followed by the
+    /// characteristic-set extension (see [`CS_NS`]). sparq already mines these sets
+    /// (Neumann & Moerkotte's per-entity-type predicate co-occurrence + per-predicate
+    /// multiplicity); exposing them lets a remote, CostFed/Odyssey-class source-selector
+    /// estimate star- and multi-join cardinalities against this node far more accurately
+    /// than the bare `void:propertyPartition` counts allow.
+    ///
+    /// Shape, per retained characteristic set (`self.characteristic_sets.sets`, already
+    /// bounded by [`BuildOptions::max_char_sets`] and ordered by descending subject
+    /// count — so the served document is bounded and deterministic):
+    ///
+    /// ```text
+    /// <dataset> scs:characteristicSet _:csN .
+    /// <dataset> scs:distinctCharacteristicSets "<distinct>"^^xsd:integer .
+    /// _:csN a scs:CharacteristicSet ;
+    ///        scs:subjects "<count(C)>"^^xsd:integer ;
+    ///        scs:predicateStat _:csN_M .
+    /// _:csN_M void:property <predicate> ;
+    ///          void:triples "<Σ triples>"^^xsd:integer ;
+    ///          scs:avgMultiplicity "<triples/subjects>"^^xsd:decimal .
+    /// ```
+    ///
+    /// The elided long tail is summarised on the dataset (`scs:distinctCharacteristicSets`
+    /// is the EXACT distinct-set count, not just the retained count, so a consumer knows
+    /// whether the served sets are complete). Reuses `void:property`/`void:triples` on the
+    /// per-predicate nodes so a VoID-aware client still reads them as property partitions.
+    pub fn to_void_with_cs(&self, dataset_iri: &str) -> String {
+        use std::fmt::Write as _;
+        let mut out = self.to_void(dataset_iri);
+        let ds = NamedNode::new_unchecked(dataset_iri);
+        let cs = |local: &str| format!("{CS_NS}{local}");
+        let v = |local: &str| format!("{VOID_NS}{local}");
+        let iri = |s: &str| NamedNode::new_unchecked(s).to_string();
+        let int = |n: u64| Literal::new_typed_literal(n.to_string(), xsd::INTEGER).to_string();
+        let dec = |val: &str| Literal::new_typed_literal(val.to_string(), xsd::DECIMAL).to_string();
+
+        // Dataset-level: the EXACT distinct-set count (independent of how many were
+        // retained for the served partitions), so a consumer knows the tail exists.
+        let _ = writeln!(
+            out,
+            "{ds} <{}> {} .",
+            cs("distinctCharacteristicSets"),
+            int(self.characteristic_sets.distinct)
+        );
+
+        // One node per retained characteristic set. Blank-node labels are local to this
+        // document and distinct from the VoID partitions' `_:cN`/`_:pN` (here `_:csN`,
+        // `_:csN_M`), so the two blank-node spaces never collide.
+        for (si, set) in self.characteristic_sets.sets.iter().enumerate() {
+            let cnode = format!("_:cs{si}");
+            let _ = writeln!(out, "{ds} <{}> {cnode} .", cs("characteristicSet"));
+            let _ = writeln!(out, "{cnode} <{RDF_TYPE}> <{}> .", cs("CharacteristicSet"));
+            let _ = writeln!(out, "{cnode} <{}> {} .", cs("subjects"), int(set.subjects));
+            for (pi, (pred, &triples)) in set
+                .predicates
+                .iter()
+                .zip(&set.predicate_triples)
+                .enumerate()
+            {
+                let pnode = format!("_:cs{si}_{pi}");
+                let _ = writeln!(out, "{cnode} <{}> {pnode} .", cs("predicateStat"));
+                let _ = writeln!(out, "{pnode} <{}> {} .", v("property"), iri(pred));
+                let _ = writeln!(out, "{pnode} <{}> {} .", v("triples"), int(triples));
+                // avg multiplicity = triples / subjects, rendered as a fixed-precision
+                // xsd:decimal (subjects >= 1 for any retained set).
+                let mult = triples as f64 / set.subjects.max(1) as f64;
+                let _ = writeln!(
+                    out,
+                    "{pnode} <{}> {} .",
+                    cs("avgMultiplicity"),
+                    dec(&format!("{mult:.4}"))
+                );
+            }
+        }
+        out
+    }
+
     /// Renders a compact, prompt-ready text digest under `budget_chars` characters,
     /// most important information first: dataset totals, then a prefix glossary of
     /// exactly the namespaces the summary uses, then classes (with per-class predicate
@@ -1854,6 +1955,81 @@ mod tests {
         );
         // The Person class partition's entity count (2) appears.
         assert!(nt2.contains("http://xmlns.com/foaf/0.1/Person"));
+    }
+
+    /// [OPUS-4.8] sq-mr32 (federation A3/Z2): the VoID+CS export is a strict superset of
+    /// `to_void` (every standard VoID triple unchanged) plus the characteristic-set
+    /// statistics under the `scs:` extension, and the whole document re-parses as valid
+    /// RDF.
+    #[test]
+    fn void_with_cs_superset_and_carries_char_sets() {
+        // alice/bob share the set {type, name}; carol has {type, name, worksAt}.
+        let g = graph(
+            ":alice rdf:type foaf:Person ; foaf:name \"Alice\" .
+             :bob   rdf:type foaf:Person ; foaf:name \"Bob\" .
+             :carol rdf:type foaf:Person ; foaf:name \"Carol\" ; :worksAt :acme .",
+        );
+        let ix = Introspection::build(&g);
+        let void = ix.to_void("http://ex.org/dataset");
+        let withcs = ix.to_void_with_cs("http://ex.org/dataset");
+
+        // Strict superset: every base VoID line is present verbatim in the CS variant.
+        for line in void.lines() {
+            assert!(
+                withcs.contains(line),
+                "VoID+CS must contain every base VoID line; missing: {line}"
+            );
+        }
+        assert!(
+            withcs.len() > void.len(),
+            "VoID+CS must add the characteristic-set triples"
+        );
+
+        // Re-parse the whole document — valid N-Triples (hence valid Turtle).
+        let triples: Vec<oxrdf::Triple> = oxttl::NTriplesParser::new()
+            .for_slice(withcs.as_bytes())
+            .map(|t| t.expect("VoID+CS is valid N-Triples"))
+            .collect();
+        let cs = |l: &str| format!("{CS_NS}{l}");
+
+        // Dataset carries the EXACT distinct-set count (here 2: {type,name}, {type,name,worksAt}).
+        assert_eq!(ix.characteristic_sets.distinct, 2);
+        let distinct_lit = oxrdf::Literal::new_typed_literal(
+            ix.characteristic_sets.distinct.to_string(),
+            oxrdf::vocab::xsd::INTEGER,
+        )
+        .to_string();
+        assert!(
+            withcs.contains(&format!(
+                "<http://ex.org/dataset> <{}> {distinct_lit} .",
+                cs("distinctCharacteristicSets")
+            )),
+            "must carry exact distinct-set count: {withcs}"
+        );
+
+        // One typed CharacteristicSet node per retained set, each with scs:subjects.
+        let typed_cs = triples
+            .iter()
+            .filter(|t| {
+                t.predicate.as_str() == RDF_TYPE
+                    && t.object.to_string() == format!("<{}>", cs("CharacteristicSet"))
+            })
+            .count();
+        assert_eq!(typed_cs, ix.characteristic_sets.sets.len());
+        assert!(typed_cs >= 2);
+
+        // Per-predicate stat nodes reuse void:property + void:triples and add
+        // scs:avgMultiplicity, and name a real predicate from the graph.
+        assert!(triples
+            .iter()
+            .any(|t| t.predicate.as_str() == cs("avgMultiplicity")));
+        assert!(withcs.contains("http://xmlns.com/foaf/0.1/name"));
+        // avg multiplicity for a single-valued predicate ({type,name} ×2 subjects, name
+        // once each) renders as the fixed-precision decimal 1.0000.
+        assert!(
+            withcs.contains("1.0000"),
+            "avg multiplicity should render as a fixed-precision decimal: {withcs}"
+        );
     }
 
     /// Retrieval-mode (seed-scoped) summary: only the seeds' slice is rendered, under

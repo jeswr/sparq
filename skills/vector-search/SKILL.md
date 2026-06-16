@@ -364,6 +364,33 @@ literal's dimension must match the store; any other `vec:` IRI is unknown. An ab
 seed IRI yields no rows. Search is the **exact** `nearest_exact` scan (deterministic, the HNSW/
 DiskANN approximate indexes are not yet wired into the predicate — recorded follow-up).
 
+**Automatic filtered ANN (compose with `filtered-ann`, sq-bvmd).** When **both**
+`vec-predicate` *and* `filtered-ann` are on, the rewrite derives the candidate id-set
+([`IdMask`], recipe 9) automatically: if the `vec:` neighbour variable is **also constrained by
+ordinary patterns in the same BGP**, those patterns carve out the eligible nodes and the k-NN is
+run as a **filtered** search (`nearest_exact_filtered`) over just that set — no separate API call.
+
+```rust
+// ?node is the neighbour AND is constrained to be a :Car: the search only ever
+// considers Cars (the IdMask), so a closer non-Car neighbour is never returned.
+let r = query_vec(&graph,
+    "PREFIX vec: <http://sparq.dev/vec#>
+     SELECT ?node WHERE {
+       ?node vec:nearest ( \"1,0\" 5 ) .
+       ?node <http://ex/kind> <http://ex/Car> .   # ← carves out the candidate id-set
+     }", &store)?;
+```
+
+The mask is exactly the set the engine binds to the neighbour variable when the constraining
+sub-BGP is evaluated, so the filtered top-k is **identical to post-filtering the unfiltered
+top-k** by that same constraint (and therefore a subset of the unfiltered result) — correct, and
+for a selective constraint it avoids scanning the rest of the store. If the neighbour variable is
+**unconstrained** the search falls back to the plain unfiltered `nearest_exact` (recipe 8's exact
+behaviour, unchanged). With `filtered-ann` **off**, the `vec:` predicate is always unfiltered —
+this composition adds nothing to the `vec-predicate`-only build. Deferred (own beads): multi-
+variable mask intersection (sq-3tjd), mask caching (sq-36ol), and a cost-model choice of
+filtered-vs-post-filter (sq-ic0n).
+
 ### 9. Predicate-constrained (filtered) ANN — only neighbours a BGP admits (opt-in, feature = `filtered-ann`)
 
 The RDF-native vector differentiator: a SPARQL BGP carves out the *eligible* graph nodes (e.g.
@@ -403,9 +430,11 @@ let hnsw = vidx.nearest_filtered(query, &mask, &store, 10);
 ```
 
 Tune the crossover / beam with `nearest_filtered_with(query, &mask, &store, k, FilterConfig { .. })`.
-The engine-side automatic BGP → mask wiring (a filtered form of the `vec:` predicate) is a recorded
-follow-up bead — for now you build the mask yourself, which keeps the filtered API a pure
-sparq-vectors surface with zero engine coupling.
+You build the mask yourself here, which keeps this filtered API a pure sparq-vectors surface with
+zero engine coupling. The engine-side **automatic** BGP → mask wiring — deriving the `IdMask` from
+the surrounding BGP and running a filtered `vec:` search — is wired in recipe 8 (sq-bvmd, when both
+`vec-predicate` and `filtered-ann` are on), and is built on exactly this `nearest_exact_filtered`
+seam.
 
 ## Gotchas / feature flags / prerequisites
 

@@ -51,6 +51,7 @@ ix.vocabularies   // Vocabularies           — namespaces + well-known recognit
 ix.to_json()                          // pretty JSON — the machine surface for LLM grounding
 ix.to_text_summary(2500)              // prompt-ready digest, most-important-first, ≤ 2500 chars
 ix.to_void("http://ex.org/dataset")   // W3C VoID description, as N-Triples (valid Turtle)
+ix.to_void_with_cs("http://ex.org/dataset") // VoID + characteristic-set source stats (scs: ext)
 ix.schema_summary_for(&seeds, 2500)   // retrieval-mode: schema scoped to seed class/predicate IRIs
 ```
 
@@ -70,6 +71,19 @@ a `void:classPartition` per class (`void:class` + `void:entities`) and a
 `void:distinctSubjects`). `void:distinctObjects` is **not** emitted — the crate tracks
 distinct objects only per-predicate (mixed IRI/literal), never a global de-duplicated
 count, so a faithful figure would need an extra pass; omitted rather than misleading.
+
+**VoID + characteristic-set source stats** (`to_void_with_cs(dataset_iri)`, sq-mr32,
+federation A3/Z2): a strict superset of `to_void` — every standard VoID triple unchanged —
+followed by the mined characteristic sets, expressed under a documented sparq extension
+vocab `scs:` (`<http://sparq.dev/ns/cs#>`). VoID has no native term for per-entity-type
+predicate co-occurrence, so this is the served federation-descriptor surface that primes a
+remote CostFed/Odyssey-class source-selector with star/multi-join cardinalities the bare
+property-partition counts cannot give. Per retained set: `scs:characteristicSet` links the
+dataset to a typed `scs:CharacteristicSet` node carrying `scs:subjects` (`count(C)`) and one
+`scs:predicateStat` per predicate (reusing `void:property`/`void:triples`, plus
+`scs:avgMultiplicity` = `predicate_triples / subjects`); the EXACT distinct-set count rides
+on `scs:distinctCharacteristicSets`. The sparq HTTP server serves this at
+`GET /.well-known/void` behind the OPT-IN `federation-descriptors` feature + flag.
 
 **Cross-class join hints** (`ix.join_hints`): the `(subject_class) --predicate-->
 (object_class)` edge table with per-edge triple counts, mined in the *same* SPO scan as
