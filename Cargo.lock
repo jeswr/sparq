@@ -3440,6 +3440,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-policy"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "sparq-core",
+ "sparq-engine",
+]
+
+[[package]]
 name = "sparq-py"
 version = "0.1.0"
 dependencies = [
