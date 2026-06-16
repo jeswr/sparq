@@ -635,6 +635,70 @@ else
   echo "note: vector skipped (cargo not on PATH or $VECTOR_RUN missing)" >&2
 fi
 
+# [OPUS-4.8] ZERO-KNOWLEDGE family (sq dashboard-data-feed) — feeds the dashboard's
+# Zero-knowledge family (FAMILIES key `zk`, #253) so its rows show real data instead of
+# "not yet reported". EVERY ZK metric name leads with the token `zk` so the dashboard's
+# prefix routing (familyOf: name.split('_')[0]) buckets it into the ZK family. Three feeds,
+# each grounded in an EXISTING bench (bench/benchmarks.toml zk-* registrations) — nothing
+# invented:
+#
+#  1. zk_compose_<member>_gates  — DETERMINISTIC ultra_honk circuit gate counts for the
+#     zk/compose circuit family. The headline ZK measurement. `bb gates` is the ground
+#     truth (noir-optimisation SKILL §) but needs nargo+bb (NOT installed in CI), so we
+#     harvest the COMMITTED, reproducible bench/zk-compose/gate_counts_latest.json (a fixed
+#     toolchain pins it; re-measure with bench/zk-compose/scripts/gate_counts.sh). Gate
+#     counts are toolchain-deterministic, so the committed JSON is a faithful per-commit
+#     value — emitted on EVERY tier (no toolchain guard). Trend-only/advisory here (NOT in
+#     scripts/perf-gate.py); a tightening is tracked on the dashboard.
+#  2. zk_commit_*  — sparq-zk commitment-pipeline criterion means (RDFC10 canon, end-to-end
+#     commit, leaves+fold, Poseidon2) in µs. Standalone cargo project (bench/zk), cargo-only.
+#  3. zk_trace_*  — zk-trace per-operator capture overhead criterion means (traced vs
+#     untraced, per plan shape) in µs. Standalone cargo project (bench/zk-trace), cargo-only.
+#
+# (2)+(3) are WALL-CLOCK criterion runs, so — exactly like the FTS/vector/geo hooks — they
+# are PINNED to the MAIN/local tier (run on push-to-main or a LOCAL run where GITHUB_REF is
+# unset; SKIPPED on the PR tier) to keep the criterion build+run off per-PR CI. A short
+# measurement window (criterion --measurement-time) bounds the cost. NON-CANONICAL timing:
+# the values are cross-commit TREND signals, never hard-coded into docs/tests.
+# The zk-compose prove+verify suite (bench/zk-compose/scripts/prove_verify.sh) is wall-clock
+# and needs nargo+bb, so it has NO CI-runnable bench — intentionally NOT emitted here.
+ZK_GATES_JSON=bench/zk-compose/gate_counts_latest.json
+if [ -f "$ZK_GATES_JSON" ]; then
+  # Deterministic gate counts from the committed JSON -> zk_compose_<member>_gates.
+  while IFS=$'\t' read -r member gates; do
+    [ -n "${member:-}" ] && [ -n "${gates:-}" ] && add "zk_compose_${member}_gates" gates "$gates"
+  done < <(python3 -c "import json,sys
+d=json.load(open(sys.argv[1])).get('benchmarks',{})
+for k in sorted(d):
+    print('%s\t%s' % (k, d[k]['circuit_size']))" "$ZK_GATES_JSON")
+fi
+
+ZK_HARVEST=bench/zk/criterion_harvest.py
+ZK_REF="${GITHUB_REF:-}"
+if [ -n "$ZK_REF" ] && [ "$ZK_REF" != "refs/heads/main" ]; then
+  echo "note: zk criterion suites skipped (PR tier — criterion build/run is main-only, like the fts/vector hooks)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -f "$ZK_HARVEST" ]; then
+  # sparq-zk commitment-pipeline throughput (bench/zk; standalone cargo project).
+  if (cd bench/zk && cargo bench -q -- --warm-up-time 0.5 --measurement-time 1 --sample-size 10) >/dev/null 2>"$TMP/zk.err"; then
+    while IFS=$'\t' read -r name unit value; do
+      [ -n "${name:-}" ] && [ -n "${value:-}" ] && add "$name" "${unit:-us}" "$value"
+    done < <(python3 "$ZK_HARVEST" bench/zk/target/criterion zk)
+  else
+    echo "ERROR: zk commit bench failed" >&2; cat "$TMP/zk.err" >&2 || true; exit 1
+  fi
+  # zk-trace per-operator capture overhead (bench/zk-trace; standalone cargo project,
+  # sparq-engine built WITH the non-default `zk` feature).
+  if (cd bench/zk-trace && cargo bench -q -- --warm-up-time 0.5 --measurement-time 1 --sample-size 10) >/dev/null 2>"$TMP/zkt.err"; then
+    while IFS=$'\t' read -r name unit value; do
+      [ -n "${name:-}" ] && [ -n "${value:-}" ] && add "$name" "${unit:-us}" "$value"
+    done < <(python3 "$ZK_HARVEST" bench/zk-trace/target/criterion zk)
+  else
+    echo "ERROR: zk-trace bench failed" >&2; cat "$TMP/zkt.err" >&2 || true; exit 1
+  fi
+else
+  echo "note: zk criterion suites skipped (cargo not on PATH or $ZK_HARVEST missing)" >&2
+fi
+
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.
 { echo '@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .'; echo '@prefix : <http://ex/> .'
   for k in $(seq 0 19); do echo ":c$k rdfs:subClassOf :c$((k+1)) ."; done

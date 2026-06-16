@@ -12,15 +12,32 @@
 # skills/**/SKILL.md in the same diff, FAIL and point at the AGENTS.md
 # public-API → SKILL.md maintenance rule.
 #
-# A "public surface" is (matching AGENTS.md:44-51 and the reactive rule's
-# `changed-public-feature-docs` paths in flow-on-rules.toml):
-#   - any changed file under one of the binding/entry crates' `src/**`:
-#       crates/sparq-cli/src/**, crates/sparq-server/src/**,
-#       crates/sparq-py/src/**,  crates/sparq-wasm/src/**;
-#   - a `pub` API change in a PUBLISHED Rust crate: a changed `crates/<x>/src/**`
-#       file whose crate is NOT `publish = false` and whose diff adds/removes a
-#       `pub` item (heuristic — see pub_api_changed()). The four binding crates
-#       above are always in scope regardless of the `pub` heuristic.
+# A "public surface" change is a changed file under a PUBLISHED Rust crate's
+# `src/**` (crate NOT `publish = false`) whose unified diff actually changes a
+# `pub `-exported item signature — see pub_api_changed(). Concretely, a hunk
+# must ADD or REMOVE a line matching the public-item pattern
+# (`pub fn`/`pub struct`/`pub enum`/`pub trait`/`pub const`/`pub type`/
+# `pub mod`/`pub use`).
+#
+# [OPUS-4.8] WHY a `pub`-signature diff and not "any src change" — false-positive
+# remediation (bead flow-on,ci; blocked #250, mis-fired #244):
+#   * #250 added only `// SAFETY:` comments + `#![warn(...)]` lint attributes to
+#     several crates' src, including the BINDING crates sparq-cli / sparq-bench.
+#     The OLD rule blanket-tripped on ANY src change to a binding crate, so a
+#     comment/attribute-only edit failed G2. Now NOTHING but a real `pub `-item
+#     line trips it — comments (`//`,`///`,`/* */`), attributes (`#[...]`/
+#     `#![...]`), and non-`pub` lines are all inert.
+#   * #244 RELOCATED `pub fn n3_proof_tree` within explain.rs: the same signature
+#     line appeared once added and once removed (net-zero), which the old
+#     line-presence heuristic read as a public-API change. Now a `pub `-item line
+#     that is BOTH added and removed unchanged (a pure move) cancels out — only a
+#     NET added-or-removed signature trips the gate.
+#   * A CI-only PR (no `crates/*/src/**` in the diff at all) can never reach the
+#     `pub` check, so it always passes — confirmed by the path filter + a test.
+#
+# Restricted visibilities (`pub(crate)`/`pub(super)`/`pub(in …)`) are NOT the
+# crate's public surface and never trip the gate (the pattern requires
+# whitespace after `pub`).
 #
 # SUPPRESSION (mirrors flow-on.py's SKILL_PATHS exactly): the gate is satisfied
 # the moment the SAME diff touches ANY skills/**/SKILL.md — that is the signal
@@ -35,9 +52,9 @@
 #
 # DIFF SOURCE: git diff --name-only origin/<base>...HEAD (CI), or a fixture file
 # (--changed-files, one path per line, optionally status-prefixed) for tests.
-# To evaluate the `pub` heuristic for non-binding crates we read the unified
-# diff (git diff origin/<base>...HEAD -- <file>) for added/removed `pub` lines;
-# in hermetic mode the caller may inject this via pub_overrides.
+# To evaluate the `pub` heuristic for a changed crate src file we read the unified
+# diff (git diff origin/<base>...HEAD -- <file>) for NET added/removed `pub `-item
+# signatures; in hermetic mode the caller may inject this via pub_overrides.
 #
 # EXIT: 0 when no public surface changed, or a SKILL.md was touched, or the
 # escape-hatch label is present; 1 (with the AGENTS.md pointer) otherwise.
@@ -61,15 +78,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Binding / entry-point crates: ANY src/** change here is a public-surface change
-# (their entire src is the public contract — CLI flags, HTTP routes, Py/JS
-# bindings). Mirrors flow-on-rules.toml `changed-public-feature-docs` when_paths.
-BINDING_SURFACE_PREFIXES = (
-    "crates/sparq-cli/src/",
-    "crates/sparq-server/src/",
-    "crates/sparq-py/src/",
-    "crates/sparq-wasm/src/",
-)
+# [OPUS-4.8] Binding / entry-point crates (sparq-cli/server/py/wasm). HISTORICALLY
+# any src/** change here was a public-surface change; that blanket rule
+# false-positived on comment/lint-attribute-only edits (blocked #250). The gate now
+# applies the SAME `pub `-signature heuristic to EVERY published crate's src/**,
+# binding crates included, so only a real public-item change trips it — there is no
+# longer a special-cased prefix list.
 
 # Suppression signal — identical to flow-on.py's SKILL_PATHS: any SKILL.md under
 # skills/ means the docs were synced in this diff.
@@ -137,19 +151,27 @@ def crate_is_published(crate: str) -> bool:
     return re.search(r"^\s*publish\s*=\s*false\b", text, re.MULTILINE) is None
 
 
-def pub_api_changed(path: str, base: str) -> bool:
-    """Heuristic: does the unified diff for `path` add or remove a `pub` item?
+# [OPUS-4.8] A line is a PUBLIC-ITEM signature iff, after the leading diff marker
+# (+/-) and any indentation, it begins with `pub ` (whitespace-separated) followed
+# by one of the exported item keywords. Requiring whitespace after `pub` excludes
+# restricted visibilities (`pub(crate)`/`pub(super)`/`pub(in …)`, all written
+# `pub(` with no space) — those are NOT the crate's public surface (AGENTS.md:
+# public API == exported items). The item-keyword anchor further excludes e.g. a
+# `pub` struct *field* (`pub name: T`) whose addition/removal is an internal-detail
+# edit, not a new exported path — only the eight item forms below count.
+_PUB_ITEM_RE = re.compile(
+    r"^[+-]\s*pub\s+(?:fn|struct|enum|trait|const|type|mod|use)\b"
+)
 
-    A `pub fn/struct/enum/trait/const/...` (or `pub use`) line being added or
-    removed signals a public-API surface change. Reads the per-file unified diff
-    from git; on any error returns False (conservative — never a CI-only crash).
 
-    [OPUS-4.8] RESTRICTED visibilities — `pub(crate)`, `pub(super)`,
-    `pub(in …)` — are NOT part of the crate's public surface (AGENTS.md: public
-    API == exported items), so they must NOT trip the gate. They are always
-    written `pub(` with no space, so requiring whitespace after `pub`
-    (`pub\\s`) matches exactly the exported forms (`pub fn`, `pub use`,
-    `pub struct`, …) while excluding the restricted ones."""
+def pub_diff_lines(path: str, base: str) -> tuple[list[str], list[str]]:
+    """Return (added, removed) public-item signature lines from `path`'s diff.
+
+    Each returned string is the diff line with its leading +/- marker stripped and
+    surrounding whitespace normalised, so an identical signature that is both added
+    and removed (a pure relocation) compares equal across the two lists. Reads the
+    per-file unified diff from git; on any error returns ([], []) — conservative,
+    never a CI-only crash."""
     ref = _normalize_base(base)
     try:
         out = subprocess.run(
@@ -160,14 +182,39 @@ def pub_api_changed(path: str, base: str) -> bool:
             check=True,
         ).stdout
     except subprocess.CalledProcessError:  # pragma: no cover - CI-only
-        return False
-    pub_re = re.compile(r"^[+-]\s*pub\s")
-    for line in out.splitlines():
+        return [], []
+    return _scan_pub_diff(out.splitlines())
+
+
+def _scan_pub_diff(diff_lines: list[str]) -> tuple[list[str], list[str]]:
+    """Pure helper: split unified-diff lines into (added, removed) public-item
+    signatures (marker stripped, inner whitespace normalised)."""
+    added: list[str] = []
+    removed: list[str] = []
+    for line in diff_lines:
+        # Skip file headers (`+++ b/…`, `--- a/…`) — never item signatures.
         if line.startswith("+++") or line.startswith("---"):
             continue
-        if (line.startswith("+") or line.startswith("-")) and pub_re.match(line):
-            return True
-    return False
+        if not _PUB_ITEM_RE.match(line):
+            continue
+        # Normalise: drop the +/- marker, collapse inner whitespace so a moved
+        # signature matches itself regardless of re-indentation.
+        norm = " ".join(line[1:].split())
+        (added if line[0] == "+" else removed).append(norm)
+    return added, removed
+
+
+def pub_api_changed(path: str, base: str) -> bool:
+    """True iff `path`'s diff NET-changes a `pub `-exported item signature.
+
+    [OPUS-4.8] A pure RELOCATION — the same signature added once and removed once
+    (net-zero) — is NOT a public-API change (mis-fired G2 on #244, which moved
+    `pub fn n3_proof_tree` within a file). We compare added vs removed signatures
+    as MULTISETS and only report a change when they differ: a genuinely NEW or
+    DELETED export, or a signature whose text actually changed. Comment-only /
+    attribute-only / non-`pub` edits yield two empty lists → no change."""
+    added, removed = pub_diff_lines(path, base)
+    return sorted(added) != sorted(removed)
 
 
 def public_surface_changes(
@@ -176,23 +223,28 @@ def public_surface_changes(
     *,
     pub_overrides: dict[str, bool] | None = None,
 ) -> list[str]:
-    """Return the changed paths that constitute a public-surface change."""
+    """Return the changed paths that constitute a public-surface change.
+
+    [OPUS-4.8] A path is in scope iff it is under a PUBLISHED crate's `src/**`
+    (the `_CRATE_SRC_RE` filter — a non-`crates/*/src/**` path, e.g. a CI workflow
+    or a test, never reaches the `pub` check, so a CI-only PR always passes) AND
+    its diff NET-changes a `pub `-exported item (pub_api_changed). The binding
+    crates get the SAME `pub`-signature test as every other crate now — no blanket
+    trip on comment/attribute-only edits."""
     pub_overrides = pub_overrides or {}
     hits: list[str] = []
     for p in changed:
-        if p.startswith(BINDING_SURFACE_PREFIXES):
-            hits.append(p)
-            continue
         m = _CRATE_SRC_RE.match(p)
-        if m:
-            crate = m.group(1)
-            if not crate_is_published(crate):
-                continue
-            is_pub = pub_overrides.get(p)
-            if is_pub is None:
-                is_pub = pub_api_changed(p, base)
-            if is_pub:
-                hits.append(p)
+        if not m:
+            continue
+        crate = m.group(1)
+        if not crate_is_published(crate):
+            continue
+        is_pub = pub_overrides.get(p)
+        if is_pub is None:
+            is_pub = pub_api_changed(p, base)
+        if is_pub:
+            hits.append(p)
     return hits
 
 

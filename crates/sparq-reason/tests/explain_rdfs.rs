@@ -152,7 +152,7 @@ fn differential_every_derived_triple_has_a_valid_proof() {
     // Randomized instance-heavy ontology (mirrors tests/incremental_prop.rs): EVERY triple
     // of the closure must explain — derived ones with checker-valid, leaf-re-entailing
     // proofs.
-    let mut rng = Rng(0xE1A7_2026_06_12);
+    let mut rng = Rng(0xE1A7_2026_0612);
     let mut dict = Dict::new();
     let (ty, sc, sp, dom, rng_p) = ids(&mut dict);
 
