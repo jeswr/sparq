@@ -21,6 +21,7 @@ framework slices); they are **data-management-maturity** gaps specific to CDMC.
 | CD-5 | **Retention is possible but not policy-driven.** Generation-ring ages out by age/count, not by declarative per-graph retention rule. | 5.1 (3→4) | P1 | Bind `TimeTravelConfig`/`time-travel-max-age` to declarative per-graph TTL → automatic DROP/age-out; document operator retention policy. | `CDMC: declarative per-graph retention policy mechanism` |
 | CD-6 | **No machine-readable dataset-ownership convention.** Ownership decision has no recorded home in the loaded graph. | 1.2 (2→3) | P2 | VoID/DCAT dataset header convention (`dcterms:publisher`, `dcat:contactPoint`, sensitivity) surfaced by introspect/descriptors. | `CDMC: VoID/DCAT dataset-ownership header convention + surfacing` |
 | CD-7 | **No published CDMC operator-responsibility split.** Deploying teams may assume the engine satisfies governance controls it delegates. | 1.1 / cross-cutting | P2 | Short deployment doc condensing this scorecard's operator-owned column. | `CDMC: publish operator-responsibility split deployment doc` |
+| CD-8 | **Catalogue capability is not CI-gated.** The VoID + Service-Description catalogue (`crates/sparq-server/src/descriptors.rs`, #219) is real with 6 `#[test]`s but lives behind the **default-OFF** `federation-descriptors` cargo feature; no CI lane compiles or runs it (`.github/workflows/ci.yml` uses default features only), so a stock build returns `404` for `/.well-known/void` and a regression in the module would pass all gates silently. This holds 2.1 at maturity 3. | 2.1 (3→4) | P1 | Add a CI lane that runs `cargo test -p sparq-server --features federation-descriptors` (and include the feature in a clippy/check `--features` matrix), so the 6 descriptor tests gate every PR. | bead **sq-kzfi** (filed by the auditor, epic `sq-toze`) + the broader feature-matrix bead |
 
 ## Explicitly NOT gaps (auditor anchors — do not re-open)
 
@@ -39,3 +40,6 @@ framework slices); they are **data-management-maturity** gaps specific to CDMC.
 Per the orchestration runbook, CDMC scores the **current** codebase state. If **CD-1** (lineage) or
 **CD-2** (access audit) — the two most likely to drive a `crates/` change — land before
 consolidation, **re-score capabilities 6.2 and 3.2** and update `scorecard.md` accordingly.
+Likewise, if **CD-8** (bead `sq-kzfi`) lands a CI lane that compiles and runs the
+`federation-descriptors` catalogue tests, **re-score capability 2.1 from 3 → 4** (and Component 2's
+average back to ~3.5).
