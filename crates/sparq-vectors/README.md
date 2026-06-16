@@ -11,7 +11,8 @@ engine (GenAI phase 4).
 
 One f32 embedding per dictionary term id, in a flat memory-mapped `.spqv` file (sparse by
 design — only entities, not every literal). Query top-`k` by cosine with an exact brute-force
-scan, an in-RAM HNSW index, or a persistent on-disk DiskANN/Vamana graph. Embeddings are
+scan or a persistent on-disk DiskANN/Vamana graph by default, or an in-RAM HNSW index behind the
+opt-in `approx-ann` feature (the only third-party ANN dependency; recall < 1.0). Embeddings are
 produced **outside** the engine; the crate verbalizes entities (label + type + description)
 to text, embeds via a provider-agnostic trait, and fuses with another ranked signal for
 hybrid search. It is a **separate crate** — nothing in the workspace (or the wasm build)
@@ -31,7 +32,7 @@ depends on it.
 # let path = std::env::temp_dir()
 #     .join(format!("sparq-vectors-quickstart-{}-{}.spqv", std::process::id(), nanos));
 use sparq_core::Graph;
-use sparq_vectors::{embed_labels, HashEmbedder, VectorIndex, VectorStore};
+use sparq_vectors::{embed_labels, nearest_term_exact, HashEmbedder, VectorStore};
 
 let graph = Graph::load_str(ttl, "turtle")?;
 let embedder = HashEmbedder::new(64);              // test-only; bring your own Embedder
@@ -39,10 +40,12 @@ let mut store = VectorStore::create(&path, 64)?;
 embed_labels(&graph, &mut store, &embedder)?;       // rdfs:label > skos:prefLabel > …
 store.finalize()?;                                  // handle becomes mmap-backed
 
-let index = VectorIndex::build(&store);             // HNSW
-let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
+// Exact brute-force search — the default build (no third-party ANN crate). For the
+// approximate in-RAM HNSW index, enable the opt-in `approx-ann` feature and build a
+// `VectorIndex` (recall < 1.0 — see the Search bullet below).
+let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
 # // [OPUS-4.8] drop the mmap handle before removing the backing file.
-# drop(index); drop(store); std::fs::remove_file(&path).ok();
+# drop(store); std::fs::remove_file(&path).ok();
 # Ok(()) }
 ```
 
@@ -57,8 +60,25 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
   descriptive error on a mismatch instead of wrong neighbours.
 - **`StreamingWriter`** — build stores bigger than RAM with O(1) build-phase memory;
   byte-identical output to the in-RAM builder.
-- **Search** — `nearest_exact` (ground-truth baseline), in-RAM HNSW (`VectorIndex`), and the
-  persistent on-disk `DiskAnnIndex` (`.spqg`, build once / open with no rebuild).
+- **Search** — `nearest_exact` (answer-exact ground-truth baseline) and the persistent on-disk
+  `DiskAnnIndex` (`.spqg`, build once / open with no rebuild) in the default build; the in-RAM HNSW
+  `VectorIndex` behind the **opt-in `approx-ann` feature** (see below).
+- **Approximate backend (opt-in `approx-ann`)** — the **only** feature that pulls a third-party ANN
+  crate (`instant-distance`, HNSW), so the **default build carries no heavy ANN dependency** — just
+  the exact scan and the hand-rolled on-disk Vamana graph (lean core). Approximate search is
+  **APPROXIMATE**: its recall is **`< 1.0`** (measured against `nearest_exact`, the ground truth) —
+  only the exact path is answer-exact. A **pluggable backend trait** (`AnnBackend`) abstracts the
+  two: `ExactBackend` (answer-exact, no extra dep) and `ApproxBackend` (over `DiskAnnIndex`,
+  `approx-ann`). Composed with `filtered-ann`, the filtered approximate path uses **iterative
+  over-fetch** (`nearest_filtered_overfetch`): post-filtering a *bounded* approximate candidate list
+  can under-fill `k` when admitted ids cluster below the fetched prefix (the recall boundary the
+  `sq-7hx6` cost model documented), so it fetches `overfetch_target(k, selectivity)`, post-filters,
+  and **if fewer than `k` survive, doubles the fetch and retries** up to the backend size — filling
+  `k` whenever `k` admitted vectors exist *and the backend surfaces them*. **Honest caveat:**
+  over-fetch fixes *under-fill*, not the approximate index's inherent misses — recall stays `< 1.0`
+  (a measured floor asserted in `tests/overfetch.rs`, **not** claimed as exactness). The A1-paper
+  recall evidence is for the **exact / transitive answer-safe** path (`sq-7hx6`) and does not
+  transfer to this approximate path.
 - **Predicate-constrained (filtered) ANN (opt-in `filtered-ann`)** — restrict the search to the
   graph nodes a SPARQL BGP admits: build an `IdMask` from the BGP-selected dict-ids and call
   `nearest_exact_filtered` / `DiskAnnIndex::nearest_filtered`. Lean feature (no new dependency, no

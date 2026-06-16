@@ -14,9 +14,11 @@
 #![cfg(feature = "filtered-ann")]
 
 use sparq_vectors::{
-    nearest_exact, nearest_exact_filtered, DiskAnnIndex, FilterConfig, IdMask, VectorIndex,
-    VectorStore,
+    nearest_exact, nearest_exact_filtered, DiskAnnIndex, FilterConfig, IdMask, VectorStore,
 };
+// [OPUS-4.8] (sq-ip3a) The HNSW filtered entry point is the approximate backend — `approx-ann` only.
+#[cfg(feature = "approx-ann")]
+use sparq_vectors::VectorIndex;
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E3779B97F4A7C15);
@@ -149,6 +151,7 @@ fn edge_cases_empty_full_single() {
     let graph_path = tmp("filtered-edge.spqg");
     let (store, ids) = build_store(N, DIM, &store_path);
     let idx = DiskAnnIndex::build(&store, &graph_path).unwrap();
+    #[cfg(feature = "approx-ann")]
     let vidx = VectorIndex::build(&store);
 
     let mut q_state = 0xBEEF_u64;
@@ -158,6 +161,7 @@ fn edge_cases_empty_full_single() {
     let empty = IdMask::new();
     assert!(empty.is_empty());
     assert!(idx.nearest_filtered(&q, &empty, &store, K).is_empty());
+    #[cfg(feature = "approx-ann")]
     assert!(vidx.nearest_filtered(&q, &empty, &store, K).is_empty());
     assert!(nearest_exact_filtered(&store, &q, &empty, K).is_empty());
 
@@ -213,6 +217,7 @@ fn edge_cases_empty_full_single() {
     let _ = std::fs::remove_file(&graph_path);
 }
 
+#[cfg(feature = "approx-ann")]
 #[test]
 fn hnsw_filtered_agrees_with_ground_truth() {
     // The in-RAM HNSW filtered entry point uses the exact pre-filter (instant-distance adjacency is

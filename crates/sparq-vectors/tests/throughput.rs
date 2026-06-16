@@ -8,6 +8,9 @@
 //! Prints store build/finalize/open, HNSW build, and exact vs HNSW query throughput
 //! on the same 50k×32 random workload as the recall gate (tests/recall.rs).
 
+// [OPUS-4.8] (sq-ip3a) HNSW (VectorIndex) is the approximate backend — gated behind `approx-ann`.
+#![cfg(feature = "approx-ann")]
+
 use sparq_vectors::{nearest_exact, VectorIndex, VectorStore};
 use std::time::Instant;
 

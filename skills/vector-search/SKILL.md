@@ -29,7 +29,7 @@ Embed entity labels, finalize the store, query the nearest neighbours of a term:
 
 ```rust
 use sparq_core::Graph;
-use sparq_vectors::{embed_labels, HashEmbedder, VectorIndex, VectorStore};
+use sparq_vectors::{embed_labels, nearest_term_exact, HashEmbedder, VectorStore};
 use oxrdf::{NamedNode, Term};
 
 # fn main() -> Result<(), String> {
@@ -46,10 +46,12 @@ let mut store = VectorStore::create("graph.spqv", 64)?; // dim must match embedd
 embed_labels(&graph, &mut store, &embedder)?;     // rdfs:label > skos:prefLabel > foaf:name > schema:name > dc:title
 store.finalize()?;                                // writes the file, handle becomes mmap-backed
 
-// In-RAM HNSW (rebuilt from the mmap on build), query by term:
-let index = VectorIndex::build(&store);
+// Exact brute-force search by term (default build — no third-party ANN dep):
 let bolt = Term::NamedNode(NamedNode::new("http://example.org/bolt").map_err(|e| e.to_string())?);
-let neighbours: Vec<(Term, f32)> = index.nearest_term(&bolt, &graph, &store, 10); // (Term, cosine), best first, query term excluded
+let neighbours: Vec<(Term, f32)> = nearest_term_exact(&store, &graph, &bolt, 10); // (Term, cosine), best first, query term excluded
+// For the APPROXIMATE in-RAM HNSW at scale, enable the opt-in `approx-ann` feature and build a
+// `VectorIndex` (recall < 1.0; see "Exact vs HNSW" below) — gated so the heavy crate stays out of
+// the default build.
 # Ok(()) }
 ```
 
@@ -99,6 +101,8 @@ nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 
 nearest_term_exact(&VectorStore, &Graph, &Term, k) -> Vec<(Term, f32)>          // UNCHECKED: stale store -> silently wrong
 nearest_term_exact_checked(&VectorStore, &Graph, &Term, k) -> Result<Vec<(Term, f32)>, String>  // errs on stale store
 cosine(a: &[f32], b: &[f32]) -> f32
+// HNSW = the APPROXIMATE backend: feature = "approx-ann" ONLY [OPUS-4.8] sq-ip3a (the ONLY thing
+// pulling instant-distance; default build has NO third-party ANN dep). recall < 1.0 — NOT exact.
 VectorIndex::build(&store) / ::build_with(&store, HnswConfig{ef_search, ef_construction, seed})
 impl VectorIndex { fn nearest(&self, query: &[f32], k) -> Vec<(Id, f32)>;
                    fn nearest_term(&self, &Term, &Graph, &VectorStore, k) -> Vec<(Term, f32)>;
@@ -131,8 +135,17 @@ Strategy::{PreFilter, PostFilter}                                               
 CostEstimate { mask_len, store_len, k, prefilter_cost, postfilter_cost, strategy }   // the modelled estimate behind a decision
 postfilter_exact(&VectorStore, query: &[f32], &IdMask, k) -> Vec<(Id, f32)>      // scan WHOLE store, drop non-masked -> IDENTICAL to nearest_exact_filtered (no over-fetch boundary: full ranking)
 nearest_filtered_costed(&VectorStore, &[f32], &IdMask, k, &CostModel) -> (Vec<(Id, f32)>, CostEstimate)   // decide + run chosen branch
-overfetch_target(k, mask_len, store_len) -> usize                               // ceil(k/selectivity) clamped; ONLY for a future APPROX backend (exact backend never under-fills)
+overfetch_target(k, mask_len, store_len) -> usize                               // ceil(k/selectivity) clamped; the FIRST fetch size for the iterative over-fetch path below (exact backend never under-fills, so it's a no-op there)
 // HEURISTIC over an ESTIMATE, not optimal: scatter_penalty is one modelled constant; pre/post return the IDENTICAL top-k either way (answer-safe)
+
+// --- pluggable ANN backend + iterative over-fetch FILTERED path (src/backend.rs) --- feature = "filtered-ann" [OPUS-4.8] sq-ip3a (follow-up to sq-7hx6)
+trait AnnBackend { fn candidates(&self, query: &[f32], fetch) -> Vec<(Id, f32)>; fn len()/is_empty(); }  // ranked top-`fetch`, best-first, prefix-stable
+ExactBackend::new(&VectorStore)                                                  // answer-EXACT (full scan); fetch>=len => complete ranking => recall 1.0; NO third-party dep
+ApproxBackend::new(&DiskAnnIndex)                                                // feature = "approx-ann" ALSO; APPROXIMATE (bounded beam) => recall < 1.0 — NOT exact
+nearest_filtered_overfetch(&impl AnnBackend, query, &IdMask, k, max_rounds) -> Vec<(Id, f32)>           // fetch overfetch_target, post-filter, if <k DOUBLE the fetch & retry up to backend size / max_rounds
+nearest_filtered_overfetch_default(&backend, query, &IdMask, k) -> Vec<(Id, f32)>                       // = ..._overfetch(.., DEFAULT_MAX_ROUNDS=24)
+// FILTERED approx under-fills a bounded list when admitted ids cluster below the prefix; iterative over-fetch FILLS k whenever k admitted vectors exist & the backend surfaces them.
+// HONESTY: over-fetch fixes UNDER-FILL, NOT recall — ApproxBackend recall stays < 1.0 (measured floor 0.90@10 in tests/overfetch.rs, NOT exactness). Only ExactBackend is answer-exact.
 
 // --- quantization for large stores (src/quant.rs) ---
 ScalarQuantizer::fit(dim, vectors: impl IntoIterator<Item=&[f32]>) -> Result<ScalarQuantizer, String>   // f32->u8, 4x
@@ -207,17 +220,23 @@ cfg.max_chars = 1024;                           // char budget; the leading labe
 
 ### 2. Exact vs HNSW (pick by scale)
 
+HNSW (`VectorIndex`) is the APPROXIMATE backend behind the **opt-in `approx-ann` feature** — the
+only thing pulling `instant-distance`, so the default build has NO third-party ANN dep (lean core).
+It is approximate: recall < 1.0 (NOT answer-exact). Build with `--features approx-ann`.
+
 ```rust
+# #[cfg(feature = "approx-ann")] {
 use sparq_vectors::{nearest_exact, VectorIndex, HnswConfig};
 
 let store = sparq_vectors::VectorStore::open("graph.spqv")?;
 
-// Below ~10^5 vectors the exact scan is a fine default (no build cost):
+// Below ~10^5 vectors the exact scan is a fine default (no build cost, answer-exact):
 let hits = nearest_exact(&store, query, 10);          // Vec<(Id, f32)>
 
 // At higher query volume, build HNSW once (rayon-parallel inside instant-distance):
 let index = VectorIndex::build_with(&store, HnswConfig { ef_search: 100, ef_construction: 100, seed: 0 });
-let approx = index.nearest(query, 10);                // ef_search must be >= k; measured recall@10 ~0.998
+let approx = index.nearest(query, 10);                // APPROXIMATE: ef_search must be >= k; recall@10 < 1.0 (run tests/recall.rs)
+# }
 ```
 
 ### 3. Persistent on-disk index that survives process restart
@@ -518,15 +537,49 @@ it and pre-filtering the mask reduce to ranking the same admitted ids by the sam
 top-k is **byte-identical** (asserted in `tests/cost_model.rs`). There is **no over-fetch recall
 boundary** for this exact backend: a full ranking can only under-fill `k` when the mask admits fewer
 than `k` stored vectors, and then the pre-filter scan is equally short. (`overfetch_target(k, m, n) =
-ceil(k/selectivity)` exists for a *future approximate* backend, whose bounded candidate list CAN
-under-fill — the honest handling there is iterative over-fetch until `k` survive; that approximate
-filtered `vec:` path is a deferred follow-up.)
+ceil(k/selectivity)` sizes the first fetch for the **approximate** backend, whose bounded candidate
+list CAN under-fill — the iterative over-fetch path that handles it is recipe 11.)
 
 **Honest scope.** This is a **HEURISTIC over a cost estimate, not an optimum**: `scatter_penalty` is a
 single modelled constant (non-canonical, not a measured fit), real cache/SIMD behaviour is
 hardware-dependent, and a planner that has *not* yet evaluated the sub-BGP would feed an *estimated*
 cardinality (here the mask is materialised, so `m` is exact). A mis-estimate costs only throughput —
 never the answer.
+
+### 11. Approximate filtered ANN with iterative over-fetch (opt-in, feature = `filtered-ann` + `approx-ann`)
+
+The cost model (recipe 10) is for the **exact** backend, which post-filters a *complete* ranking and
+so never under-fills. An **approximate** backend returns a *bounded* candidate list: post-filtering it
+can under-fill `k` when the admitted ids cluster *below* the fetched prefix (the recall boundary).
+`nearest_filtered_overfetch` removes that boundary by growing the fetch and retrying.
+
+```rust
+# #[cfg(all(feature = "filtered-ann", feature = "approx-ann"))] {
+use sparq_vectors::{
+    nearest_filtered_overfetch_default, ApproxBackend, ExactBackend, DiskAnnIndex, VectorStore,
+};
+let store = VectorStore::open("entities.spqv")?;
+let idx = DiskAnnIndex::open("entities.spqg")?;
+
+// EXACT backend: answer-exact (recall 1.0) — the ground-truth reference, no third-party dep.
+let exact = ExactBackend::new(&store);
+let exact_hits = nearest_filtered_overfetch_default(&exact, query, &mask, 10);
+
+// APPROXIMATE backend over the on-disk Vamana graph: recall < 1.0 (NOT exact).
+let approx = ApproxBackend::new(&idx);
+let approx_hits = nearest_filtered_overfetch_default(&approx, query, &mask, 10);
+// fetch overfetch_target(k, selectivity); post-filter; if < k survive, DOUBLE the fetch & retry
+// up to the backend size — fills k whenever k admitted vectors exist AND the index surfaces them.
+# let _ = (exact_hits, approx_hits); }
+```
+
+**Honesty (load-bearing).** Iterative over-fetch fixes **under-fill** (returning < k when k exist); it
+does **not** make the approximate backend exact. Even a full-store fetch from `ApproxBackend` is the
+*approximate* ranking, so a true admitted neighbour the index never visits is still missed — **recall
+stays < 1.0** (measured floor 0.90@10 in `tests/overfetch.rs`, NOT claimed as exactness). Only
+`ExactBackend` is answer-exact. The A1-paper recall evidence is for the **exact/transitive** answer-safe
+path (recipe 10), and does **not** transfer to this approximate path. Implement your own backend by
+`impl`-ing `AnnBackend` (one `candidates(query, fetch)` method + `len`).
 
 ## Gotchas / feature flags / prerequisites
 
@@ -538,6 +591,11 @@ never the answer.
   dependency and the base engine/core query path is byte-identical (see recipe 8). There is
   still no `SERVICE`/function binding. Predicate-constrained (filtered) ANN (recipe 9) is a
   separate **non-default `filtered-ann`** feature — also lean (no new dep, no engine pull).
+- **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
+  index (`VectorIndex`/`HnswConfig`) and the `ApproxBackend` are gated behind it — it is the only
+  thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force
+  (`nearest_exact`, answer-exact) + the hand-rolled on-disk Vamana graph (`DiskAnnIndex`, no extra
+  dep). Approximate search is **APPROXIMATE** — recall < 1.0, NOT answer-exact (recipes 2 & 11).
 - **`HashEmbedder` is TEST-ONLY.** It is lexical n-gram hashing with **no semantics**
   ("car" and "automobile" are unrelated). Use it to exercise the store/ANN/pipeline; bring
   a real `Embedder` for actual retrieval.

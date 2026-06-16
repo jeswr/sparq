@@ -5,6 +5,9 @@
 //! `sparq-sim` is a DEV-dependency only — the `hybrid_search` helper is generic over
 //! retriever closures, so the library never depends on it.
 
+// [OPUS-4.8] (sq-ip3a) HNSW (VectorIndex) is the approximate backend — gated behind `approx-ann`.
+#![cfg(feature = "approx-ann")]
+
 use oxrdf::{NamedNode, Term};
 use sparq_core::Graph;
 use sparq_sim::Sim;

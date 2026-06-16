@@ -3,6 +3,9 @@
 //! ordinary `cargo test` — the workspace Cargo.toml raises the dev opt-level for this
 //! crate and `instant-distance` so the build stays seconds, not minutes.
 
+// [OPUS-4.8] (sq-ip3a) HNSW (VectorIndex) is the approximate backend — gated behind `approx-ann`.
+#![cfg(feature = "approx-ann")]
+
 use sparq_vectors::{nearest_exact, VectorIndex, VectorStore};
 
 fn splitmix64(state: &mut u64) -> u64 {

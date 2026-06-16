@@ -5,8 +5,11 @@ use oxrdf::{NamedNode, Term};
 use sparq_core::Graph;
 use sparq_vectors::{
     embed_labels, embed_labels_with, nearest_term_exact, Embedder, HashEmbedder, LabelConfig,
-    VectorIndex, VectorStore,
+    VectorStore,
 };
+// [OPUS-4.8] (sq-ip3a) The HNSW index is the approximate backend — `approx-ann` only.
+#[cfg(feature = "approx-ann")]
+use sparq_vectors::VectorIndex;
 
 const TTL: &str = r#"
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -57,13 +60,18 @@ fn embed_labels_covers_labeled_entities_only() {
     // (shared n-grams), itself excluded.
     let exact = nearest_term_exact(&store, &g, &term("http://example.org/bolt"), 1);
     assert_eq!(exact[0].0, term("http://example.org/bolt2"));
-    let index = VectorIndex::build(&store);
-    let approx = index.nearest_term(&term("http://example.org/bolt"), &g, &store, 1);
-    assert_eq!(approx[0].0, term("http://example.org/bolt2"));
+    #[cfg(feature = "approx-ann")]
+    {
+        let index = VectorIndex::build(&store);
+        let approx = index.nearest_term(&term("http://example.org/bolt"), &g, &store, 1);
+        assert_eq!(approx[0].0, term("http://example.org/bolt2"));
+        assert!(index
+            .nearest_term(&term("http://example.org/nowhere"), &g, &store, 3)
+            .is_empty());
+    }
 
     // Unembedded / unknown terms return empty, not errors.
     assert!(nearest_term_exact(&store, &g, &term("http://example.org/silent"), 3).is_empty());
-    assert!(index.nearest_term(&term("http://example.org/nowhere"), &g, &store, 3).is_empty());
 
     let _ = std::fs::remove_file(&path);
 }
