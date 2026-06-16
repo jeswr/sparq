@@ -72,9 +72,20 @@ BASE_LABELS = ["drift", "auto"]
 #     suites (cli-bench-*, sparq-bench-compare, operator-coverage, …) drive;
 #   - sparq-canon: a thin RDFC-1.0 lib surfaced via the rdf-canon skill, no
 #     standalone perf surface.
+#   - sparq-py: a thin pyo3 binding (`crate-type = ["cdylib"]`, publish = false).
+#     It exposes NO native Rust-callable surface a Rust example/criterion bench
+#     could touch — it is loadable ONLY as a CPython extension module (built by
+#     maturin), and its engine logic is a thin wrapper over sparq-core/engine/
+#     reason that the CLI / operator-coverage suites already measure. A meaningful
+#     Python-level bench would need a built wheel + a pytest-benchmark harness in
+#     CI (outside the Rust-bench registry model), so it is HONESTLY exempted here
+#     rather than carrying a fake Rust bench. (sq-ncvq.12, drift catch-up A.)
 # Everything NOT listed here is scanned — so genuinely unbenched surfaces
-# (sparq-nlq, sparq-py, sparq-serve, sparq-mpc, sparq-wasm, the zk crates …)
-# still surface, matching the design's concrete §5.A gap list.
+# still surface, matching the design's concrete §5.A gap list. The other §5.A
+# crates are now COVERED by registered benches (sq-ncvq.12): sparq-mpc
+# (mpc-bench-matrix, the existing counting-tier example), sparq-wasm (wasm-bundle,
+# the deterministic browser-bundle-size measurement), sparq-nlq (nlq-offline-bench),
+# and sparq-serve (serve-core-bench).
 BENCH_EXEMPT_CRATES = frozenset(
     {
         "sparq-bench",
@@ -83,6 +94,7 @@ BENCH_EXEMPT_CRATES = frozenset(
         "sparq-engine",
         "sparq-cli",
         "sparq-canon",
+        "sparq-py",
     }
 )
 
