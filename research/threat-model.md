@@ -18,7 +18,7 @@ actually verifies.
 
 | Crate / path | Why in scope | `unsafe`? |
 |---|---|---|
-| `sparq-core` | Storage, dictionary, mmap on-disk format, RDF text parsers, fused decompress ingest | **Yes — 39 sites** (mmap, dict-spill, parallel scatter, SIMD) |
+| `sparq-core` | Storage, dictionary, mmap on-disk format, RDF text parsers, fused decompress ingest | **Yes — 42 sites** (mmap, dict-spill, parallel scatter, SIMD); canonical count via `scripts/unsafe-gate.py` |
 | `sparq-engine` | SPARQL planner + streaming executor, `QueryBudget`, optional `SERVICE` | No `unsafe` in the executor itself |
 | `sparq-server` | The W3C SPARQL 1.1 Protocol HTTP surface | No |
 | `sparq-reason` | RDFS / OWL-RL / N3 materialization, inference-conformance-gated | **No `unsafe`** (pure-safe Rust) |
@@ -115,8 +115,17 @@ and the **GAP** with its bead.
 ### B5 — hostile on-disk index → unsafe mmap loader
 
 This boundary carries the only memory-safety (rather than wrong-answer or DoS)
-risk, so it leads. `grep -rn "unsafe" crates/sparq-core/src` returns **39 sites**
-across `extsort.rs`, `dict.rs`, `store.rs`, `dictspill.rs`, `lib.rs`. The
+risk, so it leads. The canonical count is **42 `unsafe` sites** in `sparq-core`,
+across `extsort.rs`, `dict.rs`, `store.rs`, `dictspill.rs`, `lib.rs`, `diskann.rs`,
+`main.rs` — produced reproducibly by the count-ratchet
+(`python3 scripts/unsafe-gate.py --check`, the `sparq-core` row; `--list` emits
+the `file:line` of every counted site). This is the same method enforced by the
+`unsafe-register (count ratchet)` CI lane and documented per-site in
+[`compliance/memsafety/unsafe-register.md`](../compliance/memsafety/unsafe-register.md);
+a raw `grep -rn "unsafe" crates/sparq-core/src` over-counts (it also matches
+`// SAFETY:` arguments, the `#![warn(clippy::undocumented_unsafe_blocks)]`
+attribute, and prose), so the ratchet number is authoritative. [OPUS-4.8 sq-hday]
+The
 on-disk store is a *directory* of files (no single `.spq` blob), opened by
 `Graph::open` (`crates/sparq-core/src/lib.rs:1105`): permutation files
 (`perm0..5.bin`), the dictionary (`dict-meta/terms/offs/hash/hid.bin`), and the
