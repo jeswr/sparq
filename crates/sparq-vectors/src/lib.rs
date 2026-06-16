@@ -3,6 +3,8 @@
 pub mod ann;
 pub mod diskann;
 pub mod embed;
+#[cfg(feature = "filtered-ann")]
+pub mod filter;
 pub mod fingerprint;
 pub mod fuse;
 pub mod import;
@@ -33,6 +35,9 @@ pub use ann::{
 };
 pub use diskann::{sibling_graph_path, DiskAnnIndex, VamanaConfig, SPQG_MAGIC, SPQG_VERSION};
 pub use embed::{Embedder, HashEmbedder};
+// [OPUS-4.8] (sq-1wc1) Predicate-constrained (filtered) ANN — the `filtered-ann` feature only.
+#[cfg(feature = "filtered-ann")]
+pub use filter::{nearest_exact_filtered, FilterConfig, IdMask};
 pub use fingerprint::{check_against, Artifact, CheckResult, Fingerprint, FINGERPRINT_LEN};
 pub use fuse::{fuse_rrf, fuse_rrf_weighted, fuse_scores, hybrid_search, Retriever, RRF_K};
 pub use import::{ImportBinding, ImportSpec, MAX_NPY_HEADER_LEN};
