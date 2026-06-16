@@ -1,0 +1,56 @@
+# [OPUS-4.8] sq-6qw3 (W-reason): the tier-b WASM bundle for sparq-reason.
+#
+# A SEPARATE, lazy-loaded bundle (not folded into the lean `sparq-wasm` bundle): it
+# carries the forward-chaining reasoner (`sparq-reason`) + the N-Triples serialiser
+# (`sparq-engine`), which the lean default browser bundle deliberately does not. The
+# showcase site loads it ONLY on /surface/inference (next/dynamic, client-only) so the
+# landing page stays light. Mirrors the per-bundle-crate pattern of `sparq-wasm`.
+[package]
+name = "sparq-reason-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# cdylib for the wasm artifact; rlib so the pure helpers can be unit-tested natively.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No-default-features everywhere => no rayon: the wasm build has no threads and we keep
+# the bundle minimal. `sparq-reason` with default-features off drops its `parallel`
+# (rayon) feature; `sparq-engine`/`sparq-core` with defaults off drop rayon + the SPARQL
+# regex/digest cores. The reasoner's OWN `regex` dep (the N3 `string:matches` builtin) is
+# pure-Rust and compiles to wasm32 — the portability spike (sq-6qw3) confirmed regex,
+# aho-corasick and memchr all build for `wasm32-unknown-unknown`; the only build blocker
+# was getrandom's wasm backend (handled below, exactly as `sparq-wasm` does).
+sparq-core = { path = "../sparq-core", default-features = false }
+sparq-engine = { path = "../sparq-engine", default-features = false }
+sparq-reason = { path = "../sparq-reason", default-features = false }
+oxrdf.workspace = true
+wasm-bindgen = "0.2"
+
+# oxrdf pulls `rand`/getrandom (blank-node ids). On wasm there is no OS RNG, so select
+# getrandom's browser backend (crypto.getRandomValues). The matching
+# `--cfg getrandom_backend="wasm_js"` is set in the workspace .cargo/config.toml.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[features]
+default = []
+# [OPUS-4.8] sq-6qw3: expose `Reasoner::why(...)` — the derivation proof tree — by turning
+# on `sparq-reason`'s non-default `explain` feature. OFF by default so the standard reason
+# bundle carries zero proof-tree code; CI builds the bundle BOTH with and without it, and
+# the headless wasm tests run with it on. Maps directly to the `why()` proof tree the
+# /surface/inference page renders.
+explain = ["sparq-reason/explain"]
+
+[dev-dependencies]
+# [OPUS-4.8] sq-6qw3 — headless wasm test harness, mirroring sparq-wasm: exercises the
+# #[wasm_bindgen] JS-facing API in a REAL wasm runtime via `wasm-pack test --node`.
+# Dev-only: it must NOT enter the non-dev wasm graph.
+wasm-bindgen-test = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+# Optimise the wasm for size (the regex automata are the bundle-size risk flagged in the bead).
+wasm-opt = ["-Oz"]
