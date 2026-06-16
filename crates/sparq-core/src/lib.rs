@@ -4120,15 +4120,21 @@ fn parse_turtle_chunked(bytes: &[u8], target: usize) -> Result<(Dict, Vec<[Id; 3
         Ok(p) => p,
         Err(_) => return serial(), // an over-eager split produced invalid Turtle — redo serially
     };
-    let total: usize = partials.iter().map(|(_, t)| t.len()).sum();
-    let cap = partials.iter().map(|(d, _)| d.len()).max().unwrap_or(0);
-    let mut global = Dict::with_capacity(cap);
-    let mut all = Vec::with_capacity(total);
-    for (pd, ptriples) in partials {
-        let remap = global.merge_remap(&pd);
-        remap_extend(&mut all, ptriples, &remap);
-    }
-    Ok((global, all))
+    // [OPUS-4.8] (sq-eq26, T4) Consolidate the per-chunk partial dicts through the SHARED
+    // `merge_partials`: serial `merge_remap` on one thread (proven byte-reference the
+    // differential oracles pin), but on ≥2 threads the SHARDED `ShardedDict` merge the
+    // N-Triples loaders already use — the parallel dict consolidation that breaks the
+    // serial-`merge_remap` ceiling. Turtle's per-chunk parser ([`parse_turtle_chunk`])
+    // resets prefix/base/blank-node scope at each chunk boundary and emits FULLY-RESOLVED
+    // terms + per-chunk-unique blank-node labels into each partial `Dict` (turtle_chunks
+    // only splits where directive snapshots are shared and blank labels can't collide), so
+    // a partial here is structurally identical to an N-Triples block's partial: the merge
+    // sees only ground terms and labelled blank nodes and unifies them by term equality,
+    // exactly as the serial `merge_remap` loop did. RDF-1.2 triple terms are consolidated by
+    // the sharded merge too (sq-87bq), so quoted-triple Turtle stays eligible. The output
+    // (term + triple set) is identical to the serial merge — pinned by the
+    // `parallel_turtle_*_match_serial` differential oracles below.
+    Ok(merge_partials(partials))
 }
 
 /// Streams N-Triples from `reader` in newline-aligned ~64 MiB blocks, parsing+interning
@@ -4918,6 +4924,76 @@ mod tests {
             ground.push_str(&format!(":s{i} :p \"lit {i}\" ; :q {i}.5 .\n"));
         }
         differential(&ground, 16);
+    }
+
+    /// [OPUS-4.8] (sq-eq26, T4) The chunked Turtle merge now routes through the SHARDED
+    /// `ShardedDict` consolidation on ≥2 threads (the same path the N-Triples loaders use),
+    /// replacing the serial `merge_remap`-in-a-loop. This pins that the sharded merge yields
+    /// the IDENTICAL term + triple set as the single-thread serial merge on a multi-chunk
+    /// fixture that combines all the Turtle-specific state the merge must consolidate:
+    /// prefixes/base resolution, labelled + anonymous blank nodes shared across chunk
+    /// boundaries, AND RDF-1.2 triple terms (the construct sq-87bq enabled for the sharded
+    /// path). We run the parse under an EXPLICIT 4-thread rayon pool so the sharded path is
+    /// exercised regardless of the host's ambient thread count, and compare against the
+    /// serial parser under canonical blank-node renumbering.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_sharded_merge_matches_serial() {
+        // A multi-chunk document: prefixes + base, ground statements, labelled blank nodes
+        // shared across distant statements, anonymous nests/collections, and RDF-1.2 quoted
+        // triples (object position + the `{| … |}` annotation form) interleaved so chunk
+        // boundaries fall between every flavour of statement.
+        let mut ttl = String::from(
+            "@prefix : <http://ex/> .\n@prefix ex: <http://example.org/v#> .\n@base <http://base/> .\n",
+        );
+        ttl.push_str("_:shared :starts :here .\n");
+        for i in 0..500 {
+            ttl.push_str(&format!(
+                ":s{i} :p :o{i} ; :rel ex:r{i} ; :iri <doc/{i}> .\n"
+            ));
+            ttl.push_str(&format!("_:b{} :links _:b{} .\n", i / 4, i / 4 + 1));
+            ttl.push_str(&format!(
+                ":r{i} :has [ :q \"v{i}.w\" ; :list ( 1 2.5 \"three\" ) ] .\n"
+            ));
+            ttl.push_str(&format!(":m{i} :annotates <<( ex:a{i} :age {i} )>> .\n"));
+            ttl.push_str(&format!(
+                ":a{i} :age {i} {{| :certainty {i}.5 ; :by :src{i} |}} .\n"
+            ));
+        }
+        ttl.push_str("_:shared :ends :here .\n");
+        assert!(ttl.len() > 8192);
+
+        let target = 32;
+        let chunks = turtle_chunks(ttl.as_bytes(), target).expect("doc must fan out");
+        assert!(
+            chunks.len() > 1,
+            "doc must split into multiple chunks to exercise the merge"
+        );
+
+        // Force the SHARDED path: a 4-thread pool makes `merge_partials` route through the
+        // `ShardedDict` consolidation (default_shards() >= 4) inside `parse_turtle_chunked`.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let (pd, pt) = pool.install(|| {
+            assert!(
+                rayon::current_num_threads() > 1,
+                "pool must expose the sharded path"
+            );
+            parse_turtle_chunked(ttl.as_bytes(), target).unwrap()
+        });
+
+        // Serial reference: the single-chunk parser, no sharding.
+        let mut sd = Dict::new();
+        let st = parse_turtle_chunk(ttl.as_bytes(), &mut sd).unwrap();
+
+        assert_eq!(
+            canon_bnodes(&pd, &pt),
+            canon_bnodes(&sd, &st),
+            "sharded chunked merge must equal serial up to anonymous bnode ids"
+        );
+        assert!(pt.len() >= 2000, "expected the full triple set, got {}", pt.len());
     }
 
     /// [OPUS-4.8] Regression for review 1398: a PN_LOCAL_ESC `\#` in a prefixed-name local
