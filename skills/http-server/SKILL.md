@@ -287,6 +287,12 @@ curl -X DELETE 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'
 
 curl http://127.0.0.1:3030/health                               # -> "ok"
 curl http://127.0.0.1:3030/metrics                              # Prometheus text exposition
+
+# Admin WAL compaction / vacuum for ERASURE-COMPLETENESS (sq-x32t). POST-only; gated by the
+# WRITE token. Physically purges DELETEd / DROPped data (incl. orphaned literal VALUES) from the
+# on-disk store so a logical erasure is followed by real erasure. 200 ok; 409 if in-memory
+# (no --persist, nothing to purge); 503 on a transient durable-write error (retryable):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/compact
 ```
 
 `/metrics` is hand-rolled Prometheus text exposition (no metrics dependency); the
@@ -300,6 +306,24 @@ middleware wraps the whole hardening stack, so shed (`429`), body-limit (`413`) 
 | `sparq_active_subscriptions` | gauge | active WebSocket subscriptions (scrape time) |
 | `sparq_graph_triples` | gauge | triples in the published graph (scrape time) |
 | `sparq_updates_total` | counter | successfully applied SPARQL updates |
+
+**`POST /admin/compact` — WAL compaction / vacuum (erasure-completeness, `sq-x32t`).** A logical
+`DELETE` / `DROP GRAPH` retracts data from the live view but leaves the superseded bytes in earlier
+`--persist` WAL segments (and the dictionary) until a compaction folds the live state into a fresh
+base. This admin op does that on demand: it **physically rewrites** the on-disk store to only the
+current live triples, with a **re-interned (purged) dictionary**, then **atomically swaps** the
+directory (rollback-safe two-rename + WAL truncate; an interrupted swap is healed on the next
+open). So a deleted triple's value — including an orphaned **literal value** (e.g. personal data) —
+is gone from disk, not just hidden. It runs on the single writer thread strictly **between
+batches** (no race with a concurrent write), preserves the live triple set **exactly** (no
+generation published; reads keep flowing throughout). **POST-only**, gated by the **write** token
+(`--auth-token`), like an UPDATE. Responses: `200` ok; `409` if the server is in-memory (no
+`--persist` — there is no on-disk history to purge, so a no-op success would mislead); `503` on a
+transient durable-write error (retryable, writer stays alive). **Offline equivalent:** stop the
+server and run `sparq-cli compact <persist-dir>` (see the `cli` skill). **Honest scope:** this
+scrubs the engine's own on-disk segments + dictionary; it cannot reach bytes already copied off-box
+(filesystem snapshots, COW history, external backups) — those are the operator's responsibility
+(see `compliance/privacy/retention-erasure-runbook.md` §7a/§7b).
 
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the

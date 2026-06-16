@@ -201,6 +201,25 @@ pub trait ApplyUpdates: Send + 'static {
     fn footprint(&self, _update: &Self::Update) -> Footprint {
         Footprint::Barrier
     }
+
+    /// [OPUS-4.8] (sq-x32t) Runs an out-of-band MAINTENANCE operation on the writer
+    /// thread — the only thread that mutates the applier's durable side. The default
+    /// is a no-op (an in-memory applier has nothing to maintain).
+    ///
+    /// This is how an admin compaction/vacuum reaches a durable store WITHOUT a lock:
+    /// the durable [`Graph`](sparq_core::Graph) is owned by the applier and only ever
+    /// touched on the writer thread (fork/apply/seal), so a maintenance op routed here
+    /// runs strictly between batches — never concurrently with a commit. It does NOT
+    /// publish a generation: maintenance (e.g. WAL compaction) preserves the live
+    /// triple set exactly, so the readable snapshot is byte-equivalent before and
+    /// after. The published in-memory lineage is therefore untouched; only the durable
+    /// on-disk image is rewritten.
+    ///
+    /// `Err(msg)` reports a maintenance failure to the caller; the writer thread stays
+    /// alive (a failed maintenance op never tears down the writer or affects reads).
+    fn maintain(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Why a submitted update did not land in a published generation.
@@ -245,6 +264,20 @@ struct Msg<U> {
     ack: Option<SyncSender<Result<u64, WriteError>>>,
 }
 
+/// [OPUS-4.8] (sq-x32t) What the writer thread receives on its queue: either an UPDATE
+/// submission (the steady-state path) or a MAINTENANCE request (an admin op such as WAL
+/// compaction). Maintenance is sequenced through the SAME single queue as updates, so it
+/// runs strictly between batches on the one thread that owns the durable store — no lock,
+/// no concurrent access to the durable graph, no reordering relative to in-flight writes.
+enum Cmd<U> {
+    /// A normal update submission.
+    Update(Msg<U>),
+    /// Run [`ApplyUpdates::maintain`] on the writer thread; the result is sent back on the
+    /// channel so the caller can block for completion. Publishes NO generation (maintenance
+    /// preserves the live snapshot exactly).
+    Maintain(SyncSender<Result<(), String>>),
+}
+
 /// The single sequenced writer (§6.5): owns the one thread allowed to call
 /// [`GenerationRing::publish`], batching submissions in a group-commit window.
 ///
@@ -254,7 +287,7 @@ struct Msg<U> {
 /// get their generation number), and joins the thread.
 pub struct Writer<U: Send + 'static> {
     /// `Some` until drop; dropping the sender is what tells the thread to drain.
-    tx: Option<mpsc::Sender<Msg<U>>>,
+    tx: Option<mpsc::Sender<Cmd<U>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -265,7 +298,7 @@ impl<U: Send + 'static> Writer<U> {
     where
         A: ApplyUpdates<Update = U>,
     {
-        let (tx, rx) = mpsc::channel::<Msg<U>>();
+        let (tx, rx) = mpsc::channel::<Cmd<U>>();
         let thread = thread::Builder::new()
             .name("sparq-serve-writer".into())
             .spawn(move || run(ring, applier, config, rx))
@@ -299,6 +332,26 @@ impl<U: Send + 'static> Writer<U> {
         ack_rx.recv().map_err(|_| WriteError::Shutdown)?
     }
 
+    /// [OPUS-4.8] (sq-x32t) Runs an out-of-band MAINTENANCE op ([`ApplyUpdates::maintain`])
+    /// on the writer thread and **blocks until it completes**, returning its result. The
+    /// request is sequenced through the same queue as updates, so it runs strictly between
+    /// batches — never concurrently with a commit, and never reordered across an in-flight
+    /// write. It publishes no generation (maintenance preserves the live snapshot exactly),
+    /// so readers are unaffected for the whole operation. The admin WAL compaction/vacuum
+    /// reaches the durable store this way. `Err(Shutdown)` if the writer is gone; otherwise
+    /// the inner `Result` is the maintenance outcome (an `Err(String)` is a maintenance
+    /// failure that left the writer alive).
+    pub fn maintain(&self) -> Result<Result<(), String>, WriteError> {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        self.tx
+            .as_ref()
+            .expect("sender present until drop")
+            .send(Cmd::Maintain(done_tx))
+            .map_err(|_| WriteError::Shutdown)?;
+        // A dropped done sender means the writer thread died running the op.
+        done_rx.recv().map_err(|_| WriteError::Shutdown)
+    }
+
     /// Fire-and-forget submission: queues the update and returns immediately.
     /// `Err(Shutdown)` if the writer is gone; otherwise the outcome (including a
     /// possible [`WriteError::Rejected`]) is not reported — callers that need
@@ -315,7 +368,7 @@ impl<U: Send + 'static> Writer<U> {
         self.tx
             .as_ref()
             .expect("sender present until drop")
-            .send(msg)
+            .send(Cmd::Update(msg))
             .map_err(|_| WriteError::Shutdown)
     }
 }
@@ -339,25 +392,45 @@ fn run<A: ApplyUpdates>(
     ring: Arc<GenerationRing<A::Snapshot>>,
     mut applier: A,
     config: WriterConfig,
-    rx: Receiver<Msg<A::Update>>,
+    rx: Receiver<Cmd<A::Update>>,
 ) {
     let max_batch = config.max_batch.max(1);
     loop {
-        // Block until the first update arrives — it opens the window.
+        // Block until the first command arrives. An update opens a group-commit window; a
+        // maintenance request runs immediately (no pending batch to flush — it is the first
+        // thing seen this iteration).
         let first = match rx.recv() {
-            Ok(m) => m,
+            Ok(c) => c,
             Err(_) => return, // all senders gone, nothing queued: done
+        };
+        let first = match first {
+            Cmd::Update(m) => m,
+            // [OPUS-4.8] (sq-x32t) Maintenance arrived with no pending batch: run it now.
+            Cmd::Maintain(done) => {
+                let _ = done.send(applier.maintain());
+                continue;
+            }
         };
         let deadline = Instant::now() + config.window;
         let mut batch = vec![first];
         let mut disconnected = false;
+        // [OPUS-4.8] (sq-x32t) A maintenance request that arrives mid-window CLOSES the window
+        // (we commit the batch collected so far) and is then run AFTER the commit, preserving
+        // strict FIFO: every update queued before the maintenance request is committed first,
+        // so a compaction observes exactly the writes that preceded it. The request is held
+        // here and serviced once the batch is committed below.
+        let mut pending_maintain: Option<SyncSender<Result<(), String>>> = None;
         while batch.len() < max_batch {
             let now = Instant::now();
             if now >= deadline {
                 break;
             }
             match rx.recv_timeout(deadline - now) {
-                Ok(m) => batch.push(m),
+                Ok(Cmd::Update(m)) => batch.push(m),
+                Ok(Cmd::Maintain(done)) => {
+                    pending_maintain = Some(done);
+                    break; // close the window; commit the batch, then run maintenance
+                }
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => {
                     disconnected = true; // drain: commit what we have, then exit
@@ -372,6 +445,13 @@ fn run<A: ApplyUpdates>(
                     commit(&ring, &mut applier, group);
                 }
             }
+        }
+        // [OPUS-4.8] (sq-x32t) Run the maintenance op AFTER the preceding batch is committed +
+        // published (so a compaction folds in every write that arrived before it), then ack the
+        // caller. A maintenance failure leaves the writer thread alive (it is reported via the
+        // returned `Result`, not by tearing down the writer).
+        if let Some(done) = pending_maintain {
+            let _ = done.send(applier.maintain());
         }
         if disconnected {
             return;

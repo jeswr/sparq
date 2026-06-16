@@ -177,6 +177,25 @@ Semantics:
   (degraded read-only), and a subsequent write succeeds once durability recovers; a persistent
   error simply yields repeated `503`s. The fail-closed invariant is unchanged: a write that did
   not durably commit is never observed by any reader.
+- **WAL compaction / vacuum for erasure-completeness (`sq-x32t`).** A logical `DELETE` /
+  `DROP GRAPH` retracts data from the live view, but the superseded bytes linger in earlier WAL
+  segments (and the dictionary) until a compaction folds the live state into a fresh base. Two
+  operator-invokable ways to physically purge them:
+  - **Online:** `POST /admin/compact` — **POST-only**, gated by the **write** auth token
+    (`--auth-token`), like an UPDATE. Runs on the writer thread strictly **between batches** (no
+    race with a concurrent write), publishes **no** generation (the live triple set is preserved
+    exactly, so reads keep flowing). `200` ok; `409` if the server is in-memory (no `--persist` —
+    nothing to purge); `503` on a transient durable-write error (retryable; the writer stays alive).
+  - **Offline:** `sparq-cli compact <persist-dir>` (stop the server, run it, restart).
+
+  Both **rewrite** the on-disk store to only the current live triples with a **re-interned
+  (purged) dictionary**, then **atomically swap** the directory (rollback-safe two-rename, parent
+  dir fsync'd between renames, WAL truncated; an interrupted swap is healed deterministically on
+  the next open). So a deleted triple's value — including an orphaned **literal value** (e.g.
+  personal data) — is **physically gone** from the engine's on-disk segments + dictionary, not
+  merely hidden. **Honest scope:** it cannot reach bytes already copied **off-box** (filesystem
+  snapshots, block-level COW history, external backups) — those remain the operator's
+  responsibility. See `compliance/privacy/retention-erasure-runbook.md` §7a.
 - **Deferred hardening (beaded, not yet wired):** byte-accounted durability metrics, online
   compaction tuning under sustained write load, and WAL-durable `CLEAR`/`DROP GRAPH <g>` of an
   *existing* named graph (today those operations are applied in memory and persisted only at the

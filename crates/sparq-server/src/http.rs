@@ -31,7 +31,7 @@ use axum::{
     extract::{DefaultBodyLimit, Query, RawQuery, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::{any, get, post},
     BoxError, Router,
 };
 use tower::ServiceBuilder;
@@ -1052,6 +1052,36 @@ impl DurableStore {
         }
         sparq_engine::apply_effects(&mut self.graph, &batch)
     }
+
+    /// [OPUS-4.8] (sq-x32t) WAL COMPACTION / VACUUM for erasure-completeness. Rewrites the
+    /// durable on-disk store to a fresh segment set containing ONLY the current LIVE triples,
+    /// so superseded INSERTs, logically-DELETEd data and DROPped graphs that still linger in
+    /// earlier WAL segments are PHYSICALLY removed from the on-disk history (the manual purge
+    /// in `compliance/privacy/retention-erasure-runbook.md` §7a, automated). [`Graph::vacuum`]
+    /// re-interns the live triples into a fresh dictionary (so orphaned term VALUES are purged
+    /// too), writes the new base to a sibling dir, then does a rollback-safe two-rename swap
+    /// (parent dir fsync'd between renames) and truncates the WAL; an interrupted swap is healed
+    /// deterministically by `recover_compaction` on the next `Graph::open`. The live triple set
+    /// is preserved EXACTLY (round-trip), so the published in-memory snapshot is unaffected —
+    /// only the durable image is rewritten.
+    ///
+    /// Runs on the writer thread (via [`ServerApplier::maintain`]), so the durable graph is
+    /// never touched concurrently with a commit. A pending in-memory `batch` is impossible
+    /// here: maintenance is sequenced AFTER the preceding batch is sealed (see `Writer::run`),
+    /// so `commit_batch` has already drained it. We assert that to fail loudly if the invariant
+    /// is ever broken rather than silently dropping buffered effects.
+    fn compact(&mut self) -> Result<(), String> {
+        debug_assert!(
+            self.batch.is_empty(),
+            "compaction must run between batches (the durable batch buffer must be drained by seal)"
+        );
+        // [OPUS-4.8] (sq-x32t) Use the ERASURE-GRADE `vacuum`, not the serving-path `compact`:
+        // vacuum re-interns into a fresh dictionary so a term VALUE orphaned by a DELETE / DROP
+        // GRAPH (e.g. a personal-data literal) is physically purged from the on-disk dict blob,
+        // not just from the triple indexes. `compact` keeps the dict for O(triples) folding,
+        // which would leave the orphaned bytes on disk — not erasure-complete.
+        self.graph.vacuum()
+    }
 }
 
 impl ServerApplier {
@@ -1150,6 +1180,23 @@ impl ApplyUpdates for ServerApplier {
             })?;
         }
         self.inner.seal(working)
+    }
+
+    /// [OPUS-4.8] (sq-x32t) Out-of-band WAL COMPACTION / VACUUM of the durable store, for
+    /// erasure-completeness. A no-op for an in-memory server (`durable == None`) — there is no
+    /// on-disk history to purge. For a `--persist` server it physically rewrites the on-disk
+    /// store to contain only the current live triples (see [`DurableStore::compact`]). It runs
+    /// on the writer thread strictly between batches (the `Writer` sequences it through the same
+    /// queue as updates), so the durable graph is never accessed concurrently and the
+    /// compaction folds in every write that preceded the request. No generation is published —
+    /// the live triple set is preserved exactly, so readers are unaffected throughout.
+    fn maintain(&mut self) -> Result<(), String> {
+        match &mut self.durable {
+            Some(d) => d.compact(),
+            // In-memory server: nothing on disk to compact (erasure is immediate — the dropped
+            // generations free by `Arc` drop, no WAL history survives).
+            None => Ok(()),
+        }
     }
 }
 
@@ -1376,6 +1423,27 @@ impl AppState {
         }
     }
 
+    /// [OPUS-4.8] (sq-x32t) Compacts/vacuums the durable on-disk store for ERASURE-
+    /// COMPLETENESS: physically rewrites the `--persist` directory so only the current live
+    /// triples remain, dropping superseded INSERTs / DELETEd data / DROPped graphs that still
+    /// linger in earlier WAL segments. **Blocks until the compaction completes** (it runs on
+    /// the writer thread, strictly between batches — see [`Writer::maintain`]). The live triple
+    /// set is preserved exactly, so no generation is published and readers are unaffected.
+    ///
+    /// Returns `Ok(())` on success (including the no-op for an in-memory server with no persist
+    /// dir — there is no on-disk history to purge, so erasure is already complete). `Err(msg)`
+    /// is a compaction failure (e.g. an I/O error during the durable rewrite); the writer thread
+    /// stays alive and reads keep being served from the last published snapshot. Blocking: call
+    /// it on the blocking pool.
+    pub fn compact(&self) -> Result<(), String> {
+        match self.writer.maintain() {
+            Ok(res) => res,
+            Err(WriteError::Shutdown) => Err("update writer has shut down".to_string()),
+            // `maintain` only ever returns `Ok(_)` or `Shutdown` from the writer.
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     /// A receiver of the committed generation number for a subscription connection (T23).
     pub(crate) fn subscribe_commits(&self) -> tokio::sync::watch::Receiver<u64> {
         self.commits.subscribe()
@@ -1412,6 +1480,11 @@ pub fn router(state: AppState) -> Router {
         )
         // Liveness.
         .route("/health", get(|| async { "ok" }))
+        // [OPUS-4.8] (sq-x32t) ADMIN: WAL compaction/vacuum for erasure-completeness. POST-only
+        // (it mutates the durable on-disk store), gated by the WRITE auth token (the existing
+        // admin gate). Physically purges superseded/deleted data from the on-disk WAL history so
+        // a logical DELETE / DROP GRAPH is followed by real erasure. See [`admin_compact`].
+        .route("/admin/compact", post(admin_compact))
         // Prometheus metrics (T22).
         .route("/metrics", get(metrics_endpoint));
     // [OPUS-4.8] sq-d3d8 (epic sq-3183): OPT-IN federation discovery — the VoID dataset
@@ -2199,6 +2272,60 @@ async fn handle_post(
 /// BACKSTOP for an uninstrumented stretch, not the only stop. See [`await_update_worker`] for
 /// the remaining caveats (coarse cooperative checks; single sequenced writer; the writer
 /// finishes its next budget check after the HTTP side has already answered 503).
+/// [OPUS-4.8] (sq-x32t) `POST /admin/compact` — WAL COMPACTION / VACUUM for ERASURE-
+/// COMPLETENESS (epic sq-toze.33). A logical SPARQL `DELETE` / `DROP GRAPH` retracts data from
+/// the live view but leaves the superseded bytes in earlier `--persist` WAL segments until a
+/// compaction folds the live state into a fresh base. This operator-invokable endpoint runs that
+/// compaction on demand, so erased data is PHYSICALLY gone from the on-disk store (the manual
+/// quiesce→export→reseed purge in `compliance/privacy/retention-erasure-runbook.md` §7a,
+/// automated as one atomic, crash-safe operation).
+///
+/// - **Gated** behind the WRITE auth token (the existing admin gate) — it mutates the durable
+///   store. POST-only (a GET could not mutate; the route is registered POST-only so other verbs
+///   get a 405).
+/// - **In-memory server** (no `--persist`): 409 Conflict — there is no on-disk history to purge
+///   (erasure is already immediate: dropped generations free by `Arc` drop, no WAL survives), so
+///   a no-op success would be misleading. The body explains the precondition.
+/// - **Persistent server**: runs [`AppState::compact`] on the blocking pool (it blocks for the
+///   compaction, which runs on the writer thread between batches). 200 on success; 503 if the
+///   durable rewrite hit a transient I/O error (retryable — the writer stays alive); 500 if the
+///   worker panicked.
+///
+/// Physical-erasure caveat (documented honestly): compaction guarantees the LIVE store no longer
+/// references the erased triples and the new on-disk segments do not contain them; it cannot, by
+/// itself, scrub bytes already copied off-box (filesystem snapshots, block-level COW history,
+/// external backups). Those are out of scope for the engine and must be handled by the storage /
+/// backup tier per the retention-erasure runbook.
+async fn admin_compact(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
+        return resp;
+    }
+    if state.config().persist_dir.is_none() {
+        return json_error(
+            StatusCode::CONFLICT,
+            "compaction requires durable persistence; this server is in-memory (no --persist dir). \
+             In-memory erasure is already immediate (no on-disk WAL history to purge).",
+        );
+    }
+    let st = state.clone();
+    let task = tokio::task::spawn_blocking(move || st.compact());
+    match task.await {
+        Ok(Ok(())) => text_response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            "compaction complete\n".to_string(),
+            false,
+        ),
+        // A compaction failure (e.g. durable-write I/O error) is retryable: the writer thread
+        // stays alive and reads keep flowing from the last published snapshot.
+        Ok(Err(e)) => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("compaction failed (retryable): {}", e),
+        ),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "compaction worker panicked"),
+    }
+}
+
 async fn run_update(state: &AppState, update: String) -> Response {
     let st = state.clone();
     let task = tokio::task::spawn_blocking(move || st.apply_update(&update));

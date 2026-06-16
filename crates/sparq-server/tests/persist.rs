@@ -592,3 +592,114 @@ async fn persistent_durable_write_error_repeated_503_reads_survive() {
     }
     s.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-x32t, epic sq-toze.33) ADMIN WAL COMPACTION / VACUUM — erasure-completeness.
+// ---------------------------------------------------------------------------
+
+/// POSTs to `/admin/compact` (optionally with a Bearer token) and returns the status.
+async fn post_compact(cl: &reqwest::Client, base: &str, token: Option<&str>) -> reqwest::StatusCode {
+    let mut req = cl.post(format!("{base}/admin/compact"));
+    if let Some(t) = token {
+        req = req.header("authorization", format!("Bearer {}", t));
+    }
+    req.send().await.unwrap().status()
+}
+
+/// Recursively true iff `needle`'s bytes appear in any regular file under `dir` — proves a
+/// deleted datum's bytes are PHYSICALLY present/absent on disk.
+fn dir_contains_bytes(dir: &Path, needle: &[u8]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if dir_contains_bytes(&p, needle) {
+                return true;
+            }
+        } else if let Ok(bytes) = std::fs::read(&p) {
+            if bytes.windows(needle.len()).any(|w| w == needle) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The end-to-end ADMIN COMPACTION flow over HTTP: INSERT some data (one to keep, one secret),
+/// DELETE the secret, then `POST /admin/compact`. After compaction the LIVE data is intact AND the
+/// deleted secret's bytes are PHYSICALLY GONE from the `--persist` directory — and a restart
+/// confirms the erasure is durable. This is the operator-invokable erasure of the runbook §7a.
+#[tokio::test]
+async fn admin_compact_physically_erases_deleted_data() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+
+    {
+        let s = Server::start(persist_config(scratch.path())).await;
+        assert_eq!(
+            post_update(&cl, &s.base, "INSERT DATA { <http://ex/keep> <http://ex/p> \"KEEP-LIVE-9f3a\" }").await,
+            204,
+        );
+        assert_eq!(
+            post_update(&cl, &s.base, "INSERT DATA { <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-7b21\" }").await,
+            204,
+        );
+        // Logical erasure: the secret is gone from the live view…
+        assert_eq!(
+            post_update(&cl, &s.base, "DELETE DATA { <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-7b21\" }").await,
+            204,
+        );
+        assert_eq!(count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await, 1, "only KEEP remains live");
+        // …but its bytes still linger in the on-disk WAL/dict history until compaction.
+        assert!(dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"), "pre-compaction: secret still on disk");
+
+        // Operator-invoked compaction (no auth token configured here → ungated).
+        assert_eq!(post_compact(&cl, &s.base, None).await, 200, "compaction must succeed");
+
+        // Live data preserved; deleted secret physically erased; server still serving.
+        assert_eq!(count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await, 1, "live data survives compaction");
+        assert!(dir_contains_bytes(scratch.path(), b"KEEP-LIVE-9f3a"), "live data must remain on disk");
+        assert!(!dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"), "deleted secret bytes must be physically erased");
+
+        // Writes still work after compaction (fresh WAL).
+        assert_eq!(
+            post_update(&cl, &s.base, "INSERT DATA { <http://ex/after> <http://ex/p> <http://ex/v> }").await,
+            204,
+        );
+        s.stop().await;
+    }
+    // Durability: restart sees the post-compaction state; the secret never resurrects.
+    let s2 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(count_rows(&cl, &s2.base, "SELECT * WHERE { ?s ?p ?o }").await, 2, "KEEP + after survive restart");
+    assert!(!dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"), "erasure must survive the restart");
+    s2.stop().await;
+}
+
+/// The admin compaction endpoint is GATED by the WRITE auth token: no/wrong token → 401, correct
+/// token → 200. (Same gate as SPARQL Update — it mutates the durable store.)
+#[tokio::test]
+async fn admin_compact_requires_write_auth() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+    let config = ServerConfig { auth_token: Some("s3cr3t".to_string()), ..persist_config(scratch.path()) };
+    let s = Server::start(config).await;
+
+    assert_eq!(post_compact(&cl, &s.base, None).await, 401, "no token must be refused");
+    assert_eq!(post_compact(&cl, &s.base, Some("wrong")).await, 401, "wrong token must be refused");
+    assert_eq!(post_compact(&cl, &s.base, Some("s3cr3t")).await, 200, "correct write token compacts");
+    s.stop().await;
+}
+
+/// An IN-MEMORY server (no `--persist`) returns 409 on `/admin/compact`: there is no on-disk WAL
+/// history to purge (in-memory erasure is already immediate), so a misleading no-op success is
+/// avoided.
+#[tokio::test]
+async fn admin_compact_on_in_memory_server_is_409() {
+    let cl = reqwest::Client::new();
+    // Default config = no persist dir = in-memory.
+    let s = Server::start(ServerConfig::default()).await;
+    assert_eq!(post_compact(&cl, &s.base, None).await, 409, "in-memory server has nothing to compact");
+    s.stop().await;
+}

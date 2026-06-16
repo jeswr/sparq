@@ -34,6 +34,15 @@ struct MockApplier {
     /// Counts the seals the writer actually attempted (success or failure), so a
     /// test can assert the writer kept running and re-attempted after a refusal.
     seals: Arc<AtomicUsize>,
+    /// [OPUS-4.8] (sq-x32t) Records the committed-update count SEEN by each `maintain`
+    /// call (proving maintenance is sequenced AFTER the preceding batch); `len()` is a
+    /// run-count. When `maintain_fails` > 0, `maintain` returns `Err` once (writer must
+    /// stay alive).
+    maintains: Arc<std::sync::Mutex<Vec<usize>>>,
+    maintain_fails: Arc<AtomicUsize>,
+    /// The applier's own count of committed updates (advanced in `seal`), so `maintain`
+    /// can record how many it observed.
+    committed: usize,
 }
 
 impl MockApplier {
@@ -43,6 +52,27 @@ impl MockApplier {
             fork_delay: Duration::ZERO,
             seal_fails: Arc::new(AtomicUsize::new(0)),
             seals: Arc::new(AtomicUsize::new(0)),
+            maintains: Arc::new(std::sync::Mutex::new(Vec::new())),
+            maintain_fails: Arc::new(AtomicUsize::new(0)),
+            committed: 0,
+        }
+    }
+
+    /// [OPUS-4.8] (sq-x32t) A mock sharing the maintenance observation/fault handles with
+    /// the test, so the test can verify maintenance ordering and failure-survival.
+    fn with_maintain_control(
+        forks: &Arc<AtomicUsize>,
+        maintains: &Arc<std::sync::Mutex<Vec<usize>>>,
+        maintain_fails: &Arc<AtomicUsize>,
+    ) -> Self {
+        MockApplier {
+            forks: forks.clone(),
+            fork_delay: Duration::ZERO,
+            seal_fails: Arc::new(AtomicUsize::new(0)),
+            seals: Arc::new(AtomicUsize::new(0)),
+            maintains: maintains.clone(),
+            maintain_fails: maintain_fails.clone(),
+            committed: 0,
         }
     }
 
@@ -59,6 +89,9 @@ impl MockApplier {
             fork_delay: Duration::ZERO,
             seal_fails: seal_fails.clone(),
             seals: seals.clone(),
+            maintains: Arc::new(std::sync::Mutex::new(Vec::new())),
+            maintain_fails: Arc::new(AtomicUsize::new(0)),
+            committed: 0,
         }
     }
 }
@@ -97,7 +130,22 @@ impl ApplyUpdates for MockApplier {
             self.seal_fails.fetch_sub(1, Ordering::SeqCst);
             return Err("injected transient durable-write error (ENOSPC)".into());
         }
+        // [OPUS-4.8] (sq-x32t) Track how many updates have been committed so a later
+        // `maintain` can prove it observed the preceding batch (FIFO sequencing).
+        self.committed = working.len();
         Ok(working)
+    }
+
+    /// [OPUS-4.8] (sq-x32t) Records the committed-update count it observed (so the test can
+    /// assert maintenance ran AFTER the preceding updates), and fails once if armed (the
+    /// writer must survive and keep serving later maintenance/updates).
+    fn maintain(&mut self) -> Result<(), String> {
+        self.maintains.lock().unwrap().push(self.committed);
+        if self.maintain_fails.load(Ordering::SeqCst) > 0 {
+            self.maintain_fails.fetch_sub(1, Ordering::SeqCst);
+            return Err("injected maintenance failure".into());
+        }
+        Ok(())
     }
 }
 
@@ -344,6 +392,9 @@ fn readers_never_stall_while_writer_commits() {
             fork_delay: Duration::from_millis(2),
             seal_fails: Arc::new(AtomicUsize::new(0)),
             seals: Arc::new(AtomicUsize::new(0)),
+            maintains: Arc::new(std::sync::Mutex::new(Vec::new())),
+            maintain_fails: Arc::new(AtomicUsize::new(0)),
+            committed: 0,
         },
         WriterConfig { window: Duration::from_millis(1), max_batch: 64, ..WriterConfig::default() },
     ));
@@ -543,4 +594,66 @@ fn persistent_seal_failure_refuses_repeatedly_reads_survive() {
     // Durability recovered (all armed failures consumed): writes resume.
     let g = writer.submit("ok-2".to_string(), pods(&["pod:a"])).unwrap();
     assert_eq!(g, 2, "writes must resume once durability recovers");
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-x32t) Out-of-band MAINTENANCE (admin WAL compaction/vacuum) sequencing.
+// ---------------------------------------------------------------------------
+
+/// `Writer::maintain` runs the applier's maintenance op on the writer thread, STRICTLY AFTER the
+/// updates submitted before it are committed (FIFO) — so an admin compaction observes exactly the
+/// writes that preceded it — and publishes NO generation (the live snapshot is unchanged).
+#[test]
+fn maintain_runs_after_preceding_updates_no_new_generation() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let maintains = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let maintain_fails = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::new(Log::new()));
+    let writer = Writer::spawn(
+        ring.clone(),
+        MockApplier::with_maintain_control(&forks, &maintains, &maintain_fails),
+        // Tiny window so each submit commits as its own generation promptly.
+        WriterConfig { window: Duration::from_millis(5), max_batch: 64, ..WriterConfig::default() },
+    );
+
+    // Commit three updates (FIFO), each its own generation.
+    for n in 0..3 {
+        writer.submit(format!("u{n}"), pods(&["pod:a"])).unwrap();
+    }
+    let gen_before = ring.current().number();
+    assert_eq!(ring.current().snapshot().len(), 3, "three updates committed");
+
+    // Maintenance: blocks, runs on the writer thread, returns Ok.
+    assert_eq!(writer.maintain().unwrap(), Ok(()));
+
+    // It observed all three committed updates (ran after them), and published no generation.
+    assert_eq!(*maintains.lock().unwrap(), vec![3], "maintain ran once, after the 3 updates");
+    assert_eq!(ring.current().number(), gen_before, "maintenance must not publish a new generation");
+    assert_eq!(ring.current().snapshot().len(), 3, "the live snapshot is unchanged by maintenance");
+}
+
+/// A maintenance FAILURE is reported to the caller (inner `Err`) WITHOUT tearing down the writer:
+/// later maintenance and updates still work.
+#[test]
+fn maintain_failure_keeps_writer_alive() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let maintains = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let maintain_fails = Arc::new(AtomicUsize::new(1)); // fail the first maintain call only
+    let ring = Arc::new(GenerationRing::new(Log::new()));
+    let writer = Writer::spawn(
+        ring.clone(),
+        MockApplier::with_maintain_control(&forks, &maintains, &maintain_fails),
+        WriterConfig { window: Duration::from_millis(5), max_batch: 64, ..WriterConfig::default() },
+    );
+
+    writer.submit("u0".to_string(), pods(&["pod:a"])).unwrap();
+    // First maintenance fails (inner Err), but the writer thread survives.
+    let r = writer.maintain().unwrap();
+    assert!(r.is_err(), "armed maintenance failure must surface as Err, got {r:?}");
+    // A subsequent write still commits…
+    writer.submit("u1".to_string(), pods(&["pod:a"])).unwrap();
+    assert_eq!(ring.current().snapshot().len(), 2, "writes work after a maintenance failure");
+    // …and a later maintenance now succeeds.
+    assert_eq!(writer.maintain().unwrap(), Ok(()));
+    assert_eq!(maintains.lock().unwrap().len(), 2, "both maintenance attempts ran");
 }
