@@ -159,8 +159,13 @@ attestation (which still discloses the key in the manifest), so to actually
 suppress the key leak a deployment must present ONLY the hidden-issuer proof and
 the clear-key `commitment_attestations` must be made optional-when-hidden — a
 verifier-policy follow-up. The cryptographic gadget + verifier binding (the
-ZK-hard part) are COMPLETE and SOUND; the "make the clear path optional"
-policy wiring is the documented next step.
+ZK-hard part) are IMPLEMENTED and wired; the "make the clear path optional"
+policy wiring is the documented next step. SOUNDNESS (load-bearing): this is
+research-grade and NOT-yet-sound — the composition verifier has had NO external
+accredited-cryptographer sign-off (sq-qhy4 / sq-9hrn pending; remediation epic
+sq-1s2), so a passing proof is NOT, under an adversarial prover, a guarantee the
+hidden-issuer relation holds. NO soundness / ZK-privacy claim is asserted as
+achieved; every standing not-yet-sound disclaimer is preserved. [OPUS-4.8]
 
 ### Issuer-attested credential-bound HolderPoP — in-circuit B2 (sq-c2ql) — wired, NOT-yet-sound
 
