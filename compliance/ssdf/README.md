@@ -52,8 +52,10 @@ deploying organization can lift into its own attestation — not a pending exter
 ## Honesty posture
 
 The coverage summary in `controls.md` reports **28 implemented & verified / 13 audit-ready
-/ 1 gap** across the 42 SSDF task rows (one of which, `RV.1.4`, is an explicitly-flagged
-sparq-local sub-task supporting standard task RV.1.3 — see the footnote in `controls.md`).
+/ 1 gap** across **42 rows = 41 standard SP 800-218 v1.1 tasks + 1 flagged sparq-local row**
+(`RV.1.4`, the daily advisory watchdog — evidence supporting standard task RV.1.3, **not** a
+separate framework task; see the footnote in `controls.md`). <!-- [OPUS-4.8] sq-ce97: 41
+standard (RV.1 has 3 tasks) + 1 local row = 42 rows; status tally 28/13/1 unchanged. -->
 The single technical gap is **PW.6.2 reproducible-build
 evidence** (GX-8, bead **sq-toze.9**). No row presents the `sparq-zk*` / `sparq-mpc`
 research scaffold as a met security control — its documented **"v1 verifier is NOT sound"**
