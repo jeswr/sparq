@@ -67,6 +67,7 @@ criticals = "criticals"  # audit jargon: "the audit's criticals"
 unparseable = "unparseable" # accepted variant spelling used in skills docs
 unstalled = "unstalled"  # "proceeding unstalled" (= not stalled) — intentional
 # --- domain acronyms / dataset + crypto names ---
+SME = "SME"              # [OPUS-4.8] "Subject Matter Expert" — role acronym in CRA incident runbook
 ANE = "ANE"              # Apple Neural Engine
 FPR = "FPR"              # false-positive rate
 LOV = "LOV"              # Linked Open Vocabularies (dataset)
