@@ -11,9 +11,9 @@ loaders live in `sparq-core`; the binary HDT archive format (including content-s
 `.hdt.gz` / `.hdt.zst` / `.hdt.bz2`) lives in the opt-in `sparq-hdt` crate.
 
 > Direction note: these crates **parse RDF in**. To write RDF *out*, sparq-engine ships the
-> **RDF writer matrix** behind its opt-in `serialize-rdf` feature — Turtle / TriG / N-Quads
-> writers (`sparq_engine::serialize::*`); the N-Triples writer (`triples_to_ntriples`) is
-> always on. See recipe 6. (JSON-LD is not yet written — tracked in bead sq-e3pj.)
+> **RDF writer matrix** behind its opt-in `serialize-rdf` feature — Turtle / TriG / N-Quads /
+> JSON-LD 1.1 writers (`sparq_engine::serialize::*`); the N-Triples writer
+> (`triples_to_ntriples`) is always on. See recipe 6.
 
 ## Quickstart
 
@@ -163,33 +163,47 @@ assert_eq!(snap.len(), original_len);  // snapshot frozen at snapshot time
 let mutable_copy = master.snapshot().into_graph();  // a snapshot you can then mutate
 ```
 
-**6. Serialize a graph back out (the RDF writer matrix).** The Turtle / TriG / N-Quads
-writers live in `sparq-engine` behind the opt-in **`serialize-rdf`** feature (it pulls in
-ZERO new dependencies — the default dep graph is unchanged when off). The N-Triples writer
-(`triples_to_ntriples`) is always on. Enable with
+**6. Serialize a graph back out (the RDF writer matrix).** The Turtle / TriG / N-Quads /
+JSON-LD writers live in `sparq-engine` behind the opt-in **`serialize-rdf`** feature (it pulls
+in ZERO new dependencies — the default dep graph is byte-for-byte unchanged when off, *and*
+unchanged even when on: the JSON-LD writer emits JSON by hand, no json-ld/serde crate). The
+N-Triples writer (`triples_to_ntriples`) is always on. Enable with
 `sparq-engine = { version = "0.1", features = ["serialize-rdf"] }`.
 
 ```rust
-use sparq_engine::serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads};
+use sparq_engine::serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads,
+                              graph_to_jsonld, JsonLdForm};
 
 let g = sparq_core::Graph::load_dataset(trig_src, "trig")?;
 let ttl = graph_to_turtle(&g);   // Turtle: @prefix header, `a` for rdf:type, predicate-object
                                  //   lists; DEFAULT graph only.
 let tg  = graph_to_trig(&g);     // TriG: default graph + `GRAPH <g> { … }` blocks (whole dataset).
 let nq  = graph_to_nquads(&g);   // N-Quads: default graph (3 cols) + named graphs (4th column).
+let jx  = graph_to_jsonld(&g, JsonLdForm::Expanded);    // JSON-LD 1.1, fully-expanded node-object
+                                                        //   array, no @context (whole dataset).
+let jf  = graph_to_jsonld(&g, JsonLdForm::Flattened);   //   node-merged, `@graph`-framed.
+let jc  = graph_to_jsonld(&g, JsonLdForm::Compacted);   //   basic prefix `@context` (default_prefixes).
 ```
 
 Lower-level entry points take `&[oxrdf::Triple]` (e.g. CONSTRUCT output) directly:
 `write_turtle(triples, &prefixes)`, `write_trig(&named_graphs, &prefixes)`,
-`write_nquads(&named_graphs)`; `default_prefixes()` supplies the common namespaces, or pass
-your own `Prefixes` (a `BTreeMap<String, String>`) — only prefixes actually used are emitted
-in the header. Round-trip (parse → serialize → re-parse) is isomorphic.
+`write_nquads(&named_graphs)`, `write_jsonld(&named_graphs, JsonLdForm::Expanded, &prefixes)`;
+`default_prefixes()` supplies the common namespaces, or pass your own `Prefixes` (a
+`BTreeMap<String, String>`) — only prefixes actually used are emitted (the Turtle/TriG header,
+or the JSON-LD compacted `@context`). Round-trip (parse → serialize → re-parse) is isomorphic
+for every form. **JSON-LD specifics:** `xsd:string`/`rdf:langString` stay implicit
+(`@value` + optional `@language`); every other datatype is preserved as `@type`; canonical
+`xsd:integer`/`xsd:boolean` literals coerce to native JSON scalars only when lossless (leading
+zeros, `xsd:double`/`decimal`, etc. stay typed strings). RDF lists are emitted as plain
+triples (no `@list` collapsing — tracked in bead sq-e3pj follow-up).
 
 From the CLI (opt-in `serialize-rdf` feature) — re-serialize a loaded document to stdout:
 
 ```bash
 cargo build -p sparq-cli --features serialize-rdf
-./target/.../sparq-cli dump data.trig trig nquads   # out-format: turtle|trig|nquads|ntriples
+./target/.../sparq-cli dump data.trig trig nquads
+#   out-format: turtle | trig | nquads | ntriples | jsonld[-expanded|-flattened|-compacted]
+#   (bare `jsonld` == jsonld-expanded)
 ```
 
 ## Gotchas / feature flags / prerequisites
