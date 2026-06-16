@@ -54,7 +54,7 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > the `169.254.169.254` cloud-metadata IP). The allowlist is enforced before any socket is
 > opened, on the *resolved* IP (DNS-rebinding-safe). See "SERVICE federation (egress
 > allowlist)" below.
-
+>
 > **Security response headers (always on, ASVS V14.4; bead `sq-cmvh`).** Every response —
 > success, streamed and error alike — carries a hardening header set, stamped by a
 > `map_response` layer in `harden()`:
