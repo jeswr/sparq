@@ -32,7 +32,7 @@ documentation) would inspect.
 | Evidence | Where | Verify |
 |---|---|---|
 | Per-release CycloneDX SBOM (per shipped binary) | `scripts/gen-sbom-vex.sh`, `.github/workflows/release.yml#sbom` | On a tag, the Release carries `sparq-cli-<v>.sbom.cdx.json` + `sparq-server-<v>.sbom.cdx.json`. |
-| NTIA minimum elements coverage | the `*.cdx.json` components | supplier, component name, version, PURL (`pkg:cargo/…`), dependency relationships, author, timestamp all present. *(Quality gaps GS-1/GS-3/GS-4 tracked elsewhere — see gap-register.)* |
+| NTIA minimum elements coverage | the `*.cdx.json` components | supplier, component name, version, PURL (`pkg:cargo/…`), dependency relationships, author, timestamp all present. *(GS-1/GS-3/GS-4 quality items RESOLVED — sq-toze.26/27/28; see `compliance/sbom/gap-register.md`.)* |
 | Checked-in VEX (source of truth) | `supply-chain/vex.cdx.json` | CycloneDX 1.5; two `not_affected` entries mirroring `deny.toml`. |
 | CI SBOM artifact every push | `supply-chain.yml#sbom` | `cargo cyclonedx --all --format json` → uploaded artifact `sbom-cyclonedx`. |
 

@@ -83,16 +83,24 @@ watch item).
 
 ### CIS — PASS / N/A(operator) except GX-12 (P1) + GX-13 (P3) — see cross-cutting table.
 
-### SBOM — 22 implemented & verified / 6 audit-ready / 3 gap (all P2)
+### SBOM — 1 open gap (GS-2 = GX-8, all P2)
+
+<!-- [OPUS-4.8] Synced with the authoritative per-framework slice `compliance/sbom/gap-register.md`:
+     GS-1, GS-3, GS-4, GS-5, GS-6 and GS-7 are all RESOLVED (verified scripts named below); only
+     GS-2 (reproducible-build = GX-8) remains open. See the slice for full remediation evidence. -->
 
 | ID | Gap | Sev | Bead |
 |---|---|---|---|
-| GS-1 | Per-component Supplier Name (NTIA N1) not emitted (cargo-cyclonedx leaves `supplier`/`publisher` empty) | P2 | `sq-toze.26` |
 | GS-2 | = **GX-8** reproducible-build (cross-cutting) | P2 | `sq-toze.9` |
-| GS-3 | No npm/JS-lockfile SBOM for the WASM client (`sparq-wasm`, `js/`) | P2 | `sq-toze.27` |
-| GS-4 | Generated SBOM is CycloneDX 1.3 while VEX is 1.5 (mixed spec versions) | P2 | `sq-toze.28` |
-| GS-5 | VEX ↔ deny.toml sync enforced by comment + manual inspection, not CI | P2 | `sq-toze.29` |
-| GS-6 | SBOM root identity leaks the absolute build-machine path in `bom-ref` | P2 | `sq-toze.30` |
+
+> **RESOLVED (do not re-open — see `compliance/sbom/gap-register.md`):** GS-1 per-component
+> Supplier Name (NTIA N1) — `scripts/sbom-normalize.jq` derives a per-component `supplier`,
+> CI-gated by `supply-chain.yml#sbom-supplier` (`scripts/check-sbom-supplier.py`), `sq-toze.26`;
+> GS-3 npm/JS-lockfile SBOM for the WASM client — `scripts/gen-js-sbom.sh` + `supply-chain.yml#js-sbom`,
+> `sq-toze.27`; GS-4 SBOM spec version — now CycloneDX 1.5 via `--spec-version 1.5`, `sq-toze.28`;
+> GS-5 VEX↔deny.toml sync — gating `supply-chain.yml#vex-deny-sync` (`scripts/check-vex-deny-drift.py`),
+> `sq-toze.29`; GS-6 abs-path leak — `scripts/sbom-normalize.jq` publication normalisation, `sq-toze.30`;
+> GS-7 purl-canonicality — `supply-chain.yml#sbom-purl-canonical`, `sq-uujh`/`sq-tmyw`.
 
 ### SSDF — 28 implemented & verified / 13 audit-ready / 1 gap
 
@@ -171,7 +179,7 @@ watch item).
 |---|---|---|
 | **P0 / CRITICAL** | **3** | CR-G1 (external cryptographer), CDMC CD-1 + CD-2 (lineage + access-audit data-maturity). CR-G1 is **external-required**. |
 | **P1 / High** | **~9** | GX-10, GX-12, GX-4, GAP-ISO-1, GX-CRA-1, GX-CRA-2, MS-G2, CDMC CD-3/4/5/8 (P1 cluster). GAP-ISO-1 is an **org act**. *(GX-9 closed — sq-toze.23, dist.yml binaries now SLSA Build L2.)* |
-| **P2 / Medium** | **~17** | GX-8 (one row, recurs in 5 slices), GS-1/3/4/5/6, SSDF-G1(=GX-8), MS-G3/G4/G5, ASVS-G1/G3, GAP-ISO-2, GX-CRA-3, PR-G3, CR-G4/G5, CDMC CD-6/7. |
+| **P2 / Medium** | **~12** | GX-8 (one row, recurs in 5 slices; the SBOM slice's GS-2 is this same gap), SSDF-G1(=GX-8), MS-G3/G4/G5, ASVS-G1/G3, GAP-ISO-2, GX-CRA-3, PR-G3, CR-G4/G5, CDMC CD-6/7. *(GS-1/3/4/5/6 closed — sq-toze.26/27/28/29/30; per-component supplier, JS SBOM, CycloneDX 1.5, VEX↔deny sync, abs-path leak all RESOLVED & CI-gated.)* |
 | **P3 / Low** | **~8** | GX-11, GX-13, GX-OSSF-2/3, ASVS-G2/G4, PR-G2/G4/G5. |
 
 Counts collapse the recurring cross-cutting gaps (GX-8, GX-9, GX-10, GX-12) to **one row each**; the
