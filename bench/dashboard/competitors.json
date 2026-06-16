@@ -71,6 +71,45 @@
     "shacl_sparql_constraint_validate":{ "pyshacl": 27661760, "jena-shacl": 2248361 }
   },
 
+  "same_box_comparisons": [
+    {
+      "_comment": "[OPUS-4.8] sq-ays7 — SAME-BOX SPARQL comparison (PHASE 2): sparq + Oxigraph (+ QLever best-effort) on ONE ephemeral AWS EC2 box against the SAME generated SP2Bench-250k corpus + the SAME bench/sp2b/queries .rq files in the SAME min-of-5 COUNT regime. DISTINCT from (a) the gh-runner CI-band featured-suites `values` cells above — that sparq column is a DIFFERENT machine, so a competitor µs from this box must NOT be placed beside it; and (b) the cross-machine `references` baselines (cited, own scale/machine). Absolute µs are THIS-BOX-ONLY (4-vCPU Graviton) — for cross-engine ORDERING, not an absolute cross-machine reference. HONESTY: the gather launched sparq (sparq-cli bench, captured) then Oxigraph (sparq-bench bench-corpus) on the same box, but the orchestrator's poll loop reached its bound and the instance hit its orphan-safe cleanup trap immediately AFTER the Oxigraph command was invoked and BEFORE its TSV reached the pulled log — so NO Oxigraph timing and NO QLever timing were captured. Rather than fabricate or cross-fill, oxigraph + qlever stay null (render 'n/a') and count_match stays null (cannot verify cross-engine row agreement without the Oxigraph rows). Only sparq's real per-query (rows, best_us) are recorded. The sparq+oxigraph row-counts therefore COULD NOT be cross-checked on this run. Re-running the gather to completion (sentinel-gated, longer poll bound) would fill the oxigraph column and enable the count_match check. Keep byte-for-meaning in sync with COMPETITORS_DATA.same_box_comparisons in dashboard.js.",
+      "suite": "SP2Bench",
+      "scale": "SP2Bench 250k triples (bench/sp2b/gen.sh 250000; 27,219,138-byte Turtle)",
+      "iters": 5,
+      "git_commit": "681047f",
+      "gathered_at_utc": "2026-06-16",
+      "source": "live ephemeral-EC2 gather — scripts/gather-ec2-sparql.sh (sparq via `sparq-cli bench … 5 count`; Oxigraph via `sparq-bench bench-corpus … 5`)",
+      "env": {
+        "host_class": "ephemeral AWS EC2 c7g.xlarge (4 vCPU arm64 Graviton, Ubuntu 24.04)",
+        "quiet_box": true,
+        "gathered_at_utc": "2026-06-16",
+        "note": "Requested c7g.2xlarge fell back to c7g.xlarge (account vCPU limit of 16). Oxigraph 0.5.8 (Cargo.lock). QLever was requested (QLEVER=1) but produced no numbers on this run."
+      },
+      "engines": [
+        { "id": "sparq", "label": "sparq", "version": "git 681047f", "env": "ephemeral c7g.xlarge (4 vCPU Graviton), release build, min-of-5 COUNT" },
+        { "id": "oxigraph", "label": "Oxigraph", "version": "0.5.8", "env": "same box — n/a: bench-corpus TSV not captured before the orphan-safe cleanup trap fired" },
+        { "id": "qlever", "label": "QLever", "version": "n/a", "env": "requested (QLEVER=1) but no QLever timing produced on this run — honest n/a, not fabricated" }
+      ],
+      "rows": [
+        { "query": "q01",  "unit": "µs", "rows": 1,      "values": { "sparq": 9.2,      "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q02",  "unit": "µs", "rows": 6067,   "values": { "sparq": 6618.2,   "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q03a", "unit": "µs", "rows": 15823,  "values": { "sparq": 14525.7,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q03b", "unit": "µs", "rows": 114,    "values": { "sparq": 14355.4,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q03c", "unit": "µs", "rows": 0,      "values": { "sparq": 14140.6,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q04",  "unit": "µs", "rows": 541911, "values": { "sparq": 358604.1, "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q05b", "unit": "µs", "rows": 6933,   "values": { "sparq": 15317.7,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q07",  "unit": "µs", "rows": 48,     "values": { "sparq": 23383.4,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q08",  "unit": "µs", "rows": 358,    "values": { "sparq": 212938.1, "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q09",  "unit": "µs", "rows": 4,      "values": { "sparq": 23091.2,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q10",  "unit": "µs", "rows": 452,    "values": { "sparq": 3.8,      "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q11",  "unit": "µs", "rows": 10,     "values": { "sparq": 18652.1,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q12b", "unit": "µs", "rows": 1,      "values": { "sparq": 213513.8, "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q12c", "unit": "µs", "rows": 0,      "values": { "sparq": 4.9,      "oxigraph": null, "qlever": null }, "count_match": null }
+      ]
+    }
+  ],
+
   "references": [
     { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "10M synthetic (1.25M entities × 8)", "metric": "q03_star3 (3-pattern star join), count", "value": 73, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only", "source": "bench/qlever-baselines.md", "caveat": "10M-scale on an M1 — NOT the dashboard CI scale; reference only." },
     { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "10M synthetic (1.25M entities × 8)", "metric": "q04_follows_name (2-pattern chain), count", "value": 56, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only", "source": "bench/qlever-baselines.md", "caveat": "10M-scale on an M1, not the dashboard CI scale — reference only." },

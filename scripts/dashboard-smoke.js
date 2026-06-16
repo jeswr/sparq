@@ -450,7 +450,7 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
     };
   }
   const hosts = {};
-  ['updated', 'repo', 'summary', 'charts', 'featured', 'scaling', 'families'].forEach(function (id) {
+  ['updated', 'repo', 'summary', 'charts', 'featured', 'same-box', 'scaling', 'families'].forEach(function (id) {
     hosts[id] = makeNode('div');
   });
   global.document = {
@@ -507,6 +507,10 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
 
   ok(hosts.featured.children.length > 0, 'DOM: #featured populated (sq-xvow rendered)');
   ok(hosts.scaling.children.length > 0, 'DOM: #scaling populated (sq-viby rendered)');
+  // [OPUS-4.8] sq-ays7: the same-box SPARQL comparison card renders from the embedded
+  // COMPETITORS_DATA.same_box_comparisons (the shim has no fetch, so boot() uses the mirror).
+  // It renders a section when the mirror carries a comparison, else a graceful hint.
+  ok(hosts['same-box'].children.length > 0, 'DOM: #same-box populated (sq-ays7 rendered)');
 
   // ---- sq-rltn: summary-first FAMILIES render — first paint covers ALL query types -------------
   ok(hosts.families.children.length > 0, 'DOM: #families populated (sq-rltn summary-first render)');
