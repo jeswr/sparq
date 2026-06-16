@@ -565,3 +565,99 @@ async fn no_echo_execution_error() {
     let body = resp.text().await.unwrap();
     assert!(!body.contains(SENTINEL), "execution error echoed query/graph content: {body}");
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-cmvh (ASVS V14.4) — security response headers on every response
+// ---------------------------------------------------------------------------
+
+/// The exact hardening header set the server must stamp on every response. Mirrors
+/// `http::SECURITY_HEADERS` (kept in lock-step by review); asserted on a success, an error
+/// and a streamed response below.
+const EXPECTED_SECURITY_HEADERS: &[(&str, &str)] = &[
+    ("x-content-type-options", "nosniff"),
+    ("content-security-policy", "default-src 'none'; frame-ancestors 'none'"),
+    ("x-frame-options", "DENY"),
+    ("referrer-policy", "no-referrer"),
+];
+
+fn assert_security_headers(headers: &reqwest::header::HeaderMap) {
+    for (name, expected) in EXPECTED_SECURITY_HEADERS {
+        let got = headers
+            .get(*name)
+            .unwrap_or_else(|| panic!("missing security header {name}"))
+            .to_str()
+            .unwrap();
+        assert_eq!(got, *expected, "security header {name} value");
+    }
+    // Headers we deliberately do NOT emit from the plain-HTTP origin (HSTS is the fronting
+    // TLS proxy's job; X-XSS-Protection is deprecated). Their absence is part of the contract.
+    assert!(
+        !headers.contains_key("strict-transport-security"),
+        "HSTS must not be set by the origin"
+    );
+    assert!(
+        !headers.contains_key("x-xss-protection"),
+        "deprecated X-XSS-Protection must not be set"
+    );
+}
+
+#[tokio::test]
+async fn security_headers_on_success_response() {
+    let base = spawn_with(DATA, ServerConfig::default()).await;
+    // A normal 200 SELECT.
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?s WHERE { ?s <http://ex/age> ?a }")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_security_headers(resp.headers());
+    // And on the trivial /health route, which goes through the same hardened stack.
+    let health = client().get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(health.status(), 200);
+    assert_security_headers(health.headers());
+}
+
+#[tokio::test]
+async fn security_headers_on_error_response() {
+    let base = spawn_with(DATA, ServerConfig::default()).await;
+    // A 400 (missing 'query' parameter) — an error envelope must be hardened identically.
+    let resp = client().get(format!("{base}/sparql")).send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+    assert_security_headers(resp.headers());
+
+    // A 413 produced INSIDE the middleware stack (body over the limit) — confirms the headers
+    // are stamped even on extractor-level rejections rewritten by `json_error_bodies`.
+    let cfg = ServerConfig { max_body_bytes: 16, ..ServerConfig::default() };
+    let base = spawn_with(DATA, cfg).await;
+    let big = "SELECT * WHERE { ?s ?p ?o }".repeat(64);
+    let resp = client()
+        .post(format!("{base}/sparql"))
+        .header("content-type", "application/sparql-query")
+        .body(big)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    assert_security_headers(resp.headers());
+}
+
+#[tokio::test]
+async fn security_headers_on_streamed_response() {
+    // A larger result set exercises the chunked/streamed SELECT body path; the headers
+    // (set by the response-path middleware) must be present there too.
+    let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+    for i in 0..500 {
+        ttl.push_str(&format!("ex:s{i} ex:age {i} .\n"));
+    }
+    let base = spawn_with(&ttl, ServerConfig::default()).await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?s ?a WHERE { ?s <http://ex/age> ?a }")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_security_headers(resp.headers());
+}
