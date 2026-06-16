@@ -17,8 +17,8 @@ pub use fixture::{acp_fixture, wac_fixture};
 pub use materialize::{materialize_acp, materialize_wac, MaterializeStats};
 #[cfg(feature = "odrl-bridge")]
 pub use odrl_bridge::{
-    action_to_mode, materialize_permission, materialize_policy, materialize_prohibition,
-    BridgeOutcome,
+    action_to_mode, materialize_permission, materialize_permission_conditional, materialize_policy,
+    materialize_prohibition, BridgeOutcome,
 };
 pub use rewrite::{rewrite_for, wrap_for_view};
 
@@ -504,6 +504,32 @@ impl PodStore {
         let outcome = odrl_bridge::materialize_policy(&mut self.graph, policy, request);
         if outcome.granted || outcome.prohibited {
             self.reindex(); // a new grant/deny changes the auth view → rebuild + drop cache
+        }
+        outcome
+    }
+
+    /// [OPUS-4.8] sq-hiz4 — like [`PodStore::materialize_odrl_permission`], but persists a
+    /// FAITHFULLY-mappable ODRL constraint (recipient/assignee) as a re-checked ACP
+    /// `auth:ConditionalGrant` rather than freezing it into a one-shot allow: the
+    /// granted agent is re-verified per session through the SAME enforcement path
+    /// ([`PodStore::accessible`] / [`PodStore::query_as`]), not re-running the ODRL
+    /// evaluator.
+    ///
+    /// A constraint with **no** faithful ACP-condition analogue (`odrl:purpose`,
+    /// `odrl:dateTime`/time windows, `odrl:count`, a `neq`/order recipient) keeps the
+    /// one-shot materialization-time behaviour (checked once, frozen) — see
+    /// [`odrl_bridge::materialize_permission_conditional`] for the full mapping table
+    /// and the fail-closed rationale.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn materialize_odrl_permission_conditional(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+    ) -> odrl_bridge::BridgeOutcome {
+        let outcome =
+            odrl_bridge::materialize_permission_conditional(&mut self.graph, policy, request);
+        if outcome.granted {
+            self.reindex(); // a new (conditional) grant changes the auth view → rebuild
         }
         outcome
     }

@@ -75,12 +75,12 @@
 //! a permission and a prohibition on the same principal+target+mode emits both triples,
 //! and the deny **wins** at enforcement time.
 
-use crate::authindex::Mode;
+use crate::authindex::{Mode, AUTHENTICATED, PUBLIC};
 use crate::{AUTH_GRAPH, AUTH_NS};
 use oxrdf::{NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
-use sparq_policy::{evaluate, matched_prohibition, Policy, Request};
+use sparq_policy::{evaluate, matched_prohibition, Operator, Policy, Request, Rule, Value};
 
 /// The ODRL namespace prefix (`odrl:`), re-exported for caller convenience.
 pub const ODRL_NS: &str = sparq_policy::ODRL_NS;
@@ -457,3 +457,343 @@ fn append_grant(graph: &mut Graph, subject: &str, predicate: &str, object: &str)
         graph.named.push((auth_name, auth));
     }
 }
+
+// ============================================================================
+// [OPUS-4.8] sq-hiz4 — persist a FAITHFULLY-mappable ODRL constraint as an ACP
+// re-checked condition (`auth:ConditionalGrant`) instead of freezing it into a
+// one-shot materialization-time allow.
+// ============================================================================
+
+/// The `acl:` mode IRI a [`Mode`] is written as on a conditional grant's
+/// `auth:mode` (the form [`crate::AuthIndex`] reads via `from_mode_iri`).
+fn mode_iri(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Read => "http://www.w3.org/ns/auth/acl#Read",
+        Mode::Write => "http://www.w3.org/ns/auth/acl#Write",
+        Mode::Append => "http://www.w3.org/ns/auth/acl#Append",
+        Mode::Control => "http://www.w3.org/ns/auth/acl#Control",
+    }
+}
+
+/// The ODRL `recipient` constraint left-operand IRI.
+const ODRL_RECIPIENT: &str = "http://www.w3.org/ns/odrl/2/recipient";
+/// The ODRL `assignee` constraint left-operand IRI (the party as a *constraint*,
+/// distinct from the `odrl:assignee` rule attribute the evaluator already matches).
+const ODRL_ASSIGNEE: &str = "http://www.w3.org/ns/odrl/2/assignee";
+
+/// What [`map_constraints_to_agents`] concluded about a permission's constraints.
+enum AgentMapping {
+    /// Every constraint maps faithfully to an agent-dimension matcher; persist a
+    /// `ConditionalGrant` whose `auth:agent` re-checks each of these principals.
+    /// Empty ⇒ no agent restriction (the grant applies to `auth:Public`).
+    Faithful(Vec<String>),
+    /// At least one constraint has NO faithful ACP-condition analogue (purpose /
+    /// dateTime window / count): the rule MUST stay one-shot (fail-closed — never
+    /// approximate an unmappable constraint with a looser persisted condition).
+    Unmappable,
+}
+
+/// Inspect a matched permission's constraints and decide whether the WHOLE rule can
+/// be persisted as re-checked ACP agent conditions.
+///
+/// **Faithful (→ agent matcher):** an `odrl:recipient`/`odrl:assignee` constraint
+/// under `eq`/`isA` (the recipient IS this principal) or `isPartOf` (the recipient is
+/// a member of a static principal set). The recipient-of-data is exactly the session
+/// agent the ACP `auth:agent` head re-checks, so the persisted condition has the SAME
+/// semantics — it just re-evaluates per session instead of being frozen.
+///
+/// **Unmappable (→ stay one-shot):** `odrl:purpose` (ACP sessions carry no purpose —
+/// a client app is not a purpose-of-use, so mapping it to a client matcher would
+/// over-grant), `odrl:dateTime`/time windows (ACP has no "now" dimension — matcher
+/// accept-sets are static, so a persisted condition could not re-check the clock),
+/// `odrl:count` (ACP is stateless — no usage counter), and any unrecognised
+/// left-operand. A `neq` recipient (everyone EXCEPT one) has no faithful single-grant
+/// analogue either (it would need a `noneOf` exception matcher built per session) and
+/// is treated as unmappable. Any one such constraint forces the whole rule one-shot.
+fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
+    let mut agents: Vec<String> = Vec::new();
+    for c in &rule.constraints {
+        if c.left != ODRL_RECIPIENT && c.left != ODRL_ASSIGNEE {
+            // purpose / dateTime / count / anything else → no faithful condition.
+            return AgentMapping::Unmappable;
+        }
+        match c.operator {
+            // recipient IS this principal (identity) → one agent matcher.
+            Operator::Eq | Operator::IsA => match &c.right {
+                Value::Iri(s) | Value::Str(s) => agents.push(s.clone()),
+                // a numeric/dateTime recipient is malformed → fail-closed.
+                _ => return AgentMapping::Unmappable,
+            },
+            // recipient ∈ {a|b|c} (static set) → one agent matcher per member.
+            Operator::IsPartOf => {
+                let members: Vec<String> = c
+                    .right
+                    .as_str()
+                    .split(['|', ' ', ','])
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if members.is_empty() {
+                    return AgentMapping::Unmappable;
+                }
+                agents.extend(members);
+            }
+            // `neq`/order operators on a recipient have no faithful single-grant ACP
+            // analogue (an "everyone except" needs a per-session noneOf) → one-shot.
+            _ => return AgentMapping::Unmappable,
+        }
+    }
+    AgentMapping::Faithful(agents)
+}
+
+/// Whether a recipient principal IRI is safe to write as an `auth:agent` head: it
+/// must NOT smuggle the reserved pair encoding (`urn:sparq:` / `&client=`), or a
+/// crafted recipient could impersonate a minted pair principal (defense in depth,
+/// mirrors [`crate::loader::session_value_allowed`]). The session-layer check
+/// already rejects such SESSIONS; this also keeps them out of the GRANT head.
+fn recipient_principal_allowed(p: &str) -> bool {
+    crate::loader::session_value_allowed(p)
+}
+
+/// Evaluate `policy` against `request` and, for the matched permission, EITHER
+/// persist its recipient/assignee constraint as a re-checked ACP
+/// `auth:ConditionalGrant` (so the granted agent is verified per session through the
+/// real enforcement path) OR — when the permission carries a constraint with no
+/// faithful ACP-condition analogue — fall back to the one-shot
+/// [`materialize_permission`] (the constraint is checked once, at materialization).
+///
+/// # When a conditional grant is emitted (faithful)
+///
+/// All of the matched permission's constraints are `odrl:recipient`/`odrl:assignee`
+/// constraints under `eq`/`isA`/`isPartOf` (see [`map_constraints_to_agents`]). The
+/// emitted grant is:
+///
+/// ```text
+/// <grant> a auth:ConditionalGrant ; auth:effect auth:Allow ;
+///         auth:agent <recipient> ; auth:client auth:AnyClient ;
+///         auth:mode acl:<Mode> ; auth:graph <target> .
+/// ```
+///
+/// re-checked by [`crate::AuthIndex::accessible`]: a session whose agent is the
+/// recipient is granted; any other agent (or anonymous) is denied — **without**
+/// re-running the ODRL evaluator. A recipient *set* emits one grant per member (the
+/// auth view unions the allows). When the rule has NO recipient constraint, the grant
+/// head is `auth:Public` (any session) — only valid because the action/target/duties
+/// were already satisfied at materialization.
+///
+/// # Fail-closed
+///
+/// - A Deny (prohibition override, unmet *unmappable* constraint, undischarged duty)
+///   materializes **nothing** — exactly as the one-shot path.
+/// - An unmapped action, or a missing target, materializes nothing.
+/// - **Mixed constraints fail safe:** if ANY constraint is unmappable (`purpose`,
+///   `dateTime`, `count`, a `neq`/order recipient), the WHOLE rule falls back to the
+///   one-shot path so the unmappable bound is still enforced (frozen) — a persisted
+///   condition is emitted ONLY when every constraint maps faithfully.
+/// - A recipient IRI inside the reserved pair encoding is dropped from the grant head
+///   (it could otherwise impersonate a minted pair principal).
+///
+/// Returns a [`BridgeOutcome`]; on a conditional grant `grant_triple` reports the
+/// `(agent, auth:effect, graph)` of the FIRST emitted grant (audit anchor) and
+/// `mode` the mapped mode. The free-function form does not reindex a [`crate::PodStore`]
+/// — use [`crate::PodStore::materialize_odrl_permission_conditional`].
+pub fn materialize_permission_conditional(
+    graph: &mut Graph,
+    policy: &Policy,
+    request: &Request,
+) -> BridgeOutcome {
+    // 1. Action → Mode (shared with the one-shot path). Unmapped → no grant.
+    let Some(mode) = action_to_mode(&request.action) else {
+        return BridgeOutcome::denied(vec![format!(
+            "ODRL action <{}> has no WAC/ACP mode mapping; no grant materialized",
+            request.action
+        )]);
+    };
+
+    // 2. Find the permission whose action/target match AND whose duties are
+    //    discharged AND whose constraints map faithfully to agent conditions. The
+    //    recipient constraint is NOT required to hold against the request party here
+    //    — the persisted condition re-checks it per session. Prohibitions still
+    //    override (deny-overrides), so consult the evaluator's prohibition verdict.
+    if let Some(p) = matched_prohibition(policy, request) {
+        return BridgeOutcome::denied(vec![format!(
+            "prohibition {} matches the request (deny-overrides); no grant materialized",
+            p.id
+        )]);
+    }
+    let Some(target) = request.target.as_deref() else {
+        return BridgeOutcome::denied(vec![
+            "ODRL Permit has no concrete target graph IRI; no grant materialized".to_owned(),
+        ]);
+    };
+
+    let mut fallback_reasons: Vec<String> = Vec::new();
+    for rule in &policy.permissions {
+        // Action + target must agree (assignee/recipient are handled as conditions).
+        if !rule_action_target_match(rule, request, mode, target) {
+            continue;
+        }
+        // Duties must be discharged at materialization (no ACP analogue → one-shot
+        // semantics; an undischarged duty blocks this rule).
+        if rule.duties.iter().any(|d| !request.discharged_duties.contains(&d.action.0)) {
+            fallback_reasons.push(format!("permission {} has an undischarged duty", rule.id));
+            continue;
+        }
+        match map_constraints_to_agents(rule) {
+            AgentMapping::Faithful(recipients) => {
+                let agents = condition_agents(rule, &recipients);
+                if agents.is_empty() {
+                    // every recipient was reserved-encoded → fail-closed, nothing.
+                    fallback_reasons.push(format!(
+                        "permission {} recipients are all reserved-encoded; no grant",
+                        rule.id
+                    ));
+                    continue;
+                }
+                let first = append_conditional_grants(graph, &agents, mode, target);
+                return BridgeOutcome {
+                    granted: true,
+                    mode: Some(mode),
+                    grant_triple: Some(first),
+                    ..BridgeOutcome::default()
+                };
+            }
+            AgentMapping::Unmappable => {
+                // This permission carries a constraint with no faithful condition
+                // analogue → the one-shot path must check it (frozen) instead.
+                fallback_reasons.push(format!(
+                    "permission {} has a constraint with no faithful ACP condition; one-shot path",
+                    rule.id
+                ));
+            }
+        }
+    }
+
+    // 3. No faithfully-conditional permission applied → fall back to the EXISTING
+    //    one-shot behaviour (which evaluates the unmappable constraints against the
+    //    supplied request context and emits a frozen allow iff they hold).
+    let out = materialize_permission(graph, policy, request);
+    if !out.granted && out.reasons.is_empty() {
+        return BridgeOutcome::denied(fallback_reasons);
+    }
+    out
+}
+
+/// The principal-space `auth:agent` heads for a faithful recipient set, dropping any
+/// reserved-encoded recipient. An empty recipient list means the rule had NO agent
+/// restriction → a single `auth:Public` head (any session matches).
+fn condition_agents(_rule: &Rule, recipients: &[String]) -> Vec<String> {
+    if recipients.is_empty() {
+        return vec![PUBLIC.to_owned()];
+    }
+    recipients
+        .iter()
+        .filter(|r| recipient_principal_allowed(r))
+        .map(|r| normalise_recipient_principal(r))
+        .collect()
+}
+
+/// Map an ODRL recipient value to a principal-space `auth:agent` IRI. The two ODRL
+/// "any recipient" sentinels are folded onto the auth principals the session layer
+/// already understands; a concrete WebID passes through unchanged.
+fn normalise_recipient_principal(r: &str) -> String {
+    match r {
+        "http://www.w3.org/ns/odrl/2/All" | "http://www.w3.org/ns/odrl/2/Group" => PUBLIC.to_owned(),
+        "http://www.w3.org/ns/odrl/2/AllConnections" => AUTHENTICATED.to_owned(),
+        _ => r.to_owned(),
+    }
+}
+
+/// Does the rule's action permit `mode`'s action and its target agree with the
+/// request? (Assignee/recipient are deferred to the persisted condition.)
+fn rule_action_target_match(rule: &Rule, request: &Request, _mode: Mode, target: &str) -> bool {
+    let req_action = sparq_policy::Action(request.action.clone());
+    if !rule.action.permits(&req_action) {
+        return false;
+    }
+    match &rule.target {
+        Some(t) => t == target,
+        None => true,
+    }
+}
+
+
+/// Append `auth:ConditionalGrant` allow triples for each agent head onto the
+/// `<urn:sparq:auth>` view, preserving existing triples. Returns the
+/// `(agent, auth:effect, graph)` audit anchor of the first grant.
+fn append_conditional_grants(
+    graph: &mut Graph,
+    agents: &[String],
+    mode: Mode,
+    target: &str,
+) -> (String, String, String) {
+    let auth_name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
+    let mut terms: Vec<[Term; 3]> = match graph.named.iter().find(|(n, _)| *n == auth_name) {
+        Some((_, sub)) => crate::loader::graph_triples(sub),
+        None => Vec::new(),
+    };
+
+    let type_p = NamedNode::new_unchecked(RDF_TYPE);
+    let cond_class = NamedNode::new_unchecked(format!("{AUTH_NS}ConditionalGrant"));
+    let effect_p = NamedNode::new_unchecked(format!("{AUTH_NS}effect"));
+    let allow_o = NamedNode::new_unchecked(format!("{AUTH_NS}Allow"));
+    let agent_p = NamedNode::new_unchecked(format!("{AUTH_NS}agent"));
+    let client_p = NamedNode::new_unchecked(format!("{AUTH_NS}client"));
+    let any_client = NamedNode::new_unchecked(crate::authindex::ANY_CLIENT);
+    let mode_p = NamedNode::new_unchecked(format!("{AUTH_NS}mode"));
+    let mode_o = NamedNode::new_unchecked(mode_iri(mode));
+    let graph_p = NamedNode::new_unchecked(format!("{AUTH_NS}graph"));
+    let graph_o = NamedNode::new_unchecked(target);
+
+    let mut first: Option<(String, String, String)> = None;
+    for agent in agents {
+        // A deterministic grant IRI keyed on (agent, mode, graph) so re-materializing
+        // the same condition is idempotent (no duplicate heads).
+        let grant_iri = format!(
+            "urn:sparq:odrl-cond?agent={}&mode={}&graph={}",
+            sparq_reason::n3::encode_for_uri(agent),
+            sparq_reason::n3::encode_for_uri(mode_iri(mode)),
+            sparq_reason::n3::encode_for_uri(target),
+        );
+        let g = Term::NamedNode(NamedNode::new_unchecked(&grant_iri));
+        let agent_o = Term::NamedNode(NamedNode::new_unchecked(agent));
+        let head = [
+            [g.clone(), Term::NamedNode(type_p.clone()), Term::NamedNode(cond_class.clone())],
+            [g.clone(), Term::NamedNode(effect_p.clone()), Term::NamedNode(allow_o.clone())],
+            [g.clone(), Term::NamedNode(agent_p.clone()), agent_o],
+            [g.clone(), Term::NamedNode(client_p.clone()), Term::NamedNode(any_client.clone())],
+            [g.clone(), Term::NamedNode(mode_p.clone()), Term::NamedNode(mode_o.clone())],
+            [g.clone(), Term::NamedNode(graph_p.clone()), Term::NamedNode(graph_o.clone())],
+        ];
+        for t in head {
+            if !terms.contains(&t) {
+                terms.push(t);
+            }
+        }
+        if first.is_none() {
+            first = Some((
+                agent.clone(),
+                format!("{AUTH_NS}effect"),
+                target.to_owned(),
+            ));
+        }
+    }
+
+    let mut dict = Dict::new();
+    let ids: Vec<[sparq_core::dict::Id; 3]> = terms
+        .iter()
+        .map(|t| [dict.intern(&t[0]), dict.intern(&t[1]), dict.intern(&t[2])])
+        .collect();
+    let auth = Graph::from_parts(dict, ids);
+    if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == auth_name) {
+        slot.1 = auth;
+    } else {
+        graph.named.push((auth_name, auth));
+    }
+
+    first.expect("at least one agent head emitted")
+}
+
+/// `rdf:type` IRI, for the conditional-grant class triple.
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";

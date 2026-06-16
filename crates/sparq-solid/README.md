@@ -55,7 +55,9 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
   the equivalent WAC/ACP grant into the auth view — so the existing graph-level enforcement
   honours it with **no new enforcement engine**. A matched **Prohibition** materializes the dual
   `auth:deny*` triple (`materialize_prohibition` / `materialize_policy`), and the existing
-  enforcement applies **deny-overrides** ([OPUS-4.8] sq-w693). See below.
+  enforcement applies **deny-overrides** ([OPUS-4.8] sq-w693). `materialize_odrl_permission_conditional`
+  (sq-hiz4) persists a faithfully-mappable recipient/assignee constraint as a **re-checked**
+  ACP `auth:ConditionalGrant` instead of a one-shot allow. See below.
 
 ## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge` feature) — [OPUS-4.8] sq-h3uk
 
@@ -114,6 +116,36 @@ the request out.)
 action is mappable *and* the party+target are concrete. An unmatched / unmapped / partyless /
 targetless prohibition materializes **nothing**; an unmappable carve-out is *reported* in
 `reasons`, never silently dropped (dropping a deny would widen access).
+
+### Constraint → ACP **conditional** grant (`materialize_odrl_permission_conditional`) — [OPUS-4.8] sq-hiz4
+
+The one-shot `materialize_odrl_permission` *freezes* every constraint into a single allow
+scoped to the supplied request party. `materialize_odrl_permission_conditional` persists a
+**faithfully-mappable** constraint as an ACP `auth:ConditionalGrant` (the existing `noneOf`
+machinery) so the granted agent is **re-checked per session** through the unchanged
+enforcement path — not by re-running the ODRL evaluator. Constraints with no faithful ACP
+analogue keep the one-shot behaviour.
+
+| ODRL constraint | Operator | Maps to | Behaviour |
+|---|---|---|---|
+| `odrl:recipient` / `odrl:assignee` | `eq` / `isA` | `auth:agent <webid>` (agent matcher) | **re-checked condition** |
+| `odrl:recipient` / `odrl:assignee` | `isPartOf` | one `auth:agent` head per set member | **re-checked condition** |
+| `odrl:recipient` / `odrl:assignee` | `neq` / order | — (needs per-session `noneOf`) | one-shot (frozen) |
+| `odrl:purpose` | any | — (ACP session has no purpose) | one-shot (frozen) |
+| `odrl:dateTime` / time window | any | — (ACP has no "now") | one-shot (frozen) |
+| `odrl:count` | any | — (ACP is stateless) | one-shot (frozen) |
+| *no constraint* | — | `auth:agent auth:Public` | re-checked (public) |
+
+**Why only recipient/assignee:** the ACP session re-check carries exactly `(agent, client)`,
+and the recipient-of-data *is* the session agent — so an agent matcher re-checks it with
+identical semantics. Purpose/time/count have no stateless `(agent, client)` analogue, so
+persisting them would require a looser approximation that could over-grant — rejected.
+
+**Fail-safe on mixed constraints:** a condition is persisted **only** when *every* constraint
+on the rule maps faithfully. A rule mixing a mappable recipient with an unmappable
+`dateTime`/`purpose`/`count` falls back **entirely** to the one-shot path — persisting only
+the recipient would silently drop the other bound and over-grant. Reserved-encoded recipient
+IRIs are dropped from the grant head (anti-impersonation).
 
 ## Security posture — fail-closed
 
