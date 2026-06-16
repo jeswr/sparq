@@ -19,14 +19,22 @@ pub const PUBLIC: &str = "https://sparq.dev/ns/auth#Public";
 pub const AUTHENTICATED: &str = "https://sparq.dev/ns/auth#Authenticated";
 /// Client IRI matched by any client in conditional-grant heads (ACP `acp:PublicClient`).
 pub const ANY_CLIENT: &str = "https://sparq.dev/ns/auth#AnyClient";
+/// Issuer IRI matched by any OIDC issuer (the issuer-dimension top; ACP has no "public
+/// issuer" special, so an absent `acp:issuer` is issuer-unconstrained ⇒ this top).
+/// [OPUS-4.8] sq-3jtd.6.
+pub const ANY_ISSUER: &str = "https://sparq.dev/ns/auth#AnyIssuer";
 
-/// A request context: who (WebID) through what (client identifier / origin).
-/// `agent: None` = anonymous.
+/// A request context: who (WebID) through what (client identifier / origin) and vouched
+/// for by which OIDC issuer (`acp:issuer`). `agent: None` = anonymous.
 ///
-/// A session expands to at most 6 principals when grants are looked up: always
-/// `auth:Public`; plus `auth:Authenticated` and the WebID itself when `agent` is
-/// given; plus the minted `urn:sparq:pair?agent=…&client=…` pair of each of those
-/// when `client` is given. Expansion is internal — callers just construct the pair:
+/// A session expands to at most 12 principals when grants are looked up ([OPUS-4.8]
+/// sq-3jtd.6 — the issuer dimension doubles the pre-issuer ≤6): always `auth:Public`;
+/// plus `auth:Authenticated` and the WebID itself when `agent` is given; for each of
+/// those agent-principals `ap`, the minted `urn:sparq:pair?agent=…&client=…` pair when
+/// `client` is given, the minted `urn:sparq:triple?agent=…&client=…&issuer=…` term when
+/// `issuer` is given (with the client component being `auth:AnyClient` when no `client`),
+/// and the full triple when both are given. Expansion is internal — callers just supply
+/// the request context:
 ///
 /// # Examples
 ///
@@ -34,25 +42,32 @@ pub const ANY_CLIENT: &str = "https://sparq.dev/ns/auth#AnyClient";
 /// use sparq_solid::Session;
 ///
 /// let anonymous = Session::default();
-/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None };
-/// let alice_via_app =
-///     Session { agent: Some("https://alice.ex/card#me"), client: Some("https://app.ex") };
+/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+/// let alice_via_app = Session {
+///     agent: Some("https://alice.ex/card#me"),
+///     client: Some("https://app.ex"),
+///     issuer: Some("https://idp.ex"),
+/// };
 /// assert!(anonymous.agent.is_none());
 /// # let _ = (alice, alice_via_app);
 /// ```
 ///
 /// # Invariants (fail-closed)
 ///
-/// Agent/client values inside the reserved `urn:sparq:` IRI space, or containing the
-/// literal pair-encoding delimiter `&client=`, are never matched against grants: the
+/// Agent/client/issuer values inside the reserved `urn:sparq:` IRI space, or containing
+/// the literal pair-encoding delimiter `&client=`, are never matched against grants: the
 /// accessible set for such a session is empty (they could otherwise impersonate a
-/// minted pair principal — see [`AuthIndex::accessible`]).
+/// minted pair/triple principal — see [`AuthIndex::accessible`]).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Session<'a> {
     /// The authenticated agent's WebID; `None` = anonymous.
     pub agent: Option<&'a str>,
     /// The client identifier (WAC `acl:origin` / ACP `acp:client`); `None` = any client.
     pub client: Option<&'a str>,
+    /// The OIDC issuer that vouched for the WebID (ACP `acp:issuer`); `None` = any issuer.
+    /// [OPUS-4.8] sq-3jtd.6 — only ACP matchers constrain on it; WAC has no issuer notion,
+    /// so a WAC pod ignores it (no grant ever names a triple principal).
+    pub issuer: Option<&'a str>,
 }
 
 /// An access mode, matching WAC's `acl:Read`/`Write`/`Append`/`Control` (ACP reuses
@@ -130,11 +145,43 @@ pub fn pair_principal(agent: &str, client: &str) -> String {
     format!("urn:sparq:pair?agent={a}&client={c}")
 }
 
+/// [OPUS-4.8] sq-3jtd.6 — the deterministic THREE-dimension principal IRI minted by the
+/// ACP rules for an issuer-constrained grant (`string:encodeForUri` +
+/// `string:concatenation` in rules/acp-c.n3 — keep in sync; the same RFC 3986
+/// percent-encoding makes the minting INJECTIVE, so no agent/client/issuer value can
+/// smuggle a `&client=`/`&issuer=` delimiter into another principal's term).
+///
+/// The `client` component is `auth:AnyClient` ([`ANY_CLIENT`]) for a matcher that
+/// constrains the issuer but not the client; only an issuer-CONSTRAINED candidate mints a
+/// triple — an issuer-unconstrained grant reuses the agent / [`pair_principal`] term.
+///
+/// ```
+/// use sparq_solid::triple_principal;
+/// assert_eq!(
+///     triple_principal("https://bob.ex/card#me", "https://app.ex", "https://idp.ex"),
+///     "urn:sparq:triple?agent=https%3A%2F%2Fbob.ex%2Fcard%23me\
+///      &client=https%3A%2F%2Fapp.ex&issuer=https%3A%2F%2Fidp.ex",
+/// );
+/// // injective: a delimiter inside a value cannot re-bracket the triple
+/// assert_ne!(
+///     triple_principal("a&issuer=b", "c", "d"),
+///     triple_principal("a", "c", "b&issuer=d"),
+/// );
+/// ```
+pub fn triple_principal(agent: &str, client: &str, issuer: &str) -> String {
+    let a = sparq_reason::n3::encode_for_uri(agent);
+    let c = sparq_reason::n3::encode_for_uri(client);
+    let i = sparq_reason::n3::encode_for_uri(issuer);
+    format!("urn:sparq:triple?agent={a}&client={c}&issuer={i}")
+}
+
 #[derive(Debug, Default)]
 struct ConditionalGrant {
     allow: bool,
     agent: String,  // principal-space: WebID | auth:Public | auth:Authenticated
     client: String, // auth:AnyClient | concrete client id
+    // [OPUS-4.8] sq-3jtd.6: auth:AnyIssuer (issuer-unconstrained) | concrete OIDC issuer id.
+    issuer: String,
     mode: Option<Mode>,
     graph: Option<NamedNode>,
     except: Vec<String>, // matcher IRIs
@@ -168,7 +215,7 @@ struct ConditionalGrant {
 /// materialize_wac(&mut graph)?;
 ///
 /// let index = AuthIndex::from_graph(&graph);
-/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None };
+/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
 /// assert_eq!(index.accessible(&alice, Mode::Read).len(), 2); // n1 + notes/
 /// assert!(index.accessible(&alice, Mode::Write).is_empty()); // fail-closed
 /// # Ok::<(), String>(())
@@ -182,6 +229,8 @@ pub struct AuthIndex {
     /// matcher IRI → accept-sets (principal space), for exceptMatcher evaluation.
     matcher_agents: FxHashMap<String, FxHashSet<String>>,
     matcher_clients: FxHashMap<String, FxHashSet<String>>,
+    /// [OPUS-4.8] sq-3jtd.6 — the issuer-dimension twin of `matcher_clients`.
+    matcher_issuers: FxHashMap<String, FxHashSet<String>>,
 }
 
 impl AuthIndex {
@@ -224,6 +273,13 @@ impl AuthIndex {
                             ix.matcher_clients.entry(subj).or_default().insert(o.as_str().to_owned());
                         }
                     }
+                    // [OPUS-4.8] sq-3jtd.6: the issuer-dimension matcher accept-set fact.
+                    "https://sparq.dev/ns/solidx#acceptsIssuerP" => {
+                        if let Term::NamedNode(o) = &t[2] {
+                            let set = ix.matcher_issuers.entry(subj).or_default();
+                            set.insert(o.as_str().to_owned());
+                        }
+                    }
                     _ => {}
                 }
                 continue;
@@ -233,6 +289,8 @@ impl AuthIndex {
                 ("effect", Term::NamedNode(o)) => entry.allow = o.as_str() == format!("{AUTH_NS}Allow"),
                 ("agent", Term::NamedNode(o)) => entry.agent = o.as_str().to_owned(),
                 ("client", Term::NamedNode(o)) => entry.client = o.as_str().to_owned(),
+                // [OPUS-4.8] sq-3jtd.6: the conditional grant's issuer head.
+                ("issuer", Term::NamedNode(o)) => entry.issuer = o.as_str().to_owned(),
                 ("mode", Term::NamedNode(o)) => entry.mode = Mode::from_mode_iri(o.as_str()),
                 ("graph", Term::NamedNode(o)) => entry.graph = Some(o.clone()),
                 ("exceptMatcher", Term::NamedNode(o)) => entry.except.push(o.as_str().to_owned()),
@@ -253,12 +311,30 @@ impl AuthIndex {
         ps
     }
 
-    /// All principals the session matches (agent-dimension + (agent, client) pairs).
+    /// All principals the session matches: the agent-dimension principals, plus, for each
+    /// one, the minted `(agent, client)` pair (when a client is given), the minted
+    /// `(agent, client, issuer)` triple (when an issuer is given — with `auth:AnyClient`
+    /// as the client component if no client was supplied), and the full triple. [OPUS-4.8]
+    /// sq-3jtd.6: ≤12 lookups (the pre-issuer ≤6 doubled by the issuer dimension).
     fn principals(s: &Session) -> Vec<String> {
-        let mut ps = Self::agent_principals(s);
+        let agents = Self::agent_principals(s);
+        let mut ps = agents.clone();
         if let Some(c) = s.client {
-            for a in Self::agent_principals(s) {
-                ps.push(pair_principal(&a, c));
+            for a in &agents {
+                ps.push(pair_principal(a, c));
+            }
+        }
+        // The issuer dimension mints a triple principal. A grant that constrains the
+        // issuer but not the client mints `triple(agent, auth:AnyClient, issuer)`, so the
+        // session must match that term too — hence the `auth:AnyClient` client component
+        // when the session has no client.
+        if let Some(i) = s.issuer {
+            let client = s.client.unwrap_or(ANY_CLIENT);
+            for a in &agents {
+                ps.push(triple_principal(a, client, i));
+                if s.client.is_some() {
+                    ps.push(triple_principal(a, ANY_CLIENT, i));
+                }
             }
         }
         ps
@@ -282,20 +358,30 @@ impl AuthIndex {
                 set.contains(ANY_CLIENT) || s.client.map(|c| set.contains(c)).unwrap_or(false)
             }
         };
-        agent_ok && client_ok
+        // [OPUS-4.8] sq-3jtd.6: the issuer-dimension twin of the client check.
+        let issuer_ok = match self.matcher_issuers.get(matcher) {
+            None => false,
+            Some(set) => {
+                set.contains(ANY_ISSUER) || s.issuer.map(|i| set.contains(i)).unwrap_or(false)
+            }
+        };
+        agent_ok && client_ok && issuer_ok
     }
 
-    /// Does a conditional grant's (agent, client) head apply to this session?
+    /// Does a conditional grant's (agent, client, issuer) head apply to this session?
+    /// [OPUS-4.8] sq-3jtd.6: the issuer head is the twin of the client head — the grant's
+    /// `auth:AnyIssuer` matches any session, else the session's issuer must equal it.
     fn cond_applies(&self, g: &ConditionalGrant, s: &Session) -> bool {
         let agent_ok = Self::agent_principals(s).contains(&g.agent);
         let client_ok = g.client == ANY_CLIENT || s.client == Some(g.client.as_str());
-        agent_ok && client_ok && !g.except.iter().any(|m| self.matcher_accepts(m, s))
+        let issuer_ok = g.issuer == ANY_ISSUER || s.issuer == Some(g.issuer.as_str());
+        agent_ok && client_ok && issuer_ok && !g.except.iter().any(|m| self.matcher_accepts(m, s))
     }
 
     /// The sorted, deduplicated graph set this session may access in `mode`:
     /// `∪ allow(principals) ∖ ∪ deny(principals)` (deny-overrides across principals),
     /// with conditional grants/denies (ACP `noneOf`) applied when their
-    /// (agent, client) head matches the session and no exception matcher accepts it.
+    /// (agent, client, issuer) head matches the session and no exception matcher accepts it.
     ///
     /// Never panics and never errors — every unauthorized condition degrades to the
     /// **empty set**:
@@ -307,10 +393,12 @@ impl AuthIndex {
     ///   impersonate a minted pair principal (roborev 1727).
     ///
     /// Prefer [`crate::PodStore::accessible`], which memoizes this walk per
-    /// (agent, client, mode) until the next re-materialization.
+    /// (agent, client, issuer, mode) until the next re-materialization.
     pub fn accessible(&self, s: &Session, mode: Mode) -> Vec<NamedNode> {
         let invalid = |v: Option<&str>| v.is_some_and(|x| !crate::loader::session_value_allowed(x));
-        if invalid(s.agent) || invalid(s.client) {
+        // [OPUS-4.8] sq-3jtd.6: the issuer is a triple-principal ingredient too — a session
+        // issuer inside the reserved space could otherwise impersonate a minted triple.
+        if invalid(s.agent) || invalid(s.client) || invalid(s.issuer) {
             return Vec::new();
         }
         let principals = Self::principals(s);

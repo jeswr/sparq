@@ -24,7 +24,7 @@ fn wac_store() -> PodStore {
 }
 
 fn sess(agent: Option<&str>) -> Session<'_> {
-    Session { agent, client: None }
+    Session { agent, client: None, issuer: None }
 }
 
 /// How many triples a graph currently holds (0 if absent).

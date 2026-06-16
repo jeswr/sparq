@@ -438,10 +438,15 @@ The materializer (§4.2) hardcodes this order; each stratum is still pure N3 in 
 Covered: WAC accessTo, default with nearest-ancestor discovery (incl. multi-level), agent,
 agentClass foaf:Agent + acl:AuthenticatedAgent, agentGroup (+ group docs as graphs), origin
 (as pair principal), 4 modes with Control→ACL-resource semantics; ACP accessControl +
-transitive memberAccessControl, allOf/anyOf/noneOf, agent/client attrs incl.
+transitive memberAccessControl, allOf/anyOf/noneOf, agent/client/**issuer** attrs incl.
 Public/Authenticated/PublicClient specials, allow/deny with deny-overrides.
-Not covered (documented gaps, §7): `acp:issuer` (same shape as client — extend the principal
-to a triple, combinatorially noted), `acp:vc`, `acp:CreatorAgent`/`OwnerAgent` (need
+`acp:issuer` ([OPUS-4.8] sq-3jtd.6): the third principal dimension — the OIDC issuer that
+vouched for the WebID — is the exact twin of the client dimension. A constrained issuer mints
+a three-component `urn:sparq:triple?agent=A&client=C&issuer=I` principal (an unconstrained
+issuer keeps the agent / `urn:sparq:pair?…` term byte-identical), the candidate enumeration
+gains an `issuer × {matcher values, auth:AnyIssuer top}` factor (still bounded as the client
+dimension is), and the session expands to ≤12 lookups (the pre-issuer ≤6 doubled).
+Not covered (documented gaps, §7): `acp:vc`, `acp:CreatorAgent`/`OwnerAgent` (need
 per-resource creator facts from the storage layer), `acl:accessToClass`, custom ACP modes
 (design supports any mode IRI; prototype maps the 4 standard ones).
 
@@ -455,7 +460,8 @@ pub fn materialize_acp(graph: &mut Graph) -> Result<MaterializeStats, String>;
 //   both: strip reserved graphs → assemble facts (§4.2) → reason_n3 strata →
 //   REPLACE <urn:sparq:auth> in graph.named
 
-pub struct Session<'a> { pub agent: Option<&'a str>, pub client: Option<&'a str> }
+pub struct Session<'a> { pub agent: Option<&'a str>, pub client: Option<&'a str>, pub issuer: Option<&'a str> }
+//   [OPUS-4.8] sq-3jtd.6: `issuer` (ACP acp:issuer, the OIDC IdP); None = any issuer.
 pub enum Mode { Read, Write, Append, Control }
 pub struct AuthIndex { /* principal → mode → graph names; conditional grants; matcher accept-sets */ }
 impl AuthIndex {

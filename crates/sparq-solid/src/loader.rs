@@ -21,6 +21,9 @@ const ACL_AGENT_GROUP: &str = "http://www.w3.org/ns/auth/acl#agentGroup";
 const ACL_ORIGIN: &str = "http://www.w3.org/ns/auth/acl#origin";
 const ACP_AGENT: &str = "http://www.w3.org/ns/solid/acp#agent";
 const ACP_CLIENT: &str = "http://www.w3.org/ns/solid/acp#client";
+// [OPUS-4.8] sq-3jtd.6: acp:issuer is a pair/triple-principal ingredient too, so its
+// values go through the same reserved-encoding validation as agents/clients/origins.
+const ACP_ISSUER: &str = "http://www.w3.org/ns/solid/acp#issuer";
 const VCARD_MEMBER: &str = "http://www.w3.org/2006/vcard/ns#hasMember";
 
 /// Reserved IRI space: the auth view, the rewrite sentinel, minted pair/candidate/grant
@@ -217,8 +220,8 @@ pub(crate) fn assemble_input(graph: &Graph, system: System) -> Result<String, St
 }
 
 /// Concrete agents + group documents mentioned by an access-control triple; every
-/// pair-principal ingredient (agents, group members, origins, clients) is recorded for
-/// reserved-encoding validation.
+/// pair/triple-principal ingredient (agents, group members, origins, clients, issuers)
+/// is recorded for reserved-encoding validation.
 fn collect_agents(
     t: &[Term; 3],
     webids: &mut FxHashSet<String>,
@@ -233,7 +236,7 @@ fn collect_agents(
             }
             principal_iris.insert(o.as_str().to_owned());
         }
-        ACL_ORIGIN | ACP_CLIENT => {
+        ACL_ORIGIN | ACP_CLIENT | ACP_ISSUER => {
             principal_iris.insert(o.as_str().to_owned());
         }
         ACL_AGENT_GROUP => {

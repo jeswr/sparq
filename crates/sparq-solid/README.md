@@ -31,7 +31,7 @@ store.materialize_wac()?; // run the N3 rules → install <urn:sparq:auth>
 
 // The SAME query, different sessions, different results — fail-closed.
 let q = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
-let alice = Session { agent: Some("https://alice.ex/card#me"), client: None };
+let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
 let _authorized = store.query_as(&alice, Mode::Read, q)?.rows.len();
 let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len();
 # Ok(()) }
@@ -40,8 +40,11 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 ## ✨ Features
 
 - **WAC + ACP** — Web Access Control (`.acl`) and Access Control Policy (`.acr`), including
-  inheritance, agent classes, groups, the `allOf`/`anyOf`/`noneOf` combinators, and
-  normative deny-overrides. The full support matrix is in the design doc (linked below).
+  inheritance, agent classes, groups, the `allOf`/`anyOf`/`noneOf` combinators, the ACP
+  matcher's `acp:agent` / `acp:client` / `acp:issuer` attributes (the three-dimensional
+  `(agent, client, issuer)` principal — a Matcher can gate on the OIDC issuer that vouched
+  for the requester, not just the WebID), and normative deny-overrides. The full support
+  matrix is in the design doc (linked below).
 - **Triples-native** — pods, ACL/ACR documents, and the materialized authorization view are
   all ordinary named graphs; "who can read G?" is one SPARQL pattern.
 - **Zero-copy enforcement** — the default query path evaluates through the engine's zero-copy
