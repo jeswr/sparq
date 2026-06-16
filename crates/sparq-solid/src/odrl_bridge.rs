@@ -671,8 +671,8 @@ fn recipient_principal_allowed(p: &str) -> bool {
 /// # When a conditional grant is emitted (faithful)
 ///
 /// All of the matched permission's constraints are `odrl:recipient`/`odrl:assignee`
-/// constraints under `eq`/`isA`/`isPartOf` (see [`map_constraints_to_agents`]). The
-/// emitted grant is:
+/// constraints under `eq`/`isA`/`isPartOf` (see the crate-internal
+/// `map_constraints_to_agents`). The emitted grant is:
 ///
 /// ```text
 /// <grant> a auth:ConditionalGrant ; auth:effect auth:Allow ;
@@ -817,8 +817,9 @@ pub fn materialize_permission_conditional(
 /// # When a conditional deny is emitted (faithful)
 ///
 /// All of the matched prohibition's constraints are `odrl:recipient`/`odrl:assignee`
-/// constraints under `eq`/`isA`/`isPartOf`/`neq` (see [`map_constraints_to_agents`]),
-/// the action [`action_to_mode`]-maps, and the request names a target. The recipient
+/// constraints under `eq`/`isA`/`isPartOf`/`neq` (see the crate-internal
+/// `map_constraints_to_agents`), the action [`action_to_mode`]-maps, and the request
+/// names a target. The recipient
 /// constraint is NOT required to hold against the request party — the persisted
 /// condition re-checks it per session, exactly as the allow path.
 ///

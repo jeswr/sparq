@@ -435,6 +435,23 @@ jobs:
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # [OPUS-4.8] sq-z1rm: rustdoc -D warnings, scoped to sparq-solid. A broken/private
+      # intra-doc link (e.g. a public item linking to a crate-private const/fn) is a rustdoc
+      # warning, NOT a clippy/build warning, so it slips past every other gate here and
+      # mis-renders the published docs. This GATES the sparq-solid doc surface so a public
+      # item can never again link to a private/unresolved item. Both feature states: the
+      # `odrl-bridge` module (and its own intra-doc links) only compiles under that feature.
+      # Intentionally per-crate, not `--workspace`: the rest of the workspace still carries a
+      # pre-existing rustdoc-warning backlog (tracked separately) that a workspace-wide
+      # -D warnings would fail on today.
+      - name: rustdoc (deny warnings, sparq-solid — default features)
+        run: cargo doc -p sparq-solid --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      - name: rustdoc (deny warnings, sparq-solid — odrl-bridge)
+        run: cargo doc -p sparq-solid --no-deps --features odrl-bridge
+        env:
+          RUSTDOCFLAGS: "-D warnings"
       # Informational until the deferred `cargo fmt --all` reformat lands (see rustfmt.toml).
       - name: rustfmt (informational)
         run: cargo fmt --all --check
