@@ -261,6 +261,47 @@ tracks each bridged grant in a **ledger** and provides a refresh entry point:
   principal+target+mode — correct, because the prohibition is genuinely gone. Static `auth:deny*`
   rules are never in the ledger and so are never retracted.
 
+## ACP conformance harness — [OPUS-4.8] sq-3jtd.9
+
+A library-level **ACP conformance harness** (`sparq_solid::conformance`) exercises this
+crate's ACP authorization engine (`materialize_acp` + `AuthIndex::accessible`) against the
+[Solid ACP specification](https://solidproject.org/TR/acp) at the *library* level. A scenario
+is declared as data — an ACR-document corpus (built with `AcrBuilder`) plus a table of expected
+`(agent, client, mode, resource) → allow | deny` decisions — and the harness asserts the engine
+reproduces every expected decision, reporting all mismatches at once. The scenario corpus lives
+in [`tests/conformance_acp.rs`](tests/conformance_acp.rs); it covers `acp:agent`/`acp:client`
+matchers, `acp:PublicAgent`/`acp:AuthenticatedAgent`, `acp:allOf`/`acp:anyOf`/`acp:noneOf`, the
+native (user, application) pair, deny-overrides, cumulative ancestor inheritance, mode
+independence, and the fail-closed no-policy case.
+
+```rust
+use sparq_solid::conformance::{AcrBuilder, AcpScenario, Decision, Expect};
+use sparq_solid::Mode;
+
+let doc = "https://pod.example/notes/n1";
+let mut acr = AcrBuilder::new();
+acr.access_control(doc, |p| p.allow(Mode::Read).any_of_agent("https://alice.example/card#me"));
+acr.document(doc);
+
+let report = AcpScenario::new("agent-allow")
+    .acr(acr)
+    .expect(Expect::agent("https://alice.example/card#me").read(doc).is(Decision::Allow))
+    .expect(Expect::anonymous().read(doc).is(Decision::Deny))
+    .run().expect("materializes");
+assert!(report.passed());
+```
+
+**Scope decision (honest):** this is the realistic, achievable conformance signal for an
+authorization *oracle*. Driving the Solid Conformance Test Harness (CTH) over HTTP is
+out-of-scope — this crate has no HTTP surface; that belongs to the Solid server,
+conformance-tested *through* it. A differential check against a JS reference evaluator
+(Community Solid Server / Inrupt ESS — same corpus, diff decisions) is the credible *second*
+oracle but is research-open (JS-toolchain cost) and is **not** built here; it is captured as a
+follow-up. See [`research/sparq-solid-scope.md`](../../research/sparq-solid-scope.md) §4 for the
+full rationale. The harness is complementary to `tests/acp.rs` (a hand-derived access matrix
+over one realistic pod) — it gives spec-construct coverage with small, independently-failing
+cases.
+
 ## Security posture — fail-closed
 
 Absence of a grant means a graph is **invisible**, and a non-authorized graph is

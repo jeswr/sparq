@@ -345,9 +345,22 @@ The honest gaps:
 1. **(near-term, feasible — **sq-3jtd.8**)** Vendor/ingest the authorization-relevant WAC
    fixtures from the Solid spec-tests corpus and assert library-level decision parity in
    `tests/conformance_wac.rs`.
-2. **(feasible, after WAC — **sq-3jtd.9**)** Same for ACP (`tests/conformance_acp.rs`).
-3. *(research-open / aspirational)* Differential oracle against CSS (WAC/ACP) — captured here;
-   tracked under sq-3jtd.9's notes, not started until the corpus harness exists.
+2. **(DONE — **sq-3jtd.9** [OPUS-4.8])** ACP harness landed: `sparq_solid::conformance`
+   (`src/conformance.rs`) is a table-driven scenario runner over the ACP engine
+   (`materialize_acp` + `AuthIndex::accessible`), with the scenario corpus in
+   `tests/conformance_acp.rs` (matchers incl. `acp:PublicAgent`/`acp:AuthenticatedAgent`,
+   `acp:allOf`/`acp:anyOf`/`acp:noneOf`, the (user, app) pair, deny-overrides, cumulative
+   ancestor inheritance, mode independence, fail-closed). **Decision recorded:** scenarios are
+   derived from the ACP spec's normative semantics and declared as data (an `AcrBuilder` corpus
+   + an expected-decision table), rather than vendoring the live JS spec-tests/CTH corpus over
+   HTTP — that route has no library entry point here (it asserts on HTTP outputs, PSS's by
+   design). NOTE: the WAC harness (sq-3jtd.8) was still open when this landed, so the ACP harness
+   defines the in-crate pattern rather than mirroring an existing WAC one; the same harness shape
+   transfers to WAC when sq-3jtd.8 is implemented.
+3. *(research-open / aspirational — STILL NOT STARTED)* Differential oracle against CSS (WAC/ACP):
+   run the same corpus through the JS reference evaluator and diff decisions. Deferred for the
+   JS-toolchain cost; the table-driven corpus in `tests/conformance_acp.rs` is the natural input
+   for it. Tracked as a follow-up.
 
 **Verdict: library-level conformance is near-term feasible** (the storage model already matches
 the corpus shape); **CTH-over-HTTP conformance is out-of-scope** for sparq-solid (it is PSS's,

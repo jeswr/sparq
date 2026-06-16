@@ -2,6 +2,12 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod authindex;
+// [OPUS-4.8] sq-3jtd.9: library-level ACP conformance harness — a table-driven scenario
+// corpus over the ACP engine (materialize_acp + AuthIndex::accessible), asserting
+// decision parity against the Solid ACP spec semantics. Always compiled (no feature
+// gate): it depends only on the always-present ACP path. The corpus lives in
+// tests/conformance_acp.rs.
+pub mod conformance;
 pub mod fixture;
 mod loader;
 mod materialize;
@@ -13,6 +19,8 @@ mod rewrite;
 mod update; // [OPUS-4.8] sq-xor3: write/update-path enforcement
 
 pub use authindex::{pair_principal, triple_principal, AuthIndex, Mode, Session};
+// [OPUS-4.8] sq-3jtd.9: the ACP conformance harness entry types.
+pub use conformance::{AcpScenario, AcrBuilder, Decision, Expect, ScenarioReport};
 pub use fixture::{acp_fixture, wac_fixture};
 pub use materialize::{materialize_acp, materialize_wac, MaterializeStats};
 #[cfg(feature = "odrl-bridge")]
