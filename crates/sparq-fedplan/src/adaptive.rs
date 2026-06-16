@@ -27,6 +27,41 @@
 //!    suffix's by more than a margin (default 10%). A re-plan that is merely a tie, or a
 //!    tiny win, is rejected — so stable-but-noisy stats do not cause the plan to flap.
 //!
+//! ## Per-source latency weighting (sq-b51o) — a HEURISTIC, not optimal
+//!
+//! Cardinality is not the only thing the static estimates get wrong: a source can be
+//! *slow* (contended, far, rate-limited) even when its row counts are exactly as predicted.
+//! [`RuntimeStats`] already captures the *observed* per-source latency; sq-b51o folds it
+//! into the cost model so the re-planner prefers orderings that defer sub-queries against
+//! an observably slow source.
+//!
+//! The weighting is deliberately simple and **honest about being a heuristic** (see
+//! [`ReplanPolicy::latency_weight`]): for a candidate pattern, take the **slowest** observed
+//! latency over the sources retained for it (a union is bottlenecked by its slowest arm),
+//! divide by a baseline latency ([`ReplanPolicy::latency_baseline`]) to get a *relative*
+//! slowness `s ≥ 0`, and scale that join's cost by
+//!
+//! > `factor = clamp(1 + latency_weight · (s − 1), latency_floor, latency_cap)`.
+//!
+//! A source at the baseline (`s = 1`) — or one with **no** latency observation — gets
+//! `factor = 1.0`, i.e. the latency model is *off by construction* until evidence arrives,
+//! so behaviour with no measurements is byte-identical to the cardinality-only planner. A
+//! source observed at `2·baseline` with the default `latency_weight = 0.5` costs `1.5×`; the
+//! clamp ([`ReplanPolicy::latency_cap`], default `4.0`) stops one outlier measurement from
+//! dominating the order. This is a *bias*, not a guarantee: latency is noisy and the
+//! constants are tuned by hand, not derived — it nudges the re-plan toward faster sources,
+//! it does **not** claim to find the latency-optimal plan.
+//!
+//! Latency feeds the trigger too: a not-yet-executed pattern whose slowest source is
+//! observed to be more than `divergence_factor×` the baseline is enough to *consider* a
+//! re-plan (the hysteresis margin still gates whether one is *adopted*), so a query that is
+//! latency-bound — not cardinality-bound — can still react.
+//!
+//! **The latency weighting changes execution STRATEGY/ORDERING only — never results.** It
+//! enters exclusively through the *cost* term (and the suffix selection score), never the
+//! output *cardinality*, so the soundness boundary below is untouched: the re-plan is still
+//! a pure reorder of the not-yet-executed suffix, and the result multiset is unchanged.
+//!
 //! ## Soundness boundary (load-bearing — read this)
 //!
 //! Re-planning happens **only at stage boundaries** — between two leaf joins of the
@@ -90,6 +125,26 @@ pub struct ReplanPolicy {
     /// Hard cap on how many re-plans a single execution may perform (belt-and-braces
     /// anti-thrash + bounded planning overhead). Default `8`.
     pub max_replans: usize,
+    /// [OPUS-4.8] sq-b51o. Weight `w ≥ 0` of observed per-source latency in the cost model
+    /// (a HEURISTIC constant, not a derived optimum). A candidate join whose slowest retained
+    /// source is observed at relative slowness `s = latency / latency_baseline` has its cost
+    /// scaled by `clamp(1 + w·(s − 1), latency_floor, latency_cap)`. `w = 0` disables latency
+    /// weighting entirely (pure cardinality planning); the default `0.5` lets a 2×-slow source
+    /// cost 1.5× — a deliberately *gentle* bias, because latency measurements are noisy.
+    pub latency_weight: f64,
+    /// [OPUS-4.8] sq-b51o. Baseline latency (same abstract units as
+    /// [`RuntimeStats::record_source_latency`]) a source is judged *relative to*: a source
+    /// observed at this latency is "typical" (relative slowness `s = 1` ⇒ cost factor `1.0`).
+    /// A hand-set reference point, not measured. Default `100.0`.
+    pub latency_baseline: f64,
+    /// [OPUS-4.8] sq-b51o. Lower clamp on the latency cost factor — a source observed *faster*
+    /// than baseline can make its joins cheaper, but never below this floor (a fast source is
+    /// still a remote sub-query). Default `0.5`.
+    pub latency_floor: f64,
+    /// [OPUS-4.8] sq-b51o. Upper clamp on the latency cost factor — stops a single outlier
+    /// latency spike from dominating the join order (anti-thrash for the latency term, mirroring
+    /// the cardinality `divergence_factor` discipline). Default `4.0`.
+    pub latency_cap: f64,
 }
 
 impl Default for ReplanPolicy {
@@ -98,7 +153,30 @@ impl Default for ReplanPolicy {
             divergence_factor: 4.0,
             improvement_margin: 0.1,
             max_replans: 8,
+            latency_weight: 0.5,
+            latency_baseline: 100.0,
+            latency_floor: 0.5,
+            latency_cap: 4.0,
         }
+    }
+}
+
+impl ReplanPolicy {
+    /// [OPUS-4.8] sq-b51o. The latency cost-multiplier for a single observed source latency,
+    /// or `None` when latency weighting is off (`latency_weight == 0`). A source at the
+    /// baseline (or with no observation — handled by the caller passing `None`) yields `1.0`,
+    /// so the model is inert until evidence diverges from baseline. HEURISTIC — see the
+    /// module docs.
+    fn latency_factor(&self, latency: f64) -> f64 {
+        if self.latency_weight <= 0.0 {
+            return 1.0;
+        }
+        let baseline = self.latency_baseline.max(f64::MIN_POSITIVE);
+        let relative = latency.max(0.0) / baseline;
+        let raw = 1.0 + self.latency_weight * (relative - 1.0);
+        let lo = self.latency_floor.clamp(0.0, 1.0);
+        let hi = self.latency_cap.max(1.0);
+        raw.clamp(lo, hi)
     }
 }
 
@@ -111,9 +189,10 @@ pub struct RuntimeStats {
     /// union over its sources). Present only for patterns that have been (at least
     /// partially) evaluated.
     observed_leaf_card: HashMap<usize, f64>,
-    /// Observed per-source latency, in abstract time units (e.g. ms). Used by the
-    /// trigger to flag slow/unresponsive sources; the planner does not yet fold latency
-    /// into the cost model (deferred), but it is captured so the trigger can act on it.
+    /// Observed per-source latency, in abstract time units (e.g. ms). [OPUS-4.8] sq-b51o:
+    /// folded into the cost model — a slow source's joins cost more, biasing the re-plan
+    /// toward faster sources / deferring the slow one (see [`ReplanPolicy::latency_weight`]).
+    /// Affects cost/ordering ONLY, never the result multiset.
     observed_latency: HashMap<usize, f64>,
 }
 
@@ -180,6 +259,51 @@ fn corrected_selection(base: &[PatternSources], stats: &RuntimeStats) -> Vec<Pat
             ps
         })
         .collect()
+}
+
+/// [OPUS-4.8] sq-b51o. The **slowest** observed latency over the sources retained for
+/// `pattern` (a union is bottlenecked by its slowest arm), or `None` when no source of the
+/// pattern has a latency observation yet.
+fn pattern_slowest_latency(
+    pattern: usize,
+    selection: &[PatternSources],
+    stats: &RuntimeStats,
+) -> Option<f64> {
+    let ps = selection.iter().find(|ps| ps.pattern == pattern)?;
+    ps.candidates
+        .iter()
+        .filter_map(|c| stats.observed_latency_of(c.source))
+        .fold(None::<f64>, |acc, l| Some(acc.map_or(l, |a| a.max(l))))
+}
+
+/// [OPUS-4.8] sq-b51o. The latency cost-multiplier for joining `pattern`: its slowest source's
+/// observed latency run through [`ReplanPolicy::latency_factor`]. Returns `1.0` (inert) when no
+/// source of the pattern has a latency observation — the latency model contributes nothing
+/// until evidence arrives, so a measurement-free re-plan is byte-identical to cardinality-only.
+fn pattern_latency_factor(
+    pattern: usize,
+    selection: &[PatternSources],
+    stats: &RuntimeStats,
+    policy: &ReplanPolicy,
+) -> f64 {
+    match pattern_slowest_latency(pattern, selection, stats) {
+        Some(l) => policy.latency_factor(l),
+        None => 1.0,
+    }
+}
+
+/// [OPUS-4.8] sq-b51o. The pattern's slowest source's *relative slowness* `s = latency /
+/// baseline` (un-clamped, un-weighted) under `policy`'s [`ReplanPolicy::latency_baseline`] —
+/// what the trigger compares to `divergence_factor`. `None` when the pattern has no latency
+/// observation.
+fn pattern_relative_slowness(
+    pattern: usize,
+    selection: &[PatternSources],
+    stats: &RuntimeStats,
+    policy: &ReplanPolicy,
+) -> Option<f64> {
+    let baseline = policy.latency_baseline.max(f64::MIN_POSITIVE);
+    pattern_slowest_latency(pattern, selection, stats).map(|l| l / baseline)
 }
 
 /// Whether observed cardinality `observed` diverges from estimate `estimate` by more than
@@ -275,9 +399,12 @@ impl<'a> AdaptiveExecutor<'a> {
     /// Considers a re-plan at the current stage boundary given the latest `stats`.
     ///
     /// Fires the trigger when a not-yet-executed pattern's observed leaf cardinality
-    /// diverges from its estimate past the policy factor; if so, re-plans the **suffix**
-    /// with the corrected statistics and adopts the new order only when it wins by the
-    /// hysteresis margin. Returns the [`ReplanOutcome`]. The prefix is never touched.
+    /// diverges from its estimate past the policy factor, **or** ([OPUS-4.8] sq-b51o) a
+    /// not-yet-executed pattern's slowest source is observed to be `divergence_factor×`
+    /// slower than the latency baseline; if so, re-plans the **suffix** with the corrected
+    /// statistics (cardinality *and* latency-weighted cost) and adopts the new order only
+    /// when it wins by the hysteresis margin. Returns the [`ReplanOutcome`]. The prefix is
+    /// never touched, and latency enters cost/ordering ONLY — never the result multiset.
     pub fn maybe_replan(&mut self, stats: &RuntimeStats) -> ReplanOutcome {
         if self.remaining.len() < 2 {
             // Fewer than two remaining patterns ⇒ nothing to reorder.
@@ -293,27 +420,37 @@ impl<'a> AdaptiveExecutor<'a> {
             .iter()
             .map(|ps| (ps.pattern, ps.total_cardinality().max(0.0)))
             .collect();
-        let triggered =
+        let card_triggered =
             self.remaining
                 .iter()
                 .any(|&p| match (base_est.get(&p), stats.observed_leaf(p)) {
                     (Some(&e), Some(o)) => diverges(e, o, &self.policy),
                     _ => false,
                 });
-        if !triggered {
+        // [OPUS-4.8] sq-b51o: a not-yet-executed pattern bound to an observably slow source
+        // (slowest source past divergence_factor× baseline) is also enough to *consider* a
+        // re-plan — a latency-bound query reacts even when cardinalities are spot-on. The
+        // hysteresis margin still gates whether a switch is actually *adopted* (anti-thrash).
+        let lat_triggered = self.policy.latency_weight > 0.0
+            && self.remaining.iter().any(|&p| {
+                pattern_relative_slowness(p, self.base_selection, stats, &self.policy)
+                    .is_some_and(|s| s > self.policy.divergence_factor.max(1.0))
+            });
+        if !card_triggered && !lat_triggered {
             return ReplanOutcome::NoDivergence;
         }
 
         // ---- Re-plan the SUFFIX with corrected statistics.
-        // Build a sub-BGP of the remaining patterns; plan over it with observed cardinalities.
+        // Build a sub-BGP of the remaining patterns; plan over it with observed cardinalities
+        // and latency-weighted join costs.
         let corrected = corrected_selection(self.base_selection, stats);
-        let Some(new_suffix) = self.replan_suffix(&corrected) else {
+        let Some(new_suffix) = self.replan_suffix(&corrected, stats) else {
             return ReplanOutcome::KeptWithinHysteresis;
         };
 
         // ---- Hysteresis: only adopt if the new suffix beats the current one by the margin.
-        let cur_cost = self.suffix_cost(&self.remaining, &corrected);
-        let new_cost = self.suffix_cost(&new_suffix, &corrected);
+        let cur_cost = self.suffix_cost(&self.remaining, &corrected, stats);
+        let new_cost = self.suffix_cost(&new_suffix, &corrected, stats);
         let margin = self.policy.improvement_margin.clamp(0.0, 0.999);
         // new must be cheaper than (1 - margin) * current to win.
         if new_cost < cur_cost * (1.0 - margin) && new_suffix != self.remaining {
@@ -329,7 +466,11 @@ impl<'a> AdaptiveExecutor<'a> {
     /// already-executed prefix: the re-planner sees the prefix as "already joined" so it
     /// continues to prefer patterns connected to the running result (no Cartesian arm gets
     /// promoted spuriously). Returns `None` if the sub-plan is degenerate.
-    fn replan_suffix(&self, corrected: &[PatternSources]) -> Option<Vec<usize>> {
+    fn replan_suffix(
+        &self,
+        corrected: &[PatternSources],
+        stats: &RuntimeStats,
+    ) -> Option<Vec<usize>> {
         // Plan the whole BGP with corrected stats but *force the prefix to come first* by
         // seeding the greedy planner's "joined" set with the executed prefix. The public
         // `plan_bgp` always re-chooses the seed, so we re-derive the suffix order with a
@@ -341,12 +482,21 @@ impl<'a> AdaptiveExecutor<'a> {
             corrected,
             self.descriptors,
             &self.opts,
+            stats,
+            &self.policy,
         ))
     }
 
     /// Estimated remaining cost of executing `suffix` (in this order) on top of the current
-    /// prefix, under the corrected statistics — the comparable used for hysteresis.
-    fn suffix_cost(&self, suffix: &[usize], corrected: &[PatternSources]) -> f64 {
+    /// prefix, under the corrected statistics — the comparable used for hysteresis. Costs are
+    /// **latency-weighted** ([OPUS-4.8] sq-b51o): a join against a slow source costs more, so a
+    /// suffix that defers the slow source compares favourably. Output cardinality is unaffected.
+    fn suffix_cost(
+        &self,
+        suffix: &[usize],
+        corrected: &[PatternSources],
+        stats: &RuntimeStats,
+    ) -> f64 {
         suffix_cost_greedy(
             self.bgp,
             &self.executed,
@@ -354,6 +504,8 @@ impl<'a> AdaptiveExecutor<'a> {
             corrected,
             self.descriptors,
             &self.opts,
+            stats,
+            &self.policy,
         )
     }
 }
@@ -362,6 +514,14 @@ impl<'a> AdaptiveExecutor<'a> {
 /// `prefix`. Mirrors [`crate::plan_bgp`]'s selection rule (connected-first, smallest output
 /// next, tie-break on index) but over a fixed prefix — so the only thing that can change is
 /// the order of the not-yet-executed patterns. Pure, deterministic.
+///
+/// [OPUS-4.8] sq-b51o: the per-candidate selection key is the **latency-weighted** output
+/// score `out · latency_factor(cand)` rather than raw output cardinality — a candidate bound
+/// to an observably slow source is deferred. The factor is `1.0` whenever the candidate has no
+/// latency observation (or latency weighting is off), so a measurement-free re-plan is
+/// byte-identical to the cardinality-only planner (the bias enters *on the same axis* as
+/// cardinality; it never alters the output cardinality the next join's estimate uses).
+#[allow(clippy::too_many_arguments)]
 fn plan_suffix_greedy(
     bgp: &Bgp,
     prefix: &[usize],
@@ -369,6 +529,8 @@ fn plan_suffix_greedy(
     selection: &[PatternSources],
     descriptors: &[crate::descriptor::SourceDescriptor],
     opts: &PlanOptions,
+    stats: &RuntimeStats,
+    policy: &ReplanPolicy,
 ) -> Vec<usize> {
     let leaf_card: Vec<f64> = selection
         .iter()
@@ -404,7 +566,8 @@ fn plan_suffix_greedy(
         .collect();
 
     while !rem.is_empty() {
-        let mut best: Option<(usize, f64, bool)> = None; // (pat, out_card, connected)
+        // (pat, true_out_card, latency_weighted_score, connected)
+        let mut best: Option<(usize, f64, f64, bool)> = None;
         for &cand in &rem {
             let connected = joined.iter().any(|&j| bgp.shares_var(j, cand));
             let (out, _cost, _algo) = crate::plan::cost_join_pub(
@@ -418,19 +581,23 @@ fn plan_suffix_greedy(
                 opts,
                 connected,
             );
+            // [OPUS-4.8] sq-b51o: rank on the latency-weighted score, but advance `cur_card`
+            // with the TRUE `out` — latency never changes the cardinality the planner feeds
+            // forward (results/soundness are untouched), only which arm we pick next.
+            let score = out * pattern_latency_factor(cand, selection, stats, policy);
             let better = match &best {
                 None => true,
-                Some((bp, bcard, bconn)) => match (connected, *bconn) {
+                Some((bp, _bcard, bscore, bconn)) => match (connected, *bconn) {
                     (true, false) => true,
                     (false, true) => false,
-                    _ => out < *bcard || (out == *bcard && cand < *bp),
+                    _ => score < *bscore || (score == *bscore && cand < *bp),
                 },
             };
             if better {
-                best = Some((cand, out, connected));
+                best = Some((cand, out, score, connected));
             }
         }
-        let (pat, out, _) = best.expect("rem non-empty");
+        let (pat, out, _, _) = best.expect("rem non-empty");
         order.push(pat);
         joined.push(pat);
         cur_card = out;
@@ -440,6 +607,10 @@ fn plan_suffix_greedy(
 }
 
 /// Estimated total remaining cost of joining `suffix` (in the given order) onto `prefix`.
+/// [OPUS-4.8] sq-b51o: each per-join cost is scaled by the candidate's latency factor (a slow
+/// source's joins cost more); the output cardinality fed forward is the TRUE estimate, so
+/// latency biases the cost comparable only, never the result.
+#[allow(clippy::too_many_arguments)]
 fn suffix_cost_greedy(
     bgp: &Bgp,
     prefix: &[usize],
@@ -447,6 +618,8 @@ fn suffix_cost_greedy(
     selection: &[PatternSources],
     descriptors: &[crate::descriptor::SourceDescriptor],
     opts: &PlanOptions,
+    stats: &RuntimeStats,
+    policy: &ReplanPolicy,
 ) -> f64 {
     let leaf_card: Vec<f64> = selection
         .iter()
@@ -477,7 +650,10 @@ fn suffix_cost_greedy(
             opts,
             connected,
         );
-        total += cost;
+        // [OPUS-4.8] sq-b51o: latency-weight the cost of this join; cardinality fed forward
+        // (`out`) stays the true estimate, so the comparable is latency-aware but the plan
+        // remains a pure reorder (result-equivalent).
+        total += cost * pattern_latency_factor(cand, selection, stats, policy);
         cur_card = out;
         joined.push(cand);
     }
@@ -783,6 +959,7 @@ mod tests {
             divergence_factor: 4.0,
             improvement_margin: 0.999,
             max_replans: 8,
+            ..ReplanPolicy::default()
         };
         let mut exec =
             AdaptiveExecutor::new(&bgp, &srcs, &sel, &plan, PlanOptions::default(), policy);
@@ -944,6 +1121,7 @@ mod tests {
             divergence_factor: 4.0,
             improvement_margin: 0.2,
             max_replans: 0, // no re-plans allowed.
+            ..ReplanPolicy::default()
         };
         let mut exec =
             AdaptiveExecutor::new(&bgp, &srcs, &sel, &plan, PlanOptions::default(), policy);
@@ -953,12 +1131,249 @@ mod tests {
         assert_eq!(exec.maybe_replan(&stats), ReplanOutcome::BudgetExhausted);
     }
 
-    // ---- Latency capture is recorded and readable (drives source-switch trigger, deferred).
+    // ---- Latency capture is recorded and readable.
     #[test]
     fn latency_is_captured() {
         let mut stats = RuntimeStats::new();
         stats.record_source_latency(3, 250.0);
         assert_eq!(stats.observed_latency_of(3), Some(250.0));
         assert_eq!(stats.observed_latency_of(0), None);
+    }
+
+    // ============================================================================
+    // [OPUS-4.8] sq-b51o — per-source latency folded into the adaptive cost model.
+    // ============================================================================
+
+    // A 3-arm star on ?s where each arm's predicate is served by a DIFFERENT source, so a
+    // per-source latency observation maps cleanly onto a per-pattern (per-arm) cost weight.
+    //   pattern 0: ?s :a ?x  (source 0)
+    //   pattern 1: ?s :b ?y  (source 1)
+    //   pattern 2: ?s :c ?z  (source 2)
+    fn three_source_star() -> (Bgp, [SourceDescriptor; 3]) {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(v("s"), iri("http://ex/a"), v("x")),
+            TriplePattern::new(v("s"), iri("http://ex/b"), v("y")),
+            TriplePattern::new(v("s"), iri("http://ex/c"), v("z")),
+        ]);
+        // Cards: :a = 10 (seed), :b = 100, :c = 200. Static suffix after :a is [:b, :c]
+        // (smaller card first). One source per predicate ⇒ source i serves pattern i.
+        let sa = SourceDescriptor::builder(SourceId::new("A"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/a", 10, 10, 10))
+            .build();
+        let sb = SourceDescriptor::builder(SourceId::new("B"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/b", 100, 100, 100))
+            .build();
+        let sc = SourceDescriptor::builder(SourceId::new("C"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/c", 200, 200, 200))
+            .build();
+        (bgp, [sa, sb, sc])
+    }
+
+    // ---- LATENCY DECISION: with cardinalities held EXACTLY at their estimates (no
+    //      cardinality divergence at all), a slow source on the cheaper-by-card arm makes
+    //      the planner DEFER it — the chosen suffix order flips purely on latency.
+    #[test]
+    fn latency_defers_slow_source() {
+        let (bgp, srcs) = three_source_star();
+        let sel = select_sources(&bgp, &srcs);
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+
+        // Baseline (no latency observed): suffix after the :a seed is [:b, :c] by card.
+        let mut exec = AdaptiveExecutor::new(
+            &bgp,
+            &srcs,
+            &sel,
+            &plan,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        );
+        assert_eq!(exec.advance().unwrap(), 0, ":a is the seed");
+        assert_eq!(
+            exec.remaining_order(),
+            &[1, 2],
+            "static-by-cardinality suffix is [:b, :c]"
+        );
+
+        // Now observe source 1 (serving :b) as VERY slow; cardinalities are spot-on (we
+        // record them equal to the estimates, so the CARDINALITY trigger does NOT fire — only
+        // the latency trigger does).
+        let mut stats = RuntimeStats::new();
+        stats.record_leaf_cardinality(1, 100.0); // == estimate ⇒ no card divergence.
+        stats.record_leaf_cardinality(2, 200.0); // == estimate ⇒ no card divergence.
+        stats.record_source_latency(1, 1000.0); // 10× baseline ⇒ slow.
+        let outcome = exec.maybe_replan(&stats);
+        assert_eq!(
+            outcome,
+            ReplanOutcome::Switched,
+            "a slow source must trigger + switch even with cardinalities exactly as estimated"
+        );
+        assert_eq!(
+            exec.remaining_order(),
+            &[2, 1],
+            "the slow :b arm is deferred behind the faster :c arm"
+        );
+    }
+
+    // ---- RESULT-EQUIVALENCE across a LATENCY-driven reorder: the latency switch changes the
+    //      order but the result multiset is identical to the static plan's (the load-bearing
+    //      soundness invariant, exercised on the latency path specifically — mirrors
+    //      replan_result_equals_static but the reorder is driven by latency, not cardinality).
+    #[test]
+    fn latency_replan_result_equals_static() {
+        let (bgp, srcs) = three_source_star();
+        // Concrete per-pattern solution multisets (already-fetched), non-trivial join.
+        let solutions: SolutionSets = vec![
+            // pattern 0: ?s :a ?x
+            vec![
+                t(&[("s", "s1"), ("x", "x1")]),
+                t(&[("s", "s2"), ("x", "x2")]),
+                t(&[("s", "s3"), ("x", "x3")]),
+            ],
+            // pattern 1: ?s :b ?y  (s3 absent ⇒ dropped; s1 fans out)
+            vec![
+                t(&[("s", "s1"), ("y", "y1")]),
+                t(&[("s", "s1"), ("y", "y7")]),
+                t(&[("s", "s2"), ("y", "y2")]),
+            ],
+            // pattern 2: ?s :c ?z  (s2 absent ⇒ dropped)
+            vec![
+                t(&[("s", "s1"), ("z", "z1")]),
+                t(&[("s", "s3"), ("z", "z3")]),
+            ],
+        ];
+        let sel = select_sources(&bgp, &srcs);
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        let static_order = plan.join_order();
+        let static_result = evaluate(&bgp, &solutions, &static_order);
+
+        let mut exec = AdaptiveExecutor::new(
+            &bgp,
+            &srcs,
+            &sel,
+            &plan,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        );
+        let _seed = exec.advance().unwrap();
+        let mut stats = RuntimeStats::new();
+        stats.record_source_latency(1, 1000.0); // slow :b ⇒ deferred (latency-only reorder).
+        assert_eq!(
+            exec.maybe_replan(&stats),
+            ReplanOutcome::Switched,
+            "fixture is designed to switch on latency — equivalence tested across a real reorder"
+        );
+        let mut adaptive_order = exec.executed_order().to_vec();
+        adaptive_order.extend_from_slice(exec.remaining_order());
+        assert_ne!(
+            adaptive_order, static_order,
+            "the latency re-plan must actually change the order here (non-vacuous)"
+        );
+        // Same pattern SET (no pattern added/dropped) …
+        let mut a_sorted = adaptive_order.clone();
+        let mut s_sorted = static_order.clone();
+        a_sorted.sort();
+        s_sorted.sort();
+        assert_eq!(
+            a_sorted, s_sorted,
+            "latency re-plan preserves the pattern SET"
+        );
+        // … and the SAME result multiset despite the latency-driven order change.
+        let adaptive_result = evaluate(&bgp, &solutions, &adaptive_order);
+        assert!(
+            multiset_eq(&static_result, &adaptive_result),
+            "latency-reordered result MUST equal the static plan's result multiset"
+        );
+        assert!(!static_result.is_empty(), "fixture must produce some rows");
+    }
+
+    // ---- NO-THRASH on noisy-but-stable latency: latencies that jitter AROUND the baseline
+    //      (never far enough to clear divergence_factor× and whose cost effect is below the
+    //      hysteresis margin) must NOT trigger a switch — the latency term is anti-thrashed by
+    //      the same discipline as the cardinality term.
+    #[test]
+    fn no_thrash_on_noisy_stable_latency() {
+        let (bgp, srcs) = three_source_star();
+        let sel = select_sources(&bgp, &srcs);
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        let mut exec = AdaptiveExecutor::new(
+            &bgp,
+            &srcs,
+            &sel,
+            &plan,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        );
+        let _ = exec.advance(); // execute :a seed.
+                                // Latencies wobble around the 100.0 baseline (90/130/110) — noise, not a slow source:
+                                // none reaches divergence_factor× (4× = 400) so the latency trigger stays silent.
+        let mut stats = RuntimeStats::new();
+        stats.record_source_latency(0, 90.0);
+        stats.record_source_latency(1, 130.0);
+        stats.record_source_latency(2, 110.0);
+        assert_eq!(
+            exec.maybe_replan(&stats),
+            ReplanOutcome::NoDivergence,
+            "noisy-but-stable latency around baseline must not trigger a re-plan"
+        );
+        assert_eq!(
+            exec.remaining_order(),
+            &[1, 2],
+            "suffix order untouched by latency jitter"
+        );
+    }
+
+    // ---- latency_weight = 0 fully disables the latency term (pure cardinality planning):
+    //      even a wildly slow source neither triggers nor reorders.
+    #[test]
+    fn latency_weight_zero_is_inert() {
+        let (bgp, srcs) = three_source_star();
+        let sel = select_sources(&bgp, &srcs);
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        let policy = ReplanPolicy {
+            latency_weight: 0.0,
+            ..ReplanPolicy::default()
+        };
+        let mut exec =
+            AdaptiveExecutor::new(&bgp, &srcs, &sel, &plan, PlanOptions::default(), policy);
+        let _ = exec.advance();
+        let mut stats = RuntimeStats::new();
+        stats.record_source_latency(1, 100_000.0); // absurdly slow, but weighting is off.
+        assert_eq!(
+            exec.maybe_replan(&stats),
+            ReplanOutcome::NoDivergence,
+            "latency_weight = 0 ⇒ latency is ignored entirely"
+        );
+        assert_eq!(exec.remaining_order(), &[1, 2]);
+    }
+
+    // ---- The latency factor itself: baseline ⇒ 1.0, slow ⇒ > 1 (capped), fast ⇒ < 1
+    //      (floored), and weight 0 ⇒ always 1.0. Pins the documented heuristic constants.
+    #[test]
+    fn latency_factor_constants() {
+        let p = ReplanPolicy::default(); // weight 0.5, baseline 100, floor 0.5, cap 4.0.
+        assert_eq!(p.latency_factor(100.0), 1.0, "at baseline ⇒ neutral");
+        assert_eq!(
+            p.latency_factor(200.0),
+            1.5,
+            "2× baseline ⇒ 1 + 0.5·(2-1) = 1.5"
+        );
+        assert_eq!(
+            p.latency_factor(1000.0),
+            4.0,
+            "10× baseline ⇒ clamped to the cap 4.0"
+        );
+        assert_eq!(
+            p.latency_factor(0.0),
+            0.5,
+            "instant ⇒ clamped to the floor 0.5"
+        );
+        let off = ReplanPolicy {
+            latency_weight: 0.0,
+            ..ReplanPolicy::default()
+        };
+        assert_eq!(off.latency_factor(9999.0), 1.0, "weight 0 ⇒ always neutral");
     }
 }
