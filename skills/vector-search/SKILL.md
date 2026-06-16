@@ -124,6 +124,16 @@ impl DiskAnnIndex { fn nearest_filtered(&self, &[f32], &IdMask, &VectorStore, k)
 impl VectorIndex  { fn nearest_filtered(&self, &[f32], &IdMask, &VectorStore, k) -> Vec<(Id, f32)> }   // HNSW: exact pre-filter only (instant-distance adjacency not exposed)
 // empty mask -> no results; full mask -> equals the unfiltered search; every returned id is guaranteed in the mask
 
+// --- pre-filter vs post-filter cost model (src/cost.rs) --- feature = "filtered-ann" ONLY [OPUS-4.8] sq-7hx6 (subsumes sq-ic0n)
+CostModel { scatter_penalty: f32 /*2.0*/ }                                       // scattered masked-row cost vs sequential full-scan row; >= 1.0
+impl CostModel { fn decide(mask_len, store_len, k) -> CostEstimate }             // pre-filter iff mask_len * scatter_penalty <= store_len
+Strategy::{PreFilter, PostFilter}                                                // the chosen branch (assert the decision)
+CostEstimate { mask_len, store_len, k, prefilter_cost, postfilter_cost, strategy }   // the modelled estimate behind a decision
+postfilter_exact(&VectorStore, query: &[f32], &IdMask, k) -> Vec<(Id, f32)>      // scan WHOLE store, drop non-masked -> IDENTICAL to nearest_exact_filtered (no over-fetch boundary: full ranking)
+nearest_filtered_costed(&VectorStore, &[f32], &IdMask, k, &CostModel) -> (Vec<(Id, f32)>, CostEstimate)   // decide + run chosen branch
+overfetch_target(k, mask_len, store_len) -> usize                               // ceil(k/selectivity) clamped; ONLY for a future APPROX backend (exact backend never under-fills)
+// HEURISTIC over an ESTIMATE, not optimal: scatter_penalty is one modelled constant; pre/post return the IDENTICAL top-k either way (answer-safe)
+
 // --- quantization for large stores (src/quant.rs) ---
 ScalarQuantizer::fit(dim, vectors: impl IntoIterator<Item=&[f32]>) -> Result<ScalarQuantizer, String>   // f32->u8, 4x
 ProductQuantizer::fit(dim, vectors, PqConfig{m, k, iters, seed}) -> Result<ProductQuantizer, String>    // M bytes/vec, 8-32x
@@ -416,8 +426,17 @@ predicate is always unfiltered — this composition adds nothing to the `vec-pre
 :ownedBy ?node`, or a longer cycle among intermediates) are handled correctly (sq-p5oy): the
 connected-component computation is a per-pattern fixpoint so it always **terminates** on a cycle,
 and the cyclic sub-BGP is evaluated through the standard engine, so the mask is exactly the engine's
-(cycle-correct) binding — `filtered == post-filter` holds for cyclic constraints too. Deferred (own
-beads): a cost-model choice of when transitive masking pays (sq-ic0n).
+(cycle-correct) binding — `filtered == post-filter` holds for cyclic constraints too.
+
+**Pre-filter vs post-filter — the cost model (sq-7hx6, subsumes sq-ic0n).** Once the mask is derived,
+the rewrite still has a *choice*: **pre-filter** (scan only the masked ids, `nearest_exact_filtered`)
+or **post-filter** (scan the whole store unfiltered, then drop the disallowed hits, `postfilter_exact`).
+Both return the **byte-identical** top-k (same ids, same order — see recipe 10), so the choice is purely
+about throughput. The rewrite picks per query via `CostModel` (recipe 10): pre-filter when the mask is
+selective (`mask_len · scatter_penalty ≤ store_len`, default crossover ≈ half the store), post-filter
+when it is broad. This is a HEURISTIC over a cost ESTIMATE, not an optimum — it never affects the answer,
+only the work. (Deriving the mask itself is unconditional: we must, to stay answer-safe; the cost model
+only decides how to *use* it.)
 
 ### 9. Predicate-constrained (filtered) ANN — only neighbours a BGP admits (opt-in, feature = `filtered-ann`)
 
@@ -463,6 +482,51 @@ zero engine coupling. The engine-side **automatic** BGP → mask wiring — deri
 the surrounding BGP and running a filtered `vec:` search — is wired in recipe 8 (sq-bvmd, when both
 `vec-predicate` and `filtered-ann` are on), and is built on exactly this `nearest_exact_filtered`
 seam.
+
+### 10. Pre-filter vs post-filter — the cost model (opt-in, feature = `filtered-ann`)
+
+Deriving a mask is one cost; *using* it is another. With a mask in hand there are two ways to the
+**same** top-k: **pre-filter** (scan only the masked ids) or **post-filter** (scan the whole store
+unfiltered, then drop the disallowed hits). `CostModel` estimates both and picks the cheaper per
+query. The `vec:` rewrite (recipe 8) calls this automatically; you can also drive it directly.
+
+```rust
+use sparq_vectors::{nearest_filtered_costed, postfilter_exact, CostModel, Strategy};
+
+// Decision only (no search): pre-filter iff mask_len * scatter_penalty <= store_len.
+let est = CostModel::default().decide(/*mask_len*/ 50, /*store_len*/ 1000, /*k*/ 10);
+assert_eq!(est.strategy, Strategy::PreFilter);   // 50*2 = 100 <= 1000 → selective → pre-filter
+//   est.prefilter_cost / est.postfilter_cost expose WHY.
+
+// Decide + run the chosen branch in one call; the second tuple element is the estimate.
+let (hits, est) = nearest_filtered_costed(&store, query, &mask, 10, &CostModel::default());
+
+// Post-filter directly (the broad-mask branch). IDENTICAL result to nearest_exact_filtered:
+let post = postfilter_exact(&store, query, &mask, 10);
+assert_eq!(post, sparq_vectors::nearest_exact_filtered(&store, query, &mask, 10));
+```
+
+**The model.** `m = |mask|`, `n = store_len`. Pre-filter touches `m` *scattered* rows (random-access
+gather into the mmap), post-filter streams `n` rows sequentially; a scattered row is modelled as
+`scatter_penalty ×` (default `2.0`) a sequential one. **Pre-filter iff `m · scatter_penalty ≤ n`** —
+default crossover ≈ half the store. `k`/`dim` cancel out of the exact-scan comparison (both branches
+do `dim`-width work per touched row, then take `k`), so they do not enter the crossover; they are
+surfaced in `CostEstimate` for a future approximate backend.
+
+**Why it is answer-safe.** `nearest_exact` returns a *complete* ranking of the store, so post-filtering
+it and pre-filtering the mask reduce to ranking the same admitted ids by the same comparator — the
+top-k is **byte-identical** (asserted in `tests/cost_model.rs`). There is **no over-fetch recall
+boundary** for this exact backend: a full ranking can only under-fill `k` when the mask admits fewer
+than `k` stored vectors, and then the pre-filter scan is equally short. (`overfetch_target(k, m, n) =
+ceil(k/selectivity)` exists for a *future approximate* backend, whose bounded candidate list CAN
+under-fill — the honest handling there is iterative over-fetch until `k` survive; that approximate
+filtered `vec:` path is a deferred follow-up.)
+
+**Honest scope.** This is a **HEURISTIC over a cost estimate, not an optimum**: `scatter_penalty` is a
+single modelled constant (non-canonical, not a measured fit), real cache/SIMD behaviour is
+hardware-dependent, and a planner that has *not* yet evaluated the sub-BGP would feed an *estimated*
+cardinality (here the mask is materialised, so `m` is exact). A mis-estimate costs only throughput —
+never the answer.
 
 ## Gotchas / feature flags / prerequisites
 
