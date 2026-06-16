@@ -64,6 +64,20 @@ service = ["dep:serde_json", "dep:ureq"]
 # pull in ZERO new dependencies (oxrdf is already a direct dep), so the default build's
 # dependency graph is byte-for-byte unchanged when this is off.
 serialize-rdf = []
+# [OPUS-4.8] (sq-5qz9) SPARQL window functions + custom aggregate registry.
+# Two extension surfaces, OFF by default:
+#   * a `CustomAggregateRegistry` whose named (IRI) user aggregates are callable in
+#     real SPARQL `GROUP BY` (the vendored spargebra already parses a declared custom
+#     aggregate IRI — `SparqlParser::with_custom_aggregate_function`); the engine
+#     evaluates `AggregateFunction::Custom` against the installed registry.
+#   * a programmatic window-function pass (`window` module) — ROW_NUMBER / RANK /
+#     DENSE_RANK + a windowed aggregate over a result table, with PARTITION BY +
+#     ORDER BY window specs. These are a NON-STANDARD extension (no W3C-REC SPARQL
+#     window syntax exists); the surface follows the SQL:2003 OVER (PARTITION BY …
+#     ORDER BY …) window-spec model that Stardog/AnzoGraph expose.
+# When off, ZERO window/custom-aggregate code compiles and the default build is
+# byte-identical (no new dependencies — oxrdf is already a direct dep).
+window-functions = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
