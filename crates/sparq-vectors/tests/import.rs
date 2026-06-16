@@ -351,6 +351,53 @@ fn npy_malformed_header_fails_closed_bounded() {
 }
 
 #[test]
+fn empty_matrix_imports_to_an_empty_store() {
+    // [OPUS-4.8] (sq-xsq9) Edge case: a zero-row matrix + empty ids slice is a VALID import that
+    // produces an empty (but well-formed, reopenable) `.spqv` — not an error, not a panic.
+    let ids: [u32; 0] = [];
+
+    // (a) .npy with shape (0, 4): a real header, an empty body.
+    let npy = tmp("empty.npy");
+    write_npy_f32(&npy, 0, 4, &[]);
+    let spqv = tmp("empty-npy.spqv");
+    let store = VectorStore::import_npy(
+        ImportSpec {
+            spqv_path: &spqv,
+            dim: 4,
+            ids: &ids,
+            binding: ImportBinding::Unbound,
+        },
+        &npy,
+    )
+    .expect("empty npy import");
+    assert_eq!(store.len(), 0);
+    assert!(store.is_empty());
+    assert_eq!(store.get(0), None);
+    // Reopens cleanly from disk as an empty store of the declared dim.
+    let reopened = VectorStore::open(&spqv).unwrap();
+    assert_eq!(reopened.dim(), 4);
+    assert_eq!(reopened.len(), 0);
+    // A query over an empty store yields nothing rather than panicking.
+    assert!(sparq_vectors::nearest_exact(&reopened, &[1.0, 0.0, 0.0, 0.0], 5).is_empty());
+
+    // (b) header-less dump: a genuinely empty (0-byte) file is the 0-row dump.
+    let dump = tmp("empty.f32");
+    std::fs::write(&dump, b"").unwrap();
+    let spqv2 = tmp("empty-dump.spqv");
+    let store2 = VectorStore::import_numeric_dump(
+        ImportSpec {
+            spqv_path: &spqv2,
+            dim: 4,
+            ids: &ids,
+            binding: ImportBinding::Unbound,
+        },
+        &dump,
+    )
+    .expect("empty dump import");
+    assert_eq!(store2.len(), 0);
+}
+
+#[test]
 fn npy_duplicate_id_fails_closed() {
     let npy = tmp("dupid.npy");
     let flat: Vec<f32> = ROWS.iter().flatten().copied().collect();
