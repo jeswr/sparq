@@ -87,6 +87,14 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 /// `xsd:integer` — the datatype of the count / page-size literals.
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 
+/// [OPUS-4.8] sq-dxhb: the brTPF `values` control property — the Hydra `hydra:property` the
+/// `{values}` template variable maps to. brTPF (Hartig & Buil-Aranda, ODBASE 2016) has no term
+/// in a standardised vocabulary for "the attached solution-mapping set", so we mint one under a
+/// sparq namespace; a client reads it from the `hydra:mapping` to learn the dataset accepts a
+/// bindings restriction. Compiled only with the `brtpf` feature.
+#[cfg(feature = "brtpf")]
+const BRTPF_VALUES_PROPERTY: &str = "https://sparq.dev/ns/brtpf#values";
+
 /// A parsed triple pattern: each position is `Some(term)` when the request bound it, or `None`
 /// (a variable). The predicate is a [`NamedNode`] (a predicate is always an IRI), matching the
 /// shape [`Graph::pattern`] wants.
@@ -187,6 +195,20 @@ impl Fragment {
     pub fn has_previous(&self) -> bool {
         self.page > 0
     }
+
+    /// The (zero-based) index of the LAST page of this result — drives `hydra:last`. With
+    /// `n = total_estimate` matches at `page_size` per page there are `ceil(n / page_size)`
+    /// pages, so the last index is `ceil(n / page_size) - 1`, or `0` when there are no matches
+    /// (a single empty page IS the last page — there is always a page 0). Keyed on the same
+    /// ESTIMATE we advertise as `hydra:totalItems`, so `last` is consistent with `next` and the
+    /// reported count.
+    pub fn last_page(&self) -> usize {
+        if self.total_estimate == 0 {
+            0
+        } else {
+            (self.total_estimate - 1) / self.page_size
+        }
+    }
 }
 
 /// Evaluates `pattern` against the pinned `graph` snapshot, returning the [`Fragment`] for
@@ -245,6 +267,197 @@ pub fn evaluate(graph: &Graph, pattern: &TriplePattern, page: usize, page_size: 
     }
 }
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-dxhb: bindings-restricted Triple Pattern Fragments (brTPF).
+// ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] sq-dxhb: one brTPF solution mapping — a PARTIAL binding of the triple-pattern
+/// positions. Each of `subject` / `predicate` / `object` is `Some(term)` when this mapping
+/// constrains that position, or `None` (the mapping says nothing about it). A mapping that
+/// binds a position the PATTERN already bound is allowed (it is simply redundant — the merge
+/// keeps the pattern's term, and a contradictory binding makes that mapping match nothing).
+///
+/// Compiled only with the `brtpf` feature.
+#[cfg(feature = "brtpf")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Binding {
+    pub subject: Option<Term>,
+    pub predicate: Option<NamedNode>,
+    pub object: Option<Term>,
+}
+
+#[cfg(feature = "brtpf")]
+impl Binding {
+    /// `true` when this mapping constrains no position — the empty mapping μ₀, which is
+    /// compatible with EVERY triple, so it does not restrict the fragment at all.
+    pub fn is_empty(&self) -> bool {
+        self.subject.is_none() && self.predicate.is_none() && self.object.is_none()
+    }
+}
+
+/// [OPUS-4.8] sq-dxhb: parses a brTPF `values` payload into the set of solution mappings.
+///
+/// The wire format is one mapping per line; within a line, whitespace-separated
+/// `position=term` pairs, where `position` is `subject` / `predicate` / `object` (or the short
+/// `s` / `p` / `o`) and `term` is an **N-Triples term** (`<iri>`, `"lit"`, `"lit"@en`,
+/// `"lit"^^<dt>`) — the SAME term grammar as the `subject`/`predicate`/`object` query
+/// parameters, so a client encodes a binding exactly like a bound pattern position. A blank
+/// line is skipped; the empty payload is the empty binding set (no restriction). A line with no
+/// pairs is the empty mapping μ₀ (compatible with everything) and is skipped (it would defeat
+/// the restriction). The predicate position must be an IRI (same rule as the pattern).
+///
+/// Example payload (URL-decoded), restricting `?s foaf:knows ?o` to two `?s` values:
+///
+/// ```text
+/// s=<http://ex/alice>
+/// s=<http://ex/carol>
+/// ```
+#[cfg(feature = "brtpf")]
+pub fn parse_bindings(payload: &str) -> Result<Vec<Binding>, ParseError> {
+    let mut out = Vec::new();
+    for line in payload.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut b = Binding::default();
+        for pair in line.split_whitespace() {
+            let (pos, term) = pair.split_once('=').ok_or_else(|| {
+                ParseError(format!(
+                    "brTPF binding pair must be 'position=term', got '{pair}'"
+                ))
+            })?;
+            match pos {
+                "subject" | "s" => b.subject = parse_term(Some(term), "subject")?,
+                "predicate" | "p" => b.predicate = parse_predicate(Some(term))?,
+                "object" | "o" => b.object = parse_term(Some(term), "object")?,
+                other => {
+                    return Err(ParseError(format!(
+                        "brTPF binding position must be subject/predicate/object (s/p/o), got '{other}'"
+                    )))
+                }
+            }
+        }
+        // A mapping that constrains nothing (an all-blank μ₀) does not restrict the fragment;
+        // drop it rather than let it widen the result to the whole pattern.
+        if !b.is_empty() {
+            out.push(b);
+        }
+    }
+    Ok(out)
+}
+
+/// [OPUS-4.8] sq-dxhb: evaluates `pattern` against `graph` RESTRICTED to the brTPF binding set
+/// `bindings`, returning the [`Fragment`] for (zero-based) `page`.
+///
+/// The bindings-restricted fragment is the set of triples matching `pattern` that are
+/// COMPATIBLE WITH AT LEAST ONE supplied mapping (brTPF's semi-join pushdown). We evaluate it
+/// the way a brTPF server is meant to — NOT by scanning the whole pattern and filtering, but by
+/// MERGING each mapping into the pattern (a mapping's bound positions specialise the matching
+/// pattern's variable positions) and scanning each specialised, more-selective pattern, then
+/// taking the DEDUPLICATED UNION. A mapping whose bound term is absent from the dictionary, or
+/// whose bound position CONTRADICTS the pattern's own bound term, contributes nothing (it can
+/// match no triple) and is skipped without index work.
+///
+/// `total_estimate` is the EXACT size of the deduplicated union (this is a count of the real
+/// restricted result, so we can be exact and still advertise it as `hydra:totalItems`); the
+/// page slices `[page*page_size, …)` of that union in canonical `[s,p,o]` order — the same
+/// deterministic order plain TPF pages in, so the union pages consistently.
+///
+/// An EMPTY binding set means "no restriction" and is delegated to the plain [`evaluate`] — a
+/// brTPF request with zero mappings is exactly a TPF request (the spec's μ₀-only case).
+#[cfg(feature = "brtpf")]
+pub fn evaluate_brtpf(
+    graph: &Graph,
+    pattern: &TriplePattern,
+    bindings: &[Binding],
+    page: usize,
+    page_size: usize,
+) -> Fragment {
+    let page_size = page_size.max(1);
+    if bindings.is_empty() {
+        return evaluate(graph, pattern, page, page_size);
+    }
+
+    // The deduplicated union of every binding's specialised-pattern matches, as canonical
+    // [s,p,o] id triples. A BTreeSet keeps them sorted in the canonical order (so paging is
+    // deterministic) AND deduplicated (two mappings can specialise to overlapping patterns).
+    let mut union: std::collections::BTreeSet<[sparq_core::dict::Id; 3]> =
+        std::collections::BTreeSet::new();
+
+    for b in bindings {
+        // Merge the mapping into the pattern: each position takes the PATTERN's term if it bound
+        // one, else the mapping's term (the mapping only specialises a variable position). If the
+        // mapping and the pattern both bind a position to DIFFERENT terms the merged pattern is
+        // contradictory — `Graph::pattern` returns `None` for an absent term, and we additionally
+        // detect a direct subject/predicate/object clash below, so a contradictory mapping
+        // contributes nothing.
+        let subject = merge_term(pattern.subject.as_ref(), b.subject.as_ref());
+        let predicate = merge_predicate(pattern.predicate.as_ref(), b.predicate.as_ref());
+        let object = merge_term(pattern.object.as_ref(), b.object.as_ref());
+        let (subject, predicate, object) = match (subject, predicate, object) {
+            (Some(s), Some(p), Some(o)) => (s, p, o),
+            // A clash (the mapping bound a position the pattern already bound, to a different
+            // term): this mapping matches nothing. Skip it.
+            _ => continue,
+        };
+
+        let id_pattern = match graph.pattern(subject.as_ref(), predicate.as_ref(), object.as_ref())
+        {
+            Some(p) => p,
+            // A bound term absent from the dictionary: this mapping matches nothing.
+            None => continue,
+        };
+        let scan = graph.store.scan(&id_pattern);
+        for row in scan.rows.iter() {
+            union.insert(scan.to_spo(row));
+        }
+    }
+
+    let total_estimate = union.len();
+    let offset = page.saturating_mul(page_size);
+    let triples = union
+        .into_iter()
+        .skip(offset)
+        .take(page_size)
+        .filter_map(|[s, p, o]| spo_to_triple(graph, s, p, o))
+        .collect();
+
+    Fragment {
+        total_estimate,
+        page,
+        page_size,
+        triples,
+    }
+}
+
+/// [OPUS-4.8] sq-dxhb: merges a pattern position (the term the PATTERN bound, if any) with a
+/// brTPF mapping's term for the same position. Returns `Some(merged)` — `Some(Some(term))` when
+/// a term is fixed, `Some(None)` when the merged position is still a variable — or `None` on a
+/// CLASH (both bound, to different terms ⇒ the mapping is incompatible with the pattern).
+#[cfg(feature = "brtpf")]
+fn merge_term(pat: Option<&Term>, bind: Option<&Term>) -> Option<Option<Term>> {
+    match (pat, bind) {
+        (Some(p), Some(b)) if p == b => Some(Some(p.clone())),
+        (Some(_), Some(_)) => None, // clash
+        (Some(p), None) => Some(Some(p.clone())),
+        (None, Some(b)) => Some(Some(b.clone())),
+        (None, None) => Some(None),
+    }
+}
+
+/// [OPUS-4.8] sq-dxhb: [`merge_term`] for the predicate position (a [`NamedNode`]).
+#[cfg(feature = "brtpf")]
+fn merge_predicate(pat: Option<&NamedNode>, bind: Option<&NamedNode>) -> Option<Option<NamedNode>> {
+    match (pat, bind) {
+        (Some(p), Some(b)) if p == b => Some(Some(p.clone())),
+        (Some(_), Some(_)) => None, // clash
+        (Some(p), None) => Some(Some(p.clone())),
+        (None, Some(b)) => Some(Some(b.clone())),
+        (None, None) => Some(None),
+    }
+}
+
 /// Resolves a canonical `[s, p, o]` id triple to an [`oxrdf::Triple`] via the public
 /// [`Dict::term`](sparq_core::dict::Dict::term). A row whose subject is a literal or whose
 /// predicate is not an IRI cannot form a valid RDF triple (it never arises from a well-formed
@@ -283,9 +496,17 @@ fn spo_to_triple(
 ///   `http://host/tpf{?subject,predicate,object}`).
 /// * `next_url` / `prev_url` are the `hydra:next` / `hydra:previous` page URLs, present only
 ///   when [`Fragment::has_next`] / [`Fragment::has_previous`].
+/// * `first_url` / `last_url` are the `hydra:first` / `hydra:last` page URLs — the fuller Hydra
+///   `PartialCollectionView` paging vocabulary (sq-dxhb). `first` is always page 0; `last` is
+///   [`Fragment::last_page`] (the page holding the final match, or page 0 for an empty result).
+///   Pass `None` to omit either (e.g. on a malformed-Host fallback where the URL would not be a
+///   valid IRI). Unlike `next`/`prev`, these are emitted on EVERY page — a client can jump to
+///   either end of the view from any page, which is exactly what `hydra:first`/`hydra:last` are
+///   for.
 ///
 /// Defensive on IRI validity: the URLs are derived from the request `Host` header (attacker-
 /// controlled), so any that is not a valid IRI is dropped rather than emitted as malformed RDF.
+#[allow(clippy::too_many_arguments)]
 pub fn fragment_triples(
     frag: &Fragment,
     fragment_url: &str,
@@ -293,6 +514,8 @@ pub fn fragment_triples(
     template: &str,
     next_url: Option<&str>,
     prev_url: Option<&str>,
+    first_url: Option<&str>,
+    last_url: Option<&str>,
 ) -> Vec<Triple> {
     let hydra = |local: &str| NamedNode::new(format!("{HYDRA}{local}")).ok();
     let void = |local: &str| NamedNode::new(format!("{VOID}{local}")).ok();
@@ -369,6 +592,19 @@ pub fn fragment_triples(
         }
     }
 
+    // ---- Paging controls: hydra:first / hydra:last (sq-dxhb — the fuller Hydra paging
+    // vocabulary). Emitted on every page (a client can jump to either end from anywhere).
+    if let (Some(first), Some(p)) = (first_url, hydra("first")) {
+        if let Some(f) = iri(first) {
+            emit(frag_subj(), Some(p), Term::NamedNode(f));
+        }
+    }
+    if let (Some(last), Some(p)) = (last_url, hydra("last")) {
+        if let Some(l) = iri(last) {
+            emit(frag_subj(), Some(p), Term::NamedNode(l));
+        }
+    }
+
     // ---- The Hydra search control: how to request ANY pattern from this dataset.
     // dataset hydra:search _:search . _:search hydra:template "…{?subject,predicate,object}" ;
     //   hydra:mapping _:s, _:p, _:o . _:s hydra:variable "subject" ; hydra:property rdf:subject .
@@ -385,7 +621,8 @@ pub fn fragment_triples(
     );
     // The three variable mappings (subject/predicate/object), each binding the template variable
     // to the corresponding rdf: property so a client knows which position it controls.
-    for (var, prop) in [
+    #[allow(unused_mut)]
+    let mut mappings = vec![
         (
             "subject",
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject",
@@ -398,7 +635,15 @@ pub fn fragment_triples(
             "object",
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#object",
         ),
-    ] {
+    ];
+    // brTPF (sq-dxhb): advertise the `values` control variable so a TPF/brTPF client discovers
+    // it may attach a set of solution mappings. It binds to the brTPF spec's `values` property
+    // (`http://www.w3.org/ns/sparql-service-description#` has no term for it; brTPF uses a
+    // dedicated property under its own namespace). Compiled out without the feature, so a
+    // `tpf`-only fragment is byte-identical to before.
+    #[cfg(feature = "brtpf")]
+    mappings.push(("values", BRTPF_VALUES_PROPERTY));
+    for (var, prop) in mappings {
         let mapping = oxrdf::BlankNode::default();
         emit(
             NamedOrBlankNode::BlankNode(search.clone()),
@@ -602,6 +847,8 @@ mod tests {
             "http://host/tpf{?subject,predicate,object}",
             f.has_next().then_some(next),
             None, // page 0 → no previous
+            Some("http://host/tpf?page=0"),
+            Some(&format!("http://host/tpf?page={}", f.last_page())),
         );
         let doc = crate::graph::triples_to_ntriples(&triples);
         // totalItems + itemsPerPage estimate.
@@ -615,6 +862,9 @@ mod tests {
         // next present (page 0 has a next), previous absent.
         assert!(doc.contains("hydra/core#next"), "{doc}");
         assert!(!doc.contains("hydra/core#previous"), "{doc}");
+        // first + last always present (the fuller Hydra paging vocabulary, sq-dxhb).
+        assert!(doc.contains("hydra/core#first"), "{doc}");
+        assert!(doc.contains("hydra/core#last"), "{doc}");
         // The data triples are in the document too (7 total > 3 page → 3 data triples present).
         assert_eq!(f.triples.len(), 3);
     }
@@ -630,6 +880,8 @@ mod tests {
             "http://host/tpf{?subject,predicate,object}",
             f.has_next().then_some("http://host/tpf?page=2"),
             f.has_previous().then_some("http://host/tpf?page=0"),
+            Some("http://host/tpf?page=0"),
+            Some(&format!("http://host/tpf?page={}", f.last_page())),
         );
         let doc = crate::graph::triples_to_ntriples(&triples);
         assert!(doc.contains("hydra/core#previous"), "{doc}");
@@ -649,6 +901,8 @@ mod tests {
             "http://host/tpf{?subject,predicate,object}",
             None,
             None,
+            Some("http://host/tpf?subject=%3Chttp%3A%2F%2Fex%2Fnobody%3E&page=0"),
+            Some("http://host/tpf?subject=%3Chttp%3A%2F%2Fex%2Fnobody%3E&page=0"),
         );
         let ttl = crate::graph::triples_to_turtle(&triples);
         // Re-parses as valid Turtle.
@@ -657,5 +911,203 @@ mod tests {
         let nt = crate::graph::triples_to_ntriples(&triples);
         // The count is a typed integer literal: `…#totalItems> "0"^^<xsd:integer>`.
         assert!(nt.contains("totalItems> \"0\""), "{nt}");
+    }
+
+    // ---- Hydra first/last paging vocabulary (sq-dxhb) ---------------------------------
+
+    #[test]
+    fn last_page_index_matches_paging() {
+        // 7 triples, page size 3 → pages 0,1,2 ; the last page is index 2.
+        let p = TriplePattern::parse(None, None, None).unwrap();
+        let g = graph();
+        for page in 0..4 {
+            assert_eq!(evaluate(&g, &p, page, 3).last_page(), 2, "page {page}");
+        }
+        // The whole result on one page → last page is 0.
+        assert_eq!(evaluate(&g, &p, 0, DEFAULT_PAGE_SIZE).last_page(), 0);
+        // An exact multiple: 6 matches / size 3 = 2 full pages → last index 1 (not 2).
+        let knows = TriplePattern::parse(None, Some("<http://ex/knows>"), None).unwrap();
+        // 2 `knows` triples, size 1 → 2 pages, last index 1.
+        assert_eq!(evaluate(&g, &knows, 0, 1).last_page(), 1);
+        // An empty result still has a (single, empty) page 0 — last index 0.
+        let none = TriplePattern::parse(Some("<http://ex/nobody>"), None, None).unwrap();
+        assert_eq!(evaluate(&g, &none, 0, 3).last_page(), 0);
+    }
+
+    #[test]
+    fn fragment_emits_first_and_last() {
+        let p = TriplePattern::parse(None, None, None).unwrap();
+        let f = evaluate(&graph(), &p, 1, 3);
+        let triples = fragment_triples(
+            &f,
+            "http://host/tpf?page=1",
+            "http://host/tpf",
+            "http://host/tpf{?subject,predicate,object}",
+            f.has_next().then_some("http://host/tpf?page=2"),
+            f.has_previous().then_some("http://host/tpf?page=0"),
+            Some("http://host/tpf?page=0"),
+            Some(&format!("http://host/tpf?page={}", f.last_page())),
+        );
+        let doc = crate::graph::triples_to_ntriples(&triples);
+        assert!(doc.contains("hydra/core#first"), "{doc}");
+        assert!(doc.contains("hydra/core#last"), "{doc}");
+        // first → page 0, last → page 2 (7 triples / size 3).
+        assert!(doc.contains("page=0"), "{doc}");
+        assert!(doc.contains("page=2"), "{doc}");
+    }
+
+    // ---- brTPF — bindings-restricted fragments (sq-dxhb) ------------------------------
+
+    #[cfg(feature = "brtpf")]
+    mod brtpf {
+        use super::*;
+
+        #[test]
+        fn parse_bindings_one_per_line() {
+            let b = parse_bindings("s=<http://ex/alice>\ns=<http://ex/carol>").unwrap();
+            assert_eq!(b.len(), 2);
+            assert_eq!(
+                b[0].subject,
+                Some(Term::NamedNode(NamedNode::new("http://ex/alice").unwrap()))
+            );
+            assert_eq!(
+                b[1].subject,
+                Some(Term::NamedNode(NamedNode::new("http://ex/carol").unwrap()))
+            );
+            assert!(b[0].predicate.is_none() && b[0].object.is_none());
+        }
+
+        #[test]
+        fn parse_bindings_multi_position_and_long_keys() {
+            // `subject`/`object` long forms + multiple positions on one line.
+            let b = parse_bindings("subject=<http://ex/alice> object=<http://ex/bob>").unwrap();
+            assert_eq!(b.len(), 1);
+            assert_eq!(
+                b[0].subject,
+                Some(Term::NamedNode(NamedNode::new("http://ex/alice").unwrap()))
+            );
+            assert_eq!(
+                b[0].object,
+                Some(Term::NamedNode(NamedNode::new("http://ex/bob").unwrap()))
+            );
+        }
+
+        #[test]
+        fn parse_bindings_empty_payload_and_blank_lines() {
+            assert!(parse_bindings("").unwrap().is_empty());
+            assert!(parse_bindings("\n  \n\t\n").unwrap().is_empty());
+        }
+
+        #[test]
+        fn parse_bindings_rejects_malformed() {
+            assert!(parse_bindings("s").is_err()); // no '='
+            assert!(parse_bindings("bogus=<http://ex/x>").is_err()); // bad position
+            assert!(parse_bindings("p=\"a literal\"").is_err()); // non-IRI predicate
+            assert!(parse_bindings("s=not a term").is_err()); // malformed term
+        }
+
+        #[test]
+        fn restricts_to_compatible_bindings_only() {
+            // ?s ex:knows ?o has alice→bob, carol→alice. Restrict to {?s=alice}: only alice→bob.
+            let g = graph();
+            let p = TriplePattern::parse(None, Some("<http://ex/knows>"), None).unwrap();
+            let bindings = parse_bindings("s=<http://ex/alice>").unwrap();
+            let f = evaluate_brtpf(&g, &p, &bindings, 0, DEFAULT_PAGE_SIZE);
+            assert_eq!(f.total_estimate, 1);
+            assert_eq!(f.triples.len(), 1);
+            assert_eq!(f.triples[0].subject.to_string(), "<http://ex/alice>");
+            assert_eq!(f.triples[0].object.to_string(), "<http://ex/bob>");
+        }
+
+        #[test]
+        fn union_over_multiple_bindings() {
+            // Restrict to {?s=alice, ?s=carol}: BOTH knows triples (the union).
+            let g = graph();
+            let p = TriplePattern::parse(None, Some("<http://ex/knows>"), None).unwrap();
+            let bindings = parse_bindings("s=<http://ex/alice>\ns=<http://ex/carol>").unwrap();
+            let f = evaluate_brtpf(&g, &p, &bindings, 0, DEFAULT_PAGE_SIZE);
+            assert_eq!(f.total_estimate, 2);
+            assert_eq!(f.triples.len(), 2);
+        }
+
+        #[test]
+        fn binding_absent_from_data_contributes_nothing() {
+            // A binding whose term is not in the dictionary matches nothing; the other still does.
+            let g = graph();
+            let p = TriplePattern::parse(None, Some("<http://ex/knows>"), None).unwrap();
+            let bindings = parse_bindings("s=<http://ex/nobody>\ns=<http://ex/alice>").unwrap();
+            let f = evaluate_brtpf(&g, &p, &bindings, 0, DEFAULT_PAGE_SIZE);
+            assert_eq!(f.total_estimate, 1, "only alice contributes");
+        }
+
+        #[test]
+        fn binding_contradicting_the_pattern_contributes_nothing() {
+            // Pattern fixes ?s=alice; a binding ?s=carol CLASHES → contributes nothing. A second
+            // binding ?o=bob is compatible (specialises the object) → the one alice→bob triple.
+            let g = graph();
+            let p =
+                TriplePattern::parse(Some("<http://ex/alice>"), Some("<http://ex/knows>"), None)
+                    .unwrap();
+            let bindings = parse_bindings("s=<http://ex/carol>\no=<http://ex/bob>").unwrap();
+            let f = evaluate_brtpf(&g, &p, &bindings, 0, DEFAULT_PAGE_SIZE);
+            assert_eq!(f.total_estimate, 1);
+            assert_eq!(f.triples[0].object.to_string(), "<http://ex/bob>");
+        }
+
+        #[test]
+        fn empty_binding_set_is_plain_tpf() {
+            // No restriction ⇒ identical to plain evaluate (the μ₀-only case).
+            let g = graph();
+            let p = TriplePattern::parse(None, Some("<http://ex/knows>"), None).unwrap();
+            let restricted = evaluate_brtpf(&g, &p, &[], 0, DEFAULT_PAGE_SIZE);
+            let plain = evaluate(&g, &p, 0, DEFAULT_PAGE_SIZE);
+            assert_eq!(restricted.total_estimate, plain.total_estimate);
+            assert_eq!(restricted.triples.len(), plain.triples.len());
+        }
+
+        #[test]
+        fn restricted_result_pages_consistently() {
+            // Restrict ?s ?p ?o to {?s=alice} (alice has 3 triples), page size 2 → pages 0 (2) + 1 (1).
+            let g = graph();
+            let p = TriplePattern::parse(None, None, None).unwrap();
+            let bindings = parse_bindings("s=<http://ex/alice>").unwrap();
+            let p0 = evaluate_brtpf(&g, &p, &bindings, 0, 2);
+            assert_eq!(p0.total_estimate, 3);
+            assert_eq!(p0.triples.len(), 2);
+            assert!(p0.has_next());
+            assert!(!p0.has_previous());
+            assert_eq!(p0.last_page(), 1);
+            let p1 = evaluate_brtpf(&g, &p, &bindings, 1, 2);
+            assert_eq!(p1.triples.len(), 1);
+            assert!(!p1.has_next());
+            assert!(p1.has_previous());
+            // The two pages partition the 3-triple restricted result with no overlap.
+            let mut all: Vec<String> = p0
+                .triples
+                .iter()
+                .chain(p1.triples.iter())
+                .map(|t| t.to_string())
+                .collect();
+            all.sort();
+            all.dedup();
+            assert_eq!(all.len(), 3, "no duplicate across pages");
+            assert!(all.iter().all(|t| t.contains("http://ex/alice")));
+        }
+
+        #[test]
+        fn overlapping_bindings_deduplicate() {
+            // Two bindings that select the SAME triple must not double-count it.
+            let g = graph();
+            let p = TriplePattern::parse(None, None, None).unwrap();
+            // Both {?s=alice,?o=bob} and {?p=knows} select alice→bob (among others); the union
+            // counts each matching triple once.
+            let bindings =
+                parse_bindings("s=<http://ex/alice> o=<http://ex/bob>\np=<http://ex/knows>")
+                    .unwrap();
+            let f = evaluate_brtpf(&g, &p, &bindings, 0, DEFAULT_PAGE_SIZE);
+            // {alice,bob} → alice knows bob (1). {knows} → alice→bob, carol→alice (2). Union = 2.
+            assert_eq!(f.total_estimate, 2);
+            assert_eq!(f.triples.len(), 2);
+        }
     }
 }

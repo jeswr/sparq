@@ -1653,8 +1653,17 @@ pub fn router(state: AppState) -> Router {
     // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source endpoint.
     // Compiled only with the `tpf` feature; even then the handler refuses (404) unless the config
     // flag is set. READ-only — a GET (with HEAD) only. See [`crate::tpf`].
-    #[cfg(feature = "tpf")]
+    // [OPUS-4.8] sq-dxhb: with the `brtpf` feature it ALSO accepts POST — a brTPF client posts a
+    // (potentially large) binding set in the body, which would not fit a query string. POST is
+    // still a READ (it returns a fragment; it never mutates the store) and is gated by the same
+    // read auth + flag.
+    #[cfg(all(feature = "tpf", not(feature = "brtpf")))]
     let routes = routes.route("/tpf", get(tpf_endpoint).head(tpf_endpoint));
+    #[cfg(feature = "brtpf")]
+    let routes = routes.route(
+        "/tpf",
+        get(tpf_endpoint).head(tpf_endpoint).post(tpf_endpoint),
+    );
     let routes = routes.with_state(state.clone());
     // The metrics middleware wraps the WHOLE hardened stack so shed requests
     // (429), body-limit rejections (413) and panics (500) are counted with the
@@ -1926,19 +1935,32 @@ async fn tpf_endpoint(
     method: Method,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
+    body: Bytes,
 ) -> Response {
     use crate::tpf::{evaluate, fragment_triples, TriplePattern, DEFAULT_PAGE_SIZE};
 
     if !state.config().tpf {
         return json_error(StatusCode::NOT_FOUND, "not found");
     }
-    if method != Method::GET && method != Method::HEAD {
+    // GET/HEAD always; POST only with brTPF (a binding set too large for a query string).
+    #[cfg(not(feature = "brtpf"))]
+    let method_ok = method == Method::GET || method == Method::HEAD;
+    #[cfg(feature = "brtpf")]
+    let method_ok = matches!(method, Method::GET | Method::HEAD | Method::POST);
+    if !method_ok {
+        #[cfg(not(feature = "brtpf"))]
         return method_not_allowed(&[Method::GET, Method::HEAD]);
+        #[cfg(feature = "brtpf")]
+        return method_not_allowed(&[Method::GET, Method::HEAD, Method::POST]);
     }
+    // A fragment is a READ even via POST (brTPF posts the binding set; it never writes).
     if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
         return resp;
     }
     let head_only = method == Method::HEAD;
+    // The body is unused without brTPF (GET/HEAD carry none); silence the warning.
+    #[cfg(not(feature = "brtpf"))]
+    let _ = &body;
 
     let params = parse_form(raw_query.as_deref().unwrap_or(""));
     let subject = params.get("subject").map(String::as_str);
@@ -1969,10 +1991,47 @@ async fn tpf_endpoint(
 
     let base = tpf_base(&headers);
     let dataset_url = format!("{base}/tpf");
+
+    // [OPUS-4.8] sq-dxhb: the brTPF binding set. The mappings come from the `values` query
+    // parameter (GET) or — preferred for a large set — the request BODY (POST). An empty / absent
+    // payload is the plain-TPF case (no restriction). A malformed payload is a 400.
+    #[cfg(feature = "brtpf")]
+    let bindings = {
+        // POST body if non-empty, else the `values` query parameter.
+        let raw_values: std::borrow::Cow<'_, str> = if !body.is_empty() {
+            String::from_utf8_lossy(&body)
+        } else {
+            std::borrow::Cow::Borrowed(params.get("values").map(String::as_str).unwrap_or(""))
+        };
+        match crate::tpf::parse_bindings(&raw_values) {
+            Ok(b) => b,
+            Err(e) => {
+                return sanitized_error(
+                    StatusCode::BAD_REQUEST,
+                    "brtpf-bindings-parse",
+                    "malformed brTPF binding set",
+                    &e.to_string(),
+                )
+            }
+        }
+    };
+
+    // The template advertises the brTPF `{values}` control only when the feature is compiled.
+    #[cfg(feature = "brtpf")]
+    let template = format!("{base}/tpf{{?subject,predicate,object,values}}");
+    #[cfg(not(feature = "brtpf"))]
     let template = format!("{base}/tpf{{?subject,predicate,object}}");
 
-    // Pin the current generation; evaluate against its immutable snapshot.
+    // Pin the current generation; evaluate against its immutable snapshot. With a non-empty
+    // brTPF binding set the fragment is the bindings-RESTRICTED result; otherwise it is plain TPF.
     let pin = state.current();
+    #[cfg(feature = "brtpf")]
+    let frag = if bindings.is_empty() {
+        evaluate(pin.snapshot(), &pattern, page, page_size)
+    } else {
+        crate::tpf::evaluate_brtpf(pin.snapshot(), &pattern, &bindings, page, page_size)
+    };
+    #[cfg(not(feature = "brtpf"))]
     let frag = evaluate(pin.snapshot(), &pattern, page, page_size);
 
     let fragment_url = tpf_page_url(&base, subject, predicate, object, page);
@@ -1982,6 +2041,10 @@ async fn tpf_endpoint(
     let prev_url = frag
         .has_previous()
         .then(|| tpf_page_url(&base, subject, predicate, object, page - 1));
+    // [OPUS-4.8] sq-dxhb: the fuller Hydra paging vocabulary — hydra:first (always page 0) and
+    // hydra:last (the page holding the final match). Emitted on every page.
+    let first_url = tpf_page_url(&base, subject, predicate, object, 0);
+    let last_url = tpf_page_url(&base, subject, predicate, object, frag.last_page());
 
     let triples = fragment_triples(
         &frag,
@@ -1990,6 +2053,8 @@ async fn tpf_endpoint(
         &template,
         next_url.as_deref(),
         prev_url.as_deref(),
+        Some(&first_url),
+        Some(&last_url),
     );
 
     let fmt = negotiate_tpf(headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()));

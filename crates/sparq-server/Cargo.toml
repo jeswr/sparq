@@ -132,6 +132,21 @@ federation-descriptors = ["server", "dep:sparq-introspect"]
 # set `--tpf` / `SPARQ_TPF=1` (`ServerConfig::tpf`), mirroring `federation-descriptors`. Without the
 # feature, zero cost: no route, byte-identical to before.
 tpf = ["server"]
+# [OPUS-4.8] (sq-dxhb, epic sq-3183) `brtpf` (default OFF, implies `tpf`) extends the TPF
+# endpoint to bindings-restricted Triple Pattern Fragments (brTPF — Hartig & Buil-Aranda,
+# ODBASE 2016): a client may attach a SET of solution mappings (a `values` parameter on the
+# GET, or a POST body) so the server returns ONLY the page of pattern matches that are
+# COMPATIBLE with at least one supplied binding — pushing a bind-join's semi-join down to the
+# source so far less data crosses the wire than re-fetching the whole pattern per binding. The
+# fragment advertises the restriction through an extra `hydra:mapping` for the `values`
+# variable, and the `hydra:totalItems` count plus the paging window reflect the
+# bindings-restricted result, NOT the unrestricted pattern. Pure (no new dependency) — the
+# binding compatibility test runs over the same `Graph::pattern` / `store.scan` / `dict.term`
+# API. Without the feature the brTPF parsing + the `values` parameter handling are
+# `#[cfg]`-stripped, so a `tpf`-only build is byte-identical to before (a stray `values`
+# parameter is just an ignored unknown parameter — plain TPF). STILL governed by the same
+# `--tpf` runtime flag (brTPF is the same endpoint, extended).
+brtpf = ["tpf"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
