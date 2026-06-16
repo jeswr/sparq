@@ -1,0 +1,70 @@
+<!-- [OPUS-4.8] -->
+# sparq-mpc
+
+Honest-majority Shamir MPC over (federated) SPARQL (research question RQ2). This
+crate is the secret-sharing + secure-computation substrate: a prime field
+(`field.rs`, `F_p` over the Mersenne prime `p = 2^61 − 1`), Shamir sharing and
+reconstruction, authenticated (MAC) shares, the hidden-value join, robust
+(Reed–Solomon) reconstruction, and the in-process / networked transports.
+
+The build plan, milestones, and the deferred malicious-security seams live in
+[`PLAN.md`](./PLAN.md). This README records the crate's **security posture
+notes** that an auditor needs at a glance.
+
+> **No security guarantee.** This is **research-grade and externally
+> unaudited** (sq-qhy4). The ZK verifier it composes with is **not** sound
+> (`SECURITY.md` / CR-G1). Nothing here is a production security claim.
+
+## Constant-time / side-channel posture
+
+A **source-level** constant-time review of the secret-bearing paths exists at
+[`compliance/cryptoreview/side-channel-analysis.md`](../../compliance/cryptoreview/side-channel-analysis.md)
+(CR-G5, bead `sq-egx6`). Its finding: present exposure is **LOW by architectural
+placement** — every live equality is over PUBLIC / opened values (the masked
+product `== 0`, the verdict bit, public threshold bits), and operands are never
+reconstructed — **not** by constant-time primitives. It is a code-reading review,
+not an instrumented `dudect` / `ctgrind` timing study; arkworks field-op timing
+is out of scope (a black box). Three fix recommendations were bead-tracked:
+
+- **`sq-u8a8` (LANDED).** Adopt `subtle` / `zeroize` as defensive primitives
+  (`Fp::ct_eq`, `SecretKey::ct_eq`; zeroize-on-drop of the MAC key `α`, the
+  secret-share vectors, the issuer/holder key). HYGIENE only — no `==` on a live
+  protocol path was replaced.
+- **`sq-7ltf` (this README's subject — ADDRESSED).** The latent non-constant-time
+  `Fp::pow` (square-and-multiply branches on the exponent bits). See below.
+- **`sq-8jv7` (open).** Schnorr issuance signing uses arkworks scalar ops not
+  asserted constant-time; issuance-side only.
+
+### `Fp` exponentiation (sq-7ltf)
+
+The original `Fp::pow` was a textbook square-and-multiply: `if exp & 1 == 1 {
+acc = acc.mul(base) }`, a data-dependent branch on the **exponent** bits. It was
+safe in practice only because every caller passes a **public** exponent — but
+nothing at the type level stopped a future caller from passing a secret. That
+latent gap is now closed by splitting the surface in two:
+
+- **`Fp::pow_vartime(exp)`** — the variable-time square-and-multiply, renamed with
+  a load-bearing `_vartime` suffix and a **public-exponent contract** in its
+  doc-comment. Its only caller is the robust Berlekamp–Welch decoder
+  (`robust.rs`), which raises a **public** evaluation point to the **public**
+  error-correction parameter `e`. It MUST NOT be called with a secret exponent.
+- **`Fp::pow_ct(exp)`** — a **fixed 64-iteration, branchless** square-and-multiply
+  that selects the conditional multiply with `subtle::ConditionallySelectable`
+  instead of an `if`. It is **constant-time in the base value** by construction
+  (no data-dependent branch on `self`), so it is safe to exponentiate a
+  secret-bearing field element. (It is not asserted constant-time in the
+  *exponent* — the bit extraction reads exponent bits — but the trip count is
+  fixed and the loop body does not vary with the base.)
+
+**`Fp::inv` now routes through `pow_ct`** (`a^(P−2)`), so field inversion — used
+all over Lagrange interpolation and Gaussian elimination — is constant-time in
+the inverted value by construction, rather than safe only by current-caller
+convention. The exponent `P − 2` is a public constant, so this changes no timing
+that was ever secret today; it closes the gap for any future secret-value
+inversion. **No arithmetic result changes** — `pow_ct` and `pow_vartime` are
+proven to agree over a spread of bases/exponents (`field.rs` tests
+`pow_ct_agrees_with_pow_vartime`, `inv_via_pow_ct_is_multiplicative_inverse`), and
+all 270 existing MPC tests (disclosure-minimisation, MAC-soundness, hidden-join,
+tamper-detection, comparison) pass UNCHANGED, so protocol behaviour is identical.
+
+This is a **defense-in-depth / latent-gap** fix, NOT a soundness fix.

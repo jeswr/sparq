@@ -235,7 +235,10 @@ fn berlekamp_welch(shares: &[Share], degree: usize, e: usize) -> Option<Vec<Fp>>
         }
         // RHS: the fixed monic top E_e = 1 contributes y·x^e to N(x_i)=y·E(x_i),
         // i.e. moves to the RHS as + y·x^e.
-        row[cols] = y.mul(x.pow(e as u64));
+        // [OPUS-4.8] sq-7ltf: `e` is the PUBLIC error-correction parameter and `x`
+        // a PUBLIC evaluation point, so the variable-time exponentiation is sound
+        // here (no secret in the exponent or base).
+        row[cols] = y.mul(x.pow_vartime(e as u64));
         aug.push(row);
     }
 

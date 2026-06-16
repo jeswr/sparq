@@ -214,6 +214,16 @@ caller from passing a secret exponent. The recommended fix (bead `sq-7ltf`) is t
 **mark the function non-constant-time and constrain its callers**, and/or give `inv` a constant-time
 implementation so the property holds by construction rather than by current-caller convention.
 
+**RESOLVED ([OPUS-4.8], Fable re-review pending).** Both halves of the recommendation were applied:
+`Fp::pow` is now `Fp::pow_vartime` (a load-bearing suffix) carrying an explicit public-exponent
+contract — its sole caller, the robust Berlekamp–Welch decoder, raises a public evaluation point to
+the public error-correction parameter `e` — and a new branchless, fixed-64-iteration `Fp::pow_ct`
+(conditional multiply selected with `subtle::ConditionallySelectable`) is constant-time in the base
+by construction. `Fp::inv` routes through `pow_ct`, so field inversion holds the constant-time-in-the-
+inverted-value property by construction, not by current-caller convention. The latent gap is closed
+without any arithmetic change (`pow_ct ≡ pow_vartime` proven by test; all 270 MPC tests pass
+unchanged).
+
 ## 4. Dependency-level posture — `subtle` / `zeroize` / `arkworks`
 
 - **`subtle` (constant-time equality / selection): ABSENT** from all three crypto crates' manifests.
@@ -269,7 +279,14 @@ implementation so the property holds by construction rather than by current-call
    shares) and `subtle` for any future secret-vs-secret equality; document the policy in the crate
    docs. *Highest hygiene value, lowest risk to apply.*
 2. **`sq-7ltf` — make `Fp::pow` non-CT-explicit and constrain it / give `inv` a constant-time path.**
-   Closes the one latent code-level hazard before a future caller can trip it.
+   Closes the one latent code-level hazard before a future caller can trip it. **DONE
+   ([OPUS-4.8], Fable re-review pending):** `Fp::pow` was split into `pow_vartime` (variable-time,
+   explicit public-exponent contract; sole caller is the public-`e` Berlekamp–Welch decoder) and a
+   new branchless fixed-iteration `pow_ct` (conditional multiply via
+   `subtle::ConditionallySelectable`, constant-time in the base). `Fp::inv` now routes through
+   `pow_ct`, so inversion is constant-time in the inverted value by construction. No arithmetic
+   changed (`pow_ct ≡ pow_vartime` proven by test; all 270 MPC tests pass unchanged). See
+   `crates/sparq-mpc/README.md`.
 3. **`sq-8jv7` — document Schnorr signing as non-constant-time + trusted-issuance-only**, and
    re-evaluate a constant-time scalar-mul if/when the in-circuit hidden-key upgrade (`sq-1s2`) or any
    online signing moves the secret key onto an exposed surface.
