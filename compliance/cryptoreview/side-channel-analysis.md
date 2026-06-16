@@ -86,6 +86,15 @@ constant-time primitives. The risk register below records where that framing wou
 - **Verdict:** **Potential secret-dependent timing risk via `arkworks` scalar ops; LOW today by
   placement.** Recorded as bead **`sq-8jv7`** (document non-CT signing + trusted-issuance constraint;
   evaluate a constant-time Schnorr/EdDSA scalar-mul if signing ever moves to an exposed surface).
+  **ADDRESSED ([OPUS-4.8], Fable re-review pending):** the one secret-dependent branch in code sparq
+  OWNS — `derive_nonce`'s degenerate-`k` guard (`if k.is_zero()`, on the secret nonce) — is now
+  **branchless** (always compute the re-fold candidate, then `subtle`-select it via
+  `ConditionallySelectable` keyed on a `ConstantTimeEq` zero-test), so our emitted control flow is
+  data-independent of the secret nonce. The arkworks scalar-mul `G·k` / `e·sk` residual is
+  **documented, NOT claimed constant-time** (a module CONSTANT-TIME POSTURE note in `sig.rs`); closing
+  it needs a constant-time scalar-mul (curve/dep swap), deferred. No protocol change — the guard is
+  byte-identical to the old select for all reachable inputs (`k == 0` is ~2^-251), proven by test; all
+  `sparq-zk` tests pass unchanged.
 
 ### 2.3 Poseidon2 hash / permutation (`sparq-zk/src/poseidon2.rs`)
 
@@ -248,7 +257,7 @@ unchanged).
 | Component | Secret on path? | CT posture (source-level) | Residual risk | Bead |
 |---|---|---|---|---|
 | Schnorr **verify** (`sig.rs`) | No (public data) | No secret-dependent timing | None | — |
-| Schnorr **sign** (`sig.rs`) | Yes (issuer `sk`) | arkworks scalar ops not asserted CT | LOW (issuance-side) | `sq-8jv7` |
+| Schnorr **sign** (`sig.rs`) | Yes (issuer `sk`) | Our nonce-guard now branchless; arkworks scalar-mul residual not asserted CT (documented) | LOW (issuance-side) | `sq-8jv7` **ADDRESSED** |
 | **Poseidon2** (`poseidon2.rs`) | Hashes secrets in MPC/sig | Fixed rounds, no secret branch/index | Inherits arkworks `Fr` | — |
 | MPC **secure compare** (`compare.rs`) | Operands secret-shared | Fixed loop; branches on PUBLIC bits only | Inherits `Fp` ops | — |
 | Shamir **share/reconstruct** (`shamir.rs`/`robust.rs`) | Reconstructs disclosed values | No secret-value control flow | `inv` over public points | — |
@@ -289,7 +298,12 @@ unchanged).
    `crates/sparq-mpc/README.md`.
 3. **`sq-8jv7` — document Schnorr signing as non-constant-time + trusted-issuance-only**, and
    re-evaluate a constant-time scalar-mul if/when the in-circuit hidden-key upgrade (`sq-1s2`) or any
-   online signing moves the secret key onto an exposed surface.
+   online signing moves the secret key onto an exposed surface. **ADDRESSED ([OPUS-4.8], Fable
+   re-review pending):** the signing path's one secret-dependent branch we own (`derive_nonce`'s
+   `k == 0` guard) is now branchless (`subtle` select); the arkworks scalar-mul residual is documented
+   (module CONSTANT-TIME POSTURE note in `sig.rs`), explicitly NOT claimed constant-time, with a
+   curve/dep-swap follow-up beaded for true CT scalar-mul if signing ever moves to an exposed surface.
+   No protocol/value change; all `sparq-zk` tests pass unchanged.
 4. **(Folded into CR-G1, not a separate bead) — an instrumented `dudect`/`ctgrind` pass** on the sign
    path and the MPC mask/compare paths is the natural deliverable for the external cryptographer audit
    (`sq-qhy4`); this source-level review is the input pack for it, not a substitute.
