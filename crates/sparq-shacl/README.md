@@ -16,8 +16,12 @@ scans (no SPARQL round-trip), evaluates `sh:sparql` constraints by routing their
 - `to_text()` — a human-readable rendering.
 
 Like `sparq-reason`, this crate is **isolated**: it is not a dependency of any
-other sparq crate, so the core engine and the wasm bundle carry zero SHACL
-code, dependencies or runtime cost unless a consumer opts in.
+other sparq crate, so the core engine and the default wasm bundle carry zero SHACL
+code, dependencies or runtime cost unless a consumer opts in. The browser/JS
+consumer opts in through `sparq-wasm`'s non-default `shacl` feature, which exposes
+`validate` as a stateless `Store.validate(data, shapes, format)` wasm binding
+returning a JSON report (a drop-in for `rdf-validate-shacl`); on that wasm32 build
+`sparq-engine` drops its defaults so rayon never enters the bundle.
 
 ## Status: W3C SHACL core test suite
 

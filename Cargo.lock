@@ -3619,6 +3619,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "sparq-core",
  "sparq-engine",
+ "sparq-shacl",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
