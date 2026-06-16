@@ -20,9 +20,27 @@ const DATA: &str = r#"
     ex:carol a ex:Person .
 "#;
 
+/// [OPUS-4.8] sq-optl: a TriG dataset with TWO IRI-named graphs (plus default-graph triples),
+/// for the Service Description's `sd:namedGraph` enumeration test.
+const DATA_NAMED: &str = r#"
+    @prefix ex: <http://ex/> .
+    ex:alice a ex:Person .
+    ex:people { ex:alice ex:name "Alice" . ex:bob ex:name "Bob" . }
+    ex:orgs   { ex:acme a ex:Org . }
+"#;
+
 /// Boots a server with the descriptors flag ON (or OFF) and returns its base URL.
 async fn spawn(descriptors_on: bool) -> String {
-    let graph = Graph::load_str(DATA, "turtle").unwrap();
+    spawn_with(DATA, "turtle", descriptors_on).await
+}
+
+/// [OPUS-4.8] sq-optl: like [`spawn`] but loads `data` in `format` (so a test can boot a server
+/// over a named-graph TriG dataset). Uses `load_dataset` — the only loader that PRESERVES named
+/// graphs as separate sub-graphs (`load_str` collapses every quad into the default graph); it
+/// falls back to `load_str` for non-dataset formats, so the Turtle path is unchanged. Keeps the
+/// single spawn body so the two paths cannot drift.
+async fn spawn_with(data: &str, format: &str, descriptors_on: bool) -> String {
+    let graph = Graph::load_dataset(data, format).unwrap();
     let config = ServerConfig {
         federation_descriptors: descriptors_on,
         ..ServerConfig::default()
@@ -377,6 +395,108 @@ async fn sd_advertised_result_formats_match_what_server_serves() {
             "advertised {fmt_iri} but Accept {accept} returned Content-Type {ct}"
         );
     }
+}
+
+/// Objects of `(subject, predicate)` (Display strings, blank nodes kept as `_:b…`). Unlike
+/// [`objects_of`] this is subject-scoped, so a test can WALK the SD's blank-node structure
+/// (sd:Service → sd:defaultDataset → sd:namedGraph → sd:NamedGraph → sd:name).
+fn objects_of_subject(
+    triples: &[(String, String, String)],
+    subject: &str,
+    predicate: &str,
+) -> Vec<String> {
+    let pred = format!("<{predicate}>");
+    triples
+        .iter()
+        .filter(|(s, p, _)| s == subject && *p == pred)
+        .map(|(_, _, o)| o.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn sd_enumerates_named_graphs_end_to_end() {
+    // [OPUS-4.8] sq-optl: boot a server over a TWO-named-graph TriG dataset and walk the SD
+    // structure: sd:Service → sd:defaultDataset → sd:namedGraph → sd:NamedGraph → sd:name. The
+    // two IRI graph names (ex:people, ex:orgs) must BOTH surface as FROM-NAMED-referenceable
+    // names, each with an sd:graph carrying a per-graph void:triples count (people=2, orgs=1).
+    let base = spawn_with(DATA_NAMED, "trig", true).await;
+    let triples = fetch_sd_triples(&base).await;
+    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let void_triples = "http://rdfs.org/ns/void#triples";
+
+    // sd:Service → sd:defaultDataset (a blank node).
+    let service: &String = &triples
+        .iter()
+        .find(|(_, p, o)| p == &format!("<{rdf_type}>") && *o == format!("<{SD}Service>"))
+        .expect("an sd:Service")
+        .0;
+    let datasets = objects_of_subject(&triples, service, &format!("{SD}defaultDataset"));
+    assert_eq!(
+        datasets.len(),
+        1,
+        "exactly one sd:defaultDataset: {triples:?}"
+    );
+    let dataset = &datasets[0];
+
+    // sd:defaultDataset → sd:namedGraph → sd:NamedGraph nodes, one per named graph.
+    let ng_nodes = objects_of_subject(&triples, dataset, &format!("{SD}namedGraph"));
+    assert_eq!(
+        ng_nodes.len(),
+        2,
+        "two named graphs must be advertised: {triples:?}"
+    );
+
+    // For each sd:NamedGraph: it is typed, carries an sd:name IRI, and an sd:graph whose
+    // sd:Graph carries a void:triples count. Collect (name → count).
+    let mut by_name: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for ng in &ng_nodes {
+        let types = objects_of_subject(&triples, ng, rdf_type);
+        assert!(
+            types.contains(&format!("<{SD}NamedGraph>")),
+            "node must be typed sd:NamedGraph: {types:?}"
+        );
+        let names = objects_of_subject(&triples, ng, &format!("{SD}name"));
+        assert_eq!(names.len(), 1, "exactly one sd:name per NamedGraph");
+        let graphs = objects_of_subject(&triples, ng, &format!("{SD}graph"));
+        assert_eq!(graphs.len(), 1, "exactly one sd:graph per NamedGraph");
+        let graph_types = objects_of_subject(&triples, &graphs[0], rdf_type);
+        assert!(
+            graph_types.contains(&format!("<{SD}Graph>")),
+            "sd:graph target must be an sd:Graph: {graph_types:?}"
+        );
+        let counts = objects_of_subject(&triples, &graphs[0], void_triples);
+        assert_eq!(counts.len(), 1, "exactly one void:triples per graph");
+        by_name.insert(names[0].clone(), counts[0].clone());
+    }
+
+    // Both IRI graph names are present (FROM-NAMED-referenceable), with the right counts.
+    assert!(
+        by_name.contains_key("<http://ex/people>") && by_name.contains_key("<http://ex/orgs>"),
+        "both named graph IRIs must be advertised: {by_name:?}"
+    );
+    let int = |n: u32| format!("\"{n}\"^^<http://www.w3.org/2001/XMLSchema#integer>");
+    assert_eq!(
+        by_name["<http://ex/people>"],
+        int(2),
+        "people has 2 triples"
+    );
+    assert_eq!(by_name["<http://ex/orgs>"], int(1), "orgs has 1 triple");
+}
+
+#[tokio::test]
+async fn sd_default_only_dataset_advertises_no_named_graphs() {
+    // [OPUS-4.8] sq-optl: the historical default-only dataset (no named graphs) must advertise
+    // NO sd:namedGraph — the enumeration is purely additive and never invents a graph.
+    let base = spawn(true).await;
+    let triples = fetch_sd_triples(&base).await;
+    let named = triples
+        .iter()
+        .filter(|(_, p, _)| *p == format!("<{SD}namedGraph>"))
+        .count();
+    assert_eq!(
+        named, 0,
+        "default-only dataset has no sd:namedGraph: {triples:?}"
+    );
 }
 
 #[tokio::test]

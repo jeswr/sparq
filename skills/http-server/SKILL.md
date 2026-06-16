@@ -397,7 +397,13 @@ advertise itself as a discoverable federation node by serving two read-only RDF 
     - `sd:extensionFunction` — one per function the engine has **actually registered**: the
       `geof:` GeoSPARQL set with the `geo` feature (read back through
       `FunctionRegistry::iris()`, so it can never drift from what runs), none without it;
-    - the default dataset/graph linked to the VoID document via `dcterms:source`.
+    - the default dataset — its default graph linked to the VoID document via `dcterms:source`,
+      **plus** an `sd:namedGraph` enumeration of every IRI-named graph in the served dataset
+      (sq-optl): each is an `sd:NamedGraph` with its `sd:name` (the `FROM NAMED`-referenceable IRI)
+      and an `sd:graph` `sd:Graph` carrying that graph's `void:triples` count. The names come off
+      the same pinned snapshot the VoID descriptor reads, sorted for determinism, and **IRI-only**
+      — a blank-node-named graph is skipped because it is not `FROM NAMED`-referenceable, so
+      advertising it would be a fiction. A default-only dataset emits no `sd:namedGraph`.
 
   Note `sd:UnionDefaultGraph` is deliberately **not** advertised — the engine's default graph
   holds only default-graph triples (named graphs are not folded in), so claiming it would be
