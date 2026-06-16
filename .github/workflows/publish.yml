@@ -4,6 +4,7 @@
 # the ghcr.io container. This workflow covers the bytes a CONSUMER actually installs:
 #   - the `@jeswr/sparq` npm client (crates/sparq-wasm wrapper in js/)
 #   - the packaged crates.io `.crate` artifacts
+#   - the `sparq-rdf` PyPI wheels (crates/sparq-py, maturin-built) — PEP-740 attestations
 #
 # HONEST SCOPE BOUNDARY (see compliance/slsa/):
 #   * npm     — native provenance. `npm publish --provenance` runs in this GitHub Actions
@@ -19,6 +20,20 @@
 #               support) — it gives consumers an out-of-band attestation they can `gh attestation
 #               verify` against the downloaded `.crate`. The crates.io-native sub-gap stays OPEN
 #               and is tracked as an EXTERNAL sub-gap of GX-10 / sq-toze.24.
+#   * PyPI    — [OPUS-4.8] sq-toze.37. native PEP-740 attestations. `pypa/gh-action-pypi-publish`
+#               runs in this GitHub Actions OIDC context (id-token: write) and — when uploading
+#               via PyPI Trusted Publishing — generates + uploads a PEP-740 digital attestation
+#               (an in-toto/Sigstore-signed statement bound to this workflow run) ALONGSIDE each
+#               wheel/sdist. PyPI records it and shows a "Provenance" panel on the release-files
+#               page; a consumer can verify with `pypi-attestations verify` (or `gh attestation
+#               verify`). THIS IS A PROVENANCE-EMITTING PATH — the strongest of the three.
+#               BUT there is ONE maintainer prerequisite that CANNOT be wired from this repo:
+#               the PyPI project `sparq-rdf` must have a Trusted Publisher registered (PyPI →
+#               project → Publishing → "Add a new pending/published publisher": owner `jeswr`,
+#               repo `sparq`, workflow `publish.yml`, environment `pypi`). Until a maintainer
+#               does that one-time PyPI-side config, the `twine`/Trusted-Publishing upload step
+#               here will (correctly) fail to mint a token — the CI is fully wired, the PyPI
+#               account config is the only open item. See compliance/slsa/ + docs/release.md.
 #
 # TRIGGER: this is a MAINTAINER-DRIVEN publish. It fires on `release: published` (the release
 # created by release.yml is published) and on manual `workflow_dispatch`. The npm publish step
@@ -39,6 +54,10 @@ on:
         description: "Package + attest publishable crates (crates.io bytes)"
         type: boolean
         default: true
+      publish_pypi:
+        description: "Build sparq-rdf wheels + publish to PyPI with PEP-740 attestations (Trusted Publishing)"
+        type: boolean
+        default: false
 
 # Default read-only; jobs opt into the OIDC token (id-token: write) + attestation write below.
 permissions:
@@ -169,3 +188,113 @@ jobs:
           name: crate-packages
           path: crate-pkgs/*.crate
           if-no-files-found: error
+
+  # ---- PyPI: build the `sparq-rdf` wheels + publish with native PEP-740 attestations ----
+  # [OPUS-4.8] sq-toze.37 / GX-10. Two-stage: a build matrix produces the abi3 wheels + sdist
+  # with maturin (mirroring the docs/release.md "Python wheels" plan + python.yml's build args),
+  # then a single publish job uploads them via PyPI Trusted Publishing. Trusted Publishing runs
+  # in this workflow's GitHub OIDC context (id-token: write) so PyPI mints a short-lived token
+  # AND records a PEP-740 digital attestation (an in-toto/Sigstore-signed provenance statement)
+  # for each uploaded file — the PyPI-native equivalent of npm `--provenance`.
+  #
+  # MAINTAINER PREREQUISITE (cannot be wired from this repo — see header + docs/release.md):
+  #   The `sparq-rdf` PyPI project must have a Trusted Publisher registered (owner `jeswr`,
+  #   repo `sparq`, workflow `publish.yml`, environment `pypi`). Until that one-time PyPI-side
+  #   config exists, the upload step below fails to mint an OIDC token (by design — no static
+  #   API token is stored). The CI is fully wired; that PyPI account step is the only open item.
+  pypi-build:
+    name: build sparq-rdf wheels (${{ matrix.platform.target }})
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_pypi)
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            manylinux: auto
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            manylinux: ""
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            manylinux: ""
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: ""
+    runs-on: ${{ matrix.platform.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # maturin-action provisions the Rust toolchain + (on Linux) the manylinux container.
+      # `python-release` profile keeps unwinding panics — the plain release profile is
+      # panic=abort, which would turn a Rust panic into a hard interpreter abort (pyproject.toml).
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.platform.target }}
+          # auto on Linux builds inside the manylinux container; empty elsewhere.
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --profile python-release --manifest-path crates/sparq-py/Cargo.toml --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi-wheel-${{ matrix.platform.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  pypi-sdist:
+    name: build sparq-rdf sdist
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_pypi)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --manifest-path crates/sparq-py/Cargo.toml --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  pypi-publish:
+    name: publish sparq-rdf to PyPI (PEP-740 attestations)
+    needs: [pypi-build, pypi-sdist]
+    runs-on: ubuntu-latest
+    # A GitHub Environment is part of the Trusted-Publisher binding (PyPI checks owner+repo+
+    # workflow+environment). It also lets a maintainer add a required reviewer / deployment
+    # protection so a publish cannot fire unattended even on a release event.
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # OIDC token PyPI Trusted Publishing exchanges + PEP-740 attestation signing
+    steps:
+      # Collect every wheel + the sdist into one dist/ tree (download-artifact merges patterns).
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: pypi-*
+          merge-multiple: true
+      - name: List collected distributions
+        run: ls -l dist/
+      # PyPI Trusted Publishing + PEP-740: with id-token: write and a registered Trusted
+      # Publisher, this action mints a short-lived PyPI token via OIDC and (attestations: true,
+      # the default) generates + uploads a PEP-740 attestation per file. No static API token.
+      # `print-hash` echoes the uploaded digests into the log for audit.
+      - name: Publish to PyPI with provenance attestations
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          attestations: true
+          print-hash: true
+          packages-dir: dist/
