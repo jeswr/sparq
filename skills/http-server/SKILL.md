@@ -72,6 +72,15 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > blanket value would wrongly override `/health` / `/metrics` — but the sensitive auth-refusal
 > (`401` from `unauthorized()`) **does** carry `Cache-Control: no-store` so a shared cache never
 > retains it (`sq-2bhm`).
+>
+> **Error bodies carry a generic class, never internals (ASVS V7 / ASVS-G3; beads `sq-cz89`,
+> `sq-j9zs`, [OPUS-4.8] `sq-kfel`).** Every error is the structured `{"error":"<msg>"}` envelope
+> where `<msg>` is a STABLE generic category (malformed-query / auth / not-found / server-error) —
+> never the caller's input, a loaded-RDF fragment, a server filesystem path, a secret, or a
+> `Debug` of an internal type. The full detail goes to the server log under
+> `target: "sparq_server"` (gated behind `--verbose` / `RUST_LOG`), not the response body. All
+> sensitive error paths funnel through one `sanitized_error` helper; regression-guarded by
+> `tests/hardening.rs` (`no_echo_*` + `FORBIDDEN_INTERNALS`) and `tests/tpf.rs`.
 
 Point a client at it (the endpoint is `/sparql`):
 

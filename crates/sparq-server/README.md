@@ -110,6 +110,27 @@ set), so there is nothing to tighten, and a blanket value would wrongly override
 from a gated request without a valid Bearer token — carries `Cache-Control: no-store` so a
 shared cache / proxy never retains it.
 
+### Error responses do not leak internals (ASVS V7 / ASVS-G3)
+
+Every error response is the structured `{"error":"<message>"}` envelope, and the `<message>` is
+always a **stable, generic class** — never the caller's submitted input, a fragment of the
+loaded RDF, a server-side filesystem path (e.g. a `--persist` directory in an I/O error), a
+secret/token, or a `Debug` dump of an internal type. The actionable category is preserved (a
+client can still tell a malformed-query `400` from an auth `401` from a `404` from a `500`); only
+the *internal* detail is withheld. That detail is emitted server-side instead, via `tracing`
+under `target: "sparq_server"` (surfaced by the operator's opt-in `--verbose` / `RUST_LOG`
+subscriber) — **detail in the log, class in the body**.
+
+This is enforced by routing every error path that could carry sensitive content through one
+`sanitized_error` helper (beads `sq-cz89` / `sq-j9zs`; [OPUS-4.8] `sq-kfel` closed the residual
+raw-echo paths: the Graph-Store-Protocol write minted-update rejection, the Triple-Pattern-
+Fragments term parse, the federation-descriptor serialize errors, the `--persist` compaction
+failure, and the defensive middleware-error fallback). Regression-guarded by `tests/hardening.rs`
+(`no_echo_*` plus `FORBIDDEN_INTERNALS`, which asserts no absolute-path prefix /
+internal-type `Debug` / secret survives into any error body for the main failure classes) and
+`tests/tpf.rs`. The auth `401` is additionally byte-identical for a missing vs a wrong token, so
+it is not a differential-error oracle.
+
 ### SERVICE federation + DoS guards
 
 - SPARQL `SERVICE` federation is **OFF in the default build** (the `service` cargo feature).

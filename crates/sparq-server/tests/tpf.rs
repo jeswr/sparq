@@ -228,3 +228,26 @@ async fn non_iri_predicate_is_400() {
         .unwrap();
     assert_eq!(resp.status(), 400);
 }
+
+/// [OPUS-4.8] (sq-kfel, ASVS-G3) A malformed TPF term parse error must NOT echo the caller's
+/// offending term verbatim (the same echo-of-input info-leak class the rest of the surface
+/// sanitizes). The error body is the structured JSON envelope with a generic category; the
+/// sentinel embedded in the bad term never reaches the body.
+#[tokio::test]
+async fn malformed_term_does_not_echo_input() {
+    const SENTINEL: &str = "tpf_secret_sentinel";
+    let base = spawn(true).await;
+    let resp = client()
+        .get(format!("{base}/tpf"))
+        .query(&[("subject", format!("not a term {SENTINEL}").as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(
+        !body.contains(SENTINEL),
+        "TPF term parse error echoed caller input: {body}"
+    );
+}

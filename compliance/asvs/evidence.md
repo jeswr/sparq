@@ -94,9 +94,19 @@ cargo deny check advisories bans sources licenses
 - **Logging is opt-in and body-free.** `grep -n "TraceLayer\|verbose" crates/sparq-server/src/http.rs crates/sparq-server/src/main.rs`
   — `tower_http::trace::TraceLayer` behind `--verbose`; logs method/path/status, not body or
   query text. No `info!/warn!/error!` of query text or PII: `grep -rn "info!\|warn!\|error!" crates/sparq-server/src | grep -i "query\|token"` returns nothing leaking.
-- **Caveat (tracked ASVS-G3, bead `sq-j9zs`; same root cause as the wider error-body
-  info-leak bead `sq-cz89`, P1):** engine parse/exec error *messages* are echoed
-  to the client by design; no test yet asserts they are path/host-free.
+- **No internal/sensitive detail in error bodies (ASVS-G3 — Resolved, [OPUS-4.8] `sq-kfel`,
+  building on `sq-cz89`/`sq-j9zs`).** Every error path that could carry caller input, a
+  loaded-data fragment, a filesystem path or a `Debug` of an internal type routes through
+  `sanitized_error` — `grep -n "fn sanitized_error" crates/sparq-server/src/http.rs` (full
+  detail to the server log under `target:"sparq_server"`, only a stable generic class message
+  in the body). sq-kfel closed the residual raw-echo paths (GSP-write minted-update rejection,
+  TPF term parse, descriptor-serialize 500, `--persist` compaction failure, the unreachable
+  middleware-error fallback). **Verified** by `cargo test -p sparq-server --test hardening`
+  (`no_echo_*`, `no_echo_gsp_write_rejection_stays_clean`,
+  `unauthorized_error_is_clean_and_actionable`, `not_found_error_is_clean`,
+  `main_failure_classes_are_clean` — `FORBIDDEN_INTERNALS` asserts no `/home/`,`/Users/`,
+  `/tmp/`… path, no `WriteError::`/`Os { code:` Debug, no secret) and
+  `--test tpf malformed_term_does_not_echo_input`.
 
 ## V8 — Data protection
 

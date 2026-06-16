@@ -1591,7 +1591,13 @@ async fn well_known_void(State(state): State<AppState>, headers: HeaderMap) -> R
     let pin = state.current();
     match crate::descriptors::void_descriptor(pin.snapshot(), &dataset_iri, accept) {
         Ok(d) => text_response(StatusCode::OK, d.content_type, d.body, false),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        // [OPUS-4.8] (sq-kfel, ASVS-G3) `e` is an internal serializer error — withhold it.
+        Err(e) => sanitized_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "void-descriptor",
+            "failed to generate dataset description",
+            &e,
+        ),
     }
 }
 
@@ -1619,7 +1625,13 @@ fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option
             accept,
         ) {
             Ok(d) => text_response(StatusCode::OK, d.content_type, d.body, false),
-            Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+            // [OPUS-4.8] (sq-kfel, ASVS-G3) `e` is an internal serializer error — withhold it.
+            Err(e) => sanitized_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service-description",
+                "failed to generate service description",
+                &e,
+            ),
         },
     )
 }
@@ -1752,9 +1764,19 @@ async fn tpf_endpoint(
     let object = params.get("object").map(String::as_str);
 
     // Parse the triple pattern; a malformed term is a 400.
+    // [OPUS-4.8] (sq-kfel, ASVS-G3) `e` quotes the caller's offending term verbatim — the same
+    // echo-of-input info-leak class the rest of the surface sanitizes (sq-cz89/sq-j9zs). Withhold
+    // it from the client; the operator gets the full parse error in the server log.
     let pattern = match TriplePattern::parse(subject, predicate, object) {
         Ok(p) => p,
-        Err(e) => return bad_request(&e.to_string()),
+        Err(e) => {
+            return sanitized_error(
+                StatusCode::BAD_REQUEST,
+                "tpf-term-parse",
+                "malformed triple pattern term",
+                &e.to_string(),
+            )
+        }
     };
     // Page number (0-based). A non-numeric / absent page is page 0.
     let page = params
@@ -1829,10 +1851,13 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
                         "server is at its concurrent-request limit, retry later",
                     )
                 } else {
-                    json_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("middleware error: {err}"),
-                    )
+                    // [OPUS-4.8] (sq-kfel, ASVS-G3) Defensive fallback (in this configured stack
+                    // only `load_shed` produces a `BoxError`, handled above, so this is
+                    // effectively unreachable). Do NOT Display the internal `err` into the body —
+                    // that would leak the internal error type / chain. Log it server-side, return
+                    // a generic 500.
+                    tracing::warn!(target: "sparq_server", detail = %err, "unexpected middleware error (detail withheld from client)");
+                    json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
                 }
             }))
             .load_shed()
@@ -2330,9 +2355,15 @@ async fn admin_compact(State(state): State<AppState>, headers: HeaderMap) -> Res
         ),
         // A compaction failure (e.g. durable-write I/O error) is retryable: the writer thread
         // stays alive and reads keep flowing from the last published snapshot.
-        Ok(Err(e)) => json_error(
+        // [OPUS-4.8] (sq-kfel, ASVS-G3) `e` is the durable-rewrite error string, which carries
+        // the server's `--persist` filesystem path (an I/O error embeds the absolute path).
+        // Although this route is write/admin-gated, withhold the path from the response body —
+        // the operator gets the full detail in the server log.
+        Ok(Err(e)) => sanitized_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            &format!("compaction failed (retryable): {}", e),
+            "compaction",
+            "compaction failed (retryable)",
+            &e,
         ),
         Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "compaction worker panicked"),
     }
@@ -3042,7 +3073,20 @@ async fn apply_gsp_update(state: &AppState, update: String, success: StatusCode)
             if e.contains("query budget exceeded") {
                 update_rejection_response(&e, &state.config)
             } else {
-                bad_request(&format!("graph store write failed: {e}"))
+                // [OPUS-4.8] (sq-kfel, ASVS-G3) The writer-rejection string `e` is the engine's
+                // error for the SERVER-MINTED `DROP`/`INSERT DATA` update built from the request
+                // body — it can quote term text drawn from the (caller-supplied) body, exactly
+                // the info-leak class the rest of the surface sanitizes (sq-cz89/sq-j9zs). Route
+                // it through `sanitized_error`: a generic class message to the client, the full
+                // engine detail to the server log. The other UPDATE entry points already go
+                // through `update_rejection_response` → `sanitized_error`; this GSP-write minted-
+                // update branch was the one path that echoed `e` verbatim. Stays a 400.
+                sanitized_error(
+                    StatusCode::BAD_REQUEST,
+                    "gsp-write",
+                    "graph store write failed: invalid RDF body",
+                    &e,
+                )
             }
         }
         UpdateOutcome::TimedOut => timeout_response(&state.config),
