@@ -147,6 +147,11 @@ prepare_vec(&Graph, &str, &VectorStore) -> Result<PreparedQuery, String>        
 rewrite_query(Query, &Graph, &VectorStore) -> Result<Query, String>              // spargebra-algebra rewrite only
 // re-exported when the feature is on: PreparedQuery, QueryBudget, QueryResult (no direct sparq-engine dep needed)
 // vocab: vec::{VEC_NS, NEAREST, SEARCH}  (http://sparq.dev/vec#)  — exact-scan (nearest_exact) KNN
+// [OPUS-4.8] sq-36ol: with `filtered-ann` ALSO on, the BGP→IdMask a constrained `vec:` neighbour
+//   derives is CACHED across prepares, keyed by (constraining sub-BGP, graph Fingerprint). The
+//   fingerprint folds dict_len + triple_count + an id-ordered content hash, so ANY graph change
+//   misses the cache and recomputes — a stale mask is never served (invalidation is SOUND; when in
+//   doubt it misses). The cache is thread-local and transparent (no API change; same answers).
 ```
 
 ## Common recipes

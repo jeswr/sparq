@@ -1,6 +1,6 @@
 ---
 name: shacl-validation
-description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype, cardinality, ranges, paths, logical, node/property, qualified, closed, in/hasValue), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report (W3C report vocabulary as Turtle or human text). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, or produce a SHACL validation report in Rust."
+description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype, cardinality, ranges, paths, logical, node/property, qualified, closed, in/hasValue), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report (W3C report vocabulary as Turtle or human text). Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand a graph in Rust."
 ---
 
 # sparq-shacl-validation
@@ -197,12 +197,66 @@ let shapes = Graph::load_str(r#"
 let g = sparq_shacl::load_turtle_with_base(&text, &format!("file://{path}")).unwrap();
 ```
 
+**SHACL Advanced Features rules (`sh:rule`, SHACL-AF) — INFER triples** *(opt-in
+feature `shacl-af`)*. A shape's `sh:rule` values infer new triples for that shape's
+focus nodes (its targets). Two rule types: `sh:TripleRule` (`sh:subject` /
+`sh:predicate` / `sh:object` node expressions — the inferred triples are the
+cartesian product of the three evaluated sets) and `sh:SPARQLRule` (an
+`sh:construct` CONSTRUCT run per focus node with `$this` pre-bound). Rules honour
+`sh:condition` (fire only for focus nodes conforming to every condition shape),
+`sh:order` (ascending, a rule sees earlier groups' inferences), and
+`sh:deactivated`. The engine **iterates to a fixpoint** (bounded by
+`rules::MAX_ITERATIONS = 100`); the input graph is never mutated.
+
+`Cargo.toml`: `sparq-shacl = { path = "...", features = ["shacl-af"] }`
+
+```rust
+use sparq_core::Graph;
+let data = Graph::load_str(r#"
+    @prefix ex: <http://example.org/> .
+    ex:alice a ex:Person ; ex:firstName "Alice" .
+"#, "turtle").unwrap();
+let shapes = Graph::load_str(r#"
+    @prefix sh:  <http://www.w3.org/ns/shacl#> .
+    @prefix ex:  <http://example.org/> .
+    @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+    ex:PersonShape a sh:NodeShape ;
+      sh:targetClass ex:Person ;
+      sh:rule [ a sh:TripleRule ;                  # infer (this, rdf:type, ex:Agent)
+        sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Agent ] ;
+      sh:rule [ a sh:SPARQLRule ;                  # infer a label from the first name
+        sh:construct "CONSTRUCT { $this <http://example.org/label> ?n } WHERE { $this <http://example.org/firstName> ?n }" ] .
+"#, "turtle").unwrap();
+
+// The INFERRED triples only (data is not mutated):
+let inf = sparq_shacl::apply_rules(&data, &shapes);   // -> sparq_shacl::Inference
+//   inf.triples : Vec<oxrdf::Triple>   inf.iterations : usize   inf.capped : bool
+// Or get a fresh graph of data ∪ inferred, ready to query/validate:
+let expanded: Graph = sparq_shacl::expand(&data, &shapes);
+```
+
+Node expressions supported for `sh:TripleRule`: `sh:this` (focus node), a constant
+IRI/literal, and a path node expression `[ sh:path P ]` (any SHACL property path;
+`sh:nodes` defaults to the focus node). API: `apply_rules(data, shapes)`,
+`apply_rules_with_model(data, shapes, &model)` (amortise shape parsing), and
+`expand(data, shapes) -> Graph`.
+
 ## Gotchas / feature flags / prerequisites
 
-- **No feature flags on this crate.** SHACL is engaged purely by depending on
-  `sparq-shacl`. It transitively pulls in `sparq-engine` (to run `sh:sparql`/§6
-  queries); both are **native-only and never in the wasm dependency graph**, so the
-  isolation guarantee holds.
+- **Base SHACL is engaged purely by depending on `sparq-shacl`** (no feature
+  needed). It transitively pulls in `sparq-engine` (to run `sh:sparql`/§6 queries);
+  both are **native-only and never in the wasm dependency graph**, so the isolation
+  guarantee holds.
+- **SHACL-AF rules (`sh:rule`) are OPT-IN behind the `shacl-af` cargo feature.**
+  With the feature off, the base validation path carries zero rule code/parse cost
+  and the `apply_rules` / `apply_rules_with_model` / `expand` / `Inference` symbols
+  are absent. SHACL-AF rules are an INFERENCE step (they produce triples), not a
+  validation step — they do not affect `validate(..)`'s report; validate the
+  `expand(..)`-ed graph if you want constraints to see inferred triples.
+- **Rule fixpoint is bounded.** `apply_rules` iterates the rule schedule until a
+  pass infers nothing, capped at `rules::MAX_ITERATIONS` (100); `Inference::capped`
+  flags a non-terminating rule set (e.g. a CONSTRUCT minting a fresh blank node each
+  pass) whose inferred set may be incomplete.
 - **`sh:conforms` counts EVERY result regardless of severity** (matches the W3C suite).
   For "warnings don't fail" gating use `conforms_violations_only()` /
   `results_with_severity(..)`, NOT `conforms`.

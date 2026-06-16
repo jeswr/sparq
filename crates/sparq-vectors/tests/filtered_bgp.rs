@@ -240,6 +240,77 @@ fn empty_constraint_yields_no_rows() {
     );
 }
 
+/// [OPUS-4.8] (sq-36ol) ADVERSARIAL end-to-end cache-invalidation through the PUBLIC
+/// `query_vec` seam: the derived-mask cache must never serve a stale mask after the graph
+/// changes. We run the same constrained `vec:` query against graph g1 (Cars {a,b,c}), then
+/// against a MUTATED graph g2 that demotes `c` to a Boat. With a sound cache the second query
+/// must reflect the change — `c` is no longer an admissible Car neighbour — NOT replay the
+/// cached g1 result. (Caching is transparent: the only observable is the correct answer.)
+#[test]
+fn mutation_changes_filtered_result_through_query_vec() {
+    // g1: a,b,c are Cars (matches the standard fixture's kinds for a,b,c).
+    let (g1, store1) = fixture("cache_mut_g1");
+    let q = format!(
+        "{PFX} SELECT ?node WHERE {{
+           ?node vec:nearest ( \"1,0\" 3 ) .
+           ?node <http://ex/kind> <http://ex/Car> .
+         }}"
+    );
+    let mut got1 = iris(&query_vec(&g1, &q, &store1).unwrap(), 0);
+    got1.sort();
+    assert_eq!(
+        got1,
+        vec![
+            "http://ex/a".to_string(),
+            "http://ex/b".to_string(),
+            "http://ex/c".to_string()
+        ],
+        "g1: the three Cars are admissible"
+    );
+
+    // g2: MUTATION — `c` is now a Boat (its :kind triple changed). The store is rebuilt against
+    // g2 so the fingerprint binding holds; the constraining sub-BGP is byte-identical to g1's, so
+    // a sub-BGP-only cache would WRONGLY replay the g1 mask (still admitting `c`). The graph
+    // fingerprint differs (a changed triple), so the real cache MISSES and recomputes.
+    let g2 = Graph::load_str(
+        r#"
+        <http://ex/a> <http://ex/kind> <http://ex/Car> .
+        <http://ex/b> <http://ex/kind> <http://ex/Car> .
+        <http://ex/c> <http://ex/kind> <http://ex/Boat> .
+        <http://ex/d> <http://ex/kind> <http://ex/Boat> .
+        <http://ex/e> <http://ex/kind> <http://ex/Boat> .
+        <http://ex/f> <http://ex/kind> <http://ex/Boat> .
+        "#,
+        "ntriples",
+    )
+    .unwrap();
+    let id2 = |s: &str| {
+        g2.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+            .unwrap()
+    };
+    let mut store2 = VectorStore::create(tmp_path("cache_mut_g2"), 2).unwrap();
+    store2.put(id2("http://ex/a"), &[1.0, 0.0]).unwrap();
+    store2.put(id2("http://ex/b"), &[0.0, 1.0]).unwrap();
+    store2.put(id2("http://ex/c"), &[0.9, 0.1]).unwrap();
+    store2.put(id2("http://ex/d"), &[-1.0, 0.0]).unwrap();
+    store2.put(id2("http://ex/e"), &[0.2, 0.98]).unwrap();
+    store2.put(id2("http://ex/f"), &[0.95, 0.05]).unwrap();
+
+    let mut got2 = iris(&query_vec(&g2, &q, &store2).unwrap(), 0);
+    got2.sort();
+    // `c` is no longer a Car: it MUST be gone. The stale g1 result (which still contained c) must
+    // NOT be served. Remaining admissible Cars are {a, b}.
+    assert!(
+        !got2.contains(&"http://ex/c".to_string()),
+        "after demoting c to a Boat, the cache must NOT replay the stale result still admitting c: {got2:?}"
+    );
+    assert_eq!(
+        got2,
+        vec!["http://ex/a".to_string(), "http://ex/b".to_string()],
+        "g2: only a and b remain Cars"
+    );
+}
+
 /// The seed (node-IRI) form, filtered: neighbours of `a` restricted to Cars exclude the
 /// seed itself AND the closer Boat `f`, leaving Car `c`.
 #[test]

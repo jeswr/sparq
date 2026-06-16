@@ -92,6 +92,10 @@ on crates.io / npm / PyPI / ghcr.io. That shape drives four scoping decisions:
   each control row points at, with the verification commands.
 - [`gap-register.md`](./gap-register.md) — open gaps, severity, remediation, target, and the
   `bd` bead under epic `sq-toze` that tracks each.
+- [`incident-reporting-runbook.md`](./incident-reporting-runbook.md) — an **adoptable operator
+  runbook** for the **Article 14** ENISA/CSIRT reporting obligation (24h early warning / 72h
+  notification / final report), with `<FILL-IN>` org placeholders. Addresses CRA-CA.5 / former
+  gap GX-CRA-2; **not** a certification claim — the reporting act is the manufacturer/steward's.
 
 ## Honest one-line posture
 
@@ -104,4 +108,7 @@ provenance on releases, and documented secure-by-default server limits. The rema
 published-package provenance for crates.io/npm/PyPI; a container-image vuln scan), and
 **(b)** the **audit-ready** organizational layer the CRA reserves to the manufacturer/steward
 (the documented cybersecurity policy, the formal EU declaration of conformity + CE marking, and
-the Article 14 reporting workflow) — which an agent cannot and must not self-certify.
+the Article 14 reporting *act*) — which an agent cannot and must not self-certify. The Article 14
+reporting **workflow** is now documented as an adoptable runbook
+([`incident-reporting-runbook.md`](./incident-reporting-runbook.md)); the **act** of reporting to
+ENISA/CSIRT remains the organizational duty.

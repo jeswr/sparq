@@ -269,6 +269,19 @@ pub struct ServerConfig {
     /// binary's `--federation-descriptors` flag / `SPARQ_FEDERATION_DESCRIPTORS=1` env.
     #[cfg(feature = "federation-descriptors")]
     pub federation_descriptors: bool,
+    /// [OPUS-4.8] (sq-bzh1, epic sq-3183) OPT-IN Triple Pattern Fragments / Linked Data
+    /// Fragments READ-ONLY source endpoint. When `true`, the server serves a paged RDF
+    /// fragment of the triples matching one triple pattern at `GET /tpf?subject=&predicate=&
+    /// object=` (with Hydra controls: `hydra:totalItems` from the cheap cardinality estimate,
+    /// `hydra:next`/`hydra:previous` paging, the `hydra:search` template). `false` (the
+    /// default) leaves it off: `/tpf` is `404`.
+    ///
+    /// This field exists only with the `tpf` cargo feature (like
+    /// [`federation_descriptors`](Self::federation_descriptors) under
+    /// `federation-descriptors`); a build without that feature compiles no TPF code and pays
+    /// zero cost. Set by the binary's `--tpf` flag / `SPARQ_TPF=1` env.
+    #[cfg(feature = "tpf")]
+    pub tpf: bool,
 }
 
 impl Default for ServerConfig {
@@ -307,6 +320,10 @@ impl Default for ServerConfig {
             // when the feature is compiled in (the operator opts in deliberately).
             #[cfg(feature = "federation-descriptors")]
             federation_descriptors: false,
+            // [OPUS-4.8] sq-bzh1: safe default — the TPF / LDF source endpoint is OFF even when
+            // the feature is compiled in (the operator opts in deliberately via --tpf / SPARQ_TPF=1).
+            #[cfg(feature = "tpf")]
+            tpf: false,
         }
     }
 }
@@ -411,6 +428,12 @@ impl ServerConfig {
         #[cfg(feature = "federation-descriptors")]
         if let Ok(v) = std::env::var("SPARQ_FEDERATION_DESCRIPTORS") {
             cfg.federation_descriptors = env_truthy(&v);
+        }
+        // [OPUS-4.8] sq-bzh1: SPARQ_TPF truthy ("1"/"true"/"yes"/"on") serves the Triple Pattern
+        // Fragments / LDF source endpoint. Off by default. Only present with the `tpf` feature.
+        #[cfg(feature = "tpf")]
+        if let Ok(v) = std::env::var("SPARQ_TPF") {
+            cfg.tpf = env_truthy(&v);
         }
         Ok(cfg)
     }
@@ -1398,6 +1421,11 @@ pub fn router(state: AppState) -> Router {
     // "GET with no query" response). See [`crate::descriptors`].
     #[cfg(feature = "federation-descriptors")]
     let routes = routes.route("/.well-known/void", get(well_known_void));
+    // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source endpoint.
+    // Compiled only with the `tpf` feature; even then the handler refuses (404) unless the config
+    // flag is set. READ-only — a GET (with HEAD) only. See [`crate::tpf`].
+    #[cfg(feature = "tpf")]
+    let routes = routes.route("/tpf", get(tpf_endpoint).head(tpf_endpoint));
     let routes = routes.with_state(state.clone());
     // The metrics middleware wraps the WHOLE hardened stack so shed requests
     // (429), body-limit rejections (413) and panics (500) are counted with the
@@ -1509,6 +1537,179 @@ fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option
             Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
         },
     )
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-bzh1 (epic sq-3183) — OPT-IN Triple Pattern Fragments / LDF source endpoint
+// ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] sq-bzh1: derives `scheme://host` from the request `Host` header for the TPF
+/// fragment / dataset / template URLs (independent of the `federation-descriptors`-gated
+/// [`request_base`] so the two opt-in features never depend on each other). Same `http` +
+/// safe-`localhost` fallback posture: a hostile `Host` that would make an invalid IRI falls
+/// back so the fragment is always well-formed RDF rather than a 500.
+#[cfg(feature = "tpf")]
+fn tpf_base(headers: &HeaderMap) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("localhost");
+    let base = format!("http://{host}");
+    if oxrdf::NamedNode::new(&base).is_ok() {
+        base
+    } else {
+        "http://localhost".to_string()
+    }
+}
+
+/// [OPUS-4.8] sq-bzh1: percent-encodes a query-parameter VALUE for building the `hydra:next` /
+/// `hydra:previous` page URLs. Encodes everything outside the RFC 3986 unreserved set plus the
+/// few sub-delims safe in a query value, so an N-Triples term value (`<`, `>`, `"`, spaces, …)
+/// round-trips through the URL back to the same term. Hand-rolled to avoid a new dependency.
+#[cfg(feature = "tpf")]
+fn pct_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// [OPUS-4.8] sq-bzh1: builds a `/tpf` page URL for the given pattern parameters and page,
+/// re-encoding the bound positions so the link is self-contained.
+#[cfg(feature = "tpf")]
+fn tpf_page_url(
+    base: &str,
+    subject: Option<&str>,
+    predicate: Option<&str>,
+    object: Option<&str>,
+    page: usize,
+) -> String {
+    let mut url = format!("{base}/tpf");
+    let mut sep = '?';
+    let add = |url: &mut String, sep: &mut char, k: &str, v: Option<&str>| {
+        if let Some(v) = v.map(str::trim).filter(|v| !v.is_empty()) {
+            url.push(*sep);
+            url.push_str(k);
+            url.push('=');
+            url.push_str(&pct_encode(v));
+            *sep = '&';
+        }
+    };
+    add(&mut url, &mut sep, "subject", subject);
+    add(&mut url, &mut sep, "predicate", predicate);
+    add(&mut url, &mut sep, "object", object);
+    // Page is always present so the URL is an unambiguous fragment identifier (page 0 included).
+    url.push(sep);
+    url.push_str(&format!("page={page}"));
+    url
+}
+
+/// [OPUS-4.8] sq-bzh1: negotiates the TPF fragment serialisation. TPF clients send
+/// `Accept: text/turtle` (or N-Triples); we reuse the graph negotiation but DEFAULT to Turtle
+/// (the conventional, control-readable TPF serialisation), matching the descriptor surface.
+#[cfg(feature = "tpf")]
+fn negotiate_tpf(accept: Option<&str>) -> GraphFormat {
+    match accept {
+        Some(a) if !a.trim().is_empty() => {
+            let f = negotiate_graph(Some(a));
+            // negotiate_graph defaults to N-Triples on an unrecognised header; for TPF a bare
+            // `*/*` (or anything unmatched) should land on Turtle.
+            if a.contains("n-triples") || a.contains("turtle") || a.contains("rdf+xml") {
+                f
+            } else {
+                GraphFormat::Turtle
+            }
+        }
+        _ => GraphFormat::Turtle,
+    }
+}
+
+/// [OPUS-4.8] sq-bzh1: `GET /tpf?subject=&predicate=&object=` — the Triple Pattern Fragments /
+/// LDF source endpoint (read-only). Returns a paged RDF fragment of the triples matching the
+/// pattern, with Hydra controls (`hydra:totalItems` from the cheap cardinality estimate,
+/// `hydra:next`/`hydra:previous` paging, the `hydra:search` template).
+///
+/// OPT-IN: returns `404` unless [`ServerConfig::tpf`] is set (the route is mounted only with the
+/// `tpf` feature, and the handler refuses unless the operator also turned the flag on). As a
+/// read, it is gated by `--auth-token-read` like any other GET. Content-negotiates Turtle
+/// (default) / N-Triples / RDF-XML from `Accept`.
+#[cfg(feature = "tpf")]
+async fn tpf_endpoint(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    use crate::tpf::{evaluate, fragment_triples, TriplePattern, DEFAULT_PAGE_SIZE};
+
+    if !state.config().tpf {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    if method != Method::GET && method != Method::HEAD {
+        return method_not_allowed(&[Method::GET, Method::HEAD]);
+    }
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    let head_only = method == Method::HEAD;
+
+    let params = parse_form(raw_query.as_deref().unwrap_or(""));
+    let subject = params.get("subject").map(String::as_str);
+    let predicate = params.get("predicate").map(String::as_str);
+    let object = params.get("object").map(String::as_str);
+
+    // Parse the triple pattern; a malformed term is a 400.
+    let pattern = match TriplePattern::parse(subject, predicate, object) {
+        Ok(p) => p,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    // Page number (0-based). A non-numeric / absent page is page 0.
+    let page = params
+        .get("page")
+        .and_then(|p| p.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let page_size = DEFAULT_PAGE_SIZE;
+
+    let base = tpf_base(&headers);
+    let dataset_url = format!("{base}/tpf");
+    let template = format!("{base}/tpf{{?subject,predicate,object}}");
+
+    // Pin the current generation; evaluate against its immutable snapshot.
+    let pin = state.current();
+    let frag = evaluate(pin.snapshot(), &pattern, page, page_size);
+
+    let fragment_url = tpf_page_url(&base, subject, predicate, object, page);
+    let next_url = frag
+        .has_next()
+        .then(|| tpf_page_url(&base, subject, predicate, object, page + 1));
+    let prev_url = frag
+        .has_previous()
+        .then(|| tpf_page_url(&base, subject, predicate, object, page - 1));
+
+    let triples = fragment_triples(
+        &frag,
+        &fragment_url,
+        &dataset_url,
+        &template,
+        next_url.as_deref(),
+        prev_url.as_deref(),
+    );
+
+    let fmt = negotiate_tpf(headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()));
+    let body = match fmt {
+        GraphFormat::NTriples => crate::graph::triples_to_ntriples(&triples),
+        GraphFormat::Turtle => crate::graph::triples_to_turtle(&triples),
+        GraphFormat::RdfXml => crate::graph::triples_to_rdfxml(&triples),
+    };
+    text_response(StatusCode::OK, fmt.content_type(), body, head_only)
 }
 
 /// Applies the T15 hardening middleware stack to a router (outermost first):

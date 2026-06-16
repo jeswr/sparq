@@ -105,6 +105,18 @@ geo = ["dep:sparq-geo"]
 # turned on. Without the feature, zero cost: no sparq-introspect dependency, no routes,
 # byte-identical to before; sparq-core/sparq-engine untouched either way.
 federation-descriptors = ["server", "dep:sparq-introspect"]
+# [OPUS-4.8] (sq-bzh1, epic sq-3183) `tpf` (default OFF) exposes a Triple Pattern Fragments /
+# Linked Data Fragments (Hartig LDF) READ-ONLY source endpoint at `GET /tpf?subject=&predicate=&
+# object=`: a paged RDF fragment of the triples matching one triple pattern, with Hydra controls
+# (`hydra:totalItems` from the cheap cardinality ESTIMATE, `hydra:next`/`hydra:previous` paging,
+# and the `hydra:search` URI-template control). It makes the server a low-cost federation SOURCE a
+# TPF client (Comunica / the LDF client) can drive a join against. The handler reuses the existing
+# axum stack + the graph serialisers (Turtle / N-Triples) and the public `Graph::pattern` /
+# `store.estimate` / `store.scan` / `dict.term` API — no new dependency, and sparq-core/sparq-engine
+# untouched. STILL OFF AT RUNTIME by default even when compiled in — the operator must additionally
+# set `--tpf` / `SPARQ_TPF=1` (`ServerConfig::tpf`), mirroring `federation-descriptors`. Without the
+# feature, zero cost: no route, byte-identical to before.
+tpf = ["server"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

@@ -18,7 +18,10 @@
 //!                                       (graph_from_reader, skips the wavelet/OP
 //!                                       index) vs the UPSTREAM wavelet-building
 //!                                       path (Hdt::read + graph_from_hdt). Reports
-//!                                       the speedup RATIO + per-stage split + peak RSS.
+//!                                       the speedup RATIO + a 3-way DIRECT per-stage
+//!                                       split (dict/scan/build) + peak RSS + an
+//!                                       NT-vs-HDT A/B row (loads <file>.nt via the
+//!                                       fast parallel NT path) [sq-q6a1].
 //!   bench-hdt-zip <file.hdt>            decompress+parse MB/s of <file.hdt>.{gz,zst,bz2}
 //!                                       via the direct decoder (expects those files)
 
@@ -629,6 +632,12 @@ fn gen_hdt(nt_path: &str, hdt_path: &str) {
 
 /// A/B HDT load benchmark: direct decoder vs upstream wavelet path, with a
 /// per-stage split for the upstream path and the speedup ratio.
+///
+/// [OPUS-4.8] (sq-q6a1) Also emits the plan §4 measurement gaps: a 3-way per-stage
+/// split of the DIRECT path (dict decode / triple+id scan / `Graph::build`, via the
+/// measurement-only `graph_from_reader_timed`) and an NT-vs-HDT A/B row that loads
+/// the same dataset's `.nt` companion via `Graph::load_reader_parallel`. Both are
+/// measurement tooling only — the decoder's behaviour is unchanged.
 fn bench_hdt(path: &str) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let name = dataset_name(path);
@@ -653,6 +662,31 @@ fn bench_hdt(path: &str) {
         black_box(g.store.len());
     });
     row(name, "DIRECT decoder (graph_from_reader)", 1, secs_direct, bytes.len(), triples);
+
+    // [OPUS-4.8] (sq-q6a1) 3-way per-stage split of the DIRECT path. The plan's §4
+    // asks for dict-decode vs id-translation(scan) vs Graph::build separated; today
+    // the upstream split above only fuses translate+build. `graph_from_reader_timed`
+    // runs the IDENTICAL decode but records each stage's wall via `Instant::now()` at
+    // the existing boundaries (no decoder behaviour change). Median over ITERS, each
+    // stage independently, so a noisy run never reorders the stages.
+    let (mut dicts, mut scans, mut builds): (Vec<f64>, Vec<f64>, Vec<f64>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..ITERS {
+        let mut st = sparq_hdt::StageTimings::default();
+        let g = sparq_hdt::graph_from_reader_timed(std::io::Cursor::new(&bytes[..]), &mut st).unwrap();
+        black_box(g.store.len());
+        dicts.push(st.dict.as_secs_f64());
+        scans.push(st.scan.as_secs_f64());
+        builds.push(st.build.as_secs_f64());
+    }
+    let med = |mut v: Vec<f64>| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    };
+    let (secs_dict, secs_scan, secs_build) = (med(dicts), med(scans), med(builds));
+    row(name, "  direct stage (a) dict decode", 1, secs_dict, bytes.len(), triples);
+    row(name, "  direct stage (b) triple/id scan (id-translation)", 1, secs_scan, bytes.len(), triples);
+    row(name, "  direct stage (c) Graph::build", 1, secs_build, bytes.len(), triples);
 
     // --- UPSTREAM wavelet path, split into its two public stages. ---
     // Stage 1: Hdt::read = decode dict + BUILD the wavelet matrix / OP-index /
@@ -701,6 +735,61 @@ fn bench_hdt(path: &str) {
             d as f64 / 1e6, u as f64 / 1e6, u as f64 / d as f64
         ),
         _ => eprintln!("  peak RSS (per-path): unavailable (subprocess failed)"),
+    }
+
+    // [OPUS-4.8] (sq-q6a1) NT-vs-HDT A/B: the gap the sq-4wo plan headlines ("HDT
+    // direct decode vs the fast parallel N-Triples loader"). Loads the SAME dataset's
+    // `.nt` form via `Graph::load_reader_parallel` (the production fast NT path) and
+    // emits an A/B row, so the comparison is measurable on a canonical runner. The
+    // companion `.nt` is `<file.hdt>` with the `.hdt` suffix replaced by `.nt` (the
+    // same NT used by `gen-hdt` to build the archive); absent => skip (not an error).
+    let nt_path = match path.strip_suffix(".hdt") {
+        Some(stem) => format!("{stem}.nt"),
+        None => format!("{path}.nt"),
+    };
+    match std::fs::read(&nt_path) {
+        Ok(nt_bytes) => {
+            // Correctness gate: the NT load MUST yield the same triple count as the
+            // HDT decode of the same data, else the A/B is comparing two datasets.
+            let nt_g = sparq_core::Graph::load_reader_parallel(
+                std::io::Cursor::new(&nt_bytes[..]),
+                "ntriples",
+            )
+            .expect("NT parallel load");
+            assert_eq!(
+                nt_g.store.len(),
+                triples,
+                "NT-vs-HDT A/B triple-count mismatch ({} NT vs {} HDT) — refusing to report perf",
+                nt_g.store.len(),
+                triples
+            );
+            drop(nt_g);
+            eprintln!("------------------------------------------------------------");
+            eprintln!("NT-vs-HDT A/B: {} ({} NT bytes) via load_reader_parallel", nt_path, nt_bytes.len());
+            // The NT row's MB/s is over the .nt byte count (its own input size); the
+            // HDT direct row above is over .hdt bytes — the formats differ in size, so
+            // compare Mtriples/s (or wall s) across the two, NOT raw MB/s.
+            let secs_nt = median(|| {
+                let g = sparq_core::Graph::load_reader_parallel(
+                    std::io::Cursor::new(&nt_bytes[..]),
+                    "ntriples",
+                )
+                .unwrap();
+                black_box(g.store.len());
+            });
+            let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            row(name, "NT load_reader_parallel (fast NT path)", ncpu, secs_nt, nt_bytes.len(), triples);
+            eprintln!(
+                "  HDT direct {:.3}s vs NT parallel {:.3}s on {triples} triples = {:.2}x ({})",
+                secs_direct,
+                secs_nt,
+                secs_nt / secs_direct,
+                if secs_nt > secs_direct { "HDT direct faster" } else { "NT parallel faster" }
+            );
+        }
+        Err(_) => eprintln!(
+            "NT-vs-HDT A/B: skipped — companion {nt_path} absent (point bench-hdt at <data.hdt> alongside its <data.nt>)"
+        ),
     }
 }
 

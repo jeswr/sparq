@@ -41,12 +41,20 @@ mod eval;
 pub mod model;
 pub mod path;
 mod report;
+// [OPUS-4.8] (sq-d1dw) SHACL-AF rules (`sh:rule`) — OPT-IN behind the `shacl-af`
+// cargo feature so the base validation path carries zero rule code when off.
+#[cfg(feature = "shacl-af")]
+pub mod rules;
 mod sparql;
 pub mod view;
 
 pub use model::{Component, Shape, ShapesModel, Target};
 pub use path::Path;
 pub use report::{ValidationReport, ValidationResult};
+
+// [OPUS-4.8] SHACL-AF rules public surface (feature `shacl-af`).
+#[cfg(feature = "shacl-af")]
+pub use rules::{apply_rules, apply_rules_with_model, expand, Inference};
 
 use oxrdf::Triple;
 use sparq_core::Graph;

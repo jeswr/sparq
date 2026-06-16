@@ -154,6 +154,19 @@ impl std::fmt::Debug for MacKey {
     }
 }
 
+// [OPUS-4.8] sq-u8a8: zeroize the `[α]` shares on drop. The `shares` vector IS
+// the secret-shared MAC key — any `t+1` of them reconstruct `α` — so when a
+// `MacKey` is dropped we scrub the share material from memory rather than leaving
+// it in the freed allocation. `Share` derives `Zeroize`, so `Vec<Share>` zeroizes
+// element-wise (and frees scrubbed). This is HYGIENE only: it changes no sharing
+// arithmetic and runs only at end-of-life, after the key has been used.
+impl Drop for MacKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.shares.zeroize();
+    }
+}
+
 impl MacKey {
     /// Construct a [`MacKey`] from the dealer's freshly-minted `[α]` sharing.
     /// `pub(crate)` so ONLY the dealer (which alone saw `α`, and keeps the cleartext
@@ -249,6 +262,21 @@ impl std::fmt::Debug for AuthenticatedShare {
             .field("mac", &"<redacted>")
             .field("parties", &self.value.len())
             .finish()
+    }
+}
+
+// [OPUS-4.8] sq-u8a8: zeroize the MAC shares `[α·x]` on drop. For
+// `authenticated_share(1)` the `mac` vector is a sharing of `α` itself, so it is
+// key material; we scrub it on drop rather than leaving it in freed memory. The
+// `value` sharing `[x]` is the openable value (already public via
+// `value_shares()`), but we scrub it too — a uniform "drop scrubs the share
+// vectors" hygiene posture is simpler and cannot leak. HYGIENE only: runs at
+// end-of-life, changes no arithmetic.
+impl Drop for AuthenticatedShare {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.mac.zeroize();
+        self.value.zeroize();
     }
 }
 
@@ -406,6 +434,20 @@ mod tests {
     //! (`linear_ops_preserve_mac_relation`).
     use super::*;
     use crate::shamir::{reconstruct_at_zero, ShamirBackend};
+
+    /// [OPUS-4.8] sq-u8a8: compile-level assertion that the secret-bearing share
+    /// element type implements [`zeroize::Zeroize`] (so the `MacKey` / `AuthenticatedShare`
+    /// drop scrub of their `Vec<Share>` MAC material type-checks). `MacKey` and
+    /// `AuthenticatedShare` themselves zeroize their share vectors on `Drop`; a
+    /// `Drop`-implementing type cannot be probed by a `T: Zeroize` bound, so we pin
+    /// the element type here — which is exactly what their `Drop` impls scrub.
+    #[test]
+    fn share_element_is_zeroize() {
+        fn assert_zeroize<T: zeroize::Zeroize>() {}
+        assert_zeroize::<Share>();
+        assert_zeroize::<Fp>();
+        assert_zeroize::<Vec<Share>>();
+    }
 
     /// Reconstruct a degree-`t` sharing's secret using the test-only unchecked
     /// Lagrange-at-0 helper (RNG-free). The production `ShamirBackend::reconstruct`

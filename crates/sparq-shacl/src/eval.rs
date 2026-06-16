@@ -37,6 +37,26 @@ pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<Validati
     out
 }
 
+/// [OPUS-4.8] (sq-d1dw, `shacl-af`) True iff `node` conforms to the shape `sid`
+/// over `data` — i.e. validating `node` against that shape (as a standalone
+/// focus node, ignoring the shape's own targets) produces no results. The
+/// SHACL-AF rules module uses this to evaluate `sh:condition` gating: a rule
+/// fires for a focus node only when it conforms to every condition shape. Reuses
+/// the full constraint validator (Core + sh:sparql + nested shapes), so a
+/// condition may be any shape. Gated to the feature so it adds nothing when off.
+#[cfg(feature = "shacl-af")]
+pub(crate) fn conforms_node(data: &Graph, shapes: &ShapesModel, sid: usize, node: &Term) -> bool {
+    let mut v = Validator {
+        data: GraphView::new(data),
+        shapes,
+        stack: Vec::new(),
+        memo: vec![FxHashMap::default(); shapes.shapes.len()],
+        min_reentry: usize::MAX,
+        regexes: FxHashMap::default(),
+    };
+    v.conforms(node, sid)
+}
+
 struct Validator<'a> {
     data: GraphView<'a>,
     shapes: &'a ShapesModel,

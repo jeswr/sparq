@@ -446,11 +446,51 @@ fn decode_dict(dict_hdt: &FourSectDict) -> Result<DictDecode, Error> {
     })
 }
 
+/// [OPUS-4.8] (sq-q6a1) Per-stage wall-clock split of the direct decode, for the
+/// `bench/parse` HDT bench's 3-way granularity. This is MEASUREMENT-ONLY metadata:
+/// it is populated solely by [`graph_from_reader_timed`] (the production
+/// [`graph_from_reader`] passes `None` and times nothing), so it cannot change
+/// decoder behaviour. The three stages mirror the plan's §4 split:
+///
+///  * `dict` — control/header read + four-section PFC dictionary decode+intern.
+///  * `scan` — triples-section read (bitmaps/sequences) + the SPO id-translation
+///    walk that builds the `Vec<[Id; 3]>` (today fused with `build` in the bench).
+///  * `build` — `Graph::from_parts` (sort + permutation-index build).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StageTimings {
+    /// Dictionary decode (control info + header + four-section PFC decode/intern).
+    pub dict: std::time::Duration,
+    /// Triple/id scan: triples-section read + the SPO id-translation walk.
+    pub scan: std::time::Duration,
+    /// `Graph::from_parts` (the shared graph build).
+    pub build: std::time::Duration,
+}
+
 /// Direct HDT -> sparq [`Graph`] decode (H1–H4 + H6). Reads control info + header +
 /// the four-section PFC dictionary (CRC-validated via the upstream reader), then
 /// decodes the triples section's bitmaps/sequences directly and emits SPO
 /// id-triples — never constructing the upstream wavelet matrix / OP-index.
-pub fn graph_from_reader<R: BufRead>(mut reader: R) -> Result<Graph, Error> {
+pub fn graph_from_reader<R: BufRead>(reader: R) -> Result<Graph, Error> {
+    graph_from_reader_impl(reader, None)
+}
+
+/// [OPUS-4.8] (sq-q6a1) Identical decode to [`graph_from_reader`], but records the
+/// per-stage wall-clock split into `timings`. The decode path is byte-for-byte the
+/// same (the timing only reads `Instant::now()` at the existing stage boundaries);
+/// this exists for `bench/parse`'s 3-way HDT split and is NOT a production path.
+pub fn graph_from_reader_timed<R: BufRead>(
+    reader: R,
+    timings: &mut StageTimings,
+) -> Result<Graph, Error> {
+    graph_from_reader_impl(reader, Some(timings))
+}
+
+fn graph_from_reader_impl<R: BufRead>(
+    mut reader: R,
+    mut timings: Option<&mut StageTimings>,
+) -> Result<Graph, Error> {
+    // The timing hook is a zero-cost no-op when `timings` is `None` (production).
+    let t_dict = std::time::Instant::now();
     // Global control info + header (header body is not needed for the graph).
     ControlInfo::read(&mut reader).map_err(hdt::hdt::Error::from)?;
     Header::read(&mut reader).map_err(hdt::hdt::Error::from)?;
@@ -471,6 +511,12 @@ pub fn graph_from_reader<R: BufRead>(mut reader: R) -> Result<Graph, Error> {
         obj_only: obj_only_ids,
         pred: pred_ids,
     } = decode_dict(&dict_hdt)?;
+
+    // Stage (a) dict decode done; stage (b) triple/id scan begins.
+    let t_scan = std::time::Instant::now();
+    if let Some(t) = timings.as_mut() {
+        t.dict = t_scan.duration_since(t_dict);
+    }
 
     // Map an HDT subject/object id (1-based, shared section first) to its sparq Id.
     let map_so = |id: usize, shared: &[Id], only: &[Id]| -> Id {
@@ -549,7 +595,17 @@ pub fn graph_from_reader<R: BufRead>(mut reader: R) -> Result<Graph, Error> {
         pos_z += 1;
     }
 
-    Ok(Graph::from_parts(dict, triples))
+    // Stage (b) triple/id scan done; stage (c) Graph::build begins.
+    let t_build = std::time::Instant::now();
+    if let Some(t) = timings.as_mut() {
+        t.scan = t_build.duration_since(t_scan);
+    }
+
+    let graph = Graph::from_parts(dict, triples);
+    if let Some(t) = timings.as_mut() {
+        t.build = t_build.elapsed();
+    }
+    Ok(graph)
 }
 
 #[cfg(test)]

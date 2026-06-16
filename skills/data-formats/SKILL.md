@@ -55,7 +55,9 @@ cargo build -p sparq-cli --features hdt
 
 ```rust
 // In-memory, whole document in a &str. Parallel-chunked for N-Triples & Turtle
-// when the `parallel` feature is on (default native).
+// when the `parallel` feature is on (default native); on ≥2 threads both fan the
+// per-chunk dictionaries into one sharded-dict merge (the serial `merge_remap`
+// loop is kept only on a single thread). Output is identical to the serial parse.
 pub fn load_str(text: &str, format: &str) -> Result<Graph, String>
 pub fn load_str_with_base(text: &str, format: &str, base: &str) -> Result<Graph, String>
 
@@ -102,6 +104,14 @@ pub fn load_reader<R: BufRead>(reader: R) -> Result<Graph, Error>   // any buffe
 pub fn header(path: impl AsRef<Path>) -> Result<Graph, Error>       // HDT header metadata as a Graph
 pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error>
 // also: load_reader_via_upstream (differential oracle), graph_from_hdt, graph_from_reader
+
+// MEASUREMENT-ONLY (bench/parse's 3-way HDT stage split — NOT a production loader):
+// identical decode to graph_from_reader, but records a per-stage wall-clock split.
+// Production callers use the plain loaders above; the decode is byte-for-byte the
+// same (timing only reads Instant::now() at the existing stage boundaries), so
+// decoder behaviour is unchanged.
+pub struct StageTimings { pub dict: Duration, pub scan: Duration, pub build: Duration }
+pub fn graph_from_reader_timed<R: BufRead>(reader: R, t: &mut StageTimings) -> Result<Graph, Error>
 
 // WRITE (opt-in `write` feature): Graph -> .hdt (honours .gz/.zst/.bz2 by extension)
 #[cfg(feature = "write")]

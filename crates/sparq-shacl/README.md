@@ -106,6 +106,23 @@ need not be present. The component's IRI is the
 `sparql/pre-binding` semantics (rejecting variable re-binding, `$shapesGraph`) —
 see the open beads for this crate (`bd list -l area:sparq-shacl`).
 
+**SHACL Advanced Features rules (`sh:rule`, SHACL-AF) — opt-in feature
+`shacl-af`:** an *inference* step (it produces triples; it is not part of
+`validate(..)`). A shape's `sh:rule` values infer triples for that shape's focus
+nodes. Two rule types: `sh:TripleRule` (`sh:subject`/`sh:predicate`/`sh:object`
+node expressions — the inferred triples are the cartesian product of the three
+evaluated sets; node expressions supported: `sh:this`, a constant IRI/literal,
+and a path node expression `[ sh:path P ]` over any SHACL property path) and
+`sh:SPARQLRule` (an `sh:construct` CONSTRUCT run per focus node with `$this`
+pre-bound, reusing the `sh:sparql` engine path; honours `sh:prefixes`). Rules
+honour `sh:condition` (fire only for focus nodes conforming to every condition
+shape), `sh:order` (ascending; a rule sees earlier groups' inferences) and
+`sh:deactivated`. The schedule is **iterated to a fixpoint** bounded by
+`rules::MAX_ITERATIONS` (100; `Inference::capped` flags a non-terminating set).
+Entry points: `apply_rules(data, shapes) -> Inference`, `apply_rules_with_model`,
+and `expand(data, shapes) -> Graph` (data ∪ inferred; the input is never
+mutated). With the feature off, none of this is compiled in.
+
 Targets: `sh:targetNode`, `sh:targetClass` (with `rdfs:subClassOf*` closure),
 implicit class targets (a shape that is itself an `rdfs:Class`),
 `sh:targetSubjectsOf`, `sh:targetObjectsOf`.

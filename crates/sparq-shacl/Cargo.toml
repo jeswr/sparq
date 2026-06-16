@@ -33,6 +33,16 @@ rustc-hash.workspace = true
 # sh:pattern / sh:flags. Native-only crate — never in the wasm graph.
 regex = "1"
 
+[features]
+default = []
+# [OPUS-4.8] sq-d1dw: SHACL Advanced Features (SHACL-AF) rules — `sh:rule`
+# (sh:TripleRule + sh:SPARQLRule). OPT-IN: the base SHACL Core + SHACL-SPARQL
+# validation path is entirely unaffected when this is off (no extra shape parsing,
+# no rule code compiled in). Reuses the same `sparq-engine` SPARQL machinery the
+# `sh:sparql` path already depends on (CONSTRUCT for sh:SPARQLRule, ASK for
+# sh:condition gating). See `skills/shacl-validation/SKILL.md` and the crate README.
+shacl-af = []
+
 [dev-dependencies]
 # [OPUS-4.8] sq-55c1: the differential-fuzz harness (tests/diff_fuzz.rs) talks to
 # the pluggable reference-engine adapter over JSON (request out, normalised report

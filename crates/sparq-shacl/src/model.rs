@@ -593,6 +593,15 @@ impl ShapesModel {
     }
 }
 
+/// [OPUS-4.8] (sq-d1dw, `shacl-af`) Crate-internal accessor to the shared
+/// `sh:prefixes` collector for the SHACL-AF rules module (`sh:SPARQLRule`'s
+/// `sh:construct` reuses the same `sh:declare`/`owl:imports` prefix machinery as
+/// `sh:sparql`). Gated to the feature so it adds nothing when SHACL-AF is off.
+#[cfg(feature = "shacl-af")]
+pub(crate) fn collect_prefixes_for(g: &GraphView, prefix_roots: &[Term]) -> String {
+    collect_prefixes_from(g, prefix_roots)
+}
+
 /// [OPUS-4.8] Assembles SPARQL `PREFIX` declarations from a set of `sh:prefixes`
 /// declaration resources (SHACL §5.2.1 / §6.3): each root, directly or via
 /// `owl:imports`, declares `sh:declare` nodes carrying `sh:prefix` (short name)
