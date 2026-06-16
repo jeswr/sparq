@@ -341,8 +341,16 @@ matrix under "Security posture".
 - **Federation discovery** — opt-in (`federation-descriptors` feature + `--federation-descriptors`
   flag, both off by default): a [W3C VoID](https://www.w3.org/TR/void/) dataset description at
   `GET /.well-known/void` and a [SPARQL 1.1 Service Description](https://www.w3.org/TR/sparql11-service-description/)
-  for a `GET /sparql` with no `query`. Content-negotiated RDF. See the SKILL's "Federation
-  discovery" section.
+  for a `GET /sparql` with no `query`. Content-negotiated RDF. The Service Description is
+  generated from the server's **actual** capabilities — never a hard-coded fiction. It carries
+  `sd:Service` with `sd:endpoint`; `sd:supportedLanguage` `SPARQL11Query` always, `SPARQL11Update`
+  only when an anonymous client can run one (suppressed when a `--auth-token` write gate is set);
+  the `sd:resultFormat`s it negotiates (the four SPARQL-results serialisations plus Turtle,
+  N-Triples and RDF-XML) and the `sd:inputFormat`s it parses; `sd:feature sd:BasicFederatedQuery`
+  only with the `service` feature compiled in; one `sd:extensionFunction` per function actually
+  registered (the `geof:` GeoSPARQL set with the `geo` feature, read back from the live registry
+  so it cannot drift); and the default dataset/graph linked to the VoID document via
+  `dcterms:source`. See the SKILL's "Federation discovery" section.
 - **Triple Pattern Fragments / LDF source** — opt-in (`tpf` feature + `--tpf` flag, both off by
   default; read-only): a paged [Triple Pattern Fragments](https://www.hydra-cg.com/spec/latest/triple-pattern-fragments/)
   / [Linked Data Fragments](http://linkeddatafragments.org/) endpoint at
