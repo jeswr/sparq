@@ -113,13 +113,43 @@ impl Fp {
     /// Multiplicative inverse via Fermat's little theorem: `a^(p-2) mod p`.
     /// Panics if `self` is zero (zero has no inverse) — callers (Lagrange
     /// interpolation) only ever invert non-zero differences of distinct points.
+    ///
+    /// [OPUS-4.8] sq-7ltf: this routes through [`Fp::pow_ct`] (a fixed-iteration,
+    /// branchless square-and-multiply), so the inverse is **constant-time in the
+    /// inverted value `self`** by construction — there is no data-dependent
+    /// multiply branch on the base. The exponent (`P − 2`) is a public constant,
+    /// so its bit pattern is public regardless; routing through `pow_ct` removes
+    /// the *value*-dependent timing that a future secret-value inversion would
+    /// otherwise expose. This closes the latent `Fp::pow` hazard (CR-G5) for the
+    /// inversion path without changing any arithmetic result. The panic on zero
+    /// is a public-domain contract (zero is rejected before any frame crosses the
+    /// wire; see `transport.rs`), not a secret-dependent branch.
     pub fn inv(self) -> Fp {
         assert!(self.0 != 0, "Fp::inv of zero");
-        self.pow(P - 2)
+        self.pow_ct(P - 2)
     }
 
-    /// Modular exponentiation by square-and-multiply.
-    pub fn pow(self, mut exp: u64) -> Fp {
+    /// **Variable-time** modular exponentiation by square-and-multiply.
+    ///
+    /// [OPUS-4.8] sq-7ltf: this is the classic data-dependent square-and-multiply
+    /// — `if exp & 1 == 1 { acc = acc.mul(base) }` branches on the **exponent's
+    /// bits**, so its timing leaks the exponent's bit pattern / Hamming weight.
+    ///
+    /// # Public-exponent contract
+    ///
+    /// This function is **non-constant-time in the exponent** and MUST only be
+    /// called with a **PUBLIC** exponent. The side-channel analysis (CR-G5) found
+    /// every present caller satisfies this: the only direct caller is the robust
+    /// Berlekamp–Welch decoder, which raises a public evaluation point to the
+    /// **public** error-correction parameter `e` (`robust.rs`). Inversion does
+    /// **not** use this path — it uses [`Fp::pow_ct`] so it is constant-time in
+    /// the base by construction. If a **secret** exponent is ever needed, use
+    /// [`Fp::pow_ct`] instead; never widen this function's callers to secret
+    /// exponents.
+    ///
+    /// The `_vartime` suffix is the load-bearing marker: it makes the
+    /// non-constant-time property visible at every call site.
+    pub fn pow_vartime(self, mut exp: u64) -> Fp {
         let mut base = self;
         let mut acc = Fp::one();
         while exp > 0 {
@@ -128,6 +158,39 @@ impl Fp {
             }
             base = base.mul(base);
             exp >>= 1;
+        }
+        acc
+    }
+
+    /// Fixed-iteration, branchless modular exponentiation.
+    ///
+    /// [OPUS-4.8] sq-7ltf: a square-and-multiply that runs a **fixed 64
+    /// iterations** (one per `u64` exponent bit) and selects the conditional
+    /// multiply with [`subtle::ConditionalSelect`] instead of an `if`. There is no
+    /// data-dependent branch on the base value, so the routine is **constant-time
+    /// in the base `self`** — closing the latent `Fp::pow` hazard for any caller
+    /// that exponentiates a secret-bearing field element. It is **not** asserted
+    /// constant-time in the *exponent*: the `exp.bit(i)` extraction reads the
+    /// exponent bits, and the iteration count is fixed at 64 regardless, but the
+    /// loop body does not vary with the secret base. (`subtle` is a manifest dep,
+    /// adopted in sq-u8a8 as a defensive constant-time primitive.)
+    ///
+    /// Used by [`Fp::inv`] (public exponent `P − 2`); also available should a
+    /// future secret-value exponentiation be required.
+    pub fn pow_ct(self, exp: u64) -> Fp {
+        use subtle::{ConditionallySelectable, ConstantTimeEq};
+        let mut base = self;
+        let mut acc = Fp::one();
+        // Fixed 64 iterations — one per bit of the u64 exponent. No early exit,
+        // so the trip count is independent of the base and of the exponent's
+        // magnitude.
+        for i in 0..u64::BITS {
+            // bit = 1 iff the i-th exponent bit is set; constant-time extraction.
+            let bit = ((exp >> i) & 1).ct_eq(&1);
+            // Branchless: acc' = bit ? acc·base : acc.
+            let multiplied = acc.mul(base);
+            acc = Fp::conditional_select(&acc, &multiplied, bit);
+            base = base.mul(base);
         }
         acc
     }
@@ -149,6 +212,18 @@ impl Fp {
     pub fn ct_eq(self, other: Fp) -> subtle::Choice {
         use subtle::ConstantTimeEq;
         self.0.ct_eq(&other.0)
+    }
+}
+
+/// [OPUS-4.8] sq-7ltf: constant-time conditional select on the canonical
+/// representative. Because every `Fp` is kept canonical in `[0, P)`, selecting
+/// between two canonical `u64` values yields a canonical `Fp`; the underlying
+/// `u64::conditional_select` (from `subtle`) is branchless. This is the
+/// primitive [`Fp::pow_ct`] uses to make the conditional multiply branchless.
+impl subtle::ConditionallySelectable for Fp {
+    #[inline]
+    fn conditional_select(a: &Fp, b: &Fp, choice: subtle::Choice) -> Fp {
+        Fp(u64::conditional_select(&a.0, &b.0, choice))
     }
 }
 
@@ -242,6 +317,38 @@ mod tests {
         let mut x = Fp::new(0x1234_5678_9abc);
         x.zeroize();
         assert_eq!(x, Fp::zero(), "zeroized Fp must be the additive identity");
+    }
+
+    // [OPUS-4.8] sq-7ltf: the constant-time (branchless, fixed-iteration)
+    // exponentiation `pow_ct` must compute the SAME field element as the
+    // variable-time square-and-multiply `pow_vartime` for a spread of bases and
+    // exponents (including the inversion exponent `P-2`, zero, one, and large
+    // exponents that exercise the high bits). This proves the CT rewrite changes
+    // no arithmetic — the latent-gap fix is behaviour-preserving.
+    #[test]
+    fn pow_ct_agrees_with_pow_vartime() {
+        let bases = [0u64, 1, 2, 3, 7, 12345, P / 2, P - 2, P - 1];
+        let exps = [0u64, 1, 2, 3, 8, 63, 64, 1000, P - 2, P - 1, u64::MAX];
+        for &b in &bases {
+            for &e in &exps {
+                let fb = Fp::new(b);
+                assert_eq!(
+                    fb.pow_ct(e),
+                    fb.pow_vartime(e),
+                    "pow_ct vs pow_vartime disagree for base={b} exp={e}"
+                );
+            }
+        }
+    }
+
+    // [OPUS-4.8] sq-7ltf: `inv` (which now routes through `pow_ct`) still produces
+    // a true multiplicative inverse for boundary and random-ish values.
+    #[test]
+    fn inv_via_pow_ct_is_multiplicative_inverse() {
+        for v in [1u64, 2, 3, 7, 12345, P / 2, P - 2, P - 1] {
+            let a = Fp::new(v);
+            assert_eq!(a.mul(a.inv()), Fp::one(), "inv (via pow_ct) of {v}");
+        }
     }
 
     #[test]
