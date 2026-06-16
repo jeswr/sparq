@@ -80,6 +80,7 @@ export const FLAGSHIPS: Surface[] = [
       "Prove you may hire a car — age ≥ 25, valid non-revoked licence, same holder across two credentials — without revealing your documents.",
     tier: "live-bbjs",
     icon: ShieldCheck,
+    built: true,
   },
   {
     slug: "mpc-100k",
@@ -89,6 +90,7 @@ export const FLAGSHIPS: Surface[] = [
       "Four flatmates learn only whether their combined income clears a £100k threshold — no salary, and not even the exact total, is revealed.",
     tier: "live-sim",
     icon: Lock,
+    built: true,
   },
   {
     slug: "solid-pairs",
