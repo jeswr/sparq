@@ -327,7 +327,7 @@ jobs:
           fi
 
   wasm:
-    name: wasm build (sparq-wasm)
+    name: wasm build (sparq-wasm + sparq-reason-wasm)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -354,13 +354,26 @@ jobs:
       # [OPUS-4.8] sq-yqi1 (#162): clippy the shacl-feature surface on wasm32 too.
       - name: clippy (wasm32 target, shacl feature, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features shacl -- -D warnings
+      # [OPUS-4.8] sq-6qw3 (W-reason): the tier-b forward-chaining inference bundle. Build +
+      # clippy it on wasm32 in BOTH feature states (default + the opt-in `why()` proof-tree
+      # `explain` feature) so the reason bundle is gate-protected exactly like sparq-wasm.
+      - name: Build sparq-reason-wasm for the browser target
+        run: cargo build -p sparq-reason-wasm --target wasm32-unknown-unknown
+      - name: Build sparq-reason-wasm for the browser target (explain feature)
+        run: cargo build -p sparq-reason-wasm --target wasm32-unknown-unknown --features explain
+      - name: clippy (wasm32 target, sparq-reason-wasm, deny warnings)
+        run: cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      - name: clippy (wasm32 target, sparq-reason-wasm, explain feature, deny warnings)
+        run: cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets --features explain -- -D warnings
       - name: Guard the wasm dependency graph (no native-only deps)
         # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
-        # dep leaks into sparq-wasm's wasm32 graph (bundle bloat / broken browser build).
+        # dep leaks into a wasm bundle's wasm32 graph (bundle bloat / broken browser build).
         # [OPUS-4.8] sq-yqi1: guard runs against the DEFAULT graph (SHACL is opt-in, so
         # the default bundle stays SHACL-free); the shacl-feature graph is verified clean
         # locally and the wasm32 build above proves it links.
+        # [OPUS-4.8] sq-6qw3: the guard now also scans sparq-reason-wasm's default graph
+        # (regex is allowed there — it's pure-Rust + wasm-portable, not a native-only dep).
         run: ./scripts/wasm-deps-guard.sh
       # [OPUS-4.8] Headless wasm tests of the REAL #[wasm_bindgen] exports
       # (crates/sparq-wasm/tests/web.rs). `cargo build --target wasm32` above never
@@ -383,6 +396,16 @@ jobs:
       - name: Headless wasm tests (wasm-pack test --node, shacl feature)
         working-directory: crates/sparq-wasm
         run: wasm-pack test --node --features shacl
+      # [OPUS-4.8] sq-6qw3 (W-reason): drive the REAL #[wasm_bindgen] Reasoner exports
+      # (crates/sparq-reason-wasm/tests/web.rs) in a genuine wasm runtime, in BOTH feature
+      # states — the default suite, then with the opt-in `explain` feature so the `why()`
+      # proof-tree binding is exercised across the JS boundary too.
+      - name: Headless wasm tests (sparq-reason-wasm, wasm-pack test --node)
+        working-directory: crates/sparq-reason-wasm
+        run: wasm-pack test --node
+      - name: Headless wasm tests (sparq-reason-wasm, wasm-pack test --node, explain feature)
+        working-directory: crates/sparq-reason-wasm
+        run: wasm-pack test --node --features explain
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python
