@@ -4,10 +4,13 @@ import { notFound } from "next/navigation";
 import { SurfacePlaceholder } from "@/components/surface-placeholder";
 import { FLAGSHIPS } from "@/data/surfaces";
 
-// The MPC flagship has its own real page at /showcase/mpc-100k; the remaining
-// flagships fall back to the honest placeholder until their pages are built.
+// The MPC (/showcase/mpc-100k) and Solid (/showcase/solid-pairs) flagships have
+// their own real pages; the remaining flagships fall back to the honest
+// placeholder until their pages are built.
+const HAS_OWN_PAGE = new Set(["mpc-100k", "solid-pairs"]);
+
 export function generateStaticParams() {
-  return FLAGSHIPS.filter((s) => s.slug !== "mpc-100k").map((s) => ({
+  return FLAGSHIPS.filter((s) => !HAS_OWN_PAGE.has(s.slug)).map((s) => ({
     slug: s.slug,
   }));
 }
