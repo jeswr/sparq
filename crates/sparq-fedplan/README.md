@@ -114,7 +114,8 @@ A build that does not enable the feature compiles **zero** adaptive code (the mo
 
 - **Capture actual stats** — `RuntimeStats` records the *observed* per-pattern leaf
   cardinality (real row counts the sources returned) and per-source latency, fed in by the
-  executor as each stage completes.
+  executor as each stage completes. Latency is **EWMA-smoothed** per source (below), so the
+  cost model reacts to the trend, not the last raw sample.
 - **Re-plan trigger** — at each **stage boundary** (between two leaf joins of the left-deep
   plan), if a *not-yet-executed* pattern's observed cardinality `o` diverges from its
   estimate `e` past `ReplanPolicy::divergence_factor` `k` in either direction (`o > k·e` or
@@ -129,7 +130,7 @@ A build that does not enable the feature compiles **zero** adaptive code (the mo
   by a latency factor derived from the **slowest** observed latency over the pattern's retained
   sources (a union is bottlenecked by its slowest arm):
   `factor = clamp(1 + latency_weight·(s − 1), latency_floor, latency_cap)` where
-  `s = observed_latency / latency_baseline`. A source at baseline — **or with no latency
+  `s = ewma_latency / latency_baseline`. A source at baseline — **or with no latency
   observation** — gets `factor = 1.0`, so a measurement-free re-plan is byte-identical to the
   cardinality-only planner; a 2×-slow source costs 1.5× at the default `latency_weight = 0.5`,
   and the `latency_cap` (default 4.0) stops one outlier from dominating. The constants
@@ -139,6 +140,19 @@ A build that does not enable the feature compiles **zero** adaptive code (the mo
   plan. Latency enters only the *cost* term (and the suffix-selection score), **never** the
   output cardinality — so results are unchanged (see the soundness boundary). Set
   `latency_weight = 0` to disable it entirely (pure cardinality planning).
+- **Latency EWMA smoothing (sq-b51o follow-up) — a HEURISTIC α, not optimal.** The cost model
+  + trigger are fed not the single last latency sample but a per-source **exponentially-weighted
+  moving average**: each `RuntimeStats::record_source_latency` folds the new sample in as
+  `ewma_new = α·observed + (1−α)·ewma_prev` (the first sample seeds the average). α is
+  `RuntimeStats::latency_alpha`, default `RuntimeStats::DEFAULT_LATENCY_ALPHA = 0.3` — a
+  **hand-picked** smoothing factor (latest sample 30%, history 70%), **not** a workload-derived
+  optimum. This is the cleaner anti-thrash discipline that replaces the bare single-sample value:
+  a **single transient spike** moves the average only a fraction of the way and does *not*, by
+  itself, clear the re-plan trigger, while a **sustained** shift converges past it within a few
+  samples. The absolute `latency_floor`/`latency_cap` clamp is kept as a **final guard** on the
+  resulting cost factor. Use `RuntimeStats::with_latency_alpha(α)` to override (`α = 1.0` recovers
+  the old un-smoothed "last sample wins" behaviour); higher α tracks faster but is twitchier,
+  lower α is calmer but laggier.
 - **Hysteresis / anti-thrash** — the re-planned suffix is adopted **only** if its estimated
   remaining cost (cardinality- **and** latency-weighted) beats the current suffix's by more
   than `ReplanPolicy::improvement_margin` (default 10%) and there is a hard `max_replans`
@@ -155,10 +169,13 @@ the switch unchanged, so no binding is lost or duplicated. **The latency weighti
 move this boundary**: it enters only the cost/ordering, never the output cardinality or the
 pattern set, so a latency-driven reorder is the same kind of pure suffix permutation. This
 result-equivalence is proven in `adaptive::tests::replan_result_equals_static` (a
-cardinality-driven re-plan) **and** `latency_replan_result_equals_static` (a re-plan whose
-reorder is driven purely by latency) — each genuinely flips the order yet yields the identical
-multiset to the static plan — backed by an exhaustive all-permutations order-independence test.
-Mid-*operator* adaptivity and live source failover are deferred (epic sq-3183).
+cardinality-driven re-plan), `latency_replan_result_equals_static` (a re-plan driven purely by
+latency) **and** `ewma_replan_result_equals_static` (a re-plan driven by the EWMA-smoothed
+latency) — each genuinely flips the order yet yields the identical multiset to the static plan —
+backed by an exhaustive all-permutations order-independence test. The EWMA changes only *when*
+the latency path fires (anti-thrash), never the soundness boundary: re-planning is still a
+sub-query / **stage-boundary** suffix reorder, never a mid-operator swap. Mid-*operator*
+adaptivity and live source failover are deferred (epic sq-3183).
 
 ## Streaming join (quick use)
 
