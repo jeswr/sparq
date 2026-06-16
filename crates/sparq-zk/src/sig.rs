@@ -42,6 +42,36 @@
 //! [`SignatureScheme`] tags the scheme so BBS+ / SD-JWT-VC / a post-quantum
 //! candidate can ship as parallel options for the paper's per-signature
 //! performance + security table. v1 ships `poseidon2-schnorr-v1` only.
+//!
+//! ## Constant-time posture (CR-G5 / sq-8jv7) [OPUS-4.8]
+//! Honest statement, do NOT over-read: **this signing path is NOT asserted
+//! constant-time.** The Baby-JubJub scalar multiplication `R = G·k` and the
+//! scalar arithmetic `s = k + e·sk` are done with `arkworks`
+//! (`ark-ed-on-bn254` / `ark-ff`), which makes **no default constant-time
+//! guarantee** and which sparq does not (and cannot, without replacing the
+//! curve implementation) assert is constant-time. A co-located attacker
+//! observing signing could in principle obtain a timing/cache signal
+//! correlated with the secret key `sk` or the nonce `k`. This is the
+//! **irreducible arkworks residual** recorded in
+//! `compliance/cryptoreview/side-channel-analysis.md` §2.2 / §6 and gap
+//! **CR-G5**; closing it needs a constant-time scalar-mul (a curve/dep swap),
+//! tracked as a follow-up bead.
+//!
+//! What sq-8jv7 *did* change is the secret-dependent control flow **in code we
+//! own**: [`derive_nonce`]'s degenerate-`k` guard is now branchless (always
+//! computes the re-fold candidate and `subtle`-selects it), so our own emitted
+//! control flow is data-independent of the secret nonce. We do **not** claim
+//! this makes signing constant-time — the arkworks residual dominates.
+//!
+//! **Why the residual is rated LOW (placement, not primitives):** the secret
+//! key is used **only at ISSUANCE** (signing), which v1 places in a trusted
+//! issuance environment; the relying party only ever calls [`verify`], which
+//! is over **public** data (commitment + public key) and carries no secret.
+//! This becomes load-bearing only if signing ever moves to an exposed /
+//! online surface (e.g. the deferred in-circuit hidden-key upgrade), at which
+//! point a constant-time scalar-mul is required. The crate remains
+//! **research-grade and externally unaudited** (CR-G1, `sq-qhy4`); a clean
+//! source-level reading is not a timing-channel proof.
 
 use crate::field::Fr;
 use crate::poseidon2;
@@ -281,6 +311,7 @@ impl SecretKey {
 /// challenge live in the same base field, keeping the scheme circuit-friendly.
 // [OPUS-4.8] audit #3 codex #4.
 fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
+    use subtle::{ConditionallySelectable, ConstantTimeEq};
     // A distinct domain tag from the challenge so the nonce-PRF output can never
     // collide with / be mistaken for a challenge value.
     const SIG_DOMAIN_NONCE: u64 = 0x5a4b_5349_475f_4e31; // "ZKSIG_N1"
@@ -290,13 +321,31 @@ fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
     let sk_base = Fr::from_be_bytes_mod_order(&sk.0.into_bigint().to_bytes_be());
     let k_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), sk_base, *m]);
     let k = JjScalar::from_be_bytes_mod_order(&k_base.into_bigint().to_bytes_be());
-    // Guard the degenerate k == 0 (would make R the identity); fold once more.
-    if k.is_zero() {
-        let k2_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), k_base, *m]);
-        JjScalar::from_be_bytes_mod_order(&k2_base.into_bigint().to_bytes_be())
-    } else {
-        k
+
+    // [OPUS-4.8] sq-8jv7: guard the degenerate `k == 0` (would make `R` the
+    // identity) WITHOUT a secret-dependent branch in our own code. The old
+    // `if k.is_zero() { .. } else { .. }` selected on the secret nonce; here we
+    // ALWAYS compute the re-fold candidate `k2` and then `subtle`-select it only
+    // when `k == 0`, so the control flow our code emits is data-independent of
+    // the secret nonce. (The `k == 0` event is itself negligibly rare — ~2^-251
+    // for a 251-bit scalar field — so this is defence-in-depth, not a measured
+    // leak; the irreducible residual is the arkworks scalar mul `G·k` /
+    // `e·sk.0`, which sparq does NOT assert constant-time — see the module
+    // CONSTANT-TIME POSTURE note and `compliance/cryptoreview/side-channel-analysis.md` §2.2.)
+    let k2_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), k_base, *m]);
+    let k2 = JjScalar::from_be_bytes_mod_order(&k2_base.into_bigint().to_bytes_be());
+    // Constant-time "is k zero?" over the canonical little-endian scalar bytes,
+    // then a branchless byte-wise select of `k` vs `k2` keyed on that Choice.
+    let k_le = k.into_bigint().to_bytes_le();
+    let zero_le = JjScalar::zero().into_bigint().to_bytes_le();
+    let k_is_zero = k_le.ct_eq(&zero_le);
+    let mut sel = k_le;
+    let k2_le = k2.into_bigint().to_bytes_le();
+    debug_assert_eq!(sel.len(), k2_le.len());
+    for (dst, src) in sel.iter_mut().zip(k2_le.iter()) {
+        *dst = u8::conditional_select(dst, src, k_is_zero);
     }
+    JjScalar::from_le_bytes_mod_order(&sel)
 }
 
 /// Sign `m` with `sk` using a DETERMINISTIC nonce derived from `(sk, m)` (no
@@ -304,6 +353,14 @@ fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
 /// issuance-side path used by [`SecretKey::sign_commitment`]; a relying party
 /// only ever calls [`verify`]. Equivalent in shape to [`sign`] but with the
 /// nonce pinned, so it is replay-stable and seed-reuse-proof.
+//
+// # Constant-time posture (CR-G5 / sq-8jv7) [OPUS-4.8]
+// NOT asserted constant-time. The scalar mul `G·k` and the scalar arithmetic
+// `k + e·sk.0` use arkworks ops sparq does not assert are constant-time (the
+// irreducible residual — see the module CONSTANT-TIME POSTURE note). Our own
+// secret-dependent control flow ([`derive_nonce`]'s `k == 0` guard) is
+// branchless; the residual is the dependency's, and is LOW today by
+// issuance-side placement.
 // [OPUS-4.8] audit #3 codex #4.
 pub fn sign_deterministic(sk: &SecretKey, m: &Fr) -> Signature {
     let g = EdwardsProjective::generator();
@@ -1277,6 +1334,37 @@ mod tests {
             verify(&pk, &commitment_message(&c), &sig),
             "deterministic signature must verify"
         );
+    }
+
+    /// [OPUS-4.8] sq-8jv7: the branchless degenerate-`k` guard in `derive_nonce`
+    /// is BEHAVIOURALLY IDENTICAL to the old `if k.is_zero()` select. In the
+    /// non-degenerate case (overwhelmingly the only reachable case — `k == 0`
+    /// has probability ~2^-251) the nonce equals the first PRF fold, so the
+    /// signature is byte-stable and verifies. This pins that the constant-time
+    /// rewrite changed no value the signer produces (the protocol is identical;
+    /// only our emitted control flow is now data-independent of the secret).
+    #[test]
+    fn branchless_nonce_matches_first_fold_and_signs_stably() {
+        const SIG_DOMAIN_NONCE: u64 = 0x5a4b_5349_475f_4e31; // mirror derive_nonce
+        let sk = SecretKey::from_seed(77);
+        let m = commitment_message(&Fr::from(0xabcdu64));
+        // Recompute the first PRF fold exactly as derive_nonce does.
+        let sk_base = Fr::from_be_bytes_mod_order(&sk.0.into_bigint().to_bytes_be());
+        let k_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), sk_base, m]);
+        let k_first = JjScalar::from_be_bytes_mod_order(&k_base.into_bigint().to_bytes_be());
+        assert!(!k_first.is_zero(), "first fold is non-degenerate for this seed");
+        assert_eq!(
+            super::derive_nonce(&sk, &m),
+            k_first,
+            "branchless guard must return the first fold when k != 0"
+        );
+        // And the produced signature is replay-stable + verifies (no value drift).
+        let pk = sk.public_key();
+        let h1 = sk.sign_commitment(&Fr::from(0xabcdu64));
+        let h2 = sk.sign_commitment(&Fr::from(0xabcdu64));
+        assert_eq!(h1, h2, "deterministic signing remains replay-stable");
+        let sig = signature_from_hex(&h1).expect("round-trips");
+        assert!(verify(&pk, &m, &sig), "signature still verifies after CT rewrite");
     }
 
     /// [OPUS-4.8] codex #4: distinct messages get DISTINCT nonces `R` — the
