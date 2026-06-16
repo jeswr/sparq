@@ -232,6 +232,34 @@ fn check_error_display_covers_hidden_issuer_reasons() {
     assert_display_carries(&CheckError::HiddenIssuerMalformedProof, &["malformed"]);
 }
 
+// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): the in-circuit holder-PoK binding-edge
+// reasons each render their commitment + a stable sq-c2ql phrase, so a verifier
+// rejection names the binding-edge cause precisely.
+#[test]
+fn check_error_display_covers_holder_pok_reasons() {
+    assert_display_carries(
+        &CheckError::HolderPokUnreferencedCommitment { commitment: "0xd1".into() },
+        &["0xd1", "sq-c2ql"],
+    );
+    assert_display_carries(
+        &CheckError::HolderPokBindingMissing { commitment: "0xd2".into() },
+        &["0xd2", "sq-c2ql"],
+    );
+    assert_display_carries(
+        &CheckError::HolderPokMissing { commitment: "0xd3".into() },
+        &["0xd3", "sq-c2ql"],
+    );
+    assert_display_carries(
+        &CheckError::HolderPokDigestMismatch { commitment: "0xd4".into() },
+        &["0xd4", "binding edge"],
+    );
+    assert_display_carries(
+        &CheckError::HolderPokProofRejected { commitment: "0xd5".into() },
+        &["0xd5", "bb"],
+    );
+    assert_display_carries(&CheckError::HolderPokMalformedProof, &["malformed", "sq-c2ql"]);
+}
+
 #[test]
 fn check_error_display_covers_holder_pop_and_entailment_reasons() {
     assert_display_carries(&CheckError::HolderRegistryEmpty, &["HolderPop", "registry"]);

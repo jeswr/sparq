@@ -238,6 +238,7 @@ fn join_manifest() -> ProofManifest {
         join_edges: vec![JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 2 }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     }
 }
 
@@ -340,6 +341,7 @@ fn multi_scan_manifest() -> ProofManifest {
         join_edges: vec![JoinEdge { scan_a: 1, graph_a: 0, scan_b: 2, graph_b: 0, join_proof: 3 }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     }
 }
 
@@ -595,6 +597,7 @@ fn chain_manifest(shared_commitment: bool) -> ProofManifest {
         ],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     }
 }
 
@@ -864,6 +867,7 @@ fn full_bb_join_accept_real_proof() {
         join_edges: vec![JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 2 }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     // The verifier nonce that all three proofs committed (CHALLENGE_HEX) is bound
     // as field 0 of every sub-proof by the audit-#1 reconstruction.

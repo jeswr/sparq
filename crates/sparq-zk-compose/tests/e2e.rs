@@ -406,6 +406,7 @@ fn sample_manifest() -> ProofManifest {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the scan commitment (salt- AND
     // status-bound) so the sample manifest passes the issuer-signature +
@@ -731,6 +732,7 @@ fn full_manifest_prove_verify_scan() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     attest_all(&mut manifest, &test_issuer_sk(1), salt); // [OPUS-4.8] audit #3/#9/#12 (salt+status-bound)
     // [OPUS-4.8] audit #4: the verifier issues the nonce that the proof committed
@@ -853,6 +855,7 @@ fn filter_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the honest scan (salt- AND status-bound)
     // so the #1/#2 forge tests reach the crypto gate (the FILTER forge they
@@ -1208,6 +1211,7 @@ fn nonce_binding_mismatch_rejected() {
             join_edges: vec![],
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
         };
         attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
         m
@@ -1306,6 +1310,7 @@ fn holder_pop_manifest(holder_hex: &str, pop_hex: &str, cryptosuite: &str) -> Pr
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     attest_all(&mut m, &test_issuer_sk(1), salt);
     m
@@ -1576,6 +1581,7 @@ fn holder_bound_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     attest_all_holder(
         &mut m,
@@ -1952,6 +1958,7 @@ fn holder_pop_valid_verifies_end_to_end() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     attest_all(&mut manifest, &test_issuer_sk(1), salt);
     verify_manifest(
@@ -2007,6 +2014,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             join_edges: vec![],
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
         };
         attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
         m
@@ -2274,6 +2282,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -2305,6 +2314,7 @@ fn filter_reject_filter_add_on_scan_only() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -2336,6 +2346,7 @@ fn filter_reject_constant_swap_age_as_salary() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundPattern { pattern: 0 }) => {}
@@ -2387,6 +2398,7 @@ fn filter_reject_operand_slot_substitution() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "age" => {}
@@ -2432,6 +2444,7 @@ fn filter_reject_false_verdict_row() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -2463,6 +2476,7 @@ fn filter_reject_unbindable_filter_fragment() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::Sparqzk(_)) => {}
@@ -2507,6 +2521,7 @@ fn filter_binding_happy_path_structure() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the scan (salt- AND status-bound).
     // `scan_inputs_for` commits under salt byte 9, so the attestation salt must
@@ -2573,6 +2588,7 @@ fn filter_reject_unproven_failing_row() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -2628,6 +2644,7 @@ fn filter_two_rows_both_gated_verifies() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     // [OPUS-4.8] audit #3/#9: attest the scan (salt-bound). `scan_inputs_for`
     // commits under salt byte 9.
@@ -2687,6 +2704,7 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     (m, commitment_fr, salt)
 }
@@ -2830,6 +2848,7 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::UnattestedCommitment { proof: 0, .. }) => {}
@@ -3150,6 +3169,7 @@ fn cross_graph_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     // Salt- AND status-bound attestations for BOTH commitments (audit #3+#9+#12),
     // distinct salts, shared fixture status reference.
@@ -3764,6 +3784,7 @@ fn revocation_stale_status_list_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     // The relying party only trusts version 5 (window 0): the old-version
     // snapshot is STALE.
@@ -3958,6 +3979,7 @@ fn revocation_within_window_verifies() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     // now=5, window=3 => accepts [2, 5]; version 3 is fresh. The AUTHORITATIVE
     // snapshot for (list, version=3) is non-revoked (re-audit Option B: the bit is
@@ -4138,6 +4160,7 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     attest_all_committed(&mut manifest, &test_issuer_sk(1), salt, &fixture_index_commitment());
     (manifest, salt)
@@ -4220,6 +4243,7 @@ fn committed_index_without_hidden_revocation_rejected() {
         join_edges: vec![],
         hidden_revocation: None, // <- MISSING; committed-index requires it
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
         derivation_steps: vec![],
     };
     attest_all_committed(&mut m, &sk, salt, &ic);
@@ -4267,6 +4291,7 @@ fn committed_index_disclosed_commitment_mismatch_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
         derivation_steps: vec![],
     };
     // The issuer signs over `signed_ic`, but the disclosed reference carries
@@ -4500,6 +4525,7 @@ fn hi_scan_manifest(prover: &CircuitProver, signer_sk: &SecretKey, tag: &str) ->
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     attest_all(&mut manifest, signer_sk, salt);
     (manifest, c, salt)
@@ -4674,6 +4700,7 @@ fn hi_scan_manifest_no_clear_attestation(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
         derivation_steps: vec![],
     };
     (manifest, c, salt)
@@ -5072,6 +5099,7 @@ fn filter_f64_composes_end_to_end() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     attest_all(&mut manifest, &test_issuer_sk(1), salt);
     verify_manifest(
@@ -5173,6 +5201,7 @@ fn entailment_manifest(regime: EntailmentRegime, steps: Vec<DerivationStep>) -> 
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     };
     attest_all(&mut m, &test_issuer_sk(1), salt);
     m

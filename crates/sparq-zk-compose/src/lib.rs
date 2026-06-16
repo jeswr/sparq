@@ -34,8 +34,8 @@ pub mod verifier;
 
 pub use manifest::{
     AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
-    HiddenIndexRevocation, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot,
-    SubProof,
+    HiddenIndexRevocation, HolderPokProof, ProofInputs, ProofManifest, RevocationStatus,
+    StatusListSnapshot, SubProof,
 };
 // [OPUS-4.8] sq-314: derivation-step capability + entailment regime end-to-end.
 pub use derivation::{regime_admits, DerivationStep, EntailmentRule};

@@ -273,6 +273,7 @@ fn holder_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
     }
 }
 

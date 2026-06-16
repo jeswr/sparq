@@ -365,17 +365,27 @@ impl HolderRegistry {
 /// rejectable" requirement (`research/zk-holder-pop-design.md` §1 honest scope /
 /// §4.3 obligation 3).
 ///
-/// # Honest scope (clear-key tier only)
-/// This is the B1 clear-key tier: the presented holder key is DISCLOSED and the
-/// verifier recomputes its digest host-side. The hidden-key in-circuit PoK (B2,
-/// sq-i1dt) — where only the digest is public — is a separate deliverable and is
-/// NOT enforced here.
+/// # Tiers
+/// - **B1 (clear-key, T3/sq-z8s7):** the presented holder key is DISCLOSED
+///   ([`BindingMode::HolderPop`]) and the verifier recomputes its digest host-side
+///   ([`bind_holder_binding`]), governed by [`Self::require_binding`].
+/// - **B2 (hidden-key in-circuit PoK, T6/sq-c2ql):** only the issuer-attested
+///   `holder_pk_digest` is public; the holder proves possession of the matching
+///   secret IN ZERO KNOWLEDGE ([`crate::manifest::HolderPokProof`], verified by
+///   [`bind_holder_pok`]). Opt in with [`Self::require_in_circuit_pok`]. This is the
+///   NOT-yet-sound (sq-qhy4) hidden-holder tier — see `bind_holder_pok`.
 // [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): holder-binding policy (external,
 // fail-closed bearer rejection; default back-compatible). Mirrors RevocationPolicy
 // / EntailmentPolicy as a relying-party-supplied external policy object.
+// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): + opt-in in-circuit holder-PoK requirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HolderBindingPolicy {
     require_binding: bool,
+    /// [OPUS-4.8] sq-c2ql (B2): when set, a `HolderPop` presentation over a
+    /// holder-bound credential MUST additionally carry a verifying in-circuit holder
+    /// PoK ([`crate::manifest::HolderPokProof`]) for that credential's commitment.
+    /// Opt-in (default off), so the clear-key (B1) path is unaffected.
+    require_in_circuit_pok: bool,
 }
 
 impl HolderBindingPolicy {
@@ -386,6 +396,7 @@ impl HolderBindingPolicy {
     pub fn allow_bearer() -> Self {
         HolderBindingPolicy {
             require_binding: false,
+            require_in_circuit_pok: false,
         }
     }
 
@@ -397,12 +408,35 @@ impl HolderBindingPolicy {
     pub fn require_binding() -> Self {
         HolderBindingPolicy {
             require_binding: true,
+            require_in_circuit_pok: false,
+        }
+    }
+
+    /// [OPUS-4.8] sq-c2ql (B2): additionally REQUIRE an in-circuit holder PoK
+    /// ([`crate::manifest::HolderPokProof`]) for every holder-bound credential a
+    /// `HolderPop` presentation uses — the HIDDEN-key tier. A holder-bound covering
+    /// attestation with NO matching `HolderPokProof` is then rejected fail-closed
+    /// ([`CheckError::HolderPokMissing`]). Builder-style on top of the current
+    /// policy (so it composes with [`Self::require_binding`]).
+    ///
+    /// NOT-yet-sound (sq-qhy4); opt-in. Enabling this only changes a decision when a
+    /// `HolderPokProof` is presented or required; the B1 clear-key gate is unchanged.
+    pub fn require_in_circuit_pok(self) -> Self {
+        HolderBindingPolicy {
+            require_binding: self.require_binding,
+            require_in_circuit_pok: true,
         }
     }
 
     /// Whether the relying party requires a holder binding (rejects bearer).
     fn requires_binding(&self) -> bool {
         self.require_binding
+    }
+
+    /// [OPUS-4.8] sq-c2ql (B2): whether the relying party requires an in-circuit
+    /// holder PoK for each holder-bound credential.
+    fn requires_in_circuit_pok(&self) -> bool {
+        self.require_in_circuit_pok
     }
 }
 
@@ -1233,6 +1267,42 @@ pub enum CheckError {
     /// truncated length prefix) (sq-z9l) — rejected before any bb call.
     // [OPUS-4.8] sq-z9l.
     HiddenIssuerMalformedProof,
+    /// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): a [`crate::manifest::HolderPokProof`]
+    /// covers a commitment that no verified scan sub-proof references — a dangling
+    /// in-circuit holder PoK. Rejected fail-closed (every PoK must cover a
+    /// scan-referenced credential, mirroring the hidden-issuer
+    /// [`Self::HiddenIssuerUnreferencedCommitment`] discipline).
+    HolderPokUnreferencedCommitment { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): a [`crate::manifest::HolderPokProof`] covers a
+    /// scan-referenced commitment whose COVERING issuer attestation carries NO
+    /// holder binding ([`crate::manifest::AttestedHolderBinding`]). The in-circuit
+    /// PoK has no issuer-attested `holder_pk_digest` to bind to — there is nothing
+    /// for the binding edge to anchor on, so it is rejected fail-closed.
+    HolderPokBindingMissing { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): the relying party requires an in-circuit holder PoK
+    /// ([`HolderBindingPolicy::require_in_circuit_pok`]) for a holder-bound
+    /// credential, but the manifest carries NO matching
+    /// [`crate::manifest::HolderPokProof`] for that credential's commitment.
+    /// Rejected fail-closed — the hidden-key possession proof is mandated, never
+    /// silently waived.
+    HolderPokMissing { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): a [`crate::manifest::HolderPokProof`]'s PUBLIC
+    /// `holder_pk_digest` does NOT equal the ISSUER-ATTESTED digest the verifier
+    /// recovered from the credential's [`crate::manifest::AttestedHolderBinding`]
+    /// (signature-anchored under the external `K`). This is the binding edge: the
+    /// proven holder key is not the one the issuer signed into THIS credential.
+    /// Rejected fail-closed.
+    HolderPokDigestMismatch { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): `bb verify` REJECTED the in-circuit holder PoK
+    /// against the canonical `holder_pok` vk + the reconstructed public inputs
+    /// (verifier nonce + issuer-attested digest) — the prover does not know a
+    /// holder secret whose public key hashes to the issuer-attested digest, or the
+    /// public inputs were tampered. Rejected.
+    HolderPokProofRejected { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): a [`crate::manifest::HolderPokProof`] blob is
+    /// malformed (non-hex / truncated length prefix), or its declared commitment /
+    /// the recovered digest is not a field element — rejected before any bb call.
+    HolderPokMalformedProof,
     /// The manifest's binding is `HolderPop` but the relying party supplied NO
     /// holder registry (an empty [`HolderRegistry`]) (sq-cwq): the verifier has no
     /// trust anchor to check the holder key against, so it cannot accept a holder
@@ -1546,6 +1616,30 @@ impl std::fmt::Display for CheckError {
             CheckError::HiddenIssuerMalformedProof => write!(
                 f,
                 "hidden-issuer attestation proof blob is malformed (sq-z9l)"
+            ),
+            CheckError::HolderPokUnreferencedCommitment { commitment } => write!(
+                f,
+                "in-circuit holder PoK covers commitment {commitment} which no verified scan sub-proof references (sq-c2ql: dangling holder PoK)"
+            ),
+            CheckError::HolderPokBindingMissing { commitment } => write!(
+                f,
+                "in-circuit holder PoK over commitment {commitment} whose covering issuer attestation carries no holder binding (sq-c2ql: no issuer-attested holder_pk_digest for the binding edge to anchor on)"
+            ),
+            CheckError::HolderPokMissing { commitment } => write!(
+                f,
+                "relying party requires an in-circuit holder PoK for holder-bound commitment {commitment} but the manifest carries none (sq-c2ql: the hidden-key possession proof is mandated, fail-closed)"
+            ),
+            CheckError::HolderPokDigestMismatch { commitment } => write!(
+                f,
+                "in-circuit holder PoK's public holder_pk_digest does not equal the issuer-attested digest for commitment {commitment} (sq-c2ql binding edge: the proven holder key is not the one the issuer signed into this credential)"
+            ),
+            CheckError::HolderPokProofRejected { commitment } => write!(
+                f,
+                "bb rejected the in-circuit holder PoK for commitment {commitment} (sq-c2ql: the zero-knowledge holder-possession statement did not verify against the issuer-attested digest)"
+            ),
+            CheckError::HolderPokMalformedProof => write!(
+                f,
+                "in-circuit holder PoK proof blob is malformed (sq-c2ql)"
             ),
             CheckError::HolderRegistryEmpty => write!(
                 f,
@@ -2850,6 +2944,209 @@ fn bind_hidden_issuer_attestations(
     Ok(())
 }
 
+/// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): the in-circuit holder Proof-of-Possession
+/// cryptographic gate — the HIDDEN-key analogue of the clear-key
+/// [`bind_holder_binding`] (T3/sq-z8s7 B1) and the structural twin of
+/// [`bind_hidden_issuer_attestations`] (sq-z9l).
+///
+/// # What it proves (the binding edge — sq-c2ql)
+/// The clear-key B1 gate ([`bind_holder_binding`]) binds a DISCLOSED holder key to
+/// the issuer-attested digest host-side. B2 does the same WITHOUT disclosing the
+/// holder key: the prover supplies a [`crate::manifest::HolderPokProof`] — a bb
+/// proof of the `holder_pok` relation (knowledge of `hsk` with `hpk = hsk·G` and
+/// `Poseidon2([ZKSIG_HK, hpk.x, hpk.y]) == holder_pk_digest`, `hsk`/`hpk` private).
+/// The PUBLIC `holder_pk_digest` is NOT trusted as a prover field: this gate reads
+/// it from the ISSUER-ATTESTED [`crate::manifest::AttestedHolderBinding`] on the
+/// attestation covering the PoK's scan-referenced commitment, anchored in the
+/// issuer's Schnorr signature ([`verify_holder_attestation_signature`], the same
+/// `commitment_message_with_holder` / external-`K` anchor B1 uses). It then
+/// reconstructs the proof's public inputs from the verifier's fresh nonce + THAT
+/// issuer-signed digest and requires the proof's public inputs to byte-equal them
+/// (audit-#1 discipline), recomputes the canonical `holder_pok` vk verifier-side
+/// (audit-#2 discipline, never the prover's vk), and `bb verify`s.
+///
+/// So the proven (hidden) holder key is cryptographically bound to the
+/// issuer-attested credential — the binding edge: a holder A who does NOT hold
+/// `hsk_B` cannot produce a satisfying witness for B's issuer-signed digest
+/// (DL-hardness + proof soundness), and cannot swap in its own digest without
+/// breaking the issuer's EUF-CMA signature.
+///
+/// # Fail-closed contract
+/// - No `holder_pok_proofs` AND the policy does not require one => nothing to do
+///   (the clear-key path is the holder gate); returns `Ok`.
+/// - A PoK over a commitment no verified scan references =>
+///   [`CheckError::HolderPokUnreferencedCommitment`].
+/// - A PoK over a commitment whose covering attestation carries no holder binding
+///   (no issuer-attested digest to anchor on) =>
+///   [`CheckError::HolderPokBindingMissing`].
+/// - A digest / nonce / public-input mismatch => [`CheckError::HolderPokDigestMismatch`];
+///   a malformed blob => [`CheckError::HolderPokMalformedProof`]; a bb rejection =>
+///   [`CheckError::HolderPokProofRejected`].
+/// - Under [`HolderBindingPolicy::require_in_circuit_pok`], a holder-bound
+///   scan-referenced credential with NO matching verified PoK =>
+///   [`CheckError::HolderPokMissing`] (the hidden-key proof is mandated).
+///
+/// PRECONDITION: `bind_issuer_attestations` + `bind_revocation` have already run in
+/// the prefilter, so the per-commitment salt + revocation reference are the
+/// ISSUER-bound ones — the message [`verify_holder_attestation_signature`]
+/// recomputes is therefore the genuine issuer-signed message.
+///
+/// # SOUNDNESS (load-bearing, NOT a security claim)
+/// This wires the binding edge; it does NOT make the composition verifier sound.
+/// The verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2) and
+/// `holder_pok` inherits that — a passing PoK is NOT, under an adversarial prover, a
+/// guarantee the holder relation holds, and there is NO external
+/// accredited-cryptographer sign-off (sq-qhy4 pending). Research-grade, opt-in. No
+/// soundness / ZK-privacy claim is made or implied.
+// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): in-circuit holder PoK + issuer-attested
+// credential binding edge. Opt-in, NOT-yet-sound (sq-qhy4).
+fn bind_holder_pok(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+    holder_binding_policy: &HolderBindingPolicy,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    challenge: &FieldHex,
+) -> Result<(), CheckError> {
+    // Nothing presented AND nothing required => the clear-key path is the gate.
+    if manifest.holder_pok_proofs.is_empty() && !holder_binding_policy.requires_in_circuit_pok() {
+        return Ok(());
+    }
+
+    // The scan-referenced commitments and their COVERING issuer attestation — the
+    // EXACT lookup `bind_holder_binding` / `bind_issuer_attestations` use (compare as
+    // field elements so 0x-padding cannot slip a mismatch). A PoK / requirement is
+    // only meaningful for a credential the presentation actually uses.
+    let mut covering: std::collections::BTreeMap<
+        String,
+        Option<&crate::manifest::CommitmentAttestation>,
+    > = std::collections::BTreeMap::new();
+    for sp in &manifest.sub_proofs {
+        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
+            continue;
+        };
+        for c in commitments {
+            let Some(c_fr) = c.to_field() else { continue };
+            let att = manifest.commitment_attestations.iter().find(|a| {
+                a.commitment.to_field().is_some() && a.commitment.to_field() == Some(c_fr)
+            });
+            covering.insert(field_to_hex(&c_fr), att);
+        }
+    }
+
+    // The verifier nonce (audit #4) — public-input field 0, fed by us, never the
+    // prover's declared bytes.
+    let challenge_fr = challenge
+        .to_field()
+        .ok_or(CheckError::HolderPokMalformedProof)?;
+
+    // Track which holder-bound commitments a VERIFIED PoK covered, so the
+    // require_in_circuit_pok sweep below can flag any holder-bound credential left
+    // without a possession proof.
+    let mut verified_for: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for (i, pok) in manifest.holder_pok_proofs.iter().enumerate() {
+        let Some(c_fr) = pok.commitment.to_field() else {
+            return Err(CheckError::HolderPokMalformedProof);
+        };
+        let c_key = field_to_hex(&c_fr);
+
+        // (1) The PoK must cover a commitment a verified scan references (no dangling
+        // PoK — mirrors HiddenIssuerUnreferencedCommitment).
+        let Some(covering_att) = covering.get(&c_key) else {
+            return Err(CheckError::HolderPokUnreferencedCommitment {
+                commitment: pok.commitment.0.clone(),
+            });
+        };
+        // (2) Its covering attestation must carry a holder binding — that is the
+        // issuer-attested digest the binding edge anchors on. A PoK over a bearer
+        // credential has nothing to bind to (fail-closed).
+        let Some(att) = covering_att.filter(|a| a.holder.is_some()) else {
+            return Err(CheckError::HolderPokBindingMissing {
+                commitment: pok.commitment.0.clone(),
+            });
+        };
+
+        // (3) Anchor the issuer-attested digest in the ISSUER signature: the digest
+        // must be the one the issuer folded into commitment_message_with_holder,
+        // verified under the EXTERNAL trusted K (never a free prover JSON field —
+        // the design §4.3 obligation-1 anchor, shared with B1). A holder-bound
+        // attestation whose signature does not so verify is rejected here
+        // (InvalidIssuerSignature / IssuerKeyNotInKeySet).
+        verify_holder_attestation_signature(manifest, trusted_key_set, att)?;
+        let binding = att
+            .holder
+            .as_ref()
+            .expect("filtered for Some(holder) above");
+        let Some(attested_digest) = binding.digest() else {
+            return Err(CheckError::HolderPokMalformedProof);
+        };
+
+        // (4) Reconstruct the public-input vector for holder_pok main: challenge,
+        // holder_pk_digest (two 32-byte BE field words, declaration order). We feed
+        // OUR nonce + the ISSUER-ATTESTED digest — never the prover's declared bytes
+        // — so a proof committed under a different challenge OR over a digest the
+        // issuer did not sign cannot byte-match (the binding edge).
+        let blob = hex_decode(&pok.proof_hex).ok_or(CheckError::HolderPokMalformedProof)?;
+        let art = decode_artifacts(&blob).ok_or(CheckError::HolderPokMalformedProof)?;
+        let mut reconstructed: Vec<u8> = Vec::with_capacity(64);
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&challenge_fr));
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&attested_digest));
+        if reconstructed != art.public_inputs {
+            // Diagnose the digest word distinctly (the binding edge): if the proof's
+            // second public-input word is not the issuer-attested digest, it is a
+            // digest mismatch; otherwise the challenge word (or the blob length)
+            // diverged.
+            let pi = &art.public_inputs;
+            if pi.len() == 64 && pi[32..64] != field_to_be_bytes_32(&attested_digest) {
+                return Err(CheckError::HolderPokDigestMismatch {
+                    commitment: pok.commitment.0.clone(),
+                });
+            }
+            return Err(CheckError::HolderPokProofRejected {
+                commitment: pok.commitment.0.clone(),
+            });
+        }
+
+        // (5) Recompute the canonical holder_pok vk verifier-side (audit #2) and bb
+        // verify over OUR reconstructed public inputs.
+        let id = CircuitId::HolderPok;
+        let sub_work = work_dir.join(format!("holder_pok_{i}"));
+        let canonical_vk = prover
+            .canonical_vk(&id, &sub_work.join("vk"))
+            .map_err(CheckError::Driver)?;
+        let ok = prover
+            .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+            .map_err(CheckError::Driver)?;
+        if !ok {
+            return Err(CheckError::HolderPokProofRejected {
+                commitment: pok.commitment.0.clone(),
+            });
+        }
+        verified_for.insert(c_key);
+    }
+
+    // (6) [OPUS-4.8] sq-c2ql: under require_in_circuit_pok, EVERY holder-bound
+    // scan-referenced credential a HolderPop presentation uses must carry a verified
+    // PoK — a holder-bound covering attestation with no matching PoK is rejected
+    // fail-closed (the hidden-key possession proof is mandated, never silently
+    // waived). Scoped to a `HolderPop` binding: a plain `Challenge` binding presents
+    // no holder, so there is no possession to prove (mirrors the B1 `bind_holder_pop`
+    // scoping, which returns early for `Challenge`).
+    if holder_binding_policy.requires_in_circuit_pok()
+        && matches!(manifest.binding, BindingMode::HolderPop { .. })
+    {
+        for (c_key, att) in &covering {
+            if att.is_some_and(|a| a.holder.is_some()) && !verified_for.contains(c_key) {
+                return Err(CheckError::HolderPokMissing {
+                    commitment: c_key.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The per-graph salt the verifier uses to recompute a scan commitment's
 /// issuer-signed message, resolved from EITHER a clear [`CommitmentAttestation`]
 /// over `c_fr` OR — for a HIDDEN-ONLY commitment (sq-xxg) — the
@@ -4102,6 +4399,24 @@ pub fn verify_manifest(
     // holder NOT disclose WHICH issuer signed. The challenge fed here is the
     // verifier's nonce (audit #4), identical to the sub-proof loop's binding.
     bind_hidden_issuer_attestations(manifest, trusted_key_set, prover, work_dir, &challenge)?;
+
+    // --- sq-c2ql: in-circuit holder Proof-of-Possession cryptographic gate (B2). ---
+    // If the manifest carries in-circuit holder PoK proofs (or the policy mandates
+    // them), verify each against the ISSUER-ATTESTED holder digest of the covering
+    // credential (the binding edge: the proven hidden holder key is the one the
+    // issuer signed into THIS credential) and the verifier's nonce, then bb verify.
+    // The clear-key holder gate (bind_holder_pop, above) is UNCHANGED and still runs;
+    // this is the additive HIDDEN-key tier. NOT-yet-sound (sq-qhy4); opt-in. The
+    // challenge fed here is the verifier's nonce (audit #4), identical to the
+    // sub-proof loop's binding.
+    bind_holder_pok(
+        manifest,
+        trusted_key_set,
+        holder_binding_policy,
+        prover,
+        work_dir,
+        &challenge,
+    )?;
 
     Ok(())
 }

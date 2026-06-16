@@ -49,7 +49,7 @@ Verdict: scaffold is GOOD; committed as baseline unchanged. Added `.gitignore`
 | filter_f64_d4     | — | —  | — | filter_f64 composable (D=4; sq-q7e/sq-tat) |
 | revoke_unset_d10  | — | —  | — | revoke_unset (D=10, hidden-index revocation; sq-3e5/sq-h2v) |
 | hidden_issuer_d4  | — | —  | — | hidden_issuer (D=4, in-circuit Schnorr-over-BabyJubJub + hidden-key set membership; sq-z9l) |
-| holder_pok        | — | —  | — | holder_pok (in-circuit holder PoK; sq-xqfg) |
+| holder_pok        | — | —  | — | holder_pok (in-circuit holder PoK; sq-xqfg, verifier-wired B2 sq-c2ql) |
 | join_eq_na16_nb16 | — | —  | — | join_eq (N_A=16, N_B=16, hidden cross-credential JOIN; sq-bwwl/sq-r2s8) |
 | join_eq_na16_nb64 | — | —  | — | join_eq (N_A=16, N_B=64; [OPUS-4.8] sq-pzet) |
 | join_eq_na64_nb16 | — | —  | — | join_eq (N_A=64, N_B=16; [OPUS-4.8] sq-pzet) |
@@ -161,6 +161,51 @@ the clear-key `commitment_attestations` must be made optional-when-hidden — a
 verifier-policy follow-up. The cryptographic gadget + verifier binding (the
 ZK-hard part) are COMPLETE and SOUND; the "make the clear path optional"
 policy wiring is the documented next step.
+
+### Issuer-attested credential-bound HolderPoP — in-circuit B2 (sq-c2ql) — wired, NOT-yet-sound
+
+[OPUS-4.8] Wired the in-circuit holder Proof-of-Possession (the `holder_pok`
+member, sq-xqfg/T5) into the manifest verifier — the HIDDEN-key tier (B2) of the
+HolderPoP closure, the analogue of the clear-key B1 (`bind_holder_binding`,
+sq-z8s7). This closes the in-circuit half of the trusted-holder gap: B1 binds a
+DISCLOSED holder key to the issuer attestation host-side; B2 does the same WITHOUT
+disclosing the holder key.
+
+THE BINDING EDGE: a manifest may carry `HolderPokProof`s (`manifest.holder_pok_proofs`),
+each a bb proof of the `holder_pok` relation (knowledge of `hsk` with `hpk = hsk·G`
+and `holder_key_digest(hpk) == holder_pk_digest`, `hsk`/`hpk` PRIVATE). The new
+verifier gate `verifier::bind_holder_pok` does NOT trust the proof's public
+`holder_pk_digest`: it reads the digest from the ISSUER-ATTESTED `AttestedHolderBinding`
+on the attestation COVERING the PoK's scan-referenced commitment, anchors that digest
+in the issuer's Schnorr signature (`verify_holder_attestation_signature` —
+`commitment_message_with_holder` under the EXTERNAL trusted `K`, the same anchor B1
+uses), reconstructs the proof's public inputs `[challenge, holder_pk_digest]` from the
+verifier nonce + THAT issuer-signed digest, byte-equals them (audit-#1), recomputes the
+canonical `holder_pok` vk verifier-side (audit-#2), and `bb verify`s. So the proven
+hidden holder key is bound to the issuer-attested credential. Opt-in via
+`HolderBindingPolicy::require_in_circuit_pok()`; the B1 clear-key path is unchanged
+and remains the default holder gate (B2 is additive).
+
+Fail-closed reasons: `HolderPokUnreferencedCommitment` / `HolderPokBindingMissing` /
+`HolderPokDigestMismatch` / `HolderPokProofRejected` / `HolderPokMalformedProof`, plus
+`HolderPokMissing` (a holder-bound credential with no PoK under `require_in_circuit_pok`).
+Tests (`crates/sparq-zk-compose/tests/holder_pok_binding.rs`): serde + no-toolchain
+structural rejections, plus toolchain-gated full bb prove→verify→tamper→invalid-witness
+round-trips (valid issuer-bound PoK verifies; a PoK for a key the issuer did NOT bind is
+`HolderPokDigestMismatch`; a tampered proof byte is rejected; a mandated-but-absent PoK
+is `HolderPokMissing`). `CheckError` Display coverage in `tests/verifier_errors.rs`.
+
+SOUNDNESS (load-bearing): this WIRES the binding edge; it does NOT make the verifier
+sound. The composition verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic
+sq-1s2) and `holder_pok` inherits that — a passing PoK is NOT, under an adversarial
+prover, a guarantee the holder relation holds, and there is NO external accredited-
+cryptographer sign-off (sq-qhy4 pending). Research-grade, opt-in. NO soundness /
+ZK-privacy claim was added; every standing not-yet-sound disclaimer is preserved.
+
+DEFERRED (beaded): a hidden-holder-SET tier (proving membership in a holder set
+without revealing which holder — the analogue of `hidden_issuer`'s `key_set_membership`,
+reusing the same Merkle gadget) for full holder anonymity beyond B2's single-key hiding;
+and a `gate_count.rs` regression baseline for `holder_pok` measured under `bb gates`.
 
 ### M1 — Rust orchestration crate `crates/sparq-zk-compose` (DONE)
 

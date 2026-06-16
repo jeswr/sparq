@@ -191,8 +191,27 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
   behaviour for bearer credentials. The issuer-attested digest is anchored in the
   issuer signature (verified under the external trusted `KeySet K`), never a free
   prover JSON field. See `verifier::bind_holder_pop` / `verifier::bind_holder_binding`.
-  DEFERRED: the in-circuit HIDDEN-key PoK (B2, sq-i1dt) where only the digest is
-  public (no holder-key linkability) — the clear-key tier discloses `hpk`.
+- **Credential↔holder binding (hidden-key tier, B2)** — IMPLEMENTED ([OPUS-4.8]
+  sq-c2ql, `research/zk-holder-pop-design.md` §3.3 B2 / step 6), opt-in,
+  **NOT-yet-sound** (see below): the hidden-key analogue of B1 — the holder proves
+  possession of the matching secret IN ZERO KNOWLEDGE, WITHOUT disclosing `hpk`. A
+  manifest may carry `HolderPokProof`s, each a `bb` proof of the `holder_pok`
+  circuit member (knowledge of `hsk` with `hpk = hsk·G` and
+  `holder_key_digest(hpk) == holder_pk_digest`, `hsk`/`hpk` private). The verifier
+  gate `verifier::bind_holder_pok` does NOT trust the proof's public
+  `holder_pk_digest`: it reads the digest from the ISSUER-ATTESTED
+  `AttestedHolderBinding` covering the PoK's scan-referenced commitment (anchored in
+  the issuer signature, the same `ZKSIG_C4` / external-`K` anchor B1 uses),
+  reconstructs the proof's public inputs from the verifier nonce + that digest, and
+  byte-compares + `bb verify`s — **the binding edge** that ties the proven hidden
+  holder key to the issuer-attested credential (a holder who does not hold the
+  issuer-bound secret cannot satisfy the PoK, and cannot swap in its own digest
+  without breaking the issuer's EUF-CMA signature). Fail-closed reasons:
+  `HolderPokUnreferencedCommitment` / `HolderPokBindingMissing` /
+  `HolderPokDigestMismatch` / `HolderPokProofRejected` / `HolderPokMalformedProof`;
+  under the opt-in `HolderBindingPolicy::require_in_circuit_pok()`, a holder-bound
+  credential with no matching PoK is `HolderPokMissing`. The clear-key (B1) path is
+  unchanged and remains the default holder gate; B2 is the additive privacy layer.
 
 ## sparq-zk API gaps noted
 
