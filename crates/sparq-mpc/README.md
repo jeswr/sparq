@@ -15,6 +15,36 @@ notes** that an auditor needs at a glance.
 > unaudited** (sq-qhy4). The ZK verifier it composes with is **not** sound
 > (`SECURITY.md` / CR-G1). Nothing here is a production security claim.
 
+## Hidden joins — per-pair leakage tiers (sq-jnkm / sq-khf9 / sq-xhaw)
+
+The hidden-value join over PRIVATE keys (`join.rs`) ships in three leakage tiers,
+all honest-majority / **semi-honest only** (not malicious; external sign-off still
+pending, sq-qhy4):
+
+- **`HiddenValueJoin::join` / `secure_equal`** — the original per-pair equality:
+  one masked-product open per candidate (`m = (a−b)·r`, `m == 0 ⇔ equal`). It
+  leaks only the match BIT per pair, but the set of true pairs IS the bipartite
+  match graph / key fan-out (**leak L2 at the decision**). Output cardinality is
+  the true count (**leak L1**).
+- **`HiddenValueJoin::batched_join` (sq-khf9)** — ranges over a row COLUMN per
+  holder under a `RowBinding`, and routes the OUTPUT through the oblivious
+  shuffle + padded-prefix reveal (sq-jnkm): output cardinality is bounded to a
+  public `B` and ordering is shuffled (**L1 bounded, L2 of the result set
+  destroyed**). It still OPENS the per-pair match bit, so the decision-time L2 is
+  unchanged.
+- **`HiddenValueJoin::fully_oblivious_batched_join` (sq-xhaw)** — the
+  **fully-oblivious** path: the per-pair match bit is computed as a SECRET-SHARED
+  0/1 by `compare::secure_equal_to_bit` (a bit-decomposition + AND-tree, never
+  opened) and fed as a `MatchBit::SecretShared` selector into the same oblivious
+  output transform. **Nothing is opened per pair** — the decision-time L2
+  match-graph leak is closed. The cost is `O(COMPARE_BITS)` secure-multiplication
+  rounds per pair (vs one masked open), the LAN profile `compare` documents.
+
+The standalone raw-key entry point `oblivious_join::oblivious_set_output_hidden_keys`
+also realises this now (it was previously gated on the secure-compare round
+sq-rrz4/sq-dvuc, which has since landed). No soundness/security claim beyond the
+documented semi-honest model is made.
+
 ## Collaborative-proof (coZK) — witness-validation-before-proving (sq-7leq)
 
 The collaborative (multi-prover) zk-proof path is **deferred** — every

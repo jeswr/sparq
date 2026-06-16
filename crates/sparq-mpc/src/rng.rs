@@ -167,7 +167,9 @@ impl SecureRng {
             .expect("OS entropy source failed while seeding the masking CSPRNG (sq-1vt)");
         // `from_seed` takes the seed by value (a copy); `seed` itself is still
         // scrubbed by `Zeroizing` at end of scope.
-        SecureRng { inner: rand_chacha::ChaCha20Rng::from_seed(*seed) }
+        SecureRng {
+            inner: rand_chacha::ChaCha20Rng::from_seed(*seed),
+        }
     }
 }
 
@@ -194,7 +196,9 @@ impl Default for SecureRng {
 impl std::fmt::Debug for SecureRng {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never print CSPRNG internal state.
-        f.debug_struct("SecureRng").field("inner", &"ChaCha20Rng(<redacted>)").finish()
+        f.debug_struct("SecureRng")
+            .field("inner", &"ChaCha20Rng(<redacted>)")
+            .finish()
     }
 }
 
@@ -320,6 +324,9 @@ mod tests {
                 saw_large = true;
             }
         }
-        assert!(saw_large, "sampler should reach the upper half of the field");
+        assert!(
+            saw_large,
+            "sampler should reach the upper half of the field"
+        );
     }
 }

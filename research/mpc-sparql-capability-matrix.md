@@ -85,7 +85,7 @@ ground truth. Verified by reading the files:
 | Consistency-checked open (degree-2t equality) | gap | **BUILT** — `reconstruct_degree` routes the 2t open through the same RS checker | `shamir.rs:511–516`; **sq-7q9i CLOSED** |
 | **Oblivious shuffle** (Waksman/Beneš) | "ABSENT — the substrate gap" | **BUILT and SOUND** at the honest-majority Shamir layer (re-randomise + permute; no degree reduction needed) | `oblivious.rs` `WaksmanNetwork`/`shuffle`; **sq-18lk CLOSED** |
 | **Oblivious sort** network (Batcher) | "ABSENT" | **substrate BUILT** (network + access-pattern obliviousness real); **secure key-comparison NOT built** — `sort_with_keys` uses *disclosed* keys; the secret comparator (`SimulatedSecretComparator`) is INSECURE and cfg-gated test-only | `oblivious.rs:761,927,955`; gated on **sq-rrz4** |
-| Result-size protection / match-bit aggregation | gap (L1/L2) | **partially BUILT** — bead **sq-jnkm CLOSED** (oblivious result-size protection + match-bit aggregation for set-returning joins) | bead sq-jnkm |
+| Result-size protection / match-bit aggregation | gap (L1/L2) | **BUILT** — bead **sq-jnkm CLOSED** (oblivious result-size protection, output L1/L2) + **sq-xhaw CLOSED** (secret-shared match bit `secure_equal_to_bit`, never opened per-pair → decision-time L2 closed; `fully_oblivious_batched_join` / `oblivious_set_output_hidden_keys`) | beads sq-jnkm, sq-xhaw |
 | CSPRNG masking | gap | **BUILT** (ChaCha20; insecure PRNG cfg-gated) | `rng.rs`; **sq-1vt CLOSED** |
 
 **Single most important correction:** the parent record names *"the entire oblivious
@@ -442,24 +442,28 @@ and what each leaks.
 | Operator | Leakiest variant (what leaks) | Most-private variant (residual leak) | sparq today |
 |---|---|---|---|
 | **SUM/COUNT** | disclosed sum (the scalar) | secret sum, only threshold boolean opened (leaks 1 bit) | near-frontier (BUILT); only residual is the malicious flip at minimal N |
-| **FILTER =** | per-comparison match bit opened | aggregate match bits inside MPC, never open per-pair | per-pair open today (L2 below) |
+| **FILTER =** | per-comparison match bit opened | aggregate match bits inside MPC, never open per-pair | secret-shared match bit BUILT (`secure_equal_to_bit`, sq-xhaw) — never opened |
 | **FILTER <** | disclosed operand (full value) | secure comparison opening only the verdict bit | disclosed today (P5 OPEN) |
-| **JOIN (hidden)** | disclosed-key join leaks keys, values, cardinality, **and which holder contributed each row** (L4) | hidden key + match-bit aggregation + **result-size padding** + **oblivious shuffle of matched rows, reveal padded prefix** | all-pairs leaks full **match graph** (L2 / fan-out); result-size protection landed (sq-jnkm) but not on the all-pairs path |
+| **JOIN (hidden)** | disclosed-key join leaks keys, values, cardinality, **and which holder contributed each row** (L4) | hidden key + match-bit aggregation + **result-size padding** + **oblivious shuffle of matched rows, reveal padded prefix** | **fully-oblivious join BUILT (sq-xhaw)**: per-pair match bit secret-shared (`secure_equal_to_bit`, never opened) + output L1/L2 protection (sq-jnkm) → `HiddenValueJoin::fully_oblivious_batched_join` / `oblivious_set_output_hidden_keys`. Still `O(\|L\|·\|R\|)` all-pairs (the ~linear sort-merge sq-ujz8 is the perf follow-up); semi-honest only |
 | **GROUP BY** | disclosed keys + group sizes | hidden key, padded per-group output (DP-noised group count) | hidden forbidden today (convention #4) |
 | **ORDER BY / DISTINCT** | disclosed multiset | oblivious sort/dedup, padded output | disclosed (verifier) today |
 | **OPTIONAL** | which left rows matched (the optional-presence bit) | obliviously padded NULLs so presence is hidden | OPEN |
 | **Property path** | reachability structure of the secret graph | bounded-length only; even then leaks path-existence bits | scope to bounded |
 
 **The four live leaks sparq must close (from parent §4.1, status updated):**
-- **L1 result cardinality** — the all-pairs `HiddenValueJoin` emits exactly the true match
-  count. **Mitigation BUILT for set-returning joins** via bead **sq-jnkm** (oblivious
-  result-size protection + match-bit aggregation); **not yet wired into the all-pairs path** —
-  the gap is connecting sq-jnkm's output path to `HiddenValueJoin`/the sort-merge join (sq-ujz8).
-- **L2 per-pair match graph / fan-out** — each opened `m` in the all-pairs loop reveals the
-  match bit at `(i,j)`; the set of matches IS the bipartite match graph → join-key
+- **L1 result cardinality** — the all-pairs `HiddenValueJoin::join` emits exactly the true
+  match count. **Mitigation BUILT and WIRED** via bead **sq-jnkm** (oblivious result-size
+  protection) into `HiddenValueJoin::batched_join` (sq-khf9) and
+  `fully_oblivious_batched_join` (sq-xhaw): the revealed count is bounded to a public `B`. The
+  ~linear sort-merge join (sq-ujz8) is the perf follow-up; the protection itself is wired.
+- **L2 per-pair match graph / fan-out** — each opened `m` in the legacy all-pairs loop reveals
+  the match bit at `(i,j)`; the set of matches IS the bipartite match graph → join-key
   multiplicity distribution leaks (a strong fingerprint of the hidden key distribution).
-  **Mitigation:** aggregate match bits inside MPC (P4) + oblivious-shuffle (P3, BUILT) +
-  reveal only a padded prefix — i.e. the sort-merge join (sq-ujz8) consuming the BUILT shuffle.
+  **Mitigation BUILT (sq-xhaw):** compute the per-pair match bit as a SECRET-SHARED 0/1 with
+  `compare::secure_equal_to_bit` (bit-decomposition + AND-tree, **never opened**) and drive an
+  oblivious select + shuffle + padded-prefix reveal — `fully_oblivious_batched_join` /
+  `oblivious_set_output_hidden_keys`. The decision-time match-graph leak is closed (the legacy
+  `secure_equal` open path remains for the cheap-but-leaky tier). Semi-honest only.
 - **L3 input cardinalities** `|L|,|R|` — loop bounds are public; standard MPC assumption but
   the *number of credentials a holder has* can be sensitive. Mitigation: pad inputs to a
   public bound (cheap, exact) or a DP bound.
@@ -537,8 +541,12 @@ sq-a6p1/sq-jnkm state:
 - **[RECONCILED 2026-06-16] FILTER `<`/`≤`/`>` (secure comparison)** — **BUILT** (`compare.rs`,
   `sq-rrz4`, opens only the verdict bit; semi-honest), so the £100k `>` can keep the sum secret.
 - Inner equi-join over **disclosed global-IRI keys** — **BUILT, crypto-free** (sparq's lead).
-- Inner equi-join over **hidden keys** — **BUILT but naive** all-pairs `O(|L|·|R|)` (correct;
-  not SOTA cost; leaks the match graph L2).
+- Inner equi-join over **hidden keys** — **BUILT**, three leakage tiers: leaky-per-pair
+  (`HiddenValueJoin::join`), output-oblivious (`batched_join`, sq-khf9), and **fully-oblivious**
+  (`fully_oblivious_batched_join` / `oblivious_set_output_hidden_keys`, **sq-xhaw CLOSED** — the
+  per-pair match bit is secret-shared and never opened, closing L2 at the decision). All correct
+  and semi-honest; still `O(|L|·|R|)` all-pairs (the ~linear sort-merge sq-ujz8 is the perf
+  follow-up, not a privacy one).
 - ORDER BY over **disclosed sort key** with secret payload — **BUILT** (Batcher network).
 - **[RECONCILED 2026-06-16] Bounded property paths over disclosed global-IRI keys** — **BUILT**
   (`bounded_path.rs`, `sq-py8h`).
@@ -598,10 +606,12 @@ LANDED on `main`** — see the per-item ✅ DONE notes.
    end-to-end federated pipeline driver (`pipeline.rs`, **`sq-6y92` CLOSED**) also landed in this
    wave.
 3. **ORQ-style O(n log n) sort-merge join-aggregation** (replace all-pairs `HiddenValueJoin`;
-   consume the BUILT shuffle; emit shuffled padded prefix → closes L1/L2 on the join path).
-   Bead **sq-ujz8 (OPEN)** ✅ tracked. **NOT-yet-beaded sub-gap:** wiring the CLOSED sq-jnkm
-   result-size/match-bit aggregation path into the join operator (it landed standalone). →
-   **FILED below.**
+   consume the BUILT shuffle; emit shuffled padded prefix → reduces the COST of the join path).
+   Bead **sq-ujz8 (OPEN)** ✅ tracked — this is now a **performance** follow-up, NOT a privacy
+   one: the sq-jnkm result-size/match-bit path is wired into the join operator via
+   `batched_join` (sq-khf9) and the fully-oblivious `fully_oblivious_batched_join` (**sq-xhaw
+   CLOSED** — secret-shared match bit, no per-pair open), so L1/L2 are closed on the all-pairs
+   path already; sq-ujz8 only cuts the `O(|L|·|R|)` work to ~linear.
 4. **DP result-size / output-cardinality + ε-budget.** Cheapest privacy win for any
    set-returning query. Bead **sq-shk5 (OPEN)** ✅ tracked.
 5. **IT-MAC for the degree-2t equality open at minimal N=2t+1.** Promotes `secure_equal` from

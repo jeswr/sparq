@@ -138,7 +138,7 @@
 
 use crate::field::Fp;
 use crate::partial::MpcError;
-use crate::shamir::{Share, ShamirDealer};
+use crate::shamir::{ShamirDealer, Share};
 
 /// A vector of secret-shared field elements — the unit the shuffle/sort operate
 /// over. Each entry is a full Shamir sharing (`Vec<Share>` = one value's `n`
@@ -261,7 +261,10 @@ impl WaksmanNetwork {
         let (switches, bits) = route_recording(perm);
         // The switch list must match the canonical topology (it does, by the
         // build==route recursion); guard it so a future refactor can't desync.
-        debug_assert_eq!(switches, self.switches, "route topology desynced from build");
+        debug_assert_eq!(
+            switches, self.switches,
+            "route topology desynced from build"
+        );
         Ok(bits)
     }
 
@@ -347,7 +350,10 @@ fn waksman_rec(wires: &[usize], perm: &[usize], switches: &mut Vec<Switch>, bits
         return;
     }
     if m == 2 {
-        switches.push(Switch { a: wires[0], b: wires[1] });
+        switches.push(Switch {
+            a: wires[0],
+            b: wires[1],
+        });
         bits.push(perm[0] == 1); // swap iff input 0 must reach output 1
         return;
     }
@@ -363,7 +369,10 @@ fn waksman_rec(wires: &[usize], perm: &[usize], switches: &mut Vec<Switch>, bits
 
     // Input column: switch k acts on local (2k, 2k+1) → global (wires[2k], wires[2k+1]).
     for k in 0..half {
-        switches.push(Switch { a: wires[2 * k], b: wires[2 * k + 1] });
+        switches.push(Switch {
+            a: wires[2 * k],
+            b: wires[2 * k + 1],
+        });
         bits.push(solved.in_swap[k]);
     }
 
@@ -385,15 +394,18 @@ fn waksman_rec(wires: &[usize], perm: &[usize], switches: &mut Vec<Switch>, bits
 
     // Output column: switch k (k in 0..half) acts on global (wires[2k], wires[2k+1]).
     for k in 0..half {
-        switches.push(Switch { a: wires[2 * k], b: wires[2 * k + 1] });
+        switches.push(Switch {
+            a: wires[2 * k],
+            b: wires[2 * k + 1],
+        });
         bits.push(solved.out_swap[k]);
     }
 }
 
 /// The solved routing of one AS-Waksman level.
 struct WaksmanLevel {
-    in_swap: Vec<bool>,  // len half (per input switch)
-    out_swap: Vec<bool>, // len half (index 0 fixed false)
+    in_swap: Vec<bool>,   // len half (per input switch)
+    out_swap: Vec<bool>,  // len half (index 0 fixed false)
     top_perm: Vec<usize>, // permutation routed by the top sub-network (len ⌈m/2⌉)
     bot_perm: Vec<usize>, // permutation routed by the bottom sub-network (len ⌊m/2⌋)
 }
@@ -505,7 +517,11 @@ fn solve_waksman_level(m: usize, half: usize, odd: bool, perm: &[usize]) -> Waks
                             out_from_top[p] = Some(!t);
                             changed = true;
                         } else {
-                            debug_assert_eq!(out_from_top[p], Some(!t), "output pair conflict at {o}");
+                            debug_assert_eq!(
+                                out_from_top[p],
+                                Some(!t),
+                                "output pair conflict at {o}"
+                            );
                         }
                     }
                 }
@@ -567,7 +583,12 @@ fn solve_waksman_level(m: usize, half: usize, odd: bool, perm: &[usize]) -> Waks
         }
     }
 
-    WaksmanLevel { in_swap, out_swap, top_perm, bot_perm }
+    WaksmanLevel {
+        in_swap,
+        out_swap,
+        top_perm,
+        bot_perm,
+    }
 }
 
 // =====================================================================
@@ -599,7 +620,11 @@ impl ShuffleCost {
         } else {
             0
         };
-        ShuffleCost { items: n, switches, depth_rounds }
+        ShuffleCost {
+            items: n,
+            switches,
+            depth_rounds,
+        }
     }
 }
 
@@ -1046,7 +1071,11 @@ mod tests {
             let mut perm: Vec<usize> = (0..n).collect();
             permute_each(&mut perm, 0, &mut |p| {
                 let (switches, bits) = route_recording(p);
-                assert_eq!(switches, *net.switches(), "n={n} perm={p:?}: topology depends on data");
+                assert_eq!(
+                    switches,
+                    *net.switches(),
+                    "n={n} perm={p:?}: topology depends on data"
+                );
                 assert_eq!(bits.len(), switches.len());
             });
         }
@@ -1061,7 +1090,11 @@ mod tests {
             let net = WaksmanNetwork::new(n);
             let l = ceil_log2(n);
             let upper = 2 * n * l; // loose O(n log n) upper bound
-            assert!(net.switch_count() <= upper, "n={n}: {} > {upper}", net.switch_count());
+            assert!(
+                net.switch_count() <= upper,
+                "n={n}: {} > {upper}",
+                net.switch_count()
+            );
             assert!(net.switch_count() >= 1, "n={n}");
         }
     }
@@ -1084,7 +1117,10 @@ mod tests {
                     }
                 }
                 for (i, &pi) in p.iter().enumerate() {
-                    assert_eq!(labels[pi], i, "n={n} perm={p:?}: input {i} should land at {pi}");
+                    assert_eq!(
+                        labels[pi], i,
+                        "n={n} perm={p:?}: input {i} should land at {pi}"
+                    );
                 }
             });
         }
@@ -1122,7 +1158,10 @@ mod tests {
                 break;
             }
         }
-        assert!(any_reordered, "shuffle never reordered across 8 trials — suspicious");
+        assert!(
+            any_reordered,
+            "shuffle never reordered across 8 trials — suspicious"
+        );
     }
 
     #[test]
@@ -1158,7 +1197,11 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(seen.len(), 6, "AS-Waksman shuffle did not reach all 3! perms: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            6,
+            "AS-Waksman shuffle did not reach all 3! perms: {seen:?}"
+        );
     }
 
     /// A 4-item shuffle must also reach all 24 permutations (exercises the odd/even
@@ -1179,7 +1222,12 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(seen.len(), 24, "shuffle did not reach all 4! perms (saw {})", seen.len());
+        assert_eq!(
+            seen.len(),
+            24,
+            "shuffle did not reach all 4! perms (saw {})",
+            seen.len()
+        );
     }
 
     // ---- Sorting network: data-independent access pattern -----------------
@@ -1197,7 +1245,10 @@ mod tests {
         let cmp = SimulatedSecretComparator::new(t);
         let (_sa, ap_a, _) = sort_by(col_a, &cmp).unwrap();
         let (_sb, ap_b, _) = sort_by(col_b, &cmp).unwrap();
-        assert_eq!(ap_a, ap_b, "sort access pattern leaked data (differed across payloads)");
+        assert_eq!(
+            ap_a, ap_b,
+            "sort access pattern leaked data (differed across payloads)"
+        );
         assert_eq!(ap_a, SortingNetwork::new(8).compare_exchanges());
     }
 
@@ -1214,7 +1265,10 @@ mod tests {
                         v.swap(i, j);
                     }
                 }
-                assert!(v.windows(2).all(|w| w[0] <= w[1]), "n={n} mask={mask:b} not sorted: {v:?}");
+                assert!(
+                    v.windows(2).all(|w| w[0] <= w[1]),
+                    "n={n} mask={mask:b} not sorted: {v:?}"
+                );
             }
         }
     }
@@ -1234,7 +1288,11 @@ mod tests {
             let col = share_col(&mut dealer, &vals);
             let cmp = SimulatedSecretComparator::new(t);
             let (sorted, _ap, cost) = sort_by(col, &cmp).unwrap();
-            assert_eq!(open_col(t, &sorted), sorted_asc(vals.clone()), "sort wrong for {vals:?}");
+            assert_eq!(
+                open_col(t, &sorted),
+                sorted_asc(vals.clone()),
+                "sort wrong for {vals:?}"
+            );
             assert_eq!(cost.items, vals.len());
         }
     }
@@ -1263,7 +1321,11 @@ mod tests {
         let keys = vec![Fp::new(7); 4]; // all equal
         let col = share_col(&mut dealer, &payload);
         let (sorted_col, _k, _ap, _c) = sort_with_keys(col, keys).unwrap();
-        assert_eq!(open_col(t, &sorted_col), vec![1, 2, 3, 4], "equal keys must keep input order");
+        assert_eq!(
+            open_col(t, &sorted_col),
+            vec![1, 2, 3, 4],
+            "equal keys must keep input order"
+        );
     }
 
     // ---- Cost model ------------------------------------------------------
@@ -1361,7 +1423,11 @@ mod tests {
             let perm = random_permutation(&mut dealer, n).expect("valid n");
             let mut sorted = perm.clone();
             sorted.sort_unstable();
-            assert_eq!(sorted, (0..n).collect::<Vec<_>>(), "n={n}: not a permutation");
+            assert_eq!(
+                sorted,
+                (0..n).collect::<Vec<_>>(),
+                "n={n}: not a permutation"
+            );
         }
     }
 }

@@ -46,7 +46,10 @@ pub type HolderResult = Result<PartialResult, MpcError>;
 impl Holder {
     /// Create a holder from an already-built graph.
     pub fn new(id: impl Into<String>, graph: Graph) -> Self {
-        Holder { id: HolderId::new(id), graph }
+        Holder {
+            id: HolderId::new(id),
+            graph,
+        }
     }
 
     /// Create a holder by loading its wallet from an RDF document.
@@ -56,8 +59,10 @@ impl Holder {
     /// [`MpcError::LocalEval`].
     pub fn from_rdf(id: impl Into<String>, text: &str, format: &str) -> Result<Self, MpcError> {
         let id = HolderId::new(id);
-        let graph = Graph::load_str(text, format)
-            .map_err(|e| MpcError::LocalEval { holder: id.clone(), message: e })?;
+        let graph = Graph::load_str(text, format).map_err(|e| MpcError::LocalEval {
+            holder: id.clone(),
+            message: e,
+        })?;
         Ok(Holder { id, graph })
     }
 
@@ -89,9 +94,15 @@ impl Holder {
     /// fragment a holder is willing to disclose locally; cross-source secret
     /// values are handled by the (deferred) MPC layer, not by widening this.
     pub fn evaluate_local(&self, fragment_sparql: &str) -> HolderResult {
-        let result = query(&self.graph, fragment_sparql)
-            .map_err(|e| MpcError::LocalEval { holder: self.id.clone(), message: e })?;
-        Ok(PartialResult { holder: self.id.clone(), vars: result.vars, rows: result.rows })
+        let result = query(&self.graph, fragment_sparql).map_err(|e| MpcError::LocalEval {
+            holder: self.id.clone(),
+            message: e,
+        })?;
+        Ok(PartialResult {
+            holder: self.id.clone(),
+            vars: result.vars,
+            rows: result.rows,
+        })
     }
 }
 
@@ -107,14 +118,13 @@ mod tests {
     /// partials — and asserts each holder's partial reflects ONLY its own data.
     #[test]
     fn two_holders_each_answer_locally_over_their_own_graphs() {
-        const PREFIX: &str = "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n";
+        const PREFIX: &str =
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n";
 
         // Alice's wallet: one person earning 30k.
         let alice = Holder::from_rdf(
             "alice",
-            &format!(
-                "{PREFIX} ex:alice ex:name \"Alice\" ; ex:salary \"30000\"^^xsd:integer ."
-            ),
+            &format!("{PREFIX} ex:alice ex:name \"Alice\" ; ex:salary \"30000\"^^xsd:integer ."),
             "turtle",
         )
         .expect("alice wallet parses");
@@ -123,9 +133,7 @@ mod tests {
         // Alice's — neither holder can see the other's graph.
         let bob = Holder::from_rdf(
             "bob",
-            &format!(
-                "{PREFIX} ex:bob ex:name \"Bob\" ; ex:salary \"45000\"^^xsd:integer ."
-            ),
+            &format!("{PREFIX} ex:bob ex:name \"Bob\" ; ex:salary \"45000\"^^xsd:integer ."),
             "turtle",
         )
         .expect("bob wallet parses");
@@ -185,8 +193,12 @@ mod tests {
     /// holder — not a panic, not a silent empty result.
     #[test]
     fn malformed_fragment_is_a_real_local_error() {
-        let h = Holder::from_rdf("dave", "@prefix ex: <http://ex/> . ex:a ex:b ex:c .", "turtle")
-            .unwrap();
+        let h = Holder::from_rdf(
+            "dave",
+            "@prefix ex: <http://ex/> . ex:a ex:b ex:c .",
+            "turtle",
+        )
+        .unwrap();
         let err = h.evaluate_local("this is not sparql").unwrap_err();
         match err {
             MpcError::LocalEval { holder, .. } => assert_eq!(holder, HolderId::new("dave")),

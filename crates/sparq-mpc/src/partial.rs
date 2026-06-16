@@ -125,7 +125,10 @@ impl MpcError {
     /// Used by every crypto-deferred trait method so the gate is uniform and
     /// greppable.
     pub fn not_yet(what: &str, gated_on: &str) -> Self {
-        MpcError::NotYetImplemented { what: what.to_string(), gated_on: gated_on.to_string() }
+        MpcError::NotYetImplemented {
+            what: what.to_string(),
+            gated_on: gated_on.to_string(),
+        }
     }
 }
 
