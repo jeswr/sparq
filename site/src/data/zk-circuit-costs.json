@@ -1,0 +1,258 @@
+{
+  "_comment": "[OPUS-4.8] Per-member ZK circuit cost + semantics table for the website ZK-benchmark page. gate_count values are the DETERMINISTIC committed snapshot (crates/sparq-zk-compose/tests/gate_count_snapshot.json, `bb gates -s ultra_honk` circuit_size, bb 5.0.0-nightly.20260324, nargo 1.0.0-beta.21). prove_ms_t1 / prove_ms_tN are INDICATIVE / NON-CANONICAL (native `bb prove` on a shared EC2 work box, wall-clock incl. process startup + CRS/SRS load) and are populated ONLY for filter_int_d2 (the live browser circuit) where a measurement exists; null everywhere else (NOT fabricated). proof/vk size and verify time are CONSTANT across the family (ultra_honk succinctness) and are NOT per-member fields here. STANDING CAVEAT: the composition verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn / sq-1s2); the estate is research-grade, internally reviewed only, NOT externally audited; the separate MPC layer is semi-honest. A passing/fast proof is NOT a soundness or privacy guarantee under an adversarial prover.",
+  "snapshot_source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json",
+  "gate_tool": "bb gates -s ultra_honk (circuit_size)",
+  "bb_version": "5.0.0-nightly.20260324",
+  "nargo_version": "1.0.0-beta.21",
+  "timing_caveat": "prove_ms_* are INDICATIVE / NON-CANONICAL native bb prove wall-clock on a shared EC2 box (includes process startup + CRS/SRS load); populated only where measured; null = unmeasured (not fabricated). Verify time, proof bytes and vk bytes are constant across the family and are not per-member fields.",
+  "soundness_caveat": "Composition verifier NOT-yet-sound (sq-qhy4/sq-9hrn/sq-1s2). Research-grade, NOT externally audited. MPC layer (separate) is semi-honest. A 'verified' result is not production-trustworthy.",
+  "constant_family_costs": {
+    "proof_bytes_noir_recursive": 14656,
+    "proof_bytes_evm_keccak": 8384,
+    "vk_bytes": 3680,
+    "verify_ms_aarch64": 12,
+    "note": "proof/vk size and verify time are constant across the whole family (ultra_honk). evm/keccak flavour proof is smaller and still zero-knowledge (disableZk:false)."
+  },
+  "members": [
+    {
+      "member": "filter_int_d1",
+      "proves": "The hidden xsd:integer behind the committed term operand_enc satisfies (value op bound) == expected, without disclosing the value (1-digit).",
+      "primitive": "range/comparison over a hidden integer (in-circuit blake3 operand-to-commitment binding)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot gate_count_snapshot.json; bench/zk-compose/gate_counts_latest.json=17416; family_cost_curve.json prove ~1.062s (darwin/aarch64 t8, non-canonical)"
+    },
+    {
+      "member": "filter_int_d2",
+      "proves": "I know a 2-digit canonical xsd:integer whose committed N-Triples token hashes to operand_enc AND value >= 25, without disclosing the age. THE LIVE BROWSER STATEMENT.",
+      "primitive": "range/comparison over a hidden integer (in-circuit blake3 operand-to-commitment binding)",
+      "exercised_live": true,
+      "gate_count": 17416,
+      "prove_ms_t1": 1314,
+      "prove_ms_tN": 469,
+      "source": "snapshot=17416 (RE-RAN bb gates on shipped site/public/zk/filter_int_d2.json = match). prove_ms native bb prove this EC2 box (NON-CANONICAL, incl startup+CRS): t1 ~1314-1340ms (3 runs tight), t8 ~469-1079ms (noisy). Corroborates Node research figure ~1285-1295ms t1 / ~306-358ms t8 (~4.2x). research/zk-browser-perf-assessment.md."
+    },
+    {
+      "member": "filter_int_d3",
+      "proves": "Same as filter_int_d2 for a 3-digit hidden xsd:integer (D leaks only ceil(log10(value))).",
+      "primitive": "range/comparison over a hidden integer (in-circuit blake3 operand-to-commitment binding)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-wto, closes 3-digit gap). Gate count flat in D (blake3 token fits one 64-byte block)."
+    },
+    {
+      "member": "filter_int_d4",
+      "proves": "Same as filter_int_d2 for a 4-digit hidden xsd:integer.",
+      "primitive": "range/comparison over a hidden integer (in-circuit blake3 operand-to-commitment binding)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot; gate_counts_latest.json=17416; family_cost_curve.json prove ~1.071s (non-canonical). Flat in D."
+    },
+    {
+      "member": "filter_f64",
+      "proves": "Raw IEEE-754 double comparison building block (free a_bits, NON-composable; no committed-token binding).",
+      "primitive": "range/comparison over IEEE-754 doubles (raw bits, building block only)",
+      "exercised_live": false,
+      "gate_count": 3113,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot; gate_counts_latest.json=3113; family_cost_curve.json prove ~0.777s (fastest, non-canonical). Cheapest non-revoke member — no string hashing."
+    },
+    {
+      "member": "filter_f64_d1",
+      "proves": "The hidden integer-valued xsd:double behind operand_enc satisfies (f64::from(value) op b_bits) == expected under IEEE semantics, value bound to the committed decimal-digit token (1-digit).",
+      "primitive": "range/comparison over IEEE-754 doubles (composable; in-circuit operand-to-commitment binding, IEEE bits derived from bound value)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-q7e/sq-tat). Same canonical decimal-digit token as filter_int -> same 17416 gates. Flat in D."
+    },
+    {
+      "member": "filter_f64_d2",
+      "proves": "Same as filter_f64_d1 for a 2-digit hidden xsd:double.",
+      "primitive": "range/comparison over IEEE-754 doubles (composable; in-circuit operand-to-commitment binding)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-q7e/sq-tat). Flat in D."
+    },
+    {
+      "member": "filter_f64_d3",
+      "proves": "Same as filter_f64_d1 for a 3-digit hidden xsd:double.",
+      "primitive": "range/comparison over IEEE-754 doubles (composable; in-circuit operand-to-commitment binding)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-q7e/sq-tat). Flat in D."
+    },
+    {
+      "member": "filter_f64_d4",
+      "proves": "Same as filter_f64_d1 for a 4-digit hidden xsd:double.",
+      "primitive": "range/comparison over IEEE-754 doubles (composable; in-circuit operand-to-commitment binding)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-q7e/sq-tat). Flat in D."
+    },
+    {
+      "member": "scan_k1_n16_r4",
+      "proves": "Every disclosed row matches the BGP pattern constants AND occurs in an active slot of the committed graph, AND every matching active slot is disclosed (scan completeness). K=1 graph, N=16 slots, R=4 rows.",
+      "primitive": "set-membership + completeness (BGP triple-pattern scan over committed graphs; per-graph Poseidon2 commit recompute)",
+      "exercised_live": false,
+      "gate_count": 5991,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot; RE-RAN bb gates this box = 5991 (match); family_cost_curve.json prove ~0.902s (non-canonical). Smallest scan."
+    },
+    {
+      "member": "scan_k1_n16_r8",
+      "proves": "Same scan soundness+completeness. K=1, N=16, R=8.",
+      "primitive": "set-membership + completeness (BGP triple-pattern scan over committed graphs)",
+      "exercised_live": false,
+      "gate_count": 7038,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-pzet, linux x86_64 baseline)."
+    },
+    {
+      "member": "scan_k1_n64_r4",
+      "proves": "Same scan soundness+completeness. K=1, N=64, R=4 (~linear in k*n).",
+      "primitive": "set-membership + completeness (BGP triple-pattern scan over committed graphs)",
+      "exercised_live": false,
+      "gate_count": 14923,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-pzet)."
+    },
+    {
+      "member": "scan_k1_n64_r8",
+      "proves": "Same scan soundness+completeness. K=1, N=64, R=8.",
+      "primitive": "set-membership + completeness (BGP triple-pattern scan over committed graphs)",
+      "exercised_live": false,
+      "gate_count": 18850,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-pzet)."
+    },
+    {
+      "member": "scan_k2_n16_r4",
+      "proves": "Same scan soundness+completeness with per-graph attribution and strictly-increasing commitments (anti duplicate-inclusion). K=2 graphs, N=16, R=4.",
+      "primitive": "set-membership + completeness (BGP triple-pattern scan over K committed graphs)",
+      "exercised_live": false,
+      "gate_count": 9254,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-pzet)."
+    },
+    {
+      "member": "scan_k2_n16_r8",
+      "proves": "Same K=2 scan soundness+completeness. N=16, R=8.",
+      "primitive": "set-membership + completeness (BGP triple-pattern scan over K committed graphs)",
+      "exercised_live": false,
+      "gate_count": 11261,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot; gate_counts_latest.json=11261; family_cost_curve.json prove ~1.061s (non-canonical)."
+    },
+    {
+      "member": "scan_k2_n64_r4",
+      "proves": "Same K=2 scan soundness+completeness. N=64, R=4. 2nd heaviest member.",
+      "primitive": "set-membership + completeness (BGP triple-pattern scan over K committed graphs)",
+      "exercised_live": false,
+      "gate_count": 27054,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-pzet)."
+    },
+    {
+      "member": "scan_k2_n64_r8",
+      "proves": "Same K=2 scan soundness+completeness. N=64, R=8. HEAVIEST member — commitment-recompute sweep + completeness double-loop dominate.",
+      "primitive": "set-membership + completeness (BGP triple-pattern scan over K committed graphs)",
+      "exercised_live": false,
+      "gate_count": 34821,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot; gate_counts_latest.json=34821; family_cost_curve.json prove ~1.828s (non-canonical)."
+    },
+    {
+      "member": "join_eq_na16_nb16",
+      "proves": "Two committed graphs each contain a present row whose values at the query-bound join slots are EQUAL, with a hiding join_commitment binding the shared value — the joined entity NEVER appears in a public input. N_A=16, N_B=16. Smallest join.",
+      "primitive": "equality-join (hidden cross-credential JOIN, single-prover; hides the joined term from the verifier)",
+      "exercised_live": false,
+      "gate_count": 7025,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot; gate_counts_latest.json=7025 (sq-bwwl/sq-r2s8)."
+    },
+    {
+      "member": "join_eq_na16_nb64",
+      "proves": "Same hidden equi-join. N_A=16, N_B=64.",
+      "primitive": "equality-join (hidden cross-credential JOIN, single-prover)",
+      "exercised_live": false,
+      "gate_count": 12885,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-pzet). Same as na64_nb16 by bucket-size symmetry."
+    },
+    {
+      "member": "join_eq_na64_nb16",
+      "proves": "Same hidden equi-join. N_A=64, N_B=16.",
+      "primitive": "equality-join (hidden cross-credential JOIN, single-prover)",
+      "exercised_live": false,
+      "gate_count": 12885,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-pzet)."
+    },
+    {
+      "member": "join_eq_na64_nb64",
+      "proves": "Same hidden equi-join. N_A=64, N_B=64. Largest join (composes a hidden join with an n=64 scan).",
+      "primitive": "equality-join (hidden cross-credential JOIN, single-prover)",
+      "exercised_live": false,
+      "gate_count": 18681,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-pzet)."
+    },
+    {
+      "member": "hidden_issuer_d4",
+      "proves": "There exists an issuer pk that (1) is a member of the committed trusted key-set (public Poseidon2 Merkle root) and (2) produced a valid Schnorr signature over the public commitment message m — revealing NEITHER pk, the signature, NOR which authority vouched. Depth-4 = up to 16 issuers.",
+      "primitive": "signature-verification + set-membership (in-circuit Schnorr-over-Baby-JubJub + hidden-key Merkle membership)",
+      "exercised_live": false,
+      "gate_count": 16932,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot; RE-RAN bb gates this box = 16932 (match) (sq-z9l). Two ~251-bit twisted-Edwards scalar muls dominate (explicit Field constraints; embedded_curve_* is Grumpkin/wrong curve). Heaviest non-scan/non-filter operator. ADDITIVE only — clear-key attestation still mandatory."
+    },
+    {
+      "member": "holder_pok",
+      "proves": "I know a holder secret hsk and point hpk = hsk*G on Baby-JubJub with Poseidon2([ZKSIG_HK,hpk.x,hpk.y]) == the issuer-attested holder_pk_digest — disclosing neither hsk nor hpk (only the digest is public).",
+      "primitive": "proof-of-possession / proof-of-knowledge (Baby-JubJub key-pair PoK, hidden-key tier)",
+      "exercised_live": false,
+      "gate_count": 10334,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-xqfg). One ~251-bit scalar-mul. The in-circuit hidden-key tier (B2) is DEFERRED at the manifest seam; the LANDED holder binding is the clear-key B1 tier that discloses hpk."
+    },
+    {
+      "member": "revoke_unset_d10",
+      "proves": "The status bit at my HIDDEN list index is 0 (not revoked), via Merkle inclusion to the public status-list root, AND the public index_commitment is a Poseidon2 commitment to that same hidden index — disclosing neither the index nor other bits. Depth-10 = 1024 indices.",
+      "primitive": "non-membership / hidden-index status (Merkle inclusion + bit-unset + index-commitment cross-binding)",
+      "exercised_live": false,
+      "gate_count": 899,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot=899; RE-RAN bb gates this box = 899 (match) (sq-3e5/sq-h2v). CHEAPEST member. STATUS.md cites stale 822 (older darwin baseline); committed snapshot 899 (linux) is authoritative. RESIDUAL gap: clear-index path still leaks the index unless the committed-index path is used."
+    }
+  ]
+}
