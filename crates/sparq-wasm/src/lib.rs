@@ -73,7 +73,10 @@ impl SolutionCursor {
             return None;
         }
         let end = (self.pos + self.batch_size).min(total);
-        let json = sparq_engine::json::to_sparql_json_rows(&self.result.vars, &self.result.rows[self.pos..end]);
+        let json = sparq_engine::json::to_sparql_json_rows(
+            &self.result.vars,
+            &self.result.rows[self.pos..end],
+        );
         // Advance past `end`; for an empty result step from 0 to 1 so the next call stops.
         self.pos = if total == 0 { 1 } else { end };
         Some(json)
@@ -81,7 +84,11 @@ impl SolutionCursor {
 
     /// The projected variable names, in order — the `head.vars` shared by every batch.
     pub fn vars(&self) -> Vec<String> {
-        self.result.vars.iter().map(|v| v.as_str().to_string()).collect()
+        self.result
+            .vars
+            .iter()
+            .map(|v| v.as_str().to_string())
+            .collect()
     }
 
     /// The total number of solution rows in the (already materialised) result.
@@ -186,10 +193,15 @@ impl Store {
     /// which holds at most one chunk at a time.
     #[wasm_bindgen(js_name = queryChunks)]
     pub fn query_chunks(&self, sparql: &str) -> Result<QueryChunks, JsError> {
-        let chunks =
-            sparq_engine::query_json_chunks_with_budget(&self.graph, sparql, &sparq_engine::QueryBudget::unlimited())
-                .map_err(|e| JsError::new(&e))?;
-        Ok(QueryChunks { chunks: chunks.into_iter() })
+        let chunks = sparq_engine::query_json_chunks_with_budget(
+            &self.graph,
+            sparql,
+            &sparq_engine::QueryBudget::unlimited(),
+        )
+        .map_err(|e| JsError::new(&e))?;
+        Ok(QueryChunks {
+            chunks: chunks.into_iter(),
+        })
     }
 
     /// Runs a SELECT (or ASK) query and returns a [`SolutionCursor`] that yields the
@@ -206,7 +218,11 @@ impl Store {
     #[wasm_bindgen(js_name = queryCursor)]
     pub fn query_cursor(&self, sparql: &str, batch_size: usize) -> Result<SolutionCursor, JsError> {
         let result = sparq_engine::query(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
-        Ok(SolutionCursor { result, pos: 0, batch_size: batch_size.max(1) })
+        Ok(SolutionCursor {
+            result,
+            pos: 0,
+            batch_size: batch_size.max(1),
+        })
     }
 
     /// Runs a **CONSTRUCT or DESCRIBE** query and returns the resulting RDF graph
@@ -232,12 +248,21 @@ impl Store {
     /// least 1. Caveat: as with [`queryQuads`](Self::query_quads) the full graph is
     /// materialised inside wasm before the first batch; the bound is on the JS-side copy.
     #[wasm_bindgen(js_name = queryQuadsChunks)]
-    pub fn query_quads_chunks(&self, sparql: &str, batch_size: usize) -> Result<QuadChunks, JsError> {
-        let triples = sparq_engine::construct_or_describe(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
+    pub fn query_quads_chunks(
+        &self,
+        sparql: &str,
+        batch_size: usize,
+    ) -> Result<QuadChunks, JsError> {
+        let triples = sparq_engine::construct_or_describe(&self.graph, sparql)
+            .map_err(|e| JsError::new(&e))?;
         let batch = batch_size.max(1);
-        let chunks: Vec<String> =
-            triples.chunks(batch).map(sparq_engine::triples_to_ntriples).collect();
-        Ok(QuadChunks { chunks: chunks.into_iter() })
+        let chunks: Vec<String> = triples
+            .chunks(batch)
+            .map(sparq_engine::triples_to_ntriples)
+            .collect();
+        Ok(QuadChunks {
+            chunks: chunks.into_iter(),
+        })
     }
 
     /// Counts the solutions of a SELECT query *without* materialising them — for a
@@ -312,7 +337,40 @@ impl Store {
     /// triples CAN be retracted (impossible via SPARQL `DELETE DATA`).
     #[wasm_bindgen(js_name = applyDelta)]
     pub fn apply_delta(&mut self, inserts: &str, deletes: &str) -> Result<(), JsError> {
-        self.graph.apply_delta_nquads(inserts, deletes).map_err(|e| JsError::new(&e))
+        self.graph
+            .apply_delta_nquads(inserts, deletes)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// [OPUS-4.8] sq-ncvq.14: query-plan introspection — `EXPLAIN`.
+    ///
+    /// Returns the engine's plan for `sparql` as a human-readable string — the
+    /// algebra tree plus, per BGP, the chosen join order with cardinality
+    /// estimates, per-step join strategy and pushed-down filters — **without
+    /// executing the query** (a planning-only dry run; cheap regardless of the
+    /// query's run cost). This is the same plan text the Rust API
+    /// (`sparq_engine::explain`) and the HTTP endpoint (`explain` / `explain=plan`
+    /// query parameter, or `Accept: text/x-sparq-explain`) return, now exposed to
+    /// JS consumers so the browser/JS surface has the same plan introspection.
+    /// Works for every query form (SELECT / ASK / CONSTRUCT / DESCRIBE); use
+    /// [`explainAnalyze`](Self::explain_analyze) to also run and trace it.
+    pub fn explain(&self, sparql: &str) -> Result<String, JsError> {
+        sparq_engine::explain(&self.graph, sparql).map_err(|e| JsError::new(&e))
+    }
+
+    /// [OPUS-4.8] sq-ncvq.14: query-plan introspection — `EXPLAIN ANALYZE`.
+    ///
+    /// Like [`explain`](Self::explain) but **executes** the query (SELECT / ASK
+    /// only) and appends a per-operator execution trace — output row count per
+    /// operator, plus totals — after the plan. The returned string matches the
+    /// Rust API (`sparq_engine::explain_analyze`) and the HTTP `explain=analyze`
+    /// response. Wall times read 0 on `wasm32` (no monotonic clock — `Instant` is
+    /// unusable there); the row counts are exact. A CONSTRUCT / DESCRIBE / UPDATE
+    /// query is rejected with a clear error — use [`explain`](Self::explain) for
+    /// the graph-valued forms.
+    #[wasm_bindgen(js_name = explainAnalyze)]
+    pub fn explain_analyze(&self, sparql: &str) -> Result<String, JsError> {
+        sparq_engine::explain_analyze(&self.graph, sparql).map_err(|e| JsError::new(&e))
     }
 }
 
@@ -348,7 +406,11 @@ mod tests {
     #[test]
     fn escaping_through_json() {
         // A literal containing a quote and backslash must be JSON-escaped.
-        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a ex:p \"q\\\"x\" .", "turtle").unwrap();
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:p \"q\\\"x\" .",
+            "turtle",
+        )
+        .unwrap();
         let r = sparq_engine::query(&g, "SELECT ?o WHERE { ?s ?p ?o }").unwrap();
         let json = sparq_engine::json::to_sparql_json(&r);
         assert!(json.contains("\"value\":\"q\\\"x\""), "got: {json}");
@@ -357,7 +419,11 @@ mod tests {
     #[test]
     fn uri_and_bnode() {
         let g = Graph::load_str(DATA, "turtle").unwrap();
-        let r = sparq_engine::query(&g, "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:knows ?o }").unwrap();
+        let r = sparq_engine::query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:knows ?o }",
+        )
+        .unwrap();
         let json = sparq_engine::json::to_sparql_json(&r);
         assert!(json.contains("\"type\":\"uri\",\"value\":\"http://ex/bob\""));
     }
@@ -378,16 +444,25 @@ mod tests {
 
         let b0 = cur.next().expect("first batch");
         let b1 = cur.next().expect("second batch");
-        assert!(cur.next().is_none(), "cursor must be exhausted after the last batch");
+        assert!(
+            cur.next().is_none(),
+            "cursor must be exhausted after the last batch"
+        );
 
         // Each batch is a self-contained SPARQL-JSON doc with the full head vars.
         for b in [&b0, &b1] {
-            assert!(b.contains("\"vars\":[\"s\",\"n\"]"), "batch missing head vars: {b}");
+            assert!(
+                b.contains("\"vars\":[\"s\",\"n\"]"),
+                "batch missing head vars: {b}"
+            );
         }
         // One binding row per batch (batch_size 1), and together they carry both names.
         assert_eq!(b0.matches("\"n\":{").count(), 1);
         assert_eq!(b1.matches("\"n\":{").count(), 1);
-        assert!((b0.contains("\"Alice\"") && b1.contains("Bob")) || (b1.contains("\"Alice\"") && b0.contains("Bob")));
+        assert!(
+            (b0.contains("\"Alice\"") && b1.contains("Bob"))
+                || (b1.contains("\"Alice\"") && b0.contains("Bob"))
+        );
     }
 
     /// A batch larger than the result yields everything in one batch; a zero batch size
@@ -400,7 +475,11 @@ mod tests {
         let mut big = store.query_cursor(q, 1000).unwrap();
         let only = big.next().expect("single batch");
         assert!(big.next().is_none());
-        assert_eq!(only.matches("\"n\":{").count(), 2, "oversized batch must hold all rows");
+        assert_eq!(
+            only.matches("\"n\":{").count(),
+            2,
+            "oversized batch must hold all rows"
+        );
 
         let mut zero = store.query_cursor(q, 0).unwrap();
         assert_eq!(zero.batch_size(), 1, "batch size clamps to >= 1");
@@ -412,11 +491,22 @@ mod tests {
     #[test]
     fn cursor_empty_result_yields_one_empty_batch() {
         let store = Store::load(DATA, "turtle").unwrap();
-        let mut cur = store.query_cursor("PREFIX ex: <http://ex/> SELECT ?x WHERE { ?s ex:nope ?x }", 8).unwrap();
+        let mut cur = store
+            .query_cursor(
+                "PREFIX ex: <http://ex/> SELECT ?x WHERE { ?s ex:nope ?x }",
+                8,
+            )
+            .unwrap();
         assert_eq!(cur.row_count(), 0);
         let only = cur.next().expect("one empty batch even with zero rows");
-        assert!(only.contains("\"bindings\":[]"), "empty result batch must have empty bindings: {only}");
-        assert!(cur.next().is_none(), "exhausted after the single empty batch");
+        assert!(
+            only.contains("\"bindings\":[]"),
+            "empty result batch must have empty bindings: {only}"
+        );
+        assert!(
+            cur.next().is_none(),
+            "exhausted after the single empty batch"
+        );
     }
 
     // ---- sq-hlq: CONSTRUCT / DESCRIBE -> quads ----
@@ -432,9 +522,19 @@ mod tests {
             )
             .unwrap();
         // Two name triples -> two constructed triples, each a full N-Triples line.
-        assert_eq!(nt.lines().filter(|l| !l.trim().is_empty()).count(), 2, "got: {nt}");
-        assert!(nt.contains("<http://ex/label>"), "predicate IRI expanded: {nt}");
-        assert!(nt.contains("<http://ex/alice> <http://ex/label> \"Alice\" ."), "got: {nt}");
+        assert_eq!(
+            nt.lines().filter(|l| !l.trim().is_empty()).count(),
+            2,
+            "got: {nt}"
+        );
+        assert!(
+            nt.contains("<http://ex/label>"),
+            "predicate IRI expanded: {nt}"
+        );
+        assert!(
+            nt.contains("<http://ex/alice> <http://ex/label> \"Alice\" ."),
+            "got: {nt}"
+        );
         // Language tag preserved on the constructed literal.
         assert!(nt.contains("\"Bob\"@en"), "lang tag preserved: {nt}");
     }
@@ -445,9 +545,15 @@ mod tests {
         let store = Store::load(DATA, "turtle").unwrap();
         let nt = store.query_quads("DESCRIBE <http://ex/bob>").unwrap();
         // CBD of ex:bob = its outgoing triples (name + age), nothing inbound.
-        assert!(nt.contains("<http://ex/bob> <http://ex/name> \"Bob\"@en ."), "got: {nt}");
+        assert!(
+            nt.contains("<http://ex/bob> <http://ex/name> \"Bob\"@en ."),
+            "got: {nt}"
+        );
         assert!(nt.contains("<http://ex/bob> <http://ex/age>"), "got: {nt}");
-        assert!(!nt.contains("<http://ex/alice>"), "CBD must not pull in inbound subjects: {nt}");
+        assert!(
+            !nt.contains("<http://ex/alice>"),
+            "CBD must not pull in inbound subjects: {nt}"
+        );
     }
 
     /// `queryQuadsChunks` batches the constructed graph; concatenation == `queryQuads`.
@@ -465,7 +571,10 @@ mod tests {
             reassembled.push_str(&c);
         }
         assert_eq!(n_batches, 2, "batch_size 1 over 2 triples => 2 batches");
-        assert_eq!(reassembled, whole, "chunked N-Triples must reassemble to the whole document");
+        assert_eq!(
+            reassembled, whole,
+            "chunked N-Triples must reassemble to the whole document"
+        );
     }
 
     /// A SELECT routed to the quad path is rejected (it is not a graph-valued query).
@@ -495,8 +604,16 @@ mod tests {
         assert!(sparq_engine::ask(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o }").unwrap());
         assert!(!sparq_engine::ask(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap());
         // FILTER is evaluated (not just an existence count): true above the threshold, false below.
-        assert!(sparq_engine::ask(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 28) }").unwrap());
-        assert!(!sparq_engine::ask(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 99) }").unwrap());
+        assert!(sparq_engine::ask(
+            &g,
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 28) }"
+        )
+        .unwrap());
+        assert!(!sparq_engine::ask(
+            &g,
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 99) }"
+        )
+        .unwrap());
     }
 
     /// A non-ASK query routed to the ask path is rejected with a clear error (the message the
@@ -505,8 +622,15 @@ mod tests {
     fn ask_rejects_non_ask() {
         let g = Graph::load_str(DATA, "turtle").unwrap();
         let err = sparq_engine::ask(&g, "SELECT ?s WHERE { ?s ?p ?o }").unwrap_err();
-        assert!(err.contains("ASK"), "rejection must mention ASK, got: {err}");
-        assert!(sparq_engine::ask(&g, "PREFIX ex: <http://ex/> CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }").is_err());
+        assert!(
+            err.contains("ASK"),
+            "rejection must mention ASK, got: {err}"
+        );
+        assert!(sparq_engine::ask(
+            &g,
+            "PREFIX ex: <http://ex/> CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"
+        )
+        .is_err());
     }
 
     /// The budgeted dispatch builds a `max_rows` working-set cap on the portable (wasm-safe)
@@ -531,7 +655,68 @@ mod tests {
         let mut starved = sparq_engine::QueryBudget::unlimited();
         starved.max_rows = Some(0);
         let err = sparq_engine::ask_with_budget(&g, q, &starved).unwrap_err();
-        assert!(err.contains("budget"), "starved budget must report a budget error, got: {err}");
+        assert!(
+            err.contains("budget"),
+            "starved budget must report a budget error, got: {err}"
+        );
+    }
+
+    // ---- sq-ncvq.14: EXPLAIN / EXPLAIN ANALYZE through the wasm layer ----
+    //
+    // `Store::explain` / `Store::explainAnalyze` are thin `JsError`-mapping wrappers over
+    // `sparq_engine::explain` / `explain_analyze`. The mapping closure cannot run on a native
+    // target (`JsError::new` is a wasm-bindgen import that panics off-wasm), so — exactly as
+    // the quad/ask tests above do — these assert against the engine functions the exports
+    // delegate to: this task wires up the dispatch, and the engine's own `explain` module
+    // tests already cover the plan text / trace content in detail.
+
+    /// EXPLAIN returns the planning-only plan text — the query form header and the
+    /// `Plan:` tree — without executing the query.
+    #[test]
+    fn explain_returns_plan_text() {
+        let g = Graph::load_str(DATA, "turtle").unwrap();
+        let plan = sparq_engine::explain(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?n ?a WHERE { ?s ex:name ?n . ?s ex:age ?a }",
+        )
+        .unwrap();
+        assert!(
+            plan.contains("EXPLAIN (SELECT)"),
+            "plan must name the query form: {plan}"
+        );
+        assert!(
+            plan.contains("Plan:"),
+            "plan must include the plan tree header: {plan}"
+        );
+        // A malformed query surfaces an error (which the wrapper maps to a JsError).
+        assert!(sparq_engine::explain(&g, "SELECT WHERE {").is_err());
+    }
+
+    /// EXPLAIN ANALYZE returns the plan plus an execution trace for SELECT/ASK, and
+    /// rejects the graph-valued forms (CONSTRUCT/DESCRIBE) with a clear error.
+    #[test]
+    fn explain_analyze_returns_trace_and_rejects_construct() {
+        let g = Graph::load_str(DATA, "turtle").unwrap();
+        let r = sparq_engine::explain_analyze(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }",
+        )
+        .unwrap();
+        assert!(
+            r.contains("EXPLAIN ANALYZE (SELECT)"),
+            "must name analyze + form: {r}"
+        );
+        assert!(
+            r.contains("Plan:"),
+            "analyze output must include the plan: {r}"
+        );
+        // CONSTRUCT/DESCRIBE are explain-only — explain_analyze rejects them.
+        let err = sparq_engine::explain_analyze(&g, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+            .unwrap_err();
+        assert!(
+            err.contains("EXPLAIN ANALYZE"),
+            "rejection must mention EXPLAIN ANALYZE, got: {err}"
+        );
     }
 
     #[test]
