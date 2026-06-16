@@ -68,6 +68,7 @@ mapfile -t FILES < <(
     '*.md' '*.mdx' '*.tsx' '*.ts' \
     ':!:research/**' \
     ':!:**/*audit*.md' \
+    ':!:.claude/agents/**' \
     ':!:scripts/check-privacy-claims.sh' \
     ':!:.github/workflows/docs-quality.yml' \
     ':!:.git/**' ':!:target/**' ':!:**/target/**' \
