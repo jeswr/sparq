@@ -35,7 +35,7 @@ without re-deriving it. All paths are repo-relative; all CI job names match
 Reproduce:
 
 ```sh
-cargo cyclonedx --all --format json
+cargo cyclonedx --all --format json --spec-version 1.5   # [OPUS-4.8] sq-toze.28 (GS-4): 1.5, matches the VEX
 # then inspect crates/sparq-server/sparq-server.cdx.json
 ```
 
@@ -44,7 +44,8 @@ features, this branch — re-run **2026-06-15** to verify the `author`/`supplier
 
 | Field | Observed value | NTIA / CDX control |
 |---|---|---|
-| `bomFormat` / `specVersion` | `CycloneDX` / `1.3` | CDX-1 (valid); CDX-3 (spec version — see GS-4) |
+| `bomFormat` / `specVersion` | `CycloneDX` / `1.5` ([OPUS-4.8] sq-toze.28: `--spec-version 1.5`, matches the VEX) | CDX-1 (valid); CDX-3 ✅ (GS-4 RESOLVED) |
+| `metadata.lifecycles` | `[{"phase":"build"}]` (1.5-only slot, injected by `scripts/sbom-normalize.jq`) | CDX-3 (1.5 lifecycle metadata) ✅ |
 | `serialNumber` | present | CDX-1 |
 | `metadata.timestamp` | `2026-06-15T23:49Z` (varies per run) | N7 ✅ |
 | `metadata.tools` | `{vendor: CycloneDX, name: cargo-cyclonedx, version: 0.5.9}` | N6 ✅ (SBOM-author = tool) |
@@ -65,7 +66,25 @@ component-originator identity and the closest field to NTIA *Supplier Name* — 
 **144/166** components from each crate's `authors` metadata; only the dedicated `supplier`/`publisher`
 slot is empty (**0/166**). So **one** NTIA element — *Supplier Name* (`supplier`/`publisher`) — is
 left **partial** (author-granularity present, supplier-granularity empty); this is the one genuine
-NTIA-completeness gap (**N1/GS-1**). The generated SBOM is `specVersion 1.3` while the VEX is `1.5`.
+NTIA-completeness gap (**N1/GS-1**). The generated SBOM is now `specVersion 1.5` ([OPUS-4.8],
+sq-toze.28 — `cargo cyclonedx … --spec-version 1.5`), matching the VEX (`1.5`), and carries the
+1.5-only `metadata.lifecycles` slot (`[{"phase":"build"}]`, injected by `scripts/sbom-normalize.jq`).
+
+> **SBOM at CycloneDX 1.5 — spec-version gap RESOLVED (CDX-3/GS-4, bead sq-toze.28, [OPUS-4.8]):**
+> Both SBOM call-sites (`scripts/gen-sbom-vex.sh` for the two released-binary SBOMs, and
+> `supply-chain.yml#sbom` for the CI artifact) now pass `cargo cyclonedx --all --format json
+> --spec-version 1.5`. cargo-cyclonedx 0.5.9 emits 1.5 **natively** (it accepts `--spec-version`
+> `1.3`/`1.4`/`1.5`; default 1.3), so this is **not** a post-process specVersion bump — the tool
+> writes a genuine 1.5 document. `scripts/sbom-normalize.jq` additionally populates the 1.5-only
+> `metadata.lifecycles` array with the single phase that is honestly assertable for a build-time
+> SBOM, `build`. No other 1.5/1.6-only field is fabricated. **1.6 was NOT adopted:** the pinned tool
+> tops out at 1.5, and no 1.6-only field (e.g. cryptographic-asset components, formulation) could be
+> populated truthfully without fabrication. **Validation:** both `sparq-cli`/`sparq-server` SBOMs were
+> validated against the official CycloneDX **1.5** JSON schema (`bom-1.5.schema.json` + `spdx`/`jsf`
+> sub-schemas) — both VALID; `metadata.lifecycles` present; 0 host-path leaks (the abs-path guard still
+> passes); every `dependencies[].dependsOn` ref resolves to a component `bom-ref` (graph consistent);
+> the normalizer is idempotent on the 1.5 output. The VEX (`supply-chain/vex.cdx.json`, already 1.5) is
+> unchanged, so SBOM and VEX now share one spec version.
 
 > **Root/component refs are normalized — abs-path leak RESOLVED (F-6/GS-6, bead sq-toze.30, [OPUS-4.8]):**
 > cargo-cyclonedx 0.5.9 *raw* output stamps the absolute build dir into every workspace/path-dependency

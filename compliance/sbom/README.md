@@ -59,7 +59,8 @@ elements **partial** — note the CycloneDX `author` field *is* present on **144
 (re-run probe, 2026-06-15), so component-originator identity is largely carried, only the dedicated
 supplier slot is empty; (GS-2) no **reproducible-build** evidence (GX-8, the SBOM-to-binary integrity
 link is asserted, not independently reproducible); (GS-3) no separate **npm/JS-lockfile** SBOM for
-the WASM client; (GS-4) spec version 1.3 vs 1.5/1.6; (GS-5) VEX↔deny drift-check automation; plus
-(GS-6 / sq-toze.30) the SBOM root `bom-ref` leaks the absolute build path (optional sanitisation).
-None of these is papered over — each carries a severity and a tracking bead. No control here is
-overclaimed.
+the WASM client; (GS-5) VEX↔deny drift-check automation. **RESOLVED:** (GS-4 / sq-toze.28) spec
+version — the SBOM is now emitted as CycloneDX **1.5** (matching the VEX), with `metadata.lifecycles`
+populated, validated against the 1.5 schema ([OPUS-4.8]); and (GS-6 / sq-toze.30) the SBOM root
+`bom-ref` abs-path leak — sanitised via `scripts/sbom-normalize.jq`. None of these is papered over —
+each carries a severity and a tracking bead. No control here is overclaimed.

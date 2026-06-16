@@ -727,3 +727,311 @@ fn no_constraint_conditional_grants_public() {
     assert!(reads(&mut store, BOB));
     assert!(!store.accessible(&Session::default(), Mode::Read).is_empty(), "anon public read");
 }
+
+// ===========================================================================
+// [OPUS-4.8] sq-dpk4 — refresh / REVOCATION of bridged ODRL grants when the
+// underlying ODRL policy changes. SECURITY-SENSITIVE: a withdrawn permission, a
+// lapsed time window, or a re-evaluation that now Denies must LOSE access; a static
+// WAC/ACP grant must NEVER be dropped; a still-valid bridged grant must survive.
+// All assertions go through the REAL enforcement path (accessible / query_as).
+// ===========================================================================
+use sparq_solid::BridgeKind;
+
+/// alice MAY read n1 ONLY until 2026-01-01 (a time-windowed permission).
+fn windowed_read_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/win> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+                      odrl:rightOperand "2026-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// A policy that grants NOTHING (the permission has been WITHDRAWN entirely).
+fn empty_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> . <urn:pol/read> a odrl:Set ."#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+// 20. ADVERSARIAL "stale grant loses access": a bridged grant is materialized →
+//     access granted; the ODRL policy then WITHDRAWS the permission → refresh →
+//     access is GONE through the real enforcement path. We adversarially check the
+//     grant did not survive in ANY form (accessible, query_as, the raw auth view, the
+//     provenance graph) and that re-refreshing cannot resurrect it.
+#[test]
+fn withdrawn_permission_loses_access_after_refresh() {
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+
+    // Materialize → alice has read.
+    assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(
+        store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1),
+        "bridged grant is live before withdrawal",
+    );
+    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
+
+    // The policy WITHDRAWS the permission → refresh against the new (empty) policy.
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty_policy(), &req, BridgeKind::Permission);
+    assert!(matched, "the tracked grant slot matched");
+    assert_eq!(retracted, 1, "the withdrawn grant was retracted");
+
+    // ADVERSARIAL: access is GONE through every observable surface.
+    assert!(
+        store.accessible(&alice, Mode::Read).is_empty(),
+        "STALE GRANT MUST LOSE ACCESS: alice can no longer read n1",
+    );
+    assert_eq!(
+        store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(),
+        0,
+        "query_as returns nothing after revocation",
+    );
+    // The raw auth view holds no residual bridged grant for alice…
+    let leftover = "SELECT ?p ?o WHERE { GRAPH <urn:sparq:auth> { \
+        <https://alice.ex/card#me> ?p ?o } }";
+    assert_eq!(sparq_engine::query(&store.graph, leftover).unwrap().rows.len(), 0,
+        "no residual alice triple in the enforcement view");
+    // …and the provenance graph was cleared of it.
+    let prov = "SELECT ?s ?p ?o WHERE { GRAPH <urn:sparq:auth-bridged> { ?s ?p ?o } }";
+    assert_eq!(sparq_engine::query(&store.graph, prov).unwrap().rows.len(), 0,
+        "no residual provenance after retraction");
+    // Re-refreshing cannot resurrect a dropped grant (the ledger is empty now).
+    assert_eq!(store.refresh_odrl_grants(), 0, "nothing left to retract");
+    assert!(store.accessible(&alice, Mode::Read).is_empty(), "stays revoked");
+}
+
+// 21. LAPSED TIME WINDOW: a windowed grant valid at materialization-time loses access
+//     once the window lapses (re-evaluate with a NOW past the bound) → refresh → gone.
+#[test]
+fn lapsed_time_window_loses_access_after_refresh() {
+    let mut store = PodStore::new(pod());
+    let pol = windowed_read_policy();
+
+    // In-window request → granted.
+    let in_window = Request::new(odrl("read"))
+        .on(N1)
+        .by(ALICE)
+        .with(odrl("dateTime"), Value::DateTime("2025-06-01T00:00:00Z".to_owned()));
+    assert!(store.materialize_odrl_permission(&pol, &in_window).granted);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
+
+    // The window LAPSES: re-evaluate with a NOW past the bound (same policy, new ctx).
+    let now_past = Request::new(odrl("read"))
+        .on(N1)
+        .by(ALICE)
+        .with(odrl("dateTime"), Value::DateTime("2026-06-16T00:00:00Z".to_owned()));
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&pol, &now_past, BridgeKind::Permission);
+    assert!(matched);
+    assert_eq!(retracted, 1, "lapsed window retracts the grant");
+    assert!(
+        store.accessible(&alice, Mode::Read).is_empty(),
+        "lapsed time window: access gone",
+    );
+}
+
+// 22. RE-EVAL NOW DENIES (a prohibition is added): a bridged write grant is revoked
+//     when the refreshed policy now carries a matching prohibition (deny-overrides).
+#[test]
+fn reeval_now_denies_loses_access_after_refresh() {
+    let mut store = PodStore::new(pod());
+    let permit = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/w> a odrl:Set ; odrl:permission [
+    odrl:action odrl:modify ; odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_policy(&permit, &req).granted);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Write).iter().any(|g| g.as_str() == N1));
+
+    // The policy now ADDS a prohibition on the same action → re-eval Denies.
+    let now_prohibited = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/w> a odrl:Set ;
+    odrl:permission [ odrl:action odrl:modify ; odrl:target <https://pod.ex/notes/n1> ;
+        odrl:assignee <https://alice.ex/card#me> ] ;
+    odrl:prohibition [ odrl:action odrl:modify ; odrl:target <https://pod.ex/notes/n1> ;
+        odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let (matched, _) = store.refresh_odrl_grant(&now_prohibited, &req, BridgeKind::Policy);
+    assert!(matched);
+    // deny-overrides: even though materialize_policy emits a deny on replay, the net
+    // enforcement result is DENIED (the allow is overridden upstream / by the deny).
+    assert!(
+        store.accessible(&alice, Mode::Write).is_empty(),
+        "re-eval now Denies: alice can no longer write n1",
+    );
+}
+
+// 23. A STILL-VALID bridged grant SURVIVES refresh (no spurious retraction).
+#[test]
+fn valid_bridged_grant_survives_refresh() {
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
+
+    // Plain refresh (policy unchanged) re-evaluates and KEEPS the still-valid grant.
+    assert_eq!(store.refresh_odrl_grants(), 0, "valid grant not retracted");
+    assert!(
+        store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1),
+        "still-valid bridged grant survives refresh",
+    );
+    // Refresh against the SAME policy also keeps it.
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&read_policy(), &req, BridgeKind::Permission);
+    assert!(matched);
+    assert_eq!(retracted, 0);
+    assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
+}
+
+// 24. A STATIC WAC grant is NOT dropped by a bridged-grant refresh (provenance keeps
+//     static and bridged apart). bob (static) keeps read; alice (bridged, then revoked)
+//     loses it — in the SAME store, through the SAME enforcement path.
+#[test]
+fn static_grant_not_dropped_by_refresh() {
+    // bob's static .acl grant + a content graph.
+    let nq = r#"
+<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/notes/n1> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/notes/n1.acl> .
+"#;
+    let mut store = PodStore::new(Graph::load_dataset(nq, "nquads").unwrap());
+    store.materialize_wac().expect("wac materializes");
+
+    fn reads_n1(s: &mut PodStore, agent: &str) -> bool {
+        let sess = Session { agent: Some(agent), client: None };
+        s.accessible(&sess, Mode::Read).iter().any(|g| g.as_str() == N1)
+    }
+
+    // Bridge alice on top of bob's static grant.
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
+    assert!(reads_n1(&mut store, BOB), "bob static before");
+    assert!(reads_n1(&mut store, ALICE), "alice bridged before");
+
+    // Revoke alice's bridged grant. bob's STATIC grant must be untouched.
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty_policy(), &req, BridgeKind::Permission);
+    assert!(matched);
+    assert_eq!(retracted, 1);
+    assert!(reads_n1(&mut store, BOB), "STATIC GRANT PRESERVED: bob still reads n1");
+    assert!(!reads_n1(&mut store, ALICE), "bridged grant revoked");
+}
+
+// 25. PROVENANCE distinguishes bridged vs static: a static grant never appears in the
+//     bridged-provenance graph; a bridged grant does (and exactly the auth triple it
+//     emitted).
+#[test]
+fn provenance_distinguishes_bridged_from_static() {
+    let nq = r#"
+<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/notes/n1> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/notes/n1.acl> .
+"#;
+    let mut store = PodStore::new(Graph::load_dataset(nq, "nquads").unwrap());
+    store.materialize_wac().expect("wac materializes");
+    // After a pure static materialize, the provenance graph is empty.
+    let prov_all = "SELECT ?s ?p ?o WHERE { GRAPH <urn:sparq:auth-bridged> { ?s ?p ?o } }";
+    assert_eq!(sparq_engine::query(&store.graph, prov_all).unwrap().rows.len(), 0,
+        "no provenance for static grants");
+
+    // Bridge alice → exactly her grant triple appears in provenance, bob's does not.
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
+    let alice_prov = "SELECT ?p WHERE { GRAPH <urn:sparq:auth-bridged> { \
+        <https://alice.ex/card#me> <https://sparq.dev/ns/auth#read> <https://pod.ex/notes/n1> } }";
+    assert_eq!(sparq_engine::query(&store.graph, alice_prov).unwrap().rows.len(), 1,
+        "alice's bridged grant is marked in provenance");
+    let bob_prov = "SELECT ?p ?o WHERE { GRAPH <urn:sparq:auth-bridged> { \
+        <https://bob.ex/card#me> ?p ?o } }";
+    assert_eq!(sparq_engine::query(&store.graph, bob_prov).unwrap().rows.len(), 0,
+        "bob's STATIC grant is NOT in provenance");
+}
+
+// 26. A STATIC RE-MATERIALIZATION re-applies still-valid bridged grants (reconcile):
+//     materialize_wac rebuilds <urn:sparq:auth> wholesale, but a valid bridged grant is
+//     replayed back on top — and a static grant change still takes effect.
+#[test]
+fn static_rematerialization_preserves_valid_bridged_grant() {
+    let nq = r#"
+<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/notes/n1> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#a> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/notes/n1.acl> .
+"#;
+    let mut store = PodStore::new(Graph::load_dataset(nq, "nquads").unwrap());
+    store.materialize_wac().expect("wac");
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
+
+    fn reads_n1(s: &mut PodStore, agent: &str) -> bool {
+        let sess = Session { agent: Some(agent), client: None };
+        s.accessible(&sess, Mode::Read).iter().any(|g| g.as_str() == N1)
+    }
+    assert!(reads_n1(&mut store, ALICE), "alice bridged before re-materialize");
+
+    // A wholesale static re-materialization would normally CLOBBER the bridged grant.
+    store.materialize_wac().expect("re-materialize");
+    assert!(reads_n1(&mut store, BOB), "bob static after re-materialize");
+    assert!(
+        reads_n1(&mut store, ALICE),
+        "RECONCILE: the valid bridged grant survives a wholesale static re-materialization",
+    );
+}
+
+// 27. FAIL-CLOSED on AMBIGUOUS re-eval: a windowed grant refreshed with NO dateTime
+//     evidence (cannot prove the window still holds) is RETRACTED (never left stale).
+#[test]
+fn ambiguous_reeval_retracts_fail_closed() {
+    let mut store = PodStore::new(pod());
+    let pol = windowed_read_policy();
+    let in_window = Request::new(odrl("read"))
+        .on(N1)
+        .by(ALICE)
+        .with(odrl("dateTime"), Value::DateTime("2025-06-01T00:00:00Z".to_owned()));
+    assert!(store.materialize_odrl_permission(&pol, &in_window).granted);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
+
+    // Refresh with NO dateTime evidence → constraint cannot be proven → fail-closed Deny.
+    let no_evidence = Request::new(odrl("read")).on(N1).by(ALICE);
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&pol, &no_evidence, BridgeKind::Permission);
+    assert!(matched);
+    assert_eq!(retracted, 1, "ambiguous re-eval is retracted, not left stale");
+    assert!(
+        store.accessible(&alice, Mode::Read).is_empty(),
+        "FAIL-CLOSED: no evidence the window holds → access retracted",
+    );
+}

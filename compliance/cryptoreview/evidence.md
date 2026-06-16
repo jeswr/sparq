@@ -209,6 +209,14 @@ sparq makes **no** FIPS claim and uses **no** FIPS 140-3 validated cryptographic
 - No CMVP certificate number is or will be claimed for the bespoke crypto. ⇒ CR-G4 records the
   absence honestly for any operator with a FIPS deployment constraint.
 
+The full negative claim, the FIPS-status table for each primitive, the SHA-256
+used-outside-a-module reasoning, the `publish = false` containment, and the
+FIPS-constrained-operator guidance are stated in the standalone posture statement
+[`fips-posture.md`](./fips-posture.md) (sq-cu32). Short FIPS notes are also added to
+the crypto crate docs: `crates/sparq-zk-compose/README.md` (existing README),
+`crates/sparq-zk/src/lib.rs` and `crates/sparq-mpc/src/lib.rs` (crate-level `//!`
+docs — these crates have no README). `SECURITY.md` was **not** edited (governance-owned).
+
 ---
 
 ## CR-16 — Residual privacy gaps tracked
