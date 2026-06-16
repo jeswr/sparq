@@ -218,6 +218,30 @@ Notes on a few that need care:
   HONESTY NOTE (per parent `sq-i0nm`): a gh-runner gather is noisy and not
   comparable to the EC2/quiet-box reference band — the recorded `env.quiet_box`
   flag lets the dashboard label it distinctly (see the QUIET-BOX convention above).
+- **Same-box SPARQL gather — the QLever indexed-server step** (sq-52fo). The
+  same-box competitor gather [`scripts/gather-ec2-sparql.sh`](../scripts/gather-ec2-sparql.sh)
+  compares sparq vs Oxigraph on ONE generated SP2Bench corpus (always on). QLever is
+  **opt-in** behind `GATHER_QLEVER=1` because — unlike Oxigraph/EYE — it is NOT a
+  file-in/answer-out CLI: it needs a dedicated **index build → running server → HTTP
+  query → teardown** dance. That dance lives in [`scripts/qlever-same-box.sh`](../scripts/qlever-same-box.sh),
+  which the gather invokes on the bench box. Recipe (all via the
+  `docker.io/adfreiburg/qlever:latest` image):
+  1. **index** — `IndexBuilderMain -i <base> -F ttl|nt -s <settings> < corpus` into a
+     `mktemp -d` index dir (df-guarded, hard `QLEVER_INDEX_TIMEOUT`, default 20 min);
+  2. **server** — `ServerMain -i <base> -p <port> -j <jobs>` detached with a fixed
+     `--name`, then a **bounded** readiness poll (a counted for-loop, default 2 min,
+     aborts early if the container exits) — this is the fix for the prior ~53-min hang;
+  3. **query** — one bounded HTTP POST per (query, iter), min-of-K wall micros, emitting
+     the harness's `<name>\t<rows>\t<best_us>` TSV (`ERROR` rows stay honest-n/a);
+  4. **teardown** — an **EXIT trap that always runs** (`docker rm -f` the container +
+     `rm -rf` the index dir) on success, failure, timeout, or Ctrl-C — no orphan server,
+     no leaked disk. The gather also wraps the whole recipe in an outer `timeout 1800`.
+  Run it: `GATHER_QLEVER=1 AWS_PROFILE=pss scripts/gather-ec2-sparql.sh <branch>`.
+  With `GATHER_QLEVER=0` (the default) the QLever block is a complete no-op and the
+  Oxigraph-only path is byte-for-byte unchanged. The recipe is **bench-only and
+  documented-untested in the authoring worktree** (no Docker there) — validate on the
+  next `GATHER_QLEVER=1` gather. (The separate `bench/qlever-*` suites use the upstream
+  `qlever` Python CLI instead; this same-box recipe is the standalone Docker variant.)
 
 ## Replicate everything — quickstart
 
