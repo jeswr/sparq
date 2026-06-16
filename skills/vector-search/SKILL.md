@@ -369,32 +369,51 @@ literal's dimension must match the store; any other `vec:` IRI is unknown. An ab
 seed IRI yields no rows. Search is the **exact** `nearest_exact` scan (deterministic, the HNSW/
 DiskANN approximate indexes are not yet wired into the predicate — recorded follow-up).
 
-**Automatic filtered ANN (compose with `filtered-ann`, sq-bvmd).** When **both**
+**Automatic filtered ANN (compose with `filtered-ann`, sq-bvmd + sq-3tjd).** When **both**
 `vec-predicate` *and* `filtered-ann` are on, the rewrite derives the candidate id-set
-([`IdMask`], recipe 9) automatically: if the `vec:` neighbour variable is **also constrained by
+([`IdMask`], recipe 9) automatically: if the `vec:` neighbour variable is **constrained by
 ordinary patterns in the same BGP**, those patterns carve out the eligible nodes and the k-NN is
 run as a **filtered** search (`nearest_exact_filtered`) over just that set — no separate API call.
 
+The constraint is the **join-connected sub-BGP** of the neighbour variable (sq-3tjd): not only
+patterns that *directly mention* it, but every pattern reachable from it through shared variables
+— so the mask honours **transitive / multi-variable** constraints. A direct-mention-only BGP is a
+special case of this (the connected component is just those patterns), so the single-variable
+behaviour from sq-bvmd is unchanged.
+
 ```rust
-// ?node is the neighbour AND is constrained to be a :Car: the search only ever
-// considers Cars (the IdMask), so a closer non-Car neighbour is never returned.
+// Direct (single-variable): ?node is the neighbour AND is itself a :Car —
+// the search only ever considers Cars, so a closer non-Car is never returned.
 let r = query_vec(&graph,
     "PREFIX vec: <http://sparq.dev/vec#>
      SELECT ?node WHERE {
        ?node vec:nearest ( \"1,0\" 5 ) .
        ?node <http://ex/kind> <http://ex/Car> .   # ← carves out the candidate id-set
      }", &store)?;
+
+// Transitive (multi-variable, 2-hop): ?node is restricted to subjects that own a
+// :Vehicle even though ?node never appears in the `?x a :Vehicle` pattern — the
+// connected component {?node :owns ?x, ?x a :Vehicle} is evaluated and ?node projected.
+let r = query_vec(&graph,
+    "PREFIX vec: <http://sparq.dev/vec#> PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+     SELECT ?node WHERE {
+       ?node vec:nearest ( \"1,0\" 5 ) .
+       ?node <http://ex/owns> ?x .
+       ?x rdf:type <http://ex/Vehicle> .          # ← reached transitively through ?x
+     }", &store)?;
 ```
 
-The mask is exactly the set the engine binds to the neighbour variable when the constraining
-sub-BGP is evaluated, so the filtered top-k is **identical to post-filtering the unfiltered
-top-k** by that same constraint (and therefore a subset of the unfiltered result) — correct, and
-for a selective constraint it avoids scanning the rest of the store. If the neighbour variable is
-**unconstrained** the search falls back to the plain unfiltered `nearest_exact` (recipe 8's exact
-behaviour, unchanged). With `filtered-ann` **off**, the `vec:` predicate is always unfiltered —
-this composition adds nothing to the `vec-predicate`-only build. Deferred (own beads): multi-
-variable mask intersection (sq-3tjd), mask caching (sq-36ol), and a cost-model choice of
-filtered-vs-post-filter (sq-ic0n).
+The mask is exactly the set the engine binds to the neighbour variable when that connected
+sub-BGP is evaluated and the neighbour variable projected, so the filtered top-k is **identical to
+post-filtering the unfiltered top-k** by that same (now transitive) constraint — and therefore a
+subset of the unfiltered result. A pattern **disconnected** from the neighbour variable (no
+shared-variable path) is excluded, so it never narrows the mask. Each `vec:` request in a BGP gets
+its **own** connected-component mask, derived independently. If the neighbour variable is
+**unconstrained** (no pattern mentions it) the search falls back to the plain unfiltered
+`nearest_exact` (recipe 8's exact behaviour, unchanged). With `filtered-ann` **off**, the `vec:`
+predicate is always unfiltered — this composition adds nothing to the `vec-predicate`-only build.
+Deferred (own beads): cyclic-join handling, a cost-model choice of when transitive masking pays
+(sq-ic0n), and mask caching (sq-36ol).
 
 ### 9. Predicate-constrained (filtered) ANN — only neighbours a BGP admits (opt-in, feature = `filtered-ann`)
 

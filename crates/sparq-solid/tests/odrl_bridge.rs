@@ -10,7 +10,10 @@
 
 use sparq_core::Graph;
 use sparq_policy::{parse_policy_str, Request, Value};
-use sparq_solid::{action_to_mode, materialize_permission, Mode, PodStore, Session};
+use sparq_solid::{
+    action_to_mode, materialize_permission, materialize_policy, materialize_prohibition, Mode,
+    PodStore, Session,
+};
 
 const ODRL: &str = "http://www.w3.org/ns/odrl/2/";
 const ALICE: &str = "https://alice.ex/card#me";
@@ -267,4 +270,220 @@ fn bridge_preserves_existing_wac_grants() {
     // BOTH grants hold: bob (static WAC) AND alice (bridged ODRL).
     assert!(reads_n1(&mut store, "https://bob.ex/card#me"), "bob preserved");
     assert!(reads_n1(&mut store, ALICE), "alice bridged");
+}
+
+// ===========================================================================
+// [OPUS-4.8] sq-w693 — Prohibition → explicit auth:deny<Mode> (deny-overrides).
+// ===========================================================================
+
+/// alice is PROHIBITED from writing n1 (a bare matching prohibition, no constraints).
+fn write_prohibition() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/prohib> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:modify ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+// ---------------------------------------------------------------------------
+// 9. A matched Prohibition materializes the expected auth:deny<Mode> triple.
+// ---------------------------------------------------------------------------
+#[test]
+fn prohibition_materializes_deny_triple() {
+    let mut g = pod();
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    let out = materialize_prohibition(&mut g, &write_prohibition(), &req);
+
+    assert!(out.prohibited, "matched Prohibition should deny: {out:?}");
+    assert!(!out.granted, "a prohibition is not a grant");
+    assert_eq!(out.mode, Some(Mode::Write));
+    assert_eq!(
+        out.deny_triple,
+        Some((ALICE.to_owned(), "https://sparq.dev/ns/auth#denyWrite".to_owned(), N1.to_owned())),
+    );
+
+    // The deny is a real triple in the <urn:sparq:auth> view, readable as such.
+    let q = "SELECT ?who WHERE { GRAPH <urn:sparq:auth> { \
+        ?who <https://sparq.dev/ns/auth#denyWrite> <https://pod.ex/notes/n1> } }";
+    let rows = sparq_engine::query(&g, q).expect("query");
+    assert_eq!(rows.rows.len(), 1, "exactly alice's denyWrite");
+}
+
+// ---------------------------------------------------------------------------
+// 10. DENY-OVERRIDES through the REAL enforcement path: a principal with BOTH an
+//     allow grant AND a deny for the same mode is DENIED (deny beats allow).
+// ---------------------------------------------------------------------------
+#[test]
+fn deny_overrides_allow_through_enforcement() {
+    let mut store = PodStore::new(pod());
+
+    // First grant alice WRITE on n1 (an ODRL Permit → auth:write).
+    let permit = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/w> a odrl:Set ; odrl:permission [
+    odrl:action odrl:modify ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let wreq = Request::new(odrl("modify")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&permit, &wreq).granted);
+
+    let alice = Session { agent: Some(ALICE), client: None };
+    // Sanity: the allow grant is live through the real enforcement path.
+    assert!(
+        store.accessible(&alice, Mode::Write).iter().any(|g| g.as_str() == N1),
+        "alice can write n1 BEFORE the deny is materialized",
+    );
+
+    // Now materialize the matching Prohibition (auth:denyWrite for the same mode).
+    let dreq = Request::new(odrl("modify")).on(N1).by(ALICE);
+    let out = store.materialize_odrl_prohibition(&write_prohibition(), &dreq);
+    assert!(out.prohibited, "deny materialized: {out:?}");
+
+    // DENY-OVERRIDES: alice is now DENIED write through the real enforcement path,
+    // even though the allow grant is still present in the auth view.
+    assert!(
+        store.accessible(&alice, Mode::Write).is_empty(),
+        "deny beats allow: alice can no longer write n1",
+    );
+    // And the write-path update enforcement honours it too (fail-closed).
+    let ins = "INSERT DATA { GRAPH <https://pod.ex/notes/n1> { \
+        <https://pod.ex/notes/n1#it> <https://ex.dev/ns#tag> \"x\" } }";
+    assert!(store.update_as(&alice, ins).is_err(), "denied write update fails closed");
+}
+
+// ---------------------------------------------------------------------------
+// 11. A single policy with BOTH a permission and a prohibition on the same
+//     principal/target/mode → materialize both → DENIED (deny wins).
+// ---------------------------------------------------------------------------
+#[test]
+fn permit_plus_prohibition_same_subject_is_denied() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/both> a odrl:Set ;
+    odrl:permission [
+        odrl:action odrl:modify ;
+        odrl:target <https://pod.ex/notes/n1> ;
+        odrl:assignee <https://alice.ex/card#me> ] ;
+    odrl:prohibition [
+        odrl:action odrl:modify ;
+        odrl:target <https://pod.ex/notes/n1> ;
+        odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    let out = store.materialize_odrl_policy(&pol, &req);
+
+    // The prohibition side materializes a deny. The permit side does NOT: the ODRL
+    // evaluator ALREADY applies deny-overrides (a matching prohibition overrides any
+    // permission), so `evaluate(...).allow == false` and no allow grant is emitted —
+    // deny-overrides holds even more strongly (the allow is never written at all).
+    assert!(!out.granted, "the permit is overridden by the prohibition (evaluator): {out:?}");
+    assert!(out.prohibited, "the prohibition side materialized: {out:?}");
+    assert_eq!(out.mode, Some(Mode::Write), "deny mode is operative under deny-overrides");
+    assert!(out.deny_triple.is_some());
+
+    // Net effect through the real enforcement: alice is DENIED.
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(
+        store.accessible(&alice, Mode::Write).is_empty(),
+        "deny-overrides: a permission + prohibition on the same subject denies",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. No matching prohibition (wrong party / different mode / unmapped / partyless /
+//     targetless) → materialize NOTHING (fail-closed; access never silently widened).
+// ---------------------------------------------------------------------------
+#[test]
+fn unmatched_prohibition_materializes_nothing() {
+    // (a) Wrong party — the prohibition names alice; mallory isn't carved out.
+    let mut g = pod();
+    let wrong_party = Request::new(odrl("modify")).on(N1).by("https://mallory.ex/card#me");
+    let out = materialize_prohibition(&mut g, &write_prohibition(), &wrong_party);
+    assert!(!out.prohibited, "wrong party is not carved out: {out:?}");
+    assert!(out.deny_triple.is_none());
+
+    // (b) Different action/mode — the prohibition forbids modify (Write); a read
+    //     request matches no prohibition, so no deny is materialized.
+    let mut g2 = pod();
+    let read_req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(!materialize_prohibition(&mut g2, &write_prohibition(), &read_req).prohibited);
+
+    // (c) Unmapped action — a prohibition on the `use` umbrella matches a `use`
+    //     request, but `use` has no faithful single mode → materialize nothing, and
+    //     SAY SO (a dropped deny would widen access).
+    let use_prohib = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/u> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:use ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let mut g3 = pod();
+    let use_req = Request::new(odrl("use")).on(N1).by(ALICE);
+    let out3 = materialize_prohibition(&mut g3, &use_prohib, &use_req);
+    assert!(!out3.prohibited, "unmapped umbrella deny not materialized: {out3:?}");
+    assert!(!out3.reasons.is_empty(), "the unmappable carve-out is reported, not silent");
+
+    // (d) Partyless prohibition (no assignee) matched by a partyless request → nothing
+    //     (a deny with no concrete principal is meaningless here).
+    let any_prohib = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/anyp> a odrl:Set ; odrl:prohibition [ odrl:action odrl:modify ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let mut g4 = pod();
+    let no_party = Request::new(odrl("modify")).on(N1);
+    assert!(!materialize_prohibition(&mut g4, &any_prohib, &no_party).prohibited);
+
+    // (e) Targetless request → nothing.
+    let mut g5 = pod();
+    let no_target = Request::new(odrl("modify")).by(ALICE);
+    assert!(!materialize_prohibition(&mut g5, &any_prohib, &no_target).prohibited);
+}
+
+// ---------------------------------------------------------------------------
+// 13. Regression: the Permit-only path still works unchanged via materialize_policy
+//     (a policy with no prohibition grants exactly as before, no deny emitted).
+// ---------------------------------------------------------------------------
+#[test]
+fn permit_only_regression_via_policy() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_policy(&mut g, &read_policy(), &req);
+
+    assert!(out.granted, "permit-only still grants: {out:?}");
+    assert!(!out.prohibited, "no prohibition → no deny");
+    assert_eq!(out.mode, Some(Mode::Read));
+    assert!(out.deny_triple.is_none());
+    assert!(out.grant_triple.is_some());
+
+    // End-to-end through the enforcement path: alice reads, deny absent.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_policy(&read_policy(), &req).granted);
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
 }
