@@ -673,6 +673,83 @@ impl StreamingWriter {
     }
 }
 
+// [OPUS-4.8] sq-hkud (epic sq-toze, gap MS-G4) — Kani bounded model-checking proof of the
+// `.spqv` on-disk-format validator. This is the formal-methods complement to the Miri (UB),
+// fuzz (libFuzzer corpus), oracle (deterministic corruption sweep) and ASan (sanitised
+// corpus) coverage already in place. Those four EXECUTE the validator on SPECIFIC inputs
+// (the corpus, plus whatever libFuzzer reaches); Kani PROVES the safety property over EVERY
+// input up to a bounded buffer size — closing the residual "did the corpus miss a hostile
+// header/index?" gap that motivated MS-G4. It is a complement, not a replacement: Kani's
+// bound is small, so fuzz/oracle/ASan still carry the unbounded + UB coverage.
+//
+// WHY THIS VALIDATOR IS A GOOD KANI TARGET (the MS-G4 feasibility verdict):
+//   * `VectorStore::open_from_bytes` is a PURE function of an owned `Vec<u8>` — no file I/O,
+//     no `mmap`, no FFI, no syscalls (the constructs Kani cannot model). It runs the SAME
+//     `open_validated` header/length/bounds logic as the mmap'd `open`, so proving it proves
+//     the validator that the B5 hostile-on-disk-file boundary depends on.
+//   * The state space is BOUNDABLE: the checked size arithmetic ties `count`/`dim` to
+//     `map.len()`, so a small symbolic buffer bounds every loop and every allocation. A
+//     buffer just past `HEADER_LEN` exercises every branch (magic, version 1/2/other,
+//     `dim == 0`, the `checked_mul`/`checked_add` overflow rejections, the truncated-header
+//     and exact-size checks, and at least one trip of the ascending-id / in-range-slot
+//     index loop).
+//
+// UNTESTED-HERE: Kani is almost certainly NOT installed in the authoring environment, so
+// this harness has NOT been run; it is written against Kani's documented API
+// (`kani::any()`, `kani::assume()`, `#[kani::proof]`, `#[kani::unwind]`) and is VALIDATED ON
+// THE FIRST CI RUN of the `kani` lane (.github/workflows/kani.yml). It is `#[cfg(kani)]`, so
+// the normal `cargo build`/`clippy`/`test` never compile it and the crate is unaffected.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// The header is the smallest valid `.spqv` prefix; pick a symbolic buffer a little
+    /// larger so the harness can also build a well-formed one-entry store (header + one
+    /// `dim`-wide f32 vector + one 8-byte index entry) and reach the index-validation loop —
+    /// not only the early-return header checks. Kept small so model checking terminates.
+    const MAX_LEN: usize = HEADER_LEN + 32;
+
+    /// PROPERTY: `open_from_bytes` (hence the shared `open_validated` validator) never
+    /// panics, never reads out of bounds, and never triggers UB for ANY byte buffer up to
+    /// `MAX_LEN` bytes — it always returns cleanly (`Ok` for a well-formed buffer, `Err` for
+    /// every malformed one). Kani explores all such buffers symbolically. The success path
+    /// of `open_from_bytes` does an aligned-copy + the full validation; the failure path is a
+    /// plain `Err`. Neither may abort.
+    #[kani::proof]
+    #[kani::unwind(40)] // > MAX_LEN so every bounded slice/index loop fully unrolls.
+    fn open_from_bytes_never_panics() {
+        // A symbolic length in `0..=MAX_LEN`, then a symbolic buffer of that length.
+        let len: usize = kani::any();
+        kani::assume(len <= MAX_LEN);
+        let mut bytes = vec![0u8; len];
+        for b in bytes.iter_mut() {
+            *b = kani::any();
+        }
+        // The property is simply: this call returns (it must not panic / OOB / UB). We do
+        // not constrain the result — both `Ok` and `Err` are correct outcomes; the harness
+        // proves the validator is TOTAL over the bounded input domain.
+        let _ = VectorStore::open_from_bytes(bytes);
+    }
+
+    /// PROPERTY (focused): a buffer that already carries the magic + version-2 tag still
+    /// never panics in the size-arithmetic + index-validation tail. Fixing the prefix
+    /// shrinks the symbolic surface so Kani spends its budget on the arithmetic/loop logic
+    /// (the part the corpus is least likely to have exhausted) rather than on the magic byte.
+    #[kani::proof]
+    #[kani::unwind(40)]
+    fn open_validated_v2_tail_never_panics() {
+        let mut bytes = vec![0u8; HEADER_LEN + 16];
+        bytes[0..4].copy_from_slice(&SPQV_MAGIC);
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes()); // version 2
+        // dim and count are symbolic so the checked-overflow + size-mismatch + index loop
+        // are all exercised; the fingerprint block and the trailing bytes stay symbolic too.
+        for b in bytes[8..].iter_mut() {
+            *b = kani::any();
+        }
+        let _ = VectorStore::open_from_bytes(bytes);
+    }
+}
+
 #[cfg(test)]
 mod fingerprint_tests {
     // [OPUS-4.8] (sq-32i5) End-to-end checked-open tests for the `.spqv` store: build against

@@ -1,0 +1,128 @@
+# kani — Kani bounded model-checking proof of the `.spqv` on-disk-format VALIDATOR (bead
+# sq-hkud, epic sq-toze; addresses memsafety gap MS-G4). [OPUS-4.8] authored while Fable
+# unavailable — re-review when Fable returns.
+#
+# WHY (the MS-G4 gap, from compliance/memsafety/gap-register.md): the unsafe mmap on-disk
+# validators are covered by Miri (UB on the pure-Rust sites), the deterministic corruption
+# oracle (MS-7), the fuzz lane (MS-9, libFuzzer corpus) and the standalone ASan lane (MS-G3,
+# asan.yml). ALL FOUR are EXECUTION-based: they run the validator on SPECIFIC inputs (the
+# hand-built corpus, plus whatever libFuzzer reaches). None of them PROVES the validator is
+# panic-/OOB-free for EVERY hostile input. MS-G4 asks whether a bounded formal proof closes
+# that residue. It does, for the `.spqv` validator: Kani model-checks
+# `VectorStore::open_from_bytes` (the pure, mmap-free, FFI-free entry into the SAME
+# `open_validated` header/length/bounds logic the mmap'd `open` runs) over EVERY byte buffer
+# up to a small bound, proving it never panics / never reads out of bounds / never hits UB.
+# This is a COMPLEMENT, not a replacement: Kani's bound is small (model checking is
+# exponential), so fuzz/oracle/ASan still carry the unbounded + UB coverage; Kani adds the
+# "no input in the bounded domain was missed" guarantee the corpus cannot give.
+#
+# WHAT IT PROVES — the `#[cfg(kani)]` harnesses in crates/sparq-vectors/src/store.rs:
+#   • open_from_bytes_never_panics       : for ALL buffers up to HEADER_LEN+32 bytes,
+#                                          open_from_bytes returns cleanly (Ok or Err),
+#                                          never panics / OOB / UB.
+#   • open_validated_v2_tail_never_panics: same, with the magic + version-2 tag fixed so the
+#                                          budget targets the checked size-arithmetic and the
+#                                          index-validation loop.
+# `open_from_bytes` is the in-memory twin of the mmap'd `open`; both call the private
+# `open_validated`, so proving the in-memory path proves the B5 validator without Kani having
+# to model `mmap` / file I/O / FFI (which it cannot).
+#
+# WHY THE VECTORS VALIDATOR AND NOT THE DICT MMAP VALIDATOR (honest scope): MappedDict::
+# validate (sparq-core/src/dict.rs) is the other B5 validator, but it has NO mmap-free public
+# entry point — it is reachable only through `Dict::open_mmap`, which requires a live
+# `memmap2::Mmap` (Kani cannot model file-backed mappings, the same reason Miri cannot — see
+# miri.yml), and it pulls in the term-record parser + the prefix/datatype tables + a Vec of
+# collected triples. A Kani proof of it would first need a refactor to lift `validate` onto a
+# plain `&[u8]` (an in-memory `open_from_bytes`-style seam) — tracked as follow-up work, not
+# this lane. The vectors validator is the tractable, self-contained first proof.
+#
+# HOW (the documented Kani flow — https://model-checking.github.io/kani/install-guide.html):
+#   cargo install --locked kani-verifier   (the cargo-kani driver from crates.io)
+#   cargo kani setup                        (downloads the matching CBMC + Kani toolchain)
+#   cargo kani -p sparq-vectors             (model-checks every #[kani::proof] in the crate)
+# Kani injects the `kani` cfg + the `kani` crate itself during model checking, so the harness
+# needs no dependency entry; under a normal build the `#[cfg(kani)]` module is stripped (the
+# `kani` cfg is registered in sparq-vectors/Cargo.toml [lints.rust] so `-D warnings` is happy).
+#
+# UNTESTED-HERE: this lane has NOT been run in the authoring environment (Kani was not
+# installed). The harness is written against Kani's documented API and is VALIDATED ON THE
+# FIRST RUN of this workflow. If the first run surfaces an unwind-bound or API mismatch, fix
+# it there — the proof OBLIGATION (no panic/OOB over the bounded domain) is correct regardless.
+#
+# TRIGGER (deliberately OFF the per-PR critical path — like miri.yml / asan.yml / the nightly
+# fuzz tier): Kani installs CBMC and does exponential symbolic exploration, so a cold run is
+# many minutes. This is a NIGHTLY formal-assurance safety net, not a per-PR tax.
+#   • schedule (nightly) — the standing bounded-proof safety net over the .spqv validator.
+#   • workflow_dispatch  — on demand.
+# There is intentionally NO pull_request / merge_group / push trigger, so this workflow
+# creates NO check-run on a PR head or merge-queue ref — the required `ci-summary / gate`
+# aggregator (which POLLS sibling check-runs on the head commit) therefore never discovers it
+# and never waits on it. This lane is INFORMATIONAL / NON-BLOCKING, exactly the
+# nightly-safety-net posture of miri.yml + asan.yml + the nightly fuzz tier. (It is ALSO
+# belt-and-braces named "…, informational" so that even if it were ever wired onto a PR ref
+# it would be excluded from the gate by the ci-summary `\b(advisory|informational)\b` rule.)
+#
+# Third-party actions are pinned by full commit SHA (supply-chain hardening); the trailing
+# `# vX.Y.Z` comment is what Dependabot follows to bump the pin. Pins + the pinned nightly
+# date match miri.yml / asan.yml / fuzz.yml so a toolchain bump moves them together.
+name: kani
+
+on:
+  workflow_dispatch:
+  # Nightly safety net at 06:11 UTC — offset from ci.yml (03:17), fuzz/zk-toolchain (04:23),
+  # miri (05:11) and asan (05:41) so the heavy nightly lanes do not contend for one runner.
+  schedule:
+    - cron: "11 6 * * *"
+
+# Least-privilege: this lane only reads the repo + runs the model checker.
+permissions:
+  contents: read
+
+concurrency:
+  group: kani-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  kani:
+    name: kani (.spqv validator bounded proof, informational)
+    runs-on: ubuntu-latest
+    # `cargo kani setup` downloads CBMC + the Kani backend on a cold run, then the symbolic
+    # exploration runs. Generous ceiling so a hung proof fails with a clear timeout rather
+    # than running away (matches miri.yml / asan.yml posture).
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Kani pins its own internal toolchain via `cargo kani setup`, but it still needs a host
+      # Rust toolchain to build the cargo-kani driver. Pin the same nightly date as the other
+      # nightly lanes so a toolchain bump moves them together. (Kani tracks a recent stable/
+      # nightly; if it rejects this exact nightly on the first run, bump to Kani's documented
+      # supported toolchain — recorded as the UNTESTED-HERE caveat in the workflow header.)
+      - name: Install Rust (nightly, pinned)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly via toolchain input
+        with:
+          toolchain: nightly-2026-06-11
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Kani uses a distinct instrumented target tree; key the cache so it is not confused
+          # with the stable workspace build in ci.yml or the miri/asan sysroots.
+          key: kani
+      # Install the cargo-kani driver from crates.io (--locked for a reproducible resolve),
+      # then fetch the matching CBMC + Kani backend. `cargo install` is itself SHA-resolved
+      # against the crates.io index + the workspace lockfile semantics; no extra third-party
+      # action to pin here. If a future Kani release changes the setup flow, the header's
+      # install-guide link is the source of truth.
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+      # Model-check every #[kani::proof] in sparq-vectors (the two .spqv-validator harnesses).
+      # A failed proof (a reachable panic / OOB / UB on some bounded input) fails the run with
+      # a counterexample trace.
+      - name: Kani — .spqv on-disk-format validator bounded proof
+        run: |
+          cargo kani -p sparq-vectors

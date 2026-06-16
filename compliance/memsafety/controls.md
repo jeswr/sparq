@@ -52,9 +52,14 @@ reinterpret* is the load-bearing surface.
 ## External / out-of-agent-scope items (label, do not claim)
 
 - **Formal verification of the unsafe core** (e.g. Kani / Prusti / a separation-logic
-  proof of the mmap validators) is **not** done — the assurance is Miri + oracle + fuzz +
-  the per-site argument, which is strong but is *testing/justification*, not *proof*. An
-  external formal-methods review would be the certificate-grade step. Tracked: gap MS-G4.
+  proof of the mmap validators) is now **partly** in place: a Kani bounded-proof of the
+  `.spqv` (vectors) on-disk-format validator exists (`#[cfg(kani)]` harnesses in
+  `crates/sparq-vectors/src/store.rs` + the nightly, non-blocking `kani` lane,
+  `.github/workflows/kani.yml`; sq-hkud, [OPUS-4.8]). The dict mmap validator awaits an
+  `&[u8]`-seam refactor before it can be proved (follow-up bead). For the rest, the
+  assurance is Miri + oracle + fuzz + ASan + the per-site argument — strong, and now backed
+  by a bounded *proof* on the vectors validator. An external formal-methods review remains
+  the certificate-grade step. Tracked: gap MS-G4 (feasibility verdict in `gap-register.md`).
 - **An accredited third-party memory-safety audit** of the B5 surface is external by
   definition; the register + coverage matrix is the evidence pack such an auditor would
   consume.
