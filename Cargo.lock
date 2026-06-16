@@ -3357,9 +3357,12 @@ name = "sparq-fedclient"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "oxttl 0.2.3",
+ "rustc-hash 2.1.2",
  "spargebra",
  "sparq-engine",
  "sparq-fedplan",
+ "ureq",
 ]
 
 [[package]]
