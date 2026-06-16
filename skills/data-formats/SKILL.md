@@ -232,7 +232,13 @@ cargo build -p sparq-cli --features serialize-rdf
   `s p o {| … |}` desugar to the standard `rdf:reifies <<( s p o )>>` form (the annotation block
   also **asserts** the base triple; a bare `<< … >>` reifier does not). N-Triples/N-Quads carry
   only the desugared `<<( … )>>` triple-term form (no `<<>>`/`{| |}` sugar — per the line-format
-  grammar).
+  grammar). Nested triple terms are **depth-bounded** (`MAX_TRIPLE_TERM_DEPTH = 128` in
+  `sparq-core::nt`): the byte-level N-Triples/N-Quads parser is the only native-recursion RDF
+  parse path, so a pathologically nested `<<( … )>>` chain returns a clean parse error rather
+  than overflowing the stack (ASVS V5.5.2 / sq-53s1). The Turtle/TriG/N-Quads path via `oxttl`
+  is a heap-stack pushdown automaton and cannot recurse the native stack. The SPARQL parser has
+  the matching `MAX_RECURSION_DEPTH = 128` cap (groups/expressions/paths/collections/triple
+  terms). 128 is far deeper than any real data/query nests.
 - **`build_external` / `open` / `save` require the `mmap` feature** (native only). The
   N-Triples external path also honors `SPARQ_SHARDED_DICT` (default on with ≥2 threads)
   and, with the `dict-spill` feature + `SPARQ_DICT_SPILL` env, bounds peak build RSS by
