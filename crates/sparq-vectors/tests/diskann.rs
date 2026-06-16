@@ -7,7 +7,11 @@
 //! 3. **parity with the in-RAM searchers** on tiny separable clusters, and the degenerate
 //!    all-zero-query contract shared with `nearest_exact` / `VectorIndex`.
 
-use sparq_vectors::{nearest_exact, DiskAnnIndex, VamanaConfig, VectorIndex, VectorStore};
+use sparq_vectors::{nearest_exact, DiskAnnIndex, VamanaConfig, VectorStore};
+// [OPUS-4.8] (sq-ip3a) HNSW is the approximate backend — `approx-ann` only (the disk-vs-HNSW
+// parity test below is gated to match).
+#[cfg(feature = "approx-ann")]
+use sparq_vectors::VectorIndex;
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E3779B97F4A7C15);
@@ -119,6 +123,7 @@ fn reopen_without_rebuild_returns_identical_neighbours() {
     let _ = std::fs::remove_file(&graph_path);
 }
 
+#[cfg(feature = "approx-ann")]
 #[test]
 fn diskann_parity_with_hnsw_on_separable_clusters() {
     // Three well-separated clusters; the on-disk index, the in-RAM HNSW, and exact brute force

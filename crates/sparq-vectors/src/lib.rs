@@ -3,6 +3,10 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod ann;
+// [OPUS-4.8] (sq-ip3a) Pluggable ANN backend seam (exact default vs approximate) + the iterative
+// over-fetch FILTERED path — `filtered-ann` only (the approximate impl is additionally `approx-ann`).
+#[cfg(feature = "filtered-ann")]
+pub mod backend;
 // [OPUS-4.8] (sq-7hx6) Filtered-ANN pre-filter vs post-filter cost model — `filtered-ann` only.
 #[cfg(feature = "filtered-ann")]
 pub mod cost;
@@ -35,9 +39,12 @@ pub mod vocab {
     pub const SEARCH: &str = "http://sparq.dev/vec#search";
 }
 
-pub use ann::{
-    cosine, nearest_exact, nearest_term_exact, nearest_term_exact_checked, HnswConfig, VectorIndex,
-};
+pub use ann::{cosine, nearest_exact, nearest_term_exact, nearest_term_exact_checked};
+// [OPUS-4.8] (sq-ip3a) The in-RAM HNSW index is the approximate backend — `approx-ann` only
+// (the only feature pulling `instant-distance`). The default build re-exports just the exact
+// searchers above.
+#[cfg(feature = "approx-ann")]
+pub use ann::{HnswConfig, VectorIndex};
 pub use diskann::{sibling_graph_path, DiskAnnIndex, VamanaConfig, SPQG_MAGIC, SPQG_VERSION};
 pub use embed::{Embedder, HashEmbedder};
 // [OPUS-4.8] (sq-1wc1) Predicate-constrained (filtered) ANN — the `filtered-ann` feature only.
@@ -48,6 +55,15 @@ pub use filter::{nearest_exact_filtered, FilterConfig, IdMask};
 pub use cost::{
     nearest_filtered_costed, overfetch_target, postfilter_exact, CostEstimate, CostModel, Strategy,
 };
+// [OPUS-4.8] (sq-ip3a) Pluggable ANN backend + iterative over-fetch filtered path — `filtered-ann`
+// only. `ApproxBackend` is additionally `approx-ann` (re-exported below).
+#[cfg(feature = "filtered-ann")]
+pub use backend::{
+    nearest_filtered_overfetch, nearest_filtered_overfetch_default, AnnBackend, ExactBackend,
+    DEFAULT_MAX_ROUNDS,
+};
+#[cfg(all(feature = "filtered-ann", feature = "approx-ann"))]
+pub use backend::ApproxBackend;
 pub use fingerprint::{check_against, Artifact, CheckResult, Fingerprint, FINGERPRINT_LEN};
 pub use fuse::{fuse_rrf, fuse_rrf_weighted, fuse_scores, hybrid_search, Retriever, RRF_K};
 pub use import::{ImportBinding, ImportSpec, MAX_NPY_HEADER_LEN};

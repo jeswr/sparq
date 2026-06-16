@@ -148,8 +148,23 @@ jobs:
       # bin test targets), so the archived set == what the un-sharded run built. The
       # .tar.zst is self-contained (binaries + the metadata nextest needs to run them
       # on another runner with `--archive-file`), so the shards never recompile.
+      #
+      # [OPUS-4.8] (#363) `--features approx-ann,filtered-ann,vec-predicate` is LOAD-BEARING.
+      # sparq-vectors' accuracy/recall gates are gated behind these opt-in features at the
+      # MODULE level (`#![cfg(feature = ...)]` in tests/recall.rs, tests/overfetch.rs,
+      # tests/filtered*.rs, …). Without the features the gated test binaries compile EMPTY,
+      # so the dedicated heavy-hnsw shard's exact filter `test(=hnsw_recall_…on_50k)` matches
+      # ZERO tests and nextest exits 4 ("no tests to run") — the failure this fixes. These
+      # are the THREE features that gate sparq-vectors tests (approx-ann → HNSW recall +
+      # throughput + olympics + hybrid; filtered-ann → filtered + over-fetch; vec-predicate
+      # → the `vec:`-predicate BGP tests + cost_model). `provider`/`embeddings` gate NO test
+      # (API-shape + HTTP deps only), so they stay OFF. This is the TEST build only — it does
+      # not change any crate's default/shipped feature set; the opt-in features simply have to
+      # be ON for their gate tests to exist. The shard filters/partition are unchanged: the
+      # two recall tests are the known heavies, the rest (incl. the now-compiled gated tests)
+      # ride the bulk `not ( $HEAVY )` partition.
       - name: Build + archive test binaries (nextest archive)
-        run: cargo nextest archive --workspace --all-targets --archive-file nextest.tar.zst
+        run: cargo nextest archive --workspace --all-targets --features approx-ann,filtered-ann,vec-predicate --archive-file nextest.tar.zst
       # [OPUS-4.8] Upload the archive immediately after the build, BEFORE doctests, so
       # the shards' input artifact is produced even if the doctest step later fails.
       - name: Upload nextest archive
@@ -171,8 +186,11 @@ jobs:
       # artifact present"). A doctest failure is rare and itself a hard, independent
       # blocking signal; archive-then-doctest above at least guarantees the artifact
       # exists. Re-open this if doctest flakiness ever makes the masked picture costly.
+      # [OPUS-4.8] (#363) SAME feature set as the archive build above so the opt-in
+      # sparq-vectors doc examples (the approx-ann/filtered-ann/vec-predicate-gated `///`
+      # blocks) are compiled/run here too, not silently dropped.
       - name: Doctests (nextest does not run these; run once, off the warm build)
-        run: cargo test --workspace --doc
+        run: cargo test --workspace --features approx-ann,filtered-ann,vec-predicate --doc
 
   test:
     # [OPUS-4.8] LOAD-AWARE sharded test matrix (merge-queue-drain speed — @jeswr).

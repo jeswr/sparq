@@ -223,7 +223,14 @@ pub fn nearest_filtered_costed(
 /// the mask genuinely admits fewer than `k` and the short list is correct. The recall boundary is
 /// that a *single* over-fetch sized by the average selectivity can under-fill when the admitted ids
 /// cluster *below* the fetched prefix; iterative over-fetch removes that boundary at the cost of
-/// extra index probes. Wiring an approximate filtered backend is a deferred follow-up (own bead).
+/// extra index probes.
+///
+/// [OPUS-4.8] (sq-ip3a) That iterative over-fetch path now exists:
+/// [`nearest_filtered_overfetch`](crate::backend::nearest_filtered_overfetch) over the pluggable
+/// [`AnnBackend`](crate::backend::AnnBackend) seam (exact default; approximate
+/// [`ApproxBackend`](crate::backend::ApproxBackend) behind `approx-ann`). This function sizes its
+/// FIRST fetch. Honesty unchanged: the approximate backend's recall is `< 1.0` — over-fetch fixes
+/// under-fill, not the index's inherent misses.
 pub fn overfetch_target(k: usize, mask_len: usize, store_len: usize) -> usize {
     if mask_len == 0 || store_len == 0 {
         return k;
