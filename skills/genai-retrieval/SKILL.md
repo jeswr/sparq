@@ -1,6 +1,6 @@
 ---
 name: genai-retrieval
-description: Use when an LLM/agent needs to answer natural-language questions over a sparq RDF Graph with SPARQL, or to build token-budgeted retrieval/grounding context (schema card, VoID, characteristic-set join hints) about an unknown RDF dataset. Covers the sparq-nlq NL→SPARQL loop (ground→generate→validate→execute→repair, offline record/replay, optional live Anthropic backend) and sparq-introspect (schema/VoID/seed-scoped summaries + planner join hints).
+description: Use when an LLM/agent needs to answer natural-language questions over a sparq RDF Graph with SPARQL, or to build token-budgeted retrieval/grounding context (schema card, VoID, characteristic-set join hints) about an unknown RDF dataset. Covers the sparq-nlq NL→SPARQL loop (ground→generate→validate→execute→repair, offline record/replay, optional live Anthropic backend), its sparq_nlq::eval exec-accuracy harness (answer-set F1, oracle-vs-end-to-end, grounded-vs-ungrounded; live LLM test off by default), and sparq-introspect (schema/VoID/seed-scoped summaries + planner join hints).
 ---
 
 # sparq genai-retrieval
@@ -126,7 +126,46 @@ Nlq::repair_prompt_for(&self, question, failed_sparql, error) -> String
 `NlqConfig` knobs (`Default` = the config the committed fixtures were recorded under):
 `summary_budget_chars` (4000), `max_repair_rounds` (1), `exec_timeout`
 (`Some(10s)`, native only), `max_rows` (`Some(1_000_000)`), `examples`
-(two schema-agnostic few-shots).
+(two schema-agnostic few-shots), `ground` (`true` — the grounded loop the fixtures
+were recorded under; set `false` for the ungrounded baseline the exec-accuracy
+harness measures grounding against — see below).
+
+`sparq_nlq::eval` — the **exec-accuracy harness** (the design doc's accuracy gate,
+`research/genai-design.md` §4). It grades the *executed* query the QALD way — **answer-set
+F1**, not query-string equality — and is **fully offline**: it drives `Nlq` over any
+`Llm` (in CI a `ReplayLlm` fixture or a scripted in-memory backend); nothing here
+touches the network.
+
+```rust
+use sparq_nlq::eval::{self, EvalCase, Linking, Comparison, Report};
+
+// One case = a question + the GOLD SPARQL. The gold is executed on the SAME graph at
+// scoring time (no checked-in answer blob to drift — research/genai-nl-to-sparql.md §4.3).
+EvalCase::new(question: impl Into<String>, gold_sparql: impl Into<String>) -> EvalCase
+
+// Score one (linking, grounding) configuration over the cases against `graph`.
+// For Linking::Oracle the gold query is fed straight through validate→execute and the
+// `llm` is NOT consulted (isolates the engine-side loop from model linking).
+eval::run_config(graph: &Graph, cases: &[EvalCase], llm: Box<dyn Llm>,
+                 config: NlqConfig, linking: Linking) -> Report
+
+// Drives all four cells (end-to-end | oracle) × (grounded | ungrounded). `make_llm(ground)`
+// is called once per end-to-end config (ReplayLlm is consumed by the loop, so hand out a
+// fresh fixture each call; the grounded/ungrounded prompts are distinct strings).
+eval::run_comparison(graph: &Graph, cases: &[EvalCase], base_config: &NlqConfig,
+                     make_llm: impl FnMut(bool) -> Box<dyn Llm>) -> Comparison
+
+// Linking ∈ { EndToEnd, Oracle } — reported SEPARATELY, per the design doc.
+// Report { linking, grounded: bool, cases: Vec<CaseResult>, macro_f1, exact_match,
+//          validity, total_repairs }  // macro_f1 = QALD headline metric
+// CaseResult { question, outcome: Result<CaseScore, String> }  // Err = loop failure (F1=0 vs non-empty gold)
+// CaseScore { f1: F1, sparql, repairs }
+// F1 { precision, recall, f1, intersection, predicted, gold } ; F1::is_exact() -> bool
+// AnswerSet::from_result(&QueryResult) -> AnswerSet  // order-independent multiset of rows; F1::score(pred, gold)
+// Comparison { grounded_end_to_end, ungrounded_end_to_end, grounded_oracle, ungrounded_oracle }
+// Comparison::headline_grounding_pays() -> bool  // grounded end-to-end macro-F1 > ungrounded ("grounding pays for itself")
+// Comparison::summary() -> String                // a stderr table; printed at run time, no perf numbers baked into docs
+```
 
 ## Common recipes
 
@@ -210,6 +249,37 @@ let table = CsTable::new(
 # }
 ```
 
+**7. Measure NL→SPARQL exec-accuracy (answer-F1) offline.** Build a small set of
+`(question, gold SPARQL)` cases, then run all four cells and assert that grounding pays:
+
+```rust
+use sparq_nlq::eval::{run_comparison, EvalCase};
+use sparq_nlq::{NlqConfig, ReplayLlm};
+
+let cases = vec![
+    EvalCase::new("How many athletes are on each team?",
+                  "SELECT ?t (COUNT(?a) AS ?n) WHERE { ?a :team ?t } GROUP BY ?t"),
+    // … more (question, GOLD query) pairs
+];
+// `ground` flips per cell; the closure hands out a fresh fixture per end-to-end call.
+let cmp = run_comparison(&graph, &cases, &NlqConfig::default(), |ground| {
+    let f = if ground { "tests/fixtures/grounded.json" } else { "tests/fixtures/ungrounded.json" };
+    Box::new(ReplayLlm::from_file(f).unwrap())
+});
+eprintln!("{}", cmp.summary());                 // printed at run time only
+assert!(cmp.headline_grounding_pays());          // grounded end-to-end macro-F1 > ungrounded
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+What this proves (and what it does NOT): with scripted/recorded completions it validates
+the **harness** and the **mechanism** of the headline claim — answer-F1 scoring,
+oracle-vs-end-to-end and grounded-vs-ungrounded reporting, the inequality — **not** a
+real model's accuracy numbers. Those come from a `live_exec_accuracy` run (`--features
+live` + `RecordingLlm`, which needs a key + network + dataset); that test is `#[ignore]`'d
+and feature-gated **OFF**, so a model or network outage can never red the build. After a
+live run the recorded fixtures become the offline regression set. (No claim is made here
+about NL→SPARQL quality beyond what the fixtures encode.)
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in crates.** Neither crate is in the default build; add `sparq-introspect` /
@@ -235,6 +305,13 @@ let table = CsTable::new(
   ```sparql fence, a bare ``` fence, or bare query text starting `PREFIX`/`SELECT`/`ASK`.
 - **ASK answers** use the engine's unit-row encoding: zero `vars`, one empty row iff
   true (`answer.result.vars.is_empty()`, `result.len() == 1` when true).
+- **`eval` (exec-accuracy) is offline by construction and grades the answer set, not
+  the query string.** It executes both the candidate and the **gold** query on the same
+  graph and compares bind-row multisets (order-independent; empty-vs-empty scores 1, the
+  QALD true-negative convention). The *live-model* accuracy run (`live_exec_accuracy`) is
+  `#[cfg(feature = "live")]` **and** `#[ignore]`'d — it is never in the gate, so the
+  scored numbers in CI come only from scripted/recorded completions. Treat them as a
+  harness/mechanism check, not a model-quality benchmark.
 - **Summary hints are hints.** In `to_text_summary`, per-class counts/coverage are
   exact, but the trailing `→ range, e.g. sample` come from the predicate's *global*
   profile. `schema_summary_for` is struct-level scoping (filters already-mined
@@ -252,4 +329,4 @@ let table = CsTable::new(
   `sparql-formal-semantics` — the verifiable/private query estate, orthogonal to this
   retrieval surface.
 </skill_md>
-<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples }", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")"]
+<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples, ground }", "sparq_nlq::eval::EvalCase::new(question, gold_sparql)", "sparq_nlq::eval::run_config(graph, cases, llm, config, Linking) -> Report", "sparq_nlq::eval::run_comparison(graph, cases, base_config, make_llm) -> Comparison", "Comparison::headline_grounding_pays() -> bool / summary() -> String", "F1::score(&AnswerSet, &AnswerSet) -> F1 / is_exact() -> bool ; AnswerSet::from_result(&QueryResult)", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")"]
