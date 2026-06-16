@@ -1,0 +1,27 @@
+# CodeQL configuration for the Rust workspace SAST gate. [OPUS-4.8]
+#
+# Referenced from .github/workflows/codeql.yml's `github/codeql-action/init`
+# step via `config-file:`. It keeps the full `security-and-quality` query suite
+# (declared in the workflow) and only narrows it with the query-filter below.
+#
+# Why exclude `rust/unused-variable`:
+#   - It is a note-level *quality* query (NOT a security query), so excluding it
+#     does NOT reduce security coverage — every security query plus every other
+#     quality query in `security-and-quality` still runs.
+#   - It is redundant with the repo's REAL unused-variable gate: clippy run with
+#     `-D warnings` in ci.yml. clippy is the authoritative, reliable check and it
+#     correctly does NOT flag the sites CodeQL trips on.
+#   - CodeQL's Rust analyzer does not track variable uses through the `format!`
+#     macro's arguments, so it false-positives on variables that ARE used inside
+#     `format!(...)`. This was confirmed redundant/FP-only here: even after
+#     converting inline `{s}` captures to positional `format!("{}", s)` args
+#     (PR #311), a completed CodeQL run STILL flagged the same sites.
+#   - Refs the three open false-positive alerts this removes:
+#       #150 / #151 — crates/sparq-shacl/src/rules.rs
+#       #170        — crates/sparq-server/src/tpf.rs
+#
+# This is a TARGETED exclusion of exactly one redundant, FP-prone quality rule.
+# Do not broaden it.
+query-filters:
+  - exclude:
+      id: rust/unused-variable
