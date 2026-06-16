@@ -45,6 +45,12 @@ cd "$REPO_ROOT"
 VERSION="${VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --always 2>/dev/null || echo dev)}}"
 OUT_DIR="${OUT_DIR:-sbom}"
 mkdir -p "$OUT_DIR"
+# [OPUS-4.8] sq-toze.27: anchor OUT_DIR to an ABSOLUTE path. cyclonedx-npm runs inside
+# `( cd "$JS_DIR" && … )`, so a RELATIVE --output-file would land under js/$OUT_DIR (the
+# subshell cwd) instead of $REPO_ROOT/$OUT_DIR — which is exactly what made the validate +
+# upload steps ENOENT on the path they expect. Resolving to absolute keeps writes and reads
+# pointed at the same directory regardless of the working dir cyclonedx-npm runs in.
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 # Pin the generator so a silent upstream bump can't change the output shape.
 CDX_NPM="@cyclonedx/cyclonedx-npm@5.0.0"
@@ -79,6 +85,16 @@ echo "    -> full build tree (incl. dev): $dev_out"
     --package-lock-only \
     --mc-type library \
     --output-file "$dev_out" )
+
+# [OPUS-4.8] sq-toze.27: fail LOUDLY (not with a bare downstream ENOENT) if cyclonedx-npm
+# exited 0 but did not actually emit the file we expect at the path we expect.
+for f in "$runtime_out" "$dev_out"; do
+  if [ ! -f "$f" ]; then
+    echo "ERROR: expected CycloneDX SBOM was not produced at: $f" >&2
+    echo "       (cyclonedx-npm returned success but wrote nothing here — check OUT_DIR/cwd)" >&2
+    exit 1
+  fi
+done
 
 # Belt-and-braces sanity: both are valid-shaped CycloneDX JSON for the right component.
 for f in "$runtime_out" "$dev_out"; do
