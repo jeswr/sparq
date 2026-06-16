@@ -53,7 +53,7 @@ let turtle  = d.prov_ntriples(); // …serialised (N-Triples ⊂ Turtle)
 
 For result entity `E`, activity `A`, inputs `Iᵢ`:
 
-```
+```turtle
 A  a                    prov:Activity .
 A  prov:startedAtTime   "…Z"^^xsd:dateTime .
 A  prov:endedAtTime     "…Z"^^xsd:dateTime .
