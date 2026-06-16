@@ -27,6 +27,14 @@ pub mod redact;
 #[cfg(feature = "server")]
 pub mod http;
 
+/// [OPUS-4.8] (sq-r5bv, gh-50) **Stable HTTP error/status contract** — the consumer-facing
+/// transient-vs-permanent classification a client should encode (which status codes/messages
+/// sparq emits for timeout / row-cap / malformed query / auth failure / etc., and which are
+/// retryable). Documentation only (no code); asserted by `tests/status_contract.rs`. Gated on
+/// `server` because it describes the [`http`] surface. See the module docs.
+#[cfg(feature = "server")]
+pub mod status_contract;
+
 /// [OPUS-4.8] (sq-0bxp) OPT-IN per-query access audit log (CDMC CD-2 / ISO 27001 A.8.15 /
 /// EU CRA logging). Compiled only behind the `audit-log` feature, and emitted only when
 /// [`ServerConfig::audit_log`] (`--audit-log` / `SPARQ_AUDIT_LOG=1`) is also set. Emits a

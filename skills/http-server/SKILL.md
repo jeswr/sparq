@@ -776,6 +776,17 @@ Some(SinkTarget::File(path)), .. }` (field present only with the feature). See
   `Content-Type: application/json` (the `405` keeps its `Allow` header). POST query
   requires `Content-Type: application/sparql-query` or `application/x-www-form-urlencoded`
   (else `415`); a GET without `query=` is `400`.
+- **Transient vs permanent status contract (for retry classifiers — sq-r5bv / gh-50).** A retry
+  classifier should treat **only `429` and `503` as transient** (a retry of the identical request
+  may succeed): `429` is a concurrency shed (the request never ran), `503` is a query/UPDATE
+  **timeout**, a durable-write refusal (write NOT applied), or a subscription-capacity refusal.
+  Everything else is **permanent** for the identical request — `400`/`401`/`404`/`405`/`410`/
+  `413`/`415` — and `500` is a defect (caught panic / unclassified internal error), not
+  back-pressure. The trap a `5xx`-only classifier hits against sparq: a **`413` result/row cap is a
+  PERMANENT honest refusal** (narrow the query / add `LIMIT`), not a transient signal and not a
+  truncation. **Classify on the status code, not the body text** (bodies are sanitised generic
+  classes — see the next bullet). There is **no `Retry-After`** header today. Full contract +
+  rationale: the `sparq_server::status_contract` crate doc, asserted by `tests/status_contract.rs`.
 - **Error bodies are sanitized — no information leak (sq-cz89 / sq-j9zs).** On the
   no-auth-by-default path an error body carries only a **stable, generic CLASS message**
   (e.g. `malformed query`, `malformed RDF body`, `malformed gzip body`,
