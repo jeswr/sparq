@@ -225,6 +225,7 @@ fn join_manifest() -> ProofManifest {
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 

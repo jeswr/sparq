@@ -34,8 +34,8 @@ pub mod verifier;
 
 pub use manifest::{
     AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
-    HiddenIndexRevocation, HolderPokProof, ProofInputs, ProofManifest, RevocationStatus,
-    StatusListSnapshot, SubProof,
+    HiddenIndexRevocation, HolderPokProof, HolderSetProof, ProofInputs, ProofManifest,
+    RevocationStatus, StatusListSnapshot, SubProof,
 };
 // [OPUS-4.8] sq-314: derivation-step capability + entailment regime end-to-end.
 pub use derivation::{regime_admits, DerivationStep, EntailmentRule};
@@ -50,6 +50,12 @@ pub use issuer::{
 // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK host helpers (the
 // B2 hidden-key tier — `hpk = hsk·G` + holder-key-digest binding).
 pub use holder::{holder_pok_prover_toml, holder_pok_witness, HolderPokWitness};
+// [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): set-membership host
+// helpers (the hidden-holder analogue of the issuer key-set helpers). Opt-in,
+// NOT-yet-sound (sq-qhy4).
+pub use holder::{
+    holder_set_membership_witness, holder_set_prover_toml, holder_set_root, HolderSetWitness,
+};
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
 // [OPUS-4.8] sq-aih: FileSeenNonces is the DURABLE (restart-surviving) store;
 // InMemorySeenNonces is NON-DURABLE / test-only.

@@ -29,7 +29,10 @@
 //! verify`) is T6/sq-i1dt and is NOT implemented here.
 
 use sparq_zk::field::{field_to_hex, Fr};
-use sparq_zk::sig::{in_circuit_holder_witness, InCircuitHolderPokWitness, SecretKey};
+use sparq_zk::poseidon2;
+use sparq_zk::sig::{
+    holder_key_digest, in_circuit_holder_witness, InCircuitHolderPokWitness, PublicKey, SecretKey,
+};
 
 /// The complete private witness for one holder Proof-of-Possession: the holder
 /// secret `hsk` (base-field embedding) and the holder public key `hpk = hsk·G`
@@ -68,6 +71,161 @@ pub fn holder_pok_prover_toml(challenge: &Fr, witness: &HolderPokWitness) -> Str
     s.push_str(&format!("hsk = \"{}\"\n", field_to_hex(&witness.hsk)));
     s.push_str(&format!("hpk_x = \"{}\"\n", field_to_hex(&witness.hpk_x)));
     s.push_str(&format!("hpk_y = \"{}\"\n", field_to_hex(&witness.hpk_y)));
+    s
+}
+
+// ===========================================================================
+// [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): host-side Merkle
+// commitment + membership witness for the `holder_set_d{depth}` member. The
+// in-circuit relation is `holder.nr::hidden_holder_set`; this is its Rust mirror,
+// the analogue of [`crate::issuer`]'s `key_set_root` / `key_membership_witness`
+// for the hidden-issuer member.
+//
+// The holder SET is committed as a depth-`D` Poseidon2 Merkle tree whose leaf for
+// holder `H` is `holder_key_digest(hpk_H)` (the canonical attested holder
+// identity, the SAME value `holder_pok` makes public in the clear-digest tier and
+// the issuer folds into `commitment_message_with_holder`). The RELYING PARTY
+// commits this root over its OWN authoritative holder registry (the trust anchor);
+// the proof's PUBLIC `holder_set_root` must byte-equal it. WHICH holder is hidden;
+// the trust source is not.
+//
+// NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2); opt-in. No
+// soundness / ZK-privacy property is asserted as achieved.
+// ===========================================================================
+
+/// The Poseidon2 two-input compression for Merkle internal nodes -- the Rust
+/// mirror of the circuit's `h2(a, b) = Poseidon2::hash([a, b], 2)`. Identical to
+/// `issuer::h2` / `revocation::h2` (cross-tested bit-identical), shared one source
+/// of truth for the tree shape.
+fn h2(a: Fr, b: Fr) -> Fr {
+    poseidon2::hash(&[a, b])
+}
+
+/// The padding leaf for holder-set slots past the set size: `Fr::from(0)`. A
+/// genuine holder leaf is `holder_key_digest(hpk)` (a domain-separated Poseidon2
+/// digest, never `0` in practice for a non-identity key); the membership proof
+/// additionally binds the index, so a padding slot is never a usable member. Same
+/// discipline as `issuer::padding_leaf`.
+fn padding_leaf() -> Fr {
+    Fr::from(0u64)
+}
+
+/// The `2^depth` holder-set leaves: leaf `i` = `holder_key_digest(holders[i])` for
+/// `i < holders.len()`, else the padding leaf. `None` if any holder key is the
+/// identity (no coordinates -- never a usable key, fail-closed), `depth > 31`, or
+/// the set overflows the tree.
+fn holder_leaves(holders: &[PublicKey], depth: u32) -> Option<Vec<Fr>> {
+    if depth > 31 {
+        return None;
+    }
+    let n_leaves = 1usize << depth;
+    if holders.len() > n_leaves {
+        return None; // the set does not fit the tree at this depth
+    }
+    let mut leaves = Vec::with_capacity(n_leaves);
+    for hpk in holders {
+        // holder_key_digest is the in-circuit leaf (holder_set_leaf in holder.nr);
+        // None for an identity key (fail-closed, matches the in-circuit guard).
+        leaves.push(holder_key_digest(hpk).ok()?);
+    }
+    leaves.resize(n_leaves, padding_leaf());
+    Some(leaves)
+}
+
+/// Commit the trusted holder set as a depth-`depth` Poseidon2 Merkle tree and
+/// return the root (leaf `i` = `holder_key_digest(holders[i])`). This is what the
+/// RELYING PARTY computes over its OWN authoritative holder registry (the trust
+/// anchor the proof's public `holder_set_root` is checked against) and what the
+/// PROVER computes over the same set. Returns `None` if `depth > 31`, the set
+/// overflows the tree, or any holder key is the identity (fail-closed). Mirrors
+/// [`crate::issuer::key_set_root`].
+pub fn holder_set_root(holders: &[PublicKey], depth: u32) -> Option<Fr> {
+    let mut level = holder_leaves(holders, depth)?;
+    for _ in 0..depth {
+        level = level.chunks(2).map(|pair| h2(pair[0], pair[1])).collect();
+    }
+    debug_assert_eq!(level.len(), 1, "fold reduces to a single root");
+    level.first().copied()
+}
+
+/// The authentication path (sibling at each level, BOTTOM-UP -- level 0 first) for
+/// the holder at `index` in the depth-`depth` tree. The private input the circuit
+/// folds. `None` if `index >= 2^depth`, the set overflows the tree, `depth > 31`,
+/// or any holder key is the identity. Mirrors
+/// [`crate::issuer::key_membership_witness`].
+pub fn holder_set_membership_witness(
+    holders: &[PublicKey],
+    depth: u32,
+    index: u64,
+) -> Option<Vec<Fr>> {
+    let mut level = holder_leaves(holders, depth)?;
+    let n_leaves = 1u64 << depth;
+    if index >= n_leaves {
+        return None;
+    }
+    let mut pos = index as usize;
+    let mut siblings = Vec::with_capacity(depth as usize);
+    for _ in 0..depth {
+        let sib = pos ^ 1;
+        siblings.push(level[sib]);
+        level = level.chunks(2).map(|pair| h2(pair[0], pair[1])).collect();
+        pos /= 2;
+    }
+    Some(siblings)
+}
+
+/// The complete private witness for one hidden-holder-SET proof: the holder PoK
+/// witness ([`HolderPokWitness`], carrying `hsk` + the `hpk` coords) plus the
+/// holder-set membership path. Mirrors the private inputs of
+/// `holder_set_d{depth}::main` (the analogue of [`crate::HiddenIssuerWitness`]).
+/// The `holder_pk_digest` field of the inner [`HolderPokWitness`] is NOT a public
+/// input of this member (the hidden-holder upgrade hides it); it is retained only
+/// as the host-side leaf cross-check.
+#[derive(Debug, Clone)]
+pub struct HolderSetWitness {
+    /// The holder PoK witness (`hsk`, `hpk_x`, `hpk_y`, and the host
+    /// `holder_pk_digest` leaf cross-check). `hsk`/`hpk` are PRIVATE in-circuit.
+    pub pok: HolderPokWitness,
+    /// The holder's index in the set (private; the circuit derives the path
+    /// directions from it).
+    pub index: u64,
+    /// The Merkle authentication path: `siblings[k]` is the sibling at level `k`
+    /// (level 0 = leaves), bottom-up. Length = `depth`.
+    pub siblings: Vec<Fr>,
+}
+
+/// Render the `Prover.toml` body for the `holder_set_d{depth}` member. Order MUST
+/// match `holder_set_d{depth}/src/main.nr`:
+/// PUBLIC: challenge, holder_set_root;
+/// PRIVATE: hsk, hpk_x, hpk_y, index, siblings.
+///
+/// `challenge` is the verifier's fresh nonce (the public-input field-0 convention
+/// the whole circuit family shares); `holder_set_root` is the committed set root
+/// the verifier binds to its OWN authoritative holder registry. `hsk`, `hpk_x`,
+/// `hpk_y`, `index`, `siblings` are the private witness (so the proof discloses
+/// NEITHER the holder key NOR which holder).
+pub fn holder_set_prover_toml(
+    challenge: &Fr,
+    holder_set_root: &Fr,
+    witness: &HolderSetWitness,
+) -> String {
+    let w = &witness.pok;
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", field_to_hex(challenge)));
+    s.push_str(&format!(
+        "holder_set_root = \"{}\"\n",
+        field_to_hex(holder_set_root)
+    ));
+    s.push_str(&format!("hsk = \"{}\"\n", field_to_hex(&w.hsk)));
+    s.push_str(&format!("hpk_x = \"{}\"\n", field_to_hex(&w.hpk_x)));
+    s.push_str(&format!("hpk_y = \"{}\"\n", field_to_hex(&w.hpk_y)));
+    s.push_str(&format!("index = \"{}\"\n", witness.index));
+    let sibs: Vec<String> = witness
+        .siblings
+        .iter()
+        .map(|sib| format!("\"{}\"", field_to_hex(sib)))
+        .collect();
+    s.push_str(&format!("siblings = [{}]\n", sibs.join(", ")));
     s
 }
 
@@ -157,5 +315,125 @@ mod tests {
         let digest_pos = toml.find("holder_pk_digest").unwrap();
         let hsk_pos = toml.find("hsk").unwrap();
         assert!(challenge_pos < digest_pos && digest_pos < hsk_pos);
+    }
+
+    // ----- [OPUS-4.8] sq-3c00: hidden-holder-SET host helpers -----
+
+    fn holder_set(seeds: &[u64]) -> Vec<PublicKey> {
+        seeds.iter().map(|s| SecretKey::from_seed(*s).public_key()).collect()
+    }
+
+    // The `holder_set_d{depth}` CircuitId maps to the on-disk package directory, so
+    // the verifier (bind_holder_set) and the driver resolve the same compiled member.
+    #[test]
+    fn holder_set_circuit_id_package_name() {
+        assert_eq!(CircuitId::HolderSet { depth: 4 }.package(), "holder_set_d4");
+        assert_eq!(CircuitId::HolderSet { depth: 2 }.package(), "holder_set_d2");
+    }
+
+    // The holder-set LEAF is the holder-key digest (NOT the issuer h2(x,y) shape):
+    // a depth-2 tree (4 holders) built by hand from holder_key_digest leaves
+    // matches `holder_set_root`, and the membership witness for each index re-folds
+    // to the root (the circuit's fold). This is the single-source-of-truth pin the
+    // bind_holder_set anchor rests on.
+    #[test]
+    fn holder_set_root_and_witness_recompute() {
+        let holders = holder_set(&[100, 101, 102, 103]);
+        let depth = 2;
+        let leaves: Vec<Fr> = holders
+            .iter()
+            .map(|h| holder_key_digest(h).unwrap())
+            .collect();
+        let n01 = h2(leaves[0], leaves[1]);
+        let n23 = h2(leaves[2], leaves[3]);
+        let expected_root = h2(n01, n23);
+        assert_eq!(holder_set_root(&holders, depth), Some(expected_root));
+
+        for index in 0..4u64 {
+            let sibs = holder_set_membership_witness(&holders, depth, index).unwrap();
+            // Re-fold bottom-up using directions = LSB-first bits of index.
+            let mut node = leaves[index as usize];
+            let mut pos = index;
+            for sib in &sibs {
+                let is_right = pos & 1 == 1;
+                node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+                pos /= 2;
+            }
+            assert_eq!(node, expected_root, "fold for index {index} reaches the root");
+        }
+    }
+
+    // The holder-set leaf is the DIGEST, distinct from the issuer key-set leaf
+    // `h2(pk.x, pk.y)` over the SAME key (the domain tag ZKSIG_HK separates them) --
+    // so a holder-set root can never be confused with an issuer key-set root.
+    #[test]
+    fn holder_set_leaf_differs_from_issuer_key_leaf() {
+        let hpk = SecretKey::from_seed(102).public_key();
+        let (x, y) = hpk.coords().unwrap();
+        let holder_leaf = holder_key_digest(&hpk).unwrap();
+        let issuer_leaf = h2(x, y);
+        assert_ne!(
+            holder_leaf, issuer_leaf,
+            "holder-set leaf (digest) must differ from issuer key-set leaf (h2(x,y))"
+        );
+    }
+
+    // A holder set smaller than the tree is padded; padding leaves are 0, distinct
+    // from any digest leaf (so a holder never collides into a padding slot).
+    #[test]
+    fn padded_holder_set_root_is_defined() {
+        let holders = holder_set(&[100, 101, 102]); // 3 holders in a 4-slot tree
+        let depth = 2;
+        let leaves: Vec<Fr> = holders
+            .iter()
+            .map(|h| holder_key_digest(h).unwrap())
+            .collect();
+        let n01 = h2(leaves[0], leaves[1]);
+        let n23 = h2(leaves[2], padding_leaf()); // slot 3 is padding
+        let expected = h2(n01, n23);
+        assert_eq!(holder_set_root(&holders, depth), Some(expected));
+        for leaf in &leaves {
+            assert_ne!(*leaf, padding_leaf(), "a holder leaf is never the padding leaf");
+        }
+    }
+
+    #[test]
+    fn out_of_range_index_and_overflow_are_none() {
+        let holders = holder_set(&[100, 101, 102, 103]);
+        assert_eq!(holder_set_membership_witness(&holders, 2, 4), None); // idx 4 OOB
+        // 5 holders do not fit a depth-2 (4-slot) tree.
+        let big = holder_set(&[1, 2, 3, 4, 5]);
+        assert_eq!(holder_set_root(&big, 2), None);
+    }
+
+    // The full witness assembly: an in-set holder's PoK witness's hpk hashes to the
+    // leaf at the claimed index, and the membership path re-folds to the root the
+    // verifier would derive. The Prover.toml renders all seven fields in main's
+    // declaration order (PUBLIC challenge, holder_set_root; PRIVATE hsk, hpk_x,
+    // hpk_y, index, siblings).
+    #[test]
+    fn holder_set_witness_assembles_consistently() {
+        let holders = holder_set(&[100, 101, 102, 103]);
+        let depth = 2u32;
+        let holder_idx = 2usize;
+        let holder_sk = SecretKey::from_seed(102);
+        let pok = holder_pok_witness(&holder_sk).unwrap();
+        let siblings = holder_set_membership_witness(&holders, depth, holder_idx as u64).unwrap();
+
+        // The PoK witness's hpk coords digest to the leaf at holder_idx.
+        let leaf = holder_key_digest(&holders[holder_idx]).unwrap();
+        assert_eq!(leaf, pok.holder_pk_digest, "witness digest is the set leaf");
+
+        let w = HolderSetWitness { pok, index: holder_idx as u64, siblings };
+        let root = holder_set_root(&holders, depth).unwrap();
+        let toml = holder_set_prover_toml(&Fr::from(0x2au64), &root, &w);
+        for field in ["challenge", "holder_set_root", "hsk", "hpk_x", "hpk_y", "index", "siblings"] {
+            assert!(toml.contains(field), "toml must render {field}");
+        }
+        // The PUBLIC inputs come first (challenge, then holder_set_root), then private.
+        let challenge_pos = toml.find("challenge").unwrap();
+        let root_pos = toml.find("holder_set_root").unwrap();
+        let hsk_pos = toml.find("hsk").unwrap();
+        assert!(challenge_pos < root_pos && root_pos < hsk_pos);
     }
 }

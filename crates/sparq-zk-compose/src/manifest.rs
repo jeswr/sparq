@@ -566,6 +566,28 @@ pub enum CircuitId {
     /// is `bind_holder_pok` (T6/sq-i1dt), SEPARATE from this member registration.
     // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK circuit member.
     HolderPok,
+    /// `holder_set_d{depth}` — in-circuit hidden-holder SET membership (sq-3c00,
+    /// the HolderPoP hidden-holder-SET anonymity tier). The proof's PUBLIC inputs
+    /// are `challenge` + the holder-set Merkle `holder_set_root`; the holder secret
+    /// `hsk`, the holder public key `(hpk_x, hpk_y)`, the membership `index`, and
+    /// the authentication path are PRIVATE, so the proof proves "I possess the
+    /// holder secret of SOME holder in the set" without disclosing the secret, the
+    /// key, OR which holder. The relation is `hpk = hsk·G` (Baby-JubJub, ONE
+    /// scalar-mul, plus on-curve / identity / `< L` guards) AND a depth-`depth`
+    /// Poseidon2 Merkle membership of the holder-key DIGEST
+    /// `Poseidon2([ZKSIG_HK, hpk.x, hpk.y])`, reusing `holder.nr`'s `holder_pok`
+    /// gadgets + `issuer.nr`'s Merkle-fold pattern verbatim. The hidden-holder
+    /// analogue of [`HiddenIssuer`] (which hides WHICH issuer); the privacy upgrade
+    /// over the clear-digest [`HolderPok`] member (which makes `holder_pk_digest`
+    /// public). The verifier gate that binds `holder_set_root` to the relying
+    /// party's authoritative holder registry is `bind_holder_set`, SEPARATE from
+    /// this member registration.
+    ///
+    /// NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2); opt-in. No
+    /// soundness / ZK-privacy property is asserted as achieved.
+    // [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): circuit member. Opt-in,
+    // NOT-yet-sound.
+    HolderSet { depth: u32 },
     /// `join_eq_na{n_a}_nb{n_b}` — hidden cross-credential JOIN
     /// (sq-bwwl / sq-fi03, `research/zk-hidden-join-design.md` §2.2/§3.1). Proves
     /// two scan rows share a value at chosen slots — `row_a[slot_a] ==
@@ -595,6 +617,9 @@ impl CircuitId {
             CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
             // [OPUS-4.8] sq-xqfg (HolderPoP T5): depth-free single member.
             CircuitId::HolderPok => "holder_pok".to_string(),
+            // [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): the `depth`
+            // names the compiled set-membership member, e.g. `holder_set_d4`.
+            CircuitId::HolderSet { depth } => format!("holder_set_d{depth}"),
             // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): the `n_a`/`n_b` graph-size
             // buckets name the compiled join member, e.g. `join_eq_na16_nb16`.
             CircuitId::JoinEq { n_a, n_b } => format!("join_eq_na{n_a}_nb{n_b}"),
@@ -954,6 +979,28 @@ pub struct ProofManifest {
     // NOT-yet-sound.
     #[serde(default)]
     pub holder_pok_proofs: Vec<HolderPokProof>,
+    /// OPTIONAL in-circuit hidden-holder SET-membership proofs (sq-3c00, the
+    /// HolderPoP hidden-holder-SET anonymity tier). Each proves, in zero knowledge,
+    /// knowledge of a holder secret whose public key's digest is a member of a
+    /// holder SET committed as the PUBLIC `holder_set_root` — WITHOUT disclosing the
+    /// holder key OR which holder. The hidden-holder analogue of the clear-digest
+    /// [`HolderPokProof`] (which makes `holder_pk_digest` public), the holder twin
+    /// of [`HiddenIssuerAttestation`] (which hides WHICH issuer). The verifier
+    /// ([`crate::verifier::bind_holder_set`]) binds the proof's PUBLIC
+    /// `holder_set_root` to the root it derives from its OWN authoritative holder
+    /// registry (the trust anchor; WHICH holder is hidden, the trust source is
+    /// not), reconstructs the public inputs from its own nonce + that root, and `bb
+    /// verify`s. Empty for a manifest with no set-membership proof (defaults so
+    /// legacy manifests parse). Gated by an opt-in
+    /// [`crate::verifier::HolderRegistry`] depth (`with_hidden_holder_set_depth`).
+    ///
+    /// NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2): this wires the
+    /// membership gate, it does NOT make the verifier sound. No soundness /
+    /// ZK-privacy property is asserted as achieved. See [`HolderSetProof`].
+    // [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): in-circuit
+    // set-membership proofs. Opt-in, NOT-yet-sound.
+    #[serde(default)]
+    pub holder_set_proofs: Vec<HolderSetProof>,
 }
 
 /// A hidden-index revocation (bit-unset) proof (sq-3e5 / sq-h2v): the bb proof
@@ -1113,6 +1160,61 @@ pub struct HolderPokProof {
     /// public inputs are `[challenge, holder_pk_digest]` in `holder_pok` main's
     /// declaration order; the verifier reconstructs them from its own nonce + the
     /// issuer-attested digest and byte-compares.
+    pub proof_hex: String,
+}
+
+/// An in-circuit hidden-holder SET-membership proof (sq-3c00, the HolderPoP
+/// hidden-holder-SET anonymity tier): a bb proof produced by the
+/// `holder_set_d{depth}` circuit member ([`crate::CircuitId::HolderSet`]) that the
+/// prover knows a holder secret `hsk` whose public key `hpk = hsk·G` has a
+/// holder-key digest `Poseidon2([ZKSIG_HK, hpk.x, hpk.y])` that is a MEMBER of the
+/// holder SET committed as the PUBLIC Poseidon2 Merkle `holder_set_root` — WITHOUT
+/// disclosing `hsk`, `hpk`, OR which holder. The hidden-holder analogue of the
+/// clear-digest [`HolderPokProof`] (which makes `holder_pk_digest` public, so the
+/// verifier learns the holder is the SPECIFIC hidden-key party bound to one
+/// credential); the holder twin of [`HiddenIssuerAttestation`] (which hides WHICH
+/// issuer signed).
+///
+/// # Trust anchor (mirrors the hidden-issuer external-K anchor — load-bearing)
+/// `holder_set_root` is a PUBLIC input the prover commits, but it is NOT trusted as
+/// a prover claim: the verifier ([`crate::verifier::bind_holder_set`]) recomputes
+/// the authoritative root from its OWN [`crate::verifier::HolderRegistry`]
+/// (canonical order) at `depth` and rejects unless the proof's public
+/// `holder_set_root` byte-equals it. So the "in the set" fact is bound to the
+/// relying party's own holder registry, exactly as the clear-key holder path is —
+/// the only thing hidden is WHICH holder (the deanonymising channel), never the
+/// trust source.
+///
+/// `depth` selects the circuit member (`holder_set_d{depth}`) and MUST equal the
+/// depth the relying party derives its root with.
+///
+/// # SOUNDNESS (load-bearing, NOT a security claim)
+/// This wires the membership gate; it does NOT make the composition verifier sound.
+/// The verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2) and
+/// this member inherits that — a passing proof is NOT a guarantee under an
+/// adversarial prover, and there is NO external accredited-cryptographer sign-off
+/// (sq-qhy4 pending). Research-grade, opt-in. No soundness / ZK-privacy property is
+/// asserted as achieved.
+// [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): in-circuit set-membership
+// proof. Opt-in, NOT-yet-sound (sq-qhy4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolderSetProof {
+    /// The commitment this set-membership proof covers — must match a scan
+    /// sub-proof's `commitments[g]`, so the proof is tied to a credential the
+    /// presentation actually uses. A proof over a commitment no verified scan
+    /// references is a dangling proof, rejected fail-closed.
+    pub commitment: FieldHex,
+    /// The Merkle-tree depth (`holder_set_d{depth}` member; supports `2^depth`
+    /// holders). MUST match the depth the relying party derives its root with.
+    pub depth: u32,
+    /// The holder-set Merkle root the proof was produced against (the proof's
+    /// PUBLIC input). Checked byte-equal to the relying party's authoritative root.
+    pub holder_set_root: FieldHex,
+    /// The bb proof blob (hex), same `len|proof|len|pi|vk` layout as a
+    /// [`SubProof::proof_hex`] (see [`crate::verifier::encode_artifacts`]). Its
+    /// public inputs are `[challenge, holder_set_root]` in `holder_set_d{depth}`
+    /// main's declaration order; the verifier reconstructs them from its own nonce
+    /// + the authoritative root and byte-compares.
     pub proof_hex: String,
 }
 
@@ -1318,6 +1420,7 @@ mod holder_binding_tests {
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
         };
 
         let json = manifest.to_json();
@@ -1592,6 +1695,7 @@ mod canonical_edge_tests {
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
         }
     }
 

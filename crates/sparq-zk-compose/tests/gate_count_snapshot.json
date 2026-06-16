@@ -26,6 +26,7 @@
     "revoke_unset_d10": 899,
     "hidden_issuer_d4": 16932,
     "holder_pok": 10334,
+    "holder_set_d4": 10650,
     "join_eq_na16_nb16": 7025,
     "join_eq_na16_nb64": 12885,
     "join_eq_na64_nb16": 12885,

@@ -50,6 +50,7 @@ Verdict: scaffold is GOOD; committed as baseline unchanged. Added `.gitignore`
 | revoke_unset_d10  | — | —  | — | revoke_unset (D=10, hidden-index revocation; sq-3e5/sq-h2v) |
 | hidden_issuer_d4  | — | —  | — | hidden_issuer (D=4, in-circuit Schnorr-over-BabyJubJub + hidden-key set membership; sq-z9l) |
 | holder_pok        | — | —  | — | holder_pok (in-circuit holder PoK; sq-xqfg, verifier-wired B2 sq-c2ql) |
+| holder_set_d4     | — | —  | — | holder_set (D=4, in-circuit hidden-holder SET membership: holder PoK + Merkle holder-set membership; the holder analogue of hidden_issuer_d4. sq-3c00, verifier-wired) |
 | join_eq_na16_nb16 | — | —  | — | join_eq (N_A=16, N_B=16, hidden cross-credential JOIN; sq-bwwl/sq-r2s8) |
 | join_eq_na16_nb64 | — | —  | — | join_eq (N_A=16, N_B=64; [OPUS-4.8] sq-pzet) |
 | join_eq_na64_nb16 | — | —  | — | join_eq (N_A=64, N_B=16; [OPUS-4.8] sq-pzet) |
@@ -207,10 +208,53 @@ prover, a guarantee the holder relation holds, and there is NO external accredit
 cryptographer sign-off (sq-qhy4 pending). Research-grade, opt-in. NO soundness /
 ZK-privacy claim was added; every standing not-yet-sound disclaimer is preserved.
 
-DEFERRED (beaded): a hidden-holder-SET tier (proving membership in a holder set
-without revealing which holder — the analogue of `hidden_issuer`'s `key_set_membership`,
-reusing the same Merkle gadget) for full holder anonymity beyond B2's single-key hiding;
-and a `gate_count.rs` regression baseline for `holder_pok` measured under `bb gates`.
+### Hidden-holder-SET anonymity tier (sq-3c00) — wired, NOT-yet-sound
+
+[OPUS-4.8] Wired the hidden-holder-SET tier: prove the holder is a MEMBER of a
+holder set WITHOUT revealing WHICH holder — the holder analogue of `hidden_issuer`'s
+`key_set_membership`, reusing the SAME Poseidon2 Merkle fold (`hashes::h2` internal
+nodes) and the `holder_pok` key-pair / on-curve / identity / `< L` gadgets verbatim.
+This is the privacy upgrade over the clear-digest `holder_pok` member (B2), which
+makes `holder_pk_digest` PUBLIC (a verifier still learns the holder is the specific
+hidden-key party bound to one credential); here only the holder-set Merkle root is
+public, so WHICH holder is hidden.
+
+`compose_core::holder` adds `holder_set_leaf` (the leaf is the holder-key DIGEST
+`holder_key_digest(hpk) = Poseidon2([ZKSIG_HK, hpk.x, hpk.y])`, the canonical attested
+identity — distinct from the issuer `key_leaf = h2(x, y)`), `holder_set_membership`,
+and `hidden_holder_set<D>` (= `holder_pok`'s steps 1-4 + the Merkle-membership fold).
+New member `holder_set_d4` (`zk/compose/holder_set_d4`, D=4, up to 16 holders; public
+`challenge`, `holder_set_root`; private `hsk`, `hpk`, `index`, `siblings`). Host:
+`holder::{holder_set_root, holder_set_membership_witness, holder_set_prover_toml,
+HolderSetWitness}`; `manifest::HolderSetProof` + `holder_set_proofs` +
+`CircuitId::HolderSet{depth}`; `HolderRegistry::with_hidden_holder_set_depth` opt-in +
+`hidden_holder_set_root`; `verifier::bind_holder_set`. The verifier does NOT trust the
+proof's public `holder_set_root`: it recomputes the AUTHORITATIVE root from its OWN
+`HolderRegistry` (canonical order), reconstructs the public inputs `[challenge,
+holder_set_root]` from its own nonce + that root (audit-#1/#4), recomputes the canonical
+`holder_set_d4` vk verifier-side (audit-#2), and `bb verify`s — so "in the set" is bound
+to the relying party's holder registry, only WHICH holder is hidden.
+
+Fail-closed reasons: `HolderSetNotEnabled` / `HolderSetDepthMismatch` /
+`HolderSetRootUnavailable` / `HolderSetRootMismatch` / `HolderSetUnreferencedCommitment`
+/ `HolderSetProofRejected` / `HolderSetMalformedProof`. Tests
+(`crates/sparq-zk-compose/tests/holder_set_binding.rs`): serde + no-toolchain structural
+rejections, plus toolchain-gated bb prove→verify round-trips (an in-set holder verifies;
+a forged set root is `HolderSetRootMismatch`; an out-of-set holder is unprovable). Noir
+cross-vectors + adversarial rejections in `compose_core::tests`. `gate_count.rs` baseline
+for `holder_set_d4` recorded under `bb gates`.
+
+SOUNDNESS (load-bearing): this WIRES the membership gate; it does NOT make the verifier
+sound. The composition verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic
+sq-1s2) and `holder_set_d4` inherits that — a passing proof is NOT, under an adversarial
+prover, a guarantee the holder relation holds, and there is NO external accredited-
+cryptographer sign-off (sq-qhy4 pending). Research-grade, opt-in. NO soundness /
+ZK-privacy property was asserted as achieved; every standing not-yet-sound disclaimer is
+preserved.
+
+DEFERRED (beaded): deeper depths (`holder_set_d{D}` for larger holder registries) if a
+use-case demands them; the dense host Merkle builder bounds the set to `2^D` (the circuit
+relation is depth-generic), so a very large holder registry would want a sparse commitment.
 
 ### M1 — Rust orchestration crate `crates/sparq-zk-compose` (DONE)
 

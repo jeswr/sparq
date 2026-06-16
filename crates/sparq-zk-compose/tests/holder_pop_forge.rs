@@ -274,6 +274,7 @@ fn holder_manifest(
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 

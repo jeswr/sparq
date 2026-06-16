@@ -24,6 +24,10 @@ members = [
     "revoke_unset_d10",
     "hidden_issuer_d4",
     "holder_pok",
+    # [OPUS-4.8] sq-3c00: hidden-holder-SET anonymity tier (Merkle holder-set
+    # membership; the holder analogue of hidden_issuer_d4). Opt-in, NOT-yet-sound
+    # (sq-qhy4) -- the verifier remains NOT-yet-sound; this is not a soundness change.
+    "holder_set_d4",
     "join_eq_na16_nb16",
     # [OPUS-4.8] sq-pzet: remaining hidden-join graph-size members (the N=64
     # bucket) so a join composes with an n=64 scan.
