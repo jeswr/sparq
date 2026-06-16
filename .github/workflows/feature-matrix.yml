@@ -17,6 +17,25 @@
 # and fails the merge if any opt-in build/clippy/test breaks. No edit to ci-summary.yml
 # is needed — the aggregator polls by name, not by a hard-coded list.
 #
+# GUARD — THE RULE THAT KEEPS THIS LANE HONEST (sq-vya1). A test module/file behind
+# `#[cfg(feature = "X")]` / `#![cfg(feature = "X")]` for a DEFAULT-OFF feature is compiled
+# EMPTY by ci.yml's `cargo nextest archive --workspace --all-targets` (it passes NO
+# `--features`), so the sharded `test` lane there runs ZERO of those tests — silently. The
+# ONLY thing that exercises such a suite is a leg HERE whose `cargo test -p <crate>
+# --features <…>` set is a SUPERSET of every feature the suite's cfg names. THEREFORE:
+# whenever you add (or feature-gate) a test behind a default-OFF feature, you MUST either
+#   (a) add that feature to a leg below whose crate matches (combine with an existing leg
+#       if the features co-enable cleanly — see the sparq-server `audit-log,access-audit,…`
+#       leg), OR
+#   (b) add a NEW leg (if the feature must be isolated — e.g. it changes a `not(feature=…)`
+#       code path, like brTPF vs TPF — give it its own leg so both code paths are tested).
+# To verify a suite is actually wired: `cargo nextest list -p <crate> --features <set>`
+# must SHOW the previously-skipped test names. The aggregator gate (ci-summary.yml) treats
+# every leg NAME here as REQUIRED (none contains the words "advisory"/"informational"), so
+# a broken opt-in build/clippy/test blocks the merge — but ONLY for suites a leg reaches.
+# A suite with no leg and no default coverage is the silent gap this whole lane exists to
+# close; do NOT let one back in. (ci.yml carries the mirror-image of this guard.)
+#
 # SCOPE — what this lane deliberately does NOT cover, and why (each is a separate gate
 # or a documented exclusion, NOT an oversight):
 #   • `zlib-ng` (sparq-cli / sparq-server / sparq-parse / sparq-hdt): swaps flate2's
@@ -139,6 +158,18 @@ jobs:
             crate: sparq-engine
             features: service
             test: true
+          # [OPUS-4.8] sq-vya1: SPARQL window functions + the custom-aggregate registry.
+          # The `window` module, the `AggregateFunction::Custom` eval arm and their 8 in-src
+          # tests (`window::tests::*` + `aggregate::tests::custom_*`/`unregistered_*`) are all
+          # `#[cfg(feature = "window-functions")]`, so the default build (and ci.yml's archive)
+          # compiled them EMPTY and no prior engine leg enabled the feature — 8 tests never ran.
+          # No new dep (oxrdf already direct) and no `not(feature)` divergence, so a single
+          # isolated leg (matching the per-feature engine legs above) covers it; verified
+          # `cargo nextest list -p sparq-engine --features window-functions` shows the 8 tests.
+          - name: sparq-engine (window-functions)
+            crate: sparq-engine
+            features: window-functions
+            test: true
           # sparq-cli: the `dump` re-serializer (forwards sparq-engine/serialize-rdf).
           - name: sparq-cli (serialize-rdf)
             crate: sparq-cli
@@ -157,9 +188,19 @@ jobs:
           # `audit-log` pulls `server` (it operates on the async HTTP Response + tracing);
           # composed with the same server feature set as the leg above so it compiles + the
           # gated test is discovered and actually executes.
-          - name: sparq-server (audit-log + server features)
+          # [OPUS-4.8] sq-vya1: `access-audit` ADDED here. tests/access_audit.rs is
+          # `#![cfg(feature = "access-audit")]` and the 7 in-src `access_audit::tests::*`
+          # unit tests are `#[cfg(feature = "access-audit")]`, so the default build (and
+          # EVERY prior leg) compiled them EMPTY and ran ZERO of them — the silent gap this
+          # bead closes. `access-audit` only pulls `server` (no conflict — it is a SECOND,
+          # independent audit sink alongside `audit-log`), so it co-enables cleanly with this
+          # leg's set; verified: `cargo nextest list -p sparq-server --features access-audit,…`
+          # now shows the 9 access_audit tests, and the leg's `clippy --all-targets -D
+          # warnings` gates the feature surface. Folded in here (not a new leg) to avoid a
+          # near-duplicate full-server-compile.
+          - name: sparq-server (audit-log, access-audit + server features)
             crate: sparq-server
-            features: audit-log,federation-descriptors,service,time-travel,geo,test-seams
+            features: audit-log,access-audit,federation-descriptors,service,time-travel,geo,test-seams
             test: true
           # [OPUS-4.8] sq-dxhb: the Triple Pattern Fragments / Linked Data Fragments READ-ONLY
           # source endpoint (`GET /tpf`). The handler + the Hydra paging vocabulary + the
@@ -230,6 +271,33 @@ jobs:
           - name: sparq-solid (odrl-bridge)
             crate: sparq-solid
             features: odrl-bridge
+            test: true
+          # [OPUS-4.8] sq-vya1: sparq-policy STATEFUL `odrl:count` enforcement. The whole
+          # tests/odrl_count.rs file is `#![cfg(feature = "count-enforcement")]` and the
+          # `count` module is feature-gated, so the default build (and ci.yml's
+          # archive) compiled them EMPTY — the 10 odrl_count tests (lteq/lt/eq budgets,
+          # fail-closed on a missing/malformed counter, per-(party,target,rule) isolation,
+          # the concurrent-overgrant oracle) NEVER ran. sparq-policy had NO leg at all here.
+          # `count-enforcement` is std-only (no new dep, no socket/fixture), so this is a
+          # fast leg; verified `cargo nextest list -p sparq-policy --features
+          # count-enforcement` now shows the 10 previously-skipped tests.
+          - name: sparq-policy (count-enforcement)
+            crate: sparq-policy
+            features: count-enforcement
+            test: true
+          # [OPUS-4.8] sq-vya1: sparq-fedplan. The ENTIRE crate (lib.rs + every module) is
+          # `#[cfg(feature = "fedplan")]` and `default = []`, so the default build compiled
+          # it empty and ci.yml's archive listed ZERO of its 48 in-src `#[test]`s — the
+          # single biggest silent gap this bead found, and sparq-fedplan had NO leg here.
+          # `adaptive-replan` IMPLIES `fedplan` and its tests are a strict SUPERSET (32 with
+          # `fedplan` ⊂ 48 with `adaptive-replan`; the extra 16 are adaptive.rs); the only
+          # `not(feature=…)` cfg in the crate is a harmless `allow(dead_code)`, so there is
+          # NO divergent code path that a `fedplan`-only leg would reach — ONE
+          # `adaptive-replan` leg covers everything. Verified: `cargo nextest run -p
+          # sparq-fedplan --features adaptive-replan` => 48 tests run, 48 passed.
+          - name: sparq-fedplan (adaptive-replan, implies fedplan)
+            crate: sparq-fedplan
+            features: adaptive-replan
             test: true
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
