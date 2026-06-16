@@ -16,8 +16,17 @@
 //                         mirror; THIS file is the canonical source we read.
 //
 // OUTPUT: site/src/data/benchmarks.generated.json — a single typed JSON:
-//   { generatedAt, source, latest: { commit, date, benches }, labels, competitors }
+//   { generatedAt, source, latest: { commit, date, benches },
+//     history: [ { commit, date, benches }, ... ], labels, competitors }
 // committed so the site builds offline; re-run this script to refresh from the branch.
+//
+// [OPUS-4.8] sq-hsyg — `history` carries the trailing HISTORY_WINDOW (20) commits of the
+// SAME series the standalone bench/dashboard renders (window.BENCHMARK_DATA), so the site
+// can draw per-metric TREND charts (metric over commits) + SCALING charts (metric vs a
+// size/depth token in the metric name) WITHOUT a chart fetch at runtime. `latest` is kept
+// (it is history[history.length-1]) so every existing page is unaffected. We never
+// fabricate points: if the series is shorter than the window, history is just what exists,
+// and when the benchmark-data ref is unavailable we keep whatever history was committed.
 //
 // HOW THE BRANCH IS READ: data.js is NOT on `main`; it lives on `benchmark-data`. We
 // `git show origin/benchmark-data:dev/bench/data.js`. If that ref is absent (a shallow
@@ -51,6 +60,25 @@ function readBranchDataJs() {
   return null;
 }
 
+// [OPUS-4.8] sq-hsyg — same trailing window the standalone dashboard trends over.
+const HISTORY_WINDOW = 20;
+
+// Normalise one github-action-benchmark series entry to the site's slim shape
+// ({ commit, date, benches:[{name,value,unit}] }). `commit` is the short-or-full id; `date`
+// is the epoch-ms the entry carries (the site formats it). Defensive against a missing
+// commit/benches so a malformed entry never throws the build.
+function normEntry(entry) {
+  return {
+    commit: (entry.commit && entry.commit.id) || null,
+    date: entry.date || null,
+    benches: (entry.benches || []).map((b) => ({
+      name: b.name,
+      value: b.value,
+      unit: b.unit || "",
+    })),
+  };
+}
+
 function parseDataJs(text) {
   const json = text
     .replace(/^\s*window\.BENCHMARK_DATA\s*=\s*/, "")
@@ -60,16 +88,10 @@ function parseDataJs(text) {
   if (!Array.isArray(series) || series.length === 0) {
     throw new Error("benchmark series 'sparq engine' is empty");
   }
-  const latest = series[series.length - 1];
-  return {
-    commit: (latest.commit && latest.commit.id) || null,
-    date: latest.date || null,
-    benches: latest.benches.map((b) => ({
-      name: b.name,
-      value: b.value,
-      unit: b.unit || "",
-    })),
-  };
+  // Trailing HISTORY_WINDOW commits, chronological (oldest → newest). `latest` is the last
+  // element so the existing summary/competitive views read it exactly as before.
+  const history = series.slice(-HISTORY_WINDOW).map(normEntry);
+  return { latest: history[history.length - 1], history };
 }
 
 const labels = JSON.parse(
@@ -88,16 +110,21 @@ for (const k of Object.keys(competitorsRaw)) {
 
 const dataJs = readBranchDataJs();
 let latest;
+let history;
 let source;
 if (dataJs) {
-  latest = parseDataJs(dataJs);
+  ({ latest, history } = parseDataJs(dataJs));
   source = "benchmark-data branch (dev/bench/data.js)";
 } else if (existsSync(out)) {
   const prev = JSON.parse(readFileSync(out, "utf8"));
   latest = prev.latest;
+  // Keep whatever history was committed; fall back to a single-point history derived from
+  // `latest` so the trend charts still render (one marker) on a fork without the branch.
+  history =
+    Array.isArray(prev.history) && prev.history.length ? prev.history : [latest];
   source = prev.source + " (kept — benchmark-data ref unavailable this run)";
   console.warn(
-    "[sync-benchmarks] origin/benchmark-data not found — keeping committed latest, refreshing labels+competitors only.",
+    "[sync-benchmarks] origin/benchmark-data not found — keeping committed latest+history, refreshing labels+competitors only.",
   );
 } else {
   console.error(
@@ -110,6 +137,7 @@ const payload = {
   generatedAt: new Date().toISOString(),
   source,
   latest,
+  history,
   labels,
   competitors,
 };
@@ -118,5 +146,7 @@ writeFileSync(out, JSON.stringify(payload, null, 2) + "\n");
 console.log(
   `[sync-benchmarks] wrote ${latest.benches.length} benches (commit ${
     latest.commit ? latest.commit.slice(0, 8) : "?"
-  }) + ${Object.keys(labels).length} labels → src/data/benchmarks.generated.json`,
+  }) + ${history.length}-commit history + ${
+    Object.keys(labels).length
+  } labels → src/data/benchmarks.generated.json`,
 );
