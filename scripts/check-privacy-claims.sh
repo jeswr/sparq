@@ -46,14 +46,63 @@ ALLOW_MARKER='privacy-claims-allow'
 # FORBIDDEN phrases — settled-property claim shapes for the ZK/MPC estate. Case-
 # insensitive, extended-regex. Each is a phrasing that, UNHEDGED, asserts a privacy
 # or soundness guarantee the estate does not yet provide.
+#
+# Two tiers (different exemption rules):
+#   PATTERNS         — ABSOLUTE forbidden phrases. A hit fails UNLESS the line carries
+#                      the `privacy-claims-allow:` marker. These shapes have no honest
+#                      unhedged reading (e.g. "provably secure", "privacy-preserving"),
+#                      so an inline-marker justification is the only escape.
+#   SOUNDNESS_CLAIMS — PREDICATE-FORM positive soundness overclaims about a ZK/MPC
+#                      *artifact* (the verifier / proof / protocol / scheme / circuit /
+#                      prover / SNARK / system / estate / construction is/are SOUND, or
+#                      "provably/fully/… sound"). [OPUS-4.8] sq-qhy4: the prior
+#                      `sound(ness)?-(verifier|proof)` adjacency pattern missed
+#                      predicate-form overclaims ("the verifier is SOUND",
+#                      "…are COMPLETE and SOUND") — one sat in zk/compose/STATUS.md
+#                      undetected until a manual sweep (PR #391). These are subject-
+#                      ANCHORED (a ZK/MPC artifact noun) so they don't trip honest
+#                      non-crypto "is sound" uses (an unsafe-code invariant, a cache
+#                      invalidation, an MPC detection heuristic, "sound engineering
+#                      choices"). A hit is EXEMPT if the line carries the allow-marker
+#                      OR a same-line negator/hedge (NEGATOR_HEDGE_RE) — so honest
+#                      "NOT sound", "is not sound", "unsound", and the project's
+#                      canonical hedged verdict "SOUND as landed for the … threat
+#                      model" all still PASS.
 PATTERNS=(
   'zero[- ]?knowledge[- ]secure'
-  'provably[- ](private|secure)'
+  'provably[- ](private|secure|sound)'
   'sound(ness)?[- ](verifier|proof)s?'
   'privacy[- ]?preserving'
   'malicious(ly)?[- ]secure'
   'cryptographically[- ](private|sound|secure)'
+  '(fully|completely|totally|unconditionally|perfectly)[- ]sound'
 )
+
+# [OPUS-4.8] Predicate-form soundness overclaim, subject-anchored on a ZK/MPC artifact
+# noun + copula + "sound" (e.g. "the verifier is sound", "the proofs are sound", "the
+# protocol is sound"). The anchoring keeps it OFF honest non-crypto "is sound" lines.
+ZK_ARTIFACT='(verifier|proof|protocol|scheme|circuit|prover|snark|construction|the[- ]zk[- ]?(system|estate|pipeline))'
+# Copula clause: the artifact noun, then is/are/'s/'re, then "sound" — allowing up to two
+# intervening conjoined adjectives ("complete and sound", "correct, complete and sound")
+# so the PR-#391 shape ("…are COMPLETE and SOUND") is caught, not just bare "is sound".
+COPULA='[- ]+(is|are|s|re)[- ]+([a-z]+[- ,]+(and[- ]+)?){0,2}sound'
+SOUNDNESS_CLAIMS=(
+  "${ZK_ARTIFACT}s?${COPULA}"
+)
+
+# Same-line NEGATOR / HEDGE exemption — applies ONLY to a SOUNDNESS_CLAIMS hit (not to
+# the absolute PATTERNS). If any of these is present on the offending line, the soundness
+# mention is honest (negated / qualified / aspirational) and PASSES:
+#   - negators:  not / never / no / isn't / aren't / n't / un(sound) / yet-(not-) ...
+#   - the project's load-bearing hedge: "sound AS LANDED [for the … threat model]" and
+#     scoped "sound FOR <axis>" (e.g. "sound for integrity"), plus an explicit open/
+#     pending/unverified/whether/question uncertainty qualifier on the same line.
+# Deliberately NARROW (structural negators + the canonical hedges + genuine-uncertainty
+# words) — NO broad lexical escape hatch like a bare "if"/"claim", so an overclaim can't
+# slip past on an incidental word; verified that no honest in-repo line relies on those.
+# An over-matched legitimate line still has the explicit `privacy-claims-allow:` escape.
+# Case-insensitive (matched with grep -i below).
+NEGATOR_HEDGE_RE='\bnot\b|\bnever\b|\bno\b|\bn'"'"'t\b|\bun(sound|verified|audited)|not[- ]yet|yet[- ]to|\bopen\b|\bpending\b|\bunverified\b|\bremediat|sound[- ]+as[- ]+landed|sound[- ]+for[- ]+(the[- ]+)?(integrity|threat|assumed|stated)|\bwhether\b|\bquestion\b'
 
 # Path surface to scan = the OUTWARD claim surface (docs/READMEs/skills/site copy /
 # the compliance index). Excludes:
@@ -76,9 +125,17 @@ mapfile -t FILES < <(
     | sort -u
 )
 
-# Build one alternation regex.
+# Build the two alternation regexes.
+#   RE          — absolute forbidden phrases (allow-marker is the only exemption).
+#   SOUNDNESS_RE — predicate-form soundness overclaims (allow-marker OR same-line
+#                  negator/hedge exempts).
 RE="$(printf '%s|' "${PATTERNS[@]}")"
 RE="${RE%|}"
+SOUNDNESS_RE="$(printf '%s|' "${SOUNDNESS_CLAIMS[@]}")"
+SOUNDNESS_RE="${SOUNDNESS_RE%|}"
+# A single union for the per-line scan; the per-line classification below decides
+# whether a given hit was an absolute one or a guarded soundness one.
+UNION_RE="${RE}|${SOUNDNESS_RE}"
 
 fail=0
 hits=0
@@ -87,8 +144,16 @@ for f in "${FILES[@]}"; do
   # -n line numbers, -i case-insensitive, -E extended.
   while IFS= read -r line; do
     # `line` is "LINENO:CONTENT".
+    content="${line#*:}"   # strip the "LINENO:" prefix for content-only checks.
     if printf '%s\n' "$line" | grep -qiF "$ALLOW_MARKER"; then
       continue   # explicitly allow-listed with an inline justification.
+    fi
+    # If the ONLY thing this line matched was a guarded soundness claim (it does NOT
+    # match an absolute PATTERN), a same-line negator/hedge exempts it as honest.
+    if ! printf '%s\n' "$content" | grep -qiE "$RE"; then
+      if printf '%s\n' "$content" | grep -qiE "$NEGATOR_HEDGE_RE"; then
+        continue   # negated / qualified / aspirational soundness mention — honest.
+      fi
     fi
     hits=$((hits + 1))
     if [ "$fail" -eq 0 ]; then
@@ -97,7 +162,7 @@ for f in "${FILES[@]}"; do
     fi
     echo "  ${f}:${line}"
     fail=1
-  done < <(grep -niE "$RE" "$f" 2>/dev/null || true)
+  done < <(grep -niE "$UNION_RE" "$f" 2>/dev/null || true)
 done
 
 if [ "$fail" -ne 0 ]; then

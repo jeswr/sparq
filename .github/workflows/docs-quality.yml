@@ -178,6 +178,14 @@ jobs:
           persist-credentials: false
       - name: No unqualified ZK/MPC privacy/soundness claims
         run: bash scripts/check-privacy-claims.sh
+      # [OPUS-4.8] sq-qhy4: both-direction self-tests for the predicate-form soundness
+      # coverage — should-FAIL overclaims ("the verifier is sound", "…are COMPLETE and
+      # SOUND", "provably sound") must be caught; should-PASS negated/hedged/non-crypto
+      # lines (incl. the canonical "SOUND as landed for the … threat model" verdict) must
+      # not regress. Hermetic (no git/network) — pins the gate classification. Runs in
+      # this same HARD job so a coverage regression also fails the ci-summary gate.
+      - name: Self-test the privacy-claims gate (both directions)
+        run: bash scripts/tests/test_privacy_claims.sh
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
