@@ -33,7 +33,9 @@
     "node": ">=18"
   },
   "scripts": {
-    "build:wasm": "wasm-pack build ../crates/sparq-wasm --target web --release && rm -rf wasm && mkdir wasm && cp ../crates/sparq-wasm/pkg/sparq_wasm.js ../crates/sparq-wasm/pkg/sparq_wasm.d.ts ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm.d.ts wasm/",
+    "_copy:wasm": "rm -rf wasm && mkdir wasm && cp ../crates/sparq-wasm/pkg/sparq_wasm.js ../crates/sparq-wasm/pkg/sparq_wasm.d.ts ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm.d.ts wasm/",
+    "build:wasm": "wasm-pack build ../crates/sparq-wasm --target web --release -- --features shacl && npm run _copy:wasm",
+    "build:wasm:lean": "wasm-pack build ../crates/sparq-wasm --target web --release && npm run _copy:wasm",
     "build:ts": "tsc",
     "build": "npm run build:wasm && npm run build:ts",
     "test": "node --test \"test/*.test.mjs\"",

@@ -38,9 +38,17 @@ browser. (The wasm bundle bytes are tracked per-commit on the perf dashboard,
 The package ships the wasm artifact; from a source checkout build it first:
 
 ```sh
-npm run build   # wasm-pack build ../crates/sparq-wasm + tsc
+npm run build   # wasm-pack build ../crates/sparq-wasm (--features shacl) + tsc
 npm test        # node --test against the built dist/
 ```
+
+The default build (and the published bundle) ships with `--features shacl` so
+`SparqStore.validate` works out of the box. SHACL is not free in the wasm
+binary — it pulls in the SHACL engine + `regex` + the SPARQL query path for
+`sh:sparql`, which roughly **doubles** the `.wasm` (measured ~1.21 MiB → ~2.19
+MiB, +~1.0 MiB / +85%, before gzip). If you do not need validation and bundle
+size matters, build the lean variant — `npm run build:wasm:lean` — which omits
+SHACL entirely (`SparqStore.validate` then throws a clear error if called).
 
 ## Usage
 
@@ -101,6 +109,15 @@ const fromZst = await SparqStore.fromCompressed(zstBytes, 'ntriples');
 const compact = await SparqStore.fromString(bigTurtle, 'turtle', { compressed: true });
 compact.heapBytes(); // rough wasm-side footprint
 
+// SHACL validation (data graph vs shapes graph) → a typed ValidationReport.
+// Stateless one-shot: does NOT consult the store's own triples (a drop-in for
+// rdf-validate-shacl). conforms counts every result; filter by severity for a gate.
+const report = store.validate(dataTurtle, shapesTurtle, 'turtle'); // format defaults to 'turtle'
+report.conforms;                                                    // boolean
+for (const r of report.results) {
+  console.log(r.focusNode, r.path, r.severity, r.message);          // per-violation fields
+}
+
 store.free(); // release wasm memory (also `using store = …` via Symbol.dispose)
 ```
 
@@ -134,6 +151,10 @@ verified warm-up from `GET /dictionary/{dict-id}` for the *next* request.
   graph (use `countQuads()` for dataset totals). `dataset` is not combinable
   with `compressed` yet.
 - CONSTRUCT / DESCRIBE / federated queries are not supported (tracked in beads — `bd list -l area:js`).
+- `validate()` (SHACL) runs in-process and is best for small documents
+  (~10–100 triples); for large data graphs validate server-side via the
+  `sparq-server` HTTP `validate` path. It needs a `--features shacl` bundle
+  (shipped by default; `build:wasm:lean` omits it — see *Install / build*).
 - `REGEX`/`REPLACE` are compiled out of the wasm build (the engine's
   non-default `regex` cargo feature) to keep the bundle small — use
   `CONTAINS`/`STRSTARTS`/… or a custom build.

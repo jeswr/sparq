@@ -1,4 +1,10 @@
-export { SparqStore, type RdfFormat, type SparqStoreOptions } from './store.js';
+export {
+  SparqStore,
+  type RdfFormat,
+  type SparqStoreOptions,
+  type ValidationReport,
+  type ValidationResult,
+} from './store.js';
 export { Bindings } from './bindings.js';
 export { DataFactory, NamedNode, BlankNode, Literal, Variable, DefaultGraph, Quad } from './terms.js';
 export {

@@ -21,6 +21,38 @@ import { init, WasmStore } from './wasm.js';
 
 export type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig';
 
+/**
+ * [OPUS-4.8] sq-pxls (#162): one SHACL validation result — the per-violation
+ * shape PSS's ADR-0014 `ShaclValidator` seam consumes (a drop-in for
+ * `rdf-validate-shacl`'s result records). `focusNode`/`value`/`sourceShape`
+ * are N-Triples term strings (the lexical form sparq's `Term` `Display`
+ * produces); `path` is a SHACL Turtle path expression;
+ * `sourceConstraintComponent`/`severity` are full IRIs (e.g.
+ * `http://www.w3.org/ns/shacl#Violation`); `message` is the first declared
+ * `sh:message` text or a generated default. `path`/`value`/`message` are
+ * `null` when the underlying result carries none.
+ */
+export interface ValidationResult {
+  focusNode: string;
+  path: string | null;
+  value: string | null;
+  sourceShape: string;
+  sourceConstraintComponent: string;
+  severity: string;
+  message: string | null;
+}
+
+/**
+ * [OPUS-4.8] sq-pxls (#162): a SHACL validation report — the typed parse of
+ * the JSON the wasm `Store.validate` binding returns. `conforms` counts EVERY
+ * result regardless of severity (the W3C-suite notion); filter `results` by
+ * `severity` for a violations-only gate.
+ */
+export interface ValidationReport {
+  conforms: boolean;
+  results: ValidationResult[];
+}
+
 export interface SparqStoreOptions {
   /**
    * Store the index block-compressed (~half the index memory at a bounded
@@ -209,6 +241,40 @@ export class SparqStore {
    */
   count(sparql: string): number {
     return this.#inner.count(sparql);
+  }
+
+  /**
+   * [OPUS-4.8] sq-pxls (#162): validates an RDF **data graph** against a SHACL
+   * **shapes graph**, returning a typed SHACL {@link ValidationReport}.
+   *
+   * Both arguments are RDF documents in the same `format` {@link fromString}
+   * accepts (`"turtle"` (default) | `"ntriples"` | `"nquads"` | `"trig"`);
+   * they are parsed identically (named graphs folded into the default graph).
+   * This is a **stateless one-shot** — it does NOT consult the receiver's
+   * stored triples — so it is the ergonomic drop-in for `rdf-validate-shacl`'s
+   * `validate(dataDataset, { shapes })`, running through `sparq-shacl`'s SHACL
+   * Core + SHACL-SPARQL (`sh:sparql`, §5.2) engine inside wasm. The JSON the
+   * binding returns is parsed into the typed report here, so the caller never
+   * touches the raw string.
+   *
+   * `report.conforms` counts EVERY result regardless of severity (the W3C-suite
+   * notion); filter `report.results` by `severity` for a violations-only gate.
+   * Throws only if a graph fails to parse; malformed shapes are skipped by the
+   * engine, never surfaced. Validation is in-process and best for small
+   * documents (~10–100 triples); validate large graphs server-side via the
+   * `sparq-server` HTTP `validate` path instead (the other half of #162).
+   *
+   * Requires a `shacl`-enabled wasm bundle (the published `@jeswr/sparq` ships
+   * one); a `shacl`-less custom build throws a clear error here rather than a
+   * cryptic "not a function".
+   */
+  validate(data: string, shapes: string, format: RdfFormat = 'turtle'): ValidationReport {
+    if (typeof this.#inner.validate !== 'function') {
+      throw new Error(
+        'SparqStore.validate requires a SHACL-enabled wasm bundle (build sparq-wasm with --features shacl)',
+      );
+    }
+    return JSON.parse(this.#inner.validate(data, shapes, format)) as ValidationReport;
   }
 
   /**
