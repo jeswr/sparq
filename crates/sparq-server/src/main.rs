@@ -65,6 +65,9 @@
 //!   --max-results N           maximum SELECT rows (413 beyond), 0 off    [unlimited, env SPARQ_MAX_RESULTS]
 //!   --max-query-rows N        [OPUS-4.8 sq-ebii] coarse MEMORY CAP: working-set row ceiling on EVERY
 //!                             query form (413 beyond), 0 off             [unlimited, env SPARQ_MAX_QUERY_ROWS]
+//!   --max-query-bytes N       [OPUS-4.8 sq-s5is] BYTE-ACCOUNTED memory cap: prices row WIDTH and
+//!                             computed-literal size on EVERY form (413 beyond), 0 off
+//!                                                                        [unlimited, env SPARQ_MAX_QUERY_BYTES]
 //!   --max-decompress-ratio N  [OPUS-4.8 sq-ebii] DECOMPRESSION-RATIO cap for a `Content-Encoding: gzip`
 //!                             request body (zip-bomb guard; 413), 0 = refuse gzip bodies
 //!                                                                        [20, env SPARQ_MAX_DECOMPRESS_RATIO]
@@ -154,6 +157,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-query-rows" => {
                 let n: usize = parse_flag(&mut args, "--max-query-rows")?;
                 config.max_query_rows = (n > 0).then_some(n);
+            }
+            // [OPUS-4.8] sq-s5is: byte-accounted memory cap (prices row width + computed
+            // literals, all forms); 0 disables it.
+            "--max-query-bytes" => {
+                let n: usize = parse_flag(&mut args, "--max-query-bytes")?;
+                config.max_query_bytes = (n > 0).then_some(n);
             }
             // [OPUS-4.8] sq-ebii: decompression-ratio cap (zip-bomb guard); 0 disables
             // decompression of Content-Encoding: gzip request bodies (they are then refused).
@@ -270,7 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
                      [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
-                     [--max-results N] [--max-query-rows N] [--max-decompress-ratio N] \
+                     [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
                      [--max-subscriptions-per-conn N]{time_travel}{service} [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n\n  \
@@ -377,7 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
         "guards: query-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
-         max-query-rows={} max-decompress-ratio={}x max-subscriptions={} \
+         max-query-rows={} max-query-bytes={} max-decompress-ratio={}x max-subscriptions={} \
          max-subscriptions-per-conn={}",
         config
             .query_timeout
@@ -385,9 +394,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.max_body_bytes,
         config.max_concurrent,
         config.max_results.map_or("off".into(), |n| n.to_string()),
-        // [OPUS-4.8] sq-ebii: memory cap + decompression-ratio cap in the startup guard line.
+        // [OPUS-4.8] sq-ebii/sq-s5is: memory caps (row + byte) + decompression-ratio cap.
         config
             .max_query_rows
+            .map_or("off".into(), |n| n.to_string()),
+        config
+            .max_query_bytes
             .map_or("off".into(), |n| n.to_string()),
         config.max_decompress_ratio,
         config.max_subscriptions,

@@ -297,6 +297,56 @@ async fn result_row_cap_is_permanent_413_honest_refusal() {
     );
 }
 
+/// [OPUS-4.8] (sq-s5is) The byte-accounted working-set cap (`--max-query-bytes`) is the
+/// same PERMANENT honest `413` class as the row cap — a 413 (not a 5xx / not a truncation),
+/// and its body carries the documented `byte limit` sentinel naming the byte knob.
+#[tokio::test]
+async fn result_byte_cap_is_permanent_413_honest_refusal() {
+    let config = ServerConfig {
+        // A byte budget far below any multi-row, multi-column working set, but with NO row
+        // cap — so a trip can ONLY come from the byte accounting (width), proving it is wired.
+        max_query_bytes: Some(4),
+        ..ServerConfig::default()
+    };
+    let base = spawn_with(DATA, config).await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT * WHERE { ?s ?p ?o }")])
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    assert_eq!(status, 413, "exceeding the byte cap is a 413, not a 5xx");
+    assert!(!is_transient(status), "413 byte-cap must classify as PERMANENT");
+    let body = resp.text().await.unwrap();
+    assert_structured_error(&body);
+    assert!(!body.contains("bindings"), "must refuse, not truncate: {body}");
+    assert!(
+        body.contains("byte limit"),
+        "byte-cap 413 body carries the documented generic 'byte limit' sentinel: {body}"
+    );
+}
+
+/// [OPUS-4.8] (sq-s5is) Counterpart: a generous byte cap that the working set does NOT
+/// exceed must answer the query normally (200) — the cap refuses only genuine overflow.
+#[tokio::test]
+async fn result_under_byte_cap_succeeds() {
+    let config = ServerConfig {
+        max_query_bytes: Some(1 << 20),
+        ..ServerConfig::default()
+    };
+    let base = spawn_with(DATA, config).await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?s WHERE { ?s <http://ex/age> ?a }")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "a query under the byte cap must succeed");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("bindings"), "a 200 result returns its bindings: {body}");
+}
+
 // ---------------------------------------------------------------------------
 // TRANSIENT classes — a retry of the identical request may succeed
 // ---------------------------------------------------------------------------

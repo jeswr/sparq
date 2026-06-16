@@ -164,8 +164,9 @@ the client picks its own back-off. See the `status_contract` doc for the full ta
   body cap (`413`), concurrency load-shedding (`429`), a 20× gzip-body decompression-ratio
   cap (`413` zip-bomb guard, `sq-ebii`), panic→`500`. OFF by default (opt in if you expose
   the port): the coarse **memory cap** `--max-query-rows` (working-set row ceiling on every
-  form → `413`, `sq-ebii`) and `--max-results`. There is **no rate limit** — add one in the
-  gateway. See the four-limit "Server hardening" section in the SKILL for the precise
+  form → `413`, `sq-ebii`), its byte-accounted twin `--max-query-bytes` (prices row WIDTH +
+  computed-literal bytes → `413`, `sq-s5is`), and `--max-results`. There is **no rate limit**
+  — add one in the gateway. See the "Server hardening" section in the SKILL for the precise
   (honest) semantics of each cap.
 
 ### Request-log redaction (`--verbose` — ON by default)
@@ -353,10 +354,11 @@ matrix under "Security posture".
   (constant-time compared; mirrors QLever's `-a`), with an optional `--auth-token-read` gate
   for reads. Off by default (back-compat). See "Security posture".
 - **Hardening flags** — `--query-timeout` / `--max-body-bytes` / `--max-concurrent` /
-  `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-decompress-ratio`
-  (zip-bomb guard) / `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*`, each
-  with a `SPARQ_*` env override. The four DoS/SSRF limits are documented together (with their
-  honest semantics) in the SKILL's "Server hardening" section.
+  `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-query-bytes`
+  (byte-accounted memory cap, `sq-s5is`) / `--max-decompress-ratio` (zip-bomb guard) /
+  `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*`, each with a `SPARQ_*` env
+  override. The DoS/SSRF limits are documented together (with their honest semantics) in the
+  SKILL's "Server hardening" section.
 - **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket
   subscriptions** (live SELECT diffs).
 - **Federation discovery** — opt-in (`federation-descriptors` feature + `--federation-descriptors`

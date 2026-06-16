@@ -63,7 +63,8 @@ use spargebra::{Query, SparqlParser};
 /// iteration of the big scan/join loops), so enforcement is approximate but cheap:
 /// an unlimited budget (the default) costs nothing on the hot paths. When a limit
 /// trips, evaluation stops and the query fails with
-/// `"query budget exceeded (timeout)"` / `"query budget exceeded (max-rows)"`.
+/// `"query budget exceeded (timeout)"` / `"query budget exceeded (max-rows)"` /
+/// `"query budget exceeded (max-bytes)"`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QueryBudget {
     /// Wall-clock deadline. Native only: `std::time::Instant` is unusable on
@@ -75,6 +76,21 @@ pub struct QueryBudget {
     /// This is a *working-set* bound: a query whose intermediate result exceeds it
     /// is refused even if a later operator (e.g. LIMIT) would have shrunk it.
     pub max_rows: Option<usize>,
+    /// [OPUS-4.8] (sq-s5is) Upper bound, in BYTES, on the estimated working-set size of
+    /// any materialised (intermediate or final) result — the byte-accounted twin of
+    /// [`max_rows`]. Where `max_rows` counts ROWS and so misses a query with FEW but very
+    /// WIDE rows (many projected variables, or huge computed string literals), this bounds
+    /// the estimated heap footprint of the id-level working set: `rows × width ×
+    /// size_of::<Id>()` for each materialised intermediate, PLUS the bytes of any
+    /// query-computed terms (BIND / aggregate / CONSTRUCT scratch) interned into the
+    /// per-query local vocabulary. Checked cooperatively at the same coarse sites as
+    /// `max_rows` (operator entry / per outer-loop iteration); a query whose estimate
+    /// crosses it aborts with `"query budget exceeded (max-bytes)"`. The estimate is a
+    /// portable LOWER bound on real heap (it ignores allocator overhead and `SmallVec`
+    /// inline storage), so it is conservative in the SAME direction `max_rows` is — a blunt
+    /// anti-OOM ceiling, not an exact RSS quota. `None` (the default) disables it; it
+    /// composes with `max_rows` (whichever trips first aborts).
+    pub max_bytes: Option<usize>,
 }
 
 impl QueryBudget {
@@ -1934,6 +1950,67 @@ mod tests {
         // A generous row budget changes nothing.
         let b = QueryBudget { max_rows: Some(1000), ..QueryBudget::unlimited() };
         assert_eq!(query_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap().len(), 8);
+    }
+
+    /// [OPUS-4.8] (sq-s5is) The byte-accounted cap prices ROW WIDTH — the dimension the
+    /// row cap misses. Two queries over the same graph have the SAME row count but
+    /// different widths; a byte cap set between their two working-set sizes admits the
+    /// narrow one and refuses the wide one, while a pure row cap (same row count) could
+    /// not tell them apart.
+    #[test]
+    fn budget_max_bytes_prices_row_width() {
+        // 9 ex:p triples → a 1-pattern BGP yields the same 9 rows whether read as
+        // `?o` (≈1 binding-id column) or `?s ?p ?o` (3 columns). With ~4 bytes/id the
+        // wide working set is ~3× the bytes of the narrow one at identical row count.
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..9 {
+            ttl.push_str(&format!("ex:s{i} ex:p ex:o{i} .\n"));
+        }
+        let wide = Graph::load_str(&ttl, "turtle").unwrap();
+        // A byte budget that comfortably fits the 3-wide BGP must NOT refuse it…
+        let generous = QueryBudget { max_bytes: Some(1 << 20), ..QueryBudget::unlimited() };
+        assert_eq!(query_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &generous).unwrap().len(), 9);
+        // …and a byte budget far below any 9-row working set MUST refuse with max-bytes
+        // (not max-rows: the row cap is unset here, so width is the only thing tripping).
+        let tight = QueryBudget { max_bytes: Some(4), ..QueryBudget::unlimited() };
+        let e = query_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &tight).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-bytes)"), "got: {e}");
+        let e = query_json_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &tight).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-bytes)"), "got: {e}");
+    }
+
+    /// [OPUS-4.8] (sq-s5is) The byte cap also prices query-COMPUTED literals (BIND /
+    /// CONCAT scratch interned into the local vocab) — the NON-row dimension the row
+    /// cap misses. A single-row result whose one computed value is a huge string trips
+    /// the byte cap even though the row count is 1.
+    #[test]
+    fn budget_max_bytes_prices_computed_literals() {
+        // One row, one BIND that builds a large string; the row cap (=10) is generous,
+        // but the computed literal's bytes blow a tight byte cap. CONCAT of two long string
+        // literals needs no feature-gated builtin, so this holds in BOTH feature states.
+        let q = "SELECT ?big WHERE { BIND(CONCAT('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') AS ?big) }";
+        let b = QueryBudget { max_rows: Some(10), max_bytes: Some(16), ..QueryBudget::unlimited() };
+        let e = query_with_budget(&g(), q, &b).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-bytes)"), "got: {e}");
+        // A generous byte cap returns the single row unmodified.
+        let ok = QueryBudget { max_rows: Some(10), max_bytes: Some(1 << 20), ..QueryBudget::unlimited() };
+        assert_eq!(query_with_budget(&g(), q, &ok).unwrap().len(), 1);
+    }
+
+    /// [OPUS-4.8] (sq-s5is) An unset byte cap (the default) is a true no-op: results are
+    /// byte-identical to the unbudgeted query, and a query that EXCEEDS a generous row
+    /// cap but would fit a non-existent byte cap still errors on the row cap alone.
+    #[test]
+    fn budget_max_bytes_unset_is_noop() {
+        let q = "SELECT * WHERE { ?s ?p ?o }";
+        let only_rows = QueryBudget { max_rows: Some(100), ..QueryBudget::unlimited() };
+        assert_eq!(query_with_budget(&g(), q, &only_rows).unwrap().len(), 8);
+        assert_eq!(query_with_budget(&g(), q, &QueryBudget::unlimited()).unwrap().len(), 8);
+        assert_eq!(
+            query_json(&g(), q).unwrap(),
+            query_json_with_budget(&g(), q, &QueryBudget::unlimited()).unwrap()
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

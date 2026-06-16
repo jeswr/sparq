@@ -922,7 +922,7 @@ mod tests {
     #[test]
     fn max_rows_budget_refuses_oversized_results() {
         let g = graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b . ex:c ex:p ex:d . ex:e ex:p ex:f .");
-        let budget = QueryBudget { deadline: None, max_rows: Some(2) };
+        let budget = QueryBudget { max_rows: Some(2), ..QueryBudget::unlimited() };
         let err = eval_rows(&g, "SELECT ?s WHERE { ?s ?p ?o }", &budget, &ServerConfig::default()).unwrap_err();
         assert!(err.contains("max-rows"), "unexpected error: {err}");
     }

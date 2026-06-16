@@ -32,7 +32,15 @@ use std::cmp::Ordering;
 // their own work and the next on-thread check converts that into the error.
 pub(crate) mod budget {
     use crate::QueryBudget;
+    use sparq_core::dict::Id;
     use std::cell::Cell;
+
+    /// Bytes one id-level binding cell occupies in a materialised `Row`. The
+    /// byte-accounted cap ([OPUS-4.8] sq-s5is) costs the id-level working set as
+    /// `rows × width × BYTES_PER_ID` — a portable LOWER bound on real heap (it
+    /// ignores allocator overhead / `SmallVec` inline-vs-spill), conservative in the
+    /// same direction the row cap is.
+    pub(crate) const BYTES_PER_ID: usize = std::mem::size_of::<Id>();
 
     /// The installed limits, flattened for a cheap per-check read.
     #[derive(Clone, Copy)]
@@ -41,6 +49,20 @@ pub(crate) mod budget {
         #[cfg(not(target_arch = "wasm32"))]
         deadline: Option<std::time::Instant>,
         max_rows: usize,
+        /// [OPUS-4.8] (sq-s5is) Byte ceiling on the estimated working set; `usize::MAX`
+        /// when no byte cap is set. Compared against `rows × byte_width + extra_bytes`.
+        max_bytes: usize,
+        /// [OPUS-4.8] (sq-s5is) Bytes per row of the working set CURRENTLY being checked
+        /// — `width(in ids) × BYTES_PER_ID`. Set per operator by [`set_width`] so the
+        /// row-count check sites also price WIDTH (the dimension the row cap misses). A
+        /// scalar/streaming path that never sets a width leaves this at `BYTES_PER_ID`
+        /// (one id per "row"), so the byte cap degrades to the row cap there, never wider.
+        byte_width: usize,
+        /// [OPUS-4.8] (sq-s5is) Bytes of query-computed terms interned into the per-query
+        /// local vocabulary (BIND / aggregate / CONSTRUCT scratch) — the NON-row dimension
+        /// the row cap also misses. A running high-water sum, added to the working-set
+        /// estimate on every check.
+        extra_bytes: usize,
     }
 
     const OFF: Limits = Limits {
@@ -48,15 +70,25 @@ pub(crate) mod budget {
         #[cfg(not(target_arch = "wasm32"))]
         deadline: None,
         max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+        byte_width: BYTES_PER_ID,
+        extra_bytes: 0,
     };
 
     impl Limits {
+        /// `rows × byte_width + extra_bytes`, saturating — the estimated working-set
+        /// byte size compared against `max_bytes`. [OPUS-4.8] (sq-s5is)
+        #[inline]
+        fn bytes(&self, rows: usize) -> usize {
+            rows.saturating_mul(self.byte_width).saturating_add(self.extra_bytes)
+        }
+
         /// Pure (no thread-local) exhaustion test for rayon closures, where the
         /// installing thread's sticky flag is out of reach: a worker that sees
         /// `hit` stops producing, and the caller's next on-thread check fires
-        /// (the deadline is global time; a hit row cap leaves `rows > max_rows`).
-        /// Only the rayon-parallel branches call this (and `snapshot`); the
-        /// non-parallel (wasm) build compiles them out.
+        /// (the deadline is global time; a hit row/byte cap leaves the snapshot's
+        /// estimate over the limit). Only the rayon-parallel branches call this
+        /// (and `snapshot`); the non-parallel (wasm) build compiles them out.
         #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
         #[inline]
         pub(crate) fn hit(&self, rows: usize) -> bool {
@@ -64,6 +96,9 @@ pub(crate) mod budget {
                 return false;
             }
             if rows > self.max_rows {
+                return true;
+            }
+            if self.bytes(rows) > self.max_bytes {
                 return true;
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -91,19 +126,77 @@ pub(crate) mod budget {
 
     pub(crate) fn install(b: &QueryBudget) -> Guard {
         #[cfg(not(target_arch = "wasm32"))]
-        let on = b.deadline.is_some() || b.max_rows.is_some();
+        let on = b.deadline.is_some() || b.max_rows.is_some() || b.max_bytes.is_some();
         #[cfg(target_arch = "wasm32")]
-        let on = b.max_rows.is_some();
+        let on = b.max_rows.is_some() || b.max_bytes.is_some();
         ACTIVE.with(|a| {
             a.set(Limits {
                 on,
                 #[cfg(not(target_arch = "wasm32"))]
                 deadline: b.deadline,
                 max_rows: b.max_rows.unwrap_or(usize::MAX),
+                max_bytes: b.max_bytes.unwrap_or(usize::MAX),
+                byte_width: BYTES_PER_ID,
+                extra_bytes: 0,
             })
         });
         EXCEEDED.with(|e| e.set(None));
         Guard
+    }
+
+    /// [OPUS-4.8] (sq-s5is) Sets the per-row byte width (= `width_in_ids ×
+    /// BYTES_PER_ID`) of the working set the next row-count checks price. Called once
+    /// per operator with that operator's output arity, so a check on `rows` correctly
+    /// estimates `rows × width` bytes — the WIDE-row dimension the row cap misses.
+    /// No-op (and no thread-local write on the unbudgeted hot path) when no budget is
+    /// installed. Returns the previous width so callers can restore it.
+    #[inline]
+    pub(crate) fn set_width(width_in_ids: usize) -> usize {
+        ACTIVE.with(|c| {
+            let mut a = c.get();
+            let prev = a.byte_width;
+            if a.on {
+                a.byte_width = width_in_ids.max(1).saturating_mul(BYTES_PER_ID);
+                c.set(a);
+            }
+            prev
+        })
+    }
+
+    /// [OPUS-4.8] (sq-s5is) Restores a byte width previously returned by [`set_width`]
+    /// (cheap: one thread-local write, only while budgeted).
+    #[inline]
+    pub(crate) fn restore_width(prev: usize) {
+        ACTIVE.with(|c| {
+            let mut a = c.get();
+            if a.on {
+                a.byte_width = prev;
+                c.set(a);
+            }
+        });
+    }
+
+    /// [OPUS-4.8] (sq-s5is) Adds `n` bytes of query-computed terms to the local-vocab
+    /// high-water accumulator (the NON-row dimension). Trips the sticky flag immediately
+    /// if it pushes the estimate over `max_bytes`, so an oversized CONSTRUCT template /
+    /// aggregate scratch is caught even between row-count checks. No-op when unbudgeted.
+    #[inline]
+    pub(crate) fn add_bytes(n: usize) {
+        ACTIVE.with(|c| {
+            let mut a = c.get();
+            if !a.on {
+                return;
+            }
+            a.extra_bytes = a.extra_bytes.saturating_add(n);
+            c.set(a);
+            if a.extra_bytes > a.max_bytes {
+                EXCEEDED.with(|e| {
+                    if e.get().is_none() {
+                        e.set(Some("max-bytes"));
+                    }
+                });
+            }
+        });
     }
 
     /// Snapshot of the installed limits, for the rayon-parallel branches.
@@ -113,11 +206,11 @@ pub(crate) mod budget {
         ACTIVE.with(|a| a.get())
     }
 
-    /// `true` while a deadline / row-cap budget is installed. [OPUS-4.8] roborev 1538:
-    /// the streaming-JSON fast path uses this to take the cooperative SERIAL loop (which
-    /// breaks every 1024 rows) instead of the parallel fan-out that materialises every
-    /// matching fragment before any budget check — so `--max-results` / timeouts bound
-    /// CPU and memory, not just the final response.
+    /// `true` while a deadline / row-cap / byte-cap budget is installed. [OPUS-4.8]
+    /// roborev 1538: the streaming-JSON fast path uses this to take the cooperative
+    /// SERIAL loop (which breaks every 1024 rows) instead of the parallel fan-out that
+    /// materialises every matching fragment before any budget check — so `--max-results`
+    /// / timeouts / the byte cap bound CPU and memory, not just the final response.
     #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
     #[inline]
     pub(crate) fn active() -> bool {
@@ -137,6 +230,10 @@ pub(crate) mod budget {
         }
         if rows > a.max_rows {
             EXCEEDED.with(|e| e.set(Some("max-rows")));
+            return true;
+        }
+        if a.bytes(rows) > a.max_bytes {
+            EXCEEDED.with(|e| e.set(Some("max-bytes")));
             return true;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -159,14 +256,22 @@ pub(crate) mod budget {
 
     /// Caps a speculative `Vec` pre-allocation while a budget is active, so a
     /// budgeted cross-product cannot allocate its full (possibly astronomical)
-    /// output up front before the first cooperative check fires.
+    /// output up front before the first cooperative check fires. Honours BOTH the
+    /// row cap and (via `byte_width`) the byte cap — whichever admits fewer rows.
     #[inline]
     pub(crate) fn cap_alloc(cap: usize) -> usize {
         let a = ACTIVE.with(|c| c.get());
         if !a.on {
             return cap;
         }
-        cap.min(a.max_rows.saturating_add(1)).min(1 << 20)
+        // Rows the byte cap still admits, given the current width and accrued extra.
+        let by_bytes = a
+            .max_bytes
+            .saturating_sub(a.extra_bytes)
+            .checked_div(a.byte_width.max(1))
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        cap.min(a.max_rows.saturating_add(1)).min(by_bytes).min(1 << 20)
     }
 
 }
@@ -591,6 +696,26 @@ fn is_local(id: Id) -> bool {
     id >= LOCAL_BASE
 }
 
+/// [OPUS-4.8] (sq-s5is) Estimated heap bytes of a query-computed term, for the
+/// byte-accounted budget's local-vocab accounting. The struct itself plus the lexical
+/// bytes of the value/IRI (+ datatype IRI / language tag for a literal). A LOWER bound
+/// (ignores allocator overhead), conservative in the same direction the rest of the cap
+/// is. Only ever called while a budget is installed (from `LocalVocab::intern`).
+fn local_term_bytes(t: &Term) -> usize {
+    let base = std::mem::size_of::<Term>();
+    match t {
+        Term::NamedNode(n) => base + n.as_str().len(),
+        Term::BlankNode(b) => base + b.as_str().len(),
+        Term::Literal(l) => {
+            base + l.value().len()
+                + l.datatype().as_str().len()
+                + l.language().map_or(0, str::len)
+        }
+        // RDF 1.2 triple terms: charge the struct + each component recursively.
+        other => base + format!("{other}").len(),
+    }
+}
+
 /// Per-query vocabulary for terms produced during evaluation (BIND, aggregates)
 /// that are not in the graph dictionary.
 #[derive(Default)]
@@ -616,6 +741,11 @@ impl LocalVocab {
             Term::Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
             _ => f64::NAN,
         });
+        // [OPUS-4.8] (sq-s5is) Charge the byte cap for this newly-computed term (BIND /
+        // aggregate / CONSTRUCT scratch) — the NON-row dimension the row cap misses. A
+        // query that materialises few rows but huge string literals is now bounded. The
+        // term is stored TWICE (the `terms` vec + the `ids` key), so count both.
+        budget::add_bytes(2usize.saturating_mul(local_term_bytes(&t)));
         self.terms.push(t.clone());
         self.ids.insert(t, id);
         id
@@ -1812,10 +1942,21 @@ fn eval_graph_named_pref(
 /// the evaluator — the only cost on the normal path is one thread-local flag read
 /// per *operator* (the same class of check `budget::check` already does here).
 fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
-    if trace::enabled() {
-        return eval_graph_pattern_traced(graph, local, p);
-    }
-    eval_graph_pattern_inner(graph, local, p)
+    let b = if trace::enabled() {
+        eval_graph_pattern_traced(graph, local, p)?
+    } else {
+        eval_graph_pattern_inner(graph, local, p)?
+    };
+    // [OPUS-4.8] (sq-s5is) Byte-accounted cap: price THIS operator's output at its true
+    // WIDTH (`vars × BYTES_PER_ID`), the dimension the row cap misses. The operator
+    // dispatcher is the single cooperative chokepoint every materialised intermediate
+    // flows back through, so one width-aware check here bounds the widest intermediate.
+    // No-op (one thread-local read) when no budget is installed.
+    let prev = budget::set_width(b.vars.len());
+    let r = budget::check(b.rows.len());
+    budget::restore_width(prev);
+    r?;
+    Ok(b)
 }
 
 /// EXPLAIN ANALYZE wrapper: records one trace node per operator with its output
@@ -9730,7 +9871,7 @@ mod path_pushdown_tests {
             ttl.push_str(&format!(":m{k} :e :m{} .\n", k + 1));
         }
         let g = Graph::load_str(&ttl, "turtle").unwrap();
-        let budget = crate::QueryBudget { deadline: None, max_rows: Some(64) };
+        let budget = crate::QueryBudget { max_rows: Some(64), ..crate::QueryBudget::unlimited() };
         let err = crate::query_with_budget(&g, "PREFIX : <http://ex/> SELECT ?y WHERE { :m0 :e+ ?y }", &budget)
             .unwrap_err();
         assert!(err.contains("budget"), "expected a budget error, got: {err}");
