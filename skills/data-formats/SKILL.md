@@ -55,7 +55,9 @@ cargo build -p sparq-cli --features hdt
 
 ```rust
 // In-memory, whole document in a &str. Parallel-chunked for N-Triples & Turtle
-// when the `parallel` feature is on (default native).
+// when the `parallel` feature is on (default native); on ≥2 threads both fan the
+// per-chunk dictionaries into one sharded-dict merge (the serial `merge_remap`
+// loop is kept only on a single thread). Output is identical to the serial parse.
 pub fn load_str(text: &str, format: &str) -> Result<Graph, String>
 pub fn load_str_with_base(text: &str, format: &str, base: &str) -> Result<Graph, String>
 
