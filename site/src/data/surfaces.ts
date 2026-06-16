@@ -121,6 +121,7 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "SELECT / ASK / CONSTRUCT / UPDATE, property paths, RDF-star.",
         tier: "live",
         icon: FileCode2,
+        built: true,
       },
       {
         slug: "data-formats",
@@ -129,6 +130,7 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "Turtle / N-Triples / N-Quads / TriG + compressed ingest.",
         tier: "live",
         icon: Database,
+        built: true,
       },
       {
         slug: "javascript-wasm",
@@ -137,6 +139,7 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "The @jeswr/sparq browser & Node API — streaming cursors, match, applyDelta.",
         tier: "live",
         icon: Boxes,
+        built: true,
       },
     ],
   },
@@ -158,6 +161,7 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "SHACL Core + SHACL-SPARQL → W3C validation report.",
         tier: "live-new-wasm",
         icon: ShieldCheck,
+        built: true,
       },
     ],
   },
@@ -221,6 +225,7 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "Commitments, BGP + FILTER, issuer attestation, revocation.",
         tier: "live-bbjs",
         icon: Lock,
+        built: true,
       },
       {
         slug: "mpc",
@@ -229,6 +234,7 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "Federated SPARQL across distrusting holders (Shamir, threshold).",
         tier: "live-sim",
         icon: Network,
+        built: true,
       },
     ],
   },
