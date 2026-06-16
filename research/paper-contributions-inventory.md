@@ -127,8 +127,13 @@ doc exists in-tree yet); RDF/semantic-web work targets **ISWC / ESWC**, systems 
   reach EDBT. Not SIGMOD/VLDB-novel on the ANN core.
 - **Evidence:** IMPLEMENTED — `crates/sparq-vectors/src/{filter.rs,rewrite.rs}`,
   selectivity-gated prefilter vs filtered-traversal crossover. **Canonical evidence:**
-  deterministic *recall vs exact-filtered ground truth* (`tests/filtered.rs`). Caching
-  ("+caching" in the brief) is **NOT implemented** — do not claim it.
+  deterministic *recall vs exact-filtered ground truth* (`tests/filtered.rs`). `[OPUS-4.8]
+  corrected` (prior text wrongly said caching was not implemented). BGP→`IdMask` **caching
+  IS implemented**: a `Fingerprint`-keyed cross-prepare mask cache in
+  `crates/sparq-vectors/src/rewrite.rs` (the `mask_cache` module), landed by PR #292 / bead
+  sq-36ol. It is a pure engineering optimisation (a cache HIT returns a byte-identical
+  `IdMask`, invalidated by graph fingerprint change) — **not a research novelty**; do not
+  frame it as a contribution.
 - **HONESTY / READINESS: PUBLISHABLE-NOW** *as a systems/integration paper* with the
   recall (correctness) evidence. The ANN machinery is unmodified prior art — a reviewer
   pressing "what's new vs ACORN" must be answered with **exactness + same-id-space +
@@ -304,11 +309,18 @@ Listing these so the factory does not waste a paper slot on them:
 - **Inference (RDFS/OWL-RL/N3) and property paths** — competent SOTA re-implementations
   (RDFox/VLog/EYE cited); W3C-conformant (canonical floors 1967 / 33-of-33). The
   "win-both-regimes hybrid" inference idea is an unrealised aspiration. No novelty claim.
-- **SHACL** — **CORRECTION: SHACL-AF (Advanced Features — `sh:rule`/`sh:TripleRule`/
-  `sh:SPARQLRule`/`sh:expression`/`sh:SPARQLTarget`) is NOT implemented** (grep-confirmed
-  in `crates/sparq-shacl/src`). What ships is SHACL **Core** (98/98 W3C, canonical) +
-  SHACL-SPARQL §5.2 (floor 5) + §6 custom components. Do **not** claim SHACL-AF. The
-  conformant Core+SPARQL engine is table-stakes parity with Jena/pySHACL, not novel.
+- **SHACL** — `[OPUS-4.8] corrected` (prior text wrongly said SHACL-AF was *not*
+  implemented — a grep miss; the module is `#[cfg]`-gated). **SHACL-AF rules ARE
+  implemented**: `sh:rule` with `sh:TripleRule` and `sh:SPARQLRule`, exposed as
+  `apply_rules`/`expand` in `crates/sparq-shacl/src/rules.rs`, opt-in behind the `shacl-af`
+  cargo feature (default off), landed by PR #239 / bead sq-d1dw. The broader AF surface
+  (general `sh:expression` node-expression *constraints* and `sh:SPARQLTarget` SPARQL-based
+  targets) is **not** implemented — rules use only the common node-expression building
+  blocks (`sh:this`, constant, path). Beyond rules, what ships is SHACL **Core** (98/98 W3C,
+  canonical) + SHACL-SPARQL §5.2 (floor 5) + §6 custom components. **Tier-D (not novel) —
+  for the right reason:** the SHACL-AF rules module is a spec-conformant, feature-gated
+  engineering implementation (table-stakes parity with Jena/pySHACL), not a research
+  novelty. (Previously mis-tiered on the false premise that it was absent.)
 - **Conformance ratchet methodology** — excellent discipline (deterministic floors:
   SPARQL 1229, inference 1967, SHACL 98, SHACL-SPARQL 5, GeoSPARQL 119); belongs in an
   artefact/reproducibility appendix, not a standalone paper.
