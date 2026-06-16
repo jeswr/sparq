@@ -12,7 +12,9 @@ federation operators. See `research/federation-client-design.md` for the full de
 architecture, §6 phased build plan, §7 honest risks).
 
 > Model: Opus 4.8 (Fable unavailable — flag for re-review when Fable returns).
-> Bead **sq-s1uy** · epic **sq-dnko** / **sq-3183** (streaming federation client).
+> Epic **sq-dnko** / **sq-3183** (streaming federation client). Beads: skeleton
+> **sq-s1uy** · discovery **sq-nfxl** · source abstraction **sq-rsxf** · planner bridge +
+> single-source interpreter **sq-j27p**.
 
 ## What has landed, and what is still ahead
 
@@ -28,11 +30,19 @@ since (each behind the same default-OFF `fedclient` feature):
   — `SourceType` (`Endpoint | BrTpf | Tpf | Local`), the `FederatedSource` trait, the
   fine-grained `Capability` descriptor, and the real `Endpoint` SRJ adapter over a
   `Transport` seam behind a **default-deny SSRF egress guard**.
+- **Phase 3 — planner bridge + materialised single-source interpreter** (`sq-j27p`): the
+  `planner` module's `SourceResolver` (index → adapter resolution) + `lower_leaf` per-leaf
+  lowering, and the `operators` module's `materialize_single_source` interpreter +
+  `parse_srj` + `solutions_equal` result-equivalence (see below).
 - **Phase 6 — brTPF + TPF fragment adapters** (`sq-2qze`): the real Triple-Pattern-Fragments
   adapters (see below).
 
-Still ahead (future beads under epic sq-dnko): the planner bridge (§4.2), capability-aware
-pushdown (§4.3), the streaming operators (§4.4 / §5), and adaptive re-planning (§7).
+Still ahead (future beads under epic sq-dnko): capability-aware pushdown (§4.3), the
+streaming operators (§4.4 / §5), and adaptive re-planning (§7).
+
+The Phase-3 planner bridge + interpreter is detailed under
+[Phase 3 — lower a plan + interpret it against one source](#phase-3--lower-a-plan--interpret-it-against-one-source);
+the Phase-6 fragment adapters follow next.
 
 ## brTPF + TPF fragment adapters (Phase 6, `source` module)
 
@@ -66,14 +76,14 @@ serialisation, Turtle/TriG fragment parsing) lands with the streaming phase.
 
 ## Public module layout (design §4)
 
-| Module        | Design  | What it will hold (later phase)                                     |
+| Module        | Design  | Status / what it holds                                              |
 |---------------|---------|----------------------------------------------------------------------|
-| `source`      | §4.1    | `SourceType` (Endpoint \| BrTpf \| Tpf \| Local) + `FederatedSource` trait |
-| `discovery`   | §4.1    | VoID/SD discovery → `Capability`; reuses `from_void_nt`; ASK fallback |
-| `planner`     | §4.2    | lower BGP → `sparq-fedplan`, `select_sources` + `plan_bgp`, index→adapter |
-| `pushdown`    | §4.3    | maximal pushable sub-algebra per exclusive group; VALUES bind-join   |
-| `operators`   | §4.4    | `JoinTree` → Bind / Hash / Streaming / Local operators               |
-| `stream`      | §4.4    | the `SolutionStream` boundary the client owns (engine stays materialised) |
+| `source`      | §4.1    | **Phase 2** — `SourceType` (Endpoint \| BrTpf \| Tpf \| Local) + `FederatedSource` trait + `Endpoint` adapter (SSRF-guarded) |
+| `discovery`   | §4.1    | **Phase 1** — VoID/SD discovery → `Capability`; reuses `from_void_nt`; ASK fallback |
+| `planner`     | §4.2    | **Phase 3** — `SourceResolver` index→adapter resolution + `lower_leaf` per-leaf lowering |
+| `pushdown`    | §4.3    | Phase 4 (stub) — maximal pushable sub-algebra per exclusive group; VALUES bind-join |
+| `operators`   | §4.4    | **Phase 3** — `materialize_single_source` interpreter + `parse_srj` + `solutions_equal` result-equivalence |
+| `stream`      | §4.4    | Phase 5 (stub) — the `SolutionStream` boundary the client owns (engine stays materialised) |
 
 ## Opt-in (hard constraint)
 
@@ -113,13 +123,41 @@ scripts/fedclient-boundary-guard.sh        # exit 0 = boundary intact
 cargo test -p sparq-fedclient --features fedclient --test boundary
 ```
 
+## Phase 3 — lower a plan + interpret it against one source
+
+`sparq-fedplan` plans a BGP into a `JoinTree` of **pattern indices** and **source
+indices** — it speaks indices only, with no endpoint-URL or adapter mapping (the Phase-0
+finding). Phase 3 supplies that resolution layer and the materialised interpreter:
+
+```rust,ignore
+use sparq_fedclient::{SourceResolver, materialize_single_source, solutions_equal};
+use sparq_fedplan::{select_sources, plan_bgp, PlanOptions};
+
+// `descriptors[i]` describes source-adapter `adapters[i]` (SAME order — the resolver's
+// single source of truth; every lookup is range-checked, so a mismatch fails closed).
+let sel  = select_sources(&bgp, &descriptors);
+let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+
+let resolver = SourceResolver::new(&bgp, &adapters);    // index → pattern / adapter
+let rel = materialize_single_source(&resolver, &sel, source, &tree)?;
+// `rel` is the federated answer; for one source over graph `G` it carries the SAME
+// solution multiset as `sparq_engine::query(&G, <whole BGP>)` — the load-bearing
+// correctness property, asserted by `solutions_equal`.
+```
+
+The interpreter is **single-source and blocking** (every leaf relation is fetched in full
+before joining). Streaming, concurrent fan-out, the pushed-down bind-join operator, and
+multi-source fan-out are Phase 5; a multi-source leaf is rejected (`InterpError::MultiSource`)
+rather than under-answered.
+
 ## Status / roadmap
 
 Landed: Phase 0 (skeleton + boundary proof, `sq-s1uy`), Phase 1 (discovery, `sq-nfxl`),
-Phase 2 (source abstraction + Endpoint adapter, `sq-rsxf`), Phase 6 (brTPF/TPF adapters,
-`sq-2qze`). Still ahead under epic **sq-dnko**: the planner bridge (§4.2), capability-aware
-pushdown (§4.3), the streaming operators (§4.4 / §5), and adaptive re-planning (§7). No
-performance numbers appear here: any "better than Comunica" claim in the design record is an
+Phase 2 (source abstraction + Endpoint adapter, `sq-rsxf`), Phase 3 (planner bridge +
+materialised single-source interpreter, `sq-j27p`), Phase 6 (brTPF/TPF adapters, `sq-2qze`).
+Still ahead under epic **sq-dnko**: capability-aware pushdown (§4.3), the streaming operators
+(§4.4 / §5), and adaptive re-planning (§7). No performance numbers appear here: any "better
+than Comunica" claim in the design record is an
 *architectural prediction* to be validated head-to-head before being asserted as fact.
 
-[OPUS-4.8] sq-s1uy — flagged for Fable re-review.
+[OPUS-4.8] sq-j27p — flagged for Fable re-review.

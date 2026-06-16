@@ -219,19 +219,40 @@ points one-way *into* the engine.
 default-OFF `fedclient` feature, plus the load-bearing dependency-boundary proof
 (`sparq-core`/`sparq-engine` have no edge to it, enforced by
 `scripts/fedclient-boundary-guard.sh` + `crates/sparq-fedclient/tests/boundary.rs`). Landed
-since: Phase 1 capability discovery (`sq-nfxl`: SD/VoID parse + ASK fallback), Phase 2 the
-`source` source-type abstraction + `Endpoint` SRJ adapter + default-deny SSRF guard
-(`sq-rsxf`), and **Phase 6 the brTPF + TPF fragment adapters** (`sq-2qze`):
-`source::TpfSource` (plain TPF — materialise a fragment to exhaustion, no bind-join) and
-`source::BrTpfSource` (bindings-restricted — push `maxMpR`-bounded binding blocks per
-request, the standardised brTPF bind-join), both over the `FragmentTransport` seam, with
-count-metadata (`hydra:totalItems`) cardinality surfaced as a one-pattern
-`SourceDescriptor` for this planner. The fragment adapters answer one triple pattern
-**completely** and return typed `FragBinding`s via `solutions(...)` (a fragment server
-speaks triples, not SPARQL-Results-JSON, so their `FederatedSource::execute` is a
-deliberate `Unsupported` that points at `solutions`). Still to come: the planner bridge,
-capability-aware pushdown, the streaming operators, and adaptive re-planning (future beads
-under the epic). See `crates/sparq-fedclient/README.md`.
+since:
+
+- **Phase 1 discovery** (`sq-nfxl`) — Service-Description parser + VoID/`scs:` reuse + an
+  SSRF-guarded fetch seam + ASK-probe fallback → a `Capability` (+ optional
+  `SourceDescriptor` for *this* planner).
+- **Phase 2 source abstraction** (`sq-rsxf`) — the `Endpoint` adapter over the engine's
+  transport seam behind a default-deny SSRF guard.
+- **Phase 3 planner bridge + single-source interpreter** (`sq-j27p`) — the consumer of THIS
+  planner's `JoinTree`. The plan speaks pattern/source **indices** only (no endpoint-URL
+  mapping — the Phase-0 finding); `sparq_fedclient::SourceResolver` is the **index → adapter
+  resolution layer** that maps a plan `pattern: usize` → `TriplePattern` and a `source: usize`
+  → a source adapter (the resolver requires the `descriptors`/`adapters` slices to be in the
+  same order, and range-checks every lookup). `lower_leaf` lowers one BGP pattern to a
+  single-pattern `SELECT`; `materialize_single_source` walks the `JoinTree`, fetches each
+  leaf's SRJ through the Phase-2 adapter, parses it, and natural-joins in the plan's join
+  order. The load-bearing property — the materialised federated result **equals** local
+  `sparq-engine` evaluation of the same query (`solutions_equal` bag comparison) — is driven
+  end-to-end in `tests/planner_result_equals_local_eval.rs`. The interpreter is single-source
+  + blocking; the `StreamJoin` feeder, concurrent fan-out, pushed-down bind-join, and
+  multi-source UNION are Phase 5 (a multi-source leaf fails closed with
+  `InterpError::MultiSource`).
+- **Phase 6 the brTPF + TPF fragment adapters** (`sq-2qze`): `source::TpfSource` (plain TPF —
+  materialise a fragment to exhaustion, no bind-join) and `source::BrTpfSource`
+  (bindings-restricted — push `maxMpR`-bounded binding blocks per request, the standardised
+  brTPF bind-join), both over the `FragmentTransport` seam, with count-metadata
+  (`hydra:totalItems`) cardinality surfaced as a one-pattern `SourceDescriptor` for this
+  planner. The fragment adapters answer one triple pattern **completely** and return typed
+  `FragBinding`s via `solutions(...)` (a fragment server speaks triples, not
+  SPARQL-Results-JSON, so their `FederatedSource::execute` is a deliberate `Unsupported` that
+  points at `solutions`).
+
+Still to come (future beads under the epic): capability-aware pushdown, the streaming
+operators + multi-source fan-out, and adaptive re-planning. See
+`crates/sparq-fedclient/README.md`.
 
 ## Deferred (NOT here)
 
