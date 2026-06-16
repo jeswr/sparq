@@ -34,8 +34,8 @@ default = []
 # in NEITHER the engine NOR any heavy crate, so the default `sparq-vectors` build (and the core
 # query path) carry zero filtered-ANN code. The feature gates `filter.rs` (the `IdMask` +
 # `FilterConfig` + exact pre-filter) and the `DiskAnnIndex::nearest_filtered*` traversal path. The
-# engine-side BGP → mask wiring is a separate, deferred bead (see sq-1wc1); this feature is the core
-# sparq-vectors filtered API.
+# engine-side automatic BGP → mask wiring (a filtered form of the `vec:` predicate) is wired in
+# `rewrite.rs` and activates when this composes with `vec-predicate` (sq-bvmd, follow-up to sq-1wc1).
 filtered-ann = []
 # [OPUS-4.8] sq-k6ex (epic sq-3183): the `vec:` magic predicates — vector KNN
 # search expressed INSIDE plain SPARQL, mirroring sparq-text's `text:` rewrite.
