@@ -668,6 +668,87 @@ pinning     = "dataset version"
 records_to  = "stdout; research/genai-design.md §4 gate"
 status      = "ok"
 
+# [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-nlq OFFLINE NL→SPARQL micro-bench.
+# Closes the bench-missing drift item for sparq-nlq. Pure offline: the LLM is an
+# in-example fixed-completion stub (no `live` feature, no network), so it measures
+# the crate's deterministic core — schema grounding, prompt construction, and the
+# extract→spargebra-validate→budgeted-execute loop — not an Anthropic round-trip.
+[[benchmark]]
+id          = "nlq-offline-bench"
+name        = "sparq-nlq offline NL→SPARQL loop (ground + prompt + ask)"
+category    = "query"
+measures    = "grounding (Introspection scan + token-budgeted summary render via Nlq::new), prompt_for construction (us), and one full ask loop (extract SPARQL → spargebra validate → budgeted execute) using a deterministic fixed-completion stub LLM; best-of-K"
+invoke      = "cargo run -p sparq-nlq --example bench --release [n-entities=2000]"
+source      = "crates/sparq-nlq/examples/bench.rs"
+dataset     = "synthetic typed graph generated in-example (N entities x {rdf:type, rdfs:label, ex:age}); deterministic; no external data, no network (offline stub LLM)"
+quiet_box_sensitive = true
+pinning     = "in-example synthetic graph is deterministic; pin N for comparable numbers; offline path (no `live` feature)"
+records_to  = "stdout (us per phase)"
+status      = "ok"
+
+# [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-serve concurrent-serving-core
+# micro-bench. Closes the bench-missing drift item for sparq-serve. Lightweight:
+# a cheap usize snapshot type isolates the ring/scheduler machinery from graph-build
+# cost (that is the engine ingest benches), so the numbers are the lock-free
+# primitives the crate exists for.
+[[benchmark]]
+id          = "serve-core-bench"
+name        = "sparq-serve generation-ring + scheduler primitives"
+category    = "serve"
+measures    = "lock-free current() reader-pin latency (ns/op), publish() snapshot-swap + epoch-bump latency (ns/op), two-lane Scheduler::run cheap/heavy round-trip (ns/op), and a concurrent arm reporting aggregate reader pins/s while a writer publishes (readers-never-block invariant)"
+invoke      = "cargo run -p sparq-serve --example bench --release"
+source      = "crates/sparq-serve/examples/bench.rs"
+dataset     = "none — synthetic in-example (usize snapshot to isolate ring/scheduler cost from graph-build); deterministic structure, NON-CANONICAL wall-clock"
+quiet_box_sensitive = true
+pinning     = "in-example op counts fixed; the cheap usize snapshot isolates the measured machinery; numbers calibrate research/concurrent-serving.md §6"
+records_to  = "stdout (ns/op per primitive)"
+status      = "ok"
+
+# [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-mpc in-process counting-tier
+# bench matrix. Closes the bench-missing drift item for sparq-mpc by registering
+# the EXISTING example harness (it pre-dated the registry). HONESTY: this is the
+# single-process counting tier — MODELLED communication (bytes/party, rounds,
+# multiplications) + the per-cell ACTUAL security guarantee, NOT measured network
+# cost (the multi-process transport is examples/mpc_net_bench.rs; LAN/WAN netem +
+# EC2 scale-out are separate beads sq-tg6b / sq-hoaj). The correctness gates that
+# co-run the REAL primitives need the seedable simulation RNG (insecure-test-rng,
+# OFF by default — the feature name is the warning; it only makes the SIMULATION
+# reproducible, never a production claim).
+[[benchmark]]
+id          = "mpc-bench-matrix"
+name        = "sparq-mpc (security-model × N × query-class) modelled-cost matrix"
+category    = "query"
+measures    = "deterministic MODELLED communication per cell — bytes/party, total bytes, sequential+batched rounds, multiplications, field elements opened/shared, offline bytes — plus the per-cell ACTUAL security guarantee, over party counts N∈{2,3,5,7} × query classes {cumulative-sum aggregate, hidden-value equi-join, oblivious shuffle, oblivious sort}; emitted as a human table + structured JSON. With insecure-test-rng the REAL primitives co-run as correctness gates (aggregate/join/shuffle/sort)"
+invoke      = "cargo run -p sparq-mpc --example mpc_bench_matrix [--features insecure-test-rng] [-- --json]   # default build prints the cost matrix + skips the seeded correctness gates; the feature adds the co-run gates"
+source      = "crates/sparq-mpc/examples/mpc_bench_matrix.rs (in-process counting tier); crates/sparq-mpc/examples/mpc_net_bench.rs (multi-process MEASURED network tier, driver for the sibling mpc_party); crates/sparq-mpc/src/bench.rs (run_matrix + correctness gates)"
+dataset     = "synthetic in-process (capped scales: join_scale=6, shuffle_scale=16) — the counting tier needs no external data"
+quiet_box_sensitive = false  # modelled bytes/rounds/mults are DETERMINISTIC (counting tier); only mpc_net_bench's wall-clock is timing
+pinning     = "DEFAULT_PARTIES {2,3,5,7}, join/shuffle scales fixed in the example; correctness-gate seed 0x5347585140D5043... fixed under insecure-test-rng (simulation reproducibility only, NEVER a production claim)"
+records_to  = "stdout (human table + JSON schema); research/mpc design record §5"
+status      = "ok"
+
+# [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-wasm browser-bundle size.
+# Closes the bench-missing drift item for sparq-wasm. The wasm crate is a thin
+# #[wasm_bindgen] glue layer over sparq-engine (load/query/count/ask/update); its
+# QUERY logic is ALREADY measured by the CLI/operator-coverage suites over the same
+# engine, so the crate's distinct, measurable surface is its BROWSER BUNDLE SIZE —
+# a DETERMINISTIC byte count that gates the "zero wasm bundle impact" rule for
+# opt-in features. This is exactly the wasm_bundle_bytes metric ci-bench.sh already
+# emits per-commit (records_to below); this entry registers that measurement under
+# the wasm crate so the drift-scanner + CATALOG see it.
+[[benchmark]]
+id          = "wasm-bundle"
+name        = "sparq-wasm browser bundle size (deterministic byte count)"
+category    = "compression"
+measures    = "release wasm32-unknown-unknown bundle size in bytes (deterministic) — the 'zero wasm bundle impact' gate: any opt-in feature that leaks into the browser build shows up here per commit"
+invoke      = "cargo build --release -p sparq-wasm --target wasm32-unknown-unknown && wc -c < target/wasm32-unknown-unknown/release/sparq_wasm.wasm   # CI emits it as wasm_bundle_bytes via scripts/ci-bench.sh"
+source      = "crates/sparq-wasm/src/lib.rs (the #[wasm_bindgen] Store glue measured); scripts/ci-bench.sh (wasm_bundle_bytes emitter)"
+dataset     = "none — the artifact under test is the compiled wasm binary itself"
+quiet_box_sensitive = false  # byte count is fully deterministic (runner-noise-immune)
+pinning     = "release profile + wasm32-unknown-unknown target; the crate's no-default-features (no rayon) + compact 3-perm cfg pin the bundle composition"
+records_to  = "stdout (wc -c); CI emits wasm_bundle_bytes into benchmark-data (dev/bench) via scripts/ci-bench.sh (a DETERMINISTIC regression gate, NOT trend-only)"
+status      = "ok"
+
 # =============================================================================
 # CONFORMANCE — correctness against official W3C suites (NOT perf)
 # =============================================================================
