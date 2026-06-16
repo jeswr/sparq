@@ -49,6 +49,39 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
   path that enforces the same policy on any standard SPARQL 1.1 engine.
 - **Write-path gating** — `update_as` / `update_as_acp` check every graph an update could
   mutate before applying it, and auto-re-materialize on `.acl`/`.acr` writes.
+- **ODRL bridge (opt-in, research-track)** — behind the off-by-default `odrl-bridge`
+  cargo feature, `materialize_permission` / `PodStore::materialize_odrl_permission` runs the
+  [`sparq-policy`](../sparq-policy) ODRL evaluator and, on a **definite Permit**, materializes
+  the equivalent WAC/ACP grant into the auth view — so the existing graph-level enforcement
+  honours it with **no new enforcement engine**. See below.
+
+## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge` feature) — [OPUS-4.8] sq-h3uk
+
+The single-node bridge of epic sq-3183 (**research-track, not a production cutover**). Enable
+it with `--features odrl-bridge` (it pulls in the optional `sparq-policy` dependency only then;
+the default build carries zero ODRL code). A matched ODRL `Permission` becomes a concrete
+`principal auth:<mode> graph` triple in `<urn:sparq:auth>`, **appended** to whatever WAC/ACP
+view already exists.
+
+**Action → mode mapping** (the ODRL *request* action is mapped; conservative — a Permit only
+ever grants the narrowest mode the action denotes):
+
+| ODRL action (`odrl:`)                         | WAC/ACP mode            |
+|-----------------------------------------------|-------------------------|
+| `read`, `display`, `present`, `print`, `play` | `acl:Read`              |
+| `append`                                      | `acl:Append`            |
+| `modify`, `delete`, `write`                   | `acl:Write`             |
+| anything else (incl. the `odrl:use` umbrella) | **unmapped → no grant** |
+
+`odrl:use` is deliberately left unmapped: it subsumes every action, so picking one WAC mode
+for it would have to pick the widest — request `odrl:read` explicitly instead (a `use`
+permission in the policy still *grants* a concrete `read` request, and the bridge maps that
+concrete request).
+
+**Fail-closed:** a grant is materialized **only** on a definite Permit *and* a mappable action
+*and* a concrete party (WebID) + target graph. A Deny, an unsatisfied constraint, an
+undischarged duty, an unmapped action, or a partyless/targetless request materializes
+**nothing** — access is never widened on ambiguity.
 
 ## Security posture — fail-closed
 
