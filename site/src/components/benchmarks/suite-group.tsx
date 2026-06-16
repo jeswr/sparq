@@ -14,6 +14,8 @@ import { Card } from "@/components/ui/card";
 import { MetricTable } from "@/components/benchmarks/metric-table";
 import { SameBoxTable } from "@/components/benchmarks/same-box-table";
 import { ReferencesNote } from "@/components/benchmarks/references-note";
+import { TrendCharts } from "@/components/benchmarks/trend-charts";
+import { ScalingCharts } from "@/components/benchmarks/scaling-charts";
 import {
   SummaryDetail,
   SummaryPill,
@@ -23,6 +25,8 @@ import type {
   MetricRow,
   ReferenceBaseline,
   SameBoxComparison,
+  ScalingFamily,
+  TrendSeries,
 } from "@/data/benchmarks";
 
 export interface SuiteGroupData {
@@ -31,6 +35,8 @@ export interface SuiteGroupData {
   summary: CompetitiveSummary;
   sameBox?: SameBoxComparison;
   references: ReferenceBaseline[];
+  trends: TrendSeries[];
+  scaling: ScalingFamily[];
 }
 
 export function SuiteGroup({
@@ -72,6 +78,8 @@ export function SuiteGroup({
         <div id={bodyId} className="space-y-4 border-t px-4 py-4">
           <SummaryDetail suite={data.suite} summary={data.summary} />
           <MetricTable rows={data.rows} />
+          <TrendCharts series={data.trends} />
+          <ScalingCharts families={data.scaling} />
           {data.sameBox && (
             <div className="space-y-2">
               <h4 className="text-sm font-medium">Same-box cross-engine comparison</h4>

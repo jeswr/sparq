@@ -98,10 +98,20 @@ interface CompetitorsData {
   same_box_comparisons: SameBoxComparison[];
 }
 
+// [OPUS-4.8] sq-hsyg — one commit's worth of the github-action-benchmark series. `date` is
+// the epoch-ms the series carries (github-action-benchmark writes a number).
+export interface HistoryEntry {
+  commit: string | null;
+  date: number | null;
+  benches: Bench[];
+}
+
 interface Snapshot {
   generatedAt: string;
   source: string;
-  latest: { commit: string | null; date: string | null; benches: Bench[] };
+  latest: HistoryEntry;
+  // sq-hsyg: trailing window of commits (oldest -> newest), latest === history[last].
+  history?: HistoryEntry[];
   labels: Record<string, MetricLabel>;
   competitors: CompetitorsData;
 }
@@ -111,6 +121,13 @@ const SNAPSHOT = data as unknown as Snapshot;
 export const LATEST = SNAPSHOT.latest;
 export const SOURCE = SNAPSHOT.source;
 export const GENERATED_AT = SNAPSHOT.generatedAt;
+// History is optional in the schema (a pre-sq-hsyg JSON, or a fork without the
+// benchmark-data branch); fall back to a single-point series so trend charts still render
+// one marker and never crash on an empty/absent history.
+export const HISTORY: HistoryEntry[] =
+  Array.isArray(SNAPSHOT.history) && SNAPSHOT.history.length
+    ? SNAPSHOT.history
+    : [SNAPSHOT.latest];
 const LABELS = SNAPSHOT.labels;
 export const COMPETITORS = SNAPSHOT.competitors;
 
@@ -332,15 +349,24 @@ export interface FullSuiteGroup {
   summary: CompetitiveSummary;
   sameBox?: SameBoxComparison;
   references: ReferenceBaseline[];
+  // sq-hsyg: per-suite trend series (one per metric) + scaling families (size-parametrised).
+  trends: TrendSeries[];
+  scaling: ScalingFamily[];
 }
 
 export function fullSuiteGroupsForFamily(key: string): FullSuiteGroup[] {
+  // Derive the family's trend + scaling once, then slice per suite (cheap; the series count
+  // is small). Trend/scaling carry a `suite` so the per-suite filter is exact.
+  const allTrends = trendSeriesForFamily(key);
+  const allScaling = scalingFamiliesForFamily(key);
   return suiteGroupsForFamily(key).map((g) => ({
     suite: g.suite,
     rows: g.rows,
     summary: g.summary,
     sameBox: sameBoxFor(g.suite),
     references: referencesForSuite(g.suite),
+    trends: allTrends.filter((t) => t.suite === g.suite),
+    scaling: allScaling.filter((s) => s.suite === g.suite),
   }));
 }
 
@@ -524,6 +550,156 @@ export function fmtNum(v: number | null | undefined): string {
   if (abs >= 1000) return v.toLocaleString("en-US", { maximumFractionDigits: 0 });
   if (abs >= 1) return (Math.round(v * 100) / 100).toLocaleString("en-US");
   return (Math.round(v * 10000) / 10000).toString();
+}
+
+// ---- TREND series (sq-hsyg; mirror of dashboard.js trendPoints) -----------------------
+// Per-metric history points {date, value} across the committed window, oldest → newest.
+// Points are only emitted for commits that actually carry the metric — no fabricated gaps.
+
+export interface TrendPoint {
+  date: number | null; // epoch-ms (as the series carries it)
+  commit: string | null;
+  value: number;
+}
+
+export interface TrendSeries {
+  name: string;
+  label: string;
+  unit: string;
+  suite: string;
+  points: TrendPoint[];
+}
+
+function trendPointsFor(name: string): TrendPoint[] {
+  const pts: TrendPoint[] = [];
+  for (const entry of HISTORY) {
+    const b = entry.benches.find((x) => x.name === name);
+    if (b) {
+      pts.push({
+        date: entry.date == null ? null : Number(entry.date),
+        commit: entry.commit,
+        value: b.value,
+      });
+    }
+  }
+  return pts;
+}
+
+// Trend series for every metric in a family, ordered by suite then label (same order the
+// metric tables use). A metric with a single point is kept (degenerate single-marker chart).
+export function trendSeriesForFamily(key: string): TrendSeries[] {
+  const series = benchesForFamily(key).map((b) => ({
+    name: b.name,
+    label: labelFor(b.name),
+    unit: b.unit,
+    suite: suiteFor(b.name),
+    points: trendPointsFor(b.name),
+  }));
+  return series.sort((a, b) =>
+    a.suite !== b.suite
+      ? a.suite < b.suite
+        ? -1
+        : 1
+      : a.label < b.label
+        ? -1
+        : a.label > b.label
+          ? 1
+          : 0,
+  );
+}
+
+// ---- SCALING families (sq-hsyg; mirror of dashboard.js sizeAxisOf/buildScalingFamilies) -
+// For SIZE-PARAMETRISED metrics (Deep Taxonomy depth, WatDiv scale factor, …) the harness
+// encodes the size in the metric NAME (e.g. `deeptax_d10000_closure_s`). We split that size
+// token out so two sizes of the same query share a `base` and form one scaling family, then
+// plot the LATEST value vs the size axis. No fabricated points — only real metrics appear.
+
+interface SizeAxis {
+  base: string;
+  axisLabel: string;
+  axis: number;
+}
+
+const SIZE_TOKENS: { re: RegExp; label: string }[] = [
+  { re: /_sf(\d+)([km]?)(?![0-9])/i, label: "scale factor" },
+  { re: /_depth(\d+)(?![0-9])/i, label: "depth" },
+  { re: /_d(\d+)(?![0-9])/i, label: "depth" },
+  { re: /_scale(\d+)([km]?)(?![0-9])/i, label: "scale" },
+  { re: /_size(\d+)([km]?)(?![0-9])/i, label: "size" },
+];
+
+function sizeAxisOf(name: string): SizeAxis | null {
+  for (const t of SIZE_TOKENS) {
+    const m = name.match(t.re);
+    if (m) {
+      let mag = parseInt(m[1], 10);
+      const suffix = (m[2] || "").toLowerCase();
+      if (suffix === "k") mag *= 1000;
+      else if (suffix === "m") mag *= 1_000_000;
+      // Removing the token leaves a placeholder `_`; collapse repeats + trim so the displayed
+      // base stem renders cleanly (`deeptax_closure_s`). Two sizes still share one base.
+      const base = name
+        .replace(m[0], "_")
+        .replace(/_{2,}/g, "_")
+        .replace(/^_|_$/g, "");
+      return { base, axisLabel: t.label, axis: mag };
+    }
+  }
+  return null;
+}
+
+export interface ScalingPoint {
+  axis: number;
+  value: number;
+  name: string;
+  unit: string;
+}
+
+export interface ScalingFamily {
+  base: string;
+  label: string;
+  suite: string;
+  axisLabel: string;
+  unit: string;
+  points: ScalingPoint[];
+}
+
+// Group the LATEST commit's benches in a family into scaling families keyed by `base`. Each
+// family's points are sorted ascending by the size axis. A family with a single point is kept
+// (single marker). Families with NO size token never appear. Sorted by suite then label.
+export function scalingFamiliesForFamily(key: string): ScalingFamily[] {
+  const fams: Record<string, ScalingFamily> = {};
+  for (const b of benchesForFamily(key)) {
+    const s = sizeAxisOf(b.name);
+    if (!s) continue;
+    const fam =
+      fams[s.base] ||
+      (fams[s.base] = {
+        base: s.base,
+        label: labelFor(b.name).replace(/\s*\([^()]*\)\s*$/, "").trim(),
+        suite: suiteFor(b.name),
+        axisLabel: s.axisLabel,
+        unit: b.unit,
+        points: [],
+      });
+    fam.points.push({ axis: s.axis, value: b.value, name: b.name, unit: b.unit });
+  }
+  return Object.values(fams)
+    .map((f) => {
+      f.points.sort((a, b) => a.axis - b.axis);
+      return f;
+    })
+    .sort((a, b) =>
+      a.suite !== b.suite
+        ? a.suite < b.suite
+          ? -1
+          : 1
+        : a.label < b.label
+          ? -1
+          : a.label > b.label
+            ? 1
+            : 0,
+    );
 }
 
 // A one-line headline for a suite's collapsed group header.
