@@ -1,6 +1,6 @@
 ---
 name: prov-lineage
-description: Capture W3C PROV-O data lineage for DERIVED RDF — when a CONSTRUCT/DESCRIBE query produces a new graph, record who/what/when made it (prov:Activity + prov:Entity + wasGeneratedBy/used/wasDerivedFrom) using the opt-in sparq-prov crate. Use when you need machine-readable provenance for derived data: citable lineage for GenAI-grounded answers, audit/compliance (CDMC CD-1) data-lineage capture, or attribution of constructed graphs to their source(s). Off by default; does not touch sparq-core/sparq-engine's lean build.
+description: "Capture W3C PROV-O data lineage for DERIVED RDF — when a CONSTRUCT/DESCRIBE query produces a new graph, record who/what/when made it (prov:Activity + prov:Entity + wasGeneratedBy/used/wasDerivedFrom) using the opt-in sparq-prov crate. Use when you need machine-readable provenance for derived data — citable lineage for GenAI-grounded answers, audit/compliance (CDMC CD-1) data-lineage capture, or attribution of constructed graphs to their source(s). Off by default; does not touch sparq-core/sparq-engine's lean build."
 ---
 
 # sparq-prov — W3C PROV-O lineage for derived data
