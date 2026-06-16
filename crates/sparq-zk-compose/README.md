@@ -78,7 +78,7 @@ proof can only verify against the member its public inputs fit.
 > composition verifier's soundness is the subject of the open audit (`research/
 > zk-soundness-audit.md` / `research/mpc-cozk-reaudit.md`). A passing proof here is
 > NOT a guarantee that the SPARQL statement holds under an adversarial prover. The
-> sound verifier entry point is still `verifier::verify_manifest`, and even it
+> full-binding verifier entry point is still `verifier::verify_manifest`, and even it
 > inherits the open verifier-soundness question.
 
 ### Manifest (`manifest::ProofManifest`)
