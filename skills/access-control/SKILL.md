@@ -94,6 +94,12 @@ Materialize the authorization view from the access-control documents, then enfor
   `store.accessible_set(...)` / `store.view_for(...) -> DatasetView` /
   `store.auth() -> &AuthIndex` — inspect the authorized graph set or the materialized
   index directly.
+- `store.materialize_odrl_permission(&Policy, &Request) -> BridgeOutcome` — **opt-in**
+  (`odrl-bridge` feature, OFF by default; [OPUS-4.8] sq-h3uk): run the `sparq-policy` ODRL
+  evaluator and, on a *definite Permit*, materialize the equivalent `principal auth:<mode>
+  graph` grant into the auth view, then reindex — so this same enforcement path applies it.
+  Fail-closed (Deny / unmapped action / partyless / targetless → no grant). See the
+  [`usage-control-policy`](../usage-control-policy/SKILL.md) skill for the action→mode mapping.
 - `Session { agent: Option<&str>, client: Option<&str> }` (caller-asserted WebID +
   `acl:origin`/`acp:client`; `None` = anonymous / any client); `Mode::{Read, Write,
   Append, Control}`; `wac_fixture()` / `acp_fixture()` (bundled demo pods).

@@ -26,6 +26,17 @@ rustdoc-args = ["--cfg", "docsrs"]
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0", default-features = false }
 sparq-reason = { path = "../sparq-reason", version = "0.1.0", default-features = false }
+# [OPUS-4.8] sq-h3uk: the ODRL→AUTH_GRAPH bridge. OPTIONAL + behind the `odrl-bridge`
+# feature (OFF by default), so the default sparq-solid build carries zero ODRL code,
+# deps, or runtime cost — sparq-policy is NOT forced onto the default build. Research
+# track (the single-node bridge of epic sq-3183), NOT a production cutover.
+sparq-policy = { path = "../sparq-policy", version = "0.1.0", default-features = false, optional = true }
 oxrdf.workspace = true
 spargebra.workspace = true
 rustc-hash.workspace = true
+
+[features]
+# [OPUS-4.8] sq-h3uk: materialize matched ODRL permissions into the AUTH_GRAPH so the
+# existing graph-level WAC/ACP enforcement applies them. OFF by default (lean core);
+# pulls in the optional sparq-policy ODRL evaluator only when enabled.
+odrl-bridge = ["dep:sparq-policy"]

@@ -5,12 +5,18 @@ mod authindex;
 pub mod fixture;
 mod loader;
 mod materialize;
+// [OPUS-4.8] sq-h3uk: ODRL→AUTH_GRAPH bridge — opt-in (`odrl-bridge` feature), OFF by
+// default, so the core sparq-solid build carries zero ODRL/sparq-policy code.
+#[cfg(feature = "odrl-bridge")]
+pub mod odrl_bridge;
 mod rewrite;
 mod update; // [OPUS-4.8] sq-xor3: write/update-path enforcement
 
 pub use authindex::{pair_principal, AuthIndex, Mode, Session};
 pub use fixture::{acp_fixture, wac_fixture};
 pub use materialize::{materialize_acp, materialize_wac, MaterializeStats};
+#[cfg(feature = "odrl-bridge")]
+pub use odrl_bridge::{action_to_mode, materialize_permission, BridgeOutcome};
 pub use rewrite::{rewrite_for, wrap_for_view};
 
 use oxrdf::{NamedNode, Term};
@@ -413,6 +419,41 @@ impl PodStore {
             }
         }
         Ok(())
+    }
+
+    /// [OPUS-4.8] sq-h3uk — evaluate an ODRL `policy` against `request` and, on a
+    /// definite Permit, materialize the equivalent WAC/ACP grant into this store's
+    /// `<urn:sparq:auth>` view, then rebuild the session index so the grant takes
+    /// effect on the next [`PodStore::accessible`] / [`PodStore::query_as`] call.
+    ///
+    /// This is the [`PodStore`] entry point for the opt-in ODRL bridge
+    /// ([`odrl_bridge::materialize_permission`]): a matched ODRL `Permission`
+    /// (action + constraints satisfied + duties discharged) becomes a concrete
+    /// `principal auth:<mode> graph` triple honoured by the existing graph-level
+    /// enforcement — **no new enforcement engine**. The grant is APPENDED to the
+    /// current auth view (any WAC/ACP grants already materialized are preserved).
+    ///
+    /// **Fail-closed:** a Deny, an ambiguous evaluation, an unmapped ODRL action, or
+    /// a request without a concrete party/target materializes NOTHING and leaves the
+    /// auth view (and so the session index) untouched — see
+    /// [`odrl_bridge::materialize_permission`] for the exact predicates and the
+    /// [action→mode mapping](odrl_bridge#action--mode-mapping).
+    ///
+    /// Call [`PodStore::materialize_wac`] / [`materialize_acp`](PodStore::materialize_acp)
+    /// FIRST if you also want the static WAC/ACP grants present; the bridge adds to
+    /// whatever auth view currently exists (or creates a fresh one holding just the
+    /// bridged grant).
+    #[cfg(feature = "odrl-bridge")]
+    pub fn materialize_odrl_permission(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+    ) -> odrl_bridge::BridgeOutcome {
+        let outcome = odrl_bridge::materialize_permission(&mut self.graph, policy, request);
+        if outcome.granted {
+            self.reindex(); // a new grant changes the auth view → rebuild index + drop cache
+        }
+        outcome
     }
 
     /// The current auth index (for direct inspection/tests).

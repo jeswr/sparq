@@ -3575,6 +3575,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-policy",
  "sparq-reason",
 ]
 

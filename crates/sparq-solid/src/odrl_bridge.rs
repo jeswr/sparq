@@ -1,0 +1,263 @@
+//! [OPUS-4.8] sq-h3uk — bridge the `sparq-policy` ODRL evaluator into the
+//! `<urn:sparq:auth>` AUTH_GRAPH so the existing graph-level WAC/ACP enforcement
+//! applies a matched ODRL [`Permission`](sparq_policy::Rule).
+//!
+//! # What this is (and is NOT)
+//!
+//! This is the **single-node** bridge of epic sq-3183 — a research-track surface,
+//! NOT a production cutover and NOT the federated/ZK-disclosure path (that one is
+//! gated on ZK soundness remediation). It composes two opt-in crates:
+//!
+//! - `sparq-policy` answers a usage-control question — *may this party USE this
+//!   asset, for purpose P, until time T, with obligation O discharged?* — and
+//!   returns a fail-closed [`Decision`](sparq_policy::Decision).
+//! - `sparq-solid` enforces graph-level access: a principal × [`Mode`] → graph set
+//!   is read out of the `<urn:sparq:auth>` view (see [`crate::AuthIndex`]).
+//!
+//! The bridge **materializes** a definite ODRL Permit as the very same
+//! `principal auth:<mode> graphName` triples the existing enforcement already
+//! understands, appending them into the AUTH_GRAPH. Net effect: an ODRL
+//! `Permission` (action + constraints satisfied + duties discharged) becomes a
+//! concrete WAC/ACP grant honoured by the current enforcement — **no new
+//! enforcement engine**, the existing one is reused unchanged.
+//!
+//! # Fail-closed
+//!
+//! A grant is materialized **only** when [`sparq_policy::evaluate`] returns a
+//! definite Permit (`decision.allow == true`) AND the requested ODRL action maps to
+//! a concrete WAC/ACP [`Mode`] AND the request names a concrete WebID party + target
+//! graph IRI. A Deny, an ambiguous evaluation, an unmapped action, or a missing
+//! party/target materializes **nothing** — access is never widened on ambiguity.
+//!
+//! # Action → Mode mapping
+//!
+//! The ODRL request's `action` IRI is mapped to a WAC/ACP [`Mode`] by
+//! [`action_to_mode`]. The mapping is deliberately conservative (a permit only ever
+//! grants the *narrowest* mode the action denotes):
+//!
+//! | ODRL action (`odrl:`)                                   | WAC/ACP [`Mode`] |
+//! |---------------------------------------------------------|------------------|
+//! | `read`, `display`, `present`, `print`, `play`           | [`Mode::Read`]   |
+//! | `append`                                                | [`Mode::Append`] |
+//! | `modify`, `delete`, `write`                             | [`Mode::Write`]  |
+//! | anything else (incl. the `odrl:use` umbrella)           | **unmapped → no grant** |
+//!
+//! The `odrl:use` umbrella is intentionally **not** mapped to a write/control mode:
+//! `use` subsumes every action in the ODRL hierarchy, so materializing it as a
+//! single WAC mode would have to pick the widest, violating fail-closed. A caller
+//! that wants `use → Read` should request `odrl:read` explicitly (a `use` permission
+//! in the policy still *grants* a `read` request — `odrl:use` permits any action in
+//! the evaluator — so the bridge maps the **request** action, which is concrete).
+
+use crate::authindex::Mode;
+use crate::{AUTH_GRAPH, AUTH_NS};
+use oxrdf::{NamedNode, Term};
+use sparq_core::dict::Dict;
+use sparq_core::Graph;
+use sparq_policy::{evaluate, Policy, Request};
+
+/// The ODRL namespace prefix (`odrl:`), re-exported for caller convenience.
+pub const ODRL_NS: &str = sparq_policy::ODRL_NS;
+
+/// Map an ODRL **request action** IRI to the WAC/ACP [`Mode`] it materializes as,
+/// or `None` if the action has no faithful single-mode mapping (fail-closed: an
+/// unmapped action never materializes a grant).
+///
+/// See the [module docs](self#action--mode-mapping) for the full table and the
+/// rationale for leaving the `odrl:use` umbrella unmapped.
+///
+/// # Examples
+///
+/// ```
+/// # use sparq_solid::odrl_bridge::action_to_mode;
+/// # use sparq_solid::Mode;
+/// assert_eq!(action_to_mode("http://www.w3.org/ns/odrl/2/read"), Some(Mode::Read));
+/// assert_eq!(action_to_mode("http://www.w3.org/ns/odrl/2/modify"), Some(Mode::Write));
+/// assert_eq!(action_to_mode("http://www.w3.org/ns/odrl/2/append"), Some(Mode::Append));
+/// // the umbrella action and unknown actions are unmapped (no grant)
+/// assert_eq!(action_to_mode("http://www.w3.org/ns/odrl/2/use"), None);
+/// ```
+pub fn action_to_mode(action_iri: &str) -> Option<Mode> {
+    let local = action_iri.strip_prefix(ODRL_NS)?;
+    Some(match local {
+        // Read-family: observe/render the resource's content.
+        "read" | "display" | "present" | "print" | "play" => Mode::Read,
+        // Append: add without removing (the strictly weaker write).
+        "append" => Mode::Append,
+        // Write-family: mutate/replace/remove the resource's content.
+        "modify" | "delete" | "write" => Mode::Write,
+        // `use` (umbrella) and everything else: no faithful single-mode mapping.
+        _ => return None,
+    })
+}
+
+/// The `auth:` view predicate a [`Mode`] grant is materialized under — the SAME
+/// predicate the WAC/ACP rules emit and [`crate::AuthIndex`] reads
+/// (`auth:read|write|append|control`).
+fn mode_predicate(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Read => "read",
+        Mode::Write => "write",
+        Mode::Append => "append",
+        Mode::Control => "control",
+    }
+}
+
+/// What [`materialize_permission`] decided and (on a Permit) materialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeOutcome {
+    /// Whether the ODRL evaluation was a definite Permit AND produced a grant.
+    /// `false` ⇒ nothing was written to the AUTH_GRAPH (fail-closed).
+    pub granted: bool,
+    /// On a grant: the WAC/ACP mode the matched ODRL action mapped to.
+    pub mode: Option<Mode>,
+    /// On a grant: the materialized `principal auth:<mode> graph` triple, as
+    /// `(principal_iri, mode_predicate_iri, graph_iri)`, for audit/justification.
+    pub grant_triple: Option<(String, String, String)>,
+    /// Human-readable reason a grant was NOT materialized (the ODRL decision's
+    /// caveats, an unmapped action, or a missing party/target). Empty on a grant.
+    pub reasons: Vec<String>,
+}
+
+impl BridgeOutcome {
+    fn denied(reasons: Vec<String>) -> BridgeOutcome {
+        BridgeOutcome { granted: false, mode: None, grant_triple: None, reasons }
+    }
+}
+
+/// Evaluate `policy` against `request` and, **iff** the result is a definite Permit
+/// for a mappable action with a concrete party + target, materialize the equivalent
+/// `principal auth:<mode> graph` grant into the dataset's `<urn:sparq:auth>` view —
+/// the triple the existing WAC/ACP enforcement ([`crate::AuthIndex`],
+/// [`crate::PodStore::accessible`]) already honours.
+///
+/// The grant is **appended** to the current auth view: any WAC/ACP grants already
+/// materialized there are preserved (this widens nothing they denied — it only adds
+/// an allow triple, which the `∪ allow ∖ ∪ deny` semantics still subtract any
+/// matching deny from). If no `<urn:sparq:auth>` graph exists yet, one is created
+/// holding just the bridged grant.
+///
+/// # Fail-closed
+///
+/// Returns a [`BridgeOutcome`] with `granted == false` and writes **nothing** when:
+/// the ODRL [`Decision`](sparq_policy::Decision) is a Deny (or any caveat blocked the
+/// permission); the requested action does not [`action_to_mode`]-map; or the request
+/// omits the party (assignee/WebID) or the target graph IRI. The grant principal is
+/// the request's `party` (a concrete WebID) — an anonymous/partyless request never
+/// materializes a grant, since a partyless grant would widen access to everyone.
+///
+/// # Note (PodStore observation)
+///
+/// Like [`crate::materialize_wac`], a direct call on a [`crate::PodStore`]'s `graph`
+/// field does NOT rebuild its session index/cache. Use
+/// [`crate::PodStore::materialize_odrl_permission`], which reindexes afterward.
+///
+/// # Examples
+///
+/// ```
+/// use oxrdf::Term;
+/// use sparq_solid::odrl_bridge::materialize_permission;
+/// use sparq_policy::{parse_policy_str, Request};
+///
+/// // alice MAY read the target graph (a bare matching permission).
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/1> a odrl:Set ; odrl:permission [
+///     odrl:action odrl:read ;
+///     odrl:target <https://pod.ex/notes/n1> ;
+///     odrl:assignee <https://alice.ex/card#me> ] .
+/// "#, "turtle")?;
+///
+/// let mut graph = sparq_core::Graph::load_dataset(
+///     "<https://pod.ex/notes/n1#it> <https://ex.dev/ns#t> \"x\" <https://pod.ex/notes/n1> .",
+///     "nquads")?;
+/// let req = Request::new("http://www.w3.org/ns/odrl/2/read")
+///     .on("https://pod.ex/notes/n1")
+///     .by("https://alice.ex/card#me");
+///
+/// let out = materialize_permission(&mut graph, &pol, &req);
+/// assert!(out.granted);
+/// // a concrete WAC/ACP grant now lives in the auth view
+/// assert!(graph.named.iter().any(|(name, _)| matches!(
+///     name, Term::NamedNode(n) if n.as_str() == sparq_solid::AUTH_GRAPH)));
+/// # Ok::<(), String>(())
+/// ```
+pub fn materialize_permission(
+    graph: &mut Graph,
+    policy: &Policy,
+    request: &Request,
+) -> BridgeOutcome {
+    // 1. ODRL evaluation — the single source of the allow/deny decision.
+    let decision = evaluate(policy, request);
+    if !decision.allow {
+        // Deny / ambiguous → materialize NOTHING (fail-closed).
+        return BridgeOutcome::denied(decision.unmet_constraints);
+    }
+
+    // 2. Action → Mode. An unmapped action (incl. the `use` umbrella) → no grant.
+    let Some(mode) = action_to_mode(&request.action) else {
+        return BridgeOutcome::denied(vec![format!(
+            "ODRL action <{}> has no WAC/ACP mode mapping; no grant materialized",
+            request.action
+        )]);
+    };
+
+    // 3. Concrete party (WebID principal) + target graph required — a partyless or
+    //    targetless grant would widen access (fail-closed).
+    let Some(party) = request.party.as_deref() else {
+        return BridgeOutcome::denied(vec![
+            "ODRL Permit has no concrete party (assignee/WebID); no grant materialized".to_owned(),
+        ]);
+    };
+    let Some(target) = request.target.as_deref() else {
+        return BridgeOutcome::denied(vec![
+            "ODRL Permit has no concrete target graph IRI; no grant materialized".to_owned(),
+        ]);
+    };
+
+    // 4. Materialize `party auth:<mode> target` into the auth view.
+    let pred = format!("{AUTH_NS}{}", mode_predicate(mode));
+    append_grant(graph, party, &pred, target);
+
+    BridgeOutcome {
+        granted: true,
+        mode: Some(mode),
+        grant_triple: Some((party.to_owned(), pred, target.to_owned())),
+        reasons: Vec::new(),
+    }
+}
+
+/// Append a single `subject predicate object` triple to the `<urn:sparq:auth>`
+/// named graph, preserving the triples already there (the WAC/ACP grants). Rebuilds
+/// the auth sub-graph from its existing triples + the new one via [`Graph::from_parts`].
+fn append_grant(graph: &mut Graph, subject: &str, predicate: &str, object: &str) {
+    let s = Term::NamedNode(NamedNode::new_unchecked(subject));
+    let p = Term::NamedNode(NamedNode::new_unchecked(predicate));
+    let o = Term::NamedNode(NamedNode::new_unchecked(object));
+    let auth_name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
+
+    // Collect the existing auth-view triples (if any) as terms, add the grant, then
+    // re-intern into a fresh sub-graph dictionary (matches install_auth_view).
+    let mut terms: Vec<[Term; 3]> = match graph.named.iter().find(|(n, _)| *n == auth_name) {
+        Some((_, sub)) => crate::loader::graph_triples(sub),
+        None => Vec::new(),
+    };
+    // Idempotent: don't duplicate an identical grant triple.
+    let new_triple = [s, p, o];
+    if !terms.contains(&new_triple) {
+        terms.push(new_triple);
+    }
+
+    let mut dict = Dict::new();
+    let ids: Vec<[sparq_core::dict::Id; 3]> = terms
+        .iter()
+        .map(|t| [dict.intern(&t[0]), dict.intern(&t[1]), dict.intern(&t[2])])
+        .collect();
+    let auth = Graph::from_parts(dict, ids);
+
+    if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == auth_name) {
+        slot.1 = auth;
+    } else {
+        graph.named.push((auth_name, auth));
+    }
+}
