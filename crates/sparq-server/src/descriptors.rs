@@ -35,7 +35,7 @@
 //! request-time scan, not amortised — appropriate for an occasionally-polled discovery
 //! endpoint, and another reason it is opt-in rather than always-on.
 
-use oxrdf::Triple;
+use oxrdf::{Term, Triple};
 
 use sparq_core::Graph;
 use sparq_introspect::Introspection;
@@ -205,6 +205,47 @@ pub struct Capabilities {
     pub extension_functions: Vec<String>,
 }
 
+/// [OPUS-4.8] sq-optl: one named graph of the served dataset, for the Service Description's
+/// `sd:namedGraph` enumeration. `name` is the graph's IRI (the value that may be used in a
+/// `FROM NAMED` / `GRAPH <name>` clause — `sd:name`); `triples` is its triple count, surfaced
+/// as a `void:triples` on the graph's `sd:Graph` description so a federation client can size a
+/// per-graph query without a separate count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedGraphDesc {
+    /// The graph's name IRI — `sd:name`, usable in `FROM NAMED` / `GRAPH <name>`.
+    pub name: String,
+    /// The graph's triple count — `void:triples` on its `sd:Graph` description.
+    pub triples: usize,
+}
+
+/// [OPUS-4.8] sq-optl: enumerate the served dataset's named graphs for the Service Description.
+///
+/// Returns one [`NamedGraphDesc`] per named graph whose name is an IRI, SORTED by name so the
+/// emitted SD is deterministic (independent of insertion / storage order). Blank-node and
+/// literal graph names are skipped: `sd:name` ranges over an IRI ("the name by which it may be
+/// referenced in a FROM/FROM NAMED clause", SD §5.5), and a `FROM NAMED` clause can only name an
+/// IRI — a blank-node-named graph is not referenceable that way, so advertising it would be a
+/// fiction. (sparq's RDF-1.2 dataset model can carry a blank-node graph name, but it cannot be
+/// the target of `FROM NAMED`.)
+///
+/// Reuses the existing public [`Graph::for_named_graphs_with_prefix`] enumeration with the
+/// empty prefix (matches every named graph) rather than reaching into private state — the same
+/// read-only snapshot scan the VoID descriptor already performs.
+pub fn named_graph_descriptions(graph: &Graph) -> Vec<NamedGraphDesc> {
+    let mut out = Vec::new();
+    graph.for_named_graphs_with_prefix("", |name, sub| {
+        // Only IRI-named graphs are `FROM NAMED`-referenceable, so only they get an `sd:name`.
+        if let Term::NamedNode(n) = name {
+            out.push(NamedGraphDesc {
+                name: n.as_str().to_string(),
+                triples: sub.len(),
+            });
+        }
+    });
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// Builds the SPARQL Service Description for the endpoint, serialised per `accept`.
 ///
 /// * `service_iri` names the `sd:Service` (conventionally the endpoint URL, e.g.
@@ -216,20 +257,26 @@ pub struct Capabilities {
 ///   one descriptor and the capability profile from the other.
 /// * `caps` are the server's ACTUAL capabilities (see [`Capabilities`]) — every advertised
 ///   feature/language/function reflects something this binary genuinely supports.
+/// * `named_graphs` are the served dataset's named graphs ([`named_graph_descriptions`]) — each
+///   is advertised as an `sd:namedGraph` of the default dataset, an `sd:NamedGraph` with its
+///   `sd:name` (the `FROM NAMED`-referenceable IRI) and an `sd:graph` `sd:Graph` carrying the
+///   per-graph `void:triples` count. An empty slice (no named graphs) emits nothing extra.
 ///
 /// The SD advertises: the endpoint, `sd:Service` typing, the supported query language(s)
 /// (`sd:SPARQL11Query`, plus `sd:SPARQL11Update` when [`Capabilities::update`]), the supported
 /// result + input RDF formats ([`SD_RESULT_FORMATS`] / [`SD_INPUT_FORMATS`]), the federated-query
-/// feature when compiled in, the registered extension functions, and the default dataset/graph
-/// linked to the VoID dataset IRI.
+/// feature when compiled in, the registered extension functions, and the default dataset — its
+/// default graph (linked to the VoID dataset IRI) plus an `sd:namedGraph` enumeration of every
+/// IRI-named graph.
 pub fn service_description(
     service_iri: &str,
     endpoint_iri: &str,
     dataset_iri: &str,
     caps: &Capabilities,
+    named_graphs: &[NamedGraphDesc],
     accept: Option<&str>,
 ) -> Result<Descriptor, String> {
-    let nt = sd_ntriples(service_iri, endpoint_iri, dataset_iri, caps);
+    let nt = sd_ntriples(service_iri, endpoint_iri, dataset_iri, caps, named_graphs);
     let triples = parse_ntriples(&nt)?;
     let fmt = negotiate_descriptor(accept);
     let (content_type, body) = serialise(&triples, fmt);
@@ -244,6 +291,7 @@ fn sd_ntriples(
     endpoint_iri: &str,
     dataset_iri: &str,
     caps: &Capabilities,
+    named_graphs: &[NamedGraphDesc],
 ) -> String {
     use std::fmt::Write as _;
     let sd = |local: &str| format!("{SD_NS}{local}");
@@ -328,6 +376,29 @@ fn sd_ntriples(
     // and add a dcterms:source pointer from the service to the VoID document.
     let _ = writeln!(out, "{g} <{RDF_TYPE}> <{VOID_NS}Dataset> .");
     let _ = writeln!(out, "{svc} <{DCTERMS_NS}source> {} .", iri(dataset_iri));
+
+    // ---- [OPUS-4.8] sq-optl: the dataset's NAMED graphs. `sd:Dataset` is a subclass of
+    // `sd:GraphCollection`, so its named graphs are linked with `sd:namedGraph`, each an
+    // `sd:NamedGraph` carrying its `sd:name` (the `FROM NAMED`-referenceable IRI) and an
+    // `sd:graph` `sd:Graph` description with the per-graph `void:triples` count. `named_graphs`
+    // is pre-sorted + IRI-only (see `named_graph_descriptions`), so the output is deterministic
+    // and every `sd:name` is genuinely referenceable. Fresh blank-node labels per entry
+    // (`_:ngN` / `_:ngGN`) keep the N-Triples well-formed for the re-parse + re-serialise.
+    for (i, ng) in named_graphs.iter().enumerate() {
+        let ng_node = format!("_:ng{i}");
+        let ng_graph = format!("_:ngG{i}");
+        let _ = writeln!(out, "{ds} <{}> {ng_node} .", sd("namedGraph"));
+        let _ = writeln!(out, "{ng_node} <{RDF_TYPE}> <{}> .", sd("NamedGraph"));
+        let _ = writeln!(out, "{ng_node} <{}> {} .", sd("name"), iri(&ng.name));
+        let _ = writeln!(out, "{ng_node} <{}> {ng_graph} .", sd("graph"));
+        let _ = writeln!(out, "{ng_graph} <{RDF_TYPE}> <{}> .", sd("Graph"));
+        // The per-graph triple count, as a void:triples xsd:integer literal.
+        let _ = writeln!(
+            out,
+            "{ng_graph} <{VOID_NS}triples> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+            ng.triples
+        );
+    }
 
     out
 }
@@ -473,6 +544,7 @@ mod tests {
             "http://bad host/sparql",
             "http://host/ds",
             &read_only_caps(),
+            &[],
             Some("application/n-triples"),
         )
         .expect("invalid Host-derived IRI must fall back, not error/500");
@@ -491,6 +563,7 @@ mod tests {
             "http://host/sparql",
             "http://host/.well-known/void#dataset",
             &read_only_caps(),
+            &[],
             Some("application/n-triples"),
         )
         .unwrap();
@@ -521,6 +594,7 @@ mod tests {
             "http://host/sparql",
             "http://host/ds",
             &read_only_caps(),
+            &[],
             Some("application/n-triples"),
         )
         .unwrap();
@@ -538,6 +612,7 @@ mod tests {
                 update: true,
                 ..Capabilities::default()
             },
+            &[],
             Some("application/n-triples"),
         )
         .unwrap();
@@ -557,6 +632,7 @@ mod tests {
             "http://host/sparql",
             "http://host/ds",
             &read_only_caps(),
+            &[],
             Some("application/n-triples"),
         )
         .unwrap();
@@ -582,6 +658,7 @@ mod tests {
                     "http://www.opengis.net/def/function/geosparql/distance".to_string()
                 ],
             },
+            &[],
             Some("application/n-triples"),
         )
         .unwrap();
@@ -624,6 +701,18 @@ mod tests {
                     "http://www.opengis.net/def/function/geosparql/buffer".to_string(),
                 ],
             },
+            // [OPUS-4.8] sq-optl: include named graphs so the namedGraph triple shape
+            // (blank-node NamedGraph + Graph + void:triples literal) is exercised in Turtle too.
+            &[
+                NamedGraphDesc {
+                    name: "http://host/g/people".to_string(),
+                    triples: 3,
+                },
+                NamedGraphDesc {
+                    name: "http://host/g/orgs".to_string(),
+                    triples: 0,
+                },
+            ],
             Some("text/turtle"),
         )
         .unwrap();
@@ -634,5 +723,117 @@ mod tests {
             n += 1;
         }
         assert!(n >= 3, "SD should have several triples, got {n}");
+    }
+
+    /// [OPUS-4.8] sq-optl: a graph with two IRI-named graphs, for the enumeration tests. Uses
+    /// `load_dataset` (NOT `load_str`) — only the dataset loader preserves named graphs as
+    /// separate sub-graphs; `load_str` collapses every quad into the default graph.
+    fn graph_with_named() -> Graph {
+        Graph::load_dataset(
+            "@prefix ex: <http://ex/> .\n\
+             ex:a a ex:Person .\n\
+             ex:b a ex:Person .\n\
+             ex:beta { ex:x ex:p ex:y . ex:y ex:p ex:z . }\n\
+             ex:alpha { ex:s ex:p ex:o . }\n",
+            "trig",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn named_graph_descriptions_are_sorted_iri_only_with_counts() {
+        let descs = named_graph_descriptions(&graph_with_named());
+        // Two IRI-named graphs, returned SORTED by name (alpha before beta) regardless of the
+        // TriG document order (beta is written first above).
+        assert_eq!(
+            descs,
+            vec![
+                NamedGraphDesc {
+                    name: "http://ex/alpha".to_string(),
+                    triples: 1,
+                },
+                NamedGraphDesc {
+                    name: "http://ex/beta".to_string(),
+                    triples: 2,
+                },
+            ],
+            "named graphs must be IRI-only, sorted, with per-graph triple counts"
+        );
+    }
+
+    #[test]
+    fn sd_enumerates_named_graphs() {
+        // The default dataset must advertise each named graph as an sd:namedGraph →
+        // sd:NamedGraph with its sd:name (the FROM NAMED IRI), an sd:graph sd:Graph, and the
+        // per-graph void:triples count.
+        let descs = named_graph_descriptions(&graph_with_named());
+        let d = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &read_only_caps(),
+            &descs,
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        let b = &d.body;
+        let sd = |l: &str| format!("<http://www.w3.org/ns/sparql-service-description#{l}>");
+        // The dataset links each named graph via sd:namedGraph, typed sd:NamedGraph.
+        assert!(
+            b.contains(&sd("namedGraph")),
+            "must link sd:namedGraph: {b}"
+        );
+        assert!(
+            b.contains(&sd("NamedGraph")),
+            "must type sd:NamedGraph: {b}"
+        );
+        // Each carries an sd:name naming the real graph IRI (FROM NAMED-referenceable).
+        assert!(b.contains(&sd("name")), "must carry sd:name: {b}");
+        assert!(
+            b.contains("<http://ex/alpha>"),
+            "must name the graph IRI: {b}"
+        );
+        assert!(
+            b.contains("<http://ex/beta>"),
+            "must name the graph IRI: {b}"
+        );
+        // Each links an sd:graph sd:Graph carrying a void:triples count (alpha=1, beta=2).
+        assert!(b.contains(&sd("graph")), "must link sd:graph: {b}");
+        assert!(
+            b.contains("<http://rdfs.org/ns/void#triples>"),
+            "per-graph void:triples: {b}"
+        );
+        assert!(
+            b.contains("\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>")
+                && b.contains("\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>"),
+            "per-graph triple counts (1 and 2): {b}"
+        );
+        // Re-parses as valid N-Triples (the blank-node fan-out is well-formed).
+        let mut n = 0;
+        for r in oxttl::NTriplesParser::new().for_slice(b.as_bytes()) {
+            r.expect("SD with named graphs must be valid N-Triples");
+            n += 1;
+        }
+        assert!(n >= 12, "SD+named-graphs should have many triples, got {n}");
+    }
+
+    #[test]
+    fn sd_without_named_graphs_emits_no_named_graph_triples() {
+        // A dataset with no named graphs (the historical default-only case) must emit NO
+        // sd:namedGraph / sd:NamedGraph triples — a pure no-op relative to the prior shape.
+        let d = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &read_only_caps(),
+            &[],
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        assert!(
+            !d.body.contains("#namedGraph") && !d.body.contains("#NamedGraph"),
+            "no named graphs ⇒ no sd:namedGraph/NamedGraph triples: {}",
+            d.body
+        );
     }
 }

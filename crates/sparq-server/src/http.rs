@@ -1771,12 +1771,18 @@ fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option
     let dataset_iri = format!("{base}/.well-known/void#dataset");
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
     let caps = service_capabilities(state.config());
+    // [OPUS-4.8] sq-optl: enumerate the served dataset's named graphs so the SD advertises each
+    // as an sd:namedGraph (not just the default graph). Read off the same pinned snapshot the
+    // VoID descriptor uses, so the two descriptors describe one consistent dataset state.
+    let pin = state.current();
+    let named_graphs = crate::descriptors::named_graph_descriptions(pin.snapshot());
     Some(
         match crate::descriptors::service_description(
             &endpoint_iri,
             &endpoint_iri,
             &dataset_iri,
             &caps,
+            &named_graphs,
             accept,
         ) {
             Ok(d) => text_response(StatusCode::OK, d.content_type, d.body, false),
