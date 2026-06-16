@@ -95,6 +95,47 @@ fn trailing_keyword_order_direction() {
 }
 
 #[test]
+fn order_by_computed_expression_in_over() {
+    // sq-c1jv: an OVER ORDER BY key that is a computed SPARQL EXPRESSION rather
+    // than a projected variable. `(?sales * -1)` ascending == `?sales` descending,
+    // so ROW_NUMBER over it reproduces the descending-by-sales ranking. The helper
+    // binding the expression must NOT leak into the output columns.
+    let q = "PREFIX ex: <http://ex/> \
+        SELECT ?emp \
+            (ROW_NUMBER() OVER (PARTITION BY ?dept ORDER BY (?sales * -1)) AS ?rn) \
+        WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+    let r = query_over(&g(), q).unwrap();
+    // Output is exactly the named columns — the expression helper is dropped.
+    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "rn"]);
+    // eng partition, sales*-1 ascending == sales descending: a=30,b=30 tie (stable
+    // by input order a<b), then c=20 → row numbers a=1, b=2, c=3.
+    assert_eq!(for_emp(&r, "a", 1), 1);
+    assert_eq!(for_emp(&r, "b", 1), 2);
+    assert_eq!(for_emp(&r, "c", 1), 3);
+    // sales partition, sales*-1 ascending == sales descending: e=40, d=10 → e=1, d=2.
+    assert_eq!(for_emp(&r, "e", 1), 1);
+    assert_eq!(for_emp(&r, "d", 1), 2);
+}
+
+#[test]
+fn order_by_computed_expression_desc() {
+    // The DESC()-wrapped expression form: `DESC(?sales + 0)` orders descending by
+    // the computed key, so RANK gives the largest-sales row rank 1.
+    let q = "PREFIX ex: <http://ex/> \
+        SELECT ?emp \
+            (RANK() OVER (ORDER BY DESC(?sales + 0)) AS ?r) \
+        WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+    let r = query_over(&g(), q).unwrap();
+    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "r"]);
+    // Single partition, ?sales+0 descending: e=40→1, a=30,b=30→2 (tie), c=20→4, d=10→5.
+    assert_eq!(for_emp(&r, "e", 1), 1);
+    assert_eq!(for_emp(&r, "a", 1), 2);
+    assert_eq!(for_emp(&r, "b", 1), 2);
+    assert_eq!(for_emp(&r, "c", 1), 4);
+    assert_eq!(for_emp(&r, "d", 1), 5);
+}
+
+#[test]
 fn ordinary_query_passes_through_unchanged() {
     // No OVER clause → identical to sparq_engine::query.
     let q = "PREFIX ex: <http://ex/> SELECT ?emp WHERE { ?emp ex:dept ?d }";

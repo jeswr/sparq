@@ -45,15 +45,19 @@
 //! ## Covered vs deferred
 //!
 //! * **Covered:** `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `PARTITION BY` over
-//!   one or more variables, `ORDER BY` over one or more variables (ASC/DESC, both
-//!   `DESC(?v)` and `?v DESC` spellings). Multiple window columns in one SELECT.
-//!   Other (non-window) projection items — plain variables and `(expr AS ?v)`
-//!   aliases — pass through to the ordinary engine unchanged.
+//!   one or more variables, `ORDER BY` over one or more keys (ASC/DESC, both
+//!   `DESC(?v)` and `?v DESC` spellings). An `ORDER BY` key may be a **computed
+//!   SPARQL expression** (sq-c1jv) — e.g. `ORDER BY (?a + ?b)`, `DESC(?sales + 0)`,
+//!   or `STRLEN(?s)` — not just a projected variable; the rewriter binds each such
+//!   expression to a fresh helper var via `(<expr> AS ?__win_orderkeyN)` in the
+//!   inner SELECT, orders on that helper, and drops it from the output. Multiple
+//!   window columns in one SELECT. Other (non-window) projection items — plain
+//!   variables and `(expr AS ?v)` aliases — pass through to the engine unchanged.
 //! * **Deferred (beaded):** windowed AGGREGATES inline (`SUM(?x) OVER (…)` etc.),
 //!   explicit window frames (`ROWS BETWEEN …`), `LAG`/`LEAD`/`NTILE`, a named
-//!   `WINDOW` clause, and `OVER` over an order key that is a computed expression
-//!   rather than a projected variable. Those remain available via the
-//!   programmatic [`crate::window`] API.
+//!   `WINDOW` clause, and `PARTITION BY` over a computed expression (only ORDER BY
+//!   keys may be expressions). Those remain available via the programmatic
+//!   [`crate::window`] API.
 
 use oxrdf::Variable;
 use sparq_core::Graph;
@@ -62,18 +66,39 @@ use crate::window::{apply_window, SortKey, WindowFunction, WindowSpec};
 use crate::{QueryBudget, QueryResult};
 
 /// One parsed inline window item lifted out of a SELECT projection: the function,
-/// its `PARTITION BY` / `ORDER BY` variables, and the output alias.
+/// its `PARTITION BY` / `ORDER BY` keys, and the output alias.
 #[derive(Debug, Clone)]
 struct WindowItem {
     func: RankFunc,
     partition_by: Vec<String>,
-    order_by: Vec<(String, bool)>, // (var, descending)
+    order_by: Vec<OrderKey>,
     out: String,
 }
 
+/// One `ORDER BY` sort key inside an `OVER ( … )` spec: either a bare projected
+/// variable or a computed SPARQL expression (sq-c1jv). [OPUS-4.8] A `Sort::Expr` is bound to
+/// a fresh helper var via a `(<expr> AS ?__win_orderkeyN)` projection item in the
+/// rewritten inner SELECT, then the window orders on that helper var and the
+/// helper is dropped from the final output. A `Sort::Var` is ordered on directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrderKey {
+    sort: Sort,
+    /// `true` = descending (`DESC`), `false` = ascending (`ASC`, the default).
+    descending: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Sort {
+    /// A bare projected variable name (no leading `?`/`$`), ordered on directly.
+    Var(String),
+    /// A computed SPARQL expression (the source text inside the key, e.g.
+    /// `?a + ?b`), bound to a fresh helper var in the rewritten inner SELECT.
+    Expr(String),
+}
+
 /// A parsed `OVER ( … )` spec: the `PARTITION BY` variable names and the
-/// `ORDER BY` keys as `(variable, descending)` pairs.
-type OverSpec = (Vec<String>, Vec<(String, bool)>);
+/// `ORDER BY` sort keys.
+type OverSpec = (Vec<String>, Vec<OrderKey>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RankFunc {
@@ -128,7 +153,16 @@ pub fn query_over_with_budget(
             order_by: item
                 .order_by
                 .iter()
-                .map(|(v, desc)| Ok(SortKey { var: var(v)?, descending: *desc }))
+                .map(|key| {
+                    // After `extract_windows`, every ORDER BY key resolves to a
+                    // variable (a plain var, or the helper bound to a computed expr).
+                    let Sort::Var(v) = &key.sort else {
+                        return Err(
+                            "inline OVER: internal error — unresolved ORDER BY expression".into(),
+                        );
+                    };
+                    Ok(SortKey { var: var(v)?, descending: key.descending })
+                })
                 .collect::<Result<_, String>>()?,
             function: item.func.to_window_function(),
             new_var: var(&item.out)?,
@@ -202,6 +236,12 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
     let mut windows = Vec::new();
     let mut output_vars = Vec::new();
     let mut helper_vars: Vec<String> = Vec::new();
+    // Inner-SELECT `(<expr> AS ?helper)` bindings created for computed ORDER BY
+    // keys (sq-c1jv), in allocation order. Held separately from `helper_vars`
+    // (which are plain `?var` projections) because they must be emitted into the
+    // inner projection even under `SELECT *`.
+    let mut expr_bindings: Vec<String> = Vec::new();
+    let mut next_expr_key = 0usize;
     let mut rewritten_items: Vec<String> = Vec::new();
     let mut select_star = false;
 
@@ -211,12 +251,31 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
             select_star = true;
             continue;
         }
-        if let Some(win) = parse_window_item(t)? {
-            // The window's input columns (partition/order vars) must survive the
-            // inner SELECT so the post-pass can read them; project them through.
-            for v in win.partition_by.iter().chain(win.order_by.iter().map(|(v, _)| v)) {
+        if let Some(mut win) = parse_window_item(t)? {
+            // PARTITION BY vars must survive the inner SELECT so the post-pass can
+            // read them; project them through.
+            for v in &win.partition_by {
                 if !helper_vars.contains(v) {
                     helper_vars.push(v.clone());
+                }
+            }
+            // Resolve each ORDER BY key to a concrete variable the post-pass can
+            // order on: a plain var is projected through; a computed expression is
+            // bound to a fresh helper var via `(<expr> AS ?__win_orderkeyN)` in the
+            // inner SELECT, then the key orders on that helper (dropped from output).
+            for key in &mut win.order_by {
+                match &key.sort {
+                    Sort::Var(v) => {
+                        if !helper_vars.contains(v) {
+                            helper_vars.push(v.clone());
+                        }
+                    }
+                    Sort::Expr(expr) => {
+                        let helper = format!("__win_orderkey{next_expr_key}");
+                        next_expr_key += 1;
+                        expr_bindings.push(format!("({expr} AS ?{helper})"));
+                        key.sort = Sort::Var(helper);
+                    }
                 }
             }
             output_vars.push(win.out.clone());
@@ -235,10 +294,12 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
         return Ok(None);
     }
 
-    // Build the inner projection: every non-window item, plus any helper var a
-    // window needs that is not already projected. With `SELECT *` the inner query
-    // keeps `*` (all in-scope vars), which already covers the helpers.
+    // Build the inner projection: every non-window item, the `(<expr> AS ?h)`
+    // bindings for computed ORDER BY keys, plus any plain helper var a window needs
+    // that is not already projected. With `SELECT *` the inner query keeps `*` (all
+    // in-scope vars, covering the plain helpers) but STILL needs the expr bindings.
     let mut inner_proj = rewritten_items.clone();
+    inner_proj.extend(expr_bindings.iter().cloned());
     if select_star {
         inner_proj.insert(0, "*".to_string());
     } else {
@@ -384,8 +445,13 @@ fn parse_var_list(s: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Parses an ORDER BY list: `?v`, `ASC(?v)`, `DESC(?v)`, or `?v ASC`/`?v DESC`.
-fn parse_order_list(s: &str) -> Result<Vec<(String, bool)>, String> {
+/// Parses an ORDER BY list. Each comma-separated key is one sort key in one of:
+/// `?v`, `ASC(?v)`, `DESC(?v)`, `?v ASC`/`?v DESC`, OR — sq-c1jv — a computed
+/// SPARQL expression in any of those positions, e.g. `(?a + ?b)`, `DESC(?a + ?b)`,
+/// `(?a + ?b) DESC`. A bare-var key yields [`Sort::Var`]; anything else (including
+/// a `( … )`-wrapped single var) yields [`Sort::Expr`] so the rewriter binds it to
+/// a helper var.
+fn parse_order_list(s: &str) -> Result<Vec<OrderKey>, String> {
     // Tokenise on commas first; each comma-separated key is one sort key.
     let mut keys = Vec::new();
     for raw in split_top_level_commas(s) {
@@ -398,46 +464,77 @@ fn parse_order_list(s: &str) -> Result<Vec<(String, bool)>, String> {
     Ok(keys)
 }
 
-fn parse_one_order_key(key: &str) -> Result<(String, bool), String> {
+fn parse_one_order_key(key: &str) -> Result<OrderKey, String> {
     let up = key.to_ascii_uppercase();
-    // DESC( ?v ) / ASC( ?v )
-    for (kw, desc) in [("DESC", true), ("ASC", false)] {
+    // Leading direction keyword: `DESC( … )` / `ASC( … )`. The `( … )` payload is a
+    // single var OR an arbitrary expression.
+    for (kw, descending) in [("DESC", true), ("ASC", false)] {
         if up.starts_with(kw) {
             let after = key[kw.len()..].trim_start();
             if let Some(inner) = strip_outer_parens(after) {
-                let v = parse_single_var(inner.trim())?;
-                return Ok((v, desc));
+                return Ok(OrderKey { sort: classify_sort(inner.trim())?, descending });
             }
-            // `?v ASC` / `?v DESC` trailing-keyword form is handled below; a bare
-            // `ASC`/`DESC` with no parens and no following token is malformed.
+            // A `?v ASC` / `?v DESC` trailing-keyword form whose VAR happens to
+            // start with the letters `asc`/`desc` is handled by the trailing-keyword
+            // branch below; fall through.
         }
     }
-    // Trailing-keyword form: `?v` | `?v ASC` | `?v DESC`.
-    let toks: Vec<&str> = key.split_whitespace().collect();
-    match toks.as_slice() {
-        [v] => Ok((parse_single_var(v)?, false)),
-        [v, dir] => {
-            let d = dir.to_ascii_uppercase();
-            let desc = match d.as_str() {
-                "DESC" => true,
-                "ASC" => false,
-                _ => return Err(format!("inline OVER: expected ASC/DESC after order var, got {dir:?}")),
-            };
-            Ok((parse_single_var(v)?, desc))
-        }
-        _ => Err(format!("inline OVER: malformed ORDER BY key {key:?}")),
+    // Trailing-keyword form: `<key>` | `<key> ASC` | `<key> DESC`, where `<key>` is
+    // a bare var or a parenthesised expression (which may itself contain spaces).
+    if let Some((body, descending)) = split_trailing_direction(key)? {
+        return Ok(OrderKey { sort: classify_sort(body.trim())?, descending });
     }
+    // No direction keyword: the whole key is the sort body, ascending.
+    Ok(OrderKey { sort: classify_sort(key.trim())?, descending: false })
 }
 
-fn parse_single_var(tok: &str) -> Result<String, String> {
-    let name = tok
-        .strip_prefix('?')
-        .or_else(|| tok.strip_prefix('$'))
-        .ok_or_else(|| format!("inline OVER: expected a ?variable, got {tok:?}"))?;
-    if name.is_empty() || !name.chars().all(is_varname_char) {
-        return Err(format!("inline OVER: invalid variable {tok:?}"));
+/// Splits an optional trailing ` ASC` / ` DESC` direction keyword off a sort key,
+/// returning `Some((body, descending))` when one is present (so `?v DESC` → `("?v",
+/// true)` and `(?a + ?b) ASC` → `("(?a + ?b)", false)`), or `None` when the key
+/// carries no trailing direction. A direction keyword is only recognised at the
+/// very end and outside any parentheses, so `(?a + ?b)` is left intact.
+fn split_trailing_direction(key: &str) -> Result<Option<(String, bool)>, String> {
+    let trimmed = key.trim_end();
+    for (kw, descending) in [("DESC", true), ("ASC", false)] {
+        // Match a trailing whole-word keyword: preceded by whitespace, at end.
+        if let Some(body) = trimmed
+            .get(..trimmed.len().saturating_sub(kw.len()))
+            .filter(|_| trimmed.len() > kw.len())
+            .filter(|_| trimmed[trimmed.len() - kw.len()..].eq_ignore_ascii_case(kw))
+        {
+            let last = body.chars().next_back();
+            if last.map(|c| c.is_whitespace()).unwrap_or(false) {
+                let body = body.trim();
+                if body.is_empty() {
+                    return Err(format!("inline OVER: bare {kw} is not an ORDER BY key"));
+                }
+                return Ok(Some((body.to_string(), descending)));
+            }
+        }
     }
-    Ok(name.to_string())
+    Ok(None)
+}
+
+/// Classifies a direction-stripped sort body: a single bare `?var` is a
+/// [`Sort::Var`]; any other (non-empty) text is a computed [`Sort::Expr`] (sq-c1jv).
+fn classify_sort(body: &str) -> Result<Sort, String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("inline OVER: empty ORDER BY key".into());
+    }
+    // A bare `?v` / `$v` with a valid variable name is a plain variable key.
+    if let Some(name) = body.strip_prefix('?').or_else(|| body.strip_prefix('$')) {
+        if !name.is_empty() && name.chars().all(is_varname_char) {
+            return Ok(Sort::Var(name.to_string()));
+        }
+    }
+    // Otherwise it is a computed expression. Strip ONE redundant outer paren layer
+    // (`(?a + ?b)` → `?a + ?b`) so the rewriter can re-wrap it as `(<expr> AS ?h)`.
+    let expr = strip_outer_parens(body).unwrap_or(body).trim();
+    if expr.is_empty() {
+        return Err("inline OVER: empty ORDER BY expression".into());
+    }
+    Ok(Sort::Expr(expr.to_string()))
 }
 
 // ---- low-level lexical helpers ----------------------------------------------
@@ -697,6 +794,13 @@ mod tests {
         assert!(extract_windows("SELECT ?over WHERE { ?over ?p ?o }").unwrap().is_none());
     }
 
+    fn var_key(name: &str, descending: bool) -> OrderKey {
+        OrderKey { sort: Sort::Var(name.to_string()), descending }
+    }
+    fn expr_key(expr: &str, descending: bool) -> OrderKey {
+        OrderKey { sort: Sort::Expr(expr.to_string()), descending }
+    }
+
     #[test]
     fn parses_row_number_item() {
         let w = parse_window_item("(ROW_NUMBER() OVER (PARTITION BY ?dept ORDER BY DESC(?sales)) AS ?rn)")
@@ -704,7 +808,7 @@ mod tests {
             .unwrap();
         assert_eq!(w.func, RankFunc::RowNumber);
         assert_eq!(w.partition_by, vec!["dept".to_string()]);
-        assert_eq!(w.order_by, vec![("sales".to_string(), true)]);
+        assert_eq!(w.order_by, vec![var_key("sales", true)]);
         assert_eq!(w.out, "rn");
     }
 
@@ -714,7 +818,81 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.func, RankFunc::Rank);
-        assert_eq!(w.order_by, vec![("sales".to_string(), true)]);
+        assert_eq!(w.order_by, vec![var_key("sales", true)]);
+    }
+
+    #[test]
+    fn parses_computed_expression_order_key() {
+        // sq-c1jv: a parenthesised computed expression as an ORDER BY key. The
+        // redundant outer parens are stripped; the key is an Expr (ascending).
+        let w = parse_window_item("(ROW_NUMBER() OVER (ORDER BY (?a + ?b)) AS ?rn)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.order_by, vec![expr_key("?a + ?b", false)]);
+
+        // `DESC( <expr> )` → an Expr key, descending.
+        let d = parse_window_item("(RANK() OVER (ORDER BY DESC(?sales + 0)) AS ?r)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.order_by, vec![expr_key("?sales + 0", true)]);
+
+        // Trailing-keyword form on a parenthesised expression: `(?a * 2) DESC`.
+        let t = parse_window_item("(RANK() OVER (ORDER BY (?a * 2) DESC) AS ?r)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.order_by, vec![expr_key("?a * 2", true)]);
+
+        // A function-call expression key (not a direction keyword): `STRLEN(?s)`.
+        let f = parse_window_item("(ROW_NUMBER() OVER (ORDER BY STRLEN(?s)) AS ?rn)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(f.order_by, vec![expr_key("STRLEN(?s)", false)]);
+    }
+
+    #[test]
+    fn direction_keyword_detection_edge_cases() {
+        // A variable literally NAMED `desc` is a plain var key, not a direction.
+        let w = parse_window_item("(ROW_NUMBER() OVER (ORDER BY ?desc) AS ?rn)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.order_by, vec![var_key("desc", false)]);
+        // A function call ending in `)` is an expression key, not a trailing keyword.
+        let f = parse_window_item("(RANK() OVER (ORDER BY STRLEN(?desc)) AS ?r)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(f.order_by, vec![expr_key("STRLEN(?desc)", false)]);
+    }
+
+    #[test]
+    fn mixed_var_and_expression_order_keys() {
+        // A var key and an expr key in one ORDER BY list, with directions.
+        let w = parse_window_item(
+            "(RANK() OVER (ORDER BY ?dept, DESC(?a + ?b)) AS ?r)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(w.order_by, vec![var_key("dept", false), expr_key("?a + ?b", true)]);
+    }
+
+    #[test]
+    fn computed_expr_key_rewrites_to_helper_binding() {
+        // The rewriter binds a computed ORDER BY key to a fresh helper var via an
+        // `(<expr> AS ?__win_orderkeyN)` item in the inner SELECT, and the post-pass
+        // window orders on that helper (which is NOT in the final output).
+        let plan = extract_windows(
+            "PREFIX ex: <http://ex/> SELECT ?emp (ROW_NUMBER() OVER (ORDER BY (?sales * -1)) AS ?rn) WHERE { ?emp ex:sales ?sales }",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            plan.rewritten.contains("(?sales * -1 AS ?__win_orderkey0)"),
+            "inner SELECT must bind the expr to a helper: {}",
+            plan.rewritten
+        );
+        // The window now orders on the helper var, not the raw expression.
+        assert_eq!(plan.windows[0].order_by, vec![var_key("__win_orderkey0", false)]);
+        // The helper is not a user-named output column.
+        assert_eq!(plan.output_vars, vec!["emp".to_string(), "rn".to_string()]);
     }
 
     #[test]
