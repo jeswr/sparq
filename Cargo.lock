@@ -3353,6 +3353,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-fedclient"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "spargebra",
+ "sparq-engine",
+ "sparq-fedplan",
+]
+
+[[package]]
 name = "sparq-fedplan"
 version = "0.1.0"
 dependencies = [

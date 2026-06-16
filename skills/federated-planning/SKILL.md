@@ -202,6 +202,27 @@ never mid-operator. Proven by `adaptive::tests::replan_result_equals_static`
 order yet yields the identical multiset to the static plan — plus an exhaustive
 all-permutations order-independence test.
 
+## The federation CLIENT that consumes this planner (`sparq-fedclient`, sq-dnko)
+
+`sparq-fedplan` is the planning *brain* with **no consumer** — it plans, but nothing
+fetches descriptors or issues a query. The consumer is a separate opt-in crate,
+**`sparq-fedclient`** (epic **sq-dnko** / sq-3183, design `research/federation-client-design.md`):
+the streaming federation **client** that discovers each remote source's capability, lowers
+a query BGP into this crate's `Bgp`, calls `select_sources` + `plan_bgp`, interprets the
+resulting `JoinTree` into physical operators (Bind → VALUES bind-join, Hash/Streaming →
+the `StreamJoin` above, Local → `sparq-engine` eval), and streams results back. It REUSES
+this planner and the engine's `service` SRJ transport + SSRF guard; the dependency arrow
+points one-way *into* the engine.
+
+As of Phase 0 (`sq-s1uy`) `sparq-fedclient` is a **compiling skeleton only** — the public
+module layout (`source` / `discovery` / `planner` / `pushdown` / `operators` / `stream`)
+behind a default-OFF `fedclient` feature, plus the load-bearing dependency-boundary proof
+(`sparq-core`/`sparq-engine` have no edge to it, enforced by
+`scripts/fedclient-boundary-guard.sh` + `crates/sparq-fedclient/tests/boundary.rs`). There
+is **no federation logic yet**; Phases 1-7 (discovery, the source adapters, the planner
+bridge, capability-aware pushdown, the streaming operators, brTPF/TPF, adaptive re-planning)
+are future beads. See `crates/sparq-fedclient/README.md`.
+
 ## Deferred (NOT here)
 
 **Mid-*operator* adaptivity** (tearing down a join while it is producing output and resuming
