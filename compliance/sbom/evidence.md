@@ -86,6 +86,8 @@ sq-toze.28 — `cargo cyclonedx … --spec-version 1.5`), matching the VEX (`1.5
 > the normalizer is idempotent on the 1.5 output. The VEX (`supply-chain/vex.cdx.json`, already 1.5) is
 > unchanged, so SBOM and VEX now share one spec version.
 
+<!-- separate adjacent blockquotes (markdownlint MD028) -->
+
 > **Root/component refs are normalized — abs-path leak RESOLVED (F-6/GS-6, bead sq-toze.30, [OPUS-4.8]):**
 > cargo-cyclonedx 0.5.9 *raw* output stamps the absolute build dir into every workspace/path-dependency
 > `bom-ref` (`path+file:///<abs-path>/crates/sparq-server#0.1.0`) and `purl`
@@ -105,6 +107,8 @@ sq-toze.28 — `cargo cyclonedx … --spec-version 1.5`), matching the VEX (`1.5
 > all dependency refs resolve (167/175 respectively), idempotent. *Residual:* the abs-path leak is fixed
 > only in the **post-processed publication path**; raw `cargo cyclonedx` still emits path refs (upstream
 > behaviour, not changed here).
+
+<!-- separate adjacent blockquotes (markdownlint MD028) -->
 
 > The probe files (`**/*.cdx.json`) are **not committed** — `scripts/gen-sbom-vex.sh#L47` and the
 > probe both delete them to keep the worktree clean. They are regenerable with the command above.
@@ -151,3 +155,62 @@ correspond to SIG-1/SIG-2, DEP-5, and SIG-3 respectively.
 > release and re-running the commands above against its assets. The control rows in
 > `controls/sbom.md` are labelled **"Audit-ready (config-verified; operating-verification pending
 > first release)"** accordingly.
+
+## 6. purl-canonicality assertion (GS-6/GS-7 backstop — [OPUS-4.8], sq-tmyw)
+
+The GS-6/GS-7 normalizer (`scripts/sbom-normalize.jq`) is hand-written against the exact purl
+decoration `cargo-cyclonedx 0.5.9` emits (`?download_url=file://…`, `#src/…`). A future tool bump
+could re-introduce a *different* decoration the pattern misses, silently re-leaking a host path or a
+non-canonical purl into the published SBOM. `scripts/check-sbom-purl-canonical.py` is the **backstop**:
+it asserts every purl in a normalized SBOM matches `^pkg:cargo/[^?#]+@[^?#]+$` (no `?query`, no
+`#fragment`), reporting any offenders.
+
+```sh
+# regenerate + normalize (the exact publication transform), then assert canonical purls
+cargo cyclonedx --all --format json --spec-version 1.5
+for f in $(find . -name '*.cdx.json'); do jq -f scripts/sbom-normalize.jq "$f" > "$f.norm" && mv "$f.norm" "$f"; done
+python3 scripts/check-sbom-purl-canonical.py $(find . -name '*.cdx.json')
+python3 scripts/tests/test_sbom_purl_canonical.py   # hermetic self-test (9 cases incl. live workspace SBOM)
+```
+
+Recorded this branch (2026-06-16): **PASS** — all purls canonical (`sparq-server` 166 components /
+169 purls, `sparq-cli` 174 components, every member + build-target + root purl
+`pkg:cargo/<name>@<version>`; the per-member SBOMs likewise). Negative coverage (self-test): a
+`?download_url=file://…` qualifier, a `#src/main.rs` subpath, a *hypothetical future*
+`?repository_url=…` qualifier, a non-cargo purl, and an empty purl-set each FAIL the check. Wired as
+the GATING job `.github/workflows/supply-chain.yml#sbom-purl-canonical` (job name
+`SBOM purl-canonicality assertion (GS-6/GS-7) — GATING`; no `advisory`/`informational` whole word, so
+ci-summary gates it), which runs the self-test then the live regenerate→normalize→assert.
+
+## 7. JS / npm SBOM — the published WASM client (GS-3 — [OPUS-4.8], sq-toze.27)
+
+The published npm package `@jeswr/sparq` (the WASM client, `js/`) now has a dedicated CycloneDX 1.5
+SBOM, closing the un-SBOM'd JS supply-chain surface.
+
+**Scope decision (honest):**
+
+| Workspace | npm name | Shipped? | SBOM'd? | Why |
+|---|---|---|---|---|
+| `js/` | `@jeswr/sparq` | **published to npm** | **YES** | the consumable WASM client; its lockfile tree is a real supply-chain surface |
+| `site/` | `sparq-site` (`"private": true`) | never (GitHub-Pages demo) | **NO** (intentional) | not a shipped artifact; dev/showcase tree (Next.js/React/bb.js) covered by npm Dependabot |
+
+```sh
+scripts/gen-js-sbom.sh         # writes sbom/sparq-js-<ver>.sbom.cdx.json + sbom/sparq-js-dev-<ver>.sbom.cdx.json
+```
+
+Two views are shipped (both CycloneDX **1.5**, matching the Rust SBOM + VEX; `--package-lock-only`, so
+the tree is read deterministically from the committed `js/package-lock.json` with no network install):
+
+| Artifact | Tree | Components (this branch) | Audience |
+|---|---|---|---|
+| `sparq-js-<ver>.sbom.cdx.json` | runtime (`--omit dev`) | **1** — `pkg:npm/fzstd@0.1.1` | what a CONSUMER of `@jeswr/sparq` installs (matches the published-tarball dep surface) |
+| `sparq-js-dev-<ver>.sbom.cdx.json` | full build tree | **5** — `fzstd`, `@rdfjs/types`, `@types/node`, `typescript`, `undici-types` | BUILD-time surface (SSDF parity with the Rust full-tree SBOM) |
+
+**Validity:** both VALIDATED against the official CycloneDX 1.5 JSON schema — cyclonedx-npm's built-in
+`--validate` (default on) plus an independent `jsonschema` check against
+`CycloneDX/specification` `bom-1.5.schema.json` (+ referenced `spdx`/`jsf` schemas): **VALID**, root
+component `pkg:npm/%40jeswr/sparq@0.1.0`, all component purls `pkg:npm/…`. Wired as the per-PR GATING
+job `.github/workflows/supply-chain.yml#js-sbom` (uploads `sbom-js-cyclonedx`) + the per-release step
+`.github/workflows/release.yml#sbom` "Generate per-release JS/npm SBOM" (the `sbom/*.sbom.cdx.json`
+attest + attach + checksum globs already cover the JS SBOMs, so they are SLSA-attested and on the
+Release alongside the Rust SBOMs).
