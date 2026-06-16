@@ -22,6 +22,7 @@ fn main() {
         Some("ingest") => cmd_ingest(&args),
         Some("save") => cmd_save(&args),
         Some("recompress") => cmd_recompress(&args),
+        Some("compact") => cmd_compact(&args),
         Some("build") => cmd_build(&args),
         Some("query-mmap") => cmd_query_mmap(&args),
         Some("probe-compress") => cmd_probe_compress(&args),
@@ -35,7 +36,7 @@ fn main() {
         #[cfg(feature = "serialize-rdf")]
         Some("dump") => cmd_dump(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
         }
     }
@@ -341,6 +342,59 @@ fn cmd_recompress(args: &[String]) {
         std::process::exit(1);
     });
     eprintln!("recompressed {} triples {src} -> {dst} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
+}
+
+/// [OPUS-4.8] (sq-x32t) `compact <persist-dir>` — WAL COMPACTION / VACUUM for ERASURE-
+/// COMPLETENESS (epic sq-toze.33). An OFFLINE operator command: stop the server, run this on its
+/// `--persist <dir>`, restart. A logical SPARQL `DELETE` / `DROP GRAPH` retracts data from the
+/// live view but leaves the superseded bytes in earlier WAL segments until a compaction folds the
+/// live state into a fresh base; this command does exactly that — physically rewriting the store
+/// to contain ONLY the current live triples, so erased data is gone from the on-disk history.
+///
+/// `Graph::open` replays the WAL into the live overlay, `Graph::vacuum` re-interns the live
+/// triples into a fresh dictionary (so orphaned term VALUES are purged too) and ATOMICALLY
+/// (rollback-safe two-rename swap, parent dir fsync'd between renames, WAL truncated) replaces the
+/// on-disk store; an interrupted swap is healed deterministically on the next open. The live
+/// triple set is preserved exactly (round-trip).
+///
+/// Online equivalent: `POST /admin/compact` on a running `--persist` server (gated by the write
+/// auth token). The complement on the server side runs on the writer thread between batches.
+///
+/// PHYSICAL-ERASURE CAVEAT (honest scope): this scrubs the engine's own on-disk segments; it
+/// cannot reach bytes already copied off-box — filesystem snapshots, block-level COW history, or
+/// external backups — which the storage/backup tier must handle per the retention-erasure runbook.
+fn cmd_compact(args: &[String]) {
+    let dir = match args.get(2) {
+        Some(d) => d.as_str(),
+        None => {
+            eprintln!("usage: sparq-cli compact <persist-dir>   # offline WAL compact/vacuum for erasure-completeness");
+            std::process::exit(2);
+        }
+    };
+    let path = std::path::Path::new(dir);
+    // `open` replays the WAL into the live overlay (and heals any interrupted prior compaction).
+    let mut g = sparq_core::Graph::open(path).unwrap_or_else(|e| {
+        eprintln!("open error ({dir}): {e}");
+        std::process::exit(1);
+    });
+    let before = g.len();
+    let t = Instant::now();
+    // [OPUS-4.8] (sq-x32t) ERASURE-GRADE vacuum: atomic, crash-safe rewrite of the on-disk store
+    // to only the live triples + a fresh dictionary (so orphaned term VALUES are purged too) +
+    // WAL truncate. `vacuum` re-interns; the lighter `Graph::compact` keeps the dict and would
+    // leave a deleted literal's bytes on disk, which is not erasure-complete.
+    g.vacuum().unwrap_or_else(|e| {
+        eprintln!("compact error ({dir}): {e}");
+        std::process::exit(1);
+    });
+    let after = g.len();
+    // `len` is invariant across compaction (the live set is preserved exactly); print it as a
+    // round-trip sanity signal, not as a deletion count (the purged data was already retracted).
+    eprintln!(
+        "compacted {dir}: {} live triples (was {before}) in {:.3}s — superseded/erased data physically removed from the on-disk WAL history",
+        after,
+        t.elapsed().as_secs_f64()
+    );
 }
 
 /// `build <file[.gz|.bz2]> <format> <dir> [chunk_millions]` — EXTERNAL-MEMORY build:

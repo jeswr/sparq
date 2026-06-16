@@ -97,6 +97,10 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
 - **Hybrid fusion** — `fuse_rrf` / `fuse_rrf_weighted` / `fuse_scores` combine text vectors
   with another ranked signal (e.g. [`sparq-sim`](../sparq-sim) structural similarity);
   `hybrid_search` runs N retriever closures off one query and fuses by item with RRF.
+- **Bulk import (bring-your-own embeddings)** — `import_npy` / `import_numeric_dump` load a
+  matrix computed elsewhere (Python/sentence-transformers, a vendor batch job) straight into a
+  `.spqv` keyed by dictionary id, with no model in-process and no new dependency. Fail-closed on
+  any dtype/shape/length mismatch (see below).
 
 ## 🔌 Live embeddings (opt-in `embeddings` feature)
 
@@ -127,6 +131,64 @@ client); requests carry a hard timeout. Point `SPARQ_EMBEDDINGS_BASE_URL` at any
 OpenAI-compatible server (a self-hosted model, a proxy). The crate still **never opens a
 socket in the default build** — only with `--features embeddings`, and it is excluded from the
 wasm build (nothing in the workspace depends on this crate).
+
+## 📦 Bulk import of externally-computed embeddings (sq-xsq9)
+
+When your vectors come from an out-of-process pipeline rather than an in-process `Embedder`,
+import the matrix directly. It reuses the standard store writer
+(`create` / `put` / `finalize`), so the output is byte-for-byte a normal `.spqv`.
+**No new dependency** — the `.npy` header is parsed by hand — and the import functions need
+`std::fs`, so they are compiled off the wasm target (`#[cfg(not(target_arch = "wasm32"))]`);
+nothing in the default build pulls extra weight.
+
+**Row → dict-id contract.** An external matrix carries no term identity, so you supply a
+**parallel slice of dictionary ids** (`ImportSpec::ids`): row `i` of the matrix is stored for
+`ids[i]`. `ids.len()` must equal the matrix's row count. Resolve each id with `graph.id_of(&term)`;
+the natural source is the same scan that produced the texts you embedded — emit `(id, text)`
+pairs, embed the texts, then import the matrix with the ids in that same order.
+
+**Supported formats.**
+
+- **NumPy `.npy`** (`import_npy`) — a **2-D, C-order, little-endian `f4`/`f8`** array, i.e. what
+  `numpy.save(path, arr.astype(np.float32))` writes. `f8` rows are narrowed to `f32` (the store is
+  `f32`). `shape` must be `(ids.len(), dim)`.
+- **Header-less flat dump** (`import_numeric_dump`) — exactly `rows · dim · 4` bytes of contiguous
+  row-major little-endian `f32`, i.e. `arr.astype("<f4").tofile(path)` or raw `Vec<f32>` bytes from
+  any language. `rows` is taken from `ids.len()` and `dim` from the spec, so the file length is
+  fully determined and checked.
+
+```rust,ignore
+use sparq_vectors::{ImportBinding, ImportSpec, VectorStore};
+
+// row i of vecs.npy lines up with ids[i]
+let ids: Vec<u32> = vec![/* alice */ 10, /* bob */ 20, /* carol */ 30];
+
+// (a) NumPy .npy — bind the store to its source graph for the staleness guard.
+let store = VectorStore::import_npy(
+    ImportSpec { spqv_path: "graph.spqv", dim: 384, ids: &ids, binding: ImportBinding::Graph(&graph) },
+    "vecs.npy",
+)?;
+
+// (b) header-less flat f32 dump — Unbound when no graph is on hand.
+let store = VectorStore::import_numeric_dump(
+    ImportSpec { spqv_path: "graph.spqv", dim: 384, ids: &ids, binding: ImportBinding::Unbound },
+    "vecs.f32",
+)?;
+```
+
+**Fail-closed.** A dtype / byte-order / fortran-order / dimensionality mismatch, a `shape[1] != dim`,
+a `shape[0] != ids.len()`, a wrong dump length, a duplicate / zero / non-finite row, or a
+malformed / oversized `.npy` header is an `Err` — never a silent reinterpretation or truncation. The
+`.npy` declared header length is bounded (`MAX_NPY_HEADER_LEN`, 64 KiB) and the declared shape is
+checked against the real file size **before any body allocation** (the sq-tzwa bounded-read
+discipline), so a hostile header cannot force a large pre-allocation. An empty matrix
+(`shape (0, dim)` / a 0-byte dump with an empty `ids`) is a valid no-op import that yields a
+well-formed empty store.
+
+**`ImportBinding`.** `Graph(&graph)` writes the graph fingerprint into the store header so
+`check_graph` can later reject a stale store after a dict-id-shifting rebuild; pass the SAME graph
+whose ids the rows are keyed by. `Unbound` leaves the store unverifiable (use only when no graph is
+on hand at import time).
 
 ## 📚 Learn more
 

@@ -10,10 +10,13 @@
 //! Turtle and plain-text renderings of the SHACL report vocabulary).
 //!
 //! This crate follows the `sparq-reason` isolation pattern: it is NOT a
-//! dependency of any other sparq crate — the core engine and the wasm bundle
-//! carry zero SHACL code unless a consumer opts in by depending on it.
-//! (`sparq-engine`, pulled in for `sh:sparql`, is likewise native-only and does
-//! not depend on this crate, so there is no cycle and the wasm bundle is untouched.)
+//! dependency of any other sparq crate by default — the core engine and the
+//! default wasm bundle carry zero SHACL code unless a consumer opts in by
+//! depending on it. (`sparq-engine`, pulled in for `sh:sparql`, does not depend
+//! on this crate, so there is no cycle.) The browser/JS consumer opts in via
+//! `sparq-wasm`'s non-default `shacl` feature (sq-yqi1, #162), which exposes
+//! [`validate`] as a `Store::validate(...)` wasm binding; on that wasm32 build the
+//! `sparq-engine` dependency drops its defaults so rayon never enters the bundle.
 //!
 //! ```
 //! use sparq_core::Graph;

@@ -55,6 +55,7 @@ documentation) would inspect.
 | RFC 9116 machine-discoverable channel | `.well-known/security.txt` | Contact ×2, Policy, Canonical, Expires (2027-06-15) present + in the future. |
 | Public disclosure of fixed vulns | GitHub Security Advisories + `CHANGELOG.md` + release notes | GHSA list; changelog entries; release body links the changelog. |
 | Annex II info: identity, product, intended use, limitations, secure-use | `SECURITY.md`, `README.md`, `AGENTS.md`, `Dockerfile` header, `crates/sparq-server/README.md`, OCI image labels | Read; the "experimental, pre-1.0, NO-guarantee ZK/MPC" framing is consistent across all. |
+| **Article 14 incident-reporting runbook** (early-warning 24h / notification 72h / final report 14-day vuln · 1-month incident; ENISA single-reporting-platform + CSIRT routing; report-content checklist) — `[OPUS-4.8]` (sq-zbb5) | [`incident-reporting-runbook.md`](./incident-reporting-runbook.md) (sq-iy3p, controls.md CRA-CA.5) | Read; confirm it **extends** the `SECURITY.md` CVD flow (§7) without replacing it, that the trigger excludes the no-guarantee ZK/MPC crates (§1), and that every org-specific value is a `<FILL-IN>` placeholder. This is an **adoptable template**, not proof a report has occurred — see the honesty note in §E8. |
 
 ## E6 — Availability / DoS resilience (Annex I Part I (2)(f)(g))
 
@@ -75,6 +76,19 @@ documentation) would inspect.
 | End-user auth/authz is the **operator's** (B3) | Optional Bearer auth is sparq's; per-user authz → gateway/sparq-solid. | `research/threat-model.md`, `Dockerfile` header |
 | TLS/transport + at-rest encryption is the operator's | sparq emits a sniffable-token warning; TLS terminates at the operator's proxy. | `Dockerfile` header, `crates/sparq-server/README.md` |
 | CE marking / EU declaration of conformity is **not** claimed | A manufacturer organizational/legal act; this tree provides only the supporting evidence. | [`controls.md`](./controls.md) §"formal conformity layer" |
+
+## E8 — Article 14 reporting: audit-ready *documentation*, not proven *capability* `[OPUS-4.8]`
+
+The Article 14 runbook is a genuine, inspectable artifact — but it is **audit-ready
+documentation**, **not** an incident-response capability proven in a drill. The honest line:
+
+| Item | Status | Note |
+|---|---|---|
+| The reporting **runbook** (timeline, ENISA/CSIRT routing, content checklist, CVD coordination) | **audit-ready (doc delivered)** | [`incident-reporting-runbook.md`](./incident-reporting-runbook.md); cited from controls.md CRA-CA.5 + gap-register.md (GX-CRA-2 addressed). |
+| A **named legal entity / steward of record** with the `<FILL-IN>` org details completed | **residual (external)** | The runbook is a template; the manufacturer/steward must instantiate it. Out of agent scope. |
+| **CSIRT registration + ENISA single-reporting-platform account** | **residual (external)** | An operational registration with the authority; cannot be performed by the source tree, a CI job, or an agent. |
+| A **tested escalation** (table-top / drill exercising the 24h clock) | **residual (external)** | Documentation ≠ a rehearsed capability; the adopting org owns the drill + lessons-learned loop (runbook §5 step 9). |
+| Pointer **from `SECURITY.md`** (governance doc) to this runbook | **residual (governance-owned, sq-zbb5)** | `SECURITY.md` is a root governance file outside the `compliance/cra` tree's write-scope; the one-line pointer is tracked as the residual leg of the cross-reference — proposed text in the runbook §"Cross-reference into the canonical governance doc". |
 
 ## Verification quick-run
 

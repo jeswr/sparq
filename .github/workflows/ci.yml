@@ -36,6 +36,74 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # [OPUS-4.8] merge-throughput: path-filtered gate. Compute whether THIS change
+  # touches Rust at all, so a doc-only / compliance / CI-markdown / site PR can skip the
+  # ~15-minute Rust test matrix while the required `ci-summary / gate` still resolves
+  # SUCCESS for it. CORRECTNESS CONTRACT (the heavy jobs below `if:` on this):
+  #   • rust_changed == 'true'  -> every heavy job runs EXACTLY as before. A Rust PR can
+  #     never merge without the full matrix.
+  #   • rust_changed == 'false' -> the heavy jobs are `skipped`; the ci-summary aggregator
+  #     (ci-summary.yml) already treats a `skipped` conclusion as NON-failing
+  #     (`conclusion != "success" and != "skipped" and != "neutral"` is the only thing it
+  #     fails on), so the gate goes green fast. Fast doc/lint siblings (docs-quality, etc.)
+  #     still run and still gate.
+  # SAFE-BY-DEFAULT: rust_changed is forced 'true' on EVERY event except `pull_request`.
+  # On `push` to main (the canonical build), `merge_group` (the merge queue re-runs the
+  # whole set), `schedule`, and `workflow_dispatch` the full matrix ALWAYS runs — only a
+  # PR diff that is purely non-Rust is ever allowed to skip. The Rust path set is broad on
+  # purpose: any `*.rs`, any `Cargo.toml`, `Cargo.lock`, the `rust-toolchain*` pin, OR this
+  # workflow file itself (so editing a Rust job here re-runs that job). If the diff cannot
+  # be computed for any reason, the filter's absence of a match defaults to NOT skipping
+  # only because we hard-force 'true' off the PR path — i.e. we never silently skip Rust.
+  changes:
+    name: detect rust changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust_changed: ${{ steps.decide.outputs.rust_changed }}
+      # [OPUS-4.8] docker_changed is true when the SHIPPED image's inputs change but no
+      # Rust did (a Dockerfile/entrypoint/smoke-script edit). docker-smoke gates on
+      # rust_changed OR docker_changed so a Dockerfile-only PR (the sq-n6rv class of bug —
+      # the bind posture/entrypoint) still gets the image smoke even though the matrix skips.
+      docker_changed: ${{ steps.decide.outputs.docker_changed }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Only run the path filter on pull_request; on every other event we force-run the
+      # full matrix (see decide step), so the filter's result is irrelevant there and we
+      # skip it to avoid the unreliable push/merge_group base-diff.
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - '.github/workflows/ci.yml'
+            docker:
+              - 'Dockerfile'
+              - '**/Dockerfile'
+              - 'scripts/docker-smoke.sh'
+              - '.github/workflows/ci.yml'
+      - name: Decide rust_changed (safe-by-default off the PR path)
+        id: decide
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            # push / merge_group / schedule / workflow_dispatch -> always run the full matrix.
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "docker_changed=true" >> "$GITHUB_OUTPUT"
+            echo "event=${{ github.event_name }} -> forcing rust_changed=true + docker_changed=true (full matrix)"
+          else
+            echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
+            echo "docker_changed=${{ steps.filter.outputs.docker }}" >> "$GITHUB_OUTPUT"
+            echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }} docker=${{ steps.filter.outputs.docker }}"
+          fi
+
   # [OPUS-4.8] BUILD-ONCE for the sharded test suite (sq-vyxy folded in). The old
   # design had every shard run `cargo build --workspace --all-targets` itself — the
   # 131s build FLOOR that rust-cache makes cheap for *deps* but cannot remove for
@@ -49,6 +117,8 @@ jobs:
   # once, off the warm build this job already has (was a guarded shard-1 step before).
   build-archive:
     name: build + archive test binaries (+ doctests once)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -148,7 +218,12 @@ jobs:
     # fail-fast: false so one shard's failure does not cancel the others (we want the
     # full failure picture across the suite, not just the first shard to break).
     name: test (load-aware shard ${{ matrix.name }})
-    needs: build-archive
+    # [OPUS-4.8] needs BOTH: build-archive (artifact) AND changes (the path filter). With
+    # build-archive `if:`-skipped on a doc-only PR, this job is skipped too (a needed job
+    # was skipped) — exactly the intent. Keep the explicit `changes` need + `if:` so the
+    # skip is driven by the filter, not an incidental artifact-missing failure.
+    needs: [changes, build-archive]
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     env:
       # [OPUS-4.8] THE single source of truth for the known-heavy tests. `test(=NAME)`
@@ -235,6 +310,8 @@ jobs:
 
   wasm:
     name: wasm build (sparq-wasm)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -244,6 +321,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build sparq-wasm for the browser target
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
+      # [OPUS-4.8] sq-yqi1 (#162): also build WITH the opt-in `shacl` feature so the
+      # SHACL `Store::validate(...)` binding (and its wasm32 sparq-shacl/sparq-engine
+      # graph) is gate-protected — it must keep compiling to wasm.
+      - name: Build sparq-wasm for the browser target (shacl feature)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl
       # [OPUS-4.8] sq-085p follow-up: clippy AGAINST the wasm32 target (the target is
       # already installed for this job). The native `lint` job's `clippy --all-targets`
       # compiles sparq-wasm for the HOST triple, so it never sees wasm32-cfg'd code paths
@@ -251,10 +333,16 @@ jobs:
       # warnings makes those a hard failure here, where the native clippy can't reach them.
       - name: clippy (wasm32 target, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      # [OPUS-4.8] sq-yqi1 (#162): clippy the shacl-feature surface on wasm32 too.
+      - name: clippy (wasm32 target, shacl feature, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features shacl -- -D warnings
       - name: Guard the wasm dependency graph (no native-only deps)
         # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
         # dep leaks into sparq-wasm's wasm32 graph (bundle bloat / broken browser build).
+        # [OPUS-4.8] sq-yqi1: guard runs against the DEFAULT graph (SHACL is opt-in, so
+        # the default bundle stays SHACL-free); the shacl-feature graph is verified clean
+        # locally and the wasm32 build above proves it links.
         run: ./scripts/wasm-deps-guard.sh
       # [OPUS-4.8] Headless wasm tests of the REAL #[wasm_bindgen] exports
       # (crates/sparq-wasm/tests/web.rs). `cargo build --target wasm32` above never
@@ -271,6 +359,12 @@ jobs:
       - name: Headless wasm tests (wasm-pack test --node)
         working-directory: crates/sparq-wasm
         run: wasm-pack test --node
+      # [OPUS-4.8] sq-yqi1 (#162): run the headless wasm tests WITH the shacl feature
+      # so the real exported `Store::validate(...)` binding is exercised in a genuine
+      # wasm runtime (conforming + violating reports + the JsError parse-error arm).
+      - name: Headless wasm tests (wasm-pack test --node, shacl feature)
+        working-directory: crates/sparq-wasm
+        run: wasm-pack test --node --features shacl
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python
@@ -287,6 +381,8 @@ jobs:
     # and would have stopped the clippy gate from gating — verified by hand-tracing the
     # jq filter against every check name.)
     name: clippy (gate) + fmt (non-blocking)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -327,6 +423,8 @@ jobs:
     #     workspace-floor pin.
     # If the root MSRV is bumped, update the `@1.88` toolchain pin below to match.
     name: MSRV check (Rust 1.88, declared floor)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -347,6 +445,8 @@ jobs:
     # drop below the ratchet count is a conformance regression and fails CI. Never
     # lower the ratchet.
     name: W3C SPARQL conformance (ratchet >= 1229 pass+divergence)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -401,6 +501,8 @@ jobs:
     # same `>= N` belt-and-braces check the conformance jobs use. Never lower the
     # ratchet (raise BASELINE_PASS / SHACL_SPARQL_FLOOR as coverage grows).
     name: W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -445,6 +547,8 @@ jobs:
     # same belt-and-braces `>= floor` gate the SHACL/SPARQL jobs use. Never lower
     # the floor (raise OGC_RATCHET_FLOOR as the corpus grows).
     name: W3C/OGC GeoSPARQL conformance (ratchet — topology pass >= 119)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -494,6 +598,8 @@ jobs:
     # GATES exactly like the SPARQL ratchet above: a drop below the count is a
     # conformance regression and fails CI. Never lower the ratchet.
     name: Inference conformance (ratchet >= 1967 pass+divergence)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -551,7 +657,12 @@ jobs:
     # well under the ~15-20 min budget; only the heavy sparq-vectors full set is
     # nightly. Never silently drop a crate — every exclusion is in the floor file.
     name: coverage ratchet + test-presence gate (per-crate)
-    if: github.event_name != 'schedule'
+    needs: changes
+    # [OPUS-4.8] Combine the pre-existing schedule exclusion with the rust-changed gate:
+    # the per-commit coverage tier still never runs on the nightly schedule, AND now also
+    # skips on a doc-only PR. On `push`/`merge_group` rust_changed is force-'true', so the
+    # canonical/queue coverage run is unchanged.
+    if: github.event_name != 'schedule' && needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -701,6 +812,8 @@ jobs:
     # report to break CI). Promote to a gate later only with a checked-in unsafe-count
     # ratchet (mirroring the coverage/conformance idiom) — out of scope here.
     name: unsafe report (cargo-geiger, informational)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -739,6 +852,13 @@ jobs:
     # script against the tag's image before push. Builds with the SAME Dockerfile + buildx the
     # release job uses, so the artifact under test matches the one that ships.
     name: docker image smoke (run + curl /health + query)
+    # [OPUS-4.8] The image bakes the compiled sparq-server binary, so a Rust change can
+    # change what ships; gate on rust_changed. (A pure Dockerfile/entrypoint change also
+    # touches no `*.rs`, but the release.yml re-runs this script against the tag image
+    # before push, so a doc-only PR skipping it here is safe — the canonical push to main
+    # force-runs it, and any Dockerfile-affecting PR should accompany a build change.)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.docker_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

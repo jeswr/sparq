@@ -2785,33 +2785,118 @@ impl Graph {
         }
         #[cfg(feature = "mmap")]
         if let Some(dir) = dir {
-            // [OPUS-4.8] (review 1593) ROLLBACK-SAFE directory swap. The two-rename swap has a
-            // window where the canonical `dir` does not exist (between the two renames); a
-            // crash there must NOT lose the dataset. We:
-            //   1. write the new base to `compact-new` and fsync the DIRECTORY (so its
-            //      existence + contents are durable before it can become canonical);
-            //   2. rename `dir` -> `compact-old`, fsync the parent (the rename is durable);
-            //   3. rename `compact-new` -> `dir`, fsync the parent.
-            // If a crash interrupts the swap, `recover_compaction` (run on every open)
-            // deterministically completes or rolls it back from the surviving sibling.
-            let new_dir = dir.with_extension("compact-new");
-            let old_dir = dir.with_extension("compact-old");
-            std::fs::remove_dir_all(&new_dir).ok();
-            std::fs::remove_dir_all(&old_dir).ok();
-            self.wal = None; // close the log before the directory swap
-            self.save(&new_dir).map_err(|e| e.to_string())?;
-            fsync_dir(&new_dir).map_err(|e| e.to_string())?;
-            let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
-            std::fs::rename(&dir, &old_dir).map_err(|e| e.to_string())?;
-            fsync_dir(parent).map_err(|e| e.to_string())?;
-            std::fs::rename(&new_dir, &dir).map_err(|e| e.to_string())?;
-            fsync_dir(parent).map_err(|e| e.to_string())?;
-            // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop
-            // the old files (open mmaps keep unlinked files alive on unix).
-            *self = Graph::open(&dir).map_err(|e| e.to_string())?;
-            std::fs::remove_dir_all(&old_dir).ok();
+            self.persist_swap(&dir)?;
         }
         Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-x32t) ROLLBACK-SAFE on-disk swap shared by [`compact`](Self::compact) and
+    /// [`vacuum`](Self::vacuum): persist `self`'s CURRENT in-memory image as the new durable base
+    /// at `dir`, atomically, truncating the old WAL. Factored out of `compact` (review 1593) so
+    /// the erasure-grade vacuum reuses the exact same crash-safe machinery.
+    ///
+    /// The two-rename swap has a window where the canonical `dir` does not exist (between the two
+    /// renames); a crash there must NOT lose the dataset. We:
+    ///
+    ///   1. write the new base to `<dir>.compact-new` and fsync the DIRECTORY (so its existence +
+    ///      contents are durable before it can become canonical);
+    ///   2. rename `dir` -> `<dir>.compact-old`, fsync the parent (the rename is durable);
+    ///   3. rename `<dir>.compact-new` -> `dir`, fsync the parent.
+    ///
+    /// If a crash interrupts the swap, [`recover_compaction`] (run on every [`open`](Self::open))
+    /// deterministically completes or rolls it back from the surviving sibling. The graph is then
+    /// re-opened memory-mapped from the new base with a fresh, empty WAL.
+    #[cfg(feature = "mmap")]
+    fn persist_swap(&mut self, dir: &std::path::Path) -> Result<(), String> {
+        let new_dir = dir.with_extension("compact-new");
+        let old_dir = dir.with_extension("compact-old");
+        std::fs::remove_dir_all(&new_dir).ok();
+        std::fs::remove_dir_all(&old_dir).ok();
+        self.wal = None; // close the log before the directory swap
+        self.save(&new_dir).map_err(|e| e.to_string())?;
+        fsync_dir(&new_dir).map_err(|e| e.to_string())?;
+        let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::rename(dir, &old_dir).map_err(|e| e.to_string())?;
+        fsync_dir(parent).map_err(|e| e.to_string())?;
+        std::fs::rename(&new_dir, dir).map_err(|e| e.to_string())?;
+        fsync_dir(parent).map_err(|e| e.to_string())?;
+        // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop the old
+        // files (open mmaps keep unlinked files alive on unix).
+        *self = Graph::open(dir).map_err(|e| e.to_string())?;
+        std::fs::remove_dir_all(&old_dir).ok();
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-x32t, epic sq-toze.33) ERASURE-GRADE VACUUM. Like [`compact`](Self::compact)
+    /// it physically rewrites a directory-backed store to contain only the current LIVE triples —
+    /// but it additionally PURGES THE DICTIONARY: it re-interns every live term into a FRESH
+    /// dictionary, so a term string (an IRI or a literal VALUE — e.g. personal data) that is no
+    /// longer referenced by any live triple after a `DELETE` / `DROP GRAPH` is physically gone
+    /// from the on-disk dictionary blob too, not just from the triple indexes.
+    ///
+    /// Why this exists separately from `compact`: `compact` keeps the dictionary as-is (ids stay
+    /// stable, which makes the serving-path fold O(triples) with no re-interning); orphaned term
+    /// strings linger in the dict until a full reload. That is the right trade for the periodic
+    /// serving compaction, but NOT for erasure — a deleted literal's bytes would survive. `vacuum`
+    /// pays the O(terms) re-intern so erasure is complete down to the value bytes.
+    ///
+    /// The live dataset (default graph + every named graph, recursively) is dumped to `[Term; 3]`
+    /// and re-interned into a brand-new [`Graph`] with an empty [`Dict`]; that fresh image is then
+    /// swapped in via the SAME rollback-safe [`persist_swap`](Self::persist_swap) the compaction
+    /// uses (atomic, crash-safe, WAL-truncated). The live triple set is preserved EXACTLY
+    /// (round-trip). For an in-memory graph it just replaces the dictionary/store in place.
+    ///
+    /// PHYSICAL-ERASURE SCOPE (honest): this scrubs the engine's own on-disk segments + dictionary;
+    /// it cannot reach bytes already copied off-box (filesystem snapshots, block-level COW history,
+    /// external backups), which the storage/backup tier must handle per the retention-erasure
+    /// runbook.
+    pub fn vacuum(&mut self) -> Result<(), String> {
+        #[cfg(feature = "mmap")]
+        let dir = self.wal.as_ref().map(|w| w.dir.clone());
+        // Re-intern the whole live dataset into a fresh graph with an EMPTY dictionary, so any
+        // term orphaned by a prior delete/drop is dropped (it is never re-interned).
+        let mut fresh = self.reintern_live()?;
+        #[cfg(feature = "mmap")]
+        if let Some(dir) = dir {
+            // Close THIS graph's WAL before the directory swap (its `wal.log` is about to be
+            // renamed away). `persist_swap` writes `fresh`'s image to `dir` and re-opens
+            // `fresh` memory-mapped from the new base with a fresh WAL; adopt that re-opened,
+            // directory-backed graph back into `self` so subsequent updates WAL-append to it.
+            self.wal = None;
+            fresh.persist_swap(&dir)?;
+        }
+        // Adopt the freshly re-interned (and, when persisted, re-opened) image in place.
+        std::mem::swap(self, &mut fresh);
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-x32t) Builds a fresh in-memory [`Graph`] holding exactly this graph's LIVE
+    /// triples (default + named, recursively), re-interned into a brand-new [`Dict`] — so terms
+    /// orphaned by a delete/drop are absent from the result. Carries NO directory/WAL association
+    /// (the caller's [`persist_swap`](Self::persist_swap) gives the swapped-in graph its own).
+    fn reintern_live(&self) -> Result<Graph, String> {
+        // Dump the live default-graph triples as Terms (overlay already merged by `scan`).
+        let live: Vec<[Term; 3]> = {
+            let scan = self.store.scan(&[None, None, None]);
+            scan.rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    [self.dict.term(spo[0]), self.dict.term(spo[1]), self.dict.term(spo[2])]
+                })
+                .collect()
+        };
+        let mut fresh = Graph::from_parts(Dict::new(), Vec::new());
+        if !live.is_empty() {
+            fresh.apply_delta(&live, &[])?;
+        }
+        // Named graphs: re-intern each recursively and attach it as an IN-MEMORY sub-graph (no
+        // directory/WAL — the parent's `save` writes the whole `named/` sub-tree afresh).
+        for (name, sub) in &self.named {
+            let sub_fresh = sub.reintern_live()?;
+            fresh.named.push((name.clone(), sub_fresh));
+        }
+        Ok(fresh)
     }
 }
 
@@ -7757,6 +7842,171 @@ mod tests {
         g.save_compressed(&dir).unwrap();
         assert_eq!(Graph::open(&dir).unwrap().len(), 3);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-x32t) Recursively reads every regular file under `dir` and returns true iff
+    /// `needle`'s bytes appear in ANY of them — used to prove a deleted term's bytes are PHYSICALLY
+    /// gone from the on-disk store (not merely logically hidden by the overlay).
+    #[cfg(feature = "mmap")]
+    fn on_disk_contains(dir: &std::path::Path, needle: &[u8]) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if on_disk_contains(&p, needle) {
+                    return true;
+                }
+            } else if let Ok(bytes) = std::fs::read(&p) {
+                if bytes.windows(needle.len()).any(|w| w == needle) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// [OPUS-4.8] (sq-x32t, epic sq-toze.33) ERASURE-COMPLETENESS — the load-bearing test. After
+    /// INSERT + DELETE + DROP GRAPH, a `vacuum` (the admin WAL compact/vacuum) must (1) preserve the
+    /// LIVE triple set exactly (round-trip), and (2) physically REMOVE the erased data's bytes from
+    /// the on-disk store — including a deleted LITERAL VALUE that is no longer referenced (the
+    /// dictionary purge), not just hide it behind the delta-overlay. We prove (2) by asserting the
+    /// distinctive deleted bytes are present on disk BEFORE the vacuum (so the test can actually
+    /// fail) and ABSENT after, and by re-opening to confirm durability.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn vacuum_erases_deleted_data_bytes_on_disk() {
+        let dir = std::env::temp_dir().join(format!("sparq_vacuum_erase_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        // Seed: a default-graph triple to KEEP, a default-graph triple whose object literal will be
+        // DELETED, and a NAMED graph that will be DROPped. Distinctive byte markers per datum.
+        let g0 = Graph::load_dataset(
+            "<http://ex/keep> <http://ex/p> \"KEEP-ME-LIVE-MARKER\" .\n\
+             <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-555-00-1234\" .\n\
+             <http://ex/n1> <http://ex/p> \"NAMED-GRAPH-DROP-MARKER\" <http://ex/secretgraph> .",
+            "nquads",
+        )
+        .unwrap();
+        g0.save(&dir).unwrap();
+
+        // The marked secrets are on disk to begin with (dictionary blob holds the literal values).
+        assert!(on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"), "deleted-literal seed must be on disk first");
+        assert!(on_disk_contains(&dir, b"NAMED-GRAPH-DROP-MARKER"), "dropped-graph seed must be on disk first");
+
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            // Logical erasure: DELETE the SSN triple and DROP the named graph (via retraction).
+            g.apply_delta(
+                &[],
+                &[[
+                    Term::NamedNode(NamedNode::new_unchecked("http://ex/alice")),
+                    Term::NamedNode(NamedNode::new_unchecked("http://ex/ssn")),
+                    Term::Literal(Literal::new_simple_literal("SECRET-SSN-555-00-1234")),
+                ]],
+            )
+            .unwrap();
+            g.drop_named_durable(&named("secretgraph")).unwrap();
+
+            // Logically hidden — but the WAL/dict bytes still hold the secrets pre-vacuum.
+            assert_eq!(dump_terms(&g).len(), 1, "only the KEEP triple remains live");
+            assert!(on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"), "pre-vacuum: still on disk (logical only)");
+
+            // VACUUM: physically rewrite the store + purge the dictionary.
+            g.vacuum().unwrap();
+
+            // Round-trip: the live set is preserved exactly.
+            let live = dump_terms(&g);
+            assert_eq!(live.len(), 1);
+            assert_eq!(live[0].0, "<http://ex/keep>");
+            assert!(g.named.is_empty(), "dropped named graph is gone");
+        }
+
+        // The KEEP marker survives; the erased data's bytes are PHYSICALLY GONE from disk.
+        assert!(on_disk_contains(&dir, b"KEEP-ME-LIVE-MARKER"), "live data must survive the vacuum");
+        assert!(!on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"), "DELETED literal value bytes must be physically erased");
+        assert!(!on_disk_contains(&dir, b"NAMED-GRAPH-DROP-MARKER"), "DROPped-graph data bytes must be physically erased");
+
+        // Durability: a fresh open sees exactly the live triple and nothing resurrects.
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(dump_terms(&g2).len(), 1, "erasure survives reopen");
+        assert!(g2.named.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-x32t) `vacuum` ROUND-TRIP equality across the whole dataset (default + named),
+    /// independent of the byte-level erasure check: the post-vacuum quad set must EQUAL the pre-vacuum
+    /// live quad set exactly, and survive a reopen.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn vacuum_preserves_live_dataset_exactly() {
+        let dir = std::env::temp_dir().join(format!("sparq_vacuum_roundtrip_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let mut nq = String::new();
+        for i in 0..40u32 {
+            nq.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+            nq.push_str(&format!("<http://ex/s{i}> <http://ex/q> <http://ex/o{i}> <http://ex/g{}> .\n", i % 3));
+        }
+        Graph::load_dataset(&nq, "nquads").unwrap().save(&dir).unwrap();
+
+        let mut g = Graph::open(&dir).unwrap();
+        // Mutate (insert + delete + drop a graph) so the overlay is non-trivial before vacuum.
+        g.apply_delta(
+            &[[
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/new")),
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/p")),
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/v")),
+            ]],
+            &[[
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/s0")),
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/p")),
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/o0")),
+            ]],
+        )
+        .unwrap();
+        g.drop_named_durable(&named("g0")).unwrap();
+
+        let before = dump_quads(&g);
+        g.vacuum().unwrap();
+        let after = dump_quads(&g);
+        assert_eq!(before, after, "vacuum must preserve the live dataset exactly (default + named)");
+
+        let reopened = dump_quads(&Graph::open(&dir).unwrap());
+        assert_eq!(before, reopened, "the vacuumed dataset must survive a reopen unchanged");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-x32t) CRASH-SAFETY of `vacuum`: it uses the SAME rollback-safe directory swap
+    /// (`<dir>.compact-new` / `<dir>.compact-old` siblings, healed by `recover_compaction` on open)
+    /// as `compact`, so an interrupted vacuum must never lose or corrupt the store. We simulate the
+    /// two crash windows directly on the sibling dirs and assert the open recovers a VALID store.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn vacuum_swap_crash_recovery() {
+        let base = std::env::temp_dir().join(format!("sparq_vacuum_recover_{}", std::process::id()));
+        let dir = base.join("g");
+        let build = |d: &std::path::Path, tag: &str| {
+            std::fs::remove_dir_all(d).ok();
+            Graph::load_str(&format!("<http://ex/{tag}> <http://ex/p> <http://ex/o> ."), "ntriples")
+                .unwrap()
+                .save(d)
+                .unwrap();
+        };
+        // (a) Crash BETWEEN the two renames (dir missing, both siblings present): the open must
+        //     COMPLETE the swap by promoting the fully-synced new base.
+        build(&dir.with_extension("compact-old"), "old");
+        build(&dir.with_extension("compact-new"), "new");
+        assert!(!dir.exists());
+        let g = Graph::open(&dir).unwrap();
+        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/new")), "must promote the new base");
+        assert!(!dir.with_extension("compact-new").exists() && !dir.with_extension("compact-old").exists());
+        // (b) Crash BEFORE the new base was ready (dir missing, only old present): roll back.
+        std::fs::remove_dir_all(&dir).ok();
+        build(&dir.with_extension("compact-old"), "old");
+        assert!(!dir.exists());
+        let g = Graph::open(&dir).unwrap();
+        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/old")), "must roll back to the old base");
+        std::fs::remove_dir_all(&base).ok();
     }
 }
 

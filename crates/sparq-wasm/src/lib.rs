@@ -14,6 +14,12 @@
 use sparq_core::Graph;
 use wasm_bindgen::prelude::*;
 
+// [OPUS-4.8] sq-yqi1 (#162): the opt-in SHACL `Store::validate(...)` binding.
+// Behind the non-default `shacl` feature so the standard bundle carries zero SHACL
+// code; the module adds a `#[wasm_bindgen] impl Store` method to the `Store` below.
+#[cfg(feature = "shacl")]
+mod shacl;
+
 /// An immutable, dictionary-encoded RDF store queryable with SPARQL.
 #[wasm_bindgen]
 pub struct Store {

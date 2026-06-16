@@ -18,7 +18,7 @@ pub use materialize::{materialize_acp, materialize_wac, MaterializeStats};
 #[cfg(feature = "odrl-bridge")]
 pub use odrl_bridge::{
     action_to_mode, materialize_permission, materialize_permission_conditional, materialize_policy,
-    materialize_prohibition, BridgeOutcome,
+    materialize_prohibition, materialize_prohibition_conditional, BridgeOutcome,
 };
 #[cfg(feature = "odrl-bridge")]
 pub use odrl_bridge::{BridgeEntry, BridgeKind, BridgeLedger};
@@ -587,6 +587,37 @@ impl PodStore {
                 policy,
                 request,
                 odrl_bridge::BridgeKind::PermissionConditional,
+            );
+            self.reindex();
+        }
+        outcome
+    }
+
+    /// [OPUS-4.8] sq-4r70 — the deny dual of
+    /// [`PodStore::materialize_odrl_permission_conditional`]: persist a matched ODRL
+    /// **prohibition** whose recipient/assignee constraints map faithfully as a
+    /// re-checked ACP **conditional deny** (`auth:effect auth:Deny`) rather than freezing
+    /// it one-shot. The carve-out is re-verified per session through the SAME enforcement
+    /// path ([`PodStore::accessible`] / [`PodStore::query_as`]); the deny **overrides**
+    /// any allow for the same principal+target+mode (deny-overrides).
+    ///
+    /// A prohibition carrying a constraint with **no** faithful ACP-condition analogue
+    /// (`odrl:purpose`, `odrl:dateTime`, `odrl:count`) falls back to the one-shot deny
+    /// ([`odrl_bridge::materialize_prohibition`], frozen at materialization) — see
+    /// [`odrl_bridge::materialize_prohibition_conditional`] for the full rationale.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn materialize_odrl_prohibition_conditional(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+    ) -> odrl_bridge::BridgeOutcome {
+        let outcome =
+            odrl_bridge::materialize_prohibition_conditional(&mut self.graph, policy, request);
+        if outcome.prohibited {
+            self.bridge_ledger.record(
+                policy,
+                request,
+                odrl_bridge::BridgeKind::ProhibitionConditional,
             );
             self.reindex();
         }

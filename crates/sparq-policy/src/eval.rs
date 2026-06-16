@@ -29,6 +29,24 @@ pub const ODRL_PURPOSE: &str = "http://www.w3.org/ns/odrl/2/purpose";
 /// [OPUS-4.8] sq-zi5w.
 pub const ODRL_COUNT: &str = "http://www.w3.org/ns/odrl/2/count";
 
+/// The `odrl:recipient` left-operand IRI — the dimension a *recipient constraint*
+/// restricts (the party that data is disclosed to, e.g. `odrl:recipient neq <bob>`,
+/// the "everyone EXCEPT bob" shape). The recipient-of-data is the requesting party,
+/// so when a request carries **no** explicit `odrl:recipient` context value the
+/// evaluator reads its [`Request::party`] as the recipient evidence (see
+/// [`recipient_status`]). [OPUS-4.8] sq-5037.
+pub const ODRL_RECIPIENT: &str = "http://www.w3.org/ns/odrl/2/recipient";
+
+/// The `odrl:dateTime` left-operand IRI — the dimension a *temporal constraint*
+/// restricts (the instant a permission/prohibition is gated on, e.g.
+/// `odrl:dateTime lteq "2026-12-31T23:59:59Z"`, the upper edge of a validity
+/// window). The actual instant is the request's evaluation time, supplied as
+/// [`Value::DateTime`] evidence (see [`Request::at`] / [`datetime_status`]); a
+/// request that supplies **no** time carries no temporal evidence, so a temporal
+/// permission does not grant and a temporal prohibition is not withdrawn
+/// (fail-closed). [OPUS-4.8] sq-idnv.
+pub const ODRL_DATETIME: &str = "http://www.w3.org/ns/odrl/2/dateTime";
+
 /// An access request evaluated against a [`Policy`]: who wants to do what, to
 /// what, in what context (the "evaluation request" + "state of the world" of the
 /// ODRL Formal Semantics, folded into one node-local view).
@@ -41,6 +59,14 @@ pub struct Request {
     /// The requesting party (the WebID / agent IRI — matched against
     /// `odrl:assignee`).
     pub party: Option<String>,
+    /// The requesting party as an [`Value::Iri`], kept in lock-step with [`party`]
+    /// (set by [`Request::by`]) so a `recipient` constraint with no explicit
+    /// `odrl:recipient` context can be re-checked against *who is asking* without an
+    /// allocation per constraint. Internal — [`party`] is the public field.
+    /// [OPUS-4.8] sq-5037.
+    ///
+    /// [`party`]: Request::party
+    pub(crate) recipient_party: Option<Value>,
     /// Context values keyed by ODRL `leftOperand` IRI (e.g. `odrl:dateTime`,
     /// `odrl:purpose`, `odrl:recipient`, `odrl:count`) — the state-of-the-world a
     /// constraint is evaluated against. Use [`Request::with`] to populate.
@@ -67,8 +93,15 @@ impl Request {
     }
 
     /// Set the requesting party (assignee) IRI.
+    ///
+    /// The party doubles as the default **recipient-of-data**: an `odrl:recipient`
+    /// constraint with no explicit context value is re-checked against this party
+    /// (see [`recipient_status`]), so a `recipient neq X` rule gates on who is asking.
+    /// [OPUS-4.8] sq-5037.
     pub fn by(mut self, party: impl Into<String>) -> Request {
-        self.party = Some(party.into());
+        let p = party.into();
+        self.recipient_party = Some(Value::Iri(p.clone()));
+        self.party = Some(p);
         self
     }
 
@@ -109,6 +142,34 @@ impl Request {
     /// on. [OPUS-4.8] sq-q56r.
     pub fn purpose(&self) -> Option<&Value> {
         self.context.get(ODRL_PURPOSE)
+    }
+
+    /// Declare the **evaluation time** this request is made at as evidence
+    /// (chainable) — the `odrl:dateTime` left-operand value a temporal (time-window)
+    /// rule is checked against. [OPUS-4.8] sq-idnv.
+    ///
+    /// First-class sugar over [`Request::with`]`(ODRL_DATETIME, Value::DateTime(..))`:
+    /// it makes the *time evidence the requester supplies* explicit (and auditable via
+    /// [`Request::request_time`]) instead of relying on a magic context key. A request
+    /// that does NOT call this carries **no** time evidence, so a permission gated on a
+    /// time window does not grant and a prohibition gated on a time window is not
+    /// withdrawn (fail-closed — see [`datetime_status`]).
+    ///
+    /// The instant is stored verbatim as a normalized xsd:dateTime lexical key; it is
+    /// compared by magnitude under the lt/gt/lteq/gteq/eq/neq operators (the same
+    /// instant ordering the evaluator's `order`/`compare` applies — see the README
+    /// caveat on mixed timezone offsets).
+    pub fn at(self, instant: impl Into<String>) -> Request {
+        self.with(ODRL_DATETIME, Value::DateTime(instant.into()))
+    }
+
+    /// The evaluation-time evidence this request carries (`odrl:dateTime`), or `None`
+    /// if the request supplied none. The auditable answer to *"did the request supply
+    /// a time to check the window against?"* — the question faithful time-window
+    /// enforcement turns on (a missing time is Unprovable, not "any time").
+    /// [OPUS-4.8] sq-idnv.
+    pub fn request_time(&self) -> Option<&Value> {
+        self.context.get(ODRL_DATETIME)
     }
 }
 
@@ -432,6 +493,197 @@ pub fn purpose_status(rule: &Rule, request: &Request) -> PurposeMatch {
     }
 }
 
+/// The three-valued verdict of a rule's `odrl:recipient` constraints against the
+/// recipient evidence a request carries — a FAITHFUL report of exactly what
+/// [`evaluate`] checks for recipient (it reuses the same [`constraint_status`] the
+/// evaluator's recipient constraints go through). [OPUS-4.8] sq-5037.
+///
+/// The honesty contract mirrors [`PurposeMatch`]: this never claims a stronger verdict
+/// than the evaluator acts on. `Satisfied` is the ONLY verdict under which a
+/// recipient-gated permission grants; anything other than `DefinitelyUnsatisfied`
+/// (i.e. `Satisfied` OR `Unprovable`) keeps a recipient-gated prohibition in force.
+///
+/// **The `neq` / "everyone-except" shape:** a `recipient neq X` constraint is
+/// `Satisfied` for any recipient that is NOT `X`, `DefinitelyUnsatisfied` for the
+/// recipient `X` (the carved-out party), and `Unprovable` when the request supplies
+/// no identity at all (no `odrl:recipient` context AND no [`Request::party`]) —
+/// fail-closed: a `neq` permission does NOT grant to an unknown recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecipientMatch {
+    /// The rule has no `odrl:recipient` constraint — recipient places no restriction.
+    NotConstrained,
+    /// The rule constrains recipient AND the request's recipient **satisfies** every
+    /// recipient constraint (for `neq X`: the recipient is some party other than `X`).
+    Satisfied,
+    /// The rule constrains recipient but the request carries **no** recipient evidence
+    /// (no `odrl:recipient` context and no requesting party) — *unprovable*.
+    /// Fail-closed: a permission does NOT grant; a prohibition is NOT withdrawn.
+    Unprovable,
+    /// The rule constrains recipient and the request's recipient **fails** the
+    /// constraint (for `neq X`: the recipient IS the carved-out party `X`).
+    DefinitelyUnsatisfied,
+}
+
+/// Report how `rule`'s `odrl:recipient` constraint(s) stand against the recipient
+/// evidence `request` carries — the auditable surface of faithful recipient (incl.
+/// `neq` / "everyone-except") enforcement. [OPUS-4.8] sq-5037.
+///
+/// Like [`purpose_status`], this does NOT re-implement matching: it runs the request
+/// through the SAME [`constraint_status`] every `odrl:recipient` constraint goes
+/// through inside [`evaluate`], so the verdict it reports is exactly what the
+/// evaluator acts on (no claimed enforcement that isn't actually checked). The
+/// recipient evidence is the explicit `odrl:recipient` context value, or — when none
+/// is set — the requesting [`Request::party`] (the recipient-of-data is who is asking;
+/// see [`resolve_actual`]).
+///
+/// Returns [`RecipientMatch::NotConstrained`] when the rule has no recipient constraint.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_policy::{recipient_status, RecipientMatch, parse_policy_str, Request};
+/// // "everyone EXCEPT bob may receive the data"
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/p> a odrl:Set ; odrl:permission [
+///     odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+///     odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+///                       odrl:rightOperand <https://bob.ex/card#me> ] ] .
+/// "#, "turtle").unwrap();
+/// let rule = &pol.permissions[0];
+/// let base = Request::new("http://www.w3.org/ns/odrl/2/read").on("urn:asset/x");
+///
+/// // Some other party → Satisfied (not the excluded one).
+/// let carol = base.clone().by("https://carol.ex/card#me");
+/// assert_eq!(recipient_status(rule, &carol), RecipientMatch::Satisfied);
+/// // The excluded party → DefinitelyUnsatisfied.
+/// let bob = base.clone().by("https://bob.ex/card#me");
+/// assert_eq!(recipient_status(rule, &bob), RecipientMatch::DefinitelyUnsatisfied);
+/// // No identity at all → Unprovable (fail-closed; not "any recipient").
+/// assert_eq!(recipient_status(rule, &base), RecipientMatch::Unprovable);
+/// ```
+pub fn recipient_status(rule: &Rule, request: &Request) -> RecipientMatch {
+    let mut constrained = false;
+    let mut any_unprovable = false;
+    for c in &rule.constraints {
+        if c.left != ODRL_RECIPIENT {
+            continue;
+        }
+        constrained = true;
+        match constraint_status(c, request) {
+            ConstraintStatus::Satisfied => {}
+            ConstraintStatus::DefinitelyUnsatisfied => {
+                return RecipientMatch::DefinitelyUnsatisfied
+            }
+            ConstraintStatus::Unprovable => any_unprovable = true,
+        }
+    }
+    if !constrained {
+        RecipientMatch::NotConstrained
+    } else if any_unprovable {
+        RecipientMatch::Unprovable
+    } else {
+        RecipientMatch::Satisfied
+    }
+}
+
+/// The three-valued verdict of a rule's `odrl:dateTime` (time-window) constraints
+/// against the evaluation-time evidence a request carries — a FAITHFUL report of
+/// exactly what [`evaluate`] checks for the clock (it reuses the same
+/// [`constraint_status`] the evaluator's `odrl:dateTime` constraints go through).
+/// [OPUS-4.8] sq-idnv.
+///
+/// The honesty contract mirrors [`PurposeMatch`] / [`RecipientMatch`]: this never
+/// claims a stronger verdict than the evaluator acts on. `Satisfied` is the ONLY
+/// verdict under which a time-gated permission grants; anything other than
+/// `DefinitelyUnsatisfied` (i.e. `Satisfied` OR `Unprovable`) keeps a time-gated
+/// prohibition in force.
+///
+/// **The time-window shape:** a `dateTime lteq T` (or `lt`/`gteq`/`gt`/`eq`/`neq T`)
+/// constraint is `Satisfied` when the request's instant meets the bound,
+/// `DefinitelyUnsatisfied` when the request supplies an instant that fails the bound
+/// (e.g. a `lteq` upper edge that has provably lapsed), and `Unprovable` when the
+/// request supplies no time at all — fail-closed: a time-gated permission does NOT
+/// grant on an unknown clock, and a time-gated prohibition is NOT withdrawn. Several
+/// `dateTime` constraints on one rule are ANDed (a two-sided window `gteq lower` +
+/// `lteq upper` must both hold), mirroring the evaluator's constraint conjunction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateTimeMatch {
+    /// The rule has no `odrl:dateTime` constraint — time places no restriction on it.
+    NotConstrained,
+    /// The rule constrains time AND the request's instant **meets** every time
+    /// constraint (inside the window).
+    Satisfied,
+    /// The rule constrains time but the request carries **no** time evidence —
+    /// *unprovable*. Fail-closed: a permission does NOT grant; a prohibition is NOT
+    /// withdrawn. (Never silently read as "any time allowed".)
+    Unprovable,
+    /// The rule constrains time and the request's instant **fails** the window — a
+    /// definite no (the window has not opened yet, or has provably lapsed).
+    DefinitelyUnsatisfied,
+}
+
+/// Report how `rule`'s `odrl:dateTime` (time-window) constraint(s) stand against the
+/// evaluation-time evidence `request` carries — the auditable surface of faithful
+/// temporal enforcement. [OPUS-4.8] sq-idnv.
+///
+/// Like [`purpose_status`] / [`recipient_status`], this does NOT re-implement
+/// matching: it runs the request through the SAME [`constraint_status`] every
+/// `odrl:dateTime` constraint goes through inside [`evaluate`], so the verdict it
+/// reports is exactly what the evaluator acts on (no claimed enforcement that isn't
+/// actually checked — the whole point of the bead). The time evidence is the
+/// `odrl:dateTime` context value the request supplies (via [`Request::at`]).
+///
+/// Returns [`DateTimeMatch::NotConstrained`] when the rule has no time constraint.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_policy::{datetime_status, DateTimeMatch, parse_policy_str, Request};
+/// // "may read until 2026-12-31" (a half-open validity window).
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+/// <urn:pol/p> a odrl:Set ; odrl:permission [
+///     odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+///     odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+///                       odrl:rightOperand "2026-12-31T23:59:59Z"^^xsd:dateTime ] ] .
+/// "#, "turtle").unwrap();
+/// let rule = &pol.permissions[0];
+/// let base = Request::new("http://www.w3.org/ns/odrl/2/read").on("urn:asset/x");
+///
+/// // Inside the window → Satisfied.
+/// let inside = base.clone().at("2026-06-16T09:00:00Z");
+/// assert_eq!(datetime_status(rule, &inside), DateTimeMatch::Satisfied);
+/// // After the window → DefinitelyUnsatisfied.
+/// let lapsed = base.clone().at("2027-03-01T00:00:00Z");
+/// assert_eq!(datetime_status(rule, &lapsed), DateTimeMatch::DefinitelyUnsatisfied);
+/// // No time at all → Unprovable (fail-closed; not "any time").
+/// assert_eq!(datetime_status(rule, &base), DateTimeMatch::Unprovable);
+/// ```
+pub fn datetime_status(rule: &Rule, request: &Request) -> DateTimeMatch {
+    let mut constrained = false;
+    let mut any_unprovable = false;
+    for c in &rule.constraints {
+        if c.left != ODRL_DATETIME {
+            continue;
+        }
+        constrained = true;
+        match constraint_status(c, request) {
+            ConstraintStatus::Satisfied => {}
+            ConstraintStatus::DefinitelyUnsatisfied => return DateTimeMatch::DefinitelyUnsatisfied,
+            ConstraintStatus::Unprovable => any_unprovable = true,
+        }
+    }
+    if !constrained {
+        DateTimeMatch::NotConstrained
+    } else if any_unprovable {
+        DateTimeMatch::Unprovable
+    } else {
+        DateTimeMatch::Satisfied
+    }
+}
+
 /// How one prohibition rule re-evaluates against a request, distinguishing a
 /// *definite* non-match from an *unprovable* one (missing-evidence constraint).
 /// [OPUS-4.8] sq-2pcf.
@@ -496,7 +748,7 @@ enum ConstraintStatus {
 }
 
 fn constraint_status(c: &Constraint, request: &Request) -> ConstraintStatus {
-    match request.context.get(&c.left) {
+    match resolve_actual(c, request) {
         None => ConstraintStatus::Unprovable,
         Some(actual) => {
             if compare(actual, c.operator, &c.right) {
@@ -506,6 +758,27 @@ fn constraint_status(c: &Constraint, request: &Request) -> ConstraintStatus {
             }
         }
     }
+}
+
+/// The *actual* world value a constraint's `leftOperand` is compared against, or
+/// `None` when the request supplies no evidence for that dimension (⇒ unprovable /
+/// fail-closed). [OPUS-4.8] sq-5037.
+///
+/// Dimensions take their value from [`Request::context`] keyed by the left operand —
+/// EXCEPT `odrl:recipient`, where the recipient-of-data IS the requesting party: a
+/// request that names a `party` but supplies no explicit `odrl:recipient` context is
+/// read as `recipient = party`. This is what makes a `recipient neq X` rule actually
+/// gate on *who is asking* end-to-end. An explicit `odrl:recipient` context value (if
+/// the caller sets one) still takes precedence — the disclosure target need not be the
+/// authenticated principal in every deployment.
+fn resolve_actual<'r>(c: &Constraint, request: &'r Request) -> Option<&'r Value> {
+    if let Some(v) = request.context.get(&c.left) {
+        return Some(v);
+    }
+    if c.left == ODRL_RECIPIENT {
+        return request.recipient_party.as_ref();
+    }
+    None
 }
 
 /// Outcome of matching a single rule against a request.
@@ -580,12 +853,14 @@ fn rule_matches(rule: &Rule, request: &Request, req_action: &Action) -> Match {
 /// Is a single constraint satisfied by the request context?
 ///
 /// The request supplies the *actual* value for the constraint's `leftOperand`
-/// (e.g. the actual request time for `odrl:dateTime`); the constraint's
-/// `rightOperand` is the bound. A constraint whose left operand has **no** value
-/// in the request context is **unsatisfied** (fail-closed: we cannot prove the
-/// world meets a constraint we have no evidence about).
+/// (e.g. the actual request time for `odrl:dateTime`, or the requesting party for
+/// `odrl:recipient` — see [`resolve_actual`]); the constraint's `rightOperand` is the
+/// bound. A constraint whose left operand has **no** value (no context value AND, for
+/// recipient, no party) is **unsatisfied** (fail-closed: we cannot prove the world
+/// meets a constraint we have no evidence about — including a `recipient neq X`
+/// constraint with no identity to compare).
 fn constraint_satisfied(c: &Constraint, request: &Request) -> bool {
-    let Some(actual) = request.context.get(&c.left) else {
+    let Some(actual) = resolve_actual(c, request) else {
         return false; // no evidence for this dimension → fail-closed
     };
     compare(actual, c.operator, &c.right)

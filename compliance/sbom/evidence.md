@@ -109,17 +109,25 @@ sq-toze.28 — `cargo cyclonedx … --spec-version 1.5`), matching the VEX (`1.5
 > The probe files (`**/*.cdx.json`) are **not committed** — `scripts/gen-sbom-vex.sh#L47` and the
 > probe both delete them to keep the worktree clean. They are regenerable with the command above.
 
-## 4. VEX ↔ deny.toml sync verification
+## 4. VEX ↔ deny.toml sync verification (GS-5 — automated, sq-toze.29 [OPUS-4.8])
+
+The drift between the published VEX and the enforced cargo-deny gate is now a **GATING CI check**, not
+a manual inspection (GS-5 RESOLVED). **Source of truth: `deny.toml [advisories].ignore`** — the list
+cargo-deny actually enforces; the VEX must carry exactly one `vulnerabilities[].id` per ignored
+advisory. The check asserts set equality and fails (exit 1) on any unjustified one-sided entry.
 
 ```sh
-# both lists must be exactly {RUSTSEC-2024-0436, RUSTSEC-2025-0134}
-grep RUSTSEC deny.toml
-python3 -c "import json;print([v['id'] for v in json.load(open('supply-chain/vex.cdx.json'))['vulnerabilities']])"
+# the gate (parses deny.toml via tomllib + the VEX via json; robust to the {id,reason} ignore form)
+python3 scripts/check-vex-deny-drift.py        # -> "VEX ↔ deny.toml in sync: 2 advisory id(s) match 1:1."
+python3 scripts/tests/test_vex_deny_drift.py   # hermetic self-test (11 cases incl. the drift-fail paths)
 ```
 
-Recorded this branch: `deny.toml` `[advisories].ignore` = `{RUSTSEC-2024-0436, RUSTSEC-2025-0134}`;
-VEX `vulnerabilities[].id` = `{RUSTSEC-2024-0436, RUSTSEC-2025-0134}`. **In sync.** (Automating this
-drift-check is GS-5.)
+Wired as `.github/workflows/supply-chain.yml#vex-deny-sync` (job name
+`VEX ↔ deny.toml sync (GS-5) — GATING`; no `advisory`/`informational` whole word, so ci-summary gates
+it). Recorded this branch: both = `{RUSTSEC-2024-0436, RUSTSEC-2025-0134}` — **in sync** (no drift to
+resolve). Negative test: temporarily dropping either deny.toml ignore makes the check exit 1 and name
+the offending id. A genuinely-intended one-sided entry is recorded with a reason in the script's
+`JUSTIFIED_DRIFT` allow-list (empty today).
 
 ## 5. Provenance verification (for a consumer)
 

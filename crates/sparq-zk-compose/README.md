@@ -49,7 +49,11 @@ shape — never trust a declared id:
 
 - **scan** `scan_k{k}_n{n}_r{r}`: `k` = number of committed graphs, `n` =
   smallest compiled slot-bucket ≥ the largest graph, `r` = smallest compiled
-  row-bucket ≥ the disclosed match count. See `build::derive_scan_id`.
+  row-bucket ≥ the disclosed match count. See `build::derive_scan_id`. The lattice
+  is `k ∈ {1,2}`, `n ∈ {16,64}`, `r ∈ {4,8}`, and ALL EIGHT `(k,n,r)` combinations
+  are now compiled ([OPUS-4.8] sq-pzet wired the remaining five — `k1_n16_r8`,
+  `k1_n64_r4`, `k1_n64_r8`, `k2_n16_r4`, `k2_n64_r4` — closing the
+  silent-unprovability gap where `derive_scan_id` returned an id with no package).
 - **filter_int** `filter_int_d{d}`: `d` = the hidden value's decimal digit count,
   which must EXACTLY equal a compiled member (the circuit's `digits: [u8; d]`
   witness pins the count). Compiled members: `d ∈ {1,2,3,4}` (the contiguous
@@ -57,9 +61,25 @@ shape — never trust a declared id:
   requires an exact match and returns `None` for any other count (e.g. 5..=19),
   so `build_filter_int` cleanly declines an out-of-family operand rather than
   deriving a wrong-`d` member that would be silently unprovable (sq-wto).
+- **join_eq** `join_eq_na{n_a}_nb{n_b}`: the two graph-size buckets select the
+  member, exactly as scan's `n` does. The buckets are `{16,64}` (aligned with
+  scan's `n`), and ALL FOUR `(n_a,n_b)` combinations are compiled ([OPUS-4.8]
+  sq-pzet added the `64` bucket — `na16_nb64`, `na64_nb16`, `na64_nb64` — so a
+  hidden join composes with a scan over the `n=64` bucket). See
+  `build::derive_join_eq_id`; out-of-family (`> 64`) returns `None`.
 
 The verifier re-derives and rejects on mismatch (`CircuitIdMismatch`), so a
 proof can only verify against the member its public inputs fit.
+
+> **NOT-yet-sound (standing caveat — sq-qhy4 / sq-9hrn; remediation epic sq-1s2).**
+> sq-pzet only BUILDS the remaining family members (constraint encoding + the
+> prove/verify entry points, with prove→verify round-trip + invalid-witness-rejected
+> tests per member). It makes NO soundness or zero-knowledge-security claim: the
+> composition verifier's soundness is the subject of the open audit (`research/
+> zk-soundness-audit.md` / `research/mpc-cozk-reaudit.md`). A passing proof here is
+> NOT a guarantee that the SPARQL statement holds under an adversarial prover. The
+> full-binding verifier entry point is still `verifier::verify_manifest`, and even it
+> inherits the open verifier-soundness question.
 
 ### Manifest (`manifest::ProofManifest`)
 

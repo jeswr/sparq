@@ -28,9 +28,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # [OPUS-4.8] merge-throughput: path-filtered gate (same pattern as ci.yml's `changes`).
+  # cargo-deny / cargo-vet / the SBOM all read the resolved DEPENDENCY GRAPH (Cargo.lock /
+  # Cargo.toml) and the source tree — a doc-only PR changes none of that, so the result is
+  # identical and these legs can skip while the required ci-summary gate still resolves
+  # SUCCESS (the skipped legs' `skipped` conclusion is non-failing in the aggregator). The
+  # daily dependency-monitoring.yml watchdog remains the defence-in-depth for advisories
+  # disclosed BETWEEN PRs on an unchanged graph. SAFE-BY-DEFAULT: rust_changed is forced
+  # 'true' on every event except `pull_request`, so the canonical push/merge_group/manual
+  # supply-chain runs ALWAYS execute the full set. The `vex-deny-sync` job is deliberately
+  # NOT gated: it validates the checked-in deny.toml↔vex.cdx.json invariant (which a doc/
+  # config PR can touch without changing Rust) and is fast pure-Python.
+  changes:
+    name: detect rust changes (supply-chain)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust_changed: ${{ steps.decide.outputs.rust_changed }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - 'deny.toml'
+              - 'supply-chain/**'
+              - '.github/workflows/supply-chain.yml'
+      - name: Decide rust_changed (safe-by-default off the PR path)
+        id: decide
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "event=${{ github.event_name }} -> forcing rust_changed=true (full supply-chain)"
+          else
+            echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
+            echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }}"
+          fi
+
   # ---- cargo-deny: advisories, bans, sources, licenses (all gating) ----
   audit:
     name: cargo-deny (advisories + bans + sources + licenses)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -78,6 +126,8 @@ jobs:
   # "informational" word, so ci-summary treats it as GATING (intentional).
   vet:
     name: cargo-vet (per-dependency audit attestations) — GATING
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -91,9 +141,33 @@ jobs:
       - name: cargo-vet check — GATING
         run: cargo vet --locked
 
+  # ---- VEX ↔ deny.toml drift gate ----
+  # [OPUS-4.8] sq-toze.29 (GS-5): the published VEX (supply-chain/vex.cdx.json) and the
+  # ACTUAL cargo-deny gate (deny.toml [advisories].ignore) name the same set of tolerated
+  # advisories; they were kept in step by a "KEEP THIS IN SYNC" comment + manual review.
+  # This job makes the invariant a CI gate: it fails if the deny.toml ignore-id set and the
+  # VEX vulnerabilities[].id set drift apart (so the public exploitability story can never
+  # silently disagree with the gate that's actually enforced). Source of truth is deny.toml.
+  # Pure-stdlib Python (tomllib/json on the runner's 3.12); also runs the hermetic self-test
+  # so a regression in the check itself is caught. NOTE: the job name has NO "advisory"/
+  # "informational" WHOLE WORD, so the ci-summary aggregator treats it as GATING (intentional
+  # — see ci-summary.yml's \b(advisory|informational)\b rule; "advisories" plural here is in
+  # the comment, not the name).
+  vex-deny-sync:
+    name: VEX ↔ deny.toml sync (GS-5) — GATING
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: VEX ↔ deny.toml drift self-test
+        run: python3 scripts/tests/test_vex_deny_drift.py
+      - name: VEX ↔ deny.toml drift check — GATING
+        run: python3 scripts/check-vex-deny-drift.py
+
   # ---- CycloneDX SBOM ----
   sbom:
     name: generate CycloneDX SBOM
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

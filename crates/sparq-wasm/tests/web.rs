@@ -334,3 +334,85 @@ fn apply_delta_batch() {
         .ask("PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }")
         .unwrap());
 }
+
+// ---- [OPUS-4.8] sq-yqi1 (#162): the opt-in SHACL `validate` binding, in real wasm ----
+//
+// These exercise the REAL exported `Store::validate(data, shapes, format)` through the
+// wasm/JS boundary (the JSON string it returns and the JsError parse-error arm) — the
+// surface PSS's ADR-0014 ShaclValidator seam consumes. Compiled only under the `shacl`
+// feature, exactly as the binding is. The native `#[cfg(test)]` tests in src/shacl.rs
+// cover the JSON serialiser; this proves it actually exports to and runs in wasm.
+#[cfg(feature = "shacl")]
+mod shacl {
+    use super::*;
+
+    const SHAPES: &str = r#"
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://example.org/> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+        ex:PersonShape a sh:NodeShape ;
+          sh:targetClass ex:Person ;
+          sh:property [
+            sh:path ex:age ;
+            sh:datatype xsd:integer ;
+            sh:minInclusive 0 ;
+            sh:message "age must be a non-negative integer" ;
+          ] ;
+          sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+    "#;
+
+    /// Conforming data validates to `{"conforms":true,"results":[]}` across the boundary.
+    #[wasm_bindgen_test]
+    fn validate_conforming() {
+        let store = Store::load("", "turtle").unwrap();
+        let data = r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person ; ex:age 30 ; ex:name "Alice" .
+        "#;
+        let json = store
+            .validate(data, SHAPES, "turtle")
+            .expect("validate must return a report");
+        assert_eq!(json, r#"{"conforms":true,"results":[]}"#, "{json}");
+    }
+
+    /// Violating data surfaces a constraint violation with focusNode / path / message —
+    /// the fields PSS consumes — as a parseable JSON report.
+    #[wasm_bindgen_test]
+    fn validate_violating() {
+        let store = Store::load("", "turtle").unwrap();
+        let data = r#"
+            @prefix ex: <http://example.org/> .
+            ex:bob a ex:Person ; ex:age -1 .
+        "#;
+        let json = store.validate(data, SHAPES, "turtle").unwrap();
+        assert!(json.contains(r#""conforms":false"#), "{json}");
+        assert!(
+            json.contains(r#""focusNode":"<http://example.org/bob>""#),
+            "focus node: {json}"
+        );
+        assert!(
+            json.contains(r#""path":"<http://example.org/age>""#),
+            "path: {json}"
+        );
+        assert!(
+            json.contains(r#""message":"age must be a non-negative integer""#),
+            "declared message: {json}"
+        );
+        assert!(
+            json.contains("MinInclusiveConstraintComponent"),
+            "minInclusive: {json}"
+        );
+        assert!(
+            json.contains("MinCountConstraintComponent"),
+            "minCount (missing name): {json}"
+        );
+    }
+
+    /// A malformed shapes/data graph surfaces as the JsError Err arm, not a trap.
+    #[wasm_bindgen_test]
+    fn validate_parse_error_is_err() {
+        let store = Store::load("", "turtle").unwrap();
+        let bad = store.validate("@prefix ex: <http://ex/> . ex:a ex:p", SHAPES, "turtle");
+        assert!(bad.is_err(), "a truncated data graph must return Err");
+    }
+}
