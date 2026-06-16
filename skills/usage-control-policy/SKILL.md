@@ -115,6 +115,35 @@ let out = store.materialize_odrl_policy(&policy, &req);
 
 **Fail-closed (deny):** a deny is materialized only when a prohibition **matches** the request (decided by `sparq_policy::matched_prohibition` — the evaluator's own conflict test, *not* `Decision.allow == false`, which conflates a carve-out with a plain no-permission deny) AND the action is mappable AND the party+target are concrete. An unmatched / unmapped / partyless / targetless prohibition materializes **nothing** — and an unmappable carve-out is *reported* in `reasons`, never silently dropped (dropping a deny would widen access).
 
+### Persisting a constraint as a re-checked ACP condition (`materialize_odrl_permission_conditional`) — [OPUS-4.8] sq-hiz4
+
+The one-shot `materialize_odrl_permission` *freezes* every constraint into a single allow scoped to the supplied request party. `materialize_odrl_permission_conditional` instead persists a **faithfully-mappable** constraint as an ACP `auth:ConditionalGrant` (the same `noneOf` machinery the ACP materializer emits), so the granted agent is **re-checked per session** through the unchanged enforcement path — not re-running the ODRL evaluator. A constraint with **no** faithful ACP analogue keeps the one-shot behaviour (checked once, frozen).
+
+```rust,ignore
+// The recipient constraint names carol — NOT whoever materializes the grant.
+let req = Request::new("http://www.w3.org/ns/odrl/2/read")
+    .on("https://pod.ex/notes/n1").by("https://alice.ex/card#me");
+store.materialize_odrl_permission_conditional(&policy, &req); // policy: recipient eq carol
+// Re-checked per session: carol is granted; alice (the materializer) is NOT.
+```
+
+**Constraint → ACP condition mapping table** (fail-closed: map ONLY when the ACP analogue is the *same or stricter*):
+
+| ODRL constraint | Operator | ACP analogue | Faithful? | Behaviour |
+|---|---|---|---|---|
+| `odrl:recipient` / `odrl:assignee` | `eq` / `isA` | `auth:agent <webid>` on a `ConditionalGrant` (agent matcher) | ✅ recipient-of-data IS the session agent | **persisted, re-checked per session** |
+| `odrl:recipient` / `odrl:assignee` | `isPartOf` (static set) | one `auth:agent` head per member (OR) | ✅ set membership = agent ∈ set | **persisted** (one grant/member) |
+| `odrl:recipient` / `odrl:assignee` | `neq` / order | "everyone EXCEPT" needs a per-session `noneOf` | ❌ no faithful single-grant analogue | **one-shot** (frozen) |
+| `odrl:purpose` | any | (none — a client app ≠ a purpose-of-use) | ❌ ACP session carries no purpose dimension; client-matcher would over-grant | **one-shot** (frozen) |
+| `odrl:dateTime` / time window | `lteq` / `lt` / `gteq` / `gt` | (none — matcher accept-sets are static; no "now") | ❌ ACP has no clock dimension to re-check | **one-shot** (frozen) |
+| `odrl:count` | any | (none — ACP is stateless) | ❌ no usage counter exists | **one-shot** (frozen) |
+| any unrecognised left-operand | any | (none) | ❌ | **one-shot** (frozen) |
+| *no constraint* | — | `auth:agent auth:Public` (action/target/duties already held) | ✅ | persisted (public) |
+
+**Fail-safe on mixed constraints:** a persisted condition is emitted ONLY when **every** constraint on the rule maps faithfully. A rule mixing a mappable recipient with an unmappable `dateTime`/`purpose`/`count` falls back **entirely** to the one-shot path — persisting only the recipient would silently drop the time/purpose/count bound and over-grant. Recipient IRIs inside the reserved pair encoding (`urn:sparq:` / `&client=`) are dropped from the grant head (anti-impersonation). The two ODRL "any recipient" sentinels fold onto auth principals: `odrl:All`/`odrl:Group` → `auth:Public`, `odrl:AllConnections` → `auth:Authenticated`.
+
+**Why only recipient/assignee maps:** the ACP session re-check carries exactly `(agent, client)`. The recipient-of-data is precisely the session **agent**, so an agent matcher re-checks it with identical semantics. Purpose, time, and count have **no** stateless `(agent, client)` analogue, so persisting them would require either freezing the check (= the one-shot path, already correct) or a looser approximation that could over-grant — rejected.
+
 ## Learn more
 
 - Crate README: [`crates/sparq-policy/README.md`](../../crates/sparq-policy/README.md)

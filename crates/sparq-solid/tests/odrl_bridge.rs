@@ -17,6 +17,8 @@ use sparq_solid::{
 
 const ODRL: &str = "http://www.w3.org/ns/odrl/2/";
 const ALICE: &str = "https://alice.ex/card#me";
+const BOB: &str = "https://bob.ex/card#me";
+const CAROL: &str = "https://carol.ex/card#me";
 const N1: &str = "https://pod.ex/notes/n1";
 
 fn odrl(local: &str) -> String {
@@ -486,4 +488,242 @@ fn permit_only_regression_via_policy() {
     assert!(store.materialize_odrl_policy(&read_policy(), &req).granted);
     let alice = Session { agent: Some(ALICE), client: None };
     assert!(store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1));
+}
+
+// ===========================================================================
+// [OPUS-4.8] sq-hiz4 — conditional grants: a FAITHFULLY-mappable constraint
+// (recipient/assignee → agent matcher) persists as an `auth:ConditionalGrant`
+// and is RE-CHECKED per session; an UNmappable constraint stays one-shot.
+// ===========================================================================
+use sparq_solid::materialize_permission_conditional;
+
+fn reads(store: &mut PodStore, agent: &str) -> bool {
+    let s = Session { agent: Some(agent), client: None };
+    store.accessible(&s, Mode::Read).iter().any(|g| g.as_str() == N1)
+}
+
+/// Count `auth:ConditionalGrant` heads naming `agent` (or any, if `agent` is None) in
+/// the materialized auth view of a freshly-bridged `graph`.
+fn cond_grants_for(graph: &Graph, agent: Option<&str>) -> usize {
+    let q = match agent {
+        Some(a) => format!(
+            "SELECT ?g WHERE {{ GRAPH <urn:sparq:auth> {{ \
+             ?g <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                <https://sparq.dev/ns/auth#ConditionalGrant> ; \
+                <https://sparq.dev/ns/auth#agent> <{a}> }} }}"
+        ),
+        None => "SELECT ?g WHERE { GRAPH <urn:sparq:auth> { \
+             ?g <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                <https://sparq.dev/ns/auth#ConditionalGrant> } }"
+            .to_owned(),
+    };
+    sparq_engine::query(graph, &q).expect("query").rows.len()
+}
+
+/// A permission whose RECIPIENT is constrained to carol (not whoever materialized it).
+fn recipient_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/recip> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:eq ;
+                      odrl:rightOperand <https://carol.ex/card#me> ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+// 14. A recipient constraint persists as a ConditionalGrant re-checked per session:
+//     carol (the recipient) is granted; everyone else is denied — through accessible/
+//     query_as — even though ALICE materialized it.
+#[test]
+fn recipient_constraint_persists_as_rechecked_condition() {
+    // Inspect the materialized triples via the free-function form (we own the Graph).
+    // Note: the materializing request party is ALICE, but the constraint names CAROL.
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &recipient_policy(), &req);
+    assert!(out.granted, "faithful recipient maps to a condition: {out:?}");
+    // A real ConditionalGrant head naming carol now lives in the auth view.
+    assert_eq!(cond_grants_for(&g, Some(CAROL)), 1, "carol condition present");
+    assert_eq!(cond_grants_for(&g, Some(ALICE)), 0, "no condition for the materializer");
+
+    // RE-CHECK through the real enforcement path: rebuild a store over the SAME graph.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&recipient_policy(), &req).granted);
+    assert!(reads(&mut store, CAROL), "recipient carol granted");
+    assert!(!reads(&mut store, ALICE), "materializing party is NOT auto-granted");
+    assert!(!reads(&mut store, BOB), "unrelated agent denied");
+    assert!(!reads(&mut store, "https://x.ex/#m"), "stranger denied");
+    assert!(store.accessible(&Session::default(), Mode::Read).is_empty(), "anonymous denied");
+
+    // End-to-end through query_as: only carol sees the content.
+    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    let carol = Session { agent: Some(CAROL), client: None };
+    let alice = Session { agent: Some(ALICE), client: None };
+    assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
+    assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 0);
+}
+
+// 15. A recipient `isPartOf` SET → one re-checked condition per member (OR).
+#[test]
+fn recipient_set_persists_as_multiple_conditions() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/set> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand "https://bob.ex/card#me|https://carol.ex/card#me" ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+
+    assert!(reads(&mut store, BOB), "bob in set");
+    assert!(reads(&mut store, CAROL), "carol in set");
+    assert!(!reads(&mut store, ALICE), "alice not in set");
+    assert!(!reads(&mut store, "https://dave.ex/#m"), "dave not in set");
+}
+
+// 16. An UNmappable constraint (`odrl:purpose`) STAYS one-shot: the persisted view
+//     holds NO ConditionalGrant; access is the frozen check against the supplied
+//     request context (granted only if purpose matched at materialization), scoped
+//     to the materializing party.
+#[test]
+fn purpose_constraint_stays_one_shot() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/purp> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ;
+                      odrl:operator odrl:eq ;
+                      odrl:rightOperand "research" ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+
+    // (a) purpose SATISFIED at materialization → one-shot grant (frozen) for alice.
+    let req = Request::new(odrl("read"))
+        .on(N1)
+        .by(ALICE)
+        .with(odrl("purpose"), Value::Str("research".to_owned()));
+    let mut g = pod();
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "purpose satisfied → one-shot grant: {out:?}");
+    // NO ConditionalGrant was persisted (purpose has no faithful ACP analogue).
+    assert_eq!(cond_grants_for(&g, None), 0, "purpose must NOT become a re-checked condition");
+
+    // The frozen grant is scoped to the materializing party (alice).
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(reads(&mut store, ALICE), "alice one-shot grant");
+    assert!(!reads(&mut store, CAROL), "no widening");
+
+    // (b) purpose NOT satisfied (missing context) → fail-closed, nothing granted.
+    let mut store2 = PodStore::new(pod());
+    let bad = Request::new(odrl("read")).on(N1).by(ALICE); // no purpose context
+    assert!(!store2.materialize_odrl_permission_conditional(&pol, &bad).granted);
+    assert!(!reads(&mut store2, ALICE), "unsatisfied purpose grants nothing");
+}
+
+// 17. MIXED constraints fail SAFE: recipient (mappable) + dateTime (unmappable) →
+//     the WHOLE rule stays one-shot so the time bound is still enforced (frozen).
+//     A persisted recipient-only condition would have LOST the time bound (over-grant).
+#[test]
+fn mixed_mappable_and_unmappable_stays_one_shot() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/mix> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:eq ;
+                      odrl:rightOperand <https://carol.ex/card#me> ] ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ;
+                      odrl:operator odrl:lteq ;
+                      odrl:rightOperand "2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+
+    // Out-of-window request → DENY → nothing (the time bound is NOT dropped).
+    let req = Request::new(odrl("read"))
+        .on(N1)
+        .by(CAROL)
+        .with(odrl("dateTime"), Value::DateTime("2026-06-16T00:00:00Z".to_owned()));
+    let mut g = pod();
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(!out.granted, "out-of-window with mixed constraints must NOT grant: {out:?}");
+    // No ConditionalGrant leaked carol an unconditional re-checked allow.
+    assert_eq!(cond_grants_for(&g, None), 0, "no condition emitted when a bound is unmappable");
+    let mut store = PodStore::new(pod());
+    assert!(!store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(!reads(&mut store, CAROL), "no over-grant from dropping the time bound");
+}
+
+// 18. Compose-with-deny: a matching prohibition overrides the conditional path
+//     (deny-overrides) — nothing is materialized.
+#[test]
+fn prohibition_overrides_conditional_path() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/po> a odrl:Set ;
+  odrl:permission [ odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <https://carol.ex/card#me> ] ] ;
+  odrl:prohibition [ odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = store.materialize_odrl_permission_conditional(&pol, &req);
+    assert!(!out.granted, "prohibition overrides: {out:?}");
+    assert!(!reads(&mut store, CAROL), "deny-overrides: carol gets nothing");
+}
+
+// 19. A bare permission with NO constraints, via the conditional entry point, grants
+//     PUBLIC (any session) — only valid because action/target/duties already held.
+//     (Documents the no-constraint → auth:Public head behaviour.)
+#[test]
+fn no_constraint_conditional_grants_public() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/pub> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    // Free-function form: a PUBLIC ConditionalGrant head is materialized.
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "bare permission grants: {out:?}");
+    assert_eq!(cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")), 1);
+
+    // Through the real enforcement path: public read = any agent AND anonymous.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(reads(&mut store, BOB));
+    assert!(!store.accessible(&Session::default(), Mode::Read).is_empty(), "anon public read");
 }

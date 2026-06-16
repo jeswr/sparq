@@ -90,6 +90,15 @@ lexical form; mixed-offset normalization, DPV `purpose` hierarchies, and
 `Duty → proof-manifest` discharge are tracked as follow-on beads. See
 `research/feature-research-odrl-policy.md`.
 
+**Constraint persistence vs. one-shot** (sq-hiz4, in `sparq-solid`'s opt-in bridge):
+`materialize_odrl_permission_conditional` persists a `odrl:recipient`/`odrl:assignee`
+constraint (`eq`/`isA`/`isPartOf`) as a **re-checked** ACP `auth:ConditionalGrant`
+(agent matcher) — the only constraint with a faithful stateless `(agent, client)`
+analogue. `odrl:purpose`/`dateTime`/`count` have none and stay **one-shot** (checked
+once at materialization). Mapping table: the
+[`usage-control-policy`](../../skills/usage-control-policy/SKILL.md) skill +
+[`sparq-solid` README](../sparq-solid/README.md).
+
 ## 📚 Learn more
 
 - Skill: [`skills/usage-control-policy/SKILL.md`](../../skills/usage-control-policy/SKILL.md)
