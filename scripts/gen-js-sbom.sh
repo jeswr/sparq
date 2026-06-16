@@ -43,6 +43,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 VERSION="${VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --always 2>/dev/null || echo dev)}}"
+# [OPUS-4.8] sq-toze.27: SANITIZE the version before it becomes part of a FILENAME.
+# On a pull_request event GITHUB_REF_NAME is "<pr-number>/merge" (e.g. "348/merge"); the
+# embedded `/` made the --output-file path "sbom/sparq-js-348/merge.sbom.cdx.json", i.e.
+# cyclonedx-npm silently wrote into a `sparq-js-348/` SUBDIRECTORY. The script still exited
+# 0 (the file existed at its scattered path), but the workflow's non-recursive upload glob
+# `sbom/sparq-js*.cdx.json` then matched nothing and `if-no-files-found: error` failed the
+# job (exit 1). Collapse any character that is not a safe filename atom (so `/`, whitespace,
+# etc.) to a single `-` so the SBOM always lands flat in $OUT_DIR where the glob expects it.
+VERSION="$(printf '%s' "$VERSION" | tr -cs 'A-Za-z0-9._-' '-')"
+VERSION="${VERSION:-dev}"
 OUT_DIR="${OUT_DIR:-sbom}"
 mkdir -p "$OUT_DIR"
 # [OPUS-4.8] sq-toze.27: anchor OUT_DIR to an ABSOLUTE path. cyclonedx-npm runs inside
