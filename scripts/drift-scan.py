@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+# [OPUS-4.8] Periodic drift scanner (bead sq-ncvq.11, epic sq-ncvq).
+# Authored by Opus 4.8 (Fable unavailable; flag for re-review when Fable returns).
+#
+# The PERIODIC AUDIT half of the maintenance flow-on system
+# (research/maintenance-flow-on-automation-design.md §5). The three halves:
+#   - the merge-time GATES (scripts/gate-*.py, ci.yml) stop NEW drift landing;
+#   - the merge-triggered ENGINE (scripts/flow-on.py, flow-on.yml) mints
+#     follow-ons when a PR merges;
+#   - THIS scanner sweeps the WHOLE repo on a schedule to find EXISTING drift
+#     the gates predate or the heuristics missed. It complements, never gates.
+#
+# DRIFT CLASSES (each maps to a §5 finding in the design doc):
+#   bench-missing       a crate with NO registered benchmark in bench/benchmarks.toml
+#                       (cross-ref `source = crates/<x>` vs crates/*/)            §5.A
+#   skill-missing       a PUBLIC crate named in NO skills/**/SKILL.md             §5.B
+#   explain-asymmetry   a public-surface capability present in Rust/HTTP but
+#                       absent from the WASM/JS binding (best-effort)             §5.C
+#   dashboard-row       a registered bench suite with NO FEATURED_SUITES row in
+#                       bench/dashboard/dashboard.js                              §5.D
+#   conformance-split   a conformance ratchet living OUTSIDE the central
+#                       sparq-conformance scoreboard                             §5.E
+#
+# WHY GITHUB ISSUES, NOT `bd create` (identical reasoning to flow-on.py):
+# (design §2.2) In CI there is NO `bd` dolt DB — it lives only in the
+# orchestrator's main checkout and is gitignored; hand-editing `.beads/` is
+# forbidden. So this script must NOT touch `bd` or `.beads/`. It emits each
+# drift item as a GitHub issue labelled `drift` + `auto`; the orchestrator
+# reconciles them into beads out-of-band.
+#
+# IDEMPOTENCY: each drift item has a STABLE dedup_key (e.g.
+# `bench-missing:sparq-nlq`). The key is embedded in the issue body as
+# `<!-- drift-key: <key> -->`. Before creating, the script searches OPEN issues
+# for that marker and skips if one exists — so re-running the weekly sweep never
+# duplicates an item. The key is deliberately content-free (no PR/date) so it is
+# stable across runs.
+#
+# Usage:
+#   drift-scan.py --dry-run              # print the drift report (text); no gh writes
+#   drift-scan.py --dry-run --json out.json   # also write machine-readable JSON
+#   drift-scan.py                        # CI: file/update `drift`+`auto` issues
+#   drift-scan.py --root path/to/repo    # scan a different tree (tests use fixtures)
+#
+# Hermetic: with --dry-run the script makes NO gh calls at all, so it is fully
+# testable against a fixture repo layout with no network/gh/git. stdlib-only.
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Labels every drift issue carries.
+BASE_LABELS = ["drift", "auto"]
+
+# Crates whose absence of a DIRECT `source = crates/<x>` bench registration is
+# by design, because they are the shared query-execution STACK that the CLI /
+# differential harnesses already measure transitively (design §5.A: "Covered,
+# not gaps: ... core/engine/cli via CLI harnesses"). A `[[benchmark]]` whose
+# `source` references `crates/sparq-cli` or `crates/sparq-bench` exercises this
+# whole stack, so flagging each of them individually would be a false positive.
+#   - sparq-bench / sparq-conformance: the harness + conformance runner
+#     themselves, not measured TARGETS;
+#   - sparq-core / sparq-engine / sparq-cli: the query stack the CLI bench
+#     suites (cli-bench-*, sparq-bench-compare, operator-coverage, …) drive;
+#   - sparq-canon: a thin RDFC-1.0 lib surfaced via the rdf-canon skill, no
+#     standalone perf surface.
+# Everything NOT listed here is scanned — so genuinely unbenched surfaces
+# (sparq-nlq, sparq-py, sparq-serve, sparq-mpc, sparq-wasm, the zk crates …)
+# still surface, matching the design's concrete §5.A gap list.
+BENCH_EXEMPT_CRATES = frozenset(
+    {
+        "sparq-bench",
+        "sparq-conformance",
+        "sparq-core",
+        "sparq-engine",
+        "sparq-cli",
+        "sparq-canon",
+    }
+)
+
+# Bench FAMILIES (leading id token) that the design (§5.D) accepts as
+# intentionally unfeatured on the capability dashboard: internal harness
+# runners, SPIKES, external-cost suites, and the raw ingest micro-benches.
+DASHBOARD_EXEMPT_FAMILIES = frozenset(
+    {
+        "cli",  # CLI query-suite runners (cli-bench-*, cli-ingest, …)
+        "hw",  # hardware probe (hw-bench)
+        "ci",  # CI harness (ci-bench, ci-bench-ec2)
+        "serve",  # serve spike (CATALOG: research SPIKE, not a maintained suite)
+        "memtier",  # memtier spike
+        "wikidata",  # external-cost suites (wikidata-8b) — acceptably unfeatured
+        "parse",  # parse-baseline micro-bench feeds the ingest harness
+        "compress",  # compression micro-bench, not a capability card
+        "competitor",  # competitor-gather plumbing, not a suite
+    }
+)
+
+
+@dataclass
+class DriftItem:
+    """One detected drift, ready to be reported or filed as an issue."""
+
+    drift_class: str
+    dedup_key: str
+    title: str
+    body: str
+
+    def to_json(self) -> dict[str, str]:
+        return {
+            "class": self.drift_class,
+            "dedup_key": self.dedup_key,
+            "title": self.title,
+            "body": self.body,
+        }
+
+
+# --------------------------------------------------------------------------- #
+# Repo introspection helpers (all pure: take a root, read the tree)
+# --------------------------------------------------------------------------- #
+def list_crates(root: Path) -> list[str]:
+    """Every crate dir name under crates/ that has a Cargo.toml, sorted."""
+    crates_dir = root / "crates"
+    if not crates_dir.is_dir():
+        return []
+    out = []
+    for child in sorted(crates_dir.iterdir()):
+        if (child / "Cargo.toml").is_file():
+            out.append(child.name)
+    return out
+
+
+def crate_is_public(root: Path, crate: str) -> bool:
+    """A crate is PUBLIC iff its Cargo.toml does NOT carry `publish = false`
+    (matching gate-new-crate.py's definition exactly)."""
+    cargo = root / "crates" / crate / "Cargo.toml"
+    try:
+        text = cargo.read_text(encoding="utf-8")
+    except OSError:
+        return True  # absent/unreadable Cargo.toml: treat as public (safe default)
+    return re.search(r"^\s*publish\s*=\s*false\b", text, re.MULTILINE) is None
+
+
+def bench_registry_sources(root: Path) -> str:
+    """The raw text of bench/benchmarks.toml (we match `source` lines textually,
+    mirroring gate-new-crate.py — a full TOML parse of the array is unnecessary
+    and the registry is hand-authored prose-heavy TOML)."""
+    reg = root / "bench" / "benchmarks.toml"
+    try:
+        return reg.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def crate_has_registered_bench(registry_text: str, crate: str) -> bool:
+    """True iff any `source = ...` line references crates/<crate>/ or crates/<crate>".
+    Identical predicate to gate-new-crate.py::crate_has_registered_bench."""
+    pat = re.compile(
+        rf"^\s*source\s*=.*crates/{re.escape(crate)}(?:/|\b)",
+        re.MULTILINE,
+    )
+    return pat.search(registry_text) is not None
+
+
+def registered_bench_ids(root: Path) -> list[str]:
+    """Every benchmark `id` declared in bench/benchmarks.toml, in file order."""
+    text = bench_registry_sources(root)
+    ids = []
+    for m in re.finditer(r'^\s*id\s*=\s*"([^"]+)"', text, re.MULTILINE):
+        ids.append(m.group(1))
+    return ids
+
+
+def crates_named_in_skills(root: Path) -> set[str]:
+    """Every sparq-<x> crate token mentioned in ANY skills/**/SKILL.md.
+
+    Note these tokens are free text in the skill prose (e.g. `sparq-engine`),
+    so a crate counts as 'covered' the moment any skill names it. We only treat
+    EXACT crate dir names as coverage; aspirational tokens like `sparq-explain`
+    (no such crate) are ignored by the caller (it intersects with real crates)."""
+    skills_dir = root / "skills"
+    named: set[str] = set()
+    if not skills_dir.is_dir():
+        return named
+    for skill in skills_dir.rglob("SKILL.md"):
+        try:
+            text = skill.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for tok in re.findall(r"\bsparq-[a-z0-9-]+", text):
+            named.add(tok)
+    return named
+
+
+def dashboard_featured_keys(root: Path) -> str:
+    """Raw text of the FEATURED_SUITES block in bench/dashboard/dashboard.js.
+
+    Returns the slice from `FEATURED_SUITES = [` to the closing `];`, lowercased,
+    so the caller can test whether a suite's name/aliases appear. We match
+    textually (the file is JS, not data we should eval)."""
+    dash = root / "bench" / "dashboard" / "dashboard.js"
+    try:
+        text = dash.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    m = re.search(r"FEATURED_SUITES\s*=\s*\[(.*?)\];", text, re.DOTALL)
+    return (m.group(1) if m else "").lower()
+
+
+# --------------------------------------------------------------------------- #
+# Drift scanners — one per class. Each returns a list[DriftItem].
+# --------------------------------------------------------------------------- #
+def scan_bench_missing(root: Path) -> list[DriftItem]:
+    """§5.A — crates with NO registered benchmark in bench/benchmarks.toml."""
+    registry = bench_registry_sources(root)
+    items: list[DriftItem] = []
+    for crate in list_crates(root):
+        if crate in BENCH_EXEMPT_CRATES:
+            continue
+        if crate_has_registered_bench(registry, crate):
+            continue
+        key = f"bench-missing:{crate}"
+        items.append(
+            DriftItem(
+                drift_class="bench-missing",
+                dedup_key=key,
+                title=f"drift: crate `{crate}` has no registered benchmark",
+                body=(
+                    f"`crates/{crate}` is not referenced by any `source = ...` line in "
+                    f"`bench/benchmarks.toml`, so it is invisible to the CATALOG / CI / "
+                    f"dashboard.\n\n"
+                    f"Follow-on: register a `[[benchmark]]` entry whose `source` "
+                    f"references `crates/{crate}/` (an example bench is enough — cf. the "
+                    f"mpc/wasm example-bench gaps in the flow-on design §5.A), or, if the "
+                    f"crate is intentionally unbenched, record that decision (e.g. mark it "
+                    f"`publish = false` and note it in the crate README)."
+                ),
+            )
+        )
+    return items
+
+
+def scan_skill_missing(root: Path) -> list[DriftItem]:
+    """§5.B — PUBLIC crates named in NO skills/**/SKILL.md."""
+    named = crates_named_in_skills(root)
+    items: list[DriftItem] = []
+    for crate in list_crates(root):
+        if not crate_is_public(root, crate):
+            continue  # private crates are not a public surface; exempt
+        if crate in named:
+            continue
+        key = f"skill-missing:{crate}"
+        items.append(
+            DriftItem(
+                drift_class="skill-missing",
+                dedup_key=key,
+                title=f"drift: public crate `{crate}` is named in no SKILL.md",
+                body=(
+                    f"`crates/{crate}` is a public surface (its Cargo.toml is not "
+                    f"`publish = false`) yet it is mentioned in no `skills/**/SKILL.md`.\n\n"
+                    f"Follow-on (AGENTS.md public-API → SKILL.md rule): either add a "
+                    f"`skills/<surface>/SKILL.md` covering `{crate}` (or name it in an "
+                    f"existing skill), or — if it is intentionally internal — make it "
+                    f"`publish = false` and say so in the crate README."
+                ),
+            )
+        )
+    return items
+
+
+def scan_explain_asymmetry(root: Path) -> list[DriftItem]:
+    """§5.C — a public-surface capability present in Rust/HTTP but absent from
+    the WASM/JS binding. Best-effort, EXPLAIN-shaped: we look for `explain`
+    exposed in the engine + HTTP server but NOT exported from the wasm binding."""
+    items: list[DriftItem] = []
+
+    def file_text(rel: str) -> str:
+        try:
+            return (root / rel).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    engine = file_text("crates/sparq-engine/src/explain.rs")
+    http = file_text("crates/sparq-server/src/http.rs")
+    wasm = file_text("crates/sparq-wasm/src/lib.rs")
+
+    # Capability present on the Rust + HTTP surface?
+    rust_has_explain = "explain" in engine or "explain" in http
+    # Exported from the wasm binding? (a `pub fn`/exported `explain` symbol).
+    wasm_has_explain = re.search(r"\bexplain\w*", wasm) is not None
+
+    if rust_has_explain and not wasm_has_explain:
+        key = "explain-asymmetry:wasm"
+        items.append(
+            DriftItem(
+                drift_class="explain-asymmetry",
+                dedup_key=key,
+                title="drift: EXPLAIN exposed in Rust/HTTP but not in the WASM/JS binding",
+                body=(
+                    "`explain`/`explain_analyze` exist in `crates/sparq-engine/src/explain.rs` "
+                    "and over HTTP (`crates/sparq-server/src/http.rs`), but the WASM/JS binding "
+                    "(`crates/sparq-wasm/src/lib.rs`) exports no `explain` symbol — a "
+                    "public-surface capability asymmetry (design §5.C).\n\n"
+                    "Follow-on: either export EXPLAIN to the JS binding, or explicitly document "
+                    "the omission in `skills/javascript-wasm/SKILL.md` so the asymmetry is "
+                    "intentional and recorded."
+                ),
+            )
+        )
+    return items
+
+
+def scan_dashboard_row(root: Path) -> list[DriftItem]:
+    """§5.D — registered bench suites with NO FEATURED_SUITES dashboard row.
+
+    Heuristic: a registered benchmark `id` is 'featured' iff its id (or a
+    leading token of it) appears in the FEATURED_SUITES block's aliases. This
+    is intentionally loose (the dashboard matches on aliases/tokens too) — its
+    job is to flag whole FAMILIES with no promotion (e.g. the entire ZK family),
+    not to perfectly mirror the JS alias matcher."""
+    featured = dashboard_featured_keys(root)
+    if not featured:
+        return []
+    items: list[DriftItem] = []
+    seen_families: set[str] = set()
+    for bid in registered_bench_ids(root):
+        # Family = the leading slug token (e.g. `zk` for `zk-commit-throughput`).
+        family = bid.split("-", 1)[0]
+        # Skip families that are NOT a capability dashboard surface:
+        #   - internal harness/runner plumbing (cli-*, sparq-bench-*, hw-*, ci-*);
+        #   - the SPIKES + external-cost suites the design (§5.D) explicitly
+        #     accepts as unfeatured: serve/memtier spikes, the external-cost
+        #     wikidata suites, and the raw parse/compress micro-benches that feed
+        #     the ingest harness rather than standing as a capability card.
+        if family in DASHBOARD_EXEMPT_FAMILIES or bid.startswith("sparq-bench"):
+            continue
+        if family in seen_families:
+            continue
+        # Featured iff the family token or the full id appears in the block.
+        if family in featured or bid in featured:
+            continue
+        seen_families.add(family)
+        key = f"dashboard-row:{family}"
+        items.append(
+            DriftItem(
+                drift_class="dashboard-row",
+                dedup_key=key,
+                title=f"drift: bench family `{family}` has no dashboard row",
+                body=(
+                    f"Registered benchmark(s) in the `{family}` family (e.g. `{bid}`) have no "
+                    f"`FEATURED_SUITES` row in `bench/dashboard/dashboard.js` while other "
+                    f"capability surfaces are promoted (design §5.D).\n\n"
+                    f"Follow-on: add a `FEATURED_SUITES` entry for the `{family}` suite, or flag "
+                    f"it `featured = false` in its `bench/benchmarks.toml` entry if it is "
+                    f"intentionally unpromoted."
+                ),
+            )
+        )
+    return items
+
+
+def scan_conformance_split(root: Path) -> list[DriftItem]:
+    """§5.E — conformance ratchets living OUTSIDE the central sparq-conformance
+    scoreboard. We detect crate-local `tests/*.rs` files whose names mark them as
+    a conformance/compliance ratchet (w3c_*, ogc_*, *compliance*, *conformance*)
+    in any crate OTHER than sparq-conformance."""
+    items: list[DriftItem] = []
+    crates_dir = root / "crates"
+    if not crates_dir.is_dir():
+        return items
+    name_pat = re.compile(
+        r"(w3c[_-]|ogc[_-]|compliance|conformance)", re.IGNORECASE
+    )
+    for crate in list_crates(root):
+        if crate == "sparq-conformance":
+            continue  # the central scoreboard itself
+        tests = crates_dir / crate / "tests"
+        if not tests.is_dir():
+            continue
+        hits = sorted(
+            p.name
+            for p in tests.iterdir()
+            if p.is_file() and p.suffix == ".rs" and name_pat.search(p.name)
+        )
+        if not hits:
+            continue
+        key = f"conformance-split:{crate}"
+        joined = ", ".join(f"`{h}`" for h in hits)
+        items.append(
+            DriftItem(
+                drift_class="conformance-split",
+                dedup_key=key,
+                title=f"drift: crate `{crate}` carries conformance ratchets outside the central scoreboard",
+                body=(
+                    f"`crates/{crate}/tests/` holds crate-local conformance/compliance ratchet "
+                    f"test(s) ({joined}) that live OUTSIDE the central `sparq-conformance` "
+                    f"scoreboard, which therefore under-reports the project's real conformance "
+                    f"surface (design §5.E).\n\n"
+                    f"Follow-on: either surface `{crate}`'s ratchet in the central conformance "
+                    f"report, or document the split intentionally (a note in the conformance "
+                    f"report / FINDINGS.md explaining why it stays crate-local)."
+                ),
+            )
+        )
+    return items
+
+
+SCANNERS = (
+    scan_bench_missing,
+    scan_skill_missing,
+    scan_explain_asymmetry,
+    scan_dashboard_row,
+    scan_conformance_split,
+)
+
+
+def scan_all(root: Path) -> list[DriftItem]:
+    items: list[DriftItem] = []
+    for scanner in SCANNERS:
+        items.extend(scanner(root))
+    return items
+
+
+# --------------------------------------------------------------------------- #
+# gh I/O (mirrors flow-on.py exactly so the two halves behave identically)
+# --------------------------------------------------------------------------- #
+def key_marker(dedup_key: str) -> str:
+    return f"<!-- drift-key: {dedup_key} -->"
+
+
+def _gh(args: list[str]) -> str:
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=True)
+    return proc.stdout
+
+
+def open_issue_exists(dedup_key: str) -> bool:
+    marker = key_marker(dedup_key)
+    # Search by the punctuation-light substring `drift-key: <key>` (GitHub's
+    # tokeniser handles `<!--`/`-->` unreliably); verify the full marker against
+    # each returned body so the dedup decision stays exact (cf. flow-on.py).
+    search = f"drift-key: {dedup_key}"
+    out = _gh(
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--label",
+            "drift",
+            "--search",
+            search,
+            "--json",
+            "number,body",
+            "--limit",
+            "100",
+        ]
+    )
+    for issue in json.loads(out):
+        if marker in (issue.get("body") or ""):
+            return True
+    return False
+
+
+_ENSURED_LABELS: set[str] = set()
+
+
+def ensure_label(label: str) -> None:
+    """Idempotently ensure `label` exists before it is applied (gh issue create
+    ERRORS on an unknown label). Best-effort upsert; create_issue reports real
+    failures. Mirrors flow-on.py::ensure_label."""
+    if label in _ENSURED_LABELS:
+        return
+    try:
+        _gh(["label", "create", label, "--force"])
+    except Exception:  # noqa: BLE001 - best-effort; create_issue surfaces real errors
+        pass
+    _ENSURED_LABELS.add(label)
+
+
+def build_issue_body(item: DriftItem) -> str:
+    body = item.body.rstrip() + "\n\n" + key_marker(item.dedup_key)
+    body += (
+        f"\n\n> 🤖 SPARQ agent — auto-generated by the drift scanner "
+        f"(class `{item.drift_class}`, scripts/drift-scan.py). Reconcile into a bead."
+    )
+    return body
+
+
+def create_issue(item: DriftItem) -> str:
+    args = ["issue", "create", "--title", item.title, "--body", build_issue_body(item)]
+    for lbl in BASE_LABELS:
+        ensure_label(lbl)
+        args += ["--label", lbl]
+    return _gh(args).strip()
+
+
+# --------------------------------------------------------------------------- #
+# Reporting
+# --------------------------------------------------------------------------- #
+def print_report(items: list[DriftItem]) -> None:
+    by_class: dict[str, list[DriftItem]] = {}
+    for it in items:
+        by_class.setdefault(it.drift_class, []).append(it)
+    if not items:
+        print("drift-scan: no drift detected.")
+        return
+    print(f"drift-scan: {len(items)} drift item(s) across {len(by_class)} class(es).\n")
+    for cls in (s.__name__.replace("scan_", "").replace("_", "-") for s in SCANNERS):
+        bucket = by_class.get(cls, [])
+        if not bucket:
+            continue
+        print(f"## {cls} ({len(bucket)})")
+        for it in bucket:
+            print(f"  - [{it.dedup_key}] {it.title}")
+        print()
+
+
+def write_json(items: list[DriftItem], path: Path) -> None:
+    payload = {
+        "drift_count": len(items),
+        "items": [it.to_json() for it in items],
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Periodic repo-wide drift scanner.")
+    ap.add_argument("--root", default=str(REPO_ROOT), help="repo root to scan")
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the drift report; make NO gh writes",
+    )
+    ap.add_argument("--json", dest="json_out", help="also write a machine-readable JSON report here")
+    args = ap.parse_args(argv)
+
+    root = Path(args.root).resolve()
+    items = scan_all(root)
+
+    print_report(items)
+    if args.json_out:
+        write_json(items, Path(args.json_out))
+        print(f"drift-scan: wrote JSON report to {args.json_out}")
+
+    if args.dry_run:
+        return 0
+
+    created = 0
+    skipped = 0
+    for it in items:
+        if open_issue_exists(it.dedup_key):
+            print(f"drift-scan: skip (open issue exists) key={it.dedup_key}")
+            skipped += 1
+            continue
+        url = create_issue(it)
+        print(f"drift-scan: created {url} (class={it.drift_class}, key={it.dedup_key})")
+        created += 1
+
+    print(f"drift-scan: done — {created} created, {skipped} skipped (already open).")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a") as fh:
+            fh.write("### drift-scan\n\n")
+            fh.write(f"- drift items: {len(items)}\n")
+            fh.write(f"- issues created: {created}\n")
+            fh.write(f"- skipped (already open): {skipped}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

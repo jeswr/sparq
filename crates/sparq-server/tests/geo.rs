@@ -115,18 +115,30 @@ async fn update_where_with_geof_filter() {
 #[tokio::test]
 async fn unregistered_geof_iri_is_still_an_engine_error() {
     let base = spawn().await;
-    // geof:buffer is not in the registry: the engine's hard unknown-function
+    // geof:gmlToWkt is NOT in the registry — geo registers the KNOWN geof:
+    // functions, not the whole geof: namespace, so an unregistered geof: IRI is
+    // still an unknown extension function. The engine's hard unknown-function
     // error surfaces as the server's 500 engine-error response, not a 200.
+    //
+    // (geof:buffer would NOT work here: it IS registered, so a wrong-arity call
+    // is a per-row expression error → 200, never a hard query error. This must
+    // be a genuinely unregistered IRI — see sparq-geo's
+    // `unregistered_geof_iri_stays_a_hard_error`.)
     let resp = reqwest::Client::new()
         .get(format!("{base}/sparql"))
         .query(&[(
             "query",
-            format!("{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?g . FILTER(geof:buffer(?g, 1.0) > 0) }}"),
+            format!("{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?g . FILTER(geof:gmlToWkt(?g) = ?g) }}"),
         )])
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 500);
+    // The server SANITIZES engine error strings (they can embed loaded-graph term
+    // text) down to a stable generic class message; the detailed
+    // "unsupported SPARQL function: …" cause goes only to the server log. So the
+    // 500 status is the load-bearing assertion that the unknown geof: IRI is a
+    // hard engine error, and the body is the generic sanitized class.
     let body = resp.text().await.unwrap();
-    assert!(body.contains("unsupported SPARQL function"), "got: {body}");
+    assert!(body.contains("query execution error"), "got: {body}");
 }

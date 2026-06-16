@@ -4,10 +4,13 @@ import { notFound } from "next/navigation";
 import { SurfacePlaceholder } from "@/components/surface-placeholder";
 import { FLAGSHIPS } from "@/data/surfaces";
 
+// The MPC flagship has its own real page at /showcase/mpc-100k; the remaining
+// flagships fall back to the honest placeholder until their pages are built.
 export function generateStaticParams() {
-  // Flagships with a hand-built page (e.g. zk-car-hire) own their own route under
-  // /showcase/<slug>/page.tsx, so they must NOT also be generated here — a static
-  // route and a dynamic param for the same path collide at export.
+  // Flagships with a hand-built page (e.g. zk-car-hire, mpc-100k) own their own
+  // route under /showcase/<slug>/page.tsx, so they must NOT also be generated
+  // here — a static route and a dynamic param for the same path collide at
+  // export. Such flagships are marked `built` in the surfaces data.
   return FLAGSHIPS.filter((s) => !s.built).map((s) => ({ slug: s.slug }));
 }
 

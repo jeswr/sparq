@@ -138,13 +138,20 @@ sparq_engine::query(&g,
 
 **RDF-star / RDF 1.2 quoted triples** (`<< s p o >>`) — stored structurally; patterns with variables
 inside the quoted triple match. Load with the `rdf-12` feature enabled on oxrdf/oxttl (default in
-this workspace):
+this workspace). In Turtle/TriG you can write the reifying triple `<< s p o >>` (subject or object
+position, optionally `<< s p o ~ reifier >>`) or the annotation block `s p o {| … |}` (which also
+**asserts** the base triple); both desugar to the standard `rdf:reifies <<( s p o )>>` form. The
+underlying triple TERM `<<( s p o )>>` is **object-position only** (RDF 1.2). See the SPARQL-star
+functions `TRIPLE`/`isTRIPLE`/`SUBJECT`/`PREDICATE`/`OBJECT` for constructing/decomposing them.
 
 ```rust
 let g = Graph::load_str(
     r#"@prefix ex: <http://ex/> . << ex:alice ex:age 30 >> ex:certainty 0.9 ."#, "turtle").unwrap();
 sparq_engine::query(&g,
     "PREFIX ex: <http://ex/> SELECT ?s ?o ?c WHERE { << ?s ex:age ?o >> ex:certainty ?c }").unwrap();
+// Annotation-block form (asserts ex:alice ex:age 30 AND records the certainty reifier):
+let g2 = Graph::load_str(
+    r#"@prefix ex: <http://ex/> . ex:alice ex:age 30 {| ex:certainty 0.9 |} ."#, "turtle").unwrap();
 ```
 
 **Custom extension functions** — register Rust closures under function IRIs, then `query_with_functions`:

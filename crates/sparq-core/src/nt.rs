@@ -162,6 +162,13 @@ fn graph_key(b: &[u8], i: usize) -> Result<GraphKey, String> {
 #[cfg(feature = "parallel")]
 fn span_term(b: &[u8], i: usize) -> Result<usize, String> {
     match b.get(i) {
+        // [OPUS-4.8] (sq-87bq) Triple terms are OBJECT-ONLY (RDF 1.2); a `<<(` reaching the
+        // subject/predicate (or graph) span walk is a non-object triple term — reject with a
+        // precise message, mirroring `term`. See the grammar note there (prods. [7]/[8]/[9]).
+        Some(b'<') if b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') => Err(format!(
+            "N-Quads: RDF 1.2 triple term `<<( … )>>` is only valid in OBJECT position \
+             (subject/predicate/graph must be an IRI or blank node), at byte {i}"
+        )),
         Some(b'<') => {
             let (_s, _e, _esc, next) = scan_delim(b, i, b'>')?;
             Ok(next)
@@ -287,6 +294,18 @@ fn str_of(raw: &[u8]) -> Result<&str, String> {
 
 fn term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     match b.get(i) {
+        // [OPUS-4.8] (sq-87bq) A `<<(` here is an RDF 1.2 triple term in a NON-object
+        // position (subject, predicate, or a triple term's own subject/predicate). The RDF
+        // 1.2 N-Triples grammar makes triple terms OBJECT-ONLY — `subject ::= IRIREF |
+        // BLANK_NODE_LABEL` (prod. [7]) and `predicate ::= IRIREF` (prod. [8]); only
+        // `object ::= IRIREF | BLANK_NODE_LABEL | literal | tripleTerm` (prod. [9]) admits a
+        // `tripleTerm` (prod. [11]). (This differs from the legacy RDF-star CG `<< s p o >>`
+        // QUOTED-triple syntax, which DID allow subject quoting; RDF 1.2 deliberately dropped
+        // that.) Reject with a precise message instead of the generic "unexpected term start".
+        Some(b'<') if b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') => Err(format!(
+            "N-Triples: RDF 1.2 triple term `<<( … )>>` is only valid in OBJECT position \
+             (subject/predicate must be an IRI or blank node), at byte {i}"
+        )),
         Some(b'<') => iri(b, i, dict),
         Some(b'_') => blank(b, i, dict),
         Some(b'"') => literal(b, i, dict),
@@ -532,10 +551,39 @@ mod tests {
 
     #[test]
     fn triple_term_only_in_object_position() {
-        // A `<<(` in SUBJECT position is not a valid term start for `term` (subjects are
-        // never triple terms in RDF 1.2) — the parser must reject it rather than misparse.
-        let nt = b"<<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/p> <http://ex/o> .\n";
+        // [OPUS-4.8] (sq-87bq) RDF 1.2 makes triple terms OBJECT-ONLY (N-Triples grammar:
+        // `subject ::= IRIREF | BLANK_NODE_LABEL` [7], `predicate ::= IRIREF` [8], only
+        // `object` [9] admits a `tripleTerm` [11]). The parser must REJECT a `<<( … )>>` in
+        // subject OR predicate position with a precise, position-aware message — not misparse
+        // it, and not silently accept the legacy RDF-star CG `<< … >>` subject-quoting that
+        // RDF 1.2 dropped.
+
+        // Subject position.
+        let subj = b"<<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/p> <http://ex/o> .\n";
         let mut d = Dict::new();
-        assert!(parse_chunk(nt, &mut d).is_err(), "triple term in subject position must be rejected");
+        let e = parse_chunk(subj, &mut d).expect_err("triple term in subject position must be rejected");
+        assert!(e.contains("only valid in OBJECT position"), "message must explain the object-only rule, got: {e}");
+
+        // Predicate position.
+        let pred = b"<http://ex/s> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/o> .\n";
+        let mut d = Dict::new();
+        let e = parse_chunk(pred, &mut d).expect_err("triple term in predicate position must be rejected");
+        assert!(e.contains("only valid in OBJECT position"), "message must explain the object-only rule, got: {e}");
+
+        // A triple term's OWN subject must also be a plain term (recursion goes through
+        // `term`, not `object_term`): a nested `<<( … )>>` in the inner subject is rejected.
+        let inner_subj = b"<http://ex/s> <http://ex/p> <<( <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/q> <http://ex/r> )>> .\n";
+        let mut d = Dict::new();
+        assert!(
+            parse_chunk(inner_subj, &mut d).is_err(),
+            "a triple term in a triple term's SUBJECT slot must be rejected (object-only nesting)"
+        );
+
+        // Sanity: the same triple term in OBJECT position parses fine (the rejection is
+        // strictly position-driven, not a blanket ban).
+        let obj = b"<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> .\n";
+        let mut d = Dict::new();
+        assert!(parse_chunk(obj, &mut d).is_ok(), "the same triple term in object position must parse");
     }
 }
+

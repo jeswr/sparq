@@ -217,6 +217,22 @@ cargo build -p sparq-cli --features serialize-rdf
   pipelined parser is **N-Triples only** (other formats silently fall back to serial
   `load_reader`). With `parallel` off (e.g. the wasm build, `--no-default-features`),
   everything parses serially.
+- **RDF 1.2 triple terms / RDF-star are first-class.** A triple term `<<( s p o )>>` is a
+  real `oxrdf::Term::Triple` (object position only — RDF 1.2 makes triple terms object-only;
+  a `<<( … )>>` in subject/predicate position is rejected with a precise error). Triple terms
+  may nest, take blank-node/literal components, and are content-addressed (an identical triple
+  term shares one dict id). They load through **every** path — serial, parallel-chunked,
+  streaming-pipelined, and the sharded external builder — at full parallelism (the in-memory
+  parallel merge no longer drops to a serial fallback when they are present). The **dict-spill**
+  external builder is the one exception: it rejects triple terms with a clear error (its
+  content-only on-disk records can't encode them — bead sq-jvbr); use the default sharded path
+  or an in-memory load for RDF-star + dict-spill datasets. In **Turtle/TriG**, the SPARQL-1.2
+  reification sugar is supported via the Turtle parser: the reifying triple `<< s p o >>`
+  (subject or object position, optionally `<< s p o ~ reifier >>`) and the annotation block
+  `s p o {| … |}` desugar to the standard `rdf:reifies <<( s p o )>>` form (the annotation block
+  also **asserts** the base triple; a bare `<< … >>` reifier does not). N-Triples/N-Quads carry
+  only the desugared `<<( … )>>` triple-term form (no `<<>>`/`{| |}` sugar — per the line-format
+  grammar).
 - **`build_external` / `open` / `save` require the `mmap` feature** (native only). The
   N-Triples external path also honors `SPARQ_SHARDED_DICT` (default on with ≥2 threads)
   and, with the `dict-spill` feature + `SPARQ_DICT_SPILL` env, bounds peak build RSS by
