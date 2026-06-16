@@ -412,8 +412,12 @@ its **own** connected-component mask, derived independently. If the neighbour va
 **unconstrained** (no pattern mentions it) the search falls back to the plain unfiltered
 `nearest_exact` (recipe 8's exact behaviour, unchanged). With `filtered-ann` **off**, the `vec:`
 predicate is always unfiltered — this composition adds nothing to the `vec-predicate`-only build.
-Deferred (own beads): cyclic-join handling, a cost-model choice of when transitive masking pays
-(sq-ic0n), and mask caching (sq-36ol).
+**Cyclic** join sub-BGPs (a back-edge to the neighbour variable like `?node :owns ?x . ?x
+:ownedBy ?node`, or a longer cycle among intermediates) are handled correctly (sq-p5oy): the
+connected-component computation is a per-pattern fixpoint so it always **terminates** on a cycle,
+and the cyclic sub-BGP is evaluated through the standard engine, so the mask is exactly the engine's
+(cycle-correct) binding — `filtered == post-filter` holds for cyclic constraints too. Deferred (own
+beads): a cost-model choice of when transitive masking pays (sq-ic0n).
 
 ### 9. Predicate-constrained (filtered) ANN — only neighbours a BGP admits (opt-in, feature = `filtered-ann`)
 
