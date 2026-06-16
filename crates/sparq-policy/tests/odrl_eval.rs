@@ -10,7 +10,9 @@
 //! blank-node permission/prohibition carrying action/target/assignee and
 //! blank-node constraints).
 
-use sparq_policy::{evaluate, parse_policy_str, Decision, Request, Value};
+use sparq_policy::{
+    evaluate, parse_policy_str, prohibition_status, Decision, ProhibitionStatus, Request, Value,
+};
 
 const ODRL: &str = "http://www.w3.org/ns/odrl/2/";
 const XSD_DT: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
@@ -361,4 +363,102 @@ fn datetime_xsd_typed_constant_roundtrips() {
     );
     // Before the lower bound → DENY.
     assert!(!evaluate(&p, &base.with(left("dateTime"), dt("2025-12-31T00:00:00Z"))).allow);
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-2pcf — prohibition_status: the three-valued deny-retraction dual
+// of matched_prohibition (Applies / Ambiguous / Withdrawn). The bridge uses this to
+// retract a materialized deny ONLY on a DEFINITE withdrawal, never on missing evidence.
+// ---------------------------------------------------------------------------
+fn windowed_prohibition() -> sparq_policy::Policy {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/p> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:write ; odrl:target <urn:asset/x> ;
+    odrl:assignee <https://alice.ex/me> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+        odrl:rightOperand "2026-01-01T00:00:00Z"^^<{XSD_DT}> ] ] .
+"#
+    );
+    parse_policy_str(&ttl, "turtle").unwrap()
+}
+
+#[test]
+fn prohibition_status_applies_when_constraint_holds() {
+    let p = windowed_prohibition();
+    // Evidence the window holds (now < bound) → still carves out → KEEP the deny.
+    let req = Request::new(left("write"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        .with(left("dateTime"), dt("2025-06-01T00:00:00Z"));
+    assert_eq!(prohibition_status(&p, &req), ProhibitionStatus::Applies);
+}
+
+#[test]
+fn prohibition_status_withdrawn_when_constraint_definitely_false() {
+    let p = windowed_prohibition();
+    // Evidence the window LAPSED (now >= bound, operator lt) → definitely no → RETRACT.
+    let req = Request::new(left("write"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        .with(left("dateTime"), dt("2026-06-01T00:00:00Z"));
+    assert_eq!(prohibition_status(&p, &req), ProhibitionStatus::Withdrawn);
+}
+
+#[test]
+fn prohibition_status_ambiguous_when_no_evidence() {
+    let p = windowed_prohibition();
+    // NO dateTime evidence → cannot prove the window lapsed → AMBIGUOUS → KEEP the deny.
+    let req = Request::new(left("write"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me");
+    assert_eq!(prohibition_status(&p, &req), ProhibitionStatus::Ambiguous);
+}
+
+#[test]
+fn prohibition_status_withdrawn_on_structural_mismatch() {
+    let p = windowed_prohibition();
+    // A different party is not carved out at all — structurally Withdrawn, even with
+    // NO constraint evidence (a structural attribute is a DEFINITE non-match).
+    let other = Request::new(left("write"))
+        .on("urn:asset/x")
+        .by("https://bob.ex/me");
+    assert_eq!(prohibition_status(&p, &other), ProhibitionStatus::Withdrawn);
+    // An empty policy (prohibition removed) is also Withdrawn.
+    let empty = parse_policy_str(
+        &format!(r#"@prefix odrl: <{ODRL}> . <urn:pol/p> a odrl:Set ."#),
+        "turtle",
+    )
+    .unwrap();
+    let req = Request::new(left("write"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me");
+    assert_eq!(
+        prohibition_status(&empty, &req),
+        ProhibitionStatus::Withdrawn
+    );
+}
+
+#[test]
+fn prohibition_status_ambiguous_only_if_no_other_match() {
+    // Two prohibitions: one unconstrained (always matches) + one windowed (ambiguous w/o
+    // evidence). The unconstrained one still matches → Applies wins over Ambiguous.
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/p> a odrl:Set ;
+    odrl:prohibition [ odrl:action odrl:write ; odrl:target <urn:asset/x> ;
+        odrl:assignee <https://alice.ex/me> ] ;
+    odrl:prohibition [ odrl:action odrl:write ; odrl:target <urn:asset/x> ;
+        odrl:assignee <https://alice.ex/me> ;
+        odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+            odrl:rightOperand "2026-01-01T00:00:00Z"^^<{XSD_DT}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let req = Request::new(left("write"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me");
+    assert_eq!(prohibition_status(&p, &req), ProhibitionStatus::Applies);
 }

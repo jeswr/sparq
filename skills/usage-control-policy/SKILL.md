@@ -150,13 +150,33 @@ The `materialize_odrl_*` calls only ever **append**. When the underlying ODRL po
 
 - **Provenance.** Every auth triple the bridge writes into `<urn:sparq:auth>` is mirrored verbatim into a separate reserved graph `<urn:sparq:auth-bridged>` (`AUTH_BRIDGED_GRAPH`). A triple is **bridged** iff it appears there, **static** otherwise — so bridged and static grants are structurally distinguishable without inspecting predicate shape, and the enforcement reader (`AuthIndex`) is unchanged (it still reads `<urn:sparq:auth>`). The provenance graph is in the reserved `urn:sparq:` space, so a loaded dataset cannot forge it.
 - **Refresh / retract.** `PodStore::refresh_odrl_grant(&new_policy, &new_request, kind)` updates the tracked grant slot `(kind, target, party)` with the new policy / request context, then rebuilds the view as `static_baseline ∪ replay(still-valid bridged entries)`: it resets `<urn:sparq:auth>` to the static baseline captured at the last `materialize_wac`/`materialize_acp`, clears the provenance graph, and re-evaluates every tracked `(policy, request)` through its original bridge entry point. An entry that no longer holds emits nothing → it is **retracted** (access gone). `refresh_odrl_grants()` (no args) replays everything as-tracked (used to reconcile after a static re-materialization, which is automatic).
-- **Fail-closed (security-sensitive — access retraction).** A withdrawn / lapsed / now-Denied / now-prohibited / ambiguous re-evaluation loses access; the underlying evaluator is fail-closed, so on any doubt the grant is retracted, never left stale. A **static** WAC/ACP grant is never in the ledger, never re-evaluated, and always in the captured baseline (captured as the `install_auth_view` output verbatim, not by subtracting provenance — so a static grant byte-identical to a bridged one still survives) — refresh can neither widen nor drop it.
+- **Fail-closed (security-sensitive — access retraction).** A withdrawn / lapsed / now-Denied / now-prohibited / ambiguous re-evaluation of an **allow grant** loses access; the underlying evaluator is fail-closed, so on any doubt the grant is retracted, never left stale. A **static** WAC/ACP grant is never in the ledger, never re-evaluated, and always in the captured baseline (captured as the `install_auth_view` output verbatim, not by subtracting provenance — so a static grant byte-identical to a bridged one still survives) — refresh can neither widen nor drop it.
+
+#### Deny RETRACTION is asymmetric to grant retraction — [OPUS-4.8] sq-2pcf
+
+A materialized `auth:deny*` (from a `BridgeKind::Prohibition` / `Policy` entry) is **retracted on the OPPOSITE rule**: a deny carves access *out*, so retracting it *restores* access — that must happen only when the ODRL Prohibition is **definitely** withdrawn or lapsed, never on doubt. Reusing the grant rule (drop the deny whenever `matched_prohibition` no longer matches) would be **fail-OPEN**: an *ambiguous* re-eval — a prohibition still structurally naming the request but carrying a constraint the refresh request gives no evidence for — would silently restore access.
+
+So deny retraction consults `sparq_policy::prohibition_status`, a three-valued refinement of `matched_prohibition`:
+
+| `ProhibitionStatus` | meaning | deny on refresh |
+|---|---|---|
+| `Applies` | a prohibition still carves the request out | **kept** (re-emitted) |
+| `Ambiguous` | still structurally names it, but a constraint is unprovable (no evidence) | **kept** (re-emitted) |
+| `Withdrawn` | no prohibition names it, or every one is *definitely* false given the evidence | **retracted** (dropped) |
+
+"Definitely false" means the refresh request supplied evidence for the dimension and the comparison failed (e.g. a `dateTime < 2026-01-01` window with an actual time of `2026-06-01` — provably lapsed). A retracted deny composes with deny-overrides: it may re-expose an allow grant for the same principal+target+mode — correct, *because the prohibition is genuinely gone*. Static (non-bridged) `auth:deny*` rules are never in the ledger and so are never re-evaluated or retracted.
 
 ```rust,ignore
 // alice was bridged a read grant; the policy then WITHDRAWS the permission.
 let (matched, retracted) =
     store.refresh_odrl_grant(&withdrawn_policy, &req, BridgeKind::Permission);
 // matched == true, retracted == 1 → alice can no longer read (through accessible/query_as).
+
+// A bridged DENY is the dual: retracted only when the Prohibition is DEFINITELY gone.
+let (matched, retracted) =
+    store.refresh_odrl_grant(&withdrawn_prohibition, &write_req, BridgeKind::Prohibition);
+// definite withdrawal → retracted == 1 (deny gone, access restored if an allow exists);
+// ambiguous re-eval (no constraint evidence) → retracted == 0 (deny KEPT, fail-closed).
 ```
 
 ## Learn more

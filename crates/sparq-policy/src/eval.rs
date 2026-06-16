@@ -209,6 +209,173 @@ pub fn matched_prohibition<'p>(policy: &'p Policy, request: &Request) -> Option<
         .find(|rule| rule_matches(rule, request, &req_action).is_match)
 }
 
+/// Whether `policy`'s prohibitions still carve `request` out — and, when they do
+/// not, **whether that is a definite no or merely unprovable**. [OPUS-4.8] sq-2pcf.
+///
+/// This is the *deny-retraction dual* of [`matched_prohibition`]. A bare
+/// `matched_prohibition(..).is_none()` collapses two semantically different worlds:
+///
+/// - the prohibition was genuinely **withdrawn / no longer structurally applies**
+///   (its action/target/assignee no longer name this request, or a constraint it
+///   carries is *definitely* false because the request supplies evidence that fails
+///   the bound), and
+/// - the prohibition still structurally names this request but a constraint is
+///   **unprovable** because the request lacks evidence for that dimension
+///   (`constraint_satisfied` returns `false` on a missing context value).
+///
+/// For a *grant* both collapse to "deny access" — fail-closed. But for **retracting a
+/// materialized `auth:deny*`** they must NOT: retracting on the second case would
+/// RESTORE access on missing evidence (fail-OPEN). This function keeps them apart so
+/// the bridge only retracts a deny on a *definite* "no longer holds".
+///
+/// Returns:
+/// - [`ProhibitionStatus::Applies`] if some prohibition still carves the request out
+///   (every structural attribute agrees AND every constraint is *satisfied*).
+/// - [`ProhibitionStatus::Ambiguous`] if no prohibition matches, but at least one
+///   prohibition still structurally names the request (action/target/assignee agree)
+///   and fails ONLY because a constraint is unprovable for lack of evidence.
+/// - [`ProhibitionStatus::Withdrawn`] otherwise — every prohibition either does not
+///   structurally name the request or carries a constraint that is *definitely* false
+///   given the supplied evidence. This is the only case in which a deny may be retracted.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_policy::{prohibition_status, ProhibitionStatus, parse_policy_str, Request, Value};
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/p> a odrl:Set ; odrl:prohibition [
+///     odrl:action odrl:write ;
+///     odrl:target <https://pod.ex/n1> ;
+///     odrl:assignee <https://alice.ex/card#me> ;
+///     odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+///        odrl:rightOperand "2026-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> ] ] .
+/// "#, "turtle").unwrap();
+/// let base = Request::new("http://www.w3.org/ns/odrl/2/write")
+///     .on("https://pod.ex/n1").by("https://alice.ex/card#me");
+///
+/// // Evidence the window holds → still carves out.
+/// let inside = base.clone()
+///     .with("http://www.w3.org/ns/odrl/2/dateTime", Value::DateTime("2025-06-01T00:00:00Z".into()));
+/// assert_eq!(prohibition_status(&pol, &inside), ProhibitionStatus::Applies);
+///
+/// // Evidence the window has LAPSED → definitely withdrawn.
+/// let lapsed = base.clone()
+///     .with("http://www.w3.org/ns/odrl/2/dateTime", Value::DateTime("2026-06-01T00:00:00Z".into()));
+/// assert_eq!(prohibition_status(&pol, &lapsed), ProhibitionStatus::Withdrawn);
+///
+/// // NO evidence for the window → unprovable → ambiguous (keep the deny).
+/// assert_eq!(prohibition_status(&pol, &base), ProhibitionStatus::Ambiguous);
+/// ```
+pub fn prohibition_status(policy: &Policy, request: &Request) -> ProhibitionStatus {
+    let req_action = Action(request.action.clone());
+    let mut any_ambiguous = false;
+    for rule in &policy.prohibitions {
+        match classify_prohibition(rule, request, &req_action) {
+            RuleClass::Match => return ProhibitionStatus::Applies,
+            RuleClass::Ambiguous => any_ambiguous = true,
+            RuleClass::DefinitelyNo => {}
+        }
+    }
+    if any_ambiguous {
+        ProhibitionStatus::Ambiguous
+    } else {
+        ProhibitionStatus::Withdrawn
+    }
+}
+
+/// The deny-retraction verdict for a request's prohibitions — see
+/// [`prohibition_status`]. [OPUS-4.8] sq-2pcf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProhibitionStatus {
+    /// A prohibition still carves the request out — a materialized deny must be KEPT.
+    Applies,
+    /// No prohibition matches, but one still structurally names the request and fails
+    /// only for lack of evidence — the deny must be KEPT (fail-closed: do not restore
+    /// access on an unprovable carve-out).
+    Ambiguous,
+    /// No prohibition structurally names the request, or every one that does carries a
+    /// constraint that is *definitely* false given the evidence — the only case in
+    /// which a materialized deny may be RETRACTED (access restored).
+    Withdrawn,
+}
+
+/// How one prohibition rule re-evaluates against a request, distinguishing a
+/// *definite* non-match from an *unprovable* one (missing-evidence constraint).
+/// [OPUS-4.8] sq-2pcf.
+enum RuleClass {
+    /// Structural attributes agree AND every constraint is satisfied.
+    Match,
+    /// Structural attributes agree, but a constraint is unprovable (no evidence).
+    Ambiguous,
+    /// A structural attribute disagrees, OR a constraint is *definitely* false
+    /// (evidence present, comparison failed), OR a constraint is malformed.
+    DefinitelyNo,
+}
+
+/// Classify a single prohibition rule for deny-retraction. Structural attributes
+/// (action / target / assignee) are definite (no "world state" needed). Constraints
+/// split into *definitely false* (evidence present, bound not met — a definite no) vs
+/// *unprovable* (no evidence for the dimension — ambiguous). [OPUS-4.8] sq-2pcf.
+fn classify_prohibition(rule: &Rule, request: &Request, req_action: &Action) -> RuleClass {
+    // Structural attributes are definite: if any disagrees the rule no longer names
+    // this request at all (a genuine withdrawal of *this* carve-out).
+    if !rule.action.permits(req_action) {
+        return RuleClass::DefinitelyNo;
+    }
+    if let Some(t) = &rule.target {
+        if request.target.as_deref() != Some(t.as_str()) {
+            return RuleClass::DefinitelyNo;
+        }
+    }
+    if let Some(a) = &rule.assignee {
+        if request.party.as_deref() != Some(a.as_str()) {
+            return RuleClass::DefinitelyNo;
+        }
+    }
+    // Structural attributes agree — the constraints decide. A constraint that is
+    // *definitely* false (we have evidence and it fails) is a definite no; one that is
+    // unprovable for lack of evidence is ambiguous (a deny must NOT be retracted on it).
+    let mut any_ambiguous = false;
+    for c in &rule.constraints {
+        match constraint_status(c, request) {
+            ConstraintStatus::Satisfied => {}
+            ConstraintStatus::DefinitelyUnsatisfied => return RuleClass::DefinitelyNo,
+            ConstraintStatus::Unprovable => any_ambiguous = true,
+        }
+    }
+    if any_ambiguous {
+        RuleClass::Ambiguous
+    } else {
+        RuleClass::Match
+    }
+}
+
+/// Whether one constraint is satisfied, *definitely* unsatisfied, or *unprovable* for
+/// lack of evidence — the three-valued refinement of [`constraint_satisfied`] that
+/// deny-retraction needs (a plain bool conflates the last two). [OPUS-4.8] sq-2pcf.
+enum ConstraintStatus {
+    /// The request supplies evidence and the comparison holds.
+    Satisfied,
+    /// The request supplies evidence and the comparison FAILS — a definite no.
+    DefinitelyUnsatisfied,
+    /// The request supplies no value for this dimension — we cannot tell.
+    Unprovable,
+}
+
+fn constraint_status(c: &Constraint, request: &Request) -> ConstraintStatus {
+    match request.context.get(&c.left) {
+        None => ConstraintStatus::Unprovable,
+        Some(actual) => {
+            if compare(actual, c.operator, &c.right) {
+                ConstraintStatus::Satisfied
+            } else {
+                ConstraintStatus::DefinitelyUnsatisfied
+            }
+        }
+    }
+}
+
 /// Outcome of matching a single rule against a request.
 struct Match {
     is_match: bool,

@@ -69,6 +69,14 @@ assert!(!evaluate(&policy, &outside).allow);
   out), so a downstream materializer can distinguish a *carve-out* deny from a
   plain no-permission deny — `sparq-solid`'s ODRL bridge uses it to emit explicit
   `auth:deny*` triples (deny-overrides). [OPUS-4.8] sq-w693.
+  `prohibition_status(&policy, &request) -> ProhibitionStatus` is the three-valued
+  *deny-retraction* dual ([OPUS-4.8] sq-2pcf): `Applies` (a prohibition still carves
+  the request out), `Ambiguous` (one still structurally names the request but a
+  constraint is unprovable for lack of evidence), or `Withdrawn` (no prohibition names
+  the request, or every one is *definitely* false given the supplied evidence). The
+  bridge retracts a materialized deny **only** on `Withdrawn` — keeping it on `Ambiguous`
+  so access is never restored on missing evidence (`matched_prohibition().is_none()`
+  alone conflates the two, which would be fail-OPEN for a deny).
 - **Constraint operators** — `eq`, `neq`, `lt`, `lteq`, `gt`, `gteq`,
   `isPartOf` (set membership), `isA`. Numeric (`xsd:integer`/`decimal`/…) and
   `xsd:dateTime`/`date` operands compare by magnitude/instant; everything else
