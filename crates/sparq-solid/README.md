@@ -55,7 +55,9 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
   the equivalent WAC/ACP grant into the auth view — so the existing graph-level enforcement
   honours it with **no new enforcement engine**. A matched **Prohibition** materializes the dual
   `auth:deny*` triple (`materialize_prohibition` / `materialize_policy`), and the existing
-  enforcement applies **deny-overrides** ([OPUS-4.8] sq-w693). See below.
+  enforcement applies **deny-overrides** ([OPUS-4.8] sq-w693). `materialize_odrl_permission_conditional`
+  (sq-hiz4) persists a faithfully-mappable recipient/assignee constraint as a **re-checked**
+  ACP `auth:ConditionalGrant` instead of a one-shot allow. See below.
 
 ## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge` feature) — [OPUS-4.8] sq-h3uk
 
@@ -114,6 +116,64 @@ the request out.)
 action is mappable *and* the party+target are concrete. An unmatched / unmapped / partyless /
 targetless prohibition materializes **nothing**; an unmappable carve-out is *reported* in
 `reasons`, never silently dropped (dropping a deny would widen access).
+
+### Constraint → ACP **conditional** grant (`materialize_odrl_permission_conditional`) — [OPUS-4.8] sq-hiz4
+
+The one-shot `materialize_odrl_permission` *freezes* every constraint into a single allow
+scoped to the supplied request party. `materialize_odrl_permission_conditional` persists a
+**faithfully-mappable** constraint as an ACP `auth:ConditionalGrant` (the existing `noneOf`
+machinery) so the granted agent is **re-checked per session** through the unchanged
+enforcement path — not by re-running the ODRL evaluator. Constraints with no faithful ACP
+analogue keep the one-shot behaviour.
+
+| ODRL constraint | Operator | Maps to | Behaviour |
+|---|---|---|---|
+| `odrl:recipient` / `odrl:assignee` | `eq` / `isA` | `auth:agent <webid>` (agent matcher) | **re-checked condition** |
+| `odrl:recipient` / `odrl:assignee` | `isPartOf` | one `auth:agent` head per set member | **re-checked condition** |
+| `odrl:recipient` / `odrl:assignee` | `neq` / order | — (needs per-session `noneOf`) | one-shot (frozen) |
+| `odrl:purpose` | any | — (ACP session has no purpose) | one-shot (frozen) |
+| `odrl:dateTime` / time window | any | — (ACP has no "now") | one-shot (frozen) |
+| `odrl:count` | any | — (ACP is stateless) | one-shot (frozen) |
+| *no constraint* | — | `auth:agent auth:Public` | re-checked (public) |
+
+**Why only recipient/assignee:** the ACP session re-check carries exactly `(agent, client)`,
+and the recipient-of-data *is* the session agent — so an agent matcher re-checks it with
+identical semantics. Purpose/time/count have no stateless `(agent, client)` analogue, so
+persisting them would require a looser approximation that could over-grant — rejected.
+
+**Fail-safe on mixed constraints:** a condition is persisted **only** when *every* constraint
+on the rule maps faithfully. A rule mixing a mappable recipient with an unmappable
+`dateTime`/`purpose`/`count` falls back **entirely** to the one-shot path — persisting only
+the recipient would silently drop the other bound and over-grant. Reserved-encoded recipient
+IRIs are dropped from the grant head (anti-impersonation).
+
+### Refresh / revocation of bridged grants — [OPUS-4.8] sq-dpk4
+
+The `materialize_odrl_*` calls only **append**. When the ODRL policy changes — a permission is
+**withdrawn**, a **time window lapses**, or a re-evaluation now **Denies** — a previously
+materialized grant must lose access (the sq-h3uk/#280 correctness gap), and a wholesale static
+WAC/ACP re-materialization must not silently clobber a still-valid bridged grant. A `PodStore`
+tracks each bridged grant in a **ledger** and provides a refresh entry point:
+
+- **Provenance.** Every bridged auth triple is mirrored verbatim into a separate reserved graph
+  `<urn:sparq:auth-bridged>` (`AUTH_BRIDGED_GRAPH`): a triple is **bridged** iff it appears
+  there, **static** otherwise. The enforcement reader (`AuthIndex`) is unchanged — it still
+  reads `<urn:sparq:auth>`. The provenance graph lives in the reserved `urn:sparq:` space, so a
+  loaded dataset cannot forge it.
+- **Refresh / retract.** `PodStore::refresh_odrl_grant(&policy, &request, kind)` updates the
+  tracked grant slot `(kind, target, party)` with the new policy / request context, then
+  rebuilds the view as `static_baseline ∪ replay(still-valid bridged entries)`: it resets
+  `<urn:sparq:auth>` to the static baseline captured at the last `materialize_wac`/`_acp`,
+  clears the provenance graph, and re-evaluates every tracked `(policy, request)` through its
+  original bridge entry point. An entry that no longer holds emits nothing → it is **retracted**
+  (access gone). `refresh_odrl_grants()` (no args) replays everything as-tracked; a static
+  re-materialization auto-reconciles (valid bridged grants are replayed back on top).
+- **Fail-closed (access retraction).** A withdrawn / lapsed / now-Denied / now-prohibited /
+  ambiguous re-evaluation loses access — the underlying evaluator is fail-closed, so on doubt
+  the grant is retracted, never left stale. A **static** WAC/ACP grant is never in the ledger,
+  never re-evaluated, and always in the captured baseline (captured as the materializer output
+  verbatim, not by subtracting provenance — so a static grant byte-identical to a bridged one
+  still survives a refresh) — refresh can neither widen nor drop it.
 
 ## Security posture — fail-closed
 
