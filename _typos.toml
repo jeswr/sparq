@@ -31,18 +31,26 @@ extend-exclude = [
 # referenced by the dozen in compliance/research docs, so per-token allowlisting does
 # not scale — match the whole bead-id token shape instead. [OPUS-4.8]
 #
-# [OPUS-4.8] (bead sq-hyzq) Ignore the recurring "ALL-CAPS SPARQL keyword + lowercase
-# English suffix" false-positive family: DELETEd, INSERTed, SELECTed, CONSTRUCTed,
-# DESCRIBEd, CLEARed, LOADed, UNIONed, MATCHed, "3 OPTIONALs", … Authors write these in
-# prose all the time; typos splits at the case boundary and flags the keyword-minus-tail
-# (DELET→DELETE, OPTIONA→OPTIONAL) or the dangling 3-char fragment (Ded/Ned), forcing a
-# pointless reword round-trip on every doc PR. One regex pins the whole shape instead of
-# enumerating dozens of fragments. It is deliberately narrow — it matches ONLY a run of
-# >=3 capitals immediately followed by 1-3 lowercase letters with no break, so a genuine
-# ALL-CAPS misspelling (e.g. `RECIEVE`) and ordinary lowercase typos (`teh`, `hte`) STILL
-# fire and the gate keeps its teeth. Verified across the whole tree: every token this
-# newly silences is a keyword-suffix split, zero real misspellings.
-extend-ignore-re = ["\\bsq-[0-9a-z]{3,}\\b", "\\b[A-Z]{3,}[a-z]{1,3}\\b"]
+# [OPUS-4.8] (bead sq-hyzq, tightened in sq-uiie) Ignore the recurring "ALL-CAPS SPARQL
+# keyword + lowercase English suffix" false-positive family: DELETEd, INSERTed, SELECTed,
+# CONSTRUCTed, DESCRIBEd, CLEARed, LOADed, UNIONed, MATCHed, "3 OPTIONALs", … Authors write
+# these in prose all the time; typos splits at the case boundary and flags the keyword-
+# minus-tail (DELET→DELETE, OPTIONA→OPTIONAL) or the dangling 3-char fragment (Ded/Ned),
+# forcing a pointless reword round-trip on every doc PR.
+#
+# The anchor is a CLOSED alternation of known SPARQL/SQL/RDF-update keyword roots — NOT a
+# blanket `[A-Z]{3,}`. The original sq-hyzq form `\b[A-Z]{3,}[a-z]{1,3}\b` matched ANY run
+# of >=3 capitals plus a 1-3 char lowercase tail, which silently shielded genuine ALL-CAPS
+# misspellings written with a suffix (RECIEVEd, SEPERATEd, ADRESs) — it suppressed the very
+# misspelling class the gate exists to catch. Pinning the prefix to a vetted keyword list
+# closes that hole: a misspelled root is never in the list, so its suffixed form fires
+# again, while every legitimate keyword-suffix split stays clean. (Acronym plurals like
+# IRIs/APIs/SBOMs never needed shielding — typos already treats `<ACRONYM>s` as an acronym
+# plural and does not flag them; verified by a both-config diff over the doc surface.)
+extend-ignore-re = [
+  "\\bsq-[0-9a-z]{3,}\\b",
+  "\\b(?:SELECT|CONSTRUCT|DESCRIBE|ASK|INSERT|DELETE|LOAD|CLEAR|CREATE|DROP|COPY|MOVE|ADD|UNION|OPTIONAL|MINUS|GRAPH|SERVICE|BIND|FILTER|VALUES|GROUP|ORDER|HAVING|MATCH|JOIN|PROJECT|AND|OR|XOR|UPDATE|WHERE)[a-z]{1,3}\\b",
+]
 
 [default.extend-identifiers]
 iy3p = "iy3p"            # [OPUS-4.8] bead id `sq-iy3p` — typos splits on `-`, flags "iy"->"it"

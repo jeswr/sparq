@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # [OPUS-4.8] Hermetic both-direction self-tests for the _typos.toml allow-list
-# (bead sq-hyzq — CI hygiene: stop recurring SPARQL-keyword false-positives blocking
-# the docs-quality `typos` gate). Authored by Opus 4.8 (Fable unavailable; flag for
-# re-review when Fable returns).
+# (bead sq-hyzq, tightened in sq-uiie — CI hygiene: stop recurring SPARQL-keyword false-
+# positives blocking the docs-quality `typos` gate). Authored by Opus 4.8 (Fable unavailable;
+# flag for re-review when Fable returns).
 #
 # WHY: typos (crate-ci/typos) splits an ALL-CAPS SPARQL keyword written with a lowercase
 # English suffix at the case boundary and flags the keyword-minus-tail or the dangling
 # 3-char fragment — DELETEd->DELET, INSERTed->INSER, "3 OPTIONALs"->OPTIONA, LOADed->Ded.
 # These are not typos; they are how anyone naturally writes SPARQL verbs in prose, so they
 # kept blocking the HARD gate and forcing pointless reword round-trips on doc PRs. The fix
-# adds one narrow `extend-ignore-re` regex (>=3 capitals immediately followed by 1-3
-# lowercase letters) plus an `invokable` word entry. This harness pins BOTH directions so
-# the allow-list can't silently over- or under-reach later:
+# is an `extend-ignore-re` regex anchored to a CLOSED alternation of known SPARQL/SQL/RDF-
+# update keyword roots (SELECT|INSERT|DELETE|…) each followed by a 1-3 char lowercase tail,
+# plus an `invokable` word entry. (sq-uiie: the original sq-hyzq form `\b[A-Z]{3,}[a-z]{1,3}\b`
+# was over-broad — it shielded ANY all-caps run with a short lowercase tail, silently hiding
+# genuine misspellings like RECIEVEd/SEPERATEd; the keyword anchor closes that hole.) This
+# harness pins BOTH directions so the allow-list can't silently over- or under-reach later:
 #   - should-PASS (SUPPRESSED): the keyword-suffix family + `invokable` must NOT be flagged.
-#   - should-FAIL (STILL FIRES): a genuine ALL-CAPS misspelling and ordinary lowercase
-#                                typos MUST still be caught, so the gate keeps its teeth.
+#   - should-FAIL (STILL FIRES): a genuine ALL-CAPS misspelling (bare OR with a lowercase
+#                                suffix) and ordinary lowercase typos MUST still be caught,
+#                                so the gate keeps its teeth.
 #
 # HERMETIC w.r.t. repo content/network: every case is a one-line fixture written to a
 # temp file and run through the SHIPPED `typos --config _typos.toml` binary in isolation —
@@ -81,6 +85,16 @@ check FAIL "Re-order hte two clauses."
 # A bare keyword with a real lowercase typo glued on a DIFFERENT word must still fire:
 # `seperate` is lowercase, unrelated to the regex, and stays caught.
 check FAIL "Keep the two stores seperate."
+# --------------------------------------------------------------------------- #
+# Direction B (regression — bead sq-uiie). The sq-hyzq form `\b[A-Z]{3,}[a-z]{1,3}\b`
+# was over-broad: it matched ANY >=3-capital run plus a 1-3 char lowercase tail, so a
+# genuine ALL-CAPS misspelling written WITH such a suffix was silently suppressed. Anchoring
+# the prefix to a closed keyword list closes that hole — a misspelled root is not in the
+# list, so its suffixed form fires again. These MUST FIRE (would have been WRONGLY PASSed by
+# the old blanket regex):
+check FAIL "The bytes were SEPERATEd into two buffers."  # SEPERATE is not a keyword
+check FAIL "Each value was MULTIPLYed by two."            # MULTIPLY+ed, not a SPARQL verb
+check FAIL "The fault OCURRed under load."                # OCURR(ed) is not a keyword
 
 # --------------------------------------------------------------------------- #
 echo ""
