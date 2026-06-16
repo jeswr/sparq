@@ -97,7 +97,7 @@ println!("estimated total cost: {}", plan.total_cost);
 | Source selection (HiBISCuS prune + CostFed cardinality) | ✅ covered here |
 | Bind-vs-hash decision + greedy join order + CS star cardinality | ✅ covered here |
 | ANAPSID-style non-blocking streaming join with operator spill (`StreamJoin`) | ✅ covered here (sq-vf7q) |
-| Live adaptive re-planning at stage boundaries (`AdaptiveExecutor`) | ✅ covered here, opt-in `adaptive-replan` (sq-7s4z) |
+| Live adaptive re-planning at stage boundaries (`AdaptiveExecutor`), cardinality- **and** per-source-latency-weighted | ✅ covered here, opt-in `adaptive-replan` (sq-7s4z + sq-b51o) |
 | Mid-*operator* swap (tear down an in-flight join) + live source failover | ⏳ deferred (roadmap bead, epic sq-3183) |
 
 `plan_bgp` itself is still a **static** planner — it commits to one order from the estimates
@@ -118,25 +118,47 @@ A build that does not enable the feature compiles **zero** adaptive code (the mo
 - **Re-plan trigger** — at each **stage boundary** (between two leaf joins of the left-deep
   plan), if a *not-yet-executed* pattern's observed cardinality `o` diverges from its
   estimate `e` past `ReplanPolicy::divergence_factor` `k` in either direction (`o > k·e` or
-  `e > k·o`; default `k = 4`), the planner is re-invoked on the **remaining** patterns with
-  the observed cardinalities substituted in (`corrected_selection`). Source *membership* is
+  `e > k·o`; default `k = 4`), **or** ([OPUS-4.8] sq-b51o) a not-yet-executed pattern's
+  slowest source is observed at more than `k×` the latency baseline, the planner is re-invoked
+  on the **remaining** patterns with the observed cardinalities substituted in
+  (`corrected_selection`) and the join costs latency-weighted (below). Source *membership* is
   never re-pruned — only the order changes — so recall-safety is preserved.
+- **Per-source latency weighting (sq-b51o) — a HEURISTIC, not optimal.** Cardinality is not
+  the only thing the estimates get wrong: a source can be *slow* (contended / far /
+  rate-limited) even at exactly its predicted row count. Each candidate join's cost is scaled
+  by a latency factor derived from the **slowest** observed latency over the pattern's retained
+  sources (a union is bottlenecked by its slowest arm):
+  `factor = clamp(1 + latency_weight·(s − 1), latency_floor, latency_cap)` where
+  `s = observed_latency / latency_baseline`. A source at baseline — **or with no latency
+  observation** — gets `factor = 1.0`, so a measurement-free re-plan is byte-identical to the
+  cardinality-only planner; a 2×-slow source costs 1.5× at the default `latency_weight = 0.5`,
+  and the `latency_cap` (default 4.0) stops one outlier from dominating. The constants
+  (`latency_weight = 0.5`, `latency_baseline = 100.0`, `latency_floor = 0.5`,
+  `latency_cap = 4.0`) are **hand-tuned, not derived**: this is a deliberately gentle *bias*
+  toward faster sources / deferring a slow one, **not** a claim to find the latency-optimal
+  plan. Latency enters only the *cost* term (and the suffix-selection score), **never** the
+  output cardinality — so results are unchanged (see the soundness boundary). Set
+  `latency_weight = 0` to disable it entirely (pure cardinality planning).
 - **Hysteresis / anti-thrash** — the re-planned suffix is adopted **only** if its estimated
-  remaining cost beats the current suffix's by more than `ReplanPolicy::improvement_margin`
-  (default 10%) and there is a hard `max_replans` budget (default 8). Stable-but-noisy stats
-  therefore never cause the plan to flap; `maybe_replan` returns a `ReplanOutcome`
-  (`NoDivergence` / `KeptWithinHysteresis` / `Switched` / `BudgetExhausted`).
+  remaining cost (cardinality- **and** latency-weighted) beats the current suffix's by more
+  than `ReplanPolicy::improvement_margin` (default 10%) and there is a hard `max_replans`
+  budget (default 8). Stable-but-noisy stats — **including jittery latency** — therefore never
+  cause the plan to flap; `maybe_replan` returns a `ReplanOutcome` (`NoDivergence` /
+  `KeptWithinHysteresis` / `Switched` / `BudgetExhausted`).
 
 **Soundness boundary** — re-planning reorders only the not-yet-started **suffix**; it is
 **not** a mid-operator swap (a join already producing output is never torn down). Because a
 BGP is a conjunction of triple patterns, its answer is the natural join of the per-pattern
 solution multisets, which is **commutative and associative** — any order over the same
 patterns yields the **same** result multiset. The already-produced prefix is carried across
-the switch unchanged, so no binding is lost or duplicated. This result-equivalence is proven
-in `adaptive::tests::replan_result_equals_static` (a mid-execution re-plan that genuinely
-flips the order yields the identical multiset to the static plan), backed by an exhaustive
-all-permutations order-independence test. Mid-*operator* adaptivity and live source failover
-are deferred (epic sq-3183).
+the switch unchanged, so no binding is lost or duplicated. **The latency weighting does not
+move this boundary**: it enters only the cost/ordering, never the output cardinality or the
+pattern set, so a latency-driven reorder is the same kind of pure suffix permutation. This
+result-equivalence is proven in `adaptive::tests::replan_result_equals_static` (a
+cardinality-driven re-plan) **and** `latency_replan_result_equals_static` (a re-plan whose
+reorder is driven purely by latency) — each genuinely flips the order yet yields the identical
+multiset to the static plan — backed by an exhaustive all-permutations order-independence test.
+Mid-*operator* adaptivity and live source failover are deferred (epic sq-3183).
 
 ## Streaming join (quick use)
 

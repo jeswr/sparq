@@ -1,6 +1,6 @@
 ---
 name: federated-planning
-description: "Cost-based federated SPARQL source selection + bind-vs-hash join planning over already-fetched source descriptors, plus an ANAPSID-style non-blocking streaming join with operator spill, via the opt-in sparq-fedplan crate. Use when planning a federated BGP across multiple SPARQL endpoints from their served statistics (VoID property/class partitions + mined scs: characteristic sets): deciding which sources can contribute to each triple pattern (HiBISCuS recall-safe pruning + CostFed skew-aware cardinality), choosing a join order with per-join bind-vs-hash-vs-streaming algorithm selection (characteristic-set star cardinality for intermediate sizes), and executing a memory-bounded non-blocking symmetric hash join over incrementally-arriving sub-results (StreamJoin, spill to a backing store, result multiset-equal to a blocking join). Pure + deterministic planning, no network I/O. Off by default; does not touch sparq-core/sparq-engine's lean build. Also covers live adaptive RE-planning at stage boundaries (mid-execution plan switching when observed cardinalities diverge from estimates) via the further opt-in adaptive-replan feature (AdaptiveExecutor) — sound because BGP join is order-independent, with mid-operator swap + live source failover deferred."
+description: "Cost-based federated SPARQL source selection + bind-vs-hash join planning over already-fetched source descriptors, plus an ANAPSID-style non-blocking streaming join with operator spill, via the opt-in sparq-fedplan crate. Use when planning a federated BGP across multiple SPARQL endpoints from their served statistics (VoID property/class partitions + mined scs: characteristic sets): deciding which sources can contribute to each triple pattern (HiBISCuS recall-safe pruning + CostFed skew-aware cardinality), choosing a join order with per-join bind-vs-hash-vs-streaming algorithm selection (characteristic-set star cardinality for intermediate sizes), and executing a memory-bounded non-blocking symmetric hash join over incrementally-arriving sub-results (StreamJoin, spill to a backing store, result multiset-equal to a blocking join). Pure + deterministic planning, no network I/O. Off by default; does not touch sparq-core/sparq-engine's lean build. Also covers live adaptive RE-planning at stage boundaries (mid-execution plan switching when observed cardinalities diverge from estimates, or when a source is observed to be slow — per-source latency is folded into the cost model as a documented heuristic bias toward faster sources) via the further opt-in adaptive-replan feature (AdaptiveExecutor) — sound because BGP join is order-independent (latency changes ordering/cost only, never results), with mid-operator swap + live source failover deferred."
 ---
 
 # sparq-fedplan — cost-based federated source selection + join planning
@@ -149,13 +149,29 @@ to join (the **suffix**).
   counts the sources returned) and per-source latency, fed in as each stage completes.
 - **Trigger** — at each **stage boundary**, `maybe_replan(&stats)` checks whether a
   *not-yet-executed* pattern's observed cardinality `o` diverges from its estimate `e` past
-  `ReplanPolicy::divergence_factor` `k` either way (`o > k·e` or `e > k·o`; default `k = 4`).
-  If so it re-invokes the cost model on the **remaining** patterns with the observed
-  cardinalities substituted in (`corrected_selection`). Source *membership* is never
-  re-pruned — only the order changes — so HiBISCuS recall-safety is preserved.
+  `ReplanPolicy::divergence_factor` `k` either way (`o > k·e` or `e > k·o`; default `k = 4`),
+  **or** (sq-b51o) a not-yet-executed pattern's slowest source is observed at more than `k×`
+  the latency baseline. If so it re-invokes the cost model on the **remaining** patterns with
+  the observed cardinalities substituted in (`corrected_selection`) and the join costs
+  latency-weighted (below). Source *membership* is never re-pruned — only the order changes —
+  so HiBISCuS recall-safety is preserved.
+- **Per-source latency weighting (sq-b51o) — a HEURISTIC, not optimal.** A source can be
+  *slow* (contended / far / rate-limited) even at exactly its predicted cardinality, so the
+  re-planner also folds observed latency into the cost. Each candidate join's cost is scaled by
+  `factor = clamp(1 + latency_weight·(s − 1), latency_floor, latency_cap)` where
+  `s = slowest_observed_source_latency / latency_baseline` over the pattern's retained sources.
+  A source at baseline — **or with no observation** — yields `factor = 1.0`, so a re-plan with
+  no latency data is byte-identical to the cardinality-only planner; a 2×-slow source costs
+  1.5× at the default `latency_weight = 0.5`, with `latency_cap` (4.0) bounding any one
+  outlier. The constants (`latency_weight 0.5`, `latency_baseline 100`, `latency_floor 0.5`,
+  `latency_cap 4.0`) are **hand-tuned, not derived** — a deliberately gentle *bias* toward
+  faster sources / deferring a slow one, **not** a claim to compute the latency-optimal plan.
+  Latency enters only the *cost* term (and the suffix-selection score), **never** the output
+  cardinality, so results are unchanged. `latency_weight = 0` disables it.
 - **Hysteresis** — the re-planned suffix is adopted **only** if its estimated remaining cost
-  beats the current suffix's by more than `ReplanPolicy::improvement_margin` (default 10%),
-  with a hard `max_replans` budget (default 8). Stable-but-noisy stats never thrash;
+  (cardinality- **and** latency-weighted) beats the current suffix's by more than
+  `ReplanPolicy::improvement_margin` (default 10%), with a hard `max_replans` budget
+  (default 8). Stable-but-noisy stats — **including jittery latency** — never thrash;
   `maybe_replan` returns `ReplanOutcome::{NoDivergence, KeptWithinHysteresis, Switched,
   BudgetExhausted}`.
 
@@ -164,16 +180,19 @@ to join (the **suffix**).
 answer is the natural join of the per-pattern solution multisets, which is **commutative and
 associative**: any order over the same patterns yields the **same** result multiset, and the
 already-produced prefix is carried across the switch unchanged (no binding lost or
-duplicated). Proven by `adaptive::tests::replan_result_equals_static` (a re-plan that
-genuinely flips the order yields the identical multiset to the static plan) plus an
+duplicated). The latency weighting does **not** move this boundary — it touches only
+cost/ordering, never the output cardinality or the pattern set, so a latency-driven reorder is
+the same kind of pure suffix permutation. Proven by `adaptive::tests::replan_result_equals_static`
+(cardinality-driven) and `latency_replan_result_equals_static` (latency-driven) — each
+genuinely flips the order yet yields the identical multiset to the static plan — plus an
 exhaustive all-permutations order-independence test.
 
 ## Deferred (NOT here)
 
 **Mid-*operator* adaptivity** (tearing down a join while it is producing output and resuming
 its half-built hash tables under a new algorithm) and **live source failover** (switching to
-a replica mid-stage when a source goes dark — the latency capture exists but the live
-multi-source execution layer does not live in this pure crate) are out of scope. Filed as
-roadmap beads under epic **sq-3183**.
+a replica mid-stage when a source goes dark — observed latency now *biases the join order*
+toward faster sources, but hard failover needs the live multi-source execution layer this pure
+crate does not own) are out of scope. Filed as roadmap beads under epic **sq-3183**.
 
 [OPUS-4.8] sq-a35t / sq-vf7q / sq-7s4z — flag for Fable re-review.
