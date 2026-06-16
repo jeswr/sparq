@@ -142,45 +142,112 @@ class G1Test(unittest.TestCase):
 # G2 — public-api → skill
 # --------------------------------------------------------------------------- #
 class G2Test(unittest.TestCase):
-    def test_server_src_change_without_skill_fails(self):
-        changed = ["crates/sparq-server/src/routes.rs"]
-        ok, hits = g2.evaluate(changed, labels=[], base="main")
-        self.assertFalse(ok)
-        self.assertIn("crates/sparq-server/src/routes.rs", hits)
+    # [OPUS-4.8] G2 now fires ONLY on a NET `pub `-item signature change in a
+    # published crate's src/** (no more blanket binding-crate trip). The
+    # evaluate()-level tests inject the pub_api_changed verdict via pub_overrides
+    # so they stay hermetic (no live git); the _scan_pub_diff tests exercise the
+    # added/removed-multiset logic directly.
 
-    def test_server_src_change_with_skill_passes(self):
-        changed = [
-            "crates/sparq-server/src/routes.rs",
-            "skills/http-server/SKILL.md",
-        ]
-        ok, _ = g2.evaluate(changed, labels=[], base="main")
+    def test_server_pub_change_without_skill_fails(self):
+        # A real pub-item change in a binding crate's src, no SKILL → FAIL.
+        path = "crates/sparq-server/src/routes.rs"
+        ok, hits = g2.evaluate(
+            [path], labels=[], base="main", pub_overrides={path: True}
+        )
+        self.assertFalse(ok)
+        self.assertIn(path, hits)
+
+    def test_server_pub_change_with_skill_passes(self):
+        path = "crates/sparq-server/src/routes.rs"
+        ok, _ = g2.evaluate(
+            [path, "skills/http-server/SKILL.md"],
+            labels=[],
+            base="main",
+            pub_overrides={path: True},
+        )
         self.assertTrue(ok)
 
-    def test_pub_diff_regex_excludes_restricted_visibility(self):
-        # [OPUS-4.8] The pub-diff heuristic must match exported items
-        # (`pub fn`/`pub use`/…) but NOT restricted visibilities
-        # (`pub(crate)`/`pub(super)`/`pub(in …)`), which are private surface.
-        # Guard: this pattern literal MUST mirror pub_api_changed's `pub_re`
-        # in scripts/gate-api-skill.py — assert that the source still uses it.
-        import inspect
-        import re
+    def test_binding_crate_comment_only_change_passes(self):
+        # [OPUS-4.8] REGRESSION (blocked #250): a comment-/attribute-only edit to a
+        # BINDING crate's src is NOT a public-surface change — it must PASS even
+        # without a SKILL.md. pub_overrides={...: False} models "no net pub change".
+        path = "crates/sparq-cli/src/main.rs"
+        ok, hits = g2.evaluate(
+            [path], labels=[], base="main", pub_overrides={path: False}
+        )
+        self.assertTrue(ok)
+        self.assertEqual(hits, [])
 
-        src = inspect.getsource(g2.pub_api_changed)
-        self.assertIn(r'r"^[+-]\s*pub\s"', src, "pub_re drifted from this test")
-        pub_re = re.compile(r"^[+-]\s*pub\s")
-        for exported in ("+pub fn foo()", "-pub use crate::X;", "+    pub struct S"):
-            self.assertTrue(pub_re.match(exported), exported)
-        for restricted in (
+    def test_ci_only_change_passes(self):
+        # [OPUS-4.8] REGRESSION (#244 framing): a PR that touches NO crates/*/src/**
+        # — only CI workflows / tests / non-src files — can never reach the `pub`
+        # check, so G2 always passes. No pub_overrides needed: these paths never hit
+        # git because _CRATE_SRC_RE rejects them.
+        changed = [
+            ".github/workflows/feature-matrix.yml",
+            "crates/sparq-reason/tests/explain_owl.rs",
+            "compliance/asvs/gap-register.md",
+        ]
+        ok, hits = g2.evaluate(changed, labels=[], base="main")
+        self.assertTrue(ok)
+        self.assertEqual(hits, [])
+
+    def test_pub_item_relocation_does_not_trip(self):
+        # [OPUS-4.8] REGRESSION (mis-fired #244): a pure relocation of a pub item —
+        # the identical signature added once and removed once within a file — is
+        # net-zero and must NOT count as a public-API change. Drive the pure
+        # _scan_pub_diff + pub_api_changed multiset logic directly.
+        diff = [
+            "--- a/crates/sparq-reason/src/explain.rs",
+            "+++ b/crates/sparq-reason/src/explain.rs",
+            "@@ -257,1 +257,1 @@",
+            "+pub fn n3_proof_tree(",
+            "@@ -327,1 +400,0 @@",
+            "-pub fn n3_proof_tree(",
+        ]
+        added, removed = g2._scan_pub_diff(diff)
+        self.assertEqual(sorted(added), sorted(removed))  # cancels out
+        # And a genuinely NEW export does trip (added with no matching removal).
+        diff2 = [
+            "+++ b/crates/sparq-core/src/store.rs",
+            "+pub fn brand_new_export() {}",
+        ]
+        added2, removed2 = g2._scan_pub_diff(diff2)
+        self.assertNotEqual(sorted(added2), sorted(removed2))
+
+    def test_pub_item_regex_matches_all_item_forms_excludes_restricted(self):
+        # [OPUS-4.8] The pub-item pattern must match every exported FORM
+        # (fn/struct/enum/trait/const/type/mod/use) but NOT restricted
+        # visibilities (`pub(crate)`/`pub(super)`/`pub(in …)`) nor a struct
+        # `pub` field. Guard against silent drift of the source pattern.
+        for exported in (
+            "+pub fn foo()",
+            "-pub use crate::X;",
+            "+    pub struct S",
+            "+pub enum E {",
+            "-pub trait T {",
+            "+pub const C: u8 = 0;",
+            "+pub type Alias = u8;",
+            "+pub mod m;",
+        ):
+            self.assertTrue(g2._PUB_ITEM_RE.match(exported), exported)
+        for not_an_export in (
             "+pub(crate) fn foo()",
             "-pub(super) struct S",
             "+    pub(in crate::a) const X: u8 = 0;",
+            "+    pub name: String,",  # struct field, not an item
+            "+publicize();",  # `pub` not a whole word
         ):
-            self.assertFalse(pub_re.match(restricted), restricted)
+            self.assertFalse(g2._PUB_ITEM_RE.match(not_an_export), not_an_export)
 
     def test_cli_change_suppressed_by_skill_not_needed_label(self):
-        changed = ["crates/sparq-cli/src/main.rs"]
+        # Even a real pub change is suppressed by the escape-hatch label.
+        path = "crates/sparq-cli/src/main.rs"
         ok, _ = g2.evaluate(
-            changed, labels=["skill-not-needed"], base="main"
+            [path],
+            labels=["skill-not-needed"],
+            base="main",
+            pub_overrides={path: True},
         )
         self.assertTrue(ok)
 
@@ -210,13 +277,6 @@ class G2Test(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(hits, [])
-
-    def test_py_binding_change_without_skill_fails(self):
-        ok, hits = g2.evaluate(
-            ["crates/sparq-py/src/lib.rs"], labels=[], base="main"
-        )
-        self.assertFalse(ok)
-        self.assertIn("crates/sparq-py/src/lib.rs", hits)
 
 
 # --------------------------------------------------------------------------- #
