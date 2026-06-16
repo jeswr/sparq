@@ -118,6 +118,54 @@
         metric: 'forward closure, wall-clock', value: null, unit: 's',
         regime: 'not run (extrapolated ≈9h at EYE’s observed ≈N^1.95 DT scaling)',
         source: 'bench/inference/eye-comparison.md', caveat: 'n/a (not gathered) — EYE was not run at dt100k. NOT fabricated.' }
+    ],
+    // [OPUS-4.8] sq-ays7 — SAME-BOX SPARQL comparison (PHASE 2). sparq + Oxigraph (+ QLever
+    // best-effort) on ONE ephemeral AWS EC2 box against the SAME SP2Bench-250k corpus + bench/sp2b
+    // queries in the SAME min-of-5 COUNT regime. renderSameBox() draws this in the #same-box card,
+    // DISTINCT from the gh-runner CI-band featured `values` (different machine) and the cross-machine
+    // `references`. HONESTY: the gather captured sparq's TSV but the instance hit its orphan-safe
+    // cleanup trap right AFTER the Oxigraph (`sparq-bench bench-corpus`) command was invoked and
+    // BEFORE its TSV reached the pulled log — so Oxigraph + QLever timings were NOT captured. They
+    // stay null (-> "n/a"); count_match stays null (no Oxigraph rows to cross-check against). Only
+    // sparq's real per-query (rows, best_us) are recorded. Byte-for-meaning mirror of
+    // bench/dashboard/competitors.json same_box_comparisons (re-run the gather to completion to fill
+    // the Oxigraph column + enable the count_match check).
+    same_box_comparisons: [
+      {
+        suite: 'SP2Bench',
+        scale: 'SP2Bench 250k triples (bench/sp2b/gen.sh 250000; 27,219,138-byte Turtle)',
+        iters: 5,
+        git_commit: '681047f',
+        gathered_at_utc: '2026-06-16',
+        source: 'live ephemeral-EC2 gather — scripts/gather-ec2-sparql.sh (sparq via `sparq-cli bench … 5 count`; Oxigraph via `sparq-bench bench-corpus … 5`)',
+        env: {
+          host_class: 'ephemeral AWS EC2 c7g.xlarge (4 vCPU arm64 Graviton, Ubuntu 24.04)',
+          quiet_box: true,
+          gathered_at_utc: '2026-06-16',
+          note: 'Requested c7g.2xlarge fell back to c7g.xlarge (account vCPU limit of 16). Oxigraph 0.5.8 (Cargo.lock). QLever was requested (QLEVER=1) but produced no numbers on this run.'
+        },
+        engines: [
+          { id: 'sparq', label: 'sparq', version: 'git 681047f', env: 'ephemeral c7g.xlarge (4 vCPU Graviton), release build, min-of-5 COUNT' },
+          { id: 'oxigraph', label: 'Oxigraph', version: '0.5.8', env: 'same box — n/a: bench-corpus TSV not captured before the orphan-safe cleanup trap fired' },
+          { id: 'qlever', label: 'QLever', version: 'n/a', env: 'requested (QLEVER=1) but no QLever timing produced on this run — honest n/a, not fabricated' }
+        ],
+        rows: [
+          { query: 'q01',  unit: 'µs', rows: 1,      values: { sparq: 9.2,      oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q02',  unit: 'µs', rows: 6067,   values: { sparq: 6618.2,   oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q03a', unit: 'µs', rows: 15823,  values: { sparq: 14525.7,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q03b', unit: 'µs', rows: 114,    values: { sparq: 14355.4,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q03c', unit: 'µs', rows: 0,      values: { sparq: 14140.6,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q04',  unit: 'µs', rows: 541911, values: { sparq: 358604.1, oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q05b', unit: 'µs', rows: 6933,   values: { sparq: 15317.7,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q07',  unit: 'µs', rows: 48,     values: { sparq: 23383.4,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q08',  unit: 'µs', rows: 358,    values: { sparq: 212938.1, oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q09',  unit: 'µs', rows: 4,      values: { sparq: 23091.2,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q10',  unit: 'µs', rows: 452,    values: { sparq: 3.8,      oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q11',  unit: 'µs', rows: 10,     values: { sparq: 18652.1,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q12b', unit: 'µs', rows: 1,      values: { sparq: 213513.8, oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q12c', unit: 'µs', rows: 0,      values: { sparq: 4.9,      oxigraph: null, qlever: null }, count_match: null }
+        ]
+      }
     ]
   };
 
@@ -835,6 +883,81 @@
     });
   }
 
+  // ---- same-box SPARQL comparison: DOM (sq-ays7) ---------------------------
+  // [OPUS-4.8] Renders the #same-box host (a card BELOW the featured suites). This is the HONEST
+  // same-box SPARQL competitor comparison (PHASE 2 of sq-ays7): sparq + Oxigraph (+ QLever
+  // best-effort) measured ON ONE ephemeral EC2 box, against the SAME generated featured corpus and
+  // the SAME query files, in the SAME min-of-N COUNT regime. It is rendered DISTINCTLY from both
+  //   (a) the featured-suites `values` cells — those are the gh-runner CI band (sparq-only here);
+  //       injecting a competitor number from a DIFFERENT host next to a CI-band sparq number would
+  //       be cross-machine and misleading, so we DO NOT touch them; and
+  //   (b) the `references` baselines — those are cited numbers at their OWN scale/machine.
+  // Reads competitors.same_box_comparisons (an array of {suite,scale,env,git_commit,iters,engines,
+  // rows}). Each row: {query, unit, values:{<engineId>:µs|null}, rows:<count|null>, count_match}.
+  // A null per-engine µs renders "n/a" (e.g. a query the engine could not run, or QLever skipped).
+  function renderSameBox(competitors) {
+    var host = document.getElementById('same-box');
+    if (!host) return;
+    host.innerHTML = '';
+    var cmps = (competitors && competitors.same_box_comparisons) || [];
+    if (!cmps.length) {
+      host.appendChild(el('p', { 'class': 'hint',
+        text: 'No same-box competitor comparison gathered yet. Run scripts/gather-ec2-sparql.sh '
+            + 'to measure sparq + Oxigraph (+ QLever best-effort) on one box at a bounded corpus scale.' }));
+      return;
+    }
+    cmps.forEach(function (c) {
+      var engines = c.engines || [];
+      var section = el('section', { 'class': 'featured-suite same-box-suite' }, [
+        el('h3', { 'class': 'featured-title',
+          text: (c.suite || 'SPARQL') + ' — same-box comparison' })
+      ]);
+      // Provenance caption: scale + box + date + commit + iters, so this block is never confused
+      // with the cross-machine gh-runner CI band.
+      section.appendChild(el('div', { 'class': 'featured-refs-head same-box-caption',
+        title: (c.env && c.env.cpu_model ? 'cpu: ' + c.env.cpu_model + '\n' : '')
+             + (c.env && c.env.kernel ? 'kernel: ' + c.env.kernel + '\n' : '')
+             + (c.source ? 'source: ' + c.source : ''),
+        text: 'Single ' + ((c.env && c.env.host_class) || 'quiet box') + ', quiet_box='
+            + (c.env && c.env.quiet_box ? 'true' : 'false') + ' · corpus: ' + (c.scale || '?')
+            + ' · min-of-' + (c.iters || '?') + ', COUNT mode · gathered '
+            + ((c.env && c.env.gathered_at_utc) || c.gathered_at_utc || '?')
+            + ' @ ' + (c.git_commit || '?')
+            + ' — NOT the gh-runner CI band; absolute µs are this box only, for cross-engine ordering.' }));
+      var table = el('table', { 'class': 'summary-table featured-table' });
+      var headCells = [el('th', { text: 'Query' })];
+      engines.forEach(function (e) {
+        var th = el('th', { 'class': 'num',
+          title: (e.label || e.id) + (e.version ? ' ' + e.version : '') }, [
+          el('span', { 'class': 'competitor-name', text: e.label || e.id })
+        ]);
+        if (e.version) th.appendChild(el('code', { 'class': 'competitor-version', text: e.version }));
+        headCells.push(th);
+      });
+      headCells.push(el('th', { 'class': 'num', text: 'rows' }));
+      headCells.push(el('th', { text: 'counts agree' }));
+      table.appendChild(el('thead', null, [el('tr', null, headCells)]));
+      var tbody = el('tbody');
+      (c.rows || []).forEach(function (r) {
+        var cells = [el('td', { 'class': 'metric',
+          title: 'unit: ' + (r.unit || 'µs') }, [el('code', { 'class': 'metric-stem', text: r.query })])];
+        engines.forEach(function (e) {
+          var v = r.values && r.values[e.id];
+          cells.push(el('td', { 'class': 'num' + (v == null ? ' competitor-na' : ''),
+            text: v == null ? 'n/a' : fmtNum(v) + ' µs',
+            title: v == null ? 'n/a — this engine did not produce a timing for this query on this box' : '' }));
+        });
+        cells.push(el('td', { 'class': 'num', text: r.rows == null ? '—' : fmtNum(r.rows) }));
+        cells.push(el('td', { text: r.count_match == null ? '—' : (r.count_match ? '✓' : 'DIFF'),
+          title: r.count_match === false ? 'engines disagreed on the solution count for this query' : '' }));
+        tbody.appendChild(el('tr', null, cells));
+      });
+      table.appendChild(tbody);
+      section.appendChild(table);
+      host.appendChild(section);
+    });
+  }
+
   // ---- scaling comparison charts: DOM (sq-viby) ----------------------------
   // Renders the #scaling host (a card at the BOTTOM). One line chart per scaling family: x = the
   // derived size/depth axis (LINEAR, ascending), y = the metric value. ONE line for sparq today;
@@ -1055,6 +1178,7 @@
   function paintFeaturedAndScaling(entries, competitors) {
     if (!entries) return;
     renderFeatured(buildFeatured(entries, competitors));  // sq-xvow
+    renderSameBox(competitors);                           // sq-ays7 (same-box SPARQL comparison)
     renderScaling(buildScalingFamilies(entries));         // sq-viby
   }
 

@@ -50,6 +50,26 @@
       <div id="featured">loading…</div>
     </section>
 
+    <!-- [OPUS-4.8] sq-ays7: SAME-BOX SPARQL competitor comparison. dashboard.js fills #same-box from
+         competitors.same_box_comparisons — sparq + Oxigraph (+ QLever best-effort) measured on ONE
+         ephemeral EC2 box against the SAME generated featured corpus + SAME query files in the SAME
+         min-of-N COUNT regime. This is DISTINCT from the Featured-suites table above (that sparq
+         column is the gh-runner CI band — different machine; a competitor number from this box must
+         NOT be placed next to it) and from the external-reference baselines (cited, own scale). The
+         caption pins corpus scale + EC2 type + date + commit; absolute µs are this-box-only, for
+         cross-engine ORDERING, not an absolute cross-machine reference. -->
+    <section class="card" id="same-box-card">
+      <h2>Same-box SPARQL comparison</h2>
+      <p class="hint">A self-consistent head-to-head: <strong>sparq</strong> and
+         <strong>Oxigraph</strong> (plus <strong>QLever</strong> when the best-effort Docker server
+         comes up) run on <em>one</em> ephemeral EC2 box, over the <em>same</em> generated featured
+         corpus and the <em>same</em> query files, min-of-N in COUNT mode, with solution counts
+         cross-checked. Absolute µs are <strong>this box only</strong> (a 4-vCPU Graviton, not the
+         gh-runner CI band) — read them for <em>cross-engine ordering</em>, not as a cross-machine
+         reference. <code>n/a</code> where an engine produced no timing (e.g. QLever skipped).</p>
+      <div id="same-box">loading…</div>
+    </section>
+
     <!-- [OPUS-4.8] sq-rltn: capability FAMILIES — the primary, summary-first view. dashboard.js
          paints #families SYNCHRONOUSLY from window.BENCHMARK_DATA (no Chart.js, no label fetch) so
          the WHOLE picture appears immediately and visibly covers ALL benchmarked families: a family
