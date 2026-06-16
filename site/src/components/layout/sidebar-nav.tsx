@@ -22,6 +22,14 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
         Overview
       </NavLink>
 
+      <NavLink
+        href="/benchmarks"
+        active={isActive("/benchmarks")}
+        onNavigate={onNavigate}
+      >
+        Benchmarks
+      </NavLink>
+
       <Section label="Showcase">
         {FLAGSHIPS.map((f) => (
           <NavLink
