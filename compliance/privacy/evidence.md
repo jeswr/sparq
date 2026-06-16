@@ -15,15 +15,29 @@ is NON-CANONICAL** (EC2 work box) — no benchmark numbers are baked here.
 
 ```rust
 if config.verbose {
-    routes.layer(TraceLayer::new_for_http())
+    // [OPUS-4.8] sq-toze.34: redaction ON by default — RedactingMakeSpan replaces the URI
+    // query string (the GET query-text vector) with a length+fingerprint placeholder.
+    if config.redact_logs {
+        routes.layer(TraceLayer::new_for_http().make_span_with(crate::redact::RedactingMakeSpan))
+    } else {
+        routes.layer(TraceLayer::new_for_http())
+    }
 } else {
     routes
 }
 ```
 
-`ServerConfig::verbose` defaults to `false` (`crates/sparq-server/src/http.rs:276`,
-`verbose: false`). The CLI must pass `--verbose` (`crates/sparq-server/src/main.rs:162`) to
-enable per-request `tower_http::trace::TraceLayer` logging. **Verified:** a grep for the
+`ServerConfig::verbose` defaults to `false` (`crates/sparq-server/src/http.rs`,
+`verbose: false`). The CLI must pass `--verbose` (`crates/sparq-server/src/main.rs`) to
+enable per-request `tower_http::trace::TraceLayer` logging. **[OPUS-4.8] sq-toze.34: and even
+under `--verbose`, request-log redaction is ON by default** (`redact_logs: true`): the logged
+URI keeps the path but replaces the query string with a `<redacted len=N fp=…>` length +
+non-reversible FNV-1a fingerprint, so the SPARQL query text (and any embedded PII) is not
+written to the log. Verbatim logging requires the deliberate opt-out `--log-full-requests` /
+`SPARQ_LOG_FULL_REQUESTS=1`. This is log-*content* redaction, not anonymity — method, endpoint,
+status, a size signal and timing remain in the line. Regression test:
+`crates/sparq-server/tests/log_redaction.rs` asserts the sensitive query string is **absent**
+from the captured log when redaction is on, and present when opted out. **Verified:** a grep for the
 request-path logging macros (`tracing::{info,debug,…}` / `info!(`/…) across
 `crates/sparq-server/src/` returns **zero** matches in the query/update handlers — the only
 `eprintln!`s are **startup banner lines** in `main.rs` (loaded-triple count, persist/auth/bind
@@ -36,10 +50,13 @@ e.g. `/sparql`, not a user value), `sparq_query_duration_seconds` (latency histo
 count). **No query text, no result rows, no client identifiers, no IP addresses.** The module
 header states "nothing is sampled in the background." No analytics/telemetry egress exists.
 
-> Honesty note for P-2: this is *minimisation by default*, not minimisation *guaranteed* — an
-> operator who passes `--verbose` (or fronts the server with an access-logging gateway) **will**
-> capture full request lines including SPARQL query text. That residual is tracked as bead
-> **sq-toze.34** (a redaction option) and is the operator's choice to make.
+> Honesty note for P-2: this is *minimisation by default*, not minimisation *guaranteed*. The
+> request log is off unless `--verbose`, and even then query text is redacted by default
+> ([OPUS-4.8] **sq-toze.34**, landed). An operator who *deliberately* passes `--log-full-requests`
+> (or fronts the server with an access-logging gateway) **will** capture full request lines
+> including SPARQL query text — that is then the operator's explicit choice. Redaction is
+> log-*content* redaction, not anonymity: a redacted `--verbose` line still records
+> method/endpoint/status/size/timing metadata.
 
 ## P-3 / P-4 — Erasure & retention mechanism (SPARQL DELETE / DROP / CLEAR)
 

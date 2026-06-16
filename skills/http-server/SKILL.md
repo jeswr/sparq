@@ -138,7 +138,7 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
 - `struct ServerConfig { query_timeout: Option<Duration>, max_body_bytes: usize,
   max_concurrent: usize, max_results: Option<usize>, max_query_rows: Option<usize>,
   max_decompress_ratio: usize, max_subscriptions: usize, max_subscriptions_per_conn: usize,
-  verbose: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
+  verbose: bool, redact_logs: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
   service_allow: ServiceAllowlist, /* + time_travel_* under feature, + audit_log under audit-log feature */ }` with
   `ServerConfig::default()` and `ServerConfig::from_env()`.
   (`max_query_rows` = coarse memory cap; `max_decompress_ratio` = zip-bomb guard — `sq-ebii`.)
@@ -445,7 +445,8 @@ env overrides the default.
 | `--max-decompress-ratio N` | `SPARQ_MAX_DECOMPRESS_RATIO` | `20` (`0`=refuse gzip) | **zip-bomb guard**: cap on decompressed:compressed for a `Content-Encoding: gzip` body → `413` (`sq-ebii`) |
 | `--max-subscriptions N` | `SPARQ_MAX_SUBSCRIPTIONS` | `256` | server-wide subs |
 | `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | per-socket subs |
-| `--verbose` | — | off | TraceLayer request logging (respects `RUST_LOG`) |
+| `--verbose` | — | off | TraceLayer request logging (respects `RUST_LOG`); request URIs **redacted by default** — see "Request-log redaction" |
+| `--log-full-requests` | `SPARQ_LOG_FULL_REQUESTS` | off (redaction ON) | (`sq-toze.34`) OPT OUT of request-log redaction: log the raw request URI (incl. the full `?query=` SPARQL text) verbatim. Inert without `--verbose` — see "Request-log redaction" |
 | `--auth-token TOKEN` | `SPARQ_AUTH_TOKEN` | off (no auth) | require `Authorization: Bearer TOKEN` on every WRITE (SPARQL Update + GSP PUT/POST/DELETE) → `401` + `WWW-Authenticate: Bearer` otherwise; constant-time compared (QLever's `-a`) |
 | `--auth-token-read` | `SPARQ_AUTH_TOKEN_READ` | off | ALSO gate reads with the same token (only meaningful with a token set) |
 | `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | opt in to a non-loopback bind; without it a non-loopback `--addr` is **refused** unless the surface is fully authenticated (`--auth-token` AND `--auth-token-read`), with it it warns and proceeds |
@@ -554,6 +555,30 @@ contract) nor the Bearer secret; only a stable, non-reversible fingerprint of ea
 correlate repeated identical queries / a recurring caller across requests and restarts. Library
 callers set `ServerConfig { audit_log: true, .. }` (field present only with the feature). See
 `crates/sparq-server/src/audit.rs`.
+
+### Request-log redaction — keep query text out of the `--verbose` log (`sq-toze.34`, ON by default)
+
+`--verbose` installs `tower_http::trace`, whose default span records the request **URI** — and
+for `GET /sparql?query=…` the *full SPARQL query text is in that URI*, where it can carry PII (a
+patient IRI, an email in a `FILTER`, a literal in `INSERT DATA`). Logging it verbatim leaks
+sensitive content into operator logs.
+
+**Redaction is ON by default** (always compiled — no feature gate): with `--verbose` the request
+log keeps the URI *path* verbatim but replaces the *query string* with `?<redacted len=N fp=…>`
+— a length signal + a stable, non-reversible FNV-1a fingerprint (the same construction the audit
+log uses). Logs stay correlation-useful (same query → same `fp`) without exposing content.
+**`--log-full-requests`** (env `SPARQ_LOG_FULL_REQUESTS=1`) opts OUT and logs the URI verbatim,
+as the bare TraceLayer did — the deliberate debug escape hatch. Library: `ServerConfig {
+verbose: true, redact_logs: true /* default */, .. }`.
+
+**Default rationale:** enabling `--verbose` for debugging should not silently write
+potentially-sensitive query text to disk / a SIEM; content-logging is the *deliberate* choice.
+**Honest boundary — log-CONTENT redaction, not anonymity:** the log still records method,
+path/endpoint, status, a size signal and timing (it would not be a request log otherwise), so
+an adversary still learns *that* a request of roughly-this-size hit *this* endpoint at *this*
+time and (via `fp`) that the same query recurred. That metadata is not erased. It is also NOT
+the ZK/MPC privacy story — purely operator-log hygiene, complementary to error-body sanitisation
+(`sq-kfel`/#241) and the audit fingerprint. See `crates/sparq-server/src/redact.rs`.
 
 ## Gotchas / feature flags / prerequisites
 

@@ -147,6 +147,33 @@ it is not a differential-error oracle.
   gateway. See the four-limit "Server hardening" section in the SKILL for the precise
   (honest) semantics of each cap.
 
+### Request-log redaction (`--verbose` — ON by default)
+
+`--verbose` installs a per-request log (`tower_http::trace`). Its default span records the
+request **URI** — and for the SPARQL Protocol's `GET /sparql?query=…` form the *full SPARQL
+query text lives in that URI*, where it can carry PII (a patient IRI, an email in a `FILTER`, a
+literal in an `INSERT DATA`). Logging that verbatim writes sensitive content into operator logs.
+
+So **redaction is ON by default**: with `--verbose` the request log keeps the URI *path*
+verbatim (it is a route, not user content) but replaces the *query string* with a
+`?<redacted len=N fp=…>` placeholder — a length signal plus a stable, **non-reversible** FNV-1a
+fingerprint. Logs stay useful for correlation (the same query yields the same `fp`; a size
+signal from `len`) **without exposing the content**. Operators who genuinely need the raw text
+in a debug session opt out explicitly with **`--log-full-requests`** (env
+`SPARQ_LOG_FULL_REQUESTS=1`), which logs the URI verbatim as the bare `TraceLayer` did.
+
+**Rationale for the default:** turning on `--verbose` for debugging should not silently start
+writing potentially-sensitive query text to disk / a SIEM; a privacy-respecting server makes
+content-logging the *deliberate* choice. **Honest boundary:** this is **log-CONTENT redaction,
+not anonymity** — the log still necessarily records the method, the path / endpoint, the
+response status, a size signal and the timing. An adversary with the redacted log still learns
+*that* a request of roughly-this-size hit *this* endpoint at *this* time, and (via `fp`) that
+the same query recurred. That metadata is not erased here. It is also **not** the ZK/MPC privacy
+story (which concerns what a *remote party* learns from a *computation*) — purely operator-log
+hygiene. Complementary to the error-body sanitisation (`sq-kfel`/#241: detail to the server log,
+a generic class to the client) and the opt-in access audit log (which already logs only a query
+*fingerprint*, never the text).
+
 ## 🚀 Quickstart
 
 ```sh
