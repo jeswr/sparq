@@ -44,9 +44,9 @@ evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act
 | A.5.16 | Identity management | N/A(op) | No user identity store in sparq; operator's IdP. | Operator |
 | A.5.17 | Authentication information | AUDIT-READY | Optional bearer token read from env (`SPARQ_AUTH_TOKEN` / `_READ`), never logged; secret management is the operator's. | Operator |
 | A.5.18 | Access rights | N/A(op) | Provisioning/review of access rights to a deployed instance is operator-owned. | Operator |
-| A.5.19 | Information security in supplier relationships | IMPL | Dependency = supplier. `deny.toml` policy (advisories/bans/sources/licenses), gating in `supply-chain.yml`; cargo-vet per-dependency attestations (GATING). | sparq |
+| A.5.19 | Information security in supplier relationships | IMPL | Dependency = supplier. `deny.toml` policy (advisories/bans/sources/licenses), gating in `supply-chain.yml`. `cargo vet --locked` is a GATING supply-chain **ratchet**: every crate must be covered by a trusted imported audit set (Mozilla/Google/ISRG/Embark/BCA/Zcash) or an explicit `[[exemptions]]` entry, so no new un-covered dependency can enter the tree silently. **Note:** `supply-chain/audits.toml` is currently empty (0 first-party audits); the lane proves the ratchet, **not** that sparq has attested any dependency itself — reducing the 349 exemptions to real audits is supply-chain maturity work (GX-7, owned by `compliance/sbom/` + `compliance/slsa/`). | sparq |
 | A.5.20 | Addressing security in supplier agreements | AUDIT-READY | `deny.toml` codifies license + source allow-lists (the "agreement" with the dependency ecosystem); formal supplier contracts N/A for OSS deps. | sparq |
-| A.5.21 | Managing security in the ICT supply chain | IMPL | SLSA build provenance (`actions/attest-build-provenance` in `release.yml`), CycloneDX SBOM + VEW attested on release, cargo-deny + cargo-vet gating, SHA-pinned actions, Dependabot. See `compliance/sbom/` + `compliance/slsa/` (cross-ref). | sparq |
+| A.5.21 | Managing security in the ICT supply chain | IMPL | SLSA build provenance (`actions/attest-build-provenance` in `release.yml`), CycloneDX SBOM + VEX attested on release, cargo-deny gating + the `cargo vet --locked` ratchet (exemptions/imported-audits gate; `audits.toml` empty — see A.5.19), SHA-pinned actions, Dependabot. See `compliance/sbom/` + `compliance/slsa/` (cross-ref). | sparq |
 | A.5.22 | Monitoring, review & change management of supplier services | IMPL | Daily `dependency-monitoring.yml` advisory watchdog + Dependabot PRs re-run the full gate. | sparq |
 | A.5.23 | Information security for use of cloud services | N/A(op) | sparq is not a cloud service and consumes none as part of its product; CI runners are GitHub-hosted (covered under SLSA build-platform). Operator's cloud config is operator-owned (note: ISO 27017/18 were *cut* — see cert plan §0). | Operator |
 | A.5.24 | Incident management planning & preparation | AUDIT-READY | `SECURITY.md` defines the disclosure intake, acknowledgement (5 bd) + assessment (10 bd) targets, and coordinated-disclosure flow; `.well-known/security.txt` (RFC 9116) is the machine-readable pointer. A full org incident-response *plan* (runbook, roles, comms) is an org act — `compliance/policies/` template + GAP-ISO-1. | sparq / Adopting org |
@@ -131,15 +131,34 @@ evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act
 | A.5 Organizational (37) | 9 | 17 | 0 (gaps tracked under GAP-ISO-1/2) | 11 |
 | A.6 People (8) | 1 | 4 | 0 | 3 |
 | A.7 Physical (14) | 0 | 0 | 0 | 14 (block) |
-| A.8 Technological (34) | 16 | 6 | 0 | 12 |
-| **Total (93)** | **26** | **27** | **0 open Annex-A control gaps; 2 readiness gaps** | **40** |
+| A.8 Technological (34) | 14 | 6 | 0 | 14 |
+| **Total (93)** | **24** | **27** | **0 open Annex-A control gaps; 2 readiness gaps** | **42** |
+
+**Dual-status bucketing rule (so the roll-up cross-foots).** Several rows carry a dual
+status of the form `N/A(op) → X` or `X(repo) / N/A(op)`, because the control has a *sparq-side*
+facet and an *operator-side* facet. **Each such row is bucketed once, by its sparq-side
+primary status** (the facet sparq actually owns), and counted nowhere else; the operator facet
+is described in the row text, not separately tallied. Applying the rule:
+
+- **Counted as IMPL** (sparq-side primary status is a verified technical control):
+  A.8.6 (`N/A(op) → IMPL(partial)` — the `QueryBudget` primitive) and A.8.16
+  (`IMPL(repo) / N/A(op)` — CI monitoring of every push).
+- **Counted as AUDIT-READY** (sparq-side primary status is a doc-of-record, not a verified
+  control): A.8.2 and A.8.5 (both `N/A(op) → AUDIT-READY` — branch-protection ruleset / optional
+  bearer token; the certificate-level enforcement is org/operator-owned).
+- **Counted as N/A(op)**: A.8.11 (`N/A(op) → cross-ref`) — sparq does not mask loaded RDF; the
+  ZK privacy story is cross-referenced to `compliance/cryptoreview/`, not claimed here.
+
+This yields the A.8 split **14 IMPL / 6 AUDIT-READY / 14 N/A(op) = 34**. (An earlier headline
+read 26/27/40; it bucketed the two `N/A(op) → AUDIT-READY` rows A.8.2/A.8.5 as IMPL, which the
+rule above does not — corrected here in the conservative direction to **24/27/42**.)
 
 **Reading this honestly:** sparq's *technical* Annex A surface (the bulk of A.8 + the
 supplier/development/vuln-management parts of A.5) is **IMPLEMENTED & VERIFIED** with
 re-runnable CI evidence. The **27 AUDIT-READY** controls are concentrated in the
 management-system layer (A.5 policy/roles/incident/review, A.6 people) — they have a
 **doc-of-record in the repo** but their *certificate* requires an organization to operate
-an ISMS, which **no repo artifact can substitute for**. The **40 N/A(operator)** controls
+an ISMS, which **no repo artifact can substitute for**. The **42 N/A(operator)** controls
 are physical/operational properties of a *deployed* environment, correctly assigned to the
 adopting operator for a library/server. There are **zero open Annex-A control gaps**; the
 two readiness gaps (GAP-ISO-1 the ISMS organizational artifacts, GAP-ISO-2 an explicit

@@ -49,7 +49,13 @@ grep -nE 'cargo deny check|continue-on-error' .github/workflows/supply-chain.yml
 → `cargo deny check advisories` and `cargo deny check bans sources licenses` are both
 labelled **GATING** with **no `continue-on-error`** on the deny steps (GX-1 un-degraded).
 Policy of record: `deny.toml` (read `[advisories]` — each `ignore` carries a reason + a
-tracking bead). `cargo-vet check` is also GATING (per-dependency attestations).
+tracking bead). `cargo vet --locked` is also GATING — a supply-chain **ratchet**, not a set
+of attestations: every crate must be covered by a trusted imported audit set
+(Mozilla/Google/ISRG/Embark/BCA/Zcash) or an explicit `[[exemptions]]` entry, so no new
+un-covered dependency enters the tree silently. `supply-chain/audits.toml` is currently
+empty — verify with `wc -c supply-chain/audits.toml` (35 bytes, 0 `[[audits]]`) and
+`grep -cE 'exemptions\.' supply-chain/config.toml` (349 exemptions): the lane proves the
+ratchet, **not** that sparq has first-party-attested any dependency.
 
 ```sh
 sed -n '1,40p' .github/workflows/dependency-monitoring.yml
