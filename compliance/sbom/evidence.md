@@ -67,15 +67,23 @@ slot is empty (**0/166**). So **one** NTIA element — *Supplier Name* (`supplie
 left **partial** (author-granularity present, supplier-granularity empty); this is the one genuine
 NTIA-completeness gap (**N1/GS-1**). The generated SBOM is `specVersion 1.3` while the VEX is `1.5`.
 
-> **Root/component refs are local-path refs (expected, not tampering — F-6/GS-6, bead sq-toze.30):**
-> the root `metadata.component.bom-ref` is `path+file:///<abs-path>/crates/sparq-server#0.1.0`, the
-> root `purl` is `pkg:cargo/sparq-server@0.1.0?download_url=file://.`, and workspace-member dependency
-> nodes likewise carry `path+file://<abs-path>` refs — inherent to cargo-cyclonedx 0.5.9 resolving
-> path-based workspace members rather than registry purls. `release.yml#sbom` runs the same
-> `cargo cyclonedx --all`, so a published SBOM would carry the **CI runner's absolute path** in those
-> refs. An integrator verifying SBOM→artifact binding should expect local-path refs for workspace
-> members. Optional sanitisation (strip/normalise the abs-path post-generation in
-> `scripts/gen-sbom-vex.sh`) is tracked under **sq-toze.30** (GS-6).
+> **Root/component refs are normalized — abs-path leak RESOLVED (F-6/GS-6, bead sq-toze.30, [OPUS-4.8]):**
+> cargo-cyclonedx 0.5.9 *raw* output stamps the absolute build dir into every workspace/path-dependency
+> `bom-ref` (`path+file:///<abs-path>/crates/sparq-server#0.1.0`) and `purl`
+> (`pkg:cargo/sparq-server@0.1.0?download_url=file://.`), so an unprocessed published SBOM would carry
+> the **CI runner's absolute path**. The **published** SBOMs are now post-processed by
+> `scripts/sbom-normalize.jq` (invoked from `scripts/gen-sbom-vex.sh` for the two released-binary SBOMs,
+> and from `supply-chain.yml#sbom` over every CI-uploaded `*.cdx.json`), which rewrites each such ref to
+> the canonical, host-independent `pkg:cargo/<name>@<version>` form and strips the `download_url=file://…`
+> purl query, while rewriting the dependency graph (root `bom-ref`, nested build-target sub-components,
+> and every `dependencies[].ref` / `dependsOn[]` edge) in lock-step so all internal references still
+> resolve. The transform is deterministic (pure function of the input — no time/host/RNG) and idempotent
+> (a second pass is byte-identical). Both `gen-sbom-vex.sh` and `supply-chain.yml#sbom` additionally
+> fail loudly if any `path+file://`, `download_url=file://`, or `/home/` survives. Verified locally
+> against freshly-generated `sparq-cli`/`sparq-server` SBOMs: 0 host-path leaks, valid CycloneDX shell,
+> all dependency refs resolve (167/175 respectively), idempotent. *Residual:* the abs-path leak is fixed
+> only in the **post-processed publication path**; raw `cargo cyclonedx` still emits path refs (upstream
+> behaviour, not changed here).
 
 > The probe files (`**/*.cdx.json`) are **not committed** — `scripts/gen-sbom-vex.sh#L47` and the
 > probe both delete them to keep the worktree clean. They are regenerable with the command above.

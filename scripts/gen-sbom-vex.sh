@@ -21,7 +21,7 @@
 # (release.yml / Dockerfile) build `-p sparq-cli`/`-p sparq-server` without --all-features,
 # and the CI SBOM job (supply-chain.yml) likewise uses `cargo cyclonedx --all`.
 #
-# Requires: cargo, cargo-cyclonedx, python3. Usage:
+# Requires: cargo, cargo-cyclonedx, jq, python3. Usage:
 #   VERSION=v1.2.3 scripts/gen-sbom-vex.sh            # explicit version
 #   scripts/gen-sbom-vex.sh                           # derives version from git describe
 set -euo pipefail
@@ -36,11 +36,25 @@ mkdir -p "$OUT_DIR"
 echo "==> generating CycloneDX SBOMs (whole workspace, sparq ${VERSION})"
 cargo cyclonedx --all --format json
 
+# [OPUS-4.8] sq-toze.30 (GS-6 / F-6): cargo-cyclonedx 0.5.9 stamps the absolute build dir
+# into every workspace/path-dependency bom-ref (path+file:///abs/...#ver) and purl
+# (?download_url=file://...), which would leak the CI runner's filesystem layout into the
+# PUBLISHED SBOM. Normalize each shipped SBOM through scripts/sbom-normalize.jq, which
+# rewrites those refs to the canonical, host-independent pkg:cargo/<name>@<version> form,
+# rewriting the dependency graph (component bom-ref + every ref/dependsOn edge) in lock-step
+# so internal references stay consistent. The transform is deterministic and idempotent.
+NORMALIZE_JQ="$REPO_ROOT/scripts/sbom-normalize.jq"
 for crate in sparq-cli sparq-server; do
   src="crates/${crate}/${crate}.cdx.json"
   dst="$OUT_DIR/${crate}-${VERSION}.sbom.cdx.json"
-  mv "$src" "$dst"
-  echo "    -> $dst"
+  jq -f "$NORMALIZE_JQ" "$src" > "$dst"
+  rm -f "$src"
+  # Belt-and-braces: fail loudly if any host-revealing absolute path survived.
+  if grep -qE 'path\+file://|download_url=file://|/home/' "$dst"; then
+    echo "ERROR: host path leaked into $dst after normalization" >&2
+    exit 1
+  fi
+  echo "    -> $dst (abs-path-normalized)"
 done
 
 # Discard the per-member SBOMs we don't ship (keeps the worktree clean for `git status`).

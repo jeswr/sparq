@@ -16,15 +16,25 @@ Physical, A.8 Technological).
   (the exact command / grep / file an auditor re-runs).
 - [`gap-register.md`](./gap-register.md) — open gaps, severity, remediation, and the
   `bd` bead that tracks each (epic `sq-toze`).
-- [`soa-template.md`](./soa-template.md) — a **Statement of Applicability + ISMS
-  clauses-4–10 scaffold** *template* for an adopting organization (remediation of
-  GAP-ISO-1). A template, **not** a certificate.
 - [`operator-deployment-security.md`](./operator-deployment-security.md) — the
   **operator deployment-security responsibilities** doc (remediation of GAP-ISO-2 /
   boundary **B3**): what the organisation *deploying* sparq-server must do (network/TLS,
   authN/authZ, secrets, OS/container hardening, DoS limits, logging/PII, backup, patch
   cadence), each stating what sparq ships built-in vs what the operator MUST supply. An
   **operator-responsibility doc, NOT a certification claim**.
+- [`isms-templates-README.md`](./isms-templates-README.md) — **index of the org-adoptable
+  ISMS template set** (clauses 4–10 + SoA), the remediation of GAP-ISO-1. Start here for the
+  templates. **Adoptable templates, NOT a certificate.**
+- [`soa-template.md`](./soa-template.md) — the **full Annex A 93-control Statement of
+  Applicability** *template*: sparq-side status + evidence pre-filled from `controls.md`, the
+  org applicability/justification/status/sign-off columns left blank. A template, **not** a
+  certificate.
+- [`isms-scope-template.md`](./isms-scope-template.md) (clause 4),
+  [`risk-methodology-template.md`](./risk-methodology-template.md) (clauses 6/8),
+  [`internal-audit-programme-template.md`](./internal-audit-programme-template.md) (clauses
+  9.1/9.2), [`management-review-template.md`](./management-review-template.md) (clauses 9.3/10)
+  — the remaining ISMS clause scaffolds. Each carries `<FILL-IN>` placeholders for the org to
+  complete. Templates, **not** certificates.
 
 ## The single most important honesty point
 
