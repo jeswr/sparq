@@ -120,12 +120,41 @@ threat-model `T-MMAP-FUZZ`, invariant "clean `Err`, never panic/OOB/UB". Targets
 by `cargo fuzz list` in `.github/workflows/fuzz.yml` (PR smoke + nightly). Other targets:
 `load_reader_parallel.rs`, `parse_rdf_str.rs`, `parse_sparql.rs`, `validate_shacl.rs`.
 
-## MS-9 — ASan via cargo-fuzz
+## MS-9 — ASan (fuzz lane **and** standalone corruption-corpus lane)
 
-`.github/workflows/fuzz.yml` builds on nightly with `-Zsanitizer` (libFuzzer sancov) on the
-`x86_64-unknown-linux-gnu` target (the musl target is ASan-incompatible — documented in the
-workflow). So the mmap loader's reads execute under AddressSanitizer during fuzzing. Caveat
-(MS-G3): no standalone ASan unit-test lane outside fuzzing.
+**(a) Inside cargo-fuzz.** `.github/workflows/fuzz.yml` builds on nightly with `-Zsanitizer`
+(libFuzzer sancov) on the `x86_64-unknown-linux-gnu` target (the musl target is
+ASan-incompatible — documented in the workflow). So the mmap loader's reads execute under
+AddressSanitizer during fuzzing.
+
+**(b) Standalone over the deterministic corruption corpus (sq-hybl, [OPUS-4.8]) — closes the
+former MS-G3 caveat.** `.github/workflows/asan.yml`:
+```sh
+# the exact lane commands (gnu target, ASan-instrumented std via -Zbuild-std):
+RUSTFLAGS="-Zsanitizer=address" ASAN_OPTIONS="detect_leaks=0" \
+  cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu \
+    -p sparq-core --features mmap,dict-spill --test mmap_corruption_oracle
+RUSTFLAGS="-Zsanitizer=address" ASAN_OPTIONS="detect_leaks=0" \
+  cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu \
+    -p sparq-vectors --test store --test diskann
+```
+Runs the deterministic mmap corruption corpus (the oracle's truncate + bit-flip sweep over
+every on-disk section, plus the `sparq-vectors` `VectorStore`/`DiskAnnIndex` open-validation
+corpus: truncated files / wrong magic / oversized length fields) under AddressSanitizer, so a
+heap-OOB / use-after-free / UB on a malformed on-disk file is caught even when it does not
+panic. `-Zbuild-std` (needs the `rust-src` component) is REQUIRED so std is recompiled under
+the same `-Zsanitizer` flag; `--target` (a non-musl GNU triple) is REQUIRED for build-std +
+ASan compatibility; `detect_leaks=0` silences LeakSanitizer noise from rayon's daemon threads
++ the long-lived mmaps (a lifecycle artefact, cf. miri's `-Zmiri-ignore-leaks`). **Trigger:**
+nightly `schedule` + `workflow_dispatch` only — NO `pull_request`/`merge_group`, so it is a
+non-blocking UB safety net (`-Zbuild-std` is many minutes) and `ci-summary / gate` neither
+discovers nor waits on it; the job name `asan (mmap corruption corpus, informational)` also
+carries the `informational` token belt-and-braces.
+
+**Honesty on local verification:** the ASan FLOW (flags, build-std, gnu target, leak-suppress)
+was exercised locally on the agent's `aarch64-unknown-linux-gnu` host (a valid ASan target);
+the lane pins the `x86_64-unknown-linux-gnu` runner triple. See the inconsistencies note below
+for the precise tested-vs-untested boundary.
 
 ## MS-10 — clippy `-D warnings`
 
@@ -162,3 +191,12 @@ The parser/planner/executor/reasoner/SHACL layers are in the MS-1 forbid list (o
    `threat-model.md`; tracked as low-severity drift MS-G5 (one-line fix for the doc owner).
 2. The register's `undocumented_unsafe_blocks` enforcement sentence is an overstatement
    (MS-G2) — corrected in MS-5/evidence and in the register itself.
+3. **ASan lane (MS-9b / asan.yml) — tested-vs-untested boundary (sq-hybl, honest).** The
+   ASan *flow* (`RUSTFLAGS=-Zsanitizer=address` + `-Zbuild-std` + a non-musl GNU `--target` +
+   `ASAN_OPTIONS=detect_leaks=0`) was exercised locally on the agent's
+   `aarch64-unknown-linux-gnu` host — a valid ASan target — to confirm the flag combination
+   compiles + runs the instrumented corruption-corpus tests. The lane itself pins the
+   `x86_64-unknown-linux-gnu` GitHub runner triple (matching `fuzz.yml`), which was NOT run
+   in this worktree (no x86_64 runner here). The flow is identical across the two gnu triples;
+   validate on the FIRST scheduled/dispatched CI run. The lane is non-blocking, so a
+   first-run hiccup cannot block any merge.

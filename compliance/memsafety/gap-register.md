@@ -7,8 +7,9 @@ Open gaps for the memsafety framework, with severity, remediation, and the `bd` 
 tracks the fix. The headline GX-5 gap (no unsafe register + cargo-geiger informational-only)
 from `research/production-certification-plan.md` is **CLOSED** by this framework's work
 (register + gating ratchet — see below). The remaining gaps are the honest residue: a
-documentation overclaim, two deferred deeper-coverage lanes, a formal-verification ceiling,
-and a cross-doc count drift.
+documentation overclaim, one deferred deeper-coverage lane (MS-G4), a formal-verification
+ceiling, and a cross-doc count drift. **MS-G3 (standalone ASan over the corruption corpus) is
+now CLOSED** by `.github/workflows/asan.yml` (sq-hybl).
 
 > `bd` is not available in this isolated worktree, so beads are listed here for the
 > orchestrator to create (`bd create … --epic sq-toze`); they are NOT hand-edited into
@@ -27,7 +28,7 @@ and a cross-doc count drift.
 
 | ID | Gap | Sev | Remediation | Bead (to create) |
 |---|---|---|---|---|
-| **MS-G3** | **No standalone AddressSanitizer lane** outside cargo-fuzz. ASan currently runs only *inside* the fuzz build (MS-9), so ASan coverage of the B5 reads is only as deep as the fuzz corpus reaches; the deterministic oracle (MS-7) runs *without* ASan. | **Low** | Add a CI lane that runs `crates/sparq-core/tests/mmap_corruption_oracle.rs` (+ the vector/diskann corruption tests) under `-Zsanitizer=address` on the gnu target (nightly), so the deterministic corruption corpus executes under ASan. Deferred in the original miri.yml header; this makes it a tracked gap, not a silent omission. | `memsafety: ASan lane over the corruption oracle (not just fuzz)` (P2, sq-toze) |
+| ~~MS-G3~~ | ~~No standalone AddressSanitizer lane outside cargo-fuzz.~~ | ~~Low~~ | **CLOSED (sq-hybl, [OPUS-4.8]).** Added `.github/workflows/asan.yml` — a standalone ASan lane that runs the deterministic mmap corruption corpus (`crates/sparq-core/tests/mmap_corruption_oracle.rs` under `--features mmap,dict-spill`, plus the `sparq-vectors` `store`/`diskann` open-validation corpus) under `RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu`. So the B5 reads now execute under ASan against the *deterministic* corpus, not only as deep as the fuzz corpus reaches. **Nightly schedule + workflow_dispatch only** (no PR/merge_group trigger — `-Zbuild-std` rebuilds std under ASan, many minutes), so it is a non-blocking UB safety net (cf. miri.yml / the nightly fuzz tier) and the `ci-summary / gate` aggregator never discovers/waits on it; the job name also carries the `informational` token belt-and-braces. | — (done) |
 | **MS-G4** | **No formal verification / model checking of the unsafe core.** Assurance is Miri + oracle + fuzz + per-site argument (strong *testing/justification*) but not a *proof* of the mmap validators (`MappedDict::validate`, `VectorStore::open_validated`, DiskANN `open`). | **Low** (assurance ceiling, not a defect) | Evaluate Kani (bounded model checking of the offset/length validators) or a Prusti/Creusot annotation of the `validate` functions; treat as the certificate-grade external/formal-methods step. AUDIT-READY label stands until then. | `memsafety: evaluate Kani bounded-proof of the mmap validators` (P2, sq-toze) |
 | **MS-G5** | **Cross-doc unsafe-count drift.** `research/threat-model.md` says sparq-core has "39 sites"; the register/snapshot/ratchet say **42**. The register is authoritative; the threat-model prose is stale. | **Low** | One-line fix to `research/threat-model.md` (owned by the threat-model doc, not this framework) — update "39" → "42" (or reference the ratchet snapshot so it can't drift again). | `docs: sync threat-model unsafe-count to the ratchet snapshot (39→42)` (P2, sq-toze) |
 
@@ -48,7 +49,10 @@ crates), fully enumerated + justified (56-site register), gated by a merge-block
 and covered by a Miri+oracle+fuzz+ASan matrix with the B5 boundary explicitly handled. The
 open gaps are **not** missing safety — they are (a) [CLOSED] the first-party
 `undocumented_unsafe_blocks` lint, now enforced on all 5 unsafe crates (MS-G2, sq-8wbn),
-(b) two *deeper-assurance* lanes that are deferred-but-tracked (MS-G3 ASan-standalone,
-MS-G4 formal proof), and (c) a stale number in a neighbouring doc (MS-G5). None of these
+(b) one remaining *deeper-assurance* lane that is deferred-but-tracked (MS-G4 formal proof —
+MS-G3 ASan-standalone is now CLOSED, sq-hybl), and (c) a stale number in a neighbouring doc
+(MS-G5). None of these
+(b') [CLOSED] the standalone ASan lane over the corruption corpus (MS-G3, sq-hybl —
+`asan.yml`),
 contradicts the safety claim; the certificate-grade ceiling (formal proof + external audit) is
 external by definition and labelled AUDIT-READY.
