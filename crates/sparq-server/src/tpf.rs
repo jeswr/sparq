@@ -141,7 +141,7 @@ fn parse_term(raw: Option<&str>, pos: &str) -> Result<Option<Term>, ParseError> 
         None | Some("") => Ok(None),
         Some(s) => Term::from_str(s)
             .map(Some)
-            .map_err(|e| ParseError(format!("invalid {pos} term '{s}': {e}"))),
+            .map_err(|e| ParseError(format!("invalid {} term '{}': {e}", pos, s))),
     }
 }
 
