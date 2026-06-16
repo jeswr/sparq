@@ -177,6 +177,60 @@ pattern: `GRAPH <urn:sparq:auth> { ?who <https://sparq.dev/ns/auth#read> ?doc }`
   Only an issuer-CONSTRAINED grant mints a triple principal; an issuer-unconstrained grant
   (`AnyIssuer`) reuses the agent / pair term, so issuer-blind pods are unaffected.
 
+## ACP conformance harness — [OPUS-4.8] sq-3jtd.9
+
+`sparq_solid::conformance` is a **library-level ACP conformance harness**: a table-driven
+scenario runner over this crate's own ACP engine (`materialize_acp` +
+`AuthIndex::accessible`). A scenario is declared as **data** — an ACR-document corpus plus a
+table of expected `(agent, client, mode, resource) → Allow | Deny` decisions — and the
+harness asserts the engine reproduces every expected decision, reporting **all** mismatches
+at once. The module is **always compiled** (no feature gate; it depends only on the
+always-present ACP path). The scenario corpus that consumes it lives in
+`crates/sparq-solid/tests/conformance_acp.rs` (12 scenarios / 40 decisions, plus a negative
+control asserting a wrong expectation is *reported*, not panicked).
+
+What it is — and is NOT (honest scope, mirrors the module/README/`research/sparq-solid-scope.md` §4):
+
+- It is the **realistic, achievable** conformance signal for an authorization *oracle* —
+  library-level **decision parity** against the [Solid ACP spec](https://solidproject.org/TR/acp)
+  semantics. It is **NOT a normative-CTH pass** and makes no such claim.
+- **CTH-over-HTTP** (the Solid Conformance Test Harness / `solid/specification-tests`, which
+  drives a *server* and asserts on HTTP outputs) is **out-of-scope** — this crate has no HTTP
+  surface; that belongs to a Solid server, conformance-tested *through* it.
+- A **JS-reference differential oracle** (Community Solid Server / Inrupt ESS over the same
+  corpus) is the credible *second* oracle but is research-open (JS-toolchain cost) and is
+  **not** built here — captured as a follow-up.
+- It is a **test/oracle harness over the existing engine** — it does not change authorization
+  behaviour. It is complementary to `tests/acp.rs` (a hand-derived access matrix over one
+  realistic pod): this harness gives spec-construct coverage with small, independently-failing
+  cases.
+- The **WAC** conformance harness (`sq-3jtd.8`) is **still open** — this defines the in-crate
+  harness pattern (the same `AcrBuilder`/`AcpScenario` shape transfers to WAC) rather than
+  mirroring an existing WAC one.
+
+Public surface (`pub mod conformance`, re-exported from the crate root for the entry types):
+
+- `AcrBuilder` — build the ACR-document corpus as N-Quads. `acr.access_control(resource,
+  |p| …)` / `acr.member_access_control(resource, |p| …)` attach a policy (`acp:accessControl`
+  / `acp:memberAccessControl` for cumulative ancestor inheritance); `acr.document(resource)`
+  declares the protected resource graph; `acr.into_nquads()` emits the corpus.
+- `PolicyBuilder<'a>` (the `|p| …` closure argument) — `allow(Mode)` / `deny(Mode)`,
+  `any_of_agent` / `all_of_agent` / `none_of_agent`, `any_of_client` / `all_of_client`,
+  `all_of_pair(agent, client)` — the `acp:allOf` / `acp:anyOf` / `acp:noneOf` combinators over
+  `acp:agent` / `acp:client` matchers, with `PUBLIC_AGENT` / `AUTHENTICATED_AGENT` consts for
+  the `acp:PublicAgent` / `acp:AuthenticatedAgent` matcher IRIs.
+- `AcpScenario` — `new(name)`, `.acr(AcrBuilder)` / `.nquads(&str)` (the corpus),
+  `.expect(Expect)` / `.expect_all(iter)` (the decision table), `.run() ->
+  Result<ScenarioReport, String>` (materializes + checks). `run_corpus(&[AcpScenario])` runs
+  a whole corpus.
+- `Expect` — one expected decision, built fluently: `Expect::agent(webid)` /
+  `Expect::anonymous()` / `Expect::pair(agent, client)`, then `.read/.write/.append/.control(
+  resource)`, then `.is(Decision::Allow | Decision::Deny)`.
+- `ScenarioReport` — `.passed()`, `.checked()`, `.mismatches()` (the failing
+  `DecisionResult`s), `.name()`, and a readable mismatch `Display`. `Decision::{Allow, Deny}`
+  is the binary the harness compares against the engine verdict (graph in the session's
+  accessible set ⇒ `Allow`).
+
 ## Security posture — fail-closed
 
 Absence of a grant means a graph is **invisible**, and a non-authorized graph is
