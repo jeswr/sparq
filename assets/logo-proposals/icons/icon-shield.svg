@@ -1,35 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="sparq icon">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="sparq">
   <style>
     .shield{fill:#1c7f86}
-    .accent{fill:#f5a623}
-    @media (prefers-color-scheme:dark){
-      .shield{fill:#4cc4cc}
-    }
+    .bolt{fill:none;stroke:#f5a623;stroke-width:30;stroke-linejoin:round;stroke-linecap:round}
+    @media (prefers-color-scheme:dark){ .shield{fill:#4cc4cc} }
   </style>
-  <!-- standalone square icon: privacy/proof shield with RDF graph as negative space -->
   <defs>
-    <mask id="graphCut2">
+    <mask id="graphCutIcon">
       <rect x="0" y="0" width="512" height="512" fill="#fff"/>
-      <g stroke="#000" stroke-width="30" stroke-linecap="round" fill="none">
-        <line x1="256" y1="186" x2="172" y2="356"/>
-        <line x1="256" y1="186" x2="340" y2="356"/>
-        <line x1="172" y1="356" x2="340" y2="356"/>
+      <g transform="translate(66,1)">
+        <g stroke="#000" stroke-width="20" stroke-linecap="round" fill="none">
+          <line x1="138" y1="150" x2="96" y2="300"/>
+          <line x1="138" y1="150" x2="180" y2="300"/>
+          <line x1="96" y1="300" x2="180" y2="300"/>
+        </g>
+        <circle cx="138" cy="150" r="28" fill="#000"/>
+        <circle cx="96" cy="300" r="26" fill="#000"/>
+        <circle cx="180" cy="300" r="26" fill="#000"/>
       </g>
-      <circle cx="172" cy="356" r="40" fill="#000"/>
-      <circle cx="340" cy="356" r="40" fill="#000"/>
-      <circle cx="256" cy="186" r="48" fill="#000"/>
     </mask>
   </defs>
-  <g id="icon">
-    <circle class="accent" cx="256" cy="186" r="40"/>
-    <path class="shield" mask="url(#graphCut2)" d="
-      M256 56
-      C 348 102, 412 110, 432 116
-      C 438 232, 428 352, 374 432
-      C 328 500, 286 480, 256 470
-      C 226 480, 184 500, 138 432
-      C 84 352, 74 232, 80 116
-      C 100 110, 164 102, 256 56
-      Z"/>
+  <g transform="translate(66,1)" mask="url(#graphCutIcon)">
+    <path class="shield" d="M190 48 C 250 86, 300 92, 326 96 C 330 210, 320 320, 268 386 C 240 422, 214 446, 190 462 C 166 446, 140 422, 112 386 C 60 320, 50 210, 54 96 C 80 92, 130 86, 190 48 Z"/>
   </g>
+  <path class="bolt" transform="translate(66,1)" d="M278 140 L232 256 L276 256 L228 398"/>
 </svg>
