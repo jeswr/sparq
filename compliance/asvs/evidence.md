@@ -94,7 +94,8 @@ cargo deny check advisories bans sources licenses
 - **Logging is opt-in and body-free.** `grep -n "TraceLayer\|verbose" crates/sparq-server/src/http.rs crates/sparq-server/src/main.rs`
   — `tower_http::trace::TraceLayer` behind `--verbose`; logs method/path/status, not body or
   query text. No `info!/warn!/error!` of query text or PII: `grep -rn "info!\|warn!\|error!" crates/sparq-server/src | grep -i "query\|token"` returns nothing leaking.
-- **Caveat (tracked ASVS-G3, bead `sq-kfel`):** engine parse/exec error *messages* are echoed
+- **Caveat (tracked ASVS-G3, bead `sq-j9zs`; same root cause as the wider error-body
+  info-leak bead `sq-cz89`, P1):** engine parse/exec error *messages* are echoed
   to the client by design; no test yet asserts they are path/host-free.
 
 ## V8 — Data protection
@@ -156,8 +157,11 @@ cargo deny check advisories bans sources licenses
 - **`.well-known/security.txt` (RFC 9116).** `cat .well-known/security.txt` — Contact/Expires/
   Policy/Canonical; referenced from `CONTRIBUTING.md` + `SECURITY.md`. (GX-3 ✓.)
 - **No CORS / no security headers (the two GAPs).**
-  `grep -rn "CorsLayer\|Access-Control\|nosniff\|Content-Security-Policy\|X-Frame-Options" crates/`
-  returns **nothing** — V14.4 (ASVS-G1, bead `sq-2bhm`) and V14.5.3 (ASVS-G2, bead `sq-vtkj`).
+  `grep -rn "CorsLayer\|Access-Control-Allow\|nosniff\|Content-Security-Policy\|X-Frame-Options" crates/`
+  returns **nothing** — V14.4 (ASVS-G1, bead `sq-cmvh`) and V14.5.3 (ASVS-G2, bead `sq-o7o0`).
+  (Note: the header-specific `Access-Control-Allow` is the load-bearing token — a bare
+  `Access-Control` over-matches the Solid WAC English phrase "access control" with ~18
+  non-header hits in `sparq-solid`, none of them an emitted HTTP response header.)
 
 ---
 
@@ -165,8 +169,10 @@ cargo deny check advisories bans sources licenses
 
 1. **Line numbers are approximate** in `controls/asvs.md` (marked with `~`); the **grep
    anchors here are the canonical pointer**. Verified live: `constant_time_eq` and
-   `is_forbidden_ip` exist; `CorsLayer`/`nosniff`/`Set-Cookie`/`Access-Control` grep to **zero**
-   hits in `crates/` (the basis for the V3 N/A, V14.4 GAP, and V14.5.3 documented-decision).
+   `is_forbidden_ip` exist; `CorsLayer`/`nosniff`/`Set-Cookie`/`Access-Control-Allow` (the
+   header-specific token — *not* bare `Access-Control`, which over-matches the Solid WAC
+   English phrase) grep to **zero** hits in `crates/` (the basis for the V3 N/A, V14.4 GAP,
+   and V14.5.3 documented-decision).
 2. **The ZK/MPC estate is excluded** from every claim. No V6/V8 row leans on it. Per
    `SECURITY.md` + `research/zk-soundness-audit.md`, the v1 ZK verifier is **NOT sound**.
 3. **`sparq-serve/tests/tokens.rs` is NOT an auth test** — it covers read-your-writes
