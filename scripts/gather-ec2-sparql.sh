@@ -12,10 +12,13 @@
 #   Both engines load the SAME generated SP2Bench corpus and run the SAME query files, so
 #   the two TSVs (<name>\t<rows>\t<best_us>) are a self-consistent same-box comparison.
 #   Solution counts are cross-checked against bench/sp2b/expected-rows.tsv (correctness).
-#   3. qlever   : BEST-EFFORT (GATHER_QLEVER=1). Builds a QLever index over the same corpus
-#                 in Docker, starts the server, runs the same queries via the http-sparql
-#                 adapter. If Docker/index/server is too heavy/flaky in the bounded window,
-#                 it is SKIPPED and stays honest-n/a (the recipe is beaded separately).
+#   3. qlever   : BEST-EFFORT (GATHER_QLEVER=1). Delegates to scripts/qlever-same-box.sh
+#                 (sq-52fo): builds a QLever index over the same corpus in Docker
+#                 (IndexBuilderMain), starts ServerMain on a port, polls readiness, runs the
+#                 same queries over HTTP, then ALWAYS tears the server + temp index down via
+#                 an EXIT trap. EVERY step is timeout-bounded (pull/index/ready/query) so it
+#                 can never hang the gather (the prior ~53min stall). If Docker/index/server
+#                 is too heavy/flaky in the bounded window it is SKIPPED and stays honest-n/a.
 #
 # Corpus scale is BOUNDED + documented: SP2Bench is the cheapest deterministic featured
 # corpus (real Freiburg sp2b_gen, g++ -O2, sha256-pinned, byte-identical output; ~250k
@@ -152,65 +155,27 @@ NPROC=\$(nproc)
 KERNEL=\$(uname -r)
 NOW=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# qlever best-effort
+# qlever best-effort  [OPUS-4.8] sq-52fo
+# Delegates the heavy index->server->query->teardown dance to the dedicated, BOUNDED,
+# orphan-safe recipe scripts/qlever-same-box.sh (every step timeout-capped, an EXIT trap
+# always tears down the server container + temp index — fixes the prior ~53min hang / leaked
+# server). This block stays a no-op unless GATHER_QLEVER=1 AND docker is present, so the
+# Oxigraph-only path is byte-for-byte unchanged.
 QLEVER_STATUS="skipped"
 QLEVER_TSV=""
 if [ "$GATHER_QLEVER" = "1" ] && command -v docker >/dev/null 2>&1; then
-  echo "=== qlever best-effort ==="
-  QDIR=/root/qlever; mkdir -p "\$QDIR"
-  # sp2b_gen emits Turtle; QLever indexes N-Triples/Turtle. Build an index then start server.
-  cp "\$CORPUS" "\$QDIR/sp2b.ttl"
-  ( cd "\$QDIR"
-    docker pull -q docker.io/adfreiburg/qlever:latest || true
-    # IndexBuilder over the Turtle corpus
-    timeout 1200 docker run --rm -v "\$QDIR":/data -w /data docker.io/adfreiburg/qlever:latest \
-      bash -lc "IndexBuilderMain -i /data/sp2b -f /data/sp2b.ttl -F ttl 2>&1 | tail -20" \
-      && echo "QLEVER_INDEX_OK" || echo "QLEVER_INDEX_FAIL"
-    docker run -d --name qlever-srv -p 7001:7001 -v "\$QDIR":/data -w /data docker.io/adfreiburg/qlever:latest \
-      ServerMain -i /data/sp2b -p 7001 -j 4 || echo "QLEVER_SERVER_FAIL"
-  ) || true
-  # poll the endpoint
-  for _ in \$(seq 1 30); do
-    curl -s "http://localhost:7001/?query=SELECT%20*%20WHERE%7B%3Fs%20%3Fp%20%3Fo%7D%20LIMIT%201" >/dev/null 2>&1 && break
-    sleep 3
-  done
-  python3 -m venv /root/qenv && /root/qenv/bin/pip install -q requests
-  : > /tmp/qlever.tsv
-  for q in bench/sp2b/queries/*.rq; do
-    name=\$(basename "\$q" .rq)
-    /root/qenv/bin/python3 - "\$q" "\$name" <<'PYQ' >> /tmp/qlever.tsv 2>/tmp/qlever.err || true
-import sys, time, requests
-qf, name = sys.argv[1], sys.argv[2]
-q = open(qf).read()
-best = None; rows = "ERROR"
-for _ in range($ITERS):
-    t = time.perf_counter()
-    try:
-        r = requests.post("http://localhost:7001", data={"query": q},
-                          headers={"Accept": "application/sparql-results+json"}, timeout=120)
-        j = r.json()
-        if "results" in j and "bindings" in j["results"]:
-            rows = len(j["results"]["bindings"])
-        elif "boolean" in j:
-            rows = 1 if j["boolean"] else 0
-        else:
-            rows = "ERROR"; break
-        us = (time.perf_counter() - t) * 1e6
-        best = us if best is None else min(best, us)
-    except Exception as e:
-        rows = "ERROR"; break
-if rows == "ERROR" or best is None:
-    print(f"{name}\tERROR\tqlever")
-else:
-    print(f"{name}\t{rows}\t{best:.1f}")
-PYQ
-  done
-  echo "=== qlever.tsv ==="; cat /tmp/qlever.tsv || true
-  if [ -s /tmp/qlever.tsv ] && grep -qv ERROR /tmp/qlever.tsv; then
+  echo "=== qlever best-effort (scripts/qlever-same-box.sh) ==="
+  # sp2b_gen emits Turtle, so format=ttl; the recipe also accepts nt for N-Triples corpora.
+  # The recipe is itself bounded + trap-cleaned, but we ALSO wrap it in an outer 'timeout'
+  # as a belt-and-braces ceiling so it can never extend the gather window indefinitely.
+  if QLEVER_PORT=7001 QLEVER_INDEX_TIMEOUT=1200 QLEVER_READY_TIMEOUT=120 QLEVER_QUERY_TIMEOUT=60 \
+       timeout 1800 bash scripts/qlever-same-box.sh "\$CORPUS" ttl bench/sp2b/queries "$ITERS" /tmp/qlever.tsv; then
     QLEVER_STATUS="ok"
     QLEVER_TSV=\$(python3 -c 'import json,sys; print(json.dumps(open("/tmp/qlever.tsv").read()))')
   else
+    echo "qlever recipe failed/timed out — keeping dashboard cell honest-n/a"
     QLEVER_STATUS="failed"
+    [ -s /tmp/qlever.tsv ] && QLEVER_TSV=\$(python3 -c 'import json,sys; print(json.dumps(open("/tmp/qlever.tsv").read()))')
   fi
 fi
 
