@@ -50,7 +50,8 @@
 //! Both must FAIL if a future edit introduces such an edge.
 //!
 //! [OPUS-4.8] sq-s1uy — flagged for Fable re-review when available.
-#![forbid(unsafe_code)] // [OPUS-4.8] sq-s1uy: crate has zero `unsafe`.
+#![forbid(unsafe_code)]
+// [OPUS-4.8] sq-s1uy: crate has zero `unsafe`.
 // When `fedclient` is off the crate is intentionally empty; when on, the Phase-0 module
 // stubs are placeholders with no public items yet, so silence the expected dead-code/
 // unused-import lints until the logic phases populate them.
@@ -76,11 +77,12 @@ pub use source::{
     Transport,
 };
 
-/// §4.1 — **capability discovery**: GET `/.well-known/void` + the Service Description per
-/// endpoint, parse VoID+`scs:` via the existing
-/// [`SourceDescriptor::from_void_nt`](sparq_fedplan::SourceDescriptor) seam, parse SD into
-/// a `Capability`, with FedX-style ASK-probe fallback when nothing is published.
-/// The client-side SD parser is the one genuinely new parser (Phase 1).
+/// §4.1 — **capability discovery** (Phase 1, bead sq-nfxl): GET `/.well-known/void` + the
+/// Service Description per endpoint, parse VoID+`scs:` via the existing
+/// [`SourceDescriptor::from_void_nt`](sparq_fedplan::SourceDescriptor) seam (REUSED), parse
+/// SD into a [`Capability`](discovery::Capability) (the one genuinely-new client-side parser),
+/// with a FedX-style ASK-probe fallback when nothing is published. Every fetch is behind an
+/// SSRF-guarded [`Fetcher`](discovery::Fetcher) seam (default-deny private/internal IPs).
 #[cfg(feature = "fedclient")]
 pub mod discovery;
 

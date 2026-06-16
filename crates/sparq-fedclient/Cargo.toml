@@ -41,7 +41,13 @@ fedclient = [
     "dep:sparq-engine",
     "sparq-engine/service",
     "dep:oxrdf",
+    "dep:oxttl",
     "dep:spargebra",
+    "dep:rustc-hash",
+    # [OPUS-4.8] sq-nfxl: ureq is the discovery client's blocking HTTP GET (Phase 1). It is
+    # already in the tree (sparq-engine's `service` transport pulls the same crate), and is
+    # native-only — the discovery module `#[cfg]`-excludes it from the wasm build.
+    "dep:ureq",
 ]
 
 [dependencies]
@@ -54,3 +60,12 @@ sparq-engine = { path = "../sparq-engine", optional = true }
 # Term model + SPARQL algebra (already in the tree) for the source/query surface.
 oxrdf = { workspace = true, optional = true }
 spargebra = { workspace = true, optional = true }
+# [OPUS-4.8] sq-nfxl: N-Triples parsing for the Service-Description / VoID discovery
+# documents, and the small hash maps the SD parser builds. Both already in the workspace.
+oxttl = { workspace = true, optional = true }
+rustc-hash = { workspace = true, optional = true }
+# [OPUS-4.8] sq-nfxl: the discovery client's blocking HTTP GET (SSRF-guarded). Native-only;
+# the discovery module gates it out of wasm. Mirrors sparq-engine's `service` ureq config so
+# the resolved dependency is the SAME crate/version (no new tree growth on a default build).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs"], optional = true }
