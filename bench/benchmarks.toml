@@ -471,6 +471,20 @@ pinning     = "in-crate fixture is deterministic"
 records_to  = "stdout; cross-checked in bench/inference/incremental-bench.md (0.84s WAC re-run baseline)"
 status      = "ok"
 
+# [OPUS-4.8] sq-r06h — ODRL usage-control evaluator (opt-in sparq-policy crate).
+[[benchmark]]
+id          = "policy-odrl-eval"
+name        = "sparq-policy ODRL parse + evaluate"
+category    = "inference"
+measures    = "ODRL policy parse time (RDF -> typed model via engine BGP queries); per-request evaluation latency (ALLOW / DENY-by-prohibition / DENY-by-constraint), cold + best-of-K"
+invoke      = "cargo run -p sparq-policy --example bench --release [n-permissions=200]"
+source      = "crates/sparq-policy/examples/bench.rs"
+dataset     = "synthetic ODRL Set of N permissions (assignee + target + dateTime-window + purpose constraint) + 1 prohibition, generated in-example (deterministic)"
+quiet_box_sensitive = true
+pinning     = "in-example synthetic policy is deterministic; pin N for comparable numbers"
+records_to  = "stdout (us per phase)"
+status      = "ok"
+
 # =============================================================================
 # ZK — commitment pipeline, trace seam, circuit gate counts, prove/verify
 # =============================================================================
