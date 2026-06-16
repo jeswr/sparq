@@ -671,6 +671,95 @@ pub fn secure_threshold(
     greater_than_public_bits(dealer, &a_bits, threshold.value())
 }
 
+/// [OPUS-4.8] sq-xhaw — `[a == b]` over two full secret-shared `F_p` values,
+/// returning a fresh degree-`t` sharing of the 0/1 equality bit **WITHOUT ever
+/// opening it** (the key primitive the fully-oblivious batched join needs).
+///
+/// ## Why this exists (vs the existing `secure_equal`)
+///
+/// [`crate::join::HiddenValueJoin`]'s `secure_equal` computes the SAME equality
+/// verdict by the cheap masked-product trick (`m = (a−b)·r`, open `m`; `m==0 ⇔
+/// equal`) — ONE multiplication + ONE open. But it *opens* the verdict per pair,
+/// which IS the L2 match-graph leak (`research/mpc-sparql-capability-matrix.md`
+/// §4.2): the set of opened-true pairs is the bipartite match graph / key
+/// fan-out. To run a **fully-oblivious** join the match bit must stay
+/// secret-shared so it can drive an oblivious select with no per-pair open. This
+/// primitive produces exactly that — a sharing of `1{a==b}`, never reconstructed
+/// here — at the cost of a bit-decomposition + an AND-tree of secure
+/// multiplications (the same chain `secure_greater_than` pays), routed through the
+/// landed [`ShamirDealer::degree_reduce`] (sq-dvuc).
+///
+/// ## How (bitwise equality, ANDed)
+///
+/// Both operands are bit-decomposed into [`COMPARE_BITS`] secret-shared bits (as
+/// `secure_greater_than` does — the dealer holds the cleartext only to deal the
+/// bit shares, exactly like [`ShamirDealer::share`]). Then
+/// `[a == b] = ∏_k [a_k == b_k]`, where each `[a_k == b_k] = 1 − (a_k − b_k)^2` is
+/// one secure multiplication ([`secret_bit_eq`]) and the product is a balanced
+/// AND-tree of [`secret_and`] (each one mul + degree-reduce). The ONLY value this
+/// path ever opens is nothing — the result sharing is returned for the caller to
+/// consume secret-shared (e.g. as an oblivious-select control bit). To learn the
+/// verdict (NOT what the oblivious join does) use [`open_verdict`].
+///
+/// Both operands must be `< 2^`[`COMPARE_BITS`] (fail-closed, so the
+/// bit-decomposition is injective and equality in the recovered bits ⇔ equality of
+/// the field values). `n >= 2t+1` (fail-closed). Honest-majority, semi-honest —
+/// NOT malicious (module docs); the per-pair confidentiality (match bit never
+/// opened) it adds is orthogonal to malicious security (`sq-qhy4` external
+/// sign-off still pending).
+pub fn secure_equal_to_bit(
+    dealer: &mut ShamirDealer,
+    a: Fp,
+    b: Fp,
+) -> Result<Vec<Share>, MpcError> {
+    check_party_count(dealer.parties(), dealer.threshold())?;
+    check_in_range("a", a)?;
+    check_in_range("b", b)?;
+    let a_bits = share_bits(dealer, a);
+    let b_bits = share_bits(dealer, b);
+    equal_to_bit_from_bits(dealer, &a_bits, &b_bits)
+}
+
+/// The bit-vector core of [`secure_equal_to_bit`]: `[a == b] = ∏_k [a_k == b_k]`
+/// over LSB-first secret-shared bit vectors, returning a fresh degree-`t` sharing
+/// of the 0/1 equality bit. Nothing is opened. Reuses the chain primitives
+/// `secure_greater_than` uses ([`secret_bit_eq`] + [`secret_and`]) so the security
+/// argument is identical. The AND is folded as a balanced tree so the
+/// multiplication DEPTH is `O(log L)` rather than `O(L)` (fewer sequential
+/// degree-reduce rounds than a left fold), while the total multiplication COUNT is
+/// the same `L − 1` ANDs plus `L` per-bit equalities.
+fn equal_to_bit_from_bits(
+    dealer: &mut ShamirDealer,
+    a_bits: &[Vec<Share>],
+    b_bits: &[Vec<Share>],
+) -> Result<Vec<Share>, MpcError> {
+    debug_assert_eq!(a_bits.len(), b_bits.len());
+    // Per-bit equalities `[a_k == b_k]` (one secure mult each).
+    let mut layer: Vec<Vec<Share>> = a_bits
+        .iter()
+        .zip(b_bits.iter())
+        .map(|(ak, bk)| secret_bit_eq(dealer, ak, bk))
+        .collect::<Result<_, _>>()?;
+    if layer.is_empty() {
+        // No bits ⇒ vacuously equal; the trivial sharing of 1.
+        return Ok(const_sharing(dealer.parties(), Fp::one()));
+    }
+    // Balanced AND-tree: pair adjacent sharings and `secret_and` them until one
+    // remains. `secret_and` of two 0/1 sharings is exactly logical AND.
+    while layer.len() > 1 {
+        let mut next: Vec<Vec<Share>> = Vec::with_capacity(layer.len().div_ceil(2));
+        let mut it = layer.into_iter();
+        while let Some(lhs) = it.next() {
+            match it.next() {
+                Some(rhs) => next.push(secret_and(dealer, &lhs, &rhs)?),
+                None => next.push(lhs), // odd one out rides to the next layer
+            }
+        }
+        layer = next;
+    }
+    Ok(layer.into_iter().next().expect("non-empty layer"))
+}
+
 /// Open ONLY the verdict bit of a comparison result. The result sharing is a
 /// degree-`t` sharing of a 0/1; this reconstructs it (consistency-checked / robust
 /// where redundancy exists, like every other open) and returns the boolean. This
@@ -1752,5 +1841,67 @@ mod tests {
             let b = dealer.draw_bit();
             assert!(b == 0 || b == 1, "draw_bit returned non-bit {b}");
         }
+    }
+
+    // ---- [OPUS-4.8] sq-xhaw: secret-shared equality-to-bit (never opened) -------
+
+    /// THE sq-xhaw differential: the secret-shared equality bit, reconstructed,
+    /// equals the plaintext `a == b` across a spread of values incl. edges and
+    /// several honest-majority party counts. (The join NEVER opens this bit; the
+    /// test opens it only to check correctness of the primitive.)
+    #[test]
+    fn differential_equal_to_bit_across_many_pairs() {
+        let cases: &[(u64, u64)] = &[
+            (0, 0),                         // equal, zero
+            (1, 0),                         // differ minimal
+            (0, 1),                         // differ minimal
+            (5, 5),                         // equal small
+            (100_000, 100_000),             // equal at use-case scale
+            (100_001, 100_000),             // differ by 1
+            (1 << 59, 1 << 59),             // equal, high bit
+            (1 << 59, (1 << 59) - 1),       // differ, high bit
+            ((1 << 60) - 1, (1 << 60) - 1), // equal at the max
+            ((1 << 60) - 1, (1 << 60) - 2), // differ at the max
+            (42, 1_000_000),
+        ];
+        for n in [3usize, 5, 7] {
+            for (idx, &(a, b)) in cases.iter().enumerate() {
+                let backend =
+                    ShamirBackend::new_seeded(n, (idx as u64).wrapping_mul(131).wrapping_add(7))
+                        .unwrap();
+                let mut dealer = backend.dealer();
+                let bit = secure_equal_to_bit(&mut dealer, Fp::new(a), Fp::new(b)).unwrap();
+                let got = open_verdict(&backend, &bit).unwrap();
+                assert_eq!(got, a == b, "n={n} a={a} b={b}: equality bit disagreed");
+            }
+        }
+    }
+
+    /// The equality bit is a VALID degree-`t` sharing of a 0/1: it reconstructs to
+    /// the same boolean from ANY `t+1` shares (so it can be consumed secret-shared,
+    /// e.g. as an oblivious-select control bit, without being opened).
+    #[test]
+    fn equal_to_bit_is_valid_degree_t_sharing() {
+        let n = 5;
+        let backend = ShamirBackend::new_seeded(n, 0xEEE).unwrap();
+        let t = backend.threshold();
+        let mut dealer = backend.dealer();
+        // Equal operands ⇒ bit reconstructs to 1; unequal ⇒ 0. Check both, from a
+        // minimal t+1-share subset and from the full n shares.
+        for (a, b, expect) in [(7u64, 7u64, Fp::one()), (7, 8, Fp::zero())] {
+            let bit = secure_equal_to_bit(&mut dealer, Fp::new(a), Fp::new(b)).unwrap();
+            assert_eq!(recon_subset(&backend, &bit, t + 1), expect, "t+1 subset");
+            assert_eq!(recon_subset(&backend, &bit, n), expect, "full n");
+        }
+    }
+
+    /// Out-of-range operands fail closed (so the bit-decomposition stays injective).
+    #[test]
+    fn equal_to_bit_out_of_range_fails_closed() {
+        let backend = ShamirBackend::new_seeded(3, 1).unwrap();
+        let mut dealer = backend.dealer();
+        let err = secure_equal_to_bit(&mut dealer, Fp::new(COMPARE_MAX_EXCLUSIVE), Fp::new(0))
+            .unwrap_err();
+        assert!(matches!(err, MpcError::Protocol(m) if m.contains("out of range")));
     }
 }

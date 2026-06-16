@@ -240,9 +240,9 @@ pub use bounded_path::{
 // for `disclose_threshold_verdict` (the sum is now bit-decomposed in-MPC, never
 // reconstructed; its supported magnitude is `< 2^DECOMP_VALUE_BITS`).
 pub use compare::{
-    disclose_threshold_verdict, open_verdict, secure_greater_than, secure_threshold, COMPARE_BITS,
-    COMPARE_MAX_EXCLUSIVE, DECOMP_MASK_BITS, DECOMP_STAT_SECURITY_BITS, DECOMP_VALUE_BITS,
-    DECOMP_VALUE_MAX_EXCLUSIVE,
+    disclose_threshold_verdict, open_verdict, secure_equal_to_bit, secure_greater_than,
+    secure_threshold, COMPARE_BITS, COMPARE_MAX_EXCLUSIVE, DECOMP_MASK_BITS,
+    DECOMP_STAT_SECURITY_BITS, DECOMP_VALUE_BITS, DECOMP_VALUE_MAX_EXCLUSIVE,
 };
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};

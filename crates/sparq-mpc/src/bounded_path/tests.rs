@@ -341,10 +341,7 @@ fn differential_sequence_with_repetition_element() {
     // dedup it is one mid pair, composed with c->q->d gives (a,d) once.
     let h1 = "ex:a ex:p ex:b . ex:b ex:p ex:c . ex:a ex:p ex:c .";
     let h2 = "ex:c ex:q ex:d .";
-    let edges = disclosed_edges(&[
-        (h1, &["http://ex/p"]),
-        (h2, &["http://ex/q"]),
-    ]);
+    let edges = disclosed_edges(&[(h1, &["http://ex/p"]), (h2, &["http://ex/q"])]);
 
     let form = PathForm::Sequence(vec![
         PathForm::range(nn("http://ex/p"), 1, 2),
@@ -370,7 +367,10 @@ fn differential_sequence_with_repetition_element() {
                 && *b == format!("{:?}", Term::from(nn("http://ex/d")))
         })
         .count();
-    assert_eq!(ad_rows, 1, "(a,d) must be a single pair after per-part dedup");
+    assert_eq!(
+        ad_rows, 1,
+        "(a,d) must be a single pair after per-part dedup"
+    );
 }
 
 /// `Sequence` whose FIRST element is a bounded ALTERNATION repetition:
@@ -618,7 +618,7 @@ fn projected_chain_count_matches_closed_form_and_detects_overflow() {
     // length-0 arm which is not a chain.
     assert_eq!(super::projected_chain_count(1, 1, 3), Some(3));
     assert_eq!(super::projected_chain_count(1, 0, 3), Some(3)); // length-0 excluded
-    // 2-way alternation, {1,3}: 2 + 4 + 8 = 14.
+                                                                // 2-way alternation, {1,3}: 2 + 4 + 8 = 14.
     assert_eq!(super::projected_chain_count(2, 1, 3), Some(14));
     // 3-way alternation, {2,2}: 3^2 = 9.
     assert_eq!(super::projected_chain_count(3, 2, 2), Some(9));

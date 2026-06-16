@@ -58,19 +58,23 @@
 //!   candidates matched and the exact count (only `B` is revealed). This is fully
 //!   sound and shippable now.
 //!
-//! ### Honestly gated on secure-compare (NOT faked)
+//! ### [OPUS-4.8] sq-xhaw — the HIDDEN-key match bit is now REALISED (gate landed)
 //!
 //! - **Deriving the secret match bit from genuinely-secret keys WITHOUT opening
-//!   it.** To feed step 1 in the HIDDEN-key regime you need a secure
-//!   equality-to-SHARED-bit (Rabbit / edaBits bit-decomposition), which consumes a
-//!   multiplication chain and so needs the BGW/DN **degree-reduction** round (bead
-//!   **sq-dvuc**) and the secure-comparison primitive built on it (bead
-//!   **sq-rrz4**) — the same gate the substrate's secret-key sort sits behind. The
-//!   crate's existing `secure_equal` produces the bit only by *opening* it, which
-//!   is precisely the L2 leak we are closing, so it cannot feed this path. The
-//!   hidden-key entry point ([`oblivious_set_output_hidden_keys`]) therefore
-//!   returns an honest [`MpcError::NotYetImplemented`] naming that gate — no fake
-//!   secure comparator.
+//!   it.** Feeding step 1 in the HIDDEN-key regime needs a secure
+//!   equality-to-SHARED-bit. That was previously gated on the BGW/DN
+//!   **degree-reduction** round (bead **sq-dvuc**) and the secure-comparison
+//!   machinery on it (bead **sq-rrz4**) — the same gate the substrate's secret-key
+//!   sort sat behind. **Those have landed**, and
+//!   [`crate::compare::secure_equal_to_bit`] now produces `[1{a == b}]` as a fresh
+//!   degree-`t` secret-shared bit that is NEVER opened (a bit-decomposition + an
+//!   AND-tree of secure multiplications). So the hidden-key entry point
+//!   ([`oblivious_set_output_hidden_keys`]) and the row-carrying production path
+//!   ([`crate::join::HiddenValueJoin::fully_oblivious_batched_join`]) feed that
+//!   shared bit as a [`MatchBit::SecretShared`] selector — no per-pair open, the
+//!   L2 match-graph leak is closed at the DECISION (not just at the output). This
+//!   is honest-majority / semi-honest only; external soundness sign-off is still
+//!   pending (sq-qhy4).
 //!
 //! ## Residual leakage (state it loudly — empirical-honesty rule)
 //!
@@ -162,10 +166,13 @@ pub struct Candidate {
 ///   disclosed-key / public equi-join, convention #4). Sound today: we lift it to
 ///   a trivial degree-`t` sharing with no secure comparison.
 /// - [`MatchBit::SecretShared`] — a genuinely-secret 0/1 sharing produced by a
-///   secure equality-to-shared-bit. Consuming it is sound; **producing** it from
-///   secret keys without opening it is gated on sq-rrz4/sq-dvuc, so no in-crate
-///   producer exists yet (the existing `secure_equal` only *opens* the bit, which
-///   is the L2 leak this path closes).
+///   secure equality-to-shared-bit. Consuming it is sound, and **producing** it
+///   from secret keys without opening it is now realised by
+///   [`crate::compare::secure_equal_to_bit`] (sq-xhaw; the sq-rrz4/sq-dvuc gate it
+///   needed has landed) — used by [`oblivious_set_output_hidden_keys`] and
+///   [`crate::join::HiddenValueJoin::fully_oblivious_batched_join`]. (The older
+///   `secure_equal` only *opens* the bit, which is the L2 leak this path closes, so
+///   it is NOT used here.)
 #[derive(Debug, Clone)]
 pub enum MatchBit {
     /// Match bit decided in the clear (disclosed-key regime).
@@ -686,29 +693,57 @@ fn canonicalize_rows(rows: &mut [Vec<Option<Term>>]) {
 /// truly-private join key (the disclosed-key path closes L2 too, but only because
 /// the key was public to begin with).
 ///
-/// **Gated — not faked.** Producing a secret-SHARED match bit from secret keys
-/// needs a secure equality-to-shared-bit (Rabbit / edaBits bit-decomposition over
-/// `F_p`), which consumes a multiplication chain and therefore the BGW/DN
-/// **degree-reduction** round (bead **sq-dvuc**) and the secure-comparison
-/// primitive on it (bead **sq-rrz4**) — the SAME gate the substrate's secret-key
-/// sort sits behind. The crate's existing `secure_equal` produces the bit only by
-/// *opening* it, which IS the L2 leak this whole path exists to close, so it
-/// cannot feed step 1. Returns an honest [`MpcError::NotYetImplemented`] naming the
-/// gate. Once sq-rrz4 lands, this computes the shared bits and calls
-/// [`oblivious_set_output`] with [`MatchBit::SecretShared`] selectors — the
-/// transform itself is already sound and tested.
+/// ## [OPUS-4.8] sq-xhaw — UNGATED: the secure equality-to-shared-bit landed
+///
+/// This path was previously an honest [`MpcError::NotYetImplemented`] gated on a
+/// secure equality-to-shared-bit (the prior `secure_equal` only *opened* the bit —
+/// the L2 leak). That gate — the BGW/DN degree-reduction round (bead **sq-dvuc**)
+/// and the secure-comparison machinery on it (bead **sq-rrz4**) — has since landed,
+/// and [`crate::compare::secure_equal_to_bit`] now produces `[1{a == b}]` as a fresh
+/// degree-`t` **secret-shared** bit that is NEVER opened. So this is realised for
+/// real: each candidate pair's match bit is computed shared and fed as a
+/// [`MatchBit::SecretShared`] selector into the (already sound, sq-jnkm) oblivious
+/// output transform.
+///
+/// All-pairs: every `left_keys[i]` is compared against every `right_keys[j]`, so
+/// the candidate count is `|left|·|right|`; a single payload column carries the
+/// matched right key's index as a literal so the result is checkable (the payload
+/// schema is the caller's concern — this raw-key entry point exists mainly for the
+/// transform's hidden-key test surface; the row-carrying production path is
+/// [`crate::join::HiddenValueJoin::fully_oblivious_batched_join`]). `bound` must
+/// cover `|left|·|right|` (fail-closed, never truncates a candidate).
+///
+/// HONESTY (privacy-claims gate is live; cite sq-qhy4). Semi-honest, honest-majority
+/// only — the per-pair match bit is never opened (the L2-at-decision leak is closed)
+/// but malicious security is unchanged from the Shamir/compare layer, and external
+/// soundness sign-off is still pending. No security guarantee beyond the documented
+/// semi-honest model is claimed.
 pub fn oblivious_set_output_hidden_keys(
-    _backend: &ShamirBackend,
-    _left_keys: &[Fp],
-    _right_keys: &[Fp],
-    _bound: usize,
+    backend: &ShamirBackend,
+    left_keys: &[Fp],
+    right_keys: &[Fp],
+    bound: usize,
 ) -> Result<ObliviousOutput, MpcError> {
-    Err(MpcError::not_yet(
-        "hidden-key oblivious join output — secure equality-to-SHARED-bit (never opened per-pair) \
-         feeding the oblivious set-output transform; the existing secure_equal only OPENS the bit \
-         (the L2 leak this path closes), so it cannot drive an oblivious select",
-        "sq-rrz4 (secure greater-than / equality-to-shared-bit) on sq-dvuc (BGW/DN degree-reduction round)",
-    ))
+    let mut dealer = backend.dealer();
+    // All-pairs candidates: each (i, j) becomes one slot whose match bit is the
+    // SECRET-SHARED equality of the two private keys — never opened.
+    let mut candidates: Vec<Candidate> = Vec::with_capacity(left_keys.len() * right_keys.len());
+    for (i, &lk) in left_keys.iter().enumerate() {
+        for (j, &rk) in right_keys.iter().enumerate() {
+            let match_bit = crate::compare::secure_equal_to_bit(&mut dealer, lk, rk)?;
+            // A single disclosed payload column tagging the matched right index, so
+            // the test surface can identify which pair survived (the key stays
+            // hidden; this is a disclosed payload column, convention #4).
+            let payload = vec![Some(Term::Literal(oxrdf::Literal::new_simple_literal(
+                format!("{i}-{j}"),
+            )))];
+            candidates.push(Candidate {
+                payload,
+                matched: MatchBit::SecretShared(match_bit),
+            });
+        }
+    }
+    oblivious_set_output(backend, &candidates, 1, bound)
 }
 
 #[cfg(test)]
@@ -728,7 +763,10 @@ mod tests {
     /// (public match bit) regime.
     fn public_candidates(rows: &[(bool, Vec<Option<Term>>)]) -> Vec<Candidate> {
         rows.iter()
-            .map(|(m, p)| Candidate { payload: p.clone(), matched: MatchBit::Public(*m) })
+            .map(|(m, p)| Candidate {
+                payload: p.clone(),
+                matched: MatchBit::Public(*m),
+            })
             .collect()
     }
 
@@ -769,7 +807,10 @@ mod tests {
             format!("{:?}", vec![lit("Carol"), lit("Hull")]),
         ];
         expected.sort();
-        assert_eq!(reals, expected, "real rows must be exactly the matched payloads");
+        assert_eq!(
+            reals, expected,
+            "real rows must be exactly the matched payloads"
+        );
         assert_eq!(cost.bound, 6);
         assert_eq!(cost.select_mults, 6);
         assert_eq!(cost.opens, 6);
@@ -784,7 +825,13 @@ mod tests {
         let (slots, cost) = oblivious_set_output(&backend, &cands, 1, 10).unwrap();
         assert_eq!(slots.len(), 10);
         assert_eq!(real_multiset(&slots).len(), 1);
-        assert_eq!(slots.iter().filter(|s| matches!(s, OutputSlot::Dummy)).count(), 9);
+        assert_eq!(
+            slots
+                .iter()
+                .filter(|s| matches!(s, OutputSlot::Dummy))
+                .count(),
+            9
+        );
         assert_eq!(cost.bound, 10);
     }
 
@@ -794,7 +841,11 @@ mod tests {
         let backend = ShamirBackend::new_seeded(3, 1).unwrap();
         let all = public_candidates(&[(true, vec![lit("a")]), (true, vec![lit("b")])]);
         let (slots, _) = oblivious_set_output(&backend, &all, 1, 2).unwrap();
-        assert_eq!(real_multiset(&slots).len(), 2, "B == match count: all real, no dummies");
+        assert_eq!(
+            real_multiset(&slots).len(),
+            2,
+            "B == match count: all real, no dummies"
+        );
         assert!(slots.iter().all(|s| matches!(s, OutputSlot::Row(_))));
 
         let none = public_candidates(&[(false, vec![lit("a")]), (false, vec![lit("b")])]);
@@ -855,7 +906,10 @@ mod tests {
             let backend = ShamirBackend::new_seeded(3, 1000 + seed).unwrap();
             let (slots, _) = oblivious_set_output(&backend, &cands, 1, 5).unwrap();
             // Record the Row/Dummy pattern (positions of the 3 reals among 5 slots).
-            let pat: Vec<bool> = slots.iter().map(|s| matches!(s, OutputSlot::Row(_))).collect();
+            let pat: Vec<bool> = slots
+                .iter()
+                .map(|s| matches!(s, OutputSlot::Row(_)))
+                .collect();
             classification_patterns.insert(pat);
             // Always exactly 3 reals regardless of where they land.
             assert_eq!(real_multiset(&slots).len(), 3);
@@ -886,7 +940,11 @@ mod tests {
         for seed in 0..16u64 {
             let backend = ShamirBackend::new_seeded(5, seed).unwrap();
             let (slots, _) = oblivious_set_output(&backend, &cands, 2, 4).unwrap();
-            assert_eq!(real_multiset(&slots), expected, "seed {seed}: real multiset changed");
+            assert_eq!(
+                real_multiset(&slots),
+                expected,
+                "seed {seed}: real multiset changed"
+            );
         }
     }
 
@@ -902,11 +960,20 @@ mod tests {
         let one = dealer.share(Fp::one());
         let zero = dealer.share(Fp::zero());
         let cands = vec![
-            Candidate { payload: vec![lit("match")], matched: MatchBit::SecretShared(one) },
-            Candidate { payload: vec![lit("nomatch")], matched: MatchBit::SecretShared(zero) },
+            Candidate {
+                payload: vec![lit("match")],
+                matched: MatchBit::SecretShared(one),
+            },
+            Candidate {
+                payload: vec![lit("nomatch")],
+                matched: MatchBit::SecretShared(zero),
+            },
         ];
         let (slots, _) = oblivious_set_output(&backend, &cands, 1, 3).unwrap();
-        assert_eq!(real_multiset(&slots), vec![format!("{:?}", vec![lit("match")])]);
+        assert_eq!(
+            real_multiset(&slots),
+            vec![format!("{:?}", vec![lit("match")])]
+        );
     }
 
     // ---- Fail-closed contracts --------------------------------------------------
@@ -958,7 +1025,11 @@ mod tests {
         let (result, cost) = oblivious_join_output(&backend, &cands, out_vars.clone(), 5).unwrap();
         assert_eq!(result.holder, HolderId::new("federation"));
         assert_eq!(result.vars, out_vars);
-        assert_eq!(result.rows.len(), 2, "only the 2 matched rows, dummies filtered");
+        assert_eq!(
+            result.rows.len(),
+            2,
+            "only the 2 matched rows, dummies filtered"
+        );
         assert_eq!(cost.bound, 5);
         // Canonical (order-independent) check of the disclosed multiset.
         let got: Vec<String> = result.rows.iter().map(|r| format!("{r:?}")).collect();
@@ -970,23 +1041,39 @@ mod tests {
         assert_eq!(got, exp, "disclosed multiset wrong (canonical order)");
     }
 
-    /// The HIDDEN-key path is honestly gated on secure-compare — NOT faked.
+    /// [OPUS-4.8] sq-xhaw — the HIDDEN-key path is now REALISED (the secure
+    /// equality-to-shared-bit gate landed): the per-pair match bit is secret-shared
+    /// and never opened, and the revealed result matches a plaintext all-pairs
+    /// equi-join. Keys 1 and 3 are shared between the two sides → 2 matches; the
+    /// revealed slot count is the bound B, not the true match count.
     #[test]
-    fn hidden_key_path_is_gated_on_secure_compare() {
+    fn hidden_key_path_matches_plaintext_all_pairs() {
         let backend = ShamirBackend::new_seeded(3, 1).unwrap();
-        let err = oblivious_set_output_hidden_keys(&backend, &[Fp::new(1)], &[Fp::new(1)], 4)
-            .unwrap_err();
-        match err {
-            MpcError::NotYetImplemented { gated_on, what } => {
-                assert!(
-                    what.contains("SHARED-bit") || what.contains("oblivious select"),
-                    "what must name the missing primitive: {what}"
-                );
-                assert!(gated_on.contains("sq-rrz4"), "must cite the secure-compare gate");
-                assert!(gated_on.contains("sq-dvuc"), "must cite the degree-reduction gate");
-            }
-            other => panic!("expected NotYetImplemented, got {other:?}"),
-        }
+        let left = [Fp::new(1), Fp::new(2), Fp::new(3)];
+        let right = [Fp::new(3), Fp::new(5), Fp::new(1)];
+        // Plaintext all-pairs equality: (i,j) matches iff left[i]==right[j].
+        // left[0]=1 == right[2]=1 → "0-2"; left[2]=3 == right[0]=3 → "2-0".
+        let mut expected: Vec<String> = vec!["0-2".to_string(), "2-0".to_string()]
+            .into_iter()
+            .map(|s| {
+                format!(
+                    "{:?}",
+                    vec![Some(Term::Literal(oxrdf::Literal::new_simple_literal(s)))]
+                )
+            })
+            .collect();
+        expected.sort();
+        // 9 candidate pairs; bound B=9.
+        let (slots, cost) = oblivious_set_output_hidden_keys(&backend, &left, &right, 9).unwrap();
+        assert_eq!(
+            cost.bound, 9,
+            "revealed slot count is B, not the 2 true matches"
+        );
+        assert_eq!(
+            real_multiset(&slots),
+            expected,
+            "hidden-key result != plaintext all-pairs join"
+        );
     }
 
     /// Empty candidate set with a bound → all dummies, no panic.
@@ -1029,7 +1116,10 @@ mod tests {
     fn payload_row_encode_decode_round_trips() {
         let rows: Vec<Vec<Option<Term>>> = vec![
             vec![iri("http://ex/x"), lit("Alice")],
-            vec![None, typed("42", "http://www.w3.org/2001/XMLSchema#integer")],
+            vec![
+                None,
+                typed("42", "http://www.w3.org/2001/XMLSchema#integer"),
+            ],
             vec![lit("comma, and \"quote\" and \\backslash"), None],
             vec![lit(""), lit("")], // empty literals
         ];
@@ -1051,19 +1141,41 @@ mod tests {
     #[test]
     fn rich_payloads_survive_shuffle_without_opening_permutation() {
         let cands = public_candidates(&[
-            (true, vec![iri("http://ex/alice"), typed("30", "http://www.w3.org/2001/XMLSchema#integer")]),
-            (false, vec![iri("http://ex/bob"), typed("40", "http://www.w3.org/2001/XMLSchema#integer")]),
+            (
+                true,
+                vec![
+                    iri("http://ex/alice"),
+                    typed("30", "http://www.w3.org/2001/XMLSchema#integer"),
+                ],
+            ),
+            (
+                false,
+                vec![
+                    iri("http://ex/bob"),
+                    typed("40", "http://www.w3.org/2001/XMLSchema#integer"),
+                ],
+            ),
             (true, vec![lit("Carol \"C\""), None]),
         ]);
         let mut expected = vec![
-            format!("{:?}", vec![iri("http://ex/alice"), typed("30", "http://www.w3.org/2001/XMLSchema#integer")]),
+            format!(
+                "{:?}",
+                vec![
+                    iri("http://ex/alice"),
+                    typed("30", "http://www.w3.org/2001/XMLSchema#integer")
+                ]
+            ),
             format!("{:?}", vec![lit("Carol \"C\""), None]),
         ];
         expected.sort();
         for seed in 0..16u64 {
             let backend = ShamirBackend::new_seeded(5, seed).unwrap();
             let (slots, _) = oblivious_set_output(&backend, &cands, 2, 5).unwrap();
-            assert_eq!(real_multiset(&slots), expected, "seed {seed}: rich payload changed");
+            assert_eq!(
+                real_multiset(&slots),
+                expected,
+                "seed {seed}: rich payload changed"
+            );
         }
     }
 
@@ -1079,7 +1191,10 @@ mod tests {
         let wide = public_candidates(&[(true, vec![lit(&"y".repeat(200))])]);
         let (_, c_narrow) = oblivious_set_output(&backend, &narrow, 1, 4).unwrap();
         let (_, c_wide) = oblivious_set_output(&backend, &wide, 1, 4).unwrap();
-        assert_eq!(c_narrow.shuffle.items, c_wide.shuffle.items, "same slot count");
+        assert_eq!(
+            c_narrow.shuffle.items, c_wide.shuffle.items,
+            "same slot count"
+        );
         assert!(
             c_wide.shuffle.switches > c_narrow.shuffle.switches,
             "wider payload must cost more switches (width-scaled): wide={}, narrow={}",
