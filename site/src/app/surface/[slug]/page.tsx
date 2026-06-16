@@ -5,9 +5,23 @@ import { SurfacePlaceholder } from "@/components/surface-placeholder";
 import { ALL_SURFACES } from "@/data/surfaces";
 
 // Surfaces routed here are the ones whose interactive page is not built yet
-// (the REPL has its own /try page). Static export needs every slug enumerated.
+// (the REPL has its own /try page). Surfaces with a real, hand-built content
+// page live under src/app/surface/<slug>/page.tsx and are excluded here so the
+// static route takes precedence (no generateStaticParams collision).
+const BUILT_SURFACES = new Set([
+  "sparql",
+  "data-formats",
+  "javascript-wasm",
+  "shacl",
+  "mpc",
+  "zk",
+]);
 const PLACEHOLDER_SURFACES = ALL_SURFACES.filter(
-  (s) => s.slug !== "try" && s.slug !== "about" && s.href.startsWith("/surface/"),
+  (s) =>
+    s.slug !== "try" &&
+    s.slug !== "about" &&
+    s.href.startsWith("/surface/") &&
+    !BUILT_SURFACES.has(s.slug),
 );
 
 export function generateStaticParams() {

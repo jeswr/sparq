@@ -4,8 +4,12 @@ import { notFound } from "next/navigation";
 import { SurfacePlaceholder } from "@/components/surface-placeholder";
 import { FLAGSHIPS } from "@/data/surfaces";
 
+// The MPC flagship has its own real page at /showcase/mpc-100k; the remaining
+// flagships fall back to the honest placeholder until their pages are built.
 export function generateStaticParams() {
-  return FLAGSHIPS.map((s) => ({ slug: s.slug }));
+  return FLAGSHIPS.filter((s) => s.slug !== "mpc-100k").map((s) => ({
+    slug: s.slug,
+  }));
 }
 
 export const dynamicParams = false;

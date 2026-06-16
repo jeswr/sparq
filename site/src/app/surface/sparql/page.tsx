@@ -1,0 +1,87 @@
+import type { Metadata } from "next";
+import { FileCode2 } from "lucide-react";
+
+import { SurfaceContent } from "@/components/surface-content";
+
+export const metadata: Metadata = {
+  title: "SPARQL 1.1 / 1.2",
+  description:
+    "SELECT / ASK / CONSTRUCT / UPDATE, property paths, RDF-star quoted triples, aggregates, subqueries — the sparq SPARQL engine, live in your tab.",
+};
+
+export default function SparqlSurfacePage() {
+  return (
+    <SurfaceContent
+      icon={FileCode2}
+      title="SPARQL 1.1 / 1.2"
+      statement="The full query language — SELECT, ASK, CONSTRUCT, UPDATE — over the sparq engine."
+      tier="live"
+      intro={
+        <>
+          <p>
+            sparq evaluates SPARQL 1.1/1.2 over a{" "}
+            <code className="font-mono text-foreground">sparq_core::Graph</code>{" "}
+            using a worst-case-optimal join (WCOJ) engine. The same engine that
+            powers the native crate is compiled to WebAssembly and ships as{" "}
+            <code className="font-mono text-foreground">@jeswr/sparq</code>, so you
+            can run real queries in this tab — nothing is sent to a server.
+          </p>
+          <p>
+            The query surface covers the algebra you would expect — basic graph
+            patterns, FILTER, OPTIONAL, UNION, MINUS, BIND, VALUES, aggregates and
+            GROUP BY, sub-SELECT, and property paths — plus RDF-star quoted triples
+            and named-graph dataset views.
+          </p>
+        </>
+      }
+      capabilities={[
+        {
+          title: "SELECT / ASK / CONSTRUCT / DESCRIBE",
+          body: "All four query forms, returning bindings, a boolean, or a constructed graph.",
+        },
+        {
+          title: "SPARQL Update",
+          body: "INSERT / DELETE / DELETE…WHERE and graph management, mutating the store in place.",
+        },
+        {
+          title: "Property paths",
+          body: "Sequence, alternative, inverse, and the transitive *, +, ? operators.",
+        },
+        {
+          title: "RDF-star",
+          body: "Quoted triples as subjects/objects, queried with the << >> syntax.",
+        },
+        {
+          title: "Aggregates & subqueries",
+          body: "COUNT / SUM / AVG / MIN / MAX / GROUP_CONCAT, GROUP BY / HAVING, and nested SELECT.",
+        },
+        {
+          title: "Extension functions",
+          body: "Register custom SPARQL functions via the engine's FunctionRegistry (native).",
+        },
+      ]}
+      runsNote={
+        <>
+          <p>
+            <strong className="text-foreground">Live in your browser tab.</strong>{" "}
+            The lean wasm bundle carries the parser, triplestore and SPARQL engine.
+            The live REPL on this site runs your queries against the sample graph
+            with no network round-trip.
+          </p>
+        </>
+      }
+      caveat={
+        <>
+          <p>
+            REGEX / REPLACE are compiled out of the lean wasm bundle to keep it
+            small; they are available in the native build. The query-budget
+            deadline (wall-clock timeout) is native-only — the wasm bundle enforces
+            a row cap instead. <code className="font-mono">EXPLAIN</code> exists in
+            the engine but is not yet a wasm export.
+          </p>
+        </>
+      }
+      links={[{ href: "/try", label: "Open the live REPL" }]}
+    />
+  );
+}

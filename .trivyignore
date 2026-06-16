@@ -1,0 +1,22 @@
+# .trivyignore — accepted/triaged container-image findings for the sparq-server image.
+# [OPUS-4.8] GX-12 / sq-toze.31 (CIS Docker §4.4; CIS v8 7.5/7.6). Authored while Fable
+# unavailable — re-review when Fable returns.
+#
+# The container-scan CI lane (.github/workflows/container-scan.yml) builds the image and
+# runs `trivy image` failing on FIXABLE HIGH/CRITICAL OS+library vulnerabilities. This
+# file is the ALLOWLIST: one CVE id per line suppresses that finding. The base is
+# gcr.io/distroless/cc-debian12:nonroot (glibc + libgcc only, no shell / package manager),
+# so the OS surface is tiny — this list is EXPECTED to stay empty or near-empty.
+#
+# POLICY for adding an entry (keep VEX-aligned with the supply-chain slice, GX-2):
+#   * Only add a CVE that is genuinely non-applicable or unfixable (no fixed version yet),
+#     NOT to silence a real, fixable HIGH/CRITICAL — those must be remediated (base bump)
+#     or surfaced as a bead, per the GX-12 remediation and the project honesty rule.
+#   * Each entry MUST carry an inline justification comment: the CVE, why it is accepted
+#     (not-affected / fix-unavailable / out-of-scope component), and a tracking bead if the
+#     acceptance is temporary. Mirror the rationale into supply-chain/vex.cdx.json where the
+#     finding overlaps a Rust-dependency advisory so the SBOM/VEX and the image allowlist agree.
+#
+# (Empty by design: the distroless base carried no fixable HIGH/CRITICAL OS/lib findings at
+# authoring time. If CI later flags one, triage it here WITH a justification or fix the base —
+# do not blanket-suppress.)

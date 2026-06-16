@@ -1428,6 +1428,12 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
             .layer(CatchPanicLayer::custom(|_: Box<dyn std::any::Any + Send>| {
                 json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error (panic)")
             }))
+            // [OPUS-4.8] sq-cmvh (ASVS V14.4): stamp the security hardening headers onto EVERY
+            // response. Placed second so it runs LAST on the response path (after the
+            // panic-catcher, the load-shed 429 mapper and `json_error_bodies`), guaranteeing the
+            // headers land on success, streamed, error and panic responses alike. See
+            // `security_headers` / `SECURITY_HEADERS`.
+            .layer(axum::middleware::map_response(security_headers))
             // Load-shed converts "concurrency limit reached" into an immediate error
             // (mapped to 429) instead of queueing unboundedly.
             .layer(HandleErrorLayer::new(|err: BoxError| async move {
@@ -2906,6 +2912,75 @@ async fn json_error_bodies(resp: Response) -> Response {
 
 fn bad_request(msg: &str) -> Response {
     json_error(StatusCode::BAD_REQUEST, msg)
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-cmvh (ASVS-G1, cert remediation #237) — security response headers
+//
+// ASVS V14.4 wants standard hardening response headers on every HTTP response. sparq-server
+// is a SPARQL *API* (it emits SPARQL-results JSON/XML/CSV/TSV and RDF — never HTML it asks a
+// browser to render), so the header set is the subset that is meaningful for a non-HTML API,
+// chosen deliberately rather than copy-pasting a browser-app template:
+//
+//   * `X-Content-Type-Options: nosniff` — stops a browser/proxy from MIME-sniffing a response
+//     into a type we did not send. Always appropriate; cheap defence-in-depth even though we
+//     always send an explicit `Content-Type`.
+//   * `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` — the responses are
+//     data, not scripts/styles/images, so the tightest possible CSP (`default-src 'none'`)
+//     fits exactly: a `default-src 'none'` document loads no subresources and runs no inline
+//     script, so an injected/`text/html`-sniffed body is inert. `frame-ancestors 'none'` is the
+//     modern, header-spoofing-proof way to say "must not be framed" (it supersedes
+//     X-Frame-Options for CSP-aware agents and, unlike X-Frame-Options, also covers nested
+//     frames). We send BOTH (next bullet) for coverage of older agents.
+//   * `X-Frame-Options: DENY` — the legacy clickjacking guard for agents that do not honour
+//     CSP `frame-ancestors`. The API is never meant to be framed, so DENY is correct.
+//   * `Referrer-Policy: no-referrer` — a programmatic API client has no referrer concept, but
+//     if a response IRI is ever followed from a browser context this prevents the request URL
+//     (which may carry a `query=` containing sensitive terms) leaking in a `Referer` header.
+//
+// DELIBERATELY OMITTED (with reason), so the audit trail is explicit:
+//   * `Strict-Transport-Security` (HSTS): sparq-server terminates PLAIN HTTP (TLS is the job of
+//     a fronting reverse proxy — see README "Security posture"). Emitting HSTS from the origin
+//     would be meaningless at best and, if it reached a browser over the proxy's TLS, could
+//     wrongly pin a host; the TLS-terminating proxy is the correct place to set HSTS. N/A here.
+//   * `X-XSS-Protection`: deprecated and a no-op (or harmful) in modern browsers; superseded by
+//     CSP. Not emitted.
+//   * `Cross-Origin-*` / `Permissions-Policy` / CORS headers: browser-app document policies with
+//     no meaning for a data API that serves no documents and (by design) no CORS. Not emitted —
+//     adding CORS headers would *widen* the surface, the opposite of hardening.
+//
+// `Cache-Control` is NOT forced here: existing responses already manage their own cache
+// semantics where they need to, and a blanket `no-store` would override `/health`, `/metrics`
+// and the federation descriptors. Query results are not cached by default (no `Cache-Control:
+// public`/`ETag` is ever set), so there is nothing to tighten — see the omission note in
+// `skills/http-server/SKILL.md`. Applied to EVERY response (success, streamed, and error —
+// it runs on the response path of the same map_response stack `json_error_bodies` uses), so an
+// error envelope is hardened identically to a 200.
+//
+// Headers are only INSERTED when absent, so a handler that sets a more specific value (e.g. a
+// future per-route CSP) is never clobbered.
+
+/// The static security response headers (name, value) added to every response. Kept as a
+/// single source of truth so the integration test and the middleware agree on the exact set.
+pub(crate) const SECURITY_HEADERS: &[(header::HeaderName, &str)] = &[
+    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    (header::CONTENT_SECURITY_POLICY, "default-src 'none'; frame-ancestors 'none'"),
+    (header::X_FRAME_OPTIONS, "DENY"),
+    (header::REFERRER_POLICY, "no-referrer"),
+];
+
+/// `map_response` middleware ([OPUS-4.8] sq-cmvh): stamps the [`SECURITY_HEADERS`] hardening
+/// set onto every response — success, streamed and error alike. Each header is only set when
+/// absent, so a handler may override a specific one without this clobbering it. Header names
+/// and values are all static and pre-validated, so the `from_static` conversions never fail.
+async fn security_headers(mut resp: Response) -> Response {
+    let headers = resp.headers_mut();
+    for (name, value) in SECURITY_HEADERS {
+        if !headers.contains_key(name) {
+            headers.insert(name, header::HeaderValue::from_static(value));
+        }
+    }
+    resp
 }
 
 // ---------------------------------------------------------------------------

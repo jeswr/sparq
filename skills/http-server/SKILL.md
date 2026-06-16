@@ -54,6 +54,22 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > the `169.254.169.254` cloud-metadata IP). The allowlist is enforced before any socket is
 > opened, on the *resolved* IP (DNS-rebinding-safe). See "SERVICE federation (egress
 > allowlist)" below.
+>
+> **Security response headers (always on, ASVS V14.4; bead `sq-cmvh`).** Every response —
+> success, streamed and error alike — carries a hardening header set, stamped by a
+> `map_response` layer in `harden()`:
+> `X-Content-Type-Options: nosniff`,
+> `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`,
+> `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`. These suit a SPARQL *data* API
+> (no HTML is rendered): the tightest CSP says the body loads/runs nothing, and `frame-ancestors`
+> + `X-Frame-Options: DENY` say it is never meant to be framed. Each header is only added when
+> absent, so a custom handler can override one. **Deliberately omitted:** `Strict-Transport-
+> Security` (the origin serves plain HTTP — HSTS belongs on the fronting TLS proxy);
+> `X-XSS-Protection` (deprecated, superseded by CSP); CORS / `Cross-Origin-*` / `Permissions-
+> Policy` (browser-app document policies, meaningless for a no-CORS data API — adding CORS would
+> *widen* the surface). No blanket `Cache-Control: no-store` is forced: results are uncached by
+> default (no `ETag`/`Cache-Control: public` is ever set), so there is nothing to tighten, and a
+> blanket value would wrongly override `/health` / `/metrics`.
 
 Point a client at it (the endpoint is `/sparql`):
 
