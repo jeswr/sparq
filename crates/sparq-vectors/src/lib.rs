@@ -1,4 +1,6 @@
 #![doc = include_str!("../README.md")]
+// [OPUS-4.8] MS-G2 (sq-8wbn): make `// SAFETY:` mandatory on every first-party unsafe block.
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod ann;
 pub mod diskann;

@@ -2186,7 +2186,13 @@ impl ShardedDict {
         // written afterwards by the serial pass, never concurrently.)
         #[derive(Clone, Copy)]
         struct SlotPtr(*mut Id, usize);
+        // SAFETY: `SlotPtr` (a `*mut Id`) only ever touches its own disjoint slot — the
+        // hash routing above assigns each (pidx, i) leaf slot to exactly one shard, so the
+        // raw-pointer handle can be sent/shared across the parallel scatter without
+        // aliasing; no reads happen until the parallel scope ends. [OPUS-4.8 sq-8wbn]
         unsafe impl Send for SlotPtr {}
+        // SAFETY: shared read of a `Copy` raw-pointer handle; the writes it performs are
+        // disjoint by the hash routing above (see the `Send` argument). [OPUS-4.8 sq-8wbn]
         unsafe impl Sync for SlotPtr {}
         let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| SlotPtr(v.as_mut_ptr(), v.len())).collect();
 
