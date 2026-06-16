@@ -10,9 +10,14 @@ Validate a data `Graph` against a shapes `Graph` and get back a `ValidationRepor
 plain text). Covers the full SHACL Core component set, SHACL-SPARQL (`sh:sparql`,
 §5.2), and custom SPARQL-based constraint components (`sh:ConstraintComponent`, §6).
 
-`sparq-shacl` is an **opt-in, native-only** crate: depending on it is what turns on
-SHACL. It is NOT a dependency of any other sparq crate, so the core engine and the
-wasm bundle carry zero SHACL code/cost unless you pull it in.
+`sparq-shacl` is an **opt-in** crate: depending on it is what turns on SHACL. It is
+NOT a dependency of any other sparq crate by default, so the core engine and the
+default wasm bundle carry zero SHACL code/cost unless you pull it in. The browser/JS
+consumer opts in through `sparq-wasm`'s non-default `shacl` feature, which exposes
+`validate` as a stateless `Store.validate(data, shapes, format)` wasm binding
+returning a JSON report — a drop-in for `rdf-validate-shacl` (sq-yqi1, #162). On that
+wasm32 build the `sparq-engine` dep drops its defaults so rayon never enters the
+bundle; see the `javascript-wasm` skill for the JS API + report shape.
 
 ## Quickstart
 
@@ -244,9 +249,12 @@ IRI/literal, and a path node expression `[ sh:path P ]` (any SHACL property path
 ## Gotchas / feature flags / prerequisites
 
 - **Base SHACL is engaged purely by depending on `sparq-shacl`** (no feature
-  needed). It transitively pulls in `sparq-engine` (to run `sh:sparql`/§6 queries);
-  both are **native-only and never in the wasm dependency graph**, so the isolation
-  guarantee holds.
+  needed). It transitively pulls in `sparq-engine` (to run `sh:sparql`/§6 queries).
+  Neither is in the **default** wasm dependency graph, so the default browser bundle
+  stays SHACL-free; they enter the wasm graph ONLY when a consumer opts in via
+  `sparq-wasm`'s non-default `shacl` feature, on which build `sparq-engine`'s defaults
+  (rayon/regex/digest) are dropped so the bundle stays lean. The native build is
+  unaffected (full engine defaults).
 - **SHACL-AF rules (`sh:rule`) are OPT-IN behind the `shacl-af` cargo feature.**
   With the feature off, the base validation path carries zero rule code/parse cost
   and the `apply_rules` / `apply_rules_with_model` / `expand` / `Inference` symbols

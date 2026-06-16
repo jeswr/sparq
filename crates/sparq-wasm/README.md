@@ -39,6 +39,53 @@ const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, n
 MINUS, BIND, VALUES, aggregation (GROUP BY / HAVING), ORDER BY, DISTINCT/LIMIT/
 OFFSET, sub-SELECT.
 
+## SHACL validation (opt-in `shacl` feature) — `Store.validate(...)`
+
+`sparq-shacl`'s SHACL Core + SHACL-SPARQL (`sh:sparql`, W3C SHACL §5.2) engine is
+exposed to JS through the **opt-in `shacl` feature** as a stateless
+`Store.validate(data, shapes, format)` binding — a drop-in for
+`rdf-validate-shacl`. The feature is **OFF by default**, so the standard bundle
+carries zero SHACL code; build with it on to get the binding:
+
+```sh
+wasm-pack build --target web --release -- --features shacl
+# add SHACL Advanced Features (sh:rule): --features shacl-af
+```
+
+```js
+import init, { Store } from "./pkg/sparq_wasm.js";
+await init();
+
+// validate is stateless — it does not consult the receiver's triples.
+const store = Store.load("", "turtle");
+const report = JSON.parse(store.validate(dataTurtle, shapesTurtle, "turtle"));
+
+report.conforms;          // boolean — true iff there are no results (any severity)
+report.results;           // array of violation/warning/info results
+// each result: { focusNode, path, value, sourceShape,
+//                sourceConstraintComponent, severity, message }
+```
+
+- `format` is the same set `Store.load` accepts (`"turtle"` | `"ntriples"` |
+  `"nquads"` | `"trig"`); both graphs are parsed identically (named graphs folded
+  into the default graph).
+- `focusNode` / `value` / `sourceShape` are **N-Triples term strings**; `path` is
+  a SHACL **Turtle path expression**; `severity` and `sourceConstraintComponent`
+  are full IRIs; `message` is the plain text of the shape's first `sh:message` (or
+  a generated default). `path`, `value` and `message` are `null` when absent.
+- `conforms` follows the W3C-suite notion: it is `false` if *any* result is
+  reported (including `sh:Warning` / `sh:Info`). For a violations-only gate, filter
+  `results` by `severity === "http://www.w3.org/ns/shacl#Violation"`.
+- It returns the `Err`/`JsError` arm only when a graph fails to parse; malformed
+  shapes are skipped by the engine, never surfaced as an error.
+
+Small-document write-validation (~10–100 triples) sits far below the wasm
+linear-memory ceiling. Very large data graphs should validate server-side via the
+`sparq-server` HTTP `validate` endpoint instead (the other half of the same
+decision — see #162). Validation correctness is the native `sparq-shacl` engine's;
+this binding only loads the two graphs and hand-serialises the report to JSON
+(no serde, matching the SPARQL-JSON path).
+
 ### Streaming wins carry over to the browser
 
 The same engine optimisations apply in WASM, where memory and main-thread time are
