@@ -18,7 +18,7 @@ picture and we do not re-propose them.
 
 | ID | Gap | CRA req | Sev | Owner worktree | Bead |
 |---|---|---|---|---|---|
-| GX-9 | **`dist.yml` release binaries lack a SLSA provenance attestation** (only `release.yml` archives/SBOM/image are attested). A binary distributed via the `dist` lane is not provenance-covered. | Annex I Part II.7 (secure distribution) | P2 | slsa / sbom | `sq-toze.23` |
+| ~~GX-9~~ | **`dist.yml` release binaries lack a SLSA provenance attestation.** **CLOSED (sq-toze.23):** `dist.yml#build` now emits a signed in-toto SLSA provenance attestation (`actions/attest-build-provenance`, OIDC) + cargo-auditable over each per-tier binary → SLSA Build L2; the `dist` lane is now provenance-covered like `release.yml`. Verify `gh attestation verify dist/sparq-cli-<tier> --repo jeswr/sparq`. | Annex I Part II.7 (secure distribution) | P2 | slsa / sbom | `sq-toze.23` (ADDRESSED) |
 | GX-10 | **No published-package provenance for crates.io / npm / PyPI.** The release archives + ghcr image are attested, but the registry-published packages (the form most consumers actually pull) carry no provenance. | Annex I Part II.7 | P2 | slsa / supply-chain | `sq-toze.24` |
 | GX-12 | **No container-image vulnerability scan (Trivy/Grype) + Dockerfile-lint (Dockle/Hadolint) lane in CI.** The CIS-Docker posture (distroless/non-root/pinned) is strong but unscanned — a vulnerable base layer could ship undetected, weakening the I.2 "no known exploitable vulnerabilities" claim for the *container* artifact. | Annex I Part I (2); Part II.1/.3 | P2 | cis | `sq-toze.31` |
 

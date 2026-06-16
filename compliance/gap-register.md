@@ -46,7 +46,7 @@ ruleset verification against `docs/branch-protection.md` (**`sq-sto1`**).
 | ID | Gap | Sev | Framework(s) | Bead | Status |
 |---|---|---|---|---|---|
 | **GX-8** | **No reproducible-build evidence** — the SBOM↔binary integrity link is asserted (SLSA provenance + cargo-auditable), not independently reproducible; higher SLSA levels + CRA integrity want a documented bit-for-bit rebuild *or* an honest "not reproducible because X". Recurs as SBOM **GS-2**, SSDF **SSDF-G1 (PW.6.2)**, SLSA SL-B3-adjacent, OpenSSF Badge `build_reproducible`, CRA integrity. | P2 | sbom, ssdf, slsa, openssf, cra | **`sq-toze.9`** | OPEN |
-| **GX-9** | `dist.yml` tiered `sparq-cli` binaries built with **no provenance** (no id-token/attest step, no cargo-auditable) — dist/launcher binary unattested. | P1 | slsa (cited by cra) | **`sq-toze.23`** | OPEN |
+| ~~**GX-9**~~ | `dist.yml` tiered `sparq-cli` binaries built with **no provenance** — dist/launcher binary unattested. **CLOSED (sq-toze.23):** `dist.yml#build` now has `id-token`/`attestations: write`, `cargo auditable build --locked`, and `actions/attest-build-provenance@a2bbfa2…` over each per-tier binary → **SLSA Build L2** (mirrors `release.yml#package`); verify `gh attestation verify dist/sparq-cli-<tier> --repo jeswr/sparq`. | P1 | slsa (cited by cra) | **`sq-toze.23`** | ADDRESSED |
 | **GX-10** | **Published packages carry no provenance** — there is no publish workflow at all (js/python lanes are test-only); crates.io/npm/PyPI artifacts are published out-of-CI and unattested. crates.io has no upstream provenance mechanism. | P1 | slsa (cited by cra), openssf (GX-OSSF-2) | **`sq-toze.24`** (npm/PyPI), **`sq-jgt3`** (registry signing) | OPEN |
 | **GX-11** | **SLSA Build L3 not met** — in-band provenance ceiling (compromised build step shares signing context); needs slsa-github-generator / isolated trusted builder. | P3 | slsa | **`sq-toze.25`** | OPEN (aspirational) |
 | **GX-12** | **No container-image CVE scan (Trivy/Grype) + no Dockerfile linter (Dockle/Hadolint) lane in CI** — only the docker-smoke test exists. | P1 | cis (cited by cra) | **`sq-toze.31`** | OPEN |
@@ -170,7 +170,7 @@ watch item).
 | Severity | Count | Notes |
 |---|---|---|
 | **P0 / CRITICAL** | **3** | CR-G1 (external cryptographer), CDMC CD-1 + CD-2 (lineage + access-audit data-maturity). CR-G1 is **external-required**. |
-| **P1 / High** | **~10** | GX-9, GX-10, GX-12, GX-4, GAP-ISO-1, GX-CRA-1, GX-CRA-2, MS-G2, CDMC CD-3/4/5/8 (P1 cluster). GAP-ISO-1 is an **org act**. |
+| **P1 / High** | **~9** | GX-10, GX-12, GX-4, GAP-ISO-1, GX-CRA-1, GX-CRA-2, MS-G2, CDMC CD-3/4/5/8 (P1 cluster). GAP-ISO-1 is an **org act**. *(GX-9 closed — sq-toze.23, dist.yml binaries now SLSA Build L2.)* |
 | **P2 / Medium** | **~17** | GX-8 (one row, recurs in 5 slices), GS-1/3/4/5/6, SSDF-G1(=GX-8), MS-G3/G4/G5, ASVS-G1/G3, GAP-ISO-2, GX-CRA-3, PR-G3, CR-G4/G5, CDMC CD-6/7. |
 | **P3 / Low** | **~8** | GX-11, GX-13, GX-OSSF-2/3, ASVS-G2/G4, PR-G2/G4/G5. |
 

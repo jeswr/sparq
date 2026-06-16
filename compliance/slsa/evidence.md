@@ -150,9 +150,12 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
 
 ## What the evidence does NOT support (read alongside `gap-register.md`)
 
-- **No provenance** is attached to `dist.yml`-built binaries (GX-9), nor to the
-  crates.io/npm/PyPI published packages (GX-10). `gh attestation verify` will **fail** on a
-  binary obtained via those paths — that is the honest, expected result, not a bug.
+- **`dist.yml` binaries are now attested** (GX-9 closed, sq-toze.23): `dist.yml#build` runs
+  `actions/attest-build-provenance` (+ cargo-auditable, `--locked`) with `id-token`/`attestations`
+  write, so `gh attestation verify dist/sparq-cli-<tier> --repo jeswr/sparq` succeeds. **No provenance
+  is still attached to the crates.io/npm/PyPI published packages** (GX-10) — `gh attestation verify`
+  will **fail** on a binary obtained via those registry paths; that is the honest, expected result,
+  not a bug.
 - **No Build L3** evidence exists: provenance is generated in the build job, not by an
   isolated trusted builder (GX-11). Do not interpret the L2 attestations as L3.
 - **No reproducible-build evidence** (GX-8 / sq-toze.9): there is no documented bit-for-bit

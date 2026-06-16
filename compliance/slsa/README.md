@@ -53,9 +53,9 @@ tokens); consumer-side verification documentation.
 
 | Posture | Detail |
 |---|---|
-| **Implemented & verified** | Build L2 for release archives + container (signed provenance, hosted runner, cargo-auditable, attested SBOM/VEX); source-track integrity (pinned+locked deps, cargo-vet + cargo-deny GATING, least-privilege tokens, security.txt). |
+| **Implemented & verified** | Build L2 for release archives + container **+ the `dist.yml` tiered binaries** (signed provenance, hosted runner, cargo-auditable, attested SBOM/VEX; GX-9 closed via sq-toze.23); source-track integrity (pinned+locked deps, cargo-vet + cargo-deny GATING, least-privilege tokens, security.txt). |
 | **Audit-ready** | Two-person review + protected-branch ruleset (configured out-of-repo, recorded in `docs/branch-protection.md`); consumer verification policy (operator-enforced); the SLSA-level certificate (external assessor). |
-| **Gap** | dist.yml binaries unattested (GX-9/sq-toze.23); no published-package provenance (GX-10/sq-toze.24); no reproducible-build evidence (GX-8/sq-toze.9); Build L3 not met — in-band provenance (GX-11/sq-toze.25). |
+| **Gap** | no published-package provenance — crates.io/npm/PyPI (GX-10/sq-toze.24); no reproducible-build evidence (GX-8/sq-toze.9); Build L3 not met — in-band provenance (GX-11/sq-toze.25). *(GX-9 dist.yml binaries — CLOSED, now SLSA Build L2 / sq-toze.23.)* |
 
 ## Do-not-re-propose (already in the posture — cite, don't re-add)
 
