@@ -73,8 +73,8 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
   derives the candidate `IdMask`, so the filtered top-k equals post-filtering the unfiltered top-k
   by that same constraint. A direct-mention-only constraint is the single-variable special case;
   disconnected patterns never narrow the mask; each `vec:` request gets its own component mask.
-  That derived `IdMask` is **cached across prepares** (sq-36ol), keyed by `(connected sub-BGP,
-  graph `Fingerprint`)` — so the cache wraps the **transitive** derivation: repeated queries
+  That derived `IdMask` is **cached across prepares** (sq-36ol), keyed by the connected sub-BGP
+  plus the graph `Fingerprint` — so the cache wraps the **transitive** derivation: repeated queries
   against an unchanged graph reuse the component's mask instead of re-running the constraint
   SELECT, and **any** graph change (added/removed/changed triple or term, or a dict-id shift)
   changes the fingerprint and misses the cache — so a stale mask is never served (the invalidation
