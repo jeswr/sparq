@@ -108,6 +108,14 @@ jobs:
             ':!:vendor/**' ':!:**/vendor/**' | sort -u > /tmp/doc-md.txt
           echo "Scanning $(wc -l < /tmp/doc-md.txt) markdown file(s) for typos:"
           typos --file-list /tmp/doc-md.txt
+      # [OPUS-4.8] sq-hyzq: both-direction self-test for the _typos.toml allow-list — the
+      # recurring "ALL-CAPS SPARQL keyword + lowercase suffix" false-positives (DELETEd,
+      # INSERTed, "3 OPTIONALs", invokable, …) must stay SUPPRESSED, AND a genuine ALL-CAPS
+      # misspelling + ordinary lowercase typos must STILL fire (so the regex keeps its
+      # teeth). Hermetic (temp fixtures, no repo scan, no network); runs in this same HARD
+      # job so an allow-list over- or under-reach also fails the ci-summary gate.
+      - name: Self-test the typos allow-list (both directions)
+        run: bash scripts/tests/test_typos_allowlist.sh
 
   internal-links:
     name: internal-links (lychee --offline)
