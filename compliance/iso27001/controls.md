@@ -40,7 +40,7 @@ evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act
 | A.5.12 | Classification of information | AUDIT-READY | sparq classifies *its own* artifacts (public OSS source; `SECURITY.md` marks the ZK/MPC estate as "no guarantee"). Classification of *loaded RDF* is operator-owned — see `compliance/data-flow.md` (privacy worktree). | sparq / Operator |
 | A.5.13 | Labelling of information | N/A(op) | Labelling of operator datasets is operator-owned. sparq does not relabel loaded data. | Operator |
 | A.5.14 | Information transfer | AUDIT-READY | sparq-server speaks the W3C SPARQL Protocol over HTTP; transport encryption (TLS) is the operator's gateway (Dockerfile note: "plaintext HTTP is sniffable; front with a gateway"). Transfer *of source* is via signed releases (A.5.23/A.8.4). | Operator |
-| A.5.15 | Access control | N/A(op) → AUDIT-READY | **Documented architectural decision (boundary B3):** `sparq-server` ships with no per-user authz; a single optional bearer token (`SPARQ_AUTH_TOKEN`) exists (Dockerfile / `ServerConfig::from_env`). Per-user access control is the operator's gateway. `research/threat-model.md` T-HTTP-EoP. **Not a silent gap** — see gap-register GAP-ISO-2 (operator-guidance doc). | Operator |
+| A.5.15 | Access control | N/A(op) → AUDIT-READY | **Documented architectural decision (boundary B3):** `sparq-server` ships with no per-user authz; a single optional bearer token (`SPARQ_AUTH_TOKEN`) exists (Dockerfile / `ServerConfig::from_env`). Per-user access control is the operator's gateway. `research/threat-model.md` T-HTTP-EoP. **Not a silent gap** — the operator action is enumerated in [`operator-deployment-security.md`](./operator-deployment-security.md) §2 (boundary B3); gap-register GAP-ISO-2 is **ADDRESSED** by that doc. | Operator |
 | A.5.16 | Identity management | N/A(op) | No user identity store in sparq; operator's IdP. | Operator |
 | A.5.17 | Authentication information | AUDIT-READY | Optional bearer token read from env (`SPARQ_AUTH_TOKEN` / `_READ`), never logged; secret management is the operator's. | Operator |
 | A.5.18 | Access rights | N/A(op) | Provisioning/review of access rights to a deployed instance is operator-owned. | Operator |
@@ -160,7 +160,8 @@ management-system layer (A.5 policy/roles/incident/review, A.6 people) — they 
 **doc-of-record in the repo** but their *certificate* requires an organization to operate
 an ISMS, which **no repo artifact can substitute for**. The **42 N/A(operator)** controls
 are physical/operational properties of a *deployed* environment, correctly assigned to the
-adopting operator for a library/server. There are **zero open Annex-A control gaps**; the
-two readiness gaps (GAP-ISO-1 the ISMS organizational artifacts, GAP-ISO-2 an explicit
-operator-deployment-security guidance doc) are in [`gap-register.md`](./gap-register.md).
-A.8.24 makes **no** claim over the ZK/MPC estate.
+adopting operator for a library/server. There are **zero open Annex-A control gaps**; of the
+two readiness gaps, **GAP-ISO-2** (an explicit operator-deployment-security guidance doc) is
+now **ADDRESSED** by [`operator-deployment-security.md`](./operator-deployment-security.md),
+leaving **GAP-ISO-1** (the ISMS organizational artifacts) as the one open readiness gap in
+[`gap-register.md`](./gap-register.md). A.8.24 makes **no** claim over the ZK/MPC estate.

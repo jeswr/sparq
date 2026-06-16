@@ -28,17 +28,35 @@ otherwise appear are correctly classified one of two ways (and so are *not* gaps
 What remained were **two readiness gaps**: the organizational ISMS artifact set (needed for
 an actual audit, **GAP-ISO-1**) and an explicit operator-deployment-security guidance doc (so
 the N/A(operator) controls aren't left implicit, **GAP-ISO-2**). Both are
-**documentation/templates**, not code controls. **GAP-ISO-1's in-repo deliverable is now
-addressed** by the org-adoptable ISMS template set (clauses 4–10 + the full Annex A SoA, bead
-`sq-ez5z`) — see the *ADDRESSED* section below; its **certificate residual remains external**
-and must never be claimed as closed. **GAP-ISO-2 stays OPEN.** One earlier suspected gap
-(CODEOWNERS) was verified **false** and is recorded as resolved-on-inspection below.
+**documentation/templates**, not code controls, and **both in-repo deliverables are now
+addressed**:
+
+- **GAP-ISO-1's in-repo deliverable** is addressed by the org-adoptable ISMS template set
+  (clauses 4–10 + the full Annex A SoA, bead `sq-ez5z`) — see the *ADDRESSED by the
+  org-adoptable ISMS template set* section below; its **certificate residual remains external**
+  and must never be claimed as closed.
+- **GAP-ISO-2** is addressed (bead `sq-v48f`) by
+  [`operator-deployment-security.md`](./operator-deployment-security.md) — see the *ADDRESSED in
+  this directory* section below.
+
+So there are **no remaining open readiness gaps in the in-repo / agent-scoped sense**; the only
+residual is the **external certificate act** under GAP-ISO-1 (labelled, never claimed as
+closed). One earlier suspected gap (CODEOWNERS) was verified **false** and is recorded as
+resolved-on-inspection below.
 
 ## OPEN gaps
 
-| ID | Gap | Sev | Remediation | Bead (to create) |
-|---|---|---|---|---|
-| **GAP-ISO-2** | **The N/A(operator) controls are implicit, not documented in one place for the operator.** 42 Annex A controls are correctly the adopting *operator's* responsibility (A.7 physical, access-control families under boundary B3, runtime monitoring/backup/availability, network controls). They are flagged per-row in `controls.md`, but there is no single **operator security-deployment guidance** doc telling an operator "to run sparq-server safely you MUST: front it with an authenticating/TLS-terminating gateway (B3), set resource/`QueryBudget` limits, run it non-root in the distroless image, restrict network exposure, own backup/monitoring of your data." Without it, the operator-vs-sparq split is asserted but not actionable. | **Medium** | Author `compliance/iso27001/operator-responsibilities.md` (or fold into the cross-cutting `compliance/threat-model.md` + `compliance/data-flow.md` the privacy worktree owns) enumerating the operator-owned controls with the concrete action for each, anchored on the Dockerfile guidance + boundary B3 + `QueryBudget`. Cross-reference from `controls.md` N/A(op) rows. | `iso27001: operator deployment-security responsibilities doc (B3 + N/A(op) controls)` (P2, sq-toze) |
+_No open readiness gaps in the in-repo / agent-scoped sense._ Both readiness gaps have their
+in-repo deliverable addressed — GAP-ISO-1 by the ISMS template set (below) and GAP-ISO-2 by the
+operator-deployment-security doc (below). The **only residual is the external certificate act**
+under GAP-ISO-1, which is labelled in the residual note and the external section, and **must
+never be claimed as closed**.
+
+## ADDRESSED in this directory
+
+| ID | Gap | Sev | How addressed |
+|---|---|---|---|
+| **GAP-ISO-2** | **The N/A(operator) controls were implicit, not documented in one place for the operator.** 42 Annex A controls are correctly the adopting *operator's* responsibility (A.7 physical, access-control families under boundary B3, runtime monitoring/backup/availability, network controls). They were flagged per-row in `controls.md`, but there was no single **operator security-deployment guidance** doc making the operator-vs-sparq split actionable. | **Medium** | **ADDRESSED** (sq-v48f) by [`operator-deployment-security.md`](./operator-deployment-security.md): a 9-section operator-responsibility doc enumerating network/TLS, authN/authZ (boundary B3), secrets, OS/container hardening, resource/DoS limits, logging/PII, backup/durability, and patch cadence — each stating what sparq ships built-in (citing the real flag/feature) vs what the operator MUST supply, mapped to Annex A. It is an **operator-responsibility doc, NOT a certification claim**, and it states sparq's auth/crypto limits honestly (one coarse static Bearer token, no per-user authz; ZK/MPC NOT sound). Cross-referenced from `controls.md` (the B3 / N/A(op) rows point at it). |
 
 ## ADDRESSED by the org-adoptable ISMS template set (in-repo deliverable; certificate stays external)
 
@@ -64,8 +82,9 @@ and must never be claimed as closed. **GAP-ISO-2 stays OPEN.** One earlier suspe
 - **A.5.15 / A.8.3 / A.8.5 access control on `sparq-server`** is a **documented architectural
   decision** (threat-model boundary **B3**: no per-user authz; front with a gateway /
   sparq-solid; one optional bearer token exists). It is **operator-owned by design**, not a
-  silent gap. Captured in `controls.md` (N/A(op)→AUDIT-READY rows) and to be made actionable
-  by GAP-ISO-2. Re-raising it as a sparq code gap would contradict the cert plan §0 and the
+  silent gap. Captured in `controls.md` (N/A(op)→AUDIT-READY rows) and made actionable by the
+  [`operator-deployment-security.md`](./operator-deployment-security.md) doc (GAP-ISO-2
+  ADDRESSED). Re-raising it as a sparq code gap would contradict the cert plan §0 and the
   threat model.
 - **A.8.24 cryptography over the ZK/MPC estate** is **not a gap to "fix here"** — it is the
   documented **NOT-sound** verdict (`SECURITY.md`, `research/zk-soundness-audit.md`),
