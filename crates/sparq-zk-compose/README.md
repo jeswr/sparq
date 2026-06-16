@@ -9,6 +9,16 @@ full query-result proof and verifies one.
 > returns). This crate was authored by Opus 4.8 on top of a Fable-authored,
 > Opus-validated circuit scaffold.
 
+## FIPS posture (CR-G4)
+
+This crate's cryptography (BN254 / Poseidon2 / Schnorr over Baby-JubJub, via the
+`sparq-zk` primitives) is **not** FIPS-approved and is **not** inside any FIPS
+140-3 / CMVP-validated module — sparq makes **no FIPS claim and no CMVP claim**.
+The primitives are chosen for in-circuit efficiency, not regulatory approval. The
+crate is `publish = false` and is not in the default dependency graph, so a
+FIPS-constrained operator can keep it **out of FIPS scope** simply by not opting
+in. See `compliance/cryptoreview/fips-posture.md`.
+
 ## Architecture
 
 ```text

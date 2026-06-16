@@ -48,13 +48,39 @@
 //! that wants `use → Read` should request `odrl:read` explicitly (a `use` permission
 //! in the policy still *grants* a `read` request — `odrl:use` permits any action in
 //! the evaluator — so the bridge maps the **request** action, which is concrete).
+//!
+//! # Prohibitions → `auth:deny<Mode>` (deny-overrides) — [OPUS-4.8] sq-w693
+//!
+//! A matched ODRL **Prohibition** is the dual of a Permit: it carves an action out
+//! of access. [`materialize_prohibition`] materializes it as the explicit
+//! `principal auth:deny<Mode> target` triple the enforcement already understands —
+//! `auth:denyRead`/`denyWrite`/`denyAppend`/`denyControl`, via the SAME
+//! [`action_to_mode`] mapping (the request's concrete action → the narrowest denied
+//! mode). The existing session layer ([`crate::AuthIndex::accessible`]) computes
+//! `∪ allow ∖ ∪ deny`, so a materialized deny **takes precedence over any allow
+//! grant** for the same principal+target+mode — *deny-overrides*, the same conflict
+//! resolution the ODRL evaluator applies (a matching prohibition overrides any
+//! permission). No new enforcement engine: the deny path already existed
+//! ([`Mode::from_pred`](crate::Mode) parses `deny*`); the bridge only emits the triples.
+//!
+//! A prohibition materializes a deny **only** when [`sparq_policy::matched_prohibition`]
+//! reports it carves THIS request out (action permits + target/assignee agree +
+//! constraints satisfied) AND the request action [`action_to_mode`]-maps AND the
+//! request names a concrete party (WebID) + target graph IRI. An un-matched / unmapped
+//! / partyless / targetless prohibition materializes **nothing** — fail-closed; a deny
+//! is never widened on ambiguity (and certainly never silently dropped to widen access).
+//!
+//! [`materialize_policy`] composes the two: it materializes every applicable Permit
+//! grant AND every matched-Prohibition deny for the request, so a policy carrying both
+//! a permission and a prohibition on the same principal+target+mode emits both triples,
+//! and the deny **wins** at enforcement time.
 
-use crate::authindex::Mode;
-use crate::{AUTH_GRAPH, AUTH_NS};
+use crate::authindex::{Mode, AUTHENTICATED, PUBLIC};
+use crate::{AUTH_BRIDGED_GRAPH, AUTH_GRAPH, AUTH_NS};
 use oxrdf::{NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
-use sparq_policy::{evaluate, Policy, Request};
+use sparq_policy::{evaluate, matched_prohibition, Operator, Policy, Request, Rule, Value};
 
 /// The ODRL namespace prefix (`odrl:`), re-exported for caller convenience.
 pub const ODRL_NS: &str = sparq_policy::ODRL_NS;
@@ -103,25 +129,56 @@ fn mode_predicate(mode: Mode) -> &'static str {
     }
 }
 
-/// What [`materialize_permission`] decided and (on a Permit) materialized.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The `auth:deny<Mode>` view predicate a [`Mode`] DENY is materialized under — the
+/// SAME predicate [`crate::AuthIndex`] parses into its deny map
+/// (`auth:denyRead|denyWrite|denyAppend|denyControl`), so a materialized deny is
+/// subtracted from the allow set by the existing `∪ allow ∖ ∪ deny` enforcement.
+/// [OPUS-4.8] sq-w693.
+fn deny_predicate(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Read => "denyRead",
+        Mode::Write => "denyWrite",
+        Mode::Append => "denyAppend",
+        Mode::Control => "denyControl",
+    }
+}
+
+/// What the bridge decided and (on a Permit / matched Prohibition) materialized.
+///
+/// [`materialize_permission`] sets the `granted` / `grant_triple` fields;
+/// [`materialize_prohibition`] sets the `prohibited` / `deny_triple` fields
+/// ([OPUS-4.8] sq-w693); [`materialize_policy`] may set both at once (a policy with a
+/// permission AND a prohibition for the request — the deny wins at enforcement time).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BridgeOutcome {
-    /// Whether the ODRL evaluation was a definite Permit AND produced a grant.
-    /// `false` ⇒ nothing was written to the AUTH_GRAPH (fail-closed).
+    /// Whether a definite Permit produced an allow grant.
+    /// `false` ⇒ no allow triple was written to the AUTH_GRAPH (fail-closed).
     pub granted: bool,
-    /// On a grant: the WAC/ACP mode the matched ODRL action mapped to.
+    /// Whether a matched Prohibition produced a DENY. `false` ⇒ no `auth:deny*`
+    /// triple was written (fail-closed). [OPUS-4.8] sq-w693.
+    pub prohibited: bool,
+    /// On a grant: the WAC/ACP mode the matched ODRL action mapped to. On a deny:
+    /// the mode the prohibited action mapped to (`deny_triple`'s mode).
     pub mode: Option<Mode>,
     /// On a grant: the materialized `principal auth:<mode> graph` triple, as
     /// `(principal_iri, mode_predicate_iri, graph_iri)`, for audit/justification.
     pub grant_triple: Option<(String, String, String)>,
-    /// Human-readable reason a grant was NOT materialized (the ODRL decision's
-    /// caveats, an unmapped action, or a missing party/target). Empty on a grant.
+    /// On a deny: the materialized `principal auth:deny<Mode> graph` triple, as
+    /// `(principal_iri, deny_predicate_iri, graph_iri)`. [OPUS-4.8] sq-w693.
+    pub deny_triple: Option<(String, String, String)>,
+    /// Human-readable reason a grant/deny was NOT materialized (the ODRL decision's
+    /// caveats, an unmapped action, or a missing party/target). Empty on success.
     pub reasons: Vec<String>,
+    /// The exact auth-view triples this call materialized (allow grant, deny, and/or
+    /// the conditional-grant head triples), for the bridge ledger to track so a later
+    /// refresh can retract precisely these. Empty when nothing was materialized.
+    /// [OPUS-4.8] sq-dpk4.
+    pub(crate) emitted: Vec<[Term; 3]>,
 }
 
 impl BridgeOutcome {
     fn denied(reasons: Vec<String>) -> BridgeOutcome {
-        BridgeOutcome { granted: false, mode: None, grant_triple: None, reasons }
+        BridgeOutcome { reasons, ..BridgeOutcome::default() }
     }
 }
 
@@ -217,47 +274,746 @@ pub fn materialize_permission(
 
     // 4. Materialize `party auth:<mode> target` into the auth view.
     let pred = format!("{AUTH_NS}{}", mode_predicate(mode));
-    append_grant(graph, party, &pred, target);
+    let triple = append_grant(graph, party, &pred, target);
 
     BridgeOutcome {
         granted: true,
         mode: Some(mode),
         grant_triple: Some((party.to_owned(), pred, target.to_owned())),
-        reasons: Vec::new(),
+        emitted: vec![triple],
+        ..BridgeOutcome::default()
+    }
+}
+
+/// Evaluate `policy`'s **prohibitions** against `request` and, **iff** a prohibition
+/// matches (carves the request out — action permits + target/assignee agree +
+/// constraints satisfied) for a mappable action with a concrete party + target,
+/// materialize the equivalent `principal auth:deny<Mode> graph` DENY triple into the
+/// dataset's `<urn:sparq:auth>` view. [OPUS-4.8] sq-w693.
+///
+/// The deny is **appended** to the current auth view (any grants/denies already there
+/// are preserved). Because the session layer computes `∪ allow ∖ ∪ deny`
+/// ([`crate::AuthIndex::accessible`]), this materialized deny **takes precedence over
+/// any allow grant** for the same principal+target+mode — *deny-overrides*. The deny
+/// path is honoured by the EXISTING enforcement unchanged ([`crate::Mode`]'s
+/// `from_pred` already parses `auth:deny*`); this function only emits the triple.
+///
+/// Whether a prohibition carves THIS request out is decided by
+/// [`sparq_policy::matched_prohibition`] — the same match test the ODRL evaluator
+/// applies in its conflict step — NOT by `evaluate(...).allow == false`, which would
+/// conflate a carve-out with a plain no-matching-permission deny.
+///
+/// # Fail-closed
+///
+/// Returns a [`BridgeOutcome`] with `prohibited == false` and writes **nothing** when:
+/// no prohibition matches the request; the requested action does not [`action_to_mode`]
+/// -map; or the request omits the party (assignee/WebID) or the target graph IRI.
+/// A deny is never widened on ambiguity, and an unmappable carve-out is reported (not
+/// silently dropped — dropping a deny would widen access).
+///
+/// # Examples
+///
+/// ```
+/// use oxrdf::Term;
+/// use sparq_solid::odrl_bridge::materialize_prohibition;
+/// use sparq_solid::Mode;
+/// use sparq_policy::{parse_policy_str, Request};
+///
+/// // alice is PROHIBITED from writing the target graph.
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/1> a odrl:Set ; odrl:prohibition [
+///     odrl:action odrl:modify ;
+///     odrl:target <https://pod.ex/notes/n1> ;
+///     odrl:assignee <https://alice.ex/card#me> ] .
+/// "#, "turtle")?;
+///
+/// let mut graph = sparq_core::Graph::load_dataset(
+///     "<https://pod.ex/notes/n1#it> <https://ex.dev/ns#t> \"x\" <https://pod.ex/notes/n1> .",
+///     "nquads")?;
+/// let req = Request::new("http://www.w3.org/ns/odrl/2/modify")
+///     .on("https://pod.ex/notes/n1")
+///     .by("https://alice.ex/card#me");
+///
+/// let out = materialize_prohibition(&mut graph, &pol, &req);
+/// assert!(out.prohibited);
+/// assert_eq!(out.mode, Some(Mode::Write));
+/// // an explicit auth:denyWrite triple now lives in the auth view
+/// assert!(graph.named.iter().any(|(name, _)| matches!(
+///     name, Term::NamedNode(n) if n.as_str() == sparq_solid::AUTH_GRAPH)));
+/// # Ok::<(), String>(())
+/// ```
+pub fn materialize_prohibition(
+    graph: &mut Graph,
+    policy: &Policy,
+    request: &Request,
+) -> BridgeOutcome {
+    // 1. Does a prohibition CARVE THIS REQUEST OUT? (Same match test the evaluator's
+    //    conflict step uses — not `!decision.allow`, which over-fires on a plain
+    //    no-permission deny.)
+    if matched_prohibition(policy, request).is_none() {
+        return BridgeOutcome::denied(vec![
+            "no ODRL prohibition matches the request; no deny materialized".to_owned(),
+        ]);
+    }
+
+    // 2. Action → Mode. An unmapped action (incl. the `use` umbrella) → no deny.
+    //    Fail-closed: we do NOT widen the deny to a default mode, but we also must
+    //    not silently drop it — the carve-out is reported in `reasons`.
+    let Some(mode) = action_to_mode(&request.action) else {
+        return BridgeOutcome::denied(vec![format!(
+            "ODRL prohibition matched but action <{}> has no WAC/ACP mode mapping; \
+             no deny materialized",
+            request.action
+        )]);
+    };
+
+    // 3. Concrete party (WebID) + target graph required (fail-closed): a partyless
+    //    deny would be meaningless / a targetless deny ambiguous.
+    let Some(party) = request.party.as_deref() else {
+        return BridgeOutcome::denied(vec![
+            "ODRL prohibition has no concrete party (assignee/WebID); no deny materialized"
+                .to_owned(),
+        ]);
+    };
+    let Some(target) = request.target.as_deref() else {
+        return BridgeOutcome::denied(vec![
+            "ODRL prohibition has no concrete target graph IRI; no deny materialized".to_owned(),
+        ]);
+    };
+
+    // 4. Materialize `party auth:deny<Mode> target` into the auth view.
+    let pred = format!("{AUTH_NS}{}", deny_predicate(mode));
+    let triple = append_grant(graph, party, &pred, target);
+
+    BridgeOutcome {
+        prohibited: true,
+        mode: Some(mode),
+        deny_triple: Some((party.to_owned(), pred, target.to_owned())),
+        emitted: vec![triple],
+        ..BridgeOutcome::default()
+    }
+}
+
+/// Materialize **both** sides of `policy` for `request`: the Permit allow grant (via
+/// [`materialize_permission`]) AND the matched-Prohibition deny (via
+/// [`materialize_prohibition`]), composing them into one [`BridgeOutcome`].
+/// [OPUS-4.8] sq-w693.
+///
+/// A policy carrying both a permission and a prohibition for the same
+/// principal+target+mode materializes **both** triples. The deny **wins** at
+/// enforcement time — the session layer subtracts `∪ deny` from `∪ allow`
+/// ([`crate::AuthIndex::accessible`]), so *deny-overrides* falls out of the existing
+/// enforcement without any conflict logic here. Each side is independently
+/// fail-closed: a side that does not produce a definite, mappable, concrete result
+/// materializes nothing for that side.
+///
+/// The returned outcome carries `granted`/`grant_triple` from the Permit side and
+/// `prohibited`/`deny_triple` from the Prohibition side; `mode` reflects the deny
+/// mode when a deny was materialized (the operative decision under deny-overrides),
+/// else the grant mode; `reasons` aggregates the caveats of whichever side(s) did not
+/// materialize.
+pub fn materialize_policy(graph: &mut Graph, policy: &Policy, request: &Request) -> BridgeOutcome {
+    let allow = materialize_permission(graph, policy, request);
+    let deny = materialize_prohibition(graph, policy, request);
+
+    let mut reasons = allow.reasons;
+    reasons.extend(deny.reasons);
+    let mut emitted = allow.emitted;
+    emitted.extend(deny.emitted);
+    BridgeOutcome {
+        granted: allow.granted,
+        prohibited: deny.prohibited,
+        // Under deny-overrides the deny is the operative decision when present.
+        mode: deny.mode.or(allow.mode),
+        grant_triple: allow.grant_triple,
+        deny_triple: deny.deny_triple,
+        reasons,
+        emitted,
     }
 }
 
 /// Append a single `subject predicate object` triple to the `<urn:sparq:auth>`
-/// named graph, preserving the triples already there (the WAC/ACP grants). Rebuilds
-/// the auth sub-graph from its existing triples + the new one via [`Graph::from_parts`].
-fn append_grant(graph: &mut Graph, subject: &str, predicate: &str, object: &str) {
+/// named graph, preserving the triples already there (the WAC/ACP grants), and
+/// **mirror it into the bridged-provenance graph** ([`AUTH_BRIDGED_GRAPH`]) so the
+/// triple is structurally marked as bridged (vs static) — see [`mirror_bridged`].
+/// Returns the emitted triple so the caller can record it in its bridge ledger
+/// ([OPUS-4.8] sq-dpk4). Idempotent: an identical grant is not duplicated.
+fn append_grant(graph: &mut Graph, subject: &str, predicate: &str, object: &str) -> [Term; 3] {
     let s = Term::NamedNode(NamedNode::new_unchecked(subject));
     let p = Term::NamedNode(NamedNode::new_unchecked(predicate));
     let o = Term::NamedNode(NamedNode::new_unchecked(object));
-    let auth_name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
+    let triple = [s, p, o];
+    append_bridged_triples(graph, std::slice::from_ref(&triple));
+    triple
+}
 
-    // Collect the existing auth-view triples (if any) as terms, add the grant, then
-    // re-intern into a fresh sub-graph dictionary (matches install_auth_view).
-    let mut terms: Vec<[Term; 3]> = match graph.named.iter().find(|(n, _)| *n == auth_name) {
+/// Append `new_triples` to BOTH the `<urn:sparq:auth>` enforcement view and the
+/// `<urn:sparq:auth-bridged>` provenance graph, preserving existing triples in each
+/// and skipping duplicates (idempotent). Mirroring into the provenance graph is what
+/// lets a later refresh/static-re-materialization tell bridged triples apart from
+/// static WAC/ACP grants without ever inspecting predicate shape. [OPUS-4.8] sq-dpk4.
+fn append_bridged_triples(graph: &mut Graph, new_triples: &[[Term; 3]]) {
+    extend_named_graph(graph, AUTH_GRAPH, new_triples);
+    extend_named_graph(graph, AUTH_BRIDGED_GRAPH, new_triples);
+}
+
+/// Re-intern `name`'s existing triples plus `additions` (deduplicated) into a fresh
+/// sub-graph dictionary and swap it in (matches `install_auth_view`'s rebuild shape).
+fn extend_named_graph(graph: &mut Graph, name: &str, additions: &[[Term; 3]]) {
+    let g_name = Term::NamedNode(NamedNode::new_unchecked(name));
+    let mut terms: Vec<[Term; 3]> = match graph.named.iter().find(|(n, _)| *n == g_name) {
         Some((_, sub)) => crate::loader::graph_triples(sub),
         None => Vec::new(),
     };
-    // Idempotent: don't duplicate an identical grant triple.
-    let new_triple = [s, p, o];
-    if !terms.contains(&new_triple) {
-        terms.push(new_triple);
+    for t in additions {
+        if !terms.contains(t) {
+            terms.push(t.clone());
+        }
     }
+    install_triples(graph, name, terms);
+}
 
+/// Replace `name`'s sub-graph with exactly `terms` (re-interned into a fresh dict).
+/// When `terms` is empty the named graph is removed entirely (fail-closed: no empty
+/// shell left behind that a reader could otherwise treat as an existing-but-empty view).
+fn install_triples(graph: &mut Graph, name: &str, terms: Vec<[Term; 3]>) {
+    let g_name = Term::NamedNode(NamedNode::new_unchecked(name));
+    if terms.is_empty() {
+        graph.named.retain(|(n, _)| *n != g_name);
+        return;
+    }
     let mut dict = Dict::new();
     let ids: Vec<[sparq_core::dict::Id; 3]> = terms
         .iter()
         .map(|t| [dict.intern(&t[0]), dict.intern(&t[1]), dict.intern(&t[2])])
         .collect();
-    let auth = Graph::from_parts(dict, ids);
-
-    if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == auth_name) {
-        slot.1 = auth;
+    let sub = Graph::from_parts(dict, ids);
+    if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == g_name) {
+        slot.1 = sub;
     } else {
-        graph.named.push((auth_name, auth));
+        graph.named.push((g_name, sub));
+    }
+}
+
+/// The triples currently in a named graph (empty if absent).
+fn named_graph_triples(graph: &Graph, name: &str) -> Vec<[Term; 3]> {
+    let g_name = Term::NamedNode(NamedNode::new_unchecked(name));
+    match graph.named.iter().find(|(n, _)| *n == g_name) {
+        Some((_, sub)) => crate::loader::graph_triples(sub),
+        None => Vec::new(),
+    }
+}
+
+// ============================================================================
+// [OPUS-4.8] sq-hiz4 — persist a FAITHFULLY-mappable ODRL constraint as an ACP
+// re-checked condition (`auth:ConditionalGrant`) instead of freezing it into a
+// one-shot materialization-time allow.
+// ============================================================================
+
+/// The `acl:` mode IRI a [`Mode`] is written as on a conditional grant's
+/// `auth:mode` (the form [`crate::AuthIndex`] reads via `from_mode_iri`).
+fn mode_iri(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Read => "http://www.w3.org/ns/auth/acl#Read",
+        Mode::Write => "http://www.w3.org/ns/auth/acl#Write",
+        Mode::Append => "http://www.w3.org/ns/auth/acl#Append",
+        Mode::Control => "http://www.w3.org/ns/auth/acl#Control",
+    }
+}
+
+/// The ODRL `recipient` constraint left-operand IRI.
+const ODRL_RECIPIENT: &str = "http://www.w3.org/ns/odrl/2/recipient";
+/// The ODRL `assignee` constraint left-operand IRI (the party as a *constraint*,
+/// distinct from the `odrl:assignee` rule attribute the evaluator already matches).
+const ODRL_ASSIGNEE: &str = "http://www.w3.org/ns/odrl/2/assignee";
+
+/// What [`map_constraints_to_agents`] concluded about a permission's constraints.
+enum AgentMapping {
+    /// Every constraint maps faithfully to an agent-dimension matcher; persist a
+    /// `ConditionalGrant` whose `auth:agent` re-checks each of these principals.
+    /// Empty ⇒ no agent restriction (the grant applies to `auth:Public`).
+    Faithful(Vec<String>),
+    /// At least one constraint has NO faithful ACP-condition analogue (purpose /
+    /// dateTime window / count): the rule MUST stay one-shot (fail-closed — never
+    /// approximate an unmappable constraint with a looser persisted condition).
+    Unmappable,
+}
+
+/// Inspect a matched permission's constraints and decide whether the WHOLE rule can
+/// be persisted as re-checked ACP agent conditions.
+///
+/// **Faithful (→ agent matcher):** an `odrl:recipient`/`odrl:assignee` constraint
+/// under `eq`/`isA` (the recipient IS this principal) or `isPartOf` (the recipient is
+/// a member of a static principal set). The recipient-of-data is exactly the session
+/// agent the ACP `auth:agent` head re-checks, so the persisted condition has the SAME
+/// semantics — it just re-evaluates per session instead of being frozen.
+///
+/// **Unmappable (→ stay one-shot):** `odrl:purpose` (ACP sessions carry no purpose —
+/// a client app is not a purpose-of-use, so mapping it to a client matcher would
+/// over-grant), `odrl:dateTime`/time windows (ACP has no "now" dimension — matcher
+/// accept-sets are static, so a persisted condition could not re-check the clock),
+/// `odrl:count` (ACP is stateless — no usage counter), and any unrecognised
+/// left-operand. A `neq` recipient (everyone EXCEPT one) has no faithful single-grant
+/// analogue either (it would need a `noneOf` exception matcher built per session) and
+/// is treated as unmappable. Any one such constraint forces the whole rule one-shot.
+fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
+    let mut agents: Vec<String> = Vec::new();
+    for c in &rule.constraints {
+        if c.left != ODRL_RECIPIENT && c.left != ODRL_ASSIGNEE {
+            // purpose / dateTime / count / anything else → no faithful condition.
+            return AgentMapping::Unmappable;
+        }
+        match c.operator {
+            // recipient IS this principal (identity) → one agent matcher.
+            Operator::Eq | Operator::IsA => match &c.right {
+                Value::Iri(s) | Value::Str(s) => agents.push(s.clone()),
+                // a numeric/dateTime recipient is malformed → fail-closed.
+                _ => return AgentMapping::Unmappable,
+            },
+            // recipient ∈ {a|b|c} (static set) → one agent matcher per member.
+            Operator::IsPartOf => {
+                let members: Vec<String> = c
+                    .right
+                    .as_str()
+                    .split(['|', ' ', ','])
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if members.is_empty() {
+                    return AgentMapping::Unmappable;
+                }
+                agents.extend(members);
+            }
+            // `neq`/order operators on a recipient have no faithful single-grant ACP
+            // analogue (an "everyone except" needs a per-session noneOf) → one-shot.
+            _ => return AgentMapping::Unmappable,
+        }
+    }
+    AgentMapping::Faithful(agents)
+}
+
+/// Whether a recipient principal IRI is safe to write as an `auth:agent` head: it
+/// must NOT smuggle the reserved pair encoding (`urn:sparq:` / `&client=`), or a
+/// crafted recipient could impersonate a minted pair principal (defense in depth,
+/// mirrors [`crate::loader::session_value_allowed`]). The session-layer check
+/// already rejects such SESSIONS; this also keeps them out of the GRANT head.
+fn recipient_principal_allowed(p: &str) -> bool {
+    crate::loader::session_value_allowed(p)
+}
+
+/// Evaluate `policy` against `request` and, for the matched permission, EITHER
+/// persist its recipient/assignee constraint as a re-checked ACP
+/// `auth:ConditionalGrant` (so the granted agent is verified per session through the
+/// real enforcement path) OR — when the permission carries a constraint with no
+/// faithful ACP-condition analogue — fall back to the one-shot
+/// [`materialize_permission`] (the constraint is checked once, at materialization).
+///
+/// # When a conditional grant is emitted (faithful)
+///
+/// All of the matched permission's constraints are `odrl:recipient`/`odrl:assignee`
+/// constraints under `eq`/`isA`/`isPartOf` (see [`map_constraints_to_agents`]). The
+/// emitted grant is:
+///
+/// ```text
+/// <grant> a auth:ConditionalGrant ; auth:effect auth:Allow ;
+///         auth:agent <recipient> ; auth:client auth:AnyClient ;
+///         auth:mode acl:<Mode> ; auth:graph <target> .
+/// ```
+///
+/// re-checked by [`crate::AuthIndex::accessible`]: a session whose agent is the
+/// recipient is granted; any other agent (or anonymous) is denied — **without**
+/// re-running the ODRL evaluator. A recipient *set* emits one grant per member (the
+/// auth view unions the allows). When the rule has NO recipient constraint, the grant
+/// head is `auth:Public` (any session) — only valid because the action/target/duties
+/// were already satisfied at materialization.
+///
+/// # Fail-closed
+///
+/// - A Deny (prohibition override, unmet *unmappable* constraint, undischarged duty)
+///   materializes **nothing** — exactly as the one-shot path.
+/// - An unmapped action, or a missing target, materializes nothing.
+/// - **Mixed constraints fail safe:** if ANY constraint is unmappable (`purpose`,
+///   `dateTime`, `count`, a `neq`/order recipient), the WHOLE rule falls back to the
+///   one-shot path so the unmappable bound is still enforced (frozen) — a persisted
+///   condition is emitted ONLY when every constraint maps faithfully.
+/// - A recipient IRI inside the reserved pair encoding is dropped from the grant head
+///   (it could otherwise impersonate a minted pair principal).
+///
+/// Returns a [`BridgeOutcome`]; on a conditional grant `grant_triple` reports the
+/// `(agent, auth:effect, graph)` of the FIRST emitted grant (audit anchor) and
+/// `mode` the mapped mode. The free-function form does not reindex a [`crate::PodStore`]
+/// — use [`crate::PodStore::materialize_odrl_permission_conditional`].
+pub fn materialize_permission_conditional(
+    graph: &mut Graph,
+    policy: &Policy,
+    request: &Request,
+) -> BridgeOutcome {
+    // 1. Action → Mode (shared with the one-shot path). Unmapped → no grant.
+    let Some(mode) = action_to_mode(&request.action) else {
+        return BridgeOutcome::denied(vec![format!(
+            "ODRL action <{}> has no WAC/ACP mode mapping; no grant materialized",
+            request.action
+        )]);
+    };
+
+    // 2. Find the permission whose action/target match AND whose duties are
+    //    discharged AND whose constraints map faithfully to agent conditions. The
+    //    recipient constraint is NOT required to hold against the request party here
+    //    — the persisted condition re-checks it per session. Prohibitions still
+    //    override (deny-overrides), so consult the evaluator's prohibition verdict.
+    if let Some(p) = matched_prohibition(policy, request) {
+        return BridgeOutcome::denied(vec![format!(
+            "prohibition {} matches the request (deny-overrides); no grant materialized",
+            p.id
+        )]);
+    }
+    let Some(target) = request.target.as_deref() else {
+        return BridgeOutcome::denied(vec![
+            "ODRL Permit has no concrete target graph IRI; no grant materialized".to_owned(),
+        ]);
+    };
+
+    let mut fallback_reasons: Vec<String> = Vec::new();
+    for rule in &policy.permissions {
+        // Action + target must agree (assignee/recipient are handled as conditions).
+        if !rule_action_target_match(rule, request, mode, target) {
+            continue;
+        }
+        // Duties must be discharged at materialization (no ACP analogue → one-shot
+        // semantics; an undischarged duty blocks this rule).
+        if rule.duties.iter().any(|d| !request.discharged_duties.contains(&d.action.0)) {
+            fallback_reasons.push(format!("permission {} has an undischarged duty", rule.id));
+            continue;
+        }
+        match map_constraints_to_agents(rule) {
+            AgentMapping::Faithful(recipients) => {
+                let agents = condition_agents(rule, &recipients);
+                if agents.is_empty() {
+                    // every recipient was reserved-encoded → fail-closed, nothing.
+                    fallback_reasons.push(format!(
+                        "permission {} recipients are all reserved-encoded; no grant",
+                        rule.id
+                    ));
+                    continue;
+                }
+                let (first, emitted) = append_conditional_grants(graph, &agents, mode, target);
+                return BridgeOutcome {
+                    granted: true,
+                    mode: Some(mode),
+                    grant_triple: Some(first),
+                    emitted,
+                    ..BridgeOutcome::default()
+                };
+            }
+            AgentMapping::Unmappable => {
+                // This permission carries a constraint with no faithful condition
+                // analogue → the one-shot path must check it (frozen) instead.
+                fallback_reasons.push(format!(
+                    "permission {} has a constraint with no faithful ACP condition; one-shot path",
+                    rule.id
+                ));
+            }
+        }
+    }
+
+    // 3. No faithfully-conditional permission applied → fall back to the EXISTING
+    //    one-shot behaviour (which evaluates the unmappable constraints against the
+    //    supplied request context and emits a frozen allow iff they hold).
+    let out = materialize_permission(graph, policy, request);
+    if !out.granted && out.reasons.is_empty() {
+        return BridgeOutcome::denied(fallback_reasons);
+    }
+    out
+}
+
+/// The principal-space `auth:agent` heads for a faithful recipient set, dropping any
+/// reserved-encoded recipient. An empty recipient list means the rule had NO agent
+/// restriction → a single `auth:Public` head (any session matches).
+fn condition_agents(_rule: &Rule, recipients: &[String]) -> Vec<String> {
+    if recipients.is_empty() {
+        return vec![PUBLIC.to_owned()];
+    }
+    recipients
+        .iter()
+        .filter(|r| recipient_principal_allowed(r))
+        .map(|r| normalise_recipient_principal(r))
+        .collect()
+}
+
+/// Map an ODRL recipient value to a principal-space `auth:agent` IRI. The two ODRL
+/// "any recipient" sentinels are folded onto the auth principals the session layer
+/// already understands; a concrete WebID passes through unchanged.
+fn normalise_recipient_principal(r: &str) -> String {
+    match r {
+        "http://www.w3.org/ns/odrl/2/All" | "http://www.w3.org/ns/odrl/2/Group" => PUBLIC.to_owned(),
+        "http://www.w3.org/ns/odrl/2/AllConnections" => AUTHENTICATED.to_owned(),
+        _ => r.to_owned(),
+    }
+}
+
+/// Does the rule's action permit `mode`'s action and its target agree with the
+/// request? (Assignee/recipient are deferred to the persisted condition.)
+fn rule_action_target_match(rule: &Rule, request: &Request, _mode: Mode, target: &str) -> bool {
+    let req_action = sparq_policy::Action(request.action.clone());
+    if !rule.action.permits(&req_action) {
+        return false;
+    }
+    match &rule.target {
+        Some(t) => t == target,
+        None => true,
+    }
+}
+
+
+/// Append `auth:ConditionalGrant` allow triples for each agent head onto BOTH the
+/// `<urn:sparq:auth>` view and the bridged-provenance graph, preserving existing
+/// triples. Returns the `(agent, auth:effect, graph)` audit anchor of the first grant
+/// AND the full set of emitted head triples (for the bridge ledger). [OPUS-4.8] sq-dpk4.
+fn append_conditional_grants(
+    graph: &mut Graph,
+    agents: &[String],
+    mode: Mode,
+    target: &str,
+) -> ((String, String, String), Vec<[Term; 3]>) {
+    let mut emitted: Vec<[Term; 3]> = Vec::new();
+
+    let type_p = NamedNode::new_unchecked(RDF_TYPE);
+    let cond_class = NamedNode::new_unchecked(format!("{AUTH_NS}ConditionalGrant"));
+    let effect_p = NamedNode::new_unchecked(format!("{AUTH_NS}effect"));
+    let allow_o = NamedNode::new_unchecked(format!("{AUTH_NS}Allow"));
+    let agent_p = NamedNode::new_unchecked(format!("{AUTH_NS}agent"));
+    let client_p = NamedNode::new_unchecked(format!("{AUTH_NS}client"));
+    let any_client = NamedNode::new_unchecked(crate::authindex::ANY_CLIENT);
+    let mode_p = NamedNode::new_unchecked(format!("{AUTH_NS}mode"));
+    let mode_o = NamedNode::new_unchecked(mode_iri(mode));
+    let graph_p = NamedNode::new_unchecked(format!("{AUTH_NS}graph"));
+    let graph_o = NamedNode::new_unchecked(target);
+
+    let mut first: Option<(String, String, String)> = None;
+    for agent in agents {
+        // A deterministic grant IRI keyed on (agent, mode, graph) so re-materializing
+        // the same condition is idempotent (no duplicate heads).
+        let grant_iri = format!(
+            "urn:sparq:odrl-cond?agent={}&mode={}&graph={}",
+            sparq_reason::n3::encode_for_uri(agent),
+            sparq_reason::n3::encode_for_uri(mode_iri(mode)),
+            sparq_reason::n3::encode_for_uri(target),
+        );
+        let g = Term::NamedNode(NamedNode::new_unchecked(&grant_iri));
+        let agent_o = Term::NamedNode(NamedNode::new_unchecked(agent));
+        let head = [
+            [g.clone(), Term::NamedNode(type_p.clone()), Term::NamedNode(cond_class.clone())],
+            [g.clone(), Term::NamedNode(effect_p.clone()), Term::NamedNode(allow_o.clone())],
+            [g.clone(), Term::NamedNode(agent_p.clone()), agent_o],
+            [g.clone(), Term::NamedNode(client_p.clone()), Term::NamedNode(any_client.clone())],
+            [g.clone(), Term::NamedNode(mode_p.clone()), Term::NamedNode(mode_o.clone())],
+            [g.clone(), Term::NamedNode(graph_p.clone()), Term::NamedNode(graph_o.clone())],
+        ];
+        for t in head {
+            if !emitted.contains(&t) {
+                emitted.push(t);
+            }
+        }
+        if first.is_none() {
+            first = Some((
+                agent.clone(),
+                format!("{AUTH_NS}effect"),
+                target.to_owned(),
+            ));
+        }
+    }
+
+    append_bridged_triples(graph, &emitted);
+    (first.expect("at least one agent head emitted"), emitted)
+}
+
+/// `rdf:type` IRI, for the conditional-grant class triple.
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+
+// ============================================================================
+// [OPUS-4.8] sq-dpk4 — refresh / revocation of bridged ODRL grants.
+//
+// THE GAP this closes: the materialize_* functions above only ever APPEND. When the
+// underlying ODRL policy changes — a permission withdrawn, a time window lapsed, a
+// re-evaluation that now Denies — the previously-materialized grant stays in the auth
+// view, so access that should be GONE persists. And a wholesale static WAC/ACP
+// re-materialization (`install_auth_view`) rebuilds `<urn:sparq:auth>` and would drop
+// every bridged grant. Both are reconciled by tracking each bridged materialization in
+// a ledger and REPLAYING the ledger over a captured static baseline on demand.
+//
+// FAIL-CLOSED: refresh rebuilds the auth view as `static_baseline ∪ replay(ledger)`.
+// An entry whose ODRL re-evaluation no longer yields a grant emits NOTHING on replay,
+// so it is dropped — a withdrawn / lapsed / now-Denied grant LOSES access. The static
+// baseline is captured independently (the exact `install_auth_view` output), so a
+// static grant is never inspected, re-evaluated, or dropped by this path.
+// ============================================================================
+
+/// Which bridge entry point produced a tracked grant — replayed verbatim on refresh so
+/// the SAME fail-closed evaluation re-runs (a withdrawn/lapsed/now-Denied policy emits
+/// nothing → the entry is retracted). [OPUS-4.8] sq-dpk4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeKind {
+    /// [`materialize_permission`] — a definite-Permit allow grant.
+    Permission,
+    /// [`materialize_prohibition`] — a matched-Prohibition deny.
+    Prohibition,
+    /// [`materialize_policy`] — both sides of a policy at once.
+    Policy,
+    /// [`materialize_permission_conditional`] — a re-checked conditional grant (or its
+    /// one-shot fallback).
+    PermissionConditional,
+}
+
+/// One tracked bridged materialization: the originating ODRL `(policy, request, kind)`
+/// plus the auth triples it last emitted. The provenance that distinguishes a bridged
+/// grant from a static WAC/ACP one (those are never in the ledger), and the unit of
+/// retraction on refresh. [OPUS-4.8] sq-dpk4.
+#[derive(Debug, Clone)]
+pub struct BridgeEntry {
+    /// The ODRL policy this grant was bridged from.
+    pub policy: Policy,
+    /// The request `(action, target, party, context, duties)` it was evaluated against.
+    pub request: Request,
+    /// Which bridge entry point produced it (replayed verbatim).
+    pub kind: BridgeKind,
+}
+
+/// The ordered set of bridged materializations a [`crate::PodStore`] is tracking, plus
+/// the static-baseline auth view captured at the last static (WAC/ACP) materialization.
+///
+/// # The model (sq-dpk4)
+///
+/// - Each successful bridge call records a [`BridgeEntry`] (the `(policy, request, kind)`).
+/// - [`BridgeLedger::capture_static_baseline`] snapshots the EXACT `<urn:sparq:auth>`
+///   triples produced by a static WAC/ACP materialization — the grants the refresh must
+///   never touch. Capturing the install output directly (not by subtracting provenance)
+///   means a static grant byte-identical to a bridged one still survives a refresh.
+/// - [`BridgeLedger::refresh`] rebuilds the auth view as `static_baseline ∪
+///   replay(valid entries)`: it resets `<urn:sparq:auth>` to the baseline, clears the
+///   provenance graph, replays every entry, and DROPS the entries that re-evaluate to
+///   nothing (withdrawn permission / lapsed window / now-Deny / now-matching prohibition).
+///
+/// Fail-closed throughout: a retracted entry loses access immediately, and on any
+/// ambiguity the re-evaluation denies (the underlying evaluator is fail-closed), so the
+/// entry is dropped rather than left stale.
+#[derive(Debug, Clone, Default)]
+pub struct BridgeLedger {
+    entries: Vec<BridgeEntry>,
+    /// The static (WAC/ACP) `<urn:sparq:auth>` triples to rebuild from on refresh.
+    /// `None` until the first static materialization is captured (a store that only
+    /// ever bridged grants has an empty static baseline — refresh starts from nothing).
+    static_baseline: Option<Vec<[Term; 3]>>,
+}
+
+impl BridgeLedger {
+    /// A fresh, empty ledger.
+    pub fn new() -> BridgeLedger {
+        BridgeLedger::default()
+    }
+
+    /// The tracked bridged entries (for inspection/audit).
+    pub fn entries(&self) -> &[BridgeEntry] {
+        &self.entries
+    }
+
+    /// Record a successful bridge of `kind` for `(policy, request)`. Call this only when
+    /// the corresponding `materialize_*` returned a materialized outcome (`granted` /
+    /// `prohibited`). A no-op materialization is NOT tracked (nothing to retract).
+    ///
+    /// Idempotent on `(kind, target, party)`: re-recording the same grant slot REPLACES
+    /// the tracked `(policy, request)` rather than appending a duplicate, so a caller can
+    /// re-bridge with an updated policy/request and the ledger tracks exactly one entry
+    /// per logical grant.
+    pub fn record(&mut self, policy: &Policy, request: &Request, kind: BridgeKind) {
+        let slot = (kind, request.target.clone(), request.party.clone());
+        if let Some(e) = self.entries.iter_mut().find(|e| {
+            (e.kind, e.request.target.clone(), e.request.party.clone()) == slot
+        }) {
+            e.policy = policy.clone();
+            e.request = request.clone();
+            return;
+        }
+        self.entries.push(BridgeEntry { policy: policy.clone(), request: request.clone(), kind });
+    }
+
+    /// Replace the tracked `(policy, request)` for the grant slot matching
+    /// `(kind, request.target, request.party)` with the supplied (updated) ones, so the
+    /// next [`BridgeLedger::refresh`] re-evaluates against the NEW policy / request
+    /// context (a withdrawn permission, a lapsed window, a now-Deny). Returns `true` if a
+    /// tracked entry matched. A no-match returns `false` and changes nothing — there is
+    /// no bridged grant to refresh for that slot. [OPUS-4.8] sq-dpk4.
+    pub fn update(&mut self, policy: &Policy, request: &Request, kind: BridgeKind) -> bool {
+        let slot = (kind, request.target.clone(), request.party.clone());
+        match self.entries.iter_mut().find(|e| {
+            (e.kind, e.request.target.clone(), e.request.party.clone()) == slot
+        }) {
+            Some(e) => {
+                e.policy = policy.clone();
+                e.request = request.clone();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Snapshot the current `<urn:sparq:auth>` triples as the static baseline — the
+    /// grants a refresh rebuilds from and never re-evaluates. Call this right after a
+    /// static WAC/ACP materialization (which produced the view) and BEFORE replaying any
+    /// bridged grant on top.
+    pub fn capture_static_baseline(&mut self, graph: &Graph) {
+        self.static_baseline = Some(named_graph_triples(graph, AUTH_GRAPH));
+    }
+
+    /// Re-evaluate every tracked bridged grant against its (possibly changed) ODRL
+    /// policy and rebuild the auth view as `static_baseline ∪ replay(still-valid
+    /// entries)`, retracting the grants that no longer hold. [OPUS-4.8] sq-dpk4.
+    ///
+    /// Returns the number of entries RETRACTED (re-evaluated to nothing). The caller
+    /// ([`crate::PodStore::refresh_odrl_grants`]) reindexes afterward so the change
+    /// takes effect on the next `accessible`/`query_as`.
+    ///
+    /// # Fail-closed
+    ///
+    /// - The view is first reset to the static baseline (or empty if none captured) and
+    ///   the provenance graph cleared, so NO stale bridged triple can survive unless an
+    ///   entry re-emits it.
+    /// - Each entry is replayed through its original `materialize_*` function, which
+    ///   re-runs the fail-closed ODRL evaluation: a withdrawn permission, a lapsed time
+    ///   window, a now-matching prohibition, or any ambiguous re-eval emits nothing, and
+    ///   the entry is dropped.
+    /// - A static grant is never in `entries`, never re-evaluated, and always present in
+    ///   the baseline — refresh cannot widen or drop it.
+    pub fn refresh(&mut self, graph: &mut Graph) -> usize {
+        // 1. Reset the enforcement view to the captured static baseline, and clear ALL
+        //    bridged provenance — nothing bridged survives unless an entry re-emits it.
+        let baseline = self.static_baseline.clone().unwrap_or_default();
+        install_triples(graph, AUTH_GRAPH, baseline);
+        install_triples(graph, AUTH_BRIDGED_GRAPH, Vec::new());
+
+        // 2. Replay each entry; keep only those that still materialize something.
+        let entries = std::mem::take(&mut self.entries);
+        let before = entries.len();
+        for entry in entries {
+            let out = replay(graph, &entry);
+            if !out.emitted.is_empty() {
+                self.entries.push(entry);
+            }
+        }
+        before - self.entries.len()
+    }
+}
+
+/// Re-run a tracked entry's original bridge function against the current graph,
+/// re-evaluating its ODRL policy and re-emitting iff it still holds. [OPUS-4.8] sq-dpk4.
+fn replay(graph: &mut Graph, entry: &BridgeEntry) -> BridgeOutcome {
+    match entry.kind {
+        BridgeKind::Permission => materialize_permission(graph, &entry.policy, &entry.request),
+        BridgeKind::Prohibition => materialize_prohibition(graph, &entry.policy, &entry.request),
+        BridgeKind::Policy => materialize_policy(graph, &entry.policy, &entry.request),
+        BridgeKind::PermissionConditional => {
+            materialize_permission_conditional(graph, &entry.policy, &entry.request)
+        }
     }
 }

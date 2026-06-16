@@ -100,6 +100,31 @@ Materialize the authorization view from the access-control documents, then enfor
   graph` grant into the auth view, then reindex — so this same enforcement path applies it.
   Fail-closed (Deny / unmapped action / partyless / targetless → no grant). See the
   [`usage-control-policy`](../usage-control-policy/SKILL.md) skill for the action→mode mapping.
+- `store.materialize_odrl_prohibition(&Policy, &Request)` / `materialize_odrl_policy(...)` —
+  same opt-in feature ([OPUS-4.8] sq-w693): a matched ODRL **Prohibition** materializes the dual
+  `principal auth:deny<Mode> graph` triple, honoured by this enforcement under **deny-overrides**
+  (`∪ allow ∖ ∪ deny` — a deny beats any allow for the same principal+target+mode). `…_policy`
+  does both sides at once. Same fail-closed rules; no new enforcement engine.
+- `store.materialize_odrl_permission_conditional(&Policy, &Request) -> BridgeOutcome` —
+  **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
+  constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a
+  one-shot allow — so the granted agent is verified **per session**, not frozen to the
+  materializing party. Only `odrl:recipient`/`odrl:assignee` (`eq`/`isA`/`isPartOf`) maps
+  faithfully (recipient-of-data = session agent); `odrl:purpose`/`dateTime`/`count` have no
+  stateless `(agent, client)` analogue and STAY one-shot; a rule mixing mappable +
+  unmappable constraints falls back **entirely** to one-shot (fail-safe — never drops a
+  bound). Mapping table in the [`usage-control-policy`](../usage-control-policy/SKILL.md) skill.
+- `store.refresh_odrl_grant(&Policy, &Request, BridgeKind)` / `refresh_odrl_grants()` —
+  **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-dpk4): re-evaluate **bridged** ODRL grants when
+  the policy changes and **retract** the ones that no longer hold (a withdrawn permission, a
+  lapsed time window, a re-evaluation that now Denies) while preserving static WAC/ACP grants
+  and still-valid bridged grants. Bridged triples are tracked in a ledger and mirrored into a
+  provenance graph `<urn:sparq:auth-bridged>` (`AUTH_BRIDGED_GRAPH`) so they are structurally
+  distinguishable from static grants; refresh rebuilds the view as `static_baseline ∪
+  replay(valid bridged entries)`. **Fail-closed**: any ambiguous re-eval retracts (access
+  never left stale); a static grant is never re-evaluated or dropped. A wholesale static
+  re-materialization (`materialize_wac`/`materialize_acp`) auto-reconciles — valid bridged
+  grants are replayed back on top.
 - `Session { agent: Option<&str>, client: Option<&str> }` (caller-asserted WebID +
   `acl:origin`/`acp:client`; `None` = anonymous / any client); `Mode::{Read, Write,
   Append, Control}`; `wac_fixture()` / `acp_fixture()` (bundled demo pods).

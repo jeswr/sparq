@@ -46,13 +46,23 @@
 //! in [`PlanOptions::request_cost`]. The decision *flips* as `L` grows past the point
 //! where `L·req` overtakes `R`.
 //!
+//! ## Streaming (sq-vf7q)
+//!
+//! A third [`JoinAlgo::Streaming`] choice marks a hash-class join for **non-blocking
+//! streaming execution with operator spill** (the [`crate::StreamJoin`] operator). The
+//! planner picks it over a plain [`JoinAlgo::Hash`] when both inputs are large enough
+//! that materialising a side up front is the risk: the combined estimated input rows
+//! exceed [`PlanOptions::stream_threshold`]. It is the same abstract cost as Hash (one
+//! scan per side) — the difference is the execution discipline (emit-as-you-go, bounded
+//! memory), not the cost. Setting the threshold to `f64::INFINITY` disables it.
+//!
 //! ## DEFERRED (not in this slice)
 //!
-//! ANAPSID-style **non-blocking streaming joins with operator spill** and **live
-//! adaptive re-planning** are out of scope — this is a static plan. See the roadmap
-//! bead filed from sq-a35t (epic sq-3183).
+//! Live **adaptive re-planning** (mid-execution plan switching) remains out of scope —
+//! this is still a static plan; sq-vf7q adds the streaming *operator* the plan can name,
+//! not mid-flight adaptivity. See the roadmap bead filed from sq-vf7q (epic sq-3183).
 //!
-//! [OPUS-4.8] sq-a35t.
+//! [OPUS-4.8] sq-a35t / sq-vf7q.
 
 use crate::descriptor::SourceDescriptor;
 use crate::pattern::{Bgp, Term, Var};
@@ -67,6 +77,14 @@ pub enum JoinAlgo {
     /// Hash / symmetric join — scan both sides once, join locally. Cheap when the left
     /// is large or the right unselective.
     Hash,
+    /// ANAPSID-style **non-blocking streaming join with bounded operator spill** — the
+    /// execution-side [`crate::StreamJoin`]. Chosen over a plain [`JoinAlgo::Hash`] when
+    /// the combined inputs are large (past [`PlanOptions::stream_threshold`]): the
+    /// streaming operator emits matches as federated sub-results arrive and spills
+    /// over-budget partitions instead of OOMing, while producing the identical result
+    /// multiset. Same abstract cost as Hash (one scan of each side); the distinction is
+    /// the *execution discipline*, not the cost model. [OPUS-4.8] sq-vf7q.
+    Streaming,
 }
 
 /// A node of the planned (left-deep) join tree.
@@ -139,11 +157,20 @@ pub struct PlanOptions {
     /// to hash joins at a smaller left cardinality. Default `1.0` (one request ≈ one
     /// retrieved row).
     pub request_cost: f64,
+    /// [OPUS-4.8] sq-vf7q. Combined-input-rows threshold above which a hash-class join is
+    /// marked [`JoinAlgo::Streaming`] (non-blocking + spill) instead of [`JoinAlgo::Hash`].
+    /// When the estimated `L + R` of a hash join exceeds this, materialising a side up
+    /// front is the latency/memory risk, so the streaming operator is preferred. Set to
+    /// `f64::INFINITY` to always use plain hash. Default `100_000` rows.
+    pub stream_threshold: f64,
 }
 
 impl Default for PlanOptions {
     fn default() -> Self {
-        PlanOptions { request_cost: 1.0 }
+        PlanOptions {
+            request_cost: 1.0,
+            stream_threshold: 100_000.0,
+        }
     }
 }
 
@@ -276,6 +303,10 @@ fn cost_join(
     let hash_cost = r + l;
     let (algo, cost) = if bind_cost <= hash_cost {
         (JoinAlgo::Bind, bind_cost)
+    } else if l + r > opts.stream_threshold {
+        // [OPUS-4.8] sq-vf7q: a large hash join runs as the non-blocking + spill operator.
+        // Same abstract cost as plain hash; the choice is the execution discipline.
+        (JoinAlgo::Streaming, hash_cost)
     } else {
         (JoinAlgo::Hash, hash_cost)
     };
@@ -412,7 +443,10 @@ mod tests {
             .build();
         let srcs = [small_left];
         let sel = select_sources(&bgp, &srcs);
-        let opts = PlanOptions { request_cost: 50.0 };
+        let opts = PlanOptions {
+            request_cost: 50.0,
+            ..PlanOptions::default()
+        };
         let tree = plan_bgp(&bgp, &sel, &srcs, &opts).unwrap();
         // The single join: left seed is the small pattern (:p, card 5). Bind should win.
         if let JoinNode::Join { algo, .. } = &tree.root {
@@ -432,6 +466,45 @@ mod tests {
         let tree2 = plan_bgp(&bgp, &sel2, &bigs, &opts).unwrap();
         if let JoinNode::Join { algo, .. } = &tree2.root {
             assert_eq!(*algo, JoinAlgo::Hash, "large left ⇒ hash join");
+        } else {
+            panic!("expected a join");
+        }
+    }
+
+    #[test]
+    fn large_hash_join_becomes_streaming() {
+        // [OPUS-4.8] sq-vf7q. Both sides large + unselective ⇒ hash class; combined rows
+        // past stream_threshold ⇒ the planner marks it Streaming (non-blocking + spill).
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("s"), iri("http://ex/q"), var("z")),
+        ]);
+        let big = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000_000)
+            .predicate(pred("http://ex/p", 500_000, 500_000, 500_000))
+            .predicate(pred("http://ex/q", 500_000, 500_000, 500_000))
+            .build();
+        let srcs = [big];
+        let sel = select_sources(&bgp, &srcs);
+        // Low stream_threshold so the large combined input trips streaming.
+        let opts = PlanOptions {
+            request_cost: 50.0,
+            stream_threshold: 1000.0,
+        };
+        let tree = plan_bgp(&bgp, &sel, &srcs, &opts).unwrap();
+        if let JoinNode::Join { algo, .. } = &tree.root {
+            assert_eq!(*algo, JoinAlgo::Streaming, "large hash join ⇒ streaming");
+        } else {
+            panic!("expected a join");
+        }
+        // With the threshold raised above the inputs, the same join is plain Hash.
+        let opts_hi = PlanOptions {
+            request_cost: 50.0,
+            stream_threshold: f64::INFINITY,
+        };
+        let tree_hi = plan_bgp(&bgp, &sel, &srcs, &opts_hi).unwrap();
+        if let JoinNode::Join { algo, .. } = &tree_hi.root {
+            assert_eq!(*algo, JoinAlgo::Hash, "threshold disabled ⇒ plain hash");
         } else {
             panic!("expected a join");
         }

@@ -66,9 +66,13 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
   unfiltered search.
 - **k-NN inside SPARQL (opt-in `vec-predicate`)** — the `vec:nearest` / `vec:search` magic
   predicates run vector k-NN in plain SPARQL via a spargebra-algebra rewrite (the engine is
-  unchanged). Composed with `filtered-ann`, a `vec:` neighbour variable that is **also constrained
-  by ordinary BGP patterns** is searched as a *filtered* ANN automatically — the surrounding BGP
-  derives the candidate `IdMask`, so the filtered top-k equals post-filtering the unfiltered top-k.
+  unchanged). Composed with `filtered-ann`, a `vec:` neighbour variable that is **constrained by
+  ordinary BGP patterns** is searched as a *filtered* ANN automatically — the **join-connected
+  sub-BGP** of the neighbour variable (its connected component in the BGP join-graph, so
+  **transitive / multi-variable** constraints like `?node :owns ?x . ?x a :Vehicle` are honoured)
+  derives the candidate `IdMask`, so the filtered top-k equals post-filtering the unfiltered top-k
+  by that same constraint. A direct-mention-only constraint is the single-variable special case;
+  disconnected patterns never narrow the mask; each `vec:` request gets its own component mask.
 - **Verbalization** — `verbalize` / `embed_entities` render `<label>. a <type>. <description>`
   per entity (multilingual, char-budgeted); `embed_labels` is the label-only special case.
 - **Quantization** — `ScalarQuantizer` (4×) and `ProductQuantizer` (asymmetric distance) for

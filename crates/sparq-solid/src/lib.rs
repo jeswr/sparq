@@ -16,7 +16,12 @@ pub use authindex::{pair_principal, AuthIndex, Mode, Session};
 pub use fixture::{acp_fixture, wac_fixture};
 pub use materialize::{materialize_acp, materialize_wac, MaterializeStats};
 #[cfg(feature = "odrl-bridge")]
-pub use odrl_bridge::{action_to_mode, materialize_permission, BridgeOutcome};
+pub use odrl_bridge::{
+    action_to_mode, materialize_permission, materialize_permission_conditional, materialize_policy,
+    materialize_prohibition, BridgeOutcome,
+};
+#[cfg(feature = "odrl-bridge")]
+pub use odrl_bridge::{BridgeEntry, BridgeKind, BridgeLedger};
 pub use rewrite::{rewrite_for, wrap_for_view};
 
 use oxrdf::{NamedNode, Term};
@@ -55,6 +60,19 @@ use std::sync::Arc;
 /// under it (they are stripped — a dataset must not smuggle in a forged auth view),
 /// and agent/client/origin IRIs inside it are rejected at materialization time.
 pub const AUTH_GRAPH: &str = "urn:sparq:auth";
+
+/// The reserved named graph recording the **provenance** of bridged ODRL grants
+/// ([OPUS-4.8] sq-dpk4). Every auth triple the opt-in ODRL bridge writes into
+/// [`AUTH_GRAPH`] is mirrored here verbatim, so a bridged grant is structurally
+/// distinguishable from a static WAC/ACP grant: a triple is *bridged* iff it appears
+/// in this graph, *static* otherwise. This is what lets the refresh/retraction model
+/// (a) re-evaluate and retract only the bridged grants whose ODRL policy no longer
+/// holds, never touching a static grant, and (b) re-apply still-valid bridged grants
+/// after a wholesale static re-materialization rebuilds [`AUTH_GRAPH`].
+///
+/// It lives in the reserved `urn:sparq:` space, so a loaded dataset cannot smuggle a
+/// forged provenance record in (it is stripped by [`PodStore::new`] like the auth view).
+pub const AUTH_BRIDGED_GRAPH: &str = "urn:sparq:auth-bridged";
 
 /// Namespace of the materialized auth-view vocabulary
 /// (`auth:read`, `auth:denyWrite`, `auth:Public`, `auth:ConditionalGrant`, …).
@@ -104,6 +122,12 @@ pub struct PodStore {
     auth: Arc<AuthIndex>,
     epoch: u64,
     cache: FxHashMap<(Option<String>, Option<String>, Mode), SessionSets>,
+    /// [OPUS-4.8] sq-dpk4 — the bridged-ODRL-grant ledger: what was bridged from which
+    /// `(policy, request)`, plus the static-baseline auth view to rebuild from on a
+    /// refresh. Only present when the `odrl-bridge` feature is enabled (the core build
+    /// carries zero ODRL state).
+    #[cfg(feature = "odrl-bridge")]
+    bridge_ledger: odrl_bridge::BridgeLedger,
 }
 
 /// One session-cache entry: the same authorized graph set in the two shapes its two
@@ -140,7 +164,14 @@ impl PodStore {
     /// ```
     pub fn new(mut graph: Graph) -> PodStore {
         loader::strip_reserved_graphs(&mut graph);
-        PodStore { graph, auth: Arc::new(AuthIndex::default()), epoch: 0, cache: FxHashMap::default() }
+        PodStore {
+            graph,
+            auth: Arc::new(AuthIndex::default()),
+            epoch: 0,
+            cache: FxHashMap::default(),
+            #[cfg(feature = "odrl-bridge")]
+            bridge_ledger: odrl_bridge::BridgeLedger::new(),
+        }
     }
 
     /// (Re-)materialize the WAC auth view from the `.acl` graphs. Call again after any
@@ -158,9 +189,30 @@ impl PodStore {
     /// On error the previous auth view (if any) is left in place.
     pub fn materialize_wac(&mut self) -> Result<MaterializeStats, String> {
         let stats = materialize_wac(&mut self.graph)?;
+        self.reconcile_bridged_after_static();
         self.reindex();
         Ok(stats)
     }
+
+    /// [OPUS-4.8] sq-dpk4 — after a wholesale static (WAC/ACP) re-materialization has
+    /// rebuilt `<urn:sparq:auth>` (dropping any bridged grants that were on top),
+    /// capture the fresh static view as the refresh baseline and REPLAY the bridge
+    /// ledger so still-valid bridged grants are re-applied (and now-invalid ones stay
+    /// retracted). This reconciles the two grant sources: a static re-run can never drop
+    /// a valid bridged grant, and the replay can never widen or drop a static grant
+    /// (the baseline is the static view verbatim). No-op without the `odrl-bridge`
+    /// feature, or when no grants were ever bridged.
+    #[cfg(feature = "odrl-bridge")]
+    fn reconcile_bridged_after_static(&mut self) {
+        self.bridge_ledger.capture_static_baseline(&self.graph);
+        // refresh() rebuilds from the just-captured baseline and replays the ledger.
+        self.bridge_ledger.refresh(&mut self.graph);
+    }
+
+    /// No-op stub when the bridge is compiled out — the core build has no bridged state.
+    #[cfg(not(feature = "odrl-bridge"))]
+    #[inline]
+    fn reconcile_bridged_after_static(&mut self) {}
 
     /// (Re-)materialize the ACP auth view from the `.acr` graphs.
     ///
@@ -173,6 +225,7 @@ impl PodStore {
     /// agent/client IRIs; reasoner failure).
     pub fn materialize_acp(&mut self) -> Result<MaterializeStats, String> {
         let stats = materialize_acp(&mut self.graph)?;
+        self.reconcile_bridged_after_static();
         self.reindex();
         Ok(stats)
     }
@@ -451,9 +504,172 @@ impl PodStore {
     ) -> odrl_bridge::BridgeOutcome {
         let outcome = odrl_bridge::materialize_permission(&mut self.graph, policy, request);
         if outcome.granted {
-            self.reindex(); // a new grant changes the auth view → rebuild index + drop cache
+            // Track for refresh/retraction (sq-dpk4), then rebuild index + drop cache.
+            self.bridge_ledger.record(policy, request, odrl_bridge::BridgeKind::Permission);
+            self.reindex();
         }
         outcome
+    }
+
+    /// [OPUS-4.8] sq-w693 — evaluate an ODRL `policy`'s prohibitions against `request`
+    /// and, on a matched Prohibition that carves the request out, materialize the
+    /// equivalent `principal auth:deny<Mode> graph` DENY into this store's
+    /// `<urn:sparq:auth>` view, then rebuild the session index so the deny takes effect
+    /// on the next [`PodStore::accessible`] / [`PodStore::query_as`] call.
+    ///
+    /// The materialized deny is honoured by the EXISTING enforcement under
+    /// **deny-overrides**: the session layer computes `∪ allow ∖ ∪ deny`, so the deny
+    /// beats any allow grant for the same principal+target+mode — see
+    /// [`odrl_bridge::materialize_prohibition`].
+    ///
+    /// **Fail-closed:** no matching prohibition, an unmapped action, or a request
+    /// without a concrete party/target materializes NOTHING and leaves the auth view
+    /// (and session index) untouched.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn materialize_odrl_prohibition(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+    ) -> odrl_bridge::BridgeOutcome {
+        let outcome = odrl_bridge::materialize_prohibition(&mut self.graph, policy, request);
+        if outcome.prohibited {
+            self.bridge_ledger.record(policy, request, odrl_bridge::BridgeKind::Prohibition);
+            self.reindex();
+        }
+        outcome
+    }
+
+    /// [OPUS-4.8] sq-w693 — materialize **both** sides of an ODRL `policy` for
+    /// `request` into this store's `<urn:sparq:auth>` view: the Permit allow grant AND
+    /// the matched-Prohibition deny ([`odrl_bridge::materialize_policy`]), then rebuild
+    /// the session index if either materialized.
+    ///
+    /// A policy with both a permission and a prohibition for the same
+    /// principal+target+mode materializes both triples; the deny **wins** at
+    /// enforcement time (deny-overrides — the session layer subtracts `∪ deny` from
+    /// `∪ allow`). Each side is independently fail-closed.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn materialize_odrl_policy(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+    ) -> odrl_bridge::BridgeOutcome {
+        let outcome = odrl_bridge::materialize_policy(&mut self.graph, policy, request);
+        if outcome.granted || outcome.prohibited {
+            self.bridge_ledger.record(policy, request, odrl_bridge::BridgeKind::Policy);
+            self.reindex();
+        }
+        outcome
+    }
+
+    /// [OPUS-4.8] sq-hiz4 — like [`PodStore::materialize_odrl_permission`], but persists a
+    /// FAITHFULLY-mappable ODRL constraint (recipient/assignee) as a re-checked ACP
+    /// `auth:ConditionalGrant` rather than freezing it into a one-shot allow: the
+    /// granted agent is re-verified per session through the SAME enforcement path
+    /// ([`PodStore::accessible`] / [`PodStore::query_as`]), not re-running the ODRL
+    /// evaluator.
+    ///
+    /// A constraint with **no** faithful ACP-condition analogue (`odrl:purpose`,
+    /// `odrl:dateTime`/time windows, `odrl:count`, a `neq`/order recipient) keeps the
+    /// one-shot materialization-time behaviour (checked once, frozen) — see
+    /// [`odrl_bridge::materialize_permission_conditional`] for the full mapping table
+    /// and the fail-closed rationale.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn materialize_odrl_permission_conditional(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+    ) -> odrl_bridge::BridgeOutcome {
+        let outcome =
+            odrl_bridge::materialize_permission_conditional(&mut self.graph, policy, request);
+        if outcome.granted {
+            self.bridge_ledger.record(
+                policy,
+                request,
+                odrl_bridge::BridgeKind::PermissionConditional,
+            );
+            self.reindex();
+        }
+        outcome
+    }
+
+    /// [OPUS-4.8] sq-dpk4 — re-evaluate **every bridged ODRL grant** this store is
+    /// tracking against its (possibly changed) policy, and **retract** the ones that no
+    /// longer hold, while preserving static WAC/ACP grants and still-valid bridged
+    /// grants. Call this after an ODRL policy changes — a permission is withdrawn, a
+    /// time window lapses, or a re-evaluation now Denies — so a STALE bridged grant
+    /// loses access (the gap from sq-h3uk/#280: the bridge only ever appended, never
+    /// retracted).
+    ///
+    /// # How it works
+    ///
+    /// The auth view is rebuilt as `static_baseline ∪ replay(still-valid bridged
+    /// entries)`: the `<urn:sparq:auth>` view is reset to the static (WAC/ACP) baseline
+    /// captured at the last `materialize_wac`/`materialize_acp`, the bridged-provenance
+    /// graph is cleared, and each tracked `(policy, request)` is re-evaluated through its
+    /// original bridge entry point. An entry that still yields a grant is re-applied; an
+    /// entry that now yields nothing is dropped (retracted). The session index is rebuilt
+    /// and the cache dropped, so the change takes effect on the next
+    /// [`PodStore::accessible`] / [`PodStore::query_as`].
+    ///
+    /// Returns the number of bridged grants RETRACTED.
+    ///
+    /// # Fail-closed (security-sensitive — access retraction)
+    ///
+    /// - A withdrawn permission, a lapsed time window, or a re-evaluation that now Denies
+    ///   (including a now-matching prohibition) emits nothing on replay → the grant is
+    ///   removed → access is GONE. On any ambiguous re-evaluation the underlying ODRL
+    ///   evaluator denies, so the entry is retracted rather than left stale.
+    /// - A static WAC/ACP grant is never in the ledger, never re-evaluated, and always in
+    ///   the baseline — refresh can neither widen nor drop it.
+    /// - If the policy supplied to refresh differs from what was bridged, pass the new
+    ///   policy by re-running the relevant `materialize_odrl_*` (which re-records) before
+    ///   refreshing, OR rely on the policy embedded in the tracked entry; this method
+    ///   replays the policy AS TRACKED — to refresh against a mutated policy, call the
+    ///   bridge entry point again with the new policy first.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn refresh_odrl_grants(&mut self) -> usize {
+        let retracted = self.bridge_ledger.refresh(&mut self.graph);
+        self.reindex();
+        retracted
+    }
+
+    /// [OPUS-4.8] sq-dpk4 — refresh the bridged grant for one slot against an **updated**
+    /// policy / request, then re-evaluate the whole ledger.
+    ///
+    /// This is the entry point for the real revocation cases: the ODRL `policy` changed
+    /// (a permission withdrawn, a prohibition added) or the request context moved on (a
+    /// time window lapsed — pass a `request` carrying the current `odrl:dateTime`). It
+    /// replaces the tracked `(policy, request)` for the grant slot matching
+    /// `(kind, request.target, request.party)` with the supplied ones, then runs
+    /// [`PodStore::refresh_odrl_grants`]: the updated entry is re-evaluated and, if it no
+    /// longer holds, RETRACTED — access is gone.
+    ///
+    /// Returns `(matched, retracted)`: `matched` is whether a tracked grant slot was
+    /// updated (`false` ⇒ nothing tracked for that `(kind, target, party)`, nothing
+    /// changed), and `retracted` is the total number of bridged grants retracted by the
+    /// ensuing refresh.
+    ///
+    /// Fail-closed exactly as [`PodStore::refresh_odrl_grants`]: a now-Deny / lapsed /
+    /// withdrawn / now-prohibited re-evaluation loses access, static grants are untouched.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn refresh_odrl_grant(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+        kind: odrl_bridge::BridgeKind,
+    ) -> (bool, usize) {
+        let matched = self.bridge_ledger.update(policy, request, kind);
+        let retracted = self.bridge_ledger.refresh(&mut self.graph);
+        self.reindex();
+        (matched, retracted)
+    }
+
+    /// [OPUS-4.8] sq-dpk4 — the bridge ledger (tracked bridged grants + static
+    /// baseline), for inspection/audit. Only present under the `odrl-bridge` feature.
+    #[cfg(feature = "odrl-bridge")]
+    pub fn bridge_ledger(&self) -> &odrl_bridge::BridgeLedger {
+        &self.bridge_ledger
     }
 
     /// The current auth index (for direct inspection/tests).

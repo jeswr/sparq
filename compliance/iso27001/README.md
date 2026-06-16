@@ -16,6 +16,12 @@ Physical, A.8 Technological).
   (the exact command / grep / file an auditor re-runs).
 - [`gap-register.md`](./gap-register.md) — open gaps, severity, remediation, and the
   `bd` bead that tracks each (epic `sq-toze`).
+- [`operator-deployment-security.md`](./operator-deployment-security.md) — the
+  **operator deployment-security responsibilities** doc (remediation of GAP-ISO-2 /
+  boundary **B3**): what the organisation *deploying* sparq-server must do (network/TLS,
+  authN/authZ, secrets, OS/container hardening, DoS limits, logging/PII, backup, patch
+  cadence), each stating what sparq ships built-in vs what the operator MUST supply. An
+  **operator-responsibility doc, NOT a certification claim**.
 - [`isms-templates-README.md`](./isms-templates-README.md) — **index of the org-adoptable
   ISMS template set** (clauses 4–10 + SoA), the remediation of GAP-ISO-1. Start here for the
   templates. **Adoptable templates, NOT a certificate.**

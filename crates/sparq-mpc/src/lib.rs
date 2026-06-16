@@ -14,6 +14,18 @@
 //! `sparq-zk-compose`) and wraps it rather than replacing it (architecture
 //! §4.4).
 //!
+//! ## FIPS posture (CR-G4) [OPUS-4.8]
+//!
+//! This crate's cryptography (Shamir secret sharing + a CSPRNG masking seam over
+//! the BN254 scalar field, reusing the `sparq-zk` primitives) is **not**
+//! FIPS-approved and is **not** inside any FIPS 140-3 / CMVP-validated module.
+//! sparq makes **no FIPS claim and no CMVP claim**. The crate is `publish =
+//! false`, native-only, and not in the default dependency graph, so a
+//! FIPS-constrained operator keeps it out of FIPS scope by not opting in. (The
+//! malicious-security / collaborative-proof core is in any case DEFERRED behind
+//! honest `NotYetImplemented` stubs — see below.) See
+//! `compliance/cryptoreview/fips-posture.md`.
+//!
 //! ## What Milestone 0 actually delivers (and what it deliberately does not)
 //!
 //! This is a CONSERVATIVE scaffold. It builds ONLY the parts that are
