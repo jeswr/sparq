@@ -60,6 +60,19 @@ def fix_component:
   | (if has("purl") then .purl |= canon_purl else . end)
   | (if has("components") then .components |= map(fix_component) else . end);
 
+# [OPUS-4.8] sq-toze.28 (GS-4 / CDX-3): the SBOM generator now emits CycloneDX 1.5
+# natively (cargo-cyclonedx --spec-version 1.5). On a 1.5 document, populate the
+# 1.5-only `metadata.lifecycles` slot with the single phase we can honestly assert:
+# the BOM is produced from the fully-resolved dependency tree during the build, i.e.
+# CycloneDX lifecycle phase `build`. We do this here (not in the generator) so BOTH
+# publication call-sites (scripts/gen-sbom-vex.sh and supply-chain.yml#sbom) get the
+# field uniformly, and only on 1.5+ where the slot is schema-valid. Idempotent: the
+# assignment is unconditional but value-stable, so a second pass is byte-identical.
+def add_lifecycles:
+  if (.specVersion? == "1.5" or .specVersion? == "1.6") then
+    .metadata = ((.metadata // {}) | (.lifecycles = [{"phase": "build"}]))
+  else . end;
+
 # root metadata component (+ its nested build-target components, via fix_component recursion)
 ( if (.metadata? and .metadata.component?) then
     .metadata.component |= fix_component
@@ -73,3 +86,5 @@ def fix_component:
         | (if has("dependsOn") then .dependsOn |= map(canon_ref) else . end)
       )
     else . end )
+# CycloneDX 1.5+ metadata.lifecycles (build phase) — see add_lifecycles above.
+| add_lifecycles
