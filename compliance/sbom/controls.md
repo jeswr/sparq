@@ -15,14 +15,16 @@ The full control spine (control → status → evidence → owner, one row per a
 Corroborating commands + the recorded `cargo cyclonedx` probe are in [`evidence.md`](evidence.md);
 open gaps + remediation beads are in [`gap-register.md`](gap-register.md).
 
-**Headline:** **31 control rows — 23 implemented & verified, 6 audit-ready, 2 gap.** The 6
+**Headline:** **31 control rows — 24 implemented & verified, 6 audit-ready, 1 gap.** The 6
 **audit-ready** rows (SIG-1/2/3, PUB-1/2, VEX-4) are release-gated and **config-verified, not
 operating-verified** — no `v*` tag / Release / attestation exists yet (verified 2026-06-15), so the
-attested artifacts have never been produced. The 2 **gap** rows are N1/GS-1 (per-component Supplier
-Name slot — partial; the `author` field is present on 144/166 components) and INT-3/GS-2 (reproducible
-build). CDX-3/GS-4 (spec version) is now **RESOLVED** ([OPUS-4.8], sq-toze.28 — SBOM emitted as
-CycloneDX **1.5**, matching the VEX, with `metadata.lifecycles` populated). Separately, **3 tracked
-open gap *items*** (GS-1,2,3) plus the RESOLVED GS-6/sq-toze.30, GS-4/sq-toze.28, and GS-5/sq-toze.29
+attested artifacts have never been produced. The 1 **gap** row is INT-3/GS-2 (reproducible
+build). N1/GS-1 (per-component Supplier Name slot) is now **RESOLVED** ([OPUS-4.8], sq-toze.26 —
+`scripts/sbom-normalize.jq` derives `supplier` per component honestly, on every component, CI-gated by
+`supply-chain.yml#sbom-supplier`); CDX-3/GS-4 (spec version) is **RESOLVED** ([OPUS-4.8], sq-toze.28 —
+SBOM emitted as CycloneDX **1.5**, matching the VEX, with `metadata.lifecycles` populated). Separately,
+**1 tracked open gap *item*** (GS-2) plus the RESOLVED GS-1/sq-toze.26, GS-3/sq-toze.27,
+GS-6/sq-toze.30, GS-4/sq-toze.28, and GS-5/sq-toze.29
 are recorded in [`gap-register.md`](gap-register.md), each with a severity + a bead — note GS-3
 (JS-lockfile SBOM) is a scope item with no control row. GS-5 (VEX↔deny drift-check automation) is now
 **RESOLVED** ([OPUS-4.8], sq-toze.29 — the GATING CI job `supply-chain.yml#vex-deny-sync`), so VEX-3 is

@@ -254,6 +254,52 @@ jobs:
           done
           python3 scripts/check-sbom-purl-canonical.py "${generated[@]}"
 
+  # ---- per-component supplier-name assertion (NTIA N1) ----
+  # [OPUS-4.8] sq-toze.26 (GS-1 / NTIA N1): BACKSTOP for the supplier-derivation in
+  # scripts/sbom-normalize.jq. cargo-cyclonedx 0.5.9 leaves the per-component
+  # `supplier`/`publisher` slot empty, so the NTIA "Supplier Name" minimum element was
+  # unpopulated. The normalizer now derives a supplier HONESTLY from each component's
+  # identity (crates.io-published / first-party workspace / vendored upstream), never
+  # fabricated. This job regenerates the SBOM, runs it through the SAME normalizer the
+  # publication path uses, and asserts EVERY cargo component carries a supplier.name
+  # (scripts/check-sbom-supplier.py) — so a future cargo-cyclonedx bump that changes the
+  # component shape and silently stops the derivation FAILS the PR instead of shipping an
+  # SBOM that regressed to the empty-supplier state. NOTE: the job name has NO
+  # `advisory`/`informational` WHOLE WORD, so the ci-summary aggregator treats it as GATING
+  # (intentional). Also runs the hermetic self-test so a regression in the check itself is
+  # caught.
+  sbom-supplier:
+    name: SBOM per-component supplier-name assertion (GS-1) — GATING
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-cyclonedx
+      - name: supplier-name check self-test
+        run: python3 scripts/tests/test_sbom_supplier.py
+      - name: Generate + normalize SBOM, then assert per-component supplier — GATING
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --all --format json --spec-version 1.5
+          # cargo-cyclonedx writes <crate>.cdx.json next to each member's Cargo.toml; scope
+          # the normalize+assert to those generated SBOMs (NOT the committed VEX). Normalize
+          # through the SAME transform the publication path uses, then assert every cargo
+          # component in the normalized output carries a supplier.name.
+          mapfile -d '' -t generated < <(find crates -name '*.cdx.json' -print0)
+          if [ "${#generated[@]}" -eq 0 ]; then
+            echo "::error::no generated SBOM found under crates/ — cargo cyclonedx produced nothing"
+            exit 1
+          fi
+          for f in "${generated[@]}"; do
+            jq -f scripts/sbom-normalize.jq "$f" > "$f.norm"
+            mv "$f.norm" "$f"
+          done
+          python3 scripts/check-sbom-supplier.py "${generated[@]}"
+
   # ---- JS / npm-lockfile SBOM (published WASM client) ----
   # [OPUS-4.8] sq-toze.27 (GS-3): SBOM the PUBLISHED npm surface (`js/` = @jeswr/sparq, the
   # WASM client). The Rust workspace is SBOM'd above, but the JS lockfile tree was not.

@@ -63,8 +63,82 @@ def canon_purl:
     .
   end;
 
+# [OPUS-4.8] sq-toze.26 (GS-1 / N1): emit a per-component CycloneDX `supplier`
+# (organizationalEntity, NTIA "Supplier Name" slot) — derived HONESTLY from the
+# component's identity in the RAW cargo-cyclonedx output, never fabricated.
+#
+# cargo-cyclonedx 0.5.9 leaves `supplier`/`publisher` empty on every component; only the
+# 1.3-era `author` field is sometimes present (originator identity). NTIA's Minimum
+# Elements names "Supplier Name" = the entity that supplies the component, and its guidance
+# is explicit that where the supplier is not determinable it should be omitted / marked
+# unknown rather than guessed. We classify each component by the SIGNAL cargo-cyclonedx
+# encodes in its raw `bom-ref` (this MUST run BEFORE canon_ref, which strips that signal):
+#
+#   * registry+https://github.com/rust-lang/crates.io-index#<name>@<ver>
+#       -> a crates.io-published crate. Supplier-of-record = the crates.io registry (the
+#          distributor that supplied the component). supplier.name = "crates.io",
+#          supplier.url = the crate's crates.io page (derived from the name). The crate's
+#          own `author` (where present) is carried into `publisher` (the originator who
+#          published it) — distinct from the distributing supplier.
+#   * path+file://<abs>/crates/sparq-*#<ver>
+#       -> a FIRST-PARTY workspace crate this project authors and ships. Supplier = the
+#          project, matching the top-level supplier in supply-chain/vex.cdx.json
+#          ({name:"Jesse Wright", url:["https://github.com/jeswr/sparq"]}).
+#   * path+file://<abs>/vendor/<name>#<ver>
+#       -> a VENDORED UPSTREAM crate (today only `spargebra`, a [patch.crates-io] PATH
+#          replacement of a crates.io-published crate). Its supplier-of-record is crates.io
+#          (NOT this project — attributing it to sparq would be FABRICATION); treated like a
+#          registry crate (supplier "crates.io" + the crate's crates.io URL; publisher from
+#          author). This is why we cannot collapse "path+file => first-party".
+#   * anything else (none today)
+#       -> supplier NOT determinable -> OMITTED (no supplier emitted). Honest per NTIA.
+#
+# Idempotent + non-destructive: we never overwrite a `supplier` already present (so a future
+# cargo-cyclonedx that populates it wins), and the derivation is a pure function of the raw
+# bom-ref / author, so a second pass is byte-identical. Build-target sub-components (the root
+# component's bin/lib targets) inherit via the fix_component recursion: they are under
+# /crates/sparq-* and so get the first-party supplier, matching their parent.
+
+# The crates.io project page for a published crate. Keyed off the component's own `name`
+# field (always present + correct), NOT the bom-ref basename — the registry bom-ref's
+# basename is the index name (`crates.io-index`), not the crate, whereas the crate name
+# sits AFTER the '#'. Using `.name` is correct for both the registry and the vendored form.
+def cratesio_url:
+  "https://crates.io/crates/\(.name)";
+
+# Derive the organizationalEntity supplier for one component from its RAW bom-ref.
+# Returns null when the supplier is not honestly determinable (caller then omits it).
+def derive_supplier($author):
+  (."bom-ref" // "") as $ref
+  | if ($ref | startswith("registry+https://github.com/rust-lang/crates.io-index")) then
+      {name: "crates.io", url: [cratesio_url]}
+    elif ($ref | test("^path\\+file://.*/vendor/")) then
+      # vendored [patch.crates-io] upstream crate -> crates.io is the supplier-of-record
+      {name: "crates.io", url: [cratesio_url]}
+    elif ($ref | test("^path\\+file://.*/crates/sparq")) then
+      # first-party workspace crate -> the project (matches the VEX top-level supplier)
+      {name: "Jesse Wright", url: ["https://github.com/jeswr/sparq"]}
+    else
+      null    # not determinable -> omitted honestly
+    end;
+
+# Attach `supplier` (and, for crates.io-supplied components, carry `author`->`publisher` as
+# the originator identity) WITHOUT overwriting anything already present. Must run on the RAW
+# component (before canon_ref/canon_purl), since the classification reads the raw bom-ref.
+def add_supplier:
+  (.author // null) as $author
+  | (if has("supplier") then null else (derive_supplier($author)) end) as $sup
+  | (if $sup == null then . else .supplier = $sup end)
+  # publisher (the entity that published the component) only where it adds signal: a
+  # crates.io-supplied component whose own author is known. Never invented; never clobbered.
+  | (if (has("publisher") | not)
+        and ($author != null)
+        and ($sup != null) and ($sup.name == "crates.io")
+      then .publisher = $author else . end);
+
 def fix_component:
-  (if has("bom-ref") then ."bom-ref" |= canon_ref else . end)
+  add_supplier
+  | (if has("bom-ref") then ."bom-ref" |= canon_ref else . end)
   | (if has("purl") then .purl |= canon_purl else . end)
   | (if has("components") then .components |= map(fix_component) else . end);
 

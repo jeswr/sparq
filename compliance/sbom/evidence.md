@@ -49,7 +49,7 @@ features, this branch — re-run **2026-06-15** to verify the `author`/`supplier
 | `serialNumber` | present | CDX-1 |
 | `metadata.timestamp` | `2026-06-15T23:49Z` (varies per run) | N7 ✅ |
 | `metadata.tools` | `{vendor: CycloneDX, name: cargo-cyclonedx, version: 0.5.9}` | N6 ✅ (SBOM-author = tool) |
-| `metadata.authors` / `metadata.supplier` | **absent** | contributes to GS-1 |
+| `metadata.authors` / `metadata.supplier` | **absent** in raw output; per-component `supplier` injected by `scripts/sbom-normalize.jq` (sq-toze.26) | N1 ✅ (GS-1 RESOLVED) |
 | components count | **166** | — |
 | `components[].name` | present 166/166 | N2 ✅ |
 | `components[].version` | present 166/166 (e.g. `sparq-core@0.1.0`) | N3 ✅ |
@@ -57,16 +57,15 @@ features, this branch — re-run **2026-06-15** to verify the `author`/`supplier
 | `components[].licenses` | present 166/166 | CDX-2 ✅ |
 | `components[].externalReferences` | present | CDX-4 ✅ |
 | `components[].author` | **present 144/166** (e.g. `spargebra → "Tpt <thomas@pellissier-tanon.fr>"`, `aho-corasick → "Andrew Gallant <jamslam@gmail.com>"`); the 22 without it are the 3 first-party workspace crates `sparq-core`/`sparq-engine`/`sparq-serve` + 19 deps (`axum`, `axum-core`, `crossbeam-*`, `rayon`, `rayon-core`, `hashbrown`, `futures-*`, `either`, `equivalent`, `typenum`, `quick-xml`, `pin-project-lite`, `find-msvc-tools`) | N6/N1 — component-author identity present on the majority |
-| `components[].supplier` / `.publisher` | **absent on all 166 (0/166)** | **GS-1** (N1 per-component *Supplier Name* slot empty) |
+| `components[].supplier` / `.publisher` | **absent in RAW output (0/166)**; after `scripts/sbom-normalize.jq` (sq-toze.26) `supplier.name` is present on **166/166** (`publisher` on 144/166, from `author`) | **N1 ✅ (GS-1 RESOLVED)** — see §8 |
 | `dependencies[]` graph | present, 167 nodes (incl. root) | N5 ✅ |
 
-**Honest reading (corrected per the 2026-06-15 re-run):** cargo-cyclonedx 0.5.9 emits 6/7 NTIA
-elements (N2,N3,N4,N5,N6,N7). The CycloneDX `author` field — the 1.3-era carrier of
-component-originator identity and the closest field to NTIA *Supplier Name* — is populated on
-**144/166** components from each crate's `authors` metadata; only the dedicated `supplier`/`publisher`
-slot is empty (**0/166**). So **one** NTIA element — *Supplier Name* (`supplier`/`publisher`) — is
-left **partial** (author-granularity present, supplier-granularity empty); this is the one genuine
-NTIA-completeness gap (**N1/GS-1**). The generated SBOM is now `specVersion 1.5` ([OPUS-4.8],
+**Honest reading (updated for sq-toze.26):** cargo-cyclonedx 0.5.9 *raw* output emits 6/7 NTIA
+elements (N2,N3,N4,N5,N6,N7), leaving only the dedicated per-component `supplier`/`publisher` slot
+empty (**0/166**). The publication normalizer `scripts/sbom-normalize.jq` now **derives** a per-component
+`supplier` honestly from each component's identity (see §8), populating `supplier.name` on **166/166**
+(and carrying `author`→`publisher` on 144/166), so the seventh element — *Supplier Name* (**N1/GS-1**) —
+is now **met** in the published SBOM. The generated SBOM is `specVersion 1.5` ([OPUS-4.8],
 sq-toze.28 — `cargo cyclonedx … --spec-version 1.5`), matching the VEX (`1.5`), and carries the
 1.5-only `metadata.lifecycles` slot (`[{"phase":"build"}]`, injected by `scripts/sbom-normalize.jq`).
 
@@ -214,3 +213,72 @@ job `.github/workflows/supply-chain.yml#js-sbom` (uploads `sbom-js-cyclonedx`) +
 `.github/workflows/release.yml#sbom` "Generate per-release JS/npm SBOM" (the `sbom/*.sbom.cdx.json`
 attest + attach + checksum globs already cover the JS SBOMs, so they are SLSA-attested and on the
 Release alongside the Rust SBOMs).
+
+## 8. Per-component supplier name (NTIA N1 — GS-1 RESOLVED, sq-toze.26 [OPUS-4.8])
+
+cargo-cyclonedx 0.5.9 leaves the per-component `supplier`/`publisher` slot empty, so the literal NTIA
+*Supplier Name* minimum element was unpopulated per component (only the 1.3-era `author` field was
+present, on 144/166). The publication normalizer `scripts/sbom-normalize.jq` now derives a per-component
+`supplier` (CycloneDX `organizationalEntity`) **honestly** — classifying each component by the identity
+signal in the RAW cargo-cyclonedx `bom-ref` (read BEFORE the bom-ref is canonicalised), never fabricating
+one where the class is undeterminable.
+
+**What each component class gets (honest derivation):**
+
+| Component class | Raw `bom-ref` signal | `supplier.name` | `supplier.url` | `publisher` | Rationale |
+|---|---|---|---|---|---|
+| crates.io-published dependency | `registry+https://github.com/rust-lang/crates.io-index#…` | `crates.io` | `https://crates.io/crates/<name>` | the crate's `author` where present (144/166); else absent | crates.io is the distributor / supplier-of-record |
+| first-party workspace crate | `path+file…/crates/sparq-*#…` (+ the root component & its build-target sub-components) | `Jesse Wright` | `https://github.com/jeswr/sparq` | — (these crates carry no `author` in raw output) | the project authors + ships these; matches the VEX top-level `metadata.supplier` |
+| vendored `[patch.crates-io]` crate (today only `spargebra`) | `path+file…/vendor/<name>#…` | `crates.io` | `https://crates.io/crates/<name>` | its `author` (`Tpt <…>`) | a crates.io-published crate vendored as a patch replacement → crates.io is its supplier-of-record, **NOT** the sparq project (attributing it to sparq would be fabrication) |
+| anything else | — | **omitted** | — | — | not determinable → omitted honestly per NTIA's omit/mark-unknown guidance. **None occurs today**, so coverage is **100%** |
+
+**Before / after (a real registry component, `aho-corasick`, this branch):**
+
+```jsonc
+// BEFORE (raw cargo cyclonedx --all --spec-version 1.5)
+{ "name": "aho-corasick", "version": "1.1.4",
+  "author": "Andrew Gallant <jamslam@gmail.com>",
+  "purl": "pkg:cargo/aho-corasick@1.1.4" }              // no supplier, no publisher
+
+// AFTER (jq -f scripts/sbom-normalize.jq)
+{ "name": "aho-corasick", "version": "1.1.4",
+  "author": "Andrew Gallant <jamslam@gmail.com>",
+  "supplier": { "name": "crates.io",
+                "url": ["https://crates.io/crates/aho-corasick"] },
+  "publisher": "Andrew Gallant <jamslam@gmail.com>",
+  "purl": "pkg:cargo/aho-corasick@1.1.4" }
+```
+
+The first-party `sparq-core` gets `supplier {name:"Jesse Wright", url:["https://github.com/jeswr/sparq"]}`;
+the vendored `spargebra` gets `supplier {name:"crates.io", url:["https://crates.io/crates/spargebra"]}` +
+`publisher "Tpt <thomas@pellissier-tanon.fr>"` (NOT attributed to sparq).
+
+**Properties:** the derivation is a pure function of the raw `bom-ref`/`author` (deterministic), is
+**non-destructive** (never overwrites a `supplier` already present, so a future cargo-cyclonedx that
+populates it wins) and **idempotent** (the canonical output carries the derived supplier; a second pass
+is byte-identical). It runs at BOTH publication call-sites via the same `scripts/sbom-normalize.jq`
+(`scripts/gen-sbom-vex.sh` for the two released-binary SBOMs; `supply-chain.yml#sbom` for the CI
+artifact).
+
+**Validation:** both `sparq-cli`/`sparq-server` normalized SBOMs were validated against the official
+CycloneDX **1.5** JSON schema (`bom-1.5.schema.json` + `spdx`/`jsf` sub-schemas) — **VALID** with
+`supplier.name` on **every** component (`sparq-server` 166/166, `sparq-cli` 174/174); the existing
+purl-canonicality, `metadata.lifecycles`, abs-path-leak guard, and dependency-graph consistency all
+remain intact, and the transform stays idempotent.
+
+```sh
+# reproduce: generate -> normalize -> assert supplier on every component
+cargo cyclonedx --all --format json --spec-version 1.5
+jq -f scripts/sbom-normalize.jq crates/sparq-server/sparq-server.cdx.json > /tmp/s.json
+python3 scripts/check-sbom-supplier.py /tmp/s.json   # -> "All N cargo component(s) carry supplier.name …"
+python3 scripts/tests/test_sbom_supplier.py          # hermetic self-test + live workspace assertion
+```
+
+Wired as the GATING job `.github/workflows/supply-chain.yml#sbom-supplier` (job name
+`SBOM per-component supplier-name assertion (GS-1) — GATING`; no `advisory`/`informational` whole word,
+so ci-summary gates it), which regenerates+normalizes the SBOM and asserts every cargo component carries
+a `supplier.name` — so a future cargo-cyclonedx bump that changes the component shape and silently stops
+the derivation FAILS the PR rather than shipping an SBOM regressed to the empty-supplier state. Negative
+coverage (self-test): a component missing its supplier, a blank/`name`-less supplier object, and a
+supplier hiding only on the root `metadata.component`/sub-components each FAIL the check; the live test
+additionally asserts the vendored `spargebra` is supplied by `crates.io` (never the project).

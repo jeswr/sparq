@@ -20,8 +20,9 @@ the NIST SSDF (PS.3), EU CRA (Annex I), and OpenSSF certification evidence.
    generated from the **default feature set** against the committed `Cargo.lock`
    (`scripts/gen-sbom-vex.sh`, `release.yml#sbom`).
 2. **NTIA minimum elements.** Each SBOM SHALL carry the NTIA minimum elements (supplier, component
-   name, version, unique identifier/PURL, dependency relationship, SBOM author, timestamp). *Known
-   exception:* per-component supplier name (N1) is tracked as gap GS-1 until the SBOM tooling emits it.
+   name, version, unique identifier/PURL, dependency relationship, SBOM author, timestamp).
+   Per-component supplier name (N1) is derived honestly by `scripts/sbom-normalize.jq` and asserted on
+   every component by the GATING job `supply-chain.yml#sbom-supplier` (GS-1 RESOLVED, sq-toze.26).
 3. **VEX.** Every advisory the dependency policy (`deny.toml [advisories].ignore`) chooses to tolerate
    SHALL have a 1:1 VEX entry stating its exploitability (`supply-chain/vex.cdx.json`). The VEX and the
    ignore list MUST NOT diverge.
@@ -51,5 +52,6 @@ can spot-check any release with the consumer-facing commands in `evidence.md §5
 
 ## 5. Open items (tracked)
 
-GS-1 (per-component supplier), GS-2/GX-8 (reproducible build), GS-3 (JS SBOM), GS-4 (spec version),
-GS-5 (VEX drift-check CI) — see `gap-register.md`.
+GS-2/GX-8 (reproducible build) — the one open item. RESOLVED: GS-1 (per-component supplier, sq-toze.26),
+GS-3 (JS SBOM), GS-4 (spec version), GS-5 (VEX drift-check CI), GS-6/GS-7 (purl canonicality) — see
+`gap-register.md`.
