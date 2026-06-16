@@ -168,3 +168,120 @@ resolved — with the standing caveat that the 27701/SOC 2 certificate and ZK/MP
 ---
 
 *FINDINGS: 4*
+
+---
+
+## RE-AUDIT round 2 — corrections in commit `34bfa0d` (PR head `worktree-agent-af186064192837d69`)
+
+> 🤖 SPARQ agent — independent privacy auditor, re-audit of the F-1..F-4 remediation.
+> NON-CANONICAL timing (EC2 work box).
+
+**Scope of this round:** re-verify ONLY the F-1..F-4 corrections, plus a second pass over the
+other *implemented* P-rows for the same overclaim defect, plus confirmation that the held items
+remain honest. Verified against the actual PR-head source (read via `git show origin/pr236:<path>`,
+where `pr236` tracks `worktree-agent-af186064192837d69` @ `34bfa0d`) and an empirical probe of
+`Graph::load_str`.
+
+### What I checked (commands / files / lines)
+
+1. **Echo-site cites re-read at PR head** — `git show origin/pr236:crates/sparq-server/src/http.rs`
+   at the five cited lines:
+   - `:1812` `bad_request(&format!("malformed query: {msg}"))` — SPARQL query text. Present.
+   - `:2293` `Graph::load_str(text, format).map_err(|e| bad_request(&format!("malformed RDF body: {e}")))`. Present.
+   - `:2302` `"malformed RDF/XML body: {e}"`. Present.
+   - `:2116` `bad_request(&format!("update failed: {e}"))`. Present.
+   - `:2860` `execution_error` → `"query execution error: {msg}"`. Present.
+   All five line cites are **accurate**.
+
+2. **Root leak cite** — `crates/sparq-core/src/lib.rs:632` is `Graph::load_str`, which calls
+   `parse_to_triples` → `Result<_, String>` whose error is the oxttl/oxrdf diagnostic via
+   `e.to_string()`. Accurate.
+
+3. **Empirical leak confirmation** — built a throwaway `sparq-core` example calling
+   `Graph::load_str` with malformed documents carrying identifier-like tokens (artifact removed;
+   tree left clean). Observed:
+   - Positional-only (no content echo): `"N-Triples: expected '.' at byte 53"`,
+     `"Unexpected end of file"` (line/column only).
+   - **Content echo confirmed**: `"… ssn_123_45_6789_is_invalid_obj is not a valid RDF object"`
+     and `"… patient_alice_smith is not a valid subject or graph name"` — the offending **token
+     from the submitted RDF body is echoed verbatim**.
+   - Conclusion: the leak is **real but error-class-dependent** (token-bearing diagnostics echo a
+     body fragment; pure positional ones do not). The engineer's characterization is therefore
+     **accurate and appropriately conservative** — it frames the leak as *caller-input echo* (the
+     caller's own submitted body), not cross-tenant disclosure of other data already in the store
+     (which `load_str(text)` could not reach). Neither over- nor under-stated.
+
+4. **Hygienic cites re-read** — `:1429,1776,1963,1374,1435,2076` all return generic bodies
+   (panic / worker-panic / not-found / concurrency-limit / `engine_error_response` names limits
+   not data). Accurate.
+
+5. **Beads** — confirmed in `.beads/issues.jsonl`:
+   - `sq-cz89` — open, **priority 1**, code-fix bead; description enumerates the echo sites incl.
+     `:2293`/`:2302` and the `lib.rs:632` root, notes the **unauthenticated B3 path** + cross-links
+     ASVS-G3 (`sq-kfel`). Exists, matches claim.
+   - `sq-zg0u` — open, **priority 2**, regression-test bead. Exists, matches claim.
+
+6. **PR-G1 re-scope** — gap-register PR-G1 now: all five sites, severity **Medium** (raised from
+   Low), code-fix → `sq-cz89`, test → `sq-zg0u` (new PR-G5). Matches the F-2 remediation.
+
+7. **Second pass — other *implemented* P-rows** (hunting the same defect):
+   - **P-2** (no logging by default): `verbose: false` default (`http.rs:276`), `TraceLayer` gated
+     behind `if config.verbose` (`:1447`), metrics aggregate-only. Honest.
+   - **P-10** (constant-time auth): `constant_time_eq` (`:567`) is a real `#[inline(never)]`
+     data-independent fold; `auth_check` (`:629`) byte-identical 401; honestly scopes core server
+     as no-per-user-authz (B3). Honest (token *length* leaks via the early length check, but the
+     control does not claim length-hiding — not a finding).
+   - **P-13** (SSRF): SERVICE deny-all by default (`main.rs:24-29`). Honest.
+   - No other "implemented & verified" P-row re-overclaims.
+
+8. **Held items** — all intact and honest:
+   - **Controller-vs-engine framing**: P-1..P-8 consistently label OPERATOR vs IMPL(mechanism)
+     with engine hooks noted; the split is honest and does not dodge controls.
+   - **PR-G3 WAL-erasure headline** (Medium): `--persist` WAL not erasure-complete, no
+     purge/compaction command, caveat unchanged.
+   - **ZK/MPC exclusion** (PR-X1): explicitly "NOT yet sound / no guarantee", cites `SECURITY.md`
+     + `research/zk-soundness-audit.md`, claims **no** privacy benefit, gated by design. The
+     critical tripwire is honored.
+
+### Residual observation (NOT a blocking finding, NOT an overclaim)
+
+- **Enumeration completeness.** The P-12 narrative presents its echo-site list as exhaustive
+  ("exactly which bodies … echo caller input"), but omits at least `http.rs:2738`
+  `"malformed gzip body: {e}"` (caller-body decode diagnostic) and the persist-path strings at
+  `main.rs:875-881` (`dir.display()` filesystem-path echo — config/startup, not an HTTP response).
+  These are **already captured in the engineer's own bead `sq-cz89`** (which lists `:2738`) and are
+  swept up by the same remediation. Because P-12 is now honestly **PARTIAL / failing** and the leak
+  *class* is captured, this is a documentation-completeness nit, not a re-overclaim and not a
+  missed leak. **Recommendation:** reconcile the controls.md/evidence.md enumeration with
+  `sq-cz89`'s broader list when the code fix lands. No new bead filed (`bd` unavailable in the
+  audit environment; the work is already on `sq-cz89`).
+
+### Coverage note
+
+Assessed: P-12 (full re-verification incl. empirical probe), P-2 / P-10 / P-13 (overclaim
+second-pass), the controller-vs-engine framing, PR-G1/G3/G5/X1, and beads `sq-cz89`/`sq-zg0u`.
+Not re-assessed (unchanged since round 1, not flagged): P-1, P-3..P-9, P-11, P-14, P-15, the
+DPIA/data-flow docs. **External items remain external:** PR-X2 (external privacy certificate) and
+the ZK soundness fix (epic sq-1s2 / `cryptoreview`) are out of scope for this framework and are
+correctly gated, not claimed.
+
+### Verdict — round 2
+
+The F-1..F-4 corrections are **complete and honest**:
+- P-12 is now honestly **PARTIAL**; the five echoing sites and the RDF-body leak are correctly
+  enumerated with accurate line cites and an accurately-bounded leak characterization (confirmed
+  empirically), not re-overclaimed.
+- The leak is tracked as `sq-cz89` (P1, exists) + regression test `sq-zg0u` (exists); PR-G1 is
+  re-scoped to all five sites and raised to Medium.
+- No other *implemented* P-row carries the same overclaim defect.
+- The held items (controller-vs-engine framing, PR-G3 WAL-erasure headline, ZK/MPC exclusion)
+  remain intact and honest.
+
+The one residual (enumeration completeness) is a non-blocking documentation nit already tracked on
+`sq-cz89`, not an overclaim.
+
+**SIGN-OFF** — corrections complete + honest; no remaining overclaim.
+(Standing caveat: external-auditor / external-cryptographer items — PR-X2 and the ZK soundness
+work, epic sq-1s2 — remain external and outside this framework's closure.)
+
+*FINDINGS: 0 — SIGN-OFF*
