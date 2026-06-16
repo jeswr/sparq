@@ -104,6 +104,12 @@ on crates.io / npm / PyPI / ghcr.io. That shape drives four scoping decisions:
   runbook** for the **Article 14** ENISA/CSIRT reporting obligation (24h early warning / 72h
   notification / final report), with `<FILL-IN>` org placeholders. Addresses CRA-CA.5 / former
   gap GX-CRA-2; **not** a certification claim — the reporting act is the manufacturer/steward's.
+- [`support-policy.md`](./support-policy.md) — a **proposed** support-period & end-of-life
+  (EOL) policy (Annex II A.6 / Annex I Part II.8): a concrete support period (5 years from each
+  release — the CRA minimum), the security-update channel, and the EOL notification process,
+  tied to the per-release SBOM/VEX + the Article 14 runbook. Addresses former gap GX-CRA-1 as
+  **audit-ready documentation pending maintainer ratification** — a PROPOSED policy, **not** a
+  binding maintainer commitment (policy §7); until ratified, `SECURITY.md` is authoritative.
 
 ## Honest one-line posture
 
