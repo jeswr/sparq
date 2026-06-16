@@ -27,10 +27,13 @@ extend-exclude = [
 # Keep typos' default checks; we only extend the dictionaries below.
 
 [default.extend-identifiers]
+iy3p = "iy3p"            # [OPUS-4.8] bead id `sq-iy3p` — typos splits on `-`, flags "iy"->"it"
+"1gir" = "1gir"           # [OPUS-4.8] bead id `sq-1gir` — typos splits on `-`, flags "gir"->"git"
 # Author surnames + tool/library identifiers flagged as typos.
 Hendler = "Hendler"      # Jim Hendler (BitMat paper author)
 
 [default.extend-words]
+ND = "ND"                # [OPUS-4.8] "NDAs" (Non-Disclosure Agreements) — typos splits camelCase NDAs into ND+As
 # --- SPARQL / SQL keyword fragments split across table cells or wrapped lines ---
 flate = "flate"          # flate2 crate name fragment (typos splits on the digit)
 SELEC = "SELEC"          # "SELECT" wrapped mid-token in prose
