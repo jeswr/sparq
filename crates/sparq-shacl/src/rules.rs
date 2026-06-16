@@ -443,9 +443,9 @@ mod tests {
     /// True iff the inferred set contains a triple `<s> <p> <o>` (IRI terms).
     fn has(inf: &Inference, s: &str, p: &str, o: &str) -> bool {
         inf.triples.iter().any(|t| {
-            t.subject.to_string() == format!("<{s}>")
+            t.subject.to_string() == format!("<{}>", s)
                 && t.predicate.as_str() == p
-                && t.object.to_string() == format!("<{o}>")
+                && t.object.to_string() == format!("<{}>", o)
         })
     }
 
