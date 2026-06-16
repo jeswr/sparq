@@ -104,6 +104,21 @@ pub trait MpcRng {
 /// Not `Clone`: a CSPRNG state must not be duplicated (cloning would reuse the
 /// same mask stream across two "dealers"). When the backend needs a fresh dealer
 /// it *re-seeds* a brand-new `SecureRng` from the OS, never copies state.
+///
+/// # Secret-memory hygiene (sq-u8a8, from the side-channel analysis CR-G5)
+/// [OPUS-4.8] The CSPRNG seed/keystream state is secret (it predicts every mask
+/// and Shamir coefficient). `SecureRng` already redacts its [`Debug`] and forbids
+/// [`Clone`]. The remaining hygiene step — zeroizing the inner ChaCha20 state on
+/// drop — is **not reachable from this crate**: `rand_chacha` 0.9 exposes no
+/// `zeroize` feature and no accessor to the private keystream, so a `Drop` here
+/// could only scrub fields we cannot reach (the `ChaCha20Rng` is stack-allocated
+/// with private state — there is no heap allocation to zero, and replacing the
+/// value does not scrub the prior stack bytes). Rather than fake a scrub it
+/// cannot perform, this is documented honestly and tracked as a follow-up
+/// (upstream `rand_chacha` `zeroize` support, or a roll-our-own CSPRNG wrapper);
+/// see the bead filed under sq-u8a8. The exposure is LOW: the masking RNG lives
+/// only for a dealing session, never persists a long-term secret, and is already
+/// `Debug`-redacted + `!Clone`.
 pub struct SecureRng {
     inner: rand_chacha::ChaCha20Rng,
 }

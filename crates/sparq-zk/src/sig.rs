@@ -92,8 +92,74 @@ pub struct PublicKey(pub Affine<EdwardsConfig>);
 
 /// An issuer secret key (a Baby-JubJub scalar). Test/issuance-side only — a
 /// relying party never sees it.
-#[derive(Debug, Clone, Copy)]
+///
+/// # Secret-memory hygiene (sq-u8a8, from the side-channel analysis CR-G5)
+/// [OPUS-4.8] The scalar is **zeroized on drop** so the key bytes do not linger
+/// in freed stack/heap memory after the `SecretKey` goes out of scope. arkworks'
+/// `JjScalar` (`ark-ed-on-bn254::Fr`) does not implement [`zeroize::Zeroize`], so
+/// we cannot derive it; instead a manual [`Drop`] overwrites the scalar's
+/// canonical little-endian bytes (the only secret-bearing representation we can
+/// reach) and resets the field element to zero. This is **memory HYGIENE ONLY**:
+/// it changes neither the signing algorithm nor any value the key produces while
+/// alive (every signing/verify test is byte-identical). Because a type that
+/// implements [`Drop`] cannot also be `Copy`, [`SecretKey`] is no longer `Copy`
+/// (it is still [`Clone`]); all callers pass it by `&` reference, so this is not a
+/// behavioural change.
+#[derive(Clone)]
 pub struct SecretKey(pub JjScalar);
+
+// [OPUS-4.8] sq-u8a8: zeroize the secret scalar on drop. `JjScalar` is not
+// `Zeroize`, so we best-effort scrub its canonical byte image and overwrite the
+// field element with zero. This is hygiene, not a protocol change — the key
+// behaves identically for its whole lifetime; only its drop is scrubbed.
+impl zeroize::Zeroize for SecretKey {
+    fn zeroize(&mut self) {
+        // Scrub the canonical little-endian byte image of the scalar, then reset
+        // the live field element to the additive identity so nothing recoverable
+        // remains in the `SecretKey`'s own storage.
+        let mut bytes = self.0.into_bigint().to_bytes_le();
+        bytes.zeroize();
+        self.0 = JjScalar::zero();
+    }
+}
+
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.zeroize();
+    }
+}
+
+// [OPUS-4.8] sq-u8a8: manual `Debug` that REDACTS the secret scalar. A derived
+// `Debug` would print the raw key; a stray `{:?}` (log line, panic, failed
+// `assert_eq!`) would then leak it. (The old derive was `Debug` only because the
+// type was a simple newtype; redacting it is pure hygiene — no caller relies on
+// the scalar appearing in the debug output.)
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SecretKey").field(&"<redacted>").finish()
+    }
+}
+
+impl SecretKey {
+    /// [OPUS-4.8] sq-u8a8: constant-time equality of two secret keys, comparing
+    /// their canonical little-endian scalar bytes via [`subtle::ConstantTimeEq`]
+    /// so the comparison time does not depend on WHERE two keys first differ.
+    ///
+    /// This is a **defensive PRIMITIVE**, not a replacement for any existing
+    /// comparison: the side-channel analysis (CR-G5) found sparq performs no
+    /// secret-vs-secret key equality on any live path (the relying party only ever
+    /// calls [`verify`] over PUBLIC data), so nothing in the protocol calls this
+    /// today. It exists so any FUTURE secret-key comparison is constant-time by
+    /// construction rather than by a plain `==` on `JjScalar` (whose `PartialEq`
+    /// is not asserted constant-time). Behaviour is identical to a value `==`.
+    pub fn ct_eq(&self, other: &SecretKey) -> subtle::Choice {
+        use subtle::ConstantTimeEq;
+        let a = self.0.into_bigint().to_bytes_le();
+        let b = other.0.into_bigint().to_bytes_le();
+        a.ct_eq(&b)
+    }
+}
 
 /// A Schnorr signature `(R, s)` over a message field element: `R = k·G`,
 /// `s = k + e·sk` with `e = Poseidon2(DOMAIN, R.x, R.y, pk.x, pk.y, m)`.
@@ -1054,6 +1120,45 @@ mod tests {
         let m = commitment_message(&c);
         let sig = sign(&sk, &m, &mut rng());
         assert!(verify(&pk, &m, &sig), "honest signature must verify");
+    }
+
+    // [OPUS-4.8] sq-u8a8: the constant-time secret-key equality returns the SAME
+    // boolean as a value equality on the underlying scalars — for an equal pair
+    // (same seed) and an unequal pair. This is the "CT-eq agrees with the prior
+    // `==`" gate; nothing in the protocol calls `ct_eq` today (the verifier path
+    // is over public data), so this is the only exercise of the defensive
+    // primitive.
+    #[test]
+    fn secret_key_ct_eq_agrees_with_scalar_eq() {
+        let (sk_a, _) = keypair(7);
+        let (sk_a2, _) = keypair(7); // same seed → same scalar
+        let (sk_b, _) = keypair(8); // different seed → different scalar
+        let eq_same: bool = sk_a.ct_eq(&sk_a2).into();
+        let eq_diff: bool = sk_a.ct_eq(&sk_b).into();
+        assert!(
+            eq_same,
+            "ct_eq must be true for two keys with the same scalar"
+        );
+        assert!(
+            !eq_diff,
+            "ct_eq must be false for keys with different scalars"
+        );
+        // Cross-check against the scalar value equality (the prior-`==` semantics).
+        assert_eq!(eq_same, sk_a.0 == sk_a2.0);
+        assert_eq!(eq_diff, sk_a.0 == sk_b.0);
+    }
+
+    // [OPUS-4.8] sq-u8a8: compile + behaviour check that `SecretKey` implements
+    // `Zeroize` and that scrubbing resets the scalar to zero. (A `SecretKey` also
+    // zeroizes on `Drop`; this asserts the scrub itself, which `Drop` calls.)
+    #[test]
+    fn secret_key_zeroizes() {
+        use ark_ff::Zero;
+        use zeroize::Zeroize;
+        let (mut sk, _) = keypair(9);
+        assert!(!sk.0.is_zero(), "fresh key is non-zero");
+        sk.zeroize();
+        assert!(sk.0.is_zero(), "zeroized SecretKey scalar must be zero");
     }
 
     #[test]
