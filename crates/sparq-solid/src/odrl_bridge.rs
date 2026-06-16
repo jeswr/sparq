@@ -110,7 +110,7 @@
 //! the ledger and so are never re-evaluated or retracted by this path.
 
 use crate::authindex::{Mode, AUTHENTICATED, PUBLIC};
-use crate::{AUTH_BRIDGED_GRAPH, AUTH_GRAPH, AUTH_NS};
+use crate::{AUTH_BRIDGED_GRAPH, AUTH_GRAPH, AUTH_NS, SOLIDX_NS};
 use oxrdf::{NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
@@ -568,9 +568,18 @@ const ODRL_ASSIGNEE: &str = "http://www.w3.org/ns/odrl/2/assignee";
 /// What [`map_constraints_to_agents`] concluded about a permission's constraints.
 enum AgentMapping {
     /// Every constraint maps faithfully to an agent-dimension matcher; persist a
-    /// `ConditionalGrant` whose `auth:agent` re-checks each of these principals.
-    /// Empty ⇒ no agent restriction (the grant applies to `auth:Public`).
-    Faithful(Vec<String>),
+    /// `ConditionalGrant` whose `auth:agent` re-checks each of these principals,
+    /// with the `except` principals carved out via an ACP `noneOf` exception matcher
+    /// (the "everyone-except-X" / `recipient neq X` shape). [OPUS-4.8] sq-5037.
+    Faithful {
+        /// Positive recipient principals (`eq`/`isA`/`isPartOf`). Empty ⇒ no positive
+        /// restriction → grant to `auth:Public` (everyone), narrowed only by `except`.
+        agents: Vec<String>,
+        /// Principals carved OUT (`recipient neq X`) — each becomes an ACP `noneOf`
+        /// exception matcher on the grant: a session matching the grant head is denied
+        /// the grant if it is one of these. Empty ⇒ no exception.
+        except: Vec<String>,
+    },
     /// At least one constraint has NO faithful ACP-condition analogue (purpose /
     /// dateTime window / count): the rule MUST stay one-shot (fail-closed — never
     /// approximate an unmappable constraint with a looser persisted condition).
@@ -586,16 +595,22 @@ enum AgentMapping {
 /// agent the ACP `auth:agent` head re-checks, so the persisted condition has the SAME
 /// semantics — it just re-evaluates per session instead of being frozen.
 ///
+/// **Faithful (→ noneOf exception):** an `odrl:recipient`/`odrl:assignee` constraint
+/// under `neq` (the recipient is everyone EXCEPT the named party — the
+/// "everyone-except-X" shape). This maps to an ACP `noneOf`: the grant head is the
+/// positive recipient set (or `auth:Public` if there is no positive constraint) with
+/// an `auth:exceptMatcher` carving out the named party, re-checked per session by the
+/// same machinery WAC/ACP `noneOf` already uses. [OPUS-4.8] sq-5037.
+///
 /// **Unmappable (→ stay one-shot):** `odrl:purpose` (ACP sessions carry no purpose —
 /// a client app is not a purpose-of-use, so mapping it to a client matcher would
 /// over-grant), `odrl:dateTime`/time windows (ACP has no "now" dimension — matcher
 /// accept-sets are static, so a persisted condition could not re-check the clock),
 /// `odrl:count` (ACP is stateless — no usage counter), and any unrecognised
-/// left-operand. A `neq` recipient (everyone EXCEPT one) has no faithful single-grant
-/// analogue either (it would need a `noneOf` exception matcher built per session) and
-/// is treated as unmappable. Any one such constraint forces the whole rule one-shot.
+/// left-operand. Any one such constraint forces the whole rule one-shot.
 fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
     let mut agents: Vec<String> = Vec::new();
+    let mut except: Vec<String> = Vec::new();
     for c in &rule.constraints {
         if c.left != ODRL_RECIPIENT && c.left != ODRL_ASSIGNEE {
             // purpose / dateTime / count / anything else → no faithful condition.
@@ -623,12 +638,18 @@ fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
                 }
                 agents.extend(members);
             }
-            // `neq`/order operators on a recipient have no faithful single-grant ACP
-            // analogue (an "everyone except" needs a per-session noneOf) → one-shot.
+            // recipient ≠ X (everyone EXCEPT X) → an ACP noneOf exception matcher
+            // carving out X from the grant. A numeric/dateTime right-operand is
+            // malformed → fail-closed. [OPUS-4.8] sq-5037.
+            Operator::Neq => match &c.right {
+                Value::Iri(s) | Value::Str(s) => except.push(s.clone()),
+                _ => return AgentMapping::Unmappable,
+            },
+            // order operators (lt/gt/…) on a recipient are not meaningful → one-shot.
             _ => return AgentMapping::Unmappable,
         }
     }
-    AgentMapping::Faithful(agents)
+    AgentMapping::Faithful { agents, except }
 }
 
 /// Whether a recipient principal IRI is safe to write as an `auth:agent` head: it
@@ -725,7 +746,7 @@ pub fn materialize_permission_conditional(
             continue;
         }
         match map_constraints_to_agents(rule) {
-            AgentMapping::Faithful(recipients) => {
+            AgentMapping::Faithful { agents: recipients, except } => {
                 let agents = condition_agents(rule, &recipients);
                 if agents.is_empty() {
                     // every recipient was reserved-encoded → fail-closed, nothing.
@@ -735,7 +756,20 @@ pub fn materialize_permission_conditional(
                     ));
                     continue;
                 }
-                let (first, emitted) = append_conditional_grants(graph, &agents, mode, target);
+                // `recipient neq X` → an ACP noneOf exception carving out X. A reserved-
+                // encoded exclusion would be silently un-enforceable as a matcher, which
+                // would WIDEN the grant (X regains access) — fail-closed: drop the whole
+                // rule to one-shot rather than emit an exception that cannot bite.
+                let excepts = condition_excepts(&except);
+                if excepts.len() != except.len() {
+                    fallback_reasons.push(format!(
+                        "permission {} has a reserved-encoded neq recipient; one-shot path",
+                        rule.id
+                    ));
+                    continue;
+                }
+                let (first, emitted) =
+                    append_conditional_grants(graph, &agents, &excepts, mode, target, GrantEffect::Allow);
                 return BridgeOutcome {
                     granted: true,
                     mode: Some(mode),
@@ -765,6 +799,125 @@ pub fn materialize_permission_conditional(
     out
 }
 
+/// Evaluate `policy`'s **prohibitions** against `request` and, for a prohibition whose
+/// recipient/assignee constraints map faithfully to agent conditions, persist a
+/// re-checked ACP **conditional deny** (`auth:ConditionalGrant` with `auth:effect
+/// auth:Deny`) — the dual of [`materialize_permission_conditional`]. [OPUS-4.8] sq-4r70.
+///
+/// This is the constraint-CONDITIONAL deny: instead of freezing a deny at
+/// materialization time (one-shot [`materialize_prohibition`]), the carve-out is
+/// persisted as a condition the session layer re-checks per session. A prohibition
+/// `recipient eq bob` materializes a deny that applies **only to bob's sessions**; a
+/// `recipient neq bob` materializes a deny that applies to **everyone except bob** (an
+/// ACP `noneOf` exception carving bob back IN to access). The deny composes with
+/// deny-overrides via the SAME `∪ allow ∖ ∪ deny` enforcement
+/// ([`crate::AuthIndex::accessible`]) — a conditional deny that applies to a session
+/// removes the target from that session's accessible set, beating any allow.
+///
+/// # When a conditional deny is emitted (faithful)
+///
+/// All of the matched prohibition's constraints are `odrl:recipient`/`odrl:assignee`
+/// constraints under `eq`/`isA`/`isPartOf`/`neq` (see [`map_constraints_to_agents`]),
+/// the action [`action_to_mode`]-maps, and the request names a target. The recipient
+/// constraint is NOT required to hold against the request party — the persisted
+/// condition re-checks it per session, exactly as the allow path.
+///
+/// # Fail-closed
+///
+/// - **Mixed / unmappable constraints fall back to one-shot:** if the prohibition
+///   carries a constraint with no faithful ACP-condition analogue (`purpose`,
+///   `dateTime`, `count`), the WHOLE rule falls back to [`materialize_prohibition`], so
+///   the unmappable bound is still enforced (the one-shot deny is materialized iff the
+///   prohibition currently matches — frozen). A persisted deny condition is emitted ONLY
+///   when every constraint maps faithfully.
+/// - An unmapped action or a missing target materializes nothing.
+/// - A reserved-encoded recipient/exclusion cannot become an enforceable matcher; the
+///   rule falls back to one-shot rather than emit a deny condition that cannot bite
+///   (which would FAIL OPEN — a deny silently dropped widens access).
+///
+/// Returns a [`BridgeOutcome`]; on a conditional deny `prohibited == true`,
+/// `deny_triple` reports the `(agent, auth:effect, graph)` anchor of the first emitted
+/// deny head and `mode` the mapped mode. The free-function form does not reindex a
+/// [`crate::PodStore`] — go through a `materialize_*` method for that.
+pub fn materialize_prohibition_conditional(
+    graph: &mut Graph,
+    policy: &Policy,
+    request: &Request,
+) -> BridgeOutcome {
+    // 1. Action → Mode (shared with the one-shot path). Unmapped → no deny.
+    let Some(mode) = action_to_mode(&request.action) else {
+        return BridgeOutcome::denied(vec![format!(
+            "ODRL action <{}> has no WAC/ACP mode mapping; no deny materialized",
+            request.action
+        )]);
+    };
+    let Some(target) = request.target.as_deref() else {
+        return BridgeOutcome::denied(vec![
+            "ODRL prohibition has no concrete target graph IRI; no deny materialized".to_owned(),
+        ]);
+    };
+
+    // 2. Find a prohibition whose action/target match AND whose constraints map
+    //    faithfully to agent conditions. The recipient/assignee constraint is NOT
+    //    required to hold against the request party — the persisted condition re-checks
+    //    it per session (the dual of the conditional allow path).
+    let mut fallback_reasons: Vec<String> = Vec::new();
+    for rule in &policy.prohibitions {
+        if !rule_action_target_match(rule, request, mode, target) {
+            continue;
+        }
+        match map_constraints_to_agents(rule) {
+            AgentMapping::Faithful { agents: recipients, except } => {
+                let agents = condition_agents(rule, &recipients);
+                if agents.is_empty() {
+                    fallback_reasons.push(format!(
+                        "prohibition {} recipients are all reserved-encoded; no deny",
+                        rule.id
+                    ));
+                    continue;
+                }
+                let excepts = condition_excepts(&except);
+                if excepts.len() != except.len() {
+                    // A reserved-encoded exclusion would silently re-admit the carved-out
+                    // party to the DENY (i.e. they'd escape it) — fail-closed to one-shot.
+                    fallback_reasons.push(format!(
+                        "prohibition {} has a reserved-encoded neq recipient; one-shot path",
+                        rule.id
+                    ));
+                    continue;
+                }
+                let (first, emitted) = append_conditional_grants(
+                    graph, &agents, &excepts, mode, target, GrantEffect::Deny,
+                );
+                return BridgeOutcome {
+                    prohibited: true,
+                    mode: Some(mode),
+                    deny_triple: Some(first),
+                    emitted,
+                    ..BridgeOutcome::default()
+                };
+            }
+            AgentMapping::Unmappable => {
+                // A constraint with no faithful condition analogue (purpose / dateTime /
+                // count) → the one-shot deny path must check it (frozen) instead.
+                fallback_reasons.push(format!(
+                    "prohibition {} has a constraint with no faithful ACP condition; one-shot path",
+                    rule.id
+                ));
+            }
+        }
+    }
+
+    // 3. No faithfully-conditional prohibition applied → fall back to the EXISTING
+    //    one-shot deny (which checks the unmappable constraints against the supplied
+    //    request context and emits a frozen `auth:deny*` iff the prohibition matches).
+    let out = materialize_prohibition(graph, policy, request);
+    if !out.prohibited && out.reasons.is_empty() {
+        return BridgeOutcome::denied(fallback_reasons);
+    }
+    out
+}
+
 /// The principal-space `auth:agent` heads for a faithful recipient set, dropping any
 /// reserved-encoded recipient. An empty recipient list means the rule had NO agent
 /// restriction → a single `auth:Public` head (any session matches).
@@ -773,6 +926,17 @@ fn condition_agents(_rule: &Rule, recipients: &[String]) -> Vec<String> {
         return vec![PUBLIC.to_owned()];
     }
     recipients
+        .iter()
+        .filter(|r| recipient_principal_allowed(r))
+        .map(|r| normalise_recipient_principal(r))
+        .collect()
+}
+
+/// The principal-space carve-out heads for a `recipient neq X` exception set, dropping
+/// any reserved-encoded principal (the caller treats a shortfall as fail-closed — a
+/// dropped exclusion would re-admit the carved-out party). [OPUS-4.8] sq-5037.
+fn condition_excepts(except: &[String]) -> Vec<String> {
+    except
         .iter()
         .filter(|r| recipient_principal_allowed(r))
         .map(|r| normalise_recipient_principal(r))
@@ -804,22 +968,64 @@ fn rule_action_target_match(rule: &Rule, request: &Request, _mode: Mode, target:
 }
 
 
-/// Append `auth:ConditionalGrant` allow triples for each agent head onto BOTH the
-/// `<urn:sparq:auth>` view and the bridged-provenance graph, preserving existing
-/// triples. Returns the `(agent, auth:effect, graph)` audit anchor of the first grant
-/// AND the full set of emitted head triples (for the bridge ledger). [OPUS-4.8] sq-dpk4.
+/// The deontic force of a materialized `auth:ConditionalGrant` — selects the
+/// `auth:effect` object emitted by [`append_conditional_grants`]. [OPUS-4.8] sq-4r70.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantEffect {
+    /// A conditional **allow** (`auth:effect auth:Allow`) — the recipient is granted.
+    Allow,
+    /// A conditional **deny** (`auth:effect auth:Deny`) — the dual: the matched
+    /// session is denied, and the deny overrides any allow for the same
+    /// principal+target+mode (the session layer subtracts `∪ deny` from `∪ allow`).
+    Deny,
+}
+
+impl GrantEffect {
+    /// The `auth:`-local effect object (`Allow` / `Deny`) and the grant-IRI key.
+    fn iri_local(self) -> &'static str {
+        match self {
+            GrantEffect::Allow => "Allow",
+            GrantEffect::Deny => "Deny",
+        }
+    }
+}
+
+/// Append `auth:ConditionalGrant` triples (allow OR deny — see `effect`) for each agent
+/// head onto BOTH the `<urn:sparq:auth>` view and the bridged-provenance graph,
+/// preserving existing triples. Returns the `(agent, auth:effect, graph)` audit anchor
+/// of the first grant AND the full set of emitted head triples (for the bridge ledger).
+/// [OPUS-4.8] sq-dpk4 / sq-4r70.
+///
+/// `excepts` are the principals carved OUT (the `recipient neq X` / "everyone-except"
+/// shape — [OPUS-4.8] sq-5037). Each becomes an ACP `noneOf` exception: the grant gets
+/// an `auth:exceptMatcher <m>` and the matcher `<m>` is materialized with the accept-set
+/// facts the session layer reads (`solidx:acceptsAgentP <X>` + `solidx:acceptsClientP
+/// auth:AnyClient`). [`crate::AuthIndex::cond_applies`] then suppresses the grant for any
+/// session the matcher accepts — i.e. for `X` under any client — so `X` is denied while
+/// every other session keeps the grant. This is EXACTLY the shape the WAC/ACP `noneOf`
+/// rules (`rules/acp-c.n3`) emit, re-checked by the same code path.
+///
+/// `effect` selects the deontic force ([OPUS-4.8] sq-4r70): [`GrantEffect::Allow`]
+/// emits `auth:effect auth:Allow` (the conditional grant); [`GrantEffect::Deny`] emits
+/// `auth:effect auth:Deny` (the conditional deny — the dual). A conditional deny is
+/// honoured by the SAME [`crate::AuthIndex::accessible`] path: a matching deny condition
+/// adds the graph to the `denied` set, which is subtracted from `allowed`
+/// (deny-overrides). The deny's grant IRI carries an `&effect=deny` key so it never
+/// collides with an allow grant for the same `(agent, mode, graph, excepts)`.
 fn append_conditional_grants(
     graph: &mut Graph,
     agents: &[String],
+    excepts: &[String],
     mode: Mode,
     target: &str,
+    effect: GrantEffect,
 ) -> ((String, String, String), Vec<[Term; 3]>) {
     let mut emitted: Vec<[Term; 3]> = Vec::new();
 
     let type_p = NamedNode::new_unchecked(RDF_TYPE);
     let cond_class = NamedNode::new_unchecked(format!("{AUTH_NS}ConditionalGrant"));
     let effect_p = NamedNode::new_unchecked(format!("{AUTH_NS}effect"));
-    let allow_o = NamedNode::new_unchecked(format!("{AUTH_NS}Allow"));
+    let effect_o = NamedNode::new_unchecked(format!("{AUTH_NS}{}", effect.iri_local()));
     let agent_p = NamedNode::new_unchecked(format!("{AUTH_NS}agent"));
     let client_p = NamedNode::new_unchecked(format!("{AUTH_NS}client"));
     let any_client = NamedNode::new_unchecked(crate::authindex::ANY_CLIENT);
@@ -827,27 +1033,56 @@ fn append_conditional_grants(
     let mode_o = NamedNode::new_unchecked(mode_iri(mode));
     let graph_p = NamedNode::new_unchecked(format!("{AUTH_NS}graph"));
     let graph_o = NamedNode::new_unchecked(target);
+    let except_p = NamedNode::new_unchecked(format!("{AUTH_NS}exceptMatcher"));
+    let accepts_agent_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsAgentP"));
+    let accepts_client_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsClientP"));
+
+    // One deterministic exception matcher per carved-out principal, shared across the
+    // grant heads (its accept-set is the same regardless of which positive head it
+    // attaches to). Each accepts (agent = X, client = any) → suppresses the grant for X.
+    let except_matchers: Vec<(String, [Term; 2])> = excepts
+        .iter()
+        .map(|x| {
+            let m = format!("urn:sparq:odrl-except?agent={}", sparq_reason::n3::encode_for_uri(x));
+            (m, [Term::NamedNode(NamedNode::new_unchecked(x)), Term::NamedNode(any_client.clone())])
+        })
+        .collect();
 
     let mut first: Option<(String, String, String)> = None;
     for agent in agents {
-        // A deterministic grant IRI keyed on (agent, mode, graph) so re-materializing
-        // the same condition is idempotent (no duplicate heads).
+        // A deterministic grant IRI keyed on (agent, mode, graph, excepts) so re-
+        // materializing the same condition is idempotent (no duplicate heads) and an
+        // exception-bearing grant never collides with an unconditional one.
+        let except_key = except_matchers
+            .iter()
+            .map(|(m, _)| sparq_reason::n3::encode_for_uri(m))
+            .collect::<Vec<_>>()
+            .join(",");
         let grant_iri = format!(
-            "urn:sparq:odrl-cond?agent={}&mode={}&graph={}",
+            "urn:sparq:odrl-cond?agent={}&mode={}&graph={}&except={}&effect={}",
             sparq_reason::n3::encode_for_uri(agent),
             sparq_reason::n3::encode_for_uri(mode_iri(mode)),
             sparq_reason::n3::encode_for_uri(target),
+            except_key,
+            effect.iri_local(),
         );
         let g = Term::NamedNode(NamedNode::new_unchecked(&grant_iri));
         let agent_o = Term::NamedNode(NamedNode::new_unchecked(agent));
-        let head = [
+        let mut head = vec![
             [g.clone(), Term::NamedNode(type_p.clone()), Term::NamedNode(cond_class.clone())],
-            [g.clone(), Term::NamedNode(effect_p.clone()), Term::NamedNode(allow_o.clone())],
+            [g.clone(), Term::NamedNode(effect_p.clone()), Term::NamedNode(effect_o.clone())],
             [g.clone(), Term::NamedNode(agent_p.clone()), agent_o],
             [g.clone(), Term::NamedNode(client_p.clone()), Term::NamedNode(any_client.clone())],
             [g.clone(), Term::NamedNode(mode_p.clone()), Term::NamedNode(mode_o.clone())],
             [g.clone(), Term::NamedNode(graph_p.clone()), Term::NamedNode(graph_o.clone())],
         ];
+        // Wire each exception matcher onto the grant + materialize its accept-set facts.
+        for (m, [agent_accept, client_accept]) in &except_matchers {
+            let m_node = Term::NamedNode(NamedNode::new_unchecked(m));
+            head.push([g.clone(), Term::NamedNode(except_p.clone()), m_node.clone()]);
+            head.push([m_node.clone(), Term::NamedNode(accepts_agent_p.clone()), agent_accept.clone()]);
+            head.push([m_node, Term::NamedNode(accepts_client_p.clone()), client_accept.clone()]);
+        }
         for t in head {
             if !emitted.contains(&t) {
                 emitted.push(t);
@@ -901,6 +1136,9 @@ pub enum BridgeKind {
     /// [`materialize_permission_conditional`] — a re-checked conditional grant (or its
     /// one-shot fallback).
     PermissionConditional,
+    /// [`materialize_prohibition_conditional`] — a re-checked conditional deny (or its
+    /// one-shot fallback). [OPUS-4.8] sq-4r70.
+    ProhibitionConditional,
 }
 
 /// One tracked bridged materialization: the originating ODRL `(policy, request, kind)`
@@ -1068,7 +1306,57 @@ fn replay(graph: &mut Graph, entry: &BridgeEntry) -> BridgeOutcome {
         BridgeKind::PermissionConditional => {
             materialize_permission_conditional(graph, &entry.policy, &entry.request)
         }
+        BridgeKind::ProhibitionConditional => {
+            refresh_prohibition_conditional(graph, &entry.policy, &entry.request)
+        }
     }
+}
+
+/// Re-evaluate a tracked **conditional deny** ([`materialize_prohibition_conditional`])
+/// on refresh with the fail-closed deny-retraction rule (sq-2pcf). [OPUS-4.8] sq-4r70.
+///
+/// A faithfully-conditional deny re-checks its recipient/assignee carve-out per session
+/// at enforcement time, so on refresh the question is only whether the prohibition still
+/// *structurally* names the request (action/target) — which is exactly what
+/// [`materialize_prohibition_conditional`] re-checks before re-emitting. A prohibition
+/// withdrawn entirely (or whose action/target no longer match) re-emits nothing → the
+/// deny condition is retracted → access restored (correct: the prohibition is gone).
+///
+/// When the tracked deny FELL BACK to one-shot (an unmappable `dateTime`/`purpose`/
+/// `count` constraint), [`materialize_prohibition_conditional`]'s fallback runs the
+/// one-shot [`materialize_prohibition`] — which would retract on an *unprovable*
+/// constraint, FAIL-OPEN. So for the one-shot fallback we route through the deny-
+/// retraction-aware [`refresh_prohibition`] (re-emit on Ambiguous, retract only on a
+/// definite Withdrawn), exactly as the plain [`BridgeKind::Prohibition`] refresh does.
+/// We detect the fallback case by whether ANY prohibition maps faithfully for the
+/// request's action/target.
+fn refresh_prohibition_conditional(
+    graph: &mut Graph,
+    policy: &Policy,
+    request: &Request,
+) -> BridgeOutcome {
+    if prohibition_maps_faithfully(policy, request) {
+        // Faithful conditional deny: the recipient carve-out is re-checked per session,
+        // so re-emitting whenever the prohibition structurally names the request is
+        // correct (and fail-closed: a withdrawn prohibition emits nothing → retracted).
+        materialize_prohibition_conditional(graph, policy, request)
+    } else {
+        // One-shot fallback (an unmappable constraint): apply the deny-retraction rule
+        // so an unprovable bound KEEPS the deny rather than restoring access (fail-open).
+        refresh_prohibition(graph, policy, request)
+    }
+}
+
+/// Whether SOME prohibition in `policy` whose action/target structurally name `request`
+/// maps faithfully to agent conditions (so the conditional-deny path would emit a
+/// re-checked condition rather than fall back to one-shot). [OPUS-4.8] sq-4r70.
+fn prohibition_maps_faithfully(policy: &Policy, request: &Request) -> bool {
+    let Some(mode) = action_to_mode(&request.action) else { return false };
+    let Some(target) = request.target.as_deref() else { return false };
+    policy.prohibitions.iter().any(|rule| {
+        rule_action_target_match(rule, request, mode, target)
+            && matches!(map_constraints_to_agents(rule), AgentMapping::Faithful { .. })
+    })
 }
 
 /// Re-evaluate a tracked **Prohibition** deny on refresh with the fail-closed
