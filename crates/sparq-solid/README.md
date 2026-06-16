@@ -156,7 +156,7 @@ fails to bite — which would re-admit `X` — the whole rule falls back to the 
 (never widen to a public everyone-except grant on an unenforceable exclusion).
 
 **Combined `recipient eq A AND neq B` (one rule)** — [OPUS-4.8] sq-5037. The constraints are
-ANDed: the bridge emits a single `ConditionalGrant` headed by `A` (the positive `eq`) carrying
+AND-combined: the bridge emits a single `ConditionalGrant` headed by `A` (the positive `eq`) carrying
 an `auth:exceptMatcher` carving out `B` (the `neq`) — the per-head exception. Only `A` keeps
 the grant (everyone else fails the `eq` head; `B` is doubly excluded).
 

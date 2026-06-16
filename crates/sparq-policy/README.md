@@ -118,12 +118,12 @@ assert!(!evaluate(&policy, &outside).allow);
     evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` /
     `NotConstrained` — the recipient dual of `purpose_status`. (In the `sparq-solid`
     bridge, `recipient neq X` maps to an ACP `noneOf` exception, re-checked per session.)
-  - **Combined `recipient eq A AND neq B` (one rule)** — the constraints are ANDed (the
+  - **Combined `recipient eq A AND neq B` (one rule)** — the constraints are AND-combined (the
     recipient must BE `A` and must NOT BE `B`); in the bridge this emits one
     `ConditionalGrant` headed by `A` carrying an `exceptMatcher` carving out `B`.
 - **`odrl:dateTime` time-window enforcement (faithful, fail-closed)** — [OPUS-4.8] sq-idnv.
   A `dateTime` constraint gates a rule to a **time window** (`lteq T` / `lt T` / `gteq T`
-  / `gt T`, or a two-sided `gteq lower` + `lteq upper`, ANDed). The actual instant is the
+  / `gt T`, or a two-sided `gteq lower` + `lteq upper`, AND-combined). The actual instant is the
   request's evaluation time, supplied via the first-class `Request::at(instant)` sugar
   (over `.with(ODRL_DATETIME, Value::DateTime(..))`; read back via `req.request_time()`).
   Instants compare by magnitude. **Missing time → *unprovable* → fail-closed:** a
