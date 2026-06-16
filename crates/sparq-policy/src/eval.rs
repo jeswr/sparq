@@ -23,6 +23,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// `odrl:purpose eq <urn:purpose/research>`). [OPUS-4.8] sq-q56r.
 pub const ODRL_PURPOSE: &str = "http://www.w3.org/ns/odrl/2/purpose";
 
+/// The `odrl:count` left-operand IRI — the dimension a *count constraint* restricts
+/// (the number of times a permission may be exercised, e.g. `odrl:count lteq 5`).
+/// Stateful enforcement of this lives in the opt-in [`crate::count`] module.
+/// [OPUS-4.8] sq-zi5w.
+pub const ODRL_COUNT: &str = "http://www.w3.org/ns/odrl/2/count";
+
 /// An access request evaluated against a [`Policy`]: who wants to do what, to
 /// what, in what context (the "evaluation request" + "state of the world" of the
 /// ODRL Formal Semantics, folded into one node-local view).
