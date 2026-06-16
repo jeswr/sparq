@@ -113,19 +113,29 @@ operator's own SSDF programme (their deployment, monitoring, IR) is out of sparq
 
 ## Coverage summary
 
-| Practice group | Tasks | Implemented & verified | Audit-ready | Gap |
-|---|---|---|---|---|
-| **PO** (Prepare the Organization) | 13 | 7 | 6 | 0 |
-| **PS** (Protect the Software) | 4 | 4 | 0 | 0 |
-| **PW** (Produce Well-Secured Software) | 15 | 11 | 3 | 1 |
-| **RV** (Respond to Vulnerabilities) | 10 | 6 | 4 | 0 |
-| **Total** | **42** | **28** | **13** | **1** |
+<!-- [OPUS-4.8] sq-ce97: the **Tasks** column is a ROW count. SP 800-218 v1.1 defines
+     41 standard tasks (RV.1 has exactly 3 — RV.1.1/1.2/1.3); the 42nd row, `RV.1.4`, is the
+     explicitly-flagged sparq-local sub-task (footnote ⚑). The columns below therefore split
+     "standard tasks" from "+ local row" so "42" can never be misread as "42 standard SSDF
+     tasks." The status tallies (28 / 13 / 1) are unchanged and cross-foot exactly. -->
 
-These totals are re-derived mechanically from the rows above and cross-foot exactly: the
-**Tasks** column sums to 42 (13 + 4 + 15 + 10) and equals the status columns (28 + 13 + 1); each
-group's row count equals its own status split. (The RV count includes the sparq-local `RV.1.4`
-sub-task flagged above; it is evidence supporting standard task RV.1.3, not a separate framework
-task — see footnote ⚑.)
+| Practice group | Standard tasks | + sparq-local rows | Rows total | Implemented & verified | Audit-ready | Gap |
+|---|---|---|---|---|---|---|
+| **PO** (Prepare the Organization) | 13 | 0 | 13 | 7 | 6 | 0 |
+| **PS** (Protect the Software) | 4 | 0 | 4 | 4 | 0 | 0 |
+| **PW** (Produce Well-Secured Software) | 15 | 0 | 15 | 11 | 3 | 1 |
+| **RV** (Respond to Vulnerabilities) | 9 | 1 | 10 | 6 | 4 | 0 |
+| **Total** | **41** | **1** | **42** | **28** | **13** | **1** |
+
+These totals are re-derived mechanically from the rows above and cross-foot exactly. The
+**Standard tasks** column counts the SP 800-218 v1.1 publication tasks (PO 13 + PS 4 + PW 15
++ RV 9 = **41**); RV.1 has exactly three publication tasks (RV.1.1/1.2/1.3), so standard RV is
+**9**, not 10. The single **+ sparq-local row** is `RV.1.4` (the daily advisory watchdog —
+evidence *supporting* standard task RV.1.3, **not** a separate framework task; see footnote ⚑),
+which brings the **Rows total** to **42**. The status columns sum to **28 + 13 + 1 = 42** rows,
+and each group's row count equals its own status split (PO 7+6+0=13, PS 4+0+0=4, PW 11+3+1=15,
+RV 6+4+0=10). So: **41 standard SSDF tasks + 1 flagged local row = 42 rows; 28 implemented &
+verified / 13 audit-ready / 1 gap.**
 
 The single technical **gap** is **PW.6.2 reproducible-build evidence** (GX-8 / bead
 sq-toze.9). The **audit-ready** rows are the practices that are documented + automated but
