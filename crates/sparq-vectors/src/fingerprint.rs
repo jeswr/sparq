@@ -47,7 +47,12 @@ pub const FINGERPRINT_LEN: usize = 24;
 
 /// A graph fingerprint: dictionary length, triple count, and a content hash over the
 /// id-ordered dictionary terms. See the module docs for the exact inputs and rationale.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// [OPUS-4.8] (sq-36ol) Derives `Hash` so a fingerprint can key a per-graph cache (the
+/// filtered-ANN `IdMask` cache in [`crate::rewrite`]): two graphs with the same fingerprint
+/// are treated as the same graph for caching, and any mutation that could change a derived
+/// mask changes the fingerprint (and thus the key), so a stale mask is never served.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Fingerprint {
     /// `graph.dict.len()` at build time.
     pub dict_len: u64,

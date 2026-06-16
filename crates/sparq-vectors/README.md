@@ -69,6 +69,11 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
   unchanged). Composed with `filtered-ann`, a `vec:` neighbour variable that is **also constrained
   by ordinary BGP patterns** is searched as a *filtered* ANN automatically — the surrounding BGP
   derives the candidate `IdMask`, so the filtered top-k equals post-filtering the unfiltered top-k.
+  That derived `IdMask` is **cached across prepares** (sq-36ol), keyed by `(constraining sub-BGP,
+  graph `Fingerprint`)`: repeated queries against an unchanged graph reuse it instead of re-running
+  the constraint SELECT, and **any** graph change (added/removed/changed triple or term, or a
+  dict-id shift) changes the fingerprint and misses the cache — so a stale mask is never served
+  (the invalidation is sound; when in doubt it recomputes). The cache is transparent (no API change).
 - **Verbalization** — `verbalize` / `embed_entities` render `<label>. a <type>. <description>`
   per entity (multilingual, char-budgeted); `embed_labels` is the label-only special case.
 - **Quantization** — `ScalarQuantizer` (4×) and `ProductQuantizer` (asymmetric distance) for
