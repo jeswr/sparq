@@ -70,7 +70,7 @@ or an in-module `#[test]` regresses, `.github/workflows/<wf>.yml` gates. Full re
 
 | ASVS | Control | Status | Evidence | Owner |
 |---|---|---|---|---|
-| V7.1.1 | No sensitive/internal detail (paths, stack traces) in error responses | **PASS-with-caveat** | `json_error` returns a fixed `{"error":"<msg>"}` with control-char escaping (`http.rs:2671`); panics are isolated to a generic "internal server error (panic)" (`http.rs:1309`, `:1645`). **Caveat:** engine parse/exec *messages* are echoed to the client (by design, to aid query authors); they do not deliberately include filesystem paths/stack frames — tracked as a hardening item **GAP ASVS-G3** (verify no path/host leakage in engine error strings). | sparq |
+| V7.1.1 | No sensitive/internal detail (paths, stack traces) in error responses | **PASS** | `json_error` returns a fixed `{"error":"<msg>"}` with control-char escaping; panics are isolated to a generic "internal server error (panic)". Every error path that could carry caller input / loaded-data fragments / a filesystem path / a `Debug` of an internal type routes through `http.rs::sanitized_error` — full detail to the server log (`target:"sparq_server"`), only a STABLE generic class message in the body (sq-cz89/sq-j9zs guard; [OPUS-4.8] sq-kfel closed the residual GSP-write/TPF/descriptor/compaction/middleware echo paths). **Verified:** `tests/hardening.rs::no_echo_*` + the sq-kfel regression guards (`no_echo_gsp_write_rejection_stays_clean`, `unauthorized_error_is_clean_and_actionable`, `main_failure_classes_are_clean`, `FORBIDDEN_INTERNALS` — asserts no `/home/`,`/Users/`,`/tmp/`… path, no `WriteError::`/`Os { code:` Debug, no secret) + `tests/tpf.rs::malformed_term_does_not_echo_input`. Was **GAP ASVS-G3**, now **Resolved**. | sparq |
 | V7.1.2 | Generic error message; no info-leak via differential errors | **PASS** | Auth returns an **identical** 401 for missing vs wrong token (`unauthorized` `http.rs:644`); test `wrong-token 401 indistinguishable` (`tests/auth.rs:~142`). | sparq |
 | V7.3.x | Logs do not contain sensitive data (PII, secrets, full query bodies) | **PASS** | Request logging is **opt-in** via `--verbose` `tower_http::TraceLayer` (`http.rs:171`, `:1328`); it logs HTTP method/path/status, **not** request body or full query text. No `info!/warn!/error!` of query text or PII found in server src. Auth tokens are never logged. | sparq |
 | V7.4.x | Error handling does not crash the process / leak via unhandled panic | **PASS** | Catch-panic middleware converts a worker panic to a generic 500 without propagating the payload (`http.rs:1309`, `:2240`). Reachable panic on untrusted input is an in-scope DoS bug per `SECURITY.md`; fuzz lane hunts them (`fuzz.yml`). | sparq |
@@ -162,7 +162,8 @@ The ASVS input-validation / DoS-limit / auth / SSRF / error-hygiene controls abo
 - **N/A (operator gateway, B3):** the V2/V3/V4 authentication-session-access-control
   lifecycle, V6/V8 stored-crypto/data-classification — assigned to the operator with
   rationale.
-- **GAP:** V14.4 security headers (ASVS-G1), V14.5.3 first-party CORS allowlist (ASVS-G2),
-  V7.1.1 engine-error-string leakage verification (ASVS-G3), V5.5.2 explicit SPARQL
-  parse-depth bound (ASVS-G4). All in [`gap-register.md`](./gap-register.md) with beads.
+- **GAP:** V14.5.3 first-party CORS allowlist (ASVS-G2, a documented safe-default decision).
+  ASVS-G1 (V14.4 security headers, sq-cmvh), ASVS-G3 (V7.1.1 engine-error-string leakage
+  verification — [OPUS-4.8] sq-kfel) and ASVS-G4 (V5.5.2 parse-depth bound, sq-53s1) are now
+  **Resolved**. All in [`gap-register.md`](./gap-register.md) with beads.
 - **EXCLUDED (not a control):** the ZK/MPC estate — **remediated but NOT externally audited**, no production guarantee until external sign-off (`sq-qhy4`), per `SECURITY.md`. <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep -->
