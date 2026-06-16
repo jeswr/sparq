@@ -52,12 +52,13 @@ repo-relative.
 | SL-B2-a | **Hosted build platform** — builds run on a hosted, managed service (not a developer workstation) | **IV** | All release builds run on GitHub-hosted runners (`runs-on: ubuntu-latest / macos-* / windows-latest / ubuntu-24.04-arm` in `release.yml#package`, `#sbom`, `#docker`). No self-hosted runners in the release path. | release eng |
 | SL-B2-b | **Authenticated provenance** — provenance is cryptographically signed by the build platform; consumers can verify it is unforged | **IV** | `actions/attest-build-provenance` signs the in-toto provenance with a Sigstore Fulcio cert keyed to the workflow's GitHub OIDC identity (`id-token: write`, `attestations: write` on `release.yml#package` + `#sbom`). The signature + Rekor inclusion proof are what `gh attestation verify` checks. | release eng |
 | SL-B2-c | **Provenance covers all released supply-chain artifacts** | **IV** (release.yml) | `release.yml#package` attests `pkg/*.tar.gz` + `pkg/*.zip`; `release.yml#sbom` attests `sbom/*.sbom.cdx.json` + `sbom/*.vex.cdx.json`; `release.yml#docker` attests the image. The SBOM + VEX are themselves SLSA-attested (defence against a swapped SBOM). | release eng |
-| SL-B2-d | **No unattested binary in the release path** | **GAP** | `dist.yml` *also* triggers on `push: tags: [v*]` and `workflow_dispatch`, building the hardware-tiered `sparq-cli` binaries the launcher's fat-package selects from — with **no `id-token`/`attestations` permission, no attest step, no cargo-auditable** (`.github/workflows/dist.yml`). A binary consumed via the dist path is unsigned/unattested. → **GX-9 / bead sq-toze.23**. | release eng |
+| SL-B2-d | **No unattested binary in the release path** | **IV** | **Closed (GX-9 / sq-toze.23).** `dist.yml#build` now mirrors `release.yml#package`: `permissions: id-token: write` + `attestations: write`, `cargo auditable build --release --locked`, and `actions/attest-build-provenance@a2bbfa2… # v4.1.0` over the per-tier binary (`subject-path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}`). The hardware-tiered `sparq-cli` binaries the launcher's fat-package selects from now carry a signed in-toto SLSA provenance predicate (Sigstore/OIDC) and an embedded auditable dep manifest — verifiable with `gh attestation verify dist/sparq-cli-<tier> --repo jeswr/sparq`. Both the tag-time and `workflow_dispatch` dist builds are covered. | release eng |
 | SL-B2-e | **Published-package provenance** — the artifact as consumers fetch it carries provenance (crates.io / npm / PyPI) | **GAP** | There is **no publish workflow** for crates.io / npm / PyPI anywhere in `.github/workflows/` (grep for `cargo publish`/`npm publish`/`maturin … publish`/`twine` finds none). `js.yml` and `python.yml` are **test-only** — `js.yml` runs the node suite + `npm pack --dry-run`; `python.yml` does `maturin build` + pytest into a local `dist/`; neither publishes. `release.yml#release` only attaches the already-attested archives to the GitHub Release via `softprops/action-gh-release` (a Release upload, not a registry publish). The crates/bindings are published **manually / out-of-CI** (e.g. `cargo publish`), so the artifact a consumer `cargo add`/`npm i`/`pip install`s carries **no provenance**. Closing this needs *adding* a provenance-emitting publish workflow: npm `--provenance` and PyPI PEP-740 trusted-publishing are wirable once a publish workflow exists; crates.io has no upstream provenance mechanism today. → **GX-10 / bead sq-toze.24**. | release eng |
 
 **Build L2 verdict: MET (implemented & verified) for the `release.yml` archives + the ghcr.io
-container.** NOT met for the `dist.yml` binaries (SL-B2-d) or the crates.io/npm/PyPI published
-packages (SL-B2-e) — those remain at Build L1-or-below and are recorded as gaps.
+container + the `dist.yml` tiered binaries (SL-B2-d closed, GX-9 / sq-toze.23).** NOT met for the
+crates.io/npm/PyPI published packages (SL-B2-e) — those remain at Build L1-or-below and are recorded
+as a gap (GX-10).
 
 ---
 
@@ -113,7 +114,7 @@ meaningful.
 |---|---|---|
 | **`release.yml` archives** (`sparq-cli` tar.gz/zip) | **Build L2** | Signed Sigstore provenance + hosted runner + cargo-auditable + attested SBOM/VEX |
 | **ghcr.io `sparq-server` image** | **Build L2** | buildkit `provenance: mode=max` + `sbom: true`, OIDC-signed |
-| **`dist.yml` `sparq-cli` tiered binaries** | **Build L1 / below** | scripted build, but **no provenance** (SL-B2-d / GX-9) |
+| **`dist.yml` `sparq-cli` tiered binaries** | **Build L2** | signed Sigstore provenance (`attest-build-provenance`) + cargo-auditable on a hosted runner — GX-9 closed (sq-toze.23) |
 | **crates.io / npm / PyPI published packages** | **Build L1 / below** | no published-package provenance wired (SL-B2-e / GX-10) |
 | **Source track** | strong (two-person review AR, pinned+locked+vet+deny IV) | see SL-S-* |
 | **Build L3 (any artifact)** | **not met** | in-band provenance, no isolated trusted builder (SL-B3-b / GX-11) |
