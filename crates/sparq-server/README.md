@@ -85,6 +85,28 @@ reads are also gated** (`--auth-token-read`) — because a write-token alone sti
 read endpoint on a remote bind. When only writes are gated, `--allow-remote` is still required
 and the server warns that reads remain open. Loopback binds are always allowed.
 
+### Security response headers (always on)
+
+Every response — success, streamed and error alike — carries a standard hardening header set
+(ASVS V14.4; bead `sq-cmvh`), stamped by a `map_response` layer in `harden()`:
+
+| Header | Value | Why |
+| --- | --- | --- |
+| `X-Content-Type-Options` | `nosniff` | no MIME-sniffing into a type we did not send |
+| `Content-Security-Policy` | `default-src 'none'; frame-ancestors 'none'` | a data API serves no subresources/scripts; tightest CSP makes any sniffed body inert and forbids framing |
+| `X-Frame-Options` | `DENY` | legacy clickjacking guard for non-CSP agents; the API is never framed |
+| `Referrer-Policy` | `no-referrer` | never leak a request URL (a `query=` may carry sensitive terms) as a `Referer` |
+
+Each header is only added when absent, so a handler may override a specific one.
+**Deliberately omitted:** `Strict-Transport-Security` (this origin serves plain HTTP — HSTS
+belongs on the fronting TLS proxy, setting it here is meaningless or wrongly pins a host);
+`X-XSS-Protection` (deprecated, a no-op/harmful in modern browsers, superseded by CSP); and CORS
+/ `Cross-Origin-*` / `Permissions-Policy` (browser-document policies with no meaning for a
+no-CORS data API — adding CORS would *widen* the surface). No blanket `Cache-Control: no-store`
+is forced: query results are uncached by default (no `ETag` / `Cache-Control: public` is ever
+set), so there is nothing to tighten, and a blanket value would wrongly override `/health` and
+`/metrics`.
+
 ### SERVICE federation + DoS guards
 
 - SPARQL `SERVICE` federation is **OFF in the default build** (the `service` cargo feature).
