@@ -1,6 +1,6 @@
 ---
 name: federated-planning
-description: "Cost-based federated SPARQL source selection + bind-vs-hash join planning over already-fetched source descriptors, via the opt-in sparq-fedplan crate. Use when planning a federated BGP across multiple SPARQL endpoints from their served statistics (VoID property/class partitions + mined scs: characteristic sets): deciding which sources can contribute to each triple pattern (HiBISCuS recall-safe pruning + CostFed skew-aware cardinality), and choosing a join order with per-join bind-vs-hash algorithm selection (characteristic-set star cardinality for intermediate sizes). Pure + deterministic, no network I/O. Off by default; does not touch sparq-core/sparq-engine's lean build. NOT for live streaming/adaptive joins (ANAPSID — deferred)."
+description: "Cost-based federated SPARQL source selection + bind-vs-hash join planning over already-fetched source descriptors, plus an ANAPSID-style non-blocking streaming join with operator spill, via the opt-in sparq-fedplan crate. Use when planning a federated BGP across multiple SPARQL endpoints from their served statistics (VoID property/class partitions + mined scs: characteristic sets): deciding which sources can contribute to each triple pattern (HiBISCuS recall-safe pruning + CostFed skew-aware cardinality), choosing a join order with per-join bind-vs-hash-vs-streaming algorithm selection (characteristic-set star cardinality for intermediate sizes), and executing a memory-bounded non-blocking symmetric hash join over incrementally-arriving sub-results (StreamJoin, spill to a backing store, result multiset-equal to a blocking join). Pure + deterministic planning, no network I/O. Off by default; does not touch sparq-core/sparq-engine's lean build. NOT for live adaptive RE-planning mid-execution (ANAPSID adaptivity — deferred)."
 ---
 
 # sparq-fedplan — cost-based federated source selection + join planning
@@ -98,10 +98,47 @@ where per-row requests overtake a full scan; tune the round-trip penalty with
 cardinality (`Σ_{C⊇Q} count(C)·Π avg_mult`) for intermediate sizes, capturing the
 predicate correlation an independence product loses.
 
+## Non-blocking streaming join + spill (`StreamJoin`, sq-vf7q)
+
+The planner's `JoinAlgo::Streaming` choice corresponds to an execution-side operator:
+`StreamJoin`, an ANAPSID/XJoin-style **symmetric hash join** over two
+incrementally-arriving tuple streams. Feed tuples from either side as federated sub-results
+arrive; each `push` returns the results that arrival newly completes — it never blocks on
+either input finishing.
+
+```rust
+use sparq_fedplan::{StreamJoin, StreamJoinOptions, SpillStore, Tuple, Var, blocking_hash_join};
+
+let opts = StreamJoinOptions { mem_budget_tuples: 100_000, spill_store: SpillStore::TempFile };
+let mut join = StreamJoin::new([Var::new("s")], opts);
+let _ = join.push_left(Tuple::new([(Var::new("s"), "a".into()), (Var::new("o"), "1".into())]));
+let out = join.push_right(Tuple::new([(Var::new("s"), "a".into()), (Var::new("n"), "x".into())]));
+assert_eq!(out.len(), 1); // emitted the moment both sides hold key s=a — non-blocking.
+```
+
+**Bounded spill.** Memory is capped at `mem_budget_tuples`; when an insert would exceed it,
+the largest in-memory join-key partition is spilled to a backing run (a temp file under
+`std::env::temp_dir` by default — `std` only, no new dependency; `SpillStore::Memory` is an
+in-process simulation for tests). Spilling only relocates tuples; the probe consults both
+the live bucket and every spilled run for the key.
+
+**Correctness invariant (load-bearing).** The streamed + spilled result is *multiset-equal*
+to `blocking_hash_join(left, right, join_vars)` — same tuples, no loss, no duplication — for
+**any** stream interleaving and **any** budget (including one so low every partition spills).
+Each matching pair `(l, r)` is emitted exactly once, when the second of the two arrives and
+probes the other side (found in memory or a spill run). Proven by the `streamed_equals_*`,
+`spill_path_equals_*`, `duplicate_keys_*`, and `emits_before_inputs_exhausted` tests.
+
+The planner picks `Streaming` over plain `Hash` when a hash-class join's combined estimated
+inputs `L + R` exceed `PlanOptions::stream_threshold` (default 100 000 rows; set to
+`f64::INFINITY` to always use plain hash) — large joins run non-blocking + spillable rather
+than materialising a side up front.
+
 ## Deferred (NOT here)
 
-**ANAPSID-style non-blocking streaming joins with operator spill** and **live adaptive
-re-planning** are out of scope — this is a *static* plan computed up front. They are filed
-as a roadmap bead under epic **sq-3183**.
+**Live adaptive RE-planning** — switching the join algorithm or source mid-execution when
+observed rates diverge from the estimate (the harder half of ANAPSID's adaptivity) — is out
+of scope. The plan is still computed up front; sq-vf7q adds the streaming + spill *operator*
+the plan can name, not mid-flight re-planning. Filed as a roadmap bead under epic **sq-3183**.
 
-[OPUS-4.8] sq-a35t — flag for Fable re-review.
+[OPUS-4.8] sq-a35t / sq-vf7q — flag for Fable re-review.

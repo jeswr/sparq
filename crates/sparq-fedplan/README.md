@@ -73,6 +73,17 @@ println!("estimated total cost: {}", plan.total_cost);
   right with the left's bindings — cheap when the left is small + right selective) or a
   **hash/symmetric join** (scan both sides once — cheap when the left is large), and the
   decision *flips* at the expected cost threshold (tunable `PlanOptions::request_cost`).
+- **ANAPSID-style non-blocking streaming join + bounded spill** (`StreamJoin`) — the
+  execution-side operator the planner's `JoinAlgo::Streaming` choice names. It consumes two
+  incrementally-arriving tuple streams (federated sub-results at different rates), builds *and*
+  probes both sides, and emits matches as soon as both sides have a join key — without first
+  materialising either full input. Memory is bounded by `StreamJoinOptions::mem_budget_tuples`:
+  over-budget join-key partitions spill to a backing store (a temp file by default — `std`
+  only, no new dependency) and are reconciled on probe. **Correctness invariant** (tested): the
+  streamed + spilled result is *multiset-equal* to the equivalent blocking hash join
+  (`blocking_hash_join`) for any stream interleaving and any budget — no loss, no duplication.
+  A large hash-class join (`L + R` past `PlanOptions::stream_threshold`) is marked
+  `JoinAlgo::Streaming` so it runs non-blocking + spillable rather than materialising a side.
 - **Opt-in, zero core overhead** — a standalone member (like `sparq-canon`/`sparq-prov`),
   gated behind the `fedplan` cargo feature, **off by default**. Nothing in sparq's
   default build or the wasm artifact depends on it; the lean core is byte-identical
@@ -85,11 +96,27 @@ println!("estimated total cost: {}", plan.total_cost);
 |---|---|
 | Source selection (HiBISCuS prune + CostFed cardinality) | ✅ covered here |
 | Bind-vs-hash decision + greedy join order + CS star cardinality | ✅ covered here |
-| ANAPSID-style non-blocking streaming joins with operator spill | ⏳ deferred (roadmap bead, epic sq-3183) |
-| Live adaptive re-planning mid-execution | ⏳ deferred (same bead) |
+| ANAPSID-style non-blocking streaming join with operator spill (`StreamJoin`) | ✅ covered here (sq-vf7q) |
+| Live adaptive re-planning mid-execution | ⏳ deferred (roadmap bead, epic sq-3183) |
 
-This slice is a *static* plan computed up front; the deferred adaptive/streaming work is
-filed as a bead under epic sq-3183.
+The plan is still computed up front (static); sq-vf7q adds the streaming + spill *operator*
+the plan can name. Mid-execution adaptive re-planning is filed as a bead under epic sq-3183.
+
+## Streaming join (quick use)
+
+```rust
+use sparq_fedplan::{StreamJoin, StreamJoinOptions, Tuple, Var, blocking_hash_join};
+
+let mut join = StreamJoin::new([Var::new("s")], StreamJoinOptions::default());
+// Feed tuples from either side as they arrive; each push returns newly-derivable results.
+let _ = join.push_left(Tuple::new([(Var::new("s"), "a".into()), (Var::new("o"), "1".into())]));
+let out = join.push_right(Tuple::new([(Var::new("s"), "a".into()), (Var::new("n"), "x".into())]));
+assert_eq!(out.len(), 1); // emitted as soon as both sides have key `s=a` — non-blocking.
+```
+
+Cap memory with `StreamJoinOptions::mem_budget_tuples`; over-budget partitions spill
+(`SpillStore::TempFile` by default, `SpillStore::Memory` for tests). The result equals
+`blocking_hash_join` regardless of budget or arrival order.
 
 ## 📚 Learn more
 

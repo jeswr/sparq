@@ -46,15 +46,28 @@
 //! byte-identical with or without it. A build that does not enable `fedplan` compiles
 //! an empty crate.
 //!
+//! ## Streaming execution (sq-vf7q)
+//!
+//! 3. [`StreamJoin`] — an **ANAPSID-style non-blocking streaming join with bounded
+//!    operator spill** ([`stream`]): the execution-side operator the planner's
+//!    [`JoinAlgo::Streaming`] choice corresponds to. It consumes two incrementally-arriving
+//!    tuple streams (federated sub-results returning at different rates), builds *and*
+//!    probes both sides, and emits matches without first materialising either full input.
+//!    Memory is bounded by [`StreamJoinOptions::mem_budget_tuples`]: over-budget join-key
+//!    partitions spill to a backing store (a temp file by default — std only) and are
+//!    reconciled on probe. The load-bearing invariant — proven by tests — is that the
+//!    streamed + spilled result is **multiset-equal** to the equivalent blocking hash join
+//!    ([`blocking_hash_join`]) for any interleaving and any budget.
+//!
 //! ## Deferred (NOT in this slice — tracked as a roadmap bead)
 //!
-//! **ANAPSID-style non-blocking streaming joins with operator spill** and **live
-//! adaptive re-planning** are explicitly out of scope here. This slice is a *static*
-//! cost-based plan computed up front from descriptors; it does not adapt mid-execution,
-//! and it does not model memory-bounded streaming operators. Those are the natural next
-//! slice (see the roadmap bead filed from sq-a35t under epic sq-3183).
+//! **Live adaptive re-planning** — switching the join algorithm or source mid-execution
+//! when observed cardinalities/rates diverge from the estimate (the harder half of
+//! ANAPSID's adaptivity) — remains out of scope. This slice adds the non-blocking
+//! operator + bounded spill (sq-vf7q) on top of the static plan; mid-execution
+//! re-planning is filed as a roadmap bead under epic sq-3183.
 //!
-//! [OPUS-4.8] sq-a35t — flagged for Fable re-review.
+//! [OPUS-4.8] sq-a35t / sq-vf7q — flagged for Fable re-review.
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-a35t: crate has zero `unsafe`.
 #![cfg_attr(not(feature = "fedplan"), allow(dead_code, unused_imports))]
 
@@ -66,6 +79,9 @@ mod pattern;
 mod plan;
 #[cfg(feature = "fedplan")]
 mod selection;
+// [OPUS-4.8] sq-vf7q: the execution-side non-blocking streaming join + spill operator.
+#[cfg(feature = "fedplan")]
+mod stream;
 
 #[cfg(feature = "fedplan")]
 pub use descriptor::{
@@ -77,3 +93,8 @@ pub use pattern::{Bgp, Term, TriplePattern, Var};
 pub use plan::{plan_bgp, JoinAlgo, JoinNode, JoinTree, PlanOptions};
 #[cfg(feature = "fedplan")]
 pub use selection::{select_sources, PatternSources, SourceCandidate};
+// [OPUS-4.8] sq-vf7q.
+#[cfg(feature = "fedplan")]
+pub use stream::{
+    blocking_hash_join, run_streaming, SpillStore, StreamJoin, StreamJoinOptions, Tuple,
+};
