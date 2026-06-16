@@ -128,7 +128,7 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   max_concurrent: usize, max_results: Option<usize>, max_query_rows: Option<usize>,
   max_decompress_ratio: usize, max_subscriptions: usize, max_subscriptions_per_conn: usize,
   verbose: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
-  service_allow: ServiceAllowlist, /* + time_travel_* under feature */ }` with
+  service_allow: ServiceAllowlist, /* + time_travel_* under feature, + audit_log under `audit-log` */ }` with
   `ServerConfig::default()` and `ServerConfig::from_env()`.
   (`max_query_rows` = coarse memory cap; `max_decompress_ratio` = zip-bomb guard — `sq-ebii`.)
   `auth_token` (set: gates the write surface with a Bearer token, constant-time compared;
@@ -376,6 +376,7 @@ env overrides the default.
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
+| `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |
 
 In a library: `AppState::with_config(graph, ServerConfig { max_concurrent: 64, ..Default::default() })`
 then `router(state)`, or `harden(my_router, &config)`.
@@ -441,6 +442,40 @@ Library callers set all four on `ServerConfig` (`query_timeout`, `max_query_rows
 and `update_in_place_with_budget`, and wrap calls in
 `sparq_engine::with_service_egress_policy(strict, [host], || …)`.
 
+### Access audit log — opt-in per-query audit trail (`sq-0bxp`, CDMC CD-2)
+
+A **per-query access audit log** for compliance regimes that need a per-subject / per-query
+trail (CDMC CD-2, ISO 27001 A.8.15, EU CRA logging) — distinct from the aggregate-only
+`/metrics`. **Doubly opt-in:** compile with the `audit-log` cargo feature, then turn it on at
+runtime with `--audit-log` (env `SPARQ_AUDIT_LOG=1`). Off (either), the module and every call
+site are `#[cfg]`-stripped or short-circuited before any record is built — a request pays
+essentially zero.
+
+For each query / update / Graph-Store request the server emits **one** structured `tracing`
+event under the dedicated `target: "sparq_server::audit"` (`tracing::info!`). Route it to your
+sink with the standard `RUST_LOG` machinery, independently of the `--verbose` request log:
+`RUST_LOG=sparq_server::audit=info`. (`--audit-log` installs a subscriber on its own if
+`--verbose` did not.) Fields:
+
+| field | meaning |
+| --- | --- |
+| `requester` | `anonymous`, or `token:<fnv1a-hash>` of the presented Bearer token — **never the raw token** |
+| `op` | `query` / `update` / `graph_read` / `graph_write` (operation class, keyed on whether it mutates) |
+| `fingerprint` | FNV-1a hash (hex) of the trimmed query/update text — **not the query text** |
+| `decision` | `allowed` or `denied` |
+| `reason` | denial reason (`auth: missing or invalid Bearer token`); empty when allowed |
+| `status` | the HTTP status the client saw (`200` / `401` / `413` / …) |
+| `rows` | result-row count when known (else absent — `status` is the authoritative outcome) |
+| `duration_us` | handler wall-clock in microseconds |
+
+**No-PII / no-info-leak posture (reuses the #241 lesson):** this is a **server-side** log under
+the operator's control — it is NEVER written to the HTTP response. It deliberately does **not**
+log the full query text (raw SPARQL can disclose loaded-data fragments or caller PII — the #241
+contract) nor the Bearer secret; only a stable, non-reversible fingerprint of each, enough to
+correlate repeated identical queries / a recurring caller across requests and restarts. Library
+callers set `ServerConfig { audit_log: true, .. }` (field present only with the feature). See
+`crates/sparq-server/src/audit.rs`.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Auth — optional Bearer write gate; loopback-by-default; non-loopback bind refused
@@ -448,120 +483,4 @@ and `update_in_place_with_budget`, and wrap calls in
   anyone who can reach the port) — the back-compat default. Set `--auth-token <TOKEN>` (env
   `SPARQ_AUTH_TOKEN`) to require `Authorization: Bearer <TOKEN>` on every WRITE (SPARQL Update
   + GSP `PUT`/`POST`/`DELETE`); `401` + `WWW-Authenticate: Bearer` otherwise (constant-time
-  compared; QLever's `-a <token>`; missing-vs-wrong are indistinguishable). The classification
-  keys on whether the request **mutates**, not the route — an Update smuggled through the
-  query path is gated too. Add `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO
-  gate reads — INCLUDING the subscription transports (`/subscriptions` WS + `/subscriptions/sse`
-  SSE, both a read surface), closing the prior read-auth bypass (bead `sq-cxk5`): the SSE GET
-  takes the `Authorization: Bearer` header; the WS upgrade accepts that header OR (for browsers)
-  a `Sec-WebSocket-Protocol: bearer.<token>` subprotocol. The binary binds
-  `127.0.0.1:3030` by default and **refuses** a non-loopback
-  `--addr` (incl. `0.0.0.0`/`::`) unless `--allow-remote` / `SPARQ_ALLOW_REMOTE=1` OR the
-  whole surface is authenticated (`--auth-token` AND `--auth-token-read`); even then it warns.
-  A write-token alone still leaves reads open, so it does NOT by itself make a remote bind
-  safe. Deliver the token over TLS (terminate at a proxy). For per-user authz front it with a
-  reverse proxy / gateway (or `sparq-solid`). The token is authentication, NOT a resource
-  cap: it is orthogonal to the DoS caps. No rate limit; `--max-results` / `--max-query-rows`
-  are unlimited by default — set the four hardening caps (timeout, memory, decompression-ratio,
-  SERVICE allowlist; see "Server hardening — the four DoS/SSRF limits") **plus** a gateway
-  rate limiter before exposing it (beads `sq-zcby`, `sq-o4qf`, `sq-ebii`, `sq-4w18`).
-- **SERVICE federation (egress allowlist).** `SERVICE` is OFF in the default build (build
-  with `--features service` to enable it). Even enabled, the server is **default-DENY-all
-  SERVICE**: a `SERVICE <iri>` clause reaches **nothing** unless its host is allowlisted —
-  via `--service-allow HOST` / `*.SUFFIX` (repeatable), `--service-allow-file PATH` (one
-  entry per line), or `SPARQ_SERVICE_ALLOW` (comma/whitespace-separated). All three are
-  combined additively (the CLI only ever widens the env baseline). Rationale: a `SERVICE`
-  clause turns attacker-controlled query text into an outbound request from the server
-  host (textbook SSRF; worst case the `169.254.169.254` cloud-metadata IP), so the
-  network-exposed surface must opt in to every reachable host. Matching is
-  case-insensitive against the SERVICE IRI authority; a `*.example.org` entry matches the
-  apex `example.org` and any subdomain. Unlike the engine's standalone default (which lets
-  public IPs through and only blocks private ones), the server is **strict**: even a public
-  host must be on the allowlist. The allowlist applies uniformly to queries, ASK,
-  CONSTRUCT/DESCRIBE, subscriptions and federated `INSERT … WHERE` updates, and is enforced
-  before any socket is opened (DNS-rebinding-safe, on the *resolved* IP). The startup log
-  prints the effective allowlist. Beads `sq-4w18` (this wiring), `sq-2v6f` (the engine SSRF
-  filter). Embedders that drive the engine directly use
-  `sparq_engine::with_service_egress_policy(strict, [host], || …)` /
-  `with_service_egress_allow([host], || …)`.
-- **Feature flags.** `server` (default-on) pulls axum/tokio/tower — the binary needs it
-  (`required-features = ["server"]`). `time-travel` (default **off**) enables
-  `?generation=N` pinning, the `Sparq-Generation` header, `AppState::at`, and the
-  retention flags. `geo` (default **off**) installs sparq-geo's `geof:` GeoSPARQL
-  functions on query/update/subscription paths; without it an unknown `geof:` IRI is a
-  `500`. `federation-descriptors` (default **off**, `sq-d3d8`) pulls the light
-  `sparq-introspect` crate and serves the OPT-IN VoID + Service-Description discovery
-  endpoints (still gated at runtime by `--federation-descriptors`; see "Federation
-  discovery"). Run feature tests: `cargo test -p sparq-server --features time-travel` /
-  `--features geo` / `--features federation-descriptors`.
-- **Named graphs are real (since conformance round 3).** The engine stores the FULL dataset
-  — default graph + named graphs — so `GRAPH <g> { … }` / `GRAPH ?g { … }` evaluate, and a
-  GSP graph resource (`?graph=<iri>` or the direct request URI) addresses a genuine named
-  graph (no longer a default-graph alias). `FROM`/`FROM NAMED` and the protocol's
-  `default-graph-uri`/`named-graph-uri` params are accepted/threaded. Time-travel pinning is
-  `/sparql` queries only (GSP read/write and subscriptions always operate on current).
-- **Update operations.** Engine handles `INSERT DATA`, `DELETE DATA`, `CLEAR`/`DROP`/`CREATE`
-  (DEFAULT / named / ALL), `LOAD`, and `DELETE/INSERT … WHERE` — over the default graph AND
-  named graphs. A failing operation is refused with `400`, atomically (no partial effect
-  published). `apply_update` **blocks** (group-commit + O(graph) fork) — never call it on the
-  async runtime directly; the HTTP handler (and the GSP write verbs) already use
-  `spawn_blocking`.
-- **Multi-operation update bodies are accepted and applied ATOMICALLY (one request, one
-  commit).** A SPARQL 1.1 Update request is a sequence of `;`-separated operations, and the
-  endpoint takes the WHOLE body as ONE update (it is never split on `;`): e.g. a Solid PSS
-  `putDocument` body — `DROP SILENT GRAPH <r> ; INSERT DATA { GRAPH <r> … ; GRAPH <parent>
-  ldp:contains <r> }` — is one request → a single `204`, with the resource graph AND the parent
-  containment triple either BOTH applied or (on any operation failing) NEITHER. The sequenced
-  writer applies the body to a private fork and publishes only on full success, so a partial
-  body is never visible (in-memory all-or-nothing). On `--persist` the whole body's resolved
-  delta is committed as ONE fsync'd transaction-journal frame BEFORE the `204`, so a crash
-  mid-body can never leave the parent `ldp:contains` desynced from the child graph it points at
-  (the journal redoes the whole frame, or none of it, on `Graph::open`). (sq-ycle / gh-48; see
-  `crates/sparq-server/tests/persist.rs::pss_combined_multiop_body_accepted_and_atomic` and
-  `::invalid_second_op_leaves_no_partial_write`.)
-- **GSP write created-vs-replaced status is advisory.** PUT/POST sample graph existence from
-  the current generation to choose `201` vs `204`/`200`; the write itself is atomic on the
-  sequenced writer regardless. An existing-but-empty named graph reads as absent (the engine
-  has no separate "empty graph exists" bit outside an in-flight update), so it may report
-  `201` on a write — this never affects correctness of the data, only the status code.
-- **Durability — opt-in via `--persist DIR` (default in-memory).** With NO `--persist` the
-  server is in-memory and updates are **lost on restart** (the back-compat default). Pass
-  `--persist <DIR>` (env `SPARQ_PERSIST_DIR`) to make the on-disk index at `DIR` the durable,
-  rebuildable source of truth (QLever's `--persist-updates`): every committed UPDATE — default
-  graph AND named graphs — is write-ahead-logged + **fsync'd before the group-commit ack** (the
-  `204`), so a process restart on the same `DIR` restores **all** prior updates with **no
-  rebuild** (`Graph::open` replays the WAL). On startup an existing store at `DIR` is opened (its
-  WAL replayed; any `DATA_FILE` seed ignored — the persisted store wins); an empty `DIR` is
-  seeded from `DATA_FILE`. Library callers set `ServerConfig::persist_dir` and build with
-  `AppState::try_with_config` (returns the durable-open error). Deferred hardening (beaded):
-  byte-accounted durability metrics, graceful degradation on a *transient* disk error (today a
-  durability failure refuses the write rather than losing it), and WAL-durable `CLEAR`/`DROP
-  GRAPH <g>` of an existing named graph. (sq-7cxr / gh-44.)
-- **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
-  (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.
-- **Error bodies.** Every error is structured JSON `{"error": "..."}` with
-  `Content-Type: application/json` (the `405` keeps its `Allow` header). POST query
-  requires `Content-Type: application/sparql-query` or `application/x-www-form-urlencoded`
-  (else `415`); a GET without `query=` is `400`.
-- **Error bodies are sanitized — no information leak (sq-cz89 / sq-j9zs).** On the
-  no-auth-by-default path an error body carries only a **stable, generic CLASS message**
-  (e.g. `malformed query`, `malformed RDF body`, `malformed gzip body`,
-  `query execution error`, `update failed: invalid SPARQL update`). It deliberately does
-  **NOT** echo the caller's submitted query/UPDATE/RDF text, a fragment of the loaded RDF
-  (parsers like `oxttl`/`spargebra` quote the offending token — that would confirm loaded
-  triples), or any server-side filesystem path (e.g. a `--persist` mirror's path inside a
-  transient durable-write `503`). The full detailed cause is preserved for the **operator**
-  via the server-side `tracing` log (target `sparq_server`), surfaced only through the
-  opt-in `--verbose` / `RUST_LOG` subscriber — never the HTTP response. Status semantics
-  (the `400`/`413`/`415`/`503`/`500` classification) are unchanged; only the prose detail
-  is withheld. Regression tests assert a sentinel token never appears in any error body.
-- **mimalloc** is the binary's global allocator (matters under concurrent load).
-
-## See also
-
-- `serve` — the underlying `sparq-serve` generation-ring + sequenced group-commit writer
-  (the concurrency primitives `router`/`AppState` wire up).
-- `engine` — `sparq-engine` query/ask/construct/describe + `QueryBudget` the server drives.
-- `cli` — the `sparq` command-line surface over the same engine.
-- `geo` — the `geof:` GeoSPARQL extension functions enabled by `--features geo`.
-- `core` — `sparq_core::Graph` (`Graph::load_str`) the dataset is loaded into.
+  compared; QLever's `-a <token>`; missing-v

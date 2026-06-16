@@ -20,6 +20,15 @@ pub mod service_config;
 #[cfg(feature = "server")]
 pub mod http;
 
+/// [OPUS-4.8] (sq-0bxp) OPT-IN per-query access audit log (CDMC CD-2 / ISO 27001 A.8.15 /
+/// EU CRA logging). Compiled only behind the `audit-log` feature, and emitted only when
+/// [`ServerConfig::audit_log`] (`--audit-log` / `SPARQ_AUDIT_LOG=1`) is also set. Emits a
+/// structured `tracing` record per request under target `sparq_server::audit`; logs a
+/// NON-reversible query fingerprint + token-identity fingerprint, never the full query text
+/// or the Bearer secret (the #241 info-leak posture). See the module docs.
+#[cfg(feature = "audit-log")]
+pub mod audit;
+
 /// [OPUS-4.8] (sq-d3d8, epic sq-3183) OPT-IN federation discovery descriptors — the W3C
 /// VoID dataset description (`GET /.well-known/void`) and the SPARQL 1.1 Service Description
 /// (a `GET /sparql` with no `query`). Compiled only behind the `federation-descriptors`
