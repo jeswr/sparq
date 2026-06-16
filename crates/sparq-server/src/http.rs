@@ -172,6 +172,23 @@ pub struct ServerConfig {
     pub time_travel_max_age: Option<Duration>,
     /// Log every request/response via `tower_http::trace::TraceLayer`.
     pub verbose: bool,
+    /// [OPUS-4.8] (sq-toze.34, epic sq-toze) **Redact request content from the `--verbose`
+    /// request log.** When `true` (the **default**), the request log records the URI's *path*
+    /// verbatim but replaces its *query string* — where `GET /sparql?query=…` carries the full
+    /// SPARQL query text, which can contain PII (a patient IRI, an email in a `FILTER`) — with a
+    /// `<redacted len=N fp=…>` placeholder: a length signal plus a stable NON-reversible
+    /// fingerprint, so logs stay correlation-useful (same query => same `fp`) without exposing
+    /// content. When `false` (`--log-full-requests` / `SPARQ_LOG_FULL_REQUESTS=1`), the URI is
+    /// logged verbatim, exactly as the bare `TraceLayer` did — the deliberate debug escape hatch.
+    ///
+    /// **Default ON, rationale:** a privacy-respecting server should not leak request content into
+    /// operator logs by accident; turning `--verbose` on for debugging should not silently start
+    /// writing potentially-sensitive query text to disk / a SIEM. Operators who genuinely need the
+    /// raw text opt in explicitly. This is **log-CONTENT redaction, not anonymity**: the log still
+    /// records method, path/endpoint, status, a size signal and timing (it would not be a request
+    /// log otherwise). It is also NOT the ZK/MPC privacy story. Inert unless `verbose` is also on
+    /// (no request log => nothing to redact). See [`crate::redact`].
+    pub redact_logs: bool,
     /// [OPUS-4.8] (sq-0bxp) **Per-query access audit log** runtime switch (CDMC CD-2 / ISO
     /// 27001 A.8.15 / EU CRA logging). When `true`, every query / update / Graph-Store request
     /// emits a structured `tracing` record under the dedicated `target: "sparq_server::audit"`
@@ -304,6 +321,11 @@ impl Default for ServerConfig {
             #[cfg(feature = "time-travel")]
             time_travel_max_age: None,
             verbose: false,
+            // [OPUS-4.8] sq-toze.34: redact request content from the verbose log by DEFAULT — a
+            // privacy-respecting default so enabling --verbose for debugging does not silently
+            // start writing query text (possibly PII) into operator logs. Opt out with
+            // --log-full-requests / SPARQ_LOG_FULL_REQUESTS=1. Inert unless `verbose` is also set.
+            redact_logs: true,
             // [OPUS-4.8] sq-0bxp: audit log OFF by default even when the feature is compiled in
             // (the operator opts in deliberately via --audit-log / SPARQ_AUDIT_LOG=1).
             #[cfg(feature = "audit-log")]
@@ -390,6 +412,12 @@ impl ServerConfig {
         #[cfg(feature = "audit-log")]
         if let Ok(v) = std::env::var("SPARQ_AUDIT_LOG") {
             cfg.audit_log = env_truthy(&v);
+        }
+        // [OPUS-4.8] sq-toze.34: SPARQ_LOG_FULL_REQUESTS truthy ("1"/"true"/"yes"/"on") OPTS OUT of
+        // request-log redaction (logs full URIs/query text verbatim). Default (unset / falsey) keeps
+        // redaction ON — the privacy-respecting posture. Only meaningful together with --verbose.
+        if let Ok(v) = std::env::var("SPARQ_LOG_FULL_REQUESTS") {
+            cfg.redact_logs = !env_truthy(&v);
         }
         // [OPUS-4.8] sq-o4qf: SPARQ_ALLOW_REMOTE truthy ("1"/"true"/"yes"/"on", case-insensitive)
         // opts in to a non-loopback bind. Anything else (incl. unset / "0" / "false") leaves the
@@ -1843,7 +1871,16 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
             .layer(DefaultBodyLimit::max(config.max_body_bytes)),
     );
     if config.verbose {
-        routes.layer(TraceLayer::new_for_http())
+        // [OPUS-4.8] sq-toze.34: with redaction ON (the default), swap tower-http's
+        // `DefaultMakeSpan` (which records the RAW request URI — and so the full
+        // `?query=…` SPARQL text, a PII exposure) for a span that records a redacted
+        // target (path verbatim, query string => `<redacted len=N fp=…>`). With
+        // --log-full-requests the bare TraceLayer is used, logging the URI verbatim as before.
+        if config.redact_logs {
+            routes.layer(TraceLayer::new_for_http().make_span_with(crate::redact::RedactingMakeSpan))
+        } else {
+            routes.layer(TraceLayer::new_for_http())
+        }
     } else {
         routes
     }

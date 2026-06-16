@@ -17,6 +17,13 @@ pub mod results;
 /// posture and rationale.
 pub mod service_config;
 
+/// [OPUS-4.8] (sq-toze.34, epic sq-toze) **Request-log redaction** — keeps SPARQL query / update
+/// text out of the `--verbose` request log (a PII/privacy exposure: `GET /sparql?query=…` puts
+/// the full query in the logged URI). On by default ([`ServerConfig::redact_logs`]); opt out with
+/// `--log-full-requests` / `SPARQ_LOG_FULL_REQUESTS=1`. Log-CONTENT redaction, not anonymity — see
+/// the module docs for the metadata boundary that remains. Always compiled + unit-tested.
+pub mod redact;
+
 #[cfg(feature = "server")]
 pub mod http;
 

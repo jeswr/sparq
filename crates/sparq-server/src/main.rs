@@ -69,6 +69,11 @@
 //!                             request body (zip-bomb guard; 413), 0 = refuse gzip bodies
 //!                                                                        [20, env SPARQ_MAX_DECOMPRESS_RATIO]
 //!   --verbose                 per-request logging (TraceLayer)
+//!   --log-full-requests       [OPUS-4.8 sq-toze.34] OPT OUT of request-log redaction: log the
+//!                             raw request URI (incl. the full `?query=` SPARQL text) verbatim.
+//!                             By DEFAULT the --verbose log redacts the URI query string to a
+//!                             length+fingerprint placeholder (PII/privacy hygiene). Inert
+//!                             without --verbose.                  [env SPARQ_LOG_FULL_REQUESTS=1]
 //!
 //! Access audit log (opt-in `audit-log` cargo feature — see skills/http-server/SKILL.md
 //! "Access audit log"; CDMC CD-2 / ISO 27001 A.8.15 / EU CRA logging):
@@ -173,6 +178,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.time_travel_max_age = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--verbose" => config.verbose = true,
+            // [OPUS-4.8] sq-toze.34 (epic sq-toze): OPT OUT of request-log redaction. By default
+            // the --verbose request log redacts the URI query string (where GET /sparql?query=…
+            // carries the full SPARQL text, possibly PII) to a length+fingerprint placeholder.
+            // This flag logs the raw URI verbatim — the deliberate debug escape hatch. Overrides
+            // SPARQ_LOG_FULL_REQUESTS. Inert without --verbose.
+            "--log-full-requests" => config.redact_logs = false,
             // [OPUS-4.8] sq-0bxp: opt in to the per-query access audit log (CDMC CD-2). Emits a
             // structured `tracing` record per request under target `sparq_server::audit` (route
             // it with RUST_LOG). Only present with the `audit-log` cargo feature.
@@ -244,7 +255,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service} [--verbose] [DATA_FILE]\n\n  \
+                     [--max-subscriptions-per-conn N]{time_travel}{service} [--verbose] \
+                     [--log-full-requests] [DATA_FILE]\n\n  \
                      PERSIST: --persist DIR (env SPARQ_PERSIST_DIR) makes the on-disk index at \
                      DIR the durable source of truth (QLever --persist-updates): every committed \
                      UPDATE is WAL-fsync'd before ack, so a RESTART on the same DIR restores ALL \

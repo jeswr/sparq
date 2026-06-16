@@ -51,7 +51,8 @@ config.audit_log]`, then `if want_subscriber { tracing_subscriber::fmt()…init(
 | Mode | Flag (default) | Request log? | What is recorded | PII exposure |
 |---|---|---|---|---|
 | **Default** | none (`verbose:false`) | **No** | Nothing per-request. No subscriber installed. Only aggregate Prometheus metrics if `/metrics` is scraped (counts/histograms, no content). | **None per-request.** Minimisation-clean by default. |
-| **Verbose** | `--verbose` | **Yes** (`TraceLayer`) | Per-request/response `tracing` span at `debug` (`tower_http=debug,sparq_server=debug`) — HTTP **method, URI, version, status, latency**. | **Yes** — see §2. The URI of a **GET** `/sparql?query=…` carries the **full query text** in the query string. |
+| **Verbose** (redaction ON — default) | `--verbose` | **Yes** (`TraceLayer`) | Per-request/response `tracing` span at `debug` (`tower_http=debug,sparq_server=debug`) — HTTP **method, status, latency**, and a **redacted URI**: path verbatim, query string → `<redacted len=N fp=…>`. | **Minimised.** The query text is replaced by a length + non-reversible fingerprint (`sq-toze.34`). Residual = metadata (method/endpoint/status/size/timing), not content. |
+| **Verbose + full requests** | `--verbose --log-full-requests` | **Yes** (`TraceLayer`) | As above but the **raw URI** verbatim. | **Yes** — see §2. The URI of a **GET** `/sparql?query=…` carries the **full query text**. Deliberate operator opt-out of redaction (`SPARQ_LOG_FULL_REQUESTS=1`). |
 | **Audit** (opt-in build) | `--audit-log` (feature `audit-log`) | Structured access record per query/update | `op` class, **non-reversible query fingerprint**, **requester fingerprint** (token hash or `anonymous`), decision, status, duration — **never** the raw query text or token. | **Minimised by design** — fingerprints, not content (§3). |
 | **Metrics** | `/metrics` endpoint | n/a | Aggregate counters/histograms/gauges only (per-endpoint/status counts, latency buckets, triple/subscription gauges). | **None** — no query text, no result rows, no client identifiers (`crates/sparq-server/src/metrics.rs`). |
 
@@ -74,11 +75,13 @@ When the operator turns on `--verbose`, the request log can contain personal dat
 
 1. **The GET query string.** A `GET /sparql?query=<URL-encoded SPARQL>` request logs the **URI**
    including the query string, so the **full SPARQL query text** (and any identifier/literal it
-   embeds, per §0) lands in the log line. This is the primary PII vector in the request log and
-   is tracked as gap **PR-G4** in [`gap-register.md`](./gap-register.md) (bead **sq-toze.34** —
-   add a `--log-redact-queries` control / log method+path+status only). **Until that lands, an
-   operator who needs request logging in production should prefer POST for queries (body not
-   logged) and/or scrub query strings from the log pipeline.**
+   embeds, per §0) would land in the log line. **[OPUS-4.8] sq-toze.34 — now redacted by default:**
+   with `--verbose`, the request log redacts the URI query string to a `<redacted len=N fp=…>`
+   length + non-reversible fingerprint placeholder (gap **PR-G4** in [`gap-register.md`](./gap-register.md)
+   is now CLOSED). An operator only sees the verbatim query text if they deliberately pass
+   `--log-full-requests` (`SPARQ_LOG_FULL_REQUESTS=1`). **Honest boundary:** this is log-*content*
+   redaction, not anonymity — the redacted line still records method, endpoint, status, a size
+   signal and timing. (POST query bodies were never logged by `TraceLayer`; that remains true.)
 2. **Error bodies (P-12).** Several parse/validation error bodies historically echoed caller
    input (SPARQL query text or fragments of the loaded RDF data) to the caller. This was the
    most material privacy item and is **now sanitized at the HTTP boundary** by **PR #241** (the
@@ -92,6 +95,12 @@ The engine ships **data-minimisation-by-default** for logs:
 
 - **No request log unless asked.** Default `verbose:false` → no subscriber → no per-request
   records (P-2). The operator must take a deliberate action (`--verbose`) to log requests.
+- **[OPUS-4.8] sq-toze.34: request log redacts content by default.** Even with `--verbose`, the
+  request log replaces the URI query string (the GET query-text vector) with a length +
+  non-reversible FNV-1a fingerprint, so the query content is not written to the log. Logging the
+  verbatim URI is a deliberate opt-out (`--log-full-requests` / `SPARQ_LOG_FULL_REQUESTS=1`). This
+  is log-*content* redaction, not anonymity — method/endpoint/status/size/timing metadata remains
+  (`crates/sparq-server/src/redact.rs`; `crates/sparq-server/tests/log_redaction.rs`).
 - **Audit trail is fingerprints, not content.** The opt-in `--audit-log` records a **stable
   non-reversible FNV-1a fingerprint** of the normalised query text and of the requester token —
   enough to correlate repeated identical queries or attribute activity to a caller, **without
@@ -106,8 +115,11 @@ The engine ships **data-minimisation-by-default** for logs:
   data to a third party (P-2).
 
 This is a genuinely minimisation-friendly default: an out-of-the-box sparq server writes **no
-per-request personal data anywhere**. The risk surface appears only when the operator turns on
-`--verbose` (request log) and is concentrated in the **GET query string** (PR-G4 / sq-toze.34).
+per-request personal data anywhere**. With `--verbose` the request log now **redacts the GET
+query string by default** (sq-toze.34 / PR-G4 closed); the only way query text reaches the log is
+the deliberate `--log-full-requests` opt-out. The residual under a redacted `--verbose` log is
+**metadata** (method/endpoint/status/size/timing), not content — log-content redaction is not
+anonymity.
 
 ## 4. Operator guidance — keep logs PII-clean
 
