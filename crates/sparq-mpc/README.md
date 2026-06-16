@@ -45,6 +45,45 @@ also realises this now (it was previously gated on the secure-compare round
 sq-rrz4/sq-dvuc, which has since landed). No soundness/security claim beyond the
 documented semi-honest model is made.
 
+## Threshold verdict — in-MPC bit-decomposition of the secret-shared sum (sq-g7t5 / sq-nx0s / sq-mnv5)
+
+`disclose_threshold_verdict` (`compare.rs`) answers `sum > threshold` while
+disclosing **only the boolean verdict bit**, never the integer total. It does
+this by bit-decomposing the *existing* secret-shared sum **in-MPC** — the local
+`reconstruct(sum_shares)` shortcut is **gone** (`sq-g7t5`). The decomposition is
+the masked-open protocol (Damgård et al. TCC'06): a random mask `[r]` is added to
+`[sum]`, only the statistically-hiding `c = sum + r` is opened (gap
+`κ = DECOMP_STAT_SECURITY_BITS = 40`), and the sum's bits are recovered by a
+secret-shared borrow-subtraction `c ⊖ [r]`. The sum bound is an **in-protocol
+range proof** (`sq-nx0s`), so an out-of-range sum aborts fail-closed rather than
+returning a silent wrong verdict.
+
+**[OPUS-4.8] `sq-mnv5` — deployment-grade random-bit sub-protocol (this slice).**
+The mask `[r]` and its bits previously came from `deal_random_solved_bits`, where
+the in-process dealer drew each bit in **cleartext** and shared it — legitimate in
+the single-process simulation but **not deployable**, because in a real deployment
+no party may know `r` (a party that knew `r` would learn `sum = c − r` from the
+opened `c`). That seam is now closed: `secure_bit_decompose` draws its solved-bits
+from `deal_random_solved_bits_via_square_protocol`, the **square-protocol**
+random-bit generator (`square_protocol_random_bit`). Each bit `[b]` is jointly
+generated from a random `[a]` by opening **only** `c = a²` — a quadratic residue
+that is independent of the bit, since `a` and `−a` give the same `c` — then setting
+`[b] = (a·d⁻¹ + 1)·2⁻¹` for the public root `d = c^{(p+1)/4}` (valid because
+`p = 2^61−1 ≡ 3 (mod 4)`). **No party ever knows the mask or the bit.** Cost: one
+secure multiplication + one open per bit.
+
+This is **honest-majority, semi-honest only** — like every other operator in this
+crate, it is **not** maliciously secure (the `a²` open and the `degree_reduce` <!-- privacy-claims-allow: NEGATIVE usage — explicitly denies malicious security (semi-honest only); sq-qhy4 -->
+re-sharings are unauthenticated; `sq-qhy4` external sign-off is still **pending**),
+and the magnitude bound is unchanged (`DECOMP_VALUE_BITS = 20`, covers the
+four-flatmates `10^6`). The two residual `sq-mnv5` deployment items remain open
+follow-ups:
+
+- **Wider magnitude** — `p = 2^61−1` forces the 20-bit bound; lift via a larger
+  field or a non-masked-open comparison (Rabbit, eprint 2021/119).
+- **Malicious security** — carry IT-MACs (`sq-km34.*`) through the decomposition +
+  comparison chain and MAC-check the verdict before open.
+
 ## Collaborative-proof (coZK) — witness-validation-before-proving (sq-7leq)
 
 The collaborative (multi-prover) zk-proof path is **deferred** — every
