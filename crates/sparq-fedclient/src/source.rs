@@ -35,15 +35,55 @@
 //!   rather than a streamed [`SolutionStream`]; the SRJ→solution parse and the streaming
 //!   boundary are **Phase 5** (`stream`/`operators` modules). The transport seam and the
 //!   SSRF gate — the load-bearing reuse + safety pieces of §4.1 — are real here.
-//! * [`SourceType::BrTpf`] / [`SourceType::Tpf`] are **Phase-6 stubs**: their adapters
-//!   exist (so the enum is total) but `discover()`/`execute()` return
-//!   [`FedError::Unsupported`] with a clear "Phase 6" message rather than pretending.
 //! * [`SourceType::Local`] (in-process `Graph` via `sparq-engine` local eval) is wired in
 //!   the planner/operators phases; here it is represented in the enum with a capability
 //!   of "everything" and a `not-yet-wired` execute stub.
 //!
+//! # What **Phase 6** adds (brTPF + TPF — bead sq-2qze)
+//!
+//! Phase 6 turns the [`SourceType::BrTpf`] / [`SourceType::Tpf`] *capability stubs* into
+//! **real Triple-Pattern-Fragments adapters** that return a COMPLETE answer for a single
+//! triple pattern:
+//!
+//! * **[`TpfSource`] (plain TPF)** — fetches the fragment(s) for one triple pattern over a
+//!   [`FragmentTransport`] seam, follows `hydra:next` pagination to exhaustion, and binds
+//!   the matched triples back into the pattern's variables. There is **no** bind-join: a
+//!   plain-TPF source shifts every join client-side, so the adapter just materialises the
+//!   whole (selective) fragment for the planner to hash-join locally (design §2.1).
+//! * **[`BrTpfSource`] (bindings-restricted TPF)** — additionally pushes a block of *at
+//!   most `maxMpR`* upstream bindings with each fragment request, so the server returns
+//!   only triples that join with at least one attached binding (the standardised brTPF
+//!   bind-join, Hartig & Buil-Aranda, ODBASE 2016). The adapter chunks the upstream
+//!   bindings into `maxMpR`-sized blocks, issues one fragment request per block (paginated
+//!   to exhaustion), and concatenates the per-block matches — a block/bind nested-loop
+//!   join that is **complete** by construction (every binding is offered to the server in
+//!   exactly one block, and every matching triple comes back).
+//! * **Count-metadata cardinality** — both adapters read the fragment's
+//!   `hydra:totalItems`/`void:triples` count (the TPF cardinality oracle) and expose it via
+//!   [`TpfSource::cardinality`] / [`BrTpfSource::cardinality`] and a one-pattern
+//!   [`SourceDescriptor`] from [`discover()`](FederatedSource::discover), so the planner's
+//!   CostFed estimate keys on the *served* count rather than a uniform guess. For brTPF the
+//!   count metadata is the **unbound** pattern count (a recall-safe upper bound; the bound
+//!   block only narrows it).
+//!
+//! The wire seam is the [`FragmentTransport`] trait (one method: fetch one fragment page,
+//! optionally with an attached binding block, → matched triples + the page's count + the
+//! next-page token). It is the TPF analogue of the [`Transport`] SRJ seam and is tested
+//! with an in-memory fixture server ([`source` tests]) so the adapters are exercised on the
+//! REAL fetch→parse→bind→paginate→bind-join path with **zero** network. A native HTTP
+//! `FragmentTransport` (ureq, the same default-deny SSRF resolver) lands with the streaming
+//! phase; Phase 6 ships the adapters + the seam + the completeness invariant.
+//!
+//! `FederatedSource::execute` still returns the SRJ-style `String` body for the
+//! [`Endpoint`] adapter; the TPF adapters answer through the typed
+//! [`TpfSource::solutions`] / [`BrTpfSource::solutions`] methods (a fragment server speaks
+//! triples, not SPARQL-Results-JSON), and their `execute` forwards a clear
+//! [`FedError::Unsupported`] pointing the caller at `solutions` — no overclaim, no lossy
+//! re-serialisation through SRJ.
+//!
 //! [OPUS-4.8] sq-rsxf (epic sq-dnko / sq-3183): Phase-2 source-type abstraction +
-//! Endpoint adapter + default-deny SSRF guard. Flagged for Fable re-review when available.
+//! Endpoint adapter + default-deny SSRF guard. [OPUS-4.8] sq-2qze: Phase-6 brTPF + TPF
+//! adapters + count-metadata cardinality. Flagged for Fable re-review when available.
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -63,8 +103,9 @@ pub enum FedError {
     /// The underlying transport (`fetch`) returned an error (DNS, connect, non-2xx,
     /// malformed body) — the engine's `Transport`-error string, forwarded verbatim.
     Transport(String),
-    /// A capability/interface this phase does not implement (brTPF/TPF land in Phase 6;
-    /// `Local` execute is wired in the planner/operators phases).
+    /// A capability/interface answered through a different entry point (a fragment source's
+    /// `execute` points the caller at its typed `solutions` method; `Local` execute is wired
+    /// in the planner/operators phases).
     Unsupported(String),
 }
 
@@ -122,10 +163,10 @@ pub enum Interface {
     /// A full SPARQL 1.1 (Protocol) endpoint — arbitrary SPARQL, VALUES bind-join.
     Endpoint,
     /// A bindings-restricted Triple Pattern Fragments server — single triple pattern +
-    /// a bound-tuple block (`maxMpR(n)`) bind-join. **Phase-6 stub here.**
+    /// a bound-tuple block (`maxMpR(n)`) bind-join. Real adapter in Phase 6 ([`BrTpfSource`]).
     BrTpf,
     /// A plain Triple Pattern Fragments server — single triple pattern, no bind-join.
-    /// **Phase-6 stub here.**
+    /// Real adapter in Phase 6 ([`TpfSource`]).
     Tpf,
     /// The in-process `sparq-engine` over a local `Graph` — "everything".
     LocalEngine,
@@ -207,7 +248,7 @@ impl Capability {
     }
 
     /// A brTPF source: single triple pattern + `maxMpR` bind-join, no remote FILTER /
-    /// aggregate / path / ORDER-LIMIT pushdown. (Capability shape only — Phase-6 adapter.)
+    /// aggregate / path / ORDER-LIMIT pushdown. Used by the Phase-6 [`BrTpfSource`] adapter.
     pub fn brtpf(max_mpr: u32) -> Self {
         Capability {
             interface: Interface::BrTpf,
@@ -221,7 +262,7 @@ impl Capability {
     }
 
     /// A plain TPF source: single triple pattern, no bind-join, nothing pushable.
-    /// (Capability shape only — Phase-6 adapter.)
+    /// Used by the Phase-6 [`TpfSource`] adapter.
     pub fn tpf() -> Self {
         Capability {
             interface: Interface::Tpf,
@@ -444,16 +485,16 @@ pub trait FederatedSource {
 /// * [`SourceType::Endpoint`] — a full SPARQL endpoint over the transport seam (Phase 2,
 ///   real here);
 /// * [`SourceType::BrTpf`] / [`SourceType::Tpf`] — bindings-restricted / plain TPF
-///   (**Phase-6 stubs**: capability shape only, `execute` returns
-///   [`FedError::Unsupported`]);
+///   (**Phase 6, real here**: a fragment-server adapter that returns a complete answer for
+///   one triple pattern via [`BrTpfSource::solutions`] / [`TpfSource::solutions`]);
 /// * [`SourceType::Local`] — the in-process engine (capability "everything"; `execute`
-///   is wired in the planner/operators phases). [OPUS-4.8] sq-rsxf.
+///   is wired in the planner/operators phases). [OPUS-4.8] sq-rsxf / sq-2qze.
 pub enum SourceType<'a> {
     /// A full SPARQL 1.1 endpoint.
     Endpoint(&'a Endpoint),
-    /// A bindings-restricted Triple Pattern Fragments server. **Phase-6 stub.**
+    /// A bindings-restricted Triple Pattern Fragments server (Phase 6, [`BrTpfSource`]).
     BrTpf(&'a BrTpfSource),
-    /// A plain Triple Pattern Fragments server. **Phase-6 stub.**
+    /// A plain Triple Pattern Fragments server (Phase 6, [`TpfSource`]).
     Tpf(&'a TpfSource),
     /// The in-process `sparq-engine` over a local `Graph`.
     Local(&'a LocalSource),
@@ -539,16 +580,350 @@ impl FederatedSource for Endpoint {
     }
 }
 
-// ─── brTPF / TPF / Local adapters (stubs for Phase 6 / planner phases) ──────────────
+// ─── Triple Pattern Fragments: the fragment wire seam + term/pattern model (Phase 6) ─
 
-/// A bindings-restricted TPF source. **Phase-6 stub**: holds the fragment-template URL and
-/// its `maxMpR` bind-join bound so the enum is total and the capability shape is correct,
-/// but `discover`/`execute` return [`FedError::Unsupported`] — no overclaim. [OPUS-4.8].
+/// One RDF term in a fragment triple or a query position — the minimal term model the TPF
+/// adapters need without re-pulling the engine's full term type. A fragment server speaks
+/// concrete RDF, so a triple is three [`FragTerm`]s; a query pattern is three
+/// [`PatternTerm`]s (a term, or a named variable). [OPUS-4.8] sq-2qze.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FragTerm {
+    /// An IRI (no angle brackets — the bare IRI string).
+    Iri(String),
+    /// A blank node (the bare label, no `_:`).
+    Blank(String),
+    /// A literal, stored in its canonical N-Triples lexical form *including* any
+    /// `"..."^^<dt>` / `"..."@lang` decoration, so equality is exact and lossless.
+    Literal(String),
+}
+
+impl FragTerm {
+    /// An IRI term from a bare IRI string.
+    pub fn iri(s: impl Into<String>) -> FragTerm {
+        FragTerm::Iri(s.into())
+    }
+}
+
+/// One position of a TPF triple-pattern request: a bound [`FragTerm`] or a query variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternTerm {
+    /// A bound term — constrains the fragment.
+    Bound(FragTerm),
+    /// A variable (the bare name, no `?`) — a wildcard the fragment binds.
+    Var(String),
+}
+
+impl PatternTerm {
+    /// The variable name if this position is a variable.
+    pub fn as_var(&self) -> Option<&str> {
+        match self {
+            PatternTerm::Var(v) => Some(v),
+            PatternTerm::Bound(_) => None,
+        }
+    }
+}
+
+/// A single triple pattern the planner pushes to a fragment source: subject, predicate,
+/// object, each either bound or a variable (exactly the TPF/brTPF access unit — one triple
+/// pattern). [OPUS-4.8] sq-2qze.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragPattern {
+    /// The subject position.
+    pub subject: PatternTerm,
+    /// The predicate position.
+    pub predicate: PatternTerm,
+    /// The object position.
+    pub object: PatternTerm,
+}
+
+impl FragPattern {
+    /// A new pattern from its three positions.
+    pub fn new(subject: PatternTerm, predicate: PatternTerm, object: PatternTerm) -> FragPattern {
+        FragPattern {
+            subject,
+            predicate,
+            object,
+        }
+    }
+
+    /// The variable names this pattern projects, subject→predicate→object order, skipping
+    /// repeats (so a `?s ?p ?s` pattern yields `["s", "p"]`).
+    pub fn vars(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(3);
+        for pos in [&self.subject, &self.predicate, &self.object] {
+            if let Some(v) = pos.as_var() {
+                if !out.iter().any(|x: &String| x == v) {
+                    out.push(v.to_string());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A solution mapping over fragment variables: variable name → bound [`FragTerm`]. The unit
+/// the planner's join operators consume (the TPF analogue of an SRJ result row).
+pub type FragBinding = Vec<(String, FragTerm)>;
+
+/// One concrete RDF triple returned in a fragment's data graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragTriple {
+    /// The subject term.
+    pub subject: FragTerm,
+    /// The predicate term.
+    pub predicate: FragTerm,
+    /// The object term.
+    pub object: FragTerm,
+}
+
+impl FragTriple {
+    /// A new triple.
+    pub fn new(subject: FragTerm, predicate: FragTerm, object: FragTerm) -> FragTriple {
+        FragTriple {
+            subject,
+            predicate,
+            object,
+        }
+    }
+}
+
+/// One fragment page: the matched triples on this page, the fragment's estimated total
+/// match count (the TPF cardinality oracle — `hydra:totalItems`/`void:triples`, the SAME
+/// for every page of a fragment), and an optional opaque next-page token (`hydra:next`).
+///
+/// The token is whatever the transport needs to fetch the next page (a URL, a page number);
+/// `None` means this is the last page. The adapters follow it to exhaustion so the result
+/// is COMPLETE. [OPUS-4.8] sq-2qze.
+#[derive(Debug, Clone)]
+pub struct FragmentPage {
+    /// The triples on this page (already filtered to the requested pattern by the server).
+    pub triples: Vec<FragTriple>,
+    /// `hydra:totalItems` — the fragment's estimated total match count (the cardinality
+    /// oracle the planner keys on). Reported per-page but constant across a fragment's pages.
+    pub total_items: u64,
+    /// The opaque next-page token, or `None` on the last page.
+    pub next: Option<String>,
+}
+
+/// The TPF/brTPF wire seam: fetch one fragment page for `pattern` from `url`.
+///
+/// This is the fragment-server analogue of the SRJ [`Transport`] seam. One method covers
+/// both interfaces: a plain-TPF request passes `bindings = &[]`; a brTPF request passes a
+/// block of *at most `maxMpR`* solution mappings the server uses to pre-filter the fragment
+/// (only triples joining at least one binding come back). `page` is the next-page token
+/// from a prior [`FragmentPage::next`] (`None` for the first page). The implementation
+/// returns the page's triples + count + next token, or a transport-error string.
+///
+/// A native HTTP `FragmentTransport` (ureq + the default-deny SSRF resolver, serialising the
+/// pattern into the Hydra URI template + the binding block as the brTPF `values` parameter,
+/// and parsing the Turtle/TriG fragment body) lands with the streaming phase; Phase 6 ships
+/// this seam and exercises the adapters through an in-memory fixture server. [OPUS-4.8].
+pub trait FragmentTransport: Send + Sync {
+    /// Fetch one fragment page. `bindings` is the brTPF block (empty for plain TPF);
+    /// `page` is the next-page token (`None` for the first page).
+    fn fetch_fragment(
+        &self,
+        url: &str,
+        pattern: &FragPattern,
+        bindings: &[FragBinding],
+        page: Option<&str>,
+    ) -> Result<FragmentPage, String>;
+}
+
+// ─── Bind one matched triple back into a pattern's variables ─────────────────────────
+
+/// Bind a concrete `triple` (returned by the fragment server for `pattern`) into the
+/// pattern's variables, returning `None` if the triple is inconsistent with the pattern
+/// (a bound position disagrees, or the same variable in two positions binds two different
+/// terms — so a self-join pattern like `?s ?p ?s` only yields a row when the positions
+/// agree). This is the load-bearing correctness step: a misbehaving fragment server that
+/// returns a non-matching triple cannot smuggle a wrong binding through. [OPUS-4.8] sq-2qze.
+fn bind_triple(pattern: &FragPattern, triple: &FragTriple) -> Option<FragBinding> {
+    let mut out: FragBinding = Vec::with_capacity(3);
+    for (pos, term) in [
+        (&pattern.subject, &triple.subject),
+        (&pattern.predicate, &triple.predicate),
+        (&pattern.object, &triple.object),
+    ] {
+        match pos {
+            PatternTerm::Bound(b) => {
+                if b != term {
+                    return None; // server returned a triple that does not match a bound slot
+                }
+            }
+            PatternTerm::Var(v) => {
+                // If this variable already bound (repeated var), the terms must agree.
+                if let Some((_, prev)) = out.iter().find(|(name, _)| name == v) {
+                    if prev != term {
+                        return None;
+                    }
+                } else {
+                    out.push((v.clone(), term.clone()));
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Split `bindings` into blocks of at most `max_mpr` (≥1) mappings — the brTPF
+/// `maxMpR`-bounded binding blocks. A `max_mpr` of 0 is treated as 1 (a degenerate cap must
+/// not produce zero-sized blocks, which would loop forever). [OPUS-4.8] sq-2qze.
+fn chunk_bindings(bindings: &[FragBinding], max_mpr: u32) -> Vec<&[FragBinding]> {
+    let block = max_mpr.max(1) as usize;
+    if bindings.is_empty() {
+        return Vec::new();
+    }
+    bindings.chunks(block).collect()
+}
+
+/// Drive a fragment fetch to exhaustion (follow `hydra:next` until `None`), binding every
+/// returned triple into `pattern` and collecting the consistent rows. Returns the bound
+/// rows plus the fragment's `hydra:totalItems` (from the first page; constant per fragment).
+/// `page_cap` bounds the number of pages followed so a buggy server that never stops
+/// paginating cannot hang the client (a defensive bound, not a correctness limit — a
+/// well-behaved server terminates with `next = None` well within it). [OPUS-4.8] sq-2qze.
+fn drain_fragment(
+    transport: &dyn FragmentTransport,
+    url: &str,
+    pattern: &FragPattern,
+    bindings: &[FragBinding],
+    page_cap: usize,
+) -> Result<(Vec<FragBinding>, u64), FedError> {
+    let mut rows: Vec<FragBinding> = Vec::new();
+    let mut next: Option<String> = None;
+    let mut total_items = 0u64;
+    let mut first = true;
+    for _ in 0..page_cap {
+        let page = transport
+            .fetch_fragment(url, pattern, bindings, next.as_deref())
+            .map_err(FedError::Transport)?;
+        if first {
+            total_items = page.total_items;
+            first = false;
+        }
+        for t in &page.triples {
+            if let Some(b) = bind_triple(pattern, t) {
+                rows.push(b);
+            }
+        }
+        match page.next {
+            Some(tok) => next = Some(tok),
+            None => return Ok((rows, total_items)),
+        }
+    }
+    Err(FedError::Transport(format!(
+        "fragment pagination exceeded the {} page safety cap for {:?} (next-page link never \
+         terminated)",
+        page_cap, url
+    )))
+}
+
+/// The defensive page cap (see [`drain_fragment`]): follows up to this many `hydra:next`
+/// links before refusing. Generous enough for any real fragment, finite enough to fail-stop
+/// a runaway server.
+const FRAGMENT_PAGE_CAP: usize = 1_000_000;
+
+/// Build a one-pattern [`SourceDescriptor`] from a fragment's count metadata so the planner's
+/// CostFed estimate keys on the *served* `hydra:totalItems` for this source. When the pattern
+/// has a bound predicate IRI the count is attributed to that predicate partition (the exact
+/// signal `estimate_cardinality` reads); otherwise it seeds the descriptor's total only.
+/// [OPUS-4.8] sq-2qze.
+fn descriptor_from_count(
+    id: &str,
+    pattern: &FragPattern,
+    total_items: u64,
+) -> sparq_fedplan::SourceDescriptor {
+    use sparq_fedplan::{SourceDescriptor, SourceId};
+    let mut builder = SourceDescriptor::builder(SourceId::new(id)).total_triples(total_items);
+    if let PatternTerm::Bound(FragTerm::Iri(pred)) = &pattern.predicate {
+        builder = builder.predicate(sparq_fedplan::PredPartition {
+            predicate: pred.clone(),
+            triples: total_items,
+            distinct_subjects: 0,
+            distinct_objects: 0,
+        });
+    }
+    builder.build()
+}
+
+// ─── brTPF / TPF adapters (Phase 6 — real) + Local adapter (planner phases) ──────────
+
+/// A bindings-restricted Triple Pattern Fragments source (brTPF). **Phase 6 — real.**
+///
+/// Wraps a [`FragmentTransport`] and a `maxMpR` bind-join bound. [`solutions`](Self::solutions)
+/// answers one triple pattern against a block of upstream `bindings`: it chunks the bindings
+/// into `maxMpR`-sized blocks, issues one paginated fragment request per block (the brTPF
+/// bind-join — the server returns only triples joining at least one attached binding), binds
+/// every returned triple back into the pattern, and concatenates the per-block matches. The
+/// result is **complete**: every upstream binding sits in exactly one block, and every
+/// matching triple for that block comes back, so no join result is lost. With an empty
+/// `bindings` slice brTPF degrades to a plain fragment scan (one unbound request).
+///
+/// `discover()` reports the brTPF [`Capability`] and a count-metadata [`SourceDescriptor`]
+/// for the open pattern (`?s ?p ?o`), the recall-safe upper-bound cardinality the planner
+/// keys on. [OPUS-4.8] sq-2qze.
 pub struct BrTpfSource {
     /// The brTPF fragment-template / base URL.
     pub url: String,
     /// `maxMpR` — at most this many bound mappings per request.
     pub max_mpr: u32,
+    transport: Box<dyn FragmentTransport>,
+}
+
+impl BrTpfSource {
+    /// A new brTPF source over `transport` with the `max_mpr` bind-join bound.
+    pub fn new(url: impl Into<String>, max_mpr: u32, transport: Box<dyn FragmentTransport>) -> Self {
+        BrTpfSource {
+            url: url.into(),
+            max_mpr,
+            transport,
+        }
+    }
+
+    /// Answer `pattern` against this brTPF source, pushing `bindings` in `maxMpR`-bounded
+    /// blocks (the brTPF bind-join). Returns the complete set of bound solution mappings.
+    /// An empty `bindings` slice issues a single unbound fragment scan.
+    pub fn solutions(
+        &self,
+        pattern: &FragPattern,
+        bindings: &[FragBinding],
+    ) -> Result<Vec<FragBinding>, FedError> {
+        let blocks = chunk_bindings(bindings, self.max_mpr);
+        if blocks.is_empty() {
+            // No upstream bindings → a plain unbound fragment scan (still complete).
+            let (rows, _) = drain_fragment(
+                self.transport.as_ref(),
+                &self.url,
+                pattern,
+                &[],
+                FRAGMENT_PAGE_CAP,
+            )?;
+            return Ok(rows);
+        }
+        let mut all: Vec<FragBinding> = Vec::new();
+        for block in blocks {
+            let (rows, _) = drain_fragment(
+                self.transport.as_ref(),
+                &self.url,
+                pattern,
+                block,
+                FRAGMENT_PAGE_CAP,
+            )?;
+            all.extend(rows);
+        }
+        Ok(all)
+    }
+
+    /// The fragment's count metadata for the open pattern (`hydra:totalItems`) — the TPF
+    /// cardinality oracle. A network round-trip (one unbound first page).
+    pub fn cardinality(&self, pattern: &FragPattern) -> Result<u64, FedError> {
+        let page = self
+            .transport
+            .fetch_fragment(&self.url, pattern, &[], None)
+            .map_err(FedError::Transport)?;
+        Ok(page.total_items)
+    }
 }
 
 impl FederatedSource for BrTpfSource {
@@ -556,19 +931,74 @@ impl FederatedSource for BrTpfSource {
         SourceType::BrTpf(self)
     }
     fn discover(&self) -> Result<(Capability, Option<sparq_fedplan::SourceDescriptor>), FedError> {
-        Ok((Capability::brtpf(self.max_mpr), None))
+        // Count-metadata descriptor for the OPEN pattern (?s ?p ?o): the recall-safe
+        // upper-bound cardinality. The bound block only ever NARROWS this at execution.
+        let open = FragPattern::new(
+            PatternTerm::Var("s".into()),
+            PatternTerm::Var("p".into()),
+            PatternTerm::Var("o".into()),
+        );
+        let total = self.cardinality(&open)?;
+        let desc = descriptor_from_count(&self.url, &open, total);
+        Ok((Capability::brtpf(self.max_mpr), Some(desc)))
     }
     fn execute(&self, _sub: &SubQuery) -> Result<String, FedError> {
+        // A fragment server speaks triples, not SPARQL-Results-JSON. The brTPF answer is the
+        // typed solution set — call `solutions(pattern, bindings)`. We do NOT lossily
+        // re-serialise through SRJ here (no overclaim).
         Err(FedError::Unsupported(
-            "brTPF source execution is not implemented yet (Phase 6)".to_string(),
+            "brTPF source answers triple-pattern fragments — call `BrTpfSource::solutions` \
+             (pattern, bindings); a fragment server returns triples, not SPARQL-Results-JSON"
+                .to_string(),
         ))
     }
 }
 
-/// A plain TPF source. **Phase-6 stub** (see [`BrTpfSource`]). [OPUS-4.8] sq-rsxf.
+/// A plain Triple Pattern Fragments source (TPF). **Phase 6 — real.**
+///
+/// Wraps a [`FragmentTransport`]. [`solutions`](Self::solutions) answers one triple pattern
+/// by fetching its fragment to exhaustion (following `hydra:next`) and binding every matched
+/// triple into the pattern's variables. There is **no** bind-join: a plain-TPF source shifts
+/// every join client-side, so the adapter materialises the whole (selective) fragment for
+/// the planner to greedy count-driven hash-join locally (design §2.1). `discover()` reports
+/// the TPF [`Capability`] and the count-metadata [`SourceDescriptor`]. [OPUS-4.8] sq-2qze.
 pub struct TpfSource {
     /// The TPF fragment-template / base URL.
     pub url: String,
+    transport: Box<dyn FragmentTransport>,
+}
+
+impl TpfSource {
+    /// A new plain-TPF source over `transport`.
+    pub fn new(url: impl Into<String>, transport: Box<dyn FragmentTransport>) -> Self {
+        TpfSource {
+            url: url.into(),
+            transport,
+        }
+    }
+
+    /// Answer `pattern` by materialising its fragment to exhaustion and binding every
+    /// matched triple. The complete set of bound solution mappings for this pattern.
+    pub fn solutions(&self, pattern: &FragPattern) -> Result<Vec<FragBinding>, FedError> {
+        let (rows, _) = drain_fragment(
+            self.transport.as_ref(),
+            &self.url,
+            pattern,
+            &[],
+            FRAGMENT_PAGE_CAP,
+        )?;
+        Ok(rows)
+    }
+
+    /// The fragment's count metadata for `pattern` (`hydra:totalItems`) — the TPF
+    /// cardinality oracle that drives the greedy smallest-count-first client-side join order.
+    pub fn cardinality(&self, pattern: &FragPattern) -> Result<u64, FedError> {
+        let page = self
+            .transport
+            .fetch_fragment(&self.url, pattern, &[], None)
+            .map_err(FedError::Transport)?;
+        Ok(page.total_items)
+    }
 }
 
 impl FederatedSource for TpfSource {
@@ -576,11 +1006,20 @@ impl FederatedSource for TpfSource {
         SourceType::Tpf(self)
     }
     fn discover(&self) -> Result<(Capability, Option<sparq_fedplan::SourceDescriptor>), FedError> {
-        Ok((Capability::tpf(), None))
+        let open = FragPattern::new(
+            PatternTerm::Var("s".into()),
+            PatternTerm::Var("p".into()),
+            PatternTerm::Var("o".into()),
+        );
+        let total = self.cardinality(&open)?;
+        let desc = descriptor_from_count(&self.url, &open, total);
+        Ok((Capability::tpf(), Some(desc)))
     }
     fn execute(&self, _sub: &SubQuery) -> Result<String, FedError> {
         Err(FedError::Unsupported(
-            "TPF source execution is not implemented yet (Phase 6)".to_string(),
+            "TPF source answers triple-pattern fragments — call `TpfSource::solutions(pattern)`; \
+             a fragment server returns triples, not SPARQL-Results-JSON"
+                .to_string(),
         ))
     }
 }
@@ -840,26 +1279,20 @@ mod tests {
         assert_eq!(t.bind_join, BindJoin::None);
     }
 
-    // ── brTPF / TPF / Local stubs report Unsupported (honest, no overclaim) ────────
+    // ── Local stub reports Unsupported; fragment sources route execute → solutions ──
 
     #[test]
-    fn brtpf_tpf_local_execute_is_unsupported_stub() {
-        let br = BrTpfSource {
-            url: "http://ex/brtpf".into(),
-            max_mpr: 30,
-        };
+    fn fragment_execute_routes_to_solutions_and_local_is_stub() {
+        // A fragment source's `execute` (the SRJ entry point) is intentionally Unsupported:
+        // it points the caller at the typed `solutions` method (honest, no SRJ overclaim).
+        let br = BrTpfSource::new("http://ex/brtpf", 30, Box::new(FixtureFragments::empty()));
         assert!(matches!(
             br.execute(&SubQuery::new("x")).unwrap_err(),
             FedError::Unsupported(_)
         ));
         assert!(matches!(br.source_type(), SourceType::BrTpf(_)));
-        let (cap, desc) = br.discover().unwrap();
-        assert_eq!(cap.bind_join, BindJoin::MaxMpR(30));
-        assert!(desc.is_none());
 
-        let t = TpfSource {
-            url: "http://ex/tpf".into(),
-        };
+        let t = TpfSource::new("http://ex/tpf", Box::new(FixtureFragments::empty()));
         assert!(matches!(
             t.execute(&SubQuery::new("x")).unwrap_err(),
             FedError::Unsupported(_)
@@ -889,5 +1322,323 @@ mod tests {
         );
         assert!(matches!(ep.source_type(), SourceType::Endpoint(_)));
         assert_eq!(ep.url(), "http://8.8.8.8/sparql");
+    }
+
+    // ── Phase 6: a fixture TPF/brTPF server + the completeness invariant ──────────────
+
+    /// An in-memory fixture fragment server: a fixed set of triples, paginated at
+    /// `page_size`, that answers a single triple pattern (plain TPF) AND a brTPF binding
+    /// block. It is a REAL server model — it computes the matching triples itself (no canned
+    /// rows), follows the same match semantics a conformant TPF/brTPF server would, reports a
+    /// truthful `hydra:totalItems`, and records every request it saw so a test can assert the
+    /// `maxMpR`-bounded block discipline. [OPUS-4.8] sq-2qze.
+    struct FixtureFragments {
+        triples: Vec<FragTriple>,
+        page_size: usize,
+        /// Recorded (binding-block-size, page-token) per request, for block-discipline asserts.
+        requests: Mutex<Vec<(usize, Option<String>)>>,
+    }
+
+    impl FixtureFragments {
+        fn empty() -> Self {
+            FixtureFragments {
+                triples: Vec::new(),
+                page_size: 100,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+        fn new(triples: Vec<FragTriple>, page_size: usize) -> Self {
+            FixtureFragments {
+                triples,
+                page_size: page_size.max(1),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Whether a stored `triple` matches the requested `pattern` (a bound position must
+        /// equal; a variable position is a wildcard, with repeated-variable consistency).
+        fn matches_pattern(pattern: &FragPattern, triple: &FragTriple) -> bool {
+            bind_triple(pattern, triple).is_some()
+        }
+
+        /// Whether `triple` joins at least one mapping in the brTPF `bindings` block: i.e.
+        /// substituting a binding into the pattern's variables yields a pattern this triple
+        /// satisfies. An empty block means "no binding filter" (plain TPF).
+        fn joins_a_binding(
+            pattern: &FragPattern,
+            triple: &FragTriple,
+            bindings: &[FragBinding],
+        ) -> bool {
+            if bindings.is_empty() {
+                return true;
+            }
+            bindings.iter().any(|b| {
+                // The triple already satisfies `pattern`; it joins binding `b` iff the
+                // variable values `b` assigns are consistent with the values the triple binds.
+                match bind_triple(pattern, triple) {
+                    None => false,
+                    Some(row) => b.iter().all(|(name, val)| {
+                        row.iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, v)| v == val)
+                            // a binding var not in this pattern does not constrain the triple
+                            .unwrap_or(true)
+                    }),
+                }
+            })
+        }
+    }
+
+    impl FragmentTransport for FixtureFragments {
+        fn fetch_fragment(
+            &self,
+            _url: &str,
+            pattern: &FragPattern,
+            bindings: &[FragBinding],
+            page: Option<&str>,
+        ) -> Result<FragmentPage, String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((bindings.len(), page.map(str::to_string)));
+
+            // All triples this fragment (pattern ∧ optional binding block) matches.
+            let matched: Vec<&FragTriple> = self
+                .triples
+                .iter()
+                .filter(|t| Self::matches_pattern(pattern, t))
+                .filter(|t| Self::joins_a_binding(pattern, t, bindings))
+                .collect();
+            let total_items = matched.len() as u64;
+
+            // Page offset comes from the token ("offset:<n>"); first page = 0.
+            let offset = match page {
+                None => 0,
+                Some(tok) => tok
+                    .strip_prefix("offset:")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .ok_or_else(|| format!("fixture: bad page token {tok:?}"))?,
+            };
+            let end = (offset + self.page_size).min(matched.len());
+            let triples: Vec<FragTriple> = matched[offset..end].iter().map(|t| (*t).clone()).collect();
+            let next = if end < matched.len() {
+                Some(format!("offset:{end}"))
+            } else {
+                None
+            };
+            Ok(FragmentPage {
+                triples,
+                total_items,
+                next,
+            })
+        }
+    }
+
+    /// A small backing graph: people who `knows` each other + a couple of `name`s.
+    fn fixture_triples() -> Vec<FragTriple> {
+        let knows = || FragTerm::iri("http://xmlns.com/foaf/0.1/knows");
+        let name = || FragTerm::iri("http://xmlns.com/foaf/0.1/name");
+        let p = |n: &str| FragTerm::iri(format!("http://ex/{n}"));
+        let lit = |s: &str| FragTerm::Literal(format!("\"{s}\""));
+        vec![
+            FragTriple::new(p("alice"), knows(), p("bob")),
+            FragTriple::new(p("alice"), knows(), p("carol")),
+            FragTriple::new(p("bob"), knows(), p("carol")),
+            FragTriple::new(p("carol"), knows(), p("dave")),
+            FragTriple::new(p("alice"), name(), lit("Alice")),
+            FragTriple::new(p("bob"), name(), lit("Bob")),
+        ]
+    }
+
+    /// `?s foaf:knows ?o` — predicate bound, subject + object variable.
+    fn knows_pattern() -> FragPattern {
+        FragPattern::new(
+            PatternTerm::Var("s".into()),
+            PatternTerm::Bound(FragTerm::iri("http://xmlns.com/foaf/0.1/knows")),
+            PatternTerm::Var("o".into()),
+        )
+    }
+
+    /// Sort bindings into a canonical form for multiset equality (order-independent).
+    fn canon(mut rows: Vec<FragBinding>) -> Vec<Vec<(String, FragTerm)>> {
+        for r in &mut rows {
+            r.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        rows
+    }
+
+    #[test]
+    fn plain_tpf_returns_complete_fragment_across_pages() {
+        // page_size 2 forces pagination over the 4 knows-triples → exercises hydra:next.
+        let server = FixtureFragments::new(fixture_triples(), 2);
+        let tpf = TpfSource::new("http://frag/tpf", Box::new(server));
+        let pat = knows_pattern();
+        let got = tpf.solutions(&pat).unwrap();
+
+        // The complete answer: every knows-triple bound into (?s, ?o), all 4, no duplicates.
+        let p = |n: &str| FragTerm::iri(format!("http://ex/{n}"));
+        let expect = vec![
+            vec![("s".to_string(), p("alice")), ("o".to_string(), p("bob"))],
+            vec![("s".to_string(), p("alice")), ("o".to_string(), p("carol"))],
+            vec![("s".to_string(), p("bob")), ("o".to_string(), p("carol"))],
+            vec![("s".to_string(), p("carol")), ("o".to_string(), p("dave"))],
+        ];
+        assert_eq!(canon(got), canon(expect), "plain TPF must return COMPLETE fragment");
+    }
+
+    #[test]
+    fn plain_tpf_cardinality_is_count_metadata() {
+        let server = FixtureFragments::new(fixture_triples(), 2);
+        let tpf = TpfSource::new("http://frag/tpf", Box::new(server));
+        // hydra:totalItems for ?s knows ?o is the 4 matching triples (NOT a page slice).
+        assert_eq!(tpf.cardinality(&knows_pattern()).unwrap(), 4);
+        // discover() surfaces a one-pattern descriptor seeded with the OPEN-pattern count (6).
+        let (cap, desc) = tpf.discover().unwrap();
+        assert_eq!(cap.interface, Interface::Tpf);
+        let d = desc.expect("count-metadata descriptor");
+        assert_eq!(d.total_triples, 6, "open-pattern hydra:totalItems = all 6 triples");
+    }
+
+    #[test]
+    fn brtpf_bind_join_is_complete_and_respects_max_mpr() {
+        // Upstream bindings for ?s: alice, bob, carol, dave — pushed as a brTPF block.
+        let p = |n: &str| FragTerm::iri(format!("http://ex/{n}"));
+        let bindings: Vec<FragBinding> = ["alice", "bob", "carol", "dave"]
+            .iter()
+            .map(|n| vec![("s".to_string(), p(n))])
+            .collect();
+
+        // maxMpR = 2 → the 4 bindings MUST be issued as 2 blocks of 2 (not one block of 4).
+        let server = FixtureFragments::new(fixture_triples(), 100);
+        let brtpf = BrTpfSource::new("http://frag/brtpf", 2, Box::new(server));
+        let pat = knows_pattern();
+        let got = brtpf.solutions(&pat, &bindings).unwrap();
+
+        // Complete bind-join: every (?s, ?o) where ?s ∈ {alice,bob,carol,dave} AND the triple
+        // exists — i.e. ALL 4 knows-triples (dave has no outgoing knows, contributes nothing).
+        let expect = vec![
+            vec![("s".to_string(), p("alice")), ("o".to_string(), p("bob"))],
+            vec![("s".to_string(), p("alice")), ("o".to_string(), p("carol"))],
+            vec![("s".to_string(), p("bob")), ("o".to_string(), p("carol"))],
+            vec![("s".to_string(), p("carol")), ("o".to_string(), p("dave"))],
+        ];
+        assert_eq!(
+            canon(got),
+            canon(expect),
+            "brTPF bind-join must be COMPLETE over all maxMpR blocks"
+        );
+        // Block discipline (the maxMpR bound) is asserted in
+        // `brtpf_issues_max_mpr_bounded_blocks` via a recording transport.
+    }
+
+    #[test]
+    fn brtpf_issues_max_mpr_bounded_blocks() {
+        // A recording server lets us assert the EXACT block sizes issued (the maxMpR bound).
+        let p = |n: &str| FragTerm::iri(format!("http://ex/{n}"));
+        let bindings: Vec<FragBinding> = ["alice", "bob", "carol", "dave", "alice"]
+            .iter()
+            .map(|n| vec![("s".to_string(), p(n))])
+            .collect();
+        let server = FixtureFragments::new(fixture_triples(), 100);
+        // Keep a handle on the request log by constructing the server, wrapping in the adapter,
+        // and reading the Mutex after — so use an Arc-shared recorder.
+        use std::sync::Arc;
+        struct SharedRecorder {
+            inner: FixtureFragments,
+        }
+        impl FragmentTransport for Arc<SharedRecorder> {
+            fn fetch_fragment(
+                &self,
+                url: &str,
+                pattern: &FragPattern,
+                bindings: &[FragBinding],
+                page: Option<&str>,
+            ) -> Result<FragmentPage, String> {
+                self.inner.fetch_fragment(url, pattern, bindings, page)
+            }
+        }
+        let rec = Arc::new(SharedRecorder { inner: server });
+        let brtpf = BrTpfSource::new("http://frag/brtpf", 2, Box::new(Arc::clone(&rec)));
+        let _ = brtpf.solutions(&knows_pattern(), &bindings).unwrap();
+
+        let reqs = rec.inner.requests.lock().unwrap();
+        // 5 bindings, maxMpR 2 → blocks of [2, 2, 1]; one request each (page_size 100, single
+        // page per block). Every block size MUST be ≤ 2 (the maxMpR bound, never exceeded).
+        let block_sizes: Vec<usize> = reqs.iter().map(|(n, _)| *n).collect();
+        assert_eq!(block_sizes, vec![2, 2, 1], "maxMpR=2 → 3 blocks sized [2,2,1]");
+        assert!(
+            block_sizes.iter().all(|n| *n <= 2),
+            "no request may exceed maxMpR=2"
+        );
+    }
+
+    #[test]
+    fn brtpf_empty_bindings_degrades_to_unbound_scan() {
+        // No upstream bindings → one unbound fragment scan, still complete (= plain TPF).
+        let server = FixtureFragments::new(fixture_triples(), 100);
+        let brtpf = BrTpfSource::new("http://frag/brtpf", 50, Box::new(server));
+        let got = brtpf.solutions(&knows_pattern(), &[]).unwrap();
+        assert_eq!(got.len(), 4, "unbound brTPF scan returns the whole fragment");
+    }
+
+    #[test]
+    fn brtpf_discover_reports_max_mpr_and_open_count() {
+        let server = FixtureFragments::new(fixture_triples(), 100);
+        let brtpf = BrTpfSource::new("http://frag/brtpf", 50, Box::new(server));
+        let (cap, desc) = brtpf.discover().unwrap();
+        assert_eq!(cap.bind_join, BindJoin::MaxMpR(50));
+        assert_eq!(cap.interface, Interface::BrTpf);
+        // The count-metadata descriptor is keyed to the OPEN pattern (all 6 triples).
+        assert_eq!(desc.unwrap().total_triples, 6);
+    }
+
+    #[test]
+    fn bind_triple_rejects_nonmatching_and_handles_self_join() {
+        // A misbehaving server returning a triple that violates a bound slot yields no row
+        // (the load-bearing answer-safety check — a wrong triple can't smuggle a binding).
+        let pat = knows_pattern(); // predicate bound to foaf:knows
+        let wrong = FragTriple::new(
+            FragTerm::iri("http://ex/alice"),
+            FragTerm::iri("http://ex/NOT-knows"),
+            FragTerm::iri("http://ex/bob"),
+        );
+        assert!(bind_triple(&pat, &wrong).is_none(), "bound predicate mismatch ⇒ no row");
+
+        // Self-join pattern ?x knows ?x only matches a self-loop triple.
+        let selfp = FragPattern::new(
+            PatternTerm::Var("x".into()),
+            PatternTerm::Bound(FragTerm::iri("http://xmlns.com/foaf/0.1/knows")),
+            PatternTerm::Var("x".into()),
+        );
+        let not_loop = FragTriple::new(
+            FragTerm::iri("http://ex/alice"),
+            FragTerm::iri("http://xmlns.com/foaf/0.1/knows"),
+            FragTerm::iri("http://ex/bob"),
+        );
+        assert!(bind_triple(&selfp, &not_loop).is_none(), "?x..?x rejects a non-loop");
+        let loop_t = FragTriple::new(
+            FragTerm::iri("http://ex/alice"),
+            FragTerm::iri("http://xmlns.com/foaf/0.1/knows"),
+            FragTerm::iri("http://ex/alice"),
+        );
+        let row = bind_triple(&selfp, &loop_t).expect("self-loop binds ?x once");
+        assert_eq!(row, vec![("x".to_string(), FragTerm::iri("http://ex/alice"))]);
+    }
+
+    #[test]
+    fn chunk_bindings_caps_block_size_and_handles_degenerate_cap() {
+        let mk = |n: usize| -> Vec<FragBinding> {
+            (0..n).map(|i| vec![("s".to_string(), FragTerm::iri(format!("http://ex/{i}")))]).collect()
+        };
+        let b = mk(5);
+        let blocks = chunk_bindings(&b, 2);
+        assert_eq!(blocks.iter().map(|x| x.len()).collect::<Vec<_>>(), vec![2, 2, 1]);
+        // maxMpR 0 is treated as 1 (never a zero-sized block ⇒ no infinite loop).
+        let blocks0 = chunk_bindings(&b, 0);
+        assert!(blocks0.iter().all(|x| x.len() == 1));
+        assert_eq!(blocks0.len(), 5);
+        // Empty input ⇒ no blocks.
+        assert!(chunk_bindings(&[], 4).is_empty());
     }
 }

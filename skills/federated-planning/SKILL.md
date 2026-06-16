@@ -214,14 +214,24 @@ the `StreamJoin` above, Local → `sparq-engine` eval), and streams results back
 this planner and the engine's `service` SRJ transport + SSRF guard; the dependency arrow
 points one-way *into* the engine.
 
-As of Phase 0 (`sq-s1uy`) `sparq-fedclient` is a **compiling skeleton only** — the public
-module layout (`source` / `discovery` / `planner` / `pushdown` / `operators` / `stream`)
-behind a default-OFF `fedclient` feature, plus the load-bearing dependency-boundary proof
+`sparq-fedclient` started as the Phase-0 skeleton (`sq-s1uy`) — the public module layout
+(`source` / `discovery` / `planner` / `pushdown` / `operators` / `stream`) behind a
+default-OFF `fedclient` feature, plus the load-bearing dependency-boundary proof
 (`sparq-core`/`sparq-engine` have no edge to it, enforced by
-`scripts/fedclient-boundary-guard.sh` + `crates/sparq-fedclient/tests/boundary.rs`). There
-is **no federation logic yet**; Phases 1-7 (discovery, the source adapters, the planner
-bridge, capability-aware pushdown, the streaming operators, brTPF/TPF, adaptive re-planning)
-are future beads. See `crates/sparq-fedclient/README.md`.
+`scripts/fedclient-boundary-guard.sh` + `crates/sparq-fedclient/tests/boundary.rs`). Landed
+since: Phase 1 capability discovery (`sq-nfxl`: SD/VoID parse + ASK fallback), Phase 2 the
+`source` source-type abstraction + `Endpoint` SRJ adapter + default-deny SSRF guard
+(`sq-rsxf`), and **Phase 6 the brTPF + TPF fragment adapters** (`sq-2qze`):
+`source::TpfSource` (plain TPF — materialise a fragment to exhaustion, no bind-join) and
+`source::BrTpfSource` (bindings-restricted — push `maxMpR`-bounded binding blocks per
+request, the standardised brTPF bind-join), both over the `FragmentTransport` seam, with
+count-metadata (`hydra:totalItems`) cardinality surfaced as a one-pattern
+`SourceDescriptor` for this planner. The fragment adapters answer one triple pattern
+**completely** and return typed `FragBinding`s via `solutions(...)` (a fragment server
+speaks triples, not SPARQL-Results-JSON, so their `FederatedSource::execute` is a
+deliberate `Unsupported` that points at `solutions`). Still to come: the planner bridge,
+capability-aware pushdown, the streaming operators, and adaptive re-planning (future beads
+under the epic). See `crates/sparq-fedclient/README.md`.
 
 ## Deferred (NOT here)
 
