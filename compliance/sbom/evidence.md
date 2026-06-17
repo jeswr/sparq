@@ -112,6 +112,84 @@ sq-toze.28 — `cargo cyclonedx … --spec-version 1.5`), matching the VEX (`1.5
 > The probe files (`**/*.cdx.json`) are **not committed** — `scripts/gen-sbom-vex.sh#L47` and the
 > probe both delete them to keep the worktree clean. They are regenerable with the command above.
 
+## 3a. Upstream verification — cargo-cyclonedx path-member purl/bom-ref defect (GS-6/GS-7; bead sq-4qo8 [OPUS-4.8])
+
+GS-6/GS-7 are *resolved in sparq's published output* by the post-process normalizer
+(`scripts/sbom-normalize.jq`), but the **root cause is upstream**: cargo-cyclonedx emits
+non-canonical, host-revealing `purl`/`bom-ref` for every workspace / path member. Bead
+**sq-4qo8** is the deferred upstreaming of that fix (file an issue/PR against
+`CycloneDX/cyclonedx-rust-cargo`). This section records the **verification** half of sq-4qo8 —
+that the defect *persists in the latest release* — and the **ready-to-file dossier** so the
+owner-gated filing is one click. (Filing publicly under the project's GitHub identity to a
+third-party community repo is a `needs:user` action per `AGENTS.md` §"Upstream blockers"; the
+agent does not post it unprompted.)
+
+**Latest release verified.** `cargo-cyclonedx` **0.5.9** is the latest published release
+(crates.io / CHANGELOG, dated **2026-03-19**); the upstream `main` CHANGELOG has **no
+"Unreleased" entry** touching purls/bom-refs/`download_url`. So the defect is current, not stale.
+
+**Reproduction (deterministic, tool-only — no sparq code involved).** A minimal two-crate
+workspace (`foo` with a `path` dependency on `bar`):
+
+```sh
+cargo cyclonedx --all --format json --spec-version 1.5   # cargo-cyclonedx 0.5.9
+```
+
+emits, for the path/workspace members:
+
+| Field | Raw 0.5.9 output | Defect |
+|---|---|---|
+| root `purl` | `pkg:cargo/foo@0.1.0?download_url=file://.` | `download_url=file://.` is a *useless* download URL — not a real location (cf. upstream issue [#612]) |
+| member `purl` | `pkg:cargo/bar@0.2.0?download_url=file://../bar` | host-layout-derived qualifier; non-canonical purl |
+| build-target `purl` | `pkg:cargo/foo@0.1.0?download_url=file://.#src/lib.rs` | additionally carries a host `#src/…` subpath fragment |
+| `bom-ref` / `dependsOn` | `path+file:///<ABS-BUILD-DIR>/crates/foo#0.1.0` | leaks the **absolute build-machine path** into the published SBOM |
+
+Registry deps are already canonical
+(`pkg:cargo/<name>@<version>` with the registry encoded in `bom-ref`) and are untouched.
+
+**Pinpointed root cause (upstream source, `main`).**
+
+- *purl* — `cargo-cyclonedx/src/purl.rs#get_purl`: for a local package (`package.source` is
+  `None`) it unconditionally adds `builder.with_qualifier("download_url", &manifest_url)` where
+  `manifest_url = format!("file://{}", package_dir)`. In-workspace it is made *relative* via
+  `diff_utf8_paths` (→ `file://.` / `file://../…`); for a path dep **outside** the workspace it
+  stays **absolute** (the upstream `local_package` unit test asserts
+  `file:///home/shnatsel/Code/cargo-cyclonedx/cyclonedx-bom`). The `#src/…` subpath is appended by
+  `with_subpath(to_purl_subpath(subpath))` on build-target sub-components.
+- *bom-ref* — `cargo-cyclonedx/src/generator.rs#create_component`: the component `bom-ref` is
+  `package.id.to_string()`, and for a local package `cargo metadata` reports `PackageId.repr` as
+  the absolute `path+file:///…#<version>` form, which is propagated verbatim into `bom-ref` and
+  every `dependencies[].ref` / `dependsOn[]` edge.
+
+**Related existing upstream issue.** [#612] ("Replace qualifier with optional namespace for local
+packages", open since 2024-02, no maintainer action) already argues the `download_url=file://.`
+qualifier is meaningless and proposes a `pkg:cargo/<namespace>/<name>@<version>` namespace form.
+It does **not** cover the absolute-path `bom-ref` leak or the build-target `#src/…` subpath — the
+sq-4qo8 dossier extends it to the full defect surface.
+
+**Ready-to-file upstream content (issue + PR sketch).**
+
+- *Issue title:* "Path/workspace members get non-canonical, host-revealing purls + absolute-path
+  bom-refs". *Body:* the reproduction table + root-cause file/function refs above; ask for
+  canonical `pkg:cargo/<name>@<version>` purls (drop the `download_url=file://` qualifier and the
+  `#src/…` subpath, or move identity into the optional namespace per #612) and a relative-or-omitted
+  `bom-ref` so no absolute build path is emitted. Cross-link #612.
+- *PR sketch (smallest defensible upstream change):* in `get_purl`, when `package.source` is `None`
+  and the package is **not** under `workspace_root`, **omit** the `download_url` qualifier (it cannot
+  be made host-independent) rather than emitting the absolute path; and gate the build-target
+  `#src/…` subpath behind a `--include-source-subpath`-style opt-in (or drop it) so the default purl
+  is canonical. The `bom-ref` change (relative-ise the local `package.id`) is a larger,
+  maintainer-coordination change and is offered as a follow-up. The exact patch is left for the PR
+  so it tracks `main` HEAD at filing time.
+
+**What this section is NOT.** It does not claim the upstream fix has landed. sparq's *own*
+published SBOMs are already canonical via the normalizer + CI backstop (§6) — that is the
+roll-your-own half (GS-6/GS-7, `DONE`). sq-4qo8 stays **OPEN / `needs:user`** until the upstream
+issue/PR is actually filed; this section makes that filing one click and records the proof it is
+still needed.
+
+[#612]: https://github.com/CycloneDX/cyclonedx-rust-cargo/issues/612
+
 ## 4. VEX ↔ deny.toml sync verification (GS-5 — automated, sq-toze.29 [OPUS-4.8])
 
 The drift between the published VEX and the enforced cargo-deny gate is now a **GATING CI check**, not
