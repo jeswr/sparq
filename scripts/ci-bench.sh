@@ -145,6 +145,17 @@ VECTOR_RUN=bench/vector/run.sh
 # DEFICIT geo_compliance_deficit (mode:auto in bench/perf-baseline.json). Registry:
 # bench/benchmarks.toml (geo-bench); details: bench/geo/README.md.
 GEO_RUN=bench/geo/run.sh
+# [OPUS-4.8] RSP-QL streaming suite (sq-b1hn, design §3.6). sparq-rsp is a CLOCK-FREE library, so a
+# fixed (triple,ts) replay is a pure function — the gate is a DETERMINISTIC per-window result-row
+# count (single-window tumbling/sliding/GROUP-BY x three EvalModes, encoding the 3-EvalMode
+# equivalence) + an SRBench correctness ORACLE (multi-window observation⋈metadata join). Like FTS
+# the runner is a crate EXAMPLE (sparq-rsp is isolated, not a sparq-cli dependency). run.sh is the
+# self-asserting entry point: it asserts every `rsp_*_rows` metric vs bench/rsp/expected.tsv (exit 1
+# on drift) and prints the `<metric>\t<value>\t<unit>` contract; the rows are the HARD gate (in
+# run.sh), the single rsp_persistentdict_triples_per_s is ADVISORY (trend-only, NOT in
+# scripts/perf-gate.py). NO competitor perf column — the RSP peers are wall-clock service engines
+# (apples-to-oranges). Registry: bench/benchmarks.toml (rsp-ql); details: bench/rsp/README.md.
+RSP_RUN=bench/rsp/run.sh
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -685,6 +696,43 @@ elif command -v cargo >/dev/null 2>&1 && [ -x "$VECTOR_RUN" ]; then
   fi
 else
   echo "note: vector skipped (cargo not on PATH or $VECTOR_RUN missing)" >&2
+fi
+
+# [OPUS-4.8] RSP-QL streaming per-commit hook (sq-b1hn). Like FTS/vector the runner is a crate
+# EXAMPLE (rsp_oracle) that only needs `cargo`, so to match the main-only-toolchain skip the
+# LUBM/SHACL hooks get for free — and keep the example build off per-PR CI — we PIN this hook to the
+# MAIN/local tier: it runs on push-to-main (GITHUB_REF=refs/heads/main) and on a LOCAL run
+# (GITHUB_REF unset, so devs/bench/rsp/run.sh still work), but is SKIPPED on the PR tier. The
+# DETERMINISTIC per-window row-count gate therefore runs once per merge to main. run.sh asserts every
+# `rsp_*_rows` vs expected.tsv internally (exit 1 on drift), failing the whole ci-bench run on a
+# regression exactly like LUBM/FTS. We harvest run.sh's `<metric>\t<value>\t<unit>` stdout:
+# `*_rows` are DETERMINISTIC per-window counts (emitted for the dashboard's RSP-QL card; correctness
+# is the run.sh internal gate, so these are trend rows not perf-gate ratchets), and the single
+# `rsp_persistentdict_triples_per_s` is ADVISORY throughput (trend-only, NOT in scripts/perf-gate.py).
+RSP_BIN=target/release/examples/rsp_oracle
+RSP_REF="${GITHUB_REF:-}"
+if [ -n "$RSP_REF" ] && [ "$RSP_REF" != "refs/heads/main" ]; then
+  echo "note: rsp skipped (PR tier — RSP-QL example build/run is main-only, like the javac/rapper suites)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$RSP_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
+  if ! cargo build --release -q -p sparq-rsp --example rsp_oracle; then
+    echo "ERROR: rsp_oracle example failed to build" >&2
+    exit 1
+  fi
+  if RSP_BIN="$RSP_BIN" bash "$RSP_RUN" > "$TMP/rsp.tsv" 2>"$TMP/rsp.err"; then
+    while IFS=$'\t' read -r metric value unit; do
+      [ -n "${metric:-}" ] && [ -n "${value:-}" ] || continue
+      # DETERMINISTIC per-window counts + the advisory throughput: forward the metric verbatim
+      # (run.sh has already asserted the *_rows correctness gate, so these are trend rows).
+      add "$metric" "${unit:-rows}" "$value"
+    done < "$TMP/rsp.tsv"
+  else
+    echo "ERROR: rsp run.sh failed (per-window row-count regression)" >&2
+    cat "$TMP/rsp.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: rsp skipped (cargo not on PATH or $RSP_RUN missing)" >&2
 fi
 
 # [OPUS-4.8] ZERO-KNOWLEDGE family (sq dashboard-data-feed) — feeds the dashboard's

@@ -356,6 +356,11 @@
     { key: 'GeoSPARQL',     title: 'GeoSPARQL',     aliases: ['geosparql', 'geo'] },
     // [OPUS-4.8] sq-v02y: Vector / ANN suite (HNSW / Vamana / PQ recall@10 deficits vs exact-kNN).
     { key: 'Vector / ANN',  title: 'Vector / ANN', aliases: ['vector / ann', 'vector', 'vectors', 'ann'] },
+    // [OPUS-4.8] sq-b1hn: RSP-QL streaming suite. Metrics are `rsp_*` (per-window row-count gate +
+    // SRBench oracle + advisory rsp_persistentdict_triples_per_s) — the `rsp` alias prefix-matches the
+    // whole family. Correctness/expressivity card; perf head-to-head OUT OF SCOPE (clock-free vs the
+    // wall-clock RSP peers C-SPARQL/CQELS/RSP4J — different time model). No competitor perf column.
+    { key: 'RSP-QL',        title: 'RSP-QL streaming', aliases: ['rsp-ql', 'rsp', 'rspql'] },
     { key: 'BSBM',          title: 'BSBM',          aliases: ['bsbm'] },
     { key: 'DBPSB',         title: 'DBPSB',         aliases: ['dbpsb', 'dbpedia sparql benchmark'] },
     // [OPUS-4.8] sq-i0nm: the synthetic qlever-style suite carries the one in-repo competitor
