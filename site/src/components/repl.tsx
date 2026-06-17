@@ -15,8 +15,10 @@ import {
 import { cn } from "@/lib/utils";
 import {
   loadSparq,
+  loadIntoStore,
   prewarmSparq,
-  storeToNTriples,
+  storeToNQuads,
+  datasetSize,
   formatTerm,
   type SparqlResults,
   type WasmStore,
@@ -61,9 +63,13 @@ export function Repl() {
   const buildStore = React.useCallback(
     async (text: string, format: string): Promise<WasmStore> => {
       const Store = await loadSparq();
-      const store = Store.load(text, format);
+      // [OPUS-4.8] sq-17nw — route quad formats through loadDataset so uploaded
+      // N-Quads / TriG keep their named graphs (GRAPH ?g) instead of being folded
+      // into the default graph. The badge counts the WHOLE dataset (the wasm
+      // `size` getter counts the default graph only).
+      const store = loadIntoStore(Store, text, format);
       storeRef.current = store;
-      setSize(store.size);
+      setSize(datasetSize(store));
       return store;
     },
     [],
@@ -158,20 +164,21 @@ export function Repl() {
       try {
         const Store = await loadSparq();
         // Parse the incoming doc first so a parse error aborts BEFORE mutating state.
-        const incoming = Store.load(text, format);
+        // [OPUS-4.8] sq-17nw — loadIntoStore keeps named graphs for quad formats.
+        const incoming = loadIntoStore(Store, text, format);
         if (mode === "add" && storeRef.current) {
+          // Merge as N-Quads (default graph + every named graph) and re-load with
+          // loadDataset, so the named graphs of BOTH stores survive the merge.
           const merged =
-            storeToNTriples(storeRef.current) +
-            "\n" +
-            storeToNTriples(incoming);
-          await buildStore(merged, "ntriples");
+            storeToNQuads(storeRef.current) + "\n" + storeToNQuads(incoming);
+          await buildStore(merged, "nquads");
           setActive((a) => ({
             label: `${a.label} + ${label}`,
-            description: `Merged graph (${size ?? 0} + new triples).`,
+            description: `Merged dataset (${size ?? 0} + new triples).`,
           }));
         } else {
           storeRef.current = incoming;
-          setSize(incoming.size);
+          setSize(datasetSize(incoming));
           setActive({
             label,
             description: `Custom ${format} dataset loaded in your tab.`,
@@ -180,7 +187,8 @@ export function Repl() {
         setActiveBuiltinId(null);
         setState({ kind: "idle" });
         toast.success("Dataset loaded", {
-          description: `${label} — ${storeRef.current.size} triples`,
+          // Count the WHOLE dataset (default + named graphs), not just the default.
+          description: `${label} — ${datasetSize(storeRef.current)} triples`,
         });
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);

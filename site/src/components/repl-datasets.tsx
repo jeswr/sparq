@@ -28,6 +28,7 @@ import {
   type SparqlResults,
   type WasmStore,
 } from "@/lib/sparq-wasm";
+import { ALL_QUADS_BODY } from "@/lib/repl-dataset";
 import { BUILTIN_DATASETS } from "@/data/sample-graph";
 
 /** What's currently loaded into the REPL store, for the viewer's heading. */
@@ -36,8 +37,9 @@ export interface ActiveDataset {
   description: string;
 }
 
-const ALL_TRIPLES_QUERY =
-  "SELECT ?s ?p ?o WHERE { ?s ?p ?o } ORDER BY ?s ?p ?o";
+// [OPUS-4.8] sq-17nw — enumerate the WHOLE dataset (default graph + every named graph)
+// so the viewer shows named-graph content too; default-graph rows leave ?g unbound.
+const ALL_QUADS_QUERY = `SELECT ?s ?p ?o ?g WHERE { ${ALL_QUADS_BODY} } ORDER BY ?g ?s ?p ?o`;
 
 // Formats the wasm engine's `load`/`loadDataset` accept, keyed by the file extension
 // or user choice. The engine takes a single format string per the lib.rs docs.
@@ -352,11 +354,11 @@ export function DatasetViewer({
   );
   const [error, setError] = React.useState<string | null>(null);
 
-  // Re-read the triples whenever the dialog opens against the current store.
+  // Re-read the quads whenever the dialog opens against the current store.
   React.useEffect(() => {
     if (!open || !store) return;
     try {
-      const parsed = JSON.parse(store.query(ALL_TRIPLES_QUERY)) as SparqlResults;
+      const parsed = JSON.parse(store.query(ALL_QUADS_QUERY)) as SparqlResults;
       setRows(parsed.results.bindings);
       setError(null);
     } catch (e) {
@@ -365,13 +367,18 @@ export function DatasetViewer({
     }
   }, [open, store]);
 
-  const ntriples = React.useMemo(
+  // Whether ANY row is in a named graph — drives the optional "graph" column / the
+  // N-Quads (vs N-Triples) text view, so a plain triple dataset stays unchanged.
+  const hasGraphs = React.useMemo(() => rows.some((r) => r.g), [rows]);
+
+  // Default-graph rows render as triples; named-graph rows render as quads.
+  const serialised = React.useMemo(
     () =>
       rows
-        .map(
-          (r) =>
-            `${formatTerm(r.s)} ${formatTerm(r.p)} ${formatTerm(r.o)} .`,
-        )
+        .map((r) => {
+          const spo = `${formatTerm(r.s)} ${formatTerm(r.p)} ${formatTerm(r.o)}`;
+          return r.g ? `${spo} ${formatTerm(r.g)} .` : `${spo} .`;
+        })
         .join("\n"),
     [rows],
   );
@@ -402,7 +409,8 @@ export function DatasetViewer({
             size="sm"
             onClick={() => setView("ntriples")}
           >
-            <FileText className="size-3.5" /> N-Triples
+            <FileText className="size-3.5" />{" "}
+            {hasGraphs ? "N-Quads" : "N-Triples"}
           </Button>
         </div>
 
@@ -422,6 +430,9 @@ export function DatasetViewer({
                       {h}
                     </th>
                   ))}
+                  {hasGraphs && (
+                    <th className="px-3 py-2 font-medium">graph</th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -438,13 +449,19 @@ export function DatasetViewer({
                         {formatTerm(r[k])}
                       </td>
                     ))}
+                    {hasGraphs && (
+                      <td className="px-3 py-1.5 font-mono text-[12px] break-all text-muted-foreground">
+                        {/* Default-graph rows leave ?g unbound — show a dash. */}
+                        {r.g ? formatTerm(r.g) : "—"}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
             </table>
           ) : (
             <pre className="overflow-x-auto p-3 font-mono text-[12px] leading-relaxed">
-              {ntriples}
+              {serialised}
             </pre>
           )}
         </div>
