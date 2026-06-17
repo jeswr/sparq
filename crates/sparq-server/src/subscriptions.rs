@@ -356,6 +356,9 @@ pub(crate) async fn subscribe_init(
         Ok(p) if p.form == QueryForm::Select => {}
         Ok(_) => return Err(refuse("only SELECT queries can be subscribed".into(), StatusCode::BAD_REQUEST)),
         Err(PrepareError::Malformed(e)) => return Err(refuse(format!("malformed query: {e}"), StatusCode::BAD_REQUEST)),
+        // [OPUS-4.8] sq-z33x: subscriptions carry no SPARQL-Protocol dataset override, so this
+        // arm is unreachable in practice — but a bad graph IRI is a client error regardless.
+        Err(PrepareError::BadGraphUri(e)) => return Err(refuse(e, StatusCode::BAD_REQUEST)),
     }
 
     // Limits: per-connection first (cheap), then the global slot. Both are genuine

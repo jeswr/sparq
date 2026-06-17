@@ -44,7 +44,7 @@ use sparq_serve::{
     ApplyUpdates, Generation, GenerationRing, GraphApplier, PodId, WriteError, Writer, WriterConfig,
 };
 
-use crate::exec::{prepare, PrepareError, QueryForm};
+use crate::exec::{apply_update_dataset, prepare_with_dataset, DatasetOverride, PrepareError, QueryForm, UpdateDatasetError, UsingOverride};
 use crate::negotiate::{negotiate, negotiate_graph, Format, GraphFormat};
 use crate::results;
 
@@ -2326,7 +2326,13 @@ async fn sparql_endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let url_params = parse_form(raw_query.as_deref().unwrap_or(""));
+    let raw = raw_query.as_deref().unwrap_or("");
+    let url_params = parse_form(raw);
+    // [OPUS-4.8] sq-z33x: the SPARQL 1.1 Protocol query/update dataset overrides live in the URL
+    // query string for GET and the direct (`application/sparql-query` / `application/sparql-update`)
+    // POSTs; the form-POST path reads them from the request BODY instead (see `handle_post`).
+    let url_dataset = query_dataset_override(raw);
+    let url_using = update_dataset_override(raw);
     match method {
         Method::GET | Method::HEAD => {
             // Query string carries `query=` (+ optional dataset params). Per protocol, a
@@ -2378,7 +2384,7 @@ async fn sparql_endpoint(
                     };
                     let explain = explain_mode(&url_params, None, &headers);
                     let resp =
-                        run_query(&state, q, &headers, method == Method::HEAD, explain, pin).await;
+                        run_query(&state, q, &headers, method == Method::HEAD, explain, pin, &url_dataset).await;
                     #[cfg(feature = "audit-log")]
                     if let Some(a) = audit {
                         a.emit(&resp);
@@ -2401,7 +2407,7 @@ async fn sparql_endpoint(
                 None => bad_request("missing 'query' parameter"),
             }
         }
-        Method::POST => handle_post(&state, &headers, &body, &url_params).await,
+        Method::POST => handle_post(&state, &headers, &body, &url_params, &url_dataset, &url_using).await,
         _ => method_not_allowed(&[Method::GET, Method::HEAD, Method::POST]),
     }
 }
@@ -2411,6 +2417,14 @@ async fn handle_post(
     headers: &HeaderMap,
     body: &Bytes,
     url_params: &HashMap<String, String>,
+    // [OPUS-4.8] sq-z33x: the §2.1.4 query dataset override carried in the URL query string
+    // (applies to the direct `application/sparql-query` POST; the form-POST path overrides it with
+    // the override carried in the form BODY, per the protocol's url-encoded encoding).
+    url_dataset: &DatasetOverride,
+    // [OPUS-4.8] sq-z33x: the §2.2 UPDATE dataset override (`using-*`) carried in the URL query
+    // string (applies to the direct `application/sparql-update` POST; the form-POST `update=` path
+    // reads it from the form BODY).
+    url_using: &UsingOverride,
 ) -> Response {
     let ct = content_type(headers);
     if ct.starts_with(SPARQL_QUERY_CT) {
@@ -2471,7 +2485,7 @@ async fn handle_post(
             }
         };
         let explain = explain_mode(url_params, None, headers);
-        let resp = run_query(state, s, headers, false, explain, pin).await;
+        let resp = run_query(state, s, headers, false, explain, pin, url_dataset).await;
         #[cfg(feature = "audit-log")]
         if let Some(a) = audit {
             a.emit(&resp);
@@ -2557,7 +2571,12 @@ async fn handle_post(
                 audit_access_finish(state, aa, &resp);
                 return resp;
             }
-            let resp = run_update(state, u.clone()).await;
+            // [OPUS-4.8] sq-z33x: §2.2 UPDATE dataset override — for the url-encoded form encoding
+            // the `using-*` params are carried in the FORM BODY (`s`), not the URL query string.
+            let resp = match rewrite_update(u, &update_dataset_override(s)) {
+                Ok(rewritten) => run_update(state, rewritten).await,
+                Err(resp) => resp,
+            };
             #[cfg(feature = "audit-log")]
             if let Some(a) = audit {
                 a.emit(&resp);
@@ -2581,7 +2600,10 @@ async fn handle_post(
                     }
                 };
                 let explain = explain_mode(url_params, Some(&params), headers);
-                run_query(state, q, headers, false, explain, pin).await
+                // [OPUS-4.8] sq-z33x: per the SPARQL 1.1 Protocol url-encoded encoding, the dataset
+                // override (`default-graph-uri` / `named-graph-uri`) is carried in the FORM BODY for
+                // this content type, not the URL query string.
+                run_query(state, q, headers, false, explain, pin, &query_dataset_override(s)).await
             }
             None => bad_request("missing 'query' or 'update' parameter in url-encoded body"),
         };
@@ -2642,7 +2664,12 @@ async fn handle_post(
             return resp;
         }
         let resp = match std::str::from_utf8(body) {
-            Ok(u) => run_update(state, u.to_string()).await,
+            // [OPUS-4.8] sq-z33x: §2.2 UPDATE dataset override — for the `application/sparql-update`
+            // body the `using-*` params are carried in the URL query string (`url_using`).
+            Ok(u) => match rewrite_update(u, url_using) {
+                Ok(rewritten) => run_update(state, rewritten).await,
+                Err(resp) => resp,
+            },
             Err(_) => bad_request("request body is not valid UTF-8"),
         };
         #[cfg(feature = "audit-log")]
@@ -2771,9 +2798,10 @@ async fn run_query(
     head_only: bool,
     explain: ExplainMode,
     gen: PinnedGen,
+    dataset: &DatasetOverride,
 ) -> Response {
     let number = gen.number();
-    let resp = run_query_pinned(state, sparql, headers, head_only, explain, gen).await;
+    let resp = run_query_pinned(state, sparql, headers, head_only, explain, gen, dataset).await;
     with_generation_header(resp, number)
 }
 
@@ -2784,8 +2812,11 @@ async fn run_query_pinned(
     head_only: bool,
     explain: ExplainMode,
     gen: PinnedGen,
+    // [OPUS-4.8] sq-z33x: the SPARQL 1.1 Protocol §2.1.4 dataset override
+    // (`default-graph-uri` / `named-graph-uri`); empty for the common in-query / no-dataset case.
+    dataset: &DatasetOverride,
 ) -> Response {
-    let prepared = match prepare(sparql) {
+    let prepared = match prepare_with_dataset(sparql, dataset) {
         Ok(p) => p,
         // [OPUS-4.8] (sq-cz89/sq-j9zs) The parser echoes the offending query token verbatim;
         // withhold it from the body (it is caller input, but an info-leak contract regardless)
@@ -2798,6 +2829,9 @@ async fn run_query_pinned(
                 &msg,
             )
         }
+        // [OPUS-4.8] sq-z33x: a `default-graph-uri` / `named-graph-uri` value that is not a valid
+        // absolute IRI is a client error (the protocol parameter is caller input).
+        Err(PrepareError::BadGraphUri(msg)) => return bad_request(&msg),
     };
     // The generation was pinned ONCE per request (the caller's `resolve_pin`: the
     // current generation, or — under the `time-travel` feature — the requested
@@ -3772,6 +3806,58 @@ fn parse_form(s: &str) -> HashMap<String, String> {
         map.insert(form_decode(k), form_decode(v));
     }
     map
+}
+
+/// [OPUS-4.8] sq-z33x: collects EVERY value of a repeated `application/x-www-form-urlencoded`
+/// key (in request order). [`parse_form`]'s `HashMap` keeps only the last value, but the SPARQL
+/// 1.1 Protocol dataset parameters (`default-graph-uri` / `named-graph-uri` / `using-*`) are
+/// intrinsically multi-valued — a dataset can name several default and several named graphs — so
+/// they must be read from the raw form/query string, not the collapsed map.
+fn form_values(raw: &str, key: &str) -> Vec<String> {
+    raw.split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| match pair.split_once('=') {
+            Some((k, v)) => (form_decode(k) == key).then(|| form_decode(v)),
+            None => None,
+        })
+        .collect()
+}
+
+/// [OPUS-4.8] sq-z33x: extracts the SPARQL 1.1 Protocol §2.1.4 query dataset override
+/// (`default-graph-uri` / `named-graph-uri`) from a raw urlencoded string — the request URL query
+/// string for GET / direct-POST, or the form body for an `application/x-www-form-urlencoded` POST.
+fn query_dataset_override(raw: &str) -> DatasetOverride {
+    DatasetOverride {
+        default: form_values(raw, "default-graph-uri"),
+        named: form_values(raw, "named-graph-uri"),
+    }
+}
+
+/// [OPUS-4.8] sq-z33x: extracts the SPARQL 1.1 Protocol §2.2 UPDATE dataset override
+/// (`using-graph-uri` / `using-named-graph-uri`) from a raw urlencoded string.
+fn update_dataset_override(raw: &str) -> UsingOverride {
+    UsingOverride {
+        default: form_values(raw, "using-graph-uri"),
+        named: form_values(raw, "using-named-graph-uri"),
+    }
+}
+
+/// [OPUS-4.8] sq-z33x: applies the UPDATE dataset override to the update string, mapping a rewrite
+/// failure onto the right HTTP 400. Returns the (possibly rewritten) update on success.
+// clippy: Err is axum's `Response` (the idiomatic handler error, as at `resolve_pin`); boxing it
+// would only desync the call sites that already thread `Response` errors.
+#[allow(clippy::result_large_err)]
+fn rewrite_update(update: &str, over: &UsingOverride) -> Result<String, Response> {
+    apply_update_dataset(update, over).map_err(|e| match e {
+        UpdateDatasetError::Malformed(msg) => {
+            sanitized_error(StatusCode::BAD_REQUEST, "update-parse", "malformed update", &msg)
+        }
+        UpdateDatasetError::BadGraphUri(msg) => bad_request(&msg),
+        UpdateDatasetError::UsingConflict => bad_request(
+            "the 'using-graph-uri' / 'using-named-graph-uri' parameters must not be combined with \
+             an in-update USING / USING NAMED / WITH clause (SPARQL 1.1 Protocol §2.2)",
+        ),
+    })
 }
 
 /// Decodes a single `application/x-www-form-urlencoded` component (`+` → space, `%XX`).

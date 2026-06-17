@@ -164,8 +164,12 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
 - Serializer/negotiation helpers (always compiled, no `server` feature): module
   `sparq_server::negotiate` — `fn negotiate(accept: Option<&str>) -> Format`,
   `fn negotiate_graph(accept: Option<&str>) -> GraphFormat`; module
-  `sparq_server::exec` — `fn prepare(&str) -> Result<Prepared, PrepareError>`,
-  `enum QueryForm { Select, Ask, Construct, Describe }`; module `sparq_server::results`.
+  `sparq_server::exec` — `fn prepare(&str) -> Result<Prepared, PrepareError>` and
+  `fn prepare_with_dataset(&str, &DatasetOverride) -> Result<Prepared, PrepareError>` (applies the
+  SPARQL-Protocol `default-graph-uri`/`named-graph-uri` override, sq-z33x),
+  `fn apply_update_dataset(&str, &UsingOverride) -> Result<String, UpdateDatasetError>` (the
+  update-side `using-*` override), `enum QueryForm { Select, Ask, Construct, Describe }`; module
+  `sparq_server::results`.
 
 ## Common recipes
 
@@ -754,9 +758,13 @@ Some(SinkTarget::File(path)), .. }` (field present only with the feature). See
 - **Named graphs are real (since conformance round 3).** The engine stores the FULL dataset
   — default graph + named graphs — so `GRAPH <g> { … }` / `GRAPH ?g { … }` evaluate, and a
   GSP graph resource (`?graph=<iri>` or the direct request URI) addresses a genuine named
-  graph (no longer a default-graph alias). `FROM`/`FROM NAMED` and the protocol's
-  `default-graph-uri`/`named-graph-uri` params are accepted/threaded. Time-travel pinning is
-  `/sparql` queries only (GSP read/write and subscriptions always operate on current).
+  graph (no longer a default-graph alias). `FROM`/`FROM NAMED` re-scope the active dataset, and
+  the protocol's dataset-override params are **applied** (sq-z33x), not just accepted:
+  `default-graph-uri`/`named-graph-uri` synthesize the query's active dataset (replacing any
+  in-query `FROM`/`FROM NAMED` per §2.1.4), and `using-graph-uri`/`using-named-graph-uri` re-scope
+  an update's `WHERE` (per §2.2; combining with an in-update `USING`/`USING NAMED`/`WITH` is a
+  `400`, as is a non-IRI graph value). Time-travel pinning is `/sparql` queries only (GSP
+  read/write and subscriptions always operate on current).
 - **Update operations.** Engine handles `INSERT DATA`, `DELETE DATA`, `CLEAR`/`DROP`/`CREATE`
   (DEFAULT / named / ALL), `LOAD`, and `DELETE/INSERT … WHERE` — over the default graph AND
   named graphs. A failing operation is refused with `400`, atomically (no partial effect
