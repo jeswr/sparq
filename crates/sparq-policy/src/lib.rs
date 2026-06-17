@@ -6,6 +6,12 @@
 #[cfg(feature = "count-enforcement")]
 pub mod count;
 
+// [OPUS-4.8] sq-5z1q: a CROSS-PROCESS `UsageCounterStore` (a file + OS lockfile) — the
+// distributed-atomicity follow-up to sq-zi5w's in-process `InMemoryCounterStore`. Same
+// feature gate, same `try_consume` contract, std-only (no new deps, no `unsafe`).
+#[cfg(feature = "count-enforcement")]
+pub mod count_file;
+
 // [OPUS-4.8] sq-zabv: static (request-free) policy analysis — permission/prohibition
 // conflict + policy containment/refinement, on the query-containment comparison
 // semantics. Always compiled (no feature gate); it adds no deps and no core cost.
@@ -31,3 +37,8 @@ pub use count::{
     count_status, evaluate_and_exercise, ConsumeResult, CountKey, CountStatus, ExerciseDecision,
     InMemoryCounterStore, UsageCounterStore,
 };
+
+// [OPUS-4.8] sq-5z1q: the cross-process file-backed store, flat-exported alongside the
+// in-memory one (a drop-in for the same `UsageCounterStore` seam).
+#[cfg(feature = "count-enforcement")]
+pub use count_file::FileCounterStore;
