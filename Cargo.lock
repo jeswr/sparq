@@ -3362,6 +3362,7 @@ dependencies = [
  "md-5 0.11.0",
  "oxiri",
  "oxrdf 0.3.3",
+ "quick-xml 0.40.1",
  "rayon",
  "regex",
  "rustc-hash 2.1.2",

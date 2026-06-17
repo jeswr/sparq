@@ -23,9 +23,13 @@
 //!    default [`DEFAULT_BIND_BLOCK`]). The remote relation that is NOT bound-joined is
 //!    still materialised and joined locally by the caller.
 //! 2. The query is sent over HTTP (form-encoded POST, `Accept:
-//!    application/sparql-results+json`).
-//! 3. The SPARQL-Results-JSON response is parsed into a [`ServiceRelation`]
-//!    (variable list + rows of optional [`Term`]s).
+//!    application/sparql-results+json, application/sparql-results+xml;q=0.9` — JSON is
+//!    preferred but XML is accepted as a fallback).
+//! 3. The response is parsed into a [`ServiceRelation`] (variable list + rows of optional
+//!    [`Term`]s). The body is content-sniffed (`parse_results`): a leading `{` is parsed
+//!    as SPARQL-Results-JSON ([`parse_srj`]); a leading `<` as SPARQL-Results-XML
+//!    ([`parse_srx`]). The XML path matters because some endpoints ignore `Accept` and
+//!    always return XML — without it the whole SERVICE call would fail (bead sq-ycu).
 //! 4. The caller (`exec::eval_service`) interns those terms into the local/graph
 //!    dictionaries — exactly like `VALUES` — and joins them with the rest of the query.
 //!
@@ -76,7 +80,30 @@ pub(crate) fn eval_remote(
     query: &str,
 ) -> Result<ServiceRelation, String> {
     let body = transport.fetch(endpoint, query)?;
-    parse_srj(&body)
+    parse_results(&body)
+}
+
+/// Parse a remote SELECT results document, content-sniffing JSON vs XML. [OPUS-4.8]
+///
+/// The SPARQL Protocol lets a client advertise an `Accept` preference, but a server MAY
+/// ignore it; in practice some endpoints always emit SPARQL-Results-XML even when we ask
+/// for JSON (bead sq-ycu). We therefore sniff the first non-whitespace byte rather than
+/// trusting any `Content-Type` (which the `Transport` seam does not even surface): `{` ⇒
+/// SPARQL-Results-JSON, `<` ⇒ SPARQL-Results-XML. Anything else is an error (or, under
+/// `SILENT`, the caller's empty result).
+#[cfg(feature = "service")]
+pub(crate) fn parse_results(text: &str) -> Result<ServiceRelation, String> {
+    match text.trim_start().as_bytes().first() {
+        Some(b'<') => parse_srx(text),
+        Some(b'{') => parse_srj(text),
+        // An empty body or a leading byte that is neither `{` nor `<` is not a results
+        // document we can parse; report it (SILENT turns this into an empty result).
+        _ => Err(
+            "SERVICE: endpoint response is neither SPARQL-Results-JSON nor -XML \
+             (expected a leading '{' or '<')"
+                .into(),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +396,300 @@ fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
 }
 
 // ---------------------------------------------------------------------------
+// SPARQL-Results-XML (SRX) parsing [OPUS-4.8] (bead sq-ycu)
+// ---------------------------------------------------------------------------
+//
+// The JSON path (`parse_srj`) is the preferred format, but some endpoints ignore the
+// `Accept` header and only ever emit SPARQL-Results-XML
+// (<https://www.w3.org/TR/rdf-sparql-XMLres/>, with the SPARQL 1.2 `<triple>` extension).
+// This parser is the streaming-event analogue of the conformance suite's `parse_srx`
+// (`sparq-conformance/src/results.rs`) — same quick-xml event handling, same predefined-
+// entity decode discipline — but it (a) takes a `&str` body rather than a file path, and
+// (b) projects each `<result>` *positionally* over the declared `<variable>` list (an
+// absent binding ⇒ `None`), so it yields a `ServiceRelation` byte-for-byte compatible with
+// `parse_srj`. An ASK `<boolean>` body is rejected, exactly like `parse_srj`, because
+// SERVICE always wraps a SELECT.
+
+/// Resolve one XML entity reference name (as quick-xml 0.40 hands it out in a
+/// `Event::GeneralRef`, i.e. WITHOUT the surrounding `&`/`;`) to its replacement text:
+/// the five predefined named entities (`amp`/`lt`/`gt`/`quot`/`apos`) and numeric
+/// character references (`#38` decimal, `#x26` hex). [OPUS-4.8]
+#[cfg(feature = "service")]
+fn resolve_xml_entity(name: &str) -> Result<String, String> {
+    if let Some(rep) = quick_xml::escape::resolve_predefined_entity(name) {
+        return Ok(rep.to_string());
+    }
+    if let Some(rest) = name.strip_prefix('#') {
+        let cp = if let Some(hex) = rest.strip_prefix(['x', 'X']) {
+            u32::from_str_radix(hex, 16)
+        } else {
+            rest.parse::<u32>()
+        }
+        .map_err(|_| format!("SERVICE: bad numeric character reference &{name};"))?;
+        return char::from_u32(cp)
+            .map(|c| c.to_string())
+            .ok_or_else(|| format!("SERVICE: numeric character reference &{name}; out of range"));
+    }
+    Err(format!("SERVICE: unknown XML entity &{name};"))
+}
+
+/// Reconstruct one term from an SRX value element's collected attributes/text. Mirrors the
+/// conformance suite's `make_term` and the SRJ `srj_term` (uri / bnode / plain, language-
+/// tagged — incl. the SPARQL 1.2 `its:dir` directional literal — and typed literals).
+#[cfg(feature = "service")]
+fn srx_term(
+    kind: &str,
+    lang: Option<String>,
+    dir: Option<String>,
+    dt: Option<String>,
+    text: String,
+) -> Result<Term, String> {
+    match kind {
+        "uri" => Ok(Term::NamedNode(
+            NamedNode::new(&text).map_err(|e| format!("SERVICE: bad IRI {text:?}: {e}"))?,
+        )),
+        "bnode" => Ok(Term::BlankNode(
+            BlankNode::new(&text).map_err(|e| format!("SERVICE: bad bnode {text:?}: {e}"))?,
+        )),
+        // "literal" (and any other leaf, defensively).
+        _ => {
+            if let Some(lang) = lang {
+                // A `<literal xml:lang="…" its:dir="…">` is an RDF 1.2 dirLangString. As in
+                // the SRJ path (sq-s955), an ABSENT or INVALID direction degrades to a plain
+                // language-tagged literal so all parse paths agree on `(lang, dir)`.
+                match dir
+                    .as_deref()
+                    .and_then(sparq_core::dict::parse_base_direction)
+                {
+                    Some(direction) => Ok(Term::Literal(
+                        Literal::new_directional_language_tagged_literal(text, &lang, direction)
+                            .map_err(|e| format!("SERVICE: bad language tag {lang:?}: {e}"))?,
+                    )),
+                    None => Ok(Term::Literal(
+                        Literal::new_language_tagged_literal(text, &lang)
+                            .map_err(|e| format!("SERVICE: bad language tag {lang:?}: {e}"))?,
+                    )),
+                }
+            } else if let Some(dt) = dt {
+                let dt =
+                    NamedNode::new(&dt).map_err(|e| format!("SERVICE: bad datatype {dt:?}: {e}"))?;
+                Ok(Term::Literal(Literal::new_typed_literal(text, dt)))
+            } else {
+                Ok(Term::Literal(Literal::new_simple_literal(text)))
+            }
+        }
+    }
+}
+
+/// Parse a SPARQL-Results-XML SELECT document into a [`ServiceRelation`]. ASK `<boolean>`
+/// bodies are rejected (SERVICE always wraps a SELECT in our forwarding).
+#[cfg(feature = "service")]
+pub(crate) fn parse_srx(text: &str) -> Result<ServiceRelation, String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+
+    let mut vars: Vec<Variable> = Vec::new();
+    // Per-row map of variable-name → term; projected positionally over `vars` at </result>.
+    let mut cur_row: rustc_hash::FxHashMap<String, Term> = rustc_hash::FxHashMap::default();
+    let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
+    let mut cur_var: Option<String> = None;
+    // The open value element: (kind, xml:lang, its:dir, datatype, text).
+    #[allow(clippy::type_complexity)]
+    let mut cur_val: Option<(String, Option<String>, Option<String>, Option<String>, String)> =
+        None;
+    // SPARQL 1.2 `<triple>` nesting: each frame is (active slot, [s, p, o]).
+    let mut triple_stack: Vec<(usize, [Option<Term>; 3])> = Vec::new();
+    let mut in_boolean = false;
+    let mut boolean: Option<bool> = None;
+
+    // Route a finished term into the enclosing `<triple>` frame's active slot, or, at top
+    // level, into the current row keyed by the open `<binding name=…>`.
+    fn commit(
+        term: Term,
+        triple_stack: &mut [(usize, [Option<Term>; 3])],
+        cur_row: &mut rustc_hash::FxHashMap<String, Term>,
+        cur_var: &Option<String>,
+    ) {
+        if let Some((slot, parts)) = triple_stack.last_mut() {
+            parts[*slot] = Some(term);
+        } else if let Some(var) = cur_var.clone() {
+            cur_row.insert(var, term);
+        }
+    }
+    fn set_slot(triple_stack: &mut [(usize, [Option<Term>; 3])], slot: usize) {
+        if let Some((s, _)) = triple_stack.last_mut() {
+            *s = slot;
+        }
+    }
+
+    loop {
+        match reader
+            .read_event()
+            .map_err(|e| format!("SERVICE: invalid results XML: {e}"))?
+        {
+            Event::Eof => break,
+            ev @ (Event::Start(_) | Event::Empty(_)) => {
+                let is_empty = matches!(ev, Event::Empty(_));
+                let e = match &ev {
+                    Event::Start(e) | Event::Empty(e) => e,
+                    _ => unreachable!(),
+                };
+                let name = e.local_name();
+                let name = std::str::from_utf8(name.as_ref()).unwrap_or("").to_string();
+                let attr = |key: &str| -> Option<String> {
+                    e.attributes().filter_map(|a| a.ok()).find_map(|a| {
+                        let k = std::str::from_utf8(a.key.as_ref()).ok()?;
+                        // Matches a bare key or any namespaced `*:key` (e.g. `xml:lang`).
+                        if k == key || k.ends_with(&format!(":{key}")) {
+                            quick_xml::escape::unescape(std::str::from_utf8(&a.value).ok()?)
+                                .ok()
+                                .map(std::borrow::Cow::into_owned)
+                        } else {
+                            None
+                        }
+                    })
+                };
+                match name.as_str() {
+                    "variable" => {
+                        if let Some(v) = attr("name") {
+                            vars.push(Variable::new(&v).map_err(|e| {
+                                format!("SERVICE: bad result variable {v:?}: {e}")
+                            })?);
+                        }
+                    }
+                    "result" => cur_row.clear(),
+                    "binding" => cur_var = attr("name"),
+                    "uri" | "bnode" => cur_val = Some((name, None, None, None, String::new())),
+                    "literal" => {
+                        cur_val = Some((
+                            name,
+                            attr("lang"),
+                            attr("dir"),
+                            attr("datatype"),
+                            String::new(),
+                        ))
+                    }
+                    "triple" => triple_stack.push((0, [None, None, None])),
+                    "subject" => set_slot(&mut triple_stack, 0),
+                    "predicate" => set_slot(&mut triple_stack, 1),
+                    "object" => set_slot(&mut triple_stack, 2),
+                    "boolean" => in_boolean = true,
+                    _ => {}
+                }
+                // Self-closing value elements (`<literal/>`, `<bnode/>`) get no End event:
+                // commit the (empty-text) term right away.
+                if is_empty {
+                    if let Some((kind, lang, dir, dt, t)) = cur_val.take() {
+                        commit(
+                            srx_term(&kind, lang, dir, dt, t)?,
+                            &mut triple_stack,
+                            &mut cur_row,
+                            &cur_var,
+                        );
+                    }
+                }
+            }
+            Event::Text(t) => {
+                // quick-xml 0.40 splits entity references out into `Event::GeneralRef`
+                // (handled below), so the decoded text carries no `&…;` to unescape — it
+                // is the verbatim character data.
+                let s = t.decode().map_err(|e| e.to_string())?;
+                if in_boolean {
+                    boolean = Some(s.trim() == "true");
+                } else if let Some(v) = cur_val.as_mut() {
+                    v.4.push_str(&s);
+                }
+            }
+            // A `&amp;` / `&lt;` / numeric `&#38;` / `&#x26;` reference inside the open
+            // value element's text. (boolean bodies never carry references.) [OPUS-4.8]
+            Event::GeneralRef(r) => {
+                if let Some(v) = cur_val.as_mut() {
+                    let name = r.decode().map_err(|e| e.to_string())?;
+                    v.4.push_str(&resolve_xml_entity(&name)?);
+                }
+            }
+            Event::CData(t) => {
+                if let Some(v) = cur_val.as_mut() {
+                    v.4.push_str(&String::from_utf8_lossy(&t));
+                }
+            }
+            Event::End(e) => {
+                let name = e.local_name();
+                match name.as_ref() {
+                    b"uri" | b"bnode" | b"literal" => {
+                        if let Some((kind, lang, dir, dt, t)) = cur_val.take() {
+                            commit(
+                                srx_term(&kind, lang, dir, dt, t)?,
+                                &mut triple_stack,
+                                &mut cur_row,
+                                &cur_var,
+                            );
+                        }
+                    }
+                    b"triple" => {
+                        let Some((_, [s, p, o])) = triple_stack.pop() else {
+                            return Err("SERVICE: stray </triple> in results XML".into());
+                        };
+                        let subject = match s {
+                            Some(Term::NamedNode(n)) => NamedOrBlankNode::NamedNode(n),
+                            Some(Term::BlankNode(b)) => NamedOrBlankNode::BlankNode(b),
+                            other => {
+                                return Err(format!(
+                                    "SERVICE: invalid triple-term subject: {other:?}"
+                                ))
+                            }
+                        };
+                        let predicate = match p {
+                            Some(Term::NamedNode(n)) => n,
+                            other => {
+                                return Err(format!(
+                                    "SERVICE: invalid triple-term predicate: {other:?}"
+                                ))
+                            }
+                        };
+                        let object = o
+                            .ok_or_else(|| "SERVICE: triple term without object".to_string())?;
+                        commit(
+                            Term::Triple(Box::new(Triple {
+                                subject,
+                                predicate,
+                                object,
+                            })),
+                            &mut triple_stack,
+                            &mut cur_row,
+                            &cur_var,
+                        );
+                    }
+                    b"binding" => cur_var = None,
+                    b"result" => {
+                        // Project the row positionally over the declared variables; an
+                        // absent binding is UNBOUND (`None`) — the same VALUES-UNDEF
+                        // semantics the SRJ path uses.
+                        let row: Vec<Option<Term>> =
+                            vars.iter().map(|v| cur_row.remove(v.as_str())).collect();
+                        cur_row.clear();
+                        rows.push(row);
+                    }
+                    b"boolean" => in_boolean = false,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if boolean.is_some() {
+        return Err(
+            "SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into(),
+        );
+    }
+    Ok(ServiceRelation { vars, rows })
+}
+
+// ---------------------------------------------------------------------------
 // SSRF egress policy (default-deny private / internal ranges) [OPUS-4.8]
 // ---------------------------------------------------------------------------
 //
@@ -604,7 +925,8 @@ pub fn with_service_egress_policy<R>(
 // ---------------------------------------------------------------------------
 
 /// The real network transport: a blocking ureq POST with the SPARQL query
-/// form-encoded in the body and `Accept: application/sparql-results+json`.
+/// form-encoded in the body and an `Accept` header that prefers SPARQL-Results-JSON but
+/// also accepts SPARQL-Results-XML (the response is content-sniffed by `parse_results`).
 ///
 /// Gated to `cfg(not(wasm32))` AND the `service` feature so neither ureq nor any of
 /// its TLS stack ever enters the wasm bundle.
@@ -696,7 +1018,12 @@ impl Transport for HttpTransport {
         // most broadly supported method and not subject to URL-length limits.
         let resp = agent
             .post(endpoint)
-            .set("Accept", "application/sparql-results+json")
+            // Prefer JSON, but accept XML — some endpoints ignore `Accept` and only emit
+            // SPARQL-Results-XML, which `parse_results` now handles (bead sq-ycu). [OPUS-4.8]
+            .set(
+                "Accept",
+                "application/sparql-results+json, application/sparql-results+xml;q=0.9",
+            )
             .send_form(&[("query", query)]);
         match resp {
             Ok(r) => r
@@ -843,6 +1170,197 @@ mod tests {
         assert!(parse_srj("not json at all").is_err());
         assert!(parse_srj(r#"{"head":{}}"#).is_err()); // no vars
         assert!(parse_srj(r#"{"boolean":true}"#).is_err()); // ASK, not SELECT
+    }
+
+    // ---------------------------------------------------------------------
+    // SPARQL-Results-XML (SRX) parsing [OPUS-4.8] (bead sq-ycu)
+    // ---------------------------------------------------------------------
+
+    const SRX_NS: &str = "http://www.w3.org/2005/sparql-results#";
+
+    #[test]
+    fn srx_parses_uri_and_literals() {
+        let body = format!(
+            r#"<?xml version="1.0"?>
+            <sparql xmlns="{SRX_NS}">
+              <head><variable name="s"/><variable name="name"/></head>
+              <results>
+                <result>
+                  <binding name="s"><uri>http://ex/a</uri></binding>
+                  <binding name="name"><literal>Alice</literal></binding>
+                </result>
+                <result>
+                  <binding name="s"><uri>http://ex/b</uri></binding>
+                  <binding name="name"><literal xml:lang="en">Bob</literal></binding>
+                </result>
+              </results>
+            </sparql>"#
+        );
+        let rel = parse_srx(&body).unwrap();
+        assert_eq!(rel.vars.len(), 2);
+        assert_eq!(rel.rows.len(), 2);
+        assert_eq!(
+            rel.rows[0][0],
+            Some(Term::NamedNode(NamedNode::new("http://ex/a").unwrap()))
+        );
+        assert_eq!(
+            rel.rows[0][1],
+            Some(Term::Literal(Literal::new_simple_literal("Alice")))
+        );
+        assert_eq!(
+            rel.rows[1][1],
+            Some(Term::Literal(
+                Literal::new_language_tagged_literal("Bob", "en").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn srx_unbound_variable_becomes_none() {
+        // `b` is absent in the single solution and the bindings appear out of
+        // declaration order — projection must be positional over <variable> order.
+        let body = format!(
+            r#"<sparql xmlns="{SRX_NS}">
+              <head><variable name="a"/><variable name="b"/></head>
+              <results>
+                <result><binding name="a"><uri>http://ex/x</uri></binding></result>
+              </results>
+            </sparql>"#
+        );
+        let rel = parse_srx(&body).unwrap();
+        assert_eq!(
+            rel.rows[0][0],
+            Some(Term::NamedNode(NamedNode::new("http://ex/x").unwrap()))
+        );
+        assert_eq!(rel.rows[0][1], None);
+    }
+
+    #[test]
+    fn srx_typed_literal_and_bnode_and_entities() {
+        let body = format!(
+            r#"<sparql xmlns="{SRX_NS}">
+              <head><variable name="n"/><variable name="b"/><variable name="t"/></head>
+              <results>
+                <result>
+                  <binding name="n"><literal datatype="http://www.w3.org/2001/XMLSchema#integer">42</literal></binding>
+                  <binding name="b"><bnode>b0</bnode></binding>
+                  <binding name="t"><literal>a &amp; b &#38; c &#x3C; d</literal></binding>
+                </result>
+              </results>
+            </sparql>"#
+        );
+        let rel = parse_srx(&body).unwrap();
+        assert_eq!(
+            rel.rows[0][0],
+            Some(Term::Literal(Literal::new_typed_literal(
+                "42",
+                NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap()
+            )))
+        );
+        assert_eq!(
+            rel.rows[0][1],
+            Some(Term::BlankNode(oxrdf::BlankNode::new("b0").unwrap()))
+        );
+        // Predefined (&amp; -> &), decimal (&#38; -> &) and hex (&#x3C; -> <) refs all decode.
+        assert_eq!(
+            rel.rows[0][2],
+            Some(Term::Literal(Literal::new_simple_literal("a & b & c < d")))
+        );
+    }
+
+    #[test]
+    fn srx_dir_lang_string_direction_roundtrips() {
+        for (dir, want) in [
+            ("ltr", oxrdf::BaseDirection::Ltr),
+            ("rtl", oxrdf::BaseDirection::Rtl),
+        ] {
+            let body = format!(
+                r#"<sparql xmlns="{SRX_NS}">
+                  <head><variable name="g"/></head>
+                  <results><result>
+                    <binding name="g"><literal xml:lang="ar" its:dir="{dir}">مرحبا</literal></binding>
+                  </result></results>
+                </sparql>"#
+            );
+            let rel = parse_srx(&body).unwrap();
+            match &rel.rows[0][0] {
+                Some(Term::Literal(l)) => {
+                    assert_eq!(l.value(), "مرحبا");
+                    assert_eq!(l.language(), Some("ar"));
+                    assert_eq!(l.direction(), Some(want), "its:dir={dir} must survive");
+                }
+                other => panic!("expected a directional literal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn srx_triple_term_parses() {
+        // SPARQL 1.2 quoted-triple value: << <s> <p> "o" >>.
+        let body = format!(
+            r#"<sparql xmlns="{SRX_NS}">
+              <head><variable name="t"/></head>
+              <results><result>
+                <binding name="t"><triple>
+                  <subject><uri>http://ex/s</uri></subject>
+                  <predicate><uri>http://ex/p</uri></predicate>
+                  <object><literal>o</literal></object>
+                </triple></binding>
+              </result></results>
+            </sparql>"#
+        );
+        let rel = parse_srx(&body).unwrap();
+        let want = Term::Triple(Box::new(Triple {
+            subject: NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/s").unwrap()),
+            predicate: NamedNode::new("http://ex/p").unwrap(),
+            object: Term::Literal(Literal::new_simple_literal("o")),
+        }));
+        assert_eq!(rel.rows[0][0], Some(want));
+    }
+
+    #[test]
+    fn srx_empty_results_is_ok() {
+        let body = format!(
+            r#"<sparql xmlns="{SRX_NS}"><head><variable name="x"/></head><results></results></sparql>"#
+        );
+        let rel = parse_srx(&body).unwrap();
+        assert!(rel.rows.is_empty());
+        assert_eq!(rel.vars.len(), 1);
+    }
+
+    #[test]
+    fn srx_ask_boolean_is_rejected() {
+        // SERVICE always wraps a SELECT, so an ASK boolean body is an error (mirrors SRJ).
+        let body =
+            format!(r#"<sparql xmlns="{SRX_NS}"><head/><boolean>true</boolean></sparql>"#);
+        assert!(parse_srx(&body).is_err());
+    }
+
+    /// The core bead requirement: an endpoint that ignores `Accept` and returns XML must
+    /// still be parsed (content-sniffed) by the end-to-end path, not just `parse_srj`.
+    #[test]
+    fn eval_remote_handles_xml_endpoint() {
+        let body = r#"<?xml version="1.0"?>
+            <sparql xmlns="http://www.w3.org/2005/sparql-results#">
+              <head><variable name="x"/></head>
+              <results><result><binding name="x"><uri>http://ex/1</uri></binding></result></results>
+            </sparql>"#;
+        let rel = eval_remote(&Canned(body), "http://unused/", "SELECT * WHERE {}").unwrap();
+        assert_eq!(rel.rows.len(), 1);
+        assert_eq!(
+            rel.rows[0][0],
+            Some(Term::NamedNode(NamedNode::new("http://ex/1").unwrap()))
+        );
+    }
+
+    #[test]
+    fn parse_results_rejects_non_json_non_xml() {
+        // A leading byte that is neither `{` nor `<` (e.g. an HTML error page without a
+        // doctype, or plain text) is reported rather than silently mis-parsed.
+        assert!(parse_results("connection reset by peer").is_err());
+        assert!(parse_results("").is_err());
+        // Leading whitespace before the sniff byte is tolerated.
+        assert!(parse_results("   {\"head\":{\"vars\":[\"x\"]},\"results\":{\"bindings\":[]}}").is_ok());
     }
 
     /// Canned-response transport: proves `eval_remote` wires the transport into the
