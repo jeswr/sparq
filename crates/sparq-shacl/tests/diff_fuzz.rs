@@ -551,3 +551,128 @@ fn missing_focus_is_distinct_from_blank_node_focus() {
         "missing focus collapsed into the blank-node sentinel — masks report-shape bugs"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-0hj7) Guards for the extended generator: logical components,
+// sh:node nested-shape refs, and complex SHAPE paths. These run in the per-PR
+// fast lane (no reference engine) so the extension can't silently degenerate.
+// ---------------------------------------------------------------------------
+
+/// Over a batch of seeds the generator must actually emit each extended family:
+/// every logical operator (and/or/not/xone), at least one sh:node ref, and at
+/// least one complex path. A regression that stopped generating one of these
+/// would shrink the differential's coverage silently — this fails loudly.
+#[test]
+fn generator_covers_logical_node_and_complex_paths() {
+    let mut seen = gen::Coverage::default();
+    for seed in 0..4000u64 {
+        let mut rng = Rng::new(seed);
+        let cov = Scenario::generate(&mut rng).coverage();
+        seen.logical_and |= cov.logical_and;
+        seen.logical_or |= cov.logical_or;
+        seen.logical_not |= cov.logical_not;
+        seen.logical_xone |= cov.logical_xone;
+        seen.node |= cov.node;
+        seen.complex_path |= cov.complex_path;
+    }
+    assert!(seen.logical_and, "no sh:and generated over 4000 seeds");
+    assert!(seen.logical_or, "no sh:or generated over 4000 seeds");
+    assert!(seen.logical_not, "no sh:not generated over 4000 seeds");
+    assert!(seen.logical_xone, "no sh:xone generated over 4000 seeds");
+    assert!(seen.node, "no sh:node ref generated over 4000 seeds");
+    assert!(
+        seen.complex_path,
+        "no complex path generated over 4000 seeds"
+    );
+}
+
+/// The generator's conform/violate CONSTRUCTION must be sound: a case it intends
+/// to conform must validate as conforming in sparq, and a case it intends to
+/// violate must validate as non-conforming — for every extended component and
+/// every complex-path form. This is the invariant the differential leans on
+/// (a reference engine then checks sparq's *answer*; this checks the *input*
+/// actually exercises the intended outcome), verified here without one.
+#[test]
+fn extended_components_conform_violate_construction_is_sound() {
+    use gen::PathSpecKind::*;
+
+    // (label, value builder, path form) — both conform & violate are checked.
+    // For each we assert sparq's global conformance bit matches the intent. We
+    // assert on the conformance BIT (not the violation set) so the check is
+    // robust to impl-specific result counts; the differential's set comparison
+    // adds the per-component agreement on top.
+    let value_cases: Vec<(&str, gen::Constraint)> = vec![
+        ("and(2)", gen::logical_and(2)),
+        ("and(3)", gen::logical_and(3)),
+        ("or(2)", gen::logical_or(2)),
+        ("or(3)", gen::logical_or(3)),
+        ("not", gen::logical_not()),
+        ("xone(2)", gen::logical_xone(2)),
+        ("xone(3)", gen::logical_xone(3)),
+        ("node(datatype integer)", gen::node_datatype_integer()),
+        ("node(nodeKind IRI)", gen::node_nodekind_iri()),
+    ];
+
+    for (label, value) in &value_cases {
+        for conform in [true, false] {
+            let (shapes_ttl, data_ttl) = gen::single_case(value.clone(), Predicate, conform, 1);
+            assert_conformance(label, "predicate", &shapes_ttl, &data_ttl, conform);
+        }
+    }
+
+    // Complex SHAPE paths. The value-node-set-includes-focus forms (zeroOrOne /
+    // zeroOrMore) are generated value-component-free; we test them with an
+    // integer-datatype value applied to the NON-focus reachable value to confirm
+    // the path still wires up + validates (focus is a value node and is a typed
+    // IRI, which is NOT an integer literal, so those forms would mis-violate the
+    // focus — hence the generator keeps them value-free; here we only exercise
+    // the focus-EXCLUDING forms with a value constraint).
+    let path_cases = [
+        ("sequence", Sequence, gen::datatype_integer()),
+        ("oneOrMore", OneOrMore, gen::datatype_integer()),
+        ("inverse", Inverse, gen::class_kind()),
+    ];
+    for (label, kind, value) in path_cases {
+        for conform in [true, false] {
+            let (shapes_ttl, data_ttl) = gen::single_case(value.clone(), kind, conform, 7);
+            assert_conformance("complex-path", label, &shapes_ttl, &data_ttl, conform);
+        }
+    }
+
+    // And the focus-INCLUDING forms (value-component-free, exactly as the
+    // generator emits them): they must parse + validate as CONFORMING (no value
+    // constraint to violate, no cardinality). A regression that made them
+    // ill-formed or spuriously violating (e.g. checking the focus against
+    // something) would fail here.
+    for (label, kind) in [("zeroOrOne", ZeroOrOne), ("zeroOrMore", ZeroOrMore)] {
+        let (shapes_ttl, data_ttl) = gen::single_case_path_only(kind, 9);
+        assert_conformance("complex-path", label, &shapes_ttl, &data_ttl, true);
+    }
+}
+
+/// Validate `(shapes, data)` through sparq and assert the global conformance bit
+/// equals `expect_conforms`, with the reproducer in the panic message.
+fn assert_conformance(
+    group: &str,
+    label: &str,
+    shapes_ttl: &str,
+    data_ttl: &str,
+    expect_conforms: bool,
+) {
+    let data = Graph::load_str(data_ttl, "turtle")
+        .unwrap_or_else(|e| panic!("{group}/{label}: data parse: {e}\n{data_ttl}"));
+    let shapes = Graph::load_str(shapes_ttl, "turtle")
+        .unwrap_or_else(|e| panic!("{group}/{label}: shapes parse: {e}\n{shapes_ttl}"));
+    let report = validate(&data, &shapes);
+    assert_eq!(
+        report.conforms,
+        expect_conforms,
+        "{group}/{label}: generator intended conforms={expect_conforms} but sparq reported \
+         conforms={} ({} results) — the conform/violate construction is UNSOUND, so the \
+         differential would compare a case whose intended outcome doesn't hold.\
+         \n--- shapes.ttl ---\n{shapes_ttl}\n--- data.ttl ---\n{data_ttl}\n--- results ---\n{:#?}",
+        report.conforms,
+        report.results.len(),
+        report.results,
+    );
+}
