@@ -60,7 +60,7 @@ conventions first, then a per-category map that points at the registry, then a
 |---|---|---|
 | **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `geo-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `vector-ann-bench`, `geo-index-bench`, `rsp-throughput`, `rsp-ql`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
 | **parse** | text-format parse throughput (MB/s) | `parse-baseline` |
-| **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `hdt-stage-split`, `wikidata-8b` |
+| **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `hdt-stage-split`, `hdt-suite`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
 | **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench` |
 | **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench` |
@@ -155,6 +155,25 @@ Notes on a few that need care:
   Competitor honesty: **Solr/ES are NOT SPARQL competitors and stay off the dashboard**; the
   surface peer is Fuseki + `jena-text` (`http-sparql`), the kernel ref is Lucene/Anserini (labelled
   *sub-component, not an RDF benchmark*).
+- **`hdt-suite` is the HDT LOAD-AND-DECODE suite** — see [`bench/hdt/README.md`](./hdt/README.md).
+  It exercises `sparq-hdt` loading the **vendored real-world `snikmeta.hdt`** (a hdt-cpp/java-shaped
+  FourSectDict+BitmapTriples archive, 328 triples) straight into a native sparq `Graph`. Like
+  FTS/RSP the runner is a crate **example** (`bench_oracle` — `sparq-hdt` is isolated, not a
+  `sparq-cli` dependency, and is behind the `hdt` cargo feature). `run.sh` is self-asserting: it
+  gates the **load-and-decode counts** (`snikmeta_triples` / `snikmeta_terms`), **triple-pattern
+  resolution** over the decoded graph (`snikmeta_distinct_predicates` / `snikmeta_rdf_type_triples`)
+  and the **id-translation oracle** (`snikmeta_direct_eq_upstream` = direct decoder vs the
+  upstream-backed `Hdt::read` path on the same bytes) vs `expected.tsv` (exit 1 on drift),
+  complementing the differential + rejection oracles in `crates/sparq-hdt/tests/roundtrip.rs`. CI
+  emits `hdt_load_s` (advisory wall-clock) + `hdt_vs_ntgz_load_s` (an advisory **ratio** — survives
+  box contention; trend-only). **CRITICAL honest caveat:** load-and-decode-to-native is the **ONLY**
+  like-for-like axis vs **hdt-cpp / hdt-java** — `sparq-hdt` decodes HDT into sparq's own
+  `Dict`/`Graph` then queries its **own** indexes, whereas hdt-cpp/java query the compressed
+  BitmapTriples **in place**; so a **query-over-HDT head-to-head is NOT like-for-like and is OUT OF
+  SCOPE**. The `hdt-cpp` competitor (`bench/competitors.json`) is **decode-only**, gather-only via
+  docker (zero recurring CI cost). The write-side **bytes-on-disk** gate is deferred until the
+  in-memory PFC+BitmapTriples encoder (`sq-ashy`) is the production write path (encode-perf parity
+  is a non-goal today).
 - **`vector-ann-bench` is the VECTOR / ANN suite** — see
   [`bench/vector/README.md`](./vector/README.md). It exercises `sparq-vectors` (mmap'd `.spqv`
   vector store + HNSW / Vamana / PQ ANN) over a **synthetic** corpus generated **in-process** (no

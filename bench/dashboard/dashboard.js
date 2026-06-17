@@ -361,6 +361,12 @@
     // whole family. Correctness/expressivity card; perf head-to-head OUT OF SCOPE (clock-free vs the
     // wall-clock RSP peers C-SPARQL/CQELS/RSP4J — different time model). No competitor perf column.
     { key: 'RSP-QL',        title: 'RSP-QL streaming', aliases: ['rsp-ql', 'rsp', 'rspql'] },
+    // [OPUS-4.8] sq-lrp9: HDT load-and-decode suite. Metrics are the deterministic snikmeta_*
+    // counts (load-and-decode gate) + advisory hdt_load_s / hdt_vs_ntgz_load_s. The `hdt` /
+    // `snikmeta` aliases prefix-match the whole family. Load-decode-vs-hdt-cpp is the ONLY
+    // like-for-like axis (query-over-HDT is a NON-goal — different data structure); the
+    // hdt-cpp competitor (bench/competitors.json) is decode-only, gather-only via docker.
+    { key: 'HDT',           title: 'HDT load-and-decode', aliases: ['hdt', 'snikmeta'] },
     { key: 'BSBM',          title: 'BSBM',          aliases: ['bsbm'] },
     { key: 'DBPSB',         title: 'DBPSB',         aliases: ['dbpsb', 'dbpedia sparql benchmark'] },
     // [OPUS-4.8] sq-i0nm: the synthetic qlever-style suite carries the one in-repo competitor

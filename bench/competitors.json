@@ -274,6 +274,29 @@
       "version_env_metadata": "gather records each DB image digest + the host env block.",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": null
+    },
+    {
+      "id": "hdt-cpp",
+      "name": "hdt-cpp (rdfhdt reference C++ tools)",
+      "kind": "report-cli",
+      "role": "[OPUS-4.8 sq-lrp9] The HDT reference implementation: the rdfhdt C++ tools (core LGPL, tools Apache-2.0). The ONLY like-for-like axis vs sparq-hdt is LOAD-AND-DECODE — sparq-hdt decodes HDT into sparq's OWN Dict/Graph (HDT as an ingest format) then queries its own permutation indexes, whereas hdt-cpp/java query the compressed BitmapTriples IN PLACE (HDT as a queryable store). So we compare DECODE only: `hdt2rdf <in.hdt> <out.nt>` (decode the same archive to N-Triples) is the structural analogue of sparq-hdt's load+decode-to-native. A query-over-HDT head-to-head (hdtSearch / triple-pattern over the compressed bitmap) is NOT like-for-like and is OUT OF SCOPE (different data structure, different work). hdt-java is the JVM sibling, same caveat. Adapter kind `report-cli` (file-in / N-Triples-out), Docker-based -> gather-only on a Docker EC2 box (no Docker on the dev box; zero recurring CI cost), behind the `hdt` cargo feature.",
+      "pinned_version": "rdfhdt/hdt-cpp (pin the rdfhdt/hdt-cpp Docker image DIGEST at gather time)",
+      "version_source": "the rdfhdt/hdt-cpp Docker image DIGEST (or the built tag of a from-source build), recorded in the gather results file.",
+      "install_recipe": "use the `rdfhdt/hdt-cpp` Docker image (core LGPL / tools Apache-2.0), OR build from source (autotools: `./autogen.sh && ./configure && make`). Docker-based -> gather-only on a Docker EC2 box, like QLever; zero recurring CI cost. gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
+      "run_recipe": "scripts/gather-competitors.sh --run --only hdt-cpp with HDT_ARCHIVE=<in.hdt> set; the dispatch calls scripts/bench-adapters/report_cli_adapter.py with the `adapter` recipe below (hdt2rdf decodes the SAME archive sparq-hdt loads, to N-Triples on stdout — the load+decode-to-native analogue). Cross-check the decoded TRIPLE COUNT against sparq-hdt's store.len() before trusting any timing. Match the regime: hdt-cpp `mapHDT` (mmap) vs `loadHDT` (in-RAM) — compare in-RAM vs in-RAM.",
+      "adapter": {
+        "cmd": ["hdt2rdf", "{archive}"],
+        "report_format": "ntriples",
+        "report_to": "stdout",
+        "version_cmd": ["hdt2rdf", "--version"],
+        "kind_note": "DECODE-ONLY. The report is the decoded N-Triples; the comparable signal is decode wall-clock + the decoded triple count (cross-check vs sparq-hdt store.len()). A query-over-HDT (hdtSearch) head-to-head is deliberately NOT wired — it is not like-for-like (sparq-hdt re-indexes; hdt-cpp queries the compressed bitmap in place)."
+      },
+      "comparable_suites": [
+        { "sparq_suite": "hdt-suite", "note": "DECODE-ONLY: hdt2rdf decodes the SAME .hdt sparq-hdt loads; cross-check the decoded triple count (== sparq-hdt store.len(), 328 for snikmeta) before trusting any decode timing. Query-over-HDT is OUT OF SCOPE — not like-for-like (sparq-hdt re-indexes into its own Dict/Graph; hdt-cpp queries the compressed BitmapTriples in place)." }
+      ],
+      "version_env_metadata": "gather records the hdt-cpp Docker image digest (or source tag) + the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "hdt-cpp"
     }
   ],
 

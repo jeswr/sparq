@@ -156,6 +156,16 @@ GEO_RUN=bench/geo/run.sh
 # scripts/perf-gate.py). NO competitor perf column — the RSP peers are wall-clock service engines
 # (apples-to-oranges). Registry: bench/benchmarks.toml (rsp-ql); details: bench/rsp/README.md.
 RSP_RUN=bench/rsp/run.sh
+# [OPUS-4.8] HDT load-and-decode suite (sq-lrp9, design §3.7). Like FTS/RSP the runner is a crate
+# EXAMPLE (bench_oracle) that only needs `cargo` (sparq-hdt is isolated, not a sparq-cli dependency,
+# and is behind the `hdt` cargo feature). run.sh is the self-asserting entry point: it loads the
+# VENDORED snikmeta.hdt, decodes it to a native sparq Graph, resolves triple patterns, and asserts
+# every DETERMINISTIC `count`-unit metric vs bench/hdt/expected.tsv (exit 1 on drift) — the
+# load-and-decode-to-native + triple-pattern-resolution gate (the ONLY like-for-like axis vs
+# hdt-cpp/java; query-over-HDT is OUT OF SCOPE). The advisory hdt_load_s / hdt_vs_ntgz_load_s
+# (a contention-robust RATIO) are trend-only (NOT in scripts/perf-gate.py). Registry:
+# bench/benchmarks.toml (hdt-suite); details: bench/hdt/README.md.
+HDT_RUN=bench/hdt/run.sh
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -733,6 +743,44 @@ elif command -v cargo >/dev/null 2>&1 && [ -x "$RSP_RUN" ]; then
   fi
 else
   echo "note: rsp skipped (cargo not on PATH or $RSP_RUN missing)" >&2
+fi
+
+# [OPUS-4.8] HDT load-and-decode per-commit hook (sq-lrp9). Like RSP/FTS the runner is a crate
+# EXAMPLE (bench_oracle) that only needs `cargo`, so — to match the main-only-toolchain skip the
+# LUBM/SHACL hooks get for free and keep the example build off per-PR CI — we PIN this hook to the
+# MAIN/local tier: it runs on push-to-main (GITHUB_REF=refs/heads/main) and on a LOCAL run
+# (GITHUB_REF unset, so dev `bench/hdt/run.sh` still works), but is SKIPPED on the PR tier. The
+# DETERMINISTIC load-and-decode count gate therefore runs once per merge to main. run.sh asserts
+# every `count`-unit metric vs expected.tsv internally (exit 1 on drift), failing the whole ci-bench
+# run on a regression exactly like LUBM/FTS/RSP. We harvest run.sh's `<metric>\t<value>\t<unit>`
+# stdout: the `snikmeta_*` counts are DETERMINISTIC (emitted for the dashboard's HDT card; correctness
+# is the run.sh internal gate, so trend rows not perf-gate ratchets), and hdt_load_s /
+# hdt_vs_ntgz_load_s are ADVISORY (trend-only, NOT in scripts/perf-gate.py). A small HDT_BENCH_N keeps
+# the advisory synthetic-archive build quick; the deterministic gate is on the fixture, not N.
+HDT_BIN=target/release/examples/bench_oracle
+HDT_REF="${GITHUB_REF:-}"
+if [ -n "$HDT_REF" ] && [ "$HDT_REF" != "refs/heads/main" ]; then
+  echo "note: hdt skipped (PR tier — HDT example build/run is main-only, like the javac/rapper suites)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$HDT_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
+  if ! cargo build --release -q -p sparq-hdt --example bench_oracle; then
+    echo "ERROR: bench_oracle example failed to build" >&2
+    exit 1
+  fi
+  if HDT_BIN="$HDT_BIN" HDT_BENCH_N="${HDT_BENCH_N:-100000}" bash "$HDT_RUN" > "$TMP/hdt.tsv" 2>"$TMP/hdt.err"; then
+    while IFS=$'\t' read -r metric value unit; do
+      [ -n "${metric:-}" ] && [ -n "${value:-}" ] || continue
+      # DETERMINISTIC load-and-decode counts + the advisory load/ratio rows: forward verbatim
+      # (run.sh has already asserted the count gate, so these are trend rows).
+      add "$metric" "${unit:-count}" "$value"
+    done < "$TMP/hdt.tsv"
+  else
+    echo "ERROR: hdt run.sh failed (load-and-decode count regression)" >&2
+    cat "$TMP/hdt.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: hdt skipped (cargo not on PATH or $HDT_RUN missing)" >&2
 fi
 
 # [OPUS-4.8] ZERO-KNOWLEDGE family (sq dashboard-data-feed) — feeds the dashboard's
