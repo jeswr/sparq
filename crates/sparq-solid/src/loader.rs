@@ -7,7 +7,7 @@
 //! documents referenced via `acl:agentGroup` (fragment stripped), and the synthesized
 //! structural facts below.
 
-use crate::{AUTH_GRAPH, SOLIDX_NS};
+use crate::{AccessProvenance, AUTH_GRAPH, SOLIDX_NS};
 use oxrdf::Term;
 use rustc_hash::FxHashSet;
 use sparq_core::Graph;
@@ -123,10 +123,20 @@ fn subject_repr(t: &Term, gix: usize) -> String {
     s
 }
 
-/// Assemble the full facts source: structural facts + the access-control graphs.
-/// Errors if any agent/client/origin value collides with the reserved principal
-/// encoding (see [`validate_principal_iri`]).
-pub(crate) fn assemble_input(graph: &Graph, system: System) -> Result<String, String> {
+/// Assemble the full facts source: structural facts + the access-control graphs +
+/// (ACP only) the TRUSTED per-resource creator/owner facts from `provenance`.
+/// Errors if any agent/client/origin/creator/owner value collides with the reserved
+/// principal encoding (see [`validate_principal_iri`]).
+///
+/// [OPUS-4.8] sq-3jtd.5: `provenance` is the trusted channel for `acp:CreatorAgent` /
+/// `acp:OwnerAgent`. Its `<r> solidx:creator|owner <webid>` facts are synthesized HERE,
+/// from the caller-supplied map ONLY — never read from the resource graphs (design doc
+/// §2.4). For WAC (no creator/owner vocabulary) `provenance` is ignored.
+pub(crate) fn assemble_input(
+    graph: &Graph,
+    system: System,
+    provenance: &AccessProvenance,
+) -> Result<String, String> {
     let mut out = String::new();
     let suffix = if system == System::Wac { ACL_SUFFIX } else { ACR_SUFFIX };
     let own_pred = if system == System::Wac { "ownAcl" } else { "ownAcr" };
@@ -212,6 +222,25 @@ pub(crate) fn assemble_input(graph: &Graph, system: System) -> Result<String, St
     }
     for iri in &principal_iris {
         validate_principal_iri(iri)?;
+    }
+    // [OPUS-4.8] sq-3jtd.5: TRUSTED creator/owner facts (ACP only). Emitted ONLY from the
+    // caller-supplied provenance map — never from pod content (design doc §2.4). The
+    // WebIDs go through the SAME reserved-encoding validation as agents/clients/issuers
+    // (they become candidate agents in the rules) and are marked isWebId so the
+    // candidate-generation lattice picks them up.
+    if system == System::Acp {
+        for (resource, creator, owner) in provenance.iter() {
+            if let Some(c) = creator {
+                validate_principal_iri(c)?;
+                webids.insert(c.to_owned());
+                let _ = writeln!(out, "<{resource}> <{SOLIDX_NS}creator> <{c}> .");
+            }
+            if let Some(o) = owner {
+                validate_principal_iri(o)?;
+                webids.insert(o.to_owned());
+                let _ = writeln!(out, "<{resource}> <{SOLIDX_NS}owner> <{o}> .");
+            }
+        }
     }
     for a in &webids {
         let _ = writeln!(out, "<{a}> <{SOLIDX_NS}isWebId> true .");

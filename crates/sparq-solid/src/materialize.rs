@@ -7,7 +7,7 @@
 //! each seeded with the previous closure.
 
 use crate::loader::{assemble_input, strip_reserved_graphs, System};
-use crate::{AUTH_GRAPH, AUTH_NS};
+use crate::{AccessProvenance, AUTH_GRAPH, AUTH_NS};
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashSet;
 use sparq_core::dict::Dict;
@@ -98,7 +98,8 @@ pub struct MaterializeStats {
 pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
     let t0 = Instant::now();
     strip_reserved_graphs(graph);
-    let input = assemble_input(graph, System::Wac)?;
+    // WAC has no creator/owner vocabulary; provenance is ignored (the loader skips it).
+    let input = assemble_input(graph, System::Wac, &AccessProvenance::new())?;
     let src = format!("{input}\n{COMMON_RULES}\n{WAC_RULES}");
     let mut dict = Dict::new();
     let closure = reason_n3(&mut dict, &src)?;
@@ -143,9 +144,35 @@ pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
 /// # Ok::<(), String>(())
 /// ```
 pub fn materialize_acp(graph: &mut Graph) -> Result<MaterializeStats, String> {
+    materialize_acp_with(graph, &AccessProvenance::new())
+}
+
+/// Materialize the ACP auth view from the `.acr` graphs PLUS the TRUSTED per-resource
+/// creator/owner facts in `provenance`, resolving `acp:CreatorAgent` / `acp:OwnerAgent`
+/// matchers ([OPUS-4.8] sq-3jtd.5).
+///
+/// The free-function form of [`crate::PodStore::materialize_acp_with`]. Identical to
+/// [`materialize_acp`] (three stratified `reason_n3` calls) except the loader also
+/// synthesizes `<r> solidx:creator|owner <webid>` facts from `provenance` — the trusted
+/// channel for "who created/owns `<r>`". These facts are **never** read from the resource
+/// graphs (design doc §2.4): a writer cannot self-grant via a forged `solidx:creator`
+/// triple in a document they control.
+///
+/// `materialize_acp(graph)` is exactly `materialize_acp_with(graph, &AccessProvenance::new())`
+/// — with no provenance, no `CreatorAgent`/`OwnerAgent` matcher ever grants (fail-closed).
+///
+/// # Errors
+///
+/// As [`materialize_acp`], and additionally if a creator/owner WebID collides with the
+/// reserved principal encoding (starts with `urn:sparq:` or contains the literal
+/// `&client=`).
+pub fn materialize_acp_with(
+    graph: &mut Graph,
+    provenance: &AccessProvenance,
+) -> Result<MaterializeStats, String> {
     let t0 = Instant::now();
     strip_reserved_graphs(graph);
-    let input = assemble_input(graph, System::Acp)?;
+    let input = assemble_input(graph, System::Acp, provenance)?;
     let mut strata_facts = Vec::new();
 
     let mut dict = Dict::new();

@@ -11,6 +11,9 @@ pub mod conformance;
 pub mod fixture;
 mod loader;
 mod materialize;
+// [OPUS-4.8] sq-3jtd.5: TRUSTED per-resource creator/owner provenance — the channel by
+// which the storage layer (PSS) supplies the `acp:CreatorAgent`/`acp:OwnerAgent` facts.
+mod provenance;
 // [OPUS-4.8] sq-h3uk: ODRL→AUTH_GRAPH bridge — opt-in (`odrl-bridge` feature), OFF by
 // default, so the core sparq-solid build carries zero ODRL/sparq-policy code.
 #[cfg(feature = "odrl-bridge")]
@@ -22,7 +25,8 @@ pub use authindex::{pair_principal, triple_principal, AuthIndex, Mode, Session};
 // [OPUS-4.8] sq-3jtd.9: the ACP conformance harness entry types.
 pub use conformance::{AcpScenario, AcrBuilder, Decision, Expect, ScenarioReport};
 pub use fixture::{acp_fixture, wac_fixture};
-pub use materialize::{materialize_acp, materialize_wac, MaterializeStats};
+pub use materialize::{materialize_acp, materialize_acp_with, materialize_wac, MaterializeStats};
+pub use provenance::AccessProvenance;
 #[cfg(feature = "odrl-bridge")]
 pub use odrl_bridge::{
     action_to_mode, materialize_permission, materialize_permission_conditional, materialize_policy,
@@ -241,7 +245,58 @@ impl PodStore {
     /// As [`PodStore::materialize_wac`] (reserved-encoding collisions in
     /// agent/client IRIs; reasoner failure).
     pub fn materialize_acp(&mut self) -> Result<MaterializeStats, String> {
-        let stats = materialize_acp(&mut self.graph)?;
+        self.materialize_acp_with(&AccessProvenance::new())
+    }
+
+    /// (Re-)materialize the ACP auth view using TRUSTED per-resource creator/owner facts,
+    /// resolving `acp:CreatorAgent` / `acp:OwnerAgent` matchers ([OPUS-4.8] sq-3jtd.5).
+    ///
+    /// Identical to [`PodStore::materialize_acp`], but `provenance` supplies "who
+    /// created/owns `<r>`" for the resources whose ACP policies use a `CreatorAgent` /
+    /// `OwnerAgent` matcher. `provenance` is the **trusted channel** for those facts: they
+    /// are asserted by the caller (the storage layer that minted the resource) and are
+    /// **never** read from the resource graph — a writer who embeds `<r> solidx:creator
+    /// <self>` in a document they control cannot thereby grant themselves access (design
+    /// doc §2.4). `materialize_acp()` is exactly `materialize_acp_with(&AccessProvenance::new())`.
+    ///
+    /// # Errors
+    ///
+    /// As [`PodStore::materialize_acp`], plus an `Err` if a creator/owner WebID collides
+    /// with the reserved principal encoding (starts with `urn:sparq:` or contains the
+    /// literal `&client=`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sparq_solid::{AccessProvenance, Mode, PodStore, Session};
+    ///
+    /// // A policy on /docs/ grants Read to the resource's CREATOR.
+    /// let acp = "http://www.w3.org/ns/solid/acp#";
+    /// let nquads = format!(
+    ///     "<https://pod.ex/docs/d0.ttl#it> <https://ex.dev/ns#k> \"v\" <https://pod.ex/docs/d0.ttl> .\n\
+    ///      <https://pod.ex/docs/.acr> <{acp}memberAccessControl> <https://pod.ex/docs/.acr#c> <https://pod.ex/docs/.acr> .\n\
+    ///      <https://pod.ex/docs/.acr#c> <{acp}apply> <https://pod.ex/docs/.acr#pol> <https://pod.ex/docs/.acr> .\n\
+    ///      <https://pod.ex/docs/.acr#pol> <{acp}allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/docs/.acr> .\n\
+    ///      <https://pod.ex/docs/.acr#pol> <{acp}allOf> <https://pod.ex/docs/.acr#m> <https://pod.ex/docs/.acr> .\n\
+    ///      <https://pod.ex/docs/.acr#m> <{acp}agent> <{acp}CreatorAgent> <https://pod.ex/docs/.acr> .\n");
+    /// let mut store = PodStore::new(sparq_core::Graph::load_dataset(&nquads, "nquads")?);
+    ///
+    /// // The trusted storage layer says alice created d0.
+    /// let mut prov = AccessProvenance::new();
+    /// prov.set_creator("https://pod.ex/docs/d0.ttl", "https://alice.ex/card#me");
+    /// store.materialize_acp_with(&prov)?;
+    ///
+    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+    /// let bob = Session { agent: Some("https://bob.ex/card#me"), client: None, issuer: None };
+    /// assert_eq!(store.accessible(&alice, Mode::Read).len(), 1); // d0 (her creation)
+    /// assert_eq!(store.accessible(&bob, Mode::Read).len(), 0);   // not the creator
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn materialize_acp_with(
+        &mut self,
+        provenance: &AccessProvenance,
+    ) -> Result<MaterializeStats, String> {
+        let stats = materialize_acp_with(&mut self.graph, provenance)?;
         self.reconcile_bridged_after_static();
         self.reindex();
         Ok(stats)

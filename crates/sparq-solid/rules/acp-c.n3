@@ -57,12 +57,29 @@ acl:Control solidx:allowPred auth:control ; solidx:denyPred auth:denyControl .
 => { ?k solidx:principal ?p . } .
 
 # ── SIMPLE grants (policy has no noneOf) ───────────────────────────────────────────────
+# [OPUS-4.8] sq-3jtd.5: a PROVENANCE candidate (CreatorAgent/OwnerAgent) is excluded here —
+# it grants ONLY on its bound resource (solidx:provForResource), never on every
+# appliesToResource, so the creator of R1 is never granted R2. Its scoped grant is below.
 { ?pol solidx:candTriple ?k . ?k solidx:satisfied true . ?k solidx:principal ?p .
   ?pol solidx:appliesToResource ?r . ?pol acp:allow ?mode . ?mode solidx:allowPred ?pred .
-  ?UNSCOPED log:notIncludes { ?pol acp:noneOf ?nm . } . }
+  ?UNSCOPED log:notIncludes { ?pol acp:noneOf ?nm . } .
+  ?UNSCOPED log:notIncludes { ?pol solidx:provTriple ?k . } . }
 => { ?p ?pred ?r . } .
 { ?pol solidx:candTriple ?k . ?k solidx:satisfied true . ?k solidx:principal ?p .
   ?pol solidx:appliesToResource ?r . ?pol acp:deny ?mode . ?mode solidx:denyPred ?pred .
+  ?UNSCOPED log:notIncludes { ?pol acp:noneOf ?nm . } .
+  ?UNSCOPED log:notIncludes { ?pol solidx:provTriple ?k . } . }
+=> { ?p ?pred ?r . } .
+
+# ── [OPUS-4.8] sq-3jtd.5: RESOURCE-SCOPED provenance grants (policy has no noneOf) ──────
+# The candidate is satisfied (its client/issuer dimensions, and the creator/owner agent,
+# all accepted) and it is bound to resource ?r via provForResource — grant ONLY on ?r.
+{ ?pol solidx:provTriple ?k . ?k solidx:satisfied true . ?k solidx:principal ?p .
+  ?k solidx:provForResource ?r . ?pol acp:allow ?mode . ?mode solidx:allowPred ?pred .
+  ?UNSCOPED log:notIncludes { ?pol acp:noneOf ?nm . } . }
+=> { ?p ?pred ?r . } .
+{ ?pol solidx:provTriple ?k . ?k solidx:satisfied true . ?k solidx:principal ?p .
+  ?k solidx:provForResource ?r . ?pol acp:deny ?mode . ?mode solidx:denyPred ?pred .
   ?UNSCOPED log:notIncludes { ?pol acp:noneOf ?nm . } . }
 => { ?p ?pred ?r . } .
 
@@ -71,9 +88,13 @@ acl:Control solidx:allowPred auth:control ; solidx:denyPred auth:denyControl .
 #  No encoding needed here for injectivity: ?ks is a minted cand IRI whose components
 #  are already percent-encoded (acp-a.n3) — it cannot contain a raw "&mode=" — ?modes
 #  is one of four fixed acl: IRIs, and ?rs is the final component.)
+# [OPUS-4.8] sq-3jtd.5: provenance candidates are excluded here (they range over their
+# bound provForResource, not appliesToResource) and handled by the scoped conditional
+# rules that follow.
 { ?pol solidx:candTriple ?k . ?k solidx:satisfied true .
   ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc . ?k solidx:pairIssuer ?pi .
   ?pol solidx:appliesToResource ?r . ?pol acp:allow ?mode . ?pol acp:noneOf ?nm .
+  ?UNSCOPED log:notIncludes { ?pol solidx:provTriple ?k . } .
   ?k log:uri ?ks . ?mode log:uri ?modes . ?r log:uri ?rs .
   ("urn:sparq:grant?cand=" ?ks "&mode=" ?modes "&effect=allow&graph=" ?rs)
       string:concatenation ?gs .
@@ -84,6 +105,29 @@ acl:Control solidx:allowPred auth:control ; solidx:denyPred auth:denyControl .
 { ?pol solidx:candTriple ?k . ?k solidx:satisfied true .
   ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc . ?k solidx:pairIssuer ?pi .
   ?pol solidx:appliesToResource ?r . ?pol acp:deny ?mode . ?pol acp:noneOf ?nm .
+  ?UNSCOPED log:notIncludes { ?pol solidx:provTriple ?k . } .
+  ?k log:uri ?ks . ?mode log:uri ?modes . ?r log:uri ?rs .
+  ("urn:sparq:grant?cand=" ?ks "&mode=" ?modes "&effect=deny&graph=" ?rs)
+      string:concatenation ?gs .
+  ?g log:uri ?gs . }
+=> { ?g a auth:ConditionalGrant . ?g auth:effect auth:Deny .
+     ?g auth:agent ?pa . ?g auth:client ?pc . ?g auth:issuer ?pi .
+     ?g auth:mode ?mode . ?g auth:graph ?r . ?g auth:exceptMatcher ?nm . } .
+
+# ── [OPUS-4.8] sq-3jtd.5: RESOURCE-SCOPED provenance conditional grants (noneOf present) ──
+{ ?pol solidx:provTriple ?k . ?k solidx:satisfied true .
+  ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc . ?k solidx:pairIssuer ?pi .
+  ?k solidx:provForResource ?r . ?pol acp:allow ?mode . ?pol acp:noneOf ?nm .
+  ?k log:uri ?ks . ?mode log:uri ?modes . ?r log:uri ?rs .
+  ("urn:sparq:grant?cand=" ?ks "&mode=" ?modes "&effect=allow&graph=" ?rs)
+      string:concatenation ?gs .
+  ?g log:uri ?gs . }
+=> { ?g a auth:ConditionalGrant . ?g auth:effect auth:Allow .
+     ?g auth:agent ?pa . ?g auth:client ?pc . ?g auth:issuer ?pi .
+     ?g auth:mode ?mode . ?g auth:graph ?r . ?g auth:exceptMatcher ?nm . } .
+{ ?pol solidx:provTriple ?k . ?k solidx:satisfied true .
+  ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc . ?k solidx:pairIssuer ?pi .
+  ?k solidx:provForResource ?r . ?pol acp:deny ?mode . ?pol acp:noneOf ?nm .
   ?k log:uri ?ks . ?mode log:uri ?modes . ?r log:uri ?rs .
   ("urn:sparq:grant?cand=" ?ks "&mode=" ?modes "&effect=deny&graph=" ?rs)
       string:concatenation ?gs .

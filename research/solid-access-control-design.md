@@ -446,8 +446,21 @@ a three-component `urn:sparq:triple?agent=A&client=C&issuer=I` principal (an unc
 issuer keeps the agent / `urn:sparq:pair?…` term byte-identical), the candidate enumeration
 gains an `issuer × {matcher values, auth:AnyIssuer top}` factor (still bounded as the client
 dimension is), and the session expands to ≤12 lookups (the pre-issuer ≤6 doubled).
-Not covered (documented gaps, §7): `acp:vc`, `acp:CreatorAgent`/`OwnerAgent` (need
-per-resource creator facts from the storage layer), `acl:accessToClass`, custom ACP modes
+`acp:CreatorAgent`/`acp:OwnerAgent` ([OPUS-4.8] sq-3jtd.5): the context agent must be the
+resource's creator / owner. "Who created/owns `<r>`" is structural storage metadata the
+trusted caller (PSS) supplies through the `AccessProvenance` channel and
+`materialize_acp_with` — the loader synthesizes `<r> solidx:creator|owner <w>` facts from
+THAT map ONLY, never from the resource graph (§2.4): a writer cannot self-grant via a forged
+`solidx:creator` triple. The grant is RESOURCE-SCOPED — a resource-tagged
+`urn:sparq:provcand?…&res=R` candidate mints per (policy, creator/owner, resource), so the
+creator of `R1` is never granted `R2`; the creator/owner agent composes with the matcher's
+own `acp:client`/`acp:issuer` constraints (minting the same pair/triple principal). With no
+provenance supplied, no `CreatorAgent`/`OwnerAgent` matcher grants (fail-closed). Documented
+bound: a provenance matcher composes with client/issuer constraints on itself and with
+`anyOf`/`noneOf`/the policy's other allOf matchers' client/issuer dimensions, but combining a
+`CreatorAgent`/`OwnerAgent` matcher under `allOf` with a SECOND, independent concrete-agent
+matcher (a contradictory shape) is out of scope.
+Not covered (documented gaps, §7): `acp:vc`, `acl:accessToClass`, custom ACP modes
 (design supports any mode IRI; prototype maps the 4 standard ones).
 
 ## 4. L3 — the `sparq-solid` crate

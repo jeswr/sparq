@@ -3,7 +3,7 @@
 
 use sparq_core::Graph;
 use sparq_solid::fixture::{acp_fixture, ALICE, APP, BOB, CAROL, DAVE};
-use sparq_solid::{Mode, PodStore, Session};
+use sparq_solid::{AccessProvenance, Mode, PodStore, Session};
 
 fn store() -> PodStore {
     let g = Graph::load_dataset(&acp_fixture(), "nquads").expect("fixture loads");
@@ -282,4 +282,283 @@ fn acp_issuer_reserved_encoding_rejected() {
     let g = Graph::load_dataset(&acr, "nquads").expect("loads");
     let mut s = PodStore::new(g);
     assert!(s.materialize_acp().is_err(), "reserved-space issuer IRI rejected at materialization");
+}
+
+// ── [OPUS-4.8] sq-3jtd.5: acp:CreatorAgent / acp:OwnerAgent support ───────────────────
+//
+// An ACP Matcher can constrain on `acp:agent acp:CreatorAgent` / `acp:OwnerAgent`: it
+// accepts the context agent iff that agent is the *creator* (resp. *owner*) of the
+// resource being accessed. That per-resource fact ("who created <r>") is NOT in the pod
+// or the ACR — it is structural storage metadata the TRUSTED caller (PSS, which created
+// the resource) supplies through [`AccessProvenance`]. Crucially it is NEVER read from
+// the resource graph: a writer who could embed `<r> solidx:creator <self>` in their own
+// document must not thereby grant themselves access (design doc §2.4). These tests build
+// small inline ACP pods so the matrix is hand-verifiable, and exercise BOTH outcomes —
+// allow when the session agent is the trusted creator/owner, deny otherwise — plus the
+// resource-scoping and trust-boundary invariants.
+
+const CRE_DOC: &str = "https://pod.ex/cre/d0.ttl";
+const CRE_ACR: &str = "https://pod.ex/cre/.acr";
+const CRE_DOC2: &str = "https://pod.ex/cre/d1.ttl";
+
+/// One inline ACP pod: documents under `cre/` whose containing `cre/` ACR carries
+/// `policy_body` under `acp:memberAccessControl`, materialized with the trusted
+/// `provenance` (per-resource creator/owner WebIDs).
+fn cre_store(policy_body: &str, provenance: &AccessProvenance) -> PodStore {
+    let acr = format!(
+        "<{CRE_DOC}#it> <https://ex.dev/ns#title> \"d0\" <{CRE_DOC}> .\n\
+         <{CRE_DOC2}#it> <https://ex.dev/ns#title> \"d1\" <{CRE_DOC2}> .\n\
+         <{CRE_ACR}> <http://www.w3.org/ns/solid/acp#memberAccessControl> <{CRE_ACR}#ctl> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#ctl> <http://www.w3.org/ns/solid/acp#apply> <{CRE_ACR}#pol> <{CRE_ACR}> .\n\
+         {policy_body}"
+    );
+    let g = Graph::load_dataset(&acr, "nquads").expect("inline acp pod loads");
+    let mut s = PodStore::new(g);
+    s.materialize_acp_with(provenance).expect("acp materializes with provenance");
+    s
+}
+
+/// allOf { acp:agent acp:CreatorAgent }: the resource's trusted creator is granted Read;
+/// everyone else (including another WebID, or the SAME WebID when no creator fact is
+/// supplied for that resource) is denied. Allow AND deny are decided by the creator fact.
+#[test]
+fn acp_creator_agent_allow_and_deny() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#m> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#m> <{acp}agent> <{acp}CreatorAgent> <{CRE_ACR}> .\n"
+    );
+    let mut prov = AccessProvenance::default();
+    prov.set_creator(CRE_DOC, BOB); // PSS: bob created d0
+    let mut s = cre_store(&body, &prov);
+    let r = Mode::Read;
+
+    // ALLOW: bob is the trusted creator of d0.
+    assert!(can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator) reads d0");
+    // DENY decided by the creator fact: carol is not the creator of d0.
+    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol (non-creator) denied d0");
+    // DENY: anonymous has no WebID, so cannot be a creator.
+    assert!(!can(&mut s, None, None, r, CRE_DOC), "anonymous denied d0");
+    // DENY fail-closed: NO creator fact for d1, so even bob is denied there.
+    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC2), "no creator fact for d1 -> bob denied d1");
+}
+
+/// Resource-scoping: a CreatorAgent grant is per-resource. bob is the creator of d0 and
+/// carol of d1; the SINGLE shared CreatorAgent matcher grants each ONLY their own
+/// resource, never the other's.
+#[test]
+fn acp_creator_agent_is_resource_scoped() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#m> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#m> <{acp}agent> <{acp}CreatorAgent> <{CRE_ACR}> .\n"
+    );
+    let mut prov = AccessProvenance::default();
+    prov.set_creator(CRE_DOC, BOB);
+    prov.set_creator(CRE_DOC2, CAROL);
+    let mut s = cre_store(&body, &prov);
+    let r = Mode::Read;
+
+    assert!(can(&mut s, Some(BOB), None, r, CRE_DOC), "bob reads d0 (his)");
+    assert!(can(&mut s, Some(CAROL), None, r, CRE_DOC2), "carol reads d1 (hers)");
+    // the load-bearing soundness check: creator of d0 is NOT granted d1, and vice-versa.
+    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC2), "bob NOT granted d1 (carol's)");
+    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol NOT granted d0 (bob's)");
+}
+
+/// acp:OwnerAgent is the twin of acp:CreatorAgent over the trusted owner fact.
+#[test]
+fn acp_owner_agent_allow_and_deny() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Write> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#m> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#m> <{acp}agent> <{acp}OwnerAgent> <{CRE_ACR}> .\n"
+    );
+    let mut prov = AccessProvenance::default();
+    prov.set_owner(CRE_DOC, ALICE); // PSS: alice owns d0
+    let mut s = cre_store(&body, &prov);
+    let w = Mode::Write;
+
+    assert!(can(&mut s, Some(ALICE), None, w, CRE_DOC), "alice (owner) writes d0");
+    assert!(!can(&mut s, Some(BOB), None, w, CRE_DOC), "bob (non-owner) denied write on d0");
+    // a creator fact does NOT satisfy an OwnerAgent matcher (distinct dimensions).
+    let mut prov2 = AccessProvenance::default();
+    prov2.set_creator(CRE_DOC, BOB);
+    let mut s2 = cre_store(&body, &prov2);
+    assert!(!can(&mut s2, Some(BOB), None, w, CRE_DOC), "creator is not owner -> denied");
+}
+
+/// Deny-overrides with a CreatorAgent matcher: a public-Read policy plus a
+/// `acp:deny Read` policy whose matcher is `acp:agent acp:CreatorAgent` carves the creator
+/// out — everyone reads EXCEPT the resource's creator, and the deny is resource-scoped
+/// (it only carves the creator out of THEIR resource).
+#[test]
+fn acp_creator_agent_deny_overrides() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    // pol-pub: public Read.  pol-deny: deny Read to the resource's creator.
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}anyOf> <{CRE_ACR}#mpub> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#mpub> <{acp}agent> <{acp}PublicAgent> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#ctl> <{acp}apply> <{CRE_ACR}#poldeny> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#poldeny> <{acp}deny> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#poldeny> <{acp}allOf> <{CRE_ACR}#mcre> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#mcre> <{acp}agent> <{acp}CreatorAgent> <{CRE_ACR}> .\n"
+    );
+    let mut prov = AccessProvenance::default();
+    prov.set_creator(CRE_DOC, BOB); // bob created d0
+    prov.set_creator(CRE_DOC2, CAROL); // carol created d1
+    let mut s = cre_store(&body, &prov);
+    let r = Mode::Read;
+
+    // public reads both docs…
+    assert!(can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol reads d0 (public, not its creator)");
+    assert!(can(&mut s, Some(BOB), None, r, CRE_DOC2), "bob reads d1 (public, not its creator)");
+    assert!(can(&mut s, None, None, r, CRE_DOC), "anonymous reads d0");
+    // …EXCEPT each doc's own creator is denied on THAT doc (deny-overrides, resource-scoped).
+    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator of d0) denied on d0");
+    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC2), "carol (creator of d1) denied on d1");
+}
+
+/// TRUST BOUNDARY (design doc §2.4): a `solidx:creator` triple embedded in the RESOURCE
+/// graph (pod content the writer controls) must NEVER grant access — only the trusted
+/// [`AccessProvenance`] channel does. mallory writes `<d0> solidx:creator <mallory>` into
+/// her own document; with NO provenance supplied she is still denied.
+#[test]
+fn acp_creator_fact_from_resource_graph_is_ignored() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    let solidx = "https://sparq.dev/ns/solidx#";
+    let mallory = "https://mallory.ex/card#me";
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#m> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#m> <{acp}agent> <{acp}CreatorAgent> <{CRE_ACR}> .\n"
+    );
+    // mallory embeds a forged creator fact in her OWN resource document.
+    let acr = format!(
+        "<{CRE_DOC}#it> <https://ex.dev/ns#title> \"d0\" <{CRE_DOC}> .\n\
+         <{CRE_DOC}> <{solidx}creator> <{mallory}> <{CRE_DOC}> .\n\
+         <{CRE_ACR}> <{acp}memberAccessControl> <{CRE_ACR}#ctl> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#ctl> <{acp}apply> <{CRE_ACR}#pol> <{CRE_ACR}> .\n\
+         {body}"
+    );
+    let g = Graph::load_dataset(&acr, "nquads").expect("loads");
+    let mut s = PodStore::new(g);
+    // NO provenance supplied — the resource-graph forgery must not grant.
+    s.materialize_acp().expect("materializes");
+    assert!(
+        !can(&mut s, Some(mallory), None, Mode::Read, CRE_DOC),
+        "forged solidx:creator in pod content must NOT grant access"
+    );
+}
+
+/// A creator fact is INERT without a CreatorAgent/OwnerAgent matcher: supplying provenance
+/// for a resource whose policy uses a plain concrete-WebID matcher grants nothing extra —
+/// the creator is granted access ONLY if they also match the explicit policy.
+#[test]
+fn acp_creator_fact_without_creator_matcher_is_inert() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    // policy grants Read to CAROL by concrete WebID — no CreatorAgent matcher at all.
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#m> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#m> <{acp}agent> <{CAROL}> <{CRE_ACR}> .\n"
+    );
+    let mut prov = AccessProvenance::default();
+    prov.set_creator(CRE_DOC, BOB); // bob is the creator, but the policy never asks
+    let mut s = cre_store(&body, &prov);
+    let r = Mode::Read;
+    assert!(can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol granted by explicit WebID");
+    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator) NOT granted — no CreatorAgent matcher");
+}
+
+/// anyOf { acp:agent acp:CreatorAgent }: the creator alone satisfies the policy. Same
+/// outcome as the allOf-sole-matcher case, exercising the anyOf path.
+#[test]
+fn acp_creator_agent_anyof() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}anyOf> <{CRE_ACR}#m> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#m> <{acp}agent> <{acp}CreatorAgent> <{CRE_ACR}> .\n"
+    );
+    let mut prov = AccessProvenance::default();
+    prov.set_creator(CRE_DOC, BOB);
+    let mut s = cre_store(&body, &prov);
+    assert!(can(&mut s, Some(BOB), None, Mode::Read, CRE_DOC), "bob (creator) reads d0 via anyOf");
+    assert!(!can(&mut s, Some(CAROL), None, Mode::Read, CRE_DOC), "carol denied");
+}
+
+/// allOf { acp:agent acp:CreatorAgent ; acp:client APP }: the creator-AND-client pair on
+/// ONE matcher — the resource's creator is granted ONLY through the named app, composing
+/// the provenance agent dimension with the client dimension.
+#[test]
+fn acp_creator_agent_with_client_constraint() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#m> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#m> <{acp}agent> <{acp}CreatorAgent> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#m> <{acp}client> <{APP}> <{CRE_ACR}> .\n"
+    );
+    let mut prov = AccessProvenance::default();
+    prov.set_creator(CRE_DOC, BOB);
+    let mut s = cre_store(&body, &prov);
+    let r = Mode::Read;
+
+    // ALLOW: bob (creator) through the named app.
+    assert!(
+        s.accessible(&Session { agent: Some(BOB), client: Some(APP), issuer: None }, r)
+            .iter()
+            .any(|g| g.as_str() == CRE_DOC),
+        "bob (creator) + app reads d0"
+    );
+    // DENY: creator without the named client (the client dimension is constrained).
+    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator) w/o app denied");
+    // DENY: named client but not the creator.
+    assert!(
+        !s.accessible(&Session { agent: Some(CAROL), client: Some(APP), issuer: None }, r)
+            .iter()
+            .any(|g| g.as_str() == CRE_DOC),
+        "carol (non-creator) + app denied"
+    );
+}
+
+/// Fail-closed: a malicious creator/owner WebID inside the reserved `urn:sparq:` space is
+/// rejected at materialization, exactly like a malicious agent/client/issuer value — it
+/// cannot smuggle a forged principal into the auth view.
+#[test]
+fn acp_creator_reserved_encoding_rejected() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#m> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#m> <{acp}agent> <{acp}CreatorAgent> <{CRE_ACR}> .\n"
+    );
+    let acr = format!(
+        "<{CRE_DOC}#it> <https://ex.dev/ns#title> \"d0\" <{CRE_DOC}> .\n\
+         <{CRE_ACR}> <{acp}accessControl> <{CRE_ACR}#ctl> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#ctl> <{acp}apply> <{CRE_ACR}#pol> <{CRE_ACR}> .\n\
+         {body}"
+    );
+    let g = Graph::load_dataset(&acr, "nquads").expect("loads");
+    let mut s = PodStore::new(g);
+    let mut prov = AccessProvenance::default();
+    prov.set_creator(CRE_DOC, "urn:sparq:pair?agent=x&client=y");
+    assert!(
+        s.materialize_acp_with(&prov).is_err(),
+        "reserved-space creator WebID rejected at materialization"
+    );
 }
