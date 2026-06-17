@@ -1,24 +1,31 @@
-# [OPUS-4.8] Differential SHACL fuzz gate (bead sq-55c1).
+# [OPUS-4.8] Differential SHACL fuzz gate (beads sq-55c1 + sq-evws).
 #
 # WHAT: generates random but VALID SHACL shapes + data graphs, validates each
-# through `sparq-shacl` AND through a reference SHACL engine (pySHACL — the
-# canonical reference implementation), and asserts the reports agree on the
-# `sh:conforms` bit and the per-focus-node violated-constraint set. A disagreement
-# is a candidate sparq-shacl correctness bug; the harness prints the seed + the
-# reproducing Turtle so it replays deterministically. See
+# through `sparq-shacl` AND through every reference SHACL engine that resolves, and
+# asserts the reports agree on the `sh:conforms` bit and the per-focus-node
+# violated-constraint set. Two references are wired:
+#   - pySHACL — the canonical Python reference implementation (sq-55c1).
+#   - Apache Jena SHACL — a second, independent reference (sq-evws), driven via the
+#     Java single-file source launcher over its `org.apache.jena.shacl` validator.
+# A disagreement is a candidate sparq-shacl correctness bug; the harness prints the
+# seed + the reproducing Turtle so it replays deterministically. A second engine
+# catches bugs where sparq and pySHACL happen to agree but are both wrong. See
 # crates/sparq-shacl/tests/diff_fuzz.rs.
 #
 # TRIGGER — NIGHTLY/HEAVY tier ONLY. Deliberately NOT on pull_request / push /
-# merge_group: it installs a Python reference engine and runs thousands of
-# validations, which is too heavy + too slow for the per-PR fast path, and the
-# `#[ignore]`d test is excluded from `cargo nextest run` anyway. Running only on
-# `schedule` + `workflow_dispatch` means this workflow never produces a check-run
-# on a PR head commit, so the `ci-summary / gate` aggregator never sees it and the
-# per-PR gate is unaffected (the intended heavy-lane isolation).
+# merge_group: it installs reference engines and runs thousands of validations,
+# which is too heavy + too slow for the per-PR fast path, and the `#[ignore]`d test
+# is excluded from `cargo nextest run` anyway. Running only on `schedule` +
+# `workflow_dispatch` means this workflow never produces a check-run on a PR head
+# commit, so the `ci-summary / gate` aggregator never sees it and the per-PR gate
+# is unaffected (the intended heavy-lane isolation).
 #
 # Third-party actions are pinned by full commit SHA (supply-chain hardening); the
 # trailing `# vX.Y.Z` comment is what Dependabot follows to bump the pin. The pins
-# here match those already used by .github/workflows/fuzz.yml / ci.yml.
+# here match those already used by .github/workflows/fuzz.yml / ci.yml. The Jena
+# tarball is fetched from the Apache archive and verified against a pinned SHA-512
+# (the published apache-jena-5.2.0 checksum) before use — a tampered or substituted
+# artifact fails the job rather than silently feeding a bad reference engine.
 name: shacl-diff-fuzz
 
 on:
@@ -47,14 +54,20 @@ env:
   # pySHACL change cannot silently break (or silently "fix") the differential; bump
   # deliberately. rdflib comes in as its dependency.
   PYSHACL_VERSION: "0.31.0"
+  # Apache Jena release pinned (binary tarball) with its published SHA-512 so the
+  # second reference engine is reproducible AND the artifact is verified before use;
+  # bump both together (the .sha512 is alongside the tarball on the Apache archive).
+  JENA_VERSION: "5.2.0"
+  JENA_SHA512: "9a66044573ca269c0a9a1191fe7a8e1925f2d77e2e0bdadddd68616a1bafed1d9819c0b2988dd03614ec778a3882ccb091d825976fc0837406916f9f001b701c"
 
 jobs:
   diff-fuzz:
-    name: SHACL differential fuzz (sparq-shacl vs pySHACL)
+    name: SHACL differential fuzz (sparq-shacl vs pySHACL + Jena)
     runs-on: ubuntu-latest
-    # Generous ceiling: ~thousands of cases × a per-case Python subprocess. A hung
-    # run fails with a clear timeout rather than running away.
-    timeout-minutes: 45
+    # Generous ceiling: ~thousands of cases × a per-case reference subprocess, now
+    # across two engines (each case spawns a fresh interpreter/JVM). A hung run
+    # fails with a clear timeout rather than running away.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install Rust (stable)
@@ -67,6 +80,11 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
+      - name: Set up Java (for the Jena reference engine)
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: "21"
       - name: Install pySHACL (reference engine) in a venv
         run: |
           set -euo pipefail
@@ -75,6 +93,30 @@ jobs:
           "$RUNNER_TEMP/shacl-ref-venv/bin/pip" install --quiet "pyshacl==${PYSHACL_VERSION}"
           "$RUNNER_TEMP/shacl-ref-venv/bin/python" -c "import pyshacl, rdflib; print('pyshacl', pyshacl.__version__, 'rdflib', rdflib.__version__)"
           echo "SHACL_DIFF_PYTHON=$RUNNER_TEMP/shacl-ref-venv/bin/python" >> "$GITHUB_ENV"
+      # Cache the unpacked Jena dist across runs (keyed on the pinned version) so the
+      # nightly lane does not re-download ~24 MB every day. A cache miss falls
+      # through to the download+verify step below.
+      - name: Cache Apache Jena
+        id: jena-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ runner.temp }}/apache-jena
+          key: apache-jena-${{ env.JENA_VERSION }}
+      - name: Install Apache Jena (reference engine), SHA-512 verified
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/apache-jena"
+          if [ ! -x "$dest/bin/shacl" ]; then
+            tarball="$RUNNER_TEMP/apache-jena.tar.gz"
+            url="https://archive.apache.org/dist/jena/binaries/apache-jena-${JENA_VERSION}.tar.gz"
+            curl -fsSL --retry 3 -o "$tarball" "$url"
+            echo "${JENA_SHA512}  ${tarball}" | sha512sum --check --strict -
+            mkdir -p "$dest"
+            tar -xzf "$tarball" -C "$dest" --strip-components=1
+          fi
+          # The harness derives ${JENA_HOME}/lib/* when JENA_HOME is set.
+          echo "JENA_HOME=$dest" >> "$GITHUB_ENV"
+          "$dest/bin/shacl" --help >/dev/null 2>&1 && echo "Jena shacl CLI OK ($JENA_VERSION)"
       - name: Pick seed count for this trigger
         id: budget
         run: |
