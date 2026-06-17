@@ -40,3 +40,12 @@ rustc-hash.workspace = true
 # existing graph-level WAC/ACP enforcement applies them. OFF by default (lean core);
 # pulls in the optional sparq-policy ODRL evaluator only when enabled.
 odrl-bridge = ["dep:sparq-policy"]
+
+# [OPUS-4.8] sq-58mh: wire sparq-policy's STATEFUL `odrl:count` enforcement THROUGH the
+# bridge so a bridged grant SELF-RETRACTS on exhaustion. OFF by default; implies
+# `odrl-bridge` and turns on the `count-enforcement` feature of sparq-policy (the
+# usage-counter store + the atomic `evaluate_and_exercise`). ACP is stateless — there
+# is no per-session usage counter — so the count is enforced through the EXISTING
+# refresh/retraction ledger (sq-dpk4): the count is consumed atomically at exercise and
+# re-checked (read-only) on refresh, dropping the grant once the budget is spent.
+count-enforcement = ["odrl-bridge", "sparq-policy/count-enforcement"]

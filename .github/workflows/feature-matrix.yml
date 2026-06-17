@@ -292,6 +292,17 @@ jobs:
             crate: sparq-policy
             features: count-enforcement
             test: true
+          # [OPUS-4.8] sq-58mh: sparq-solid STATEFUL `odrl:count` wired THROUGH the bridge
+          # (a bridged grant self-retracts on exhaustion). The whole
+          # tests/odrl_count_bridge.rs file is `#![cfg(feature = "count-enforcement")]`
+          # and `materialize_odrl_permission_counted` + the `count` module are
+          # feature-gated, so without this leg the bridge's count path NEVER runs. The
+          # feature implies `odrl-bridge` + `sparq-policy/count-enforcement` (std-only, no
+          # new dep) — keeps the opt-in ON path from rotting.
+          - name: sparq-solid (count-enforcement)
+            crate: sparq-solid
+            features: count-enforcement
+            test: true
           # [OPUS-4.8] sq-vya1: sparq-fedplan. The ENTIRE crate (lib.rs + every module) is
           # `#[cfg(feature = "fedplan")]` and `default = []`, so the default build compiled
           # it empty and ci.yml's archive listed ZERO of its 48 in-src `#[test]`s — the
