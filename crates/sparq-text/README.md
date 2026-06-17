@@ -82,6 +82,15 @@ evaluation), match subjects must be variables, and an unknown `text:` IRI is
 a hard error (typo guard). `VALUES` rows carry no order through joins — sort
 with `ORDER BY DESC(?s)` over a `text:score` variable.
 
+The `engine` feature pulls `sparq-engine` with **no** default features; the
+default-on `engine-builtins` feature re-adds the engine's `regex` (SPARQL
+REGEX/REPLACE) and `digest` (hash) builtins, so a native `text:` rewrite over a
+query that also uses those builtins works. The lean in-browser bundle
+[`sparq-text-wasm`](../sparq-text-wasm/README.md) ("W-text", [OPUS-4.8] sq-jbe6)
+takes `features = ["engine"]` only — engine present, but no rayon/regex/digest —
+so the BM25 index + `text:` rewrite ship to the browser without the native-only
+or heavyweight pieces.
+
 ## Tokenizer & scoring semantics
 
 - **Tokens**: UAX #29 Unicode word segmentation
