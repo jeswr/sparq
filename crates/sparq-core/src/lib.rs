@@ -774,17 +774,29 @@ impl Graph {
         // [OPUS-4.8] (sq-25r3) N-Quads is newline-delimited, so a byte-range chunk-parallel parse
         // is correct: the quad's 4th (graph) field just routes its triple to a per-graph bucket,
         // and each graph's buckets merge through the SAME dataset-scoped sharded/serial dict merge
-        // the N-Triples fast path uses (one dict PER graph, mirroring the serial loader). TriG is
-        // NOT line-oriented (it nests `GRAPH g { … }` blocks with Turtle's prefix/blank-node
-        // scope), so it stays on the serial oxttl path here — the chunk-parallel TriG path is
-        // tracked separately (bead sq-ev37); see `load_dataset_serial`.
+        // the N-Triples fast path uses (one dict PER graph, mirroring the serial loader).
+        //
+        // [OPUS-4.8] (sq-ev37) TriG is NOT line-oriented (it nests `GRAPH g { … }` / `g { … }` /
+        // `{ … }` blocks carrying Turtle's `@prefix`/`@base` scope and document-scoped blank-node
+        // labels), so byte-range newline chunking is wrong. Instead it reuses the Turtle
+        // statement-terminator chunking ([`trig_chunks`]): each chunk is a directive-snapshot + a
+        // run of same-graph statements re-wrapped as `label { … }`, parsed back into per-graph
+        // buckets and merged per graph exactly like N-Quads. The splitter is conservative and the
+        // loader redoes the document serially on any per-chunk parse error, so the result equals
+        // [`load_dataset_serial`] (up to anonymous blank-node ids, which differ run-to-run even
+        // between two serial parses).
         #[cfg(feature = "parallel")]
         {
             if matches!(format, "nquads" | "n-quads") {
-                return Self::load_nquads_parallel(text.as_bytes());
+                Self::load_nquads_parallel(text.as_bytes())
+            } else {
+                Self::load_trig_parallel(text.as_bytes())
             }
         }
-        Self::load_dataset_serial(text, format)
+        #[cfg(not(feature = "parallel"))]
+        {
+            Self::load_dataset_serial(text, format)
+        }
     }
 
     /// [OPUS-4.8] (sq-25r3) Serial dataset loader (the correctness reference + the non-`parallel`
@@ -886,6 +898,81 @@ impl Graph {
             }
         }
         // Merge each graph's partials into one (Dict, triples) and build its sub-graph.
+        let mut main: Option<Graph> = None;
+        let mut named: Vec<(Term, Graph)> = Vec::new();
+        for (key, partials) in per_graph {
+            let (dict, ids) = merge_partials(partials);
+            let sub = Self::build(dict, ids);
+            match key {
+                None => main = Some(sub),
+                Some(k) => named.push((k.to_term(), sub)),
+            }
+        }
+        let mut g = main.unwrap_or_else(|| Self::build(Dict::new(), Vec::new()));
+        g.named = named;
+        Ok(g)
+    }
+
+    /// [OPUS-4.8] (sq-ev37) Chunk-parallel TriG dataset loader. Splits the document with the
+    /// TriG-aware statement chunker ([`trig_chunks`]) — directive-snapshot + a run of same-graph
+    /// statements re-wrapped as `label { … }` per chunk — parses each chunk into per-graph buckets
+    /// in parallel ([`parse_trig_chunk`]), then merges PER GRAPH through the SAME
+    /// [`merge_partials`] the N-Quads/N-Triples fast paths use. Falls back to the serial oxttl path
+    /// ([`load_dataset_serial`]) when the document is not safely splittable OR any chunk fails to
+    /// re-parse, so the result always equals the serial parse (up to anonymous blank-node ids).
+    #[cfg(feature = "parallel")]
+    fn load_trig_parallel(bytes: &[u8]) -> Result<Graph, String> {
+        // Below ~1 statement/thread or on a single thread, chunking is pure overhead — parse
+        // serially. Otherwise aim for ~4 chunks/thread (the Turtle policy), capped by document size.
+        let threads = rayon::current_num_threads().max(1);
+        if threads == 1 {
+            return Self::load_dataset_serial(std::str::from_utf8(bytes).map_err(|e| e.to_string())?, "trig");
+        }
+        let target = (threads * 4).min(bytes.len() / 8192 + 1).max(1);
+        Self::load_trig_chunked(bytes, target)
+    }
+
+    /// [`load_trig_parallel`] with an explicit chunk-count `target` — separated so the differential
+    /// tests can force small documents to fan out across many chunks (and so the splitter's
+    /// per-graph routing + `label { … }` re-wrapping is exercised across genuine chunk boundaries).
+    #[cfg(feature = "parallel")]
+    fn load_trig_chunked(bytes: &[u8], target: usize) -> Result<Graph, String> {
+        use rayon::prelude::*;
+        use std::collections::HashMap;
+        let serial = || {
+            Self::load_dataset_serial(
+                std::str::from_utf8(bytes).map_err(|e| e.to_string())?,
+                "trig",
+            )
+        };
+        let chunks = match trig_chunks(bytes, target) {
+            Some(c) if c.len() > 1 => c,
+            // Not safely splittable (or only one chunk): the serial path is the reference anyway.
+            _ => return serial(),
+        };
+        type ChunkBuckets = Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)>;
+        let per_chunk: Result<Vec<ChunkBuckets>, String> =
+            chunks.par_iter().map(|chunk| parse_trig_chunk(chunk)).collect();
+        let per_chunk = match per_chunk {
+            Ok(p) => p,
+            // An over-eager split produced invalid TriG — redo the whole document serially. This is
+            // the safety net that makes any clean-but-wrong split observationally impossible.
+            Err(_) => return serial(),
+        };
+        // Regroup per-chunk buckets BY GRAPH in first-occurrence document order (chunks are in
+        // document order; within a chunk buckets are already first-occurrence) — the exact input
+        // shape the per-graph merge consumes. Identical to the N-Quads loader's regroup.
+        let mut index: HashMap<Option<nt::GraphKey>, usize> = HashMap::new();
+        let mut per_graph: Vec<(Option<nt::GraphKey>, ChunkPartials)> = Vec::new();
+        for chunk in per_chunk {
+            for (key, dict, triples) in chunk {
+                let slot = *index.entry(key.clone()).or_insert_with(|| {
+                    per_graph.push((key.clone(), Vec::new()));
+                    per_graph.len() - 1
+                });
+                per_graph[slot].1.push((dict, triples));
+            }
+        }
         let mut main: Option<Graph> = None;
         let mut named: Vec<(Term, Graph)> = Vec::new();
         for (key, partials) in per_graph {
@@ -4222,6 +4309,272 @@ fn parse_turtle_chunked(bytes: &[u8], target: usize) -> Result<(Dict, Vec<[Id; 3
     Ok(merge_partials(partials))
 }
 
+/// [OPUS-4.8] (sq-ev37) Delimit a TriG graph LABEL token starting at `start` — the `labelOrSubject`
+/// that precedes a `{ … }` block (`label { … }` or `GRAPH label { … }`). A label is one of an
+/// `IRIREF` (`<…>`), a `BLANK_NODE_LABEL` (`_:name`), or a `PrefixedName` (`pfx:local` / `:local`).
+/// Returns the offset just past the token, or `None` (→ caller falls back to serial) when the token
+/// is anything we do not delimit cleanly (an anonymous `[]` graph label, a collection, EOF, …).
+///
+/// The returned span is REPLAYED VERBATIM as the chunk's graph header, so its exact bytes — and in
+/// particular a blank-node label `_:g` — are preserved; the per-graph dataset merge then unifies
+/// that label across chunks exactly as the serial parse / the N-Quads fast path do (sq-25r3). We
+/// only need a span here: oxttl re-validates the token when it re-parses the chunk.
+#[cfg(feature = "parallel")]
+fn scan_graph_label(bytes: &[u8], start: usize) -> Option<usize> {
+    let n = bytes.len();
+    if start >= n {
+        return None;
+    }
+    match bytes[start] {
+        // IRIREF: `<` … `>` (no unescaped `>` inside; oxttl re-validates the snapshot).
+        b'<' => memchr::memchr(b'>', &bytes[start + 1..]).map(|off| start + 1 + off + 1),
+        // BLANK_NODE_LABEL `_:name` or a PrefixedName `pfx:local` / `:local`: a run of name
+        // characters terminated by whitespace, a comment, or the opening `{`. PN_CHARS / `.` / `:`
+        // are all consumed; the `{` (or ws/comment) that follows ends the token. (oxttl validates
+        // the precise PN grammar on re-parse — a malformed label makes that chunk fail → serial.)
+        b'_' | b':' | b'A'..=b'Z' | b'a'..=b'z' | 0x80..=0xff => {
+            let mut i = start;
+            while i < n
+                && !matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | b'#' | b'{' | b'}')
+            {
+                i += 1;
+            }
+            // A label must be non-empty; the caller checks that a `{` follows (after ws/comments).
+            (i > start).then_some(i)
+        }
+        _ => None,
+    }
+}
+
+/// [OPUS-4.8] (sq-ev37) A scanned TriG top-level unit: one statement's byte span `[start, end)`,
+/// the graph it belongs to (`None` = default graph; `Some((s, e))` = the verbatim label byte-span),
+/// and how many directive spans precede it (its chunk's preamble = `dirs[..dirs_before]`).
+#[cfg(feature = "parallel")]
+struct TrigStmt {
+    start: usize,
+    end: usize,
+    graph: Option<(usize, usize)>,
+    dirs_before: usize,
+}
+
+/// [OPUS-4.8] (sq-ev37) Split a TriG dataset into independently-parseable chunks for the
+/// chunk-parallel in-memory loader, or `None` to fall back to the serial oxttl path. This is the
+/// TriG twin of [`turtle_chunks`]: it reuses the SAME statement-terminator scanning
+/// ([`next_terminator`]) and directive-snapshot machinery (Turtle `@prefix`/`@base` and SPARQL
+/// `PREFIX`/`BASE` spans, replayed verbatim into each chunk), and adds the TriG-specific structure:
+///
+/// 1. **Graph routing context per statement.** A top-level unit is a directive, a DEFAULT-graph
+///    triple (`subj … .`), or a graph BLOCK — `{ … }` (default graph), `label { … }`, or
+///    `GRAPH label { … }`. While inside a block every statement is routed to that block's graph;
+///    the closing `}` returns to the top level. Each statement records its graph as the verbatim
+///    label byte-span (or `None`).
+/// 2. **Block-open/close + headers as units.** The `label {` / `GRAPH label {` header and the
+///    closing `}` are consumed as structural tokens (not statements). A chunk that carries a run of
+///    statements from graph `G` is re-wrapped as `label { … }` (the verbatim label), so oxttl
+///    re-parses it back into `G`. This lets a single large block split across many chunks while
+///    each chunk stays a self-contained, re-parseable TriG fragment.
+///
+/// Then [`parse_trig_chunk`] parses each chunk into per-graph buckets and the loader merges them
+/// with the SAME per-graph [`merge_partials`] the N-Quads fast path uses — so blank-node + prefix
+/// scope across blocks and chunk boundaries is resolved by the dataset-scoped dict merge (by label,
+/// exactly as the serial parse), not by anything fragile in the splitter.
+///
+/// Correctness is paramount: anything the scanner cannot cleanly delimit (a `triplesOrGraph`
+/// subject that is not a simple label, an anonymous-blank-node graph label, a truncated block, a
+/// `}`-before-`{` imbalance, …) returns `None` and the loader runs the proven serial path — and
+/// even a clean split is only ACCEPTED if every chunk re-parses (the loader redoes serially on any
+/// per-chunk parse error), so an over-eager split can never silently change the result.
+///
+/// Two-level only: TriG graph blocks do not nest, so the scanner needs no stack — just a current
+/// graph context (`None` at the top level, `Some(label)` inside one block).
+#[cfg(feature = "parallel")]
+fn trig_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
+    let n = bytes.len();
+    let mut dirs: Vec<(usize, usize)> = Vec::new();
+    let mut stmts: Vec<TrigStmt> = Vec::new();
+    // `None` at depth 0 (top level); `Some(label_span)` inside a block (label_span `None` ⇒ the
+    // anonymous `{ … }` default-graph block).
+    let mut cur_graph: Option<Option<(usize, usize)>> = None;
+    let mut j = skip_ws_comments(bytes, 0);
+    while j < n {
+        match cur_graph {
+            // ── Inside a block: statements terminated by `.`, or the closing `}`. ──────────────
+            Some(label) => {
+                if bytes[j] == b'}' {
+                    cur_graph = None;
+                    j = skip_ws_comments(bytes, j + 1);
+                    continue;
+                }
+                let end = next_terminator(bytes, j)?;
+                stmts.push(TrigStmt { start: j, end, graph: label, dirs_before: dirs.len() });
+                j = skip_ws_comments(bytes, end);
+            }
+            // ── Top level: directive, graph block, or a default-graph triple. ─────────────────
+            None => {
+                if is_sparql_directive_start(bytes, j) {
+                    let end = next_sparql_directive_end(bytes, j)?;
+                    dirs.push((j, end));
+                    j = skip_ws_comments(bytes, end);
+                    continue;
+                }
+                match bytes[j] {
+                    // `@prefix` / `@base`: a `.`-terminated directive span.
+                    b'@' => {
+                        let end = next_terminator(bytes, j)?;
+                        dirs.push((j, end));
+                        j = skip_ws_comments(bytes, end);
+                    }
+                    // Anonymous default-graph block `{ … }`.
+                    b'{' => {
+                        cur_graph = Some(None);
+                        j = skip_ws_comments(bytes, j + 1);
+                    }
+                    // A stray `}` at top level is malformed → serial.
+                    b'}' => return None,
+                    // `GRAPH label { … }` (case-insensitive keyword + ws). A subject that merely
+                    // starts with `g`/`G` (e.g. `graph:x` / `<…graph> …`) does NOT match because
+                    // `matches_kw_ws` requires whitespace/comment immediately after `graph`.
+                    _ if matches_kw_ws(bytes, j, b"graph") => {
+                        let after_kw = skip_ws_comments(bytes, j + 5);
+                        let label_end = scan_graph_label(bytes, after_kw)?;
+                        let at_brace = skip_ws_comments(bytes, label_end);
+                        if bytes.get(at_brace) != Some(&b'{') {
+                            return None; // `GRAPH` not followed by `label {` — malformed.
+                        }
+                        cur_graph = Some(Some((after_kw, label_end)));
+                        j = skip_ws_comments(bytes, at_brace + 1);
+                    }
+                    // `triplesOrGraph`: a leading SIMPLE label token. If the next significant byte
+                    // is `{`, it is a `label { … }` block; otherwise it is a default-graph triple
+                    // whose subject is that token — delimited by `next_terminator` from `j` (the
+                    // label scan is only a lookahead; the statement still starts at `j`).
+                    b'<' | b'_' | b':' | b'A'..=b'Z' | b'a'..=b'z' | 0x80..=0xff => {
+                        if let Some(label_end) = scan_graph_label(bytes, j) {
+                            let at = skip_ws_comments(bytes, label_end);
+                            if bytes.get(at) == Some(&b'{') {
+                                cur_graph = Some(Some((j, label_end)));
+                                j = skip_ws_comments(bytes, at + 1);
+                                continue;
+                            }
+                        }
+                        let end = next_terminator(bytes, j)?;
+                        stmts.push(TrigStmt { start: j, end, graph: None, dirs_before: dirs.len() });
+                        j = skip_ws_comments(bytes, end);
+                    }
+                    // Any other top-level statement start (a `[` blank-property-list subject, a `(`
+                    // collection subject, a literal — i.e. NOT a graph label). It is a default-graph
+                    // triple; delimit it. (A `[ … ] { … }` graph block is not valid TriG, so a `{`
+                    // can never legally follow such a subject — if one did, the chunk would fail to
+                    // re-parse and the loader would fall back to serial.)
+                    _ => {
+                        let end = next_terminator(bytes, j)?;
+                        stmts.push(TrigStmt { start: j, end, graph: None, dirs_before: dirs.len() });
+                        j = skip_ws_comments(bytes, end);
+                    }
+                }
+            }
+        }
+    }
+    // An unclosed block (EOF while inside one) is malformed → serial.
+    if cur_graph.is_some() {
+        return None;
+    }
+    if stmts.len() < 2 {
+        return None;
+    }
+
+    // Directive snapshot: the verbatim, in-order bytes of `dirs[..dirs_before]`, joined by `\n` —
+    // the exact replay [`turtle_chunks`] uses (correct for redefinitions and relative `@base`).
+    let snapshot = |dirs_before: usize| -> Vec<u8> {
+        let mut pre = Vec::new();
+        for &(s, e) in &dirs[..dirs_before] {
+            pre.extend_from_slice(&bytes[s..e]);
+            pre.push(b'\n');
+        }
+        pre
+    };
+
+    // Partition statements into ~target contiguous groups. A group must share BOTH the directive
+    // snapshot AND the graph context (so the chunk's preamble and `label { … }` wrapper are well
+    // defined) — split a group at any change of either.
+    let per = (stmts.len() / target.max(1)).max(1);
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut idx = 0;
+    while idx < stmts.len() {
+        let dirs_before = stmts[idx].dirs_before;
+        let graph = stmts[idx].graph;
+        let group_start = stmts[idx].start;
+        let mut end_i = (idx + per).min(stmts.len());
+        for (k, stmt) in stmts.iter().enumerate().take(end_i).skip(idx + 1) {
+            if stmt.dirs_before != dirs_before || stmt.graph != graph {
+                end_i = k;
+                break;
+            }
+        }
+        let body_end = stmts[end_i - 1].end;
+        let mut chunk = snapshot(dirs_before);
+        match graph {
+            // Default-graph statements: emit them bare (a valid TriG document body).
+            None => chunk.extend_from_slice(&bytes[group_start..body_end]),
+            // Block statements: re-wrap in `label { … }` so oxttl re-parses them back into the
+            // right graph. The label bytes are replayed VERBATIM (blank-node labels and prefixed
+            // names included), so graph identity is preserved across chunks.
+            Some((ls, le)) => {
+                chunk.extend_from_slice(&bytes[ls..le]);
+                chunk.extend_from_slice(b" {\n");
+                chunk.extend_from_slice(&bytes[group_start..body_end]);
+                chunk.extend_from_slice(b"\n}\n");
+            }
+        }
+        chunks.push(chunk);
+        idx = end_i;
+    }
+    Some(chunks)
+}
+
+/// [OPUS-4.8] (sq-ev37) Is the case-insensitive keyword `kw` at `k`, followed by whitespace or a
+/// comment (so `GRAPH ` matches but a `graph:` prefixed name or a `<…graph>` IRI does not)?
+#[cfg(feature = "parallel")]
+fn matches_kw_ws(bytes: &[u8], k: usize, kw: &[u8]) -> bool {
+    bytes.len() > k + kw.len()
+        && bytes[k..k + kw.len()].eq_ignore_ascii_case(kw)
+        && matches!(bytes.get(k + kw.len()), Some(b' ' | b'\t' | b'\n' | b'\r' | b'#'))
+}
+
+/// [OPUS-4.8] (sq-ev37) Parse one self-contained TriG chunk into per-graph buckets — the per-chunk
+/// worker for [`Graph::load_trig_chunked`], the oxttl analogue of [`nt::parse_quads_chunk`]. Routes
+/// each quad's triple to a bucket keyed by its graph name (`None` = default graph), interning S/P/O
+/// into that bucket's OWN partial dict (the graph NAME is the routing key, never interned), in
+/// first-occurrence order within the chunk — exactly the input shape the per-graph
+/// [`merge_partials`] consumes. Errors (an over-eager split that yields invalid TriG) propagate so
+/// the loader can redo the document serially.
+#[cfg(feature = "parallel")]
+#[allow(clippy::type_complexity)]
+fn parse_trig_chunk(bytes: &[u8]) -> Result<Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)>, String> {
+    use oxrdf::GraphName;
+    use std::collections::HashMap;
+    let mut buckets: Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)> = Vec::new();
+    let mut index: HashMap<Option<nt::GraphKey>, usize> = HashMap::new();
+    for q in TriGParser::new().for_slice(bytes) {
+        let q = q.map_err(|e| e.to_string())?;
+        let key = match q.graph_name {
+            GraphName::DefaultGraph => None,
+            GraphName::NamedNode(nn) => Some(nt::GraphKey::Iri(nn.into_string())),
+            GraphName::BlankNode(b) => Some(nt::GraphKey::Blank(b.into_string())),
+        };
+        let slot = *index.entry(key.clone()).or_insert_with(|| {
+            buckets.push((key.clone(), Dict::new(), Vec::new()));
+            buckets.len() - 1
+        });
+        let (_, dict, triples) = &mut buckets[slot];
+        let s = intern_subject_ref(dict, &q.subject);
+        let p = dict.intern_iri(q.predicate.as_str());
+        let o = intern_object_ref(dict, &q.object);
+        triples.push([s, p, o]);
+    }
+    Ok(buckets)
+}
+
 /// Streams N-Triples from `reader` in newline-aligned ~64 MiB blocks, parsing+interning
 /// each block IN PARALLEL (the custom byte parser, per-block partial dicts merged into
 /// the running `dict`), and spilling SPO runs — the parallel-parse path for the external
@@ -5394,6 +5747,155 @@ mod tests {
         differential(&dotted, 16);
     }
 
+    /// [OPUS-4.8] (sq-ev37) DIFFERENTIAL: the chunk-parallel TriG loader
+    /// ([`Graph::load_trig_chunked`]) must produce a dataset IDENTICAL (default graph, the set AND
+    /// order of named graphs, and every graph's triples + dict) to the serial oxttl reference
+    /// ([`Graph::load_dataset_serial`]) — the TriG twin of [`parallel_nquads_matches_serial`]. Each
+    /// case forces a fan-out across many chunks (small `target`) so chunk boundaries fall inside
+    /// blocks, between blocks of different graphs, and across runs of a shared blank-node label.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_trig_matches_serial() {
+        let differential = |trig: &str, target: usize| {
+            let chunks = trig_chunks(trig.as_bytes(), target)
+                .unwrap_or_else(|| panic!("doc must be splittable (len {})", trig.len()));
+            assert!(chunks.len() > 1, "doc must split into multiple chunks (len {})", trig.len());
+            let par = Graph::load_trig_chunked(trig.as_bytes(), target).unwrap();
+            let ser = Graph::load_dataset_serial(trig, "trig").unwrap();
+            assert_eq!(par.len(), ser.len(), "default-graph triple count differs");
+            let par_names: Vec<String> = par.named.iter().map(|(n, _)| n.to_string()).collect();
+            let ser_names: Vec<String> = ser.named.iter().map(|(n, _)| n.to_string()).collect();
+            assert_eq!(par_names, ser_names, "named-graph set/order differs");
+            assert_eq!(canon_dataset(&par), canon_dataset(&ser), "chunked TriG must equal serial");
+        };
+
+        // 1. Many `GRAPH g { … }` blocks interleaved with top-level default-graph triples and an
+        //    anonymous `{ … }` default block — the core per-graph routing across chunk boundaries.
+        //    A leading `@prefix` is in scope for every chunk (the directive-snapshot replay).
+        let mut multi = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..400 {
+            match i % 4 {
+                0 => multi.push_str(&format!(":s{i} :p :o{i} .\n")), // default (top level)
+                1 => multi.push_str(&format!("GRAPH :g1 {{ :s{i} :p :o{i} . :s{i} :q :r{i} . }}\n")),
+                2 => multi.push_str(&format!(":g2 {{ :s{i} :p :o{i} . }}\n")), // label { … }
+                _ => multi.push_str(&format!("{{ :d{i} :p :o{i} . }}\n")),     // anon default block
+            }
+        }
+        differential(&multi, 24);
+
+        // 2. ONE large `GRAPH g { … }` block whose interior statements split across many chunks —
+        //    the case the `label { … }` re-wrap exists for (a whole block bigger than a chunk). The
+        //    same blank-node label `_:b{k}` recurs at the block's start and end and is chained
+        //    between adjacent statements, so the per-graph dict merge must unify it across chunks.
+        let mut big = String::from("@prefix : <http://ex/> .\n:top :p :level .\nGRAPH :big {\n_:shared :starts :here .\n");
+        for i in 0..500 {
+            big.push_str(&format!(":s{i} :p :o{i} .\n_:n{} :next _:n{} .\n", i / 3, i / 3 + 1));
+        }
+        big.push_str("_:shared :ends :here .\n}\n");
+        differential(&big, 24);
+
+        // 3. A BLANK-NODE-named graph `_:g { … }` (label replayed verbatim across chunks) plus
+        //    same-spelled `_:g` used as a normal subject/object in the default graph — the routing
+        //    key must NOT be conflated with the in-graph bnode (mirrors the N-Quads case 3).
+        let mut bgraph = String::from("@prefix : <http://ex/> .\n_:g :is :a-default-subject .\n_:g {\n");
+        for i in 0..400 {
+            bgraph.push_str(&format!(":s{i} :p _:x{i} .\n"));
+        }
+        bgraph.push_str("}\n:after :p :default .\n");
+        differential(&bgraph, 24);
+
+        // 4. The SAME named graph re-opened in non-adjacent blocks (first-occurrence ordering must
+        //    survive: g_a, then g_b, then g_a again must keep [g_a, g_b]), plus prefixed names,
+        //    typed/lang literals (incl. an interior `.`), and SPARQL-style `PREFIX` directives.
+        let mut reopen = String::from("PREFIX : <http://ex/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n");
+        for i in 0..300 {
+            reopen.push_str(&format!(
+                "GRAPH :g_a {{ :s{i} :p \"v.{i}\"@en . }}\n\
+                 :top{i} :p \"{i}\"^^xsd:integer .\n\
+                 GRAPH :g_b {{ :s{i} :p :o{i} . }}\n"
+            ));
+        }
+        for i in 0..50 {
+            reopen.push_str(&format!("GRAPH :g_a {{ :late{i} :p :o{i} . }}\n"));
+        }
+        differential(&reopen, 24);
+
+        // 5. Mid-document `@prefix` REDEFINITION: statements before vs after the redefinition must
+        //    each parse under the correct snapshot (the chunker splits a group at any directive
+        //    change and replays the in-scope directives verbatim).
+        let mut redef = String::from("@prefix p: <http://a/> .\n");
+        for i in 0..150 {
+            redef.push_str(&format!("p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"));
+        }
+        redef.push_str("@prefix p: <http://b/> .\n");
+        for i in 0..150 {
+            redef.push_str(&format!("p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"));
+        }
+        differential(&redef, 24);
+
+        // 6. Comments + blank lines interleaved (a chunk boundary may land on one); a comment text
+        //    contains a `.` and braces to confirm they are skipped, not treated as structure.
+        let mut sparse = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..300 {
+            sparse.push_str("# a comment . with a dot and { fake brace }\n\n");
+            if i % 2 == 0 {
+                sparse.push_str(&format!("GRAPH :g {{ :s{i} :p :o{i} . }}\n"));
+            } else {
+                sparse.push_str(&format!(":s{i} :p :o{i} .\n"));
+            }
+        }
+        differential(&sparse, 24);
+    }
+
+    /// [OPUS-4.8] (sq-ev37) The public `Graph::load_dataset("…","trig")` entry point (which under
+    /// the `parallel` feature dispatches to `load_trig_parallel`) must agree with the serial
+    /// reference on a dataset large enough to genuinely fan out — the end-to-end witness that the
+    /// dispatch + per-graph build are wired correctly, not just the internals.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn load_dataset_trig_public_entry_matches_serial() {
+        let mut trig = String::from("@prefix : <http://ex/> .\n_:shared :a :b .\n");
+        for i in 0..3000 {
+            if i % 3 == 0 {
+                trig.push_str(&format!(":s{i} :p _:n{i} .\n"));
+            } else {
+                trig.push_str(&format!("GRAPH :g1 {{ :s{i} :p _:n{i} . }}\n"));
+            }
+        }
+        trig.push_str("GRAPH :g1 { _:shared :c :d . }\n");
+        let pub_g = Graph::load_dataset(&trig, "trig").unwrap();
+        let ser = Graph::load_dataset_serial(&trig, "trig").unwrap();
+        assert_eq!(pub_g.len(), ser.len());
+        assert_eq!(pub_g.named.len(), ser.named.len(), "named graph count");
+        assert_eq!(canon_dataset(&pub_g), canon_dataset(&ser), "public load_dataset must equal serial");
+    }
+
+    /// [OPUS-4.8] (sq-ev37) Malformed / not-cleanly-splittable TriG must NOT be silently accepted:
+    /// either `trig_chunks` bails (`None` → serial) or some chunk fails to re-parse (→ serial), and
+    /// either way the public loader returns the SAME `Err` the serial oxttl parser does. This pins
+    /// the one failure the chunked-vs-serial oracle cannot catch — an over-eager split that happens
+    /// to parse invalid input as valid.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_trig_rejects_malformed() {
+        let cases = [
+            // Unclosed graph block.
+            "@prefix : <http://ex/> .\n:a :p :b .\nGRAPH :g { :x :y :z .\n:c :d :e .\n",
+            // A `}` with no matching `{`.
+            "@prefix : <http://ex/> .\n:a :p :b .\n} :c :d :e .\n:f :g :h .\n",
+            // Missing `.` between two default-graph triples (oxttl rejects the fused statement).
+            "@prefix : <http://ex/> .\n:a :p :b\n:c :d :e .\n:f :g :h .\n",
+            // An undefined prefix used inside a block (`undef:` was never declared).
+            "@prefix : <http://ex/> .\n:a :p :b .\nGRAPH :g { :x undef:y :z . }\n:c :d :e .\n",
+        ];
+        for src in cases {
+            let serial_err = Graph::load_dataset_serial(src, "trig").is_err();
+            let public_err = Graph::load_dataset(src, "trig").is_err();
+            assert_eq!(public_err, serial_err, "rejection parity differs for {src:?}");
+            assert!(serial_err, "case was expected to be invalid TriG: {src:?}");
+        }
+    }
+
     /// [OPUS-4.8] (sq-25r3) The public `Graph::load_dataset("…","nquads")` entry point (which
     /// dispatches to the parallel path under the `parallel` feature) must agree with the serial
     /// reference on a dataset with default + named graphs and a cross-chunk blank node — the
@@ -5414,10 +5916,12 @@ mod tests {
         assert_eq!(canon_dataset(&pub_g), canon_dataset(&ser), "public load_dataset must equal serial");
     }
 
-    /// [OPUS-4.8] (sq-25r3) TriG is DEFERRED to the serial oxttl path (bead sq-ev37)
-    /// — the parallel N-Quads work must not break it. Loading a TriG dataset through the public
-    /// `load_dataset` (which routes TriG to `load_dataset_serial`) must still split the default and
-    /// named graphs correctly.
+    /// [OPUS-4.8] (sq-25r3 / sq-ev37) Loading a small TriG dataset through the public
+    /// `load_dataset` must split the default and named graphs correctly. (Under the `parallel`
+    /// feature this now routes through the chunk-parallel `load_trig_parallel`, which falls back to
+    /// serial for a document this small; the result is the same either way — the byte-identical
+    /// equivalence on larger, genuinely-fanned-out documents is pinned by
+    /// `parallel_trig_matches_serial`.)
     #[test]
     fn load_dataset_trig_still_serial_and_correct() {
         let trig = "@prefix : <http://ex/> .\n\
