@@ -186,14 +186,27 @@ assert!(!evaluate(&policy, &outside).allow);
   - **First *N* exercises grant; the *(N+1)*th denies.** A *denied* request burns **no**
     budget. `lteq N`/`eq N` = at most *N*; `lt N` = at most *N-1*.
   - **Counter-store seam.** `UsageCounterStore` is an injectable trait; the in-memory
-    default `InMemoryCounterStore` is the reference impl. The budget key is
-    `(rule_id, party, target)` (`CountKey`) — per-assignee, per-asset, per-rule.
+    default `InMemoryCounterStore` is the single-process reference impl and
+    `FileCounterStore` ([OPUS-4.8] sq-5z1q) is a **cross-process** impl (below). The
+    budget key is `(rule_id, party, target)` (`CountKey`) — per-assignee, per-asset,
+    per-rule.
   - **Atomicity / concurrency boundary.** The single mutating op is the atomic
     `try_consume` (check-and-consume under one lock in the in-memory store), **not** a
     read-then-increment — so the in-process TOCTOU race is closed (a concurrency test
-    asserts exactly the limit is granted, never one more). A **distributed** store
-    (Redis `INCR`, SQL `UPDATE … WHERE consumed < limit`) is the operator's concern and
-    MUST provide the same atomicity; cross-process atomicity is a deferred bead.
+    asserts exactly the limit is granted, never one more).
+  - **Cross-process counting (`FileCounterStore`)** — [OPUS-4.8] sq-5z1q. The in-memory
+    store is atomic in-process only; in a multi-process deployment each process would get
+    its own full budget. `FileCounterStore::new(dir)` persists all budgets in one file and
+    serializes the **whole** compare-and-increment with an OS-level lockfile (`O_EXCL`
+    `create_new` — the cross-process analogue of the in-memory `Mutex`), so every process
+    that opens the same `dir` shares one budget. It is a drop-in for the same trait seam
+    (identical `try_consume` contract / `evaluate_and_exercise` semantics), **std-only —
+    no new deps, no `unsafe`**, and a cross-process test (6 worker subprocesses, 240
+    attempts, budget 60) asserts exactly the limit is granted across all processes.
+    **Boundary (honest):** `O_EXCL` create is atomic on a local FS and on modern NFS, not
+    on old/misconfigured NFS — for a multi-*host* deployment over a questionable mount,
+    prefer a Redis `INCR` / SQL `UPDATE … WHERE consumed < limit RETURNING` store against
+    the same trait.
   - **Fail-closed.** An *unavailable* counter (`ConsumeResult::Unavailable`) or a
     *malformed* limit denies — never silently treated as "unlimited".
     `count_status(&rule, &request, &store) -> CountStatus` is the side-effect-free audit
