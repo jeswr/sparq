@@ -3255,6 +3255,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-algos"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "rustc-hash 2.1.2",
+ "sparq-core",
+]
+
+[[package]]
 name = "sparq-bench"
 version = "0.1.0"
 dependencies = [
