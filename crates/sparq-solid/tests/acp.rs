@@ -541,6 +541,71 @@ fn acp_creator_agent_with_client_constraint() {
     );
 }
 
+/// [OPUS-4.8] sq-az1b — allOf { CreatorAgent } { concrete WebID } where the WebID == the
+/// resource's creator. The bead asked whether this "degenerate" composition is supported;
+/// it IS, with no special-casing: the provenance candidate's agent dimension is the creator
+/// WebID, and the sibling concrete-agent matcher's accept-set is exactly that one WebID, so
+/// the allOf rejection check (acp-b.n3) finds the agent accepted by BOTH matchers and the
+/// resource-scoped grant fires. Crucially the grant stays RESOURCE-SCOPED: the creator of
+/// d0 (who is ALSO the literal WebID the second matcher names) is granted ONLY d0, never d1
+/// where they are not the creator — the second concrete matcher does not widen the
+/// provenance candidate's resource binding.
+#[test]
+fn acp_creator_agent_allof_with_matching_concrete_agent_is_supported() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    // allOf { CreatorAgent } { concrete agent BOB } — BOB is the creator of d0.
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#mcre> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#mcre> <{acp}agent> <{acp}CreatorAgent> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#magent> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#magent> <{acp}agent> <{BOB}> <{CRE_ACR}> .\n"
+    );
+    let mut prov = AccessProvenance::default();
+    prov.set_creator(CRE_DOC, BOB); // bob created d0 (and is the concrete WebID named)
+    let mut s = cre_store(&body, &prov);
+    let r = Mode::Read;
+
+    // ALLOW: bob is BOTH the creator of d0 AND the WebID the second matcher names.
+    assert!(can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator == named WebID) reads d0");
+    // DENY: carol is neither the creator nor the named WebID.
+    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol denied d0");
+    // SOUNDNESS — still resource-scoped: bob is NOT the creator of d1, so even though the
+    // second matcher names bob, the contradictory CreatorAgent half blocks d1. The concrete
+    // matcher must not widen the provenance candidate's resource binding to every resource.
+    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC2), "bob (named, but not creator of d1) denied d1");
+}
+
+/// [OPUS-4.8] sq-az1b — the genuinely contradictory shape: allOf { CreatorAgent } { concrete
+/// WebID } where the WebID is a FIXED agent that is NOT the creator. The two matchers demand
+/// the agent be BOTH the creator AND a different fixed WebID — unsatisfiable for any agent,
+/// so NOBODY is granted. This is correct-by-soundness (an empty intersection), not a missing
+/// feature: the creator is rejected by the concrete matcher, and the fixed WebID is rejected
+/// by the CreatorAgent matcher (it is not the creator). Documented bound, design doc §3.6.
+#[test]
+fn acp_creator_agent_allof_with_contradictory_concrete_agent_grants_nobody() {
+    let acl = "http://www.w3.org/ns/auth/acl#";
+    let acp = "http://www.w3.org/ns/solid/acp#";
+    // allOf { CreatorAgent } { concrete agent CAROL } — CAROL is NOT the creator of d0.
+    let body = format!(
+        "<{CRE_ACR}#pol> <{acp}allow> <{acl}Read> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#mcre> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#mcre> <{acp}agent> <{acp}CreatorAgent> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#pol> <{acp}allOf> <{CRE_ACR}#magent> <{CRE_ACR}> .\n\
+         <{CRE_ACR}#magent> <{acp}agent> <{CAROL}> <{CRE_ACR}> .\n"
+    );
+    let mut prov = AccessProvenance::default();
+    prov.set_creator(CRE_DOC, BOB); // bob created d0; CAROL is a distinct fixed WebID
+    let mut s = cre_store(&body, &prov);
+    let r = Mode::Read;
+
+    // The creator (bob) is rejected by the concrete CAROL matcher…
+    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator, not CAROL) denied d0");
+    // …and the fixed WebID (carol) is rejected by the CreatorAgent matcher (she is not the creator).
+    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol (named, not creator) denied d0");
+}
+
 /// Fail-closed: a malicious creator/owner WebID inside the reserved `urn:sparq:` space is
 /// rejected at materialization, exactly like a malicious agent/client/issuer value — it
 /// cannot smuggle a forged principal into the auth view.
