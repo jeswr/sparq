@@ -15,7 +15,7 @@
 //! Writing back out (`Graph` -> `.hdt`) is opt-in behind the `write` cargo feature.
 //! It encodes the FourSectDict (Plain Front Coding) + BitmapTriples sections
 //! DIRECTLY from sparq's in-memory dictionary + triples (the inverse of the decoder)
-//! — no temporary N-Triples round-trip — see [`save`] and `src/encode.rs`:
+//! — no temporary N-Triples round-trip — see `save` and `src/encode.rs`:
 //!
 //! ```no_run
 //! # #[cfg(feature = "write")]

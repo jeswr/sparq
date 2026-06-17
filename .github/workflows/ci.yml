@@ -559,46 +559,23 @@ jobs:
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # [OPUS-4.8] sq-z1rm: rustdoc -D warnings, scoped to sparq-solid. A broken/private
-      # intra-doc link (e.g. a public item linking to a crate-private const/fn) is a rustdoc
-      # warning, NOT a clippy/build warning, so it slips past every other gate here and
-      # mis-renders the published docs. This GATES the sparq-solid doc surface so a public
-      # item can never again link to a private/unresolved item. Both feature states: the
-      # `odrl-bridge` module (and its own intra-doc links) only compiles under that feature.
-      # Intentionally per-crate, not `--workspace`: the rest of the workspace still carries a
-      # pre-existing rustdoc-warning backlog (tracked separately) that a workspace-wide
-      # -D warnings would fail on today.
-      - name: rustdoc (deny warnings, sparq-solid — default features)
-        run: cargo doc -p sparq-solid --no-deps
+      # [OPUS-4.8] sq-8gsv: rustdoc -D warnings, WORKSPACE-WIDE. A broken/private intra-doc
+      # link (e.g. a public item linking to a crate-private const/fn, or an unresolved
+      # `[`Foo`]` that renders as literal text) is a rustdoc warning — NOT a clippy/build
+      # warning — so it slips past every other gate here and mis-renders the published docs.
+      # This was previously scoped to sparq-solid (sq-z1rm) and sparq-mpc (sq-h1w2) only,
+      # because the rest of the workspace carried ~174 pre-existing intra-doc-link warnings
+      # across ~20 crates. sq-8gsv cleared that backlog, so the gate now covers the WHOLE
+      # doc surface: any new public item that links to a private/unresolved one fails CI.
+      # Two feature states cover the feature-gated doc surface (e.g. sparq-solid's
+      # `odrl-bridge`/`count-enforcement` modules, sparq-mpc's `insecure-test-rng`,
+      # sparq-prov's `reason` bridge): default features, then `--all-features`.
+      - name: rustdoc (deny warnings, workspace — default features)
+        run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - name: rustdoc (deny warnings, sparq-solid — odrl-bridge)
-        run: cargo doc -p sparq-solid --no-deps --features odrl-bridge
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-      # [OPUS-4.8] sq-58mh: the STATEFUL `odrl:count` bridge surface (the `count` module +
-      # `materialize_odrl_permission_counted` + the `BridgeOutcome::consumed` doc-link)
-      # only compiles/resolves under `count-enforcement` — gate its doc surface too.
-      - name: rustdoc (deny warnings, sparq-solid — count-enforcement)
-        run: cargo doc -p sparq-solid --no-deps --features count-enforcement
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-      # [OPUS-4.8] sq-h1w2: rustdoc -D warnings, scoped to sparq-mpc. Same rationale as
-      # the sparq-solid gate above — a public MPC item linking to a crate-private helper
-      # (e.g. the `pub(crate)` `mac_shares`/`verify_sum_in_range` internals, or a wrong
-      # `ShamirBackend::run_secure` path that should be the `MpcBackend` trait method) is
-      # a rustdoc warning that slips past clippy/build. This crate's intra-doc backlog is
-      # now cleared, so we GATE it so a public item can never again link to a
-      # private/unresolved one. Both feature states: default and the off-by-default
-      # `insecure-test-rng` (its only feature; `--all-features` == that one feature).
-      # Still per-crate, not `--workspace`: the rest of the workspace carries a separate
-      # pre-existing rustdoc-warning backlog (own beads) a workspace-wide gate would fail.
-      - name: rustdoc (deny warnings, sparq-mpc — default features)
-        run: cargo doc -p sparq-mpc --no-deps
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-      - name: rustdoc (deny warnings, sparq-mpc — insecure-test-rng)
-        run: cargo doc -p sparq-mpc --no-deps --features insecure-test-rng
+      - name: rustdoc (deny warnings, workspace — all features)
+        run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: "-D warnings"
       # Informational until the deferred `cargo fmt --all` reformat lands (see rustfmt.toml).

@@ -21,7 +21,7 @@
 //! This is STRICTER than the engine's standalone default (which allows public IPs
 //! and only blocks private/internal ones): on the server, a host must be on the
 //! allowlist to be reached *at all*, even a public one. The strictness is wired via
-//! [`sparq_engine::with_service_egress_policy`] with `strict = true`.
+//! `sparq_engine::with_service_egress_policy` with `strict = true`.
 //!
 //! ## Allowlist syntax
 //!
@@ -79,7 +79,7 @@ impl ServiceAllowlist {
     /// apex-and-subdomain suffix wildcard, not arbitrary globs).
     ///
     /// [OPUS-4.8] sq-4w18: exact-host entries are NORMALISED to the bare host the
-    /// engine actually compares against (see [`Self::normalize_host`]), so a copy-
+    /// engine actually compares against (see `Self::normalize_host`), so a copy-
     /// pasted endpoint like `example.org:443` or a bracketed IPv6 `[::1]` matches
     /// instead of silently never matching (which would make the allowlist look
     /// configured but be inert — a fail-open footgun).
@@ -207,7 +207,7 @@ impl ServiceAllowlist {
 
     /// The entries in the engine's allowlist representation: exact hosts verbatim,
     /// suffix wildcards as leading-dot strings (`.example.org`). Fed to
-    /// [`sparq_engine::with_service_egress_policy`].
+    /// `sparq_engine::with_service_egress_policy`.
     pub fn engine_entries(&self) -> Vec<String> {
         self.exact.iter().chain(self.suffix.iter()).cloned().collect()
     }

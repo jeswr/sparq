@@ -14,7 +14,7 @@
 //! *finer-grained* derivation record than a single CONSTRUCT-style PROV activity:
 //! it names the rule that fired and the exact premises for **each** inferred fact.
 //!
-//! This module is the bridge. [`prov_from_proof`] walks one proof tree and emits,
+//! This module is the bridge. `prov_from_proof` walks one proof tree and emits,
 //! for the proof's structure:
 //!
 //! * one [`prov:Entity`] per distinct fact (the node's conclusion), with a stable

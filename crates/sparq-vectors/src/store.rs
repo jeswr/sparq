@@ -430,7 +430,7 @@ impl VectorStore {
     ///
     /// Call this once after [`open`](Self::open) (it is O(dict_len), not per-query) before issuing
     /// `get`/`nearest_term` against `graph`. The term-by-query entry points
-    /// ([`crate::ann::nearest_term_exact_checked`], [`DiskAnnIndex::nearest_term_checked`]) run it.
+    /// ([`crate::ann::nearest_term_exact_checked`], `DiskAnnIndex::nearest_term_checked`) run it.
     pub fn check_graph(&self, graph: &Graph) -> fingerprint::CheckResult {
         let origin = if self.path.as_os_str().is_empty() {
             "<bytes>".to_string()

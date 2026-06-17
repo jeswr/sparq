@@ -13,7 +13,7 @@
 //! a privacy / PII exposure distinct from, and complementary to, the #241 / sq-kfel
 //! *error-body* sanitisation (which governs what a CLIENT sees on an error).
 //!
-//! This is the same lesson the audit log ([`crate::audit`]) already applies to its records: it
+//! This is the same lesson the audit log (`crate::audit`) already applies to its records: it
 //! logs a non-reversible *fingerprint* of the query, never the text. Redaction extends that
 //! discipline to the `--verbose` request log.
 //!
@@ -24,7 +24,7 @@
 //! length and a stable non-reversible fingerprint of the original — `?<redacted len=N
 //! fp=xxxxxxxxxxxxxxxx>` — so logs stay useful for correlation (same query => same `fp`; a size
 //! signal from `len`) **without exposing the content**. The path is left intact (it is a route,
-//! not user content). When redaction is off ([`--log-full-requests`] / `SPARQ_LOG_FULL_REQUESTS`
+//! not user content). When redaction is off (`--log-full-requests` / `SPARQ_LOG_FULL_REQUESTS`
 //! truthy), the URI is logged verbatim, exactly as the bare `TraceLayer` did before — the escape
 //! hatch for operators who deliberately want full request text in a debug session.
 //!
@@ -37,7 +37,7 @@
 //! *this* time, and (via `fp`) that the same query recurred. That is metadata, and it is not
 //! erased here. This is also NOT the ZK/MPC privacy story (which concerns what a *remote party*
 //! can learn from a *computation*); it is purely operator-log hygiene. The fingerprint is the
-//! same FNV-1a construction the audit log uses ([`crate::audit::query_fingerprint`]) — fixed,
+//! same FNV-1a construction the audit log uses (`crate::audit::query_fingerprint`) — fixed,
 //! one-way, dependency-free, stable across builds and restarts.
 
 /// A 64-bit FNV-1a hash, hex-encoded. Kept independent of the (feature-gated) audit module so

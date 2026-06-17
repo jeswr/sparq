@@ -128,7 +128,7 @@ pub trait UsageCounterStore {
 
     /// The number of units already consumed for `key` (for audit/inspection), or `None`
     /// if the store cannot be read. Pure read — does NOT consume. Never used to *gate*
-    /// an exercise (that is [`try_consume`]'s atomic job); only to report state.
+    /// an exercise (that is `try_consume`'s atomic job); only to report state.
     fn consumed(&self, key: &CountKey) -> Option<u64>;
 }
 

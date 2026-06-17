@@ -959,7 +959,7 @@ const BRTPF_VALUES_PARAM: &str = "values";
 ///    server returns only triples joining at least one attached mapping (the brTPF bind-join).
 /// 3. **Pagination.** A `page` token is the OPAQUE next-page URL the server published as
 ///    `hydra:next`; the transport GETs it verbatim, so following pagination to exhaustion is
-///    "GET the `hydra:next` link until there is none" — exactly what [`drain_fragment`] drives.
+///    "GET the `hydra:next` link until there is none" — exactly what `drain_fragment` drives.
 /// 4. **Turtle/TriG fragment-body parse.** The response (`Accept: text/turtle, application/trig`)
 ///    is parsed with oxttl's TriG parser (a superset of Turtle — it handles a default-graph
 ///    Turtle body and a named-graph TriG body identically). The parse SPLITS the document into

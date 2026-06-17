@@ -58,7 +58,7 @@
 //! tracked as a follow-up bead.
 //!
 //! What sq-8jv7 *did* change is the secret-dependent control flow **in code we
-//! own**: [`derive_nonce`]'s degenerate-`k` guard is now branchless (always
+//! own**: `derive_nonce`'s degenerate-`k` guard is now branchless (always
 //! computes the re-fold candidate and `subtle`-selects it), so our own emitted
 //! control flow is data-independent of the secret nonce. We do **not** claim
 //! this makes signing constant-time — the arkworks residual dominates.
@@ -349,9 +349,9 @@ fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
 }
 
 /// Sign `m` with `sk` using a DETERMINISTIC nonce derived from `(sk, m)` (no
-/// entropy source, no caller seed — see [`derive_nonce`]). This is the
+/// entropy source, no caller seed — see `derive_nonce`). This is the
 /// issuance-side path used by [`SecretKey::sign_commitment`]; a relying party
-/// only ever calls [`verify`]. Equivalent in shape to [`sign`] but with the
+/// only ever calls [`verify`]. Equivalent in shape to `sign` but with the
 /// nonce pinned, so it is replay-stable and seed-reuse-proof.
 //
 // # Constant-time posture (CR-G5 / sq-8jv7) [OPUS-4.8]

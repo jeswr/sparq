@@ -20,9 +20,9 @@ pub const ODRL_NS: &str = "http://www.w3.org/ns/odrl/2/";
 
 /// An ODRL policy: a container of deontic rules.
 ///
-/// A policy is evaluated as a whole against a single request: a [`Permission`]
+/// A policy is evaluated as a whole against a single request: a `Permission`
 /// whose action/target/constraints all match the request grants access, and any
-/// matching [`Prohibition`] overrides it (fail-closed — see
+/// matching `Prohibition` overrides it (fail-closed — see
 /// [`crate::evaluate`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Policy {

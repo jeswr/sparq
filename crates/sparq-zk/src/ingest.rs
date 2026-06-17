@@ -132,7 +132,7 @@ impl SaltMint {
     /// folds them into a field element, and redraws on the (negligible) chance
     /// the same salt was already issued. Fails closed ([`IngestError::SaltExhausted`])
     /// only if the entropy source is broken (no fresh value in
-    /// [`MAX_MINT_REDRAWS`] tries).
+    /// `MAX_MINT_REDRAWS` tries).
     pub fn mint(&mut self) -> Result<Fr, IngestError> {
         for _ in 0..MAX_MINT_REDRAWS {
             let mut bytes = [0u8; 32];

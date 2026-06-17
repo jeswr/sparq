@@ -7,7 +7,7 @@
 //! query-result proof, and verifies one (plan v3 §S4.E modules ii/iii).
 //!
 //! Pipeline:
-//! 1. [`build`] turns sparq-zk [`GraphCommitment`]s + a BGP pattern into a
+//! 1. [`build`] turns sparq-zk `GraphCommitment`s + a BGP pattern into a
 //!    scan [`ProofInputs`], deriving the (k, n, r) [`CircuitId`] from the data.
 //! 2. [`driver::CircuitProver`] proves it via nargo/bb subprocesses.
 //! 3. A [`ProofManifest`] carries the public inputs + bb proof to the verifier.

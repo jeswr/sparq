@@ -80,7 +80,7 @@ pub(crate) fn with_extensions<T>(f: impl FnOnce() -> T) -> T {
 /// the SERVICE egress allowlist policy AND the SPARQL extension functions.
 ///
 /// With the `service` cargo feature, this installs
-/// [`sparq_engine::with_service_egress_policy`] in STRICT (allowlist-only) mode for the
+/// `sparq_engine::with_service_egress_policy` in STRICT (allowlist-only) mode for the
 /// config's [`ServerConfig::service_allow`]: SERVICE may reach ONLY allowlisted hosts —
 /// an empty allowlist (the default) refuses ALL federation before any network call.
 /// Every engine entry point that can evaluate a `SERVICE` clause (query, ASK,
@@ -146,14 +146,14 @@ pub struct ServerConfig {
     /// time a freshly-accepted HTTP/1 connection may take to transmit its COMPLETE request-header
     /// block. A client that dribbles headers byte-by-byte (the classic slow-loris) otherwise holds
     /// a connection — and, behind the `concurrency_limit`, a concurrency slot — open indefinitely;
-    /// [`max_concurrent`] such clients starve every legitimate caller. Enforced at hyper's HTTP/1
+    /// `max_concurrent` such clients starve every legitimate caller. Enforced at hyper's HTTP/1
     /// connection layer (`http1().header_read_timeout`), so it fires BEFORE the request ever
-    /// reaches a handler — which is exactly why the existing [`query_timeout`] (a per-request
-    /// engine deadline) and the [`max_body_bytes`] / load-shed guards do NOT cover it: those all
+    /// reaches a handler — which is exactly why the existing `query_timeout` (a per-request
+    /// engine deadline) and the `max_body_bytes` / load-shed guards do NOT cover it: those all
     /// run AFTER the headers are fully parsed. The connection is closed when the deadline elapses.
     ///
     /// `None` disables it (back to the unbounded-header-read behaviour `axum::serve` ships — see
-    /// the rationale on [`serve`]). Default 15s. Distinct from the slower [`query_timeout`] (30s)
+    /// the rationale on [`serve`]). Default 15s. Distinct from the slower `query_timeout` (30s)
     /// because reading a header block is sub-second on any healthy client; 15s is generous
     /// headroom for a slow but honest network without leaving the slot open for minutes.
     pub header_read_timeout: Option<Duration>,
@@ -204,7 +204,7 @@ pub struct ServerConfig {
     /// (the default) disables it. For the byte-accounted companion that DOES price row
     /// width and computed-literal size, see [`max_query_bytes`](Self::max_query_bytes).
     ///
-    /// Distinct from [`max_results`]: this caps the working set on *all* forms, whereas
+    /// Distinct from `max_results`: this caps the working set on *all* forms, whereas
     /// `max_results` is folded into the budget only on the paths that pass
     /// `make_budget(_, true)` — SELECT (the final projection) AND CONSTRUCT/DESCRIBE (their
     /// WHERE-pattern solution count) AND EXPLAIN ANALYZE. It is NOT applied on the
@@ -292,7 +292,7 @@ pub struct ServerConfig {
     /// essentially zero. Set by `--audit-log` / `SPARQ_AUDIT_LOG=1`. Present only with the
     /// `audit-log` cargo feature; without it the field, the flag and every call site are
     /// compiled out, so a request pays EXACTLY zero (byte-identical to before). See
-    /// [`crate::audit`].
+    /// `crate::audit`.
     #[cfg(feature = "audit-log")]
     pub audit_log: bool,
     /// [OPUS-4.8] (sq-gos8, epic sq-toze) **Richer STRUCTURED access-audit sink** target (ASVS
@@ -354,7 +354,7 @@ pub struct ServerConfig {
     /// through the query path — classification there keys on whether the request mutates, not
     /// the route) — and the Graph-Store-Protocol write methods (`PUT`/`POST`/`DELETE`/`PATCH`) on
     /// `/sparql/graph` and `/graphs/{*path}`. The token is compared in **constant time**
-    /// ([`constant_time_eq`]). A missing vs a wrong token produce the *identical* 401, so an
+    /// (`constant_time_eq`). A missing vs a wrong token produce the *identical* 401, so an
     /// attacker cannot learn whether a token was presented. `None` (the default) means **no
     /// write auth** — today's behaviour, preserved exactly. Mirrors QLever's `-a <token>`.
     /// Enforced by the library `router` itself, so an embedder gets the gate for free.
@@ -371,7 +371,7 @@ pub struct ServerConfig {
     /// open. The SSE GET reads the `Authorization: Bearer` header like any other GET; the WS
     /// UPGRADE accepts the token from that header OR (for browsers, which cannot set headers on a
     /// WS handshake) a `Sec-WebSocket-Protocol: bearer.<token>` subprotocol — see
-    /// [`crate::subscriptions::subscriptions_endpoint`] and [`ws_auth_gate`].
+    /// [`crate::subscriptions::subscriptions_endpoint`] and `ws_auth_gate`.
     pub auth_token_read: bool,
     /// [OPUS-4.8] (sq-4w18) SERVICE federation egress allowlist. SPARQL `SERVICE <iri>`
     /// makes attacker-controlled query text trigger an outbound HTTP request from the
@@ -382,7 +382,7 @@ pub struct ServerConfig {
     /// `SPARQ_SERVICE_ALLOW` (see [`crate::ServiceAllowlist`]); only listed hosts (or
     /// `*.suffix` matches) become reachable — even a public host must be listed.
     ///
-    /// Enforced by installing [`sparq_engine::with_service_egress_policy`] (strict =
+    /// Enforced by installing `sparq_engine::with_service_egress_policy` (strict =
     /// allowlist-only) around every engine call. Without the `service` cargo feature
     /// this field is still present (so the config shape is stable) but inert: no
     /// federation code is compiled and a SERVICE clause errors at execution as before.
@@ -1207,7 +1207,7 @@ pub(crate) const TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 /// A request's pinned generation: holding this `Arc` keeps the generation's immutable
 /// snapshot alive no matter how far the writer publishes past it. Pinned ONCE per
 /// request and kept for the lifetime of response production (streamed bodies included —
-/// see [`chunked_response`]), so every response is snapshot-consistent with its start.
+/// see `chunked_response`), so every response is snapshot-consistent with its start.
 pub type PinnedGen = Arc<Generation<Graph>>;
 
 /// The catch-all pod: the visibility scope every query implicitly reads, and the
@@ -1220,7 +1220,7 @@ pub type PinnedGen = Arc<Generation<Graph>>;
 /// statically knowable from the parsed update. A correct cache MUST therefore record
 /// this pod's epoch on every entry, so a global bump invalidates all cached reads. Writes
 /// that DO name a finite set of graphs additionally bump those graphs' per-named-graph
-/// pods (see [`touched_pods`]), so a cache keyed on finer-than-global pods is invalidated
+/// pods (see `touched_pods`), so a cache keyed on finer-than-global pods is invalidated
 /// too — finer scoping is purely additive over this catch-all, never a replacement for it.
 ///
 /// Public so a cache layer (and the update tests) can record/compare this catch-all pod's
@@ -1680,7 +1680,7 @@ impl AppState {
     /// the `graph` seed is SAVED there and then re-opened so it carries a WAL. The ring is then
     /// seeded from the durable graph's snapshot, and the writer's applier mirrors every
     /// committed batch back to the durable graph (WAL-durable before publish — see
-    /// [`ServerApplier::seal`]). With `persist_dir == None` this is exactly the historical
+    /// `ServerApplier::seal`). With `persist_dir == None` this is exactly the historical
     /// in-memory path (the ring is seeded from `graph`; no durable mirror; never errors).
     pub fn try_with_config(graph: Graph, config: ServerConfig) -> Result<Self, String> {
         Self::try_with_config_inner(

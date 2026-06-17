@@ -145,7 +145,7 @@ fn kway_merge_to<S: FnMut([Id; 3]) -> io::Result<()>>(runs: &[PathBuf], mut sink
 }
 
 /// K-way merges sorted run files into a RAW little-endian `[u32;3]` permutation at `out`
-/// (deduplicating consecutive equal triples). See [`kway_merge_to`] for the shared merge
+/// (deduplicating consecutive equal triples). See `kway_merge_to` for the shared merge
 /// machinery.
 pub fn kway_merge(runs: &[PathBuf], out: &Path) -> io::Result<()> {
     let mut w = BufWriter::new(std::fs::File::create(out)?);

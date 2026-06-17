@@ -25,7 +25,7 @@ pub const ODRL_PURPOSE: &str = "http://www.w3.org/ns/odrl/2/purpose";
 
 /// The `odrl:count` left-operand IRI — the dimension a *count constraint* restricts
 /// (the number of times a permission may be exercised, e.g. `odrl:count lteq 5`).
-/// Stateful enforcement of this lives in the opt-in [`crate::count`] module.
+/// Stateful enforcement of this lives in the opt-in `crate::count` module.
 /// [OPUS-4.8] sq-zi5w.
 pub const ODRL_COUNT: &str = "http://www.w3.org/ns/odrl/2/count";
 
@@ -283,7 +283,7 @@ impl Decision {
 
 /// Evaluate `policy` against `request`, returning a fail-closed [`Decision`].
 ///
-/// See the [module docs](self) for the exact semantics. This is the single-node
+/// See the module docs for the exact semantics. This is the single-node
 /// base case of ODRL — it reduces to the same allow/deny shape `sparq-solid`'s
 /// WAC/ACP path produces, with ODRL's richer purpose/recipient/time constraints
 /// and duty obligations layered on top.
@@ -483,7 +483,7 @@ pub enum ProhibitionStatus {
 
 /// The three-valued verdict of a rule's `odrl:purpose` constraints against the
 /// purpose evidence a request carries — a FAITHFUL report of exactly what
-/// [`evaluate`] checks for purpose (it reuses the same [`constraint_status`] the
+/// [`evaluate`] checks for purpose (it reuses the same `constraint_status` the
 /// evaluator's purpose constraints go through). [OPUS-4.8] sq-q56r.
 ///
 /// The honesty contract: this never claims a stronger verdict than the evaluator
@@ -516,7 +516,7 @@ pub enum PurposeMatch {
 /// enforcement. [OPUS-4.8] sq-q56r.
 ///
 /// This does NOT re-implement matching: it runs the request through the SAME
-/// [`constraint_status`] every `odrl:purpose` constraint goes through inside
+/// `constraint_status` every `odrl:purpose` constraint goes through inside
 /// [`evaluate`], so the verdict it reports is exactly what the evaluator acts on —
 /// the whole point of the bead (no claimed enforcement that isn't actually checked).
 ///
@@ -592,7 +592,7 @@ pub fn purpose_status(rule: &Rule, request: &Request) -> PurposeMatch {
 
 /// The three-valued verdict of a rule's `odrl:recipient` constraints against the
 /// recipient evidence a request carries — a FAITHFUL report of exactly what
-/// [`evaluate`] checks for recipient (it reuses the same [`constraint_status`] the
+/// [`evaluate`] checks for recipient (it reuses the same `constraint_status` the
 /// evaluator's recipient constraints go through). [OPUS-4.8] sq-5037.
 ///
 /// The honesty contract mirrors [`PurposeMatch`]: this never claims a stronger verdict
@@ -626,12 +626,12 @@ pub enum RecipientMatch {
 /// `neq` / "everyone-except") enforcement. [OPUS-4.8] sq-5037.
 ///
 /// Like [`purpose_status`], this does NOT re-implement matching: it runs the request
-/// through the SAME [`constraint_status`] every `odrl:recipient` constraint goes
+/// through the SAME `constraint_status` every `odrl:recipient` constraint goes
 /// through inside [`evaluate`], so the verdict it reports is exactly what the
 /// evaluator acts on (no claimed enforcement that isn't actually checked). The
 /// recipient evidence is the explicit `odrl:recipient` context value, or — when none
 /// is set — the requesting [`Request::party`] (the recipient-of-data is who is asking;
-/// see [`resolve_actual`]).
+/// see `resolve_actual`).
 ///
 /// Returns [`RecipientMatch::NotConstrained`] when the rule has no recipient constraint.
 ///
@@ -687,7 +687,7 @@ pub fn recipient_status(rule: &Rule, request: &Request) -> RecipientMatch {
 /// The three-valued verdict of a rule's `odrl:dateTime` (time-window) constraints
 /// against the evaluation-time evidence a request carries — a FAITHFUL report of
 /// exactly what [`evaluate`] checks for the clock (it reuses the same
-/// [`constraint_status`] the evaluator's `odrl:dateTime` constraints go through).
+/// `constraint_status` the evaluator's `odrl:dateTime` constraints go through).
 /// [OPUS-4.8] sq-idnv.
 ///
 /// The honesty contract mirrors [`PurposeMatch`] / [`RecipientMatch`]: this never
@@ -725,7 +725,7 @@ pub enum DateTimeMatch {
 /// temporal enforcement. [OPUS-4.8] sq-idnv.
 ///
 /// Like [`purpose_status`] / [`recipient_status`], this does NOT re-implement
-/// matching: it runs the request through the SAME [`constraint_status`] every
+/// matching: it runs the request through the SAME `constraint_status` every
 /// `odrl:dateTime` constraint goes through inside [`evaluate`], so the verdict it
 /// reports is exactly what the evaluator acts on (no claimed enforcement that isn't
 /// actually checked — the whole point of the bead). The time evidence is the
@@ -783,7 +783,7 @@ pub fn datetime_status(rule: &Rule, request: &Request) -> DateTimeMatch {
 
 /// The three-valued verdict of a rule's `odrl:spatial` constraints against the spatial
 /// (region) evidence a request carries — a FAITHFUL report of exactly what [`evaluate`]
-/// checks for the location (it reuses the same [`constraint_status`] the evaluator's
+/// checks for the location (it reuses the same `constraint_status` the evaluator's
 /// `odrl:spatial` constraints go through). [OPUS-4.8] sq-wukl.
 ///
 /// The honesty contract mirrors [`PurposeMatch`] / [`RecipientMatch`] / [`DateTimeMatch`]:
@@ -823,7 +823,7 @@ pub enum SpatialMatch {
 /// enforcement. [OPUS-4.8] sq-wukl.
 ///
 /// Like [`purpose_status`] / [`recipient_status`] / [`datetime_status`], this does NOT
-/// re-implement matching: it runs the request through the SAME [`constraint_status`]
+/// re-implement matching: it runs the request through the SAME `constraint_status`
 /// every `odrl:spatial` constraint goes through inside [`evaluate`] (including the
 /// transitive `isPartOf` match over the request's supplied subsumption closure — see
 /// [`Request::with_purpose_subsumption`]), so the verdict it reports is exactly what the
@@ -1237,7 +1237,7 @@ fn order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 /// `2026-06-16T12:00:00Z` orders correctly (the offset form is *earlier*).
 ///
 /// Returns `None` when **either** operand is not a parseable instant — an order
-/// comparison against a malformed operand is undefined, and [`compare`] treats
+/// comparison against a malformed operand is undefined, and `compare` treats
 /// `None` as fail-closed (the constraint is not satisfied). This is the sq-qj2q
 /// fix for what was previously a raw `x.cmp(y)` lexical comparison.
 ///

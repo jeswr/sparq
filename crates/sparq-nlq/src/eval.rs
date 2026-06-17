@@ -19,7 +19,7 @@
 //!    grounding prompt) vs [`Linking::Oracle`] (the schema/entity linking is given:
 //!    the harness supplies the correct query directly, isolating the loop's
 //!    *validate → execute → repair* contribution from the model's linking ability).
-//! 2. **Grounding** — grounded ([`NlqConfig::ground`] `true`) vs the ungrounded
+//! 2. **Grounding** — grounded (`NlqConfig::ground` `true`) vs the ungrounded
 //!    baseline (`false`). The headline claim is *grounded end-to-end* F1 **>**
 //!    *ungrounded end-to-end* F1.
 //!
@@ -347,7 +347,7 @@ pub fn run_config(
 
 /// The four-cell comparison the design doc requires: end-to-end and oracle, each
 /// grounded and ungrounded. Returned as a struct so the caller can assert the
-/// load-bearing inequality ([`headline_grounding_pays`]).
+/// load-bearing inequality (`headline_grounding_pays`).
 #[derive(Debug, Clone)]
 pub struct Comparison {
     pub grounded_end_to_end: Report,

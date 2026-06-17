@@ -6,7 +6,7 @@
 //!
 //! # Why a second index
 //!
-//! [`VectorIndex`](crate::ann::VectorIndex) wraps `instant-distance`'s HNSW, which is rebuilt
+//! `VectorIndex` wraps `instant-distance`'s HNSW, which is rebuilt
 //! from the mmap'd store on every open (~33 s release for 50k×32 on an M1 — see the README
 //! throughput table). `instant-distance` is a closed graph: its adjacency is not exposed, so
 //! it cannot be laid out on disk. This index is therefore **self-contained** — we build the
@@ -409,7 +409,7 @@ fn write_graph(b: &Builder, path: &Path, fingerprint: Option<Fingerprint>) -> Re
 // ───────────────────────────── on-disk search ─────────────────────────────
 
 /// A **persistent on-disk Vamana index** opened over a `.spqg` file (memory-mapped) — the
-/// out-of-core counterpart to [`VectorIndex`](crate::ann::VectorIndex). Built once with
+/// out-of-core counterpart to `VectorIndex`. Built once with
 /// [`build`](Self::build) / [`build_with`](Self::build_with), reopened with [`open`](Self::open)
 /// at near-zero cost (mmap + header validation, no rebuild). Search reads node records directly
 /// from the map; see the module docs for the format and the honest scope vs. full DiskANN.
@@ -726,7 +726,7 @@ impl DiskAnnIndex {
     /// a *very selective* mask is served by an exact **pre-filter** scan over just the masked ids
     /// (cheaper and exact than touching the whole graph), a *broad* mask by **filtered traversal**
     /// of the Vamana graph. Both honour the mask; see the [`filter`](crate::filter) module docs and
-    /// `tests/filtered.rs` for the measured recall. Uses [`FilterConfig::default`]; for a custom
+    /// `tests/filtered.rs` for the measured recall. Uses `FilterConfig::default`; for a custom
     /// threshold/beam use [`nearest_filtered_with`](Self::nearest_filtered_with).
     ///
     /// An empty mask returns no results (the BGP matched nothing); an all-zero query returns no
@@ -776,7 +776,7 @@ impl DiskAnnIndex {
 
     /// Approximate top-`k` ids by cosine similarity to `query`, best first. An all-zero
     /// `query` returns no results (same contract as [`nearest_exact`](crate::ann::nearest_exact)
-    /// and [`VectorIndex::nearest`](crate::ann::VectorIndex::nearest)).
+    /// and `VectorIndex::nearest`).
     pub fn nearest(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
         assert_eq!(query.len(), self.dim, "query dim {} != index dim {}", query.len(), self.dim);
         let Some(q) = normalized(query) else { return Vec::new() };
@@ -789,7 +789,7 @@ impl DiskAnnIndex {
     /// Approximate top-`k` neighbours of `term`: resolves it through the graph's dictionary,
     /// looks its vector up in `store`, excludes the term itself and maps neighbour ids back to
     /// [`Term`]s. Empty if the term is absent or unembedded. Mirrors
-    /// [`VectorIndex::nearest_term`](crate::ann::VectorIndex::nearest_term).
+    /// `VectorIndex::nearest_term`.
     ///
     /// [OPUS-4.8] (sq-32i5) This does NOT verify the index/store match `graph` — pass a graph
     /// whose ids have shifted since build and the results are silently WRONG. Use

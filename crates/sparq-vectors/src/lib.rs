@@ -24,7 +24,7 @@ pub mod rewrite;
 pub mod store;
 pub mod verbalize;
 
-/// The `vec:` vocabulary — magic predicates recognised by [`rewrite`]
+/// The `vec:` vocabulary — magic predicates recognised by `rewrite`
 /// (`http://sparq.dev/vec#`, the sparq extension namespace). [OPUS-4.8] (sq-k6ex)
 pub mod vocab {
     /// `vec:` — the sparq vector-search namespace.

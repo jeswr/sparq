@@ -1020,12 +1020,12 @@ impl Introspection {
         out
     }
 
-    /// [OPUS-4.8] sq-mr32 (federation A3/Z2): the VoID description ([`to_void`]) **plus**
+    /// [OPUS-4.8] sq-mr32 (federation A3/Z2): the VoID description (`to_void`) **plus**
     /// the characteristic-set source statistics, as one N-Triples document.
     ///
     /// This is the served federation-descriptor surface: it is a strict superset of
-    /// [`to_void`] — every standard VoID triple is emitted unchanged — followed by the
-    /// characteristic-set extension (see [`CS_NS`]). sparq already mines these sets
+    /// `to_void` — every standard VoID triple is emitted unchanged — followed by the
+    /// characteristic-set extension (see `CS_NS`). sparq already mines these sets
     /// (Neumann & Moerkotte's per-entity-type predicate co-occurrence + per-predicate
     /// multiplicity); exposing them lets a remote, CostFed/Odyssey-class source-selector
     /// estimate star- and multi-join cardinalities against this node far more accurately
@@ -1276,7 +1276,7 @@ impl Introspection {
     /// it participates in (as subject or object); a seed naming a **predicate** pulls
     /// that predicate's global profile. Only the matched slice is rendered, under
     /// `budget_chars`, most-relevant-first, with the same prefix glossary discipline as
-    /// [`to_text_summary`].
+    /// `to_text_summary`.
     ///
     /// This is struct-level scoping (it filters the already-mined profiles by IRI);
     /// it does not re-scan the graph, so it cannot expand to neighbours the build did

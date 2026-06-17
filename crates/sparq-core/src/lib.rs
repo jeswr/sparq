@@ -727,7 +727,7 @@ impl Graph {
     /// Like [`load_str`](Self::load_str) but resolves relative IRIs in the document
     /// against `base` — the entry point for documents that carry no `@base` of their
     /// own (e.g. SHACL shapes graphs addressed by their location, W3C test-suite
-    /// manifests). `format`: as [`load_str`]; the line-based formats ("ntriples" /
+    /// manifests). `format`: as `load_str`; the line-based formats ("ntriples" /
     /// "nquads") only allow absolute IRIs, so `base` has no effect on them.
     pub fn load_str_with_base(text: &str, format: &str, base: &str) -> Result<Graph, String> {
         let (dict, triples) = Self::parse_to_triples_with_base(text, format, base)?;
@@ -1036,7 +1036,7 @@ impl Graph {
 
     /// Builds a graph from an already-interned dictionary + triple set (e.g. after opt-in
     /// reasoning materialized additional triples). Public counterpart of the internal
-    /// [`build`](Self::build).
+    /// `build`.
     pub fn from_parts(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         Self::build(dict, triples)
     }
@@ -1185,7 +1185,7 @@ impl Graph {
     /// NEVER materialised in memory — only a few blocks in flight plus the growing
     /// dictionary/triples. (The store itself must fit in RAM; this removes the redundant
     /// full-text copy a read-to-string load would hold alongside it.) For N-Triples; other
-    /// formats defer to the serial streaming [`load_reader`].
+    /// formats defer to the serial streaming `load_reader`.
     ///
     /// The read/decompress runs PIPELINED on its own thread (same 3-stage design as the
     /// external build's `build_external_ntriples_parallel`): stage 1 fills full 32 MiB
@@ -1377,7 +1377,7 @@ impl Graph {
     }
 
     /// Like [`save`](Self::save) but persists the permutation indexes BLOCK-COMPRESSED
-    /// (~3-5x smaller on disk; the dictionary/numerics files are unchanged). [`open`]
+    /// (~3-5x smaller on disk; the dictionary/numerics files are unchanged). `open`
     /// auto-detects the format per file, serving compressed perms by lazy block-wise
     /// decode off the mapped file; call [`decompress_indexes`](Self::decompress_indexes)
     /// after open to trade RAM for exactly-raw query speed instead.
@@ -1965,7 +1965,7 @@ impl Graph {
     /// [OPUS-4.8] (sq-5atq) EXTERNAL-MEMORY build for a DATASET WITH NAMED GRAPHS — the
     /// out-of-core twin of an in-RAM dataset `load_dataset` + [`save`](Self::save). Streams an
     /// N-Quads (`"nquads"`/`"n-quads"`) or TriG (`"trig"`) document and writes the SAME
-    /// on-disk layout [`save_named`](Self::save_named) emits — the default graph in `dir`
+    /// on-disk layout `save_named` emits — the default graph in `dir`
     /// itself plus each named graph under `dir/named/<i>/`, committed by the `dir/named.bin`
     /// manifest — so [`open`](Self::open) reads the whole dataset back LOSSLESSLY (mmap).
     ///
@@ -1990,7 +1990,7 @@ impl Graph {
     /// [`build_external`](Self::build_external)), and an empty default graph still produces a
     /// valid (empty) store in `dir`.
     ///
-    /// `chunk` is the per-graph external-build run size (see [`build_external`]).
+    /// `chunk` is the per-graph external-build run size (see `build_external`).
     #[cfg(feature = "mmap")]
     pub fn build_external_quads<R: std::io::Read>(
         reader: R,
@@ -2648,8 +2648,8 @@ impl Graph {
     /// directory swap, scoped to the `named/` sub-tree: the renumbered survivors are built in a
     /// staging `named.drop-new/`, fsync'd, then swapped in (`named` → `named.drop-old`,
     /// `named.drop-new` → `named`), and only THEN is the shrunk manifest written (the manifest
-    /// rewrite is itself atomic+dir-fsync'd via [`write_named_manifest`]). An interrupted swap
-    /// is completed/rolled back deterministically by [`recover_named_drop`] on the next
+    /// rewrite is itself atomic+dir-fsync'd via `write_named_manifest`). An interrupted swap
+    /// is completed/rolled back deterministically by `recover_named_drop` on the next
     /// [`open`](Self::open). Surviving sub-graphs are re-opened from their new directories so
     /// each re-acquires a correctly-indexed per-graph WAL.
     ///
@@ -2696,7 +2696,7 @@ impl Graph {
     /// graph: each of those rebuilt the ENTIRE surviving named set (renumber + manifest rewrite),
     /// making DROP ALL O(n²) in the number of named graphs. Clearing the whole set is O(n) — one
     /// pass to release every sub-graph's handles, one manifest removal, one sub-tree removal — so
-    /// this routes straight through the no-survivors arm of [`persist_named_after_drop`].
+    /// this routes straight through the no-survivors arm of `persist_named_after_drop`.
     ///
     /// In-memory parent (or a non-`mmap` build): just clears the entries, matching the old
     /// `self.named.clear()`. Idempotent — a no-op when there are no named graphs.
@@ -3038,7 +3038,7 @@ impl Graph {
     ///
     /// The live dataset (default graph + every named graph, recursively) is dumped to `[Term; 3]`
     /// and re-interned into a brand-new [`Graph`] with an empty [`Dict`]; that fresh image is then
-    /// swapped in via the SAME rollback-safe [`persist_swap`](Self::persist_swap) the compaction
+    /// swapped in via the SAME rollback-safe `persist_swap` the compaction
     /// uses (atomic, crash-safe, WAL-truncated). The live triple set is preserved EXACTLY
     /// (round-trip). For an in-memory graph it just replaces the dictionary/store in place.
     ///

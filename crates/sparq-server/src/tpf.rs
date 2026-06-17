@@ -13,7 +13,7 @@
 //! ## What this module is
 //!
 //! A PURE (no async, no HTTP types) builder — like [`crate::graph`] / [`crate::descriptors`] —
-//! that, given a parsed triple pattern, a pinned [`Graph`] snapshot and a page number,
+//! that, given a parsed triple pattern, a pinned `Graph` snapshot and a page number,
 //! produces the response **triples** (the page of data triples + the Hydra metadata/control
 //! triples) ready for the crate's existing graph serialisers ([`crate::graph::triples_to_turtle`]
 //! / [`triples_to_ntriples`](crate::graph::triples_to_ntriples)). The async handler that wires
@@ -26,7 +26,7 @@
 //! The three positions come from the `subject` / `predicate` / `object` query parameters, each
 //! an **N-Triples term** (`<iri>`, `"lit"`, `"lit"@en`, `"lit"^^<dt>`); an absent or empty
 //! parameter is a *variable* (unbound). The pattern resolves through the public
-//! [`Graph::pattern`] dictionary lookup, then:
+//! `Graph::pattern` dictionary lookup, then:
 //!
 //!   * `hydra:totalItems` (and the void:triples count on the metadata node) is the engine's
 //!     **cardinality ESTIMATE** for the pattern ([`sparq_core::store::TripleStore::estimate`]) —
@@ -62,7 +62,7 @@
 //! This mirrors the `federation-descriptors` double-opt-in exactly. A build without the feature
 //! pays ZERO cost — no route, no new dependency, byte-identical to before — and
 //! `sparq-core`/`sparq-engine` are untouched (this reads a pinned `&Graph` snapshot through the
-//! existing public [`Graph::pattern`] / `store.estimate` / `store.scan` / `dict.term` API).
+//! existing public `Graph::pattern` / `store.estimate` / `store.scan` / `dict.term` API).
 //!
 //! It is a **READ-only** source interface — there is no write path.
 
@@ -214,7 +214,7 @@ impl Fragment {
 /// Evaluates `pattern` against the pinned `graph` snapshot, returning the [`Fragment`] for
 /// (zero-based) `page` with `page_size` data triples.
 ///
-/// The cardinality estimate is the cheap index-range count ([`store.estimate`]); the page
+/// The cardinality estimate is the cheap index-range count (`store.estimate`); the page
 /// scans only its `[page*page_size, …)` window and resolves that window's ids back to terms.
 /// A bound term absent from the dictionary makes the pattern unmatchable: estimate 0, empty
 /// page, no index work.

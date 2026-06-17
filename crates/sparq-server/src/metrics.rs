@@ -2,7 +2,7 @@
 //! no metrics crate, no extra dependencies.
 //!
 //! Counters are wired in at exactly two points: an outermost middleware
-//! ([`track`], applied *around* the hardening stack so shed/over-limit
+//! (`track`, applied *around* the hardening stack so shed/over-limit
 //! responses are counted with their real status) records per-endpoint/status
 //! request counts and the `/sparql` latency histogram; the update handler bumps
 //! `sparq_updates_total`. The two gauges (graph triples, active subscriptions)

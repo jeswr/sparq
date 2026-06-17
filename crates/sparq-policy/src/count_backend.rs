@@ -49,8 +49,8 @@
 //! # Fail-closed
 //!
 //! Every backend error ([`BackendError`]) maps to [`ConsumeResult::Unavailable`] — a DENY
-//! upstream, never a silent grant. A read error makes [`consumed`](BackendCounterStore::
-//! consumed) return `None`. We never grant beyond a limit we cannot account for.
+//! upstream, never a silent grant. A read error makes `BackendCounterStore::consumed`
+//! return `None`. We never grant beyond a limit we cannot account for.
 //!
 //! [`evaluate_and_exercise`]: crate::count::evaluate_and_exercise
 

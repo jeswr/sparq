@@ -7,9 +7,9 @@
 //! checked it, so a manifest could claim `Rdfs`/`Owl` while the proof attested only
 //! the asserted triples (`Simple` semantics). A relying party reading the regime
 //! field would believe inference was applied when nothing established it. This
-//! module + the verifier's [`crate::verifier::bind_entailment`] make the regime
+//! module + the verifier's `crate::verifier::bind_entailment` make the regime
 //! ENFORCED:
-//! - the relying party declares which regimes it accepts ([`EntailmentPolicy`]);
+//! - the relying party declares which regimes it accepts (`EntailmentPolicy`);
 //! - a regime the policy does not accept REJECTS (fail-closed);
 //! - a non-`Simple` regime REQUIRES `derivation_steps` that STRUCTURALLY justify
 //!   every derived triple against the regime's rule set, re-checked verifier-side.
@@ -85,7 +85,7 @@ pub fn regime_admits(regime: EntailmentRegime, rule: EntailmentRule) -> bool {
 /// same `FieldHex` the scan sub-proofs disclose), so the verifier can tie an
 /// antecedent to a disclosed scan row by encoding-equality.
 ///
-/// The verifier re-checks (see [`crate::verifier::bind_entailment`]):
+/// The verifier re-checks (see `crate::verifier::bind_entailment`):
 /// 1. the step is well-formed for its rule (arity + the rule's variable-sharing
 ///    shape — [`Self::is_well_formed`]);
 /// 2. its regime admits the rule ([`regime_admits`]);

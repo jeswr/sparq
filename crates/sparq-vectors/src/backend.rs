@@ -4,7 +4,7 @@
 //! sq-7hx6 ([`crate::cost`]) settled the *exact*-scan filtered story: post-filtering a **complete**
 //! cosine ranking can never under-fill `k` (it sees every admitted vector), so there is no
 //! over-fetch boundary for the exact backend. This module is where the **approximate** backend
-//! bites — and it bites exactly as sq-7hx6's [`overfetch_target`](crate::cost::overfetch_target)
+//! bites — and it bites exactly as sq-7hx6's [`overfetch_target`]
 //! docs warned it would.
 //!
 //! # The backend trait
@@ -12,9 +12,9 @@
 //! [`AnnBackend`] is the seam the filtered path searches *through*: a backend returns a ranked
 //! `(Id, cosine)` candidate list of a requested `fetch` size, best-first. Two impls:
 //!
-//! - **[`ExactBackend`]** (default, no third-party dep) — wraps [`nearest_exact`]. `fetch` ≥ the
+//! - **[`ExactBackend`]** (default, no third-party dep) — wraps `nearest_exact`. `fetch` ≥ the
 //!   store size yields the *complete* ranking, so it is **answer-exact**; recall is `1.0`.
-//! - **[`ApproxBackend`]** (`approx-ann`, wraps the on-disk [`DiskAnnIndex`] Vamana graph; the
+//! - **[`ApproxBackend`]** (`approx-ann`, wraps the on-disk `DiskAnnIndex` Vamana graph; the
 //!   in-RAM HNSW [`VectorIndex`](crate::VectorIndex) is an equally valid impl) — returns a
 //!   *bounded, approximate* candidate list. Recall is **`< 1.0`** by construction: an approximate
 //!   index can miss true neighbours. We never claim exactness for it; the recall floor is a
@@ -24,7 +24,7 @@
 //!
 //! Post-filtering a *bounded* approximate candidate list can **under-fill `k`**: if the top
 //! `fetch` candidates contain fewer than `k` ids the mask admits, the result is short even though
-//! the store holds `≥ k` admitted vectors. [`overfetch_target`](crate::cost::overfetch_target)
+//! the store holds `≥ k` admitted vectors. [`overfetch_target`]
 //! sizes a *first* fetch at `ceil(k / selectivity)` — enough *on average* — but the admitted ids
 //! can cluster *below* that prefix, so a single sized fetch still under-fills (the recall boundary
 //! sq-7hx6 documented).

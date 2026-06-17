@@ -8,7 +8,7 @@
 //! BM25-ranked literals; `text:matches` / `text:score` SELECT).
 //!
 //! Every method is a stateless one-shot — it parses the supplied document, builds the
-//! [`TextIndex`](sparq_text::TextIndex) over it, runs the request, and returns a string —
+//! [`TextIndex`] over it, runs the request, and returns a string —
 //! so the JS side never holds a long-lived index handle. The bundle ALWAYS builds the
 //! index with positions ([`TextIndex::build_with_positions`]) so the positional
 //! predicates (`text:phrase` / `text:near`) work alongside the BM25 ones; a tiny demo

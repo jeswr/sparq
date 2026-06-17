@@ -516,7 +516,7 @@ fn decode_dict(
 ///
 ///  * the `dict` stage is broken into its four PFC-section decodes (`dict_shared`,
 ///    `dict_subjects`, `dict_objects`, `dict_predicates` — each the wall of one
-///    [`decode_section`], so in the multi-threaded pool these OVERLAP and need not sum to
+///    `decode_section`, so in the multi-threaded pool these OVERLAP and need not sum to
 ///    `dict`) plus the section-order `merge` (`dict_merge`);
 ///  * the `scan` stage is broken into the triples-section bitmap/sequence READ
 ///    (`scan_read`) and the SPO id-translation adjacency WALK (`scan_walk`).
@@ -534,7 +534,7 @@ pub struct StageTimings {
     pub build: std::time::Duration,
 
     // --- [OPUS-4.8] sq-7ge0 finer split (measurement-only; same decode path) ---
-    /// PFC decode+intern wall of the `shared` section (one [`decode_section`] call).
+    /// PFC decode+intern wall of the `shared` section (one `decode_section` call).
     /// In the multi-threaded pool the four section decodes run concurrently, so these
     /// four per-section walls OVERLAP each other and need not sum to `dict`.
     pub dict_shared: std::time::Duration,
@@ -545,7 +545,7 @@ pub struct StageTimings {
     /// PFC decode+intern wall of the `predicates` section.
     pub dict_predicates: std::time::Duration,
     /// Section-order merge of the four partial dicts into the final dict + the
-    /// per-section local-id remap (the four [`merge_section`] calls). This runs single
+    /// per-section local-id remap (the four `merge_section` calls). This runs single
     /// threaded after the (possibly concurrent) section decodes join.
     pub dict_merge: std::time::Duration,
     /// Triples-section READ: triples control info + the two raw bitmaps + the two

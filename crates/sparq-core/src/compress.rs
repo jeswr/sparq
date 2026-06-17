@@ -491,7 +491,7 @@ impl CompressedPermWriter {
     /// perm the bytes are identical to `CompressedPerm::encode(all_rows).write_to(out)`.
     ///
     /// EMPTY-PERM POLICY: when no rows were pushed, `out` is written as a ZERO-byte file
-    /// (NOT a bare 32-byte header), matching [`TripleStore::save_compressed`] which leaves an
+    /// (NOT a bare 32-byte header), matching `TripleStore::save_compressed` which leaves an
     /// unbuilt permutation raw-empty so `open` skips it by size. This keeps the streaming
     /// build byte-identical to a raw build followed by `recompress`.
     pub fn finish(mut self, out: &std::path::Path) -> std::io::Result<()> {

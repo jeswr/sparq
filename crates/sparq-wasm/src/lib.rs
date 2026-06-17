@@ -150,7 +150,7 @@ impl Store {
     /// separate sub-graphs, so `GRAPH <iri> { … }` / `GRAPH ?g { … }` patterns,
     /// `FROM` / `FROM NAMED` dataset clauses, and SPARQL Updates with `GRAPH`
     /// blocks (including `CLEAR GRAPH` / `DROP GRAPH`) all see the dataset.
-    /// Formats without named graphs ("turtle" / "ntriples") load as [`load`].
+    /// Formats without named graphs ("turtle" / "ntriples") load as [`load`](Self::load).
     /// [`size`](Self::size) / [`heapBytes`](Self::heap_bytes) report the DEFAULT
     /// graph only (count the dataset with `GRAPH ?g` queries).
     #[wasm_bindgen(js_name = loadDataset)]

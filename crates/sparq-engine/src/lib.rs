@@ -78,7 +78,7 @@ pub struct QueryBudget {
     pub max_rows: Option<usize>,
     /// [OPUS-4.8] (sq-s5is) Upper bound, in BYTES, on the estimated working-set size of
     /// any materialised (intermediate or final) result — the byte-accounted twin of
-    /// [`max_rows`]. Where `max_rows` counts ROWS and so misses a query with FEW but very
+    /// `max_rows`. Where `max_rows` counts ROWS and so misses a query with FEW but very
     /// WIDE rows (many projected variables, or huge computed string literals), this bounds
     /// the estimated heap footprint of the id-level working set: `rows × width ×
     /// size_of::<Id>()` for each materialised intermediate, PLUS the bytes of any

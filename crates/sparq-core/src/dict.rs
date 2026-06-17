@@ -251,7 +251,7 @@ pub(crate) fn lang_with_dir(l: &Literal) -> Option<std::borrow::Cow<'_, str>> {
     }
 }
 
-/// Inverse of [`lang_with_dir`]: split a STORED language slot back into its BCP47 tag and
+/// Inverse of `lang_with_dir`: split a STORED language slot back into its BCP47 tag and
 /// (optional) RDF 1.2 base direction. A stored slot of `en--ltr` is `("en", Some("ltr"))`;
 /// a plain `en` is `("en", None)`. The returned tag/direction are the spec-distinct
 /// components the SPARQL 1.2 results formats keep apart (`xml:lang` vs `its:dir`) — see the
@@ -290,7 +290,7 @@ pub fn split_lang_dir(slot: &str) -> (&str, Option<&str>) {
 /// and never drift apart:
 /// - stored-slot fast path — [`split_lang_dir`] (splits off the `--dir` suffix, then validates
 ///   it here);
-/// - materialised path — [`reconstruct_ref`] (same split-then-validate of a stored slot);
+/// - materialised path — `reconstruct_ref` (same split-then-validate of a stored slot);
 /// - outbound SPARQL 1.2 results — `sparq-engine`'s `json.rs` (emits the validated direction
 ///   as a separate `its:dir` field);
 /// - inbound SERVICE results parser — `sparq-engine`'s `service.rs` (sq-s955), where `its:dir`
@@ -1399,7 +1399,7 @@ impl Dict {
         self.find_term(hash, term).unwrap_or(NO_ID)
     }
 
-    /// Returns the id for a literal given its components, else `NO_ID` — [`lookup`]
+    /// Returns the id for a literal given its components, else `NO_ID` — `lookup`
     /// without constructing an `oxrdf::Term` (the fast path for resolving computed
     /// BIND/aggregate values against the dictionary). Canonical small `xsd:integer`s
     /// resolve to their inline id, exactly like `lookup`/`intern_lit`.
