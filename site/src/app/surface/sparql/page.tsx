@@ -65,8 +65,18 @@ export default function SparqlSurfacePage() {
           <p>
             <strong className="text-foreground">Live in your browser tab.</strong>{" "}
             The lean wasm bundle carries the parser, triplestore and SPARQL engine.
-            The live REPL on this site runs your queries against the sample graph
-            with no network round-trip.
+            The live REPL runs your queries against the sample graph with no network
+            round-trip — SELECT and ASK render a table / boolean, CONSTRUCT and
+            DESCRIBE render the constructed N-Triples, and SPARQL Update
+            (INSERT / DELETE) mutates the in-tab store.
+          </p>
+          <p>
+            The same REPL has an{" "}
+            <code className="font-mono text-foreground">EXPLAIN</code> /{" "}
+            <code className="font-mono text-foreground">EXPLAIN ANALYZE</code> mode:
+            EXPLAIN shows the planner&apos;s join order and cardinality estimates
+            without executing, ANALYZE also runs the query and appends a per-operator
+            row-count trace.
           </p>
         </>
       }
@@ -76,8 +86,10 @@ export default function SparqlSurfacePage() {
             REGEX / REPLACE are compiled out of the lean wasm bundle to keep it
             small; they are available in the native build. The query-budget
             deadline (wall-clock timeout) is native-only — the wasm bundle enforces
-            a row cap instead. <code className="font-mono">EXPLAIN</code> exists in
-            the engine but is not yet a wasm export.
+            a row cap instead. In the wasm build,{" "}
+            <code className="font-mono">EXPLAIN ANALYZE</code> reports exact
+            per-operator row counts but zero wall-times (no monotonic clock under
+            wasm32).
           </p>
         </>
       }

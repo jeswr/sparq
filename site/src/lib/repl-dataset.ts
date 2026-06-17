@@ -122,6 +122,91 @@ type QuadRow = {
   g?: SparqlTerm;
 };
 
+// [OPUS-4.8] sq-vfbm — query-form classification for the live REPL.
+//
+// The wasm Store exposes a different entry point per SPARQL form: `query` for
+// SELECT/ASK (a solution table / boolean), `queryQuads` for the graph-valued forms
+// CONSTRUCT/DESCRIBE (an N-Triples document), and `updateInPlace` for SPARQL Update
+// (INSERT / DELETE / LOAD / graph management — mutates the store, returns nothing).
+// EXPLAIN/EXPLAIN ANALYZE are a separate mode the user toggles, not a query form.
+// The REPL dispatches on the form, so it must recognise it from the query text
+// BEFORE handing it to the engine. This is a pure, framework-free classifier so it
+// unit-tests directly; the engine itself remains the source of truth (a mis-classed
+// query still surfaces the engine's own error).
+
+export type QueryForm = "select" | "ask" | "construct" | "describe" | "update";
+
+// The SPARQL Update keywords (SPARQL 1.1 §3.1 / §3.2). Any of these as the leading
+// significant token means the request is an Update, not a query.
+const UPDATE_KEYWORDS = [
+  "INSERT",
+  "DELETE",
+  "LOAD",
+  "CLEAR",
+  "CREATE",
+  "DROP",
+  "ADD",
+  "MOVE",
+  "COPY",
+  "WITH",
+];
+
+/**
+ * Strips SPARQL comments (`# … <eol>`) and the leading PREFIX / BASE declarations
+ * so the FIRST significant keyword can be read. Returns the remaining query text
+ * upper-cased for keyword matching. Comments are stripped line-by-line; a `#` inside
+ * an IRI or string literal in the prologue is not a concern because the prologue only
+ * contains PREFIX/BASE declarations whose IRIs are angle-bracketed.
+ */
+function significantHead(sparql: string): string {
+  const noComments = sparql
+    .split("\n")
+    .map((line) => {
+      const hash = line.indexOf("#");
+      return hash === -1 ? line : line.slice(0, hash);
+    })
+    .join("\n");
+  // Drop leading PREFIX / BASE declarations (the prologue) repeatedly.
+  let rest = noComments.trimStart();
+  // PREFIX pfx: <iri>  |  BASE <iri>
+  const prologue = /^(PREFIX\s+[^\s]*\s*<[^>]*>|BASE\s*<[^>]*>)\s*/i;
+  while (prologue.test(rest)) {
+    rest = rest.replace(prologue, "").trimStart();
+  }
+  return rest.toUpperCase();
+}
+
+/**
+ * Classifies a SPARQL request into the engine entry point that handles it
+ * ({@link QueryForm}). SELECT/ASK -> `query`; CONSTRUCT/DESCRIBE -> `queryQuads`;
+ * any Update keyword -> `updateInPlace`. Unknown leading tokens default to `"select"`
+ * so the engine's own parser produces the error, rather than this classifier guessing.
+ */
+export function classifyQueryForm(sparql: string): QueryForm {
+  const head = significantHead(sparql);
+  if (head.startsWith("ASK")) return "ask";
+  if (head.startsWith("CONSTRUCT")) return "construct";
+  if (head.startsWith("DESCRIBE")) return "describe";
+  if (head.startsWith("SELECT")) return "select";
+  for (const kw of UPDATE_KEYWORDS) {
+    // Whole-word match: the keyword followed by whitespace, `{`, or end-of-string.
+    if (
+      head === kw ||
+      head.startsWith(`${kw} `) ||
+      head.startsWith(`${kw}\n`) ||
+      head.startsWith(`${kw}{`)
+    ) {
+      return "update";
+    }
+  }
+  return "select";
+}
+
+/** True for the graph-valued query forms answered by the wasm `queryQuads` export. */
+export function isGraphForm(form: QueryForm): boolean {
+  return form === "construct" || form === "describe";
+}
+
 /**
  * Serialises {@link ALL_QUADS_QUERY} solution rows to an N-Quads document: a triple
  * line (`s p o .`) when `?g` is unbound (default graph), a quad line
