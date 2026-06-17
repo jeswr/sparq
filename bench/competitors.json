@@ -225,9 +225,10 @@
       "pinned_version": "anserini (pin the exact release/Maven coordinate + Lucene version at gather time)",
       "version_source": "the Anserini release version + bundled Lucene version, recorded in the gather results file.",
       "install_recipe": "Anserini (Apache-2.0) via its fatjar / pyserini, plus a BEIR cut (SciFact or TREC-COVID + qrels) downloaded at gather time. gather-only — NOT committed; the BEIR corpus is NOT redistributable in-repo (see the text-index-bench BEIR follow-up bead).",
-      "run_recipe": "Anserini's OWN IR harness: index the BEIR corpus, run BM25 retrieval against the qrels, report Recall@100 / nDCG@10 + latency. This is the IR-quality oracle for sparq-text's BEIR axis once that axis is wired (currently gather-only).",
+      "run_recipe": "[OPUS-4.8 sq-1fz0] WIRED: scripts/gather-competitors.sh dispatches kind `python-lib` to scripts/bench-adapters/beir_ir_adapter.py — it downloads a BEIR cut + qrels, BM25-retrieves with Anserini/pyserini (k1=1.2/b=0.75), and scores Recall@100 / nDCG@10 as DEFICITS (G4). Run: `BEIR_CUT=scifact scripts/gather-competitors.sh --run --only lucene-anserini` (set SPARQ_TEXT_BEIR=target/release/examples/beir_text to ALSO score sparq-text on the SAME cut+qrels via the same scorer). The IR-quality oracle for sparq-text's BEIR axis; gather-only (corpus not redistributable in-repo).",
       "adapter": {
-        "kind_note": "Lucene/Anserini is a kernel IR sub-component with its own harness (not the shared http-sparql/report-cli path); its results are the BM25 quality oracle, comparable ONLY on the IR-quality axis (Recall@100/nDCG@10), never as a SPARQL benchmark."
+        "kind_note": "Lucene/Anserini is a kernel IR sub-component with its own harness (scripts/bench-adapters/beir_ir_adapter.py, NOT the shared http-sparql/report-cli/vector-lib path); its results are the BM25 quality oracle, comparable ONLY on the IR-quality axis (Recall@100/nDCG@10), never as a SPARQL benchmark.",
+        "dataset_env": "BEIR_CUT (scifact|trec-covid; default scifact), BEIR_K (top-k, default 100), BEIR_DATA_DIR (download cache, default /tmp/beir-data)"
       },
       "comparable_suites": [
         { "sparq_suite": "text-index-bench", "note": "KERNEL-ONLY, IR-quality axis: compare Recall@100/nDCG@10 on the same BEIR cut + qrels. NOT a SPARQL benchmark (no RDF surface) and NOT on the dashboard. Scope to AND/OR/prefix/phrase/slop + BM25 k1=1.2/b=0.75 to stay fair." }

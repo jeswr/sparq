@@ -1,0 +1,17 @@
+# [OPUS-4.8] sq-1fz0 BEIR fixture: a TREC run `<qid> Q0 <docid> <rank> <score> <tag>`.
+# q1 rows are INTENTIONALLY out of score order to prove parse_run sorts by score
+# (dA 9 > dX 8 > dB 7), not by file row order. Pairs with beir_qrels.txt:
+#   q1 top-3 = dA,dX,dB  -> recall@3 = |{dA,dB}|/2 = 1.0 ; ndcg gains [1,0,1]
+#   q2 top-3 = dD,dY,dZ  -> recall@3 = |{dD}|/2 = 0.5  (dC,grade2, MISSED) ; gains [1,0,0]
+#   q3 top-3 = dW,dV,dU  -> recall@3 = 0/1 = 0.0  ; gains [0,0,0]
+# Mean Recall@3 = (1.0 + 0.5 + 0.0)/3 = 0.5            -> recall_deficit_milli = 500
+# Mean nDCG@3   = 0.4332715...                          -> ndcg_deficit_milli   = 567
+q1 Q0 dB 3 7.0 fix
+q1 Q0 dA 1 9.0 fix
+q1 Q0 dX 2 8.0 fix
+q2 Q0 dD 1 5.0 fix
+q2 Q0 dY 2 4.0 fix
+q2 Q0 dZ 3 3.0 fix
+q3 Q0 dW 1 2.0 fix
+q3 Q0 dV 2 1.0 fix
+q3 Q0 dU 3 0.5 fix

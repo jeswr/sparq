@@ -1,0 +1,13 @@
+# [OPUS-4.8] sq-1fz0 BEIR fixture: TREC qrels `<qid> <iter> <docid> <rel>`.
+# Three queries with GRADED judgements (q2 has a grade-2 doc so nDCG exercises the
+# graded path; SciFact is binary but TREC-COVID grades 0/1/2). Pairs with beir_run.txt
+# to give a KNOWN Recall@3 = 0.5 and nDCG@3 = 0.4332715... (see test_adapters.py).
+#   q1 relevant: dA, dB        (dZ explicitly non-relevant, rel 0 — ignored)
+#   q2 relevant: dC (grade 2), dD (grade 1)
+#   q3 relevant: dE
+q1 0 dA 1
+q1 0 dB 1
+q1 0 dZ 0
+q2 0 dC 2
+q2 0 dD 1
+q3 0 dE 1
