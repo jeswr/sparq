@@ -128,6 +128,15 @@ pub mod batched;
 // salary > £100k" disclosing only the verdict. Honest-majority, semi-honest (NOT
 // malicious) — reported as OperatorClass::Comparison. See the module docs.
 pub mod compare;
+// [OPUS-4.8] sq-ka8m (sq-mnv5 residual; design Hole 4): the MALICIOUS-SECURE
+// (honest-majority, with-abort) twin of `compare`. Carries an IT-MAC through the
+// WHOLE decompose+compare chain (`MacSession::auth_mul`, §2.4 route (a)) and
+// MAC-checks the boolean verdict BEFORE opening it (`MacSession::mac_check`, §2.5),
+// so a tamper in ANY gate (forged share / wrong degree_reduce re-sharing) aborts
+// fail-closed — at the minimal n=2t+1 where RS redundancy is zero (soundness from
+// the secret α). Reported as OperatorClass::Comparison @ Malicious+Abort. See the
+// module docs and `research/mpc-malicious-security-design.md`.
+pub mod auth_compare;
 // [OPUS-4.8] sq-sxm: the (security model × N × query class) benchmark MATRIX
 // harness + its deterministic communication/round/multiplication counter — the
 // IN-PROCESS counting tier (Tier 1). New modules, isolated from the protocol
@@ -262,6 +271,9 @@ pub use compare::{
     secure_threshold, COMPARE_BITS, COMPARE_MAX_EXCLUSIVE, DECOMP_MASK_BITS,
     DECOMP_STAT_SECURITY_BITS, DECOMP_VALUE_BITS, DECOMP_VALUE_MAX_EXCLUSIVE,
 };
+// [OPUS-4.8] sq-ka8m: the malicious-secure (honest-majority, with-abort) comparison
+// surface — IT-MAC-carried decompose+compare chain, verdict MAC-checked before open.
+pub use auth_compare::{malicious_greater_than, malicious_threshold, open_auth_verdict};
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{

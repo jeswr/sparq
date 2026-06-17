@@ -698,6 +698,178 @@ impl MacSession<'_> {
             .collect()
     }
 
+    /// [OPUS-4.8] sq-ka8m / sq-km34.3 — **MAC-carrying secret×secret multiplication**
+    /// (design §2.4 route (a)). Given authenticated `[[x]] = ([x],[α·x])` and
+    /// `[[y]] = ([y],[α·y])`, produce the authenticated product `[[z]] = ([z],[α·z])`
+    /// with `z = x·y`, so the chain can keep multiplying while staying tamper-evident
+    /// under the batched MAC-check (§2.5, [`Self::mac_check`]).
+    ///
+    /// ## How (two INDEPENDENT BGW mult-then-reduce rounds — the Chida-et-al. shape)
+    ///
+    /// 1. The VALUE product `[z] = reduce([x]·[y])` — one degree-`2t`
+    ///    [`mul_shares_raw`] then one BGW [`ShamirDealer::degree_reduce`].
+    /// 2. The MAC `[α·z] = reduce([α·x]·[y])` — computed from the INPUT MAC `[α·x]`
+    ///    times the input value `[y]`, since `(α·x)·y = α·(x·y) = α·z`. This is a
+    ///    SECOND, INDEPENDENT product + reduce over DIFFERENT input shares than step
+    ///    1 (`[α·x]·[y]`, not `[z]·[α]`). Carrying the MAC forward through the input
+    ///    MAC — rather than recomputing it from the just-reduced value — is exactly
+    ///    what makes the multiplication TAMPER-EVIDENT (next paragraph), and is the
+    ///    standard honest-majority malicious-multiplication shape (Chida et al.
+    ///    "Fast Large-Scale Honest-Majority MPC for Malicious Adversaries",
+    ///    CRYPTO'18; the design's route (a)).
+    ///
+    /// ## Why this MAC-COVERS the `degree_reduce` re-sharing (Hole 2)
+    ///
+    /// `degree_reduce`'s re-sharing step (`shamir.rs`) is the one place a deviating
+    /// party can re-share `h_i + δ` and produce a *perfectly consistent* degree-`t`
+    /// codeword of a WRONG product — undetectable by Reed–Solomon even at
+    /// over-provisioned `n`, because the tampering is on the value being shared, not
+    /// on the open. The value reduce (step 1) and the MAC reduce (step 2) are
+    /// SEPARATE re-sharings over DIFFERENT input shares, so a party that injects `δ`
+    /// into ONE of them cannot land both on a consistent `(z+δ, α·(z+δ))` pair:
+    /// - tamper the value reduce → `[z]` opens to `z+δ` while `[α·z]` still holds the
+    ///   true `α·z` (computed from `[α·x]·[y]`) → `σ = α·z − (z+δ)·α = −δ·α ≠ 0`;
+    /// - tamper the MAC reduce → `[α·z]` holds `α·z+δ` while `[z]` opens to the true
+    ///   `z` → `σ = δ ≠ 0`.
+    ///
+    /// Either way the §2.5 batched check fires (`≈ 1 − 2^{−61}`): the adversary would
+    /// have to fix the OTHER side without knowing the secret `α`, which it cannot. The
+    /// reduction is therefore no longer *trusted* — its correctness is *checked*.
+    /// (Recomputing `[α·z]` from `[z]·[α]` instead would NOT have this property — the
+    /// MAC would just track whatever tampered value `[z]` carried, and `σ` would be 0.)
+    ///
+    /// HONESTY (cost): route (a) roughly DOUBLES the per-multiplication work — two
+    /// `mul_shares_raw` + two `degree_reduce` rounds instead of one (design §5). This
+    /// is the documented price of authentication; it does NOT enter a preprocessing
+    /// phase (that is route (b) / the dishonest-majority continuation, sq-j5ok).
+    /// Honest-majority, malicious-with-abort (the abort comes from
+    /// [`Self::mac_check`], not from this primitive alone). `[OPUS-4.8]`
+    pub fn auth_mul(
+        &mut self,
+        x: &crate::authenticated::AuthenticatedShare,
+        y: &crate::authenticated::AuthenticatedShare,
+    ) -> Result<crate::authenticated::AuthenticatedShare, MpcError> {
+        // 1. Value product z = x·y: degree-2t product, then BGW reduce to degree-t.
+        let z_2t = mul_shares_raw(x.value_shares(), y.value_shares())?;
+        let z = self.dealer.degree_reduce(&z_2t)?;
+        // 2. MAC [α·z] = reduce([α·x]·[y]) — computed from the INPUT MAC `[α·x]`
+        //    times the input value `[y]`, NOT from the just-reduced `[z]` times
+        //    `[α]`. This independence is what makes the multiplication TAMPER-EVIDENT
+        //    (Hole 2): the value reduction (step 1) and the MAC reduction (here) are
+        //    SEPARATE BGW re-sharings over DIFFERENT input shares, so a deviating
+        //    party that injects δ into ONE of them cannot make both land on a
+        //    consistent `(z+δ, α·(z+δ))` pair. If the value reduce is tampered, `[z]`
+        //    opens to `z+δ` while `[α·z]` still holds `α·z` → σ = α·z − (z+δ)·α =
+        //    −δ·α ≠ 0; if the MAC reduce is tampered, `[α·z]` holds `α·z+δ` while
+        //    `[z]` opens to `z` → σ = δ ≠ 0. Either way the §2.5 batched check fires
+        //    (the adversary cannot fix the other side without knowing the secret α).
+        //    Recomputing `[α·z]` from `[z]·[α]` would NOT have this property — the MAC
+        //    would just track whatever (tampered) value `[z]` carried. This is the
+        //    Chida-et-al. honest-majority malicious multiplication shape (the MAC is
+        //    carried forward via the input MAC, then checked at output).
+        let mac_2t = mul_shares_raw(x.mac_shares(), y.value_shares())?;
+        let mac = self.dealer.degree_reduce(&mac_2t)?;
+        crate::authenticated::AuthenticatedShare::new(z, mac)
+    }
+
+    /// [OPUS-4.8] sq-ka8m — a degree-`t` AUTHENTICATED sharing of a PUBLIC constant
+    /// `c`: value sharing `[c]` (the trivial constant sharing on `x = 1..=n`) paired
+    /// with the MAC `[α·c]` (= `c·[α]` via [`crate::authenticated::MacKey::scaled_constant_mac`]).
+    /// This is the authenticated analogue of `const_sharing` — it lets the
+    /// comparison chain seed its `[0]`/`[1]` accumulators (`gt`, `eq`) as authenticated
+    /// values so the WHOLE chain is MAC-carried. `α·c` is the MAC of a PUBLIC value
+    /// (no secret leaks); the constant sharing is degree-`0 ⊆ t`, consistent with the
+    /// degree-`t` MAC. `[OPUS-4.8]`
+    pub fn auth_const_sharing(&self, c: Fp) -> crate::authenticated::AuthenticatedShare {
+        let value: Vec<Share> = (1..=self.dealer.parties() as u64)
+            .map(|x| Share { x, y: c })
+            .collect();
+        let mac = self.key.scaled_constant_mac(c);
+        crate::authenticated::AuthenticatedShare::new(value, mac)
+            .expect("const value sharing and scaled-constant MAC share the canonical party points")
+    }
+
+    /// [OPUS-4.8] sq-ka8m / sq-km34.4 — **the batched random-challenge IT-MAC check**
+    /// (design §2.5), run ONCE just before any value on an authenticated path is
+    /// opened. This is the step that turns "the MACs were carried" into "tampering is
+    /// CAUGHT" — the catch-everything check that closes Holes 1, 2 and (via the
+    /// comparison chain) 4, **at the minimal `n = 2t+1`** where Reed–Solomon
+    /// redundancy is zero.
+    ///
+    /// Given the authenticated values `[[y_1]]..[[y_k]]` whose VALUES are about to be
+    /// opened (the verdict bit, the intermediate opens of a chain — every value whose
+    /// integrity the verdict depends on):
+    ///
+    /// 1. Draw public random challenge coefficients `χ_1..χ_k ∈ F_p` from the session
+    ///    RNG. CRITICAL ORDER: the challenges are drawn AFTER the share vectors are
+    ///    fixed (the `[[y_j]]` are already computed when this is called), so a
+    ///    deviating party cannot adapt its tampering to the challenge.
+    /// 2. Open the values `y_j` and form the public `y = Σ_j χ_j·y_j`.
+    /// 3. Each (simulated) party locally forms its share of
+    ///    `[σ] = Σ_j χ_j·[m_{y_j}] − y·[α]` (all LINEAR → free), then open `σ`.
+    /// 4. **Accept iff `σ == 0`.** For honest values `σ = Σχ_j(α·y_j) − (Σχ_jy_j)α = 0`;
+    ///    any tamper that changed a `y_j` without a consistent matching change to its
+    ///    MAC (impossible without `α`) makes `σ ≠ 0` with probability `≥ 1 − 1/p ≈
+    ///    1 − 2^{−61}`. On `σ ≠ 0` this returns [`MpcError::MacCheckFailed`] (ABORT).
+    ///
+    /// `σ` is **leakage-free**: it is identically `0` for honest executions and is a
+    /// random-coefficient combination of MACs minus the same of values otherwise — it
+    /// reveals nothing about the inputs (design §2.5 confidentiality note; the
+    /// coZK-2025/1026 mitigation is that the check runs BEFORE the result is acted on).
+    /// `α` is never reconstructed: only `σ` (which is `0`) and the public `y_j` are
+    /// opened. Returns `Ok(())` on a passing check; the caller then opens the verdict.
+    /// `[OPUS-4.8]`
+    pub fn mac_check(
+        &mut self,
+        values: &[crate::authenticated::AuthenticatedShare],
+    ) -> Result<(), MpcError> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        let t = self.dealer.threshold();
+        // 1. Public challenge coefficients χ_j, drawn AFTER the shares are fixed.
+        let chis: Vec<Fp> = (0..values.len()).map(|_| self.dealer.draw_fp()).collect();
+
+        // 2./3. Build [σ] = Σ_j χ_j·[m_{y_j}] − (Σ_j χ_j·y_j)·[α] as a free local
+        //       linear combination, and accumulate the public y = Σ_j χ_j·y_j.
+        let n = self.dealer.parties();
+        let mut sigma_shares: Vec<Share> =
+            (1..=n as u64).map(|x| Share { x, y: Fp::zero() }).collect();
+        let mut y_pub = Fp::zero();
+        for (chi, av) in chis.iter().zip(values.iter()) {
+            // Open the value y_j (public on this path) and accumulate χ_j·y_j.
+            let y_j = self.dealer.reconstruct(av.value_shares())?;
+            y_pub = y_pub.add(chi.mul(y_j));
+            // Add χ_j·[m_{y_j}] into [σ].
+            let weighted_mac = scale(av.mac_shares(), *chi);
+            sigma_shares = add_shares(&sigma_shares, &weighted_mac)?;
+        }
+        // Subtract y·[α]: scale the session's secret-shared [α] by the PUBLIC y.
+        let y_alpha = scale(self.key.alpha_shares(), y_pub);
+        sigma_shares = sub_shares(&sigma_shares, &y_alpha)?;
+
+        // 4. Open σ — leakage-free (identically 0 when honest) — and check it is 0.
+        //    σ is a degree-`t` sharing (a linear combination of degree-`t` MAC
+        //    sharings and [α]), so we open it via the backend's robust degree-`t`
+        //    path: at the minimal n = 2t+1 (zero RS redundancy) this is plain
+        //    Lagrange and the σ == 0 check below is the SOLE detector (soundness from
+        //    the secret α); with redundancy (n > 2t+1) the robust path additionally
+        //    flags a degree-`t` inconsistency. Either way a tamper is caught.
+        let sigma = self.dealer.reconstruct(&sigma_shares)?;
+        if sigma != Fp::zero() {
+            return Err(MpcError::MacCheckFailed {
+                detail: format!(
+                    "batched IT-MAC check over {} value(s) opened σ = {} != 0 — a value, share, \
+                     or degree-reduce re-sharing on the authenticated path was tampered (caught at \
+                     n = {n}, t = {t}; soundness ≈ 1 − 2^-61 from the secret α, not RS redundancy)",
+                    values.len(),
+                    sigma.value()
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// **Test-only.** The cleartext session MAC key `α`, so tests can verify the
     /// MAC relation `reconstruct([α·x]) == α·x`. NOT part of the public API — the
     /// `cfg` gate guarantees production code physically cannot read `α` (acceptance
