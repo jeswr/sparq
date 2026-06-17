@@ -218,8 +218,15 @@ jobs:
   # `^pkg:cargo/[^?#]+@[^?#]+$` (scripts/check-sbom-purl-canonical.py) — so a regression
   # in the normalizer-vs-tool contract FAILS the PR instead of shipping. NOTE: the job name
   # has NO `advisory`/`informational` WHOLE WORD, so the ci-summary aggregator treats it as
-  # GATING (intentional). Also runs the hermetic self-test so a regression in the check
-  # itself is caught.
+  # GATING (intentional). Also runs the hermetic self-tests so a regression in the checks
+  # themselves is caught:
+  #   * test_sbom_purl_canonical.py — the purl half (GS-7).
+  #   * test_sbom_bomref_canonical.py — the bom-ref half (GS-6, sq-9gli): pins that the SBOM
+  #     ROOT COMPONENT's `bom-ref` (and every workspace/path ref + dependency edge) is
+  #     rewritten from the `path+file:///abs/build/dir/...#ver` form to the canonical
+  #     `pkg:cargo/<name>@<version>` identity, so no build-machine path leaks into the
+  #     PUBLISHED SBOM. With the toolchain installed below, its live-workspace assertion runs
+  #     here (not skipped) over the same normalizer the publication path uses.
   sbom-purl-canonical:
     name: SBOM purl-canonicality assertion (GS-6/GS-7) — GATING
     runs-on: ubuntu-latest
@@ -233,6 +240,8 @@ jobs:
           tool: cargo-cyclonedx
       - name: purl-canonicality check self-test
         run: python3 scripts/tests/test_sbom_purl_canonical.py
+      - name: bom-ref-canonicality check self-test (GS-6)
+        run: python3 scripts/tests/test_sbom_bomref_canonical.py
       - name: Generate + normalize SBOM, then assert canonical purls — GATING
         run: |
           set -euo pipefail
