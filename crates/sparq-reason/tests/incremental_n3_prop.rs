@@ -287,11 +287,17 @@ fn decimal_data_reaching_concatenation_falls_back_sticky_and_stays_correct() {
 }
 
 /// The real sparq-solid rule sets' qualification matrix: the ?UNSCOPED-migrated WAC rules
-/// and the first two ACP strata are exactly the input-stratified-negation shape and take
-/// the counting fast path; acp-c.n3 does NOT qualify — its simple-grant rules conclude
-/// `{ ?p ?pred ?r }` with a VARIABLE predicate (bound from solidx:allowPred/denyPred data),
-/// so the derived-predicate set is not statically known and predicate-level stratification
-/// is unsound. The analysis must detect that and fall back.
+/// and the acp-b.n3 stratum are exactly the input-stratified-negation shape and take the
+/// counting fast path. acp-a.n3 and acp-c.n3 do NOT qualify — each has a rule with a
+/// VARIABLE predicate the analysis cannot statically resolve, so predicate-level
+/// stratification is unsound and the analysis must conservatively fall back. In acp-c.n3 a
+/// simple-grant rule CONCLUDES `{ ?p ?pred ?r }` (predicate bound from
+/// `solidx:allowPred`/`denyPred` data), so the derived-predicate set is not statically known.
+/// In acp-a.n3 ([OPUS-4.8] sq-3jtd.5) the CreatorAgent/OwnerAgent candidate rule has a
+/// variable-predicate PREMISE `?r ?kind ?w` (`?kind` bound to `solidx:creator`/`owner` from
+/// `solidx:provMatcher`), likewise outside the statically-stratifiable whitelist. Both
+/// fallbacks are SOUND (the engine path is always correct); they only forgo the counting
+/// fast path. This asserts the analysis classifies each stratum correctly.
 #[test]
 fn sparq_solid_wac_and_acp_rules_qualification_matrix() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../sparq-solid/rules");
@@ -299,7 +305,7 @@ fn sparq_solid_wac_and_acp_rules_qualification_matrix() {
     let common = read("common.n3");
     for (stratum, expect) in [
         ("wac.n3", N3Mode::Counting),
-        ("acp-a.n3", N3Mode::Counting),
+        ("acp-a.n3", N3Mode::Fallback), // variable PREMISE predicate (?r ?kind ?w), sq-3jtd.5
         ("acp-b.n3", N3Mode::Counting),
         ("acp-c.n3", N3Mode::Fallback), // variable conclusion predicate (?p ?pred ?r)
     ] {
