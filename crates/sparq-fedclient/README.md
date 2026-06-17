@@ -87,6 +87,31 @@ fragment server (real fetch → parse → bind → paginate → bind-join, zero 
 native HTTP `FragmentTransport` (ureq + the default-deny SSRF resolver, Hydra URI-template
 serialisation, Turtle/TriG fragment parsing) lands with the streaming phase.
 
+### brTPF binding-block wire encodings (`wire` module, `sq-6ihg`)
+
+The brTPF bind-join attaches a **set of solution mappings** to each fragment request. The
+sparq server (`sq-dxhb`) parses that set from a **line-oriented text wire** — one mapping per
+line, space-separated `position=term` pairs, each term fully N-Triples-decorated. That wire is
+readable but verbose (it repeats the `s=`/`p=`/`o=` key and the `<…>`/`"…"` framing on every
+term), and a large `maxMpR` block is re-sent on every request of a bind nested-loop join.
+
+The `wire` module adds the alternative: a **compact, self-describing binary mapping wire**
+(`encode_bindings` / `decode_bindings`) the client can emit instead, plus a text-wire writer
+(`encode_bindings_text`) so a client can speak **either** form over the same `FragBinding`
+model. The binary form drops the per-pair position key (a 1-byte header bitmask records which
+of `s`/`p`/`o` a mapping binds, so a position term carries **no** name bytes) and the N-Triples
+framing (a 1-byte kind tag distinguishes IRI / blank / literal; the bare lexical bytes follow
+length-prefixed), and round-trips **losslessly** — including arbitrary variable names (via an
+overflow section) and literal terms with embedded `=`, whitespace, or newlines that the text
+wire cannot carry on a single line. A 4-byte magic + version header makes a future revision
+detectable, and the decoder validates every length so a truncated / corrupt buffer is a clean
+`WireError`, never a panic (the crate is `forbid(unsafe_code)`).
+
+This is a **codec only**: the native HTTP `FragmentTransport` that picks a wire by content
+negotiation and attaches it as the request body / `values` parameter lands with the streaming
+HTTP phase (same as the adapters above). The text form matches the server's `parse_bindings`
+grammar byte-for-byte, so a client emitting either wire is understood by the existing server.
+
 ## Capability-aware pushdown (Phase 4, `pushdown` module)
 
 The planner decides *which* source answers *which* pattern and in *what* join order; the

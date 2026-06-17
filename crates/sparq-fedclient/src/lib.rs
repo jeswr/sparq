@@ -52,7 +52,11 @@ the same default-OFF `fedclient` feature:
   interpreter — backpressured + bounded (Rust ownership + the reused StreamJoin spill).
 * **Phase 6 — brTPF + TPF fragment adapters** ([`source`], bead `sq-2qze`): the real
   Triple-Pattern-Fragments adapters ([`TpfSource`] / [`BrTpfSource`]) over a
-  [`FragmentTransport`] seam, complete-by-construction with count-metadata cardinality.
+  [`FragmentTransport`] seam, complete-by-construction with count-metadata cardinality. The
+  [`wire`] module (bead `sq-6ihg`) adds the brTPF binding-block transport encodings — a COMPACT
+  self-describing BINARY mapping wire ([`encode_bindings`] / [`decode_bindings`]) alongside the
+  line-oriented TEXT wire the server parses ([`encode_bindings_text`]), so a large bind-join
+  block travels compactly and losslessly and the client can speak either form.
 
 * **Phase 7 — adaptive re-planning** (the `adaptive` module, bead `sq-ij5x`, the FINAL
   phase): the opt-in feedback loop that re-invokes [`sparq-fedplan`](sparq_fedplan)'s planner
@@ -149,6 +153,23 @@ pub use source::{
 #[cfg(feature = "fedclient")]
 pub use source::{
     FragBinding, FragPattern, FragTerm, FragTriple, FragmentPage, FragmentTransport, PatternTerm,
+};
+
+/// brTPF binding-block **transport encodings** (bead `sq-6ihg`, follow-up to the server's
+/// `sq-dxhb`): a COMPACT, self-describing BINARY mapping wire ([`wire::encode_bindings`] /
+/// [`wire::decode_bindings`]) alongside the line-oriented TEXT wire the server already parses
+/// ([`wire::encode_bindings_text`]). The binary form drops the per-pair position key and the
+/// N-Triples framing (a one-byte kind tag + length-prefixed bare lexical bytes) so a large
+/// [`FragBinding`] block travels compactly and losslessly; the text form matches the server's
+/// `position=term` grammar so a client can speak either over the same `FragBinding` model. A
+/// codec only — the native HTTP `FragmentTransport` that picks a wire by content negotiation
+/// lands with the streaming HTTP phase.
+#[cfg(feature = "fedclient")]
+pub mod wire;
+// [OPUS-4.8] sq-6ihg: re-export the brTPF binding-block wire codec at the crate root.
+#[cfg(feature = "fedclient")]
+pub use wire::{
+    decode_bindings, encode_bindings, encode_bindings_text, WireError, BINARY_MAGIC, BINARY_VERSION,
 };
 
 /// §4.1 — **capability discovery** (Phase 1, bead sq-nfxl): GET `/.well-known/void` + the
