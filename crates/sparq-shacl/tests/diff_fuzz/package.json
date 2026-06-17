@@ -1,0 +1,14 @@
+{
+  "name": "sparq-shacl-diff-fuzz-node-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "[OPUS-4.8] sq-vz2v — Node/RDF-JS reference SHACL adapter for the sparq-shacl differential fuzzer. Pinned reference engines so the differential is reproducible; bump deliberately (mirrors the pinned pySHACL/Jena versions). `npm ci` here, then point the Rust runner at this node_modules via SHACL_DIFF_NODE_MODULES (or NODE_PATH).",
+  "license": "MIT",
+  "dependencies": {
+    "@zazuko/env-node": "2.1.2",
+    "n3": "2.0.4",
+    "rdf-validate-shacl": "0.6.5",
+    "shacl-engine": "1.1.0"
+  }
+}

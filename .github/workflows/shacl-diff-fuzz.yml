@@ -1,15 +1,19 @@
-# [OPUS-4.8] Differential SHACL fuzz gate (beads sq-55c1 + sq-evws).
+# [OPUS-4.8] Differential SHACL fuzz gate (beads sq-55c1 + sq-evws + sq-vz2v).
 #
 # WHAT: generates random but VALID SHACL shapes + data graphs, validates each
 # through `sparq-shacl` AND through every reference SHACL engine that resolves, and
 # asserts the reports agree on the `sh:conforms` bit and the per-focus-node
-# violated-constraint set. Two references are wired:
+# violated-constraint set. Three reference families are wired:
 #   - pySHACL — the canonical Python reference implementation (sq-55c1).
 #   - Apache Jena SHACL — a second, independent reference (sq-evws), driven via the
 #     Java single-file source launcher over its `org.apache.jena.shacl` validator.
+#   - Node / RDF-JS — a third family (sq-vz2v) driving the Zazuko `shacl-engine`
+#     validator over an RDF-JS dataset, via tests/diff_fuzz/node_shacl_adapter.mjs.
+#     (`rdf-validate-shacl` is the same adapter behind SHACL_DIFF_NODE_ENGINE; the
+#     lane runs shacl-engine, the actively-maintained SHACL-AF one.)
 # A disagreement is a candidate sparq-shacl correctness bug; the harness prints the
-# seed + the reproducing Turtle so it replays deterministically. A second engine
-# catches bugs where sparq and pySHACL happen to agree but are both wrong. See
+# seed + the reproducing Turtle so it replays deterministically. Independent engines
+# catch bugs where sparq and ONE reference happen to agree but are both wrong. See
 # crates/sparq-shacl/tests/diff_fuzz.rs.
 #
 # TRIGGER — NIGHTLY/HEAVY tier ONLY. Deliberately NOT on pull_request / push /
@@ -62,12 +66,12 @@ env:
 
 jobs:
   diff-fuzz:
-    name: SHACL differential fuzz (sparq-shacl vs pySHACL + Jena)
+    name: SHACL differential fuzz (sparq-shacl vs pySHACL + Jena + Node RDF-JS)
     runs-on: ubuntu-latest
     # Generous ceiling: ~thousands of cases × a per-case reference subprocess, now
-    # across two engines (each case spawns a fresh interpreter/JVM). A hung run
-    # fails with a clear timeout rather than running away.
-    timeout-minutes: 90
+    # across three engines (each case spawns a fresh interpreter/JVM/Node). A hung
+    # run fails with a clear timeout rather than running away.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install Rust (stable)
@@ -85,6 +89,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - name: Set up Node (for the RDF-JS reference engine)
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "20"
       - name: Install pySHACL (reference engine) in a venv
         run: |
           set -euo pipefail
@@ -117,6 +125,29 @@ jobs:
           # The harness derives ${JENA_HOME}/lib/* when JENA_HOME is set.
           echo "JENA_HOME=$dest" >> "$GITHUB_ENV"
           "$dest/bin/shacl" --help >/dev/null 2>&1 && echo "Jena shacl CLI OK ($JENA_VERSION)"
+      # Cache the Node reference adapter's node_modules across runs (keyed on the
+      # committed lockfile) so the nightly lane doesn't reinstall the RDF-JS trees
+      # every day. A cache miss falls through to the `npm ci` step.
+      - name: Cache Node reference adapter node_modules
+        id: node-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: crates/sparq-shacl/tests/diff_fuzz/node_modules
+          key: shacl-node-adapter-${{ hashFiles('crates/sparq-shacl/tests/diff_fuzz/package-lock.json') }}
+      - name: Install the Node / RDF-JS reference engine (pinned via lockfile)
+        run: |
+          set -euo pipefail
+          # `npm ci` installs exactly the committed package-lock.json so the
+          # reference engine is reproducible (a pinned shacl-engine, like the pinned
+          # pySHACL/Jena). The Rust harness auto-resolves this adapter-local
+          # node_modules; SHACL_DIFF_NODE_MODULES makes that explicit + robust.
+          npm ci --prefix crates/sparq-shacl/tests/diff_fuzz
+          node crates/sparq-shacl/tests/diff_fuzz/node_shacl_adapter.mjs --selftest \
+            && echo "Node RDF-JS SHACL adapter selftest OK"
+          echo "SHACL_DIFF_NODE_MODULES=$PWD/crates/sparq-shacl/tests/diff_fuzz/node_modules" >> "$GITHUB_ENV"
+          # Run the default engine (shacl-engine); rdf-validate-shacl is the same
+          # adapter behind the switch and is exercised by the Rust unit selftest.
+          echo "SHACL_DIFF_NODE_ENGINE=shacl-engine" >> "$GITHUB_ENV"
       - name: Pick seed count for this trigger
         id: budget
         run: |
