@@ -12,7 +12,8 @@
     "prebuild": "node scripts/sync-wasm.mjs && node scripts/sync-benchmarks.mjs && node scripts/build-papers.mjs",
     "build": "next build",
     "start": "npx --yes serve out",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:unit": "node --import ./test-support/register-ts.mjs --test test/"
   },
   "dependencies": {
     "@aztec/bb.js": "5.0.0-nightly.20260324",

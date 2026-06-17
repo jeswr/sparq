@@ -8,6 +8,13 @@
 // the wasm bytes' URL explicitly, prefixed with the Pages basePath. This is genuinely
 // live: every query runs the real Rust engine compiled to wasm, in your tab.
 
+import {
+  ALL_QUADS_BODY,
+  ALL_QUADS_QUERY,
+  isDatasetFormat,
+  rowsToNQuads,
+} from "./repl-dataset";
+
 export interface WasmStore {
   readonly size: number;
   query(sparql: string): string; // SPARQL 1.1 JSON results document
@@ -17,18 +24,63 @@ export interface WasmStore {
 interface WasmModule {
   default: (opts?: { module_or_path: string | URL }) => Promise<unknown>;
   Store: {
+    /** Loads RDF, FOLDING any named graphs into the default graph. */
     load(text: string, format: string): WasmStore;
+    /** Loads RDF, PRESERVING named graphs (N-Quads / TriG) as separate graphs. */
     loadDataset(text: string, format: string): WasmStore;
   };
 }
 
 /**
- * [OPUS-4.8] Serialises a store's whole default graph to N-Triples (a valid Turtle
- * subset) via a CONSTRUCT. Used to merge two graphs format-agnostically when the user
- * chooses "add to current": concatenate both stores' N-Triples and re-load as ntriples.
+ * [OPUS-4.8] sq-17nw — parses RDF into a store, PRESERVING named graphs for the
+ * quad-bearing formats (N-Quads / TriG) by routing them through `loadDataset` instead
+ * of `load` (which folds every named graph into the default graph). Triple-only formats
+ * (`turtle` / `ntriples`) carry no named graphs, so the cheaper `load` is used. This is
+ * the single load entry point the REPL uses for every source (default, picker, upload,
+ * URL, and the re-load step of a merge).
  */
-export function storeToNTriples(store: WasmStore): string {
-  return store.queryQuads("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }");
+export function loadIntoStore(
+  Store: WasmModule["Store"],
+  text: string,
+  format: string,
+): WasmStore {
+  return isDatasetFormat(format)
+    ? Store.loadDataset(text, format)
+    : Store.load(text, format);
+}
+
+/**
+ * [OPUS-4.8] sq-17nw — serialises a store's WHOLE dataset (default graph PLUS every
+ * named graph) to N-Quads, by selecting {@link ALL_QUADS_QUERY} and emitting one
+ * triple/quad line per solution. Used to merge two stores format-agnostically when the
+ * user chooses "add to current": concatenate both stores' N-Quads and re-load with
+ * `Store.loadDataset(_, "nquads")` so the named graphs survive the round-trip. (The
+ * previous `CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }` saw only the default graph, so
+ * merging silently dropped every named graph — the folding bug this fixes.)
+ */
+export function storeToNQuads(store: WasmStore): string {
+  const json = store.query(ALL_QUADS_QUERY);
+  const parsed = JSON.parse(json) as SparqlResults;
+  return rowsToNQuads(parsed.results.bindings);
+}
+
+/**
+ * [OPUS-4.8] sq-17nw — the TOTAL number of triples in a store across the default graph
+ * and all named graphs. The wasm `store.size` getter counts the DEFAULT graph only
+ * (see `loadDataset`'s doc), so it under-reports a dataset; this counts the whole thing
+ * via {@link ALL_QUADS_QUERY} for an accurate "N triples" badge. Falls back to
+ * `store.size` if the count query fails for any reason.
+ */
+export function datasetSize(store: WasmStore): number {
+  try {
+    const json = store.query(`SELECT (COUNT(*) AS ?n) WHERE { ${ALL_QUADS_BODY} }`);
+    const parsed = JSON.parse(json) as SparqlResults;
+    const n = parsed.results.bindings[0]?.n?.value;
+    const parsedN = n != null ? Number.parseInt(n, 10) : NaN;
+    return Number.isFinite(parsedN) ? parsedN : store.size;
+  } catch {
+    return store.size;
+  }
 }
 
 let modulePromise: Promise<WasmModule> | null = null;
