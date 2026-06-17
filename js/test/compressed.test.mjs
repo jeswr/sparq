@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { gzipSync, zstdCompressSync } from 'node:zlib';
+import { gzipSync } from 'node:zlib';
 import { decompress, decompressToString, sniffCodec, SparqStore } from '../dist/index.js';
+// zstd fixtures are synthesised in pure JS (Raw_Block frames) rather than via
+// node:zlib's native zstdCompressSync, which is absent on Node 20 and
+// experimental/version-coupled thereafter (bead sq-fz8s).
+import { zstdRawFrame, zstdMultiFrame } from './helpers/zstd-fixtures.mjs';
 
 const NT = [
   '<http://ex/a> <http://ex/p> "one" .\n',
@@ -12,7 +16,7 @@ const FULL = NT.join('');
 const bytes = s => new Uint8Array(Buffer.from(s));
 
 test('sniffCodec recognises zstd, skippable-frame zstd, gzip, and rejects junk', () => {
-  assert.equal(sniffCodec(new Uint8Array(zstdCompressSync(bytes(FULL)))), 'zstd');
+  assert.equal(sniffCodec(zstdRawFrame(bytes(FULL))), 'zstd');
   assert.equal(sniffCodec(new Uint8Array(gzipSync(bytes(FULL)))), 'gzip');
   // a skippable frame (magic 0x184D2A50, LE on the wire) may legally lead a stream
   assert.equal(sniffCodec(new Uint8Array([0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0])), 'zstd');
@@ -20,16 +24,16 @@ test('sniffCodec recognises zstd, skippable-frame zstd, gzip, and rejects junk',
 });
 
 test('.nt.zst ingest: single zstd frame', async () => {
-  const store = await SparqStore.fromCompressed(new Uint8Array(zstdCompressSync(bytes(FULL))), 'ntriples');
+  const store = await SparqStore.fromCompressed(zstdRawFrame(bytes(FULL)), 'ntriples');
   assert.equal(store.size, 3);
   assert.equal(store.queryBoolean('ASK { <http://ex/b> ?p "two" }'), true);
 });
 
 test('multi-frame zstd (the CompressedSink wire shape) decodes fully', async () => {
   // Independently compressed chunks concatenated in order — RFC 8878 multi-frame.
-  const frames = Buffer.concat(NT.map(line => zstdCompressSync(bytes(line))));
-  assert.equal(await decompressToString(new Uint8Array(frames)), FULL);
-  const store = await SparqStore.fromCompressed(new Uint8Array(frames), 'ntriples');
+  const frames = zstdMultiFrame(NT.map(line => bytes(line)));
+  assert.equal(await decompressToString(frames), FULL);
+  const store = await SparqStore.fromCompressed(frames, 'ntriples');
   assert.equal(store.size, 3); // NOT first-frame-only (Node's own zstd truncates here)
 });
 
@@ -45,7 +49,7 @@ test('.gz ingest (multi-member gzip decodes fully in Node)', async () => {
 
 test('explicit codec, dataset pass-through, and clear junk error', async () => {
   const nq = '<http://ex/s> <http://ex/p> "in-g" <http://ex/g> .\n';
-  const store = await SparqStore.fromCompressed(new Uint8Array(zstdCompressSync(bytes(nq))), 'nquads', {
+  const store = await SparqStore.fromCompressed(zstdRawFrame(bytes(nq)), 'nquads', {
     codec: 'zstd',
     dataset: true,
   });
