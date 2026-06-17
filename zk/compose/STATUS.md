@@ -152,9 +152,13 @@ prove/verify e2e (in-set verifies & KEY-not-public; out-of-set unprovable; forge
 sig unprovable; forged-root rejected) + 1 fast fail-closed.
 
 SCOPE (honest): `key_set_root` is a DENSE 2^D-leaf builder and only `d4` (16
-issuers) is compiled — real issuer sets are small, so depth 4–10 is ample; a very
-large issuer registry would want sparse/compressed inclusion (the circuit relation
-is depth-generic; only the host builder + single member bound the size). The
+issuers) is compiled — real issuer sets are small, so depth 4–10 is ample. A very
+large issuer/holder registry instead uses the SPARSE builders (sq-8k3h)
+`issuer::key_set_root_sparse` / `key_membership_witness_sparse`, which produce the
+BIT-IDENTICAL root + authentication path in O(n·depth) WITHOUT materialising the
+2^D padding slots (precomputed per-level empty-subtree digests). The circuit
+relation is depth-generic, so only the single compiled member (not the host
+builder) now bounds the size. The
 hidden-issuer path is ADDITIVE: it does not yet REPLACE the mandatory clear-key
 attestation (which still discloses the key in the manifest), so to actually
 suppress the key leak a deployment must present ONLY the hidden-issuer proof and
@@ -225,7 +229,8 @@ identity — distinct from the issuer `key_leaf = h2(x, y)`), `holder_set_member
 and `hidden_holder_set<D>` (= `holder_pok`'s steps 1-4 + the Merkle-membership fold).
 New member `holder_set_d4` (`zk/compose/holder_set_d4`, D=4, up to 16 holders; public
 `challenge`, `holder_set_root`; private `hsk`, `hpk`, `index`, `siblings`). Host:
-`holder::{holder_set_root, holder_set_membership_witness, holder_set_prover_toml,
+`holder::{holder_set_root, holder_set_membership_witness, holder_set_root_sparse,
+holder_set_membership_witness_sparse, holder_set_prover_toml,
 HolderSetWitness}`; `manifest::HolderSetProof` + `holder_set_proofs` +
 `CircuitId::HolderSet{depth}`; `HolderRegistry::with_hidden_holder_set_depth` opt-in +
 `hidden_holder_set_root`; `verifier::bind_holder_set`. The verifier does NOT trust the
@@ -252,9 +257,18 @@ cryptographer sign-off (sq-qhy4 pending). Research-grade, opt-in. NO soundness /
 ZK-privacy property was asserted as achieved; every standing not-yet-sound disclaimer is
 preserved.
 
-DEFERRED (beaded): deeper depths (`holder_set_d{D}` for larger holder registries) if a
-use-case demands them; the dense host Merkle builder bounds the set to `2^D` (the circuit
-relation is depth-generic), so a very large holder registry would want a sparse commitment.
+SCALING (sq-8k3h, host-side ONLY): a VERY LARGE holder registry no longer needs the
+dense `O(2^D)` host builder. `holder::{holder_set_root_sparse,
+holder_set_membership_witness_sparse}` compute the BIT-IDENTICAL root + authentication
+path in `O(n·D)` (`n = holders.len()`) WITHOUT materialising the `2^D` padding slots
+(precomputed per-level empty-subtree digests; shared sparse-fold core with
+`issuer::*_sparse`). The in-circuit relation (`hidden_holder_set<D>`) is depth-generic
+and UNCHANGED, so a sparse-built witness verifies under exactly the same member; the
+compiled member (`holder_set_d4`) still bounds the in-circuit depth, so deeper depths
+remain a separate `holder_set_d{D}` compile if a use-case demands them. This is a host
+SCALING change only — NO new soundness / ZK-privacy property is asserted (still
+NOT-yet-sound per sq-qhy4). Cross-checked equal to the dense builder for every
+`(holders, depth)` in `holder::tests`.
 
 ### M1 — Rust orchestration crate `crates/sparq-zk-compose` (DONE)
 
