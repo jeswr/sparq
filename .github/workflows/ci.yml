@@ -402,7 +402,7 @@ jobs:
           done
 
   wasm:
-    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm)
+    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm + sparq-shacl-wasm)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -465,6 +465,19 @@ jobs:
         run: cargo build -p sparq-text-wasm --target wasm32-unknown-unknown
       - name: clippy (wasm32 target, sparq-text-wasm, deny warnings)
         run: cargo clippy -p sparq-text-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      # [OPUS-4.8] sq-lfmf (W-shacl): the tier-b SHACL validation bundle. Build + clippy it
+      # on wasm32 in BOTH feature states (default SHACL Core + SHACL-SPARQL, and the opt-in
+      # `shacl-af` sh:rule feature) so the SHACL bundle (sparq-shacl + its no-default-features
+      # sparq-engine/sparq-core wasm32 graph, carrying the pure-Rust `sh:pattern` regex) is
+      # gate-protected exactly like the other wasm bundles.
+      - name: Build sparq-shacl-wasm for the browser target
+        run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown
+      - name: Build sparq-shacl-wasm for the browser target (shacl-af feature)
+        run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --features shacl-af
+      - name: clippy (wasm32 target, sparq-shacl-wasm, deny warnings)
+        run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      - name: clippy (wasm32 target, sparq-shacl-wasm, shacl-af feature, deny warnings)
+        run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --features shacl-af -- -D warnings
       - name: Guard the wasm dependency graph (no native-only deps)
         # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
@@ -478,6 +491,8 @@ jobs:
         # no regex; sparq-rsp + its engine/core are no-default-features).
         # [OPUS-4.8] sq-jbe6: it now also scans sparq-text-wasm (unicode-segmentation is
         # pure-Rust + wasm-portable; the guard catches any native-only dep leaking in).
+        # [OPUS-4.8] sq-lfmf: and sparq-shacl-wasm (regex is allowed there — pure-Rust +
+        # wasm-portable, the sh:pattern constraint; the guard catches native-only leaks).
         run: ./scripts/wasm-deps-guard.sh
       # [OPUS-4.8] Headless wasm tests of the REAL #[wasm_bindgen] exports
       # (crates/sparq-wasm/tests/web.rs). `cargo build --target wasm32` above never
@@ -530,6 +545,17 @@ jobs:
       - name: Headless wasm tests (sparq-text-wasm, wasm-pack test --node)
         working-directory: crates/sparq-text-wasm
         run: wasm-pack test --node
+      # [OPUS-4.8] sq-lfmf (W-shacl): drive the REAL #[wasm_bindgen] Validator exports
+      # (crates/sparq-shacl-wasm/tests/web.rs) in a genuine wasm runtime — SHACL validation +
+      # the JSON / Turtle / text report serialisation across the JS boundary, which a
+      # `cargo build --target wasm32` above never RUNS. Both feature states: default, then
+      # with the opt-in `shacl-af` (sh:rule) feature.
+      - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node)
+        working-directory: crates/sparq-shacl-wasm
+        run: wasm-pack test --node
+      - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node, shacl-af feature)
+        working-directory: crates/sparq-shacl-wasm
+        run: wasm-pack test --node --features shacl-af
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python

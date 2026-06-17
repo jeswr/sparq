@@ -19,6 +19,15 @@ returning a JSON report — a drop-in for `rdf-validate-shacl` (sq-yqi1, #162). 
 wasm32 build the `sparq-engine` dep drops its defaults so rayon never enters the
 bundle; see the `javascript-wasm` skill for the JS API + report shape.
 
+For the showcase site there is also a **standalone, lazy-loaded** wasm bundle,
+`sparq-shacl-wasm` (the tier-b "W-shacl" artifact, sq-lfmf), kept separate from the lean
+default bundle so SHACL never ships on the landing page. It exposes a stateless
+`Validator` with the FULL report surface — `Validator.validate(data, shapes, format)`
+(JSON report), `validateTurtle` (report-RDF in the `sh:ValidationReport` vocabulary),
+`validateText` (human-readable), and `conforms(..., violationsOnly)` (the W3C
+`sh:conforms` flag, or a violations-only gate). SHACL-AF `sh:rule` validation is behind
+its opt-in `shacl-af` feature. See `crates/sparq-shacl-wasm/README.md`.
+
 ## Quickstart
 
 `Cargo.toml`:

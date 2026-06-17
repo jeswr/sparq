@@ -13,11 +13,14 @@
 #   - sparq-reason-wasm (the tier-b "W-reason" forward-chaining inference bundle — sq-6qw3)
 #   - sparq-rsp-wasm    (the tier-b "W-rsp" windowed RSP-QL stream bundle — sq-nzcb)
 #   - sparq-text-wasm   (the tier-b "W-text" BM25 full-text bundle — sq-jbe6)
-# Opt-in features (sparq-wasm's `shacl`, sparq-reason-wasm's `explain`) are NOT scanned
-# here: they are off by default so the default bundles stay lean, and the wasm32 build +
-# clippy in CI prove the feature-on graphs still link. NOTE: `regex` is intentionally NOT
-# forbidden — sparq-reason-wasm legitimately carries it (the N3 `string:matches` builtin),
-# and it is pure-Rust + wasm-portable; the forbidden set is the native-ONLY heavy deps.
+#   - sparq-shacl-wasm  (the tier-b "W-shacl" SHACL validation bundle — sq-lfmf)
+# Opt-in features (sparq-wasm's `shacl`, sparq-reason-wasm's `explain`,
+# sparq-shacl-wasm's `shacl-af`) are NOT scanned here: they are off by default so the
+# default bundles stay lean, and the wasm32 build + clippy in CI prove the feature-on
+# graphs still link. NOTE: `regex` is intentionally NOT forbidden — sparq-reason-wasm
+# legitimately carries it (the N3 `string:matches` builtin) and sparq-shacl-wasm carries
+# it (the `sh:pattern` constraint), and it is pure-Rust + wasm-portable; the forbidden set
+# is the native-ONLY heavy deps.
 # sparq-rsp-wasm carries NO regex (sparq-rsp + its engine/core are no-default-features), so
 # its graph is among the leanest — guarded by the same forbidden set.
 # sparq-text-wasm's `unicode-segmentation` (UAX #29 tokenizer) is likewise pure-Rust +
@@ -28,7 +31,7 @@ set -euo pipefail
 
 TARGET="wasm32-unknown-unknown"
 # The shipped wasm bundle crates whose default wasm32 graph must stay lean.
-BUNDLES=(sparq-wasm sparq-reason-wasm sparq-rsp-wasm sparq-text-wasm)
+BUNDLES=(sparq-wasm sparq-reason-wasm sparq-rsp-wasm sparq-text-wasm sparq-shacl-wasm)
 # Crates that must be absent from the wasm32 graph (non-dev deps).
 FORBIDDEN=(rayon flate2 zstd zstd-safe bzip2 sparq-parse mio tokio)
 
