@@ -217,6 +217,127 @@ class G2Test(unittest.TestCase):
         added2, removed2 = g2._scan_pub_diff(diff2)
         self.assertNotEqual(sorted(added2), sorted(removed2))
 
+    def test_rustfmt_line_wrap_does_not_trip(self):
+        # [OPUS-4.8] REGRESSION (false-positive, tripped #469 — bead sq-5x2i): a
+        # one-shot `cargo fmt` LINE-WRAPS a long `pub fn` signature. The diff
+        # REMOVES the single-line form and ADDS the multi-line wrapped form (same
+        # tokens, only rustfmt whitespace + an inserted trailing comma). The two
+        # must canonicalise EQUAL so a pure reformat is NOT a public-surface change
+        # — no `skill-not-needed` label needed on fmt-only PRs. This is the exact
+        # `compress_chunks` reflow from #469 (crates/sparq-parse/src/lib.rs).
+        diff = [
+            "--- a/crates/sparq-parse/src/lib.rs",
+            "+++ b/crates/sparq-parse/src/lib.rs",
+            "@@ -40,7 +40,12 @@",
+            "-pub fn compress_chunks<S: AsRef<[u8]> + Sync>(chunks: &[S], codec: "
+            "&Codec, mode: Mode) -> io::Result<Vec<Vec<u8>>> {",
+            "+pub fn compress_chunks<S: AsRef<[u8]> + Sync>(",
+            "+    chunks: &[S],",
+            "+    codec: &Codec,",
+            "+    mode: Mode,",
+            "+) -> io::Result<Vec<Vec<u8>>> {",
+            "     match mode {",
+        ]
+        added, removed = g2._scan_pub_diff(diff)
+        self.assertEqual(sorted(added), sorted(removed))  # reflow cancels out
+        self.assertFalse(g2._pad.diff_has_net_pub_change(diff))
+
+    def test_rustfmt_unwrap_does_not_trip(self):
+        # [OPUS-4.8] The symmetric direction: rustfmt UN-wraps a previously wrapped
+        # signature (removes the multi-line form, adds the one-liner). Same key.
+        diff = [
+            "+++ b/crates/sparq-parse/src/lib.rs",
+            "-pub fn gzip_single_member<S: AsRef<[u8]>>(",
+            "-    chunks: &[S],",
+            "-    level: u32,",
+            "-    mode: Mode,",
+            "-) -> io::Result<Vec<Vec<u8>>> {",
+            "+pub fn gzip_single_member<S: AsRef<[u8]>>(chunks: &[S], level: u32, "
+            "mode: Mode) -> io::Result<Vec<Vec<u8>>> {",
+        ]
+        self.assertFalse(g2._pad.diff_has_net_pub_change(diff))
+
+    def test_real_signature_change_still_trips_after_normalize(self):
+        # [OPUS-4.8] Normalisation must NOT mask a GENUINE signature change: if a
+        # param TYPE actually changes (Mode -> FastMode), the wrapped-added key
+        # differs from the one-line-removed key and the gate still fires.
+        diff = [
+            "+++ b/crates/sparq-parse/src/lib.rs",
+            "-pub fn compress_chunks<S: AsRef<[u8]> + Sync>(chunks: &[S], codec: "
+            "&Codec, mode: Mode) -> io::Result<Vec<Vec<u8>>> {",
+            "+pub fn compress_chunks<S: AsRef<[u8]> + Sync>(",
+            "+    chunks: &[S],",
+            "+    codec: &Codec,",
+            "+    mode: FastMode,",
+            "+) -> io::Result<Vec<Vec<u8>>> {",
+        ]
+        self.assertTrue(g2._pad.diff_has_net_pub_change(diff))
+
+    def test_wrapped_use_and_const_reflow_cancel(self):
+        # [OPUS-4.8] Wrapping is not fn-only: a long `pub use` re-export and a
+        # `pub const` can reflow too. The `;`/`=` terminators must close the
+        # accumulation and the keys must cancel against the one-line forms.
+        use_diff = [
+            "+++ b/crates/sparq-core/src/lib.rs",
+            "-pub use crate::store::{Alpha, Beta, Gamma, Delta, Epsilon, Zeta};",
+            "+pub use crate::store::{",
+            "+    Alpha, Beta, Gamma, Delta, Epsilon, Zeta,",
+            "+};",
+        ]
+        self.assertFalse(g2._pad.diff_has_net_pub_change(use_diff))
+
+    def test_wrapped_where_clause_reflow_cancels(self):
+        # [OPUS-4.8] rustfmt commonly hoists a `where`-clause onto its own lines
+        # and adds a trailing comma after the last bound — which lands right
+        # before the body `{`. The wrapped and one-line forms must canonicalise
+        # equal (trailing comma before `{` dropped), but a GENUINE bound change
+        # (Send -> Sync) must still trip.
+        reflow = [
+            "+++ b/crates/x/src/a.rs",
+            "-pub fn f<T>(x: T) -> T where T: Clone + Send {",
+            "+pub fn f<T>(x: T) -> T",
+            "+where",
+            "+    T: Clone + Send,",
+            "+{",
+        ]
+        self.assertFalse(g2._pad.diff_has_net_pub_change(reflow))
+        changed = [
+            "+++ b/crates/x/src/a.rs",
+            "-pub fn f<T>(x: T) -> T where T: Clone + Send {",
+            "+pub fn f<T>(x: T) -> T",
+            "+where",
+            "+    T: Clone + Sync,",
+            "+{",
+        ]
+        self.assertTrue(g2._pad.diff_has_net_pub_change(changed))
+
+    def test_wrapped_tuple_struct_reflow_cancels(self):
+        # [OPUS-4.8] A long tuple-struct (terminates at `;`, not a body `{`) that
+        # rustfmt wraps one field per line must also cancel against its one-liner.
+        diff = [
+            "+++ b/crates/x/src/a.rs",
+            "-pub struct P(pub u64, pub u64, pub u64, pub u64, pub u64, pub u64);",
+            "+pub struct P(",
+            "+    pub u64,",
+            "+    pub u64,",
+            "+    pub u64,",
+            "+    pub u64,",
+            "+    pub u64,",
+            "+    pub u64,",
+            "+);",
+        ]
+        self.assertFalse(g2._pad.diff_has_net_pub_change(diff))
+
+    def test_normalize_signature_is_wrap_invariant(self):
+        # [OPUS-4.8] Unit-level: the canonical key is identical for the one-line
+        # and wrapped forms (whitespace stripped + trailing comma dropped).
+        one = "pub fn f<T: Clone>(a: T, b: T) -> Vec<T> {"
+        wrapped = "pub fn f<T: Clone>( a: T, b: T, ) -> Vec<T> {"
+        self.assertEqual(
+            g2._pad.normalize_signature(one),
+            g2._pad.normalize_signature(wrapped),
+        )
+
     def test_pub_item_regex_matches_all_item_forms_excludes_restricted(self):
         # [OPUS-4.8] The pub-item pattern must match every exported FORM
         # (fn/struct/enum/trait/const/type/mod/use) but NOT restricted
