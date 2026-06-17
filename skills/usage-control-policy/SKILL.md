@@ -123,6 +123,28 @@ assert!(!evaluate_and_exercise(&policy, &req, &store).allow); // 4th: limit reac
 - **Fail-closed.** `ConsumeResult::Unavailable` (store outage / poisoned lock) or a malformed limit → **DENY** — never silently "unlimited". `count_status(&rule, &request, &store) -> CountStatus` is the side-effect-free audit surface (`Satisfied{consumed,limit}` / `DefinitelyUnsatisfied{..}` / `Unprovable` / `NotConstrained`), the count dual of `purpose_status`.
 - **Deferred (honest).** The stateless ODRL→ACP **bridge does NOT wire this stateful path** — a bridged ACP grant does not self-retract on count exhaustion (ACP has no usage counter; the bridge keeps `odrl:count` one-shot/unmappable, see the mapping table). This feature is the evaluator + store seam such a bridge would build on.
 
+## Static conflict + containment analysis (request-free) — [OPUS-4.8] sq-zabv
+
+Where `evaluate` answers *"may THIS request go through?"*, two **request-free** functions answer questions about the policies themselves (the query-containment comparison semantics, [arXiv 2509.05139 §comparison](https://arxiv.org/html/2509.05139v1)). Both are always compiled (no feature, no deps) and both are **sound / fail-closed — never over-claimed**.
+
+```rust,ignore
+use sparq_policy::{contains, detect_conflicts, Containment, Overlap};
+// Lint a policy for permission/prohibition conflicts.
+for c in detect_conflicts(&policy) {
+    // c.permission_id is (wholly, if c.overlap == Overlap::Certain) carved out by c.prohibition_id
+}
+// Does the provider's offer permit everything the requester asks?
+match contains(&provider_policy, &request_policy) {
+    Containment::Contains => { /* every ask is covered */ }
+    Containment::NotContained => { /* a witness ask the offer denies */ }
+    Containment::Unknown => { /* undecidable under the conservative comparison */ }
+}
+```
+
+- **`detect_conflicts(&policy) -> Vec<Conflict>`** — every permission/prohibition pair whose request footprints overlap (a prohibition carves the permission out — deny-overrides). `Conflict { permission_id, prohibition_id, overlap, action, target }`. `overlap` is `Overlap::Certain` **only** when the structural attributes (action / target / assignee) prove an overlap AND the prohibition adds **no** constraint the permission lacks (so the carve-out covers the *whole* permission); otherwise `Overlap::Possible` (the rules *might* overlap but we cannot prove they always do). A pair that **provably never** overlaps (disjoint concrete action / target / assignee) is omitted. Conflict is strictly across the permission/prohibition divide — two permissions never conflict.
+- **`contains(outer, inner) -> Containment`** — does `outer` permit everything `inner` permits (refinement / requester-vs-provider containment)? `Containment::Contains` **only** when every `inner` permission is *provably* subsumed by some `outer` permission AND no `outer` prohibition could carve into it; `Containment::NotContained` when an `inner` permission *provably* grants a request `outer` denies (disjoint concrete target/action, or `inner` leaves a dimension `outer` restricts wide open); `Containment::Unknown` otherwise. An `inner` with no permissions is contained vacuously.
+- **Soundness boundary (honest).** Constraint satisfiability / query containment is undecidable in the general ODRL constraint language. This module decides only what it can *prove* from rule structure plus a conservative per-dimension constraint comparison (identical constraints; `eq v` admitted by an `outer` bound; a *tighter* same-direction order bound — `lt`/`lteq`, `gt`/`gteq` — implying a looser one). Everything else degrades to `Possible` / `Unknown` — it **never** reports `Certain` / `Contains` it cannot prove (that is the fail-OPEN failure mode: claiming an ask is covered when it is not). It also does not (yet) prove `NotContained` from a *looser* inner numeric bound reaching above a tighter outer one — that case honestly returns `Unknown`. DPV/`isPartOf` set-subset refinement is a deferred bead.
+
 ## Bridge to WAC/ACP enforcement (opt-in `odrl-bridge`) — [OPUS-4.8] sq-h3uk
 
 `sparq-solid` can **materialize** a matched ODRL permission into its `<urn:sparq:auth>` AUTH_GRAPH so the existing graph-level WAC/ACP enforcement applies it — **no new enforcement engine**. Behind the off-by-default `odrl-bridge` cargo feature on `sparq-solid` (it pulls in `sparq-policy` only when enabled; the default solid build stays ODRL-free). This is the **single-node** bridge of epic sq-3183, **research-track**, NOT the (gated) federated/ZK-disclosure path.

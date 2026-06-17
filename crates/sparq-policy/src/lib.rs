@@ -6,10 +6,15 @@
 #[cfg(feature = "count-enforcement")]
 pub mod count;
 
+// [OPUS-4.8] sq-zabv: static (request-free) policy analysis — permission/prohibition
+// conflict + policy containment/refinement, on the query-containment comparison
+// semantics. Always compiled (no feature gate); it adds no deps and no core cost.
+mod compare;
 mod eval;
 pub mod model;
 mod parse;
 
+pub use compare::{contains, detect_conflicts, Conflict, Containment, Overlap};
 pub use eval::{
     datetime_status, evaluate, matched_prohibition, prohibition_status, purpose_status,
     recipient_status, DateTimeMatch, Decision, ProhibitionStatus, PurposeMatch, RecipientMatch,
