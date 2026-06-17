@@ -168,8 +168,14 @@ query_vec(&Graph, sparql: &str, &VectorStore) -> Result<QueryResult, String>    
 query_vec_with_budget(&Graph, &str, &VectorStore, &QueryBudget) -> Result<QueryResult, String>
 prepare_vec(&Graph, &str, &VectorStore) -> Result<PreparedQuery, String>          // compose with engine *_prepared entry points
 rewrite_query(Query, &Graph, &VectorStore) -> Result<Query, String>              // spargebra-algebra rewrite only
-// re-exported when the feature is on: PreparedQuery, QueryBudget, QueryResult (no direct sparq-engine dep needed)
+// re-exported when the feature is on: query_prepared, PreparedQuery, QueryBudget, QueryResult (no direct sparq-engine dep needed)
 // vocab: vec::{VEC_NS, NEAREST, SEARCH}  (http://sparq.dev/vec#)  — exact-scan (nearest_exact) KNN
+// [OPUS-4.8] sq-z589: with `approx-ann` ALSO on, the *_approx twins take a &DiskAnnIndex and run the
+//   UNFILTERED vec: k-NN through that Vamana index instead of the full scan (APPROXIMATE, recall < 1.0):
+query_vec_approx(&Graph, &str, &VectorStore, &DiskAnnIndex) -> Result<QueryResult, String>   // feature = "vec-predicate" + "approx-ann"
+query_vec_approx_with_budget(&Graph, &str, &VectorStore, &DiskAnnIndex, &QueryBudget) -> Result<QueryResult, String>
+prepare_vec_approx(&Graph, &str, &VectorStore, &DiskAnnIndex) -> Result<PreparedQuery, String>
+//   The FILTERED path is unchanged (still cost-model'd nearest_filtered_costed); approx seam = unfiltered scan only.
 // [OPUS-4.8] sq-36ol: with `filtered-ann` ALSO on, the BGP→IdMask a constrained `vec:` neighbour
 //   derives is CACHED across prepares, keyed by (constraining sub-BGP, graph Fingerprint). The
 //   fingerprint folds dict_len + triple_count + an id-ordered content hash, so ANY graph change
@@ -395,8 +401,30 @@ The argument lists `( … )` are ordinary SPARQL RDF collections (spargebra lowe
 the neighbour position(s) must be variables; `query`/`k` must be constants; the object list must
 be exactly `( query k )` and the `vec:search` subject exactly `( ?node ?score )`; a query-vector
 literal's dimension must match the store; any other `vec:` IRI is unknown. An absent/unembedded
-seed IRI yields no rows. Search is the **exact** `nearest_exact` scan (deterministic, the HNSW/
-DiskANN approximate indexes are not yet wired into the predicate — recorded follow-up).
+seed IRI yields no rows. By default the unfiltered search is the **exact** `nearest_exact` scan
+(deterministic, answer-exact — a fine default below ~10⁵ vectors).
+
+**Approximate `vec:` for large stores (opt-in, ALSO `approx-ann`, sq-z589).** With BOTH
+`vec-predicate` *and* `approx-ann` on, `query_vec_approx` / `prepare_vec_approx` take an extra
+on-disk `DiskAnnIndex` argument and run the **unfiltered** k-NN through that Vamana index instead
+of the full scan — for large `.spqv` stores where brute force is the bottleneck. Everything else
+(parse, rewrite, VALUES inlining, joins, error checks, seed-self-exclusion) is identical to
+`query_vec`. **APPROXIMATE: recall < 1.0** — the index can miss a true neighbour; use `query_vec`
+(exact) when answer-exactness matters. Pass an index built with `DiskAnnIndex::build_for(&store,
+path, &graph)` (and a store bound via `.with_fingerprint(&graph)`) so the staleness guard catches a
+stale index. The **filtered** path (below) is unaffected — it still uses the cost-model'd filtered
+search; the approximate seam is only the unfiltered scan.
+
+```rust
+# #[cfg(all(feature = "vec-predicate", feature = "approx-ann"))] {
+use sparq_vectors::{query_vec_approx, DiskAnnIndex};
+let index = DiskAnnIndex::build_for(&store, "entities.spqg", &graph)?;   // build/open the Vamana graph once
+let r = query_vec_approx(&graph,
+    "PREFIX vec: <http://sparq.dev/vec#>
+     SELECT ?node WHERE { ?node vec:nearest ( \"0.1,0.9,…\" 10 ) }",
+    &store, &index)?;                                                     // APPROXIMATE top-10
+# }
+```
 
 **Automatic filtered ANN (compose with `filtered-ann`, sq-bvmd + sq-3tjd).** When **both**
 `vec-predicate` *and* `filtered-ann` are on, the rewrite derives the candidate id-set

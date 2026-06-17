@@ -73,11 +73,17 @@ pub use quant::{
 };
 #[cfg(feature = "vec-predicate")]
 pub use rewrite::{prepare_vec, query_vec, query_vec_with_budget, rewrite_query};
-// Re-export the engine result/budget types the `vec:` entry points return/take, so
-// callers (and tests) need not also declare a direct `sparq-engine` dependency.
-// [OPUS-4.8] (sq-k6ex)
+// [OPUS-4.8] (sq-z589, epic sq-3183) The APPROXIMATE `vec:` entry points — the unfiltered k-NN runs
+// through an on-disk `DiskAnnIndex` (Vamana) instead of the exact full scan, for large `.spqv`
+// stores. APPROXIMATE (recall < 1.0); gated on `approx-ann` (the only feature that compiles an
+// approximate index) on top of `vec-predicate`.
+#[cfg(all(feature = "vec-predicate", feature = "approx-ann"))]
+pub use rewrite::{prepare_vec_approx, query_vec_approx, query_vec_approx_with_budget};
+// Re-export the engine result/budget types the `vec:` entry points return/take (and `query_prepared`
+// so callers can evaluate a `prepare_vec*` `PreparedQuery`), so callers (and tests) need not also
+// declare a direct `sparq-engine` dependency. [OPUS-4.8] (sq-k6ex; query_prepared added sq-z589)
 #[cfg(feature = "vec-predicate")]
-pub use sparq_engine::{PreparedQuery, QueryBudget, QueryResult};
+pub use sparq_engine::{query_prepared, PreparedQuery, QueryBudget, QueryResult};
 pub use store::{StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION};
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
