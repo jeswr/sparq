@@ -342,7 +342,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
-                     [--query-timeout SECS] [--update-where-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
+                     [--query-timeout SECS] [--update-where-timeout SECS] [--header-read-timeout SECS] \
+                     [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
                      [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl} [--verbose] \
@@ -449,7 +450,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
-        "guards: query-timeout={} update-where-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
+        "guards: query-timeout={} update-where-timeout={} header-read-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
          max-query-rows={} max-query-bytes={} max-decompress-ratio={}x max-subscriptions={} \
          max-subscriptions-per-conn={}",
         config
@@ -458,6 +459,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // [OPUS-4.8] sq-nulp: writer-side WHERE deadline bounding head-of-line blocking.
         config
             .update_where_timeout
+            .map_or("off".into(), |t| format!("{}s", t.as_secs())),
+        // [OPUS-4.8] sq-2gqr: connection-layer header-read deadline (slow-loris guard).
+        config
+            .header_read_timeout
             .map_or("off".into(), |t| format!("{}s", t.as_secs())),
         config.max_body_bytes,
         config.max_concurrent,

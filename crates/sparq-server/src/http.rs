@@ -2582,6 +2582,7 @@ pub async fn serve<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    use futures_util::FutureExt;
     use hyper_util::rt::{TokioIo, TokioTimer};
     use hyper_util::service::TowerToHyperService;
 
@@ -2637,7 +2638,14 @@ where
             // WebSocket handshake depends on it.
             let conn = builder.serve_connection(io, hyper_service).with_upgrades();
             let mut conn = std::pin::pin!(conn);
-            let mut signal_closed = std::pin::pin!(signal_tx.closed());
+            // `.fuse()` is load-bearing (mirrors axum's own graceful-shutdown loop): a bare
+            // `watch::Receiver::closed()` future panics with `async fn resumed after completion`
+            // if it is polled again after it has resolved. Once the shutdown signal fires, the
+            // loop keeps running to DRAIN the connection (`conn.as_mut().await`), and `tokio::select!`
+            // would re-poll the already-completed `signal_closed` on the next iteration. Fusing it
+            // makes that branch terminated (`is_terminated()`); `select!` skips it, so the shutdown
+            // path fires `graceful_shutdown()` exactly once and then quietly drains to completion.
+            let mut signal_closed = std::pin::pin!(signal_tx.closed().fuse());
 
             loop {
                 tokio::select! {
@@ -2648,6 +2656,7 @@ where
                         break;
                     }
                     _ = &mut signal_closed => {
+                        tracing::trace!(target: "sparq_server", "shutdown signal in connection task, starting graceful shutdown");
                         conn.as_mut().graceful_shutdown();
                     }
                 }
