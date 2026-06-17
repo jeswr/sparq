@@ -820,6 +820,22 @@
       "mode": "query",
       "unit": "µs"
     },
+    "hdt_load_s": {
+      "label": "HDT — load+decode .hdt to a native Graph (advisory)",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "wall-clock load+decode of the synthetic .hdt (trend-only; machine-sensitive)",
+      "mode": "load",
+      "unit": "s"
+    },
+    "hdt_vs_ntgz_load_s": {
+      "label": "HDT — gzipped-N-Triples / HDT load-time ratio (advisory)",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "ntgz_load_s / hdt_load_s on the same triples (ratio survives contention; trend-only)",
+      "mode": "ratio",
+      "unit": "ratio"
+    },
     "load_s": {
       "label": "Load — parse + index build (synthetic)",
       "suite": "Pipeline",
@@ -1822,6 +1838,46 @@
       "query": "sh:sparql (SHACL §5.2) routed through sparq-engine",
       "mode": "validate",
       "unit": "µs"
+    },
+    "snikmeta_direct_eq_upstream": {
+      "label": "HDT direct_eq_upstream — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "1 iff direct decoder == upstream-backed path on the same bytes (oracle)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_distinct_predicates": {
+      "label": "HDT distinct_predicates — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "distinct predicates via a full SPO scan (triple-pattern resolution)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_rdf_type_triples": {
+      "label": "HDT rdf_type_triples — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "bound-predicate triple-pattern resolution (rdf:type triples)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_terms": {
+      "label": "HDT terms — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "distinct dictionary terms interned into sparq's Dict (id-translation)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_triples": {
+      "label": "HDT triples — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "stored triples of the decoded graph (load-and-decode-to-native)",
+      "mode": "count",
+      "unit": "count"
     },
     "sp2b_q01_count": {
       "label": "SP2Bench q01 — single journal's issue year (selective lookup), count",

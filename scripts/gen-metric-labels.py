@@ -529,6 +529,42 @@ def build():
         "mode": "deficit", "unit": "fixtures",
     }
 
+    # 13.5) HDT load-and-decode suite (sq-lrp9, design §3.7). The ci-bench hook emits the
+    # DETERMINISTIC load-and-decode counts (snikmeta_* , unit count — the HARD gate in
+    # bench/hdt/run.sh's self-assertion) plus two ADVISORY rows: hdt_load_s (wall-clock, trend)
+    # and hdt_vs_ntgz_load_s (a RATIO that survives box contention; trend, NEVER asserted).
+    # Load-and-decode-to-native is the ONLY like-for-like axis vs hdt-cpp/java (query-over-HDT is
+    # a NON-goal); the deterministic counts ARE the gate, not the dashboard. The `hdt` alias in the
+    # dashboard's FEATURED_SUITES routes these metrics to the HDT card via name-token match.
+    HDT_DATASET = ("vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; "
+                   "328 triples) for the gate; deterministic ~250k-triple synthetic archive for the "
+                   "advisory timing (HDT_BENCH_N)")
+    HDT_GATE = {
+        "snikmeta_triples": "stored triples of the decoded graph (load-and-decode-to-native)",
+        "snikmeta_terms": "distinct dictionary terms interned into sparq's Dict (id-translation)",
+        "snikmeta_distinct_predicates": "distinct predicates via a full SPO scan (triple-pattern resolution)",
+        "snikmeta_rdf_type_triples": "bound-predicate triple-pattern resolution (rdf:type triples)",
+        "snikmeta_direct_eq_upstream": "1 iff direct decoder == upstream-backed path on the same bytes (oracle)",
+    }
+    for name, desc in HDT_GATE.items():
+        labels[name] = {
+            "label": "HDT %s — load-and-decode gate" % name.replace("snikmeta_", ""),
+            "suite": "HDT", "dataset": HDT_DATASET,
+            "query": desc, "mode": "count", "unit": "count",
+        }
+    labels["hdt_load_s"] = {
+        "label": "HDT — load+decode .hdt to a native Graph (advisory)",
+        "suite": "HDT", "dataset": HDT_DATASET,
+        "query": "wall-clock load+decode of the synthetic .hdt (trend-only; machine-sensitive)",
+        "mode": "load", "unit": "s",
+    }
+    labels["hdt_vs_ntgz_load_s"] = {
+        "label": "HDT — gzipped-N-Triples / HDT load-time ratio (advisory)",
+        "suite": "HDT", "dataset": HDT_DATASET,
+        "query": "ntgz_load_s / hdt_load_s on the same triples (ratio survives contention; trend-only)",
+        "mode": "ratio", "unit": "ratio",
+    }
+
     # 14) ZERO-KNOWLEDGE family (sq dashboard-data-feed; ci-bench ZK hooks). EVERY ZK metric
     # name leads with the token `zk` so the dashboard's Zero-knowledge family prefix routing
     # buckets it. Three feeds, each grounded in an EXISTING bench (bench/benchmarks.toml zk-*):

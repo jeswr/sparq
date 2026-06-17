@@ -644,6 +644,29 @@ pinning     = "dataset slice size; mimalloc + fat LTO build to match shipped ing
 records_to  = "stdout (canonical runner); not baked into docs/tests"
 status      = "ok"
 
+# [OPUS-4.8] sq-lrp9 — the HDT capability suite: a DETERMINISTIC LOAD-AND-DECODE
+# count gate (triples/terms/distinct-predicates/rdf:type-resolution of the vendored
+# real-world snikmeta.hdt + a direct-vs-upstream id-translation oracle) + advisory
+# load timing (hdt_load_s + the contention-robust hdt_vs_ntgz_load_s RATIO).
+# Design: research/capability-benchmark-program.md §3.7. CRITICAL honest caveat:
+# load-and-decode-to-native is the ONLY like-for-like axis vs hdt-cpp/java —
+# sparq-hdt decodes HDT into sparq's own Dict/Graph then queries its own indexes,
+# whereas hdt-cpp/java query the compressed BitmapTriples in place — so a
+# "query over HDT" head-to-head is NOT like-for-like and is OUT OF SCOPE. The
+# hdt-cpp competitor (bench/competitors.json) is decode-only, gather-only via docker.
+[[benchmark]]
+id          = "hdt-suite"
+name        = "HDT load-and-decode (count gate + direct==upstream oracle)"
+category    = "ingest"
+measures    = "DETERMINISTIC load-and-decode counts on the vendored snikmeta.hdt — stored triples (328) / distinct dictionary terms / distinct predicates + rdf:type triple-pattern resolution over the decoded graph + the direct-vs-upstream id-translation oracle (all unit count, the HARD gate); advisory hdt_load_s + hdt_vs_ntgz_load_s ratio (trend-only, NOT gated)"
+invoke      = "cargo build --release -p sparq-hdt --example bench_oracle && bench/hdt/run.sh"
+source      = "bench/hdt/run.sh; crates/sparq-hdt/examples/bench_oracle.rs; gate bench/hdt/expected.tsv"
+dataset     = "vendored real-world snikmeta.hdt (crates/sparq-hdt/tests/fixtures; hdt-cpp/java-shaped, 328 triples) for the gate; deterministic ~250k-triple synthetic archive (HDT_BENCH_N) for the advisory timing"
+quiet_box_sensitive = true
+pinning     = "fixture is byte-fixed in-repo; counts gated in bench/hdt/expected.tsv; synthetic generator is seeded (xorshift) — only the advisory timing depends on N (HDT_BENCH_N)"
+records_to  = "stdout (run.sh, the canonical self-asserting runner); not baked into docs/tests — correctness lives in expected.tsv"
+status      = "ok"
+
 [[benchmark]]
 id          = "rsp-throughput"
 name        = "sparq-rsp continuous-query throughput"
