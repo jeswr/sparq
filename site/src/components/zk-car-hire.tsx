@@ -278,22 +278,24 @@ export function ZkCarHire() {
 // [OPUS-4.8] Subtle prover-readiness pill. Reuses the badge tokens; never blocks the
 // UI and never alters any security claim — it only reports cold-start progress.
 function ProverIndicator({ prover }: { prover: ProverState }) {
+  // [OPUS-4.8] sq-5q63 — `data-prover` mirrors the lifecycle state for the headless
+  // smoke test to await deterministically (regardless of label text/locale/styling).
   if (prover === "ready") {
     return (
-      <Badge variant="muted" aria-live="polite">
+      <Badge variant="muted" aria-live="polite" data-prover="ready">
         <CircleCheck className="size-3 text-[var(--success)]" /> Prover ready
       </Badge>
     );
   }
   if (prover === "error") {
     return (
-      <Badge variant="warning" aria-live="polite">
+      <Badge variant="warning" aria-live="polite" data-prover="error">
         <CircleAlert className="size-3" /> Prover load failed — retries on proof
       </Badge>
     );
   }
   return (
-    <Badge variant="muted" aria-live="polite">
+    <Badge variant="muted" aria-live="polite" data-prover="warming">
       <Loader2 className="size-3 animate-spin" /> Initializing ZK prover…
     </Badge>
   );
@@ -356,7 +358,9 @@ function VerdictPanel({ phase, age }: { phase: Phase; age: number }) {
   if (phase.kind !== "done") return null;
   const r = phase.result;
   return (
-    <Card>
+    // [OPUS-4.8] sq-5q63 — `data-proof-verified` lets the smoke test await the first
+    // completed proof and assert it verified, without scraping copy.
+    <Card data-proof-result data-proof-verified={r.verified ? "true" : "false"}>
       <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="flex items-center gap-2 text-base">
           {r.verified ? (
