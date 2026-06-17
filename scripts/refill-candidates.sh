@@ -14,14 +14,24 @@
 # It is strictly read-only: it runs `bd ready`, `gh pr list`, and `git worktree list`, and
 # prints. It NEVER closes/creates/dispatches anything.
 #
+# Contention is reserved by OPEN PR + worktree branches with UNPUSHED local commits only
+# — NOT every git worktree branch. The harness never auto-removes a finished agent's
+# worktree, so hundreds of stale branches pile up; counting all of them reserved EVERY
+# crate and made the launchable frontier spuriously empty (sq-8rpq part 3). A pushed /
+# squash-merged branch (unpushed=0) is ignored — note we use the UNPUSHED test, NOT
+# "ancestor of origin/main": PRs are squash-merged, so a merged feature branch is NOT an
+# ancestor of main yet WAS pushed, and an ancestor test would re-introduce the bug. The
+# unpushed test mirrors scripts/worktree-gc.sh's "never-dropped" predicate.
+#
 # Surface derivation (best-effort, deterministic): a bead's surface is inferred from its
 # title — a leading `crate:` / `crate(...)` / `[tag]` token, or any `sparq-<crate>` mention,
 # matched against the actual crate list under crates/. Beads with no recognised surface are
 # bucketed under "(unscoped)".
 #
-# Contention: a surface is "in flight" if an OPEN PR's head branch or a local worktree's
-# branch name contains the surface token. This is heuristic (branch names are free-form) and
-# advisory — a flag is a prompt to check, not a hard block.
+# Contention: a surface is "in flight" if an OPEN PR's head branch — or a local worktree
+# branch that has UNPUSHED local commits — contains the surface token. Pushed / stale
+# worktree branches are ignored (see above). This is heuristic (branch names are
+# free-form) and advisory — a flag is a prompt to check, not a hard block.
 #
 # Run:
 #   scripts/refill-candidates.sh                    # the candidate briefing
@@ -66,6 +76,41 @@ infer_surface() {
   printf '\n'
 }
 
+# [OPUS-4.8] sq-8rpq part 3: contention by UNPUSHED worktree branches (not every branch).
+# wt_contention_branch <branch> <unpushed-count> : echo <branch> iff it is a CONTENTION
+# source, i.e. iff it has UNPUSHED local commits (fresh work, no PR yet). <unpushed-count>
+# is the number of commits on HEAD absent from the push target; "0" = fully pushed (or
+# squash-merged) => NOT contention; any non-"0" (incl. the 999999 never-pushed sentinel)
+# => genuinely in-flight. The UNPUSHED test (not "ancestor of main") is load-bearing:
+# PRs are squash-merged, so a finished feature branch is NOT an ancestor of main yet WAS
+# pushed (unpushed=0); an ancestor/`--no-merged` test would flag all the hundreds of
+# lingering `.claude/worktrees/` branches and reserve every crate, emptying the frontier
+# (the sq-8rpq bug). Pure (no git): the count is injected, so this is hermetically
+# testable. Mirrors scripts/worktree-gc.sh's `wt_unpushed_count` predicate.
+wt_contention_branch() {
+  local branch="$1" unpushed="$2"
+  [ -n "$branch" ] || return 0
+  [ "$unpushed" = "0" ] && return 0        # fully pushed / squash-merged -> not contention.
+  printf '%s\n' "$branch"
+}
+
+# wt_unpushed_count <wt> <branch> : commits on HEAD absent from the push target (upstream,
+# else origin/<branch>); 999999 sentinel if never pushed. Copied verbatim from
+# scripts/worktree-gc.sh so all three scripts share one definition of "unpushed".
+wt_unpushed_count() {
+  local wt="$1" branch="$2" upstream target
+  upstream="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || upstream=""
+  if [ -n "$upstream" ] && git -C "$wt" rev-parse --verify -q "$upstream" >/dev/null 2>&1; then
+    target="$upstream"
+  elif [ -n "$branch" ] && git -C "$wt" rev-parse --verify -q "origin/$branch" >/dev/null 2>&1; then
+    target="origin/$branch"
+  else
+    printf '999999'   # no push target ⇒ treat as unpushed ⇒ in flight.
+    return 0
+  fi
+  git -C "$wt" rev-list --count "$target..HEAD" 2>/dev/null || printf '999999'
+}
+
 # --- self-test (no external calls) -----------------------------------------------------
 self_test() {
   local fails=0 got CR
@@ -97,6 +142,20 @@ self_test() {
   got="$(infer_surface 'server hardening for sparq-server limits' "$CR")"
   _check "crate mention wins over prose"           "$got" "sparq-server"
 
+  # --- worktree-branch contention filter (sq-8rpq part 3): a worktree branch is a
+  #     contention source ONLY if it has UNPUSHED local commits. A pushed / squash-merged
+  #     branch (unpushed=0) must NOT reserve its surface — otherwise the ~500 lingering
+  #     worktree branches reserve EVERY crate and the frontier is spuriously empty. The
+  #     unpushed COUNT is injected so this stays hermetic (no git calls).
+  got="$(wt_contention_branch 'sq-glw2-dict-spill' 2)"
+  _check "branch w/ unpushed commits IS contention" "$got" "sq-glw2-dict-spill"
+
+  got="$(wt_contention_branch 'sq-never-pushed' 999999)"
+  _check "never-pushed branch IS contention"        "$got" "sq-never-pushed"
+
+  got="$(wt_contention_branch 'sq-squash-merged' 0)"
+  _check "pushed/squash-merged branch NOT contention" "$got" ""
+
   echo
   if [ "$fails" -eq 0 ]; then log "self-test PASSED"; return 0; fi
   die "self-test FAILED ($fails check(s))"
@@ -126,19 +185,41 @@ if [ -d "$ROOT/crates" ]; then
 fi
 [ -n "$CRATES" ] || log "WARNING: no crates/ dir found — surface inference will fall back to title tags only."
 
-# --- 1. gather contention signals: open-PR branches + worktree branches ----------------
+# --- 1. gather contention signals: open-PR branches + UNPUSHED worktree branches -------
+# A surface is genuinely in flight iff it is touched by (a) an OPEN PR, or (b) a worktree
+# branch with UNPUSHED local commits (work committed but not yet pushed/PR'd). A pushed
+# branch (incl. one that was squash-merged) is NOT contention — the harness never
+# auto-removes finished worktrees, so hundreds pile up; reserving on *every* worktree
+# branch (the old behaviour) reserved every crate and left the frontier spuriously empty
+# (sq-8rpq part 3). The unpushed test mirrors scripts/worktree-gc.sh.
 CONTENTION_BRANCHES=""
 if command -v gh >/dev/null 2>&1; then
   CONTENTION_BRANCHES="$(gh pr list --state open --limit 200 --json headRefName \
     -q '.[].headRefName' 2>/dev/null || true)"
 else
-  log "gh not found — open-PR contention flags will be omitted (worktree branches still used)."
+  log "gh not found — open-PR contention flags will be omitted (unpushed worktrees still used)."
 fi
-WT_BRANCHES="$(git -C "$ROOT" worktree list --porcelain 2>/dev/null \
-  | sed -n 's/^branch refs\/heads\///p' || true)"
+
+# Walk each worktree; keep its branch only if it has UNPUSHED local commits (fresh work,
+# no PR yet). A pushed / squash-merged branch (unpushed=0) is skipped. Worktrees with a
+# detached HEAD (no branch line) are skipped automatically.
+WT_BRANCHES=""
+WT_PATH="" WT_BRANCH=""
+while IFS= read -r line; do
+  case "$line" in
+    "worktree "*) WT_PATH="${line#worktree }"; WT_BRANCH="" ;;
+    "branch refs/heads/"*)
+      WT_BRANCH="${line#branch refs/heads/}"
+      if [ -n "$WT_BRANCH" ] && [ -d "$WT_PATH" ]; then
+        WT_BRANCHES+="$(wt_contention_branch "$WT_BRANCH" "$(wt_unpushed_count "$WT_PATH" "$WT_BRANCH")")"$'\n'
+      fi
+      ;;
+  esac
+done < <(git -C "$ROOT" worktree list --porcelain 2>/dev/null || true)
+
 ALL_BRANCHES="$(printf '%s\n%s\n' "$CONTENTION_BRANCHES" "$WT_BRANCHES" | sed '/^$/d' | sort -u)"
 
-# Is surface $1 contended (its token appears in any open-PR/worktree branch name)?
+# Is surface $1 contended (its token appears in any open-PR / unpushed-worktree branch name)?
 is_contended() {
   local surface="$1"
   [ -n "$surface" ] || return 1
@@ -177,7 +258,7 @@ done <<< "$ROWS"
 
 # --- 3. print the briefing (surfaces sorted; contended ones flagged) -------------------
 echo "refill-candidates — $total ready bead(s), grouped by inferred surface (READ-ONLY, advisory)"
-echo "  contention sources: $(printf '%s\n' "$ALL_BRANCHES" | sed '/^$/d' | wc -l | tr -d ' ') open-PR/worktree branch name(s)"
+echo "  contention sources: $(printf '%s\n' "$ALL_BRANCHES" | sed '/^$/d' | wc -l | tr -d ' ') open-PR + unpushed-worktree branch name(s)"
 echo
 
 # List free (uncontended) surfaces first — those are the safest refill targets.

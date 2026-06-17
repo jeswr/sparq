@@ -117,10 +117,27 @@ concurrency ceiling. The launchable frontier the brief specifies is:
 frontier = (bd ready)  −  (in-flight beads)  −  (conflict-collisions)   capped at 6 LOCAL
 ```
 
-where *conflict-collision* = a bead whose file-area overlaps an in-flight bead
-(`sparq-server`/`http.rs` auth path is the one contended surface — reserve for ONE
-branch at a time per `AGENTS.md`). This frontier is exactly what `push-frontier.sh`
-must print (§4). The two independent ceilings from `AGENTS.md` both apply and are
+where *conflict-collision* = a bead whose file-area overlaps an in-flight bead, applied
+as a per-crate **conflict-partition: ≤ 1 bead per crate/surface**, with `site` and the
+`sparq-server`/`http.rs` `server-auth` path serialised to ≤ 1 (reserve for ONE branch at
+a time per `AGENTS.md`). This frontier is exactly what `push-frontier.sh` must print
+(§4). Two refinements (sq-8rpq), both load-bearing:
+
+* **The conflict-partition is canonical over the COMBINED set.** If the scheduler ever
+  *falls back* to a raw `bd ready` list (push-frontier unavailable, or it blends in extra
+  beads), it MUST re-apply the ≤ 1-per-crate / server+site→1 dedup to the **combined**
+  push-frontier + bd-ready set — never dispatch the bd-ready fallback un-deduped, or two
+  beads on the same crate launch at once and conflict (the original sq-8rpq symptom:
+  two `sparq-server` beads dispatched together).
+* **In-flight is reserved by open PR + UNPUSHED worktree branches, not every branch.**
+  PRs are squash-merged, so a finished feature branch is *not* an ancestor of `main` but
+  *was* pushed; the harness never auto-removes its worktree, so hundreds of stale
+  branches accumulate. `push-frontier.sh` / `refill-candidates.sh` reserve a worktree
+  branch only when it has **unpushed local commits** (`origin/<branch>..HEAD ≠ 0`, or
+  never pushed) — an `--no-merged`/ancestor test would flag all of them and empty the
+  frontier. Run `worktree-gc.sh --apply` at idle so stale worktrees do not pile up.
+
+The two independent ceilings from `AGENTS.md` both apply and are
 HARD: the **box CPU budget** (6 cargo-heavy locally) and the **Anthropic API
 rate-limit** (~10 concurrent agents trips throttling → keep a *sustained* fleet,
 refill as agents land, never a thundering-herd burst). EC2 adds a third hard ceiling:
