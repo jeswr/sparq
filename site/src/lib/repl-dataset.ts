@@ -207,6 +207,28 @@ export function isGraphForm(form: QueryForm): boolean {
   return form === "construct" || form === "describe";
 }
 
+// [OPUS-4.8] sq-xe4f — EXPLAIN / EXPLAIN ANALYZE support per query form.
+//
+// EXPLAIN/ANALYZE drive the *query* planner (`store.explain` / `store.explainAnalyze`),
+// which only accept query forms — handing it a SPARQL Update yields an engine parse
+// error ("expected CONSTRUCT"). So the REPL must NOT offer EXPLAIN/ANALYZE for an Update
+// example. This pure predicate lets the ModeTabs component gray those tabs out (and lets
+// `Repl` snap the mode back to "run" when an Update is loaded) instead of only degrading
+// via the error panel after the fact. The engine stays the source of truth — a
+// mis-classified query still surfaces the engine's own error.
+export type RunMode = "run" | "explain" | "analyze";
+
+/**
+ * True when {@link mode} is a usable choice for {@link form}. `"run"` always is.
+ * EXPLAIN / ANALYZE plan a *query* and reject SPARQL Update forms, so they are
+ * unavailable for `"update"`.
+ */
+export function modeSupportsForm(mode: RunMode, form: QueryForm): boolean {
+  if (mode === "run") return true;
+  // EXPLAIN / EXPLAIN ANALYZE plan a *query*; SPARQL Update is not a query form.
+  return form !== "update";
+}
+
 /**
  * Serialises {@link ALL_QUADS_QUERY} solution rows to an N-Quads document: a triple
  * line (`s p o .`) when `?g` is unbound (default graph), a quad line
