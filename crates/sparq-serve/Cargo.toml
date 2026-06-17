@@ -26,8 +26,8 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# Lock-free current-generation pointer (§6.4): readers `load()` in ~10-20 ns and
-# never block the writer. Deliberately a direct dependency of THIS crate only (not
+# Lock-free current-generation pointer (§6.4): readers `load()` without blocking
+# the writer. Deliberately a direct dependency of THIS crate only (not
 # a workspace dependency) — no other crate should reach for it casually; the
 # generation ring is the one sanctioned place for arc-swap in the tree.
 arc-swap = "1"

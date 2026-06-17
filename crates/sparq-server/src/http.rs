@@ -1744,7 +1744,7 @@ impl AppState {
         &self.metrics
     }
 
-    /// Pins the current generation for a request: lock-free, ~10–20 ns, never blocked
+    /// Pins the current generation for a request: lock-free, never blocked
     /// by an in-flight update. Hold the returned `Arc` for as long as the response is
     /// being produced; `gen.snapshot()` is the immutable [`Graph`] to evaluate against.
     pub fn current(&self) -> PinnedGen {
