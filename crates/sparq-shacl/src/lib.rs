@@ -468,3 +468,69 @@ mod tests {
         assert!(r.conforms, "{}", r.to_text());
     }
 }
+
+// [OPUS-4.8] (sq-mk9n, `shacl-af`) The `sh:expression` constraint
+// (`sh:ExpressionConstraintComponent`): a value node violates when the node
+// expression does not evaluate to `{ true }` for that value.
+#[cfg(feature = "shacl-af")]
+#[cfg(test)]
+mod expression_tests {
+    use super::*;
+
+    fn g(ttl: &str) -> Graph {
+        let prelude = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+            @prefix shnex: <http://www.w3.org/ns/shacl-node-expr#> .\n\
+            @prefix ex: <http://example.org/> .\n\
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n";
+        Graph::load_str(&format!("{prelude}{ttl}"), "turtle").unwrap()
+    }
+
+    #[test]
+    fn expression_constant_false_violates() {
+        // The W3C `expression-001` shape: `sh:expression false` at a node shape ⇒
+        // every targeted node is a violation (false != true).
+        let data = g("ex:i a ex:C .");
+        let shapes = g("ex:C a rdfs:Class, sh:NodeShape ; sh:expression false .");
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "{}", r.to_text());
+        assert!(r.results.iter().any(|res| res
+            .source_component
+            .ends_with("ExpressionConstraintComponent")
+            && res.value.as_ref().map(|v| v.to_string()).as_deref()
+                == Some("<http://example.org/i>")));
+    }
+
+    #[test]
+    fn expression_true_conforms() {
+        // A node expression that DOES evaluate to { true } conforms — here a
+        // `shnex:exists` over an existing path value.
+        let data = g("ex:i a ex:C ; ex:p ex:v .");
+        let shapes = g(
+            "ex:C a rdfs:Class, sh:NodeShape ; \
+             sh:expression [ shnex:exists [ sh:path ex:p ] ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(r.conforms, "exists ex:p => true => conforms: {}", r.to_text());
+    }
+
+    #[test]
+    fn expression_on_property_shape_per_value() {
+        // `sh:expression` on a property shape applies per path value node; here the
+        // value (5) satisfies a matchAll-over-minInclusive-3 ⇒ exists ⇒ true.
+        let data = g("ex:i a ex:C ; ex:age 5 .");
+        let shapes = g(
+            "ex:C a rdfs:Class, sh:NodeShape ; \
+             sh:property [ sh:path ex:age ; \
+               sh:expression [ shnex:exists [ shnex:nodes [ shnex:var \"focusNode\" ] ; \
+                 shnex:matchAll [ sh:minInclusive 3 ] ] ] ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(
+            r.conforms,
+            "age 5 >= 3 => matchAll true => exists true: {}",
+            r.to_text()
+        );
+    }
+}

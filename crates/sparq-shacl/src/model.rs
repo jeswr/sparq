@@ -86,6 +86,13 @@ pub enum Component {
         component: usize,
         args: Vec<Option<Term>>,
     },
+    /// [OPUS-4.8] (sq-mk9n, `shacl-af`) `sh:expression` — the SHACL-AF
+    /// *Expression Constraint* (`sh:ExpressionConstraintComponent`): a value node
+    /// `v` is violated when the node expression does NOT evaluate to `{ true }`
+    /// for `v` as focus. The index is into [`ShapesModel::expressions`] (the
+    /// parsed node expression is held there, off the public `Component` enum).
+    #[cfg(feature = "shacl-af")]
+    Expression(usize),
 }
 
 /// [OPUS-4.8] A declared `sh:parameter` of a SPARQL-based constraint component
@@ -196,6 +203,11 @@ pub struct ShapesModel {
     /// [`Component::CustomSparql`]. The registry is keyed (for activation) on the
     /// mandatory parameter predicates each component declares.
     pub(crate) components: Vec<ComponentDef>,
+    /// [OPUS-4.8] (sq-mk9n, `shacl-af`) Parsed `sh:expression` node expressions,
+    /// referenced by [`Component::Expression`]. Kept off the public `Component`
+    /// enum so the (crate-private) node-expression type is not exposed.
+    #[cfg(feature = "shacl-af")]
+    pub(crate) expressions: Vec<crate::rules::NodeExpr>,
 }
 
 impl ShapesModel {
@@ -207,6 +219,8 @@ impl ShapesModel {
             targeted: Vec::new(),
             sparql: Vec::new(),
             components: Vec::new(),
+            #[cfg(feature = "shacl-af")]
+            expressions: Vec::new(),
         };
 
         // [OPUS-4.8] SHACL §6: discover SPARQL-based constraint components FIRST, so
@@ -275,6 +289,14 @@ impl ShapesModel {
             }
         }
 
+        // [OPUS-4.8] (sq-mk9n, `shacl-af`) Second pass: parse each shape's
+        // `sh:expression` node expression into a component. Done after shape
+        // discovery so a filter expression can reference any declared shape; an
+        // inline anonymous filter shape inside the expression is registered on
+        // demand here so it is parsed and conformance-checkable at eval time.
+        #[cfg(feature = "shacl-af")]
+        m.parse_expression_constraints(shapes_graph);
+
         // Validation entry points: shapes with targets.
         m.targeted = (0..m.shapes.len())
             .filter(|&i| !m.shapes[i].targets.is_empty())
@@ -282,8 +304,87 @@ impl ShapesModel {
         m
     }
 
+    /// [OPUS-4.8] (sq-mk9n, `shacl-af`) Parses `sh:expression` on every shape into
+    /// a [`Component::Expression`]. Inline filter shapes used by the expression are
+    /// registered first (so they are conformance-checkable), then the expressions
+    /// are parsed and attached.
+    #[cfg(feature = "shacl-af")]
+    fn parse_expression_constraints(&mut self, shapes_graph: &Graph) {
+        let g = GraphView::new(shapes_graph);
+        // Collect (shape_id, expression_term) for every shape carrying sh:expression.
+        let mut pending: Vec<(usize, Term)> = Vec::new();
+        for sid in 0..self.shapes.len() {
+            let node = self.shapes[sid].node.clone();
+            for expr in g.objects(&node, &sh("expression")) {
+                pending.push((sid, expr));
+            }
+        }
+        // Register any inline filter shapes the expressions reference (best-effort)
+        // so `sh:filterShape` / function filter shapes resolve at eval time.
+        for (_, expr) in &pending {
+            self.register_expression_shapes(shapes_graph, expr, 0);
+        }
+        // Parse each expression (immutable borrow) and attach the component.
+        let parsed: Vec<(usize, crate::rules::NodeExpr)> = pending
+            .into_iter()
+            .filter_map(|(sid, expr)| {
+                crate::rules::parse_node_expr(&g, self, &expr).map(|ne| (sid, ne))
+            })
+            .collect();
+        for (sid, expr) in parsed {
+            let idx = self.expressions.len();
+            self.expressions.push(expr);
+            self.shapes[sid].components.push(Component::Expression(idx));
+        }
+    }
+
+    /// Walks an expression term registering inline `sh:filterShape` / function
+    /// filter shapes (`shnex:`/`sh:` `findFirst`/`matchAll`/`nodesMatching`) as
+    /// shapes so they resolve. Depth-bounded against pathological cyclic graphs.
+    #[cfg(feature = "shacl-af")]
+    fn register_expression_shapes(&mut self, shapes_graph: &Graph, term: &Term, depth: usize) {
+        if depth > 64 || matches!(term, Term::Literal(_)) {
+            return;
+        }
+        let g = GraphView::new(shapes_graph);
+        const SHNEX: &str = "http://www.w3.org/ns/shacl-node-expr#";
+        for local in ["filterShape", "findFirst", "matchAll", "nodesMatching"] {
+            for pred in [format!("{SHNEX}{local}"), sh(local)] {
+                if let Some(shape_term) = g.object(term, &pred) {
+                    self.ensure_shape(shapes_graph, &shape_term);
+                }
+            }
+        }
+        // Recurse into nested operand expressions / list members.
+        for (_, obj) in g.predicate_objects(term) {
+            if matches!(obj, Term::BlankNode(_)) {
+                self.register_expression_shapes(shapes_graph, &obj, depth + 1);
+            }
+        }
+    }
+
     pub fn by_node(&self, node: &Term) -> Option<usize> {
         self.by_node.get(node).copied()
+    }
+
+    /// [OPUS-4.8] (sq-mk9n, `shacl-af`) Ensures `node` is parsed as a shape and
+    /// returns its id, parsing it on demand from `shapes_graph` if it was not
+    /// discovered by top-level root discovery. SHACL-AF node-expression *filter
+    /// shapes* (`sh:filterShape`, `shnex:findFirst`/`matchAll`/`nodesMatching`)
+    /// may be **inline anonymous** shapes (e.g. `[ sh:minInclusive 3 ]`) that
+    /// carry no `rdf:type`/target, so they are not roots; this lets the function
+    /// registry register such a shape and then check conformance against it.
+    /// `None` only if `node` is a literal (literals are never shapes).
+    #[cfg(feature = "shacl-af")]
+    pub(crate) fn ensure_shape(&mut self, shapes_graph: &Graph, node: &Term) -> Option<usize> {
+        if matches!(node, Term::Literal(_)) {
+            return None;
+        }
+        if let Some(id) = self.by_node(node) {
+            return Some(id);
+        }
+        let g = GraphView::new(shapes_graph);
+        Some(self.shape_id(&g, node))
     }
 
     /// The id of the shape rooted at `node`, parsing it (and, recursively, the

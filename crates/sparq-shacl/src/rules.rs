@@ -73,6 +73,12 @@ use oxrdf::{NamedNode, NamedOrBlankNode, Term, Triple};
 use rustc_hash::FxHashSet;
 use sparq_core::Graph;
 
+// [OPUS-4.8] (sq-mk9n) The SHACL-function registry + the function-expression form
+// ([`NodeExpr::Func`]). A child module so its (sizeable) operator table stays out
+// of this file; it reaches the node-expression machinery through `super::`.
+#[path = "func.rs"]
+mod func;
+
 /// Upper bound on fixpoint iterations of the rule schedule. SHACL-AF leaves
 /// multi-pass entailment to "external orchestration"; we iterate until a pass
 /// adds nothing, but cap it so a pathological rule set (e.g. one that mints a
@@ -114,11 +120,17 @@ enum RuleKind {
 }
 
 /// A SHACL-AF node expression (SHACL-AF *Node Expressions*), evaluated against a
-/// focus node to a *set* of nodes. The full algebra is supported except the
-/// function-expression form (which needs a SHACL-function registry the crate
-/// does not carry — see the module docs).
+/// focus node to a *set* of nodes. The full algebra is supported, including the
+/// **function-expression form** ([`NodeExpr::Func`]) backed by the SHACL-function
+/// registry ([`func`]): the SHACL 1.2 built-in node-expression operators
+/// (`concat`/`sum`/`count`/`if`/`distinct`/`min`/`max`/`exists`/`limit`/`offset`/
+/// `instancesOf`/`flatMap`/`findFirst`/`matchAll`/`remove`/`orderBy`/
+/// `nodesMatching`/`var`) and a custom `sh:SPARQLFunction` IRI applied to a SHACL
+/// list of argument node expressions. A function IRI with no registered
+/// implementation is dropped leniently (so a rule using one infers nothing rather
+/// than misfiring) — see the module docs.
 #[derive(Debug, Clone)]
-enum NodeExpr {
+pub(crate) enum NodeExpr {
     /// `sh:this` — evaluates to `{ focus }`.
     This,
     /// A constant IRI or literal node — evaluates to `{ term }`.
@@ -133,6 +145,14 @@ enum NodeExpr {
     Intersection(Vec<NodeExpr>),
     /// `[ sh:union ( E1 E2 … ) ]`: set union of the members.
     Union(Vec<NodeExpr>),
+    /// A function expression — a registered SHACL-function operator applied to its
+    /// (already-parsed) operands. The [`func::Func`] carries the operator and the
+    /// argument node expressions / inline filter shapes it was parsed with.
+    Func(Box<func::Func>),
+    /// A SHACL 1.2 *list expression* — a bare `rdf:list` whose members are
+    /// themselves node expressions; evaluates to their members in order,
+    /// preserving duplicates (a sequence, not a set). `rdf:nil` ⇒ `{ rdf:nil }`.
+    List(Vec<NodeExpr>),
 }
 
 impl NodeExpr {
@@ -140,7 +160,7 @@ impl NodeExpr {
     /// shape expressions need the parsed `model` (to run the constraint validator
     /// for conformance) and the owning `Graph` (the validator is graph-, not
     /// view-, oriented) — both threaded through.
-    fn eval(
+    pub(crate) fn eval(
         &self,
         graph: &Graph,
         view: &GraphView,
@@ -182,6 +202,11 @@ impl NodeExpr {
                     .iter()
                     .flat_map(|m| m.eval(graph, view, model, focus)),
             ),
+            NodeExpr::Func(f) => f.eval(graph, view, model, focus),
+            NodeExpr::List(members) => members
+                .iter()
+                .flat_map(|m| m.eval(graph, view, model, focus))
+                .collect(),
         }
     }
 }
@@ -322,7 +347,7 @@ fn parse_values_rule(
 /// Parses a SHACL-AF node expression value (the full algebra — see [`NodeExpr`]).
 /// `None` for an unsupported / ill-formed blank-node expression (e.g. a function
 /// expression, or a filter shape whose shape is not in the model) — skipped.
-fn parse_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<NodeExpr> {
+pub(crate) fn parse_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<NodeExpr> {
     match node {
         Term::NamedNode(n) if n.as_str() == sh("this") => Some(NodeExpr::This),
         Term::NamedNode(_) | Term::Literal(_) => Some(NodeExpr::Constant(node.clone())),
@@ -336,6 +361,21 @@ fn parse_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<No
 /// union. The `sh:nodes` of a path or filter expression is itself a node
 /// expression (defaulting to `sh:this` for a path), so these nest.
 fn parse_blank_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<NodeExpr> {
+    // [OPUS-4.8] (sq-mk9n) A bare `rdf:list` blank node is a SHACL 1.2 *list
+    // expression* — its members are themselves node expressions. (Checked first:
+    // a list head carries `rdf:first`, which no operator/filter expression does.)
+    if g.object(node, crate::view::RDF_FIRST).is_some() {
+        let members: Vec<NodeExpr> = g
+            .list(node)
+            .iter()
+            .filter_map(|m| parse_node_expr(g, model, m))
+            .collect();
+        return Some(NodeExpr::List(members));
+    }
+    // An empty blank node `[]` (no predicates) is the EMPTY node expression.
+    if g.predicate_objects(node).is_empty() {
+        return Some(NodeExpr::List(Vec::new()));
+    }
     // Intersection / union: a SHACL list of member node expressions.
     for (pred, is_union) in [("intersection", false), ("union", true)] {
         if let Some(list_head) = g.object(node, &sh(pred)) {
@@ -373,7 +413,10 @@ fn parse_blank_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Opt
             path,
         });
     }
-    None // unsupported (e.g. a function expression) — dropped
+    // Function expression: a registered SHACL-function operator (`shnex:`/`sh:`
+    // built-in, or a custom `sh:SPARQLFunction` IRI) applied to its operands. An
+    // unregistered function IRI / ill-formed operand list yields `None` (dropped).
+    func::parse(g, model, node).map(|f| NodeExpr::Func(Box::new(f)))
 }
 
 /// The `sh:nodes` input node expression of a path / filter expression, defaulting
@@ -514,14 +557,40 @@ pub fn eval_node_expression(
     Some(parsed.eval(data, &view, &model, focus))
 }
 
+/// [OPUS-4.8] (sq-mk9n) Evaluates a parsed node expression `expr` against a value
+/// node `value` over the data `graph` (with `model` for filter-shape conformance),
+/// returning its result node set. The `sh:expression` constraint (in `eval.rs`)
+/// uses this to test whether an expression evaluates to `{ true }` for a value.
+pub(crate) fn eval_parsed_expr(
+    graph: &Graph,
+    model: &ShapesModel,
+    expr: &NodeExpr,
+    value: &Term,
+) -> Vec<Term> {
+    let view = GraphView::new(graph);
+    expr.eval(graph, &view, model, value)
+}
+
+/// True iff a node-expression result set is exactly `{ xsd:boolean "true" }` — the
+/// SHACL-AF `sh:expression` "satisfied" condition.
+pub(crate) fn is_true_result(set: &[Term]) -> bool {
+    set.len() == 1
+        && matches!(&set[0], Term::Literal(l)
+            if l.datatype().as_str() == "http://www.w3.org/2001/XMLSchema#boolean"
+                && l.value() == "true")
+}
+
 /// True iff `focus` **conforms** to the shape identified by `shape_node` in the
 /// `shapes` graph — i.e. validating `focus` against that shape as a standalone
 /// focus node (ignoring the shape's own targets) yields no results. `false` if
 /// `shape_node` names no parsed shape. This surfaces the `sh:condition` /
 /// `sh:filterShape` conformance primitive for callers (the harness uses it).
 pub fn conforms<'a>(data: &'a Graph, shapes: &Graph, shape_node: &Term) -> ConformanceCheck<'a> {
-    let model = ShapesModel::parse(shapes);
-    let sid = model.by_node(shape_node);
+    let mut model = ShapesModel::parse(shapes);
+    // Register the target shape on demand: an INLINE anonymous filter shape used by
+    // a node expression (`[ sh:minInclusive 3 ]` under `shnex:findFirst`/`matchAll`/
+    // `nodesMatching`) is not a top-level root, so `by_node` alone would miss it.
+    let sid = model.ensure_shape(shapes, shape_node);
     ConformanceCheck { data, model, sid }
 }
 
@@ -1289,11 +1358,12 @@ mod tests {
         );
     }
 
-    // ---- a function expression (unsupported) is dropped, not misfired ----
+    // ---- an UNDECLARED custom function IRI is dropped, not misfired ----
     #[test]
     fn function_expression_is_dropped() {
-        // [ ex:someFunction ( sh:this ) ] is a function expression we do not support;
-        // the value rule must infer nothing (lenient drop), never panic or misfire.
+        // [ ex:someFunction ( sh:this ) ] names a function IRI that is NOT declared
+        // as a sh:SPARQLFunction, so the registry has no implementation: the value
+        // rule must infer nothing (lenient drop), never panic or misfire.
         let data = g("ex:a a ex:Person .");
         let shapes = g(r#"
             ex:S a sh:NodeShape ;
@@ -1305,6 +1375,108 @@ mod tests {
         "#);
         let inf = apply_rules(&data, &shapes);
         assert!(inf.triples.is_empty(), "{:?}", inf.triples);
+    }
+
+    // ---- [OPUS-4.8] (sq-mk9n) function-expression operators in a sh:values rule ----
+    #[test]
+    fn values_rule_function_concat() {
+        // A `shnex:concat` function expression in sh:values infers one triple per
+        // concatenated member: (focus, ex:both, v) for v in {ex:a-vals ∪ ex:b-vals}.
+        let data = g("ex:a a ex:N ; ex:x ex:p ; ex:y ex:q .");
+        let shapes = g(r#"
+            @prefix shnex: <http://www.w3.org/ns/shacl-node-expr#> .
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:N ;
+              sh:property [
+                sh:path ex:both ;
+                sh:values [ shnex:concat ( [ sh:path ex:x ] [ sh:path ex:y ] ) ] ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert!(
+            has(
+                &inf,
+                "http://example.org/a",
+                "http://example.org/both",
+                "http://example.org/p"
+            ),
+            "{:?}",
+            inf.triples
+        );
+        assert!(
+            has(
+                &inf,
+                "http://example.org/a",
+                "http://example.org/both",
+                "http://example.org/q"
+            ),
+            "{:?}",
+            inf.triples
+        );
+        assert_eq!(inf.triples.len(), 2);
+    }
+
+    #[test]
+    fn eval_node_expression_function_operators() {
+        use crate::view::GraphView;
+        // Exercise the registry directly through the public seam: sum/count/if.
+        let data = g("ex:a a ex:N .");
+        let shapes = g(r#"
+            @prefix shnex: <http://www.w3.org/ns/shacl-node-expr#> .
+            ex:Decl
+              ex:sumExpr   [ shnex:sum ( 4 5 3 ) ] ;
+              ex:countExpr [ shnex:count ( 4 3 3 ) ] ;
+              ex:ifExpr    [ shnex:if true ; shnex:then 42 ] ;
+              ex:distExpr  [ shnex:distinct ( 4 2 4 ) ] .
+        "#);
+        let view = GraphView::new(&shapes);
+        let decl = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/Decl"));
+        let focus = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/a"));
+        let lex = |p: &str| -> Vec<String> {
+            let e = view
+                .object(&decl, &format!("http://example.org/{p}"))
+                .unwrap();
+            let mut v: Vec<String> = eval_node_expression(&data, &shapes, &e, &focus)
+                .unwrap()
+                .iter()
+                .map(|t| match t {
+                    Term::Literal(l) => l.value().to_string(),
+                    _ => t.to_string(),
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(lex("sumExpr"), vec!["12".to_string()]);
+        assert_eq!(lex("countExpr"), vec!["3".to_string()]);
+        assert_eq!(lex("ifExpr"), vec!["42".to_string()]);
+        assert_eq!(lex("distExpr"), vec!["2".to_string(), "4".to_string()]);
+    }
+
+    #[test]
+    fn eval_node_expression_custom_sparql_function() {
+        use crate::view::GraphView;
+        // A declared sh:SPARQLFunction applied to one argument: doubles its input.
+        let data = g("ex:a a ex:N .");
+        let shapes = g(r#"
+            ex:double a sh:SPARQLFunction ;
+              sh:parameter [ sh:path ex:arg ] ;
+              sh:select "SELECT ((?arg * 2) AS ?result) WHERE { }" .
+            ex:Decl ex:call [ ex:double ( 21 ) ] .
+        "#);
+        let view = GraphView::new(&shapes);
+        let decl = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/Decl"));
+        let call = view.object(&decl, "http://example.org/call").unwrap();
+        let focus = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/a"));
+        let got: Vec<String> = eval_node_expression(&data, &shapes, &call, &focus)
+            .expect("declared sh:SPARQLFunction must evaluate")
+            .iter()
+            .map(|t| match t {
+                Term::Literal(l) => l.value().to_string(),
+                _ => t.to_string(),
+            })
+            .collect();
+        assert_eq!(got, vec!["42".to_string()], "21 * 2 = 42");
     }
 
     // ---- the public `eval_node_expression` seam, exercised directly ----

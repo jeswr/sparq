@@ -2,9 +2,9 @@
 //! emits [`ValidationResult`]s via direct graph scans (no SPARQL round-trip).
 
 use crate::model::{sh, Component, ComponentDef, Shape, ShapesModel, Target};
-use crate::sparql::{ComponentResultFields, PreparedValidator};
 use crate::path::Path;
 use crate::report::ValidationResult;
+use crate::sparql::{ComponentResultFields, PreparedValidator};
 use crate::view::GraphView;
 use oxrdf::{Literal, Term};
 use rustc_hash::FxHashMap;
@@ -654,11 +654,37 @@ impl<'a> Validator<'a> {
             Component::CustomSparql { component, args } => {
                 self.eval_custom_component(sid, focus, values, *component, args, out)
             }
+            // [OPUS-4.8] (sq-mk9n, `shacl-af`) `sh:expression`
+            // (`sh:ExpressionConstraintComponent`): a value node is violated when
+            // the node expression does NOT evaluate to `{ true }` for that value.
+            #[cfg(feature = "shacl-af")]
+            Component::Expression(idx) => {
+                let data = self.data.graph();
+                let expr = &self.shapes.expressions[*idx];
+                for v in values {
+                    let result = crate::rules::eval_parsed_expr(data, self.shapes, expr, v);
+                    if !crate::rules::is_true_result(&result) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "ExpressionConstraintComponent",
+                            "Value does not satisfy the sh:expression".to_string(),
+                        ));
+                    }
+                }
+            }
         }
     }
 
     /// SHACL-SPARQL evaluation for one `sh:sparql` constraint occurrence.
-    fn eval_sparql(&mut self, sid: usize, focus: &Term, idx: usize, out: &mut Vec<ValidationResult>) {
+    fn eval_sparql(
+        &mut self,
+        sid: usize,
+        focus: &Term,
+        idx: usize,
+        out: &mut Vec<ValidationResult>,
+    ) {
         let constraint = &self.shapes.sparql[idx];
         if constraint.deactivated {
             return;
@@ -1025,7 +1051,10 @@ fn timestamp(value: &str, dt: &str) -> Option<(f64, bool)> {
     if local == "dateTimeStamp" && !has_tz {
         return None;
     }
-    Some((days_from_civil(y, m, d) as f64 * 86_400.0 + secs - tz_offset_secs, has_tz))
+    Some((
+        days_from_civil(y, m, d) as f64 * 86_400.0 + secs - tz_offset_secs,
+        has_tz,
+    ))
 }
 
 /// The byte index where a date lexical's optional timezone suffix starts.
@@ -1245,27 +1274,72 @@ mod tests {
 
         // [OPUS-4.8] Stricter XSD date/time lexical validation (review 1616):
         // impossible calendar days are rejected.
-        assert!(!well_formed(&lit("2023-02-29", "date")), "Feb 29 in a non-leap year");
-        assert!(!well_formed(&lit("2024-02-30", "date")), "Feb 30 never exists");
-        assert!(!well_formed(&lit("2024-04-31", "date")), "April has 30 days");
+        assert!(
+            !well_formed(&lit("2023-02-29", "date")),
+            "Feb 29 in a non-leap year"
+        );
+        assert!(
+            !well_formed(&lit("2024-02-30", "date")),
+            "Feb 30 never exists"
+        );
+        assert!(
+            !well_formed(&lit("2024-04-31", "date")),
+            "April has 30 days"
+        );
         assert!(well_formed(&lit("2024-04-30", "date")));
-        assert!(well_formed(&lit("2000-02-29", "date")), "2000 is a leap year (÷400)");
-        assert!(!well_formed(&lit("1900-02-29", "date")), "1900 is not (÷100, ¬÷400)");
+        assert!(
+            well_formed(&lit("2000-02-29", "date")),
+            "2000 is a leap year (÷400)"
+        );
+        assert!(
+            !well_formed(&lit("1900-02-29", "date")),
+            "1900 is not (÷100, ¬÷400)"
+        );
         // dateTime requires a time component after 'T'.
-        assert!(!well_formed(&lit("2024-01-01T", "dateTime")), "missing time part");
-        assert!(!well_formed(&lit("2024-01-01TZ", "dateTime")), "empty time part");
+        assert!(
+            !well_formed(&lit("2024-01-01T", "dateTime")),
+            "missing time part"
+        );
+        assert!(
+            !well_formed(&lit("2024-01-01TZ", "dateTime")),
+            "empty time part"
+        );
         // Out-of-range hour/minute/second.
-        assert!(!well_formed(&lit("2024-01-01T25:00:00", "dateTime")), "hour 25");
-        assert!(!well_formed(&lit("2024-01-01T12:60:00", "dateTime")), "minute 60");
-        assert!(!well_formed(&lit("2024-01-01T12:00:61", "dateTime")), "second 61");
-        assert!(well_formed(&lit("2024-01-01T24:00:00", "dateTime")), "24:00:00 is legal");
-        assert!(!well_formed(&lit("2024-01-01T24:00:01", "dateTime")), "24:00:01 is not");
-        assert!(well_formed(&lit("2024-01-01T12:30:45.5", "dateTime")), "fractional seconds");
+        assert!(
+            !well_formed(&lit("2024-01-01T25:00:00", "dateTime")),
+            "hour 25"
+        );
+        assert!(
+            !well_formed(&lit("2024-01-01T12:60:00", "dateTime")),
+            "minute 60"
+        );
+        assert!(
+            !well_formed(&lit("2024-01-01T12:00:61", "dateTime")),
+            "second 61"
+        );
+        assert!(
+            well_formed(&lit("2024-01-01T24:00:00", "dateTime")),
+            "24:00:00 is legal"
+        );
+        assert!(
+            !well_formed(&lit("2024-01-01T24:00:01", "dateTime")),
+            "24:00:01 is not"
+        );
+        assert!(
+            well_formed(&lit("2024-01-01T12:30:45.5", "dateTime")),
+            "fractional seconds"
+        );
         // Out-of-range / malformed timezone.
-        assert!(!well_formed(&lit("2024-01-01T12:00:00+15:00", "dateTime")), "tz > ±14:00");
+        assert!(
+            !well_formed(&lit("2024-01-01T12:00:00+15:00", "dateTime")),
+            "tz > ±14:00"
+        );
         assert!(well_formed(&lit("2024-01-01T12:00:00+14:00", "dateTime")));
         // dateTimeStamp requires an explicit timezone; dateTime does not.
-        assert!(well_formed(&lit("2024-01-01T12:00:00", "dateTime")), "tz-less dateTime ok");
+        assert!(
+            well_formed(&lit("2024-01-01T12:00:00", "dateTime")),
+            "tz-less dateTime ok"
+        );
         assert!(
             !well_formed(&lit("2024-01-01T12:00:00", "dateTimeStamp")),
             "tz-less dateTimeStamp is NOT in its lexical space"
@@ -1296,7 +1370,10 @@ mod tests {
             Literal::new_typed_literal(v, oxrdf::NamedNode::new(xsd("dateTime")).unwrap())
         };
         assert_eq!(
-            cmp_literals(&lit("2002-10-10T12:00:00-05:00"), &lit("2002-10-10T12:00:00")),
+            cmp_literals(
+                &lit("2002-10-10T12:00:00-05:00"),
+                &lit("2002-10-10T12:00:00")
+            ),
             None
         );
     }

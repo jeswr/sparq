@@ -49,12 +49,15 @@ const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 
 /// Pass-rate floor: the number of `sht:EvalNodeExpr` entries the implemented
 /// algebra evaluates correctly at the pinned suite commit (`fetch-shacl-tests.sh`
-/// PIN). The supported forms — focus / constant / list / path-values /
-/// filter-shape / intersection / union — yield 14 passing entries; the rest are
-/// the suite's *function* expressions (sum/orderBy/if/concat/count/…), recorded
-/// as SKIP not FAIL (no function registry). A regression below this floor fails
-/// the build; raising it (e.g. when functions land) is a deliberate bump.
-const BASELINE_PASS: usize = 14;
+/// PIN). [OPUS-4.8] (sq-mk9n) The SHACL-function registry promotes the suite's
+/// *function* expressions — `concat`/`count`/`sum`/`min`/`max`/`distinct`/`if`/
+/// `exists`/`limit`/`offset`/`instancesOf`/`nodesMatching`/`flatMap`/`findFirst`/
+/// `matchAll`/`remove`/`orderBy`/`var` — from SKIP to PASS, so all 63 evaluation
+/// entries pass (the remaining 2 `constraints/` entries are `sht:Validate` tests
+/// for `sh:expression`/`sh:nodeByExpression`, a different harness, not node-expr
+/// evaluation). A regression below this floor fails the build; raising it is a
+/// deliberate bump.
+const BASELINE_PASS: usize = 63;
 
 fn suite_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -221,7 +224,11 @@ fn run_entry(g: &Graph, view: &GraphView, entry: &Term) -> Outcome {
         .object(&action, &format!("{SHT}focusNode"))
         .unwrap_or_else(|| iri("urn:x-sparq:no-focus"));
 
-    let mut ev = Evaluator { g, view };
+    let mut ev = Evaluator {
+        g,
+        view,
+        action: action.clone(),
+    };
     let actual = match ev.eval(&expr, &focus) {
         Some(v) => v,
         None => return Outcome::Skip("unsupported node-expression form".into()),
@@ -253,6 +260,9 @@ fn set_eq(a: &[Term], b: &[Term]) -> bool {
 struct Evaluator<'a> {
     g: &'a Graph,
     view: &'a GraphView<'a>,
+    /// The entry's `mf:action` node — carries the test-suite variable scope
+    /// (`sht:scope-<name>` bindings) a `shnex:var "<name>"` expression resolves.
+    action: Term,
 }
 
 impl Evaluator<'_> {
@@ -269,6 +279,12 @@ impl Evaluator<'_> {
     }
 
     fn eval_blank(&mut self, expr: &Term, focus: &Term) -> Option<Vec<Term>> {
+        // An empty blank node `[]` (no predicates at all) is the EMPTY node
+        // expression — it evaluates to the empty set (so `count []` ⇒ 0,
+        // `exists []` ⇒ false, `min []` ⇒ ()), NOT an unsupported form.
+        if self.view.predicate_objects(expr).is_empty() {
+            return Some(Vec::new());
+        }
         // shnex *list expression* (SHACL 1.2): a bare rdf:list whose members are
         // the result node set. This is the SHACL-1.2 input form the suite uses to
         // feed filter / intersection / union member sets; the crate's SHACL-AF API
@@ -280,7 +296,10 @@ impl Evaluator<'_> {
             for m in &members {
                 out.extend(self.eval(m, focus)?);
             }
-            return Some(dedup(out));
+            // A SHACL list expression evaluates to its members in order, preserving
+            // DUPLICATES (a sequence, not a set) — `count`/`concat`/`sum` observe the
+            // multiset; set-valued consumers dedup themselves.
+            return Some(out);
         }
         // Path-values expression: shnex:pathValues P (P a property path), with the
         // start node from shnex:focusNode (a node expression; default = focus).
@@ -320,7 +339,155 @@ impl Evaluator<'_> {
                 });
             }
         }
-        None // unsupported form (function expression, etc.)
+        // [OPUS-4.8] (sq-mk9n) Function-expression operators (SHACL-function
+        // registry). Mirror the crate's `func` registry so the conformance gate is
+        // an end-to-end check of the same algebra.
+        self.eval_func(expr, focus)
+    }
+
+    /// The SHACL 1.2 / SHACL-AF built-in node-expression *function* operators —
+    /// the registry the `sh:`/`shnex:` namespaces spell as predicate-named
+    /// functions (sq-mk9n). Returns `None` for an operator this harness does not
+    /// implement (e.g. `var "bound"`, which needs a caller-supplied scope), so the
+    /// runner records SKIP not FAIL.
+    fn eval_func(&mut self, expr: &Term, focus: &Term) -> Option<Vec<Term>> {
+        // concat ( E1 E2 … ) — members of each argument, in order, NO dedup.
+        if let Some(list) = pred_object(self.view, expr, "concat") {
+            let mut out = Vec::new();
+            for m in &self.view.list(&list) {
+                out.extend(self.eval(m, focus)?);
+            }
+            return Some(out);
+        }
+        // count E — count of the input node set as xsd:integer.
+        if let Some(arg) = pred_object(self.view, expr, "count") {
+            return Some(vec![int_lit(self.eval(&arg, focus)?.len() as i128)]);
+        }
+        // sum E — numeric sum (empty ⇒ 0; integer-typed stays integer).
+        if let Some(arg) = pred_object(self.view, expr, "sum") {
+            return Some(vec![sum_lit(&self.eval(&arg, focus)?)]);
+        }
+        // min / max E.
+        for (op, max) in [("min", false), ("max", true)] {
+            if let Some(arg) = pred_object(self.view, expr, op) {
+                return Some(min_max(&self.eval(&arg, focus)?, max).into_iter().collect());
+            }
+        }
+        // distinct E — dedup by term equality.
+        if let Some(arg) = pred_object(self.view, expr, "distinct") {
+            return Some(dedup(self.eval(&arg, focus)?));
+        }
+        // exists E — { true } if Eval(E) non-empty else { false }.
+        if let Some(arg) = pred_object(self.view, expr, "exists") {
+            return Some(vec![bool_lit(!self.eval(&arg, focus)?.is_empty())]);
+        }
+        // if C ; then T ; else U?.
+        if let Some(cond) = pred_object(self.view, expr, "if") {
+            let is_true = is_true_set(&self.eval(&cond, focus)?);
+            if is_true {
+                return self.eval(&pred_object(self.view, expr, "then")?, focus);
+            }
+            return match pred_object(self.view, expr, "else") {
+                Some(e) => self.eval(&e, focus),
+                None => Some(Vec::new()),
+            };
+        }
+        // instancesOf C.
+        if let Some(class) = pred_object(self.view, expr, "instancesOf") {
+            return Some(self.view.instances_of(&class));
+        }
+        // nodesMatching S — graph nodes conforming to shape S.
+        if let Some(shape) = pred_object(self.view, expr, "nodesMatching") {
+            let chk = conforms(self.g, self.g, &shape);
+            return Some(
+                candidate_nodes(self.view)
+                    .into_iter()
+                    .filter(|n| chk.holds(n))
+                    .collect(),
+            );
+        }
+        // nodes N ; flatMap E — rebind focus to each n, concat (NO dedup).
+        if let Some(body) = pred_object(self.view, expr, "flatMap") {
+            let nodes = self.nodes_input(expr, focus)?;
+            let mut out = Vec::new();
+            for n in &nodes {
+                out.extend(self.eval(&body, n)?);
+            }
+            return Some(out);
+        }
+        // findFirst S ; nodes N — first node of N conforming to S.
+        if let Some(shape) = pred_object(self.view, expr, "findFirst") {
+            let nodes = self.nodes_input(expr, focus)?;
+            let chk = conforms(self.g, self.g, &shape);
+            return Some(
+                nodes
+                    .into_iter()
+                    .find(|n| chk.holds(n))
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        // matchAll S ; nodes N — { true } iff every node of N conforms to S.
+        if let Some(shape) = pred_object(self.view, expr, "matchAll") {
+            let nodes = self.nodes_input(expr, focus)?;
+            let chk = conforms(self.g, self.g, &shape);
+            return Some(vec![bool_lit(nodes.iter().all(|n| chk.holds(n)))]);
+        }
+        // remove R ; nodes N — N minus members of R (term equality).
+        if let Some(removed) = pred_object(self.view, expr, "remove") {
+            let nodes = self.nodes_input(expr, focus)?;
+            let drop: std::collections::HashSet<Term> =
+                self.eval(&removed, focus)?.into_iter().collect();
+            return Some(nodes.into_iter().filter(|n| !drop.contains(n)).collect());
+        }
+        // nodes N ; orderBy K ; desc? — sort N by least key value.
+        if let Some(key) = pred_object(self.view, expr, "orderBy") {
+            let mut nodes = self.nodes_input(expr, focus)?;
+            let desc = matches!(pred_object(self.view, expr, "desc"),
+                Some(Term::Literal(l)) if l.value() == "true");
+            // Precompute keys (eval cannot be called inside sort_by's closure as it
+            // needs &mut self); collect (node, key) pairs first.
+            let mut keyed: Vec<(Term, Vec<Term>)> = Vec::with_capacity(nodes.len());
+            for n in nodes.drain(..) {
+                let k = self.eval(&key, &n)?;
+                keyed.push((n, k));
+            }
+            keyed.sort_by(|a, b| {
+                let ord = cmp_key(&a.1, &b.1);
+                if desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+            return Some(keyed.into_iter().map(|(n, _)| n).collect());
+        }
+        // nodes N ; limit k / offset k.
+        if pred_object(self.view, expr, "limit").is_some()
+            || pred_object(self.view, expr, "offset").is_some()
+        {
+            let nodes = self.nodes_input(expr, focus)?;
+            let offset = int_arg(self.view, expr, "offset").unwrap_or(0).max(0) as usize;
+            let limit = int_arg(self.view, expr, "limit").map(|k| k.max(0) as usize);
+            let it = nodes.into_iter().skip(offset);
+            return Some(match limit {
+                Some(k) => it.take(k).collect(),
+                None => it.collect(),
+            });
+        }
+        // var "name" — "focusNode" ⇒ the focus; a test-suite `sht:scope-<name>`
+        // binding ⇒ its value; any other (unbound) name ⇒ the empty set.
+        if let Some(Term::Literal(name)) = pred_object(self.view, expr, "var") {
+            if name.value() == "focusNode" {
+                return Some(vec![focus.clone()]);
+            }
+            let scope_pred = format!("{SHT}scope-{}", name.value());
+            if let Some(bound) = self.view.object(&self.action, &scope_pred) {
+                return Some(vec![bound]);
+            }
+            return Some(Vec::new());
+        }
+        None // unsupported form (custom SPARQLFunction without decl, …)
     }
 
     /// The `shnex:focusNode` / SHACL-AF `sh:nodes` start-node expression of a path
@@ -376,4 +543,156 @@ fn dedup(items: Vec<Term>) -> Vec<Term> {
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+}
+
+// ---- [OPUS-4.8] (sq-mk9n) function-operator helpers (mirror crate `func`) ----
+
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+/// An integer argument of `subject <ns#local>` (in either namespace).
+fn int_arg(view: &GraphView, subject: &Term, local: &str) -> Option<i64> {
+    match pred_object(view, subject, local) {
+        Some(Term::Literal(l)) => l.value().trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+/// The candidate node set of the graph for `nodesMatching`: every non-literal
+/// subject / object, deduplicated.
+fn candidate_nodes(view: &GraphView) -> Vec<Term> {
+    let mut out = Vec::new();
+    for [s, _, o] in view.triples(None, None, None) {
+        if !matches!(s, Term::Literal(_)) {
+            out.push(s);
+        }
+        if !matches!(o, Term::Literal(_)) {
+            out.push(o);
+        }
+    }
+    dedup(out)
+}
+
+fn is_true_set(set: &[Term]) -> bool {
+    set.len() == 1
+        && matches!(&set[0], Term::Literal(l)
+            if l.datatype().as_str() == format!("{XSD}boolean") && l.value() == "true")
+}
+
+fn numeric(t: &Term) -> Option<f64> {
+    match t {
+        Term::Literal(l) if is_numeric(l.datatype().as_str()) => l.value().trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn is_numeric(dt: &str) -> bool {
+    let Some(local) = dt.strip_prefix(XSD) else {
+        return false;
+    };
+    matches!(
+        local,
+        "integer" | "decimal" | "double" | "float" | "long" | "int" | "short" | "byte"
+    )
+}
+
+fn is_integer_typed(t: &Term) -> bool {
+    matches!(t, Term::Literal(l) if matches!(
+        l.datatype().as_str().strip_prefix(XSD),
+        Some("integer" | "long" | "int" | "short" | "byte")
+    ))
+}
+
+fn int_lit(n: i128) -> Term {
+    Term::Literal(oxrdf::Literal::new_typed_literal(
+        n.to_string(),
+        oxrdf::NamedNode::new_unchecked(format!("{XSD}integer")),
+    ))
+}
+
+fn bool_lit(b: bool) -> Term {
+    Term::Literal(oxrdf::Literal::new_typed_literal(
+        if b { "true" } else { "false" },
+        oxrdf::NamedNode::new_unchecked(format!("{XSD}boolean")),
+    ))
+}
+
+fn sum_lit(vals: &[Term]) -> Term {
+    let mut total = 0.0_f64;
+    let mut all_int = true;
+    for v in vals {
+        if let Some(n) = numeric(v) {
+            total += n;
+            all_int &= is_integer_typed(v);
+        }
+    }
+    if all_int && total.fract() == 0.0 {
+        int_lit(total as i128)
+    } else {
+        Term::Literal(oxrdf::Literal::new_typed_literal(
+            decimal_lexical(total),
+            oxrdf::NamedNode::new_unchecked(format!("{XSD}decimal")),
+        ))
+    }
+}
+
+/// A valid `xsd:decimal` lexical form — always carries a fractional part
+/// (`42` ⇒ `42.0`) so an integer-valued decimal is still spelled as a decimal.
+fn decimal_lexical(v: f64) -> String {
+    let s = format!("{v}");
+    if s.contains('.') {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
+fn min_max(vals: &[Term], max: bool) -> Option<Term> {
+    let mut best: Option<(f64, Term)> = None;
+    for v in vals {
+        let Some(n) = numeric(v) else { continue };
+        let take = match &best {
+            None => true,
+            Some((b, _)) => {
+                if max {
+                    n > *b
+                } else {
+                    n < *b
+                }
+            }
+        };
+        if take {
+            best = Some((n, v.clone()));
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
+fn cmp_key(a: &[Term], b: &[Term]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let la = a.iter().min_by(|x, y| cmp_term(x, y));
+    let lb = b.iter().min_by(|x, y| cmp_term(x, y));
+    match (la, lb) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(x), Some(y)) => cmp_term(x, y),
+    }
+}
+
+fn cmp_term(a: &Term, b: &Term) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if let (Some(na), Some(nb)) = (numeric(a), numeric(b)) {
+        return na.partial_cmp(&nb).unwrap_or(Ordering::Equal);
+    }
+    lexical(a).cmp(&lexical(b))
+}
+
+fn lexical(t: &Term) -> String {
+    match t {
+        Term::NamedNode(n) => n.as_str().to_string(),
+        Term::Literal(l) => l.value().to_string(),
+        Term::BlankNode(b) => b.as_str().to_string(),
+        #[allow(unreachable_patterns)]
+        _ => String::new(),
+    }
 }
