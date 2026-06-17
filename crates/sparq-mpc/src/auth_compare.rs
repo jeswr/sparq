@@ -485,9 +485,13 @@ mod tests {
 
     /// ACCEPTANCE: `auth_mul` is correct AND tamper-evident — `a·b·c` chains and a
     /// wrong re-sharing of an intermediate product is caught (design §6 step 3
-    /// acceptance). We can't tamper INSIDE degree_reduce here, but corrupting the
-    /// value sharing of an authenticated product is the same observable deviation
-    /// (a [z] inconsistent with its MAC), so the check catches it.
+    /// acceptance). This test tampers the OUTPUT value sharing of an authenticated
+    /// product (`[z]` inconsistent with its MAC), the same OBSERVABLE deviation a
+    /// wrong re-sharing produces, so the check catches it. It does NOT distinguish a
+    /// SOUND MAC-carry from the (rejected) UNSOUND one, because a post-hoc value
+    /// tamper happens after the MAC is committed either way — that discrimination is
+    /// the dedicated job of [`mac_carry_soundness_distinguished_by_in_reduce_tamper`]
+    /// (sq-81gd), which injects the deviation INSIDE the value degree-reduce.
     #[test]
     fn auth_mul_chain_is_correct_and_tamper_evident() {
         let backend = ShamirBackend::new_seeded(7, 0xABBA).unwrap();
@@ -513,6 +517,143 @@ mod tests {
             session.mac_check(std::slice::from_ref(&tampered)),
             Err(MpcError::MacCheckFailed { .. })
         ));
+    }
+
+    /// [OPUS-4.8] sq-81gd — **THE regression test that distinguishes the SOUND
+    /// MAC-carry from the UNSOUND one by tampering INSIDE the value `degree_reduce`.**
+    ///
+    /// The other tamper tests in this module (and `auth_mul_chain_is_correct_and_
+    /// tamper_evident`) corrupt the OUTPUT value sharing of a completed `auth_mul`.
+    /// That models the *observable* result of a wrong re-sharing, but it CANNOT
+    /// discriminate the production MAC-carry (`[α·z] = reduce([α·x]·[y])`, an
+    /// independent reduce) from the design's REJECTED alternative
+    /// (`[α·z] = reduce([z]·[α])`): a post-hoc value tamper lands AFTER the MAC is
+    /// committed, so BOTH carries would catch it. The genuine "Hole 2" attack — a
+    /// deviating party re-sharing `h_i + δ` INSIDE the BGW reduce — produces a
+    /// *perfectly consistent* degree-`t` `[z]` of a WRONG product, with nothing for
+    /// Reed–Solomon to detect, and ONLY the independence of the two reduces makes the
+    /// MAC catch it. This test injects exactly that, then runs it through BOTH carries
+    /// and asserts they DIVERGE:
+    ///
+    /// - **SOUND** (`MacCarry::SoundIndependentReduce`): the MAC reduce never saw `δ`,
+    ///   so `[α·z]` holds the true `α·z` while `[z]` opens to `z + λδ` →
+    ///   `σ = α·z − (z+λδ)·α = −λδ·α ≠ 0` → `mac_check` ABORTS. Tamper CAUGHT.
+    /// - **UNSOUND** (`MacCarry::UnsoundFromValueTimesAlpha`): `[α·z]` is recomputed
+    ///   as `reduce([z]·[α])` from the tampered `[z]`, so it tracks `α·(z+λδ)` and
+    ///   `σ = 0` → `mac_check` PASSES on a WRONG product. Tamper MISSED.
+    ///
+    /// The divergence is the whole point: it proves the soundness lives in the
+    /// independent MAC reduce, not in any post-hoc consistency / RS check. If a future
+    /// refactor "simplified" `auth_mul` to recompute the MAC from the reduced value,
+    /// the SOUND assertion here would start failing — this is the guard that catches
+    /// that regression. We also sanity-check that the honest run (no `δ`) passes under
+    /// the production `auth_mul`, and that the in-reduce tamper alone (no MAC) leaves
+    /// `[z]` a *consistent* sharing the robust open does NOT flag (so the catch really
+    /// is the MAC, not RS).
+    #[test]
+    fn mac_carry_soundness_distinguished_by_in_reduce_tamper() {
+        use crate::shamir::MacCarry;
+        // n = 5, t = 2 → 2t+1 = 5: the MINIMAL honest-majority count, where the
+        // degree-2t product has ZERO RS redundancy — so RS/robust opens cannot help
+        // and the MAC is the SOLE detector (the regime the MAC was added for).
+        let backend = ShamirBackend::new_seeded(5, 0x81_9D).unwrap();
+        let t = backend.threshold();
+        assert_eq!(t, 2);
+        assert_eq!(
+            backend.parties(),
+            2 * t + 1,
+            "minimal honest-majority count"
+        );
+
+        let x_val = Fp::new(6);
+        let y_val = Fp::new(7);
+        let true_z = x_val.mul(y_val); // 42
+        let delta = Fp::new(123);
+        // Re-sharing party 0 deviates; the reduced secret shifts by λ_0·δ ≠ 0
+        // (λ_0 is the nonzero Lagrange-at-0 weight for the first recombination point).
+        let reshare_party = 0usize;
+
+        // ---- (a) honest production auth_mul passes and is correct (no behaviour
+        //          change on the clean path). ----
+        {
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let x = session.authenticated_share(x_val);
+            let y = session.authenticated_share(y_val);
+            let z = session.auth_mul(&x, &y).unwrap();
+            session.mac_check(std::slice::from_ref(&z)).unwrap();
+            assert_eq!(backend.reconstruct(z.value_shares()).unwrap(), true_z);
+        }
+
+        // ---- (b) SOUND carry, tamper INSIDE the value reduce → MAC-check ABORTS,
+        //          and the tampered value is a CONSISTENT (undetectable-by-RS)
+        //          sharing of the wrong product. ----
+        {
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let x = session.authenticated_share(x_val);
+            let y = session.authenticated_share(y_val);
+            let z = session
+                .auth_mul_with_value_reduce_tamper_for_test(
+                    &x,
+                    &y,
+                    reshare_party,
+                    delta,
+                    MacCarry::SoundIndependentReduce,
+                )
+                .unwrap();
+
+            // The value sharing is internally CONSISTENT: the robust degree-t open
+            // succeeds (no RS flag) and yields the WRONG product — exactly the Hole-2
+            // codeword. (If this were an off-curve tamper the open would error.)
+            let opened = backend.reconstruct(z.value_shares()).unwrap();
+            assert_ne!(
+                opened, true_z,
+                "in-reduce δ must shift the reduced product to a wrong value"
+            );
+
+            // The SOUND MAC reduce never saw δ → σ ≠ 0 → ABORT. THIS is the catch
+            // that a post-hoc value tamper test cannot uniquely attribute to the MAC.
+            assert!(
+                matches!(
+                    session.mac_check(std::slice::from_ref(&z)),
+                    Err(MpcError::MacCheckFailed { .. })
+                ),
+                "SOUND independent MAC reduce must catch an in-reduce value tamper"
+            );
+        }
+
+        // ---- (c) UNSOUND carry, SAME tamper → MAC-check PASSES (false negative).
+        //          This is the discriminator: the unsound MAC tracks the tampered
+        //          value, so σ = 0 and a WRONG product would be silently accepted. ----
+        {
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let x = session.authenticated_share(x_val);
+            let y = session.authenticated_share(y_val);
+            let z = session
+                .auth_mul_with_value_reduce_tamper_for_test(
+                    &x,
+                    &y,
+                    reshare_party,
+                    delta,
+                    MacCarry::UnsoundFromValueTimesAlpha,
+                )
+                .unwrap();
+
+            let opened = backend.reconstruct(z.value_shares()).unwrap();
+            assert_ne!(opened, true_z, "same in-reduce tamper → same wrong value");
+
+            // The UNSOUND recompute `[α·z] = reduce([z]·[α])` makes the MAC track the
+            // tampered z, so the batched check is FOOLED — it passes on a wrong result.
+            // This is the false negative the sound design avoids; the two carries
+            // DIVERGING on the identical in-reduce tamper is the property sq-81gd pins.
+            assert!(
+                session.mac_check(std::slice::from_ref(&z)).is_ok(),
+                "UNSOUND [z]·[α] MAC carry is FOOLED by the in-reduce tamper (σ = 0) — \
+                 this divergence from the sound route is what the test must exhibit"
+            );
+        }
     }
 
     /// `mac_check` of a clean degree-2t-style product (`auth_mul`) on an unequal
