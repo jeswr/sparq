@@ -13,7 +13,7 @@
     "build": "next build",
     "start": "npx --yes serve out",
     "lint": "next lint",
-    "test:unit": "node --import ./test-support/register-ts.mjs --test test/",
+    "test:unit": "node --import ./test-support/register-ts.mjs --test test/*.test.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {
