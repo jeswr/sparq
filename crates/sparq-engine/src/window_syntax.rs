@@ -20,58 +20,80 @@
 //! Inside a top-level `SELECT` projection, a window expression is written
 //!
 //! ```text
-//! ( <FN>() OVER ( [PARTITION BY ?v …] [ORDER BY [ASC|DESC]? ?v …] ) AS ?out )
+//! ( <FN>(<arg>) OVER ( [PARTITION BY ?v …] [ORDER BY [ASC|DESC]? ?v …] [<frame>] ) AS ?out )
 //! ```
 //!
-//! where `<FN>` is one of `ROW_NUMBER`, `RANK`, `DENSE_RANK` (case-insensitive),
-//! the empty `()` after the function name is required, and the `AS ?out` alias is
-//! required. This mirrors the SQL:2003 / Stardog / AnzoGraph window surface (the
-//! same model the programmatic [`crate::window`] pass follows) restricted to the
-//! three ranking functions.
+//! where `<FN>` is either a RANKING function — `ROW_NUMBER`, `RANK`, `DENSE_RANK`
+//! (case-insensitive), called with empty `()` — or a windowed AGGREGATE —
+//! `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (sq-imj8), called with a single `?var`
+//! argument. The `AS ?out` alias is required. An optional `<frame>` (sq-imj8) is
+//! `ROWS`/`RANGE` followed by either `BETWEEN <bound> AND <bound>` or a single
+//! `<bound>` (shorthand for `BETWEEN <bound> AND CURRENT ROW`), where a bound is
+//! `UNBOUNDED PRECEDING`, `n PRECEDING`, `CURRENT ROW`, `n FOLLOWING`, or
+//! `UNBOUNDED FOLLOWING`; a frame is valid only on an aggregate. This mirrors the
+//! SQL:2003 / Stardog / AnzoGraph window surface (the same model the programmatic
+//! [`crate::window`] pass follows).
 //!
-//! Example:
+//! Examples:
 //!
 //! ```text
 //! SELECT ?emp ?dept ?sales
 //!        (ROW_NUMBER() OVER (PARTITION BY ?dept ORDER BY DESC(?sales)) AS ?rn)
 //! WHERE { ?emp :dept ?dept ; :sales ?sales }
+//!
+//! SELECT ?emp ?sales
+//!        (SUM(?sales) OVER (ORDER BY ?sales ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ?run)
+//! WHERE { ?emp :sales ?sales }
 //! ```
 //!
 //! Both `ORDER BY DESC(?sales)` and `ORDER BY ?sales DESC` (the SQL trailing-
 //! keyword form) are accepted; bare `?sales` is ASC. `PARTITION BY` and the whole
 //! `ORDER BY` are each optional (an absent `PARTITION BY` is a single partition
-//! over the whole result; an absent `ORDER BY` makes every row a peer).
+//! over the whole result; an absent `ORDER BY` makes every row a peer; a frame
+//! requires an `ORDER BY`).
 //!
 //! ## Covered vs deferred
 //!
-//! * **Covered:** `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `PARTITION BY` over
-//!   one or more variables, `ORDER BY` over one or more keys (ASC/DESC, both
-//!   `DESC(?v)` and `?v DESC` spellings). An `ORDER BY` key may be a **computed
-//!   SPARQL expression** (sq-c1jv) — e.g. `ORDER BY (?a + ?b)`, `DESC(?sales + 0)`,
-//!   or `STRLEN(?s)` — not just a projected variable; the rewriter binds each such
-//!   expression to a fresh helper var via `(<expr> AS ?__win_orderkeyN)` in the
-//!   inner SELECT, orders on that helper, and drops it from the output. Multiple
-//!   window columns in one SELECT. Other (non-window) projection items — plain
-//!   variables and `(expr AS ?v)` aliases — pass through to the engine unchanged.
-//! * **Deferred (beaded):** windowed AGGREGATES inline (`SUM(?x) OVER (…)` etc.),
-//!   explicit window frames (`ROWS BETWEEN …`), `LAG`/`LEAD`/`NTILE`, a named
-//!   `WINDOW` clause, and `PARTITION BY` over a computed expression (only ORDER BY
-//!   keys may be expressions). Those remain available via the programmatic
-//!   [`crate::window`] API.
+//! * **Covered:** the ranking functions `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`
+//!   (empty `()`), AND the windowed AGGREGATES `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` of a
+//!   single `?var` (sq-imj8). `PARTITION BY` over one or more variables; `ORDER BY`
+//!   over one or more keys (ASC/DESC, both `DESC(?v)` and `?v DESC` spellings). An
+//!   `ORDER BY` key may be a **computed SPARQL expression** (sq-c1jv) — e.g.
+//!   `ORDER BY (?a + ?b)`, `DESC(?sales + 0)`, or `STRLEN(?s)` — not just a
+//!   projected variable; the rewriter binds each such expression to a fresh helper
+//!   var via `(<expr> AS ?__win_orderkeyN)` in the inner SELECT, orders on that
+//!   helper, and drops it from the output. An aggregate may carry an explicit
+//!   `ROWS`/`RANGE` window FRAME (sq-imj8) — `ROWS BETWEEN UNBOUNDED PRECEDING AND
+//!   CURRENT ROW`, `ROWS n PRECEDING` (single-bound shorthand for `… AND CURRENT
+//!   ROW`), `RANGE BETWEEN … AND CURRENT ROW`, etc. Multiple window columns in one
+//!   SELECT. Other (non-window) projection items — plain variables and
+//!   `(expr AS ?v)` aliases — pass through to the engine unchanged.
+//! * **Deferred (beaded):** a `DISTINCT` windowed aggregate
+//!   (`COUNT(DISTINCT ?x) OVER …`), an aggregate over a computed-expression
+//!   argument (the aggregate arg must be a bare `?var`), numeric `RANGE n PRECEDING`
+//!   offsets, `LAG`/`LEAD`/`NTILE`, a named `WINDOW` clause, and `PARTITION BY` over
+//!   a computed expression (only ORDER BY keys may be expressions). Those remain
+//!   available via the programmatic [`crate::window`] API.
 
 use oxrdf::Variable;
 use sparq_core::Graph;
 
-use crate::window::{apply_window, SortKey, WindowFunction, WindowSpec};
+use crate::window::{
+    apply_window, FrameBound, FrameUnit, SortKey, WindowAggregate, WindowFrame, WindowFunction,
+    WindowSpec,
+};
 use crate::{QueryBudget, QueryResult};
 
 /// One parsed inline window item lifted out of a SELECT projection: the function,
-/// its `PARTITION BY` / `ORDER BY` keys, and the output alias.
+/// its `PARTITION BY` / `ORDER BY` keys, an optional frame, and the output alias.
 #[derive(Debug, Clone)]
 struct WindowItem {
-    func: RankFunc,
+    func: WinFunc,
     partition_by: Vec<String>,
     order_by: Vec<OrderKey>,
+    /// An explicit window frame (`ROWS`/`RANGE …`), or `None` for the SQL default
+    /// (whole partition for an aggregate; ignored by a ranking function). sq-imj8.
+    frame: Option<WindowFrame>,
     out: String,
 }
 
@@ -96,9 +118,19 @@ enum Sort {
     Expr(String),
 }
 
-/// A parsed `OVER ( … )` spec: the `PARTITION BY` variable names and the
-/// `ORDER BY` sort keys.
-type OverSpec = (Vec<String>, Vec<OrderKey>);
+/// A parsed `OVER ( … )` spec: the `PARTITION BY` variable names, the `ORDER BY`
+/// sort keys, and an optional frame clause (`ROWS`/`RANGE …` — sq-imj8).
+type OverSpec = (Vec<String>, Vec<OrderKey>, Option<WindowFrame>);
+
+/// The function a window item computes: one of the three RANKING functions (an
+/// empty `FN()` call), or a windowed AGGREGATE over a column (`SUM(?x)` etc. —
+/// sq-imj8). The aggregate variant carries its argument variable name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WinFunc {
+    Rank(RankFunc),
+    /// A windowed aggregate `AGG(?of)`; the `?of` argument is a bare variable name.
+    Agg { agg: AggFunc, of: String },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RankFunc {
@@ -121,6 +153,40 @@ impl RankFunc {
             Self::RowNumber => WindowFunction::RowNumber,
             Self::Rank => WindowFunction::Rank,
             Self::DenseRank => WindowFunction::DenseRank,
+        }
+    }
+}
+
+/// A windowed aggregate function name (sq-imj8). Maps to a
+/// [`crate::window::WindowAggregate`]. `DISTINCT` arguments are not supported
+/// inline (use the programmatic API).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AggFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+impl AggFunc {
+    fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "COUNT" => Some(Self::Count),
+            "SUM" => Some(Self::Sum),
+            "AVG" => Some(Self::Avg),
+            "MIN" => Some(Self::Min),
+            "MAX" => Some(Self::Max),
+            _ => None,
+        }
+    }
+    fn to_window_aggregate(self) -> WindowAggregate {
+        match self {
+            Self::Count => WindowAggregate::Count,
+            Self::Sum => WindowAggregate::Sum,
+            Self::Avg => WindowAggregate::Avg,
+            Self::Min => WindowAggregate::Min,
+            Self::Max => WindowAggregate::Max,
         }
     }
 }
@@ -148,6 +214,12 @@ pub fn query_over_with_budget(
     // Run the rewritten (window-stripped) SELECT, then apply each window spec.
     let mut result = crate::query_with_budget(graph, &plan.rewritten, budget)?;
     for item in &plan.windows {
+        let function = match &item.func {
+            WinFunc::Rank(r) => r.to_window_function(),
+            WinFunc::Agg { agg, of } => {
+                WindowFunction::Aggregate { agg: agg.to_window_aggregate(), of: var(of)? }
+            }
+        };
         let spec = WindowSpec {
             partition_by: item.partition_by.iter().map(|v| var(v)).collect::<Result<_, _>>()?,
             order_by: item
@@ -164,7 +236,8 @@ pub fn query_over_with_budget(
                     Ok(SortKey { var: var(v)?, descending: key.descending })
                 })
                 .collect::<Result<_, String>>()?,
-            function: item.func.to_window_function(),
+            function,
+            frame: item.frame,
             new_var: var(&item.out)?,
         };
         result = apply_window(&result, &spec)?;
@@ -259,6 +332,13 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
                     helper_vars.push(v.clone());
                 }
             }
+            // A windowed aggregate's argument variable (`SUM(?of)`) must also
+            // survive the inner SELECT so the post-pass can read it. sq-imj8.
+            if let WinFunc::Agg { of, .. } = &win.func {
+                if !helper_vars.contains(of) {
+                    helper_vars.push(of.clone());
+                }
+            }
             // Resolve each ORDER BY key to a concrete variable the post-pass can
             // order on: a plain var is projected through; a computed expression is
             // bound to a fresh helper var via `(<expr> AS ?__win_orderkeyN)` in the
@@ -340,23 +420,61 @@ fn parse_window_item(item: &str) -> Result<Option<WindowItem>, String> {
     let head = inner[..over_pos].trim();
     let rest = inner[over_pos + 4..].trim_start();
 
-    // head := FN ( ) — function name then an empty argument list.
-    let lp = head.find('(').ok_or("inline OVER: window function call needs '()'")?;
+    // head := FN ( args ) — function name then its argument list. A RANKING
+    // function takes empty `()`; a windowed AGGREGATE takes a single `?var`. sq-imj8.
+    let func = parse_window_func(head)?;
+
+    // rest := ( PARTITION BY … ORDER BY … [frame] ) AS ?out — split the balanced
+    // `( … )` spec from its trailing `AS ?out` alias.
+    let (spec_body, alias) = split_spec_and_alias(rest.trim())?;
+    let (partition_by, order_by, frame) = parse_over_spec(&spec_body)?;
+    // A frame is only meaningful on an aggregate; reject it on a ranking function so
+    // a typo is a clear error rather than silently ignored.
+    if frame.is_some() && matches!(func, WinFunc::Rank(_)) {
+        return Err(
+            "inline OVER: a window frame (ROWS/RANGE) is only valid on a windowed aggregate, not a ranking function".into(),
+        );
+    }
+    Ok(Some(WindowItem { func, partition_by, order_by, frame, out: alias }))
+}
+
+/// Parses a window function head `FN ( args )` into a [`WinFunc`]: a ranking
+/// function (`ROW_NUMBER`/`RANK`/`DENSE_RANK` with empty `()`), or a windowed
+/// aggregate (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` of a single `?var`). sq-imj8.
+fn parse_window_func(head: &str) -> Result<WinFunc, String> {
+    let lp = head.find('(').ok_or("inline OVER: window function call needs '(...)'")?;
     let fname = head[..lp].trim();
     let args = head[lp..].trim();
-    let func = RankFunc::parse(fname)
-        .ok_or_else(|| format!("inline OVER: unsupported window function {fname:?} (covered: ROW_NUMBER, RANK, DENSE_RANK)"))?;
-    if args != "()" {
-        return Err(format!(
-            "inline OVER: window function {fname} must be called with empty args '()' (got {args:?}); windowed aggregates are deferred"
-        ));
+    if let Some(rank) = RankFunc::parse(fname) {
+        if args != "()" {
+            return Err(format!(
+                "inline OVER: ranking function {fname} must be called with empty args '()' (got {args:?})"
+            ));
+        }
+        return Ok(WinFunc::Rank(rank));
     }
-
-    // rest := ( PARTITION BY … ORDER BY … ) AS ?out — split the balanced `( … )`
-    // spec from its trailing `AS ?out` alias.
-    let (spec_body, alias) = split_spec_and_alias(rest.trim())?;
-    let (partition_by, order_by) = parse_over_spec(&spec_body)?;
-    Ok(Some(WindowItem { func, partition_by, order_by, out: alias }))
+    if let Some(agg) = AggFunc::parse(fname) {
+        // args := ( ?var ) — a single bare variable. DISTINCT and expression
+        // arguments are not supported inline (use the programmatic API).
+        let arg_inner = strip_outer_parens(args)
+            .ok_or_else(|| format!("inline OVER: aggregate {fname} needs a parenthesised argument '( ?var )'"))?;
+        let arg = arg_inner.trim();
+        if arg.is_empty() {
+            return Err(format!("inline OVER: aggregate {fname} needs a single ?var argument (got '()')"));
+        }
+        if arg.to_ascii_uppercase().starts_with("DISTINCT") {
+            return Err(format!(
+                "inline OVER: a DISTINCT windowed aggregate ({fname}(DISTINCT …)) is not supported inline; use the programmatic window API"
+            ));
+        }
+        let of = parse_single_var(arg).map_err(|_| {
+            format!("inline OVER: windowed aggregate {fname} takes a single ?var argument (an expression argument is not supported inline); got {arg:?}")
+        })?;
+        return Ok(WinFunc::Agg { agg, of });
+    }
+    Err(format!(
+        "inline OVER: unsupported window function {fname:?} (ranking: ROW_NUMBER, RANK, DENSE_RANK; aggregates: COUNT, SUM, AVG, MIN, MAX)"
+    ))
 }
 
 /// Splits `( spec ) AS ?out` into (`spec`, `out`). Requires the `AS ?out` alias.
@@ -387,17 +505,27 @@ fn split_spec_and_alias(s: &str) -> Result<(String, String), String> {
     Ok((spec, out.to_string()))
 }
 
-/// Parses the body of an `OVER ( … )` spec into (partition vars, order keys).
+/// Parses the body of an `OVER ( … )` spec into (partition vars, order keys, frame).
 fn parse_over_spec(spec: &str) -> Result<OverSpec, String> {
     let spec = spec.trim();
     let spec_up = spec.to_ascii_uppercase();
     let part_kw = find_keyword(spec, "PARTITION");
     let order_kw = find_keyword(spec, "ORDER");
+    // The frame clause begins at the first `ROWS` or `RANGE` keyword AFTER the
+    // ORDER BY (sq-imj8): SQL requires an order for a frame, and scoping the scan
+    // past `ORDER` avoids a false hit on a variable like `?range` inside an ORDER
+    // BY expression. With no ORDER BY, a frame is rejected below, so a stray
+    // `ROWS`/`RANGE` token before any ORDER BY is left for the engine to reject.
+    let frame_search_from = order_kw.unwrap_or(spec.len());
+    let frame_kw = find_keyword(&spec[frame_search_from..], "ROWS")
+        .or_else(|| find_keyword(&spec[frame_search_from..], "RANGE"))
+        .map(|rel| frame_search_from + rel);
 
     let mut partition_by = Vec::new();
     let mut order_by = Vec::new();
 
-    // Partition segment runs from after `PARTITION BY` to the ORDER keyword (or end).
+    // Partition segment runs from after `PARTITION BY` to the ORDER keyword (or the
+    // frame keyword, or end).
     if let Some(p) = part_kw {
         let after = &spec[p..];
         let after_up = &spec_up[p..];
@@ -405,7 +533,7 @@ fn parse_over_spec(spec: &str) -> Result<OverSpec, String> {
             .find("BY")
             .ok_or("inline OVER: PARTITION must be followed by BY")?;
         let seg_start = p + by + 2;
-        let seg_end = order_kw.unwrap_or(spec.len());
+        let seg_end = order_kw.or(frame_kw).unwrap_or(spec.len());
         if seg_end < seg_start {
             return Err("inline OVER: ORDER BY must come after PARTITION BY".into());
         }
@@ -416,17 +544,104 @@ fn parse_over_spec(spec: &str) -> Result<OverSpec, String> {
         let _ = after;
     }
 
+    // ORDER BY segment runs from after `ORDER BY` to the frame keyword (or end).
     if let Some(o) = order_kw {
         let after_up = &spec_up[o..];
         let by = after_up.find("BY").ok_or("inline OVER: ORDER must be followed by BY")?;
         let seg_start = o + by + 2;
-        order_by = parse_order_list(&spec[seg_start..])?;
+        let seg_end = match frame_kw {
+            Some(f) if f > seg_start => f,
+            Some(_) => return Err("inline OVER: a window frame (ROWS/RANGE) must come after ORDER BY".into()),
+            None => spec.len(),
+        };
+        order_by = parse_order_list(&spec[seg_start..seg_end])?;
         if order_by.is_empty() {
-            return Err("inline OVER: ORDER BY needs at least one variable".into());
+            return Err("inline OVER: ORDER BY needs at least one key".into());
         }
     }
 
-    Ok((partition_by, order_by))
+    // Frame clause: `ROWS|RANGE …`. SQL requires an ORDER BY for a frame to be
+    // meaningful; we require it too (a frame without ORDER BY is an error here).
+    let frame = match frame_kw {
+        Some(f) => {
+            if order_kw.is_none() {
+                return Err("inline OVER: a window frame (ROWS/RANGE) requires an ORDER BY".into());
+            }
+            Some(parse_frame(&spec[f..])?)
+        }
+        None => None,
+    };
+
+    Ok((partition_by, order_by, frame))
+}
+
+/// Parses a frame clause `ROWS|RANGE <extent>` where `<extent>` is either a single
+/// bound (`UNBOUNDED PRECEDING`, `n PRECEDING`, `CURRENT ROW`) — shorthand for
+/// `BETWEEN <bound> AND CURRENT ROW` — or `BETWEEN <start> AND <end>`. sq-imj8.
+fn parse_frame(s: &str) -> Result<WindowFrame, String> {
+    let s = s.trim();
+    let up = s.to_ascii_uppercase();
+    let (unit, rest) = if let Some(r) = up.strip_prefix("ROWS") {
+        (FrameUnit::Rows, &s[s.len() - r.len()..])
+    } else if let Some(r) = up.strip_prefix("RANGE") {
+        (FrameUnit::Range, &s[s.len() - r.len()..])
+    } else {
+        return Err(format!("inline OVER: expected ROWS or RANGE in window frame, got {s:?}"));
+    };
+    let rest = rest.trim();
+    let rest_up = rest.to_ascii_uppercase();
+
+    let (start, end) = if let Some(between) = rest_up.strip_prefix("BETWEEN") {
+        // BETWEEN <start> AND <end>.
+        let body = &rest[rest.len() - between.len()..];
+        let and = find_keyword(body, "AND")
+            .ok_or("inline OVER: window frame `BETWEEN …` must contain `AND`")?;
+        let start = parse_frame_bound(body[..and].trim())?;
+        let end = parse_frame_bound(body[and + 3..].trim())?;
+        (start, end)
+    } else {
+        // Single-bound shorthand: `<bound>` ≡ `BETWEEN <bound> AND CURRENT ROW`.
+        (parse_frame_bound(rest)?, FrameBound::CurrentRow)
+    };
+    Ok(WindowFrame { unit, start, end })
+}
+
+/// Parses one frame bound: `UNBOUNDED PRECEDING`, `UNBOUNDED FOLLOWING`,
+/// `CURRENT ROW`, `n PRECEDING`, or `n FOLLOWING`. sq-imj8.
+fn parse_frame_bound(s: &str) -> Result<FrameBound, String> {
+    let s = s.trim();
+    let up = s.to_ascii_uppercase();
+    let tokens: Vec<&str> = up.split_whitespace().collect();
+    match tokens.as_slice() {
+        ["UNBOUNDED", "PRECEDING"] => Ok(FrameBound::UnboundedPreceding),
+        ["UNBOUNDED", "FOLLOWING"] => Ok(FrameBound::UnboundedFollowing),
+        ["CURRENT", "ROW"] => Ok(FrameBound::CurrentRow),
+        [n, "PRECEDING"] => n
+            .parse::<u64>()
+            .map(FrameBound::Preceding)
+            .map_err(|_| format!("inline OVER: frame offset must be a non-negative integer, got {n:?}")),
+        [n, "FOLLOWING"] => n
+            .parse::<u64>()
+            .map(FrameBound::Following)
+            .map_err(|_| format!("inline OVER: frame offset must be a non-negative integer, got {n:?}")),
+        _ => Err(format!(
+            "inline OVER: malformed window frame bound {s:?} (expected UNBOUNDED PRECEDING/FOLLOWING, CURRENT ROW, or `n PRECEDING`/`n FOLLOWING`)"
+        )),
+    }
+}
+
+/// Parses a single `?var` (or `$var`) token into its bare name. Used for a
+/// windowed aggregate's argument variable (`SUM(?of)`). sq-imj8.
+fn parse_single_var(tok: &str) -> Result<String, String> {
+    let tok = tok.trim();
+    let name = tok
+        .strip_prefix('?')
+        .or_else(|| tok.strip_prefix('$'))
+        .ok_or_else(|| format!("inline OVER: expected a ?variable, got {tok:?}"))?;
+    if name.is_empty() || !name.chars().all(is_varname_char) {
+        return Err(format!("inline OVER: invalid variable {tok:?}"));
+    }
+    Ok(name.to_string())
 }
 
 /// Parses a whitespace/comma-separated list of `?var` into bare names.
@@ -806,7 +1021,7 @@ mod tests {
         let w = parse_window_item("(ROW_NUMBER() OVER (PARTITION BY ?dept ORDER BY DESC(?sales)) AS ?rn)")
             .unwrap()
             .unwrap();
-        assert_eq!(w.func, RankFunc::RowNumber);
+        assert_eq!(w.func, WinFunc::Rank(RankFunc::RowNumber));
         assert_eq!(w.partition_by, vec!["dept".to_string()]);
         assert_eq!(w.order_by, vec![var_key("sales", true)]);
         assert_eq!(w.out, "rn");
@@ -817,7 +1032,7 @@ mod tests {
         let w = parse_window_item("(RANK() OVER (PARTITION BY ?dept ORDER BY ?sales DESC) AS ?r)")
             .unwrap()
             .unwrap();
-        assert_eq!(w.func, RankFunc::Rank);
+        assert_eq!(w.func, WinFunc::Rank(RankFunc::Rank));
         assert_eq!(w.order_by, vec![var_key("sales", true)]);
     }
 
@@ -896,15 +1111,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_windowed_aggregate_inline() {
-        // A windowed aggregate (`SUM(?x) OVER …`) is DEFERRED: SUM is not in the
-        // covered ranking-function set, so it is rejected as unsupported.
-        let e = parse_window_item("(SUM(?sales) OVER (PARTITION BY ?dept) AS ?t)").unwrap_err();
-        assert!(e.contains("unsupported window function") && e.contains("SUM"), "{e}");
-        // And a covered function called WITH args (the other way to write a windowed
-        // aggregate) is rejected for the non-empty arg list, naming the deferral.
-        let e2 = parse_window_item("(RANK(?sales) OVER (PARTITION BY ?dept) AS ?t)").unwrap_err();
-        assert!(e2.contains("empty args") && e2.contains("aggregate"), "{e2}");
+    fn parses_windowed_aggregate_item() {
+        // sq-imj8: a windowed aggregate `SUM(?sales) OVER (PARTITION BY ?dept)` now
+        // parses to a WinFunc::Agg carrying the argument variable.
+        let w = parse_window_item("(SUM(?sales) OVER (PARTITION BY ?dept) AS ?t)").unwrap().unwrap();
+        assert_eq!(w.func, WinFunc::Agg { agg: AggFunc::Sum, of: "sales".to_string() });
+        assert_eq!(w.partition_by, vec!["dept".to_string()]);
+        assert!(w.frame.is_none());
+        // COUNT/AVG/MIN/MAX likewise.
+        for (src, agg) in [
+            ("(COUNT(?s) OVER () AS ?c)", AggFunc::Count),
+            ("(AVG(?s) OVER () AS ?a)", AggFunc::Avg),
+            ("(MIN(?s) OVER () AS ?m)", AggFunc::Min),
+            ("(MAX(?s) OVER () AS ?x)", AggFunc::Max),
+        ] {
+            let w = parse_window_item(src).unwrap().unwrap();
+            assert_eq!(w.func, WinFunc::Agg { agg, of: "s".to_string() });
+        }
+    }
+
+    #[test]
+    fn rejects_ranking_function_with_args() {
+        // A ranking function called WITH args is rejected (it takes empty `()`).
+        let e = parse_window_item("(RANK(?sales) OVER (PARTITION BY ?dept) AS ?t)").unwrap_err();
+        assert!(e.contains("empty args") && e.contains("RANK"), "{e}");
+    }
+
+    #[test]
+    fn rejects_distinct_windowed_aggregate() {
+        // A DISTINCT windowed aggregate is not supported inline (programmatic only).
+        let e = parse_window_item("(COUNT(DISTINCT ?s) OVER () AS ?c)").unwrap_err();
+        assert!(e.contains("DISTINCT"), "{e}");
     }
 
     #[test]
@@ -1040,7 +1277,145 @@ mod tests {
     fn malformed_over_is_error() {
         // Missing AS alias.
         assert!(query_over(&g(), "PREFIX ex: <http://ex/> SELECT (ROW_NUMBER() OVER (ORDER BY ?sales)) WHERE { ?emp ex:sales ?sales }").is_err());
-        // Non-empty args (a windowed aggregate, deferred).
-        assert!(query_over(&g(), "PREFIX ex: <http://ex/> SELECT (SUM(?sales) OVER (PARTITION BY ?dept) AS ?t) WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }").is_err());
+        // A ranking function called with a non-empty arg list is invalid.
+        assert!(query_over(&g(), "PREFIX ex: <http://ex/> SELECT (ROW_NUMBER(?sales) OVER (PARTITION BY ?dept) AS ?t) WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }").is_err());
+        // An unknown window function is invalid.
+        assert!(query_over(&g(), "PREFIX ex: <http://ex/> SELECT (NTILE(?sales) OVER (ORDER BY ?sales) AS ?t) WHERE { ?emp ex:sales ?sales }").is_err());
+    }
+
+    // ---- windowed aggregates inline (sq-imj8) ----
+
+    #[test]
+    fn inline_windowed_sum_over_partition() {
+        // SUM(?sales) OVER (PARTITION BY ?dept): every row in a dept sees the dept total.
+        let q = "PREFIX ex: <http://ex/> \
+            SELECT ?emp ?dept (SUM(?sales) OVER (PARTITION BY ?dept) AS ?total) \
+            WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+        let r = query_over(&g(), q).unwrap();
+        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "dept", "total"]);
+        // eng total = 30+30+20 = 80; sales total = 10.
+        for row in &r.rows {
+            let dept = row[1].as_ref().unwrap().to_string();
+            let total = literal_int(&row[2]);
+            if dept.contains("/eng") {
+                assert_eq!(total, 80);
+            } else {
+                assert_eq!(total, 10);
+            }
+        }
+    }
+
+    #[test]
+    fn inline_windowed_count_avg_min_max() {
+        let mk = |agg: &str| {
+            format!(
+                "PREFIX ex: <http://ex/> SELECT ?emp ?dept ({agg}(?sales) OVER (PARTITION BY ?dept) AS ?w) \
+                 WHERE {{ ?emp ex:dept ?dept ; ex:sales ?sales }}"
+            )
+        };
+        let eng = |r: &QueryResult| -> i64 {
+            for row in &r.rows {
+                if row[1].as_ref().unwrap().to_string().contains("/eng") {
+                    return literal_int(&row[2]);
+                }
+            }
+            panic!("no eng row");
+        };
+        assert_eq!(eng(&query_over(&g(), &mk("COUNT")).unwrap()), 3); // 3 eng rows
+        assert_eq!(eng(&query_over(&g(), &mk("MIN")).unwrap()), 20); // min eng sales
+        assert_eq!(eng(&query_over(&g(), &mk("MAX")).unwrap()), 30); // max eng sales
+        // AVG eng = (30+30+20)/3 = 26.666… → a non-integer double.
+        let avg = query_over(&g(), &mk("AVG")).unwrap();
+        let v: f64 = avg
+            .rows
+            .iter()
+            .find(|row| row[1].as_ref().unwrap().to_string().contains("/eng"))
+            .and_then(|row| row[2].as_ref())
+            .map(|t| if let oxrdf::Term::Literal(l) = t { l.value().parse().unwrap() } else { panic!() })
+            .unwrap();
+        assert!((v - 80.0 / 3.0).abs() < 1e-9, "AVG was {v}");
+    }
+
+    #[test]
+    fn inline_running_total_with_rows_frame() {
+        // ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: a running total of sales
+        // over the whole result ordered by ?sales ascending.
+        let q = "PREFIX ex: <http://ex/> \
+            SELECT ?emp ?sales \
+                   (SUM(?sales) OVER (ORDER BY ?sales ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ?run) \
+            WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+        let r = query_over(&g(), q).unwrap();
+        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "sales", "run"]);
+        // Ordered by sales asc: 10, 20, 30, 30. Running sums: 10, 30, 60, 90.
+        // The final (largest-sales) row's running total is the grand total 90.
+        let mut by_sales: Vec<(i64, i64)> =
+            r.rows.iter().map(|row| (literal_int(&row[1]), literal_int(&row[2]))).collect();
+        by_sales.sort();
+        // The row with sales=10 has run=10; both sales=30 rows have run=90 (tie at the
+        // end is by physical position so both reach the running total only at the last).
+        assert_eq!(by_sales[0], (10, 10)); // first
+        // grand total appears as the max running value.
+        let max_run = by_sales.iter().map(|&(_, run)| run).max().unwrap();
+        assert_eq!(max_run, 90);
+    }
+
+    #[test]
+    fn inline_moving_sum_with_n_preceding_shorthand() {
+        // `ROWS 1 PRECEDING` shorthand ≡ BETWEEN 1 PRECEDING AND CURRENT ROW: a
+        // 2-row trailing moving sum over sales ascending (10,20,30,30).
+        let q = "PREFIX ex: <http://ex/> \
+            SELECT ?emp ?sales (SUM(?sales) OVER (ORDER BY ?sales ROWS 1 PRECEDING) AS ?mov) \
+            WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+        let r = query_over(&g(), q).unwrap();
+        // Ordered 10,20,30,30 → moving sums 10, 30, 50, 60. The first row (sales=10)
+        // has mov=10; check it appears and the max moving sum is 60 (30+30).
+        let movs: Vec<i64> = r.rows.iter().map(|row| literal_int(&row[2])).collect();
+        assert!(movs.contains(&10));
+        assert_eq!(movs.iter().max().copied().unwrap(), 60);
+    }
+
+    #[test]
+    fn inline_range_frame_groups_peers() {
+        // RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: the two sales=30 rows
+        // are PEERS, so both see the same running total (the grand total 90), unlike
+        // a ROWS frame where they would differ.
+        let q = "PREFIX ex: <http://ex/> \
+            SELECT ?emp ?sales (SUM(?sales) OVER (ORDER BY ?sales RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ?run) \
+            WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+        let r = query_over(&g(), q).unwrap();
+        // Both sales=30 rows → run=90 (peer group). sales=20 → run=10+20+? wait: the
+        // peer group of 20 is just itself, so run = 10+20 = 30. sales=10 → 10.
+        for row in &r.rows {
+            let sales = literal_int(&row[1]);
+            let run = literal_int(&row[2]);
+            match sales {
+                10 => assert_eq!(run, 10),
+                20 => assert_eq!(run, 30),
+                30 => assert_eq!(run, 90),
+                other => panic!("unexpected sales {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn inline_frame_on_ranking_function_is_error() {
+        // A frame is only valid on an aggregate; on a ranking function it errors.
+        let q = "PREFIX ex: <http://ex/> \
+            SELECT ?emp (ROW_NUMBER() OVER (ORDER BY ?sales ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ?rn) \
+            WHERE { ?emp ex:sales ?sales }";
+        let e = query_over(&g(), q).unwrap_err();
+        assert!(e.contains("frame") && e.contains("ranking"), "{e}");
+    }
+
+    #[test]
+    fn inline_aggregate_of_var_not_in_output_is_dropped() {
+        // ?sales feeds the aggregate but is NOT projected; it must survive the inner
+        // SELECT then be dropped from the final result.
+        let q = "PREFIX ex: <http://ex/> \
+            SELECT ?emp (SUM(?sales) OVER (PARTITION BY ?dept) AS ?t) \
+            WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+        let r = query_over(&g(), q).unwrap();
+        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "t"]);
+        assert_eq!(r.rows.len(), 4);
     }
 }
