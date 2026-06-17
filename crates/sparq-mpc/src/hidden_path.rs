@@ -388,5 +388,414 @@ pub fn eval_exact_k_chain_hidden_slots(
     oblivious_set_output(backend, &candidates, 2, bound)
 }
 
+// =====================================================================
+// sq-py8h.3 — bounded repetition `{1,k}` / `{0,k}` / `p?` + alternation
+// over the SAME hidden edge set, as a union-of-fixed-chains with an
+// OR-fold cross-length dedup (the realized length is never revealed).
+// =====================================================================
+
+/// One labelled directed edge of the secret graph: `(subject, object)` nodes plus a
+/// DISCLOSED predicate label. The predicate is public (it is named in the public
+/// query plan, design §1.2/§4.1) and is used ONLY to select which alternation branch
+/// an edge may serve at a hop position; the node *keys* stay private exactly as in
+/// [`HiddenEdge`]. `[OPUS-4.8]`
+#[derive(Debug, Clone)]
+pub struct PredicatedEdge {
+    /// The (public) predicate IRI this edge belongs to.
+    pub predicate: String,
+    /// The edge's subject node (private key + disclosed term).
+    pub subject: HiddenNode,
+    /// The edge's object node (private key + disclosed term).
+    pub object: HiddenNode,
+}
+
+/// The federated secret edge relation for a bounded path whose hops may range over an
+/// ALTERNATION of predicates `p_1 | … | p_a`. It is the union of every holder's
+/// `(predicate, subject, object)` edges; only the candidate-tuple COUNT and the
+/// matched endpoint TERMS are ever disclosed. Mirrors [`HiddenEdges`] but tags each
+/// edge with its (public) predicate so a hop can be restricted to one alternation
+/// branch. `[OPUS-4.8]`
+#[derive(Debug, Clone)]
+pub struct PredicatedEdges {
+    edges: Vec<PredicatedEdge>,
+}
+
+impl PredicatedEdges {
+    /// Build the relation from the federated union of labelled edges.
+    pub fn new(edges: Vec<PredicatedEdge>) -> Self {
+        PredicatedEdges { edges }
+    }
+
+    /// Number of edges (`|E|` — public).
+    pub fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Whether the relation is empty.
+    pub fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    /// The set of all distinct node TERMS occurring as a subject or object — the
+    /// domain over which the reflexive (length-0) identity pairs `(x, x)` are added
+    /// for `{0,k}` / `p?` (design §2.3, the secret-graph analogue of the clear-text
+    /// `graph_nodes`). Disclosed terms only; no key is touched. Each distinct node
+    /// appears once, in canonical (debug-string) order so the output is deterministic.
+    fn node_domain(&self) -> Vec<Term> {
+        let mut seen: BTreeMap<String, Term> = BTreeMap::new();
+        for e in &self.edges {
+            seen.entry(format!("{:?}", e.subject.term))
+                .or_insert_with(|| e.subject.term.clone());
+            seen.entry(format!("{:?}", e.object.term))
+                .or_insert_with(|| e.object.term.clone());
+        }
+        seen.into_values().collect()
+    }
+}
+
+/// A bounded property-path form the HIDDEN-regime operator understands: a repetition
+/// `(step){min,max}` of a single step, where the step is an ALTERNATION of one or more
+/// (public) predicate IRIs `p_1 | … | p_a` (a bare predicate is `a == 1`).
+///
+/// - `{k,k}` is exactly-`k`.
+/// - `{1,k}` is the bounded `+`.
+/// - `{0,k}` is the bounded `*` (adds the length-0 reflexive diagonal, design §2.3).
+/// - `{0,1}` is `p?` ([`HiddenBoundedPath::optional`]).
+///
+/// The bounds are PUBLIC plan parameters; an OPEN upper bound (`+`/`*`/`{m,}`) is NOT
+/// representable here by construction (`max` is a concrete `usize`) — the
+/// fail-closed refusal of a hidden unbounded path is a planner concern (sq-py8h.5),
+/// not this operator. `[OPUS-4.8]`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenBoundedPath {
+    /// The (public) alternation predicates a single hop may traverse. Non-empty.
+    pub alternatives: Vec<String>,
+    /// Minimum hop count `m` (`0` enables the reflexive identity diagonal).
+    pub min: usize,
+    /// Maximum hop count `k` (PUBLIC, finite, `>= min`).
+    pub max: usize,
+}
+
+impl HiddenBoundedPath {
+    /// `(p){min,max}` over a single predicate.
+    pub fn range(predicate: impl Into<String>, min: usize, max: usize) -> Self {
+        HiddenBoundedPath {
+            alternatives: vec![predicate.into()],
+            min,
+            max,
+        }
+    }
+
+    /// `(p){k}` — exactly-`k` over a single predicate (mirrors
+    /// [`eval_exact_k_chain_hidden`] but on this union machinery).
+    pub fn exact(predicate: impl Into<String>, k: usize) -> Self {
+        Self::range(predicate, k, k)
+    }
+
+    /// `(p?)` — the optional path, i.e. `{0,1}`.
+    pub fn optional(predicate: impl Into<String>) -> Self {
+        Self::range(predicate, 0, 1)
+    }
+
+    /// `(p_1 | … | p_a){min,max}` over an alternation of predicates.
+    pub fn alternation(
+        alternatives: impl IntoIterator<Item = impl Into<String>>,
+        min: usize,
+        max: usize,
+    ) -> Self {
+        HiddenBoundedPath {
+            alternatives: alternatives.into_iter().map(Into::into).collect(),
+            min,
+            max,
+        }
+    }
+}
+
+/// Every fixed predicate sequence of `length` hops obtained by choosing one of the
+/// `alternatives` at each position (design §2.4). For a single-predicate step this is
+/// the one `length`-long sequence. Grows the chain set amortised (no
+/// `len * alts`-sized `with_capacity`, which could overflow on a large public unroll);
+/// the genuine size limit is enforced upstream by [`check_bounded_params`] BEFORE this
+/// runs. `[OPUS-4.8]`
+fn predicate_chains(alternatives: &[String], length: usize) -> Vec<Vec<String>> {
+    let mut chains: Vec<Vec<String>> = vec![Vec::new()];
+    for _ in 0..length {
+        let mut next: Vec<Vec<String>> = Vec::new();
+        for prefix in &chains {
+            for alt in alternatives {
+                let mut extended = prefix.clone();
+                extended.push(alt.clone());
+                next.push(extended);
+            }
+        }
+        chains = next;
+    }
+    chains
+}
+
+/// The chain bit of ONE edge-tuple against a FIXED predicate sequence `chain`: it is
+/// the secret-shared AND of (a) every internal hop equality `[e_i.object == e_{i+1}.
+/// subject]` ([`secure_equal_to_bit`], never opened — exactly [`tuple_chain_bit`]) and
+/// (b) a PUBLIC predicate-match gate per hop (`e_i.predicate == chain[i]`). The
+/// predicate gate is a fully public decision: a tuple whose predicates do not match
+/// the alternation branch contributes a constant shared `0` (no secure multiplication
+/// at all) and is OR-folded away. The intermediate node KEYS are fed to the secure
+/// equality but never reconstructed. `[OPUS-4.8]`
+fn predicated_tuple_chain_bit(
+    backend: &ShamirBackend,
+    dealer: &mut ShamirDealer,
+    tuple: &[&PredicatedEdge],
+    chain: &[String],
+) -> Result<Vec<Share>, MpcError> {
+    debug_assert_eq!(tuple.len(), chain.len());
+    let n = backend.parties();
+    // Public predicate gate first: if any hop's edge predicate does not match the
+    // required alternation branch this tuple cannot serve this chain — the chain bit
+    // is the constant shared 0 (no crypto needed, fully public decision).
+    for (edge, pred) in tuple.iter().zip(chain.iter()) {
+        if &edge.predicate != pred {
+            return Ok(const_sharing(n, Fp::zero()));
+        }
+    }
+    // Internal-hop equalities, secret-shared and never opened — identical to the
+    // exactly-k chain's `tuple_chain_bit`. Length-1 has no internal hop → shared 1.
+    let mut bit = const_sharing(n, Fp::one());
+    for w in tuple.windows(2) {
+        let hop = secure_equal_to_bit(dealer, w[0].object.key, w[1].subject.key)?;
+        bit = secret_and(dealer, &bit, &hop)?;
+    }
+    Ok(bit)
+}
+
+/// Fail-closed parameter checks for the bounded hidden path. `min <= max`, non-empty
+/// alternation, `n >= 2t+1` (the AND/OR chain needs degree reduction), and the total
+/// enumerated edge-tuples across the whole union — `Σ_ℓ (a^ℓ · |E|^ℓ)` — must be
+/// within [`MAX_CHAIN_TUPLES`], all from PUBLIC parameters before any crypto runs
+/// (the same public, statically-computable guard discipline as the exactly-k
+/// operator). `[OPUS-4.8]`
+fn check_bounded_params(
+    backend: &ShamirBackend,
+    edges: &PredicatedEdges,
+    form: &HiddenBoundedPath,
+) -> Result<(), MpcError> {
+    if form.alternatives.is_empty() {
+        return Err(MpcError::Protocol(
+            "hidden bounded path step has no predicates (empty alternation)".into(),
+        ));
+    }
+    if form.min > form.max {
+        return Err(MpcError::Protocol(format!(
+            "hidden bounded path {{{},{}}} has min > max",
+            form.min, form.max
+        )));
+    }
+    let t = backend.threshold();
+    if backend.parties() < 2 * t + 1 {
+        return Err(MpcError::Protocol(format!(
+            "hidden bounded path needs n >= 2t+1 for the AND/OR chain's degree reduction \
+             (n={}, t={t})",
+            backend.parties()
+        )));
+    }
+    // Total tuple work = Σ_ℓ (#chains_ℓ · |E|^ℓ); #chains_ℓ = a^ℓ. Compute in closed
+    // form (PUBLIC), reject on overflow or over-cap BEFORE any allocation/crypto.
+    let m = edges.len() as u64;
+    let a = form.alternatives.len() as u64;
+    let mut total_tuples: u64 = 0;
+    for length in form.min.max(1)..=form.max {
+        let mut chains: u64 = 1;
+        let mut per_chain: u64 = 1;
+        let mut overflowed = false;
+        for _ in 0..length {
+            match (chains.checked_mul(a), per_chain.checked_mul(m)) {
+                (Some(c), Some(p)) => {
+                    chains = c;
+                    per_chain = p;
+                }
+                _ => {
+                    overflowed = true;
+                    break;
+                }
+            }
+        }
+        let length_tuples = if overflowed {
+            None
+        } else {
+            chains.checked_mul(per_chain)
+        };
+        match length_tuples.and_then(|v| total_tuples.checked_add(v)) {
+            Some(v) => total_tuples = v,
+            None => return oversized_bounded(edges, form),
+        }
+    }
+    if total_tuples > MAX_CHAIN_TUPLES {
+        return oversized_bounded(edges, form);
+    }
+    Ok(())
+}
+
+/// The controlled over-cap refusal shared by [`check_bounded_params`]'s overflow and
+/// over-limit branches. `[OPUS-4.8]`
+fn oversized_bounded<T>(edges: &PredicatedEdges, form: &HiddenBoundedPath) -> Result<T, MpcError> {
+    Err(MpcError::Protocol(format!(
+        "hidden bounded path {{{},{}}} over |E|={} edges and a {}-way alternation would \
+         enumerate more than the MAX_CHAIN_TUPLES cap of {} edge-tuples — refusing \
+         (CPU/round denial-of-service)",
+        form.min,
+        form.max,
+        edges.len(),
+        form.alternatives.len(),
+        MAX_CHAIN_TUPLES,
+    )))
+}
+
+/// Build one [`Candidate`] per DISTINCT disclosed endpoint pair, OR-folding the chain
+/// bits of EVERY (length, alternation-branch, edge-tuple) that reaches that pair into
+/// one secret-shared connected-bit. This is the design §2.2–§2.5 union with the
+/// cross-length OR-fold dedup: a pair reached by a 2-hop AND a 4-hop chain (or by two
+/// alternation branches) yields ONE candidate with connected-bit `1`, and **which
+/// length connected it is never revealed** (§1.2 length-revealing prohibition).
+///
+/// When `form.min == 0` the reflexive length-0 diagonal `(x, x)` is added for every
+/// node in the domain with the constant shared `1` chain bit (design §2.3 — every node
+/// reaches itself by the empty path), OR-folded in exactly like a length-ℓ chain so a
+/// node that is also reachable from itself by a longer chain still appears once.
+/// `[OPUS-4.8]`
+fn build_bounded_candidates(
+    backend: &ShamirBackend,
+    dealer: &mut ShamirDealer,
+    edges: &PredicatedEdges,
+    form: &HiddenBoundedPath,
+) -> Result<Vec<Candidate>, MpcError> {
+    let n = backend.parties();
+    // disclosed endpoint key → (a term, b term, OR-folded connected bit).
+    let mut by_pair: BTreeMap<String, (Term, Term, Vec<Share>)> = BTreeMap::new();
+
+    // OR this chain bit into the connected-bit of endpoint pair (a, b).
+    fn fold(
+        dealer: &mut ShamirDealer,
+        by_pair: &mut BTreeMap<String, (Term, Term, Vec<Share>)>,
+        a: Term,
+        b: Term,
+        bit: Vec<Share>,
+    ) -> Result<(), MpcError> {
+        let key = endpoint_key(&a, &b);
+        match by_pair.get_mut(&key) {
+            Some((_, _, acc)) => {
+                let folded = secret_or(dealer, acc, &bit)?;
+                *acc = folded;
+            }
+            None => {
+                by_pair.insert(key, (a, b, bit));
+            }
+        }
+        Ok(())
+    }
+
+    // Length-0 reflexive diagonal (design §2.3) for {0,k} / p?.
+    if form.min == 0 {
+        for node in edges.node_domain() {
+            fold(
+                dealer,
+                &mut by_pair,
+                node.clone(),
+                node,
+                const_sharing(n, Fp::one()),
+            )?;
+        }
+    }
+
+    // Each length ℓ in max(min,1)..=max: union of the a^ℓ predicate chains, each a
+    // base-|E| odometer over the ℓ-tuples of edges. All OR-folded per endpoint pair.
+    let m = edges.len();
+    if m > 0 {
+        for length in form.min.max(1)..=form.max {
+            for chain in predicate_chains(&form.alternatives, length) {
+                let mut idx = vec![0usize; length];
+                loop {
+                    let tuple: Vec<&PredicatedEdge> =
+                        idx.iter().map(|&i| &edges.edges[i]).collect();
+                    let bit = predicated_tuple_chain_bit(backend, dealer, &tuple, &chain)?;
+                    let a_term = tuple[0].subject.term.clone();
+                    let b_term = tuple[length - 1].object.term.clone();
+                    fold(dealer, &mut by_pair, a_term, b_term, bit)?;
+
+                    // Advance the base-|E| odometer (least-significant = idx[len-1]).
+                    let mut pos = length;
+                    let done = loop {
+                        if pos == 0 {
+                            break true;
+                        }
+                        pos -= 1;
+                        idx[pos] += 1;
+                        if idx[pos] < m {
+                            break false;
+                        }
+                        idx[pos] = 0;
+                    };
+                    if done {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(by_pair
+        .into_values()
+        .map(|(a, b, bit)| Candidate {
+            payload: vec![Some(a), Some(b)],
+            matched: MatchBit::SecretShared(bit),
+        })
+        .collect())
+}
+
+/// Evaluate a bounded HIDDEN-intermediate property path `?a (step){min,max} ?b` and
+/// return the disclosed endpoint pairs as a [`PartialResult`] with
+/// `vars == [?__pp_a, ?__pp_b]`. Covers `{1,k}`, `{0,k}` (reflexive), `p?` (`{0,1}`),
+/// and per-hop alternation `(p_1 | … | p_a)`, built as a union of fixed-length
+/// predicate chains over the SAME secret edge set, OR-folded to one connected-bit per
+/// distinct endpoint pair (set semantics; realized length never revealed, design
+/// §1.2/§2.2–§2.5). Reuses the exactly-`k` chain's secret-shared equality + AND/OR
+/// chaining and the landed oblivious output path verbatim.
+///
+/// `bound` is the public padded bound `B`; it must cover the distinct-endpoint-pair
+/// candidate count (fail-closed in [`oblivious_set_output`] — never truncates a
+/// match). Security tier is identical to [`eval_exact_k_chain_hidden`]:
+/// honest-majority, semi-honest, no new assumption. `[OPUS-4.8]`
+pub fn eval_bounded_path_hidden(
+    backend: &ShamirBackend,
+    edges: &PredicatedEdges,
+    form: &HiddenBoundedPath,
+    bound: usize,
+) -> Result<PartialResult, MpcError> {
+    check_bounded_params(backend, edges, form)?;
+    let mut dealer = backend.dealer();
+    let candidates = build_bounded_candidates(backend, &mut dealer, edges, form)?;
+    let out_vars = vec![
+        Variable::new_unchecked(SUBJECT_VAR),
+        Variable::new_unchecked(OBJECT_VAR),
+    ];
+    let (result, _cost) = oblivious_join_output(backend, &candidates, out_vars, bound)?;
+    Ok(result)
+}
+
+/// Like [`eval_bounded_path_hidden`] but returns the raw oblivious output (the `B`
+/// shuffled slots + modelled cost) — the transcript-level view that witnesses the
+/// revealed slot count is exactly the public `B`. `[OPUS-4.8]`
+pub fn eval_bounded_path_hidden_slots(
+    backend: &ShamirBackend,
+    edges: &PredicatedEdges,
+    form: &HiddenBoundedPath,
+    bound: usize,
+) -> Result<ObliviousOutput, MpcError> {
+    check_bounded_params(backend, edges, form)?;
+    let mut dealer = backend.dealer();
+    let candidates = build_bounded_candidates(backend, &mut dealer, edges, form)?;
+    oblivious_set_output(backend, &candidates, 2, bound)
+}
+
+#[cfg(test)]
+mod bounded_tests;
 #[cfg(test)]
 mod tests;

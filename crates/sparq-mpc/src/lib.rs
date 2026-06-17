@@ -271,8 +271,9 @@ pub use bounded_path::{
 // [OPUS-4.8] sq-py8h.2: the HIDDEN-intermediate exactly-`k` chain surface (the
 // cryptographic regime — intermediate node-sets never opened).
 pub use hidden_path::{
-    eval_exact_k_chain_hidden, eval_exact_k_chain_hidden_slots, HiddenEdge, HiddenEdges,
-    HiddenNode, MAX_CHAIN_TUPLES,
+    eval_bounded_path_hidden, eval_bounded_path_hidden_slots, eval_exact_k_chain_hidden,
+    eval_exact_k_chain_hidden_slots, HiddenBoundedPath, HiddenEdge, HiddenEdges, HiddenNode,
+    PredicatedEdge, PredicatedEdges, MAX_CHAIN_TUPLES,
 };
 // [OPUS-4.8] sq-rrz4 + sq-g7t5: the secure-comparison surface (verdict-only
 // disclosure). sq-g7t5 adds the in-MPC bit-decomposition magnitude-bound constants
