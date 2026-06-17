@@ -245,7 +245,10 @@ async fn malformed_term_does_not_echo_input() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body = resp.text().await.unwrap();
-    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(
+        body.starts_with("{\"error\":"),
+        "structured JSON error, got: {body}"
+    );
     assert!(
         !body.contains(SENTINEL),
         "TPF term parse error echoed caller input: {body}"
@@ -278,7 +281,10 @@ async fn fragment_carries_first_and_last_paging_controls() {
         "fragment must link hydra:last: {body}"
     );
     // first → page 0; with 7 triples in one default page, last is also page 0.
-    assert!(body.contains("page=0"), "first/last should reference page 0: {body}");
+    assert!(
+        body.contains("page=0"),
+        "first/last should reference page 0: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +365,10 @@ async fn brtpf_empty_values_is_plain_tpf() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("totalItems> \"2\""), "unrestricted count: {body}");
+    assert!(
+        body.contains("totalItems> \"2\""),
+        "unrestricted count: {body}"
+    );
 }
 
 #[cfg(feature = "brtpf")]
@@ -377,9 +386,135 @@ async fn brtpf_malformed_bindings_is_400_and_no_echo() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body = resp.text().await.unwrap();
-    assert!(body.starts_with("{\"error\":"), "structured JSON error: {body}");
+    assert!(
+        body.starts_with("{\"error\":"),
+        "structured JSON error: {body}"
+    );
     assert!(
         !body.contains(SENTINEL),
         "brTPF binding parse error echoed caller input: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-r74h — brTPF binding-set DoS caps (mapping count + payload bytes), enforced
+// independently of --max-body-bytes and refusing 413 (not 400) so a client can distinguish
+// "too large" from "malformed". Only with the `brtpf` feature.
+// ---------------------------------------------------------------------------
+
+/// Boots a TPF-on server with explicit brTPF binding-set caps (0 = disabled).
+#[cfg(feature = "brtpf")]
+async fn spawn_with_caps(max_bindings: usize, max_values_bytes: usize) -> String {
+    let graph = Graph::load_str(DATA, "turtle").unwrap();
+    let config = ServerConfig {
+        tpf: true,
+        brtpf_max_bindings: max_bindings,
+        brtpf_max_values_bytes: max_values_bytes,
+        ..ServerConfig::default()
+    };
+    let app = router(AppState::with_config(graph, config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[cfg(feature = "brtpf")]
+#[tokio::test]
+async fn brtpf_too_many_mappings_is_413() {
+    // Cap of 2 mappings; POST 3 → 413 (not 400 — the set is well-formed, just too large).
+    let base = spawn_with_caps(2, 0).await;
+    let resp = client()
+        .post(format!("{base}/tpf"))
+        .query(&[("predicate", "<http://ex/knows>")])
+        .body("s=<http://ex/a>\ns=<http://ex/b>\ns=<http://ex/c>")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.starts_with("{\"error\":"),
+        "structured JSON error: {body}"
+    );
+    // The 413 message names the cap knob, so a client/operator knows what to change.
+    assert!(body.contains("brtpf-max-bindings"), "{body}");
+}
+
+#[cfg(feature = "brtpf")]
+#[tokio::test]
+async fn brtpf_mappings_at_the_cap_succeed() {
+    // Exactly at the cap is accepted (boundary): 2 mappings under a cap of 2 → 200.
+    let base = spawn_with_caps(2, 0).await;
+    let resp = client()
+        .post(format!("{base}/tpf"))
+        .query(&[("predicate", "<http://ex/knows>")])
+        .header("Accept", "application/n-triples")
+        .body("s=<http://ex/alice>\ns=<http://ex/carol>")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("totalItems> \"2\""), "{body}");
+}
+
+#[cfg(feature = "brtpf")]
+#[tokio::test]
+async fn brtpf_values_query_string_payload_byte_cap_is_413() {
+    // The `values` query-string carrier is NOT a body, so --max-body-bytes never bounds it; only
+    // --brtpf-max-values-bytes does. A 10-byte payload cap rejects a longer GET `values`.
+    let base = spawn_with_caps(0, 10).await;
+    let resp = client()
+        .get(format!("{base}/tpf"))
+        .query(&[
+            ("predicate", "<http://ex/knows>"),
+            ("values", "s=<http://ex/carol>"), // > 10 bytes
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("brtpf-max-values-bytes"), "{body}");
+}
+
+#[cfg(feature = "brtpf")]
+#[tokio::test]
+async fn brtpf_caps_disabled_with_zero_allow_a_large_set() {
+    // 0 on both caps disables them — a set larger than the production defaults is accepted.
+    let base = spawn_with_caps(0, 0).await;
+    let resp = client()
+        .post(format!("{base}/tpf"))
+        .query(&[("predicate", "<http://ex/knows>")])
+        .header("Accept", "application/n-triples")
+        .body("s=<http://ex/alice>\ns=<http://ex/carol>")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("totalItems> \"2\""), "{body}");
+}
+
+#[cfg(feature = "brtpf")]
+#[tokio::test]
+async fn brtpf_413_payload_message_does_not_echo_input() {
+    // The 413 body names only the cap, never the caller's payload (no info-leak / no echo).
+    const SENTINEL: &str = "brtpf_dos_secret_sentinel";
+    let base = spawn_with_caps(0, 5).await;
+    let resp = client()
+        .post(format!("{base}/tpf"))
+        .body(format!("s=<http://ex/{SENTINEL}>"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains(SENTINEL),
+        "413 cap message echoed caller input: {body}"
     );
 }

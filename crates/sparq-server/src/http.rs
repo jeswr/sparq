@@ -44,7 +44,10 @@ use sparq_serve::{
     ApplyUpdates, Generation, GenerationRing, GraphApplier, PodId, WriteError, Writer, WriterConfig,
 };
 
-use crate::exec::{apply_update_dataset, prepare_with_dataset, DatasetOverride, PrepareError, QueryForm, UpdateDatasetError, UsingOverride};
+use crate::exec::{
+    apply_update_dataset, prepare_with_dataset, DatasetOverride, PrepareError, QueryForm,
+    UpdateDatasetError, UsingOverride,
+};
 use crate::negotiate::{negotiate, negotiate_graph, Format, GraphFormat};
 use crate::results;
 
@@ -360,6 +363,28 @@ pub struct ServerConfig {
     /// zero cost. Set by the binary's `--tpf` flag / `SPARQ_TPF=1` env.
     #[cfg(feature = "tpf")]
     pub tpf: bool,
+    /// [OPUS-4.8] (sq-r74h, follow-up to sq-dxhb) **brTPF binding-set DoS cap — maximum number of
+    /// solution mappings** accepted on a `GET /tpf?values=…` / `POST /tpf` brTPF request. A brTPF
+    /// fragment runs ONE index scan per attached mapping (see [`crate::tpf::evaluate_brtpf`]), so
+    /// the per-request cost is super-linear in the mapping *count*, not the payload *bytes* — and
+    /// `--max-body-bytes` (a body-byte limit, and one that the `values` *query-string* carrier
+    /// never even sees) bounds the count only transitively and far too loosely. This caps the
+    /// fan-out directly: a request whose binding set exceeds it is refused `413` BEFORE any index
+    /// work. `0` disables the count cap. Default `1024`. Set by `--brtpf-max-bindings` /
+    /// `SPARQ_BRTPF_MAX_BINDINGS`. Present only with the `brtpf` cargo feature.
+    #[cfg(feature = "brtpf")]
+    pub brtpf_max_bindings: usize,
+    /// [OPUS-4.8] (sq-r74h, follow-up to sq-dxhb) **brTPF binding-set DoS cap — maximum `values`
+    /// payload bytes.** The companion byte cap to [`brtpf_max_bindings`](Self::brtpf_max_bindings),
+    /// enforced on the raw binding-set payload BEFORE it is parsed (`413` on breach). It exists
+    /// because the brTPF `values` binding set can ride the **query string** of a `GET /tpf`, which
+    /// the server's `--max-body-bytes` HTTP *body* limit does not cover at all — so without this,
+    /// the GET carrier is unbounded. On a `POST` body the body limit also applies; the effective
+    /// bound is then the tighter of the two. `0` disables the byte cap. Default `1048576` (1 MiB,
+    /// matching the `--max-body-bytes` default). Set by `--brtpf-max-values-bytes` /
+    /// `SPARQ_BRTPF_MAX_VALUES_BYTES`. Present only with the `brtpf` cargo feature.
+    #[cfg(feature = "brtpf")]
+    pub brtpf_max_values_bytes: usize,
 }
 
 impl Default for ServerConfig {
@@ -417,6 +442,14 @@ impl Default for ServerConfig {
             // the feature is compiled in (the operator opts in deliberately via --tpf / SPARQ_TPF=1).
             #[cfg(feature = "tpf")]
             tpf: false,
+            // [OPUS-4.8] sq-r74h: brTPF binding-set DoS caps — ON by default (a public source
+            // endpoint should be bounded out of the box). 1024 mappings and a 1 MiB payload mirror
+            // the conservative LDF page size and the --max-body-bytes default; an operator widens
+            // (or, with 0, disables) either via the flags.
+            #[cfg(feature = "brtpf")]
+            brtpf_max_bindings: 1024,
+            #[cfg(feature = "brtpf")]
+            brtpf_max_values_bytes: 1024 * 1024,
         }
     }
 }
@@ -558,6 +591,17 @@ impl ServerConfig {
         #[cfg(feature = "tpf")]
         if let Ok(v) = std::env::var("SPARQ_TPF") {
             cfg.tpf = env_truthy(&v);
+        }
+        // [OPUS-4.8] sq-r74h: brTPF binding-set DoS caps (mapping count + payload bytes); 0
+        // disables that cap. Only present with the `brtpf` feature.
+        #[cfg(feature = "brtpf")]
+        {
+            if let Some(n) = env_parse::<usize>("SPARQ_BRTPF_MAX_BINDINGS") {
+                cfg.brtpf_max_bindings = n;
+            }
+            if let Some(n) = env_parse::<usize>("SPARQ_BRTPF_MAX_VALUES_BYTES") {
+                cfg.brtpf_max_values_bytes = n;
+            }
         }
         Ok(cfg)
     }
@@ -2077,15 +2121,30 @@ async fn tpf_endpoint(
         } else {
             std::borrow::Cow::Borrowed(params.get("values").map(String::as_str).unwrap_or(""))
         };
-        match crate::tpf::parse_bindings(&raw_values) {
+        // [OPUS-4.8] sq-r74h: enforce the binding-set DoS caps (mapping count + payload bytes)
+        // BEFORE parsing/evaluation. These bound the brTPF fan-out independently of
+        // `--max-body-bytes` — which does not cover the `values` query-string carrier at all, and
+        // bounds the per-mapping index-scan cost only transitively. A too-large set is a `413`
+        // (the same refusal class as the body limit); a malformed set stays a `400`.
+        let limits = crate::tpf::BindingLimits {
+            max_mappings: state.config().brtpf_max_bindings,
+            max_payload_bytes: state.config().brtpf_max_values_bytes,
+        };
+        match crate::tpf::parse_bindings_capped(&raw_values, limits) {
             Ok(b) => b,
-            Err(e) => {
+            Err(crate::tpf::BindingError::Malformed(e)) => {
                 return sanitized_error(
                     StatusCode::BAD_REQUEST,
                     "brtpf-bindings-parse",
                     "malformed brTPF binding set",
                     &e.to_string(),
                 )
+            }
+            Err(crate::tpf::BindingError::TooLarge(m)) => {
+                // The cap message names only the limit (never a caller-supplied term), so it is
+                // safe to return to the client — it tells them which knob to lower / which the
+                // operator set, exactly like the `--max-body-bytes` 413.
+                return json_error(StatusCode::PAYLOAD_TOO_LARGE, &m);
             }
         }
     };
@@ -2418,8 +2477,16 @@ async fn sparql_endpoint(
                         }
                     };
                     let explain = explain_mode(&url_params, None, &headers);
-                    let resp =
-                        run_query(&state, q, &headers, method == Method::HEAD, explain, pin, &url_dataset).await;
+                    let resp = run_query(
+                        &state,
+                        q,
+                        &headers,
+                        method == Method::HEAD,
+                        explain,
+                        pin,
+                        &url_dataset,
+                    )
+                    .await;
                     #[cfg(feature = "audit-log")]
                     if let Some(a) = audit {
                         a.emit(&resp);
@@ -2442,7 +2509,17 @@ async fn sparql_endpoint(
                 None => bad_request("missing 'query' parameter"),
             }
         }
-        Method::POST => handle_post(&state, &headers, &body, &url_params, &url_dataset, &url_using).await,
+        Method::POST => {
+            handle_post(
+                &state,
+                &headers,
+                &body,
+                &url_params,
+                &url_dataset,
+                &url_using,
+            )
+            .await
+        }
         _ => method_not_allowed(&[Method::GET, Method::HEAD, Method::POST]),
     }
 }
@@ -2638,7 +2715,16 @@ async fn handle_post(
                 // [OPUS-4.8] sq-z33x: per the SPARQL 1.1 Protocol url-encoded encoding, the dataset
                 // override (`default-graph-uri` / `named-graph-uri`) is carried in the FORM BODY for
                 // this content type, not the URL query string.
-                run_query(state, q, headers, false, explain, pin, &query_dataset_override(s)).await
+                run_query(
+                    state,
+                    q,
+                    headers,
+                    false,
+                    explain,
+                    pin,
+                    &query_dataset_override(s),
+                )
+                .await
             }
             None => bad_request("missing 'query' or 'update' parameter in url-encoded body"),
         };
@@ -3910,9 +3996,12 @@ fn update_dataset_override(raw: &str) -> UsingOverride {
 #[allow(clippy::result_large_err)]
 fn rewrite_update(update: &str, over: &UsingOverride) -> Result<String, Response> {
     apply_update_dataset(update, over).map_err(|e| match e {
-        UpdateDatasetError::Malformed(msg) => {
-            sanitized_error(StatusCode::BAD_REQUEST, "update-parse", "malformed update", &msg)
-        }
+        UpdateDatasetError::Malformed(msg) => sanitized_error(
+            StatusCode::BAD_REQUEST,
+            "update-parse",
+            "malformed update",
+            &msg,
+        ),
         UpdateDatasetError::BadGraphUri(msg) => bad_request(&msg),
         UpdateDatasetError::UsingConflict => bad_request(
             "the 'using-graph-uri' / 'using-named-graph-uri' parameters must not be combined with \
@@ -4974,7 +5063,10 @@ mod hardening_unit_tests {
     #[test]
     fn update_where_deadline_defaults_to_query_timeout_unchanged() {
         let cfg = ServerConfig::default();
-        assert_eq!(cfg.update_where_timeout, None, "no separate update deadline by default");
+        assert_eq!(
+            cfg.update_where_timeout, None,
+            "no separate update deadline by default"
+        );
         assert_eq!(update_where_deadline(&cfg), cfg.query_timeout);
     }
 
