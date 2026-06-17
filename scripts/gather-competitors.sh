@@ -15,12 +15,14 @@
 #                          Heavy. Caps dataset size, watches `df`, cleans /tmp.
 #
 # Engines: oxigraph (embedded Rust dep) | qlever (Docker) | eye (N3 binary).
-# Plus four SHARED reusable adapter KINDS (sq-eifd), dispatched off competitors.json
-# `kind` and backed by scripts/bench-adapters/:
+# Plus five SHARED reusable adapter KINDS (sq-eifd / sq-1fz0), dispatched off
+# competitors.json `kind` and backed by scripts/bench-adapters/:
 #   report-cli  : file-in/SHACL-report-out CLI (pySHACL, Jena `shacl validate`)
 #   js-lib      : in-process Node/RDF-JS SHACL (rdf-validate-shacl, sparq's own WASM)
 #   http-sparql : POST query -> parse SPARQL-JSON -> count (Fuseki, Virtuoso, QLever)
 #   vector-lib  : in-process Python ANN -> recall@k vs exact-kNN (FAISS, hnswlib)
+#   python-lib  : in-process IR kernel -> Recall@100/nDCG@10 deficits on a BEIR cut
+#                 (lucene-anserini, the FTS IR-quality oracle; sq-1fz0)
 # Select with --only <id[,id...]>; default is all engines in dry-run, but --run
 # requires you to NAME the engines (no accidental "run everything heavy").
 #
@@ -537,9 +539,67 @@ run_vector_lib_engine() { # <id>
   fi
 }
 
+# beir_deficits_json <tsv> — fold the adapter's `<engine>\t<metric>\t<deficit_milli>`
+# lines (recall_at_100, ndcg_at_10) into ONE `{engine, deficits_milli:{metric:val}}`
+# JSON object, so each engine's results envelope is a single comparable record (the
+# same deficit shape the vector-lib path emits).
+beir_deficits_json() {
+  printf '%s' "$1" | python3 -c 'import json,sys
+m={}; e=None
+for ln in sys.stdin.read().splitlines():
+    if not ln.strip(): continue
+    e,k,v=ln.split("\t"); m[k]=int(v)
+print(json.dumps({"engine":e,"deficits_milli":m}))'
+}
+
+# [OPUS-4.8] sq-1fz0: PYTHON-LIB kind — the BEIR IR-quality axis of the FTS suite
+# (design §3.4). The ONLY python-lib engine is lucene-anserini, the kernel BM25
+# ORACLE: it downloads a small BEIR cut (SciFact / TREC-COVID + qrels), BM25-retrieves
+# with Anserini/pyserini (k1=1.2/b=0.75, matching sparq-text), and scores Recall@100 /
+# nDCG@10, emitted as DEFICITS (G4) on the SAME cut + qrels sparq-text is scored on.
+# GATHER-ONLY: the BEIR corpus is not redistributable in-repo, so this is a download
+# step, never a committed per-PR gate. The scoring half is fixture-unit-tested in
+# scripts/bench-adapters/test_adapters.py WITHOUT pyserini/beir installed.
+run_python_lib_engine() { # <id>
+  local id="$1"
+  hdr "$id (python-lib — BEIR IR-quality oracle)"
+  log "  adapter: $ADAPTERS_DIR/beir_ir_adapter.py (download BEIR cut -> Anserini BM25 retrieve -> Recall@100/nDCG@10 deficits)"
+  log "  scoring half is fixture-unit-tested in $ADAPTERS_DIR/test_adapters.py (no pyserini/beir needed)"
+  log "  PREP (gather box): pip install pyserini beir; set BEIR_CUT (scifact|trec-covid); optional BEIR_DATA_DIR"
+  log "  OPTIONAL apples-to-apples: set SPARQ_TEXT_BEIR=target/release/examples/beir_text to ALSO"
+  log "    score sparq-text on the SAME cut+qrels (cargo build -p sparq-text --release --example beir_text)"
+  log "  OFF the dashboard (no RDF/SPARQL surface) — the kernel BM25 reference, 'sub-component, not an RDF benchmark'"
+  if [ "$DO_RUN" -eq 1 ]; then
+    have python3 || die "python3 needed for the python-lib (BEIR) adapter"
+    python3 -c 'import pyserini, beir' 2>/dev/null || die "python-lib adapter needs pyserini + beir (pip install pyserini beir)"
+    local cut; cut="${BEIR_CUT:-scifact}"
+    # 1. the kernel BM25 ORACLE: Anserini retrieve + score on the cut + qrels.
+    OUT="$(python3 "$ADAPTERS_DIR/beir_ir_adapter.py" --anserini --dataset "$cut" --k "${BEIR_K:-100}" --engine "$id" --json 2>/dev/null)" \
+      || die "python-lib (BEIR) adapter failed for $id (cut '$cut'; pyserini index downloadable?)"
+    PAYLOAD="$(beir_deficits_json "$OUT")"
+    write_result "$id" "beir-ir-${cut}" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    # 2. OPTIONAL: score sparq-text on the SAME cut+qrels via the shared scorer, so the
+    #    comparison is apples-to-apples (same scorer, same judgements; design §3.4).
+    if [ -n "${SPARQ_TEXT_BEIR:-}" ]; then
+      [ -x "$SPARQ_TEXT_BEIR" ] || die "SPARQ_TEXT_BEIR='$SPARQ_TEXT_BEIR' is not an executable (build the beir_text example)"
+      local prep; prep="$(mktemp -d)"
+      python3 "$ADAPTERS_DIR/beir_ir_adapter.py" --prepare-sparq --dataset "$cut" --out "$prep" \
+        || { rm -rf "$prep"; die "could not prepare sparq inputs for cut '$cut'"; }
+      "$SPARQ_TEXT_BEIR" "$prep/corpus.nt" "$prep/queries.tsv" "${BEIR_K:-100}" sparq-text > "$prep/run.txt" \
+        || { rm -rf "$prep"; die "sparq-text beir_text retrieval failed for cut '$cut'"; }
+      local SOUT
+      SOUT="$(python3 "$ADAPTERS_DIR/beir_ir_adapter.py" --score --run "$prep/run.txt" --qrels "$prep/qrels.txt" --k "${BEIR_K:-100}" --engine sparq-text 2>/dev/null)" \
+        || { rm -rf "$prep"; die "could not score the sparq-text run for cut '$cut'"; }
+      write_result "sparq-text" "beir-ir-${cut}" "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" "$(beir_deficits_json "$SOUT")"
+      rm -rf "$prep"
+    fi
+    check_df
+  fi
+}
+
 # Walk every registry engine of a SHARED-ADAPTER kind (skipping the three bespoke
 # kinds handled above) and dispatch. Engines stay empty in git, so this is a no-op
-# until a maintainer adds report-cli/js-lib/http-sparql/vector-lib entries.
+# until a maintainer adds report-cli/js-lib/http-sparql/vector-lib/python-lib entries.
 if have jq; then
   while IFS= read -r aid; do
     [ -n "$aid" ] || continue
@@ -549,8 +609,9 @@ if have jq; then
       js-lib)      run_js_lib_engine      "$aid" ;;
       http-sparql) run_http_sparql_engine "$aid" ;;
       vector-lib)  run_vector_lib_engine  "$aid" ;;
+      python-lib)  run_python_lib_engine  "$aid" ;;
     esac
-  done < <(jq -r '.competitors[] | select(.kind=="report-cli" or .kind=="js-lib" or .kind=="http-sparql" or .kind=="vector-lib") | .id' "$REGISTRY")
+  done < <(jq -r '.competitors[] | select(.kind=="report-cli" or .kind=="js-lib" or .kind=="http-sparql" or .kind=="vector-lib" or .kind=="python-lib") | .id' "$REGISTRY")
 fi
 
 hdr "done"
