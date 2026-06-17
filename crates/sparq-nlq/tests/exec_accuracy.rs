@@ -27,7 +27,7 @@
 
 use sparq_core::Graph;
 use sparq_nlq::eval::{run_comparison, run_config, EvalCase, Linking};
-use sparq_nlq::{Llm, NlqConfig};
+use sparq_nlq::{Llm, NlqConfig, RecordingLlm, ReplayLlm};
 
 // ---------------------------------------------------------------------------
 // Layer 1 — the offline CI gate: a tiny in-memory graph, scripted backends.
@@ -165,6 +165,109 @@ fn empty_gold_is_a_true_negative() {
     );
     assert_eq!(report.macro_f1, 1.0, "empty==empty is a true negative");
     assert_eq!(report.exact_match, 1.0);
+}
+
+/// The **regression-set contract** the live run depends on (bead sq-g0lw, follow-up
+/// to sq-05rv): a recorded session, once written to disk in the on-disk fixture format
+/// `live_exec_accuracy` uses (`RecordingLlm::save` → `tests/fixtures/live_session_
+/// {i}.json`), must reload via `ReplayLlm::from_file` and re-score **identically**
+/// through the very same exec-accuracy harness (`run_config`). That round-trip is what
+/// makes "commit the recorded session as the regression set" honest — without it, a
+/// live run could write a fixture the offline gate cannot faithfully replay.
+///
+/// Proven OFFLINE. The live measurement itself needs `ANTHROPIC_API_KEY` + network +
+/// the 1.78M-triple olympics dump (none of which CI has), and per project policy a
+/// live run from a non-canonical box must NOT bake numbers into committed fixtures. So
+/// the live API is substituted by the same deterministic grounded backend the CI gate
+/// already uses; what is exercised is the *mechanism* (record → save-to-disk → reload
+/// → identical harness scores), not a real model's accuracy.
+#[test]
+fn recorded_session_saves_and_replays_as_regression_set() {
+    use std::rc::Rc;
+
+    let g = tiny_graph();
+    let cases = cases();
+    let cfg = NlqConfig::default();
+
+    // 1. Record a grounded session through the SAME `run_config` harness the live run
+    //    drives — the recorder wraps the deterministic backend exactly as
+    //    `RecordingLlm<AnthropicLlm>` wraps the live client. `Rc` keeps a handle to the
+    //    recorder after `run_config` takes ownership of its `Box<dyn Llm>` (an `Rc<L>`
+    //    is itself `Llm`), mirroring `live_exec_accuracy`'s recorder bookkeeping.
+    let recorder = Rc::new(RecordingLlm::new(FnLlm(|prompt: &str| {
+        grounded_completion(prompt)
+            .ok_or_else(|| format!("no scripted grounded answer for {prompt:?}"))
+    })));
+    let recorded_report = run_config(
+        &g,
+        &cases,
+        Box::new(Rc::clone(&recorder)),
+        cfg.clone(),
+        Linking::EndToEnd,
+    );
+    assert_eq!(
+        recorded_report.macro_f1, 1.0,
+        "the recorded grounded session answers all tiny-graph cases"
+    );
+    assert!(
+        !recorder.exchanges().is_empty(),
+        "the session recorded at least one (prompt, completion) pair"
+    );
+
+    // 2. Persist it exactly as `live_exec_accuracy` does — to disk, in the committed
+    //    `Exchange[]` JSON format — then reload through the public file API.
+    let path = std::env::temp_dir().join(format!(
+        "sparq_nlq_live_session_{}_{}.json",
+        std::process::id(),
+        // distinguish concurrent test binaries sharing the temp dir.
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ));
+    recorder.save(&path).expect("save the recorded session");
+
+    // The on-disk shape IS the committed fixture format (a JSON array of
+    // {prompt, completion}) — same contract as `olympics_replay.json`.
+    let on_disk = std::fs::read_to_string(&path).expect("read back the saved session");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&on_disk).expect("saved session is valid JSON");
+    assert!(parsed.is_array(), "fixture is a JSON array of exchanges");
+    assert!(
+        parsed[0].get("prompt").is_some() && parsed[0].get("completion").is_some(),
+        "each exchange carries a prompt and a completion"
+    );
+
+    let reloaded = ReplayLlm::from_file(&path).expect("saved session reloads as a fixture");
+    assert_eq!(
+        reloaded.len(),
+        recorder.exchanges().len(),
+        "every recorded exchange survives the disk round-trip"
+    );
+
+    // 3. Re-score the SAME cases through the SAME `run_config` harness, now driven by
+    //    the reloaded fixture. The regression set is faithful iff the scores match.
+    let replay_report = run_config(
+        &g,
+        &cases,
+        Box::new(reloaded),
+        cfg.clone(),
+        Linking::EndToEnd,
+    );
+    assert_eq!(
+        replay_report.macro_f1, recorded_report.macro_f1,
+        "replayed regression set must reproduce the recorded macro-F1"
+    );
+    assert_eq!(
+        replay_report.exact_match, recorded_report.exact_match,
+        "replayed regression set must reproduce the recorded exact-match"
+    );
+    assert_eq!(
+        replay_report.validity, recorded_report.validity,
+        "replayed regression set must reproduce the recorded validity"
+    );
+
+    let _ = std::fs::remove_file(&path); // hygiene: leave no scratch fixture behind.
 }
 
 // ---------------------------------------------------------------------------

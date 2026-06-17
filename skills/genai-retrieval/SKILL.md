@@ -277,8 +277,11 @@ oracle-vs-end-to-end and grounded-vs-ungrounded reporting, the inequality — **
 real model's accuracy numbers. Those come from a `live_exec_accuracy` run (`--features
 live` + `RecordingLlm`, which needs a key + network + dataset); that test is `#[ignore]`'d
 and feature-gated **OFF**, so a model or network outage can never red the build. After a
-live run the recorded fixtures become the offline regression set. (No claim is made here
-about NL→SPARQL quality beyond what the fixtures encode.)
+live run the recorded sessions become the offline regression set — and the
+record→`save`→`from_file`→identical-scores round-trip that makes them a *faithful*
+regression set is itself CI-gated (`recorded_session_saves_and_replays_as_regression_set`
+in `tests/exec_accuracy.rs`). (No claim is made here about NL→SPARQL quality beyond what
+the fixtures encode.)
 
 ## Gotchas / feature flags / prerequisites
 
