@@ -72,20 +72,31 @@
 //! optionally with an attached binding block, → matched triples + the page's count + the
 //! next-page token). It is the TPF analogue of the [`Transport`] SRJ seam and is tested
 //! with an in-memory fixture server ([`source` tests]) so the adapters are exercised on the
-//! REAL fetch→parse→bind→paginate→bind-join path with **zero** network. A native HTTP
-//! `FragmentTransport` (ureq, the same default-deny SSRF resolver) lands with the streaming
-//! phase; Phase 6 ships the adapters + the seam + the completeness invariant.
+//! REAL fetch→parse→bind→paginate→bind-join path with **zero** network.
+//!
+//! The **native HTTP `FragmentTransport`** ([`HttpFragmentTransport`], bead `sq-yzca`) is the
+//! production seam: a blocking ureq GET behind the same default-deny SSRF resolver as
+//! [`HttpTransport`], that serialises a [`FragPattern`] into the Hydra TPF URI template
+//! (`?subject=&predicate=&object=`), attaches a brTPF binding block as the `values` parameter
+//! (the server's text wire), follows the `hydra:next` page link to exhaustion, and parses the
+//! Turtle/TriG fragment body — splitting the Hydra/VoID control triples (the
+//! `hydra:totalItems`/`void:triples` count + the `hydra:next` link) from the data triples
+//! (kept only when they match the requested pattern). Native-only (gated out of wasm).
 //!
 //! `FederatedSource::execute` still returns the SRJ-style `String` body for the
 //! [`Endpoint`] adapter; the TPF adapters answer through the typed
 //! [`TpfSource::solutions`] / [`BrTpfSource::solutions`] methods (a fragment server speaks
 //! triples, not SPARQL-Results-JSON), and their `execute` forwards a clear
 //! [`FedError::Unsupported`] pointing the caller at `solutions` — no overclaim, no lossy
-//! re-serialisation through SRJ.
+//! re-serialisation through SRJ. The interpreter ([`crate::operators`]) bridges this: a
+//! `JoinTree` leaf resolving to a TPF/brTPF source is answered through `solutions` (the typed
+//! fragment path), not through `execute` (bead `sq-yzca`).
 //!
 //! [OPUS-4.8] sq-rsxf (epic sq-dnko / sq-3183): Phase-2 source-type abstraction +
 //! Endpoint adapter + default-deny SSRF guard. [OPUS-4.8] sq-2qze: Phase-6 brTPF + TPF
-//! adapters + count-metadata cardinality. Flagged for Fable re-review when available.
+//! adapters + count-metadata cardinality. [OPUS-4.8] sq-yzca: native HTTP `FragmentTransport`
+//! (ureq + SSRF resolver + Hydra URI-template + Turtle/TriG parse) + interpreter wiring.
+//! Flagged for Fable re-review when available.
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -901,10 +912,10 @@ pub struct FragmentPage {
 /// from a prior [`FragmentPage::next`] (`None` for the first page). The implementation
 /// returns the page's triples + count + next token, or a transport-error string.
 ///
-/// A native HTTP `FragmentTransport` (ureq + the default-deny SSRF resolver, serialising the
-/// pattern into the Hydra URI template + the binding block as the brTPF `values` parameter,
-/// and parsing the Turtle/TriG fragment body) lands with the streaming phase; Phase 6 ships
-/// this seam and exercises the adapters through an in-memory fixture server. [OPUS-4.8].
+/// The native HTTP implementation is [`HttpFragmentTransport`] (bead `sq-yzca`): ureq + the
+/// default-deny SSRF resolver, serialising the pattern into the Hydra URI template + the binding
+/// block as the brTPF `values` parameter, and parsing the Turtle/TriG fragment body. The trait
+/// is also exercised through an in-memory fixture server in the tests (zero network). [OPUS-4.8].
 pub trait FragmentTransport: Send + Sync {
     /// Fetch one fragment page. `bindings` is the brTPF block (empty for plain TPF);
     /// `page` is the next-page token (`None` for the first page).
@@ -915,6 +926,305 @@ pub trait FragmentTransport: Send + Sync {
         bindings: &[FragBinding],
         page: Option<&str>,
     ) -> Result<FragmentPage, String>;
+}
+
+// ─── Native HTTP FragmentTransport (ureq + SSRF resolver + Hydra template + Turtle/TriG) ─
+
+/// The Hydra Core vocabulary namespace (the TPF control vocabulary). [OPUS-4.8] sq-yzca.
+#[cfg(not(target_arch = "wasm32"))]
+const HYDRA_NS: &str = "http://www.w3.org/ns/hydra/core#";
+/// The VoID namespace (`void:triples` — the fragment's match-count estimate). [OPUS-4.8].
+#[cfg(not(target_arch = "wasm32"))]
+const VOID_NS: &str = "http://rdfs.org/ns/void#";
+/// The brTPF `values` control property the sparq server mints (sq-dxhb) — the
+/// `hydra:property` its `{values}` template variable maps to. The native transport attaches
+/// the brTPF binding block under the `values` query parameter (the server's text wire).
+/// [OPUS-4.8] sq-yzca.
+#[cfg(not(target_arch = "wasm32"))]
+const BRTPF_VALUES_PARAM: &str = "values";
+
+/// The production [`FragmentTransport`]: a blocking ureq GET against a Triple-Pattern-Fragments
+/// (TPF) / bindings-restricted-TPF (brTPF) server, behind the **same default-deny SSRF resolver**
+/// as [`HttpTransport`] (the resolved-and-vetted IP is the dialled IP — no DNS-rebinding
+/// re-resolve window).
+///
+/// # What it does (the four pieces the bead names)
+///
+/// 1. **Hydra URI-template serialisation.** A [`FragPattern`] is rendered into the TPF query
+///    string the sparq server reads (`?subject=&predicate=&object=`, each a percent-encoded
+///    N-Triples term; a variable position is omitted). This is the `{subject}`/`{predicate}`/
+///    `{object}` Hydra template the server advertises (`sparq-server`'s `tpf.rs`).
+/// 2. **brTPF binding block.** A non-empty `bindings` slice is attached as the `values` query
+///    parameter using the server's text wire ([`crate::wire::encode_bindings_text`]), so the
+///    server returns only triples joining at least one attached mapping (the brTPF bind-join).
+/// 3. **Pagination.** A `page` token is the OPAQUE next-page URL the server published as
+///    `hydra:next`; the transport GETs it verbatim, so following pagination to exhaustion is
+///    "GET the `hydra:next` link until there is none" — exactly what [`drain_fragment`] drives.
+/// 4. **Turtle/TriG fragment-body parse.** The response (`Accept: text/turtle, application/trig`)
+///    is parsed with oxttl's TriG parser (a superset of Turtle — it handles a default-graph
+///    Turtle body and a named-graph TriG body identically). The parse SPLITS the document into
+///    the **control** triples (`hydra:totalItems` / `void:triples` → the count; `hydra:next` →
+///    the next-page link) and the **data** triples (everything whose predicate is NOT in the
+///    Hydra/VoID control vocabulary), and the data triples are filtered to those that actually
+///    match the requested pattern, so a control triple can never be mistaken for a match.
+///
+/// Native-only (`cfg(not(target_arch = "wasm32"))`): ureq + its TLS stack never enter the wasm
+/// bundle (a wasm federation client would carry a `fetch`-based transport). Construct with
+/// [`HttpFragmentTransport::new`] (strict default-deny) or [`HttpFragmentTransport::from_guard`]
+/// to share an [`EgressGuard`]'s allowlist. [OPUS-4.8] sq-yzca.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct HttpFragmentTransport {
+    timeout: std::time::Duration,
+    /// Hosts (bare authority, lowercased) the SSRF resolver permits even when they resolve
+    /// privately — bridged from an [`EgressGuard`] so the pre-flight check and the socket
+    /// resolver share one allowlist.
+    allow_private: std::sync::Arc<HashSet<String>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for HttpFragmentTransport {
+    fn default() -> Self {
+        HttpFragmentTransport::new()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HttpFragmentTransport {
+    /// A fragment transport with a finite default timeout and the strict default-deny SSRF
+    /// policy (no private host permitted).
+    pub fn new() -> HttpFragmentTransport {
+        HttpFragmentTransport {
+            timeout: std::time::Duration::from_secs(30),
+            allow_private: std::sync::Arc::new(HashSet::new()),
+        }
+    }
+
+    /// A fragment transport whose SSRF resolver shares `guard`'s allowlist, so a deliberately
+    /// allowlisted private fragment server is reachable (and only such a host is). The IP the
+    /// resolver vets is the IP ureq dials.
+    pub fn from_guard(guard: &EgressGuard) -> HttpFragmentTransport {
+        HttpFragmentTransport {
+            timeout: std::time::Duration::from_secs(30),
+            allow_private: std::sync::Arc::new(guard.allowed_hosts().clone()),
+        }
+    }
+
+    /// Sets the per-request timeout. Chainable.
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> HttpFragmentTransport {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Build the first-page request URL for `url` + `pattern` (+ optional brTPF `bindings`):
+    /// the Hydra TPF query string with the bound positions percent-encoded as N-Triples terms.
+    fn first_page_url(url: &str, pattern: &FragPattern, bindings: &[FragBinding]) -> String {
+        let mut out = String::with_capacity(url.len() + 64);
+        out.push_str(url);
+        let mut sep = if url.contains('?') { '&' } else { '?' };
+        for (key, pos) in [
+            ("subject", &pattern.subject),
+            ("predicate", &pattern.predicate),
+            ("object", &pattern.object),
+        ] {
+            if let PatternTerm::Bound(term) = pos {
+                out.push(sep);
+                out.push_str(key);
+                out.push('=');
+                out.push_str(&pct_encode(&term_to_ntriples(term)));
+                sep = '&';
+            }
+        }
+        // brTPF binding block (the server's text wire). Empty → plain TPF (no `values` param).
+        if !bindings.is_empty() {
+            let wire = crate::wire::encode_bindings_text(bindings);
+            if !wire.is_empty() {
+                out.push(sep);
+                out.push_str(BRTPF_VALUES_PARAM);
+                out.push('=');
+                out.push_str(&pct_encode(&wire));
+            }
+        }
+        out
+    }
+}
+
+/// Percent-encode a query-parameter VALUE (RFC 3986 unreserved set passes through; everything
+/// else is `%XX`-escaped), so an N-Triples term (`<`, `>`, `"`, spaces, newlines in a brTPF
+/// block) round-trips through the URL back to the same term. Mirrors the sparq server's
+/// `pct_encode` so the link the transport builds is read identically server-side. Hand-rolled
+/// to avoid a `url`-crate dependency (the crate pulls `oxrdf`/`oxttl`, not `url`). [OPUS-4.8].
+#[cfg(not(target_arch = "wasm32"))]
+fn pct_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Render a [`FragTerm`] in N-Triples lexical form (the TPF query-parameter grammar the server
+/// reads): an IRI is `<…>`-wrapped, a blank node is `_:…`, a literal carries its
+/// `"…"`/`@lang`/`^^<dt>` decoration verbatim (the `FragTerm::Literal` model already stores it).
+/// Identical to `crate::wire`'s private renderer; inlined here so the transport has no cross-
+/// module private dependency. [OPUS-4.8] sq-yzca.
+#[cfg(not(target_arch = "wasm32"))]
+fn term_to_ntriples(term: &FragTerm) -> String {
+    match term {
+        FragTerm::Iri(s) => format!("<{s}>"),
+        FragTerm::Blank(s) => format!("_:{s}"),
+        FragTerm::Literal(s) => s.clone(),
+    }
+}
+
+/// Convert one parsed oxrdf [`oxrdf::Term`] (a triple object) into a [`FragTerm`], preserving the
+/// term's canonical N-Triples lexical identity (so equality against a bound pattern position is
+/// exact). [OPUS-4.8] sq-yzca.
+#[cfg(not(target_arch = "wasm32"))]
+fn oxterm_to_fragterm(term: &oxrdf::Term) -> FragTerm {
+    match term {
+        oxrdf::Term::NamedNode(n) => FragTerm::Iri(n.as_str().to_string()),
+        oxrdf::Term::BlankNode(b) => FragTerm::Blank(b.as_str().to_string()),
+        // A literal's canonical N-Triples form (`"v"`, `"v"@lang`, `"v"^^<dt>`) is its lexical
+        // identity in the `FragTerm::Literal` model — keep it verbatim via `Display`.
+        oxrdf::Term::Literal(l) => FragTerm::Literal(l.to_string()),
+        // SPARQL-1.2 triple terms cannot appear as a TPF fragment data object; carry the
+        // canonical serialisation so a (degenerate) match still compares exactly.
+        other => FragTerm::Literal(other.to_string()),
+    }
+}
+
+/// Convert a parsed oxrdf subject ([`oxrdf::NamedOrBlankNode`]) into a [`FragTerm`]. [OPUS-4.8].
+#[cfg(not(target_arch = "wasm32"))]
+fn oxsubject_to_fragterm(s: &oxrdf::NamedOrBlankNode) -> FragTerm {
+    match s {
+        oxrdf::NamedOrBlankNode::NamedNode(n) => FragTerm::Iri(n.as_str().to_string()),
+        oxrdf::NamedOrBlankNode::BlankNode(b) => FragTerm::Blank(b.as_str().to_string()),
+    }
+}
+
+/// Whether a predicate IRI is a TPF **control** predicate (Hydra / VoID), i.e. metadata about
+/// the fragment rather than a data triple. The native parser uses this to SPLIT the fragment
+/// document: control triples feed the count + next-page link; everything else is candidate
+/// data. [OPUS-4.8] sq-yzca.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_control_predicate(pred: &str) -> bool {
+    pred.starts_with(HYDRA_NS)
+        || pred.starts_with(VOID_NS)
+        // rdf:type triples describe the fragment/dataset/control nodes, never the data.
+        || pred == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FragmentTransport for HttpFragmentTransport {
+    fn fetch_fragment(
+        &self,
+        url: &str,
+        pattern: &FragPattern,
+        bindings: &[FragBinding],
+        page: Option<&str>,
+    ) -> Result<FragmentPage, String> {
+        // The next-page token is the OPAQUE `hydra:next` URL (built by the server, self-
+        // contained); the first page is built from the pattern + binding block.
+        let request_url = match page {
+            Some(next) => next.to_string(),
+            None => Self::first_page_url(url, pattern, bindings),
+        };
+        let agent = ureq::AgentBuilder::new()
+            .timeout(self.timeout)
+            .user_agent(concat!("sparq-fedclient/", env!("CARGO_PKG_VERSION")))
+            // Default-deny SSRF egress filter INSIDE ureq's resolver: ureq dials only the
+            // addresses this resolver returns, so the vetted IP IS the dialled IP — no DNS-
+            // rebinding re-resolve window. Same resolver as the SRJ `HttpTransport`. [OPUS-4.8].
+            .resolver(EgressFilterResolver {
+                allow_private: std::sync::Arc::clone(&self.allow_private),
+            })
+            .build();
+        let body = match agent
+            .get(&request_url)
+            // TriG is a Turtle superset; ask for either so a server that serves Turtle (the
+            // conventional TPF serialisation) or TriG (named graphs) both parse.
+            .set("Accept", "application/trig, text/turtle")
+            .call()
+        {
+            Ok(r) => r
+                .into_string()
+                .map_err(|e| format!("fedclient: reading fragment from {request_url}: {e}"))?,
+            Err(ureq::Error::Status(code, _)) => {
+                return Err(format!(
+                    "fedclient: fragment server {request_url} returned HTTP {code}"
+                ))
+            }
+            Err(e) => return Err(format!("fedclient: request to {request_url} failed: {e}")),
+        };
+        parse_fragment_body(&body, pattern)
+    }
+}
+
+/// Parse a Turtle/TriG fragment body into a [`FragmentPage`] (the data triples + the
+/// `hydra:totalItems`/`void:triples` count + the `hydra:next` token).
+///
+/// TriG is parsed (a superset of Turtle: a Turtle body is a TriG document with everything in the
+/// default graph), so a plain-TPF Turtle response and a TriG response are handled identically.
+/// The parse SPLITS each parsed triple into:
+///
+/// * a **control** triple (predicate in the Hydra/VoID vocabulary or `rdf:type`) — from which the
+///   match-count (`hydra:totalItems` / `void:triples`, the max seen) and the next-page link
+///   (`hydra:next`, an IRI object) are read; and
+/// * a candidate **data** triple — kept iff it actually MATCHES the requested `pattern` (the same
+///   consistency [`bind_triple`] enforces downstream), so a control triple never leaks in as a
+///   match and a misbehaving server cannot smuggle a non-matching triple through.
+///
+/// A malformed body (a TriG syntax error) is a clean transport-error string, never a panic — this
+/// crate is `forbid(unsafe_code)`. [OPUS-4.8] sq-yzca.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_fragment_body(body: &str, pattern: &FragPattern) -> Result<FragmentPage, String> {
+    let mut triples: Vec<FragTriple> = Vec::new();
+    let mut total_items: u64 = 0;
+    let mut next: Option<String> = None;
+    for quad in oxttl::TriGParser::new().for_slice(body.as_bytes()) {
+        let quad = quad.map_err(|e| format!("fedclient: malformed TriG/Turtle fragment: {e}"))?;
+        let pred = quad.predicate.as_str();
+        if is_control_predicate(pred) {
+            // Count metadata: take the largest of any `hydra:totalItems` / `void:triples` literal
+            // (a fragment may carry the count on more than one control node; they agree, and the
+            // max is the recall-safe choice if they ever differ).
+            if pred == format!("{HYDRA_NS}totalItems") || pred == format!("{VOID_NS}triples") {
+                if let oxrdf::Term::Literal(l) = &quad.object {
+                    if let Ok(n) = l.value().parse::<u64>() {
+                        total_items = total_items.max(n);
+                    }
+                }
+            }
+            // The next-page control link (`hydra:next`; legacy `hydra:nextPage` also accepted).
+            if pred == format!("{HYDRA_NS}next") || pred == format!("{HYDRA_NS}nextPage") {
+                if let oxrdf::Term::NamedNode(n) = &quad.object {
+                    next = Some(n.as_str().to_string());
+                }
+            }
+            continue;
+        }
+        // A candidate data triple: keep it only if it matches the requested pattern (the
+        // load-bearing answer-safety filter — a control triple or a non-matching triple cannot
+        // become a match).
+        let triple = FragTriple::new(
+            oxsubject_to_fragterm(&quad.subject),
+            FragTerm::Iri(pred.to_string()),
+            oxterm_to_fragterm(&quad.object),
+        );
+        if bind_triple(pattern, &triple).is_some() {
+            triples.push(triple);
+        }
+    }
+    Ok(FragmentPage {
+        triples,
+        total_items,
+        next,
+    })
 }
 
 // ─── Bind one matched triple back into a pattern's variables ─────────────────────────
@@ -1956,6 +2266,170 @@ mod tests {
         let ep = Endpoint::native("http://127.0.0.1:9999/sparql");
         let err = ep.execute(&SubQuery::new("ASK {}")).unwrap_err();
         assert!(matches!(err, FedError::EgressRefused(_)), "got {err:?}");
+    }
+
+    // ── Native HTTP FragmentTransport: Hydra URI-template + Turtle/TriG parse (sq-yzca) ──
+    //
+    // These prove the four pieces the bead names WITHOUT a network: the Hydra query-string
+    // serialisation, the brTPF `values` text-wire attachment, the Turtle/TriG fragment-body
+    // parse (control/data split + hydra:totalItems + hydra:next extraction), and that a control
+    // triple is never mistaken for a data match. The SSRF resolver itself is the SAME
+    // `EgressFilterResolver` the SRJ transport tests above exercise. [OPUS-4.8] sq-yzca.
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fragment_first_page_url_serialises_bound_positions() {
+        // ?s foaf:knows ?o — predicate bound, subject + object variable. Only the bound
+        // predicate appears in the query string, percent-encoded as an N-Triples IRI.
+        let url = HttpFragmentTransport::first_page_url("http://frag/tpf", &knows_pattern(), &[]);
+        assert_eq!(
+            url,
+            "http://frag/tpf?predicate=%3Chttp%3A%2F%2Fxmlns.com%2Ffoaf%2F0.1%2Fknows%3E"
+        );
+        // A fully-bound pattern serialises all three positions; a base URL that already has a
+        // query string gets `&`-joined.
+        let bound = FragPattern::new(
+            PatternTerm::Bound(FragTerm::iri("http://ex/alice")),
+            PatternTerm::Bound(FragTerm::iri("http://xmlns.com/foaf/0.1/knows")),
+            PatternTerm::Bound(FragTerm::iri("http://ex/bob")),
+        );
+        let url2 = HttpFragmentTransport::first_page_url("http://frag/tpf?dataset=x", &bound, &[]);
+        assert!(url2.starts_with("http://frag/tpf?dataset=x&subject="));
+        assert!(url2.contains("&predicate="));
+        assert!(url2.contains("&object="));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fragment_first_page_url_attaches_brtpf_values_block() {
+        // A non-empty binding block rides the `values` parameter using the server's text wire.
+        let p = |n: &str| FragTerm::iri(format!("http://ex/{n}"));
+        let bindings: Vec<FragBinding> = vec![
+            vec![("s".to_string(), p("alice"))],
+            vec![("s".to_string(), p("bob"))],
+        ];
+        let url =
+            HttpFragmentTransport::first_page_url("http://frag/brtpf", &knows_pattern(), &bindings);
+        assert!(url.contains("predicate="), "the bound predicate is present");
+        assert!(url.contains("&values="), "the brTPF block rides `values`");
+        // The encoded `values` payload decodes back to the server's text wire (s=<…>\ns=<…>).
+        let encoded = url.split("values=").nth(1).unwrap();
+        let decoded = pct_decode_for_test(encoded);
+        assert_eq!(decoded, "s=<http://ex/alice>\ns=<http://ex/bob>");
+    }
+
+    /// Decode a percent-encoded string (test helper — the inverse of `pct_encode`). [OPUS-4.8].
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pct_decode_for_test(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = (bytes[i + 1] as char).to_digit(16).unwrap();
+                let lo = (bytes[i + 2] as char).to_digit(16).unwrap();
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parse_turtle_fragment_splits_control_from_data() {
+        // A realistic TPF fragment Turtle body: two data triples + the Hydra/VoID control node
+        // (totalItems + next). The parse must return ONLY the data triples that match the
+        // pattern, the count, and the next-page link.
+        let body = r#"
+@prefix hydra: <http://www.w3.org/ns/hydra/core#> .
+@prefix void: <http://rdfs.org/ns/void#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+<http://ex/alice> foaf:knows <http://ex/bob> .
+<http://ex/alice> foaf:knows <http://ex/carol> .
+<http://frag/tpf?predicate=knows&page=0> void:triples 4 ;
+    hydra:totalItems 4 ;
+    hydra:itemsPerPage 2 ;
+    hydra:next <http://frag/tpf?predicate=knows&page=1> .
+"#;
+        let page = parse_fragment_body(body, &knows_pattern()).unwrap();
+        assert_eq!(page.total_items, 4, "hydra:totalItems / void:triples");
+        assert_eq!(
+            page.next.as_deref(),
+            Some("http://frag/tpf?predicate=knows&page=1"),
+            "hydra:next page link"
+        );
+        // Exactly the two matching knows-triples — the control triples are excluded.
+        assert_eq!(page.triples.len(), 2, "only the data triples survive");
+        let p = |n: &str| FragTerm::iri(format!("http://ex/{n}"));
+        let knows = FragTerm::iri("http://xmlns.com/foaf/0.1/knows");
+        assert!(page
+            .triples
+            .contains(&FragTriple::new(p("alice"), knows.clone(), p("bob"))));
+        assert!(page
+            .triples
+            .contains(&FragTriple::new(p("alice"), knows, p("carol"))));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parse_trig_fragment_named_graph_body() {
+        // A TriG body wrapping the data + controls in a named graph still parses (TriG superset
+        // of Turtle): the count, next link, and data triples come through identically.
+        let body = r#"
+@prefix hydra: <http://www.w3.org/ns/hydra/core#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+<http://frag/g> {
+  <http://ex/bob> foaf:knows <http://ex/carol> .
+  <http://frag/tpf?page=0> hydra:totalItems 1 .
+}
+"#;
+        let page = parse_fragment_body(body, &knows_pattern()).unwrap();
+        assert_eq!(page.total_items, 1);
+        assert!(page.next.is_none(), "no hydra:next ⇒ last page");
+        assert_eq!(page.triples.len(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parse_fragment_filters_nonmatching_data_triple() {
+        // A misbehaving server returns a triple that does NOT match the requested pattern (a
+        // different predicate). The match filter drops it — it can never become a binding.
+        let body = r#"
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+<http://ex/alice> foaf:knows <http://ex/bob> .
+<http://ex/alice> foaf:name "Alice" .
+"#;
+        // Pattern is ?s foaf:knows ?o — the foaf:name triple must be filtered out.
+        let page = parse_fragment_body(body, &knows_pattern()).unwrap();
+        assert_eq!(page.triples.len(), 1, "non-matching predicate dropped");
+        assert_eq!(
+            page.triples[0].predicate,
+            FragTerm::iri("http://xmlns.com/foaf/0.1/knows")
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parse_malformed_fragment_is_clean_error() {
+        // A TriG syntax error is a clean transport-error string (never a panic — forbid unsafe).
+        let err = parse_fragment_body("@prefix x: <broken .", &knows_pattern()).unwrap_err();
+        assert!(err.contains("malformed"), "got {err:?}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn http_fragment_transport_from_guard_bridges_allowlist() {
+        // The transport built from a guard shares the guard's allowlist (so the SSRF resolver and
+        // the pre-flight egress check agree — one source of truth, no second unguarded resolve).
+        let guard = EgressGuard::deny_private().allow_host("frag.internal");
+        let t = HttpFragmentTransport::from_guard(&guard);
+        assert!(t.allow_private.contains("frag.internal"));
+        let empty = HttpFragmentTransport::from_guard(&EgressGuard::deny_private());
+        assert!(empty.allow_private.is_empty());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

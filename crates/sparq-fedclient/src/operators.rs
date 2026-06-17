@@ -44,10 +44,10 @@
 // [OPUS-4.8] sq-j27p (epic sq-dnko): Phase-3 materialised single-source interpreter +
 // SRJ parser + result-equivalence invariant. Flagged for Fable re-review when available.
 
-use crate::planner::{lower_leaf, pattern_vars, SourceResolver};
-use crate::source::{FedError, FederatedSource};
+use crate::planner::{lower_leaf, lower_leaf_fragment, pattern_vars, SourceResolver};
+use crate::source::{FedError, FederatedSource, FragBinding, FragPattern, FragTerm, SourceType};
 use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple};
-use sparq_fedplan::{JoinNode, JoinTree, PatternSources};
+use sparq_fedplan::{JoinNode, JoinTree, PatternSources, TriplePattern};
 use std::collections::HashMap;
 // [OPUS-4.8] sq-vtba (Phase 5): the streaming-operator surface reuses the planner's proven
 // non-blocking `StreamJoin` + its `Tuple` model, the `SolutionStream` boundary, and `std`
@@ -228,9 +228,101 @@ fn materialize_leaf(
         }
     }
     let tp = resolver.pattern(pattern)?;
-    let sub = lower_leaf(tp);
-    let body = source.execute(&sub)?;
-    parse_srj(&body).map_err(InterpError::BadSrj)
+    fetch_leaf_relation(source, tp)
+}
+
+/// Answer ONE leaf triple pattern against `source`, returning the leaf [`Relation`] —
+/// **dispatching on the source's interface** so a fragment source is answered through its typed
+/// fragment path rather than the SRJ `execute` (which a fragment server refuses, since it speaks
+/// triples, not SPARQL-Results-JSON — bead `sq-2qze`'s `FedError::Unsupported` stub).
+///
+/// * **[`Endpoint`](crate::source::Endpoint) / [`Local`](crate::source::LocalSource)** — lower
+///   to a SPARQL [`SubQuery`](crate::source::SubQuery) ([`lower_leaf`]), `execute` → an SRJ body,
+///   parse → [`Relation`] (the Phase-3 path).
+/// * **[`Tpf`](crate::source::TpfSource)** — lower to a [`FragPattern`] ([`lower_leaf_fragment`]),
+///   call [`solutions`](crate::source::TpfSource::solutions) (the fragment fetched to exhaustion,
+///   complete by construction), and build a [`Relation`] over the pattern's variables.
+/// * **[`BrTpf`](crate::source::BrTpfSource)** — same, calling
+///   [`solutions`](crate::source::BrTpfSource::solutions) with an EMPTY upstream binding block: a
+///   complete unbound fragment scan that the interpreter then hash-joins locally. This mirrors how
+///   the Phase-3 interpreter executes a planner `JoinAlgo::Bind` as a materialised hash join — the
+///   result multiset is identical (the pushed-down brTPF bind-join is a per-block execution
+///   discipline, not a different answer); the streaming bind-join feeder is a later phase.
+///
+/// This is the wiring the bead asks for: a `JoinTree` leaf that resolves to a TPF/brTPF source is
+/// now answered, not rejected with `Unsupported`. The single-source-per-leaf contract is enforced
+/// by the caller. [OPUS-4.8] sq-yzca.
+fn fetch_leaf_relation(
+    source: &dyn FederatedSource,
+    tp: &TriplePattern,
+) -> Result<Relation, InterpError> {
+    match source.source_type() {
+        SourceType::Tpf(tpf) => {
+            let pat = lower_leaf_fragment(tp);
+            let rows = tpf.solutions(&pat)?;
+            Ok(frag_solutions_to_relation(&pat, rows))
+        }
+        SourceType::BrTpf(brtpf) => {
+            let pat = lower_leaf_fragment(tp);
+            // An empty upstream binding block ⇒ a complete unbound fragment scan; the interpreter
+            // hash-joins it locally (semantically identical to the pushed brTPF bind-join).
+            let rows = brtpf.solutions(&pat, &[])?;
+            Ok(frag_solutions_to_relation(&pat, rows))
+        }
+        SourceType::Endpoint(_) | SourceType::Local(_) => {
+            let sub = lower_leaf(tp);
+            let body = source.execute(&sub)?;
+            parse_srj(&body).map_err(InterpError::BadSrj)
+        }
+    }
+}
+
+/// Build a [`Relation`] from a fragment source's typed solution mappings for `pattern`. The
+/// relation's columns are the pattern's variables in position order ([`FragPattern::vars`]); each
+/// [`FragBinding`] row contributes one [`Relation`] row, with each [`FragTerm`] converted back to
+/// the engine's [`oxrdf::Term`] model so the leaf joins against the SAME term type a SPARQL-
+/// endpoint leaf produces (so a federated query mixing endpoint + fragment sources joins
+/// correctly). A binding the fragment did not bind for a column is unbound (`None`). [OPUS-4.8].
+fn frag_solutions_to_relation(pattern: &FragPattern, rows: Vec<FragBinding>) -> Relation {
+    let vars = pattern.vars();
+    let rows = rows
+        .iter()
+        .map(|binding| {
+            vars.iter()
+                .map(|v| {
+                    binding
+                        .iter()
+                        .find(|(name, _)| name == v)
+                        .map(|(_, term)| fragterm_to_oxterm(term))
+                })
+                .collect()
+        })
+        .collect();
+    Relation { vars, rows }
+}
+
+/// Convert one [`FragTerm`] back into the engine's [`oxrdf::Term`] model, preserving the term's
+/// exact lexical identity so it equi-joins with the SAME term parsed from an endpoint's SRJ.
+///
+/// * an IRI / blank node is reconstructed directly; an invalid IRI/label degrades to a simple
+///   literal carrying the raw bytes (never a panic — `forbid(unsafe_code)`, and a malformed term
+///   from a misbehaving server must not crash the join);
+/// * a literal is parsed from its canonical N-Triples lexical form (`"v"`, `"v"@lang`,
+///   `"v"^^<dt>` — the `FragTerm::Literal` model stores exactly that) via `Term::from_str`, the
+///   inverse of the `oxterm_to_fragterm` writer the HTTP transport uses, so the round-trip is
+///   lossless; an unparseable lexical degrades to a simple literal of the raw text. [OPUS-4.8].
+fn fragterm_to_oxterm(term: &FragTerm) -> Term {
+    match term {
+        FragTerm::Iri(s) => NamedNode::new(s)
+            .map(Term::NamedNode)
+            .unwrap_or_else(|_| Term::Literal(Literal::new_simple_literal(s.clone()))),
+        FragTerm::Blank(s) => BlankNode::new(s)
+            .map(Term::BlankNode)
+            .unwrap_or_else(|_| Term::Literal(Literal::new_simple_literal(s.clone()))),
+        FragTerm::Literal(s) => {
+            Term::from_str(s).unwrap_or_else(|_| Term::Literal(Literal::new_simple_literal(s.clone())))
+        }
+    }
 }
 
 /// A materialised **natural (inner) join** of two relations on their shared variables,
@@ -1021,34 +1113,37 @@ fn stream_leaf(
     }
     let tp = resolver.pattern(pattern)?;
     let vars = pattern_vars(tp);
-    let sub = lower_leaf(tp);
+    // Clone the leaf pattern onto the worker (a light fedplan `TriplePattern`) so the blocking
+    // fetch — which dispatches on the source's interface (SRJ endpoint vs TPF/brTPF fragment) —
+    // runs the SAME `fetch_leaf_relation` the materialised interpreter uses. [OPUS-4.8] sq-yzca.
+    let tp_owned = tp.clone();
     let (sink, stream) = SolutionStream::bounded(opts.channel_cap);
     let source = Arc::clone(source);
     let leaf_vars = vars.clone();
     pool.submit(move || {
-        // Blocking fetch + parse on the worker thread. The SSRF gate lives inside `execute`.
-        match source.execute(&sub) {
-            Ok(body) => match parse_srj(&body) {
-                Ok(rel) => {
-                    // Re-key each materialised row onto the leaf's variable header and feed it
-                    // into the stream (the per-leaf "stream" delivers the parsed rows; the
-                    // streaming win is at the JOIN level — a fast leaf feeds the join while a
-                    // slow leaf is still in flight).
-                    for row in rel.rows {
-                        // The SRJ header may differ in order from the pattern's; project onto
-                        // the leaf's variable order so the join keys line up.
-                        let proj = rel_row_project(&rel.vars, &row, &leaf_vars);
-                        if !sink.emit(Solution::new(leaf_vars.clone(), proj)) {
-                            return; // consumer gone.
-                        }
+        // Blocking fetch + parse on the worker thread (the SSRF gate / fragment fetch lives
+        // inside the source adapter). Endpoint/Local answer SRJ; Tpf/BrTpf answer typed
+        // fragment solutions — `fetch_leaf_relation` picks the path by interface.
+        match fetch_leaf_relation(source.as_ref(), &tp_owned) {
+            Ok(rel) => {
+                // Re-key each materialised row onto the leaf's variable header and feed it
+                // into the stream (the per-leaf "stream" delivers the parsed rows; the
+                // streaming win is at the JOIN level — a fast leaf feeds the join while a
+                // slow leaf is still in flight).
+                for row in rel.rows {
+                    // The source header may differ in order from the pattern's; project onto
+                    // the leaf's variable order so the join keys line up.
+                    let proj = rel_row_project(&rel.vars, &row, &leaf_vars);
+                    if !sink.emit(Solution::new(leaf_vars.clone(), proj)) {
+                        return; // consumer gone.
                     }
                 }
-                Err(m) => {
-                    sink.emit_err(FedError::Transport(format!("malformed SRJ: {}", m)));
-                }
-            },
-            Err(e) => {
+            }
+            Err(InterpError::Source(e)) => {
                 sink.emit_err(e);
+            }
+            Err(other) => {
+                sink.emit_err(FedError::Transport(other.to_string()));
             }
         }
         // `sink` drops here → the per-leaf stream ends.
@@ -1502,16 +1597,29 @@ mod tests {
     }
 
     /// A `FederatedSource` whose `execute` answers from a canned map AND can be wrapped in an
-    /// `Arc<dyn FederatedSource + Send + Sync>` for the streaming interpreter. [OPUS-4.8].
+    /// `Arc<dyn FederatedSource + Send + Sync>` for the streaming interpreter. It embeds a real
+    /// `Endpoint` so `source_type()` reports `SourceType::Endpoint` — which the interpreter's
+    /// interface dispatch ([`fetch_leaf_relation`], sq-yzca) now CONSULTS to route an endpoint
+    /// leaf to the SRJ `execute` path (vs the typed fragment path). [OPUS-4.8].
     struct ArcMapSource {
         answers: StdHashMap<String, String>,
+        // A real endpoint so `source_type()` is honest (its inner transport is never reached —
+        // `ArcMapSource::execute` overrides `execute` to answer from the canned map directly).
+        ep: Endpoint,
+    }
+    impl ArcMapSource {
+        fn new(answers: StdHashMap<String, String>) -> Self {
+            ArcMapSource {
+                answers,
+                ep: Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new()))),
+            }
+        }
     }
     impl FederatedSource for ArcMapSource {
         fn source_type(&self) -> crate::source::SourceType<'_> {
-            // Not consulted by the interpreter; point at a dummy via unreachable is wrong, so
-            // return a real variant by constructing nothing — the interpreter never calls this.
-            // We instead panic to prove it is unused on this path.
-            unreachable!("source_type is not called by the streaming interpreter")
+            // Honest: an endpoint-shaped source reports the Endpoint interface, so the
+            // interpreter's dispatch routes it to the SRJ `execute` path.
+            self.ep.source_type()
         }
         fn discover(
             &self,
@@ -1585,7 +1693,7 @@ mod tests {
         let reference = materialize_single_source(&resolver_ref, &sel, &ep, &tree).unwrap();
 
         // Streamed result via the Phase-5 interpreter.
-        let arc_src: Arc<dyn FederatedSource + Send + Sync> = Arc::new(ArcMapSource { answers });
+        let arc_src: Arc<dyn FederatedSource + Send + Sync> = Arc::new(ArcMapSource::new(answers));
         // The resolver only needs an adapter slice for index resolution; the streaming
         // interpreter answers every leaf through `arc_src`, so a stand-in endpoint adapter in
         // the slice is never `execute`d (it only satisfies `resolver.source_count()`/typing).
@@ -1640,12 +1748,232 @@ mod tests {
         let adapters: Vec<&dyn FederatedSource> = vec![&stub];
         let resolver = SourceResolver::new(&bgp, &adapters);
         let arc_src: Arc<dyn FederatedSource + Send + Sync> =
-            Arc::new(ArcMapSource { answers: StdHashMap::new() });
+            Arc::new(ArcMapSource::new(StdHashMap::new()));
         // `SolutionStream` is not `Debug`, so match the error out by hand (cannot `unwrap_err`).
         let err = match stream_single_source(&resolver, &sel, arc_src, &tree, &StreamOptions::default()) {
             Ok(_) => panic!("multi-source leaf must fail closed"),
             Err(e) => e,
         };
         assert_eq!(err, InterpError::MultiSource { pattern: 0, sources: 2 });
+    }
+
+    // ─── sq-yzca: TPF / brTPF leaves are answered through the interpreter (not Unsupported) ──
+
+    use crate::source::{
+        BrTpfSource, FragBinding, FragPattern, FragTerm, FragTriple, FragmentPage,
+        FragmentTransport, PatternTerm, TpfSource,
+    };
+
+    /// An in-test fragment server (one fixed triple set, paged) so the interpreter exercises a
+    /// TPF/brTPF leaf with NO network — the operators twin of `source`'s `FixtureFragments`.
+    /// [OPUS-4.8] sq-yzca.
+    struct FragFixture {
+        triples: Vec<FragTriple>,
+        page_size: usize,
+    }
+    impl FragFixture {
+        fn matches(pattern: &FragPattern, t: &FragTriple) -> bool {
+            // A position matches iff bound-and-equal, or a variable (with repeated-var consistency
+            // delegated to the adapter's bind_triple — here we just check bound positions).
+            let pos_ok = |p: &PatternTerm, term: &FragTerm| match p {
+                PatternTerm::Bound(b) => b == term,
+                PatternTerm::Var(_) => true,
+            };
+            pos_ok(&pattern.subject, &t.subject)
+                && pos_ok(&pattern.predicate, &t.predicate)
+                && pos_ok(&pattern.object, &t.object)
+        }
+        fn joins(pattern: &FragPattern, t: &FragTriple, bindings: &[FragBinding]) -> bool {
+            if bindings.is_empty() {
+                return true;
+            }
+            // The triple joins a binding iff every var the binding assigns that the pattern also
+            // names binds to the same term in this triple.
+            bindings.iter().any(|b| {
+                b.iter().all(|(name, val)| {
+                    for (p, term) in [
+                        (&pattern.subject, &t.subject),
+                        (&pattern.predicate, &t.predicate),
+                        (&pattern.object, &t.object),
+                    ] {
+                        if p.as_var() == Some(name.as_str()) {
+                            return term == val;
+                        }
+                    }
+                    true
+                })
+            })
+        }
+    }
+    impl FragmentTransport for FragFixture {
+        fn fetch_fragment(
+            &self,
+            _url: &str,
+            pattern: &FragPattern,
+            bindings: &[FragBinding],
+            page: Option<&str>,
+        ) -> Result<FragmentPage, String> {
+            let matched: Vec<&FragTriple> = self
+                .triples
+                .iter()
+                .filter(|t| Self::matches(pattern, t))
+                .filter(|t| Self::joins(pattern, t, bindings))
+                .collect();
+            let total_items = matched.len() as u64;
+            let offset = match page {
+                None => 0,
+                Some(tok) => tok.strip_prefix("offset:").and_then(|n| n.parse().ok()).unwrap_or(0),
+            };
+            let end = (offset + self.page_size.max(1)).min(matched.len());
+            let triples = matched[offset..end].iter().map(|t| (*t).clone()).collect();
+            let next = (end < matched.len()).then(|| format!("offset:{end}"));
+            Ok(FragmentPage { triples, total_items, next })
+        }
+    }
+
+    fn frag_iri(n: &str) -> FragTerm {
+        FragTerm::iri(format!("http://ex/{n}"))
+    }
+    fn knows_triples() -> Vec<FragTriple> {
+        let k = || FragTerm::iri("http://ex/knows");
+        vec![
+            FragTriple::new(frag_iri("alice"), k(), frag_iri("bob")),
+            FragTriple::new(frag_iri("alice"), k(), frag_iri("carol")),
+            FragTriple::new(frag_iri("bob"), k(), frag_iri("dave")),
+        ]
+    }
+
+    /// A `?s :knows ?o` BGP planned over a single TPF source must be ANSWERED by the interpreter
+    /// (the typed `solutions` path), not rejected with `Unsupported` — the wiring the bead asks
+    /// for. The materialised relation is the complete fragment bound into (?s, ?o). [OPUS-4.8].
+    #[test]
+    fn interpreter_answers_tpf_leaf() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/knows"),
+            var("o"),
+        )]);
+        let descriptors = [SourceDescriptor::builder(SourceId::new("T"))
+            .total_triples(3)
+            .build()];
+        let sel = select_sources(&bgp, &descriptors);
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+        // page_size 2 forces pagination → exercises hydra:next-to-exhaustion through the adapter.
+        let tpf = TpfSource::new(
+            "http://frag/tpf",
+            Box::new(FragFixture { triples: knows_triples(), page_size: 2 }),
+        );
+        let adapters: Vec<&dyn FederatedSource> = vec![&tpf];
+        let resolver = SourceResolver::new(&bgp, &adapters);
+        let rel = materialize_single_source(&resolver, &sel, &tpf, &tree).unwrap();
+
+        let expect_vars = vec!["s".to_string(), "o".to_string()];
+        let expect_rows = vec![
+            vec![Some(nn("http://ex/alice")), Some(nn("http://ex/bob"))],
+            vec![Some(nn("http://ex/alice")), Some(nn("http://ex/carol"))],
+            vec![Some(nn("http://ex/bob")), Some(nn("http://ex/dave"))],
+        ];
+        assert!(
+            solutions_equal(&rel.vars, &rel.rows, &expect_vars, &expect_rows),
+            "TPF leaf must be materialised completely, got {:?}",
+            rel
+        );
+    }
+
+    /// The SAME single-pattern plan over a brTPF source is answered through the brTPF `solutions`
+    /// path (an unbound scan that the interpreter joins locally). [OPUS-4.8] sq-yzca.
+    #[test]
+    fn interpreter_answers_brtpf_leaf() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/knows"),
+            var("o"),
+        )]);
+        let descriptors = [SourceDescriptor::builder(SourceId::new("B"))
+            .total_triples(3)
+            .build()];
+        let sel = select_sources(&bgp, &descriptors);
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+        let brtpf = BrTpfSource::new(
+            "http://frag/brtpf",
+            30,
+            Box::new(FragFixture { triples: knows_triples(), page_size: 100 }),
+        );
+        let adapters: Vec<&dyn FederatedSource> = vec![&brtpf];
+        let resolver = SourceResolver::new(&bgp, &adapters);
+        let rel = materialize_single_source(&resolver, &sel, &brtpf, &tree).unwrap();
+        assert_eq!(rel.rows.len(), 3, "brTPF unbound scan returns the whole fragment");
+    }
+
+    /// The fragment leaf is also answered by the STREAMING interpreter (the dispatch is shared),
+    /// and the streamed multiset equals the materialised one. [OPUS-4.8] sq-yzca.
+    #[test]
+    fn stream_interpreter_answers_tpf_leaf() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/knows"),
+            var("o"),
+        )]);
+        let descriptors = [SourceDescriptor::builder(SourceId::new("T"))
+            .total_triples(3)
+            .build()];
+        let sel = select_sources(&bgp, &descriptors);
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+        // Materialised reference.
+        let tpf_ref = TpfSource::new(
+            "http://frag/tpf",
+            Box::new(FragFixture { triples: knows_triples(), page_size: 2 }),
+        );
+        let adapters: Vec<&dyn FederatedSource> = vec![&tpf_ref];
+        let resolver_ref = SourceResolver::new(&bgp, &adapters);
+        let reference = materialize_single_source(&resolver_ref, &sel, &tpf_ref, &tree).unwrap();
+        // Streamed.
+        let arc_src: Arc<dyn FederatedSource + Send + Sync> = Arc::new(TpfSource::new(
+            "http://frag/tpf",
+            Box::new(FragFixture { triples: knows_triples(), page_size: 2 }),
+        ));
+        let resolver = SourceResolver::new(&bgp, &adapters);
+        let stream =
+            stream_single_source(&resolver, &sel, arc_src, &tree, &StreamOptions::default())
+                .expect("stream builds");
+        let got = stream.collect_solutions().unwrap();
+        let got_rows: Vec<Vec<Option<Term>>> = got.iter().map(|s| s.cells.clone()).collect();
+        let got_vars = got
+            .first()
+            .map(|s| s.vars.clone())
+            .unwrap_or_else(|| reference.vars.clone());
+        assert!(
+            solutions_equal(&got_vars, &got_rows, &reference.vars, &reference.rows),
+            "streamed TPF leaf must equal the materialised one"
+        );
+    }
+
+    /// A fragment term round-trips through `fragterm_to_oxterm` so a TPF leaf equi-joins with the
+    /// SAME `oxrdf::Term` an endpoint leaf produces — the cross-interface join correctness check.
+    /// [OPUS-4.8] sq-yzca.
+    #[test]
+    fn fragterm_oxterm_round_trips_every_kind() {
+        assert_eq!(
+            fragterm_to_oxterm(&FragTerm::iri("http://ex/a")),
+            nn("http://ex/a")
+        );
+        assert_eq!(
+            fragterm_to_oxterm(&FragTerm::Blank("b0".into())),
+            Term::BlankNode(BlankNode::new("b0").unwrap())
+        );
+        // A typed/lang literal carried in its N-Triples lexical form parses back exactly.
+        assert_eq!(
+            fragterm_to_oxterm(&FragTerm::Literal(
+                "\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>".into()
+            )),
+            Term::Literal(Literal::new_typed_literal(
+                "30",
+                NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap()
+            ))
+        );
+        assert_eq!(
+            fragterm_to_oxterm(&FragTerm::Literal("\"hi\"@en".into())),
+            Term::Literal(Literal::new_language_tagged_literal("hi", "en").unwrap())
+        );
     }
 }

@@ -56,7 +56,14 @@ the same default-OFF `fedclient` feature:
   [`wire`] module (bead `sq-6ihg`) adds the brTPF binding-block transport encodings — a COMPACT
   self-describing BINARY mapping wire ([`encode_bindings`] / [`decode_bindings`]) alongside the
   line-oriented TEXT wire the server parses ([`encode_bindings_text`]), so a large bind-join
-  block travels compactly and losslessly and the client can speak either form.
+  block travels compactly and losslessly and the client can speak either form. The **native
+  HTTP** [`FragmentTransport`](source::FragmentTransport) ([`HttpFragmentTransport`], bead
+  `sq-yzca`) is the production seam — ureq + the same default-deny SSRF resolver, Hydra
+  URI-template serialisation (`?subject=&predicate=&object=` + the brTPF `values` block),
+  `hydra:next` pagination, and a Turtle/TriG fragment-body parse that splits the Hydra/VoID
+  control triples from the data triples — and the [`operators`] interpreter is wired to answer
+  a `JoinTree` leaf resolving to a TPF/brTPF source through its typed `solutions` path (via
+  [`lower_leaf_fragment`]) rather than the SRJ `execute` a fragment server refuses.
 
 * **Phase 7 — adaptive re-planning** (the `adaptive` module, bead `sq-ij5x`, the FINAL
   phase): the opt-in feedback loop that re-invokes [`sparq-fedplan`](sparq_fedplan)'s planner
@@ -159,6 +166,12 @@ pub use source::{
 // the guard-vetted IP IS the dialled IP (no DNS-rebinding re-resolve window).
 #[cfg(all(feature = "fedclient", not(target_arch = "wasm32")))]
 pub use source::HttpTransport;
+// [OPUS-4.8] sq-yzca: re-export the native HTTP FragmentTransport for the TPF/brTPF adapters.
+// Native-only — ureq + the SAME default-deny SSRF resolver, Hydra URI-template serialisation
+// (`?subject=&predicate=&object=` + the brTPF `values` block) and Turtle/TriG fragment-body
+// parse (control/data split, `hydra:totalItems`/`void:triples` count, `hydra:next` pagination).
+#[cfg(all(feature = "fedclient", not(target_arch = "wasm32")))]
+pub use source::HttpFragmentTransport;
 
 /// brTPF binding-block **transport encodings** (bead `sq-6ihg`, follow-up to the server's
 /// `sq-dxhb`): a COMPACT, self-describing BINARY mapping wire ([`wire::encode_bindings`] /
@@ -167,8 +180,9 @@ pub use source::HttpTransport;
 /// N-Triples framing (a one-byte kind tag + length-prefixed bare lexical bytes) so a large
 /// [`FragBinding`] block travels compactly and losslessly; the text form matches the server's
 /// `position=term` grammar so a client can speak either over the same `FragBinding` model. A
-/// codec only — the native HTTP `FragmentTransport` that picks a wire by content negotiation
-/// lands with the streaming HTTP phase.
+/// codec only — the native HTTP [`FragmentTransport`](source::FragmentTransport)
+/// ([`HttpFragmentTransport`], bead `sq-yzca`) attaches the TEXT form on the `values` query
+/// parameter; the binary wire here is the alternative a body-carrying transport emits.
 #[cfg(feature = "fedclient")]
 pub mod wire;
 // [OPUS-4.8] sq-6ihg: re-export the brTPF binding-block wire codec at the crate root.
@@ -194,8 +208,10 @@ pub mod discovery;
 #[cfg(feature = "fedclient")]
 pub mod planner;
 // [OPUS-4.8] sq-j27p: re-export the Phase-3 planner-bridge surface at the crate root.
+// [OPUS-4.8] sq-yzca: `lower_leaf_fragment` lowers a leaf to a `FragPattern` for a TPF/brTPF
+// source (the fragment-source twin of `lower_leaf`'s SPARQL `SubQuery`).
 #[cfg(feature = "fedclient")]
-pub use planner::{lower_leaf, pattern_vars, ResolveError, SourceResolver};
+pub use planner::{lower_leaf, lower_leaf_fragment, pattern_vars, ResolveError, SourceResolver};
 
 /// §4.3 — **capability-aware pushdown**: per leaf / FedX exclusive group, build the
 /// MOST PRECISE sub-query a source can answer (projection + common-variable-checked
