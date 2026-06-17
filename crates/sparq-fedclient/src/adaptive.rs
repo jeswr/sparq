@@ -17,7 +17,7 @@
 //! # Where the planner-level engine lives (and what this module adds)
 //!
 //! The *re-plan decision* — the divergence trigger, the hysteresis / anti-thrash margin, the
-//! suffix re-ordering, and the soundness proof — is already implemented, tested, and gated in
+//! suffix re-ordering, and the commutativity correctness proof — is already implemented, tested, and gated in
 //! `sparq-fedplan`'s [`AdaptiveExecutor`](sparq_fedplan::AdaptiveExecutor) /
 //! [`RuntimeStats`](sparq_fedplan::RuntimeStats) / [`ReplanPolicy`](sparq_fedplan::ReplanPolicy)
 //! (bead `sq-7s4z`, behind its `adaptive-replan` feature). The client does **not** re-write
