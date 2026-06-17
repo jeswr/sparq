@@ -295,6 +295,73 @@ impl Binding {
     }
 }
 
+/// [OPUS-4.8] sq-r74h: the DoS caps on a brTPF binding set, enforced by [`parse_bindings_capped`]
+/// BEFORE the (potentially large) payload is fully parsed and BEFORE any index work. `0` on either
+/// field disables that cap (the historical uncapped behaviour). These bound the binding set
+/// *independently of* the server's `--max-body-bytes` body limit, for two reasons the body limit
+/// does not cover:
+///
+///   * **The `values` query-string transport is NOT a body** — a `GET /tpf?values=…` carries the
+///     binding set in the URL, which `--max-body-bytes` (an HTTP *body* limit) never sees. So a
+///     payload-byte cap is the only bound on the query-string carrier.
+///   * **Cost is super-linear in the mapping COUNT, not the bytes** — [`evaluate_brtpf`] runs ONE
+///     index scan per mapping and unions the rows into a `BTreeSet`, so N tiny mappings (each a
+///     handful of bytes, so well under any byte limit) still cost N scans + an O(result) set. A
+///     mapping-COUNT cap bounds that fan-out directly; a byte limit only bounds it transitively
+///     and far too loosely (a 1 MiB body of `s=<a>\n`-sized mappings is ~150k scans).
+///
+/// Compiled only with the `brtpf` feature.
+#[cfg(feature = "brtpf")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindingLimits {
+    /// Maximum number of (non-empty) solution mappings accepted. `0` disables the count cap.
+    pub max_mappings: usize,
+    /// Maximum size, in bytes, of the raw `values` payload accepted. `0` disables the byte cap.
+    pub max_payload_bytes: usize,
+}
+
+#[cfg(feature = "brtpf")]
+impl BindingLimits {
+    /// No caps — the historical uncapped behaviour (used by [`parse_bindings`]).
+    pub const UNLIMITED: BindingLimits = BindingLimits {
+        max_mappings: 0,
+        max_payload_bytes: 0,
+    };
+}
+
+/// [OPUS-4.8] sq-r74h: a brTPF binding-set parse outcome that DISTINGUISHES a malformed payload
+/// (the client sent garbage → `400`) from a payload that exceeds a DoS cap (the client sent a
+/// well-formed but too-large set → `413`, the same refusal class as `--max-body-bytes`). The HTTP
+/// layer maps the two variants to those two distinct statuses.
+///
+/// Compiled only with the `brtpf` feature.
+#[cfg(feature = "brtpf")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindingError {
+    /// The payload was malformed (a bad `position=term` pair, a non-IRI predicate, …) → `400`.
+    Malformed(ParseError),
+    /// The payload was well-formed but exceeded a [`BindingLimits`] DoS cap → `413`. The message
+    /// names which cap and its limit (NOT any caller-supplied term — no info-leak / no echo).
+    TooLarge(String),
+}
+
+#[cfg(feature = "brtpf")]
+impl std::fmt::Display for BindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindingError::Malformed(e) => write!(f, "{e}"),
+            BindingError::TooLarge(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+#[cfg(feature = "brtpf")]
+impl From<ParseError> for BindingError {
+    fn from(e: ParseError) -> Self {
+        BindingError::Malformed(e)
+    }
+}
+
 /// [OPUS-4.8] sq-dxhb: parses a brTPF `values` payload into the set of solution mappings.
 ///
 /// The wire format is one mapping per line; within a line, whitespace-separated
@@ -306,6 +373,12 @@ impl Binding {
 /// pairs is the empty mapping μ₀ (compatible with everything) and is skipped (it would defeat
 /// the restriction). The predicate position must be an IRI (same rule as the pattern).
 ///
+/// This is the UNCAPPED parse — for the DoS-capped form a public server should use, see
+/// [`parse_bindings_capped`] (sq-r74h). This entrypoint is retained for callers that have already
+/// bounded the input (e.g. unit tests) and is equivalent to
+/// `parse_bindings_capped(payload, BindingLimits::UNLIMITED)` with the error re-narrowed to
+/// [`ParseError`] (it can only fail malformed when uncapped).
+///
 /// Example payload (URL-decoded), restricting `?s foaf:knows ?o` to two `?s` values:
 ///
 /// ```text
@@ -314,6 +387,44 @@ impl Binding {
 /// ```
 #[cfg(feature = "brtpf")]
 pub fn parse_bindings(payload: &str) -> Result<Vec<Binding>, ParseError> {
+    match parse_bindings_capped(payload, BindingLimits::UNLIMITED) {
+        Ok(b) => Ok(b),
+        // UNLIMITED can never produce a TooLarge; only Malformed is reachable here.
+        Err(BindingError::Malformed(e)) => Err(e),
+        Err(BindingError::TooLarge(m)) => {
+            unreachable!("BindingLimits::UNLIMITED never trips a cap: {m}")
+        }
+    }
+}
+
+/// [OPUS-4.8] sq-r74h: [`parse_bindings`] with the DoS caps in [`BindingLimits`] enforced.
+///
+/// Enforces, in this order:
+///   1. **The payload-byte cap** (`limits.max_payload_bytes`) — checked FIRST, on the raw byte
+///      length, BEFORE any line scanning, so an oversized payload is rejected without parsing it.
+///      This is the bound on the `values` *query-string* carrier, which `--max-body-bytes` (a
+///      *body* limit) never sees.
+///   2. **The mapping-count cap** (`limits.max_mappings`) — checked as non-empty mappings
+///      accumulate, so parsing stops at the limit + 1th mapping rather than building the whole
+///      vector first. This bounds [`evaluate_brtpf`]'s per-mapping index-scan fan-out directly.
+///
+/// A `0` limit disables that cap. A cap breach returns [`BindingError::TooLarge`] (the HTTP layer
+/// → `413`); a malformed payload returns [`BindingError::Malformed`] (→ `400`). The byte cap is
+/// checked before the malformed check, so a payload that is BOTH oversized and malformed is
+/// reported as too-large (the cheaper, earlier refusal — we never parse an over-cap payload).
+#[cfg(feature = "brtpf")]
+pub fn parse_bindings_capped(
+    payload: &str,
+    limits: BindingLimits,
+) -> Result<Vec<Binding>, BindingError> {
+    // 1. Payload-byte cap — rejected on raw length before any parse work. NB: the message names
+    // only the limit, never the payload, so an over-cap request leaks nothing back to the client.
+    if limits.max_payload_bytes != 0 && payload.len() > limits.max_payload_bytes {
+        return Err(BindingError::TooLarge(format!(
+            "brTPF binding payload exceeds the {}-byte cap (--brtpf-max-values-bytes)",
+            limits.max_payload_bytes
+        )));
+    }
     let mut out = Vec::new();
     for line in payload.lines() {
         let line = line.trim();
@@ -332,15 +443,23 @@ pub fn parse_bindings(payload: &str) -> Result<Vec<Binding>, ParseError> {
                 "predicate" | "p" => b.predicate = parse_predicate(Some(term))?,
                 "object" | "o" => b.object = parse_term(Some(term), "object")?,
                 other => {
-                    return Err(ParseError(format!(
+                    return Err(BindingError::Malformed(ParseError(format!(
                         "brTPF binding position must be subject/predicate/object (s/p/o), got '{other}'"
-                    )))
+                    ))))
                 }
             }
         }
         // A mapping that constrains nothing (an all-blank μ₀) does not restrict the fragment;
         // drop it rather than let it widen the result to the whole pattern.
         if !b.is_empty() {
+            // 2. Mapping-count cap — checked as each non-empty mapping is accepted, so we stop at
+            // the (limit+1)th rather than materialising the whole set first.
+            if limits.max_mappings != 0 && out.len() == limits.max_mappings {
+                return Err(BindingError::TooLarge(format!(
+                    "brTPF binding set exceeds the {}-mapping cap (--brtpf-max-bindings)",
+                    limits.max_mappings
+                )));
+            }
             out.push(b);
         }
     }
@@ -1113,6 +1232,102 @@ mod tests {
             // {alice,bob} → alice knows bob (1). {knows} → alice→bob, carol→alice (2). Union = 2.
             assert_eq!(f.total_estimate, 2);
             assert_eq!(f.triples.len(), 2);
+        }
+
+        // ---- sq-r74h: DoS caps on the binding set (count + payload bytes) ----------------
+
+        #[test]
+        fn capped_unlimited_matches_uncapped() {
+            // UNLIMITED trips no cap — identical to the uncapped parse_bindings.
+            let payload = "s=<http://ex/alice>\ns=<http://ex/carol>";
+            let capped = parse_bindings_capped(payload, BindingLimits::UNLIMITED).unwrap();
+            let plain = parse_bindings(payload).unwrap();
+            assert_eq!(capped, plain);
+            assert_eq!(capped.len(), 2);
+        }
+
+        #[test]
+        fn mapping_count_cap_rejects_excess_as_too_large() {
+            // 3 mappings, cap of 2 → TooLarge (413), naming the count cap, not the payload.
+            let payload = "s=<http://ex/a>\ns=<http://ex/b>\ns=<http://ex/c>";
+            let limits = BindingLimits {
+                max_mappings: 2,
+                max_payload_bytes: 0,
+            };
+            let err = parse_bindings_capped(payload, limits).unwrap_err();
+            assert!(matches!(err, BindingError::TooLarge(_)), "{err:?}");
+            assert!(err.to_string().contains("brtpf-max-bindings"), "{err}");
+            // Exactly at the cap is accepted (boundary: count == cap is OK, cap+1 is not).
+            let at_cap = "s=<http://ex/a>\ns=<http://ex/b>";
+            assert_eq!(parse_bindings_capped(at_cap, limits).unwrap().len(), 2);
+        }
+
+        #[test]
+        fn empty_mappings_do_not_count_toward_the_cap() {
+            // Blank lines + an all-blank μ₀ line are dropped, so they don't consume the count cap:
+            // 2 real mappings interleaved with skipped lines is fine under a cap of 2.
+            let payload = "\ns=<http://ex/a>\n   \ns=<http://ex/b>\n";
+            let limits = BindingLimits {
+                max_mappings: 2,
+                max_payload_bytes: 0,
+            };
+            assert_eq!(parse_bindings_capped(payload, limits).unwrap().len(), 2);
+        }
+
+        #[test]
+        fn payload_byte_cap_rejects_oversize_as_too_large() {
+            let payload = "s=<http://ex/alice>"; // 19 bytes
+            let limits = BindingLimits {
+                max_mappings: 0,
+                max_payload_bytes: 10,
+            };
+            let err = parse_bindings_capped(payload, limits).unwrap_err();
+            assert!(matches!(err, BindingError::TooLarge(_)), "{err:?}");
+            assert!(err.to_string().contains("brtpf-max-values-bytes"), "{err}");
+            // A payload exactly at the byte cap is accepted.
+            let ok = BindingLimits {
+                max_mappings: 0,
+                max_payload_bytes: payload.len(),
+            };
+            assert_eq!(parse_bindings_capped(payload, ok).unwrap().len(), 1);
+        }
+
+        #[test]
+        fn byte_cap_is_checked_before_parsing_so_oversize_garbage_is_413_not_400() {
+            // A payload that is BOTH oversize AND malformed is reported as 413 (TooLarge), because
+            // the byte cap is enforced before any line is parsed — we never parse over-cap input.
+            let garbage = "this is not a valid binding payload at all";
+            let limits = BindingLimits {
+                max_mappings: 0,
+                max_payload_bytes: 5,
+            };
+            let err = parse_bindings_capped(garbage, limits).unwrap_err();
+            assert!(matches!(err, BindingError::TooLarge(_)), "{err:?}");
+        }
+
+        #[test]
+        fn malformed_under_caps_is_still_malformed_not_too_large() {
+            // Within both caps, a malformed pair is Malformed (→ 400), not TooLarge (→ 413).
+            let limits = BindingLimits {
+                max_mappings: 100,
+                max_payload_bytes: 1024,
+            };
+            let err = parse_bindings_capped("bogus=<http://ex/x>", limits).unwrap_err();
+            assert!(matches!(err, BindingError::Malformed(_)), "{err:?}");
+        }
+
+        #[test]
+        fn too_large_message_does_not_echo_the_payload() {
+            // The TooLarge message must not leak any caller-supplied term (same no-echo posture as
+            // the malformed-term path) — it names only the cap.
+            const SENTINEL: &str = "brtpf_secret_sentinel";
+            let payload = format!("s=<http://ex/{SENTINEL}>");
+            let limits = BindingLimits {
+                max_mappings: 0,
+                max_payload_bytes: 5,
+            };
+            let err = parse_bindings_capped(&payload, limits).unwrap_err();
+            assert!(!err.to_string().contains(SENTINEL), "leaked payload: {err}");
         }
     }
 }

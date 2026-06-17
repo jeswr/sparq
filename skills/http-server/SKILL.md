@@ -475,6 +475,18 @@ re-fetching the whole pattern once per binding.
   `#[cfg]`-stripped, so a stray `values` parameter is just an ignored unknown parameter (plain
   TPF). Still governed by the same `--tpf` runtime flag and read-auth (`POST /tpf` is a READ — it
   returns a fragment, it never writes).
+- **DoS caps on the binding set (`sq-r74h`).** The brTPF fragment runs ONE index scan per
+  attached mapping (`tpf::evaluate_brtpf`), so the per-request cost is super-linear in the mapping
+  **count**, not the payload **bytes** — and `--max-body-bytes` bounds the count only transitively
+  (a 1 MiB body of `s=<a>`-sized mappings is ~150k scans) and does NOT cover the `values`
+  **query-string** carrier of a `GET /tpf` at all (it is a body limit). Two dedicated, ON-by-default
+  caps close that: `--brtpf-max-bindings` (default `1024`) bounds the mapping count, and
+  `--brtpf-max-values-bytes` (default `1 MiB`) bounds the raw `values` payload bytes — enforced
+  BEFORE any parse/index work. A breach is a `413` (the same refusal class as `--max-body-bytes`,
+  distinct from the malformed-payload `400`); the message names the cap, never the caller's input
+  (no echo). `0` disables either cap. The pure parser is `tpf::parse_bindings_capped(payload,
+  tpf::BindingLimits { max_mappings, max_payload_bytes })`, returning `tpf::BindingError::{Malformed
+  → 400, TooLarge → 413}`.
 
 ```sh
 cargo run -p sparq-server --features brtpf -- data.ttl --tpf
@@ -528,6 +540,8 @@ env overrides the default.
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
 | `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, full Hydra paging incl. `first`/`last`, read-only); same flag also serves brTPF bind-restricted fragments (`values` param / `POST` body) when built with the `brtpf` feature — see "Triple Pattern Fragments" |
+| `--brtpf-max-bindings N` | `SPARQ_BRTPF_MAX_BINDINGS` | `1024` (`0`=off) | (feature `brtpf`) **DoS cap on the brTPF binding-set mapping COUNT** — one index scan per mapping, so cost is super-linear in the count, not the bytes → `413` (`sq-r74h`) |
+| `--brtpf-max-values-bytes N` | `SPARQ_BRTPF_MAX_VALUES_BYTES` | `1048576` (`0`=off) | (feature `brtpf`) **DoS cap on the raw brTPF `values` payload BYTES** — bounds the GET query-string carrier that `--max-body-bytes` never sees → `413` (`sq-r74h`) |
 | `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |
 | `--access-audit <file\|stderr>` | `SPARQ_ACCESS_AUDIT` | off | (feature `access-audit`) richer **structured access-audit sink** (typed JSON-Lines: actor / action / resource / decision+basis / ts / fingerprint) — see "Structured access-audit sink" |
 

@@ -76,6 +76,13 @@
 //!   --max-decompress-ratio N  [OPUS-4.8 sq-ebii] DECOMPRESSION-RATIO cap for a `Content-Encoding: gzip`
 //!                             request body (zip-bomb guard; 413), 0 = refuse gzip bodies
 //!                                                                        [20, env SPARQ_MAX_DECOMPRESS_RATIO]
+//!   --brtpf-max-bindings N    [OPUS-4.8 sq-r74h] (feature `brtpf`) DoS cap on the brTPF binding-set
+//!                             MAPPING COUNT — one index scan runs per mapping, so cost is super-linear
+//!                             in the count, not the bytes (413 beyond), 0 off
+//!                                                                        [1024, env SPARQ_BRTPF_MAX_BINDINGS]
+//!   --brtpf-max-values-bytes N [OPUS-4.8 sq-r74h] (feature `brtpf`) DoS cap on the raw brTPF `values`
+//!                             PAYLOAD BYTES — bounds the GET query-string carrier that --max-body-bytes
+//!                             never sees (413 beyond), 0 off            [1048576, env SPARQ_BRTPF_MAX_VALUES_BYTES]
 //!   --verbose                 per-request logging (TraceLayer)
 //!   --log-full-requests       [OPUS-4.8 sq-toze.34] OPT OUT of request-log redaction: log the
 //!                             raw request URI (incl. the full `?query=` SPARQL text) verbatim.
@@ -263,6 +270,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // controls. Read-only. Off by default (env SPARQ_TPF=1).
             #[cfg(feature = "tpf")]
             "--tpf" => config.tpf = true,
+            // [OPUS-4.8] sq-r74h (follow-up to sq-dxhb): brTPF binding-set DoS caps. A brTPF
+            // request runs ONE index scan per attached solution mapping, so the cost is
+            // super-linear in the mapping COUNT — which `--max-body-bytes` bounds only loosely,
+            // and not at all for the `values` query-string carrier. These cap the mapping count
+            // and the raw `values` payload bytes (413 on breach); 0 disables that cap.
+            #[cfg(feature = "brtpf")]
+            "--brtpf-max-bindings" => {
+                config.brtpf_max_bindings = parse_flag(&mut args, "--brtpf-max-bindings")?;
+            }
+            #[cfg(feature = "brtpf")]
+            "--brtpf-max-values-bytes" => {
+                config.brtpf_max_values_bytes = parse_flag(&mut args, "--brtpf-max-values-bytes")?;
+            }
             // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).
@@ -287,13 +307,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [OPUS-4.8] sq-r74h: surface the brTPF binding-set DoS caps in --help (feature brtpf).
+                let brtpf = if cfg!(feature = "brtpf") {
+                    " [--brtpf-max-bindings N] [--brtpf-max-values-bytes N]"
+                } else {
+                    ""
+                };
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
                      [--query-timeout SECS] [--update-where-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service} [--verbose] \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf} [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n\n  \
                      PERSIST: --persist DIR (env SPARQ_PERSIST_DIR) makes the on-disk index at \
                      DIR the durable source of truth (QLever --persist-updates): every committed \
@@ -421,6 +447,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.max_subscriptions,
         config.max_subscriptions_per_conn,
     );
+    // [OPUS-4.8] sq-r74h: surface the brTPF binding-set DoS caps at startup (feature `brtpf`).
+    #[cfg(feature = "brtpf")]
+    {
+        let fmt0 = |n: usize| {
+            if n == 0 {
+                "off".to_string()
+            } else {
+                n.to_string()
+            }
+        };
+        eprintln!(
+            "guards (brtpf): brtpf-max-bindings={} brtpf-max-values-bytes={}",
+            fmt0(config.brtpf_max_bindings),
+            fmt0(config.brtpf_max_values_bytes),
+        );
+    }
     // [OPUS-4.8] sq-7cxr: surface the durable-persistence posture at startup.
     match &config.persist_dir {
         Some(dir) => eprintln!(

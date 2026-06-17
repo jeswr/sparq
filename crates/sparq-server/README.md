@@ -368,9 +368,11 @@ matrix under "Security posture".
   UPDATE, `sq-nulp`) / `--max-body-bytes` / `--max-concurrent` /
   `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-query-bytes`
   (byte-accounted memory cap, `sq-s5is`) / `--max-decompress-ratio` (zip-bomb guard) /
-  `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*`, each with a `SPARQ_*` env
-  override. The DoS/SSRF limits are documented together (with their honest semantics) in the
-  SKILL's "Server hardening" section.
+  `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*` / (feature `brtpf`)
+  `--brtpf-max-bindings` + `--brtpf-max-values-bytes` (DoS caps on the brTPF binding set — mapping
+  count + `values` payload bytes, `sq-r74h`), each with a `SPARQ_*` env override. The DoS/SSRF
+  limits are documented together (with their honest semantics) in the SKILL's "Server hardening"
+  section.
 - **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket
   subscriptions** (live SELECT diffs).
 - **Federation discovery** — opt-in (`federation-descriptors` feature + `--federation-descriptors`
@@ -403,7 +405,11 @@ matrix under "Security posture".
   fragment advertises the restriction through an extra `hydra:mapping` for the `values` variable,
   and `hydra:totalItems` reflects the bindings-restricted result (not the unrestricted pattern). A
   `tpf`-only build is byte-identical to before (a stray `values` parameter is just an ignored
-  unknown parameter — plain TPF). See the SKILL's "Triple Pattern Fragments" section.
+  unknown parameter — plain TPF). The binding set is bounded by two ON-by-default DoS caps
+  (`sq-r74h`): `--brtpf-max-bindings` (mapping count — one index scan runs per mapping, so cost is
+  super-linear in the count) and `--brtpf-max-values-bytes` (raw `values` payload bytes — the GET
+  query-string carrier is not covered by `--max-body-bytes`); a breach is a `413`. See the SKILL's
+  "Triple Pattern Fragments" section.
 - **Access-audit trails** — opt-in, off by default: `audit-log` (flat `tracing` event per request)
   and `access-audit` (richer typed JSON-Lines records via a pluggable sink — actor / action /
   resource / decision+basis / timestamp / fingerprint, hooked at the real enforcement seam).
