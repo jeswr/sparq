@@ -77,6 +77,12 @@ const SD_SPARQL11_QUERY: &str = "http://www.w3.org/ns/sparql-service-description
 /// when built with the `service` feature). We surface it as [`Capability::federated_query`].
 const SD_BASIC_FEDERATED_QUERY: &str =
     "http://www.w3.org/ns/sparql-service-description#BasicFederatedQuery";
+/// [OPUS-4.8] sq-yyy3: the sparq PROV-O **data-lineage** extension feature IRI a `sparq-server`
+/// advertises via `sd:feature` when it serves W3C PROV-O lineage for the data it derives. We
+/// surface it as [`Capability::provenance_lineage`] so a federation client can prefer (or record)
+/// a source that can answer "where did this come from?". An SD that omits it yields the
+/// recall-safe `false` default; it is never inferred from anything but this exact IRI.
+const SPARQ_PROV_LINEAGE: &str = "http://sparq.dev/ns/prov#lineage";
 
 // ─── The capability model (§4.1) ─────────────────────────────────────────────────────
 //
@@ -176,6 +182,11 @@ pub struct Capability {
     pub update: bool,
     /// Whether the source advertises `sd:BasicFederatedQuery` (a SERVICE-capable endpoint).
     pub federated_query: bool,
+    /// [OPUS-4.8] sq-yyy3: whether the source advertises the sparq PROV-O data-lineage feature
+    /// (`sd:feature <http://sparq.dev/ns/prov#lineage>`) — it can serve W3C PROV-O lineage for the
+    /// data it derives. Purely informational for the planner (it constrains no pushdown), so it is
+    /// the recall-safe `false` default unless the SD names the exact lineage feature IRI.
+    pub provenance_lineage: bool,
     /// The result formats the source can return (`sd:resultFormat`), sorted + de-duplicated.
     pub result_formats: Vec<MediaType>,
 }
@@ -200,6 +211,9 @@ impl Capability {
             order_limit: false,
             update: false,
             federated_query: false,
+            // [OPUS-4.8] sq-yyy3: an ASK-only endpoint published no SD, so it makes no lineage
+            // claim — recall-safe `false`.
+            provenance_lineage: false,
             result_formats: vec![MediaType(
                 "http://www.w3.org/ns/formats/SPARQL_Results_JSON".to_string(),
             )],
@@ -224,7 +238,9 @@ impl Capability {
 ///   * `sd:supportedLanguage` → [`Capability::sparql_version`] (SPARQL11 wins over 10) and
 ///     the [`Capability::update`] flag (`sd:SPARQL11Update`);
 ///   * `sd:resultFormat` → [`Capability::result_formats`] (sorted + de-duplicated);
-///   * `sd:feature sd:BasicFederatedQuery` → [`Capability::federated_query`].
+///   * `sd:feature sd:BasicFederatedQuery` → [`Capability::federated_query`];
+///   * `sd:feature <http://sparq.dev/ns/prov#lineage>` → [`Capability::provenance_lineage`]
+///     (the sparq PROV-O data-lineage extension, sq-yyy3).
 ///
 /// `pushable_filters` is set [`FilterClass::Full`] for a SPARQL 1.1 endpoint (SD has no
 /// per-filter vocabulary; the pushdown phase narrows it). `bind_join` is [`BindJoin::Values`]
@@ -307,11 +323,17 @@ pub fn parse_service_description(nt: &str) -> Result<Option<Capability>, String>
     result_formats.sort();
     result_formats.dedup();
 
-    // --- feature sd:BasicFederatedQuery.
-    let federated_query = props
-        .get(&sd("feature"))
-        .map(|fs| fs.iter().any(|t| iri_eq(t, SD_BASIC_FEDERATED_QUERY)))
-        .unwrap_or(false);
+    // --- sd:feature IRIs. Read once, then test for each known feature so a future feature is a
+    // one-line add. BasicFederatedQuery (SERVICE-clause) and the sparq PROV-O lineage extension.
+    let features = props.get(&sd("feature"));
+    let has_feature = |iri: &str| {
+        features
+            .map(|fs| fs.iter().any(|t| iri_eq(t, iri)))
+            .unwrap_or(false)
+    };
+    let federated_query = has_feature(SD_BASIC_FEDERATED_QUERY);
+    // [OPUS-4.8] sq-yyy3: the sparq PROV-O data-lineage extension feature.
+    let provenance_lineage = has_feature(SPARQ_PROV_LINEAGE);
 
     // A SPARQL endpoint evaluates a full FILTER grammar and a VALUES bind-join block; a
     // document with no supportedLanguage at all is treated as an endpoint with unknown
@@ -336,6 +358,7 @@ pub fn parse_service_description(nt: &str) -> Result<Option<Capability>, String>
         order_limit: version == Some(SparqlVersion::Sparql11),
         update,
         federated_query,
+        provenance_lineage,
         result_formats,
     }))
 }
@@ -746,6 +769,32 @@ _:c1 <http://rdfs.org/ns/void#entities> "100"^^<http://www.w3.org/2001/XMLSchema
         assert!(cap.result_formats.windows(2).all(|w| w[0] < w[1]), "sorted");
         // SPARQL 1.1 ⇒ aggregates / paths / order-limit pushable.
         assert!(cap.aggregates && cap.property_paths && cap.order_limit);
+        // [OPUS-4.8] sq-yyy3: this SD does NOT advertise the PROV-O lineage feature, so the flag
+        // is the recall-safe `false` (it is set ONLY by the exact lineage feature IRI).
+        assert!(
+            !cap.provenance_lineage,
+            "no sd:feature <…/prov#lineage> ⇒ provenance_lineage must be false"
+        );
+    }
+
+    #[test]
+    fn parse_sd_with_provenance_feature_sets_flag() {
+        // [OPUS-4.8] sq-yyy3: a node advertising the sparq PROV-O data-lineage feature
+        // (`sd:feature <http://sparq.dev/ns/prov#lineage>`, exactly what
+        // `descriptors::sd_ntriples` emits when `Capabilities::provenance`) is surfaced as
+        // `Capability::provenance_lineage`. Adding it leaves BasicFederatedQuery untouched.
+        let nt = format!(
+            "{SERVED_SD_NT}<http://host/sparql> \
+             <http://www.w3.org/ns/sparql-service-description#feature> \
+             <http://sparq.dev/ns/prov#lineage> .\n"
+        );
+        let cap = parse_service_description(&nt).unwrap().unwrap();
+        assert!(
+            cap.provenance_lineage,
+            "sd:feature <…/prov#lineage> advertised ⇒ provenance_lineage flag set"
+        );
+        // The other features are unaffected by the new one.
+        assert!(cap.federated_query, "BasicFederatedQuery still detected");
     }
 
     #[test]

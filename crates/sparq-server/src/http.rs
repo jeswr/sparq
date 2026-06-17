@@ -2118,10 +2118,18 @@ fn service_capabilities(config: &ServerConfig) -> crate::descriptors::Capabiliti
     };
     #[cfg(not(feature = "geo"))]
     let extension_functions: Vec<String> = Vec::new();
+    // [OPUS-4.8] sq-yyy3: PROV-O data-lineage is NOT advertised by `sparq-server` today — the
+    // server exposes no lineage-serving endpoint (the `sparq-prov` capture surface is a separate
+    // crate not wired into the HTTP layer), so advertising it would over-promise. The descriptor
+    // SUPPORT exists (`Capabilities::provenance` ⇒ `sd:feature <…/prov#lineage>`) so a node that
+    // genuinely serves lineage can flip this honestly without a vocabulary change; until then it
+    // stays `false`. Set explicitly (not via `..default()`) so the honesty stays visible here.
+    let provenance = false;
     crate::descriptors::Capabilities {
         update,
         federated_query,
         extension_functions,
+        provenance,
     }
 }
 

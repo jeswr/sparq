@@ -63,6 +63,20 @@ const SD_SPARQL11_UPDATE: &str = "http://www.w3.org/ns/sparql-service-descriptio
 const SD_BASIC_FEDERATED_QUERY: &str =
     "http://www.w3.org/ns/sparql-service-description#BasicFederatedQuery";
 
+/// [OPUS-4.8] sq-yyy3 (follow-up to sq-ntcg/#267): the sparq W3C-PROV-O **data-lineage**
+/// capability IRI — advertised via `sd:feature` ONLY when [`Capabilities::provenance`] is set,
+/// i.e. when this node genuinely captures + serves PROV-O lineage for the data it derives
+/// (`CONSTRUCT` / SPARQL-Update / reasoner-materialization, the `sparq-prov` surface). It is a
+/// sparq extension feature (PROV-O lineage is not a standard SPARQL Service Description feature),
+/// so it lives under the sparq vocab namespace alongside the `scs:` characteristic-set extension
+/// the VoID descriptor already serves. A federation client that reads it knows the source can
+/// answer "where did this triple come from?" with standard
+/// [W3C PROV-O](https://www.w3.org/TR/prov-o/) — and a client that does not understand the IRI
+/// simply ignores it (it is an opaque feature IRI). The flag is FALSE unless a node opts into
+/// serving lineage, so the advertisement is never a fiction (the same honesty boundary as
+/// `federated_query` / `extension_functions`).
+const SPARQ_PROV_LINEAGE: &str = "http://sparq.dev/ns/prov#lineage";
+
 /// The W3C media-type IRIs (`<https://www.w3.org/ns/formats/...>`) for the result/RDF
 /// serialisations the server can RETURN, advertised via `sd:resultFormat`. These mirror the
 /// formats [`crate::negotiate`] produces (SELECT/ASK results + CONSTRUCT/DESCRIBE graphs).
@@ -203,6 +217,11 @@ pub struct Capabilities {
     pub federated_query: bool,
     /// `sd:extensionFunction` IRIs — exactly the functions the engine has registered.
     pub extension_functions: Vec<String>,
+    /// [OPUS-4.8] sq-yyy3: advertise `sd:feature <http://sparq.dev/ns/prov#lineage>` — this node
+    /// captures + serves W3C PROV-O data-lineage for the data it derives (the `sparq-prov`
+    /// surface). FALSE unless the node genuinely serves lineage, so the advertisement is never a
+    /// fiction. See [`SPARQ_PROV_LINEAGE`].
+    pub provenance: bool,
 }
 
 /// [OPUS-4.8] sq-optl: one named graph of the served dataset, for the Service Description's
@@ -350,6 +369,18 @@ fn sd_ntriples(
             "{svc} <{}> {} .",
             sd("feature"),
             iri(SD_BASIC_FEDERATED_QUERY)
+        );
+    }
+
+    // [OPUS-4.8] sq-yyy3: the sparq PROV-O data-lineage extension feature — advertised only when
+    // this node genuinely captures + serves lineage (the `sparq-prov` surface). Like
+    // BasicFederatedQuery it is a genuine, build/config-determined capability, never a fiction.
+    if caps.provenance {
+        let _ = writeln!(
+            out,
+            "{svc} <{}> {} .",
+            sd("feature"),
+            iri(SPARQ_PROV_LINEAGE)
         );
     }
 
@@ -657,6 +688,7 @@ mod tests {
                 extension_functions: vec![
                     "http://www.opengis.net/def/function/geosparql/distance".to_string()
                 ],
+                ..Capabilities::default()
             },
             &[],
             Some("application/n-triples"),
@@ -686,6 +718,52 @@ mod tests {
     }
 
     #[test]
+    fn sd_provenance_feature_only_when_present() {
+        // [OPUS-4.8] sq-yyy3: the PROV-O lineage feature IRI is advertised ONLY when the node
+        // reports the provenance capability — honesty, not aspiration (like BasicFederatedQuery).
+        let absent = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &read_only_caps(),
+            &[],
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        assert!(
+            !absent.body.contains("sparq.dev/ns/prov#lineage"),
+            "a node that does not serve lineage must NOT advertise the PROV-O feature: {}",
+            absent.body
+        );
+
+        let present = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &Capabilities {
+                provenance: true,
+                ..Capabilities::default()
+            },
+            &[],
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        // Emitted as a standard sd:feature whose object is the sparq PROV-O lineage IRI.
+        assert!(
+            present.body.contains(
+                "<http://www.w3.org/ns/sparql-service-description#feature> \
+                 <http://sparq.dev/ns/prov#lineage>"
+            ),
+            "a lineage-serving node must advertise sd:feature <…/prov#lineage>: {}",
+            present.body
+        );
+        // Re-parses as valid N-Triples (the extra feature triple is well-formed).
+        for r in oxttl::NTriplesParser::new().for_slice(present.body.as_bytes()) {
+            r.expect("SD with the PROV-O feature must be valid N-Triples");
+        }
+    }
+
+    #[test]
     fn sd_reparses_as_turtle() {
         // Turtle serialisation must be well-formed (round-trips through oxttl). Use the
         // richest profile so every advertised triple shape is exercised.
@@ -700,6 +778,9 @@ mod tests {
                     "http://www.opengis.net/def/function/geosparql/distance".to_string(),
                     "http://www.opengis.net/def/function/geosparql/buffer".to_string(),
                 ],
+                // [OPUS-4.8] sq-yyy3: richest profile also advertises PROV-O lineage, so the
+                // extra sd:feature triple is exercised through the Turtle re-parse too.
+                provenance: true,
             },
             // [OPUS-4.8] sq-optl: include named graphs so the namedGraph triple shape
             // (blank-node NamedGraph + Graph + void:triples literal) is exercised in Turtle too.

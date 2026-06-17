@@ -434,6 +434,13 @@ advertise itself as a discoverable federation node by serving two read-only RDF 
       matches, so the advertisement cannot over-promise;
     - `sd:feature sd:BasicFederatedQuery` — **only** when the `service` cargo feature is compiled
       in (the `SERVICE` clause is then evaluable); omitted otherwise;
+    - `sd:feature <http://sparq.dev/ns/prov#lineage>` (sq-yyy3) — the sparq W3C-PROV-O
+      data-lineage extension, advertised **only** when this node genuinely serves PROV-O lineage
+      for the data it derives (`Capabilities::provenance`). `sparq-server` exposes no lineage
+      endpoint today, so it keeps the flag `false` and the feature is **omitted** — advertising it
+      would over-promise. The descriptor + the `sparq-fedclient` discovery parser
+      (`Capability::provenance_lineage`) support the round-trip so a lineage-serving node can flip
+      it honestly without a vocabulary change;
     - `sd:extensionFunction` — one per function the engine has **actually registered**: the
       `geof:` GeoSPARQL set with the `geo` feature (read back through
       `FunctionRegistry::iris()`, so it can never drift from what runs), none without it;
