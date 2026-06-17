@@ -171,6 +171,36 @@ jobs:
       # rides these archive features; ANYTHING ELSE must be wired into a feature-matrix.yml leg
       # (read that file's GUARD block). Prove a suite is reached: `cargo nextest list -p <crate>
       # --features <set>` must SHOW its test names.
+      # [OPUS-4.8] sq-9crx: FREE DISK before the archive. The whole-workspace
+      # `--all-targets` build + the self-contained `nextest.tar.zst` it writes are the
+      # disk peak of this job, and on a GitHub-hosted ubuntu-latest runner that peak has
+      # intermittently hit `No space left on device` while WRITING the archive (#442,
+      # AFTER a clean compile — so it is a capacity flake, not a build error). The runner
+      # ships ~30 GB+ of preinstalled SDKs/toolchains this job never touches; reclaim them
+      # first so the build's `target/` + the .tar.zst have headroom. Inline (no new
+      # third-party action to SHA-pin — keeps the supply-chain surface flat), only removes
+      # well-known preinstalled bloat (.NET / Android / Haskell / large /usr/local SDKs)
+      # plus a docker prune, and is `|| true`-guarded per path so a layout change on the
+      # image can never red the job. `df -h` brackets it for diagnosability if the flake
+      # ever recurs despite the reclaim.
+      - name: Free disk space (purge unused preinstalled SDKs + docker)
+        run: |
+          echo "::group::Disk before reclaim"
+          df -h /
+          echo "::endgroup::"
+          # Large preinstalled toolchains this Rust workspace never builds against.
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          # Cached docker images (none are used by this job) — reclaims several GB.
+          sudo docker image prune --all --force || true
+          echo "::group::Disk after reclaim"
+          df -h /
+          echo "::endgroup::"
       - name: Build + archive test binaries (nextest archive)
         run: cargo nextest archive --workspace --all-targets --features approx-ann,filtered-ann,vec-predicate --archive-file nextest.tar.zst
       # [OPUS-4.8] Upload the archive immediately after the build, BEFORE doctests, so
