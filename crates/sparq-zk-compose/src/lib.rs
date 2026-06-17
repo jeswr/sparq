@@ -44,8 +44,12 @@ pub use verifier::EntailmentPolicy;
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
 // [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers (in-circuit
 // Schnorr-over-BabyJubJub + hidden-key set membership).
+// [OPUS-4.8] sq-8k3h: `*_sparse` are the `O(n·depth)` builders for a very large
+// registry (e.g. a holder set) — BIT-IDENTICAL root + path to the dense builders,
+// so the depth-generic member is unchanged; only the host build is bounded no more.
 pub use issuer::{
-    hidden_issuer_prover_toml, key_membership_witness, key_set_root, HiddenIssuerWitness,
+    hidden_issuer_prover_toml, key_membership_witness, key_membership_witness_sparse,
+    key_set_root, key_set_root_sparse, HiddenIssuerWitness,
 };
 // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK host helpers (the
 // B2 hidden-key tier — `hpk = hsk·G` + holder-key-digest binding).
@@ -53,8 +57,13 @@ pub use holder::{holder_pok_prover_toml, holder_pok_witness, HolderPokWitness};
 // [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): set-membership host
 // helpers (the hidden-holder analogue of the issuer key-set helpers). Opt-in,
 // NOT-yet-sound (sq-qhy4).
+// [OPUS-4.8] sq-8k3h: `*_sparse` are the `O(n·depth)` holder-set builders for a
+// VERY LARGE holder registry — BIT-IDENTICAL root + path to the dense builders, so
+// the depth-generic `holder_set_d{depth}` member is unchanged; only the host build
+// is no longer bounded to `2^depth`.
 pub use holder::{
-    holder_set_membership_witness, holder_set_prover_toml, holder_set_root, HolderSetWitness,
+    holder_set_membership_witness, holder_set_membership_witness_sparse, holder_set_prover_toml,
+    holder_set_root, holder_set_root_sparse, HolderSetWitness,
 };
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
 // [OPUS-4.8] sq-aih: FileSeenNonces is the DURABLE (restart-surviving) store;

@@ -174,6 +174,74 @@ pub fn holder_set_membership_witness(
     Some(siblings)
 }
 
+// ===========================================================================
+// [OPUS-4.8] sq-8k3h: SPARSE holder-set commitment for a VERY LARGE registry.
+//
+// `holder_set_root` / `holder_set_membership_witness` above are DENSE: they
+// materialise all `2^depth` slots, so the host work is `O(2^depth)` and the depth
+// bounds the registry. A very large holder registry (the deployment sq-8k3h
+// targets) needs the deep `depth` such a registry implies, where `O(2^depth)` is
+// infeasible. The sparse builders below produce the BIT-IDENTICAL root and
+// authentication path in `O(n·depth)` (`n = holders.len()`) by never materialising
+// the padding slots, reusing the SHARED sparse-fold core in [`crate::issuer`]
+// (both modules share `h2` and the `Fr::from(0)` padding leaf, so the trees are
+// bit-identical). The in-circuit relation (`hidden_holder_set` /
+// `key_set_membership::<D>`) is depth-generic and UNCHANGED — only the host build
+// is no longer size-bounded — so a sparse-built witness verifies under exactly the
+// same `holder_set_d{depth}` member.
+//
+// NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2); opt-in. This is a
+// host-side scaling change ONLY: it asserts NO new soundness / ZK-privacy property.
+// ===========================================================================
+
+/// The `n` non-padding holder-set leaves (NOT padded to `2^depth`): leaf `i` =
+/// `holder_key_digest(holders[i])`. `None` if any holder key is the identity
+/// (fail-closed, matches `holder_leaves`), the set overflows the depth-`depth`
+/// tree, or `depth > 31`. The sparse builders fold these directly.
+fn sparse_holder_leaves(holders: &[PublicKey], depth: u32) -> Option<Vec<Fr>> {
+    if depth > 31 || holders.len() as u128 > (1u128 << depth) {
+        return None;
+    }
+    let mut leaves = Vec::with_capacity(holders.len());
+    for hpk in holders {
+        leaves.push(holder_key_digest(hpk).ok()?);
+    }
+    Some(leaves)
+}
+
+/// SPARSE variant of [`holder_set_root`]: the BIT-IDENTICAL depth-`depth` holder-set
+/// root, computed in `O(n·depth)` instead of `O(2^depth)` — the builder a VERY
+/// LARGE holder registry needs (sq-8k3h). Cross-checked equal to [`holder_set_root`]
+/// for every `(holders, depth)` in the tests, so the relying party may commit its
+/// authoritative registry at any depth without materialising `2^depth` slots.
+/// Returns `None` under the same fail-closed conditions as the dense builder.
+pub fn holder_set_root_sparse(holders: &[PublicKey], depth: u32) -> Option<Fr> {
+    crate::issuer::sparse_root_from_leaves(
+        sparse_holder_leaves(holders, depth)?,
+        depth,
+        padding_leaf(),
+    )
+}
+
+/// SPARSE variant of [`holder_set_membership_witness`]: the BIT-IDENTICAL
+/// authentication path (sibling per level, BOTTOM-UP) for `index`, in `O(n·depth)`.
+/// The path folds to [`holder_set_root_sparse`] (== [`holder_set_root`]) under the
+/// circuit's fold, so it is a drop-in replacement for the dense witness in the
+/// depth-generic `holder_set_d{depth}` member. `None` if `index >= 2^depth` or
+/// under the dense builder's fail-closed conditions.
+pub fn holder_set_membership_witness_sparse(
+    holders: &[PublicKey],
+    depth: u32,
+    index: u64,
+) -> Option<Vec<Fr>> {
+    crate::issuer::sparse_witness_from_leaves(
+        sparse_holder_leaves(holders, depth)?,
+        depth,
+        index,
+        padding_leaf(),
+    )
+}
+
 /// The complete private witness for one hidden-holder-SET proof: the holder PoK
 /// witness ([`HolderPokWitness`], carrying `hsk` + the `hpk` coords) plus the
 /// holder-set membership path. Mirrors the private inputs of
@@ -435,5 +503,158 @@ mod tests {
         let root_pos = toml.find("holder_set_root").unwrap();
         let hsk_pos = toml.find("hsk").unwrap();
         assert!(challenge_pos < root_pos && root_pos < hsk_pos);
+    }
+
+    // ============================================================
+    // [OPUS-4.8] sq-8k3h: SPARSE holder-set builder cross-checks.
+    // The sparse builders MUST produce a root + authentication path BIT-IDENTICAL
+    // to the dense holder-set builders, so a sparse-built witness verifies under the
+    // same depth-generic `holder_set_d{depth}` member — the soundness contract for
+    // the scaling path. Any drift from the dense layout fails here.
+    // ============================================================
+
+    // For every (size, depth) with size <= 2^depth, the sparse holder-set root
+    // EQUALS the dense root — empty, partial, and full registries.
+    #[test]
+    fn sparse_holder_root_matches_dense_for_all_sizes() {
+        for depth in 0..=6u32 {
+            let cap = 1u64 << depth;
+            for size in 0..=cap {
+                let seeds: Vec<u64> = (0..size).map(|i| 3100 + i).collect();
+                let holders = holder_set(&seeds);
+                assert_eq!(
+                    holder_set_root_sparse(&holders, depth),
+                    holder_set_root(&holders, depth),
+                    "sparse holder root must equal dense root (depth {depth}, size {size})"
+                );
+            }
+        }
+    }
+
+    // For every index, the sparse holder authentication path EQUALS the dense path
+    // (and so re-folds to the same root the circuit derives). Covers partial trees
+    // where the dense padding slots become the sparse empty digests.
+    #[test]
+    fn sparse_holder_witness_matches_dense_for_all_indices() {
+        for depth in 0..=5u32 {
+            let cap = 1u64 << depth;
+            for size in [cap / 2 + 1, cap] {
+                if size == 0 {
+                    continue;
+                }
+                let seeds: Vec<u64> = (0..size).map(|i| 3200 + i).collect();
+                let holders = holder_set(&seeds);
+                for index in 0..cap {
+                    assert_eq!(
+                        holder_set_membership_witness_sparse(&holders, depth, index),
+                        holder_set_membership_witness(&holders, depth, index),
+                        "sparse holder witness must equal dense (depth {depth}, size {size}, index {index})"
+                    );
+                }
+            }
+        }
+    }
+
+    // The whole point of sq-8k3h: a DEEP holder tree a very large registry needs is
+    // built by the sparse path WITHOUT materialising 2^depth slots (the dense
+    // builder is infeasible at this depth), and a member's path still re-folds to
+    // the sparse root under the circuit's bottom-up fold (directions = LSB-first
+    // index bits) — bit-for-bit the `holder_set_d{depth}` relation.
+    #[test]
+    fn sparse_holder_deep_tree_witness_refolds_to_root() {
+        let depth = 30u32; // 2^30 ≈ 1.07e9 dense slots — only the sparse builder is feasible
+        let holders = holder_set(&[9001, 9002, 9003, 9004, 9005, 9006, 9007]);
+        let root = holder_set_root_sparse(&holders, depth).expect("sparse deep holder root");
+        for index in 0..holders.len() as u64 {
+            let sibs = holder_set_membership_witness_sparse(&holders, depth, index)
+                .expect("sparse deep holder path");
+            assert_eq!(sibs.len(), depth as usize);
+            let mut node = holder_key_digest(&holders[index as usize]).unwrap();
+            let mut pos = index;
+            for sib in &sibs {
+                let is_right = pos & 1 == 1;
+                node = if is_right {
+                    h2(*sib, node)
+                } else {
+                    h2(node, *sib)
+                };
+                pos /= 2;
+            }
+            assert_eq!(
+                node, root,
+                "sparse holder path for index {index} re-folds to the root"
+            );
+        }
+    }
+
+    // An unused slot deep in the all-padding region still has a well-defined sparse
+    // path that folds to the committed root (the slot's leaf is the padding leaf,
+    // never silently aliased onto a holder).
+    #[test]
+    fn sparse_holder_empty_slot_path_is_well_defined() {
+        let depth = 24u32;
+        let holders = holder_set(&[9100, 9101, 9102]);
+        let root = holder_set_root_sparse(&holders, depth).unwrap();
+        let idx = (1u64 << depth) - 1;
+        let sibs = holder_set_membership_witness_sparse(&holders, depth, idx).unwrap();
+        let mut node = padding_leaf();
+        let mut pos = idx;
+        for sib in &sibs {
+            let is_right = pos & 1 == 1;
+            node = if is_right {
+                h2(*sib, node)
+            } else {
+                h2(node, *sib)
+            };
+            pos /= 2;
+        }
+        assert_eq!(
+            node, root,
+            "an unused holder slot path folds to the same committed root"
+        );
+    }
+
+    // A sparse-built witness is a drop-in for the dense one in HolderSetWitness:
+    // the PoK leaf digest sits at the claimed index and the sparse path re-folds to
+    // the sparse root (== the dense root) — exactly what the member checks.
+    #[test]
+    fn sparse_holder_set_witness_assembles_consistently() {
+        let holders = holder_set(&[100, 101, 102, 103]);
+        let depth = 2u32;
+        let holder_idx = 2u64;
+        let pok = holder_pok_witness(&SecretKey::from_seed(102)).unwrap();
+        let siblings = holder_set_membership_witness_sparse(&holders, depth, holder_idx).unwrap();
+        assert_eq!(
+            holder_key_digest(&holders[holder_idx as usize]).unwrap(),
+            pok.holder_pk_digest,
+            "the sparse-built witness's leaf is the holder digest at the index"
+        );
+        let w = HolderSetWitness {
+            pok,
+            index: holder_idx,
+            siblings: siblings.clone(),
+        };
+        let root_sparse = holder_set_root_sparse(&holders, depth).unwrap();
+        let root_dense = holder_set_root(&holders, depth).unwrap();
+        assert_eq!(root_sparse, root_dense, "sparse root == dense root");
+        // The sparse siblings equal the dense siblings (drop-in interchangeable).
+        assert_eq!(
+            w.siblings,
+            holder_set_membership_witness(&holders, depth, holder_idx).unwrap()
+        );
+    }
+
+    // Fail-closed parity with the dense holder builder: overflow, out-of-range
+    // index, and depth>31 all return None from the sparse builders too.
+    #[test]
+    fn sparse_holder_fail_closed_matches_dense() {
+        let holders = holder_set(&[100, 101, 102, 103]);
+        assert_eq!(holder_set_membership_witness_sparse(&holders, 2, 4), None);
+        assert_eq!(holder_set_membership_witness(&holders, 2, 4), None);
+        let big = holder_set(&[1, 2, 3, 4, 5]);
+        assert_eq!(holder_set_root_sparse(&big, 2), None);
+        assert_eq!(holder_set_root(&big, 2), None);
+        assert_eq!(holder_set_root_sparse(&holders, 32), None);
+        assert_eq!(holder_set_membership_witness_sparse(&holders, 32, 0), None);
     }
 }
