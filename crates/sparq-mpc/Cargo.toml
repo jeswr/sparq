@@ -12,9 +12,10 @@
 # (Q1) the unsolved distributed-signature-over-secret-shared-witness inside the
 # collaborative proof (M4), gated on the ZK-foundation remediation. No fake
 # crypto: every deferred path names its gate. Shamir's masking RNG is now a
-# CSPRNG (sq-1vt resolved): OS-seeded rand_chacha ChaCha20 by default, with a
-# deterministic seedable PRNG only behind the `insecure-test-rng` feature (off
-# by default; tests use it). See rng.rs + shamir.rs.
+# CSPRNG (sq-1vt resolved): an OS-seeded, sparq-OWNED ChaCha20 keystream generator
+# by default (sq-it50 — owned so its key schedule is ZeroizeOnDrop-scrubbed), with
+# a deterministic seedable PRNG only behind the `insecure-test-rng` feature (off
+# by default; tests use it). See chacha.rs + rng.rs + shamir.rs.
 [package]
 name = "sparq-mpc"
 version.workspace = true
@@ -53,16 +54,19 @@ sparq-engine = { path = "../sparq-engine" }
 # re-encode its own data to hand a partial to the join layer.
 oxrdf = { workspace = true }
 
-# [OPUS-4.8] sq-1vt: CSPRNG for the secret-sharing / masking randomness.
+# [OPUS-4.8] sq-1vt / sq-it50: CSPRNG for the secret-sharing / masking randomness.
 # The dealer's polynomial coefficients and the equality-test mask MUST be
 # unpredictable — a non-crypto PRNG there is a real confidentiality weakness
-# (sq-1vt). `rand_chacha::ChaCha20Rng` is a vetted CSPRNG; we seed it from OS
-# entropy via `SeedableRng::from_os_rng` (getrandom), and draw u64s via
-# `rand`'s `RngCore`. `rand` is `default-features = false` (we use only the
-# RngCore/SeedableRng traits, NOT thread_rng/distributions) to keep the
-# dependency surface minimal and the native-only / wasm-exclusion invariant
-# intact. Pinned to the workspace's existing 0.9 line (sparq-geo/sparq-text).
-rand = { version = "0.9", default-features = false }
+# (sq-1vt). We now own the ChaCha20 keystream generator (`crate::chacha`,
+# correctness-pinned to the RFC 8439 vectors) so its key schedule is
+# `ZeroizeOnDrop`-scrubbed (sq-it50) — ecosystem `rand_chacha::ChaCha20Rng`
+# exposes no `zeroize`/`&mut`-key access, so its key schedule could not be
+# scrubbed in place. We still depend on `rand_chacha` ONLY for its re-exported
+# `rand_core` (`OsRng` + `TryRngCore`), which pulls the 32-byte seed from OS
+# entropy (getrandom). The direct `rand` dependency is dropped — we no longer use
+# its `RngCore`/`SeedableRng`/distributions — keeping the dependency surface
+# minimal and the native-only / wasm-exclusion invariant intact. Pinned to the
+# workspace's existing 0.9 line (sparq-geo/sparq-text).
 rand_chacha = "0.9"
 
 # [OPUS-4.8] sq-u8a8 (epic sq-toze / from side-channel analysis sq-egx6, gap

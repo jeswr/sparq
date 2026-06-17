@@ -3435,7 +3435,6 @@ name = "sparq-mpc"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
- "rand 0.9.4",
  "rand_chacha 0.9.0",
  "sparq-core",
  "sparq-engine",
