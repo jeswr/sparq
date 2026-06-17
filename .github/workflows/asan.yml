@@ -104,6 +104,14 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
+      # heavy build. -Zbuild-std recompiles the ENTIRE standard library under ASan
+      # instrumentation into a distinct target tree, on a runner that starts with only
+      # ~14 GB free on `/` — exactly the `No space left on device` profile sq-c76x fixed in
+      # the load-aware test lane. Same in-repo, SHA-pin-free, best-effort step (absent paths
+      # no-op). See scripts/ci-free-disk.sh.
+      - name: Free runner disk before build
+        run: ./scripts/ci-free-disk.sh
       # ASan via -Zsanitizer ships ONLY on nightly. Pin the nightly channel by DATE so the
       # lane is reproducible and a future nightly regression cannot silently break it; bump
       # the date deliberately (same pinned dtolnay action + nightly date as miri.yml /
