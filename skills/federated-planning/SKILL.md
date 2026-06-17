@@ -280,10 +280,25 @@ since:
   `FragBinding`s via `solutions(...)` (a fragment server speaks triples, not
   SPARQL-Results-JSON, so their `FederatedSource::execute` is a deliberate `Unsupported` that
   points at `solutions`).
+- **Phase 7 adaptive re-planning** (`sq-ij5x`, the FINAL phase) — the client-side ANAPSID
+  feedback loop, behind the extra default-OFF **`fedclient-adaptive`** feature (which pulls
+  this planner's `adaptive-replan`). `adaptive::execute_adaptive_single_source` runs the plan
+  as a leaf-scan phase (fetch each leaf once through the real adapter, record its REAL observed
+  row count into `RuntimeStats`) followed by an adaptive join-ordering phase that drives this
+  crate's `AdaptiveExecutor`: at each operator boundary it re-invokes the planner on the
+  **unjoined remainder** when an observation diverges past `divergence_factor`, adopting the
+  cheaper suffix only when it clears the hysteresis margin — **at most once per boundary**, no
+  thrash. The re-plan DECISION engine is this planner's `AdaptiveExecutor` (the client does not
+  re-write it); the client supplies real observed cardinalities and joins the re-ordered suffix
+  with the SAME materialised `natural_join`. Re-planning changes the plan, never the answer:
+  `tests/adaptive_result_equals_static.rs` asserts the adaptive result equals both the static
+  interpreter and ground-truth local engine eval across a genuine large-divergence switch.
 
-Still to come (future beads under the epic): multi-source UNION-per-leaf fan-out + the
-pushed-down streaming bind-join, and adaptive re-planning. See
-`crates/sparq-fedclient/README.md`.
+With Phase 7 the **8-phase streaming federation client is feature-complete** (Phases 0–7 all
+landed; epic **sq-dnko** closed). Still ahead as future beads under epic sq-3183: multi-source
+UNION-per-leaf fan-out, the pushed-down streaming bind-join, and the ANAPSID "adaptive operator"
+refinement (estimate a leaf's cardinality from a prefix of its rows while still streaming it).
+See `crates/sparq-fedclient/README.md`.
 
 ## Deferred (NOT here)
 
