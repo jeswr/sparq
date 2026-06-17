@@ -1,0 +1,82 @@
+# [OPUS-4.8] RSP-QL DETERMINISTIC per-window result-row-count gate (sq-b1hn).
+# Design: research/capability-benchmark-program.md §3.6.
+#
+# sparq-rsp is CLOCK-FREE — the windowed pipeline is a pure function of the pushed
+# (triple, ts) sequence — so replaying the FIXED scripts in
+# crates/sparq-rsp/examples/rsp_oracle.rs yields a fully DETERMINISTIC per-window
+# result. run.sh asserts EVERY metric below against the example's output; any
+# mismatch is an S2R / R2R / eval-mode / multi-window-join regression and fails
+# the run LOUDLY. This is a STRONGER correctness gate than any wall-clock RSP
+# benchmark (no timing flake, no scheduler nondeterminism). The advisory throughput
+# (rsp_persistentdict_triples_per_s) is machine-sensitive and is NOT gated here.
+#
+# Two metric families:
+#   rsp_<scenario>_<mode>_w<k>_rows  — single-window scenario, per closed window k.
+#     The three modes (rebuild / pdict / delta) are pinned to the SAME counts, so
+#     these rows ALSO encode the three-EvalMode equivalence assert.
+#   rsp_srbench_<q>_w<k>_rows        — SRBench correctness ORACLE: a multi-window
+#     JOIN over two LOD-weather streams (observations ⋈ station metadata) per
+#     synchronized window k. Correctness/expressivity only — perf head-to-head vs
+#     C-SPARQL/CQELS/RSP4J is OUT OF SCOPE (different, wall-clock time model).
+#
+# Columns: metric<TAB>expected_rows
+#
+# --- single-window: tumbling AVG (RANGE 10 STEP 10) — 1 row per window (AVG is a
+#     single aggregate group), incl. the empty [10,20) which still yields one AVG row.
+rsp_tumbling_avg_rebuild_w0_rows	1
+rsp_tumbling_avg_rebuild_w1_rows	1
+rsp_tumbling_avg_rebuild_w2_rows	1
+rsp_tumbling_avg_rebuild_w3_rows	1
+rsp_tumbling_avg_rebuild_w4_rows	1
+rsp_tumbling_avg_pdict_w0_rows	1
+rsp_tumbling_avg_pdict_w1_rows	1
+rsp_tumbling_avg_pdict_w2_rows	1
+rsp_tumbling_avg_pdict_w3_rows	1
+rsp_tumbling_avg_pdict_w4_rows	1
+rsp_tumbling_avg_delta_w0_rows	1
+rsp_tumbling_avg_delta_w1_rows	1
+rsp_tumbling_avg_delta_w2_rows	1
+rsp_tumbling_avg_delta_w3_rows	1
+rsp_tumbling_avg_delta_w4_rows	1
+# --- single-window: sliding SUM per sensor (RANGE 20 STEP 10, 50% overlap) — one
+#     row per distinct sensor present in each overlapping window.
+rsp_sliding_sum_rebuild_w0_rows	2
+rsp_sliding_sum_rebuild_w1_rows	1
+rsp_sliding_sum_rebuild_w2_rows	2
+rsp_sliding_sum_rebuild_w3_rows	2
+rsp_sliding_sum_rebuild_w4_rows	1
+rsp_sliding_sum_pdict_w0_rows	2
+rsp_sliding_sum_pdict_w1_rows	1
+rsp_sliding_sum_pdict_w2_rows	2
+rsp_sliding_sum_pdict_w3_rows	2
+rsp_sliding_sum_pdict_w4_rows	1
+rsp_sliding_sum_delta_w0_rows	2
+rsp_sliding_sum_delta_w1_rows	1
+rsp_sliding_sum_delta_w2_rows	2
+rsp_sliding_sum_delta_w3_rows	2
+rsp_sliding_sum_delta_w4_rows	1
+# --- single-window: tumbling GROUP BY join room⋈value (RANGE 20 STEP 20) — one
+#     row per room with readings; [40,60) has values but no room triple → 0 rows.
+rsp_tumbling_groupby_join_rebuild_w0_rows	2
+rsp_tumbling_groupby_join_rebuild_w1_rows	2
+rsp_tumbling_groupby_join_rebuild_w2_rows	0
+rsp_tumbling_groupby_join_pdict_w0_rows	2
+rsp_tumbling_groupby_join_pdict_w1_rows	2
+rsp_tumbling_groupby_join_pdict_w2_rows	0
+rsp_tumbling_groupby_join_delta_w0_rows	2
+rsp_tumbling_groupby_join_delta_w1_rows	2
+rsp_tumbling_groupby_join_delta_w2_rows	0
+# --- SRBench oracle Q1 (join): observation ⋈ station-state per synchronized
+#     window. w0=3 (A,B,C all report+known), w1=2 (only A,C), w2=2 (A dedup'd +
+#     C; the unknown station stZ has NO metadata → inner join drops it), w3=0
+#     (the closing heartbeat's window has no metadata snapshot).
+rsp_srbench_join_w0_rows	3
+rsp_srbench_join_w1_rows	2
+rsp_srbench_join_w2_rows	2
+rsp_srbench_join_w3_rows	0
+# --- SRBench oracle Q2 (aggregate-after-join): readings per US state per window.
+#     w0/w1/w2=2 (NY + CA both present), w3=0.
+rsp_srbench_groupby_state_w0_rows	2
+rsp_srbench_groupby_state_w1_rows	2
+rsp_srbench_groupby_state_w2_rows	2
+rsp_srbench_groupby_state_w3_rows	0

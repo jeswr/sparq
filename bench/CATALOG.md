@@ -58,7 +58,7 @@ conventions first, then a per-category map that points at the registry, then a
 
 | category | what it covers | registry ids |
 |---|---|---|
-| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `geo-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `vector-ann-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
+| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `geo-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `vector-ann-bench`, `geo-index-bench`, `rsp-throughput`, `rsp-ql`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
 | **parse** | text-format parse throughput (MB/s) | `parse-baseline` |
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `hdt-stage-split`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
@@ -138,6 +138,20 @@ Notes on a few that need care:
   `fts_bytes_per_doc` also has a `mode:auto` ratchet in `bench/perf-baseline.json`. CI emits
   `text_<workload>_us` + `text_build_s` (trend-only, advisory). Heavy/latency tier: `N=1000000`.
   An IR-quality BEIR axis (Recall@100 / nDCG@10) is gather-only and not yet wired (follow-up bead).
+- **`rsp-ql` is the RSP-QL STREAMING suite** — see [`bench/rsp/README.md`](./rsp/README.md). It
+  exercises `sparq-rsp` (windowed continuous SPARQL: S2R `RANGE/STEP` windows, three `EvalMode`s,
+  RSP-QL multi-window joins). Because `sparq-rsp` is **clock-free** (a window closes on the
+  pushed-timestamp watermark, not a real clock), a fixed `(triple, ts)` replay is a pure function —
+  so the gate is a **DETERMINISTIC per-window result-row count** (a STRONGER gate than any
+  wall-clock RSP benchmark). `run.sh` runs the `rsp_oracle` example (no external tool — the crate
+  is isolated, like FTS's `bench_text`) and asserts every `rsp_<scenario>_<mode>_w<k>_rows`
+  (single-window tumbling/sliding/GROUP-BY × Rebuild/PersistentDict/Delta — the identical expected
+  counts ALSO encode the **three-EvalMode-equivalence**) and `rsp_srbench_<q>_w<k>_rows` (the
+  **SRBench correctness ORACLE**: a multi-window observation⋈station-metadata join) vs
+  `expected.tsv` (exit 1 on drift). CI emits `rsp_persistentdict_triples_per_s` (trend-only,
+  advisory). **NO competitor perf column** — the RSP peers (C-SPARQL / CQELS / RSP4J) are
+  wall-clock service engines, so a throughput head-to-head is apples-to-oranges (different time
+  model); perf comparison is explicitly **out of scope**.
   Competitor honesty: **Solr/ES are NOT SPARQL competitors and stay off the dashboard**; the
   surface peer is Fuseki + `jena-text` (`http-sparql`), the kernel ref is Lucene/Anserini (labelled
   *sub-component, not an RDF benchmark*).
@@ -282,6 +296,7 @@ bench/shacl/run.sh                    # SHACL (javac + rapper): LUBM ABox x 5 sh
 cargo build --release -p sparq-text --example bench_text && bench/fts/run.sh   # Full-text (no external tool): synthetic BM25 corpus + hit-count/bytes-per-doc diff
 cargo build --release -p sparq-vectors --example bench_vectors && bench/vector/run.sh   # Vector/ANN (no external tool): synthetic corpus + recall@10-deficit gate (HNSW/Vamana/PQ)
 bench/geo/run.sh                      # GeoSPARQL (cargo only): fixed ~100k point corpus + within/nearest/geof: result-set-size + compliance-pass diff (counts-not-coords)
+cargo build --release -p sparq-rsp --example rsp_oracle && bench/rsp/run.sh   # RSP-QL (cargo only): clock-free fixed (triple,ts) replay + DETERMINISTIC per-window row-count gate (3 EvalModes) + SRBench correctness oracle
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
 bench/owl-sameas/run.sh               # OWL sameAs (python3 only): OWL-RL closure per size tier + closure-size (K·N·(N+M)) + query-row (K·N) gate
 

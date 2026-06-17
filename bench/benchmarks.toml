@@ -657,6 +657,25 @@ pinning     = "in-example generator"
 records_to  = "stdout; sparq-rsp README"
 status      = "ok"
 
+# [OPUS-4.8] sq-b1hn — the RSP-QL capability suite: a DETERMINISTIC per-window
+# result-row-count gate (sparq-rsp is clock-free, so a fixed (triple,ts) replay is
+# a pure function — a STRONGER correctness gate than any wall-clock RSP benchmark)
+# + an SRBench correctness ORACLE (multi-window observation⋈metadata join).
+# Design: research/capability-benchmark-program.md §3.6. NO competitor perf column:
+# the RSP peers (C-SPARQL/CQELS/RSP4J) are wall-clock service engines — a throughput
+# head-to-head is apples-to-oranges (different time model), so perf is OUT OF SCOPE.
+[[benchmark]]
+id          = "rsp-ql"
+name        = "RSP-QL streaming (per-window row-count gate + SRBench oracle)"
+category    = "query"
+measures    = "DETERMINISTIC per-window result-row count over a fixed (triple,ts) replay — single-window tumbling/sliding/GROUP-BY x three EvalModes (encoding the 3-EvalMode-equivalence) + SRBench correctness oracle (multi-window join); advisory rsp_persistentdict_triples_per_s (trend-only, NOT gated)"
+invoke      = "cargo build --release -p sparq-rsp --example rsp_oracle && bench/rsp/run.sh"
+source      = "bench/rsp/run.sh; crates/sparq-rsp/examples/rsp_oracle.rs; gate bench/rsp/expected.tsv"
+dataset     = "fixed (triple,ts) replay scripts pinned in-example (single-window sensor stream + SRBench-shaped LOD-weather observation/metadata streams); no external data"
+pinning     = "scripts + queries hard-coded in rsp_oracle.rs; per-window counts gated in bench/rsp/expected.tsv"
+records_to  = "stdout (run.sh, the canonical self-asserting runner); not baked into docs/tests — correctness lives in expected.tsv"
+status      = "ok"
+
 # [OPUS-4.8] sq-cu8c — vector store/HNSW throughput behind an #[ignore]d test.
 [[benchmark]]
 id          = "vectors-throughput"
