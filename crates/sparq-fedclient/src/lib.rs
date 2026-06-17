@@ -98,6 +98,9 @@ pub mod discovery;
 /// patterns / endpoint adapters (Phase 3). The client does NOT write a new planner.
 #[cfg(feature = "fedclient")]
 pub mod planner;
+// [OPUS-4.8] sq-j27p: re-export the Phase-3 planner-bridge surface at the crate root.
+#[cfg(feature = "fedclient")]
+pub use planner::{lower_leaf, pattern_vars, ResolveError, SourceResolver};
 
 /// §4.3 — **capability-aware pushdown**: per leaf / FedX exclusive group, build the
 /// MOST PRECISE sub-query a source can answer (projection + common-variable-checked
@@ -113,6 +116,11 @@ pub mod pushdown;
 /// the async [`stream::SolutionStream`] boundary, with concurrent fan-out (Phase 3/5).
 #[cfg(feature = "fedclient")]
 pub mod operators;
+// [OPUS-4.8] sq-j27p: re-export the Phase-3 materialised single-source interpreter surface.
+#[cfg(feature = "fedclient")]
+pub use operators::{
+    materialize_single_source, parse_srj, solutions_equal, InterpError, Relation,
+};
 
 /// §4.4 — the **`SolutionStream`** abstraction the client owns at its boundary (the
 /// engine stays materialised, §7). Backpressured + bounded (Rust ownership + explicit
