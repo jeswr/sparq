@@ -25,14 +25,44 @@
 //!   distinct row's rank skips by the size of the tie group).
 //! * [`WindowFunction::DenseRank`] — `DENSE_RANK()`: 1-based, NO gaps (ties share
 //!   a rank, the next distinct row is +1).
-//! * [`WindowFunction::Aggregate`] — a windowed aggregate over the WHOLE
-//!   partition (frame = the entire partition, the SQL default for an aggregate
-//!   with `PARTITION BY` and no explicit frame): every row in a partition gets
-//!   the same value, the aggregate of a chosen column over that partition.
+//! * [`WindowFunction::Aggregate`] — a windowed aggregate over a FRAME within the
+//!   partition. With no explicit [`WindowFrame`] the frame is the WHOLE partition
+//!   (the SQL default for an aggregate with `PARTITION BY` and no frame): every
+//!   row gets the same value, the aggregate of a chosen column over that
+//!   partition. With an explicit frame (`ROWS`/`RANGE BETWEEN … AND …`) the
+//!   aggregate is recomputed per row over only the rows in that row's frame, so a
+//!   running total / moving average is expressible (see [`WindowFrame`]).
 //!
 //! Each appends one new bound column (`new_var`) to every row; the row order of
 //! the input `QueryResult` is preserved (window functions are computed, not a
 //! re-sort).
+//!
+//! ## Window frames (`ROWS` / `RANGE`)  [OPUS-4.8] (sq-imj8)
+//!
+//! A [`WindowFrame`] narrows the set of rows an [`WindowFunction::Aggregate`]
+//! folds over, per current row, in the window `ORDER BY` ordering. Two frame
+//! UNITS, following SQL:2003:
+//!
+//! * [`FrameUnit::Rows`] — a PHYSICAL frame: bounds count rows by position in the
+//!   ordered partition (`N PRECEDING` ≡ `N` rows back, `CURRENT ROW` ≡ this row,
+//!   `N FOLLOWING` ≡ `N` rows on, and the `UNBOUNDED` ends). A running total is
+//!   `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`; a 3-row moving sum is
+//!   `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW`.
+//! * [`FrameUnit::Range`] — a LOGICAL frame: `CURRENT ROW` extends to the whole
+//!   PEER group of the current row (all rows equal on every `ORDER BY` key), and
+//!   the `UNBOUNDED` ends behave as for `Rows`. (A numeric value offset —
+//!   `RANGE BETWEEN 5 PRECEDING` — is **not** modelled; only the `UNBOUNDED` /
+//!   `CURRENT ROW` peer-based bounds are, which is the most-used RANGE form and
+//!   the only one with an unambiguous meaning over the self-contained
+//!   [`cmp_terms`] order. A numeric `N PRECEDING`/`N FOLLOWING` bound under
+//!   `Range` is rejected by [`apply_window`].)
+//!
+//! Frames apply ONLY to aggregates; the ranking functions
+//! (`ROW_NUMBER`/`RANK`/`DENSE_RANK`) ignore any frame (SQL forbids a frame on
+//! them, so [`WindowSpec::frame`] is honoured only for [`WindowFunction::Aggregate`]).
+//! A frame with no `ORDER BY` degenerates to the whole partition for `RANGE`
+//! (every row is a peer) and is still well-defined for `ROWS` (input order within
+//! the partition).
 
 use oxrdf::{Literal, NamedNode, Term, Variable};
 use std::cmp::Ordering;
@@ -93,8 +123,66 @@ pub enum WindowFunction {
     Rank,
     /// `DENSE_RANK()` — no gaps.
     DenseRank,
-    /// A windowed aggregate over the whole partition, of the given column.
+    /// A windowed aggregate over the row's FRAME within the partition (the whole
+    /// partition when [`WindowSpec::frame`] is `None`), of the given column.
     Aggregate { agg: WindowAggregate, of: Variable },
+}
+
+/// The unit of a window [`WindowFrame`]: physical row offsets (`ROWS`) or the
+/// logical, peer-based `RANGE`. See the module docs.  [OPUS-4.8] (sq-imj8)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameUnit {
+    /// `ROWS` — bounds count rows by physical position in the ordered partition.
+    Rows,
+    /// `RANGE` — `CURRENT ROW` covers the current row's whole PEER group; numeric
+    /// `N PRECEDING`/`N FOLLOWING` offsets are not modelled (see the module docs).
+    Range,
+}
+
+/// One end of a window [`WindowFrame`], in the window `ORDER BY` ordering.
+/// [OPUS-4.8] (sq-imj8)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameBound {
+    /// `UNBOUNDED PRECEDING` — the first row of the partition.
+    UnboundedPreceding,
+    /// `N PRECEDING` — `N` rows before the current row (`ROWS` only; rejected for
+    /// `RANGE`). `0 PRECEDING` ≡ `CURRENT ROW`.
+    Preceding(u64),
+    /// `CURRENT ROW` — the current row (`ROWS`), or its whole peer group (`RANGE`).
+    CurrentRow,
+    /// `N FOLLOWING` — `N` rows after the current row (`ROWS` only; rejected for
+    /// `RANGE`). `0 FOLLOWING` ≡ `CURRENT ROW`.
+    Following(u64),
+    /// `UNBOUNDED FOLLOWING` — the last row of the partition.
+    UnboundedFollowing,
+}
+
+/// A window frame: a unit (`ROWS`/`RANGE`) and a `[start, end]` bound pair
+/// (`BETWEEN start AND end`). The frame narrows the rows an
+/// [`WindowFunction::Aggregate`] folds over, per current row; ranking functions
+/// ignore it. `None` for [`WindowSpec::frame`] ≡ the whole partition (the SQL
+/// default for an aggregate).  [OPUS-4.8] (sq-imj8)
+///
+/// A frame is well-formed iff `start` does not begin AFTER `end` in the ordering
+/// (e.g. `UNBOUNDED FOLLOWING` may not be a `start`, `UNBOUNDED PRECEDING` may not
+/// be an `end`); [`apply_window`] returns `Err` for a malformed frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowFrame {
+    pub unit: FrameUnit,
+    pub start: FrameBound,
+    pub end: FrameBound,
+}
+
+impl WindowFrame {
+    /// `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — a running aggregate.
+    pub fn rows_running() -> Self {
+        Self { unit: FrameUnit::Rows, start: FrameBound::UnboundedPreceding, end: FrameBound::CurrentRow }
+    }
+    /// `ROWS BETWEEN n PRECEDING AND CURRENT ROW` — a trailing moving aggregate of
+    /// width `n + 1`.
+    pub fn rows_preceding(n: u64) -> Self {
+        Self { unit: FrameUnit::Rows, start: FrameBound::Preceding(n), end: FrameBound::CurrentRow }
+    }
 }
 
 /// A window specification: PARTITION BY zero or more columns, ORDER BY zero or
@@ -107,6 +195,10 @@ pub struct WindowSpec {
     pub partition_by: Vec<Variable>,
     pub order_by: Vec<SortKey>,
     pub function: WindowFunction,
+    /// An explicit window frame for an [`WindowFunction::Aggregate`] (`None` ≡ the
+    /// whole partition, the SQL default). Ignored for the ranking functions.
+    /// [OPUS-4.8] (sq-imj8)
+    pub frame: Option<WindowFrame>,
     /// The new variable the computed window value is bound to.
     pub new_var: Variable,
 }
@@ -127,6 +219,15 @@ pub fn apply_window(result: &QueryResult, spec: &WindowSpec) -> Result<QueryResu
     let part_cols: Vec<usize> = spec.partition_by.iter().map(&col).collect::<Result<_, _>>()?;
     let order_cols: Vec<(usize, bool)> =
         spec.order_by.iter().map(|k| col(&k.var).map(|c| (c, k.descending))).collect::<Result<_, _>>()?;
+
+    // A frame is only meaningful for an aggregate; validate it (well-formedness +
+    // the RANGE numeric-offset restriction) up front so a bad frame is one clear
+    // error rather than a per-partition surprise.
+    if let Some(frame) = &spec.frame {
+        if matches!(spec.function, WindowFunction::Aggregate { .. }) {
+            validate_frame(frame)?;
+        }
+    }
 
     // Group row indices into partitions by their partition-key tuple, preserving
     // first-seen partition order and input row order within a partition.
@@ -150,7 +251,7 @@ pub fn apply_window(result: &QueryResult, spec: &WindowSpec) -> Result<QueryResu
         // order breaks ties — required for ROW_NUMBER determinism).
         let mut ordered: Vec<usize> = part.clone();
         ordered.sort_by(|&a, &b| order_rows(result, &order_cols, a, b));
-        compute_partition(result, spec, part, &ordered, &order_cols, &mut values);
+        compute_partition(result, spec, part, &ordered, &order_cols, &mut values)?;
     }
 
     let mut vars = result.vars.clone();
@@ -177,7 +278,7 @@ fn compute_partition(
     ordered: &[usize],
     order_cols: &[(usize, bool)],
     values: &mut [Option<Term>],
-) {
+) -> Result<(), String> {
     match &spec.function {
         WindowFunction::RowNumber => {
             for (n, &ri) in ordered.iter().enumerate() {
@@ -212,17 +313,138 @@ fn compute_partition(
         }
         WindowFunction::Aggregate { agg, of } => {
             let of_col = result.vars.iter().position(|c| c == of);
-            let cells: Vec<Option<Term>> = part
+            // The chosen column's cell for each row of the partition, in window
+            // ORDER BY order (`ordered`); the frame is computed over THIS ordered
+            // list (positions are physical offsets within it).
+            let ordered_cells: Vec<Option<Term>> = ordered
                 .iter()
                 .map(|&ri| of_col.and_then(|c| result.rows[ri][c].clone()))
                 .collect();
-            let v = eval_window_aggregate(agg, &cells);
-            // The whole-partition frame: every row in the partition gets `v`.
-            for &ri in part {
-                values[ri] = v.clone();
+            match &spec.frame {
+                // No explicit frame ⇒ the whole partition (SQL default): one fold,
+                // every row gets the same value. (Cheap path; preserves prior
+                // behaviour exactly.)
+                None => {
+                    let v = eval_window_aggregate(agg, &ordered_cells);
+                    for &ri in part {
+                        values[ri] = v.clone();
+                    }
+                }
+                // An explicit frame ⇒ recompute the aggregate per row over the rows
+                // in that row's frame `[lo, hi]` (inclusive, by ordered position).
+                Some(frame) => {
+                    for (pos, &ri) in ordered.iter().enumerate() {
+                        let (lo, hi) = frame_bounds(frame, pos, ordered, result, order_cols)?;
+                        // An empty frame (`hi < lo`) yields the aggregate of the
+                        // empty multiset (e.g. COUNT 0, SUM 0, AVG/MIN/MAX unbound).
+                        let slice: &[Option<Term>] =
+                            if lo <= hi { &ordered_cells[lo..=hi] } else { &[] };
+                        values[ri] = eval_window_aggregate(agg, slice);
+                    }
+                }
             }
         }
     }
+    Ok(())
+}
+
+/// Validates a window frame for an aggregate: well-formedness (a `start` may not
+/// be `UNBOUNDED FOLLOWING`, an `end` may not be `UNBOUNDED PRECEDING`) and the
+/// `RANGE` restriction (no numeric `N PRECEDING`/`N FOLLOWING` offset under
+/// `RANGE`).  [OPUS-4.8] (sq-imj8)
+fn validate_frame(frame: &WindowFrame) -> Result<(), String> {
+    if matches!(frame.start, FrameBound::UnboundedFollowing) {
+        return Err("window frame: start bound may not be UNBOUNDED FOLLOWING".into());
+    }
+    if matches!(frame.end, FrameBound::UnboundedPreceding) {
+        return Err("window frame: end bound may not be UNBOUNDED PRECEDING".into());
+    }
+    if frame.unit == FrameUnit::Range {
+        for b in [&frame.start, &frame.end] {
+            if matches!(b, FrameBound::Preceding(_) | FrameBound::Following(_)) {
+                return Err(
+                    "window frame: RANGE supports only UNBOUNDED PRECEDING / CURRENT ROW / UNBOUNDED FOLLOWING bounds (a numeric N PRECEDING/FOLLOWING RANGE offset is not supported; use ROWS, or the programmatic API)".into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The inclusive ordered-position interval `[lo, hi]` of the frame for the row at
+/// ordered position `pos`. `lo > hi` ⇒ an empty frame. For `RANGE` a `CURRENT ROW`
+/// bound extends to the current row's whole PEER group (per the `start`/`end`
+/// side); for `ROWS` a `CURRENT ROW` bound is `pos` itself.  [OPUS-4.8] (sq-imj8)
+fn frame_bounds(
+    frame: &WindowFrame,
+    pos: usize,
+    ordered: &[usize],
+    result: &QueryResult,
+    order_cols: &[(usize, bool)],
+) -> Result<(usize, usize), String> {
+    let n = ordered.len();
+    // `lo` resolves a START bound to its first ordered position; `hi` resolves an
+    // END bound to its last. CURRENT ROW differs per unit (and per side for RANGE).
+    let pos = pos as isize;
+    let lo: isize = match frame.start {
+        FrameBound::UnboundedPreceding => 0,
+        FrameBound::Preceding(k) => pos.saturating_sub(clamp_offset(k)),
+        FrameBound::CurrentRow => match frame.unit {
+            FrameUnit::Rows => pos,
+            // RANGE: the start of the current row's peer group.
+            FrameUnit::Range => peer_group_start(pos as usize, ordered, result, order_cols) as isize,
+        },
+        FrameBound::Following(k) => pos.saturating_add(clamp_offset(k)),
+        FrameBound::UnboundedFollowing => {
+            return Err("window frame: start bound may not be UNBOUNDED FOLLOWING".into())
+        }
+    };
+    let hi: isize = match frame.end {
+        FrameBound::UnboundedPreceding => {
+            return Err("window frame: end bound may not be UNBOUNDED PRECEDING".into())
+        }
+        FrameBound::Preceding(k) => pos.saturating_sub(clamp_offset(k)),
+        FrameBound::CurrentRow => match frame.unit {
+            FrameUnit::Rows => pos,
+            // RANGE: the end of the current row's peer group.
+            FrameUnit::Range => peer_group_end(pos as usize, ordered, result, order_cols) as isize,
+        },
+        FrameBound::Following(k) => pos.saturating_add(clamp_offset(k)),
+        FrameBound::UnboundedFollowing => n as isize - 1,
+    };
+    // Clamp to the partition; an entirely out-of-range frame becomes empty.
+    let lo = lo.clamp(0, n as isize);
+    let hi = hi.clamp(-1, n as isize - 1);
+    if lo > hi {
+        // Signal "empty" with a lo>hi pair the caller treats as the empty slice.
+        Ok((1, 0))
+    } else {
+        Ok((lo as usize, hi as usize))
+    }
+}
+
+/// Saturates a frame offset to `isize::MAX` so `pos ± k` (with `saturating_*`)
+/// cannot overflow for an absurd `N PRECEDING`/`N FOLLOWING` (it clamps to the ends).
+fn clamp_offset(k: u64) -> isize {
+    isize::try_from(k).unwrap_or(isize::MAX)
+}
+
+/// The first ordered position that is a PEER of `pos` (same `ORDER BY` keys).
+fn peer_group_start(pos: usize, ordered: &[usize], result: &QueryResult, order_cols: &[(usize, bool)]) -> usize {
+    let mut lo = pos;
+    while lo > 0 && peers(result, order_cols, ordered[lo - 1], ordered[pos]) {
+        lo -= 1;
+    }
+    lo
+}
+
+/// The last ordered position that is a PEER of `pos` (same `ORDER BY` keys).
+fn peer_group_end(pos: usize, ordered: &[usize], result: &QueryResult, order_cols: &[(usize, bool)]) -> usize {
+    let mut hi = pos;
+    while hi + 1 < ordered.len() && peers(result, order_cols, ordered[hi + 1], ordered[pos]) {
+        hi += 1;
+    }
+    hi
 }
 
 /// Whether rows `a` and `b` are PEERS under the window ORDER BY (compare equal on
@@ -394,6 +616,7 @@ mod tests {
             partition_by: vec![var("dept")],
             order_by: vec![SortKey::desc(var("sales"))],
             function: WindowFunction::RowNumber,
+            frame: None,
             new_var: var("rn"),
         };
         let out = apply_window(&sample(), &spec).unwrap();
@@ -412,6 +635,7 @@ mod tests {
             partition_by: vec![var("dept")],
             order_by: vec![SortKey::desc(var("sales"))],
             function: f,
+            frame: None,
             new_var: var("r"),
         };
         let rank = apply_window(&sample(), &mk(WindowFunction::Rank)).unwrap();
@@ -432,6 +656,7 @@ mod tests {
             partition_by: vec![var("dept")],
             order_by: vec![],
             function: WindowFunction::Aggregate { agg: WindowAggregate::Sum, of: var("sales") },
+            frame: None,
             new_var: var("total"),
         };
         let out = apply_window(&sample(), &spec).unwrap();
@@ -450,6 +675,7 @@ mod tests {
                 partition_by: vec![var("dept")],
                 order_by: vec![],
                 function: WindowFunction::Aggregate { agg: WindowAggregate::Count, of: var("sales") },
+                frame: None,
                 new_var: var("n"),
             },
         )
@@ -469,6 +695,7 @@ mod tests {
                     })),
                     of: var("sales"),
                 },
+                frame: None,
                 new_var: var("m"),
             },
         )
@@ -483,8 +710,151 @@ mod tests {
             partition_by: vec![var("nope")],
             order_by: vec![],
             function: WindowFunction::RowNumber,
+            frame: None,
             new_var: var("rn"),
         };
         assert!(apply_window(&sample(), &spec).is_err());
+    }
+
+    // ---- window frames (ROWS / RANGE) — sq-imj8 [OPUS-4.8] ----
+
+    /// A single partition with distinct, ascending values so frame offsets are
+    /// unambiguous: (?k) = 10, 20, 20, 40 in input (and ORDER BY ?k) order.
+    fn seq() -> QueryResult {
+        QueryResult {
+            vars: vec![var("k")],
+            rows: vec![vec![Some(int(10))], vec![Some(int(20))], vec![Some(int(20))], vec![Some(int(40))]],
+        }
+    }
+
+    fn agg(frame: Option<WindowFrame>, a: WindowAggregate) -> WindowSpec {
+        WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("k"))],
+            function: WindowFunction::Aggregate { agg: a, of: var("k") },
+            frame,
+            new_var: var("w"),
+        }
+    }
+
+    #[test]
+    fn rows_running_total_is_cumulative() {
+        // ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: running SUM.
+        let out = apply_window(&seq(), &agg(Some(WindowFrame::rows_running()), WindowAggregate::Sum)).unwrap();
+        // 10, 10+20, 10+20+20, 10+20+20+40 = 10, 30, 50, 90.
+        assert_eq!(val(&out, 0, 1), int(10).to_string());
+        assert_eq!(val(&out, 1, 1), int(30).to_string());
+        assert_eq!(val(&out, 2, 1), int(50).to_string());
+        assert_eq!(val(&out, 3, 1), int(90).to_string());
+    }
+
+    #[test]
+    fn rows_trailing_moving_sum_and_count() {
+        // ROWS BETWEEN 1 PRECEDING AND CURRENT ROW: 2-row trailing window.
+        let sum = apply_window(&seq(), &agg(Some(WindowFrame::rows_preceding(1)), WindowAggregate::Sum)).unwrap();
+        // 10, 10+20, 20+20, 20+40 = 10, 30, 40, 60.
+        assert_eq!(val(&sum, 0, 1), int(10).to_string());
+        assert_eq!(val(&sum, 1, 1), int(30).to_string());
+        assert_eq!(val(&sum, 2, 1), int(40).to_string());
+        assert_eq!(val(&sum, 3, 1), int(60).to_string());
+        // COUNT over the same 2-row trailing window: 1, 2, 2, 2.
+        let cnt = apply_window(&seq(), &agg(Some(WindowFrame::rows_preceding(1)), WindowAggregate::Count)).unwrap();
+        assert_eq!(val(&cnt, 0, 1), int(1).to_string());
+        assert_eq!(val(&cnt, 1, 1), int(2).to_string());
+        assert_eq!(val(&cnt, 3, 1), int(2).to_string());
+    }
+
+    #[test]
+    fn rows_centered_following_window() {
+        // ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING: this row + next.
+        let frame = WindowFrame { unit: FrameUnit::Rows, start: FrameBound::CurrentRow, end: FrameBound::Following(1) };
+        let out = apply_window(&seq(), &agg(Some(frame), WindowAggregate::Sum)).unwrap();
+        // 10+20, 20+20, 20+40, 40 = 30, 40, 60, 40 (last row has no follower).
+        assert_eq!(val(&out, 0, 1), int(30).to_string());
+        assert_eq!(val(&out, 1, 1), int(40).to_string());
+        assert_eq!(val(&out, 2, 1), int(60).to_string());
+        assert_eq!(val(&out, 3, 1), int(40).to_string());
+    }
+
+    #[test]
+    fn range_running_includes_peer_group() {
+        // RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: the running SUM is the
+        // same as ROWS at distinct rows, BUT at the two equal `20` peers the whole
+        // peer group is included, so BOTH 20-rows see 10+20+20 = 50 (not 30 then 50).
+        let frame = WindowFrame { unit: FrameUnit::Range, start: FrameBound::UnboundedPreceding, end: FrameBound::CurrentRow };
+        let out = apply_window(&seq(), &agg(Some(frame), WindowAggregate::Sum)).unwrap();
+        assert_eq!(val(&out, 0, 1), int(10).to_string()); // 10
+        assert_eq!(val(&out, 1, 1), int(50).to_string()); // 10+20+20 (peer group)
+        assert_eq!(val(&out, 2, 1), int(50).to_string()); // 10+20+20 (peer group)
+        assert_eq!(val(&out, 3, 1), int(90).to_string()); // all
+    }
+
+    #[test]
+    fn no_frame_is_whole_partition_unchanged() {
+        // Without a frame an aggregate is still the whole-partition fold (the prior
+        // behaviour): every row sees the total.
+        let out = apply_window(&seq(), &agg(None, WindowAggregate::Sum)).unwrap();
+        for r in 0..4 {
+            assert_eq!(val(&out, r, 1), int(90).to_string());
+        }
+    }
+
+    #[test]
+    fn empty_frame_yields_empty_aggregate() {
+        // ROWS BETWEEN 3 PRECEDING AND 2 PRECEDING: empty for the first rows.
+        let frame = WindowFrame { unit: FrameUnit::Rows, start: FrameBound::Preceding(3), end: FrameBound::Preceding(2) };
+        let sum = apply_window(&seq(), &agg(Some(frame), WindowAggregate::Sum)).unwrap();
+        // Row 0: frame ends 2 rows BEFORE row 0 → entirely before the partition →
+        // empty. The empty-frame SUM is 0 and COUNT is 0; MIN/MAX/AVG are unbound.
+        assert_eq!(val(&sum, 0, 1), int(0).to_string());
+        let cnt = apply_window(&seq(), &agg(Some(frame), WindowAggregate::Count)).unwrap();
+        assert_eq!(val(&cnt, 0, 1), int(0).to_string());
+        // MIN over an empty frame is unbound.
+        let min = apply_window(&seq(), &agg(Some(frame), WindowAggregate::Min)).unwrap();
+        assert!(min.rows[0][1].is_none());
+    }
+
+    #[test]
+    fn malformed_frame_is_error() {
+        // start = UNBOUNDED FOLLOWING is malformed.
+        let bad = WindowFrame { unit: FrameUnit::Rows, start: FrameBound::UnboundedFollowing, end: FrameBound::CurrentRow };
+        assert!(apply_window(&seq(), &agg(Some(bad), WindowAggregate::Sum)).is_err());
+        // end = UNBOUNDED PRECEDING is malformed.
+        let bad2 = WindowFrame { unit: FrameUnit::Rows, start: FrameBound::CurrentRow, end: FrameBound::UnboundedPreceding };
+        assert!(apply_window(&seq(), &agg(Some(bad2), WindowAggregate::Sum)).is_err());
+        // RANGE with a numeric offset is unsupported.
+        let bad3 = WindowFrame { unit: FrameUnit::Range, start: FrameBound::Preceding(1), end: FrameBound::CurrentRow };
+        let e = apply_window(&seq(), &agg(Some(bad3), WindowAggregate::Sum)).unwrap_err();
+        assert!(e.contains("RANGE"), "{e}");
+    }
+
+    #[test]
+    fn absurd_frame_offset_saturates_not_overflows() {
+        // A huge N PRECEDING/FOLLOWING must clamp to the partition ends, not panic.
+        let huge = WindowFrame {
+            unit: FrameUnit::Rows,
+            start: FrameBound::Preceding(u64::MAX),
+            end: FrameBound::Following(u64::MAX),
+        };
+        let out = apply_window(&seq(), &agg(Some(huge), WindowAggregate::Sum)).unwrap();
+        // The frame spans the whole partition for every row → the grand total 90.
+        for r in 0..4 {
+            assert_eq!(val(&out, r, 1), int(90).to_string());
+        }
+    }
+
+    #[test]
+    fn frame_is_ignored_for_ranking_functions() {
+        // A frame on ROW_NUMBER is silently ignored (SQL forbids it; we don't error).
+        let spec = WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("k"))],
+            function: WindowFunction::RowNumber,
+            frame: Some(WindowFrame::rows_running()),
+            new_var: var("rn"),
+        };
+        let out = apply_window(&seq(), &spec).unwrap();
+        assert_eq!(val(&out, 0, 1), int(1).to_string());
+        assert_eq!(val(&out, 3, 1), int(4).to_string());
     }
 }
