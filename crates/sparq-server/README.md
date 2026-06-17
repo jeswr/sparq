@@ -410,6 +410,20 @@ matrix under "Security posture".
   super-linear in the count) and `--brtpf-max-values-bytes` (raw `values` payload bytes — the GET
   query-string carrier is not covered by `--max-body-bytes`); a breach is a `413`. See the SKILL's
   "Triple Pattern Fragments" section.
+- **SHACL validation endpoint** — opt-in (`shacl` feature + `--shacl` flag, both off by default;
+  read-only): `POST /shacl/validate` validates the server's **currently-loaded data graph**
+  against a SHACL **shapes** graph the client POSTs (RDF body, classified by `Content-Type`,
+  gzip-decoded under the zip-bomb cap). The response is content-negotiated — a JSON projection of
+  the validation report (`{ conforms, results: [{ focusNode, path, value, sourceShape,
+  sourceConstraintComponent, severity, message }] }`, the shape the PSS Pod-Manager + the wasm
+  `shacl` binding consume) by default, or the W3C SHACL report-vocabulary Turtle on
+  `Accept: text/turtle`. Always `200` regardless of conformance (the verdict is in the body); a
+  malformed shapes body is `400`, an unsupported `Content-Type` `415`. Backed by `sparq-shacl`
+  (SHACL Core + SHACL-SPARQL §5.2 + custom SPARQL constraint components §6) — the server-side /
+  large-graph path of [#162](https://github.com/jeswr/sparq/issues/162): the store is already in
+  memory (no per-request data parse) and the 100k-node case where the JS `rdf-validate-shacl` OOMs
+  is handled natively. A build without the `shacl` feature carries zero SHACL code. See the SKILL's
+  "SHACL validation endpoint" section.
 - **Access-audit trails** — opt-in, off by default: `audit-log` (flat `tracing` event per request)
   and `access-audit` (richer typed JSON-Lines records via a pluggable sink — actor / action /
   resource / decision+basis / timestamp / fingerprint, hooked at the real enforcement seam).
@@ -420,6 +434,7 @@ matrix under "Security posture".
   (VoID + Service Description discovery endpoints — see "Federation discovery"), `tpf` (Triple
   Pattern Fragments / LDF source endpoint — see "Triple Pattern Fragments / LDF source"), `brtpf`
   (implies `tpf`; bind-restricted Triple Pattern Fragments — the `values`/POST bindings extension),
+  `shacl` (the `POST /shacl/validate` SHACL validation endpoint — see "SHACL validation endpoint"),
   `audit-log` / `access-audit` (access-audit trails — see "Access-audit trails"), `zlib-ng`
   (native-only faster zlib-ng C backend for `Content-Encoding: gzip` request inflate; off by
   default, pure-Rust `miniz_oxide` otherwise; never in the wasm build).
