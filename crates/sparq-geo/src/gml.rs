@@ -12,8 +12,8 @@
 //!    <gml:pos>-83.4 34.3</gml:pos></gml:Point>"^^geo:gmlLiteral
 //! ```
 //!
-//! Output is the SAME [`GeoGeometry`](crate::GeoGeometry) the WKT path produces
-//! (a [`geo_types::Geometry<f64>`] tagged with a [`Crs`](crate::Crs)), so every
+//! Output is the SAME [`GeoGeometry`] the WKT path produces
+//! (a [`geo_types::Geometry<f64>`] tagged with a [`Crs`]), so every
 //! downstream `geof:` function, the [`GeoIndex`](crate::GeoIndex), and the CRS /
 //! axis-order handling work UNCHANGED. As with WKT, coordinates are normalised
 //! to x = longitude / y = latitude: an EPSG:4326 `srsName` (LAT/LONG axis order)

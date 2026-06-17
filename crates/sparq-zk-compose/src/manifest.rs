@@ -92,7 +92,7 @@ pub enum BindingMode {
     /// Holder proof-of-possession (sq-cwq): the holder demonstrates possession of
     /// its holder secret key by signing the verifier's `challenge` (its nonce).
     ///
-    /// # Verifier contract (fail-closed) — see [`crate::verifier::bind_holder_pop`]
+    /// # Verifier contract (fail-closed) — see `crate::verifier::bind_holder_pop`
     /// The verifier requires (a) `holder` to be a member of an EXTERNAL
     /// relying-party holder registry ([`crate::verifier::HolderRegistry`], the
     /// trust anchor — mirrors the issuer key-set `K`), and (b) `pop` to be a valid
@@ -581,7 +581,7 @@ pub enum CircuitId {
     /// witness, and the membership index/path are PRIVATE, so the proof proves
     /// "this commitment was signed by SOME key in K" without disclosing WHICH
     /// issuer. The privacy upgrade over the clear-key
-    /// [`crate::verifier::bind_issuer_attestations`] check.
+    /// `crate::verifier::bind_issuer_attestations` check.
     // [OPUS-4.8] sq-z9l: hidden-issuer-attestation circuit member.
     HiddenIssuer { depth: u32 },
     /// `holder_pok` — in-circuit holder Proof-of-Possession (sq-xqfg, HolderPoP
@@ -591,7 +591,7 @@ pub enum CircuitId {
     /// "I possess the holder secret whose key the issuer bound into this
     /// credential" without disclosing the secret OR the key. The relation is
     /// `hpk = hsk·G` (Baby-JubJub, ONE scalar-mul — cheaper than the
-    /// [`HiddenIssuer`] Schnorr's two) AND
+    /// `HiddenIssuer` Schnorr's two) AND
     /// `Poseidon2([ZKSIG_HK, hpk.x, hpk.y]) == holder_pk_digest`, reusing
     /// `issuer.nr`'s scalar-mul / on-curve / `< L` gadgets verbatim. A single
     /// depth-free member (no Merkle parameterisation — the clear-digest tier).
@@ -610,8 +610,8 @@ pub enum CircuitId {
     /// Poseidon2 Merkle membership of the holder-key DIGEST
     /// `Poseidon2([ZKSIG_HK, hpk.x, hpk.y])`, reusing `holder.nr`'s `holder_pok`
     /// gadgets + `issuer.nr`'s Merkle-fold pattern verbatim. The hidden-holder
-    /// analogue of [`HiddenIssuer`] (which hides WHICH issuer); the privacy upgrade
-    /// over the clear-digest [`HolderPok`] member (which makes `holder_pk_digest`
+    /// analogue of `HiddenIssuer` (which hides WHICH issuer); the privacy upgrade
+    /// over the clear-digest `HolderPok` member (which makes `holder_pk_digest`
     /// public). The verifier gate that binds `holder_set_root` to the relying
     /// party's authoritative holder registry is `bind_holder_set`, SEPARATE from
     /// this member registration.
@@ -691,7 +691,7 @@ pub enum ProofInputs {
         /// Per-graph source attribution (length k): `attribution[g]` is true
         /// iff this pattern's match set draws a triple from committed graph `g`.
         /// Constrained in-circuit (`scan.nr` step 4, audit #8) and byte-bound
-        /// into the bb public inputs by [`crate::verifier::reconstruct_public_inputs`],
+        /// into the bb public inputs by `crate::verifier::reconstruct_public_inputs`,
         /// so it is PROOF-BOUND, not a prover-controlled claim. The verifier
         /// cross-checks it against `manifest.attributions` for the pattern this
         /// scan answers (closes the `[[0],[0]]` collapse-two-graphs forge).
@@ -978,7 +978,7 @@ pub struct ProofManifest {
     pub entailment_regime: EntailmentRegime,
     /// The recorded inference steps that justify any DERIVED triples under a
     /// non-`Simple` `entailment_regime` (sq-314). EMPTY for `Simple` (no
-    /// inference). For `Rdfs`/`Owl` the verifier ([`crate::verifier::bind_entailment`])
+    /// inference). For `Rdfs`/`Owl` the verifier (`crate::verifier::bind_entailment`)
     /// re-checks every step is a well-formed, regime-admitted rule instance whose
     /// antecedents are GROUNDED (chain to an earlier step or to a disclosed scan
     /// row) — so the regime claim is enforced, not free metadata. A non-`Simple`
@@ -1030,21 +1030,21 @@ pub struct ProofManifest {
     /// trust anchor is preserved) and runs `bb verify` — so the holder's list slot
     /// is never disclosed. The clear `RevocationStatus.index`/snapshot path remains
     /// the interim check; this field is the additive privacy layer. See
-    /// [`crate::verifier::bind_hidden_revocation`].
+    /// `crate::verifier::bind_hidden_revocation`.
     // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation proof (privacy upgrade).
     #[serde(default)]
     pub hidden_revocation: Option<HiddenIndexRevocation>,
     /// OPTIONAL hidden-issuer attestation proofs (sq-z9l): zero-knowledge proofs
     /// that scan-covering commitments were each signed by SOME issuer whose key is
     /// in the committed key set K, WITHOUT disclosing which issuer. The privacy
-    /// upgrade over the clear-key [`crate::verifier::bind_issuer_attestations`]
+    /// upgrade over the clear-key `crate::verifier::bind_issuer_attestations`
     /// check. When the policy enables the path (`KeySet::with_hidden_issuer_depth`)
     /// and an entry is present for a commitment, the verifier checks the proof's
     /// PUBLIC `key_set_root` equals the root it derives from its OWN authoritative
     /// KeySet and `message` equals the recomputed issuer-signed message, then runs
     /// `bb verify` — so WHICH authority vouched for the holder is never disclosed.
     /// The clear-key path remains the interim/always-on check; this is the additive
-    /// privacy layer. See [`crate::verifier::bind_hidden_issuer_attestations`].
+    /// privacy layer. See `crate::verifier::bind_hidden_issuer_attestations`.
     // [OPUS-4.8] sq-z9l: hidden-issuer attestation proofs (privacy upgrade).
     #[serde(default)]
     pub hidden_issuer_attestations: Vec<HiddenIssuerAttestation>,
@@ -1053,7 +1053,7 @@ pub struct ProofManifest {
     /// the holder secret whose public key hashes to the issuer-attested
     /// `holder_pk_digest` of the credential covering [`HolderPokProof::commitment`]
     /// — WITHOUT disclosing the holder key. The verifier
-    /// ([`crate::verifier::bind_holder_pok`]) binds the proof's public digest to the
+    /// (`crate::verifier::bind_holder_pok`) binds the proof's public digest to the
     /// ISSUER-SIGNED digest (the binding edge: the digest must verify under the
     /// external trusted `K` over [`sparq_zk::sig::commitment_message_with_holder`]),
     /// reconstructs the public inputs from its own nonce + that digest, and `bb
@@ -1078,7 +1078,7 @@ pub struct ProofManifest {
     /// holder key OR which holder. The hidden-holder analogue of the clear-digest
     /// [`HolderPokProof`] (which makes `holder_pk_digest` public), the holder twin
     /// of [`HiddenIssuerAttestation`] (which hides WHICH issuer). The verifier
-    /// ([`crate::verifier::bind_holder_set`]) binds the proof's PUBLIC
+    /// (`crate::verifier::bind_holder_set`) binds the proof's PUBLIC
     /// `holder_set_root` to the root it derives from its OWN authoritative holder
     /// registry (the trust anchor; WHICH holder is hidden, the trust source is
     /// not), reconstructs the public inputs from its own nonce + that root, and `bb
@@ -1148,7 +1148,7 @@ pub struct HiddenIndexRevocation {
 /// the relying party's own trust anchor, exactly as the clear-key path is — the
 /// only thing hidden is WHICH key (the deanonymising channel), never the trust
 /// source. The privacy upgrade over the clear-key
-/// [`crate::verifier::bind_issuer_attestations`] check.
+/// `crate::verifier::bind_issuer_attestations` check.
 ///
 /// `m` is the issuer-signed commitment message the proof binds. In v1 this is the
 /// status-bound `commitment_message_with_status(C(G), salt, status_ref)` (the
@@ -1202,13 +1202,13 @@ pub struct HiddenIssuerAttestation {
 /// holder_pk_digest` — WITHOUT disclosing `hsk` OR `hpk` (only the digest is
 /// public). The hidden-key analogue of the clear-key
 /// [`BindingMode::HolderPop`]+[`AttestedHolderBinding`] path
-/// ([`crate::verifier::bind_holder_binding`], T3/sq-z8s7 B1): there the presenter
+/// (`crate::verifier::bind_holder_binding`, T3/sq-z8s7 B1): there the presenter
 /// discloses `hpk` and the verifier recomputes the digest host-side; here `hpk`
 /// stays private and possession is proved in zero knowledge.
 ///
 /// # The binding edge (the load-bearing tie — sq-c2ql)
 /// `holder_pk_digest` is the proof's PUBLIC input, but it is NOT trusted as a
-/// prover claim. The verifier ([`crate::verifier::bind_holder_pok`]) reads the
+/// prover claim. The verifier (`crate::verifier::bind_holder_pok`) reads the
 /// digest from the ISSUER-ATTESTED [`AttestedHolderBinding::holder_pk_digest`] on
 /// the attestation COVERING this credential's scan-referenced `commitment`, and —
 /// crucially — anchors that digest in the issuer's Schnorr signature (it must
@@ -1269,7 +1269,7 @@ pub struct HolderPokProof {
 ///
 /// # Trust anchor (mirrors the hidden-issuer external-K anchor — load-bearing)
 /// `holder_set_root` is a PUBLIC input the prover commits, but it is NOT trusted as
-/// a prover claim: the verifier ([`crate::verifier::bind_holder_set`]) recomputes
+/// a prover claim: the verifier (`crate::verifier::bind_holder_set`) recomputes
 /// the authoritative root from its OWN [`crate::verifier::HolderRegistry`]
 /// (canonical order) at `depth` and rejects unless the proof's public
 /// `holder_set_root` byte-equals it. So the "in the set" fact is bound to the

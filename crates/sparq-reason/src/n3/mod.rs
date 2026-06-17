@@ -22,7 +22,7 @@
 //!     logarithm, atan2 — `atan(x/y)` exactly like eye.pl) is always
 //!     xsd:double, with REVERSE modes (`?y math:sin 0` solves y = asin 0).
 //!   * `string:` concatenation (typed literals coerce to canonical value
-//!     strings, IRIs to their text, like cwm)/length/contains[IgnoringCase]/
+//!     strings, IRIs to their text, like cwm)/length/containsIgnoringCase/
 //!     containsRoughly/startsWith/endsWith/greaterThan/lessThan/notGreaterThan/
 //!     notLessThan/equalIgnoringCase/notEqualIgnoringCase/matches/notMatches/
 //!     replace/lowerCase/upperCase/scrape/format (%s %d %f %% subset — other
@@ -38,7 +38,7 @@
 //!     closure), parsedAsN3, langlit, uri and dtlit (both directions), and —
 //!     ONLY when the caller supplies a [`Resolver`] — semantics/content.
 //!
-//! `log:includes` containment is cwm-faithful ([`formula_containment`]): the
+//! `log:includes` containment is cwm-faithful (`formula_containment`): the
 //! scope is the subject formula (the empty formula includes nothing); pattern
 //! existentials (blanks, `@forSome`) are wildcards, pattern rule-variables
 //! bind, scope-side quantified terms are opaque constants (the
@@ -50,7 +50,7 @@
 //! Backward rules (`<=`, log:isImpliedBy) are GOAL-DIRECTED, matching EYE:
 //! they never fire forward; a forward-rule premise atom resolves against
 //! backward conclusions SLD-style (standardized apart, depth-bounded by
-//! [`BW_DEPTH`]), with structural unification through lists and quoted
+//! `BW_DEPTH`), with structural unification through lists and quoted
 //! formulae on both sides.
 //!
 //! Conclusion blank nodes are EXISTENTIALS instantiated fresh once per

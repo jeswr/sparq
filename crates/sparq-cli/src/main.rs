@@ -44,7 +44,7 @@ fn main() {
 
 /// Isolated micro-benchmark of the latency-bound dict-remap gather, to measure the per-ISA
 /// software prefetch in isolation (undiluted by parsing) on each hardware target.
-///   sparq-cli bench-remap [n_triples] [dict_size] [iters]
+///   sparq-cli bench-remap n_triples dict_size iters
 /// Run twice — once normally, once with SPARQ_NO_PREFETCH=1 — to get the prefetch delta.
 fn cmd_bench_remap(args: &[String]) {
     let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20_000_000);
@@ -62,7 +62,7 @@ fn cmd_bench_remap(args: &[String]) {
 /// sweeping the thread count in ONE process. Reports best time, speedup vs the smallest pool, and
 /// parallel EFFICIENCY (speedup ÷ thread-ratio; 1.0 = perfectly linear) per subsystem, so you can
 /// see precisely where each part plateaus. On a many-core box pass e.g. `1,2,4,8,16,32,64,128,192`.
-///   sparq-cli scaling <data-file> <format> <queries-dir> [threads=auto] [iters=3]
+///   sparq-cli scaling `<data-file>` `<format>` `<queries-dir>` [threads=auto] [iters=3]
 fn cmd_scaling(args: &[String]) {
     let (path, format, qdir) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(d)) => (p.clone(), f.clone(), d.clone()),
@@ -1017,7 +1017,7 @@ fn out_format_flag(args: &[String]) -> OutFormat {
     }
 }
 
-/// [OPUS-4.8] (sq-l4ki) Renders a SELECT [`QueryResult`] as a fixed-width ASCII table —
+/// [OPUS-4.8] (sq-l4ki) Renders a SELECT `QueryResult` as a fixed-width ASCII table —
 /// the default human-readable `query` output. Unbound cells render empty; each term uses
 /// its SPARQL/Turtle term syntax (oxrdf's `Display`). Column widths are sized to the
 /// widest cell so columns line up; for a zero-variable result (which only ASK produces,

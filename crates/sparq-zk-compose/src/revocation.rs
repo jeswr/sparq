@@ -31,11 +31,11 @@
 //! the tree is dominated by all-ZERO subtrees in the covered region and all-ONE
 //! subtrees in the fail-closed padding region past the bitstring. We cache the
 //! "all-zeros subtree root" and "all-ones subtree root" at every height
-//! ([`SubtreeDefaults`]) and recurse only into the `O(S)` subtrees that actually
+//! (`SubtreeDefaults`) and recurse only into the `O(S)` subtrees that actually
 //! contain a set bit or straddle the covered/padding boundary. Cost is
 //! `O(S * depth + depth)` host work and `O(S * depth)` memory — INDEPENDENT of
 //! `2^depth` — so production depths (StatusList2021 lists are commonly 2^17+) are
-//! supported WITHOUT the old dense `O(2^depth)` full-size builder ([`dense_merkle_root`],
+//! supported WITHOUT the old dense `O(2^depth)` full-size builder (`dense_merkle_root`,
 //! retained only as the cross-check oracle).
 //!
 //! The root is BIT-IDENTICAL to the dense fold (same Poseidon2 `h2`, same leaf
@@ -192,12 +192,12 @@ fn any_bit_set(snapshot: &StatusListSnapshot, lo: u64, hi: u64) -> bool {
 /// (the trust anchor the proof's public root is checked against) and what the
 /// PROVER computes over the list it holds.
 ///
-/// [OPUS-4.8] sq-hwe: computed by the SPARSE builder ([`sparse_subtree_root`]) —
+/// [OPUS-4.8] sq-hwe: computed by the SPARSE builder (`sparse_subtree_root`) —
 /// `O(S * depth + depth)` host work / `O(S * depth)` memory for `S` set bits,
 /// INDEPENDENT of `2^depth`, so production depths (2^17+) are supported without a
 /// dense full-size builder. The result is BIT-IDENTICAL to the dense fold (same
 /// `h2`, same leaf layout, same fail-closed padding); cross-checked against
-/// [`dense_merkle_root`] in the unit tests.
+/// `dense_merkle_root` in the unit tests.
 ///
 /// Returns `None` if `depth` is implausibly large (`> 31`, i.e. more than ~2^31
 /// leaves) — a guard so a hostile/buggy `depth` cannot trigger an astronomical
@@ -257,7 +257,7 @@ pub struct MerkleWitness {
 ///
 /// [OPUS-4.8] sq-hwe: SPARSE. The sibling at level `k` is the root of the
 /// height-`k` subtree hanging off the OTHER side of the path node at that level;
-/// each is computed by [`sparse_subtree_root`] (which short-circuits uniform
+/// each is computed by `sparse_subtree_root` (which short-circuits uniform
 /// subtrees against the precomputed defaults), so the whole authentication path is
 /// `O(depth^2)` worst case but `O(depth)` for the common case where the siblings
 /// are uniform subtrees — and, crucially, NEVER materialises `2^depth` leaves. The

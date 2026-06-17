@@ -29,7 +29,7 @@
 //! invert that and couple the SPARQL/inference scoreboard to the SHACL/geo build.
 //! So consolidation happens at the REPORTING layer: the floors live here as the
 //! authoritative list, the runners stay where their dependencies are, and a guard
-//! test ([`tests/scoreboard_floors.rs`]) hermetically reads the crate-local
+//! test (`tests/scoreboard_floors.rs`) hermetically reads the crate-local
 //! sources to prove the centrally-declared floors still match the runner-enforced
 //! ones (so the two can never silently diverge).
 

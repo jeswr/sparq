@@ -764,7 +764,7 @@ fn join_out_vars(left: &[String], right: &[String]) -> Vec<String> {
 /// joined solution the moment the **later-arriving** of a matching pair is processed — never
 /// waiting for either input to finish. Because [`StreamJoin`] is proven multiset-equal to a
 /// blocking hash join for ANY interleaving and any spill budget, the streamed result is the
-/// same multiset Phase-3's [`natural_join`] produces — the load-bearing correctness property.
+/// same multiset Phase-3's `natural_join` produces — the load-bearing correctness property.
 ///
 /// Interleaving is *real*: a dedicated feeder thread drains both input streams (pulling from
 /// whichever has an item ready, via two `recv` loops multiplexed by a tiny merge) and pushes
@@ -1028,7 +1028,7 @@ impl Default for StreamOptions {
 /// [`materialize_single_source`] for the same plan and source, for ANY interleaving of leaf
 /// arrivals (the streaming-correctness test). Because each [`StreamingJoin`] reuses the
 /// planner's [`StreamJoin`] — proven multiset-equal to a blocking hash join — and the join
-/// keys / output headers match the Phase-3 [`natural_join`], the streamed bag equals the
+/// keys / output headers match the Phase-3 `natural_join`, the streamed bag equals the
 /// materialised bag.
 ///
 /// The returned stream borrows nothing (it owns its channels + threads), but the leaf fetches

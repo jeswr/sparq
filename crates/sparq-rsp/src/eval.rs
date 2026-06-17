@@ -36,7 +36,7 @@ pub enum EvalMode {
     /// bounded amount of post-eviction churn triggers a COMPACTION pass that
     /// rebuilds the dictionary from only the still-live terms and atomically
     /// remaps the live window indexes onto the fresh dense ids (see
-    /// [`WindowEval::compact_dict`]). Bound: the dictionary stays O(distinct
+    /// `WindowEval::compact_dict`). Bound: the dictionary stays O(distinct
     /// terms across the live windows), not O(distinct terms over all time. So a
     /// long-running query over an unbounded vocabulary holds memory proportional
     /// to its window content, not its history.

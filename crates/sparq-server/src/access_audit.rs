@@ -3,11 +3,11 @@
 //! for a security / compliance audit trail. Maps to ASVS V7 (logging) / ISO 27001 A.8.15
 //! (logging) / CDMC CD-2 (access audit).
 //!
-//! This is the heavier sibling of the [`crate::audit`] module (`audit-log`). Where `audit-log`
+//! This is the heavier sibling of the `crate::audit` module (`audit-log`). Where `audit-log`
 //! emits a single flat `tracing` event per request (requester fingerprint, op class, query
 //! fingerprint, decision, status, duration) for operators who route a `tracing` target to a
 //! sink, THIS module emits a **typed, self-describing access RECORD** through a **pluggable
-//! sink trait** ([`AuditSink`]) — capturing more of the access-decision context that a
+//! sink trait** (`AuditSink`) — capturing more of the access-decision context that a
 //! compliance audit trail needs:
 //!
 //!   * **actor** — the authenticated subject (a WebID / agent IRI when known, else a Bearer
@@ -19,7 +19,7 @@
 //!     enforcement reason: the Bearer-auth gate, etc.),
 //!   * **timestamp** — RFC-3339-ish UTC wall-clock, plus a monotonic `duration_us`,
 //!   * a **request fingerprint** — the SAME FNV-1a construction the redaction / `audit-log`
-//!     fingerprints use ([`fingerprint`]), so an operator can correlate this record with the
+//!     fingerprints use (`fingerprint`), so an operator can correlate this record with the
 //!     `audit-log` trail and with redacted error logs.
 //!
 //! ## Opt-in, lean, zero-cost-when-off
@@ -40,7 +40,7 @@
 //! opt-in choice.
 //!
 //! What it **does NOT** record is query **CONTENT**. The query / update text is recorded only
-//! as its non-reversible [`fingerprint`] — never the raw SPARQL — because (per the #241
+//! as its non-reversible `fingerprint` — never the raw SPARQL — because (per the #241
 //! info-leak posture and the sq-toze.34 redaction work) a query body can itself carry PII (a
 //! patient IRI in a `FILTER`, an email literal) or disclose loaded-data fragments. The sink
 //! therefore does **not** double-log the content the redaction work just protected. The
@@ -50,7 +50,7 @@
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// A 64-bit FNV-1a hash, hex-encoded — the SAME construction used by [`crate::audit`] and the
+/// A 64-bit FNV-1a hash, hex-encoded — the SAME construction used by `crate::audit` and the
 /// error-redaction fingerprints, so a fingerprint produced here correlates byte-for-byte with
 /// those trails. Fixed + dependency-free (not [`std::hash::DefaultHasher`], whose output is
 /// unspecified across builds), so the same input yields the same fingerprint in every process

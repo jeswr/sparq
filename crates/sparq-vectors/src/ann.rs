@@ -1,5 +1,5 @@
 //! Nearest-neighbour search over a [`VectorStore`]: an exact brute-force baseline and
-//! an HNSW index ([`instant-distance`], pure Rust).
+//! an HNSW index (`instant-distance`, pure Rust).
 //!
 //! Similarity is **cosine** throughout. The HNSW index stores L2-normalized copies of
 //! the vectors and searches with Euclidean distance, which is rank-equivalent to cosine
@@ -13,7 +13,7 @@
 //! throughput table). Out-of-core persistent ANN (DiskANN-style) is the recorded
 //! follow-up for 10M+ stores.
 //!
-//! [OPUS-4.8] (sq-ip3a) **The HNSW index ([`VectorIndex`]) is gated behind the opt-in
+//! [OPUS-4.8] (sq-ip3a) **The HNSW index (`VectorIndex`) is gated behind the opt-in
 //! `approx-ann` feature** — it is the only thing here that pulls the third-party
 //! `instant-distance` crate, so with `approx-ann` OFF the default build carries the exact
 //! brute-force searchers ([`nearest_exact`], [`nearest_term_exact`]) and NO heavy ANN
@@ -62,7 +62,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// baseline the HNSW recall gate measures against, and a fine default below ~10⁵
 /// vectors. Ties break on ascending id, so results are deterministic. An all-zero
 /// `query` has no direction (cosine is undefined), so it returns no results — stored
-/// vectors are never zero ([`VectorStore::put`] rejects them), and [`VectorIndex`]
+/// vectors are never zero ([`VectorStore::put`] rejects them), and `VectorIndex`
 /// treats a zero query the same way, so exact and HNSW agree on the degenerate case.
 pub fn nearest_exact(store: &VectorStore, query: &[f32], k: usize) -> Vec<(Id, f32)> {
     if query.iter().all(|&v| v == 0.0) {

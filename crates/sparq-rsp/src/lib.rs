@@ -41,7 +41,7 @@
 //!   `max_ts − max_delay`). The whole pipeline is a pure function of the
 //!   pushed `(triple, ts)` sequence: deterministic, unit-testable, and
 //!   trivially embeddable under tokio / threads / wasm timers *by the caller*.
-//! * **Exact window semantics are documented** in [`window`] (boundary
+//! * **Exact window semantics are documented** in `window` (boundary
 //!   inclusivity, lateness, empty windows, gaps) and pinned by tests.
 //! * **Isolation:** nothing else in the workspace depends on this crate; the
 //!   core engine and the wasm build carry zero streaming code.

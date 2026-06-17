@@ -40,7 +40,7 @@
 //!   public-input field vector from the DECLARED [`ProofInputs`] (in `main`
 //!   declaration order) using the verifier's own challenge, serialize to
 //!   bb's byte layout (32-byte BE field elements, no header — see
-//!   [`reconstruct_public_inputs`]), and assert byte-equality with the
+//!   `reconstruct_public_inputs`), and assert byte-equality with the
 //!   prover's `public_inputs` blob. This binds the JSON statement to the
 //!   proof; without it stages 1-2 (JSON) and the proof (a detached crypto
 //!   object) describe potentially different statements.
@@ -78,7 +78,7 @@
 //!    commitment to the index), the clear index is WITHHELD, and liveness is
 //!    checked by the hidden-index proof cross-bound to that commitment (so neither
 //!    the index nor the bit is disclosed). The clear-index path above is unchanged
-//!    for clear references. See [`bind_revocation`] / [`bind_hidden_revocation`].
+//!    for clear references. See `bind_revocation` / `bind_hidden_revocation`.
 //!
 //! 4. **Freshness / single-use (audit #4).** [`verify_manifest`] takes a
 //!    VERIFIER-ISSUED fresh [`VerifierNonce`] (minted out of band, handed to the
@@ -154,7 +154,7 @@ use std::path::Path;
 /// (the structural pre-filter). The accept decision then
 /// depends only on this external set; `manifest.key_set`, if present at all, is
 /// only accepted when it is a SUBSET of this external set (checked, never
-/// trusted as the anchor) — see [`bind_issuer_attestations`].
+/// trusted as the anchor) — see `bind_issuer_attestations`.
 ///
 /// Keys are stored in normalized hex form (no `0x`, lowercase) and validated as
 /// parseable, non-identity Baby-JubJub points at construction (an unparseable or
@@ -291,7 +291,7 @@ impl KeySet {
 /// Membership here means "this holder key is authorised to present" — it does NOT
 /// bind the key to a SPECIFIC credential. Issuer-attested credential↔holder
 /// binding (the issuer signing the holder key into the credential) is deferred;
-/// see [`bind_holder_pop`]. Keys are stored normalized (no `0x`, lowercase) and
+/// see `bind_holder_pop`. Keys are stored normalized (no `0x`, lowercase) and
 /// validated as parseable, non-identity Baby-JubJub points at construction
 /// (unparseable/identity entries dropped fail-closed).
 // [OPUS-4.8] sq-cwq: external holder trust anchor (mirrors KeySet).
@@ -430,11 +430,11 @@ impl HolderRegistry {
 /// # Tiers
 /// - **B1 (clear-key, T3/sq-z8s7):** the presented holder key is DISCLOSED
 ///   ([`BindingMode::HolderPop`]) and the verifier recomputes its digest host-side
-///   ([`bind_holder_binding`]), governed by [`Self::require_binding`].
+///   (`bind_holder_binding`), governed by [`Self::require_binding`].
 /// - **B2 (hidden-key in-circuit PoK, T6/sq-c2ql):** only the issuer-attested
 ///   `holder_pk_digest` is public; the holder proves possession of the matching
 ///   secret IN ZERO KNOWLEDGE ([`crate::manifest::HolderPokProof`], verified by
-///   [`bind_holder_pok`]). Opt in with [`Self::require_in_circuit_pok`]. This is the
+///   `bind_holder_pok`). Opt in with [`Self::require_in_circuit_pok`]. This is the
 ///   NOT-yet-sound (sq-qhy4) hidden-holder tier — see `bind_holder_pok`.
 // [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): holder-binding policy (external,
 // fail-closed bearer rejection; default back-compatible). Mirrors RevocationPolicy
@@ -504,7 +504,7 @@ impl HolderBindingPolicy {
 
 /// The relying party's ENTAILMENT-REGIME policy (sq-314): which entailment regimes
 /// it will accept a manifest under. The verifier enforces this fail-closed
-/// ([`bind_entailment`]) so `manifest.entailment_regime` is no longer free
+/// (`bind_entailment`) so `manifest.entailment_regime` is no longer free
 /// metadata.
 ///
 /// # Default = `Simple`-only (fail-closed)
@@ -514,7 +514,7 @@ impl HolderBindingPolicy {
 /// in explicitly with [`EntailmentPolicy::with_rdfs`] / [`EntailmentPolicy::with_owl`];
 /// when it does, the verifier additionally requires the manifest's
 /// `derivation_steps` to STRUCTURALLY ground every derived triple (see
-/// [`bind_entailment`] + the `derivation` module). A regime the policy does not
+/// `bind_entailment` + the `derivation` module). A regime the policy does not
 /// accept REJECTS.
 ///
 /// # Honest scope
@@ -885,7 +885,7 @@ impl SeenNonces for InMemorySeenNonces {
 ///
 /// `flock(LOCK_EX)` serialises step 1–3 across ALL processes that opened the SAME
 /// path on the SAME machine, so two concurrent verifiers cannot both observe one
-/// nonce as fresh (the check-and-append is atomic). An in-process [`Mutex`] also
+/// nonce as fresh (the check-and-append is atomic). An in-process `Mutex` also
 /// guards the fd so threads in one process can't interleave the seek/read/append.
 ///
 /// # Honest scope — reference impl, not a clustered DB

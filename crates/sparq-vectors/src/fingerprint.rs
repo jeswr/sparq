@@ -19,7 +19,7 @@
 //!   1. **`dict_len`** — `graph.dict.len()`, the number of real dictionary terms. O(1).
 //!   2. **`triple_count`** — `graph.len()`, the number of triples in the default graph. O(1).
 //!   3. **`content_hash`** — a 64-bit hash that folds, **in ascending id order**, every dictionary
-//!      term's content (its [`TermParts`](sparq_core::dict::TermParts) — IRI prefix+suffix, literal
+//!      term's content (its [`TermParts`] — IRI prefix+suffix, literal
 //!      value+datatype+lang, blank label, or a triple term's three child ids). This directly
 //!      captures the **id → term binding**: if any id maps to a different term (the exact failure
 //!      mode of a dict-id shift), the sequence of folded writes changes and the hash changes. The
@@ -49,7 +49,7 @@ pub const FINGERPRINT_LEN: usize = 24;
 /// id-ordered dictionary terms. See the module docs for the exact inputs and rationale.
 ///
 /// [OPUS-4.8] (sq-36ol) Derives `Hash` so a fingerprint can key a per-graph cache (the
-/// filtered-ANN `IdMask` cache in [`crate::rewrite`]): two graphs with the same fingerprint
+/// filtered-ANN `IdMask` cache in `crate::rewrite`): two graphs with the same fingerprint
 /// are treated as the same graph for caching, and any mutation that could change a derived
 /// mask changes the fingerprint (and thus the key), so a stale mask is never served.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

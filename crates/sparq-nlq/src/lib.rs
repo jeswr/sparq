@@ -32,7 +32,7 @@
 //! The LLM sits behind the [`Llm`] trait. CI never touches the network:
 //! [`ReplayLlm`] serves recorded prompt→completion pairs from a JSON fixture, and
 //! [`RecordingLlm`] wraps any backend to produce such fixtures. A thin Anthropic
-//! Messages-API client ([`AnthropicLlm`](live::AnthropicLlm)) is available behind
+//! Messages-API client (`AnthropicLlm`) is available behind
 //! the non-default `live` feature.
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 

@@ -1,5 +1,5 @@
 //! [OPUS-4.8] (sq-7hx6, epic sq-3183) **Filtered-ANN pre-filter vs post-filter cost model** —
-//! deciding when materialising a transitive [`IdMask`](crate::filter::IdMask) and pre-filtering
+//! deciding when materialising a transitive [`IdMask`] and pre-filtering
 //! the search is worth it, versus running the search unfiltered and dropping the disallowed hits
 //! afterwards.
 //!

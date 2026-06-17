@@ -13,8 +13,8 @@
 //! `net` + `io-util`, already in the `server` feature stack), and it works inside distroless
 //! because the probe *is* the shipped binary.
 //!
-//! The HTTP-response classification ([`probe_healthy`]) is pure and unit-tested; the async
-//! [`run_probe`] is the thin TCP wrapper around it.
+//! The HTTP-response classification (`probe_healthy`) is pure and unit-tested; the async
+//! `run_probe` is the thin TCP wrapper around it.
 
 use std::time::Duration;
 
@@ -36,7 +36,7 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// `Content-Length`. `Host` is required by some routers even on 1.0; loopback is fine here.
 ///
 /// Only built when the async probe (`server` feature) is, or under `cfg(test)` for the
-/// request-shape unit test; the pure [`probe_healthy`] classifier needs no request builder.
+/// request-shape unit test; the pure `probe_healthy` classifier needs no request builder.
 #[cfg(any(feature = "server", test))]
 fn probe_request(host: &str) -> String {
     format!("GET /health HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n")

@@ -65,7 +65,7 @@ let turtle  = d.prov_ntriples();    // …serialised (N-Triples ⊂ Turtle)
   `urn:sparq:prov:` nodes (same derivation ⇒ same IRIs); set `ProvConfig`
   `activity`/`entity`/`used`/`agent` to integrate with an external provenance
   store or named-graph scheme. The clock is injectable for deterministic tests.
-- **Reasoner-materialization lineage** (`reason` feature) — [`prov_from_proof`]
+- **Reasoner-materialization lineage** (`reason` feature) — `prov_from_proof`
   maps a `sparq-reason` `why()` proof tree to PROV-O: one `prov:Entity` per
   inferred fact, one `prov:Activity` per rule firing (labelled `cax-sco` /
   `rdfs9` / `prp-trp` / `n3-rule-i` / …), with `wasGeneratedBy` / `used` /

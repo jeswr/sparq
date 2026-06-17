@@ -31,7 +31,7 @@
 //! ## Cost
 //!
 //! Generating the VoID/SD scans the snapshot (the same cost as a `?s ?p ?o` dump plus the
-//! per-class/predicate aggregation [`Introspection::build`] already does). It is therefore a
+//! per-class/predicate aggregation `Introspection::build` already does). It is therefore a
 //! request-time scan, not amortised — appropriate for an occasionally-polled discovery
 //! endpoint, and another reason it is opt-in rather than always-on.
 
@@ -264,7 +264,7 @@ pub fn named_graph_descriptions(graph: &Graph) -> Vec<NamedGraphDesc> {
 ///
 /// The SD advertises: the endpoint, `sd:Service` typing, the supported query language(s)
 /// (`sd:SPARQL11Query`, plus `sd:SPARQL11Update` when [`Capabilities::update`]), the supported
-/// result + input RDF formats ([`SD_RESULT_FORMATS`] / [`SD_INPUT_FORMATS`]), the federated-query
+/// result + input RDF formats (`SD_RESULT_FORMATS` / `SD_INPUT_FORMATS`), the federated-query
 /// feature when compiled in, the registered extension functions, and the default dataset — its
 /// default graph (linked to the VoID dataset IRI) plus an `sd:namedGraph` enumeration of every
 /// IRI-named graph.

@@ -2,7 +2,7 @@
 //!
 //! A thin, allocation-conscious wrapper over the workspace's public APIs:
 //!
-//! * [`Graph`] wraps `sparq_core::Graph` (load / save / open / len).
+//! * `Graph` wraps `sparq_core::Graph` (load / save / open / len).
 //! * `Graph.query` / `Graph.query_json` / `Graph.ask` / `Graph.construct` /
 //!   `Graph.describe` call `sparq_engine` (all four query forms are native:
 //!   ASK early-exits, CONSTRUCT/DESCRIBE return term triples).

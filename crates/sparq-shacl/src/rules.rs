@@ -25,7 +25,7 @@
 //!
 //! `sh:subject`/`sh:predicate`/`sh:object` (TripleRule) and `sh:values` (value
 //! rule) take **node expressions**, evaluated against a focus node `$this` to a
-//! set of nodes. The full algebra is implemented ([`NodeExpr`]):
+//! set of nodes. The full algebra is implemented (`NodeExpr`):
 //!
 //!   * **focus** — the IRI `sh:this` ⇒ `{ $this }`.
 //!   * **constant** — any other IRI / literal ⇒ `{ term }`.
@@ -534,7 +534,7 @@ pub fn expand(data: &Graph, shapes: &Graph) -> Graph {
 /// not declared in the shapes graph) — the caller can treat that as "skip".
 ///
 /// This is the production public seam onto the implemented algebra
-/// ([focus][sh:this] / constant / path-with-`sh:nodes` / `sh:filterShape` /
+/// (focus / constant / path-with-`sh:nodes` / `sh:filterShape` /
 /// `sh:intersection` / `sh:union`): it is the same `parse_node_expr` →
 /// `NodeExpr::eval` machinery that backs `apply_rules`' `sh:values` rules, and is
 /// exercised by this crate's `#[cfg(test)]` unit tests (via `apply_rules` for the

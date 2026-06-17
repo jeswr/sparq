@@ -54,7 +54,7 @@ pub mod vocab {
     pub const MATCHES_ANY: &str = "http://sparq.dev/text#matchesAny";
     /// `?lit text:phrase "foo bar"` — literals where the query's tokens appear
     /// ADJACENT and IN ORDER (a positional phrase match, not a BM25 ranking).
-    /// Requires a positions-enabled index ([`TextIndex::build_with_positions`]);
+    /// Requires a positions-enabled index (`TextIndex::build_with_positions`);
     /// the cheap default index stores no positions and is rejected at rewrite
     /// time. No `text:score` companion (a phrase match is boolean adjacency).
     /// [OPUS-4.8]
@@ -67,7 +67,7 @@ pub mod vocab {
     /// the same subject variable in the same basic graph pattern. Unlike
     /// `text:phrase` (boolean adjacency) it IS scored, so it also takes an
     /// optional `text:score ?s` companion. Requires a positions-enabled index
-    /// ([`TextIndex::build_with_positions`]); `text:near "foo bar"` at slop 0 is
+    /// (`TextIndex::build_with_positions`); `text:near "foo bar"` at slop 0 is
     /// exactly `text:phrase "foo bar"`. [OPUS-4.8]
     pub const NEAR: &str = "http://sparq.dev/text#near";
     /// `?lit text:slop N` — sets the proximity gap budget for the `text:near`

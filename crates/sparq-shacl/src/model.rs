@@ -109,11 +109,11 @@ pub enum Component {
     /// key).
     UniqueValuesFor(Vec<String>),
     /// sh:sparql — a SPARQL-based constraint (SHACL §5.2). The index is into
-    /// [`ShapesModel::sparql`].
+    /// `ShapesModel::sparql`.
     Sparql(usize),
     /// [OPUS-4.8] A SPARQL-based constraint COMPONENT (SHACL §6) that activated on
     /// this shape because the shape uses the component's parameter predicates.
-    /// `component` indexes [`ShapesModel::components`]; `args` are the bound
+    /// `component` indexes `ShapesModel::components`; `args` are the bound
     /// parameter values, parallel to the component's `parameters` (one term each
     /// — the first object found for a mandatory parameter; `None` for an absent
     /// optional one). The validator pre-binds each as `$paramName`.
@@ -124,7 +124,7 @@ pub enum Component {
     /// [OPUS-4.8] (sq-mk9n, `shacl-af`) `sh:expression` — the SHACL-AF
     /// *Expression Constraint* (`sh:ExpressionConstraintComponent`): a value node
     /// `v` is violated when the node expression does NOT evaluate to `{ true }`
-    /// for `v` as focus. The index is into [`ShapesModel::expressions`] (the
+    /// for `v` as focus. The index is into `ShapesModel::expressions` (the
     /// parsed node expression is held there, off the public `Component` enum).
     #[cfg(feature = "shacl-af")]
     Expression(usize),
@@ -134,7 +134,7 @@ pub enum Component {
     /// focus to a set of node-shape terms `s`; `v` is violated when it does NOT
     /// conform to some `s`. (Like `sh:node`, but the shape is computed by the
     /// expression rather than fixed.) The index is into
-    /// [`ShapesModel::expressions`] (shared store with `sh:expression`).
+    /// `ShapesModel::expressions` (shared store with `sh:expression`).
     #[cfg(feature = "shacl-af")]
     NodeByExpression(usize),
 }

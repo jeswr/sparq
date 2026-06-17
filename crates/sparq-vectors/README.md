@@ -131,7 +131,7 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
 
 The default build opens no sockets. To embed against a real OpenAI-compatible
 `/v1/embeddings` endpoint without writing any HTTP glue, enable the **non-default**
-`embeddings` feature (it pulls in a blocking [`reqwest`] client; the default build does not):
+`embeddings` feature (it pulls in a blocking `reqwest` client; the default build does not):
 
 ```toml
 sparq-vectors = { path = "../sparq-vectors", features = ["embeddings"] }

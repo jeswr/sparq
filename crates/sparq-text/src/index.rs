@@ -40,7 +40,7 @@
 //! positions are stored — every existing caller is byte-for-byte unchanged.
 //! Positions are **opt-in**: [`TextIndex::build_with_positions`] (or
 //! [`TextIndex::with_positions`] for the empty/delta-fed case) turns on a
-//! SEPARATE parallel structure ([`positions`](TextIndex::positions)) recording,
+//! SEPARATE parallel structure (`positions`) recording,
 //! for each (token, doc), the token's 0-based offsets within that document. The
 //! BM25 tables and the single-/multi-term [`search`](TextIndex::search) path are
 //! identical either way; only the extra map is allocated, so the cheap default

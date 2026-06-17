@@ -23,7 +23,7 @@
 //!      groups of equal terms yield the distinct term with its MIN seq
 //!      (= first occurrence) plus a (min_seq, seq) pair per occurrence.
 //!   3. assign    — per shard in order: external sort of the distinct terms by
-//!      min_seq; final id = base[shard] + rank (the sharded path's
+//!      min_seq; final id = baseshard + rank (the sharded path's
 //!      assignment). The dictionary files (`dict-terms/offs/hash/hid/
 //!      meta.bin`) plus `numerics.bin`/`temporals.bin` are STREAM-written
 //!      in final-id order — never resident.

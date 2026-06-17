@@ -296,7 +296,7 @@ chain of immutable store snapshots) plus the **single sequenced writer**
   reclaims from) readers; old generations are freed by ordinary `Arc` drop. Reader
   concurrency scales with cores; it is the throughput story (the bulk of real endpoint
   traffic is duplicate, cacheable, read-only queries — Bonifati et al., PVLDB 2017).
-- **Writers** submit through one sequenced [`Writer`]; each group-commit window
+- **Writers** submit through one sequenced `Writer`; each group-commit window
   publishes a batch as ONE new immutable generation. Serialisability is by
   construction (Calvin/Bohm collapsed to one node) — write skew is impossible, no SSI
   needed. `apply_update` blocks until the generation containing the update is

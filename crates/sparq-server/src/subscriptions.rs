@@ -141,7 +141,7 @@ impl Drop for ConnSlots {
 /// `Authorization` header on a WS handshake, the token is accepted from EITHER the
 /// `Authorization: Bearer <token>` header (non-browser clients) OR a
 /// `Sec-WebSocket-Protocol: bearer.<token>` subprotocol (browsers) — see
-/// [`crate::http::ws_auth_gate`]. When a `bearer.<token>` subprotocol is present and accepted, it
+/// `crate::http::ws_auth_gate`. When a `bearer.<token>` subprotocol is present and accepted, it
 /// is echoed back as the selected subprotocol (RFC 6455 requires the server to confirm one of the
 /// client's offered subprotocols, or a browser rejects the handshake). When no read token is
 /// configured the upgrade is unchanged (open access) — back-compatible.
@@ -685,10 +685,10 @@ async fn send(socket: &mut WebSocket, msg: &Value) -> Result<(), axum::Error> {
 
 /// SSE (`text/event-stream`) transport for SPARQL update subscriptions, ALONGSIDE the
 /// WebSocket `/subscriptions` endpoint. Both transports share ONE notification source —
-/// [`subscribe_init`] (register + initial result) and [`Subscription::reevaluate_step`]
+/// `subscribe_init` (register + initial result) and `Subscription::reevaluate_step`
 /// (re-evaluate + diff), driven by the same commit-generation `watch` channel
-/// ([`AppState::subscribe_commits`]) and the same global/per-connection slot accounting
-/// ([`ConnSlots`]). Only the wire framing differs: SSE emits `event:`/`data:`/`id:` frames
+/// (`AppState::subscribe_commits`) and the same global/per-connection slot accounting
+/// (`ConnSlots`). Only the wire framing differs: SSE emits `event:`/`data:`/`id:` frames
 /// instead of WebSocket JSON text frames.
 ///
 /// Because SSE is a one-way GET stream (no client→server channel after the request),
@@ -696,7 +696,7 @@ async fn send(socket: &mut WebSocket, msg: &Value) -> Result<(), axum::Error> {
 /// optional `alias`) query-string parameters — the natural REST shape, versus the WS
 /// path's multiplexed many-subscriptions-per-socket protocol. There is no `unsubscribe`
 /// frame: a client unsubscribes by closing the stream, which drops the per-stream state
-/// (releasing its global slot via [`ConnSlots`]'s `Drop`) with no leak.
+/// (releasing its global slot via `ConnSlots`'s `Drop`) with no leak.
 pub mod sse {
     use std::collections::HashMap;
 
@@ -738,18 +738,18 @@ pub mod sse {
     /// Auth ([OPUS-4.8] sq-cxk5): this is a READ surface (live SELECT diffs), so it mirrors the
     /// WebSocket `/subscriptions` path AND the other `/sparql` GET routes — when
     /// `--auth-token-read` is configured the GET is gated behind the read token via
-    /// [`crate::http::auth_gate`] ([`crate::http::Operation::Read`]) and refused with the SAME
+    /// `crate::http::auth_gate` (`crate::http::Operation::Read`) and refused with the SAME
     /// 401 BEFORE the event-stream opens. As a plain GET, the `Authorization: Bearer <token>`
     /// header is the only auth channel here (no WS subprotocol). When no read token is configured
     /// the GET is unchanged (open access) — back-compatible.
     ///
     /// A registration refusal is returned as a normal JSON HTTP error BEFORE the event-stream
     /// opens — SSE cannot set a status once the stream is flowing — classified to match the
-    /// `/sparql` endpoint ([`crate::http::engine_error_response`]): missing/non-SELECT/malformed
+    /// `/sparql` endpoint (`crate::http::engine_error_response`): missing/non-SELECT/malformed
     /// query → **400**; the initial evaluation over the row cap (`--max-results` /
     /// `--max-query-rows`) → **413**; the initial evaluation timing out, or subscription-slot
     /// exhaustion → **503**; any other engine error → **500**. The status is carried on the
-    /// [`super::Refusal`]. On success the response is `text/event-stream` and the first two
+    /// `super::Refusal`. On success the response is `text/event-stream` and the first two
     /// frames are the `subscribed` ack and the full initial result.
     pub async fn sse_endpoint(State(state): State<AppState>, headers: axum::http::HeaderMap, Query(params): Query<HashMap<String, String>>) -> Response {
         // [OPUS-4.8] sq-cxk5: gate the read surface behind the read token (fail-closed when

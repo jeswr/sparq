@@ -138,7 +138,7 @@ impl AdaptiveOutcome {
 /// 2. **Adaptive join-ordering** — walk the plan stage by stage; **at each operator boundary**
 ///    ask the [`AdaptiveExecutor`] whether to re-plan the **unjoined remainder** given the
 ///    observation-corrected statistics, then join the next leaf onto the running prefix with
-///    the materialised [`natural_join`] (the SAME operator the static interpreter uses). A
+///    the materialised `natural_join` (the SAME operator the static interpreter uses). A
 ///    re-plan is **considered at most once per boundary** and adopted only when the new suffix
 ///    beats the current one by the policy's hysteresis margin (anti-thrash).
 ///

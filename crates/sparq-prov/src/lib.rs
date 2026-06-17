@@ -31,16 +31,16 @@
 //! matched inputs), the triples it **deletes** are *invalidated*
 //! (`prov:wasInvalidatedBy`). [`derive_update`] applies the update in place, captures
 //! the engine's resolved effect log, and returns an [`UpdateDerivation`] carrying the
-//! inserted + deleted triples and the PROV-O lineage. See the [`update`] module.
+//! inserted + deleted triples and the PROV-O lineage. See the `update` module.
 //!
 //! **Reasoner-materialization** lineage is covered under the (non-default)
-//! `reason` feature: [`prov_from_proof`] maps a `sparq-reason` `why()`
-//! [`ProofTree`](sparq_reason::ProofTree) to PROV-O — one `prov:Entity` per
+//! `reason` feature: `prov_from_proof` maps a `sparq-reason` `why()`
+//! `ProofTree` to PROV-O — one `prov:Entity` per
 //! inferred fact, one `prov:Activity` per rule firing, with
 //! `wasGeneratedBy`/`used`/`wasDerivedFrom` edges. Inference *is* derivation, and
 //! the proof tree is a finer-grained provenance (it names the rule and exact
 //! premises for each fact) than a single CONSTRUCT-style activity. See the
-//! [`reason`] module.
+//! `reason` module.
 //!
 //! **Out of scope for per-triple lineage** (a deliberate honesty boundary, not a TODO):
 //! the structural UPDATE operations `CLEAR` / `DROP` / `CREATE` change a graph's
