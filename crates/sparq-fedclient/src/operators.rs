@@ -238,8 +238,11 @@ fn materialize_leaf(
 /// for two rows to combine; the result carries `left.vars` followed by the right-only vars.
 /// This is the materialised analogue of the `StreamJoin` Phase 5 will run incrementally —
 /// it produces the identical result multiset (bag semantics, no de-duplication).
-/// [OPUS-4.8] sq-j27p.
-fn natural_join(left: &Relation, right: &Relation) -> Relation {
+///
+/// `pub(crate)` so the Phase-7 adaptive executor ([`crate::adaptive`]) reuses the SAME
+/// proven join operator when it folds the re-ordered suffix — the result-equivalence
+/// invariant rests on adaptive + static using one identical join. [OPUS-4.8] sq-j27p / sq-ij5x.
+pub(crate) fn natural_join(left: &Relation, right: &Relation) -> Relation {
     // Shared variables (join key) and the right-only variables (appended columns).
     let shared: Vec<(usize, usize)> = left
         .vars

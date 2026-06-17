@@ -54,6 +54,15 @@ fedclient = [
     # this adds NO new crate to the resolved dependency graph.
     "dep:serde_json",
 ]
+# [OPUS-4.8] sq-ij5x (epic sq-dnko, FINAL phase): Phase-7 client-side ADAPTIVE re-planning.
+# OFF by default; IMPLIES `fedclient` (it is the streaming client's execution loop) AND
+# `sparq-fedplan/adaptive-replan` (it DRIVES that planner's AdaptiveExecutor/RuntimeStats/
+# ReplanPolicy on the unjoined remainder — the re-plan DECISION engine lives in the planner,
+# the client just feeds it real observed cardinalities). A build that does not enable this
+# compiles ZERO adaptive code — the `adaptive` module is `#[cfg]`-gated out, and the
+# `adaptive-replan` edge into `sparq-fedplan` is not pulled. The dependency arrow still points
+# one-way INTO the engine (never the reverse), so the boundary guard is unaffected.
+fedclient-adaptive = ["fedclient", "sparq-fedplan/adaptive-replan"]
 
 [dependencies]
 # REUSE: the cost-based planner + StreamJoin operator (planner-bridge §4.2, physical

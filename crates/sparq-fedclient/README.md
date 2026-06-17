@@ -44,9 +44,14 @@ since (each behind the same default-OFF `fedclient` feature):
   (`stream_single_source`) that EMIT results before the inputs are exhausted (see below).
 - **Phase 6 — brTPF + TPF fragment adapters** (`sq-2qze`): the real Triple-Pattern-Fragments
   adapters (see below).
+- **Phase 7 — adaptive re-planning** (`sq-ij5x`, the FINAL phase): the opt-in ANAPSID feedback
+  loop in the `adaptive` module, behind the extra default-OFF `fedclient-adaptive` feature (see
+  below).
 
-Still ahead (future beads under epic sq-dnko): multi-source UNION-per-leaf fan-out, the
-streaming bind-join pushed down as VALUES/`maxMpR` blocks, and adaptive re-planning (§7).
+With Phase 7 the **8-phase streaming federation client is feature-complete** — Phases 0–7 have
+all landed and epic **sq-dnko** is closed. Still ahead as future beads under epic sq-3183:
+multi-source UNION-per-leaf fan-out, the streaming bind-join pushed down as VALUES/`maxMpR`
+blocks, and the ANAPSID "adaptive operator" refinement (§7).
 
 The Phase-3 planner bridge + interpreter is detailed under
 [Phase 3 — lower a plan + interpret it against one source](#phase-3--lower-a-plan--interpret-it-against-one-source);
@@ -137,6 +142,7 @@ rather than a bare BGP.
 | `pushdown`    | §4.3    | **Phase 4** — FedX exclusive groups + maximal pushable sub-algebra per group + exact common-variable FILTER check + bind-join block primitive |
 | `operators`   | §4.4    | **Phase 3 + 5** — `materialize_single_source` (blocking) + `stream_single_source` (streaming) interpreters, `ScatterPool`, `StreamingJoin`, `parse_srj`, `solutions_equal` |
 | `stream`      | §4.4    | **Phase 5** — the bounded, backpressured `SolutionStream` boundary the client owns (engine stays materialised) |
+| `adaptive`    | §4.5    | **Phase 7** — `execute_adaptive_single_source` + `AdaptiveOutcome`/`ReplanEvent`: observed-cardinality feedback → re-plan the unjoined remainder, at most once per boundary (behind `fedclient-adaptive`) |
 
 ## Opt-in (hard constraint)
 
@@ -152,6 +158,17 @@ sparq-fedclient = { path = "crates/sparq-fedclient", features = ["fedclient"] }
 Enabling `fedclient` pulls in `sparq-fedplan` (`fedplan` planner + `StreamJoin`) and
 `sparq-engine` (`service` SRJ transport + VALUES bind-join + SSRF egress guard + local
 eval) — the two reuse seams §4 names.
+
+The Phase-7 **adaptive re-planning** path is behind a *second* default-OFF feature,
+`fedclient-adaptive`, which implies `fedclient` and additionally pulls
+`sparq-fedplan/adaptive-replan` (the planner's `AdaptiveExecutor` re-plan engine). A build
+that enables only `fedclient` compiles **zero** adaptive code, and a default build pulls
+neither feature:
+
+```toml
+[dependencies]
+sparq-fedclient = { path = "crates/sparq-fedclient", features = ["fedclient-adaptive"] }
+```
 
 ## The dependency boundary (load-bearing, enforced)
 
@@ -273,16 +290,65 @@ Still a stub / deferred (a clear slice boundary, not a half-done operator):
   The streaming win is at the **join** level (a fast leaf feeds the join while a slow leaf is
   still in flight), not solution-level laziness *through* a remote endpoint.
 
+## Adaptive re-planning (Phase 7, `adaptive` module, `fedclient-adaptive` feature)
+
+Phases 3 + 5 execute the **static** plan `sparq-fedplan` commits to from descriptor-derived
+estimates. When the descriptors are accurate that plan is simplest and at least as good (§7),
+so it stays the default. Phase 7 adds the opt-in feedback loop for when they are **not**:
+
+`adaptive::execute_adaptive_single_source` runs the plan in two phases:
+
+1. **Leaf-scan** — fetch each leaf once through the real adapter and record its REAL observed
+   row count into `sparq-fedplan`'s `RuntimeStats`. A leaf scan is order-independent, so this
+   reveals the true cardinality of every arm — including the not-yet-joined ones (the ANAPSID
+   insight: an arm's divergence is only knowable once its scan completes).
+2. **Adaptive join-ordering** — walk the plan stage by stage; at each **operator boundary** ask
+   `sparq-fedplan`'s `AdaptiveExecutor` whether to re-plan the **unjoined remainder** given the
+   observation-corrected statistics, then join the next leaf with the SAME materialised
+   `natural_join` the static interpreter uses. A re-plan fires only when an observation diverges
+   past the policy's `divergence_factor`, is adopted only when the cheaper suffix clears the
+   hysteresis margin, and is considered **at most once per boundary** — no thrashing.
+
+The re-plan **decision** engine (the divergence trigger, hysteresis, suffix re-ordering, and
+the commutativity soundness proof) lives in `sparq-fedplan` (`AdaptiveExecutor`, behind its own
+`adaptive-replan` feature); the client does not re-write it — it feeds it real observed
+cardinalities and executes the order it returns, exactly as the static phases consume `plan_bgp`.
+
+**Re-planning changes the plan, never the answer.** A BGP's answer is the natural join of its
+per-pattern solution multisets, which is commutative + associative, so any join order over the
+same pattern set yields the same multiset; a re-plan only reorders the not-yet-executed suffix
+and carries the already-joined prefix across unchanged.
+
+- `tests/adaptive_result_equals_static.rs` drives this on the **real engine**: a star whose
+  descriptors misestimate `:c` as huge (it is tiny) re-plans the suffix, yet the adaptive result
+  is multiset-equal to both the static interpreter and ground-truth `sparq_engine::query`.
+- The in-crate `adaptive::tests` assert the same over canned SRJ plus the once-per-boundary
+  bound and the inert "accurate descriptors ⇒ no switch" path.
+
+### Honest work-vs-stub split (Phase 7)
+
+REAL: the leaf-scan-then-adaptive-join executor, the observed-cardinality capture, the
+`RuntimeStats`/`AdaptiveExecutor` wiring, the once-per-boundary bound, and the correctness
+tests against the real engine. The executor is **single-source** (it shares the Phase-3/5
+`MultiSource` guard). Because the observed-cardinality boundary is a materialisation point (a
+leaf must be drained to be counted), the adaptive path scans each leaf fully once, trading the
+within-stage streaming of Phase 5 for the cross-stage re-ordering it buys. Folding the two
+together — the ANAPSID "adaptive operator" that estimates a leaf's cardinality from a prefix of
+its rows while still streaming it — is a clear next slice, filed under epic sq-3183, not
+half-built here.
+
 ## Status / roadmap
 
+The **8-phase streaming federation client is feature-complete** — epic **sq-dnko** is closed.
 Landed: Phase 0 (skeleton + boundary proof, `sq-s1uy`), Phase 1 (discovery, `sq-nfxl`),
 Phase 2 (source abstraction + Endpoint adapter, `sq-rsxf`), Phase 3 (planner bridge +
 materialised single-source interpreter, `sq-j27p`), Phase 4 (capability-aware pushdown,
 `sq-7byx`), Phase 5 (streaming operators — `SolutionStream` + thread-pool fan-out +
-`StreamJoin`-feeder join, `sq-vtba`), Phase 6 (brTPF/TPF adapters, `sq-2qze`). Still ahead
-under epic **sq-dnko**: multi-source UNION-per-leaf fan-out + the pushed-down streaming
-bind-join, and adaptive re-planning (§7). No performance numbers appear here: any "better
-than Comunica" claim in the design record is an
-*architectural prediction* to be validated head-to-head before being asserted as fact.
+`StreamJoin`-feeder join, `sq-vtba`), Phase 6 (brTPF/TPF adapters, `sq-2qze`), Phase 7
+(adaptive re-planning, `sq-ij5x`). Still ahead as future beads under epic **sq-3183**:
+multi-source UNION-per-leaf fan-out + the pushed-down streaming bind-join, and the ANAPSID
+"adaptive operator" refinement. No performance numbers appear here: any "better than Comunica"
+claim in the design record is an *architectural prediction* to be validated head-to-head before
+being asserted as fact.
 
-[OPUS-4.8] sq-7byx, sq-vtba — flagged for Fable re-review.
+[OPUS-4.8] sq-7byx, sq-vtba, sq-ij5x — flagged for Fable re-review.

@@ -41,8 +41,16 @@
 //!   Triple-Pattern-Fragments adapters ([`TpfSource`] / [`BrTpfSource`]) over a
 //!   [`FragmentTransport`] seam, complete-by-construction with count-metadata cardinality.
 //!
-//! Still ahead (future beads under epic sq-dnko): adaptive re-planning (§7). The public
-//! surface and the dependency boundary were made visible before the logic landed.
+//! * **Phase 7 — adaptive re-planning** ([`adaptive`], bead `sq-ij5x`, the FINAL phase): the
+//!   opt-in feedback loop that re-invokes [`sparq-fedplan`](sparq_fedplan)'s planner on the
+//!   **unjoined remainder** when observed cardinality diverges from the static estimate,
+//!   bounded to at most once per operator boundary — re-planning changes the plan, never the
+//!   answer ([`execute_adaptive_single_source`]). Behind the extra default-OFF
+//!   `fedclient-adaptive` feature (it pulls `sparq-fedplan/adaptive-replan`).
+//!
+//! With Phase 7 the **8-phase streaming federation client is feature-complete** (Phases 0–7
+//! all landed; epic sq-dnko closed). The public surface and the dependency boundary were made
+//! visible before the logic landed.
 //!
 //! # Opt-in (hard constraint)
 //!
@@ -160,3 +168,19 @@ pub mod stream;
 // [OPUS-4.8] sq-vtba: re-export the Phase-5 `SolutionStream` boundary surface at the crate root.
 #[cfg(feature = "fedclient")]
 pub use stream::{Solution, SolutionSink, SolutionStream, StreamItem};
+
+/// §4.5 — **adaptive re-planning** (Phase 7, bead sq-ij5x, the FINAL phase of epic sq-dnko):
+/// the opt-in ANAPSID feedback loop. As streaming execution proceeds, each completed operator
+/// reports its OBSERVED leaf cardinality; when that diverges materially from the static
+/// estimate, the client re-invokes `sparq-fedplan`'s planner (its `AdaptiveExecutor`, which
+/// owns the divergence trigger + hysteresis + soundness proof) on the UNJOINED REMAINDER to
+/// pick a cheaper suffix order — bounded to at most ONCE per operator boundary (no thrashing).
+/// Re-planning changes the plan, never the answer (result-multiset-preserving). Behind the
+/// extra default-OFF `fedclient-adaptive` feature (which pulls `sparq-fedplan/adaptive-replan`).
+#[cfg(feature = "fedclient-adaptive")]
+pub mod adaptive;
+// [OPUS-4.8] sq-ij5x: re-export the Phase-7 adaptive surface at the crate root.
+#[cfg(feature = "fedclient-adaptive")]
+pub use adaptive::{
+    execute_adaptive_single_source, static_plan, AdaptiveOutcome, ReplanEvent,
+};

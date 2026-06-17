@@ -417,14 +417,27 @@ bindings; the local join reattaches them identically).
   async transport behind the same `Transport` seam). First results stream as soon as the
   earliest source responds.
 
-### 4.5 Adaptive re-planning (the deferred ANAPSID half)
+### 4.5 Adaptive re-planning (the deferred ANAPSID half) — LANDED (Phase 7, `sq-ij5x`)
 
 Last and hardest. A feedback loop: each operator reports **observed** cardinality / arrival
 rate; when these diverge materially from the `JoinTree` estimate (or a source stalls), the
 client re-invokes `plan_bgp` on the *unjoined remainder* with corrected leaf cardinalities,
 switching a `Bind` node to `Hash`/`Streaming` (or re-ordering) for the not-yet-executed
 suffix. This is opt-in and bounded (re-plan at most once per operator boundary) to avoid
-thrash. It is filed as a roadmap bead under epic sq-3183.
+thrash.
+
+**Status: implemented** as `sparq_fedclient::adaptive::execute_adaptive_single_source`, behind
+the default-OFF `fedclient-adaptive` feature (which pulls `sparq-fedplan/adaptive-replan`). The
+re-plan DECISION engine — the divergence trigger, the hysteresis margin, the suffix re-ordering,
+and the commutativity soundness proof — already lived in `sparq-fedplan`'s `AdaptiveExecutor`
+(`sq-7s4z`); Phase 7 is the client-side execution loop that drives it with **real observed
+cardinalities** (a leaf-scan phase records each leaf's true row count, then an adaptive
+join-ordering phase re-plans the unjoined remainder at each boundary). Re-planning changes the
+plan, never the answer — the adaptive result is multiset-equal to the static plan and to local
+engine eval, verified across a genuine large-divergence switch
+(`tests/adaptive_result_equals_static.rs`). The ANAPSID "adaptive operator" refinement (estimate
+a leaf's cardinality from a *prefix* of its rows while still streaming it) and live source
+failover remain roadmap beads under epic sq-3183.
 
 ### 4.6 How this does BETTER than Comunica (architectural predictions, not measurements)
 
