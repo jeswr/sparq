@@ -137,11 +137,44 @@ pub enum Actor {
 impl Actor {
     /// Derives the actor from a presented Bearer token (the channel available on the plain
     /// HTTP / GSP surface today). `None`/empty => [`Actor::Anonymous`]. A future Solid / ACP
-    /// identity layer constructs [`Actor::WebId`] directly at its enforcement seam.
+    /// identity layer constructs [`Actor::WebId`] directly at its enforcement seam (see
+    /// [`from_session`](Actor::from_session)).
     pub fn from_token(presented: Option<&str>) -> Self {
         match presented {
             Some(t) if !t.is_empty() => Actor::TokenFingerprint(fnv1a_hex(t.as_bytes())),
             _ => Actor::Anonymous,
+        }
+    }
+
+    /// [OPUS-4.8] (sq-ljfz, sq-gos8 follow-up) Derives the actor from the *authenticated
+    /// session* of a fronting authorization layer, falling back to the local Bearer gate.
+    ///
+    /// The deployment pattern this serves is the one the bind-time warnings already name: a
+    /// trusted front — `sparq-solid`, or any Solid/WAC reverse-proxy / identity gateway —
+    /// authenticates the user (resolves their WebID from a WAC/ACP session) and forwards that
+    /// resolved WebID to this upstream server as a request header. When the operator has
+    /// configured the server to trust such a header, the header's value IS the authenticated
+    /// subject, so the audit trail records [`Actor::WebId`] (the actual identity) instead of
+    /// the coarse Bearer-token fingerprint — which is the whole point of the bead: attribute
+    /// access to *who*, not to *which shared secret*.
+    ///
+    /// **Trust precondition (audit-integrity critical).** A forwarded header is
+    /// client-controllable on the wire, so honouring it unconditionally would let any caller
+    /// spoof an arbitrary WebID into the audit trail. The caller therefore passes the
+    /// forwarded value ONLY when the operator has explicitly opted into trusting a named
+    /// header (`--audit-webid-header` / `SPARQ_AUDIT_WEBID_HEADER`), asserting that a trusted
+    /// front sets/overwrites it. With no trusted header configured the caller passes `None`
+    /// here and this is byte-identical to [`from_token`](Actor::from_token).
+    ///
+    /// `forwarded_webid`: the value of the trusted forwarded-identity header (already
+    /// extracted by the caller; `None` when no trusted header is configured or it is absent).
+    /// A present, non-empty, whitespace-trimmed value becomes [`Actor::WebId`]; an empty /
+    /// whitespace-only value is treated as "no identity forwarded" and falls through to the
+    /// Bearer gate, so a front that emits an empty header never silently records a blank WebID.
+    pub fn from_session(forwarded_webid: Option<&str>, bearer: Option<&str>) -> Self {
+        match forwarded_webid.map(str::trim) {
+            Some(w) if !w.is_empty() => Actor::WebId(w.to_string()),
+            _ => Actor::from_token(bearer),
         }
     }
 
@@ -458,6 +491,36 @@ mod tests {
             Actor::WebId("https://alice.example/profile#me".into()).as_field(),
             "webid:https://alice.example/profile#me"
         );
+    }
+
+    #[test]
+    fn from_session_prefers_a_forwarded_webid_else_falls_back_to_the_bearer_gate() {
+        // [OPUS-4.8] sq-ljfz: a trusted front's forwarded WebID becomes Actor::WebId (the
+        // actual subject), recorded verbatim — that is the whole point of the enrichment.
+        let webid = "https://alice.example/profile#me";
+        assert_eq!(
+            Actor::from_session(Some(webid), Some("the-shared-token")),
+            Actor::WebId(webid.to_string()),
+        );
+        // The forwarded value is trimmed (a front may pad the header).
+        assert_eq!(
+            Actor::from_session(Some("  https://bob.example/#me \t"), None),
+            Actor::WebId("https://bob.example/#me".to_string()),
+        );
+        // No forwarded identity (no trusted header configured / header absent) => byte-identical
+        // to the Bearer gate: a present token fingerprints, an absent one is anonymous.
+        assert_eq!(
+            Actor::from_session(None, Some("tok")),
+            Actor::from_token(Some("tok")),
+        );
+        assert_eq!(Actor::from_session(None, None), Actor::Anonymous);
+        // An EMPTY / whitespace-only forwarded value is "no identity forwarded" — it must NOT
+        // record a blank WebID; it falls through to the Bearer gate.
+        assert_eq!(
+            Actor::from_session(Some(""), Some("tok")),
+            Actor::from_token(Some("tok")),
+        );
+        assert_eq!(Actor::from_session(Some("   "), None), Actor::Anonymous);
     }
 
     #[test]
