@@ -26,6 +26,37 @@ test('fromString compressed returns identical results', async () => {
   );
 });
 
+// [OPUS-4.8] sq-dvyi: JSON-LD is parsed engine-side (oxjsonld) when the wasm bundle is
+// built with the OPT-IN `jsonld` feature (the js `build:wasm` script enables it, so this
+// published bundle and the site REPL both have it). With the feature on, `fromString(_,
+// 'jsonld')` works like the other syntaxes — the site REPL's JSON-LD upload/URL path. The
+// DEFAULT (lean) wasm bundle does NOT link oxjsonld (it stays under the perf-gate floor).
+// (`dataset: true` preserves a JSON-LD `@graph` as a named graph.)
+test('fromString parses JSON-LD (folded), queryable like Turtle', async () => {
+  const jsonld = JSON.stringify({
+    '@context': { ex: 'http://ex/' },
+    '@id': 'ex:alice',
+    'ex:name': 'Alice',
+    'ex:knows': { '@id': 'ex:bob' },
+  });
+  const store = await SparqStore.fromString(jsonld, 'jsonld');
+  assert.equal(store.size, 2);
+  const rows = store.queryBindings('PREFIX ex: <http://ex/> SELECT ?n WHERE { ex:alice ex:name ?n }');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].get('n').value, 'Alice');
+});
+
+test('fromString JSON-LD with dataset:true preserves @graph as a named graph', async () => {
+  const jsonld = JSON.stringify({
+    '@id': 'http://ex/g1',
+    '@graph': [{ '@id': 'http://ex/s', 'http://ex/p': { '@id': 'http://ex/o' } }],
+  });
+  const store = await SparqStore.fromString(jsonld, 'jsonld', { dataset: true });
+  const rows = store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].get('g').value, 'http://ex/g1');
+});
+
 test('SELECT returns RDF/JS bindings with spec-compliant terms', async () => {
   const store = await load();
   const rows = store.queryBindings(

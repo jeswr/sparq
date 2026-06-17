@@ -429,6 +429,16 @@ jobs:
       # [OPUS-4.8] sq-yqi1 (#162): clippy the shacl-feature surface on wasm32 too.
       - name: clippy (wasm32 target, shacl feature, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features shacl -- -D warnings
+      # [OPUS-4.8] sq-dvyi: also build + clippy WITH the opt-in `jsonld` feature (the
+      # site REPL's JSON-LD upload/URL path) so the oxjsonld-linked surface is
+      # gate-protected on wasm32. The DEFAULT bundle stays JSON-LD-free (perf floor).
+      # The site builds `shacl,jsonld` together, so the combined feature set is built too.
+      - name: Build sparq-wasm for the browser target (jsonld feature)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features jsonld
+      - name: Build sparq-wasm for the browser target (shacl + jsonld, the site bundle)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl,jsonld
+      - name: clippy (wasm32 target, jsonld feature, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features jsonld -- -D warnings
       # [OPUS-4.8] sq-6qw3 (W-reason): the tier-b forward-chaining inference bundle. Build +
       # clippy it on wasm32 in BOTH feature states (default + the opt-in `why()` proof-tree
       # `explain` feature) so the reason bundle is gate-protected exactly like sparq-wasm.
@@ -471,6 +481,12 @@ jobs:
       - name: Headless wasm tests (wasm-pack test --node, shacl feature)
         working-directory: crates/sparq-wasm
         run: wasm-pack test --node --features shacl
+      # [OPUS-4.8] sq-dvyi: run the headless wasm tests WITH the jsonld feature so the
+      # real exported `Store::load`/`loadDataset` JSON-LD path (folded + `@graph` named
+      # graph queryable) is exercised in a genuine wasm runtime — the site REPL's path.
+      - name: Headless wasm tests (wasm-pack test --node, jsonld feature)
+        working-directory: crates/sparq-wasm
+        run: wasm-pack test --node --features jsonld
       # [OPUS-4.8] sq-6qw3 (W-reason): drive the REAL #[wasm_bindgen] Reasoner exports
       # (crates/sparq-reason-wasm/tests/web.rs) in a genuine wasm runtime, in BOTH feature
       # states — the default suite, then with the opt-in `explain` feature so the `why()`

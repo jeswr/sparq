@@ -135,13 +135,18 @@ impl QuadChunks {
 #[wasm_bindgen]
 impl Store {
     /// Parses an RDF document into a store. `format`: `"turtle"` | `"ntriples"` |
-    /// `"nquads"` | `"trig"` (named graphs are folded into the default graph).
+    /// `"nquads"` | `"trig"` | `"jsonld"` (also `"json-ld"` / `"application/ld+json"`,
+    /// available only when the crate is built with the OPT-IN `jsonld` feature — the
+    /// site REPL bundle enables it; the lean default bundle does not).
+    /// Named graphs (from N-Quads / TriG / JSON-LD `@graph`) are folded into the default
+    /// graph — use [`loadDataset`](Self::load_dataset) to preserve them.
     pub fn load(text: &str, format: &str) -> Result<Store, JsError> {
         let graph = Graph::load_str(text, format).map_err(|e| JsError::new(&e))?;
         Ok(Store { graph })
     }
 
-    /// Like [`load`](Self::load) but preserves NAMED GRAPHS from N-Quads / TriG as
+    /// Like [`load`](Self::load) but preserves NAMED GRAPHS from N-Quads / TriG / a
+    /// JSON-LD `@graph` (with an outer `@id`) as
     /// separate sub-graphs, so `GRAPH <iri> { … }` / `GRAPH ?g { … }` patterns,
     /// `FROM` / `FROM NAMED` dataset clauses, and SPARQL Updates with `GRAPH`
     /// blocks (including `CLEAR GRAPH` / `DROP GRAPH`) all see the dataset.
@@ -722,6 +727,56 @@ mod tests {
         assert!(
             err.contains("EXPLAIN ANALYZE"),
             "rejection must mention EXPLAIN ANALYZE, got: {err}"
+        );
+    }
+
+    // ---- sq-dvyi: JSON-LD ingest through the wasm `Store::load` / `loadDataset` ----
+
+    /// `Store::load(jsonldText, "jsonld")` parses a JSON-LD document and the store is
+    /// queryable exactly as a Turtle-loaded one. This is the wasm bundle path the
+    /// site REPL's JSON-LD upload/URL feature drives (OPT-IN behind the `jsonld` feature).
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_and_query() {
+        let doc = r#"{
+            "@context": { "ex": "http://ex/" },
+            "@id": "ex:alice",
+            "ex:name": "Alice",
+            "ex:knows": { "@id": "ex:bob" }
+        }"#;
+        let store = Store::load(doc, "jsonld").unwrap();
+        assert_eq!(store.size(), 2);
+        let json = store
+            .query("PREFIX ex: <http://ex/> SELECT ?n WHERE { ex:alice ex:name ?n }")
+            .unwrap();
+        assert!(json.contains("\"value\":\"Alice\""), "got: {json}");
+        // The IRI object is queryable too.
+        let json2 = store
+            .query("PREFIX ex: <http://ex/> SELECT ?o WHERE { ex:alice ex:knows ?o }")
+            .unwrap();
+        assert!(
+            json2.contains("\"type\":\"uri\",\"value\":\"http://ex/bob\""),
+            "got: {json2}"
+        );
+    }
+
+    /// `Store::loadDataset(jsonld, "jsonld")` preserves a JSON-LD `@graph` named graph, so
+    /// a `GRAPH ?g { … }` query over an uploaded JSON-LD dataset returns the right graph.
+    /// OPT-IN behind the `jsonld` feature.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_dataset_named_graph_queryable() {
+        let doc = r#"{
+            "@id": "http://ex/g1",
+            "@graph": [ { "@id": "http://ex/s", "http://ex/p": { "@id": "http://ex/o" } } ]
+        }"#;
+        let store = Store::load_dataset(doc, "jsonld").unwrap();
+        let json = store
+            .query("SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }")
+            .unwrap();
+        assert!(
+            json.contains("\"value\":\"http://ex/g1\""),
+            "named graph must be queryable: {json}"
         );
     }
 

@@ -19,7 +19,7 @@ const store = await SparqStore.fromString(`
   @prefix ex: <http://ex/> .
   ex:alice ex:name "Alice" ; ex:knows ex:bob .
   ex:bob   ex:name "Bob"@en .
-`, 'turtle'); // 'turtle' (default) | 'ntriples' | 'nquads' | 'trig'
+`, 'turtle'); // 'turtle' (default) | 'ntriples' | 'nquads' | 'trig' | 'jsonld'
 
 // SELECT -> RDF/JS Bindings[]
 for (const row of store.queryBindings(
@@ -56,7 +56,7 @@ static fromQuads(quads: Iterable<RDF.Quad>, opts?: SparqStoreOptions): Promise<S
 static fromCompressed(bytes: Uint8Array, format?: RdfFormat,
                       opts?: SparqStoreOptions & { codec?: 'zstd' | 'gzip' }): Promise<SparqStore>
 
-type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig';
+type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig' | 'jsonld'; // jsonld: a JSON-LD @graph is preserved with { dataset: true }
 interface SparqStoreOptions { compressed?: boolean; dataset?: boolean; } // NOT combinable
 
 // Reading
@@ -117,7 +117,7 @@ store.removeQuads(store.match(null, DF.namedNode('http://ex/p')));
 store.applyDelta(insertQuads, deleteQuads); // deletes applied first, then inserts
 ```
 
-**Named graphs (load as a dataset).** Without `dataset: true`, all quads fold into the default graph and `GRAPH`/named-graph lookups see nothing.
+**Named graphs (load as a dataset).** Without `dataset: true`, all quads fold into the default graph and `GRAPH`/named-graph lookups see nothing. Applies to N-Quads, TriG, and a JSON-LD `@graph` (with an outer `@id`). `'jsonld'` parsing is compiled in only when the bundle is built with the opt-in `jsonld` feature (the published `@jeswr/sparq` bundle enables it — see the bundle-features note below); the lean default bundle omits it.
 
 ```js
 const ds = await SparqStore.fromString(nquads, 'nquads', { dataset: true });
@@ -174,6 +174,7 @@ The raw `Store.validate(data, shapes, format)` returns the same report as a JSON
 - **`SparqStore` exposes SELECT/ASK only.** Its `query()` returns `Bindings[]` (SELECT) or `boolean` (ASK). CONSTRUCT/DESCRIBE and federated (`SERVICE`) queries are **not** exposed at the JS wrapper layer — use the raw `Store.queryQuads` for CONSTRUCT/DESCRIBE.
 - **`REGEX` / `REPLACE` are compiled out** of the wasm build (the engine's non-default `regex` cargo feature is off to keep the bundle small). Use `CONTAINS`/`STRSTARTS`/`STRENDS`/... or a custom wasm build with `--features regex`.
 - **SHACL is on `SparqStore.validate` (typed) AND raw `Store.validate` (JSON string), shipped by default.** The published bundle is built with `--features shacl`, so `validate` works out of the box. SHACL is **not free in the binary** — it pulls in the SHACL engine + `regex` + the `sh:sparql` query path, which roughly **doubles** the `.wasm` (measured ~1.21 MiB → ~2.19 MiB, +~1.0 MiB / +85%, pre-gzip). Size-sensitive consumers can build the lean variant (`npm run build:wasm:lean`, equivalently `wasm-pack build … --release` with no `--features`), which omits SHACL — `SparqStore.validate` then throws a clear "requires a SHACL-enabled wasm bundle" error. Use `--features shacl-af` to also compile `sh:rule`. Validation is in-process and best for small documents (~10–100 triples); large graphs should use the server-side HTTP `validate` path.
+- **JSON-LD ingest (`'jsonld'`) is shipped in the published bundle but is an OPT-IN cargo feature.** The published `@jeswr/sparq` bundle is built with `--features shacl,jsonld` (the js `build:wasm` script), so `fromString(_, 'jsonld')` works out of the box. JSON-LD is **not free in the binary** — it links the `oxjsonld` parser (~0.35 MiB raw `cargo build`, pre-`wasm-opt`), so the **lean default bundle** (`build:wasm:lean` / `cargo build -p sparq-wasm` with no `--features`) omits it to stay under the perf-gate `wasm_bundle_bytes` floor. On the lean bundle a `'jsonld'` load is not recognised as JSON-LD. Turtle / N-Triples / N-Quads / TriG are always present (no feature needed).
 - **`options.dataset` is not combinable with `options.compressed`** — there is no compressed dataset loader yet (the constructor throws). `compact-index` (3 permutations, ~half the memory) is auto-selected for wasm32 regardless; `compressed` adds block compression on top.
 - **`size` / `heapBytes` report the DEFAULT graph only.** For dataset totals use `countQuads()` (its graph wildcard spans named graphs).
 - **Mutation is overlay-based.** `update()` / `applyDelta()` write through an append-only delta overlay: the dictionary only grows, and deletes are tombstones until the wasm store is reloaded. Blank nodes in `applyDelta`/`removeQuads` are matched **by label** (so bnode triples can be retracted — impossible via SPARQL `DELETE DATA`).

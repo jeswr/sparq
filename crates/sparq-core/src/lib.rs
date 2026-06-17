@@ -23,6 +23,10 @@ use temporal::Temporal;
 // the alias as dead code under the `-D warnings` clippy gate.
 #[cfg(feature = "parallel")]
 type ChunkPartials = Vec<(Dict, Vec<[Id; 3]>)>;
+// [OPUS-4.8] sq-dvyi: JSON-LD parser is OPT-IN behind the `jsonld` feature so the
+// default (lean) wasm bundle never links `oxjsonld`.
+#[cfg(feature = "jsonld")]
+use oxjsonld::JsonLdParser;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
@@ -631,7 +635,12 @@ pub(crate) fn is_numeric_datatype_str(dt: &str) -> bool {
 impl Graph {
     /// Loads triples from an RDF document (default graph only for M1; named
     /// graphs from TriG/N-Quads are folded into the default graph). Returns the
-    /// built graph. `format`: "turtle" | "ntriples" | "nquads" | "trig".
+    /// built graph. `format`: "turtle" | "ntriples" | "nquads" | "trig" | "jsonld"
+    /// (also "json-ld" / "application/ld+json"). JSON-LD is recognised only when the
+    /// crate is built with the OPT-IN `jsonld` feature (it links `oxjsonld`); without the
+    /// feature a "jsonld" format falls through to the Turtle arm. JSON-LD `@graph` named
+    /// graphs are folded into the default graph here; use [`load_dataset`](Self::load_dataset)
+    /// to preserve them.
     pub fn load_str(text: &str, format: &str) -> Result<Graph, String> {
         let (dict, triples) = Self::parse_to_triples(text, format)?;
         Ok(Self::from_parts(dict, triples))
@@ -679,6 +688,17 @@ impl Graph {
             }
             "trig" | "application/trig" => {
                 for q in TriGParser::new().for_slice(bytes) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
+            // [OPUS-4.8] sq-dvyi: JSON-LD. A whole-document JSON parse (NOT line-oriented,
+            // so no parallel chunking applies) yielding quads; the quad's graph name is
+            // FOLDED here (default-graph load) — `load_dataset` preserves it instead.
+            // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+            #[cfg(feature = "jsonld")]
+            _ if is_jsonld_format(format) => {
+                for q in JsonLdParser::new().for_slice(bytes) {
                     let q = q.map_err(|e| e.to_string())?;
                     push_triple!(&q.subject, &q.predicate, &q.object);
                 }
@@ -749,6 +769,19 @@ impl Graph {
                     push_triple!(&q.subject, &q.predicate, &q.object);
                 }
             }
+            // [OPUS-4.8] sq-dvyi: JSON-LD with a document base — the URL load path (a
+            // document fetched from a URL with relative IRIs). Graph name folded.
+            // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+            #[cfg(feature = "jsonld")]
+            _ if is_jsonld_format(format) => {
+                let parser = JsonLdParser::new()
+                    .with_base_iri(base)
+                    .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
+                for q in parser.for_slice(bytes) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
             _ => {
                 let parser = TurtleParser::new()
                     .with_base_iri(base)
@@ -768,6 +801,14 @@ impl Graph {
     /// main graph; each named graph becomes a [`named`](Self::named) entry. Formats without named
     /// graphs defer to [`load_str`](Self::load_str). In-memory only (the mmap path is triple-only).
     pub fn load_dataset(text: &str, format: &str) -> Result<Graph, String> {
+        // [OPUS-4.8] sq-dvyi: JSON-LD carries named graphs (`@graph` with an outer `@id`),
+        // so it must take the dataset path too — but it is a WHOLE-DOCUMENT JSON parse
+        // (not line/statement chunkable), so it always goes through the serial loader.
+        // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+        #[cfg(feature = "jsonld")]
+        if is_jsonld_format(format) {
+            return Self::load_dataset_serial(text, format);
+        }
         if !matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
             return Self::load_str(text, format);
         }
@@ -833,6 +874,11 @@ impl Graph {
         }
         match format {
             "nquads" | "n-quads" => group!(NQuadsParser::new()),
+            // [OPUS-4.8] sq-dvyi: JSON-LD yields quads with a graph name, so the same
+            // per-graph bucketing applies — `@graph`/`@id` named graphs are preserved.
+            // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+            #[cfg(feature = "jsonld")]
+            _ if is_jsonld_format(format) => group!(JsonLdParser::new()),
             _ => group!(TriGParser::new()),
         }
         let build_terms = |triples: &[[Term; 3]]| -> Graph {
@@ -1111,6 +1157,16 @@ impl Graph {
                 for t in TurtleParser::new().for_reader(reader) {
                     let t = t.map_err(|e| e.to_string())?;
                     push_triple!(&t.subject, &t.predicate, &t.object);
+                }
+            }
+            // [OPUS-4.8] sq-dvyi: JSON-LD over a streaming reader (the CLI's file path).
+            // Graph name folded — `load_reader` is the triple-only entry point.
+            // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+            #[cfg(feature = "jsonld")]
+            _ if is_jsonld_format(format) => {
+                for q in JsonLdParser::new().for_reader(reader) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
                 }
             }
             _ => {
@@ -3627,6 +3683,17 @@ fn subject_term(s: &oxrdf::NamedOrBlankNode) -> Term {
     }
 }
 
+/// [OPUS-4.8] sq-dvyi: the `format` strings the loaders accept for JSON-LD — the short
+/// key the JS surface passes (`"jsonld"`), the hyphenated spelling, and the IANA media
+/// type (`application/ld+json`, what an `Accept`-negotiated URL load reports). Kept in
+/// one place so every loader arm (`parse_to_triples` / `…_with_base` / `load_reader` /
+/// `load_dataset`) recognises the same set. OPT-IN behind the `jsonld` feature; every
+/// call site is gated on the same feature, so the helper is only compiled when JSON-LD is.
+#[cfg(feature = "jsonld")]
+fn is_jsonld_format(format: &str) -> bool {
+    matches!(format, "jsonld" | "json-ld" | "application/ld+json")
+}
+
 /// Splits a byte buffer into ~`target` ranges, each ending on a newline so no
 /// (single-line) N-Triples statement is split across a boundary.
 #[cfg(feature = "parallel")]
@@ -5026,6 +5093,118 @@ mod build_timing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- sq-dvyi: engine-side JSON-LD ingest (the lean WASM build's `load`) ----
+    //
+    // The site REPL's upload/URL path loads through `Graph::load_str` / `load_dataset`
+    // in the wasm bundle; JSON-LD is the one widely-served RDF syntax those entries did
+    // not accept. These cover the triple-folding path, the base-IRI path (relative IRIs
+    // in a fetched document), and the named-graph-preserving dataset path (`@graph`).
+    // `dump_terms` returns full lexical term forms (`<iri>`, `"lit"`, `"lit"^^<dt>`), so
+    // the assertions match against those, not bare strings.
+
+    /// A JSON-LD object document parses through `load_str` to the expected triples:
+    /// a plain string literal, a typed (xsd:integer) literal, and an IRI object; and
+    /// every `jsonld` alias is accepted.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_str_object() {
+        let doc = r#"{
+            "@context": { "ex": "http://ex/", "name": "ex:name", "age": "ex:age", "knows": { "@id": "ex:knows", "@type": "@id" } },
+            "@id": "ex:alice",
+            "name": "Alice",
+            "age": { "@value": "30", "@type": "http://www.w3.org/2001/XMLSchema#integer" },
+            "knows": "ex:bob"
+        }"#;
+        for fmt in ["jsonld", "json-ld", "application/ld+json"] {
+            let g = Graph::load_str(doc, fmt).unwrap_or_else(|e| panic!("{fmt}: {e}"));
+            assert_eq!(g.len(), 3, "{fmt}: subject has three predicates");
+            let terms = dump_terms(&g);
+            let has = |s: &str, p: &str, o: &str| {
+                terms.iter().any(|(ts, tp, to)| ts == s && tp == p && to == o)
+            };
+            assert!(
+                has("<http://ex/alice>", "<http://ex/name>", "\"Alice\""),
+                "{fmt}: name triple missing: {terms:?}"
+            );
+            assert!(
+                has(
+                    "<http://ex/alice>",
+                    "<http://ex/age>",
+                    "\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+                ),
+                "{fmt}: typed age triple missing: {terms:?}"
+            );
+            assert!(
+                has("<http://ex/alice>", "<http://ex/knows>", "<http://ex/bob>"),
+                "{fmt}: knows IRI triple missing: {terms:?}"
+            );
+        }
+    }
+
+    /// A JSON-LD array of node objects (the common "list of records" shape) loads every
+    /// node — JSON-LD is whole-document, not line-oriented, so this is one parse.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_str_array() {
+        let doc = r#"[
+            { "@id": "http://ex/a", "http://ex/p": [ { "@id": "http://ex/b" } ] },
+            { "@id": "http://ex/b", "http://ex/p": [ { "@id": "http://ex/c" } ] }
+        ]"#;
+        let g = Graph::load_str(doc, "jsonld").unwrap();
+        assert_eq!(g.len(), 2);
+    }
+
+    /// Relative IRIs in a JSON-LD document resolve against the supplied base — the URL
+    /// load path (a document fetched from `https://host/dir/data.jsonld`) relies on this.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_str_with_base_resolves_relative() {
+        let doc = r#"{ "@id": "alice", "http://ex/knows": { "@id": "bob" } }"#;
+        let g = Graph::load_str_with_base(doc, "jsonld", "http://base.example/dir/").unwrap();
+        let terms = dump_terms(&g);
+        assert!(
+            terms.iter().any(|(s, p, o)| s == "<http://base.example/dir/alice>"
+                && p == "<http://ex/knows>"
+                && o == "<http://base.example/dir/bob>"),
+            "relative IRIs must resolve against the base: {terms:?}"
+        );
+    }
+
+    /// `load_dataset` preserves the named graph a JSON-LD `@graph` with an outer `@id`
+    /// expresses (so a `GRAPH ?g { … }` query against an uploaded JSON-LD dataset works),
+    /// while `load_str` folds it into the default graph.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_dataset_preserves_named_graph() {
+        let doc = r#"{
+            "@id": "http://ex/g1",
+            "@graph": [ { "@id": "http://ex/s", "http://ex/p": { "@id": "http://ex/o" } } ]
+        }"#;
+        let ds = Graph::load_dataset(doc, "jsonld").unwrap();
+        // The triple lives in the named graph, not the default graph.
+        assert_eq!(ds.len(), 0, "default graph empty");
+        let name = Term::NamedNode(NamedNode::new("http://ex/g1").unwrap());
+        let sub = ds
+            .named
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, g)| g.len());
+        assert_eq!(sub, Some(1), "named graph ex:g1 holds the triple");
+
+        // Folding (load_str) keeps the same triple but in the default graph.
+        let folded = Graph::load_str(doc, "jsonld").unwrap();
+        assert_eq!(folded.len(), 1);
+        assert!(folded.named.is_empty());
+    }
+
+    /// Malformed JSON-LD surfaces a parse error (not a silent empty graph), so the REPL
+    /// can report the failure inline.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_malformed_errors() {
+        assert!(Graph::load_str("{ not json", "jsonld").is_err());
+    }
 
     /// [OPUS-4.8] (sq-zz8z, gh-51) The graph-IRI prefix RANGE SCAN returns EXACTLY the named graphs
     /// whose `STR(name)` starts with the prefix, and its lazily-built cache stays coherent across

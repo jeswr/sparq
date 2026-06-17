@@ -37,6 +37,10 @@ categories = ["database-implementations", "parsing", "science"]
 # Term model + parsers (best-in-class; we build the store + engine ourselves).
 oxrdf = { version = "0.3", features = ["rdf-12"] }
 oxttl = { version = "0.2", features = ["rdf-12"] }
+# JSON-LD parser (same oxigraph family as oxrdf/oxttl, pure-Rust + wasm-portable — no
+# native-only deps, so it is safe in the lean wasm bundle). [OPUS-4.8] sq-dvyi: the
+# engine-side JSON-LD ingest the browser REPL's upload/URL path needs.
+oxjsonld = { version = "0.2", features = ["rdf-12"] }
 # SPARQL syntax -> algebra (we build the planner + physical execution ourselves).
 spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
 # Fast hashing / maps.

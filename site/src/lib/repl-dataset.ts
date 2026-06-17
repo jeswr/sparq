@@ -16,16 +16,59 @@
 
 import type { SparqlTerm } from "./sparq-wasm";
 
+// [OPUS-4.8] sq-dvyi: JSON-LD can carry named graphs (`@graph` with an outer `@id`),
+// so it joins nquads/trig as a dataset format routed through `loadDataset`.
 /** Formats whose payload can carry named graphs (and so need `loadDataset`). */
-const DATASET_FORMATS = new Set(["nquads", "trig"]);
+const DATASET_FORMATS = new Set(["nquads", "trig", "jsonld"]);
 
 /**
- * True for the quad-bearing RDF formats (`nquads` / `trig`). Triple-only formats
- * (`turtle` / `ntriples`) have no named graphs, so the cheaper `Store.load` is both
- * correct and slightly faster for them.
+ * True for the quad-bearing RDF formats (`nquads` / `trig` / `jsonld`). Triple-only
+ * formats (`turtle` / `ntriples`) have no named graphs, so the cheaper `Store.load` is
+ * both correct and slightly faster for them.
  */
 export function isDatasetFormat(format: string): boolean {
   return DATASET_FORMATS.has(format);
+}
+
+// [OPUS-4.8] sq-dvyi: the RDF formats the wasm engine's `load`/`loadDataset` accept,
+// keyed by file extension. Lives here (not in the React component) so it is framework-
+// free and unit-testable. JSON-LD is parsed engine-side (oxjsonld) in the lean wasm
+// bundle. The component renders these as the upload/URL format choices.
+export const FORMAT_OPTIONS: { value: string; label: string; exts: string[] }[] = [
+  { value: "turtle", label: "Turtle (.ttl)", exts: ["ttl", "turtle"] },
+  { value: "ntriples", label: "N-Triples (.nt)", exts: ["nt", "ntriples"] },
+  { value: "nquads", label: "N-Quads (.nq)", exts: ["nq", "nquads"] },
+  { value: "trig", label: "TriG (.trig)", exts: ["trig"] },
+  { value: "jsonld", label: "JSON-LD (.jsonld)", exts: ["jsonld", "json-ld"] },
+];
+
+/** Best-effort engine format guess from a filename/URL; falls back to Turtle. */
+export function guessFormat(name: string): string {
+  const ext = name.split(/[?#]/)[0].split(".").pop()?.toLowerCase() ?? "";
+  const hit = FORMAT_OPTIONS.find((f) => f.exts.includes(ext));
+  return hit?.value ?? "turtle";
+}
+
+// Map a response `Content-Type` to an engine format, ignoring any `; charset=…`
+// parameter. A served media type is more reliable than the URL extension for the
+// auto-detect URL load (e.g. a JSON-LD endpoint with no `.jsonld` suffix), so the URL
+// path prefers it when present. Returns `undefined` for an unknown/absent type so the
+// caller can fall back to the extension guess.
+const CONTENT_TYPE_FORMATS: Record<string, string> = {
+  "text/turtle": "turtle",
+  "application/n-triples": "ntriples",
+  "application/n-quads": "nquads",
+  "application/trig": "trig",
+  "application/ld+json": "jsonld",
+};
+
+/** Engine format for a response `Content-Type`, or `undefined` if unrecognised. */
+export function formatFromContentType(
+  contentType: string | null,
+): string | undefined {
+  if (!contentType) return undefined;
+  const mime = contentType.split(";")[0].trim().toLowerCase();
+  return CONTENT_TYPE_FORMATS[mime];
 }
 
 /**

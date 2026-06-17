@@ -28,7 +28,12 @@ import {
   type SparqlResults,
   type WasmStore,
 } from "@/lib/sparq-wasm";
-import { ALL_QUADS_BODY } from "@/lib/repl-dataset";
+import {
+  ALL_QUADS_BODY,
+  FORMAT_OPTIONS,
+  guessFormat,
+  formatFromContentType,
+} from "@/lib/repl-dataset";
 import { BUILTIN_DATASETS } from "@/data/sample-graph";
 
 /** What's currently loaded into the REPL store, for the viewer's heading. */
@@ -40,22 +45,6 @@ export interface ActiveDataset {
 // [OPUS-4.8] sq-17nw — enumerate the WHOLE dataset (default graph + every named graph)
 // so the viewer shows named-graph content too; default-graph rows leave ?g unbound.
 const ALL_QUADS_QUERY = `SELECT ?s ?p ?o ?g WHERE { ${ALL_QUADS_BODY} } ORDER BY ?g ?s ?p ?o`;
-
-// Formats the wasm engine's `load`/`loadDataset` accept, keyed by the file extension
-// or user choice. The engine takes a single format string per the lib.rs docs.
-const FORMAT_OPTIONS: { value: string; label: string; exts: string[] }[] = [
-  { value: "turtle", label: "Turtle (.ttl)", exts: ["ttl", "turtle"] },
-  { value: "ntriples", label: "N-Triples (.nt)", exts: ["nt", "ntriples"] },
-  { value: "nquads", label: "N-Quads (.nq)", exts: ["nq", "nquads"] },
-  { value: "trig", label: "TriG (.trig)", exts: ["trig"] },
-];
-
-/** Best-effort format guess from a filename/URL; falls back to Turtle. */
-export function guessFormat(name: string): string {
-  const ext = name.split(/[?#]/)[0].split(".").pop()?.toLowerCase() ?? "";
-  const hit = FORMAT_OPTIONS.find((f) => f.exts.includes(ext));
-  return hit?.value ?? "turtle";
-}
 
 // ---------------------------------------------------------------------------
 // Dataset source controls
@@ -150,7 +139,7 @@ export function DatasetControls({
         <input
           ref={fileRef}
           type="file"
-          accept=".ttl,.turtle,.nt,.ntriples,.nq,.nquads,.trig,text/turtle,application/n-triples,application/n-quads,application/trig"
+          accept=".ttl,.turtle,.nt,.ntriples,.nq,.nquads,.trig,.jsonld,text/turtle,application/n-triples,application/n-quads,application/trig,application/ld+json"
           className="hidden"
           onChange={onFile}
         />
@@ -210,7 +199,7 @@ function UrlLoadDialog({
     try {
       let res: Response;
       try {
-        res = await fetch(target, { headers: { Accept: "text/turtle, application/n-triples, application/n-quads, application/trig, */*" } });
+        res = await fetch(target, { headers: { Accept: "text/turtle, application/n-triples, application/n-quads, application/trig, application/ld+json, */*" } });
       } catch {
         // A network/CORS rejection throws a TypeError with no useful detail in the
         // browser — be explicit about the most likely cause rather than failing silently.
@@ -224,7 +213,12 @@ function UrlLoadDialog({
         throw new Error(`Fetch failed: HTTP ${res.status} ${res.statusText}`);
       }
       const text = await res.text();
-      const fmt = format === "__auto__" ? guessFormat(target) : format;
+      // Auto-detect prefers the served media type (reliable for extension-less URLs),
+      // then the URL extension. An explicit picker choice always wins.
+      const fmt =
+        format === "__auto__"
+          ? (formatFromContentType(res.headers.get("content-type")) ?? guessFormat(target))
+          : format;
       await onLoadText(text, fmt, shortName(target), defaultMode);
       onOpenChange(false);
       setUrl("");
@@ -276,7 +270,7 @@ function UrlLoadDialog({
               onChange={(e) => setFormat(e.target.value)}
               className="h-8 w-full rounded-lg border bg-background px-2 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
             >
-              <option value="__auto__">Auto-detect from extension</option>
+              <option value="__auto__">Auto-detect (content type / extension)</option>
               {FORMAT_OPTIONS.map((f) => (
                 <option key={f.value} value={f.value}>
                   {f.label}
