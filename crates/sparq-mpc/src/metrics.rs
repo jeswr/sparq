@@ -229,7 +229,7 @@ impl CommCounter {
     /// total the field elements that cross the boundary and divide by the party
     /// count to get a symmetric per-party figure — the cross-`N`-comparable cost.
     ///
-    /// The on-wire traffic is [`Self::wire_field_elements`]`× FIELD_BYTES`; the
+    /// The on-wire traffic is `Self::wire_field_elements` × [`FIELD_BYTES`]; the
     /// per-party share is that divided by `parties` (each party sends/receives an
     /// equal slice in a symmetric protocol). For one open at `n` parties this is
     /// `(1·n)·8 / n = 8` — the per-open-per-party figure the design record fixes

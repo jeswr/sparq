@@ -526,7 +526,7 @@ impl HiddenValueJoin {
 /// parties' shares of the whole key column are jointly independent of every key
 /// (the batched-Shamir hiding property). This is the structural reason the keys
 /// never leak: the cleartext keys are used ONLY as the local inputs to Shamir
-/// sharing and to the secure-equality test ([`HiddenValueJoin::secure_equal_shared`]),
+/// sharing and to the secure-equality test (`HiddenValueJoin::secure_equal_shared`),
 /// and are NEVER reconstructed from shares — exactly as the four-flatmates aggregate
 /// uses its salary column. The DISCLOSED payload columns ride alongside in the clear
 /// (disclosure-minimisation, convention #4 — only the *key* is hidden).
@@ -619,7 +619,7 @@ impl HiddenValueJoin {
     ///      are disclosed (convention #4); the VALUE stays hidden. Correlation is by
     ///      key, not index, so the orders need not match.
     /// 3. For each candidate pair the match is decided by the existing
-    ///    [`Self::secure_equal`] over the secret-shared keys — the join key/value is
+    ///    `Self::secure_equal` over the secret-shared keys — the join key/value is
     ///    NEVER opened; only the match bit is (see the honesty note).
     /// 4. The candidates feed [`crate::oblivious_join::oblivious_join_output`] with
     ///    [`MatchBit::Public`] bits and the public bound `B`: non-matches become

@@ -934,7 +934,7 @@ impl MacSession<'_> {
 
     /// [OPUS-4.8] sq-ka8m — a degree-`t` AUTHENTICATED sharing of a PUBLIC constant
     /// `c`: value sharing `[c]` (the trivial constant sharing on `x = 1..=n`) paired
-    /// with the MAC `[α·c]` (= `c·[α]` via [`crate::authenticated::MacKey::scaled_constant_mac`]).
+    /// with the MAC `[α·c]` (= `c·[α]` via `crate::authenticated::MacKey::scaled_constant_mac`).
     /// This is the authenticated analogue of `const_sharing` — it lets the
     /// comparison chain seed its `[0]`/`[1]` accumulators (`gt`, `eq`) as authenticated
     /// values so the WHOLE chain is MAC-carried. `α·c` is the MAC of a PUBLIC value
@@ -1380,11 +1380,11 @@ impl MpcBackend for ShamirBackend {
     /// private contribution. The holder evaluates `fragment` (which MUST project
     /// exactly one integer-valued column) over its OWN data and we share EVERY row
     /// it returns — generalising [`Self::share_private_input`] (the single-row
-    /// special case using the fixed [`PRIVATE_SALARY_FRAGMENT`]) to a per-row
+    /// special case using the fixed `PRIVATE_SALARY_FRAGMENT`) to a per-row
     /// hidden-value / salary vector / per-graph commitment column.
     ///
     /// **Row-binding (POSITIONAL, value-sorted).** The values are extracted and
-    /// then sorted ascending ([`extract_integer_vector`] returns them in the
+    /// then sorted ascending (`extract_integer_vector` returns them in the
     /// holder's local row order; we sort here) so two holders running the same
     /// fragment produce batches whose index `i` refers to the same logical row
     /// position regardless of each holder's local row ordering — exactly the

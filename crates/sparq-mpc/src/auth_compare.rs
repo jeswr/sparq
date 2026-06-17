@@ -178,7 +178,7 @@ fn auth_greater_than_bits(
 /// ## Pipeline
 ///
 /// 1. Bit-decompose both operands into [`COMPARE_BITS`] authenticated bits.
-/// 2. Run the authenticated MSB-first comparator ([`auth_greater_than_bits`]) — every
+/// 2. Run the authenticated MSB-first comparator (`auth_greater_than_bits`) — every
 ///    gate a [`MacSession::auth_mul`].
 /// 3. **MAC-check the verdict** ([`MacSession::mac_check`]) BEFORE opening it — a
 ///    tamper in any gate of step 2 (a forged share, a wrong `degree_reduce`

@@ -543,6 +543,24 @@ jobs:
         run: cargo doc -p sparq-solid --no-deps --features odrl-bridge
         env:
           RUSTDOCFLAGS: "-D warnings"
+      # [OPUS-4.8] sq-h1w2: rustdoc -D warnings, scoped to sparq-mpc. Same rationale as
+      # the sparq-solid gate above — a public MPC item linking to a crate-private helper
+      # (e.g. the `pub(crate)` `mac_shares`/`verify_sum_in_range` internals, or a wrong
+      # `ShamirBackend::run_secure` path that should be the `MpcBackend` trait method) is
+      # a rustdoc warning that slips past clippy/build. This crate's intra-doc backlog is
+      # now cleared, so we GATE it so a public item can never again link to a
+      # private/unresolved one. Both feature states: default and the off-by-default
+      # `insecure-test-rng` (its only feature; `--all-features` == that one feature).
+      # Still per-crate, not `--workspace`: the rest of the workspace carries a separate
+      # pre-existing rustdoc-warning backlog (own beads) a workspace-wide gate would fail.
+      - name: rustdoc (deny warnings, sparq-mpc — default features)
+        run: cargo doc -p sparq-mpc --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      - name: rustdoc (deny warnings, sparq-mpc — insecure-test-rng)
+        run: cargo doc -p sparq-mpc --no-deps --features insecure-test-rng
+        env:
+          RUSTDOCFLAGS: "-D warnings"
       # Informational until the deferred `cargo fmt --all` reformat lands (see rustfmt.toml).
       - name: rustfmt (informational)
         run: cargo fmt --all --check
