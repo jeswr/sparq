@@ -59,7 +59,7 @@
 
 ## E4 — Security controls (Component 4.1, maturity 4)
 
-- `forbid(unsafe_code)` — present in 20+ crate `lib.rs` files; concentrated unsafe surface in
+- `forbid(unsafe_code)` — present in 26+ crate `lib.rs` files; concentrated unsafe surface in
   `sparq-core` (mmap/dict-spill/SIMD = threat-model boundary **B5**), justified in the GX-5 register
   (#217, the `memsafety` slice).
 - `.github/workflows/miri.yml` (nightly Miri), `fuzz.yml` (cargo-fuzz PR smoke + nightly),

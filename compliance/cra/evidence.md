@@ -15,7 +15,7 @@ documentation) would inspect.
 | Fail-closed non-loopback bind | `crates/sparq-server/src/main.rs` (sq-o4qf) | Run `sparq-server --addr 0.0.0.0:3030` without `--allow-remote`/auth → server **refuses** + exits non-zero. |
 | Optional Bearer auth + read-gating | `crates/sparq-server/src/main.rs` (sq-zcby) | `SPARQ_AUTH_TOKEN=t sparq-server …` then a request without the bearer → 401; with `SPARQ_AUTH_TOKEN_READ=1` reads are gated too. |
 | Distroless **non-root** runtime, SHA-pinned base | `Dockerfile` (runtime `FROM gcr.io/distroless/cc-debian12:nonroot@sha256:…`) | `docker inspect` the image → user is non-root, no shell present. |
-| `#![forbid(unsafe_code)]` posture + concentrated unsafe under UB lanes | 20+ crates; `compliance/memsafety/`, `.github/workflows/{miri,fuzz}.yml` | `grep -rl 'forbid(unsafe_code)' crates/*/src/lib.rs`; CI miri/fuzz lanes green. |
+| `#![forbid(unsafe_code)]` posture + concentrated unsafe under UB lanes | 26+ crates; `compliance/memsafety/`, `.github/workflows/{miri,fuzz}.yml` | `grep -rl 'forbid(unsafe_code)' crates/*/src/lib.rs`; CI miri/fuzz lanes green. |
 | Secure-coding standard (contributor-facing) | `CONTRIBUTING.md` §"unsafe policy"/"Input validation"/"Supply chain" | Read; maps to NIST SSDF PW + ASVS V1/V5/V7. |
 
 ## E2 — No known exploitable vulnerabilities at ship (Annex I Part I (2); Part II.1)

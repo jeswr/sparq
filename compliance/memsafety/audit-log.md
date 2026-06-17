@@ -7,6 +7,14 @@ Epic `sq-toze`. Branch `cert-memsafety-certification`. This is the **proof-of-pa
 before the loop fans out to the other 11 frameworks. The loop ran the engineer and auditor
 roles adversarially against the *actual repo*, not the docs.
 
+> **Count note (sq-pro0, [OPUS-4.8]).** The crate counts quoted in the rounds below are the
+> point-in-time figures verified *at audit time* (20 `#![forbid(unsafe_code)]` crates / 25
+> total) and are preserved as the historical record — **do not rewrite them**. The workspace
+> has since grown: the *current* figures are **26 `#![forbid(unsafe_code)]` crates of 31
+> total**, with the unsafe surface still confined to the same 5 crates and the 56-site
+> per-crate register unchanged. The live count lives in `unsafe-register.md` + `evidence.md`
+> §MS-1; this log is not re-verified per crate-count change.
+
 ## Round 0 — engineer
 
 Authored `controls.md` (13 controls + a B5 coverage matrix), `evidence.md` (re-runnable

@@ -40,13 +40,13 @@ register distinguishes two trust classes of `unsafe`:
 |---|---|
 | `miri` lane (`.github/workflows/miri.yml`, sq-fo28) | pure-Rust unsafe in `sparq-core` reachable without `mmap`/`dict-spill`: the parallel scatter writes, POD↔bytes reinterprets, `from_utf8_unchecked` over in-memory buffers, `MaybeUninit`+`set_len`. Runs nightly under Tree-Borrows for aliasing/provenance/data-race UB. |
 | `mmap_corruption_oracle` test (`crates/sparq-core/tests/`, run under `--features mmap,dict-spill`) + `fuzz` lane's mmap-loader target | the **B5** mmap sites Miri structurally cannot run (file-backed mappings): hostile/corrupt index → loader must reject or stay in-bounds, never UB. |
-| `#![forbid(unsafe_code)]` on 20 crates (sq-emay) | proves the unsafe surface is *confined* to the 5 crates below; a new `unsafe` anywhere else fails to compile. |
+| `#![forbid(unsafe_code)]` on 26 crates (sq-emay) | proves the unsafe surface is *confined* to the 5 crates below; a new `unsafe` anywhere else fails to compile. |
 | `scripts/unsafe-gate.py --check` (this PR, GX-5) | the count **ratchet** — a PR cannot add `unsafe` without updating this register + re-seeding the snapshot. |
 | `// SAFETY:` argument on every site, **enforced by `clippy::undocumented_unsafe_blocks`** | the per-site argument lives next to the code. `#![warn(clippy::undocumented_unsafe_blocks)]` is set crate-root on all 5 unsafe-bearing crates (sparq-core, sparq-vectors, sparq-cli, sparq-zk-compose, sparq-bench), so the existing `clippy --all-targets -D warnings` gate **mechanically** rejects any `unsafe` block/impl that lacks a literal `// SAFETY:` comment. Combined with the **register + review + count ratchet** (a new `unsafe` cannot land without a register row, the `// SAFETY:` comment, and a re-seed). Closes gap MS-G2 (sq-8wbn) in [`gap-register.md`](./gap-register.md). [OPUS-4.8] |
 
 ## Register
 
-**56 `unsafe` sites** across 5 crates (the other 20 crates are `#![forbid(unsafe_code)]`).
+**56 `unsafe` sites** across 5 crates (the other 26 crates are `#![forbid(unsafe_code)]`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
 must equal `bench/unsafe-snapshot.json`.
 

@@ -33,7 +33,7 @@ which is itself recorded honestly rather than presented as an independent second
 
 These are re-runnable, file-or-test-cited, and gating in CI — sparq can stand behind them now:
 
-- `#![forbid(unsafe_code)]` across 20+ crates; the concentrated `sparq-core` unsafe surface (mmap /
+- `#![forbid(unsafe_code)]` across 26+ crates; the concentrated `sparq-core` unsafe surface (mmap /
   dict-spill / SIMD = boundary **B5**) is enumerated, per-site justified, **count-ratcheted as a
   merge gate**, and covered by Miri + a corruption oracle + cargo-fuzz. (memsafety, SIGN-OFF)
 - CodeQL SAST (gating), clippy `-D warnings` (gating), cargo-deny advisories/bans/licenses/sources
