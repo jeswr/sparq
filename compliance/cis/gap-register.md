@@ -15,7 +15,13 @@ maturity/nice-to-have.
 
 | ID | Gap | Sev | CIS mapping | Remediation | Bead |
 |---|---|---|---|---|---|
-| **GX-13** | **No `HEALTHCHECK` instruction in the `Dockerfile`.** The server exposes `/health` (curled by `docker-smoke.sh`) but the image does not self-declare a healthcheck, so a bare `docker run` cannot report unhealthy-but-running. | **P3** (minor) | Docker Bench **§4.6**. | Add `HEALTHCHECK` against `127.0.0.1:3030/health`. **Constraint:** distroless has *no shell and no `wget`/`curl`*, so the check cannot be a shell command — it needs either a tiny static probe binary `COPY`d in or a `sparq-server --health-probe` subcommand invoked in exec-form. Track the small server addition in the bead. Orchestrators (k8s) typically use their own probes and ignore the image HEALTHCHECK, hence P3. | **sq-toze.36** |
+| _(none open)_ | | | | | |
+
+## Resolved gaps (owned by this slice)
+
+| ID | Gap | CIS mapping | Resolution | Bead |
+|---|---|---|---|---|
+| **GX-13** | No `HEALTHCHECK` instruction in the `Dockerfile`. | Docker Bench **§4.6**. | **RESOLVED.** The `Dockerfile` now declares `HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/sparq-server", "--health-probe"]`. **Distroless constraint:** the runtime stage (`gcr.io/distroless/cc-debian12`) has *no shell and no `wget`/`curl`*, so the check could not be a shell/curl command — instead the server binary probes itself. `sparq-server --health-probe` (`crates/sparq-server/src/health_probe.rs`) opens a TCP connection to the loopback `/health` and exits 0 (healthy) / non-zero (unhealthy); exec-form is required (no shell to interpret a string CMD). Probed address defaults to `127.0.0.1:3030`, overridable via `--health-probe-addr` / `SPARQ_HEALTH_PROBE_ADDR`. Orchestrators (k8s) typically use their own probes and ignore the image HEALTHCHECK, hence the original P3. | **sq-toze.36** |
 
 ## Explicitly NOT gaps (architectural decisions / operator responsibility)
 
@@ -71,10 +77,10 @@ These are **not** CIS-owned; they back CIS rows and are already closed/tracked e
 
 ## Honesty statement
 
-The CIS slice has **no remaining P1 technical gap** — GX-12 (image-CVE-scan + Dockerfile linter) is
-now addressed (see above) — leaving one P3 minor gap (GX-13, HEALTHCHECK). The `Dockerfile`
-hardening itself is verified PASS against the actual file; the closed gap was *automated
-scanning/linting* coverage, not a hardening deficiency. Nothing here is satisfied by the ZK/MPC
+The CIS slice has **no remaining technical gap** — GX-12 (image-CVE-scan + Dockerfile linter) and
+GX-13 (HEALTHCHECK, sq-toze.36, distroless-aware in-binary `--health-probe`) are both now
+addressed (see above). The `Dockerfile` hardening itself is verified PASS against the actual file;
+GX-12's closed gap was *automated scanning/linting* coverage, not a hardening deficiency. Nothing here is satisfied by the ZK/MPC
 estate. [OPUS-4.8] Its v1 ZK verifier was originally found unsound
 (`research/zk-soundness-audit.md`), then `sq-1s2` landed the binding layer and an internal
 re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found the prior findings closed → "sound

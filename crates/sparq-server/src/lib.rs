@@ -7,6 +7,16 @@ pub mod exec;
 /// surface. Pure (no async), like [`results`].
 pub mod graph;
 pub mod negotiate;
+
+/// [OPUS-4.8] (sq-toze.36, cert gap GX-13) **In-binary container HEALTHCHECK probe** — the
+/// `--health-probe` subcommand the Dockerfile's `HEALTHCHECK` runs. The runtime image is
+/// distroless (no shell, no `curl`/`wget`), so the server probes its own loopback `/health`
+/// endpoint and exits `0`/non-zero for the container runtime. The response classifier
+/// ([`health_probe::probe_healthy`]) is pure + always compiled/unit-tested; the async TCP
+/// runner ([`health_probe::run_probe`]) is gated on `server` (it uses tokio). See the module
+/// docs for the distroless constraint that forces this in-binary approach.
+pub mod health_probe;
+
 pub mod results;
 /// [OPUS-4.8] (sq-4w18) SERVICE federation egress allowlist — the
 /// [`service_config::ServiceAllowlist`] config type (parse `--service-allow` /
