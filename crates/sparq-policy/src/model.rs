@@ -124,7 +124,10 @@ pub enum Operator {
     /// `odrl:gteq` — greater than or equal.
     Gteq,
     /// `odrl:isPartOf` — the request value is a member of / part of the
-    /// right-operand set or hierarchy (set membership in this base case).
+    /// right-operand set, OR — for the taxonomic dimensions `odrl:purpose` and
+    /// `odrl:spatial` — **transitively part-of** a named value under the subsumption
+    /// closure the request supplies (the DPV-purpose taxonomy / spatial region *tree*
+    /// case — see `Request::with_purpose_subsumption`). [OPUS-4.8] sq-z3ve / sq-wukl.
     IsPartOf,
     /// `odrl:isA` — the request value IS the right operand (a type/identity
     /// membership check, treated as equality here).

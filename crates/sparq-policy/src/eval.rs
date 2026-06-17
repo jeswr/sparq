@@ -37,6 +37,16 @@ pub const ODRL_COUNT: &str = "http://www.w3.org/ns/odrl/2/count";
 /// [`recipient_status`]). [OPUS-4.8] sq-5037.
 pub const ODRL_RECIPIENT: &str = "http://www.w3.org/ns/odrl/2/recipient";
 
+/// The `odrl:spatial` left-operand IRI — the dimension a *spatial constraint*
+/// restricts (the geographic region a permission/prohibition is gated on, e.g.
+/// `odrl:spatial isPartOf <country/EU>`, "anywhere in the EU"). A request supplies its
+/// region as `odrl:spatial` evidence; an `isPartOf` spatial constraint matches a
+/// sub-region the request declares part-of the named region by supplying the region
+/// `isPartOf` tree as subsumption evidence via [`Request::with_purpose_subsumption`] /
+/// [`Request::with_purpose_taxonomy`] (`DEU ⊑ EU` — the same caller-supplied closure the
+/// DPV purpose taxonomy uses; see [`spatial_status`]). [OPUS-4.8] sq-wukl.
+pub const ODRL_SPATIAL: &str = "http://www.w3.org/ns/odrl/2/spatial";
+
 /// The `odrl:dateTime` left-operand IRI — the dimension a *temporal constraint*
 /// restricts (the instant a permission/prohibition is gated on, e.g.
 /// `odrl:dateTime lteq "2026-12-31T23:59:59Z"`, the upper edge of a validity
@@ -75,18 +85,20 @@ pub struct Request {
     /// (e.g. `odrl:anonymize`, a custom `proveAttestation`). A permission with an
     /// undischarged duty is denied.
     pub discharged_duties: BTreeSet<String>,
-    /// The **purpose subsumption** evidence the request supplies: the *transitive
-    /// closure* of `(narrower, broader)` purpose pairs — `narrower ⊑ broader`, i.e.
-    /// the stated purpose `narrower` IS-A / is-part-of the broader purpose. Sourced
-    /// from a DPV/purpose-taxonomy (`skos:broader` / `rdfs:subClassOf` /
-    /// `dpv:isSubTypeOf` edges), supplied via [`Request::with_purpose_subsumption`]
-    /// / [`Request::with_purpose_taxonomy`]. Internal — populated only through those
-    /// builders, which maintain the closure so a lookup is a single membership test.
+    /// The **subsumption** evidence the request supplies: the *transitive closure* of
+    /// `(narrower, broader)` pairs — `narrower ⊑ broader`, i.e. the stated value
+    /// `narrower` IS-A / is-part-of the broader value. Used for the two taxonomic
+    /// dimensions — `odrl:purpose` (a DPV/purpose taxonomy, `skos:broader` /
+    /// `rdfs:subClassOf` / `dpv:isSubTypeOf` edges) and `odrl:spatial` (a region
+    /// `isPartOf` tree, e.g. `DEU ⊑ EU`). Supplied via
+    /// [`Request::with_purpose_subsumption`] / [`Request::with_purpose_taxonomy`].
+    /// Internal — populated only through those builders, which maintain the closure so
+    /// a lookup is a single membership test.
     ///
-    /// **Soundness:** subsumption matching for `odrl:purpose` constraints draws ONLY
-    /// on this caller-supplied closure (never inferred from IRI string structure), so
-    /// with an empty closure matching is byte-for-byte the exact-IRI base case and
-    /// access is never widened on an unproven relation. [OPUS-4.8] sq-z3ve.
+    /// **Soundness:** subsumption matching draws ONLY on this caller-supplied closure
+    /// (never inferred from IRI string structure), so with an empty closure matching is
+    /// byte-for-byte the exact-IRI base case and access is never widened on an unproven
+    /// relation. [OPUS-4.8] sq-z3ve / sq-wukl.
     pub(crate) purpose_subsumes: BTreeSet<(String, String)>,
 }
 
@@ -769,6 +781,105 @@ pub fn datetime_status(rule: &Rule, request: &Request) -> DateTimeMatch {
     }
 }
 
+/// The three-valued verdict of a rule's `odrl:spatial` constraints against the spatial
+/// (region) evidence a request carries — a FAITHFUL report of exactly what [`evaluate`]
+/// checks for the location (it reuses the same [`constraint_status`] the evaluator's
+/// `odrl:spatial` constraints go through). [OPUS-4.8] sq-wukl.
+///
+/// The honesty contract mirrors [`PurposeMatch`] / [`RecipientMatch`] / [`DateTimeMatch`]:
+/// it never claims a stronger verdict than the evaluator acts on. `Satisfied` is the ONLY
+/// verdict under which a spatially-gated permission grants; anything other than
+/// `DefinitelyUnsatisfied` (i.e. `Satisfied` OR `Unprovable`) keeps a spatially-gated
+/// prohibition in force.
+///
+/// **The spatial-tree / `isPartOf` shape:** a `spatial isPartOf <Region>` constraint is
+/// `Satisfied` when the request's stated region IS the named region or is **transitively
+/// part-of** it under the region `isPartOf` tree the request supplies as subsumption
+/// evidence (via [`Request::with_purpose_subsumption`] / [`Request::with_purpose_taxonomy`]
+/// — e.g. `Berlin ⊑ DEU ⊑ EU` for a `spatial isPartOf EU` rule, the SAME caller-supplied
+/// closure the DPV purpose taxonomy uses), `DefinitelyUnsatisfied` when the stated region
+/// is provably outside the named region (no edge path reaches it), and `Unprovable` when
+/// the request supplies no region at all — fail-closed. **No invented subsumption:** a
+/// sub-region grants only when the request asserts the `isPartOf` edge; a missing edge
+/// fails closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialMatch {
+    /// The rule has no `odrl:spatial` constraint — location places no restriction on it.
+    NotConstrained,
+    /// The rule constrains location AND the request's region **meets** every spatial
+    /// constraint (the named region, or part-of it under the supplied tree).
+    Satisfied,
+    /// The rule constrains location but the request carries **no** region evidence —
+    /// *unprovable*. Fail-closed: a permission does NOT grant; a prohibition is NOT
+    /// withdrawn. (Never silently read as "anywhere allowed".)
+    Unprovable,
+    /// The rule constrains location and the request's region **fails** the constraint —
+    /// a definite no (outside the named region; no `isPartOf` path reaches it).
+    DefinitelyUnsatisfied,
+}
+
+/// Report how `rule`'s `odrl:spatial` constraint(s) stand against the region evidence
+/// `request` carries — the auditable surface of faithful spatial (incl. `isPartOf`-tree)
+/// enforcement. [OPUS-4.8] sq-wukl.
+///
+/// Like [`purpose_status`] / [`recipient_status`] / [`datetime_status`], this does NOT
+/// re-implement matching: it runs the request through the SAME [`constraint_status`]
+/// every `odrl:spatial` constraint goes through inside [`evaluate`] (including the
+/// transitive `isPartOf` match over the request's supplied subsumption closure — see
+/// [`Request::with_purpose_subsumption`]), so the verdict it reports is exactly what the
+/// evaluator acts on — no claimed enforcement that isn't actually checked.
+///
+/// Returns [`SpatialMatch::NotConstrained`] when the rule has no spatial constraint.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_policy::{spatial_status, SpatialMatch, parse_policy_str, Request, Value, ODRL_SPATIAL};
+/// // "may distribute to anywhere in the EU" — spatial isPartOf EU.
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/geo> a odrl:Set ; odrl:permission [
+///     odrl:action odrl:distribute ; odrl:target <urn:asset/x> ;
+///     odrl:constraint [ odrl:leftOperand odrl:spatial ; odrl:operator odrl:isPartOf ;
+///                       odrl:rightOperand <urn:country/EU> ] ] .
+/// "#, "turtle").unwrap();
+/// let rule = &pol.permissions[0];
+/// let base = Request::new("http://www.w3.org/ns/odrl/2/distribute").on("urn:asset/x");
+///
+/// // Germany part-of EU (edge supplied) → Satisfied.
+/// let de = base.clone()
+///     .with(ODRL_SPATIAL, Value::Iri("urn:country/DEU".into()))
+///     .with_purpose_subsumption("urn:country/DEU", "urn:country/EU");
+/// assert_eq!(spatial_status(rule, &de), SpatialMatch::Satisfied);
+/// // A region outside EU → DefinitelyUnsatisfied.
+/// let us = base.clone().with(ODRL_SPATIAL, Value::Iri("urn:country/USA".into()));
+/// assert_eq!(spatial_status(rule, &us), SpatialMatch::DefinitelyUnsatisfied);
+/// // No region at all → Unprovable (fail-closed; not "anywhere").
+/// assert_eq!(spatial_status(rule, &base), SpatialMatch::Unprovable);
+/// ```
+pub fn spatial_status(rule: &Rule, request: &Request) -> SpatialMatch {
+    let mut constrained = false;
+    let mut any_unprovable = false;
+    for c in &rule.constraints {
+        if c.left != ODRL_SPATIAL {
+            continue;
+        }
+        constrained = true;
+        match constraint_status(c, request) {
+            ConstraintStatus::Satisfied => {}
+            ConstraintStatus::DefinitelyUnsatisfied => return SpatialMatch::DefinitelyUnsatisfied,
+            ConstraintStatus::Unprovable => any_unprovable = true,
+        }
+    }
+    if !constrained {
+        SpatialMatch::NotConstrained
+    } else if any_unprovable {
+        SpatialMatch::Unprovable
+    } else {
+        SpatialMatch::Satisfied
+    }
+}
+
 /// How one prohibition rule re-evaluates against a request, distinguishing a
 /// *definite* non-match from an *unprovable* one (missing-evidence constraint).
 /// [OPUS-4.8] sq-2pcf.
@@ -845,31 +956,45 @@ fn constraint_status(c: &Constraint, request: &Request) -> ConstraintStatus {
     }
 }
 
+/// Whether a constraint's `leftOperand` is a **taxonomic** dimension that subsumption
+/// (the request's supplied `narrower ⊑ broader` closure) applies to — `odrl:purpose`
+/// (a DPV/purpose taxonomy — [OPUS-4.8] sq-z3ve) and `odrl:spatial` (a region
+/// `isPartOf` tree — [OPUS-4.8] sq-wukl). Every other dimension matches by exact
+/// value / magnitude only.
+fn is_subsumable_dimension(left: &str) -> bool {
+    left == ODRL_PURPOSE || left == ODRL_SPATIAL
+}
+
 /// Compare a constraint's `actual` request value against its bound, applying
-/// **purpose subsumption** for `odrl:purpose` constraints (the stated purpose is
-/// matched against the constraint purpose *and every broader purpose* the request's
-/// supplied taxonomy proves it falls under — see [`Request::with_purpose_subsumption`]);
-/// every other dimension is the plain [`compare`]. One source of truth for both
-/// [`constraint_status`] and [`constraint_satisfied`]. [OPUS-4.8] sq-z3ve.
+/// **subsumption** for the taxonomic dimensions — `odrl:purpose` (a DPV/purpose
+/// taxonomy) and `odrl:spatial` (a region `isPartOf` tree). The stated value is
+/// matched against the constraint value *and every broader value* the request's
+/// supplied subsumption closure proves it falls under (see
+/// [`Request::with_purpose_subsumption`]); every other dimension is the plain
+/// [`compare`]. One source of truth for both [`constraint_status`] and
+/// [`constraint_satisfied`]. [OPUS-4.8] sq-z3ve / sq-wukl.
 fn compare_constraint(c: &Constraint, actual: &Value, request: &Request) -> bool {
-    if c.left == ODRL_PURPOSE && !request.purpose_subsumes.is_empty() {
-        return compare_purpose(actual, c.operator, &c.right, request);
+    if is_subsumable_dimension(&c.left) && !request.purpose_subsumes.is_empty() {
+        return compare_subsumed(actual, c.operator, &c.right, request);
     }
     compare(actual, c.operator, &c.right)
 }
 
-/// Subsumption-aware comparison for an `odrl:purpose` constraint. The stated
-/// purpose `actual` matches the named purpose `bound` when it equals it OR is a
-/// transitively-narrower purpose under the request's supplied taxonomy
-/// (`actual ⊑ bound`). [OPUS-4.8] sq-z3ve.
+/// Subsumption-aware comparison for a taxonomic constraint (`odrl:purpose`,
+/// `odrl:spatial`). The stated value `actual` matches the named value `bound` when it
+/// equals it OR is a transitively-narrower value under the request's supplied closure
+/// (`actual ⊑ bound`) — `clinical ⊑ research` for purpose, `DEU ⊑ EU` for spatial.
+/// [OPUS-4.8] sq-z3ve / sq-wukl.
 ///
 /// - `eq`/`isA`: `actual ⊑ bound`.
-/// - `neq`: NOT `actual ⊑ bound` — a sub-purpose of the excluded purpose is also
-///   excluded (a sub-purpose IS that purpose), so the carve-out is not widened away.
-/// - `isPartOf`: `actual ⊑ some member` of the named set.
-/// - order operators (`lt`/`lteq`/`gt`/`gteq`): purpose is not orderable, so these
-///   delegate to the plain [`compare`] (which already fail-closes on non-orderable).
-fn compare_purpose(actual: &Value, op: Operator, bound: &Value, request: &Request) -> bool {
+/// - `neq`: NOT `actual ⊑ bound` — a sub-value of the excluded value is also excluded
+///   (a sub-purpose IS that purpose; a sub-region IS in that region), so the carve-out
+///   is not widened away.
+/// - `isPartOf`: `actual ⊑ some member` of the named set (the spatial `isPartOf EU`
+///   region-tree case, and the purpose-set-with-hierarchy case).
+/// - order operators (`lt`/`lteq`/`gt`/`gteq`): a taxonomic value is not orderable, so
+///   these delegate to the plain [`compare`] (which already fail-closes on non-orderable).
+fn compare_subsumed(actual: &Value, op: Operator, bound: &Value, request: &Request) -> bool {
     let a = actual.as_str();
     match op {
         Operator::Eq | Operator::IsA => request.purpose_subsumed_by(a, bound.as_str()),
@@ -994,6 +1119,10 @@ fn constraint_satisfied(c: &Constraint, request: &Request) -> bool {
 /// operator. Numeric and dateTime operands compare by magnitude; everything
 /// else compares by string/IRI value. An order comparison (`lt`/`gt`/…) on
 /// non-orderable values is **false** (fail-closed).
+///
+/// This is the **exact / flat** base case (no subsumption). The taxonomic dimensions
+/// (`odrl:purpose`, `odrl:spatial`) route through [`compare_subsumed`] instead when the
+/// request supplies a subsumption closure — see [`compare_constraint`].
 fn compare(actual: &Value, op: Operator, bound: &Value) -> bool {
     match op {
         Operator::Eq | Operator::IsA => value_eq(actual, bound),
@@ -1067,6 +1196,10 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 /// `isPartOf` / set membership: the right operand is a `|`-or-space-separated
 /// set (the common compact encoding) OR a single IRI/string the actual must
 /// equal. We treat the right operand's string as a set: actual ∈ set.
+///
+/// This is the **flat** base case. Transitive `isPartOf` over a taxonomy (a DPV
+/// purpose subtree, a spatial region tree) is handled by [`compare_subsumed`] using the
+/// request's caller-supplied subsumption closure — see [`Request::with_purpose_subsumption`].
 fn is_part_of(actual: &Value, bound: &Value) -> bool {
     let a = actual.as_str();
     bound

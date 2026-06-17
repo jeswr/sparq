@@ -17,8 +17,9 @@ mod parse;
 pub use compare::{contains, detect_conflicts, Conflict, Containment, Overlap};
 pub use eval::{
     datetime_status, evaluate, matched_prohibition, prohibition_status, purpose_status,
-    recipient_status, DateTimeMatch, Decision, ProhibitionStatus, PurposeMatch, RecipientMatch,
-    Request, ODRL_COUNT, ODRL_DATETIME, ODRL_PURPOSE, ODRL_RECIPIENT,
+    recipient_status, spatial_status, DateTimeMatch, Decision, ProhibitionStatus, PurposeMatch,
+    RecipientMatch, Request, SpatialMatch, ODRL_COUNT, ODRL_DATETIME, ODRL_PURPOSE, ODRL_RECIPIENT,
+    ODRL_SPATIAL,
 };
 pub use model::{Action, Constraint, Duty, Operator, Policy, Rule, Value, ODRL_NS};
 pub use parse::{parse_policy, parse_policy_str};

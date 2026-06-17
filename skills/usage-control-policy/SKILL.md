@@ -70,11 +70,29 @@ assert_eq!(d.matched_rules.len(), 1);  // the granting permission, for audit
 
 ## Constraint operators
 
-`eq`, `neq`, `lt`, `lteq`, `gt`, `gteq`, `isPartOf` (set membership: `right` is a `|`/space/comma-separated set), `isA` (identity, ≈ `eq`). Numeric (`xsd:integer`/`decimal`/`double`/…) and `xsd:dateTime`/`date` operands compare by magnitude/instant; everything else by IRI/string value. Order comparison on non-orderable values is `false` (fail-closed). `dateTime` ordering compares the lexical form — mixed-offset normalization is a deferred bead.
+`eq`, `neq`, `lt`, `lteq`, `gt`, `gteq`, `isPartOf` (set membership: `right` is a `|`/space/comma-separated set — **or**, for the taxonomic dimensions `purpose`/`spatial`, a transitive subsumption match over a request-supplied closure, see below), `isA` (identity, ≈ `eq`). Numeric (`xsd:integer`/`decimal`/`double`/…) and `xsd:dateTime`/`date` operands compare by magnitude/instant; everything else by IRI/string value. Order comparison on non-orderable values is `false` (fail-closed). `dateTime` ordering compares the lexical form — mixed-offset normalization is a deferred bead.
+
+## `odrl:spatial` region enforcement + region `isPartOf` trees — [OPUS-4.8] sq-wukl
+
+A `spatial` constraint gates a rule to a **geographic region** (`spatial isPartOf <country/EU>`, "anywhere in the EU"). The new left-operand IRI is `ODRL_SPATIAL` (`odrl:spatial`); supply the request's region with `.with(ODRL_SPATIAL, Value::Iri(region))`, gated through the **same** `evaluate` constraint path as every other dimension.
+
+The spatial dimension is **taxonomic**, so it reuses the **same** caller-supplied subsumption closure the DPV purpose taxonomy uses — there is *no* separate spatial evidence channel. Declare the region `isPartOf` tree with `.with_purpose_subsumption(narrower, broader)` (one edge) or `.with_purpose_taxonomy([(n, b), …])` (bulk), and a `spatial isPartOf <EU>` constraint is then satisfied by a request whose stated region is the EU **or transitively part-of** it — `Berlin ⊑ DEU ⊑ EU`.
+
+- **Honesty / fail-closed:** the tree is *the requester's asserted subsumption*, never invented. With **no** edge supplied, `spatial` matching is exact membership (fully backward compatible) and a sub-region does **not** grant a broad-region permission — a missing edge fails closed, like a missing context value. Cycle-safe (the closure tolerates a malformed `A ⊑ B ⊑ A`).
+- **Audit:** `spatial_status(&rule, &request) -> SpatialMatch` (`Satisfied`/`DefinitelyUnsatisfied`/`Unprovable`/`NotConstrained`) is the spatial twin of `purpose_status` — it runs the same subsumption-aware path `evaluate` does.
+
+```rust,ignore
+use sparq_policy::{evaluate, Request, Value, ODRL_SPATIAL};
+// policy: distribute spatial isPartOf <country/EU>
+let req = Request::new("http://www.w3.org/ns/odrl/2/distribute").on("urn:asset/x")
+    .with(ODRL_SPATIAL, Value::Iri("urn:country/DEU".into()))
+    .with_purpose_subsumption("urn:country/DEU", "urn:country/EU"); // DEU ⊑ EU
+assert!(evaluate(&policy, &req).allow); // a sub-region of the named region grants
+```
 
 ## Building the request
 
-`Request::new(action_iri)` then chain `.on(target)`, `.by(party)`, `.with(left_operand_iri, Value)` for each context dimension (`dateTime`, `purpose`, `recipient`, `count`, `spatial`, …), and `.discharge(duty_action_iri)` per discharged duty. `Value` is `Iri` | `Str` | `Num(f64)` | `DateTime(String)`. For purpose specifically, prefer the first-class `.for_purpose(Value)` (sugar over `.with(ODRL_PURPOSE, ..)`; read it back via `req.purpose()`); for the evaluation time prefer `.at(instant)` (sugar over `.with(ODRL_DATETIME, Value::DateTime(..))`; read it back via `req.request_time()`).
+`Request::new(action_iri)` then chain `.on(target)`, `.by(party)`, `.with(left_operand_iri, Value)` for each context dimension (`dateTime`, `purpose`, `recipient`, `count`, `spatial`, …), `.with_purpose_subsumption(narrower, broader)` / `.with_purpose_taxonomy([(n, b), …])` per asserted subsumption edge (the DPV-purpose taxonomy / spatial region trees, above — one closure for both taxonomic dimensions), and `.discharge(duty_action_iri)` per discharged duty. `Value` is `Iri` | `Str` | `Num(f64)` | `DateTime(String)`. For purpose specifically, prefer the first-class `.for_purpose(Value)` (sugar over `.with(ODRL_PURPOSE, ..)`; read it back via `req.purpose()`); for the evaluation time prefer `.at(instant)` (sugar over `.with(ODRL_DATETIME, Value::DateTime(..))`; read it back via `req.request_time()`).
 
 ## `odrl:purpose` enforcement (faithful, fail-closed) — [OPUS-4.8] sq-q56r
 
@@ -82,7 +100,7 @@ A purpose constraint restricts a rule to a stated *purpose of use*. The request 
 
 - **Match → grant; mismatch → deny; missing purpose → fail-closed.** A request stating **no** purpose is *unprovable*: a purpose-gated permission does **not** grant, and a purpose-gated prohibition is **not** withdrawn. "No purpose stated" is **never** treated as "any purpose allowed".
 - **Match semantics (the boundary — do not over-claim):** **exact** IRI/string equality (`eq`/`isA`), or membership in the explicit `isPartOf` purpose *set* the constraint names, or `neq` (≠ the named one; still requires a stated purpose).
-- **DPV / purpose-taxonomy subsumption — [OPUS-4.8] sq-z3ve.** Supply the request a purpose taxonomy with `.with_purpose_subsumption(narrower, broader)` (one `skos:broader`/`rdfs:subClassOf`/`dpv:isSubTypeOf` edge) or the bulk `.with_purpose_taxonomy([(n, b), …])`, and a purpose constraint naming `B` is also satisfied by a stated purpose `P` that is **transitively narrower** than `B` (`P ⊑ B`) — a `research` permission covers `clinical-research`, and a `neq research` carve-out *also* excludes that sub-purpose. **Sound, never over-claimed:** the `⊑` relation is the **caller-supplied transitive closure only** (never inferred from IRI string structure); with no taxonomy supplied it is byte-for-byte the exact-IRI base case, the broader-under-narrower direction never matches, and access is never widened on an unproven relation.
+- **DPV / purpose-taxonomy subsumption — [OPUS-4.8] sq-z3ve.** Supply the request a purpose taxonomy with `.with_purpose_subsumption(narrower, broader)` (one `skos:broader`/`rdfs:subClassOf`/`dpv:isSubTypeOf` edge) or the bulk `.with_purpose_taxonomy([(n, b), …])`, and a purpose constraint naming `B` is also satisfied by a stated purpose `P` that is **transitively narrower** than `B` (`P ⊑ B`) — a `research` permission covers `clinical-research`, and a `neq research` carve-out *also* excludes that sub-purpose. **Sound, never over-claimed:** the `⊑` relation is the **caller-supplied transitive closure only** (never inferred from IRI string structure); with no taxonomy supplied it is byte-for-byte the exact-IRI base case, the broader-under-narrower direction never matches, and access is never widened on an unproven relation. The **same** closure also drives the `odrl:spatial` region tree (above) — one subsumption evidence channel for both taxonomic dimensions.
 - **Audit:** `purpose_status(&rule, &request) -> PurposeMatch` reports exactly what the evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` / `NotConstrained` (it runs the same subsumption-aware path `evaluate` does).
 - Through the bridge, purpose stays **one-shot** (checked once at materialization; see the mapping table below) — it has no re-checked-condition analogue, so a changed purpose is re-evaluated on the next `refresh_odrl_grant`.
 
@@ -205,7 +223,8 @@ store.materialize_odrl_permission_conditional(&policy, &req); // policy: recipie
 | `odrl:recipient` / `odrl:assignee` | `isPartOf` (static set) | one `auth:agent` head per member (OR) | ✅ set membership = agent ∈ set | **persisted** (one grant/member) |
 | `odrl:recipient` / `odrl:assignee` | `neq` ("everyone EXCEPT X") | `auth:Public` `ConditionalGrant` + `auth:exceptMatcher` carving out `X` (ACP `noneOf`) | ✅ everyone-except is exactly the ACP `noneOf` shape | **persisted, re-checked per session** ([OPUS-4.8] sq-5037) |
 | `odrl:recipient` / `odrl:assignee` | order (`lt`/`gt`/…) | (none — not meaningful on a recipient) | ❌ | **one-shot** (frozen) |
-| `odrl:purpose` | any | (none — a client app ≠ a purpose-of-use) | ❌ ACP session carries no purpose dimension; client-matcher would over-grant | **one-shot** (frozen) |
+| `odrl:purpose` | any (incl. `isPartOf` DPV hierarchy) | (none — a client app ≠ a purpose-of-use) | ❌ ACP session carries no purpose dimension; client-matcher would over-grant | **one-shot** (frozen) |
+| `odrl:spatial` | any (incl. `isPartOf` region hierarchy) | (none — ACP session carries no region) | ❌ no spatial dimension to re-check | **one-shot** (frozen) ([OPUS-4.8] sq-wukl) |
 | `odrl:dateTime` / time window | `lteq` / `lt` / `gteq` / `gt` | (none — matcher accept-sets are static; no "now") | ❌ ACP has no clock dimension to re-check | **one-shot** (frozen) |
 | `odrl:count` | any | (none — ACP is stateless; no per-session usage counter) | ❌ in the bridge | **one-shot** (frozen) in the bridge — stateful enforcement lives in `sparq-policy`'s `count-enforcement` feature (`evaluate_and_exercise`), not yet wired through ACP |
 | any unrecognised left-operand | any | (none) | ❌ | **one-shot** (frozen) |

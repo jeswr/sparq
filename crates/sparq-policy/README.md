@@ -78,10 +78,33 @@ assert!(!evaluate(&policy, &outside).allow);
   so access is never restored on missing evidence (`matched_prohibition().is_none()`
   alone conflates the two, which would be fail-OPEN for a deny).
 - **Constraint operators** — `eq`, `neq`, `lt`, `lteq`, `gt`, `gteq`,
-  `isPartOf` (set membership), `isA`. Numeric (`xsd:integer`/`decimal`/…) and
+  `isPartOf` (set membership **or**, for the taxonomic dimensions `purpose`/`spatial`,
+  a transitive subsumption match — see below), `isA`. Numeric (`xsd:integer`/`decimal`/…) and
   `xsd:dateTime`/`date` operands compare by magnitude/instant; everything else
   by IRI/string value. Constraints over `purpose` / `recipient` / `dateTime` /
   `count` / `spatial` left-operands are all supported.
+- **`odrl:spatial` region enforcement + region `isPartOf` trees** — [OPUS-4.8] sq-wukl.
+  A `spatial` constraint gates a rule to a **geographic region** (`spatial isPartOf
+  <country/EU>`, "anywhere in the EU"). A request supplies its region as `odrl:spatial`
+  evidence (`.with(ODRL_SPATIAL, ..)`), gated through the **same** `evaluate` constraint
+  path as every other dimension.
+  - **Region `isPartOf` tree (subsumption).** The spatial dimension is taxonomic, so it
+    reuses the **same** caller-supplied subsumption closure the DPV purpose taxonomy uses
+    (`Request::with_purpose_subsumption(narrower, broader)` / `with_purpose_taxonomy(edges)`
+    — there is *no* separate spatial evidence channel). A `spatial isPartOf <EU>`
+    constraint is then satisfied by a request whose stated region is the EU **or
+    transitively part-of** it — `Berlin ⊑ DEU ⊑ EU`. **Honesty / fail-closed:** the tree is
+    *the requester's asserted subsumption*, never invented — with **no** edge supplied
+    `spatial` matching is exact membership (fully backward compatible), and a sub-region
+    does **not** grant a broad-region permission unless the request asserts the edge (a
+    missing edge fails closed, like a missing context value). Cycle-safe (the closure
+    tolerates a malformed `A ⊑ B ⊑ A`).
+  - `spatial_status(&rule, &request) -> SpatialMatch` reports exactly what the evaluator
+    checks for a rule's spatial constraints — `Satisfied` / `DefinitelyUnsatisfied` /
+    `Unprovable` / `NotConstrained` — the spatial twin of `purpose_status` (it runs the
+    same subsumption-aware path `evaluate` does). (Through the `sparq-solid` bridge
+    `purpose`/`spatial` stay **one-shot** — ACP has no purpose/region dimension to
+    re-check; see the mapping table.)
 - **`odrl:purpose` enforcement (faithful, fail-closed)** — [OPUS-4.8] sq-q56r. A
   purpose constraint restricts a rule to a stated *purpose of use*. A request carries
   its purpose evidence via `Request::for_purpose(Value)` (sugar over
@@ -108,7 +131,9 @@ assert!(!evaluate(&policy, &outside).allow);
     it is *never* inferred from IRI string structure — so with no taxonomy supplied
     matching is byte-for-byte the exact-IRI base case, the broader-under-narrower
     direction never matches, and access is never widened on an unproven relation. The
-    edges form the closure incrementally (order-independent).
+    edges form the closure incrementally (order-independent). The **same** closure also
+    drives the `odrl:spatial` region tree (see the spatial bullet above) — one subsumption
+    evidence channel for both taxonomic dimensions.
   - `purpose_status(&rule, &request) -> PurposeMatch` reports exactly what the evaluator
     checks for a rule's purpose constraints — `Satisfied` / `DefinitelyUnsatisfied` /
     `Unprovable` / `NotConstrained` — the auditable surface of this enforcement (it runs
@@ -208,11 +233,13 @@ Single-node only. The headline **federated-disclosure** / ODRL→MPC composition
 (per-node ODRL drives the `sparq-mpc` disclosed-vs-hidden split; ODRL `Duty` →
 ZK proof obligation) is **deferred** — it inherits the MPC honest-majority/LAN
 envelope and the open ZK-soundness remediation. `dateTime` ordering normalizes
-mixed timezone offsets to the UTC instant before comparing ([OPUS-4.8] sq-qj2q);
-DPV `purpose`-taxonomy subsumption is supported when the request supplies the
-taxonomy edges ([OPUS-4.8] sq-z3ve — `Request::with_purpose_subsumption` /
-`with_purpose_taxonomy`); `Duty → proof-manifest` discharge is tracked as a
-follow-on bead. See `research/feature-research-odrl-policy.md`.
+mixed timezone offsets to the UTC instant before comparing ([OPUS-4.8] sq-qj2q).
+DPV-`purpose`-taxonomy subsumption ([OPUS-4.8] sq-z3ve — `Request::with_purpose_subsumption`
+/ `with_purpose_taxonomy`) and the `odrl:spatial` region `isPartOf` tree ([OPUS-4.8]
+sq-wukl — the same caller-supplied closure) are both evaluated at request time when the
+request supplies the edges. The *static* (request-free) `contains` refinement over
+`isPartOf` set-subset, and `Duty → proof-manifest` discharge, remain follow-on beads.
+See `research/feature-research-odrl-policy.md`.
 
 **Constraint persistence vs. one-shot** (sq-hiz4 / sq-5037, in `sparq-solid`'s opt-in
 bridge): `materialize_odrl_permission_conditional` persists a
@@ -220,8 +247,8 @@ bridge): `materialize_odrl_permission_conditional` persists a
 `auth:ConditionalGrant` — `eq`/`isA`/`isPartOf` as an agent matcher, and **`neq`
 ("everyone EXCEPT X") as an ACP `noneOf` exception** (a public grant + an
 `auth:exceptMatcher` carving out `X`). These are the only constraints with a faithful
-stateless `(agent, client)` analogue. `odrl:purpose`/`dateTime`/`count` have no
-*stateless* ACP analogue and stay
+stateless `(agent, client)` analogue. `odrl:purpose`/`spatial`/`dateTime`/`count` have no
+*stateless* ACP analogue (ACP carries no purpose/region/clock dimension) and stay
 **one-shot** in the bridge (checked once at materialization). Stateful `odrl:count`
 enforcement itself (the usage counter) lives in this crate's `count-enforcement`
 feature (`evaluate_and_exercise` + `UsageCounterStore`); wiring it *through* the
