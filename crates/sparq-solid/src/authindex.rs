@@ -24,8 +24,10 @@ pub const ANY_CLIENT: &str = "https://sparq.dev/ns/auth#AnyClient";
 /// [OPUS-4.8] sq-3jtd.6.
 pub const ANY_ISSUER: &str = "https://sparq.dev/ns/auth#AnyIssuer";
 
-/// A request context: who (WebID) through what (client identifier / origin) and vouched
-/// for by which OIDC issuer (`acp:issuer`). `agent: None` = anonymous.
+/// A request context: who (WebID) through what (client identifier / origin), vouched
+/// for by which OIDC issuer (`acp:issuer`), and — for [OPUS-4.8] sq-0q7n — *when* (the
+/// wall-clock instant the request is evaluated at). `agent: None` = anonymous;
+/// `now: None` = no clock supplied.
 ///
 /// A session expands to at most 12 principals when grants are looked up ([OPUS-4.8]
 /// sq-3jtd.6 — the issuer dimension doubles the pre-issuer ≤6): always `auth:Public`;
@@ -36,20 +38,37 @@ pub const ANY_ISSUER: &str = "https://sparq.dev/ns/auth#AnyIssuer";
 /// and the full triple when both are given. Expansion is internal — callers just supply
 /// the request context:
 ///
+/// # The clock (`now`) — [OPUS-4.8] sq-0q7n
+///
+/// `now` is the request instant as an `xsd:dateTime` lexical string (e.g.
+/// `"2026-06-17T09:00:00Z"`). It is consulted ONLY by time-windowed conditional grants
+/// (an `odrl:dateTime` constraint persisted as `auth:notBefore`/`auth:notAfter`
+/// bounds): the grant applies iff `now` falls inside the window, re-checked *per
+/// request* rather than frozen at materialization. **Fail-closed:** a time-windowed
+/// grant evaluated with `now == None` (no clock evidence) never applies — exactly
+/// mirroring the ODRL evaluator, which fails a `dateTime` constraint with no
+/// request-context value. A grant with NO time window ignores `now`, so an
+/// identity-only session need not supply it. Construct it with [`Session::at`].
+///
 /// # Examples
 ///
 /// ```
 /// use sparq_solid::Session;
 ///
 /// let anonymous = Session::default();
-/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+/// let alice =
+///     Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 /// let alice_via_app = Session {
 ///     agent: Some("https://alice.ex/card#me"),
 ///     client: Some("https://app.ex"),
 ///     issuer: Some("https://idp.ex"),
+///     now: None,
 /// };
+/// // bind the request clock for a time-windowed grant:
+/// let alice_at = alice.at("2026-06-17T09:00:00Z");
 /// assert!(anonymous.agent.is_none());
-/// # let _ = (alice, alice_via_app);
+/// assert_eq!(alice_at.now, Some("2026-06-17T09:00:00Z"));
+/// # let _ = alice_via_app;
 /// ```
 ///
 /// # Invariants (fail-closed)
@@ -68,6 +87,26 @@ pub struct Session<'a> {
     /// [OPUS-4.8] sq-3jtd.6 — only ACP matchers constrain on it; WAC has no issuer notion,
     /// so a WAC pod ignores it (no grant ever names a triple principal).
     pub issuer: Option<&'a str>,
+    /// The request instant as an `xsd:dateTime` lexical string, consulted only by
+    /// time-windowed conditional grants ([OPUS-4.8] sq-0q7n). `None` = no clock supplied
+    /// → a time-windowed grant fails closed.
+    pub now: Option<&'a str>,
+}
+
+impl<'a> Session<'a> {
+    /// This session with its request clock bound to `now` (an `xsd:dateTime` lexical
+    /// string). Use it so a time-windowed conditional grant re-checks the live clock per
+    /// request instead of being frozen at materialization. [OPUS-4.8] sq-0q7n.
+    ///
+    /// ```
+    /// use sparq_solid::Session;
+    /// let alice =
+    ///     Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
+    /// assert_eq!(alice.at("2026-06-17T00:00:00Z").now, Some("2026-06-17T00:00:00Z"));
+    /// ```
+    pub fn at(self, now: &'a str) -> Session<'a> {
+        Session { now: Some(now), ..self }
+    }
 }
 
 /// An access mode, matching WAC's `acl:Read`/`Write`/`Append`/`Control` (ACP reuses
@@ -186,6 +225,13 @@ struct ConditionalGrant {
     mode: Option<Mode>,
     graph: Option<NamedNode>,
     except: Vec<String>, // matcher IRIs
+    // [OPUS-4.8] sq-0q7n: an optional live-clock window from a faithfully-mappable
+    // `odrl:dateTime` constraint. `not_before` = the grant is inactive UNTIL this
+    // instant (inclusive); `not_after` = inactive AFTER it (inclusive). Both are
+    // `xsd:dateTime` lexical strings, compared against `Session::now` per request (see
+    // [`AuthIndex::cond_applies`]). `None` on a bound means that side is unbounded.
+    not_before: Option<String>,
+    not_after: Option<String>,
 }
 
 /// A transient index over the `<urn:sparq:auth>` graph's triples: principal × mode →
@@ -216,7 +262,7 @@ struct ConditionalGrant {
 /// materialize_wac(&mut graph)?;
 ///
 /// let index = AuthIndex::from_graph(&graph);
-/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 /// assert_eq!(index.accessible(&alice, Mode::Read).len(), 2); // n1 + notes/
 /// assert!(index.accessible(&alice, Mode::Write).is_empty()); // fail-closed
 /// # Ok::<(), String>(())
@@ -295,6 +341,9 @@ impl AuthIndex {
                 ("mode", Term::NamedNode(o)) => entry.mode = Mode::from_mode_iri(o.as_str()),
                 ("graph", Term::NamedNode(o)) => entry.graph = Some(o.clone()),
                 ("exceptMatcher", Term::NamedNode(o)) => entry.except.push(o.as_str().to_owned()),
+                // [OPUS-4.8] sq-0q7n: the live-clock window bounds (xsd:dateTime literals).
+                ("notBefore", Term::Literal(o)) => entry.not_before = Some(o.value().to_owned()),
+                ("notAfter", Term::Literal(o)) => entry.not_after = Some(o.value().to_owned()),
                 _ => {}
             }
         }
@@ -369,14 +418,23 @@ impl AuthIndex {
         agent_ok && client_ok && issuer_ok
     }
 
-    /// Does a conditional grant's (agent, client, issuer) head apply to this session?
+    /// Does a conditional grant's (agent, client, issuer) head apply to this session,
+    /// AND — for a time-windowed grant — does the session's clock fall inside the window?
     /// [OPUS-4.8] sq-3jtd.6: the issuer head is the twin of the client head — the grant's
     /// `auth:AnyIssuer` matches any session, else the session's issuer must equal it.
+    /// [OPUS-4.8] sq-0q7n: the `auth:notBefore`/`auth:notAfter` window is re-checked
+    /// against `Session::now` here, so a lapsed window denies *this request* without
+    /// waiting for a ledger refresh.
     fn cond_applies(&self, g: &ConditionalGrant, s: &Session) -> bool {
         let agent_ok = Self::agent_principals(s).contains(&g.agent);
         let client_ok = g.client == ANY_CLIENT || s.client == Some(g.client.as_str());
         let issuer_ok = g.issuer == ANY_ISSUER || s.issuer == Some(g.issuer.as_str());
-        agent_ok && client_ok && issuer_ok && !g.except.iter().any(|m| self.matcher_accepts(m, s))
+        let window_ok = window_admits(g.not_before.as_deref(), g.not_after.as_deref(), s.now);
+        agent_ok
+            && client_ok
+            && issuer_ok
+            && window_ok
+            && !g.except.iter().any(|m| self.matcher_accepts(m, s))
     }
 
     /// The sorted, deduplicated graph set this session may access in `mode`:
@@ -428,5 +486,84 @@ impl AuthIndex {
         let mut out: Vec<NamedNode> = allowed.into_iter().filter(|g| !denied.contains(g)).collect();
         out.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
         out
+    }
+}
+
+/// Does the live clock `now` fall inside a conditional grant's
+/// `[not_before, not_after]` window (both bounds inclusive)? [OPUS-4.8] sq-0q7n.
+///
+/// - A grant with NO window (`not_before == None && not_after == None`) admits any
+///   session, including one with `now == None` — there is no clock dimension to check.
+/// - A windowed grant evaluated with `now == None` **fails closed**: no clock evidence
+///   means we cannot prove the request falls inside the window (mirrors the ODRL
+///   evaluator's fail-closed `dateTime` constraint with no request-context value).
+/// - Bounds compare by `xsd:dateTime` lexical order — the SAME comparison
+///   `sparq_policy`'s evaluator uses for `odrl:dateTime` (`str::cmp` on Z-normalized
+///   ISO-8601 instants; the documented mixed-offset limitation carries over identically,
+///   so a window emitted from a constraint re-checks exactly as the constraint did).
+fn window_admits(not_before: Option<&str>, not_after: Option<&str>, now: Option<&str>) -> bool {
+    if not_before.is_none() && not_after.is_none() {
+        return true; // no window → the clock is irrelevant.
+    }
+    let Some(now) = now else {
+        return false; // windowed grant, no clock evidence → fail-closed.
+    };
+    if let Some(nb) = not_before {
+        if now < nb {
+            return false; // before the window opens.
+        }
+    }
+    if let Some(na) = not_after {
+        if now > na {
+            return false; // after the window closes.
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod window_tests {
+    //! [OPUS-4.8] sq-0q7n — soundness of the live-clock window predicate. The
+    //! integration suite (`tests/odrl_bridge.rs`) covers the `lteq`/`notAfter` path
+    //! end-to-end; these unit tests pin the `gteq`/`notBefore`, two-sided, and
+    //! fail-closed corner cases directly.
+    use super::window_admits;
+
+    const T0: &str = "2026-01-01T00:00:00Z";
+    const T1: &str = "2026-06-17T00:00:00Z";
+    const T2: &str = "2026-12-31T00:00:00Z";
+
+    #[test]
+    fn no_window_admits_anything_including_no_clock() {
+        assert!(window_admits(None, None, None));
+        assert!(window_admits(None, None, Some(T1)));
+    }
+
+    #[test]
+    fn windowed_with_no_clock_fails_closed() {
+        assert!(!window_admits(None, Some(T2), None), "notAfter + no clock → deny");
+        assert!(!window_admits(Some(T0), None, None), "notBefore + no clock → deny");
+        assert!(!window_admits(Some(T0), Some(T2), None), "two-sided + no clock → deny");
+    }
+
+    #[test]
+    fn not_after_is_inclusive_upper_bound() {
+        assert!(window_admits(None, Some(T2), Some(T1)), "before close → admit");
+        assert!(window_admits(None, Some(T2), Some(T2)), "exactly at close → admit (inclusive)");
+        assert!(!window_admits(None, Some(T0), Some(T1)), "after close → deny");
+    }
+
+    #[test]
+    fn not_before_is_inclusive_lower_bound() {
+        assert!(window_admits(Some(T0), None, Some(T1)), "after open → admit");
+        assert!(window_admits(Some(T0), None, Some(T0)), "exactly at open → admit (inclusive)");
+        assert!(!window_admits(Some(T2), None, Some(T1)), "before open → deny");
+    }
+
+    #[test]
+    fn two_sided_window_admits_only_inside() {
+        assert!(window_admits(Some(T0), Some(T2), Some(T1)), "inside → admit");
+        assert!(!window_admits(Some(T0), Some(T2), Some("2025-01-01T00:00:00Z")), "before → deny");
+        assert!(!window_admits(Some(T0), Some(T2), Some("2027-01-01T00:00:00Z")), "after → deny");
     }
 }

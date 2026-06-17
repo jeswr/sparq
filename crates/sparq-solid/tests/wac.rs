@@ -14,7 +14,7 @@ fn store() -> PodStore {
 
 fn can(s: &mut PodStore, agent: Option<&str>, client: Option<&str>, mode: Mode, graph: &str) -> bool {
     // WAC has no issuer dimension; the field stays None for these cases. [OPUS-4.8] sq-3jtd.6
-    s.accessible(&Session { agent, client, issuer: None }, mode).iter().any(|g| g.as_str() == graph)
+    s.accessible(&Session { agent, client, issuer: None, now: None }, mode).iter().any(|g| g.as_str() == graph)
 }
 
 use sparq_solid::fixture::{ALICE, APP, BOB, CAROL, DAVE};
@@ -105,21 +105,21 @@ fn wac_write_enforcement_matches_grants() {
     // owner writes inherited to depth 4 (read-matrix #1 has the Read twin)
     let priv0 = "https://pod.ex/priv0/c4/g0/d0.ttl";
     assert!(can(&mut s, Some(ALICE), None, Mode::Write, priv0));
-    s.update_as(&Session { agent: Some(ALICE), client: None, issuer: None }, &ins(priv0)).expect("alice writes");
+    s.update_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, &ins(priv0)).expect("alice writes");
     // …and nobody else (read-matrix #2 twin)
     assert!(!can(&mut s, Some(BOB), None, Mode::Write, priv0));
-    assert!(s.update_as(&Session { agent: Some(BOB), client: None, issuer: None }, &ins(priv0)).is_err());
+    assert!(s.update_as(&Session { agent: Some(BOB), client: None, issuer: None, now: None }, &ins(priv0)).is_err());
 
     // group read+write; nearest-ACL shadows alice (read-matrix #4/#5 twins)
     let team2 = "https://pod.ex/team2/c3/g0/d0.ttl";
     assert!(can(&mut s, Some(CAROL), None, Mode::Write, team2));
-    s.update_as(&Session { agent: Some(CAROL), client: None, issuer: None }, &ins(team2)).expect("carol writes");
+    s.update_as(&Session { agent: Some(CAROL), client: None, issuer: None, now: None }, &ins(team2)).expect("carol writes");
     assert!(!can(&mut s, Some(ALICE), None, Mode::Write, team2));
-    assert!(s.update_as(&Session { agent: Some(ALICE), client: None, issuer: None }, &ins(team2)).is_err());
+    assert!(s.update_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, &ins(team2)).is_err());
 
     // Control gates the .acl document: writing it needs Write, granted only to alice
     let acl = "https://pod.ex/.acl";
     assert!(can(&mut s, Some(ALICE), None, Mode::Write, acl)); // via Control->write
     assert!(!can(&mut s, Some(BOB), None, Mode::Write, acl));
-    assert!(s.update_as(&Session { agent: Some(BOB), client: None, issuer: None }, &ins(acl)).is_err());
+    assert!(s.update_as(&Session { agent: Some(BOB), client: None, issuer: None, now: None }, &ins(acl)).is_err());
 }

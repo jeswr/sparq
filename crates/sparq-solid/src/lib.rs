@@ -129,7 +129,7 @@ pub const SOLIDX_NS: &str = "https://sparq.dev/ns/solidx#";
 /// let mut store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
 /// store.materialize_wac()?;
 ///
-/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 /// // alice was granted acl:Read only — Write fails closed
 /// assert_eq!(store.accessible(&alice, Mode::Read).len(), 2); // n1 + the notes/ container
 /// assert_eq!(store.accessible(&alice, Mode::Write).len(), 0);
@@ -155,10 +155,13 @@ pub struct PodStore {
     bridge_ledger: odrl_bridge::BridgeLedger,
 }
 
-/// The owned session-cache key: the three request dimensions ([`Session`] is borrowed,
-/// so the cache owns `String` copies) plus the [`Mode`]. [OPUS-4.8] sq-3jtd.6 added the
-/// issuer slot — keep all three dimensions here so issuer-distinct sessions never collide.
-type SessionKey = (Option<String>, Option<String>, Option<String>, Mode);
+/// The owned session-cache key: the request dimensions ([`Session`] is borrowed, so the
+/// cache owns `String` copies) plus the [`Mode`]. [OPUS-4.8] sq-3jtd.6 added the issuer
+/// slot; [OPUS-4.8] sq-0q7n added the clock (`now`) slot so a time-windowed conditional
+/// grant re-checked at two different instants never returns a stale cached graph set
+/// (two requests differing only by `now` — one inside a window, one after it — must not
+/// collide).
+type SessionKey = (Option<String>, Option<String>, Option<String>, Option<String>, Mode);
 
 /// One session-cache entry: the same authorized graph set in the two shapes its two
 /// consumers need — sorted (the v1 `FROM NAMED` rewrite, [`PodStore::accessible`])
@@ -188,7 +191,7 @@ impl PodStore {
     /// <https://mallory.ex/card#me> <https://sparq.dev/ns/auth#read> <https://pod.ex/secret> <urn:sparq:auth> .
     /// "#;
     /// let mut store = PodStore::new(sparq_core::Graph::load_dataset(forged, "nquads")?);
-    /// let mallory = Session { agent: Some("https://mallory.ex/card#me"), client: None, issuer: None };
+    /// let mallory = Session { agent: Some("https://mallory.ex/card#me"), client: None, issuer: None, now: None };
     /// assert!(store.accessible(&mallory, Mode::Read).is_empty());
     /// # Ok::<(), String>(())
     /// ```
@@ -295,8 +298,8 @@ impl PodStore {
     /// prov.set_creator("https://pod.ex/docs/d0.ttl", "https://alice.ex/card#me");
     /// store.materialize_acp_with(&prov)?;
     ///
-    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
-    /// let bob = Session { agent: Some("https://bob.ex/card#me"), client: None, issuer: None };
+    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
+    /// let bob = Session { agent: Some("https://bob.ex/card#me"), client: None, issuer: None, now: None };
     /// assert_eq!(store.accessible(&alice, Mode::Read).len(), 1); // d0 (her creation)
     /// assert_eq!(store.accessible(&bob, Mode::Read).len(), 0);   // not the creator
     /// # Ok::<(), String>(())
@@ -346,8 +349,13 @@ impl PodStore {
     }
 
     fn session_sets(&mut self, s: &Session, mode: Mode) -> &SessionSets {
-        let key =
-            (s.agent.map(str::to_owned), s.client.map(str::to_owned), s.issuer.map(str::to_owned), mode);
+        let key = (
+            s.agent.map(str::to_owned),
+            s.client.map(str::to_owned),
+            s.issuer.map(str::to_owned),
+            s.now.map(str::to_owned),
+            mode,
+        );
         let auth = Arc::clone(&self.auth);
         self.cache.entry(key).or_insert_with(|| {
             let sorted = auth.accessible(s, mode);
@@ -406,7 +414,7 @@ impl PodStore {
     /// # let mut store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
     /// # store.materialize_wac()?;
     /// let q = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
-    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
     /// assert_eq!(store.query_as(&alice, Mode::Read, q)?.rows.len(), 1);
     /// assert_eq!(store.query_as(&Session::default(), Mode::Read, q)?.rows.len(), 0);
     /// # Ok::<(), String>(())
@@ -519,7 +527,7 @@ impl PodStore {
     /// let mut store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
     /// store.materialize_wac()?;
     ///
-    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
     /// let ins = "INSERT DATA { GRAPH <https://pod.ex/notes/n1> { \
     ///     <https://pod.ex/notes/n1#it> <https://ex.dev/ns#tag> \"x\" } }";
     /// // alice has acl:Write on n1 -> permitted

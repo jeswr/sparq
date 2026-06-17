@@ -139,7 +139,7 @@ pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
 /// assert_eq!(stats.strata_facts.len(), 3); // accepts → rejections → grants
 ///
 /// let index = sparq_solid::AuthIndex::from_graph(&graph);
-/// let alice = sparq_solid::Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+/// let alice = sparq_solid::Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 /// assert_eq!(index.accessible(&alice, sparq_solid::Mode::Read).len(), 2); // n1 + notes/
 /// # Ok::<(), String>(())
 /// ```
