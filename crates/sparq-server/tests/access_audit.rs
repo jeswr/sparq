@@ -177,3 +177,105 @@ async fn graph_store_write_records_named_graph_resource() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// [OPUS-4.8] sq-ljfz (sq-gos8 follow-up): when the operator configures a TRUSTED forwarded
+/// -identity header, a fronting auth layer's resolved WebID is recorded as the audit actor
+/// (`Actor::WebId`) — the real authenticated subject — instead of the coarse Bearer-token
+/// fingerprint. This is the bead's enrichment, driven end-to-end through the real seam.
+#[tokio::test]
+async fn trusted_forwarded_webid_header_becomes_the_audit_actor() {
+    let dir = std::env::temp_dir().join(format!("sparq-aa-webid-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit_path = dir.join("access.jsonl");
+
+    // Trust the front's `X-WebID` header (the deployment names sparq-solid / a Solid-WAC proxy).
+    let config = ServerConfig {
+        access_audit: Some(SinkTarget::File(audit_path.clone())),
+        audit_webid_header: Some("X-WebID".to_string()),
+        ..ServerConfig::default()
+    };
+    let graph =
+        Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
+    let app = router(AppState::with_config(graph, config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let cl = reqwest::Client::new();
+
+    let webid = "https://alice.example/profile#me";
+    // Header casing is deliberately different from the configured name to exercise the
+    // case-insensitive HTTP header match.
+    let ok = cl
+        .get(format!("{base}/sparql"))
+        .header("accept", "application/sparql-results+json")
+        .header("x-webid", webid)
+        .query(&[("query", SELECT)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200, "unauthed open read should succeed");
+
+    let recs = read_records(&audit_path, 1).await;
+    let rec = recs.iter().find(|r| r["decision"] == "allow").expect("an allow record");
+    assert_eq!(
+        rec["actor"],
+        format!("webid:{webid}"),
+        "the trusted front's WebID is the audit actor",
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// [OPUS-4.8] sq-ljfz (audit-integrity / no-spoof): with NO trusted header configured (the
+/// default), a client-supplied identity header is IGNORED — the actor stays the local Bearer
+/// gate (here `anonymous`). This is the guarantee that a direct client cannot spoof an
+/// arbitrary WebID into the audit trail; the WebID is honoured ONLY behind a trusted front the
+/// operator opted into.
+#[tokio::test]
+async fn forwarded_identity_header_is_ignored_unless_a_trusted_header_is_configured() {
+    let dir = std::env::temp_dir().join(format!("sparq-aa-nospoof-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit_path = dir.join("access.jsonl");
+
+    // NO audit_webid_header set => trust nothing forwarded.
+    let config = ServerConfig {
+        access_audit: Some(SinkTarget::File(audit_path.clone())),
+        ..ServerConfig::default()
+    };
+    let graph =
+        Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
+    let app = router(AppState::with_config(graph, config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let cl = reqwest::Client::new();
+
+    let spoofed = "https://attacker.example/#me";
+    let ok = cl
+        .get(format!("{base}/sparql"))
+        .header("accept", "application/sparql-results+json")
+        // A common forwarded-identity header name — but the operator trusts none, so it is inert.
+        .header("X-WebID", spoofed)
+        .query(&[("query", SELECT)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+
+    let recs = read_records(&audit_path, 1).await;
+    let rec = recs.iter().find(|r| r["decision"] == "allow").expect("an allow record");
+    assert_eq!(rec["actor"], "anonymous", "a spoofed header must NOT become the actor");
+    let file = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(
+        !file.contains(spoofed),
+        "an untrusted client-supplied WebID must never reach the audit trail"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

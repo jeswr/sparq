@@ -277,6 +277,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 config.access_audit = Some(sparq_server::access_audit::SinkTarget::parse(&target));
             }
+            // [OPUS-4.8] sq-ljfz (sq-gos8 follow-up): trust a fronting auth layer's forwarded
+            // WebID header so the access-audit actor is the real authenticated subject
+            // (Actor::WebId) rather than the coarse Bearer-token fingerprint. NAME the header a
+            // trusted front (sparq-solid / a Solid-WAC proxy / gateway) sets to the user's
+            // WebID. SECURITY: only set this when the server runs BEHIND that trusted front —
+            // a forwarded header is client-spoofable otherwise. Overrides SPARQ_AUDIT_WEBID_HEADER.
+            #[cfg(feature = "access-audit")]
+            "--audit-webid-header" => {
+                let name = args
+                    .next()
+                    .ok_or("--audit-webid-header requires a header name")?;
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return Err("--audit-webid-header must not be empty".into());
+                }
+                config.audit_webid_header = Some(name);
+            }
             // [OPUS-4.8] sq-7cxr (PSS gh-44): durable persistence directory (QLever
             // --persist-updates). Updates are WAL-durable to DIR before ack; a restart on the
             // same DIR restores all of them with no rebuild. Overrides SPARQ_PERSIST_DIR.

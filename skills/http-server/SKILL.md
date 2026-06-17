@@ -610,6 +610,7 @@ env overrides the default.
 | `--brtpf-max-values-bytes N` | `SPARQ_BRTPF_MAX_VALUES_BYTES` | `1048576` (`0`=off) | (feature `brtpf`) **DoS cap on the raw brTPF `values` payload BYTES** — bounds the GET query-string carrier that `--max-body-bytes` never sees → `413` (`sq-r74h`) |
 | `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |
 | `--access-audit <file\|stderr>` | `SPARQ_ACCESS_AUDIT` | off | (feature `access-audit`) richer **structured access-audit sink** (typed JSON-Lines: actor / action / resource / decision+basis / ts / fingerprint) — see "Structured access-audit sink" |
+| `--audit-webid-header <name>` | `SPARQ_AUDIT_WEBID_HEADER` | off | (feature `access-audit`) **trust a fronting auth layer's forwarded WebID header** so the audit `actor` is the real authenticated subject (`webid:<iri>`) — set ONLY behind a trusted front (spoofable otherwise); see "Structured access-audit sink" |
 
 In a library: `AppState::with_config(graph, ServerConfig { max_concurrent: 64, ..Default::default() })`
 then `router(state)`, or `harden(my_router, &config)`.
@@ -820,6 +821,22 @@ the content the redaction work just protected. One line: **identities + resource
 content stays fingerprinted.** Library callers set `ServerConfig { access_audit:
 Some(SinkTarget::File(path)), .. }` (field present only with the feature). See
 `crates/sparq-server/src/access_audit.rs`.
+
+**Actor enrichment from a trusted front (`sq-ljfz`).** By default the `actor` is derived from the
+local Bearer gate (`token:<fnv1a>` / `anonymous`) — `sparq-server`'s own auth is a single shared
+secret, not per-user. To record the **real authenticated WebID** instead, run the server behind a
+fronting authorization layer — `sparq-solid`, or any Solid/WAC reverse-proxy / identity gateway
+(the "reverse proxy / gateway or sparq-solid" the bind warnings name) — that authenticates the
+user (resolves their WebID from a WAC/ACP session) and forwards it in a request header, then name
+that header with `--audit-webid-header <name>` (env `SPARQ_AUDIT_WEBID_HEADER`, library field
+`ServerConfig { audit_webid_header: Some(name), .. }`). When set, a present non-empty value of that
+header becomes `actor = webid:<iri>` (the audit attributes access to *who*, not to *which shared
+secret*); empty/absent falls back to the Bearer gate, byte-identical to before. **Security:** a
+forwarded header is client-spoofable, so this is honoured ONLY when an operator explicitly names a
+trusted header — set it **only** when the server runs behind that trusted front (never exposed
+directly to untrusted clients), and ensure the front sets/overwrites the header so a direct client
+cannot inject an arbitrary WebID. With no trusted header configured (the default) any such header
+is ignored.
 
 ## Gotchas / feature flags / prerequisites
 

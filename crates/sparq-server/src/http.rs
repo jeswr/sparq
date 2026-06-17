@@ -308,6 +308,25 @@ pub struct ServerConfig {
     /// compiled out (byte-identical to before). See [`crate::access_audit`].
     #[cfg(feature = "access-audit")]
     pub access_audit: Option<crate::access_audit::SinkTarget>,
+    /// [OPUS-4.8] (sq-ljfz, sq-gos8 follow-up) **Trusted forwarded-identity header** for the
+    /// structured access-audit actor. `Some(name)` tells the audit seam that a fronting
+    /// authorization layer — `sparq-solid`, or any Solid/WAC reverse-proxy / identity gateway,
+    /// the very "reverse proxy / gateway or sparq-solid" the bind warnings name — authenticates
+    /// the user and forwards their resolved WebID in the request header `name`. When set, the
+    /// audit trail records [`Actor::WebId`](crate::access_audit::Actor::WebId) (the real
+    /// authenticated subject from the WAC/ACP session) instead of the coarse Bearer-token
+    /// fingerprint. `None` (the default) trusts no forwarded header, so the actor is derived
+    /// from the local Bearer gate exactly as before (byte-identical).
+    ///
+    /// SECURITY: a forwarded header is client-controllable, so this is honoured ONLY when the
+    /// operator explicitly names a trusted header — the operator thereby asserts that the
+    /// fronting layer sets/overwrites it so a direct client cannot spoof an arbitrary WebID
+    /// into the audit trail. Therefore expose this server ONLY behind that trusted front (not
+    /// directly to untrusted clients) when this is set. Set by `--audit-webid-header <name>` /
+    /// `SPARQ_AUDIT_WEBID_HEADER`. Present only with the `access-audit` cargo feature; without
+    /// it the field + the seam are compiled out (byte-identical to before).
+    #[cfg(feature = "access-audit")]
+    pub audit_webid_header: Option<String>,
     /// [OPUS-4.8] sq-o4qf: explicit opt-in to bind a **non-loopback** address.
     ///
     /// By default the server has **no authentication** on any endpoint — including the
@@ -510,6 +529,11 @@ impl Default for ServerConfig {
             // feature is compiled in (the operator opts in via --access-audit / SPARQ_ACCESS_AUDIT).
             #[cfg(feature = "access-audit")]
             access_audit: None,
+            // [OPUS-4.8] sq-ljfz: trust NO forwarded WebID header by default — the audit actor
+            // is the local Bearer gate unless the operator names a trusted front's header
+            // (--audit-webid-header / SPARQ_AUDIT_WEBID_HEADER).
+            #[cfg(feature = "access-audit")]
+            audit_webid_header: None,
             allow_remote: false, // [OPUS-4.8] sq-o4qf: safe default — refuse non-loopback bind unless opted in
             // [OPUS-4.8] sq-zcby: safe default — no token => no write auth (back-compat).
             auth_token: None,
@@ -653,6 +677,15 @@ impl ServerConfig {
             if !v.is_empty() {
                 cfg.access_audit = Some(crate::access_audit::SinkTarget::parse(v));
             }
+        }
+        // [OPUS-4.8] sq-ljfz: SPARQ_AUDIT_WEBID_HEADER=<header-name> names a TRUSTED forwarded
+        // -identity header — a fronting auth layer (sparq-solid / a Solid-WAC proxy / gateway)
+        // sets it to the authenticated user's WebID, which the audit seam then records as
+        // Actor::WebId. Empty / unset => trust no header (the local Bearer gate, unchanged).
+        #[cfg(feature = "access-audit")]
+        if let Ok(v) = std::env::var("SPARQ_AUDIT_WEBID_HEADER") {
+            let v = v.trim();
+            cfg.audit_webid_header = (!v.is_empty()).then(|| v.to_string());
         }
         // [OPUS-4.8] sq-o4qf: SPARQ_ALLOW_REMOTE truthy ("1"/"true"/"yes"/"on", case-insensitive)
         // opts in to a non-loopback bind. Anything else (incl. unset / "0" / "false") leaves the
@@ -1093,12 +1126,30 @@ fn sparql_action(op: Operation) -> crate::access_audit::Action {
     }
 }
 
-/// [OPUS-4.8] (sq-gos8) Begins a structured access-audit record IFF a sink is installed —
-/// snapshotting the actor (from the presented Bearer token), the action class, the resource and
-/// the (non-reversible) request fingerprint at the enforcement seam. Returns `None` (and builds
-/// nothing) when no sink is configured, so an audit-disabled request pays only the `Option`
-/// check. The returned [`AuditPending`] is `finish`ed once the enforced decision is known and
-/// handed to the sink via [`audit_access_finish`].
+/// [OPUS-4.8] (sq-ljfz) The forwarded WebID a TRUSTED front placed on the request, IFF the
+/// operator named a trusted header ([`ServerConfig::audit_webid_header`]). `None` when no
+/// trusted header is configured (the common case), the header is absent, or its value is not
+/// valid UTF-8 — in every such case the audit actor falls back to the local Bearer gate.
+/// HTTP header names are case-insensitive (`HeaderMap::get` lowercases its key), so the
+/// configured name matches regardless of the front's casing.
+#[cfg(feature = "access-audit")]
+fn forwarded_webid<'a>(config: &ServerConfig, headers: &'a HeaderMap) -> Option<&'a str> {
+    let name = config.audit_webid_header.as_deref()?;
+    headers.get(name)?.to_str().ok()
+}
+
+/// [OPUS-4.8] (sq-gos8; sq-ljfz) Begins a structured access-audit record IFF a sink is installed
+/// — snapshotting the actor, the action class, the resource and the (non-reversible) request
+/// fingerprint at the enforcement seam. Returns `None` (and builds nothing) when no sink is
+/// configured, so an audit-disabled request pays only the `Option` check.
+///
+/// The actor is derived via [`Actor::from_session`](crate::access_audit::Actor::from_session):
+/// when the operator has configured a TRUSTED forwarded-identity header
+/// ([`ServerConfig::audit_webid_header`]) and a fronting auth layer (sparq-solid / a Solid-WAC
+/// proxy / gateway) set it, the record attributes access to that authenticated WebID; otherwise
+/// it falls back to the local Bearer-token fingerprint exactly as before. The returned
+/// [`AuditPending`] is `finish`ed once the enforced decision is known and handed to the sink via
+/// [`audit_access_finish`].
 #[cfg(feature = "access-audit")]
 fn audit_access_begin(
     state: &AppState,
@@ -1108,12 +1159,11 @@ fn audit_access_begin(
     sparql: Option<&str>,
 ) -> Option<crate::access_audit::AuditPending> {
     state.access_audit_sink().map(|_| {
-        crate::access_audit::AuditPending::begin(
-            action,
-            crate::access_audit::Actor::from_token(bearer_token(headers)),
-            resource,
-            sparql,
-        )
+        let actor = crate::access_audit::Actor::from_session(
+            forwarded_webid(state.config(), headers),
+            bearer_token(headers),
+        );
+        crate::access_audit::AuditPending::begin(action, actor, resource, sparql)
     })
 }
 
