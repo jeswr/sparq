@@ -4,8 +4,9 @@
 //!
 //! This is the direct test of the QLever failure mode prod-solid-server designed around
 //! (qlever#2481: memory climbing under sustained live updates → OOM): does sparq's
-//! double-buffered delta-overlay writer keep BOTH update latency and RSS flat over a
-//! long update stream, including the periodic O(graph) compactions?
+//! generation-ring writer (Wave A4: structural-fork per generation, delta-overlay
+//! `apply`, bounded-K retention, the applier's own periodic O(graph) compaction fold)
+//! keep BOTH update latency and RSS flat over a long update stream?
 //!
 //! Each update models prod-solid-server's `putDocument` shape scaled to the default
 //! graph (the server's published surface today): DELETE the resource's previous ~9
@@ -13,8 +14,9 @@
 //! round-robin over a pool, so deletes really hit (an overlay that only grows by
 //! inserts would flatter the result).
 //!
-//! Optional concurrent readers (`--readers N`) take snapshots and run a point query in
-//! a loop — checking that the reclaim path doesn't degrade under read load.
+//! Optional concurrent readers (`--readers N`) pin the current generation
+//! ([`AppState::current`]) and run a point query in a loop — checking that reads stay
+//! lock-free and never stall the writer under sustained read load.
 //!
 //! Output: update p50/p99/max per 1k-window, RSS per window, total throughput.
 
@@ -60,7 +62,6 @@ fn main() {
     let mut updates = 20_000usize;
     let mut resources = 2_000usize;
     let mut readers = 0usize;
-    let mut compact_every = 1024usize;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut next = || args.next().expect("flag value").parse::<usize>().expect("number");
@@ -68,7 +69,6 @@ fn main() {
             "--updates" => updates = next(),
             "--resources" => resources = next(),
             "--readers" => readers = next(),
-            "--compact-every" => compact_every = next(),
             other => panic!("unknown arg {other}"),
         }
     }
@@ -80,14 +80,18 @@ fn main() {
     }
     let graph = Graph::load_str(&nt, "ntriples").expect("load");
     println!(
-        "base graph: {} triples, RSS {:.0} MB; {updates} updates over {resources} resources, compact_every={compact_every}, readers={readers}",
+        "base graph: {} triples, RSS {:.0} MB; {updates} updates over {resources} resources, readers={readers}",
         graph.len(),
         rss_mb()
     );
 
+    // Compaction is no longer a ServerConfig knob: as of Wave A4 the writer's
+    // GraphApplier folds each generation's pending overlay flat once it reaches its own
+    // compact threshold (DEFAULT_COMPACT_THRESHOLD), entirely inside sparq-serve. This
+    // spike drives the PRODUCTION AppState, so it inherits that default — what the HTTP
+    // server actually does — and no longer overrides the fold cadence.
     let config = ServerConfig {
         query_timeout: Some(Duration::from_secs(5)),
-        compact_every,
         ..ServerConfig::default()
     };
     let state = AppState::with_config(graph, config);
@@ -101,10 +105,13 @@ fn main() {
                 let b = QueryBudget::unlimited();
                 let mut n = 0u64;
                 while !stop.load(Ordering::Relaxed) {
-                    let g = st.snapshot();
+                    // Pin the current generation (lock-free ~10–20ns); never blocked by the
+                    // writer. Hold `pin` for the whole query so its snapshot stays readable.
+                    let pin = st.current();
+                    let g = pin.snapshot();
                     let s = (n as usize).wrapping_mul(2654435761).wrapping_add(i) % 200_000;
                     let q = format!("SELECT ?o WHERE {{ <http://ex/s{s}> ?p ?o }} LIMIT 5");
-                    std::hint::black_box(sparq_engine::query_json_with_budget(&g, &q, &b).ok());
+                    std::hint::black_box(sparq_engine::query_json_with_budget(g, &q, &b).ok());
                     n += 1;
                 }
                 n
@@ -147,6 +154,6 @@ fn main() {
         rss_mb()
     );
     // Final published graph sanity: each resource should have exactly 8 triples + parent containment.
-    let g = state.snapshot();
-    println!("final graph: {} triples", g.len());
+    let pin = state.current();
+    println!("final graph: {} triples", pin.snapshot().len());
 }
