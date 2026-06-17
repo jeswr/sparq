@@ -2356,480 +2356,480 @@
       "query": "compiled sparq-wasm browser bundle size",
       "unit": "bytes"
     },
-    "watdiv_C1_count": {
-      "label": "WatDiv C1 — complex query, count",
+    "watdiv_sf1000_C1_count": {
+      "label": "WatDiv C1 (SF=1000) — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C1_json": {
-      "label": "WatDiv C1 — complex query, json",
+    "watdiv_sf1000_C1_json": {
+      "label": "WatDiv C1 (SF=1000) — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C1_materialize": {
-      "label": "WatDiv C1 — complex query, materialize",
+    "watdiv_sf1000_C1_materialize": {
+      "label": "WatDiv C1 (SF=1000) — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_C2_count": {
-      "label": "WatDiv C2 — complex query, count",
+    "watdiv_sf1000_C2_count": {
+      "label": "WatDiv C2 (SF=1000) — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C2_json": {
-      "label": "WatDiv C2 — complex query, json",
+    "watdiv_sf1000_C2_json": {
+      "label": "WatDiv C2 (SF=1000) — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C2_materialize": {
-      "label": "WatDiv C2 — complex query, materialize",
+    "watdiv_sf1000_C2_materialize": {
+      "label": "WatDiv C2 (SF=1000) — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_C3_count": {
-      "label": "WatDiv C3 — complex query, count",
+    "watdiv_sf1000_F1_count": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, count",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F1_json": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, json",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "json",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F1_materialize": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, materialize",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "materialize",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_count": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, count",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_json": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, json",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "json",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_materialize": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, materialize",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "materialize",
+      "unit": "µs"
+    },
+    "watdiv_sf1_C3_count": {
+      "label": "WatDiv C3 (SF=1) — complex query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C3_json": {
-      "label": "WatDiv C3 — complex query, json",
+    "watdiv_sf1_C3_json": {
+      "label": "WatDiv C3 (SF=1) — complex query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C3_materialize": {
-      "label": "WatDiv C3 — complex query, materialize",
+    "watdiv_sf1_C3_materialize": {
+      "label": "WatDiv C3 (SF=1) — complex query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F1_count": {
-      "label": "WatDiv F1 — snowflake query, count",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "count",
-      "unit": "µs"
-    },
-    "watdiv_F1_json": {
-      "label": "WatDiv F1 — snowflake query, json",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "json",
-      "unit": "µs"
-    },
-    "watdiv_F1_materialize": {
-      "label": "WatDiv F1 — snowflake query, materialize",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "materialize",
-      "unit": "µs"
-    },
-    "watdiv_F2_count": {
-      "label": "WatDiv F2 — snowflake query, count",
+    "watdiv_sf1_F2_count": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F2_json": {
-      "label": "WatDiv F2 — snowflake query, json",
+    "watdiv_sf1_F2_json": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F2_materialize": {
-      "label": "WatDiv F2 — snowflake query, materialize",
+    "watdiv_sf1_F2_materialize": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F3_count": {
-      "label": "WatDiv F3 — snowflake query, count",
+    "watdiv_sf1_F3_count": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F3_json": {
-      "label": "WatDiv F3 — snowflake query, json",
+    "watdiv_sf1_F3_json": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F3_materialize": {
-      "label": "WatDiv F3 — snowflake query, materialize",
+    "watdiv_sf1_F3_materialize": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F4_count": {
-      "label": "WatDiv F4 — snowflake query, count",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "count",
-      "unit": "µs"
-    },
-    "watdiv_F4_json": {
-      "label": "WatDiv F4 — snowflake query, json",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "json",
-      "unit": "µs"
-    },
-    "watdiv_F4_materialize": {
-      "label": "WatDiv F4 — snowflake query, materialize",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "materialize",
-      "unit": "µs"
-    },
-    "watdiv_F5_count": {
-      "label": "WatDiv F5 — snowflake query, count",
+    "watdiv_sf1_F5_count": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F5_json": {
-      "label": "WatDiv F5 — snowflake query, json",
+    "watdiv_sf1_F5_json": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F5_materialize": {
-      "label": "WatDiv F5 — snowflake query, materialize",
+    "watdiv_sf1_F5_materialize": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L1_count": {
-      "label": "WatDiv L1 — linear query, count",
+    "watdiv_sf1_L1_count": {
+      "label": "WatDiv L1 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L1_json": {
-      "label": "WatDiv L1 — linear query, json",
+    "watdiv_sf1_L1_json": {
+      "label": "WatDiv L1 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L1_materialize": {
-      "label": "WatDiv L1 — linear query, materialize",
+    "watdiv_sf1_L1_materialize": {
+      "label": "WatDiv L1 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L2_count": {
-      "label": "WatDiv L2 — linear query, count",
+    "watdiv_sf1_L2_count": {
+      "label": "WatDiv L2 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L2_json": {
-      "label": "WatDiv L2 — linear query, json",
+    "watdiv_sf1_L2_json": {
+      "label": "WatDiv L2 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L2_materialize": {
-      "label": "WatDiv L2 — linear query, materialize",
+    "watdiv_sf1_L2_materialize": {
+      "label": "WatDiv L2 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L3_count": {
-      "label": "WatDiv L3 — linear query, count",
+    "watdiv_sf1_L3_count": {
+      "label": "WatDiv L3 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L3_json": {
-      "label": "WatDiv L3 — linear query, json",
+    "watdiv_sf1_L3_json": {
+      "label": "WatDiv L3 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L3_materialize": {
-      "label": "WatDiv L3 — linear query, materialize",
+    "watdiv_sf1_L3_materialize": {
+      "label": "WatDiv L3 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L4_count": {
-      "label": "WatDiv L4 — linear query, count",
+    "watdiv_sf1_L4_count": {
+      "label": "WatDiv L4 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L4_json": {
-      "label": "WatDiv L4 — linear query, json",
+    "watdiv_sf1_L4_json": {
+      "label": "WatDiv L4 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L4_materialize": {
-      "label": "WatDiv L4 — linear query, materialize",
+    "watdiv_sf1_L4_materialize": {
+      "label": "WatDiv L4 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L5_count": {
-      "label": "WatDiv L5 — linear query, count",
+    "watdiv_sf1_L5_count": {
+      "label": "WatDiv L5 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L5_json": {
-      "label": "WatDiv L5 — linear query, json",
+    "watdiv_sf1_L5_json": {
+      "label": "WatDiv L5 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L5_materialize": {
-      "label": "WatDiv L5 — linear query, materialize",
+    "watdiv_sf1_L5_materialize": {
+      "label": "WatDiv L5 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S1_count": {
-      "label": "WatDiv S1 — star query, count",
+    "watdiv_sf1_S1_count": {
+      "label": "WatDiv S1 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S1_json": {
-      "label": "WatDiv S1 — star query, json",
+    "watdiv_sf1_S1_json": {
+      "label": "WatDiv S1 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S1_materialize": {
-      "label": "WatDiv S1 — star query, materialize",
+    "watdiv_sf1_S1_materialize": {
+      "label": "WatDiv S1 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S2_count": {
-      "label": "WatDiv S2 — star query, count",
+    "watdiv_sf1_S2_count": {
+      "label": "WatDiv S2 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S2_json": {
-      "label": "WatDiv S2 — star query, json",
+    "watdiv_sf1_S2_json": {
+      "label": "WatDiv S2 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S2_materialize": {
-      "label": "WatDiv S2 — star query, materialize",
+    "watdiv_sf1_S2_materialize": {
+      "label": "WatDiv S2 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S3_count": {
-      "label": "WatDiv S3 — star query, count",
+    "watdiv_sf1_S3_count": {
+      "label": "WatDiv S3 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S3_json": {
-      "label": "WatDiv S3 — star query, json",
+    "watdiv_sf1_S3_json": {
+      "label": "WatDiv S3 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S3_materialize": {
-      "label": "WatDiv S3 — star query, materialize",
+    "watdiv_sf1_S3_materialize": {
+      "label": "WatDiv S3 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S4_count": {
-      "label": "WatDiv S4 — star query, count",
+    "watdiv_sf1_S4_count": {
+      "label": "WatDiv S4 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S4_json": {
-      "label": "WatDiv S4 — star query, json",
+    "watdiv_sf1_S4_json": {
+      "label": "WatDiv S4 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S4_materialize": {
-      "label": "WatDiv S4 — star query, materialize",
+    "watdiv_sf1_S4_materialize": {
+      "label": "WatDiv S4 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S5_count": {
-      "label": "WatDiv S5 — star query, count",
+    "watdiv_sf1_S5_count": {
+      "label": "WatDiv S5 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S5_json": {
-      "label": "WatDiv S5 — star query, json",
+    "watdiv_sf1_S5_json": {
+      "label": "WatDiv S5 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S5_materialize": {
-      "label": "WatDiv S5 — star query, materialize",
+    "watdiv_sf1_S5_materialize": {
+      "label": "WatDiv S5 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S6_count": {
-      "label": "WatDiv S6 — star query, count",
+    "watdiv_sf1_S6_count": {
+      "label": "WatDiv S6 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S6_json": {
-      "label": "WatDiv S6 — star query, json",
+    "watdiv_sf1_S6_json": {
+      "label": "WatDiv S6 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S6_materialize": {
-      "label": "WatDiv S6 — star query, materialize",
+    "watdiv_sf1_S6_materialize": {
+      "label": "WatDiv S6 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S7_count": {
-      "label": "WatDiv S7 — star query, count",
+    "watdiv_sf1_S7_count": {
+      "label": "WatDiv S7 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S7_json": {
-      "label": "WatDiv S7 — star query, json",
+    "watdiv_sf1_S7_json": {
+      "label": "WatDiv S7 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S7_materialize": {
-      "label": "WatDiv S7 — star query, materialize",
+    "watdiv_sf1_S7_materialize": {
+      "label": "WatDiv S7 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",

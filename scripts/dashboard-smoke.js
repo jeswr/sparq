@@ -51,8 +51,11 @@ for (const k of Object.keys(labels)) {
 
 // ---- labelFor / suiteFor: the cryptic stems from the bead brief must become readable ----------
 // These assert the label map is wired through (not the fallback) for the exact examples cited.
-eq(D.labelFor('watdiv_S1_count_us'), 'WatDiv S1 — star query, count', 'watdiv_S1_count_us label');
-eq(D.suiteFor('watdiv_S1_count_us'), 'WatDiv', 'watdiv suite');
+// [OPUS-4.8] (sq-1wrw) WatDiv metrics now carry the scale-factor token `_sf<SF>` (per-commit SF=1)
+// so the per-commit + nightly SF tiers form distinct series for the scaling chart. The label map +
+// emitter both use the SF-suffixed stem (watdiv_sf1_S1_count_us), so assert against that name.
+eq(D.labelFor('watdiv_sf1_S1_count_us'), 'WatDiv S1 (SF=1) — star query, count', 'watdiv_sf1_S1_count_us label');
+eq(D.suiteFor('watdiv_sf1_S1_count_us'), 'WatDiv', 'watdiv suite');
 ok(/Students/.test(D.labelFor('lubm_q06_count_us')), 'lubm_q06 mentions Students');
 eq(D.suiteFor('lubm_q06_count_us'), 'LUBM (reasoning)', 'lubm suite');
 ok(/star join/.test(D.labelFor('op_q02_star3_count_us')), 'op_q02_star3 mentions star join');
@@ -62,8 +65,8 @@ eq(D.suiteFor('load_s'), 'Pipeline', 'load_s -> Pipeline');
 eq(D.suiteFor('wasm_bundle_bytes'), 'Memory / Size', 'wasm_bundle_bytes -> Memory / Size');
 
 // ---- titleFor: raw stem first (transparency) + dataset/query lines ----------------------------
-const t = D.titleFor('watdiv_S1_count_us');
-ok(t.split('\n')[0] === 'watdiv_S1_count_us', 'titleFor leads with the raw stem');
+const t = D.titleFor('watdiv_sf1_S1_count_us');
+ok(t.split('\n')[0] === 'watdiv_sf1_S1_count_us', 'titleFor leads with the raw stem');
 ok(/dataset:/.test(t) && /query:/.test(t), 'titleFor includes dataset + query');
 
 // ---- graceful fallback: an UNLABELLED metric must still get a label + a suite -----------------
@@ -79,7 +82,7 @@ const entries = [{
   date: Date.now(),
   benches: [
     { name: 'load_s', value: 1.2, unit: 's' },
-    { name: 'watdiv_S1_count_us', value: 30, unit: 'us' },
+    { name: 'watdiv_sf1_S1_count_us', value: 30, unit: 'us' },
     { name: 'lubm_q06_count_us', value: 99, unit: 'us' },
     { name: 'op_q01_bgp_count_us', value: 5, unit: 'us' }
   ]
@@ -94,10 +97,10 @@ ok(groupNames.indexOf('WatDiv') !== -1 && groupNames.indexOf('LUBM (reasoning)')
 let sawWatdivRow = false;
 summary.groups.forEach(function (g) {
   g.rows.forEach(function (r) {
-    if (r.name === 'watdiv_S1_count_us') {
+    if (r.name === 'watdiv_sf1_S1_count_us') {
       sawWatdivRow = true;
-      ok(r.label === 'WatDiv S1 — star query, count', 'summary row uses readable label');
-      ok(r.title.indexOf('watdiv_S1_count_us') === 0, 'summary row title carries the raw stem');
+      ok(r.label === 'WatDiv S1 (SF=1) — star query, count', 'summary row uses readable label');
+      ok(r.title.indexOf('watdiv_sf1_S1_count_us') === 0, 'summary row title carries the raw stem');
     }
   });
 });
@@ -111,7 +114,7 @@ ok(typeof D.buildFeatured === 'function', 'dashboard.js exports buildFeatured');
 ok(typeof D.competitorsFor === 'function', 'dashboard.js exports competitorsFor');
 
 // featuredSuiteOf: recognised public suites are featured; engine micro-suites are NOT.
-eq(D.featuredSuiteOf('watdiv_S1_count_us') && D.featuredSuiteOf('watdiv_S1_count_us').key, 'WatDiv',
+eq(D.featuredSuiteOf('watdiv_sf1_S1_count_us') && D.featuredSuiteOf('watdiv_sf1_S1_count_us').key, 'WatDiv',
    'watdiv metric is featured under WatDiv');
 eq(D.featuredSuiteOf('lubm_q06_count_us') && D.featuredSuiteOf('lubm_q06_count_us').key, 'LUBM',
    'lubm metric is featured under LUBM');
@@ -135,7 +138,7 @@ const featEntries = [{
   benches: [
     { name: 'load_s', value: 1.2, unit: 's' },                  // NOT featured
     { name: 'op_q01_bgp_count_us', value: 5, unit: 'us' },      // NOT featured
-    { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },
+    { name: 'watdiv_sf1_S1_count_us', value: 30, unit: 'µs' },
     { name: 'lubm_q06_count_us', value: 99, unit: 'µs' },
     { name: 'sp2b_q1_count_us', value: 50, unit: 'µs' }
   ]
@@ -151,10 +154,10 @@ ok(Array.isArray(feat.competitorEngines) && feat.competitorEngines.length === 0,
    'no competitor file -> competitorEngines is []');
 let sawFeatRow = false;
 feat.groups.forEach(function (g) { g.rows.forEach(function (r) {
-  if (r.name === 'watdiv_S1_count_us') {
+  if (r.name === 'watdiv_sf1_S1_count_us') {
     sawFeatRow = true;
     eq(r.value, 30, 'featured row carries the latest value');
-    ok(r.label === 'WatDiv S1 — star query, count', 'featured row uses the sq-ocuf readable label');
+    ok(r.label === 'WatDiv S1 (SF=1) — star query, count', 'featured row uses the sq-ocuf readable label');
     ok(r.competitors && typeof r.competitors === 'object', 'featured row exposes a competitors seam');
   }
 }); });
@@ -164,13 +167,13 @@ ok(sawFeatRow, 'watdiv row present in featured view');
 // AND by canonical stem (name minus _us). Absent numbers stay absent (-> "—" in the DOM).
 const compFile = {
   engines: [{ id: 'qlever', label: 'QLever', version: '1.2.3', env: 'CI' }, { id: 'oxigraph' }],
-  values: { 'watdiv_S1_count_us': { qlever: 12 }, 'lubm_q06_count': { oxigraph: 200 } }
+  values: { 'watdiv_sf1_S1_count_us': { qlever: 12 }, 'lubm_q06_count': { oxigraph: 200 } }
 };
 const featC = D.buildFeatured(featEntries, compFile);
 eq(featC.competitorEngines.length, 2, 'competitor file -> two engine columns');
 let watdivComp = null, lubmComp = null;
 featC.groups.forEach(function (g) { g.rows.forEach(function (r) {
-  if (r.name === 'watdiv_S1_count_us') watdivComp = r.competitors;
+  if (r.name === 'watdiv_sf1_S1_count_us') watdivComp = r.competitors;
   if (r.name === 'lubm_q06_count_us') lubmComp = r.competitors;
 }); });
 eq(watdivComp && watdivComp.qlever, 12, 'competitor matched by raw metric name');
@@ -219,6 +222,26 @@ const sfFam = fams.filter(function (f) { return f.axisLabel === 'scale factor'; 
 ok(sfFam && sfFam.points.length === 1, 'single-size family is kept (renders a single marker + note)');
 ok(fams.every(function (f) { return !/lubm_q06/.test(f.base); }), 'non-size-parametrised metric excluded');
 
+// [OPUS-4.8] (sq-1wrw) The exact names the ci-bench emitter now produces: the per-commit SF=1 tier
+// (watdiv_sf1_C1_count_us) and the EC2/nightly SF=1000 tier (watdiv_sf1000_C1_count_us) must
+// collapse to ONE scaling family (same base) with two ascending scale-factor points — this is the
+// engine-vs-scale-factor axis the bead unblocks. Before this bead both tiers emitted the SF-less
+// stem (watdiv_C1_count_us) and COLLIDED into a single series, so no axis could form.
+const wdFams = D.buildScalingFamilies([{
+  commit: { id: 'sf', message: 's', url: '#' }, date: Date.now(),
+  benches: [
+    { name: 'watdiv_sf1000_C1_count_us', value: 9000, unit: 'µs' }, // nightly (out of order on purpose)
+    { name: 'watdiv_sf1_C1_count_us', value: 30, unit: 'µs' }       // per-commit
+  ]
+}]);
+ok(wdFams.length === 1, 'watdiv SF tiers collapse to exactly ONE scaling family');
+ok(wdFams[0].axisLabel === 'scale factor', 'watdiv scaling axis is scale factor');
+ok(wdFams[0].points.length === 2, 'watdiv family has the two SF points (per-commit + nightly)');
+ok(wdFams[0].points[0].axis === 1 && wdFams[0].points[1].axis === 1000,
+   'watdiv SF points sorted ascending (SF=1 -> SF=1000)');
+eq(D.sizeAxisOf('watdiv_sf1_C1_count_us').base, D.sizeAxisOf('watdiv_sf1000_C1_count_us').base,
+   'watdiv per-commit + nightly share one family base (sf-token stripped)');
+
 // ============================================================================================
 // [OPUS-4.8] Copilot review fixes on PR #59 — unit-less labels (#2/#4), clean scaling base (#3),
 // and the featured "Metric" column header (#1).
@@ -233,7 +256,7 @@ ok(!/\(µs\)$/.test(D.labelForBare('deeptax_d10_count_us')),
    'labelForBare strips the trailing (µs) from an unlabelled metric');
 ok(!/\(s\)$/.test(D.labelForBare('totally_new_metric_s')),
    'labelForBare strips a trailing (s) too');
-eq(D.labelForBare('watdiv_S1_count_us'), D.labelFor('watdiv_S1_count_us'),
+eq(D.labelForBare('watdiv_sf1_S1_count_us'), D.labelFor('watdiv_sf1_S1_count_us'),
    'labelForBare leaves a labelled (no-trailing-unit) label unchanged');
 // mid-label parentheses must survive: only a TRAILING parenthesised token is a unit. lubm_q06's
 // readable label mentions "Students" and carries no trailing unit, so it is returned untouched.
@@ -309,7 +332,7 @@ eq(D.familyOf('u64_q03_materialize_us').key, 'sparql', 'unlabelled u64 value-id 
 eq(D.familyOf('rdfs_infer_s').key, 'core', 'rdfs_infer_s still routes to Core (Pipeline suite wins)');
 
 // familyOf: each query type lands in its OWN family (SPARQL volume must not swallow capabilities).
-eq(D.familyOf('watdiv_S1_count_us').key, 'sparql', 'watdiv -> SPARQL family');
+eq(D.familyOf('watdiv_sf1_S1_count_us').key, 'sparql', 'watdiv -> SPARQL family');
 eq(D.familyOf('sp2b_q1_count_us').key, 'sparql', 'sp2b -> SPARQL family');
 eq(D.familyOf('lubm_q06_count_us').key, 'sparql', 'lubm -> SPARQL family');
 eq(D.familyOf('op_q01_bgp_count_us').key, 'sparql', 'operators -> SPARQL family');
@@ -331,7 +354,7 @@ const famEntries = [{
   commit: { id: 'fam', message: 'fam', url: '#' }, date: Date.now(),
   benches: [
     { name: 'load_s', value: 1.2, unit: 's' },
-    { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },
+    { name: 'watdiv_sf1_S1_count_us', value: 30, unit: 'µs' },
     { name: 'shacl_cardinality_validate_us', value: 40, unit: 'µs' },
     { name: 'geo_within10km_us', value: 55, unit: 'µs' },
     { name: 'text_phrase_us', value: 22, unit: 'µs' }
@@ -352,10 +375,10 @@ ok(famByKey.reasoning.count === 0, 'Reasoning family has count 0 in this fixture
 // each row carries the readable label + latest value (the summary first-paint payload).
 let sawFamWatdiv = false;
 famByKey.sparql.rows.forEach(function (r) {
-  if (r.name === 'watdiv_S1_count_us') {
+  if (r.name === 'watdiv_sf1_S1_count_us') {
     sawFamWatdiv = true;
     eq(r.value, 30, 'family row carries the latest value');
-    ok(r.label === 'WatDiv S1 — star query, count', 'family row uses the readable label');
+    ok(r.label === 'WatDiv S1 (SF=1) — star query, count', 'family row uses the readable label');
   }
 });
 ok(sawFamWatdiv, 'watdiv row present in the SPARQL family view');
@@ -477,7 +500,7 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
         commit: { id: 'deadbeefcafe', message: 'dom sim', url: '#' }, date: Date.now(),
         benches: [
           { name: 'load_s', value: 1.2, unit: 's' },                        // Core family
-          { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },            // SPARQL family
+          { name: 'watdiv_sf1_S1_count_us', value: 30, unit: 'µs' },        // SPARQL family
           { name: 'lubm_q06_count_us', value: 99, unit: 'µs' },             // SPARQL family
           { name: 'shacl_cardinality_validate_us', value: 40, unit: 'µs' }, // SHACL family
           { name: 'geo_within10km_us', value: 55, unit: 'µs' },             // GeoSPARQL family

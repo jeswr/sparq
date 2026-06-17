@@ -340,17 +340,24 @@ def build():
                 "SP2Bench DBLP-in-RDF, 250k triples" + tag, desc))
 
     # 5) WatDiv (family from the leading letter L/S/F/C) -> "WatDiv S1 — star, <mode>".
+    # [OPUS-4.8] (sq-1wrw) The stem carries the scale factor as an `_sf<SF>` token, matching the
+    # ci-bench emitter (`watdiv_sf<SF>_<query>_<mode>_us`): SF=1 for the per-commit tier and the
+    # documented SF=1000 full reference scale for the heavy nightly tier (bench/watdiv/README.md
+    # Tiering table). Distinct tokens keep the two SF tiers as SEPARATE github-action-benchmark
+    # series so the dashboard's engine-vs-scale-factor scaling chart (sq-viby) can plot them on one
+    # axis (bench/dashboard/dashboard.js sizeAxisOf parses `_sf<digits>`).
     for sub, heavy in (("watdiv/queries", False), ("watdiv/queries-heavy", True)):
+        sf = 1000 if heavy else 1
         for s in stems(sub):
             fam = WATDIV_FAMILY.get(s[0], "query")
             # Per-commit runs at SF=1 (~106k triples); the heavy queries are empty at SF=1
             # and only populate at the EC2/nightly scale (SF≥10, up to SF=1000 ≈ 100M+),
             # per bench/watdiv/README.md — so do NOT claim SF=1 for a heavy metric.
-            dataset = ("WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples"
+            dataset = ("WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples"
                        if heavy else "WatDiv SF=1, ~106k triples")
             desc = "%s query" % fam
             labels.update(mode_records(
-                "watdiv_" + s, "WatDiv " + s, "WatDiv",
+                "watdiv_sf%d_%s" % (sf, s), "WatDiv %s (SF=%d)" % (s, sf), "WatDiv",
                 dataset, desc))
 
     # 6) BSBM Explore mix -> "BSBM query01 — <desc>, <mode>".

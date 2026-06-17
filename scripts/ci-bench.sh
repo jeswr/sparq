@@ -319,19 +319,29 @@ fi
 # [OPUS-4.8] WatDiv per-commit subset (sq-13i). Builds+caches the real Waterloo generator and
 # emits a FIXED, deterministic SF=1 corpus (N-Triples), then runs the 16 sub-ms Basic-Testing
 # queries (Linear/Star/Snowflake/Complex; the 4 SF=1-empty ones live in queries-heavy/ for the
-# EC2/nightly tier). Emits `watdiv_<query>_<mode>_us` (trend-only, NOT in scripts/perf-gate.py)
-# AND a HARD expected-rows equality check on count mode (a solution-count drift on the fixed
-# corpus is a correctness regression and fails the run). Guarded on g++ (the generator needs
-# g++ + Boost; gen.sh handles Boost) — if g++/the generator is unavailable, the whole block is
-# skipped gracefully so ci-bench still emits valid JSON for everything else. (CI keys
-# actions/cache on /tmp/watdiv so the steady state does NO rebuild — see bench/watdiv/README.md.)
+# EC2/nightly tier). Emits `watdiv_sf<SF>_<query>_<mode>_us` (trend-only, NOT in
+# scripts/perf-gate.py) AND a HARD expected-rows equality check on count mode (a solution-count
+# drift on the fixed corpus is a correctness regression and fails the run). Guarded on g++ (the
+# generator needs g++ + Boost; gen.sh handles Boost) — if g++/the generator is unavailable, the
+# whole block is skipped gracefully so ci-bench still emits valid JSON for everything else. (CI
+# keys actions/cache on /tmp/watdiv so the steady state does NO rebuild — see bench/watdiv/README.md.)
+#
+# [OPUS-4.8] (sq-1wrw) The metric stem carries the scale factor as an `_sf<SF>` token so the per-
+# commit tier (`watdiv_sf1_*`) and the EC2/nightly full-scale tier (e.g. `watdiv_sf1000_*`) form
+# DISTINCT github-action-benchmark series instead of colliding into one (gh-action-benchmark keys
+# series by metric NAME, so an SF-less stem makes the two tiers overwrite each other and a scaling
+# axis can never form). The token is exactly the `_sf<digits>` form the dashboard's scaling axis
+# parses (bench/dashboard/dashboard.js sizeAxisOf), so the engine-vs-scale-factor scaling chart
+# (sq-viby) lights up automatically. SF is digit-sanitised so the token stays a clean metric name
+# regardless of how WATDIV_SF was passed (e.g. a stray "SF=1" string).
+WATDIV_SFTOK="$(printf '%s' "$WATDIV_SF" | tr -cd '0-9')"; WATDIV_SFTOK="${WATDIV_SFTOK:-1}"
 if command -v g++ >/dev/null 2>&1 && [ -x "$WATDIV_GEN" ] && [ -d "$WATDIV_Q" ]; then
   if WATDIV_CORPUS="$(bash "$WATDIV_GEN" "$WATDIV_SF" 2>/dev/null)" && [ -s "${WATDIV_CORPUS:-}" ]; then
     for mode in count materialize json; do
       "$CLI" bench "$WATDIV_CORPUS" ntriples "$WATDIV_Q" 3 "$mode" 2>/dev/null > "$TMP/watdiv.$mode" || true
       while IFS=$'\t' read -r name rows us; do
         [ "${rows:-}" = "ERROR" ] && continue
-        [ -n "${us:-}" ] && add "watdiv_${name}_${mode}_us" us "$us"
+        [ -n "${us:-}" ] && add "watdiv_sf${WATDIV_SFTOK}_${name}_${mode}_us" us "$us"
       done < "$TMP/watdiv.$mode"
     done
     # HARD differential: count-mode solution counts must match the committed expected sizes.

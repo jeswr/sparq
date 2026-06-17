@@ -93,9 +93,12 @@ Notes on a few that need care:
 - **`watdiv` (WatDiv) is tiered** — see [`bench/watdiv/README.md`](./watdiv/README.md). The
   per-commit path builds+caches the real Waterloo v0.6 generator (research-use; sha256-pinned,
   g++ + Boost, RNG seed-pinned to `1u`) and runs the 16 sub-ms Basic-Testing queries on a fixed
-  SF=1 corpus (~106k triples), emitting `watdiv_<query>_<mode>_us` (trend-only) plus a HARD
-  expected-rows correctness diff (count mode). Four templates empty at SF=1 (F1/F4/C1/C2) sit in
-  `queries-heavy/` for the **EC2/nightly SF≥10 tier** (`bench/watdiv/gen.sh <SF>`).
+  SF=1 corpus (~106k triples), emitting `watdiv_sf<SF>_<query>_<mode>_us` (trend-only; the
+  `_sf<SF>` scale-factor token keeps the per-commit `watdiv_sf1_…` and nightly `watdiv_sf1000_…`
+  tiers as distinct series so the dashboard's scaling chart, sq-viby, can plot them on one axis)
+  plus a HARD expected-rows correctness diff (count mode). Four templates empty at SF=1
+  (F1/F4/C1/C2) sit in `queries-heavy/` for the **EC2/nightly SF≥10 tier**
+  (`bench/watdiv/gen.sh <SF>`).
 - **`bsbm` (Berlin SPARQL Benchmark, Explore mix) is tiered + fetch-and-cache** — see
   [`bench/bsbm/README.md`](./bsbm/README.md). Per-commit, `gen.sh` fetches the PREBUILT bsbmtools
   v0.2 distribution (JRE-only; sha256-pinned zip) and emits a deterministic `-fc -pc 300` corpus
