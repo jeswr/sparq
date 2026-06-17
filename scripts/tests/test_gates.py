@@ -397,15 +397,95 @@ class G6Test(unittest.TestCase):
         self.assertEqual(undoc, [])
 
     def test_knob_token_extraction(self):
-        # Flags + env vars are extracted; --help and short flags are NOT knobs;
-        # restricted/struct-field/non-quoted tokens do not leak in.
-        toks = g6.knob_tokens(
+        # CODE-side: flags are extracted from DOUBLE-QUOTED literals (how Rust source
+        # writes them) + env vars; --help and short flags are NOT knobs; a
+        # backtick-wrapped / bare flag is NOT a code token (code never writes those).
+        toks = g6.code_knob_tokens(
             '            "--max-results" => { SPARQ_MAX_RESULTS } "--help" "-h"'
         )
         self.assertIn("--max-results", toks)
         self.assertIn("SPARQ_MAX_RESULTS", toks)
         self.assertNotIn("--help", toks)
         self.assertNotIn("-h", toks)
+        # knob_tokens is the back-compat alias for the code extractor.
+        self.assertEqual(g6.knob_tokens('"--addr"'), {"--addr"})
+        self.assertEqual(g6.code_knob_tokens("`--addr`"), set())  # not a code form
+
+    def test_doc_extractor_recognizes_backtick_flags(self):
+        # THE FIX: docs write a flag in markdown BACKTICKS (`--addr`), the dominant
+        # convention — and also `--flag <ARG>` / `--flag*` / `--flag N`, bare in
+        # prose, and double-quoted. The doc extractor recognises ALL of these (so a
+        # code-defined double-quoted flag matches its backtick-documented form),
+        # while a bare `--` dash fragment and short flags are NOT picked up.
+        self.assertEqual(g6.doc_knob_tokens("set `--addr` to bind"), {"--addr"})
+        self.assertEqual(
+            g6.doc_knob_tokens("`--access-audit <file|stderr>` writes audit"),
+            {"--access-audit"},
+        )
+        self.assertEqual(
+            g6.doc_knob_tokens("`--max-subscriptions*` family, `--max-results N`"),
+            {"--max-subscriptions", "--max-results"},
+        )
+        self.assertEqual(g6.doc_knob_tokens("the --reason flag enables"), {"--reason"})
+        self.assertEqual(g6.doc_knob_tokens('use "--proof" here'), {"--proof"})
+        self.assertEqual(g6.doc_knob_tokens("SPARQ_ADDR is the env"), {"SPARQ_ADDR"})
+        self.assertEqual(g6.doc_knob_tokens("a `git -- pathspec` fence"), set())
+        self.assertNotIn("--help", g6.doc_knob_tokens("`--help` prints usage"))
+
+    def test_code_flag_documented_only_in_backticks_passes(self):
+        # END-TO-END through BOTH real extractors: a flag defined in code as a
+        # double-quoted literal and documented ONLY in markdown backticks must be
+        # recognised as documented (the asymmetric-extractor bug: a quote-only doc
+        # extractor saw 0/29 flags and false-positived on the compliant path).
+        src = "crates/sparq-server/src/main.rs"
+        code_added = g6.scan_added_knobs(['+            "--addr" => addr = next(),'])
+        doc_disk = g6.doc_knob_tokens("Bind address: `--addr <HOST:PORT>` (default …).")
+        self.assertEqual(code_added, {"--addr"})
+        self.assertIn("--addr", doc_disk)  # the two forms map to the same token
+        ok, undoc = g6.evaluate(
+            [src],
+            labels=[],
+            base="main",
+            code_knobs={src: code_added},
+            doc_added=set(),
+            doc_disk=doc_disk,
+        )
+        self.assertTrue(ok)  # backtick-documented flag PASSES
+        self.assertEqual(undoc, [])
+
+    def test_code_flag_not_documented_anywhere_fails(self):
+        # Conversely, a flag in code that no doc surface mentions (in ANY form)
+        # FAILS — the gate is not merely permissive after the fix.
+        src = "crates/sparq-cli/src/main.rs"
+        code_added = g6.scan_added_knobs(['+            "--never-documented" => x,'])
+        doc_disk = g6.doc_knob_tokens("Docs that mention `--addr` and `--reason` only.")
+        ok, undoc = g6.evaluate(
+            [src],
+            labels=[],
+            base="main",
+            code_knobs={src: code_added},
+            doc_added=set(),
+            doc_disk=doc_disk,
+        )
+        self.assertFalse(ok)
+        self.assertEqual([k for k, _ in undoc], ["--never-documented"])
+
+    def test_real_repo_backcatalogue_flags_are_documented(self):
+        # Regression guard against the asymmetric extractor on the REAL tree: every
+        # double-quoted flag literal under the config crates' src must be recognised
+        # as documented by the doc extractor reading the actual READMEs/SKILL.md.
+        # (Pre-fix this was 0/29; the gate false-positived on its own clean tree.)
+        flag_re = g6._CODE_FLAG_RE
+        code_flags: set[str] = set()
+        for crate in ("sparq-cli", "sparq-server"):
+            for rs in (REPO_ROOT / "crates" / crate / "src").rglob("*.rs"):
+                for m in flag_re.findall(rs.read_text(encoding="utf-8", errors="ignore")):
+                    code_flags.add(m)
+        code_flags.discard("--help")
+        documented = g6.documented_on_disk()
+        missing = sorted(code_flags - documented)
+        self.assertGreaterEqual(len(code_flags), 20, "expected the back-catalogue flags")
+        self.assertEqual(missing, [], f"undocumented back-catalogue flags: {missing}")
 
     def test_scan_added_knobs_net_diff(self):
         # A pure relocation (same flag removed once + added once) cancels; a
