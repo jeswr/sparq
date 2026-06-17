@@ -9,6 +9,33 @@
 > buildable phase-3 design. It is **DOC-ONLY**: no site/crate code is written here. The
 > build comes after maintainer review; the phased plan in §7 enumerates each future bead.
 
+**[OPUS-4.8] AS-BUILT CORRECTION (sq-3df4).** The factory was built in PR #336; the
+as-built knowledge is in `skills/academic-paper/SKILL.md` (corrected to as-built in PR #349).
+**Two design-time commitments below were superseded — read the as-built sources, not the
+original text, for current behaviour. The original wording is preserved below as the
+historical design record:**
+
+1. **In-site HTML render = Typst NATIVE HTML export, NOT typst.ts.** The §1 / §2 / §3 /
+   §7 / §8 text below proposes rendering the `.typ` in the browser via
+   **typst.ts / `@myriaddreamin/typst.react`**. The factory instead uses **Typst's native
+   HTML export** (`typst compile --format html --features html`):
+   `site/scripts/build-papers.mjs` extracts the `<body>` fragment and
+   `site/src/components/papers/paper-html.tsx` injects it as a static, scoped `.paper-prose`
+   fragment — **no WASM compiler is shipped to the browser**. Trade-off (as-built):
+   layout-only constructs (centring, page/horizontal rules) drop in the HTML view but are
+   preserved in the PDF. The §7-(b) plan to add `@myriaddreamin/typst.react` + the typst.ts
+   wasm to `site/` was **NOT taken**.
+2. **Paper-bound numbers come from a dedicated `site/src/data/paper-evidence.json`, NOT
+   from `benchmarks.generated.json`.** The Stage-2 / §2 / §5 text below binds paper numbers
+   to `benchmarks.generated.json` (the per-commit work-box timing feed, all
+   `environment: indicative`). The factory instead reads a **separate, canonical-only**
+   `paper-evidence.json` (deterministic, machine-independent records, each `source`-traced
+   to a named test); `benchmarks.generated.json` feeds the site's benchmark widgets and
+   **never** a paper headline. The honesty gate is two-layer as-built:
+   `build-papers.mjs::runHonestyGate()` schema-checks `paper-evidence.json` first, then
+   `headline()` in `site/papers/_lib/bench.typ` panics the Typst compile on any
+   non-canonical record.
+
 **The two load-bearing constraints inherited from the research (never softened):**
 
 1. **No ZK/MPC security property may be claimed as proven.** The single-prover ZK verifier
