@@ -204,16 +204,30 @@ impl MacKey {
         scale(&self.shares, c)
     }
 
-    /// The raw `[α]` shares — **`pub(crate)`, NEVER public** — for the two crate-
-    /// internal consumers that genuinely need the SECRET-SHARED key itself (not a
-    /// derived `α·c`): the §2.4 MAC-carrying multiplication ([`auth_mul`], which
-    /// secure-multiplies the reduced product `[z]` by `[α]` to get `[α·z]`) and the
-    /// §2.5 batched MAC-check ([`mac_check`], whose `σ` term `−y·[α]` scales `[α]`
-    /// by a PUBLIC `y`). Both *consume* `[α]` inside a sharing computation; neither
-    /// opens it — the shares flow into `mul_shares_raw` / `scale` and only the
-    /// (eventually, leakage-free) result is opened, never `[α]`. Kept crate-private
-    /// exactly as [`AuthenticatedShare::mac_shares`] is, so no public surface can
-    /// pull `[α]` out and reconstruct `α`. `[OPUS-4.8]`
+    /// The raw `[α]` shares — **`pub(crate)`, NEVER public** — for the ONE crate-
+    /// internal consumer that genuinely needs the SECRET-SHARED key itself (not a
+    /// derived `α·c`): the §2.5 batched MAC-check
+    /// ([`MacSession::mac_check`](crate::shamir::MacSession::mac_check)), whose `σ`
+    /// term `−y·[α]` scales `[α]` by the PUBLIC opened value `y` (a free local
+    /// [`scale`]).
+    ///
+    /// **NOT the §2.4 MAC-carrying multiplication.** [`MacSession::auth_mul`](crate::shamir::MacSession::auth_mul)
+    /// does **not** read `[α]` at all: it carries the MAC forward as the INDEPENDENT
+    /// product `[α·z] = reduce([α·x]·[y])` — the input MAC `[α·x]` times the input
+    /// value `[y]` — **not** as `[z]·[α]` of the just-reduced product. That
+    /// independence is exactly what makes the multiplication tamper-evident (a δ
+    /// injected into one of the two separate re-sharings cannot land both `[z]` and
+    /// `[α·z]` on a consistent `(z+δ, α·(z+δ))` pair), so `auth_mul` never touches
+    /// this accessor; recomputing the MAC from `[z]·[α]` would be UNSOUND (the MAC
+    /// would track whatever tampered `z` carried and `σ` would be 0). See
+    /// [`MacSession::auth_mul`](crate::shamir::MacSession::auth_mul) for the full
+    /// argument.
+    ///
+    /// The single consumer *consumes* `[α]` inside a sharing computation; it never
+    /// opens it — the shares flow into [`scale`] and only the (leakage-free) `σ` is
+    /// opened, never `[α]`. Kept crate-private exactly as
+    /// [`AuthenticatedShare::mac_shares`] is, so no public surface can pull `[α]` out
+    /// and reconstruct `α`. `[OPUS-4.8]`
     pub(crate) fn alpha_shares(&self) -> &[Share] {
         &self.shares
     }

@@ -515,6 +515,71 @@ mod tests {
         ));
     }
 
+    /// [OPUS-4.8] sq-fbt2 — pins the SOUND MAC-carry route `auth_mul` actually ships,
+    /// the claim the corrected [`MacKey::alpha_shares`](crate::authenticated::MacKey::alpha_shares)
+    /// doc now states (and the OLD doc got wrong: it described the AVOIDED `[z]·[α]`).
+    ///
+    /// `auth_mul` computes the product MAC as the INDEPENDENT `[α·z] = reduce([α·x]·[y])`
+    /// — the INPUT MAC `[α·x]` times the INPUT value `[y]` — NOT as `[z]·[α]` of the
+    /// just-reduced product (`auth_mul` never even reads `[α]`). Two observable
+    /// consequences this test asserts:
+    ///  1. the product MAC reconstructs to `α·z` (`z = x·y`): the MAC relation is
+    ///     preserved by the input-MAC carry; and
+    ///  2. the MAC is INDEPENDENT of the value sharing — tampering ONLY `[z]` (δ added,
+    ///     MAC untouched) leaves the MAC still reconstructing to the ORIGINAL true `α·z`,
+    ///     so `σ = α·z − (z+δ)·α = −δ·α ≠ 0` and the check fires. Were the MAC instead
+    ///     recomputed as `[z]·[α]`, it would track the tampered `z+δ` and `σ` would be 0
+    ///     — i.e. the unsound route the old doc described would NOT be tamper-evident.
+    #[test]
+    fn auth_mul_mac_is_independent_input_mac_carry_not_z_times_alpha() {
+        use crate::shamir::reconstruct_at_zero;
+        let backend = ShamirBackend::new_seeded(5, 0x5BD2).unwrap();
+        let t = backend.threshold();
+        let mut dealer = backend.dealer();
+        let mut session = dealer.new_mac_session();
+
+        let (xv, yv) = (Fp::new(6), Fp::new(7));
+        let x = session.authenticated_share(xv);
+        let y = session.authenticated_share(yv);
+        let z = session.auth_mul(&x, &y).unwrap();
+
+        let alpha = session.alpha_for_test();
+        // z = x·y = 42.
+        let zval = xv.mul(yv);
+        // (1) MAC relation holds: [α·z] reconstructs to α·z, carried via [α·x]·[y].
+        assert_eq!(
+            reconstruct_at_zero(z.value_shares(), t).unwrap(),
+            zval,
+            "value sharing opens to z = x·y"
+        );
+        assert_eq!(
+            reconstruct_at_zero(z.mac_shares(), t).unwrap(),
+            alpha.mul(zval),
+            "product MAC opens to α·z (input-MAC carry [α·x]·[y]), not a re-derivation"
+        );
+
+        // (2) The MAC is INDEPENDENT of [z]: corrupt only the value (δ=+1), and the
+        //     MAC sharing — untouched — still opens to the ORIGINAL α·z, NOT α·(z+δ).
+        //     This is precisely why σ ≠ 0 catches the tamper; a [z]·[α] re-derivation
+        //     would have tracked z+δ and σ would vanish.
+        let tampered = tamper_value(&z); // value → z+δ, MAC untouched
+        assert_eq!(
+            reconstruct_at_zero(tampered.value_shares(), t).unwrap(),
+            zval.add(Fp::new(1)),
+            "tampered value opens to z+δ"
+        );
+        assert_eq!(
+            reconstruct_at_zero(tampered.mac_shares(), t).unwrap(),
+            alpha.mul(zval),
+            "MAC still opens to the ORIGINAL α·z (independent of the tampered value) — \
+             so σ = α·z − (z+δ)·α = −δ·α ≠ 0 and the check fires"
+        );
+        assert!(matches!(
+            session.mac_check(std::slice::from_ref(&tampered)),
+            Err(MpcError::MacCheckFailed { .. })
+        ));
+    }
+
     /// `mac_check` of a clean degree-2t-style product (`auth_mul`) on an unequal
     /// challenge batch is sound: a single forged value among several is caught even
     /// when batched with honest values (random-linear-combination batching).
