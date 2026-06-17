@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Database } from "lucide-react";
 
 import { SurfaceContent } from "@/components/surface-content";
+import { DataFormatsDemo } from "@/components/data-formats-demo";
 
 export const metadata: Metadata = {
   title: "Data formats",
@@ -47,7 +48,7 @@ export default function DataFormatsSurfacePage() {
         },
         {
           title: "Compressed ingest",
-          body: "gzip / zstd RDF dumps decode-and-load; in the browser via SparqStore.fromCompressed().",
+          body: "gzip / zstd / bzip2 RDF dumps decode-and-load natively (fused decompress + parallel parse); gzip also decodes live in the browser.",
         },
         {
           title: "Streaming & parallel loaders",
@@ -70,21 +71,32 @@ export default function DataFormatsSurfacePage() {
         <>
           <p>
             <strong className="text-foreground">Live in your tab</strong> for the
-            four text formats and gzip/zstd-compressed ingest — the same loaders
-            that ship in <code className="font-mono">@jeswr/sparq</code>.
+            four text formats — the demo above runs the same{" "}
+            <code className="font-mono">Store.load</code> /{" "}
+            <code className="font-mono">loadDataset</code> loaders that ship in{" "}
+            <code className="font-mono">@jeswr/sparq</code>, compiled to wasm. The
+            gzip-ingest panel decodes with the browser&apos;s native{" "}
+            <code className="font-mono">DecompressionStream</code> before parsing —
+            no codec library, no server.
           </p>
         </>
       }
       caveat={
         <>
           <p>
-            HDT loading, the mmap / external-memory ingest path, and the
-            fully-parallel fast loaders are <strong className="text-foreground">native-only</strong>
-            ; in the browser they fall back to the in-memory streaming loader.
+            Only <strong className="text-foreground">gzip</strong> decodes in the
+            browser (via <code className="font-mono">DecompressionStream</code>);{" "}
+            <strong className="text-foreground">zstd</strong> and{" "}
+            <strong className="text-foreground">bzip2</strong> ingest, HDT loading,
+            the mmap / external-memory path, and the fully-parallel fast loaders are{" "}
+            <strong className="text-foreground">native-only</strong> — in the
+            browser the in-memory streaming loader is used.
           </p>
         </>
       }
-      links={[{ href: "/try", label: "Load data in the REPL" }]}
-    />
+      links={[{ href: "/try", label: "Open the full SPARQL REPL" }]}
+    >
+      <DataFormatsDemo />
+    </SurfaceContent>
   );
 }
