@@ -1787,6 +1787,11 @@ impl Graph {
             false
         };
         let mut sharded_remap: Option<(Vec<u64>, u32)> = None;
+        // [OPUS-4.8 sq-3l43] Serial dict-consolidation seconds (`into_merged`) on the sharded
+        // default path, folded into the phase report so the FULL dict-consolidation bucket
+        // (the one this rung-5 spike re-measures) appears on one honestly-labelled line.
+        #[cfg(all(feature = "mmap", feature = "parallel"))]
+        let mut cons_secs: Option<f64> = None;
 
         if sharded {
             #[cfg(all(feature = "mmap", feature = "parallel"))]
@@ -1795,8 +1800,10 @@ impl Graph {
                 build_external_ntriples_sharded(reader, &mut sd, &mut buf, &mut runs, &tmp, chunk)?;
                 let t_cons = std::time::Instant::now();
                 let (merged, base, stride) = sd.into_merged();
+                let elapsed = t_cons.elapsed().as_secs_f64();
                 if build_timing::enabled() {
-                    eprintln!("[build-timing] dict consolidate (into_merged): {:.2}s", t_cons.elapsed().as_secs_f64());
+                    eprintln!("[build-timing] dict consolidate (into_merged): {elapsed:.2}s");
+                    cons_secs = Some(elapsed);
                 }
                 dict = merged;
                 sharded_remap = Some((base, stride));
@@ -1840,7 +1847,16 @@ impl Graph {
         buf.shrink_to_fit();
         #[cfg(all(feature = "mmap", feature = "parallel"))]
         if build_timing::enabled() {
-            build_timing::report("parse+intern+spill done", _t_build.elapsed().as_secs_f64());
+            // [OPUS-4.8 sq-3l43] The sharded default path's merge/remap buckets are PIPELINED
+            // (parallel intern + overlapped remap), NOT the additive-serial `merge_remap`/
+            // `triple-remap` of the non-sharded parallel build — label them accordingly so the
+            // dict-consolidation bucket re-measurement reads correctly.
+            let (kind, cons) = if sharded {
+                (build_timing::PathKind::Pipelined, cons_secs)
+            } else {
+                (build_timing::PathKind::Serial, None)
+            };
+            build_timing::report("parse+intern+spill done", kind, cons, _t_build.elapsed().as_secs_f64());
         }
 
         // Merge the SPO runs into the SPO permutation file (deduplicating).
@@ -2242,7 +2258,15 @@ impl Graph {
             dictspill::SpillInterner::new(default_shards(), &tmp, cfg).map_err(|e| e.to_string())?;
         build_external_ntriples_dictspill(reader, &mut interner)?;
         if build_timing::enabled() {
-            build_timing::report("parse+route+stage done", _t_build.elapsed().as_secs_f64());
+            // [OPUS-4.8 sq-3l43] The spill path's "merge" bucket is the bounded PARALLEL
+            // `intern_batch` occupancy (Pipelined), not a serial `merge_remap`. Consolidation
+            // (`consolidate`) is a LATER phase, reported separately below, so `None` here.
+            build_timing::report(
+                "parse+route+stage done",
+                build_timing::PathKind::Pipelined,
+                None,
+                _t_build.elapsed().as_secs_f64(),
+            );
         }
 
         // Phases 2-4: external dedup/rank. The dictionary files and the numeric/temporal
@@ -5173,16 +5197,129 @@ mod build_timing {
             counter.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    pub fn report(stage: &str, secs: f64) {
+    /// Which interning topology produced the `MERGE_NS`/`REMAP_NS` buckets — they are NOT
+    /// comparable across paths, so the report MUST label them honestly:
+    ///
+    /// * [`Serial`](PathKind::Serial) — the non-sharded parallel external build
+    ///   (`build_external_ntriples_parallel`): "merge" is the one serial `Dict::merge_remap`
+    ///   global-id re-intern and "remap" is a serial loop. These two buckets ADD into the
+    ///   serial dict-consolidation wall (the measured ~200 s/1 B at engine `ef86e66`).
+    /// * [`Pipelined`](PathKind::Pipelined) — the sharded default
+    ///   (`build_external_ntriples_sharded`) and the dict-spill path: the "merge" bucket is
+    ///   the PARALLEL `intern_partials`/`intern_batch` occupancy and the "remap" bucket runs
+    ///   on its OWN pipeline stage CONCURRENTLY with the next batch's intern. They are
+    ///   per-stage thread-occupancy (inflated by contention), NOT additive serial wall — so
+    ///   labelling them `(serial)` (as this report did before [OPUS-4.8] sq-3l43) made a
+    ///   rung-5 re-measurement of the dict-consolidation bucket UNINTERPRETABLE: a reader
+    ///   would compare pipelined occupancy against the old additive-serial ~200 s/1 B and
+    ///   draw the wrong conclusion. The interpretable dict-consolidation bucket on this path
+    ///   is the `consolidate` term (`into_merged`/spilled, serial) PLUS whatever intern
+    ///   occupancy exceeds the overlapped parse — which is what sq-3l43 confirms at 1 B.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum PathKind {
+        Serial,
+        Pipelined,
+    }
+
+    /// Format the per-phase build-timing line for `stage`. Pure (no I/O, no clock) so it is
+    /// unit-testable; `report` prints what this returns. `consolidate_secs` is the serial
+    /// dict-consolidation step (`into_merged` for sharded, `consolidate` for spilled), folded
+    /// in so the FULL dict-consolidation bucket is attributed on one line; pass `None` for the
+    /// serial path (whose consolidation is the inline `merge_remap` already in "merge").
+    pub fn format_report(
+        stage: &str,
+        kind: PathKind,
+        consolidate_secs: Option<f64>,
+        secs: f64,
+    ) -> String {
         use std::sync::atomic::Ordering::Relaxed;
         let (p, m, r) = (
             PARSE_NS.load(Relaxed) as f64 / 1e9,
             MERGE_NS.load(Relaxed) as f64 / 1e9,
             REMAP_NS.load(Relaxed) as f64 / 1e9,
         );
-        eprintln!(
-            "[build-timing] {stage}: parse(parallel) {p:.2}s | merge_remap(serial) {m:.2}s | triple-remap(serial) {r:.2}s | {secs:.2}s wall to here"
-        );
+        // Honest bucket labels: serial buckets ADD to the consolidation wall; pipelined
+        // buckets are overlapped per-stage occupancy (see `PathKind`).
+        let (merge_lbl, remap_lbl) = match kind {
+            PathKind::Serial => ("merge_remap(serial)", "triple-remap(serial)"),
+            PathKind::Pipelined => {
+                ("intern(parallel-occupancy)", "triple-remap(pipelined-occupancy)")
+            }
+        };
+        let cons = match consolidate_secs {
+            Some(c) => format!(" | dict-consolidate(serial) {c:.2}s"),
+            None => String::new(),
+        };
+        format!(
+            "[build-timing] {stage}: parse(parallel) {p:.2}s | {merge_lbl} {m:.2}s | {remap_lbl} {r:.2}s{cons} | {secs:.2}s wall to here"
+        )
+    }
+
+    pub fn report(stage: &str, kind: PathKind, consolidate_secs: Option<f64>, secs: f64) {
+        eprintln!("{}", format_report(stage, kind, consolidate_secs, secs));
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::Ordering::Relaxed;
+
+        // The phase counters are process-global statics; serialize the few tests that set
+        // them so they don't race each other's `format_report` reads.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        // [OPUS-4.8 sq-3l43] The non-sharded parallel build's buckets are the genuine
+        // additive-serial `merge_remap` + `triple-remap` (the measured ~200 s/1 B); they
+        // MUST keep the `(serial)` label and carry NO separate consolidate term.
+        #[test]
+        fn serial_path_labels_buckets_serial_and_has_no_consolidate_term() {
+            let _g = LOCK.lock().unwrap();
+            reset();
+            MERGE_NS.store(137_900_000_000, Relaxed); // 137.9 s
+            REMAP_NS.store(62_200_000_000, Relaxed); //  62.2 s
+            PARSE_NS.store(138_100_000_000, Relaxed); // 138.1 s
+            let line = format_report("parse+intern+spill done", PathKind::Serial, None, 221.2);
+            assert!(line.contains("merge_remap(serial) 137.90s"), "{line}");
+            assert!(line.contains("triple-remap(serial) 62.20s"), "{line}");
+            assert!(!line.contains("dict-consolidate"), "serial path folds consolidation into merge_remap: {line}");
+            assert!(!line.contains("parallel-occupancy"), "{line}");
+        }
+
+        // The sharded DEFAULT (what sq-3l43 re-measures) overlaps a PARALLEL intern with a
+        // pipelined remap — those buckets are per-stage occupancy, NOT additive-serial. They
+        // MUST NOT be labelled `(serial)` (which would make the bucket re-measurement read as
+        // a regression vs the old additive 200 s/1 B), and the serial `into_merged`
+        // consolidation MUST appear as its own honestly-labelled term on the same line.
+        #[test]
+        fn pipelined_path_labels_occupancy_and_surfaces_consolidate_bucket() {
+            let _g = LOCK.lock().unwrap();
+            reset();
+            MERGE_NS.store(40_000_000_000, Relaxed); // 40 s intern occupancy
+            REMAP_NS.store(60_000_000_000, Relaxed); // 60 s remap occupancy
+            PARSE_NS.store(138_000_000_000, Relaxed);
+            let line = format_report("parse+intern+spill done", PathKind::Pipelined, Some(3.5), 150.0);
+            // The whole point of the bead: the dict-consolidation bucket is the small serial
+            // `into_merged` term, distinct from the (overlapped) intern/remap occupancy.
+            assert!(line.contains("dict-consolidate(serial) 3.50s"), "{line}");
+            assert!(line.contains("intern(parallel-occupancy) 40.00s"), "{line}");
+            assert!(line.contains("triple-remap(pipelined-occupancy) 60.00s"), "{line}");
+            // Must NOT mislabel the pipelined buckets as additive-serial.
+            assert!(!line.contains("merge_remap(serial)"), "{line}");
+            assert!(!line.contains("triple-remap(serial)"), "{line}");
+        }
+
+        // Pipelined paths whose consolidation is reported on a SEPARATE later line (dict-spill)
+        // pass `None` and so carry no inline consolidate term, but still drop the serial labels.
+        #[test]
+        fn pipelined_path_without_inline_consolidate_omits_the_term() {
+            let _g = LOCK.lock().unwrap();
+            reset();
+            MERGE_NS.store(10_000_000_000, Relaxed);
+            let line = format_report("parse+route+stage done", PathKind::Pipelined, None, 99.0);
+            assert!(!line.contains("dict-consolidate"), "{line}");
+            assert!(line.contains("intern(parallel-occupancy) 10.00s"), "{line}");
+            assert!(!line.contains("(serial)"), "{line}");
+        }
     }
 }
 

@@ -12,7 +12,8 @@
 set -u
 SLICE_N="${1:-1000000000}"
 THREADS="${2:-1,2,4,8}"
-SHA="${3:-ef86e66}"
+# [OPUS-4.8 sq-3l43] Post-`dict-consolidation` build by default (see rung5-launch.sh).
+SHA="${3:-origin/main}"
 
 R="$HOME/results"; mkdir -p "$R"
 exec > >(tee -a "$R/onbox.log") 2>&1
@@ -83,6 +84,9 @@ command -v cargo >/dev/null 2>&1 || \
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1
 . "$HOME/.cargo/env"
 git clone -q https://github.com/jeswr/sparq.git "$HOME/sparq" && cd "$HOME/sparq" && git checkout -q "$SHA"
+# [OPUS-4.8 sq-3l43] Record the resolved commit so the dict-bucket result is attributable
+# to a specific engine revision (the original ~200 s figure was at ef86e66, PRE-consolidation).
+git rev-parse HEAD | tee "$R/engine-sha.txt"
 t0=$SECONDS
 cargo build --release -q -p sparq-cli -p sparq-bench
 echo "cargo build: $((SECONDS-t0))s"
@@ -145,6 +149,12 @@ if [ -f "$HOME/slice.nt.zst" ] && [ "${SLICE_LINES:-0}" -gt 1000000 ]; then
   BUILD_RC=$?
   kill "$IOSTAT_PID" 2>/dev/null
   tail -30 "$R/t2-build.log"
+  # [OPUS-4.8 sq-3l43] The bead's deliverable: isolate the dict-consolidation bucket from the
+  # phase report. On post-consolidation main these lines read `dict consolidate (into_merged)`
+  # + `dict-consolidate(serial)` + `intern(parallel-occupancy)`/`triple-remap(pipelined-
+  # occupancy)` — NOT the old `merge_remap(serial)`/`triple-remap(serial)` additive ~200 s/1 B.
+  # Compare the `dict-consolidate(serial)` term against the projected single-digit seconds.
+  grep -E '\[build-timing\]' "$R/t2-build.log" | tee "$R/t2-dict-bucket.txt" || true
   df -h / | tail -1; du -sh "$HOME/idx" | tee -a "$R/t2-build.log"
   if [ "$BUILD_RC" = "0" ]; then
     echo "== T2 sanity COUNT queries (mmap) =="

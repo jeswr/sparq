@@ -219,3 +219,40 @@ correct COUNTs, out-of-core, 51.5 GB peak RAM, on an 8-vCPU ~$0.61/h box.** The 
 full-truthy target remains neither met nor refuted on real hardware (192-core box still
 quota-blocked), but the path is now quantified: shrink/parallelise the ~200 s/1 B serial
 dict bucket, then re-measure many-core scaling.
+
+## Rung-5 dict-bucket re-measurement (sq-3l43) — instrumentation + re-launch
+
+The ~200 s/1 B SERIAL dict bucket above (`merge_remap(serial)` 137.9 s + `triple-remap
+(serial)` 62.2 s) was measured at engine **`ef86e66`**, which is BEFORE the
+`dict-consolidation` branch landed on main (parallel `intern_partials`, pipelined remap,
+parallel `into_merged`, sharded-default). `research/dict-consolidation-verdict.md` PROJECTS
+that bucket down to single-digit seconds at 1 B — an EXTRAPOLATION from 40 M synthetic on a
+contended M1, never re-measured at 1 B real truthy. sq-3l43 is the cheap precursor to the
+deferred 192-core validation (sq-bj3): one ~$1.50 r7i.2xlarge 1 B build on **current main**
+to confirm or refute the bucket reduction.
+
+Two defeaters in the existing harness made that re-measurement uninterpretable, both fixed
+here (no fabricated numbers — this PR ships the instrumentation + re-launch, the on-box run
+records the result to `hwrun/results/rung5/t2-dict-bucket.txt`):
+
+1. **Stale engine pin.** `hwrun/rung5-launch.sh`/`rung5-remote.sh` defaulted `SHA=ef86e66`
+   — the PRE-consolidation commit. Re-running them would have re-measured the OLD serial
+   path. Default is now `origin/main`; the resolved commit is recorded to `engine-sha.txt`.
+2. **Mislabelled phase report.** On the sharded DEFAULT path, `SPARQ_BUILD_TIMING=1` printed
+   the now-PARALLEL intern / PIPELINED remap occupancy under the labels `merge_remap(serial)`
+   / `triple-remap(serial)` — so a reader would have compared overlapped per-stage occupancy
+   against the old ADDITIVE-serial ~200 s and drawn the wrong conclusion. The report now
+   distinguishes the path (`sparq_core` `build_timing::PathKind`): the sharded/spill paths
+   read `intern(parallel-occupancy)` / `triple-remap(pipelined-occupancy)` and surface the
+   serial consolidation step as its own `dict-consolidate(serial)` term (the `into_merged`
+   bucket — the interpretable dict-consolidation cost on the new path). The non-sharded
+   serial build keeps the honest `merge_remap(serial)` / `triple-remap(serial)` labels.
+
+**Status:** instrumentation + orchestration ready; the 1 B r7i.2xlarge run is launchable
+with `bash hwrun/rung5-launch.sh` (uses `AWS_PROFILE=pss`, self-terminating, tag
+`purpose=sparq-hw-validation`, dead-man `shutdown -h +150`). The on-box clone checks out
+`origin/main`, so the box must be run AFTER this fix merges (otherwise it rebuilds the
+mislabelled report). The dict-consolidation bucket number at 1 B real truthy on
+post-consolidation main is NOT YET recorded — when the box runs, capture `dict consolidate
+(into_merged)` + the `dict-consolidate(serial)` term from `t2-dict-bucket.txt` here and
+compare against the projected single-digit seconds.

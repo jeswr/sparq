@@ -21,7 +21,11 @@ set -uo pipefail
 
 export AWS_PROFILE=pss
 REGION=eu-west-2
-SHA="${SPARQ_SHA:-ef86e66}"
+# [OPUS-4.8 sq-3l43] Default to current public main, NOT the pre-`dict-consolidation`
+# engine ef86e66 that produced the original ~200 s/1 B SERIAL dict bucket. The whole
+# point of this re-measurement is to exercise the MERGED parallel-intern + pipelined
+# remap + parallel `into_merged` path, so the build MUST be a post-consolidation commit.
+SHA="${SPARQ_SHA:-origin/main}"
 ITYPE=r7i.2xlarge
 DEADMAN=150          # minutes; box self-destructs even if this script dies
 SLICE=1000000000
