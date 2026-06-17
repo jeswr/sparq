@@ -63,4 +63,6 @@ unicode-segmentation = "1"
 
 [dev-dependencies]
 # Deterministic random literals/deltas for the differential test + the benchmark example.
-rand = "0.9"
+# [OPUS-4.8] sq-8xug: rand-ecosystem 0.10. `random_range`/`random` moved from the
+# `Rng` trait to `RngExt` in 0.10, so the test/example imports use the prelude.
+rand = "0.10"

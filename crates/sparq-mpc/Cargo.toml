@@ -54,20 +54,21 @@ sparq-engine = { path = "../sparq-engine" }
 # re-encode its own data to hand a partial to the join layer.
 oxrdf = { workspace = true }
 
-# [OPUS-4.8] sq-1vt / sq-it50: CSPRNG for the secret-sharing / masking randomness.
-# The dealer's polynomial coefficients and the equality-test mask MUST be
-# unpredictable — a non-crypto PRNG there is a real confidentiality weakness
-# (sq-1vt). We now own the ChaCha20 keystream generator (`crate::chacha`,
+# [OPUS-4.8] sq-1vt / sq-it50 / sq-8xug: OS-entropy seed for the secret-sharing /
+# masking CSPRNG. The dealer's polynomial coefficients and the equality-test mask
+# MUST be unpredictable — a non-crypto PRNG there is a real confidentiality
+# weakness (sq-1vt). We own the ChaCha20 keystream generator (`crate::chacha`,
 # correctness-pinned to the RFC 8439 vectors) so its key schedule is
 # `ZeroizeOnDrop`-scrubbed (sq-it50) — ecosystem `rand_chacha::ChaCha20Rng`
 # exposes no `zeroize`/`&mut`-key access, so its key schedule could not be
-# scrubbed in place. We still depend on `rand_chacha` ONLY for its re-exported
-# `rand_core` (`OsRng` + `TryRngCore`), which pulls the 32-byte seed from OS
-# entropy (getrandom). The direct `rand` dependency is dropped — we no longer use
-# its `RngCore`/`SeedableRng`/distributions — keeping the dependency surface
-# minimal and the native-only / wasm-exclusion invariant intact. Pinned to the
-# workspace's existing 0.9 line (sparq-geo/sparq-text).
-rand_chacha = "0.9"
+# scrubbed in place. We need ONLY a fresh 32-byte OS-entropy seed for that owned
+# CSPRNG. Under the rand 0.10 ecosystem upgrade (sq-8xug), `rand_core` 0.10 no
+# longer re-exports `OsRng` (it was removed), so the previous
+# `rand_chacha::rand_core::OsRng` path is gone. We now draw the seed straight from
+# `getrandom::fill`, which DROPS the `rand_chacha` dependency entirely (we never
+# used its `ChaCha20Rng`). Minimal dependency surface; native-only / wasm-exclusion
+# invariant intact. `getrandom` 0.4 is the workspace OS-entropy floor.
+getrandom = "0.4"
 
 # [OPUS-4.8] sq-u8a8 (epic sq-toze / from side-channel analysis sq-egx6, gap
 # CR-G5): secret-memory hygiene (`zeroize`) + constant-time-equality PRIMITIVES

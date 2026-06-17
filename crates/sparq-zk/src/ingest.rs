@@ -137,7 +137,8 @@ impl SaltMint {
         for _ in 0..MAX_MINT_REDRAWS {
             let mut bytes = [0u8; 32];
             // getrandom is the OS CSPRNG; an error here means no entropy source.
-            if getrandom::getrandom(&mut bytes).is_err() {
+            // [OPUS-4.8] sq-8xug: getrandom 0.4 renamed the top-level fn to `fill`.
+            if getrandom::fill(&mut bytes).is_err() {
                 return Err(IngestError::SaltExhausted);
             }
             let salt = salt_from_bytes(&bytes);

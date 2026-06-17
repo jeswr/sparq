@@ -21,7 +21,7 @@
 //!
 //! - [`SecureRng`] — the **production / default** masking RNG. An **owned**
 //!   ChaCha20 CSPRNG (`crate::chacha::ChaCha20Csprng`, private to this crate)
-//!   seeded from OS entropy (`OsRng` → `getrandom`). This is what the real
+//!   seeded from OS entropy (`getrandom::fill`). This is what the real
 //!   protocol uses and the only RNG reachable from the default
 //!   [`crate::shamir::ShamirBackend::new`] constructor. We own the cipher (rather
 //!   than wrapping `rand_chacha::ChaCha20Rng`) specifically so its key schedule is
@@ -159,16 +159,18 @@ impl SecureRng {
     ///
     /// [`Zeroizing`]: zeroize::Zeroizing
     pub fn from_os() -> Self {
-        use rand_chacha::rand_core::{OsRng, TryRngCore};
         // Pull the ChaCha seed into a sparq-owned buffer we CAN scrub. `Zeroizing`
         // wipes `seed` on scope exit (incl. on an unwind), so the sparq-held seed
         // secret never lingers on the stack.
         let mut seed = zeroize::Zeroizing::new([0u8; 32]);
-        // `try_fill_bytes` surfaces a hard OS-entropy failure as an error instead
-        // of silently degrading to a weak/known seed (which would reintroduce
-        // sq-1vt). Panicking on that failure is intended for a security seed.
-        OsRng
-            .try_fill_bytes(seed.as_mut())
+        // [OPUS-4.8] sq-8xug: draw the seed straight from the OS CSPRNG via
+        // `getrandom::fill`. `rand_core` 0.10 removed `OsRng`, so the prior
+        // `rand_chacha::rand_core::OsRng::try_fill_bytes` path no longer exists;
+        // `getrandom` is the underlying OS-entropy source that `OsRng` wrapped.
+        // It surfaces a hard OS-entropy failure as an error instead of silently
+        // degrading to a weak/known seed (which would reintroduce sq-1vt).
+        // Panicking on that failure is intended for a security seed.
+        getrandom::fill(seed.as_mut())
             .expect("OS entropy source failed while seeding the masking CSPRNG (sq-1vt)");
         // `from_seed` takes the seed by value (a copy); `seed` itself is still
         // scrubbed by `Zeroizing` at end of scope. The inner cipher's key schedule

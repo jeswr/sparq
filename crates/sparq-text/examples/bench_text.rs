@@ -47,7 +47,8 @@
 
 use std::time::Instant;
 
-use rand::{rngs::StdRng, Rng, SeedableRng};
+// [OPUS-4.8] sq-8xug: `random_range` moved from `Rng` to `RngExt` in rand 0.10.
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 use sparq_core::Graph;
 use sparq_text::TextIndex;
 

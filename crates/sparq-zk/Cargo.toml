@@ -56,9 +56,10 @@ subtle = "2"
 
 # OS CSPRNG for the trusted-ingest per-graph salt mint (audit #9 / sq-610): each
 # named graph draws fresh OS-random entropy so its bnode salt is globally unique
-# by construction. Already in the workspace lockfile (via ark-std's rand).
-# [OPUS-4.8] sq-610.
-getrandom = "0.2"
+# by construction.
+# [OPUS-4.8] sq-610 / sq-8xug: bumped to the 0.4 line as part of the rand-ecosystem
+# upgrade. getrandom 0.3+ replaced the top-level `getrandom()` fn with `fill()`.
+getrandom = "0.4"
 ark-ed-on-bn254 = { version = "0.6", default-features = false }
 ark-ec = { version = "0.6", default-features = false }
 ark-serialize = { version = "0.6", default-features = false }
