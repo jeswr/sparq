@@ -27,6 +27,13 @@ const KEYS: usize = 10_000;
 const RESPONSE_BYTES: usize = 1024;
 const ZIPF_S: f64 = 1.0;
 
+/// query string → pre-serialized response bytes (the cache's value is a shared blob).
+type ResponseCache = HashMap<String, Arc<Vec<u8>>>;
+/// the sharded read-mostly map: one `RwLock`-guarded `ResponseCache` per shard.
+/// [OPUS-4.8] sq-kujq — factored out to satisfy `clippy::type_complexity` under
+/// `--all-targets -D warnings` (this standalone spike workspace is not gated by root CI).
+type ShardedCache = Arc<Vec<RwLock<ResponseCache>>>;
+
 fn main() {
     let threads: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(8);
 
@@ -46,7 +53,7 @@ fn main() {
         .map(|i| format!("SELECT ?n WHERE {{ <http://example.org/person/{i}> <http://xmlns.com/foaf/0.1/name> ?n }}"))
         .collect();
     let blob: Arc<Vec<u8>> = Arc::new(vec![b'x'; RESPONSE_BYTES]);
-    let mut map: HashMap<String, Arc<Vec<u8>>> = HashMap::with_capacity(KEYS * 2);
+    let mut map: ResponseCache = HashMap::with_capacity(KEYS * 2);
     for s in &queries {
         map.insert(s.clone(), blob.clone());
     }
@@ -82,12 +89,11 @@ fn main() {
 
     // --- multi-thread hit path: sharded maps (no writer contention modelled) ------
     const SHARDS: usize = 64;
-    let mut shards: Vec<HashMap<String, Arc<Vec<u8>>>> = (0..SHARDS).map(|_| HashMap::new()).collect();
+    let mut shards: Vec<ResponseCache> = (0..SHARDS).map(|_| HashMap::new()).collect();
     for s in &queries {
         shards[shard_of(s, SHARDS)].insert(s.clone(), blob.clone());
     }
-    let shards: Arc<Vec<RwLock<HashMap<String, Arc<Vec<u8>>>>>> =
-        Arc::new(shards.into_iter().map(RwLock::new).collect());
+    let shards: ShardedCache = Arc::new(shards.into_iter().map(RwLock::new).collect());
     bench_threads("sharded(64) RwLock", threads, &queries, &cdf, {
         let shards = shards.clone();
         move |k| {
@@ -99,7 +105,7 @@ fn main() {
     // --- multi-thread: lock-free reads via an immutable Arc-swapped map ----------
     // Models the "generation cache": readers clone an Arc to the whole map (as the
     // server already does for the graph) and look up with zero locking.
-    let frozen: Arc<HashMap<String, Arc<Vec<u8>>>> = Arc::new(cache.read().unwrap().clone());
+    let frozen: Arc<ResponseCache> = Arc::new(cache.read().unwrap().clone());
     bench_threads("Arc-swapped immutable map", threads, &queries, &cdf, {
         let frozen = frozen.clone();
         move |k| frozen.get(k).map(|v| v.len()).unwrap_or(0)
