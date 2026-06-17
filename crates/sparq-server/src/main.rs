@@ -83,6 +83,10 @@
 //!   --brtpf-max-values-bytes N [OPUS-4.8 sq-r74h] (feature `brtpf`) DoS cap on the raw brTPF `values`
 //!                             PAYLOAD BYTES — bounds the GET query-string carrier that --max-body-bytes
 //!                             never sees (413 beyond), 0 off            [1048576, env SPARQ_BRTPF_MAX_VALUES_BYTES]
+//!   --shacl                   [OPUS-4.8 sq-r868] (feature `shacl`) serve the OPT-IN HTTP SHACL validate
+//!                             endpoint `POST /shacl/validate`: POST a shapes graph, the server validates
+//!                             its loaded data graph against it. Read-only. Off by default
+//!                                                                        [off, env SPARQ_SHACL=1]
 //!   --verbose                 per-request logging (TraceLayer)
 //!   --log-full-requests       [OPUS-4.8 sq-toze.34] OPT OUT of request-log redaction: log the
 //!                             raw request URI (incl. the full `?query=` SPARQL text) verbatim.
@@ -283,6 +287,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--brtpf-max-values-bytes" => {
                 config.brtpf_max_values_bytes = parse_flag(&mut args, "--brtpf-max-values-bytes")?;
             }
+            // [OPUS-4.8] sq-r868 (from-pss gh-162 follow-up (c)): OPT-IN HTTP SHACL validate
+            // endpoint — POST a shapes graph to /shacl/validate and the server validates its
+            // loaded data graph against it. Read-only. Off by default (env SPARQ_SHACL=1).
+            #[cfg(feature = "shacl")]
+            "--shacl" => config.shacl = true,
             // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).
@@ -313,13 +322,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [OPUS-4.8] sq-r868: surface the SHACL validate endpoint flag (feature shacl).
+                let shacl = if cfg!(feature = "shacl") {
+                    " [--shacl]"
+                } else {
+                    ""
+                };
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
                      [--query-timeout SECS] [--update-where-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf} [--verbose] \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl} [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n\n  \
                      PERSIST: --persist DIR (env SPARQ_PERSIST_DIR) makes the on-disk index at \
                      DIR the durable source of truth (QLever --persist-updates): every committed \

@@ -147,6 +147,24 @@ tpf = ["server"]
 # parameter is just an ignored unknown parameter — plain TPF). STILL governed by the same
 # `--tpf` runtime flag (brTPF is the same endpoint, extended).
 brtpf = ["tpf"]
+# [OPUS-4.8] (sq-r868, from-pss gh-162 follow-up (c)) `shacl` (default OFF) mounts the
+# OPT-IN HTTP SHACL validation endpoint `POST /shacl/validate`: the client POSTs a SHACL
+# shapes graph (RDF, by `Content-Type`) and the server validates its CURRENTLY-LOADED data
+# graph against it, returning a validation report — a JSON projection of
+# `sparq_shacl::ValidationReport` (the same `{ conforms, results: [{ focusNode, path, value,
+# sourceShape, sourceConstraintComponent, severity, message }] }` shape the wasm `shacl`
+# binding (gh-162 part (a)) and the PSS Pod-Manager consume) by default, or the W3C SHACL
+# report-vocabulary Turtle on `Accept: text/turtle`. This is the server-side / large-graph
+# path from gh-162: the store is already in memory (no per-request data parse), and the
+# 100k-node case where the JS `rdf-validate-shacl` OOMs is handled natively. The feature
+# pulls `sparq-shacl` (which transitively pulls sparq-engine for `sh:sparql`); sparq-shacl
+# follows the opt-in isolation pattern, so a build WITHOUT this feature carries ZERO SHACL
+# code — byte-identical to before, and sparq-core/the wasm bundle are untouched either way
+# (sparq-wasm depends on sparq-core/-engine directly, never on sparq-server). STILL OFF AT
+# RUNTIME by default even when compiled in — the operator must additionally set `--shacl` /
+# `SPARQ_SHACL=1` (`ServerConfig::shacl`), mirroring `tpf` / `federation-descriptors`;
+# validation is a READ over the store, so it is gated by the read auth like any GET.
+shacl = ["server", "dep:sparq-shacl"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -167,6 +185,12 @@ sparq-introspect = { path = "../sparq-introspect", version = "0.1.0", optional =
 # Behind the opt-in `geo` feature only (geof_registry; its own default `engine`
 # feature is this same sparq-engine, so the graph gains just the georust stack).
 sparq-geo = { path = "../sparq-geo", version = "0.1.0", optional = true }
+# [OPUS-4.8] (sq-r868) Behind the opt-in `shacl` feature only: SHACL Core + SHACL-SPARQL
+# validation (`sparq_shacl::validate` → `ValidationReport`) for the `POST /shacl/validate`
+# endpoint. It transitively pulls sparq-engine (already a dependency here) for `sh:sparql`;
+# its OWN `oxrdf` is the same workspace 0.3 the server resolves, so terms flow through. OFF
+# by default — a build without the `shacl` feature carries zero SHACL code.
+sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
 oxrdf.workspace = true
 # [OPUS-4.8] sq-rt6v: prefix-compacting Turtle + RDF/XML graph serialisation, and RDF/XML
 # request-body parsing, for the GSP read/write + CONSTRUCT/DESCRIBE surface. Both crates are

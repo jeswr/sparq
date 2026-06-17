@@ -385,6 +385,20 @@ pub struct ServerConfig {
     /// `SPARQ_BRTPF_MAX_VALUES_BYTES`. Present only with the `brtpf` cargo feature.
     #[cfg(feature = "brtpf")]
     pub brtpf_max_values_bytes: usize,
+    /// [OPUS-4.8] (sq-r868, from-pss gh-162 follow-up (c)) OPT-IN HTTP SHACL validation
+    /// endpoint. When `true`, the server serves `POST /shacl/validate`: the client POSTs a
+    /// SHACL shapes graph (RDF, by `Content-Type`) and the server validates its
+    /// CURRENTLY-LOADED data graph against it, returning a validation report — a JSON
+    /// projection of `sparq_shacl::ValidationReport` (the gh-162 / wasm-binding shape) by
+    /// default, or the W3C report-vocabulary Turtle on `Accept: text/turtle`. `false` (the
+    /// default) leaves it off: `/shacl/validate` is `404`.
+    ///
+    /// This field exists only with the `shacl` cargo feature (like
+    /// [`tpf`](Self::tpf) under `tpf`); a build without that feature compiles no SHACL code
+    /// and pays zero cost. Set by the binary's `--shacl` flag / `SPARQ_SHACL=1` env. Validation
+    /// is a READ over the store, so the endpoint is gated by the read auth like any GET.
+    #[cfg(feature = "shacl")]
+    pub shacl: bool,
 }
 
 impl Default for ServerConfig {
@@ -450,6 +464,11 @@ impl Default for ServerConfig {
             brtpf_max_bindings: 1024,
             #[cfg(feature = "brtpf")]
             brtpf_max_values_bytes: 1024 * 1024,
+            // [OPUS-4.8] sq-r868: safe default — the SHACL validate endpoint is OFF even when
+            // the feature is compiled in (the operator opts in deliberately via --shacl /
+            // SPARQ_SHACL=1).
+            #[cfg(feature = "shacl")]
+            shacl: false,
         }
     }
 }
@@ -602,6 +621,12 @@ impl ServerConfig {
             if let Some(n) = env_parse::<usize>("SPARQ_BRTPF_MAX_VALUES_BYTES") {
                 cfg.brtpf_max_values_bytes = n;
             }
+        }
+        // [OPUS-4.8] sq-r868: SPARQ_SHACL truthy ("1"/"true"/"yes"/"on") serves the SHACL
+        // validate endpoint. Off by default. Only present with the `shacl` feature.
+        #[cfg(feature = "shacl")]
+        if let Ok(v) = std::env::var("SPARQ_SHACL") {
+            cfg.shacl = env_truthy(&v);
         }
         Ok(cfg)
     }
@@ -1776,6 +1801,13 @@ pub fn router(state: AppState) -> Router {
         "/tpf",
         get(tpf_endpoint).head(tpf_endpoint).post(tpf_endpoint),
     );
+    // [OPUS-4.8] sq-r868 (from-pss gh-162 follow-up (c)): OPT-IN HTTP SHACL validate endpoint.
+    // Compiled only with the `shacl` feature; even then the handler refuses (404) unless the
+    // config flag is set. POST only — the client sends a shapes graph and the server validates
+    // its loaded data graph (a READ); axum returns a 405 with `Allow: POST` for other methods.
+    // See [`shacl_validate_endpoint`].
+    #[cfg(feature = "shacl")]
+    let routes = routes.route("/shacl/validate", post(shacl_validate_endpoint));
     let routes = routes.with_state(state.clone());
     // The metrics middleware wraps the WHOLE hardened stack so shed requests
     // (429), body-limit rejections (413) and panics (500) are counted with the
@@ -2197,6 +2229,227 @@ async fn tpf_endpoint(
         GraphFormat::RdfXml => crate::graph::triples_to_rdfxml(&triples),
     };
     text_response(StatusCode::OK, fmt.content_type(), body, head_only)
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-r868 (from-pss gh-162 follow-up (c)) — OPT-IN HTTP SHACL validate endpoint
+// ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] sq-r868: `POST /shacl/validate` — validate the server's currently-loaded data
+/// graph against a SHACL shapes graph the client POSTs.
+///
+/// OPT-IN: returns `404` unless [`ServerConfig::shacl`] is set (the route is mounted only with
+/// the `shacl` feature, and the handler refuses unless the operator also turned the flag on).
+///
+/// **Contract.** The request BODY is the SHACL **shapes** graph (RDF — `text/turtle` /
+/// `application/n-triples` / `application/n-quads` / `application/trig` / `application/rdf+xml`,
+/// classified by `Content-Type` exactly like a GSP write body, and gzip-decoded under the same
+/// zip-bomb cap). The **data** graph is the server's CURRENT in-memory store snapshot (pinned
+/// for the request) — the gh-162 server-side / large-graph path: the store is already loaded, so
+/// there is no per-request data parse, and the 100k-node case where the JS `rdf-validate-shacl`
+/// OOMs is handled natively. Validation is a READ; the endpoint is gated by the read auth.
+///
+/// **Response.** Content-negotiated from `Accept`: `text/turtle` yields the W3C SHACL
+/// report-vocabulary graph ([`sparq_shacl::ValidationReport::to_turtle`]); anything else (the
+/// default) yields the JSON projection PSS / the wasm `shacl` binding consume —
+/// `{ "conforms": bool, "results": [{ "focusNode", "path", "value", "sourceShape",
+/// "sourceConstraintComponent", "severity", "message" }] }`. `200` regardless of conformance —
+/// the verdict is in the body (`conforms`), not the HTTP status; a malformed shapes body is a
+/// `400`, an unsupported `Content-Type` a `415`.
+#[cfg(feature = "shacl")]
+async fn shacl_validate_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !state.config().shacl {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    // Validation reads the store; gate it like any other read.
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    // Decode the (possibly gzip'd) body under the shared decompression-ratio cap.
+    let body = match decode_request_body(&body, &headers, state.config()) {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+    // Parse the shapes graph from the body, classified by Content-Type (same matrix as a GSP
+    // write body). A no/relative base is fine — shapes graphs name shapes by absolute IRI.
+    let shapes = match parse_shapes_graph(&body, &content_type(&headers)) {
+        Ok(g) => g,
+        Err(resp) => return resp,
+    };
+    let turtle =
+        negotiate_shacl_report_turtle(headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()));
+    let gen = state.current();
+    // Validation is CPU-bound (index scans over the whole store + any `sh:sparql`), so run it
+    // on the blocking pool under the same wall-clock cap the query paths use.
+    let task = tokio::task::spawn_blocking(move || {
+        let report = sparq_shacl::validate(gen.snapshot(), &shapes);
+        if turtle {
+            text_response(
+                StatusCode::OK,
+                "text/turtle; charset=utf-8",
+                report.to_turtle(),
+                false,
+            )
+        } else {
+            text_response(
+                StatusCode::OK,
+                "application/json; charset=utf-8",
+                shacl_report_to_json(&report),
+                false,
+            )
+        }
+    });
+    await_worker(task, state.config()).await
+}
+
+/// [OPUS-4.8] sq-r868: parse a SHACL shapes graph from a request body classified by its
+/// `Content-Type` (the same media-type matrix as a GSP write body — see [`rdf_format_for`]).
+/// Returns the caller's `415` for an unsupported type, `400` for malformed RDF. The offending
+/// body fragment the parser would echo is withheld from the client and logged server-side, the
+/// same info-leak posture the rest of the surface uses (sq-cz89/sq-j9zs).
+#[cfg(feature = "shacl")]
+#[allow(clippy::result_large_err)]
+fn parse_shapes_graph(body: &Bytes, content_type: &str) -> Result<Graph, Response> {
+    match rdf_format_for(content_type) {
+        Some(BodyFormat::Core(format)) => {
+            let text = std::str::from_utf8(body)
+                .map_err(|_| bad_request("shapes body is not valid UTF-8"))?;
+            Graph::load_str(text, format).map_err(|e| {
+                sanitized_error(
+                    StatusCode::BAD_REQUEST,
+                    "shacl-shapes-parse",
+                    "malformed RDF shapes body",
+                    &e,
+                )
+            })
+        }
+        Some(BodyFormat::RdfXml) => {
+            let triples = crate::graph::parse_rdfxml(body, None).map_err(|e| {
+                sanitized_error(
+                    StatusCode::BAD_REQUEST,
+                    "shacl-shapes-rdfxml-parse",
+                    "malformed RDF/XML shapes body",
+                    &e,
+                )
+            })?;
+            Ok(sparq_shacl::graph_from_triples(triples))
+        }
+        None => Err(json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "SHACL shapes body must be RDF: Content-Type 'text/turtle', 'application/n-triples', \
+             'application/n-quads', 'application/trig' or 'application/rdf+xml'",
+        )),
+    }
+}
+
+/// [OPUS-4.8] sq-r868: pick the report serialisation from `Accept`. `text/turtle` (the W3C SHACL
+/// report vocabulary) when explicitly requested at non-zero q; otherwise the JSON projection
+/// (the default — the shape PSS / the wasm `shacl` binding consume). q-value aware: an explicit
+/// `text/turtle;q=0` falls back to JSON.
+#[cfg(feature = "shacl")]
+fn negotiate_shacl_report_turtle(accept: Option<&str>) -> bool {
+    let accept = match accept {
+        Some(a) if !a.trim().is_empty() => a,
+        _ => return false,
+    };
+    // Highest-q wins; JSON is the default when nothing (or a wildcard) is preferred over Turtle.
+    let mut turtle_q = f32::NEG_INFINITY;
+    let mut json_q = 0.0f32; // the default floor — JSON is always acceptable
+    for part in accept.split(',') {
+        let mut it = part.split(';');
+        let media = it.next().unwrap_or("").trim().to_ascii_lowercase();
+        let mut q = 1.0f32;
+        for param in it {
+            if let Some(v) = param.trim().strip_prefix("q=") {
+                q = v.parse().unwrap_or(1.0);
+            }
+        }
+        match media.as_str() {
+            "text/turtle" | "application/x-turtle" => turtle_q = turtle_q.max(q),
+            "application/json" | "application/sparql-results+json" => json_q = json_q.max(q),
+            _ => {}
+        }
+    }
+    turtle_q > 0.0 && turtle_q > json_q
+}
+
+/// [OPUS-4.8] sq-r868: serialise a [`sparq_shacl::ValidationReport`] to the JSON projection the
+/// PSS Pod-Manager + the wasm `shacl` binding consume:
+/// `{ "conforms": bool, "results": [{ focusNode, path, value, sourceShape,
+/// sourceConstraintComponent, severity, message }] }`. `path`/`value` are `null` when the result
+/// carries none; `focusNode`/`value`/`sourceShape` are N-Triples term strings; `path` is a SHACL
+/// Turtle path expression; `message` is the first `sh:message` text (or the generated default).
+/// Hand-rolled with the same string escaping as [`json_error`] so the projection stays
+/// byte-compatible with the wasm binding's documented shape.
+#[cfg(feature = "shacl")]
+fn shacl_report_to_json(report: &sparq_shacl::ValidationReport) -> String {
+    use oxrdf::Term;
+
+    fn push_str_lit(out: &mut String, s: &str) {
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+    fn push_field(out: &mut String, key: &str, val: Option<&str>) {
+        out.push('"');
+        out.push_str(key);
+        out.push_str("\":");
+        match val {
+            Some(v) => push_str_lit(out, v),
+            None => out.push_str("null"),
+        }
+    }
+
+    let mut out = String::from("{\"conforms\":");
+    out.push_str(if report.conforms { "true" } else { "false" });
+    out.push_str(",\"results\":[");
+    for (i, r) in report.results.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('{');
+        push_field(&mut out, "focusNode", Some(&r.focus_node.to_string()));
+        out.push(',');
+        let path = r.path.as_ref().map(|p| p.to_turtle());
+        push_field(&mut out, "path", path.as_deref());
+        out.push(',');
+        let value = r.value.as_ref().map(|v| v.to_string());
+        push_field(&mut out, "value", value.as_deref());
+        out.push(',');
+        push_field(&mut out, "sourceShape", Some(&r.source_shape.to_string()));
+        out.push(',');
+        push_field(
+            &mut out,
+            "sourceConstraintComponent",
+            Some(&r.source_component),
+        );
+        out.push(',');
+        push_field(&mut out, "severity", Some(&r.severity));
+        out.push(',');
+        // The human-readable message: the first sh:message's text, or the generated default.
+        let message = match r.messages.first() {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            _ => r.default_message.clone(),
+        };
+        push_field(&mut out, "message", Some(&message));
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
 }
 
 /// Applies the T15 hardening middleware stack to a router (outermost first):

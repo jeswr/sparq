@@ -3564,6 +3564,7 @@ dependencies = [
  "sparq-geo",
  "sparq-introspect",
  "sparq-serve",
+ "sparq-shacl",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tower",

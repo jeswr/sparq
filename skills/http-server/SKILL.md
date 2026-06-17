@@ -514,6 +514,44 @@ curl -H 'Accept: application/n-triples' \
   'http://127.0.0.1:3030/tpf?subject=%3Chttp%3A%2F%2Fex%2Falice%3E&predicate=%3Chttp%3A%2F%2Fex%2Fknows%3E'
 ```
 
+**5e. SHACL validation endpoint (OPT-IN, `sq-r868`, from-pss gh-162 follow-up; feature
+`shacl`).** Validate the server's **currently-loaded data graph** against a SHACL **shapes**
+graph the client POSTs — the server-side / large-graph path from gh-162 (the store is already in
+memory, so there is no per-request data parse, and the 100k-node case where the JS
+`rdf-validate-shacl` OOMs is handled natively by `sparq-shacl`).
+
+- `POST /shacl/validate` — the request **body** is the SHACL shapes graph (RDF: `text/turtle` /
+  `application/n-triples` / `application/n-quads` / `application/trig` / `application/rdf+xml`,
+  classified by `Content-Type` like a GSP write body, and gzip-decoded under the same zip-bomb
+  cap). The **data** graph is the server's pinned store snapshot.
+- **Response, content-negotiated from `Accept`:** the default is the JSON projection PSS / the
+  wasm `shacl` binding consume — `{ "conforms": bool, "results": [{ "focusNode", "path", "value",
+  "sourceShape", "sourceConstraintComponent", "severity", "message" }] }`; `Accept: text/turtle`
+  yields the W3C SHACL report-vocabulary graph (`sparq_shacl::ValidationReport::to_turtle`).
+- Always `200` regardless of conformance — the verdict is in the body (`conforms`), not the HTTP
+  status. A malformed shapes body is a `400`, an unsupported `Content-Type` a `415`, a non-`POST`
+  method a `405`.
+- Covers SHACL Core + SHACL-SPARQL (`sh:sparql`, §5.2) + custom SPARQL constraint components (§6)
+  — whatever `sparq-shacl::validate` supports (it is the SAME engine the wasm binding and the
+  `sparq-shacl` crate expose; see the `shacl-validation` skill). SHACL-AF `sh:rule` inference is
+  not part of validation and is not run by this endpoint.
+
+```sh
+cargo run -p sparq-server --features shacl -- data.ttl --shacl
+# validate the loaded store against POSTed shapes → JSON report (default)
+curl -X POST -H 'Content-Type: text/turtle' --data-binary @shapes.ttl \
+  http://127.0.0.1:3030/shacl/validate
+# the W3C report vocabulary as Turtle
+curl -X POST -H 'Content-Type: text/turtle' -H 'Accept: text/turtle' --data-binary @shapes.ttl \
+  http://127.0.0.1:3030/shacl/validate
+```
+
+**Double opt-in**, OFF by default and **READ-only** (validation never mutates the store):
+compiled only with the `shacl` cargo feature **and** served only when `--shacl` / `SPARQ_SHACL=1`
+is also set (mirrors `tpf` / `federation-descriptors`). Without the feature, zero cost (no route,
+no SHACL code — `sparq-core`/the wasm bundle are untouched); with the feature but not the flag,
+`/shacl/validate` is `404`. Reads are gated by `--auth-token-read` like any GET.
+
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
 env overrides the default.
 
@@ -540,6 +578,7 @@ env overrides the default.
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
 | `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, full Hydra paging incl. `first`/`last`, read-only); same flag also serves brTPF bind-restricted fragments (`values` param / `POST` body) when built with the `brtpf` feature — see "Triple Pattern Fragments" |
+| `--shacl` | `SPARQ_SHACL` | off | (feature `shacl`) serve the SHACL validate endpoint `POST /shacl/validate` — POST a shapes graph, the server validates its loaded data graph against it; JSON report (default) or W3C report Turtle (`Accept: text/turtle`); read-only — see "SHACL validation endpoint" |
 | `--brtpf-max-bindings N` | `SPARQ_BRTPF_MAX_BINDINGS` | `1024` (`0`=off) | (feature `brtpf`) **DoS cap on the brTPF binding-set mapping COUNT** — one index scan per mapping, so cost is super-linear in the count, not the bytes → `413` (`sq-r74h`) |
 | `--brtpf-max-values-bytes N` | `SPARQ_BRTPF_MAX_VALUES_BYTES` | `1048576` (`0`=off) | (feature `brtpf`) **DoS cap on the raw brTPF `values` payload BYTES** — bounds the GET query-string carrier that `--max-body-bytes` never sees → `413` (`sq-r74h`) |
 | `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |
