@@ -18,23 +18,39 @@
 //! ## Reference engines (pluggable — sq-eifd report-cli adapters)
 //! The reference side is a "report-cli" adapter (bead sq-eifd): a subprocess that
 //! reads `{data, shapes}` Turtle and emits a normalised JSON report
-//! (`conforms` + a `{focus, component, path}` violation list). The first wired
-//! reference is **pySHACL** (`tests/diff_fuzz/pyshacl_adapter.py`), the canonical
-//! SHACL reference implementation. Other engines (rdf-validate-shacl /
-//! shacl-engine via Node, Jena-SHACL via a jar) are left as TODO beads; each is a
-//! drop-in alternative `RefEngine` that produces the same JSON shape.
+//! (`conforms` + a `{focus, component, path}` violation list). Two references are
+//! wired, each a drop-in `RefEngine` that produces the *same* JSON shape:
+//!   - **pySHACL** (`tests/diff_fuzz/pyshacl_adapter.py`, bead sq-55c1) — the
+//!     canonical Python SHACL reference implementation, driven via a Python
+//!     interpreter that has `pyshacl` + `rdflib` importable.
+//!   - **Apache Jena SHACL** (`tests/diff_fuzz/JenaShaclAdapter.java`, bead
+//!     sq-evws) — Jena's `org.apache.jena.shacl` validator, driven via the Java
+//!     single-file source launcher (`java -cp <jena-libs> JenaShaclAdapter.java`)
+//!     so no compile step / committed jar is needed. A second independent
+//!     reference catches bugs where sparq and pySHACL happen to agree but are both
+//!     wrong.
+//!
+//! Other engines (rdf-validate-shacl / shacl-engine via Node) remain follow-up
+//! beads; each is another `RefEngine` over the same contract.
 //!
 //! ## How to run
 //! Off by default (`#[ignore]`) so the per-PR `cargo nextest run` fast path is
-//! untouched — this is a NIGHTLY/heavy-tier check. Run it explicitly:
+//! untouched — this is a NIGHTLY/heavy-tier check. The differential runs against
+//! EVERY reference engine that resolves; run it explicitly:
 //! ```text
-//! # point at a Python with pyshacl + rdflib installed:
+//! # pySHACL: point at a Python with pyshacl + rdflib installed:
 //! SHACL_DIFF_PYTHON=/path/to/venv/bin/python \
+//!   cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
+//! # Jena: point at a `*`-globbable classpath of its jars (an unpacked apache-jena
+//! # tarball's `lib`), or set JENA_HOME (its `lib` is derived):
+//! SHACL_DIFF_JENA_CP="/opt/apache-jena/lib/*" \
 //!   cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
 //! # bound the run: SHACL_DIFF_SEED_START / SHACL_DIFF_COUNT (defaults 0 / 200).
 //! ```
-//! When no reference engine resolves, the test SKIPS (prints why and returns) so
-//! it stays green on a box without the reference toolchain.
+//! When NO reference engine resolves, the test SKIPS (prints why and returns) so
+//! it stays green on a box without any reference toolchain. Each engine is gated
+//! independently — Jena is silently skipped when neither a Jena classpath nor a
+//! working `java` is available, so the existing pySHACL-only lane is unaffected.
 //!
 //! ## Comparison policy (per bead sq-55c1)
 //! 1. `conforms` bit — exact (cheap, highest signal).
@@ -73,10 +89,24 @@ struct RefViolation {
     path: Option<String>,
 }
 
-/// Resolves the Python interpreter to drive the pySHACL adapter, or `None` if
-/// pySHACL is not importable (so the test can SKIP cleanly). Honours
-/// `SHACL_DIFF_PYTHON` (a venv's `python`); otherwise tries `python3`.
-fn resolve_pyshacl() -> Option<String> {
+/// A resolved reference engine: a human name plus the program + leading args to
+/// spawn its report-cli adapter. The (data, shapes) request is always written to
+/// the child's stdin and the normalised JSON report read from stdout, regardless
+/// of engine — so adding an engine is just another `resolve_*` returning this.
+struct RefEngine {
+    name: String,
+    program: String,
+    args: Vec<String>,
+}
+
+fn adapter_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/diff_fuzz")
+}
+
+/// Resolves the pySHACL engine, or `None` if pySHACL is not importable (so it can
+/// be SKIPPED cleanly). Honours `SHACL_DIFF_PYTHON` (a venv's `python`); otherwise
+/// tries `python3` then `python`.
+fn resolve_pyshacl() -> Option<RefEngine> {
     let candidates = std::env::var("SHACL_DIFF_PYTHON")
         .ok()
         .into_iter()
@@ -90,23 +120,90 @@ fn resolve_pyshacl() -> Option<String> {
             .map(|s| s.success())
             .unwrap_or(false);
         if ok {
-            return Some(py);
+            let adapter = adapter_dir().join("pyshacl_adapter.py");
+            return Some(RefEngine {
+                name: format!("pySHACL via {py}"),
+                program: py,
+                args: vec![adapter.to_string_lossy().into_owned()],
+            });
         }
     }
     None
 }
 
-fn adapter_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/diff_fuzz/pyshacl_adapter.py")
+/// Pure classpath selection (env values passed in, so it is unit-testable without
+/// mutating process-global env in parallel tests): an explicit `SHACL_DIFF_JENA_CP`
+/// wins; otherwise `${JENA_HOME}/lib/*` if `JENA_HOME` is set; otherwise `None`
+/// (Jena skipped). An empty string is treated as unset so a blank env var does not
+/// produce a degenerate empty classpath.
+fn jena_classpath(cp_env: Option<String>, jena_home_env: Option<String>) -> Option<String> {
+    if let Some(cp) = cp_env.filter(|s| !s.is_empty()) {
+        return Some(cp);
+    }
+    jena_home_env.filter(|s| !s.is_empty()).map(|home| {
+        std::path::Path::new(&home)
+            .join("lib")
+            .join("*")
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
-/// Runs the reference engine over one (data, shapes) pair. `Err` means the
-/// adapter itself failed (engine error / bad invocation) — distinct from a
-/// produced non-conforming report.
-fn run_reference(python: &str, data: &str, shapes: &str) -> Result<RefReport, String> {
+/// Resolves the Apache Jena SHACL engine, or `None` if Jena cannot be driven (so
+/// it is SKIPPED cleanly — the pySHACL-only lane is unaffected). Needs:
+///   - a `java` launcher: `SHACL_DIFF_JAVA` else `java` on PATH (must run), and
+///   - a Jena classpath: `SHACL_DIFF_JENA_CP` (a `*`-glob over its jars) else
+///     `${JENA_HOME}/lib/*` if `JENA_HOME` is set.
+///
+/// The adapter is the single-file `JenaShaclAdapter.java` run via the Java
+/// single-file source launcher (`java -cp <cp> <file>.java`), so no jar/.class is
+/// committed and there is no separate compile step.
+fn resolve_jena() -> Option<RefEngine> {
+    let classpath = jena_classpath(
+        std::env::var("SHACL_DIFF_JENA_CP").ok(),
+        std::env::var("JENA_HOME").ok(),
+    )?;
+    let java = std::env::var("SHACL_DIFF_JAVA").unwrap_or_else(|_| "java".to_string());
+    // `java -version` must actually run (writes to stderr, exit 0) — otherwise no
+    // usable launcher and we skip rather than spawn-error every case.
+    let java_ok = Command::new(&java)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !java_ok {
+        return None;
+    }
+    let adapter = adapter_dir().join("JenaShaclAdapter.java");
+    Some(RefEngine {
+        name: format!("Apache Jena SHACL via {java} (cp {classpath})"),
+        program: java,
+        args: vec![
+            "-cp".to_string(),
+            classpath,
+            adapter.to_string_lossy().into_owned(),
+        ],
+    })
+}
+
+/// All reference engines available on this box, in a stable order. The
+/// differential runs against each; an empty list means SKIP the whole test.
+fn resolve_engines() -> Vec<RefEngine> {
+    [resolve_pyshacl(), resolve_jena()]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Runs one reference engine over one (data, shapes) pair. `Err` means the adapter
+/// itself failed (engine error / bad invocation) — distinct from a produced
+/// non-conforming report.
+fn run_reference(engine: &RefEngine, data: &str, shapes: &str) -> Result<RefReport, String> {
     let req = serde_json::json!({ "data": data, "shapes": shapes }).to_string();
-    let mut child = Command::new(python)
-        .arg(adapter_path())
+    let mut child = Command::new(&engine.program)
+        .args(&engine.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -225,7 +322,7 @@ enum CaseOutcome {
     Mismatch(String),
 }
 
-fn run_case(python: &str, seed: u64) -> CaseOutcome {
+fn run_case(engine: &RefEngine, seed: u64) -> CaseOutcome {
     let mut rng = Rng::new(seed);
     let scenario = Scenario::generate(&mut rng);
     let data_ttl = scenario.data_turtle();
@@ -237,6 +334,7 @@ fn run_case(python: &str, seed: u64) -> CaseOutcome {
         Ok(g) => g,
         Err(e) => {
             return mismatch(
+                engine,
                 seed,
                 &data_ttl,
                 &shapes_ttl,
@@ -248,6 +346,7 @@ fn run_case(python: &str, seed: u64) -> CaseOutcome {
         Ok(g) => g,
         Err(e) => {
             return mismatch(
+                engine,
                 seed,
                 &data_ttl,
                 &shapes_ttl,
@@ -257,7 +356,7 @@ fn run_case(python: &str, seed: u64) -> CaseOutcome {
     };
     let sparq_report = validate(&data, &shapes);
 
-    let reference = match run_reference(python, &data_ttl, &shapes_ttl) {
+    let reference = match run_reference(engine, &data_ttl, &shapes_ttl) {
         Ok(r) => r,
         Err(e) => return CaseOutcome::Skipped(format!("reference engine error: {e}")),
     };
@@ -265,6 +364,7 @@ fn run_case(python: &str, seed: u64) -> CaseOutcome {
     // 1. conforms bit — exact.
     if sparq_report.conforms != reference.conforms {
         return mismatch(
+            engine,
             seed,
             &data_ttl,
             &shapes_ttl,
@@ -285,6 +385,7 @@ fn run_case(python: &str, seed: u64) -> CaseOutcome {
         let only_sparq: Vec<_> = s.difference(&r).collect();
         let only_ref: Vec<_> = r.difference(&s).collect();
         return mismatch(
+            engine,
             seed,
             &data_ttl,
             &shapes_ttl,
@@ -302,9 +403,10 @@ fn run_case(python: &str, seed: u64) -> CaseOutcome {
     CaseOutcome::Agree
 }
 
-fn mismatch(seed: u64, data: &str, shapes: &str, msg: &str) -> CaseOutcome {
+fn mismatch(engine: &RefEngine, seed: u64, data: &str, shapes: &str, msg: &str) -> CaseOutcome {
     CaseOutcome::Mismatch(format!(
-        "MISMATCH seed={seed}\n{msg}\n--- shapes.ttl ---\n{shapes}\n--- data.ttl ---\n{data}"
+        "MISMATCH seed={seed} reference={}\n{msg}\n--- shapes.ttl ---\n{shapes}\n--- data.ttl ---\n{data}",
+        engine.name,
     ))
 }
 
@@ -313,78 +415,108 @@ fn mismatch(seed: u64, data: &str, shapes: &str, msg: &str) -> CaseOutcome {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "differential SHACL fuzz — nightly/heavy tier; needs a reference engine (pyshacl)"]
+#[ignore = "differential SHACL fuzz — nightly/heavy tier; needs a reference engine (pyshacl / Jena)"]
 fn differential_shacl_fuzz() {
-    let python = match resolve_pyshacl() {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "SKIP: no reference SHACL engine — install pyshacl+rdflib and set \
-                 SHACL_DIFF_PYTHON to its interpreter (e.g. a venv's bin/python)."
-            );
-            return;
-        }
-    };
-    eprintln!("differential SHACL fuzz: reference = pySHACL via {python}");
+    let engines = resolve_engines();
+    if engines.is_empty() {
+        eprintln!(
+            "SKIP: no reference SHACL engine resolved. Install pyshacl+rdflib and set \
+             SHACL_DIFF_PYTHON to its interpreter (e.g. a venv's bin/python), and/or point \
+             SHACL_DIFF_JENA_CP (or JENA_HOME) at an apache-jena lib classpath for the Jena \
+             reference."
+        );
+        return;
+    }
+    eprintln!(
+        "differential SHACL fuzz: {} reference engine(s):",
+        engines.len()
+    );
+    for e in &engines {
+        eprintln!("  - {}", e.name);
+    }
 
     let seed_start: u64 = env_u64("SHACL_DIFF_SEED_START", 0);
     let count: u64 = env_u64("SHACL_DIFF_COUNT", 200);
 
-    let mut agree = 0u64;
-    let mut skipped = 0u64;
-    let mut mismatches: Vec<String> = Vec::new();
-    let mut skip_examples: Vec<String> = Vec::new();
+    // The differential is run independently against EVERY resolved engine over the
+    // same seed range, so a bug surfaces against whichever reference catches it
+    // (and a sparq-vs-pySHACL agreement that is jointly wrong is still caught if
+    // Jena disagrees). Any per-engine disagreement, or any resolved engine that
+    // compared zero cases, fails the whole test.
+    let mut all_mismatches: Vec<String> = Vec::new();
+    let mut all_skip_examples: Vec<String> = Vec::new();
+    let mut vacuous_engines: Vec<String> = Vec::new();
+    let mut total_mismatch_count = 0u64;
 
-    for seed in seed_start..seed_start + count {
-        match run_case(&python, seed) {
-            CaseOutcome::Agree => agree += 1,
-            CaseOutcome::Skipped(why) => {
-                skipped += 1;
-                if skip_examples.len() < 5 {
-                    skip_examples.push(format!("seed={seed}: {why}"));
+    for engine in &engines {
+        let mut agree = 0u64;
+        let mut skipped = 0u64;
+        let mut mismatches: Vec<String> = Vec::new();
+        let mut skip_examples: Vec<String> = Vec::new();
+
+        for seed in seed_start..seed_start + count {
+            match run_case(engine, seed) {
+                CaseOutcome::Agree => agree += 1,
+                CaseOutcome::Skipped(why) => {
+                    skipped += 1;
+                    if skip_examples.len() < 5 {
+                        skip_examples.push(format!("seed={seed}: {why}"));
+                    }
                 }
-            }
-            CaseOutcome::Mismatch(detail) => {
-                eprintln!("MISMATCH seed={seed}");
-                // Cap stored reproducers so a systematically-wrong run does not
-                // produce megabytes of output; the count is still exact.
-                if mismatches.len() < 10 {
-                    mismatches.push(detail);
+                CaseOutcome::Mismatch(detail) => {
+                    eprintln!("MISMATCH seed={seed} reference={}", engine.name);
+                    // Cap stored reproducers per engine so a systematically-wrong
+                    // run does not produce megabytes of output; counts stay exact.
+                    if mismatches.len() < 10 {
+                        mismatches.push(detail);
+                    }
                 }
             }
         }
-    }
 
-    let total_mismatch = count - agree - skipped;
-    eprintln!(
-        "\nSHACL diff fuzz: seeds {seed_start}..{} — agree={agree} skipped={skipped} mismatch={total_mismatch}",
-        seed_start + count,
-    );
-    for ex in &skip_examples {
-        eprintln!("SKIP example: {ex}");
-    }
-
-    if total_mismatch > 0 {
-        for d in &mismatches {
-            eprintln!("\n{d}");
-        }
-        panic!(
-            "{total_mismatch} disagreement(s) between sparq-shacl and the reference engine \
-             (showing up to {} reproducers above) — file a bead per distinct bug with the seed.",
-            mismatches.len()
+        let engine_mismatch = count - agree - skipped;
+        total_mismatch_count += engine_mismatch;
+        eprintln!(
+            "\nSHACL diff fuzz [{}]: seeds {seed_start}..{} — agree={agree} skipped={skipped} mismatch={engine_mismatch}",
+            engine.name,
+            seed_start + count,
         );
-    }
-
-    // [OPUS-4.8] Guard against a VACUOUS pass. We only reach this point with the
-    // adapter RESOLVED (an absent pySHACL short-circuits via `resolve_pyshacl`
-    // returning `None` above), so the comparison is expected to actually run.
-    // `assess_run` makes "adapter present but compared zero cases" a hard error
-    // instead of a silent agreement; see its doc + the unit test below.
-    if let Err(why) = assess_run(agree, skipped) {
         for ex in &skip_examples {
             eprintln!("SKIP example: {ex}");
         }
-        panic!("{why}");
+        all_mismatches.append(&mut mismatches);
+        all_skip_examples.append(&mut skip_examples);
+
+        // [OPUS-4.8] Guard against a VACUOUS pass for THIS engine. We only resolve
+        // an engine when its toolchain is present, so it is expected to actually
+        // compare. If it compared zero cases (resolved yet errored on every seed —
+        // wrong venv / missing jar / adapter regression) that is a broken setup,
+        // not agreement; record it as a hard failure.
+        if let Err(why) = assess_run(agree, skipped) {
+            vacuous_engines.push(format!("{}: {why}", engine.name));
+        }
+    }
+
+    if total_mismatch_count > 0 {
+        for d in &all_mismatches {
+            eprintln!("\n{d}");
+        }
+        panic!(
+            "{total_mismatch_count} disagreement(s) between sparq-shacl and the reference \
+             engine(s) (showing up to {} reproducers above) — file a bead per distinct bug \
+             with the seed.",
+            all_mismatches.len()
+        );
+    }
+
+    if !vacuous_engines.is_empty() {
+        for ex in &all_skip_examples {
+            eprintln!("SKIP example: {ex}");
+        }
+        panic!(
+            "reference engine(s) compared ZERO cases (resolved yet errored on every seed): {}",
+            vacuous_engines.join("; ")
+        );
     }
 }
 
@@ -549,6 +681,39 @@ fn missing_focus_is_distinct_from_blank_node_focus() {
     assert!(
         !missing.contains(&blank),
         "missing focus collapsed into the blank-node sentinel — masks report-shape bugs"
+    );
+}
+
+/// [OPUS-4.8] (sq-evws) Jena classpath gating: an explicit `SHACL_DIFF_JENA_CP`
+/// wins; else `${JENA_HOME}/lib/*`; else `None` (Jena SKIPPED, pySHACL-only lane
+/// unaffected). A blank value is treated as unset so an empty env var can't yield
+/// a degenerate empty classpath. Pure (env passed in) so it runs in the fast lane
+/// without mutating process-global env across parallel tests.
+#[test]
+fn jena_classpath_gating() {
+    // Explicit classpath wins, even when JENA_HOME is also set.
+    assert_eq!(
+        jena_classpath(Some("/opt/jena/lib/*".into()), Some("/ignored".into())),
+        Some("/opt/jena/lib/*".to_string())
+    );
+    // Derive from JENA_HOME when no explicit classpath.
+    let derived = jena_classpath(None, Some("/opt/apache-jena".into())).unwrap();
+    assert!(
+        derived.starts_with("/opt/apache-jena")
+            && (derived.ends_with("lib/*") || derived.ends_with("lib\\*")),
+        "JENA_HOME-derived classpath should be <home>/lib/*, got {derived}"
+    );
+    // Neither set → Jena is skipped (None), which is the pySHACL-only lane.
+    assert_eq!(jena_classpath(None, None), None);
+    // Blank values are treated as unset (no degenerate empty classpath).
+    assert_eq!(jena_classpath(Some(String::new()), None), None);
+    assert_eq!(jena_classpath(None, Some(String::new())), None);
+    assert_eq!(
+        jena_classpath(Some(String::new()), Some("/opt/apache-jena".into()))
+            .as_deref()
+            .map(|s| s.ends_with("lib/*") || s.ends_with("lib\\*")),
+        Some(true),
+        "blank explicit cp must fall through to JENA_HOME"
     );
 }
 

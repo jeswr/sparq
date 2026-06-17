@@ -66,25 +66,41 @@ from its printed seed.
 
 The reference side is a pluggable "report-cli" adapter (bead sq-eifd): a
 subprocess reading `{data, shapes}` Turtle and emitting a normalised JSON
-report. The first wired reference is **pySHACL**
-(`tests/diff_fuzz/pyshacl_adapter.py`); other engines (rdf-validate-shacl /
-shacl-engine via Node, Jena-SHACL via a jar) are tracked as follow-up beads and
-slot in as alternative adapters producing the same JSON shape.
+report. Two references are wired today, each producing the same JSON shape so the
+runner's comparison is engine-agnostic:
+
+- **pySHACL** (`tests/diff_fuzz/pyshacl_adapter.py`, bead sq-55c1) — the canonical
+  Python reference, driven via a Python interpreter with `pyshacl` + `rdflib`.
+- **Apache Jena SHACL** (`tests/diff_fuzz/JenaShaclAdapter.java`, bead sq-evws) —
+  Jena's `org.apache.jena.shacl` validator, driven via the Java single-file source
+  launcher (`java -cp <jena-libs> JenaShaclAdapter.java`) so no compile step or
+  committed jar is needed. A second independent reference catches bugs where sparq
+  and pySHACL happen to agree but are both wrong.
+
+The differential runs against **every** reference engine that resolves. Other
+engines (rdf-validate-shacl / shacl-engine via Node) are tracked as follow-up
+beads and slot in as further adapters over the same contract.
 
 It is `#[ignore]`d (off the per-PR fast path) and runs as a **nightly** CI lane
-(`.github/workflows/shacl-diff-fuzz.yml`). Run it locally against a Python that
-has pySHACL + rdflib installed:
+(`.github/workflows/shacl-diff-fuzz.yml`, which installs both pySHACL and a
+SHA-512-verified apache-jena tarball). Run it locally against either or both:
 
 ```sh
+# pySHACL:
 python3 -m venv /tmp/shacl-ref-venv && /tmp/shacl-ref-venv/bin/pip install pyshacl
 SHACL_DIFF_PYTHON=/tmp/shacl-ref-venv/bin/python SHACL_DIFF_COUNT=2000 \
+  cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
+# Jena (point at an unpacked apache-jena lib classpath, or set JENA_HOME):
+SHACL_DIFF_JENA_CP="/opt/apache-jena/lib/*" SHACL_DIFF_COUNT=2000 \
   cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
 ```
 
 When no reference engine resolves, the test skips cleanly (so a fresh checkout
-stays green). Two fast, reference-free self-tests of the generator
-(well-formedness + outcome mix, and key-normalisation consistency) DO run in the
-per-PR path.
+stays green); each engine is gated independently, so Jena is silently skipped
+without a Java/Jena classpath and the pySHACL lane is unaffected. Fast,
+reference-free self-tests (generator well-formedness + outcome mix,
+key-normalisation consistency, the engine-gating logic) DO run in the per-PR
+path.
 
 ## Supported constraint components
 
