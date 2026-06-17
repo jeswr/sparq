@@ -167,6 +167,24 @@ assert!(!evaluate(&policy, &outside).allow);
     this stateful path — a bridged ACP grant does not self-retract on count exhaustion;
     the bridge keeps `odrl:count` one-shot/unmappable. This crate provides the
     evaluator + store seam such a bridge would build on.
+- **Static conflict + containment analysis (request-free, sound)** — [OPUS-4.8]
+  sq-zabv. Two policy-vs-policy lints on the query-containment comparison semantics,
+  always compiled (no feature, no deps):
+  - `detect_conflicts(&policy) -> Vec<Conflict>` flags every
+    permission/prohibition pair whose request footprints overlap (a prohibition
+    carves the permission out — deny-overrides). `Overlap::Certain` when the
+    prohibition carves out the **whole** permission (structural overlap + it adds no
+    constraint the permission lacks), else `Overlap::Possible`; a pair that
+    *provably never* overlaps is omitted.
+  - `contains(outer, inner) -> Containment` answers *"does `outer` permit everything
+    `inner` permits?"* (refinement / requester-vs-provider containment):
+    `Contains` / `NotContained` / `Unknown`.
+  - **Sound, never over-claimed.** Constraint satisfiability / query containment is
+    undecidable in general, so this decides only what it can *prove* (identical
+    constraints, `eq` admitted by an outer bound, a tighter same-direction order
+    bound implying a looser one); everything else degrades to `Possible` / `Unknown`
+    — it never reports `Certain` / `Contains` it cannot prove (the fail-OPEN failure
+    mode). DPV/`isPartOf` set-subset refinement is a deferred bead.
 - **Duties as obligations** — a permission's `odrl:duty` must appear in the
   request's discharged-duty set, or the permission is denied (the usage-control
   kernel pure access control lacks).

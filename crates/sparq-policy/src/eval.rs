@@ -955,6 +955,14 @@ fn cmp_datetime(x: &str, y: &str) -> Option<std::cmp::Ordering> {
     Some(parse_instant(x)?.cmp(&parse_instant(y)?))
 }
 
+/// Crate-internal accessor for [`cmp_datetime`] so [`crate::compare`]'s static
+/// containment analysis orders dateTime bounds by the **same** instant normalizer
+/// the evaluator uses (one source of truth — no duplicated xsd:dateTime parser).
+/// [OPUS-4.8] sq-zabv.
+pub(crate) fn cmp_datetime_pub(x: &str, y: &str) -> Option<std::cmp::Ordering> {
+    cmp_datetime(x, y)
+}
+
 /// A point on the UTC timeline, as `(days-since-epoch, nanoseconds-into-day)`
 /// after applying the lexical form's timezone offset. Comparable and equatable
 /// by derive — that is exactly instant ordering / instant equality.
