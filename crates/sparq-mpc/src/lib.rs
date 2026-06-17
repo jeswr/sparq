@@ -159,6 +159,10 @@ pub mod partial;
 // explicit. Composes EXISTING primitives only; proof.prove stays the honest stub.
 pub mod pipeline;
 pub mod proof;
+// [OPUS-4.8] sq-it50: the owned ChaCha20 CSPRNG backing SecureRng — private
+// implementation detail (not a public API), so its key schedule can be
+// ZeroizeOnDrop-scrubbed (which ecosystem rand_chacha cannot do from our side).
+mod chacha;
 // [OPUS-4.8] sq-1vt: the CSPRNG masking seam (production SecureRng + test-only
 // InsecureTestRng). The real protocol's secret-sharing randomness lives here.
 pub mod rng;

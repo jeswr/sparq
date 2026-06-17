@@ -19,11 +19,14 @@
 //! concrete RNG. There are exactly two implementors and they are NOT
 //! interchangeable by accident:
 //!
-//! - [`SecureRng`] — the **production / default** masking RNG. A
-//!   [`rand_chacha::ChaCha20Rng`] CSPRNG seeded from OS entropy
-//!   (`rand_core::SeedableRng::from_os_rng` → `getrandom`). This is what the
-//!   real protocol uses and the only RNG reachable from the default
-//!   [`crate::shamir::ShamirBackend::new`] constructor.
+//! - [`SecureRng`] — the **production / default** masking RNG. An **owned**
+//!   ChaCha20 CSPRNG (`crate::chacha::ChaCha20Csprng`, private to this crate)
+//!   seeded from OS entropy (`OsRng` → `getrandom`). This is what the real
+//!   protocol uses and the only RNG reachable from the default
+//!   [`crate::shamir::ShamirBackend::new`] constructor. We own the cipher (rather
+//!   than wrapping `rand_chacha::ChaCha20Rng`) specifically so its key schedule is
+//!   zeroized on drop — see the secret-memory-hygiene note on [`SecureRng`]
+//!   (sq-it50).
 //! - `InsecureTestRng` (`#[cfg(any(test, feature = "insecure-test-rng"))]`,
 //!   so not an intra-doc link in default builds) — a **deterministic, seedable
 //!   SplitMix64** PRNG for
@@ -47,9 +50,8 @@
 //!
 //! [`next_fp`]: MpcRng::next_fp
 
+use crate::chacha::ChaCha20Csprng;
 use crate::field::{Fp, P};
-use rand::RngCore;
-use zeroize::Zeroize;
 
 /// Source of randomness for the masking / secret-sharing path.
 ///
@@ -106,36 +108,39 @@ pub trait MpcRng {
 /// same mask stream across two "dealers"). When the backend needs a fresh dealer
 /// it *re-seeds* a brand-new `SecureRng` from the OS, never copies state.
 ///
-/// # Secret-memory hygiene (sq-u8a8 / sq-19ej, from the side-channel analysis CR-G5)
-/// [OPUS-4.8] The CSPRNG seed/keystream state is secret (it predicts every mask
-/// and Shamir coefficient). `SecureRng` redacts its [`Debug`], forbids [`Clone`],
-/// and zeroizes on drop **everything this crate can reach**:
+/// # Secret-memory hygiene (sq-u8a8 / sq-19ej / sq-it50, from the side-channel analysis CR-G5)
+/// [OPUS-4.8] The CSPRNG seed/key/keystream state is secret (it predicts every
+/// mask and Shamir coefficient). `SecureRng` redacts its [`Debug`], forbids
+/// [`Clone`], and zeroizes on drop **the entire secret state, including the key
+/// schedule**:
 ///
 /// - **The sparq-held seed buffer (scrubbed).** [`from_os`](SecureRng::from_os)
 ///   pulls the 32-byte ChaCha seed into a [`zeroize::Zeroizing`] buffer that this
-///   crate owns, feeds a *copy* to `ChaCha20Rng::from_seed`, and the buffer is
-///   wiped when the constructor returns. Previously `from_os_rng()` had the OS
-///   seed flow straight into `ChaCha20Rng` with no sparq-side copy we could
-///   scrub; now the only sparq-controlled secret byte buffer is zeroized.
-/// - **The drop barrier.** [`Drop`] for `SecureRng` invokes the inner RNG once to
-///   advance its 64-byte keystream block so the *most recently buffered* output
-///   block is overwritten by fresh keystream before the value is dropped. This is
-///   a best-effort scrub of the cached block, not of the key schedule.
+///   crate owns, feeds a *copy* to the owned ChaCha constructor, and the buffer is
+///   wiped when the constructor returns — so the only sparq-controlled secret byte
+///   buffer never lingers.
+/// - **The key schedule (scrubbed — sq-it50).** The inner CSPRNG is now an
+///   **owned** `crate::chacha::ChaCha20Csprng` (NOT `rand_chacha`), whose full
+///   16-word block state (the expanded ChaCha key, the block counter, and the
+///   cached 64-byte keystream block) is `#[derive(ZeroizeOnDrop)]`. Dropping
+///   `SecureRng` drops the inner cipher, which overwrites every secret word with
+///   zeros. There is no longer any sparq-reachable copy of the key material that
+///   survives drop, and no `get_seed()`-style accessor that re-exposes it.
 ///
-/// ## Irreducible residual (documented, NOT claimed scrubbed) — sq-19ej
-/// The inner `ChaCha20Rng`'s **key schedule** (the expanded ChaCha key, recoverable
-/// via `get_seed()`) **cannot be scrubbed in place from this crate.** `rand_chacha`
-/// — verified at the latest published `0.10.0` (Feb 2026) as well as the pinned
-/// `0.9` — exposes **no `zeroize` feature**, implements no `Drop`/`Zeroize` for
-/// `ChaCha20Rng`, and gives no `&mut` accessor to the private key words. The value
-/// is stack-allocated, so there is no heap allocation to zero and overwriting the
-/// binding does not scrub the prior stack bytes. We do **not** fake a scrub we
-/// cannot perform. The exposure is **LOW**: the masking RNG lives only for a
-/// dealing session, never persists a long-term secret, and is `Debug`-redacted +
-/// `!Clone`. A follow-up bead tracks the upstream fix (`rand_chacha` `zeroize`
-/// support, or a roll-our-own ChaCha wrapper we fully own and can `ZeroizeOnDrop`).
+/// ## Why we own the cipher (sq-it50)
+/// Ecosystem `rand_chacha::ChaCha20Rng` could not be scrubbed in place from this
+/// crate — verified at the latest published `0.10.0` (Feb 2026) as well as the
+/// pinned `0.9`, it exposes **no `zeroize` feature**, implements no `Drop`/`Zeroize`,
+/// and gives no `&mut` accessor to the private key words; its key schedule
+/// (recoverable via `get_seed()`) lingered on the stack after drop. Rather than
+/// fake a scrub we could not perform, sq-19ej documented that as an irreducible
+/// residual and beaded the fix; sq-it50 closes it by replacing the dependency with
+/// a minimal, fully-owned ChaCha20 keystream generator we *can* zeroize. The
+/// generator is correctness-pinned to the RFC 8439 known-answer vectors (see
+/// `crate::chacha`); RNG *behaviour* is unchanged for the protocol (a CSPRNG
+/// keyed by fresh OS entropy, drawn as uniform field elements).
 pub struct SecureRng {
-    inner: rand_chacha::ChaCha20Rng,
+    inner: ChaCha20Csprng,
 }
 
 impl SecureRng {
@@ -144,20 +149,20 @@ impl SecureRng {
     /// which is the correct behaviour for a security-critical seed: we must NOT
     /// silently continue with predictable randomness.
     ///
-    /// [OPUS-4.8] sq-19ej: the 32-byte seed is pulled into a [`Zeroizing`] buffer
-    /// owned by this crate and wiped when this function returns, so the only
-    /// sparq-held copy of the seed secret is scrubbed. (The copy handed to
-    /// `from_seed` is absorbed into `ChaCha20Rng`'s private key schedule, which is
-    /// the residual documented on the type — not scrubbable from here.)
+    /// [OPUS-4.8] sq-19ej/sq-it50: the 32-byte seed is pulled into a [`Zeroizing`]
+    /// buffer owned by this crate and wiped when this function returns, so the only
+    /// sparq-held copy of the *seed* secret is scrubbed. The copy handed to the
+    /// owned `crate::chacha::ChaCha20Csprng` is absorbed into its block state —
+    /// which is itself `ZeroizeOnDrop`, so the expanded key schedule is scrubbed on
+    /// drop too (sq-it50 closes the residual sq-19ej had to leave open under
+    /// `rand_chacha`).
     ///
     /// [`Zeroizing`]: zeroize::Zeroizing
     pub fn from_os() -> Self {
-        use rand::SeedableRng;
         use rand_chacha::rand_core::{OsRng, TryRngCore};
-        // Pull the ChaCha seed into a sparq-owned buffer we CAN scrub, rather than
-        // letting `from_os_rng()` route the OS seed straight into the RNG with no
-        // copy under our control. `Zeroizing` wipes `seed` on scope exit (incl. on
-        // an unwind), so the sparq-held seed secret never lingers on the stack.
+        // Pull the ChaCha seed into a sparq-owned buffer we CAN scrub. `Zeroizing`
+        // wipes `seed` on scope exit (incl. on an unwind), so the sparq-held seed
+        // secret never lingers on the stack.
         let mut seed = zeroize::Zeroizing::new([0u8; 32]);
         // `try_fill_bytes` surfaces a hard OS-entropy failure as an error instead
         // of silently degrading to a weak/known seed (which would reintroduce
@@ -166,24 +171,11 @@ impl SecureRng {
             .try_fill_bytes(seed.as_mut())
             .expect("OS entropy source failed while seeding the masking CSPRNG (sq-1vt)");
         // `from_seed` takes the seed by value (a copy); `seed` itself is still
-        // scrubbed by `Zeroizing` at end of scope.
+        // scrubbed by `Zeroizing` at end of scope. The inner cipher's key schedule
+        // is scrubbed on drop by its own `ZeroizeOnDrop` (sq-it50).
         SecureRng {
-            inner: rand_chacha::ChaCha20Rng::from_seed(*seed),
+            inner: ChaCha20Csprng::from_seed(*seed),
         }
-    }
-}
-
-impl Drop for SecureRng {
-    fn drop(&mut self) {
-        // [OPUS-4.8] sq-19ej — best-effort scrub of what we CAN reach. The inner
-        // `ChaCha20Rng` exposes no `zeroize`/`Drop`/`&mut` key accessor (verified
-        // through rand_chacha 0.10.0), so the key schedule is the documented
-        // residual. We can still overwrite the most-recently-buffered keystream
-        // block: drawing one fresh block advances the cipher and replaces the
-        // cached output bytes, then we zeroize that throwaway value. This does NOT
-        // scrub the key; it reduces the lifetime of the last emitted mask bytes.
-        let mut spent = self.inner.next_u64();
-        spent.zeroize();
     }
 }
 
@@ -197,7 +189,7 @@ impl std::fmt::Debug for SecureRng {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never print CSPRNG internal state.
         f.debug_struct("SecureRng")
-            .field("inner", &"ChaCha20Rng(<redacted>)")
+            .field("inner", &"ChaCha20Csprng(<redacted>)")
             .finish()
     }
 }
@@ -305,8 +297,11 @@ mod tests {
 
     #[test]
     fn secure_rng_drop_does_not_panic() {
-        // The drop-time best-effort keystream-block scrub must run cleanly (it
-        // draws one fresh block and zeroizes the throwaway value).
+        // [OPUS-4.8] sq-it50: dropping `SecureRng` drops the owned
+        // `ChaCha20Csprng`, whose `ZeroizeOnDrop` scrubs the full key schedule +
+        // keystream. The drop must run cleanly (the key-schedule scrub is now
+        // complete, not best-effort). The actual zeroing is asserted in the
+        // `chacha` module's `key_schedule_is_zeroized_on_drop` test.
         let rng = SecureRng::from_os();
         drop(rng);
     }
