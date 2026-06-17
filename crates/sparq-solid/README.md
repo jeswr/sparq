@@ -55,8 +55,13 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
   `<r> solidx:creator <self>` in neither a content document NOR the `.acr` they control and
   thereby grant themselves access (design doc §2.4) — this also closes forged
   `solidx:appliesToResource` policy-redirection. Each grant is resource-scoped: the creator
-  of `R1` is never granted `R2`. With no provenance supplied, no such matcher grants
-  (fail-closed). [OPUS-4.8] sq-3jtd.5.
+  of `R1` is never granted `R2`. A `CreatorAgent`/`OwnerAgent` matcher also composes under
+  the same `allOf` with a second, independent concrete-WebID `acp:agent` matcher
+  ([OPUS-4.8] sq-az1b): the two agent constraints are intersected, so the degenerate case
+  where that WebID equals the resource's creator/owner is granted (resource-scoping intact),
+  and the case where it is a different fixed WebID grants nobody — correct-by-soundness (an
+  unsatisfiable "be both the creator and a distinct fixed WebID" conjunction), not a gap.
+  With no provenance supplied, no such matcher grants (fail-closed). [OPUS-4.8] sq-3jtd.5.
 - **Triples-native** — pods, ACL/ACR documents, and the materialized authorization view are
   all ordinary named graphs; "who can read G?" is one SPARQL pattern.
 - **Zero-copy enforcement** — the default query path evaluates through the engine's zero-copy

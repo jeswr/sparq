@@ -479,11 +479,19 @@ The grant is RESOURCE-SCOPED — a resource-tagged
 `urn:sparq:provcand?…&res=R` candidate mints per (policy, creator/owner, resource), so the
 creator of `R1` is never granted `R2`; the creator/owner agent composes with the matcher's
 own `acp:client`/`acp:issuer` constraints (minting the same pair/triple principal). With no
-provenance supplied, no `CreatorAgent`/`OwnerAgent` matcher grants (fail-closed). Documented
-bound: a provenance matcher composes with client/issuer constraints on itself and with
-`anyOf`/`noneOf`/the policy's other allOf matchers' client/issuer dimensions, but combining a
-`CreatorAgent`/`OwnerAgent` matcher under `allOf` with a SECOND, independent concrete-agent
-matcher (a contradictory shape) is out of scope.
+provenance supplied, no `CreatorAgent`/`OwnerAgent` matcher grants (fail-closed). A provenance
+matcher composes with client/issuer constraints on itself and with `anyOf`/`noneOf`/the
+policy's other allOf matchers' client/issuer dimensions. It ALSO composes with a SECOND,
+independent concrete-WebID `acp:agent` matcher under the same `allOf` ([OPUS-4.8] sq-az1b)
+with no special-casing — the provenance candidate's agent dimension is the creator/owner
+WebID, so the sibling concrete matcher's accept-set (that one WebID) and the allOf rejection
+check (acp-b.n3) intersect the two agent constraints: the degenerate case where the concrete
+WebID EQUALS the resource's creator/owner is supported (the agent satisfies both matchers,
+the grant stays resource-scoped — the creator of `R1` is still never granted `R2`), and the
+case where the concrete WebID is a DIFFERENT fixed agent grants nobody — correct-by-soundness
+(the two matchers demand the agent be both the creator and a distinct fixed WebID, an
+unsatisfiable conjunction), not a missing feature. Documented bound: only `acp:vc` /
+`acl:accessToClass` / custom modes remain out of scope (below).
 Not covered (documented gaps, §7): `acp:vc`, `acl:accessToClass`, custom ACP modes
 (design supports any mode IRI; prototype maps the 4 standard ones).
 

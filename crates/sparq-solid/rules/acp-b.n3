@@ -17,6 +17,22 @@
 { ?pol solidx:candTriple ?k . ?k solidx:pairAgent ?pa . ?pol acp:allOf ?m .
   ?UNSCOPED log:notIncludes { ?m solidx:acceptsAgentP ?pa . } . }
 => { ?k solidx:allOfRejected true . } .
+
+# [OPUS-4.8] sq-az1b: a PROVENANCE (CreatorAgent/OwnerAgent) allOf matcher's agent
+# constraint is intrinsically resource-COUPLED — it accepts an agent only AS the creator/
+# owner of a SPECIFIC resource. Its `acceptsAgentP` accept-set fact (acp-a.n3) is agent-only
+# and resource-UNBOUND (it has to be, to clear the matcher's own resource-scoped provenance
+# candidate in the agent dimension). So if a SIBLING concrete-WebID `acp:agent` matcher under
+# the same allOf independently introduces that same creator/owner WebID as a REGULAR
+# (non-resource-scoped) candidate, the agent-dimension rule above would NOT reject it on
+# resources where the agent is NOT the creator/owner — an over-grant. A provenance allOf
+# matcher therefore rejects every candidate of its policy that is NOT a resource-scoped
+# provenance candidate (provTriple); the matcher's OWN provenance candidate is handled by the
+# resource-scoped grant in acp-c.n3 (and a sibling provenance matcher's candidate, if its
+# agent differs, is still rejected by the agent-dimension rule above).
+{ ?pol solidx:candTriple ?k . ?pol acp:allOf ?m . ?m solidx:provMatcher ?kind .
+  ?UNSCOPED log:notIncludes { ?pol solidx:provTriple ?k . } . }
+=> { ?k solidx:allOfRejected true . } .
 { ?pol solidx:candTriple ?k . ?k solidx:pairClient ?pc . ?pol acp:allOf ?m .
   ?UNSCOPED log:notIncludes { ?m solidx:acceptsClientP ?pc . } . }
 => { ?k solidx:allOfRejected true . } .
