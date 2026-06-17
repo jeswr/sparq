@@ -282,6 +282,35 @@ since:
   `FragBinding`s via `solutions(...)` (a fragment server speaks triples, not
   SPARQL-Results-JSON, so their `FederatedSource::execute` is a deliberate `Unsupported` that
   points at `solutions`).
+  - **brTPF binding-block wire codec** (the `wire` module, `sq-6ihg`, follow-up to the
+    server's `sq-dxhb`): the brTPF bind-join attaches a SET of upstream solution mappings (a
+    `&[FragBinding]` block, at most `maxMpR`) to each fragment request, and that block is
+    re-sent on every request of a bind nested-loop join. The sparq server parses it from a
+    **line-oriented TEXT wire** — one mapping per line, space-separated `position=term` pairs,
+    each term fully N-Triples-decorated — which is readable but verbose: it repeats the
+    `s=`/`p=`/`o=` key and the `<…>`/`"…"`/`^^<…>` framing on every term. The `wire` module
+    adds the **compact, self-describing BINARY mapping wire** the bead asks for
+    (`encode_bindings` / `decode_bindings`) the client can emit instead, plus the text-wire
+    writer (`encode_bindings_text`) so a client can speak EITHER form over the same
+    `FragBinding` model (the server already parses the text one). The binary form's twofold
+    compactness win: a 1-byte per-mapping header bitmask records which of `s`/`p`/`o` the
+    mapping binds, so a position term carries **no** name bytes (the header bit IS the name),
+    and a 1-byte kind tag distinguishes IRI / blank / literal so the bare lexical bytes follow
+    length-prefixed with **no** `<>`/`""` framing. A binding over an arbitrary (non-position)
+    variable name still round-trips losslessly via an overflow EXTRA section, and the binary
+    wire carries literals with embedded `=`, whitespace, or newlines that the one-mapping-
+    per-line text wire cannot represent (the text writer drops a non-position variable — it
+    has no brTPF slot). The container leads with a 4-byte magic (`BINARY_MAGIC`, ASCII `bTPF`)
+    + a 1-byte `BINARY_VERSION` so a future revision is detectable, and `decode_bindings`
+    validates every length against the remaining input, so a truncated / bad-magic / bad-
+    version / bad-kind / varint-overflow buffer is a clean `WireError`, never a panic or OOB
+    read (the crate is `forbid(unsafe_code)`). Position keys decode in a deterministic
+    canonical `s`→`p`→`o` order, and the empty mapping μ₀ is skipped on encode (it does not
+    restrict a fragment) exactly as the server's `parse_bindings` skips an all-blank line.
+    **HONEST scope — a codec only:** it converts `&[FragBinding]` ↔ bytes / `String`; it
+    issues no request. The native HTTP `FragmentTransport` that picks a wire by content
+    negotiation and attaches it as the request body / `values` parameter lands with the
+    streaming HTTP phase (same as the Phase-6 adapters above).
 - **Phase 7 adaptive re-planning** (`sq-ij5x`, the FINAL phase) — the client-side ANAPSID
   feedback loop, behind the extra default-OFF **`fedclient-adaptive`** feature (which pulls
   this planner's `adaptive-replan`). `adaptive::execute_adaptive_single_source` runs the plan
