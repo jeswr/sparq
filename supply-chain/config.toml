@@ -105,6 +105,14 @@ criteria = "safe-to-deploy"
 version = "0.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.bit-set]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.bit-vec]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.bitflags]]
 version = "2.13.0"
 criteria = "safe-to-deploy"
@@ -119,6 +127,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.block-buffer]]
 version = "0.12.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.block2]]
+version = "0.6.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.bytemuck]]
@@ -151,6 +163,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cmake]]
 version = "0.1.58"
+criteria = "safe-to-deploy"
+
+[[exemptions.codespan-reporting]]
+version = "0.13.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.com]]
@@ -205,6 +221,10 @@ criteria = "safe-to-deploy"
 version = "0.8.21"
 criteria = "safe-to-deploy"
 
+[[exemptions.crunchy]]
+version = "0.2.4"
+criteria = "safe-to-deploy"
+
 [[exemptions.crypto-common]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
@@ -233,8 +253,16 @@ criteria = "safe-to-deploy"
 version = "0.11.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.dispatch2]]
+version = "0.3.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.displaydoc]]
 version = "0.2.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.dlib]]
+version = "0.5.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.earcut]]
@@ -329,6 +357,10 @@ criteria = "safe-to-deploy"
 version = "0.13.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.glow]]
+version = "0.17.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.glutin_wgl_sys]]
 version = "0.6.1"
 criteria = "safe-to-deploy"
@@ -341,12 +373,20 @@ criteria = "safe-to-deploy"
 version = "0.3.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.gpu-allocator]]
+version = "0.28.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.gpu-descriptor]]
 version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.gpu-descriptor-types]]
 version = "0.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.half]]
+version = "2.7.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.hash32]]
@@ -617,8 +657,16 @@ criteria = "safe-to-deploy"
 version = "22.1.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.naga]]
+version = "29.0.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.ndk-sys]]
 version = "0.5.0+25.2.9519653"
+criteria = "safe-to-deploy"
+
+[[exemptions.ndk-sys]]
+version = "0.6.0+11769913"
 criteria = "safe-to-deploy"
 
 [[exemptions.ntriple]]
@@ -635,6 +683,30 @@ criteria = "safe-to-deploy"
 
 [[exemptions.objc]]
 version = "0.2.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2]]
+version = "0.6.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-core-foundation]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-encode]]
+version = "4.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-foundation]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-metal]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-quartz-core]]
+version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.once_cell]]
@@ -737,6 +809,10 @@ criteria = "safe-to-deploy"
 version = "1.13.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.portable-atomic-util]]
+version = "0.2.7"
+criteria = "safe-to-deploy"
+
 [[exemptions.potential_utf]]
 version = "0.1.5"
 criteria = "safe-to-deploy"
@@ -815,6 +891,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.range-alloc]]
 version = "0.1.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.raw-window-metal]]
+version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rayon]]
@@ -1049,6 +1129,10 @@ criteria = "safe-to-deploy"
 version = "0.3.0+sdk-1.3.268.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.spirv]]
+version = "0.4.0+sdk-1.4.341.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.stable_deref_trait]]
 version = "1.2.1"
 criteria = "safe-to-deploy"
@@ -1225,6 +1309,10 @@ criteria = "safe-to-run"
 version = "0.2.122"
 criteria = "safe-to-run"
 
+[[exemptions.wayland-sys]]
+version = "0.31.11"
+criteria = "safe-to-deploy"
+
 [[exemptions.web-sys]]
 version = "0.3.99"
 criteria = "safe-to-deploy"
@@ -1245,8 +1333,40 @@ criteria = "safe-to-deploy"
 version = "22.1.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.wgpu]]
+version = "29.0.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.wgpu-core]]
 version = "22.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.wgpu-core]]
+version = "29.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.wgpu-core-deps-apple]]
+version = "29.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.wgpu-core-deps-emscripten]]
+version = "29.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.wgpu-core-deps-windows-linux-android]]
+version = "29.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.wgpu-hal]]
+version = "29.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.wgpu-naga-bridge]]
+version = "29.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.wgpu-types]]
+version = "29.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.widestring]]
@@ -1273,6 +1393,42 @@ criteria = "safe-to-deploy"
 version = "0.52.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.windows]]
+version = "0.62.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-collections]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-core]]
+version = "0.62.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-future]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-implement]]
+version = "0.60.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-interface]]
+version = "0.59.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-numerics]]
+version = "0.3.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-result]]
+version = "0.4.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-strings]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.windows-sys]]
 version = "0.52.0"
 criteria = "safe-to-deploy"
@@ -1291,6 +1447,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.windows-targets]]
 version = "0.53.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-threading]]
+version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_aarch64_gnullvm]]
