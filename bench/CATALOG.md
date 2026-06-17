@@ -65,7 +65,7 @@ conventions first, then a per-category map that points at the registry, then a
 | **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench` |
 | **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench` |
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
-| **serve** | concurrent-serving + memory-tiering research spikes | `serve-spikes`, `memtier-spikes` |
+| **serve** | concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-spikes`, `memtier-spikes`, `pss-update-parity` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance` |
 | **competitors** | versioned external-engine comparison (Oxigraph / QLever / eye) + version+env capture | `competitor-gather` (registry: [`competitors.json`](./competitors.json)) |
 

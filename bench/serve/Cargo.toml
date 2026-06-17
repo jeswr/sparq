@@ -57,3 +57,9 @@ path = "src/bin/update_stream_spike.rs"
 [[bin]]
 name = "writer_spike"
 path = "src/bin/writer_spike.rs"
+
+# [OPUS-4.8] sq-b4lo / gh-52 — single-writer write-throughput on the PSS update set,
+# with an optional QLever-parity gate (the gh-52 Phase-2 acceptance criterion).
+[[bin]]
+name = "pss_update_throughput"
+path = "src/bin/pss_update_throughput.rs"

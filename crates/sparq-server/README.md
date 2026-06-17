@@ -231,6 +231,89 @@ cargo run -p sparq-server -- --format turtle data.ttl
 curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o } LIMIT 5'
 ```
 
+## Concurrency contract — N readers, 1 sequenced writer
+
+<!-- [OPUS-4.8] sq-b4lo / gh-52 — the explicit, PSS-facing serving contract; re-review
+     when Fable returns. -->
+
+sparq-server is a **single-process** SPARQL endpoint with a deliberate, documented
+concurrency shape:
+
+> **N concurrent readers against 1 sequenced writer.** Reads are lock-free and never
+> block; all writes are *serialised* through a single sequenced, group-committing
+> writer. There is **no distributed lock, replication, or consensus**, and the engine
+> is **not sharded per logical dataset** — horizontal scale is an *external*
+> deployment concern, not an in-engine one.
+
+**How it works.** Shared state is a lock-free **generation ring** (an arc-swapped
+chain of immutable store snapshots) plus the **single sequenced writer**
+([`sparq-serve`](../sparq-serve/README.md), design:
+[`research/concurrent-serving.md`](../../research/concurrent-serving.md) §6):
+
+- **Readers** pin the current generation once per request (`AppState::current`, an
+  atomic load — lock-free, never blocked by an in-flight update) and evaluate against
+  that immutable snapshot for the whole response — including streamed bodies. A reader
+  **never** waits for an in-flight update, and an update **never** waits for (or
+  reclaims from) readers; old generations are freed by ordinary `Arc` drop. Reader
+  concurrency scales with cores; it is the throughput story (the bulk of real endpoint
+  traffic is duplicate, cacheable, read-only queries — Bonifati et al., PVLDB 2017).
+- **Writers** submit through one sequenced [`Writer`]; each group-commit window
+  publishes a batch as ONE new immutable generation. Serialisability is by
+  construction (Calvin/Bohm collapsed to one node) — write skew is impossible, no SSI
+  needed. `apply_update` blocks until the generation containing the update is
+  published (the read-your-writes token it returns is the published generation
+  number; clients can pin it with `?generation=N`). A slow `DELETE/INSERT … WHERE`
+  head-of-line-blocks the queue behind it; `--update-where-timeout` bounds that
+  (see `sq-nulp` under "Security posture").
+
+**This single writer IS the write ceiling, by design.** That is a feature for the
+target workload (interactive single-resource writes), not a gap to paper over.
+
+### What scales where, and the explicit non-goal
+
+| Axis | sparq-server | How you scale it |
+| --- | --- | --- |
+| **Reads** | scale with cores in-process; horizontally with an external LB over read replicas | LB / replicas (deployment) |
+| **Writes** | one sequenced writer — the ceiling | **external coordination** (route writes for a logical dataset to its owning instance) |
+| **Whole-dataset HA / sharding** | **not in-engine** | deployment topology |
+
+**Explicit Phase-2 non-goal:** sparq-server does **not** provide an in-engine
+distributed/replicated/sharded writer, and is not planned to for the
+single-instance deployment. If a deployment needs HA or RAM/NIC scale-out, that is an
+*external* topology over single-writer instances — the design (pod-sharded shards,
+each a single writer + 0..N read replicas replaying its deterministic log; staged,
+opt-in, single-node path unchanged) is recorded in
+[`research/adr-horizontal-scaling.md`](../../research/adr-horizontal-scaling.md), but
+**no engine code implements it** and none is required for Phase-2.
+
+### Reconciliation with PSS `decisions/0012-horizontal-scaling.md`
+
+This contract is the SPARQ-side answer to PSS issue **gh-52**. PSS ADR-0012 scaled the
+*application tier* (stateless replicas + shared coordination) and explicitly left the
+*engine* as a single writer with external coordination — sparq fits that seat exactly:
+
+- **Peak concurrent writers per logical dataset = effectively 1** (PSS deploys
+  single-instance; one sequenced writer matches the deployment).
+- **External coordination** (a distributed lock / shared `jti`+cache, ADR-0012's
+  `none`-backend-default discipline) lives in **PSS**, not in sparq — sparq guarantees
+  *per-instance* serialisation, and the deployment guarantees one writer per logical
+  dataset.
+- **Stable write error contract** (for retry classifiers): see "Stable error/status
+  contract" above — a write is `204` (committed), `400` (malformed — permanent), `401`
+  (auth — permanent), `503` (timeout / durable-write refusal — **retryable**, the
+  write did **not** commit), or `429` (shed — never ran, retryable).
+
+### Acceptance bar — parity-or-better vs QLever on the PSS update set
+
+gh-52's binding criterion for the single writer is **parity-or-better vs the
+QLever-over-HTTP write path on PSS's actual update set** (interactive LDP-CRUD — small
+`DELETE … ; INSERT DATA …` per resource + its `.acl`, plus pod provisioning — **not**
+bulk ingest). Reference starting targets (non-gating): sustained *≥ a few hundred small
+updates/sec* and *p99 write-commit < ~50 ms*. The benchmark that asserts this lives in
+[`bench/pss-update-set`](../../bench/pss-update-set/README.md) (a true differential vs
+a running QLever) with a fast in-process single-writer harness in
+[`bench/serve`](../../bench/serve/README.md) (`pss_update_throughput`).
+
 ## Durable persistence (`--persist DIR` — QLever's `--persist-updates`)
 
 By default the server is **in-memory**: updates apply to a `Graph` held only in RAM, so they
