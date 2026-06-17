@@ -1,0 +1,52 @@
+# [OPUS-4.8] sq-nzcb (W-rsp): the tier-b WASM bundle for sparq-rsp.
+#
+# A SEPARATE, lazy-loaded bundle (not folded into the lean `sparq-wasm` bundle): it
+# carries the windowed RSP-QL stream processor (`sparq-rsp`) — sliding/tumbling time
+# windows, R/I/DSTREAM output, the AVG(?v)-per-window demo — which the lean default
+# browser bundle deliberately does not. The showcase site loads it ONLY on
+# /surface/streaming-rsp (next/dynamic, client-only) so the landing page stays light.
+# Mirrors the per-bundle-crate pattern of `sparq-wasm` / `sparq-reason-wasm`.
+#
+# sparq-rsp is documented "wasm-safe" (pure, no wall clock, no async runtime — time only
+# advances through application-supplied timestamps), so the in-tab UI drives the logical
+# clock: each pushed reading carries a `ts`, and a window closes when the watermark
+# reaches its end. This bundle confirms that wasm-safety claim by BUILDING the crate for
+# wasm32 in CI and exercising the real #[wasm_bindgen] API in a genuine wasm runtime.
+[package]
+name = "sparq-rsp-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# cdylib for the wasm artifact; rlib so the pure helpers can be unit-tested natively.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No-default-features everywhere => no rayon: the wasm build has no threads and we keep
+# the bundle minimal. `sparq-rsp` carries no `parallel`/rayon feature of its own (it is a
+# deliberately synchronous push API); `sparq-engine`/`sparq-core` with defaults off drop
+# rayon + the SPARQL regex/digest cores. The only wasm build blocker is getrandom's wasm
+# backend (handled below, exactly as `sparq-wasm` / `sparq-reason-wasm` do).
+sparq-core = { path = "../sparq-core", default-features = false }
+sparq-engine = { path = "../sparq-engine", default-features = false }
+sparq-rsp = { path = "../sparq-rsp" }
+oxrdf.workspace = true
+wasm-bindgen = "0.2"
+
+# oxrdf pulls `rand`/getrandom (blank-node ids). On wasm there is no OS RNG, so select
+# getrandom's browser backend (crypto.getRandomValues). The matching
+# `--cfg getrandom_backend="wasm_js"` is set in the workspace .cargo/config.toml.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+# [OPUS-4.8] sq-nzcb — headless wasm test harness, mirroring sparq-wasm / sparq-reason-wasm:
+# exercises the #[wasm_bindgen] JS-facing API in a REAL wasm runtime via `wasm-pack test
+# --node`. Dev-only: it must NOT enter the non-dev wasm graph.
+wasm-bindgen-test = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+# Optimise the wasm for size (the bundle is small, but keep parity with the other bundles).
+wasm-opt = ["-Oz"]
