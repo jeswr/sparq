@@ -71,6 +71,11 @@
 //!                             to send its complete request-header block (closes the connection +
 //!                             frees the concurrency slot if exceeded), 0 disables
 //!                             [15, env SPARQ_HEADER_READ_TIMEOUT]
+//!   --body-read-timeout S     [OPUS-4.8 sq-lodb] slow-BODY guard (complement to --header-read-timeout):
+//!                             max SECONDS the server waits for the NEXT request-body chunk (idle deadline
+//!                             between body reads, reset after each chunk — an honest large upload is not
+//!                             penalised, only a stall). Closes the slow-body DoS a complete-header client
+//!                             could otherwise use. 0 disables   [30, env SPARQ_BODY_READ_TIMEOUT]
 //!   --max-results N           maximum SELECT rows (413 beyond), 0 off    [unlimited, env SPARQ_MAX_RESULTS]
 //!   --max-query-rows N        [OPUS-4.8 sq-ebii] coarse MEMORY CAP: working-set row ceiling on EVERY
 //!                             query form (413 beyond), 0 off             [unlimited, env SPARQ_MAX_QUERY_ROWS]
@@ -181,6 +186,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--header-read-timeout" => {
                 let secs: u64 = parse_flag(&mut args, "--header-read-timeout")?;
                 config.header_read_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+            }
+            // [OPUS-4.8] sq-lodb: slow-body request-body read/idle deadline (seconds); 0 disables
+            // it (unbounded body read — a slow body can hold the slot forever). Default 30s. The
+            // complement to --header-read-timeout. See ServerConfig::body_read_timeout.
+            "--body-read-timeout" => {
+                let secs: u64 = parse_flag(&mut args, "--body-read-timeout")?;
+                config.body_read_timeout = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--max-results" => {
                 let n: usize = parse_flag(&mut args, "--max-results")?;
@@ -450,7 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
-        "guards: query-timeout={} update-where-timeout={} header-read-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
+        "guards: query-timeout={} update-where-timeout={} header-read-timeout={} body-read-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
          max-query-rows={} max-query-bytes={} max-decompress-ratio={}x max-subscriptions={} \
          max-subscriptions-per-conn={}",
         config
@@ -463,6 +475,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // [OPUS-4.8] sq-2gqr: connection-layer header-read deadline (slow-loris guard).
         config
             .header_read_timeout
+            .map_or("off".into(), |t| format!("{}s", t.as_secs())),
+        // [OPUS-4.8] sq-lodb: connection-layer body read/idle deadline (slow-body guard).
+        config
+            .body_read_timeout
             .map_or("off".into(), |t| format!("{}s", t.as_secs())),
         config.max_body_bytes,
         config.max_concurrent,
@@ -552,10 +568,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         BindPosture::RemoteRefused { message } => return Err(message.into()),
     }
 
-    // [OPUS-4.8] sq-2gqr: capture the slow-loris header-read deadline BEFORE `config` is moved
-    // into `AppState` — `sparq_server::serve` (not `axum::serve`) installs it at the hyper
-    // connection layer to close the slow-loris DoS (see ServerConfig::header_read_timeout).
+    // [OPUS-4.8] sq-2gqr / sq-lodb: capture the connection-layer slow-client deadlines BEFORE
+    // `config` is moved into `AppState` — `sparq_server::serve` (not `axum::serve`) installs the
+    // header-read deadline (slow-loris HEADER guard, sq-2gqr) and the body read/idle deadline
+    // (slow-BODY guard, sq-lodb). See ServerConfig::header_read_timeout / ::body_read_timeout.
     let header_read_timeout = config.header_read_timeout;
+    let body_read_timeout = config.body_read_timeout;
     // [OPUS-4.8] sq-7cxr: `try_with_config` surfaces a durable-open error (corrupt persist dir,
     // unwritable path) as a clean startup error + non-zero exit, rather than panicking.
     let state = AppState::try_with_config(graph, config)?;
@@ -563,11 +581,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("sparq-server listening on http://{addr}  (SPARQL endpoint: /sparql, subscriptions: ws://{addr}/subscriptions)");
-    // [OPUS-4.8] sq-2gqr: NOT `axum::serve` — it never installs a timer, so hyper's header-read
-    // deadline is inert there and a slow-loris client holds a connection (and concurrency slot)
-    // open forever. `sparq_server::serve` is the same accept + graceful-drain loop WITH the
-    // header-read deadline wired in.
-    sparq_server::serve(listener, app, header_read_timeout, shutdown_signal()).await?;
+    // [OPUS-4.8] sq-2gqr / sq-lodb: NOT `axum::serve` — it never installs a timer, so hyper's
+    // header-read deadline is inert there and a slow-loris client holds a connection (and
+    // concurrency slot) open forever. `sparq_server::serve` is the same accept + graceful-drain
+    // loop WITH the header-read deadline (slow-loris HEADER guard) and the body read/idle deadline
+    // (slow-BODY guard) wired in.
+    sparq_server::serve(
+        listener,
+        app,
+        header_read_timeout,
+        body_read_timeout,
+        shutdown_signal(),
+    )
+    .await?;
     Ok(())
 }
 

@@ -157,6 +157,31 @@ pub struct ServerConfig {
     /// because reading a header block is sub-second on any healthy client; 15s is generous
     /// headroom for a slow but honest network without leaving the slot open for minutes.
     pub header_read_timeout: Option<Duration>,
+    /// [OPUS-4.8] (sq-lodb) **Slow-body guard — request-body read/idle deadline (complement to
+    /// [`header_read_timeout`](Self::header_read_timeout)).** The maximum time the server will wait
+    /// for the NEXT chunk of a request body once the previous one has arrived — an *idle* deadline
+    /// between consecutive body reads, reset after every chunk. The header-read deadline closes the
+    /// classic slow-loris (dribbled *headers*), but it does NOT cover the body phase: once a client
+    /// has sent a complete, valid header block it can then dribble the request BODY one byte at a
+    /// time (or send a chunk then stall forever) and stay under [`max_body_bytes`](Self::max_body_bytes)
+    /// yet hold the connection — and, behind the `concurrency_limit`, a concurrency slot — open
+    /// indefinitely. hyper's `header_read_timeout` has already elapsed (the headers parsed fine),
+    /// [`query_timeout`](Self::query_timeout) is an engine deadline that only starts once the WHOLE
+    /// request has been read, and [`max_body_bytes`](Self::max_body_bytes) is a SIZE cap that a
+    /// one-byte-at-a-time trickle never trips. So this is a genuinely distinct vector that needs its
+    /// own bound.
+    ///
+    /// Enforced by a `tower_http::timeout::RequestBodyTimeoutLayer` wrapping the request body in a
+    /// `TimeoutBody`: each poll for the next body frame gets a fresh deadline; if that frame does
+    /// not arrive within the window the body read fails and the request is aborted. Because the
+    /// timer RESETS after every received frame, a slow-but-honest large upload (steady chunks just
+    /// under the window apart) is never penalised by total transfer time — only an idle stall is.
+    ///
+    /// `None` disables it (back to the unbounded body-read behaviour — a slow body can hold the
+    /// slot forever). Default 30s. The window is generous (a stall, not a slow link) and matches
+    /// the default [`query_timeout`](Self::query_timeout); an operator behind a flaky network widens
+    /// it, a hostile-input operator tightens it.
+    pub body_read_timeout: Option<Duration>,
     /// Maximum SELECT result rows. Exceeding it is an honest 413 refusal (the engine
     /// aborts evaluation via the row budget), never a silent truncation.
     pub max_results: Option<usize>,
@@ -433,6 +458,13 @@ impl Default for ServerConfig {
             // TokioTimer and wires this value. 0 / env-unset keeps the guard; SPARQ_HEADER_READ_TIMEOUT=0
             // disables it. See ServerConfig::header_read_timeout.
             header_read_timeout: Some(Duration::from_secs(15)),
+            // [OPUS-4.8] sq-lodb: a 30s body read/idle deadline closes the slow-BODY hole ON by
+            // default — the complement to the header-read guard above. A client that finishes its
+            // headers then dribbles the request body (or stalls mid-body) otherwise holds the slot
+            // forever. The timer resets after each received chunk, so an honest large upload is
+            // never penalised by total time. 0 / SPARQ_BODY_READ_TIMEOUT=0 disables it. See
+            // ServerConfig::body_read_timeout.
+            body_read_timeout: Some(Duration::from_secs(30)),
             max_results: None,
             // [OPUS-4.8] sq-ebii: memory cap OFF by default (no surprise refusals on an
             // unconfigured server); an operator exposing the endpoint opts a ceiling in.
@@ -502,7 +534,9 @@ impl ServerConfig {
     /// UPDATE; seconds, `0`/unset disables — the update WHERE budget is then the plain
     /// `query_timeout`), `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT`,
     /// `SPARQ_HEADER_READ_TIMEOUT` ([OPUS-4.8] sq-2gqr: the slow-loris connection header-read
-    /// deadline in seconds; `0` disables, default 15), `SPARQ_MAX_RESULTS`,
+    /// deadline in seconds; `0` disables, default 15),
+    /// `SPARQ_BODY_READ_TIMEOUT` ([OPUS-4.8] sq-lodb: the slow-body request-body read/idle
+    /// deadline in seconds; `0` disables, default 30), `SPARQ_MAX_RESULTS`,
     /// `SPARQ_MAX_QUERY_ROWS` ([OPUS-4.8] sq-ebii: the coarse memory cap; `0` disables) and
     /// `SPARQ_MAX_DECOMPRESS_RATIO` ([OPUS-4.8] sq-ebii: the zip-bomb guard; `0` refuses gzip
     /// bodies) environment variables — plus, with the `time-travel` feature,
@@ -539,6 +573,11 @@ impl ServerConfig {
         // unbounded header read, the pre-fix behaviour), anything else sets the deadline.
         if let Some(secs) = env_parse::<u64>("SPARQ_HEADER_READ_TIMEOUT") {
             cfg.header_read_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+        }
+        // [OPUS-4.8] sq-lodb: slow-body read/idle deadline (seconds); `0` disables it (an
+        // unbounded body read — a slow body can hold the slot forever), anything else sets it.
+        if let Some(secs) = env_parse::<u64>("SPARQ_BODY_READ_TIMEOUT") {
+            cfg.body_read_timeout = (secs > 0).then(|| Duration::from_secs(secs));
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_RESULTS") {
             cfg.max_results = (n > 0).then_some(n);
@@ -2547,12 +2586,14 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
 }
 
 // ---------------------------------------------------------------------------
-// [OPUS-4.8] (sq-2gqr) Serve loop with a connection header-read deadline (slow-loris guard)
+// [OPUS-4.8] (sq-2gqr / sq-lodb) Serve loop with connection-layer slow-client deadlines
+// (slow-loris HEADER guard + slow-BODY guard)
 // ---------------------------------------------------------------------------
 
-/// Serves `app` on `listener` until `shutdown` resolves, with a hyper HTTP/1
-/// **header-read deadline** ([`ServerConfig::header_read_timeout`]) that closes the
-/// slow-loris DoS.
+/// Serves `app` on `listener` until `shutdown` resolves, with two complementary slow-client
+/// deadlines: a hyper HTTP/1 **header-read deadline** ([`ServerConfig::header_read_timeout`],
+/// sq-2gqr) that closes the slow-loris HEADER dribble, and a **request-body read/idle deadline**
+/// ([`ServerConfig::body_read_timeout`], sq-lodb) that closes the slow-BODY dribble.
 ///
 /// **Why this exists instead of `axum::serve`.** `axum::serve` builds hyper's connection
 /// `Builder` internally and exposes no hook to configure it, and — critically — it never
@@ -2566,17 +2607,31 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
 /// deadline that only starts once a full request has been parsed; `max_body_bytes` and load-shed
 /// likewise act *after* the headers are read.
 ///
+/// **The slow-BODY complement (sq-lodb).** hyper's `header_read_timeout` only covers the header
+/// block; once that completes a client can dribble the request BODY one byte at a time (or send a
+/// chunk then stall) and hold the slot forever — under [`ServerConfig::max_body_bytes`] (a SIZE
+/// cap a trickle never trips) and before [`ServerConfig::query_timeout`] starts (an engine
+/// deadline that begins only after the whole request is read). When `body_read_timeout` is set
+/// the incoming request body is wrapped in a `tower_http::timeout::TimeoutBody` (via
+/// [`tower::util::option_layer`] so a `None` is a true no-op `Identity` layer): every poll for the
+/// next body frame gets a fresh deadline, reset after each frame — so an honest large upload is
+/// never penalised by total transfer time, only an idle stall is. The `Router` accepts the
+/// wrapped body natively (`impl<B> Service<Request<B>> for Router` for any `B: Body<Data = Bytes>`),
+/// so no body re-boxing is needed.
+///
 /// This loop is a faithful port of `axum::serve`'s own accept + graceful-shutdown loop
 /// (per-connection task, watch-channel drain, `serve_connection(...).with_upgrades()` so the
-/// `/subscriptions` WebSocket upgrade still works) with exactly one behavioural addition: the
-/// connection builder installs a `TokioTimer` and sets `header_read_timeout`. `None` opts back
-/// out to the unbounded behaviour. axum is configured HTTP/1-only (no `http2` feature), so this
-/// uses hyper's `http1::Builder` directly — the smallest builder that carries the knob we need.
+/// `/subscriptions` WebSocket upgrade still works) with two behavioural additions: the connection
+/// builder installs a `TokioTimer` and sets `header_read_timeout`, and the per-connection service
+/// optionally wraps the body in the `body_read_timeout` layer. `None` on either opts back out to
+/// the unbounded behaviour. axum is configured HTTP/1-only (no `http2` feature), so this uses
+/// hyper's `http1::Builder` directly — the smallest builder that carries the header knob.
 #[cfg(feature = "server")]
 pub async fn serve<F>(
     listener: tokio::net::TcpListener,
     app: Router,
     header_read_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
     shutdown: F,
 ) -> std::io::Result<()>
 where
@@ -2585,6 +2640,15 @@ where
     use futures_util::FutureExt;
     use hyper_util::rt::{TokioIo, TokioTimer};
     use hyper_util::service::TowerToHyperService;
+    use tower::ServiceBuilder;
+    use tower_http::timeout::RequestBodyTimeoutLayer;
+
+    // [OPUS-4.8] sq-lodb: wrap the per-connection service with the slow-body read/idle deadline.
+    // `option_layer` makes a `None` an `Identity` (true no-op) layer, so the disabled path is
+    // byte-for-byte the pre-sq-lodb behaviour. The layer feeds the `Router` a `TimeoutBody`-wrapped
+    // request body, which the `Router`'s body-generic `Service` impl accepts directly.
+    let body_timeout_layer =
+        tower::util::option_layer(body_read_timeout.map(RequestBodyTimeoutLayer::new));
 
     // `signal_tx`: dropped (closed) once `shutdown` resolves — every connection task watches it
     // and begins a graceful drain. `close_rx`: each task holds a clone; the loop waits for them
@@ -2622,7 +2686,12 @@ where
         };
 
         let io = TokioIo::new(stream);
-        let hyper_service = TowerToHyperService::new(app.clone());
+        // [OPUS-4.8] sq-lodb: apply the (optional) slow-body read/idle deadline around this
+        // connection's clone of the router, then hand the composed tower service to hyper.
+        let service = ServiceBuilder::new()
+            .layer(body_timeout_layer.clone())
+            .service(app.clone());
+        let hyper_service = TowerToHyperService::new(service);
         let signal_tx = signal_tx.clone();
         let close_rx = close_tx.subscribe();
 
@@ -2679,10 +2748,11 @@ where
 
 #[cfg(test)]
 mod header_read_timeout_config_tests {
-    //! [OPUS-4.8] (sq-2gqr) The slow-loris header-read deadline lives in `ServerConfig` so it is
-    //! configurable + testable in isolation; the END-TO-END behaviour (a partial-header socket is
-    //! actually closed by `serve`) is the integration suite in `tests/hardening.rs`. These pin the
-    //! config contract.
+    //! [OPUS-4.8] (sq-2gqr / sq-lodb) The slow-loris header-read deadline and the slow-body
+    //! read/idle deadline live in `ServerConfig` so they are configurable + testable in isolation;
+    //! the END-TO-END behaviour (a partial-header socket / a dribbled-body socket is actually
+    //! closed by `serve`) is the integration suite in `tests/hardening.rs`. These pin the config
+    //! contract.
     use super::*;
 
     #[test]
@@ -2710,6 +2780,36 @@ mod header_read_timeout_config_tests {
         // It is opt-out-able (an operator who really wants the old unbounded behaviour).
         let off = ServerConfig { header_read_timeout: None, ..ServerConfig::default() };
         assert_eq!(off.header_read_timeout, None);
+    }
+
+    #[test]
+    fn slow_body_guard_is_on_by_default() {
+        // [OPUS-4.8] sq-lodb: a fresh, unconfigured server must also bound the slow-BODY vector.
+        // A generous-but-finite 30s idle deadline ships ON.
+        assert_eq!(
+            ServerConfig::default().body_read_timeout,
+            Some(Duration::from_secs(30)),
+            "body read/idle deadline must be ON by default (slow-body guard)"
+        );
+    }
+
+    #[test]
+    fn body_read_timeout_is_independent_of_the_header_and_query_deadlines() {
+        // [OPUS-4.8] sq-lodb: three distinct deadlines (body phase / header phase / engine
+        // evaluation). Setting one must not move the others.
+        let cfg = ServerConfig {
+            body_read_timeout: Some(Duration::from_secs(5)),
+            header_read_timeout: Some(Duration::from_secs(3)),
+            query_timeout: Some(Duration::from_secs(99)),
+            ..ServerConfig::default()
+        };
+        assert_eq!(cfg.body_read_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(cfg.header_read_timeout, Some(Duration::from_secs(3)));
+        assert_eq!(cfg.query_timeout, Some(Duration::from_secs(99)));
+        // It is opt-out-able independently of the header guard.
+        let off = ServerConfig { body_read_timeout: None, ..ServerConfig::default() };
+        assert_eq!(off.body_read_timeout, None);
+        assert_eq!(off.header_read_timeout, Some(Duration::from_secs(15))); // header guard untouched
     }
 }
 
