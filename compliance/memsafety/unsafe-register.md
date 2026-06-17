@@ -46,7 +46,7 @@ register distinguishes two trust classes of `unsafe`:
 
 ## Register
 
-**56 `unsafe` sites** across 5 crates (the other 26 crates are `#![forbid(unsafe_code)]`).
+**58 `unsafe` sites** across 5 crates (the other 26 crates are `#![forbid(unsafe_code)]`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
 must equal `bench/unsafe-snapshot.json`.
 
@@ -60,7 +60,7 @@ Recurring invariant shorthands used below:
   borrow's duration and is not mutated by us; external concurrent mutation is explicitly
   out of contract (documented stance, same as the rest of the mmap surface).
 
-### `sparq-core` — 42 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
+### `sparq-core` — 44 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
@@ -80,6 +80,7 @@ Recurring invariant shorthands used below:
 | `src/lib.rs:4235` | ptr `add` (prefetch arg) | `id-1 < remap.len()` | same as 3548 (other build path). |
 | `src/lib.rs:4392` | `MmapMut::map_mut` | own-for-lifetime; freshly-written perm file | read-write map of a perm file of whole `[u32;3]` rows we just wrote. |
 | `src/lib.rs:4393` | mut slice reinterpret | page-align; POD-bytes | `len/4` u32; exclusively owned (the `MmapMut`); rayon writes are disjoint by index. |
+| `src/lib.rs:3997` | slice reinterpret (read) | page-align; whole `[u32;3]` rows; map outlives the slice | `compress_perm_file_in_place` (sq-vkz7). `extsort::map_perm` returns `(Mmap, n)` with `n = len/12`, so the `n` `[u32;3]` rows are fully in-bounds and the base is ≥ 4-byte u32-aligned (page-aligned mmap). The raw SPO perm was written by this build (whole rows, sorted+deduped) and is read-only here — the `Mmap` (`map`) is held for the whole row-streaming loop and is not mutated through any other alias for the slice's lifetime; it is `drop`ped only at L4006, *after* the slice's last use, before the file is renamed. `n==0` (empty perm) returns early without forming the slice. [OPUS-4.8] |
 | `src/lib.rs:6229` | `std::env::set_var` | single-threaded test; var restored before return | TEST-only (`#[test] external_quads_fd_*`): sets `SPARQ_QUADS_SPILL_MAX_OPEN` to exercise the bounded-writer-pool path; no other thread reads the env in the test. Edition-2024 made `set_var` `unsafe`. |
 | `src/lib.rs:6231` | `std::env::remove_var` | same test; restores the env | TEST-only: removes the var set at 6229 before returning so the process env is left clean. Edition-2024 `unsafe`. |
 | `src/store.rs:106` | slice reinterpret (read) | page-align; whole `[u32;3]` triples | `n = len/12`; mmap base ≥ 4-byte u32 align. |
@@ -106,6 +107,7 @@ Recurring invariant shorthands used below:
 | `src/extsort.rs:83` | `Mmap::map` | own-for-lifetime | run files written by us, not mutated during the merge. |
 | `src/extsort.rs:98` | slice reinterpret (read) | page-align; whole `[u32;3]` triples | `n = len/12` per run. |
 | `src/extsort.rs:180` | `Mmap::map` | own-for-lifetime | `map_perm` read-only map of a perm file we own for the call. |
+| `src/compress.rs:646` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] stream_writer_byte_identical_to_encode_write_to`, sq-vkz7): read-only map of a perm file the test just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates the file during the test, so the subsequent `CompressedPerm::from_mmap` read stays in-bounds over a stable region. [OPUS-4.8] |
 
 ### `sparq-vectors` — 9 sites (aligned vector blobs + mmap'd `.spqv` / DiskANN)
 
@@ -143,7 +145,7 @@ Recurring invariant shorthands used below:
 
 ## NEEDS-REVIEW
 
-**None.** Every one of the 56 sites now carries a literal `// SAFETY:` comment
+**None.** Every one of the 58 sites now carries a literal `// SAFETY:` comment
 immediately preceding the `unsafe` block/impl, mechanically enforced by
 `clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]). The 6 sites that
 previously relied on an adjacent block comment — the two `unsafe impl Send`/`Sync for
