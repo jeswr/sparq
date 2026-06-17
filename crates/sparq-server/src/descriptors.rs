@@ -75,7 +75,7 @@ const SD_BASIC_FEDERATED_QUERY: &str =
 /// simply ignores it (it is an opaque feature IRI). The flag is FALSE unless a node opts into
 /// serving lineage, so the advertisement is never a fiction (the same honesty boundary as
 /// `federated_query` / `extension_functions`).
-const SPARQ_PROV_LINEAGE: &str = "http://sparq.dev/ns/prov#lineage";
+const PROV_LINEAGE_FEATURE_IRI: &str = "http://sparq.dev/ns/prov#lineage";
 
 /// The W3C media-type IRIs (`<https://www.w3.org/ns/formats/...>`) for the result/RDF
 /// serialisations the server can RETURN, advertised via `sd:resultFormat`. These mirror the
@@ -220,7 +220,7 @@ pub struct Capabilities {
     /// [OPUS-4.8] sq-yyy3: advertise `sd:feature <http://sparq.dev/ns/prov#lineage>` — this node
     /// captures + serves W3C PROV-O data-lineage for the data it derives (the `sparq-prov`
     /// surface). FALSE unless the node genuinely serves lineage, so the advertisement is never a
-    /// fiction. See [`SPARQ_PROV_LINEAGE`].
+    /// fiction. The advertised feature IRI is `<http://sparq.dev/ns/prov#lineage>`.
     pub provenance: bool,
 }
 
@@ -380,7 +380,7 @@ fn sd_ntriples(
             out,
             "{svc} <{}> {} .",
             sd("feature"),
-            iri(SPARQ_PROV_LINEAGE)
+            iri(PROV_LINEAGE_FEATURE_IRI)
         );
     }
 

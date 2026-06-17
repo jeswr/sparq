@@ -82,7 +82,7 @@ const SD_BASIC_FEDERATED_QUERY: &str =
 /// surface it as [`Capability::provenance_lineage`] so a federation client can prefer (or record)
 /// a source that can answer "where did this come from?". An SD that omits it yields the
 /// recall-safe `false` default; it is never inferred from anything but this exact IRI.
-const SPARQ_PROV_LINEAGE: &str = "http://sparq.dev/ns/prov#lineage";
+const PROV_LINEAGE_FEATURE_IRI: &str = "http://sparq.dev/ns/prov#lineage";
 
 // ─── The capability model (§4.1) ─────────────────────────────────────────────────────
 //
@@ -333,7 +333,7 @@ pub fn parse_service_description(nt: &str) -> Result<Option<Capability>, String>
     };
     let federated_query = has_feature(SD_BASIC_FEDERATED_QUERY);
     // [OPUS-4.8] sq-yyy3: the sparq PROV-O data-lineage extension feature.
-    let provenance_lineage = has_feature(SPARQ_PROV_LINEAGE);
+    let provenance_lineage = has_feature(PROV_LINEAGE_FEATURE_IRI);
 
     // A SPARQL endpoint evaluates a full FILTER grammar and a VALUES bind-join block; a
     // document with no supportedLanguage at all is treated as an endpoint with unknown
