@@ -237,9 +237,8 @@ since:
   order. The load-bearing property — the materialised federated result **equals** local
   `sparq-engine` evaluation of the same query (`solutions_equal` bag comparison) — is driven
   end-to-end in `tests/planner_result_equals_local_eval.rs`. The interpreter is single-source
-  + blocking; the `StreamJoin` feeder, concurrent fan-out, pushed-down bind-join, and
-  multi-source UNION are Phase 5 (a multi-source leaf fails closed with
-  `InterpError::MultiSource`).
+  + blocking (its streaming counterpart is Phase 5 below); a multi-source leaf fails closed
+  with `InterpError::MultiSource`.
 - **Phase 4 capability-aware pushdown** (`sq-7byx`) — the `pushdown` module decides the most
   precise sub-query each source is asked. `exclusive_groups(selection, bgp)` derives the FedX
   **exclusive groups** (maximal connected sub-patterns whose only retained source is one
@@ -256,6 +255,22 @@ since:
   plain TPF), mirroring `sparq-engine`'s `pub(crate)` `service.rs` helpers. Pushdown only ever
   **narrows** a source's result, so it is correctness-preserving; the FILTER model is light
   (the parsed-query FILTER algebra wiring is Phase 5).
+- **Phase 5 streaming operators** (`sq-vtba`) — the streaming counterpart of the Phase-3
+  interpreter, built ON THIS crate's non-blocking `StreamJoin`. `sparq_fedclient::stream`'s
+  `SolutionStream` is a bounded, backpressured `Iterator` over a `std::sync::mpsc::sync_channel`
+  (the channel bound IS the backpressure); `operators::ScatterPool` is a **bounded blocking
+  thread-pool** over the blocking transport — the ASYNC/RUNTIME decision (no async runtime is
+  pulled in; all concurrency is `std`-only and confined to the opt-in crate). `StreamingJoin`
+  drives THIS crate's `StreamJoin` over two `SolutionStream`s, bridging `oxrdf::Term` rows into
+  the `Tuple` model losslessly via the term's canonical N-Triples form (`Term::Display` ↔
+  `Term::from_str`). `stream_single_source` walks the same `JoinTree`, fans each leaf's blocking
+  fetch onto the pool, and chains the leaves through streaming joins so results EMIT before the
+  inputs are exhausted. The load-bearing invariant — the streamed multiset is **multiset-equal**
+  to the Phase-3 materialised result for **any** source-arrival interleaving (and both equal
+  local eval) — is driven on the real engine path under injected per-leaf delays + a forced spill
+  in `tests/streaming_result_equals_phase3.rs`. Multi-source UNION-per-leaf and the *pushed-down*
+  bind-join (VALUES/`maxMpR`) remain deferred; a bind-classified join runs as the same streaming
+  symmetric hash join (identical result multiset).
 - **Phase 6 the brTPF + TPF fragment adapters** (`sq-2qze`): `source::TpfSource` (plain TPF —
   materialise a fragment to exhaustion, no bind-join) and `source::BrTpfSource`
   (bindings-restricted — push `maxMpR`-bounded binding blocks per request, the standardised
@@ -266,8 +281,9 @@ since:
   SPARQL-Results-JSON, so their `FederatedSource::execute` is a deliberate `Unsupported` that
   points at `solutions`).
 
-Still to come (future beads under the epic): the streaming operators + multi-source fan-out,
-and adaptive re-planning. See `crates/sparq-fedclient/README.md`.
+Still to come (future beads under the epic): multi-source UNION-per-leaf fan-out + the
+pushed-down streaming bind-join, and adaptive re-planning. See
+`crates/sparq-fedclient/README.md`.
 
 ## Deferred (NOT here)
 

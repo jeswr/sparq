@@ -127,6 +127,10 @@ pub mod operators;
 pub use operators::{
     materialize_single_source, parse_srj, solutions_equal, InterpError, Relation,
 };
+// [OPUS-4.8] sq-vtba: re-export the Phase-5 streaming-operator surface — the bounded blocking
+// thread-pool, the `StreamJoin`-feeder streaming join, and the streaming interpreter.
+#[cfg(feature = "fedclient")]
+pub use operators::{stream_single_source, ScatterPool, StreamOptions, StreamingJoin};
 
 /// §4.4 — the **`SolutionStream`** abstraction the client owns at its boundary (the
 /// engine stays materialised, §7). Backpressured + bounded (Rust ownership + explicit
@@ -134,3 +138,6 @@ pub use operators::{
 /// operators consume and produce it (Phase 5).
 #[cfg(feature = "fedclient")]
 pub mod stream;
+// [OPUS-4.8] sq-vtba: re-export the Phase-5 `SolutionStream` boundary surface at the crate root.
+#[cfg(feature = "fedclient")]
+pub use stream::{Solution, SolutionSink, SolutionStream, StreamItem};
