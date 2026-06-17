@@ -92,9 +92,11 @@ Materialize the authorization view from the access-control documents, then enfor
   `acp:OwnerAgent` matchers against per-resource creator/owner WebIDs supplied by the
   TRUSTED caller. `AccessProvenance::set_creator(resource, webid)` /
   `set_owner(resource, webid)` build the map; the loader synthesizes
-  `<r> solidx:creator|owner <w>` facts from THAT map ONLY — **never** from the resource
-  graph (§2.4), so a writer who embeds `<r> solidx:creator <self>` in a document they
-  control cannot self-grant. Each grant is RESOURCE-SCOPED (the creator of `R1` is never
+  `<r> solidx:creator|owner <w>` facts from THAT map ONLY. The loader hard-rejects any
+  control-document triple whose predicate is in the derivation-internal `solidx:` namespace
+  (§2.4), so a writer who embeds `<r> solidx:creator <self>` in a content document OR in the
+  `.acr` they control cannot self-grant (this also blocks forged `solidx:appliesToResource`
+  policy redirection). Each grant is RESOURCE-SCOPED (the creator of `R1` is never
   granted `R2`) and composes with the matcher's own `acp:client`/`acp:issuer` constraints.
   `materialize_acp()` is `materialize_acp_with(&AccessProvenance::new())` — no provenance ⇒
   no `CreatorAgent`/`OwnerAgent` grant (fail-closed).

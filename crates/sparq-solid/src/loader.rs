@@ -6,6 +6,16 @@
 //! triples granting themselves access. The inputs are: `.acl`/`.acr` graphs, group
 //! documents referenced via `acl:agentGroup` (fragment stripped), and the synthesized
 //! structural facts below.
+//!
+//! [OPUS-4.8] sq-3jtd.5: the `.acl`/`.acr`/group graphs ARE emitted verbatim, so they are a
+//! second smuggling surface. The reasoner's derivation-internal vocabulary — the `solidx:`
+//! namespace (`solidx:creator|owner|appliesToResource|isResource|isWebId|…`) — must only be
+//! produced by THIS loader (from trusted structural metadata + the caller-supplied
+//! `AccessProvenance`) or derived by the rules; a forged `solidx:` fact inside a control
+//! document would otherwise grant access (cross-resource privilege escalation / policy
+//! redirection). So [`is_reserved_derivation_predicate`] hard-rejects any control-graph or
+//! group-document triple whose predicate is in `solidx:` space — the analogue of the
+//! `urn:sparq:` reserved-principal guard ([`validate_principal_iri`]).
 
 use crate::{AccessProvenance, AUTH_GRAPH, SOLIDX_NS};
 use oxrdf::Term;
@@ -47,6 +57,25 @@ fn validate_principal_iri(iri: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// [OPUS-4.8] sq-3jtd.5: Predicates in the `solidx:` namespace are the reasoner's
+/// DERIVATION-INTERNAL vocabulary (`solidx:creator`, `solidx:owner`,
+/// `solidx:appliesToResource`, `solidx:isResource`, `solidx:inDoc`, `solidx:isWebId`,
+/// `solidx:provForResource`, …). Those facts are synthesized by THIS loader from
+/// trusted inputs (structural metadata + the caller-supplied [`AccessProvenance`]) or
+/// derived by the N3 rules — they must NEVER originate from access-control-document
+/// content. A writer who can place a triple inside an `.acr`/`.acl` they control could
+/// otherwise smuggle a forged `<r> solidx:creator <self>` (cross-resource privilege
+/// escalation) or `<pol> solidx:appliesToResource <secret>` (policy redirection) that
+/// the rules cannot distinguish from a loader-synthesized trusted fact.
+///
+/// So any control-graph (or group-document) triple whose PREDICATE is in `solidx:`
+/// space is DROPPED before it reaches the reasoner — the direct analogue of the
+/// `urn:sparq:` reserved-principal guard in [`validate_principal_iri`]. The trusted
+/// channel for creator/owner facts is [`AccessProvenance`] and nothing else.
+fn is_reserved_derivation_predicate(t: &[Term; 3]) -> bool {
+    matches!(&t[1], Term::NamedNode(n) if n.as_str().starts_with(SOLIDX_NS))
 }
 
 /// Drop ALL named graphs in the reserved IRI space — including a pre-existing
@@ -185,6 +214,12 @@ pub(crate) fn assemble_input(
     for (gix, iri, sub) in &control_graphs {
         let mut in_doc: FxHashSet<String> = FxHashSet::default();
         for t in graph_triples(sub) {
+            // [OPUS-4.8] sq-3jtd.5: hard-reject any forged derivation-internal fact
+            // (`solidx:creator|owner|appliesToResource|…`) smuggled into the control
+            // document — only the loader/rules may produce `solidx:` facts.
+            if is_reserved_derivation_predicate(&t) {
+                continue;
+            }
             write_term(&mut out, &t[0], *gix);
             out.push(' ');
             write_term(&mut out, &t[1], *gix);
@@ -205,6 +240,11 @@ pub(crate) fn assemble_input(
                 continue;
             }
             for t in graph_triples(sub) {
+                // [OPUS-4.8] sq-3jtd.5: same derivation-internal guard for group
+                // documents — a forged `solidx:` fact here would feed the reasoner too.
+                if is_reserved_derivation_predicate(&t) {
+                    continue;
+                }
                 write_term(&mut out, &t[0], gix);
                 out.push(' ');
                 write_term(&mut out, &t[1], gix);

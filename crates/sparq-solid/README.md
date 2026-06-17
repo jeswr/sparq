@@ -49,10 +49,13 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 - **Trusted creator/owner provenance** — `acp:CreatorAgent` / `acp:OwnerAgent` matchers
   resolve against per-resource creator/owner WebIDs the storage layer supplies through the
   trusted [`AccessProvenance`] channel and `PodStore::materialize_acp_with`. These facts are
-  asserted by the caller (who minted the resource) and are **never** read from the resource
-  graph — a writer who embeds `<r> solidx:creator <self>` in a document they control cannot
-  thereby grant themselves access (design doc §2.4). Each grant is resource-scoped: the
-  creator of `R1` is never granted `R2`. With no provenance supplied, no such matcher grants
+  asserted by the caller (who minted the resource); they come from that channel **only** and
+  never from graph content. The loader hard-rejects any control-document triple whose
+  predicate is in the derivation-internal `solidx:` namespace, so a writer can embed
+  `<r> solidx:creator <self>` in neither a content document NOR the `.acr` they control and
+  thereby grant themselves access (design doc §2.4) — this also closes forged
+  `solidx:appliesToResource` policy-redirection. Each grant is resource-scoped: the creator
+  of `R1` is never granted `R2`. With no provenance supplied, no such matcher grants
   (fail-closed). [OPUS-4.8] sq-3jtd.5.
 - **Triples-native** — pods, ACL/ACR documents, and the materialized authorization view are
   all ordinary named graphs; "who can read G?" is one SPARQL pattern.

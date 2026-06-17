@@ -255,6 +255,27 @@ structural facts. Pod *content* graphs are **excluded** — otherwise any agent 
 a document could embed `acl:` triples and grant themselves access. Writing `.acl`/`.acr`
 graphs is what `acl:Control` (WAC) / ACR write (ACP) gates.
 
+That excludes pod *content*, but the `.acl`/`.acr`/group graphs are themselves emitted to
+the reasoner **verbatim**, so there is a SECOND smuggling surface: the reasoner's own
+**derivation-internal vocabulary** is the `solidx:` namespace (`solidx:creator`,
+`solidx:owner`, `solidx:appliesToResource`, `solidx:isResource`, `solidx:isWebId`,
+`solidx:provForResource`, …). Those facts are meant to be produced ONLY by the loader (from
+trusted structural metadata + the caller-supplied `AccessProvenance`) or derived by the
+rules. A writer who controls an `.acr` could otherwise place a forged
+`<r> solidx:creator <self>` (cross-resource privilege escalation) or
+`<pol> solidx:appliesToResource <secret>` (policy redirection onto a resource they do not
+control) directly into the control document — and the rules cannot distinguish it from a
+loader-synthesized trusted fact. **[OPUS-4.8] sq-3jtd.5:** the loader therefore HARD-REJECTS
+(`is_reserved_derivation_predicate`) any control-graph or group-document triple whose
+predicate is in `solidx:` space before it reaches the reasoner — the direct analogue of the
+`urn:sparq:` reserved-principal guard (`validate_principal_iri`). The trusted channel for
+creator/owner facts is `AccessProvenance` and **nothing else**. *Until that filter was in
+place this boundary was NOT airtight: the original forgery test only covered a forged fact
+in a **resource** graph (never fed to the reasoner anyway); a forged fact placed inside the
+`.acr` itself escalated. The filter, the `acp:CreatorAgent`/`acp:OwnerAgent` resource-scoping
+AND the `solidx:appliesToResource` redirection class are now closed — see tests
+`acp_forged_{creator,owner,applies_to_resource}_in_acr_document_does_not_grant`.*
+
 ## 3. L2 — the rule sets (`crates/sparq-solid/rules/*.n3`)
 
 Vocabulary: `auth:` = `https://sparq.dev/ns/auth#` (public view), `solidx:` =
@@ -450,8 +471,11 @@ dimension is), and the session expands to ≤12 lookups (the pre-issuer ≤6 dou
 resource's creator / owner. "Who created/owns `<r>`" is structural storage metadata the
 trusted caller (PSS) supplies through the `AccessProvenance` channel and
 `materialize_acp_with` — the loader synthesizes `<r> solidx:creator|owner <w>` facts from
-THAT map ONLY, never from the resource graph (§2.4): a writer cannot self-grant via a forged
-`solidx:creator` triple. The grant is RESOURCE-SCOPED — a resource-tagged
+THAT map ONLY. Neither pod content NOR the `.acr` document itself can supply them: the
+loader hard-rejects any control-graph triple whose predicate is in `solidx:` space (§2.4),
+so a writer cannot self-grant via a forged `solidx:creator` triple smuggled into the `.acr`
+(tests `acp_forged_{creator,owner,applies_to_resource}_in_acr_document_does_not_grant`).
+The grant is RESOURCE-SCOPED — a resource-tagged
 `urn:sparq:provcand?…&res=R` candidate mints per (policy, creator/owner, resource), so the
 creator of `R1` is never granted `R2`; the creator/owner agent composes with the matcher's
 own `acp:client`/`acp:issuer` constraints (minting the same pair/triple principal). With no
