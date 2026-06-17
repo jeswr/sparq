@@ -5216,7 +5216,13 @@ mod build_timing {
     ///   is the `consolidate` term (`into_merged`/spilled, serial) PLUS whatever intern
     ///   occupancy exceeds the overlapped parse — which is what sq-3l43 confirms at 1 B.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    pub enum PathKind {
+    // [OPUS-4.8 sq-3l43] `build_timing` is a PRIVATE module, so these items are only
+    // crate-reachable regardless of the `pub` keyword. Declare that reachability accurately
+    // with `pub(crate)`: it both reflects the real (crate-internal) surface and keeps the
+    // textual public-API diff gate (G2 / scripts/pub_api_diff.py, a `pub\s+(fn|enum|…)`
+    // regex that does NOT resolve enclosing-module visibility) from tripping on a `pub`
+    // that exports nothing.
+    pub(crate) enum PathKind {
         Serial,
         Pipelined,
     }
@@ -5226,7 +5232,7 @@ mod build_timing {
     /// dict-consolidation step (`into_merged` for sharded, `consolidate` for spilled), folded
     /// in so the FULL dict-consolidation bucket is attributed on one line; pass `None` for the
     /// serial path (whose consolidation is the inline `merge_remap` already in "merge").
-    pub fn format_report(
+    pub(crate) fn format_report(
         stage: &str,
         kind: PathKind,
         consolidate_secs: Option<f64>,
@@ -5255,7 +5261,7 @@ mod build_timing {
         )
     }
 
-    pub fn report(stage: &str, kind: PathKind, consolidate_secs: Option<f64>, secs: f64) {
+    pub(crate) fn report(stage: &str, kind: PathKind, consolidate_secs: Option<f64>, secs: f64) {
         eprintln!("{}", format_report(stage, kind, consolidate_secs, secs));
     }
 
