@@ -1868,10 +1868,19 @@ impl Graph {
         let spo: &[[Id; 3]] =
             unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[Id; 3]>(), n) };
         let siblings: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
+        // [OPUS-4.8] sq-vkz7: opt-in compressed build — the sibling sorts write `SPQCPRM1`
+        // straight from their merge tail, and SPO is re-encoded below. SPO itself must stay
+        // RAW until the siblings finish, because they re-sort by mmapping it as `[[Id;3]]`.
+        let compressed = build_compressed_perms();
         let sib_sort = |perm: Perm, sub: &std::path::Path, per: usize| -> Result<(), String> {
             std::fs::create_dir_all(sub).map_err(|e| e.to_string())?;
             let out = dir.join(format!("perm{}.bin", perm as usize));
-            extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+            if compressed {
+                extsort::external_sort_compressed(spo.iter().copied(), perm.order(), &out, sub, per)
+                    .map_err(|e| e.to_string())
+            } else {
+                extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+            }
         };
         // The sibling sorts are independent — run them CONCURRENTLY (each in its own tmp
         // subdir, so run files don't collide), sharing the chunk budget so total resident
@@ -1912,6 +1921,14 @@ impl Graph {
         #[cfg(all(feature = "mmap", feature = "parallel"))]
         if build_timing::enabled() {
             eprintln!("[build-timing] sibling sorts ∥ dict-save done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+        }
+
+        // [OPUS-4.8] sq-vkz7: the siblings are already `SPQCPRM1`; compress SPO LAST, now
+        // that no sibling sort needs it raw. One streaming pass over the raw SPO perm (the
+        // 1/6 we had to keep raw) — never the `open` + `decode_all` of ALL SIX perms the
+        // separate `recompress` would do.
+        if compressed {
+            compress_perm_file_in_place(&spo_path)?;
         }
 
         // Empty files for the unbuilt permutations so `open` finds all six slots.
@@ -2261,10 +2278,18 @@ impl Graph {
         let spo: &[[Id; 3]] =
             unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[Id; 3]>(), n) };
         let siblings: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
+        // [OPUS-4.8] sq-vkz7: opt-in compressed build, same as `build_external_opts` —
+        // siblings write `SPQCPRM1` directly; SPO is re-encoded after they finish.
+        let compressed = build_compressed_perms();
         let sib_sort = |perm: Perm, sub: &std::path::Path, per: usize| -> Result<(), String> {
             std::fs::create_dir_all(sub).map_err(|e| e.to_string())?;
             let out = dir.join(format!("perm{}.bin", perm as usize));
-            extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+            if compressed {
+                extsort::external_sort_compressed(spo.iter().copied(), perm.order(), &out, sub, per)
+                    .map_err(|e| e.to_string())
+            } else {
+                extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+            }
         };
         {
             use rayon::prelude::*;
@@ -2276,6 +2301,10 @@ impl Graph {
         drop(map);
         if build_timing::enabled() {
             eprintln!("[build-timing] sibling sorts done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+        }
+        // SPO compressed last, now that no sibling sort needs it raw (see `build_external_opts`).
+        if compressed {
+            compress_perm_file_in_place(&spo_path)?;
         }
 
         // Empty files for the unbuilt permutations so `open` finds all six slots.
@@ -3910,6 +3939,73 @@ fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
 #[cfg(feature = "parallel")]
 fn default_shards() -> usize {
     (rayon::current_num_threads() * 2).clamp(4, 64)
+}
+
+#[cfg(feature = "mmap")]
+thread_local! {
+    /// [OPUS-4.8] sq-vkz7 — per-thread override of the [`build_compressed_perms`] gate, so
+    /// tests/benchmarks can request the compressed build WITHOUT mutating the process-global
+    /// environment (a `set_var`/`getenv` data race under parallel `cargo test`, exactly the
+    /// hazard the dict-spill `from_lookup` note documents). `None` ⇒ fall back to the env var.
+    /// Read once on the build's orchestrating thread before any rayon fan-out, so a value set
+    /// on the calling thread is observed by the whole build.
+    static BUILD_COMPRESSED_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// [OPUS-4.8] sq-vkz7 — TEST/BENCH hook: run `f` with the [`build_compressed_perms`] gate
+/// forced to `on`, on THIS thread only, restoring the previous override afterwards. Used by
+/// the differential build tests so they never touch the global environment.
+#[cfg(feature = "mmap")]
+#[doc(hidden)]
+pub fn with_build_compressed<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    let prev = BUILD_COMPRESSED_OVERRIDE.with(|c| c.replace(Some(on)));
+    let r = f();
+    BUILD_COMPRESSED_OVERRIDE.with(|c| c.set(prev));
+    r
+}
+
+/// [OPUS-4.8] sq-vkz7 — gate for the external build to emit BLOCK-COMPRESSED (`SPQCPRM1`)
+/// permutation files DIRECTLY from the sort/merge tail, skipping the separate
+/// `open` + `decode_all` + re-encode recompress pass. Off by default (RAW stays the build
+/// default per `research/compressed-perms-verdict.md`); set
+/// `SPARQ_BUILD_COMPRESSED=1|on|true` (or [`with_build_compressed`] in tests) to opt in. The
+/// output is byte-identical to running the raw build then `recompress`.
+#[cfg(feature = "mmap")]
+fn build_compressed_perms() -> bool {
+    if let Some(forced) = BUILD_COMPRESSED_OVERRIDE.with(|c| c.get()) {
+        return forced;
+    }
+    matches!(
+        std::env::var("SPARQ_BUILD_COMPRESSED").as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    )
+}
+
+/// [OPUS-4.8] sq-vkz7 — converts a RAW `[u32;3]` permutation file at `path` to the
+/// BLOCK-COMPRESSED `SPQCPRM1` format IN PLACE, by streaming its rows through
+/// [`compress::CompressedPermWriter`] into a temp file and renaming it over `path`. One
+/// sequential pass over the raw rows (already sorted+deduped on disk) — no `Graph::open`,
+/// no `decode_all`. Used only for the SPO perm, which the build had to keep raw while the
+/// sibling sorts re-read it. An empty raw file (unbuilt perm) is left untouched.
+#[cfg(feature = "mmap")]
+fn compress_perm_file_in_place(path: &std::path::Path) -> Result<(), String> {
+    let (map, n) = extsort::map_perm(path).map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(()); // empty perm stays raw-empty, exactly like the non-compressed build
+    }
+    // SAFETY: the perm file is a whole number of [u32;3] rows written by this build.
+    let rows: &[[Id; 3]] = unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[Id; 3]>(), n) };
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".cmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let mut w = compress::CompressedPermWriter::create(&tmp).map_err(|e| e.to_string())?;
+    for &row in rows {
+        w.push(row).map_err(|e| e.to_string())?;
+    }
+    w.finish(&tmp).map_err(|e| e.to_string())?;
+    drop(map); // release the raw mapping before replacing the file underneath it
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Interns a parsed block's partial dicts into the sharded dict and appends the block's
