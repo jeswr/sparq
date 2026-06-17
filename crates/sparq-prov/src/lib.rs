@@ -25,10 +25,17 @@
 //! derivation. [`derive_construct`] runs the query, times it, and returns a
 //! [`Derivation`] carrying both the derived triples and a PROV-O lineage graph.
 //!
+//! **Reasoner-materialization** lineage is covered under the (non-default)
+//! `reason` feature: [`prov_from_proof`] maps a `sparq-reason` `why()`
+//! [`ProofTree`](sparq_reason::ProofTree) to PROV-O — one `prov:Entity` per
+//! inferred fact, one `prov:Activity` per rule firing, with
+//! `wasGeneratedBy`/`used`/`wasDerivedFrom` edges. Inference *is* derivation, and
+//! the proof tree is a finer-grained provenance (it names the rule and exact
+//! premises for each fact) than a single CONSTRUCT-style activity. See the
+//! [`reason`] module.
+//!
 //! **Deferred** (filed as follow-up beads, see the crate README): SPARQL UPDATE
-//! (`INSERT … WHERE` / `INSERT DATA`) lineage, and reasoner-materialization
-//! lineage (which would reuse `sparq-reason`'s per-triple `why()` proof trees —
-//! already a finer-grained derivation provenance than PROV-O alone).
+//! (`INSERT … WHERE` / `INSERT DATA`) lineage.
 //!
 //! [`prov:Activity`]: https://www.w3.org/TR/prov-o/#Activity
 //! [`prov:Entity`]: https://www.w3.org/TR/prov-o/#Entity
@@ -46,6 +53,13 @@ use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 
 mod datetime;
+// [OPUS-4.8] sq-m3i0: reasoner-materialization lineage — map a sparq-reason
+// `why()` proof tree → PROV-O RDF. Non-default feature, so the sparq-reason dep
+// is pulled only when asked for.
+#[cfg(feature = "reason")]
+pub mod reason;
+#[cfg(feature = "reason")]
+pub use reason::{prov_from_proof, ProvProofConfig};
 
 // ── PROV-O vocabulary IRIs ─────────────────────────────────────────────────
 const PROV: &str = "http://www.w3.org/ns/prov#";
