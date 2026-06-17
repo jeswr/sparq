@@ -30,7 +30,11 @@ oxrdf      = { version = "0.3", features = ["rdf-12"] }  # for Term/NamedNode at
 ```rust
 use sparq_core::Graph;
 
-// `format`: "turtle"|"ttl" | "ntriples"|"n-triples" | "nquads"|"n-quads" | "trig"|"application/trig"
+// `format` (plus media-type aliases): "turtle"|"ttl"|"text/turtle"|"application/turtle" |
+//   "ntriples"|"n-triples"|"nt"|"application/n-triples" | "nquads"|"n-quads"|"nq"|"application/n-quads" |
+//   "trig"|"application/trig". An UNRECOGNISED format string is an `Err` — NOT silently
+//   parsed as Turtle (sq-m2pc). JSON-LD ("jsonld"/"json-ld"/"application/ld+json") needs the
+//   opt-in `jsonld` feature; without it those strings also error rather than mis-parsing.
 let ttl = r#"@prefix ex: <http://ex/> .
 ex:alice ex:knows ex:bob ."#;
 let g = Graph::load_str(ttl, "turtle").expect("parse");
