@@ -606,6 +606,22 @@ async fn sd_omits_basic_federated_query_without_service_feature() {
 }
 
 #[tokio::test]
+async fn sd_omits_prov_lineage_feature_until_node_serves_it() {
+    // [OPUS-4.8] sq-yyy3: `sparq-server` exposes no PROV-O lineage-serving endpoint today, so it
+    // must NOT advertise the sparq PROV-O lineage feature — advertising it would over-promise.
+    // The descriptor SUPPORTS the feature (Capabilities::provenance ⇒ sd:feature <…/prov#lineage>),
+    // but the server keeps the flag false, so the served SD never carries it. This guards the
+    // honesty boundary at the integration level.
+    let base = spawn(true).await;
+    let triples = fetch_sd_triples(&base).await;
+    let features = objects_of(&triples, &format!("{SD}feature"));
+    assert!(
+        !features.contains(&"http://sparq.dev/ns/prov#lineage".to_string()),
+        "server does not serve lineage => PROV-O lineage feature must be absent: {features:?}"
+    );
+}
+
+#[tokio::test]
 async fn sparql_query_still_works_with_descriptors_on() {
     // The SD only intercepts the no-query GET; a real query is unaffected.
     let base = spawn(true).await;
