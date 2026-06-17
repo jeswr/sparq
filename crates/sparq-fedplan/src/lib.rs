@@ -122,6 +122,12 @@ adaptive re-planning (`AdaptiveExecutor`) is behind the further `adaptive-replan
 // denying it keeps the existing build/clippy/test gates untouched while making a future broken
 // crate-doc link a hard `cargo doc` error in EITHER feature state.
 #![deny(rustdoc::broken_intra_doc_links)]
+// [OPUS-4.8] sq-qik4: also lock in the *private*-link invariant. This is a SEPARATE rustdoc lint
+// from `broken_intra_doc_links` (#474) — it fires when a PUBLIC item's doc links to a private
+// item. `from_void_nt`'s doc links to `SourceDescriptorBuilder::authorities_complete`; once the
+// builder is re-exported (above), that target is public, so this deny is clean. Denying it makes a
+// future public→private doc link a hard `cargo doc` error rather than a silently-residual warning.
+#![deny(rustdoc::private_intra_doc_links)]
 #![cfg_attr(not(feature = "fedplan"), allow(dead_code, unused_imports))]
 
 // [OPUS-4.8] sq-7s4z: live adaptive mid-execution re-planning. Gated behind the
@@ -140,9 +146,16 @@ mod selection;
 #[cfg(feature = "fedplan")]
 mod stream;
 
+// [OPUS-4.8] sq-qik4: re-export `SourceDescriptorBuilder` too. It is the return type of the
+// PUBLIC `SourceDescriptor::builder` and the link target of `from_void_nt`'s doc, so leaving it
+// un-exported (a) leaked a public method returning an unnameable type and (b) tripped the residual
+// `rustdoc::private_intra_doc_links` warning (the link resolved to a `pub` item reachable only
+// through the private `descriptor` module). Re-exporting it closes both: the link now points at a
+// genuinely public item. Separate from the #474 `broken_intra_doc_links` gate (a method-doc lint).
 #[cfg(feature = "fedplan")]
 pub use descriptor::{
-    CharSet, ClassPartition, PredPartition, SourceDescriptor, SourceId, CS_NS, VOID_NS,
+    CharSet, ClassPartition, PredPartition, SourceDescriptor, SourceDescriptorBuilder, SourceId,
+    CS_NS, VOID_NS,
 };
 #[cfg(feature = "fedplan")]
 pub use pattern::{Bgp, Term, TriplePattern, Var};

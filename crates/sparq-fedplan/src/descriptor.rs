@@ -494,6 +494,20 @@ fn is_subset(a: &[String], b: &[String]) -> bool {
 mod tests {
     use super::*;
 
+    // [OPUS-4.8] sq-qik4: `SourceDescriptorBuilder` is the return type of the PUBLIC
+    // `SourceDescriptor::builder` and the link target of `from_void_nt`'s doc, so it must be a
+    // nameable crate-level public item. Referencing it through `crate::` (NOT `super::`) makes a
+    // future drop of the re-export a compile error here — not just a residual `cargo doc` warning.
+    #[test]
+    fn builder_type_is_publicly_nameable() {
+        let b: crate::SourceDescriptorBuilder =
+            SourceDescriptor::builder(SourceId::new("http://s/"));
+        // The builder method named in `from_void_nt`'s doc opts the descriptor into complete
+        // authorities; the built descriptor must then report `authorities_complete() == true`.
+        let d = b.authorities_complete().build();
+        assert!(d.authorities_complete());
+    }
+
     #[test]
     fn authority_extraction() {
         assert_eq!(

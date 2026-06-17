@@ -35,7 +35,9 @@ depends on `sparq-fedplan` pays nothing for it unless the feature is enabled.
 Either programmatically via the builder, or by parsing the served N-Triples document.
 
 ```rust
-use sparq_fedplan::{SourceDescriptor, SourceId, PredPartition, ClassPartition};
+// `SourceDescriptorBuilder` is the (public, nameable) return type of `.builder(..)`; you only
+// need to import it if you hold the builder in a `let` rather than chaining straight to `.build()`.
+use sparq_fedplan::{SourceDescriptor, SourceDescriptorBuilder, SourceId, PredPartition, ClassPartition};
 
 // Programmatic (VoID property/class partitions).
 let src = SourceDescriptor::builder(SourceId::new("https://a.example/sparql"))
