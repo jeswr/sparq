@@ -63,23 +63,32 @@
 //! the statistically-masked `c = sum + r`, and the 1-bit verdict, and the latter two
 //! only after their MAC-checks pass.
 //!
+//! ## The range-proof zero-tests are MAC-checked too (sq-m4zi / sq-e7ma)
+//!
+//! The in-protocol **range proof** (`sum ∈ [0, 2^`[`crate::compare::DECOMP_VALUE_BITS`]`)`,
+//! sq-nx0s) — clause (1) recompose `sum == Σ b_k·2^k` and clause (2) high-part
+//! `Σ_{k≥value_bits} b_k·2^k == 0`, each a secret zero-test of a `v·r` masked product
+//! — was, on `sq-6fv7`, still reused VERBATIM from the SEMI-HONEST
+//! [`crate::compare::verify_sum_in_range`]: a tampered open of either `v·r` product
+//! (a wrong re-sharing producing a consistent codeword of the wrong value) could flip
+//! "was it zero?" and let an out-of-range / field-wrapping sum masquerade as in-range,
+//! defeating the fail-closed guard. [`auth_verify_sum_in_range`] closes that residual:
+//! the range proof now runs over the AUTHENTICATED sum and bits, the recompose-diff and
+//! high-part are FREE authenticated linear combinations, and each zero-test multiplies
+//! by a fresh nonzero AUTHENTICATED mask via [`crate::shamir::MacSession::auth_mul`] and
+//! **MAC-checks the product `[[v·r]]` before its open is read** — so a tampered zero-test
+//! open aborts with [`MpcError::MacCheckFailed`] like the other three.
+//!
 //! ## Residual (honest scope statement)
 //!
 //! The masked open statistically hides `sum` (mask gap `κ = `
 //! [`crate::compare::DECOMP_STAT_SECURITY_BITS`], the `p = 2^61−1` field is too small
-//! for a perfect mask above the value width) — unchanged from the semi-honest path.
-//! The in-protocol **range proof** (`sum ∈ [0, 2^`[`crate::compare::DECOMP_VALUE_BITS`]`)`,
-//! sq-nx0s) is reused VERBATIM from [`crate::compare`] and still opens its two
-//! zero-test mask products (`v·r`) semi-honestly: those reveal only "was it zero?"
-//! and are a SEPARATE surface from the three integrity opens this bead names — routing
-//! the range-proof zero-tests through the MAC-check is tracked as its own follow-up
-//! bead `sq-e7ma` (`sq-6fv7` names exactly the `a²` / `c=sum+r` / `verdict` opens). The
+//! for a perfect mask above the value width) — unchanged from the semi-honest path. The
 //! dishonest-majority SPDZ regime (route (b) / sq-j5ok) is NOT entered. `[OPUS-4.8]`
 
 use crate::authenticated::{auth_add, auth_add_constant, auth_scale, auth_sub, AuthenticatedShare};
 use crate::compare::{
-    check_party_count, verify_sum_in_range, DECOMP_MASK_BITS, DECOMP_VALUE_BITS,
-    DECOMP_VALUE_MAX_EXCLUSIVE,
+    check_party_count, DECOMP_MASK_BITS, DECOMP_VALUE_BITS, DECOMP_VALUE_MAX_EXCLUSIVE,
 };
 use crate::field::Fp;
 use crate::partial::{HolderId, MpcError, PartialResult};
@@ -94,9 +103,11 @@ use crate::shamir::{MacSession, ShamirBackend, Share};
 /// `sum_shares` is the degree-`t` sharing of the cumulative aggregate;
 /// `public_threshold` is the public bar (e.g. £100k). `public_threshold` must be
 /// `< 2^`[`DECOMP_VALUE_BITS`] (fail-closed up front); the SUM is range-checked
-/// in-protocol after its bit-decomposition (reusing the sq-nx0s range proof). On any
-/// tampered open the function ABORTS with [`MpcError::MacCheckFailed`] (or the
-/// fail-closed non-boolean-verdict guard) rather than returning a wrong verdict.
+/// in-protocol after its bit-decomposition by the MAC-checked sq-nx0s range proof
+/// ([`auth_verify_sum_in_range`], whose zero-test `v·r` opens are MAC-checked too —
+/// sq-m4zi/sq-e7ma). On any tampered open the function ABORTS with
+/// [`MpcError::MacCheckFailed`] (or the fail-closed non-boolean-verdict guard) rather
+/// than returning a wrong verdict.
 ///
 /// Honest-majority, **malicious-with-abort** (design §3). `[OPUS-4.8]`
 pub fn malicious_disclose_threshold_verdict(
@@ -148,13 +159,13 @@ fn malicious_threshold_over_sum(
     let (auth_sum_bits, _auth_r_bits) =
         auth_masked_bit_decompose(&mut session, backend, &auth_sum, &key)?;
 
-    // 3. IN-PROTOCOL range proof of the secret-shared sum (reuse the sq-nx0s proof
-    //    over the recovered bits' VALUE sharings — see the module residual note).
-    let value_bits: Vec<Vec<Share>> = auth_sum_bits
-        .iter()
-        .map(|b| b.value_shares().to_vec())
-        .collect();
-    verify_sum_in_range(session.dealer_mut(), sum_shares, &value_bits)?;
+    // 3. IN-PROTOCOL range proof of the secret-shared sum, MAC-CHECKED end to end
+    //    (sq-m4zi/sq-e7ma): the two zero-test `v·r` opens are now routed through the
+    //    §2.5 IT-MAC check over the AUTHENTICATED sum and bits, so a tampered zero-test
+    //    open — which would otherwise let an out-of-range sum masquerade as in-range,
+    //    bypassing the fail-closed guard — aborts with `MpcError::MacCheckFailed`
+    //    rather than letting the verdict be derived from a corrupted decomposition.
+    auth_verify_sum_in_range(&mut session, backend, &auth_sum, &auth_sum_bits)?;
 
     // 4. Authenticated MSB-first comparison of the recovered sum bits against the
     //    PUBLIC threshold; the verdict is MAC-carried.
@@ -234,6 +245,111 @@ fn auth_masked_bit_decompose(
         out.push(a_k);
     }
     Ok((out, r_bits))
+}
+
+/// [OPUS-4.8] sq-m4zi/sq-e7ma — **MAC-checked in-protocol range proof of the
+/// secret-shared sum**, the malicious-with-abort twin of the semi-honest
+/// [`crate::compare::verify_sum_in_range`] (sq-nx0s). Given the AUTHENTICATED sum
+/// `[[sum]]` and the `L = `[`DECOMP_MASK_BITS`] AUTHENTICATED bits `[[b_0..b_{L-1}]]`
+/// that [`auth_masked_bit_decompose`] recovered, it PROVES — without reconstructing the
+/// sum — that `sum ∈ [0, 2^`[`DECOMP_VALUE_BITS`]`)` via the SAME two secret zero-tests
+/// the semi-honest proof runs, but now each zero-test's `v·r` open is MAC-checked:
+///
+/// 1. **recompose clause** (no field wrap / fits `L` bits): `sum − Σ_{k<L} b_k·2^k == 0`;
+/// 2. **magnitude clause** (below the supported width): the high part
+///    `Σ_{k≥`[`DECOMP_VALUE_BITS`]`} b_k·2^k == 0`.
+///
+/// Both `[[recompose_diff]]` and `[[high_part]]` are FREE authenticated linear
+/// combinations of `[[sum]]` and the `[[b_k]]` (no `auth_mul`); each is then fed to the
+/// MAC-checked zero-test [`auth_secret_is_zero`]. On violation it returns a fail-closed
+/// [`MpcError::Protocol`] (an out-of-range / wrapping sum), and on a TAMPERED zero-test
+/// open [`MpcError::MacCheckFailed`] — so a deviating party can no longer flip
+/// "was it zero?" to smuggle an out-of-range sum past the guard. Honest-majority,
+/// malicious-with-abort. `[OPUS-4.8]`
+fn auth_verify_sum_in_range(
+    session: &mut MacSession,
+    backend: &ShamirBackend,
+    auth_sum: &AuthenticatedShare,
+    auth_sum_bits: &[AuthenticatedShare],
+) -> Result<(), MpcError> {
+    // Recompose [[Σ b_k·2^k]] over ALL L bits and SEPARATELY the high part (bits ≥
+    // DECOMP_VALUE_BITS). Both are FREE authenticated linear combinations of the bit
+    // sharings — no auth_mul — so the recomposition stays MAC-carried.
+    let mut recomposed = session.auth_const_sharing(Fp::zero());
+    let mut high_part = session.auth_const_sharing(Fp::zero());
+    for (k, bit) in auth_sum_bits.iter().enumerate() {
+        let weighted = auth_scale(bit, Fp::new(1u64 << k));
+        recomposed = auth_add(&recomposed, &weighted)?;
+        if k >= DECOMP_VALUE_BITS {
+            high_part = auth_add(&high_part, &weighted)?;
+        }
+    }
+
+    // Clause (1): no field wrap / fits L bits ⇔ [[sum − Σ b_k 2^k]] == 0.
+    let recompose_diff = auth_sub(auth_sum, &recomposed)?;
+    if !auth_secret_is_zero(session, backend, &recompose_diff)? {
+        return Err(MpcError::Protocol(format!(
+            "malicious_disclose_threshold_verdict: in-protocol range proof FAILED — the \
+             secret-shared sum does not equal the bit-composition of its recovered \
+             {DECOMP_MASK_BITS} bits (the masked open `sum + r` wrapped the field modulus \
+             p = 2^61-1, or the sum has content above bit {DECOMP_MASK_BITS}). The verdict would \
+             be derived from a corrupted decomposition, so it is REJECTED fail-closed rather than \
+             returned wrong. The sum must be < 2^{DECOMP_VALUE_BITS} = {DECOMP_VALUE_MAX_EXCLUSIVE}."
+        )));
+    }
+
+    // Clause (2): below the supported magnitude ⇔ all bits ≥ DECOMP_VALUE_BITS are
+    // zero ⇔ [[high_part]] == 0.
+    if !auth_secret_is_zero(session, backend, &high_part)? {
+        return Err(MpcError::Protocol(format!(
+            "malicious_disclose_threshold_verdict: in-protocol range proof FAILED — the \
+             secret-shared sum is >= 2^{DECOMP_VALUE_BITS} = {DECOMP_VALUE_MAX_EXCLUSIVE} (a bit \
+             at or above position {DECOMP_VALUE_BITS} is set). That exceeds the statistically-safe \
+             magnitude the in-MPC masked bit-decomposition supports, so the verdict is REJECTED \
+             fail-closed rather than returned wrong."
+        )));
+    }
+    Ok(())
+}
+
+/// [OPUS-4.8] sq-m4zi/sq-e7ma — **MAC-checked secret zero-test**: returns `true` iff the
+/// AUTHENTICATED `[[v]]` reconstructs to `0`, WITHOUT reconstructing `v`, the
+/// malicious-with-abort twin of [`crate::compare`] `secret_is_zero` (sq-nx0s). Draw a
+/// fresh NONZERO authenticated mask `[[r]]`, form `[[m]] = [[v]]·[[r]]` via
+/// [`MacSession::auth_mul`] (which carries the sound MAC `[α·m]` — design §2.4), then
+/// **MAC-check `[[m]]` BEFORE its value open is read** ([`MacSession::mac_check`], §2.5),
+/// and test `m == 0`.
+///
+/// Soundness of the disclosure (unchanged from the semi-honest twin): if `v == 0` then
+/// `m == 0` regardless of `r`; if `v != 0` then `v·r` is a UNIFORM NONZERO field element
+/// (nonzero times uniform nonzero), so the open of `m` reveals ONLY the single bit
+/// "was `v` zero?" — nothing about `v`'s magnitude. The nonzero mask is load-bearing: a
+/// zero mask would open `m = 0` even for `v != 0` (a false "in-range"). The MAC-check is
+/// the new integrity layer: a tampered open of `m` (a wrong re-sharing producing a
+/// consistent degree-`t` codeword of a DIFFERENT value, undetectable by Reed–Solomon at
+/// `n = 2t+1`) makes `σ ≠ 0` and aborts with [`MpcError::MacCheckFailed`], so a deviating
+/// party cannot flip the zero-test result. Honest-majority, malicious-with-abort.
+/// `[OPUS-4.8]`
+fn auth_secret_is_zero(
+    session: &mut MacSession,
+    backend: &ShamirBackend,
+    v: &AuthenticatedShare,
+) -> Result<bool, MpcError> {
+    // Fresh NONZERO authenticated mask [[r]]. Nonzero is load-bearing: m = v·0 = 0
+    // would falsely report v == 0. `authenticated_share` mints [[r]] = ([r], [α·r]).
+    let mask_value = session.draw_nonzero_fp();
+    let auth_mask = session.authenticated_share(mask_value);
+    // [[m]] = [[v]]·[[r]] — a MAC-carrying multiplication (degree-t value product with
+    // the SOUND independent-reduce MAC, design §2.4): a tampered value reduce makes
+    // σ ≠ 0 at the check below.
+    let auth_m = session.auth_mul(v, &auth_mask)?;
+    // MAC-CHECK [[m]] BEFORE its value is opened — the §2.5 batched check is the sole
+    // detector at the minimal n = 2t+1 (soundness ≈ 1 − 2^-61 from the secret α).
+    session.mac_check(std::slice::from_ref(&auth_m))?;
+    // Open the (MAC-verified) product and test m == 0 ⇔ v == 0. v itself is never
+    // reconstructed; m is a uniform nonzero when v != 0 (leaks only "was it zero?").
+    let m = backend.reconstruct(auth_m.value_shares())?;
+    Ok(m == Fp::zero())
 }
 
 /// `[[a ∨ b]]` for authenticated 0/1 sharings: `a + b − a·b`. One [`MacSession::auth_mul`]
@@ -357,13 +473,17 @@ fn open_auth_verdict(
 
 #[cfg(test)]
 mod tests {
-    //! sq-6fv7 acceptance suite. The load-bearing ones:
+    //! sq-6fv7 + sq-m4zi/sq-e7ma acceptance suite. The load-bearing ones:
     //! - `differential_*`: across many (sum, threshold) pairs incl. edges, the
     //!   MAC-checked verdict equals the plaintext `sum > threshold`.
     //! - `matches_semi_honest_disclose`: the malicious path agrees with the
     //!   semi-honest [`crate::compare::disclose_threshold_verdict`] verdict.
     //! - `tamper_in_*_is_caught`: a tampered open on each of the three named opens
-    //!   (`a²`, `c=sum+r`, `verdict`) aborts fail-closed.
+    //!   (`a²`, `c=sum+r`, `verdict`) AND on the range-proof zero-test product
+    //!   (`tamper_in_the_zero_test_open_is_caught`, sq-m4zi) aborts fail-closed.
+    //! - `auth_secret_is_zero_matches_plaintext` / `auth_range_proof_*`: the
+    //!   MAC-checked zero-test and range proof accept the in-range / zero cases and
+    //!   reject the out-of-range / nonzero ones, agreeing with the plaintext.
     //! - `*_fails_closed`: out-of-range threshold / sum and n<2t+1 are descriptive
     //!   errors, never a silent wrong verdict.
     use super::*;
@@ -571,6 +691,97 @@ mod tests {
             malicious_threshold_over_sum(&backend, &big, 100_000),
             Err(MpcError::Protocol(_))
         ));
+    }
+
+    // ---- sq-m4zi/sq-e7ma: the MAC-checked range-proof zero-tests -----------------
+
+    /// The MAC-checked zero-test [`auth_secret_is_zero`] agrees with the plaintext
+    /// `v == 0` over a spread of values, several honest-majority party counts — and
+    /// never reconstructs `v` (only the masked `m = v·r` is opened inside).
+    #[test]
+    fn auth_secret_is_zero_matches_plaintext() {
+        for n in [3usize, 5, 7] {
+            for &v in &[0u64, 1, 2, 42, 100_000, DECOMP_VALUE_MAX_EXCLUSIVE - 1] {
+                let backend = ShamirBackend::new_seeded(n, v.wrapping_add(n as u64)).unwrap();
+                let mut dealer = backend.dealer();
+                let mut session = dealer.new_mac_session();
+                let auth_v = session.authenticate_existing(&backend.dealer().share(Fp::new(v)));
+                let auth_v = auth_v.unwrap();
+                let is_zero = auth_secret_is_zero(&mut session, &backend, &auth_v).unwrap();
+                assert_eq!(
+                    is_zero,
+                    v == 0,
+                    "n={n}: MAC-checked zero-test of v={v} must match plaintext v==0"
+                );
+            }
+        }
+    }
+
+    /// ACCEPTANCE (range-proof open, sq-m4zi): a tamper on the zero-test's `[[v·r]]`
+    /// product open (the canonical Hole-2 consistent-codeword-of-the-wrong-value
+    /// deviation that RS cannot detect at n=2t+1) is caught by the MAC-check — so a
+    /// deviating party cannot flip "was it zero?" to smuggle an out-of-range sum past
+    /// the fail-closed guard.
+    #[test]
+    fn tamper_in_the_zero_test_open_is_caught() {
+        let backend = ShamirBackend::new_seeded(5, 0x2E20).unwrap();
+        let mut dealer = backend.dealer();
+        let mut session = dealer.new_mac_session();
+        // A nonzero v whose zero-test would HONESTLY report false; build [[v·r]]
+        // exactly as the zero-test does, then tamper its value before the open.
+        let auth_v = session
+            .authenticate_existing(&backend.dealer().share(Fp::new(7)))
+            .unwrap();
+        let auth_mask = session.authenticated_share(Fp::new(3));
+        let auth_m = session.auth_mul(&auth_v, &auth_mask).unwrap();
+        // Honest m passes its MAC-check (the check the zero-test runs before the open).
+        session.mac_check(std::slice::from_ref(&auth_m)).unwrap();
+        // A tampered m open is caught — the zero-test can no longer be flipped.
+        let tampered = tamper_value(&auth_m);
+        assert!(
+            matches!(
+                session.mac_check(std::slice::from_ref(&tampered)),
+                Err(MpcError::MacCheckFailed { .. })
+            ),
+            "a tampered zero-test product open must make the MAC-check abort"
+        );
+    }
+
+    /// The MAC-checked range proof [`auth_verify_sum_in_range`] ACCEPTS in-range sums
+    /// (incl. edges) and REJECTS out-of-range / field-wrapping sums fail-closed —
+    /// agreeing with the semi-honest [`crate::compare::verify_sum_in_range`] verdict on
+    /// the same recovered bits.
+    #[test]
+    fn auth_range_proof_accepts_in_range_and_rejects_out_of_range() {
+        // In-range sums (incl. the top of the supported width) must be accepted by the
+        // full malicious path — the range proof passes, so a verdict is returned.
+        for &sum in &[0u64, 1, 100_000, DECOMP_VALUE_MAX_EXCLUSIVE - 1] {
+            let backend = ShamirBackend::new_seeded(5, sum.wrapping_add(11)).unwrap();
+            let shares = share_sum(&backend, sum);
+            assert!(
+                malicious_threshold_over_sum(&backend, &shares, 100_000).is_ok(),
+                "in-range sum {sum} must pass the MAC-checked range proof"
+            );
+        }
+        // Out-of-range (>= 2^DECOMP_VALUE_BITS) sums must be REJECTED fail-closed by the
+        // MAC-checked range proof's magnitude clause (a descriptive Protocol error,
+        // never a silent wrong verdict).
+        for &sum in &[
+            DECOMP_VALUE_MAX_EXCLUSIVE,
+            DECOMP_VALUE_MAX_EXCLUSIVE + 1,
+            DECOMP_VALUE_MAX_EXCLUSIVE + 12345,
+        ] {
+            let backend =
+                ShamirBackend::new_seeded(5, sum.wrapping_mul(7).wrapping_add(3)).unwrap();
+            let shares = share_sum(&backend, sum);
+            assert!(
+                matches!(
+                    malicious_threshold_over_sum(&backend, &shares, 100_000),
+                    Err(MpcError::Protocol(_))
+                ),
+                "out-of-range sum {sum} must be rejected fail-closed by the range proof"
+            );
+        }
     }
 
     // ---- tamper helper (test-only) ---------------------------------------------

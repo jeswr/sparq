@@ -986,14 +986,11 @@ impl MacSession<'_> {
         self.dealer.draw_nonzero_fp()
     }
 
-    /// [OPUS-4.8] sq-6fv7 — re-borrow the session's dealer, so an in-crate sub-protocol
-    /// that needs `&mut ShamirDealer` (e.g. the reused sq-nx0s range proof
-    /// [`crate::compare::verify_sum_in_range`], which draws only its own zero-test
-    /// masks and never touches the MAC key `[α]`) can run on the SAME dealer / RNG
-    /// stream as the rest of the session. `pub(crate)` — internal only. `[OPUS-4.8]`
-    pub(crate) fn dealer_mut(&mut self) -> &mut ShamirDealer {
-        self.dealer
-    }
+    // [OPUS-4.8] sq-m4zi/sq-e7ma — `dealer_mut()` (sq-6fv7) was removed: the malicious
+    // disclose path's range proof no longer borrows the bare dealer to run the
+    // SEMI-HONEST `verify_sum_in_range`. It now runs the MAC-checked
+    // `auth_disclose::auth_verify_sum_in_range` over AUTHENTICATED shares, which uses
+    // only the existing session API (`auth_mul` / `mac_check` / `authenticated_share`).
 
     /// [OPUS-4.8] sq-ka8m / sq-km34.4 — **the batched random-challenge IT-MAC check**
     /// (design §2.5), run ONCE just before any value on an authenticated path is
