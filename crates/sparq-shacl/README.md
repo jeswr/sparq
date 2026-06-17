@@ -110,22 +110,44 @@ need not be present. The component's IRI is the
 `sparql/pre-binding` semantics (rejecting variable re-binding, `$shapesGraph`) —
 see the open beads for this crate (`bd list -l area:sparq-shacl`).
 
-**SHACL Advanced Features rules (`sh:rule`, SHACL-AF) — opt-in feature
-`shacl-af`:** an *inference* step (it produces triples; it is not part of
-`validate(..)`). A shape's `sh:rule` values infer triples for that shape's focus
-nodes. Two rule types: `sh:TripleRule` (`sh:subject`/`sh:predicate`/`sh:object`
-node expressions — the inferred triples are the cartesian product of the three
-evaluated sets; node expressions supported: `sh:this`, a constant IRI/literal,
-and a path node expression `[ sh:path P ]` over any SHACL property path) and
-`sh:SPARQLRule` (an `sh:construct` CONSTRUCT run per focus node with `$this`
-pre-bound, reusing the `sh:sparql` engine path; honours `sh:prefixes`). Rules
-honour `sh:condition` (fire only for focus nodes conforming to every condition
-shape), `sh:order` (ascending; a rule sees earlier groups' inferences) and
-`sh:deactivated`. The schedule is **iterated to a fixpoint** bounded by
+**SHACL Advanced Features rules (`sh:rule` + `sh:values`, SHACL-AF) — opt-in
+feature `shacl-af`:** an *inference* step (it produces triples; it is not part of
+`validate(..)`). A shape's rules infer triples for that shape's focus nodes.
+Three rule types:
+
+- `sh:TripleRule` — `sh:subject`/`sh:predicate`/`sh:object` node expressions; the
+  inferred triples are the cartesian product of the three evaluated sets.
+- `sh:SPARQLRule` — an `sh:construct` CONSTRUCT run per focus node with `$this`
+  pre-bound, reusing the `sh:sparql` engine path; honours `sh:prefixes`.
+- `sh:values` value rule — a property shape with a single-predicate `sh:path` and
+  an `sh:values` node expression infers `(focus, predicate, v)` for every `v` in
+  the evaluated set (the canonical "derive these values" rule). A value rule on a
+  `sh:property` child of a targeted node shape fires for the parent's focus nodes.
+
+**Node-expression algebra** (the operand of `sh:subject`/`sh:predicate`/`sh:object`
+and `sh:values`): the focus node `sh:this`, a constant IRI/literal, a path
+expression `[ sh:path P ; sh:nodes N? ]` (over any SHACL property path; the
+optional `sh:nodes` is itself a node expression giving the start nodes, defaulting
+to `sh:this`), a filter-shape expression `[ sh:filterShape S ; sh:nodes N ]` (the
+nodes of `N` that conform to shape `S`), `[ sh:intersection ( … ) ]` and
+`[ sh:union ( … ) ]`. These nest arbitrarily. The SHACL *function* expression form
+(a SHACL-function IRI applied to an argument list) is **not** supported — it needs
+a function registry the crate does not carry; such an expression is dropped
+(lenient), so a rule that uses one infers nothing rather than misfiring.
+
+Rules honour `sh:condition` (fire only for focus nodes conforming to every
+condition shape), `sh:order` (ascending; a rule sees earlier groups' inferences)
+and `sh:deactivated`. The schedule is **iterated to a fixpoint** bounded by
 `rules::MAX_ITERATIONS` (100; `Inference::capped` flags a non-terminating set).
 Entry points: `apply_rules(data, shapes) -> Inference`, `apply_rules_with_model`,
-and `expand(data, shapes) -> Graph` (data ∪ inferred; the input is never
-mutated). With the feature off, none of this is compiled in.
+`expand(data, shapes) -> Graph` (data ∪ inferred; the input is never mutated),
+plus the node-expression seam `eval_node_expression(data, shapes, expr, focus) ->
+Option<Vec<Term>>` and the conformance primitive `conforms(data, shapes,
+shape_node)` (a reusable `ConformanceCheck`). With the feature off, none of this is
+compiled in. A gated W3C conformance harness
+([`tests/w3c_node_expr.rs`](tests/w3c_node_expr.rs)) drives the `sht:EvalNodeExpr`
+suite for the implemented forms (it self-skips when the suite is not fetched and
+records unsupported function expressions as SKIP, not FAIL).
 
 Targets: `sh:targetNode`, `sh:targetClass` (with `rdfs:subClassOf*` closure),
 implicit class targets (a shape that is itself an `rdfs:Class`),

@@ -55,9 +55,12 @@ pub use model::{Component, Shape, ShapesModel, Target};
 pub use path::Path;
 pub use report::{ValidationReport, ValidationResult};
 
-// [OPUS-4.8] SHACL-AF rules public surface (feature `shacl-af`).
+// [OPUS-4.8] SHACL-AF rules + node-expression public surface (feature `shacl-af`).
 #[cfg(feature = "shacl-af")]
-pub use rules::{apply_rules, apply_rules_with_model, expand, Inference};
+pub use rules::{
+    apply_rules, apply_rules_with_model, conforms, eval_node_expression, expand, ConformanceCheck,
+    Inference,
+};
 
 use oxrdf::Triple;
 use sparq_core::Graph;
