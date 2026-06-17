@@ -202,6 +202,29 @@ jobs:
       - name: Self-test the privacy-claims gate (both directions)
         run: bash scripts/tests/test_privacy_claims.sh
 
+  # [OPUS-4.8] sq-6uc7: HARD self-tests for the shared CI disk-reclaim script
+  # (scripts/ci-free-disk.sh). #462 folded `/usr/local/share/boost` + the env-named
+  # `$AGENT_TOOLSDIRECTORY` toolcache into that one script (instead of a 2nd inline
+  # step). The toolcache is UNSET on a non-GitHub host and the script runs `set -u`,
+  # so the load-bearing invariants are: (1) an unset/empty `$AGENT_TOOLSDIRECTORY`
+  # must NOT trip `set -u`; (2) an absent path must never red the step; (3) the
+  # reclaim still FIRES when the path is present. The harness is hermetic (PATH-shadows
+  # sudo/df/docker — touches no real system path) and runs unconditionally on every PR
+  # (the script gates `build-archive` + every heavy lane, which are themselves
+  # Rust-gated, so it is validated HERE rather than only when Rust changes). HARD (no
+  # "advisory"/"informational" in the name) so ci-summary gates on it.
+  ci-scripts:
+    name: ci-scripts (disk-reclaim self-test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: shellcheck ci-free-disk.sh + its self-test
+        run: shellcheck scripts/ci-free-disk.sh scripts/tests/test_ci_free_disk.sh
+      - name: Self-test ci-free-disk.sh (set -u safety + existence guards + #462 fold)
+        run: bash scripts/tests/test_ci_free_disk.sh
+
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
     name: markdownlint-advisory (whole repo)

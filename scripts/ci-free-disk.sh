@@ -45,6 +45,7 @@ PURGE_PATHS=(
   /opt/hostedtoolcache/CodeQL # bundled CodeQL pack (we run CodeQL in codeql.yml, not here)
   /usr/local/share/powershell # PowerShell
   /usr/share/swift            # Swift toolchain
+  /usr/local/share/boost      # bundled Boost C++ headers/libs (folded from #462)
 )
 
 for p in "${PURGE_PATHS[@]}"; do
@@ -53,6 +54,22 @@ for p in "${PURGE_PATHS[@]}"; do
     sudo rm -rf "$p" || true
   fi
 done
+
+# [OPUS-4.8] sq-6uc7: the hosted-toolcache root (env-named, NOT a fixed path) —
+# folded from the closed #462. It holds preinstalled language runtimes
+# (Node/Python/Go/…) keyed by version that this Rust workspace never uses; on a
+# hosted image it is several GB. Handled SEPARATELY from PURGE_PATHS because:
+#   • it is an ENV VAR that is unset on a non-GitHub host, and this script runs
+#     `set -u` — so we expand it as `${AGENT_TOOLSDIRECTORY:-}` and skip when empty
+#     rather than abort;
+#   • every lane runs THIS reclaim BEFORE its `dtolnay/rust-toolchain` install, and
+#     that install uses rustup under $HOME (~/.rustup, ~/.cargo) — NOT the
+#     toolcache — so purging the toolcache here cannot remove a toolchain CI needs.
+TOOLCACHE="${AGENT_TOOLSDIRECTORY:-}"
+if [ -n "$TOOLCACHE" ] && [ -e "$TOOLCACHE" ]; then
+  echo "removing $TOOLCACHE (hosted toolcache)"
+  sudo rm -rf "$TOOLCACHE" || true
+fi
 
 # Reclaim the Docker image cache (the hosted image preloads several GB of images
 # this lane does not use). Best-effort: `docker` may be absent in some contexts.
