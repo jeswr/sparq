@@ -30,7 +30,13 @@ since (each behind the same default-OFF `fedclient` feature):
 - **Phase 2 — source-type abstraction + Endpoint adapter** (`sq-rsxf`): the `source` module
   — `SourceType` (`Endpoint | BrTpf | Tpf | Local`), the `FederatedSource` trait, the
   fine-grained `Capability` descriptor, and the real `Endpoint` SRJ adapter over a
-  `Transport` seam behind a **default-deny SSRF egress guard**.
+  `Transport` seam behind a **default-deny SSRF egress guard**. The native
+  `HttpTransport` (`sq-25xk`, native-only, ureq) installs the egress policy as ureq's own
+  `Resolver`, so the socket dials only the resolved-and-vetted IP — **closing the
+  DNS-rebinding re-resolve TOCTOU window** (the same `.resolver(...)` discipline as the
+  engine's SERVICE transport). Build it via `Endpoint::native` / `Endpoint::with_guard_native`
+  (the guard's allowlist is bridged into the resolver, so the pre-flight check and the socket
+  resolution share one allowlist).
 - **Phase 3 — planner bridge + materialised single-source interpreter** (`sq-j27p`): the
   `planner` module's `SourceResolver` (index → adapter resolution) + `lower_leaf` per-leaf
   lowering, and the `operators` module's `materialize_single_source` interpreter +
