@@ -2,11 +2,15 @@
 
 > Operational guide. Researched & **empirically verified on this box** (Linux aarch64, Node 20, npm 10, Go absent) on 2026-06-13. All commands below were run against `@beads/bd` v1.0.5. Forward-looking notes tagged `[OPUS-4.8]`.
 
+<!-- [OPUS-4.8] sq-knl8 (2026-06-17): total-crate count synced 25 → 31 (and the inline
+     `area:<crate>` list refreshed) to track the current workspace (`ls crates/`). This is
+     the TOTAL count only; the unsafe-posture forbid/unsafe split is tracked separately. -->
+
 ## TL;DR (read this)
 
 - **Use beads.** It is the right tool for *this* repo: a dependency graph of issues stored as git-committed JSONL, with `bd ready` computing the unblocked work-set offline in ms. That maps directly onto our merge-queue + roborev-backlog reality where "task X is blocked until PR Y merges" is the dominant relationship — something flat TODO.md and the agent's built-in todo tool cannot express.
 - **Install is trivial here (no Go needed):** the npm package ships a postinstall that downloads the prebuilt Go binary for `linux/arm64`. Verified working: `npx @beads/bd@latest version` → `bd version 1.0.5`. See "Install".
-- **How to adopt:** one `.beads/` DB at repo root, prefix `sq`. Model the 25 crates + cross-cutting concerns as **labels** (`area:sparq-core`, `area:zk`, …), big initiatives (MPC, ZK build-out, serve-wave) as **epics** (`-t epic` + `parent-child`), the merge queue as **`blocks` edges** ("re-run roborev job" `blocked` by "PR merges"), and roborev findings as tasks linked **`discovered-from`** their source. Commit `.beads/issues.jsonl`; the Dolt dir is gitignored.
+- **How to adopt:** one `.beads/` DB at repo root, prefix `sq`. Model the 31 crates + cross-cutting concerns as **labels** (`area:sparq-core`, `area:zk`, …), big initiatives (MPC, ZK build-out, serve-wave) as **epics** (`-t epic` + `parent-child`), the merge queue as **`blocks` edges** ("re-run roborev job" `blocked` by "PR merges"), and roborev findings as tasks linked **`discovered-from`** their source. Commit `.beads/issues.jsonl`; the Dolt dir is gitignored.
 - **One caveat, mandatory:** run `bd init` with `--skip-agents --skip-hooks` so it does **not** overwrite our `CLAUDE.md` or install git hooks (default behavior does both). See "Install step 2".
 - **Honest downside:** beads is young (1.x, "API stability not guaranteed"), the backend is Dolt (an embedded SQL/git database — heavier than a flat file), and a 132 MB binary. If you want zero new infra and never parallelize agents, plain TODO.md is fine. Beads earns its keep the moment you have >1 agent and real cross-task blockers — which we do.
 
@@ -140,8 +144,8 @@ bd gc --dry-run                       # preview decay+compact;  bd gc --older-th
 
 **One DB, prefix `sq`, at repo root.** Commit `.beads/issues.jsonl` + `config.yaml`; never commit `embeddeddolt/`.
 
-**Crates/areas → labels, not epics.** 25 crates is too many for epics. Use a flat label namespace, multi-label as needed:
-- `area:<crate>` — e.g. `area:sparq-core`, `area:sparq-zk`, `area:sparq-mpc`, `area:sparq-hdt`, `area:sparq-serve`. (We have: sparq-bench, -cli, -conformance, -core, -engine, -geo, -gpu, -hdt, -introspect, -mpc, -nlq, -parse, -py, -reason, -rsp, -serve, -server, -shacl, -sim, -solid, -text, -vectors, -wasm, -zk-compose, -zk.)
+**Crates/areas → labels, not epics.** 31 crates is too many for epics. Use a flat label namespace, multi-label as needed:
+- `area:<crate>` — e.g. `area:sparq-core`, `area:sparq-zk`, `area:sparq-mpc`, `area:sparq-hdt`, `area:sparq-serve`. (We have: sparq-bench, -canon, -cli, -conformance, -core, -engine, -fedclient, -fedplan, -geo, -gpu, -hdt, -introspect, -mpc, -nlq, -parse, -policy, -prov, -py, -reason, -reason-wasm, -rsp, -serve, -server, -shacl, -sim, -solid, -text, -vectors, -wasm, -zk-compose, -zk.)
 - `kind:` cross-cutting: `kind:perf`, `kind:correctness`, `kind:docs`.
 - `roborev` for review-backlog items; `quota-failed` for jobs that need re-running after quota reset.
 - `js` for the JS/WASM port side.
@@ -182,7 +186,7 @@ Each agent: `bd ready --assignee <agent> --claim --json` to atomically grab the 
 |---|---|---|
 | **Beads (`bd`)** | Multiple agents, real cross-task blockers, want offline `ready` queries, git-native history, breadcrumb trails. **Our case.** | Young (1.x, no API-stability promise; 67 npm versions); Dolt backend is heavier than a flat file (132 MB binary, an embedded SQL/git DB under `.beads/`); learning curve on edge semantics; default `init` clobbers `CLAUDE.md`+hooks (mitigated by `--skip-*`); no cross-database refs. |
 | **GitHub Issues** | Human collaborators, public visibility, PR auto-linking, mature/stable. | Requires network for *every* readiness query; dependency graph is weak (task-lists, not first-class `blocks`+`ready`); rate limits; agents pay latency; not git-local. Good as a *mirror* (`bd github …` exists) but poor as the agent's live work-graph. |
-| **Plain markdown TODO.md** (what we have) | Zero infra, human-readable, trivially diffable, fine for a single linear worker. | No dependency semantics, no `ready` computation, no atomic claim — two agents collide; "blocked until X" is a prose comment a human must parse; rots fast across 25 crates. We already feel this pain (10+ TODO.md files, no cross-cutting view). |
+| **Plain markdown TODO.md** (what we have) | Zero infra, human-readable, trivially diffable, fine for a single linear worker. | No dependency semantics, no `ready` computation, no atomic claim — two agents collide; "blocked until X" is a prose comment a human must parse; rots fast across 31 crates. We already feel this pain (10+ TODO.md files, no cross-cutting view). |
 | **Agent built-in todo tool** | Single task, single session scratchpad. | Ephemeral — dies with the session; no persistence, no graph, no cross-agent sharing. Wrong layer for a multi-day, multi-agent backlog. Keep it for in-session steps; beads for the durable backlog. |
 
 **Verdict:** adopt beads as the durable, cross-agent backlog + merge-queue graph; keep the agent's built-in todo for in-session steps; optionally mirror selected epics to GitHub Issues for human visibility. Retire per-crate `TODO.md` once migrated (or leave one-line pointers to `bd`). The honest cost is a new young dependency and a Dolt directory; the honest benefit is that "what can an agent work on right now, given everything in flight?" becomes a single `bd ready` call instead of tribal knowledge.
