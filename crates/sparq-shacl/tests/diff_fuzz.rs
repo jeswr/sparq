@@ -717,6 +717,40 @@ fn jena_classpath_gating() {
     );
 }
 
+/// [OPUS-4.8] (sq-vsqr) The Jena adapter must mirror the pySHACL adapter's sq-0hj7
+/// `sh:detail` exclusion: a nested sub-result that is the object of an `sh:detail`
+/// must NOT appear as a top-level violation (it lives in `ValidationResult::details`
+/// in sparq, and `sh:detail` is non-normative per SHACL §3.6.2 — diffing it would
+/// be a latent over-report, not a real disagreement). The adapter ships a
+/// `--selftest` mode that asserts this on a synthetic report graph (no validator
+/// run, so it is independent of whether THIS Jena build emits `sh:detail`); we drive
+/// it here. SKIPPED cleanly when Java + a Jena classpath don't resolve (the
+/// pySHACL-only / no-Jena lanes are unaffected) — exactly the diff-fuzz gating.
+#[test]
+fn jena_adapter_excludes_nested_sh_detail() {
+    let Some(engine) = resolve_jena() else {
+        eprintln!("SKIP jena_adapter_excludes_nested_sh_detail: Jena did not resolve");
+        return;
+    };
+    // engine.args is `[-cp, <classpath>, <adapter>.java]`; append `--selftest` so the
+    // single-file source launcher runs the adapter in self-test mode.
+    let mut args = engine.args.clone();
+    args.push("--selftest".to_string());
+    let out = Command::new(&engine.program)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn Jena adapter --selftest");
+    assert!(
+        out.status.success(),
+        "Jena adapter --selftest failed (exit {:?}) — the sh:detail exclusion \
+         regressed (nested sub-result leaked into the top-level violation set):\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // [OPUS-4.8] (sq-0hj7) Guards for the extended generator: logical components,
 // sh:node nested-shape refs, and complex SHAPE paths. These run in the per-PR
