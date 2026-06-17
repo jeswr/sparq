@@ -7,7 +7,7 @@
 //! Private witnesses (graph encodings, filter digits) are supplied by the
 //! prover driver, never present in the manifest.
 
-use crate::build::JoinWitness;
+use crate::build::{FilterSignedWitness, JoinWitness};
 use crate::manifest::{CircuitId, FieldHex, ProofInputs};
 
 /// Error returned by [`prover_toml_for`] when a `Prover.toml` cannot be emitted
@@ -28,6 +28,16 @@ pub enum ProverTomlError {
     // the "witness omitted for a JoinEq input" recoverable failure (no panic in a
     // public fn).
     JoinEqMissingWitness,
+    /// A [`ProofInputs::FilterSignedInt`] or [`ProofInputs::FilterDecimal`] was
+    /// passed without its private [`crate::build::FilterSignedWitness`]: the
+    /// operand's SIGN flag and canonical digits live in the witness, not the
+    /// manifest, so the Prover.toml cannot be emitted without it. The caller obtains
+    /// the witness from [`crate::build::build_filter_signed_int`] /
+    /// [`crate::build::build_filter_decimal`] and threads it through
+    /// `prover_toml_for`'s `filter_signed_witness` parameter.
+    // [OPUS-4.8] sq-7lrq: signed/decimal proving path; witness-omitted recoverable
+    // failure (no panic in a public fn).
+    FilterSignedMissingWitness,
 }
 
 impl std::fmt::Display for ProverTomlError {
@@ -38,6 +48,13 @@ impl std::fmt::Display for ProverTomlError {
                 "join_eq Prover.toml generation requires the private JoinWitness \
                  (enc_a/counts_a/enc_b/counts_b/row_a/row_b/blinding) — obtain it \
                  from build_join and pass it via prover_toml_for's join_witness arg"
+            ),
+            ProverTomlError::FilterSignedMissingWitness => write!(
+                f,
+                "signed-int / decimal FILTER Prover.toml generation requires the \
+                 private FilterSignedWitness (sign flag + canonical digits) — obtain \
+                 it from build_filter_signed_int / build_filter_decimal and pass it \
+                 via prover_toml_for's filter_signed_witness arg"
             ),
         }
     }
@@ -164,6 +181,79 @@ pub fn filter_f64_prover_toml(
     s
 }
 
+/// Render a `[ "d0", "d1", … ]` inline array of decimal digit bytes (each byte
+/// rendered as its ASCII codepoint string, matching the circuit's `[u8; N]`).
+fn digits_array(digits: &[u8]) -> String {
+    format!(
+        "[{}]",
+        digits
+            .iter()
+            .map(|d| format!("\"{d}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Render the `Prover.toml` body for a MANIFEST-COMPOSABLE `filter_signed_int`
+/// proof ([OPUS-4.8] sq-7lrq). Order MUST match
+/// `filter_signed_int_d{md}/src/main.nr`: PUBLIC `challenge, operand_enc, op,
+/// bound_neg, bound, expected` then PRIVATE `neg, mag_digits`. `neg` is the hidden
+/// operand's sign flag; `mag_digits` are its canonical MAGNITUDE digits (length
+/// MD).
+#[allow(clippy::too_many_arguments)]
+pub fn filter_signed_int_prover_toml(
+    challenge: &FieldHex,
+    operand_enc: &FieldHex,
+    op: u32,
+    bound_neg: bool,
+    bound: u64,
+    expected: bool,
+    neg: bool,
+    mag_digits: &[u8],
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", challenge.0));
+    s.push_str(&format!("operand_enc = \"{}\"\n", operand_enc.0));
+    s.push_str(&format!("op = \"{op}\"\n"));
+    s.push_str(&format!("bound_neg = {bound_neg}\n"));
+    s.push_str(&format!("bound = \"{bound}\"\n"));
+    s.push_str(&format!("expected = {expected}\n"));
+    s.push_str(&format!("neg = {neg}\n"));
+    s.push_str(&format!("mag_digits = {}\n", digits_array(mag_digits)));
+    s
+}
+
+/// Render the `Prover.toml` body for a MANIFEST-COMPOSABLE `filter_decimal` proof
+/// ([OPUS-4.8] sq-7lrq). Order MUST match `filter_decimal_i{id}_f{fd}/src/main.nr`:
+/// PUBLIC `challenge, operand_enc, op, bound_neg, bound_scaled, expected` then
+/// PRIVATE `neg, int_digits, frac_digits`. `neg` is the hidden operand's sign flag;
+/// `int_digits` (length ID) / `frac_digits` (length FD) are its canonical
+/// integer-part / fraction digits.
+#[allow(clippy::too_many_arguments)]
+pub fn filter_decimal_prover_toml(
+    challenge: &FieldHex,
+    operand_enc: &FieldHex,
+    op: u32,
+    bound_neg: bool,
+    bound_scaled: u64,
+    expected: bool,
+    neg: bool,
+    int_digits: &[u8],
+    frac_digits: &[u8],
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", challenge.0));
+    s.push_str(&format!("operand_enc = \"{}\"\n", operand_enc.0));
+    s.push_str(&format!("op = \"{op}\"\n"));
+    s.push_str(&format!("bound_neg = {bound_neg}\n"));
+    s.push_str(&format!("bound_scaled = \"{bound_scaled}\"\n"));
+    s.push_str(&format!("expected = {expected}\n"));
+    s.push_str(&format!("neg = {neg}\n"));
+    s.push_str(&format!("int_digits = {}\n", digits_array(int_digits)));
+    s.push_str(&format!("frac_digits = {}\n", digits_array(frac_digits)));
+    s
+}
+
 /// Render the `Prover.toml` body for a hidden cross-credential `join_eq` proof
 /// ([OPUS-4.8] sq-r2s8). Order MUST match `join_eq_na{n_a}_nb{n_b}/src/main.nr`:
 /// PUBLIC `challenge, commit_a, commit_b, join_commitment, slot_a, slot_b` then
@@ -265,6 +355,14 @@ pub fn canonical_digits(value: u64) -> Vec<u8> {
 /// (a public fn must not crash a downstream caller). The `join_witness` argument is
 /// ignored for every non-join input, exactly as `scan_*` is ignored for filters.
 /// [OPUS-4.8] sq-r2s8: the join_eq proving path is now implemented.
+///
+/// For [`ProofInputs::FilterSignedInt`] / [`ProofInputs::FilterDecimal`] the private
+/// [`FilterSignedWitness`] (operand sign + canonical digits) MUST be supplied via
+/// `filter_signed_witness`; omitting it returns
+/// [`ProverTomlError::FilterSignedMissingWitness`] (recoverable, never a panic — the
+/// `filter_digits` arg does NOT carry the sign these members need). The
+/// `filter_signed_witness` argument is ignored for every other input.
+/// [OPUS-4.8] sq-7lrq: the signed-int / decimal proving path is now implemented.
 #[allow(clippy::too_many_arguments)]
 pub fn prover_toml_for(
     inputs: &ProofInputs,
@@ -273,11 +371,15 @@ pub fn prover_toml_for(
     // per-graph per-slot encodings.
     scan_counts: &[u32],
     scan_enc: &[Vec<[FieldHex; 3]>],
-    // filter witness (ignored for scan): canonical decimal digits.
+    // filter witness (ignored for scan): canonical decimal digits (filter_int /
+    // filter_f64). Signed-int / decimal carry their digits in `filter_signed_witness`.
     filter_digits: &[u8],
     // join witness (ignored for scan/filter): the join_eq member's private inputs
     // (enc_a/counts_a/enc_b/counts_b/row_a/row_b/blinding). [OPUS-4.8] sq-r2s8.
     join_witness: Option<&JoinWitness>,
+    // signed-int / decimal witness (ignored for every other input): the operand's
+    // PRIVATE sign flag + canonical digits. [OPUS-4.8] sq-7lrq.
+    filter_signed_witness: Option<&FilterSignedWitness>,
 ) -> Result<(CircuitId, String), ProverTomlError> {
     let out = match inputs {
         ProofInputs::Scan {
@@ -346,6 +448,57 @@ pub fn prover_toml_for(
                 *b_bits,
                 *expected,
                 filter_digits,
+            );
+            (id.clone(), toml)
+        }
+        // [OPUS-4.8] sq-7lrq: composable SIGNED xsd:integer FILTER. The operand's
+        // PRIVATE sign flag + magnitude digits come from `filter_signed_witness`
+        // (built by `build_filter_signed_int`); omitting it is a recoverable `Err`
+        // (no panic in a public fn). `frac_digits` is empty for signed-int.
+        ProofInputs::FilterSignedInt {
+            id,
+            operand_enc,
+            op,
+            bound_neg,
+            bound,
+            expected,
+        } => {
+            let w = filter_signed_witness.ok_or(ProverTomlError::FilterSignedMissingWitness)?;
+            let toml = filter_signed_int_prover_toml(
+                challenge,
+                operand_enc,
+                op.code(),
+                *bound_neg,
+                *bound,
+                *expected,
+                w.neg,
+                &w.int_digits,
+            );
+            (id.clone(), toml)
+        }
+        // [OPUS-4.8] sq-7lrq: composable xsd:decimal FILTER. The operand's PRIVATE
+        // sign flag + integer-part / fraction digits come from `filter_signed_witness`
+        // (built by `build_filter_decimal`); `bound_scaled` is the host-prescaled
+        // constant magnitude. Omitting the witness is a recoverable `Err`.
+        ProofInputs::FilterDecimal {
+            id,
+            operand_enc,
+            op,
+            bound_neg,
+            bound_scaled,
+            expected,
+        } => {
+            let w = filter_signed_witness.ok_or(ProverTomlError::FilterSignedMissingWitness)?;
+            let toml = filter_decimal_prover_toml(
+                challenge,
+                operand_enc,
+                op.code(),
+                *bound_neg,
+                *bound_scaled,
+                *expected,
+                w.neg,
+                &w.int_digits,
+                &w.frac_digits,
             );
             (id.clone(), toml)
         }

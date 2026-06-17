@@ -189,6 +189,7 @@ fn scan_k1_n16_r8_witness_satisfiable() {
         &scan.witness.enc,
         &[],
         None,
+        None,
     )
     .unwrap();
     assert_eq!(id, CircuitId::Scan { k: 1, n: 16, r: 8 });
@@ -242,6 +243,7 @@ fn scan_k1_n16_r8_rejects_fabricated_row() {
         &scan.witness.enc,
         &[],
         None,
+        None,
     )
     .unwrap();
     let prover = CircuitProver::from_crate_root();
@@ -270,6 +272,7 @@ fn scan_k1_n16_r8_full_prove_verify_round_trip() {
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
+        None,
         None,
     )
     .unwrap();
@@ -359,7 +362,7 @@ fn join_eq_na64_nb64_witness_satisfiable() {
     let built =
         build_join(&big_graph_a(), 2, &big_graph_b(), 0, blinding()).expect("big join builds");
     let (id, toml) =
-        prover_toml_for(&built.inputs, &challenge(), &[], &[], &[], Some(&built.witness)).unwrap();
+        prover_toml_for(&built.inputs, &challenge(), &[], &[], &[], Some(&built.witness), None).unwrap();
     assert_eq!(id, CircuitId::JoinEq { n_a: 64, n_b: 64 });
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("join_eq_na64_nb64 compiles");
@@ -397,7 +400,7 @@ fn join_eq_na64_nb64_full_prove_verify_round_trip() {
     let built =
         build_join(&big_graph_a(), 2, &big_graph_b(), 0, blinding()).expect("big join builds");
     let (id, toml) =
-        prover_toml_for(&built.inputs, &challenge(), &[], &[], &[], Some(&built.witness)).unwrap();
+        prover_toml_for(&built.inputs, &challenge(), &[], &[], &[], Some(&built.witness), None).unwrap();
     assert_eq!(id, CircuitId::JoinEq { n_a: 64, n_b: 64 });
     let prover = CircuitProver::from_crate_root();
     let out = scratch("join_n64_full");
