@@ -3,14 +3,17 @@
 # WHAT: generates random but VALID SHACL shapes + data graphs, validates each
 # through `sparq-shacl` AND through every reference SHACL engine that resolves, and
 # asserts the reports agree on the `sh:conforms` bit and the per-focus-node
-# violated-constraint set. Two references are wired:
+# violated-constraint set. Three reference families are wired:
 #   - pySHACL — the canonical Python reference implementation (sq-55c1).
 #   - Apache Jena SHACL — a second, independent reference (sq-evws), driven via the
 #     Java single-file source launcher over its `org.apache.jena.shacl` validator.
+#   - RDF-JS SHACL — the Zazuko `rdf-validate-shacl` + `shacl-engine` validators
+#     (sq-vz2v), driven via a Node adapter (one JS engine selected per run by
+#     SHACL_DIFF_NODE_ENGINE; both are exercised across two run passes below).
 # A disagreement is a candidate sparq-shacl correctness bug; the harness prints the
-# seed + the reproducing Turtle so it replays deterministically. A second engine
-# catches bugs where sparq and pySHACL happen to agree but are both wrong. See
-# crates/sparq-shacl/tests/diff_fuzz.rs.
+# seed + the reproducing Turtle so it replays deterministically. Each extra engine
+# catches bugs where sparq and another reference happen to agree but are both
+# wrong. See crates/sparq-shacl/tests/diff_fuzz.rs.
 #
 # TRIGGER — NIGHTLY/HEAVY tier ONLY. Deliberately NOT on pull_request / push /
 # merge_group: it installs reference engines and runs thousands of validations,
@@ -59,6 +62,22 @@ env:
   # bump both together (the .sha512 is alongside the tarball on the Apache archive).
   JENA_VERSION: "5.2.0"
   JENA_SHA512: "9a66044573ca269c0a9a1191fe7a8e1925f2d77e2e0bdadddd68616a1bafed1d9819c0b2988dd03614ec778a3882ccb091d825976fc0837406916f9f001b701c"
+  # JS / RDF-JS reference engines (sq-vz2v): the Zazuko SHACL validators + the
+  # RDF/JS factory pieces the Node adapter composes. Versions are pinned so the
+  # third reference family is reproducible and a future npm release cannot silently
+  # break (or silently "fix") the differential; bump deliberately. These are
+  # `npm i`-ed into a scratch dir and are NOT committed (AGENTS.md: reference
+  # engines stay out of git). `--ignore-scripts` since none need a build step.
+  NODE_SHACL_PACKAGES: >-
+    rdf-validate-shacl@0.5.5
+    shacl-engine@1.0.2
+    @rdfjs/environment@1.0.0
+    @rdfjs/data-model@2.0.2
+    @rdfjs/dataset@2.0.2
+    @rdfjs/term-map@2.0.1
+    @rdfjs/namespace@2.0.1
+    @rdfjs/parser-n3@2.0.2
+    clownface@2.0.3
 
 jobs:
   diff-fuzz:
@@ -85,6 +104,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - name: Set up Node (for the RDF-JS reference engines)
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "20"
       - name: Install pySHACL (reference engine) in a venv
         run: |
           set -euo pipefail
@@ -117,6 +140,19 @@ jobs:
           # The harness derives ${JENA_HOME}/lib/* when JENA_HOME is set.
           echo "JENA_HOME=$dest" >> "$GITHUB_ENV"
           "$dest/bin/shacl" --help >/dev/null 2>&1 && echo "Jena shacl CLI OK ($JENA_VERSION)"
+      - name: Install RDF-JS SHACL engines (reference engines) into a scratch dir
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/shacl-node-modules"
+          mkdir -p "$dest"
+          # A minimal package.json so `node`'s createRequire resolves from here.
+          echo '{"name":"shacl-diff-node-refs","private":true,"version":"0.0.0"}' > "$dest/package.json"
+          # Pinned, scripts disabled (none of these need a build step), no audit/fund noise.
+          (cd "$dest" && npm install --no-audit --no-fund --ignore-scripts ${NODE_SHACL_PACKAGES})
+          node -e "const r=require('node:module').createRequire('$dest/package.json'); \
+                   r('rdf-validate-shacl'); r('shacl-engine'); r('@rdfjs/parser-n3'); \
+                   console.log('RDF-JS SHACL engines OK');"
+          echo "SHACL_DIFF_NODE_MODULES=$dest" >> "$GITHUB_ENV"
       - name: Pick seed count for this trigger
         id: budget
         run: |
@@ -130,9 +166,23 @@ jobs:
       # fuzzing disagreement.
       - name: Build the differential test
         run: cargo build -p sparq-shacl --test diff_fuzz
-      - name: Run the differential fuzz (bounded; fails on any disagreement)
+      # First pass resolves pySHACL + Jena + the Node `rdf-validate-shacl` engine
+      # (SHACL_DIFF_NODE_ENGINE defaults to it), all over the same seed range.
+      - name: Run the differential fuzz — pySHACL + Jena + rdf-validate-shacl
         env:
           SHACL_DIFF_SEED_START: "0"
           SHACL_DIFF_COUNT: ${{ steps.budget.outputs.count }}
+          SHACL_DIFF_NODE_ENGINE: "rdf-validate-shacl"
+        run: |
+          cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
+      # Second pass drives the OTHER Node JS engine (shacl-engine). The runner
+      # resolves one JS engine per run (selected by SHACL_DIFF_NODE_ENGINE), so a
+      # dedicated pass exercises shacl-engine too. pySHACL + Jena re-run here is
+      # cheap relative to the JS engine and keeps the lane a single job.
+      - name: Run the differential fuzz — shacl-engine (the other RDF-JS engine)
+        env:
+          SHACL_DIFF_SEED_START: "0"
+          SHACL_DIFF_COUNT: ${{ steps.budget.outputs.count }}
+          SHACL_DIFF_NODE_ENGINE: "shacl-engine"
         run: |
           cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture

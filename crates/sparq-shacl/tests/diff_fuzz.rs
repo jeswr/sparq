@@ -30,8 +30,17 @@
 //!     reference catches bugs where sparq and pySHACL happen to agree but are both
 //!     wrong.
 //!
-//! Other engines (rdf-validate-shacl / shacl-engine via Node) remain follow-up
-//! beads; each is another `RefEngine` over the same contract.
+//!   - **Node / RDF-JS** (`tests/diff_fuzz/node_shacl_adapter.mjs`, bead sq-vz2v)
+//!     — the JS-ecosystem SHACL validators (Zazuko `rdf-validate-shacl` and
+//!     `shacl-engine`), a NODE "js-lib" adapter (sq-eifd kind) driven via `node`.
+//!     The JS engine is selected by `SHACL_DIFF_NODE_ENGINE` (default
+//!     `rdf-validate-shacl`); the engines are `npm i`-ed into a scratch dir the
+//!     runner points at with `SHACL_DIFF_NODE_MODULES`. A third independent engine
+//!     family catches bugs where sparq and the Python/Java references agree but are
+//!     jointly wrong, and (bonus) the same harness can drive sparq's own
+//!     `@jeswr/sparq` WASM SHACL JS-vs-JS in a follow-up.
+//!
+//! Each reference is another `RefEngine` over the same contract.
 //!
 //! ## How to run
 //! Off by default (`#[ignore]`) so the per-PR `cargo nextest run` fast path is
@@ -45,12 +54,18 @@
 //! # tarball's `lib`), or set JENA_HOME (its `lib` is derived):
 //! SHACL_DIFF_JENA_CP="/opt/apache-jena/lib/*" \
 //!   cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
+//! # Node: point at a dir where `rdf-validate-shacl` / `shacl-engine` + the RDF/JS
+//! # factory pieces were `npm i`-ed, and pick which JS engine to drive:
+//! SHACL_DIFF_NODE_MODULES=/path/to/scratch SHACL_DIFF_NODE_ENGINE=rdf-validate-shacl \
+//!   cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
 //! # bound the run: SHACL_DIFF_SEED_START / SHACL_DIFF_COUNT (defaults 0 / 200).
 //! ```
 //! When NO reference engine resolves, the test SKIPS (prints why and returns) so
 //! it stays green on a box without any reference toolchain. Each engine is gated
 //! independently — Jena is silently skipped when neither a Jena classpath nor a
-//! working `java` is available, so the existing pySHACL-only lane is unaffected.
+//! working `java` is available, and Node is silently skipped when `node` or a
+//! module dir with the JS engines is unavailable, so the existing pySHACL-only
+//! lane is unaffected.
 //!
 //! ## Comparison policy (per bead sq-55c1)
 //! 1. `conforms` bit — exact (cheap, highest signal).
@@ -97,6 +112,10 @@ struct RefEngine {
     name: String,
     program: String,
     args: Vec<String>,
+    /// Extra environment variables to set on the spawned adapter (e.g. the Node
+    /// adapter's `SHACL_DIFF_NODE_ENGINE` / `SHACL_DIFF_NODE_MODULES`). Empty for
+    /// engines that take all their config via args (pySHACL / Jena).
+    env: Vec<(String, String)>,
 }
 
 fn adapter_dir() -> std::path::PathBuf {
@@ -125,6 +144,7 @@ fn resolve_pyshacl() -> Option<RefEngine> {
                 name: format!("pySHACL via {py}"),
                 program: py,
                 args: vec![adapter.to_string_lossy().into_owned()],
+                env: vec![],
             });
         }
     }
@@ -185,13 +205,69 @@ fn resolve_jena() -> Option<RefEngine> {
             classpath,
             adapter.to_string_lossy().into_owned(),
         ],
+        env: vec![],
+    })
+}
+
+/// Pure selection of the Node JS engine name (env passed in, so it is
+/// unit-testable without mutating process-global env). A blank or absent
+/// `SHACL_DIFF_NODE_ENGINE` defaults to `rdf-validate-shacl`; only the two wired
+/// engine names are accepted (anything else returns `None`, so a typo SKIPS Node
+/// rather than spawning an adapter that errors on every case). The returned name
+/// is the value passed straight through to the adapter's `SHACL_DIFF_NODE_ENGINE`.
+fn node_engine_name(engine_env: Option<String>) -> Option<&'static str> {
+    match engine_env.as_deref().filter(|s| !s.is_empty()) {
+        None | Some("rdf-validate-shacl") => Some("rdf-validate-shacl"),
+        Some("shacl-engine") => Some("shacl-engine"),
+        Some(_) => None,
+    }
+}
+
+/// Resolves the Node / RDF-JS SHACL engine, or `None` if it cannot be driven (so
+/// it is SKIPPED cleanly — the pySHACL/Jena lanes are unaffected). Needs:
+///   - a `node` launcher: `SHACL_DIFF_NODE` else `node` on PATH (must run), and
+///   - a modules dir with the JS engines `npm i`-ed: `SHACL_DIFF_NODE_MODULES`.
+///     We require this rather than guessing, because without the engines the
+///     adapter would error on every case (a vacuous run); demanding the env var
+///     means an unconfigured box SKIPS instead of looking like agreement.
+///   - a wired JS engine name (`SHACL_DIFF_NODE_ENGINE`, default
+///     `rdf-validate-shacl`); an unknown name SKIPS.
+///
+/// The selected JS engine is passed to the adapter via the child's
+/// `SHACL_DIFF_NODE_ENGINE` env (set on the spawn in `run_reference`), and the
+/// modules dir via `SHACL_DIFF_NODE_MODULES`.
+fn resolve_node() -> Option<RefEngine> {
+    let modules = std::env::var("SHACL_DIFF_NODE_MODULES")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let engine = node_engine_name(std::env::var("SHACL_DIFF_NODE_ENGINE").ok())?;
+    let node = std::env::var("SHACL_DIFF_NODE").unwrap_or_else(|_| "node".to_string());
+    let node_ok = Command::new(&node)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !node_ok {
+        return None;
+    }
+    let adapter = adapter_dir().join("node_shacl_adapter.mjs");
+    Some(RefEngine {
+        name: format!("Node {engine} via {node} (modules {modules})"),
+        program: node,
+        args: vec![adapter.to_string_lossy().into_owned()],
+        env: vec![
+            ("SHACL_DIFF_NODE_ENGINE".to_string(), engine.to_string()),
+            ("SHACL_DIFF_NODE_MODULES".to_string(), modules),
+        ],
     })
 }
 
 /// All reference engines available on this box, in a stable order. The
 /// differential runs against each; an empty list means SKIP the whole test.
 fn resolve_engines() -> Vec<RefEngine> {
-    [resolve_pyshacl(), resolve_jena()]
+    [resolve_pyshacl(), resolve_jena(), resolve_node()]
         .into_iter()
         .flatten()
         .collect()
@@ -204,6 +280,7 @@ fn run_reference(engine: &RefEngine, data: &str, shapes: &str) -> Result<RefRepo
     let req = serde_json::json!({ "data": data, "shapes": shapes }).to_string();
     let mut child = Command::new(&engine.program)
         .args(&engine.args)
+        .envs(engine.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -745,6 +822,67 @@ fn jena_adapter_excludes_nested_sh_detail() {
     assert!(
         out.status.success(),
         "Jena adapter --selftest failed (exit {:?}) — the sh:detail exclusion \
+         regressed (nested sub-result leaked into the top-level violation set):\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+}
+
+/// [OPUS-4.8] (sq-vz2v) Node JS-engine selection: blank/absent defaults to
+/// `rdf-validate-shacl`; `shacl-engine` is accepted; any unknown name returns
+/// `None` so a typo SKIPS Node rather than spawning an always-erroring adapter.
+/// Pure (env passed in) so it runs in the fast lane without mutating process env.
+#[test]
+fn node_engine_name_selection() {
+    assert_eq!(node_engine_name(None), Some("rdf-validate-shacl"));
+    assert_eq!(
+        node_engine_name(Some(String::new())),
+        Some("rdf-validate-shacl")
+    );
+    assert_eq!(
+        node_engine_name(Some("rdf-validate-shacl".into())),
+        Some("rdf-validate-shacl")
+    );
+    assert_eq!(
+        node_engine_name(Some("shacl-engine".into())),
+        Some("shacl-engine")
+    );
+    assert_eq!(node_engine_name(Some("not-an-engine".into())), None);
+}
+
+/// [OPUS-4.8] (sq-vz2v) The Node adapter must mirror the pySHACL/Jena adapters'
+/// sq-0hj7 `sh:detail` exclusion: a nested sub-result that is the object of an
+/// `sh:detail` must NOT appear as a top-level violation. The adapter ships a
+/// `--selftest` mode asserting this on a synthetic report dataset (no engine /
+/// npm dep, so it is independent of whether an engine build emits `sh:detail`);
+/// we drive it here. SKIPPED cleanly when `node` is unavailable (the no-Node lane
+/// is unaffected), and it needs NO `SHACL_DIFF_NODE_MODULES` (the self-test runs
+/// the adapter's pure normaliser, not a validator).
+#[test]
+fn node_adapter_excludes_nested_sh_detail() {
+    let node = std::env::var("SHACL_DIFF_NODE").unwrap_or_else(|_| "node".to_string());
+    let node_ok = Command::new(&node)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !node_ok {
+        eprintln!("SKIP node_adapter_excludes_nested_sh_detail: `node` did not resolve");
+        return;
+    }
+    let adapter = adapter_dir().join("node_shacl_adapter.mjs");
+    let out = Command::new(&node)
+        .arg(&adapter)
+        .arg("--selftest")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn Node adapter --selftest");
+    assert!(
+        out.status.success(),
+        "Node adapter --selftest failed (exit {:?}) — the sh:detail exclusion \
          regressed (nested sub-result leaked into the top-level violation set):\n{}",
         out.status.code(),
         String::from_utf8_lossy(&out.stderr).trim()
