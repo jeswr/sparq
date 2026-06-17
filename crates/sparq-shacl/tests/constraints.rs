@@ -670,6 +670,86 @@ fn member_shape_checks_each_list_member() {
     assert_eq!(count_component(&r, "MemberShapeConstraintComponent"), 2);
 }
 
+// [OPUS-4.8] (sq-f8gu) sh:memberShape emits one sh:detail sub-result per
+// NON-CONFORMING member: the actual validation results of validating that member
+// against the member shape. A non-list value node carries NO details (there are
+// no members to validate against the shape).
+#[test]
+fn member_shape_emits_detail_per_failing_member() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:list, ex:notAList ;
+          sh:memberShape [ sh:nodeKind sh:IRI ] .
+    "#;
+    // ex:list = ( ex:ok "bad1" "bad2" ): one IRI member (ok) and two literal
+    // members (each violates sh:nodeKind sh:IRI).
+    let data = r#"
+        ex:list rdf:first ex:ok ; rdf:rest ( "bad1" "bad2" ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+
+    let top: Vec<_> = r
+        .results
+        .iter()
+        .filter(|x| {
+            x.source_component
+                .ends_with("MemberShapeConstraintComponent")
+        })
+        .collect();
+    assert_eq!(top.len(), 2, "{}", r.to_text());
+
+    // The list result carries two details (one per failing member); each detail
+    // is a NodeKind violation whose sh:value is the offending literal.
+    let list_result = top
+        .iter()
+        .find(|x| {
+            x.value
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .as_deref()
+                == Some("<http://example.org/list>")
+        })
+        .expect("a result on ex:list");
+    assert_eq!(list_result.details.len(), 2, "{}", r.to_text());
+    assert!(list_result
+        .details
+        .iter()
+        .all(|d| d.source_component.ends_with("NodeKindConstraintComponent")));
+    let mut detail_vals: Vec<String> = list_result
+        .details
+        .iter()
+        .filter_map(|d| d.value.as_ref().map(std::string::ToString::to_string))
+        .collect();
+    detail_vals.sort();
+    assert_eq!(
+        detail_vals,
+        vec![r#""bad1""#.to_string(), r#""bad2""#.to_string()]
+    );
+
+    // The non-list value node carries no details.
+    let notalist = top
+        .iter()
+        .find(|x| {
+            x.value
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .as_deref()
+                == Some("<http://example.org/notAList>")
+        })
+        .expect("a result on ex:notAList");
+    assert!(notalist.details.is_empty(), "{}", r.to_text());
+
+    // sh:detail must surface in the Turtle report and round-trip as valid Turtle.
+    let ttl = r.to_turtle();
+    assert!(ttl.contains("sh:detail"), "no sh:detail in report: {ttl}");
+    oxttl::TurtleParser::new()
+        .for_slice(ttl.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|e| panic!("report Turtle does not parse: {e}\n{ttl}"));
+}
+
 // ---- sh:uniqueMembers ----
 
 #[test]
@@ -688,6 +768,69 @@ fn unique_members_flags_duplicate_and_nonlist() {
     assert!(!r.conforms, "{}", r.to_text());
     // ex:dup (duplicate 1) + ex:notAList (not a list) -> two results; ex:uniq ok.
     assert_eq!(count_component(&r, "UniqueMembersConstraintComponent"), 2);
+}
+
+// [OPUS-4.8] (sq-f8gu) sh:uniqueMembers emits one sh:detail sub-result per
+// DUPLICATED member (each duplicated value reported once via sh:value), and a
+// non-list value node carries no details.
+#[test]
+fn unique_members_emits_detail_per_duplicate() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:dup, ex:notAList ;
+          sh:uniqueMembers true .
+    "#;
+    // ex:dup = ( 1 2 1 3 2 ): members 1 and 2 each appear twice -> two duplicates.
+    let data = r#"
+        ex:dup rdf:first 1 ; rdf:rest ( 2 1 3 2 ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+
+    let dup_result = r
+        .results
+        .iter()
+        .find(|x| {
+            x.source_component
+                .ends_with("UniqueMembersConstraintComponent")
+                && x.value
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .as_deref()
+                    == Some("<http://example.org/dup>")
+        })
+        .expect("a result on ex:dup");
+    // One detail per duplicated value (1 and 2), each carrying that value.
+    assert_eq!(dup_result.details.len(), 2, "{}", r.to_text());
+    let mut detail_vals: Vec<String> = dup_result
+        .details
+        .iter()
+        .filter_map(|d| d.value.as_ref().map(std::string::ToString::to_string))
+        .collect();
+    detail_vals.sort();
+    assert_eq!(
+        detail_vals,
+        vec![
+            r#""1"^^<http://www.w3.org/2001/XMLSchema#integer>"#.to_string(),
+            r#""2"^^<http://www.w3.org/2001/XMLSchema#integer>"#.to_string(),
+        ]
+    );
+
+    let notalist = r
+        .results
+        .iter()
+        .find(|x| {
+            x.source_component
+                .ends_with("UniqueMembersConstraintComponent")
+                && x.value
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .as_deref()
+                    == Some("<http://example.org/notAList>")
+        })
+        .expect("a result on ex:notAList");
+    assert!(notalist.details.is_empty(), "{}", r.to_text());
 }
 
 // ---- sh:maxListLength / sh:minListLength ----

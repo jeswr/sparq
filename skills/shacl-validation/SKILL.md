@@ -107,8 +107,18 @@ pub source_component: String;               // constraint-component IRI, e.g. ".
 pub severity: String;                       // severity IRI (default ".../shacl#Violation")
 pub messages: Vec<oxrdf::Term>;             // sh:message literals
 pub default_message: String;
+pub details: Vec<ValidationResult>;         // nested sh:detail sub-results (see below); empty for most components
 pub fn effective_messages(&self) -> Vec<oxrdf::Term>;   // messages, or a generated default
 ```
+
+`details` carries non-normative `sh:detail` sub-results that explain WHY a result
+fired: a `sh:memberShape` violation lists one sub-result per non-conforming list
+member (the actual results of validating that member against the member shape),
+and a `sh:uniqueMembers` violation lists one sub-result per duplicated member
+(`sh:value` = the duplicated term). `sh:detail` is non-normative — it never
+affects `sh:conforms` and the W3C suite compares only top-level result fields —
+so it is empty for every other component. `to_turtle` nests each detail as a
+`sh:ValidationResult` blank node under `sh:detail`; `to_text` indents them.
 
 `Path` (`sparq_shacl::Path`) — `Predicate | Inverse | Sequence | Alternative |
 ZeroOrMore | OneOrMore | ZeroOrOne`; `path.to_turtle()` gives the Turtle path

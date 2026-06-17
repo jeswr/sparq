@@ -137,6 +137,23 @@ impl<'a> Validator<'a> {
         ok
     }
 
+    /// [OPUS-4.8] (sq-f8gu) Validate `node` against shape `sid` and RETURN the
+    /// results produced (rather than the `conforms` boolean), under the same
+    /// recursion guard. Used to collect `sh:memberShape` per-member `sh:detail`
+    /// sub-results. Re-entry of an in-progress `(node, shape)` pair yields no
+    /// results (the cycle is treated as conforming, exactly as `conforms` does),
+    /// so a cyclic member never recurses unboundedly.
+    fn member_details(&mut self, node: &Term, sid: usize) -> Vec<ValidationResult> {
+        if self.stack.iter().any(|(n, s)| n == node && *s == sid) {
+            return Vec::new();
+        }
+        self.stack.push((node.clone(), sid));
+        let mut tmp = Vec::new();
+        self.validate_shape(sid, node, &mut tmp);
+        self.stack.pop();
+        tmp
+    }
+
     fn validate_shape(&mut self, sid: usize, focus: &Term, out: &mut Vec<ValidationResult>) {
         let shape = &self.shapes.shapes[sid];
         if shape.deactivated {
@@ -171,6 +188,7 @@ impl<'a> Validator<'a> {
             severity: shape.severity.clone(),
             messages: shape.messages.clone(),
             default_message: message,
+            details: Vec::new(),
         }
     }
 
@@ -656,50 +674,81 @@ impl<'a> Validator<'a> {
             // [OPUS-4.8] (sq-vg3y) `sh:memberShape` (SHACL-1.2): each value node must
             // be a well-formed SHACL list whose members all conform to `member`. A
             // non-list (or member non-conformance) is ONE top-level result on the
-            // value node (the per-member `sh:detail`s are non-normative; the W3C
-            // suite compares only top-level result fields).
+            // value node. (sq-f8gu) That top-level result carries one `sh:detail`
+            // sub-result PER non-conforming member — the actual results of
+            // validating that member against the member shape. `sh:detail` is
+            // non-normative (the W3C suite compares only top-level result fields),
+            // so a non-list value (no members to validate) carries no details.
             Component::MemberShape(member) => {
                 for v in values {
-                    let violates = match self.data.list_strict(v) {
-                        None => true, // not a SHACL list
-                        Some(members) => members.iter().any(|m| !self.conforms(m, *member)),
+                    let members = self.data.list_strict(v);
+                    // Collect per-member sub-results before any top-level push, so
+                    // the borrow of `self` for `member_details` is released first.
+                    let details: Vec<ValidationResult> = match &members {
+                        None => Vec::new(), // not a SHACL list — no members
+                        Some(ms) => ms
+                            .iter()
+                            .flat_map(|m| self.member_details(m, *member))
+                            .collect(),
                     };
-                    if violates {
-                        out.push(
-                            self.result(
-                                sid,
-                                focus,
-                                Some(v.clone()),
-                                "MemberShapeConstraintComponent",
-                                "List value is not a well-formed SHACL list, or a member \
+                    // Violation iff the value is not a well-formed list, or any
+                    // member produced a (detail) result.
+                    if members.is_none() || !details.is_empty() {
+                        let mut r = self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "MemberShapeConstraintComponent",
+                            "List value is not a well-formed SHACL list, or a member \
                              does not conform to the member shape"
-                                    .into(),
-                            ),
+                                .into(),
                         );
+                        r.details = details;
+                        out.push(r);
                     }
                 }
             }
             // [OPUS-4.8] (sq-vg3y) `sh:uniqueMembers true` (SHACL-1.2): each value
             // node must be a SHACL list whose members are pairwise distinct. A
             // non-list, or a list with duplicate members, is one result on v.
+            // (sq-f8gu) A duplicate-bearing list carries one `sh:detail` sub-result
+            // per DUPLICATED member (each duplicated value reported once via
+            // `sh:value`); a non-list value carries no details.
             Component::UniqueMembers => {
                 for v in values {
-                    let violates = match self.data.list_strict(v) {
-                        None => true,
-                        Some(members) => crate::view::dedup(members.clone()).len() != members.len(),
+                    let members = self.data.list_strict(v);
+                    let duplicates: Vec<Term> = match &members {
+                        None => Vec::new(),
+                        Some(ms) => duplicate_members(ms),
                     };
-                    if violates {
-                        out.push(
-                            self.result(
-                                sid,
-                                focus,
-                                Some(v.clone()),
-                                "UniqueMembersConstraintComponent",
-                                "List value is not a well-formed SHACL list, or has \
+                    if members.is_none() || !duplicates.is_empty() {
+                        let mut r = self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "UniqueMembersConstraintComponent",
+                            "List value is not a well-formed SHACL list, or has \
                              duplicate members"
-                                    .into(),
-                            ),
+                                .into(),
                         );
+                        r.details = duplicates
+                            .into_iter()
+                            .map(|d| {
+                                let mut detail = self.result(
+                                    sid,
+                                    focus,
+                                    Some(d),
+                                    "UniqueMembersConstraintComponent",
+                                    "List member is not unique".into(),
+                                );
+                                // The detail's path is the member, not the parent
+                                // shape's path — clear it to avoid a misleading
+                                // sh:resultPath on the sub-result.
+                                detail.path = None;
+                                detail
+                            })
+                            .collect();
+                        out.push(r);
                     }
                 }
             }
@@ -870,6 +919,7 @@ impl<'a> Validator<'a> {
                 severity: severity.clone(),
                 messages: shape_messages.clone(),
                 default_message: fields.default_message,
+                details: Vec::new(),
             },
             out,
         );
@@ -952,6 +1002,7 @@ impl<'a> Validator<'a> {
                             severity: severity.clone(),
                             messages: shape_messages.clone(),
                             default_message,
+                            details: Vec::new(),
                         });
                     }
                 }
@@ -977,6 +1028,7 @@ impl<'a> Validator<'a> {
                         severity: severity.clone(),
                         messages: shape_messages.clone(),
                         default_message: fields.default_message,
+                        details: Vec::new(),
                     },
                     out,
                 );
@@ -1111,6 +1163,23 @@ impl<'a> Validator<'a> {
             })
             .clone()
     }
+}
+
+/// [OPUS-4.8] (sq-f8gu) The DISTINCT members of `members` that appear more than
+/// once (each duplicated value listed once, in first-seen order). Uses exact
+/// `Term` equality — the same notion `view::dedup` uses for the `sh:uniqueMembers`
+/// constraint itself — so the per-duplicate `sh:detail` sub-results agree exactly
+/// with the top-level violation decision.
+fn duplicate_members(members: &[Term]) -> Vec<Term> {
+    let mut seen: rustc_hash::FxHashSet<&Term> = rustc_hash::FxHashSet::default();
+    let mut reported: rustc_hash::FxHashSet<&Term> = rustc_hash::FxHashSet::default();
+    let mut out = Vec::new();
+    for m in members {
+        if !seen.insert(m) && reported.insert(m) {
+            out.push(m.clone());
+        }
+    }
+    out
 }
 
 /// [OPUS-4.8] (sq-vg3y) True iff value node `v` matches the single `sh:nodeKind`
