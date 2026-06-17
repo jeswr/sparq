@@ -256,3 +256,36 @@ mislabelled report). The dict-consolidation bucket number at 1 B real truthy on
 post-consolidation main is NOT YET recorded — when the box runs, capture `dict consolidate
 (into_merged)` + the `dict-consolidate(serial)` term from `t2-dict-bucket.txt` here and
 compare against the projected single-digit seconds.
+
+### 2026-06-17 launch attempt — BLOCKED by the account envelope (NOT yet measured) [OPUS-4.8]
+
+The post-`#570` run was attempted on 2026-06-17 against `origin/main`. It is currently
+**blocked by the AWS account quota/IAM envelope this work box runs under — no `dict-
+consolidate(serial)` figure was produced, and none is recorded here (no fabrication).**
+Both launch paths fail at `RunInstances`:
+
+1. **On-demand `VcpuLimitExceeded`.** The original 2026-06-11 run fit the 16-vCPU Standard
+   on-demand bucket (`L-1216C47A`) because only the 2-vCPU prod `t3.large` was running
+   (14-vCPU headroom). Since **2026-06-13** the 8-vCPU `r7g.2xlarge` agent dev box
+   `sparq-dev-claude` — *the box this orchestrator itself runs on*, which must never be
+   terminated — also occupies that bucket. Standard usage is now 2 + 8 = 10 vCPU, so a
+   fresh 8-vCPU `r7i.2xlarge` (→ 18) trips the limit. The 1 B build needs ≥64 GB RAM
+   (51.5 GB peak RSS measured), and the smallest 64 GB box is an `x.2xlarge` (8 vCPU), so
+   the 6-vCPU on-demand headroom cannot host it. The prod box and the dev box are both
+   off-limits, so on-demand cannot proceed without a quota increase.
+2. **Spot `AuthFailure.ServiceLinkedRoleCreationNotPermitted`.** Spot draws on a *separate*
+   quota bucket (`L-34B43A08`), and a spot `--dry-run` reports "would have succeeded", so
+   spot is this bead's natural unblock (also cheaper: ~$0.21/h vs ~$0.61/h on-demand).
+   `hwrun/rung5-launch.sh` now takes `SPARQ_SPOT=1` to launch one-time spot (interrupt =
+   terminate, so the self-cleaning + dead-man contract holds). But the real spot
+   `RunInstances` is refused: the scoped SSO deploy role (`AWSReservedSSO_PSSSingleInstance
+   Deploy`) lacks permission to create the one-time `AWSServiceRoleForEC2Spot`
+   service-linked role (and cannot even `iam:GetRole` to check whether it exists).
+
+**Unblock — one of:** (a) a privileged principal creates the `AWSServiceRoleForEC2Spot`
+SLR once (`aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`),
+after which `SPARQ_SPOT=1 bash hwrun/rung5-launch.sh` runs end-to-end under the separate
+spot quota; or (b) a Standard on-demand vCPU limit bump to ≥24 (then plain `bash
+hwrun/rung5-launch.sh`); or (c) run it from a session that is NOT on the 8-vCPU dev box so
+the on-demand headroom is free again. Tracked on sq-3l43; the deferred 192-core full
+validation is sq-bj3.

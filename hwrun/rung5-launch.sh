@@ -98,19 +98,37 @@ SG_ID=$(aws ec2 create-security-group --region "$REGION" --group-name "$KEY_NAME
   --query 'GroupId' --output text)
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_ID" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null
 
-echo "== RUNG 5: launch on-demand $ITYPE (deadman +${DEADMAN}m, 400 GB gp3) =="
+# [OPUS-4.8 sq-3l43] MARKET selection. The original 2026-06-11 run launched ON-DEMAND
+# and fit the 16-vCPU L-1216C47A Standard bucket because only the 2-vCPU prod t3.large
+# was running. Since 2026-06-13 the 8-vCPU r7g.2xlarge agent dev box (`sparq-dev-claude`,
+# the box this orchestrator itself runs on — NEVER terminate it) also occupies that
+# bucket: 2 + 8 = 10 used, so a fresh 8-vCPU r7i.2xlarge (=18) trips VcpuLimitExceeded.
+# SPOT requests draw on a SEPARATE quota bucket (L-34B43A08 "All Standard Spot Instance
+# Requests"), so SPARQ_SPOT=1 unblocks the re-measurement without any on-demand quota
+# bump and at ~$0.21/h (cheaper than the ~$0.61/h on-demand). The 12-min build tolerates
+# the low spot-interruption risk; one-time + interrupt=terminate keeps it self-cleaning,
+# and the dead-man `shutdown -h +DEADMAN` + cleanup trap still apply unchanged.
+MARKET="${SPARQ_SPOT:+spot}"; MARKET="${MARKET:-on-demand}"
+echo "== RUNG 5: launch $MARKET $ITYPE (deadman +${DEADMAN}m, 400 GB gp3) =="
 # plain text: AWS CLI v2 base64-encodes --user-data itself
 printf '#!/bin/bash\nshutdown -h +%s\n' "$DEADMAN" > "$WORK/udata.txt"
+MARKET_OPTS=()
+if [ "$MARKET" = "spot" ]; then
+  # one-time spot, terminate (not stop/hibernate) on interruption so the cleanup contract
+  # — and the gp3 DeleteOnTermination — hold even if AWS reclaims the box mid-build.
+  MARKET_OPTS=(--instance-market-options '{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}')
+fi
 INSTANCE_ID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type "$ITYPE" \
   --key-name "$KEY_NAME" --security-group-ids "$SG_ID" --subnet-id "$SUBNET1" --associate-public-ip-address \
   --user-data "file://$WORK/udata.txt" \
   --instance-initiated-shutdown-behavior terminate \
+  "${MARKET_OPTS[@]}" \
   --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":400,"VolumeType":"gp3","Throughput":500,"Iops":6000,"DeleteOnTermination":true}}]' \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=purpose,Value=sparq-hw-validation},{Key=Name,Value=sparq-hw-validation-rung5}]' \
   --query 'Instances[0].InstanceId' --output text 2>"$WORK/err.txt")
 if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ] || [[ "$INSTANCE_ID" != i-* ]]; then
   INSTANCE_ID=""
-  { echo "--- RUNG 5 (on-demand $ITYPE) FAILED $(date -u +%FT%TZ) ---"; cat "$WORK/err.txt"; } | tee -a "$ERRLOG"
+  { echo "--- RUNG 5 ($MARKET $ITYPE) FAILED $(date -u +%FT%TZ) ---"; cat "$WORK/err.txt"; } | tee -a "$ERRLOG"
   exit 1
 fi
 LAUNCH_EPOCH=$(date +%s)
@@ -119,7 +137,7 @@ echo "RUNG 5 SUCCEEDED: $INSTANCE_ID" | tee -a "$ERRLOG"
 aws ec2 wait instance-running --region "$REGION" --instance-ids "$INSTANCE_ID"
 IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" \
   --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-echo "instance $INSTANCE_ID ($ITYPE, on-demand) ip=$IP launched $(date -u +%FT%TZ)" | tee -a "$OUT/rung5-cost.txt"
+echo "instance $INSTANCE_ID ($ITYPE, $MARKET) ip=$IP launched $(date -u +%FT%TZ)" | tee -a "$OUT/rung5-cost.txt"
 
 echo "== wait for sshd =="
 UP=""
