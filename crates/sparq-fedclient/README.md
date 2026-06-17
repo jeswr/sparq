@@ -310,7 +310,7 @@ so it stays the default. Phase 7 adds the opt-in feedback loop for when they are
    hysteresis margin, and is considered **at most once per boundary** — no thrashing.
 
 The re-plan **decision** engine (the divergence trigger, hysteresis, suffix re-ordering, and
-the commutativity soundness proof) lives in `sparq-fedplan` (`AdaptiveExecutor`, behind its own
+the commutativity correctness proof) lives in `sparq-fedplan` (`AdaptiveExecutor`, behind its own
 `adaptive-replan` feature); the client does not re-write it — it feeds it real observed
 cardinalities and executes the order it returns, exactly as the static phases consume `plan_bgp`.
 
