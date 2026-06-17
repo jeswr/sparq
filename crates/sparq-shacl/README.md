@@ -39,6 +39,18 @@ crates/sparq-shacl/fetch-shacl-tests.sh
 cargo test -p sparq-shacl --test w3c_core -- --nocapture
 ```
 
+A companion harness ([`tests/w3c_core_shacl12.rs`](tests/w3c_core_shacl12.rs),
+sq-yca1) walks the **newer `shacl12-test-suite/tests/core/node`** tree, which
+additionally carries the `nodeByExpression-001` `sht:Validate` entry (covered end
+to end under the `shacl-af` feature) and a set of SHACL-1.2-only constraints this
+crate does not yet implement (`sh:memberShape`, `sh:uniqueMembers`,
+`sh:{min,max}ListLength`, `sh:uniqueValuesFor`, the `sh:closed sh:ByTypes` mode,
+and the disjunctive list form of `sh:datatype` / `sh:nodeKind`). It is
+**SKIP-tolerant**: an entry is recorded as SKIP — never FAIL — exactly when its
+shapes use a constraint *form* the crate does not implement; every other entry is
+compared strictly, so a regression in an implemented constraint still fails the
+build. The unimplemented forms are tracked in sq-vg3y.
+
 ## Differential fuzzing against reference engines
 
 Beyond the fixed W3C suite, a **differential fuzzer** (`tests/diff_fuzz.rs` +
