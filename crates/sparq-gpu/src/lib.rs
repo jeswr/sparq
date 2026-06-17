@@ -329,25 +329,32 @@ impl Gpu {
 
     async fn new_async() -> Option<Gpu> {
         let instance = wgpu::Instance::default();
+        // [OPUS-4.8] wgpu 22 -> 29 migration (sq-5z08): `request_adapter` now
+        // returns `Result` (was `Option` in 22); `.ok()?` keeps the
+        // "no adapter ⇒ None" contract callers rely on.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 ..Default::default()
             })
-            .await?;
+            .await
+            .ok()?;
         let info = adapter.get_info();
         let limits = adapter.limits();
-        let max_storage_bytes = u64::from(limits.max_storage_buffer_binding_size);
+        // wgpu 29: `max_storage_buffer_binding_size` is already `u64` (was `u32`
+        // in 22, where this needed a `u64::from`).
+        let max_storage_bytes = limits.max_storage_buffer_binding_size;
+        // wgpu 29: `request_device` takes only the descriptor (the trailing trace
+        // `Option` arg was folded into `DeviceDescriptor::trace`), and the
+        // descriptor gained `experimental_features` + `trace` (both `Default`).
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("sparq-gpu"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: limits,
-                    memory_hints: wgpu::MemoryHints::Performance,
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("sparq-gpu"),
+                required_features: wgpu::Features::empty(),
+                required_limits: limits,
+                memory_hints: wgpu::MemoryHints::Performance,
+                ..Default::default()
+            })
             .await
             .ok()?;
 
@@ -360,7 +367,8 @@ impl Gpu {
                 label: Some(label),
                 layout: None,
                 module: &module,
-                entry_point: "main",
+                // wgpu 29: `entry_point` is now `Option<&str>` (was `&str`).
+                entry_point: Some("main"),
                 compilation_options: Default::default(),
                 cache: None,
             })
@@ -608,7 +616,12 @@ impl Gpu {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        // wgpu 29: `Maintain::Wait` became `PollType::wait_indefinitely()` (block
+        // on the most recent submission, no timeout — same semantics as before),
+        // and `poll` now returns a `Result` (Err only on device loss / timeout).
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll failed");
         rx.recv()
             .expect("map_async callback dropped")
             .expect("readback map failed");
