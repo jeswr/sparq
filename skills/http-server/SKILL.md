@@ -65,9 +65,11 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > + `X-Frame-Options: DENY` say it is never meant to be framed. Each header is only added when
 > absent, so a custom handler can override one. **Deliberately omitted:** `Strict-Transport-
 > Security` (the origin serves plain HTTP — HSTS belongs on the fronting TLS proxy);
-> `X-XSS-Protection` (deprecated, superseded by CSP); CORS / `Cross-Origin-*` / `Permissions-
-> Policy` (browser-app document policies, meaningless for a no-CORS data API — adding CORS would
-> *widen* the surface). No *blanket* `Cache-Control: no-store` is forced: results are uncached by
+> `X-XSS-Protection` (deprecated, superseded by CSP); `Cross-Origin-*` / `Permissions-Policy`
+> (browser-app document policies, meaningless for a data API). **CORS is OFF by default** (no
+> `Access-Control-*` header — a cross-origin browser read is blocked, the safe posture) but is an
+> opt-in **first-party origin allowlist** (`sq-o7o0`; see "CORS" below). No *blanket*
+> `Cache-Control: no-store` is forced: results are uncached by
 > default (no `ETag`/`Cache-Control: public` is ever set), so there is nothing to tighten, and a
 > blanket value would wrongly override `/health` / `/metrics` — but the sensitive auth-refusal
 > (`401` from `unauthorized()`) **does** carry `Cache-Control: no-store` so a shared cache never
@@ -597,6 +599,8 @@ env overrides the default.
 | `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | opt in to a non-loopback bind; without it a non-loopback `--addr` is **refused** unless the surface is fully authenticated (`--auth-token` AND `--auth-token-read`), with it it warns and proceeds |
 | `--service-allow HOST\|*.SUFFIX` (repeatable) | `SPARQ_SERVICE_ALLOW` (comma/ws-sep) | empty = **deny ALL SERVICE** | (feature `service`) allowlist a SERVICE egress host (exact or `*.suffix` wildcard); CLI + file + env are all merged (combined additively) |
 | `--service-allow-file PATH` | — | — | (feature `service`) load allowlist entries, one per line (`#` comments + blanks ignored) |
+| `--cors-allow-origin ORIGIN` (repeatable) | `SPARQ_CORS_ALLOW_ORIGIN` (comma/ws-sep) | empty = **no CORS headers** | allowlist a first-party browser origin (`scheme://host[:port]`); a listed `Origin` is reflected into `Access-Control-Allow-Origin` (never `*`, never credentials) + `Vary: Origin`, preflight `OPTIONS` answered; CLI + file + env merged additively — see "CORS" |
+| `--cors-allow-origin-file PATH` | — | — | load CORS origins, one per line (`#` comments + blanks ignored) |
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
@@ -695,6 +699,30 @@ Library callers set these on `ServerConfig` (`query_timeout`, `max_query_rows`,
 directly thread a `sparq_engine::QueryBudget { deadline, max_rows, max_bytes }` into
 `*_with_budget` query entry points and `update_in_place_with_budget`, and wrap calls in
 `sparq_engine::with_service_egress_policy(strict, [host], || …)`.
+
+### CORS — off by default; opt-in first-party origin allowlist (`sq-o7o0`, ASVS V14.5.3)
+
+`sparq-server` is a SPARQL **data API**, so by default it emits **no CORS headers** — a
+cross-origin browser `fetch` cannot read its responses (the safe posture). Do nothing and you
+keep that. For a **first-party** browser app on another origin, allowlist its exact origin(s):
+
+```sh
+cargo run -p sparq-server -- --cors-allow-origin https://app.example.org data.ttl
+SPARQ_CORS_ALLOW_ORIGIN='https://app.example.org, http://localhost:5173' \
+  cargo run -p sparq-server -- data.ttl
+# or one origin per line: --cors-allow-origin-file ./cors-origins.txt
+```
+
+Each entry is an RFC 6454 origin `scheme://host[:port]`. CLI + `--cors-allow-origin-file` + env
+merge additively (same precedence as the SERVICE allowlist). When non-empty, a middleware in
+`harden()` reflects an **allowlisted** request `Origin` into `Access-Control-Allow-Origin` (+
+`Vary: Origin`) and answers the `OPTIONS` preflight for it; an **un-listed** origin gets **no**
+CORS header (browser blocks it). Deliberately conservative: **never** `Access-Control-Allow-
+Origin: *`, **never** `Access-Control-Allow-Credentials`, a `*` entry is rejected at startup. It
+is a **browser-read gate only** — it does *not* relax the Bearer-token auth gate, the bind
+posture, the body limit, the SERVICE allowlist, or the row caps (an allowlisted browser still
+needs the token to write). Library callers set `ServerConfig.cors_allow: CorsAllowlist`
+(re-exported at the crate root).
 
 ### Access audit log — opt-in per-query audit trail (`sq-0bxp`, CDMC CD-2)
 

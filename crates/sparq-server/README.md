@@ -101,14 +101,53 @@ hardening header set (ASVS V14.4 / ASVS-G1; beads `sq-cmvh`, `sq-2bhm`), stamped
 Each header is only added when absent, so a handler may override a specific one.
 **Deliberately omitted:** `Strict-Transport-Security` (this origin serves plain HTTP — HSTS
 belongs on the fronting TLS proxy, setting it here is meaningless or wrongly pins a host);
-`X-XSS-Protection` (deprecated, a no-op/harmful in modern browsers, superseded by CSP); and CORS
-/ `Cross-Origin-*` / `Permissions-Policy` (browser-document policies with no meaning for a
-no-CORS data API — adding CORS would *widen* the surface). No *blanket* `Cache-Control: no-store`
+`X-XSS-Protection` (deprecated, a no-op/harmful in modern browsers, superseded by CSP); and
+`Cross-Origin-*` / `Permissions-Policy` (browser-document policies with no meaning for a data
+API). **CORS** is OFF by default (no `Access-Control-*` header is emitted — a cross-origin
+browser read is blocked, which is the safe posture for a public data API) but is an explicit
+**opt-in first-party allowlist** — see the next section. No *blanket* `Cache-Control: no-store`
 is forced: query results are uncached by default (no `ETag` / `Cache-Control: public` is ever
 set), so there is nothing to tighten, and a blanket value would wrongly override `/health` and
 `/metrics`. **The one targeted exception (`sq-2bhm`):** the sensitive auth-refusal — the `401`
 from a gated request without a valid Bearer token — carries `Cache-Control: no-store` so a
 shared cache / proxy never retains it.
+
+### CORS — off by default; opt-in first-party origin allowlist (ASVS V14.5.3; bead `sq-o7o0`)
+
+`sparq-server` is a SPARQL **data API**, so by default it emits **no CORS headers at all**. A
+response with no `Access-Control-Allow-Origin` is, by the browser Same-Origin Policy, unreadable
+to a cross-origin script — exactly the right (and historical) posture for a public, possibly
+unauthenticated endpoint. **Do nothing and you keep that safe default** (no CORS code path even
+runs).
+
+If you serve a **first-party browser app** (a dashboard / query UI) from a *different* origin
+than the endpoint and need it to read responses from `fetch`, allowlist that origin explicitly:
+
+```sh
+# allow one origin (repeatable)
+cargo run -p sparq-server -- --cors-allow-origin https://app.example.org data.ttl
+# or from a file (one origin per line; '#' comments) / the env var (comma- or ws-separated)
+cargo run -p sparq-server -- --cors-allow-origin-file ./cors-origins.txt data.ttl
+SPARQ_CORS_ALLOW_ORIGIN='https://app.example.org, http://localhost:5173' cargo run -p sparq-server -- data.ttl
+```
+
+Each entry is one RFC 6454 origin `scheme://host[:port]` (e.g. `https://app.example.org`,
+`http://localhost:5173`). Sources union additively (env baseline + file + CLI), matching the
+SERVICE allowlist's precedence. When the allowlist is non-empty, a small middleware in
+`harden()`:
+
+- reflects an **allowlisted** request `Origin` into `Access-Control-Allow-Origin` (plus
+  `Vary: Origin`) on every response; an **un-listed** origin gets **no** CORS header (so the
+  browser still blocks it);
+- answers the **`OPTIONS` preflight** (when it carries `Access-Control-Request-Method`) with the
+  allowed methods, the requested/`content-type, authorization` headers, and a `Max-Age`, for an
+  allowlisted origin only.
+
+Deliberately conservative: it **never** emits `Access-Control-Allow-Origin: *` (only an exact
+listed origin is reflected) and **never** sets `Access-Control-Allow-Credentials` (this is for
+reading public query results). A `*` entry is rejected at startup. **CORS is a browser-read gate
+only** — it does *not* relax the Bearer-token auth gate, the bind posture, the body limits, the
+SERVICE egress allowlist, or the row caps; an allowlisted browser still needs the token to write.
 
 ### Error responses do not leak internals (ASVS V7 / ASVS-G3)
 
