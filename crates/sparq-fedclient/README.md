@@ -34,11 +34,14 @@ since (each behind the same default-OFF `fedclient` feature):
   `planner` module's `SourceResolver` (index → adapter resolution) + `lower_leaf` per-leaf
   lowering, and the `operators` module's `materialize_single_source` interpreter +
   `parse_srj` + `solutions_equal` result-equivalence (see below).
+- **Phase 4 — capability-aware pushdown** (`sq-7byx`): the `pushdown` module — FedX
+  exclusive-group decomposition, the maximal pushable sub-algebra per group, the exact
+  common-variable FILTER check, and the cross-group bind-join block primitive (see below).
 - **Phase 6 — brTPF + TPF fragment adapters** (`sq-2qze`): the real Triple-Pattern-Fragments
   adapters (see below).
 
-Still ahead (future beads under epic sq-dnko): capability-aware pushdown (§4.3), the
-streaming operators (§4.4 / §5), and adaptive re-planning (§7).
+Still ahead (future beads under epic sq-dnko): the streaming operators (§4.4 / §5) and
+adaptive re-planning (§7).
 
 The Phase-3 planner bridge + interpreter is detailed under
 [Phase 3 — lower a plan + interpret it against one source](#phase-3--lower-a-plan--interpret-it-against-one-source);
@@ -74,6 +77,51 @@ fragment server (real fetch → parse → bind → paginate → bind-join, zero 
 native HTTP `FragmentTransport` (ureq + the default-deny SSRF resolver, Hydra URI-template
 serialisation, Turtle/TriG fragment parsing) lands with the streaming phase.
 
+## Capability-aware pushdown (Phase 4, `pushdown` module)
+
+The planner decides *which* source answers *which* pattern and in *what* join order; the
+`pushdown` module decides the **most precise sub-query** each source is asked, so a source
+answers a whole sub-pattern in one request rather than one single-pattern `SELECT` per leaf.
+
+- **`exclusive_groups(selection, bgp)`** — the FedX **exclusive-group decomposition**. From
+  the planner's per-pattern source selection it forms the maximal sets of patterns that each
+  have **exactly one** retained source, the **same** source, and are **connected** by a
+  shared variable (transitively, via union-find). These are the sub-BGPs pushable as one
+  sub-query. A pattern matched by two-or-more sources (a cross-source join) or zero sources
+  is **excluded** from every group — it is handled by the operators phase, never folded into
+  a single-source sub-query.
+- **`push_group(group, bgp, cap, output_vars, filters, order_keys, limit)`** — the **maximal
+  sub-algebra builder**. For one group it builds the most precise `SubQuery` the source's
+  `Capability` can answer: the **projection** trimmed to exactly the join + output variables;
+  the FILTER conjuncts the source's `FilterClass` covers AND that pass the common-variable
+  check; `ORDER BY` / `LIMIT` only when the capability's `order_limit` allows. A full endpoint
+  gets the whole group as one multi-pattern `SELECT`; a fragment source (brTPF / plain TPF)
+  answers **one** triple pattern (its access unit), so a multi-pattern group is *not* collapsed
+  and no filter / order / limit is pushed — honest, not an overclaim that a fragment server
+  evaluates a multi-pattern BGP. The result records which conjuncts were **pushed** and which
+  were kept **local** (the residual the local engine still evaluates).
+- **`common_variable_check(filter, group_vars)`** — the **exact** check Comunica is documented
+  to omit (issues #834/#609): a FILTER conjunct is pushed **only when every variable it
+  references is bound by the group's patterns**. A conjunct over a variable a sibling group
+  binds would evaluate against an *unbound* value remote-side and could drop a solution the
+  local plan keeps, so it is kept local. This is the load-bearing safety invariant — push only
+  the provably-identical sub-algebra.
+- **`render_values_block` / `bind_block_size`** — the cross-group **bind-join block**
+  primitive: a `VALUES` block for a full endpoint (block size `DEFAULT_BIND_BLOCK` ≈ FedX's
+  bound-join batch), a `maxMpR`-bounded block for brTPF, no block for plain TPF. The rendering
+  mirrors `sparq-engine`'s `service.rs::render_values_block` byte-for-byte (that function is
+  `pub(crate)`, so it is re-declared here, exactly as Phase 2 re-declares the `Transport`
+  seam). Phase 4 owns the block *construction*; the operator that gathers upstream bindings,
+  slices them into blocks, and streams the per-block matches is Phase 5.
+
+Pushdown only ever **narrows** what a source returns (a pushed FILTER removes solutions, a
+trimmed projection removes columns, a `VALUES`/`maxMpR` block bounds the rows requested) — it
+never adds an answer the residual local join would not reattach, so it is correctness-preserving
+by construction. The FILTER conjuncts are a **light, pre-parsed model** (`Filter`: variable set +
+rendered expression + required `FilterClass`); wiring the real parsed-query FILTER algebra and
+the disjunctive-filter decomposition is Phase 5's job when the operators consume a whole query
+rather than a bare BGP.
+
 ## Public module layout (design §4)
 
 | Module        | Design  | Status / what it holds                                              |
@@ -81,7 +129,7 @@ serialisation, Turtle/TriG fragment parsing) lands with the streaming phase.
 | `source`      | §4.1    | **Phase 2** — `SourceType` (Endpoint \| BrTpf \| Tpf \| Local) + `FederatedSource` trait + `Endpoint` adapter (SSRF-guarded) |
 | `discovery`   | §4.1    | **Phase 1** — VoID/SD discovery → `Capability`; reuses `from_void_nt`; ASK fallback |
 | `planner`     | §4.2    | **Phase 3** — `SourceResolver` index→adapter resolution + `lower_leaf` per-leaf lowering |
-| `pushdown`    | §4.3    | Phase 4 (stub) — maximal pushable sub-algebra per exclusive group; VALUES bind-join |
+| `pushdown`    | §4.3    | **Phase 4** — FedX exclusive groups + maximal pushable sub-algebra per group + exact common-variable FILTER check + bind-join block primitive |
 | `operators`   | §4.4    | **Phase 3** — `materialize_single_source` interpreter + `parse_srj` + `solutions_equal` result-equivalence |
 | `stream`      | §4.4    | Phase 5 (stub) — the `SolutionStream` boundary the client owns (engine stays materialised) |
 
@@ -154,10 +202,10 @@ rather than under-answered.
 
 Landed: Phase 0 (skeleton + boundary proof, `sq-s1uy`), Phase 1 (discovery, `sq-nfxl`),
 Phase 2 (source abstraction + Endpoint adapter, `sq-rsxf`), Phase 3 (planner bridge +
-materialised single-source interpreter, `sq-j27p`), Phase 6 (brTPF/TPF adapters, `sq-2qze`).
-Still ahead under epic **sq-dnko**: capability-aware pushdown (§4.3), the streaming operators
-(§4.4 / §5), and adaptive re-planning (§7). No performance numbers appear here: any "better
-than Comunica" claim in the design record is an
+materialised single-source interpreter, `sq-j27p`), Phase 4 (capability-aware pushdown,
+`sq-7byx`), Phase 6 (brTPF/TPF adapters, `sq-2qze`). Still ahead under epic **sq-dnko**: the
+streaming operators (§4.4 / §5) and adaptive re-planning (§7). No performance numbers appear
+here: any "better than Comunica" claim in the design record is an
 *architectural prediction* to be validated head-to-head before being asserted as fact.
 
-[OPUS-4.8] sq-j27p — flagged for Fable re-review.
+[OPUS-4.8] sq-7byx — flagged for Fable re-review.

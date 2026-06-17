@@ -240,6 +240,22 @@ since:
   + blocking; the `StreamJoin` feeder, concurrent fan-out, pushed-down bind-join, and
   multi-source UNION are Phase 5 (a multi-source leaf fails closed with
   `InterpError::MultiSource`).
+- **Phase 4 capability-aware pushdown** (`sq-7byx`) — the `pushdown` module decides the most
+  precise sub-query each source is asked. `exclusive_groups(selection, bgp)` derives the FedX
+  **exclusive groups** (maximal connected sub-patterns whose only retained source is one
+  member — exactly-one-source, same-source, share-a-variable, via union-find); a cross-source
+  or zero-source pattern is excluded. `push_group(...)` builds the **maximal sub-algebra** per
+  group: projection trimmed to the join + output vars, the FILTER conjuncts the source's
+  `FilterClass` covers AND that pass the common-variable check, `ORDER`/`LIMIT` when the
+  capability allows — a full endpoint gets the whole group as one multi-pattern `SELECT`, a
+  fragment source answers one pattern only (no collapse, no filter pushed — honest about a
+  fragment server's access unit). `common_variable_check(filter, group_vars)` is the **exact**
+  check Comunica omits (#834/#609): push a conjunct only when *every* variable it references is
+  bound by the group. `render_values_block` / `bind_block_size` are the cross-group bind-join
+  block primitive (VALUES for endpoints — `DEFAULT_BIND_BLOCK`; `maxMpR` for brTPF; none for
+  plain TPF), mirroring `sparq-engine`'s `pub(crate)` `service.rs` helpers. Pushdown only ever
+  **narrows** a source's result, so it is correctness-preserving; the FILTER model is light
+  (the parsed-query FILTER algebra wiring is Phase 5).
 - **Phase 6 the brTPF + TPF fragment adapters** (`sq-2qze`): `source::TpfSource` (plain TPF —
   materialise a fragment to exhaustion, no bind-join) and `source::BrTpfSource`
   (bindings-restricted — push `maxMpR`-bounded binding blocks per request, the standardised
@@ -250,9 +266,8 @@ since:
   SPARQL-Results-JSON, so their `FederatedSource::execute` is a deliberate `Unsupported` that
   points at `solutions`).
 
-Still to come (future beads under the epic): capability-aware pushdown, the streaming
-operators + multi-source fan-out, and adaptive re-planning. See
-`crates/sparq-fedclient/README.md`.
+Still to come (future beads under the epic): the streaming operators + multi-source fan-out,
+and adaptive re-planning. See `crates/sparq-fedclient/README.md`.
 
 ## Deferred (NOT here)
 
@@ -262,4 +277,4 @@ a replica mid-stage when a source goes dark — observed latency now *biases the
 toward faster sources, but hard failover needs the live multi-source execution layer this pure
 crate does not own) are out of scope. Filed as roadmap beads under epic **sq-3183**.
 
-[OPUS-4.8] sq-a35t / sq-vf7q / sq-7s4z / sq-b51o — flag for Fable re-review.
+[OPUS-4.8] sq-a35t / sq-vf7q / sq-7s4z / sq-b51o / sq-7byx — flag for Fable re-review.
