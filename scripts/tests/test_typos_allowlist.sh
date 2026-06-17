@@ -13,7 +13,11 @@
 # update keyword roots (SELECT|INSERT|DELETE|…) each followed by a 1-3 char lowercase tail,
 # plus an `invokable` word entry. (sq-uiie: the original sq-hyzq form `\b[A-Z]{3,}[a-z]{1,3}\b`
 # was over-broad — it shielded ANY all-caps run with a short lowercase tail, silently hiding
-# genuine misspellings like RECIEVEd/SEPERATEd; the keyword anchor closes that hole.) This
+# genuine misspelled roots whose suffixed form typos DOES flag: SEPERATEd/MULTIPLYed/OCURRed
+# (typos splits at the case boundary -> SEPERAT/MULTIPL/OCUR -> SEPARATE/MULTIPLE/OCCUR). The
+# keyword anchor closes that hole. sq-k041: the glued mixed-case forms RECIEVEd/ADRESs are NOT
+# such a case — typos never flags those, regex or no; only the bare all-caps RECIEVE/ADRES do.)
+# This
 # harness pins BOTH directions so the allow-list can't silently over- or under-reach later:
 #   - should-PASS (SUPPRESSED): the keyword-suffix family + `invokable` must NOT be flagged.
 #   - should-FAIL (STILL FIRES): a genuine ALL-CAPS misspelling (bare OR with a lowercase
@@ -95,6 +99,16 @@ check FAIL "Keep the two stores seperate."
 check FAIL "The bytes were SEPERATEd into two buffers."  # SEPERATE is not a keyword
 check FAIL "Each value was MULTIPLYed by two."            # MULTIPLY+ed, not a SPARQL verb
 check FAIL "The fault OCURRed under load."                # OCURR(ed) is not a keyword
+
+# --------------------------------------------------------------------------- #
+# [OPUS-4.8] Pin (bead sq-k041): the glued mixed-case forms RECIEVEd/ADRESs were cited by the sq-uiie
+# comment as misspellings the new anchor "recovers" — but typos NEVER flags those glued forms
+# (case-boundary split leaves a mixed-case token it won't correct), regex or no. They are NOT
+# the recovered class. These MUST PASS unconditionally — independent of the keyword anchor —
+# so the comment can't drift back to citing them. (The bare all-caps RECIEVE still FAILs above
+# at line ~81, which is the form typos actually catches.)
+check PASS "The handler RECIEVEd the message."           # glued mixed-case — typos-invisible
+check PASS "The ADRESs field was left blank."            # glued mixed-case — typos-invisible
 
 # --------------------------------------------------------------------------- #
 echo ""
