@@ -563,6 +563,85 @@ impl ShamirDealer {
         Ok(reduced)
     }
 
+    /// [OPUS-4.8] sq-81gd — **test-only INSTRUMENTED degree-reduce that injects a
+    /// deviation `δ` INSIDE the BGW re-sharing step.** This reproduces
+    /// [`Self::degree_reduce`] EXACTLY, except the `reshare_party`-th recombination
+    /// party re-shares `h_i + δ` instead of its true sub-share `h_i` — the genuine
+    /// "Hole 2" malicious deviation that a plain post-hoc share tamper cannot model.
+    ///
+    /// ## Why this is a DIFFERENT, harder attack than tampering the output sharing
+    ///
+    /// The honest reduce re-shares each `h_i` under a FRESH degree-`t` polynomial and
+    /// recombines `Σ_i λ_i·[h_i]`. A deviating party who instead re-shares `h_i + δ`
+    /// emits a **perfectly internally-consistent** degree-`t` codeword (`share()`
+    /// always produces a valid sharing) — so the recombined output `[z]` is a *valid*
+    /// degree-`t` sharing whose secret is `z + λ_i·δ`. There is NO off-curve point,
+    /// NO degree inflation, NOTHING for Reed–Solomon / the robust open to detect:
+    /// every party's share lies exactly on a consistent degree-`t` polynomial. This
+    /// is structurally INDISTINGUISHABLE from an honest reduction of a different
+    /// product. A post-hoc tamper that adds a uniform `δ` to every OUTPUT share's `y`
+    /// (e.g. `auth_compare::tests::tamper_value`) reaches the same *observable* `[z]`,
+    /// but it models tampering the RESULT, not a party deviating INSIDE the reduce;
+    /// crucially it cannot be wired to drive a SOUND-vs-UNSOUND `auth_mul`
+    /// discrimination (see [`MacSession::auth_mul_with_value_reduce_tamper_for_test`]),
+    /// which is the property bead sq-81gd pins.
+    ///
+    /// The `secret_shift` out-param receives `λ_{reshare_party}·δ`, the exact amount
+    /// the reduced secret was shifted — the caller uses it to construct the UNSOUND
+    /// (`[z]·[α]`) MAC that would *track* the tampered value, so the regression test
+    /// can show the unsound design fails to catch what the sound one catches.
+    ///
+    /// Only the recombination parties `0..2t+1` re-share, so `reshare_party` must be
+    /// in that range. NOT part of any production path (`#[cfg(test)]`). `[OPUS-4.8]`
+    #[cfg(test)]
+    pub(crate) fn degree_reduce_tamper_inside_reshare_for_test(
+        &mut self,
+        shares_2t: &[Share],
+        reshare_party: usize,
+        delta: Fp,
+        secret_shift: &mut Fp,
+    ) -> Result<Vec<Share>, MpcError> {
+        assert!(
+            reshare_party < 2 * self.t + 1,
+            "only the first 2t+1 recombination parties re-share"
+        );
+        assert_eq!(shares_2t.len(), self.n, "expected the full n-party sharing");
+
+        let recomb_points: Vec<u64> = shares_2t[..2 * self.t + 1].iter().map(|s| s.x).collect();
+        let lambdas = lagrange_zero_weights(&recomb_points);
+
+        // The deviation: the `reshare_party`-th party re-shares `h_i + δ` instead of
+        // `h_i`. `share()` still emits a perfectly consistent degree-t codeword — the
+        // tamper is invisible to any consistency / RS check, exactly the Hole-2 point.
+        let mut resharings: Vec<Vec<Share>> = Vec::with_capacity(2 * self.t + 1);
+        for (i, s) in shares_2t[..2 * self.t + 1].iter().enumerate() {
+            let to_share = if i == reshare_party {
+                s.y.add(delta)
+            } else {
+                s.y
+            };
+            resharings.push(self.share(to_share));
+        }
+
+        // The reduced secret is shifted by exactly λ_{reshare_party}·δ.
+        *secret_shift = lambdas[reshare_party].mul(delta);
+
+        let mut reduced: Vec<Share> = shares_2t
+            .iter()
+            .map(|s| Share {
+                x: s.x,
+                y: Fp::zero(),
+            })
+            .collect();
+        for (i, sub) in resharings.iter().enumerate() {
+            let lambda = lambdas[i];
+            for (out, sub_share) in reduced.iter_mut().zip(sub.iter()) {
+                out.y = out.y.add(lambda.mul(sub_share.y));
+            }
+        }
+        Ok(reduced)
+    }
+
     /// Reconstruct (RNG-free). Like [`ShamirBackend::reconstruct`], this uses the
     /// consistency-checked / robust path (sq-m34i) when redundancy is present.
     pub fn reconstruct(&self, shares: &[Share]) -> Result<Fp, MpcError> {
@@ -600,6 +679,26 @@ impl ShamirDealer {
             key,
         }
     }
+}
+
+/// [OPUS-4.8] sq-81gd — **test-only** selector for how
+/// [`MacSession::auth_mul_with_value_reduce_tamper_for_test`] carries the output MAC.
+/// It exists ONLY so the regression suite can run the SAME in-reduce VALUE tamper
+/// against BOTH the sound and the (rejected) unsound MAC-carry and PROVE they
+/// diverge — the production [`MacSession::auth_mul`] is hard-wired to the sound route
+/// and offers no such toggle. `#[cfg(test)]`.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MacCarry {
+    /// PRODUCTION route: `[α·z] = reduce([α·x]·[y])` — an INDEPENDENT reduce over the
+    /// input MAC that never saw the VALUE-reduce tamper, so it holds the TRUE `α·z`
+    /// and the batched check fires on a tampered value.
+    SoundIndependentReduce,
+    /// REJECTED route (design §2.4 warning): `[α·z] = reduce([z]·[α])` from the
+    /// just-reduced (tampered) value times `[α]`, so the MAC TRACKS the tampered
+    /// value and the batched check is fooled (`σ = 0`). Used only to demonstrate the
+    /// false-negative the sound route avoids.
+    UnsoundFromValueTimesAlpha,
 }
 
 /// An **IT-MAC authenticated-sharing session** bound to a single session-global,
@@ -774,6 +873,62 @@ impl MacSession<'_> {
         //    bead sq-81gd.
         let mac_2t = mul_shares_raw(x.mac_shares(), y.value_shares())?;
         let mac = self.dealer.degree_reduce(&mac_2t)?;
+        crate::authenticated::AuthenticatedShare::new(z, mac)
+    }
+
+    /// [OPUS-4.8] sq-81gd — **test-only `auth_mul` whose VALUE degree-reduce is
+    /// tampered INSIDE the re-sharing step (the genuine Hole-2 deviation), with a
+    /// SOUND-vs-UNSOUND toggle for how the MAC is carried.** This is the harness the
+    /// production tamper helpers cannot express: it lets the regression test inject
+    /// `δ` into the BGW re-sharing of the VALUE product
+    /// ([`ShamirDealer::degree_reduce_tamper_inside_reshare_for_test`], so `[z]` is a
+    /// *perfectly consistent* degree-`t` sharing of `z + λ·δ`, undetectable by RS),
+    /// then compute the output MAC by one of two routes:
+    ///
+    /// - **`MacCarry::SoundIndependentReduce`** — the PRODUCTION route: `[α·z] =
+    ///   reduce([α·x]·[y])`, an INDEPENDENT reduce over the input MAC `[α·x]` that
+    ///   never saw `δ`. The MAC therefore holds the TRUE `α·z`, so `σ = α·z −
+    ///   (z+λδ)·α = −λδ·α ≠ 0` and [`Self::mac_check`] ABORTS.
+    /// - **`MacCarry::UnsoundFromValueTimesAlpha`** — the REJECTED route the design
+    ///   doc warns against: `[α·z] = reduce([z]·[α])` from the JUST-REDUCED (tampered)
+    ///   value times `[α]`. The MAC then tracks the tampered `z + λδ`, so `σ = 0` and
+    ///   [`Self::mac_check`] PASSES — a SILENT WRONG result.
+    ///
+    /// The two routes diverging on the SAME in-reduce tamper is exactly what the
+    /// current harness cannot show (a post-hoc value tamper happens AFTER the unsound
+    /// `[z]·[α]` recompute too, so even the unsound design would catch it). `[OPUS-4.8]`
+    #[cfg(test)]
+    pub(crate) fn auth_mul_with_value_reduce_tamper_for_test(
+        &mut self,
+        x: &crate::authenticated::AuthenticatedShare,
+        y: &crate::authenticated::AuthenticatedShare,
+        reshare_party: usize,
+        delta: Fp,
+        mac_carry: MacCarry,
+    ) -> Result<crate::authenticated::AuthenticatedShare, MpcError> {
+        // 1. VALUE product reduced with a δ injected INSIDE the re-sharing: [z] is a
+        //    consistent degree-t sharing of (true z) + λ_{reshare_party}·δ.
+        let z_2t = mul_shares_raw(x.value_shares(), y.value_shares())?;
+        let mut secret_shift = Fp::zero();
+        let z = self.dealer.degree_reduce_tamper_inside_reshare_for_test(
+            &z_2t,
+            reshare_party,
+            delta,
+            &mut secret_shift,
+        )?;
+
+        let mac = match mac_carry {
+            // SOUND: independent reduce of [α·x]·[y]; never saw δ → holds true α·z.
+            MacCarry::SoundIndependentReduce => {
+                let mac_2t = mul_shares_raw(x.mac_shares(), y.value_shares())?;
+                self.dealer.degree_reduce(&mac_2t)?
+            }
+            // UNSOUND: [α·z] = reduce([z]·[α]) — tracks whatever (tampered) z carried.
+            MacCarry::UnsoundFromValueTimesAlpha => {
+                let mac_2t = mul_shares_raw(&z, self.key.alpha_shares())?;
+                self.dealer.degree_reduce(&mac_2t)?
+            }
+        };
         crate::authenticated::AuthenticatedShare::new(z, mac)
     }
 
