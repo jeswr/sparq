@@ -18,9 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sparq_core::Graph;
-use sparq_serve::{
-    CommitGranularity, GenerationRing, GraphApplier, PodId, Writer, WriterConfig,
-};
+use sparq_serve::{CommitGranularity, GenerationRing, GraphApplier, PodId, Writer, WriterConfig};
 
 fn empty_graph() -> Graph {
     Graph::load_str("", "ntriples").expect("empty graph")
@@ -50,15 +48,23 @@ fn run_stream(granularity: CommitGranularity, updates: &[(&str, &str)]) -> (usiz
         GraphApplier::new(),
         // Wide window + large max_batch so every update joins ONE window; the
         // granularity then decides how many generations that window publishes.
-        WriterConfig { window: Duration::from_millis(120), max_batch: 4096, granularity },
+        WriterConfig {
+            window: Duration::from_millis(120),
+            max_batch: 4096,
+            granularity,
+        },
     );
     // Submit all but the last detached, then a sync submit to force the window to
     // have opened and collected everyone before we read.
     for (upd, pod) in &updates[..updates.len() - 1] {
-        writer.submit_detached((*upd).to_string(), [PodId::from(*pod)]).unwrap();
+        writer
+            .submit_detached((*upd).to_string(), [PodId::from(*pod)])
+            .unwrap();
     }
     let (last_upd, last_pod) = updates[updates.len() - 1];
-    writer.submit(last_upd.to_string(), [PodId::from(last_pod)]).unwrap();
+    writer
+        .submit(last_upd.to_string(), [PodId::from(last_pod)])
+        .unwrap();
     drop(writer); // drain any straggler
     let current = ring.current();
     (total_quads(current.snapshot()), current.number())
@@ -114,14 +120,23 @@ fn same_graph_opposite_polarity_splits_but_result_identical() {
     // INS_A0 then DEL_A0 (deletes what was inserted) then INS_A1.
     let stream = [(INS_A0, "a"), (DEL_A0, "a"), (INS_A1, "a")];
     let serial = serial_result(&stream);
-    assert_eq!(serial, 1, "insert s0, delete s0, insert s1 → only s1 remains");
+    assert_eq!(
+        serial, 1,
+        "insert s0, delete s0, insert s1 → only s1 remains"
+    );
 
     let (win_len, win_gen) = run_stream(CommitGranularity::Window, &stream);
     let (cg_len, cg_gen) = run_stream(CommitGranularity::CommuteGroup, &stream);
 
     assert_eq!(win_len, serial);
-    assert_eq!(cg_len, serial, "CommuteGroup result == serial despite group splits");
-    assert_eq!(win_gen, 1, "Window collapses the whole window into one generation");
+    assert_eq!(
+        cg_len, serial,
+        "CommuteGroup result == serial despite group splits"
+    );
+    assert_eq!(
+        win_gen, 1,
+        "Window collapses the whole window into one generation"
+    );
     assert!(
         cg_gen > 1,
         "CommuteGroup splits at the insert/delete polarity conflict (got {cg_gen} generations)"
@@ -132,8 +147,7 @@ fn same_graph_opposite_polarity_splits_but_result_identical() {
 /// singleton generation, but the final result is still serial-identical.
 #[test]
 fn where_update_is_a_barrier_result_identical() {
-    let where_upd =
-        "INSERT { GRAPH <http://ex/a> { ?s <http://ex/q> \"copy\" } } \
+    let where_upd = "INSERT { GRAPH <http://ex/a> { ?s <http://ex/q> \"copy\" } } \
          WHERE { GRAPH <http://ex/a> { ?s <http://ex/p> \"v\" } }";
     let stream = [(INS_A0, "a"), (where_upd, "a"), (INS_B0, "b")];
     let serial = serial_result(&stream);
@@ -141,8 +155,14 @@ fn where_update_is_a_barrier_result_identical() {
     assert_eq!(serial, 3);
 
     let (cg_len, cg_gen) = run_stream(CommitGranularity::CommuteGroup, &stream);
-    assert_eq!(cg_len, serial, "barrier update still produces the serial result");
-    assert!(cg_gen >= 2, "the WHERE barrier forces at least one extra generation (got {cg_gen})");
+    assert_eq!(
+        cg_len, serial,
+        "barrier update still produces the serial result"
+    );
+    assert!(
+        cg_gen >= 2,
+        "the WHERE barrier forces at least one extra generation (got {cg_gen})"
+    );
 }
 
 /// Pseudo-random differential fuzz: many mixed inserts/deletes across a small set
@@ -152,7 +172,9 @@ fn fuzz_differential_window_vs_commute_vs_serial() {
     // A deterministic LCG so the stream is reproducible.
     let mut state: u64 = 0x9E3779B97F4A7C15;
     let mut next = || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         state >> 33
     };
     let graphs = ["http://ex/g0", "http://ex/g1", "http://ex/g2"];
@@ -162,9 +184,8 @@ fn fuzz_differential_window_vs_commute_vs_serial() {
         let subj = next() % 20;
         let del = next() % 2 == 0;
         let op = if del { "DELETE" } else { "INSERT" };
-        let upd = format!(
-            "{op} DATA {{ GRAPH <{g}> {{ <http://ex/s{subj}> <http://ex/p> \"v\" }} }}"
-        );
+        let upd =
+            format!("{op} DATA {{ GRAPH <{g}> {{ <http://ex/s{subj}> <http://ex/p> \"v\" }} }}");
         let pod = g.rsplit('/').next().unwrap();
         owned.push((upd, pod));
     }

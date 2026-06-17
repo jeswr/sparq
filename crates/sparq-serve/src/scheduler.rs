@@ -117,7 +117,10 @@ pub const DEFAULT_HEAVY_THRESHOLD: Cost = 4_096;
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
-        let workers = thread::available_parallelism().map(|n| n.get()).unwrap_or(8).max(2);
+        let workers = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+            .max(2);
         SchedulerConfig {
             workers,
             heavy_concurrency: (workers / 2).max(1),
@@ -130,7 +133,8 @@ impl SchedulerConfig {
     /// Resolved heavy-concurrency cap, clamped to `1..=workers-1` so at least one
     /// worker is always reservable for cheap jobs.
     fn heavy_cap(&self) -> usize {
-        self.heavy_concurrency.clamp(1, self.workers.saturating_sub(1).max(1))
+        self.heavy_concurrency
+            .clamp(1, self.workers.saturating_sub(1).max(1))
     }
 }
 
@@ -261,7 +265,10 @@ enum SlotState<T> {
 
 impl<T> Slot<T> {
     fn new() -> Arc<Self> {
-        Arc::new(Slot { state: Mutex::new(SlotState::Pending), ready: Condvar::new() })
+        Arc::new(Slot {
+            state: Mutex::new(SlotState::Pending),
+            ready: Condvar::new(),
+        })
     }
 
     fn deliver(&self, outcome: Result<T, SchedError>) {
@@ -335,7 +342,10 @@ impl<T: Send + 'static> Scheduler<T> {
             );
         }
         Arc::new(Scheduler {
-            cfg: SchedulerConfig { workers: workers_n, ..cfg },
+            cfg: SchedulerConfig {
+                workers: workers_n,
+                ..cfg
+            },
             heavy_cap,
             queues,
             seq: AtomicU64::new(0),
@@ -363,7 +373,11 @@ impl<T: Send + 'static> Scheduler<T> {
         F: FnOnce() -> T + Send + 'static,
     {
         let slot = Slot::new();
-        let lane = if cost >= self.cfg.heavy_threshold { Lane::Heavy } else { Lane::Cheap };
+        let lane = if cost >= self.cfg.heavy_threshold {
+            Lane::Heavy
+        } else {
+            Lane::Cheap
+        };
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let job = Job {
             seq,
@@ -402,7 +416,11 @@ impl<T: Send + 'static> Scheduler<T> {
     /// The lane a given cost maps to under this scheduler's config (exposed for
     /// callers/metrics that classify before submitting).
     pub fn lane_of(&self, cost: Cost) -> Lane {
-        if cost >= self.cfg.heavy_threshold { Lane::Heavy } else { Lane::Cheap }
+        if cost >= self.cfg.heavy_threshold {
+            Lane::Heavy
+        } else {
+            Lane::Cheap
+        }
     }
 
     /// Total jobs submitted since construction.
@@ -560,7 +578,10 @@ fn pick_heavy<T>(heavy: &mut Vec<Job<T>>) -> Job<T> {
 }
 
 fn heavy_key<T>(job: &Job<T>) -> HeavyKey {
-    HeavyKey { cost: job.cost, enqueued: job.enqueued }
+    HeavyKey {
+        cost: job.cost,
+        enqueued: job.enqueued,
+    }
 }
 
 /// Runs `work`, catching a panic and reporting it as [`SchedError::Panicked`]

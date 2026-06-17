@@ -37,7 +37,11 @@ fn direct(graph: &Graph) -> String {
 #[test]
 fn scheduled_query_matches_direct_execution_on_pinned_generation() {
     let ring = Arc::new(GenerationRing::new(graph_with(100)));
-    let sched = Scheduler::new(SchedulerConfig { workers: 4, heavy_concurrency: 2, heavy_threshold: 10_000 });
+    let sched = Scheduler::new(SchedulerConfig {
+        workers: 4,
+        heavy_concurrency: 2,
+        heavy_threshold: 10_000,
+    });
 
     // Submit many queries; each pins the CURRENT generation inside the closure and
     // runs the engine. We compare to a direct run on a generation pinned now.
@@ -58,7 +62,10 @@ fn scheduled_query_matches_direct_execution_on_pinned_generation() {
     for t in tickets {
         let (num, got) = t.wait().expect("scheduled query ok");
         assert_eq!(num, 0, "no writes happened, all reads see generation 0");
-        assert_eq!(got, expected, "scheduled result must equal direct execution");
+        assert_eq!(
+            got, expected,
+            "scheduled result must equal direct execution"
+        );
     }
 }
 
@@ -67,7 +74,11 @@ fn snapshot_consistency_preserved_under_concurrent_writes() {
     // A reader scheduled at generation G must see exactly G's state even as the
     // writer publishes past it — the scheduler must not perturb the A1 pin.
     let ring = Arc::new(GenerationRing::new(graph_with(50)));
-    let sched = Scheduler::new(SchedulerConfig { workers: 4, heavy_concurrency: 2, heavy_threshold: 10_000 });
+    let sched = Scheduler::new(SchedulerConfig {
+        workers: 4,
+        heavy_concurrency: 2,
+        heavy_threshold: 10_000,
+    });
 
     // Pin generation 0 BEFORE any writes; schedule a job that reads it but is held
     // until after the writer has advanced the ring. The job captures the pinned
@@ -82,7 +93,9 @@ fn snapshot_consistency_preserved_under_concurrent_writes() {
         let upd = format!(
             "INSERT DATA {{ GRAPH <http://pod/{i}> {{ <http://ex/s{i}> <http://ex/p> \"new{i}\" }} }}"
         );
-        writer.submit(upd, [PodId::from(format!("http://pod/{i}").as_str())]).expect("write ok");
+        writer
+            .submit(upd, [PodId::from(format!("http://pod/{i}").as_str())])
+            .expect("write ok");
     }
 
     // The job that pinned generation 0 must still report generation-0 state.
@@ -92,14 +105,20 @@ fn snapshot_consistency_preserved_under_concurrent_writes() {
     let exp0 = expected0.clone();
     let held = sched.submit(1, move || {
         let got = direct(p0.snapshot());
-        assert_eq!(got, exp0, "pinned generation-0 read must be unchanged by concurrent writes");
+        assert_eq!(
+            got, exp0,
+            "pinned generation-0 read must be unchanged by concurrent writes"
+        );
         let count = sparq_engine::count(p0.snapshot(), "SELECT * WHERE { GRAPH ?gr { ?s ?p ?o } }")
             .unwrap_or(0);
         (p0.number(), count)
     });
     let (num, held_named_count) = held.wait().expect("held read ok");
     assert_eq!(num, 0, "the held read stayed on generation 0");
-    assert_eq!(held_named_count, 0, "generation 0 has no named-graph triples — the writes are invisible to it");
+    assert_eq!(
+        held_named_count, 0,
+        "generation 0 has no named-graph triples — the writes are invisible to it"
+    );
 
     // A fresh read scheduled now sees the advanced state (more triples, higher gen).
     let ring2 = ring.clone();
@@ -110,8 +129,14 @@ fn snapshot_consistency_preserved_under_concurrent_writes() {
         (g.number(), count)
     });
     let (fresh_num, fresh_named_count) = fresh.wait().expect("fresh read ok");
-    assert!(fresh_num >= 1, "fresh read should see at least one published generation, saw {fresh_num}");
-    assert_eq!(fresh_named_count, 20, "the 20 named-graph inserts are visible to a fresh read");
+    assert!(
+        fresh_num >= 1,
+        "fresh read should see at least one published generation, saw {fresh_num}"
+    );
+    assert_eq!(
+        fresh_named_count, 20,
+        "the 20 named-graph inserts are visible to a fresh read"
+    );
 
     // Clean shutdown.
     drop(writer);

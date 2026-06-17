@@ -100,8 +100,14 @@ impl Footprint {
     pub fn commutes_with(&self, other: &Footprint) -> bool {
         match (self, other) {
             (
-                Footprint::Data { inserts: i1, deletes: d1 },
-                Footprint::Data { inserts: i2, deletes: d2 },
+                Footprint::Data {
+                    inserts: i1,
+                    deletes: d1,
+                },
+                Footprint::Data {
+                    inserts: i2,
+                    deletes: d2,
+                },
             ) => i1.is_disjoint(d2) && d1.is_disjoint(i2),
             _ => false,
         }

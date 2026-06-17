@@ -247,7 +247,9 @@ impl std::fmt::Display for WriteError {
         match self {
             WriteError::Rejected(e) => write!(f, "update rejected: {e}"),
             WriteError::Shutdown => f.write_str("writer has shut down"),
-            WriteError::Unavailable(e) => write!(f, "update not durably committed (retryable): {e}"),
+            WriteError::Unavailable(e) => {
+                write!(f, "update not durably committed (retryable): {e}")
+            }
         }
     }
 }
@@ -294,7 +296,11 @@ pub struct Writer<U: Send + 'static> {
 impl<U: Send + 'static> Writer<U> {
     /// Spawns the writer thread over `ring`, owning `applier` as its snapshot
     /// production strategy.
-    pub fn spawn<A>(ring: Arc<GenerationRing<A::Snapshot>>, applier: A, config: WriterConfig) -> Self
+    pub fn spawn<A>(
+        ring: Arc<GenerationRing<A::Snapshot>>,
+        applier: A,
+        config: WriterConfig,
+    ) -> Self
     where
         A: ApplyUpdates<Update = U>,
     {
@@ -303,7 +309,10 @@ impl<U: Send + 'static> Writer<U> {
             .name("sparq-serve-writer".into())
             .spawn(move || run(ring, applier, config, rx))
             .expect("spawn writer thread");
-        Writer { tx: Some(tx), thread: Some(thread) }
+        Writer {
+            tx: Some(tx),
+            thread: Some(thread),
+        }
     }
 
     /// Submits an update and **blocks until the generation containing it is
@@ -327,7 +336,11 @@ impl<U: Send + 'static> Writer<U> {
         touched: impl IntoIterator<Item = PodId>,
     ) -> Result<u64, WriteError> {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        self.send(Msg { update, touched: touched.into_iter().collect(), ack: Some(ack_tx) })?;
+        self.send(Msg {
+            update,
+            touched: touched.into_iter().collect(),
+            ack: Some(ack_tx),
+        })?;
         // A dropped ack sender means the writer thread died mid-batch.
         ack_rx.recv().map_err(|_| WriteError::Shutdown)?
     }
@@ -361,7 +374,11 @@ impl<U: Send + 'static> Writer<U> {
         update: U,
         touched: impl IntoIterator<Item = PodId>,
     ) -> Result<(), WriteError> {
-        self.send(Msg { update, touched: touched.into_iter().collect(), ack: None })
+        self.send(Msg {
+            update,
+            touched: touched.into_iter().collect(),
+            ack: None,
+        })
     }
 
     fn send(&self, msg: Msg<U>) -> Result<(), WriteError> {
@@ -567,7 +584,9 @@ fn commit<A: ApplyUpdates>(
         Ok(s) => s,
         Err(e) => return fail_batch_after_seal_error(batch, errs, &e),
     };
-    let touched = applied.iter().flat_map(|&i| batch[i].touched.iter().cloned());
+    let touched = applied
+        .iter()
+        .flat_map(|&i| batch[i].touched.iter().cloned());
     let number = ring.publish(snapshot, touched).number();
     for (i, msg) in batch.into_iter().enumerate() {
         if let Some(ack) = msg.ack {

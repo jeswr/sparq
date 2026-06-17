@@ -20,7 +20,13 @@ fn graph_with(n: usize) -> Graph {
 
 #[test]
 fn ring_serves_real_graph_snapshots_consistently() {
-    let ring = GenerationRing::with_config(graph_with(2), RingConfig { retain: 2, ..RingConfig::default() });
+    let ring = GenerationRing::with_config(
+        graph_with(2),
+        RingConfig {
+            retain: 2,
+            ..RingConfig::default()
+        },
+    );
 
     let gen0 = ring.current();
     assert_eq!(gen0.snapshot().len(), 2);
@@ -34,7 +40,11 @@ fn ring_serves_real_graph_snapshots_consistently() {
     // The pinned generation still answers at its own state — snapshot-consistent
     // streaming is free by construction (§6.6).
     assert_eq!(gen0.number(), 0);
-    assert_eq!(gen0.snapshot().len(), 2, "pinned graph unchanged after 6 publishes");
+    assert_eq!(
+        gen0.snapshot().len(),
+        2,
+        "pinned graph unchanged after 6 publishes"
+    );
     let current = ring.current();
     assert_eq!(current.number(), 6);
     assert_eq!(current.snapshot().len(), 8);
