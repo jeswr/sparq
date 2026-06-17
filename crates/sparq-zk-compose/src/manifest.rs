@@ -531,6 +531,39 @@ pub enum CircuitId {
     /// `sparq_zk_compose_core::filter_float::filter_f64_composable_check`.
     // [OPUS-4.8] sq-q7e + sq-tat: FilterF64 is now manifest-composable (carries d).
     FilterF64 { d: u32 },
+    /// `filter_signed_int_d{md}` — MANIFEST-COMPOSABLE hidden SIGNED xsd:integer
+    /// FILTER with `md` MAGNITUDE digits (the optional leading `-` is bound into the
+    /// canonical token, not counted in `md`) ([OPUS-4.8] sq-7lrq, the sq-1q9h
+    /// member). Extends [`Self::FilterInt`] (canonical NON-negative only) to negative
+    /// coordinates / amounts: the hidden operand is bound to the committed literal
+    /// via the canonical `"[-]?<digits>"^^<…#integer>` token (blake3, the same
+    /// mechanism as `filter_int`), and the sign-aware comparison runs over the `u64`
+    /// magnitude (`sparq_zk_compose_core::filter_signed::filter_signed_int_check`).
+    /// `md` selects the compiled member exactly as `filter_int`'s `d` does (the
+    /// `mag_digits: [u8; MD]` witness pins the operand's magnitude-digit count to
+    /// `MD`), so a `md`-magnitude-digit operand is provable ONLY by the `MD == md`
+    /// member — the same EXACT-match discipline (sq-wto) the filter_int / filter_f64
+    /// families use.
+    // [OPUS-4.8] sq-7lrq: signed xsd:integer FILTER is now manifest-composable.
+    FilterSignedInt { md: u32 },
+    /// `filter_decimal_i{id}_f{fd}` — MANIFEST-COMPOSABLE hidden xsd:decimal FILTER
+    /// with `id` integer-part digits and `fd` fraction digits (e.g. `"123.45"` =>
+    /// `id=3`, `fd=2`) ([OPUS-4.8] sq-7lrq, the sq-1q9h member). The hidden operand
+    /// is bound to the committed literal via the canonical
+    /// `"[-]?<int>.<frac>"^^<…#decimal>` token (blake3, the same mechanism as
+    /// `filter_int`), and the comparison is fixed-point at `fd` places against a
+    /// HOST-PRESCALED constant (`bound_scaled = round(|bound| * 10^fd)` carried as a
+    /// public input) — `sparq_zk_compose_core::filter_signed::filter_decimal_check`.
+    /// `(id, fd)` selects the compiled member: the `int_digits: [u8; ID]` /
+    /// `frac_digits: [u8; FD]` witnesses pin the operand's integer-digit AND
+    /// fraction-digit counts to `(ID, FD)` exactly, so an operand is provable ONLY by
+    /// the member whose `(ID, FD)` equals its `(id, fd)` (EXACT-match discipline,
+    /// sq-wto). The general fractional/scientific xsd:double fragment (an in-circuit
+    /// decimal→IEEE RNE parser over an arbitrary lexical form) remains DEFERRED — see
+    /// `filter_float.nr` and the README "sparq-zk API gaps"; this member is the
+    /// fixed-point decimal fragment, not that parser.
+    // [OPUS-4.8] sq-7lrq: xsd:decimal FILTER is now manifest-composable.
+    FilterDecimal { id: u32, fd: u32 },
     /// `revoke_unset_d{depth}` — hidden-index status-list inclusion + bit-unset
     /// proof over a depth-`depth` Poseidon2 Merkle tree (sq-3e5 / sq-h2v). The
     /// proof's PUBLIC inputs are `challenge` + the status-list Merkle `root`; the
@@ -613,6 +646,12 @@ impl CircuitId {
             CircuitId::Scan { k, n, r } => format!("scan_k{k}_n{n}_r{r}"),
             CircuitId::FilterInt { d } => format!("filter_int_d{d}"),
             CircuitId::FilterF64 { d } => format!("filter_f64_d{d}"),
+            // [OPUS-4.8] sq-7lrq: the `md` magnitude-digit count names the compiled
+            // signed-int member, e.g. `filter_signed_int_d2`.
+            CircuitId::FilterSignedInt { md } => format!("filter_signed_int_d{md}"),
+            // [OPUS-4.8] sq-7lrq: the `(id, fd)` integer/fraction digit counts name
+            // the compiled decimal member, e.g. `filter_decimal_i3_f2`.
+            CircuitId::FilterDecimal { id, fd } => format!("filter_decimal_i{id}_f{fd}"),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
             CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
             // [OPUS-4.8] sq-xqfg (HolderPoP T5): depth-free single member.
@@ -690,6 +729,56 @@ pub enum ProofInputs {
         /// The disclosed verdict.
         expected: bool,
     },
+    /// filter_signed_int_d{md}: MANIFEST-COMPOSABLE hidden-operand numeric FILTER
+    /// over a SIGNED xsd:integer ([OPUS-4.8] sq-7lrq). Public inputs mirror the
+    /// member `main` (`zk/compose/filter_signed_int_d{md}/src/main.nr`), in
+    /// declaration order AFTER the prepended `challenge`: operand_enc, op, bound_neg,
+    /// bound, expected. The hidden operand is bound to the committed literal by
+    /// `operand_enc` (the scan-proof anchor, same as `filter_int`); the FILTER's
+    /// constant is carried sign-split as `(bound_neg, bound)` (`bound` = the `u64`
+    /// magnitude), so the in-circuit signed comparison sees the full signed constant.
+    /// The operand's SIGN and magnitude digits are PRIVATE witnesses.
+    #[serde(rename = "filter_signed_int")]
+    FilterSignedInt {
+        id: CircuitId,
+        /// The hidden column's term encoding (the scan-proof anchor) — bound
+        /// in-circuit to the committed signed xsd:integer literal via its canonical
+        /// `"[-]?<digits>"^^<…#integer>` token.
+        operand_enc: FieldHex,
+        op: FilterOp,
+        /// Sign of the FILTER's constant operand (`true` = negative).
+        bound_neg: bool,
+        /// `|FILTER constant operand|` — the unsigned magnitude.
+        bound: u64,
+        /// The disclosed verdict.
+        expected: bool,
+    },
+    /// filter_decimal_i{id}_f{fd}: MANIFEST-COMPOSABLE hidden-operand numeric FILTER
+    /// over an xsd:decimal ([OPUS-4.8] sq-7lrq). Public inputs mirror the member
+    /// `main` (`zk/compose/filter_decimal_i{id}_f{fd}/src/main.nr`), in declaration
+    /// order AFTER the prepended `challenge`: operand_enc, op, bound_neg,
+    /// bound_scaled, expected. The hidden operand is bound to the committed literal
+    /// by `operand_enc`; the FILTER's constant is carried as the sign +
+    /// HOST-PRESCALED magnitude `bound_scaled = round(|bound| * 10^fd)` (so the
+    /// fixed-point comparison at `fd` places stays in the integer domain). The
+    /// operand's SIGN, integer-part digits, and fraction digits are PRIVATE witnesses.
+    #[serde(rename = "filter_decimal")]
+    FilterDecimal {
+        id: CircuitId,
+        /// The hidden column's term encoding (the scan-proof anchor) — bound
+        /// in-circuit to the committed xsd:decimal literal via its canonical
+        /// `"[-]?<int>.<frac>"^^<…#decimal>` token.
+        operand_enc: FieldHex,
+        op: FilterOp,
+        /// Sign of the FILTER's constant operand (`true` = negative).
+        bound_neg: bool,
+        /// `round(|FILTER constant operand| * 10^fd)` — the host-prescaled magnitude
+        /// the in-circuit fixed-point comparison uses (`fd` = the member's fraction
+        /// digit count).
+        bound_scaled: u64,
+        /// The disclosed verdict.
+        expected: bool,
+    },
     /// `join_eq_na{n_a}_nb{n_b}`: hidden cross-credential JOIN
     /// (sq-bwwl / sq-fi03, `research/zk-hidden-join-design.md` §2.2/§3.2). These
     /// fields are EXACTLY the `pub` parameters of the `join_eq` member `main`, in
@@ -740,6 +829,9 @@ impl ProofInputs {
             ProofInputs::Scan { id, .. } => id,
             ProofInputs::FilterInt { id, .. } => id,
             ProofInputs::FilterF64 { id, .. } => id,
+            // [OPUS-4.8] sq-7lrq: signed xsd:integer / xsd:decimal composable FILTERs.
+            ProofInputs::FilterSignedInt { id, .. } => id,
+            ProofInputs::FilterDecimal { id, .. } => id,
             // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN.
             ProofInputs::JoinEq { id, .. } => id,
         }

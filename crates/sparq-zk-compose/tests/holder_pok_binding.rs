@@ -421,6 +421,7 @@ fn prove_scan(prover: &CircuitProver, salt: Fr, tag: &str) -> (ProofInputs, Stri
         &scan.witness.enc,
         &[],
         None,
+        None,
     )
     .unwrap();
     let out = scratch(&format!("{tag}_scan"));

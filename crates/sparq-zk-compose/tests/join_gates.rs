@@ -789,6 +789,7 @@ fn full_bb_join_accept_real_proof() {
         &scan_a.witness.enc,
         &[],
         None,
+        None,
     )
     .expect("scan A toml");
     let sa_art = prover
@@ -809,6 +810,7 @@ fn full_bb_join_accept_real_proof() {
         &scan_b.witness.enc,
         &[],
         None,
+        None,
     )
     .expect("scan B toml");
     let sb_art = prover
@@ -827,6 +829,7 @@ fn full_bb_join_accept_real_proof() {
         &[],
         &[],
         Some(&built_join.witness),
+        None,
     )
     .expect("join toml emits with the witness");
     assert_eq!(j_id, CircuitId::JoinEq { n_a: 16, n_b: 16 });

@@ -104,7 +104,8 @@
 //! bits) and the verifier's nonce to the proofs.
 
 use crate::build::{
-    derive_filter_f64_id, derive_filter_int_id, derive_join_eq_id, derive_scan_id,
+    derive_filter_decimal_id, derive_filter_f64_id, derive_filter_int_id,
+    derive_filter_signed_int_id, derive_join_eq_id, derive_scan_id,
 };
 use crate::driver::{CircuitProver, DriverError};
 use crate::manifest::{
@@ -1892,6 +1893,30 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
             };
             derive_filter_f64_id(d)
         }
+        // [OPUS-4.8] sq-7lrq: composable SIGNED xsd:integer FILTER. As with
+        // filter_int, the operand's MAGNITUDE-digit count is PRIVATE; the declared
+        // `md` is re-checked against the compiled signed-int family only (it must be
+        // a compiled MD). The full CircuitId is what the public-input reconstruction
+        // + canonical-vk recompute pin, so a wrong `md` cannot byte-match a real
+        // member's proof.
+        ProofInputs::FilterSignedInt { .. } => {
+            let md = match inputs.circuit_id() {
+                CircuitId::FilterSignedInt { md } => *md,
+                _ => return None,
+            };
+            derive_filter_signed_int_id(md)
+        }
+        // [OPUS-4.8] sq-7lrq: composable xsd:decimal FILTER. The operand's
+        // integer-/fraction-digit counts are PRIVATE; the declared `(id, fd)` is
+        // re-checked against the compiled decimal family only (it must be a compiled
+        // shape). The full CircuitId is what the reconstruction + canonical-vk pin.
+        ProofInputs::FilterDecimal { .. } => {
+            let (id, fd) = match inputs.circuit_id() {
+                CircuitId::FilterDecimal { id, fd } => (*id, *fd),
+                _ => return None,
+            };
+            derive_filter_decimal_id(id, fd)
+        }
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN. The
         // two graph sizes are PRIVATE (the witnessed graph contents are not public
         // inputs — only the commitments are), so — exactly as scan trusts the
@@ -2046,9 +2071,15 @@ pub fn prefilter_manifest_structure(
         // column into EITHER an xsd:integer FILTER (filter_int) or a composable
         // xsd:double FILTER (filter_f64) — both carry `operand_enc` as the
         // scan-proof anchor, bound to the committed literal in-circuit.
+        // [OPUS-4.8] sq-7lrq: a binding edge may also consume the scanned column
+        // into a SIGNED xsd:integer FILTER (filter_signed_int) or an xsd:decimal
+        // FILTER (filter_decimal); both carry `operand_enc` as the scan-proof anchor,
+        // bound to the committed literal in-circuit (same mechanism as filter_int).
         let operand = match &to.inputs {
             ProofInputs::FilterInt { operand_enc, .. } => operand_enc,
             ProofInputs::FilterF64 { operand_enc, .. } => operand_enc,
+            ProofInputs::FilterSignedInt { operand_enc, .. } => operand_enc,
+            ProofInputs::FilterDecimal { operand_enc, .. } => operand_enc,
             _ => return Err(CheckError::EdgeKindMismatch { edge: e }),
         };
         if scanned != operand {
@@ -4830,6 +4861,28 @@ fn reconstruct_public_inputs(
             push_uint(&mut out, *b_bits);
             push_uint(&mut out, u64::from(*expected));
         }
+        // [OPUS-4.8] sq-7lrq: filter_signed_int_d{md} public inputs, in `main`
+        // declaration order: challenge (pushed above), operand_enc, op, bound_neg
+        // (bool -> {0,1}), bound (the constant's u64 magnitude), expected.
+        // Cross-reference `zk/compose/filter_signed_int_d{md}/src/main.nr`.
+        ProofInputs::FilterSignedInt { operand_enc, op, bound_neg, bound, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, u64::from(*bound_neg));
+            push_uint(&mut out, *bound);
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-7lrq: filter_decimal_i{id}_f{fd} public inputs, in `main`
+        // declaration order: challenge (pushed above), operand_enc, op, bound_neg
+        // (bool -> {0,1}), bound_scaled (the host-prescaled constant magnitude),
+        // expected. Cross-reference `zk/compose/filter_decimal_i{id}_f{fd}/src/main.nr`.
+        ProofInputs::FilterDecimal { operand_enc, op, bound_neg, bound_scaled, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, u64::from(*bound_neg));
+            push_uint(&mut out, *bound_scaled);
+            push_uint(&mut out, u64::from(*expected));
+        }
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN
         // public inputs, in the `join_eq` member's `main` declaration order:
         // challenge (pushed above), commit_a, commit_b, join_commitment, slot_a,
@@ -5079,6 +5132,82 @@ mod tests {
         let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
         assert_eq!(got.len(), 160);
         assert_eq!(got, bb, "filter_f64 reconstruction must byte-match bb");
+    }
+
+    /// [OPUS-4.8] sq-7lrq: EMPIRICAL anchor for the composable `filter_signed_int_d{md}`
+    /// family. `filter_signed_int_d2` over: challenge=0x2a, operand_enc=0x25f9…a120
+    /// ("-42"^^xsd:integer), op=Lt(0), bound_neg=false, bound=1, expected=true. 6
+    /// fields * 32 = 192 bytes. Captured verbatim by
+    /// `probe_filter_signed_int_public_inputs_hex` (e2e.rs, ignored) from a real
+    /// `bb prove`; a toolchain bump that changes the serialization breaks this
+    /// loudly. The two extra words over `filter_int` are the sign-split bound
+    /// (`bound_neg`, `bound` magnitude).
+    #[test]
+    fn reconstruct_filter_signed_int_matches_real_bb_public_inputs() {
+        let bb = hex_decode(concat!(
+            // challenge
+            "000000000000000000000000000000000000000000000000000000000000002a",
+            // operand_enc ("-42"^^xsd:integer)
+            "25f95edbf033080613232d81e9851bafcb0addf47bcffcb02e388298dec5a120",
+            // op = Lt (0)
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // bound_neg = false
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // bound = 1 (the +1 magnitude)
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            // expected = true
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ))
+        .unwrap();
+        let inputs = ProofInputs::FilterSignedInt {
+            id: CircuitId::FilterSignedInt { md: 2 },
+            operand_enc: fh("0x25f95edbf033080613232d81e9851bafcb0addf47bcffcb02e388298dec5a120"),
+            op: FilterOp::Lt,
+            bound_neg: false,
+            bound: 1,
+            expected: true,
+        };
+        let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
+        assert_eq!(got.len(), 192);
+        assert_eq!(got, bb, "filter_signed_int reconstruction must byte-match bb");
+    }
+
+    /// [OPUS-4.8] sq-7lrq: EMPIRICAL anchor for the composable
+    /// `filter_decimal_i{id}_f{fd}` family. `filter_decimal_i3_f2` over:
+    /// challenge=0x2a, operand_enc=0x2711…8ddd ("123.45"^^xsd:decimal), op=Gt(2),
+    /// bound_neg=false, bound_scaled=12340 (0x3034 = round(123.40*100)),
+    /// expected=true. 6 fields * 32 = 192 bytes. Captured verbatim by
+    /// `probe_filter_decimal_public_inputs_hex` (e2e.rs, ignored) from a real
+    /// `bb prove`. The host-prescaled `bound_scaled` is the only layout difference
+    /// from the signed-int member.
+    #[test]
+    fn reconstruct_filter_decimal_matches_real_bb_public_inputs() {
+        let bb = hex_decode(concat!(
+            // challenge
+            "000000000000000000000000000000000000000000000000000000000000002a",
+            // operand_enc ("123.45"^^xsd:decimal)
+            "271130972d0065afdc11c7ac94fd97f113e2cc1d8a6f8771d8d4116446138ddd",
+            // op = Gt (2)
+            "0000000000000000000000000000000000000000000000000000000000000002",
+            // bound_neg = false
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // bound_scaled = 12340 (0x3034)
+            "0000000000000000000000000000000000000000000000000000000000003034",
+            // expected = true
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ))
+        .unwrap();
+        let inputs = ProofInputs::FilterDecimal {
+            id: CircuitId::FilterDecimal { id: 3, fd: 2 },
+            operand_enc: fh("0x271130972d0065afdc11c7ac94fd97f113e2cc1d8a6f8771d8d4116446138ddd"),
+            op: FilterOp::Gt,
+            bound_neg: false,
+            bound_scaled: 12340,
+            expected: true,
+        };
+        let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
+        assert_eq!(got.len(), 192);
+        assert_eq!(got, bb, "filter_decimal reconstruction must byte-match bb");
     }
 
     /// [OPUS-4.8] sq-f9tl (re-audit NEW-1): EMPIRICAL anchor for the k=2 scan

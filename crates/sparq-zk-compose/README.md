@@ -75,11 +75,20 @@ shape — never trust a declared id:
   `tests/filter_signed_binding.rs`). The numeric value is a constrained function
   of the SAME witnessed bytes, so the comparison is sound. `bb gates`: 17416 each
   (blake3-block-bound, identical to `filter_int`). Host encoders:
-  `build::encode_signed_int_literal` / `encode_decimal_literal`. NOTE: these are
-  compiled, byte-bound, tested CIRCUIT MEMBERS; the verifier `CircuitId` /
-  `ProofInputs` / binding-edge wiring that makes them manifest-composable is a
-  follow-up (bead sq-7lrq), like the `filter_f64` building-block precedent —
-  they are NOT yet assemblable into a `ProofManifest`.
+  `build::encode_signed_int_literal` / `encode_decimal_literal`. As of [OPUS-4.8]
+  sq-7lrq these are now MANIFEST-COMPOSABLE: `CircuitId::FilterSignedInt { md }` /
+  `FilterDecimal { id, fd }` + the matching `ProofInputs` variants +
+  `build_filter_signed_int` / `build_filter_decimal` (returning a
+  `FilterSignedWitness` of the private sign + digits) + `prover_toml_for`'s
+  `filter_signed_witness` arg + the verifier's binding-edge operand extraction and
+  public-input reconstruction (empirically anchored against real `bb prove` output
+  in `reconstruct_filter_signed_int_matches_real_bb_public_inputs` /
+  `reconstruct_filter_decimal_matches_real_bb_public_inputs`; composable witness
+  soundness in `filter_{signed_int,decimal}_composable_witness_honest_proves_lie_rejected`).
+  `md` / `(id, fd)` are EXACT-match (an out-of-family shape returns `None`, never a
+  silently-unprovable member). The GENERAL fractional/scientific `xsd:double`
+  fragment (an in-circuit decimal→IEEE-754 RNE parser over an arbitrary lexical
+  form) remains DEFERRED — bead sq-lxi7.
 - **join_eq** `join_eq_na{n_a}_nb{n_b}`: the two graph-size buckets select the
   member, exactly as scan's `n` does. The buckets are `{16,64}` (aligned with
   scan's `n`), and ALL FOUR `(n_a,n_b)` combinations are compiled ([OPUS-4.8]
@@ -162,6 +171,16 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
   FILTER→float mapping also deferred (sparq-zk `fragment_filters` parses only the
   xsd:integer FILTER fragment); a float FILTER composes via the binding edge +
   its own verified sub-proof.
+- **SIGNED `xsd:integer` + `xsd:decimal` FILTER composition** ([OPUS-4.8] sq-7lrq)
+  — IMPLEMENTED. The sq-1q9h members (`filter_signed_int_d{md}`,
+  `filter_decimal_i{id}_f{fd}`) are now manifest-composable: `CircuitId` /
+  `ProofInputs` variants + `derive_*` + `build_*` + `prover_toml_for`
+  (`filter_signed_witness` arg) + the verifier binding edge + public-input
+  reconstruction (same shape as the f64 work). The numeric value stays a
+  constrained function of the witnessed lexical bytes (sound operand binding,
+  inherited from sq-1q9h). DEFERRED: the GENERAL fractional/scientific `xsd:double`
+  fragment (in-circuit decimal→IEEE-754 RNE parser over an arbitrary lexical form)
+  — bead sq-lxi7; MEASURE `bb gates` before claiming it is affordable.
 
 **Deferred (documented, schema-stable placeholders where relevant):**
 - **Issuer signatures** over commitments — v1 carries `did:key` refs in the
