@@ -437,7 +437,21 @@ docker run --rm -p 3030:3030 -v "$PWD/data:/data:ro" \
 
 curl http://127.0.0.1:3030/health   # -> ok
 curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=ASK {}'
+
+docker inspect --format '{{.State.Health.Status}}' <container>   # -> healthy
 ```
+
+**Container `HEALTHCHECK`** (CIS Docker Benchmark §4.6). The image self-declares a
+`HEALTHCHECK` so a runtime can tell an unhealthy-but-still-running server apart from a
+healthy one (`docker ps` shows `(healthy)`/`(unhealthy)`; `docker run --health-*` and Swarm
+act on it). Because the runtime stage is distroless — **no shell, no `curl`/`wget`** — the
+classic `HEALTHCHECK CMD curl …/health` cannot run there. Instead the server binary probes
+*itself*: the check runs `sparq-server --health-probe`, which opens a TCP connection to the
+loopback `/health` and exits `0` (healthy) / non-zero (unhealthy). Override the probed
+address with `--health-probe-addr HOST:PORT` or `SPARQ_HEALTH_PROBE_ADDR` if you remap the
+internal port. Note: Kubernetes / Nomad usually run their *own* liveness/readiness probe
+against `/health` and ignore the image `HEALTHCHECK`, so this primarily benefits bare
+`docker run` / docker-compose / Swarm; it is baked once and costs nothing when overridden.
 
 **Why it binds `0.0.0.0`.** Inside a container the only useful bind is the non-loopback
 `0.0.0.0` (loopback is unreachable through Docker's port mapping). The fail-closed bind

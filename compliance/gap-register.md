@@ -50,7 +50,7 @@ ruleset verification against `docs/branch-protection.md` (**`sq-sto1`**).
 | **GX-10** | **Published packages carry no provenance** — there was no publish workflow (js/python lanes test-only); crates.io/npm/PyPI artifacts published out-of-CI, unattested. **PARTIAL (sq-toze.24 + sq-toze.37):** added `.github/workflows/publish.yml` — **npm `@jeswr/sparq` CLOSED** (`#npm` `npm publish --provenance` in OIDC + `npm audit signatures` gate); **crates.io PARTIAL** (`#crates` attests the `cargo package` `.crate` bytes via `attest-build-provenance` — out-of-band `gh attestation verify`; crates.io has **no native provenance link** upstream → external sub-gap OPEN); **PyPI CI-WIRED, awaiting maintainer config (sq-toze.37):** `#pypi-build`/`#pypi-sdist`/`#pypi-publish` build the `sparq-rdf` wheels+sdist (maturin) and upload via PyPI **Trusted Publishing** with native **PEP-740 attestations** (`attestations: true`, OIDC `id-token: write`). PyPI's PEP-740 path is the strongest of the three (native provenance link on PyPI). The ONE non-repo step: a maintainer must register the Trusted Publisher on the `sparq-rdf` PyPI project (owner `jeswr`, repo `sparq`, workflow `publish.yml`, env `pypi`) — until then the OIDC token mint fails by design (no static token stored). | P1 | slsa (cited by cra), openssf (GX-OSSF-2) | **`sq-toze.24`** (npm DONE / crates.io partial), **`sq-toze.37`** (PyPI CI wired; maintainer PyPI Trusted-Publisher config pending), **`sq-jgt3`** (registry signing) | PARTIAL |
 | **GX-11** | **SLSA Build L3 not met** — in-band provenance ceiling (compromised build step shares signing context); needs slsa-github-generator / isolated trusted builder. | P3 | slsa | **`sq-toze.25`** | OPEN (aspirational) |
 | **GX-12** | **No container-image CVE scan (Trivy/Grype) + no Dockerfile linter (Dockle/Hadolint) lane in CI** — only the docker-smoke test exists. | P1 | cis (cited by cra) | **`sq-toze.31`** | OPEN |
-| **GX-13** | No `HEALTHCHECK` in the Dockerfile (distroless has no shell; needs a static probe / `--health-probe` subcommand). | P3 | cis | **`sq-toze.36`** | OPEN |
+| ~~**GX-13**~~ | No `HEALTHCHECK` in the Dockerfile (distroless has no shell; needs a static probe / `--health-probe` subcommand). **CLOSED (sq-toze.36):** the `Dockerfile` now declares `HEALTHCHECK … CMD ["/usr/local/bin/sparq-server", "--health-probe"]`; since distroless has no shell/`curl`/`wget`, the server binary probes its own loopback `/health` (`crates/sparq-server/src/health_probe.rs`, exec-form) and exits 0/non-zero. Override addr via `--health-probe-addr` / `SPARQ_HEALTH_PROBE_ADDR`. | P3 | cis | **`sq-toze.36`** | ADDRESSED |
 
 **Closed cross-cutting gaps (cited as evidence across slices — do NOT re-propose):** GX-1 cargo-deny
 advisories PR-gate (`sq-toze.2`, closed by #210; CVSS-4.0 blocker `sq-q8de` resolved) · GX-2 per-release
@@ -81,7 +81,7 @@ watch item).
 | ASVS-G3 | (Error-body info-leak) no test asserting no FS-path/internal-host leak — **FIX SHIPPED (PR #241)**; regression bead open | Medium | `sq-j9zs` (parent `sq-cz89`) |
 | ASVS-G4 | No explicit SPARQL parse-depth bound (nested-input DoS bounded only by `--max-body-bytes`) | Low | `sq-53s1` |
 
-### CIS — PASS / N/A(operator) except GX-12 (P1) + GX-13 (P3) — see cross-cutting table.
+### CIS — PASS / N/A(operator) except GX-12 (P1); GX-13 (P3) CLOSED by sq-toze.36 — see cross-cutting table.
 
 ### SBOM — 1 open gap (GS-2 = GX-8, all P2)
 
@@ -180,7 +180,7 @@ watch item).
 | **P0 / CRITICAL** | **3** | CR-G1 (external cryptographer), CDMC CD-1 + CD-2 (lineage + access-audit data-maturity). CR-G1 is **external-required**. |
 | **P1 / High** | **~9** | GX-10, GX-12, GX-4, GAP-ISO-1, GX-CRA-1, GX-CRA-2, MS-G2, CDMC CD-3/4/5/8 (P1 cluster). GAP-ISO-1 is an **org act**. *(GX-9 closed — sq-toze.23, dist.yml binaries now SLSA Build L2.)* |
 | **P2 / Medium** | **~12** | GX-8 (one row, recurs in 5 slices; the SBOM slice's GS-2 is this same gap), SSDF-G1(=GX-8), MS-G3/G4/G5, ASVS-G1/G3, GAP-ISO-2, GX-CRA-3, PR-G3, CR-G4/G5, CDMC CD-6/7. *(GS-1/3/4/5/6 closed — sq-toze.26/27/28/29/30; per-component supplier, JS SBOM, CycloneDX 1.5, VEX↔deny sync, abs-path leak all RESOLVED & CI-gated.)* |
-| **P3 / Low** | **~8** | GX-11, GX-13, GX-OSSF-2/3, ASVS-G2/G4, PR-G2/G4/G5. |
+| **P3 / Low** | **~7** | GX-11, GX-OSSF-2/3, ASVS-G2/G4, PR-G2/G4/G5. *(GX-13 closed — sq-toze.36, Dockerfile HEALTHCHECK via in-binary `--health-probe`.)* |
 
 Counts collapse the recurring cross-cutting gaps (GX-8, GX-9, GX-10, GX-12) to **one row each**; the
 per-slice gap-registers list them once per framework. The only **P0** that is a hard external ceiling

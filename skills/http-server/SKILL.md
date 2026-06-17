@@ -395,6 +395,13 @@ docker run --rm -p 3030:3030 \
 Deliver the token over TLS (terminate at a proxy). See `crates/sparq-server/README.md` →
 "Running the container image".
 
+The image self-declares a `HEALTHCHECK` (CIS Docker §4.6, `sq-toze.36`). Since distroless has
+no shell/`curl`/`wget`, the check is the server binary probing **itself**: `sparq-server
+--health-probe` opens a TCP connection to the loopback `/health` and exits 0 (healthy)/non-zero
+(unhealthy) — exec-form in the Dockerfile. Override the probed address with `--health-probe-addr
+HOST:PORT` or `SPARQ_HEALTH_PROBE_ADDR`. `docker ps` then shows `(healthy)`/`(unhealthy)`; k8s
+usually runs its own `/health` probe and ignores the image healthcheck.
+
 **5c. Federation discovery — VoID + Service Description (OPT-IN, `sq-d3d8`).** A server can
 advertise itself as a discoverable federation node by serving two read-only RDF descriptors:
 

@@ -2,6 +2,7 @@
 //! W3C SPARQL 1.1 Protocol + Graph Store HTTP Protocol (read side).
 //!
 //! Usage:
+//!   sparq-server --health-probe [--health-probe-addr 127.0.0.1:3030]
 //!   sparq-server [--addr 127.0.0.1:3030] [--allow-remote] [--format turtle]
 //!                [--persist DIR]
 //!                [--auth-token TOKEN] [--auth-token-read]
@@ -154,6 +155,23 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // [OPUS-4.8] sq-toze.36 (cert gap GX-13): the `--health-probe` subcommand is the
+    // Dockerfile HEALTHCHECK's check. The runtime image is distroless (no shell, no curl/wget),
+    // so the server probes its OWN loopback /health endpoint and exits 0 (healthy) / non-zero
+    // (unhealthy). It must short-circuit BEFORE any env/config/data-load work — it never binds a
+    // listener, it only connects to an already-running server. Scanned directly off argv (not the
+    // main flag loop below) so the probe path stays self-contained.
+    if let Some(probe) = parse_health_probe(std::env::args().skip(1))? {
+        return match sparq_server::health_probe::run_probe(&probe).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("health probe failed: {e}");
+                // Non-zero exit so the container runtime marks the container unhealthy.
+                std::process::exit(1);
+            }
+        };
+    }
+
     let mut addr = "127.0.0.1:3030".to_string();
     let mut format = "turtle".to_string();
     let mut data_file: Option<String> = None;
@@ -406,7 +424,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--max-subscriptions N] \
                      [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
-                     [--log-full-requests] [DATA_FILE]\n\n  \
+                     [--log-full-requests] [DATA_FILE]\n  \
+                     or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \
+                     HEALTH-PROBE: --health-probe (the container HEALTHCHECK) connects to an \
+                     already-running server's /health on 127.0.0.1:3030 (override with \
+                     --health-probe-addr or SPARQ_HEALTH_PROBE_ADDR) and exits 0 (healthy) / \
+                     non-zero (unhealthy). For distroless images with no curl/wget; it does NOT \
+                     start a server.\n\n  \
                      PERSIST: --persist DIR (env SPARQ_PERSIST_DIR) makes the on-disk index at \
                      DIR the durable source of truth (QLever --persist-updates): every committed \
                      UPDATE is WAL-fsync'd before ack, so a RESTART on the same DIR restores ALL \
@@ -667,6 +691,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     Ok(())
+}
+
+/// [OPUS-4.8] sq-toze.36 (cert gap GX-13): detect the `--health-probe` subcommand and resolve
+/// the address it should probe. Returns `Ok(Some(addr))` when `--health-probe` is present (the
+/// caller then runs the probe and exits), `Ok(None)` when it is absent (normal server start),
+/// or `Err` on a malformed `--health-probe-addr`.
+///
+/// Address precedence: `--health-probe-addr HOST:PORT` (highest) > `SPARQ_HEALTH_PROBE_ADDR`
+/// env > the [`health_probe::DEFAULT_PROBE_ADDR`] loopback default. Kept separate from the main
+/// flag loop so the probe path never touches data-loading / bind / config.
+fn parse_health_probe(args: impl Iterator<Item = String>) -> Result<Option<String>, String> {
+    use sparq_server::health_probe::DEFAULT_PROBE_ADDR;
+    let mut requested = false;
+    let mut addr_override: Option<String> = None;
+    let mut args = args;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--health-probe" => requested = true,
+            "--health-probe-addr" => {
+                let v = args
+                    .next()
+                    .ok_or("--health-probe-addr requires a HOST:PORT value")?;
+                if v.is_empty() {
+                    return Err("--health-probe-addr must not be empty".into());
+                }
+                addr_override = Some(v);
+            }
+            _ => {}
+        }
+    }
+    if !requested {
+        return Ok(None);
+    }
+    let addr = addr_override
+        .or_else(|| std::env::var("SPARQ_HEALTH_PROBE_ADDR").ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_PROBE_ADDR.to_string());
+    Ok(Some(addr))
 }
 
 fn parse_flag<T: std::str::FromStr>(

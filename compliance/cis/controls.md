@@ -27,7 +27,7 @@ Verified **against the actual `Dockerfile`** (read in full, lines 1–106) — n
 | D-4.3 | **Do not install unnecessary packages** (minimise the image). | **PASS** | Runtime stage installs nothing: it is distroless (no `apt`, no package manager, no shell). Only artifact copied in is the single static-ish server binary (`COPY --from=builder … /usr/local/bin/sparq-server`, `Dockerfile:84`). Builder packages stay in the discarded builder stage. | sparq |
 | D-4.4 | **Scan and rebuild images to include security patches.** | **OPEN-gap** (GX-12) | No Trivy/Grype image-CVE scan lane in CI (verified: `grep -rIl -E 'trivy\|grype' .github/` → only false-positive comment hits). Daily `dependency-monitoring.yml` watches *cargo* advisories, and SHA-pinned bases are bumped deliberately, but the *image's OS layer* is not CVE-scanned. Bead **sq-toze.31**. | sparq |
 | D-4.5 | **Enable Content Trust / verify image provenance.** | **PASS** | Pushed image carries buildkit max-mode SLSA provenance + an embedded SBOM (`release.yml` `docker:` job — `provenance: mode=max`, `sbom: true`). Verifiable with `gh attestation verify` / cosign. (Full SLSA-level claim lives in the `slsa` slice.) | sparq |
-| D-4.6 | **Add HEALTHCHECK instruction to the container image.** | **OPEN-gap** (GX-13, minor) | No `HEALTHCHECK` directive in the `Dockerfile` (verified: `grep -n HEALTHCHECK Dockerfile` → none). The server *does* expose `/health` (proven by `docker-smoke.sh`), so an orchestrator probe works, but the image does not self-declare it. Bead **sq-toze.36**. | sparq |
+| D-4.6 | **Add HEALTHCHECK instruction to the container image.** | **PASS** (was GX-13, closed by sq-toze.36) | The `Dockerfile` declares `HEALTHCHECK … CMD ["/usr/local/bin/sparq-server", "--health-probe"]`. Distroless has no shell/`curl`/`wget`, so the check is the server binary probing its own loopback `/health` (`crates/sparq-server/src/health_probe.rs`) and exiting 0/non-zero; exec-form (no shell). Bead **sq-toze.36** (RESOLVED). | sparq |
 | D-4.7 | **Do not use `latest` tag** (use a versioned/pinned tag for FROM). | **PASS** | Both `FROM`s are digest-pinned (D-4.2). The *published* image gets a `latest` tag for consumers (`release.yml` metadata `type=raw,value=latest`) **alongside** semver tags — that is the consumer-facing tag, not a `FROM`; the build itself never depends on a floating tag. | sparq |
 | D-4.8 | **Remove setuid/setgid permissions** from the image. | **PASS (by construction)** | The runtime image contains only the distroless base + one server binary copied with default perms; no setuid/setgid bit is set on the binary, and distroless ships no setuid utilities (no shell/coreutils). No `chmod u+s` anywhere. | sparq |
 | D-4.9 | **Use COPY instead of ADD.** | **PASS** | Every file-bring-in is `COPY` (`Dockerfile:57`, `:84`); `grep -n '^ADD ' Dockerfile` → none. | sparq |
@@ -65,9 +65,9 @@ estate (accounts, network, endpoints, the Docker host). Each is mapped, not drop
 
 ## Summary
 
-- **Docker Benchmark §4:** 9 PASS, 2 OPEN-gap (D-4.4 image-CVE-scan = GX-12; D-4.6 HEALTHCHECK =
-  GX-13), §5 runtime N/A-operator. The image is genuinely hardened; the holes are *scanning*, not
-  hardening.
+- **Docker Benchmark §4:** 10 PASS, 1 OPEN-gap (D-4.4 image-CVE-scan = GX-12; D-4.6 HEALTHCHECK =
+  GX-13 now CLOSED by sq-toze.36 via the in-binary `--health-probe`), §5 runtime N/A-operator. The
+  image is genuinely hardened; the one remaining hole is *scanning*, not hardening.
 - **CIS v8 (artifact-applicable):** the software-inventory (2.x), secure-config of the artifact
   (4.1), vuln-management/disclosure (7.1/7.3), CI access-control (6.8), and SSDLC/SAST/threat-model/
   fuzz (16.x) Safeguards are PASS; 7.5/7.6 is PARTIAL pending GX-12; the org/endpoint/network
