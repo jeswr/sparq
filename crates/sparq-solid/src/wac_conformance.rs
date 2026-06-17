@@ -393,6 +393,8 @@ impl WacScenario {
                 agent: e.req_agent(),
                 client: e.req_client(),
                 issuer: None,
+                // [OPUS-4.8] sq-0q7n: WAC has no time-window grant; the clock is unused.
+                now: None,
             };
             index
                 .accessible(&session, e.req_mode())
@@ -421,6 +423,8 @@ impl WacScenario {
                 agent: e.req_agent(),
                 client: e.req_client(),
                 issuer: None,
+                // [OPUS-4.8] sq-0q7n: WAC has no time-window grant; the clock is unused.
+                now: None,
             };
             store
                 .accessible(&session, e.req_mode())

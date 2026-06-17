@@ -24,8 +24,10 @@ pub const ANY_CLIENT: &str = "https://sparq.dev/ns/auth#AnyClient";
 /// [OPUS-4.8] sq-3jtd.6.
 pub const ANY_ISSUER: &str = "https://sparq.dev/ns/auth#AnyIssuer";
 
-/// A request context: who (WebID) through what (client identifier / origin) and vouched
-/// for by which OIDC issuer (`acp:issuer`). `agent: None` = anonymous.
+/// A request context: who (WebID) through what (client identifier / origin), vouched
+/// for by which OIDC issuer (`acp:issuer`), and — for [OPUS-4.8] sq-0q7n — *when* (the
+/// wall-clock instant the request is evaluated at). `agent: None` = anonymous;
+/// `now: None` = no clock supplied.
 ///
 /// A session expands to at most 12 principals when grants are looked up ([OPUS-4.8]
 /// sq-3jtd.6 — the issuer dimension doubles the pre-issuer ≤6): always `auth:Public`;
@@ -36,20 +38,37 @@ pub const ANY_ISSUER: &str = "https://sparq.dev/ns/auth#AnyIssuer";
 /// and the full triple when both are given. Expansion is internal — callers just supply
 /// the request context:
 ///
+/// # The clock (`now`) — [OPUS-4.8] sq-0q7n
+///
+/// `now` is the request instant as an `xsd:dateTime` lexical string (e.g.
+/// `"2026-06-17T09:00:00Z"`). It is consulted ONLY by time-windowed conditional grants
+/// (an `odrl:dateTime` constraint persisted as `auth:notBefore`/`auth:notAfter`
+/// bounds): the grant applies iff `now` falls inside the window, re-checked *per
+/// request* rather than frozen at materialization. **Fail-closed:** a time-windowed
+/// grant evaluated with `now == None` (no clock evidence) never applies — exactly
+/// mirroring the ODRL evaluator, which fails a `dateTime` constraint with no
+/// request-context value. A grant with NO time window ignores `now`, so an
+/// identity-only session need not supply it. Construct it with [`Session::at`].
+///
 /// # Examples
 ///
 /// ```
 /// use sparq_solid::Session;
 ///
 /// let anonymous = Session::default();
-/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+/// let alice =
+///     Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 /// let alice_via_app = Session {
 ///     agent: Some("https://alice.ex/card#me"),
 ///     client: Some("https://app.ex"),
 ///     issuer: Some("https://idp.ex"),
+///     now: None,
 /// };
+/// // bind the request clock for a time-windowed grant:
+/// let alice_at = alice.at("2026-06-17T09:00:00Z");
 /// assert!(anonymous.agent.is_none());
-/// # let _ = (alice, alice_via_app);
+/// assert_eq!(alice_at.now, Some("2026-06-17T09:00:00Z"));
+/// # let _ = alice_via_app;
 /// ```
 ///
 /// # Invariants (fail-closed)
@@ -68,6 +87,26 @@ pub struct Session<'a> {
     /// [OPUS-4.8] sq-3jtd.6 — only ACP matchers constrain on it; WAC has no issuer notion,
     /// so a WAC pod ignores it (no grant ever names a triple principal).
     pub issuer: Option<&'a str>,
+    /// The request instant as an `xsd:dateTime` lexical string, consulted only by
+    /// time-windowed conditional grants ([OPUS-4.8] sq-0q7n). `None` = no clock supplied
+    /// → a time-windowed grant fails closed.
+    pub now: Option<&'a str>,
+}
+
+impl<'a> Session<'a> {
+    /// This session with its request clock bound to `now` (an `xsd:dateTime` lexical
+    /// string). Use it so a time-windowed conditional grant re-checks the live clock per
+    /// request instead of being frozen at materialization. [OPUS-4.8] sq-0q7n.
+    ///
+    /// ```
+    /// use sparq_solid::Session;
+    /// let alice =
+    ///     Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
+    /// assert_eq!(alice.at("2026-06-17T00:00:00Z").now, Some("2026-06-17T00:00:00Z"));
+    /// ```
+    pub fn at(self, now: &'a str) -> Session<'a> {
+        Session { now: Some(now), ..self }
+    }
 }
 
 /// An access mode, matching WAC's `acl:Read`/`Write`/`Append`/`Control` (ACP reuses
@@ -186,6 +225,13 @@ struct ConditionalGrant {
     mode: Option<Mode>,
     graph: Option<NamedNode>,
     except: Vec<String>, // matcher IRIs
+    // [OPUS-4.8] sq-0q7n: an optional live-clock window from a faithfully-mappable
+    // `odrl:dateTime` constraint. `not_before` = the grant is inactive UNTIL this
+    // instant (inclusive); `not_after` = inactive AFTER it (inclusive). Both are
+    // `xsd:dateTime` lexical strings, compared against `Session::now` per request (see
+    // [`AuthIndex::cond_applies`]). `None` on a bound means that side is unbounded.
+    not_before: Option<String>,
+    not_after: Option<String>,
 }
 
 /// A transient index over the `<urn:sparq:auth>` graph's triples: principal × mode →
@@ -216,7 +262,7 @@ struct ConditionalGrant {
 /// materialize_wac(&mut graph)?;
 ///
 /// let index = AuthIndex::from_graph(&graph);
-/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 /// assert_eq!(index.accessible(&alice, Mode::Read).len(), 2); // n1 + notes/
 /// assert!(index.accessible(&alice, Mode::Write).is_empty()); // fail-closed
 /// # Ok::<(), String>(())
@@ -295,6 +341,9 @@ impl AuthIndex {
                 ("mode", Term::NamedNode(o)) => entry.mode = Mode::from_mode_iri(o.as_str()),
                 ("graph", Term::NamedNode(o)) => entry.graph = Some(o.clone()),
                 ("exceptMatcher", Term::NamedNode(o)) => entry.except.push(o.as_str().to_owned()),
+                // [OPUS-4.8] sq-0q7n: the live-clock window bounds (xsd:dateTime literals).
+                ("notBefore", Term::Literal(o)) => entry.not_before = Some(o.value().to_owned()),
+                ("notAfter", Term::Literal(o)) => entry.not_after = Some(o.value().to_owned()),
                 _ => {}
             }
         }
@@ -369,14 +418,23 @@ impl AuthIndex {
         agent_ok && client_ok && issuer_ok
     }
 
-    /// Does a conditional grant's (agent, client, issuer) head apply to this session?
+    /// Does a conditional grant's (agent, client, issuer) head apply to this session,
+    /// AND — for a time-windowed grant — does the session's clock fall inside the window?
     /// [OPUS-4.8] sq-3jtd.6: the issuer head is the twin of the client head — the grant's
     /// `auth:AnyIssuer` matches any session, else the session's issuer must equal it.
+    /// [OPUS-4.8] sq-0q7n: the `auth:notBefore`/`auth:notAfter` window is re-checked
+    /// against `Session::now` here, so a lapsed window denies *this request* without
+    /// waiting for a ledger refresh.
     fn cond_applies(&self, g: &ConditionalGrant, s: &Session) -> bool {
         let agent_ok = Self::agent_principals(s).contains(&g.agent);
         let client_ok = g.client == ANY_CLIENT || s.client == Some(g.client.as_str());
         let issuer_ok = g.issuer == ANY_ISSUER || s.issuer == Some(g.issuer.as_str());
-        agent_ok && client_ok && issuer_ok && !g.except.iter().any(|m| self.matcher_accepts(m, s))
+        let window_ok = window_admits(g.not_before.as_deref(), g.not_after.as_deref(), s.now);
+        agent_ok
+            && client_ok
+            && issuer_ok
+            && window_ok
+            && !g.except.iter().any(|m| self.matcher_accepts(m, s))
     }
 
     /// The sorted, deduplicated graph set this session may access in `mode`:
@@ -428,5 +486,350 @@ impl AuthIndex {
         let mut out: Vec<NamedNode> = allowed.into_iter().filter(|g| !denied.contains(g)).collect();
         out.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
         out
+    }
+}
+
+/// Does the live clock `now` fall inside a conditional grant's
+/// `[not_before, not_after]` window (both bounds inclusive)? [OPUS-4.8] sq-0q7n.
+///
+/// - A grant with NO window (`not_before == None && not_after == None`) admits any
+///   session, including one with `now == None` — there is no clock dimension to check.
+/// - A windowed grant evaluated with `now == None` **fails closed**: no clock evidence
+///   means we cannot prove the request falls inside the window (mirrors the ODRL
+///   evaluator's fail-closed `dateTime` constraint with no request-context value).
+/// - Bounds compare by the **real UTC instant** each `xsd:dateTime` denotes — the SAME
+///   offset-aware semantics `sparq_policy`'s evaluator uses for `odrl:dateTime`
+///   (`parse_instant().cmp()`, sq-qj2q), NOT raw lexical `str::cmp`. A mixed-offset
+///   request such as `now = 2026-06-16T11:00:00-02:00` (real instant `13:00Z`) is
+///   correctly seen as *after* a `not_after = 2026-06-16T12:00:00Z` window and DENIED,
+///   even though lexically `"…11…" < "…12…"`. A window emitted from an ODRL constraint
+///   therefore re-checks **identically** to how the constraint itself evaluated, closing
+///   the lexical fail-open. **An unparseable bound or clock fails closed** (the instant
+///   comparison is undefined → we cannot prove the request is inside the window → deny),
+///   mirroring the evaluator's `None`-is-fail-closed contract.
+fn window_admits(not_before: Option<&str>, not_after: Option<&str>, now: Option<&str>) -> bool {
+    use std::cmp::Ordering;
+    if not_before.is_none() && not_after.is_none() {
+        return true; // no window → the clock is irrelevant.
+    }
+    let Some(now) = now else {
+        return false; // windowed grant, no clock evidence → fail-closed.
+    };
+    if let Some(nb) = not_before {
+        // now must be at-or-after the open instant; unparseable / before → deny.
+        match cmp_datetime_instant(now, nb) {
+            Some(Ordering::Greater | Ordering::Equal) => {}
+            _ => return false,
+        }
+    }
+    if let Some(na) = not_after {
+        // now must be at-or-before the close instant; unparseable / after → deny.
+        match cmp_datetime_instant(now, na) {
+            Some(Ordering::Less | Ordering::Equal) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Order two `xsd:dateTime` lexical forms by the **real UTC instant** they denote
+/// (offset-aware), returning `None` when either is unparseable — the single source of
+/// truth for the window re-check's dateTime comparison. [OPUS-4.8] sq-0q7n.
+///
+/// With the `odrl-bridge` feature this delegates straight to
+/// [`sparq_policy::cmp_datetime`], so the window enforces on byte-for-byte the same
+/// instant normalizer the ODRL evaluator used when it emitted the bound — there is no
+/// second dateTime parser in play. Without the feature (the lean default build carries
+/// no `sparq-policy` dependency, yet an externally-loaded AUTH_GRAPH can still carry
+/// `auth:notBefore`/`auth:notAfter`), it uses the std-only [`cmp_datetime_instant_local`]
+/// twin, which the `odrl-bridge`-gated `parity_with_sparq_policy_evaluator` test pins to
+/// the canonical answers so the two builds can never diverge.
+fn cmp_datetime_instant(x: &str, y: &str) -> Option<std::cmp::Ordering> {
+    #[cfg(feature = "odrl-bridge")]
+    {
+        sparq_policy::cmp_datetime(x, y)
+    }
+    #[cfg(not(feature = "odrl-bridge"))]
+    {
+        cmp_datetime_instant_local(x, y)
+    }
+}
+
+/// Std-only twin of `sparq_policy::cmp_datetime` (instant order, `None` on either operand
+/// unparseable). The comparator the lean default build uses; under `odrl-bridge` the
+/// runtime path delegates to `sparq_policy::cmp_datetime` instead, so this and its parser
+/// chain are compiled there **only** as support for the `parity_with_sparq_policy_evaluator`
+/// test that proves the two never drift. [OPUS-4.8] sq-0q7n.
+#[cfg(any(not(feature = "odrl-bridge"), test))]
+fn cmp_datetime_instant_local(x: &str, y: &str) -> Option<std::cmp::Ordering> {
+    Some(parse_utc_instant(x)?.cmp(&parse_utc_instant(y)?))
+}
+
+/// A point on the UTC timeline as `(days-since-epoch, nanoseconds-into-day)`, after
+/// applying the lexical form's timezone offset — `Ord` by derive *is* instant ordering.
+/// Mirrors `sparq_policy::eval::Instant`. [OPUS-4.8] sq-0q7n.
+#[cfg(any(not(feature = "odrl-bridge"), test))]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct UtcInstant {
+    day: i64,
+    nanos_in_day: i64,
+}
+
+/// Parse an `xsd:dateTime`/`xsd:date` lexical form into a UTC instant (std-only, no
+/// `chrono`/`time`). Accepts `YYYY-MM-DD[Thh:mm:ss[.frac]][Z|±hh:mm]`; a missing tz is
+/// UTC. Returns `None` for anything not matching this grammar (→ fail-closed). This is
+/// the feature-off twin of `sparq_policy`'s `parse_instant`. [OPUS-4.8] sq-0q7n.
+#[cfg(any(not(feature = "odrl-bridge"), test))]
+fn parse_utc_instant(s: &str) -> Option<UtcInstant> {
+    let s = s.trim();
+    let (date, rest) = match s.split_once('T') {
+        Some((d, r)) => (d, Some(r)),
+        None => (s, None),
+    };
+    let (year, month, dom) = parse_ymd(date)?;
+    let epoch_day = days_from_civil(year, month, dom)?;
+    let Some(rest) = rest else {
+        return Some(UtcInstant { day: epoch_day, nanos_in_day: 0 });
+    };
+    let (time, offset_min) = split_offset(rest)?;
+    let (hh, mm, ss, frac_nanos) = parse_hms(time)?;
+    let local_nanos = (hh as i64) * 3_600_000_000_000
+        + (mm as i64) * 60_000_000_000
+        + (ss as i64) * 1_000_000_000
+        + frac_nanos;
+    let utc_nanos = local_nanos - (offset_min as i64) * 60_000_000_000;
+    Some(UtcInstant {
+        day: epoch_day + utc_nanos.div_euclid(86_400_000_000_000),
+        nanos_in_day: utc_nanos.rem_euclid(86_400_000_000_000),
+    })
+}
+
+#[cfg(any(not(feature = "odrl-bridge"), test))]
+fn parse_ymd(s: &str) -> Option<(i64, u32, u32)> {
+    let (neg, body) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let mut it = body.splitn(3, '-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let mo_s = it.next()?;
+    let d_s = it.next()?;
+    if it.next().is_some() || mo_s.len() != 2 || d_s.len() != 2 {
+        return None;
+    }
+    let month: u32 = mo_s.parse().ok()?;
+    let dom: u32 = d_s.parse().ok()?;
+    if !(1..=12).contains(&month) || dom < 1 || dom > days_in_month(y, month)? {
+        return None;
+    }
+    Some((if neg { -y } else { y }, month, dom))
+}
+
+#[cfg(any(not(feature = "odrl-bridge"), test))]
+fn split_offset(rest: &str) -> Option<(&str, i32)> {
+    if let Some(t) = rest.strip_suffix('Z') {
+        return Some((t, 0));
+    }
+    // Find the sign of the offset (after the time-of-day, so skip a leading position).
+    for (i, c) in rest.char_indices().skip(1) {
+        if c == '+' || c == '-' {
+            let (time, off) = rest.split_at(i);
+            let sign = if c == '+' { 1 } else { -1 };
+            let off = &off[1..];
+            let (h, m) = off.split_once(':')?;
+            if h.len() != 2 || m.len() != 2 {
+                return None;
+            }
+            let hh: i32 = h.parse().ok()?;
+            let mm: i32 = m.parse().ok()?;
+            if hh > 14 || mm > 59 || (hh == 14 && mm != 0) {
+                return None;
+            }
+            return Some((time, sign * (hh * 60 + mm)));
+        }
+    }
+    Some((rest, 0)) // no tz → UTC
+}
+
+#[cfg(any(not(feature = "odrl-bridge"), test))]
+fn parse_hms(s: &str) -> Option<(u32, u32, u32, i64)> {
+    let (hms, frac) = match s.split_once('.') {
+        Some((a, f)) => (a, Some(f)),
+        None => (s, None),
+    };
+    let mut it = hms.splitn(3, ':');
+    let h_s = it.next()?;
+    let m_s = it.next()?;
+    let s_s = it.next()?;
+    if it.next().is_some() || h_s.len() != 2 || m_s.len() != 2 || s_s.len() != 2 {
+        return None;
+    }
+    let hh: u32 = h_s.parse().ok()?;
+    let mm: u32 = m_s.parse().ok()?;
+    let ss: u32 = s_s.parse().ok()?;
+    if hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    let frac_nanos = match frac {
+        None => 0,
+        Some(f) if f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit()) => return None,
+        Some(f) => {
+            let mut padded = String::with_capacity(9);
+            padded.push_str(&f[..f.len().min(9)]);
+            while padded.len() < 9 {
+                padded.push('0');
+            }
+            padded.parse().ok()?
+        }
+    };
+    Some((hh, mm, ss, frac_nanos))
+}
+
+#[cfg(any(not(feature = "odrl-bridge"), test))]
+fn days_in_month(year: i64, month: u32) -> Option<u32> {
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    Some(match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    })
+}
+
+/// Days since 1970-01-01 (Howard Hinnant's proleptic-Gregorian `days_from_civil`).
+#[cfg(any(not(feature = "odrl-bridge"), test))]
+fn days_from_civil(year: i64, month: u32, dom: u32) -> Option<i64> {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let m = month as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + dom as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    Some(era * 146_097 + doe - 719_468)
+}
+
+#[cfg(test)]
+mod window_tests {
+    //! [OPUS-4.8] sq-0q7n — soundness of the live-clock window predicate. The
+    //! integration suite (`tests/odrl_bridge.rs`) covers the `lteq`/`notAfter` path
+    //! end-to-end; these unit tests pin the `gteq`/`notBefore`, two-sided, and
+    //! fail-closed corner cases directly.
+    use super::window_admits;
+
+    const T0: &str = "2026-01-01T00:00:00Z";
+    const T1: &str = "2026-06-17T00:00:00Z";
+    const T2: &str = "2026-12-31T00:00:00Z";
+
+    #[test]
+    fn no_window_admits_anything_including_no_clock() {
+        assert!(window_admits(None, None, None));
+        assert!(window_admits(None, None, Some(T1)));
+    }
+
+    #[test]
+    fn windowed_with_no_clock_fails_closed() {
+        assert!(!window_admits(None, Some(T2), None), "notAfter + no clock → deny");
+        assert!(!window_admits(Some(T0), None, None), "notBefore + no clock → deny");
+        assert!(!window_admits(Some(T0), Some(T2), None), "two-sided + no clock → deny");
+    }
+
+    #[test]
+    fn not_after_is_inclusive_upper_bound() {
+        assert!(window_admits(None, Some(T2), Some(T1)), "before close → admit");
+        assert!(window_admits(None, Some(T2), Some(T2)), "exactly at close → admit (inclusive)");
+        assert!(!window_admits(None, Some(T0), Some(T1)), "after close → deny");
+    }
+
+    #[test]
+    fn not_before_is_inclusive_lower_bound() {
+        assert!(window_admits(Some(T0), None, Some(T1)), "after open → admit");
+        assert!(window_admits(Some(T0), None, Some(T0)), "exactly at open → admit (inclusive)");
+        assert!(!window_admits(Some(T2), None, Some(T1)), "before open → deny");
+    }
+
+    #[test]
+    fn two_sided_window_admits_only_inside() {
+        assert!(window_admits(Some(T0), Some(T2), Some(T1)), "inside → admit");
+        assert!(!window_admits(Some(T0), Some(T2), Some("2025-01-01T00:00:00Z")), "before → deny");
+        assert!(!window_admits(Some(T0), Some(T2), Some("2027-01-01T00:00:00Z")), "after → deny");
+    }
+
+    // [OPUS-4.8] sq-0q7n — REGRESSION for the access-control fail-open the adversarial
+    // verify flagged: the pre-fix `window_admits` compared `now`/bounds with raw lexical
+    // `str::cmp`, so a request whose clock is lexically-inside but instant-OUTSIDE the
+    // window was wrongly admitted (granting access after the window closed / before it
+    // opened). The fix compares by the real UTC instant, matching the ODRL evaluator.
+
+    #[test]
+    fn fail_open_mixed_offset_after_close_is_denied() {
+        // The verify's concrete repro: notAfter = 12:00Z; now = 11:00-02:00 (= 13:00Z,
+        // AFTER the window closed). Lexically "…11…" < "…12…" so the OLD code admitted;
+        // by instant the request is past the close → MUST deny.
+        let not_after = "2026-06-16T12:00:00Z";
+        let now = "2026-06-16T11:00:00-02:00"; // real instant 13:00Z
+        assert!(
+            !window_admits(None, Some(not_after), Some(now)),
+            "mixed-offset clock after the window closed must DENY (was the fail-open)"
+        );
+    }
+
+    #[test]
+    fn fail_open_mixed_offset_before_open_is_denied() {
+        // Symmetric lower-bound case: notBefore = 12:00Z; now = 13:00+02:00 (= 11:00Z,
+        // BEFORE the window opened). Lexically "…13…" > "…12…" so the OLD code admitted;
+        // by instant the request precedes the open → MUST deny.
+        let not_before = "2026-06-16T12:00:00Z";
+        let now = "2026-06-16T13:00:00+02:00"; // real instant 11:00Z
+        assert!(
+            !window_admits(Some(not_before), None, Some(now)),
+            "mixed-offset clock before the window opened must DENY (symmetric fail-open)"
+        );
+    }
+
+    #[test]
+    fn mixed_offset_genuinely_inside_window_is_admitted() {
+        // A mixed-offset clock that really IS inside must still be admitted (the fix is
+        // not a blanket deny): notAfter = 12:00Z; now = 09:00-02:00 (= 11:00Z, before close).
+        let not_after = "2026-06-16T12:00:00Z";
+        let now = "2026-06-16T09:00:00-02:00"; // real instant 11:00Z, inside
+        assert!(window_admits(None, Some(not_after), Some(now)), "instant inside → admit");
+        // Two-sided, offset clock genuinely inside.
+        assert!(
+            window_admits(
+                Some("2026-06-16T00:00:00Z"),
+                Some("2026-06-17T00:00:00Z"),
+                Some("2026-06-16T13:00:00+02:00") // = 11:00Z, inside
+            ),
+            "two-sided instant inside → admit"
+        );
+    }
+
+    #[test]
+    fn unparseable_bound_or_clock_fails_closed() {
+        assert!(!window_admits(None, Some("not-a-date"), Some(T1)), "bad notAfter → deny");
+        assert!(!window_admits(Some("garbage"), None, Some(T1)), "bad notBefore → deny");
+        assert!(!window_admits(None, Some(T2), Some("???")), "bad clock → deny");
+    }
+
+    /// [OPUS-4.8] sq-0q7n — the feature-off fallback comparator MUST agree with the
+    /// canonical `sparq_policy::cmp_datetime` (the evaluator's instant normalizer) on
+    /// the offset-sensitive cases, so the two builds can never diverge.
+    #[cfg(feature = "odrl-bridge")]
+    #[test]
+    fn parity_with_sparq_policy_evaluator() {
+        for (a, b) in [
+            ("2026-06-16T11:00:00-02:00", "2026-06-16T12:00:00Z"), // 13:00Z vs 12:00Z
+            ("2026-06-16T13:00:00+02:00", "2026-06-16T12:00:00Z"), // 11:00Z vs 12:00Z
+            ("2026-06-16T12:00:00Z", "2026-06-16T12:00:00Z"),      // equal
+            ("2026-06-15T23:00:00-02:00", "2026-06-16T01:00:00Z"), // both 2026-06-16T01:00Z
+            ("not-a-date", "2026-06-16T12:00:00Z"),                // None
+        ] {
+            assert_eq!(
+                super::cmp_datetime_instant_local(a, b),
+                sparq_policy::cmp_datetime(a, b),
+                "fallback diverged from evaluator on ({a}, {b})"
+            );
+        }
     }
 }

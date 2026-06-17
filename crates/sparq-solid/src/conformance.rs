@@ -545,6 +545,9 @@ impl AcpScenario {
                 // unconstrained (`None` ⇒ AnyIssuer), so issuer-blind decision parity is
                 // unaffected by the (agent, client, issuer) principal model.
                 issuer: None,
+                // [OPUS-4.8] sq-0q7n: no time-windowed grant in the ACP conformance
+                // scenarios → the clock dimension is irrelevant here.
+                now: None,
             };
             index
                 .accessible(&session, e.req_mode())

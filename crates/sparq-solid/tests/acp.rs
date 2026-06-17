@@ -15,7 +15,7 @@ fn store() -> PodStore {
 }
 
 fn can(s: &mut PodStore, agent: Option<&str>, client: Option<&str>, mode: Mode, graph: &str) -> bool {
-    s.accessible(&Session { agent, client, issuer: None }, mode).iter().any(|g| g.as_str() == graph)
+    s.accessible(&Session { agent, client, issuer: None, now: None }, mode).iter().any(|g| g.as_str() == graph)
 }
 
 /// [OPUS-4.8] sq-3jtd.6: as [`can`] but with the issuer dimension supplied.
@@ -27,7 +27,7 @@ fn can_iss(
     mode: Mode,
     graph: &str,
 ) -> bool {
-    s.accessible(&Session { agent, client, issuer }, mode).iter().any(|g| g.as_str() == graph)
+    s.accessible(&Session { agent, client, issuer, now: None }, mode).iter().any(|g| g.as_str() == graph)
 }
 
 #[test]
@@ -102,21 +102,21 @@ fn acp_write_enforcement_matches_grants() {
 
     let priv0 = "https://pod.ex/priv0/c4/g0/d0.ttl";
     assert!(can(&mut s, Some(ALICE), None, Mode::Write, priv0));
-    s.update_as_acp(&Session { agent: Some(ALICE), client: None, issuer: None }, &ins(priv0))
+    s.update_as_acp(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, &ins(priv0))
         .expect("alice (cumulative owner) writes priv0");
     assert!(!can(&mut s, Some(BOB), None, Mode::Write, priv0));
     assert!(
-        s.update_as_acp(&Session { agent: Some(BOB), client: None, issuer: None }, &ins(priv0)).is_err(),
+        s.update_as_acp(&Session { agent: Some(BOB), client: None, issuer: None, now: None }, &ins(priv0)).is_err(),
         "bob has no write on priv0"
     );
 
     let team2 = "https://pod.ex/team2/c3/g0/d0.ttl";
     assert!(can(&mut s, Some(BOB), None, Mode::Write, team2));
-    s.update_as_acp(&Session { agent: Some(BOB), client: None, issuer: None }, &ins(team2))
+    s.update_as_acp(&Session { agent: Some(BOB), client: None, issuer: None, now: None }, &ins(team2))
         .expect("bob (anyOf) writes team2");
     assert!(!can(&mut s, Some(DAVE), None, Mode::Write, team2));
     assert!(
-        s.update_as_acp(&Session { agent: Some(DAVE), client: None, issuer: None }, &ins(team2)).is_err(),
+        s.update_as_acp(&Session { agent: Some(DAVE), client: None, issuer: None, now: None }, &ins(team2)).is_err(),
         "dave denied write on team2"
     );
 }
@@ -525,7 +525,7 @@ fn acp_creator_agent_with_client_constraint() {
 
     // ALLOW: bob (creator) through the named app.
     assert!(
-        s.accessible(&Session { agent: Some(BOB), client: Some(APP), issuer: None }, r)
+        s.accessible(&Session { agent: Some(BOB), client: Some(APP), issuer: None, now: None }, r)
             .iter()
             .any(|g| g.as_str() == CRE_DOC),
         "bob (creator) + app reads d0"
@@ -534,7 +534,7 @@ fn acp_creator_agent_with_client_constraint() {
     assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator) w/o app denied");
     // DENY: named client but not the creator.
     assert!(
-        !s.accessible(&Session { agent: Some(CAROL), client: Some(APP), issuer: None }, r)
+        !s.accessible(&Session { agent: Some(CAROL), client: Some(APP), issuer: None, now: None }, r)
             .iter()
             .any(|g| g.as_str() == CRE_DOC),
         "carol (non-creator) + app denied"

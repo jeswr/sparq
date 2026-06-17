@@ -1240,7 +1240,14 @@ fn order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 /// comparison against a malformed operand is undefined, and [`compare`] treats
 /// `None` as fail-closed (the constraint is not satisfied). This is the sq-qj2q
 /// fix for what was previously a raw `x.cmp(y)` lexical comparison.
-fn cmp_datetime(x: &str, y: &str) -> Option<std::cmp::Ordering> {
+///
+/// **Public so other crates compare dateTime bounds by the *same* instant
+/// normalizer the evaluator uses — never a divergent (lexical) one.** It is the one
+/// source of truth for `xsd:dateTime` ordering across the workspace: `sparq-solid`'s
+/// opt-in live-clock window re-check ([OPUS-4.8] sq-0q7n) calls this so a persisted
+/// `not_before`/`not_after` window is enforced on the real UTC instant, exactly as
+/// the evaluator's `odrl:dateTime` constraint was, rather than on `str::cmp`.
+pub fn cmp_datetime(x: &str, y: &str) -> Option<std::cmp::Ordering> {
     Some(parse_instant(x)?.cmp(&parse_instant(y)?))
 }
 

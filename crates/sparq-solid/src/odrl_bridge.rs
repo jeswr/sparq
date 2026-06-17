@@ -111,7 +111,7 @@
 
 use crate::authindex::{Mode, AUTHENTICATED, PUBLIC};
 use crate::{AUTH_BRIDGED_GRAPH, AUTH_GRAPH, AUTH_NS, SOLIDX_NS};
-use oxrdf::{NamedNode, Term};
+use oxrdf::{Literal, NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
 use sparq_policy::{
@@ -564,6 +564,32 @@ const ODRL_RECIPIENT: &str = "http://www.w3.org/ns/odrl/2/recipient";
 /// The ODRL `assignee` constraint left-operand IRI (the party as a *constraint*,
 /// distinct from the `odrl:assignee` rule attribute the evaluator already matches).
 const ODRL_ASSIGNEE: &str = "http://www.w3.org/ns/odrl/2/assignee";
+/// The ODRL `dateTime` constraint left-operand IRI — the request-time dimension.
+/// [OPUS-4.8] sq-0q7n.
+const ODRL_DATETIME: &str = "http://www.w3.org/ns/odrl/2/dateTime";
+
+/// A faithfully-mappable `odrl:dateTime` validity window persisted onto an
+/// `auth:ConditionalGrant` as live-clock bounds. [OPUS-4.8] sq-0q7n.
+///
+/// Both bounds are `xsd:dateTime` lexical strings (the constraint's right-operand,
+/// verbatim) and **inclusive**, matching [`crate::AuthIndex`]'s `window_admits`:
+/// `not_before` = the grant is inactive until this instant; `not_after` = inactive
+/// after it. The session layer re-checks `Session::now` against the window per request,
+/// so a lapsed window denies *this request* without waiting for a ledger refresh.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TimeWindow {
+    /// Lower bound (`odrl:dateTime gteq T` → "from T", inclusive). `None` = unbounded.
+    not_before: Option<String>,
+    /// Upper bound (`odrl:dateTime lteq T` → "until T", inclusive). `None` = unbounded.
+    not_after: Option<String>,
+}
+
+impl TimeWindow {
+    /// Whether this window constrains anything (else it is the always-open window).
+    fn is_some(&self) -> bool {
+        self.not_before.is_some() || self.not_after.is_some()
+    }
+}
 
 /// What [`map_constraints_to_agents`] concluded about a permission's constraints.
 enum AgentMapping {
@@ -579,10 +605,15 @@ enum AgentMapping {
         /// exception matcher on the grant: a session matching the grant head is denied
         /// the grant if it is one of these. Empty ⇒ no exception.
         except: Vec<String>,
+        /// The live-clock validity window from a faithfully-mappable `odrl:dateTime`
+        /// constraint (`gteq` → `not_before`, `lteq` → `not_after`). [OPUS-4.8] sq-0q7n.
+        /// The always-open window (no `odrl:dateTime` constraint) is the default.
+        window: TimeWindow,
     },
     /// At least one constraint has NO faithful ACP-condition analogue (purpose /
-    /// dateTime window / count): the rule MUST stay one-shot (fail-closed — never
-    /// approximate an unmappable constraint with a looser persisted condition).
+    /// `odrl:count` / a strict `odrl:dateTime` bound / an unrecognised operand): the rule
+    /// MUST stay one-shot (fail-closed — never approximate an unmappable constraint with
+    /// a looser persisted condition).
     Unmappable,
 }
 
@@ -602,18 +633,50 @@ enum AgentMapping {
 /// an `auth:exceptMatcher` carving out the named party, re-checked per session by the
 /// same machinery WAC/ACP `noneOf` already uses. [OPUS-4.8] sq-5037.
 ///
+/// **Faithful (→ live-clock window):** an `odrl:dateTime` constraint under `lteq`
+/// ("until T", inclusive → `auth:notAfter`) or `gteq` ("from T", inclusive →
+/// `auth:notBefore`) with an `xsd:dateTime` right-operand. [OPUS-4.8] sq-0q7n — the
+/// window is persisted onto the grant and re-checked against the session clock
+/// (`Session::now`) per request, so a lapsed window denies *immediately* on the next
+/// request instead of only on the next ledger refresh. Strict bounds (`lt`/`gt`) are
+/// deliberately left **Unmappable** to avoid an inclusive/exclusive off-by-one against
+/// the inclusive `auth:notBefore`/`auth:notAfter` semantics (the one-shot path still
+/// enforces them, frozen).
+///
 /// **Unmappable (→ stay one-shot):** `odrl:purpose` (ACP sessions carry no purpose —
 /// a client app is not a purpose-of-use, so mapping it to a client matcher would
-/// over-grant), `odrl:dateTime`/time windows (ACP has no "now" dimension — matcher
-/// accept-sets are static, so a persisted condition could not re-check the clock),
-/// `odrl:count` (ACP is stateless — no usage counter), and any unrecognised
-/// left-operand. Any one such constraint forces the whole rule one-shot.
+/// over-grant), a STRICT `odrl:dateTime` bound (`lt`/`gt` — see above), `odrl:count`
+/// (ACP is stateless — no usage counter), and any unrecognised left-operand. Any one
+/// such constraint forces the whole rule one-shot.
 fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
     let mut agents: Vec<String> = Vec::new();
     let mut except: Vec<String> = Vec::new();
+    let mut window = TimeWindow::default();
     for c in &rule.constraints {
+        // [OPUS-4.8] sq-0q7n: a faithfully-mappable dateTime window → live-clock bounds.
+        if c.left == ODRL_DATETIME {
+            let Value::DateTime(t) = &c.right else {
+                // a non-dateTime right-operand on a dateTime constraint is malformed.
+                return AgentMapping::Unmappable;
+            };
+            match c.operator {
+                // request time ≤ T → "until T" (inclusive upper bound).
+                Operator::Lteq => {
+                    // Two upper bounds → keep the EARLIER (tightest) — fail-closed.
+                    set_tighter(&mut window.not_after, t, /*keep_earlier=*/ true);
+                }
+                // request time ≥ T → "from T" (inclusive lower bound).
+                Operator::Gteq => {
+                    // Two lower bounds → keep the LATER (tightest) — fail-closed.
+                    set_tighter(&mut window.not_before, t, /*keep_earlier=*/ false);
+                }
+                // strict bounds have no inclusive window analogue → one-shot.
+                _ => return AgentMapping::Unmappable,
+            }
+            continue;
+        }
         if c.left != ODRL_RECIPIENT && c.left != ODRL_ASSIGNEE {
-            // purpose / dateTime / count / anything else → no faithful condition.
+            // purpose / count / anything else → no faithful condition.
             return AgentMapping::Unmappable;
         }
         match c.operator {
@@ -649,7 +712,35 @@ fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
             _ => return AgentMapping::Unmappable,
         }
     }
-    AgentMapping::Faithful { agents, except }
+    AgentMapping::Faithful { agents, except, window }
+}
+
+/// Tighten an inclusive window bound with a new `xsd:dateTime` candidate `t`, compared
+/// by the **real UTC instant** each denotes (`sparq_policy::cmp_datetime`, the SAME
+/// offset-aware normalizer the evaluator uses — never raw lexical `str::cmp`, which
+/// would pick the wrong bound for mixed-offset times). When two constraints set the
+/// same side, keep the TIGHTER bound (the earlier upper bound / the later lower bound)
+/// so the persisted window is the intersection — fail-closed, never wider than any one
+/// constraint. An **unparseable** incoming `t` is treated as not-tighter (the existing
+/// bound is kept) so a malformed candidate can never *widen* the window. [OPUS-4.8]
+/// sq-0q7n.
+fn set_tighter(slot: &mut Option<String>, t: &str, keep_earlier: bool) {
+    use std::cmp::Ordering;
+    match slot {
+        None => *slot = Some(t.to_owned()),
+        Some(cur) => {
+            // Replace only when `t` is strictly tighter than `cur` by instant order;
+            // an incomparable (unparseable) pair never replaces (fail-closed).
+            let replace = match sparq_policy::cmp_datetime(t, cur.as_str()) {
+                Some(Ordering::Less) => keep_earlier,
+                Some(Ordering::Greater) => !keep_earlier,
+                _ => false,
+            };
+            if replace {
+                *cur = t.to_owned();
+            }
+        }
+    }
 }
 
 /// Whether a recipient principal IRI is safe to write as an `auth:agent` head: it
@@ -746,7 +837,7 @@ pub fn materialize_permission_conditional(
             continue;
         }
         match map_constraints_to_agents(rule) {
-            AgentMapping::Faithful { agents: recipients, except } => {
+            AgentMapping::Faithful { agents: recipients, except, window } => {
                 let agents = condition_agents(rule, &recipients);
                 if agents.is_empty() {
                     // every recipient was reserved-encoded → fail-closed, nothing.
@@ -768,8 +859,9 @@ pub fn materialize_permission_conditional(
                     ));
                     continue;
                 }
-                let (first, emitted) =
-                    append_conditional_grants(graph, &agents, &excepts, mode, target, GrantEffect::Allow);
+                let (first, emitted) = append_conditional_grants(
+                    graph, &agents, &excepts, &window, mode, target, GrantEffect::Allow,
+                );
                 return BridgeOutcome {
                     granted: true,
                     mode: Some(mode),
@@ -868,7 +960,19 @@ pub fn materialize_prohibition_conditional(
             continue;
         }
         match map_constraints_to_agents(rule) {
-            AgentMapping::Faithful { agents: recipients, except } => {
+            AgentMapping::Faithful { agents: recipients, except, window } => {
+                // [OPUS-4.8] sq-0q7n: a time-windowed DENY is fail-OPEN — outside the
+                // window the deny would lapse and the carved-out party would regain
+                // access. A live-clock window is safe only on an ALLOW (a lapsed allow
+                // removes access — fail-closed). So a dateTime-windowed prohibition must
+                // stay one-shot (the frozen deny is materialized iff it matches now).
+                if window.is_some() {
+                    fallback_reasons.push(format!(
+                        "prohibition {} carries a dateTime window (fail-open as a live deny); one-shot path",
+                        rule.id
+                    ));
+                    continue;
+                }
                 let agents = condition_agents(rule, &recipients);
                 if agents.is_empty() {
                     fallback_reasons.push(format!(
@@ -888,7 +992,7 @@ pub fn materialize_prohibition_conditional(
                     continue;
                 }
                 let (first, emitted) = append_conditional_grants(
-                    graph, &agents, &excepts, mode, target, GrantEffect::Deny,
+                    graph, &agents, &excepts, &TimeWindow::default(), mode, target, GrantEffect::Deny,
                 );
                 return BridgeOutcome {
                     prohibited: true,
@@ -1017,6 +1121,7 @@ fn append_conditional_grants(
     graph: &mut Graph,
     agents: &[String],
     excepts: &[String],
+    window: &TimeWindow,
     mode: Mode,
     target: &str,
     effect: GrantEffect,
@@ -1044,6 +1149,11 @@ fn append_conditional_grants(
     let accepts_agent_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsAgentP"));
     let accepts_client_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsClientP"));
     let accepts_issuer_p = NamedNode::new_unchecked(format!("{SOLIDX_NS}acceptsIssuerP"));
+    // [OPUS-4.8] sq-0q7n: the live-clock window predicates + the xsd:dateTime datatype the
+    // bounds are typed with (so they round-trip as the same literal the evaluator parses).
+    let not_before_p = NamedNode::new_unchecked(format!("{AUTH_NS}notBefore"));
+    let not_after_p = NamedNode::new_unchecked(format!("{AUTH_NS}notAfter"));
+    let xsd_datetime = NamedNode::new_unchecked(XSD_DATETIME);
 
     // One deterministic exception matcher per carved-out principal, shared across the
     // grant heads (its accept-set is the same regardless of which positive head it
@@ -1076,13 +1186,18 @@ fn append_conditional_grants(
             .map(|(m, _)| sparq_reason::n3::encode_for_uri(m))
             .collect::<Vec<_>>()
             .join(",");
+        // [OPUS-4.8] sq-0q7n: the window is part of the grant identity — two grants for
+        // the same (agent, mode, graph, excepts, effect) but DIFFERENT windows must not
+        // collide on the same IRI (one would silently overwrite the other's bounds).
         let grant_iri = format!(
-            "urn:sparq:odrl-cond?agent={}&mode={}&graph={}&except={}&effect={}",
+            "urn:sparq:odrl-cond?agent={}&mode={}&graph={}&except={}&effect={}&notBefore={}&notAfter={}",
             sparq_reason::n3::encode_for_uri(agent),
             sparq_reason::n3::encode_for_uri(mode_iri(mode)),
             sparq_reason::n3::encode_for_uri(target),
             except_key,
             effect.iri_local(),
+            sparq_reason::n3::encode_for_uri(window.not_before.as_deref().unwrap_or("")),
+            sparq_reason::n3::encode_for_uri(window.not_after.as_deref().unwrap_or("")),
         );
         let g = Term::NamedNode(NamedNode::new_unchecked(&grant_iri));
         let agent_o = Term::NamedNode(NamedNode::new_unchecked(agent));
@@ -1095,6 +1210,22 @@ fn append_conditional_grants(
             [g.clone(), Term::NamedNode(mode_p.clone()), Term::NamedNode(mode_o.clone())],
             [g.clone(), Term::NamedNode(graph_p.clone()), Term::NamedNode(graph_o.clone())],
         ];
+        // [OPUS-4.8] sq-0q7n: the live-clock window bounds (xsd:dateTime literals),
+        // re-checked against `Session::now` by `crate::AuthIndex::cond_applies`.
+        if let Some(nb) = &window.not_before {
+            head.push([
+                g.clone(),
+                Term::NamedNode(not_before_p.clone()),
+                Term::Literal(Literal::new_typed_literal(nb.as_str(), xsd_datetime.clone())),
+            ]);
+        }
+        if let Some(na) = &window.not_after {
+            head.push([
+                g.clone(),
+                Term::NamedNode(not_after_p.clone()),
+                Term::Literal(Literal::new_typed_literal(na.as_str(), xsd_datetime.clone())),
+            ]);
+        }
         // Wire each exception matcher onto the grant + materialize its accept-set facts.
         for (m, [agent_accept, client_accept, issuer_accept]) in &except_matchers {
             let m_node = Term::NamedNode(NamedNode::new_unchecked(m));
@@ -1123,6 +1254,10 @@ fn append_conditional_grants(
 
 /// `rdf:type` IRI, for the conditional-grant class triple.
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+
+/// `xsd:dateTime` datatype IRI, for the live-clock window bound literals. [OPUS-4.8]
+/// sq-0q7n.
+const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
 // ============================================================================
 // [OPUS-4.8] sq-dpk4 — refresh / revocation of bridged ODRL grants.
@@ -1457,5 +1592,43 @@ fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
         deny_triple: Some((party.to_owned(), pred, target.to_owned())),
         emitted: vec![triple],
         ..BridgeOutcome::default()
+    }
+}
+
+#[cfg(test)]
+mod set_tighter_tests {
+    //! [OPUS-4.8] sq-0q7n — `set_tighter` keeps the instant-tightest window bound when
+    //! two same-side `odrl:dateTime` constraints intersect. The pre-fix lexical `<`/`>`
+    //! picked the wrong bound for mixed timezone offsets (a fail-open: a wider persisted
+    //! window than the constraints allow). These pin the offset-aware behavior.
+    use super::set_tighter;
+
+    #[test]
+    fn upper_bound_keeps_earlier_instant_across_offsets() {
+        // Two notAfter bounds: 12:00Z (= 12:00Z) and 13:00+02:00 (= 11:00Z). The EARLIER
+        // instant is the offset form (11:00Z); lexically "12…Z" < "13…+02:00" so the OLD
+        // code wrongly kept 12:00Z (later instant → wider window).
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "2026-06-16T13:00:00+02:00", /*keep_earlier=*/ true);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T13:00:00+02:00"), "kept earlier instant");
+    }
+
+    #[test]
+    fn lower_bound_keeps_later_instant_across_offsets() {
+        // Two notBefore bounds: 12:00Z and 09:00-02:00 (= 11:00Z). The LATER instant is
+        // 12:00Z; lexically "09…-02:00" < "12…Z" — verify the tighter (later) is kept.
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "2026-06-16T09:00:00-02:00", /*keep_earlier=*/ false);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "kept later instant");
+        // And a genuinely-later offset bound DOES replace.
+        set_tighter(&mut slot, "2026-06-16T16:00:00+02:00", /*keep_earlier=*/ false); // = 14:00Z
+        assert_eq!(slot.as_deref(), Some("2026-06-16T16:00:00+02:00"), "later instant wins");
+    }
+
+    #[test]
+    fn unparseable_candidate_never_widens() {
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "not-a-date", true);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "malformed never replaces");
     }
 }

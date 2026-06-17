@@ -72,7 +72,9 @@ store.materialize_wac()?;                 // run the N3 rules → install <urn:s
 let q = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
 
 // WebID / client / issuer are all CALLER-ASSERTED — sparq-solid does NOT authenticate them.
-let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+// `now` is the request clock (xsd:dateTime), used only by time-windowed conditional grants.
+let alice =
+    Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 let authorized = store.query_as(&alice, Mode::Read, q)?;            // alice's authorized graphs
 let public_only = store.query_as(&Session::default(), Mode::Read, q)?; // anonymous: public graphs only
 let _ = (authorized.rows.len(), public_only.rows.len());
@@ -130,11 +132,15 @@ Materialize the authorization view from the access-control documents, then enfor
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
   constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a
   one-shot allow — so the granted agent is verified **per session**, not frozen to the
-  materializing party. Only `odrl:recipient`/`odrl:assignee` (`eq`/`isA`/`isPartOf`) maps
-  faithfully (recipient-of-data = session agent); `odrl:purpose`/`dateTime`/`count` have no
-  stateless `(agent, client)` analogue and STAY one-shot; a rule mixing mappable +
-  unmappable constraints falls back **entirely** to one-shot (fail-safe — never drops a
-  bound). Mapping table in the [`usage-control-policy`](../usage-control-policy/SKILL.md) skill.
+  materializing party. `odrl:recipient`/`odrl:assignee` (`eq`/`isA`/`isPartOf`/`neq`) maps
+  faithfully (recipient-of-data = session agent); an `odrl:dateTime` **inclusive** bound
+  (`lteq` → `auth:notAfter`, `gteq` → `auth:notBefore`) maps to a **live-clock window**
+  re-checked against `Session::now` per request ([OPUS-4.8] sq-0q7n — a lapsed window denies
+  immediately, no `refresh_odrl_grant` needed); `odrl:purpose`/`count`/a *strict* `dateTime`
+  bound have no faithful analogue and STAY one-shot; a rule mixing mappable + unmappable
+  constraints falls back **entirely** to one-shot (fail-safe — never drops a bound). A
+  dateTime window is mapped only on an **allow** (a lapsed *deny* would fail open). Mapping
+  table in the [`usage-control-policy`](../usage-control-policy/SKILL.md) skill.
 - `store.refresh_odrl_grant(&Policy, &Request, BridgeKind)` / `refresh_odrl_grants()` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-dpk4): re-evaluate **bridged** ODRL grants when
   the policy changes and **retract** the ones that no longer hold (a withdrawn permission, a
@@ -151,13 +157,16 @@ Materialize the authorization view from the access-control documents, then enfor
   Withdrawn`); an *ambiguous* re-eval **keeps** the deny (never restore access on missing
   evidence). A retracted deny may re-expose an allow grant — correct, since the prohibition
   is genuinely gone.
-- `Session { agent: Option<&str>, client: Option<&str>, issuer: Option<&str> }`
-  (all three caller-asserted: WebID + `acl:origin`/`acp:client` + the OIDC `acp:issuer`;
-  `None` = anonymous / any client / any issuer respectively). [OPUS-4.8] sq-3jtd.6: the
-  `issuer` field is the third matcher dimension (ACP only — WAC ignores it) and is a
-  STRING MATCH on a caller-asserted issuer, **not** an authentication step (see
-  "What this is — and is NOT"). `Mode::{Read, Write, Append, Control}`; `wac_fixture()` /
-  `acp_fixture()` (bundled demo pods).
+- `Session { agent: Option<&str>, client: Option<&str>, issuer: Option<&str>, now: Option<&str> }`
+  (agent/client/issuer caller-asserted: WebID + `acl:origin`/`acp:client` + the OIDC
+  `acp:issuer`; `None` = anonymous / any client / any issuer respectively). [OPUS-4.8]
+  sq-3jtd.6: the `issuer` field is the third matcher dimension (ACP only — WAC ignores it)
+  and is a STRING MATCH on a caller-asserted issuer, **not** an authentication step (see
+  "What this is — and is NOT"). [OPUS-4.8] sq-0q7n: `now` is the request clock (an
+  `xsd:dateTime` lexical string), consulted **only** by time-windowed conditional grants —
+  a windowed grant with `now == None` fails closed; set it with `Session::at(now)`.
+  `Mode::{Read, Write, Append, Control}`; `wac_fixture()` / `acp_fixture()` (bundled demo
+  pods).
 - `triple_principal(agent, client, issuer) -> String` / `pair_principal(agent, client) ->
   String` — the deterministic minted principal IRIs (`urn:sparq:triple?…` /
   `urn:sparq:pair?…`) that the ACP/WAC N3 rules emit for an issuer- / client-constrained

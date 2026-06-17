@@ -31,7 +31,7 @@ store.materialize_wac()?; // run the N3 rules → install <urn:sparq:auth>
 
 // The SAME query, different sessions, different results — fail-closed.
 let q = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
-let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None };
+let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 let _authorized = store.query_as(&alice, Mode::Read, q)?.rows.len();
 let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len();
 # Ok(()) }
@@ -153,14 +153,29 @@ analogue keep the one-shot behaviour.
 | `odrl:recipient` / `odrl:assignee` | `neq` ("everyone EXCEPT X") | `auth:Public` grant + `auth:exceptMatcher` carving out `X` (ACP `noneOf`) | **re-checked condition** ([OPUS-4.8] sq-5037) |
 | `odrl:recipient` / `odrl:assignee` | order (`lt`/`gt`/…) | — (not meaningful on a recipient) | one-shot (frozen) |
 | `odrl:purpose` | any | — (ACP session has no purpose) | one-shot (frozen) |
-| `odrl:dateTime` / time window | any | — (ACP has no "now") | one-shot (frozen) |
+| `odrl:dateTime` | `lteq` ("until T") / `gteq` ("from T") | `auth:notAfter` / `auth:notBefore` window on the grant | **re-checked condition (live clock)** ([OPUS-4.8] sq-0q7n) |
+| `odrl:dateTime` | strict (`lt`/`gt`) | — (no inclusive `auth:notBefore`/`notAfter` analogue) | one-shot (frozen) |
 | `odrl:count` | any | — (ACP is stateless; no per-session usage counter) | one-shot (frozen) in the bridge¹ |
 | *no constraint* | — | `auth:agent auth:Public` | re-checked (public) |
 
-**Why only recipient/assignee:** the ACP session re-check carries exactly `(agent, client)`,
-and the recipient-of-data *is* the session agent — so an agent matcher re-checks it with
-identical semantics. Purpose/time/count have no stateless `(agent, client)` analogue, so
-persisting them would require a looser approximation that could over-grant — rejected.
+**Why recipient/assignee + dateTime:** the ACP session re-check carries `(agent, client,
+issuer)` and now an optional request clock `Session::now`. The recipient-of-data *is* the
+session agent, and an `odrl:dateTime` window *is* the request instant, so both re-check with
+identical semantics. Purpose/count have no stateless per-session analogue, so persisting them
+would require a looser approximation that could over-grant — rejected.
+
+**`odrl:dateTime` → live-clock window** — [OPUS-4.8] sq-0q7n. An inclusive bound
+(`dateTime lteq T` → `auth:notAfter T`, `dateTime gteq T` → `auth:notBefore T`) is persisted
+onto the `ConditionalGrant` as an `xsd:dateTime` literal and **re-checked against
+`Session::now` per request** by `cond_applies` (`window_admits`). A lapsed window therefore
+denies *immediately on the next request* — it no longer waits for a `refresh_odrl_grant` pass
+to retract the frozen allow. **Fail-closed:** a windowed grant evaluated with `now == None`
+(no clock supplied) never applies, exactly mirroring the ODRL evaluator's fail-closed
+`dateTime` constraint with no request-context value; two `lteq`/two `gteq` bounds keep the
+*tightest* (the intersection); strict `lt`/`gt` stay one-shot to avoid an inclusive/exclusive
+off-by-one. A time-windowed **deny** is NOT persisted as a live window (a lapsed deny would
+fail OPEN — the carved-out party would regain access); a dateTime-windowed prohibition stays
+one-shot. Bind the clock with `Session::at("2026-06-17T09:00:00Z")` or set `Session::now`.
 
 **`recipient neq X` → ACP `noneOf` ("everyone EXCEPT X")** — [OPUS-4.8] sq-5037. A
 `recipient neq X` rule emits a `ConditionalGrant` whose head is the positive recipient set
