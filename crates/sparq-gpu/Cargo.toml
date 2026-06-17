@@ -26,9 +26,11 @@ publish = false
 # a GPU win once the host→device transfer tax is charged honestly?
 
 [dependencies]
-# wgpu 22: the exact version the research/hardware/wgpu-spike prototype proved to
-# build and run unmodified on Metal (M1); same source targets Vulkan/DX12/WebGPU.
-wgpu = "22"
+# wgpu 29: migrated from 22 (sq-5z08, #117). The research/hardware/wgpu-spike
+# prototype originally proved wgpu 22 builds and runs on Metal (M1); the same
+# WGSL source targets Vulkan/DX12/WebGPU. wgpu 29's MSRV is 1.83, below the
+# workspace floor (1.88), so the bump does NOT raise the workspace MSRV.
+wgpu = "29"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 
