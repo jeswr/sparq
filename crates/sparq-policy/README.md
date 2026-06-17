@@ -126,9 +126,15 @@ assert!(!evaluate(&policy, &outside).allow);
   / `gt T`, or a two-sided `gteq lower` + `lteq upper`, AND-combined). The actual instant is the
   request's evaluation time, supplied via the first-class `Request::at(instant)` sugar
   (over `.with(ODRL_DATETIME, Value::DateTime(..))`; read back via `req.request_time()`).
-  Instants compare by magnitude. **Missing time → *unprovable* → fail-closed:** a
-  time-gated permission does not grant on an unknown clock; a time-gated prohibition is
-  not withdrawn.
+  Instants compare by the **UTC point they denote, not their lexical form** — a
+  mixed-offset pair such as `2026-06-16T13:00:00+02:00` (= 11:00Z) and `…T12:00:00Z`
+  orders correctly, and `…T12:00:00Z` equals `…T14:00:00+02:00` under `eq` ([OPUS-4.8]
+  sq-qj2q). Normalization is self-contained (std-only — the crate carries no `chrono`/
+  `time` dependency): `xsd:dateTime`/`xsd:date` lexical forms are parsed to a UTC instant
+  (`Z`/`±hh:mm`/no-tz, fractional seconds, leap-second clamp), and an **unparseable**
+  operand compares fail-closed (order is undefined → constraint not satisfied).
+  **Missing time → *unprovable* → fail-closed:** a time-gated permission does not grant
+  on an unknown clock; a time-gated prohibition is not withdrawn.
   - `datetime_status(&rule, &request) -> DateTimeMatch` reports exactly what the evaluator
     checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` / `NotConstrained` — the
     temporal dual of `purpose_status`/`recipient_status`. (In the `sparq-solid` bridge,
@@ -172,10 +178,10 @@ assert!(!evaluate(&policy, &outside).allow);
 Single-node only. The headline **federated-disclosure** / ODRL→MPC composition
 (per-node ODRL drives the `sparq-mpc` disclosed-vs-hidden split; ODRL `Duty` →
 ZK proof obligation) is **deferred** — it inherits the MPC honest-majority/LAN
-envelope and the open ZK-soundness remediation. `dateTime` ordering compares the
-lexical form; mixed-offset normalization, DPV `purpose` hierarchies, and
-`Duty → proof-manifest` discharge are tracked as follow-on beads. See
-`research/feature-research-odrl-policy.md`.
+envelope and the open ZK-soundness remediation. `dateTime` ordering normalizes
+mixed timezone offsets to the UTC instant before comparing ([OPUS-4.8] sq-qj2q);
+DPV `purpose` hierarchies and `Duty → proof-manifest` discharge are tracked as
+follow-on beads. See `research/feature-research-odrl-policy.md`.
 
 **Constraint persistence vs. one-shot** (sq-hiz4 / sq-5037, in `sparq-solid`'s opt-in
 bridge): `materialize_odrl_permission_conditional` persists a
