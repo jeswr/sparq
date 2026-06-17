@@ -67,7 +67,17 @@ export function zstdRawFrame(payload, { dictId = 0 } = {}) {
   // Window_Descriptor byte then).
   const fhd = (fcs.flag << 6) | (1 << 5) | did.flag;
 
-  const blocks = [];
+  // The frame is at least one block even for a zero-length payload (an empty
+  // Raw_Block with Last_Block set). Each block contributes a 3-byte header plus
+  // its raw bytes; size the output exactly so we can write it with .set()
+  // rather than spreading chunk bytes as function args — a >=128 KiB chunk
+  // spread into Array.push overflows the call stack (RangeError, bead sq-3lh7).
+  const blockCount = Math.max(1, Math.ceil(data.length / MAX_RAW_BLOCK));
+  const header = [...ZSTD_MAGIC, fhd, ...did.bytes, ...fcs.bytes];
+  const frame = new Uint8Array(header.length + blockCount * 3 + data.length);
+  frame.set(header, 0);
+
+  let pos = header.length;
   let offset = 0;
   do {
     const end = Math.min(offset + MAX_RAW_BLOCK, data.length);
@@ -75,18 +85,31 @@ export function zstdRawFrame(payload, { dictId = 0 } = {}) {
     const lastBlock = end >= data.length ? 1 : 0;
     // Block_Header (3 bytes LE): Block_Size<<3 | Block_Type<<1 | Last_Block.
     // Block_Type 0 = Raw_Block (stored uncompressed).
-    const header = (chunk.length << 3) | (0 << 1) | lastBlock;
-    blocks.push(header & 0xff, (header >> 8) & 0xff, (header >> 16) & 0xff, ...chunk);
+    const bh = (chunk.length << 3) | (0 << 1) | lastBlock;
+    frame[pos] = bh & 0xff;
+    frame[pos + 1] = (bh >> 8) & 0xff;
+    frame[pos + 2] = (bh >> 16) & 0xff;
+    frame.set(chunk, pos + 3);
+    pos += 3 + chunk.length;
     offset = end;
   } while (offset < data.length);
 
-  return Uint8Array.from([...ZSTD_MAGIC, fhd, ...did.bytes, ...fcs.bytes, ...blocks]);
+  return frame;
 }
 
 /** Concatenated independent frames — the RFC 8878 multi-frame wire shape the
  *  `CompressedSink` emits (Node's own `zstdDecompressSync` decodes only the
  *  first; fzstd loops them all). */
 export function zstdMultiFrame(payloads) {
-  const frames = payloads.map(p => [...zstdRawFrame(p)]);
-  return Uint8Array.from(frames.flat());
+  // Copy each frame in with .set() (no spread): frames can each exceed the
+  // safe argument count, so flattening via spread would re-introduce sq-3lh7.
+  const frames = payloads.map(p => zstdRawFrame(p));
+  const total = frames.reduce((n, f) => n + f.length, 0);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const f of frames) {
+    out.set(f, pos);
+    pos += f.length;
+  }
+  return out;
 }
