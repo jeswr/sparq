@@ -1,6 +1,6 @@
 ---
 name: prov-lineage
-description: "Capture W3C PROV-O data lineage for DERIVED RDF — when a CONSTRUCT/DESCRIBE query produces a new graph, OR a reasoner materializes inferred triples (RDFS/OWL-RL/N3), record who/what/when made it (prov:Activity + prov:Entity + wasGeneratedBy/used/wasDerivedFrom) using the opt-in sparq-prov crate. Use when you need machine-readable provenance for derived data — citable lineage for GenAI-grounded answers, audit/compliance (CDMC CD-1) data-lineage capture, attribution of constructed graphs to their source(s), or per-fact inference lineage from a why() proof tree (the `reason` feature). Off by default; does not touch sparq-core/sparq-engine's lean build."
+description: "Capture W3C PROV-O data lineage for DERIVED RDF — when a CONSTRUCT/DESCRIBE query produces a new graph, a SPARQL UPDATE (INSERT…WHERE / INSERT DATA / DELETE) changes a store, OR a reasoner materializes inferred triples (RDFS/OWL-RL/N3), record who/what/when made it (prov:Activity + prov:Entity + wasGeneratedBy/used/wasDerivedFrom; wasInvalidatedBy for deletes) using the opt-in sparq-prov crate. Use when you need machine-readable provenance for derived/mutated data — citable lineage for GenAI-grounded answers, audit/compliance (CDMC CD-1) data-lineage capture, attribution of constructed graphs or UPDATE writes to their source(s), or per-fact inference lineage from a why() proof tree (the `reason` feature). Off by default; does not touch sparq-core/sparq-engine's lean build."
 ---
 
 # sparq-prov — W3C PROV-O lineage for derived data
@@ -69,6 +69,57 @@ A  prov:wasAssociatedWith <agent> .           # if ProvConfig.agent is set
 All IRIs are absolute, so the output is valid PROV-O that round-trips through any
 RDF parser (tested against both `Graph::load_str` and `oxttl::NTriplesParser`).
 
+## Capture lineage for a SPARQL UPDATE
+
+A SPARQL UPDATE mutates a store. `derive_update` applies it **in place** and reads the
+engine's *resolved* effect log, so the lineage reflects the triples actually committed
+(exact even for non-deterministic update text — `NOW()`/`RAND()`/`UUID()`/fresh
+`BNODE()`). The PROV reading is two-sided: **inserts** are *generated/derived*, **deletes**
+are *invalidated*.
+
+```rust
+use sparq_core::Graph;
+use sparq_prov::{derive_update, ProvConfig};
+use oxrdf::NamedNode;
+
+let mut g = Graph::load_str("@prefix ex: <http://ex/> . ex:a ex:age 30 .", "turtle").unwrap();
+let cfg = ProvConfig::with_inputs([NamedNode::new_unchecked("http://ex/src")]);
+let d = derive_update(
+    &mut g,
+    "PREFIX ex: <http://ex/> \
+     DELETE { ?s ex:age ?a } INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+    cfg,
+).unwrap();
+
+let inserted = d.inserted();    // the generated (derived) triples
+let deleted  = d.deleted();     // the retracted (invalidated) triples
+let lineage  = d.prov_graph();  // its PROV-O record (Vec<Triple>)
+```
+
+Emitted shape — for update activity `A`, generated entity `E` (the inserts), inputs `Iᵢ`:
+
+```turtle
+A  a                    prov:Activity .
+A  rdfs:label           "DELETE/INSERT WHERE" .   # / "INSERT DATA" / "LOAD" / "SPARQL UPDATE"
+A  prov:value           "<the SPARQL text>" .
+A  prov:startedAtTime   "…Z"^^xsd:dateTime .
+A  prov:endedAtTime     "…Z"^^xsd:dateTime .
+A  prov:used            Iᵢ .                       # one per input
+E  a                    prov:Entity .              # only if the update INSERTED
+E  prov:wasGeneratedBy  A .                         #   "
+E  prov:wasDerivedFrom  Iᵢ .                        #   " (one per input)
+_:d a                   prov:Entity ;               # one fresh blank node per DELETED triple
+    prov:wasInvalidatedBy A .
+```
+
+Honesty boundaries:
+
+- **Deletes are invalidations, not derivations** — a deleted triple is never
+  `wasGeneratedBy`/`wasDerivedFrom`. A pure-delete update generates **no** result entity.
+- **Structural ops** (`CLEAR` / `DROP` / `CREATE`) change a graph's existence/emptiness,
+  not its triples-as-data — they are reflected only in the activity kind label, with **no**
+  per-triple entity (no sound per-triple derivation to assert).
+
 ## Identity & determinism
 
 - IRIs default to stable, content-addressed `urn:sparq:prov:{role}:…` nodes — the
@@ -128,7 +179,8 @@ DAG (the same shared fact names the same entity).
 |---|---|
 | `CONSTRUCT` / `DESCRIBE` | ✅ covered (`derive_construct`) |
 | Reasoner materialization (RDFS / OWL-RL / N3) | ✅ covered (`reason` feature → `prov_from_proof`) |
-| SPARQL UPDATE (`INSERT … WHERE`, `INSERT DATA`) | ⏳ deferred (follow-up bead) |
+| SPARQL UPDATE data ops (`INSERT … WHERE`, `INSERT DATA`, `DELETE …`, `LOAD`) | ✅ covered (`derive_update`) — inserts ⇒ generated/derived, deletes ⇒ `wasInvalidatedBy` |
+| SPARQL UPDATE structural ops (`CLEAR` / `DROP` / `CREATE`) | ⛔ no per-triple entity (deliberate boundary — recorded only as the activity kind) |
 
 For the reasoner's per-fact proof itself (the input to `prov_from_proof`), see the
 [`inference`](../inference/SKILL.md) skill's `explain` feature (`why()` produces

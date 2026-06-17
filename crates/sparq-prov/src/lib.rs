@@ -25,6 +25,14 @@
 //! derivation. [`derive_construct`] runs the query, times it, and returns a
 //! [`Derivation`] carrying both the derived triples and a PROV-O lineage graph.
 //!
+//! The **SPARQL UPDATE** path is covered: an `INSERT … WHERE` / `INSERT DATA` /
+//! `DELETE …` mutation has a two-sided PROV reading — the triples it **inserts** are
+//! *generated* (a `prov:Entity` `wasGeneratedBy` the update, `wasDerivedFrom` the
+//! matched inputs), the triples it **deletes** are *invalidated*
+//! (`prov:wasInvalidatedBy`). [`derive_update`] applies the update in place, captures
+//! the engine's resolved effect log, and returns an [`UpdateDerivation`] carrying the
+//! inserted + deleted triples and the PROV-O lineage. See the [`update`] module.
+//!
 //! **Reasoner-materialization** lineage is covered under the (non-default)
 //! `reason` feature: [`prov_from_proof`] maps a `sparq-reason` `why()`
 //! [`ProofTree`](sparq_reason::ProofTree) to PROV-O — one `prov:Entity` per
@@ -34,8 +42,10 @@
 //! premises for each fact) than a single CONSTRUCT-style activity. See the
 //! [`reason`] module.
 //!
-//! **Deferred** (filed as follow-up beads, see the crate README): SPARQL UPDATE
-//! (`INSERT … WHERE` / `INSERT DATA`) lineage.
+//! **Out of scope for per-triple lineage** (a deliberate honesty boundary, not a TODO):
+//! the structural UPDATE operations `CLEAR` / `DROP` / `CREATE` change a graph's
+//! existence/emptiness rather than its triples-as-data and carry no resolved triple set,
+//! so [`derive_update`] records them as an activity kind but emits no per-triple entity.
 //!
 //! [`prov:Activity`]: https://www.w3.org/TR/prov-o/#Activity
 //! [`prov:Entity`]: https://www.w3.org/TR/prov-o/#Entity
@@ -53,6 +63,11 @@ use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 
 mod datetime;
+// [OPUS-4.8] sq-xwdd: SPARQL UPDATE lineage — capture PROV-O for the data an
+// `INSERT … WHERE` / `INSERT DATA` / `DELETE …` operation changes in a store. Like
+// the CONSTRUCT path it depends only on sparq-core/sparq-engine (no extra feature).
+mod update;
+pub use update::{derive_update, derive_update_with_budget, UpdateDerivation};
 // [OPUS-4.8] sq-m3i0: reasoner-materialization lineage — map a sparq-reason
 // `why()` proof tree → PROV-O RDF. Non-default feature, so the sparq-reason dep
 // is pulled only when asked for.
