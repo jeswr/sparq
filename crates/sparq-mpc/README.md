@@ -158,10 +158,12 @@ is out of scope (a black box). Three fix recommendations were bead-tracked:
   and there is no `get_seed()`-style accessor. The owned cipher is
   correctness-pinned to two independent RFC 8439 known-answer vectors (§2.3.2
   block + §2.4.2 keystream), and the scrub is proven by test. The now-unused direct
-  `rand` dependency is dropped (only `rand_chacha`'s re-exported `rand_core::OsRng`
-  is kept, for the OS seed). HYGIENE only — the masking RNG is still an OS-seeded
-  ChaCha20 CSPRNG drawn as uniform `F_p`; behaviour is identical and all MPC tests
-  pass unchanged in both feature states.
+  `rand` dependency was dropped, and as of the rand-ecosystem 0.10 upgrade
+  (`sq-8xug`) the `rand_chacha` dependency is dropped too: `rand_core` 0.10 removed
+  `OsRng`, so `SecureRng::from_os` now draws the 32-byte seed straight from
+  `getrandom::fill` (the same OS-entropy source `OsRng` wrapped). HYGIENE only — the
+  masking RNG is still an OS-seeded ChaCha20 CSPRNG drawn as uniform `F_p`;
+  behaviour is identical and all MPC tests pass unchanged in both feature states.
 - **`sq-7ltf` (this README's subject — ADDRESSED).** The latent non-constant-time
   `Fp::pow` (square-and-multiply branches on the exponent bits). See below.
 - **`sq-8jv7` (open).** Schnorr issuance signing uses arkworks scalar ops not

@@ -37,7 +37,8 @@
 use geo::{Contains, Intersects};
 use geo_types::{Coord, Geometry, LineString, Point, Polygon};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+// [OPUS-4.8] sq-8xug: `random_range` moved from `Rng` to `RngExt` in rand 0.10.
+use rand::{RngExt, SeedableRng};
 use sparq_geo::geof;
 use sparq_geo::{GeoGeometry, Crs};
 

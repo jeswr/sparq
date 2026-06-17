@@ -22,8 +22,10 @@ The three bespoke crypto crates and their declared role / non-shipping status:
   flock for the durable nonce store). Comment: "byte-identical wasm artifact with or without
   it."
 - `crates/sparq-mpc/Cargo.toml` — `publish = false`; deps `sparq-core`/`sparq-engine`,
-  `rand 0.9` + `rand_chacha 0.9` (CSPRNG). Header: "Native-only research scaffold; crypto
-  deferred"; `insecure-test-rng` feature OFF by default.
+  `getrandom 0.4` for the OS-entropy seed of the sparq-owned ChaCha20 CSPRNG
+  (`src/chacha.rs`; `rand_chacha` dropped at the rand-ecosystem 0.10 upgrade, sq-8xug).
+  Header: "Native-only research scaffold; crypto deferred"; `insecure-test-rng`
+  feature OFF by default.
 
 Standard primitives inventory: see CR-11.
 
@@ -154,9 +156,11 @@ soundness certificate — it would be dishonest to present it as one. The publis
   via the maintained zkp-ld `rdf-canon` crate, W3C-test-suite-validated"); conformance test
   `crates/sparq-zk/tests/rdf_canon_suite.rs` (incl. SHA-384 parameterized cases, test075).
   Fail-closed on the HNDQ poison-graph limit (`CanonError::Canonicalization`).
-- **CSPRNG:** `crates/sparq-zk/src/ingest.rs` `SaltMint::mint` draws 32 `getrandom` bytes per
-  graph; `crates/sparq-mpc/src/rng.rs` uses `rand_chacha::ChaCha20Rng` seeded from OS entropy
-  (`from_os_rng`). Insecure deterministic PRNG only behind `insecure-test-rng` (CR-12).
+- **CSPRNG:** `crates/sparq-zk/src/ingest.rs` `SaltMint::mint` draws 32 `getrandom::fill` bytes
+  per graph; `crates/sparq-mpc/src/rng.rs` `SecureRng::from_os` seeds the sparq-owned
+  ChaCha20 CSPRNG (`src/chacha.rs`) with 32 OS-entropy bytes from `getrandom::fill`
+  (`rand_chacha` dropped at the rand-ecosystem 0.10 upgrade, sq-8xug — `rand_core`
+  0.10 removed `OsRng`). Insecure deterministic PRNG only behind `insecure-test-rng` (CR-12).
 
 ---
 
