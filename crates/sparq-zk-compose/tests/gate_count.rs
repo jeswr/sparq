@@ -41,6 +41,13 @@ const BENCH_JSON: &str = include_str!("../../../bench/zk-compose/gate_counts_lat
 struct Snapshot {
     tolerance_pct: f64,
     members: std::collections::BTreeMap<String, u64>,
+    /// sq-ncvq.8 (Gate G5): top-level `zk/` `bin` packages that are deliberately
+    /// NOT gate-count-baselined (e.g. the xpath unit-test harness — a `bin` that
+    /// drives library tests, not a deployed proving circuit). Map of package name
+    /// → reason. `snapshot_covers_top_level_circuits` requires every top-level
+    /// `bin` circuit to be either a `members` baseline or listed here.
+    #[serde(default)]
+    exempt_circuits: std::collections::BTreeMap<String, String>,
 }
 
 /// `bench/zk-compose/gate_counts_latest.json` shape (the `zk/ieee754` JSON
@@ -75,15 +82,86 @@ fn toolchain_available() -> bool {
     on_path("nargo") && on_path("bb")
 }
 
-/// `zk/compose/` workspace root, relative to this crate (workspace layout:
-/// `crates/sparq-zk-compose` → `../../zk/compose`). Mirrors
-/// `CircuitProver::from_crate_root`.
-fn compose_dir() -> PathBuf {
+/// The repo's top-level `zk/` directory, relative to this crate (workspace
+/// layout: `crates/sparq-zk-compose` → `../../zk`).
+fn zk_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     here.parent()
         .and_then(Path::parent)
-        .map(|root| root.join("zk").join("compose"))
+        .map(|root| root.join("zk"))
         .expect("workspace layout")
+}
+
+/// `zk/compose/` workspace root. Mirrors `CircuitProver::from_crate_root`.
+fn compose_dir() -> PathBuf {
+    zk_root().join("compose")
+}
+
+/// Minimal `Nargo.toml` reader: the `[package] name` and `type`, without pulling
+/// in a TOML crate (these files are machine/hand-written in a fixed, simple
+/// shape). Returns `(name, type)` where `type` is `""` for a `[workspace]` root
+/// (no `[package]`). Good enough for the G5 coverage scan — it only needs to
+/// tell a `bin` proving circuit apart from a `lib`/workspace.
+fn parse_nargo_toml(path: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut in_package = false;
+    let mut name = None;
+    let mut pkg_type = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("name") {
+            if let Some(val) = v.trim_start().strip_prefix('=') {
+                name = Some(val.trim().trim_matches('"').to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("type") {
+            if let Some(val) = v.trim_start().strip_prefix('=') {
+                pkg_type = val.trim().trim_matches('"').to_string();
+            }
+        }
+    }
+    name.map(|n| (n, pkg_type))
+}
+
+/// Recursively collect every `bin`-type Noir package under `zk/`, EXCLUDING the
+/// `zk/compose/` family (already covered by `snapshot_covers_every_member`) and
+/// any `target/` build dir. Returns `(package_name, manifest_dir)` pairs. A
+/// `bin` package is a deployable proving circuit (it has a `main`); `lib`
+/// packages and `[workspace]` roots have no `circuit_size` and are skipped.
+fn top_level_bin_circuits(zk: &Path) -> Vec<(String, PathBuf)> {
+    let compose = zk.join("compose");
+    let mut found = Vec::new();
+    let mut stack = vec![zk.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let path = entry.path();
+            // zk/compose is the EXISTING gate's domain; target/ is build output.
+            if path == compose || entry.file_name() == "target" {
+                continue;
+            }
+            if let Some((name, ty)) = parse_nargo_toml(&path.join("Nargo.toml")) {
+                if ty == "bin" {
+                    found.push((name, path.clone()));
+                }
+            }
+            stack.push(path);
+        }
+    }
+    found.sort();
+    found
 }
 
 /// Compile the whole workspace once (idempotent), producing `target/<pkg>.json`
@@ -244,5 +322,71 @@ fn bench_json_matches_snapshot() {
         "circuit_size disagrees between snapshot and bench JSON (they must be ONE \
          measurement — re-baseline both together):\n{}",
         mismatches.join("\n")
+    );
+}
+
+/// [OPUS-4.8] sq-ncvq.8 (Gate G5) — extend the gate-count snapshot coverage
+/// beyond `zk/compose/` to EVERY top-level `zk/` proving circuit. A "proving
+/// circuit" is a `bin`-type Noir package (it has a `main`, so it has a
+/// `circuit_size`); `lib` packages and `[workspace]` roots are not proven and
+/// carry no gate-count guarantee.
+///
+/// `snapshot_covers_every_member` already fails if a `zk/compose/` member lacks
+/// a baseline. This test closes the same gap for a NEW top-level circuit family
+/// added elsewhere under `zk/` (e.g. a future `zk/<family>/<circuit>` `bin`):
+/// it must have either a `members` baseline OR an explicit `exempt_circuits`
+/// entry (with a documented reason). So a deployable circuit cannot silently
+/// ship without a gate-count baseline.
+///
+/// Today the only top-level `bin` package outside `zk/compose/` is the
+/// `xpath_unit_tests` harness (a `bin` that drives the xpath library's unit
+/// tests, NOT a deployed proving circuit) — it is listed in `exempt_circuits`.
+/// `zk/ieee754` and `zk/xpath/xpath` are `lib`s and have no circuit to gate.
+/// Runs WITHOUT the toolchain — it only reads `Nargo.toml`s + the snapshot.
+#[test]
+fn snapshot_covers_top_level_circuits() {
+    let snapshot: Snapshot =
+        serde_json::from_str(SNAPSHOT_JSON).expect("gate_count_snapshot.json parses");
+    let zk = zk_root();
+    if !zk.exists() {
+        eprintln!("zk/ absent; skipping top-level circuit coverage check");
+        return;
+    }
+
+    let mut uncovered = Vec::new();
+    for (name, path) in top_level_bin_circuits(&zk) {
+        let covered =
+            snapshot.members.contains_key(&name) || snapshot.exempt_circuits.contains_key(&name);
+        if !covered {
+            uncovered.push(format!("{name} ({})", path.display()));
+        }
+    }
+
+    assert!(
+        uncovered.is_empty(),
+        "top-level zk/ proving circuit(s) have NO gate-count baseline AND NO \
+         exempt_circuits entry in tests/gate_count_snapshot.json: {uncovered:?} \
+         — add a `members` baseline (run bench/zk-compose/scripts/gate_counts.sh) \
+         for a deployed circuit, or an `exempt_circuits` entry (with a reason) for \
+         a non-deployed bin (e.g. a test harness)"
+    );
+
+    // Guard against a stale exemption: every exempt_circuits key must still be a
+    // real top-level bin package (or a compose member), else the exemption is
+    // dead and should be removed.
+    let live: std::collections::BTreeSet<String> = top_level_bin_circuits(&zk)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let mut stale = Vec::new();
+    for name in snapshot.exempt_circuits.keys() {
+        if !live.contains(name) && !snapshot.members.contains_key(name) {
+            stale.push(name.clone());
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "exempt_circuits entr(ies) no longer match any top-level zk/ bin package \
+         — remove the dead exemption from tests/gate_count_snapshot.json: {stale:?}"
     );
 }
