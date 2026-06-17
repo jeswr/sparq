@@ -239,7 +239,7 @@ Documented in design doc §3.6 / §7 item 4 and gh-55, all currently **missing**
 | Vocabulary term | Spec | Status | Shape of the work |
 |---|---|---|---|
 | `acl:accessToClass` | WAC (extension) | missing | needs a class-membership join over pod content — crosses the §2.4 reasoner/content boundary; non-trivial |
-| `acp:CreatorAgent` / `acp:OwnerAgent` | ACP | missing | needs *per-resource creator/owner facts* from the storage layer (who created `<r>`) — a loader-synthesized fact PSS would have to supply; recognized in `loader.rs` `SPECIAL_AGENTS` but not granted |
+| `acp:CreatorAgent` / `acp:OwnerAgent` | ACP | **done ([OPUS-4.8] sq-3jtd.5)** | per-resource creator/owner WebIDs the trusted caller supplies via `AccessProvenance` + `materialize_acp_with`; loader synthesizes `<r> solidx:creator\|owner <w>` from THAT map only (never pod content, §2.4); resource-scoped grant (`urn:sparq:provcand?…&res=R`) so a creator of `R1` is never granted `R2` |
 | `acp:issuer` | ACP | missing | "same shape as `acp:client`" (design doc §3.6) — extend the principal from a pair to a triple `(agent, client, issuer)`, combinatorial blow-up noted |
 | `acp:vc` | ACP | missing | Verifiable-Credential-gated matcher — needs VC verification, genuinely large; ties to the sparq ZK/VC estate |
 | custom ACP mode IRIs | ACP | partial | the design supports *any* mode IRI; the prototype maps only the 4 standard ones — the auth-view predicate space is fixed to read/write/append/control |

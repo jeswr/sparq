@@ -87,6 +87,19 @@ Materialize the authorization view from the access-control documents, then enfor
   `materialize_*` call **every** session (including the owner) sees nothing.
 - `store.materialize_wac()` / `store.materialize_acp() -> Result<MaterializeStats, _>` —
   run the N3 rules to (re)install `<urn:sparq:auth>`.
+- `store.materialize_acp_with(&AccessProvenance) -> Result<MaterializeStats, _>` —
+  ([OPUS-4.8] sq-3jtd.5) ACP materialization that ALSO resolves `acp:CreatorAgent` /
+  `acp:OwnerAgent` matchers against per-resource creator/owner WebIDs supplied by the
+  TRUSTED caller. `AccessProvenance::set_creator(resource, webid)` /
+  `set_owner(resource, webid)` build the map; the loader synthesizes
+  `<r> solidx:creator|owner <w>` facts from THAT map ONLY. The loader hard-rejects any
+  control-document triple whose predicate is in the derivation-internal `solidx:` namespace
+  (§2.4), so a writer who embeds `<r> solidx:creator <self>` in a content document OR in the
+  `.acr` they control cannot self-grant (this also blocks forged `solidx:appliesToResource`
+  policy redirection). Each grant is RESOURCE-SCOPED (the creator of `R1` is never
+  granted `R2`) and composes with the matcher's own `acp:client`/`acp:issuer` constraints.
+  `materialize_acp()` is `materialize_acp_with(&AccessProvenance::new())` — no provenance ⇒
+  no `CreatorAgent`/`OwnerAgent` grant (fail-closed).
 - `store.query_as(&Session, Mode, sparql)` → `QueryResult` (`.rows`);
   `store.query_json_as(...)` → JSON string; `store.ask_as(...)` → `bool`. These evaluate
   through the engine's **zero-copy `DatasetView`** filtered to the session's authorized
@@ -167,7 +180,10 @@ pattern: `GRAPH <urn:sparq:auth> { ?who <https://sparq.dev/ns/auth#read> ?doc }`
 - **ACP** (`.acr`) — policies / matchers with the `allOf` / `anyOf` / `noneOf`
   combinators and normative **deny-overrides**. [OPUS-4.8] sq-3jtd.6: matchers may now
   also constrain on `acp:issuer` (the caller-asserted OIDC issuer), the third principal
-  dimension.
+  dimension. [OPUS-4.8] sq-3jtd.5: matchers may also use `acp:agent acp:CreatorAgent` /
+  `acp:OwnerAgent` — the context agent must be the resource's creator / owner, resolved
+  against the TRUSTED per-resource provenance supplied via `materialize_acp_with` (above),
+  resource-scoped and fail-closed.
 - Principal lattice — three independent dimensions (agent, client, issuer):
   `Public ⊒ Authenticated ⊒ concrete-WebID`, `AnyClient ⊒ concrete-client`, and
   ([OPUS-4.8] sq-3jtd.6) `AnyIssuer ⊒ concrete-issuer`. A session expands to the agent
