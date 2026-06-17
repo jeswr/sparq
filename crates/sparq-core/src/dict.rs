@@ -730,7 +730,9 @@ struct MappedDict {
 impl MappedDict {
     #[inline]
     fn slice_u64(m: &memmap2::Mmap) -> &[u64] {
-        // SAFETY: written as little-endian u64; mmap base is page-aligned (>= 8).
+        // SAFETY: `write_pod_slice` wrote these as raw NATIVE-endian u64 (little-endian on
+        // every supported target — pinned by `DICT_ON_DISK_LE_GUARD`, sq-lvw8); mmap base is
+        // page-aligned (>= 8). This pointer cast reads them back in the same native order.
         unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<u64>(), m.len() / 8) }
     }
     #[inline]
@@ -743,7 +745,9 @@ impl MappedDict {
     }
     #[inline]
     fn hashids(&self) -> &[u32] {
-        // SAFETY: written as little-endian u32; mmap base is page-aligned (>= 4).
+        // SAFETY: `write_pod_slice` wrote these as raw NATIVE-endian u32 (little-endian on
+        // every supported target — pinned by `DICT_ON_DISK_LE_GUARD`, sq-lvw8); mmap base is
+        // page-aligned (>= 4). This pointer cast reads them back in the same native order.
         unsafe { std::slice::from_raw_parts(self.hashids.as_ptr().cast::<u32>(), self.hashids.len() / 4) }
     }
     /// The parsed term record for a 1-based id.
@@ -786,6 +790,15 @@ impl MappedDict {
         // so ALL of the header/length/bounds/record/index logic lives in a pure function
         // that has no `mmap`/file-I/O/FFI dependency and can be Kani-proof-harnessed (the
         // MS-G4 follow-up the .spqv validator already enjoys — see .github/workflows/kani.yml).
+        //
+        // [OPUS-4.8] sq-lvw8 (sq-ueuk/#418 verify note) — the seam reads the offset/hashid
+        // arrays with EXPLICIT `from_le_bytes`, while the runtime mmap readers (`slice_u64` /
+        // `hashids`) reinterpret the same bytes with a NATIVE-endian pointer cast. PR #418's
+        // claim that this delegation is "byte-for-byte unchanged" from the old inline validator
+        // therefore holds only on a LITTLE-ENDIAN target, where native == LE. That precondition
+        // is enforced for the whole persistence format by `DICT_ON_DISK_LE_GUARD` (a build error
+        // on a big-endian target), so on every platform this validator actually runs on, the
+        // explicit-LE seam and the native-endian readers observe identical integers.
         validate_dict_bytes(&self.blob, &self.offsets, &self.hashes, &self.hashids, len, prefixes, datatypes)
     }
 }
@@ -2078,10 +2091,52 @@ pub(crate) fn write_record(w: &mut impl std::io::Write, t: &StoredRef) -> std::i
     })
 }
 
-/// Writes a slice of plain-old-data (u32/u64) as raw little-endian bytes (for the mmap
-/// offset / hash / id arrays). Little-endian is assumed on read (all target platforms).
+/// [OPUS-4.8] sq-lvw8 (sq-ueuk/#418 follow-up): the mmap on-disk dictionary format is
+/// little-endian. [`write_pod_slice`] / [`MappedDict::slice_u64`] / [`MappedDict::hashids`]
+/// move the offset/hash/id arrays through a raw native-endian byte cast, while
+/// [`validate_dict_bytes`] and the `dict-spill` external builder use explicit
+/// `from_le_bytes` / `to_le_bytes`; the two only agree (and the in-RAM vs spilled build only
+/// stay byte-identical) on a little-endian host. Make that a BUILD error, not silent on-disk
+/// corruption, on the day someone targets a big-endian platform — at which point both the raw
+/// writer and the unsafe readers must be reworked onto explicit `*_le_bytes`. (`compile_error!`
+/// here would be evaluated even when the `mmap` cfg is inactive, so this uses a const guard,
+/// which is monomorphised only when the feature is on.)
+#[cfg(feature = "mmap")]
+const DICT_ON_DISK_LE_GUARD: () = assert!(
+    cfg!(target_endian = "little"),
+    "the mmap/dict-spill on-disk dictionary format is little-endian only (sq-lvw8): \
+     write_pod_slice + the MappedDict pointer-cast readers are native-endian, but \
+     validate_dict_bytes and the dict-spill builder are explicit-LE, so they diverge on a \
+     big-endian target. Port both to explicit *_le_bytes before enabling these features on BE."
+);
+
+/// Writes a slice of plain-old-data (u32/u64) as raw bytes (for the mmap offset / hash /
+/// id arrays — `dict-offs.bin` / `dict-hash.bin` / `dict-hid.bin`).
+///
+/// [OPUS-4.8] sq-lvw8 (sq-ueuk/#418 follow-up): this is a raw `transmute`-style byte copy,
+/// so the on-disk byte order is the HOST's native endianness — little-endian on every target
+/// sparq currently builds for. The whole mmap dictionary format relies on that:
+///   * the mmap readers ([`MappedDict::slice_u64`] / [`MappedDict::hashids`]) reinterpret
+///     these bytes as `&[u64]` / `&[u32]` via a pointer cast — also native-endian — so the
+///     in-RAM write/read round-trip is self-consistent on ANY single target, BUT
+///   * [`validate_dict_bytes`] and the `dict-spill` external builder (`dictspill.rs`) read
+///     and WRITE the very same files with EXPLICIT `from_le_bytes` / `to_le_bytes`.
+///
+/// On a little-endian host all three agree, so `save_mmap`'s output is byte-for-byte identical
+/// to the spilled-build output and `validate_dict_bytes` accepts it — exactly the equivalence
+/// PR #418 relied on when it called its validator refactor "byte-for-byte unchanged". On a
+/// BIG-endian host the native-endian writer/reader here would diverge from the explicit-LE
+/// `validate_dict_bytes` / `dictspill` paths, so a freshly-written store would FAIL its own
+/// `open_mmap` validation and the two build paths would no longer be byte-identical. Rather
+/// than carry that silent-corruption hazard, the persistence features are STATICALLY pinned to
+/// little-endian targets by [`DICT_ON_DISK_LE_GUARD`]; the only correct way to support BE would
+/// be to route BOTH this writer and the unsafe readers through explicit `*_le_bytes` too.
 #[cfg(feature = "mmap")]
 fn write_pod_slice<T: Copy>(path: &std::path::Path, data: &[T]) -> std::io::Result<()> {
+    // Force-evaluate the little-endian on-disk-format guard (sq-lvw8): referencing the const
+    // both keeps it from being dead-code-eliminated and makes a big-endian build fail HERE,
+    // at the native-endian raw byte write, rather than silently emit a BE file.
+    let () = DICT_ON_DISK_LE_GUARD;
     // SAFETY: T is u32/u64 (POD); we only read its bytes.
     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) };
     std::fs::write(path, bytes)
@@ -3005,6 +3060,59 @@ mod tests {
         assert_eq!(d2.term(iid), inner);
         assert_eq!(d2.lookup(&outer), oid);
         assert_eq!(d2.lookup(&triple("http://ex/x", "http://ex/p", int("8"))), NO_ID);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] sq-lvw8 (sq-ueuk/#418 follow-up) — endianness invariant of the mmap on-disk
+    /// dictionary format. The format mixes two byte-order conventions for the SAME files: the
+    /// runtime writer/readers (`write_pod_slice`, `MappedDict::slice_u64`/`hashids`) move the
+    /// `u64`/`u32` arrays through a raw NATIVE-endian byte cast, while `validate_dict_bytes` and
+    /// the `dict-spill` external builder use explicit `to_le_bytes` / `from_le_bytes`. They
+    /// agree, and the in-RAM `save_mmap` output is byte-for-byte identical to the spilled build
+    /// (the claim PR #418 relied on), ONLY on a little-endian host — which is exactly what
+    /// `DICT_ON_DISK_LE_GUARD` pins at compile time. This test makes the assumption a CHECKED
+    /// invariant: it evaluates the compile-time guard, confirms the writer's raw bytes equal the
+    /// explicit-LE encoding the validator expects, and that re-opening round-trips. On a
+    /// (currently unbuildable) big-endian target `DICT_ON_DISK_LE_GUARD` fails the build before
+    /// this test — or any silent on-disk corruption — can be reached.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn mmap_dict_on_disk_arrays_are_little_endian() {
+        // Force-evaluate the compile-time little-endian guard: on a big-endian target this
+        // const initializer (and thus the whole crate) fails to build, so the persistence
+        // format is never silently emitted in the wrong byte order. `cfg!(target_endian)` is a
+        // compile-time constant here, hence the const guard rather than a runtime `assert!`.
+        let () = DICT_ON_DISK_LE_GUARD;
+
+        let mut d = Dict::new();
+        d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a")));
+        d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/b")));
+        let dir = std::env::temp_dir().join(format!("sparq-dict-endian-mmap-{}", std::process::id()));
+        d.save_mmap(&dir).unwrap();
+
+        // (a) `write_pod_slice` is a raw native-endian byte copy; on this LE host the on-disk
+        //     `dict-offs.bin` must therefore be the EXPLICIT little-endian encoding of the same
+        //     u64 offsets that `validate_dict_bytes` (which uses `from_le_bytes`) reads back.
+        let offs_bytes = std::fs::read(dir.join("dict-offs.bin")).unwrap();
+        assert_eq!(offs_bytes.len() % 8, 0, "offset array is whole u64s");
+        for chunk in offs_bytes.chunks_exact(8) {
+            // Re-encoding the LE-decoded value must reproduce the on-disk bytes exactly.
+            let v = u64::from_le_bytes(chunk.try_into().unwrap());
+            assert_eq!(&v.to_le_bytes(), chunk, "dict-offs.bin is little-endian on this host");
+        }
+        // (b) Same for `dict-hid.bin` (the u32 lookup ids the seam reads via `from_le_bytes`).
+        let hid_bytes = std::fs::read(dir.join("dict-hid.bin")).unwrap();
+        assert_eq!(hid_bytes.len() % 4, 0, "hashid array is whole u32s");
+        for chunk in hid_bytes.chunks_exact(4) {
+            let v = u32::from_le_bytes(chunk.try_into().unwrap());
+            assert_eq!(&v.to_le_bytes(), chunk, "dict-hid.bin is little-endian on this host");
+        }
+
+        // (c) End-to-end: the store re-opens and resolves — i.e. the native-endian mmap readers
+        //     and the explicit-LE `validate_dict_bytes` (run inside `open_mmap`) agree.
+        let d2 = Dict::open_mmap(&dir).unwrap();
+        assert_eq!(d2.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a"))), 1);
+        assert_eq!(d2.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/b"))), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 
