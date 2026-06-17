@@ -18,7 +18,7 @@ auditor re-runs the command and re-reads the cited file to confirm the claim.
 ```sh
 grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | sed 's#crates/##;s#/src.*##' | sort -u | wc -l
 ```
-→ **20** crates (of 25 total) carry `#![forbid(unsafe_code)]` (verified on this branch via
+→ **26** crates (of 31 total) carry `#![forbid(unsafe_code)]` (verified on this branch via
 the per-crate-deduped count above); the 5 with `unsafe` are sparq-core/-vectors/-cli/
 -zk-compose/-bench. A new `unsafe` in a forbid crate fails to compile. The confined unsafe
 surface and its per-site register are

@@ -22,7 +22,7 @@ or an in-module `#[test]` regresses, `.github/workflows/<wf>.yml` gates. Full re
 | V1.1.3 | Threat model exists, covers the boundaries | **PASS** | `research/threat-model.md` (STRIDE, boundaries B1–B5; B3 = no-auth server boundary, B5 = mmap) | sparq |
 | V1.2.x | Authentication architecture documented | **PASS (as B3 decision)** | `research/threat-model.md` B3; `crates/sparq-server/src/main.rs` usage banner; `README.md` (this dir) "B3 boundary" | sparq + operator |
 | V1.5.x | Input/output trust boundaries defined; untrusted input identified | **PASS** | `CONTRIBUTING.md#secure-coding` ("hardened surfaces": parser/engine/server); threat-model T-PARSE-FUZZ, T-MMAP-FUZZ | sparq |
-| V1.14.x | Segregation of components; the unsafe/crypto surfaces isolated | **PASS** | `#![forbid(unsafe_code)]` in 20 crates; ZK/MPC scaffolds isolated + caveated (`SECURITY.md`) | sparq |
+| V1.14.x | Segregation of components; the unsafe/crypto surfaces isolated | **PASS** | `#![forbid(unsafe_code)]` in 26 crates; ZK/MPC scaffolds isolated + caveated (`SECURITY.md`) | sparq |
 | V1.10 | Source control + signed commits / provenance | **AUDIT-READY** | SLSA `attest-build-provenance` on release (`release.yml`); commit-signing is a maintainer/org control | sparq + operator |
 
 ## V2 — Authentication (mostly N/A — operator; thin residual is the optional token gate)

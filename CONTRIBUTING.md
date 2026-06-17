@@ -44,7 +44,7 @@ encouraged.
 ### Every `unsafe` block needs a `// SAFETY:` comment and a register row
 
 `sparq`'s `unsafe` is confined to five crates (mmap loaders, the zero-copy dictionary,
-SIMD/FFI); the other twenty are `#![forbid(unsafe_code)]`. If you add an `unsafe` block,
+SIMD/FFI); the other twenty-six are `#![forbid(unsafe_code)]`. If you add an `unsafe` block,
 `fn`, `impl`, `trait`, or `extern`, you **must** in the same change:
 
 1. Put a **`// SAFETY:`** comment immediately above it stating the invariant it relies on

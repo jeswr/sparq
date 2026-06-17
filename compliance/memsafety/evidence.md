@@ -7,21 +7,23 @@ Each control in [`controls.md`](./controls.md) is backed here by the **exact** f
 test, or CI job, plus the command an auditor re-runs to confirm it. Paths are
 repo-relative. No timing is recorded (NON-CANONICAL EC2 box).
 
-## MS-1 — confined unsafe surface (20 `forbid` crates, 5 unsafe crates)
+## MS-1 — confined unsafe surface (26 `forbid` crates, 5 unsafe crates)
 
 ```sh
 grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | sed 's#crates/##;s#/src.*##' | sort -u
 ```
-→ 20 crates: sparq-conformance, sparq-engine, sparq-geo, sparq-gpu, sparq-hdt,
-sparq-introspect, sparq-mpc, sparq-nlq, sparq-parse, sparq-py, sparq-reason, sparq-rsp,
-sparq-serve, sparq-server, sparq-shacl, sparq-sim, sparq-solid, sparq-text, sparq-wasm,
-sparq-zk.
+→ 26 crates: sparq-canon, sparq-conformance, sparq-engine, sparq-fedclient, sparq-fedplan,
+sparq-geo, sparq-gpu, sparq-hdt, sparq-introspect, sparq-mpc, sparq-nlq, sparq-parse,
+sparq-policy, sparq-prov, sparq-py, sparq-reason, sparq-reason-wasm, sparq-rsp, sparq-serve,
+sparq-server, sparq-shacl, sparq-sim, sparq-solid, sparq-text, sparq-wasm, sparq-zk.
 
 ```sh
-ls crates/ | wc -l            # → 25 total crates
+ls crates/ | wc -l            # → 31 total crates
 ```
-Accounting: **20 forbid + 5 with unsafe (sparq-core, sparq-vectors, sparq-cli,
-sparq-zk-compose, sparq-bench) = 25.** No crate is unaccounted-for.
+Accounting: **26 forbid + 5 with unsafe (sparq-core, sparq-vectors, sparq-cli,
+sparq-zk-compose, sparq-bench) = 31.** No crate is unaccounted-for. <!-- [OPUS-4.8] sq-pro0:
+count re-verified on this branch — 31 workspace crates, 26 `#![forbid(unsafe_code)]` roots,
+5 unsafe-bearing. The 56-site / per-crate figures (MS-2) are unchanged. -->
 
 ## MS-2 — 56-site register, count-verified
 

@@ -89,7 +89,7 @@ remain external by definition; the AUDIT-READY label stands.
 
 ## Honest overall posture
 
-The memsafety framework is **substantively PASS**: the unsafe surface is confined (20 forbid
+The memsafety framework is **substantively PASS**: the unsafe surface is confined (26 forbid
 crates), fully enumerated + justified (56-site register), gated by a merge-blocking ratchet,
 and covered by a Miri+oracle+fuzz+ASan matrix with the B5 boundary explicitly handled. The
 open gaps are **not** missing safety — they are (a) [CLOSED] the first-party
