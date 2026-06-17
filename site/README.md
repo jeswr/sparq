@@ -32,11 +32,33 @@ npm ci
 npm run dev        # sync-wasm → public/wasm, then next dev
 npm run build      # → out/  (static export)
 npm run lint
+npm run test:unit  # node:test — pure helper logic (REPL dataset, …)
+npm run test:e2e   # Playwright — headless browser smoke tests (see below)
 ```
 
 `public/wasm/` is generated (git-ignored): `scripts/sync-wasm.mjs` copies the
 wasm-pack `--target web` output from `js/wasm/`. The `prebuild` script runs it
 automatically before `next build`.
+
+### Browser smoke tests (Playwright)
+
+`e2e/` holds headless-browser smoke tests driven by Playwright against a real `next dev`
+server (config: `playwright.config.ts`). The first time, install the browser:
+
+```bash
+npx playwright install chromium
+npm run test:e2e
+```
+
+The current coverage is the **ZK car-hire prover pre-warm** (`e2e/zk-prewarm.spec.ts`,
+bead sq-5q63): it loads `/showcase/zk-car-hire`, waits for the *Prover ready* pill, and
+asserts the first **Generate ZK proof** click pays no cold start — i.e. it does not
+re-pay the lazy `@noir-lang/noir_js` + `@aztec/bb.js` dynamic-import or the
+`Barretenberg.new` WASM instantiate that `prewarmProver()` already did on route mount.
+That is observed via a test-only cold-start counter the prover mirrors onto
+`window.__zkProverColdStarts` (pure observability; it changes nothing the prover proves).
+CI runs this lane on site-touching PRs (`.github/workflows/site-e2e.yml`); Playwright
+outputs (`test-results/`, `playwright-report/`, the browser cache) are git-ignored.
 
 ## Papers (the academic paper factory)
 

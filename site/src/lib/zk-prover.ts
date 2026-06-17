@@ -141,9 +141,45 @@ interface ProverContext {
 
 let proverPromise: Promise<ProverContext> | null = null;
 
+/**
+ * [OPUS-4.8] sq-5q63 — observable cold-start counter for the browser smoke test.
+ *
+ * Incremented exactly ONCE per real cold start — i.e. each time the expensive
+ * {@link loadProver} body (dynamic-import of noir_js + bb.js, circuit fetch, and the
+ * dominant `Barretenberg.new` WASM instantiate) actually runs, NOT on the memoised
+ * fast path. Because {@link loadProver} shares one `proverPromise`, a correctly
+ * pre-warmed prover leaves this at 1 across the first {@link proveAgeEligibility}; a
+ * regression that re-paid the cold start on the first proof would bump it to 2.
+ *
+ * Mirrored onto `window.__zkProverColdStarts` purely so a headless Playwright run can
+ * read it without scraping the UI. This is pure test observability: it does not touch
+ * what is proved, the witness, the public inputs, or any security property of the
+ * proof. The counter only ever increases; it is never reset by product code.
+ */
+let coldStarts = 0;
+
+const COLD_START_GLOBAL = "__zkProverColdStarts" as const;
+
+declare global {
+  interface Window {
+    /** @see {@link coldStarts} — test-only cold-start observability hook (sq-5q63). */
+    [COLD_START_GLOBAL]?: number;
+  }
+}
+
+function recordColdStart(): void {
+  coldStarts += 1;
+  if (typeof window !== "undefined") {
+    window[COLD_START_GLOBAL] = coldStarts;
+  }
+}
+
 async function loadProver(): Promise<ProverContext> {
   if (!proverPromise) {
     proverPromise = (async () => {
+      // First (and, when pre-warm works, only) cold start: count it before the heavy
+      // dynamic-import + WASM instantiate so the smoke test can assert it stays at 1.
+      recordColdStart();
       const [{ Noir }, bb, circuit] = await Promise.all([
         import(/* webpackChunkName: "noir-js" */ "@noir-lang/noir_js") as Promise<NoirModule>,
         import(/* webpackChunkName: "bb-js" */ "@aztec/bb.js") as Promise<BbModule>,
