@@ -40,11 +40,16 @@ extend-exclude = [
 #
 # The anchor is a CLOSED alternation of known SPARQL/SQL/RDF-update keyword roots — NOT a
 # blanket `[A-Z]{3,}`. The original sq-hyzq form `\b[A-Z]{3,}[a-z]{1,3}\b` matched ANY run
-# of >=3 capitals plus a 1-3 char lowercase tail, which silently shielded genuine ALL-CAPS
-# misspellings written with a suffix (RECIEVEd, SEPERATEd, ADRESs) — it suppressed the very
-# misspelling class the gate exists to catch. Pinning the prefix to a vetted keyword list
-# closes that hole: a misspelled root is never in the list, so its suffixed form fires
-# again, while every legitimate keyword-suffix split stays clean. (Acronym plurals like
+# of >=3 capitals plus a 1-3 char lowercase tail, which silently shielded genuine misspelled
+# roots written with a suffix (SEPERATEd, MULTIPLYed, OCURRed) — it suppressed the very
+# misspelling class the gate exists to catch. (typos splits at the case boundary, so it sees
+# `SEPERAT`/`MULTIPL`/`OCUR` and flags them against SEPARATE/MULTIPLE/OCCUR; the old regex hid
+# exactly those hits. Note the glued mixed-case forms RECIEVEd/ADRESs are NOT a member of this
+# class — typos never flags them in the first place, with or without the regex; only the bare
+# all-caps RECIEVE/ADRES fire, and the keyword anchor leaves those untouched.) Pinning the
+# prefix to a vetted keyword list closes the hole: a misspelled root is never in the list, so
+# its suffixed form fires again, while every legitimate keyword-suffix split stays clean.
+# (Acronym plurals like
 # IRIs/APIs/SBOMs never needed shielding — typos already treats `<ACRONYM>s` as an acronym
 # plural and does not flag them; verified by a both-config diff over the doc surface.)
 extend-ignore-re = [

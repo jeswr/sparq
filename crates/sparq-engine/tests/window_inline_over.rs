@@ -143,3 +143,83 @@ fn ordinary_query_passes_through_unchanged() {
     assert_eq!(viaq.rows.len(), 5);
     assert_eq!(viaq.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp"]);
 }
+
+// ---- inline windowed AGGREGATES + frames (sq-imj8) [OPUS-4.8] ----
+
+#[test]
+fn inline_windowed_sum_per_partition() {
+    // SUM(?sales) OVER (PARTITION BY ?dept): each emp sees its dept's sales total.
+    let q = "PREFIX ex: <http://ex/> \
+        SELECT ?emp \
+            (SUM(?sales) OVER (PARTITION BY ?dept) AS ?dept_total) \
+        WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+    let r = query_over(&g(), q).unwrap();
+    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "dept_total"]);
+    // eng = 30+30+20 = 80; sales = 10+40 = 50.
+    for emp in ["a", "b", "c"] {
+        assert_eq!(for_emp(&r, emp, 1), 80);
+    }
+    for emp in ["d", "e"] {
+        assert_eq!(for_emp(&r, emp, 1), 50);
+    }
+}
+
+#[test]
+fn inline_running_total_rows_frame() {
+    // ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW — a running total of sales
+    // over the whole result ordered ascending by sales (10,20,30,30,40).
+    let q = "PREFIX ex: <http://ex/> \
+        SELECT ?emp ?sales \
+            (SUM(?sales) OVER (ORDER BY ?sales ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ?run) \
+        WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+    let r = query_over(&g(), q).unwrap();
+    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "sales", "run"]);
+    // d (sales=10) is first → run 10. e (sales=40) is last → run = grand total 130
+    // (10+20+30+30+40).
+    assert_eq!(for_emp(&r, "d", 2), 10);
+    assert_eq!(for_emp(&r, "e", 2), 130);
+    // c (sales=20) → 10+20 = 30.
+    assert_eq!(for_emp(&r, "c", 2), 30);
+}
+
+#[test]
+fn inline_moving_average_rows_n_preceding() {
+    // AVG(?sales) OVER (ORDER BY ?sales ROWS 1 PRECEDING) — a 2-row trailing moving
+    // average. ordered: d=10, c=20, a=30, b=30, e=40. The first row's frame is just
+    // itself (avg = its own value).
+    let q = "PREFIX ex: <http://ex/> \
+        SELECT ?emp ?sales \
+            (AVG(?sales) OVER (ORDER BY ?sales ROWS 1 PRECEDING) AS ?mavg) \
+        WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+    let r = query_over(&g(), q).unwrap();
+    // d is the smallest (sales=10), its trailing 1-row frame is itself → avg 10.
+    assert_eq!(for_emp(&r, "d", 2), 10);
+}
+
+#[test]
+fn inline_range_frame_includes_peer_group() {
+    // RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW — the two sales=30 rows are
+    // PEERS, so both see the same running total (10+20+30+30 = 90), unlike ROWS.
+    let q = "PREFIX ex: <http://ex/> \
+        SELECT ?emp ?sales \
+            (SUM(?sales) OVER (ORDER BY ?sales RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ?run) \
+        WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
+    let r = query_over(&g(), q).unwrap();
+    // a and b both have sales=30 → both run = 90 (their shared peer group included:
+    // 10+20+30+30).
+    assert_eq!(for_emp(&r, "a", 2), 90);
+    assert_eq!(for_emp(&r, "b", 2), 90);
+    // d=10 → 10; c=20 → 30; e=40 → 130 (the grand total 10+20+30+30+40).
+    assert_eq!(for_emp(&r, "d", 2), 10);
+    assert_eq!(for_emp(&r, "c", 2), 30);
+    assert_eq!(for_emp(&r, "e", 2), 130);
+}
+
+#[test]
+fn inline_frame_on_ranking_function_is_rejected() {
+    // A frame is only valid on a windowed aggregate; on a ranking function it errors.
+    let q = "PREFIX ex: <http://ex/> \
+        SELECT ?emp (RANK() OVER (ORDER BY ?sales ROWS UNBOUNDED PRECEDING) AS ?r) \
+        WHERE { ?emp ex:sales ?sales }";
+    assert!(query_over(&g(), q).is_err());
+}

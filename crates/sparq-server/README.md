@@ -342,15 +342,17 @@ matrix under "Security posture".
 ## ✨ Features
 
 - **SPARQL 1.1 Protocol** — `query` (GET / POST direct / POST url-encoded / HEAD) and
-  `update` (`application/sparql-update` → `204`, atomic).
+  `update` (`application/sparql-update` → `204`, atomic). The protocol **dataset-override**
+  parameters are applied, not just accepted: `default-graph-uri` / `named-graph-uri` re-scope a
+  query's active RDF dataset (replacing any in-query `FROM` / `FROM NAMED`, per §2.1.4), and
+  `using-graph-uri` / `using-named-graph-uri` re-scope an update's `WHERE` clause (per §2.2;
+  combining them with an in-update `USING` / `USING NAMED` / `WITH` is a `400`). A graph-URI value
+  that is not a valid absolute IRI is a `400`.
 - **Named graphs / full RDF dataset** — the server serves a complete RDF dataset (a default
   graph **plus** named graphs), so an in-query `GRAPH <iri>` / `GRAPH ?g` pattern, a
   cross-graph join, and a `FROM` / `FROM NAMED` dataset clause all execute, and a
   `GRAPH`-scoped `INSERT`/`DELETE`/`LOAD`/`CLEAR`/`DROP`/`CREATE` commits through the same
   sequenced writer (these are exercised end-to-end over HTTP in `tests/named_graphs.rs`).
-  **Caveat:** the *protocol-level* dataset OVERRIDE parameters (`default-graph-uri` /
-  `named-graph-uri` on `/sparql`) are accepted but not yet applied — address named graphs
-  with an in-query `GRAPH` / `FROM` for now (deferred: bead sq-z33x).
 - **Durable persistence** — `--persist <DIR>` (env `SPARQ_PERSIST_DIR`) makes the on-disk index
   the source of truth: updates are WAL-fsync'd before ack and survive a restart with **no
   rebuild** (QLever's `--persist-updates`). Off by default (in-memory). See "Durable persistence".
@@ -361,7 +363,9 @@ matrix under "Security posture".
 - **Authentication** — optional `--auth-token <TOKEN>` Bearer gate on the write surface
   (constant-time compared; mirrors QLever's `-a`), with an optional `--auth-token-read` gate
   for reads. Off by default (back-compat). See "Security posture".
-- **Hardening flags** — `--query-timeout` / `--max-body-bytes` / `--max-concurrent` /
+- **Hardening flags** — `--query-timeout` / `--update-where-timeout` (separate, typically-shorter
+  writer-side WHERE deadline that bounds writer-queue **head-of-line blocking** from a slow
+  UPDATE, `sq-nulp`) / `--max-body-bytes` / `--max-concurrent` /
   `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-query-bytes`
   (byte-accounted memory cap, `sq-s5is`) / `--max-decompress-ratio` (zip-bomb guard) /
   `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*`, each with a `SPARQ_*` env

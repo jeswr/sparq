@@ -16,6 +16,26 @@ following it, and the first bytes hit the wire sooner.
 Hard constraint: this crate must **not** enter `sparq-wasm`'s dependency graph
 (flate2 / zstd / rayon stay out of the browser bundle).
 
+## API sketch
+
+```rust
+use sparq_parse::{Codec, CompressedSink, Mode, decode_gzip_concat};
+
+let chunks: Vec<String> = vec!["{\"head\":...".into(), "...rest".into()];
+let mut sink = CompressedSink::new(Codec::Gzip { level: 6 }, Mode::Parallel);
+let mut wire = Vec::new();
+for c in &chunks {
+    sink.push(c.as_bytes());
+    for member in sink.try_drain().unwrap() {
+        wire.extend_from_slice(&member); // stream to the client immediately
+    }
+}
+for member in sink.finish().unwrap() {
+    wire.extend_from_slice(&member);
+}
+assert_eq!(decode_gzip_concat(&wire).unwrap(), chunks.concat().into_bytes());
+```
+
 > **Internal crate — not on crates.io** (`publish = false`). The design is gated
 > on a measured baseline; it is consumed inside the workspace, not as a
 > standalone public API.

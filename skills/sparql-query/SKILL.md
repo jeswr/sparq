@@ -110,9 +110,11 @@ Extension functions (SPARQL 17.6) and dataset views:
 - *(opt-in `window-functions`)* `CustomAggregateRegistry::new()` + `.register(iri, |members:
   &[Option<Term>]| -> Result<Option<Term>, String>)`; `query_with_aggregates(&Graph, &str, &reg)`
   (+ `_and_budget`) parses+installs, `with_aggregates(&reg, || …)` scopes it. Window functions:
-  `window::{WindowSpec, WindowFunction, WindowAggregate, SortKey, apply_window}` (programmatic pass),
-  or `query_over(&Graph, &str)` (+ `_with_budget`) for the inline `OVER(…)` query syntax (a source
-  rewrite over the engine; covers `ROW_NUMBER`/`RANK`/`DENSE_RANK` with `PARTITION BY`/`ORDER BY`).
+  `window::{WindowSpec, WindowFunction, WindowAggregate, WindowFrame, FrameUnit, FrameBound, SortKey,
+  apply_window}` (programmatic pass), or `query_over(&Graph, &str)` (+ `_with_budget`) for the inline
+  `OVER(…)` query syntax (a source rewrite over the engine; covers `ROW_NUMBER`/`RANK`/`DENSE_RANK`,
+  the windowed aggregates `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` (sq-imj8), `PARTITION BY`/`ORDER BY`, and
+  `ROWS`/`RANGE` frames).
 
 Introspection: `explain(&Graph, &str)` (plan-only) and `explain_analyze(&Graph, &str)` (plan + per-
 operator execution trace).
@@ -216,8 +218,8 @@ the SQL:2003 window model (the surface Stardog / AnzoGraph expose) and neither t
 W3C-conformance SPARQL surface.
 
 *(a) Programmatic pass over a `QueryResult`* — the full surface. Run an ordinary SELECT, then apply a
-`WindowSpec` (`ROW_NUMBER` / `RANK` / `DENSE_RANK`, or a windowed aggregate over the whole partition).
-One column is appended; row order is preserved:
+`WindowSpec` (`ROW_NUMBER` / `RANK` / `DENSE_RANK`, or a windowed aggregate over the whole partition, or
+— sq-imj8 — over an explicit `ROWS`/`RANGE` frame). One column is appended; row order is preserved:
 
 ```rust
 use sparq_engine::window::{apply_window, SortKey, WindowFunction, WindowSpec};
@@ -228,22 +230,31 @@ let spec = WindowSpec {
     partition_by: vec![Variable::new("dept").unwrap()],
     order_by: vec![SortKey::desc(Variable::new("sales").unwrap())],
     function: WindowFunction::Rank,            // RANK() over (PARTITION BY ?dept ORDER BY ?sales DESC)
+    frame: None,                               // a frame applies only to an Aggregate (None = whole partition)
     new_var: Variable::new("rank").unwrap(),
 };
 let ranked = apply_window(&result, &spec).unwrap(); // ?rank appended; RANK has gaps after ties
-// Windowed aggregate (whole-partition frame): WindowFunction::Aggregate { agg: WindowAggregate::Sum, of }
+// Windowed aggregate over a FRAME (sq-imj8): a running total is
+//   WindowFunction::Aggregate { agg: WindowAggregate::Sum, of }
+//   + frame: Some(WindowFrame::rows_running())  // ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+// `WindowFrame { unit: FrameUnit::Rows|Range, start, end }` with `FrameBound::{UnboundedPreceding,
+// Preceding(n), CurrentRow, Following(n), UnboundedFollowing}`; RANGE bounds are peer-group based
+// (no numeric RANGE offset). `frame: None` keeps the whole-partition default.
 ```
 
 *(b) Inline `OVER(…)` query syntax* (sq-h564) — write the window directly in the SELECT projection and
 run it with `query_over` / `query_over_with_budget`. This is a **source rewrite in front of the engine**
 (it does NOT change the vendored `spargebra` parser): `query_over` lifts each `(FN() OVER (…) AS ?out)`
 item out of the projection, runs the window-stripped SELECT through the ordinary engine, applies the
-programmatic pass above, then reprojects. **Covered subset:** `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`
-(case-insensitive), `PARTITION BY ?v …`, `ORDER BY` over projected variables **or computed expressions**
-(sq-c1jv) — e.g. `ORDER BY (?a + ?b)`, `DESC(?sales + 0)`, `STRLEN(?s)`; each expression is bound to a
-fresh helper var in the rewritten inner SELECT and dropped from the output — in both `DESC(…)` and
-`… DESC` spellings, multiple window columns, and `SELECT *`. A query with no `OVER` clause is run
-unchanged (so `query_over` is a strict superset of `query` for non-window queries):
+programmatic pass above, then reprojects. **Covered subset:** the ranking functions `ROW_NUMBER()`,
+`RANK()`, `DENSE_RANK()` and the windowed aggregates `COUNT(?x)` / `SUM(?x)` / `AVG(?x)` / `MIN(?x)` /
+`MAX(?x)` (sq-imj8 — single `?var` argument; case-insensitive), `PARTITION BY ?v …`, `ORDER BY` over
+projected variables **or computed expressions** (sq-c1jv) — e.g. `ORDER BY (?a + ?b)`, `DESC(?sales + 0)`,
+`STRLEN(?s)`; each expression is bound to a fresh helper var in the rewritten inner SELECT and dropped
+from the output — in both `DESC(…)` and `… DESC` spellings, an explicit `ROWS`/`RANGE` frame on an
+aggregate (sq-imj8 — `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, `ROWS n PRECEDING`,
+`RANGE BETWEEN … AND CURRENT ROW`, etc.), multiple window columns, and `SELECT *`. A query with no
+`OVER` clause is run unchanged (so `query_over` is a strict superset of `query` for non-window queries):
 
 ```rust
 // Cargo.toml: sparq-engine = { version = "0.1", features = ["window-functions"] }
@@ -255,11 +266,14 @@ let r = sparq_engine::query_over(&g,
 
 **Inline-OVER caveats (HONEST):** the `OVER` surface is a sparq extension, not W3C SPARQL, recognised
 ONLY on the `query_over` entry point (a `(… OVER …)` clause is still a parse error on `query`/the
-standard surface). The function call must be empty (`ROW_NUMBER()`), the `AS ?out` alias is required,
-`ORDER BY` keys may be projected variables OR computed expressions (sq-c1jv) but `PARTITION BY` keys must
-be projected variables. **Deferred (programmatic API only, beaded):** inline windowed AGGREGATES
-(`SUM(?x) OVER (…)`), explicit frames (`ROWS BETWEEN …`), `LAG`/`LEAD`/`NTILE`, a named `WINDOW` clause,
-and `PARTITION BY` over a computed expression.
+standard surface). A ranking function call must be empty (`ROW_NUMBER()`); a windowed aggregate takes a
+single `?var` argument (`SUM(?x)`); the `AS ?out` alias is required. `ORDER BY` keys may be projected
+variables OR computed expressions (sq-c1jv) but `PARTITION BY` keys must be projected variables. A
+`ROWS`/`RANGE` frame is valid only on an aggregate (a frame on a ranking function errors), and `RANGE`
+supports only the peer-group bounds (`UNBOUNDED …` / `CURRENT ROW`), not a numeric `RANGE n PRECEDING`
+offset. **Deferred (programmatic API only, beaded):** a `DISTINCT` windowed aggregate
+(`COUNT(DISTINCT ?x) OVER …`), an aggregate over a computed-expression argument, numeric `RANGE` offsets,
+`LAG`/`LEAD`/`NTILE`, a named `WINDOW` clause, and `PARTITION BY` over a computed expression.
 
 **Budgets / timeouts / ASK-style early exit** — a `QueryBudget` is checked cooperatively at coarse
 sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"` /
@@ -324,13 +338,15 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
 - **Window functions + custom aggregate registry** are the non-default `window-functions` cargo
   feature. **Window functions are a NON-STANDARD extension** — there is no W3C-REC SPARQL `OVER`
   syntax. sparq exposes them as a programmatic pass over a `QueryResult` (the SQL:2003 model
-  Stardog/AnzoGraph expose), `ROW_NUMBER`/`RANK`/`DENSE_RANK` + a whole-partition windowed aggregate,
+  Stardog/AnzoGraph expose), `ROW_NUMBER`/`RANK`/`DENSE_RANK` + a windowed aggregate over the whole
+  partition or an explicit `ROWS`/`RANGE` frame (sq-imj8),
   AND as an inline `OVER(…)` query syntax via the dedicated `query_over` entry point (a *source rewrite*
   in front of the engine — it does NOT change the vendored parser, so the standard `query`/`ask`/… surface
   stays exactly SPARQL 1.1 and conformance is unaffected; `OVER` is a parse error everywhere except
-  `query_over`). The inline syntax covers the three ranking functions with `PARTITION BY`/`ORDER BY`;
-  windowed aggregates, frames, `LAG`/`LEAD`/`NTILE` and a named `WINDOW` clause are inline-deferred (use
-  the programmatic API). The custom-aggregate side DOES ride real SPARQL `GROUP BY` (a declared aggregate
+  `query_over`). The inline syntax covers the three ranking functions AND the windowed aggregates
+  `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` with `PARTITION BY`/`ORDER BY` and `ROWS`/`RANGE` frames (sq-imj8);
+  `DISTINCT`/expression aggregate arguments, numeric `RANGE` offsets, `LAG`/`LEAD`/`NTILE` and a named
+  `WINDOW` clause are inline-deferred (use the programmatic API). The custom-aggregate side DOES ride real SPARQL `GROUP BY` (a declared aggregate
   IRI is part of the SPARQL 1.1 extension grammar). When the feature is off, zero window/aggregate-registry
   code compiles and the default build is byte-identical (no new dependencies). See the recipes above.
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`

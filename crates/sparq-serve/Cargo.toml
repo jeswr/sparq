@@ -20,7 +20,10 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-readme = "../../README.md"
+# [OPUS-4.8] sq-ieqz: crate-LOCAL README is the crates.io/docs.rs front page (this
+# crate is publishable). lib.rs mirrors it via `#![doc = include_str!("../README.md")]`,
+# so the rustdoc front page == the crates.io README (parity, like sparq-server).
+readme = "README.md"
 
 [dependencies]
 # Lock-free current-generation pointer (§6.4): readers `load()` in ~10-20 ns and

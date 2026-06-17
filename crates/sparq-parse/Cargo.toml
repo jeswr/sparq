@@ -9,7 +9,10 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-readme = "../../README.md"
+# [OPUS-4.8] sq-ieqz: surface the crate-LOCAL README, not the root one. Harmless here
+# (publish = false, never reaches crates.io) but kept consistent with sparq-serve;
+# lib.rs mirrors it via `#![doc = include_str!("../README.md")]` for rustdoc parity.
+readme = "README.md"
 publish = false
 
 # Codec deps live HERE and nowhere closer to the engine: this crate must never
