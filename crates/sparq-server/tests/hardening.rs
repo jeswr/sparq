@@ -332,6 +332,79 @@ async fn update_path_honours_timeout() {
 }
 
 // ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-nulp) Writer-queue head-of-line blocking bound: a SEPARATE, shorter
+// --update-where-timeout releases the single sequenced writer from a slow UPDATE's WHERE
+// within that window, EVEN when the (read) --query-timeout is much longer. So a slow update
+// (a) returns its 503 bounded by the short writer deadline, not the long read timeout, and
+// (b) does not head-of-line block a fast update queued behind it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn update_where_timeout_bounds_head_of_line_blocking() {
+    // A GENEROUS read timeout (8 s) — long enough that, without the writer-side WHERE
+    // deadline, a slow update would hold the single writer for the full 8 s + grace and
+    // head-of-line block everything behind it. The separate short WHERE deadline (1 s) is
+    // what actually bounds the writer's work.
+    let config = ServerConfig {
+        query_timeout: Some(Duration::from_secs(8)),
+        update_where_timeout: Some(Duration::from_secs(1)),
+        ..ServerConfig::default()
+    };
+    let base = spawn_with(&dense_graph_ttl(), config).await;
+
+    // The never-finishing 3-way cross-product WHERE, as a DELETE/INSERT update.
+    let slow = "PREFIX ex: <http://ex/> \
+         DELETE { ?a ex:e ?b } INSERT { ?a ex:gone ?b } \
+         WHERE { ?a ex:e ?b . ?c ex:e ?d . ?e ex:e ?f }";
+
+    // Fire the slow update and, concurrently, a trivial fast update. The fast one is queued
+    // behind the slow one on the single writer; if the slow update were NOT cut at the 1 s
+    // writer deadline, the fast one could not be acked until the slow one released the writer.
+    let slow_base = base.clone();
+    let slow_task = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let resp = client()
+            .post(format!("{slow_base}/sparql"))
+            .header("content-type", "application/sparql-update")
+            .body(slow)
+            .send()
+            .await
+            .unwrap();
+        (resp.status(), started.elapsed())
+    });
+
+    // Give the slow update a head start so it is the one occupying the writer.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let fast_started = std::time::Instant::now();
+    let fast = client()
+        .post(format!("{base}/sparql"))
+        .header("content-type", "application/sparql-update")
+        .body("INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }")
+        .send()
+        .await
+        .unwrap();
+    let fast_elapsed = fast_started.elapsed();
+    assert_eq!(fast.status(), 204, "fast queued update must still commit");
+
+    let (slow_status, slow_elapsed) = slow_task.await.unwrap();
+    // The slow update is refused (503): its WHERE hit the writer-side cooperative deadline.
+    assert_eq!(slow_status, 503, "slow update must be cut at the writer WHERE deadline");
+    // Bounded by the SHORT writer deadline (1 s + grace + scheduling slack), NOT the 8 s
+    // read timeout — proving head-of-line blocking is bounded by --update-where-timeout.
+    assert!(
+        slow_elapsed < Duration::from_secs(6),
+        "slow update 503 should be bounded by the 1 s writer deadline, took {slow_elapsed:?}"
+    );
+    // The fast update was not blocked for anything near the 8 s read timeout: it landed once
+    // the writer was released (≈ the 1 s WHERE deadline), well under the read timeout.
+    assert!(
+        fast_elapsed < Duration::from_secs(6),
+        "fast update must not be head-of-line blocked for the full read timeout, took {fast_elapsed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // [OPUS-4.8] (sq-ebii) Decompression-ratio cap (--max-decompress-ratio): a high-ratio
 // gzip body (a "zip bomb") on the GSP write path is refused with 413 BEFORE the full
 // decompressed image is held; a benign small gzip body within the ratio decodes fine.
