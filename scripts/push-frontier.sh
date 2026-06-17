@@ -135,6 +135,44 @@ infer_surface() {
   printf '\n'
 }
 
+# [OPUS-4.8] sq-8rpq: in-flight reservation by UNPUSHED worktree branches (not every branch).
+# inflight_wt_branch <branch> <unpushed-count> : echo <branch> iff it is an IN-FLIGHT
+# signal, i.e. iff it has UNPUSHED local commits. <unpushed-count> is the number of
+# commits on the branch's HEAD that are absent from its push target (origin/<branch> or
+# its upstream); "0" = fully pushed (or squash-merged) -> NOT in flight; any non-"0"
+# (including the 999999 never-pushed sentinel) -> genuinely fresh work with no PR yet ->
+# in flight. The UNPUSHED test (not "ancestor of main") is the load-bearing choice:
+# squash-merged feature branches are NOT ancestors of main but they WERE pushed
+# (unpushed=0), so an ancestor/`--no-merged` test would flag all ~500 lingering worktree
+# branches and reserve every crate, emptying the frontier (the sq-8rpq bug). Pure (no
+# git): the count is injected, so this is hermetically testable. Mirrors
+# scripts/worktree-gc.sh's `wt_unpushed_count` predicate.
+inflight_wt_branch() {
+  local branch="$1" unpushed="$2"
+  [ -n "$branch" ] || return 0
+  [ "$unpushed" = "0" ] && return 0        # fully pushed / squash-merged -> not in flight.
+  printf '%s\n' "$branch"
+}
+
+# wt_unpushed_count <wt> <branch> : number of commits on HEAD absent from the push target.
+# Push target = configured upstream if any, else origin/<branch>. If neither exists (the
+# branch was never pushed) return a large sentinel so the caller treats it as "has
+# unpushed work" (genuinely fresh, no PR yet). Copied verbatim from scripts/worktree-gc.sh
+# so the two scripts share one definition of "unpushed".
+wt_unpushed_count() {
+  local wt="$1" branch="$2" upstream target
+  upstream="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || upstream=""
+  if [ -n "$upstream" ] && git -C "$wt" rev-parse --verify -q "$upstream" >/dev/null 2>&1; then
+    target="$upstream"
+  elif [ -n "$branch" ] && git -C "$wt" rev-parse --verify -q "origin/$branch" >/dev/null 2>&1; then
+    target="origin/$branch"
+  else
+    printf '999999'   # no push target ⇒ treat as unpushed ⇒ in flight.
+    return 0
+  fi
+  git -C "$wt" rev-list --count "$target..HEAD" 2>/dev/null || printf '999999'
+}
+
 # --- CPU ceiling ----------------------------------------------------------------------
 # The build farm cannot usefully parallelise more cargo builds than it has cores; the
 # orchestrator brief uses min(16, nproc-2). nproc-2 leaves headroom for the orchestrator
@@ -188,6 +226,21 @@ self_test() {
   got="$(infer_surface 'Federation TPF follow-ups: brTPF DoS cap' "$CR")"
   _check "prose-before-colon => unscoped"          "$got" ""
 
+  # --- in-flight worktree-branch filter (sq-8rpq) -------------------------------------
+  # A worktree branch is an in-flight signal ONLY if it has UNPUSHED local commits (fresh
+  # work, no PR yet). A pushed / squash-merged branch (unpushed=0) must NOT reserve its
+  # surface — else the hundreds of lingering worktree branches reserve every crate and the
+  # frontier is spuriously empty. The unpushed COUNT is injected so this stays hermetic
+  # (no git calls); the count semantics mirror worktree-gc.sh's wt_unpushed_count.
+  got="$(inflight_wt_branch 'sq-glw2-dict-spill' 2)"
+  _check "branch w/ unpushed commits IS in-flight" "$got" "sq-glw2-dict-spill"
+
+  got="$(inflight_wt_branch 'sq-never-pushed' 999999)"
+  _check "never-pushed branch IS in-flight"        "$got" "sq-never-pushed"
+
+  got="$(inflight_wt_branch 'sq-squash-merged' 0)"
+  _check "pushed/squash-merged branch NOT in-flight" "$got" ""
+
   echo
   if [ "$fails" -eq 0 ]; then log "self-test PASSED"; return 0; fi
   die "self-test FAILED ($fails check(s))"
@@ -221,19 +274,45 @@ if [ -d "$ROOT/crates" ]; then
 fi
 [ -n "$CRATES" ] || log "WARNING: no crates/ dir — surface inference falls back to title tags only."
 
-# --- 1. in-flight bead ids (from OPEN PRs — the authoritative signal) ------------------
-# A bead is in flight if its id token appears in an open PR's head-branch name or title.
-# (See the header note on why git branch -r is unreliable here.)
+# --- 1. in-flight bead ids -------------------------------------------------------------
+# A bead is in flight if its id token appears in:
+#   (a) an open PR's head-branch name or title  — the authoritative, primary signal; OR
+#   (b) a worktree branch with UNPUSHED local commits — work an agent has committed but
+#       not yet pushed/PR'd, so the PR signal can't see it yet (sq-8rpq).
+# Load-bearing on WHY (b) is the UNPUSHED test and NOT "branch not an ancestor of main":
+# PRs are squash-merged, so a finished/merged feature branch is NEVER an ancestor of main
+# and a `--no-merged`/ancestor test flags ALL ~500 lingering worktree branches as "in
+# flight" — that reserves every crate and empties the frontier (the exact sq-8rpq bug).
+# A squash-merged branch was PUSHED (origin/<branch>..HEAD == 0), so the unpushed test
+# excludes it; only a genuinely-fresh, not-yet-pushed branch (no PR possible yet) survives.
+# This mirrors scripts/worktree-gc.sh's `wt_unpushed_count` "never-dropped" predicate.
 if command -v gh >/dev/null 2>&1; then
   # head-branch names + titles of every open PR, joined per-line for substring search.
   PR_BLOB="$(gh pr list --state open --limit 300 --json headRefName,title \
     -q '.[] | (.headRefName + " " + .title)' 2>/dev/null || true)"
 else
-  log "gh not found — in-flight subtraction will be EMPTY (every ready bead treated as launchable)."
+  log "gh not found — open-PR in-flight subtraction will be EMPTY (unpushed worktrees still used)."
   PR_BLOB=""
 fi
 
-# Is bead id $1 in flight (its id appears in any open-PR branch/title)?
+# Append UNPUSHED-worktree branch names to the in-flight blob (one per line). A worktree
+# with detached HEAD (no branch line) is skipped; a branch with no local commits beyond
+# its push target (pushed/squash-merged) is intentionally omitted.
+WT_PATH="" WT_BRANCH=""
+while IFS= read -r line; do
+  case "$line" in
+    "worktree "*) WT_PATH="${line#worktree }"; WT_BRANCH="" ;;
+    "branch refs/heads/"*)
+      WT_BRANCH="${line#branch refs/heads/}"
+      if [ -n "$WT_BRANCH" ] && [ -d "$WT_PATH" ]; then
+        b="$(inflight_wt_branch "$WT_BRANCH" "$(wt_unpushed_count "$WT_PATH" "$WT_BRANCH")")"
+        [ -n "$b" ] && PR_BLOB+="$b"$'\n'
+      fi
+      ;;
+  esac
+done < <(git -C "$ROOT" worktree list --porcelain 2>/dev/null || true)
+
+# Is bead id $1 in flight (its id appears in any open-PR branch/title or unpushed-worktree branch)?
 is_inflight() {
   local id="$1"
   [ -n "$PR_BLOB" ] || return 1

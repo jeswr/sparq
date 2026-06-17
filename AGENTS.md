@@ -269,7 +269,7 @@ This is the standing orchestration loop that ties the sections above together. R
    - **Open issues** (`gh issue list`): screen every one. Many are filed by the **PSS agent** — the agent developing the private sibling `jeswr/prod-solid-server`, which consumes sparq as its triplestore/server; **"PSS" anywhere in an issue refers to that codebase.** For each actionable issue: capture it as a bead (`bd create` with the issue as `--external-ref`, priority by the issue's stated severity — a "SHOWSTOPPER" → P0/P1) and drive it through the loop; comment on the issue with the bead id + status; close it when the work lands (referencing the merged PR). If an issue is **unclear, do not guess — post a clarifying reply on the issue** (the PSS agent monitors and responds), and leave it open.
    - **Code-scanning alerts** (`gh api repos/<owner>/<repo>/code-scanning/alerts`): screen open CodeQL/Scorecard alerts and **resolve each** — fix the flagged code, or dismiss with a written reason when it is a genuine false positive (never leave one silently open). Keep the open-alert count at **zero** (the security/quality posture from *Contribution workflow*).
    - Also scan **Dependabot PRs + open roborev findings + the siblings** for recurring or again-needed work → `bd create` (never hand-edit `.beads/`).
-3. **Drive `bd ready` (the engine).** Pick the largest set of unblocked beads on **disjoint file-areas**; delegate each to a **background** worktree sub-agent (smallest context-independent brief; gates in-worktree scoped to its crates; `bd create`s discovered work; does **not** push). Maximise parallelism — serialise only (a) two beads touching the same file and (b) CPU-heavy perf/benchmark **measurements** (those need a quiet box). Cap concurrent *cargo-heavy* agents to the core budget; doc/research/config agents parallelise freely. (See *Maximise parallelism*.)
+3. **Drive `bd ready` (the engine).** Pick the largest set of unblocked beads on **disjoint file-areas** — prefer `scripts/push-frontier.sh`, which already subtracts in-flight beads and applies the **conflict-partition (≤ 1 bead per crate/surface; `site` and the sparq-server `server-auth` path → ≤ 1)**. **If you fall back to a raw `bd ready` list** (push-frontier unavailable, or you blend in extra beads), you MUST apply that same ≤ 1-per-crate / server+site→1 dedup to the **COMBINED** push-frontier + bd-ready set — never dispatch the bd-ready fallback un-deduped, or two beads on the same crate launch and conflict (sq-8rpq: this once dispatched two sparq-server beads at once). Delegate each survivor to a **background** worktree sub-agent (smallest context-independent brief; gates in-worktree scoped to its crates; `bd create`s discovered work; does **not** push). Maximise parallelism — serialise only (a) two beads touching the same file and (b) CPU-heavy perf/benchmark **measurements** (those need a quiet box). Cap concurrent *cargo-heavy* agents to the core budget; doc/research/config agents parallelise freely. (See *Maximise parallelism*.)
 4. **Land each finished agent via a PR — one through merge at a time.** The orchestrator pushes the branch, opens the PR, requests Copilot review. **`ci-summary` is the authoritative full gate** (workspace clippy `-D warnings` + `cargo test` + SPARQL/SHACL/inference ratchets + coverage ratchet + best-ever perf floor) — **read CI; do not re-run the heavy gate locally.** Address every Copilot **and** roborev finding (fix it, or reply with the decline reason) and resolve the thread; merge only when `ci-summary` is green **and** all threads resolved; squash; `bd close`; re-export beads in a bookkeeping PR. (See *Contribution workflow* + *Automated review*.)
 5. **roborev hygiene.** Before merging a branch, reconcile its roborev (codex, non-Anthropic) findings against current `main` HEAD — never assume a merge cleared them; fix / bead / close-with-reason.
 6. **Watch main CI after every push; a red main is stop-the-line** → fix it before any further merge. (See *Monitor CI after every push to main*.)
@@ -311,7 +311,27 @@ clean and carries a `--dry-run-self-test` (hermetic; no network).
   an open PR or in-flight worktree (contention). It is the **substrate** for the refill
   decision (loop step 3), **not** the decision: it never dispatches, closes, or mutates
   anything. Surface inference and contention flags are heuristic (free-form branch names)
-  and advisory by design.
+  and advisory by design. **Contention is reserved by open PR + worktree branches with
+  UNPUSHED local commits only — not every git worktree branch.** The harness never
+  auto-removes a finished agent's worktree, so hundreds of stale branches accumulate;
+  reserving on *all* of them once reserved every crate and made the launchable frontier
+  spuriously empty (sq-8rpq). A pushed / squash-merged branch is ignored (we use the
+  UNPUSHED test, **not** "ancestor of `origin/main`" — squash-merged feature branches are
+  *not* ancestors of main yet *were* pushed, so an ancestor test would re-introduce the
+  bug). Run `worktree-gc.sh --apply` at idle so stale worktrees do not pile up.
+- **`scripts/push-frontier.sh`** — the read-only **decision layer** on top of
+  `refill-candidates.sh`. Prints the beads SAFE TO LAUNCH NOW: `bd ready` **minus**
+  in-flight beads (open PR, or a worktree branch with unpushed commits — same signal as
+  refill, not every branch) **minus** conflict-collisions (the conflict-partition: at
+  most **one bead per crate/surface**, with `site` and the sparq-server `server-auth`
+  http.rs path serialised to ≤ 1) **minus** epics, then capped at the CPU ceiling
+  (`min(16, nproc-2)`). **The conflict-partition is canonical — it must be applied to the
+  COMBINED launch set, not bypassed by a raw `bd ready` fallback.** If you ever dispatch
+  from `bd ready` directly (push-frontier unavailable), you MUST still apply the same
+  ≤ 1-per-crate / server+site→1 dedup over the COMBINED push-frontier + bd-ready set, or
+  two beads on the same crate launch and conflict (this gap once dispatched two
+  sparq-server beads at once — sq-8rpq). Carries an `--explain` (per-bead keep/drop
+  reasons) and a hermetic `--dry-run-self-test`.
 - **`scripts/worktree-gc.sh [--dry-run | --apply]`** (sq-6xdr) — a **manual / idle-time**
   broom for the harness's `.claude/worktrees/` dirs. The harness creates one git worktree
   per agent but never auto-removes a finished one, so they pile up (366+ this session) and
