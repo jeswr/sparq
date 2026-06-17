@@ -368,6 +368,10 @@ matrix under "Security posture".
   UPDATE, `sq-nulp`) / `--max-body-bytes` / `--max-concurrent` / `--header-read-timeout`
   (slow-loris guard: caps how long a connection may take to send its complete request-header block,
   closing it — and freeing the concurrency slot — when exceeded; default 15s, `sq-2gqr`) /
+  `--body-read-timeout` (slow-**body** guard, the complement to `--header-read-timeout`: an idle
+  deadline between consecutive request-**body** reads — a complete-header client that then dribbles
+  the body one byte at a time, or stalls mid-body, otherwise holds the slot forever; the timer
+  resets after each chunk so an honest large upload is never penalised; default 30s, `sq-lodb`) /
   `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-query-bytes`
   (byte-accounted memory cap, `sq-s5is`) / `--max-decompress-ratio` (zip-bomb guard) /
   `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*` / (feature `brtpf`)

@@ -948,17 +948,25 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Spawn the real `sparq_server::serve` accept loop (NOT `axum::serve`) with the given
-/// header-read deadline, returning the bound address for a raw-socket client.
+/// header-read and body read/idle deadlines, returning the bound address for a raw-socket client.
 async fn spawn_serve(config: ServerConfig) -> SocketAddr {
     let header_read_timeout = config.header_read_timeout;
+    // [OPUS-4.8] sq-lodb: also drive the real slow-body read/idle deadline through the serve loop.
+    let body_read_timeout = config.body_read_timeout;
     let graph = Graph::load_str(DATA, "turtle").unwrap();
     let app = router(AppState::with_config(graph, config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        sparq_server::serve(listener, app, header_read_timeout, std::future::pending::<()>())
-            .await
-            .unwrap();
+        sparq_server::serve(
+            listener,
+            app,
+            header_read_timeout,
+            body_read_timeout,
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
     });
     addr
 }
@@ -1068,5 +1076,147 @@ async fn serve_loop_handles_complete_request() {
     assert!(
         text.to_ascii_lowercase().contains("x-content-type-options: nosniff"),
         "security headers must still be stamped by the serve loop: {text:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (sq-lodb) [OPUS-4.8] Slow-BODY guard — the request-body read/idle deadline (complement to
+// sq-2gqr's header-read deadline).
+//
+// sq-2gqr's `header_read_timeout` closes the slow-loris HEADER dribble, but once a client has
+// sent a complete, valid header block it can then dribble the BODY — declare a large
+// `Content-Length`, send a few bytes, then stall forever — staying under `max_body_bytes` (a SIZE
+// cap a trickle never trips) and before `query_timeout` starts (an engine deadline that begins
+// only after the whole request is read). `body_read_timeout` wraps the body in a `TimeoutBody`
+// whose per-frame idle deadline aborts that read. These tests drive the REAL `serve` loop over a
+// raw TCP socket (reqwest sends its whole body at once, so it cannot exercise this — we have to be
+// the misbehaving client and stall mid-body).
+// ---------------------------------------------------------------------------
+
+/// Write a complete request head for a POST /sparql whose `Content-Length` PROMISES more body
+/// bytes than we will actually send, then send a partial body and stall. With a short
+/// `body_read_timeout` the SERVER must let go of the connection (close / reset / an error status)
+/// within roughly the deadline, instead of waiting forever for the rest of the body.
+#[tokio::test]
+async fn slow_body_dribble_closed_by_deadline() {
+    let config = ServerConfig {
+        // Short body deadline; keep the header deadline generous so it is unambiguously the BODY
+        // guard that fires, not the header guard.
+        body_read_timeout: Some(Duration::from_millis(400)),
+        header_read_timeout: Some(Duration::from_secs(30)),
+        ..ServerConfig::default()
+    };
+    let addr = spawn_serve(config).await;
+
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    // A COMPLETE header block (so the header-read deadline is satisfied), promising 4096 body
+    // bytes — but we send only a handful and then never send the rest (the slow-body dribble).
+    sock.write_all(
+        b"POST /sparql HTTP/1.1\r\n\
+          Host: localhost\r\n\
+          Content-Type: application/sparql-query\r\n\
+          Content-Length: 4096\r\n\r\n\
+          SELECT",
+    )
+    .await
+    .unwrap();
+    sock.flush().await.unwrap();
+
+    // The body-read deadline (400ms) must make the server release the connection well within this
+    // generous 5s cap. Ok(0) is a clean close, Err is a reset, and a 400/408 status line before
+    // close all mean the server let go of the slot rather than holding it for the missing body.
+    let started = std::time::Instant::now();
+    let mut buf = [0u8; 256];
+    let outcome = tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await;
+    let elapsed = started.elapsed();
+    match outcome {
+        Ok(Ok(0)) | Ok(Err(_)) => {} // connection closed / reset by the server — the guard fired
+        Ok(Ok(n)) => {
+            let head = String::from_utf8_lossy(&buf[..n]);
+            assert!(
+                head.contains("400") || head.contains("408") || head.contains("500"),
+                "server responded but did not signal a body-read timeout: {head:?}"
+            );
+        }
+        Err(_) => panic!(
+            "slow-body connection was NOT closed within 5s — the body-read deadline did not fire \
+             (connection + concurrency slot held open for a dribbled body: the slow-body DoS)"
+        ),
+    }
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "connection released but only after {elapsed:?} — far beyond the 400ms body deadline"
+    );
+}
+
+/// With the body deadline DISABLED (`None`) — header guard still on — the same dribbled-body
+/// connection is NOT proactively released within a short window, proving the body guard is what
+/// does the releasing (and is genuinely opt-out-able). We only assert it stays open briefly (then
+/// we drop it), so the test is fast and not flaky.
+#[tokio::test]
+async fn slow_body_held_open_when_deadline_disabled() {
+    let config = ServerConfig {
+        body_read_timeout: None,
+        header_read_timeout: Some(Duration::from_secs(30)),
+        ..ServerConfig::default()
+    };
+    let addr = spawn_serve(config).await;
+
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    sock.write_all(
+        b"POST /sparql HTTP/1.1\r\n\
+          Host: localhost\r\n\
+          Content-Type: application/sparql-query\r\n\
+          Content-Length: 4096\r\n\r\n\
+          SELECT",
+    )
+    .await
+    .unwrap();
+    sock.flush().await.unwrap();
+
+    // Within a short window the server must NOT have released the (incomplete-body) connection.
+    let mut buf = [0u8; 64];
+    let outcome = tokio::time::timeout(Duration::from_millis(700), sock.read(&mut buf)).await;
+    assert!(
+        outcome.is_err(),
+        "with body_read_timeout=None the connection should stay open (waiting for the rest of the \
+         body), but the server released/answered it: {outcome:?}"
+    );
+}
+
+/// Sanity: with the body deadline ON, a COMPLETE POST /sparql whose body arrives all at once is
+/// still answered normally (the timer resets after the frame and never fires). Proves the guard
+/// does not penalise an honest request that simply carries a body.
+#[tokio::test]
+async fn slow_body_guard_does_not_break_a_complete_post() {
+    let config = ServerConfig {
+        body_read_timeout: Some(Duration::from_millis(500)),
+        ..ServerConfig::default()
+    };
+    let addr = spawn_serve(config).await;
+
+    let body = b"SELECT * WHERE { ?s ?p ?o } LIMIT 1";
+    let req = format!(
+        "POST /sparql HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/sparql-query\r\n\
+         Connection: close\r\n\
+         Content-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    sock.write_all(req.as_bytes()).await.unwrap();
+    sock.write_all(body).await.unwrap(); // whole body in one write — no idle gap
+    sock.flush().await.unwrap();
+
+    let mut resp = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut resp))
+        .await
+        .expect("a complete POST with a body must be answered promptly under the body deadline")
+        .unwrap();
+    let text = String::from_utf8_lossy(&resp);
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "complete POST /sparql under body_read_timeout must return 200: {text:?}"
     );
 }
