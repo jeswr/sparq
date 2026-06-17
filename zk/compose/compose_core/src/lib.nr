@@ -16,6 +16,8 @@ pub mod hashes;
 pub mod scan;
 pub mod filter_int;
 pub mod filter_float;
+// [OPUS-4.8] sq-1q9h: signed xsd:integer + xsd:decimal FILTER coverage.
+pub mod filter_signed;
 pub mod revoke;
 pub mod issuer;
 // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder Proof-of-Possession (B2).

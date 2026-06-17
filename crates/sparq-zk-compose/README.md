@@ -60,7 +60,26 @@ shape — never trust a declared id:
   1..=4 range; [OPUS-4.8] sq-wto added `d=3`). `build::derive_filter_int_id`
   requires an exact match and returns `None` for any other count (e.g. 5..=19),
   so `build_filter_int` cleanly declines an out-of-family operand rather than
-  deriving a wrong-`d` member that would be silently unprovable (sq-wto).
+  deriving a wrong-`d` member that would be silently unprovable (sq-wto). NOTE:
+  `filter_int` handles the canonical NON-negative integer fragment only; see
+  `filter_signed_int` / `filter_decimal` below for the signed + decimal extension.
+- **filter_signed_int** `filter_signed_int_d{md}` and **filter_decimal**
+  `filter_decimal_i{id}_f{fd}` ([OPUS-4.8] sq-1q9h): extend `filter_int` to
+  NEGATIVE `xsd:integer` (`md` = magnitude digit count, plus an optional leading
+  `-`) and to `xsd:decimal` (`id` integer digits + `fd` fraction digits, fixed-
+  point compared at `fd` places against a host-prescaled bound). Same operand
+  binding as `filter_int` — the canonical `"[-]?<lexical>"^^<datatype>` token is
+  rebuilt in-circuit and asserted equal to `operand_enc` (oxrdf passes the lexical
+  form through verbatim, so the in-circuit token byte-matches the committed one;
+  cross-checked against the REAL `sparq_zk::encode` pipeline in
+  `tests/filter_signed_binding.rs`). The numeric value is a constrained function
+  of the SAME witnessed bytes, so the comparison is sound. `bb gates`: 17416 each
+  (blake3-block-bound, identical to `filter_int`). Host encoders:
+  `build::encode_signed_int_literal` / `encode_decimal_literal`. NOTE: these are
+  compiled, byte-bound, tested CIRCUIT MEMBERS; the verifier `CircuitId` /
+  `ProofInputs` / binding-edge wiring that makes them manifest-composable is a
+  follow-up (bead sq-7lrq), like the `filter_f64` building-block precedent —
+  they are NOT yet assemblable into a `ProofManifest`.
 - **join_eq** `join_eq_na{n_a}_nb{n_b}`: the two graph-size buckets select the
   member, exactly as scan's `n` does. The buckets are `{16,64}` (aligned with
   scan's `n`), and ALL FOUR `(n_a,n_b)` combinations are compiled ([OPUS-4.8]

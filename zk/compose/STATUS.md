@@ -42,6 +42,9 @@ Verdict: scaffold is GOOD; committed as baseline unchanged. Added `.gitignore`
 | filter_int_d2     | — | —  | — | filter_int (D=2)|
 | filter_int_d3     | — | —  | — | filter_int (D=3; [OPUS-4.8] sq-wto, closes the 3-digit gap) |
 | filter_int_d4     | — | —  | — | filter_int (D=4)|
+| filter_signed_int_d2 | — | — | — | filter_signed_int (MD=2, NEGATIVE+non-neg xsd:integer; [OPUS-4.8] sq-1q9h) |
+| filter_signed_int_d4 | — | — | — | filter_signed_int (MD=4; sq-1q9h) |
+| filter_decimal_i3_f2 | — | — | — | filter_decimal (ID=3,FD=2, xsd:decimal fixed-point; sq-1q9h) |
 | filter_f64        | — | —  | — | filter_f64 (raw-bits building block; non-composed use) |
 | filter_f64_d1     | — | —  | — | filter_f64 composable (D=1; [OPUS-4.8] sq-q7e/sq-tat, integer-valued double, operand-bound) |
 | filter_f64_d2     | — | —  | — | filter_f64 composable (D=2; sq-q7e/sq-tat) |
