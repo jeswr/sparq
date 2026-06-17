@@ -26,7 +26,30 @@
 # NEIGHBOUR-TSV format (what an external ANN tool dumps, and the fixture format):
 #   one line per query: `<query_id>\t<id1>,<id2>,...,<idk>`  (ranked neighbour ids).
 # recall_at_k consumes two such maps (approx + exact) and scores them.
+#
+# --- GATHER-TIER: SIFT1M / GloVe-100-angular recall-QPS Pareto (sq-aiup) ------
+# [OPUS-4.8] sq-aiup. The per-commit suite (bench/vector/) gates the SYNTHETIC 50k
+# corpus recall deficits. The big PUBLISHED-dataset recall-QPS Pareto is gather-tier:
+# the corpora (SIFT1M = ann-benchmarks `sift-128-euclidean`; `glove-100-angular`) are
+# NOT redistributable in-repo, so this is a download/gather step (nightly/EC2), never a
+# per-PR gate (design research/capability-benchmark-program.md §3.3(c)).
+#
+# A single (recall, latency) point is MEANINGLESS for ANN — a faster engine at lower
+# recall is not "faster". The deliverable is the recall-QPS PARETO at MATCHED recall:
+# sweep the search-effort knob (hnswlib `ef`), and for EACH setting emit one
+# `(recall_deficit, qps)` point. The Pareto FRONTIER (pareto_frontier) is the
+# published-comparable curve; matched_recall_qps reads QPS off it at a target recall so
+# two engines are compared at the SAME recall, never at a single latency.
+#
+# THREE pieces, split so the light half is fixture-unit-tested WITHOUT numpy/hnswlib:
+#   1. recall_at_k / parse_neighbour_tsv      — scoring/oracle (pure).            [light]
+#   2. read_fvecs / read_ivecs / pareto_frontier / matched_recall_qps /
+#      qps_from_query_us                       — dataset parse + curve maths (pure). [light]
+#   3. load_dataset / run_hnswlib_sweep        — the heavy harness: read the corpus,
+#      build/query the engine over a param sweep, exact-kNN oracle.   [gather-only/heavy]
 import json
+import os
+import struct
 import sys
 import time
 
@@ -74,6 +97,90 @@ def recall_deficit_milli(recall):
     return int(round((1.0 - recall) * 1000))
 
 
+# --- published-dataset parse + curve maths (pure, fixture-tested) ------------
+# [OPUS-4.8] sq-aiup. These are stdlib-only so they are unit-tested WITHOUT numpy.
+# `.fvecs`/`.ivecs` is the TEXMEX/SIFT1M on-disk format (http://corpus-texmex.irisa.fr):
+# each record is a little-endian int32 dimension `d`, then `d` little-endian values
+# (float32 for .fvecs, int32 for .ivecs). GloVe-100-angular ships as ann-benchmarks
+# HDF5 instead (loaded via h5py in the heavy half).
+def read_vecs(raw, value_fmt):
+    """Decode a TEXMEX `.fvecs`/`.ivecs` byte string -> list of equal-length rows.
+
+    `value_fmt` is "f" (float32, .fvecs) or "i" (int32, .ivecs). Each record is
+    `<int32 d><d values>`; `d` must be constant across records (raises otherwise, so
+    a truncated/mismatched file fails loudly rather than yielding ragged rows)."""
+    if value_fmt not in ("f", "i"):
+        raise ValueError("value_fmt must be 'f' or 'i'")
+    rows = []
+    off = 0
+    n = len(raw)
+    dim = None
+    while off < n:
+        if off + 4 > n:
+            raise ValueError("truncated .vecs record header at byte %d" % off)
+        (d,) = struct.unpack_from("<i", raw, off)
+        if d < 0:
+            raise ValueError("negative dimension %d in .vecs at byte %d" % (d, off))
+        if dim is None:
+            dim = d
+        elif d != dim:
+            raise ValueError("ragged .vecs: dim %d != %d at byte %d" % (d, dim, off))
+        off += 4
+        end = off + 4 * d
+        if end > n:
+            raise ValueError("truncated .vecs row at byte %d (need %d bytes)" % (off, 4 * d))
+        rows.append(list(struct.unpack_from("<%d%s" % (d, value_fmt), raw, off)))
+        off = end
+    return rows
+
+
+def read_fvecs(path):
+    """Read a `.fvecs` file (SIFT1M base/query vectors) -> list[list[float]]."""
+    with open(path, "rb") as fh:
+        return read_vecs(fh.read(), "f")
+
+
+def read_ivecs(path):
+    """Read a `.ivecs` file (SIFT1M ground-truth neighbour ids) -> list[list[int]]."""
+    with open(path, "rb") as fh:
+        return read_vecs(fh.read(), "i")
+
+
+def qps_from_query_us(query_us):
+    """Per-query microseconds -> queries-per-second (0 for non-positive latency)."""
+    return (1e6 / query_us) if query_us > 0 else 0.0
+
+
+def pareto_frontier(points):
+    """Recall-QPS Pareto frontier of `points` = list of (recall, qps) tuples.
+
+    A point is on the frontier if NO other point dominates it (>= on BOTH recall and
+    qps, and strictly greater on at least one). Returns the frontier sorted by ascending
+    recall — the published-comparable curve (higher-and-to-the-right is better). Ties
+    (identical recall AND qps) collapse to one point."""
+    uniq = sorted(set((float(r), float(q)) for r, q in points))
+    front = []
+    for r, q in uniq:
+        dominated = any(
+            (or_ >= r and oq >= q) and (or_ > r or oq > q) for or_, oq in uniq if (or_, oq) != (r, q)
+        )
+        if not dominated:
+            front.append((r, q))
+    return front
+
+
+def matched_recall_qps(points, target_recall):
+    """QPS at MATCHED recall: the best QPS achievable at recall >= `target_recall`.
+
+    Reads the answer off the recall-QPS frontier — this is the ONLY honest cross-engine
+    number (two engines compared at the SAME recall floor, never a single latency). The
+    max over all frontier points clearing the floor (a higher-recall, higher-qps point
+    also satisfies a lower floor). Returns None if no point reaches the target recall
+    (the engine simply cannot hit that recall on this dataset)."""
+    qualifying = [q for r, q in pareto_frontier(points) if r >= target_recall]
+    return max(qualifying) if qualifying else None
+
+
 # --- heavy harness (gather-only; needs numpy [+ hnswlib]) --------------------
 def exact_knn(data, queries, k):
     """numpy exact L2 kNN ground truth -> {qid:[ids]} with qid/ids as str(index)."""
@@ -108,15 +215,93 @@ def run_hnswlib(data, queries, k, ef=64, m=16, ef_construction=200):
     return approx, int(round(query_us))
 
 
+# --- published-dataset loaders + Pareto sweep (gather-only; sq-aiup) ---------
+def load_dataset(name, root):
+    """Load a published ANN dataset -> (data, queries, space, ground_truth-or-None).
+
+    Two on-disk layouts (the corpora are gather-only, NOT redistributable in-repo):
+      * SIFT1M (`sift`, `sift-128-euclidean`): the TEXMEX .fvecs/.ivecs files under
+        `<root>/sift/` — sift_base.fvecs, sift_query.fvecs, and the precomputed
+        sift_groundtruth.ivecs (used as the exact-kNN oracle, so no numpy recompute).
+        L2 space.
+      * GloVe-100-angular (`glove`, `glove-100-angular`): the ann-benchmarks HDF5 file
+        `<root>/glove-100-angular.hdf5` with train/test/neighbors datasets (needs h5py).
+        Angular (cosine) space; hnswlib uses `cosine`.
+    Returns ground_truth as {qid:[ids]} when the dataset ships it (SIFT/GloVe both do),
+    else None (caller computes exact_knn)."""
+    import numpy as np  # gather-only
+
+    key = name.lower()
+    if key in ("sift", "sift1m", "sift-128-euclidean"):
+        base = os.path.join(root, "sift")
+        data = np.asarray(read_fvecs(os.path.join(base, "sift_base.fvecs")), dtype="float32")
+        queries = np.asarray(read_fvecs(os.path.join(base, "sift_query.fvecs")), dtype="float32")
+        gt = None
+        gt_path = os.path.join(base, "sift_groundtruth.ivecs")
+        if os.path.exists(gt_path):
+            gt = {str(qi): [str(i) for i in row] for qi, row in enumerate(read_ivecs(gt_path))}
+        return data, queries, "l2", gt
+    if key in ("glove", "glove-100-angular", "glove100"):
+        import h5py  # gather-only
+
+        path = os.path.join(root, "glove-100-angular.hdf5")
+        with h5py.File(path, "r") as fh:
+            data = np.asarray(fh["train"], dtype="float32")
+            queries = np.asarray(fh["test"], dtype="float32")
+            gt = {
+                str(qi): [str(int(i)) for i in row] for qi, row in enumerate(np.asarray(fh["neighbors"]))
+            }
+        return data, queries, "cosine", gt
+    raise ValueError("unknown dataset %r (use sift-128-euclidean or glove-100-angular)" % name)
+
+
+def run_hnswlib_sweep(data, queries, k, space, ef_values, m=16, ef_construction=200, ground_truth=None):
+    """Build ONE hnswlib index and query it at a sweep of `ef` search-effort settings.
+
+    Yields one Pareto point per ef: (ef, recall@k, query_us, qps). The exact-kNN oracle
+    is `ground_truth` if supplied (the dataset's precomputed neighbours), else computed
+    once with numpy. Higher ef -> higher recall + higher latency: this IS the recall-QPS
+    trade-off curve the ann-benchmarks Pareto plots."""
+    import hnswlib
+    import numpy as np
+
+    data = np.asarray(data, dtype="float32")
+    queries = np.asarray(queries, dtype="float32")
+    dim = data.shape[1]
+    index = hnswlib.Index(space=space, dim=dim)
+    index.init_index(max_elements=len(data), ef_construction=ef_construction, M=m)
+    index.add_items(data, list(range(len(data))))
+    exact = ground_truth if ground_truth is not None else exact_knn(data, queries, k)
+    out = []
+    for ef in ef_values:
+        index.set_ef(int(ef))
+        t0 = time.perf_counter()
+        labels, _ = index.knn_query(queries, k=k)
+        query_us = (time.perf_counter() - t0) * 1e6 / max(1, len(queries))
+        approx = {str(qi): [str(int(i)) for i in row] for qi, row in enumerate(labels)}
+        recall, _n = recall_at_k(approx, exact, k)
+        out.append((int(ef), recall, int(round(query_us)), qps_from_query_us(query_us)))
+    return out
+
+
 def main(argv):
     """CLI:
       vector_lib_adapter.py --score --approx <tsv> --exact <tsv> --k K [--engine N]
             offline: score two neighbour TSVs (fixture-testable, no numpy/hnswlib).
       vector_lib_adapter.py --hnswlib --npz <file.npz> --k K [--engine N]
             heavy: build hnswlib index over npz {data,queries}, score vs exact-kNN.
+      vector_lib_adapter.py --pareto --dataset sift-128-euclidean|glove-100-angular
+            --root <dir> --k K [--ef 32,64,...] [--engine N] [--match-recall R]
+            gather-tier (sq-aiup): build ONE hnswlib index over the published corpus,
+            sweep `ef`, and emit the recall-QPS Pareto. One `<engine>\\t<recall_deficit_milli>
+            \\t<query_us>\\t<qps>\\t<ef>` line PER ef point; --json adds the frontier +
+            QPS-at-matched-recall (the only honest cross-engine number).
     Emits `<engine>\\t<recall_deficit_milli>\\t<query_us>`; --json adds raw recall."""
     mode = None
     approx_f = exact_f = npz_f = None
+    dataset = root = None
+    ef_values = [16, 32, 64, 128, 256]
+    match_recall = 0.9
     k = 10
     engine = "engine"
     want_json = False
@@ -128,6 +313,8 @@ def main(argv):
             mode = "score"
         elif a == "--hnswlib":
             mode = "hnswlib"
+        elif a == "--pareto":
+            mode = "pareto"
         elif a == "--approx":
             i += 1
             approx_f = argv[i]
@@ -137,6 +324,18 @@ def main(argv):
         elif a == "--npz":
             i += 1
             npz_f = argv[i]
+        elif a == "--dataset":
+            i += 1
+            dataset = argv[i]
+        elif a == "--root":
+            i += 1
+            root = argv[i]
+        elif a == "--ef":
+            i += 1
+            ef_values = [int(x) for x in argv[i].split(",") if x != ""]
+        elif a == "--match-recall":
+            i += 1
+            match_recall = float(argv[i])
         elif a == "--k":
             i += 1
             k = int(argv[i])
@@ -168,8 +367,40 @@ def main(argv):
             approx, query_us = run_hnswlib(npz["data"], npz["queries"], k)
             exact = exact_knn(npz["data"], npz["queries"], k)
             recall, _n = recall_at_k(approx, exact, k)
+        elif mode == "pareto":
+            if not (dataset and root):
+                raise ValueError("--pareto needs --dataset <name> --root <dir>")
+            data, queries, space, gt = load_dataset(dataset, root)
+            sweep = run_hnswlib_sweep(data, queries, k, space, ef_values, ground_truth=gt)
+            # One TSV row per ef point (the recall-QPS curve, never a single latency).
+            for ef, rec, qus, qps in sweep:
+                sys.stdout.write(
+                    "%s\t%d\t%d\t%.2f\t%d\n" % (engine, recall_deficit_milli(rec), qus, qps, ef)
+                )
+            if want_json:
+                pts = [(rec, qps) for _ef, rec, _qus, qps in sweep]
+                front = pareto_frontier(pts)
+                sys.stderr.write(
+                    json.dumps(
+                        {
+                            "engine": engine,
+                            "dataset": dataset,
+                            "k": k,
+                            "space": space,
+                            "points": [
+                                {"ef": ef, "recall_at_k": rec, "query_us": qus, "qps": qps}
+                                for ef, rec, qus, qps in sweep
+                            ],
+                            "pareto_frontier": [{"recall_at_k": r, "qps": q} for r, q in front],
+                            "match_recall": match_recall,
+                            "qps_at_matched_recall": matched_recall_qps(pts, match_recall),
+                        }
+                    )
+                    + "\n"
+                )
+            return 0
         else:
-            sys.stderr.write("vector_lib_adapter: pick --score or --hnswlib\n")
+            sys.stderr.write("vector_lib_adapter: pick --score, --hnswlib or --pareto\n")
             return 2
     except Exception as e:  # noqa: BLE001 — adapter boundary
         sys.stderr.write("vector_lib_adapter: %s\n" % e)

@@ -115,10 +115,30 @@ PQ) or it is unfair. A real `scripts/gather-competitors.sh --run --only <id>` wr
 `bench/competitor-results/`; the big-corpus (SIFT1M / GloVe) recall-QPS Pareto is gather-tier (no
 recurring CI cost — nightly + git-ignored results).
 
-## Follow-up
+## Gather-tier: SIFT1M / GloVe-100-angular recall–QPS Pareto (sq-aiup)
 
-The big published-dataset recall–QPS Pareto (SIFT1M / GloVe-100-angular via the `ann-benchmarks`
-harness) is captured as a bead — it needs a download/gather step (corpora not redistributable
-in-repo) before it can run, so it is gather/nightly, not a per-PR gate. Until then the per-commit
-gate is the deterministic recall-deficit structure (HNSW / DiskANN / PQ on the synthetic corpus)
-above.
+<!-- [OPUS-4.8] sq-aiup -->
+The big published-dataset recall–QPS Pareto runs through the `vector-lib` adapter's **`--pareto`**
+mode (`scripts/bench-adapters/vector_lib_adapter.py`). It builds **one** hnswlib index over the
+corpus, **sweeps the `ef` search-effort knob**, and emits **one `(recall_deficit, query_us, qps, ef)`
+point per setting** — the recall–QPS curve. A single (recall, latency) point is meaningless for ANN,
+so the `--json` envelope carries the **Pareto frontier** plus **QPS at matched recall**
+(`matched_recall_qps`) — the only honest cross-engine number (two engines at the *same* recall floor,
+never a single latency). The corpora are **not redistributable in-repo** (download/gather step), so
+this is **nightly/EC2, not per-PR CI** (design §3.3(c)).
+
+```sh
+# SIFT1M (TEXMEX .fvecs/.ivecs under <root>/sift/) — L2:
+VECTOR_DATASET=sift-128-euclidean VECTOR_ROOT=/data/ann VECTOR_EF=16,32,64,128,256 \
+  scripts/gather-competitors.sh --run --only ann-benchmarks
+# GloVe-100-angular (ann-benchmarks <root>/glove-100-angular.hdf5; needs h5py) — cosine:
+VECTOR_DATASET=glove-100-angular VECTOR_ROOT=/data/ann \
+  scripts/gather-competitors.sh --run --only ann-benchmarks
+```
+
+The pure halves — the `.fvecs`/`.ivecs` parser (`read_vecs`), the QPS/Pareto-frontier/matched-recall
+maths — are **fixture-unit-tested without numpy/hnswlib** in `scripts/bench-adapters/test_adapters.py`
+(`test_pareto`); only the index build + query (`load_dataset` / `run_hnswlib_sweep`) need the heavy
+gather deps. Results land git-ignored in `bench/competitor-results/`. FAISS / ScaNN / DiskANN-ref are
+additional kernel peers on the same recall–QPS axis (run each library's sweep, score against the same
+exact-kNN ground truth, compare frontiers at matched recall) — tracked as further gather backends.
