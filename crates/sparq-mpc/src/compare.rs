@@ -197,7 +197,7 @@ fn check_in_range(label: &str, v: Fp) -> Result<(), MpcError> {
 /// recombination points exist). The honest-majority constructor already fixes
 /// `t = ⌊(n−1)/2⌋ ⇒ n >= 2t+1`, so this only fires on a mis-built backend; it
 /// fails with a descriptive error rather than letting `degree_reduce` panic later.
-fn check_party_count(n: usize, t: usize) -> Result<(), MpcError> {
+pub(crate) fn check_party_count(n: usize, t: usize) -> Result<(), MpcError> {
     if n < 2 * t + 1 {
         return Err(MpcError::Protocol(format!(
             "secure comparison needs n >= 2t+1 (each multiplication's degree reduction does); \
@@ -718,7 +718,7 @@ fn secret_is_zero(dealer: &mut ShamirDealer, v: &[Share]) -> Result<bool, MpcErr
 /// The verdict bit is opened separately by the caller.
 ///
 /// Honest-majority, semi-honest (inherits the module security model).
-fn verify_sum_in_range(
+pub(crate) fn verify_sum_in_range(
     dealer: &mut ShamirDealer,
     sum_shares: &[Share],
     sum_bits: &[Vec<Share>],
