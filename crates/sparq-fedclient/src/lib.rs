@@ -1,83 +1,124 @@
-//! sparq-fedclient: a **streaming federation CLIENT** over heterogeneous remote RDF
-//! sources — the query *consumer* half of federation (epic **sq-dnko** / **sq-3183**,
-//! Phase 0 bead **sq-s1uy**). See `research/federation-client-design.md` for the full
-//! design (§4 architecture, §6 phased build plan, §7 honest risks).
-//!
-//! Given one SPARQL query and a set of heterogeneous remote sources — full SPARQL
-//! endpoints, bindings-restricted (brTPF) servers, plain TPF servers, and the *local*
-//! sparq engine — this crate (when complete) **discovers** each source's capability,
-//! **plans** a federated execution that pushes the most precise sub-query each source
-//! can answer (REUSING the [`sparq-fedplan`](sparq_fedplan) cost-based planner), and
-//! **streams** results back through non-blocking federation operators.
-//!
-//! # What has landed, and what is still ahead
-//!
-//! The crate began as the **Phase-0 compiling skeleton** (design §6) — the public module
-//! layout the design §4 names ([`source`], [`discovery`], [`planner`], [`pushdown`],
-//! [`operators`], [`stream`]), the **opt-in feature** ([`fedclient`](#opt-in-hard-constraint),
-//! OFF by default), and the **dependency-boundary proof** (below). Landed since, each behind
-//! the same default-OFF `fedclient` feature:
-//!
-//! * **Phase 1 — capability discovery** ([`discovery`], bead `sq-nfxl`): GET the source's
-//!   Service Description + `/.well-known/void`, parse them to a `Capability` +
-//!   `SourceDescriptor`, with a FedX-style ASK-probe fallback, all behind a default-deny
-//!   SSRF-guarded fetch seam.
-//! * **Phase 2 — source-type abstraction + Endpoint adapter** ([`source`], bead `sq-rsxf`):
-//!   [`SourceType`] (`Endpoint | BrTpf | Tpf | Local`), the [`FederatedSource`] trait, the
-//!   fine-grained [`Capability`](source::Capability) descriptor, and the real [`Endpoint`] SRJ
-//!   adapter over a [`Transport`] seam behind a default-deny [`EgressGuard`].
-//! * **Phase 3 — planner bridge + materialised single-source interpreter** ([`planner`] +
-//!   [`operators`], bead `sq-j27p`): [`SourceResolver`] index→adapter resolution + [`lower_leaf`],
-//!   and [`materialize_single_source`] + [`parse_srj`] + [`solutions_equal`].
-//! * **Phase 4 — capability-aware pushdown** ([`pushdown`], bead `sq-7byx`): per leaf / FedX
-//!   exclusive group, build the most precise sub-query a source can answer (projection +
-//!   common-variable-checked filters + ORDER/LIMIT under capability) — [`exclusive_groups`] +
-//!   [`push_group`] + [`render_values_block`], correctness-preservingly NARROWing each source.
-//! * **Phase 5 — streaming operators** ([`operators`] + [`stream`], bead `sq-vtba`): the
-//!   [`SolutionStream`] boundary the client owns, the bounded blocking [`ScatterPool`], the
-//!   `StreamJoin`-feeder [`StreamingJoin`], and the [`stream_single_source`] streaming
-//!   interpreter — backpressured + bounded (Rust ownership + the reused StreamJoin spill).
-//! * **Phase 6 — brTPF + TPF fragment adapters** ([`source`], bead `sq-2qze`): the real
-//!   Triple-Pattern-Fragments adapters ([`TpfSource`] / [`BrTpfSource`]) over a
-//!   [`FragmentTransport`] seam, complete-by-construction with count-metadata cardinality.
-//!
-//! * **Phase 7 — adaptive re-planning** ([`adaptive`], bead `sq-ij5x`, the FINAL phase): the
-//!   opt-in feedback loop that re-invokes [`sparq-fedplan`](sparq_fedplan)'s planner on the
-//!   **unjoined remainder** when observed cardinality diverges from the static estimate,
-//!   bounded to at most once per operator boundary — re-planning changes the plan, never the
-//!   answer ([`execute_adaptive_single_source`]). Behind the extra default-OFF
-//!   `fedclient-adaptive` feature (it pulls `sparq-fedplan/adaptive-replan`).
-//!
-//! With Phase 7 the **8-phase streaming federation client is feature-complete** (Phases 0–7
-//! all landed; epic sq-dnko closed). The public surface and the dependency boundary were made
-//! visible before the logic landed.
-//!
-//! # Opt-in (hard constraint)
-//!
-//! The whole client is behind the **`fedclient` cargo feature, OFF by default**, and the
-//! crate is a standalone workspace member with `publish = false`. `sparq-core` and
-//! `sparq-engine` **never** depend on it — the dependency arrow points one-way *into*
-//! the engine (the client reuses the engine's SERVICE transport + SSRF guard + local
-//! eval), so the default engine build and the WASM artifact are byte-identical with or
-//! without `sparq-fedclient`. A build that does not enable `fedclient` compiles an empty
-//! crate (mirrors [`sparq-fedplan`](sparq_fedplan)'s `fedplan` feature).
-//!
-//! # The dependency boundary (load-bearing, enforced)
-//!
-//! The boundary was **proved before any logic existed** (Phase 0) and is re-checked on every
-//! build. Two complementary checks enforce that neither `sparq-core` nor `sparq-engine` ever
-//! gains a dependency edge *to* `sparq-fedclient`, in both feature states:
-//!
-//! * `scripts/fedclient-boundary-guard.sh` — a CI step (in `feature-matrix.yml`) that
-//!   inverts the dependency graph (`cargo tree -i sparq-fedclient`) and fails if
-//!   `sparq-core` or `sparq-engine` appears as a dependent;
-//! * `tests/boundary.rs` — a hermetic `cargo metadata` test asserting the same invariant
-//!   from inside the test suite, so it gates even off the CI script.
-//!
-//! Both must FAIL if a future edit introduces such an edge.
-//!
-//! [OPUS-4.8] sq-s1uy / sq-73om — flagged for Fable re-review when available.
+// ─── Crate-level documentation ──────────────────────────────────────────────────────
+// [OPUS-4.8] sq-tiq4: the narrative below intra-doc-links the per-phase modules
+// (`source`/`discovery`/`planner`/`pushdown`/`operators`/`stream`/`adaptive`) and the
+// re-exported items — but EVERY one of those is `#[cfg(feature = "fedclient")]`-gated, so in
+// the DEFAULT (fedclient OFF) build none of them are in scope and `cargo doc` under
+// `-D rustdoc::broken_intra_doc_links` failed on ~40 unresolved links. The fix keeps the rich
+// linked narrative for the build where its targets actually exist (`fedclient` ON) and serves
+// a concise, link-free crate doc for the OFF build, so `cargo doc` is clean in BOTH states.
+// `deny(rustdoc::broken_intra_doc_links)` below locks the invariant in (rustdoc-only lint — it
+// fires under `cargo doc`, never under `cargo build`/`clippy`, so the existing gates are
+// unchanged). Mirror this split in any future crate-doc edit.
+#![cfg_attr(
+    feature = "fedclient",
+    doc = r#"sparq-fedclient: a **streaming federation CLIENT** over heterogeneous remote RDF
+sources — the query *consumer* half of federation (epic **sq-dnko** / **sq-3183**,
+Phase 0 bead **sq-s1uy**). See `research/federation-client-design.md` for the full
+design (§4 architecture, §6 phased build plan, §7 honest risks).
+
+Given one SPARQL query and a set of heterogeneous remote sources — full SPARQL
+endpoints, bindings-restricted (brTPF) servers, plain TPF servers, and the *local*
+sparq engine — this crate (when complete) **discovers** each source's capability,
+**plans** a federated execution that pushes the most precise sub-query each source
+can answer (REUSING the [`sparq-fedplan`](sparq_fedplan) cost-based planner), and
+**streams** results back through non-blocking federation operators.
+
+# What has landed, and what is still ahead
+
+The crate began as the **Phase-0 compiling skeleton** (design §6) — the public module
+layout the design §4 names ([`source`], [`discovery`], [`planner`], [`pushdown`],
+[`operators`], [`stream`]), the **opt-in feature** ([`fedclient`](#opt-in-hard-constraint),
+OFF by default), and the **dependency-boundary proof** (below). Landed since, each behind
+the same default-OFF `fedclient` feature:
+
+* **Phase 1 — capability discovery** ([`discovery`], bead `sq-nfxl`): GET the source's
+  Service Description + `/.well-known/void`, parse them to a `Capability` +
+  `SourceDescriptor`, with a FedX-style ASK-probe fallback, all behind a default-deny
+  SSRF-guarded fetch seam.
+* **Phase 2 — source-type abstraction + Endpoint adapter** ([`source`], bead `sq-rsxf`):
+  [`SourceType`] (`Endpoint | BrTpf | Tpf | Local`), the [`FederatedSource`] trait, the
+  fine-grained [`Capability`](source::Capability) descriptor, and the real [`Endpoint`] SRJ
+  adapter over a [`Transport`] seam behind a default-deny [`EgressGuard`].
+* **Phase 3 — planner bridge + materialised single-source interpreter** ([`planner`] +
+  [`operators`], bead `sq-j27p`): [`SourceResolver`] index→adapter resolution + [`lower_leaf`],
+  and [`materialize_single_source`] + [`parse_srj`] + [`solutions_equal`].
+* **Phase 4 — capability-aware pushdown** ([`pushdown`], bead `sq-7byx`): per leaf / FedX
+  exclusive group, build the most precise sub-query a source can answer (projection +
+  common-variable-checked filters + ORDER/LIMIT under capability) — [`exclusive_groups`] +
+  [`push_group`] + [`render_values_block`], correctness-preservingly NARROWing each source.
+* **Phase 5 — streaming operators** ([`operators`] + [`stream`], bead `sq-vtba`): the
+  [`SolutionStream`] boundary the client owns, the bounded blocking [`ScatterPool`], the
+  `StreamJoin`-feeder [`StreamingJoin`], and the [`stream_single_source`] streaming
+  interpreter — backpressured + bounded (Rust ownership + the reused StreamJoin spill).
+* **Phase 6 — brTPF + TPF fragment adapters** ([`source`], bead `sq-2qze`): the real
+  Triple-Pattern-Fragments adapters ([`TpfSource`] / [`BrTpfSource`]) over a
+  [`FragmentTransport`] seam, complete-by-construction with count-metadata cardinality.
+
+* **Phase 7 — adaptive re-planning** (the `adaptive` module, bead `sq-ij5x`, the FINAL
+  phase): the opt-in feedback loop that re-invokes [`sparq-fedplan`](sparq_fedplan)'s planner
+  on the **unjoined remainder** when observed cardinality diverges from the static estimate,
+  bounded to at most once per operator boundary — re-planning changes the plan, never the
+  answer. Behind the extra default-OFF `fedclient-adaptive` feature (it pulls
+  `sparq-fedplan/adaptive-replan`); when that feature is off the `adaptive` module and its
+  `execute_adaptive_single_source` entry point are `#[cfg]`-compiled out.
+
+With Phase 7 the **8-phase streaming federation client is feature-complete** (Phases 0–7
+all landed; epic sq-dnko closed). The public surface and the dependency boundary were made
+visible before the logic landed.
+
+# Opt-in (hard constraint)
+
+The whole client is behind the **`fedclient` cargo feature, OFF by default**, and the
+crate is a standalone workspace member with `publish = false`. `sparq-core` and
+`sparq-engine` **never** depend on it — the dependency arrow points one-way *into*
+the engine (the client reuses the engine's SERVICE transport + SSRF guard + local
+eval), so the default engine build and the WASM artifact are byte-identical with or
+without `sparq-fedclient`. A build that does not enable `fedclient` compiles an empty
+crate (mirrors [`sparq-fedplan`](sparq_fedplan)'s `fedplan` feature).
+
+# The dependency boundary (load-bearing, enforced)
+
+The boundary was **proved before any logic existed** (Phase 0) and is re-checked on every
+build. Two complementary checks enforce that neither `sparq-core` nor `sparq-engine` ever
+gains a dependency edge *to* `sparq-fedclient`, in both feature states:
+
+* `scripts/fedclient-boundary-guard.sh` — a CI step (in `feature-matrix.yml`) that
+  inverts the dependency graph (`cargo tree -i sparq-fedclient`) and fails if
+  `sparq-core` or `sparq-engine` appears as a dependent;
+* `tests/boundary.rs` — a hermetic `cargo metadata` test asserting the same invariant
+  from inside the test suite, so it gates even off the CI script.
+
+Both must FAIL if a future edit introduces such an edge.
+
+[OPUS-4.8] sq-s1uy / sq-73om / sq-tiq4 — flagged for Fable re-review when available."#
+)]
+// Default (fedclient OFF) build: a concise, link-free crate doc. None of the per-phase
+// modules/items linked above exist in this build, so the doc is plain text + code spans
+// (matching `README.md`). [OPUS-4.8] sq-tiq4.
+#![cfg_attr(
+    not(feature = "fedclient"),
+    doc = r#"sparq-fedclient: a **streaming federation CLIENT** over heterogeneous remote RDF
+sources — the query *consumer* half of federation (epic **sq-dnko** / **sq-3183**). See
+`research/federation-client-design.md` for the full design.
+
+**This is the default build with the `fedclient` feature OFF, so the crate is empty** — the
+whole client (the `source` / `discovery` / `planner` / `pushdown` / `operators` / `stream` /
+`adaptive` modules and every re-exported item) is gated behind the **`fedclient` cargo
+feature, OFF by default**. Build the docs with `--features fedclient` to see the federation
+API and the per-phase narrative; this crate is a standalone workspace member with
+`publish = false`, and `sparq-core` / `sparq-engine` **never** depend on it (the dependency
+arrow points one-way *into* the engine), so the default engine build and the WASM artifact
+are byte-identical with or without `sparq-fedclient` (mirrors `sparq-fedplan`'s `fedplan`
+feature).
+
+[OPUS-4.8] sq-s1uy / sq-73om / sq-tiq4 — flagged for Fable re-review when available."#
+)]
 #![forbid(unsafe_code)]
+// [OPUS-4.8] sq-tiq4: lock the fix in. `rustdoc::broken_intra_doc_links` is a rustdoc-only
+// lint — it fires under `cargo doc`, NOT under `cargo build`/`clippy`/`test` — so denying it
+// keeps the existing build/clippy/test gates untouched while making a future broken crate-doc
+// link a hard `cargo doc` error in EITHER feature state.
+#![deny(rustdoc::broken_intra_doc_links)]
 // [OPUS-4.8] sq-s1uy: crate has zero `unsafe`.
 // When `fedclient` is off the crate is intentionally empty. With it on, not every landed item
 // is yet wired into an end-to-end public entry point, so silence the expected dead-code/

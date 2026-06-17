@@ -26,7 +26,8 @@
 //! What Phase 7 adds is the **client-side execution loop** that engine drives: it runs the
 //! plan as a sequence of stages, **fetches** each leaf through the real
 //! [`FederatedSource`](crate::FederatedSource) adapter, feeds the *real observed row count*
-//! back into [`RuntimeStats`], asks the executor whether to re-plan the remaining stages, and
+//! back into [`RuntimeStats`](sparq_fedplan::RuntimeStats), asks the executor whether to
+//! re-plan the remaining stages, and
 //! joins the (possibly re-ordered) suffix with the **same** materialised
 //! [`natural_join`](crate::operators) the static interpreter uses. The observed cardinality is
 //! genuine — you cannot know a leaf's true cardinality until you have drained it, which is
@@ -35,7 +36,8 @@
 //! # The load-bearing correctness property (result-equivalence)
 //!
 //! > Re-planning changes the **plan**, never the **answer**. For any divergence, the adaptive
-//! > execution produces the **same solution multiset** as the static [`JoinTree`].
+//! > execution produces the **same solution multiset** as the static
+//! > [`JoinTree`](sparq_fedplan::JoinTree).
 //!
 //! This holds because a BGP's answer is the natural join of its per-pattern solution
 //! multisets, which is **commutative and associative** (proven exhaustively in
@@ -50,13 +52,14 @@
 //! # Honest scope (work-vs-stub split)
 //!
 //! REAL here: the leaf-scan-then-adaptive-join executor, the observed-cardinality capture from
-//! the real adapter, the [`RuntimeStats`] / [`AdaptiveExecutor`] wiring, the
+//! the real adapter, the [`RuntimeStats`](sparq_fedplan::RuntimeStats) /
+//! [`AdaptiveExecutor`](sparq_fedplan::AdaptiveExecutor) wiring, the
 //! at-most-once-per-boundary bound, and the two correctness tests on the real interpreter path
 //! (the in-crate canned-SRJ tests below, plus the end-to-end
 //! `tests/adaptive_result_equals_static.rs` against the REAL engine). The executor is
 //! **single-source** (it shares the Phase-3/5
 //! [`InterpError::MultiSource`](crate::operators::InterpError) guard) and each per-stage join
-//! is the materialised [`natural_join`].
+//! is the materialised [`natural_join`](crate::operators).
 //!
 //! By its nature the observed-cardinality boundary is a **materialisation point** — a leaf must
 //! be drained to be counted — so the adaptive path scans each leaf fully (once) to learn its
