@@ -330,7 +330,7 @@ fn main() {
                 let b = QueryBudget::unlimited();
                 let mut n = 0u64;
                 while !stop.load(Ordering::Relaxed) {
-                    // Pin the current generation (lock-free ~10–20ns); never blocked by the
+                    // Pin the current generation (lock-free atomic load); never blocked by the
                     // writer — the N-readers side of the contract.
                     let pin = st.current();
                     let g = pin.snapshot();
