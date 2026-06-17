@@ -129,11 +129,26 @@ and `sh:values`): the focus node `sh:this`, a constant IRI/literal, a path
 expression `[ sh:path P ; sh:nodes N? ]` (over any SHACL property path; the
 optional `sh:nodes` is itself a node expression giving the start nodes, defaulting
 to `sh:this`), a filter-shape expression `[ sh:filterShape S ; sh:nodes N ]` (the
-nodes of `N` that conform to shape `S`), `[ sh:intersection ( … ) ]` and
-`[ sh:union ( … ) ]`. These nest arbitrarily. The SHACL *function* expression form
-(a SHACL-function IRI applied to an argument list) is **not** supported — it needs
-a function registry the crate does not carry; such an expression is dropped
-(lenient), so a rule that uses one infers nothing rather than misfiring.
+nodes of `N` that conform to shape `S`), `[ sh:intersection ( … ) ]`,
+`[ sh:union ( … ) ]`, a bare `rdf:list` (a SHACL 1.2 *list expression* — its
+members in order, preserving duplicates), and the **function-expression form**
+backed by a SHACL-function registry (sq-mk9n). These nest arbitrarily.
+
+The function registry implements the SHACL 1.2 built-in node-expression operators
+(`shnex:`/`sh:`): `concat`, `count`, `sum`, `min`, `max`, `distinct`,
+`if`/`then`/`else`, `exists`, `limit`, `offset`, `instancesOf`, `nodesMatching`,
+`flatMap`, `findFirst`, `matchAll`, `remove`, `orderBy`, and `var` (only the
+`"focusNode"` binding is defined outside a SPARQL scope; any other variable is the
+empty set). A **custom `sh:SPARQLFunction`** IRI applied to a `sh:list` of
+arguments is dispatched through the SPARQL engine (its `sh:select` body run with the
+ordered `sh:parameter` variables pre-bound to the evaluated arguments). A function
+IRI with no registered implementation is dropped (lenient), so a rule that uses an
+unknown function infers nothing rather than misfiring.
+
+**`sh:expression` constraint** (`sh:ExpressionConstraintComponent`, SHACL-AF) — a
+value node `v` is a violation when its `sh:expression` node expression does NOT
+evaluate to `{ true }` for `v`. On a node shape `v` is the focus node; on a
+property shape it is each path value node.
 
 Rules honour `sh:condition` (fire only for focus nodes conforming to every
 condition shape), `sh:order` (ascending; a rule sees earlier groups' inferences)
@@ -146,8 +161,9 @@ Option<Vec<Term>>` and the conformance primitive `conforms(data, shapes,
 shape_node)` (a reusable `ConformanceCheck`). With the feature off, none of this is
 compiled in. A gated W3C conformance harness
 ([`tests/w3c_node_expr.rs`](tests/w3c_node_expr.rs)) drives the `sht:EvalNodeExpr`
-suite for the implemented forms (it self-skips when the suite is not fetched and
-records unsupported function expressions as SKIP, not FAIL).
+suite for the implemented forms — all evaluation entries (focus/constant/list/path/
+filter/intersection/union plus the registry's function operators) pass; it
+self-skips when the suite is not fetched.
 
 Targets: `sh:targetNode`, `sh:targetClass` (with `rdfs:subClassOf*` closure),
 implicit class targets (a shape that is itself an `rdfs:Class`),

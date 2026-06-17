@@ -242,27 +242,41 @@ let inf = sparq_shacl::apply_rules(&data, &shapes);   // -> sparq_shacl::Inferen
 let expanded: Graph = sparq_shacl::expand(&data, &shapes);
 ```
 
-**Node-expression algebra** (operand of `sh:subject`/`sh:predicate`/`sh:object`
-and the `sh:values` value rule): `sh:this` (focus node); a constant IRI/literal;
-a path expression `[ sh:path P ; sh:nodes N? ]` (any SHACL property path; the
-optional `sh:nodes` is itself a node expression giving the start nodes, default
-`sh:this`); a filter-shape expression `[ sh:filterShape S ; sh:nodes N ]` (the
-nodes of `N` conforming to shape `S`); `[ sh:intersection ( … ) ]`; `[ sh:union (
-… ) ]`. These nest. The SHACL *function* expression form is NOT supported (needs a
-function registry) — it is dropped (lenient), inferring nothing.
+**Node-expression algebra** (operand of `sh:subject`/`sh:predicate`/`sh:object`,
+the `sh:values` value rule, and `sh:expression`): `sh:this` (focus node); a
+constant IRI/literal; a path expression `[ sh:path P ; sh:nodes N? ]` (any SHACL
+property path; the optional `sh:nodes` is itself a node expression giving the start
+nodes, default `sh:this`); a filter-shape expression `[ sh:filterShape S ; sh:nodes
+N ]` (the nodes of `N` conforming to shape `S`); `[ sh:intersection ( … ) ]`; `[
+sh:union ( … ) ]`; a bare `rdf:list` (a SHACL 1.2 list expression — its members in
+order, preserving duplicates); and the **function-expression form** (sq-mk9n). These
+nest.
+
+**Function registry (sq-mk9n):** the SHACL 1.2 built-in node-expression operators
+(`shnex:`/`sh:`) — `concat`, `count`, `sum`, `min`, `max`, `distinct`,
+`if`/`then`/`else`, `exists`, `limit`, `offset`, `instancesOf`, `nodesMatching`,
+`flatMap`, `findFirst`, `matchAll`, `remove`, `orderBy`, `var` (only `"focusNode"`
+is bound outside a SPARQL scope) — plus a custom `sh:SPARQLFunction` IRI applied to
+a `sh:list` of arguments (dispatched through the SPARQL engine with the ordered
+`sh:parameter` variables pre-bound). An unregistered function IRI is dropped
+(lenient), inferring nothing.
 
 **`sh:values` value rule:** a property shape with a single-predicate `sh:path` and
 an `sh:values` node expression infers `(focus, predicate, v)` for each evaluated
 `v`. A value rule on a `sh:property` child of a targeted node shape ranges over the
 parent's focus nodes.
 
+**`sh:expression` constraint** (`sh:ExpressionConstraintComponent`): a value node
+violates when its `sh:expression` node expression does NOT evaluate to `{ true }`
+(value = focus on a node shape; each path value on a property shape).
+
 API: `apply_rules(data, shapes)`, `apply_rules_with_model(data, shapes, &model)`
 (amortise shape parsing), `expand(data, shapes) -> Graph`, the node-expression
 seam `eval_node_expression(data, shapes, expr, focus) -> Option<Vec<Term>>`, and
 the conformance primitive `conforms(data, shapes, shape_node) -> ConformanceCheck`
 (call `.holds(node)` per focus). A gated W3C harness (`tests/w3c_node_expr.rs`)
-drives the `sht:EvalNodeExpr` suite for the implemented forms (self-skips when the
-suite is not fetched; function expressions count as SKIP, not FAIL).
+drives the `sht:EvalNodeExpr` suite — all evaluation entries pass (self-skips when
+the suite is not fetched).
 
 ## Gotchas / feature flags / prerequisites
 
