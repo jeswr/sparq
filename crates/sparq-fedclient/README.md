@@ -14,7 +14,8 @@ architecture, §6 phased build plan, §7 honest risks).
 > Model: Opus 4.8 (Fable unavailable — flag for re-review when Fable returns).
 > Epic **sq-dnko** / **sq-3183** (streaming federation client). Beads: skeleton
 > **sq-s1uy** · discovery **sq-nfxl** · source abstraction **sq-rsxf** · planner bridge +
-> single-source interpreter **sq-j27p**.
+> single-source interpreter **sq-j27p** · streaming operators **sq-vtba** · brTPF/TPF
+> **sq-2qze**.
 
 ## What has landed, and what is still ahead
 
@@ -37,15 +38,19 @@ since (each behind the same default-OFF `fedclient` feature):
 - **Phase 4 — capability-aware pushdown** (`sq-7byx`): the `pushdown` module — FedX
   exclusive-group decomposition, the maximal pushable sub-algebra per group, the exact
   common-variable FILTER check, and the cross-group bind-join block primitive (see below).
+- **Phase 5 — streaming operators** (`sq-vtba`): the `stream` module's `SolutionStream`
+  boundary + the `operators` module's bounded blocking thread-pool (`ScatterPool`),
+  `StreamJoin`-feeder streaming join (`StreamingJoin`), and the streaming interpreter
+  (`stream_single_source`) that EMIT results before the inputs are exhausted (see below).
 - **Phase 6 — brTPF + TPF fragment adapters** (`sq-2qze`): the real Triple-Pattern-Fragments
   adapters (see below).
 
-Still ahead (future beads under epic sq-dnko): the streaming operators (§4.4 / §5) and
-adaptive re-planning (§7).
+Still ahead (future beads under epic sq-dnko): multi-source UNION-per-leaf fan-out, the
+streaming bind-join pushed down as VALUES/`maxMpR` blocks, and adaptive re-planning (§7).
 
 The Phase-3 planner bridge + interpreter is detailed under
 [Phase 3 — lower a plan + interpret it against one source](#phase-3--lower-a-plan--interpret-it-against-one-source);
-the Phase-6 fragment adapters follow next.
+the Phase-5 streaming operators follow it, then the Phase-6 fragment adapters.
 
 ## brTPF + TPF fragment adapters (Phase 6, `source` module)
 
@@ -130,8 +135,8 @@ rather than a bare BGP.
 | `discovery`   | §4.1    | **Phase 1** — VoID/SD discovery → `Capability`; reuses `from_void_nt`; ASK fallback |
 | `planner`     | §4.2    | **Phase 3** — `SourceResolver` index→adapter resolution + `lower_leaf` per-leaf lowering |
 | `pushdown`    | §4.3    | **Phase 4** — FedX exclusive groups + maximal pushable sub-algebra per group + exact common-variable FILTER check + bind-join block primitive |
-| `operators`   | §4.4    | **Phase 3** — `materialize_single_source` interpreter + `parse_srj` + `solutions_equal` result-equivalence |
-| `stream`      | §4.4    | Phase 5 (stub) — the `SolutionStream` boundary the client owns (engine stays materialised) |
+| `operators`   | §4.4    | **Phase 3 + 5** — `materialize_single_source` (blocking) + `stream_single_source` (streaming) interpreters, `ScatterPool`, `StreamingJoin`, `parse_srj`, `solutions_equal` |
+| `stream`      | §4.4    | **Phase 5** — the bounded, backpressured `SolutionStream` boundary the client owns (engine stays materialised) |
 
 ## Opt-in (hard constraint)
 
@@ -194,18 +199,90 @@ let rel = materialize_single_source(&resolver, &sel, source, &tree)?;
 ```
 
 The interpreter is **single-source and blocking** (every leaf relation is fetched in full
-before joining). Streaming, concurrent fan-out, the pushed-down bind-join operator, and
-multi-source fan-out are Phase 5; a multi-source leaf is rejected (`InterpError::MultiSource`)
-rather than under-answered.
+before joining). The Phase-5 streaming interpreter below removes the blocking; a multi-source
+leaf is still rejected (`InterpError::MultiSource`) rather than under-answered.
+
+## Phase 5 — stream the plan (emit before inputs are exhausted)
+
+`stream_single_source` is the streaming counterpart of `materialize_single_source`. It walks
+the **same** `JoinTree` and enforces the **same** single-source guard, but instead of
+fetching every leaf in full and blocking-joining, it fans each leaf's blocking fetch out
+across a bounded thread-pool and chains the leaves through non-blocking joins:
+
+```rust,ignore
+use sparq_fedclient::{stream_single_source, StreamOptions, SolutionStream};
+use std::sync::Arc;
+
+let opts = StreamOptions::default();              // workers, channel cap, StreamJoin tuning
+let stream: SolutionStream =
+    stream_single_source(&resolver, &sel, Arc::clone(&source), &tree, &opts)?;
+for item in stream {                              // pulls solutions AS they become derivable
+    let sol = item?;                              // …before every leaf has finished fetching
+}
+```
+
+The pieces:
+
+- **`SolutionStream`** (`stream` module) — a bounded, backpressured `Iterator` over
+  `Result<Solution, FedError>`, built on a `std::sync::mpsc::sync_channel`. The channel bound
+  IS the backpressure: a producer `emit` blocks once the bound is reached, so a fast source
+  cannot grow an unbounded in-flight buffer. No GC heap, no async runtime.
+- **`ScatterPool`** (`operators` module) — a bounded blocking thread-pool over the blocking
+  transport. The **async/runtime decision** (design §7) lands here: NO async runtime is pulled
+  into the dependency tree; all concurrency is `std`-only and confined to this opt-in crate,
+  so the lean core is untouched. Each leaf's `source.execute` (a blocking round-trip + parse)
+  runs as one pool job; at most `workers` run concurrently.
+- **`StreamingJoin`** (`operators` module) — a streaming binary join driven by the planner's
+  proven non-blocking `StreamJoin` (the reused symmetric hash join + bounded operator spill).
+  It bridges `oxrdf::Term` solutions into `sparq-fedplan`'s lexical `Tuple` model via the
+  term's canonical N-Triples form (`Term::Display` ↔ `Term::from_str`, lossless and
+  injective), so the streamed join's term equality agrees with the materialised join's.
+
+### The load-bearing invariant (streaming-correctness)
+
+> The streamed solution multiset is **multiset-EQUAL** to the Phase-3
+> `materialize_single_source` result for **any** source-arrival interleaving — and both equal
+> local `sparq-engine` evaluation of the whole BGP.
+
+`tests/streaming_result_equals_phase3.rs` drives this on the **real** engine path: each leaf
+is answered by the real engine over an in-process graph, with a `DelayTransport` injecting
+per-leaf sleeps so the fetches complete in different orders. Because each `StreamingJoin`
+reuses `StreamJoin` (proven multiset-equal to a blocking hash join for any interleaving and
+any spill budget) and computes the same join keys / output header as the Phase-3
+`natural_join`, the streamed bag equals the materialised bag — verified across no-delay,
+one-leaf-slow, both-slow, chained-join, and forced-spill schedules.
+
+### Honest work-vs-stub split (Phase 5)
+
+REAL here: the `SolutionStream` boundary, the bounded blocking thread-pool, the
+`StreamJoin`-feeder streaming join (with spill), the streaming single-source interpreter, the
+lossless `Term ↔ Tuple` bridge, and the streaming-correctness test against the real engine.
+
+Still a stub / deferred (a clear slice boundary, not a half-done operator):
+
+- **Multi-source UNION-per-leaf fan-out** — a leaf retained by more than one source is still
+  rejected with `InterpError::MultiSource` (the Phase-3 guard), not yet fanned out as a
+  per-source union. The thread-pool and `SolutionStream` are the seam that work builds on.
+- **The pushed-down streaming bind-join** — `JoinAlgo::Bind` is executed with the same
+  streaming symmetric hash join (identical result multiset), not yet as a VALUES / `maxMpR`
+  block pushed to the source. That pushdown is Phase 4's `pushdown` module + a follow-up
+  bead; the result is correct either way (a bind join and a hash join over the same inputs
+  produce the same solutions), only the *request discipline* differs.
+- **End-to-end laziness through the engine** — a leaf's `execute` returns a materialised SRJ
+  body (the engine stays materialised, §7); the per-leaf stream delivers those parsed rows.
+  The streaming win is at the **join** level (a fast leaf feeds the join while a slow leaf is
+  still in flight), not solution-level laziness *through* a remote endpoint.
 
 ## Status / roadmap
 
 Landed: Phase 0 (skeleton + boundary proof, `sq-s1uy`), Phase 1 (discovery, `sq-nfxl`),
 Phase 2 (source abstraction + Endpoint adapter, `sq-rsxf`), Phase 3 (planner bridge +
 materialised single-source interpreter, `sq-j27p`), Phase 4 (capability-aware pushdown,
-`sq-7byx`), Phase 6 (brTPF/TPF adapters, `sq-2qze`). Still ahead under epic **sq-dnko**: the
-streaming operators (§4.4 / §5) and adaptive re-planning (§7). No performance numbers appear
-here: any "better than Comunica" claim in the design record is an
+`sq-7byx`), Phase 5 (streaming operators — `SolutionStream` + thread-pool fan-out +
+`StreamJoin`-feeder join, `sq-vtba`), Phase 6 (brTPF/TPF adapters, `sq-2qze`). Still ahead
+under epic **sq-dnko**: multi-source UNION-per-leaf fan-out + the pushed-down streaming
+bind-join, and adaptive re-planning (§7). No performance numbers appear here: any "better
+than Comunica" claim in the design record is an
 *architectural prediction* to be validated head-to-head before being asserted as fact.
 
-[OPUS-4.8] sq-7byx — flagged for Fable re-review.
+[OPUS-4.8] sq-7byx, sq-vtba — flagged for Fable re-review.
