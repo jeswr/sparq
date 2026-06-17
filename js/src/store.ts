@@ -19,8 +19,10 @@ import {
 import { DataFactory, Quad, Variable } from './terms.js';
 import { init, WasmStore } from './wasm.js';
 
-// [OPUS-4.8] sq-dvyi: `'jsonld'` added — the engine parses JSON-LD in the lean wasm
-// bundle (oxjsonld), so the JS surface accepts it like the other syntaxes.
+// [OPUS-4.8] sq-dvyi: `'jsonld'` added — the engine parses JSON-LD (oxjsonld) when the
+// wasm bundle is built with the OPT-IN `jsonld` feature, which the published `@jeswr/sparq`
+// bundle and the site REPL both enable (js `build:wasm`). The JS surface accepts it like
+// the other syntaxes; the default lean wasm bundle leaves oxjsonld out (perf-gate floor).
 export type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig' | 'jsonld';
 
 /**

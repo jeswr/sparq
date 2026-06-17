@@ -44,6 +44,13 @@ shacl = ["dep:sparq-shacl"]
 # [OPUS-4.8] sq-yqi1: also compile SHACL Advanced Features (sh:rule) into the binding.
 # Implies `shacl`; OFF by default.
 shacl-af = ["shacl", "sparq-shacl/shacl-af"]
+# [OPUS-4.8] sq-dvyi: JSON-LD ingest in the browser, OPT-IN behind the `jsonld` feature
+# (OFF by default). Forwards to sparq-core's `jsonld` feature so the `oxjsonld` parser is
+# only linked when enabled. The DEFAULT (lean) bundle — the one scripts/ci-bench.sh tracks
+# as wasm_bundle_bytes via `cargo build -p sparq-wasm` (no features) — carries ZERO JSON-LD
+# code and stays under the perf-gate floor. The site REPL build (js `build:wasm`) turns this
+# on so the upload/URL loader keeps the JSON-LD capability.
+jsonld = ["sparq-core/jsonld"]
 
 [dev-dependencies]
 # [OPUS-4.8] sq-9qz6 pt2 — headless wasm test harness. Exercises the #[wasm_bindgen]

@@ -26,9 +26,12 @@ test('fromString compressed returns identical results', async () => {
   );
 });
 
-// [OPUS-4.8] sq-dvyi: JSON-LD is parsed engine-side (oxjsonld) in the lean wasm bundle,
-// so `fromString(_, 'jsonld')` works like the other syntaxes — the site REPL's JSON-LD
-// upload/URL path. (`dataset: true` preserves a JSON-LD `@graph` as a named graph.)
+// [OPUS-4.8] sq-dvyi: JSON-LD is parsed engine-side (oxjsonld) when the wasm bundle is
+// built with the OPT-IN `jsonld` feature (the js `build:wasm` script enables it, so this
+// published bundle and the site REPL both have it). With the feature on, `fromString(_,
+// 'jsonld')` works like the other syntaxes — the site REPL's JSON-LD upload/URL path. The
+// DEFAULT (lean) wasm bundle does NOT link oxjsonld (it stays under the perf-gate floor).
+// (`dataset: true` preserves a JSON-LD `@graph` as a named graph.)
 test('fromString parses JSON-LD (folded), queryable like Turtle', async () => {
   const jsonld = JSON.stringify({
     '@context': { ex: 'http://ex/' },

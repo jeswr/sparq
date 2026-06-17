@@ -25,7 +25,7 @@ in `Cargo.toml` (oxrdf pulls `rand` for blank-node ids).
 import init, { Store } from "./pkg/sparq_wasm.js";
 await init();
 
-const store = Store.load(turtleText, "turtle"); // or "ntriples" | "nquads" | "trig" | "jsonld"
+const store = Store.load(turtleText, "turtle"); // or "ntriples" | "nquads" | "trig" | "jsonld"*
 store.size;             // number of triples
 store.heapBytes();      // rough in-memory footprint
 
@@ -38,6 +38,13 @@ const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, n
 `query` supports the M2 surface: BGPs (binary + WCOJ), FILTER, OPTIONAL, UNION,
 MINUS, BIND, VALUES, aggregation (GROUP BY / HAVING), ORDER BY, DISTINCT/LIMIT/
 OFFSET, sub-SELECT.
+
+\* **`"jsonld"` (and `"json-ld"` / `"application/ld+json"`) is parsed only when
+built with the opt-in `jsonld` feature** — `wasm-pack build … --release -- --features jsonld`.
+It links the `oxjsonld` parser (~0.35 MiB raw, pre-`wasm-opt`), so it is **OFF by default**
+to keep the lean bundle under the `wasm_bundle_bytes` perf-gate floor. The published
+`@jeswr/sparq` bundle and the site REPL build it with `--features shacl,jsonld`, so JSON-LD
+upload/URL works there. Turtle / N-Triples / N-Quads / TriG need no feature.
 
 ## SHACL validation (opt-in `shacl` feature) — `Store.validate(...)`
 

@@ -135,7 +135,9 @@ impl QuadChunks {
 #[wasm_bindgen]
 impl Store {
     /// Parses an RDF document into a store. `format`: `"turtle"` | `"ntriples"` |
-    /// `"nquads"` | `"trig"` | `"jsonld"` (also `"json-ld"` / `"application/ld+json"`).
+    /// `"nquads"` | `"trig"` | `"jsonld"` (also `"json-ld"` / `"application/ld+json"`,
+    /// available only when the crate is built with the OPT-IN `jsonld` feature — the
+    /// site REPL bundle enables it; the lean default bundle does not).
     /// Named graphs (from N-Quads / TriG / JSON-LD `@graph`) are folded into the default
     /// graph — use [`loadDataset`](Self::load_dataset) to preserve them.
     pub fn load(text: &str, format: &str) -> Result<Store, JsError> {
@@ -731,8 +733,9 @@ mod tests {
     // ---- sq-dvyi: JSON-LD ingest through the wasm `Store::load` / `loadDataset` ----
 
     /// `Store::load(jsonldText, "jsonld")` parses a JSON-LD document and the store is
-    /// queryable exactly as a Turtle-loaded one. This is the lean wasm bundle path the
-    /// site REPL's JSON-LD upload/URL feature drives.
+    /// queryable exactly as a Turtle-loaded one. This is the wasm bundle path the
+    /// site REPL's JSON-LD upload/URL feature drives (OPT-IN behind the `jsonld` feature).
+    #[cfg(feature = "jsonld")]
     #[test]
     fn jsonld_load_and_query() {
         let doc = r#"{
@@ -759,6 +762,8 @@ mod tests {
 
     /// `Store::loadDataset(jsonld, "jsonld")` preserves a JSON-LD `@graph` named graph, so
     /// a `GRAPH ?g { … }` query over an uploaded JSON-LD dataset returns the right graph.
+    /// OPT-IN behind the `jsonld` feature.
+    #[cfg(feature = "jsonld")]
     #[test]
     fn jsonld_load_dataset_named_graph_queryable() {
         let doc = r#"{

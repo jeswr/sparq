@@ -32,6 +32,13 @@ parallel = ["dep:rayon", "dep:memchr"]
 compact-index = []
 # Out-of-core querying: persist the indexes and memory-map them (native only).
 mmap = ["dep:memmap2"]
+# [OPUS-4.8] sq-dvyi: JSON-LD ingest for the in-memory loaders (`load_str` /
+# `load_dataset` / `load_reader`). OPT-IN and OFF by default so the DEFAULT lean wasm
+# bundle (which the perf-gate tracks via `cargo build -p sparq-wasm`, no features) does
+# NOT link `oxjsonld` and stays under the wasm_bundle_bytes floor. JSON-LD is a
+# whole-document JSON parse (not chunkable), so it has no parallel/streaming variant to
+# gate further. Consumers that want JSON-LD (the site REPL upload/URL path) enable this.
+jsonld = ["dep:oxjsonld"]
 # Spillable BUILD-time term dictionary (native only, off by default): bound the peak
 # build RSS by a configurable memory budget — term occurrences spill to disk and are
 # externally sorted/deduplicated into the SAME ids (byte-identical output) as the
@@ -43,9 +50,10 @@ dict-spill = ["mmap", "parallel", "dep:libc"]
 oxrdf.workspace = true
 oxttl.workspace = true
 # [OPUS-4.8] sq-dvyi: JSON-LD ingest for the in-memory loaders (`load_str` /
-# `load_dataset` / `load_reader`). Pure-Rust + wasm-portable, so it is in the lean wasm
-# bundle's graph too (the browser REPL's JSON-LD upload/URL path).
-oxjsonld.workspace = true
+# `load_dataset` / `load_reader`). Pure-Rust + wasm-portable, but OPT-IN behind the
+# `jsonld` feature (OFF by default) so the tracked lean wasm bundle never links it and
+# stays under the wasm_bundle_bytes perf floor — the site REPL enables the feature.
+oxjsonld = { workspace = true, optional = true }
 rustc-hash.workspace = true
 hashbrown.workspace = true
 rayon = { workspace = true, optional = true }
