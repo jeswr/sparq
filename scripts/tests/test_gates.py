@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# [OPUS-4.8] Hermetic tests for the proactive merge-gate scripts G1/G2 (beads
-# sq-ncvq.4 + sq-ncvq.5, epic sq-ncvq). Authored by Opus 4.8 (Fable unavailable;
-# flag for re-review when Fable returns).
+# [OPUS-4.8] Hermetic tests for the proactive merge-gate scripts G1/G2/G6 (beads
+# sq-ncvq.4 + sq-ncvq.5 + sq-ncvq.9, epic sq-ncvq). Authored by Opus 4.8 (Fable
+# unavailable; flag for re-review when Fable returns).
 #
 # Hermetic w.r.t. git/network: imports scripts/gate-new-crate.py +
-# scripts/gate-api-skill.py and drives their pure evaluate()/main() entry points
-# against FIXTURE diff listings. NO live git and NO subprocess — the
-# evaluate()-level tests inject every git/subprocess fact (crate stub status,
-# bench registration, `pub`-diff heuristic) via the *_overrides kwargs, and
-# main() is driven with --changed-files fixtures + --dry-run so it never shells
-# out. [OPUS-4.8] (Caveat: the main() smoke tests call main() WITHOUT overrides,
-# so they may still consult the in-repo bench/benchmarks.toml on disk — that is a
-# committed file, not git/network state, so the runs stay deterministic.)
+# scripts/gate-api-skill.py + scripts/check-config-documented.py and drives their
+# pure evaluate()/main() entry points against FIXTURE diff listings. NO live git
+# and NO subprocess — the evaluate()-level tests inject every git/subprocess fact
+# (crate stub status, bench registration, `pub`-diff heuristic, G6 net-added knob
+# tokens + documented-token sets) via the *_overrides kwargs, and main() is driven
+# with --changed-files fixtures + --dry-run so it never shells out. [OPUS-4.8]
+# (Caveat: the main() smoke tests call main() WITHOUT overrides, so they may still
+# consult the in-repo bench/benchmarks.toml or the crate READMEs/SKILL.md on disk —
+# those are committed files, not git/network state, so the runs stay deterministic.)
 #
 # Run:  python3 scripts/tests/test_gates.py
 # (stdlib only; no pytest required — also discoverable by `pytest`.)
@@ -38,6 +39,7 @@ def _load(name: str, filename: str):
 
 g1 = _load("gate_new_crate", "gate-new-crate.py")
 g2 = _load("gate_api_skill", "gate-api-skill.py")
+g6 = _load("check_config_documented", "check-config-documented.py")
 
 
 def _statused(added: list[str], modified: list[str] | None = None) -> list[str]:
@@ -280,6 +282,163 @@ class G2Test(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# G6 — new-config/flag → docs
+# --------------------------------------------------------------------------- #
+class G6Test(unittest.TestCase):
+    # [OPUS-4.8] G6 fires on a NET-added CLI flag literal / SPARQ_* env var in a
+    # sparq-cli|sparq-server src file that no docs surface documents. The
+    # evaluate()-level tests inject the net-added-knob set (code_knobs), the
+    # docs-added set (doc_added) and the on-disk documented set (doc_disk) so they
+    # stay hermetic (no live git, no disk). The token-extraction + net-diff helpers
+    # are exercised directly.
+
+    SERVER_MAIN = "crates/sparq-server/src/main.rs"
+    CLI_MAIN = "crates/sparq-cli/src/main.rs"
+
+    def test_new_flag_without_docs_fails(self):
+        ok, undoc = g6.evaluate(
+            [self.SERVER_MAIN],
+            labels=[],
+            base="main",
+            code_knobs={self.SERVER_MAIN: {"--new-knob"}},
+            doc_added=set(),
+            doc_disk=set(),
+        )
+        self.assertFalse(ok)
+        self.assertEqual([k for k, _ in undoc], ["--new-knob"])
+        self.assertEqual(undoc[0][1], self.SERVER_MAIN)
+
+    def test_new_flag_documented_in_same_diff_passes(self):
+        # The same PR adds the flag to the crate README → documented.
+        ok, undoc = g6.evaluate(
+            [self.SERVER_MAIN, "crates/sparq-server/README.md"],
+            labels=[],
+            base="main",
+            code_knobs={self.SERVER_MAIN: {"--new-knob"}},
+            doc_added={"--new-knob"},
+            doc_disk=set(),
+        )
+        self.assertTrue(ok)
+        self.assertEqual(undoc, [])
+
+    def test_new_flag_documented_in_skill_in_same_diff_passes(self):
+        ok, undoc = g6.evaluate(
+            [self.CLI_MAIN, "skills/cli/SKILL.md"],
+            labels=[],
+            base="main",
+            code_knobs={self.CLI_MAIN: {"--new-knob"}},
+            doc_added={"--new-knob"},
+            doc_disk=set(),
+        )
+        self.assertTrue(ok)
+        self.assertEqual(undoc, [])
+
+    def test_new_env_var_without_docs_fails(self):
+        ok, undoc = g6.evaluate(
+            [self.CLI_MAIN],
+            labels=[],
+            base="main",
+            code_knobs={self.CLI_MAIN: {"SPARQ_NEW_THING"}},
+            doc_added=set(),
+            doc_disk=set(),
+        )
+        self.assertFalse(ok)
+        self.assertEqual([k for k, _ in undoc], ["SPARQ_NEW_THING"])
+
+    def test_knob_already_documented_on_disk_passes(self):
+        # A rewire of an EXISTING flag whose name is already written down on disk
+        # (the README/SKILL was not touched in this PR) is still covered.
+        ok, undoc = g6.evaluate(
+            [self.SERVER_MAIN],
+            labels=[],
+            base="main",
+            code_knobs={self.SERVER_MAIN: {"--audit-log"}},
+            doc_added=set(),
+            doc_disk={"--audit-log"},
+        )
+        self.assertTrue(ok)
+        self.assertEqual(undoc, [])
+
+    def test_config_internal_label_suppresses(self):
+        ok, undoc = g6.evaluate(
+            [self.SERVER_MAIN],
+            labels=["config-internal"],
+            base="main",
+            code_knobs={self.SERVER_MAIN: {"--secret-internal"}},
+            doc_added=set(),
+            doc_disk=set(),
+        )
+        self.assertTrue(ok)
+        self.assertEqual(undoc, [])
+
+    def test_non_config_crate_src_never_trips(self):
+        # A flag literal added in a NON-config crate's src can never reach the knob
+        # check — out of scope. No code_knobs needed: config_src_changes filters it.
+        ok, undoc = g6.evaluate(
+            ["crates/sparq-core/src/store.rs"],
+            labels=[],
+            base="main",
+            doc_added=set(),
+            doc_disk=set(),
+        )
+        self.assertTrue(ok)
+        self.assertEqual(undoc, [])
+
+    def test_ci_only_change_passes(self):
+        # No config src in the diff at all → always passes (mirrors G2).
+        ok, undoc = g6.evaluate(
+            [".github/workflows/ci.yml", "research/notes.md"],
+            labels=[],
+            base="main",
+            doc_added=set(),
+            doc_disk=set(),
+        )
+        self.assertTrue(ok)
+        self.assertEqual(undoc, [])
+
+    def test_knob_token_extraction(self):
+        # Flags + env vars are extracted; --help and short flags are NOT knobs;
+        # restricted/struct-field/non-quoted tokens do not leak in.
+        toks = g6.knob_tokens(
+            '            "--max-results" => { SPARQ_MAX_RESULTS } "--help" "-h"'
+        )
+        self.assertIn("--max-results", toks)
+        self.assertIn("SPARQ_MAX_RESULTS", toks)
+        self.assertNotIn("--help", toks)
+        self.assertNotIn("-h", toks)
+
+    def test_scan_added_knobs_net_diff(self):
+        # A pure relocation (same flag removed once + added once) cancels; a
+        # genuinely new flag is reported; a removed-only flag is not "added".
+        diff = [
+            "--- a/crates/sparq-server/src/main.rs",
+            "+++ b/crates/sparq-server/src/main.rs",
+            '+            "--relocated" => foo,',
+            '-            "--relocated" => foo,',
+            '+            "--brand-new" => bar,',
+            '-            "--deleted" => baz,',
+        ]
+        added = g6.scan_added_knobs(diff)
+        self.assertEqual(added, {"--brand-new"})
+
+    def test_comment_mentioning_existing_flag_is_inert(self):
+        # A doc-comment that merely names an existing flag adds the token, but the
+        # token is already documented on disk → not undocumented. (Models the very
+        # common "//! --audit-log does X" comment edit.)
+        path = self.SERVER_MAIN
+        ok, undoc = g6.evaluate(
+            [path],
+            labels=[],
+            base="main",
+            code_knobs={path: g6.scan_added_knobs(['+    // see --audit-log flag'])},
+            doc_added=set(),
+            doc_disk={"--audit-log"},
+        )
+        self.assertTrue(ok)
+        self.assertEqual(undoc, [])
+
+
+# --------------------------------------------------------------------------- #
 # main() smoke (hermetic, via --changed-files + --dry-run; no git/network)
 # --------------------------------------------------------------------------- #
 class MainSmokeTest(unittest.TestCase):
@@ -295,6 +454,14 @@ class MainSmokeTest(unittest.TestCase):
             tmp = Path(d)
             f = _write(tmp, "diff.txt", ["research/foo.md"])
             rc = g2.main(["--dry-run", "--changed-files", f])
+            self.assertEqual(rc, 0)
+
+    def test_g6_main_dry_run_on_clean_diff_passes(self):
+        # No config-surface src in the diff → no knob check → PASS (exit 0).
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            f = _write(tmp, "diff.txt", _statused([], ["research/foo.md"]))
+            rc = g6.main(["--dry-run", "--changed-files", f])
             self.assertEqual(rc, 0)
 
 

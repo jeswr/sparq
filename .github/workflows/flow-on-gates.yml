@@ -1,6 +1,6 @@
-# [OPUS-4.8] Proactive maintenance merge-gates G1/G2/G3 (beads sq-ncvq.4 +
-# sq-ncvq.5 + sq-ncvq.6, epic sq-ncvq). Authored by Opus 4.8 (Fable unavailable;
-# flag for re-review when Fable returns).
+# [OPUS-4.8] Proactive maintenance merge-gates G1/G2/G3/G6 (beads sq-ncvq.4 +
+# sq-ncvq.5 + sq-ncvq.6 + sq-ncvq.9, epic sq-ncvq). Authored by Opus 4.8 (Fable
+# unavailable; flag for re-review when Fable returns).
 #
 # This is the PROACTIVE / merge-time half of the maintenance flow-on system
 # (research/maintenance-flow-on-automation-design.md §2.1). It is the COMPLEMENT of
@@ -17,8 +17,10 @@
 # reported but never blocks. There is NO branch-protection edit and NO
 # ci.yml/ci-summary.yml edit needed — the aggregator discovers gates by sibling
 # name on the head commit.
-#   - G1 + G2 run HARD (no "advisory" token, scripts run without --advisory):
-#     the back-catalogue is already clean (verified against current HEAD).
+#   - G1 + G2 + G6 run HARD (no "advisory" token, scripts run without --advisory):
+#     the back-catalogue is already clean (verified against current HEAD — every
+#     existing sparq-cli/sparq-server flag + SPARQ_* env var is already documented
+#     in a crate README or a SKILL.md).
 #   - G3 (new-bench->registry+dashboard) SOFT-LAUNCHES advisory, per design §2.1
 #     ("G1/G3 are heuristic and intentionally start advisory — a false positive
 #     is a nag, not a block, until tuned"). Its job name carries "(advisory)" AND
@@ -143,3 +145,61 @@ jobs:
           # 'refs/heads/main' ref — the scripts normalize the refs/heads/ prefix).
           GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
         run: python3 scripts/check-new-bench-registered.py --base "$GATE_BASE_REF" --advisory
+
+  config-documented:
+    # [OPUS-4.8] sq-ncvq.9 — G6 new-config/flag→docs, runs HARD. Like G2 it reads
+    # the PR labels (for the `config-internal` escape hatch), so it mirrors G2's
+    # label-resolution (incl. the merge_group path where the PR number is resolved
+    # from the head commit's associated PR).
+    name: config-documented (G6)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for the merge-base diff)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Self-test the proactive merge-gates (G1/G2/G3/G6)
+        # Runs the hermetic gate unit tests so a regression in any gate script is
+        # caught at PR time (the suite is stdlib-only; no git/network).
+        run: python3 scripts/tests/test_gates.py
+      - name: Read PR labels (for the config-internal escape hatch)
+        id: labels
+        # [OPUS-4.8] Mirror G2: run on BOTH pull_request AND merge_group so the
+        # escape-hatch label is honoured in the merge queue too. On merge_group the
+        # PR number is not in the event payload, so resolve it from the head
+        # commit's associated PR.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGE_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          : > pr-labels.txt
+          num="${PR_NUMBER:-}"
+          if [ -z "$num" ] && [ -n "${MERGE_SHA:-}" ]; then
+            num="$(gh api "repos/${{ github.repository }}/commits/${MERGE_SHA}/pulls" \
+                     --jq '.[0].number' 2>/dev/null || true)"
+          fi
+          if [ -n "$num" ]; then
+            gh pr view "$num" \
+              --repo "${{ github.repository }}" \
+              --json labels --jq '.labels[].name' > pr-labels.txt || : > pr-labels.txt
+          fi
+          echo "have_labels=1" >> "$GITHUB_OUTPUT"
+      - name: G6 — new CLI flag / SPARQ_* env var must be documented
+        env:
+          # On pull_request github.base_ref is the bare target branch ('main'); on
+          # merge_group it is empty, so fall back to merge_group.base_ref (a full
+          # 'refs/heads/main' ref — the scripts normalize the refs/heads/ prefix).
+          GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          if [ -f pr-labels.txt ]; then
+            python3 scripts/check-config-documented.py --base "$GATE_BASE_REF" --labels-file pr-labels.txt
+          else
+            python3 scripts/check-config-documented.py --base "$GATE_BASE_REF"
+          fi
