@@ -1757,6 +1757,137 @@ fn recipient_neq_reserved_encoded_does_not_widen_to_public() {
 }
 
 // ===========================================================================
+// [OPUS-4.8] sq-gx2q — REFRESH of a noneOf conditional grant when the EXCLUSION SET
+// CHANGES (sq-5037 follow-up, sq-dpk4 interaction). A `recipient neq X` permission
+// bridges to a public ConditionalGrant carrying a `noneOf` exceptMatcher that carves
+// out X (everyone-except-X). When the ODRL policy later swaps the excluded party (X→Y),
+// `refresh_odrl_grant(BridgeKind::PermissionConditional)` must RETRACT the X carve-out
+// (X regains access) and REPLAY the Y carve-out (Y loses access) — through the real
+// per-session enforcement path — leaving NO residual old matcher. This is the union
+// of sq-5037's noneOf shape and sq-dpk4's refresh-as-baseline-reset-then-replay.
+// ===========================================================================
+
+/// "everyone EXCEPT `<excluded>` may read n1" — a `recipient neq <excluded>` permission
+/// (the noneOf "everyone-except-X" shape). Parameterised so the exclusion set can be
+/// swapped between refreshes. [OPUS-4.8] sq-gx2q.
+fn recipient_neq_policy_excluding(excluded: &str) -> sparq_policy::Policy {
+    parse_policy_str(
+        &format!(
+            r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/neq> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:neq ;
+                      odrl:rightOperand <{excluded}> ] ] .
+"#
+        ),
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+// 22. CHANGED EXCLUSION SET: an everyone-except-BOB noneOf grant is refreshed against an
+//     everyone-except-DAVE policy → the bob carve-out is retracted (bob regains access),
+//     the dave carve-out is replayed (dave loses access), and the OLD bob exceptMatcher
+//     leaves no residue. Verified through `accessible` AND the raw exceptMatcher shape.
+#[test]
+fn refresh_noneof_grant_replays_changed_exclusion_set() {
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+
+    // Bridge "everyone EXCEPT bob" → bob is the sole carved-out party.
+    assert!(store
+        .materialize_odrl_permission_conditional(&recipient_neq_policy_excluding(BOB), &req)
+        .granted);
+    assert!(!reads(&mut store, BOB), "bob excluded before refresh");
+    assert!(reads(&mut store, DAVE), "dave granted before refresh");
+    assert!(reads(&mut store, CAROL), "carol granted before refresh");
+    {
+        let ms = except_matchers(&store.graph);
+        assert_eq!(ms.len(), 1, "exactly one exceptMatcher before refresh: {ms:?}");
+        assert!(ms[0].1.contains("bob.ex"), "carve-out names bob: {ms:?}");
+    }
+
+    // The policy SWAPS the excluded party: now "everyone EXCEPT dave". refresh against the
+    // changed exclusion set re-evaluates the same tracked slot (kind/target/party match —
+    // the request party is the materializer, not the excluded recipient).
+    let (matched, retracted) = store.refresh_odrl_grant(
+        &recipient_neq_policy_excluding(DAVE),
+        &req,
+        BridgeKind::PermissionConditional,
+    );
+    assert!(matched, "the tracked conditional-grant slot matched");
+    // The entry still materializes a grant (everyone-except-dave), so it is NOT counted as
+    // retracted — but its exclusion CARVE-OUT was replayed, swapping bob for dave.
+    assert_eq!(retracted, 0, "the grant still holds (re-headed), so not retracted");
+
+    // ENFORCEMENT FLIP: bob regains access (the bob carve-out is gone); dave loses it.
+    assert!(reads(&mut store, BOB), "RETRACTED carve-out: bob regains read access");
+    assert!(!reads(&mut store, DAVE), "REPLAYED carve-out: dave is now excluded");
+    assert!(reads(&mut store, CAROL), "carol (never excluded) keeps access");
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).iter().any(|gr| gr.as_str() == N1),
+        "anonymous (public) still granted; only dave is excepted now"
+    );
+
+    // The auth view holds exactly ONE exceptMatcher, and it carves out DAVE — the stale
+    // bob matcher left no residue (baseline reset + provenance clear before replay).
+    let ms = except_matchers(&store.graph);
+    assert_eq!(ms.len(), 1, "exactly one exceptMatcher after refresh (no stale bob): {ms:?}");
+    assert!(ms[0].1.contains("dave.ex"), "carve-out now names dave: {ms:?}");
+    assert!(!ms[0].1.contains("bob.ex"), "no residual bob carve-out: {ms:?}");
+
+    // End-to-end through query_as confirms the flip at the query layer.
+    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
+    let dave = Session { agent: Some(DAVE), client: None, issuer: None, now: None };
+    assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 1, "bob now reads");
+    assert_eq!(store.query_as(&dave, Mode::Read, sel).unwrap().rows.len(), 0, "dave now denied");
+}
+
+// 23. EXCLUSION SET GROWS then the WHOLE permission is WITHDRAWN: refreshing a noneOf
+//     grant against an empty policy retracts it entirely — the public head AND every
+//     carve-out are gone, and access is fully removed (fail-closed). This is the noneOf
+//     analogue of `withdrawn_permission_loses_access_after_refresh` (sq-dpk4).
+#[test]
+fn refresh_noneof_grant_withdrawn_retracts_public_head() {
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+
+    // Bridge "everyone EXCEPT bob" → carol/dave/anonymous read, bob does not.
+    assert!(store
+        .materialize_odrl_permission_conditional(&recipient_neq_policy_excluding(BOB), &req)
+        .granted);
+    assert!(reads(&mut store, CAROL), "carol reads before withdrawal");
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).iter().any(|gr| gr.as_str() == N1),
+        "anonymous reads before withdrawal"
+    );
+
+    // The permission is WITHDRAWN entirely → refresh against the empty policy.
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty_policy(), &req, BridgeKind::PermissionConditional);
+    assert!(matched, "the tracked conditional-grant slot matched");
+    assert_eq!(retracted, 1, "the whole everyone-except grant was retracted");
+
+    // FAIL-CLOSED: the public head AND the carve-out are gone — nobody reads via the bridge.
+    assert!(!reads(&mut store, CAROL), "STALE noneOf GRANT MUST LOSE ACCESS: carol denied");
+    assert!(!reads(&mut store, DAVE), "dave denied after withdrawal");
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).is_empty(),
+        "anonymous (public) denied after withdrawal"
+    );
+    assert!(except_matchers(&store.graph).is_empty(), "no residual exceptMatcher");
+    assert_eq!(
+        cond_grants_for(&store.graph, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "no residual public head after retraction"
+    );
+}
+
+// ===========================================================================
 // [OPUS-4.8] sq-5037 follow-up — COMBINED recipient `eq A AND neq B` in ONE rule
 // through the BRIDGE. The bridge emits `agents=[A]` (positive head) + `except=[B]`
 // (a noneOf exceptMatcher) — both on the SAME ConditionalGrant. Structurally emitted
