@@ -217,42 +217,34 @@ pub enum CountStatus {
 ///
 /// This does NOT gate an exercise (that is [`evaluate_and_exercise`]'s atomic job, which
 /// *consumes*). It answers "would the next exercise have count budget?" for inspection.
-/// Several `odrl:count` constraints on one rule are ANDed: the tightest verdict wins
-/// (any `Unprovable` ⇒ `Unprovable`; else any `DefinitelyUnsatisfied` ⇒
-/// `DefinitelyUnsatisfied`; else `Satisfied` reporting the tightest remaining budget).
+///
+/// **All `odrl:count` constraints on one rule share ONE usage counter** — the
+/// [`CountKey`] is `(rule_id, party, target)`, *not* per-constraint, so the same
+/// exercise is counted against the same budget no matter how many count constraints
+/// express it. ANDing them is therefore "the **tightest** (minimum) limit governs": a
+/// rule with `lteq 5` AND `lteq 2` is exhausted once 2 are consumed, and a single
+/// exercise consumes exactly one unit of that one counter (never one-per-constraint).
+/// A malformed or store-unavailable constraint is fail-closed (`Unprovable`).
 pub fn count_status(rule: &Rule, request: &Request, store: &dyn UsageCounterStore) -> CountStatus {
-    let mut constrained = false;
-    let mut tightest: Option<CountStatus> = None;
-    for c in &rule.constraints {
-        if c.left != ODRL_COUNT {
-            continue;
-        }
-        constrained = true;
-        let Some(limit) = count_limit(c.operator, &c.right) else {
-            return CountStatus::Unprovable; // malformed bound → fail-closed
-        };
-        let key = CountKey::for_rule(rule, request);
-        let Some(consumed) = store.consumed(&key) else {
-            return CountStatus::Unprovable; // store unavailable → fail-closed
-        };
-        let status = if consumed >= limit {
-            CountStatus::DefinitelyUnsatisfied { consumed, limit }
+    // The effective limit is the minimum over all ceiling-shaped count constraints; a
+    // count constraint that yields no usable bound fails the whole rule closed.
+    let Some(effective) = effective_count_limit(rule) else {
+        // Either the rule carries no count constraint at all, or one was malformed.
+        return if rule_has_count_constraint(rule) {
+            CountStatus::Unprovable // malformed bound → fail-closed
         } else {
-            CountStatus::Satisfied { consumed, limit }
+            CountStatus::NotConstrained
         };
-        tightest = Some(match (tightest, status) {
-            // A definite no anywhere dominates a satisfied elsewhere.
-            (Some(CountStatus::DefinitelyUnsatisfied { .. }), _) => {
-                CountStatus::DefinitelyUnsatisfied { consumed, limit }
-            }
-            (_, CountStatus::DefinitelyUnsatisfied { .. }) => status,
-            _ => status,
-        });
-    }
-    match (constrained, tightest) {
-        (false, _) => CountStatus::NotConstrained,
-        (true, Some(s)) => s,
-        (true, None) => CountStatus::Unprovable,
+    };
+    // One shared counter for the rule/party/target → a single read.
+    let key = CountKey::for_rule(rule, request);
+    let Some(consumed) = store.consumed(&key) else {
+        return CountStatus::Unprovable; // store unavailable → fail-closed
+    };
+    if consumed >= effective {
+        CountStatus::DefinitelyUnsatisfied { consumed, limit: effective }
+    } else {
+        CountStatus::Satisfied { consumed, limit: effective }
     }
 }
 
@@ -305,13 +297,14 @@ impl ExerciseDecision {
 /// integer) denies (fail-closed) — the base evaluator already rejects the request via
 /// its stateless count comparison in most shapes, but this path denies regardless.
 ///
-/// **Multiple count limits on one rule** are all consumed atomically-per-store-op but
-/// not as one cross-store transaction: each is consumed in turn, and if a later one is
-/// exhausted the earlier consumptions have already happened. To avoid that partial-burn
-/// the function first checks every limit has budget ([`count_status`]) and only then
-/// consumes — a tiny TOCTOU window remains *between* the multi-limit pre-check and the
-/// consume for the multi-constraint case (single-constraint, the overwhelmingly common
-/// shape, is fully atomic). This narrow multi-limit window is documented and beaded.
+/// **Multiple count limits on one rule** all bind the *same* usage counter (the
+/// [`CountKey`] is `(rule_id, party, target)`, never per-constraint), so several count
+/// constraints are not several budgets — they are several *bounds on one budget*, and the
+/// **tightest (minimum) bound governs** (`lteq 5` AND `lteq 2` ⇒ at most 2). The exercise
+/// is therefore a **single** atomic [`try_consume`](UsageCounterStore::try_consume)
+/// against that one effective limit: exactly one unit is consumed per exercise (never one
+/// per constraint), and there is **no** read-then-consume gap — the multi-limit case is as
+/// atomic as the single-limit case, closing the prior TOCTOU window (sq-ea27).
 pub fn evaluate_and_exercise(
     policy: &Policy,
     request: &Request,
@@ -342,74 +335,43 @@ pub fn evaluate_and_exercise(
         return granted(decision, None);
     };
 
-    // 3. Gather this rule's count limits. None → grant unchanged.
-    let limits: Vec<u64> = collect_count_limits(rule);
-    if rule_has_count_constraint(rule) && limits.len() != count_constraint_count(rule) {
-        // A count constraint was present but malformed → fail-closed.
-        return ExerciseDecision::deny(
-            vec![rule.id.clone()],
-            vec![format!("permission {} has a malformed odrl:count limit", rule.id)],
-        );
-    }
-    if limits.is_empty() {
-        return granted(decision, None);
-    }
+    // 3. Reduce this rule's count constraint(s) to ONE effective limit. All count
+    //    constraints on the rule bind the SAME counter (the `CountKey` is per
+    //    rule/party/target, never per-constraint), so several constraints are several
+    //    bounds on one budget and the tightest (minimum) governs. `None` here means
+    //    either no count constraint (grant unchanged) or a malformed one (fail-closed).
+    let effective_limit = match effective_count_limit(rule) {
+        Some(limit) => limit,
+        None if rule_has_count_constraint(rule) => {
+            // A count constraint was present but malformed → fail-closed.
+            return ExerciseDecision::deny(
+                vec![rule.id.clone()],
+                vec![format!("permission {} has a malformed odrl:count limit", rule.id)],
+            );
+        }
+        None => return granted(decision, None),
+    };
 
+    // 4. A SINGLE atomic check-and-consume against the one effective limit — exactly one
+    //    unit per exercise, no read-then-consume gap (no multi-limit TOCTOU window).
     let key = CountKey::for_rule(rule, request);
-
-    // 4a. Multi-limit pre-check (avoid a partial burn across several limits) — a no-op
-    //     side-effect-free read. Single-limit skips straight to the atomic consume.
-    if limits.len() > 1 {
-        match count_status(rule, request, store) {
-            CountStatus::Satisfied { .. } | CountStatus::NotConstrained => {}
-            CountStatus::DefinitelyUnsatisfied { consumed, limit } => {
-                return ExerciseDecision::deny(
-                    vec![rule.id.clone()],
-                    vec![format!(
-                        "permission {} count limit reached ({consumed}/{limit})",
-                        rule.id
-                    )],
-                );
-            }
-            CountStatus::Unprovable => {
-                return ExerciseDecision::deny(
-                    vec![rule.id.clone()],
-                    vec![format!(
-                        "permission {} count state unavailable; denied (fail-closed)",
-                        rule.id
-                    )],
-                );
-            }
-        }
+    match store.try_consume(&key, effective_limit) {
+        ConsumeResult::Consumed(n) => granted(decision, Some(n)),
+        ConsumeResult::Exhausted => ExerciseDecision::deny(
+            vec![rule.id.clone()],
+            vec![format!(
+                "permission {} count limit reached (>= {effective_limit}); denied",
+                rule.id
+            )],
+        ),
+        ConsumeResult::Unavailable => ExerciseDecision::deny(
+            vec![rule.id.clone()],
+            vec![format!(
+                "permission {} count state unavailable; denied (fail-closed)",
+                rule.id
+            )],
+        ),
     }
-
-    // 4b. Atomically consume one unit of every applicable limit.
-    let mut new_count = None;
-    for limit in limits {
-        match store.try_consume(&key, limit) {
-            ConsumeResult::Consumed(n) => new_count = Some(n),
-            ConsumeResult::Exhausted => {
-                return ExerciseDecision::deny(
-                    vec![rule.id.clone()],
-                    vec![format!(
-                        "permission {} count limit reached (>= {limit}); denied",
-                        rule.id
-                    )],
-                );
-            }
-            ConsumeResult::Unavailable => {
-                return ExerciseDecision::deny(
-                    vec![rule.id.clone()],
-                    vec![format!(
-                        "permission {} count state unavailable; denied (fail-closed)",
-                        rule.id
-                    )],
-                );
-            }
-        }
-    }
-
-    granted(decision, new_count)
 }
 
 fn granted(decision: Decision, consumed: Option<u64>) -> ExerciseDecision {
@@ -470,18 +432,23 @@ fn rule_has_count_constraint(rule: &Rule) -> bool {
     rule.constraints.iter().any(|c| c.left == ODRL_COUNT)
 }
 
-fn count_constraint_count(rule: &Rule) -> usize {
-    rule.constraints.iter().filter(|c| c.left == ODRL_COUNT).count()
-}
-
-/// All upper-bound count limits on `rule` (one per ceiling-shaped `odrl:count`
-/// constraint). A count constraint that does not express a ceiling is skipped here (it
-/// is the stateless evaluator's concern), so this returns only the limits the stateful
-/// path enforces.
-fn collect_count_limits(rule: &Rule) -> Vec<u64> {
+/// The ONE effective usage-counter limit for `rule`: the **minimum** over every
+/// ceiling-shaped `odrl:count` constraint, because all of them bind the same counter
+/// (the [`CountKey`] is per rule/party/target, not per-constraint), so several count
+/// constraints are several bounds on one budget and the tightest governs. [OPUS-4.8]
+/// sq-ea27.
+///
+/// Returns `None` when the rule yields no enforceable count ceiling. Callers distinguish
+/// the two `None` cases via [`rule_has_count_constraint`]:
+/// - no `odrl:count` constraint at all (the stateful path leaves the rule alone), and
+/// - a count constraint that does NOT express an upper bound (`gt`/`gteq`/`neq`/… —
+///   left to the stateless evaluator) **or is malformed** (a non-integer/negative
+///   right-operand) — fail-closed by the callers when a count constraint is present but
+///   yields no usable bound.
+fn effective_count_limit(rule: &Rule) -> Option<u64> {
     rule.constraints
         .iter()
         .filter(|c| c.left == ODRL_COUNT)
         .filter_map(|c| count_limit(c.operator, &c.right))
-        .collect()
+        .min()
 }
