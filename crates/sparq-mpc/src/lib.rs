@@ -137,6 +137,18 @@ pub mod compare;
 // the secret α). Reported as OperatorClass::Comparison @ Malicious+Abort. See the
 // module docs and `research/mpc-malicious-security-design.md`.
 pub mod auth_compare;
+// [OPUS-4.8] sq-6fv7 (sq-ka8m residual): the MALICIOUS-SECURE twin of
+// `compare::disclose_threshold_verdict` — the federation £100k path that operates
+// on an EXISTING secret-shared sum. sq-ka8m's `auth_compare` made the cleartext
+// fresh-operand comparison malicious-secure, but the disclose path's THREE
+// decomposition opens (the square-protocol `a²`, the masked open `c = sum + r`, and
+// the boolean `verdict`) were still semi-honest (no integrity check). This module
+// routes all three through the §2.5 batched IT-MAC check: the existing sum is
+// authenticated (`MacSession::authenticate_existing`), the mask bits come from an
+// AUTHENTICATED square protocol, the masked open and the verdict are MAC-checked
+// BEFORE they are acted on, so a tamper on any of the three aborts fail-closed at
+// the minimal n=2t+1. Honest-majority, malicious-with-abort. See the module docs.
+pub mod auth_disclose;
 // [OPUS-4.8] sq-sxm: the (security model × N × query class) benchmark MATRIX
 // harness + its deterministic communication/round/multiplication counter — the
 // IN-PROCESS counting tier (Tier 1). New modules, isolated from the protocol
@@ -274,6 +286,9 @@ pub use compare::{
 // [OPUS-4.8] sq-ka8m: the malicious-secure (honest-majority, with-abort) comparison
 // surface — IT-MAC-carried decompose+compare chain, verdict MAC-checked before open.
 pub use auth_compare::{malicious_greater_than, malicious_threshold, open_auth_verdict};
+// [OPUS-4.8] sq-6fv7: the malicious-secure disclose path over an EXISTING sum — the
+// three decomposition opens (a², c=sum+r, verdict) routed through the MAC-check.
+pub use auth_disclose::malicious_disclose_threshold_verdict;
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{

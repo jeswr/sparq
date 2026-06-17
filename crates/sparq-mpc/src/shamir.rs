@@ -949,6 +949,52 @@ impl MacSession<'_> {
             .expect("const value sharing and scaled-constant MAC share the canonical party points")
     }
 
+    /// [OPUS-4.8] sq-6fv7 — **authenticate an EXISTING degree-`t` value sharing**
+    /// `[v]` into `[[v]] = ([v], [α·v])` under this session's key, WITHOUT
+    /// reconstructing `v`. This is the entry the malicious-secure
+    /// [`disclose_threshold_verdict`](crate::compare::disclose_threshold_verdict)
+    /// path needs: the federation hands it a plain Shamir sharing of an aggregate
+    /// (e.g. the cumulative SUM from [`ShamirBackend::run_secure`]), and to carry it
+    /// through the MAC-checked decompose+compare chain it must first gain a MAC.
+    ///
+    /// The MAC `[α·v] = reduce([α]·[v])` is computed by ONE BGW mult-then-reduce
+    /// over the SECRET-shared `[α]` and the input `[v]` — the SAME shape as the MAC
+    /// half of [`Self::auth_mul`] — so `α·v` is never reconstructed and `[α]` is
+    /// never opened. The value sharing `[v]` is reused VERBATIM (the caller's
+    /// sharing, not re-dealt). The MAC reduction is itself covered by the later
+    /// batched [`Self::mac_check`]: a deviating party that re-shares `[α·v] + δ` here
+    /// makes `σ = δ ≠ 0` at the check, exactly as a tampered `auth_mul` MAC reduce
+    /// does. Honest-majority; tamper-evident under the §2.5 check. `[OPUS-4.8]`
+    pub fn authenticate_existing(
+        &mut self,
+        value_shares: &[Share],
+    ) -> Result<crate::authenticated::AuthenticatedShare, MpcError> {
+        // [α·v] = reduce([α] · [v]): degree-2t product of the session's secret-shared
+        // MAC key and the value, then BGW-reduce back to degree t. No reconstruction
+        // of v, no opening of α — and the reduction is checked at output time.
+        let mac_2t = mul_shares_raw(self.key.alpha_shares(), value_shares)?;
+        let mac = self.dealer.degree_reduce(&mac_2t)?;
+        crate::authenticated::AuthenticatedShare::new(value_shares.to_vec(), mac)
+    }
+
+    /// [OPUS-4.8] sq-6fv7 — draw a fresh nonzero `F_p` from the session's masking
+    /// RNG (the SAME CSPRNG stream the value/MAC sharings are dealt from). The
+    /// authenticated square protocol ([`crate::auth_disclose`]) uses it for the
+    /// jointly-random `[[a]]` whose `a²` is opened (no party knows `a`). `pub(crate)`
+    /// — an internal protocol accessor, not part of the malicious-secure public API.
+    pub(crate) fn draw_nonzero_fp(&mut self) -> Fp {
+        self.dealer.draw_nonzero_fp()
+    }
+
+    /// [OPUS-4.8] sq-6fv7 — re-borrow the session's dealer, so an in-crate sub-protocol
+    /// that needs `&mut ShamirDealer` (e.g. the reused sq-nx0s range proof
+    /// [`crate::compare::verify_sum_in_range`], which draws only its own zero-test
+    /// masks and never touches the MAC key `[α]`) can run on the SAME dealer / RNG
+    /// stream as the rest of the session. `pub(crate)` — internal only. `[OPUS-4.8]`
+    pub(crate) fn dealer_mut(&mut self) -> &mut ShamirDealer {
+        self.dealer
+    }
+
     /// [OPUS-4.8] sq-ka8m / sq-km34.4 — **the batched random-challenge IT-MAC check**
     /// (design §2.5), run ONCE just before any value on an authenticated path is
     /// opened. This is the step that turns "the MACs were carried" into "tampering is
