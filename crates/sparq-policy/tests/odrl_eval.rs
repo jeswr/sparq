@@ -1204,3 +1204,213 @@ fn unparseable_datetime_falls_back_to_lexical_and_denies_order() {
         "unparseable instant must not grant"
     );
 }
+
+// ===========================================================================
+// [OPUS-4.8] sq-z3ve — DPV/purpose-taxonomy hierarchy/subsumption matching.
+// A purpose constraint `eq B` (or `isA B` / a member of an `isPartOf` set) is
+// satisfied by a request whose stated purpose is B *or transitively narrower
+// than B* (P ⊑ B), where the ⊑ edges are an EXPLICIT taxonomy the request
+// supplies (DPV `skos:broader`/`rdfs:subClassOf` closure). SOUNDNESS: with no
+// supplied taxonomy, matching is byte-for-byte identical to the exact-IRI base
+// case; subsumption only ever comes from caller-supplied edges (never invented
+// from IRI string structure), so access is never widened on an unproven
+// relation. `neq B` is correspondingly *unsatisfied* for a sub-purpose of B
+// (a sub-purpose IS a B-purpose, so it must not slip past a `neq B` carve-out).
+// ===========================================================================
+
+const CLINICAL: &str = "urn:purpose/research/clinical";
+
+#[test]
+fn purpose_subsumption_narrower_grants_under_broader_permission() {
+    // Permission gated on `eq research`; request states the NARROWER `clinical`
+    // purpose + the taxonomy edge clinical ⊑ research → grant.
+    let p = purpose_permission(); // gated on <urn:purpose/research>
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        .for_purpose(Value::Iri(CLINICAL.into()))
+        .with_purpose_subsumption(CLINICAL, RESEARCH);
+    assert!(
+        evaluate(&p, &req).allow,
+        "clinical ⊑ research → a research permission covers it"
+    );
+    assert_eq!(
+        purpose_status(&p.permissions[0], &req),
+        PurposeMatch::Satisfied
+    );
+}
+
+#[test]
+fn purpose_subsumption_is_transitive() {
+    // grandchild ⊑ child ⊑ research → a research permission covers the grandchild.
+    let grandchild = "urn:purpose/research/clinical/trial";
+    let p = purpose_permission(); // gated on <urn:purpose/research>
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        .for_purpose(Value::Iri(grandchild.into()))
+        .with_purpose_subsumption(grandchild, CLINICAL)
+        .with_purpose_subsumption(CLINICAL, RESEARCH);
+    assert!(
+        evaluate(&p, &req).allow,
+        "subsumption is transitive: grandchild ⊑ research"
+    );
+}
+
+#[test]
+fn purpose_subsumption_broader_does_not_grant_under_narrower_permission() {
+    // SOUNDNESS / direction: a permission gated on `eq clinical` is NOT satisfied
+    // by a request stating the BROADER `research` purpose — broader ⋢ narrower.
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/pc> a odrl:Set ; odrl:permission [
+    odrl:action odrl:use ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <{CLINICAL}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .for_purpose(Value::Iri(RESEARCH.into()))
+        .with_purpose_subsumption(CLINICAL, RESEARCH);
+    assert!(
+        !evaluate(&p, &req).allow,
+        "broader research ⋢ narrower clinical: must not grant"
+    );
+    assert_eq!(
+        purpose_status(&p.permissions[0], &req),
+        PurposeMatch::DefinitelyUnsatisfied
+    );
+}
+
+#[test]
+fn purpose_subsumption_unrelated_does_not_grant() {
+    // A taxonomy that does NOT relate the stated purpose to the constraint's
+    // purpose leaves matching exactly as the exact-IRI base case (no grant).
+    let p = purpose_permission(); // gated on <urn:purpose/research>
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        .for_purpose(Value::Iri(MARKETING.into()))
+        .with_purpose_subsumption(CLINICAL, RESEARCH); // irrelevant edge
+    assert!(
+        !evaluate(&p, &req).allow,
+        "marketing is not ⊑ research under the supplied taxonomy"
+    );
+}
+
+#[test]
+fn purpose_no_taxonomy_is_exact_match_only() {
+    // SOUNDNESS regression: WITHOUT a supplied taxonomy, a sub-purpose IRI is
+    // still NOT subsumed — identical to the pre-existing exact-match behaviour.
+    let p = purpose_permission(); // gated on <urn:purpose/research>
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        .for_purpose(Value::Iri(CLINICAL.into())); // no .with_purpose_subsumption
+    assert!(
+        !evaluate(&p, &req).allow,
+        "no taxonomy ⇒ exact match only (unchanged base case)"
+    );
+}
+
+#[test]
+fn purpose_subsumption_via_is_part_of_set() {
+    // `isPartOf` over a set {research|marketing}: a request stating the narrower
+    // `clinical` (clinical ⊑ research) is a member-by-subsumption → grant.
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/ps2> a odrl:Set ; odrl:permission [
+    odrl:action odrl:use ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand "{RESEARCH}|{MARKETING}" ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .for_purpose(Value::Iri(CLINICAL.into()))
+        .with_purpose_subsumption(CLINICAL, RESEARCH);
+    assert!(
+        evaluate(&p, &req).allow,
+        "clinical ⊑ research ∈ set → member by subsumption"
+    );
+}
+
+#[test]
+fn purpose_neq_carves_out_sub_purposes_too() {
+    // SOUNDNESS: a `neq research` carve-out must ALSO exclude a sub-purpose of
+    // research (clinical research IS a research purpose). Stating `clinical`
+    // with the edge clinical ⊑ research must NOT grant under `neq research`.
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/pn2> a odrl:Set ; odrl:permission [
+    odrl:action odrl:use ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:neq ;
+                      odrl:rightOperand <{RESEARCH}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let base = Request::new(left("use")).on("urn:asset/x");
+    // A sub-purpose of the excluded research purpose → still excluded.
+    let sub = base
+        .clone()
+        .for_purpose(Value::Iri(CLINICAL.into()))
+        .with_purpose_subsumption(CLINICAL, RESEARCH);
+    assert!(
+        !evaluate(&p, &sub).allow,
+        "neq research must also exclude clinical ⊑ research"
+    );
+    // An unrelated purpose → not excluded → grant.
+    let other = base
+        .clone()
+        .for_purpose(Value::Iri(MARKETING.into()))
+        .with_purpose_subsumption(CLINICAL, RESEARCH);
+    assert!(evaluate(&p, &other).allow, "marketing ⋢ research → granted");
+}
+
+#[test]
+fn purpose_subsumption_prohibition_carves_out_sub_purpose() {
+    // A prohibition gated on `eq research` carves out a request for the narrower
+    // `clinical` purpose too (deny-overrides), since clinical ⊑ research.
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/pp> a odrl:Set ;
+  odrl:permission [ odrl:action odrl:use ; odrl:target <urn:asset/x> ] ;
+  odrl:prohibition [ odrl:action odrl:use ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <{RESEARCH}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .for_purpose(Value::Iri(CLINICAL.into()))
+        .with_purpose_subsumption(CLINICAL, RESEARCH);
+    assert!(
+        !evaluate(&p, &req).allow,
+        "prohibition on research carves out clinical ⊑ research"
+    );
+}
+
+#[test]
+fn purpose_subsumption_bulk_taxonomy_builder() {
+    // The bulk `with_purpose_taxonomy(edges)` builder accepts many (narrower,
+    // broader) edges at once and computes the transitive closure.
+    let grandchild = "urn:purpose/research/clinical/trial";
+    let p = purpose_permission(); // gated on <urn:purpose/research>
+    let req = Request::new(left("use"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
+        .for_purpose(Value::Iri(grandchild.into()))
+        .with_purpose_taxonomy([(grandchild, CLINICAL), (CLINICAL, RESEARCH)]);
+    assert!(
+        evaluate(&p, &req).allow,
+        "bulk taxonomy builder computes the transitive closure"
+    );
+}

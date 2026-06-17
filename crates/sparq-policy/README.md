@@ -94,14 +94,25 @@ assert!(!evaluate(&policy, &outside).allow);
     **never** read as "any purpose allowed".
   - **Match semantics (the boundary — not over-claimed):** **exact** IRI/string
     equality (`eq`/`isA`), or membership in the explicit `isPartOf` purpose *set* the
-    constraint names, or `neq` (purpose ≠ the named one). There is **no** purpose
-    hierarchy / DPV subsumption: a narrower or broader purpose IRI is *not* matched
-    against a constraint that names a different one. `neq` still requires a stated
-    purpose (missing → fail-closed). A DPV-style purpose taxonomy / `isPartOf`-over-a-
-    hierarchy is a deferred bead.
+    constraint names, or `neq` (purpose ≠ the named one). `neq` still requires a stated
+    purpose (missing → fail-closed).
+  - **DPV / purpose-taxonomy subsumption** — [OPUS-4.8] sq-z3ve. Supply the request a
+    purpose taxonomy via `Request::with_purpose_subsumption(narrower, broader)` (one
+    `skos:broader`/`rdfs:subClassOf`/`dpv:isSubTypeOf` edge) or the bulk
+    `with_purpose_taxonomy(edges)`, and a purpose constraint naming a purpose `B` is then
+    also satisfied by a request whose stated purpose `P` is **transitively narrower than
+    `B`** (`P ⊑ B`): a permission gated on the broad `research` purpose covers a request
+    for the narrow `clinical-research` sub-purpose, and a `neq research` carve-out *also*
+    excludes that sub-purpose (a sub-purpose **is** a research purpose). **Sound, never
+    over-claimed:** the `⊑` relation is the **caller-supplied transitive closure only** —
+    it is *never* inferred from IRI string structure — so with no taxonomy supplied
+    matching is byte-for-byte the exact-IRI base case, the broader-under-narrower
+    direction never matches, and access is never widened on an unproven relation. The
+    edges form the closure incrementally (order-independent).
   - `purpose_status(&rule, &request) -> PurposeMatch` reports exactly what the evaluator
     checks for a rule's purpose constraints — `Satisfied` / `DefinitelyUnsatisfied` /
-    `Unprovable` / `NotConstrained` — the auditable surface of this enforcement.
+    `Unprovable` / `NotConstrained` — the auditable surface of this enforcement (it runs
+    the same subsumption-aware path `evaluate` does).
 - **`odrl:recipient` enforcement + `neq` / "everyone-except"** — [OPUS-4.8] sq-5037.
   A `recipient` constraint restricts **who the data is disclosed to**. The
   recipient-of-data is the requesting party, so a request that names a party (`.by(..)`)
@@ -198,8 +209,10 @@ Single-node only. The headline **federated-disclosure** / ODRL→MPC composition
 ZK proof obligation) is **deferred** — it inherits the MPC honest-majority/LAN
 envelope and the open ZK-soundness remediation. `dateTime` ordering normalizes
 mixed timezone offsets to the UTC instant before comparing ([OPUS-4.8] sq-qj2q);
-DPV `purpose` hierarchies and `Duty → proof-manifest` discharge are tracked as
-follow-on beads. See `research/feature-research-odrl-policy.md`.
+DPV `purpose`-taxonomy subsumption is supported when the request supplies the
+taxonomy edges ([OPUS-4.8] sq-z3ve — `Request::with_purpose_subsumption` /
+`with_purpose_taxonomy`); `Duty → proof-manifest` discharge is tracked as a
+follow-on bead. See `research/feature-research-odrl-policy.md`.
 
 **Constraint persistence vs. one-shot** (sq-hiz4 / sq-5037, in `sparq-solid`'s opt-in
 bridge): `materialize_odrl_permission_conditional` persists a

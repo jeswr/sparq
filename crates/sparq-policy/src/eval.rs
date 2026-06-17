@@ -75,6 +75,19 @@ pub struct Request {
     /// (e.g. `odrl:anonymize`, a custom `proveAttestation`). A permission with an
     /// undischarged duty is denied.
     pub discharged_duties: BTreeSet<String>,
+    /// The **purpose subsumption** evidence the request supplies: the *transitive
+    /// closure* of `(narrower, broader)` purpose pairs — `narrower ⊑ broader`, i.e.
+    /// the stated purpose `narrower` IS-A / is-part-of the broader purpose. Sourced
+    /// from a DPV/purpose-taxonomy (`skos:broader` / `rdfs:subClassOf` /
+    /// `dpv:isSubTypeOf` edges), supplied via [`Request::with_purpose_subsumption`]
+    /// / [`Request::with_purpose_taxonomy`]. Internal — populated only through those
+    /// builders, which maintain the closure so a lookup is a single membership test.
+    ///
+    /// **Soundness:** subsumption matching for `odrl:purpose` constraints draws ONLY
+    /// on this caller-supplied closure (never inferred from IRI string structure), so
+    /// with an empty closure matching is byte-for-byte the exact-IRI base case and
+    /// access is never widened on an unproven relation. [OPUS-4.8] sq-z3ve.
+    pub(crate) purpose_subsumes: BTreeSet<(String, String)>,
 }
 
 impl Request {
@@ -130,8 +143,10 @@ impl Request {
     ///
     /// The value is stored verbatim: a DPV/purpose-taxonomy IRI as [`Value::Iri`]
     /// (`Value::Iri(..)`) or a purpose code as [`Value::Str`]. Matching is **exact**
-    /// (IRI/string equality) — there is no hierarchy/subsumption (see
-    /// [`purpose_status`]).
+    /// (IRI/string equality) by default; supply DPV/purpose-taxonomy edges via
+    /// [`Request::with_purpose_subsumption`] / [`Request::with_purpose_taxonomy`] to
+    /// also match a stated purpose against the *broader* purposes it falls under
+    /// (`P ⊑ B`) — see [`purpose_status`].
     pub fn for_purpose(self, purpose: Value) -> Request {
         self.with(ODRL_PURPOSE, purpose)
     }
@@ -142,6 +157,60 @@ impl Request {
     /// on. [OPUS-4.8] sq-q56r.
     pub fn purpose(&self) -> Option<&Value> {
         self.context.get(ODRL_PURPOSE)
+    }
+
+    /// Declare one **purpose-subsumption** edge `narrower ⊑ broader` (chainable) —
+    /// "the purpose `narrower` IS-A / is-part-of the broader purpose `broader`" —
+    /// from a DPV/purpose-taxonomy (`skos:broader` / `rdfs:subClassOf` /
+    /// `dpv:isSubTypeOf`). [OPUS-4.8] sq-z3ve.
+    ///
+    /// With one or more such edges supplied, an `odrl:purpose` constraint that names
+    /// a purpose `B` is satisfied by a request whose stated purpose `P` is `B` **or
+    /// transitively narrower than `B`** (`P ⊑ B`): a permission gated on the broad
+    /// `research` purpose then covers a request for the narrow `clinical-research`
+    /// sub-purpose, and a `neq research` carve-out *also* excludes that sub-purpose
+    /// (a sub-purpose IS a research purpose). The relation is the **caller-supplied**
+    /// transitive closure only — it is never inferred from IRI string structure — so
+    /// matching is *sound*: with no edge supplied it is the exact-IRI base case, and
+    /// access is never widened on an unproven subsumption. The closure is maintained
+    /// incrementally (adding `a⊑b` when `b⊑c` is already known also records `a⊑c`).
+    ///
+    /// Subsumption is consulted for `odrl:purpose` constraints only (the DPV
+    /// dimension that forms a taxonomy); `recipient`/`dateTime`/`count` are
+    /// unaffected.
+    pub fn with_purpose_subsumption(
+        mut self,
+        narrower: impl Into<String>,
+        broader: impl Into<String>,
+    ) -> Request {
+        insert_subsumption(&mut self.purpose_subsumes, narrower.into(), broader.into());
+        self
+    }
+
+    /// Declare many **purpose-subsumption** edges `(narrower, broader)` at once
+    /// (chainable) — the bulk form of [`Request::with_purpose_subsumption`], e.g. the
+    /// `skos:broader`/`rdfs:subClassOf` edges read out of a DPV taxonomy graph. The
+    /// transitive closure is computed across all supplied edges (order-independent).
+    /// [OPUS-4.8] sq-z3ve.
+    pub fn with_purpose_taxonomy<N, B, I>(mut self, edges: I) -> Request
+    where
+        N: Into<String>,
+        B: Into<String>,
+        I: IntoIterator<Item = (N, B)>,
+    {
+        for (n, b) in edges {
+            insert_subsumption(&mut self.purpose_subsumes, n.into(), b.into());
+        }
+        self
+    }
+
+    /// Whether the request's supplied taxonomy proves the purpose `p` is `target`
+    /// or transitively narrower than it (`p ⊑ target`). [OPUS-4.8] sq-z3ve.
+    pub(crate) fn purpose_subsumed_by(&self, p: &str, target: &str) -> bool {
+        p == target
+            || self
+                .purpose_subsumes
+                .contains(&(p.to_owned(), target.to_owned()))
     }
 
     /// Declare the **evaluation time** this request is made at as evidence
@@ -416,7 +485,9 @@ pub enum PurposeMatch {
     /// it (the rule's other attributes/constraints decide).
     NotConstrained,
     /// The rule constrains purpose AND the request's stated purpose **matches** every
-    /// purpose constraint (exact IRI/string equality, the only matching this checks).
+    /// purpose constraint — exact IRI/string equality, or (when the request supplies a
+    /// DPV/purpose-taxonomy via [`Request::with_purpose_subsumption`]) a purpose
+    /// transitively *narrower* than the constraint's (`P ⊑ B`).
     Satisfied,
     /// The rule constrains purpose but the request carries **no** purpose evidence —
     /// *unprovable*. Fail-closed: a permission does NOT grant on this; a prohibition is
@@ -440,11 +511,17 @@ pub enum PurposeMatch {
 /// **Match semantics (the boundary, not over-claimed):** a purpose matches by
 /// **exact** IRI/string equality (an `eq`/`isA` purpose constraint), or by membership
 /// in an explicit `isPartOf` purpose *set* (the `|`/space/comma-separated right
-/// operand). There is **no** purpose hierarchy / DPV subsumption: a request purpose is
-/// not matched against broader/narrower purposes — only the exact value(s) the
-/// constraint names. A `neq` purpose constraint is honoured (purpose ≠ the named one).
-/// Several purpose constraints on one rule are ANDed (every one must hold), mirroring
-/// the evaluator's constraint conjunction.
+/// operand). When the request supplies a DPV/purpose-taxonomy (via
+/// [`Request::with_purpose_subsumption`] / [`Request::with_purpose_taxonomy`]), a
+/// stated purpose ALSO matches a constraint that names a *broader* purpose it falls
+/// under (`P ⊑ B`) — a permission gated on `research` covers a request for
+/// `clinical-research`. The subsumption relation is the **caller-supplied** transitive
+/// closure only (never inferred from IRI string structure), so with no taxonomy
+/// supplied this is byte-for-byte the exact-IRI base case (access is never widened on
+/// an unproven relation). A `neq` purpose constraint is honoured (purpose ≠ the named
+/// one, AND ≠ any sub-purpose of it — a sub-purpose IS that purpose, so it stays
+/// carved out). Several purpose constraints on one rule are ANDed (every one must
+/// hold), mirroring the evaluator's constraint conjunction. [OPUS-4.8] sq-z3ve.
 ///
 /// Returns [`PurposeMatch::NotConstrained`] when the rule has no purpose constraint.
 ///
@@ -470,6 +547,13 @@ pub enum PurposeMatch {
 /// assert_eq!(purpose_status(rule, &bad), PurposeMatch::DefinitelyUnsatisfied);
 /// // NO purpose evidence → Unprovable (fail-closed; not "any purpose").
 /// assert_eq!(purpose_status(rule, &base), PurposeMatch::Unprovable);
+///
+/// // A NARROWER purpose + the taxonomy edge clinical ⊑ research → Satisfied
+/// // (a research permission covers clinical research). [OPUS-4.8] sq-z3ve.
+/// let sub = base.clone()
+///     .for_purpose(Value::Iri("urn:purpose/research/clinical".into()))
+///     .with_purpose_subsumption("urn:purpose/research/clinical", "urn:purpose/research");
+/// assert_eq!(purpose_status(rule, &sub), PurposeMatch::Satisfied);
 /// ```
 pub fn purpose_status(rule: &Rule, request: &Request) -> PurposeMatch {
     let mut constrained = false;
@@ -752,12 +836,51 @@ fn constraint_status(c: &Constraint, request: &Request) -> ConstraintStatus {
     match resolve_actual(c, request) {
         None => ConstraintStatus::Unprovable,
         Some(actual) => {
-            if compare(actual, c.operator, &c.right) {
+            if compare_constraint(c, actual, request) {
                 ConstraintStatus::Satisfied
             } else {
                 ConstraintStatus::DefinitelyUnsatisfied
             }
         }
+    }
+}
+
+/// Compare a constraint's `actual` request value against its bound, applying
+/// **purpose subsumption** for `odrl:purpose` constraints (the stated purpose is
+/// matched against the constraint purpose *and every broader purpose* the request's
+/// supplied taxonomy proves it falls under — see [`Request::with_purpose_subsumption`]);
+/// every other dimension is the plain [`compare`]. One source of truth for both
+/// [`constraint_status`] and [`constraint_satisfied`]. [OPUS-4.8] sq-z3ve.
+fn compare_constraint(c: &Constraint, actual: &Value, request: &Request) -> bool {
+    if c.left == ODRL_PURPOSE && !request.purpose_subsumes.is_empty() {
+        return compare_purpose(actual, c.operator, &c.right, request);
+    }
+    compare(actual, c.operator, &c.right)
+}
+
+/// Subsumption-aware comparison for an `odrl:purpose` constraint. The stated
+/// purpose `actual` matches the named purpose `bound` when it equals it OR is a
+/// transitively-narrower purpose under the request's supplied taxonomy
+/// (`actual ⊑ bound`). [OPUS-4.8] sq-z3ve.
+///
+/// - `eq`/`isA`: `actual ⊑ bound`.
+/// - `neq`: NOT `actual ⊑ bound` — a sub-purpose of the excluded purpose is also
+///   excluded (a sub-purpose IS that purpose), so the carve-out is not widened away.
+/// - `isPartOf`: `actual ⊑ some member` of the named set.
+/// - order operators (`lt`/`lteq`/`gt`/`gteq`): purpose is not orderable, so these
+///   delegate to the plain [`compare`] (which already fail-closes on non-orderable).
+fn compare_purpose(actual: &Value, op: Operator, bound: &Value, request: &Request) -> bool {
+    let a = actual.as_str();
+    match op {
+        Operator::Eq | Operator::IsA => request.purpose_subsumed_by(a, bound.as_str()),
+        Operator::Neq => !request.purpose_subsumed_by(a, bound.as_str()),
+        Operator::IsPartOf => bound
+            .as_str()
+            .split(['|', ' ', ','])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .any(|member| request.purpose_subsumed_by(a, member)),
+        Operator::Lt | Operator::Lteq | Operator::Gt | Operator::Gteq => compare(actual, op, bound),
     }
 }
 
@@ -864,7 +987,7 @@ fn constraint_satisfied(c: &Constraint, request: &Request) -> bool {
     let Some(actual) = resolve_actual(c, request) else {
         return false; // no evidence for this dimension → fail-closed
     };
-    compare(actual, c.operator, &c.right)
+    compare_constraint(c, actual, request)
 }
 
 /// Compare an actual request value against a constraint right-operand under an
@@ -886,6 +1009,39 @@ fn compare(actual: &Value, op: Operator, bound: &Value) -> bool {
                 Operator::Gt => ord == std::cmp::Ordering::Greater,
                 Operator::Gteq => ord != std::cmp::Ordering::Less,
                 _ => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Insert one `narrower ⊑ broader` purpose edge into `set`, maintaining the
+/// **transitive closure** so a subsumption check stays a single membership test.
+/// Adding `a⊑b` also derives `a⊑c` for every already-known `b⊑c`, and `x⊑b` for
+/// every already-known `x⊑a`. Self-edges (`a⊑a`) are dropped (handled by the
+/// reflexive `p == target` short-circuit in [`Request::purpose_subsumed_by`]).
+/// [OPUS-4.8] sq-z3ve.
+fn insert_subsumption(set: &mut BTreeSet<(String, String)>, narrower: String, broader: String) {
+    if narrower == broader || set.contains(&(narrower.clone(), broader.clone())) {
+        return;
+    }
+    // Ancestors of `broader` (incl. `broader`) and descendants of `narrower`
+    // (incl. `narrower`) — every (desc, anc) pair becomes an edge of the closure.
+    let mut ancestors: Vec<String> = vec![broader.clone()];
+    ancestors.extend(
+        set.iter()
+            .filter(|(n, _)| n == &broader)
+            .map(|(_, b)| b.clone()),
+    );
+    let mut descendants: Vec<String> = vec![narrower.clone()];
+    descendants.extend(
+        set.iter()
+            .filter(|(_, b)| b == &narrower)
+            .map(|(n, _)| n.clone()),
+    );
+    for d in &descendants {
+        for a in &ancestors {
+            if d != a {
+                set.insert((d.clone(), a.clone()));
             }
         }
     }
@@ -1264,5 +1420,73 @@ mod instant_tests {
         let leap = parse_instant("2026-06-30T23:59:60Z").unwrap();
         let next = parse_instant("2026-07-01T00:00:00Z").unwrap();
         assert!(leap < next);
+    }
+}
+
+// [OPUS-4.8] sq-z3ve — unit tests for the incremental transitive-closure
+// maintenance that backs purpose-subsumption matching. The public-API behaviour
+// is covered by tests/odrl_eval.rs; these pin the closure arithmetic, including
+// the order-independence and cycle-tolerance that a string-prefix shortcut would
+// get wrong.
+#[cfg(test)]
+mod subsumption_tests {
+    use super::*;
+
+    fn closure(edges: &[(&str, &str)]) -> BTreeSet<(String, String)> {
+        let mut s = BTreeSet::new();
+        for (n, b) in edges {
+            insert_subsumption(&mut s, (*n).to_owned(), (*b).to_owned());
+        }
+        s
+    }
+
+    fn has(s: &BTreeSet<(String, String)>, n: &str, b: &str) -> bool {
+        s.contains(&(n.to_owned(), b.to_owned()))
+    }
+
+    #[test]
+    fn direct_edge_recorded() {
+        let s = closure(&[("a", "b")]);
+        assert!(has(&s, "a", "b"));
+        // No spurious reverse edge.
+        assert!(!has(&s, "b", "a"));
+    }
+
+    #[test]
+    fn chain_forward_is_transitive() {
+        // a⊑b then b⊑c ⇒ a⊑c also recorded.
+        let s = closure(&[("a", "b"), ("b", "c")]);
+        assert!(has(&s, "a", "c"), "a⊑c must be derived");
+    }
+
+    #[test]
+    fn chain_reverse_order_is_transitive() {
+        // Insert b⊑c FIRST, then a⊑b ⇒ a⊑c still derived (order-independent).
+        let s = closure(&[("b", "c"), ("a", "b")]);
+        assert!(has(&s, "a", "c"), "a⊑c must be derived regardless of order");
+    }
+
+    #[test]
+    fn deep_chain_full_closure() {
+        // a⊑b⊑c⊑d in scrambled insertion order ⇒ every ancestor edge present.
+        let s = closure(&[("c", "d"), ("a", "b"), ("b", "c")]);
+        for (n, b) in [("a", "c"), ("a", "d"), ("b", "d")] {
+            assert!(has(&s, n, b), "{n}⊑{b} must be derived");
+        }
+    }
+
+    #[test]
+    fn self_edge_dropped() {
+        // A reflexive edge is never stored (the p == target short-circuit owns it).
+        let s = closure(&[("a", "a")]);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn cycle_does_not_loop_forever() {
+        // a⊑b, b⊑a is a (degenerate) cycle — insertion must terminate and record
+        // both directions without diverging.
+        let s = closure(&[("a", "b"), ("b", "a")]);
+        assert!(has(&s, "a", "b") && has(&s, "b", "a"));
     }
 }
