@@ -402,7 +402,7 @@ jobs:
           done
 
   wasm:
-    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm)
+    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -457,6 +457,14 @@ jobs:
         run: cargo build -p sparq-rsp-wasm --target wasm32-unknown-unknown
       - name: clippy (wasm32 target, sparq-rsp-wasm, deny warnings)
         run: cargo clippy -p sparq-rsp-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      # [OPUS-4.8] sq-jbe6 (W-text): the tier-b BM25 full-text bundle. Build + clippy it on
+      # wasm32 so the text bundle (sparq-text `engine` feature + the `text:` magic-predicate
+      # rewrite + sparq-engine) is gate-protected exactly like the other wasm bundles. It has
+      # a single feature state (no opt-in features), so one build + one clippy invocation.
+      - name: Build sparq-text-wasm for the browser target
+        run: cargo build -p sparq-text-wasm --target wasm32-unknown-unknown
+      - name: clippy (wasm32 target, sparq-text-wasm, deny warnings)
+        run: cargo clippy -p sparq-text-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
       - name: Guard the wasm dependency graph (no native-only deps)
         # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
@@ -466,8 +474,10 @@ jobs:
         # locally and the wasm32 build above proves it links.
         # [OPUS-4.8] sq-6qw3: the guard now also scans sparq-reason-wasm's default graph
         # (regex is allowed there — it's pure-Rust + wasm-portable, not a native-only dep).
-        # [OPUS-4.8] sq-nzcb: and sparq-rsp-wasm's default graph (the leanest of the three —
+        # [OPUS-4.8] sq-nzcb: and sparq-rsp-wasm's default graph (among the leanest —
         # no regex; sparq-rsp + its engine/core are no-default-features).
+        # [OPUS-4.8] sq-jbe6: it now also scans sparq-text-wasm (unicode-segmentation is
+        # pure-Rust + wasm-portable; the guard catches any native-only dep leaking in).
         run: ./scripts/wasm-deps-guard.sh
       # [OPUS-4.8] Headless wasm tests of the REAL #[wasm_bindgen] exports
       # (crates/sparq-wasm/tests/web.rs). `cargo build --target wasm32` above never
@@ -512,6 +522,13 @@ jobs:
       # --target wasm32` above never RUNS. Single feature state (the bundle has no features).
       - name: Headless wasm tests (sparq-rsp-wasm, wasm-pack test --node)
         working-directory: crates/sparq-rsp-wasm
+        run: wasm-pack test --node
+      # [OPUS-4.8] sq-jbe6 (W-text): drive the REAL #[wasm_bindgen] TextSearch exports
+      # (crates/sparq-text-wasm/tests/web.rs) in a genuine wasm runtime — the index build +
+      # `text:` rewrite + SPARQL-JSON serialisation across the JS boundary, which a
+      # `cargo build --target wasm32` never runs.
+      - name: Headless wasm tests (sparq-text-wasm, wasm-pack test --node)
+        working-directory: crates/sparq-text-wasm
         run: wasm-pack test --node
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
