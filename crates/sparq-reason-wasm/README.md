@@ -76,6 +76,25 @@ The build is single-threaded (no rayon) and pure-Rust. The reasoner's `regex` de
 are the bundle-size consideration the design flags, which is why this bundle is lazy-loaded
 on its page only and built `-Oz`.
 
+### Measuring the bundle size
+
+<!-- [OPUS-4.8] sq-75hm: replaces the non-reproducible "~2.3 MB pre-gzip" figure that lived
+     in PR #421's body with a reproducible measurement recipe (no hard-coded perf in markdown). -->
+We deliberately do **not** quote a hard-coded byte/MB figure here — bundle size drifts with
+the toolchain (`rustc`, `wasm-bindgen`, `wasm-opt`) and dependency versions, so any number in
+this file would silently rot. To get a reproducible figure for your toolchain, build and
+measure the emitted `.wasm` directly:
+
+```sh
+wasm-pack build crates/sparq-reason-wasm --target web --release   # add `-- --features explain` for the why() variant
+f=crates/sparq-reason-wasm/pkg/sparq_reason_wasm_bg.wasm
+echo "pre-gzip: $(stat -c%s "$f") bytes   gzip -9: $(gzip -9 -c "$f" | wc -c) bytes (this is the over-the-wire transfer size)"
+```
+
+The `regex` automata dominate the binary, which is why the bundle is `-Oz`-optimised and
+lazy-loaded on its page only. The gzip figure — not the pre-gzip one — is what end users
+actually download, since the showcase site serves the `.wasm` gzip-compressed.
+
 ## Status / what remains
 
 This crate delivers the wasm-compatibility changes, the `Reasoner` entry points, the `why()`
