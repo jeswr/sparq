@@ -63,7 +63,7 @@ conventions first, then a per-category map that points at the registry, then a
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `hdt-stage-split`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
 | **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench` |
-| **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `solid-wac-bench` |
+| **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench` |
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
 | **serve** | concurrent-serving + memory-tiering research spikes | `serve-spikes`, `memtier-spikes` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance` |
@@ -183,6 +183,21 @@ Notes on a few that need care:
   `deeptax_d<DEPTH>_{closure_s,query_us,closure_triples}` (trend-only). The dashboard features it
   as a scaling suite (depth axis) with EYE external-reference baselines (cited from
   `bench/inference/eye-comparison.md`; dt100k = n/a, EYE not run).
+- **`owl-sameas` is the OWL `sameAs` equality micro-suite** (the EQUALITY analogue of
+  DeepTaxonomy) — see [`bench/owl-sameas/README.md`](./owl-sameas/README.md). `run.sh` is
+  self-asserting: per tier `N` it builds `K=4` independent `owl:sameAs` equivalence classes of `N`
+  members (a STAR of `N-1` edges) + `M=3` anchor data triples (a NEW pure-Python generator
+  `gen_sameas.py`), materializes the **OWL-RL closure** (`sparq-cli reason … owl`), runs a
+  class-membership `query.rq`, and asserts BOTH the closure triple-count (`= K·N·(N+M)`) AND the
+  query rows (`= K·N`) vs `expected.tsv` — a deterministic, load-robust gate on the `owl:sameAs`
+  union-find rewriting + expand-back path that NO other reasoning suite exercises (LUBM is
+  subClassOf/restriction/Transitive/inverseOf; DeepTaxonomy is N3 subclass transitivity). The
+  closure-size assertion is the load-bearing gate: it catches silent UNDER-derivation (a missing
+  `N²` `sameAs` pair) that a correct membership query alone would miss. Needs only `python3` (no
+  g++/javac/Docker), so it runs on the per-commit tier at a SMALL tier pair (N=8+N=32); N=256 is
+  opt-in via `SAMEAS_TIERS` for EC2/nightly. CI emits
+  `sameas_size<N>_{closure_s,query_us,closure_triples}` (trend-only). The dashboard features it as
+  a scaling suite (size axis).
 - **`wikidata-8b` is external-cost and gated.** It builds the full Wikidata
   truthy dump (~8-9.4B triples) on a 16 GB EC2 box (~$5-17). It is **blocked
   until dict-spill merges to public main** — see
@@ -268,6 +283,7 @@ cargo build --release -p sparq-text --example bench_text && bench/fts/run.sh   #
 cargo build --release -p sparq-vectors --example bench_vectors && bench/vector/run.sh   # Vector/ANN (no external tool): synthetic corpus + recall@10-deficit gate (HNSW/Vamana/PQ)
 bench/geo/run.sh                      # GeoSPARQL (cargo only): fixed ~100k point corpus + within/nearest/geof: result-set-size + compliance-pass diff (counts-not-coords)
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
+bench/owl-sameas/run.sh               # OWL sameAs (python3 only): OWL-RL closure per size tier + closure-size (K·N·(N+M)) + query-row (K·N) gate
 
 # --- selective bind-join + u64 value-id probes ---
 python3 bench/selective/gen.py 500000 > bench/selective/selective.nt

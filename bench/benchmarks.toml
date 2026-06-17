@@ -228,6 +228,19 @@ records_to  = "stdout (TSV); CI emits deeptax_d<DEPTH>_{closure_s,query_us,closu
 status      = "ok"
 
 [[benchmark]]
+id          = "owl-sameas"
+name        = "OWL sameAs equality micro-suite — equality-reasoning closure correctness"
+category    = "inference"
+measures    = "per tier N (default N=8+N=32 per-commit; N=256 EC2/nightly): OWL-RL closure time (sameas_size<N>_closure_s), a class-membership query over the closure (sameas_size<N>_query_us), and the materialized closure triple-count (sameas_size<N>_closure_triples). run.sh carries a SELF-ASSERTING closure-size gate: closure_triples (= K·N·(N+M), K=4 classes, M=3 data triples) AND query rows (= K·N) are asserted vs expected.tsv (deterministic) so a sparq-reason owl:sameAs regression fails LOUDLY. This is the EQUALITY analogue of deep-taxonomy: it gates the union-find sameAs rewriting + expand-back path that no other reasoning suite touches (LUBM is subClassOf/restriction/Transitive/inverseOf; deep-taxonomy is N3 subclass transitivity)"
+invoke      = "cargo build --release -p sparq-cli && bench/owl-sameas/run.sh   # self-contained: gen_sameas.py builds K owl:sameAs classes of N members per tier, materialize the OWL-RL closure per tier, query.rq over it, assert expected.tsv; CI runs it via scripts/ci-bench.sh -> sameas_size<N>_{closure_s,query_us,closure_triples}. Tiers via SAMEAS_TIERS"
+source      = "bench/owl-sameas/{gen_sameas.py,gen.sh,run.sh,query.rq,expected.tsv,README.md} (gen_sameas.py is a NEW pure-Python deterministic generator, in-repo); scripts/ci-bench.sh (sameas hook); crates/sparq-cli/src/main.rs (cmd_reason owl); crates/sparq-reason/src/owl.rs (owl:sameAs union-find rewriting + expand-back)"
+dataset     = "K=4 independent owl:sameAs equivalence classes, each N individuals (a STAR of N-1 sameAs edges to the class anchor) + M=3 anchor data triples; pure-Python stdlib, NO network/toolchain, byte-deterministic (pure function of K,N,M). Per-commit tiers N=8 + N=32 (OWL-RL closures 352 / 4,480 triples, sub-second total); N=256 (closure 265,216) is opt-in via SAMEAS_TIERS for EC2/nightly. gitignored + regenerable (/tmp/owl-sameas)"
+quiet_box_sensitive = true  # closure_s/query_us wall-clock trend-only, NOT in scripts/perf-gate.py; the closure-triple-count + query-row assertions ARE a hard correctness gate (deterministic, load-robust; catches owl:sameAs reasoner regressions — incl. silent under-derivation a single query misses)
+pinning     = "gen_sameas.py is a deterministic pure function of (K,N,M) (no RNG, byte-identical); expected.tsv pins the closed-form closure sizes (K·N·(N+M)) + query rows (K·N) per tier, each VERIFIED against `sparq-cli reason … owl` (not guessed); metric `n<N>` token is numeric so the dashboard derives the size-scaling axis"
+records_to  = "stdout (TSV); CI emits sameas_size<N>_{closure_s,query_us,closure_triples} into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/owl-sameas/expected.tsv"
+status      = "ok"
+
+[[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
 category    = "query"

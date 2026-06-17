@@ -345,6 +345,9 @@
     { key: 'WatDiv',        title: 'WatDiv',        aliases: ['watdiv'] },
     { key: 'SP2Bench',      title: 'SP2Bench',      aliases: ['sp2bench', 'sp2b'] },
     { key: 'Deep Taxonomy', title: 'Deep Taxonomy', aliases: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy'] },
+    // [OPUS-4.8] sq-msl6: OWL sameAs equality micro-suite (sameas_size<N>_* — the owl:sameAs
+    // closure-correctness analogue of Deep Taxonomy). `sameas` is the metric-name prefix.
+    { key: 'OWL sameAs', title: 'OWL sameAs', aliases: ['owl sameas', 'owl-sameas', 'sameas'] },
     // [OPUS-4.8] sq-7iai: SHACL validation suite (LUBM ABox x 5 hand-authored shape graphs).
     { key: 'SHACL',         title: 'SHACL validation', aliases: ['shacl', 'shacl validation'] },
     // [OPUS-4.8] sq-ustq: Full-text-search suite (synthetic BM25 corpus; text:matches/phrase/near).
@@ -499,8 +502,10 @@
       // likely hook prefixes so they share the Reasoning section if/when they start emitting.
       // NB: `rdfs_infer_s` stays in Core — its label-map suite is "Pipeline" (suiteFor wins over the
       // prefix pass), and we deliberately do NOT claim the bare `rdfs` token here to avoid ambiguity.
-      suites: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy', 'reasoning', 'inference'],
-      prefixes: ['deeptax', 'deep', 'owl', 'infer', 'incremental', 'reason'] },
+      // [OPUS-4.8] sq-msl6: the OWL sameAs equality micro-suite (sameas_size<N>_*) is part of the
+      // reasoning estate — recognise its `sameas` hook prefix so it shares the Reasoning section.
+      suites: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy', 'owl sameas', 'reasoning', 'inference'],
+      prefixes: ['deeptax', 'deep', 'owl', 'sameas', 'infer', 'incremental', 'reason'] },
     // ---- newly-promoted capability families (sq-ncvq.15 / drift-scan §5.D) ------------------------
     // [OPUS-4.8] ZK is the HEADLINE gap: the whole commitment + trace + circuit estate (the zk,
     // zk-trace and zk-compose benchmark suites) had no dashboard presence at all. Prefixes cover the
