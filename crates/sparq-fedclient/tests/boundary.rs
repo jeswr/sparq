@@ -151,8 +151,7 @@ mod tinyjson {
                             }
                             let hex = std::str::from_utf8(&b[*pos..*pos + 4])
                                 .map_err(|e| e.to_string())?;
-                            let code =
-                                u32::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
+                            let code = u32::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
                             *pos += 4;
                             out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
                         }
@@ -284,7 +283,12 @@ fn graph(meta: &Json) -> Graph {
         let deps: Vec<String> = n
             .get("dependencies")
             .and_then(Json::as_arr)
-            .map(|a| a.iter().filter_map(Json::as_str).map(String::from).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(Json::as_str)
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         adj.insert(id.to_string(), deps);
     }

@@ -392,8 +392,7 @@ fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
                     )),
                 }
             } else if let Some(dt) = get("datatype") {
-                let dt =
-                    NamedNode::new(dt).map_err(|e| format!("bad datatype {:?}: {}", dt, e))?;
+                let dt = NamedNode::new(dt).map_err(|e| format!("bad datatype {:?}: {}", dt, e))?;
                 Ok(Term::Literal(Literal::new_typed_literal(value, dt)))
             } else {
                 Ok(Term::Literal(Literal::new_simple_literal(value)))
@@ -1162,7 +1161,10 @@ mod tests {
                 if ci > 0 {
                     s.push(',');
                 }
-                s.push_str(&format!("\"{}\":{{\"type\":\"uri\",\"value\":\"{}\"}}", var, uri));
+                s.push_str(&format!(
+                    "\"{}\":{{\"type\":\"uri\",\"value\":\"{}\"}}",
+                    var, uri
+                ));
             }
             s.push('}');
         }
@@ -1306,7 +1308,10 @@ mod tests {
                 ],
             ),
         );
-        let ep = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(answers)));
+        let ep = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(answers)),
+        );
         let adapters: Vec<&dyn FederatedSource> = vec![&ep];
         let resolver = SourceResolver::new(&bgp, &adapters);
 

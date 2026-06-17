@@ -906,4 +906,116 @@ _:c1 <http://rdfs.org/ns/void#entities> "100"^^<http://www.w3.org/2001/XMLSchema
         assert!(!forbid("1.1.1.1"));
         assert!(!forbid("2606:4700:4700::1111"));
     }
+
+    // ---- EgressFilterResolver::resolve (the ureq resolver that fronts every fetch) ----
+    //
+    // The classifier above proves WHICH addresses are forbidden; these prove the *resolver*
+    // that ureq actually calls applies it correctly — including the host-authority parse
+    // (`rsplit(':')`), the IPv6 bracket strip, and the `allow_private_host` allowlist bypass.
+    // All cases use IP-LITERAL netlocs so `to_socket_addrs` is hermetic (no DNS lookup, no
+    // network), so the tests are deterministic. [OPUS-4.8] sq-73om (follow-up to sq-nfxl).
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolver_denying() -> EgressFilterResolver {
+        EgressFilterResolver {
+            allow_private: std::sync::Arc::new(std::collections::HashSet::new()),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolver_allowing(host: &str) -> EgressFilterResolver {
+        let mut set = std::collections::HashSet::new();
+        set.insert(host.to_ascii_lowercase());
+        EgressFilterResolver {
+            allow_private: std::sync::Arc::new(set),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolve_refuses_private_v4_literal() {
+        use ureq::Resolver;
+        // A bare host:port whose ONLY resolved address is private must be refused outright —
+        // ureq never sees a dialable address.
+        let err = resolver_denying()
+            .resolve("10.0.0.5:443")
+            .expect_err("a private-only host must be refused by the egress resolver");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolve_refuses_cloud_metadata_literal() {
+        use ureq::Resolver;
+        // The 169.254.169.254 cloud-metadata IP is the canonical SSRF target — refused.
+        let err = resolver_denying()
+            .resolve("169.254.169.254:80")
+            .expect_err("cloud-metadata IP must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolve_strips_ipv6_brackets_and_refuses_loopback() {
+        use ureq::Resolver;
+        // The IPv6 loopback arrives bracketed (`[::1]:80`); the resolver must strip the
+        // brackets to recover the host, classify ::1 as forbidden, and refuse.
+        let err = resolver_denying()
+            .resolve("[::1]:80")
+            .expect_err("bracketed IPv6 loopback must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolve_permits_public_v4_literal() {
+        use ureq::Resolver;
+        // A public address survives the filter and is handed back to ureq to dial.
+        let addrs = resolver_denying()
+            .resolve("8.8.8.8:80")
+            .expect("a public address must survive the egress filter");
+        assert_eq!(addrs, vec!["8.8.8.8:80".parse().unwrap()]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolve_permits_public_v6_literal() {
+        use ureq::Resolver;
+        // A public IPv6 literal (bracketed) is bracket-stripped, classified public, kept.
+        let addrs = resolver_denying()
+            .resolve("[2606:4700:4700::1111]:443")
+            .expect("a public IPv6 address must survive");
+        assert_eq!(addrs, vec!["[2606:4700:4700::1111]:443".parse().unwrap()]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolve_allowlist_reopens_private_v4_literal() {
+        use ureq::Resolver;
+        // The allowlist bypass (`HttpFetcher::allow_private_host`): the SAME private literal
+        // refused by the default-deny resolver is now dialled because the bare host is on the
+        // allowlist. This is the only path that lets a private federation endpoint through.
+        let addrs = resolver_allowing("10.0.0.5")
+            .resolve("10.0.0.5:443")
+            .expect("an allowlisted private host must be permitted");
+        assert_eq!(addrs, vec!["10.0.0.5:443".parse().unwrap()]);
+        // And it is exactly that host that opens it: a DIFFERENT allowlist entry does not.
+        let err = resolver_allowing("192.168.0.1")
+            .resolve("10.0.0.5:443")
+            .expect_err("allowlisting a different host must not re-open 10.0.0.5");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolve_allowlist_match_is_case_insensitive() {
+        use ureq::Resolver;
+        // `allow_private_host` lower-cases its key; the resolver lower-cases the parsed host,
+        // so an IPv6 literal with upper-case hex digits still matches its allowlist entry.
+        // (`fc00::AB` is unique-local ⇒ forbidden unless allowlisted.)
+        let addrs = resolver_allowing("fc00::ab")
+            .resolve("[fc00::AB]:80")
+            .expect("case-insensitive allowlist match must permit the private host");
+        assert_eq!(addrs, vec!["[fc00::AB]:80".parse().unwrap()]);
+    }
 }
