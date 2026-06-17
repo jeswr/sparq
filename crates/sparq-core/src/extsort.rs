@@ -68,10 +68,12 @@ pub fn spill_run(buf: &mut Vec<[Id; 3]>, runs: &mut Vec<PathBuf>, tmp: &Path) ->
     Ok(())
 }
 
-/// K-way merges sorted run files into `out` (deduplicating consecutive equal triples).
-/// The runs are memory-mapped (paged on demand) and merged through a min-heap, so peak
-/// RAM is the heap (one triple per run) — independent of the dataset size.
-pub fn kway_merge(runs: &[PathBuf], out: &Path) -> io::Result<()> {
+/// K-way merges sorted run files, deduplicating consecutive equal triples, calling `sink`
+/// for each surviving row IN SORTED ORDER. The runs are memory-mapped (paged on demand)
+/// and merged through a min-heap with drop-behind, so peak RAM is the heap (one triple per
+/// run) — independent of the dataset size. [OPUS-4.8] sq-vkz7: extracted from `kway_merge`
+/// so the raw writer and the streaming COMPRESSED writer share one merge body.
+fn kway_merge_to<S: FnMut([Id; 3]) -> io::Result<()>>(runs: &[PathBuf], mut sink: S) -> io::Result<()> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
@@ -115,13 +117,10 @@ pub fn kway_merge(runs: &[PathBuf], out: &Path) -> io::Result<()> {
     const DROP_STRIDE: usize = 32 << 20;
     let mut dropped = vec![0usize; runs.len()];
 
-    let mut w = BufWriter::new(std::fs::File::create(out)?);
     let mut last: Option<[Id; 3]> = None;
     while let Some(Reverse((t, i))) = heap.pop() {
         if last != Some(t) {
-            for &id in &t {
-                w.write_all(&id.to_le_bytes())?;
-            }
+            sink(t)?;
             last = Some(t);
         }
         heads[i] += 1;
@@ -142,7 +141,33 @@ pub fn kway_merge(runs: &[PathBuf], out: &Path) -> io::Result<()> {
     }
     #[cfg(not(unix))]
     let _ = &mut dropped;
+    Ok(())
+}
+
+/// K-way merges sorted run files into a RAW little-endian `[u32;3]` permutation at `out`
+/// (deduplicating consecutive equal triples). See [`kway_merge_to`] for the shared merge
+/// machinery.
+pub fn kway_merge(runs: &[PathBuf], out: &Path) -> io::Result<()> {
+    let mut w = BufWriter::new(std::fs::File::create(out)?);
+    kway_merge_to(runs, |t| {
+        for &id in &t {
+            w.write_all(&id.to_le_bytes())?;
+        }
+        Ok(())
+    })?;
     w.flush()
+}
+
+/// [OPUS-4.8] sq-vkz7 — k-way merges sorted run files into a BLOCK-COMPRESSED `SPQCPRM1`
+/// permutation at `out`, streaming each deduplicated row straight into the FoR+varint
+/// block encoder. This lets the external-memory build emit compressed perms in ONE pass —
+/// no raw write followed by a separate `open` + `decode_all` + re-encode recompress pass
+/// over the (84+ GB at 1B-scale) index. The file is byte-identical to running the raw
+/// `kway_merge` then `recompress` on its output.
+pub fn kway_merge_compressed(runs: &[PathBuf], out: &Path) -> io::Result<()> {
+    let mut w = crate::compress::CompressedPermWriter::create(out)?;
+    kway_merge_to(runs, |t| w.push(t))?;
+    w.finish(out)
 }
 
 /// External-sorts the triples produced by `iter` into key order `order` (a column
@@ -166,6 +191,33 @@ pub fn external_sort(
     }
     spill_run(&mut buf, &mut runs, tmp)?;
     kway_merge(&runs, out)?;
+    for r in &runs {
+        std::fs::remove_file(r).ok();
+    }
+    Ok(())
+}
+
+/// [OPUS-4.8] sq-vkz7 — like [`external_sort`] but writes `out` BLOCK-COMPRESSED
+/// (`SPQCPRM1`) via [`kway_merge_compressed`], so a sibling permutation is produced in its
+/// compressed on-disk form directly from the sort tail (no recompress second pass). The
+/// run-spill phase is identical; only the merge tail differs.
+pub fn external_sort_compressed(
+    iter: impl Iterator<Item = [Id; 3]>,
+    order: [usize; 3],
+    out: &Path,
+    tmp: &Path,
+    chunk: usize,
+) -> io::Result<()> {
+    let mut runs: Vec<PathBuf> = Vec::new();
+    let mut buf: Vec<[Id; 3]> = Vec::with_capacity(chunk);
+    for t in iter {
+        buf.push([t[order[0]], t[order[1]], t[order[2]]]);
+        if buf.len() >= chunk {
+            spill_run(&mut buf, &mut runs, tmp)?;
+        }
+    }
+    spill_run(&mut buf, &mut runs, tmp)?;
+    kway_merge_compressed(&runs, out)?;
     for r in &runs {
         std::fs::remove_file(r).ok();
     }

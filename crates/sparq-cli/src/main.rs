@@ -411,7 +411,12 @@ fn cmd_build(args: &[String]) {
     let (path, format, dir) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(d)) => (p.as_str(), f.as_str(), d.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli build <file[.gz|.bz2]> <format> <dir> [chunk_millions]");
+            // [OPUS-4.8] sq-vkz7: `SPARQ_BUILD_COMPRESSED=1` makes the external build emit
+            // block-compressed (SPQCPRM1) perms in ONE pass — skipping a later `recompress`.
+            eprintln!(
+                "usage: sparq-cli build <file[.gz|.bz2]> <format> <dir> [chunk_millions]\n  \
+                 (set SPARQ_BUILD_COMPRESSED=1 to write block-compressed perms directly, no recompress pass)"
+            );
             std::process::exit(2);
         }
     };
