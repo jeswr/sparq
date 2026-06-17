@@ -54,7 +54,7 @@ window. Then:
 
 | method | returns | role |
 |---|---|---|
-| `push(s, p, o, ts)` | JSON array of closed-window `{start,end,results}` objects | feeds one timestamped triple; the terms are N-Triples syntax (`<iri>`, `"lit"`, `"3.0"^^<…#decimal>`, `"hi"@en`, `_:b`) |
+| `push(s, p, o, ts)` | JSON array of closed-window `{start,end,results}` objects | feeds one timestamped triple; the terms are Turtle syntax (`<iri>`, the numeric shorthand `10` / `10.5`, `"lit"`, `"3.0"^^<…#decimal>`, `"hi"@en`, `_:b`) |
 | `flush()` | same JSON array | end-of-stream: close every window up to the last `ts` seen (ignoring `maxDelay`) |
 | `lateDropped()` | `number` | arrivals dropped as too late (every covering window already closed) |
 | `sparql()` | `string` | the registered query text (echo, for the UI) |
@@ -65,8 +65,9 @@ JSON form (so the page hands `.results` to any SPARQL-JSON renderer). The window
 boundary inclusivity, sliding overlap, lateness, empty-window reporting, the R2S multiset
 diffs — are exactly [`sparq-rsp`'s](../sparq-rsp/README.md), pinned by that crate's tests;
 this bundle is a thin, zero-`unsafe` JS wrapper that owns no parsing or semantics of its own
-(triples are parsed via the engine's N-Triples path; results via the engine's SPARQL-JSON
-serialiser — the bundle carries no serde).
+(triples are parsed via the engine's Turtle path — chosen over N-Triples so the streaming demo
+can push the bare numeric shorthand `10` / `10.5` rather than the verbose `"10"^^<…#integer>`;
+results via the engine's SPARQL-JSON serialiser — the bundle carries no serde).
 
 This bundle exposes the single-window `ContinuousQuery` SELECT form (the streaming-rsp
 showcase). CONSTRUCT/ASK forms and multi-window joins (`ContinuousMultiQuery`) stay in the
