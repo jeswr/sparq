@@ -17,8 +17,13 @@ import {
 
 export interface WasmStore {
   readonly size: number;
-  query(sparql: string): string; // SPARQL 1.1 JSON results document
-  queryQuads(sparql: string): string; // CONSTRUCT/DESCRIBE -> N-Triples
+  query(sparql: string): string; // SELECT/ASK -> SPARQL 1.1 JSON results document
+  queryQuads(sparql: string): string; // CONSTRUCT/DESCRIBE -> N-Triples document
+  // [OPUS-4.8] sq-vfbm — the remaining lean-bundle query surface the REPL drives:
+  // SPARQL Update (mutates this store in place) and the EXPLAIN introspection forms.
+  updateInPlace(sparql: string): void; // INSERT/DELETE/LOAD/graph-mgmt -> mutate store
+  explain(sparql: string): string; // planning-only plan text (every query form)
+  explainAnalyze(sparql: string): string; // plan + per-operator trace (SELECT/ASK only)
 }
 
 interface WasmModule {

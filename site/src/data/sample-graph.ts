@@ -123,7 +123,22 @@ export interface ExampleQuery {
   sparql: string;
 }
 
+// [OPUS-4.8] sq-vfbm — the example gallery now spans every query FORM the lean wasm
+// bundle answers (SELECT / ASK / CONSTRUCT / DESCRIBE / UPDATE) plus property paths,
+// so the live REPL exercises the whole tier-a surface advertised on /surface/sparql.
+// Each query is real and runs against the default social graph (ex:alice & friends).
 export const EXAMPLE_QUERIES: ExampleQuery[] = [
+  {
+    // The prefilled default: a focused look at ex:alice — name, age, and who she knows.
+    label: "ex:alice profile",
+    sparql: `PREFIX ex:   <http://example.org/>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+SELECT ?name ?age ?friend WHERE {
+  ex:alice foaf:name  ?name ;
+           foaf:age   ?age ;
+           foaf:knows ?friend .
+} ORDER BY ?friend`,
+  },
   {
     label: "All people & ages",
     sparql: `PREFIX foaf: <http://xmlns.com/foaf/0.1/>
@@ -156,8 +171,42 @@ SELECT ?city (COUNT(?s) AS ?people) WHERE {
 } GROUP BY ?city ORDER BY DESC(?people)`,
   },
   {
+    // Property path: everyone reachable from ex:alice via one-or-more foaf:knows hops.
+    label: "Reachable from ex:alice (path)",
+    sparql: `PREFIX ex:   <http://example.org/>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+SELECT ?name WHERE {
+  ex:alice foaf:knows+ ?p .
+  ?p foaf:name ?name .
+} ORDER BY ?name`,
+  },
+  {
     label: "ASK: anyone over 40?",
     sparql: `PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 ASK { ?s foaf:age ?age . FILTER(?age > 40) }`,
+  },
+  {
+    // CONSTRUCT: derive a symmetric :friendOf graph from the directed foaf:knows links.
+    label: "CONSTRUCT friend-of graph",
+    sparql: `PREFIX ex:   <http://example.org/>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+CONSTRUCT { ?a ex:friendOf ?b }
+WHERE     { ?a foaf:knows ?b }`,
+  },
+  {
+    label: "DESCRIBE ex:alice",
+    sparql: `PREFIX ex: <http://example.org/>
+DESCRIBE ex:alice`,
+  },
+  {
+    // SPARQL Update: mutate the in-tab store. Re-run the "ex:alice profile" query
+    // afterwards to see Erin appear among the people she knows.
+    label: "UPDATE: alice knows ex:erin",
+    sparql: `PREFIX ex:   <http://example.org/>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+INSERT DATA {
+  ex:erin a foaf:Person ; foaf:name "Erin" ; foaf:age 28 .
+  ex:alice foaf:knows ex:erin .
+}`,
   },
 ];

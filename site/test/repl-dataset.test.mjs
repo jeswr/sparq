@@ -13,6 +13,8 @@ import {
   rowsToNQuads,
   guessFormat,
   formatFromContentType,
+  classifyQueryForm,
+  isGraphForm,
 } from "../src/lib/repl-dataset.ts";
 
 test("isDatasetFormat is true exactly for the quad-bearing formats", () => {
@@ -152,4 +154,75 @@ test("rowsToNQuads escapes backslash, quote, CR and LF in literals", () => {
     rowsToNQuads(rows),
     '<http://ex/x> <http://ex/p> "a \\"q\\"\\nlf\\r cr \\\\ bs" .',
   );
+});
+
+// [OPUS-4.8] sq-vfbm — query-form classification: the REPL routes each form to a
+// different wasm export (query / queryQuads / updateInPlace), so the classifier must
+// read the leading significant keyword past the prologue and comments.
+test("classifyQueryForm recognises the four query forms", () => {
+  assert.equal(classifyQueryForm("SELECT ?s WHERE { ?s ?p ?o }"), "select");
+  assert.equal(classifyQueryForm("ASK { ?s ?p ?o }"), "ask");
+  assert.equal(
+    classifyQueryForm("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"),
+    "construct",
+  );
+  assert.equal(classifyQueryForm("DESCRIBE <http://ex/a>"), "describe");
+  // Case-insensitive.
+  assert.equal(classifyQueryForm("select ?s where { ?s ?p ?o }"), "select");
+  assert.equal(classifyQueryForm("describe ?x"), "describe");
+});
+
+test("classifyQueryForm recognises every SPARQL Update keyword", () => {
+  for (const kw of [
+    "INSERT DATA { <a> <b> <c> }",
+    "DELETE WHERE { ?s ?p ?o }",
+    "LOAD <http://ex/g>",
+    "CLEAR GRAPH <http://ex/g>",
+    "CREATE GRAPH <http://ex/g>",
+    "DROP GRAPH <http://ex/g>",
+    "ADD <http://ex/a> TO <http://ex/b>",
+    "MOVE <http://ex/a> TO <http://ex/b>",
+    "COPY <http://ex/a> TO <http://ex/b>",
+    "WITH <http://ex/g> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }",
+  ]) {
+    assert.equal(classifyQueryForm(kw), "update", kw);
+  }
+});
+
+test("classifyQueryForm reads past the prologue (PREFIX / BASE)", () => {
+  const q = `PREFIX ex: <http://example.org/>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+SELECT ?name WHERE { ex:alice foaf:name ?name }`;
+  assert.equal(classifyQueryForm(q), "select");
+
+  const u = `PREFIX ex: <http://example.org/>
+INSERT DATA { ex:alice ex:knows ex:erin }`;
+  assert.equal(classifyQueryForm(u), "update");
+
+  const c = `BASE <http://example.org/>
+CONSTRUCT { ?a <friendOf> ?b } WHERE { ?a <knows> ?b }`;
+  assert.equal(classifyQueryForm(c), "construct");
+});
+
+test("classifyQueryForm skips leading comments", () => {
+  const q = `# a comment line
+# another, with a SELECT keyword that must NOT win
+ASK { ?s ?p ?o }`;
+  assert.equal(classifyQueryForm(q), "ask");
+});
+
+test("classifyQueryForm does not mistake INSERTED-into-a-name etc. for whole words", () => {
+  // A SELECT projecting a variable named like a keyword stays a SELECT; the Update
+  // keywords only match as the leading whole token.
+  assert.equal(classifyQueryForm("SELECT ?insert WHERE { ?insert ?p ?o }"), "select");
+  // Unknown leading token defaults to select so the engine surfaces the parse error.
+  assert.equal(classifyQueryForm("GIBBERISH foo bar"), "select");
+});
+
+test("isGraphForm is true exactly for CONSTRUCT and DESCRIBE", () => {
+  assert.equal(isGraphForm("construct"), true);
+  assert.equal(isGraphForm("describe"), true);
+  assert.equal(isGraphForm("select"), false);
+  assert.equal(isGraphForm("ask"), false);
+  assert.equal(isGraphForm("update"), false);
 });

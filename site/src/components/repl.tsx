@@ -23,6 +23,7 @@ import {
   type SparqlResults,
   type WasmStore,
 } from "@/lib/sparq-wasm";
+import { classifyQueryForm, isGraphForm } from "@/lib/repl-dataset";
 import { EXAMPLE_QUERIES, BUILTIN_DATASETS } from "@/data/sample-graph";
 import {
   DatasetControls,
@@ -30,12 +31,23 @@ import {
   type ActiveDataset,
 } from "@/components/repl-datasets";
 
+// [OPUS-4.8] sq-vfbm — the REPL now dispatches across the whole lean-bundle query
+// surface, so the result state carries one variant per shape of answer: a solution
+// table (SELECT), a boolean (ASK), a constructed N-Triples graph (CONSTRUCT/DESCRIBE),
+// an Update acknowledgement (mutated the in-tab store), and the EXPLAIN plan text.
 type RunState =
   | { kind: "idle" }
   | { kind: "running" }
   | { kind: "select"; results: SparqlResults; ms: number }
   | { kind: "boolean"; value: boolean; ms: number }
+  | { kind: "graph"; ntriples: string; triples: number; ms: number }
+  | { kind: "update"; sizeBefore: number; sizeAfter: number; ms: number }
+  | { kind: "explain"; plan: string; analyze: boolean; ms: number }
   | { kind: "error"; message: string };
+
+// Run mode: execute the query, or render the planner's EXPLAIN / EXPLAIN ANALYZE
+// plan without (EXPLAIN) or with (ANALYZE) executing it.
+type RunMode = "run" | "explain" | "analyze";
 
 // [OPUS-4.8] Engine warm-up lifecycle, surfaced as a subtle indicator. The wasm fetch +
 // instantiate is kicked off on mount (prewarmSparq) so the first "Run query" is instant.
@@ -45,6 +57,7 @@ const DEFAULT_DATASET = BUILTIN_DATASETS[0];
 
 export function Repl() {
   const [sparql, setSparql] = React.useState(EXAMPLE_QUERIES[0].sparql);
+  const [mode, setMode] = React.useState<RunMode>("run");
   const [state, setState] = React.useState<RunState>({ kind: "idle" });
   const [size, setSize] = React.useState<number | null>(null);
   const [engine, setEngine] = React.useState<EngineState>("cold");
@@ -114,10 +127,47 @@ export function Repl() {
     return store;
   }, [buildStore]);
 
+  // [OPUS-4.8] sq-vfbm — dispatch across the whole lean-bundle query surface. EXPLAIN /
+  // ANALYZE modes render the planner's plan text (every form for EXPLAIN; SELECT/ASK for
+  // ANALYZE). Otherwise we classify the SPARQL form and route to the matching wasm export:
+  // SELECT/ASK -> query (JSON), CONSTRUCT/DESCRIBE -> queryQuads (N-Triples), and an Update
+  // keyword -> updateInPlace (mutates the in-tab store; we re-count the dataset after).
   const run = React.useCallback(async () => {
     try {
       const store = await ensureStore();
+      const form = classifyQueryForm(sparql);
       setState({ kind: "running" });
+
+      if (mode === "explain" || mode === "analyze") {
+        const analyze = mode === "analyze";
+        const t0 = performance.now();
+        const plan = analyze ? store.explainAnalyze(sparql) : store.explain(sparql);
+        const ms = performance.now() - t0;
+        setState({ kind: "explain", plan, analyze, ms });
+        return;
+      }
+
+      if (form === "update") {
+        const sizeBefore = datasetSize(store);
+        const t0 = performance.now();
+        store.updateInPlace(sparql);
+        const ms = performance.now() - t0;
+        const sizeAfter = datasetSize(store);
+        setSize(sizeAfter);
+        setState({ kind: "update", sizeBefore, sizeAfter, ms });
+        return;
+      }
+
+      if (isGraphForm(form)) {
+        const t0 = performance.now();
+        const ntriples = store.queryQuads(sparql);
+        const ms = performance.now() - t0;
+        const trimmed = ntriples.trim();
+        const triples = trimmed === "" ? 0 : trimmed.split("\n").length;
+        setState({ kind: "graph", ntriples: trimmed, triples, ms });
+        return;
+      }
+
       const t0 = performance.now();
       const json = store.query(sparql);
       const ms = performance.now() - t0;
@@ -130,9 +180,11 @@ export function Repl() {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setState({ kind: "error", message });
-      toast.error("Query failed", { description: message });
+      toast.error(mode === "run" ? "Query failed" : "EXPLAIN failed", {
+        description: message,
+      });
     }
-  }, [ensureStore, sparql]);
+  }, [ensureStore, sparql, mode]);
 
   // Switch to a built-in dataset: reload the store, reset the count + active descriptor.
   const selectBuiltin = React.useCallback(
@@ -261,20 +313,30 @@ export function Repl() {
           className="w-full resize-y rounded-lg border bg-muted/40 p-3 font-mono text-[13px] leading-relaxed outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
         />
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <Button onClick={run} disabled={busy}>
             {busy ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
               <Play className="size-4" />
             )}
-            Run query
+            {mode === "run" ? "Run query" : "Run EXPLAIN"}
           </Button>
+          <ModeTabs mode={mode} onChange={setMode} disabled={busy} />
           <p aria-live="polite" className="text-xs text-muted-foreground">
             {state.kind === "select" &&
               `${state.results.results.bindings.length} rows · ${state.ms.toFixed(1)} ms`}
             {state.kind === "boolean" && `${state.ms.toFixed(1)} ms`}
-            {state.kind === "running" && "Running on the wasm engine…"}
+            {state.kind === "graph" &&
+              `${state.triples} triples · ${state.ms.toFixed(1)} ms`}
+            {state.kind === "update" &&
+              `store ${state.sizeBefore} → ${state.sizeAfter} triples · ${state.ms.toFixed(1)} ms`}
+            {state.kind === "explain" &&
+              `plan ${state.analyze ? "+ trace " : ""}· ${state.ms.toFixed(1)} ms`}
+            {state.kind === "running" &&
+              (mode === "run"
+                ? "Running on the wasm engine…"
+                : "Planning on the wasm engine…")}
             {state.kind === "idle" &&
               engine === "warming" &&
               "Pre-warming the wasm engine…"}
@@ -318,6 +380,59 @@ function EngineIndicator({ engine }: { engine: EngineState }) {
   );
 }
 
+// [OPUS-4.8] sq-vfbm — Run / EXPLAIN / EXPLAIN ANALYZE selector. EXPLAIN is a
+// planning-only dry run (every query form); ANALYZE also executes (SELECT/ASK).
+function ModeTabs({
+  mode,
+  onChange,
+  disabled,
+}: {
+  mode: RunMode;
+  onChange: (m: RunMode) => void;
+  disabled: boolean;
+}) {
+  const tabs: { value: RunMode; label: string; title: string }[] = [
+    { value: "run", label: "Run", title: "Execute the query / update" },
+    {
+      value: "explain",
+      label: "EXPLAIN",
+      title: "Show the query plan without executing it",
+    },
+    {
+      value: "analyze",
+      label: "ANALYZE",
+      title: "Show the plan and execute it with a per-operator trace (SELECT/ASK)",
+    },
+  ];
+  return (
+    <div
+      role="tablist"
+      aria-label="Run mode"
+      className="inline-flex rounded-lg border bg-muted/40 p-0.5"
+    >
+      {tabs.map((t) => (
+        <button
+          key={t.value}
+          type="button"
+          role="tab"
+          aria-selected={mode === t.value}
+          title={t.title}
+          disabled={disabled}
+          onClick={() => onChange(t.value)}
+          className={cn(
+            "rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50",
+            mode === t.value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ResultPanel({ state }: { state: RunState }) {
   if (state.kind === "error") {
     return (
@@ -338,6 +453,38 @@ function ResultPanel({ state }: { state: RunState }) {
       >
         ASK → {state.value ? "true" : "false"}
       </div>
+    );
+  }
+  if (state.kind === "update") {
+    const delta = state.sizeAfter - state.sizeBefore;
+    const sign = delta > 0 ? "+" : "";
+    return (
+      <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+        <span className="font-medium text-foreground">Update applied</span> to the
+        in-tab store — {state.sizeBefore} → {state.sizeAfter} triples ({sign}
+        {delta}). Switch the example to a SELECT and re-run to see the change.
+      </div>
+    );
+  }
+  if (state.kind === "graph") {
+    if (state.triples === 0) {
+      return (
+        <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+          Empty graph — the template produced no triples.
+        </p>
+      );
+    }
+    return (
+      <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed">
+        {state.ntriples}
+      </pre>
+    );
+  }
+  if (state.kind === "explain") {
+    return (
+      <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed">
+        {state.plan}
+      </pre>
     );
   }
   if (state.kind !== "select") return null;
