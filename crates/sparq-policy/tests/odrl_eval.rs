@@ -499,7 +499,10 @@ fn purpose_match_grants() {
         .by("https://alice.ex/me")
         .for_purpose(Value::Iri(RESEARCH.into()));
     assert!(evaluate(&p, &req).allow, "matching purpose grants");
-    assert_eq!(purpose_status(&p.permissions[0], &req), PurposeMatch::Satisfied);
+    assert_eq!(
+        purpose_status(&p.permissions[0], &req),
+        PurposeMatch::Satisfied
+    );
     // The request's purpose is auditable as exactly what it stated.
     assert_eq!(req.purpose().map(Value::as_str), Some(RESEARCH));
 }
@@ -511,7 +514,10 @@ fn purpose_mismatch_denies() {
         .on("urn:asset/x")
         .by("https://alice.ex/me")
         .for_purpose(Value::Iri(MARKETING.into()));
-    assert!(!evaluate(&p, &req).allow, "a different purpose must not grant");
+    assert!(
+        !evaluate(&p, &req).allow,
+        "a different purpose must not grant"
+    );
     assert_eq!(
         purpose_status(&p.permissions[0], &req),
         PurposeMatch::DefinitelyUnsatisfied
@@ -575,7 +581,15 @@ fn purpose_set_is_part_of() {
     assert!(evaluate(&p, &base.clone().for_purpose(Value::Str(RESEARCH.into()))).allow);
     assert!(evaluate(&p, &base.clone().for_purpose(Value::Str(MARKETING.into()))).allow);
     // Outside the set → deny; missing → Unprovable (fail-closed).
-    assert!(!evaluate(&p, &base.clone().for_purpose(Value::Str("urn:purpose/ads".into()))).allow);
+    assert!(
+        !evaluate(
+            &p,
+            &base
+                .clone()
+                .for_purpose(Value::Str("urn:purpose/ads".into()))
+        )
+        .allow
+    );
     assert!(!evaluate(&p, &base).allow);
 }
 
@@ -597,7 +611,10 @@ fn purpose_neq_constraint() {
     assert!(evaluate(&p, &base.clone().for_purpose(Value::Iri(RESEARCH.into()))).allow);
     assert!(!evaluate(&p, &base.clone().for_purpose(Value::Iri(MARKETING.into()))).allow);
     // Missing purpose is unprovable, NOT "any purpose ≠ marketing" → fail-closed.
-    assert!(!evaluate(&p, &base).allow, "neq purpose still needs evidence");
+    assert!(
+        !evaluate(&p, &base).allow,
+        "neq purpose still needs evidence"
+    );
 }
 
 #[test]
@@ -623,7 +640,10 @@ fn purpose_prohibition_dual() {
     // Stated marketing purpose → the prohibition applies (carve-out).
     let marketing = base.clone().for_purpose(Value::Iri(MARKETING.into()));
     assert_eq!(purpose_status(prohib, &marketing), PurposeMatch::Satisfied);
-    assert_eq!(prohibition_status(&p, &marketing), ProhibitionStatus::Applies);
+    assert_eq!(
+        prohibition_status(&p, &marketing),
+        ProhibitionStatus::Applies
+    );
 
     // Stated a DIFFERENT purpose → the prohibition definitely no longer carves THIS out.
     let research = base.clone().for_purpose(Value::Iri(RESEARCH.into()));
@@ -631,7 +651,10 @@ fn purpose_prohibition_dual() {
         purpose_status(prohib, &research),
         PurposeMatch::DefinitelyUnsatisfied
     );
-    assert_eq!(prohibition_status(&p, &research), ProhibitionStatus::Withdrawn);
+    assert_eq!(
+        prohibition_status(&p, &research),
+        ProhibitionStatus::Withdrawn
+    );
 
     // NO purpose stated → ambiguous: the deny is NOT withdrawn (fail-closed).
     assert_eq!(purpose_status(prohib, &base), PurposeMatch::Unprovable);
@@ -686,9 +709,15 @@ fn recipient_neq_grants_everyone_except_named_party() {
     let p = recipient_neq_permission();
     let base = Request::new(left("read")).on("urn:asset/x");
     // carol is NOT bob → granted (party doubles as recipient).
-    assert!(evaluate(&p, &base.clone().by(CAROL)).allow, "non-excluded party granted");
+    assert!(
+        evaluate(&p, &base.clone().by(CAROL)).allow,
+        "non-excluded party granted"
+    );
     // bob is the carved-out recipient → denied.
-    assert!(!evaluate(&p, &base.clone().by(BOB)).allow, "excluded party denied");
+    assert!(
+        !evaluate(&p, &base.clone().by(BOB)).allow,
+        "excluded party denied"
+    );
 }
 
 #[test]
@@ -696,7 +725,10 @@ fn recipient_neq_fail_closed_on_missing_identity() {
     let p = recipient_neq_permission();
     // No party AND no explicit recipient context → unprovable → fail-closed DENY.
     let anon = Request::new(left("read")).on("urn:asset/x");
-    assert!(!evaluate(&p, &anon).allow, "no identity → does NOT grant a neq permission");
+    assert!(
+        !evaluate(&p, &anon).allow,
+        "no identity → does NOT grant a neq permission"
+    );
 }
 
 #[test]
@@ -707,10 +739,16 @@ fn recipient_neq_explicit_context_overrides_party() {
     let base = Request::new(left("read")).on("urn:asset/x").by(CAROL);
     // explicit recipient = bob → DENY despite party=carol.
     let to_bob = base.clone().with(left("recipient"), Value::Iri(BOB.into()));
-    assert!(!evaluate(&p, &to_bob).allow, "explicit recipient bob is carved out");
+    assert!(
+        !evaluate(&p, &to_bob).allow,
+        "explicit recipient bob is carved out"
+    );
     // explicit recipient = carol → granted.
     let to_carol = base.with(left("recipient"), Value::Iri(CAROL.into()));
-    assert!(evaluate(&p, &to_carol).allow, "explicit non-excluded recipient granted");
+    assert!(
+        evaluate(&p, &to_carol).allow,
+        "explicit non-excluded recipient granted"
+    );
 }
 
 #[test]
@@ -729,9 +767,15 @@ fn recipient_neq_prohibition_dual() {
     let p = parse_policy_str(&ttl, "turtle").unwrap();
     let base = Request::new(left("read")).on("urn:asset/x");
     // carol (not bob) → the prohibition's neq holds → carved out → DENY.
-    assert_eq!(prohibition_status(&p, &base.clone().by(CAROL)), ProhibitionStatus::Applies);
+    assert_eq!(
+        prohibition_status(&p, &base.clone().by(CAROL)),
+        ProhibitionStatus::Applies
+    );
     // bob → neq is definitely false → NOT carved out by this prohibition → Withdrawn.
-    assert_eq!(prohibition_status(&p, &base.clone().by(BOB)), ProhibitionStatus::Withdrawn);
+    assert_eq!(
+        prohibition_status(&p, &base.clone().by(BOB)),
+        ProhibitionStatus::Withdrawn
+    );
     // no identity → unprovable → Ambiguous (deny is kept, fail-closed).
     assert_eq!(prohibition_status(&p, &base), ProhibitionStatus::Ambiguous);
 }
@@ -741,7 +785,10 @@ fn recipient_status_reports_what_evaluate_checks() {
     let p = recipient_neq_permission();
     let rule = &p.permissions[0];
     let base = Request::new(left("read")).on("urn:asset/x");
-    assert_eq!(recipient_status(rule, &base.clone().by(CAROL)), RecipientMatch::Satisfied);
+    assert_eq!(
+        recipient_status(rule, &base.clone().by(CAROL)),
+        RecipientMatch::Satisfied
+    );
     assert_eq!(
         recipient_status(rule, &base.clone().by(BOB)),
         RecipientMatch::DefinitelyUnsatisfied
@@ -789,11 +836,20 @@ fn recipient_eq_a_and_neq_b_combined() {
     let base = Request::new(left("read")).on("urn:asset/x");
 
     // carol: eq carol ✓ AND neq bob ✓ → BOTH hold → granted.
-    assert!(evaluate(&p, &base.clone().by(CAROL)).allow, "carol satisfies eq carol AND neq bob");
-    assert_eq!(recipient_status(rule, &base.clone().by(CAROL)), RecipientMatch::Satisfied);
+    assert!(
+        evaluate(&p, &base.clone().by(CAROL)).allow,
+        "carol satisfies eq carol AND neq bob"
+    );
+    assert_eq!(
+        recipient_status(rule, &base.clone().by(CAROL)),
+        RecipientMatch::Satisfied
+    );
 
     // bob: eq carol ✗ (and neq bob ✗ too) → DENY; the conjunction reports a definite no.
-    assert!(!evaluate(&p, &base.clone().by(BOB)).allow, "bob fails eq carol");
+    assert!(
+        !evaluate(&p, &base.clone().by(BOB)).allow,
+        "bob fails eq carol"
+    );
     assert_eq!(
         recipient_status(rule, &base.clone().by(BOB)),
         RecipientMatch::DefinitelyUnsatisfied
@@ -801,7 +857,10 @@ fn recipient_eq_a_and_neq_b_combined() {
 
     // dave: eq carol ✗ → DENY (and neq bob ✓ — but the AND still fails).
     let dave = "https://dave.ex/card#me";
-    assert!(!evaluate(&p, &base.clone().by(dave)).allow, "dave is not carol");
+    assert!(
+        !evaluate(&p, &base.clone().by(dave)).allow,
+        "dave is not carol"
+    );
     assert_eq!(
         recipient_status(rule, &base.clone().by(dave)),
         RecipientMatch::DefinitelyUnsatisfied
@@ -831,9 +890,15 @@ fn recipient_eq_a_and_neq_b_prohibition_dual() {
     let p = parse_policy_str(&ttl, "turtle").unwrap();
     let base = Request::new(left("read")).on("urn:asset/x");
     // carol: both hold → carved out → Applies.
-    assert_eq!(prohibition_status(&p, &base.clone().by(CAROL)), ProhibitionStatus::Applies);
+    assert_eq!(
+        prohibition_status(&p, &base.clone().by(CAROL)),
+        ProhibitionStatus::Applies
+    );
     // bob: eq carol definitely false → not carved out → Withdrawn.
-    assert_eq!(prohibition_status(&p, &base.clone().by(BOB)), ProhibitionStatus::Withdrawn);
+    assert_eq!(
+        prohibition_status(&p, &base.clone().by(BOB)),
+        ProhibitionStatus::Withdrawn
+    );
     // no identity → unprovable → Ambiguous (deny kept, fail-closed).
     assert_eq!(prohibition_status(&p, &base), ProhibitionStatus::Ambiguous);
 }
@@ -871,11 +936,17 @@ fn datetime_status_reports_what_evaluate_checks() {
     let inside = base.clone().at("2026-06-16T09:00:00Z");
     assert_eq!(datetime_status(rule, &inside), DateTimeMatch::Satisfied);
     assert!(evaluate(&p, &inside).allow, "inside window grants");
-    assert_eq!(inside.request_time().map(Value::as_str), Some("2026-06-16T09:00:00Z"));
+    assert_eq!(
+        inside.request_time().map(Value::as_str),
+        Some("2026-06-16T09:00:00Z")
+    );
 
     // After the window → DefinitelyUnsatisfied AND evaluate denies.
     let lapsed = base.clone().at("2027-03-01T00:00:00Z");
-    assert_eq!(datetime_status(rule, &lapsed), DateTimeMatch::DefinitelyUnsatisfied);
+    assert_eq!(
+        datetime_status(rule, &lapsed),
+        DateTimeMatch::DefinitelyUnsatisfied
+    );
     assert!(!evaluate(&p, &lapsed).allow, "after window denies");
 
     // No time supplied → Unprovable → fail-closed (NOT "any time allowed").
@@ -904,7 +975,10 @@ fn datetime_two_sided_window_anded() {
     let base = Request::new(left("read")).on("urn:asset/x");
 
     // Inside both bounds → Satisfied.
-    assert_eq!(datetime_status(rule, &base.clone().at("2026-06-16T00:00:00Z")), DateTimeMatch::Satisfied);
+    assert_eq!(
+        datetime_status(rule, &base.clone().at("2026-06-16T00:00:00Z")),
+        DateTimeMatch::Satisfied
+    );
     // Before the lower bound → one constraint definitely false → DefinitelyUnsatisfied.
     assert_eq!(
         datetime_status(rule, &base.clone().at("2025-12-31T23:59:59Z")),
@@ -937,7 +1011,9 @@ fn datetime_prohibition_dual() {
     );
     let p = parse_policy_str(&ttl, "turtle").unwrap();
     let prohib = &p.prohibitions[0];
-    let base = Request::new(left("read")).on("urn:asset/x").by("https://alice.ex/me");
+    let base = Request::new(left("read"))
+        .on("urn:asset/x")
+        .by("https://alice.ex/me");
 
     // Now < bound → the window holds → carve-out Applies; datetime_status Satisfied.
     let inside = base.clone().at("2025-06-01T00:00:00Z");
@@ -946,8 +1022,14 @@ fn datetime_prohibition_dual() {
 
     // Now >= bound → the window lapsed → definitely no → Withdrawn.
     let lapsed = base.clone().at("2026-06-01T00:00:00Z");
-    assert_eq!(datetime_status(prohib, &lapsed), DateTimeMatch::DefinitelyUnsatisfied);
-    assert_eq!(prohibition_status(&p, &lapsed), ProhibitionStatus::Withdrawn);
+    assert_eq!(
+        datetime_status(prohib, &lapsed),
+        DateTimeMatch::DefinitelyUnsatisfied
+    );
+    assert_eq!(
+        prohibition_status(&p, &lapsed),
+        ProhibitionStatus::Withdrawn
+    );
 
     // No time → unprovable → Ambiguous (deny kept).
     assert_eq!(datetime_status(prohib, &base), DateTimeMatch::Unprovable);
@@ -962,6 +1044,163 @@ fn datetime_not_constrained_when_absent() {
            odrl:action odrl:read ; odrl:target <urn:asset/x> ] ."#
     );
     let p = parse_policy_str(&ttl, "turtle").unwrap();
-    let req = Request::new(left("read")).on("urn:asset/x").at("2026-06-16T00:00:00Z");
-    assert_eq!(datetime_status(&p.permissions[0], &req), DateTimeMatch::NotConstrained);
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .at("2026-06-16T00:00:00Z");
+    assert_eq!(
+        datetime_status(&p.permissions[0], &req),
+        DateTimeMatch::NotConstrained
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-qj2q — mixed-offset dateTime normalization. The instant
+// 2026-06-16T12:00:00Z equals 2026-06-16T13:00:00+01:00 and is one hour LATER
+// than 2026-06-16T13:00:00+02:00 (=11:00Z). A lexical comparison gets all of
+// these wrong; the evaluator must normalize to the instant before comparing.
+// ---------------------------------------------------------------------------
+
+/// A `dateTime lteq T` policy whose upper bound `T` is supplied with an offset.
+fn lteq_window(bound: &str) -> sparq_policy::Policy {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/tz> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+                      odrl:rightOperand "{bound}"^^<{XSD_DT}> ] ] .
+"#
+    );
+    parse_policy_str(&ttl, "turtle").unwrap()
+}
+
+#[test]
+fn mixed_offset_request_under_z_bound_allows() {
+    // Bound 2026-06-16T12:00:00Z. Request 2026-06-16T13:00:00+02:00 = 11:00Z,
+    // one hour BEFORE the bound → inside the lteq window → ALLOW. A lexical
+    // compare would read "13:00:00+02:00" > "12:00:00Z" → wrongly DENY.
+    let p = lteq_window("2026-06-16T12:00:00Z");
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .at("2026-06-16T13:00:00+02:00");
+    assert!(evaluate(&p, &req).allow, "11:00Z must be <= 12:00Z");
+    assert_eq!(
+        datetime_status(&p.permissions[0], &req),
+        DateTimeMatch::Satisfied
+    );
+}
+
+#[test]
+fn mixed_offset_request_over_z_bound_denies() {
+    // Bound 2026-06-16T12:00:00Z. Request 2026-06-16T13:00:00-02:00 = 15:00Z,
+    // AFTER the bound → outside the lteq window → DENY. A lexical compare would
+    // read "13:00:00-02:00" > "12:00:00Z" too, but for the wrong reason; flip
+    // the sign to be sure the offset is actually applied.
+    let p = lteq_window("2026-06-16T12:00:00Z");
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .at("2026-06-16T13:00:00-02:00");
+    assert!(!evaluate(&p, &req).allow, "15:00Z must be > 12:00Z");
+    assert_eq!(
+        datetime_status(&p.permissions[0], &req),
+        DateTimeMatch::DefinitelyUnsatisfied
+    );
+}
+
+#[test]
+fn offset_bound_normalized_against_z_request() {
+    // The OFFSET lives on the policy bound this time. Bound 2026-06-16T13:00:00+02:00
+    // = 11:00Z. Request 2026-06-16T12:00:00Z = 12:00Z > bound → DENY (lexical
+    // would read "12:00:00Z" < "13:00:00+02:00" → wrongly ALLOW).
+    let p = lteq_window("2026-06-16T13:00:00+02:00");
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .at("2026-06-16T12:00:00Z");
+    assert!(!evaluate(&p, &req).allow, "12:00Z must be > 11:00Z bound");
+}
+
+#[test]
+fn equal_instants_distinct_offsets_compare_equal() {
+    // eq operator: 2026-06-16T12:00:00Z == 2026-06-16T14:00:00+02:00 (both 12:00Z).
+    // A lexical eq sees different strings → wrongly DENY.
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/eq> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:eq ;
+                      odrl:rightOperand "2026-06-16T12:00:00Z"^^<{XSD_DT}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .at("2026-06-16T14:00:00+02:00");
+    assert!(evaluate(&p, &req).allow, "same instant must satisfy eq");
+    // And neq of the same instant must be false → a neq-gated rule denies.
+    let ttl_neq = ttl.replace("odrl:eq", "odrl:neq");
+    let p_neq = parse_policy_str(&ttl_neq, "turtle").unwrap();
+    assert!(
+        !evaluate(&p_neq, &req).allow,
+        "same instant must fail neq (still equal)"
+    );
+}
+
+#[test]
+fn fractional_seconds_normalized() {
+    // Fractional seconds + offset: 2026-06-16T12:00:00.500+01:00 = 11:00:00.5Z,
+    // strictly before the 12:00:00Z bound under lt.
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/fr> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+                      odrl:rightOperand "2026-06-16T12:00:00Z"^^<{XSD_DT}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .at("2026-06-16T12:00:00.500+01:00");
+    assert!(evaluate(&p, &req).allow, "11:00:00.5Z must be < 12:00:00Z");
+}
+
+#[test]
+fn date_only_normalized_against_offset_datetime() {
+    // xsd:date (no time) is treated as the start of day. 2026-06-16 (=00:00Z)
+    // vs a request at 2026-06-15T23:00:00-02:00 (=2026-06-16T01:00:00Z) under
+    // gteq: request instant 01:00Z >= bound 00:00Z → ALLOW.
+    let xsd_date = "http://www.w3.org/2001/XMLSchema#date";
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/d> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gteq ;
+                      odrl:rightOperand "2026-06-16"^^<{xsd_date}> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .at("2026-06-15T23:00:00-02:00");
+    assert!(
+        evaluate(&p, &req).allow,
+        "01:00Z on the 16th must be >= 00:00Z"
+    );
+}
+
+#[test]
+fn unparseable_datetime_falls_back_to_lexical_and_denies_order() {
+    // Garbage that is not a valid instant must NOT panic and must NOT silently
+    // grant: an order comparison against an unparseable operand is fail-closed.
+    let p = lteq_window("2026-06-16T12:00:00Z");
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .with(left("dateTime"), dt("not-a-date"));
+    assert!(
+        !evaluate(&p, &req).allow,
+        "unparseable instant must not grant"
+    );
 }

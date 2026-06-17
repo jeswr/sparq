@@ -155,10 +155,11 @@ impl Request {
     /// time window does not grant and a prohibition gated on a time window is not
     /// withdrawn (fail-closed — see [`datetime_status`]).
     ///
-    /// The instant is stored verbatim as a normalized xsd:dateTime lexical key; it is
-    /// compared by magnitude under the lt/gt/lteq/gteq/eq/neq operators (the same
-    /// instant ordering the evaluator's `order`/`compare` applies — see the README
-    /// caveat on mixed timezone offsets).
+    /// The lexical form is stored verbatim and parsed to a **UTC instant** at
+    /// comparison time, so the `lt`/`gt`/`lteq`/`gteq`/`eq`/`neq` operators compare
+    /// the *point in time* the value denotes — mixed timezone offsets are normalized
+    /// (`…T13:00:00+02:00` == `…T11:00:00Z`) rather than compared lexically
+    /// ([OPUS-4.8] sq-qj2q). An unparseable instant compares fail-closed.
     pub fn at(self, instant: impl Into<String>) -> Request {
         self.with(ODRL_DATETIME, Value::DateTime(instant.into()))
     }
@@ -893,8 +894,16 @@ fn compare(actual: &Value, op: Operator, bound: &Value) -> bool {
 fn value_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => x == y,
+        // Two dateTimes are equal iff they denote the same *instant* — a
+        // mixed-offset pair like `12:00:00Z` and `14:00:00+02:00` is equal even
+        // though the lexical forms differ (sq-qj2q). Fall back to lexical only
+        // when an operand is not a parseable instant.
+        (Value::DateTime(x), Value::DateTime(y)) => match (parse_instant(x), parse_instant(y)) {
+            (Some(ix), Some(iy)) => ix == iy,
+            _ => x == y,
+        },
         // Cross-type: compare by canonical string (an IRI right-operand vs an IRI
-        // actual, a string code vs a string code, a dateTime vs a dateTime).
+        // actual, a string code vs a string code).
         _ => a.as_str() == b.as_str(),
     }
 }
@@ -913,13 +922,13 @@ fn is_part_of(actual: &Value, bound: &Value) -> bool {
 }
 
 /// A total-ish order for orderable values: numeric by magnitude, dateTime by
-/// the lexical-as-comparable key (ISO-8601 instants sort lexicographically when
-/// in the same `Z`-normalized form — see the README caveat). Returns `None` for
-/// incomparable pairs.
+/// the **instant** the lexical form denotes (mixed timezone offsets are
+/// normalized to UTC before comparing — sq-qj2q). Returns `None` for
+/// incomparable pairs (e.g. an unparseable dateTime under an order operator).
 fn order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => x.partial_cmp(y),
-        (Value::DateTime(x), Value::DateTime(y)) => Some(cmp_datetime(x, y)),
+        (Value::DateTime(x), Value::DateTime(y)) => cmp_datetime(x, y),
         // A numeric actual against a numeric-looking string bound, or vice versa.
         _ => {
             let (Ok(x), Ok(y)) = (
@@ -933,10 +942,319 @@ fn order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
-/// Compare two xsd:dateTime lexical forms. We normalize a trailing `Z` and a
-/// missing timezone to a comparable key; mixed offsets are compared by the raw
-/// lexical form (documented limitation — see the README; full offset
-/// normalization is a deferred bead).
-fn cmp_datetime(x: &str, y: &str) -> std::cmp::Ordering {
-    x.cmp(y)
+/// Compare two `xsd:dateTime`/`xsd:date` lexical forms by the **instant** they
+/// denote: each is normalized to a UTC timeline position (`Instant`), so a
+/// mixed-offset pair such as `2026-06-16T13:00:00+02:00` (= 11:00Z) and
+/// `2026-06-16T12:00:00Z` orders correctly (the offset form is *earlier*).
+///
+/// Returns `None` when **either** operand is not a parseable instant — an order
+/// comparison against a malformed operand is undefined, and [`compare`] treats
+/// `None` as fail-closed (the constraint is not satisfied). This is the sq-qj2q
+/// fix for what was previously a raw `x.cmp(y)` lexical comparison.
+fn cmp_datetime(x: &str, y: &str) -> Option<std::cmp::Ordering> {
+    Some(parse_instant(x)?.cmp(&parse_instant(y)?))
+}
+
+/// A point on the UTC timeline, as `(days-since-epoch, nanoseconds-into-day)`
+/// after applying the lexical form's timezone offset. Comparable and equatable
+/// by derive — that is exactly instant ordering / instant equality.
+///
+/// We carry the day as a proleptic-Gregorian day number (not a calendar tuple)
+/// so that an offset crossing midnight (e.g. `2026-06-15T23:00:00-02:00`
+/// = `2026-06-16T01:00:00Z`) lands on the correct day without special-casing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Instant {
+    /// Days since 1970-01-01 (may be negative for pre-epoch dates).
+    day: i64,
+    /// Nanoseconds since 00:00:00 of that UTC day, in `0..86_400_000_000_000`.
+    nanos_in_day: i64,
+}
+
+/// Parse an `xsd:dateTime` or `xsd:date` lexical form into a UTC [`Instant`].
+///
+/// Self-contained and std-only (this crate deliberately carries no `chrono`/
+/// `time` dependency — see the crate `Cargo.toml` rationale). Accepts:
+/// * `YYYY-MM-DDThh:mm:ss` with optional fractional seconds (`.s…`) and an
+///   optional timezone (`Z`, `+hh:mm`, or `-hh:mm`),
+/// * `YYYY-MM-DD` (`xsd:date`), taken as `00:00:00` of that day, with the same
+///   optional timezone suffix.
+///
+/// A missing timezone is treated as UTC (the policy author's intent is an
+/// absolute instant; an unzoned local time has no absolute position, and
+/// assuming UTC is the conventional fail-safe — the previous code likewise did
+/// not localize). Returns `None` for anything not matching this grammar so the
+/// caller can fail closed.
+fn parse_instant(s: &str) -> Option<Instant> {
+    let s = s.trim();
+    // Split off the calendar date (`YYYY-MM-DD`) from the optional `Thh:mm:ss…`.
+    let (date, rest) = match s.split_once('T') {
+        Some((d, r)) => (d, Some(r)),
+        None => (s, None),
+    };
+    let (year, month, day_of_month) = parse_date(date)?;
+    let epoch_day = days_from_civil(year, month, day_of_month)?;
+
+    let Some(rest) = rest else {
+        // Bare `xsd:date` → midnight UTC. (`xsd:date` may itself carry a tz, but
+        // by the grammar the `T` is only present for dateTime; a zoned date has
+        // its offset on the date component, handled by `parse_date`'s tz split.)
+        return Some(Instant {
+            day: epoch_day,
+            nanos_in_day: 0,
+        });
+    };
+
+    // Separate the time-of-day from a trailing timezone designator.
+    let (time, offset_min) = split_timezone(rest)?;
+    let (hh, mm, ss, frac_nanos) = parse_time(time)?;
+
+    // Combine to nanoseconds since local midnight, then shift by the offset to
+    // reach UTC. The offset is "local = UTC + offset", so UTC = local − offset.
+    let local_nanos = (hh as i64) * 3_600_000_000_000
+        + (mm as i64) * 60_000_000_000
+        + (ss as i64) * 1_000_000_000
+        + frac_nanos;
+    let utc_nanos = local_nanos - (offset_min as i64) * 60_000_000_000;
+
+    // Normalize the offset-induced day carry/borrow into a clean day + in-day.
+    let day_carry = utc_nanos.div_euclid(86_400_000_000_000);
+    let nanos_in_day = utc_nanos.rem_euclid(86_400_000_000_000);
+    Some(Instant {
+        day: epoch_day + day_carry,
+        nanos_in_day,
+    })
+}
+
+/// Parse `YYYY-MM-DD`, allowing a leading `-` for BCE years (`-0044-03-15`).
+fn parse_date(s: &str) -> Option<(i64, u32, u32)> {
+    let (neg, body) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let mut parts = body.splitn(3, '-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let mo: u32 = parse_fixed(parts.next()?, 2)?;
+    let d: u32 = parse_fixed(parts.next()?, 2)?;
+    if parts.next().is_some() || !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some((if neg { -y } else { y }, mo, d))
+}
+
+/// Parse `hh:mm:ss` (with optional `.fraction`) into `(h, m, s, frac_nanos)`.
+fn parse_time(s: &str) -> Option<(u32, u32, u32, i64)> {
+    let (whole, frac) = match s.split_once('.') {
+        Some((w, f)) => (w, Some(f)),
+        None => (s, None),
+    };
+    let mut parts = whole.splitn(3, ':');
+    let h: u32 = parse_fixed(parts.next()?, 2)?;
+    let m: u32 = parse_fixed(parts.next()?, 2)?;
+    let sec: u32 = parse_fixed(parts.next()?, 2)?;
+    if parts.next().is_some() || h > 23 || m > 59 || sec > 60 {
+        // `sec == 60` is a leap second — accept it, clamped below.
+        return None;
+    }
+    let frac_nanos = match frac {
+        None => 0,
+        Some(f) => {
+            if f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            // Take up to 9 significant digits (nanosecond resolution), pad/truncate.
+            let mut digits = [b'0'; 9];
+            for (slot, b) in digits.iter_mut().zip(f.bytes()) {
+                *slot = b;
+            }
+            std::str::from_utf8(&digits).ok()?.parse::<i64>().ok()?
+        }
+    };
+    // Clamp a leap second to the last representable instant of the minute.
+    let sec_nanos = if sec == 60 { 59 } else { sec };
+    Some((
+        h,
+        m,
+        sec_nanos,
+        if sec == 60 { 999_999_999 } else { frac_nanos },
+    ))
+}
+
+/// Split a time-or-date tail into `(body, offset_minutes)`. `Z`/none ⇒ `0`.
+fn split_timezone(s: &str) -> Option<(&str, i32)> {
+    if let Some(body) = s.strip_suffix('Z') {
+        return Some((body, 0));
+    }
+    // A `+hh:mm` / `-hh:mm` suffix. Scan from the right for the sign so a
+    // negative *year* (handled earlier) is never confused with an offset.
+    if let Some(idx) = s.rfind(['+', '-']) {
+        // The sign must introduce a `±hh:mm` tail (6 chars) at the very end.
+        let (body, tz) = s.split_at(idx);
+        if let Some(min) = parse_offset(tz) {
+            return Some((body, min));
+        }
+    }
+    // No timezone designator → treat as UTC.
+    Some((s, 0))
+}
+
+/// Parse a `±hh:mm` offset into signed minutes.
+fn parse_offset(s: &str) -> Option<i32> {
+    let sign = match s.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let (h, m) = s[1..].split_once(':')?;
+    let hh: i32 = parse_fixed(h, 2)?;
+    let mm: i32 = parse_fixed(m, 2)?;
+    if hh > 14 || mm > 59 {
+        return None;
+    }
+    Some(sign * (hh * 60 + mm))
+}
+
+/// Parse a base-10 field of exactly `width` ASCII digits.
+fn parse_fixed<T: std::str::FromStr>(s: &str, width: usize) -> Option<T> {
+    if s.len() != width || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// Days from 1970-01-01 to `year-month-day` (proleptic Gregorian). Adapted from
+/// Howard Hinnant's `days_from_civil` (public-domain `date` algorithms): a
+/// branch-free civil-to-days conversion valid for the full `i64` year range.
+fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
+    // Reject obviously-out-of-range days-of-month for the given month.
+    let dim = days_in_month(year, month)?;
+    if day < 1 || day > dim {
+        return None;
+    }
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let m = month as i64;
+    let d = day as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// Days in `month` of `year` (Gregorian leap rules).
+fn days_in_month(year: i64, month: u32) -> Option<u32> {
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    Some(match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    })
+}
+
+// [OPUS-4.8] sq-qj2q — unit tests for the self-contained instant normalizer that
+// backs mixed-offset dateTime comparison (the public-API behaviour is covered by
+// tests/odrl_eval.rs; these pin the internal arithmetic + the rejection grammar).
+#[cfg(test)]
+mod instant_tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn epoch_day_anchors() {
+        // 1970-01-01 is day 0; 1969-12-31 is day -1; 1972-02-29 (leap) sanity.
+        assert_eq!(days_from_civil(1970, 1, 1), Some(0));
+        assert_eq!(days_from_civil(1969, 12, 31), Some(-1));
+        assert_eq!(days_from_civil(2000, 1, 1), Some(10_957));
+        // 2000-02-29 exists (leap), 1900-02-29 does not (century non-leap).
+        assert!(days_from_civil(2000, 2, 29).is_some());
+        assert!(days_from_civil(1900, 2, 29).is_none());
+    }
+
+    #[test]
+    fn mixed_offsets_normalize_to_same_instant() {
+        // All three name 2026-06-16T11:00:00Z.
+        let z = parse_instant("2026-06-16T11:00:00Z").unwrap();
+        let plus = parse_instant("2026-06-16T13:00:00+02:00").unwrap();
+        let minus = parse_instant("2026-06-16T09:00:00-02:00").unwrap();
+        assert_eq!(z, plus);
+        assert_eq!(z, minus);
+        // Missing tz is treated as UTC.
+        assert_eq!(z, parse_instant("2026-06-16T11:00:00").unwrap());
+    }
+
+    #[test]
+    fn offset_can_borrow_or_carry_across_midnight() {
+        // 2026-06-15T23:00:00-02:00 == 2026-06-16T01:00:00Z (carry forward a day).
+        assert_eq!(
+            parse_instant("2026-06-15T23:00:00-02:00"),
+            parse_instant("2026-06-16T01:00:00Z")
+        );
+        // 2026-06-16T01:00:00+02:00 == 2026-06-15T23:00:00Z (borrow back a day).
+        assert_eq!(
+            parse_instant("2026-06-16T01:00:00+02:00"),
+            parse_instant("2026-06-15T23:00:00Z")
+        );
+    }
+
+    #[test]
+    fn fractional_seconds_subsecond_ordering() {
+        let a = parse_instant("2026-06-16T12:00:00.250Z").unwrap();
+        let b = parse_instant("2026-06-16T12:00:00.750Z").unwrap();
+        assert!(a < b);
+        // Differing precision but equal value: .5 == .500000000.
+        assert_eq!(
+            parse_instant("2026-06-16T12:00:00.5Z"),
+            parse_instant("2026-06-16T12:00:00.500000000Z")
+        );
+    }
+
+    #[test]
+    fn bare_date_is_midnight_utc() {
+        assert_eq!(
+            parse_instant("2026-06-16"),
+            parse_instant("2026-06-16T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn cmp_datetime_orders_by_instant_not_lexical() {
+        // Lexically "13:..+02:00" > "12:..Z", but as instants the offset form is earlier.
+        assert_eq!(
+            cmp_datetime("2026-06-16T13:00:00+02:00", "2026-06-16T12:00:00Z"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cmp_datetime("2026-06-16T12:00:00Z", "2026-06-16T12:00:00Z"),
+            Some(Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn malformed_inputs_rejected() {
+        for bad in [
+            "",
+            "not-a-date",
+            "2026-13-01T00:00:00Z",      // month 13
+            "2026-06-32T00:00:00Z",      // day 32
+            "2026-02-29T00:00:00Z",      // 2026 is not a leap year
+            "2026-06-16T24:00:00Z",      // hour 24
+            "2026-06-16T12:60:00Z",      // minute 60
+            "2026-06-16T12:00:00+15:00", // offset > ±14:00
+            "2026-6-16T00:00:00Z",       // unpadded month
+            "2026-06-16T12:00:00.Z",     // empty fraction
+        ] {
+            assert!(parse_instant(bad).is_none(), "should reject {bad:?}");
+        }
+        // An order comparison against a malformed operand is undefined (fail-closed).
+        assert_eq!(cmp_datetime("not-a-date", "2026-06-16T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn leap_second_clamped_not_rejected() {
+        // xsd permits :60 (a leap second); we accept and clamp to end-of-minute.
+        let leap = parse_instant("2026-06-30T23:59:60Z").unwrap();
+        let next = parse_instant("2026-07-01T00:00:00Z").unwrap();
+        assert!(leap < next);
+    }
 }
