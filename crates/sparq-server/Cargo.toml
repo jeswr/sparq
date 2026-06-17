@@ -75,7 +75,7 @@ access-audit = ["server"]
 # equivalent. Feature unification means the `sparq-core` `sparq-engine` resolves also gains `mmap`,
 # so the WAL-durable `apply_delta` path is live on the shared graph. Without `--persist` the server
 # is in-memory exactly as before (the flag, not the feature, selects durability).
-server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
+server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library) for the server's `Content-Encoding: gzip` request
 # inflate (MultiGzDecoder) — a measured 1.5–3× at ~zero code change. The weak
@@ -212,6 +212,14 @@ spargebra.workspace = true
 # --- async HTTP stack (feature-gated; native only) ---
 # `ws` powers the /subscriptions endpoint (T23, SEPA-style SPARQL subscriptions).
 axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "tokio", "query", "json", "ws"] }
+# [OPUS-4.8] (sq-2gqr) Slow-loris guard: `axum::serve` builds hyper's connection `Builder`
+# internally and never installs a timer, so hyper's HTTP/1 `header_read_timeout` is inert and a
+# slow client holds a connection (and concurrency slot) open forever. `sparq_server::serve` owns
+# the accept loop on hyper's `http1::Builder` directly (with a `TokioTimer` + `header_read_timeout`).
+# Both are already in axum 0.8's own dependency graph, so this adds NO new transitive code — it
+# only names them as direct deps so we can call `Builder`. http1-only (matches axum's config).
+hyper = { version = "1", optional = true, default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", optional = true, default-features = false, features = ["server", "tokio", "service"] }
 # `sync` adds the watch channel that carries the commit generation to subscription tasks (T23).
 tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 # `limit` + `load-shed` power the max-concurrency guard (T15); `util` for ServiceBuilder combinators.

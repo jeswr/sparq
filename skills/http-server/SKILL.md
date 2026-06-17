@@ -137,7 +137,7 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   (**`time-travel` feature only**).
 - `struct ServerConfig { query_timeout: Option<Duration>, update_where_timeout: Option<Duration>,
   max_body_bytes: usize,
-  max_concurrent: usize, max_results: Option<usize>, max_query_rows: Option<usize>,
+  max_concurrent: usize, header_read_timeout: Option<Duration>, max_results: Option<usize>, max_query_rows: Option<usize>,
   max_query_bytes: Option<usize>,
   max_decompress_ratio: usize, max_subscriptions: usize, max_subscriptions_per_conn: usize,
   verbose: bool, redact_logs: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
@@ -147,7 +147,10 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   UPDATE that bounds writer-queue **head-of-line blocking** from a slow update — `None` =
   use `query_timeout`, `sq-nulp`; `max_query_rows` = coarse memory cap; `max_query_bytes` =
   byte-accounted memory cap that also prices row WIDTH + computed-literal size — `sq-s5is`;
-  `max_decompress_ratio` = zip-bomb guard — `sq-ebii`.)
+  `max_decompress_ratio` = zip-bomb guard — `sq-ebii`;
+  `header_read_timeout` = **slow-loris guard**: max time a connection may take to send its
+  complete request-header block, enforced at hyper's HTTP/1 connection layer by
+  `sparq_server::serve` — `None` disables; default 15s — `sq-2gqr`.)
   `auth_token` (set: gates the write surface with a Bearer token, constant-time compared;
   `None`: no write auth) and `auth_token_read` (gate reads too) are honoured by the library
   `router` itself — embedders get the gate for free (`sq-zcby`).
@@ -162,6 +165,15 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
 - `fn harden(routes: axum::Router, config: &ServerConfig) -> axum::Router` — wrap any
   router in the production middleware (panic→500, concurrency-limit→429, body-limit→413,
   JSON error bodies, optional trace).
+- `async fn serve(listener: tokio::net::TcpListener, app: axum::Router, header_read_timeout:
+  Option<Duration>, shutdown: impl Future<Output=()>) -> std::io::Result<()>` — the accept +
+  graceful-drain loop the binary runs **instead of `axum::serve`** (`sq-2gqr`). It is a faithful
+  port of axum's own loop (per-connection task, watch-channel drain, `with_upgrades()` so the
+  `/subscriptions` WebSocket still works) with one addition: it installs a `hyper_util` TokioTimer
+  and hyper's HTTP/1 `header_read_timeout`. **Why:** `axum::serve` never installs a timer, so
+  hyper's header-read deadline is inert there and a slow-loris client holds a connection (and a
+  `concurrency_limit` slot) open indefinitely; this loop closes that hole. Pass `None` to opt back
+  out to the unbounded behaviour.
 - Re-exports for cache layers/tests: `PinnedGen`, `GLOBAL_POD: &str`
   (`"urn:sparq:pod:global"`), and `sparq_serve::{Epoch, PodEpochs, PodId}`.
 - Serializer/negotiation helpers (always compiled, no `server` feature): module
@@ -561,6 +573,7 @@ env overrides the default.
 | `--update-where-timeout SECS` | `SPARQ_UPDATE_WHERE_TIMEOUT` | unset (`0`/unset = use `--query-timeout`) | **separate, typically-SHORTER writer-side WHERE deadline for SPARQL UPDATE** — bounds writer-queue **head-of-line blocking** from a slow update (the single sequenced writer is released within this window instead of holding it for the full read timeout); the update WHERE budget is `min(query_timeout, update_where_timeout)` → slow update `503` (`sq-nulp`) |
 | `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` | body cap → `413` |
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | in-flight cap, load-shed → `429` |
+| `--header-read-timeout SECS` | `SPARQ_HEADER_READ_TIMEOUT` | `15` (`0`=off) | **slow-loris guard**: max time a connection may take to send its complete request-header block — enforced at hyper's HTTP/1 connection layer by `sparq_server::serve` (NOT `axum::serve`, which never installs a timer so its header deadline is inert), so it fires BEFORE a handler and frees the concurrency slot a dribbling client would otherwise hold forever; connection closed when exceeded (`sq-2gqr`) |
 | `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0`=off) | result/solution cap (SELECT + CONSTRUCT/DESCRIBE WHERE-solutions + EXPLAIN ANALYZE; not ASK/GSP-read/UPDATE) → honest `413` (not truncation) |
 | `--max-query-rows N` | `SPARQ_MAX_QUERY_ROWS` | unlimited (`0`=off) | **memory cap** (coarse): working-set ROW ceiling on **every** form → honest `413` (`sq-ebii`) |
 | `--max-query-bytes N` | `SPARQ_MAX_QUERY_BYTES` | unlimited (`0`=off) | **byte-accounted memory cap**: prices working-set row WIDTH (`rows × vars × id-size`) + computed-literal bytes on **every** form → honest `413` (`sq-s5is`) |
