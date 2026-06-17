@@ -154,6 +154,11 @@ pub use source::{
 pub use source::{
     FragBinding, FragPattern, FragTerm, FragTriple, FragmentPage, FragmentTransport, PatternTerm,
 };
+// [OPUS-4.8] sq-25xk: re-export the native IP-pinning HTTP transport for the Endpoint adapter.
+// Native-only — it wraps ureq (gated out of the wasm bundle) and installs an SSRF resolver so
+// the guard-vetted IP IS the dialled IP (no DNS-rebinding re-resolve window).
+#[cfg(all(feature = "fedclient", not(target_arch = "wasm32")))]
+pub use source::HttpTransport;
 
 /// brTPF binding-block **transport encodings** (bead `sq-6ihg`, follow-up to the server's
 /// `sq-dxhb`): a COMPACT, self-describing BINARY mapping wire ([`wire::encode_bindings`] /

@@ -363,6 +363,14 @@ impl EgressGuard {
         self.allow.contains(&host.to_ascii_lowercase())
     }
 
+    /// The set of allowlisted hosts (lowercased bare authorities), so a native transport can
+    /// bridge *this guard's* allowlist into the ureq SSRF resolver — making the IP the guard
+    /// vets and the IP the socket dials come from the **same** resolution (no second,
+    /// unguarded re-resolve). [OPUS-4.8] sq-25xk.
+    pub fn allowed_hosts(&self) -> &HashSet<String> {
+        &self.allow
+    }
+
     /// Vet one resolved address for `host`: `Ok(())` to dial it, `Err(reason)` to refuse.
     /// An allowlisted host is always permitted; otherwise a [`is_forbidden_ip`] address is
     /// refused. This is the per-address hook a real resolver calls on every candidate IP.
@@ -456,6 +464,155 @@ fn endpoint_host(endpoint: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
+// ─── Native HTTP transport that PINS the guard-vetted IP (no re-resolve TOCTOU) ──────
+
+/// The production [`Transport`]: a blocking ureq POST (SPARQL Protocol §2.1.2 — `query=`
+/// form-encoded body, `Accept: application/sparql-results+json`) that **closes the
+/// DNS-rebinding TOCTOU re-resolve window** by installing an SSRF [`Resolver`](ureq::Resolver)
+/// on the ureq agent itself.
+///
+/// # Why this exists (bead sq-25xk, follow-up to sq-rsxf)
+///
+/// Phase 2 shipped the [`Transport`] *seam* + the [`EgressGuard`] but only **in-test
+/// transport doubles**; there was no native HTTP `Transport`. A naive native transport would
+/// re-open the very window the guard was meant to close: [`Endpoint::execute`] calls
+/// [`EgressGuard::check_endpoint`], which resolves the host and vets the IP — but if the
+/// transport is an ordinary HTTP client it then **re-resolves the host independently** before
+/// connecting, so a hostile DNS server can answer a public IP to the guard's lookup and a
+/// private/cloud-metadata IP to the socket lookup (a time-of-check-to-time-of-use SSRF
+/// re-bind). The check is on a *different* address than the one dialled.
+///
+/// [`HttpTransport`] removes that gap exactly as `sparq-engine`'s `service.rs`
+/// `HttpTransport` does (`.resolver(EgressFilterResolver)`, `service.rs:692`): the egress
+/// policy runs **inside ureq's own resolver**, so ureq connects ONLY to the addresses the
+/// resolver returns — the resolved-and-vetted IP IS the dialled IP. There is no second,
+/// unguarded re-resolve. The guard's [`allowlist`](EgressGuard::allowed_hosts) is bridged
+/// into the resolver, so an allowlisted private host is reachable through BOTH the pre-flight
+/// `check_endpoint` and the socket resolver — one source of truth.
+///
+/// Native-only (`cfg(not(target_arch = "wasm32"))`): neither ureq nor its TLS stack ever
+/// enters the wasm bundle (the wasm federation client would carry a `fetch`-based transport
+/// instead). Build one with [`Endpoint::native`] / [`Endpoint::with_guard_native`], or
+/// directly via [`HttpTransport::new`] / [`HttpTransport::from_guard`]. [OPUS-4.8] sq-25xk.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct HttpTransport {
+    timeout: std::time::Duration,
+    /// Hosts (bare authority, lowercased) the SSRF resolver permits even when they resolve
+    /// privately — bridged from the [`EgressGuard`] so both the pre-flight check and the
+    /// socket resolver share one allowlist.
+    allow_private: std::sync::Arc<HashSet<String>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for HttpTransport {
+    fn default() -> Self {
+        HttpTransport::new()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HttpTransport {
+    /// A transport with a finite default timeout (so an unreachable endpoint cannot hang the
+    /// client) and the strict default-deny SSRF policy (no private host permitted).
+    pub fn new() -> HttpTransport {
+        HttpTransport {
+            // Mirrors `sparq-engine`'s 30s SERVICE default — generous for a slow endpoint,
+            // finite so a black-holed host fails-stop rather than hanging.
+            timeout: std::time::Duration::from_secs(30),
+            allow_private: std::sync::Arc::new(HashSet::new()),
+        }
+    }
+
+    /// A transport whose SSRF resolver shares `guard`'s allowlist, so the IP the guard vets in
+    /// [`EgressGuard::check_endpoint`] and the IP this transport's socket dials come from the
+    /// SAME guarded resolution. This is the bridge that closes the re-resolve TOCTOU window.
+    pub fn from_guard(guard: &EgressGuard) -> HttpTransport {
+        HttpTransport {
+            timeout: std::time::Duration::from_secs(30),
+            allow_private: std::sync::Arc::new(guard.allowed_hosts().clone()),
+        }
+    }
+
+    /// Sets the per-request timeout. Chainable.
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> HttpTransport {
+        self.timeout = timeout;
+        self
+    }
+}
+
+/// ureq [`Resolver`](ureq::Resolver) that enforces the SSRF egress policy on the *resolved*
+/// addresses (DNS-rebinding-safe): it resolves the host, drops every [`is_forbidden_ip`]
+/// address (unless the bare host is on the allowlist), and returns only the survivors — so
+/// ureq dials only vetted IPs and there is no resolve-then-re-resolve gap. Mirrors the
+/// engine's `service.rs` `EgressFilterResolver` and this crate's `discovery::EgressFilterResolver`.
+/// [OPUS-4.8] sq-25xk.
+#[cfg(not(target_arch = "wasm32"))]
+struct EgressFilterResolver {
+    allow_private: std::sync::Arc<HashSet<String>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ureq::Resolver for EgressFilterResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        use std::net::ToSocketAddrs;
+        // `netloc` is `host:port`; the allowlist is keyed by the bare host. rsplit on ':' to
+        // keep IPv6 literals, which arrive bracketed (`[::1]:80`) — then strip the brackets.
+        let host = match netloc.rsplit_once(':') {
+            Some((h, _)) => h,
+            None => netloc,
+        };
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let allowed = self.allow_private.contains(&host.to_ascii_lowercase());
+        let permitted: Vec<std::net::SocketAddr> = netloc
+            .to_socket_addrs()?
+            .filter(|sa| allowed || !is_forbidden_ip(sa.ip()))
+            .collect();
+        if permitted.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "federation egress refused: {netloc} resolves only to private/internal \
+                     addresses (default-deny SSRF policy; allowlist the host on the EgressGuard)"
+                ),
+            ));
+        }
+        Ok(permitted)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Transport for HttpTransport {
+    fn fetch(&self, endpoint: &str, query: &str) -> Result<String, String> {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(self.timeout)
+            .user_agent(concat!("sparq-fedclient/", env!("CARGO_PKG_VERSION")))
+            // Default-deny SSRF egress filter, INSIDE ureq's resolver: ureq connects only to
+            // the addresses this resolver returns, so the resolved-and-vetted IP is the IP
+            // dialled — no DNS-rebinding re-resolve window. [OPUS-4.8] sq-25xk.
+            .resolver(EgressFilterResolver {
+                allow_private: std::sync::Arc::clone(&self.allow_private),
+            })
+            .build();
+        // SPARQL Protocol §2.1.2: query via POST with `application/x-www-form-urlencoded`
+        // `query=` — the broadly-supported method, not subject to URL-length limits. Same
+        // shape as `sparq-engine`'s SERVICE transport so a sub-query travels identically.
+        match agent
+            .post(endpoint)
+            .set("Accept", "application/sparql-results+json")
+            .send_form(&[("query", query)])
+        {
+            Ok(r) => r
+                .into_string()
+                .map_err(|e| format!("fedclient: reading response from {endpoint}: {e}")),
+            // ureq surfaces non-2xx as `Error::Status`; treat transport + HTTP errors uniformly.
+            Err(ureq::Error::Status(code, _)) => {
+                Err(format!("fedclient: endpoint {endpoint} returned HTTP {code}"))
+            }
+            Err(e) => Err(format!("fedclient: request to {endpoint} failed: {e}")),
+        }
+    }
+}
+
 // ─── The FederatedSource trait (design §4.1) ────────────────────────────────────────
 
 /// One remote (or local) RDF source the federation engine can query — the sparq analogue
@@ -538,6 +695,34 @@ impl Endpoint {
         transport: Box<dyn Transport>,
         guard: EgressGuard,
     ) -> Self {
+        Endpoint {
+            endpoint: endpoint.into(),
+            transport,
+            guard,
+        }
+    }
+
+    /// A new endpoint source over the native IP-pinning [`HttpTransport`] with the **secure
+    /// default** SSRF guard. The transport's ureq resolver and the pre-flight guard share the
+    /// (empty) default-deny allowlist, so the IP vetted before the request is the IP dialled —
+    /// the DNS-rebinding re-resolve window is closed end-to-end. Native-only. [OPUS-4.8] sq-25xk.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn native(endpoint: impl Into<String>) -> Self {
+        Endpoint {
+            endpoint: endpoint.into(),
+            transport: Box::new(HttpTransport::new()),
+            guard: EgressGuard::deny_private(),
+        }
+    }
+
+    /// A new endpoint source over the native IP-pinning [`HttpTransport`] with an explicit
+    /// [`EgressGuard`]. The transport's resolver is built [`from_guard`](HttpTransport::from_guard),
+    /// so the guard's allowlist governs BOTH the pre-flight [`check_endpoint`](EgressGuard::check_endpoint)
+    /// and the socket resolver — one allowlist, no second unguarded re-resolve. Native-only.
+    /// [OPUS-4.8] sq-25xk.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_guard_native(endpoint: impl Into<String>, guard: EgressGuard) -> Self {
+        let transport = Box::new(HttpTransport::from_guard(&guard));
         Endpoint {
             endpoint: endpoint.into(),
             transport,
@@ -1676,5 +1861,118 @@ mod tests {
         assert_eq!(blocks0.len(), 5);
         // Empty input ⇒ no blocks.
         assert!(chunk_bindings(&[], 4).is_empty());
+    }
+
+    // ── Native HttpTransport: the SSRF resolver PINS the vetted IP (sq-25xk) ──────────
+    //
+    // These prove the load-bearing TOCTOU fix: the egress policy lives INSIDE ureq's own
+    // resolver, so ureq dials only the addresses the resolver returns. The classifier tests
+    // above prove WHICH IPs are forbidden; these prove the *resolver ureq actually calls*
+    // applies that classification — including the host-authority parse, the IPv6 bracket
+    // strip, and the allowlist bypass. Every case uses an IP-LITERAL netloc so `to_socket_addrs`
+    // is hermetic (no DNS lookup, no network), so the tests are deterministic. [OPUS-4.8] sq-25xk.
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolver_with(allow: &[&str]) -> EgressFilterResolver {
+        let set: HashSet<String> = allow.iter().map(|h| h.to_ascii_lowercase()).collect();
+        EgressFilterResolver {
+            allow_private: std::sync::Arc::new(set),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolver_refuses_private_metadata_and_loopback_literals() {
+        use ureq::Resolver;
+        // The default-deny resolver must refuse every private/internal IP literal — ureq is
+        // never handed a dialable address (so a re-bound DNS answer cannot connect to it).
+        for netloc in [
+            "10.0.0.5:443",          // RFC1918
+            "127.0.0.1:8080",        // loopback
+            "169.254.169.254:80",    // cloud metadata (link-local)
+            "192.168.1.1:80",        // RFC1918
+            "100.64.0.1:80",         // CGNAT
+            "[::1]:80",              // IPv6 loopback (bracketed)
+            "[fc00::1]:80",          // IPv6 unique-local (bracketed)
+            "[::ffff:127.0.0.1]:80", // v4-mapped loopback can't smuggle through a v6 literal
+        ] {
+            match resolver_with(&[]).resolve(netloc) {
+                Ok(addrs) => panic!("{netloc} should have been refused, got {addrs:?}"),
+                Err(e) => assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "{netloc} must be refused with PermissionDenied"
+                ),
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolver_permits_public_literal() {
+        use ureq::Resolver;
+        // A public address survives the filter and is handed back to ureq to dial.
+        let addrs = resolver_with(&[])
+            .resolve("8.8.8.8:80")
+            .expect("a public IP must be permitted by the egress resolver");
+        assert!(
+            addrs.iter().any(|sa| sa.ip().to_string() == "8.8.8.8"),
+            "the public address must be returned for ureq to dial"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resolver_allowlist_reopens_private_literal() {
+        use ureq::Resolver;
+        // An allowlisted private host is permitted even though it resolves privately — the
+        // allowlist bridged from the EgressGuard re-opens it at the socket-resolution layer.
+        let addrs = resolver_with(&["10.0.0.5"])
+            .resolve("10.0.0.5:443")
+            .expect("an allowlisted private host must be permitted");
+        assert!(addrs.iter().any(|sa| sa.ip().to_string() == "10.0.0.5"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn from_guard_bridges_allowlist_into_resolver() {
+        // The transport built from a guard shares the guard's allowlist, so an allowlisted
+        // private host the guard would permit is ALSO permitted by the transport's resolver
+        // (the two resolutions agree — no second, unguarded re-resolve).
+        let guard = EgressGuard::deny_private().allow_host("sparql.internal");
+        let t = HttpTransport::from_guard(&guard);
+        assert!(t.allow_private.contains("sparql.internal"));
+        // A default-deny guard yields an empty transport allowlist.
+        let empty = HttpTransport::from_guard(&EgressGuard::deny_private());
+        assert!(empty.allow_private.is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn endpoint_native_denies_loopback_at_preflight() {
+        // The native constructor still runs the pre-flight check_endpoint FIRST: a loopback
+        // endpoint is refused before the request, with no network round-trip. (The transport's
+        // resolver is the SECOND line of defence against a re-bind on a public-looking host.)
+        let ep = Endpoint::native("http://127.0.0.1:9999/sparql");
+        let err = ep.execute(&SubQuery::new("ASK {}")).unwrap_err();
+        assert!(matches!(err, FedError::EgressRefused(_)), "got {err:?}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn endpoint_native_preserves_guard_and_url() {
+        // with_guard_native keeps the supplied guard (so the pre-flight allowlist is intact)
+        // AND wires a transport whose resolver shares that same allowlist.
+        let guard = EgressGuard::deny_private().allow_host("sparql.internal");
+        let ep = Endpoint::with_guard_native("http://sparql.internal/sparql", guard);
+        assert_eq!(ep.url(), "http://sparql.internal/sparql");
+        assert!(ep.guard().is_allowed("sparql.internal"));
+        // An allowlisted host short-circuits the pre-flight resolution and returns Ok(host).
+        assert_eq!(
+            ep.guard()
+                .check_endpoint("http://sparql.internal/sparql")
+                .unwrap(),
+            "sparql.internal"
+        );
     }
 }
