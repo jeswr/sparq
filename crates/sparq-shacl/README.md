@@ -76,14 +76,20 @@ runner's comparison is engine-agnostic:
   launcher (`java -cp <jena-libs> JenaShaclAdapter.java`) so no compile step or
   committed jar is needed. A second independent reference catches bugs where sparq
   and pySHACL happen to agree but are both wrong.
+- **Node / RDF-JS** (`tests/diff_fuzz/node_shacl_adapter.mjs`, bead sq-vz2v) —
+  the Zazuko `shacl-engine` validator (default) or `rdf-validate-shacl` (select via
+  `SHACL_DIFF_NODE_ENGINE`) over an RDF-JS dataset, run directly by Node (no build
+  step); deps are pinned in `tests/diff_fuzz/package.json` + lockfile. Being JS over
+  RDF-JS it is also the on-ramp for a future JS-vs-JS lane against sparq's own
+  `@jeswr/sparq` WASM SHACL.
 
-The differential runs against **every** reference engine that resolves. Other
-engines (rdf-validate-shacl / shacl-engine via Node) are tracked as follow-up
-beads and slot in as further adapters over the same contract.
+The differential runs against **every** reference engine that resolves; adding one
+is just another adapter over the same contract.
 
 It is `#[ignore]`d (off the per-PR fast path) and runs as a **nightly** CI lane
-(`.github/workflows/shacl-diff-fuzz.yml`, which installs both pySHACL and a
-SHA-512-verified apache-jena tarball). Run it locally against either or both:
+(`.github/workflows/shacl-diff-fuzz.yml`, which installs pySHACL, a SHA-512-verified
+apache-jena tarball, and the Node adapter's pinned `node_modules`). Run it locally
+against any of them:
 
 ```sh
 # pySHACL:
@@ -93,11 +99,17 @@ SHACL_DIFF_PYTHON=/tmp/shacl-ref-venv/bin/python SHACL_DIFF_COUNT=2000 \
 # Jena (point at an unpacked apache-jena lib classpath, or set JENA_HOME):
 SHACL_DIFF_JENA_CP="/opt/apache-jena/lib/*" SHACL_DIFF_COUNT=2000 \
   cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
+# Node (install the pinned deps once; the runner auto-finds the adapter-local
+# node_modules, or point SHACL_DIFF_NODE_MODULES / NODE_PATH at one):
+npm ci --prefix crates/sparq-shacl/tests/diff_fuzz
+SHACL_DIFF_COUNT=2000 \
+  cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
 ```
 
 When no reference engine resolves, the test skips cleanly (so a fresh checkout
 stays green); each engine is gated independently, so Jena is silently skipped
-without a Java/Jena classpath and the pySHACL lane is unaffected. Fast,
+without a Java/Jena classpath, the Node engine without a `node`/node_modules, and
+the pySHACL lane is unaffected. Fast,
 reference-free self-tests (generator well-formedness + outcome mix,
 key-normalisation consistency, the engine-gating logic) DO run in the per-PR
 path.

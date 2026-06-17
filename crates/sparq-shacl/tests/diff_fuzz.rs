@@ -30,8 +30,14 @@
 //!     reference catches bugs where sparq and pySHACL happen to agree but are both
 //!     wrong.
 //!
-//! Other engines (rdf-validate-shacl / shacl-engine via Node) remain follow-up
-//! beads; each is another `RefEngine` over the same contract.
+//!   - **Node / RDF-JS** (`tests/diff_fuzz/node_shacl_adapter.mjs`, bead sq-vz2v) —
+//!     a third, independent family driving the Zazuko `shacl-engine` (default) or
+//!     `rdf-validate-shacl` validator (selected by `SHACL_DIFF_NODE_ENGINE`) over an
+//!     RDF-JS dataset. Being JS over RDF-JS it is also the on-ramp for diffing
+//!     sparq's OWN `@jeswr/sparq` WASM SHACL (a future JS-vs-JS lane).
+//!
+//! Each reference is another `RefEngine` over the same report-cli contract; adding
+//! one is just a `resolve_*` returning that struct.
 //!
 //! ## How to run
 //! Off by default (`#[ignore]`) so the per-PR `cargo nextest run` fast path is
@@ -45,12 +51,19 @@
 //! # tarball's `lib`), or set JENA_HOME (its `lib` is derived):
 //! SHACL_DIFF_JENA_CP="/opt/apache-jena/lib/*" \
 //!   cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
+//! # Node: point at a node_modules with the RDF-JS validator + its deps installed
+//! # (SHACL_DIFF_NODE_MODULES, else NODE_PATH); SHACL_DIFF_NODE_ENGINE picks the
+//! # validator (shacl-engine | rdf-validate-shacl; default shacl-engine):
+//! SHACL_DIFF_NODE_MODULES="$PWD/crates/sparq-shacl/tests/diff_fuzz/node_modules" \
+//!   cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
 //! # bound the run: SHACL_DIFF_SEED_START / SHACL_DIFF_COUNT (defaults 0 / 200).
 //! ```
 //! When NO reference engine resolves, the test SKIPS (prints why and returns) so
 //! it stays green on a box without any reference toolchain. Each engine is gated
 //! independently — Jena is silently skipped when neither a Jena classpath nor a
-//! working `java` is available, so the existing pySHACL-only lane is unaffected.
+//! working `java` is available, and the Node engine when neither a usable `node`
+//! nor a resolvable node_modules is present, so the existing pySHACL-only lane is
+//! unaffected.
 //!
 //! ## Comparison policy (per bead sq-55c1)
 //! 1. `conforms` bit — exact (cheap, highest signal).
@@ -90,13 +103,18 @@ struct RefViolation {
 }
 
 /// A resolved reference engine: a human name plus the program + leading args to
-/// spawn its report-cli adapter. The (data, shapes) request is always written to
-/// the child's stdin and the normalised JSON report read from stdout, regardless
-/// of engine — so adding an engine is just another `resolve_*` returning this.
+/// spawn its report-cli adapter, and any extra environment to set on the child
+/// (e.g. the Node adapter's `NODE_PATH`/engine switch). The (data, shapes) request
+/// is always written to the child's stdin and the normalised JSON report read from
+/// stdout, regardless of engine — so adding an engine is just another `resolve_*`
+/// returning this.
 struct RefEngine {
     name: String,
     program: String,
     args: Vec<String>,
+    /// Extra `(key, value)` environment overrides for the spawned child; empty for
+    /// engines that need none (pySHACL, Jena).
+    envs: Vec<(String, String)>,
 }
 
 fn adapter_dir() -> std::path::PathBuf {
@@ -125,6 +143,7 @@ fn resolve_pyshacl() -> Option<RefEngine> {
                 name: format!("pySHACL via {py}"),
                 program: py,
                 args: vec![adapter.to_string_lossy().into_owned()],
+                envs: vec![],
             });
         }
     }
@@ -185,13 +204,85 @@ fn resolve_jena() -> Option<RefEngine> {
             classpath,
             adapter.to_string_lossy().into_owned(),
         ],
+        envs: vec![],
+    })
+}
+
+/// Pure node_modules selection (env values passed in, so it is unit-testable
+/// without mutating process-global env in parallel tests): an explicit
+/// `SHACL_DIFF_NODE_MODULES` wins; otherwise the adapter-local `node_modules`
+/// (`tests/diff_fuzz/node_modules`, what the CI lane installs) if it exists;
+/// otherwise `NODE_PATH` if set; otherwise `None` (Node engine skipped). An empty
+/// string is treated as unset so a blank env var does not produce a degenerate
+/// empty path. `local_exists` lets the test decide whether to consider the local
+/// dir without touching the filesystem.
+fn node_modules_path(
+    explicit_env: Option<String>,
+    node_path_env: Option<String>,
+    local_modules: &std::path::Path,
+    local_exists: bool,
+) -> Option<String> {
+    if let Some(p) = explicit_env.filter(|s| !s.is_empty()) {
+        return Some(p);
+    }
+    if local_exists {
+        return Some(local_modules.to_string_lossy().into_owned());
+    }
+    node_path_env.filter(|s| !s.is_empty())
+}
+
+/// Resolves the Node / RDF-JS SHACL engine, or `None` if it cannot be driven (so
+/// it is SKIPPED cleanly — the pySHACL/Jena lanes are unaffected). Needs:
+///   - a `node` launcher: `SHACL_DIFF_NODE` else `node` on PATH (must run), and
+///   - a resolvable `node_modules` with the RDF-JS validator installed:
+///     `SHACL_DIFF_NODE_MODULES` else the adapter-local `node_modules` else
+///     `NODE_PATH`.
+///
+/// The adapter is the single-file `node_shacl_adapter.mjs` run directly by Node
+/// (no build step); `SHACL_DIFF_NODE_ENGINE` (shacl-engine | rdf-validate-shacl)
+/// selects the validator inside the adapter. `NODE_PATH` is set on the child so the
+/// adapter's bare `import`s resolve from the chosen `node_modules`.
+fn resolve_node() -> Option<RefEngine> {
+    let local = adapter_dir().join("node_modules");
+    let modules = node_modules_path(
+        std::env::var("SHACL_DIFF_NODE_MODULES").ok(),
+        std::env::var("NODE_PATH").ok(),
+        &local,
+        local.is_dir(),
+    )?;
+    let node = std::env::var("SHACL_DIFF_NODE").unwrap_or_else(|_| "node".to_string());
+    // `node --version` must actually run — otherwise no usable launcher and we skip
+    // rather than spawn-error every case.
+    let node_ok = Command::new(&node)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !node_ok {
+        return None;
+    }
+    let engine_sel =
+        std::env::var("SHACL_DIFF_NODE_ENGINE").unwrap_or_else(|_| "shacl-engine".to_string());
+    let adapter = adapter_dir().join("node_shacl_adapter.mjs");
+    Some(RefEngine {
+        name: format!("Node RDF-JS SHACL ({engine_sel}) via {node}"),
+        program: node,
+        args: vec![adapter.to_string_lossy().into_owned()],
+        // Bare `import`s in the .mjs adapter resolve from NODE_PATH; pass the engine
+        // selection through so it is honoured even if the parent env differs.
+        envs: vec![
+            ("NODE_PATH".to_string(), modules),
+            ("SHACL_DIFF_NODE_ENGINE".to_string(), engine_sel),
+        ],
     })
 }
 
 /// All reference engines available on this box, in a stable order. The
 /// differential runs against each; an empty list means SKIP the whole test.
 fn resolve_engines() -> Vec<RefEngine> {
-    [resolve_pyshacl(), resolve_jena()]
+    [resolve_pyshacl(), resolve_jena(), resolve_node()]
         .into_iter()
         .flatten()
         .collect()
@@ -204,6 +295,7 @@ fn run_reference(engine: &RefEngine, data: &str, shapes: &str) -> Result<RefRepo
     let req = serde_json::json!({ "data": data, "shapes": shapes }).to_string();
     let mut child = Command::new(&engine.program)
         .args(&engine.args)
+        .envs(engine.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -415,7 +507,7 @@ fn mismatch(engine: &RefEngine, seed: u64, data: &str, shapes: &str, msg: &str) 
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "differential SHACL fuzz — nightly/heavy tier; needs a reference engine (pyshacl / Jena)"]
+#[ignore = "differential SHACL fuzz — nightly/heavy tier; needs a reference engine (pyshacl / Jena / Node RDF-JS)"]
 fn differential_shacl_fuzz() {
     let engines = resolve_engines();
     if engines.is_empty() {
@@ -423,7 +515,8 @@ fn differential_shacl_fuzz() {
             "SKIP: no reference SHACL engine resolved. Install pyshacl+rdflib and set \
              SHACL_DIFF_PYTHON to its interpreter (e.g. a venv's bin/python), and/or point \
              SHACL_DIFF_JENA_CP (or JENA_HOME) at an apache-jena lib classpath for the Jena \
-             reference."
+             reference, and/or install the RDF-JS validator into a node_modules pointed at by \
+             SHACL_DIFF_NODE_MODULES (or NODE_PATH) for the Node reference."
         );
         return;
     }
@@ -745,6 +838,91 @@ fn jena_adapter_excludes_nested_sh_detail() {
     assert!(
         out.status.success(),
         "Jena adapter --selftest failed (exit {:?}) — the sh:detail exclusion \
+         regressed (nested sub-result leaked into the top-level violation set):\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+}
+
+/// [OPUS-4.8] (sq-vz2v) Node node_modules gating, pure (no filesystem / process
+/// env touched, so it is parallel-safe): an explicit `SHACL_DIFF_NODE_MODULES`
+/// wins; else the adapter-local `node_modules` IF it exists; else `NODE_PATH`;
+/// else `None` (Node engine SKIPPED — the pySHACL/Jena lanes unaffected). Blank
+/// values are treated as unset so a degenerate empty path can't slip through.
+#[test]
+fn node_modules_gating() {
+    let local = std::path::Path::new("/repo/tests/diff_fuzz/node_modules");
+    // Explicit env wins, even when the local dir and NODE_PATH are also present.
+    assert_eq!(
+        node_modules_path(
+            Some("/custom/nm".into()),
+            Some("/ignored/nm".into()),
+            local,
+            true
+        ),
+        Some("/custom/nm".to_string())
+    );
+    // No explicit env, local dir exists → the adapter-local node_modules.
+    assert_eq!(
+        node_modules_path(None, Some("/np".into()), local, true)
+            .as_deref()
+            .map(|s| s.ends_with("node_modules")),
+        Some(true)
+    );
+    // No explicit, no local → fall through to NODE_PATH.
+    assert_eq!(
+        node_modules_path(None, Some("/np".into()), local, false),
+        Some("/np".to_string())
+    );
+    // Nothing set → Node skipped.
+    assert_eq!(node_modules_path(None, None, local, false), None);
+    // Blank values are unset.
+    assert_eq!(
+        node_modules_path(Some(String::new()), None, local, false),
+        None
+    );
+    assert_eq!(
+        node_modules_path(None, Some(String::new()), local, false),
+        None
+    );
+    // Blank explicit falls through to the local dir when it exists.
+    assert_eq!(
+        node_modules_path(Some(String::new()), None, local, true)
+            .as_deref()
+            .map(|s| s.ends_with("node_modules")),
+        Some(true)
+    );
+}
+
+/// [OPUS-4.8] (sq-vz2v) The Node adapter must mirror the pySHACL/Jena adapters'
+/// `sh:detail` exclusion: a nested sub-result that is the object of an `sh:detail`
+/// must NOT appear as a top-level violation (it lives in `ValidationResult::details`
+/// in sparq, and `sh:detail` is non-normative per SHACL §3.6.2 — diffing it would
+/// be a latent over-report, not a real disagreement). The adapter ships a
+/// `--selftest` mode asserting this on a synthetic RDF-JS report dataset (no
+/// validator run, so it is independent of which validator/version is installed);
+/// we drive it here. SKIPPED cleanly when Node + a node_modules don't resolve (the
+/// pySHACL/Jena / no-Node lanes are unaffected) — exactly the diff-fuzz gating.
+#[test]
+fn node_adapter_excludes_nested_sh_detail() {
+    let Some(engine) = resolve_node() else {
+        eprintln!("SKIP node_adapter_excludes_nested_sh_detail: Node engine did not resolve");
+        return;
+    };
+    // engine.args is `[<adapter>.mjs]`; append `--selftest` and carry the resolved
+    // NODE_PATH/engine env so the adapter's bare imports resolve.
+    let mut args = engine.args.clone();
+    args.push("--selftest".to_string());
+    let out = Command::new(&engine.program)
+        .args(&args)
+        .envs(engine.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn Node adapter --selftest");
+    assert!(
+        out.status.success(),
+        "Node adapter --selftest failed (exit {:?}) — the sh:detail exclusion \
          regressed (nested sub-result leaked into the top-level violation set):\n{}",
         out.status.code(),
         String::from_utf8_lossy(&out.stderr).trim()
