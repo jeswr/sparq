@@ -30,12 +30,18 @@ fn sparql_batch_publishes_one_generation() {
     let writer = Writer::spawn(
         ring.clone(),
         GraphApplier::new(),
-        WriterConfig { window: Duration::from_millis(200), max_batch: 64, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(200),
+            max_batch: 64,
+            ..WriterConfig::default()
+        },
     );
 
     let before = ring.current(); // pinned across the commit
     for i in 0..3 {
-        writer.submit_detached(insert(i), [PodId::from("pod:alice")]).unwrap();
+        writer
+            .submit_detached(insert(i), [PodId::from("pod:alice")])
+            .unwrap();
     }
     let generation = writer
         .submit(
@@ -44,7 +50,10 @@ fn sparql_batch_publishes_one_generation() {
         )
         .unwrap();
 
-    assert_eq!(generation, 1, "3 inserts + 1 delete in one window = one generation");
+    assert_eq!(
+        generation, 1,
+        "3 inserts + 1 delete in one window = one generation"
+    );
     let current = ring.current();
     assert_eq!(current.number(), 1);
     assert_eq!(current.snapshot().len(), 12, "10 + 3 inserts - 1 delete");
@@ -61,10 +70,16 @@ fn bad_sparql_is_isolated_from_its_batch() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         GraphApplier::new(),
-        WriterConfig { window: Duration::from_millis(300), max_batch: 64, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(300),
+            max_batch: 64,
+            ..WriterConfig::default()
+        },
     ));
 
-    writer.submit_detached(insert(0), [PodId::from("pod:a")]).unwrap();
+    writer
+        .submit_detached(insert(0), [PodId::from("pod:a")])
+        .unwrap();
     let bad = {
         let writer = writer.clone();
         std::thread::spawn(move || {
@@ -101,11 +116,17 @@ fn consecutive_windows_consecutive_generations() {
     let writer = Writer::spawn(
         ring.clone(),
         GraphApplier::new(),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 256, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 256,
+            ..WriterConfig::default()
+        },
     );
 
     for expect in 1..=4u64 {
-        let g = writer.submit(insert(expect as usize), [PodId::from("pod:a")]).unwrap();
+        let g = writer
+            .submit(insert(expect as usize), [PodId::from("pod:a")])
+            .unwrap();
         assert_eq!(g, expect);
     }
     assert_eq!(ring.current().snapshot().len(), 6);
@@ -146,7 +167,9 @@ fn fork_cost_measurement() {
             best = best.min(t.elapsed());
             assert_eq!(f.len(), n);
         }
-        println!("fork of {n} triples: first (freeze) {first_cost:?}, steady-state {best:?} (best of 5)");
+        println!(
+            "fork of {n} triples: first (freeze) {first_cost:?}, steady-state {best:?} (best of 5)"
+        );
 
         // Full commit cycle: fork + 10-triple INSERT DATA + seal, chained like the
         // writer (each commit forks the previous sealed generation). 2000 commits
@@ -207,7 +230,10 @@ fn pending_delta_stays_bounded_under_sustained_updates() {
         max_pending < threshold + 5,
         "pending delta must stay bounded by threshold + one batch (saw {max_pending})"
     );
-    assert!(compactions >= 5, "compaction must keep firing (saw {compactions})");
+    assert!(
+        compactions >= 5,
+        "compaction must keep firing (saw {compactions})"
+    );
     assert_eq!(base.len(), 200 + 200 * 2);
     // And the final generation still answers correctly after many fold cycles.
     assert_eq!(

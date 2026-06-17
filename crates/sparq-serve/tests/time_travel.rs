@@ -16,7 +16,14 @@ use sparq_serve::{GenerationRing, RingConfig, TimeTravelConfig};
 /// Snapshots are plain u64 payloads here: time travel is about *which* generation
 /// is served, not about drop instrumentation (tests/ring.rs covers reclamation).
 fn ring(retain: usize, tt: Option<TimeTravelConfig>) -> GenerationRing<u64> {
-    GenerationRing::with_config(0, RingConfig { retain, time_travel: tt, ..RingConfig::default() })
+    GenerationRing::with_config(
+        0,
+        RingConfig {
+            retain,
+            time_travel: tt,
+            ..RingConfig::default()
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -25,7 +32,13 @@ fn ring(retain: usize, tt: Option<TimeTravelConfig>) -> GenerationRing<u64> {
 
 #[test]
 fn at_hits_every_retained_generation_and_misses_the_rest() {
-    let ring = ring(2, Some(TimeTravelConfig { max_generations: 8, max_age: None }));
+    let ring = ring(
+        2,
+        Some(TimeTravelConfig {
+            max_generations: 8,
+            max_age: None,
+        }),
+    );
     for i in 1..=10u64 {
         ring.publish(i, std::iter::empty());
     }
@@ -34,7 +47,9 @@ fn at_hits_every_retained_generation_and_misses_the_rest() {
 
     // Hit: every retained generation, including current, served with its own data.
     for n in 2..=10u64 {
-        let g = ring.at(n).unwrap_or_else(|| panic!("generation {n} should be retained"));
+        let g = ring
+            .at(n)
+            .unwrap_or_else(|| panic!("generation {n} should be retained"));
         assert_eq!(g.number(), n);
         assert_eq!(*g.snapshot(), n);
     }
@@ -42,7 +57,10 @@ fn at_hits_every_retained_generation_and_misses_the_rest() {
     assert!(ring.at(1).is_none(), "generation 1 aged out of the window");
     assert!(ring.at(0).is_none(), "generation 0 aged out of the window");
     // Miss: never published.
-    assert!(ring.at(11).is_none(), "generation 11 has not been published");
+    assert!(
+        ring.at(11).is_none(),
+        "generation 11 has not been published"
+    );
     assert!(ring.at(u64::MAX).is_none());
 }
 
@@ -55,7 +73,10 @@ fn at_without_time_travel_serves_exactly_the_k_window() {
         ring.publish(i, std::iter::empty());
     }
     assert_eq!(ring.oldest_retained(), 7);
-    assert!(ring.at(6).is_none(), "beyond K with no time travel: aged out");
+    assert!(
+        ring.at(6).is_none(),
+        "beyond K with no time travel: aged out"
+    );
     assert_eq!(*ring.at(7).expect("inside K").snapshot(), 7);
     assert_eq!(*ring.at(10).expect("current").snapshot(), 10);
 }
@@ -70,7 +91,11 @@ fn at_returns_none_for_a_generation_only_a_reader_still_pins() {
         ring.publish(i, std::iter::empty());
     }
     assert_eq!(pinned.number(), 0);
-    assert_eq!(*pinned.snapshot(), 0, "the pin itself still serves old data");
+    assert_eq!(
+        *pinned.snapshot(),
+        0,
+        "the pin itself still serves old data"
+    );
     assert!(ring.at(0).is_none(), "ring no longer owns generation 0");
 }
 
@@ -82,21 +107,41 @@ fn at_returns_none_for_a_generation_only_a_reader_still_pins() {
 fn k_floor_wins_when_time_travel_bound_is_smaller() {
     // time-travel max_generations < K: the concurrency floor wins — time travel
     // can extend retention, never shrink it below K.
-    let ring = ring(4, Some(TimeTravelConfig { max_generations: 1, max_age: None }));
+    let ring = ring(
+        4,
+        Some(TimeTravelConfig {
+            max_generations: 1,
+            max_age: None,
+        }),
+    );
     for i in 1..=10u64 {
         ring.publish(i, std::iter::empty());
     }
-    assert_eq!(ring.oldest_retained(), 6, "K=4 older generations kept despite max_generations=1");
+    assert_eq!(
+        ring.oldest_retained(),
+        6,
+        "K=4 older generations kept despite max_generations=1"
+    );
     assert_eq!(ring.live_generations(), 5);
 }
 
 #[test]
 fn time_travel_bound_wins_when_larger_than_k() {
-    let ring = ring(2, Some(TimeTravelConfig { max_generations: 6, max_age: None }));
+    let ring = ring(
+        2,
+        Some(TimeTravelConfig {
+            max_generations: 6,
+            max_age: None,
+        }),
+    );
     for i in 1..=10u64 {
         ring.publish(i, std::iter::empty());
     }
-    assert_eq!(ring.oldest_retained(), 4, "max_generations=6 older generations kept, K=2 floor inactive");
+    assert_eq!(
+        ring.oldest_retained(),
+        4,
+        "max_generations=6 older generations kept, K=2 floor inactive"
+    );
     assert_eq!(ring.live_generations(), 7);
 }
 
@@ -137,7 +182,11 @@ fn max_age_evicts_only_beyond_the_k_floor_and_only_on_publish() {
     // and 3 (1030) are over-age too. But gen 4 sits inside the K=1 floor, which
     // age NEVER evicts.
     ring.publish(5, std::iter::empty());
-    assert_eq!(ring.oldest_retained(), 4, "over-age extension evicted, K floor kept");
+    assert_eq!(
+        ring.oldest_retained(),
+        4,
+        "over-age extension evicted, K floor kept"
+    );
     assert!(ring.at(3).is_none(), "aged out by max_age");
     assert_eq!(*ring.at(4).expect("K floor survives any age").snapshot(), 4);
     assert_eq!(*ring.at(5).expect("current").snapshot(), 5);
@@ -160,7 +209,10 @@ fn as_of_resolves_timestamps_to_the_generation_current_at_that_time() {
         0u64,
         RingConfig {
             retain: 0,
-            time_travel: Some(TimeTravelConfig { max_generations: 2, max_age: None }),
+            time_travel: Some(TimeTravelConfig {
+                max_generations: 2,
+                max_age: None,
+            }),
             clock,
         },
     );
@@ -170,7 +222,11 @@ fn as_of_resolves_timestamps_to_the_generation_current_at_that_time() {
     CLOCK_SECS.store(300, Ordering::SeqCst);
     ring.publish(2, std::iter::empty());
 
-    assert_eq!(ring.at(1).unwrap().published_at(), at(200), "publish stamps the injected clock");
+    assert_eq!(
+        ring.at(1).unwrap().published_at(),
+        at(200),
+        "publish stamps the injected clock"
+    );
 
     // Exact hits and in-between times resolve to the generation current THEN.
     assert_eq!(ring.as_of(at(100)).unwrap().number(), 0);
@@ -188,6 +244,13 @@ fn as_of_resolves_timestamps_to_the_generation_current_at_that_time() {
     CLOCK_SECS.store(400, Ordering::SeqCst);
     ring.publish(3, std::iter::empty());
     assert!(ring.at(0).is_none());
-    assert!(ring.as_of(at(150)).is_none(), "the generation covering t=150 aged out");
-    assert_eq!(ring.as_of(at(200)).unwrap().number(), 1, "still-retained history resolves");
+    assert!(
+        ring.as_of(at(150)).is_none(),
+        "the generation covering t=150 aged out"
+    );
+    assert_eq!(
+        ring.as_of(at(200)).unwrap().number(),
+        1,
+        "still-retained history resolves"
+    );
 }

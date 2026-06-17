@@ -9,9 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sparq_serve::{
-    ApplyUpdates, GenerationRing, PodId, WriteError, Writer, WriterConfig,
-};
+use sparq_serve::{ApplyUpdates, GenerationRing, PodId, WriteError, Writer, WriterConfig};
 
 /// Snapshot = the log of applied updates, in application order.
 type Log = Vec<String>;
@@ -162,7 +160,11 @@ fn one_window_one_generation_epochs_union() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(250), max_batch: 64, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(250),
+            max_batch: 64,
+            ..WriterConfig::default()
+        },
     );
 
     // 7 fire-and-forget + 1 sync, all queued well inside the 250 ms window the
@@ -172,20 +174,33 @@ fn one_window_one_generation_epochs_union() {
             .submit_detached(format!("u{i}"), pods(&[&format!("pod:{i}"), "pod:shared"]))
             .unwrap();
     }
-    let generation = writer.submit("u7".to_string(), pods(&["pod:7", "pod:shared"])).unwrap();
+    let generation = writer
+        .submit("u7".to_string(), pods(&["pod:7", "pod:shared"]))
+        .unwrap();
 
-    assert_eq!(generation, 1, "all 8 updates collapse into the single generation 1");
+    assert_eq!(
+        generation, 1,
+        "all 8 updates collapse into the single generation 1"
+    );
     let current = ring.current();
     assert_eq!(current.number(), 1);
     let expected: Log = (0..8).map(|i| format!("u{i}")).collect();
-    assert_eq!(*current.snapshot(), expected, "strict FIFO submission order");
+    assert_eq!(
+        *current.snapshot(),
+        expected,
+        "strict FIFO submission order"
+    );
     // Union of touched pods, each bumped ONCE per publish (dedup across updates).
     for i in 0..8 {
         assert_eq!(current.epochs().epoch(&PodId::from(format!("pod:{i}"))), 1);
     }
     assert_eq!(current.epochs().epoch(&PodId::from("pod:shared")), 1);
     assert_eq!(current.epochs().len(), 9);
-    assert_eq!(forks.load(Ordering::SeqCst), 1, "one working copy for the whole batch");
+    assert_eq!(
+        forks.load(Ordering::SeqCst),
+        1,
+        "one working copy for the whole batch"
+    );
 }
 
 /// Sequential sync submits land in consecutive generations and each ack carries
@@ -197,7 +212,11 @@ fn sync_submit_returns_its_generation_number() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 256, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 256,
+            ..WriterConfig::default()
+        },
     );
 
     // Each submit blocks until publish, so the next opens a fresh window.
@@ -207,7 +226,10 @@ fn sync_submit_returns_its_generation_number() {
 
     let current = ring.current();
     assert_eq!(current.number(), 3);
-    assert_eq!(*current.snapshot(), vec!["a".to_string(), "b".into(), "c".into()]);
+    assert_eq!(
+        *current.snapshot(),
+        vec!["a".to_string(), "b".into(), "c".into()]
+    );
     assert_eq!(current.epochs().epoch(&PodId::from("p")), 2);
     assert_eq!(current.epochs().epoch(&PodId::from("q")), 1);
 }
@@ -223,7 +245,11 @@ fn failed_update_is_isolated_and_recovered() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(300), max_batch: 64, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(300),
+            max_batch: 64,
+            ..WriterConfig::default()
+        },
     ));
 
     // Deterministic in-window order via staggered sync submitters: a (t≈0),
@@ -247,15 +273,35 @@ fn failed_update_is_isolated_and_recovered() {
         WriteError::Rejected("boom".into()),
         "the failed update's submitter gets ITS error"
     );
-    assert_eq!(c.join().unwrap().unwrap(), 1, "the batch survivor publishes in the same generation");
+    assert_eq!(
+        c.join().unwrap().unwrap(),
+        1,
+        "the batch survivor publishes in the same generation"
+    );
 
     let current = ring.current();
-    assert_eq!(current.number(), 1, "one generation despite the mid-batch failure");
-    assert_eq!(*current.snapshot(), vec!["a".to_string(), "c".into()], "no POISON, order kept");
+    assert_eq!(
+        current.number(),
+        1,
+        "one generation despite the mid-batch failure"
+    );
+    assert_eq!(
+        *current.snapshot(),
+        vec!["a".to_string(), "c".into()],
+        "no POISON, order kept"
+    );
     assert_eq!(current.epochs().epoch(&PodId::from("pod:a")), 1);
     assert_eq!(current.epochs().epoch(&PodId::from("pod:c")), 1);
-    assert_eq!(current.epochs().epoch(&PodId::from("pod:bad")), 0, "skipped update bumps nothing");
-    assert_eq!(forks.load(Ordering::SeqCst), 2, "initial fork + one recovery re-fork");
+    assert_eq!(
+        current.epochs().epoch(&PodId::from("pod:bad")),
+        0,
+        "skipped update bumps nothing"
+    );
+    assert_eq!(
+        forks.load(Ordering::SeqCst),
+        2,
+        "initial fork + one recovery re-fork"
+    );
 }
 
 /// A batch in which EVERY update fails publishes nothing — the generation
@@ -267,12 +313,22 @@ fn all_failed_batch_publishes_no_generation() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 8, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 8,
+            ..WriterConfig::default()
+        },
     );
 
-    let err = writer.submit("fail:nope".into(), pods(&["pod:x"])).unwrap_err();
+    let err = writer
+        .submit("fail:nope".into(), pods(&["pod:x"]))
+        .unwrap_err();
     assert_eq!(err, WriteError::Rejected("nope".into()));
-    assert_eq!(ring.current().number(), 0, "nothing changed, nothing published");
+    assert_eq!(
+        ring.current().number(),
+        0,
+        "nothing changed, nothing published"
+    );
     assert!(ring.current().epochs().is_empty());
 
     // The writer is still healthy afterwards.
@@ -288,7 +344,11 @@ fn window_closes_early_on_max_batch() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_secs(10), max_batch: 2, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_secs(10),
+            max_batch: 2,
+            ..WriterConfig::default()
+        },
     ));
 
     let started = Instant::now();
@@ -300,7 +360,11 @@ fn window_closes_early_on_max_batch() {
     let g1 = t.join().unwrap().unwrap();
     let elapsed = started.elapsed();
 
-    assert_eq!((g1, g2), (1, 1), "both updates in the one max_batch-closed generation");
+    assert_eq!(
+        (g1, g2),
+        (1, 1),
+        "both updates in the one max_batch-closed generation"
+    );
     assert!(
         elapsed < Duration::from_secs(5),
         "max_batch must close the 10 s window early (took {elapsed:?})"
@@ -317,7 +381,11 @@ fn window_timing_approximately_honored() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(80), max_batch: 256, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(80),
+            max_batch: 256,
+            ..WriterConfig::default()
+        },
     );
 
     let started = Instant::now();
@@ -343,14 +411,21 @@ fn drop_drains_pending_batch() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_secs(10), max_batch: 256, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_secs(10),
+            max_batch: 256,
+            ..WriterConfig::default()
+        },
     );
 
     writer.submit_detached("a".into(), pods(&["p"])).unwrap();
     writer.submit_detached("b".into(), pods(&["q"])).unwrap();
     let started = Instant::now();
     drop(writer); // closes the queue; the open window ends early; batch commits
-    assert!(started.elapsed() < Duration::from_secs(5), "drop does not wait out the window");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "drop does not wait out the window"
+    );
 
     let current = ring.current();
     assert_eq!(current.number(), 1);
@@ -367,13 +442,23 @@ fn applier_panic_reports_shutdown() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 8, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 8,
+            ..WriterConfig::default()
+        },
     );
 
-    assert_eq!(writer.submit("panic".into(), pods(&["p"])).unwrap_err(), WriteError::Shutdown);
+    assert_eq!(
+        writer.submit("panic".into(), pods(&["p"])).unwrap_err(),
+        WriteError::Shutdown
+    );
     // The thread is gone (the receiver dropped with it): later submissions fail
     // fast instead of queueing forever.
-    assert_eq!(writer.submit("a".into(), pods(&["p"])).unwrap_err(), WriteError::Shutdown);
+    assert_eq!(
+        writer.submit("a".into(), pods(&["p"])).unwrap_err(),
+        WriteError::Shutdown
+    );
     assert_eq!(ring.current().number(), 0);
 }
 
@@ -396,7 +481,11 @@ fn readers_never_stall_while_writer_commits() {
             maintain_fails: Arc::new(AtomicUsize::new(0)),
             committed: 0,
         },
-        WriterConfig { window: Duration::from_millis(1), max_batch: 64, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 64,
+            ..WriterConfig::default()
+        },
     ));
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -408,7 +497,10 @@ fn readers_never_stall_while_writer_commits() {
         std::thread::spawn(move || {
             let mut i = 0u64;
             while !stop.load(Ordering::Relaxed) {
-                if writer.submit_detached(format!("u{i}"), [PodId::from("pod:w")]).is_err() {
+                if writer
+                    .submit_detached(format!("u{i}"), [PodId::from("pod:w")])
+                    .is_err()
+                {
                     break;
                 }
                 i += 1;
@@ -440,17 +532,27 @@ fn readers_never_stall_while_writer_commits() {
     feeder.join().unwrap();
 
     let committed = ring.current().number();
-    assert!(committed > 50, "writer must have committed continuously (got {committed})");
+    assert!(
+        committed > 50,
+        "writer must have committed continuously (got {committed})"
+    );
 
     for r in readers {
         let mut lat = r.join().unwrap();
-        assert!(lat.len() > 10_000, "reader must have run hot ({} reads)", lat.len());
+        assert!(
+            lat.len() > 10_000,
+            "reader must have run hot ({} reads)",
+            lat.len()
+        );
         lat.sort_unstable();
         let p99 = lat[lat.len() * 99 / 100];
         // Lock-free load is ~tens of ns; 1 ms is two orders of magnitude of
         // scheduler-noise headroom. A reader blocked behind a 2 ms fork or the
         // writer's batch application would blow straight past this.
-        assert!(p99 < 1_000_000, "reader p99 = {p99} ns — a read blocked on the write path");
+        assert!(
+            p99 < 1_000_000,
+            "reader p99 = {p99} ns — a read blocked on the write path"
+        );
     }
 }
 
@@ -469,7 +571,11 @@ fn transient_seal_failure_refuses_then_recovers() {
         ring.clone(),
         MockApplier::with_seal_control(&forks, &seal_fails, &seals),
         // One update per window so each is its own batch / generation attempt.
-        WriterConfig { window: Duration::from_millis(5), max_batch: 1, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(5),
+            max_batch: 1,
+            ..WriterConfig::default()
+        },
     );
 
     // Baseline: a normal write publishes generation 1.
@@ -500,11 +606,20 @@ fn transient_seal_failure_refuses_then_recovers() {
 
     // The writer thread SURVIVED: a subsequent write after recovery succeeds + publishes.
     let g2 = writer.submit("ok-2".to_string(), pods(&["pod:a"])).unwrap();
-    assert_eq!(g2, 2, "writer must keep running and publish after a transient failure");
-    assert_eq!(ring.current().snapshot(), &vec!["ok-1".to_string(), "ok-2".to_string()]);
+    assert_eq!(
+        g2, 2,
+        "writer must keep running and publish after a transient failure"
+    );
+    assert_eq!(
+        ring.current().snapshot(),
+        &vec!["ok-1".to_string(), "ok-2".to_string()]
+    );
 
     // Sanity: the writer actually re-attempted the seal after the refusal.
-    assert!(seals.load(Ordering::SeqCst) >= 3, "writer must have re-attempted seal after refusal");
+    assert!(
+        seals.load(Ordering::SeqCst) >= 3,
+        "writer must have re-attempted seal after refusal"
+    );
 }
 
 /// [OPUS-4.8] (sq-vpx4) Per-submitter failure semantics when `seal` fails on a MIXED
@@ -522,7 +637,11 @@ fn seal_failure_keeps_apply_rejection_distinct_from_unavailable() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         MockApplier::with_seal_control(&forks, &seal_fails, &seals),
-        WriterConfig { window: Duration::from_millis(300), max_batch: 64, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(300),
+            max_batch: 64,
+            ..WriterConfig::default()
+        },
     ));
 
     // Arm ONE seal failure: it fires when the writer seals this batch.
@@ -554,10 +673,19 @@ fn seal_failure_keeps_apply_rejection_distinct_from_unavailable() {
     );
 
     // FAIL-CLOSED: nothing published; the writer survived and recovers on the next write.
-    assert_eq!(ring.current().number(), 0, "a seal-failed batch must publish no generation");
+    assert_eq!(
+        ring.current().number(),
+        0,
+        "a seal-failed batch must publish no generation"
+    );
     assert!(ring.current().snapshot().is_empty());
-    let g = writer.submit("ok-after".to_string(), pods(&["pod:ok"])).unwrap();
-    assert_eq!(g, 1, "writer must keep running and publish once durability recovers");
+    let g = writer
+        .submit("ok-after".to_string(), pods(&["pod:ok"]))
+        .unwrap();
+    assert_eq!(
+        g, 1,
+        "writer must keep running and publish once durability recovers"
+    );
 }
 
 /// [OPUS-4.8] (sq-vpx4) A PERSISTENT durable-write error → every write is refused with
@@ -573,7 +701,11 @@ fn persistent_seal_failure_refuses_repeatedly_reads_survive() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::with_seal_control(&forks, &seal_fails, &seals),
-        WriterConfig { window: Duration::from_millis(5), max_batch: 1, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(5),
+            max_batch: 1,
+            ..WriterConfig::default()
+        },
     );
 
     // Establish a published snapshot, then jam durability "persistently".
@@ -587,7 +719,11 @@ fn persistent_seal_failure_refuses_repeatedly_reads_survive() {
             "write #{n} under persistent durability failure must be Unavailable, got {r:?}",
         );
         // Reads still served from the last good snapshot throughout the outage.
-        assert_eq!(ring.current().number(), 1, "reads must keep serving generation 1 during the outage");
+        assert_eq!(
+            ring.current().number(),
+            1,
+            "reads must keep serving generation 1 during the outage"
+        );
         assert_eq!(ring.current().snapshot(), &vec!["ok-1".to_string()]);
     }
 
@@ -613,7 +749,11 @@ fn maintain_runs_after_preceding_updates_no_new_generation() {
         ring.clone(),
         MockApplier::with_maintain_control(&forks, &maintains, &maintain_fails),
         // Tiny window so each submit commits as its own generation promptly.
-        WriterConfig { window: Duration::from_millis(5), max_batch: 64, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(5),
+            max_batch: 64,
+            ..WriterConfig::default()
+        },
     );
 
     // Commit three updates (FIFO), each its own generation.
@@ -621,15 +761,31 @@ fn maintain_runs_after_preceding_updates_no_new_generation() {
         writer.submit(format!("u{n}"), pods(&["pod:a"])).unwrap();
     }
     let gen_before = ring.current().number();
-    assert_eq!(ring.current().snapshot().len(), 3, "three updates committed");
+    assert_eq!(
+        ring.current().snapshot().len(),
+        3,
+        "three updates committed"
+    );
 
     // Maintenance: blocks, runs on the writer thread, returns Ok.
     assert_eq!(writer.maintain().unwrap(), Ok(()));
 
     // It observed all three committed updates (ran after them), and published no generation.
-    assert_eq!(*maintains.lock().unwrap(), vec![3], "maintain ran once, after the 3 updates");
-    assert_eq!(ring.current().number(), gen_before, "maintenance must not publish a new generation");
-    assert_eq!(ring.current().snapshot().len(), 3, "the live snapshot is unchanged by maintenance");
+    assert_eq!(
+        *maintains.lock().unwrap(),
+        vec![3],
+        "maintain ran once, after the 3 updates"
+    );
+    assert_eq!(
+        ring.current().number(),
+        gen_before,
+        "maintenance must not publish a new generation"
+    );
+    assert_eq!(
+        ring.current().snapshot().len(),
+        3,
+        "the live snapshot is unchanged by maintenance"
+    );
 }
 
 /// A maintenance FAILURE is reported to the caller (inner `Err`) WITHOUT tearing down the writer:
@@ -643,17 +799,32 @@ fn maintain_failure_keeps_writer_alive() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::with_maintain_control(&forks, &maintains, &maintain_fails),
-        WriterConfig { window: Duration::from_millis(5), max_batch: 64, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(5),
+            max_batch: 64,
+            ..WriterConfig::default()
+        },
     );
 
     writer.submit("u0".to_string(), pods(&["pod:a"])).unwrap();
     // First maintenance fails (inner Err), but the writer thread survives.
     let r = writer.maintain().unwrap();
-    assert!(r.is_err(), "armed maintenance failure must surface as Err, got {r:?}");
+    assert!(
+        r.is_err(),
+        "armed maintenance failure must surface as Err, got {r:?}"
+    );
     // A subsequent write still commits…
     writer.submit("u1".to_string(), pods(&["pod:a"])).unwrap();
-    assert_eq!(ring.current().snapshot().len(), 2, "writes work after a maintenance failure");
+    assert_eq!(
+        ring.current().snapshot().len(),
+        2,
+        "writes work after a maintenance failure"
+    );
     // …and a later maintenance now succeeds.
     assert_eq!(writer.maintain().unwrap(), Ok(()));
-    assert_eq!(maintains.lock().unwrap().len(), 2, "both maintenance attempts ran");
+    assert_eq!(
+        maintains.lock().unwrap().len(),
+        2,
+        "both maintenance attempts ran"
+    );
 }
