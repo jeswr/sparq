@@ -183,7 +183,10 @@ fn reader_under_writer(max_batch: usize, dur: Duration, mode: Mode) -> Vec<u64> 
                     let base = ring2.current();
                     let mut w = applier.fork(base.snapshot()).unwrap();
                     if applier.apply(&mut w, &update(i)).is_ok() {
-                        let s = applier.seal(w);
+                        // seal now returns Result (the applier's compaction-fold can fail on a
+                        // durable-backed store); this in-memory applier never errs, so a failure
+                        // here is a real bug — surface it rather than skip the publish.
+                        let s = applier.seal(w).expect("in-memory seal never fails");
                         ring2.publish(s, [PodId::from("pod:w")]);
                     }
                     i += 1;
