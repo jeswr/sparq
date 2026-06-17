@@ -1,6 +1,6 @@
 ---
 name: prov-lineage
-description: "Capture W3C PROV-O data lineage for DERIVED RDF — when a CONSTRUCT/DESCRIBE query produces a new graph, record who/what/when made it (prov:Activity + prov:Entity + wasGeneratedBy/used/wasDerivedFrom) using the opt-in sparq-prov crate. Use when you need machine-readable provenance for derived data — citable lineage for GenAI-grounded answers, audit/compliance (CDMC CD-1) data-lineage capture, or attribution of constructed graphs to their source(s). Off by default; does not touch sparq-core/sparq-engine's lean build."
+description: "Capture W3C PROV-O data lineage for DERIVED RDF — when a CONSTRUCT/DESCRIBE query produces a new graph, OR a reasoner materializes inferred triples (RDFS/OWL-RL/N3), record who/what/when made it (prov:Activity + prov:Entity + wasGeneratedBy/used/wasDerivedFrom) using the opt-in sparq-prov crate. Use when you need machine-readable provenance for derived data — citable lineage for GenAI-grounded answers, audit/compliance (CDMC CD-1) data-lineage capture, attribution of constructed graphs to their source(s), or per-fact inference lineage from a why() proof tree (the `reason` feature). Off by default; does not touch sparq-core/sparq-engine's lean build."
 ---
 
 # sparq-prov — W3C PROV-O lineage for derived data
@@ -80,17 +80,59 @@ RDF parser (tested against both `Graph::load_str` and `oxttl::NTriplesParser`).
 - `ProvConfig.used` lists the input-source IRIs (typically the dataset / named
   graph the CONSTRUCT ran against); `ProvConfig.agent` names the running service.
 
+## Reasoner-materialization lineage (`reason` feature)
+
+Inference *is* derivation: when a reasoner materializes a triple, that triple is
+`wasDerivedFrom` the premises the rule fired on. The `reason` feature turns a
+`sparq-reason` `why()` proof tree (the `explain` feature there) straight into
+PROV-O — a *finer-grained* provenance than a single CONSTRUCT activity, because
+it names the rule and exact premises for **each** inferred fact.
+
+```toml
+[dependencies]
+sparq-prov   = { path = "crates/sparq-prov", features = ["reason"] }
+sparq-reason = { path = "crates/sparq-reason", features = ["explain"] }
+```
+
+```rust
+use sparq_prov::{prov_from_proof, ProvProofConfig};
+
+// g: a sparq_reason::MaterializedGraph / MaterializedOwlGraph / MaterializedN3Graph.
+let proof   = g.why(&dict, inferred_fact).expect("fact is in the closure");
+let lineage = prov_from_proof(&proof, &ProvProofConfig::default());  // Vec<Triple>
+```
+
+Emitted shape — for each proof node (fact) `F` and the rule firing `R` that
+generated a non-leaf `F` from premises `Pᵢ`:
+
+```turtle
+F  a                   prov:Entity .
+R  a                   prov:Activity .
+R  rdfs:label          "cax-sco" .          # rdfs9 / prp-trp / n3-rule-0 / …
+F  prov:wasGeneratedBy R .
+R  prov:used           Pᵢ .                  # one per premise
+F  prov:wasDerivedFrom Pᵢ .
+R  prov:generatedAtTime "…Z"^^xsd:dateTime . # iff ProvProofConfig.clock is set
+R  prov:wasAssociatedWith <agent> .          # iff ProvProofConfig.agent is set
+```
+
+Asserted leaves and `axiom-*` tautologies are entities with **no** generating
+activity — they are the boundary the derivation rests on. Entity/activity IRIs
+are content-addressed (`urn:sparq:prov:fact:…` / `:rule:…`) from the proof's
+canonical term strings, so lineage from overlapping proofs **stitches** into one
+DAG (the same shared fact names the same entity).
+
 ## Scope — covered vs deferred
 
 | Derivation path | Status |
 |---|---|
 | `CONSTRUCT` / `DESCRIBE` | ✅ covered (`derive_construct`) |
+| Reasoner materialization (RDFS / OWL-RL / N3) | ✅ covered (`reason` feature → `prov_from_proof`) |
 | SPARQL UPDATE (`INSERT … WHERE`, `INSERT DATA`) | ⏳ deferred (follow-up bead) |
-| Reasoner materialization (RDFS / OWL-RL / N3) | ⏳ deferred — reuses `sparq-reason`'s `why()` proof trees, a finer-grained per-triple derivation provenance (follow-up bead) |
 
-For the reasoner's *inference* provenance today, see the
+For the reasoner's per-fact proof itself (the input to `prov_from_proof`), see the
 [`inference`](../inference/SKILL.md) skill's `explain` feature (`why()` produces
-an N3 proof tree — derivation provenance at the rule/premise level).
+a proof tree — derivation provenance at the rule/premise level).
 
 ## See also
 

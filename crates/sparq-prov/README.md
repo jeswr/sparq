@@ -56,6 +56,15 @@ let turtle  = d.prov_ntriples();    // …serialised (N-Triples ⊂ Turtle)
   `urn:sparq:prov:` nodes (same derivation ⇒ same IRIs); set `ProvConfig`
   `activity`/`entity`/`used`/`agent` to integrate with an external provenance
   store or named-graph scheme. The clock is injectable for deterministic tests.
+- **Reasoner-materialization lineage** (`reason` feature) — [`prov_from_proof`]
+  maps a `sparq-reason` `why()` proof tree to PROV-O: one `prov:Entity` per
+  inferred fact, one `prov:Activity` per rule firing (labelled `cax-sco` /
+  `rdfs9` / `prp-trp` / `n3-rule-i` / …), with `wasGeneratedBy` / `used` /
+  `wasDerivedFrom` edges. Inference *is* derivation, and the proof tree is a
+  *finer-grained* provenance than a single CONSTRUCT activity (it names the rule
+  and exact premises for each fact). Entity/activity IRIs are content-addressed,
+  so lineage from overlapping proofs **stitches** into one DAG. Non-default
+  feature: the `sparq-reason` dep is pulled only when you ask for `reason`.
 - **Dependency-light** — `xsd:dateTime` is formatted in-crate (no `chrono`/
   `time` dep); the formatter is the inverse of `sparq-core`'s dateTime parser,
   so a recorded timestamp parses back to the same instant (tested).
@@ -65,11 +74,12 @@ let turtle  = d.prov_ntriples();    // …serialised (N-Triples ⊂ Turtle)
 | Derivation path | Status |
 |---|---|
 | `CONSTRUCT` / `DESCRIBE` (query → new graph) | ✅ covered here |
+| Reasoner materialization (RDFS / OWL-RL / N3) | ✅ covered (`reason` feature) — reuses `sparq-reason`'s per-fact `why()` proof trees: a *finer-grained* derivation provenance than PROV-O alone |
 | SPARQL UPDATE (`INSERT … WHERE`, `INSERT DATA`) | ⏳ deferred (follow-up bead) |
-| Reasoner materialization (RDFS / OWL-RL / N3) | ⏳ deferred — would reuse `sparq-reason`'s per-triple `why()` proof trees, a *finer-grained* derivation provenance than PROV-O alone (follow-up bead) |
 
 The CONSTRUCT path is the cleanest, best-tested derivation in the engine and the
-natural first PROV-O target; the deferred paths are filed as beads.
+natural first PROV-O target; reasoner materialization reuses the existing proof
+trees; the remaining UPDATE path is filed as a bead. [OPUS-4.8] sq-m3i0
 
 ## 📚 Learn more
 
