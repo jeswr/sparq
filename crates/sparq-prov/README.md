@@ -42,6 +42,15 @@ let turtle  = d.prov_ntriples();    // …serialised (N-Triples ⊂ Turtle)
 - **CONSTRUCT/DESCRIBE lineage** — [`derive_construct`] wraps the engine's
   `CONSTRUCT`/`DESCRIBE` evaluation, times it, and returns a [`Derivation`]
   carrying both the derived triples and a PROV-O lineage graph.
+- **SPARQL UPDATE lineage** — [`derive_update`] applies an `INSERT … WHERE` /
+  `INSERT DATA` / `DELETE …` in place, captures the engine's *resolved* effect log,
+  and returns an [`UpdateDerivation`]. The two-sided PROV reading: the **inserted**
+  triples are *generated* (a `prov:Entity` `wasGeneratedBy` the update,
+  `wasDerivedFrom` the matched inputs); the **deleted** triples are *invalidated*
+  (`prov:wasInvalidatedBy`) — retraction is not derivation, so deletes are never
+  claimed as generated/derived. A pure-delete update generates nothing (no result
+  entity). Structural ops (`CLEAR`/`DROP`/`CREATE`) are recorded as an activity kind
+  but carry no per-triple entity (a deliberate honesty boundary — see below).
 - **Standard PROV-O shape** — for result entity `E`, activity `A`, inputs `Iᵢ`:
   `A a prov:Activity` · `E a prov:Entity` ·
   `A prov:startedAtTime/endedAtTime "…"^^xsd:dateTime` ·
@@ -73,13 +82,15 @@ let turtle  = d.prov_ntriples();    // …serialised (N-Triples ⊂ Turtle)
 
 | Derivation path | Status |
 |---|---|
-| `CONSTRUCT` / `DESCRIBE` (query → new graph) | ✅ covered here |
+| `CONSTRUCT` / `DESCRIBE` (query → new graph) | ✅ covered here (`derive_construct`) |
 | Reasoner materialization (RDFS / OWL-RL / N3) | ✅ covered (`reason` feature) — reuses `sparq-reason`'s per-fact `why()` proof trees: a *finer-grained* derivation provenance than PROV-O alone |
-| SPARQL UPDATE (`INSERT … WHERE`, `INSERT DATA`) | ⏳ deferred (follow-up bead) |
+| SPARQL UPDATE data ops (`INSERT … WHERE`, `INSERT DATA`, `DELETE …`, `LOAD`) | ✅ covered here (`derive_update`) — inserts ⇒ generated/derived, deletes ⇒ `wasInvalidatedBy` |
+| SPARQL UPDATE structural ops (`CLEAR` / `DROP` / `CREATE`) | ⛔ no per-triple entity (deliberate boundary — they change graph existence/emptiness, not triples-as-data; recorded only as the activity kind) |
 
 The CONSTRUCT path is the cleanest, best-tested derivation in the engine and the
 natural first PROV-O target; reasoner materialization reuses the existing proof
-trees; the remaining UPDATE path is filed as a bead. [OPUS-4.8] sq-m3i0
+trees; UPDATE lineage reads the engine's resolved effect log so capture is exact
+even for non-deterministic update text. [OPUS-4.8] sq-m3i0, sq-xwdd
 
 ## 📚 Learn more
 
