@@ -25,7 +25,12 @@ TIMEOUT            = 30s
 
 [runtime]
 SYSTEM = native
-IMAGE  = docker.io/adfreiburg/qlever:latest
+# [OPUS-4.8] sq-l9yt: pinned by sha256 digest for reproducibility (was :latest).
+# This is the multi-arch manifest-list (OCI index) digest of adfreiburg/qlever:latest
+# resolved 2026-06-17; it is what `docker pull` resolves and what `docker inspect
+# --format '{{index .RepoDigests 0}}'` records (see scripts/gather-competitors.sh).
+# Re-pin only deliberately (record the new digest in bench/competitors.json too).
+IMAGE  = docker.io/adfreiburg/qlever@sha256:6fb9ce89e6461607e0826872369ad09c48e96b4c6faffc3f0c8133001858c29b
 
 [ui]
 UI_CONFIG = olympics
