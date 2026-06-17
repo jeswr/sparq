@@ -104,6 +104,11 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   iff `mask_len · scatter_penalty ≤ store_len` (default crossover ≈ half the store). Both branches
   return the **byte-identical** top-k (asserted in tests), so the choice trades only throughput,
   never the answer; it is a heuristic over a cost estimate, not an optimum.
+  Composed instead with `approx-ann` (sq-z589), the `query_vec_approx` / `prepare_vec_approx` twins
+  take an on-disk `DiskAnnIndex` and run the **unfiltered** `vec:` k-NN through that Vamana graph
+  rather than the full scan — for large `.spqv` stores. **APPROXIMATE (recall `< 1.0`)**, never
+  claimed as exact; use the exact `query_vec` when answer-exactness matters. The filtered path above
+  is unaffected (still cost-model'd) — the approximate seam swaps only the unfiltered scan.
 - **Verbalization** — `verbalize` / `embed_entities` render `<label>. a <type>. <description>`
   per entity (multilingual, char-budgeted); `embed_labels` is the label-only special case.
 - **Quantization** — `ScalarQuantizer` (4×) and `ProductQuantizer` (asymmetric distance) for

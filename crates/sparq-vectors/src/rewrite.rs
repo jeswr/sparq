@@ -81,6 +81,11 @@
 use crate::ann::nearest_exact;
 use crate::store::VectorStore;
 use crate::vocab;
+// [OPUS-4.8] (sq-z589, epic sq-3183) The approximate backend the `*_approx` entry points search
+// the UNFILTERED `vec:` path through — the on-disk Vamana graph. `approx-ann` only (the only
+// feature that compiles an approximate index); with it off the crate carries only the exact path.
+#[cfg(feature = "approx-ann")]
+use crate::diskann::DiskAnnIndex;
 use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashMap;
 use spargebra::algebra::GraphPattern;
@@ -117,8 +122,51 @@ const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 
+/// [OPUS-4.8] (sq-z589, epic sq-3183) The backend the UNFILTERED `vec:` k-NN runs through. The
+/// rewrite picks neighbours by this seam, so swapping the exact full scan for an approximate index
+/// is a one-line backend swap with NO other change to the rewrite (parse, list-walk, error checks,
+/// seed-self-exclusion, VALUES inlining and the join all stay identical). Two impls:
+///
+/// - [`ExactSearch`] (default; the original `vec:` behaviour) — a full [`nearest_exact`] scan;
+///   answer-exact, the deterministic ground truth, a fine default below ~10⁵ vectors.
+/// - `ApproxSearch` (`approx-ann` only) — the on-disk [`DiskAnnIndex`] Vamana greedy beam search;
+///   APPROXIMATE (recall < 1.0 — see [`crate::ann`]/[`crate::diskann`]), for large `.spqv` stores
+///   where the full scan is the bottleneck. NEVER claimed as exact: the index can miss a true
+///   neighbour. The FILTERED `vec:` path (when `filtered-ann` composes in) is unchanged — it still
+///   goes through the cost-model'd `nearest_filtered_costed`; this seam is only the unfiltered scan.
+trait UnfilteredSearch {
+    /// Top-`k` `(id, cosine)` by similarity to `query`, best first (same contract as
+    /// [`nearest_exact`]: all-zero query → no results).
+    fn search(&self, query: &[f32], k: usize) -> Vec<(Id, f32)>;
+}
+
+/// The exact full-scan backend — preserves the pre-sq-z589 `vec:` behaviour exactly.
+struct ExactSearch<'a> {
+    store: &'a VectorStore,
+}
+
+impl UnfilteredSearch for ExactSearch<'_> {
+    fn search(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
+        nearest_exact(self.store, query, k)
+    }
+}
+
+/// [OPUS-4.8] (sq-z589) The approximate on-disk Vamana backend — `approx-ann` only.
+#[cfg(feature = "approx-ann")]
+struct ApproxSearch<'a> {
+    index: &'a DiskAnnIndex,
+}
+
+#[cfg(feature = "approx-ann")]
+impl UnfilteredSearch for ApproxSearch<'_> {
+    fn search(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
+        self.index.nearest(query, k)
+    }
+}
+
 /// Executes a SPARQL query that may use the `vec:` magic predicates: parse,
-/// [`rewrite_query`], then evaluate with the standard engine.
+/// [`rewrite_query`], then evaluate with the standard engine. The unfiltered k-NN is the
+/// answer-exact full scan — for the **approximate** index path see [`query_vec_approx`].
 pub fn query_vec(graph: &Graph, sparql: &str, store: &VectorStore) -> Result<QueryResult, String> {
     sparq_engine::query_prepared(graph, &prepare_vec(graph, sparql, store)?)
 }
@@ -142,6 +190,80 @@ pub fn prepare_vec(
     sparql: &str,
     store: &VectorStore,
 ) -> Result<PreparedQuery, String> {
+    prepare_with(graph, sparql, store, &ExactSearch { store })
+}
+
+/// [OPUS-4.8] (sq-z589, epic sq-3183) [`query_vec`] but with the **unfiltered** k-NN run through an
+/// approximate on-disk [`DiskAnnIndex`] (Vamana) instead of the exact full scan — for large `.spqv`
+/// stores where the brute-force scan is the bottleneck. Everything else is identical to
+/// [`query_vec`]: parse, rewrite, VALUES inlining, joins, error checks, the seed-self-exclusion, and
+/// (when `filtered-ann` composes in) the BGP→mask filtered path.
+///
+/// **Approximate ⇒ recall < 1.0.** The index can miss a true neighbour the greedy beam never
+/// visits; this is the *approximate* ranking, NOT the exact top-`k`. Use [`query_vec`] (the exact
+/// scan) when answer-exactness matters. `OFF by default` — gated on `approx-ann` (the only feature
+/// that pulls an approximate index into the build) on top of `vec-predicate`.
+///
+/// The `index` must be built against the SAME graph generation as `graph`/`store` (its dictionary
+/// ids must match): pass an index built with [`DiskAnnIndex::build_for`] so the fingerprint guard
+/// catches a stale index, exactly as the store's own fingerprint guard does.
+///
+/// Note: the **filtered** `vec:` path (when `filtered-ann` is also on and the neighbour variable is
+/// constrained) is unaffected — it still goes through the cost-model'd filtered search. This entry
+/// point only swaps the *unfiltered* scan for the approximate index.
+#[cfg(feature = "approx-ann")]
+pub fn query_vec_approx(
+    graph: &Graph,
+    sparql: &str,
+    store: &VectorStore,
+    index: &DiskAnnIndex,
+) -> Result<QueryResult, String> {
+    sparq_engine::query_prepared(graph, &prepare_vec_approx(graph, sparql, store, index)?)
+}
+
+/// [OPUS-4.8] (sq-z589) [`query_vec_approx`] under a cooperative [`QueryBudget`].
+#[cfg(feature = "approx-ann")]
+pub fn query_vec_approx_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    store: &VectorStore,
+    index: &DiskAnnIndex,
+    budget: &QueryBudget,
+) -> Result<QueryResult, String> {
+    sparq_engine::query_prepared_with_budget(
+        graph,
+        &prepare_vec_approx(graph, sparql, store, index)?,
+        budget,
+    )
+}
+
+/// [OPUS-4.8] (sq-z589) [`prepare_vec`] but resolving the **unfiltered** `vec:` k-NN through the
+/// approximate `index` — the prepare-time twin of [`query_vec_approx`]. See that function for the
+/// recall / staleness caveats.
+#[cfg(feature = "approx-ann")]
+pub fn prepare_vec_approx(
+    graph: &Graph,
+    sparql: &str,
+    store: &VectorStore,
+    index: &DiskAnnIndex,
+) -> Result<PreparedQuery, String> {
+    // The index is keyed by `graph`'s dictionary ids too, so verify it alongside the store when it
+    // carries a fingerprint (built with `build_for`); a legacy/unbound index is left to work as
+    // before, like the store guard below.
+    if index.fingerprint().is_some() {
+        index.check_graph(store, graph)?;
+    }
+    prepare_with(graph, sparql, store, &ApproxSearch { index })
+}
+
+/// Shared prepare body: staleness-guard the store, parse, then rewrite every `vec:` pattern with
+/// `searcher` as the unfiltered backend.
+fn prepare_with(
+    graph: &Graph,
+    sparql: &str,
+    store: &VectorStore,
+    searcher: &dyn UnfilteredSearch,
+) -> Result<PreparedQuery, String> {
     // [OPUS-4.8] Opportunistic staleness guard: the store is keyed by `graph`'s
     // dictionary ids, so a store built against a DIFFERENT graph would silently
     // mis-resolve neighbours. If the store carries a graph fingerprint, verify
@@ -153,16 +275,26 @@ pub fn prepare_vec(
     let query = spargebra::SparqlParser::new()
         .parse_query(sparql)
         .map_err(|e| e.to_string())?;
-    Ok(PreparedQuery::from(rewrite_query(query, graph, store)?))
+    Ok(PreparedQuery::from(rewrite_query_with(
+        query, graph, store, searcher,
+    )?))
 }
 
 /// Rewrites every `vec:` magic pattern in the query into inline `VALUES` over
 /// the search hits (see the module docs). A query without `vec:` patterns
-/// passes through unchanged.
-pub fn rewrite_query(
+/// passes through unchanged. The unfiltered k-NN uses the exact full scan — for the approximate
+/// index path use [`query_vec_approx`] / [`prepare_vec_approx`].
+pub fn rewrite_query(query: Query, graph: &Graph, store: &VectorStore) -> Result<Query, String> {
+    rewrite_query_with(query, graph, store, &ExactSearch { store })
+}
+
+/// Threaded form of [`rewrite_query`]: `searcher` is the unfiltered k-NN backend (exact scan or an
+/// approximate index). [OPUS-4.8] (sq-z589)
+fn rewrite_query_with(
     mut query: Query,
     graph: &Graph,
     store: &VectorStore,
+    searcher: &dyn UnfilteredSearch,
 ) -> Result<Query, String> {
     let pattern = match &mut query {
         Query::Select { pattern, .. }
@@ -170,24 +302,29 @@ pub fn rewrite_query(
         | Query::Describe { pattern, .. }
         | Query::Ask { pattern, .. } => pattern,
     };
-    rewrite_pattern(pattern, graph, store)?;
+    rewrite_pattern(pattern, graph, store, searcher)?;
     Ok(query)
 }
 
 /// Recursively rewrites the magic patterns inside `p`.
-fn rewrite_pattern(p: &mut GraphPattern, graph: &Graph, store: &VectorStore) -> Result<(), String> {
+fn rewrite_pattern(
+    p: &mut GraphPattern,
+    graph: &Graph,
+    store: &VectorStore,
+    searcher: &dyn UnfilteredSearch,
+) -> Result<(), String> {
     match p {
         GraphPattern::Bgp { patterns } => {
             let patterns = std::mem::take(patterns);
-            *p = rewrite_bgp(patterns, graph, store)?;
+            *p = rewrite_bgp(patterns, graph, store, searcher)?;
         }
         GraphPattern::Join { left, right }
         | GraphPattern::LeftJoin { left, right, .. }
         | GraphPattern::Union { left, right }
         | GraphPattern::Minus { left, right }
         | GraphPattern::Lateral { left, right } => {
-            rewrite_pattern(left, graph, store)?;
-            rewrite_pattern(right, graph, store)?;
+            rewrite_pattern(left, graph, store, searcher)?;
+            rewrite_pattern(right, graph, store, searcher)?;
         }
         GraphPattern::Filter { inner, .. }
         | GraphPattern::Graph { inner, .. }
@@ -198,7 +335,7 @@ fn rewrite_pattern(p: &mut GraphPattern, graph: &Graph, store: &VectorStore) -> 
         | GraphPattern::Reduced { inner }
         | GraphPattern::Slice { inner, .. }
         | GraphPattern::Group { inner, .. }
-        | GraphPattern::Service { inner, .. } => rewrite_pattern(inner, graph, store)?,
+        | GraphPattern::Service { inner, .. } => rewrite_pattern(inner, graph, store, searcher)?,
         // No BGPs inside: property paths and inline VALUES pass through.
         GraphPattern::Path { .. } | GraphPattern::Values { .. } => {}
     }
@@ -231,6 +368,7 @@ fn rewrite_bgp(
     patterns: Vec<TriplePattern>,
     graph: &Graph,
     store: &VectorStore,
+    searcher: &dyn UnfilteredSearch,
 ) -> Result<GraphPattern, String> {
     // Index the rdf:first/rdf:rest triples by their (blank-node) list-cell
     // subject so the magic-predicate handlers can walk each `( … )` chain.
@@ -292,9 +430,9 @@ fn rewrite_bgp(
     let mut out = GraphPattern::Bgp { patterns: rest };
     for req in reqs {
         #[cfg(feature = "filtered-ann")]
-        let hits = run_knn(&req, graph, store, &mask_constraint)?;
+        let hits = run_knn(&req, graph, store, searcher, &mask_constraint)?;
         #[cfg(not(feature = "filtered-ann"))]
-        let hits = run_knn(&req, graph, store)?;
+        let hits = run_knn(&req, graph, store, searcher)?;
         let mut variables = vec![req.node];
         if let Some(s) = &req.score {
             variables.push(s.clone());
@@ -520,16 +658,23 @@ fn term_to_ground(t: Term) -> Option<GroundTerm> {
 /// Runs the k-NN search for `req` and returns `(neighbour id, cosine score)`
 /// pairs, best first.
 ///
+/// [OPUS-4.8] (sq-z589) The UNFILTERED search runs through `searcher` — the exact full scan
+/// ([`ExactSearch`], the default `vec:` behaviour) or an approximate index (`ApproxSearch`, the
+/// `*_approx` entry points). The store is still used to look up the seed vector and (for the
+/// filtered path) to scan the masked candidates.
+///
 /// [OPUS-4.8] (sq-bvmd) When the `filtered-ann` feature is on, `constraint` is the
 /// BGP's surviving ordinary patterns; if any of them constrain `req.node`, the search
 /// is restricted to the candidate id-set those patterns admit (filtered ANN) instead
-/// of scanning the whole store and joining afterwards. When no pattern constrains the
-/// neighbour variable — or with `filtered-ann` off — this is the plain unfiltered
-/// `nearest_exact` path, byte-identical to the pre-sq-bvmd behaviour.
+/// of scanning the whole store and joining afterwards — and that filtered path goes through the
+/// cost-model'd `nearest_filtered_costed`, INDEPENDENT of `searcher` (the approximate seam is only
+/// the unfiltered scan; the filtered story stays exactly as sq-bvmd/sq-7hx6 left it). When no
+/// pattern constrains the neighbour variable — or with `filtered-ann` off — `searcher` runs.
 fn run_knn(
     req: &KnnReq,
     graph: &Graph,
     store: &VectorStore,
+    searcher: &dyn UnfilteredSearch,
     #[cfg(feature = "filtered-ann")] constraint: &[TriplePattern],
 ) -> Result<Vec<(Id, f32)>, String> {
     // Derive the candidate id-set (IdMask) from the patterns that constrain `req.node`.
@@ -563,8 +708,9 @@ fn run_knn(
                     .take(req.k)
                     .collect());
             }
-            // Over-fetch by one and drop the seed itself.
-            Ok(nearest_exact(store, query, req.k + 1)
+            // Over-fetch by one and drop the seed itself (the searcher may be exact or approximate).
+            Ok(searcher
+                .search(query, req.k + 1)
                 .into_iter()
                 .filter(|&(n, _)| n != id)
                 .take(req.k)
@@ -586,7 +732,7 @@ fn run_knn(
                     nearest_filtered_costed(store, v, mask, req.k, &CostModel::default());
                 return Ok(hits);
             }
-            Ok(nearest_exact(store, v, req.k))
+            Ok(searcher.search(v, req.k))
         }
     }
 }
