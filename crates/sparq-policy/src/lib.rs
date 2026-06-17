@@ -12,6 +12,13 @@ pub mod count;
 #[cfg(feature = "count-enforcement")]
 pub mod count_file;
 
+// [OPUS-4.8] sq-u3yo: the CROSS-HOST `UsageCounterStore` seam — an `AtomicCounterBackend`
+// trait (one Redis-`INCR` / SQL-`UPDATE…WHERE consumed<limit` atomic op) + a
+// `BackendCounterStore` adapter, the drop-in for a distributed backend against the
+// unchanged trait. Still std-only (no Redis/SQL client bundled — the operator brings it).
+#[cfg(feature = "count-enforcement")]
+pub mod count_backend;
+
 // [OPUS-4.8] sq-zabv: static (request-free) policy analysis — permission/prohibition
 // conflict + policy containment/refinement, on the query-containment comparison
 // semantics. Always compiled (no feature gate); it adds no deps and no core cost.
@@ -42,3 +49,9 @@ pub use count::{
 // in-memory one (a drop-in for the same `UsageCounterStore` seam).
 #[cfg(feature = "count-enforcement")]
 pub use count_file::FileCounterStore;
+
+// [OPUS-4.8] sq-u3yo: the cross-host backend seam — the `AtomicCounterBackend` trait an
+// operator implements over Redis/SQL + the `BackendCounterStore` adapter (and its
+// outcome/error types), flat-exported alongside the in-memory/file stores.
+#[cfg(feature = "count-enforcement")]
+pub use count_backend::{AtomicCounterBackend, BackendCounterStore, BackendError, BackendOutcome};

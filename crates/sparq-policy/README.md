@@ -185,11 +185,12 @@ assert!(!evaluate(&policy, &outside).allow);
   grant, **atomically consumes** one unit of the applicable count budget:
   - **First *N* exercises grant; the *(N+1)*th denies.** A *denied* request burns **no**
     budget. `lteq N`/`eq N` = at most *N*; `lt N` = at most *N-1*.
-  - **Counter-store seam.** `UsageCounterStore` is an injectable trait; the in-memory
-    default `InMemoryCounterStore` is the single-process reference impl and
-    `FileCounterStore` ([OPUS-4.8] sq-5z1q) is a **cross-process** impl (below). The
-    budget key is `(rule_id, party, target)` (`CountKey`) — per-assignee, per-asset,
-    per-rule.
+  - **Counter-store seam.** `UsageCounterStore` is an injectable trait with three shipped
+    impls of increasing reach: the in-memory default `InMemoryCounterStore` (single-process),
+    `FileCounterStore` ([OPUS-4.8] sq-5z1q) — **cross-process** on one host (below) — and
+    `BackendCounterStore<B: AtomicCounterBackend>` ([OPUS-4.8] sq-u3yo) — **cross-host** over a
+    Redis/SQL backend the operator supplies (below). The budget key is `(rule_id, party,
+    target)` (`CountKey`) — per-assignee, per-asset, per-rule.
   - **Atomicity / concurrency boundary.** The single mutating op is the atomic
     `try_consume` (check-and-consume under one lock in the in-memory store), **not** a
     read-then-increment — so the in-process TOCTOU race is closed (a concurrency test
@@ -205,8 +206,26 @@ assert!(!evaluate(&policy, &outside).allow);
     attempts, budget 60) asserts exactly the limit is granted across all processes.
     **Boundary (honest):** `O_EXCL` create is atomic on a local FS and on modern NFS, not
     on old/misconfigured NFS — for a multi-*host* deployment over a questionable mount,
-    prefer a Redis `INCR` / SQL `UPDATE … WHERE consumed < limit RETURNING` store against
-    the same trait.
+    prefer a Redis `INCR` / SQL `UPDATE … WHERE consumed < limit RETURNING` store via the
+    `BackendCounterStore` seam below.
+  - **Cross-host counting (`BackendCounterStore` over `AtomicCounterBackend`)** — [OPUS-4.8]
+    sq-u3yo. The bead's headline distributed backends are **Redis** and **SQL**. This crate
+    is `publish = false`, **std-only, dependency-of-nothing**, so it does **not** bundle a
+    `redis`/`tokio-postgres`/`rusqlite` client (which would also need a live service CI
+    cannot gate). It ships the **seam** instead: `AtomicCounterBackend` is the ONE primitive
+    an operator implements — `checked_increment(key, limit) -> Incremented(new) | Exhausted |
+    Err` — which **is** a Redis `INCR`-behind-a-Lua-cap and **is** a SQL `UPDATE … SET
+    consumed = consumed + 1 WHERE key = ? AND consumed < ? RETURNING consumed` (the trait
+    docs carry both statements verbatim). `BackendCounterStore::new(backend)` adapts any such
+    backend into a full `UsageCounterStore`: it encodes a `CountKey` into one collision-free
+    backend key, runs the backend's single atomic op (**no** read-then-write — no TOCTOU
+    window added atop the backend's atomicity), and maps a backend error to
+    `ConsumeResult::Unavailable` (fail-closed). The adapter — the only logic that lives in
+    this crate — is **tested against an in-crate reference backend** reproducing the exact
+    Redis/SQL atomic semantics (drop-in through the real `evaluate_and_exercise` path, an
+    8-thread no-over-grant oracle, injective key-encoding, fail-closed on backend error), so
+    the wiring is proven without a live service. An operator writes ~one method and inherits
+    a correct, fail-closed distributed store.
   - **Fail-closed.** An *unavailable* counter (`ConsumeResult::Unavailable`) or a
     *malformed* limit denies — never silently treated as "unlimited".
     `count_status(&rule, &request, &store) -> CountStatus` is the side-effect-free audit

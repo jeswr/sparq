@@ -39,7 +39,10 @@ oxrdf.workspace = true
 # store + an atomic exercise path that increments per use and denies once the limit is
 # reached. OFF by default (lean core): the default evaluator treats `odrl:count` as the
 # stateless numeric constraint it always was (the caller supplies the count in the
-# request context). Turning this on adds ONLY the `count` module (an injectable
-# `UsageCounterStore` trait + an in-memory `Mutex`-backed default impl, std-only — no
-# new deps); it does NOT change the stateless `evaluate` path.
+# request context). Turning this on adds the `count` module (an injectable
+# `UsageCounterStore` trait + an in-memory `Mutex`-backed default impl), the `count_file`
+# module ([OPUS-4.8] sq-5z1q: a cross-process file+lockfile store), and the `count_backend`
+# module ([OPUS-4.8] sq-u3yo: the `AtomicCounterBackend` Redis/SQL seam + `BackendCounterStore`
+# adapter). ALL std-only — no new deps (the operator brings their own Redis/SQL client); it
+# does NOT change the stateless `evaluate` path.
 count-enforcement = []
