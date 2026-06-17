@@ -282,6 +282,21 @@ since:
   `FragBinding`s via `solutions(...)` (a fragment server speaks triples, not
   SPARQL-Results-JSON, so their `FederatedSource::execute` is a deliberate `Unsupported` that
   points at `solutions`).
+  - **Native HTTP `FragmentTransport` + interpreter wiring** (`sq-yzca`):
+    `source::HttpFragmentTransport` (native-only — ureq behind the SAME default-deny SSRF
+    resolver as the SRJ `HttpTransport`) is the production seam. It serialises a `FragPattern`
+    into the Hydra TPF query string (`?subject=&predicate=&object=`, percent-encoded N-Triples
+    terms), attaches a brTPF binding block as the `values` parameter (the server's text wire),
+    follows the opaque `hydra:next` page URL to exhaustion, and parses the Turtle/TriG body
+    (oxttl `TriGParser`, a Turtle superset) — splitting Hydra/VoID **control** triples
+    (`hydra:totalItems`/`void:triples` → count; `hydra:next` → next link) from **data** triples
+    (kept only when they match the requested pattern). The `operators` interpreter is wired:
+    `fetch_leaf_relation` dispatches on `source_type()`, routing an endpoint/local leaf to the
+    SRJ `execute` path and a TPF/brTPF leaf to the typed `solutions` path (lowered via
+    `planner::lower_leaf_fragment`), converting `FragBinding` rows back to `oxrdf::Term` so a
+    fragment leaf equi-joins with an endpoint leaf. A brTPF leaf currently runs as a complete
+    unbound scan the interpreter hash-joins locally (the same discipline the Phase-3 interpreter
+    applies to `JoinAlgo::Bind`); the streamed per-block bind-join feeder is a later phase.
   - **brTPF binding-block wire codec** (the `wire` module, `sq-6ihg`, follow-up to the
     server's `sq-dxhb`): the brTPF bind-join attaches a SET of upstream solution mappings (a
     `&[FragBinding]` block, at most `maxMpR`) to each fragment request, and that block is
@@ -308,9 +323,9 @@ since:
     canonical `s`→`p`→`o` order, and the empty mapping μ₀ is skipped on encode (it does not
     restrict a fragment) exactly as the server's `parse_bindings` skips an all-blank line.
     **HONEST scope — a codec only:** it converts `&[FragBinding]` ↔ bytes / `String`; it
-    issues no request. The native HTTP `FragmentTransport` that picks a wire by content
-    negotiation and attaches it as the request body / `values` parameter lands with the
-    streaming HTTP phase (same as the Phase-6 adapters above).
+    issues no request. The native HTTP `FragmentTransport` (`HttpFragmentTransport`, `sq-yzca`,
+    above) attaches the **text** form on the `values` query parameter (the carrier the server
+    reads); this binary wire is the compact alternative a body-carrying transport emits.
 - **Phase 7 adaptive re-planning** (`sq-ij5x`, the FINAL phase) — the client-side ANAPSID
   feedback loop, behind the extra default-OFF **`fedclient-adaptive`** feature (which pulls
   this planner's `adaptive-replan`). `adaptive::execute_adaptive_single_source` runs the plan

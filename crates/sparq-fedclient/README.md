@@ -89,9 +89,40 @@ A fragment server speaks triples, not SPARQL-Results-JSON, so the adapters answe
 the typed `solutions(...)` methods; their `FederatedSource::execute` (the SRJ entry point)
 is a deliberate `Unsupported` that points the caller at `solutions` — no lossy SRJ
 re-serialisation, no overclaim. The adapters are tested against an in-memory fixture
-fragment server (real fetch → parse → bind → paginate → bind-join, zero network); the
-native HTTP `FragmentTransport` (ureq + the default-deny SSRF resolver, Hydra URI-template
-serialisation, Turtle/TriG fragment parsing) lands with the streaming phase.
+fragment server (real fetch → parse → bind → paginate → bind-join, zero network).
+
+### Native HTTP `FragmentTransport` + interpreter wiring (`sq-yzca`)
+
+The production `FragmentTransport` is `HttpFragmentTransport` (native-only — ureq + its TLS
+stack never enter the wasm bundle): a blocking GET behind the **same default-deny SSRF
+resolver** as the SRJ `HttpTransport` (the resolved-and-vetted IP is the dialled IP — no
+DNS-rebinding re-resolve window). It does the four pieces a fragment client needs:
+
+- **Hydra URI-template serialisation** — a `FragPattern` becomes the TPF query string the
+  sparq server reads (`?subject=&predicate=&object=`, each bound position percent-encoded as
+  an N-Triples term; a variable position is omitted).
+- **brTPF binding block** — a non-empty binding set rides the `values` parameter using the
+  server's text wire (`wire::encode_bindings_text`), so the server returns only triples that
+  join at least one attached mapping.
+- **Pagination** — the next-page token is the opaque `hydra:next` URL the server published;
+  the transport GETs it verbatim, so following pagination to exhaustion is "GET `hydra:next`
+  until there is none".
+- **Turtle/TriG fragment-body parse** — the response is parsed with oxttl's TriG parser (a
+  Turtle superset), splitting the **control** triples (`hydra:totalItems` / `void:triples` →
+  the count; `hydra:next` → the next-page link) from the **data** triples (kept only when they
+  actually match the requested pattern, so a control triple can never be mistaken for a match,
+  nor a misbehaving server smuggle a non-matching triple). A malformed body is a clean
+  transport-error string, never a panic.
+
+The interpreter (`operators` module) is wired to this: a `JoinTree` leaf that resolves to a
+TPF/brTPF source is **answered** — `fetch_leaf_relation` dispatches on the source's interface,
+routing an endpoint/local leaf to the SRJ `execute` path and a TPF/brTPF leaf to the typed
+`solutions` path (lowered via `lower_leaf_fragment`), converting the `FragBinding` rows back to
+the engine's `oxrdf::Term` model so a fragment leaf equi-joins with an endpoint leaf. (A brTPF
+leaf is currently executed as a complete unbound scan that the interpreter hash-joins locally —
+the same discipline the Phase-3 interpreter applies to a planner `JoinAlgo::Bind`; the streamed
+per-block bind-join feeder is a later phase.) Both the materialised and the streaming
+interpreters share that dispatch.
 
 ### brTPF binding-block wire encodings (`wire` module, `sq-6ihg`)
 
@@ -113,10 +144,12 @@ wire cannot carry on a single line. A 4-byte magic + version header makes a futu
 detectable, and the decoder validates every length so a truncated / corrupt buffer is a clean
 `WireError`, never a panic (the crate is `forbid(unsafe_code)`).
 
-This is a **codec only**: the native HTTP `FragmentTransport` that picks a wire by content
-negotiation and attaches it as the request body / `values` parameter lands with the streaming
-HTTP phase (same as the adapters above). The text form matches the server's `parse_bindings`
-grammar byte-for-byte, so a client emitting either wire is understood by the existing server.
+This `wire` module is a **codec only**. The native HTTP `FragmentTransport`
+(`HttpFragmentTransport`, `sq-yzca`) attaches the **text** form on the `values` query
+parameter (the carrier the sparq server reads on a `GET /tpf`); the compact binary wire here
+is the alternative a body-carrying transport (or a future content-negotiated one) emits. The
+text form matches the server's `parse_bindings` grammar byte-for-byte, so a client emitting
+either wire is understood by the existing server.
 
 ## Capability-aware pushdown (Phase 4, `pushdown` module)
 

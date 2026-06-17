@@ -39,7 +39,7 @@
 // [OPUS-4.8] sq-j27p (epic sq-dnko): Phase-3 planner bridge — index→adapter resolution +
 // per-leaf lowering. Flagged for Fable re-review when available.
 
-use crate::source::{FederatedSource, SubQuery};
+use crate::source::{FederatedSource, FragPattern, FragTerm, PatternTerm, SubQuery};
 use sparq_fedplan::{Bgp, Term, TriplePattern};
 
 /// An error from resolving a plan index — the plan referenced an out-of-range
@@ -189,6 +189,40 @@ pub fn pattern_vars(tp: &TriplePattern) -> Vec<String> {
     out
 }
 
+/// Lower one BGP triple pattern to the [`FragPattern`] a Triple-Pattern-Fragments source
+/// ([`TpfSource`](crate::source::TpfSource) / [`BrTpfSource`](crate::source::BrTpfSource))
+/// answers for that leaf — the TPF/brTPF access unit is exactly one triple pattern.
+///
+/// Each fedplan [`Term`] position maps to a [`PatternTerm`]: a variable becomes
+/// [`PatternTerm::Var`] (the bare name, so it round-trips through the fragment's variable
+/// binding), a bound IRI becomes a [`FragTerm::Iri`], and a bound literal becomes a
+/// [`FragTerm::Literal`] carrying its already-rendered SPARQL/N-Triples lexical form verbatim
+/// (the `Term::Literal` model stores literals already rendered, and the `FragTerm::Literal`
+/// model likewise stores the decorated form — so the lexical identity is preserved end-to-end,
+/// which the fragment server's term parser and the adapter's `bind_triple` both compare on).
+///
+/// This is the fragment-source twin of [`lower_leaf`] (which produces a SPARQL `SubQuery` for an
+/// [`Endpoint`](crate::source::Endpoint)); the interpreter dispatches on the source's interface
+/// to pick which lowering to use. [OPUS-4.8] sq-yzca.
+pub fn lower_leaf_fragment(tp: &TriplePattern) -> FragPattern {
+    FragPattern::new(
+        term_to_pattern_term(&tp.subject),
+        term_to_pattern_term(&tp.predicate),
+        term_to_pattern_term(&tp.object),
+    )
+}
+
+/// Map one fedplan [`Term`] position to a [`PatternTerm`] for a [`FragPattern`]. [OPUS-4.8].
+fn term_to_pattern_term(t: &Term) -> PatternTerm {
+    match t {
+        Term::Var(v) => PatternTerm::Var(v.0.clone()),
+        Term::Iri(iri) => PatternTerm::Bound(FragTerm::Iri(iri.clone())),
+        // A bound literal carries its already-rendered lexical form verbatim (see the doc on
+        // `lower_leaf_fragment` / `FragTerm::Literal`). The fragment server compares on it.
+        Term::Literal(lit) => PatternTerm::Bound(FragTerm::Literal(lit.clone())),
+    }
+}
+
 /// Render a light `sparq-fedplan` [`Term`] as a SPARQL term string. IRIs are wrapped in
 /// `<>`; variables become `?name`; a literal is rendered as a `"…"`-quoted string with the
 /// minimal `"`/`\\`/control escaping, UNLESS it already carries SPARQL literal syntax (a
@@ -322,6 +356,31 @@ mod tests {
         assert_eq!(
             sub.sparql,
             "SELECT * WHERE { <http://ex/a> <http://ex/p> <http://ex/b> } LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn lower_leaf_fragment_maps_positions() {
+        use crate::source::{FragTerm, PatternTerm};
+        // ?s foaf:knows ?o — predicate bound, subject + object variable.
+        let tp = TriplePattern::new(var("s"), iri("http://xmlns.com/foaf/0.1/knows"), var("o"));
+        let pat = lower_leaf_fragment(&tp);
+        assert_eq!(pat.subject, PatternTerm::Var("s".into()));
+        assert_eq!(
+            pat.predicate,
+            PatternTerm::Bound(FragTerm::Iri("http://xmlns.com/foaf/0.1/knows".into()))
+        );
+        assert_eq!(pat.object, PatternTerm::Var("o".into()));
+        assert_eq!(pat.vars(), vec!["s".to_string(), "o".to_string()]);
+        // A bound literal object carries its already-rendered lexical form verbatim.
+        let tp2 = TriplePattern::new(
+            var("s"),
+            iri("http://ex/label"),
+            Term::Literal("\"hi\"@en".to_string()),
+        );
+        assert_eq!(
+            lower_leaf_fragment(&tp2).object,
+            PatternTerm::Bound(FragTerm::Literal("\"hi\"@en".into()))
         );
     }
 

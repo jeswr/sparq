@@ -28,9 +28,10 @@
 //!
 //! This module is a **codec only** — it converts a `&[FragBinding]` to/from bytes (binary) and
 //! to a `String` (text). It does NOT issue any request: the native HTTP
-//! [`FragmentTransport`](crate::source::FragmentTransport) (which will pick a wire by content
-//! negotiation and attach it as the request body / `values` parameter) lands with the streaming
-//! HTTP phase, exactly as the Phase-6 module doc states. What is load-bearing and tested here is
+//! [`FragmentTransport`](crate::source::FragmentTransport) (`HttpFragmentTransport`, bead
+//! `sq-yzca`) attaches the **text** form on the `values` query parameter (the carrier the sparq
+//! server reads); this binary wire is the compact alternative a body-carrying transport emits.
+//! What is load-bearing and tested here is
 //! that the binary form is **lossless** (`decode_bindings(encode_bindings(b)) == b` for every
 //! binding set, including literals with embedded `=`, whitespace, and newlines that the text
 //! wire could not carry on a single line) and that the **text form matches the server's parser
