@@ -353,7 +353,9 @@ matrix under "Security posture".
 - **Authentication** — optional `--auth-token <TOKEN>` Bearer gate on the write surface
   (constant-time compared; mirrors QLever's `-a`), with an optional `--auth-token-read` gate
   for reads. Off by default (back-compat). See "Security posture".
-- **Hardening flags** — `--query-timeout` / `--max-body-bytes` / `--max-concurrent` /
+- **Hardening flags** — `--query-timeout` / `--update-where-timeout` (separate, typically-shorter
+  writer-side WHERE deadline that bounds writer-queue **head-of-line blocking** from a slow
+  UPDATE, `sq-nulp`) / `--max-body-bytes` / `--max-concurrent` /
   `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-query-bytes`
   (byte-accounted memory cap, `sq-s5is`) / `--max-decompress-ratio` (zip-bomb guard) /
   `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*`, each with a `SPARQ_*` env

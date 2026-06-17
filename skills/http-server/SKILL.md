@@ -135,16 +135,19 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   off the async workers (`spawn_blocking`).
 - `AppState::at(&self, number: u64) -> Option<PinnedGen>` — pin a retained generation
   (**`time-travel` feature only**).
-- `struct ServerConfig { query_timeout: Option<Duration>, max_body_bytes: usize,
+- `struct ServerConfig { query_timeout: Option<Duration>, update_where_timeout: Option<Duration>,
+  max_body_bytes: usize,
   max_concurrent: usize, max_results: Option<usize>, max_query_rows: Option<usize>,
   max_query_bytes: Option<usize>,
   max_decompress_ratio: usize, max_subscriptions: usize, max_subscriptions_per_conn: usize,
   verbose: bool, redact_logs: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
   service_allow: ServiceAllowlist, /* + time_travel_* under feature, + audit_log under audit-log feature */ }` with
   `ServerConfig::default()` and `ServerConfig::from_env()`.
-  (`max_query_rows` = coarse memory cap; `max_query_bytes` = byte-accounted memory cap that
-  also prices row WIDTH + computed-literal size — `sq-s5is`; `max_decompress_ratio` =
-  zip-bomb guard — `sq-ebii`.)
+  (`update_where_timeout` = separate, typically-SHORTER writer-side WHERE deadline for SPARQL
+  UPDATE that bounds writer-queue **head-of-line blocking** from a slow update — `None` =
+  use `query_timeout`, `sq-nulp`; `max_query_rows` = coarse memory cap; `max_query_bytes` =
+  byte-accounted memory cap that also prices row WIDTH + computed-literal size — `sq-s5is`;
+  `max_decompress_ratio` = zip-bomb guard — `sq-ebii`.)
   `auth_token` (set: gates the write surface with a Bearer token, constant-time compared;
   `None`: no write auth) and `auth_token_read` (gate reads too) are honoured by the library
   `router` itself — embedders get the gate for free (`sq-zcby`).
@@ -501,6 +504,7 @@ env overrides the default.
 | Flag | Env | Default | Effect |
 | --- | --- | --- | --- |
 | `--query-timeout SECS` | `SPARQ_QUERY_TIMEOUT` | `30` (`0`=off) | per-request timeout → `503` |
+| `--update-where-timeout SECS` | `SPARQ_UPDATE_WHERE_TIMEOUT` | unset (`0`/unset = use `--query-timeout`) | **separate, typically-SHORTER writer-side WHERE deadline for SPARQL UPDATE** — bounds writer-queue **head-of-line blocking** from a slow update (the single sequenced writer is released within this window instead of holding it for the full read timeout); the update WHERE budget is `min(query_timeout, update_where_timeout)` → slow update `503` (`sq-nulp`) |
 | `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` | body cap → `413` |
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | in-flight cap, load-shed → `429` |
 | `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0`=off) | result/solution cap (SELECT + CONSTRUCT/DESCRIBE WHERE-solutions + EXPLAIN ANALYZE; not ASK/GSP-read/UPDATE) → honest `413` (not truncation) |
@@ -543,8 +547,19 @@ quota:
    same cooperative budget on the writer thread *and* the same wall-clock await cap on the
    HTTP side. *Bounds:* wall-clock per request, approximately (next-check granularity).
    *Caveat:* updates are sequenced on a single writer, so a long update blocks the queue
-   behind it until it finishes — the cap bounds the **client's wait**, the writer still runs
-   the WHERE to its cooperative stop.
+   behind it until it finishes — this cap bounds the **client's own wait**, while the writer
+   runs the WHERE to its cooperative stop. To bound that **head-of-line blocking** of the
+   queue, set a separate, shorter WHERE deadline — see (1b).
+   - **1b. UPDATE writer-side WHERE deadline / head-of-line bound**
+     (`--update-where-timeout`, `SPARQ_UPDATE_WHERE_TIMEOUT`, default **unset** = use
+     `--query-timeout`; `sq-nulp`). A SEPARATE, typically-shorter cooperative deadline applied
+     ONLY to the WHERE phase of a SPARQL UPDATE on the writer thread: the update's budget
+     deadline becomes `min(query_timeout, update_where_timeout)`, so a slow update releases the
+     single sequenced writer within this window instead of holding it for the full (usually
+     longer) read timeout — bounding how long one slow update can head-of-line block every
+     queued update behind it. Cooperative, like the query timeout (next-check granularity); a
+     tunable backstop, not hard preemption. Unset ⇒ the update WHERE budget is exactly
+     `--query-timeout` (unchanged). The offending update gets a `503`.
 2. **Memory cap** (`--max-query-rows`, `SPARQ_MAX_QUERY_ROWS`, default **off**, `0`=off).
    A coarse OOM circuit-breaker: an upper bound on the **row count** of any *materialised
    intermediate or final* result the engine builds, on **every** form (including

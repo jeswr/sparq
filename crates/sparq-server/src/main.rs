@@ -5,7 +5,7 @@
 //!   sparq-server [--addr 127.0.0.1:3030] [--allow-remote] [--format turtle]
 //!                [--persist DIR]
 //!                [--auth-token TOKEN] [--auth-token-read]
-//!                [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
+//!                [--query-timeout SECS] [--update-where-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
 //!                [--max-results N] [--max-query-rows N] [--max-decompress-ratio N]
 //!                [--max-subscriptions N] [--max-subscriptions-per-conn N]
 //!                [--service-allow HOST|*.SUFFIX]... [--service-allow-file PATH]
@@ -60,6 +60,11 @@
 //! `SPARQ_*` environment variable (see crates/sparq-server/README.md and the four-limit
 //! "Server hardening" section in skills/http-server/SKILL.md):
 //!   --query-timeout SECS      per-request query timeout, 0 disables      [30, env SPARQ_QUERY_TIMEOUT]
+//!   --update-where-timeout S  [OPUS-4.8 sq-nulp] separate, typically-SHORTER writer-side WHERE deadline
+//!                             for SPARQL UPDATE: bounds writer-queue HEAD-OF-LINE blocking from a slow
+//!                             update (a slow update releases the single writer within S instead of
+//!                             holding it for the full --query-timeout). 0/unset = use --query-timeout
+//!                             [unset, env SPARQ_UPDATE_WHERE_TIMEOUT]
 //!   --max-body-bytes N        maximum request body in bytes              [1048576, env SPARQ_MAX_BODY_BYTES]
 //!   --max-concurrent N        maximum in-flight requests (429 beyond)    [32, env SPARQ_MAX_CONCURRENT]
 //!   --max-results N           maximum SELECT rows (413 beyond), 0 off    [unlimited, env SPARQ_MAX_RESULTS]
@@ -140,6 +145,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--query-timeout" => {
                 let secs: u64 = parse_flag(&mut args, "--query-timeout")?;
                 config.query_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+            }
+            // [OPUS-4.8] sq-nulp: separate, typically-shorter writer-side WHERE deadline that
+            // bounds writer-queue head-of-line blocking from a slow UPDATE; 0 disables it (the
+            // update WHERE budget is then the plain --query-timeout, exactly as before).
+            "--update-where-timeout" => {
+                let secs: u64 = parse_flag(&mut args, "--update-where-timeout")?;
+                config.update_where_timeout = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--max-body-bytes" => {
                 config.max_body_bytes = parse_flag(&mut args, "--max-body-bytes")?
@@ -278,7 +290,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
-                     [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
+                     [--query-timeout SECS] [--update-where-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
                      [--max-subscriptions-per-conn N]{time_travel}{service} [--verbose] \
@@ -385,11 +397,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
-        "guards: query-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
+        "guards: query-timeout={} update-where-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
          max-query-rows={} max-query-bytes={} max-decompress-ratio={}x max-subscriptions={} \
          max-subscriptions-per-conn={}",
         config
             .query_timeout
+            .map_or("off".into(), |t| format!("{}s", t.as_secs())),
+        // [OPUS-4.8] sq-nulp: writer-side WHERE deadline bounding head-of-line blocking.
+        config
+            .update_where_timeout
             .map_or("off".into(), |t| format!("{}s", t.as_secs())),
         config.max_body_bytes,
         config.max_concurrent,

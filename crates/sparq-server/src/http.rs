@@ -113,6 +113,28 @@ pub struct ServerConfig {
     /// `timeout + TIMEOUT_GRACE` guarantees the HTTP 503 even if the engine is inside
     /// an uninstrumented stretch. `None` disables the timeout.
     pub query_timeout: Option<Duration>,
+    /// [OPUS-4.8] (sq-nulp) **Writer-side WHERE deadline for SPARQL UPDATE — a head-of-line
+    /// blocking bound.** Updates are *sequenced* on a single writer thread (sparq-serve's
+    /// group-commit writer), so while one update runs its `DELETE/INSERT … WHERE` to its
+    /// cooperative stop, every queued update behind it waits. The plain [`query_timeout`](Self::query_timeout)
+    /// already bounds the WHERE evaluation, but it is the *read* timeout (default 30 s) — far
+    /// too long to hold the writer, because it bounds the offending client's own wait, not the
+    /// head-of-line blocking of the whole writer queue.
+    ///
+    /// When set, this is a SEPARATE, typically-shorter cooperative deadline applied ONLY to
+    /// the WHERE phase of an UPDATE on the writer thread: the update's budget deadline becomes
+    /// `min(query_timeout, update_where_timeout)`, so any single update releases the writer
+    /// within this bound and the queue behind it cannot be head-of-line blocked longer than
+    /// that — *no matter how long the read timeout is*. `None` (the default) keeps the
+    /// historical behaviour exactly: the update WHERE budget is the plain [`query_timeout`](Self::query_timeout).
+    ///
+    /// This is a cooperative deadline (checked at the engine's coarse sites — operator entry /
+    /// per outer-loop iteration), so it bounds head-of-line blocking *approximately*, like
+    /// every other [`QueryBudget`] deadline: an uninstrumented stretch can overrun until the
+    /// next check. It is a tunable backstop, not a hard preemption (true preemption of the
+    /// writer is out of scope — see `sparq_serve`'s scheduler docs). Set via
+    /// `--update-where-timeout` / `SPARQ_UPDATE_WHERE_TIMEOUT` (seconds; `0` disables).
+    pub update_where_timeout: Option<Duration>,
     /// Maximum accepted request body, enforced before the handler reads it (413).
     pub max_body_bytes: usize,
     /// Maximum in-flight requests; excess requests are shed with 429.
@@ -344,6 +366,10 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             query_timeout: Some(Duration::from_secs(30)),
+            // [OPUS-4.8] sq-nulp: no separate writer-side WHERE deadline by default — an
+            // update's WHERE budget is the plain query_timeout, exactly as before. An operator
+            // who wants to bound writer-queue head-of-line blocking opts a shorter one in.
+            update_where_timeout: None,
             max_body_bytes: 1024 * 1024, // 1 MiB
             max_concurrent: 32,
             max_results: None,
@@ -397,7 +423,10 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     /// Defaults overridden by the `SPARQ_QUERY_TIMEOUT` (seconds; `0` disables),
-    /// `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT`, `SPARQ_MAX_RESULTS`,
+    /// `SPARQ_UPDATE_WHERE_TIMEOUT` ([OPUS-4.8] sq-nulp: the separate, typically-shorter
+    /// writer-side WHERE deadline that bounds writer-queue head-of-line blocking from a slow
+    /// UPDATE; seconds, `0`/unset disables — the update WHERE budget is then the plain
+    /// `query_timeout`), `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT`, `SPARQ_MAX_RESULTS`,
     /// `SPARQ_MAX_QUERY_ROWS` ([OPUS-4.8] sq-ebii: the coarse memory cap; `0` disables) and
     /// `SPARQ_MAX_DECOMPRESS_RATIO` ([OPUS-4.8] sq-ebii: the zip-bomb guard; `0` refuses gzip
     /// bodies) environment variables — plus, with the `time-travel` feature,
@@ -417,6 +446,12 @@ impl ServerConfig {
         let mut cfg = Self::default();
         if let Some(secs) = env_parse::<u64>("SPARQ_QUERY_TIMEOUT") {
             cfg.query_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+        }
+        // [OPUS-4.8] sq-nulp: separate, typically-shorter writer-side WHERE deadline that
+        // bounds writer-queue head-of-line blocking from a slow UPDATE; 0 / unset disables it
+        // (the update WHERE budget is then the plain query_timeout, exactly as before).
+        if let Some(secs) = env_parse::<u64>("SPARQ_UPDATE_WHERE_TIMEOUT") {
+            cfg.update_where_timeout = (secs > 0).then(|| Duration::from_secs(secs));
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_BODY_BYTES") {
             cfg.max_body_bytes = n;
@@ -2929,16 +2964,37 @@ pub(crate) fn make_budget(config: &ServerConfig, apply_max_results: bool) -> Que
 }
 
 /// [OPUS-4.8] (sq-ebii) The per-UPDATE engine budget: the coarse memory cap
-/// (`--max-query-rows`) as the working-set row ceiling, and the query timeout as a
-/// cooperative deadline measured from NOW (the moment the writer starts this update). The
-/// SELECT-projection cap (`--max-results`) does NOT apply to updates — there is no result to
-/// project — but the working-set memory cap and the deadline do.
+/// (`--max-query-rows`) as the working-set row ceiling, and a cooperative deadline measured
+/// from NOW (the moment the writer starts this update). The SELECT-projection cap
+/// (`--max-results`) does NOT apply to updates — there is no result to project — but the
+/// working-set memory cap and the deadline do.
+///
+/// [OPUS-4.8] (sq-nulp) The WHERE deadline is [`update_where_deadline`]: the TIGHTER of the
+/// read [`query_timeout`](ServerConfig::query_timeout) and the optional, typically-shorter
+/// [`update_where_timeout`](ServerConfig::update_where_timeout). Because updates are sequenced
+/// on a single writer thread, this deadline is what BOUNDS writer-queue head-of-line blocking:
+/// a slow update releases the writer within this window, so the queue behind it cannot be held
+/// longer than that (cooperatively — see [`QueryBudget`]'s coarse-check caveat). With
+/// `update_where_timeout` unset (the default) it is exactly `query_timeout`, unchanged.
 fn update_budget(config: &ServerConfig) -> QueryBudget {
     QueryBudget {
-        deadline: config.query_timeout.map(|t| std::time::Instant::now() + t),
+        deadline: update_where_deadline(config).map(|t| std::time::Instant::now() + t),
         max_rows: config.max_query_rows,
         // [OPUS-4.8] (sq-s5is) the byte cap reaches the UPDATE's WHERE evaluation too.
         max_bytes: config.max_query_bytes,
+    }
+}
+
+/// [OPUS-4.8] (sq-nulp) The effective WHERE-phase deadline for a SPARQL UPDATE on the writer
+/// thread: the tighter of the read [`query_timeout`](ServerConfig::query_timeout) and the
+/// opt-in [`update_where_timeout`](ServerConfig::update_where_timeout). `None` (no deadline)
+/// only when BOTH are unset; otherwise the smaller of whichever are present. This is the knob
+/// that bounds writer-queue head-of-line blocking independently of the (usually longer) read
+/// timeout — see [`update_budget`].
+fn update_where_deadline(config: &ServerConfig) -> Option<Duration> {
+    match (config.query_timeout, config.update_where_timeout) {
+        (Some(q), Some(u)) => Some(q.min(u)),
+        (q, u) => q.or(u),
     }
 }
 
@@ -3002,7 +3058,12 @@ pub(crate) enum UpdateOutcome {
 /// result; (2) the non-WHERE operations (INSERT/DELETE DATA, CLEAR/DROP/CREATE/LOAD) do not
 /// consult the budget (they are bounded by operand size, already capped by `--max-body-bytes`);
 /// (3) updates are *sequenced* on a single writer, so a long-running update blocks the queue
-/// behind it until it finishes — this cap bounds the client's wait, not the writer's work.
+/// behind it until it finishes — this *await* cap bounds the client's own wait, not the writer's
+/// work. [OPUS-4.8] (sq-nulp) The writer's work — and hence that head-of-line blocking — is
+/// bounded SEPARATELY by the WHERE-phase deadline ([`update_budget`] / [`update_where_deadline`]):
+/// `--update-where-timeout` sets a typically-shorter cooperative deadline so a slow update
+/// releases the writer within that window instead of holding it for the full (longer) read
+/// timeout, cooperatively per caveat (1).
 async fn await_update_worker(
     task: tokio::task::JoinHandle<Result<u64, String>>,
     config: &ServerConfig,
@@ -4784,9 +4845,10 @@ mod hardening_unit_tests {
     //! [OPUS-4.8] (sq-ebii) Pure-logic units for the memory cap (`tighter`) and the
     //! decompression-ratio cap (`decode_request_body`). The HTTP-level 413/503 wiring is
     //! covered by tests/hardening.rs; these pin the boundary math without a server boot.
-    use super::{decode_request_body, tighter, ServerConfig};
+    use super::{decode_request_body, tighter, update_where_deadline, ServerConfig};
     use axum::body::Bytes;
     use axum::http::{header, HeaderMap, HeaderValue};
+    use std::time::Duration;
 
     #[test]
     fn tighter_takes_the_smaller_present_cap() {
@@ -4795,6 +4857,39 @@ mod hardening_unit_tests {
         assert_eq!(tighter(None, Some(7)), Some(7));
         assert_eq!(tighter(Some(5), Some(7)), Some(5));
         assert_eq!(tighter(Some(9), Some(7)), Some(7));
+    }
+
+    // [OPUS-4.8] (sq-nulp) The writer-side WHERE deadline for an UPDATE is the TIGHTER of the
+    // read query_timeout and the opt-in update_where_timeout — that smaller value is what
+    // bounds writer-queue head-of-line blocking. `None` only when BOTH are unset.
+    #[test]
+    fn update_where_deadline_is_the_tighter_of_query_and_update_timeouts() {
+        let with = |q: Option<u64>, u: Option<u64>| {
+            update_where_deadline(&ServerConfig {
+                query_timeout: q.map(Duration::from_secs),
+                update_where_timeout: u.map(Duration::from_secs),
+                ..ServerConfig::default()
+            })
+        };
+        // Both unset => no deadline at all.
+        assert_eq!(with(None, None), None);
+        // Only one present => that one (whichever it is).
+        assert_eq!(with(Some(30), None), Some(Duration::from_secs(30)));
+        assert_eq!(with(None, Some(2)), Some(Duration::from_secs(2)));
+        // Both present => the SMALLER. The whole point: a short update_where_timeout wins over
+        // a long read query_timeout, so the writer is released sooner (head-of-line bound).
+        assert_eq!(with(Some(30), Some(2)), Some(Duration::from_secs(2)));
+        // ...and an update_where_timeout LARGER than query_timeout never loosens the bound.
+        assert_eq!(with(Some(5), Some(30)), Some(Duration::from_secs(5)));
+    }
+
+    // [OPUS-4.8] (sq-nulp) The DEFAULT config sets no update_where_timeout, so the update WHERE
+    // budget is exactly the plain query_timeout — byte-for-byte the historical behaviour.
+    #[test]
+    fn update_where_deadline_defaults_to_query_timeout_unchanged() {
+        let cfg = ServerConfig::default();
+        assert_eq!(cfg.update_where_timeout, None, "no separate update deadline by default");
+        assert_eq!(update_where_deadline(&cfg), cfg.query_timeout);
     }
 
     fn gz(data: &[u8]) -> Bytes {
