@@ -490,10 +490,17 @@ pub fn expand(data: &Graph, shapes: &Graph) -> Graph {
 /// expression form (e.g. a function expression, or a filter shape whose shape is
 /// not declared in the shapes graph) — the caller can treat that as "skip".
 ///
-/// This is the public seam onto the implemented algebra ([focus][sh:this] /
-/// constant / path-with-`sh:nodes` / `sh:filterShape` / `sh:intersection` /
-/// `sh:union`); the conformance harness uses it. `shapes` is parsed fresh; for
-/// repeated evaluation parse a model once and use the engine entry points.
+/// This is the production public seam onto the implemented algebra
+/// ([focus][sh:this] / constant / path-with-`sh:nodes` / `sh:filterShape` /
+/// `sh:intersection` / `sh:union`): it is the same `parse_node_expr` →
+/// `NodeExpr::eval` machinery that backs `apply_rules`' `sh:values` rules, and is
+/// exercised by this crate's `#[cfg(test)]` unit tests (via `apply_rules` for the
+/// production `sh:values` rule path, and directly by the `eval_node_expression_seam`
+/// test). The W3C conformance harness (`tests/w3c_node_expr.rs`) does **not** call
+/// this function: it validates a *parallel re-implementation* of the same algebra
+/// in its own `Evaluator`, and touches the crate only through `conforms` / `Path`.
+/// `shapes` is parsed fresh; for repeated evaluation parse a model once and use the
+/// engine entry points.
 pub fn eval_node_expression(
     data: &Graph,
     shapes: &Graph,
@@ -1298,5 +1305,55 @@ mod tests {
         "#);
         let inf = apply_rules(&data, &shapes);
         assert!(inf.triples.is_empty(), "{:?}", inf.triples);
+    }
+
+    // ---- the public `eval_node_expression` seam, exercised directly ----
+    #[test]
+    fn eval_node_expression_seam() {
+        use crate::view::GraphView;
+
+        // Evaluate node expressions directly through the public seam (NOT via
+        // apply_rules). The expression terms are the blank nodes that the SHACL-AF
+        // `sh:values` algebra ranges over, so they exercise the real
+        // parse_node_expr → NodeExpr::eval machinery — not a Constant short-circuit.
+        let data = g(r#"
+            ex:a ex:parent ex:b , ex:c .
+            ex:b ex:name "Bob" .
+            ex:c ex:name "Carol" .
+            ex:d ex:name "Dave" .
+        "#);
+        let shapes = g(r#"
+            ex:Decl
+              # a path-with-sh:nodes expression: focus/ex:parent, then ex:name
+              ex:goodExpr [ sh:nodes [ sh:path ex:parent ] ; sh:path ex:name ] ;
+              # an unsupported function expression
+              ex:fnExpr [ ex:someFunction ( sh:this ) ] .
+        "#);
+        let view = GraphView::new(&shapes);
+        let decl = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/Decl"));
+        let good_expr = view
+            .object(&decl, "http://example.org/goodExpr")
+            .expect("goodExpr node-expression bnode present");
+        let fn_expr = view
+            .object(&decl, "http://example.org/fnExpr")
+            .expect("fnExpr node-expression bnode present");
+        let focus = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/a"));
+
+        let mut got: Vec<String> = eval_node_expression(&data, &shapes, &good_expr, &focus)
+            .expect("supported path-with-sh:nodes form must evaluate")
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        got.sort();
+        // focus/ex:parent = {ex:b, ex:c}; their ex:name = {"Bob","Carol"}.
+        // ex:d's name is NOT reachable from the focus, so it must be absent.
+        assert_eq!(got, vec!["\"Bob\"".to_string(), "\"Carol\"".to_string()]);
+
+        // An unsupported (function) expression returns None — the documented
+        // "skip" contract — rather than a wrong/empty result set.
+        assert!(
+            eval_node_expression(&data, &shapes, &fn_expr, &focus).is_none(),
+            "a function expression is not a supported node-expression form"
+        );
     }
 }
