@@ -133,6 +133,23 @@ The opt-in capability crates (`sparq-geo`, `sparq-text`, `sparq-vectors`, `sparq
 security boundaries. As with the whole engine at this stage, run untrusted input through
 `sparq` only inside your own sandboxing/resource limits.
 
+<!-- [OPUS-4.8] sq-d7kh / CR-G4 (epic sq-toze) — FIPS posture cross-ref into the
+     governance-owned SECURITY.md, mirroring how the ZK posture cross-ref was handled.
+     Honest negative only: NO FIPS 140-3/CMVP module, NO FIPS claim, NO CMVP claim.
+     Authored by Opus 4.8 while Fable 5 unavailable — re-review when Fable returns. -->
+### FIPS / CMVP posture — no validated module, no claim
+
+`sparq` incorporates **no FIPS 140-2 / 140-3 (CMVP-validated) cryptographic module** and
+makes **no FIPS claim and no CMVP claim**. Its bespoke, research-only ZK/MPC cryptography is
+deliberately built on ZK-friendly, **non-FIPS-approved** primitives (BN254, Poseidon2,
+Schnorr over Baby-JubJub) and must be treated as **out of FIPS scope**; computing a
+FIPS 180-4 algorithm such as the SHA-256 release digests is *not* the same as running it
+inside a validated module. An operator under a FIPS deployment constraint must supply their
+own FIPS-validated module. This is an honest negative posture, not a deficiency to be
+remediated into a positive claim within this project. The full statement — the per-primitive
+breakdown and FIPS-constrained-operator guidance — lives in
+[`compliance/cryptoreview/fips-posture.md`](./compliance/cryptoreview/fips-posture.md) (CR-G4).
+
 ## Hardened-input expectations for the core engine
 
 The parser, query engine, and HTTP server (`sparq-core`, `sparq-engine`, `sparq-server`)

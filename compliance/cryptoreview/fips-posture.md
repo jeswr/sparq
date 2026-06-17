@@ -129,10 +129,11 @@ If your deployment is subject to a FIPS 140-2 / 140-3 requirement:
 - It is **not** a FIPS claim, a CMVP claim, or a statement of FIPS-readiness.
 - It is **not** a soundness assertion about the Tier-B crypto (that is `CR-G1`,
   external, open; and `SECURITY.md` is the published posture).
-- It does **not** override `SECURITY.md`. `SECURITY.md` is governance-owned; a
-  cross-reference to this FIPS posture from `SECURITY.md` is deferred to its own
-  bead (mirroring how the SECURITY.md cross-ref for the ZK posture was handled),
-  not made here.
+- It does **not** override `SECURITY.md`. `SECURITY.md` is governance-owned; the
+  one-line FIPS cross-ref into `SECURITY.md` (§"FIPS / CMVP posture — no validated
+  module, no claim") landed under its own bead `sq-d7kh` (mirroring how the SECURITY.md
+  cross-ref for the ZK posture was handled), pointing back at this document as the full
+  statement. <!-- [OPUS-4.8] sq-d7kh: deferral now resolved; reference is bidirectional. -->
 
 ## 7. Disposition
 
