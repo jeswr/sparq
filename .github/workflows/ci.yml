@@ -543,6 +543,13 @@ jobs:
         run: cargo doc -p sparq-solid --no-deps --features odrl-bridge
         env:
           RUSTDOCFLAGS: "-D warnings"
+      # [OPUS-4.8] sq-58mh: the STATEFUL `odrl:count` bridge surface (the `count` module +
+      # `materialize_odrl_permission_counted` + the `BridgeOutcome::consumed` doc-link)
+      # only compiles/resolves under `count-enforcement` — gate its doc surface too.
+      - name: rustdoc (deny warnings, sparq-solid — count-enforcement)
+        run: cargo doc -p sparq-solid --no-deps --features count-enforcement
+        env:
+          RUSTDOCFLAGS: "-D warnings"
       # [OPUS-4.8] sq-h1w2: rustdoc -D warnings, scoped to sparq-mpc. Same rationale as
       # the sparq-solid gate above — a public MPC item linking to a crate-private helper
       # (e.g. the `pub(crate)` `mac_shares`/`verify_sum_in_range` internals, or a wrong

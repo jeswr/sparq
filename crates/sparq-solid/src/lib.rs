@@ -714,6 +714,63 @@ impl PodStore {
         outcome
     }
 
+    /// [OPUS-4.8] sq-58mh — STATEFUL `odrl:count` enforcement THROUGH the bridge: evaluate
+    /// `policy` against `request`, **atomically consume** one unit of any applicable
+    /// `odrl:count` budget from `store`, and on a grant materialize the equivalent
+    /// `principal auth:<mode> graph` allow into this store's `<urn:sparq:auth>` view — so
+    /// the existing graph-level WAC/ACP enforcement honours it. The grant then
+    /// **self-retracts on exhaustion**: it is tracked as
+    /// [`odrl_bridge::BridgeKind::PermissionCounted`], and the next
+    /// [`PodStore::refresh_odrl_grants`] re-checks the budget READ-ONLY (never consuming)
+    /// and RETRACTS the grant once the budget is spent — access is GONE through
+    /// [`PodStore::accessible`] / [`PodStore::query_as`].
+    ///
+    /// This closes the gap the [`PodStore::materialize_odrl_permission_conditional`]
+    /// mapping table left open: ACP is stateless (no per-session usage counter), so the
+    /// count cannot be a re-checked ACP *condition*; instead it is enforced via the
+    /// EXISTING refresh/retraction ledger (sq-dpk4). The decision routes through
+    /// sparq-policy's [`sparq_policy::evaluate_and_exercise`] — the first *N* exercises of
+    /// an "at most *N*" permission grant; the *(N+1)*th denies; a denied / exhausted /
+    /// store-unavailable exercise burns no budget and materializes nothing (fail-closed).
+    ///
+    /// `store` is the injected [`sparq_policy::UsageCounterStore`] (shared via `Arc` so
+    /// the same budgets back both exercise-time consumption and refresh-time re-checks);
+    /// [`sparq_policy::InMemoryCounterStore`] is the in-process reference impl. A
+    /// distributed deployment supplies a shared-atomic backend honouring the same
+    /// `try_consume` contract. The budget key is `(rule_id, party, target)`
+    /// ([`sparq_policy::CountKey`]) — per-assignee, per-asset, per-rule.
+    ///
+    /// **Fail-closed:** a base Deny, an exhausted/unavailable count, an unmapped action,
+    /// or a request without a concrete party/target materializes NOTHING. Only present
+    /// under the `count-enforcement` feature.
+    #[cfg(feature = "count-enforcement")]
+    pub fn materialize_odrl_permission_counted(
+        &mut self,
+        policy: &sparq_policy::Policy,
+        request: &sparq_policy::Request,
+        store: &Arc<dyn sparq_policy::UsageCounterStore + Send + Sync>,
+    ) -> odrl_bridge::BridgeOutcome {
+        let outcome = odrl_bridge::count::materialize_permission_counted(
+            &mut self.graph,
+            policy,
+            request,
+            store.as_ref(),
+        );
+        if outcome.granted {
+            // Remember the store so refresh can re-check the budget (read-only), then
+            // track the counted grant for refresh/retraction, then rebuild the index.
+            self.bridge_ledger
+                .set_count_store(&odrl_bridge::count::CounterHandle(Arc::clone(store)));
+            self.bridge_ledger.record(
+                policy,
+                request,
+                odrl_bridge::BridgeKind::PermissionCounted,
+            );
+            self.reindex();
+        }
+        outcome
+    }
+
     /// [OPUS-4.8] sq-dpk4 — re-evaluate **every bridged ODRL grant** this store is
     /// tracking against its (possibly changed) policy, and **retract** the ones that no
     /// longer hold, while preserving static WAC/ACP grants and still-valid bridged

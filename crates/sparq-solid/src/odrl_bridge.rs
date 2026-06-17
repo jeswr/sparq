@@ -206,6 +206,12 @@ pub struct BridgeOutcome {
     /// Human-readable reason a grant/deny was NOT materialized (the ODRL decision's
     /// caveats, an unmapped action, or a missing party/target). Empty on success.
     pub reasons: Vec<String>,
+    /// On a STATEFUL `odrl:count` grant ([OPUS-4.8] sq-58mh, via
+    /// [`crate::PodStore::materialize_odrl_permission_counted`]): the new consumed count
+    /// (`1..=limit`) after this exercise atomically consumed one unit of budget. `None`
+    /// for an uncounted permission, any non-counted bridge path, or a deny.
+    #[cfg_attr(not(feature = "count-enforcement"), allow(rustdoc::broken_intra_doc_links))]
+    pub consumed: Option<u64>,
     /// The exact auth-view triples this call materialized (allow grant, deny, and/or
     /// the conditional-grant head triples), for the bridge ledger to track so a later
     /// refresh can retract precisely these. Empty when nothing was materialized.
@@ -466,6 +472,8 @@ pub fn materialize_policy(graph: &mut Graph, policy: &Policy, request: &Request)
         grant_triple: allow.grant_triple,
         deny_triple: deny.deny_triple,
         reasons,
+        // The policy path is not the stateful-count path; no unit is consumed here.
+        consumed: None,
         emitted,
     }
 }
@@ -1294,6 +1302,14 @@ pub enum BridgeKind {
     /// [`materialize_prohibition_conditional`] — a re-checked conditional deny (or its
     /// one-shot fallback). [OPUS-4.8] sq-4r70.
     ProhibitionConditional,
+    /// A STATEFUL `odrl:count` allow grant (via
+    /// [`crate::PodStore::materialize_odrl_permission_counted`]). The count was consumed
+    /// atomically at exercise; on refresh the grant is re-checked (read-only — never
+    /// consumes again) against the usage state and RETRACTED once the budget is
+    /// exhausted, so the bridged grant self-retracts on exhaustion. Only ever recorded
+    /// under the `count-enforcement` feature. [OPUS-4.8] sq-58mh.
+    #[cfg(feature = "count-enforcement")]
+    PermissionCounted,
 }
 
 /// One tracked bridged materialization: the originating ODRL `(policy, request, kind)`
@@ -1335,6 +1351,13 @@ pub struct BridgeLedger {
     /// `None` until the first static materialization is captured (a store that only
     /// ever bridged grants has an empty static baseline — refresh starts from nothing).
     static_baseline: Option<Vec<[Term; 3]>>,
+    /// The injected usage-counter store backing every [`BridgeKind::PermissionCounted`]
+    /// entry's stateful `odrl:count` budget. Set on the first counted bridge call and
+    /// re-used by [`refresh`](BridgeLedger::refresh) to re-check (read-only) whether a
+    /// counted grant's budget is still available — so an exhausted grant is retracted.
+    /// `None` ⇒ no counted grant was ever bridged. [OPUS-4.8] sq-58mh.
+    #[cfg(feature = "count-enforcement")]
+    count_store: Option<count::CounterHandle>,
 }
 
 impl BridgeLedger {
@@ -1422,16 +1445,34 @@ impl BridgeLedger {
         install_triples(graph, AUTH_GRAPH, baseline);
         install_triples(graph, AUTH_BRIDGED_GRAPH, Vec::new());
 
-        // 2. Replay each entry; keep only those that still materialize something.
+        // 2. Replay each entry; keep only those that still materialize something. A
+        //    counted entry ([OPUS-4.8] sq-58mh) is re-checked against the usage store
+        //    (read-only) — exhausted ⇒ emits nothing ⇒ retracted (self-retract on
+        //    exhaustion).
+        #[cfg(feature = "count-enforcement")]
+        let count_store = self.count_store.clone();
         let entries = std::mem::take(&mut self.entries);
         let before = entries.len();
         for entry in entries {
+            #[cfg(feature = "count-enforcement")]
+            let out = replay(graph, &entry, count_store.as_ref());
+            #[cfg(not(feature = "count-enforcement"))]
             let out = replay(graph, &entry);
             if !out.emitted.is_empty() {
                 self.entries.push(entry);
             }
         }
         before - self.entries.len()
+    }
+
+    /// Remember the usage-counter `store` backing this ledger's counted grants, so a
+    /// later [`refresh`](BridgeLedger::refresh) can re-check (read-only) whether each
+    /// [`BridgeKind::PermissionCounted`] entry's budget is still available. Idempotent;
+    /// the latest store wins (a caller injecting a different store re-points refresh at
+    /// it). [OPUS-4.8] sq-58mh.
+    #[cfg(feature = "count-enforcement")]
+    pub(crate) fn set_count_store(&mut self, store: &count::CounterHandle) {
+        self.count_store = Some(store.clone());
     }
 }
 
@@ -1453,6 +1494,7 @@ impl BridgeLedger {
 /// [`prohibition_status`] and re-emit the deny on [`ProhibitionStatus::Ambiguous`] just
 /// as on [`ProhibitionStatus::Applies`]; the deny is retracted ONLY on a definite
 /// [`ProhibitionStatus::Withdrawn`].
+#[cfg(not(feature = "count-enforcement"))]
 fn replay(graph: &mut Graph, entry: &BridgeEntry) -> BridgeOutcome {
     match entry.kind {
         BridgeKind::Permission => materialize_permission(graph, &entry.policy, &entry.request),
@@ -1463,6 +1505,33 @@ fn replay(graph: &mut Graph, entry: &BridgeEntry) -> BridgeOutcome {
         }
         BridgeKind::ProhibitionConditional => {
             refresh_prohibition_conditional(graph, &entry.policy, &entry.request)
+        }
+    }
+}
+
+/// Re-run a tracked entry's original bridge function against the current graph. The
+/// `count_store` variant ([OPUS-4.8] sq-58mh): a [`BridgeKind::PermissionCounted`] entry
+/// is re-checked (read-only) against the usage store via
+/// [`count::refresh_permission_counted`] — exhausted ⇒ emits nothing ⇒ retracted; every
+/// other kind ignores the store.
+#[cfg(feature = "count-enforcement")]
+fn replay(
+    graph: &mut Graph,
+    entry: &BridgeEntry,
+    count_store: Option<&count::CounterHandle>,
+) -> BridgeOutcome {
+    match entry.kind {
+        BridgeKind::Permission => materialize_permission(graph, &entry.policy, &entry.request),
+        BridgeKind::Prohibition => refresh_prohibition(graph, &entry.policy, &entry.request),
+        BridgeKind::Policy => refresh_policy(graph, &entry.policy, &entry.request),
+        BridgeKind::PermissionConditional => {
+            materialize_permission_conditional(graph, &entry.policy, &entry.request)
+        }
+        BridgeKind::ProhibitionConditional => {
+            refresh_prohibition_conditional(graph, &entry.policy, &entry.request)
+        }
+        BridgeKind::PermissionCounted => {
+            count::refresh_permission_counted(graph, &entry.policy, &entry.request, count_store)
         }
     }
 }
@@ -1557,6 +1626,8 @@ fn refresh_policy(graph: &mut Graph, policy: &Policy, request: &Request) -> Brid
         grant_triple: allow.grant_triple,
         deny_triple: deny.deny_triple,
         reasons,
+        // The policy-refresh path is not the stateful-count path; no unit consumed.
+        consumed: None,
         emitted,
     }
 }
@@ -1630,5 +1701,242 @@ mod set_tighter_tests {
         let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
         set_tighter(&mut slot, "not-a-date", true);
         assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "malformed never replaces");
+    }
+}
+
+// ============================================================================
+// [OPUS-4.8] sq-58mh — STATEFUL `odrl:count` enforcement wired THROUGH the bridge so a
+// bridged grant SELF-RETRACTS on exhaustion (the sq-zi5w follow-up).
+//
+// ACP is stateless: there is no per-session usage counter to decrement, so the count
+// limit cannot be a re-checked ACP *condition* the way `recipient`/`dateTime` are (a
+// `ConditionalGrant` re-checks a STATELESS dimension of the session — agent / clock).
+// A usage count lives OUTSIDE any one session. So count is wired through the EXISTING
+// refresh/retraction ledger (sq-dpk4) instead:
+//
+//   - At EXERCISE, `materialize_permission_counted` calls sparq-policy's atomic
+//     `evaluate_and_exercise`, which runs the real base decision AND consumes exactly
+//     one unit of `odrl:count` budget on a grant. On a grant the equivalent one-shot
+//     `principal auth:<mode> graph` allow is materialized (the same triple the existing
+//     enforcement honours). On a base deny / exhausted / store-unavailable: NOTHING
+//     (fail-closed — a denied request never burns budget).
+//   - On REFRESH the tracked counted entry is re-checked READ-ONLY against the usage
+//     store (`refresh_permission_counted` → `count::count_status`, which never consumes):
+//     while budget remains the grant is re-emitted; once the budget is exhausted (or the
+//     store is unavailable, or the base permission was withdrawn / now-prohibited) it
+//     emits nothing → the grant is RETRACTED → access is GONE through the real
+//     enforcement path. That is the "self-retracts on exhaustion" the bead asks for.
+//
+// FAIL-CLOSED throughout: an exhausted / unprovable / store-missing re-check retracts
+// (never re-grants beyond a budget we cannot account for); refresh NEVER consumes a unit
+// (so re-checking is idempotent and a refresh can never itself exhaust a budget).
+// ============================================================================
+#[cfg(feature = "count-enforcement")]
+pub(crate) mod count {
+    use super::{action_to_mode, append_grant, BridgeOutcome, AUTH_NS};
+    use sparq_core::Graph;
+    use sparq_policy::{
+        count_status, evaluate, evaluate_and_exercise, CountStatus, Policy, Request,
+        UsageCounterStore, ODRL_COUNT,
+    };
+    use std::sync::Arc;
+
+    /// A cloneable, `Debug`-able handle to the injected usage-counter store, so the
+    /// [`super::BridgeLedger`] (which derives `Debug`/`Clone`/`Default`) can hold one.
+    /// [OPUS-4.8] sq-58mh.
+    #[derive(Clone)]
+    pub(crate) struct CounterHandle(pub(crate) Arc<dyn UsageCounterStore + Send + Sync>);
+
+    impl std::fmt::Debug for CounterHandle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            // The store interior is opaque (a trait object); name the handle only.
+            f.write_str("CounterHandle(<UsageCounterStore>)")
+        }
+    }
+
+    /// The `auth:` allow-view predicate a mode grant is materialized under — the SAME
+    /// predicate [`super::materialize_permission`] uses and [`crate::AuthIndex`] reads.
+    fn mode_predicate(mode: crate::Mode) -> &'static str {
+        match mode {
+            crate::Mode::Read => "read",
+            crate::Mode::Write => "write",
+            crate::Mode::Append => "append",
+            crate::Mode::Control => "control",
+        }
+    }
+
+    /// Evaluate `policy` against `request` and, on a grant, **atomically consume** one
+    /// unit of any applicable `odrl:count` budget from `store`, materializing the
+    /// equivalent `principal auth:<mode> graph` allow into the `<urn:sparq:auth>` view.
+    /// [OPUS-4.8] sq-58mh.
+    ///
+    /// This is the stateful-count entry point of the bridge: it routes the allow/deny
+    /// decision through sparq-policy's [`evaluate_and_exercise`] (which runs the REAL
+    /// base [`evaluate`] decision and consumes exactly one count unit on a grant), so the
+    /// first *N* exercises of an "at most *N*" permission materialize a grant and the
+    /// *(N+1)*th denies — and a denied / exhausted / store-unavailable exercise burns no
+    /// budget and materializes NOTHING (fail-closed).
+    ///
+    /// The grant is materialized **only** when the exercise was granted AND the request
+    /// action [`action_to_mode`]-maps AND the request names a concrete party + target —
+    /// the SAME fail-closed gates as [`super::materialize_permission`]. The returned
+    /// [`BridgeOutcome`] carries `consumed = Some(n)` on a count-constrained grant
+    /// (`None` for an uncounted permission or a deny).
+    pub(crate) fn materialize_permission_counted(
+        graph: &mut Graph,
+        policy: &Policy,
+        request: &Request,
+        store: &dyn UsageCounterStore,
+    ) -> BridgeOutcome {
+        // 1. The atomic, count-aware decision — the single source of allow/deny AND the
+        //    one place a unit is consumed. A base deny / exhausted / store-unavailable
+        //    returns allow == false and consumes nothing.
+        let exercise = evaluate_and_exercise(policy, request, store);
+        if !exercise.allow {
+            return BridgeOutcome::denied(exercise.reasons);
+        }
+
+        // 2. Same fail-closed mapping gates as the one-shot allow path.
+        let Some(mode) = action_to_mode(&request.action) else {
+            return BridgeOutcome::denied(vec![format!(
+                "ODRL action <{}> has no WAC/ACP mode mapping; no grant materialized",
+                request.action
+            )]);
+        };
+        let Some(party) = request.party.as_deref() else {
+            return BridgeOutcome::denied(vec![
+                "ODRL Permit has no concrete party (assignee/WebID); no grant materialized"
+                    .to_owned(),
+            ]);
+        };
+        let Some(target) = request.target.as_deref() else {
+            return BridgeOutcome::denied(vec![
+                "ODRL Permit has no concrete target graph IRI; no grant materialized".to_owned(),
+            ]);
+        };
+
+        // 3. Materialize `party auth:<mode> target` (one-shot allow shape; the count was
+        //    consumed in step 1, and is re-checked read-only on refresh).
+        let pred = format!("{AUTH_NS}{}", mode_predicate(mode));
+        let triple = append_grant(graph, party, &pred, target);
+        BridgeOutcome {
+            granted: true,
+            mode: Some(mode),
+            grant_triple: Some((party.to_owned(), pred, target.to_owned())),
+            consumed: exercise.consumed,
+            emitted: vec![triple],
+            ..BridgeOutcome::default()
+        }
+    }
+
+    /// Re-check a tracked counted grant on refresh and re-emit it **iff** it still holds —
+    /// WITHOUT consuming a unit (refresh is read-only; a refresh must never itself burn
+    /// budget). [OPUS-4.8] sq-58mh.
+    ///
+    /// Fail-closed: the grant is re-emitted only when (a) a counter store is available,
+    /// (b) the base permission STILL grants (re-evaluated with the `odrl:count`
+    /// constraints stripped — the same shape [`evaluate_and_exercise`] uses for its base
+    /// decision — so a withdrawn permission / now-matching prohibition denies and the
+    /// grant is retracted), and (c) the granting rule's count budget is **not** exhausted
+    /// ([`CountStatus::Satisfied`]/[`NotConstrained`](CountStatus::NotConstrained)).
+    /// An exhausted ([`CountStatus::DefinitelyUnsatisfied`]), unprovable
+    /// ([`CountStatus::Unprovable`] — store outage / malformed limit), or store-missing
+    /// re-check emits NOTHING → the grant is retracted → access is GONE. This is what
+    /// makes a bridged grant self-retract on exhaustion.
+    pub(crate) fn refresh_permission_counted(
+        graph: &mut Graph,
+        policy: &Policy,
+        request: &Request,
+        store: Option<&CounterHandle>,
+    ) -> BridgeOutcome {
+        // No store ⇒ a counted entry cannot be accounted for → fail-closed retract.
+        let Some(handle) = store else {
+            return BridgeOutcome::denied(vec![
+                "counted grant has no usage-counter store on refresh; retracted (fail-closed)"
+                    .to_owned(),
+            ]);
+        };
+        let store: &dyn UsageCounterStore = handle.0.as_ref();
+
+        // (b) Does the BASE permission still grant? Re-evaluate with `odrl:count`
+        //     stripped from the permissions (the stateless evaluator would otherwise deny
+        //     for a missing count value) — exactly the base shape `evaluate_and_exercise`
+        //     uses. A withdrawn permission / now-matching prohibition denies here →
+        //     retract. NOTE: this never consumes; consumption only happens at exercise.
+        let stripped = strip_count_constraints(policy);
+        let decision = evaluate(&stripped, request);
+        if !decision.allow {
+            return BridgeOutcome::denied(decision.unmet_constraints);
+        }
+
+        // Locate the granting rule in the ORIGINAL policy (which still carries the count
+        // constraint) so `count_status` can read its effective limit.
+        let Some(rule) = decision
+            .matched_rules
+            .first()
+            .and_then(|id| policy.permissions.iter().find(|r| &r.id == id))
+        else {
+            // A base grant with no identifiable rule (should not happen for a permission)
+            // → nothing to count; re-emit the plain allow.
+            return super::materialize_permission(graph, &stripped, request);
+        };
+
+        // (c) Read-only count check — NEVER consumes a unit on refresh.
+        match count_status(rule, request, store) {
+            // Budget remains, or the rule has no count limit → re-emit the allow grant.
+            CountStatus::Satisfied { .. } | CountStatus::NotConstrained => {
+                reemit_grant(graph, request)
+            }
+            // Exhausted, or unprovable (store outage / malformed) → retract (fail-closed).
+            CountStatus::DefinitelyUnsatisfied { consumed, limit } => BridgeOutcome::denied(vec![
+                format!(
+                    "permission {} count budget exhausted ({consumed} >= {limit}); grant retracted",
+                    rule.id
+                ),
+            ]),
+            CountStatus::Unprovable => BridgeOutcome::denied(vec![format!(
+                "permission {} count state unprovable on refresh; grant retracted (fail-closed)",
+                rule.id
+            )]),
+        }
+    }
+
+    /// Re-emit the `principal auth:<mode> target` allow for `request` (the same triple
+    /// [`materialize_permission_counted`] emitted), used on a still-valid count refresh.
+    /// The triple is fully determined by the request (party + action→mode + target).
+    fn reemit_grant(graph: &mut Graph, request: &Request) -> BridgeOutcome {
+        let Some(mode) = action_to_mode(&request.action) else {
+            return BridgeOutcome::denied(vec![
+                "counted grant action no longer maps on refresh; not re-emitted".to_owned(),
+            ]);
+        };
+        let (Some(party), Some(target)) = (request.party.as_deref(), request.target.as_deref())
+        else {
+            return BridgeOutcome::denied(vec![
+                "counted grant lost its party/target on refresh; not re-emitted".to_owned(),
+            ]);
+        };
+        let pred = format!("{AUTH_NS}{}", mode_predicate(mode));
+        let triple = append_grant(graph, party, &pred, target);
+        BridgeOutcome {
+            granted: true,
+            mode: Some(mode),
+            grant_triple: Some((party.to_owned(), pred, target.to_owned())),
+            emitted: vec![triple],
+            ..BridgeOutcome::default()
+        }
+    }
+
+    /// A copy of `policy` with every `odrl:count` constraint removed from its PERMISSION
+    /// rules — the base shape the stateless [`evaluate`] sees (count is enforced against
+    /// the store, not as a stateless numeric comparison). Mirrors sparq-policy's internal
+    /// `strip_count_constraints` (kept here because that helper is crate-private).
+    /// Prohibitions are untouched (a count on a prohibition keeps its stateless meaning).
+    fn strip_count_constraints(policy: &Policy) -> Policy {
+        let mut out = policy.clone();
+        for rule in &mut out.permissions {
+            rule.constraints.retain(|c| c.left != ODRL_COUNT);
+        }
+        out
     }
 }
