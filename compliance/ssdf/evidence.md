@@ -85,8 +85,13 @@ cargo audit bin <path-to-sparq-cli>
 ## 5. Honest gaps (do not read these as met)
 
 - **PW.6.2 — reproducible builds (GX-8, bead sq-toze.9).** The release is `--locked` +
-  provenance-attested, but there is no reproducible-build claim or evidence yet. See
-  [`gap-register.md`](./gap-register.md). This is the only *technical* SSDF gap.
+  provenance-attested, and the honest PW.6.2 reproducibility statement is now **documented**
+  ([`../slsa/reproducible-build.md`](../slsa/reproducible-build.md)): a measured double-build of
+  `sparq-cli` is **identical size + byte-identical apart from 22 bytes**, all from **one**
+  non-determinism source (the `mimalloc` build-time `__DATE__`/`__TIME__` `.rodata` banner + the
+  build-id it perturbs). The only *technical* SSDF gap that remains open is the **enforcement**
+  step — `SOURCE_DATE_EPOCH`/feature-drop + a CI rebuild-and-diff ratchet for a byte-for-byte
+  claim. See [`gap-register.md`](./gap-register.md).
 - The **audit-ready** rows in `controls.md` (PO.1.x/PO.2.x/PO.5.x, several RV tasks) are
   *documented + automated* but their continuous operation / formal attestation is an
   organizational act; for a single-maintainer volunteer project they are asserted with the

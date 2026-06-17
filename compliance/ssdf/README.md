@@ -56,8 +56,10 @@ The coverage summary in `controls.md` reports **28 implemented & verified / 13 a
 (`RV.1.4`, the daily advisory watchdog — evidence supporting standard task RV.1.3, **not** a
 separate framework task; see the footnote in `controls.md`). <!-- [OPUS-4.8] sq-ce97: 41
 standard (RV.1 has 3 tasks) + 1 local row = 42 rows; status tally 28/13/1 unchanged. -->
-The single technical gap is **PW.6.2 reproducible-build
-evidence** (GX-8, bead **sq-toze.9**). No row presents the `sparq-zk*` / `sparq-mpc`
+The single technical gap is **PW.6.2 reproducible-build**
+(GX-8, bead **sq-toze.9**) — now *characterised*: the honest reproducibility statement is
+documented ([`../slsa/reproducible-build.md`](../slsa/reproducible-build.md)), with only the CI
+rebuild-and-diff enforcement outstanding. No row presents the `sparq-zk*` / `sparq-mpc`
 research scaffold as a met security control. [OPUS-4.8] The v1 ZK verifier was **originally found
 unsound** (`research/zk-soundness-audit.md`, kept on record), then `sq-1s2` landed the binding
 layer and an **internal post-remediation re-audit** (`research/zk-verifier-reaudit.md`, `sq-gbp4`)

@@ -70,7 +70,7 @@ flag where sparq also satisfies **silver/gold**.
 - **`build`** — Met — `cargo build --workspace`.
 - **`build_common_tools`** — Met — Cargo (standard Rust toolchain).
 - **`build_floss_tools`** — Met — Rust/Cargo are FLOSS.
-- **`build_reproducible`** — **Unmet (honest)** — no reproducible-build attestation yet (GX-8, cross-framework with slsa/cra). The release uses pinned actions + a hosted builder + SLSA provenance, but bit-for-bit reproducibility is not yet demonstrated. Recorded as a gap, not claimed.
+- **`build_reproducible`** — **Unmet but characterised (honest)** — bit-for-bit reproducibility is not yet *demonstrated/enforced*, so the criterion stays Unmet; but it is no longer a bare "no evidence". A documented double-build ([`../slsa/reproducible-build.md`](../slsa/reproducible-build.md)) shows `sparq-cli` is **byte-identical apart from 22 bytes**, all from **one** non-determinism source (the C-compiled `mimalloc` `__DATE__`/`__TIME__` `.rodata` banner + the build-id it perturbs); the release also uses pinned actions + a hosted builder + SLSA provenance. The residual to flip this to Met is `SOURCE_DATE_EPOCH`/feature-drop + a CI rebuild-and-diff ratchet (GX-8/sq-toze.9, cross-framework with slsa/cra/sbom/ssdf). Recorded honestly, not claimed Met.
 - **`test`** — Met — `cargo test --workspace` + the W3C SPARQL/SHACL/inference conformance ratchets.
 - **`test_invocation`** — Met — documented in [`CONTRIBUTING.md`](../../CONTRIBUTING.md) "The gate" + [`AGENTS.md`](../../AGENTS.md).
 - **`test_most`** — Met — workspace tests + conformance ratchets + coverage floors (the "never lower" rule, `CONTRIBUTING.md`). *(Silver/gold `test_statement_coverage_*`: coverage floors are ratcheted; cite the coverage cron in `ci.yml`.)*

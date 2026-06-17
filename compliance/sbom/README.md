@@ -54,8 +54,11 @@ of DEP-5) are **config-verified, not operating-verified** — they fire only on 
 **no `v*` tag, GitHub Release, or Sigstore attestation exists yet** (verified 2026-06-15:
 `git tag -l 'v*'` → 0, `gh release list` → empty, attestations API → 404). They are labelled
 **Audit-ready (operating-verification pending first release)** rather than claimed as already
-operating. The honest **gap** is: (GS-2) no **reproducible-build** evidence (GX-8, the SBOM-to-binary
-integrity link is asserted, not independently reproducible). **RESOLVED:** (GS-1 / sq-toze.26) the
+operating. The honest **gap** is: (GS-2) **reproducible-build** is now *characterised, not yet enforced*
+(GX-8 — the SBOM-to-binary integrity link is asserted, not yet *bit-identically* reproducible,
+but the honest non-determinism statement is documented in
+[`../slsa/reproducible-build.md`](../slsa/reproducible-build.md): a 22-byte single-cause diff;
+the CI rebuild-and-diff ratchet is the residual). **RESOLVED:** (GS-1 / sq-toze.26) the
 per-component **Supplier Name** NTIA slot — `scripts/sbom-normalize.jq` now derives `supplier` per
 component honestly (crates.io-published → `crates.io`; first-party workspace crate → the project;
 vendored upstream → `crates.io`; otherwise omitted, none today), so `supplier.name` is on **every**

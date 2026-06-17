@@ -178,6 +178,12 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
     Do NOT claim PyPI provenance is *emitted* until that registration is confirmed live.
 - **No Build L3** evidence exists: provenance is generated in the build job, not by an
   isolated trusted builder (GX-11). Do not interpret the L2 attestations as L3.
-- **No reproducible-build evidence** (GX-8 / sq-toze.9): there is no documented bit-for-bit
-  rebuild attestation. SLSA does not *require* reproducibility for L2/L3, but CRA integrity +
-  consumer trust want it; recorded as an open gap, not claimed.
+- **Reproducible build — characterised, not yet bit-for-bit** (GX-8 / sq-toze.9):
+  [`reproducible-build.md`](./reproducible-build.md) records a measured double-build of
+  `sparq-cli` (`--release --locked`, same tier flags) → **identical size, byte-identical apart
+  from 22 bytes**, all from **one** source (the C-compiled `mimalloc` `__DATE__`/`__TIME__`
+  `.rodata` banner + the build-id it perturbs). SLSA does not *require* reproducibility for
+  L2/L3, but CRA integrity + consumer trust want it; the honest non-repro reason is now
+  documented (not a bare "no evidence"). Residual to a byte-for-byte claim — `SOURCE_DATE_EPOCH`
+  (or feature-drop) + a CI rebuild-and-diff ratchet — keeps the bead open. **Verify:** the
+  auditor quick-run in that doc.
