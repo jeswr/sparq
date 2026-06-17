@@ -202,12 +202,14 @@ let shapes = Graph::load_str(r#"
 let g = sparq_shacl::load_turtle_with_base(&text, &format!("file://{path}")).unwrap();
 ```
 
-**SHACL Advanced Features rules (`sh:rule`, SHACL-AF) — INFER triples** *(opt-in
-feature `shacl-af`)*. A shape's `sh:rule` values infer new triples for that shape's
-focus nodes (its targets). Two rule types: `sh:TripleRule` (`sh:subject` /
-`sh:predicate` / `sh:object` node expressions — the inferred triples are the
-cartesian product of the three evaluated sets) and `sh:SPARQLRule` (an
-`sh:construct` CONSTRUCT run per focus node with `$this` pre-bound). Rules honour
+**SHACL Advanced Features rules (`sh:rule` + `sh:values`, SHACL-AF) — INFER
+triples** *(opt-in feature `shacl-af`)*. A shape's rules infer new triples for that
+shape's focus nodes (its targets). Three rule types: `sh:TripleRule` (`sh:subject`
+/ `sh:predicate` / `sh:object` node expressions — the inferred triples are the
+cartesian product of the three evaluated sets), `sh:SPARQLRule` (an `sh:construct`
+CONSTRUCT run per focus node with `$this` pre-bound), and the `sh:values` value
+rule (a property shape with a single-predicate `sh:path` and an `sh:values` node
+expression infers `(focus, predicate, v)` per evaluated `v`). Rules honour
 `sh:condition` (fire only for focus nodes conforming to every condition shape),
 `sh:order` (ascending, a rule sees earlier groups' inferences), and
 `sh:deactivated`. The engine **iterates to a fixpoint** (bounded by
@@ -240,11 +242,27 @@ let inf = sparq_shacl::apply_rules(&data, &shapes);   // -> sparq_shacl::Inferen
 let expanded: Graph = sparq_shacl::expand(&data, &shapes);
 ```
 
-Node expressions supported for `sh:TripleRule`: `sh:this` (focus node), a constant
-IRI/literal, and a path node expression `[ sh:path P ]` (any SHACL property path;
-`sh:nodes` defaults to the focus node). API: `apply_rules(data, shapes)`,
-`apply_rules_with_model(data, shapes, &model)` (amortise shape parsing), and
-`expand(data, shapes) -> Graph`.
+**Node-expression algebra** (operand of `sh:subject`/`sh:predicate`/`sh:object`
+and the `sh:values` value rule): `sh:this` (focus node); a constant IRI/literal;
+a path expression `[ sh:path P ; sh:nodes N? ]` (any SHACL property path; the
+optional `sh:nodes` is itself a node expression giving the start nodes, default
+`sh:this`); a filter-shape expression `[ sh:filterShape S ; sh:nodes N ]` (the
+nodes of `N` conforming to shape `S`); `[ sh:intersection ( … ) ]`; `[ sh:union (
+… ) ]`. These nest. The SHACL *function* expression form is NOT supported (needs a
+function registry) — it is dropped (lenient), inferring nothing.
+
+**`sh:values` value rule:** a property shape with a single-predicate `sh:path` and
+an `sh:values` node expression infers `(focus, predicate, v)` for each evaluated
+`v`. A value rule on a `sh:property` child of a targeted node shape ranges over the
+parent's focus nodes.
+
+API: `apply_rules(data, shapes)`, `apply_rules_with_model(data, shapes, &model)`
+(amortise shape parsing), `expand(data, shapes) -> Graph`, the node-expression
+seam `eval_node_expression(data, shapes, expr, focus) -> Option<Vec<Term>>`, and
+the conformance primitive `conforms(data, shapes, shape_node) -> ConformanceCheck`
+(call `.holds(node)` per focus). A gated W3C harness (`tests/w3c_node_expr.rs`)
+drives the `sht:EvalNodeExpr` suite for the implemented forms (self-skips when the
+suite is not fetched; function expressions count as SKIP, not FAIL).
 
 ## Gotchas / feature flags / prerequisites
 

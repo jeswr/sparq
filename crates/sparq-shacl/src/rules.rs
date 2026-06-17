@@ -4,20 +4,47 @@
 //! base SHACL Core + SHACL-SPARQL validation path carries zero rule code or parse
 //! cost when the feature is off.
 //!
-//! Two rule types from the W3C SHACL-AF Recommendation are supported:
+//! Three rule types from the W3C SHACL-AF Recommendation are supported:
 //!
 //!   * **`sh:TripleRule`** (§4.2) — carries `sh:subject` / `sh:predicate` /
 //!     `sh:object` node expressions. For each focus node, the inferred triples are
 //!     the cartesian product `S × P × O` of the three evaluated node-expression
-//!     sets. The node-expression forms supported here are the spec's common
-//!     building blocks: the focus-node expression `sh:this`, a constant IRI /
-//!     literal, and a path node expression (`[ sh:path P ]`, with `sh:nodes`
-//!     defaulting to the focus node).
+//!     sets.
 //!   * **`sh:SPARQLRule`** (§4.3) — carries an `sh:construct` CONSTRUCT query (with
 //!     optional `sh:prefixes`). For each focus node, the query runs with `$this`
 //!     pre-bound to the focus node and the constructed triples are inferred. This
 //!     reuses the very SPARQL engine the `sh:sparql` constraint path already
 //!     depends on (here through `sparq_engine::construct`).
+//!   * **`sh:values`** value rule (SHACL-AF *Property value rules*) — a property
+//!     shape whose `sh:path` is a single predicate IRI and which carries an
+//!     `sh:values` node expression infers, for each focus node `n` and each `v` in
+//!     `Eval(values-expr, n)`, the triple `(n, predicate, v)`. (A non-predicate
+//!     path has no inferable subject/predicate form, so such a shape is skipped.)
+//!
+//! ## Node-expression algebra (SHACL-AF *Node Expressions*)
+//!
+//! `sh:subject`/`sh:predicate`/`sh:object` (TripleRule) and `sh:values` (value
+//! rule) take **node expressions**, evaluated against a focus node `$this` to a
+//! set of nodes. The full algebra is implemented ([`NodeExpr`]):
+//!
+//!   * **focus** — the IRI `sh:this` ⇒ `{ $this }`.
+//!   * **constant** — any other IRI / literal ⇒ `{ term }`.
+//!   * **path** — `[ sh:path P ]` with optional `sh:nodes` (a *nested* node
+//!     expression giving the start nodes; defaults to `sh:this`) ⇒ the union of
+//!     the path-`P` value nodes of every start node.
+//!   * **filter shape** — `[ sh:filterShape S ; sh:nodes N ]` ⇒ the nodes of `N`
+//!     that **conform** to shape `S` (evaluated through the constraint validator,
+//!     exactly like `sh:condition`).
+//!   * **intersection** — `[ sh:intersection ( E1 E2 … ) ]` ⇒ set intersection of
+//!     each member's nodes (order-preserving, deduplicated).
+//!   * **union** — `[ sh:union ( E1 E2 … ) ]` ⇒ set union of each member's nodes.
+//!
+//! These nest arbitrarily (a path's `sh:nodes`, a filter's `sh:nodes`, and the
+//! intersection/union members are themselves node expressions). The **function**
+//! expression form (a SHACL function IRI applied to an argument list) is NOT
+//! supported here — it needs a SHACL-function registry the crate does not carry;
+//! an unrecognised blank-node expression is dropped (lenient), so a rule that uses
+//! one simply infers nothing rather than misfiring.
 //!
 //! Both rule types honour:
 //!   * **`sh:condition`** (§4.1) — a rule only fires for focus nodes that conform
@@ -77,29 +104,84 @@ enum RuleKind {
     /// does not go through the SELECT pre-binding path; `$this` is injected as a
     /// `VALUES` table textually-safe at parse time via the algebra).
     Sparql { construct: String },
+    /// `sh:values` value rule: a property shape with a single-predicate `sh:path`
+    /// and an `sh:values` node expression. For each focus node `n`, infers
+    /// `(n, predicate, v)` for every `v` in `Eval(values, n)`.
+    Values {
+        predicate: NamedNode,
+        values: NodeExpr,
+    },
 }
 
-/// A SHACL node expression as used by `sh:subject`/`sh:predicate`/`sh:object`.
-/// The supported subset (the spec's common building blocks): the focus node
-/// (`sh:this`), a constant term, or a property-path expression from the focus.
+/// A SHACL-AF node expression (SHACL-AF *Node Expressions*), evaluated against a
+/// focus node to a *set* of nodes. The full algebra is supported except the
+/// function-expression form (which needs a SHACL-function registry the crate
+/// does not carry — see the module docs).
 #[derive(Debug, Clone)]
 enum NodeExpr {
-    /// `sh:this` — evaluates to the focus node.
+    /// `sh:this` — evaluates to `{ focus }`.
     This,
-    /// A constant IRI or literal node.
+    /// A constant IRI or literal node — evaluates to `{ term }`.
     Constant(Term),
-    /// A path node expression `[ sh:path P ]` (`sh:nodes` defaults to the focus
-    /// node): evaluates to the value nodes of the path from the focus node.
-    Path(Path),
+    /// A path node expression `[ sh:path P ; sh:nodes N ]`: the path-`P` value
+    /// nodes of every node in `Eval(N, focus)` (`N` defaults to `sh:this`).
+    Path { nodes: Box<NodeExpr>, path: Path },
+    /// A filter shape expression `[ sh:filterShape S ; sh:nodes N ]`: the nodes
+    /// of `Eval(N, focus)` that conform to shape `S` (a [`ShapesModel`] shape id).
+    FilterShape { nodes: Box<NodeExpr>, shape: usize },
+    /// `[ sh:intersection ( E1 E2 … ) ]`: set intersection of the members.
+    Intersection(Vec<NodeExpr>),
+    /// `[ sh:union ( E1 E2 … ) ]`: set union of the members.
+    Union(Vec<NodeExpr>),
 }
 
 impl NodeExpr {
-    /// The node-set this expression evaluates to for `focus` over `data`.
-    fn eval(&self, data: &GraphView, focus: &Term) -> Vec<Term> {
+    /// The node-set this expression evaluates to for `focus` over `data`. Filter
+    /// shape expressions need the parsed `model` (to run the constraint validator
+    /// for conformance) and the owning `Graph` (the validator is graph-, not
+    /// view-, oriented) — both threaded through.
+    fn eval(
+        &self,
+        graph: &Graph,
+        view: &GraphView,
+        model: &ShapesModel,
+        focus: &Term,
+    ) -> Vec<Term> {
         match self {
             NodeExpr::This => vec![focus.clone()],
             NodeExpr::Constant(t) => vec![t.clone()],
-            NodeExpr::Path(p) => p.values(data, focus),
+            NodeExpr::Path { nodes, path } => {
+                let starts = nodes.eval(graph, view, model, focus);
+                crate::view::dedup(starts.iter().flat_map(|s| path.values(view, s)))
+            }
+            NodeExpr::FilterShape { nodes, shape } => nodes
+                .eval(graph, view, model, focus)
+                .into_iter()
+                .filter(|n| crate::eval::conforms_node(graph, model, *shape, n))
+                .collect(),
+            NodeExpr::Intersection(members) => {
+                let mut iter = members.iter();
+                // Empty intersection ⇒ empty (no constraining set); a degenerate
+                // single-member intersection is just that member.
+                let Some(first) = iter.next() else {
+                    return Vec::new();
+                };
+                let mut acc = crate::view::dedup(first.eval(graph, view, model, focus));
+                for m in iter {
+                    let other: FxHashSet<Term> =
+                        m.eval(graph, view, model, focus).into_iter().collect();
+                    acc.retain(|t| other.contains(t));
+                    if acc.is_empty() {
+                        break;
+                    }
+                }
+                acc
+            }
+            NodeExpr::Union(members) => crate::view::dedup(
+                members
+                    .iter()
+                    .flat_map(|m| m.eval(graph, view, model, focus)),
+            ),
         }
     }
 }
@@ -114,7 +196,8 @@ struct RuleSet {
 
 impl RuleSet {
     /// Parses every `sh:rule` of every shape in `model` from the shapes graph
-    /// `shapes`. A shape's rules apply to that shape's focus nodes (its targets).
+    /// `shapes`, plus every `sh:values` value rule on a property shape. A rule
+    /// applies to its owning shape's focus nodes (its targets).
     fn parse(shapes: &Graph, model: &ShapesModel) -> RuleSet {
         let g = GraphView::new(shapes);
         let mut scheduled: Vec<(usize, Rule)> = Vec::new();
@@ -123,6 +206,25 @@ impl RuleSet {
             for rule_node in g.objects(&shape_node, &sh("rule")) {
                 if let Some(rule) = parse_rule(&g, model, &rule_node) {
                     scheduled.push((sid, rule));
+                }
+            }
+            // `sh:values` value rule (SHACL-AF): directly on a property shape, NOT
+            // a `sh:rule` value. Needs a single-predicate `sh:path`; the values
+            // node expression is read from the same shape node.
+            if let Some(rule) = parse_values_rule(&g, model, sid, &shape_node) {
+                // Focus selection: a property shape with its OWN targets fires for
+                // those; otherwise (the common `sh:property` child case) it fires
+                // for every targeted node shape that references it as a child, so
+                // the rule sees the parent's focus nodes (SHACL-AF property value
+                // rules attach to the property shape but range over focus nodes).
+                if !model.shapes[sid].targets.is_empty() {
+                    scheduled.push((sid, rule));
+                } else {
+                    for parent in parents_of(model, sid) {
+                        if !model.shapes[parent].targets.is_empty() {
+                            scheduled.push((parent, rule.clone()));
+                        }
+                    }
                 }
             }
         }
@@ -165,9 +267,9 @@ fn parse_rule(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<Rule> {
         let construct = format!("{prefixes}\n{}", l.value());
         RuleKind::Sparql { construct }
     } else {
-        let subject = parse_node_expr(g, &g.object(node, &sh("subject"))?)?;
-        let predicate = parse_node_expr(g, &g.object(node, &sh("predicate"))?)?;
-        let object = parse_node_expr(g, &g.object(node, &sh("object"))?)?;
+        let subject = parse_node_expr(g, model, &g.object(node, &sh("subject"))?)?;
+        let predicate = parse_node_expr(g, model, &g.object(node, &sh("predicate"))?)?;
+        let object = parse_node_expr(g, model, &g.object(node, &sh("object"))?)?;
         RuleKind::Triple {
             subject,
             predicate,
@@ -182,21 +284,104 @@ fn parse_rule(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<Rule> {
     })
 }
 
-/// Parses a node expression value. Supported forms: `sh:this`, a constant
-/// IRI/literal, or a path node expression `[ sh:path P ]`. `None` for an
-/// unsupported blank-node expression form (skipped — ill-formed/unsupported).
-fn parse_node_expr(g: &GraphView, node: &Term) -> Option<NodeExpr> {
+/// Parses a `sh:values` value rule on property shape `sid` (SHACL-AF property
+/// value rules). Requires a single-predicate `sh:path` (only a predicate path
+/// has an inferable subject/predicate form) and an `sh:values` node expression.
+/// `None` when the shape carries no `sh:values`, has a non-predicate path, or the
+/// values expression is unsupported (skipped — lenient). `sh:order` /
+/// `sh:deactivated` / `sh:condition` on the property shape itself are honoured.
+fn parse_values_rule(
+    g: &GraphView,
+    model: &ShapesModel,
+    sid: usize,
+    shape_node: &Term,
+) -> Option<Rule> {
+    let values_term = g.object(shape_node, &sh("values"))?;
+    let predicate = match &model.shapes[sid].path {
+        Some(Path::Predicate(p)) => NamedNode::new(p).ok()?,
+        _ => return None, // a non-predicate (or absent) path cannot be inferred
+    };
+    let values = parse_node_expr(g, model, &values_term)?;
+    let order = match g.object(shape_node, &sh("order")) {
+        Some(Term::Literal(l)) => l.value().parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    };
+    let conditions: Vec<usize> = g
+        .objects(shape_node, &sh("condition"))
+        .iter()
+        .filter_map(|c| model.by_node(c))
+        .collect();
+    Some(Rule {
+        kind: RuleKind::Values { predicate, values },
+        order,
+        conditions,
+        deactivated: model.shapes[sid].deactivated,
+    })
+}
+
+/// Parses a SHACL-AF node expression value (the full algebra — see [`NodeExpr`]).
+/// `None` for an unsupported / ill-formed blank-node expression (e.g. a function
+/// expression, or a filter shape whose shape is not in the model) — skipped.
+fn parse_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<NodeExpr> {
     match node {
         Term::NamedNode(n) if n.as_str() == sh("this") => Some(NodeExpr::This),
         Term::NamedNode(_) | Term::Literal(_) => Some(NodeExpr::Constant(node.clone())),
-        Term::BlankNode(_) => {
-            // A path node expression: [ sh:path P ]. (sh:nodes defaults to the
-            // focus node, which is exactly Path::values' `start` argument.)
-            let p = g.object(node, &sh("path"))?;
-            Path::parse(g, &p).ok().map(NodeExpr::Path)
-        }
+        Term::BlankNode(_) => parse_blank_node_expr(g, model, node),
         #[allow(unreachable_patterns)]
         _ => None,
+    }
+}
+
+/// Parses a blank-node node expression: path / filter-shape / intersection /
+/// union. The `sh:nodes` of a path or filter expression is itself a node
+/// expression (defaulting to `sh:this` for a path), so these nest.
+fn parse_blank_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<NodeExpr> {
+    // Intersection / union: a SHACL list of member node expressions.
+    for (pred, is_union) in [("intersection", false), ("union", true)] {
+        if let Some(list_head) = g.object(node, &sh(pred)) {
+            let members: Vec<NodeExpr> = g
+                .list(&list_head)
+                .iter()
+                .filter_map(|m| parse_node_expr(g, model, m))
+                .collect();
+            if members.is_empty() {
+                return None; // an empty/all-unparsable set is degenerate — skip
+            }
+            return Some(if is_union {
+                NodeExpr::Union(members)
+            } else {
+                NodeExpr::Intersection(members)
+            });
+        }
+    }
+    // Filter shape: [ sh:filterShape S ; sh:nodes N ]. The shape must be parsed
+    // into the model (typed sh:NodeShape / referenced) — exactly as sh:condition.
+    if let Some(shape_term) = g.object(node, &sh("filterShape")) {
+        let shape = model.by_node(&shape_term)?;
+        let nodes = parse_nodes_input(g, model, node)?;
+        return Some(NodeExpr::FilterShape {
+            nodes: Box::new(nodes),
+            shape,
+        });
+    }
+    // Path: [ sh:path P ; sh:nodes N? ] (sh:nodes defaults to sh:this).
+    if let Some(p) = g.object(node, &sh("path")) {
+        let path = Path::parse(g, &p).ok()?;
+        let nodes = parse_nodes_input(g, model, node)?;
+        return Some(NodeExpr::Path {
+            nodes: Box::new(nodes),
+            path,
+        });
+    }
+    None // unsupported (e.g. a function expression) — dropped
+}
+
+/// The `sh:nodes` input node expression of a path / filter expression, defaulting
+/// to the focus-node expression (`sh:this`) when `sh:nodes` is absent.
+fn parse_nodes_input(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<NodeExpr> {
+    match g.object(node, &sh("nodes")) {
+        Some(n) => parse_node_expr(g, model, &n),
+        None => Some(NodeExpr::This),
     }
 }
 
@@ -267,7 +452,7 @@ pub fn apply_rules_with_model(data: &Graph, shapes: &Graph, model: &ShapesModel)
                 if !conforms_to_all(&augmented, model, &rule.conditions, &focus) {
                     continue;
                 }
-                for triple in fire_rule(&augmented, &view, &focus, rule) {
+                for triple in fire_rule(&augmented, &view, model, &focus, rule) {
                     if inferred_set.insert(triple.clone()) {
                         inferred.push(triple);
                         pass_new = true;
@@ -299,17 +484,84 @@ pub fn expand(data: &Graph, shapes: &Graph) -> Graph {
     expand_graph(data, &inf.triples)
 }
 
+/// Evaluates the SHACL-AF **node expression** rooted at `expr` (a term in the
+/// `shapes` graph) against `focus` over `data`, returning the set of result nodes
+/// (deduplicated, in discovery order). `None` if `expr` is not a supported node
+/// expression form (e.g. a function expression, or a filter shape whose shape is
+/// not declared in the shapes graph) — the caller can treat that as "skip".
+///
+/// This is the production public seam onto the implemented algebra
+/// ([focus][sh:this] / constant / path-with-`sh:nodes` / `sh:filterShape` /
+/// `sh:intersection` / `sh:union`): it is the same `parse_node_expr` →
+/// `NodeExpr::eval` machinery that backs `apply_rules`' `sh:values` rules, and is
+/// exercised by this crate's `#[cfg(test)]` unit tests (via `apply_rules` for the
+/// production `sh:values` rule path, and directly by the `eval_node_expression_seam`
+/// test). The W3C conformance harness (`tests/w3c_node_expr.rs`) does **not** call
+/// this function: it validates a *parallel re-implementation* of the same algebra
+/// in its own `Evaluator`, and touches the crate only through `conforms` / `Path`.
+/// `shapes` is parsed fresh; for repeated evaluation parse a model once and use the
+/// engine entry points.
+pub fn eval_node_expression(
+    data: &Graph,
+    shapes: &Graph,
+    expr: &Term,
+    focus: &Term,
+) -> Option<Vec<Term>> {
+    let model = ShapesModel::parse(shapes);
+    let g = GraphView::new(shapes);
+    let parsed = parse_node_expr(&g, &model, expr)?;
+    let view = GraphView::new(data);
+    Some(parsed.eval(data, &view, &model, focus))
+}
+
+/// True iff `focus` **conforms** to the shape identified by `shape_node` in the
+/// `shapes` graph — i.e. validating `focus` against that shape as a standalone
+/// focus node (ignoring the shape's own targets) yields no results. `false` if
+/// `shape_node` names no parsed shape. This surfaces the `sh:condition` /
+/// `sh:filterShape` conformance primitive for callers (the harness uses it).
+pub fn conforms<'a>(data: &'a Graph, shapes: &Graph, shape_node: &Term) -> ConformanceCheck<'a> {
+    let model = ShapesModel::parse(shapes);
+    let sid = model.by_node(shape_node);
+    ConformanceCheck { data, model, sid }
+}
+
+/// A reusable conformance check for one shape (the result of [`conforms`]): call
+/// [`ConformanceCheck::holds`] per focus node. Holding the parsed model lets a
+/// caller test many nodes against the same shape without re-parsing.
+pub struct ConformanceCheck<'a> {
+    data: &'a Graph,
+    model: ShapesModel,
+    sid: Option<usize>,
+}
+
+impl ConformanceCheck<'_> {
+    /// True iff `focus` conforms to the shape (always `false` if the shape was
+    /// not found in the shapes graph).
+    pub fn holds(&self, focus: &Term) -> bool {
+        match self.sid {
+            Some(sid) => crate::eval::conforms_node(self.data, &self.model, sid, focus),
+            None => false,
+        }
+    }
+}
+
 /// Fires one rule for one focus node, yielding the triples it infers.
-fn fire_rule(augmented: &Graph, view: &GraphView, focus: &Term, rule: &Rule) -> Vec<Triple> {
+fn fire_rule(
+    augmented: &Graph,
+    view: &GraphView,
+    model: &ShapesModel,
+    focus: &Term,
+    rule: &Rule,
+) -> Vec<Triple> {
     match &rule.kind {
         RuleKind::Triple {
             subject,
             predicate,
             object,
         } => {
-            let subjects = subject.eval(view, focus);
-            let predicates = predicate.eval(view, focus);
-            let objects = object.eval(view, focus);
+            let subjects = subject.eval(augmented, view, model, focus);
+            let predicates = predicate.eval(augmented, view, model, focus);
+            let objects = object.eval(augmented, view, model, focus);
             let mut out = Vec::new();
             // The cartesian product S × P × O; only well-typed RDF triples are
             // emitted (subject IRI/blank, predicate IRI), the rest are dropped.
@@ -336,7 +588,32 @@ fn fire_rule(augmented: &Graph, view: &GraphView, focus: &Term, rule: &Rule) -> 
                 None => Vec::new(),
             }
         }
+        RuleKind::Values { predicate, values } => {
+            // (focus, predicate, v) for every value-expression result v. The focus
+            // node is the subject, so it must be an IRI/blank node (else skipped).
+            let Some(subj) = as_subject(focus) else {
+                return Vec::new();
+            };
+            values
+                .eval(augmented, view, model, focus)
+                .into_iter()
+                .map(|o| Triple {
+                    subject: subj.clone(),
+                    predicate: predicate.clone(),
+                    object: o,
+                })
+                .collect()
+        }
     }
+}
+
+/// The shape ids that reference shape `sid` as a `sh:property` child (the parent
+/// node shapes of a property shape). Used to range a `sh:values` value rule over
+/// the parent's focus nodes when the property shape has no targets of its own.
+fn parents_of(model: &ShapesModel, sid: usize) -> Vec<usize> {
+    (0..model.shapes.len())
+        .filter(|&p| model.shapes[p].property_children.contains(&sid))
+        .collect()
 }
 
 /// Builds the CONSTRUCT query text with `$this` pre-bound to `focus` via a
@@ -765,5 +1042,318 @@ mod tests {
         let inf = apply_rules(&data, &shapes);
         assert!(inf.triples.is_empty());
         assert_eq!(inf.iterations, 0);
+    }
+
+    // [OPUS-4.8] (sq-1m0n) -------- full node-expression algebra + sh:values --------
+
+    /// All inferred object IRIs for `(s, p, ?)`, as ex:-local sorted strings.
+    fn objs(inf: &Inference, s: &str, p: &str) -> Vec<String> {
+        let mut v: Vec<String> = inf
+            .triples
+            .iter()
+            .filter(|t| t.subject.to_string() == format!("<{s}>") && t.predicate.as_str() == p)
+            .map(|t| t.object.to_string())
+            .collect();
+        v.sort();
+        v
+    }
+
+    // ---- path node expression with explicit sh:nodes (start != focus) ----
+    #[test]
+    fn node_expr_path_with_explicit_nodes() {
+        // Infer (this, ex:grandparentName, X) where the VALUE expression starts at
+        // this/ex:parent (sh:nodes) and then walks ex:name — i.e. the parent's name.
+        let data = g(r#"
+            ex:a a ex:Person ; ex:parent ex:b .
+            ex:b ex:name "Bob" .
+        "#);
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path ex:grandparentName ;
+                sh:values [ sh:nodes [ sh:path ex:parent ] ; sh:path ex:name ] ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        // (ex:a, ex:grandparentName, "Bob")
+        assert_eq!(inf.triples.len(), 1, "{:?}", inf.triples);
+        let t = &inf.triples[0];
+        assert_eq!(t.subject.to_string(), "<http://example.org/a>");
+        assert_eq!(t.predicate.as_str(), "http://example.org/grandparentName");
+        assert_eq!(t.object.to_string(), "\"Bob\"");
+    }
+
+    // ---- filter-shape node expression ----
+    #[test]
+    fn node_expr_filter_shape() {
+        // Of this/ex:item values, keep only those conforming to ex:HasLabelShape
+        // (those with an rdfs:label), inferred under ex:goodItem.
+        let data = g(r#"
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:a a ex:Coll ; ex:item ex:x , ex:y , ex:z .
+            ex:x rdfs:label "X" .
+            ex:y rdfs:label "Y" .
+            ex:z ex:other "no label" .
+        "#);
+        let shapes = g(r#"
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:HasLabelShape a sh:NodeShape ;
+              sh:property [ sh:path rdfs:label ; sh:minCount 1 ] .
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Coll ;
+              sh:property [
+                sh:path ex:goodItem ;
+                sh:values [ sh:filterShape ex:HasLabelShape ; sh:nodes [ sh:path ex:item ] ] ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert_eq!(
+            objs(&inf, "http://example.org/a", "http://example.org/goodItem"),
+            vec![
+                "<http://example.org/x>".to_string(),
+                "<http://example.org/y>".to_string()
+            ],
+            "only x and y carry a label: {:?}",
+            inf.triples
+        );
+    }
+
+    // ---- union node expression ----
+    #[test]
+    fn node_expr_union() {
+        // Union of this/ex:a values and this/ex:b values, deduplicated.
+        let data = g(r#"
+            ex:n a ex:T ; ex:a ex:x , ex:y ; ex:b ex:y , ex:z .
+        "#);
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:T ;
+              sh:property [
+                sh:path ex:all ;
+                sh:values [ sh:union ( [ sh:path ex:a ] [ sh:path ex:b ] ) ] ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert_eq!(
+            objs(&inf, "http://example.org/n", "http://example.org/all"),
+            vec![
+                "<http://example.org/x>".to_string(),
+                "<http://example.org/y>".to_string(),
+                "<http://example.org/z>".to_string()
+            ],
+            "union {{x,y}} ∪ {{y,z}} = {{x,y,z}}: {:?}",
+            inf.triples
+        );
+    }
+
+    // ---- intersection node expression (with dedup) ----
+    #[test]
+    fn node_expr_intersection() {
+        // Intersection of this/ex:a values and this/ex:b values.
+        let data = g(r#"
+            ex:n a ex:T ; ex:a ex:x , ex:y , ex:w ; ex:b ex:y , ex:z , ex:w .
+        "#);
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:T ;
+              sh:property [
+                sh:path ex:both ;
+                sh:values [ sh:intersection ( [ sh:path ex:a ] [ sh:path ex:b ] ) ] ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert_eq!(
+            objs(&inf, "http://example.org/n", "http://example.org/both"),
+            vec![
+                "<http://example.org/w>".to_string(),
+                "<http://example.org/y>".to_string()
+            ],
+            "intersection {{x,y,w}} ∩ {{y,z,w}} = {{y,w}}: {:?}",
+            inf.triples
+        );
+    }
+
+    // ---- a constant node expression in sh:values ----
+    #[test]
+    fn values_rule_constant() {
+        // Every ex:Person gets ex:species ex:Human (a constant value expression).
+        let data = g("ex:alice a ex:Person . ex:bob a ex:Person .");
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [ sh:path ex:species ; sh:values ex:Human ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert!(has(
+            &inf,
+            "http://example.org/alice",
+            "http://example.org/species",
+            "http://example.org/Human"
+        ));
+        assert!(has(
+            &inf,
+            "http://example.org/bob",
+            "http://example.org/species",
+            "http://example.org/Human"
+        ));
+        assert_eq!(inf.triples.len(), 2);
+    }
+
+    // ---- sh:values value rule with a path expression (the canonical "copy" rule) ----
+    #[test]
+    fn values_rule_path_copies() {
+        // ex:fullName := this/ex:firstName (a property value rule on a property shape
+        // that is a sh:property CHILD of the targeted node shape — fires for the
+        // PARENT's focus nodes).
+        let data =
+            g(r#"ex:a a ex:Person ; ex:firstName "Ann" . ex:b a ex:Person ; ex:firstName "Ben" ."#);
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path ex:fullName ;
+                sh:values [ sh:path ex:firstName ] ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert_eq!(inf.triples.len(), 2, "{:?}", inf.triples);
+        let ann = inf
+            .triples
+            .iter()
+            .find(|t| t.subject.to_string() == "<http://example.org/a>")
+            .unwrap();
+        assert_eq!(ann.predicate.as_str(), "http://example.org/fullName");
+        assert_eq!(ann.object.to_string(), "\"Ann\"");
+    }
+
+    // ---- a non-predicate path on a sh:values shape is skipped (cannot be inferred) ----
+    #[test]
+    fn values_rule_non_predicate_path_skipped() {
+        // sh:path is a sequence (not a single predicate) — no inferable predicate.
+        let data = g("ex:a a ex:Person ; ex:x ex:b . ex:b ex:y ex:c .");
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path ( ex:x ex:y ) ;
+                sh:values ex:K ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert!(inf.triples.is_empty(), "{:?}", inf.triples);
+    }
+
+    // ---- sh:values honours sh:deactivated on the property shape ----
+    #[test]
+    fn values_rule_deactivated() {
+        let data = g("ex:a a ex:Person .");
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                a sh:PropertyShape ;
+                sh:deactivated true ;
+                sh:path ex:species ;
+                sh:values ex:Human ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert!(inf.triples.is_empty(), "{:?}", inf.triples);
+    }
+
+    // ---- a TripleRule using the new union object expression ----
+    #[test]
+    fn triple_rule_union_object() {
+        // (this, ex:contact, X) for X in (this/ex:email ∪ this/ex:phone).
+        let data = g(r#"ex:a a ex:Person ; ex:email ex:e1 ; ex:phone ex:p1 ."#);
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:rule [
+                a sh:TripleRule ;
+                sh:subject sh:this ;
+                sh:predicate ex:contact ;
+                sh:object [ sh:union ( [ sh:path ex:email ] [ sh:path ex:phone ] ) ] ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert_eq!(
+            objs(&inf, "http://example.org/a", "http://example.org/contact"),
+            vec![
+                "<http://example.org/e1>".to_string(),
+                "<http://example.org/p1>".to_string()
+            ],
+            "{:?}",
+            inf.triples
+        );
+    }
+
+    // ---- a function expression (unsupported) is dropped, not misfired ----
+    #[test]
+    fn function_expression_is_dropped() {
+        // [ ex:someFunction ( sh:this ) ] is a function expression we do not support;
+        // the value rule must infer nothing (lenient drop), never panic or misfire.
+        let data = g("ex:a a ex:Person .");
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path ex:fx ;
+                sh:values [ ex:someFunction ( sh:this ) ] ;
+              ] .
+        "#);
+        let inf = apply_rules(&data, &shapes);
+        assert!(inf.triples.is_empty(), "{:?}", inf.triples);
+    }
+
+    // ---- the public `eval_node_expression` seam, exercised directly ----
+    #[test]
+    fn eval_node_expression_seam() {
+        use crate::view::GraphView;
+
+        // Evaluate node expressions directly through the public seam (NOT via
+        // apply_rules). The expression terms are the blank nodes that the SHACL-AF
+        // `sh:values` algebra ranges over, so they exercise the real
+        // parse_node_expr → NodeExpr::eval machinery — not a Constant short-circuit.
+        let data = g(r#"
+            ex:a ex:parent ex:b , ex:c .
+            ex:b ex:name "Bob" .
+            ex:c ex:name "Carol" .
+            ex:d ex:name "Dave" .
+        "#);
+        let shapes = g(r#"
+            ex:Decl
+              # a path-with-sh:nodes expression: focus/ex:parent, then ex:name
+              ex:goodExpr [ sh:nodes [ sh:path ex:parent ] ; sh:path ex:name ] ;
+              # an unsupported function expression
+              ex:fnExpr [ ex:someFunction ( sh:this ) ] .
+        "#);
+        let view = GraphView::new(&shapes);
+        let decl = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/Decl"));
+        let good_expr = view
+            .object(&decl, "http://example.org/goodExpr")
+            .expect("goodExpr node-expression bnode present");
+        let fn_expr = view
+            .object(&decl, "http://example.org/fnExpr")
+            .expect("fnExpr node-expression bnode present");
+        let focus = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/a"));
+
+        let mut got: Vec<String> = eval_node_expression(&data, &shapes, &good_expr, &focus)
+            .expect("supported path-with-sh:nodes form must evaluate")
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        got.sort();
+        // focus/ex:parent = {ex:b, ex:c}; their ex:name = {"Bob","Carol"}.
+        // ex:d's name is NOT reachable from the focus, so it must be absent.
+        assert_eq!(got, vec!["\"Bob\"".to_string(), "\"Carol\"".to_string()]);
+
+        // An unsupported (function) expression returns None — the documented
+        // "skip" contract — rather than a wrong/empty result set.
+        assert!(
+            eval_node_expression(&data, &shapes, &fn_expr, &focus).is_none(),
+            "a function expression is not a supported node-expression form"
+        );
     }
 }
