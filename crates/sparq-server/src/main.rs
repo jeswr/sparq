@@ -9,6 +9,7 @@
 //!                [--max-results N] [--max-query-rows N] [--max-decompress-ratio N]
 //!                [--max-subscriptions N] [--max-subscriptions-per-conn N]
 //!                [--service-allow HOST|*.SUFFIX]... [--service-allow-file PATH]
+//!                [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH]
 //!                [--verbose] [DATA_FILE]
 //!
 //! DURABLE PERSISTENCE (`--persist DIR`, env `SPARQ_PERSIST_DIR`; QLever's `--persist-updates`
@@ -27,6 +28,16 @@
 //! `SPARQ_SERVICE_ALLOW` env var (comma/whitespace-separated). This is an SSRF guard: a
 //! `SERVICE` clause turns attacker-controlled query text into an outbound request from this
 //! host. See crates/sparq-server/README.md -> "SERVICE federation (egress allowlist)". [OPUS-4.8]
+//!
+//! CORS (sq-o7o0, ASVS V14.5.3): by default the server emits NO CORS headers — it is a SPARQL
+//! DATA API, so a cross-origin browser `fetch` simply cannot read its responses (the safe
+//! posture). For a FIRST-PARTY browser app on a different origin, allowlist that origin via
+//! `--cors-allow-origin <ORIGIN>` (repeatable; exact `scheme://host[:port]`),
+//! `--cors-allow-origin-file PATH` (one origin per line) or `SPARQ_CORS_ALLOW_ORIGIN`
+//! (comma/whitespace-separated). Only a listed `Origin` is reflected into
+//! `Access-Control-Allow-Origin` (never `*`, never with credentials) and the preflight
+//! `OPTIONS` is answered for it; an un-listed origin still gets no CORS header. See
+//! crates/sparq-server/README.md -> "Security posture" (CORS). [OPUS-4.8]
 //!
 //! SECURITY (auth): by default the server has NO authentication on any endpoint (query, the
 //! `application/sparql-update` mutation path, the `/subscriptions` WebSocket). [OPUS-4.8]
@@ -156,6 +167,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the CLI only ever widens what env granted (never silently narrows it).
     let mut service_allow_cli: Vec<String> = Vec::new();
     let mut service_allow_file: Option<String> = None;
+    // [OPUS-4.8] sq-o7o0: collect first-party CORS origin allowlist entries from the CLI;
+    // UNIONed with the SPARQ_CORS_ALLOW_ORIGIN env baseline + an optional
+    // --cors-allow-origin-file, after the arg loop (additive — CLI only widens).
+    let mut cors_allow_cli: Vec<String> = Vec::new();
+    let mut cors_allow_file: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -328,6 +344,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 service_allow_file =
                     Some(args.next().ok_or("--service-allow-file requires a path")?);
             }
+            // [OPUS-4.8] sq-o7o0 (ASVS V14.5.3): first-party CORS origin allowlist. Repeatable:
+            // each value adds one exact origin (`https://app.example.org`). With NO allowlist
+            // (the default) NO CORS headers are emitted (a cross-origin browser read is blocked).
+            "--cors-allow-origin" => {
+                cors_allow_cli.push(
+                    args.next()
+                        .ok_or("--cors-allow-origin requires an origin (scheme://host[:port])")?,
+                );
+            }
+            "--cors-allow-origin-file" => {
+                cors_allow_file =
+                    Some(args.next().ok_or("--cors-allow-origin-file requires a path")?);
+            }
             "-h" | "--help" => {
                 let time_travel = if cfg!(feature = "time-travel") {
                     " [--time-travel-generations N] [--time-travel-max-age SECS]"
@@ -358,7 +387,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl} [--verbose] \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl} \
+                     [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n\n  \
                      PERSIST: --persist DIR (env SPARQ_PERSIST_DIR) makes the on-disk index at \
                      DIR the durable source of truth (QLever --persist-updates): every committed \
@@ -379,7 +409,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      SERVICE federation (the `service` build feature) is DENY-ALL by default: \
                      SERVICE <iri> reaches NOTHING unless the host is allowlisted via \
                      --service-allow / --service-allow-file / SPARQ_SERVICE_ALLOW \
-                     (exact host or *.suffix wildcard) — an SSRF guard."
+                     (exact host or *.suffix wildcard) — an SSRF guard.\n  \
+                     CORS: NO CORS headers by default (a cross-origin browser fetch cannot read \
+                     responses). For a FIRST-PARTY browser app on another origin, allowlist its \
+                     exact origin(s) via --cors-allow-origin ORIGIN (repeatable) / \
+                     --cors-allow-origin-file PATH / SPARQ_CORS_ALLOW_ORIGIN \
+                     (scheme://host[:port]); only a listed Origin is reflected (never '*', never \
+                     with credentials), and preflight OPTIONS is answered for it."
                 );
                 return Ok(());
             }
@@ -401,6 +437,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for entry in &service_allow_cli {
         config.service_allow.add(entry)?;
+    }
+
+    // [OPUS-4.8] sq-o7o0: merge the --cors-allow-origin-file + --cors-allow-origin CLI
+    // entries INTO the SPARQ_CORS_ALLOW_ORIGIN env baseline already in config.cors_allow
+    // (union — additive). A malformed origin or unreadable file is a hard startup error:
+    // refuse to boot rather than silently run with a narrower-than-written allowlist.
+    if let Some(path) = &cors_allow_file {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("--cors-allow-origin-file {path}: {e}"))?;
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            config.cors_allow.add(line)?;
+        }
+    }
+    for entry in &cors_allow_cli {
+        config.cors_allow.add(entry)?;
     }
 
     // [OPUS-4.8] sq-0bxp: the per-query access audit log emits via `tracing`, so it needs a
@@ -526,6 +578,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "SERVICE egress allowlist: {}",
         config.service_allow.display()
     );
+    // [OPUS-4.8] sq-o7o0: surface the CORS posture at startup. Empty (the default) = no CORS
+    // headers; configured = the exact first-party origins a browser may read responses from.
+    eprintln!("CORS first-party origin allowlist: {}", config.cors_allow.display());
     #[cfg(feature = "time-travel")]
     eprintln!(
         "time travel: ?generation=N enabled — generations={} max-age={} (each retained generation is a full graph)",

@@ -368,6 +368,22 @@ pub struct ServerConfig {
     /// this field is still present (so the config shape is stable) but inert: no
     /// federation code is compiled and a SERVICE clause errors at execution as before.
     pub service_allow: crate::service_config::ServiceAllowlist,
+    /// [OPUS-4.8] (sq-o7o0, ASVS V14.5.3) First-party CORS origin allowlist. `sparq-server`
+    /// is a SPARQL DATA API, so its safe default is to emit **no CORS headers** — a
+    /// cross-origin browser `fetch` cannot read a response with no
+    /// `Access-Control-Allow-Origin`, which is exactly the historical behaviour and the
+    /// right posture for a public endpoint. EMPTY (the default) keeps that: no CORS code
+    /// path runs and a response is byte-identical to before this option existed.
+    ///
+    /// An operator running a FIRST-PARTY browser app on a different origin opts that one
+    /// origin in via `--cors-allow-origin` / `--cors-allow-origin-file` /
+    /// `SPARQ_CORS_ALLOW_ORIGIN` (see [`crate::CorsAllowlist`]). When non-empty, the
+    /// [`harden`] middleware reflects an allowlisted request `Origin` into
+    /// `Access-Control-Allow-Origin` (never `*`, never with credentials) + `Vary: Origin`,
+    /// and answers the `OPTIONS` preflight. An un-listed origin still gets no CORS header.
+    /// This is a browser-read gate ONLY: it does not relax auth, the bind posture, body
+    /// limits, the SERVICE egress allowlist, or the row caps.
+    pub cors_allow: crate::cors_config::CorsAllowlist,
     /// [OPUS-4.8] (sq-7cxr, gh-44) DURABLE PERSISTENCE directory — the QLever `--persist-updates`
     /// equivalent. When `Some(dir)`, the server treats the on-disk index at `dir` as the durable,
     /// rebuildable source of truth: at startup it opens the existing store there (replaying its
@@ -500,6 +516,9 @@ impl Default for ServerConfig {
             auth_token_read: false,
             // [OPUS-4.8] sq-4w18: safe default — empty allowlist = deny ALL SERVICE.
             service_allow: crate::service_config::ServiceAllowlist::default(),
+            // [OPUS-4.8] sq-o7o0: safe default — empty allowlist = NO CORS headers (a
+            // cross-origin browser read is blocked, the historical posture for a data API).
+            cors_allow: crate::cors_config::CorsAllowlist::default(),
             // [OPUS-4.8] sq-7cxr: safe default — no persistence dir = in-memory (back-compat).
             persist_dir: None,
             // [OPUS-4.8] sq-d3d8: safe default — federation discovery descriptors OFF even
@@ -660,6 +679,17 @@ impl ServerConfig {
             cfg.service_allow
                 .add_many(&v)
                 .map_err(|e| format!("SPARQ_SERVICE_ALLOW: {e}"))?;
+        }
+        // [OPUS-4.8] sq-o7o0: first-party CORS origin allowlist baseline from
+        // SPARQ_CORS_ALLOW_ORIGIN (comma/whitespace-separated). The binary then ADDS any
+        // `--cors-allow-origin` / `--cors-allow-origin-file` entries (the union — CLI only
+        // ever widens). A malformed env origin is a hard startup error (propagated, not
+        // panicked) rather than a silently-dropped origin, so the operator's allowlist is
+        // never quietly narrower than written. Unset/empty => no CORS headers (the default).
+        if let Ok(v) = std::env::var("SPARQ_CORS_ALLOW_ORIGIN") {
+            cfg.cors_allow
+                .add_many(&v)
+                .map_err(|e| format!("SPARQ_CORS_ALLOW_ORIGIN: {e}"))?;
         }
         // [OPUS-4.8] sq-7cxr: SPARQ_PERSIST_DIR enables durable persistence at the given
         // directory (the binary's --persist flag overrides it). An empty value is "unset".
@@ -2568,6 +2598,25 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
             .layer(axum::middleware::map_response(json_error_bodies))
             .layer(DefaultBodyLimit::max(config.max_body_bytes)),
     );
+    // [OPUS-4.8] sq-o7o0 (ASVS V14.5.3): OPT-IN first-party CORS. When the allowlist is
+    // EMPTY (the default) this layer is NOT added at all — the stack is byte-identical to
+    // before and NO CORS headers are emitted (a cross-origin browser read stays blocked).
+    // When configured, the layer wraps the WHOLE hardened stack so a preflight `OPTIONS`
+    // is answered before the body-limit/concurrency layers, and the CORS response headers
+    // land on every response — success, 429-shed, 413, and panic alike. The middleware
+    // reflects ONLY an allowlisted `Origin` (never `*`, never with credentials). See
+    // [`cors_layer`] / [`crate::cors_config`].
+    let routes = if config.cors_allow.is_empty() {
+        routes
+    } else {
+        let allow = config.cors_allow.clone();
+        routes.layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let allow = allow.clone();
+                async move { cors_layer(allow, req, next).await }
+            },
+        ))
+    };
     if config.verbose {
         // [OPUS-4.8] sq-toze.34: with redaction ON (the default), swap tower-http's
         // `DefaultMakeSpan` (which records the RAW request URI — and so the full
@@ -4917,6 +4966,130 @@ async fn security_headers(mut resp: Response) -> Response {
         if !headers.contains_key(name) {
             headers.insert(name, header::HeaderValue::from_static(value));
         }
+    }
+    resp
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-o7o0 (ASVS V14.5.3) — OPT-IN first-party CORS
+//
+// sparq-server is a SPARQL DATA API and its DEFAULT is to emit NO CORS headers (an
+// empty [`CorsAllowlist`] => this middleware is not even installed; see `harden`). The
+// option exists only so an operator can let a FIRST-PARTY browser app on a different
+// origin read responses. The policy is deliberately conservative:
+//
+//   * reflect ONLY an exact allowlisted `Origin` into `Access-Control-Allow-Origin`;
+//     an un-listed origin gets NO CORS header (browser blocks the read). Never `*`.
+//   * always `Vary: Origin` so a shared cache never serves an origin-specific
+//     `Access-Control-Allow-Origin` to a different origin.
+//   * NEVER `Access-Control-Allow-Credentials` — this is for reading PUBLIC results;
+//     the endpoint's own Bearer gate is orthogonal and unchanged.
+//   * answer the `OPTIONS` preflight (when it carries `Access-Control-Request-Method`)
+//     with the allowed methods/headers + a `Max-Age`, for an allowlisted origin only.
+// ---------------------------------------------------------------------------
+
+/// The methods advertised in a CORS preflight response. The HTTP surface accepts GET /
+/// HEAD / POST (SPARQL query + the GSP read/write verbs) plus OPTIONS itself; PUT /
+/// DELETE are the GSP write verbs. A browser's actual request is still subject to every
+/// other guard (auth, body limit, …) — advertising a method here does not bypass them.
+const CORS_ALLOW_METHODS: &str = "GET, HEAD, POST, PUT, DELETE, OPTIONS";
+
+/// The request headers advertised as allowed in a preflight when the browser does not
+/// send its own `Access-Control-Request-Headers` (we otherwise reflect that list). Covers
+/// the headers a SPARQL browser client sends: `Content-Type` (the POST forms) and
+/// `Authorization` (the optional Bearer gate).
+const CORS_ALLOW_HEADERS_DEFAULT: &str = "content-type, authorization";
+
+/// Preflight cache lifetime (`Access-Control-Max-Age`, seconds) — 10 minutes, a modest
+/// value so a policy change is picked up reasonably soon without re-preflighting every
+/// request.
+const CORS_MAX_AGE: &str = "600";
+
+/// [OPUS-4.8] sq-o7o0: the opt-in first-party CORS middleware (installed by [`harden`]
+/// only when [`ServerConfig::cors_allow`] is non-empty).
+///
+/// Reads the request `Origin`; if it is allowlisted (exact match, never `*`), reflects it
+/// into `Access-Control-Allow-Origin` (+ `Vary: Origin`). A CORS *preflight* (an `OPTIONS`
+/// carrying `Access-Control-Request-Method`) from an allowlisted origin is answered here
+/// with a `204` + the allowed methods/headers/max-age, WITHOUT running the inner stack.
+/// Any other request runs the inner stack normally and the actual-request CORS headers are
+/// stamped onto its response. A request with no `Origin`, or with an un-listed `Origin`,
+/// passes through completely untouched (no CORS header at all).
+async fn cors_layer(
+    allow: crate::cors_config::CorsAllowlist,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // The browser's Origin (RFC 6454 serialization). Absent ⇒ not a CORS request.
+    let origin_allowed = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|o| allow.allows(o))
+        .map(str::to_owned);
+
+    // A preflight is an OPTIONS that carries Access-Control-Request-Method. Answer it
+    // here for an allowlisted origin (204, no inner work). A bare OPTIONS without the
+    // request-method header is NOT a preflight — let it fall through (it 405s) and get
+    // the actual-request CORS header below.
+    let is_preflight = req.method() == Method::OPTIONS
+        && req
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+
+    if is_preflight {
+        return match &origin_allowed {
+            Some(origin) => {
+                // Echo the requested headers if the browser listed them, else a sane default.
+                let allow_headers = req
+                    .headers()
+                    .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| header::HeaderValue::from_str(s).ok())
+                    .unwrap_or_else(|| {
+                        header::HeaderValue::from_static(CORS_ALLOW_HEADERS_DEFAULT)
+                    });
+                let mut resp = Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .body(axum::body::Body::empty())
+                    .expect("static preflight response is always valid");
+                let h = resp.headers_mut();
+                // `origin` came from the request header (valid HeaderValue bytes) and is
+                // allowlisted, so the conversion cannot fail.
+                if let Ok(v) = header::HeaderValue::from_str(origin) {
+                    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+                }
+                h.insert(
+                    header::ACCESS_CONTROL_ALLOW_METHODS,
+                    header::HeaderValue::from_static(CORS_ALLOW_METHODS),
+                );
+                h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, allow_headers);
+                h.insert(
+                    header::ACCESS_CONTROL_MAX_AGE,
+                    header::HeaderValue::from_static(CORS_MAX_AGE),
+                );
+                h.insert(header::VARY, header::HeaderValue::from_static("Origin"));
+                resp
+            }
+            // Preflight from a NON-allowlisted origin: no CORS headers; a 204 with no
+            // Allow-Origin makes the browser fail the preflight (the desired refusal).
+            None => Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(axum::body::Body::empty())
+                .expect("static preflight response is always valid"),
+        };
+    }
+
+    // Actual (non-preflight) request: run the inner stack, then stamp the CORS
+    // response headers for an allowlisted origin. `Vary: Origin` is APPENDED (not
+    // inserted) so we never clobber a `Vary` a handler already set.
+    let mut resp = next.run(req).await;
+    if let Some(origin) = origin_allowed {
+        let h = resp.headers_mut();
+        if let Ok(v) = header::HeaderValue::from_str(&origin) {
+            h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+        }
+        h.append(header::VARY, header::HeaderValue::from_static("Origin"));
     }
     resp
 }

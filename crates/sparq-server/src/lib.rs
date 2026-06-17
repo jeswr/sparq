@@ -17,6 +17,15 @@ pub mod results;
 /// posture and rationale.
 pub mod service_config;
 
+/// [OPUS-4.8] (sq-o7o0, ASVS V14.5.3) **First-party CORS origin allowlist** — the
+/// [`cors_config::CorsAllowlist`] config type (parse `--cors-allow-origin` /
+/// `--cors-allow-origin-file` / `SPARQ_CORS_ALLOW_ORIGIN`, exact-origin matcher). Pure
+/// (no async), always compiled + unit-tested. EMPTY by default = NO CORS headers (the
+/// historical, safe posture for a data API); an operator opts specific first-party
+/// browser origins back in. Enforced by the [`http::harden`] middleware. See the module
+/// docs for the deliberately-conservative policy (no `*`, no credentials).
+pub mod cors_config;
+
 /// [OPUS-4.8] (sq-toze.34, epic sq-toze) **Request-log redaction** — keeps SPARQL query / update
 /// text out of the `--verbose` request log (a PII/privacy exposure: `GET /sparql?query=…` puts
 /// the full query in the logged URI). On by default ([`ServerConfig::redact_logs`]); opt out with
@@ -91,6 +100,10 @@ pub use http::{
 /// [OPUS-4.8] (sq-4w18) The SERVICE egress allowlist config type, re-exported at the
 /// crate root next to [`ServerConfig`].
 pub use service_config::ServiceAllowlist;
+
+/// [OPUS-4.8] (sq-o7o0, ASVS V14.5.3) The first-party CORS origin allowlist config type,
+/// re-exported at the crate root next to [`ServerConfig`].
+pub use cors_config::CorsAllowlist;
 
 /// [OPUS-4.8] (sq-uqh, Wave B) Re-exported for consumers (and tests) that introspect a
 /// pinned generation's per-pod epoch vector — the cache-invalidation hook the server's
