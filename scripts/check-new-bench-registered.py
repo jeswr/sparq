@@ -9,6 +9,12 @@
 # ISSUE after a PR merges; THIS gate flags the gap BEFORE merge so a new bench
 # suite never lands invisible to the registry + capability dashboard.
 #
+# [OPUS-4.8] sq-ncvq.10 doc-sync: this gate is the "Enforced by: **G3**" cell of
+# the "new bench suite" row in the AGENTS.md "Post-batch re-evaluation checklist"
+# table (alongside the reactive `flow-on:new-bench-dashboard-row` rule). That
+# table row and this docstring are the two halves of the same rule — change one
+# and update the other; the divergence is what sq-ncvq.10 exists to prevent.
+#
 # RULE (G3): when a PR introduces a NEW bench suite — either
 #   (T1) a NEW `[[benchmark]]` id in bench/benchmarks.toml (an id present at HEAD
 #        but not at the base ref), OR

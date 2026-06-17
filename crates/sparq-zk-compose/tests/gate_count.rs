@@ -343,6 +343,12 @@ fn bench_json_matches_snapshot() {
 /// tests, NOT a deployed proving circuit) — it is listed in `exempt_circuits`.
 /// `zk/ieee754` and `zk/xpath/xpath` are `lib`s and have no circuit to gate.
 /// Runs WITHOUT the toolchain — it only reads `Nargo.toml`s + the snapshot.
+///
+/// [OPUS-4.8] sq-ncvq.10 doc-sync: this test is the "Enforced by: **G5**" cell of
+/// the "ZK verifier / circuits" row in the AGENTS.md "Post-batch re-evaluation
+/// checklist" table (alongside the reactive `flow-on:new-zk-circuit-gatecount`
+/// rule). That table row and this docstring are the two halves of the same rule —
+/// change one and update the other; the divergence is what sq-ncvq.10 prevents.
 #[test]
 fn snapshot_covers_top_level_circuits() {
     let snapshot: Snapshot =

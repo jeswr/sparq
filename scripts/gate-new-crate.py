@@ -8,6 +8,11 @@
 # mints follow-on ISSUES after a PR merges; THIS script BLOCKS the PR before it
 # merges when a new crate would land without its required maintenance artifacts.
 #
+# [OPUS-4.8] sq-ncvq.10 doc-sync: this gate is the "Enforced by: **G1**" cell of
+# the "new crate" row in the AGENTS.md "Post-batch re-evaluation checklist" table.
+# That table row and this docstring are the two halves of the same rule — change
+# one and update the other; the divergence is what sq-ncvq.10 exists to prevent.
+#
 # RULE (G1): when a PR ADDS a new `crates/<x>/Cargo.toml`, fail unless the SAME
 # PR also provides, for that crate:
 #   (a) a registered benchmark — a `[[benchmark]]` entry in bench/benchmarks.toml
