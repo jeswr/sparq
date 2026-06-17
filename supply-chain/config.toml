@@ -1106,10 +1106,6 @@ version = "0.26.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.tokio-tungstenite]]
-version = "0.24.0"
-criteria = "safe-to-run"
-
-[[exemptions.tokio-tungstenite]]
 version = "0.29.0"
 criteria = "safe-to-deploy"
 
@@ -1148,10 +1144,6 @@ criteria = "safe-to-deploy"
 [[exemptions.tracing-subscriber]]
 version = "0.3.23"
 criteria = "safe-to-deploy"
-
-[[exemptions.tungstenite]]
-version = "0.24.0"
-criteria = "safe-to-run"
 
 [[exemptions.tungstenite]]
 version = "0.29.0"

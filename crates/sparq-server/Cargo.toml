@@ -263,9 +263,13 @@ sparesults = { version = "0.3", features = ["sparql-12"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "time"] }
 # In-process HTTP client for integration tests (spin the server, assert protocol shape).
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-# WebSocket client for the /subscriptions integration tests (T23) — same version axum's
-# `ws` feature resolves to, so the dependency tree gains nothing new.
-tokio-tungstenite = "0.24"
+# WebSocket client for the /subscriptions integration tests (T23) — pinned to the SAME
+# version axum 0.8's `ws` feature resolves to (0.29) so the dependency tree gains nothing
+# new (no duplicate tungstenite/tungstenite-http). [OPUS-4.8] (sq-1qkm) Bumped 0.24 -> 0.29
+# to re-deduplicate after axum 0.8 moved to tungstenite 0.29; the 0.26 break moved
+# `Message::Text` to `Utf8Bytes` and `Ping/Pong/Binary` to `Bytes` — handled in
+# tests/subscriptions.rs.
+tokio-tungstenite = "0.29"
 # `StreamExt::next` / `SinkExt::send` on the test client's WebSocket stream.
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 # [OPUS-4.8] (sq-ebii) The decompression-ratio-cap test gzips a request body (a high-ratio
