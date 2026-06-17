@@ -453,6 +453,24 @@ fn intersection_polygon_clips_line() {
 }
 
 #[test]
+fn intersection_line_grazing_polygon_vertex_is_a_multipoint() {
+    // A line that only TOUCHES the polygon at an isolated corner vertex (with no
+    // in-polygon span): the intersection is that single point as a MULTIPOINT.
+    // `i_overlay`'s string-line clip drops zero-length pieces, so this exercises
+    // the isolated-touch-point fallback preserved through the migration. [OPUS-4.8]
+    let poly = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    // A line whose ENDPOINT lands on the (0,0) corner, otherwise heading
+    // below-left (outside): no in-polygon span, just the isolated touch vertex.
+    let grazing = lex::intersection("LINESTRING(0 0, -1 -1)", poly).unwrap();
+    assert!(grazing.contains("MULTIPOINT") && grazing.contains('0'), "got {grazing}");
+    let pt = parse_wkt_literal(&grazing).unwrap();
+    assert!(
+        geof::sf_equals(&pt, &parse_wkt_literal("MULTIPOINT(0 0)").unwrap()).unwrap(),
+        "got {grazing}"
+    );
+}
+
+#[test]
 fn intersection_line_crosses_line() {
     // Two crossing diagonals of the unit square meet at the centre (0.5, 0.5).
     let r = parse_wkt_literal(
