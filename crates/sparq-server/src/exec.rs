@@ -39,11 +39,16 @@ pub enum PrepareError {
 
 /// Parses + classifies the query.
 ///
-/// Note on datasets / named graphs: the engine has no named-graph support (a `GRAPH`
-/// pattern makes the engine error at execution, and `FROM`/`FROM NAMED` are ignored — all
-/// data lives in the single default graph). We deliberately do NOT inspect the protocol's
-/// `default-graph-uri` / `named-graph-uri` here; the HTTP layer accepts and records them
-/// but, with a single in-memory default graph, they have no effect. See README.
+/// Note on datasets / named graphs: the engine DOES support a full RDF dataset — a default
+/// graph plus named graphs — so a `GRAPH <iri>` / `GRAPH ?g` pattern, a cross-graph join,
+/// and an in-query `FROM` / `FROM NAMED` dataset clause all execute correctly (conformance
+/// rounds 3–4; covered end-to-end over HTTP by `tests/named_graphs.rs`, sq-fh4z). What is
+/// NOT yet wired is the *protocol-level* dataset OVERRIDE: the SPARQL-Protocol
+/// `default-graph-uri` / `named-graph-uri` request parameters, which would let a client
+/// re-scope the active dataset for a query that has no in-query `FROM`. The HTTP layer
+/// accepts and records those parameters but does not currently rewrite the query's dataset
+/// around them, so they have no effect — an in-query `FROM` / `GRAPH` is the supported way
+/// to address named graphs today (deferred: bead sq-z33x). See README.
 pub fn prepare(sparql: &str) -> Result<Prepared, PrepareError> {
     let parsed = SparqlParser::new()
         .parse_query(sparql)
