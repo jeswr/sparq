@@ -113,7 +113,8 @@ pub mod pushdown;
 /// §4.4 — **physical federation operators**: interpret a `JoinTree` into operators —
 /// `Bind` → VALUES/brTPF bind-join, `Hash`/`Streaming` → the reused
 /// [`StreamJoin`](sparq_fedplan::StreamJoin), `Local` → `sparq-engine` local eval — over
-/// the async [`stream::SolutionStream`] boundary, with concurrent fan-out (Phase 3/5).
+/// the async `SolutionStream` boundary (the Phase-5 [`stream`] item, not yet defined),
+/// with concurrent fan-out (Phase 3/5).
 #[cfg(feature = "fedclient")]
 pub mod operators;
 // [OPUS-4.8] sq-j27p: re-export the Phase-3 materialised single-source interpreter surface.

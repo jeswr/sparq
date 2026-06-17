@@ -28,11 +28,12 @@
 //! # What is STUBBED for later phases (no overclaim)
 //!
 //! * `discover()` on [`Endpoint`] is a **stub** that returns the "everything an endpoint
-//!   can do" [`Capability`] with **no** [`SourceDescriptor`] — the real VoID/SD discovery
+//!   can do" [`Capability`] with **no** [`SourceDescriptor`](sparq_fedplan::SourceDescriptor) — the real VoID/SD discovery
 //!   (GET `/.well-known/void` + SD, parse via `SourceDescriptor::from_void_nt`, the
 //!   client-side SD parser, ASK-probe fallback) is **Phase 1** (`discovery` module).
 //! * `execute()` returns the raw SRJ body (after the egress check + transport round-trip)
-//!   rather than a streamed [`SolutionStream`]; the SRJ→solution parse and the streaming
+//!   rather than a streamed `SolutionStream` (the Phase-5 [`stream`] item, not yet
+//!   defined); the SRJ→solution parse and the streaming
 //!   boundary are **Phase 5** (`stream`/`operators` modules). The transport seam and the
 //!   SSRF gate — the load-bearing reuse + safety pieces of §4.1 — are real here.
 //! * [`SourceType::Local`] (in-process `Graph` via `sparq-engine` local eval) is wired in
@@ -61,7 +62,8 @@
 //! * **Count-metadata cardinality** — both adapters read the fragment's
 //!   `hydra:totalItems`/`void:triples` count (the TPF cardinality oracle) and expose it via
 //!   [`TpfSource::cardinality`] / [`BrTpfSource::cardinality`] and a one-pattern
-//!   [`SourceDescriptor`] from [`discover()`](FederatedSource::discover), so the planner's
+//!   [`SourceDescriptor`](sparq_fedplan::SourceDescriptor) from
+//!   [`discover()`](FederatedSource::discover), so the planner's
 //!   CostFed estimate keys on the *served* count rather than a uniform guess. For brTPF the
 //!   count metadata is the **unbound** pattern count (a recall-safe upper bound; the bound
 //!   block only narrows it).
@@ -282,7 +284,7 @@ impl Capability {
 /// String>`). The engine's trait + its `HttpTransport` impl are `pub(crate)` and so cannot
 /// be imported; re-declaring the identical shape here lets the `Endpoint` adapter wrap any
 /// transport — including a test double — without depending on engine internals, while the
-/// dependency arrow still points one-way *into* the engine. A native [`HttpTransport`]
+/// dependency arrow still points one-way *into* the engine. A native `HttpTransport`
 /// (ureq, default-deny SSRF resolver) lands alongside `execute()`'s streaming in a later
 /// phase; Phase 2 ships the seam + the egress gate that fronts it. [OPUS-4.8] sq-rsxf.
 pub trait Transport: Send + Sync {
@@ -460,7 +462,7 @@ fn endpoint_host(endpoint: &str) -> Option<String> {
 /// of Comunica's `IQuerySource`.
 ///
 /// `discover()` resolves the source's [`Capability`] (and, once Phase 1 lands, its
-/// [`SourceDescriptor`] statistics) one-shot; `execute()` answers the most-precise
+/// [`SourceDescriptor`](sparq_fedplan::SourceDescriptor) statistics) one-shot; `execute()` answers the most-precise
 /// sub-query the source can evaluate. Phase 2 returns the raw SRJ body from `execute()`;
 /// the streamed `SolutionStream` boundary is Phase 5. [OPUS-4.8] sq-rsxf.
 pub trait FederatedSource {
@@ -860,7 +862,7 @@ fn descriptor_from_count(
 /// matching triple for that block comes back, so no join result is lost. With an empty
 /// `bindings` slice brTPF degrades to a plain fragment scan (one unbound request).
 ///
-/// `discover()` reports the brTPF [`Capability`] and a count-metadata [`SourceDescriptor`]
+/// `discover()` reports the brTPF [`Capability`] and a count-metadata [`SourceDescriptor`](sparq_fedplan::SourceDescriptor)
 /// for the open pattern (`?s ?p ?o`), the recall-safe upper-bound cardinality the planner
 /// keys on. [OPUS-4.8] sq-2qze.
 pub struct BrTpfSource {
@@ -961,7 +963,7 @@ impl FederatedSource for BrTpfSource {
 /// triple into the pattern's variables. There is **no** bind-join: a plain-TPF source shifts
 /// every join client-side, so the adapter materialises the whole (selective) fragment for
 /// the planner to greedy count-driven hash-join locally (design §2.1). `discover()` reports
-/// the TPF [`Capability`] and the count-metadata [`SourceDescriptor`]. [OPUS-4.8] sq-2qze.
+/// the TPF [`Capability`] and the count-metadata [`SourceDescriptor`](sparq_fedplan::SourceDescriptor). [OPUS-4.8] sq-2qze.
 pub struct TpfSource {
     /// The TPF fragment-template / base URL.
     pub url: String,
