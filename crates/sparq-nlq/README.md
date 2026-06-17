@@ -142,11 +142,12 @@ It reports the two axes the design doc requires **separately**:
 `Comparison::headline_grounding_pays()` is the load-bearing check: grounded end-to-end
 macro-F1 **>** the *same LLM* ungrounded ("the grounding must pay for itself").
 
-Three layers, the first two run in CI with **no network**:
+Four layers, the first three run in CI with **no network**:
 
 | Layer | What | Runs in CI? |
 |---|---|---|
 | `harness_demonstrates_grounding_pays_in_memory` | tiny in-memory graph + scripted backends (a grounded model that answers from the deck; an ungrounded one that hallucinates a predicate) — proves the harness and the headline inequality | yes, always |
+| `recorded_session_saves_and_replays_as_regression_set` | the **regression-set round-trip**: record a session, `RecordingLlm::save` it to disk in the `live_session_*.json` format, reload via `ReplayLlm::from_file`, re-score through `run_config` — and assert the scores are identical. Proves a saved live session replays faithfully (so "commit the recorded session as the regression set" is sound) | yes, always |
 | `olympics_exec_accuracy_replay` | answer-F1 on the real 1.78M-triple olympics dataset via the committed `ReplayLlm` fixture + oracle linking | yes, **skip-if-absent** dataset |
 | `live_exec_accuracy` | the real measurement: a live model via `--features live` + `RecordingLlm`, records replay fixtures, asserts the inequality | **no** — `#[cfg(feature = "live")]` **and** `#[ignore]`'d |
 
@@ -171,7 +172,12 @@ ANTHROPIC_API_KEY=sk-ant-... SPARQ_OLYMPICS_NT=/path/olympics.nt \
   they demonstrate the *harness* and the *mechanism* of the headline claim, **not** a
   real model's accuracy. The live measurement runs through the same harness with
   `--features live` + `RecordingLlm` (`live_exec_accuracy`, `#[ignore]`'d); after a
-  live run the recorded fixtures become the offline regression set. <!-- [OPUS-4.8] sq-05rv -->
+  live run the recorded sessions become the offline regression set — and that
+  record→`save`→`from_file`→identical-scores round-trip is itself CI-gated by
+  `recorded_session_saves_and_replays_as_regression_set`, so a committed live session
+  is guaranteed replayable. Producing the live *numbers* needs a real key, the olympics
+  dump, and a **canonical** measurement host (not a CI/sandbox box); that run remains
+  the open work of bead `sq-g0lw`. <!-- [OPUS-4.8] sq-05rv sq-g0lw -->
 - **Not yet wired**: entity/relation linking from `sparq-sim` (design §2 phase 3
   lists it as input to grounding; the schema summary alone is enough for the
   olympics-scale schema) — bead `sq-uw40`; and N2 grammar-constrained decoding
