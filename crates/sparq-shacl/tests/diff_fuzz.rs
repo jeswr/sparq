@@ -485,6 +485,7 @@ fn key_normalisation_is_consistent() {
             severity: "http://www.w3.org/ns/shacl#Violation".into(),
             messages: vec![],
             default_message: String::new(),
+            details: vec![],
         }],
     };
     let sk = sparq_keys(&report);

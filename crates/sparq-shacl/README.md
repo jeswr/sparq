@@ -108,7 +108,11 @@ member of a SHACL-list value node conforms to a shape), `sh:uniqueMembers`
 (members pairwise distinct), `sh:minListLength`/`sh:maxListLength` (member-count
 bounds), `sh:uniqueValuesFor` (the values of one property — or a SHACL list of
 properties, a composite key — are unique across the shape's target nodes). Each
-also reports when a value node is not a well-formed SHACL list.
+also reports when a value node is not a well-formed SHACL list. `sh:memberShape`
+and `sh:uniqueMembers` additionally attach non-normative `sh:detail` sub-results
+to the top-level violation (sq-f8gu): one detail per non-conforming member (the
+member-shape results) / per duplicated member. `sh:detail` never affects
+`sh:conforms` (the W3C suite compares only top-level result fields).
 
 **SHACL-SPARQL:** `sh:sparql` (the SPARQL-based constraint component, §5.2) —
 the `sh:select` runs per focus node with `$this` pre-bound (and `$PATH` on

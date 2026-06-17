@@ -26,6 +26,14 @@ pub struct ValidationResult {
     pub messages: Vec<Term>,
     /// A generated message used when the shape declares none.
     pub default_message: String,
+    /// [OPUS-4.8] (sq-f8gu) Nested `sh:detail` sub-results explaining WHY this
+    /// result fired — currently the per-member (`sh:memberShape`) / per-duplicate
+    /// (`sh:uniqueMembers`) results produced by validating each offending list
+    /// member against the member shape. Empty for every other component. The
+    /// SHACL spec keeps `sh:detail` non-normative (the W3C suite compares only
+    /// top-level result fields), so these are informational and never affect
+    /// `sh:conforms`.
+    pub details: Vec<ValidationResult>,
 }
 
 /// The outcome of validating a data graph against a shapes graph.
@@ -75,27 +83,8 @@ impl ValidationReport {
         let _ = write!(out, "  sh:conforms {}", self.conforms);
         for r in &self.results {
             let _ = writeln!(out, " ;");
-            let _ = writeln!(out, "  sh:result [");
-            let _ = writeln!(out, "    a sh:ValidationResult ;");
-            let _ = writeln!(out, "    sh:focusNode {} ;", r.focus_node);
-            if let Some(p) = &r.path {
-                let _ = writeln!(out, "    sh:resultPath {} ;", p.to_turtle());
-            }
-            if let Some(v) = &r.value {
-                let _ = writeln!(out, "    sh:value {v} ;");
-            }
-            // A blank-node source shape has no graph-independent identity; emit
-            // its label so the report stays self-consistent and parseable.
-            let _ = writeln!(out, "    sh:sourceShape {} ;", r.source_shape);
-            for m in r.effective_messages() {
-                let _ = writeln!(out, "    sh:resultMessage {m} ;");
-            }
-            let _ = writeln!(out, "    sh:resultSeverity <{}> ;", r.severity);
-            let _ = write!(
-                out,
-                "    sh:sourceConstraintComponent <{}> ]",
-                r.source_component
-            );
+            let _ = write!(out, "  sh:result ");
+            write_result_node(&mut out, r);
         }
         let _ = writeln!(out, " .");
         out
@@ -126,9 +115,55 @@ impl ValidationReport {
                 _ => r.default_message.clone(),
             };
             let _ = writeln!(out, "\n    {comp}: {msg}");
+            // [OPUS-4.8] (sq-f8gu) Render nested sh:detail sub-results, indented.
+            for d in &r.details {
+                let dcomp = d
+                    .source_component
+                    .rsplit(['#', '/'])
+                    .next()
+                    .unwrap_or(&d.source_component);
+                let _ = write!(out, "      detail: {dcomp}");
+                if let Some(v) = &d.value {
+                    let _ = write!(out, " | value {v}");
+                }
+                let _ = writeln!(out);
+            }
         }
         out
     }
+}
+
+/// [OPUS-4.8] (sq-f8gu) Writes one `sh:ValidationResult` as an anonymous
+/// blank-node block, recursively nesting `sh:detail` sub-results. Emitted as a
+/// continuation of an already-written predicate (`sh:result ` / `sh:detail `),
+/// and closed with `]` (no trailing `.` — the caller owns statement framing).
+fn write_result_node(out: &mut String, r: &ValidationResult) {
+    let _ = writeln!(out, "[");
+    let _ = writeln!(out, "    a sh:ValidationResult ;");
+    let _ = writeln!(out, "    sh:focusNode {} ;", r.focus_node);
+    if let Some(p) = &r.path {
+        let _ = writeln!(out, "    sh:resultPath {} ;", p.to_turtle());
+    }
+    if let Some(v) = &r.value {
+        let _ = writeln!(out, "    sh:value {v} ;");
+    }
+    // A blank-node source shape has no graph-independent identity; emit its
+    // label so the report stays self-consistent and parseable.
+    let _ = writeln!(out, "    sh:sourceShape {} ;", r.source_shape);
+    for m in r.effective_messages() {
+        let _ = writeln!(out, "    sh:resultMessage {m} ;");
+    }
+    let _ = writeln!(out, "    sh:resultSeverity <{}> ;", r.severity);
+    for d in &r.details {
+        let _ = write!(out, "    sh:detail ");
+        write_result_node(out, d);
+        let _ = writeln!(out, " ;");
+    }
+    let _ = write!(
+        out,
+        "    sh:sourceConstraintComponent <{}> ]",
+        r.source_component
+    );
 }
 
 impl ValidationResult {
@@ -184,6 +219,7 @@ mod tests {
             severity: format!("{SH}{severity}"),
             messages,
             default_message: "generated default".into(),
+            details: Vec::new(),
         }
     }
 
@@ -351,6 +387,68 @@ mod tests {
         let m = with_msg.effective_messages();
         assert_eq!(m.len(), 2);
         assert_eq!(m, vec![lit("m1"), lit("m2")]);
+    }
+
+    // [OPUS-4.8] (sq-f8gu) A result carrying sh:detail sub-results nests each as a
+    // sh:ValidationResult blank node under sh:detail; both Turtle and text render
+    // them, and the Turtle round-trips.
+    #[test]
+    fn turtle_and_text_nest_detail_sub_results() {
+        let mut top = result(
+            iri(&format!("{EX}list")),
+            None,
+            Some(iri(&format!("{EX}list"))),
+            "MemberShapeConstraintComponent",
+            "Violation",
+            vec![],
+        );
+        top.details = vec![
+            result(
+                iri(&format!("{EX}list")),
+                None,
+                Some(lit("bad1")),
+                "NodeKindConstraintComponent",
+                "Violation",
+                vec![],
+            ),
+            result(
+                iri(&format!("{EX}list")),
+                None,
+                Some(lit("bad2")),
+                "NodeKindConstraintComponent",
+                "Violation",
+                vec![],
+            ),
+        ];
+        let r = ValidationReport::new(vec![top]);
+        let ttl = r.to_turtle();
+        assert!(ttl.contains("sh:detail"), "{ttl}");
+        let triples = parse_report(&ttl);
+        // Two sh:detail links, and three sh:ValidationResult nodes (top + 2 details).
+        assert_eq!(
+            triples
+                .iter()
+                .filter(|t| t.predicate.as_str().ends_with("#detail"))
+                .count(),
+            2,
+            "{ttl}"
+        );
+        assert_eq!(
+            triples
+                .iter()
+                .filter(|t| t.predicate.as_str().ends_with("#type")
+                    && t.object.to_string().ends_with("ValidationResult>"))
+                .count(),
+            3,
+            "{ttl}"
+        );
+        // The text rendering surfaces the nested details.
+        let text = r.to_text();
+        assert_eq!(
+            text.matches("detail: NodeKindConstraintComponent").count(),
+            2,
+            "{text}"
+        );
     }
 
     #[test]
