@@ -283,14 +283,25 @@ with thousands of nested `(` or `{` recurses unbounded and **overflows the stack
 → process abort**. Reachable from the production entry `PreparedQuery::parse`
 (`crates/sparq-engine/src/lib.rs:380`) and hence the unauthenticated `/sparql`
 endpoint.
-*Existing mitigation:* **none in the parser.** A search of the vendored crate for
-`stacker`/`recursion`/`depth`/`set_max` finds no depth cap, no input-length cap,
-no stack-growth guard. The conformance harness wraps each parse in a 20s
-watchdog thread (`crates/sparq-conformance/src/run.rs:170-201`) — but that is
-**test-harness only** and does not protect production callers.
-*GAP:* add a recursion-depth / input-size cap (or `stacker`-style stack-growth
-guard) at the parse entry, and contribute it upstream per the vendoring policy.
-**Bead sq-v5dg** (new).
+*Mitigation (IMPLEMENTED — sq-v5dg):* the vendored parser now caps syntactic
+nesting at `MAX_RECURSION_DEPTH = 128` (`vendor/spargebra/src/parser.rs`):
+recursive productions call `enter_recursion`/`leave_recursion` around every
+nested delimiter (group graph patterns, sub-SELECTs, bracketed/unary
+expressions, property paths, RDF collections, blank-node property lists, RDF-1.2
+triple terms), and exceeding the cap returns a clean `TooDeeplyNested` syntax
+error (`SparqlSyntaxErrorKind::TooDeeplyNested`) instead of recursing until the
+native stack overflows. 128 is ~8× the deepest W3C conformance query yet leaves
+~30% headroom under the debug-build overflow point on the smallest (2 MiB tokio
+worker / blocking-pool) stack the server parses on. The conformance harness's 20s
+parse watchdog (`crates/sparq-conformance/src/run.rs:170-201`) remains as
+defence-in-depth but is no longer the only line.
+*Regression coverage:* `vendor/spargebra/tests/recursion_depth.rs` exercises every
+recursion axis on a 2 MiB stack (overflow there aborts the process, so a passing
+run *proves* graceful rejection); `crates/sparq-engine/tests/parse_recursion_depth.rs`
+pins the same guarantee at the production seam `PreparedQuery::parse` and at the
+default `--max-body-bytes` (1 MiB) request-body envelope (ASVS V5.5.2 / cert gap
+ASVS-G4, **bead sq-1ukn**). Upstreaming the cap to `oxigraph/spargebra` per the
+vendoring policy is tracked separately.
 
 **T-EXEC-DoS — Denial of service (pathological query: unbounded CPU / memory /
 result set).**
@@ -369,8 +380,10 @@ gating it. Beads: **sq-zcby** (write gate, done), **sq-o4qf** (bind posture),
 *GAP:* (i) **no rate limit** — a flood of distinct expensive-but-under-timeout
 queries within the concurrency window is unthrottled; (ii) `max_results`
 **defaults to unlimited**; (iii) **no query-complexity bound**; (iv) the parser
-stack-overflow (T-PARSE-DoS / sq-v5dg) is reachable here. Items (i)–(iii)
-→ **sq-ebii** + **sq-o4qf**; (iv) → **sq-v5dg**.
+stack-overflow (T-PARSE-DoS) was reachable here — now bounded by the
+`MAX_RECURSION_DEPTH` cap (sq-v5dg), with the engine-seam / body-cap assertion
+under sq-1ukn. Items (i)–(iii) → **sq-ebii** + **sq-o4qf**; (iv) → **sq-v5dg**
+(done) + **sq-1ukn** (cert assertion).
 
 **T-HTTP-INFO — Information disclosure (error messages).**
 *Mechanism:* an error response leaking filesystem paths, stack traces, or
@@ -454,7 +467,7 @@ Ordered by severity. Every gap maps to a bead (existing or new).
 | 1 | Non-UTF-8 dictionary blob → `from_utf8_unchecked` → **UB** on a hostile/corrupt store | **Critical** (UB) | B5 | Replace `from_utf8_unchecked` with checked `from_utf8`; validate `dict-offs.bin` length & every offset at open | **sq-znld** (new, P1) |
 | 2 | mmap loader unfuzzed against hostile/truncated files (the whole B5 surface incl. dict-spill & raw-perm sortedness, plus parser-robustness) | **High** | B5 / B1 | Add a fuzz target: corrupt/truncated/hostile store + hostile RDF/SPARQL bytes → must error, never UB/panic-loop; run under `--features dict-spill` | **sq-ky2a** (exists, P2) |
 | 3 | Compressed-perm header arithmetic overflow + unchecked block offsets/varints → panic / OOB-read | **High** | B5 | `checked_mul`/`checked_add` header math; bounds-check directory offsets and varint reads | **sq-ed2i** (new, P2) |
-| 4 | SPARQL parser stack-overflow on deeply-nested query → process abort | **High** | B2 | Recursion-depth / input-size cap (or `stacker`) at parse entry; contribute upstream | **sq-v5dg** (new, P2) |
+| 4 | SPARQL parser stack-overflow on deeply-nested query → process abort | **High** → mitigated | B2 | Recursion-depth cap (`MAX_RECURSION_DEPTH = 128`) at the parse productions returning a clean `TooDeeplyNested` error; engine-seam + 1 MiB body-cap regression assertion; upstream the cap | **sq-v5dg** (cap, done) + **sq-1ukn** (cert assertion, done) |
 | 5 | Server auth: write surface now has a Bearer-token gate (`--auth-token`, sq-zcby) + bind-posture refusal (sq-o4qf); RESIDUAL — `/subscriptions` WS not yet token-gated, no per-user authz, `max-results` unlimited, no rate limit / query-complexity bound | **Medium** (was High) | B3 / B2 | Gate the subscriptions WS (sq-cxk5); default-on rate limit + sensible `max-results`; document gateway expectation | **sq-zcby** (write gate, done) + **sq-o4qf** (bind, done) + **sq-cxk5** (WS, new) + **sq-ebii** (exists, P2) |
 | 6 | No documented/enforced server timeout-memory-decompression-SSRF policy; minor 500-error engine-internal disclosure; reason/SHACL materialization budgets | **Medium** | B3 / B1 | Write+enforce the DoS/SSRF policy doc; redact `{:?}` algebra from 500s; add reasoning/validation budgets when exposed to untrusted input | **sq-ebii** (exists, P2) |
 | 7 | SERVICE federation has zero SSRF egress filtering **if** the `service` feature is enabled | **Medium** (gated off by default) | B4 | Default-deny loopback/RFC1918/link-local/metadata; config allowlist; document the sharp edge | **sq-2v6f** (new, P2) |
