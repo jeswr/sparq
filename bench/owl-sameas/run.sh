@@ -49,7 +49,11 @@ fi
 
 # query.rq lives in a file but `sparq-cli bench` takes a queries DIRECTORY; stage a dir with just
 # the probe query so the bench runner's TSV reports it under a stable `q` name.
+# CACHE persists across runs (default /tmp/owl-sameas), so CLEAR any stale `.rq` first: `bench` runs
+# EVERY *.rq in the dir, and a leftover probe (e.g. a renamed query) would emit an extra TSV line
+# that could sort ahead of q_membership and false-fail the row-count gate. [OPUS-4.8] sq-f4ps
 QDIR="$CACHE/qdir"
+rm -rf "$QDIR"
 mkdir -p "$QDIR"
 cp "$QUERY" "$QDIR/q_membership.rq"
 
@@ -76,8 +80,12 @@ for TIER in $TIERS; do
   closure_s="$(grep -oE 'in [0-9.]+s' "$TMP/r.err" | head -1 | grep -oE '[0-9.]+' | head -1)"
 
   # ---- 3. run query.rq over the closure (count mode, min-of-ITERS) ----------------------
+  # `bench` prints one `<name>\t<rows>\t<us>` line per *.rq (sorted by name). Pick the
+  # q_membership line BY NAME rather than reading line 1 — robust to any extra/stale line that
+  # would otherwise sort ahead of it and false-fail the gate. [OPUS-4.8] sq-f4ps
   "$CLI" bench "$CLOSURE" ntriples "$QDIR" "$ITERS" count 2>/dev/null > "$TMP/q.tsv" || true
-  IFS=$'\t' read -r _qname qrows qus < "$TMP/q.tsv"
+  qrows=""; qus=""
+  IFS=$'\t' read -r qrows qus < <(awk -F'\t' '$1=="q_membership"{print $2"\t"$3; exit}' "$TMP/q.tsv")
 
   # ---- emit metric TSV lines (harvested by the ci-bench sameas hook) --------------------
   [ -n "${closure_s:-}" ] && printf 'sameas_size%s_closure_s\t%s\ts\n'            "$TIER" "$closure_s"
