@@ -26,7 +26,10 @@
 //! where `<FN>` is either a RANKING function — `ROW_NUMBER`, `RANK`, `DENSE_RANK`
 //! (case-insensitive), called with empty `()` — or a windowed AGGREGATE —
 //! `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (sq-imj8), called with a single `?var`
-//! argument. The `AS ?out` alias is required. An optional `<frame>` (sq-imj8) is
+//! argument — or an OFFSET / POSITIONAL function — `LAG`/`LEAD(?var[, n[, default]])`
+//! and `NTILE(n)` (sq-hqhc). The `OVER` operand may be an inline `( … )` spec OR a
+//! bare NAME bound by a `WINDOW` clause (sq-hqhc, see below). The `AS ?out` alias is
+//! required. An optional `<frame>` (sq-imj8) is
 //! `ROWS`/`RANGE` followed by either `BETWEEN <bound> AND <bound>` or a single
 //! `<bound>` (shorthand for `BETWEEN <bound> AND CURRENT ROW`), where a bound is
 //! `UNBOUNDED PRECEDING`, `n PRECEDING`, `CURRENT ROW`, `n FOLLOWING`, or
@@ -52,11 +55,31 @@
 //! over the whole result; an absent `ORDER BY` makes every row a peer; a frame
 //! requires an `ORDER BY`).
 //!
+//! ## Named `WINDOW` clause (sq-hqhc)
+//!
+//! A window spec can be DEFINED ONCE and REUSED across projection items via a
+//! trailing `WINDOW` clause (placed in the query tail, alongside `ORDER BY` /
+//! `LIMIT`):
+//!
+//! ```text
+//! SELECT ?emp (RANK() OVER w AS ?r) (DENSE_RANK() OVER w AS ?dr)
+//! WHERE { ?emp :dept ?dept ; :sales ?sales }
+//! WINDOW w AS (PARTITION BY ?dept ORDER BY DESC(?sales))
+//! ```
+//!
+//! Each `<name> AS ( … )` definition uses the same `( PARTITION BY … ORDER BY …
+//! [frame] )` grammar as an inline spec. SPARQL has no standard `WINDOW` clause, so
+//! this is a sparq extension scanned and stripped ONLY on `query_over` (the engine
+//! never sees it). `OVER name` with no matching definition is an error.
+//!
 //! ## Covered vs deferred
 //!
 //! * **Covered:** the ranking functions `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`
-//!   (empty `()`), AND the windowed AGGREGATES `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` of a
-//!   single `?var` (sq-imj8). `PARTITION BY` over one or more variables; `ORDER BY`
+//!   (empty `()`), the windowed AGGREGATES `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` of a
+//!   single `?var` (sq-imj8), AND the offset / positional functions
+//!   `LAG`/`LEAD(?var[, n[, default]])` and `NTILE(n)` (sq-hqhc). A `WINDOW <name>
+//!   AS ( … )` clause reused via `OVER name` (sq-hqhc). `PARTITION BY` over one or
+//!   more variables; `ORDER BY`
 //!   over one or more keys (ASC/DESC, both `DESC(?v)` and `?v DESC` spellings). An
 //!   `ORDER BY` key may be a **computed SPARQL expression** (sq-c1jv) — e.g.
 //!   `ORDER BY (?a + ?b)`, `DESC(?sales + 0)`, or `STRLEN(?s)` — not just a
@@ -71,12 +94,15 @@
 //! * **Deferred (beaded):** a `DISTINCT` windowed aggregate
 //!   (`COUNT(DISTINCT ?x) OVER …`), an aggregate over a computed-expression
 //!   argument (the aggregate arg must be a bare `?var`), numeric `RANGE n PRECEDING`
-//!   offsets, `LAG`/`LEAD`/`NTILE`, a named `WINDOW` clause, and `PARTITION BY` over
-//!   a computed expression (only ORDER BY keys may be expressions). Those remain
-//!   available via the programmatic [`crate::window`] API.
+//!   offsets, and `PARTITION BY` over a computed expression (only ORDER BY keys may
+//!   be expressions). A `LAG`/`LEAD` argument and default likewise must be a bare
+//!   `?var` / a constant term (not a computed expression). Those remain available
+//!   via the programmatic [`crate::window`] API.
 
 use oxrdf::Variable;
 use sparq_core::Graph;
+
+use oxrdf::Term;
 
 use crate::window::{
     apply_window, FrameBound, FrameUnit, SortKey, WindowAggregate, WindowFrame, WindowFunction,
@@ -124,12 +150,19 @@ type OverSpec = (Vec<String>, Vec<OrderKey>, Option<WindowFrame>);
 
 /// The function a window item computes: one of the three RANKING functions (an
 /// empty `FN()` call), or a windowed AGGREGATE over a column (`SUM(?x)` etc. —
-/// sq-imj8). The aggregate variant carries its argument variable name.
+/// sq-imj8), or an OFFSET / POSITIONAL function (`LAG`/`LEAD`/`NTILE` — sq-hqhc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WinFunc {
     Rank(RankFunc),
     /// A windowed aggregate `AGG(?of)`; the `?of` argument is a bare variable name.
     Agg { agg: AggFunc, of: String },
+    /// `LAG(?of[, n[, default]])` / `LEAD(…)` — the `?of` argument is a bare
+    /// variable name, `offset` defaults to `1`, `default` is an optional constant
+    /// RDF term (an unbound result when out of partition and no default is given).
+    /// sq-hqhc.
+    Offset { lead: bool, of: String, offset: u64, default: Option<Term> },
+    /// `NTILE(n)` — split the ordered partition into `n` near-equal buckets. sq-hqhc.
+    Ntile { buckets: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +252,13 @@ pub fn query_over_with_budget(
             WinFunc::Agg { agg, of } => {
                 WindowFunction::Aggregate { agg: agg.to_window_aggregate(), of: var(of)? }
             }
+            WinFunc::Offset { lead: false, of, offset, default } => {
+                WindowFunction::Lag { of: var(of)?, offset: *offset, default: default.clone() }
+            }
+            WinFunc::Offset { lead: true, of, offset, default } => {
+                WindowFunction::Lead { of: var(of)?, offset: *offset, default: default.clone() }
+            }
+            WinFunc::Ntile { buckets } => WindowFunction::Ntile { buckets: *buckets },
         };
         let spec = WindowSpec {
             partition_by: item.partition_by.iter().map(|v| var(v)).collect::<Result<_, _>>()?,
@@ -306,6 +346,12 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
     let projection = &sparql[proj_start..proj_end];
     let items = split_projection_items(projection)?;
 
+    // A named WINDOW clause (sq-hqhc) lives in the query TAIL (after the WHERE block,
+    // alongside GROUP BY / ORDER BY / LIMIT, etc.): `WINDOW w AS ( … )[, x AS ( … )]`.
+    // Extract + strip it so the engine never sees it, and resolve `OVER w` against it.
+    let tail = &sparql[proj_end..];
+    let (tail_no_window, named_windows) = extract_window_clause(tail)?;
+
     let mut windows = Vec::new();
     let mut output_vars = Vec::new();
     let mut helper_vars: Vec<String> = Vec::new();
@@ -324,7 +370,7 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
             select_star = true;
             continue;
         }
-        if let Some(mut win) = parse_window_item(t)? {
+        if let Some(mut win) = parse_window_item(t, &named_windows)? {
             // PARTITION BY vars must survive the inner SELECT so the post-pass can
             // read them; project them through.
             for v in &win.partition_by {
@@ -332,9 +378,10 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
                     helper_vars.push(v.clone());
                 }
             }
-            // A windowed aggregate's argument variable (`SUM(?of)`) must also
-            // survive the inner SELECT so the post-pass can read it. sq-imj8.
-            if let WinFunc::Agg { of, .. } = &win.func {
+            // A windowed aggregate's argument variable (`SUM(?of)`) — and an offset
+            // function's `?of` (`LAG`/`LEAD`) — must also survive the inner SELECT so
+            // the post-pass can read it. sq-imj8 / sq-hqhc.
+            if let WinFunc::Agg { of, .. } | WinFunc::Offset { of, .. } = &win.func {
                 if !helper_vars.contains(of) {
                     helper_vars.push(of.clone());
                 }
@@ -371,6 +418,9 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
     if windows.is_empty() {
         // `OVER` appeared as a token but not as a window clause we recognise
         // (e.g. a variable or IRI containing the letters). Leave the query alone.
+        // (A WINDOW clause with no `OVER w` user is harmless but pointless; we still
+        // bail to the unmodified engine, which will reject the non-standard WINDOW —
+        // honest: a stray WINDOW clause is only meaningful with an `OVER w` reference.)
         return Ok(None);
     }
 
@@ -395,7 +445,9 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
     }
 
     let inner = inner_proj.join(" ");
-    let rewritten = format!("{} {} {}", &sparql[..proj_start], inner, &sparql[proj_end..]);
+    // Build the rewritten query with the (WINDOW-clause-stripped) tail so the engine
+    // never sees the non-standard WINDOW clause.
+    let rewritten = format!("{} {} {}", &sparql[..proj_start], inner, tail_no_window);
     // `select_star` ⇒ keep all produced columns (no explicit reprojection), which
     // also matches `SELECT *` semantics (the window column is appended).
     let output_vars = if select_star { Vec::new() } else { output_vars };
@@ -405,8 +457,10 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
 }
 
 /// Parses one trimmed projection item as a window expression, or `Ok(None)` if it
-/// is not a window item. A `(… OVER …)` shape that fails to parse is an `Err`.
-fn parse_window_item(item: &str) -> Result<Option<WindowItem>, String> {
+/// is not a window item. A `(… OVER …)` shape that fails to parse is an `Err`. The
+/// `OVER` operand may be an inline `( … )` spec OR a bare NAME referring to a
+/// definition in the `named` WINDOW clause (sq-hqhc).
+fn parse_window_item(item: &str, named: &NamedWindows) -> Result<Option<WindowItem>, String> {
     // A window item is parenthesised: `( FN() OVER ( … ) AS ?out )`.
     let inner = match strip_outer_parens(item) {
         Some(i) => i,
@@ -424,15 +478,23 @@ fn parse_window_item(item: &str) -> Result<Option<WindowItem>, String> {
     // function takes empty `()`; a windowed AGGREGATE takes a single `?var`. sq-imj8.
     let func = parse_window_func(head)?;
 
-    // rest := ( PARTITION BY … ORDER BY … [frame] ) AS ?out — split the balanced
-    // `( … )` spec from its trailing `AS ?out` alias.
-    let (spec_body, alias) = split_spec_and_alias(rest.trim())?;
-    let (partition_by, order_by, frame) = parse_over_spec(&spec_body)?;
-    // A frame is only meaningful on an aggregate; reject it on a ranking function so
-    // a typo is a clear error rather than silently ignored.
-    if frame.is_some() && matches!(func, WinFunc::Rank(_)) {
+    // rest := <over-operand> AS ?out, where <over-operand> is either an inline
+    // `( PARTITION BY … ORDER BY … [frame] )` spec, or a bare NAME bound by the
+    // query's WINDOW clause (sq-hqhc). Split off the trailing `AS ?out` alias.
+    let (spec_source, alias) = split_over_operand_and_alias(rest.trim())?;
+    let (partition_by, order_by, frame) = match spec_source {
+        OverOperand::Inline(spec_body) => parse_over_spec(&spec_body)?,
+        OverOperand::Named(name) => named
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, spec)| spec.clone())
+            .ok_or_else(|| format!("inline OVER: window name {name:?} is not defined by any WINDOW clause"))?,
+    };
+    // A frame is only meaningful on an aggregate; reject it on a ranking or offset
+    // function so a typo is a clear error rather than silently ignored.
+    if frame.is_some() && !matches!(func, WinFunc::Agg { .. }) {
         return Err(
-            "inline OVER: a window frame (ROWS/RANGE) is only valid on a windowed aggregate, not a ranking function".into(),
+            "inline OVER: a window frame (ROWS/RANGE) is only valid on a windowed aggregate, not a ranking or offset (LAG/LEAD/NTILE) function".into(),
         );
     }
     Ok(Some(WindowItem { func, partition_by, order_by, frame, out: alias }))
@@ -472,22 +534,151 @@ fn parse_window_func(head: &str) -> Result<WinFunc, String> {
         })?;
         return Ok(WinFunc::Agg { agg, of });
     }
+    // Offset functions: LAG / LEAD ( ?var [, n [, default]] ). sq-hqhc.
+    let fup = fname.to_ascii_uppercase();
+    if fup == "LAG" || fup == "LEAD" {
+        return parse_offset_func(fname, fup == "LEAD", args);
+    }
+    // NTILE ( n ): a single positive-integer bucket count. sq-hqhc.
+    if fup == "NTILE" {
+        let arg_inner = strip_outer_parens(args)
+            .ok_or("inline OVER: NTILE needs a parenthesised bucket count '( n )'")?;
+        let n: u64 = arg_inner.trim().parse().map_err(|_| {
+            format!("inline OVER: NTILE takes a single positive-integer bucket count, got {arg_inner:?}")
+        })?;
+        if n == 0 {
+            return Err("inline OVER: NTILE bucket count must be >= 1".into());
+        }
+        return Ok(WinFunc::Ntile { buckets: n });
+    }
     Err(format!(
-        "inline OVER: unsupported window function {fname:?} (ranking: ROW_NUMBER, RANK, DENSE_RANK; aggregates: COUNT, SUM, AVG, MIN, MAX)"
+        "inline OVER: unsupported window function {fname:?} (ranking: ROW_NUMBER, RANK, DENSE_RANK; aggregates: COUNT, SUM, AVG, MIN, MAX; offset: LAG, LEAD, NTILE)"
     ))
 }
 
-/// Splits `( spec ) AS ?out` into (`spec`, `out`). Requires the `AS ?out` alias.
-fn split_spec_and_alias(s: &str) -> Result<(String, String), String> {
-    let s = s.trim();
-    if !s.starts_with('(') {
-        return Err("inline OVER: expected `( … )` after OVER".into());
+/// Parses a `LAG`/`LEAD ( ?var [, n [, default]] )` argument list. The first arg is
+/// a bare `?var`; an optional second arg is a non-negative integer offset (default
+/// `1`); an optional third arg is a constant RDF term used when the source row falls
+/// outside the partition. sq-hqhc. [OPUS-4.8]
+fn parse_offset_func(fname: &str, lead: bool, args: &str) -> Result<WinFunc, String> {
+    let arg_inner = strip_outer_parens(args)
+        .ok_or_else(|| format!("inline OVER: {fname} needs a parenthesised argument list '( ?var[, n[, default]] )'"))?;
+    let pieces: Vec<String> =
+        split_top_level_commas(arg_inner).into_iter().map(|s| s.trim().to_string()).collect();
+    if pieces.is_empty() || pieces[0].is_empty() {
+        return Err(format!("inline OVER: {fname} needs a ?var first argument (got '()')"));
     }
-    // Find the matching close paren for the opening one.
-    let close = matching_paren(s, 0)
-        .ok_or("inline OVER: unbalanced parentheses in OVER ( … )")?;
-    let spec = s[1..close].to_string();
-    let tail = s[close + 1..].trim();
+    if pieces.len() > 3 {
+        return Err(format!("inline OVER: {fname} takes at most 3 args (?var, offset, default), got {}", pieces.len()));
+    }
+    let of = parse_single_var(&pieces[0]).map_err(|_| {
+        format!("inline OVER: {fname}'s first argument must be a single ?var (an expression argument is not supported inline); got {:?}", pieces[0])
+    })?;
+    let offset: u64 = match pieces.get(1) {
+        None => 1,
+        Some(s) => s.parse().map_err(|_| {
+            format!("inline OVER: {fname}'s offset (2nd arg) must be a non-negative integer, got {s:?}")
+        })?,
+    };
+    let default: Option<Term> = match pieces.get(2) {
+        None => None,
+        Some(s) => Some(parse_constant_term(s).map_err(|e| {
+            format!("inline OVER: {fname}'s default (3rd arg) must be a constant RDF term ({e}); got {s:?}")
+        })?),
+    };
+    Ok(WinFunc::Offset { lead, of, offset, default })
+}
+
+/// Parses a constant RDF term literal as it appears in an `OVER(…)` argument: an
+/// integer/decimal/double numeric literal, a `"…"`-quoted string literal (optionally
+/// with a `@lang` or `^^<datatype>`), `true`/`false`, or an `<IRI>`. Used for a
+/// `LAG`/`LEAD` default value. sq-hqhc. [OPUS-4.8]
+fn parse_constant_term(s: &str) -> Result<Term, String> {
+    use oxrdf::{Literal, NamedNode};
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty term".into());
+    }
+    // <IRI>
+    if let Some(rest) = s.strip_prefix('<') {
+        let iri = rest.strip_suffix('>').ok_or("unterminated <IRI>")?;
+        let nn = NamedNode::new(iri).map_err(|e| format!("invalid IRI: {e}"))?;
+        return Ok(Term::NamedNode(nn));
+    }
+    // Boolean keywords.
+    match s {
+        "true" => return Ok(Term::Literal(Literal::from(true))),
+        "false" => return Ok(Term::Literal(Literal::from(false))),
+        _ => {}
+    }
+    // A quoted string literal, optionally with @lang or ^^<datatype>.
+    if let Some(after_open) = s.strip_prefix('"') {
+        // Find the closing quote (no escape handling beyond the simple form — a
+        // default value is a constant, not arbitrary user text).
+        let close = after_open.find('"').ok_or("unterminated string literal")?;
+        let value = &after_open[..close];
+        let tail = after_open[close + 1..].trim();
+        if tail.is_empty() {
+            return Ok(Term::Literal(Literal::new_simple_literal(value)));
+        }
+        if let Some(lang) = tail.strip_prefix('@') {
+            return Literal::new_language_tagged_literal(value, lang)
+                .map(Term::Literal)
+                .map_err(|e| format!("invalid language tag: {e}"));
+        }
+        if let Some(dt) = tail.strip_prefix("^^") {
+            let dt = dt.trim();
+            let iri = dt.strip_prefix('<').and_then(|r| r.strip_suffix('>')).ok_or("datatype must be an <IRI>")?;
+            let nn = NamedNode::new(iri).map_err(|e| format!("invalid datatype IRI: {e}"))?;
+            return Ok(Term::Literal(Literal::new_typed_literal(value, nn)));
+        }
+        return Err("trailing text after string literal".into());
+    }
+    // Bare numeric literal (integer / decimal / double).
+    if let Ok(i) = s.parse::<i64>() {
+        return Ok(Term::Literal(Literal::from(i)));
+    }
+    if s.parse::<f64>().is_ok() {
+        let dt = if s.contains(['e', 'E']) {
+            "http://www.w3.org/2001/XMLSchema#double"
+        } else {
+            "http://www.w3.org/2001/XMLSchema#decimal"
+        };
+        return Ok(Term::Literal(Literal::new_typed_literal(s, NamedNode::new_unchecked(dt))));
+    }
+    Err("not a recognised constant (numeric, \"string\"[@lang|^^<dt>], true/false, or <IRI>)".into())
+}
+
+/// The operand of an `OVER`: either an INLINE `( … )` spec body, or a NAMED window
+/// (`OVER w`) defined by a WINDOW clause. sq-hqhc.
+enum OverOperand {
+    /// The interior of an inline `OVER ( … )` spec.
+    Inline(String),
+    /// A bare window NAME referring to a `WINDOW <name> AS ( … )` definition.
+    Named(String),
+}
+
+/// Splits `<operand> AS ?out` into (`operand`, `out`), where `<operand>` is either
+/// an inline `( spec )` or a bare window NAME. Requires the `AS ?out` alias. sq-hqhc.
+fn split_over_operand_and_alias(s: &str) -> Result<(OverOperand, String), String> {
+    let s = s.trim();
+    let (operand, tail) = if s.starts_with('(') {
+        // Inline `( spec )`: split off the balanced spec then the trailing alias.
+        let close = matching_paren(s, 0)
+            .ok_or("inline OVER: unbalanced parentheses in OVER ( … )")?;
+        (OverOperand::Inline(s[1..close].to_string()), s[close + 1..].trim())
+    } else {
+        // Bare window NAME: the name runs up to the first whitespace; the rest is the
+        // `AS ?out` alias.
+        let name_end = s.find(char::is_whitespace).unwrap_or(s.len());
+        let name = &s[..name_end];
+        if name.is_empty() || !name.chars().all(is_varname_char) {
+            return Err(format!(
+                "inline OVER: expected `( … )` or a WINDOW name after OVER, got {s:?}"
+            ));
+        }
+        (OverOperand::Named(name.to_string()), s[name_end..].trim())
+    };
     // tail := AS ?out
     let tail_up = tail.to_ascii_uppercase();
     if !tail_up.starts_with("AS") {
@@ -502,7 +693,121 @@ fn split_spec_and_alias(s: &str) -> Result<(String, String), String> {
     if out.is_empty() || !out.chars().all(is_varname_char) {
         return Err(format!("inline OVER: invalid output variable {after_as:?} after AS"));
     }
-    Ok((spec, out.to_string()))
+    Ok((operand, out.to_string()))
+}
+
+/// A parsed set of named window definitions from a `WINDOW` clause (sq-hqhc), in
+/// source order: `(name, spec)` pairs a `FN() OVER name` item resolves against.
+type NamedWindows = Vec<(String, OverSpec)>;
+
+/// Extracts a `WINDOW <name> AS ( … )[, <name> AS ( … )]*` clause from the query
+/// TAIL (the text after the SELECT projection — the WHERE block and the solution
+/// modifiers). Returns the tail WITH the WINDOW clause REMOVED (so the engine never
+/// sees it) plus the parsed definitions. With no WINDOW clause the tail is returned
+/// unchanged and the definition list is empty. sq-hqhc. [OPUS-4.8]
+///
+/// The clause is located at top level (depth 0 — outside the WHERE `{ … }` group and
+/// any parentheses), and runs to the next top-level solution-modifier keyword
+/// (`GROUP`/`HAVING`/`ORDER`/`LIMIT`/`OFFSET`/`VALUES`) or end of query, whichever is
+/// first. SPARQL has no standard WINDOW clause, so this is a sparq extension scanned
+/// only on the `query_over` entry point.
+fn extract_window_clause(tail: &str) -> Result<(String, NamedWindows), String> {
+    let Some(kw) = find_top_level_keyword(tail, "WINDOW") else {
+        return Ok((tail.to_string(), Vec::new()));
+    };
+    // The clause body runs from after `WINDOW` to the next top-level modifier.
+    let body_start = kw + "WINDOW".len();
+    let mut clause_end = tail.len();
+    for modifier in ["GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "VALUES"] {
+        if let Some(rel) = find_top_level_keyword(&tail[body_start..], modifier) {
+            clause_end = clause_end.min(body_start + rel);
+        }
+    }
+    let body = tail[body_start..clause_end].trim();
+    let named = parse_window_definitions(body)?;
+    // Splice the clause out of the tail.
+    let mut tail_no_window = String::with_capacity(tail.len());
+    tail_no_window.push_str(&tail[..kw]);
+    tail_no_window.push(' ');
+    tail_no_window.push_str(&tail[clause_end..]);
+    Ok((tail_no_window, named))
+}
+
+/// Parses the body of a WINDOW clause — `<name> AS ( … )[, <name> AS ( … )]*` — into
+/// `(name, spec)` definitions. Each `( … )` spec follows the same grammar as an
+/// inline `OVER ( … )` operand (`PARTITION BY` / `ORDER BY` / frame). sq-hqhc.
+fn parse_window_definitions(body: &str) -> Result<NamedWindows, String> {
+    let mut out: NamedWindows = Vec::new();
+    for def in split_top_level_commas(body) {
+        let def = def.trim();
+        if def.is_empty() {
+            continue;
+        }
+        // `<name> AS ( … )`.
+        let as_pos = find_keyword(def, "AS")
+            .ok_or_else(|| format!("inline OVER: WINDOW definition must be `<name> AS ( … )`, got {def:?}"))?;
+        let name = def[..as_pos].trim();
+        if name.is_empty() || !name.chars().all(is_varname_char) {
+            return Err(format!("inline OVER: invalid WINDOW name {name:?}"));
+        }
+        if out.iter().any(|(n, _)| n == name) {
+            return Err(format!("inline OVER: WINDOW name {name:?} is defined more than once"));
+        }
+        let after = def[as_pos + 2..].trim();
+        let spec_body = strip_outer_parens(after)
+            .ok_or_else(|| format!("inline OVER: WINDOW {name} definition needs a parenthesised `( … )` spec, got {after:?}"))?;
+        let spec = parse_over_spec(spec_body)?;
+        out.push((name.to_string(), spec));
+    }
+    if out.is_empty() {
+        return Err("inline OVER: empty WINDOW clause (expected `<name> AS ( … )`)".into());
+    }
+    Ok(out)
+}
+
+/// The byte offset of the first whole-word, case-insensitive occurrence of `kw` in
+/// `s` at TOP LEVEL — outside any `{ … }` group, `( … )`, or `<IRI>` / `"string"`.
+/// Used to locate a WINDOW clause and the solution modifiers around it without
+/// tripping on the same letters inside the WHERE block or an inline spec. sq-hqhc.
+fn find_top_level_keyword(s: &str, kw: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let su = s.to_ascii_uppercase();
+    let ku = kw.to_ascii_uppercase();
+    let kb = ku.as_bytes();
+    let mut brace: i32 = 0;
+    let mut paren: i32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => brace += 1,
+            b'}' => brace -= 1,
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b'<' => {
+                // Skip an IRI ref so its interior is ignored.
+                if let Some(rel) = s[i..].find('>') {
+                    i += rel;
+                }
+            }
+            b'"' => {
+                // Skip a string literal.
+                if let Some(rel) = s[i + 1..].find('"') {
+                    i += rel + 1;
+                }
+            }
+            _ if brace == 0 && paren == 0 && su[i..].starts_with(&ku) => {
+                let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+                let after = i + kb.len();
+                let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+                if before_ok && after_ok {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Parses the body of an `OVER ( … )` spec into (partition vars, order keys, frame).
@@ -1015,10 +1320,14 @@ mod tests {
     fn expr_key(expr: &str, descending: bool) -> OrderKey {
         OrderKey { sort: Sort::Expr(expr.to_string()), descending }
     }
+    /// `parse_window_item` with no named WINDOW definitions (the common unit-test case).
+    fn pwi(item: &str) -> Result<Option<WindowItem>, String> {
+        parse_window_item(item, &Vec::new())
+    }
 
     #[test]
     fn parses_row_number_item() {
-        let w = parse_window_item("(ROW_NUMBER() OVER (PARTITION BY ?dept ORDER BY DESC(?sales)) AS ?rn)")
+        let w = pwi("(ROW_NUMBER() OVER (PARTITION BY ?dept ORDER BY DESC(?sales)) AS ?rn)")
             .unwrap()
             .unwrap();
         assert_eq!(w.func, WinFunc::Rank(RankFunc::RowNumber));
@@ -1029,7 +1338,7 @@ mod tests {
 
     #[test]
     fn parses_trailing_keyword_order_form() {
-        let w = parse_window_item("(RANK() OVER (PARTITION BY ?dept ORDER BY ?sales DESC) AS ?r)")
+        let w = pwi("(RANK() OVER (PARTITION BY ?dept ORDER BY ?sales DESC) AS ?r)")
             .unwrap()
             .unwrap();
         assert_eq!(w.func, WinFunc::Rank(RankFunc::Rank));
@@ -1040,25 +1349,25 @@ mod tests {
     fn parses_computed_expression_order_key() {
         // sq-c1jv: a parenthesised computed expression as an ORDER BY key. The
         // redundant outer parens are stripped; the key is an Expr (ascending).
-        let w = parse_window_item("(ROW_NUMBER() OVER (ORDER BY (?a + ?b)) AS ?rn)")
+        let w = pwi("(ROW_NUMBER() OVER (ORDER BY (?a + ?b)) AS ?rn)")
             .unwrap()
             .unwrap();
         assert_eq!(w.order_by, vec![expr_key("?a + ?b", false)]);
 
         // `DESC( <expr> )` → an Expr key, descending.
-        let d = parse_window_item("(RANK() OVER (ORDER BY DESC(?sales + 0)) AS ?r)")
+        let d = pwi("(RANK() OVER (ORDER BY DESC(?sales + 0)) AS ?r)")
             .unwrap()
             .unwrap();
         assert_eq!(d.order_by, vec![expr_key("?sales + 0", true)]);
 
         // Trailing-keyword form on a parenthesised expression: `(?a * 2) DESC`.
-        let t = parse_window_item("(RANK() OVER (ORDER BY (?a * 2) DESC) AS ?r)")
+        let t = pwi("(RANK() OVER (ORDER BY (?a * 2) DESC) AS ?r)")
             .unwrap()
             .unwrap();
         assert_eq!(t.order_by, vec![expr_key("?a * 2", true)]);
 
         // A function-call expression key (not a direction keyword): `STRLEN(?s)`.
-        let f = parse_window_item("(ROW_NUMBER() OVER (ORDER BY STRLEN(?s)) AS ?rn)")
+        let f = pwi("(ROW_NUMBER() OVER (ORDER BY STRLEN(?s)) AS ?rn)")
             .unwrap()
             .unwrap();
         assert_eq!(f.order_by, vec![expr_key("STRLEN(?s)", false)]);
@@ -1067,12 +1376,12 @@ mod tests {
     #[test]
     fn direction_keyword_detection_edge_cases() {
         // A variable literally NAMED `desc` is a plain var key, not a direction.
-        let w = parse_window_item("(ROW_NUMBER() OVER (ORDER BY ?desc) AS ?rn)")
+        let w = pwi("(ROW_NUMBER() OVER (ORDER BY ?desc) AS ?rn)")
             .unwrap()
             .unwrap();
         assert_eq!(w.order_by, vec![var_key("desc", false)]);
         // A function call ending in `)` is an expression key, not a trailing keyword.
-        let f = parse_window_item("(RANK() OVER (ORDER BY STRLEN(?desc)) AS ?r)")
+        let f = pwi("(RANK() OVER (ORDER BY STRLEN(?desc)) AS ?r)")
             .unwrap()
             .unwrap();
         assert_eq!(f.order_by, vec![expr_key("STRLEN(?desc)", false)]);
@@ -1081,11 +1390,9 @@ mod tests {
     #[test]
     fn mixed_var_and_expression_order_keys() {
         // A var key and an expr key in one ORDER BY list, with directions.
-        let w = parse_window_item(
-            "(RANK() OVER (ORDER BY ?dept, DESC(?a + ?b)) AS ?r)",
-        )
-        .unwrap()
-        .unwrap();
+        let w = pwi("(RANK() OVER (ORDER BY ?dept, DESC(?a + ?b)) AS ?r)")
+            .unwrap()
+            .unwrap();
         assert_eq!(w.order_by, vec![var_key("dept", false), expr_key("?a + ?b", true)]);
     }
 
@@ -1114,7 +1421,7 @@ mod tests {
     fn parses_windowed_aggregate_item() {
         // sq-imj8: a windowed aggregate `SUM(?sales) OVER (PARTITION BY ?dept)` now
         // parses to a WinFunc::Agg carrying the argument variable.
-        let w = parse_window_item("(SUM(?sales) OVER (PARTITION BY ?dept) AS ?t)").unwrap().unwrap();
+        let w = pwi("(SUM(?sales) OVER (PARTITION BY ?dept) AS ?t)").unwrap().unwrap();
         assert_eq!(w.func, WinFunc::Agg { agg: AggFunc::Sum, of: "sales".to_string() });
         assert_eq!(w.partition_by, vec!["dept".to_string()]);
         assert!(w.frame.is_none());
@@ -1125,7 +1432,7 @@ mod tests {
             ("(MIN(?s) OVER () AS ?m)", AggFunc::Min),
             ("(MAX(?s) OVER () AS ?x)", AggFunc::Max),
         ] {
-            let w = parse_window_item(src).unwrap().unwrap();
+            let w = pwi(src).unwrap().unwrap();
             assert_eq!(w.func, WinFunc::Agg { agg, of: "s".to_string() });
         }
     }
@@ -1133,21 +1440,101 @@ mod tests {
     #[test]
     fn rejects_ranking_function_with_args() {
         // A ranking function called WITH args is rejected (it takes empty `()`).
-        let e = parse_window_item("(RANK(?sales) OVER (PARTITION BY ?dept) AS ?t)").unwrap_err();
+        let e = pwi("(RANK(?sales) OVER (PARTITION BY ?dept) AS ?t)").unwrap_err();
         assert!(e.contains("empty args") && e.contains("RANK"), "{e}");
     }
 
     #[test]
     fn rejects_distinct_windowed_aggregate() {
         // A DISTINCT windowed aggregate is not supported inline (programmatic only).
-        let e = parse_window_item("(COUNT(DISTINCT ?s) OVER () AS ?c)").unwrap_err();
+        let e = pwi("(COUNT(DISTINCT ?s) OVER () AS ?c)").unwrap_err();
         assert!(e.contains("DISTINCT"), "{e}");
     }
 
     #[test]
     fn rejects_unknown_window_function() {
-        let e = parse_window_item("(NTILE() OVER (ORDER BY ?x) AS ?n)").unwrap_err();
+        let e = pwi("(BOGUS() OVER (ORDER BY ?x) AS ?n)").unwrap_err();
         assert!(e.contains("unsupported window function"), "{e}");
+    }
+
+    // ---- offset / positional functions inline (LAG / LEAD / NTILE) — sq-hqhc ----
+
+    #[test]
+    fn parses_lag_lead_ntile_items() {
+        // LAG(?x): default offset 1, no default value.
+        let lag = pwi("(LAG(?sales) OVER (ORDER BY ?sales) AS ?prev)").unwrap().unwrap();
+        assert_eq!(lag.func, WinFunc::Offset { lead: false, of: "sales".into(), offset: 1, default: None });
+        // LEAD(?x, 2): explicit offset, no default.
+        let lead = pwi("(LEAD(?sales, 2) OVER (ORDER BY ?sales) AS ?n)").unwrap().unwrap();
+        assert_eq!(lead.func, WinFunc::Offset { lead: true, of: "sales".into(), offset: 2, default: None });
+        // LAG(?x, 1, 0): a constant integer default.
+        let dflt = pwi("(LAG(?sales, 1, 0) OVER (ORDER BY ?sales) AS ?p)").unwrap().unwrap();
+        assert_eq!(
+            dflt.func,
+            WinFunc::Offset { lead: false, of: "sales".into(), offset: 1, default: Some(Term::Literal(oxrdf::Literal::from(0))) }
+        );
+        // NTILE(4): a bucket count.
+        let nt = pwi("(NTILE(4) OVER (ORDER BY ?sales) AS ?q)").unwrap().unwrap();
+        assert_eq!(nt.func, WinFunc::Ntile { buckets: 4 });
+    }
+
+    #[test]
+    fn rejects_bad_offset_and_ntile_args() {
+        // LAG with no variable.
+        assert!(pwi("(LAG() OVER (ORDER BY ?x) AS ?p)").is_err());
+        // NTILE needs a positive integer.
+        assert!(pwi("(NTILE() OVER (ORDER BY ?x) AS ?q)").is_err());
+        assert!(pwi("(NTILE(0) OVER (ORDER BY ?x) AS ?q)").is_err());
+        assert!(pwi("(NTILE(?x) OVER (ORDER BY ?x) AS ?q)").is_err());
+        // A frame on an offset function is rejected (only valid on an aggregate).
+        assert!(pwi("(LAG(?x) OVER (ORDER BY ?x ROWS 1 PRECEDING) AS ?p)").is_err());
+    }
+
+    #[test]
+    fn parses_lag_string_iri_defaults() {
+        // A quoted-string default.
+        let s = pwi("(LAG(?n, 1, \"none\") OVER (ORDER BY ?n) AS ?p)").unwrap().unwrap();
+        match s.func {
+            WinFunc::Offset { default: Some(Term::Literal(l)), .. } => assert_eq!(l.value(), "none"),
+            other => panic!("{other:?}"),
+        }
+        // An <IRI> default.
+        let i = pwi("(LEAD(?n, 1, <http://ex/x>) OVER (ORDER BY ?n) AS ?p)").unwrap().unwrap();
+        match i.func {
+            WinFunc::Offset { default: Some(Term::NamedNode(n)), .. } => assert_eq!(n.as_str(), "http://ex/x"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // ---- named WINDOW clause (sq-hqhc) ----
+
+    #[test]
+    fn named_window_clause_extracted_and_resolved() {
+        // A WINDOW w AS (…) clause defines a reusable spec; `OVER w` resolves to it.
+        let (tail_no_window, named) = extract_window_clause(
+            "WHERE { ?s ?p ?o } WINDOW w AS (PARTITION BY ?dept ORDER BY DESC(?sales)) ORDER BY ?s",
+        )
+        .unwrap();
+        // The WINDOW clause is stripped from the tail the engine sees.
+        assert!(!tail_no_window.to_ascii_uppercase().contains("WINDOW"), "{tail_no_window}");
+        assert!(tail_no_window.contains("ORDER BY ?s"), "ORDER BY kept: {tail_no_window}");
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].0, "w");
+        assert_eq!(named[0].1 .0, vec!["dept".to_string()]); // partition_by
+        assert_eq!(named[0].1 .1, vec![var_key("sales", true)]); // order_by
+
+        // `RANK() OVER w` resolves the named window.
+        let w = parse_window_item("(RANK() OVER w AS ?r)", &named).unwrap().unwrap();
+        assert_eq!(w.func, WinFunc::Rank(RankFunc::Rank));
+        assert_eq!(w.partition_by, vec!["dept".to_string()]);
+        assert_eq!(w.order_by, vec![var_key("sales", true)]);
+    }
+
+    #[test]
+    fn over_unknown_window_name_is_error() {
+        // `OVER w` with no matching WINDOW definition is an error.
+        let e = parse_window_item("(RANK() OVER w AS ?r)", &Vec::new()).unwrap_err();
+        assert!(e.contains("not defined"), "{e}");
     }
 
     // ---- end-to-end parse + eval ----

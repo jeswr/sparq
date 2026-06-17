@@ -42,16 +42,19 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   see [`docs/extension-functions.md`](../../docs/extension-functions.md).
 - **Custom aggregates + window functions** *(opt-in `window-functions` feature, OFF by default)* —
   register a named user aggregate (`CustomAggregateRegistry`) callable from a real SPARQL `GROUP BY`,
-  and a window-function surface (`ROW_NUMBER` / `RANK` / `DENSE_RANK` + the windowed aggregates
-  `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, with `PARTITION BY` + `ORDER BY` and an optional `ROWS`/`RANGE` frame)
+  and a window-function surface (`ROW_NUMBER` / `RANK` / `DENSE_RANK`, the offset/positional
+  `LAG`/`LEAD`/`NTILE` (sq-hqhc), + the windowed aggregates `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, with
+  `PARTITION BY` + `ORDER BY` and an optional `ROWS`/`RANGE` frame)
   available two ways: a programmatic pass (`window::apply_window` over a `QueryResult`) and an inline
   `OVER(…)` query syntax (`query_over` — e.g. `(SUM(?x) OVER (ORDER BY ?y ROWS BETWEEN UNBOUNDED
-  PRECEDING AND CURRENT ROW) AS ?run)` in the SELECT). **Window functions are a NON-STANDARD extension**
+  PRECEDING AND CURRENT ROW) AS ?run)` in the SELECT, and a reusable `WINDOW w AS (…)` clause with
+  `OVER w`). **Window functions are a NON-STANDARD extension**
   — SPARQL has no W3C-REC `OVER` syntax. The inline form is a *source rewrite* in front of the engine
   recognised ONLY on `query_over` (it does NOT change the vendored parser), so the standard
   `query`/`ask`/… surface stays exactly SPARQL 1.1 and conformance is unaffected. Inline covers the three
-  ranking functions, the five windowed aggregates, and `ROWS`/`RANGE` frames (sq-imj8); `DISTINCT`/
-  expression aggregate arguments, numeric `RANGE` offsets, and `LAG`/`LEAD`/`NTILE` are inline-deferred
+  ranking functions, the five windowed aggregates, `ROWS`/`RANGE` frames (sq-imj8), the offset/positional
+  `LAG`/`LEAD`/`NTILE` and a named `WINDOW` clause (sq-hqhc); `DISTINCT`/computed-expression function
+  arguments, numeric `RANGE` offsets, and a computed-expression `PARTITION BY` are inline-deferred
   (use the programmatic API). When the feature is off, zero window/aggregate-registry code compiles and
   the default build is byte-identical (no new deps).
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.

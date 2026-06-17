@@ -71,8 +71,10 @@ serialize-rdf = []
 #     aggregate IRI — `SparqlParser::with_custom_aggregate_function`); the engine
 #     evaluates `AggregateFunction::Custom` against the installed registry.
 #   * a programmatic window-function pass (`window` module) — ROW_NUMBER / RANK /
-#     DENSE_RANK + a windowed aggregate over a result table, with PARTITION BY +
-#     ORDER BY window specs. These are a NON-STANDARD extension (no W3C-REC SPARQL
+#     DENSE_RANK, the offset/positional LAG / LEAD / NTILE (sq-hqhc), + a windowed
+#     aggregate over a result table, with PARTITION BY + ORDER BY window specs (and a
+#     reusable named WINDOW clause on the inline OVER syntax). These are a
+#     NON-STANDARD extension (no W3C-REC SPARQL
 #     window syntax exists); the surface follows the SQL:2003 OVER (PARTITION BY …
 #     ORDER BY …) window-spec model that Stardog/AnzoGraph expose.
 # When off, ZERO window/custom-aggregate code compiles and the default build is
