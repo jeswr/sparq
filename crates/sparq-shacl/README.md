@@ -40,16 +40,17 @@ cargo test -p sparq-shacl --test w3c_core -- --nocapture
 ```
 
 A companion harness ([`tests/w3c_core_shacl12.rs`](tests/w3c_core_shacl12.rs),
-sq-yca1) walks the **newer `shacl12-test-suite/tests/core/node`** tree, which
-additionally carries the `nodeByExpression-001` `sht:Validate` entry (covered end
-to end under the `shacl-af` feature) and a set of SHACL-1.2-only constraints this
-crate does not yet implement (`sh:memberShape`, `sh:uniqueMembers`,
+sq-yca1) walks the **newer `shacl12-test-suite/tests/core/node`** tree. The
+SHACL-1.2-only core constraints there — `sh:memberShape`, `sh:uniqueMembers`,
 `sh:{min,max}ListLength`, `sh:uniqueValuesFor`, the `sh:closed sh:ByTypes` mode,
-and the disjunctive list form of `sh:datatype` / `sh:nodeKind`). It is
-**SKIP-tolerant**: an entry is recorded as SKIP — never FAIL — exactly when its
-shapes use a constraint *form* the crate does not implement; every other entry is
-compared strictly, so a regression in an implemented constraint still fails the
-build. The unimplemented forms are tracked in sq-vg3y.
+and the disjunctive list form of `sh:datatype` / `sh:nodeKind` — are now
+**implemented** (sq-vg3y) and pass strictly: 44/45 entries PASS with `shacl-af`
+off (the one SKIP is `nodeByExpression-001`, a `shacl-af` constraint) and 45/45
+with it on. The harness stays **SKIP-tolerant** for any constraint *predicate*
+the build still lacks (after sq-vg3y that is only `sh:nodeByExpression` when
+`shacl-af` is off): such an entry is recorded as SKIP — never FAIL — while every
+other entry is compared strictly, so a regression in an implemented constraint
+still fails the build.
 
 ## Differential fuzzing against reference engines
 
@@ -87,8 +88,10 @@ per-PR path.
 
 ## Supported constraint components
 
-`sh:class`, `sh:datatype` (with XSD lexical-space ill-formedness checks),
-`sh:nodeKind`, `sh:minCount`/`sh:maxCount`,
+`sh:class`, `sh:datatype` (with XSD lexical-space ill-formedness checks; the
+SHACL-1.2 disjunctive list form `sh:datatype ( … )` is accepted),
+`sh:nodeKind` (single IRI or the SHACL-1.2 list form `sh:nodeKind ( … )`),
+`sh:minCount`/`sh:maxCount`,
 `sh:minInclusive`/`sh:minExclusive`/`sh:maxInclusive`/`sh:maxExclusive`
 (numeric, string, boolean and date/time orderings, including the
 timezone-presence comparability rule), `sh:minLength`/`sh:maxLength`,
@@ -96,8 +99,16 @@ timezone-presence comparability rule), `sh:minLength`/`sh:maxLength`,
 `sh:disjoint`, `sh:lessThan`, `sh:lessThanOrEquals`, `sh:not`, `sh:and`,
 `sh:or`, `sh:xone`, `sh:node`, `sh:property`, `sh:qualifiedValueShape`
 (+`sh:qualifiedMinCount`/`sh:qualifiedMaxCount`/
-`sh:qualifiedValueShapesDisjoint`), `sh:closed` (+`sh:ignoredProperties`),
+`sh:qualifiedValueShapesDisjoint`), `sh:closed` (+`sh:ignoredProperties`; the
+SHACL-1.2 `sh:closed sh:ByTypes` close-by-types mode is supported),
 `sh:hasValue`, `sh:in`.
+
+**SHACL-1.2 list constraints (sq-vg3y, Core path):** `sh:memberShape` (every
+member of a SHACL-list value node conforms to a shape), `sh:uniqueMembers`
+(members pairwise distinct), `sh:minListLength`/`sh:maxListLength` (member-count
+bounds), `sh:uniqueValuesFor` (the values of one property — or a SHACL list of
+properties, a composite key — are unique across the shape's target nodes). Each
+also reports when a value node is not a well-formed SHACL list.
 
 **SHACL-SPARQL:** `sh:sparql` (the SPARQL-based constraint component, §5.2) —
 the `sh:select` runs per focus node with `$this` pre-bound (and `$PATH` on

@@ -1,6 +1,6 @@
 ---
 name: shacl-validation
-description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype, cardinality, ranges, paths, logical, node/property, qualified, closed, in/hasValue), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report (W3C report vocabulary as Turtle or human text). Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand a graph in Rust."
+description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, and the SHACL-1.2 list constraints sh:memberShape / sh:uniqueMembers / sh:min+maxListLength / sh:uniqueValuesFor), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report (W3C report vocabulary as Turtle or human text). Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand a graph in Rust."
 ---
 
 # sparq-shacl-validation
@@ -170,6 +170,22 @@ let shapes = Graph::load_str(r#"
 "#, "turtle").unwrap();
 let report = sparq_shacl::validate(&data, &shapes);   // source_component ends with "SPARQLConstraintComponent"
 ```
+
+**SHACL-1.2 core constraints (always on, no feature flag).** The disjunctive
+*set* spellings of `sh:datatype` / `sh:nodeKind` — `sh:datatype ( xsd:string
+rdf:langString )`, `sh:nodeKind ( sh:BlankNode sh:IRI )` — conform a value node
+when it matches ANY listed datatype / kind (the single-IRI form is the singleton
+case). `sh:closed sh:ByTypes` is the "close by types" mode: the allowed-predicate
+set is recomputed per value node from its `rdf:type`s (transitively through
+`rdfs:subClassOf` / inbound `sh:targetClass` / `sh:node`, SHACL §4.8.1), unlike
+`sh:closed true` which fixes it to the shape's own `sh:property` paths. The four
+SHACL list constraints validate that each value node is a well-formed SHACL list:
+`sh:memberShape` (every member conforms to a shape), `sh:uniqueMembers true`
+(members pairwise distinct), `sh:min`/`sh:maxListLength` (member-count bounds),
+and `sh:uniqueValuesFor` (the listed properties' values are unique across the
+shape's target nodes — one IRI, or a SHACL list for a composite key). A value that
+is not a well-formed SHACL list violates the list constraints; a node with no
+values for any `sh:uniqueValuesFor` property is never reported.
 
 **Custom SPARQL-based constraint component (`sh:ConstraintComponent`, §6).** Declare
 the component (parameters + an `sh:ask`/`sh:select` validator) IN THE SHAPES GRAPH; it

@@ -27,6 +27,7 @@ pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<Validati
         memo: vec![FxHashMap::default(); shapes.shapes.len()],
         min_reentry: usize::MAX,
         regexes: FxHashMap::default(),
+        uvf_targets: FxHashMap::default(),
     };
     let mut out = Vec::new();
     for &sid in &shapes.targeted {
@@ -53,6 +54,7 @@ pub(crate) fn conforms_node(data: &Graph, shapes: &ShapesModel, sid: usize, node
         memo: vec![FxHashMap::default(); shapes.shapes.len()],
         min_reentry: usize::MAX,
         regexes: FxHashMap::default(),
+        uvf_targets: FxHashMap::default(),
     };
     v.conforms(node, sid)
 }
@@ -72,6 +74,10 @@ struct Validator<'a> {
     /// memoised only if no re-entry pointed BELOW it.
     min_reentry: usize,
     regexes: FxHashMap<String, Option<regex::Regex>>,
+    /// [OPUS-4.8] (sq-vg3y) Per-shape target-node cache for `sh:uniqueValuesFor`
+    /// (the constraint needs every target node of the shape, but is evaluated once
+    /// per focus node — compute the target scan once).
+    uvf_targets: FxHashMap<usize, Vec<Term>>,
 }
 
 impl<'a> Validator<'a> {
@@ -191,10 +197,15 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            Component::Datatype(dt) => {
+            // [OPUS-4.8] (sq-vg3y) A value conforms iff it is a literal whose
+            // (well-formed) datatype is ANY of the allowed datatypes — the single
+            // IRI is a singleton set, the SHACL-1.2 list form is the disjunction.
+            Component::Datatype(dts) => {
                 for v in values {
                     let ok = match v {
-                        Term::Literal(l) => l.datatype().as_str() == dt && well_formed(l),
+                        Term::Literal(l) => {
+                            dts.iter().any(|dt| l.datatype().as_str() == dt) && well_formed(l)
+                        }
                         _ => false,
                     };
                     if !ok {
@@ -203,34 +214,23 @@ impl<'a> Validator<'a> {
                             focus,
                             Some(v.clone()),
                             "DatatypeConstraintComponent",
-                            format!("Value does not have datatype <{dt}>"),
+                            iri_set_message("datatype", dts),
                         ));
                     }
                 }
             }
-            Component::NodeKind(kind) => {
+            // [OPUS-4.8] (sq-vg3y) A value conforms iff its node kind matches ANY of
+            // the allowed kinds (single IRI = singleton; SHACL-1.2 list = disjunction).
+            Component::NodeKind(kinds) => {
                 for v in values {
-                    let local = kind.strip_prefix(crate::model::SH).unwrap_or(kind);
-                    let ok = match v {
-                        Term::NamedNode(_) => {
-                            matches!(local, "IRI" | "BlankNodeOrIRI" | "IRIOrLiteral")
-                        }
-                        Term::BlankNode(_) => {
-                            matches!(local, "BlankNode" | "BlankNodeOrIRI" | "BlankNodeOrLiteral")
-                        }
-                        Term::Literal(_) => {
-                            matches!(local, "Literal" | "BlankNodeOrLiteral" | "IRIOrLiteral")
-                        }
-                        #[allow(unreachable_patterns)]
-                        _ => false,
-                    };
+                    let ok = kinds.iter().any(|kind| node_kind_matches(v, kind));
                     if !ok {
                         out.push(self.result(
                             sid,
                             focus,
                             Some(v.clone()),
                             "NodeKindConstraintComponent",
-                            format!("Value does not have node kind <{kind}>"),
+                            iri_set_message("node kind", kinds),
                         ));
                     }
                 }
@@ -581,21 +581,35 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            Component::Closed { ignored } => {
-                let shape = &self.shapes.shapes[sid];
-                let mut allowed: Vec<String> = ignored
+            Component::Closed { ignored, by_types } => {
+                let ignored_preds: Vec<String> = ignored
                     .iter()
                     .filter_map(|t| match t {
                         Term::NamedNode(n) => Some(n.as_str().to_string()),
                         _ => None,
                     })
                     .collect();
-                for &child in &shape.property_children {
-                    if let Some(Path::Predicate(p)) = &self.shapes.shapes[child].path {
-                        allowed.push(p.clone());
+                // `sh:closed true`: the allowed set is fixed (this shape's
+                // sh:property/sh:path predicates), so compute it once. `sh:closed
+                // sh:ByTypes`: the allowed set is recomputed PER value node from its
+                // rdf:type(s) (SHACL-1.2 §4.8.1 collectProperties), so defer it.
+                // [OPUS-4.8] (sq-vg3y) added the ByTypes branch.
+                let fixed_allowed: Option<Vec<String>> = if *by_types {
+                    None
+                } else {
+                    let mut allowed = ignored_preds.clone();
+                    for &child in &self.shapes.shapes[sid].property_children {
+                        if let Some(Path::Predicate(p)) = &self.shapes.shapes[child].path {
+                            allowed.push(p.clone());
+                        }
                     }
-                }
+                    Some(allowed)
+                };
                 for v in values {
+                    let allowed = match &fixed_allowed {
+                        Some(a) => a.clone(),
+                        None => self.close_by_types_allowed(sid, v, &ignored_preds),
+                    };
                     for (p, o) in self.data.predicate_objects(v) {
                         let p_str = match &p {
                             Term::NamedNode(n) => n.as_str().to_string(),
@@ -638,6 +652,101 @@ impl<'a> Validator<'a> {
                         ));
                     }
                 }
+            }
+            // [OPUS-4.8] (sq-vg3y) `sh:memberShape` (SHACL-1.2): each value node must
+            // be a well-formed SHACL list whose members all conform to `member`. A
+            // non-list (or member non-conformance) is ONE top-level result on the
+            // value node (the per-member `sh:detail`s are non-normative; the W3C
+            // suite compares only top-level result fields).
+            Component::MemberShape(member) => {
+                for v in values {
+                    let violates = match self.data.list_strict(v) {
+                        None => true, // not a SHACL list
+                        Some(members) => members.iter().any(|m| !self.conforms(m, *member)),
+                    };
+                    if violates {
+                        out.push(
+                            self.result(
+                                sid,
+                                focus,
+                                Some(v.clone()),
+                                "MemberShapeConstraintComponent",
+                                "List value is not a well-formed SHACL list, or a member \
+                             does not conform to the member shape"
+                                    .into(),
+                            ),
+                        );
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-vg3y) `sh:uniqueMembers true` (SHACL-1.2): each value
+            // node must be a SHACL list whose members are pairwise distinct. A
+            // non-list, or a list with duplicate members, is one result on v.
+            Component::UniqueMembers => {
+                for v in values {
+                    let violates = match self.data.list_strict(v) {
+                        None => true,
+                        Some(members) => crate::view::dedup(members.clone()).len() != members.len(),
+                    };
+                    if violates {
+                        out.push(
+                            self.result(
+                                sid,
+                                focus,
+                                Some(v.clone()),
+                                "UniqueMembersConstraintComponent",
+                                "List value is not a well-formed SHACL list, or has \
+                             duplicate members"
+                                    .into(),
+                            ),
+                        );
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-vg3y) `sh:maxListLength` / `sh:minListLength` (SHACL-1.2):
+            // each value node must be a SHACL list with at most / at least N members.
+            Component::MaxListLength(n) => {
+                for v in values {
+                    let violates = match self.data.list_strict(v) {
+                        None => true,
+                        Some(members) => members.len() as u64 > *n,
+                    };
+                    if violates {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "MaxListLengthConstraintComponent",
+                            format!("List value is not a SHACL list with at most {n} members"),
+                        ));
+                    }
+                }
+            }
+            Component::MinListLength(n) => {
+                for v in values {
+                    let violates = match self.data.list_strict(v) {
+                        None => true,
+                        Some(members) => (members.len() as u64) < *n,
+                    };
+                    if violates {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "MinListLengthConstraintComponent",
+                            format!("List value is not a SHACL list with at least {n} members"),
+                        ));
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-vg3y) `sh:uniqueValuesFor` (SHACL-1.2): the values of the
+            // listed properties of a value node must be unique across ALL target
+            // nodes of the shape. For each value node V that shares the exact same
+            // value-set (for every listed property) with another target node Other,
+            // one result with Other as sh:value. No result if V has no values for
+            // ANY of the properties.
+            Component::UniqueValuesFor(props) => {
+                self.eval_unique_values_for(sid, focus, values, props, out)
             }
             // [OPUS-4.8] sh:sparql — SPARQL-based constraints (SHACL §5.2). The
             // sh:select runs against the data graph with $this pre-bound to the
@@ -875,6 +984,85 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// [OPUS-4.8] (sq-vg3y) The allowed-predicate set P for `sh:closed sh:ByTypes`
+    /// at value node `v` (SHACL-1.2 §4.8.1 `collectProperties`): the IRI properties
+    /// reachable via `sh:property/sh:path` from every shape that the value node's
+    /// `rdf:type`s pull in — transitively through `rdfs:subClassOf`, inbound
+    /// `sh:targetClass`, and `sh:node` — plus `rdf:type` and the shape's own
+    /// `sh:ignoredProperties`. The shapes-graph traversal is DATA-INDEPENDENT, so
+    /// it is precomputed once per shapes node into [`ShapesModel::by_types_closure`]
+    /// at parse time; here we just union the closures for the shape's own node and
+    /// for each `rdf:type` of the value node (read from the DATA graph).
+    fn close_by_types_allowed(&self, sid: usize, v: &Term, ignored: &[String]) -> Vec<String> {
+        const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let mut allowed: rustc_hash::FxHashSet<String> = ignored.iter().cloned().collect();
+        allowed.insert(RDF_TYPE.to_string());
+        let mut add = |node: &Term| {
+            if let Some(props) = self.shapes.by_types_closure(node) {
+                allowed.extend(props.iter().cloned());
+            }
+        };
+        // The shape's own node carries sh:closed and is the rdfs:Class in the
+        // closed-003/004 tests, then every rdf:type of the value node.
+        add(&self.shapes.shapes[sid].node);
+        for ty in self.data.objects(v, RDF_TYPE) {
+            add(&ty);
+        }
+        allowed.into_iter().collect()
+    }
+
+    /// [OPUS-4.8] (sq-vg3y) `sh:uniqueValuesFor` evaluation: for each value node V
+    /// (with at least one value across the listed properties), report each OTHER
+    /// target node of this shape that has the exact same per-property value sets as
+    /// V (with that other node as `sh:value`, V's focus as `sh:focusNode`).
+    fn eval_unique_values_for(
+        &mut self,
+        sid: usize,
+        focus: &Term,
+        values: &[Term],
+        props: &[String],
+        out: &mut Vec<ValidationResult>,
+    ) {
+        // The shape's target nodes (cached once per shape, reused across foci).
+        let targets = self.unique_values_targets(sid);
+        for v in values {
+            let sig_v = value_signature(&self.data, v, props);
+            if sig_v.iter().all(|s| s.is_empty()) {
+                continue; // V has no values for any property — never a violation
+            }
+            for other in &targets {
+                if other == v {
+                    continue;
+                }
+                if value_signature(&self.data, other, props) == sig_v {
+                    out.push(
+                        self.result(
+                            sid,
+                            focus,
+                            Some(other.clone()),
+                            "UniqueValuesForConstraintComponent",
+                            "Another target node has the same values for the unique \
+                         properties"
+                                .into(),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The (deduplicated) target nodes of shape `sid`, for `sh:uniqueValuesFor`.
+    /// Memoised on first use so a shape's whole-target scan happens once even
+    /// though the constraint is evaluated once per focus node.
+    fn unique_values_targets(&mut self, sid: usize) -> Vec<Term> {
+        if let Some(cached) = self.uvf_targets.get(&sid) {
+            return cached.clone();
+        }
+        let targets = self.focus_nodes(&self.shapes.shapes[sid]);
+        self.uvf_targets.insert(sid, targets.clone());
+        targets
+    }
+
     #[allow(clippy::too_many_arguments)] // one call site per range component; a struct would obscure it
     fn range(
         &mut self,
@@ -923,6 +1111,61 @@ impl<'a> Validator<'a> {
             })
             .clone()
     }
+}
+
+/// [OPUS-4.8] (sq-vg3y) True iff value node `v` matches the single `sh:nodeKind`
+/// IRI `kind` (SHACL §4.6.1): an IRI matches sh:IRI / sh:BlankNodeOrIRI /
+/// sh:IRIOrLiteral; a blank node matches sh:BlankNode / sh:BlankNodeOrIRI /
+/// sh:BlankNodeOrLiteral; a literal matches sh:Literal / sh:BlankNodeOrLiteral /
+/// sh:IRIOrLiteral. A list-form `sh:nodeKind` is the OR over its members.
+fn node_kind_matches(v: &Term, kind: &str) -> bool {
+    let local = kind.strip_prefix(crate::model::SH).unwrap_or(kind);
+    match v {
+        Term::NamedNode(_) => matches!(local, "IRI" | "BlankNodeOrIRI" | "IRIOrLiteral"),
+        Term::BlankNode(_) => {
+            matches!(local, "BlankNode" | "BlankNodeOrIRI" | "BlankNodeOrLiteral")
+        }
+        Term::Literal(_) => matches!(local, "Literal" | "BlankNodeOrLiteral" | "IRIOrLiteral"),
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
+}
+
+/// [OPUS-4.8] (sq-vg3y) A default message for a set-valued `sh:datatype` /
+/// `sh:nodeKind` constraint (`label` = "datatype" / "node kind"): the single IRI
+/// reads naturally, the list form reads "any of <…> <…>".
+fn iri_set_message(label: &str, iris: &[String]) -> String {
+    match iris {
+        [one] => format!("Value does not have {label} <{one}>"),
+        many => {
+            let joined = many
+                .iter()
+                .map(|i| format!("<{i}>"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("Value does not have any of the allowed {label}s {joined}")
+        }
+    }
+}
+
+/// [OPUS-4.8] (sq-vg3y) The `sh:uniqueValuesFor` signature of a node: for each
+/// listed property (IN ORDER), the SORTED, deduplicated set of its data-graph
+/// values (rendered as terms). Two nodes share a key iff their signatures are
+/// equal — exact term match, so `"04"^^xsd:byte` ≠ `"4"^^xsd:integer`.
+fn value_signature(data: &GraphView, node: &Term, props: &[String]) -> Vec<Vec<String>> {
+    props
+        .iter()
+        .map(|p| {
+            let mut vs: Vec<String> = data
+                .objects(node, p)
+                .iter()
+                .map(|t| t.to_string())
+                .collect();
+            vs.sort();
+            vs.dedup();
+            vs
+        })
+        .collect()
 }
 
 /// The string a value node contributes to sh:minLength/maxLength/pattern:

@@ -564,3 +564,225 @@ fn deactivated_shape_is_skipped() {
         r.to_text()
     );
 }
+
+// ---- [OPUS-4.8] (sq-vg3y) SHACL-1.2 core/node forms ----
+
+// ---- sh:datatype disjunctive (list) form ----
+
+#[test]
+fn datatype_list_form_accepts_any_listed() {
+    // sh:datatype ( xsd:string rdf:langString ): a plain string and a lang-tagged
+    // literal both conform; an integer (neither) violates. Mirrors W3C datatype-003.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode "plain" ;
+          sh:targetNode "tagged"@en ;
+          sh:targetNode 42 ;
+          sh:datatype ( xsd:string rdf:langString ) .
+    "#;
+    let r = run("", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "DatatypeConstraintComponent"), 1);
+    // The integer is the sole violator.
+    assert!(flagged_values(&r).iter().any(|v| v.contains("42")));
+}
+
+#[test]
+fn datatype_single_iri_still_works() {
+    // Regression: the single-IRI form is the singleton-set case.
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "x" , 1 ;
+          sh:datatype xsd:string .
+    "#;
+    let r = run("", shapes);
+    assert_eq!(count_component(&r, "DatatypeConstraintComponent"), 1);
+}
+
+// ---- sh:nodeKind disjunctive (list) form ----
+
+#[test]
+fn nodekind_list_form_accepts_iri_or_blanknode() {
+    // sh:nodeKind ( sh:BlankNode sh:IRI ): an IRI and a blank node conform; a
+    // literal violates. Mirrors W3C nodeKind-002.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:iri ;
+          sh:targetNode "true"^^xsd:boolean ;
+          sh:nodeKind ( sh:BlankNode sh:IRI ) .
+    "#;
+    let r = run("ex:iri ex:p 0 .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "NodeKindConstraintComponent"), 1);
+}
+
+// ---- sh:closed sh:ByTypes ----
+
+#[test]
+fn closed_by_types_uses_properties_of_value_node_types() {
+    // closed-003 in miniature: ex:RootClass is closed-by-types and declares
+    // ex:rootClassProperty1; ex:SubClass (subclass) declares ex:subClassProperty1.
+    // An instance of ROOT (not Sub) that uses ex:subClassProperty1 is closed out;
+    // an instance of Sub that uses it is allowed (its type pulls the property in).
+    let shapes = r#"
+        ex:RootClass a rdfs:Class, sh:NodeShape ;
+          sh:property [ sh:path ex:rootClassProperty1 ] ;
+          sh:closed sh:ByTypes .
+        ex:SubClass a rdfs:Class, sh:NodeShape ;
+          rdfs:subClassOf ex:RootClass ;
+          sh:property [ sh:path ex:subClassProperty1 ] ;
+          sh:closed sh:ByTypes .
+    "#;
+    let data = r#"
+        ex:RootInstance a ex:RootClass ; ex:subClassProperty1 1 .
+        ex:SubInstance a ex:SubClass ; ex:rootClassProperty1 1 ; ex:subClassProperty1 3 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // Exactly one closed violation: ex:RootInstance's ex:subClassProperty1.
+    assert_eq!(count_component(&r, "ClosedConstraintComponent"), 1);
+    let closed: Vec<_> = r
+        .results
+        .iter()
+        .filter(|x| x.source_component.ends_with("ClosedConstraintComponent"))
+        .collect();
+    assert!(closed[0].focus_node.to_string().contains("RootInstance"));
+}
+
+// ---- sh:memberShape ----
+
+#[test]
+fn member_shape_checks_each_list_member() {
+    // sh:memberShape [ sh:nodeKind sh:IRI ]: a list of IRIs conforms; a list with
+    // a literal member, AND a value that is not a SHACL list at all, both violate.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:goodList, ex:badList, ex:notAList ;
+          sh:memberShape [ sh:nodeKind sh:IRI ] .
+    "#;
+    let data = r#"
+        ex:goodList rdf:first ex:a ; rdf:rest ( ex:b ) .
+        ex:badList  rdf:first ex:a ; rdf:rest ( "lit" ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // One top-level result per violating value node (badList + notAList).
+    assert_eq!(count_component(&r, "MemberShapeConstraintComponent"), 2);
+}
+
+// ---- sh:uniqueMembers ----
+
+#[test]
+fn unique_members_flags_duplicate_and_nonlist() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:uniq, ex:dup, ex:notAList ;
+          sh:uniqueMembers true .
+    "#;
+    let data = r#"
+        ex:uniq rdf:first 1 ; rdf:rest ( 2 3 ) .
+        ex:dup  rdf:first 1 ; rdf:rest ( 2 1 ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // ex:dup (duplicate 1) + ex:notAList (not a list) -> two results; ex:uniq ok.
+    assert_eq!(count_component(&r, "UniqueMembersConstraintComponent"), 2);
+}
+
+// ---- sh:maxListLength / sh:minListLength ----
+
+#[test]
+fn max_list_length_flags_too_long_and_nonlist() {
+    // Value nodes: ex:ok (2 members, ok), rdf:nil (0, ok), ex:long (3, violates),
+    // ex:notAList (not a list, violates). Mirrors W3C maxListLength-001.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:ok, rdf:nil, ex:long, ex:notAList ;
+          sh:maxListLength 2 .
+    "#;
+    let data = r#"
+        ex:ok   rdf:first 1 ; rdf:rest ( 2 ) .
+        ex:long rdf:first 1 ; rdf:rest ( 2 3 ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "MaxListLengthConstraintComponent"), 2);
+}
+
+#[test]
+fn min_list_length_flags_too_short_and_nil() {
+    // rdf:nil is a valid SHACL list of length 0 < 1 -> violates; ex:notAList is
+    // not a list -> violates; ex:ok (length 2) passes. Mirrors W3C minListLength-001.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:ok, rdf:nil, ex:notAList ;
+          sh:minListLength 1 .
+    "#;
+    let data = r#"
+        ex:ok rdf:first 1 ; rdf:rest ( 2 ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "MinListLengthConstraintComponent"), 2);
+}
+
+// ---- sh:uniqueValuesFor ----
+
+#[test]
+fn unique_values_for_single_property() {
+    // Two target nodes sharing the same ex:id -> a symmetric pair of results.
+    // A node with no ex:id contributes nothing. Mirrors W3C uniqueValuesFor-001.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetClass ex:Thing ;
+          sh:uniqueValuesFor ex:id .
+    "#;
+    let data = r#"
+        ex:a a ex:Thing ; ex:id "001" .
+        ex:b a ex:Thing ; ex:id "002" .
+        ex:dup1 a ex:Thing ; ex:id "DUP" .
+        ex:dup2 a ex:Thing ; ex:id "DUP" .
+        ex:noid a ex:Thing .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // dup1 -> dup2 and dup2 -> dup1: exactly two results.
+    assert_eq!(count_component(&r, "UniqueValuesForConstraintComponent"), 2);
+}
+
+#[test]
+fn unique_values_for_composite_key_and_missing_values() {
+    // Composite key ( ex:notation ex:scheme ): only nodes that agree on BOTH
+    // collide. Mirrors W3C uniqueValuesFor-002.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetClass ex:Concept ;
+          sh:uniqueValuesFor ( ex:notation ex:scheme ) .
+    "#;
+    let data = r#"
+        ex:v1 a ex:Concept ; ex:notation "A1" ; ex:scheme ex:S1 .
+        ex:v2 a ex:Concept ; ex:notation "A2" ; ex:scheme ex:S1 .
+        ex:bad1 a ex:Concept ; ex:notation "A1" ; ex:scheme ex:S2 .
+        ex:bad2 a ex:Concept ; ex:notation "A1" ; ex:scheme ex:S2 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // Only bad1/bad2 agree on both -> two results; v1 (notation A1, scheme S1)
+    // does NOT collide with bad1 (scheme differs).
+    assert_eq!(count_component(&r, "UniqueValuesForConstraintComponent"), 2);
+}
+
+#[test]
+fn unique_values_for_no_values_conforms() {
+    // No instance has the property -> conforms (W3C uniqueValuesFor-004).
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetClass ex:Thing ;
+          sh:uniqueValuesFor ex:id .
+    "#;
+    let r = run("ex:a a ex:Thing . ex:b a ex:Thing .", shapes);
+    assert!(r.conforms, "{}", r.to_text());
+}
