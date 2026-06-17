@@ -276,12 +276,21 @@ Prioritize by *what PSS actually needs as an oracle*, conservatively:
 2. **(feasible, larger — **sq-3jtd.6**)** `acp:issuer` — extend the principal model from pair to
    triple; sized as a follow-up because it touches all minting + the session expansion.
 3. *(research-open — **sq-3jtd.7**)* `acl:accessToClass`, `acp:vc`, nested `acl:agentGroup`
-   chains, custom ACP mode IRIs — captured here; a single tracking bead (do not start blind; each
-   needs its own design note, `acp:vc` ties to the ZK/VC estate).
+   chains, custom ACP mode IRIs — **the per-gap design notes this bead asked for now exist:
+   [`research/solid-vocab-gaps-design.md`](./solid-vocab-gaps-design.md) [OPUS-4.8]**. Net of
+   that analysis: `acl:accessToClass` and `acp:vc` stay research-open (the former breaches the
+   §2.4 content boundary unless PSS supplies trusted class facts; the latter needs the ZK/VC
+   estate's verifier and a verify-in-PSS / match-in-rules split); **custom ACP mode IRIs is
+   near-term feasible** (no soundness barrier — a bounded `Mode`-enum→IRI refactor with a
+   public-API/`SKILL.md` cost, demand-driven); **nested `acl:agentGroup` chains is feasible as
+   an N3 transitive closure** but gated on first confirming recursive expansion is the CSS/ESS
+   reference behaviour (do not over-grant) and bounding expansion to loaded group docs.
 
-**Verdict:** `CreatorAgent`/`OwnerAgent` and `issuer` are **near-term feasible**;
-`accessToClass`/`vc`/custom-modes/nested-groups are **research-open** (they breach the
-content/reasoner boundary or need verification machinery).
+**Verdict:** `CreatorAgent`/`OwnerAgent` and `issuer` are **near-term feasible** (landed);
+within sq-3jtd.7, **custom-modes and nested-groups are near-term feasible** (the latter gated on
+a conformance decision), while **`accessToClass`/`vc` remain research-open** (they breach the
+content/reasoner boundary or need verification machinery) — see the design notes for the per-gap
+prerequisites.
 
 ---
 
