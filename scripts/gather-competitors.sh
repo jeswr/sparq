@@ -526,15 +526,40 @@ run_vector_lib_engine() { # <id>
   local id="$1"
   hdr "$id (vector-lib)"
   log "  adapter: $ADAPTERS_DIR/vector_lib_adapter.py (build index -> query -> recall@k vs exact-kNN oracle)"
-  log "  PREP (gather box): pip install numpy hnswlib; set VECTOR_NPZ to an npz with {data,queries}"
+  # [OPUS-4.8] sq-aiup: TWO gather modes.
+  #   * SINGLE-POINT (default): VECTOR_NPZ (npz with {data,queries}) -> one recall@k point.
+  #   * PARETO (gather-tier, the published-dataset recall-QPS curve): set VECTOR_DATASET +
+  #     VECTOR_ROOT to sweep `ef` over SIFT1M (sift-128-euclidean) or glove-100-angular and
+  #     emit the recall-QPS Pareto at MATCHED recall (never a single latency). The corpora
+  #     are NOT redistributable in-repo (download/gather step) — design §3.3(c).
+  log "  PREP single-point: pip install numpy hnswlib; set VECTOR_NPZ to an npz with {data,queries}"
+  log "  PREP Pareto (sq-aiup): pip install numpy hnswlib [h5py for glove]; download SIFT1M/GloVe under"
+  log "    VECTOR_ROOT (SIFT: <root>/sift/sift_{base,query}.fvecs + sift_groundtruth.ivecs;"
+  log "    GloVe: <root>/glove-100-angular.hdf5), then set VECTOR_DATASET=sift-128-euclidean|glove-100-angular"
   if [ "$DO_RUN" -eq 1 ]; then
     have python3 || die "python3 needed for the vector-lib adapter"
     python3 -c 'import numpy, hnswlib' 2>/dev/null || die "vector-lib adapter needs numpy + hnswlib (pip install numpy hnswlib)"
-    [ -n "${VECTOR_NPZ:-}" ] || die "vector-lib --run needs VECTOR_NPZ (npz with {data,queries})"
-    OUT="$(python3 "$ADAPTERS_DIR/vector_lib_adapter.py" --hnswlib --npz "$VECTOR_NPZ" --k "${VECTOR_K:-10}" --engine "$id" --json 2>/dev/null)" \
-      || die "vector-lib adapter failed for $id"
-    PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,d,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"recall_deficit_milli":int(d),"query_us":int(u)}))')"
-    write_result "$id" "vectors-recall" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    if [ -n "${VECTOR_DATASET:-}" ]; then
+      # PARETO mode: published-dataset recall-QPS curve (sq-aiup).
+      [ -n "${VECTOR_ROOT:-}" ] || die "vector-lib Pareto --run needs VECTOR_ROOT (dir holding the SIFT1M/GloVe corpus)"
+      log "  Pareto: dataset=$VECTOR_DATASET root=$VECTOR_ROOT ef=${VECTOR_EF:-16,32,64,128,256} k=${VECTOR_K:-10} match_recall=${VECTOR_MATCH_RECALL:-0.9}"
+      local errf; errf="$(mktemp)"
+      # stdout = the per-ef recall-QPS TSV rows; stderr = the --json Pareto envelope.
+      python3 "$ADAPTERS_DIR/vector_lib_adapter.py" --pareto --dataset "$VECTOR_DATASET" \
+        --root "$VECTOR_ROOT" --ef "${VECTOR_EF:-16,32,64,128,256}" --k "${VECTOR_K:-10}" \
+        --match-recall "${VECTOR_MATCH_RECALL:-0.9}" --engine "$id" --json >/dev/null 2>"$errf" \
+        || { rm -f "$errf"; die "vector-lib Pareto adapter failed for $id (dataset $VECTOR_DATASET under $VECTOR_ROOT)"; }
+      PAYLOAD="$(tail -n1 "$errf" | jq -c . 2>/dev/null)"
+      rm -f "$errf"
+      [ -n "$PAYLOAD" ] || die "vector-lib Pareto produced no parseable --json envelope for $id"
+      write_result "$id" "vectors-recall-qps-${VECTOR_DATASET}" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    else
+      [ -n "${VECTOR_NPZ:-}" ] || die "vector-lib --run needs VECTOR_NPZ (npz with {data,queries}) or VECTOR_DATASET+VECTOR_ROOT (Pareto)"
+      OUT="$(python3 "$ADAPTERS_DIR/vector_lib_adapter.py" --hnswlib --npz "$VECTOR_NPZ" --k "${VECTOR_K:-10}" --engine "$id" --json 2>/dev/null)" \
+        || die "vector-lib adapter failed for $id"
+      PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,d,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"recall_deficit_milli":int(d),"query_us":int(u)}))')"
+      write_result "$id" "vectors-recall" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    fi
     check_df
   fi
 }

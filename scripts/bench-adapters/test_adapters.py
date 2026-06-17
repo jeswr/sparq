@@ -12,6 +12,7 @@
 # always run). Run with the venv that has rdflib for full coverage:
 #   /tmp/sq-eifd-venv/bin/python scripts/bench-adapters/test_adapters.py
 import os
+import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -94,6 +95,56 @@ def test_vector():
         check("vec.disjoint-raises", False, True)
     except ValueError:
         check("vec.disjoint-raises", True, True)
+
+
+# --- gather-tier Pareto maths (sq-aiup; stdlib-only, no numpy/hnswlib) --------
+def _fvecs_bytes(rows, fmt):
+    """Encode rows as TEXMEX .fvecs/.ivecs bytes: per row <int32 d><d values>."""
+    out = b""
+    for r in rows:
+        out += struct.pack("<i", len(r))
+        out += struct.pack("<%d%s" % (len(r), fmt), *r)
+    return out
+
+
+def test_pareto():
+    # .fvecs / .ivecs round-trip (the SIFT1M on-disk format) via read_vecs.
+    fvecs = _fvecs_bytes([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], "f")
+    check("vec.read_fvecs", vec.read_vecs(fvecs, "f"), [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    ivecs = _fvecs_bytes([[10, 20], [30, 40]], "i")
+    check("vec.read_ivecs", vec.read_vecs(ivecs, "i"), [[10, 20], [30, 40]])
+    # ragged dims must raise (truncated/mismatched corpus fails loudly).
+    try:
+        vec.read_vecs(_fvecs_bytes([[1.0, 2.0], [3.0]], "f"), "f")
+        check("vec.read_vecs.ragged-raises", False, True)
+    except ValueError:
+        check("vec.read_vecs.ragged-raises", True, True)
+    # truncated trailing row must raise.
+    try:
+        vec.read_vecs(struct.pack("<i", 3) + struct.pack("<2f", 1.0, 2.0), "f")
+        check("vec.read_vecs.truncated-raises", False, True)
+    except ValueError:
+        check("vec.read_vecs.truncated-raises", True, True)
+
+    # qps_from_query_us: inverse of latency; 0 for non-positive.
+    approx("vec.qps.1000us", vec.qps_from_query_us(1000.0), 1000.0)
+    check("vec.qps.zero", vec.qps_from_query_us(0), 0.0)
+
+    # Pareto frontier: a dominated point (lower recall AND lower qps than another) drops.
+    # (0.99, 500) dominates (0.95, 300); (0.999, 100) is on the frontier (best recall).
+    pts = [(0.95, 300.0), (0.99, 500.0), (0.999, 100.0), (0.95, 200.0)]
+    front = vec.pareto_frontier(pts)
+    check("vec.pareto.frontier", front, [(0.99, 500.0), (0.999, 100.0)])
+    # ties collapse to one point.
+    check("vec.pareto.ties", vec.pareto_frontier([(0.9, 100.0), (0.9, 100.0)]), [(0.9, 100.0)])
+
+    # matched_recall_qps: best QPS at recall >= target (the only honest cross-engine #).
+    # At recall>=0.9: both frontier points qualify -> max qps = 500.
+    check("vec.matched.0_9", vec.matched_recall_qps(pts, 0.9), 500.0)
+    # At recall>=0.999: only (0.999,100) qualifies -> 100.
+    check("vec.matched.0_999", vec.matched_recall_qps(pts, 0.999), 100.0)
+    # Unreachable recall -> None (engine cannot hit that recall on this dataset).
+    check("vec.matched.unreachable", vec.matched_recall_qps(pts, 1.0), None)
 
 
 # --- BEIR IR scoring (sq-1fz0; stdlib-only, no pyserini/beir) ----------------
@@ -201,6 +252,7 @@ def test_shacl():
 def main():
     test_http()
     test_vector()
+    test_pareto()
     test_beir()
     test_shacl()
     print("\n%d passed, %d failed" % (PASS, FAIL))
