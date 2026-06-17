@@ -109,6 +109,12 @@ pub use planner::{lower_leaf, pattern_vars, ResolveError, SourceResolver};
 /// local (Phase 4). Pushdown only ever NARROWS a source's result — correctness-preserving.
 #[cfg(feature = "fedclient")]
 pub mod pushdown;
+// [OPUS-4.8] sq-7byx: re-export the Phase-4 capability-aware pushdown surface at the crate root.
+#[cfg(feature = "fedclient")]
+pub use pushdown::{
+    bind_block_size, common_variable_check, exclusive_groups, group_vars, push_group,
+    render_values_block, ExclusiveGroup, Filter, PushedGroup, DEFAULT_BIND_BLOCK,
+};
 
 /// §4.4 — **physical federation operators**: interpret a `JoinTree` into operators —
 /// `Bind` → VALUES/brTPF bind-join, `Hash`/`Streaming` → the reused
