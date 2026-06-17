@@ -6,38 +6,31 @@
 //! newer `shacl12-test-suite/tests/core/node` tree additionally carries a
 //! `nodeByExpression-001` `sht:Validate` entry (the constant-IRI form of
 //! `sh:nodeByExpression`, implemented under the `shacl-af` feature in sq-3w6n)
-//! **plus** a set of SHACL-1.2-only constraints this crate does not implement
-//! (`sh:memberShape`, `sh:uniqueMembers`, `sh:maxListLength`, `sh:minListLength`,
-//! `sh:uniqueValuesFor`). This harness covers that tree end-to-end with an honest
-//! floor: the SHACL-1.2-only entries are recorded as **SKIP**, never FAIL.
+//! **plus** the SHACL-1.2-only core constraints `sh:memberShape`,
+//! `sh:uniqueMembers`, `sh:{max,min}ListLength`, `sh:uniqueValuesFor`, the
+//! `sh:closed sh:ByTypes` close-by-types mode, and the disjunctive list spellings
+//! of `sh:datatype` / `sh:nodeKind`. [OPUS-4.8] (sq-vg3y) all of those are now
+//! implemented on the Core path and compared strictly; the only thing this
+//! harness still SKIPs is `sh:nodeByExpression` when `shacl-af` is off.
 //!
 //! ## SKIP-tolerance (honest floor)
 //!
 //! An entry is **SKIP**, not FAIL, exactly when its shapes graph uses a
-//! constraint form this crate does not implement. Two kinds:
+//! constraint-component *predicate* with no counterpart in this build
+//! ([`unimplemented`]). After sq-vg3y that is ONLY `sh:nodeByExpression`, and ONLY
+//! when `shacl-af` is off.
 //!
-//!   1. **Unimplemented predicate** — a constraint-component predicate with no
-//!      counterpart in [`sparq_shacl::Component`] (the [`UNIMPLEMENTED_CORE`] set,
-//!      plus `sh:nodeByExpression` when `shacl-af` is off).
-//!   2. **Unimplemented *form* of an implemented predicate** — a SHACL-1.2-only
-//!      spelling of a constraint whose single-valued form *is* implemented:
-//!      `sh:closed` with a non-boolean object (the SHACL-1.2 "close by types"
-//!      mode, e.g. `sh:ByTypes`), and the disjunctive list form of `sh:datatype`
-//!      / `sh:nodeKind` (`( xsd:string rdf:langString )`). The crate models these
-//!      as a single IRI / a boolean flag, so a list / IRI object is a feature it
-//!      does not carry — an absence, not a regression (see [`uses_unimplemented_form`]).
-//!
-//! Any entry whose shapes use **only** implemented constraint forms is compared
+//! Any entry whose shapes use **only** implemented constraints is compared
 //! strictly — a mismatch there is a FAIL, so the harness can never silently mask
 //! a regression in an implemented constraint.
 //!
-//! This is deliberately a *structural* SKIP (vocabulary + object shape) and not an
-//! outcome-driven one: an entry is classed up front by the form it exercises, so a
-//! wrong report on an *implemented* constraint form cannot be laundered into a SKIP.
+//! This is deliberately a *structural* SKIP (vocabulary) and not an
+//! outcome-driven one: an entry is classed up front by the predicates it
+//! exercises, so a wrong report on an *implemented* constraint cannot be laundered
+//! into a SKIP.
 //!
-//! Implementing those SHACL-1.2-only forms (and promoting their entries from SKIP
-//! to PASS) is tracked in **sq-vg3y**; the floor auto-grows as the SKIP list
-//! shrinks (bump [`BASELINE_PASS_CORE`] / [`BASELINE_PASS_AF`] then).
+//! The floor auto-grows as the SKIP list shrinks (bump [`BASELINE_PASS_CORE`] /
+//! [`BASELINE_PASS_AF`] then).
 //!
 //! ## Two gates
 //!
@@ -64,31 +57,21 @@ use std::collections::BTreeMap;
 use std::path::{Path as FsPath, PathBuf};
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const MF: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#";
 const SHT: &str = "http://www.w3.org/ns/shacl-test#";
 const SH: &str = "http://www.w3.org/ns/shacl#";
-const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 
 /// Constraint-component *predicates* (relative to `sh:`) this crate does NOT
 /// implement. An entry whose shapes use any of these is recorded as SKIP rather
-/// than FAIL. These are exactly the SHACL-1.2-only core/node constraints with no
-/// counterpart in [`sparq_shacl::Component`]:
+/// than FAIL.
 ///
-///   * `memberShape` — `sh:MemberShapeConstraintComponent` (list-member shape)
-///   * `uniqueMembers` — `sh:UniqueMembersConstraintComponent`
-///   * `maxListLength` / `minListLength` — `sh:{Max,Min}ListLengthConstraintComponent`
-///   * `uniqueValuesFor` — `sh:UniqueValuesForConstraintComponent`
-///
-/// `sh:nodeByExpression` is implemented only under `shacl-af`, so it joins this
-/// set when that feature is OFF (see [`unimplemented`]).
-const UNIMPLEMENTED_CORE: &[&str] = &[
-    "memberShape",
-    "uniqueMembers",
-    "maxListLength",
-    "minListLength",
-    "uniqueValuesFor",
-];
+/// [OPUS-4.8] (sq-vg3y) The SHACL-1.2-only core/node constraints
+/// (`sh:memberShape`, `sh:uniqueMembers`, `sh:{max,min}ListLength`,
+/// `sh:uniqueValuesFor`) are now implemented on the Core path, so this set is
+/// EMPTY. The only feature-dependent absence left is `sh:nodeByExpression`
+/// (implemented under `shacl-af` only) — added to the per-build set in
+/// [`unimplemented`] when that feature is off.
+const UNIMPLEMENTED_CORE: &[&str] = &[];
 
 /// The unimplemented-constraint predicate set for the current build, as full
 /// `sh:`-prefixed IRIs. Feature-dependent: `sh:nodeByExpression` is implemented
@@ -108,7 +91,12 @@ fn unimplemented() -> Vec<String> {
 /// `sht:Validate` entries at the pinned suite commit, excluding
 /// `nodeByExpression-001` (which is then a SKIP). A regression below this fails
 /// the build; raising it is a deliberate bump.
-const BASELINE_PASS_CORE: usize = 32;
+///
+/// [OPUS-4.8] (sq-vg3y) Bumped 32 → 44: the twelve formerly-SKIPed SHACL-1.2-only
+/// core/node entries (`closed-003/004`, `datatype-003`, `nodeKind-002`,
+/// `memberShape-001`, `uniqueMembers-001`, `{max,min}ListLength-001`,
+/// `uniqueValuesFor-001..004`) are now implemented and PASS.
+const BASELINE_PASS_CORE: usize = 44;
 
 /// Pass-floor with the `shacl-af` feature ON: [`BASELINE_PASS_CORE`] plus the
 /// `nodeByExpression-001` entry, which the SHACL-AF `sh:nodeByExpression`
@@ -332,65 +320,23 @@ fn run_entry(
 }
 
 /// The reason (if any) the shapes graph uses a constraint **form** this build
-/// does not implement — identifying an entry to SKIP. Covers two cases:
+/// does not implement — identifying an entry to SKIP.
 ///
-///   1. an unimplemented-constraint *predicate* (the [`unimplemented`] set), and
-///   2. an unimplemented *form* of an implemented predicate:
-///      * `sh:closed` with a non-boolean object (SHACL-1.2 "close by types"), and
-///      * the disjunctive list form of `sh:datatype` / `sh:nodeKind`.
+/// [OPUS-4.8] (sq-vg3y) This now reduces to a single case: an
+/// unimplemented-constraint *predicate* (the [`unimplemented`] set), which after
+/// sq-vg3y contains ONLY `sh:nodeByExpression` and ONLY when `shacl-af` is off.
+/// The previously-SKIPed *forms* of implemented predicates — `sh:closed
+/// sh:ByTypes`, and the disjunctive list spellings of `sh:datatype` /
+/// `sh:nodeKind` — are now implemented on the Core path and so compared strictly.
 ///
 /// Returns `None` when every constraint the shapes use is in a form the crate
 /// implements (so the entry is compared strictly).
 fn unimplemented_form(shapes: &Graph, unimpl: &[String]) -> Option<String> {
     let view = GraphView::new(shapes);
-
-    // (1) Whole-predicate absences.
     if let Some(p) = unimpl.iter().find(|p| !view.subjects_of(p).is_empty()) {
         return Some(format!("shapes use unimplemented constraint <{p}>"));
     }
-
-    // (2a) `sh:closed` with a non-boolean object — the crate fires only on the
-    // literal `true`/`false` form; `sh:ByTypes` (and any other IRI value) is the
-    // unimplemented SHACL-1.2 "close by types" mode.
-    for o in view.objects_of(&format!("{SH}closed")) {
-        let is_boolean_literal =
-            matches!(&o, Term::Literal(l) if l.datatype().as_str() == XSD_BOOLEAN);
-        if !is_boolean_literal {
-            return Some(format!(
-                "shapes use unimplemented sh:closed mode <{}>",
-                term_label(&o)
-            ));
-        }
-    }
-
-    // (2b) Disjunctive (list-valued) `sh:datatype` / `sh:nodeKind` — the crate
-    // models each as a single IRI; a list head (`rdf:first ...`) is the SHACL-1.2
-    // "any of" form it does not implement.
-    for local in ["datatype", "nodeKind"] {
-        for o in view.objects_of(&sh(local)) {
-            if view.object(&o, RDF_FIRST).is_some() {
-                return Some(format!(
-                    "shapes use unimplemented disjunctive sh:{local} (list value)"
-                ));
-            }
-        }
-    }
-
     None
-}
-
-fn sh(local: &str) -> String {
-    format!("{SH}{local}")
-}
-
-fn term_label(t: &Term) -> String {
-    match t {
-        Term::NamedNode(n) => n.as_str().to_string(),
-        Term::Literal(l) => l.value().to_string(),
-        Term::BlankNode(b) => b.as_str().to_string(),
-        #[allow(unreachable_patterns)]
-        _ => t.to_string(),
-    }
 }
 
 fn summarize(rs: &[ValidationResult]) -> String {

@@ -33,8 +33,17 @@ pub enum Target {
 #[derive(Debug, Clone)]
 pub enum Component {
     Class(Term),
-    Datatype(String),
-    NodeKind(String),
+    /// `sh:datatype` — the allowed-datatype set (SHACL §4.5.2). A single IRI
+    /// object is a singleton set; the SHACL-1.2 disjunctive list form
+    /// `sh:datatype ( xsd:string rdf:langString )` is the multi-element set. A
+    /// value node conforms iff it is a literal whose (well-formed) datatype is in
+    /// the set. [OPUS-4.8] (sq-vg3y) extended from a single IRI to the set form.
+    Datatype(Vec<String>),
+    /// `sh:nodeKind` — the allowed node-kind set (SHACL §4.6.1). A single IRI is a
+    /// singleton set; the SHACL-1.2 disjunctive list form
+    /// `sh:nodeKind ( sh:BlankNode sh:IRI )` is the multi-element set. A value
+    /// node conforms iff its kind matches ANY listed kind. [OPUS-4.8] (sq-vg3y).
+    NodeKind(Vec<String>),
     MinCount(u64),
     MaxCount(u64),
     MinExclusive(Term),
@@ -70,9 +79,35 @@ pub enum Component {
     },
     Closed {
         ignored: Vec<Term>,
+        /// [OPUS-4.8] (sq-vg3y) SHACL-1.2 "close by types" mode: `sh:closed
+        /// sh:ByTypes`. When `false` (`sh:closed true`), the allowed predicate set
+        /// P is the IRIs reachable from THIS shape via `sh:property/sh:path`. When
+        /// `true`, P is recomputed PER value node from its `rdf:type`s via the
+        /// `collectProperties` algorithm (SHACL §4.8.1), plus `rdf:type`.
+        by_types: bool,
     },
     HasValue(Term),
     In(Vec<Term>),
+    /// [OPUS-4.8] (sq-vg3y) `sh:memberShape` — SHACL-1.2 list-member shape
+    /// (`sh:MemberShapeConstraintComponent`, SHACL §4.x). Each value node must be a
+    /// well-formed SHACL list, and every member of that list must conform to the
+    /// referenced shape. The index is into [`ShapesModel::shapes`].
+    MemberShape(usize),
+    /// [OPUS-4.8] (sq-vg3y) `sh:uniqueMembers true` — value nodes must be SHACL
+    /// lists whose members are pairwise distinct (`sh:UniqueMembersConstraintComponent`).
+    UniqueMembers,
+    /// [OPUS-4.8] (sq-vg3y) `sh:maxListLength` — value nodes must be SHACL lists
+    /// with at most N members (`sh:MaxListLengthConstraintComponent`).
+    MaxListLength(u64),
+    /// [OPUS-4.8] (sq-vg3y) `sh:minListLength` — value nodes must be SHACL lists
+    /// with at least N members (`sh:MinListLengthConstraintComponent`).
+    MinListLength(u64),
+    /// [OPUS-4.8] (sq-vg3y) `sh:uniqueValuesFor` — the values of the listed
+    /// properties of a value node must be unique across all target nodes of the
+    /// shape (`sh:UniqueValuesForConstraintComponent`, SHACL §4.x). One or more
+    /// property IRIs (a single IRI is a singleton; a SHACL list gives a composite
+    /// key).
+    UniqueValuesFor(Vec<String>),
     /// sh:sparql — a SPARQL-based constraint (SHACL §5.2). The index is into
     /// [`ShapesModel::sparql`].
     Sparql(usize),
@@ -212,6 +247,14 @@ pub struct ShapesModel {
     /// [`Component::CustomSparql`]. The registry is keyed (for activation) on the
     /// mandatory parameter predicates each component declares.
     pub(crate) components: Vec<ComponentDef>,
+    /// [OPUS-4.8] (sq-vg3y) Precomputed `sh:closed sh:ByTypes` property closures
+    /// (SHACL-1.2 §4.8.1 `collectProperties`): for each shapes-graph node, the
+    /// IRI properties reachable via `sh:property/sh:path` transitively through
+    /// `rdfs:subClassOf` / inbound `sh:targetClass` / `sh:node`. This
+    /// shapes-graph traversal is data-independent, so it is resolved ONCE here
+    /// (only when at least one ByTypes-closed shape exists) and unioned per value
+    /// node at eval time. Empty when no shape uses `sh:closed sh:ByTypes`.
+    pub(crate) by_types_closures: FxHashMap<Term, Vec<String>>,
     /// [OPUS-4.8] (sq-mk9n, `shacl-af`) Parsed `sh:expression` node expressions,
     /// referenced by [`Component::Expression`]. Kept off the public `Component`
     /// enum so the (crate-private) node-expression type is not exposed.
@@ -228,6 +271,7 @@ impl ShapesModel {
             targeted: Vec::new(),
             sparql: Vec::new(),
             components: Vec::new(),
+            by_types_closures: FxHashMap::default(),
             #[cfg(feature = "shacl-af")]
             expressions: Vec::new(),
         };
@@ -306,11 +350,28 @@ impl ShapesModel {
         #[cfg(feature = "shacl-af")]
         m.parse_expression_constraints(shapes_graph);
 
+        // [OPUS-4.8] (sq-vg3y) Resolve the data-independent `sh:closed sh:ByTypes`
+        // property closures once (only if any shape uses that mode).
+        if m.shapes.iter().any(|s| {
+            s.components
+                .iter()
+                .any(|c| matches!(c, Component::Closed { by_types: true, .. }))
+        }) {
+            m.by_types_closures = compute_by_types_closures(&g);
+        }
+
         // Validation entry points: shapes with targets.
         m.targeted = (0..m.shapes.len())
             .filter(|&i| !m.shapes[i].targets.is_empty())
             .collect();
         m
+    }
+
+    /// [OPUS-4.8] (sq-vg3y) The precomputed `sh:closed sh:ByTypes` property closure
+    /// for a shapes-graph node, or `None` if the node pulls in no properties (e.g.
+    /// a data class with no shapes-graph footprint). See [`Self::by_types_closures`].
+    pub(crate) fn by_types_closure(&self, node: &Term) -> Option<&Vec<String>> {
+        self.by_types_closures.get(node)
     }
 
     /// [OPUS-4.8] (sq-mk9n / sq-3w6n, `shacl-af`) Parses the two SHACL-AF
@@ -486,14 +547,20 @@ impl ShapesModel {
         for o in g.objects(node, &sh("class")) {
             c.push(Component::Class(o));
         }
+        // [OPUS-4.8] (sq-vg3y) `sh:datatype` / `sh:nodeKind` accept either a single
+        // IRI or the SHACL-1.2 disjunctive SHACL-list form (`( a b )`). `iri_set`
+        // returns the IRI set for either spelling; an empty set (e.g. a literal
+        // object, or an ill-formed list) contributes no constraint.
         for o in g.objects(node, &sh("datatype")) {
-            if let Term::NamedNode(n) = o {
-                c.push(Component::Datatype(n.as_str().to_string()));
+            let dts = iri_set(g, &o);
+            if !dts.is_empty() {
+                c.push(Component::Datatype(dts));
             }
         }
         for o in g.objects(node, &sh("nodeKind")) {
-            if let Term::NamedNode(n) = o {
-                c.push(Component::NodeKind(n.as_str().to_string()));
+            let kinds = iri_set(g, &o);
+            if !kinds.is_empty() {
+                c.push(Component::NodeKind(kinds));
             }
         }
         for (pred, ctor) in [
@@ -578,12 +645,64 @@ impl ShapesModel {
             let members = g.list(&o);
             c.push(Component::In(members));
         }
-        if matches!(g.object(node, &sh("closed")), Some(Term::Literal(l)) if l.value() == "true") {
-            let ignored = match g.object(node, &sh("ignoredProperties")) {
-                Some(list) => g.list(&list),
-                None => Vec::new(),
-            };
-            shape.components.push(Component::Closed { ignored });
+        // [OPUS-4.8] (sq-vg3y) `sh:maxListLength` / `sh:minListLength` (SHACL-1.2):
+        // value nodes must be SHACL lists with at most / at least N members.
+        for (pred, ctor) in [
+            (
+                "maxListLength",
+                Component::MaxListLength as fn(u64) -> Component,
+            ),
+            (
+                "minListLength",
+                Component::MinListLength as fn(u64) -> Component,
+            ),
+        ] {
+            for o in g.objects(node, &sh(pred)) {
+                if let Term::Literal(l) = &o {
+                    if let Ok(n) = l.value().parse::<u64>() {
+                        c.push(ctor(n));
+                    }
+                }
+            }
+        }
+        // [OPUS-4.8] (sq-vg3y) `sh:uniqueMembers true` (SHACL-1.2): SHACL-list value
+        // nodes must have pairwise-distinct members.
+        if matches!(g.object(node, &sh("uniqueMembers")), Some(Term::Literal(l)) if l.value() == "true")
+        {
+            c.push(Component::UniqueMembers);
+        }
+        // [OPUS-4.8] (sq-vg3y) `sh:uniqueValuesFor` (SHACL-1.2): one property IRI or
+        // a SHACL list of property IRIs forming a composite uniqueness key.
+        for o in g.objects(node, &sh("uniqueValuesFor")) {
+            let props = iri_set(g, &o);
+            if !props.is_empty() {
+                c.push(Component::UniqueValuesFor(props));
+            }
+        }
+        // `sh:closed`: SHACL-1.0 boolean (`true`) or SHACL-1.2 `sh:ByTypes`
+        // (close-by-types). Any other object (or `false`) is not a closing form.
+        // [OPUS-4.8] (sq-vg3y) added the `sh:ByTypes` spelling.
+        match g.object(node, &sh("closed")) {
+            Some(Term::Literal(l)) if l.value() == "true" => {
+                shape.components.push(Component::Closed {
+                    ignored: closed_ignored(g, node),
+                    by_types: false,
+                });
+            }
+            Some(Term::NamedNode(n)) if n.as_str() == sh("ByTypes") => {
+                shape.components.push(Component::Closed {
+                    ignored: closed_ignored(g, node),
+                    by_types: true,
+                });
+            }
+            _ => {}
+        }
+        // [OPUS-4.8] (sq-vg3y) `sh:memberShape` (SHACL-1.2): each value node must be
+        // a well-formed SHACL list whose members all conform to the referenced
+        // shape. Recursive (the member shape is parsed/interned like sh:node).
+        for o in g.objects(node, &sh("memberShape")) {
+            let id = self.shape_id(g, &o);
+            shape.components.push(Component::MemberShape(id));
         }
 
         // Shape-referencing components (recursive).
@@ -772,6 +891,105 @@ fn collect_prefixes_from(g: &GraphView, prefix_roots: &[Term]) -> String {
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+}
+
+/// [OPUS-4.8] (sq-vg3y) The set of IRIs an object denotes when a constraint
+/// parameter accepts "an IRI or a SHACL list of IRIs" (`sh:datatype` /
+/// `sh:nodeKind` / `sh:uniqueValuesFor`, SHACL-1.2). A single IRI → singleton; a
+/// SHACL-list head → its IRI members (non-IRI members dropped). Anything else →
+/// empty (no constraint contributed).
+fn iri_set(g: &GraphView, o: &Term) -> Vec<String> {
+    match o {
+        Term::NamedNode(n) => vec![n.as_str().to_string()],
+        Term::BlankNode(_) => g
+            .list(o)
+            .into_iter()
+            .filter_map(|m| match m {
+                Term::NamedNode(n) => Some(n.as_str().to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The `sh:ignoredProperties` SHACL list of a (closed) shape node, or empty.
+fn closed_ignored(g: &GraphView, node: &Term) -> Vec<Term> {
+    match g.object(node, &sh("ignoredProperties")) {
+        Some(list) => g.list(&list),
+        None => Vec::new(),
+    }
+}
+
+/// [OPUS-4.8] (sq-vg3y) Precompute the `sh:closed sh:ByTypes` `collectProperties`
+/// closure (SHACL-1.2 §4.8.1) for every node mentioned in the shapes graph. For a
+/// starting node S the closure is the union of the IRI properties reachable via
+/// `sh:property/sh:path` from S and, recursively, from S's `rdfs:subClassOf`
+/// objects, the shapes that target S via `sh:targetClass`, and the node shapes S
+/// references via `sh:node`. The traversal is cycle-guarded (each node expanded at
+/// most once per starting node) and reads ONLY the shapes graph (the per-value
+/// `rdf:type` step happens at eval time). Nodes whose closure is empty are
+/// omitted, so a `get` miss means "no properties".
+fn compute_by_types_closures(g: &GraphView) -> FxHashMap<Term, Vec<String>> {
+    // Candidate starting nodes: every subject and object in the shapes graph (a
+    // data class T is looked up here too, so we must cover object positions).
+    let mut nodes: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+    for [s, _, o] in g.triples(None, None, None) {
+        if !matches!(s, Term::Literal(_)) {
+            nodes.insert(s);
+        }
+        if !matches!(o, Term::Literal(_)) {
+            nodes.insert(o);
+        }
+    }
+    let mut out: FxHashMap<Term, Vec<String>> = FxHashMap::default();
+    for start in nodes {
+        let mut props: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+        let mut visited: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![start.clone()];
+        while let Some(s) = stack.pop() {
+            if !visited.insert(s.clone()) {
+                continue;
+            }
+            collect_properties(g, &s, &mut props, &mut stack);
+        }
+        if !props.is_empty() {
+            out.insert(start, props.into_iter().collect());
+        }
+    }
+    out
+}
+
+/// One step of the `collectProperties` algorithm (SHACL-1.2 §4.8.1): add the IRI
+/// properties reachable from `s` via `sh:property/sh:path`, and push the nodes the
+/// recursion continues into (`rdfs:subClassOf` objects, inbound `sh:targetClass`
+/// subjects, `sh:node` objects) onto `stack`. Cycle-avoidance is the caller's
+/// `visited` set. Reads only the shapes graph.
+fn collect_properties(
+    g: &GraphView,
+    s: &Term,
+    props: &mut rustc_hash::FxHashSet<String>,
+    stack: &mut Vec<Term>,
+) {
+    const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    // IRI properties reached via sh:property/sh:path.
+    for ps in g.objects(s, &sh("property")) {
+        if let Some(Term::NamedNode(n)) = g.object(&ps, &sh("path")) {
+            props.insert(n.as_str().to_string());
+        }
+    }
+    // rdfs:subClassOf objects (superclasses).
+    for sup in g.objects(s, RDFS_SUBCLASS_OF) {
+        stack.push(sup);
+    }
+    // Shapes that target s via sh:targetClass.
+    for sub in g.subjects(&sh("targetClass"), s) {
+        stack.push(sub);
+    }
+    // Node shapes referenced via sh:node.
+    for n in g.objects(s, &sh("node")) {
+        stack.push(n);
+    }
 }
 
 /// [OPUS-4.8] SHACL §6.2: discover the `sh:ConstraintComponent` declarations in

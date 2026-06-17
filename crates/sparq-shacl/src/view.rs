@@ -153,6 +153,44 @@ impl<'g> GraphView<'g> {
         out
     }
 
+    /// [OPUS-4.8] (sq-vg3y) The members of `head` iff it is a WELL-FORMED SHACL
+    /// list (SHACL §1.4 "SHACL Lists"), else `None`. A SHACL list is `rdf:nil`
+    /// (with no `rdf:first`/`rdf:rest` — empty list), or a node with EXACTLY ONE
+    /// `rdf:first`, EXACTLY ONE `rdf:rest` that is itself a SHACL list, and that
+    /// does not reach itself via `rdf:rest+` (no cycle). A literal head, a missing
+    /// or duplicated `rdf:first`/`rdf:rest`, or a cycle ⇒ NOT a SHACL list. This is
+    /// the strict check `sh:memberShape` / `sh:{min,max}ListLength` /
+    /// `sh:uniqueMembers` need (the lenient [`Self::list`] tolerates malformed
+    /// tails, which would silently truncate those constraints).
+    pub fn list_strict(&self, head: &Term) -> Option<Vec<Term>> {
+        if matches!(head, Term::Literal(_)) {
+            return None; // a literal is never a SHACL list
+        }
+        let mut out = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+        let mut cur = head.clone();
+        loop {
+            if matches!(&cur, Term::NamedNode(n) if n.as_str() == RDF_NIL) {
+                // rdf:nil must carry no rdf:first/rdf:rest to be the empty list.
+                if self.object(&cur, RDF_FIRST).is_some() || self.object(&cur, RDF_REST).is_some() {
+                    return None;
+                }
+                return Some(out);
+            }
+            if !seen.insert(cur.clone()) {
+                return None; // cycle via rdf:rest+
+            }
+            // Exactly one rdf:first and exactly one rdf:rest.
+            let firsts = self.objects(&cur, RDF_FIRST);
+            let rests = self.objects(&cur, RDF_REST);
+            if firsts.len() != 1 || rests.len() != 1 {
+                return None;
+            }
+            out.push(firsts.into_iter().next().unwrap());
+            cur = rests.into_iter().next().unwrap();
+        }
+    }
+
     /// The SHACL instances of `class`: nodes whose `rdf:type` is `class` or any
     /// `rdfs:subClassOf`-descendant of it (closure computed within this graph).
     pub fn instances_of(&self, class: &Term) -> Vec<Term> {
