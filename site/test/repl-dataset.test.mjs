@@ -15,6 +15,7 @@ import {
   formatFromContentType,
   classifyQueryForm,
   isGraphForm,
+  modeSupportsForm,
 } from "../src/lib/repl-dataset.ts";
 
 test("isDatasetFormat is true exactly for the quad-bearing formats", () => {
@@ -225,4 +226,29 @@ test("isGraphForm is true exactly for CONSTRUCT and DESCRIBE", () => {
   assert.equal(isGraphForm("select"), false);
   assert.equal(isGraphForm("ask"), false);
   assert.equal(isGraphForm("update"), false);
+});
+
+// [OPUS-4.8] sq-xe4f — EXPLAIN / ANALYZE drive the query planner, which rejects SPARQL
+// Update forms; the REPL grays those mode tabs out for Update examples. The decision is
+// this pure predicate, so the table-of-cases test guards the gating rule directly.
+test("modeSupportsForm: Run is available for every form", () => {
+  for (const form of ["select", "ask", "construct", "describe", "update"]) {
+    assert.equal(modeSupportsForm("run", form), true, form);
+  }
+});
+
+test("modeSupportsForm: EXPLAIN / ANALYZE are available for the query forms", () => {
+  for (const form of ["select", "ask", "construct", "describe"]) {
+    assert.equal(modeSupportsForm("explain", form), true, `explain/${form}`);
+    assert.equal(modeSupportsForm("analyze", form), true, `analyze/${form}`);
+  }
+});
+
+test("modeSupportsForm: EXPLAIN / ANALYZE are UNavailable for SPARQL Update", () => {
+  // The bead (sq-xe4f): selecting EXPLAIN or ANALYZE on an Update example yields an
+  // engine parse error, so the toggle must gray those modes out for "update".
+  assert.equal(modeSupportsForm("explain", "update"), false);
+  assert.equal(modeSupportsForm("analyze", "update"), false);
+  // Run still works — the Update can still be executed.
+  assert.equal(modeSupportsForm("run", "update"), true);
 });

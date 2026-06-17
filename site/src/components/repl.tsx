@@ -23,7 +23,13 @@ import {
   type SparqlResults,
   type WasmStore,
 } from "@/lib/sparq-wasm";
-import { classifyQueryForm, isGraphForm } from "@/lib/repl-dataset";
+import {
+  classifyQueryForm,
+  isGraphForm,
+  modeSupportsForm,
+  type QueryForm,
+  type RunMode,
+} from "@/lib/repl-dataset";
 import { EXAMPLE_QUERIES, BUILTIN_DATASETS } from "@/data/sample-graph";
 import {
   DatasetControls,
@@ -46,8 +52,9 @@ type RunState =
   | { kind: "error"; message: string };
 
 // Run mode: execute the query, or render the planner's EXPLAIN / EXPLAIN ANALYZE
-// plan without (EXPLAIN) or with (ANALYZE) executing it.
-type RunMode = "run" | "explain" | "analyze";
+// plan without (EXPLAIN) or with (ANALYZE) executing it. The RunMode union now lives
+// alongside the form classifier in repl-dataset so the per-form mode-support rule
+// (modeSupportsForm) is a single pure, unit-tested source of truth.
 
 // [OPUS-4.8] Engine warm-up lifecycle, surfaced as a subtle indicator. The wasm fetch +
 // instantiate is kicked off on mount (prewarmSparq) so the first "Run query" is instant.
@@ -254,6 +261,19 @@ export function Repl() {
   const busy = state.kind === "running";
   const controlsDisabled = engine === "warming" || engine === "cold";
 
+  // [OPUS-4.8] sq-xe4f — classify the current editor text so the mode toggle can gray
+  // out EXPLAIN / ANALYZE for SPARQL Update forms (the query planner those modes drive
+  // rejects Update). If the user had EXPLAIN/ANALYZE selected and then loads an Update
+  // example, snap the mode back to "run" so the next click runs the Update instead of
+  // hitting an engine parse error.
+  const form: QueryForm = React.useMemo(
+    () => classifyQueryForm(sparql),
+    [sparql],
+  );
+  React.useEffect(() => {
+    if (!modeSupportsForm(mode, form)) setMode("run");
+  }, [mode, form]);
+
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
@@ -322,7 +342,7 @@ export function Repl() {
             )}
             {mode === "run" ? "Run query" : "Run EXPLAIN"}
           </Button>
-          <ModeTabs mode={mode} onChange={setMode} disabled={busy} />
+          <ModeTabs mode={mode} onChange={setMode} disabled={busy} form={form} />
           <p aria-live="polite" className="text-xs text-muted-foreground">
             {state.kind === "select" &&
               `${state.results.results.bindings.length} rows · ${state.ms.toFixed(1)} ms`}
@@ -382,14 +402,19 @@ function EngineIndicator({ engine }: { engine: EngineState }) {
 
 // [OPUS-4.8] sq-vfbm — Run / EXPLAIN / EXPLAIN ANALYZE selector. EXPLAIN is a
 // planning-only dry run (every query form); ANALYZE also executes (SELECT/ASK).
+// [OPUS-4.8] sq-xe4f — EXPLAIN / ANALYZE drive the query planner, which rejects SPARQL
+// Update forms, so those tabs are grayed (disabled + aria-disabled) when the editor
+// holds an Update example. The decision is the pure `modeSupportsForm` predicate.
 function ModeTabs({
   mode,
   onChange,
   disabled,
+  form,
 }: {
   mode: RunMode;
   onChange: (m: RunMode) => void;
   disabled: boolean;
+  form: QueryForm;
 }) {
   const tabs: { value: RunMode; label: string; title: string }[] = [
     { value: "run", label: "Run", title: "Execute the query / update" },
@@ -410,25 +435,37 @@ function ModeTabs({
       aria-label="Run mode"
       className="inline-flex rounded-lg border bg-muted/40 p-0.5"
     >
-      {tabs.map((t) => (
-        <button
-          key={t.value}
-          type="button"
-          role="tab"
-          aria-selected={mode === t.value}
-          title={t.title}
-          disabled={disabled}
-          onClick={() => onChange(t.value)}
-          className={cn(
-            "rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50",
-            mode === t.value
-              ? "bg-background text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          {t.label}
-        </button>
-      ))}
+      {tabs.map((t) => {
+        // Gray out a mode the current query form cannot use (EXPLAIN/ANALYZE on an
+        // Update). The engine still validates — this only stops the user picking a
+        // mode that would parse-error.
+        const unsupported = !modeSupportsForm(t.value, form);
+        const tabDisabled = disabled || unsupported;
+        return (
+          <button
+            key={t.value}
+            type="button"
+            role="tab"
+            aria-selected={mode === t.value}
+            aria-disabled={unsupported}
+            title={
+              unsupported
+                ? `${t.label} is unavailable for SPARQL Update — it plans a query`
+                : t.title
+            }
+            disabled={tabDisabled}
+            onClick={() => onChange(t.value)}
+            className={cn(
+              "rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50 disabled:cursor-not-allowed",
+              mode === t.value
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {t.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
