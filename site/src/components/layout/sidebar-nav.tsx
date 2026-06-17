@@ -8,6 +8,62 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { FLAGSHIPS, GROUPS, TIER_LABEL, TIER_VARIANT } from "@/data/surfaces";
 
+// [OPUS-4.8] Hover/focus-intent prefetch of the in-browser ZK prover.
+//
+// The prover's cold start (the ~MB @noir-lang/noir_js + @aztec/bb.js WASM glue +
+// the ACIR circuit fetch + the Barretenberg WASM instantiate) is deliberately
+// route-scoped: it warms only after the user lands on a ZK page and the demo
+// component mounts (prewarmProver in src/lib/zk-prover.ts, invoked from the
+// zk-car-hire useEffect). This adds an EARLIER, intent-gated hook so the warm can
+// begin while the pointer is still on the nav link — before navigation, before
+// first paint of the ZK page — without ever pulling those assets onto routes that
+// have nothing to do with ZK (/try, /papers, /benchmarks, …).
+//
+// It is purely an optimisation layered on top of the existing in-route warm-up:
+//   * fire-and-forget — never awaited on any render / interaction path;
+//   * idempotent — `prewarmProver` shares the single module-level promise, so a
+//     hover, a later hover, and the in-route useEffect all reuse ONE cold start;
+//   * one-shot per session — `zkPrefetchScheduled` guards repeat scheduling;
+//   * idle-gated — scheduled via requestIdleCallback (setTimeout fallback) so it
+//     never contends with first paint or an active interaction;
+//   * graceful — failures are swallowed and re-arm the guard; the cold-start cache
+//     self-resets, so the on-demand proving path stays correct even if this never
+//     ran.
+// The dynamic import keeps the bb.js / noir_js chunks out of every other route's
+// bundle, preserving the route-scoping documented in zk-car-hire.tsx.
+const ZK_PREFETCH_HREFS = new Set(["/showcase/zk-car-hire", "/surface/zk"]);
+
+let zkPrefetchScheduled = false;
+
+function prefetchZkProver() {
+  if (typeof window === "undefined" || zkPrefetchScheduled) return;
+  zkPrefetchScheduled = true;
+
+  const warm = () => {
+    // Dynamic import so the bb.js / noir_js chunks never enter non-ZK route bundles.
+    void import("@/lib/zk-prover")
+      .then((m) => m.prewarmProver())
+      .catch(() => {
+        // Optimisation only — if the warm import / instantiate fails, the in-route
+        // useEffect and the proveAgeEligibility safety net still drive a fresh cold
+        // start on demand. Re-arm the guard so a later hover can retry.
+        zkPrefetchScheduled = false;
+      });
+  };
+
+  const ric = (
+    window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+    }
+  ).requestIdleCallback;
+  if (typeof ric === "function") {
+    ric(warm, { timeout: 2000 });
+  } else {
+    // Safari / older browsers lack requestIdleCallback: defer past first paint.
+    window.setTimeout(warm, 200);
+  }
+}
+
 // Shared nav body used by BOTH the persistent desktop sidebar and the mobile Sheet.
 // Every item is a real <a href> (Next Link) per the accessible-html-links rule.
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
@@ -103,10 +159,16 @@ function NavLink({
   onNavigate?: () => void;
   children: React.ReactNode;
 }) {
+  // [OPUS-4.8] On ZK nav entries only, hover / focus intent eagerly (idle-gated,
+  // fire-and-forget) warms the in-browser prover before navigation. No-op on every
+  // other link, so non-ZK routes never pull the prover WASM.
+  const onZkIntent = ZK_PREFETCH_HREFS.has(href) ? prefetchZkProver : undefined;
   return (
     <Link
       href={href}
       onClick={onNavigate}
+      onMouseEnter={onZkIntent}
+      onFocus={onZkIntent}
       aria-current={active ? "page" : undefined}
       className={cn(
         "flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors",
