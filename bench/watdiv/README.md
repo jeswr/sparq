@@ -82,9 +82,14 @@ target/release/sparq-cli bench "$CORPUS" ntriples bench/watdiv/queries 3 count  
 ```
 
 CI wires the per-commit subset through `scripts/ci-bench.sh` (iters=3) as metrics
-`watdiv_<query>_<mode>_us` — **trend-only** (NOT in the deterministic hard perf-gate,
+`watdiv_sf<SF>_<query>_<mode>_us` — **trend-only** (NOT in the deterministic hard perf-gate,
 `scripts/perf-gate.py`) — plus a hard **expected-rows equality** check (`expected-rows.tsv`) on
 count mode, so a correctness regression fails the build even though the latency is trend-only.
+The stem carries the **scale factor** as an `_sf<SF>` token (`watdiv_sf1_…` per-commit;
+`watdiv_sf1000_…` at the EC2/nightly tier) so the two SF tiers form **distinct**
+github-action-benchmark series instead of colliding — that is what lets the dashboard's
+engine-vs-scale-factor **scaling chart** (sq-viby) plot the per-commit and full-scale points on
+one axis (`bench/dashboard/dashboard.js` `sizeAxisOf` parses `_sf<digits>`). [OPUS-4.8] (sq-1wrw)
 
 ## Tiering — per-commit vs EC2/nightly
 
