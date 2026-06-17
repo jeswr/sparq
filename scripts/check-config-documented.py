@@ -34,8 +34,21 @@
 #     hand-rolled arg matchers in crates/sparq-{cli,server}/src/main.rs. Short flags
 #     (`-h`) and the universal `--help` are NOT user config and are ignored.
 #   * an environment variable: a `SPARQ_[A-Z0-9_]+` token.
-# Both forms are extracted identically from code-diff lines and from docs (so the
-# "documented?" test is a pure token-membership check — no format coupling).
+#
+# CODE-SIDE vs DOC-SIDE extraction (the formats DIFFER, so the extractor MUST too):
+# Rust source writes a flag as a DOUBLE-QUOTED literal (`"--addr"`) — that is what the
+# arg matcher compares against. But the READMEs / SKILL.md document a flag in markdown
+# BACKTICKS (`--addr`) or bare in prose, never in double quotes. A single
+# double-quote-only extractor applied to both sides therefore recognises EVERY
+# code-defined flag and ZERO documented flags, so it false-positives even on its own
+# compliant path (add a flag + document it in backticks → still reported undocumented).
+# Env vars don't have this skew — `SPARQ_*` is written the same way (no quotes) on both
+# sides — so the env half is quote-agnostic on both sides and stays as-is.
+# Fix: code_knob_tokens() recognises double-quoted flags (how code defines them);
+# doc_knob_tokens() recognises backtick-started / double-quoted / bare-prose flags (how
+# docs write them, incl. `--flag <ARG>` / `--flag*` / `--flag N`). Both extract
+# `SPARQ_*` identically. The "documented?" test is then a symmetric token-membership
+# check across the two format conventions.
 #
 # SCOPE: only crates/sparq-cli/src/** and crates/sparq-server/src/** are config
 # surfaces (per the design's "(sparq-cli, sparq-server)"). A new flag/env added in
@@ -89,10 +102,30 @@ SKILL_SUFFIX = "SKILL.md"
 # Escape-hatch label (design §2.1).
 CONFIG_INTERNAL_LABEL = "config-internal"
 
-# A long CLI flag literal: a double-quoted "--lower-kebab" token. The hand-rolled
-# matchers in main.rs compare argv against exactly these literals.
-_FLAG_RE = re.compile(r'"(--[a-z][a-z0-9-]*)"')
-# An environment variable: SPARQ_ + uppercase/underscore/digits.
+# CODE-side long CLI flag literal: a double-quoted "--lower-kebab" token. The
+# hand-rolled matchers in crates/sparq-{cli,server}/src/main.rs compare argv against
+# exactly these double-quoted literals.
+_CODE_FLAG_RE = re.compile(r'"(--[a-z][a-z0-9-]*)"')
+# DOC-side long CLI flag: how a flag is actually WRITTEN DOWN in markdown — at the
+# start of a backtick code span (the dominant convention: `--addr`, but also
+# `--access-audit <file|stderr>` with an arg placeholder, `--max-subscriptions*` with
+# a glob, `--max-subscriptions N` in a SKILL table cell), in double quotes ("--addr"),
+# or bare in prose (--addr at a word boundary). A code-defined flag is "documented" if
+# its token appears in any of these doc forms.
+#   * The backtick arm anchors on the OPENING backtick and captures only the flag
+#     token, NOT the whole span — so `--flag ARG`, `--flag*`, `--flag=VAL` and bare
+#     `--flag` inside a code span all yield the flag. (`[a-z0-9-]*` is greedy but
+#     stops at the first non-kebab char — space, `*`, `=`, `<`, closing backtick.)
+#   * The bare-prose arm requires `--` to start at a non-word, non-`-`, non-quote,
+#     non-backtick boundary, so it never re-matches the backtick/quote forms or a
+#     mid-token `--` fragment.
+_DOC_FLAG_RE = re.compile(
+    r"`(--[a-z][a-z0-9-]*)"  # start of a backtick span: `--addr  / `--access-audit <…>
+    r'|"(--[a-z][a-z0-9-]*)"'  # double-quoted:           "--addr"
+    r'|(?<![\w`"-])(--[a-z][a-z0-9-]*)\b'  # bare in prose: --addr
+)
+# An environment variable: SPARQ_ + uppercase/underscore/digits. Written identically
+# (no quoting) in both code and docs, so this half is shared verbatim by both sides.
 _ENV_RE = re.compile(r"\bSPARQ_[A-Z0-9_]+\b")
 
 # Flags that are NOT user config knobs (universal help; short -h handled elsewhere).
@@ -153,38 +186,63 @@ def git_diff(base: str) -> tuple[list[str], list[str]]:
     return parse_status_lines(out.splitlines())
 
 
-def knob_tokens(text: str) -> set[str]:
-    """Extract every config-knob token (CLI flags + SPARQ_* env vars) from `text`.
-
-    Used both on code-diff lines (to find what a PR introduces) and on docs (to
-    test whether a knob is documented) — one extractor, so the membership test is
-    format-agnostic."""
-    flags = {f for f in _FLAG_RE.findall(text) if f not in _FLAG_IGNORE}
+def code_knob_tokens(text: str) -> set[str]:
+    """Extract config-knob tokens as a PR INTRODUCES them in code: double-quoted
+    `"--flag"` literals (the form the hand-rolled arg matcher compares against) plus
+    `SPARQ_*` env vars. Used on code-diff lines to find what a PR adds."""
+    flags = {f for f in _CODE_FLAG_RE.findall(text) if f not in _FLAG_IGNORE}
     envs = set(_ENV_RE.findall(text))
     return flags | envs
 
 
-def scan_added_knobs(diff_lines: list[str]) -> set[str]:
+def doc_knob_tokens(text: str) -> set[str]:
+    """Extract config-knob tokens as the DOCS write them down: a flag at the start of
+    a markdown backtick span (`--flag`, `--flag <ARG>`, `--flag*`), in double quotes
+    ("--flag"), or bare in prose (--flag), plus `SPARQ_*` env vars. Used on docs
+    (READMEs / SKILL.md) to test whether a knob is documented. Recognising the
+    backtick form — the dominant convention in the docs — is what makes the gate
+    symmetric: a code-defined double-quoted flag and its backtick-documented
+    counterpart map to the same token."""
+    flags: set[str] = set()
+    for backtick, dquote, prose in _DOC_FLAG_RE.findall(text):
+        tok = backtick or dquote or prose
+        if tok and tok not in _FLAG_IGNORE:
+            flags.add(tok)
+    envs = set(_ENV_RE.findall(text))
+    return flags | envs
+
+
+# Back-compat alias: historically a single `knob_tokens()` served both sides. It is the
+# CODE-side extractor (callers that pass code-diff lines must see double-quoted flags).
+knob_tokens = code_knob_tokens
+
+
+def scan_added_knobs(diff_lines: list[str], extractor=code_knob_tokens) -> set[str]:
     """Return knob tokens NET-added by a unified diff: present on an added (`+`)
     line and NOT on any removed (`-`) line. A pure relocation (same token removed
     once, added once) cancels; a comment that only mentions an unchanged flag is
     inert (no +/- line). File headers ('+++ '/'--- ') are skipped so a path is
-    never mistaken for content."""
+    never mistaken for content.
+
+    `extractor` is the token extractor for the diff's side: code_knob_tokens for a
+    src diff (double-quoted flags) or doc_knob_tokens for a docs diff (backtick /
+    quoted / bare-prose flags). Defaults to the code side."""
     added: set[str] = set()
     removed: set[str] = set()
     for line in diff_lines:
         if line.startswith("+++") or line.startswith("---"):
             continue
         if line.startswith("+"):
-            added |= knob_tokens(line[1:])
+            added |= extractor(line[1:])
         elif line.startswith("-"):
-            removed |= knob_tokens(line[1:])
+            removed |= extractor(line[1:])
     return added - removed
 
 
-def git_added_knobs(path: str, base: str) -> set[str]:
-    """Net-added knob tokens for `path` read from git. Conservative on error
-    (returns empty set — never a CI-only crash)."""
+def git_added_knobs(path: str, base: str, extractor=code_knob_tokens) -> set[str]:
+    """Net-added knob tokens for `path` read from git, using `extractor` for the
+    path's side (code vs docs). Conservative on error (returns empty set — never a
+    CI-only crash)."""
     ref = _normalize_base(base)
     try:
         out = subprocess.run(
@@ -196,7 +254,7 @@ def git_added_knobs(path: str, base: str) -> set[str]:
         ).stdout
     except subprocess.CalledProcessError:  # pragma: no cover - CI-only
         return set()
-    return scan_added_knobs(out.splitlines())
+    return scan_added_knobs(out.splitlines(), extractor)
 
 
 def documented_on_disk() -> set[str]:
@@ -207,12 +265,12 @@ def documented_on_disk() -> set[str]:
     for rel in DOC_READMES:
         p = REPO_ROOT / rel
         try:
-            tokens |= knob_tokens(p.read_text(encoding="utf-8", errors="ignore"))
+            tokens |= doc_knob_tokens(p.read_text(encoding="utf-8", errors="ignore"))
         except OSError:
             continue
     for sk in REPO_ROOT.glob("skills/**/SKILL.md"):
         try:
-            tokens |= knob_tokens(sk.read_text(encoding="utf-8", errors="ignore"))
+            tokens |= doc_knob_tokens(sk.read_text(encoding="utf-8", errors="ignore"))
         except OSError:
             continue
     return tokens
@@ -229,7 +287,7 @@ def git_doc_added_knobs(changed: list[str], base: str) -> set[str]:
     ]
     tokens: set[str] = set()
     for p in docs:
-        tokens |= git_added_knobs(p, base)
+        tokens |= git_added_knobs(p, base, doc_knob_tokens)
     return tokens
 
 
