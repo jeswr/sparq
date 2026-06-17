@@ -20,10 +20,19 @@ mod provenance;
 pub mod odrl_bridge;
 mod rewrite;
 mod update; // [OPUS-4.8] sq-xor3: write/update-path enforcement
+// [OPUS-4.8] sq-3jtd.8: library-level WAC conformance harness — the table-driven
+// scenario sibling of `conformance` (ACP), over the WAC engine (materialize_wac +
+// AuthIndex::accessible). Shares the decision/expectation/report vocabulary with
+// `conformance`; adds the WAC `.acl`-corpus builder (`AclBuilder`) and runner
+// (`WacScenario`). Always compiled (no feature gate). Corpus in tests/conformance_wac.rs.
+pub mod wac_conformance;
 
 pub use authindex::{pair_principal, triple_principal, AuthIndex, Mode, Session};
 // [OPUS-4.8] sq-3jtd.9: the ACP conformance harness entry types.
 pub use conformance::{AcpScenario, AcrBuilder, Decision, Expect, ScenarioReport};
+// [OPUS-4.8] sq-3jtd.8: the WAC conformance harness entry types (the decision/expectation
+// /report vocabulary is the shared `conformance::{Decision, Expect, ScenarioReport}`).
+pub use wac_conformance::{AclBuilder, AuthBuilder, WacScenario};
 pub use fixture::{acp_fixture, wac_fixture};
 pub use materialize::{materialize_acp, materialize_acp_with, materialize_wac, MaterializeStats};
 pub use provenance::AccessProvenance;
