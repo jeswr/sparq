@@ -264,7 +264,7 @@ impl MacKey {
 /// itself, and *any* `t+1` of them reconstruct `α`; for general `x`, `α = (α·x)/x`
 /// whenever `x` is known and invertible. So a stray `{:?}` (a log line, a panic
 /// message, an `assert_eq!` failure) would exfiltrate the MAC shares and back-door
-/// the `pub(crate)` restriction on [`Self::mac_shares`], undermining the "α is never
+/// the `pub(crate)` restriction on `Self::mac_shares`, undermining the "α is never
 /// reconstructable" guarantee. Instead [`AuthenticatedShare`] has a MANUAL [`Debug`]
 /// that surfaces the openable value sharing `[x]` (already public via
 /// [`Self::value_shares`]) but REDACTS the MAC shares. `[OPUS-4.8]`

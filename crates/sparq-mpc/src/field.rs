@@ -176,7 +176,7 @@ impl Fp {
     ///
     /// [OPUS-4.8] sq-7ltf: a square-and-multiply that runs a **fixed 64
     /// iterations** (one per `u64` exponent bit) and selects the conditional
-    /// multiply with [`subtle::ConditionalSelect`] instead of an `if`. There is no
+    /// multiply with [`subtle::ConditionallySelectable`] instead of an `if`. There is no
     /// data-dependent branch on the base value, so the routine is **constant-time
     /// in the base `self`** — closing the latent `Fp::pow` hazard for any caller
     /// that exponentiates a secret-bearing field element. It is **not** asserted

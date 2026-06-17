@@ -12,7 +12,7 @@
 //!
 //! ## The gap this closes
 //!
-//! [`crate::shamir::ShamirBackend::share_private_input`] caps a holder's secure
+//! [`crate::backend::MpcBackend::share_private_input`] caps a holder's secure
 //! contribution to ONE scalar (one row, one column — its single salary). The
 //! four-flatmates aggregate works because each flatmate has exactly one private
 //! salary; but the moment a holder has a *column* of private values (per-row
@@ -29,7 +29,7 @@
 //!
 //! - [`RowBinding::Positional`] — element `i` is row `i`. Two holders' batches
 //!   correlate by INDEX. This is sound only when both holders impose the SAME
-//!   deterministic order on their rows; [`crate::shamir::ShamirBackend::share_private_inputs`]
+//!   deterministic order on their rows; [`crate::backend::MpcBackend::share_private_inputs`]
 //!   enforces this by value-sorting before sharing, so positional batches from
 //!   different holders line up regardless of local row order. Use for a per-row
 //!   secure aggregate where row `i` of holder A pairs with row `i` of holder B
@@ -71,7 +71,7 @@ use crate::shamir::{add_shares, ShamirBackend, ShareVec};
 pub enum RowBinding {
     /// Element `i` is row `i`; holders correlate by INDEX. Sound only when every
     /// holder imposes the same deterministic row order (the value-sort in
-    /// [`ShamirBackend::share_private_inputs`] guarantees this).
+    /// [`crate::backend::MpcBackend::share_private_inputs`] guarantees this).
     Positional,
     /// Element `i` is bound to the DISCLOSED public row key `keys[i]` (a global
     /// IRI / row id rendered to a `String`); holders correlate by KEY. The key

@@ -46,7 +46,7 @@
 //!   Shamir multiplication ([`crate::shamir::mul_shares_raw`]) plus local adds: no
 //!   multiplication CHAIN, so it needs **no degree reduction** and is buildable on
 //!   the single-product backend — exactly like
-//!   [`crate::join::HiddenValueJoin::secure_equal`]. The shuffle is the sound
+//!   `crate::join::HiddenValueJoin::secure_equal`. The shuffle is the sound
 //!   substrate; the padded-prefix reveal is a degree-`2t` open of `B` slots. This
 //!   is the structural obliviousness the bead asks for, and it holds at the
 //!   honest-majority Shamir layer.

@@ -18,7 +18,7 @@
 //! ## The gap this closes (disclosure-minimisation)
 //!
 //! Before this, the only way to answer `sum > £100k` was
-//! [`crate::shamir::ShamirBackend::reconstruct_disclosed`] — which OPENS the exact
+//! [`crate::backend::MpcBackend::reconstruct_disclosed`] — which OPENS the exact
 //! integer sum, so a verifier recomputing the threshold over a DISCLOSED aggregate
 //! learns the precise total (violates disclosure-minimisation, §2 convention #4
 //! read as "the minimal answer"). The missing piece is a secret-shared comparison
@@ -838,8 +838,8 @@ pub fn secure_threshold(
 /// `secure_greater_than` does — the dealer holds the cleartext only to deal the
 /// bit shares, exactly like [`ShamirDealer::share`]). Then
 /// `[a == b] = ∏_k [a_k == b_k]`, where each `[a_k == b_k] = 1 − (a_k − b_k)^2` is
-/// one secure multiplication ([`secret_bit_eq`]) and the product is a balanced
-/// AND-tree of [`secret_and`] (each one mul + degree-reduce). The ONLY value this
+/// one secure multiplication (`secret_bit_eq`) and the product is a balanced
+/// AND-tree of `secret_and` (each one mul + degree-reduce). The ONLY value this
 /// path ever opens is nothing — the result sharing is returned for the caller to
 /// consume secret-shared (e.g. as an oblivious-select control bit). To learn the
 /// verdict (NOT what the oblivious join does) use [`open_verdict`].
@@ -929,12 +929,12 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// Surface the £100k flatmate verdict as a disclosed [`PartialResult`] carrying
 /// ONLY the boolean `sum > threshold` — never the exact sum. This is the
 /// disclosure-minimising counterpart to
-/// [`crate::shamir::ShamirBackend::reconstruct_disclosed`] (which opens the
+/// [`crate::backend::MpcBackend::reconstruct_disclosed`] (which opens the
 /// integer): here the secure comparison runs over the secret-shared sum, and only
 /// the 1-bit verdict is reconstructed.
 ///
 /// `sum_shares` is the degree-`t` sharing of the cumulative aggregate (e.g. from
-/// [`crate::shamir::ShamirBackend::run_secure`]); `public_threshold` is the public
+/// [`crate::backend::MpcBackend::run_secure`]); `public_threshold` is the public
 /// bar (e.g. £100k). Only the 1-bit verdict ever leaves the computation.
 ///
 /// ## [OPUS-4.8] sq-g7t5 — the sum is bit-decomposed IN-MPC, never reconstructed
@@ -942,13 +942,13 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// This NO LONGER reconstructs the sum locally. The previous implementation called
 /// `backend.reconstruct(sum_shares)` to obtain the cleartext total and re-deal its
 /// bits — an in-process-simulation shortcut. That shortcut is GONE. The sum is now
-/// bit-decomposed via [`secure_bit_decompose`] (masked-open bit-decomposition,
+/// bit-decomposed via `secure_bit_decompose` (masked-open bit-decomposition,
 /// Damgård et al. TCC'06): a fresh dealer-random mask `[r]` is added to `[sum]` and
 /// ONLY `c = sum + r` is opened (statistically hiding the sum, `2^{−κ}` advantage,
 /// `κ = `[`DECOMP_STAT_SECURITY_BITS`]); the sum's bits are then recovered by a
 /// secret-shared bitwise subtraction `c ⊖ [r]`. **The sum's shares are never all
 /// brought together; `reconstruct(sum_shares)` is never called.** The recovered
-/// shared bits feed [`greater_than_public_bits`], and only the final verdict bit is
+/// shared bits feed `greater_than_public_bits`, and only the final verdict bit is
 /// opened ([`open_verdict`]).
 ///
 /// ## Security tier — honest-majority, semi-honest (NOT malicious)
@@ -972,7 +972,7 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// Previously the sum bound was a CALLER PRECONDITION (documented, not enforced):
 /// an out-of-range sum silently produced a WRONG verdict because the magnitude of a
 /// SHARING cannot be read off the shares. That seam is now CLOSED. After the in-MPC
-/// bit-decomposition, [`verify_sum_in_range`] PROVES — without reconstructing the
+/// bit-decomposition, `verify_sum_in_range` PROVES — without reconstructing the
 /// sum — that `sum ∈ [0, 2^DECOMP_VALUE_BITS)`, via two secret zero-tests over the
 /// recovered shared bits:
 /// 1. `sum == Σ b_k·2^k` (the bits faithfully recompose the sum: no field wrap, no
@@ -982,7 +982,7 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 ///
 /// Clause (1) is what makes this SOUND against field wraparound — a magnitude-only
 /// check would wrongly accept large wrapping sums whose recovered low bits look
-/// small (see [`verify_sum_in_range`]). On violation the function returns a
+/// small (see `verify_sum_in_range`). On violation the function returns a
 /// fail-closed [`MpcError::Protocol`] (abort) — the verdict is **rejected, not
 /// returned wrong**. Each zero-test opens ONLY a uniform `v·r` mask product (zero
 /// in range, uniform-nonzero otherwise), so the sum is STILL never reconstructed.

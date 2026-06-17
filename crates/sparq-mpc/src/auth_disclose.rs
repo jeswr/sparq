@@ -13,7 +13,7 @@
 //! MAC-checks the verdict. But the FEDERATION path —
 //! [`crate::compare::disclose_threshold_verdict`], which runs over an EXISTING
 //! degree-`t` sharing `[sum]` (e.g. the cumulative aggregate from
-//! [`crate::shamir::ShamirBackend::run_secure`]) — uses a *masked-open*
+//! [`crate::backend::MpcBackend::run_secure`]) — uses a *masked-open*
 //! bit-decomposition (Damgård et al. TCC'06), not cleartext bit-sharing. That path
 //! has **three distinct opens**, every one of them semi-honest (no integrity check)
 //! on `origin/main`:
@@ -69,10 +69,10 @@
 //! sq-nx0s) — clause (1) recompose `sum == Σ b_k·2^k` and clause (2) high-part
 //! `Σ_{k≥value_bits} b_k·2^k == 0`, each a secret zero-test of a `v·r` masked product
 //! — was, on `sq-6fv7`, still reused VERBATIM from the SEMI-HONEST
-//! [`crate::compare::verify_sum_in_range`]: a tampered open of either `v·r` product
+//! `crate::compare::verify_sum_in_range`: a tampered open of either `v·r` product
 //! (a wrong re-sharing producing a consistent codeword of the wrong value) could flip
 //! "was it zero?" and let an out-of-range / field-wrapping sum masquerade as in-range,
-//! defeating the fail-closed guard. [`auth_verify_sum_in_range`] closes that residual:
+//! defeating the fail-closed guard. `auth_verify_sum_in_range` closes that residual:
 //! the range proof now runs over the AUTHENTICATED sum and bits, the recompose-diff and
 //! high-part are FREE authenticated linear combinations, and each zero-test multiplies
 //! by a fresh nonzero AUTHENTICATED mask via [`crate::shamir::MacSession::auth_mul`] and
@@ -104,7 +104,7 @@ use crate::shamir::{MacSession, ShamirBackend, Share};
 /// `public_threshold` is the public bar (e.g. £100k). `public_threshold` must be
 /// `< 2^`[`DECOMP_VALUE_BITS`] (fail-closed up front); the SUM is range-checked
 /// in-protocol after its bit-decomposition by the MAC-checked sq-nx0s range proof
-/// ([`auth_verify_sum_in_range`], whose zero-test `v·r` opens are MAC-checked too —
+/// (`auth_verify_sum_in_range`, whose zero-test `v·r` opens are MAC-checked too —
 /// sq-m4zi/sq-e7ma). On any tampered open the function ABORTS with
 /// [`MpcError::MacCheckFailed`] (or the fail-closed non-boolean-verdict guard) rather
 /// than returning a wrong verdict.
