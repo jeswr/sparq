@@ -246,8 +246,136 @@ fn no_count_constraint_unbounded() {
     }
 }
 
+/// "alice may read asset/x" under TWO `odrl:count` constraints (a tighter and a looser
+/// limit on the same rule → same usage counter). [OPUS-4.8] sq-ea27.
+fn policy_two_counts(op_a: &str, bound_a: &str, op_b: &str, bound_b: &str) -> sparq_policy::Policy {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/c> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:assignee <https://alice.ex/me> ;
+    odrl:constraint [ odrl:leftOperand odrl:count ;
+                      odrl:operator odrl:{op_a} ;
+                      odrl:rightOperand "{bound_a}"^^xsd:integer ] ,
+                    [ odrl:leftOperand odrl:count ;
+                      odrl:operator odrl:{op_b} ;
+                      odrl:rightOperand "{bound_b}"^^xsd:integer ] ] .
+"#
+    );
+    parse_policy_str(&ttl, "turtle").unwrap()
+}
+
 // ---------------------------------------------------------------------------
-// 10. ATOMICITY: under concurrent exercises against the SAME key, the in-memory store
+// 10. MULTI-LIMIT: two `odrl:count` constraints on one rule share ONE usage counter
+//     (same CountKey). The TIGHTEST limit governs, and each exercise consumes EXACTLY
+//     ONE unit — never one-per-constraint (the multi-consume bug). [OPUS-4.8] sq-ea27.
+// ---------------------------------------------------------------------------
+#[test]
+fn two_counts_tightest_governs_and_consumes_one() {
+    // lteq 5 AND lteq 2 → effective limit 2; the looser 5 never relaxes it.
+    let p = policy_two_counts("lteq", "5", "lteq", "2");
+    let store = InMemoryCounterStore::new();
+    let req = alice_reads();
+
+    // First exercise consumes exactly ONE unit (not one-per-constraint → would be 2).
+    let d = evaluate_and_exercise(&p, &req, &store);
+    assert!(d.allow, "exercise 1 should grant: {d:?}");
+    assert_eq!(d.consumed, Some(1), "one exercise consumes exactly one unit");
+
+    // Second exercise: still within the tightest limit of 2.
+    let d = evaluate_and_exercise(&p, &req, &store);
+    assert!(d.allow, "exercise 2 should grant: {d:?}");
+    assert_eq!(d.consumed, Some(2));
+
+    // Third: the tightest limit (2) is reached → DENY, nothing consumed.
+    let d = evaluate_and_exercise(&p, &req, &store);
+    assert!(!d.allow, "exercise 3 must deny under the tightest (2) limit");
+    assert_eq!(d.consumed, None);
+
+    // Exactly 2 consumed — the looser limit of 5 never granted a 3rd, and no exercise
+    // burned more than one unit.
+    let key = CountKey {
+        rule_id: p.permissions[0].id.clone(),
+        party: "https://alice.ex/me".into(),
+        target: "urn:asset/x".into(),
+    };
+    assert_eq!(store.consumed(&key), Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// 11. MULTI-LIMIT ATOMICITY: under concurrent exercises against a rule carrying TWO
+//     count constraints, the store grants EXACTLY the tightest limit — never over-grants
+//     (the multi-limit TOCTOU window between the pre-check and the consume is closed).
+//     [OPUS-4.8] sq-ea27.
+// ---------------------------------------------------------------------------
+#[test]
+fn concurrent_multi_limit_never_overgrants() {
+    const TIGHTEST: u64 = 100;
+    const THREADS: usize = 16;
+    const PER_THREAD: usize = 50; // 800 attempts >> 100 budget
+
+    // lteq 100 (tightest) AND lteq 250 (looser) on ONE rule → one shared counter.
+    let p = Arc::new(policy_two_counts("lteq", "100", "lteq", "250"));
+    let store = Arc::new(InMemoryCounterStore::new());
+    let granted = Arc::new(AtomicU64::new(0));
+
+    let mut handles = Vec::new();
+    for _ in 0..THREADS {
+        let p = Arc::clone(&p);
+        let store = Arc::clone(&store);
+        let granted = Arc::clone(&granted);
+        handles.push(std::thread::spawn(move || {
+            let req = alice_reads();
+            for _ in 0..PER_THREAD {
+                if evaluate_and_exercise(&p, &req, &*store).allow {
+                    granted.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    // EXACTLY the tightest limit granted — never one more (the multi-limit TOCTOU is
+    // closed) — and the single shared counter agrees.
+    assert_eq!(
+        granted.load(Ordering::Relaxed),
+        TIGHTEST,
+        "must grant exactly the tightest limit, never over-grant"
+    );
+    let key = CountKey {
+        rule_id: p.permissions[0].id.clone(),
+        party: "https://alice.ex/me".into(),
+        target: "urn:asset/x".into(),
+    };
+    assert_eq!(store.consumed(&key), Some(TIGHTEST));
+}
+
+// ---------------------------------------------------------------------------
+// 12. MULTI-LIMIT pre-exhausted: if the tightest limit is already reached, a further
+//     exercise denies and burns nothing. [OPUS-4.8] sq-ea27.
+// ---------------------------------------------------------------------------
+#[test]
+fn two_counts_denies_when_tightest_exhausted() {
+    let p = policy_two_counts("lteq", "1", "lteq", "9");
+    let store = InMemoryCounterStore::new();
+    let req = alice_reads();
+
+    assert!(evaluate_and_exercise(&p, &req, &store).allow, "first exercise grants");
+    let d = evaluate_and_exercise(&p, &req, &store);
+    assert!(!d.allow, "second exercise denies under the tightest (1) limit");
+    assert_eq!(d.consumed, None);
+    // count_status agrees the tightest limit is exhausted.
+    assert_eq!(
+        count_status(&p.permissions[0], &req, &store),
+        CountStatus::DefinitelyUnsatisfied { consumed: 1, limit: 1 }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. ATOMICITY: under concurrent exercises against the SAME key, the in-memory store
 //     grants EXACTLY the limit — never over-grants (the TOCTOU race is closed).
 // ---------------------------------------------------------------------------
 #[test]
