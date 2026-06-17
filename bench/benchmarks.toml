@@ -829,8 +829,8 @@ status      = "ok"
 id          = "serve-spikes"
 name        = "Concurrent-serving research spikes"
 category    = "serve"
-measures    = "HTTP throughput/latency closed+open loop (loadgen); result-cache hit ceiling (cache_spike); point-BGP->JSON ceiling (point_spike); snapshot cost + RSS/generation (snapshot_spike); update-stream latency+RSS stability (update_stream_spike); TTFC streaming (stream_spike); group-commit writer throughput + reader p50/p99 (writer_spike)"
-invoke      = "cd bench/serve && cargo build --release && ./target/release/<bin>   # bins: loadgen cache_spike point_spike snapshot_spike update_stream_spike stream_spike writer_spike"
+measures    = "HTTP throughput/latency closed+open loop (loadgen); result-cache hit ceiling (cache_spike); point-BGP->JSON ceiling (point_spike); snapshot cost + RSS/generation (snapshot_spike); update-stream latency+RSS stability (update_stream_spike); TTFC streaming (stream_spike); group-commit writer throughput + reader p50/p99 (writer_spike); single-writer write-throughput on the PSS update set + reference targets + optional QLever-parity gate (pss_update_throughput, sq-b4lo/gh-52)"
+invoke      = "cd bench/serve && cargo build --release --bin <bin> && ./target/release/<bin>   # bins: loadgen cache_spike point_spike snapshot_spike update_stream_spike stream_spike writer_spike pss_update_throughput   # NOTE (sq-b4lo): some older spikes (snapshot_spike/writer_spike/update_stream_spike) carry AppState API drift — build per-bin; pss_update_throughput is current"
 source      = "bench/serve/{README.md,Cargo.toml}, src/bin/*.rs"
 dataset     = "synthetic, in-spike; writer_spike uses WRITER_UPDATES env (recorded run 30000)"
 quiet_box_sensitive = true  # research spikes, NOT maintained benchmarks; re-run on target hardware before trusting absolutes
@@ -850,6 +850,24 @@ quiet_box_sensitive = true
 pinning     = "standalone cargo project; compact feature = wasm 3-perm {SPO,POS,OSP} config"
 records_to  = "stdout; research/memory-tiering.md"
 status      = "ok"  # research spikes, not a regression gate
+
+# [OPUS-4.8] sq-b4lo / gh-52 — the WRITE-PATH companion to qlever-olympics (READ path):
+# asserts sparq's single sequenced writer is parity-or-better vs QLever-over-HTTP on the
+# PSS interactive LDP-CRUD update set (the documented N-readers/1-writer serving-contract
+# acceptance bar). Differential: fires the SAME updates at both live endpoints on one box.
+[[benchmark]]
+id          = "pss-update-parity"
+name        = "sparq vs QLever — PSS write-path parity (single-writer acceptance bar)"
+category    = "serve"
+measures    = "per-update HTTP commit latency p50/p99/max + sustained writes/s for sparq vs QLever over the SAME PSS LDP-CRUD update set; parity gate exits 1 iff sparq p99 > QLever p99 × tolerance (default 1.0 = parity-or-better, the gh-52 binding criterion)"
+invoke      = "cargo run -p sparq-server --release -- --addr 127.0.0.1:7020   # writable sparq\n              ../../.qlever-venv/bin/qlever start                            # writable QLever on :7019 (see bench/qlever-olympics/README.md)\n              python3 bench/pss-update-set/compare.py 200 --qlever-token <ACCESS_TOKEN>   # the differential gate"
+source      = "bench/pss-update-set/{compare.py,README.md}; update shapes mirror crates/sparq-server/tests/named_graphs.rs (gh-47) + bench/serve/src/bin/pss_update_throughput.rs"
+dataset     = "none — generated interactive LDP-CRUD updates (put_document / set_acl / delete_document), --iters count; NOT bulk ingest"
+quiet_box_sensitive = true
+pinning     = "both engines live on ONE box in ONE run (the only fair way to assert a RELATIVE bar); QLever numbers are machine-specific and intentionally NOT committed (repo hygiene: no hard-coded perf); record the QLever image DIGEST + host env when reporting"
+records_to  = "stdout; the parity verdict is the gate (exit 1 on regression)"
+status      = "ok"  # external-cost (needs a running QLever); the relative gate is the regression check, not a stored number
+featured    = false  # external-cost differential harness, not a dashboard-promoted capability suite
 
 # =============================================================================
 # CI — cross-commit regression tracking (github-action-benchmark)
