@@ -19,7 +19,9 @@ import {
 import { DataFactory, Quad, Variable } from './terms.js';
 import { init, WasmStore } from './wasm.js';
 
-export type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig';
+// [OPUS-4.8] sq-dvyi: `'jsonld'` added — the engine parses JSON-LD in the lean wasm
+// bundle (oxjsonld), so the JS surface accepts it like the other syntaxes.
+export type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig' | 'jsonld';
 
 /**
  * [OPUS-4.8] sq-pxls (#162): one SHACL validation result — the per-violation
@@ -99,9 +101,10 @@ export class SparqStore {
 
   /**
    * Parses an RDF document into a store.
-   * `format`: `"turtle"` (default) | `"ntriples"` | `"nquads"` | `"trig"`.
-   * Named graphs are folded into the default graph unless `options.dataset`
-   * is set, in which case they are preserved as separate graphs.
+   * `format`: `"turtle"` (default) | `"ntriples"` | `"nquads"` | `"trig"` | `"jsonld"`.
+   * Named graphs (N-Quads / TriG / a JSON-LD `@graph`) are folded into the default
+   * graph unless `options.dataset` is set, in which case they are preserved as
+   * separate graphs.
    */
   static async fromString(data: string, format: RdfFormat = 'turtle', options: SparqStoreOptions = {}): Promise<SparqStore> {
     await init();

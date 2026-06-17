@@ -19,7 +19,7 @@ const store = await SparqStore.fromString(`
   @prefix ex: <http://ex/> .
   ex:alice ex:name "Alice" ; ex:knows ex:bob .
   ex:bob   ex:name "Bob"@en .
-`, 'turtle'); // 'turtle' (default) | 'ntriples' | 'nquads' | 'trig'
+`, 'turtle'); // 'turtle' (default) | 'ntriples' | 'nquads' | 'trig' | 'jsonld'
 
 // SELECT -> RDF/JS Bindings[]
 for (const row of store.queryBindings(
@@ -56,7 +56,7 @@ static fromQuads(quads: Iterable<RDF.Quad>, opts?: SparqStoreOptions): Promise<S
 static fromCompressed(bytes: Uint8Array, format?: RdfFormat,
                       opts?: SparqStoreOptions & { codec?: 'zstd' | 'gzip' }): Promise<SparqStore>
 
-type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig';
+type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig' | 'jsonld'; // jsonld: a JSON-LD @graph is preserved with { dataset: true }
 interface SparqStoreOptions { compressed?: boolean; dataset?: boolean; } // NOT combinable
 
 // Reading
@@ -117,7 +117,7 @@ store.removeQuads(store.match(null, DF.namedNode('http://ex/p')));
 store.applyDelta(insertQuads, deleteQuads); // deletes applied first, then inserts
 ```
 
-**Named graphs (load as a dataset).** Without `dataset: true`, all quads fold into the default graph and `GRAPH`/named-graph lookups see nothing.
+**Named graphs (load as a dataset).** Without `dataset: true`, all quads fold into the default graph and `GRAPH`/named-graph lookups see nothing. Applies to N-Quads, TriG, and a JSON-LD `@graph` (with an outer `@id`).
 
 ```js
 const ds = await SparqStore.fromString(nquads, 'nquads', { dataset: true });

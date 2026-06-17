@@ -11,18 +11,50 @@ import {
   isDatasetFormat,
   ALL_QUADS_QUERY,
   rowsToNQuads,
+  guessFormat,
+  formatFromContentType,
 } from "../src/lib/repl-dataset.ts";
 
 test("isDatasetFormat is true exactly for the quad-bearing formats", () => {
   // Quad formats carry named graphs and must be loaded with loadDataset.
   assert.equal(isDatasetFormat("nquads"), true);
   assert.equal(isDatasetFormat("trig"), true);
+  // [OPUS-4.8] sq-dvyi: JSON-LD `@graph` carries named graphs too.
+  assert.equal(isDatasetFormat("jsonld"), true);
   // Triple-only formats have no named graphs; load() is correct (and cheaper).
   assert.equal(isDatasetFormat("turtle"), false);
   assert.equal(isDatasetFormat("ntriples"), false);
   // Unknown / empty defaults to the non-dataset path.
   assert.equal(isDatasetFormat("nt"), false);
   assert.equal(isDatasetFormat(""), false);
+});
+
+// [OPUS-4.8] sq-dvyi: the REPL upload/URL format detection now recognises JSON-LD.
+test("guessFormat maps file/URL extensions to the engine format", () => {
+  assert.equal(guessFormat("data.ttl"), "turtle");
+  assert.equal(guessFormat("data.nt"), "ntriples");
+  assert.equal(guessFormat("data.nq"), "nquads");
+  assert.equal(guessFormat("data.trig"), "trig");
+  // JSON-LD: both the .jsonld and .json-ld spellings, and through a URL query string.
+  assert.equal(guessFormat("data.jsonld"), "jsonld");
+  assert.equal(guessFormat("https://host/dir/data.jsonld?v=2#frag"), "jsonld");
+  assert.equal(guessFormat("data.json-ld"), "jsonld");
+  // Unknown extension falls back to Turtle.
+  assert.equal(guessFormat("data.bin"), "turtle");
+});
+
+test("formatFromContentType maps a served media type (ignoring charset) to a format", () => {
+  assert.equal(formatFromContentType("text/turtle"), "turtle");
+  assert.equal(formatFromContentType("application/n-triples"), "ntriples");
+  assert.equal(formatFromContentType("application/n-quads"), "nquads");
+  assert.equal(formatFromContentType("application/trig"), "trig");
+  // JSON-LD, including a charset parameter and mixed case.
+  assert.equal(formatFromContentType("application/ld+json"), "jsonld");
+  assert.equal(formatFromContentType("application/ld+json; charset=utf-8"), "jsonld");
+  assert.equal(formatFromContentType("APPLICATION/LD+JSON"), "jsonld");
+  // Unknown / absent content types yield undefined so the caller falls back to the ext.
+  assert.equal(formatFromContentType("application/octet-stream"), undefined);
+  assert.equal(formatFromContentType(null), undefined);
 });
 
 test("ALL_QUADS_QUERY spans the default graph AND every named graph", () => {

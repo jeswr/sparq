@@ -25,7 +25,7 @@ in `Cargo.toml` (oxrdf pulls `rand` for blank-node ids).
 import init, { Store } from "./pkg/sparq_wasm.js";
 await init();
 
-const store = Store.load(turtleText, "turtle"); // or "ntriples" | "nquads" | "trig"
+const store = Store.load(turtleText, "turtle"); // or "ntriples" | "nquads" | "trig" | "jsonld"
 store.size;             // number of triples
 store.heapBytes();      // rough in-memory footprint
 
