@@ -715,17 +715,27 @@ fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
     AgentMapping::Faithful { agents, except, window }
 }
 
-/// Tighten an inclusive window bound with a new `xsd:dateTime` candidate `t` (compared
-/// by lexical order — the same key `sparq_policy`'s evaluator uses, see
-/// [`crate::AuthIndex`]). When two constraints set the same side, keep the TIGHTER
-/// bound (the earlier upper bound / the later lower bound) so the persisted window is
-/// the intersection — fail-closed, never wider than any one constraint. [OPUS-4.8]
+/// Tighten an inclusive window bound with a new `xsd:dateTime` candidate `t`, compared
+/// by the **real UTC instant** each denotes (`sparq_policy::cmp_datetime`, the SAME
+/// offset-aware normalizer the evaluator uses — never raw lexical `str::cmp`, which
+/// would pick the wrong bound for mixed-offset times). When two constraints set the
+/// same side, keep the TIGHTER bound (the earlier upper bound / the later lower bound)
+/// so the persisted window is the intersection — fail-closed, never wider than any one
+/// constraint. An **unparseable** incoming `t` is treated as not-tighter (the existing
+/// bound is kept) so a malformed candidate can never *widen* the window. [OPUS-4.8]
 /// sq-0q7n.
 fn set_tighter(slot: &mut Option<String>, t: &str, keep_earlier: bool) {
+    use std::cmp::Ordering;
     match slot {
         None => *slot = Some(t.to_owned()),
         Some(cur) => {
-            let replace = if keep_earlier { t < cur.as_str() } else { t > cur.as_str() };
+            // Replace only when `t` is strictly tighter than `cur` by instant order;
+            // an incomparable (unparseable) pair never replaces (fail-closed).
+            let replace = match sparq_policy::cmp_datetime(t, cur.as_str()) {
+                Some(Ordering::Less) => keep_earlier,
+                Some(Ordering::Greater) => !keep_earlier,
+                _ => false,
+            };
             if replace {
                 *cur = t.to_owned();
             }
@@ -1582,5 +1592,43 @@ fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
         deny_triple: Some((party.to_owned(), pred, target.to_owned())),
         emitted: vec![triple],
         ..BridgeOutcome::default()
+    }
+}
+
+#[cfg(test)]
+mod set_tighter_tests {
+    //! [OPUS-4.8] sq-0q7n — `set_tighter` keeps the instant-tightest window bound when
+    //! two same-side `odrl:dateTime` constraints intersect. The pre-fix lexical `<`/`>`
+    //! picked the wrong bound for mixed timezone offsets (a fail-open: a wider persisted
+    //! window than the constraints allow). These pin the offset-aware behavior.
+    use super::set_tighter;
+
+    #[test]
+    fn upper_bound_keeps_earlier_instant_across_offsets() {
+        // Two notAfter bounds: 12:00Z (= 12:00Z) and 13:00+02:00 (= 11:00Z). The EARLIER
+        // instant is the offset form (11:00Z); lexically "12…Z" < "13…+02:00" so the OLD
+        // code wrongly kept 12:00Z (later instant → wider window).
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "2026-06-16T13:00:00+02:00", /*keep_earlier=*/ true);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T13:00:00+02:00"), "kept earlier instant");
+    }
+
+    #[test]
+    fn lower_bound_keeps_later_instant_across_offsets() {
+        // Two notBefore bounds: 12:00Z and 09:00-02:00 (= 11:00Z). The LATER instant is
+        // 12:00Z; lexically "09…-02:00" < "12…Z" — verify the tighter (later) is kept.
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "2026-06-16T09:00:00-02:00", /*keep_earlier=*/ false);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "kept later instant");
+        // And a genuinely-later offset bound DOES replace.
+        set_tighter(&mut slot, "2026-06-16T16:00:00+02:00", /*keep_earlier=*/ false); // = 14:00Z
+        assert_eq!(slot.as_deref(), Some("2026-06-16T16:00:00+02:00"), "later instant wins");
+    }
+
+    #[test]
+    fn unparseable_candidate_never_widens() {
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "not-a-date", true);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "malformed never replaces");
     }
 }
