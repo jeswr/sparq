@@ -278,6 +278,49 @@ tracks each bridged grant in a **ledger** and provides a refresh entry point:
   principal+target+mode — correct, because the prohibition is genuinely gone. Static `auth:deny*`
   rules are never in the ledger and so are never retracted.
 
+## WAC conformance harness — [OPUS-4.8] sq-3jtd.8
+
+A library-level **WAC conformance harness** (`sparq_solid::wac_conformance`) exercises this
+crate's WAC authorization engine (`materialize_wac` + `AuthIndex::accessible`) against the
+[Solid Web Access Control specification](https://solidproject.org/TR/wac) at the *library*
+level. A scenario is declared as data — an `.acl`-document corpus (built with `AclBuilder`)
+plus a table of expected `(agent, client, mode, resource) → allow | deny` decisions — and the
+harness asserts the engine reproduces every expected decision, reporting all mismatches at
+once. The scenario corpus lives in [`tests/conformance_wac.rs`](tests/conformance_wac.rs); it
+isolates each WAC construct: `acl:agent` on the resource's own ACL (`acl:accessTo`),
+`acl:agentClass foaf:Agent` (public) / `acl:AuthenticatedAgent`, `acl:agentGroup` via
+`vcard:hasMember`, `acl:default` inheritance vs `acl:accessTo`, **nearest-ACL shadowing** (the
+key WAC difference from ACP's cumulative inheritance — a closer ACL replaces, not adds to, the
+ancestors'), resource-specific override, the `acl:origin` (user, application) pair, mode
+independence, `acl:Control` governing the resource's `.acl` document, the fail-closed no-ACL
+case, and the multi-agent union.
+
+```rust
+use sparq_solid::wac_conformance::{AclBuilder, WacScenario};
+use sparq_solid::conformance::{Decision, Expect};
+use sparq_solid::Mode;
+
+let doc = "https://pod.example/notes/n1";
+let mut acl = AclBuilder::new();
+acl.access_to(doc, |a| a.agent("https://alice.example/card#me").mode(Mode::Read));
+acl.document(doc);
+
+let report = WacScenario::new("agent-allow")
+    .acl(acl)
+    .expect(Expect::agent("https://alice.example/card#me").read(doc).is(Decision::Allow))
+    .expect(Expect::anonymous().read(doc).is(Decision::Deny))
+    .run().expect("materializes");
+assert!(report.passed());
+```
+
+The decision/expectation/report vocabulary (`conformance::{Decision, Expect, ScenarioReport}`)
+is **shared** with the ACP harness below — both compare the same allow/deny binary against the
+same `AuthIndex::accessible` verdict; only the corpus shape differs. A `run_via_podstore` twin
+additionally proves the public `PodStore` method-form path (the one a PSS integration uses, with
+the per-session cache) reproduces the same decisions. The **scope decision is identical to ACP's**
+(below): library-level decision parity, not CTH-over-HTTP (PSS's), with the CSS differential
+oracle research-open. The table-driven corpus is the natural input for that future oracle.
+
 ## ACP conformance harness — [OPUS-4.8] sq-3jtd.9
 
 A library-level **ACP conformance harness** (`sparq_solid::conformance`) exercises this

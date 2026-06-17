@@ -145,6 +145,29 @@ impl Expect {
     pub fn decision(&self) -> Decision {
         self.decision
     }
+
+    /// The requestor's agent WebID (`None` = anonymous). [OPUS-4.8] sq-3jtd.8 — exposed so
+    /// the sibling WAC harness ([`crate::wac_conformance`]) can build a [`crate::Session`]
+    /// from a shared [`Expect`]. (Named `req_*` so it does not shadow the [`Expect::agent`]
+    /// *constructor*.)
+    pub fn req_agent(&self) -> Option<&str> {
+        self.agent.as_deref()
+    }
+
+    /// The requestor's client identifier (`None` = any client). [OPUS-4.8] sq-3jtd.8.
+    pub fn req_client(&self) -> Option<&str> {
+        self.client.as_deref()
+    }
+
+    /// The access mode this expectation is about. [OPUS-4.8] sq-3jtd.8.
+    pub fn req_mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// The resource (named graph) this expectation is about. [OPUS-4.8] sq-3jtd.8.
+    pub fn req_resource(&self) -> &str {
+        &self.resource
+    }
 }
 
 /// Half-built [`Expect`]: requestor chosen, resource + mode + decision still to come.
@@ -513,33 +536,20 @@ impl AcpScenario {
         materialize_acp(&mut graph)
             .map_err(|e| format!("scenario {:?}: materialize_acp failed: {e}", self.name))?;
         let index = AuthIndex::from_graph(&graph);
-
-        let mut results = Vec::with_capacity(self.expects.len());
-        for e in &self.expects {
+        ScenarioReport::build(&self.name, &self.expects, |e| {
             let session = Session {
-                agent: e.agent.as_deref(),
-                client: e.client.as_deref(),
+                agent: e.req_agent(),
+                client: e.req_client(),
                 // [OPUS-4.8] sq-3jtd.9: this harness exercises the agent/client matcher
                 // dimensions; the issuer dimension (sq-3jtd.6, ACP `acp:issuer`) is left
                 // unconstrained (`None` ⇒ AnyIssuer), so issuer-blind decision parity is
                 // unaffected by the (agent, client, issuer) principal model.
                 issuer: None,
             };
-            let accessible = index.accessible(&session, e.mode);
-            let granted = accessible.iter().any(|g| g.as_str() == e.resource);
-            let actual = if granted {
-                Decision::Allow
-            } else {
-                Decision::Deny
-            };
-            results.push(DecisionResult {
-                expect: e.clone(),
-                actual,
-            });
-        }
-        Ok(ScenarioReport {
-            name: self.name.clone(),
-            results,
+            index
+                .accessible(&session, e.req_mode())
+                .iter()
+                .any(|g| g.as_str() == e.req_resource())
         })
     }
 }
@@ -568,6 +578,47 @@ pub struct ScenarioReport {
 }
 
 impl ScenarioReport {
+    /// Build a report by asking `granted` whether the engine grants each expectation's
+    /// `(agent, client, mode, resource)` request, comparing it to the expected [`Decision`].
+    ///
+    /// [OPUS-4.8] sq-3jtd.8 — the shared comparison/reporting core for both the ACP harness
+    /// ([`AcpScenario::run`]) and the WAC harness ([`crate::wac_conformance::WacScenario::run`]):
+    /// only the *engine* differs (which auth view `granted` consults), not the
+    /// decision-parity machinery. `granted` returns `true` when the resource is in the
+    /// session's accessible set for the mode (⇒ [`Decision::Allow`]), `false` otherwise
+    /// (⇒ [`Decision::Deny`]). It is `FnMut` so callers may consult a `&mut` engine handle
+    /// (e.g. [`crate::PodStore`], whose `accessible` memoizes per session).
+    ///
+    /// # Errors
+    ///
+    /// Never — this is infallible (it records mismatches in the report rather than
+    /// erroring). It returns `Result` only so callers can `?`-chain it after a fallible
+    /// materialization step.
+    pub fn build(
+        name: &str,
+        expects: &[Expect],
+        mut granted: impl FnMut(&Expect) -> bool,
+    ) -> Result<ScenarioReport, String> {
+        let results = expects
+            .iter()
+            .map(|e| {
+                let actual = if granted(e) {
+                    Decision::Allow
+                } else {
+                    Decision::Deny
+                };
+                DecisionResult {
+                    expect: e.clone(),
+                    actual,
+                }
+            })
+            .collect();
+        Ok(ScenarioReport {
+            name: name.to_owned(),
+            results,
+        })
+    }
+
     /// `true` iff every expected decision was reproduced by the engine.
     pub fn passed(&self) -> bool {
         self.results.iter().all(DecisionResult::matched)

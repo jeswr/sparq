@@ -342,9 +342,23 @@ The honest gaps:
 
 ### Sequenced tasks
 
-1. **(near-term, feasible — **sq-3jtd.8**)** Vendor/ingest the authorization-relevant WAC
-   fixtures from the Solid spec-tests corpus and assert library-level decision parity in
-   `tests/conformance_wac.rs`.
+1. **(DONE — **sq-3jtd.8** [OPUS-4.8])** WAC harness landed: `sparq_solid::wac_conformance`
+   (`src/wac_conformance.rs`) is a table-driven scenario runner over the WAC engine
+   (`materialize_wac` + `AuthIndex::accessible`, with a `run_via_podstore` twin proving the
+   `PodStore` method-form path), sharing the decision/expectation/report vocabulary
+   (`conformance::{Decision, Expect, ScenarioReport}`) with the ACP harness. The scenario
+   corpus in `tests/conformance_wac.rs` isolates each WAC construct: `acl:agent` on the
+   resource's own ACL (`acl:accessTo`), `acl:agentClass foaf:Agent` (public) /
+   `acl:AuthenticatedAgent`, `acl:agentGroup` via `vcard:hasMember`, `acl:default`
+   inheritance vs `acl:accessTo`, **nearest-ACL shadowing** (the key WAC difference from
+   ACP's cumulative inheritance), resource-specific override, the `acl:origin` (user, app)
+   pair, mode independence, `acl:Control` governing the `.acl` document, fail-closed, and
+   the multi-agent union. **Decision recorded (same as ACP):** scenarios are derived from
+   the WAC spec's normative semantics and declared as data (an `AclBuilder` corpus + an
+   expected-decision table), rather than vendoring the live JS spec-tests/CTH corpus over
+   HTTP — that route has no library entry point here (it asserts on HTTP outputs, PSS's by
+   design). The table-driven corpus is the natural input for the aspirational CSS
+   differential oracle (item 3).
 2. **(DONE — **sq-3jtd.9** [OPUS-4.8])** ACP harness landed: `sparq_solid::conformance`
    (`src/conformance.rs`) is a table-driven scenario runner over the ACP engine
    (`materialize_acp` + `AuthIndex::accessible`), with the scenario corpus in
@@ -354,9 +368,10 @@ The honest gaps:
    derived from the ACP spec's normative semantics and declared as data (an `AcrBuilder` corpus
    + an expected-decision table), rather than vendoring the live JS spec-tests/CTH corpus over
    HTTP — that route has no library entry point here (it asserts on HTTP outputs, PSS's by
-   design). NOTE: the WAC harness (sq-3jtd.8) was still open when this landed, so the ACP harness
-   defines the in-crate pattern rather than mirroring an existing WAC one; the same harness shape
-   transfers to WAC when sq-3jtd.8 is implemented.
+   design). The ACP harness defined the in-crate pattern; the WAC harness (sq-3jtd.8, item 1
+   above) now mirrors it, sharing the `conformance::{Decision, Expect, ScenarioReport}`
+   vocabulary (the `ScenarioReport::build` core takes a `FnMut` "granted?" oracle, so both
+   harnesses differ only in which auth view they consult).
 3. *(research-open / aspirational — STILL NOT STARTED)* Differential oracle against CSS (WAC/ACP):
    run the same corpus through the JS reference evaluator and diff decisions. Deferred for the
    JS-toolchain cost; the table-driven corpus in `tests/conformance_acp.rs` is the natural input

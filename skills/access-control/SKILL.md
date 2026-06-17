@@ -220,9 +220,9 @@ What it is — and is NOT (honest scope, mirrors the module/README/`research/spa
   behaviour. It is complementary to `tests/acp.rs` (a hand-derived access matrix over one
   realistic pod): this harness gives spec-construct coverage with small, independently-failing
   cases.
-- The **WAC** conformance harness (`sq-3jtd.8`) is **still open** — this defines the in-crate
-  harness pattern (the same `AcrBuilder`/`AcpScenario` shape transfers to WAC) rather than
-  mirroring an existing WAC one.
+- The **WAC** conformance harness (`sq-3jtd.8`, `sparq_solid::wac_conformance`) mirrors this
+  one — the same harness shape with a WAC `.acl` corpus builder; see its section below. The
+  two share the `conformance::{Decision, Expect, ScenarioReport}` vocabulary.
 
 Public surface (`pub mod conformance`, re-exported from the crate root for the entry types):
 
@@ -246,6 +246,43 @@ Public surface (`pub mod conformance`, re-exported from the crate root for the e
   `DecisionResult`s), `.name()`, and a readable mismatch `Display`. `Decision::{Allow, Deny}`
   is the binary the harness compares against the engine verdict (graph in the session's
   accessible set ⇒ `Allow`).
+
+## WAC conformance harness — [OPUS-4.8] sq-3jtd.8
+
+`sparq_solid::wac_conformance` is the **WAC sibling** of the ACP harness above: the same
+table-driven scenario runner, but over this crate's **WAC** engine (`materialize_wac` +
+`AuthIndex::accessible`) against the [Solid WAC spec](https://solidproject.org/TR/wac)
+semantics. A scenario is an `.acl`-document corpus (`AclBuilder`) plus a table of expected
+`(agent, client, mode, resource) → Allow | Deny` decisions; the harness asserts the engine
+reproduces every one, reporting all mismatches at once. Always compiled (no feature gate).
+The corpus lives in `crates/sparq-solid/tests/conformance_wac.rs` (12 scenarios / 40+
+decisions, a `run_via_podstore` parity test over the full `PodStore` method-form path, and a
+negative control). The honest-scope caveats are **identical** to the ACP harness's (library
+decision parity, NOT a normative-CTH pass; CTH-over-HTTP out-of-scope; CSS differential oracle
+research-open).
+
+Public surface (`pub mod wac_conformance`, re-exported from the crate root for the entry types;
+the decision/expectation/report types are the **shared** `conformance::{Decision, Expect,
+ScenarioReport}`):
+
+- `AclBuilder` — build the `.acl` corpus as N-Quads. `acl.access_to(resource, |a| …)` /
+  `acl.default_for(resource, |a| …)` / `acl.access_to_and_default(resource, |a| …)` attach an
+  `acl:Authorization` (`acl:accessTo` on the resource's own ACL / `acl:default` for
+  **nearest-ancestor** inheritance over members / both); `acl.document(resource)` declares the
+  protected resource graph + inheritance anchor; `acl.into_nquads()` emits the corpus.
+- `AuthBuilder<'a>` (the `|a| …` closure argument) — `mode(Mode)`, `agent(webid)`,
+  `public()` / `authenticated()` / `agent_class(class)` (`acl:agentClass foaf:Agent` /
+  `acl:AuthenticatedAgent`), `agent_group(group, &[members])` (emits the `vcard:hasMember`
+  group document), `origin(client)` (the `acl:origin` (user, app) pair). `PUBLIC_AGENT`
+  (`foaf:Agent`) / `AUTHENTICATED_AGENT` consts name the two recognised classes.
+- `WacScenario` — `new(name)`, `.acl(AclBuilder)` / `.nquads(&str)`, `.expect(Expect)` /
+  `.expect_all(iter)`, `.run() -> Result<ScenarioReport, String>` (materializes via the free
+  `AuthIndex` path + checks), and `.run_via_podstore()` (the same check through the full
+  `PodStore` method form — proves the path a PSS integration uses). `run_corpus(&[WacScenario])`
+  runs a whole corpus.
+- The `Expect` builder, `Decision`, and `ScenarioReport` are the same shared types as the ACP
+  harness — `Expect::agent(webid)` / `Expect::anonymous()` / `Expect::pair(agent, client)`,
+  `.read/.write/.append/.control(resource)`, `.is(Decision::Allow | Deny)`.
 
 ## Security posture — fail-closed
 
