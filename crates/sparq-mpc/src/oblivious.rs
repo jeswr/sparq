@@ -371,6 +371,7 @@ fn waksman_rec(wires: &[usize], perm: &[usize], switches: &mut Vec<Switch>, bits
     let odd = m % 2 == 1;
     let top_len = m - half; // = ⌈m/2⌉
     let bot_len = half; // = ⌊m/2⌋
+
     // AS-Waksman: ⌊(m−1)/2⌋ output switches. On even m the LAST output pair
     // (m−2, m−1) is fixed (no switch), shaving one switch this level; on odd m all
     // `half` output switches are kept.
