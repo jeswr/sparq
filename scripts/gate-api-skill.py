@@ -8,6 +8,12 @@
 # "sync SKILL.md" follow-on ISSUE after merge; THIS gate BLOCKS the PR before it
 # merges so the docs never drift in the first place.
 #
+# [OPUS-4.8] sq-ncvq.10 doc-sync: this gate is the "Enforced by: **G2**" cell of
+# the "public API" row in the AGENTS.md "Post-batch re-evaluation checklist" table
+# (alongside the reactive `flow-on:changed-public-feature-docs` rule). That table
+# row and this docstring are the two halves of the same rule — change one and
+# update the other; the divergence is what sq-ncvq.10 exists to prevent.
+#
 # RULE (G2): when a PR changes a PUBLIC SURFACE without touching any
 # skills/**/SKILL.md in the same diff, FAIL and point at the AGENTS.md
 # public-API → SKILL.md maintenance rule.

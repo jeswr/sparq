@@ -10,6 +10,12 @@
 # hand-rolled arg-parser match arm (a string literal, not a `pub` symbol) slips
 # right past it — that is exactly the gap G6 closes.
 #
+# [OPUS-4.8] sq-ncvq.10 doc-sync: this gate is the "Enforced by: **G6**" cell of
+# the "public config key / CLI flag / env var" row in the AGENTS.md "Post-batch
+# re-evaluation checklist" table. That table row and this docstring are the two
+# halves of the same rule — change one and update the other; the divergence is
+# what sq-ncvq.10 exists to prevent.
+#
 # RULE (G6): when a PR ADDS a new public config knob — a CLI flag literal
 # (`"--flag"`) or a `SPARQ_*` environment variable token — to a sparq-cli /
 # sparq-server `src/**` file, FAIL unless that knob is DOCUMENTED:
