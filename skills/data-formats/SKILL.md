@@ -216,8 +216,12 @@ or the JSON-LD compacted `@context`). Round-trip (parse → serialize → re-par
 for every form. **JSON-LD specifics:** `xsd:string`/`rdf:langString` stay implicit
 (`@value` + optional `@language`); every other datatype is preserved as `@type`; canonical
 `xsd:integer`/`xsd:boolean` literals coerce to native JSON scalars only when lossless (leading
-zeros, `xsd:double`/`decimal`, etc. stay typed strings). RDF lists are emitted as plain
-triples (no `@list` collapsing — tracked in bead sq-e3pj follow-up).
+zeros, `xsd:double`/`decimal`, etc. stay typed strings). A *well-formed, single-referenced*
+`rdf:first`/`rdf:rest`/`rdf:nil` blank-node chain is collapsed into a native `@list` array
+(nested lists collapse recursively); anything that fails the conservative safety predicate —
+a list cell referenced more than once, carrying an extra predicate, cyclic, or not terminated
+by `rdf:nil` — is left as ordinary `rdf:first`/`rdf:rest` triples, so the round-trip stays
+lossless either way (the empty list `()` stays an `rdf:nil` reference, never `@list`).
 
 From the CLI (opt-in `serialize-rdf` feature) — re-serialize a loaded document to stdout:
 

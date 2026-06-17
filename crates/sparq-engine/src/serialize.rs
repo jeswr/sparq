@@ -42,6 +42,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 
 /// A prefix map (`prefix` → namespace IRI) for Turtle / TriG compaction. The empty
 /// string key is the default (`@prefix : <…>`) namespace.
@@ -539,10 +542,137 @@ pub fn graph_to_nquads(graph: &Graph) -> String {
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
-// RDF-list (`@list`) collapsing is intentionally NOT done here: detecting a well-formed,
-// single-referenced rdf:first/rdf:rest/rdf:nil chain safely is not cheap and would risk
-// breaking the round-trip on shared/ill-formed lists. The expanded form already round-trips
-// list triples losslessly as ordinary triples. Tracked for a follow-up (bead).
+// [OPUS-4.8] (sq-gg3j) RDF-list (`@list`) collapsing — see `detect_lists` below. A
+// *well-formed, single-referenced* rdf:first/rdf:rest/rdf:nil chain is collapsed into a
+// native JSON-LD `@list` array; anything that fails the safety predicate (shared list cell,
+// extra predicates, missing/duplicate first/rest, a cycle, a non-blank cell) is left as
+// ordinary rdf:first/rdf:rest triples so the round-trip stays lossless either way.
+
+/// [OPUS-4.8] (sq-gg3j) Result of scanning one graph for collapsible RDF lists.
+///
+/// `heads[b]` holds, for every blank-node list **head** `b` that is safe to collapse, the
+/// list's element terms in order. `cells` is the full set of blank-node *list cells* (every
+/// node visited while walking a collapsed chain, head included) — those must be suppressed
+/// from the top-level node array and never emitted as ordinary `rdf:first`/`rdf:rest` nodes,
+/// because their content now lives inside the `@list`.
+#[derive(Default)]
+struct ListInfo {
+    heads: std::collections::HashMap<oxrdf::BlankNode, Vec<Term>>,
+    cells: std::collections::HashSet<oxrdf::BlankNode>,
+}
+
+/// Per-blank-node view used by list detection: how many times the node appears as an
+/// *object* anywhere in the graph, and (if it is a candidate list cell) its single
+/// `rdf:first` value and single `rdf:rest` continuation.
+#[derive(Default)]
+struct CellFacts {
+    /// Times this node appears in object position across the whole graph.
+    obj_refs: u32,
+    first: Option<Term>,
+    rest: Option<Term>,
+    /// True once the node carries any predicate that is **not** `rdf:first`/`rdf:rest`
+    /// (including `rdf:type`), or a duplicate `rdf:first`/`rdf:rest`, or appears as a
+    /// subject term that is not a blank node. Any of these makes it ineligible.
+    tainted: bool,
+}
+
+/// Scans one graph's triples and returns the set of safe, single-referenced
+/// `rdf:first`/`rdf:rest`/`rdf:nil` chains, collapsible into JSON-LD `@list` arrays.
+///
+/// A blank node is a collapsible **list cell** only when *all* of these hold (the
+/// conservative safety predicate — any miss leaves the triples as ordinary RDF):
+///
+/// * it is a blank node carrying **exactly one** `rdf:first` and **exactly one** `rdf:rest`
+///   and **no other** predicate (no `rdf:type`, no stray properties);
+/// * it is referenced in object position **exactly once** in the whole graph (so collapsing
+///   it — which discards its blank-node identity — cannot drop a second reference); and
+/// * its `rdf:rest` chain reaches `rdf:nil` through nothing but such cells, with no cycle and
+///   no sharing of any interior cell.
+///
+/// A **head** is a collapsible cell whose single object-reference comes from a triple whose
+/// predicate is *not* `rdf:rest` (i.e. it is pointed at as a value, not as a list tail). The
+/// empty list (`rdf:nil` used directly) is intentionally left as a plain `@id` reference:
+/// `rdf:nil` is a shared named node, never collapsed.
+fn detect_lists(triples: &[Triple]) -> ListInfo {
+    // Pass 1 — accumulate per-blank-node facts.
+    let mut facts: std::collections::HashMap<oxrdf::BlankNode, CellFacts> =
+        std::collections::HashMap::new();
+    for t in triples {
+        if let Term::BlankNode(b) = &t.object {
+            facts.entry(b.clone()).or_default().obj_refs += 1;
+        }
+        let NamedOrBlankNode::BlankNode(s) = &t.subject else {
+            continue;
+        };
+        let cell = facts.entry(s.clone()).or_default();
+        match t.predicate.as_str() {
+            RDF_FIRST => {
+                if cell.first.replace(t.object.clone()).is_some() {
+                    cell.tainted = true; // duplicate rdf:first
+                }
+            }
+            RDF_REST => {
+                if cell.rest.replace(t.object.clone()).is_some() {
+                    cell.tainted = true; // duplicate rdf:rest
+                }
+            }
+            _ => cell.tainted = true, // any other predicate (incl. rdf:type)
+        }
+    }
+
+    // A blank node is a *well-formed cell* iff it has exactly one first + one rest, is
+    // referenced as an object exactly once, and is untainted.
+    let is_cell = |b: &oxrdf::BlankNode| -> bool {
+        facts.get(b).is_some_and(|c| {
+            !c.tainted && c.obj_refs == 1 && c.first.is_some() && c.rest.is_some()
+        })
+    };
+
+    // Pass 2 — for every triple that points at a candidate head (a cell reached by a
+    // non-`rdf:rest` predicate), walk and validate the whole chain before committing it.
+    let mut info = ListInfo::default();
+    for t in triples {
+        if t.predicate.as_str() == RDF_REST {
+            continue; // interior link, not a head reference
+        }
+        let Term::BlankNode(head) = &t.object else {
+            continue;
+        };
+        if !is_cell(head) || info.cells.contains(head) {
+            continue;
+        }
+        // Walk first→rest until rdf:nil, requiring every interior node to be a fresh cell.
+        let mut elems: Vec<Term> = Vec::new();
+        let mut chain: Vec<oxrdf::BlankNode> = Vec::new();
+        let mut seen: std::collections::HashSet<oxrdf::BlankNode> =
+            std::collections::HashSet::new();
+        let mut cur = head.clone();
+        let well_formed = loop {
+            if !seen.insert(cur.clone()) {
+                break false; // cycle
+            }
+            if !is_cell(&cur) || info.cells.contains(&cur) {
+                break false; // shared with an already-collapsed list, or not a cell
+            }
+            let c = &facts[&cur];
+            elems.push(c.first.clone().expect("cell has rdf:first"));
+            chain.push(cur.clone());
+            match c.rest.clone().expect("cell has rdf:rest") {
+                Term::NamedNode(n) if n.as_str() == RDF_NIL => break true,
+                Term::BlankNode(next) => cur = next,
+                // rdf:rest to a literal, a non-nil IRI, or a triple term: not a list.
+                _ => break false,
+            }
+        };
+        if well_formed {
+            for b in &chain {
+                info.cells.insert(b.clone());
+            }
+            info.heads.insert(head.clone(), elems);
+        }
+    }
+    info
+}
 
 /// Which JSON-LD 1.1 document form [`write_jsonld`] / [`graph_to_jsonld`] emits.
 ///
@@ -702,12 +832,21 @@ struct JsonLdNode {
 }
 
 /// Groups a graph's triples into per-subject node objects, subjects in first-seen order.
-fn group_nodes(triples: &[Triple]) -> (Vec<NamedOrBlankNode>, Vec<JsonLdNode>) {
+///
+/// Triples whose subject is a collapsed list **cell** (`lists.cells`) are skipped entirely:
+/// their `rdf:first`/`rdf:rest` content now lives inside the `@list` array emitted at the head
+/// reference, so emitting the cell as its own node object would duplicate it.
+fn group_nodes(triples: &[Triple], lists: &ListInfo) -> (Vec<NamedOrBlankNode>, Vec<JsonLdNode>) {
     let mut order: Vec<NamedOrBlankNode> = Vec::new();
     let mut slot: std::collections::HashMap<NamedOrBlankNode, usize> =
         std::collections::HashMap::new();
     let mut nodes: Vec<JsonLdNode> = Vec::new();
     for t in triples {
+        if let NamedOrBlankNode::BlankNode(b) = &t.subject {
+            if lists.cells.contains(b) {
+                continue;
+            }
+        }
         let s = t.subject.clone();
         let i = *slot.entry(s.clone()).or_insert_with(|| {
             order.push(s.clone());
@@ -752,7 +891,16 @@ fn write_node_id(subj: &NamedOrBlankNode, prefixes: Option<&Prefixes>, out: &mut
 /// Writes one object term as JSON-LD: an IRI/blank node as `{"@id": …}`, a literal as a value
 /// object, an RDF 1.2 triple term as nested expanded JSON-LD (round-trippable). Blank node ids
 /// keep the `_:` form so they re-parse to the same node.
-fn write_jsonld_object(term: &Term, prefixes: Option<&Prefixes>, out: &mut String) {
+///
+/// When `lists` records the blank node as a collapsed list **head**, it is emitted as a
+/// `{"@list": [ … ]}` object instead — each element rendered through this same function, so a
+/// list element that is itself a collapsed list nests naturally.
+fn write_jsonld_object(
+    term: &Term,
+    prefixes: Option<&Prefixes>,
+    lists: &ListInfo,
+    out: &mut String,
+) {
     match term {
         Term::NamedNode(n) => {
             out.push_str("{\"@id\":");
@@ -760,6 +908,17 @@ fn write_jsonld_object(term: &Term, prefixes: Option<&Prefixes>, out: &mut Strin
             out.push('}');
         }
         Term::BlankNode(b) => {
+            if let Some(elems) = lists.heads.get(b) {
+                out.push_str("{\"@list\":[");
+                for (i, e) in elems.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write_jsonld_object(e, prefixes, lists, out);
+                }
+                out.push_str("]}");
+                return;
+            }
             let mut s = String::from("_:");
             s.push_str(b.as_str());
             out.push_str("{\"@id\":");
@@ -786,7 +945,12 @@ fn write_jsonld_object(term: &Term, prefixes: Option<&Prefixes>, out: &mut Strin
 /// Emits the predicate→objects map of a node as JSON members (the `@type` keyword first when
 /// present), reusing input order. Returns whether anything was written before this call's
 /// members (so the caller manages the leading comma).
-fn write_node_members(node: &JsonLdNode, prefixes: Option<&Prefixes>, out: &mut String) {
+fn write_node_members(
+    node: &JsonLdNode,
+    prefixes: Option<&Prefixes>,
+    lists: &ListInfo,
+    out: &mut String,
+) {
     let mut first = true;
     if !node.types.is_empty() {
         first = false;
@@ -821,7 +985,7 @@ fn write_node_members(node: &JsonLdNode, prefixes: Option<&Prefixes>, out: &mut 
             if i > 0 {
                 out.push(',');
             }
-            write_jsonld_object(o, prefixes, out);
+            write_jsonld_object(o, prefixes, lists, out);
         }
         out.push(']');
     }
@@ -830,7 +994,10 @@ fn write_node_members(node: &JsonLdNode, prefixes: Option<&Prefixes>, out: &mut 
 /// Serializes one graph (already grouped) as a JSON array of node objects into `out`. Shared by
 /// every form — the difference between forms is the `@context`/`@graph` framing the callers add.
 fn write_node_array(triples: &[Triple], prefixes: Option<&Prefixes>, out: &mut String) {
-    let (order, nodes) = group_nodes(triples);
+    // [OPUS-4.8] (sq-gg3j) Find collapsible rdf:first/rdf:rest chains *per graph* (blank-node
+    // scope is per graph), then suppress their cells and render their heads as `@list`.
+    let lists = detect_lists(triples);
+    let (order, nodes) = group_nodes(triples, &lists);
     out.push('[');
     for (i, subj) in order.iter().enumerate() {
         if i > 0 {
@@ -840,7 +1007,7 @@ fn write_node_array(triples: &[Triple], prefixes: Option<&Prefixes>, out: &mut S
         write_node_id(subj, prefixes, out);
         // `@type` / predicate members (each prefixed by a comma inside write_node_members).
         let mut members = String::new();
-        write_node_members(&nodes[i], prefixes, &mut members);
+        write_node_members(&nodes[i], prefixes, &lists, &mut members);
         if !members.is_empty() {
             out.push(',');
             out.push_str(&members);
@@ -1257,10 +1424,54 @@ mod tests {
         }
     }
 
-    /// Emits the N-Triples object text for a JSON-LD object value (a `@value` literal or an
-    /// `@id` reference), expanding any compacted `@type` IRI via `ctx`.
-    fn object_to_nt(v: &Value, ctx: &std::collections::HashMap<String, String>) -> String {
+    /// Emits the N-Triples object text for a JSON-LD object value (a `@value` literal, an
+    /// `@id` reference, or a `@list`), expanding any compacted `@type` IRI via `ctx`.
+    ///
+    /// A `@list` is materialised back into a fresh rdf:first/rdf:rest/rdf:nil blank-node chain
+    /// (the inverse of the writer's collapse): the chain triples are appended to `out` in
+    /// `graph` and the head reference is returned, so the JSON-LD-to-RDF round-trip reproduces
+    /// the original list structure (up to blank-node renaming). `counter` hands out unique
+    /// blank-node labels.
+    fn object_to_nt(
+        v: &Value,
+        ctx: &std::collections::HashMap<String, String>,
+        graph: &str,
+        counter: &mut u64,
+        out: &mut String,
+    ) -> String {
         let obj = v.as_object().expect("object value is a JSON object");
+        if let Some(items) = obj.get("@list").and_then(|l| l.as_array()) {
+            // Empty list collapses straight to rdf:nil.
+            if items.is_empty() {
+                return "<http://www.w3.org/1999/02/22-rdf-syntax-ns#nil>".to_string();
+            }
+            // Allocate one fresh blank node per element, then wire first/rest/nil.
+            let cells: Vec<String> = items
+                .iter()
+                .map(|_| {
+                    *counter += 1;
+                    format!("_:lst{counter}")
+                })
+                .collect();
+            for (i, item) in items.iter().enumerate() {
+                let cell = &cells[i];
+                let first = object_to_nt(item, ctx, graph, counter, out);
+                let _ = writeln!(
+                    out,
+                    "{cell} <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> {first} {graph}."
+                );
+                let rest = if i + 1 < cells.len() {
+                    cells[i + 1].clone()
+                } else {
+                    "<http://www.w3.org/1999/02/22-rdf-syntax-ns#nil>".to_string()
+                };
+                let _ = writeln!(
+                    out,
+                    "{cell} <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> {rest} {graph}."
+                );
+            }
+            return cells[0].clone();
+        }
         if let Some(val) = obj.get("@value") {
             // Native scalar or string. Reconstruct the canonical lexical form + datatype.
             let (lex, dt) = match val {
@@ -1319,6 +1530,7 @@ mod tests {
         node: &serde_json::Map<String, Value>,
         graph: &str,
         ctx: &std::collections::HashMap<String, String>,
+        counter: &mut u64,
         out: &mut String,
     ) {
         let subj = node
@@ -1342,8 +1554,13 @@ mod tests {
             }
             let pred = expand_iri(k, ctx);
             for o in v.as_array().expect("predicate value is an array") {
-                let obj = object_to_nt(o, ctx);
+                // `object_to_nt` may append rdf:first/rest chain triples for a `@list`; collect
+                // them into a side buffer so they land *after* this predicate line, keeping the
+                // emitted N-Quads readable (order is irrelevant to the loader).
+                let mut aux = String::new();
+                let obj = object_to_nt(o, ctx, graph, counter, &mut aux);
                 let _ = writeln!(out, "{subj} <{pred}> {obj} {graph}.");
+                out.push_str(&aux);
             }
         }
     }
@@ -1354,6 +1571,8 @@ mod tests {
         let v: Value = serde_json::from_str(doc).expect("valid JSON");
         let mut ctx: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut out = String::new();
+        // Unique blank-node label source for any `@list` chains re-materialised below.
+        let mut counter: u64 = 0;
 
         let nodes: &Vec<Value> = match &v {
             Value::Array(a) => a,
@@ -1386,11 +1605,12 @@ mod tests {
                         sub.as_object().expect("node"),
                         &format!("{gid} "),
                         &ctx,
+                        &mut counter,
                         &mut out,
                     );
                 }
             } else {
-                node_to_nquads(node, "", &ctx, &mut out);
+                node_to_nquads(node, "", &ctx, &mut counter, &mut out);
             }
         }
         out
@@ -1434,6 +1654,43 @@ mod tests {
                     "{form:?} named graph {name}\n{doc}"
                 );
             }
+        }
+    }
+
+    /// Total triple count across the default graph and every named graph.
+    fn triple_count(g: &Graph) -> usize {
+        g.iter_ids().count() + g.named.iter().map(|(_, ng)| ng.iter_ids().count()).sum::<usize>()
+    }
+
+    /// Blank-node-blind round-trip check for graphs that exercise `@list` collapsing.
+    ///
+    /// Collapsing an rdf:first/rdf:rest chain and re-materialising it *renames* the list-cell
+    /// blank nodes, so the label-sensitive [`assert_jsonld_iso`] cannot be used. Instead this
+    /// asserts the serialize → parse → serialize cycle is a **fixed point** (the second
+    /// JSON-LD document is byte-identical to the first) for every form, plus that no triple is
+    /// gained or lost. A fixed point under our deterministic writer means the list structure
+    /// (length, element order, nesting) is reproduced exactly, up to blank-node renaming.
+    fn assert_jsonld_list_iso(g0: &Graph) {
+        for form in [
+            JsonLdForm::Expanded,
+            JsonLdForm::Flattened,
+            JsonLdForm::Compacted,
+        ] {
+            let doc0 = graph_to_jsonld(g0, form);
+            let nq = jsonld_to_nquads(&doc0);
+            let g1 = Graph::load_dataset(&nq, "nquads").unwrap_or_else(|e| {
+                panic!("{form:?} re-parse failed: {e}\n--- doc ---\n{doc0}\n--- nq ---\n{nq}")
+            });
+            assert_eq!(
+                triple_count(g0),
+                triple_count(&g1),
+                "{form:?} triple count changed across round-trip\n--- doc ---\n{doc0}\n--- nq ---\n{nq}"
+            );
+            let doc1 = graph_to_jsonld(&g1, form);
+            assert_eq!(
+                doc0, doc1,
+                "{form:?} not a fixed point (list structure not reproduced)\n--- doc0 ---\n{doc0}\n--- doc1 ---\n{doc1}"
+            );
         }
     }
 
@@ -1618,5 +1875,170 @@ mod tests {
         )
         .unwrap();
         assert_jsonld_iso(&g);
+    }
+
+    // =======================================================================
+    // [OPUS-4.8] (sq-gg3j) RDF-list (`@list`) collapsing.
+    // =======================================================================
+
+    /// Turtle `(...)` collection syntax expands to an rdf:first/rdf:rest/rdf:nil chain on
+    /// load; the writer must collapse it back to a native `@list` AND still round-trip.
+    #[test]
+    fn jsonld_list_collapses_and_roundtrips() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:items ( ex:a "b" 3 ) ."#,
+            "turtle",
+        )
+        .unwrap();
+        // The expanded form must carry a single `@list` with the three elements in order, and
+        // must NOT leak any rdf:first / rdf:rest into the JSON.
+        let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        assert!(doc.contains("\"@list\""), "expected @list in:\n{doc}");
+        assert!(
+            !doc.contains("rdf-syntax-ns#first") && !doc.contains("rdf-syntax-ns#rest"),
+            "list cells leaked as plain triples:\n{doc}"
+        );
+        // Element order is preserved (ex:a before "b" before 3).
+        let a = doc.find("http://ex/a").expect("element a present");
+        let b = doc.find("\"b\"").expect("element b present");
+        let three = doc.find(":3").or_else(|| doc.find("@value\":3")).is_some()
+            || doc.contains("\"@value\":3");
+        assert!(three, "integer element 3 present:\n{doc}");
+        assert!(a < b, "list order a < b preserved:\n{doc}");
+        assert_jsonld_list_iso(&g);
+    }
+
+    /// The empty collection `()` is `rdf:nil`; it is left as a plain `@id` reference (never a
+    /// `@list`), and still round-trips.
+    #[test]
+    fn jsonld_empty_list_stays_nil_reference() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:items () ."#,
+            "turtle",
+        )
+        .unwrap();
+        let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        assert!(!doc.contains("\"@list\""), "empty list must not collapse:\n{doc}");
+        assert!(doc.contains("rdf-syntax-ns#nil"), "expected rdf:nil reference:\n{doc}");
+        assert_jsonld_iso(&g);
+    }
+
+    /// Nested lists `( (a b) c )` collapse recursively (a `@list` element that is itself a
+    /// `@list`), and round-trip.
+    #[test]
+    fn jsonld_nested_list_collapses() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:items ( ( ex:a ex:b ) ex:c ) ."#,
+            "turtle",
+        )
+        .unwrap();
+        let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        assert_eq!(doc.matches("\"@list\"").count(), 2, "two nested @lists:\n{doc}");
+        assert!(
+            !doc.contains("rdf-syntax-ns#first") && !doc.contains("rdf-syntax-ns#rest"),
+            "nested list cells leaked:\n{doc}"
+        );
+        assert_jsonld_list_iso(&g);
+    }
+
+    /// A list whose head cell carries an extra predicate is NOT a well-formed list cell, so the
+    /// chain stays as ordinary triples (round-trips losslessly either way).
+    #[test]
+    fn jsonld_list_with_extra_predicate_not_collapsed() {
+        // Hand-built chain: _:c0 is a list cell but also carries ex:tag — disqualifying it.
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+               ex:s ex:items _:c0 .
+               _:c0 rdf:first ex:a ; rdf:rest _:c1 ; ex:tag "extra" .
+               _:c1 rdf:first ex:b ; rdf:rest rdf:nil ."#,
+            "turtle",
+        )
+        .unwrap();
+        let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        assert!(
+            !doc.contains("\"@list\""),
+            "tainted head must NOT collapse:\n{doc}"
+        );
+        assert_jsonld_iso(&g);
+    }
+
+    /// A list cell shared by two heads (referenced twice as an object) is NOT collapsed:
+    /// collapsing would discard the second reference. Stays as plain triples.
+    #[test]
+    fn jsonld_shared_list_cell_not_collapsed() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+               ex:s ex:items _:c0 .
+               ex:t ex:items _:c0 .
+               _:c0 rdf:first ex:a ; rdf:rest rdf:nil ."#,
+            "turtle",
+        )
+        .unwrap();
+        let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        assert!(
+            !doc.contains("\"@list\""),
+            "doubly-referenced cell must NOT collapse:\n{doc}"
+        );
+        assert_jsonld_iso(&g);
+    }
+
+    /// A cyclic "list" (`rdf:rest` loops back) is not a list; it must never collapse (and the
+    /// detector must terminate). Stays as plain triples and round-trips.
+    #[test]
+    fn jsonld_cyclic_rest_not_collapsed_and_terminates() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+               ex:s ex:items _:c0 .
+               _:c0 rdf:first ex:a ; rdf:rest _:c1 .
+               _:c1 rdf:first ex:b ; rdf:rest _:c0 ."#,
+            "turtle",
+        )
+        .unwrap();
+        let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        assert!(!doc.contains("\"@list\""), "cycle must NOT collapse:\n{doc}");
+        assert_jsonld_iso(&g);
+    }
+
+    /// A chain that does not terminate in rdf:nil (the last `rdf:rest` points at an IRI) is not
+    /// a proper RDF list; it must not collapse.
+    #[test]
+    fn jsonld_non_nil_terminated_not_collapsed() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+               ex:s ex:items _:c0 .
+               _:c0 rdf:first ex:a ; rdf:rest ex:notNil ."#,
+            "turtle",
+        )
+        .unwrap();
+        let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        assert!(!doc.contains("\"@list\""), "non-nil tail must NOT collapse:\n{doc}");
+        assert_jsonld_iso(&g);
+    }
+
+    /// Two independent well-formed lists in one graph both collapse, and a graph mixing a
+    /// collapsible list with an unrelated tainted chain round-trips.
+    #[test]
+    fn jsonld_multiple_lists_and_named_graph_roundtrip() {
+        let g = Graph::load_dataset(
+            r#"<http://ex/s> <http://ex/a> _:l0 .
+               _:l0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://ex/x> .
+               _:l0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> .
+               <http://ex/s> <http://ex/b> _:m0 <http://ex/g> .
+               _:m0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> "y" <http://ex/g> .
+               _:m0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> <http://ex/g> ."#,
+            "nquads",
+        )
+        .unwrap();
+        // Default graph list collapses; named-graph list collapses in its own scope.
+        let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
+        assert_eq!(doc.matches("\"@list\"").count(), 2, "both lists collapse:\n{doc}");
+        assert_jsonld_list_iso(&g);
     }
 }
