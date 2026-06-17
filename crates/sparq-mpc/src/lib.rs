@@ -147,7 +147,15 @@ pub mod bench;
 // ?z_i) is the separate sq-py8h.2 and is NOT here. See the module docs for the
 // regime + semantic boundary statement.
 pub mod bounded_path;
+// [OPUS-4.8] sq-py8h.2: the HIDDEN-intermediate fixed exactly-`k` property-path
+// chain — the cryptographic core of the bounded property-path operator. Each hop's
+// match is a secret-shared `secure_equal_to_bit` (never opened); the `k` hops are
+// chained by AND (`mul_shares_raw` + `degree_reduce`, the sq-dvuc keystone) and
+// OR-folded per distinct endpoint pair; the final connected-bit drives
+// `oblivious_set_output` (padded+shuffled to B). Intermediate node-sets are never
+// reconstructed. Honest-majority / semi-honest only. See the module docs.
 pub mod field;
+pub mod hidden_path;
 pub mod holder;
 pub mod join;
 pub mod metrics;
@@ -238,6 +246,12 @@ pub use bench::{
 // [OPUS-4.8] sq-py8h.1: the disclosed-key bounded property-path surface.
 pub use bounded_path::{
     eval_bounded_path_disclosed, BoundedRepetition, DisclosedEdges, PathForm, PathStep,
+};
+// [OPUS-4.8] sq-py8h.2: the HIDDEN-intermediate exactly-`k` chain surface (the
+// cryptographic regime — intermediate node-sets never opened).
+pub use hidden_path::{
+    eval_exact_k_chain_hidden, eval_exact_k_chain_hidden_slots, HiddenEdge, HiddenEdges,
+    HiddenNode, MAX_CHAIN_TUPLES,
 };
 // [OPUS-4.8] sq-rrz4 + sq-g7t5: the secure-comparison surface (verdict-only
 // disclosure). sq-g7t5 adds the in-MPC bit-decomposition magnitude-bound constants
