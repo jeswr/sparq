@@ -18,10 +18,12 @@
 //!                                       (graph_from_reader, skips the wavelet/OP
 //!                                       index) vs the UPSTREAM wavelet-building
 //!                                       path (Hdt::read + graph_from_hdt). Reports
-//!                                       the speedup RATIO + a 3-way DIRECT per-stage
-//!                                       split (dict/scan/build) + peak RSS + an
-//!                                       NT-vs-HDT A/B row (loads <file>.nt via the
-//!                                       fast parallel NT path) [sq-q6a1].
+//!                                       the speedup RATIO + a DIRECT per-stage split
+//!                                       (dict/scan/build, with dict broken into the
+//!                                       four PFC sections + merge and scan into
+//!                                       read vs SPO-walk) + peak RSS + an NT-vs-HDT
+//!                                       A/B row (loads <file>.nt via the fast
+//!                                       parallel NT path) [sq-q6a1, sq-7ge0].
 //!   bench-hdt-zip <file.hdt>            decompress+parse MB/s of <file.hdt>.{gz,zst,bz2}
 //!                                       via the direct decoder (expects those files)
 
@@ -633,11 +635,13 @@ fn gen_hdt(nt_path: &str, hdt_path: &str) {
 /// A/B HDT load benchmark: direct decoder vs upstream wavelet path, with a
 /// per-stage split for the upstream path and the speedup ratio.
 ///
-/// [OPUS-4.8] (sq-q6a1) Also emits the plan §4 measurement gaps: a 3-way per-stage
+/// [OPUS-4.8] (sq-q6a1 / sq-7ge0) Also emits the plan §4 measurement gaps: a per-stage
 /// split of the DIRECT path (dict decode / triple+id scan / `Graph::build`, via the
 /// measurement-only `graph_from_reader_timed`) and an NT-vs-HDT A/B row that loads
-/// the same dataset's `.nt` companion via `Graph::load_reader_parallel`. Both are
-/// measurement tooling only — the decoder's behaviour is unchanged.
+/// the same dataset's `.nt` companion via `Graph::load_reader_parallel`. sq-7ge0 refines
+/// the split further — the `dict` stage into its four PFC sections + merge, and the `scan`
+/// stage into the triples-section READ vs the SPO id-translation WALK — to localise where
+/// direct-decode time goes. Both are measurement tooling only — the decoder is unchanged.
 fn bench_hdt(path: &str) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let name = dataset_name(path);
@@ -669,24 +673,49 @@ fn bench_hdt(path: &str) {
     // runs the IDENTICAL decode but records each stage's wall via `Instant::now()` at
     // the existing boundaries (no decoder behaviour change). Median over ITERS, each
     // stage independently, so a noisy run never reorders the stages.
-    let (mut dicts, mut scans, mut builds): (Vec<f64>, Vec<f64>, Vec<f64>) =
-        (Vec::new(), Vec::new(), Vec::new());
+    //
+    // [OPUS-4.8] (sq-7ge0) FINER split: the coarse `dict` blob is further broken into the
+    // four per-PFC-section decodes (shared/subjects/objects/predicates) + the section-order
+    // merge, and the coarse `scan` is split into the triples-section READ vs the SPO
+    // id-translation WALK — so the bench localises where direct-decode time goes. Same
+    // `StageTimings` measurement-only pattern; the decoder behaviour is unchanged.
+    let mut cols: std::collections::BTreeMap<&str, Vec<f64>> = std::collections::BTreeMap::new();
     for _ in 0..ITERS {
         let mut st = sparq_hdt::StageTimings::default();
         let g = sparq_hdt::graph_from_reader_timed(std::io::Cursor::new(&bytes[..]), &mut st).unwrap();
         black_box(g.store.len());
-        dicts.push(st.dict.as_secs_f64());
-        scans.push(st.scan.as_secs_f64());
-        builds.push(st.build.as_secs_f64());
+        // Coarse three (back-compat) + the finer sub-stages.
+        cols.entry("dict").or_default().push(st.dict.as_secs_f64());
+        cols.entry("scan").or_default().push(st.scan.as_secs_f64());
+        cols.entry("build").or_default().push(st.build.as_secs_f64());
+        cols.entry("dict_shared").or_default().push(st.dict_shared.as_secs_f64());
+        cols.entry("dict_subjects").or_default().push(st.dict_subjects.as_secs_f64());
+        cols.entry("dict_objects").or_default().push(st.dict_objects.as_secs_f64());
+        cols.entry("dict_predicates").or_default().push(st.dict_predicates.as_secs_f64());
+        cols.entry("dict_merge").or_default().push(st.dict_merge.as_secs_f64());
+        cols.entry("scan_read").or_default().push(st.scan_read.as_secs_f64());
+        cols.entry("scan_walk").or_default().push(st.scan_walk.as_secs_f64());
     }
     let med = |mut v: Vec<f64>| -> f64 {
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         v[v.len() / 2]
     };
-    let (secs_dict, secs_scan, secs_build) = (med(dicts), med(scans), med(builds));
+    let mut med_of = |k: &str| med(cols.remove(k).unwrap());
+    let secs_dict = med_of("dict");
+    // [OPUS-4.8] sq-7ge0 finer dict sub-stages. In a multi-threaded pool the four section
+    // decodes run CONCURRENTLY, so these per-section rows overlap each other and do NOT sum
+    // to `dict` — they show the relative cost of each section, not a wall partition.
     row(name, "  direct stage (a) dict decode", 1, secs_dict, bytes.len(), triples);
-    row(name, "  direct stage (b) triple/id scan (id-translation)", 1, secs_scan, bytes.len(), triples);
-    row(name, "  direct stage (c) Graph::build", 1, secs_build, bytes.len(), triples);
+    row(name, "  direct stage (a1) dict: shared section decode", 1, med_of("dict_shared"), bytes.len(), triples);
+    row(name, "  direct stage (a2) dict: subjects section decode", 1, med_of("dict_subjects"), bytes.len(), triples);
+    row(name, "  direct stage (a3) dict: objects section decode", 1, med_of("dict_objects"), bytes.len(), triples);
+    row(name, "  direct stage (a4) dict: predicates section decode", 1, med_of("dict_predicates"), bytes.len(), triples);
+    row(name, "  direct stage (a5) dict: section-order merge", 1, med_of("dict_merge"), bytes.len(), triples);
+    // [OPUS-4.8] sq-7ge0 finer scan sub-stages: (b1) + (b2) sum EXACTLY to (b) `scan`.
+    row(name, "  direct stage (b) triple/id scan (id-translation)", 1, med_of("scan"), bytes.len(), triples);
+    row(name, "  direct stage (b1) scan: triples-section read", 1, med_of("scan_read"), bytes.len(), triples);
+    row(name, "  direct stage (b2) scan: SPO id-translation walk", 1, med_of("scan_walk"), bytes.len(), triples);
+    row(name, "  direct stage (c) Graph::build", 1, med_of("build"), bytes.len(), triples);
 
     // --- UPSTREAM wavelet path, split into its two public stages. ---
     // Stage 1: Hdt::read = decode dict + BUILD the wavelet matrix / OP-index /

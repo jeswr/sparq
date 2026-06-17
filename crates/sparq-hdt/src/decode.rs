@@ -351,6 +351,15 @@ struct DictDecode {
     pred: Vec<Id>,
 }
 
+/// [OPUS-4.8] sq-7ge0: a [`decode_section`] that also returns its own wall-clock. Used by
+/// the timed decode path so each PFC section's decode is measured INSIDE its (possibly
+/// rayon) worker; the production path calls plain [`decode_section`] and times nothing.
+fn decode_section_timed(sect: &DictSectPFC) -> Result<(Dict, Vec<Id>, std::time::Duration), Error> {
+    let t = std::time::Instant::now();
+    let (dict, ids) = decode_section(sect)?;
+    Ok((dict, ids, t.elapsed()))
+}
+
 /// Decodes a `FourSectDict` into one sparq `Dict` plus per-section id vectors.
 ///
 /// [OPUS-4.8] sq-s506 (lever H6): the four INDEPENDENT PFC blobs are decoded
@@ -362,13 +371,21 @@ struct DictDecode {
 /// interning BIT-FOR-BIT — and, in particular, the `shared` section is merged FIRST so
 /// its terms keep the lowest ids and an HDT id resolves to the same sparq Id whether it
 /// is referenced as a subject or as an object.
-fn decode_dict(dict_hdt: &FourSectDict) -> Result<DictDecode, Error> {
+///
+/// [OPUS-4.8] sq-7ge0: when `sect_timings` is `Some`, also records each PFC section's
+/// decode wall and the merge wall there (the finer split; measurement-only — `None` runs
+/// the identical decode and times nothing).
+fn decode_dict(
+    dict_hdt: &FourSectDict,
+    mut sect_timings: Option<&mut DictSectionTimings>,
+) -> Result<DictDecode, Error> {
     let (sh, su, ob, pr) = (
         &dict_hdt.shared,
         &dict_hdt.subjects,
         &dict_hdt.objects,
         &dict_hdt.predicates,
     );
+    let want_timings = sect_timings.is_some();
     // [OPUS-4.8] sq-s506: when the rayon pool is effectively single-threaded
     // (`current_num_threads() <= 1`, e.g. `RAYON_NUM_THREADS=1`) the two nested `join`s buy
     // no parallelism — only join/closure overhead — so decode the four sections straight-line
@@ -376,52 +393,77 @@ fn decode_dict(dict_hdt: &FourSectDict) -> Result<DictDecode, Error> {
     // the SAME four sections into their OWN partial dicts and feed them to the identical
     // section-order merge below, so the id layout is bit-for-bit identical either way (guarded
     // by the `parallel_matches_sequential_reference` / `shared_section_so_id_layout` tests).
+    // [OPUS-4.8] sq-7ge0: each section decode yields its own wall (zeroed when the caller
+    // didn't ask for timings, so production still times nothing). The `decode_section_timed`
+    // closure runs the IDENTICAL decode plus one `Instant::now()` pair; in the rayon path
+    // each runs inside its worker so the four walls correctly OVERLAP.
+    type SectOut = (Dict, Vec<Id>, std::time::Duration);
+    let decode_one = |sect: &DictSectPFC| -> Result<SectOut, Error> {
+        if want_timings {
+            decode_section_timed(sect)
+        } else {
+            let (d, ids) = decode_section(sect)?;
+            Ok((d, ids, std::time::Duration::ZERO))
+        }
+    };
     let (
         shared_partial,
         mut shared,
+        dur_shared,
         subj_partial,
         mut subj_only,
+        dur_subjects,
         obj_partial,
         mut obj_only,
+        dur_objects,
         pred_partial,
         mut pred,
+        dur_predicates,
     ) = if rayon::current_num_threads() <= 1 {
         // Single-threaded fast path: no join overhead, same section order.
-        let (shared_partial, shared) = decode_section(sh)?;
-        let (subj_partial, subj_only) = decode_section(su)?;
-        let (obj_partial, obj_only) = decode_section(ob)?;
-        let (pred_partial, pred) = decode_section(pr)?;
+        let (shared_partial, shared, dur_shared) = decode_one(sh)?;
+        let (subj_partial, subj_only, dur_subjects) = decode_one(su)?;
+        let (obj_partial, obj_only, dur_objects) = decode_one(ob)?;
+        let (pred_partial, pred, dur_predicates) = decode_one(pr)?;
         (
             shared_partial,
             shared,
+            dur_shared,
             subj_partial,
             subj_only,
+            dur_subjects,
             obj_partial,
             obj_only,
+            dur_objects,
             pred_partial,
             pred,
+            dur_predicates,
         )
     } else {
         // Two nested `join`s fan the four CPU-bound section decodes across the pool; each
-        // returns its `Result<(Dict, Vec<Id>), Error>` so any malformed section is surfaced
-        // (handled with `?` below), never swallowed.
+        // returns its `Result<(Dict, Vec<Id>, Duration), Error>` so any malformed section is
+        // surfaced (handled with `?` below), never swallowed.
         let ((shared_res, subj_res), (obj_res, pred_res)) = rayon::join(
-            || rayon::join(|| decode_section(sh), || decode_section(su)),
-            || rayon::join(|| decode_section(ob), || decode_section(pr)),
+            || rayon::join(|| decode_one(sh), || decode_one(su)),
+            || rayon::join(|| decode_one(ob), || decode_one(pr)),
         );
-        let (shared_partial, shared) = shared_res?;
-        let (subj_partial, subj_only) = subj_res?;
-        let (obj_partial, obj_only) = obj_res?;
-        let (pred_partial, pred) = pred_res?;
+        let (shared_partial, shared, dur_shared) = shared_res?;
+        let (subj_partial, subj_only, dur_subjects) = subj_res?;
+        let (obj_partial, obj_only, dur_objects) = obj_res?;
+        let (pred_partial, pred, dur_predicates) = pred_res?;
         (
             shared_partial,
             shared,
+            dur_shared,
             subj_partial,
             subj_only,
+            dur_subjects,
             obj_partial,
             obj_only,
+            dur_objects,
             pred_partial,
             pred,
+            dur_predicates,
         )
     };
     debug_assert_eq!(shared.len(), dict_hdt.shared.num_strings);
@@ -432,11 +474,22 @@ fn decode_dict(dict_hdt: &FourSectDict) -> Result<DictDecode, Error> {
     // Merge the partials into the final dict IN SECTION ORDER (shared, subjects, objects,
     // predicates) — identical to the sequential decode's interning order — and rewrite
     // each section's local ids to final ids.
+    // [OPUS-4.8] sq-7ge0: the merge wall is the remainder of the `dict` stage not spent in
+    // the (possibly concurrent) section decodes; time it only when asked.
+    let t_merge = want_timings.then(std::time::Instant::now);
     let mut dict = Dict::new();
     merge_section(&mut dict, &shared_partial, &mut shared);
     merge_section(&mut dict, &subj_partial, &mut subj_only);
     merge_section(&mut dict, &obj_partial, &mut obj_only);
     merge_section(&mut dict, &pred_partial, &mut pred);
+    if let Some(t) = sect_timings.as_mut() {
+        t.shared = dur_shared;
+        t.subjects = dur_subjects;
+        t.objects = dur_objects;
+        t.predicates = dur_predicates;
+        // `t_merge` is `Some` here (set under the same `want_timings`).
+        t.merge = t_merge.map(|m| m.elapsed()).unwrap_or_default();
+    }
     Ok(DictDecode {
         dict,
         shared,
@@ -446,24 +499,75 @@ fn decode_dict(dict_hdt: &FourSectDict) -> Result<DictDecode, Error> {
     })
 }
 
-/// [OPUS-4.8] (sq-q6a1) Per-stage wall-clock split of the direct decode, for the
-/// `bench/parse` HDT bench's 3-way granularity. This is MEASUREMENT-ONLY metadata:
-/// it is populated solely by [`graph_from_reader_timed`] (the production
-/// [`graph_from_reader`] passes `None` and times nothing), so it cannot change
-/// decoder behaviour. The three stages mirror the plan's §4 split:
+/// [OPUS-4.8] (sq-q6a1 / sq-7ge0) Per-stage wall-clock split of the direct decode, for
+/// the `bench/parse` HDT bench. This is MEASUREMENT-ONLY metadata: it is populated solely
+/// by [`graph_from_reader_timed`] (the production [`graph_from_reader`] passes `None` and
+/// times nothing), so it cannot change decoder behaviour. The three COARSE stages mirror
+/// the plan's §4 split:
 ///
 ///  * `dict` — control/header read + four-section PFC dictionary decode+intern.
 ///  * `scan` — triples-section read (bitmaps/sequences) + the SPO id-translation
 ///    walk that builds the `Vec<[Id; 3]>` (today fused with `build` in the bench).
 ///  * `build` — `Graph::from_parts` (sort + permutation-index build).
+///
+/// [OPUS-4.8] sq-7ge0 adds a FINER split so the bench can localise where direct-decode
+/// time goes (it previously fused three sub-stages inside `scan` and reported the four PFC
+/// sections as one `dict` blob):
+///
+///  * the `dict` stage is broken into its four PFC-section decodes (`dict_shared`,
+///    `dict_subjects`, `dict_objects`, `dict_predicates` — each the wall of one
+///    [`decode_section`], so in the multi-threaded pool these OVERLAP and need not sum to
+///    `dict`) plus the section-order `merge` (`dict_merge`);
+///  * the `scan` stage is broken into the triples-section bitmap/sequence READ
+///    (`scan_read`) and the SPO id-translation adjacency WALK (`scan_walk`).
+///
+/// The finer fields are pure additional `Instant::now()` reads at boundaries the decode
+/// already crosses; the decode is byte-for-byte the production path. `dict` / `scan` /
+/// `build` stay the coarse totals (back-compat with existing bench rows).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StageTimings {
-    /// Dictionary decode (control info + header + four-section PFC decode/intern).
+    /// Dictionary decode (control info + header + four-section PFC decode/intern + merge).
     pub dict: std::time::Duration,
     /// Triple/id scan: triples-section read + the SPO id-translation walk.
     pub scan: std::time::Duration,
     /// `Graph::from_parts` (the shared graph build).
     pub build: std::time::Duration,
+
+    // --- [OPUS-4.8] sq-7ge0 finer split (measurement-only; same decode path) ---
+    /// PFC decode+intern wall of the `shared` section (one [`decode_section`] call).
+    /// In the multi-threaded pool the four section decodes run concurrently, so these
+    /// four per-section walls OVERLAP each other and need not sum to `dict`.
+    pub dict_shared: std::time::Duration,
+    /// PFC decode+intern wall of the `subjects` (subject-only) section.
+    pub dict_subjects: std::time::Duration,
+    /// PFC decode+intern wall of the `objects` (object-only) section.
+    pub dict_objects: std::time::Duration,
+    /// PFC decode+intern wall of the `predicates` section.
+    pub dict_predicates: std::time::Duration,
+    /// Section-order merge of the four partial dicts into the final dict + the
+    /// per-section local-id remap (the four [`merge_section`] calls). This runs single
+    /// threaded after the (possibly concurrent) section decodes join.
+    pub dict_merge: std::time::Duration,
+    /// Triples-section READ: triples control info + the two raw bitmaps + the two
+    /// CRC-validated sequences (`bitmap_y`/`bitmap_z`/`sequence_y`/`sequence_z`).
+    pub scan_read: std::time::Duration,
+    /// SPO id-translation adjacency WALK: the sequential loop that maps each HDT
+    /// (subject, predicate, object) id triad to sparq ids and pushes the `[Id; 3]`.
+    pub scan_walk: std::time::Duration,
+}
+
+/// [OPUS-4.8] sq-7ge0: per-PFC-section decode walls + the merge wall, captured by
+/// [`decode_dict`] when (and only when) the caller asks for finer timings. Each section
+/// wall is the elapsed of that section's lone [`decode_section`] call (timed inside the
+/// rayon worker in the parallel path, so the four overlap there); `merge` is the four
+/// [`merge_section`] calls. Folded into [`StageTimings`] by [`graph_from_reader_impl`].
+#[derive(Debug, Clone, Copy, Default)]
+struct DictSectionTimings {
+    shared: std::time::Duration,
+    subjects: std::time::Duration,
+    objects: std::time::Duration,
+    predicates: std::time::Duration,
+    merge: std::time::Duration,
 }
 
 /// Direct HDT -> sparq [`Graph`] decode (H1–H4 + H6). Reads control info + header +
@@ -504,18 +608,26 @@ fn graph_from_reader_impl<R: BufRead>(
         .map_err(hdt::hdt::Error::from)?;
 
     let n_shared = dict_hdt.shared.num_strings;
+    // [OPUS-4.8] sq-7ge0: ask `decode_dict_impl` for per-PFC-section walls only when the
+    // caller wants finer timings; production passes `None` straight through (times nothing).
+    let mut sect_timings = timings.is_some().then(DictSectionTimings::default);
     let DictDecode {
         dict,
         shared: shared_ids,
         subj_only: subj_only_ids,
         obj_only: obj_only_ids,
         pred: pred_ids,
-    } = decode_dict(&dict_hdt)?;
+    } = decode_dict(&dict_hdt, sect_timings.as_mut())?;
 
     // Stage (a) dict decode done; stage (b) triple/id scan begins.
     let t_scan = std::time::Instant::now();
-    if let Some(t) = timings.as_mut() {
+    if let (Some(t), Some(s)) = (timings.as_mut(), sect_timings) {
         t.dict = t_scan.duration_since(t_dict);
+        t.dict_shared = s.shared;
+        t.dict_subjects = s.subjects;
+        t.dict_objects = s.objects;
+        t.dict_predicates = s.predicates;
+        t.dict_merge = s.merge;
     }
 
     // Map an HDT subject/object id (1-based, shared section first) to its sparq Id.
@@ -552,6 +664,15 @@ fn graph_from_reader_impl<R: BufRead>(
     let bitmap_z = read_bitmap_words(&mut reader)?;
     let sequence_y = Sequence::read(&mut reader).map_err(|e| crc_mismatch(format!("sequence_y: {e}")))?;
     let sequence_z = Sequence::read(&mut reader).map_err(|e| crc_mismatch(format!("sequence_z: {e}")))?;
+
+    // [OPUS-4.8] sq-7ge0: split the `scan` stage here — everything above (triples control
+    // info + the two raw bitmaps + the two CRC-validated sequences) is the triples-section
+    // READ; everything below (the `Vec` reservation + the SPO id-translation loop) is the
+    // adjacency WALK. Recorded only under finer timings; the decode bytes are unchanged.
+    let t_walk = std::time::Instant::now();
+    if let Some(t) = timings.as_mut() {
+        t.scan_read = t_walk.duration_since(t_scan);
+    }
 
     let num_triples = sequence_z.entries;
     // [OPUS-4.8] sq-tzwa (OOM-DoS hardening): `sequence_z.entries` is a count from the
@@ -599,6 +720,8 @@ fn graph_from_reader_impl<R: BufRead>(
     let t_build = std::time::Instant::now();
     if let Some(t) = timings.as_mut() {
         t.scan = t_build.duration_since(t_scan);
+        // [OPUS-4.8] sq-7ge0: the WALK is the part of `scan` after the section read.
+        t.scan_walk = t_build.duration_since(t_walk);
     }
 
     let graph = Graph::from_parts(dict, triples);
@@ -706,7 +829,7 @@ mod tests {
         assert!(n_shared > 0, "fixture must exercise the shared section");
         assert!(n_subj_only > 0 || n_obj_only > 0, "fixture must exercise an offset section");
 
-        let dd = decode_dict(&dict_hdt).expect("parallel dict decode");
+        let dd = decode_dict(&dict_hdt, None).expect("parallel dict decode");
 
         // The S-view map and the O-view map BOTH start with the shared block.
         let map_s = |id: usize| {
@@ -769,6 +892,57 @@ mod tests {
             term_triple_set(&sequential),
             "parallel and sequential decode must resolve to the identical triple set"
         );
+    }
+
+    /// [OPUS-4.8] sq-7ge0: the finer `StageTimings` split is measurement-only and must
+    /// (a) leave the decoded graph byte-identical to the untimed path, and (b) be internally
+    /// consistent — the two `scan` sub-stages sum EXACTLY to `scan` (consecutive spans of one
+    /// clock), the per-section dict walls + merge are each within the `dict` total, and the
+    /// finer fields populate (non-trivially, for a fixture that exercises every section).
+    #[test]
+    fn finer_stage_split_is_consistent_and_decode_unchanged() {
+        let Some(bytes) = fixture_bytes() else { return };
+
+        // (a) The timed path decodes the IDENTICAL graph as the production untimed path.
+        let untimed = graph_from_reader(std::io::Cursor::new(&bytes)).expect("untimed decode");
+        let mut st = StageTimings::default();
+        let timed = graph_from_reader_timed(std::io::Cursor::new(&bytes), &mut st).expect("timed decode");
+        assert_eq!(untimed.len(), timed.len(), "timed decode must not change triple count");
+        assert_eq!(
+            term_triple_set(&untimed),
+            term_triple_set(&timed),
+            "timed decode must resolve to the identical triple set as the untimed path"
+        );
+
+        // (b) `scan_read` and `scan_walk` are consecutive spans of the SAME clock split at
+        // one boundary, so they sum EXACTLY to the coarse `scan` (no rounding slack).
+        assert_eq!(
+            st.scan_read + st.scan_walk,
+            st.scan,
+            "scan_read + scan_walk must equal the coarse scan total exactly"
+        );
+
+        // Each PFC-section decode wall and the merge wall are sub-spans of the `dict` stage,
+        // so none can exceed the coarse `dict` total.
+        for (label, d) in [
+            ("dict_shared", st.dict_shared),
+            ("dict_subjects", st.dict_subjects),
+            ("dict_objects", st.dict_objects),
+            ("dict_predicates", st.dict_predicates),
+            ("dict_merge", st.dict_merge),
+        ] {
+            assert!(d <= st.dict, "{label} ({d:?}) must not exceed the dict total ({:?})", st.dict);
+        }
+
+        // The coarse stages span enough work to register on any real clock; assert the
+        // timing hooks fired at the stage level. We deliberately do NOT assert magnitudes on
+        // the per-section sub-walls — a ~10 KB fixture's smallest PFC section can decode in
+        // under one clock tick, so a `> ZERO` there would be flaky. Structural consistency
+        // (the exact-sum + bounded-by-total checks above) is the real guard; the untimed-vs-
+        // timed graph equality proves the hooks did not perturb the decode.
+        assert!(st.dict > std::time::Duration::ZERO, "dict stage must be timed");
+        assert!(st.scan > std::time::Duration::ZERO, "scan stage must be timed");
+        assert!(st.build > std::time::Duration::ZERO, "build stage must be timed");
     }
 
     /// Sequential reference decoder: the dict half done serially (shared, subjects,
