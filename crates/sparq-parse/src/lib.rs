@@ -1,43 +1,8 @@
-//! sparq-parse: compressed serialization of query results (D4).
-//!
-//! The crate's first real module: chunk-at-a-time compression of serialized
-//! query results, designed around one format property — **multi-member gzip and
-//! multi-frame zstd are valid single streams**. Each serialized chunk (e.g. one
-//! element of `sparq_engine::query_json_chunks_with_budget`'s output) is
-//! compressed as an *independent* gzip member / zstd frame, and the members are
-//! concatenated in order. The concatenation decodes as ONE stream with stock
-//! decoders (`Content-Encoding: gzip` in browsers, `MultiGzDecoder`, `gzip -d`,
-//! Python `gzip`, the `zstd` CLI), so chunks can be compressed in parallel as
-//! they are produced and emitted in order: compression overlaps serialization
-//! instead of following it, and the first bytes hit the wire sooner.
-//!
-//! Measured results + design notes: `research/custom-parsers-D4-compressed-serialization.md`
-//! (benchmarks under `bench/parse/`, `compress-bench` binary). Numbers gate on
-//! the house baseline in `research/custom-parsers-baseline.md`.
-//!
-//! Hard constraint (unchanged from the scaffold): this crate must NOT enter the
-//! wasm dependency graph (`sparq-wasm` must never depend on it, directly or
-//! transitively) — flate2/zstd/rayon stay out of the bundle.
-//!
-//! # API sketch
-//!
-//! ```
-//! use sparq_parse::{Codec, CompressedSink, Mode, decode_gzip_concat};
-//!
-//! let chunks: Vec<String> = vec!["{\"head\":...".into(), "...rest".into()];
-//! let mut sink = CompressedSink::new(Codec::Gzip { level: 6 }, Mode::Parallel);
-//! let mut wire = Vec::new();
-//! for c in &chunks {
-//!     sink.push(c.as_bytes());
-//!     for member in sink.try_drain().unwrap() {
-//!         wire.extend_from_slice(&member); // stream to the client immediately
-//!     }
-//! }
-//! for member in sink.finish().unwrap() {
-//!     wire.extend_from_slice(&member);
-//! }
-//! assert_eq!(decode_gzip_concat(&wire).unwrap(), chunks.concat().into_bytes());
-//! ```
+// [OPUS-4.8] sq-ieqz: rustdoc front page IS the crate-local README
+// (`crates/sparq-parse/README.md`), so the doc surface and the README never drift.
+// The README carries the format rationale (multi-member gzip / multi-frame zstd),
+// the no-wasm-dep guard, and the runnable API-sketch doctest below.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use std::collections::BTreeMap;
