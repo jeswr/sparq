@@ -94,6 +94,17 @@ LUBM_RUN=bench/lubm/run.sh
 # (deep-taxonomy); details: bench/deep-taxonomy/README.md. (sq-1hgz)
 DEEPTAX_RUN=bench/deep-taxonomy/run.sh
 DEEPTAX_DEPTHS="${DEEPTAX_DEPTHS:-1000 10000}"
+# [OPUS-4.8] OWL sameAs equality micro-suite (sq-msl6, design A3 + A5) — the EQUALITY reasoning
+# suite (the owl:sameAs analogue of Deep Taxonomy's subclass transitivity). Like LUBM/deep-taxonomy
+# its run.sh is the self-asserting entry point: it builds K owl:sameAs classes of N members per tier
+# (bench/owl-sameas/gen_sameas.py via bench/owl-sameas/gen.sh — pure Python, NO javac/rapper),
+# materializes the OWL-RL closure with `sparq-cli reason … owl`, runs query.rq over the closure, and
+# asserts BOTH the closure triple-count (K·N·(N+M)) AND the query row-count (K·N) vs expected.tsv
+# internally (exit 1 on any mismatch). The hook below invokes run.sh and harvests its metric TSV into
+# `sameas_size<TIER>_{closure_s,query_us,closure_triples}`. Registry: bench/benchmarks.toml (owl-sameas);
+# details: bench/owl-sameas/README.md. (sq-msl6)
+SAMEAS_RUN=bench/owl-sameas/run.sh
+SAMEAS_TIERS="${SAMEAS_TIERS:-8 32}"
 # [OPUS-4.8] SHACL VALIDATION suite (sq-7iai, design §3.1) — the cleanest competitor surface.
 # Reuses the LUBM(1) ABox as its data substrate (so it shares the javac/rapper guard) x the 5
 # committed shape graphs in bench/shacl/shapes/. Like LUBM, run.sh is the self-asserting entry
@@ -458,6 +469,37 @@ if command -v python3 >/dev/null 2>&1 && [ -x "$DEEPTAX_RUN" ]; then
   fi
 else
   echo "note: deep-taxonomy skipped (python3 not on PATH)" >&2
+fi
+
+# [OPUS-4.8] OWL sameAs equality micro-suite per-commit (sq-msl6, design A3 + A5). Exactly the
+# deep-taxonomy hook shape: run.sh is the self-asserting entry point — it reuses
+# bench/owl-sameas/gen_sameas.py (via gen.sh) to build K owl:sameAs equivalence classes of N members
+# per tier, materializes the OWL-RL closure with `sparq-cli reason … owl`, runs query.rq over the
+# closure, and asserts BOTH the closure triple-count (K·N·(N+M)) AND the query row-count (K·N) vs
+# expected.tsv internally (exit 1 on any mismatch). So we invoke run.sh and harvest its metric TSV
+# (it prints `<metric>\t<value>\t<unit>` lines on stdout) into
+# `sameas_size<TIER>_{closure_s,query_us,closure_triples}` (trend-only, NOT in scripts/perf-gate.py;
+# closure_triples is a deterministic structural metric, never an alert source). Like deep-taxonomy
+# this suite needs NO heavyweight toolchain — only python3 (always present) + the built sparq-cli —
+# so it runs on the per-commit tier by default at a SMALL tier pair (N=8 + N=32; closures 352 / 4,480
+# triples, sub-second total). N=256 is opt-in via SAMEAS_TIERS for the EC2/nightly tier. Guarded on
+# python3 + run.sh present (same shape as the deep-taxonomy guard): if python3 is somehow absent it
+# is skipped gracefully so ci-bench still emits valid JSON. run.sh failing (an owl:sameAs reasoner
+# regression) fails the whole ci-bench run.
+if command -v python3 >/dev/null 2>&1 && [ -x "$SAMEAS_RUN" ]; then
+  if CLI="$CLI" ITERS=3 SAMEAS_TIERS="$SAMEAS_TIERS" bash "$SAMEAS_RUN" > "$TMP/sameas.tsv" 2>"$TMP/sameas.err"; then
+    while IFS=$'\t' read -r name value unit; do
+      [ -n "${name:-}" ] && [ -n "${value:-}" ] && add "$name" "${unit:-}" "$value"
+    done < "$TMP/sameas.tsv"
+  else
+    # run.sh exits non-zero ONLY on a hard correctness mismatch (the python3 guard above ensures
+    # the toolchain is present), so surface its diagnostics and fail the run.
+    echo "ERROR: owl-sameas run.sh failed (closure-size regression or owl:sameAs reasoner error)" >&2
+    cat "$TMP/sameas.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: owl-sameas skipped (python3 not on PATH)" >&2
 fi
 
 # [OPUS-4.8] SHACL validation suite per-commit (sq-7iai). Reuses the LUBM(1) ABox, so it shares

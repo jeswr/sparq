@@ -1,0 +1,6 @@
+# [OPUS-4.8] OWL sameAs equality micro-suite class-membership probe (sq-msl6, design A3).
+# Returns one row per member of EVERY equivalence class — each member inherits the anchor's
+# (:p0 :v0) data triple via owl:sameAs entity rewriting (eq-rep). On the RAW corpus only the K
+# anchors carry :p0, so this returns K; only after the OWL-RL closure does it return K*N (every
+# member). expected.tsv pins K*N per tier. The :p0/:v0 IRIs match gen_sameas.py's first data triple.
+SELECT ?x WHERE { ?x <http://ex/p0> <http://ex/v0> }
