@@ -32,6 +32,16 @@
 //!   partition. With an explicit frame (`ROWS`/`RANGE BETWEEN … AND …`) the
 //!   aggregate is recomputed per row over only the rows in that row's frame, so a
 //!   running total / moving average is expressible (see [`WindowFrame`]).
+//! * [`WindowFunction::Lag`] / [`WindowFunction::Lead`] — `LAG`/`LEAD(?x[, n[,
+//!   default]])`: the value of a column from the row `n` positions BEFORE (`Lag`)
+//!   or AFTER (`Lead`) the current row in the window `ORDER BY` order. `n` defaults
+//!   to `1`; a source row outside the partition yields the supplied `default`
+//!   (unbound when none is given). These are POSITIONAL functions — they ignore any
+//!   [`WindowFrame`]. [OPUS-4.8] (sq-hqhc)
+//! * [`WindowFunction::Ntile`] — `NTILE(n)`: the 1-based bucket number when the
+//!   ordered partition is split into `n` near-equal buckets (the first `size % n`
+//!   buckets take one extra row). `n` must be `>= 1`. Also ignores any frame.
+//!   [OPUS-4.8] (sq-hqhc)
 //!
 //! Each appends one new bound column (`new_var`) to every row; the row order of
 //! the input `QueryResult` is preserved (window functions are computed, not a
@@ -58,8 +68,9 @@
 //!   `Range` is rejected by [`apply_window`].)
 //!
 //! Frames apply ONLY to aggregates; the ranking functions
-//! (`ROW_NUMBER`/`RANK`/`DENSE_RANK`) ignore any frame (SQL forbids a frame on
-//! them, so [`WindowSpec::frame`] is honoured only for [`WindowFunction::Aggregate`]).
+//! (`ROW_NUMBER`/`RANK`/`DENSE_RANK`) and the positional functions
+//! (`LAG`/`LEAD`/`NTILE`) ignore any frame (SQL forbids a frame on them, so
+//! [`WindowSpec::frame`] is honoured only for [`WindowFunction::Aggregate`]).
 //! A frame with no `ORDER BY` degenerates to the whole partition for `RANGE`
 //! (every row is a peer) and is still well-defined for `ROWS` (input order within
 //! the partition).
@@ -126,6 +137,19 @@ pub enum WindowFunction {
     /// A windowed aggregate over the row's FRAME within the partition (the whole
     /// partition when [`WindowSpec::frame`] is `None`), of the given column.
     Aggregate { agg: WindowAggregate, of: Variable },
+    /// `LAG(?of[, offset[, default]])` — the value of column `of` from the row
+    /// `offset` positions BEFORE the current row, in the window `ORDER BY` order.
+    /// `offset` defaults to `1`. When the source row falls outside the partition
+    /// the result is `default` (unbound when no default is given). [OPUS-4.8] (sq-hqhc)
+    Lag { of: Variable, offset: u64, default: Option<Term> },
+    /// `LEAD(?of[, offset[, default]])` — as [`Self::Lag`] but `offset` positions
+    /// AFTER the current row. [OPUS-4.8] (sq-hqhc)
+    Lead { of: Variable, offset: u64, default: Option<Term> },
+    /// `NTILE(n)` — the 1-based bucket number (`1..=n`) when the ordered partition
+    /// is split into `n` buckets as evenly as possible (earlier buckets take the
+    /// extra row when the partition size is not a multiple of `n`). `n` must be
+    /// `>= 1` (a `0` bucket count is rejected by [`apply_window`]). [OPUS-4.8] (sq-hqhc)
+    Ntile { buckets: u64 },
 }
 
 /// The unit of a window [`WindowFrame`]: physical row offsets (`ROWS`) or the
@@ -227,6 +251,16 @@ pub fn apply_window(result: &QueryResult, spec: &WindowSpec) -> Result<QueryResu
         if matches!(spec.function, WindowFunction::Aggregate { .. }) {
             validate_frame(frame)?;
         }
+    }
+    // NTILE(0) is undefined (you cannot split into zero buckets); reject up front.
+    // [OPUS-4.8] (sq-hqhc)
+    if let WindowFunction::Ntile { buckets: 0 } = spec.function {
+        return Err("window: NTILE requires a bucket count >= 1".into());
+    }
+    // The offset / positional functions read the column named by `of`, so validate
+    // it like the aggregate's `of` (a missing column is one clear error).
+    if let WindowFunction::Lag { of, .. } | WindowFunction::Lead { of, .. } = &spec.function {
+        col(of)?;
     }
 
     // Group row indices into partitions by their partition-key tuple, preserving
@@ -344,8 +378,66 @@ fn compute_partition(
                 }
             }
         }
+        // LAG / LEAD: offset the current ordered position by ±`offset`; out of the
+        // partition ⇒ the supplied default (unbound if none). The frame is ignored
+        // (SQL: an offset function takes no frame). [OPUS-4.8] (sq-hqhc)
+        WindowFunction::Lag { of, offset, default } => {
+            eval_offset(result, of, ordered, values, |pos| pos.checked_sub(*offset as i128), default);
+        }
+        WindowFunction::Lead { of, offset, default } => {
+            eval_offset(result, of, ordered, values, |pos| pos.checked_add(*offset as i128), default);
+        }
+        // NTILE(n): split the ordered partition into `n` near-equal buckets; the
+        // first `size % n` buckets get one extra row. The frame is ignored.
+        // [OPUS-4.8] (sq-hqhc)
+        WindowFunction::Ntile { buckets } => {
+            let n = *buckets;
+            // `buckets == 0` is validated away in `apply_window`; guard anyway.
+            if n == 0 {
+                return Err("window: NTILE requires a bucket count >= 1".into());
+            }
+            let total = ordered.len() as u64;
+            let base = total / n; // minimum rows per bucket
+            let extra = total % n; // first `extra` buckets get one more
+            let mut pos: u64 = 0; // 0-based ordered position consumed so far
+            for bucket in 0..n {
+                let this = base + u64::from(bucket < extra);
+                for _ in 0..this {
+                    let ri = ordered[pos as usize];
+                    values[ri] = Some(int_term((bucket + 1) as i64));
+                    pos += 1;
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// Shared LAG/LEAD body: for each ordered position `pos`, read column `of` from the
+/// row at `src(pos)` (a position-offset closure) and write it into `values` at the
+/// current row's input index; an out-of-partition source yields `default` (which may
+/// be unbound). [OPUS-4.8] (sq-hqhc)
+fn eval_offset(
+    result: &QueryResult,
+    of: &Variable,
+    ordered: &[usize],
+    values: &mut [Option<Term>],
+    src: impl Fn(i128) -> Option<i128>,
+    default: &Option<Term>,
+) {
+    let of_col = result.vars.iter().position(|c| c == of);
+    let n = ordered.len() as i128;
+    for (pos, &ri) in ordered.iter().enumerate() {
+        let value = match src(pos as i128) {
+            Some(j) if j >= 0 && j < n => {
+                let src_ri = ordered[j as usize];
+                of_col.and_then(|c| result.rows[src_ri][c].clone())
+            }
+            // Source row is outside the partition: fall back to the default.
+            _ => default.clone(),
+        };
+        values[ri] = value;
+    }
 }
 
 /// Validates a window frame for an aggregate: well-formedness (a `start` may not
@@ -856,5 +948,172 @@ mod tests {
         let out = apply_window(&seq(), &spec).unwrap();
         assert_eq!(val(&out, 0, 1), int(1).to_string());
         assert_eq!(val(&out, 3, 1), int(4).to_string());
+    }
+
+    // ---- offset / positional functions: LAG / LEAD / NTILE — sq-hqhc [OPUS-4.8] ----
+
+    /// `(?emp ?sales)` in one partition: a=10, b=20, c=30, d=40 in input order.
+    fn seq2() -> QueryResult {
+        QueryResult {
+            vars: vec![var("emp"), var("sales")],
+            rows: vec![
+                vec![Some(iri("http://ex/a")), Some(int(10))],
+                vec![Some(iri("http://ex/b")), Some(int(20))],
+                vec![Some(iri("http://ex/c")), Some(int(30))],
+                vec![Some(iri("http://ex/d")), Some(int(40))],
+            ],
+        }
+    }
+
+    #[test]
+    fn lag_default_offset_one() {
+        // LAG(?sales) over ORDER BY ?sales asc: each row sees the previous row's value;
+        // the first row's predecessor is out of partition → unbound (no default).
+        let spec = WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("sales"))],
+            function: WindowFunction::Lag { of: var("sales"), offset: 1, default: None },
+            frame: None,
+            new_var: var("prev"),
+        };
+        let out = apply_window(&seq2(), &spec).unwrap();
+        // ordered 10,20,30,40 → lag: unbound, 10, 20, 30 (mapped back to input order a,b,c,d).
+        assert!(out.rows[0][2].is_none()); // a: no predecessor
+        assert_eq!(val(&out, 1, 2), int(10).to_string()); // b sees a=10
+        assert_eq!(val(&out, 2, 2), int(20).to_string()); // c sees b=20
+        assert_eq!(val(&out, 3, 2), int(30).to_string()); // d sees c=30
+    }
+
+    #[test]
+    fn lag_with_offset_and_default() {
+        // LAG(?sales, 2, -1): two rows back, default -1 when out of partition.
+        let spec = WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("sales"))],
+            function: WindowFunction::Lag { of: var("sales"), offset: 2, default: Some(int(-1)) },
+            frame: None,
+            new_var: var("prev2"),
+        };
+        let out = apply_window(&seq2(), &spec).unwrap();
+        // ordered 10,20,30,40 → lag2: default(-1), default(-1), 10, 20.
+        assert_eq!(val(&out, 0, 2), int(-1).to_string()); // a: out → default
+        assert_eq!(val(&out, 1, 2), int(-1).to_string()); // b: out → default
+        assert_eq!(val(&out, 2, 2), int(10).to_string()); // c sees a=10
+        assert_eq!(val(&out, 3, 2), int(20).to_string()); // d sees b=20
+    }
+
+    #[test]
+    fn lead_default_offset_one() {
+        // LEAD(?sales): the NEXT row's value; the last row's successor is out → unbound.
+        let spec = WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("sales"))],
+            function: WindowFunction::Lead { of: var("sales"), offset: 1, default: None },
+            frame: None,
+            new_var: var("next"),
+        };
+        let out = apply_window(&seq2(), &spec).unwrap();
+        // ordered 10,20,30,40 → lead: 20, 30, 40, unbound.
+        assert_eq!(val(&out, 0, 2), int(20).to_string()); // a sees b=20
+        assert_eq!(val(&out, 2, 2), int(40).to_string()); // c sees d=40
+        assert!(out.rows[3][2].is_none()); // d: no successor
+    }
+
+    #[test]
+    fn ntile_even_and_uneven() {
+        // NTILE(2) over 4 rows → buckets [1,1,2,2] (even split).
+        let two = WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("sales"))],
+            function: WindowFunction::Ntile { buckets: 2 },
+            frame: None,
+            new_var: var("nt"),
+        };
+        let out = apply_window(&seq2(), &two).unwrap();
+        assert_eq!(val(&out, 0, 2), int(1).to_string()); // a
+        assert_eq!(val(&out, 1, 2), int(1).to_string()); // b
+        assert_eq!(val(&out, 2, 2), int(2).to_string()); // c
+        assert_eq!(val(&out, 3, 2), int(2).to_string()); // d
+
+        // NTILE(3) over 4 rows → the first (4 % 3 = 1) bucket gets the extra row:
+        // bucket sizes 2,1,1 → [1,1,2,3].
+        let three = WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("sales"))],
+            function: WindowFunction::Ntile { buckets: 3 },
+            frame: None,
+            new_var: var("nt3"),
+        };
+        let out3 = apply_window(&seq2(), &three).unwrap();
+        assert_eq!(val(&out3, 0, 2), int(1).to_string());
+        assert_eq!(val(&out3, 1, 2), int(1).to_string());
+        assert_eq!(val(&out3, 2, 2), int(2).to_string());
+        assert_eq!(val(&out3, 3, 2), int(3).to_string());
+    }
+
+    #[test]
+    fn ntile_more_buckets_than_rows() {
+        // NTILE(10) over 4 rows: 4 % 10 = 4 buckets of size 1, the rest empty →
+        // each row in its own bucket 1..=4.
+        let spec = WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("sales"))],
+            function: WindowFunction::Ntile { buckets: 10 },
+            frame: None,
+            new_var: var("nt"),
+        };
+        let out = apply_window(&seq2(), &spec).unwrap();
+        for (i, expect) in [1, 2, 3, 4].into_iter().enumerate() {
+            assert_eq!(val(&out, i, 2), int(expect).to_string());
+        }
+    }
+
+    #[test]
+    fn ntile_zero_is_error() {
+        let spec = WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("sales"))],
+            function: WindowFunction::Ntile { buckets: 0 },
+            frame: None,
+            new_var: var("nt"),
+        };
+        assert!(apply_window(&seq2(), &spec).is_err());
+    }
+
+    #[test]
+    fn lag_lead_respect_partitions() {
+        // LAG must not cross a partition boundary: with PARTITION BY ?dept, the first
+        // row of each dept has no predecessor.
+        let data = QueryResult {
+            vars: vec![var("dept"), var("sales")],
+            rows: vec![
+                vec![Some(iri("http://ex/eng")), Some(int(10))],
+                vec![Some(iri("http://ex/eng")), Some(int(20))],
+                vec![Some(iri("http://ex/sales")), Some(int(30))],
+            ],
+        };
+        let spec = WindowSpec {
+            partition_by: vec![var("dept")],
+            order_by: vec![SortKey::asc(var("sales"))],
+            function: WindowFunction::Lag { of: var("sales"), offset: 1, default: None },
+            frame: None,
+            new_var: var("prev"),
+        };
+        let out = apply_window(&data, &spec).unwrap();
+        assert!(out.rows[0][2].is_none()); // eng/10: first of partition
+        assert_eq!(val(&out, 1, 2), int(10).to_string()); // eng/20 sees eng/10
+        assert!(out.rows[2][2].is_none()); // sales/30: first (and only) of its partition
+    }
+
+    #[test]
+    fn lag_unknown_column_is_error() {
+        let spec = WindowSpec {
+            partition_by: vec![],
+            order_by: vec![SortKey::asc(var("sales"))],
+            function: WindowFunction::Lag { of: var("nope"), offset: 1, default: None },
+            frame: None,
+            new_var: var("prev"),
+        };
+        assert!(apply_window(&seq2(), &spec).is_err());
     }
 }
