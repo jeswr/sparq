@@ -270,12 +270,21 @@ parent's focus nodes.
 violates when its `sh:expression` node expression does NOT evaluate to `{ true }`
 (value = focus on a node shape; each path value on a property shape).
 
+**`sh:nodeByExpression` constraint** (`sh:NodeByExpressionConstraintComponent`):
+like `sh:node`, but the node shape is *computed* by a node expression. For each
+value node `v`, the expression is evaluated against `v` as focus to a set of
+node-shape terms; `v` violates when it does NOT conform to one of them. A constant
+IRI expression is the `sh:node` special case; an expression result naming no parsed
+shape is skipped (lenient).
+
 API: `apply_rules(data, shapes)`, `apply_rules_with_model(data, shapes, &model)`
 (amortise shape parsing), `expand(data, shapes) -> Graph`, the node-expression
 seam `eval_node_expression(data, shapes, expr, focus) -> Option<Vec<Term>>`, and
 the conformance primitive `conforms(data, shapes, shape_node) -> ConformanceCheck`
 (call `.holds(node)` per focus). A gated W3C harness (`tests/w3c_node_expr.rs`)
-drives the `sht:EvalNodeExpr` suite — all evaluation entries pass (self-skips when
+drives the `sht:EvalNodeExpr` suite — all evaluation entries pass; a companion
+harness (`tests/w3c_node_expr_constraints.rs`) drives the suite's two `sht:Validate`
+entries (`sh:expression` / `sh:nodeByExpression`) end-to-end (both self-skip when
 the suite is not fetched).
 
 ## Gotchas / feature flags / prerequisites

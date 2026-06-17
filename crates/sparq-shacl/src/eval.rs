@@ -674,6 +674,51 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            // [OPUS-4.8] (sq-3w6n, `shacl-af`) `sh:nodeByExpression`
+            // (`sh:NodeByExpressionConstraintComponent`): for each value node `v`,
+            // the node expression is evaluated against `v` as focus to a set of
+            // node-shape terms; `v` is violated when it does NOT conform to one of
+            // them. (Per SHACL-AF, `sh:node` is the special case of a constant IRI
+            // node-shape expression.) Result-set evaluation borrows the model
+            // immutably, so the (value → shape ids) work is collected up front and
+            // the recursion-safe `conforms` (which needs `&mut self`) runs after.
+            #[cfg(feature = "shacl-af")]
+            Component::NodeByExpression(idx) => {
+                let mut checks: Vec<(Term, Vec<usize>)> = Vec::with_capacity(values.len());
+                {
+                    let data = self.data.graph();
+                    let expr = &self.shapes.expressions[*idx];
+                    for v in values {
+                        let shape_terms =
+                            crate::rules::eval_parsed_expr(data, self.shapes, expr, v);
+                        // Resolve each computed shape term to a parsed shape id. An
+                        // unparsed term (no such shape) is skipped — lenient, per
+                        // this crate's policy.
+                        let sids: Vec<usize> = shape_terms
+                            .iter()
+                            .filter_map(|s| self.shapes.by_node(s))
+                            .collect();
+                        checks.push((v.clone(), sids));
+                    }
+                }
+                for (v, sids) in checks {
+                    for s in sids {
+                        if !self.conforms(&v, s) {
+                            out.push(
+                                self.result(
+                                    sid,
+                                    focus,
+                                    Some(v.clone()),
+                                    "NodeByExpressionConstraintComponent",
+                                    "Value does not conform to the node shape computed by \
+                                 sh:nodeByExpression"
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

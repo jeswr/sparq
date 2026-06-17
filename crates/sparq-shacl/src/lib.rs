@@ -469,9 +469,11 @@ mod tests {
     }
 }
 
-// [OPUS-4.8] (sq-mk9n, `shacl-af`) The `sh:expression` constraint
-// (`sh:ExpressionConstraintComponent`): a value node violates when the node
-// expression does not evaluate to `{ true }` for that value.
+// [OPUS-4.8] (sq-mk9n / sq-3w6n, `shacl-af`) The two SHACL-AF node-expression
+// constraints: `sh:expression` (`sh:ExpressionConstraintComponent`) — a value
+// node violates when the node expression does not evaluate to `{ true }` — and
+// `sh:nodeByExpression` (`sh:NodeByExpressionConstraintComponent`) — a value node
+// violates when it does not conform to a node shape the expression computes.
 #[cfg(feature = "shacl-af")]
 #[cfg(test)]
 mod expression_tests {
@@ -530,6 +532,88 @@ mod expression_tests {
         assert!(
             r.conforms,
             "age 5 >= 3 => matchAll true => exists true: {}",
+            r.to_text()
+        );
+    }
+
+    // ---- [OPUS-4.8] (sq-3w6n) sh:nodeByExpression ----
+
+    #[test]
+    fn node_by_expression_constant_iri_violates_nonconforming_value() {
+        // The W3C `nodeByExpression-001` shape: a property shape whose value nodes
+        // must conform to the node shape an expression computes. Here the expression
+        // is the constant IRI `ex:AssignedToShape` (per SHACL-AF, an IRI expression
+        // evaluating to { ex:AssignedToShape } — the `sh:node` special case). The
+        // assignee lacks the required `ex:email`, so it does NOT conform => one
+        // violation with the value node and component IRI.
+        let data = g("ex:issue a ex:Issue ; ex:assignedTo ex:anon . ex:anon a ex:Person .");
+        let shapes = g(
+            "ex:AssignedToShape a sh:NodeShape ; \
+               sh:property [ sh:path ex:email ; sh:minCount 1 ] . \
+             ex:Issue a rdfs:Class, sh:NodeShape ; \
+               sh:property [ sh:path ex:assignedTo ; sh:nodeByExpression ex:AssignedToShape ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "{}", r.to_text());
+        assert!(
+            r.results.iter().any(|res| res
+                .source_component
+                .ends_with("NodeByExpressionConstraintComponent")
+                && res.value.as_ref().map(|v| v.to_string()).as_deref()
+                    == Some("<http://example.org/anon>")),
+            "expected a NodeByExpression violation for ex:anon: {}",
+            r.to_text()
+        );
+    }
+
+    #[test]
+    fn node_by_expression_conforming_value_passes() {
+        // The same constraint, but the assignee carries the required email, so it
+        // conforms to the computed node shape and there is no violation.
+        let data = g(
+            "ex:issue a ex:Issue ; ex:assignedTo ex:jane . \
+             ex:jane a ex:Person ; ex:email \"jane@ex.org\" .",
+        );
+        let shapes = g(
+            "ex:AssignedToShape a sh:NodeShape ; \
+               sh:property [ sh:path ex:email ; sh:minCount 1 ] . \
+             ex:Issue a rdfs:Class, sh:NodeShape ; \
+               sh:property [ sh:path ex:assignedTo ; sh:nodeByExpression ex:AssignedToShape ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(
+            r.conforms,
+            "ex:jane has an email => conforms: {}",
+            r.to_text()
+        );
+    }
+
+    #[test]
+    fn node_by_expression_path_computed_shape() {
+        // A dynamically-computed shape: the node expression is a path-values
+        // expression that locates the shape at `ex:hasShape` from the value node.
+        // ex:obs/ex:hasShape => ex:RangeShape (minInclusive 0); ex:obs's measure is
+        // -1, so it must NOT conform => one violation on the value node.
+        let data = g(
+            "ex:obs a ex:Observation ; ex:value -1 ; ex:hasShape ex:RangeShape . \
+             ex:s a ex:DataShape ; ex:item ex:obs .",
+        );
+        let shapes = g(
+            "ex:RangeShape a sh:NodeShape ; \
+               sh:property [ sh:path ex:value ; sh:minInclusive 0 ] . \
+             ex:DataShape a rdfs:Class, sh:NodeShape ; \
+               sh:property [ sh:path ex:item ; \
+                 sh:nodeByExpression [ sh:path ex:hasShape ] ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "value -1 < 0 must violate: {}", r.to_text());
+        assert!(
+            r.results.iter().any(|res| res
+                .source_component
+                .ends_with("NodeByExpressionConstraintComponent")
+                && res.value.as_ref().map(|v| v.to_string()).as_deref()
+                    == Some("<http://example.org/obs>")),
+            "expected a NodeByExpression violation for ex:obs: {}",
             r.to_text()
         );
     }

@@ -93,6 +93,15 @@ pub enum Component {
     /// parsed node expression is held there, off the public `Component` enum).
     #[cfg(feature = "shacl-af")]
     Expression(usize),
+    /// [OPUS-4.8] (sq-3w6n, `shacl-af`) `sh:nodeByExpression` — the SHACL-AF
+    /// *Node-by-Expression Constraint* (`sh:NodeByExpressionConstraintComponent`):
+    /// for each value node `v`, the node expression is evaluated against `v` as
+    /// focus to a set of node-shape terms `s`; `v` is violated when it does NOT
+    /// conform to some `s`. (Like `sh:node`, but the shape is computed by the
+    /// expression rather than fixed.) The index is into
+    /// [`ShapesModel::expressions`] (shared store with `sh:expression`).
+    #[cfg(feature = "shacl-af")]
+    NodeByExpression(usize),
 }
 
 /// [OPUS-4.8] A declared `sh:parameter` of a SPARQL-based constraint component
@@ -304,37 +313,54 @@ impl ShapesModel {
         m
     }
 
-    /// [OPUS-4.8] (sq-mk9n, `shacl-af`) Parses `sh:expression` on every shape into
-    /// a [`Component::Expression`]. Inline filter shapes used by the expression are
-    /// registered first (so they are conformance-checkable), then the expressions
-    /// are parsed and attached.
+    /// [OPUS-4.8] (sq-mk9n / sq-3w6n, `shacl-af`) Parses the two SHACL-AF
+    /// node-expression constraints — `sh:expression`
+    /// (→ [`Component::Expression`]) and `sh:nodeByExpression`
+    /// (→ [`Component::NodeByExpression`]) — on every shape. Inline filter shapes
+    /// used by the expressions, and the node shapes a `sh:nodeByExpression`
+    /// expression names as a constant, are registered first (so they are
+    /// conformance-checkable), then the expressions are parsed and attached.
     #[cfg(feature = "shacl-af")]
     fn parse_expression_constraints(&mut self, shapes_graph: &Graph) {
         let g = GraphView::new(shapes_graph);
-        // Collect (shape_id, expression_term) for every shape carrying sh:expression.
-        let mut pending: Vec<(usize, Term)> = Vec::new();
+        // Collect (shape_id, expression_term, is_node_by_expr) for every shape
+        // carrying sh:expression or sh:nodeByExpression.
+        let mut pending: Vec<(usize, Term, bool)> = Vec::new();
         for sid in 0..self.shapes.len() {
             let node = self.shapes[sid].node.clone();
             for expr in g.objects(&node, &sh("expression")) {
-                pending.push((sid, expr));
+                pending.push((sid, expr, false));
+            }
+            for expr in g.objects(&node, &sh("nodeByExpression")) {
+                pending.push((sid, expr, true));
             }
         }
         // Register any inline filter shapes the expressions reference (best-effort)
         // so `sh:filterShape` / function filter shapes resolve at eval time.
-        for (_, expr) in &pending {
+        for (_, expr, is_nbe) in &pending {
             self.register_expression_shapes(shapes_graph, expr, 0);
+            // A `sh:nodeByExpression` whose expression names a node shape as a
+            // constant IRI must have that shape parsed so conformance can be
+            // checked at eval time (it may not be a target-bearing root).
+            if *is_nbe && matches!(expr, Term::NamedNode(_)) {
+                self.ensure_shape(shapes_graph, expr);
+            }
         }
         // Parse each expression (immutable borrow) and attach the component.
-        let parsed: Vec<(usize, crate::rules::NodeExpr)> = pending
+        let parsed: Vec<(usize, crate::rules::NodeExpr, bool)> = pending
             .into_iter()
-            .filter_map(|(sid, expr)| {
-                crate::rules::parse_node_expr(&g, self, &expr).map(|ne| (sid, ne))
+            .filter_map(|(sid, expr, is_nbe)| {
+                crate::rules::parse_node_expr(&g, self, &expr).map(|ne| (sid, ne, is_nbe))
             })
             .collect();
-        for (sid, expr) in parsed {
+        for (sid, expr, is_nbe) in parsed {
             let idx = self.expressions.len();
             self.expressions.push(expr);
-            self.shapes[sid].components.push(Component::Expression(idx));
+            self.shapes[sid].components.push(if is_nbe {
+                Component::NodeByExpression(idx)
+            } else {
+                Component::Expression(idx)
+            });
         }
     }
 

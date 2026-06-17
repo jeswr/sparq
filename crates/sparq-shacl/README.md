@@ -150,6 +150,14 @@ value node `v` is a violation when its `sh:expression` node expression does NOT
 evaluate to `{ true }` for `v`. On a node shape `v` is the focus node; on a
 property shape it is each path value node.
 
+**`sh:nodeByExpression` constraint** (`sh:NodeByExpressionConstraintComponent`,
+SHACL-AF) — like `sh:node`, but the node shape is *computed* by a node expression
+rather than fixed. For each value node `v`, the expression is evaluated against
+`v` as focus to a set of node-shape terms; `v` is a violation when it does NOT
+conform to one of them. A constant IRI expression is the `sh:node` special case
+(it evaluates to that one shape); a path-values expression locates the shape(s)
+dynamically. An expression result that names no parsed shape is skipped (lenient).
+
 Rules honour `sh:condition` (fire only for focus nodes conforming to every
 condition shape), `sh:order` (ascending; a rule sees earlier groups' inferences)
 and `sh:deactivated`. The schedule is **iterated to a fixpoint** bounded by
@@ -163,7 +171,11 @@ compiled in. A gated W3C conformance harness
 ([`tests/w3c_node_expr.rs`](tests/w3c_node_expr.rs)) drives the `sht:EvalNodeExpr`
 suite for the implemented forms — all evaluation entries (focus/constant/list/path/
 filter/intersection/union plus the registry's function operators) pass; it
-self-skips when the suite is not fetched.
+self-skips when the suite is not fetched. A companion gated harness
+([`tests/w3c_node_expr_constraints.rs`](tests/w3c_node_expr_constraints.rs)) drives
+the suite's two `sht:Validate` constraint entries (`expression-001`,
+`nodeByExpression-001`) end-to-end through `validate`, comparing the produced
+report to the expected one.
 
 Targets: `sh:targetNode`, `sh:targetClass` (with `rdfs:subClassOf*` closure),
 implicit class targets (a shape that is itself an `rdfs:Class`),
