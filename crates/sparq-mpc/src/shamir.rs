@@ -767,6 +767,11 @@ impl MacSession<'_> {
         //    would just track whatever (tampered) value `[z]` carried. This is the
         //    Chida-et-al. honest-majority malicious multiplication shape (the MAC is
         //    carried forward via the input MAC, then checked at output).
+        // [OPUS-4.8] The genuine regression test that DISTINGUISHES this sound carry
+        //    from the unsound `[z]·[α]` route must inject δ INSIDE this `degree_reduce`
+        //    over the independent input shares (a post-hoc output tamper cannot tell the
+        //    two routes apart — both leave the honest MAC opening to `α·z`). Tracked as
+        //    bead sq-81gd.
         let mac_2t = mul_shares_raw(x.mac_shares(), y.value_shares())?;
         let mac = self.dealer.degree_reduce(&mac_2t)?;
         crate::authenticated::AuthenticatedShare::new(z, mac)
