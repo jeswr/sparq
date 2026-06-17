@@ -1,29 +1,11 @@
 # sparq-sim
 
-**Training-free structural entity similarity** for the sparq RDF engine — an opt-in
-crate (GenAI phase 1, see [`research/genai-design.md`](../../research/genai-design.md))
-that computes similarity straight from the store's existing permutation indexes. No
-embeddings, no models, no network, no extra state: the indexes ARE the feature store,
-so similarity stays correct under incremental updates for free.
+**Training-free structural entity similarity** for the sparq RDF engine — an **opt-in**
+crate (GenAI phase 1) that computes similarity straight from the store's existing
+permutation indexes. No embeddings, no models, no network, no extra state: the indexes
+ARE the feature store, so similarity stays correct under incremental updates for free.
 
-## How it works
-
-- **Signature**: an entity's structural signature is its set of
-  `(direction, predicate, neighbor)` pairs — outgoing from one SPO range scan,
-  incoming from one OSP/OPS range scan. Cost `O(log n + degree)`.
-- **Similarity**: predicate-IDF-weighted Jaccard over two signatures
-  (`w(e) = 1 + ln(|G| / freq(pred))`, frequencies from the store's existing planner
-  stats) — sharing a rare predicate counts for more than sharing `rdf:type`.
-- **`most_similar(a, k)`**: candidate generation through the indexes, **not a full
-  scan** — each signature element's co-owners are one contiguous index range (POS for
-  outgoing `(p, n)`, SPO for incoming). Candidates accumulate shared-element weight
-  (an intersection upper bound); the top `max(4k, 64)` are re-scored exactly.
-  Complexity `O(Σ_e min(freq(e), F))` for generation plus `O(M·(log n + d̄))` for
-  re-scoring. Elements matched by more than `F = max_pair_frequency` triples (hubs —
-  the lowest-IDF, least informative) are skipped during *generation only*; re-scoring
-  is always exact. Set the cap to `usize::MAX` for exact-but-slower generation.
-
-## API
+## 🚀 Quickstart
 
 ```rust
 use sparq_sim::{Sim, SimConfig, SignatureMode, weighted_jaccard};
@@ -43,83 +25,78 @@ sim.similar_by_signature(&sig, 10);      // probe with an arbitrary signature
 weighted_jaccard(&sig_a, &sig_b);        // for callers that cache signatures
 ```
 
-Two signature modes, two notions of similarity:
+## ✨ Features
 
-- `PredicateNeighbor` (default): similar = **shares concrete context** (same team,
-  same games, same birthplace). This is the mode `most_similar`'s index-driven
-  candidate generation is built around.
-- `Predicates`: similar = **used the same way** (predicate profile / role similarity —
-  two Sports share no concrete neighbor, but their profiles are near-identical).
+- **Structural signature** — an entity's signature is its set of
+  `(direction, predicate, neighbor)` pairs (outgoing from one SPO range scan, incoming
+  from one OSP/OPS scan), cost `O(log n + degree)`.
+- **IDF-weighted Jaccard** — `w(e) = 1 + ln(|G| / freq(pred))`, frequencies from the
+  store's existing planner stats, so sharing a rare predicate counts for more than
+  sharing `rdf:type`.
+- **Index-driven `most_similar(a, k)`** — candidate generation through the indexes, **not
+  a full scan**: each signature element's co-owners are one contiguous index range.
+  Candidates accumulate a shared-element weight (intersection upper bound); the top
+  `max(4k, 64)` are re-scored exactly. Generation skips hub elements matched by more than
+  `F = max_pair_frequency` triples (the lowest-IDF, least informative); re-scoring is
+  always exact. Set the cap to `usize::MAX` for exact-but-slower generation.
+- **Two signature modes** — `PredicateNeighbor` (default): similar = **shares concrete
+  context** (same team, same games), the mode candidate generation is built around.
+  `Predicates`: similar = **used the same way** (predicate profile / role similarity).
+- **Neighbor-sparse profile fallback** (`SimConfig::profile_fallback`, default on) — for
+  classes where every entity names a unique neighbor (no two share concrete context), the
+  fallback fills starved slots with role-profile matches, recovering near-full precision
+  for a small per-query latency cost.
+- **Hybrid search with text vectors** — structural similarity knows how entities are
+  *connected*, not what their labels *mean*. The opt-in
+  [`sparq-vectors`](../sparq-vectors) crate covers the text side and ships dependency-free
+  fusion helpers, so the two signals combine without either crate depending on the other:
 
-## How to: hybrid search with text vectors
+  ```rust
+  use sparq_sim::Sim;
+  use sparq_vectors::{fuse_rrf, RRF_K};
 
-Structural similarity knows how entities are *connected*; it knows nothing about
-what their labels and descriptions *mean* (two differently-modeled descriptions of
-the same person share no structure). The opt-in [`sparq-vectors`](../sparq-vectors)
-crate covers the text side — `embed_entities` embeds a passage per entity
-(label + type + description, configurable) — and ships dependency-free fusion
-helpers, so the two signals combine without either crate depending on the other:
+  let structural = Sim::new(&graph).most_similar(&query, 50);
+  let text: Vec<(_, f64)> = index.nearest_term(&query, &graph, &store, 50)
+      .into_iter().map(|(t, s)| (t, s as f64)).collect();
+  // Reciprocal Rank Fusion: rank-based, no score normalization needed.
+  let hybrid = fuse_rrf(&[&text, &structural], RRF_K, 10);
+  ```
 
-```rust
-use sparq_sim::Sim;
-use sparq_vectors::{fuse_rrf, RRF_K};
-
-let structural: Vec<(Term, f64)> = Sim::new(&graph).most_similar(&query, 50);
-let text: Vec<(Term, f64)> = index // sparq_vectors::VectorIndex
-    .nearest_term(&query, &graph, &store, 50)
-    .into_iter().map(|(t, s)| (t, s as f64)).collect();
-
-// Reciprocal Rank Fusion: rank-based, no score normalization needed
-// (weighted Jaccard in [0,1] and cosine in [-1,1] fuse as-is).
-let hybrid = fuse_rrf(&[&text, &structural], RRF_K, 10);
-```
-
-Over-fetch each signal (k = 50 for a top-10 fusion) so the fusion has overlap to
-reward. `fuse_scores(&text, &structural, alpha, k)` is the tunable alternative
-(min-max normalized alpha-blend). Full recipe + the research behind it:
-[`sparq-vectors` README](../sparq-vectors/README.md) and
-[`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md).
+  Over-fetch each signal (k = 50 for a top-10 fusion) so the fusion has overlap to reward.
+  `fuse_scores(&text, &structural, alpha, k)` is the tunable min-max-normalized alternative.
 
 ## Measured results — olympics
 
 `bench/qlever-olympics/olympics.nt` (134,730 foaf:Person + SportsTeam/SportsEvent/
-Olympics/Sport/City), ground truth = `rdf:type`, **type triples excluded from
-signatures** (leakage rule, design doc §5.5). Stratified per-class sampling (40 per
-class — the data is 98% Person).
-
-The `olympics_eval` example reports the quality + latency metrics and checks them
-against their gates (same-class precision@10; `Predicates`-mode class-separation AUC;
-`most_similar(k=10)` latency). Run it for the numbers — and see the perf dashboard
-(<https://jeswr.github.io/sparq/dev/bench>) for the tracked figures:
+Olympics/Sport/City), ground truth = `rdf:type`, **type triples excluded** (leakage rule,
+design doc §5.5), stratified per-class sampling. The `olympics_eval` example reports
+quality + latency and checks the gates (same-class precision@10; `Predicates`-mode
+class-separation AUC; `most_similar(k=10)` latency); the absolute figures live on the
+perf dashboard.
 
 ```sh
 cargo run -p sparq-sim --example olympics_eval --release
 ```
 
-The gates it enforces, and the two AUC interpretations below, are the load-bearing
-part — the absolute figures print from the example.
+**The two AUCs.** Pairwise AUC asks "do two random same-class entities score higher than
+two cross-class ones?". In `PredicateNeighbor` mode most same-class pairs share *no*
+concrete neighbor and tie at 0 — by design: that mode measures shared context, not class
+membership. Role similarity is the `Predicates` mode's job (near-perfect separation). The
+ranking task the crate is built for — `most_similar` retrieving same-class entities — is
+measured by precision@10, high across every class.
 
-**Note on the two AUCs.** Pairwise AUC asks "do two random same-class entities score
-higher than two cross-class ones?". In `PredicateNeighbor` mode most same-class pairs
-(two arbitrary athletes) share *no concrete neighbor* and tie with cross-class pairs
-at 0 — by design: that mode measures shared context, not class membership. Role
-similarity is the `Predicates` mode's job, where class separation is near-perfect.
-The ranking task the crate is built for — `most_similar` retrieving same-class
-entities — is measured by precision@10, which is high across every class.
+Tests: 13 unit (`src/lib.rs`: Jaccard math, symmetry, direction, IDF ordering, exclusions,
+mode semantics, hub-cap behaviour, neighbor-sparse fallback, AUC gate) plus 1 integration
+(`tests/olympics.rs`, skip-if-absent at 1.78M scale).
 
-Sport and City are served by the **neighbor-sparse profile fallback**
-(`SimConfig::profile_fallback`, default on): v1 returned almost no candidates for them
-(every event names exactly one sport, so no two sports share a concrete neighbor); the
-fallback fills starved slots with role-profile matches, taking those classes to near-full
-precision for a small per-query latency cost.
+## 📚 Learn more
 
-## Tests
+- Design record: [`research/genai-design.md`](../../research/genai-design.md)
+- Text embeddings: [`sparq-vectors` README](../sparq-vectors/README.md),
+  [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md)
+- Skill: `skills/structural-similarity/SKILL.md`
+- Perf dashboard: <https://jeswr.github.io/sparq/dev/bench>
 
-- 13 unit tests (`src/lib.rs`): Jaccard math hand-checks, symmetry, direction,
-  IDF ordering, exclusions, mode semantics, hub-cap behaviour (with and without the
-  fallback), neighbor-sparse fallback semantics (starved star topology, exact-first
-  ranking, no fallback when generation suffices), and a generated-taxonomy
-  AUC gate (a deterministic threshold the synthetic data must clear).
-- 1 integration test (`tests/olympics.rs`): API sanity at 1.78M-triple scale —
-  skips (passes with a note) when the fixture is absent; override the path with
-  `SPARQ_OLYMPICS_NT`.
+## License
+
+MIT. [OPUS-4.8] sq-lsxd
