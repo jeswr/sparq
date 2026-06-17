@@ -1,0 +1,35 @@
+[package]
+name = "sparq-algos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in graph analytics over a sparq RDF graph: PageRank, degree/in/out centrality, and weakly-connected-component community detection, computed directly from sparq-core's permutation indexes with no extra state"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# [OPUS-4.8] Render README.md as the docs.rs front page (lib.rs uses include_str!).
+[package.metadata.docs.rs]
+all-features = true
+
+# [OPUS-4.8] sq-mqvm (epic sq-3183): vendor-parity graph analytics (Neptune ships 25+;
+# sparq shipped none). This is a SEPARATE, OPT-IN crate so the core engine carries ZERO
+# analytics code — it consumes ONLY sparq-core's PUBLIC read API (the borrowing triple-id
+# iterator + dict lookups), holds no graph state of its own, and nothing in the workspace
+# depends on it (the default engine build does not even compile it). The algorithms project
+# the RDF graph onto a directed adjacency view keyed by dictionary ids; PageRank, the
+# centralities, and the connected-component / label-propagation community pass all run over
+# that view, so the engine, planner and wasm bundle remain completely unaware of analytics.
+
+[features]
+default = []
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+oxrdf.workspace = true
+rustc-hash.workspace = true

@@ -48,6 +48,21 @@ pinning     = "dataset deterministic (fixed SplitMix64 seed 0x9E3779B97F4A7C15);
 records_to  = "stdout; results table in research/BENCHMARKS.md"
 status      = "ok"
 
+# [OPUS-4.8] sq-mqvm (epic sq-3183): the opt-in sparq-algos graph-analytics surface.
+[[benchmark]]
+id          = "sparq-algos"
+name        = "Graph analytics (PageRank / centrality / community) throughput"
+category    = "scaling"
+measures    = "min-of-3 microseconds for NodeGraph build, PageRank, degree centrality, weakly-connected components, and label propagation over a generated graph (metric_us lines)"
+invoke      = "cargo run -p sparq-algos --release --example bench_algos -- 50000 8"
+source      = "crates/sparq-algos/examples/bench_algos.rs"
+dataset     = "synthetic preferential-attachment graph generated in-process (deterministic xorshift seed); args = [nodes=50000] [avg_degree=8]"
+quiet_box_sensitive = true
+featured    = false  # in-crate micro-bench for an opt-in capability crate; not a dashboard series
+pinning     = "generator deterministic (fixed xorshift seed); pin nodes/avg_degree for comparable numbers"
+records_to  = "stdout (metric_us lines); not a committed regression number"
+status      = "ok"
+
 [[benchmark]]
 id          = "sparq-bench-fuzz"
 name        = "Differential fuzzer vs Oxigraph"
