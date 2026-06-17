@@ -110,6 +110,14 @@ on crates.io / npm / PyPI / ghcr.io. That shape drives four scoping decisions:
   tied to the per-release SBOM/VEX + the Article 14 runbook. Addresses former gap GX-CRA-1 as
   **audit-ready documentation pending maintainer ratification** — a PROPOSED policy, **not** a
   binding maintainer commitment (policy §7); until ratified, `SECURITY.md` is authoritative.
+- [`../policies/policy-cybersecurity.md`](../policies/policy-cybersecurity.md) — the single named
+  **cybersecurity-policy template** for **Art. 24** (open-source-software steward) / **Art. 13**
+  (manufacturer risk assessment), consolidating the risk basis (threat-model B1–B5), the
+  secure-SDLC, the dependency/supply-chain policy, coordinated disclosure + vuln-handling,
+  release-signing/provenance, and the support/EOL posture into one adoptable artifact. Addresses
+  former gap GX-CRA-3 (CRA-CA.1/CRA-CA.6) as **audit-ready documentation pending org sign-off**
+  (policy §13); cross-references — does not fork — the live sources + the sibling SSDF/SBOM/SLSA/ISO
+  templates. Lives under the shared `compliance/policies/` directory (not duplicated here).
 
 ## Honest one-line posture
 
