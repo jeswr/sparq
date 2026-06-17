@@ -402,7 +402,7 @@ jobs:
           done
 
   wasm:
-    name: wasm build (sparq-wasm + sparq-reason-wasm)
+    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -450,6 +450,13 @@ jobs:
         run: cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
       - name: clippy (wasm32 target, sparq-reason-wasm, explain feature, deny warnings)
         run: cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets --features explain -- -D warnings
+      # [OPUS-4.8] sq-nzcb (W-rsp): the tier-b windowed RSP-QL stream bundle. Build + clippy
+      # it on wasm32 so the streaming bundle is gate-protected exactly like the others. It
+      # has no opt-in features (a single default state), so one build + one clippy suffice.
+      - name: Build sparq-rsp-wasm for the browser target
+        run: cargo build -p sparq-rsp-wasm --target wasm32-unknown-unknown
+      - name: clippy (wasm32 target, sparq-rsp-wasm, deny warnings)
+        run: cargo clippy -p sparq-rsp-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
       - name: Guard the wasm dependency graph (no native-only deps)
         # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
@@ -459,6 +466,8 @@ jobs:
         # locally and the wasm32 build above proves it links.
         # [OPUS-4.8] sq-6qw3: the guard now also scans sparq-reason-wasm's default graph
         # (regex is allowed there — it's pure-Rust + wasm-portable, not a native-only dep).
+        # [OPUS-4.8] sq-nzcb: and sparq-rsp-wasm's default graph (the leanest of the three —
+        # no regex; sparq-rsp + its engine/core are no-default-features).
         run: ./scripts/wasm-deps-guard.sh
       # [OPUS-4.8] Headless wasm tests of the REAL #[wasm_bindgen] exports
       # (crates/sparq-wasm/tests/web.rs). `cargo build --target wasm32` above never
@@ -497,6 +506,13 @@ jobs:
       - name: Headless wasm tests (sparq-reason-wasm, wasm-pack test --node, explain feature)
         working-directory: crates/sparq-reason-wasm
         run: wasm-pack test --node --features explain
+      # [OPUS-4.8] sq-nzcb (W-rsp): drive the REAL #[wasm_bindgen] Rsp exports
+      # (crates/sparq-rsp-wasm/tests/web.rs) in a genuine wasm runtime — windowed continuous
+      # SELECT + SPARQL-1.1-JSON serialisation across the JS boundary, which `cargo build
+      # --target wasm32` above never RUNS. Single feature state (the bundle has no features).
+      - name: Headless wasm tests (sparq-rsp-wasm, wasm-pack test --node)
+        working-directory: crates/sparq-rsp-wasm
+        run: wasm-pack test --node
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python

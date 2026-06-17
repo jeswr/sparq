@@ -5,7 +5,7 @@ description: Use when running continuous/standing SPARQL over a live RDF triple 
 
 # sparq-streaming-rsp
 
-`sparq-rsp` runs **windowed continuous SPARQL** (RSP-QL-style RDF Stream Processing) over a stream of `(triple, timestamp)` elements, as a deterministic **synchronous library** — no async runtime, no wall clock, no service. You push timestamped triples; it closes windows on a watermark and fires your callback once per closed window with the SELECT / CONSTRUCT / ASK result. It is a fully isolated, opt-in crate: nothing else in the workspace depends on it, the core engine and wasm build carry zero streaming code, and there are **no cargo features** — you engage it simply by depending on the crate.
+`sparq-rsp` runs **windowed continuous SPARQL** (RSP-QL-style RDF Stream Processing) over a stream of `(triple, timestamp)` elements, as a deterministic **synchronous library** — no async runtime, no wall clock, no service. You push timestamped triples; it closes windows on a watermark and fires your callback once per closed window with the SELECT / CONSTRUCT / ASK result. It is a fully isolated, opt-in crate: nothing else in the workspace depends on it, the core engine and the **lean** `sparq-wasm` bundle carry zero streaming code (streaming ships as a *separate*, lazy-loaded `sparq-rsp-wasm` bundle — see below), and there are **no cargo features** — you engage it simply by depending on the crate.
 
 ## Quickstart
 
@@ -44,6 +44,21 @@ q.flush(|r| println!("final [{},{}) -> {:?}", r.start, r.end, r.rows))?;
 ```
 
 The whole pipeline is a pure function of the pushed `(triple, ts)` sequence: replayable, unit-testable, wasm-safe. Wrapping pushes in tokio / a thread / a browser timer is your one-liner, not this crate's dependency.
+
+### In-tab live streaming: the tier-b `sparq-rsp-wasm` ("W-rsp") bundle ([OPUS-4.8] sq-nzcb)
+
+Because `sparq-rsp` reads no wall clock and runs no async runtime, it compiles to `wasm32-unknown-unknown` and ships as a **separate, lazy-loaded** wasm bundle (`crates/sparq-rsp-wasm`) — NOT folded into the lean `sparq-wasm` triplestore bundle (the `sparq-reason-wasm` "W-reason" pattern). It exposes a single stateful JS handle, `Rsp`, for the showcase site's `/surface/streaming-rsp` page, where the **browser tab drives the logical clock**:
+
+```js
+import init, { Rsp } from "./sparq_rsp_wasm.js";
+await init();
+const q = Rsp.select("SELECT (AVG(?v) AS ?avg) WHERE { ?s <http://ex/reading> ?v }",
+                     60, 60, 0, "rstream"); // range, step, maxDelay, "rstream"|"istream"|"dstream"
+const closed = JSON.parse(q.push("<http://ex/s1>", "<http://ex/reading>", "10", 0)); // -> "[]" until a window closes
+JSON.parse(q.flush()); // end-of-stream; q.lateDropped() = arrivals too late for any window
+```
+
+Each `push(s, p, o, ts)` / `flush()` returns a JSON array of the windows that just closed: `{"start","end","results"}`, where `results` is a standard self-contained **SPARQL 1.1 JSON** results document (from the engine's serialiser). Triple terms are **Turtle** syntax — the bare-numeric shorthand (`10`, `10.5`) works, alongside `<iri>`, `"str"`, `"str"@en`, `"v"^^<dt>`, `_:b`. The bundle wraps the single-window `ContinuousQuery` SELECT form only; CONSTRUCT/ASK and `ContinuousMultiQuery` stay native for now. Zero `unsafe`, no serde, no regex (it is the leanest of the wasm bundles); the wasm-deps guard keeps the native-only heavy deps out of its graph.
 
 ## Key APIs
 
