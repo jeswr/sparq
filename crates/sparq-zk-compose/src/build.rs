@@ -373,6 +373,45 @@ pub fn encode_double_literal(value: u64) -> FieldHex {
     hexf(&enc)
 }
 
+/// XSD integer / decimal datatype IRIs (the signed-int / decimal filter
+/// fragments' literal types). [OPUS-4.8] sq-1q9h.
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+
+/// Encode a SIGNED `xsd:integer` literal `value` (canonical lexical form
+/// `value.to_string()`, e.g. `-42` => `"-42"^^xsd:integer`) to its term
+/// encoding — the host convenience wiring a `filter_signed_int` proof to a known
+/// constant operand. The lexical form (with an optional leading `-`) matches the
+/// `filter_signed_int_check` token rebuild byte-for-byte (oxrdf passes the
+/// lexical form through verbatim). (Salt-independent for literals.)
+/// [OPUS-4.8] sq-1q9h.
+pub fn encode_signed_int_literal(value: i64) -> FieldHex {
+    let lit = oxrdf::Literal::new_typed_literal(
+        value.to_string(),
+        NamedNode::new(XSD_INTEGER).unwrap(),
+    );
+    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
+        .expect("integer literal is committable");
+    hexf(&enc)
+}
+
+/// Encode an `xsd:decimal` literal from its sign, integer-part digits, and
+/// EXACTLY `fd` fraction digits (lexical form `[-]?<int>.<frac>`, e.g.
+/// `(false, 123, "45")` => `"123.45"^^xsd:decimal`) to its term encoding — the
+/// host convenience wiring a `filter_decimal` proof to a known constant operand.
+/// The lexical form matches the `filter_decimal_check` token rebuild
+/// byte-for-byte. `frac` must be exactly the member's `FD` digits (zero-padded
+/// by the caller, e.g. `"50"` for `0.50`). (Salt-independent for literals.)
+/// [OPUS-4.8] sq-1q9h.
+pub fn encode_decimal_literal(neg: bool, int_part: u64, frac: &str) -> FieldHex {
+    let sign = if neg { "-" } else { "" };
+    let lexical = format!("{sign}{int_part}.{frac}");
+    let lit = oxrdf::Literal::new_typed_literal(lexical, NamedNode::new(XSD_DECIMAL).unwrap());
+    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
+        .expect("decimal literal is committable");
+    hexf(&enc)
+}
+
 fn subj_term(t: &oxrdf::Triple) -> Term {
     match &t.subject {
         oxrdf::NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),

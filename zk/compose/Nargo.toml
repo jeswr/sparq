@@ -16,6 +16,13 @@ members = [
     "filter_int_d2",
     "filter_int_d3",
     "filter_int_d4",
+    # [OPUS-4.8] sq-1q9h: SIGNED xsd:integer + xsd:decimal FILTER coverage --
+    # extends filter_int (canonical NON-negative integer only) to negative
+    # integers and decimal amounts (sound operand binding; verifier composability
+    # wiring is a follow-up, like the filter_f64 building-block precedent).
+    "filter_signed_int_d2",
+    "filter_signed_int_d4",
+    "filter_decimal_i3_f2",
     "filter_f64",
     "filter_f64_d1",
     "filter_f64_d2",
