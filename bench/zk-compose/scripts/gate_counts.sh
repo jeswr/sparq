@@ -5,11 +5,25 @@
 # noir-optimisation SKILL §). Compiles every member and emits the
 # `circuit_size` ultra_honk gate count in the zk/ieee754 JSON convention.
 #
+# The member list is read from the regression-gate snapshot
+# (crates/sparq-zk-compose/tests/gate_count_snapshot.json) — the SAME source the
+# in-crate gate_count_regression test baselines against — so this bench JSON
+# always covers exactly the regression-gated set and the two can never drift.
+# (sq-ifur: a hand-maintained MEMBERS array had silently dropped holder_pok,
+# hidden_issuer_d4, revoke_unset_d10, and the join + scan-lattice members that
+# the snapshot already gates, so re-baselining never regenerated their numbers.)
+#
 # Usage:  bench/zk-compose/scripts/gate_counts.sh > bench/zk-compose/gate_counts_latest.json
 set -euo pipefail
 
 COMPOSE_DIR="$(cd "$(dirname "$0")/../../../zk/compose" && pwd)"
-MEMBERS=(scan_k1_n16_r4 scan_k2_n16_r8 scan_k2_n64_r8 filter_int_d1 filter_int_d2 filter_int_d4 filter_f64 join_eq_na16_nb16)
+SNAPSHOT_JSON="$(cd "$(dirname "$0")/../../../crates/sparq-zk-compose/tests" && pwd)/gate_count_snapshot.json"
+
+# Drive the member set from the regression-gate snapshot's `members` keys (sorted
+# for a stable diff), so re-baselining can never silently skip a gated member.
+mapfile -t MEMBERS < <(python3 -c \
+  "import json,sys; print('\n'.join(sorted(json.load(open(sys.argv[1]))['members'])))" \
+  "$SNAPSHOT_JSON")
 
 cd "$COMPOSE_DIR"
 nargo compile --workspace >/dev/null 2>&1
