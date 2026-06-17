@@ -931,3 +931,142 @@ async fn security_headers_on_auth_gated_response() {
         "auth-refusal must carry Cache-Control: no-store"
     );
 }
+
+// ---------------------------------------------------------------------------
+// (sq-2gqr) [OPUS-4.8] Slow-loris guard — the connection header-read deadline.
+//
+// `axum::serve` never installs a timer, so hyper's HTTP/1 header_read_timeout is inert and a
+// client that opens a connection then dribbles (or simply never finishes) its request-header
+// block holds the connection — and a concurrency slot — open forever. `sparq_server::serve`
+// fixes this by owning the accept loop and wiring a TokioTimer + header_read_timeout. These
+// tests drive the REAL `serve` loop over a raw TCP socket (reqwest always sends a complete
+// header block, so it cannot exercise this — we have to be the misbehaving client).
+// ---------------------------------------------------------------------------
+
+use std::net::SocketAddr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+/// Spawn the real `sparq_server::serve` accept loop (NOT `axum::serve`) with the given
+/// header-read deadline, returning the bound address for a raw-socket client.
+async fn spawn_serve(config: ServerConfig) -> SocketAddr {
+    let header_read_timeout = config.header_read_timeout;
+    let graph = Graph::load_str(DATA, "turtle").unwrap();
+    let app = router(AppState::with_config(graph, config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        sparq_server::serve(listener, app, header_read_timeout, std::future::pending::<()>())
+            .await
+            .unwrap();
+    });
+    addr
+}
+
+/// A slow-loris connection: open a socket, send a partial request line + ONE header, then
+/// never send the terminating blank line. With a short `header_read_timeout` the SERVER must
+/// close the connection (a read returns 0 / a reset) within roughly the deadline. Without the
+/// fix the read would block until the test's own timeout, proving the connection is held open.
+#[tokio::test]
+async fn slow_loris_partial_headers_closed_by_deadline() {
+    let config = ServerConfig {
+        header_read_timeout: Some(Duration::from_millis(400)),
+        ..ServerConfig::default()
+    };
+    let addr = spawn_serve(config).await;
+
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    // A well-formed request LINE and one header, but NO terminating CRLFCRLF — the header block
+    // is never completed, exactly as a slow-loris client behaves.
+    sock.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+    sock.flush().await.unwrap();
+
+    // The server's header-read deadline (400ms) must close the connection well within this
+    // generous 5s cap. `read` returning Ok(0) is a clean close; an Err is a reset — both mean
+    // the server let go of the slot. A timeout here means the connection was held open (the bug).
+    let started = std::time::Instant::now();
+    let mut buf = [0u8; 256];
+    let outcome = tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await;
+    let elapsed = started.elapsed();
+    match outcome {
+        Ok(Ok(0)) | Ok(Err(_)) => {} // connection closed / reset by the server — the guard fired
+        // hyper may emit a 408 Request Timeout status line before closing; that's also a pass —
+        // it still means the server let go rather than holding the slot.
+        Ok(Ok(n)) => {
+            let head = String::from_utf8_lossy(&buf[..n]);
+            assert!(
+                head.contains("408") || head.contains("400"),
+                "server responded but did not signal a header-read timeout: {head:?}"
+            );
+        }
+        Err(_) => panic!(
+            "slow-loris connection was NOT closed within 5s — the header-read deadline did not fire \
+             (connection + concurrency slot held open: the slow-loris DoS)"
+        ),
+    }
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "connection closed but only after {elapsed:?} — far beyond the 400ms deadline"
+    );
+}
+
+/// With the deadline DISABLED (`None`), the partial-header connection is NOT proactively closed
+/// by the server within a short window — proving the guard is what does the closing (and is
+/// genuinely opt-out-able), not some unrelated default. We only assert it stays open briefly
+/// (then we drop it), so the test is fast and not flaky.
+#[tokio::test]
+async fn slow_loris_held_open_when_deadline_disabled() {
+    let config = ServerConfig { header_read_timeout: None, ..ServerConfig::default() };
+    let addr = spawn_serve(config).await;
+
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    sock.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+    sock.flush().await.unwrap();
+
+    // Within a short window the server must NOT have closed the (incomplete) connection.
+    let mut buf = [0u8; 64];
+    let outcome = tokio::time::timeout(Duration::from_millis(700), sock.read(&mut buf)).await;
+    assert!(
+        outcome.is_err(),
+        "with header_read_timeout=None the connection should stay open (read blocks), \
+         but the server closed/answered it: {outcome:?}"
+    );
+}
+
+/// Sanity: the new `serve` loop still serves a COMPLETE request normally (it is a faithful port
+/// of axum's accept loop, not just a timeout). Drives a full HTTP/1.1 request over a raw socket
+/// and asserts a 200 with the hardened security headers, so we know nothing regressed.
+#[tokio::test]
+async fn serve_loop_handles_complete_request() {
+    let config = ServerConfig {
+        header_read_timeout: Some(Duration::from_secs(15)),
+        ..ServerConfig::default()
+    };
+    let addr = spawn_serve(config).await;
+
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    sock.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    sock.flush().await.unwrap();
+
+    let mut resp = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut resp))
+        .await
+        .expect("complete request must be answered promptly")
+        .unwrap();
+    let text = String::from_utf8_lossy(&resp);
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "complete request through sparq_server::serve must return 200: {text:?}"
+    );
+    // The hardened stack still runs on this path — the X-Content-Type-Options header must land.
+    assert!(
+        text.to_ascii_lowercase().contains("x-content-type-options: nosniff"),
+        "security headers must still be stamped by the serve loop: {text:?}"
+    );
+}

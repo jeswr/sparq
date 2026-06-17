@@ -3551,6 +3551,8 @@ dependencies = [
  "axum",
  "flate2",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "mimalloc",
  "oxrdf 0.3.3",
  "oxrdfxml",

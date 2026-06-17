@@ -142,6 +142,21 @@ pub struct ServerConfig {
     pub max_body_bytes: usize,
     /// Maximum in-flight requests; excess requests are shed with 429.
     pub max_concurrent: usize,
+    /// [OPUS-4.8] (sq-2gqr) **Slow-loris guard — connection header-read deadline.** The maximum
+    /// time a freshly-accepted HTTP/1 connection may take to transmit its COMPLETE request-header
+    /// block. A client that dribbles headers byte-by-byte (the classic slow-loris) otherwise holds
+    /// a connection — and, behind the `concurrency_limit`, a concurrency slot — open indefinitely;
+    /// [`max_concurrent`] such clients starve every legitimate caller. Enforced at hyper's HTTP/1
+    /// connection layer (`http1().header_read_timeout`), so it fires BEFORE the request ever
+    /// reaches a handler — which is exactly why the existing [`query_timeout`] (a per-request
+    /// engine deadline) and the [`max_body_bytes`] / load-shed guards do NOT cover it: those all
+    /// run AFTER the headers are fully parsed. The connection is closed when the deadline elapses.
+    ///
+    /// `None` disables it (back to the unbounded-header-read behaviour `axum::serve` ships — see
+    /// the rationale on [`serve`]). Default 15s. Distinct from the slower [`query_timeout`] (30s)
+    /// because reading a header block is sub-second on any healthy client; 15s is generous
+    /// headroom for a slow but honest network without leaving the slot open for minutes.
+    pub header_read_timeout: Option<Duration>,
     /// Maximum SELECT result rows. Exceeding it is an honest 413 refusal (the engine
     /// aborts evaluation via the row budget), never a silent truncation.
     pub max_results: Option<usize>,
@@ -411,6 +426,13 @@ impl Default for ServerConfig {
             update_where_timeout: None,
             max_body_bytes: 1024 * 1024, // 1 MiB
             max_concurrent: 32,
+            // [OPUS-4.8] sq-2gqr: a 15s header-read deadline closes the slow-loris hole ON by
+            // default. `axum::serve` configures hyper's auto-Builder WITHOUT a timer, so hyper's
+            // own 30s header_read_timeout default is inert (it requires a Timer) — meaning the
+            // out-of-the-box stack has NO header deadline at all. `crate::serve` installs a
+            // TokioTimer and wires this value. 0 / env-unset keeps the guard; SPARQ_HEADER_READ_TIMEOUT=0
+            // disables it. See ServerConfig::header_read_timeout.
+            header_read_timeout: Some(Duration::from_secs(15)),
             max_results: None,
             // [OPUS-4.8] sq-ebii: memory cap OFF by default (no surprise refusals on an
             // unconfigured server); an operator exposing the endpoint opts a ceiling in.
@@ -478,7 +500,9 @@ impl ServerConfig {
     /// `SPARQ_UPDATE_WHERE_TIMEOUT` ([OPUS-4.8] sq-nulp: the separate, typically-shorter
     /// writer-side WHERE deadline that bounds writer-queue head-of-line blocking from a slow
     /// UPDATE; seconds, `0`/unset disables — the update WHERE budget is then the plain
-    /// `query_timeout`), `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT`, `SPARQ_MAX_RESULTS`,
+    /// `query_timeout`), `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT`,
+    /// `SPARQ_HEADER_READ_TIMEOUT` ([OPUS-4.8] sq-2gqr: the slow-loris connection header-read
+    /// deadline in seconds; `0` disables, default 15), `SPARQ_MAX_RESULTS`,
     /// `SPARQ_MAX_QUERY_ROWS` ([OPUS-4.8] sq-ebii: the coarse memory cap; `0` disables) and
     /// `SPARQ_MAX_DECOMPRESS_RATIO` ([OPUS-4.8] sq-ebii: the zip-bomb guard; `0` refuses gzip
     /// bodies) environment variables — plus, with the `time-travel` feature,
@@ -510,6 +534,11 @@ impl ServerConfig {
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_CONCURRENT") {
             cfg.max_concurrent = n.max(1);
+        }
+        // [OPUS-4.8] sq-2gqr: slow-loris header-read deadline (seconds); `0` disables it (an
+        // unbounded header read, the pre-fix behaviour), anything else sets the deadline.
+        if let Some(secs) = env_parse::<u64>("SPARQ_HEADER_READ_TIMEOUT") {
+            cfg.header_read_timeout = (secs > 0).then(|| Duration::from_secs(secs));
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_RESULTS") {
             cfg.max_results = (n > 0).then_some(n);
@@ -2514,6 +2543,173 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
         }
     } else {
         routes
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-2gqr) Serve loop with a connection header-read deadline (slow-loris guard)
+// ---------------------------------------------------------------------------
+
+/// Serves `app` on `listener` until `shutdown` resolves, with a hyper HTTP/1
+/// **header-read deadline** ([`ServerConfig::header_read_timeout`]) that closes the
+/// slow-loris DoS.
+///
+/// **Why this exists instead of `axum::serve`.** `axum::serve` builds hyper's connection
+/// `Builder` internally and exposes no hook to configure it, and — critically — it never
+/// installs a [`hyper_util::rt::TokioTimer`]. hyper's HTTP/1 `header_read_timeout` (which
+/// would otherwise default to 30s) is *inert without a timer* and silently does nothing. So
+/// the stock `axum::serve` stack has **no header-read deadline at all**: a client that opens a
+/// connection and then dribbles request-header bytes (or never finishes the header block) holds
+/// the connection — and, behind [`harden`]'s `concurrency_limit`, a concurrency slot — open
+/// indefinitely. [`ServerConfig::max_concurrent`] such clients starve every real caller. None of
+/// the existing guards cover this: the per-request [`ServerConfig::query_timeout`] is an engine
+/// deadline that only starts once a full request has been parsed; `max_body_bytes` and load-shed
+/// likewise act *after* the headers are read.
+///
+/// This loop is a faithful port of `axum::serve`'s own accept + graceful-shutdown loop
+/// (per-connection task, watch-channel drain, `serve_connection(...).with_upgrades()` so the
+/// `/subscriptions` WebSocket upgrade still works) with exactly one behavioural addition: the
+/// connection builder installs a `TokioTimer` and sets `header_read_timeout`. `None` opts back
+/// out to the unbounded behaviour. axum is configured HTTP/1-only (no `http2` feature), so this
+/// uses hyper's `http1::Builder` directly — the smallest builder that carries the knob we need.
+#[cfg(feature = "server")]
+pub async fn serve<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    header_read_timeout: Option<Duration>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    use futures_util::FutureExt;
+    use hyper_util::rt::{TokioIo, TokioTimer};
+    use hyper_util::service::TowerToHyperService;
+
+    // `signal_tx`: dropped (closed) once `shutdown` resolves — every connection task watches it
+    // and begins a graceful drain. `close_rx`: each task holds a clone; the loop waits for them
+    // all to drop, which means all connections have finished, before returning.
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
+    tokio::spawn(async move {
+        shutdown.await;
+        tracing::trace!(target: "sparq_server", "shutdown signal received, starting graceful drain");
+        drop(signal_rx);
+    });
+
+    // `close_tx` outlives the loop; each connection task holds a `close_tx.subscribe()` receiver
+    // and drops it when the connection finishes. `close_tx.closed()` then resolves only once every
+    // task's receiver is gone — i.e. all connections have fully drained.
+    let (close_tx, _close_rx) = tokio::sync::watch::channel(());
+    drop(_close_rx); // the loop itself does not hold a connection slot
+
+    loop {
+        let (stream, _remote) = tokio::select! {
+            conn = listener.accept() => match conn {
+                Ok(c) => c,
+                // A transient accept error (e.g. EMFILE / a peer that vanished mid-handshake)
+                // must not kill the server — yield and keep accepting, exactly as axum does.
+                Err(_e) => {
+                    tracing::trace!(target: "sparq_server", error = %_e, "accept error (continuing)");
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+            },
+            _ = signal_tx.closed() => {
+                // Shutdown signalled: stop accepting and let in-flight connections drain.
+                tracing::trace!(target: "sparq_server", "accept loop stopping (graceful shutdown)");
+                break;
+            }
+        };
+
+        let io = TokioIo::new(stream);
+        let hyper_service = TowerToHyperService::new(app.clone());
+        let signal_tx = signal_tx.clone();
+        let close_rx = close_tx.subscribe();
+
+        tokio::spawn(async move {
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            // The header-read deadline is the slow-loris guard. It REQUIRES a timer (hyper panics
+            // otherwise / silently no-ops on the auto builder), which is the bug in the stock
+            // `axum::serve` path this whole function exists to fix.
+            if let Some(t) = header_read_timeout {
+                builder.timer(TokioTimer::new()).header_read_timeout(t);
+            }
+            // `.with_upgrades()` keeps the HTTP/1 `Upgrade` working — the `/subscriptions`
+            // WebSocket handshake depends on it.
+            let conn = builder.serve_connection(io, hyper_service).with_upgrades();
+            let mut conn = std::pin::pin!(conn);
+            // `.fuse()` is load-bearing (mirrors axum's own graceful-shutdown loop): a bare
+            // `watch::Receiver::closed()` future panics with `async fn resumed after completion`
+            // if it is polled again after it has resolved. Once the shutdown signal fires, the
+            // loop keeps running to DRAIN the connection (`conn.as_mut().await`), and `tokio::select!`
+            // would re-poll the already-completed `signal_closed` on the next iteration. Fusing it
+            // makes that branch terminated (`is_terminated()`); `select!` skips it, so the shutdown
+            // path fires `graceful_shutdown()` exactly once and then quietly drains to completion.
+            let mut signal_closed = std::pin::pin!(signal_tx.closed().fuse());
+
+            loop {
+                tokio::select! {
+                    result = conn.as_mut() => {
+                        if let Err(_err) = result {
+                            tracing::trace!(target: "sparq_server", error = %_err, "connection ended with error");
+                        }
+                        break;
+                    }
+                    _ = &mut signal_closed => {
+                        tracing::trace!(target: "sparq_server", "shutdown signal in connection task, starting graceful shutdown");
+                        conn.as_mut().graceful_shutdown();
+                    }
+                }
+            }
+            drop(close_rx);
+        });
+    }
+
+    // Drain: `close_tx.closed()` resolves once every connection task's `close_tx.subscribe()`
+    // receiver has dropped — i.e. all in-flight connections have finished (mirrors axum's
+    // own graceful-shutdown drain).
+    tracing::trace!(
+        target: "sparq_server",
+        tasks = close_tx.receiver_count(),
+        "waiting for in-flight connections to drain"
+    );
+    close_tx.closed().await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod header_read_timeout_config_tests {
+    //! [OPUS-4.8] (sq-2gqr) The slow-loris header-read deadline lives in `ServerConfig` so it is
+    //! configurable + testable in isolation; the END-TO-END behaviour (a partial-header socket is
+    //! actually closed by `serve`) is the integration suite in `tests/hardening.rs`. These pin the
+    //! config contract.
+    use super::*;
+
+    #[test]
+    fn slow_loris_guard_is_on_by_default() {
+        // The whole point of sq-2gqr: a fresh, unconfigured server must NOT be vulnerable. A
+        // generous-but-finite 15s deadline ships ON.
+        assert_eq!(
+            ServerConfig::default().header_read_timeout,
+            Some(Duration::from_secs(15)),
+            "header-read deadline must be ON by default (slow-loris guard)"
+        );
+    }
+
+    #[test]
+    fn header_read_timeout_is_independent_of_query_timeout() {
+        // Distinct from the engine's per-request query_timeout (a connection-layer vs evaluation
+        // bound). Setting one must not move the other.
+        let cfg = ServerConfig {
+            header_read_timeout: Some(Duration::from_secs(3)),
+            query_timeout: Some(Duration::from_secs(99)),
+            ..ServerConfig::default()
+        };
+        assert_eq!(cfg.header_read_timeout, Some(Duration::from_secs(3)));
+        assert_eq!(cfg.query_timeout, Some(Duration::from_secs(99)));
+        // It is opt-out-able (an operator who really wants the old unbounded behaviour).
+        let off = ServerConfig { header_read_timeout: None, ..ServerConfig::default() };
+        assert_eq!(off.header_read_timeout, None);
     }
 }
 

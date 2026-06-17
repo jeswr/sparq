@@ -365,7 +365,9 @@ matrix under "Security posture".
   for reads. Off by default (back-compat). See "Security posture".
 - **Hardening flags** — `--query-timeout` / `--update-where-timeout` (separate, typically-shorter
   writer-side WHERE deadline that bounds writer-queue **head-of-line blocking** from a slow
-  UPDATE, `sq-nulp`) / `--max-body-bytes` / `--max-concurrent` /
+  UPDATE, `sq-nulp`) / `--max-body-bytes` / `--max-concurrent` / `--header-read-timeout`
+  (slow-loris guard: caps how long a connection may take to send its complete request-header block,
+  closing it — and freeing the concurrency slot — when exceeded; default 15s, `sq-2gqr`) /
   `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-query-bytes`
   (byte-accounted memory cap, `sq-s5is`) / `--max-decompress-ratio` (zip-bomb guard) /
   `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*` / (feature `brtpf`)
