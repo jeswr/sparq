@@ -2,11 +2,12 @@ import type { Metadata } from "next";
 import { ShieldCheck } from "lucide-react";
 
 import { SurfaceContent } from "@/components/surface-content";
+import { ShaclPlayground } from "@/components/shacl-playground";
 
 export const metadata: Metadata = {
   title: "SHACL",
   description:
-    "Validate RDF against SHACL shapes with the sparq engine — SHACL Core constraints, SHACL-SPARQL, custom constraint components, and the W3C validation report.",
+    "Validate RDF against SHACL shapes with the sparq engine — SHACL Core constraints, SHACL-SPARQL, custom constraint components, and the W3C validation report, live in your tab.",
 };
 
 export default function ShaclSurfacePage() {
@@ -15,8 +16,7 @@ export default function ShaclSurfacePage() {
       icon={ShieldCheck}
       title="SHACL"
       statement="Validate RDF data against shapes — SHACL Core, SHACL-SPARQL, and the W3C validation report."
-      tier="live-new-wasm"
-      extraBadge="Portability spike first"
+      tier="live"
       intro={
         <>
           <p>
@@ -31,9 +31,11 @@ export default function ShaclSurfacePage() {
           </p>
           <p>
             Because it is pure Rust over <code className="font-mono">sparq-engine</code>
-            , it is wasm-portable: a dedicated{" "}
-            <code className="font-mono text-foreground">sparq-shacl-wasm</code>{" "}
-            bundle can validate data + shapes in-tab, lazy-loaded only on this page.
+            , it is wasm-portable. The SHACL-enabled wasm bundle — the same one the
+            published <code className="font-mono text-foreground">@jeswr/sparq</code>{" "}
+            ships — runs the validator in this tab: paste data + shapes below and the
+            conformance flag and per-violation report come back with no network
+            round-trip.
           </p>
         </>
       }
@@ -66,23 +68,32 @@ export default function ShaclSurfacePage() {
       runsNote={
         <>
           <p>
-            Planned <strong className="text-foreground">live in your tab via a new
-            wasm bundle</strong>. The validator is pure Rust over the engine, so it
-            ports cleanly; the bundle is lazy-loaded on this page only to keep the
-            landing page light.
+            <strong className="text-foreground">Live in your browser tab.</strong>{" "}
+            The validator is pure Rust over the engine, compiled to wasm in the
+            SHACL-enabled bundle (the published{" "}
+            <code className="font-mono">@jeswr/sparq</code> ships it). The playground
+            calls the bundle&rsquo;s{" "}
+            <code className="font-mono text-foreground">Store.validate(data, shapes)</code>{" "}
+            binding, parses the two graphs, and renders the conformance flag plus the
+            per-violation W3C report — nothing is sent to a server.
           </p>
         </>
       }
       caveat={
         <>
           <p>
-            SHACL-SPARQL constraints rely on the engine&rsquo;s REGEX, which is
-            compiled out of the lean bundle — the SHACL bundle must include it (a
-            size trade-off confirmed by a portability spike). Until that bundle
-            ships, this surface is a captured-I/O walkthrough.
+            SHACL-SPARQL constraints rely on the engine&rsquo;s REGEX. The lean SPARQL
+            REPL bundle compiles REGEX out, but the SHACL bundle keeps it, so{" "}
+            <code className="font-mono">sh:sparql</code> constraints validate in-tab
+            too. The in-tab validator is sized for small documents (~10–100 triples);
+            validate large graphs server-side via the{" "}
+            <code className="font-mono">sparq-server</code> HTTP{" "}
+            <code className="font-mono">validate</code> path.
           </p>
         </>
       }
-    />
+    >
+      <ShaclPlayground />
+    </SurfaceContent>
   );
 }

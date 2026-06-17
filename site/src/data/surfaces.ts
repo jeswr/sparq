@@ -162,7 +162,7 @@ export const GROUPS: SurfaceGroup[] = [
         href: "/surface/shacl",
         title: "SHACL",
         blurb: "SHACL Core + SHACL-SPARQL → W3C validation report.",
-        tier: "live-new-wasm",
+        tier: "live",
         icon: ShieldCheck,
         built: true,
       },

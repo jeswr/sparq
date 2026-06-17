@@ -24,6 +24,11 @@ export interface WasmStore {
   updateInPlace(sparql: string): void; // INSERT/DELETE/LOAD/graph-mgmt -> mutate store
   explain(sparql: string): string; // planning-only plan text (every query form)
   explainAnalyze(sparql: string): string; // plan + per-operator trace (SELECT/ASK only)
+  // [OPUS-4.8] sq-egy6 — the SHACL `validate` binding. Present only when the bundle
+  // is built with `--features shacl` (the site's default `build:wasm`, and the
+  // published `@jeswr/sparq`, both enable it). Stateless: it does NOT consult the
+  // receiver's stored triples — it parses `data`/`shapes` and validates one-shot.
+  validate?: (data: string, shapes: string, format: string) => string;
 }
 
 interface WasmModule {
@@ -146,6 +151,59 @@ export interface SparqlResults {
   head: { vars: string[] };
   results: { bindings: Record<string, SparqlTerm>[] };
   boolean?: boolean;
+}
+
+// ---- SHACL validation report (mirrors crates/sparq-wasm/src/shacl.rs JSON) ----
+
+/**
+ * [OPUS-4.8] sq-egy6 — one SHACL validation result, the per-violation record the
+ * wasm `Store.validate` binding emits (a drop-in for `rdf-validate-shacl`'s
+ * results). `focusNode`/`value`/`sourceShape` are N-Triples term strings; `path`
+ * is a SHACL Turtle path expression; `sourceConstraintComponent`/`severity` are
+ * full IRIs. `path`/`value`/`message` are `null` when the result carries none.
+ */
+export interface ShaclResult {
+  focusNode: string;
+  path: string | null;
+  value: string | null;
+  sourceShape: string;
+  sourceConstraintComponent: string;
+  severity: string;
+  message: string | null;
+}
+
+/**
+ * [OPUS-4.8] sq-egy6 — a SHACL validation report. `conforms` counts EVERY result
+ * regardless of severity (the W3C-suite notion); `results` is the per-violation list.
+ */
+export interface ShaclReport {
+  conforms: boolean;
+  results: ShaclResult[];
+}
+
+/**
+ * [OPUS-4.8] sq-egy6 — validate an RDF **data** document against a SHACL **shapes**
+ * document, entirely in your tab via the shacl-enabled wasm bundle. Both arguments
+ * use the same syntaxes {@link loadIntoStore} accepts. A clear error is thrown if the
+ * loaded bundle was built without the `shacl` feature (no `validate` binding), so a
+ * caller can distinguish "no SHACL in this bundle" from a parse error.
+ */
+export async function sparqShaclValidate(
+  data: string,
+  shapes: string,
+  format = "turtle",
+): Promise<ShaclReport> {
+  const Store = await loadSparq();
+  // `validate` is a stateless one-shot, but it is exposed as an instance method on
+  // the wasm `Store`, so we need any receiver. An empty store is the cheapest.
+  const store = Store.load("", format);
+  if (typeof store.validate !== "function") {
+    throw new Error(
+      "This wasm bundle was built without the SHACL feature (no validate binding). " +
+        "Rebuild sparq-wasm with --features shacl.",
+    );
+  }
+  return JSON.parse(store.validate(data, shapes, format)) as ShaclReport;
 }
 
 /** Renders a term for display, with a compact datatype/lang suffix. */
