@@ -19,7 +19,7 @@ cargo-auditable/vet) have **already landed** in the codebase and are cited as ev
 
 ## Open gaps
 
-### SSDF-G1 — PW.6.2: no reproducible-build evidence
+### SSDF-G1 — PW.6.2: reproducible-build (statement DELIVERED; CI enforcement remaining)
 
 | Field | Value |
 |---|---|
@@ -27,9 +27,9 @@ cargo-auditable/vet) have **already landed** in the codebase and are cited as ev
 | **Cross-cutting id** | GX-8 |
 | **Severity** | P2 (raises assurance; not a vulnerability) |
 | **Bead** | **sq-toze.9** (`[cert][gap GX-8] Reproducible-build evidence`) — already open under epic `sq-toze` |
-| **Status** | Open |
-| **What's missing** | The release build is `cargo auditable build --release --locked` and SLSA-provenance-attested, but there is **no documented reproducible-build claim or evidence** — neither a "byte-for-byte reproducible from this commit + toolchain" demonstration nor an honest "not reproducible because <X>" statement. SSDF PW.6.2 (and CRA integrity / SLSA higher levels) want one or the other. |
-| **Remediation plan** | (1) Attempt a double-build of `sparq-cli` for one target and diff the artifacts; (2) if reproducible, document the pinned inputs (toolchain version, `--locked`, `RUSTFLAGS`, `SOURCE_DATE_EPOCH`) and add a CI job that rebuilds + compares digests; (3) if **not** reproducible, document the specific non-determinism source(s) (e.g. embedded build paths, parallel-codegen ordering, timestamps) as an honest PW.6.2 statement and link it from `controls.md`. Either outcome closes the gap honestly. |
+| **Status** | Open — **PW.6.2 honest statement DELIVERED** ([`../slsa/reproducible-build.md`](../slsa/reproducible-build.md)); bead stays open for the optional CI rebuild-and-diff ratchet. |
+| **What's missing** | ~~No documented reproducible-build claim or evidence.~~ **Now documented** — remediation step (3) is done: a measured double-build of `sparq-cli` (`--release --locked`, same tier flags) is **identical size + byte-identical apart from 22 bytes**, all from **one** non-determinism source (the C-compiled `mimalloc` `__DATE__`/`__TIME__` `.rodata` banner + the build-id it perturbs). That is the honest PW.6.2 statement SSDF wanted. What remains for a *byte-for-byte* claim (and to flip the bead to closed): the `SOURCE_DATE_EPOCH`/feature-drop fix + a CI lane that rebuilds and diffs digests. |
+| **Remediation plan** | (1) ✓ DONE — double-build + diff of `sparq-cli`, recorded in [`../slsa/reproducible-build.md`](../slsa/reproducible-build.md). (2) result was **not** byte-identical; (3) ✓ DONE — the specific non-determinism source (`mimalloc` build-time `__DATE__`/`__TIME__` banner; the build-id is downstream) is documented as the honest PW.6.2 statement and linked from `controls.md`. REMAINING (keeps the bead open): pin `SOURCE_DATE_EPOCH` (or drop the opt-in `mimalloc` default) for the reproducible artifact + add a CI rebuild-and-diff ratchet → a byte-for-byte claim. |
 | **Target** | Before a 1.0 release; not a pre-1.0 blocker (the project is explicitly pre-1.0, `SECURITY.md`). |
 | **Owner** | @jeswr |
 

@@ -52,6 +52,8 @@ can spot-check any release with the consumer-facing commands in `evidence.md §5
 
 ## 5. Open items (tracked)
 
-GS-2/GX-8 (reproducible build) — the one open item. RESOLVED: GS-1 (per-component supplier, sq-toze.26),
+GS-2/GX-8 (reproducible build) — the one open item, now *characterised* (honest non-determinism
+statement documented in [`../slsa/reproducible-build.md`](../slsa/reproducible-build.md); only the
+CI rebuild-and-diff enforcement is outstanding). RESOLVED: GS-1 (per-component supplier, sq-toze.26),
 GS-3 (JS SBOM), GS-4 (spec version), GS-5 (VEX drift-check CI), GS-6/GS-7 (purl canonicality) — see
 `gap-register.md`.

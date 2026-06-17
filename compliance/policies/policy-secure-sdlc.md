@@ -129,7 +129,7 @@ it points to the single source so the two never drift.
 
 ## 7. Related policies & frameworks (cross-references, not forks)
 
-- **SSDF mapping** — [`../ssdf/controls.md`](../ssdf/controls.md), [`../ssdf/evidence.md`](../ssdf/evidence.md), [`../ssdf/gap-register.md`](../ssdf/gap-register.md) (the one open technical gap is PW.6.2 reproducible-build evidence, GX-8 / `sq-toze.9`).
+- **SSDF mapping** — [`../ssdf/controls.md`](../ssdf/controls.md), [`../ssdf/evidence.md`](../ssdf/evidence.md), [`../ssdf/gap-register.md`](../ssdf/gap-register.md) (the one open technical gap is PW.6.2 reproducible-build, GX-8 / `sq-toze.9` — the honest reproducibility statement is documented in [`../slsa/reproducible-build.md`](../slsa/reproducible-build.md); only the CI rebuild-and-diff enforcement is outstanding).
 - **Coordinated vulnerability disclosure** — [`SECURITY.md`](../../SECURITY.md) is the live human-readable disclosure policy; the consolidating CRA cybersecurity-policy template (`sq-d43g`) lives under this directory.
 - **Dependency / supply-chain policy** — [`deny.toml`](../../deny.toml); the SBOM-publication policy template ([`../sbom/policy-sbom-publication.md`](../sbom/policy-sbom-publication.md)).
 - **Release-signing / provenance** — `.github/workflows/release.yml`; the SLSA framework folder ([`../slsa/README.md`](../slsa/README.md)).
