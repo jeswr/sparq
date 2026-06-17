@@ -79,7 +79,12 @@ fn descriptor(preds: &[&str]) -> SourceDescriptor {
 
 /// Lower + materialise `bgp` against the single engine-backed source, and assert the
 /// materialised relation's solution multiset equals `sparq_engine::query(&G, whole_query)`.
-fn assert_federated_equals_local(graph: Arc<Graph>, bgp: &Bgp, descriptor: &SourceDescriptor, whole_query: &str) {
+fn assert_federated_equals_local(
+    graph: Arc<Graph>,
+    bgp: &Bgp,
+    descriptor: &SourceDescriptor,
+    whole_query: &str,
+) {
     let descriptors = [descriptor.clone()];
     let sel = select_sources(bgp, &descriptors);
     let tree = plan_bgp(bgp, &sel, &descriptors, &PlanOptions::default())

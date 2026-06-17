@@ -873,7 +873,11 @@ pub struct BrTpfSource {
 
 impl BrTpfSource {
     /// A new brTPF source over `transport` with the `max_mpr` bind-join bound.
-    pub fn new(url: impl Into<String>, max_mpr: u32, transport: Box<dyn FragmentTransport>) -> Self {
+    pub fn new(
+        url: impl Into<String>,
+        max_mpr: u32,
+        transport: Box<dyn FragmentTransport>,
+    ) -> Self {
         BrTpfSource {
             url: url.into(),
             max_mpr,
@@ -1420,7 +1424,8 @@ mod tests {
                     .ok_or_else(|| format!("fixture: bad page token {tok:?}"))?,
             };
             let end = (offset + self.page_size).min(matched.len());
-            let triples: Vec<FragTriple> = matched[offset..end].iter().map(|t| (*t).clone()).collect();
+            let triples: Vec<FragTriple> =
+                matched[offset..end].iter().map(|t| (*t).clone()).collect();
             let next = if end < matched.len() {
                 Some(format!("offset:{end}"))
             } else {
@@ -1484,7 +1489,11 @@ mod tests {
             vec![("s".to_string(), p("bob")), ("o".to_string(), p("carol"))],
             vec![("s".to_string(), p("carol")), ("o".to_string(), p("dave"))],
         ];
-        assert_eq!(canon(got), canon(expect), "plain TPF must return COMPLETE fragment");
+        assert_eq!(
+            canon(got),
+            canon(expect),
+            "plain TPF must return COMPLETE fragment"
+        );
     }
 
     #[test]
@@ -1497,7 +1506,10 @@ mod tests {
         let (cap, desc) = tpf.discover().unwrap();
         assert_eq!(cap.interface, Interface::Tpf);
         let d = desc.expect("count-metadata descriptor");
-        assert_eq!(d.total_triples, 6, "open-pattern hydra:totalItems = all 6 triples");
+        assert_eq!(
+            d.total_triples, 6,
+            "open-pattern hydra:totalItems = all 6 triples"
+        );
     }
 
     #[test]
@@ -1566,7 +1578,11 @@ mod tests {
         // 5 bindings, maxMpR 2 → blocks of [2, 2, 1]; one request each (page_size 100, single
         // page per block). Every block size MUST be ≤ 2 (the maxMpR bound, never exceeded).
         let block_sizes: Vec<usize> = reqs.iter().map(|(n, _)| *n).collect();
-        assert_eq!(block_sizes, vec![2, 2, 1], "maxMpR=2 → 3 blocks sized [2,2,1]");
+        assert_eq!(
+            block_sizes,
+            vec![2, 2, 1],
+            "maxMpR=2 → 3 blocks sized [2,2,1]"
+        );
         assert!(
             block_sizes.iter().all(|n| *n <= 2),
             "no request may exceed maxMpR=2"
@@ -1579,7 +1595,11 @@ mod tests {
         let server = FixtureFragments::new(fixture_triples(), 100);
         let brtpf = BrTpfSource::new("http://frag/brtpf", 50, Box::new(server));
         let got = brtpf.solutions(&knows_pattern(), &[]).unwrap();
-        assert_eq!(got.len(), 4, "unbound brTPF scan returns the whole fragment");
+        assert_eq!(
+            got.len(),
+            4,
+            "unbound brTPF scan returns the whole fragment"
+        );
     }
 
     #[test]
@@ -1603,7 +1623,10 @@ mod tests {
             FragTerm::iri("http://ex/NOT-knows"),
             FragTerm::iri("http://ex/bob"),
         );
-        assert!(bind_triple(&pat, &wrong).is_none(), "bound predicate mismatch ⇒ no row");
+        assert!(
+            bind_triple(&pat, &wrong).is_none(),
+            "bound predicate mismatch ⇒ no row"
+        );
 
         // Self-join pattern ?x knows ?x only matches a self-loop triple.
         let selfp = FragPattern::new(
@@ -1616,24 +1639,35 @@ mod tests {
             FragTerm::iri("http://xmlns.com/foaf/0.1/knows"),
             FragTerm::iri("http://ex/bob"),
         );
-        assert!(bind_triple(&selfp, &not_loop).is_none(), "?x..?x rejects a non-loop");
+        assert!(
+            bind_triple(&selfp, &not_loop).is_none(),
+            "?x..?x rejects a non-loop"
+        );
         let loop_t = FragTriple::new(
             FragTerm::iri("http://ex/alice"),
             FragTerm::iri("http://xmlns.com/foaf/0.1/knows"),
             FragTerm::iri("http://ex/alice"),
         );
         let row = bind_triple(&selfp, &loop_t).expect("self-loop binds ?x once");
-        assert_eq!(row, vec![("x".to_string(), FragTerm::iri("http://ex/alice"))]);
+        assert_eq!(
+            row,
+            vec![("x".to_string(), FragTerm::iri("http://ex/alice"))]
+        );
     }
 
     #[test]
     fn chunk_bindings_caps_block_size_and_handles_degenerate_cap() {
         let mk = |n: usize| -> Vec<FragBinding> {
-            (0..n).map(|i| vec![("s".to_string(), FragTerm::iri(format!("http://ex/{i}")))]).collect()
+            (0..n)
+                .map(|i| vec![("s".to_string(), FragTerm::iri(format!("http://ex/{i}")))])
+                .collect()
         };
         let b = mk(5);
         let blocks = chunk_bindings(&b, 2);
-        assert_eq!(blocks.iter().map(|x| x.len()).collect::<Vec<_>>(), vec![2, 2, 1]);
+        assert_eq!(
+            blocks.iter().map(|x| x.len()).collect::<Vec<_>>(),
+            vec![2, 2, 1]
+        );
         // maxMpR 0 is treated as 1 (never a zero-sized block ⇒ no infinite loop).
         let blocks0 = chunk_bindings(&b, 0);
         assert!(blocks0.iter().all(|x| x.len() == 1));

@@ -10,20 +10,39 @@
 //! can answer (REUSING the [`sparq-fedplan`](sparq_fedplan) cost-based planner), and
 //! **streams** results back through non-blocking federation operators.
 //!
-//! # Phase 0 — what this is, and what it is NOT
+//! # What has landed, and what is still ahead
 //!
-//! This is the **compiling skeleton only** (design §6, Phase 0). It establishes:
+//! The crate began as the **Phase-0 compiling skeleton** (design §6) — the public module
+//! layout the design §4 names ([`source`], [`discovery`], [`planner`], [`pushdown`],
+//! [`operators`], [`stream`]), the **opt-in feature** ([`fedclient`](#opt-in-hard-constraint),
+//! OFF by default), and the **dependency-boundary proof** (below). Landed since, each behind
+//! the same default-OFF `fedclient` feature:
 //!
-//! * the **public module layout** the design §4 names ([`source`], [`discovery`],
-//!   [`planner`], [`pushdown`], [`operators`], [`stream`]) — each currently an empty,
-//!   `todo!()`-free placeholder module;
-//! * the **opt-in feature** ([`fedclient`](#opt-in-hard-constraint), OFF by default);
-//! * the **dependency-boundary proof** (below) — the load-bearing deliverable of Phase 0.
+//! * **Phase 1 — capability discovery** ([`discovery`], bead `sq-nfxl`): GET the source's
+//!   Service Description + `/.well-known/void`, parse them to a `Capability` +
+//!   `SourceDescriptor`, with a FedX-style ASK-probe fallback, all behind a default-deny
+//!   SSRF-guarded fetch seam.
+//! * **Phase 2 — source-type abstraction + Endpoint adapter** ([`source`], bead `sq-rsxf`):
+//!   [`SourceType`] (`Endpoint | BrTpf | Tpf | Local`), the [`FederatedSource`] trait, the
+//!   fine-grained [`Capability`](source::Capability) descriptor, and the real [`Endpoint`] SRJ
+//!   adapter over a [`Transport`] seam behind a default-deny [`EgressGuard`].
+//! * **Phase 3 — planner bridge + materialised single-source interpreter** ([`planner`] +
+//!   [`operators`], bead `sq-j27p`): [`SourceResolver`] index→adapter resolution + [`lower_leaf`],
+//!   and [`materialize_single_source`] + [`parse_srj`] + [`solutions_equal`].
+//! * **Phase 4 — capability-aware pushdown** ([`pushdown`], bead `sq-7byx`): per leaf / FedX
+//!   exclusive group, build the most precise sub-query a source can answer (projection +
+//!   common-variable-checked filters + ORDER/LIMIT under capability) — [`exclusive_groups`] +
+//!   [`push_group`] + [`render_values_block`], correctness-preservingly NARROWing each source.
+//! * **Phase 5 — streaming operators** ([`operators`] + [`stream`], bead `sq-vtba`): the
+//!   [`SolutionStream`] boundary the client owns, the bounded blocking [`ScatterPool`], the
+//!   `StreamJoin`-feeder [`StreamingJoin`], and the [`stream_single_source`] streaming
+//!   interpreter — backpressured + bounded (Rust ownership + the reused StreamJoin spill).
+//! * **Phase 6 — brTPF + TPF fragment adapters** ([`source`], bead `sq-2qze`): the real
+//!   Triple-Pattern-Fragments adapters ([`TpfSource`] / [`BrTpfSource`]) over a
+//!   [`FragmentTransport`] seam, complete-by-construction with count-metadata cardinality.
 //!
-//! There is **NO federation logic yet**: discovery, the source adapters, the planner
-//! bridge, capability-aware pushdown, and the streaming operators land in Phases 1-7
-//! (each a future bead under epic sq-dnko). The modules exist so the public surface is
-//! visible and the boundary is provable *before* any logic is written.
+//! Still ahead (future beads under epic sq-dnko): adaptive re-planning (§7). The public
+//! surface and the dependency boundary were made visible before the logic landed.
 //!
 //! # Opt-in (hard constraint)
 //!
@@ -37,9 +56,9 @@
 //!
 //! # The dependency boundary (load-bearing, enforced)
 //!
-//! Phase 0's actual point is to **prove the boundary before any logic exists**. Two
-//! complementary checks enforce that neither `sparq-core` nor `sparq-engine` ever gains a
-//! dependency edge *to* `sparq-fedclient`, in both feature states:
+//! The boundary was **proved before any logic existed** (Phase 0) and is re-checked on every
+//! build. Two complementary checks enforce that neither `sparq-core` nor `sparq-engine` ever
+//! gains a dependency edge *to* `sparq-fedclient`, in both feature states:
 //!
 //! * `scripts/fedclient-boundary-guard.sh` — a CI step (in `feature-matrix.yml`) that
 //!   inverts the dependency graph (`cargo tree -i sparq-fedclient`) and fails if
@@ -49,19 +68,20 @@
 //!
 //! Both must FAIL if a future edit introduces such an edge.
 //!
-//! [OPUS-4.8] sq-s1uy — flagged for Fable re-review when available.
+//! [OPUS-4.8] sq-s1uy / sq-73om — flagged for Fable re-review when available.
 #![forbid(unsafe_code)]
 // [OPUS-4.8] sq-s1uy: crate has zero `unsafe`.
-// When `fedclient` is off the crate is intentionally empty; when on, the Phase-0 module
-// stubs are placeholders with no public items yet, so silence the expected dead-code/
-// unused-import lints until the logic phases populate them.
+// When `fedclient` is off the crate is intentionally empty. With it on, not every landed item
+// is yet wired into an end-to-end public entry point, so silence the expected dead-code/
+// unused-import lints until the remaining (§7 re-planning) phase consumes them.
 #![cfg_attr(not(feature = "fedclient"), allow(dead_code, unused_imports))]
 #![cfg_attr(feature = "fedclient", allow(dead_code, unused_imports))]
 
 // ─── Public module layout (design §4) ──────────────────────────────────────────────
-// Each module is a Phase-0 placeholder. The doc comment on each records WHICH design
-// section it realises and WHICH existing sparq seam that phase reuses, so the layout is
-// self-documenting before any logic exists. All are gated behind `fedclient`.
+// Every module (source, discovery, planner, pushdown, operators, stream) now carries real
+// logic. The doc comment on each records WHICH design section it realises and WHICH existing
+// sparq seam that phase reuses, so the layout is self-documenting. All are gated behind
+// `fedclient`.
 
 /// §4.1 — **source-type abstraction**: the `SourceType` enum (Endpoint | BrTpf | Tpf |
 /// Local) and the `FederatedSource` trait (`discover()` + `execute(&SubQuery) ->
@@ -124,9 +144,7 @@ pub use pushdown::{
 pub mod operators;
 // [OPUS-4.8] sq-j27p: re-export the Phase-3 materialised single-source interpreter surface.
 #[cfg(feature = "fedclient")]
-pub use operators::{
-    materialize_single_source, parse_srj, solutions_equal, InterpError, Relation,
-};
+pub use operators::{materialize_single_source, parse_srj, solutions_equal, InterpError, Relation};
 // [OPUS-4.8] sq-vtba: re-export the Phase-5 streaming-operator surface — the bounded blocking
 // thread-pool, the `StreamJoin`-feeder streaming join, and the streaming interpreter.
 #[cfg(feature = "fedclient")]
