@@ -204,6 +204,20 @@ impl MacKey {
         scale(&self.shares, c)
     }
 
+    /// The raw `[α]` shares — **`pub(crate)`, NEVER public** — for the two crate-
+    /// internal consumers that genuinely need the SECRET-SHARED key itself (not a
+    /// derived `α·c`): the §2.4 MAC-carrying multiplication ([`auth_mul`], which
+    /// secure-multiplies the reduced product `[z]` by `[α]` to get `[α·z]`) and the
+    /// §2.5 batched MAC-check ([`mac_check`], whose `σ` term `−y·[α]` scales `[α]`
+    /// by a PUBLIC `y`). Both *consume* `[α]` inside a sharing computation; neither
+    /// opens it — the shares flow into `mul_shares_raw` / `scale` and only the
+    /// (eventually, leakage-free) result is opened, never `[α]`. Kept crate-private
+    /// exactly as [`AuthenticatedShare::mac_shares`] is, so no public surface can
+    /// pull `[α]` out and reconstruct `α`. `[OPUS-4.8]`
+    pub(crate) fn alpha_shares(&self) -> &[Share] {
+        &self.shares
+    }
+
     /// **Test-only.** The raw `[α]` shares, so the independence test (acceptance
     /// (3)) can argue about `≤ t` views of `α`. The `cfg` gate keeps this out of
     /// the public/production API — there is deliberately no non-test accessor that

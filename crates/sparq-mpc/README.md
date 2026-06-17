@@ -80,9 +80,17 @@ four-flatmates `10^6`). The two residual `sq-mnv5` deployment items remain open
 follow-ups:
 
 - **Wider magnitude** — `p = 2^61−1` forces the 20-bit bound; lift via a larger
-  field or a non-masked-open comparison (Rabbit, eprint 2021/119).
+  field or a non-masked-open comparison (Rabbit, eprint 2021/119). Still open.
 - **Malicious security** — carry IT-MACs (`sq-km34.*`) through the decomposition +
-  comparison chain and MAC-check the verdict before open.
+  comparison chain and MAC-check the verdict before open. **Partly closed by
+  `sq-ka8m`** (`auth_compare`): the malicious-with-abort *comparison chain* over
+  secret operands now carries an IT-MAC through every gate (`MacSession::auth_mul`,
+  design §2.4 route (a)) and MAC-checks the verdict before open
+  (`MacSession::mac_check`, §2.5), aborting on any tamper at the minimal `n = 2t+1` <!-- privacy-claims-allow: design-doc-cited construction, scoped + caveated below; sq-toze.35 -->
+  (soundness from the secret `α`, not RS redundancy) — `malicious_greater_than` /
+  `malicious_threshold`. The residual is the end-to-end `disclose_threshold_verdict`
+  decomposition opens (`a²`, `c = sum+r`, the zero-test products), which are not yet
+  routed through the MAC-check; and external sign-off (`sq-qhy4`) is still pending.
 
 ## Collaborative-proof (coZK) — witness-validation-before-proving (sq-7leq)
 
