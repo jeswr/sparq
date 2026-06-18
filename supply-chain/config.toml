@@ -414,7 +414,7 @@ version = "4.5.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.i_overlay]]
-version = "7.0.0"
+version = "7.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.i_shape]]
@@ -642,7 +642,7 @@ version = "3.9.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.oxigraph]]
-version = "0.5.8"
+version = "0.5.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.oxilangtag]]
@@ -1471,6 +1471,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.zerofrom-derive]]
 version = "0.1.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.zeroize]]
+version = "1.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zeroize_derive]]
