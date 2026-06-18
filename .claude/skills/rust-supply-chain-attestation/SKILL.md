@@ -48,9 +48,11 @@ can't parse the vendored `spargebra`, which needs `edition2024` / cargo >= 1.85)
   (a path patch is not a registry/git source, so it doesn't trip the gate);
   `allow-git = []` is the hook for any deliberately-allowed future git source.
 - **Advisories ignore list:** only `unmaintained` *informational* advisories on
-  transitive deps with no safe upgrade (e.g. `paste` via wgpu → bead sq-l8bv;
-  `rustls-pemfile` via ureq → bead sq-g2xs). A real **vulnerability** or a
-  **yanked** crate FAILS the gate.
+  transitive deps with no safe upgrade (today: `rustls-pemfile` via ureq → bead
+  sq-g2xs). A real **vulnerability** or a **yanked** crate FAILS the gate.
+  (`paste` via wgpu → bead sq-l8bv was previously ignored under RUSTSEC-2024-0436;
+  the GPU stack dropped `paste`, so it left the tree and the ignore was removed —
+  the gate now re-flags any regression that reintroduces it.)
 
 ### The advisories-gate gap (GX-1 — know this)
 `cargo deny check advisories` is currently **`continue-on-error` (non-gating)**:

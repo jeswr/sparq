@@ -11,7 +11,7 @@ without re-deriving it. All paths are repo-relative; all CI job names match
 
 | Artifact | Path | What it is |
 |---|---|---|
-| VEX (source of truth) | `supply-chain/vex.cdx.json` | CycloneDX 1.5 VEX; 2 vulnerabilities (`RUSTSEC-2024-0436`, `RUSTSEC-2025-0134`), each `not_affected`. |
+| VEX (source of truth) | `supply-chain/vex.cdx.json` | CycloneDX 1.5 VEX; 1 vulnerability (`RUSTSEC-2025-0134`), `not_affected`. (`RUSTSEC-2024-0436` paste was dropped once the GPU stack stopped pulling `paste`.) |
 | SBOM+VEX generator | `scripts/gen-sbom-vex.sh` | Produces per-binary SBOM + version-stamped VEX into `./sbom/` for the release. |
 | Dependency policy | `deny.toml` | cargo-deny advisories/bans/sources/licenses; `[advisories].ignore` = the 2 RUSTSEC IDs the VEX mirrors. |
 | cargo-vet config | `supply-chain/config.toml`, `supply-chain/audits.toml`, `supply-chain/imports.lock` | Trusted import sets + exemptions; gates new unaudited deps. |
@@ -205,8 +205,9 @@ python3 scripts/tests/test_vex_deny_drift.py   # hermetic self-test (11 cases in
 
 Wired as `.github/workflows/supply-chain.yml#vex-deny-sync` (job name
 `VEX ↔ deny.toml sync (GS-5) — GATING`; no `advisory`/`informational` whole word, so ci-summary gates
-it). Recorded this branch: both = `{RUSTSEC-2024-0436, RUSTSEC-2025-0134}` — **in sync** (no drift to
-resolve). Negative test: temporarily dropping either deny.toml ignore makes the check exit 1 and name
+it). Recorded this branch: both = `{RUSTSEC-2025-0134}` — **in sync** (no drift to
+resolve). (`RUSTSEC-2024-0436` paste/sq-l8bv was removed from both sides once the GPU stack stopped
+pulling `paste`.) Negative test: temporarily dropping either deny.toml ignore makes the check exit 1 and name
 the offending id. A genuinely-intended one-sided entry is recorded with a reason in the script's
 `JUSTIFIED_DRIFT` allow-list (empty today).
 
