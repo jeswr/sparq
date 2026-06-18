@@ -37,8 +37,19 @@ Geometry parsing and algorithms wrap the standard pure-Rust geo stack
 | 6 (Req 4–7) | RDFS/OWL **entailment** requirements — `geo:Feature`/`geo:Geometry`/`geo:SpatialObject` class hierarchy + the `geo:hasGeometry`/`geo:hasDefaultGeometry` property axioms | ✅ via the GENERIC `sparq-reason` RDFS / OWL-RL closure over the GeoSPARQL ontology axioms (no geo-specific reasoner); conformance fixture: [`tests/entailment.rs`](tests/entailment.rs) [OPUS-4.8] sq-5ts8 |
 | 7 / 9 | **Query-rewrite extension** — `geo:sfWithin`-style topology TRIPLE-PATTERN property forms, and the RIF/SPARQL `geor:` rewrite rules | ✅ on the dedicated [`geosparql_rewrite`](src/rewrite.rs) entry point (an algebra rewrite, NOT a parser change): a topology relation triple `?a geo:sfWithin ?b` is expanded to `(geo:hasDefaultGeometry\|geo:hasGeometry)/geo:asWKT` geometry resolution + the matching `geof:` FILTER, then run under [`geof_registry`]. Covers the `sf*`/`eh*`/`rcc8*` families. The STANDARD entry points are untouched (the property form still matches only asserted triples there — W3C conformance unaffected). Conformance fixture: [`tests/query_rewrite.rs`](tests/query_rewrite.rs) [OPUS-4.8] sq-9g58 |
 
-Formal OGC conformance testing is **skipped** (the official suite needs a full
-SPARQL endpoint harness); the table above is the implemented subset.
+**OGC conformance.** OGC never shipped an executable TEAM-Engine ETS for
+GeoSPARQL (only the *abstract* test suite — the 30 normative requirements); the
+de-facto canonical executable suite is the GPL-2.0 academic *GeoSPARQL
+Compliance Benchmark* (Jovanovik et al., ISPRS IJGI 10(7):487, 2021), whose
+query/answer files we cannot vendor into this MIT tree. Instead,
+[`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs)
+encodes the OGC standard's own R1–R30 requirements taxonomy (the six conformance
+classes) and runs a self-written executable probe per requirement against this
+crate's API — a ratcheted scoreboard of which OGC requirements sparq
+demonstrates (currently **28 / 30**; the two honest gaps — R9 geometry-metadata
+properties and R16 empty-`gmlLiteral` — are bead-tracked). The table above is
+the implemented subset; [`tests/ogc_compliance_ratchet.rs`](tests/ogc_compliance_ratchet.rs)
+pins the DE-9IM topology truth values. [OPUS-4.8] sq-i2a0
 
 ### GML parsing — roll-your-own + upstream
 
