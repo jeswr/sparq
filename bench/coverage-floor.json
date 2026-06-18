@@ -29,7 +29,7 @@
       "note": "GPU kernels need a device; CPU-only line coverage is low by design."
     },
     "sparq-hdt": {
-      "floor": 87
+      "floor": 90
     },
     "sparq-introspect": {
       "floor": 94

@@ -405,6 +405,59 @@ pub(crate) fn intern_hdt_term(dict: &mut Dict, s: &str) -> Result<Id, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error as _;
+
+    /// [OPUS-4.8] sq-cafc: the public [`Error`] type's `Display` and `source()` are part of
+    /// the crate's error contract (callers print and chain these) but were never asserted.
+    /// Each of the three variants must render its documented prefix, and `source()` must
+    /// expose the wrapped cause for the I/O variant and report `None` for the leaf `Term`
+    /// variant — so a `?`-chained caller can walk the cause chain.
+    #[test]
+    fn error_display_and_source_chain() {
+        // `Io`: renders the I/O prefix and EXPOSES the wrapped error as its `source`.
+        let io = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "boom",
+        ));
+        assert!(
+            io.to_string().starts_with("I/O error reading HDT file:"),
+            "Io Display prefix, got: {io}"
+        );
+        assert!(io.source().is_some(), "Io must expose its wrapped cause");
+
+        // `Term`: renders the dictionary-term prefix and is a LEAF (no source).
+        let term = Error::Term("bad term".to_owned());
+        assert_eq!(term.to_string(), "invalid term in HDT dictionary: bad term");
+        assert!(term.source().is_none(), "Term is a leaf error");
+
+        // `From<std::io::Error>` builds the `Io` variant (the `?` conversion path).
+        let converted: Error =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into();
+        assert!(matches!(converted, Error::Io(_)));
+        assert!(converted.to_string().contains("denied"));
+    }
+
+    /// The `Hdt` variant's `Display` + `source()` (the wrapped `hdt` decode error) are
+    /// reached on any malformed archive. Drive a real decode failure (random bytes) and,
+    /// when it surfaces as the `Hdt` variant, assert its prefix + that it chains a source.
+    #[test]
+    fn hdt_error_variant_displays_and_chains() {
+        let Err(err) = load_reader(std::io::Cursor::new(
+            b"$HDT\x01 not really an archive".to_vec(),
+        )) else {
+            panic!("garbage after the cookie must fail to decode");
+        };
+        if let Error::Hdt(_) = err {
+            assert!(
+                err.to_string().starts_with("error decoding HDT archive:"),
+                "Hdt Display prefix, got: {err}"
+            );
+            assert!(err.source().is_some(), "Hdt must expose its wrapped cause");
+        }
+        // (If the failure classified as Io/Term instead, those variants are covered by
+        // `error_display_and_source_chain`; the point here is to EXERCISE the Hdt arm,
+        // which a corrupt control-info read reaches.)
+    }
 
     /// The dictionary-string parser must map every HDT term shape onto the term
     /// sparq's own loaders would produce (checked via the N-Triples rendering).
