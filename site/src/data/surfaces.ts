@@ -216,6 +216,7 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "RSP-QL windows (sliding / tumbling, R/I/DSTREAM).",
         tier: "live-new-wasm",
         icon: Radio,
+        built: true,
       },
     ],
   },

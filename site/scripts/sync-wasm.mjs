@@ -59,3 +59,33 @@ try {
       `            run live. Build it:  (cd ../js && npm run build:reason-wasm)`,
   );
 }
+
+// [OPUS-4.8] sq-11zy — also sync the tier-b "W-rsp" bundle that drives
+// /surface/streaming-rsp (crates/sparq-rsp-wasm, the windowed RSP-QL stream processor,
+// built by `js/`'s `build:rsp-wasm`). Like W-reason, its wasm-pack output stays in the
+// crate's own pkg/ (it is NOT part of the published @jeswr/sparq package), so we copy it
+// into public/wasm/rsp/. OPTIONAL: a quick `next dev` that skips the build WARNs and
+// skips rather than failing — the streaming page then surfaces a clear load-failure state.
+const rspSrc = join(here, "..", "..", "crates", "sparq-rsp-wasm", "pkg");
+const rspDest = join(dest, "rsp");
+const rspFiles = [
+  "sparq_rsp_wasm.js",
+  "sparq_rsp_wasm_bg.wasm",
+  "sparq_rsp_wasm.d.ts",
+];
+
+try {
+  await access(join(rspSrc, "sparq_rsp_wasm_bg.wasm"));
+  await mkdir(rspDest, { recursive: true });
+  for (const f of rspFiles) {
+    await copyFile(join(rspSrc, f), join(rspDest, f));
+  }
+  console.log(
+    `[sync-wasm] copied ${rspFiles.length} files → public/wasm/rsp/ (W-rsp)`,
+  );
+} catch {
+  console.warn(
+    `[sync-wasm] W-rsp bundle not found at ${rspSrc}; /surface/streaming-rsp will not\n` +
+      `            run live. Build it:  (cd ../js && npm run build:rsp-wasm)`,
+  );
+}
