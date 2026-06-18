@@ -61,6 +61,26 @@ These are **topology** algorithms: edges are unweighted and predicate-erased. To
 sub-graph (e.g. only `foaf:knows` edges), filter the source graph first; predicate-weighted
 and predicate-projected views are tracked as follow-up beads.
 
+### Mutation-testing note (`bench/mutants-baseline.json`)
+
+The crate is on the cargo-mutants quality ratchet. The few mutants that still survive the
+suite are **equivalent mutants** — they cannot change any observable output, so no
+black-box test can kill them, and they are *expected* to sit under the committed ceiling
+rather than being chased:
+
+- **`UnionFind` union-by-size internals** (`community.rs`, the `size[ra] < size[rb]` swap
+  and the `size[ra] += size[rb]` bookkeeping). Union by size is a *performance* heuristic:
+  it only decides which root becomes the parent, never the partition. `weakly_connected_components`
+  re-densifies the labelling by first-seen node order, so the chosen root is invisible in
+  the result — mutating the size comparison or the size accumulator leaves every partition
+  identical.
+- **PageRank's `delta < tolerance` → `<=`** (`pagerank.rs`). `delta` is a sum of
+  floating-point absolute differences; it never lands *exactly* on the tolerance, so `<`
+  and `<=` stop on the same iteration and return bit-identical ranks.
+
+Every *behaviour-changing* mutant on these files is covered by an assertion in the
+`#[test]` module of `src/lib.rs` (search `sq-lqty`).
+
 ## License
 
 Licensed under the MIT license, same as the rest of the sparq workspace.
