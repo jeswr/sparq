@@ -246,6 +246,12 @@ pub use operators::{materialize_single_source, parse_srj, solutions_equal, Inter
 // thread-pool, the `StreamJoin`-feeder streaming join, and the streaming interpreter.
 #[cfg(feature = "fedclient")]
 pub use operators::{stream_single_source, ScatterPool, StreamOptions, StreamingJoin};
+// [OPUS-4.8] sq-7yf0: re-export the multi-source UNION-per-leaf interpreters — a leaf the
+// planner retained >1 source for is fanned out as a per-source bag-union rather than rejected
+// with `InterpError::MultiSource` (the materialised + streaming counterparts of the
+// single-source entry points above).
+#[cfg(feature = "fedclient")]
+pub use operators::{materialize_multi_source, stream_multi_source};
 
 /// §4.4 — the **`SolutionStream`** abstraction the client owns at its boundary (the
 /// engine stays materialised, §7). Backpressured + bounded (Rust ownership + explicit
