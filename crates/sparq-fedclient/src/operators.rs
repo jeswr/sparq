@@ -108,8 +108,11 @@ pub enum InterpError {
     Source(FedError),
     /// The SRJ body the adapter returned could not be parsed as SPARQL-Results-JSON.
     BadSrj(String),
-    /// A leaf retained more than one source — Phase-3's interpreter is single-source; the
-    /// multi-source UNION-per-leaf fan-out is Phase 5. Fail closed rather than drop a source.
+    /// A leaf retained more than one source while running through a **single-source** entry
+    /// point ([`materialize_single_source`] / [`stream_single_source`]) — those answer every
+    /// leaf from one explicit `source` and fail closed rather than drop a source. To fan a
+    /// multi-source leaf out as a per-source UNION use [`materialize_multi_source`] /
+    /// [`stream_multi_source`] (bead `sq-7yf0`), which never returns this variant.
     MultiSource { pattern: usize, sources: usize },
 }
 
@@ -175,6 +178,100 @@ pub fn materialize_single_source(
     let project = bgp_vars(resolver);
     rel = rel.project(&project);
     Ok(rel)
+}
+
+/// Materialise a `sparq-fedplan` [`JoinTree`] across **all retained sources per leaf**,
+/// fanning a leaf the planner kept more than one source for out as a **per-source UNION**,
+/// and return the federated solution table. This lifts the single-source restriction the
+/// Phase-3/5/7 [`InterpError::MultiSource`] guard imposed (bead `sq-7yf0`).
+///
+/// Where [`materialize_single_source`] answers every leaf from one explicit `source` (and
+/// rejects a multi-source leaf), this entry point resolves each leaf's retained source
+/// **indices** ([`PatternSources::candidates`](sparq_fedplan::PatternSources)) to adapters
+/// through the `resolver` and answers the leaf as the **bag-union** of every retained
+/// source's relation for that pattern. That is exactly SPARQL UNION semantics over the
+/// per-source solution sequences: the multisets are concatenated, no de-duplication
+/// (SELECT bag semantics), preserving multiplicity. A leaf with a single retained source
+/// degrades to the same fetch the single-source interpreter performs, so for a plan whose
+/// every leaf resolves to one source the two entry points return the identical multiset.
+///
+/// The join order, projection, and the materialised left-deep natural join are
+/// unchanged — only the per-leaf input is now a union over sources rather than one source.
+/// Joining over the *union per leaf* (rather than joining per-source and unioning the
+/// whole BGP) is the correct federated semantics: a leaf's contribution is the union of
+/// what each source holds for that pattern, and the BGP answer is the natural join of those
+/// per-leaf unions, regardless of which source each matching triple came from.
+///
+/// A leaf whose selection retained **no** source is an empty relation over the pattern's
+/// variables (the source-selection layer is the single source of truth; the interpreter
+/// does not silently fall back to "every adapter"). [OPUS-4.8] sq-7yf0.
+pub fn materialize_multi_source(
+    resolver: &SourceResolver<'_>,
+    selection: &[PatternSources],
+    tree: &JoinTree,
+) -> Result<Relation, InterpError> {
+    let mut rel = materialize_node_multi(resolver, selection, &tree.root)?;
+    // Project onto the whole-BGP variable set, matching `materialize_single_source`.
+    let project = bgp_vars(resolver);
+    rel = rel.project(&project);
+    Ok(rel)
+}
+
+/// Recursively materialise one plan node into a [`Relation`], fanning each leaf out across
+/// its retained sources (the multi-source counterpart of [`materialize_node`]). [OPUS-4.8].
+fn materialize_node_multi(
+    resolver: &SourceResolver<'_>,
+    selection: &[PatternSources],
+    node: &JoinNode,
+) -> Result<Relation, InterpError> {
+    match node {
+        JoinNode::Leaf { pattern, .. } => materialize_leaf_multi(resolver, selection, *pattern),
+        JoinNode::Join { left, right, .. } => {
+            let l = materialize_node_multi(resolver, selection, left)?;
+            let r = materialize_leaf_multi(resolver, selection, *right)?;
+            Ok(natural_join(&l, &r))
+        }
+    }
+}
+
+/// Answer ONE leaf pattern as the **bag-union over its retained sources**: fetch the leaf
+/// relation from each candidate adapter (resolved by source index through `resolver`) and
+/// concatenate the rows. The per-source relations share the same variable header (the
+/// pattern's variables in position order), so the union is a plain row concatenation —
+/// SPARQL UNION's multiset semantics, no de-duplication. [OPUS-4.8] sq-7yf0.
+fn materialize_leaf_multi(
+    resolver: &SourceResolver<'_>,
+    selection: &[PatternSources],
+    pattern: usize,
+) -> Result<Relation, InterpError> {
+    let tp = resolver.pattern(pattern)?;
+    let vars = pattern_vars(tp);
+    let mut union = Relation {
+        vars: vars.clone(),
+        rows: Vec::new(),
+    };
+    for idx in leaf_source_indices(selection, pattern) {
+        let source = resolver.source(idx)?;
+        let leaf = fetch_leaf_relation(source, tp)?;
+        // Re-key onto the canonical leaf header so every source's rows union column-aligned
+        // (a source's SRJ header may differ in order from the pattern's variable order).
+        for row in &leaf.rows {
+            union.rows.push(rel_row_project(&leaf.vars, row, &vars));
+        }
+    }
+    Ok(union)
+}
+
+/// The retained source indices for `pattern`, ascending (the deterministic order
+/// [`select_sources`](sparq_fedplan::select_sources) records). A pattern absent from the
+/// selection — or one whose candidate set is empty — contributes no sources, hence an empty
+/// leaf relation. [OPUS-4.8] sq-7yf0.
+fn leaf_source_indices(selection: &[PatternSources], pattern: usize) -> Vec<usize> {
+    selection
+        .iter()
+        .find(|ps| ps.pattern == pattern)
+        .map(|ps| ps.candidates.iter().map(|c| c.source).collect())
+        .unwrap_or_default()
 }
 
 /// All distinct variables of the resolver's BGP, in first-seen order (subject, predicate,
@@ -1151,6 +1248,141 @@ fn stream_leaf(
     Ok(StreamNode { vars, stream })
 }
 
+/// **Stream** a `sparq-fedplan` [`JoinTree`] with **per-leaf multi-source UNION fan-out**,
+/// returning a [`SolutionStream`]. The streaming counterpart of [`materialize_multi_source`]
+/// and the multi-source counterpart of [`stream_single_source`]: it lifts the
+/// [`InterpError::MultiSource`] guard (bead `sq-7yf0`).
+///
+/// `adapters` are the sendable source adapters indexed **the same way** as the resolver's
+/// source indices — `adapters[i]` is descriptor `i` is the adapter `select_sources`'
+/// `candidates[].source` index `i` names (the same contract [`SourceResolver`] enforces for
+/// its borrowed slice; the streaming path needs owned `Arc` adapters to move fetch jobs onto
+/// the [`ScatterPool`], so they are passed directly rather than re-borrowed through the
+/// resolver). A leaf the planner retained N sources for fans **all N** fetches out onto the
+/// pool, each feeding ONE shared per-leaf [`SolutionStream`] (a cloned [`SolutionSink`] per
+/// job) — the channel multiplexes them, so the per-leaf stream is the **bag-union** of every
+/// source's rows and ends only once every source job for that leaf has finished. The leaves
+/// then chain through [`StreamingJoin`]s exactly as the single-source path does.
+///
+/// **Load-bearing invariant:** the streamed multiset equals [`materialize_multi_source`] for
+/// the same plan + adapters, for ANY interleaving of source arrivals — the union is a bag
+/// concatenation (order-independent) and the joins reuse the proven [`StreamJoin`].
+/// [OPUS-4.8] sq-7yf0.
+pub fn stream_multi_source(
+    resolver: &SourceResolver<'_>,
+    selection: &[PatternSources],
+    adapters: &[Arc<dyn FederatedSource + Send + Sync>],
+    tree: &JoinTree,
+    opts: &StreamOptions,
+) -> Result<SolutionStream, InterpError> {
+    // Size the queue to hold every (leaf × retained-source) job at once, so the synchronous
+    // tree walk never blocks submitting (a worker may be blocked on `emit` before the
+    // consumer pulls). The pool still bounds concurrency to `opts.workers`.
+    let job_count: usize = resolver
+        .bgp()
+        .patterns
+        .iter()
+        .enumerate()
+        .map(|(p, _)| leaf_source_indices(selection, p).len())
+        .sum::<usize>()
+        .max(1);
+    let pool = Arc::new(ScatterPool::new(opts.workers, job_count));
+    let node = stream_node_multi(resolver, selection, adapters, &tree.root, &pool, opts)?;
+    let project = bgp_vars(resolver);
+    Ok(project_stream(node.stream, project, opts.channel_cap))
+}
+
+/// Recursively build the streaming pipeline for one node with per-leaf multi-source fan-out
+/// (the multi-source counterpart of [`stream_node`]). [OPUS-4.8] sq-7yf0.
+fn stream_node_multi(
+    resolver: &SourceResolver<'_>,
+    selection: &[PatternSources],
+    adapters: &[Arc<dyn FederatedSource + Send + Sync>],
+    node: &JoinNode,
+    pool: &Arc<ScatterPool>,
+    opts: &StreamOptions,
+) -> Result<StreamNode, InterpError> {
+    match node {
+        JoinNode::Leaf { pattern, .. } => {
+            stream_leaf_multi(resolver, selection, adapters, *pattern, pool, opts)
+        }
+        JoinNode::Join { left, right, .. } => {
+            let l = stream_node_multi(resolver, selection, adapters, left, pool, opts)?;
+            let r = stream_leaf_multi(resolver, selection, adapters, *right, pool, opts)?;
+            let join = StreamingJoin::new(&l.vars, &r.vars, opts.join_opts.clone(), opts.channel_cap);
+            let out_vars = join.out_vars().to_vec();
+            let stream = join.run(l.stream, r.stream);
+            Ok(StreamNode {
+                vars: out_vars,
+                stream,
+            })
+        }
+    }
+}
+
+/// Fan ONE leaf's fetches out across **every retained source** onto the pool, all feeding a
+/// single per-leaf [`SolutionStream`] (a cloned [`SolutionSink`] per source job). The
+/// resulting stream is the bag-union of every source's rows for the pattern; it ends once
+/// the last source job drops its sink. A leaf with no retained source yields an empty stream
+/// (its only sink drops immediately). Each source index is resolved against `adapters`
+/// (range-checked, same as [`SourceResolver::source`]). [OPUS-4.8] sq-7yf0.
+fn stream_leaf_multi(
+    resolver: &SourceResolver<'_>,
+    selection: &[PatternSources],
+    adapters: &[Arc<dyn FederatedSource + Send + Sync>],
+    pattern: usize,
+    pool: &Arc<ScatterPool>,
+    opts: &StreamOptions,
+) -> Result<StreamNode, InterpError> {
+    let tp = resolver.pattern(pattern)?;
+    let vars = pattern_vars(tp);
+    let indices = leaf_source_indices(selection, pattern);
+    // Range-check every source index up front (fail closed before spawning any job) so a
+    // mismatched plan/adapter set surfaces a `ResolveError`, not a silent under-answer.
+    for &idx in &indices {
+        if idx >= adapters.len() {
+            return Err(InterpError::Resolve(
+                crate::planner::ResolveError::SourceOutOfRange {
+                    index: idx,
+                    sources: adapters.len(),
+                },
+            ));
+        }
+    }
+    let (sink, stream) = SolutionStream::bounded(opts.channel_cap);
+    for &idx in &indices {
+        let source = Arc::clone(&adapters[idx]);
+        let tp_owned = tp.clone();
+        let leaf_vars = vars.clone();
+        // Each source job gets its OWN clone of the sink; the per-leaf stream ends only when
+        // the LAST clone drops (every source job finished) — the union over sources.
+        let job_sink = sink.clone();
+        pool.submit(move || {
+            match fetch_leaf_relation(source.as_ref(), &tp_owned) {
+                Ok(rel) => {
+                    for row in rel.rows {
+                        let proj = rel_row_project(&rel.vars, &row, &leaf_vars);
+                        if !job_sink.emit(Solution::new(leaf_vars.clone(), proj)) {
+                            return; // consumer gone.
+                        }
+                    }
+                }
+                Err(InterpError::Source(e)) => {
+                    job_sink.emit_err(e);
+                }
+                Err(other) => {
+                    job_sink.emit_err(FedError::Transport(other.to_string()));
+                }
+            }
+            // `job_sink` drops here → one source job done; the leaf stream ends when all do.
+        });
+    }
+    // Drop our own retained sink so the stream is driven solely by the job clones (and an
+    // empty `indices` immediately closes the stream).
+    drop(sink);
+    Ok(StreamNode { vars, stream })
+}
+
 /// Project one parsed SRJ row from its `src_vars` order onto `keep`'s order (an absent
 /// variable becomes unbound). The streaming analogue of [`Relation::project`] for a single
 /// row. [OPUS-4.8] sq-vtba.
@@ -1974,6 +2206,243 @@ mod tests {
         assert_eq!(
             fragterm_to_oxterm(&FragTerm::Literal("\"hi\"@en".into())),
             Term::Literal(Literal::new_language_tagged_literal("hi", "en").unwrap())
+        );
+    }
+
+    // ─── sq-7yf0: multi-source UNION-per-leaf fan-out ─────────────────────────────────
+
+    /// A single canned answer for one sub-query, as a one-entry map. [OPUS-4.8] sq-7yf0.
+    fn one_answer(sub: &str, body: String) -> StdHashMap<String, String> {
+        let mut m = StdHashMap::new();
+        m.insert(sub.to_string(), body);
+        m
+    }
+
+    /// `materialize_multi_source` fans a leaf retained by TWO sources out as a per-source
+    /// UNION (bag concatenation) instead of returning `MultiSource`. Two distinct endpoints
+    /// answer the SAME leaf sub-query with disjoint rows; the union is their concatenation.
+    /// [OPUS-4.8] sq-7yf0.
+    #[test]
+    fn materialize_multi_source_unions_two_sources() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/p"),
+            var("o"),
+        )]);
+        let mk = |id: &str| {
+            SourceDescriptor::builder(SourceId::new(id))
+                .total_triples(10)
+                .predicate(sparq_fedplan::PredPartition {
+                    predicate: "http://ex/p".into(),
+                    triples: 10,
+                    distinct_subjects: 10,
+                    distinct_objects: 10,
+                })
+                .build()
+        };
+        let descriptors = [mk("A"), mk("B")];
+        let sel = select_sources(&bgp, &descriptors);
+        assert_eq!(sel[0].candidates.len(), 2, "both sources retained");
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+
+        let sub = "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }";
+        // Source A holds {a→o1}, source B holds {b→o2}; the union is both rows.
+        let ep_a = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(one_answer(
+                sub,
+                srj(&["s", "o"], &[&[("s", "http://ex/a"), ("o", "http://ex/o1")]]),
+            ))),
+        );
+        let ep_b = Endpoint::new(
+            "http://8.8.4.4/sparql",
+            Box::new(MapTransport::new(one_answer(
+                sub,
+                srj(&["s", "o"], &[&[("s", "http://ex/b"), ("o", "http://ex/o2")]]),
+            ))),
+        );
+        // Adapter slice in source-index order: adapters[0]=A, adapters[1]=B.
+        let adapters: Vec<&dyn FederatedSource> = vec![&ep_a, &ep_b];
+        let resolver = SourceResolver::new(&bgp, &adapters);
+
+        let rel = materialize_multi_source(&resolver, &sel, &tree).expect("multi-source unions");
+        assert_eq!(rel.vars, vec!["s".to_string(), "o".to_string()]);
+        // Bag-union: both sources' rows, no de-duplication.
+        let bag = solution_bag(&rel.vars, &rel.rows);
+        assert_eq!(
+            bag,
+            solution_bag(
+                &["s".into(), "o".into()],
+                &[
+                    vec![Some(nn("http://ex/a")), Some(nn("http://ex/o1"))],
+                    vec![Some(nn("http://ex/b")), Some(nn("http://ex/o2"))],
+                ]
+            )
+        );
+    }
+
+    /// The bag-union preserves multiplicity: when two sources return the SAME solution, the
+    /// union carries it TWICE (SELECT bag semantics, no de-dup) — the honest federated
+    /// behaviour over disjoint sources that happen to share a triple. [OPUS-4.8] sq-7yf0.
+    #[test]
+    fn materialize_multi_source_preserves_duplicates() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/p"),
+            var("o"),
+        )]);
+        let mk = |id: &str| {
+            SourceDescriptor::builder(SourceId::new(id))
+                .total_triples(10)
+                .predicate(sparq_fedplan::PredPartition {
+                    predicate: "http://ex/p".into(),
+                    triples: 10,
+                    distinct_subjects: 10,
+                    distinct_objects: 10,
+                })
+                .build()
+        };
+        let descriptors = [mk("A"), mk("B")];
+        let sel = select_sources(&bgp, &descriptors);
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+        let sub = "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }";
+        let body = srj(&["s", "o"], &[&[("s", "http://ex/a"), ("o", "http://ex/o1")]]);
+        let ep_a = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(one_answer(sub, body.clone()))));
+        let ep_b = Endpoint::new("http://8.8.4.4/sparql", Box::new(MapTransport::new(one_answer(sub, body))));
+        let adapters: Vec<&dyn FederatedSource> = vec![&ep_a, &ep_b];
+        let resolver = SourceResolver::new(&bgp, &adapters);
+        let rel = materialize_multi_source(&resolver, &sel, &tree).unwrap();
+        assert_eq!(rel.rows.len(), 2, "the shared solution appears once per source");
+    }
+
+    /// `stream_multi_source` produces the SAME multiset as `materialize_multi_source` for a
+    /// two-source leaf (and proves the guard is lifted on the streaming path too). [OPUS-4.8].
+    #[test]
+    fn stream_multi_source_equals_materialised() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/p"),
+            var("o"),
+        )]);
+        let mk = |id: &str| {
+            SourceDescriptor::builder(SourceId::new(id))
+                .total_triples(10)
+                .predicate(sparq_fedplan::PredPartition {
+                    predicate: "http://ex/p".into(),
+                    triples: 10,
+                    distinct_subjects: 10,
+                    distinct_objects: 10,
+                })
+                .build()
+        };
+        let descriptors = [mk("A"), mk("B")];
+        let sel = select_sources(&bgp, &descriptors);
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+        let sub = "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }";
+        let a_body = srj(&["s", "o"], &[&[("s", "http://ex/a"), ("o", "http://ex/o1")]]);
+        let b_body = srj(&["s", "o"], &[&[("s", "http://ex/b"), ("o", "http://ex/o2")]]);
+
+        // Materialised reference.
+        let ep_a = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(one_answer(sub, a_body.clone()))));
+        let ep_b = Endpoint::new("http://8.8.4.4/sparql", Box::new(MapTransport::new(one_answer(sub, b_body.clone()))));
+        let ref_adapters: Vec<&dyn FederatedSource> = vec![&ep_a, &ep_b];
+        let resolver_ref = SourceResolver::new(&bgp, &ref_adapters);
+        let reference = materialize_multi_source(&resolver_ref, &sel, &tree).unwrap();
+
+        // Streamed: owned Arc adapters, same source-index order.
+        let arc_a: Arc<dyn FederatedSource + Send + Sync> = Arc::new(ArcMapSource::new(one_answer(sub, a_body)));
+        let arc_b: Arc<dyn FederatedSource + Send + Sync> = Arc::new(ArcMapSource::new(one_answer(sub, b_body)));
+        let arc_adapters = vec![arc_a, arc_b];
+        // A stub borrowed slice only for index resolution (pattern lookup); the streaming path
+        // answers through `arc_adapters`, so these are never `execute`d.
+        let stub_a = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new())));
+        let stub_b = Endpoint::new("http://8.8.4.4/sparql", Box::new(MapTransport::new(StdHashMap::new())));
+        let stub_adapters: Vec<&dyn FederatedSource> = vec![&stub_a, &stub_b];
+        let resolver = SourceResolver::new(&bgp, &stub_adapters);
+        let stream =
+            stream_multi_source(&resolver, &sel, &arc_adapters, &tree, &StreamOptions::default())
+                .expect("streaming multi-source builds");
+        let got = stream.collect_solutions().unwrap();
+        let got_rows: Vec<Vec<Option<Term>>> = got.iter().map(|s| s.cells.clone()).collect();
+        let got_vars = got
+            .first()
+            .map(|s| s.vars.clone())
+            .unwrap_or_else(|| reference.vars.clone());
+        assert!(
+            solutions_equal(&got_vars, &got_rows, &reference.vars, &reference.rows),
+            "streamed multi-source must equal materialised.\n streamed={:?}\n reference={:?}",
+            got_rows,
+            reference.rows,
+        );
+    }
+
+    /// A leaf the selection retained NO source for is an empty relation (the source-selection
+    /// layer is authoritative — the interpreter never falls back to "every adapter"). Both
+    /// entry points agree. [OPUS-4.8] sq-7yf0.
+    #[test]
+    fn multi_source_leaf_with_no_retained_source_is_empty() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/p"),
+            var("o"),
+        )]);
+        // A descriptor that does NOT declare ex/p ⇒ the source is NOT retained for the leaf.
+        let descriptors = [SourceDescriptor::builder(SourceId::new("A")).total_triples(10).build()];
+        let sel = select_sources(&bgp, &descriptors);
+        assert!(
+            sel.first().map(|ps| ps.candidates.is_empty()).unwrap_or(true),
+            "no source retained for the unmatched predicate"
+        );
+        // With an empty selection there is no plan (no leaf retained any source); exercise the
+        // leaf helper directly to assert the empty-relation contract without a JoinTree.
+        let ep = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new())));
+        let adapters: Vec<&dyn FederatedSource> = vec![&ep];
+        let resolver = SourceResolver::new(&bgp, &adapters);
+        let leaf = materialize_leaf_multi(&resolver, &sel, 0).unwrap();
+        assert_eq!(leaf.vars, vec!["s".to_string(), "o".to_string()]);
+        assert!(leaf.rows.is_empty(), "no retained source ⇒ empty leaf relation");
+    }
+
+    /// A retained source index out of range for the streaming adapter slice fails closed with
+    /// a `ResolveError` BEFORE any fetch job is spawned (never a silent under-answer).
+    /// [OPUS-4.8] sq-7yf0.
+    #[test]
+    fn stream_multi_source_range_checks_source_index() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/p"),
+            var("o"),
+        )]);
+        let mk = |id: &str| {
+            SourceDescriptor::builder(SourceId::new(id))
+                .total_triples(10)
+                .predicate(sparq_fedplan::PredPartition {
+                    predicate: "http://ex/p".into(),
+                    triples: 10,
+                    distinct_subjects: 10,
+                    distinct_objects: 10,
+                })
+                .build()
+        };
+        let descriptors = [mk("A"), mk("B")];
+        let sel = select_sources(&bgp, &descriptors);
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+        let stub = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new())));
+        let stub_adapters: Vec<&dyn FederatedSource> = vec![&stub];
+        let resolver = SourceResolver::new(&bgp, &stub_adapters);
+        // Only ONE Arc adapter supplied, but the selection retained source index 1 ⇒ out of range.
+        let only: Arc<dyn FederatedSource + Send + Sync> = Arc::new(ArcMapSource::new(StdHashMap::new()));
+        let arc_adapters = vec![only];
+        let err = match stream_multi_source(&resolver, &sel, &arc_adapters, &tree, &StreamOptions::default()) {
+            Ok(_) => panic!("an out-of-range source index must fail closed"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err,
+            InterpError::Resolve(crate::planner::ResolveError::SourceOutOfRange {
+                index: 1,
+                sources: 1,
+            })
         );
     }
 }

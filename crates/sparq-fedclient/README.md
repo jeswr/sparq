@@ -339,11 +339,27 @@ REAL here: the `SolutionStream` boundary, the bounded blocking thread-pool, the
 `StreamJoin`-feeder streaming join (with spill), the streaming single-source interpreter, the
 lossless `Term ↔ Tuple` bridge, and the streaming-correctness test against the real engine.
 
+### Multi-source UNION-per-leaf fan-out (bead `sq-7yf0`)
+
+Landed since: a leaf the planner retained **more than one source** for is no longer rejected
+with `InterpError::MultiSource` — `materialize_multi_source` / `stream_multi_source` fan it
+out as a **per-source UNION** (the bag-union of every retained source's solutions for that
+pattern, SPARQL UNION's multiset semantics — solution sequences concatenated, no
+de-duplication, multiplicity preserved). The materialised path resolves each candidate
+`source` index to its adapter through the `SourceResolver` and concatenates the per-source
+leaf relations; the streaming path fans each retained source's fetch out onto the same
+`ScatterPool`, all feeding ONE per-leaf `SolutionStream` (a cloned `SolutionSink` per source
+job, so the leaf stream ends once the last source job finishes). Both fold the per-leaf
+unions through the unchanged left-deep `natural_join` / `StreamingJoin`. The single-source
+entry points (`materialize_single_source` / `stream_single_source`) keep the
+`InterpError::MultiSource` fail-closed contract — multi-source is the opt-in entry point.
+`tests/multi_source_union_result_equals_local.rs` proves the materialised AND streamed
+multi-source result equals local `sparq-engine` evaluation over the **union of every source's
+graph**, over disjoint-fragment sources (single leaf, star join, 2-hop path, three sources,
+mixed single+multi-source leaves).
+
 Still a stub / deferred (a clear slice boundary, not a half-done operator):
 
-- **Multi-source UNION-per-leaf fan-out** — a leaf retained by more than one source is still
-  rejected with `InterpError::MultiSource` (the Phase-3 guard), not yet fanned out as a
-  per-source union. The thread-pool and `SolutionStream` are the seam that work builds on.
 - **The pushed-down streaming bind-join** — `JoinAlgo::Bind` is executed with the same
   streaming symmetric hash join (identical result multiset), not yet as a VALUES / `maxMpR`
   block pushed to the source. That pushdown is Phase 4's `pushdown` module + a follow-up
@@ -409,10 +425,12 @@ Phase 2 (source abstraction + Endpoint adapter, `sq-rsxf`), Phase 3 (planner bri
 materialised single-source interpreter, `sq-j27p`), Phase 4 (capability-aware pushdown,
 `sq-7byx`), Phase 5 (streaming operators — `SolutionStream` + thread-pool fan-out +
 `StreamJoin`-feeder join, `sq-vtba`), Phase 6 (brTPF/TPF adapters, `sq-2qze`), Phase 7
-(adaptive re-planning, `sq-ij5x`). Still ahead as future beads under epic **sq-3183**:
-multi-source UNION-per-leaf fan-out + the pushed-down streaming bind-join, and the ANAPSID
-"adaptive operator" refinement. No performance numbers appear here: any "better than Comunica"
-claim in the design record is an *architectural prediction* to be validated head-to-head before
-being asserted as fact.
+(adaptive re-planning, `sq-ij5x`). Landed since under epic **sq-3183**: multi-source
+UNION-per-leaf fan-out (`materialize_multi_source` / `stream_multi_source`, `sq-7yf0`). Still
+ahead as future beads under epic **sq-3183**: the pushed-down streaming bind-join (a VALUES /
+`maxMpR` block pushed to the source vs the current correct streaming hash join) and the
+ANAPSID "adaptive operator" refinement. No performance numbers appear here: any "better than
+Comunica" claim in the design record is an *architectural prediction* to be validated
+head-to-head before being asserted as fact.
 
-[OPUS-4.8] sq-7byx, sq-vtba, sq-ij5x — flagged for Fable re-review.
+[OPUS-4.8] sq-7byx, sq-vtba, sq-ij5x, sq-7yf0 — flagged for Fable re-review.

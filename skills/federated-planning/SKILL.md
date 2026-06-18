@@ -238,9 +238,11 @@ since:
   leaf's SRJ through the Phase-2 adapter, parses it, and natural-joins in the plan's join
   order. The load-bearing property — the materialised federated result **equals** local
   `sparq-engine` evaluation of the same query (`solutions_equal` bag comparison) — is driven
-  end-to-end in `tests/planner_result_equals_local_eval.rs`. The interpreter is single-source
-  + blocking (its streaming counterpart is Phase 5 below); a multi-source leaf fails closed
-  with `InterpError::MultiSource`.
+  end-to-end in `tests/planner_result_equals_local_eval.rs`. `materialize_single_source` is
+  single-source + blocking (its streaming counterpart is Phase 5 below); a leaf the planner
+  retained >1 source for fails closed with `InterpError::MultiSource`. To fan such a leaf out
+  as a per-source UNION use `materialize_multi_source` / `stream_multi_source` (bead `sq-7yf0`,
+  below) — the opt-in multi-source entry points that never return `MultiSource`.
 - **Phase 4 capability-aware pushdown** (`sq-7byx`) — the `pushdown` module decides the most
   precise sub-query each source is asked. `exclusive_groups(selection, bgp)` derives the FedX
   **exclusive groups** (maximal connected sub-patterns whose only retained source is one
@@ -270,9 +272,21 @@ since:
   inputs are exhausted. The load-bearing invariant — the streamed multiset is **multiset-equal**
   to the Phase-3 materialised result for **any** source-arrival interleaving (and both equal
   local eval) — is driven on the real engine path under injected per-leaf delays + a forced spill
-  in `tests/streaming_result_equals_phase3.rs`. Multi-source UNION-per-leaf and the *pushed-down*
-  bind-join (VALUES/`maxMpR`) remain deferred; a bind-classified join runs as the same streaming
-  symmetric hash join (identical result multiset).
+  in `tests/streaming_result_equals_phase3.rs`. The *pushed-down* bind-join (VALUES/`maxMpR`)
+  remains deferred; a bind-classified join runs as the same streaming symmetric hash join
+  (identical result multiset).
+- **Multi-source UNION-per-leaf fan-out** (`sq-7yf0`) — `materialize_multi_source` /
+  `stream_multi_source` lift the single-source `InterpError::MultiSource` guard: a leaf the
+  planner retained >1 source for is answered as the **bag-union** of every retained source's
+  solutions for that pattern (SPARQL UNION's multiset semantics — concatenation, no de-dup,
+  multiplicity preserved), resolving each candidate `source` index to its adapter through the
+  `SourceResolver`. The streaming path fans each retained source's fetch onto the same
+  `ScatterPool`, all feeding ONE per-leaf `SolutionStream` (a cloned `SolutionSink` per source
+  job). Both fold the per-leaf unions through the unchanged left-deep `natural_join` /
+  `StreamingJoin`. `tests/multi_source_union_result_equals_local.rs` proves the materialised
+  AND streamed multi-source result equals local `sparq-engine` evaluation over the union of
+  every source's graph. The single-source entry points keep the fail-closed `MultiSource`
+  contract — multi-source is the opt-in entry point.
 - **Phase 6 the brTPF + TPF fragment adapters** (`sq-2qze`): `source::TpfSource` (plain TPF —
   materialise a fragment to exhaustion, no bind-join) and `source::BrTpfSource`
   (bindings-restricted — push `maxMpR`-bounded binding blocks per request, the standardised
@@ -341,10 +355,11 @@ since:
   interpreter and ground-truth local engine eval across a genuine large-divergence switch.
 
 With Phase 7 the **8-phase streaming federation client is feature-complete** (Phases 0–7 all
-landed; epic **sq-dnko** closed). Still ahead as future beads under epic sq-3183: multi-source
-UNION-per-leaf fan-out, the pushed-down streaming bind-join, and the ANAPSID "adaptive operator"
-refinement (estimate a leaf's cardinality from a prefix of its rows while still streaming it).
-See `crates/sparq-fedclient/README.md`.
+landed; epic **sq-dnko** closed). Multi-source UNION-per-leaf fan-out has since landed under
+epic sq-3183 (`sq-7yf0`, above). Still ahead as future beads under epic sq-3183: the
+pushed-down streaming bind-join, and the ANAPSID "adaptive operator" refinement (estimate a
+leaf's cardinality from a prefix of its rows while still streaming it). See
+`crates/sparq-fedclient/README.md`.
 
 ## Deferred (NOT here)
 
