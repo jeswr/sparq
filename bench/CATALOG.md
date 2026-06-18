@@ -67,7 +67,7 @@ conventions first, then a per-category map that points at the registry, then a
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
 | **serve** | concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-spikes`, `memtier-spikes`, `pss-update-parity` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance` |
-| **competitors** | versioned external-engine comparison (Oxigraph / QLever / eye) + version+env capture | `competitor-gather` (registry: [`competitors.json`](./competitors.json)) |
+| **competitors** | versioned external-engine comparison (Oxigraph / QLever / Fuseki+TDB2 / eye + the SHACL/geo/FTS/vector peers) + version+env capture | `competitor-gather` (registry: [`competitors.json`](./competitors.json)) |
 
 Notes on a few that need care:
 

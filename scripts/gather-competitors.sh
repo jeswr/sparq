@@ -510,6 +510,13 @@ run_http_sparql_engine() { # <id>
   hdr "$id (http-sparql)"
   log "  adapter: $ADAPTERS_DIR/http_sparql_adapter.py (POST query -> parse SPARQL-JSON -> count)"
   log "  PREP (gather box): start the engine's HTTP endpoint, then set SPARQL_ENDPOINT + SPARQL_QUERY_FILE"
+  # [OPUS-4.8] sq-gbq0: a Docker-backed http-sparql engine (Fuseki, Virtuoso, the
+  # jena-* SAILs) records its IMAGE DIGEST as the version identifier (the endpoint
+  # reports no build string), and tags the result per SUITE so the file lands as
+  # <engine>-<suite>-<UTC>.json per bench/CATALOG.md (e.g. fuseki-sp2b-<UTC>.json).
+  # Both are OPTIONAL env knobs, backward-compatible: default suite stays
+  # "http-sparql" and the version falls back to the registry pinned_version.
+  log "  OPTIONAL: SPARQL_SUITE=<sp2b|watdiv|lubm|bsbm|dbpsb> tags the result file; SPARQL_IMAGE=<image:tag> records the resolved Docker DIGEST as the version"
   if [ "$DO_RUN" -eq 1 ]; then
     have python3 || die "python3 needed for the http-sparql adapter"
     { [ -n "${SPARQL_ENDPOINT:-}" ] && [ -n "${SPARQL_QUERY_FILE:-}" ]; } || die "http-sparql --run needs SPARQL_ENDPOINT + SPARQL_QUERY_FILE"
@@ -517,7 +524,14 @@ run_http_sparql_engine() { # <id>
             --query-file "$SPARQL_QUERY_FILE" --engine "$id" --iters "$ITERS" --json 2>/dev/null)" \
       || die "http-sparql adapter failed for $id (endpoint up?)"
     PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,c,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"count":int(c),"query_us":int(u)}))')"
-    write_result "$id" "http-sparql" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    # Version: a resolved Docker image DIGEST (SPARQL_IMAGE) IS the version pin for a
+    # Dockerized server; fall back to the registry pinned_version when not Dockerized.
+    local hver=""
+    if [ -n "${SPARQL_IMAGE:-}" ] && have docker; then
+      hver="$(docker inspect --format '{{index .RepoDigests 0}}' "$SPARQL_IMAGE" 2>/dev/null || true)"
+    fi
+    [ -n "$hver" ] || hver="$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")"
+    write_result "$id" "${SPARQL_SUITE:-http-sparql}" "$hver" "$PAYLOAD"
     check_df
   fi
 }
