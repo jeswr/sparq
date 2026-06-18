@@ -292,11 +292,29 @@ fn requirements() -> Vec<Req> {
             Class::GeometryExt,
             "Allow the geo:dimension/coordinateDimension/spatialDimension/\
              isEmpty/isSimple/hasSerialization metadata properties.",
-            Coverage::Gap,
-            "Geometry-metadata PROPERTIES (dimension/isEmpty/isSimple/…) are not \
-             yet materialised by sparq-geo. Tracked: sq-mzmh \
-             (bd list -l area:sparq-geo).",
-            || false,
+            Coverage::Pass,
+            "GeoGeometry::metadata materialises every geometry-metadata property \
+             value (geof.rs sibling sparq_geo::metadata, sq-mzmh): topological \
+             dimension, coordinate/spatial dimension (2 in the 2-D SF profile), \
+             isEmpty, isSimple (self-intersection test), and hasSerialization.",
+            || {
+                use sparq_geo::metadata::lex as m;
+                use sparq_geo::vocab::WKT_LITERAL as W;
+                // dimension by kind; coordinate/spatial dimension are 2.
+                m::dimension("POINT(1 2)", W) == Ok(Some(0))
+                    && m::dimension("LINESTRING(0 0, 1 1)", W) == Ok(Some(1))
+                    && m::dimension("POLYGON((0 0,2 0,2 2,0 2,0 0))", W) == Ok(Some(2))
+                    && m::coordinate_dimension("POINT(1 2)", W) == Ok(Some(2))
+                    && m::spatial_dimension("POINT(1 2)", W) == Ok(Some(2))
+                    // isEmpty / isSimple.
+                    && m::is_empty("POINT(1 2)", W) == Ok(false)
+                    && m::is_empty("GEOMETRYCOLLECTION EMPTY", W) == Ok(true)
+                    && m::is_simple("LINESTRING(0 0, 1 0, 1 1)", W) == Ok(true)
+                    && m::is_simple("LINESTRING(0 0, 2 2, 0 2, 2 0)", W) == Ok(false)
+                    // hasSerialization re-parses to the same geometry.
+                    && m::has_serialization("POINT(1 2)", W)
+                        .is_ok_and(|s| s.contains("POINT"))
+            },
         ),
         req(
             10,
@@ -377,10 +395,19 @@ fn requirements() -> Vec<Req> {
             16,
             Class::GeometryExt,
             "An empty geo:gmlLiteral is the empty geometry.",
-            Coverage::Gap,
-            "Empty/degenerate gmlLiteral handling is not asserted by sparq-geo's \
-             GML-SF parser yet. Tracked: sq-i2a0 follow-up (bd list -l area:sparq-geo).",
-            || parse_gml_literal("").is_ok(),
+            Coverage::Pass,
+            "parse_gml_literal accepts an empty/whitespace-only lexical form AND a \
+             member-less GML aggregate (gml:MultiPoint/MultiGeometry/…) as the \
+             empty geometry, the GML counterpart of the empty wktLiteral (R13). \
+             (sq-mzmh)",
+            || {
+                parse_gml_literal("").is_ok()
+                    && parse_gml_literal("   ").is_ok()
+                    && parse_gml_literal(
+                        "<gml:MultiPoint xmlns:gml=\"http://www.opengis.net/gml\"/>",
+                    )
+                    .is_ok()
+            },
         ),
         req(
             17,
@@ -558,9 +585,9 @@ fn requirements() -> Vec<Req> {
 
 /// [OPUS-4.8] sq-i2a0 — FLOOR on the number of OGC GeoSPARQL requirements sparq
 /// demonstrates with a passing executable probe. A ratchet: it may only RISE.
-/// 30 requirements total; 28 demonstrated; 2 honest gaps (R9 geometry-metadata
-/// properties, R16 empty gmlLiteral).
-const REQUIREMENTS_FLOOR: usize = 28;
+/// 30 requirements total; ALL 30 now demonstrated after sq-mzmh closed the last
+/// two gaps (R9 geometry-metadata properties + R16 empty gmlLiteral). [OPUS-4.8]
+const REQUIREMENTS_FLOOR: usize = 30;
 
 #[test]
 fn ogc_geosparql_requirements_conformance() {

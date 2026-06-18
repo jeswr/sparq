@@ -5,6 +5,7 @@ pub mod geof;
 pub mod gml; // [OPUS-4.8] sq-zy0: GML-SF geometry parser (geo:gmlLiteral)
 pub mod index;
 pub mod literal;
+pub mod metadata; // [OPUS-4.8] sq-mzmh: geo:dimension/isEmpty/isSimple/… metadata (OGC R9)
 #[cfg(feature = "engine")]
 pub mod provider;
 #[cfg(feature = "engine")]
@@ -20,6 +21,7 @@ pub use index::GeoIndex;
 pub use literal::{
     is_geometry_datatype, parse_geometry_literal, parse_wkt_literal, Crs, GeoGeometry,
 }; // [OPUS-4.8]
+pub use metadata::GeometryMetadata; // [OPUS-4.8] sq-mzmh
 #[cfg(feature = "engine")]
 pub use provider::GeoIndexProvider;
 #[cfg(feature = "engine")]
@@ -45,6 +47,20 @@ pub mod vocab {
     pub const HAS_GEOMETRY: &str = "http://www.opengis.net/ont/geosparql#hasGeometry";
     /// `geo:hasDefaultGeometry` — feature -> default geometry node (GeoSPARQL 8.3).
     pub const HAS_DEFAULT_GEOMETRY: &str = "http://www.opengis.net/ont/geosparql#hasDefaultGeometry";
+    // ---- geometry-METADATA properties (GeoSPARQL 8.4; OGC R9). [OPUS-4.8] sq-mzmh ----
+    /// `geo:dimension` — topological dimension of a geometry (`xsd:integer`).
+    pub const DIMENSION: &str = "http://www.opengis.net/ont/geosparql#dimension";
+    /// `geo:coordinateDimension` — coordinate measurements per point (`xsd:integer`).
+    pub const COORDINATE_DIMENSION: &str =
+        "http://www.opengis.net/ont/geosparql#coordinateDimension";
+    /// `geo:spatialDimension` — spatial measurements per point (`xsd:integer`).
+    pub const SPATIAL_DIMENSION: &str = "http://www.opengis.net/ont/geosparql#spatialDimension";
+    /// `geo:isEmpty` — whether the geometry is the empty set (`xsd:boolean`).
+    pub const IS_EMPTY: &str = "http://www.opengis.net/ont/geosparql#isEmpty";
+    /// `geo:isSimple` — whether the geometry has no self-intersection (`xsd:boolean`).
+    pub const IS_SIMPLE: &str = "http://www.opengis.net/ont/geosparql#isSimple";
+    /// `geo:hasSerialization` — a serialization of the geometry (`geo:wktLiteral`).
+    pub const HAS_SERIALIZATION: &str = "http://www.opengis.net/ont/geosparql#hasSerialization";
     /// `geof:` — the GeoSPARQL function namespace.
     pub const GEOF_NS: &str = "http://www.opengis.net/def/function/geosparql/";
     /// `uom:` — the OGC units-of-measure namespace used by `geof:distance`.

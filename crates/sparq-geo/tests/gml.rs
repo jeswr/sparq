@@ -282,8 +282,8 @@ fn malformed_gml_is_a_clean_error() {
         r#"<gml:Polygon><gml:exterior><gml:LinearRing><gml:posList>0 0 1 1</gml:posList></gml:LinearRing></gml:exterior></gml:Polygon>"#,
         // Truncated / unbalanced XML.
         r#"<gml:Point><gml:pos>1 2</gml:pos>"#,
-        // Empty string.
-        "",
+        // NB: an empty lexical form is NOT an error — it is the empty geometry
+        // (GeoSPARQL Req 16); see `empty_gml_lexical_form_is_empty_geometry`. [OPUS-4.8]
     ];
     for lex in cases {
         match parse_gml_literal(lex) {
@@ -362,6 +362,53 @@ fn parse_geometry_literal_dispatches_by_datatype() {
         parse_geometry_literal("POINT(1 2)", "http://example.org/notGeometry"),
         Err(GeoError::Unsupported(_))
     ));
+}
+
+// ---- R16: an empty gmlLiteral is the empty geometry -------------------------
+// [OPUS-4.8] sq-mzmh — GeoSPARQL Req 16, the GML counterpart of the empty
+// wktLiteral (Req 13).
+
+/// An empty / whitespace-only lexical form is the empty geometry (CRS84).
+#[test]
+fn empty_gml_lexical_form_is_empty_geometry() {
+    for lex in ["", "   ", "\n\t "] {
+        let g = parse_gml_literal(lex).expect("empty gmlLiteral parses");
+        assert_eq!(g.crs, Crs::Crs84);
+        assert!(g.metadata().is_empty, "lexical form {lex:?} must be empty");
+        assert_eq!(g.metadata().dimension, None);
+    }
+}
+
+/// A member-less GML aggregate element is the empty geometry, not a parse error.
+#[test]
+fn member_less_gml_aggregates_are_empty() {
+    const NS: &str = "xmlns:gml=\"http://www.opengis.net/gml\"";
+    for lex in [
+        format!("<gml:MultiPoint {NS}/>"),
+        format!("<gml:MultiPoint {NS}></gml:MultiPoint>"),
+        format!("<gml:MultiCurve {NS}/>"),
+        format!("<gml:MultiSurface {NS}/>"),
+        format!("<gml:MultiGeometry {NS}/>"),
+    ] {
+        let g = parse_gml_literal(&lex).unwrap_or_else(|e| panic!("{lex} -> {e}"));
+        assert!(g.metadata().is_empty, "{lex} must be the empty geometry");
+    }
+}
+
+/// A NON-empty GML aggregate (a MultiGeometry with members) still parses to its
+/// constituents — the empty-handling change does not weaken populated parsing.
+#[test]
+fn gml_multigeometry_with_members_parses() {
+    let lex = "<gml:MultiGeometry xmlns:gml=\"http://www.opengis.net/gml\">\
+               <gml:geometryMember><gml:Point><gml:pos>1 2</gml:pos></gml:Point></gml:geometryMember>\
+               <gml:geometryMember><gml:Point><gml:pos>3 4</gml:pos></gml:Point></gml:geometryMember>\
+               </gml:MultiGeometry>";
+    let g = parse_gml_literal(lex).unwrap();
+    assert!(!g.metadata().is_empty);
+    match g.geometry {
+        Geometry::GeometryCollection(gc) => assert_eq!(gc.0.len(), 2),
+        other => panic!("expected a GEOMETRYCOLLECTION, got {other:?}"),
+    }
 }
 
 // ---- A gmlLiteral round-trips through SPARQL geof: like its WKT twin ---------
