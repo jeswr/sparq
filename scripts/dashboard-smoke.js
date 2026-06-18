@@ -254,6 +254,14 @@ const tdN = D.tierDescriptor('nightly'); const tdC = D.tierDescriptor('per-commi
 eq(tdN.kind, 'tier-nightly', 'tierDescriptor(nightly) kind');
 eq(tdC.kind, 'tier-per-commit', 'tierDescriptor(per-commit) kind');
 ok(tdN.text && tdN.title && tdC.text && tdC.title, 'tier descriptors carry text + title');
+// [OPUS-4.8] sq-c0kd: the nightly tier must NOT claim "same box" vs the competitor gathers (nightly
+// runs c7g.4xlarge, the gathers ran c7g.xlarge — same c7g family, different size). The title must
+// say "instance family" and flag the gap so EC2-nightly-vs-competitor is never read as a direct,
+// same-box comparison once the tier goes live.
+ok(!/same[ -]box/i.test(tdN.title), 'tierDescriptor(nightly) title does not claim "same box"');
+ok(/instance family/i.test(tdN.title), 'tierDescriptor(nightly) title says "instance family"');
+ok(/not directly comparable/i.test(tdN.title),
+   'tierDescriptor(nightly) title flags it is not directly comparable to the competitor cells');
 
 // buildFeatured carries the chosen tier through to the view (and defaults to per-commit).
 const featNightly = D.buildFeatured(ec2Entry, null, pickedNightly);
