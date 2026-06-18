@@ -179,6 +179,7 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "BM25 text search via magic predicates.",
         tier: "live-new-wasm",
         icon: Search,
+        built: true,
       },
       {
         slug: "vector",

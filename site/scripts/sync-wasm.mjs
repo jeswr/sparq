@@ -89,3 +89,34 @@ try {
       `            run live. Build it:  (cd ../js && npm run build:rsp-wasm)`,
   );
 }
+
+// [OPUS-4.8] sq-xoxu — also sync the tier-b "W-text" bundle that drives
+// /surface/full-text (crates/sparq-text-wasm, the BM25 inverted index + `text:` magic
+// predicates, built by `js/`'s `build:text-wasm`). Like W-reason / W-rsp, its wasm-pack
+// output stays in the crate's own pkg/ (it is NOT part of the published @jeswr/sparq
+// package), so we copy it into public/wasm/text/. OPTIONAL: a quick `next dev` that skips
+// the build WARNs and skips rather than failing — the full-text page then surfaces a clear
+// load-failure state.
+const textSrc = join(here, "..", "..", "crates", "sparq-text-wasm", "pkg");
+const textDest = join(dest, "text");
+const textFiles = [
+  "sparq_text_wasm.js",
+  "sparq_text_wasm_bg.wasm",
+  "sparq_text_wasm.d.ts",
+];
+
+try {
+  await access(join(textSrc, "sparq_text_wasm_bg.wasm"));
+  await mkdir(textDest, { recursive: true });
+  for (const f of textFiles) {
+    await copyFile(join(textSrc, f), join(textDest, f));
+  }
+  console.log(
+    `[sync-wasm] copied ${textFiles.length} files → public/wasm/text/ (W-text)`,
+  );
+} catch {
+  console.warn(
+    `[sync-wasm] W-text bundle not found at ${textSrc}; /surface/full-text will not\n` +
+      `            run live. Build it:  (cd ../js && npm run build:text-wasm)`,
+  );
+}
