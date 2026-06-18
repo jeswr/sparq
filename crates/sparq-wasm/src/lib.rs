@@ -9,6 +9,63 @@
 //! const json = store.query("SELECT * WHERE { ?s ?p ?o } LIMIT 10");
 //! const { results } = JSON.parse(json);
 //! ```
+//!
+//! # Query surface (what crosses the wasm boundary)
+//!
+//! [OPUS-4.8] sq-0ptd (gh-54) — the read-replica / edge-cache tier audit. Every SPARQL
+//! query *form* is exported: SELECT/ASK via [`Store::query`] / [`Store::ask`] (plus the
+//! streaming [`Store::query_cursor`] / [`Store::query_chunks`]) and **CONSTRUCT / DESCRIBE**
+//! via [`Store::query_quads`] / [`Store::query_quads_chunks`] (the constructed graph as
+//! N-Triples). The non-regex **string functions** are retained unchanged in the wasm build
+//! — `CONTAINS`, `STRSTARTS`, `LCASE` (and `UCASE`, `STRENDS`, `SUBSTR`, `STRLEN`, `CONCAT`,
+//! `STRBEFORE`/`STRAFTER`, …): the `Store` shares one `sparq-engine`/`sparq-core` with native,
+//! so for these the FILTER / expression evaluator is byte-for-byte the same. (The
+//! `regression_string_functions` native test and the `string_functions_retained`
+//! headless-wasm test lock the `CONTAINS` / `STRSTARTS` / `LCASE` trio in.)
+//!
+//! **`REGEX` / `REPLACE` are the one exception — compiled OUT of the lean default bundle.**
+//! They sit behind `sparq-engine`'s default-on `regex` Cargo feature, and this crate depends
+//! on `sparq-engine` with `default-features = false` to keep the regex automata out of the
+//! browser bundle, so on a default-built `Store` a query that uses `REGEX` / `REPLACE` is
+//! **rejected** — the engine returns an `"unsupported SPARQL function"` error, surfaced as the
+//! `JsError` Err arm (not a silently-empty result). Build the bundle with `--features regex`
+//! (or prefer `CONTAINS` / `STRSTARTS` / `STRENDS`) if you need them in wasm.
+//!
+//! # Persistence is native-only (no `save` / `open` / `mmap` here)
+//!
+//! The native `sparq_core::Graph` `save` / `open` / `save_compressed` family and the
+//! mmap-backed dictionary/store map-in path are **deliberately not exported** to wasm,
+//! because they cannot exist on `wasm32`: they take a `std::path::Path` and rely on a POSIX
+//! **filesystem** and **`mmap`** (`memmap2`), neither of which a browser/edge wasm sandbox
+//! provides. The whole `mmap` Cargo feature is therefore off in this crate's `sparq-core`
+//! dependency, and persistence stays on the native (container) tier. A wasm store is built
+//! fresh each session from an in-memory document via [`Store::load`] /
+//! [`Store::load_compressed`] (the caller already holds the bytes — IndexedDB, `fetch`,
+//! a `File`); to *materialise* a store's contents back out for the host to persist, run a
+//! `CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }` (or per-graph) through
+//! [`Store::query_quads`] and store the N-Triples. There is no binary snapshot format
+//! across the boundary.
+//!
+//! # Runtime constraints (the edge tier's envelope)
+//!
+//! - **Single-threaded.** No `rayon` in the bundle (wasm has no threads here), so loads and
+//!   queries run on the one (main) thread; there is no parallel scan/parse.
+//! - **Append-only delta growth.** [`Store::update_in_place`] / [`Store::apply_delta`] apply
+//!   mutations through the engine's delta overlay: the permutation indexes and the dictionary
+//!   grow **append-only** (existing term ids stay valid — never renumbered), and deletes are
+//!   masked rather than reclaimed. Steady-state writing therefore **monotonically grows** the
+//!   footprint until a rebuild — re-`load`, or use the immutable-rebuild [`Store::update`]
+//!   (which returns a fresh compacted store), to fold the overlay back down and reclaim
+//!   deleted space. The wasm tier is read-replica-shaped (load → query), not a long-lived
+//!   mutable primary.
+//! - **32-bit linear-memory ceiling.** `wasm32` linear memory is **4 GiB** addressable, and a
+//!   real browser tab is happier well under ~2 GiB. That — not CPU — is the binding scale
+//!   limit; [`Store::load_compressed`] (block-compressed indexes + compact dictionary) is the
+//!   lever for fitting a bigger graph under the ceiling, and append-only growth eats into the
+//!   same budget. [`Store::heap_bytes`] reports the current footprint so a host can watch it.
+//!
+//! See `README.md` (the "Browser memory bound" / persistence sections) for the operational
+//! detail; this audit is tracked as bead sq-0ptd / gh-54.
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use sparq_core::Graph;
@@ -795,5 +852,90 @@ mod tests {
             assert_eq!(raw.query(q).unwrap(), cmp.query(q).unwrap(), "compressed JSON differs for: {q}");
         }
         assert!(cmp.heap_bytes() <= raw.heap_bytes());
+    }
+
+    // ---- sq-0ptd (gh-54): string-function retention in the wasm build ----
+    //
+    // The wasm bundle shares one `sparq-engine` evaluator with native — no string builtin is
+    // compiled out for `wasm32` — so this asserts the trio the bead calls out (CONTAINS /
+    // STRSTARTS / LCASE) is exercisable through the engine path the `Store::query` wrapper
+    // delegates to. (`Store::query` itself maps errors via `JsError::new`, a wasm-bindgen
+    // import that panics off-wasm, so — as the other native tests do — this drives
+    // `sparq_engine::query_json` directly; the headless `string_functions_retained` test
+    // proves the same through the real `#[wasm_bindgen] Store::query` export in wasm.)
+    #[test]
+    fn regression_string_functions() {
+        let data = r#"@prefix ex: <http://ex/> .
+            ex:a ex:name "Alice" . ex:b ex:name "BOB" . ex:c ex:name "carol" ."#;
+        let g = Graph::load_str(data, "turtle").unwrap();
+
+        // STRSTARTS: only "Alice" starts with "Al".
+        let j = sparq_engine::query_json(
+            &g,
+            r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(STRSTARTS(?n, "Al")) }"#,
+        )
+        .unwrap();
+        assert!(j.contains("\"value\":\"Alice\""), "STRSTARTS: {j}");
+        assert_eq!(j.matches("\"n\":{").count(), 1, "STRSTARTS one row: {j}");
+
+        // CONTAINS over LCASE: lowercasing folds "BOB"->"bob" and "carol", both contain "o".
+        let j = sparq_engine::query_json(
+            &g,
+            r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(CONTAINS(LCASE(?n), "o")) }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            j.matches("\"n\":{").count(),
+            2,
+            "CONTAINS(LCASE(..)) matches BOB + carol: {j}"
+        );
+
+        // LCASE as a projected value (BIND), not just inside a FILTER.
+        let j = sparq_engine::query_json(
+            &g,
+            r#"PREFIX ex: <http://ex/> SELECT ?l WHERE { ex:b ex:name ?n BIND(LCASE(?n) AS ?l) }"#,
+        )
+        .unwrap();
+        assert!(
+            j.contains("\"value\":\"bob\""),
+            "LCASE projects lowercase: {j}"
+        );
+    }
+
+    // [OPUS-4.8] sq-0ptd (gh-54): the NEGATIVE half of the audit — "REGEX/REPLACE are
+    // compiled OUT of the lean default bundle" — is asserted ONLY on the real `wasm32`
+    // target, in `tests/web.rs::regex_compiled_out_by_default`. It is NOT a native unit
+    // test, and deliberately so: `sparq-engine`'s `regex` feature is part of its DEFAULT
+    // set, and many OTHER workspace crates (sparq-mpc, sparq-prov, sparq-bench, …) depend
+    // on `sparq-engine` with default features. In ANY native `cargo nextest --workspace`
+    // build — which is exactly what the CI test-archive lane runs — Cargo FEATURE
+    // UNIFICATION compiles a SINGLE `sparq-engine` with `regex` ON, so a native query that
+    // uses REGEX SUCCEEDS regardless of this crate's own `regex` feature. A native negative
+    // assertion is therefore unobservable/unsound (a `not(feature = "shacl")` guard does not
+    // help — shacl is not the only unification source). Only the `wasm32` build links
+    // `sparq-wasm`'s own (no-defaults, regex-off) `sparq-engine` without unifying the rest of
+    // the workspace, so regex IS genuinely compiled out there and the negative is testable.
+
+    /// With `--features regex` the wasm crate forwards to `sparq-engine/regex` and REGEX works
+    /// — the positive half of the audit, asserting the opt-in lever actually re-enables it.
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_present_when_enabled() {
+        let data = r#"@prefix ex: <http://ex/> . ex:a ex:name "Alice" . ex:b ex:name "Bob" ."#;
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let j = sparq_engine::query_json(
+            &g,
+            r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(REGEX(?n, "^Al")) }"#,
+        )
+        .unwrap();
+        assert!(
+            j.contains("\"value\":\"Alice\""),
+            "REGEX matches Alice: {j}"
+        );
+        assert_eq!(
+            j.matches("\"n\":{").count(),
+            1,
+            "REGEX keeps only Alice: {j}"
+        );
     }
 }
