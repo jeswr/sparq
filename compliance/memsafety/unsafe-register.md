@@ -46,7 +46,7 @@ register distinguishes two trust classes of `unsafe`:
 
 ## Register
 
-**58 `unsafe` sites** across 5 crates (the other 30 crates are `#![forbid(unsafe_code)]`).
+**59 `unsafe` sites** across 5 crates (the other 30 crates are `#![forbid(unsafe_code)]`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
 must equal `bench/unsafe-snapshot.json`.
 
@@ -60,7 +60,7 @@ Recurring invariant shorthands used below:
   borrow's duration and is not mutated by us; external concurrent mutation is explicitly
   out of contract (documented stance, same as the rest of the mmap surface).
 
-### `sparq-core` — 44 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
+### `sparq-core` — 45 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
@@ -68,21 +68,22 @@ Recurring invariant shorthands used below:
 | `src/lib.rs:389` | ptr read | page-align; instant section is `n` f64 at offset 0 | `i < n` checked at the call; f64 at `base+i`. |
 | `src/lib.rs:456` | slice reinterpret (read) | page-align; instants are `n` f64 at offset 0 | `n = mapped_len`; materialises the cells. |
 | `src/lib.rs:577` | slice reinterpret (write) | POD-bytes | reinterpret the f64 column as bytes to write `temporals.bin`. |
-| `src/lib.rs:1546` | slice reinterpret (read) | page-align; `temporals.bin` starts with `len` f64 | `len = mapped_len`; flags read separately after. |
-| `src/lib.rs:1597` | `Mmap::map` | own-for-lifetime | `numerics.bin` opened only if `size == dict.len()*8` (length pre-validated). |
-| `src/lib.rs:1605` | `Mmap::map` | own-for-lifetime | `temporals.bin` opened only if `size == dict.len()*9` (length pre-validated). |
-| `src/lib.rs:1898` | slice reinterpret (read) | page-align; perm0 is whole `[u32;3]` rows | `n` from `map_perm`; map outlives the loop. Written by us above. |
-| `src/lib.rs:2316` | slice reinterpret (read) | page-align; perm0 is whole `[u32;3]` rows | same as 1898 (external-build path). |
-| `src/lib.rs:3741` | slice reinterpret (write) | POD-bytes | reinterpret the f64 numerics cache as bytes to write. |
-| `src/lib.rs:3821` | `_mm_prefetch` (x86_64) | hint-only | prefetch is defined for any address; the hint is dropped on a bad one — cannot fault. |
-| `src/lib.rs:3826` | `prfm` asm (aarch64) | hint-only | `prfm pldl1keep` is a hint; `nostack, preserves_flags`; cannot fault or write memory/regs. |
-| `src/lib.rs:3881` | ptr `add` (prefetch arg) | `id-1 < remap.len()` for every dict id | only computes an address for the hint-only `prefetch_read`; never dereferenced here. |
-| `src/lib.rs:4905` | ptr `add` (prefetch arg) | `id-1 < remap.len()` | same as 3881 (other build path). |
-| `src/lib.rs:5062` | `MmapMut::map_mut` | own-for-lifetime; freshly-written perm file | read-write map of a perm file of whole `[u32;3]` rows we just wrote. |
-| `src/lib.rs:5066` | mut slice reinterpret | page-align; POD-bytes | `len/4` u32; exclusively owned (the `MmapMut`); rayon writes are disjoint by index. |
-| `src/lib.rs:4059` | slice reinterpret (read) | page-align; whole `[u32;3]` rows; map outlives the slice | `compress_perm_file_in_place` (sq-vkz7). `extsort::map_perm` returns `(Mmap, n)` with `n = len/12`, so the `n` `[u32;3]` rows are fully in-bounds and the base is ≥ 4-byte u32-aligned (page-aligned mmap). The raw SPO perm was written by this build (whole rows, sorted+deduped) and is read-only here — the `Mmap` (`map`) is held for the whole row-streaming loop and is not mutated through any other alias for the slice's lifetime; it is `drop`ped only *after* the slice's last use, before the file is renamed. `n==0` (empty perm) returns early without forming the slice. [OPUS-4.8] |
-| `src/lib.rs:7480` | `std::env::set_var` | single-threaded test; var restored before return | TEST-only (`#[test] external_quads_fd_*`): sets `SPARQ_QUADS_SPILL_MAX_OPEN` to exercise the bounded-writer-pool path; no other thread reads the env in the test. Edition-2024 made `set_var` `unsafe`. |
-| `src/lib.rs:7484` | `std::env::remove_var` | same test; restores the env | TEST-only: removes the var set at 7480 before returning so the process env is left clean. Edition-2024 `unsafe`. |
+| `src/lib.rs:1584` | `Mmap::map` | own-for-lifetime | `numerics.bin` opened only if `size == dict.len()*8` (length pre-validated). |
+| `src/lib.rs:1592` | `Mmap::map` | own-for-lifetime | `temporals.bin` opened only if `size == dict.len()*9` (length pre-validated). |
+| `src/lib.rs:1885` | slice reinterpret (read) | page-align; perm0 is whole `[u32;3]` rows | `n` from `map_perm`; map outlives the loop. Written by us above. |
+| `src/lib.rs:2303` | slice reinterpret (read) | page-align; perm0 is whole `[u32;3]` rows | same as 1885 (external-build path). |
+| `src/lib.rs:3728` | slice reinterpret (write) | POD-bytes | reinterpret the f64 numerics cache as bytes to write `numerics.bin`. |
+| `src/lib.rs:3761` | slice reinterpret (write) | POD-bytes | (sq-7ph8) `stream_write_numerics` flush: reinterprets a reusable `Vec<f64>` BLOCK as bytes for `write_all`. (a) `buf` is a live `Vec<f64>` of `buf.len()` elems; `size_of_val(&buf[..]) = len*8` covers the initialised contiguous region exactly. (b) target `u8` has align 1; the f64 source is over-aligned — no misalignment. (c) bytes are only READ (passed to `write_all`), never written through the alias. (d) the `&[u8]` is consumed inside the closure before `buf.clear()`; no provenance/lifetime escape past the source borrow. (e) NATIVE-endian reinterpret, identical to `write_numerics` (3728) it replaces and symmetric with the native-endian READ at `NumData::as_slice` (285): write-native + read-native round-trips on the same arch (the established cache contract; the cache is rebuilt, never shipped cross-arch). Test `streamed_caches_byte_identical_to_dense` asserts byte-identity to the dense write. **GX-5**. [OPUS-4.8] |
+| `src/lib.rs:3805` | slice reinterpret (write) | POD-bytes | (sq-7ph8) `stream_write_temporals` flush_f: reinterprets a reusable `Vec<f64>` instant BLOCK as bytes for `write_all`. Same invariants (a)–(e) as 3761: full-length `len*8` byte view of a live `Vec<f64>`, `u8` align 1, read-only, no escape, native-endian — symmetric with the native-endian temporal read (`temporals.bin` first `n` f64; rows 285/389/456) and byte-identical to `write_temporals` (577). The trailing flag-byte column is written from a `Vec<u8>` (no unsafe). **GX-5**. [OPUS-4.8] |
+| `src/lib.rs:3934` | `_mm_prefetch` (x86_64) | hint-only | prefetch is defined for any address; the hint is dropped on a bad one — cannot fault. |
+| `src/lib.rs:3939` | `prfm` asm (aarch64) | hint-only | `prfm pldl1keep` is a hint; `nostack, preserves_flags`; cannot fault or write memory/regs. |
+| `src/lib.rs:3994` | ptr `add` (prefetch arg) | `id-1 < remap.len()` for every dict id | only computes an address for the hint-only `prefetch_read`; never dereferenced here. |
+| `src/lib.rs:5018` | ptr `add` (prefetch arg) | `id-1 < remap.len()` | same as 3994 (other build path). |
+| `src/lib.rs:5175` | `MmapMut::map_mut` | own-for-lifetime; freshly-written perm file | read-write map of a perm file of whole `[u32;3]` rows we just wrote. |
+| `src/lib.rs:5179` | mut slice reinterpret | page-align; POD-bytes | `len/4` u32; exclusively owned (the `MmapMut`); rayon writes are disjoint by index. |
+| `src/lib.rs:4172` | slice reinterpret (read) | page-align; whole `[u32;3]` rows; map outlives the slice | `compress_perm_file_in_place` (sq-vkz7). `extsort::map_perm` returns `(Mmap, n)` with `n = len/12`, so the `n` `[u32;3]` rows are fully in-bounds and the base is ≥ 4-byte u32-aligned (page-aligned mmap). The raw SPO perm was written by this build (whole rows, sorted+deduped) and is read-only here — the `Mmap` (`map`) is held for the whole row-streaming loop and is not mutated through any other alias for the slice's lifetime; it is `drop`ped only *after* the slice's last use, before the file is renamed. `n==0` (empty perm) returns early without forming the slice. [OPUS-4.8] |
+| `src/lib.rs:7668` | `std::env::set_var` | single-threaded test; var restored before return | TEST-only (`#[test] external_quads_fd_*`): sets `SPARQ_QUADS_SPILL_MAX_OPEN` to exercise the bounded-writer-pool path; no other thread reads the env in the test. Edition-2024 made `set_var` `unsafe`. |
+| `src/lib.rs:7672` | `std::env::remove_var` | same test; restores the env | TEST-only: removes the var set at 7668 before returning so the process env is left clean. Edition-2024 `unsafe`. |
 | `src/store.rs:106` | slice reinterpret (read) | page-align; whole `[u32;3]` triples | `n = len/12`; mmap base ≥ 4-byte u32 align. |
 | `src/store.rs:375` | slice reinterpret (write) | POD-bytes | reinterpret contiguous `[u32;3]` rows as bytes for `std::fs::write`. |
 | `src/store.rs:459` | `Mmap::map` | own-for-lifetime | per-permutation file; empty (size 0) skipped; format auto-detected after. **B5**. |
@@ -145,7 +146,7 @@ Recurring invariant shorthands used below:
 
 ## NEEDS-REVIEW
 
-**None.** Every one of the 58 sites now carries a literal `// SAFETY:` comment
+**None.** Every one of the 59 sites now carries a literal `// SAFETY:` comment
 immediately preceding the `unsafe` block/impl, mechanically enforced by
 `clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]). The 6 sites that
 previously relied on an adjacent block comment — the two `unsafe impl Send`/`Sync for
