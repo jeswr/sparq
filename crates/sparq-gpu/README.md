@@ -13,10 +13,13 @@ The full measured answer, tables, and the recommendation live in
 
 > **Parked.** On this M1 (unified memory — the *best possible* transfer
 > economics), the GPU loses or merely ties the 8-core CPU on compute-light
-> scans even when the column is already device-resident, and only wins on the
-> hash-probe shape (~1.7–3× resident, ~1.1× including transfer). One winning
-> kernel class does not pay for a residency cache, scheduler integration, and
-> a second execution backend. Re-open only per the conditions in the verdict.
+> scans even when the column is already device-resident, and wins only on the
+> hash-probe shape — and that win mostly evaporates once the host→device
+> transfer is charged. One winning kernel class does not pay for a residency
+> cache, scheduler integration, and a second execution backend. Re-open only
+> per the conditions in the verdict. The measured ratios live in the verdict
+> and on the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench),
+> never baked in here.
 
 ## What is here
 
