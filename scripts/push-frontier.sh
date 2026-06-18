@@ -32,6 +32,18 @@
 #                                                  UMBRELLA not a work unit — you dispatch
 #                                                  its child tasks, never "the epic";
 #                                                  excluded so the frontier is launchable)
+#   MINUS  HELD-scope beads                         (a maintainer can HOLD an entire impl
+#                                                  lane behind one open "design"/research PR;
+#                                                  while #514 (the signed typed-value design)
+#                                                  is open, the maintainer holds "#514 + ANY
+#                                                  sparq-zk value-lane impl" — so EVERY
+#                                                  sparq-zk / sparq-zk-compose value-lane bead
+#                                                  is reserved, not just #514's research/*.md
+#                                                  surface. The scheduler reserves by OPEN PR
+#                                                  and the design PR's surface is just "research",
+#                                                  which left the zk CRATES free and let a held
+#                                                  bead (sq-mslu/#637) launch — sq-751l. See
+#                                                  is_zk_value_lane + the HELD table below.)
 #   CAPPED at the CPU ceiling                     (min(16, nproc-2); the build farm
 #                                                  cannot usefully run more parallel
 #                                                  cargo builds than it has cores).
@@ -173,6 +185,41 @@ infer_code_crate() {
   printf '\n'
 }
 
+# [OPUS-4.8] sq-751l: HELD-scope predicate — is a bead in the sparq-zk value-lane that the
+# maintainer holds while PR #514 (the signed typed-value-representation design) is open?
+#
+# WHY this exists separately from infer_surface: the scheduler reserves a surface only when an
+# OPEN PR's branch/title carries that surface's token. #514 is a research/design PR — its
+# inferred surface is just "research" (a `research:`-prefixed title) — so it reserved the
+# research-doc surface but left the sparq-zk + sparq-zk-compose CRATES free. A value-lane impl
+# bead (sq-mslu/#637, "sparq-zk-compose: general xsd:double RNE-parser FILTER member") therefore
+# launched even though the maintainer holds "#514 + ANY sparq-zk value-lane impl" (the design may
+# obsolete the whole in-circuit-parsing lane). The orchestrator caught it at arm time and parked
+# it; this predicate makes the scheduler exclude the lane up front.
+#
+# A bead is in the held zk value-lane (given its TITLE on $1) iff:
+#   * it mentions a sparq-zk crate (sparq-zk / sparq-zk-compose) — the value-lane CRATES; OR
+#   * its title leads with a "zk" word token — the maintainer's convention for a zk-impl bead
+#     ("ZK: ...", "ZK join: ...", "zk-...", "[zk] ..."). A bare "zk" mid-prose does NOT match
+#     (we only treat a LEADING zk token as the lane marker), so an unrelated bead that merely
+#     references zk in passing is not over-excluded.
+# Pure text (no bd/gh/git) -> hermetically tested in self_test. The HOLD is only ENFORCED when
+# #514 is open (see HELD_ZK_VALUE_LANE below); this predicate just classifies the lane.
+is_zk_value_lane() {
+  local title="$1" lc lead
+  lc="$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]')"
+  # 1. an explicit sparq-zk / sparq-zk-compose mention -> value-lane crate.
+  case "$lc" in
+    *sparq-zk*) return 0 ;;
+  esac
+  # 2. a LEADING "zk" word token: "zk:", "zk ", "zk-", or a "[zk]"/"[zk ...]" bracket tag.
+  lead="${lc#\[}"                       # tolerate a leading "[zk]"/"[zk-foo]" bracket.
+  case "$lead" in
+    zk:*|"zk "*|zk-*|"zk]"*) return 0 ;;
+  esac
+  return 1
+}
+
 # [OPUS-4.8] sq-8rpq: in-flight reservation by UNPUSHED worktree branches (not every branch).
 # inflight_wt_branch <branch> <unpushed-count> : echo <branch> iff it is an IN-FLIGHT
 # signal, i.e. iff it has UNPUSHED local commits. <unpushed-count> is the number of
@@ -305,6 +352,42 @@ self_test() {
   got="$(infer_code_crate 'first crates/sparq-core/src/a.rs then crates/sparq-mpc/src/b.rs' "$CR")"
   _check "first known .rs crate wins"              "$got" "sparq-core"
 
+  # --- HELD zk value-lane predicate (sq-751l) -----------------------------------------
+  # While #514 is open, the maintainer holds "#514 + ANY sparq-zk value-lane impl". A bead is
+  # in the held lane iff it mentions a sparq-zk crate OR leads with a "zk" word token. The
+  # exemplar held beads from the bug report (sq-mslu/sq-lxi7/.../sq-uii0) must all classify
+  # as held; the design PR itself and unrelated beads must NOT.
+  _zk() { if is_zk_value_lane "$1"; then printf 'held'; else printf 'free'; fi; }
+
+  got="$(_zk 'sparq-zk-compose: general xsd:double RNE-parser FILTER member')"
+  _check "sparq-zk-compose crate -> held (sq-mslu)" "$got" "held"
+
+  got="$(_zk 'ZK: general xsd:double decimal->IEEE-754 RNE parser')"
+  _check "leading 'ZK:' token -> held (sq-lxi7)"    "$got" "held"
+
+  got="$(_zk 'ZK join: optional v2 cardinality-hiding join_eq_rN')"
+  _check "leading 'ZK join:' -> held (sq-uii0)"     "$got" "held"
+
+  got="$(_zk '[zk] in-circuit salt binding privacy residuals')"
+  _check "leading '[zk]' bracket -> held"           "$got" "held"
+
+  got="$(_zk 'sparq-zk: regression-gate holder_pok gate count')"
+  _check "sparq-zk crate -> held"                   "$got" "held"
+
+  # The design/research PR #514's own title is research-surface, NOT a value-lane impl.
+  got="$(_zk 'research: signed typed-value representation to remove in-circuit literal parsing')"
+  _check "research design title -> free (#514 self)" "$got" "free"
+
+  # Unrelated beads, including ones that mention zk only mid-prose, are NOT held.
+  got="$(_zk 'fix(sparq-core): dict spill (sq-glw2)')"
+  _check "non-zk bead -> free"                       "$got" "free"
+
+  got="$(_zk 'sparq-server: tighten error contract for the zk proof endpoint')"
+  _check "mid-prose 'zk' (not leading) -> free"      "$got" "free"
+
+  got="$(_zk 'docs: explain zk value-lane in the README')"
+  _check "mid-prose value-lane mention -> free"      "$got" "free"
+
   echo
   if [ "$fails" -eq 0 ]; then log "self-test PASSED"; return 0; fi
   die "self-test FAILED ($fails check(s))"
@@ -383,6 +466,36 @@ is_inflight() {
   printf '%s\n' "$PR_BLOB" | grep -qiF -- "$id"
 }
 
+# --- 1b. HELD-scope detection (sq-751l) ------------------------------------------------
+# The maintainer holds "#514 + ANY sparq-zk value-lane impl" while the signed typed-value
+# DESIGN PR #514 is open. The scheduler reserves a surface only when an open PR carries its
+# token; #514's surface is just "research", so the zk crates stayed free and a value-lane impl
+# bead launched (sq-mslu/#637). We therefore add an explicit HOLD: while #514 is open, every
+# bead in the zk value-lane (is_zk_value_lane) is excluded from the frontier.
+#
+# #514 is treated as open iff `gh pr view 514` reports OPEN. If gh is unavailable we fall back
+# to scanning the open-PR blob for #514's head-branch token (the design branch); if neither
+# signal is available the hold is conservatively OFF (we never silently empty the zk lane on a
+# transient gh outage — the orchestrator's arm-time check remains the backstop).
+HELD_ZK_VALUE_LANE=0
+HELD_514_BRANCH="zk-signed-credential-representation-design"
+if command -v gh >/dev/null 2>&1; then
+  pr514_state="$(gh pr view 514 --json state -q .state 2>/dev/null || true)"
+  if [ "$pr514_state" = "OPEN" ]; then
+    HELD_ZK_VALUE_LANE=1
+  elif [ -z "$pr514_state" ] && printf '%s\n' "$PR_BLOB" | grep -qiF -- "$HELD_514_BRANCH"; then
+    # gh pr view failed (e.g. rate-limited) but the design branch is in the open-PR blob.
+    HELD_ZK_VALUE_LANE=1
+  fi
+fi
+if [ "$EXPLAIN" -eq 1 ]; then
+  if [ "$HELD_ZK_VALUE_LANE" -eq 1 ]; then
+    log "HOLD active: #514 open -> sparq-zk value-lane beads RESERVED (sq-751l)"
+  else
+    log "HOLD inactive: #514 not detected open -> zk value-lane NOT reserved by this hold"
+  fi
+fi
+
 # --- 2. read bd ready ------------------------------------------------------------------
 READY_JSON="$(bd ready --json 2>/dev/null)" || die "bd ready --json failed"
 
@@ -446,6 +559,15 @@ while IFS=$'\t' read -r id prio title desc; do
 
   if is_inflight "$id"; then
     continue                                   # already accounted for in the seed pass.
+  fi
+
+  # sq-751l: while #514 is open, the maintainer holds the entire sparq-zk value-lane. A
+  # value-lane bead is RESERVED -- excluded from the frontier -- even though no open PR carries
+  # the zk-crate token (#514's surface is just "research"). This is the fix for the launch of a
+  # held bead (sq-mslu/#637); see the HELD_ZK_VALUE_LANE block above.
+  if [ "$HELD_ZK_VALUE_LANE" -eq 1 ] && is_zk_value_lane "$title"; then
+    [ "$EXPLAIN" -eq 1 ] && log "DROP  $id  [HELD: sparq-zk value-lane reserved while #514 open (sq-751l)]"
+    continue
   fi
 
   surface="$(infer_surface "$title" "$CRATES")"
