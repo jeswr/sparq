@@ -183,7 +183,7 @@ The scheduler is one `ultracode` Workflow (`scheduler.workflow.js`, intended pat
 
 ```js
 // scheduler.workflow.js  — intended ultracode Workflow (Phase 2). [OPUS-4.8]
-const TOKEN_BUDGET = env.SCHED_TOKEN_BUDGET;     // hard stop (see §7 runaway guard)
+const TOKEN_BUDGET = env.SCHED_TOKEN_BUDGET;     // hard stop (see §8 runaway guard)
 const COST_CEIL    = env.SCHED_EC2_USD_DAY ?? 5; // ≤ $5/day, enforced by build-farm
 let spent = loadCheckpoint();                    // resumeFromRunId crash-recovery (§3.4)
 
@@ -240,7 +240,7 @@ emit("scheduler run complete", spent);            // Workflow exits; NOT a daemo
 
 1. **Frontier empty** — `push-frontier.sh` returns `[]` (nothing ready, minus
    in-flight/conflicts). Clean exit.
-2. **Token budget hit** — `spent ≥ SCHED_TOKEN_BUDGET`. Hard stop (runaway guard §7).
+2. **Token budget hit** — `spent ≥ SCHED_TOKEN_BUDGET`. Hard stop (runaway guard §8).
 3. **Cost ceiling hit** — cumulative EC2 spend would exceed ≤ $5/day; the farm refuses
    new leases and the driver stops *placing* EC2 work (LOCAL work may continue).
 4. **Wall-clock cap** — a `SCHED_MAX_MINUTES` deadline (the Workflow runtime itself is
@@ -413,7 +413,167 @@ Net new trust delta vs today: the *arm* decision for **verified-clean non-perf**
 moves from human to machine. Everything else (verify bar, perf discretion,
 canonical-number surfacing, `ci-summary`) is unchanged.
 
-## 7. Honest risks + guards
+## 7. Oversight + observability (design requirement)
+
+Automating dispatch removes the human from the *loop* but must **not** remove them
+from *oversight*. A self-driving scheduler that the maintainer cannot watch, pause, or
+stop is a runaway hazard, not a productivity win. This section makes oversight a
+first-class, **non-optional** part of the design: every autonomous decision is
+**logged with its reason**, the live state is **readable at a glance**, the maintainer
+has a **PAUSE and a KILL** control, and the two classes of decision that are *policy*
+rather than *mechanics* — performance and canonical numbers — are **escalated**, never
+silently auto-armed. The existing runaway checkpoints (no-auto-merge-of-perf,
+adversarial-verify, the perf-gate) stay exactly as in §6; this section adds the
+*visibility and the brakes* on top of them.
+
+### 7.1 Structured decision LOG (append-only, every launch + arm + reason)
+
+The scheduler emits a single **append-only, structured (JSON-lines) decision log** —
+one record per autonomous decision, each carrying *why*. This is the audit trail: after
+the fact, the maintainer (or a post-mortem) can reconstruct exactly what the scheduler
+did and on what basis. It is the scheduler's analogue of the bead `interactions.jsonl`
+ledger — machine-readable, append-only, never rewritten.
+
+- **Path + format.** `scripts/.scheduler/decisions.jsonl` (gitignored — it is run state,
+  not a tracked narrative doc, per the §0 / `AGENTS.md` no-scratch-docs rule). One JSON
+  object per line, never edited in place. A record:
+
+  ```jsonc
+  { "ts": "2026-06-17T21:50:20Z", "run_id": "wf_…", "pass": 3,
+    "event": "launch",              // launch | place | arm | arm_withheld | escalate
+    //                                 | skip | pause | resume | kill | terminate
+    "bead": "sq-xxxx",
+    "decision": "dispatch LOCAL",   // the action taken
+    "reason": "LIGHT tier (docs); 2/6 local slots free; no crate conflict",
+    "evidence": { "tier": "light", "local_inflight": 2, "conflict": null },
+    "outcome": "ok" }               // ok | denied | error | deferred
+  ```
+
+- **Every launch decision is logged** — which bead, where it was placed (LOCAL / which
+  EC2 lease), and the reason (tier estimate, free-slot count, conflict-partition
+  result). A bead the frontier *skipped* is logged too (`event:"skip"`, with the reason:
+  crate conflict, in-flight, ceiling full) so "why didn't it pick bead X?" is always
+  answerable from the log, not from re-running the heuristic.
+- **Every arm decision is logged** — `event:"arm"` (the `gh pr merge … --auto` ran) or
+  `event:"arm_withheld"` when the `sparq-perf-reviewer` hook returned DENY, with the
+  hook's `{perf_affecting, perf_ok, concerns}` verdict copied into `evidence`. A withheld
+  arm is *also* an escalation (§7.4) — the log and the escalation surface are written
+  together so the two never diverge.
+- **Every escalation, pause, resume, and kill is logged** with the trigger (sentinel
+  file appeared, `needs:human-stop` bead, token/cost ceiling hit, canonical-number
+  change detected). The log is the single source of truth for "what made it stop".
+- **Reason is mandatory.** A record without a non-empty `reason` is a bug; the driver
+  asserts it before appending. The whole point is that *no autonomous action is
+  unexplained*.
+- **Rotation.** The driver rotates the file at a size cap (e.g. 50 MB →
+  `decisions.<ts>.jsonl`) so a long-running fleet never fills the disk; rotation itself
+  is logged. (Disk-pressure discipline per the repo's disk-space rule.)
+
+### 7.2 Readable live STATUS surface
+
+Distinct from the *historical* log, the maintainer needs a **right-now** view: what is
+the scheduler doing *this second*? The driver maintains a single, **human-readable,
+atomically-rewritten** status file plus a one-line renderer.
+
+- **Path.** `scripts/.scheduler/STATUS.md` (gitignored run state — *not* a committed
+  `STATUS.md` narrative doc; it lives under the scheduler's dot-dir and is regenerated,
+  never reviewed/merged). Rewritten atomically (write-temp-then-rename) at the end of
+  every pass and on every state transition so a reader never sees a half-written file.
+- **Contents (at a glance):** run id + start time + elapsed; current pass number; the
+  live fleet — each in-flight bead with its placement (LOCAL / EC2-lease-id), its
+  pipeline phase (`implement` / `verify`), and elapsed; LOCAL slot usage (`4/6`); EC2
+  lease count + cumulative tagged spend vs the ≤ $5/day ceiling; token spend vs
+  `SCHED_TOKEN_BUDGET`; the count of armed / withheld PRs this run; the **pause/kill
+  state**; and the **open-escalation count** (PRs withheld for perf, canonical-number
+  changes awaiting the maintainer). It ends with the tail of the most recent decision
+  reasons so the *why* of the current state is visible without opening the JSONL.
+- **`scripts/scheduler-status.sh`** — a zero-token shell renderer that prints
+  `STATUS.md` (or a compact one-line summary for a terminal/notification:
+  `sched run wf_… pass 3 · local 4/6 · ec2 1 ($1.20/5) · armed 2 withheld 1 · ESCALATIONS 1 · RUNNING`).
+  This is what a `/loop` re-kick or a glance command shows the maintainer; it is also
+  what the stalled-frontier alert (§8) reads.
+- **Liveness.** The status file carries a `heartbeat_ts` updated every pass; a renderer
+  that sees a stale heartbeat with state `RUNNING` reports `STALE?` so a hung Workflow
+  is visible (it cannot update its own status when wedged — staleness *is* the signal).
+
+### 7.3 PAUSE / KILL switch (graceful brake + hard stop)
+
+The maintainer must be able to **stop the autonomy at any time** without killing
+in-flight work mid-PR. Two distinct controls, both honoured at the **pass boundary**
+(the loop checks them at the top of every pass, after the current parallel batch
+settles — so no half-implemented bead is abandoned):
+
+- **PAUSE (graceful).** A `scripts/.scheduler/PAUSE` sentinel file **or** a
+  `needs:human-stop` bead halts *new* dispatch: the loop finishes the in-flight batch
+  (lets running pipelines complete and their clean non-perf PRs arm normally), then
+  **stops placing new work** and idles in a poll-only state, rewriting `STATUS.md` to
+  `PAUSED` and logging `event:"pause"`. Removing the sentinel (or closing the bead)
+  resumes (`event:"resume"`). PAUSE is reversible and loses no work — it is the
+  "hold on, let me look" brake.
+- **KILL (hard stop).** A `scripts/.scheduler-stop` sentinel (the existing kill-switch
+  name from §8/§10) **or** a `needs:human-stop` bead with a `kill` marker halts the loop
+  **after the current pass**, then **reaps**: it tears down EC2 leases by tag
+  (`describe-instances` + terminate), releases the single-flight lock, writes
+  `STATUS.md` to `KILLED`, logs `event:"kill"` + per-lease `event:"terminate"`, and
+  exits the Workflow. In-flight local pipelines are allowed to finish their current
+  phase (so a PR is never left in a corrupt half-open state) but no new phase starts.
+  KILL is the "stop everything now" control; it is **not** reversible — re-kicking
+  starts a fresh run.
+- **Belt-and-braces.** Even if neither switch is honoured (a wedged driver), the
+  independent ceilings still bound the blast radius: the ≤ 45-min per-instance watchdog
+  terminates every leased box, the `SCHED_TOKEN_BUDGET` hard-stops model spend, and the
+  single-flight lock prevents a second scheduler from compounding the problem. The
+  switches are the *fast* brake; the ceilings are the *backstop* (§8).
+- **Discoverability.** Both sentinel paths and the `needs:human-stop` bead label are
+  documented in `STATUS.md`'s footer and in `scheduler-status.sh --help`, so the
+  maintainer never has to read code to find the stop control.
+
+### 7.4 ESCALATE perf / canonical-number changes (policy, not mechanics)
+
+Two classes of change are **policy decisions reserved to the maintainer** and must be
+escalated, never silently auto-armed — this is the human-discretion boundary from §6
+made into an explicit, *visible* surface:
+
+- **Performance-affecting PRs.** The `sparq-perf-reviewer` PreToolUse hook (§6, item 2)
+  already returns DENY for a perf-affecting-and-not-evidenced-clean PR, so it never
+  auto-arms.
+  The oversight layer makes the *withholding visible*: every DENY writes an
+  `event:"escalate"` decision-log record **and** increments the `STATUS.md`
+  open-escalation count **and** appends the PR to a `scripts/.scheduler/escalations.jsonl`
+  queue with the hook's `concerns`. The maintainer sees "1 PR withheld for perf review"
+  in the status one-liner and can resolve it; the scheduler never retries the arm.
+- **Canonical-number changes.** Any change that moves a *canonical* number — a
+  `bench/perf-baseline.json` floor move, an edit to a published-results artifact, or a
+  hard-coded perf number entering markdown (the no-hardcoded-perf rule) — is a **policy
+  change**, even when the perf hook would otherwise ALLOW. The perf-reviewer flags
+  `canonical_number_change` in its `evidence` (§6, item 4); on that flag the scheduler **forces
+  an escalation regardless of the ALLOW**: it withholds the arm, logs `event:"escalate"`
+  with `reason:"canonical-number change — maintainer policy decision"`, and surfaces a
+  `needs:user` bead. A floor change is *never* auto-armed. (This composes with the
+  privacy-claims + no-hardcoded-perf gates already live on `main` — the scheduler is one
+  more enforcement point, not a bypass.)
+- **The escalation surface is the `needs:user` queue.** Escalations map onto the existing
+  human-in-the-loop tracker surface (`bd list -l needs:user`, per `AGENTS.md`) so nothing
+  awaiting a maintainer decision is lost in a chat scroll or a JSONL file the maintainer
+  never opens. The `escalations.jsonl` queue + the `STATUS.md` count are the *fast* view;
+  the `needs:user` bead is the *durable* one. They are written together.
+
+### 7.5 The runaway checkpoints are PRESERVED (not replaced by oversight)
+
+Oversight is *additive*. The three runaway checkpoints from §6 remain the hard safety
+floor and are **not** weakened by adding visibility:
+
+1. **No auto-merge of perf-affecting PRs** — the perf hook DENY (now also an escalation).
+2. **adversarial-verify gates every PR pre-arm** — the honesty/correctness gate.
+3. **The perf-gate** (`scripts/perf-gate.py` + `bench/perf-baseline.json`) — the
+   deterministic-vs-timing ratchet on the merge.
+
+The decision log, STATUS surface, and PAUSE/KILL switch make these checkpoints
+*observable and interruptible*; they do not move the gates. A scheduler with full
+oversight but a removed checkpoint would be *worse* than today, not better — so the
+checkpoints stay, and oversight watches them.
+
+## 8. Honest risks + guards
 
 - **No-daemon limit (inherent).** The scheduler is a bounded Workflow, not an
   always-on service. Between runs, nothing is driving except the merge-watchers and
@@ -453,7 +613,7 @@ canonical-number surfacing, `ci-summary`) is unchanged.
   the perf hook, the maintainer on canonical numbers); no single gate is the sole
   trust anchor.
 
-## 8. Options considered (trade-offs)
+## 9. Options considered (trade-offs)
 
 | Option | Pros | Cons | Verdict |
 |---|---|---|---|
@@ -470,7 +630,7 @@ fault-tolerant short-lived work, dedicate for latency-sensitive runs.** sparq's 
 is the local-box tier + the benchmark-must-be-quiet constraint + the NON-canonical
 caveat. (Sources in the report-back to the orchestrator.)
 
-## 9. Phased implementation plan (each phase = a future bead under a scheduler epic)
+## 10. Phased implementation plan (each phase = a future bead under a scheduler epic)
 
 Proposed epic: **`autonomous scheduler`** (orchestrator to create via `bd create`;
 this design doc is the epic's anchor). Ordered, each phase a crisp future bead:
@@ -516,7 +676,7 @@ this design doc is the epic's anchor). Ordered, each phase a crisp future bead:
 Suggested labels per phase: `scheduler`, plus `needs:user` on Phase 5's enablement
 flag (the maintainer should green-light auto-arm going live).
 
-## 10. Open questions for the maintainer
+## 11. Open questions for the maintainer
 
 - **OQ-1 (blocking Phase 2/4).** The exact `ultracode` Workflow API
   (`agent()/parallel()/pipeline()/phase()` signatures, background-run lifecycle,
