@@ -12,21 +12,25 @@ footprint via swap, and the dict extrapolates to ~280–330 GiB at full truthy.
 
 **This run is infeasible without dictionary spill-to-disk.** Without it, the dict
 alone is ~18–21× this box's RAM and the build would be effectively all-swap
-(stage-1 measured 4.8× per-triple slowdown at just 2.2× RAM). The dict-spill
-branch (`../sparq-dictspill`, currently @ 5069b33, feature `dict-spill`) is IN
-FLIGHT. Before launching:
+(stage-1 measured 4.8× per-triple slowdown at just 2.2× RAM). dict-spill is now
+**MERGED** to public main (`crates/sparq-core/src/dictspill.rs`; PRs #29/#582/#670).
+Before launching:
 
-1. dict-spill must be **merged to public main**; set `SPARQ_SHA` in
-   `scripts/config.sh` to a post-merge commit.
-2. Resolve the dict-spill flag/feature placeholders in `scripts/config.sh` and
-   `scripts/remote-8b.sh` (tracked in bead sq-1q3). Candidate names from the
-   in-flight branch (VERIFY against the merged impl — they may change):
-   - env: `SPARQ_DICT_SPILL=1|on|auto`, `SPARQ_DICT_SPILL_BUDGET_MB`,
-     `SPARQ_DICT_SPILL_DISK_FLOOR_MB`
-   - cargo: feature `dict-spill` exists on **sparq-core only**; sparq-cli does
-     not yet re-export it, so the build command is currently
-     `cargo build --release -p sparq-cli --features sparq-core/dict-spill`
-     (verify the merge's final plumbing).
+1. Set `SPARQ_SHA` in `scripts/config.sh` to a public-main commit at or after the
+   dict-spill merge (the module + the sparq-cli default feature must be present).
+2. dict-spill flags/feature RECONCILED against the merged impl (sq-1q3):
+   - env gate (`SpillConfig::from_lookup`): `SPARQ_DICT_SPILL=1|on|auto`
+     (`0`/`off`/unset keeps the in-RAM consolidation), `SPARQ_DICT_SPILL_BUDGET_MB`,
+     `SPARQ_DICT_SPILL_DISK_FLOOR_MB` (default floor 1024). The BUDGET governs the
+     dedup caches + external-sort run buffers ONLY — it does NOT count the
+     `chunk`×12 B triple-run buffer or the ~0.5–1 GiB parse pipeline, so real peak
+     RSS ≈ budget + that floor (8192 MB ⇒ ~9–10 GiB on the 15 GiB box).
+   - cargo: feature `dict-spill` is now a **DEFAULT** feature of sparq-cli
+     (`crates/sparq-cli/Cargo.toml`: `default = ["mmap","mimalloc","dict-spill"]`,
+     forwarding `sparq-core/dict-spill`), so the build command is simply
+     `cargo build --release -p sparq-cli` — no `--features` needed. (`CARGO_FEATURES`
+     in `config.sh` is therefore empty by default; the old
+     `--features sparq-core/dict-spill` was redundant and reached into the sub-crate.)
 3. Budget ledger check: ≤ $0.78 of the $30 cap spent; no live
    `purpose=sparq-hw-validation` instances; **NEVER touch i-090531b4ede8f2d3f**.
 4. Re-verify the dump headers (`curl -sI`, §3) — the dump rolls weekly and the
@@ -62,13 +66,27 @@ flagged estimate):
 | dump .gz (deleted after recompress) | 71 GB | 71 GB | verified Content-Length |
 | recompressed .zst | 56 GB | 66 GB | ~7.0 GB/B-triples (measured @1B: 6.99 GB) |
 | extsort temp runs (peak, upper bound) | 675 GB | 790 GB | ≤0.94× index (1B write-amplification) |
-| dict spill working set | ~150 GB | ~250 GB | ESTIMATE: ~69 B/term (measured @100M) at extrapolated term counts; refine from merged impl (sq-1q3) |
+| dict spill transient (staged + remap) | ~210 GB | ~250 GB | staged `[u64;3]` triples 24 B/triple (192/226 GB) + per-shard `seq→id` remap files (~8 B/distinct-term); deleted at remap end. NOT 69 B/term — that was the in-RAM dict @100M which spill REMOVES (sq-1q3) |
+| dict record files + sort runs (transient) | ~150 GB | ~180 GB | serialized distinct-term bytes + dedup/assign external-sort runs; ≈ on-disk dict (~38.4 B/distinct-term measured @100M, research/external-dictionary.md), deleted as consumed. Partly overlaps the final dict already in "final index" |
 | swapfile | 64 GB | 64 GB | fixed |
 | OS + rust + sparq build | 15 GB | 15 GB | stage-1 observed |
-| **peak total** | **~1,750 GB** | **~2,100 GB** | gz deleted before build (mandatory step) |
+| **peak total (remap phase)** | **~1,800 GB** | **~2,150 GB** | gz deleted before build; see phase note below — the two dict transient rows do NOT both co-peak |
 
-2,200 GB leaves ~5–25 % headroom. The remote driver samples `df` every 30 s and
-kills the build if free space drops below 50 GB (collect partials, terminate).
+The dict-spill transients are PHASE-DISJOINT from each other, so the rows do **not**
+all sum at once. The heaviest moment is the **remap phase**: final index (growing) +
+extsort temp runs + staged `[u64;3]` triples + .zst input + swap + OS. The dict
+**record files + dedup/assign sort runs** are freed BEFORE remap starts feeding
+extsort, so they peak earlier and separately (their phase total stays well under the
+remap peak). Peak total above is the remap co-peak: final index + extsort runs +
+staged triples + .zst + swap + OS ≈ 717 + 675 + 192 + 56 + 64 + 15 = ~1,720 GB @8B
+(round up to ~1,800 for transient-file slack), ~2,150 GB @9.4 B. The staged-triple file is
+the one dict-spill transient that overlaps the extsort-runs peak; it is the +24 B/triple
+the OLD budget's 69-B/term row mis-estimated.
+
+2,200 GB leaves ~2–18 % headroom (tighter at 9.4 B than the pre-reconcile estimate —
+the staged triples are real co-peak bytes). The remote driver samples `df` every 30 s
+and kills the build if free space drops below 50 GB (collect partials, terminate). If
+the 9.4-B case runs hot, raise `VOL_GB` to 2,400 (cost: +$0.025/h).
 
 ## 2. Cost model
 
@@ -161,7 +179,9 @@ instances — never double-launch.
 Executed by `remote-8b.sh`:
 
 ```sh
-# NOTE: verify these flag names + cli feature plumbing against the merged impl (sq-1q3).
+# Flag names + cli feature plumbing RECONCILED against the merged impl (sq-1q3):
+# dict-spill is a default sparq-cli feature, so the plain release binary has the spill
+# path; the env vars below are the merged SpillConfig::from_lookup gate.
 SPARQ_SHARDED_DICT=1 SPARQ_BUILD_TIMING=1 \
 SPARQ_DICT_SPILL=1 SPARQ_DICT_SPILL_BUDGET_MB=8192 \
 timeout 86400 /usr/bin/time -v \
@@ -169,10 +189,16 @@ timeout 86400 /usr/bin/time -v \
 ```
 
 - `32` = 32 M-triple chunks, same as stage 1 (~0.5 GB triple-sort cap).
-- Budget 8,192 MB ≈ half of RAM for the dict, leaving room for chunk buffers +
-  page cache on a 15 GiB-usable box. Tune against the merged implementation's
-  accounting (sq-1q3) — if the budget excludes overheads, go lower.
+- Budget 8,192 MB. The merged `SpillConfig` accounts ONLY the dedup caches + the
+  external-sort run buffers under this budget; it EXCLUDES the `chunk`×12 B triple-run
+  buffer (32M×12 B ≈ 384 MB at chunk=32) and the ~0.5–1 GiB parse pipeline. So expected
+  peak RSS ≈ 8,192 MB + ~1 GiB floor ≈ 9–10 GiB on the 15 GiB-usable box — headroom for
+  page cache. This confirms 8,192 MB is safe; it need NOT be lowered for overhead (the
+  overhead is already outside the budget). The watchdog still aborts on sustained swap
+  >24 GiB as the backstop.
 - `timeout 86400` (24 h) is the build-phase hard stop.
+- The build emits the `parse+intern+spill done` phase marker (verified against the
+  merged `build_timing::report`); the §9 throughput-floor checkpoint greps for it.
 
 ## 5. Monitoring
 
