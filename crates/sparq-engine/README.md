@@ -68,6 +68,22 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   fresh. Keying on the parsed algebra makes the cache insensitive to whitespace / comments / prefix
   spelling. When the feature is off, zero cache code compiles, the default build is byte-identical,
   and no new dependencies are added (std `HashMap`/`Mutex`/`Arc` only).
+- **MVCC / ACID transaction isolation** *(opt-in `txn` feature, OFF by default)* —
+  a `txn::TransactionManager` over a single logical `Graph` giving **snapshot-isolation** read
+  transactions (`begin_read` → a cheap point-in-time `GraphSnapshot`, immune to later commits) and
+  serialized **write** transactions (`begin_write` → a private copy-on-write fork) with
+  **first-committer-wins** write-write conflict detection (optimistic concurrency control). A
+  `WriteTxn` has read-your-own-writes, applies SPARQL `UPDATE`s to its fork, and on `commit` either
+  publishes a new committed generation (advancing a `u64` version) or returns
+  `CommitError::Conflict` if a concurrent writer published an overlapping write set since it began —
+  in which case the whole body is discarded (atomic rollback). A stale but *non*-conflicting writer
+  has its resolved delta replayed onto the current generation (no lost update). For a *single
+  writer* the conflict check never fires, so SI is serializability (see
+  `research/concurrent-serving-litreview-A-mvcc-benchmarks.md` §A.1); durability is inherited from a
+  directory-backed `Graph`'s WAL. Built entirely on the existing COW delta-overlay substrate
+  (`Graph::fork`/`snapshot`/`apply_delta` + `update_in_place_capturing`/`apply_effects`); when the
+  feature is off, zero transaction code compiles, the default build is byte-identical, and no new
+  dependencies are added.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
