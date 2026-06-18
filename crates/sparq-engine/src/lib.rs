@@ -206,6 +206,15 @@ pub use aggregate::{
 #[cfg(feature = "window-functions")]
 pub use window_syntax::{query_over, query_over_with_budget};
 
+// [OPUS-4.8] (sq-hvfe) Vectorized (columnar / vector-at-a-time) execution primitives —
+// the first building block of the M4 plan (research/optimization-techniques.md). NON-DEFAULT
+// `vectorized` feature: when off, zero columnar code compiles and the default native + wasm
+// builds are byte-identical (no new dependencies — sparq-core is already a direct dep).
+#[cfg(feature = "vectorized")]
+pub mod chunk;
+#[cfg(feature = "vectorized")]
+pub use chunk::{DataChunk, SelVec, VecCmp};
+
 // ---- Spatial pushdown seam (sq-mg9) -----------------------------------------
 //
 // The engine is GEOMETRY-FREE: the dependency direction is sparq-geo ->

@@ -80,6 +80,15 @@ serialize-rdf = []
 # When off, ZERO window/custom-aggregate code compiles and the default build is
 # byte-identical (no new dependencies — oxrdf is already a direct dep).
 window-functions = []
+# [OPUS-4.8] (sq-hvfe) Vectorized (columnar / vector-at-a-time) execution primitives —
+# the first building block of the M4 plan (research/optimization-techniques.md). The
+# `chunk` module's `DataChunk` columnar intermediate + a numeric FILTER comparison
+# kernel + a selection/gather kernel, the vector-at-a-time analogue of the
+# row-materialising evaluator's per-row FILTER. OPT-IN and OFF by default: when off,
+# zero columnar code compiles and the default native + wasm builds are byte-identical.
+# Pulls in ZERO new dependencies (sparq-core is already a direct dep) and contains no
+# `unsafe` — the kernels are plain index loops the compiler auto-vectorises.
+vectorized = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
