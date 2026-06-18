@@ -709,22 +709,13 @@ pub fn shuffle(
     Ok((col, ShuffleCost::model(n, net.switch_count())))
 }
 
-/// Draw a uniformly-random permutation of `0..n` via Fisher–Yates over the
-/// dealer's masking RNG (CSPRNG in production). Unbiased: each index is chosen
-/// uniformly from the remaining range with rejection sampling to kill modulo bias.
-///
-/// **Fails closed for oversized `n`.** The unbiased sampler can only draw a
-/// uniform integer below the field modulus `P = 2^61 − 1` (it rejection-samples
-/// field elements), so a column whose length exceeds `P` is rejected with a typed
-/// [`MpcError`] rather than producing a biased permutation or hanging
-/// ([`uniform_below`]). `n` is a row count, so `n > P` is unreachable in any real
-/// deployment; this guards the boundary explicitly anyway. `[OPUS-4.8]`
-/// Public wrapper over [`random_permutation`] so the **network tier**
-/// ([`crate::transport`]) can sample the SAME uniformly-random secret permutation
-/// the in-process [`shuffle`] uses, then route it through the [`WaksmanNetwork`] to
-/// obtain the per-switch control bits it drives over the wire. Same unbiased
-/// Fisher–Yates over the dealer's masking RNG, same fail-closed `n > P` guard —
-/// the network tier must not re-implement a second sampler. `[OPUS-4.8]` sq-bdbv.
+/// Public wrapper over the private `random_permutation` sampler so the
+/// **network tier** ([`crate::transport`]) can draw the SAME uniformly-random
+/// secret permutation the in-process [`shuffle`] uses, then route it through the
+/// [`WaksmanNetwork`] to obtain the per-switch control bits it drives over the
+/// wire. Same unbiased Fisher–Yates over the dealer's masking RNG, same
+/// fail-closed `n > P` guard — the network tier must not re-implement a second
+/// sampler. `[OPUS-4.8]` sq-bdbv.
 pub fn sample_random_permutation(
     dealer: &mut ShamirDealer,
     n: usize,
@@ -732,6 +723,16 @@ pub fn sample_random_permutation(
     random_permutation(dealer, n)
 }
 
+/// Draw a uniformly-random permutation of `0..n` via Fisher–Yates over the
+/// dealer's masking RNG (CSPRNG in production). Unbiased: each index is chosen
+/// uniformly from the remaining range with rejection sampling to kill modulo bias.
+///
+/// **Fails closed for oversized `n`.** The unbiased sampler can only draw a
+/// uniform integer below the field modulus `P = 2^61 − 1` (it rejection-samples
+/// field elements via `uniform_below`), so a column whose length exceeds `P` is
+/// rejected with a typed [`MpcError`] rather than producing a biased permutation
+/// or hanging. `n` is a row count, so `n > P` is unreachable in any real
+/// deployment; this guards the boundary explicitly anyway. `[OPUS-4.8]`
 fn random_permutation(dealer: &mut ShamirDealer, n: usize) -> Result<Vec<usize>, MpcError> {
     // Reject up front so the `as u64` cast below cannot lose information and the
     // sampler is never asked for a `bound > P` it cannot serve unbiasedly.
