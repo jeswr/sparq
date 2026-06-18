@@ -36,7 +36,11 @@ sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
 # expands each linked entity with its structurally-similar siblings via the store's
 # permutation indexes. Read-only over the public sparq-core API; no model, no network.
 sparq-sim = { path = "../sparq-sim", version = "0.1.0" }
-# Term types for the linking surface (entities/relations are oxrdf NamedNodes/Terms).
+# Term types for two surfaces: the entity/relation linking surface (entities/relations
+# are oxrdf NamedNodes/Terms, sq-uw40) and the N2 dictionary-grounded constraint
+# (`constrain.rs`, sq-9yjp — build oxrdf NamedNode/Term to probe the live dictionary via
+# Graph::id_of). Workspace-pinned so the term type is byte-identical to sparq-core's
+# (id_of takes oxrdf::Term).
 oxrdf.workspace = true
 # Validation: parse the generated query to algebra BEFORE touching the engine, so the
 # repair round gets a real parser error message.

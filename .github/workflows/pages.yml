@@ -31,7 +31,23 @@ name: pages
 
 on:
   push:
-    branches: [main]
+    # [OPUS-4.8] sq-gdhy — rebuild on TWO sources so the paper factory's live numbers
+    # stay current. (1) `main`: the site source itself changes (pages, papers, the
+    # COMMITTED site/src/data/benchmarks.generated.json). (2) `benchmark-data`: bench.yml
+    # pushes a fresh benchmark point THERE (not to main), and the paper/showcase numbers
+    # are synced FROM that branch at build time (site/scripts/sync-benchmarks.mjs reads
+    # origin/benchmark-data:dev/bench/data.js). Before this, a new benchmark point only
+    # reached the published papers on the NEXT unrelated main push — the data-branch
+    # change alone did not re-publish. A benchmark-data-triggered run still builds the
+    # `main` site source (the benchmark-data branch is an orphan dashboard branch with no
+    # site/), so it rebuilds main's site against the freshly-pushed data.
+    #
+    # NO double-fire: bench.yml writes benchmark-data in TWO separate pushes — (a) the
+    # github-action-benchmark data.js push (the one carrying the new numbers; NO [skip ci],
+    # so it triggers this rebuild) and (b) the "Seed Pages dashboard" push, whose commit
+    # message carries [skip ci] (so it never re-triggers). The `concurrency: pages` group
+    # below already serialises any overlapping main+benchmark-data runs into one live deploy.
+    branches: [main, benchmark-data]
   workflow_dispatch:
 
 # Least-privilege (Scorecard TokenPermissions): read by default; the deploy job
@@ -47,13 +63,20 @@ concurrency:
 
 jobs:
   build:
-    # Gate the publish to main only (PRs build nothing here).
-    if: github.ref == 'refs/heads/main'
+    # Gate the publish to the two first-party branches CI writes (PRs build nothing here).
+    # [OPUS-4.8] sq-gdhy — `benchmark-data` joins `main` so a fresh benchmark point
+    # re-publishes the paper factory; both are CI-written branches, never PR refs.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/benchmark-data'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # Need the benchmark-data branch too, to overlay its dev/ tree.
+          # [OPUS-4.8] sq-gdhy — ALWAYS build the `main` site source, even when this run was
+          # triggered by a benchmark-data push: the benchmark-data branch is an orphan
+          # dashboard branch (dev/ + a root redirect, NO site/), so checking it out would
+          # have nothing to build. fetch-depth:0 still pulls origin/benchmark-data so the
+          # overlay + sync-benchmarks steps read its freshly-pushed dev/bench/data.js.
+          ref: main
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -134,7 +157,8 @@ jobs:
 
   deploy:
     needs: build
-    if: github.ref == 'refs/heads/main'
+    # [OPUS-4.8] sq-gdhy — mirror the build gate: deploy for either CI-written branch.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/benchmark-data'
     runs-on: ubuntu-latest
     # Pages deployment requires these two writes; everything else stays read-only.
     permissions:

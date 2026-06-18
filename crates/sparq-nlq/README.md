@@ -58,6 +58,18 @@ llm.save("my_session.json")?;                   // replayable fixture for later
 - **Validate before execute** — parses with `spargebra` *before* the engine sees the
   query, so the repair round gets a real parser error; execution failures (unsupported
   forms, `QueryBudget` trips) are repair signals too.
+- **N2 dictionary constraint** ([`constrain`](src/constrain.rs), bead `sq-9yjp`,
+  **opt-in** via `NlqConfig::check_dictionary`) — once a query parses, walk its algebra
+  and check every predicate / `rdf:type` class IRI against the **live dictionary**
+  (`Graph::id_of`). An ungrounded IRI matches no triple, so it becomes a *targeted*
+  repair signal ("predicate `<…>` not in the dictionary; did you mean `<…>`?") with
+  nearest-namespace edit-distance suggestions pulled from the store itself. This is the
+  design doc's API-backend fallback (`research/genai-nl-to-sparql.md` §6, §11): strict
+  logit-level grammar-constrained *decoding* needs logit/grammar access the Anthropic
+  Messages API does not expose, so it is **only feasible on a local backend** — not
+  implemented here, and not claimed. Off by default because an empty-answer question
+  (a valid-but-absent class) must not be "repaired"; the exec-accuracy harness measures
+  raw model accuracy with it off. <!-- [OPUS-4.8] sq-9yjp -->
 - **Budgeted execution** — LLM-generated queries are untrusted input, so every query runs
   under a [`QueryBudget`]. The default is **bounded** (10 s wall clock, 1M materialised
   rows); opting out requires setting `exec_timeout` / `max_rows` to `None` explicitly.
@@ -99,8 +111,13 @@ llm.save("my_session.json")?;                   // replayable fixture for later
   in-memory graph; whether it lifts live exec-accuracy is part of the open live
   measurement (`sq-g0lw`). The complementary lexical/exact literal-value tier is
   bead `sq-na0q`.
-- **Not yet wired**: N2 grammar-constrained decoding against the live dictionary
-  (bead `sq-9yjp`).
+- **Partial (honest scope)**: N2 against the live dictionary (bead `sq-9yjp`). The
+  **vocabulary** half — predicate / class IRIs checked against the dictionary, with
+  did-you-mean repair — is wired (opt-in `check_dictionary`, see Features). Strict
+  logit-level **grammar-constrained decoding** is *not* implemented: it needs
+  logit/grammar access the Anthropic Messages API does not expose, so it is only
+  feasible on a local/open backend (`research/genai-nl-to-sparql.md` §11). Not claimed.
+  <!-- [OPUS-4.8] sq-9yjp -->
 - `AnthropicLlm` is compile-checked in CI (`--features live`) but never called there; no
   test touches the network. <!-- [OPUS-4.8] sq-05rv sq-g0lw -->
 

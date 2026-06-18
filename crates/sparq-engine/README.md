@@ -57,6 +57,17 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   arguments, numeric `RANGE` offsets, and a computed-expression `PARTITION BY` are inline-deferred
   (use the programmatic API). When the feature is off, zero window/aggregate-registry code compiles and
   the default build is byte-identical (no new deps).
+- **Materialised-view / query-result cache** *(opt-in `result-cache` feature, OFF by default)* —
+  a bounded, version-aware LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed
+  by `(parsed query algebra, caller graph-version)`, so an endpoint that re-serves the same read
+  query against a slowly-changing graph can replay the materialised result instead of re-executing.
+  **Caching is sound only under a contract**: the caller bumps a `u64` *version* on every mutation
+  (the engine can't observe writes through a borrowed `&Graph`), and the cache **refuses to store
+  non-deterministic queries** — `NOW`/`RAND`/`UUID`/`STRUUID`/`BNODE`, a remote `SERVICE`, or any
+  custom function / aggregate (detected conservatively by `is_cacheable`); those always evaluate
+  fresh. Keying on the parsed algebra makes the cache insensitive to whitespace / comments / prefix
+  spelling. When the feature is off, zero cache code compiles, the default build is byte-identical,
+  and no new dependencies are added (std `HashMap`/`Mutex`/`Arc` only).
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more

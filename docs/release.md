@@ -166,6 +166,26 @@ cargo publish -p sparq-server
   PyPI wheels later, see below), and `sparq-wasm` (ships via npm).
 - Publishing is **permanent** (versions can only be yanked, not deleted/reused).
 
+> [OPUS-4.8] **Registry-publish signing (sq-jgt3 / GX-OSSF-2).** Scorecard's `Signed-Releases`
+> is satisfied by the Sigstore SLSA build-provenance over the GitHub-Release archives
+> (`release.yml`) — but that does **not** sign the bytes a consumer installs from a *package
+> registry*. Honest per-registry status:
+>
+> - **crates.io — no first-party signing/provenance scheme exists upstream** (no equivalent of
+>   npm `--provenance` or PyPI PEP-740 attestations). The tractable equivalent we DO ship is an
+>   out-of-band attestation: [`publish.yml`](../.github/workflows/publish.yml)'s `crates` job runs
+>   `cargo package` and attests the resulting `.crate` bytes (identical to what `cargo publish`
+>   uploads) with `actions/attest-build-provenance`. This puts **no** provenance link on the
+>   crates.io page — that needs upstream support — but a consumer who downloads the `.crate` can
+>   `gh attestation verify <file> --repo jeswr/sparq`. The crates.io-native sub-gap stays **OPEN**
+>   (external — see `compliance/openssf/gap-register.md` GX-OSSF-2 / `compliance/gap-register.md`
+>   GX-10). Do **not** describe a crates.io publish as "signed".
+> - **npm `@jeswr/sparq` — native Sigstore provenance** via [`publish.yml`](../.github/workflows/publish.yml)'s
+>   `npm` job (`npm publish --provenance` in the GitHub OIDC context); consumers verify with
+>   `npm audit signatures`.
+> - **PyPI `sparq-rdf` — native PEP-740 attestations** via Trusted Publishing (see the
+>   "Python wheels" section below) once the maintainer registers the Trusted Publisher.
+
 ## 5. Docker (manual / local)
 
 CI does this on tag; to build locally:
