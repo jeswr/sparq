@@ -76,10 +76,14 @@ export default function JavascriptWasmSurfacePage() {
       caveat={
         <>
           <p>
-            The wrapper does not yet expose CONSTRUCT / DESCRIBE — drop to the raw{" "}
-            <code className="font-mono">Store</code> for those. The lean bundle
-            omits REGEX/REPLACE and the wall-clock query budget (see the SPARQL
-            surface), trading a smaller download for those native-only features.
+            CONSTRUCT / DESCRIBE are on the wrapper via{" "}
+            <code className="font-mono">queryQuads()</code> (RDF/JS quads),{" "}
+            <code className="font-mono">queryQuadsString()</code> (N-Triples), and{" "}
+            <code className="font-mono">queryQuadsStream()</code>; drop to the raw{" "}
+            <code className="font-mono">Store</code> only to skip term
+            materialisation. The lean bundle omits REGEX/REPLACE and the
+            wall-clock query budget (see the SPARQL surface), trading a smaller
+            download for those native-only features.
           </p>
         </>
       }

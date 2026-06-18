@@ -7,7 +7,7 @@ description: Use the sparq RDF+SPARQL engine from JavaScript/TypeScript (Node >=
 
 sparq is a Rust RDF triplestore + SPARQL engine compiled to a single ~886 KB (314 KB gzip) WebAssembly artifact. The npm package **`@jeswr/sparq`** wraps it in an idiomatic [RDF/JS](https://rdf.js.org/) surface (`SparqStore`, Map-like `Bindings`, spec terms via `@rdfjs/types`); it runs unchanged in Node >= 18 and the browser. There is also a thin raw wasm class (`Store`) if you want SPARQL-JSON strings with no JS-side term materialisation.
 
-Use `SparqStore` (the high-level wrapper) by default. Drop to the raw `Store` only for CONSTRUCT/DESCRIBE (the wrapper does not expose those yet) or to skip term materialisation entirely.
+Use `SparqStore` (the high-level wrapper) by default — it covers SELECT/ASK (`query`/`queryBindings`/`queryBoolean`) and CONSTRUCT/DESCRIBE (`queryQuads`, returning RDF/JS `Quad`s). Drop to the raw `Store` only to skip term materialisation entirely (SPARQL-JSON / N-Triples strings) or for query-plan introspection.
 
 ## Quickstart
 
@@ -66,8 +66,11 @@ query(sparql): Bindings[] | boolean                 // dispatches: SELECT->Bindi
 queryBindings(sparql): Bindings[]                    // SELECT -> one Bindings per solution
 queryBoolean(sparql): boolean                        // ASK (native path; rejects non-ASK)
 queryJson(sparql): string                            // raw SPARQL 1.1 JSON string (SELECT or ASK)
+queryQuads(sparql): Quad[]                            // CONSTRUCT/DESCRIBE -> RDF/JS quads (default graph); rejects SELECT/ASK
+queryQuadsString(sparql): string                     // CONSTRUCT/DESCRIBE -> raw N-Triples (valid Turtle subset)
 count(sparql): number                                // solution count, no materialisation
 queryBindingsStream(sparql): Generator<Bindings>     // stream solutions, for...of / for await...of
+queryQuadsStream(sparql, batchSize?): Generator<Quad> // stream CONSTRUCT/DESCRIBE quads (default batchSize 1024)
 queryJsonChunks(sparql): Generator<string>           // raw ~64 KiB JSON chunks (concat == queryJson)
 
 // SHACL validation (data graph vs shapes graph) — typed report; needs a shacl bundle (shipped by default)
@@ -133,14 +136,16 @@ const fromZst = await SparqStore.fromCompressed(zstBytes, 'ntriples');          
 const compact = await SparqStore.fromString(bigTurtle, 'turtle', { compressed: true });
 ```
 
-**CONSTRUCT / DESCRIBE (raw wasm only).** Not on `SparqStore`; drop to the raw `Store`, which returns N-Triples (a valid Turtle subset).
+**CONSTRUCT / DESCRIBE.** `SparqStore.queryQuads(sparql)` returns the constructed/described graph as RDF/JS `Quad`s in the default graph (template bnodes freshened per solution; illegal slots dropped per §16.2). `queryQuadsString(sparql)` gives the raw N-Triples (a valid Turtle subset) and `queryQuadsStream(sparql, batchSize?)` streams the quads for a large graph. A SELECT/ASK routed here throws.
 
 ```js
-import init, { Store } from '@jeswr/sparq/wasm/sparq_wasm.js'; // path is into the shipped wasm/ dir
-await init();
-const raw = Store.load(turtle, 'turtle');
-const nt  = raw.queryQuads('PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }');
+const quads = store.queryQuads('PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }');
+quads[0].subject.value; // 'http://ex/alice'
+for (const q of store.queryQuadsStream('DESCRIBE <http://ex/bob>')) { /* one Quad at a time */ }
+const nt = store.queryQuadsString('DESCRIBE <http://ex/bob>'); // raw N-Triples string
 ```
+
+The raw `Store.queryQuads` / `queryQuadsChunks` (returning N-Triples strings) remain available for zero term-materialisation.
 
 **EXPLAIN / EXPLAIN ANALYZE (query-plan introspection, raw wasm only).** Same plan text the Rust API (`sparq_engine::explain`) and the HTTP endpoint (`?explain` / `?explain=analyze`, or `Accept: text/x-sparq-explain`) return — returned to JS as a plain string. `explain` is a planning-only dry run (no execution; every query form); `explainAnalyze` runs the query (SELECT/ASK only) and appends a per-operator row-count trace.
 
@@ -171,7 +176,7 @@ The raw `Store.validate(data, shapes, format)` returns the same report as a JSON
 ## Gotchas / feature flags / prerequisites
 
 - **ESM only, Node >= 18.** The package is `"type": "module"`; `init()` is idempotent and runs automatically on the first `SparqStore.from*` call (in Node it reads the wasm bytes from disk; in the browser/Deno it `fetch`es relative to the module). One runtime dep: `fzstd` (~8 KB, dynamically imported only when decoding zstd).
-- **`SparqStore` exposes SELECT/ASK only.** Its `query()` returns `Bindings[]` (SELECT) or `boolean` (ASK). CONSTRUCT/DESCRIBE and federated (`SERVICE`) queries are **not** exposed at the JS wrapper layer — use the raw `Store.queryQuads` for CONSTRUCT/DESCRIBE.
+- **`SparqStore.query()` is SELECT/ASK only.** It returns `Bindings[]` (SELECT) or `boolean` (ASK); a CONSTRUCT/DESCRIBE routed through it throws. Use `queryQuads()` (RDF/JS `Quad`s) / `queryQuadsString()` (N-Triples) / `queryQuadsStream()` for the graph-valued forms. Federated (`SERVICE`) queries are still **not** exposed at the JS wrapper layer.
 - **`REGEX` / `REPLACE` are compiled out** of the wasm build (the engine's non-default `regex` cargo feature is off to keep the bundle small). Use `CONTAINS`/`STRSTARTS`/`STRENDS`/... or a custom wasm build with `--features regex`.
 - **SHACL is on `SparqStore.validate` (typed) AND raw `Store.validate` (JSON string), shipped by default.** The published bundle is built with `--features shacl`, so `validate` works out of the box. SHACL is **not free in the binary** — it pulls in the SHACL engine + `regex` + the `sh:sparql` query path, which roughly **doubles** the `.wasm` (measured ~1.21 MiB → ~2.19 MiB, +~1.0 MiB / +85%, pre-gzip). Size-sensitive consumers can build the lean variant (`npm run build:wasm:lean`, equivalently `wasm-pack build … --release` with no `--features`), which omits SHACL — `SparqStore.validate` then throws a clear "requires a SHACL-enabled wasm bundle" error. Use `--features shacl-af` to also compile `sh:rule`. Validation is in-process and best for small documents (~10–100 triples); large graphs should use the server-side HTTP `validate` path.
 - **JSON-LD ingest (`'jsonld'`) is shipped in the published bundle but is an OPT-IN cargo feature.** The published `@jeswr/sparq` bundle is built with `--features shacl,jsonld` (the js `build:wasm` script), so `fromString(_, 'jsonld')` works out of the box. JSON-LD is **not free in the binary** — it links the `oxjsonld` parser (~0.35 MiB raw `cargo build`, pre-`wasm-opt`), so the **lean default bundle** (`build:wasm:lean` / `cargo build -p sparq-wasm` with no `--features`) omits it to stay under the perf-gate `wasm_bundle_bytes` floor. On the lean bundle a `'jsonld'` load is not recognised as JSON-LD. Turtle / N-Triples / N-Quads / TriG are always present (no feature needed).

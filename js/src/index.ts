@@ -11,6 +11,7 @@ export {
   termFromSparqlJson,
   termToNT,
   quadsToNQuads,
+  parseNTriples,
   detectQueryForm,
   askToSelect,
   SparqlJsonRowsParser,

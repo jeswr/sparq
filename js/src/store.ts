@@ -9,6 +9,7 @@ import { Bindings } from './bindings.js';
 import { decompressToString, type CompressionCodec } from './decompress.js';
 import {
   detectQueryForm,
+  parseNTriples,
   quadsToNQuads,
   SparqlJsonRowsParser,
   termFromSparqlJson,
@@ -158,7 +159,9 @@ export class SparqStore {
 
   /**
    * Runs a SPARQL query: returns `Bindings[]` for SELECT, `boolean` for ASK.
-   * CONSTRUCT/DESCRIBE are not supported by the engine yet.
+   * For the graph-valued forms (CONSTRUCT / DESCRIBE) use {@link queryQuads}
+   * (or {@link queryQuadsString} for the raw N-Triples) — routing one through
+   * `query()` throws, since this method only yields solution tables.
    */
   query(sparql: string): Bindings[] | boolean {
     const form = detectQueryForm(sparql)?.form;
@@ -238,6 +241,54 @@ export class SparqStore {
    */
   queryJson(sparql: string): string {
     return this.#inner.query(sparql);
+  }
+
+  /**
+   * [OPUS-4.8] sq-1gkw: runs a graph-valued query (CONSTRUCT / DESCRIBE),
+   * returning the constructed/described graph as RDF/JS {@link Quad}s in the
+   * default graph. CONSTRUCT instantiates its template once per WHERE solution
+   * (template blank nodes freshened per solution; triples with unbound or
+   * RDF-illegal slots dropped per SPARQL §16.2); DESCRIBE returns each
+   * resource's concise bounded description. A SELECT / ASK query is rejected
+   * with a clear error — use {@link query} / {@link queryBindings} /
+   * {@link queryBoolean} for those. For a large graph, stream it with
+   * {@link queryQuadsStream}, or get the raw N-Triples with
+   * {@link queryQuadsString}.
+   */
+  queryQuads(sparql: string): Quad[] {
+    return parseNTriples(this.#inner.queryQuads(sparql));
+  }
+
+  /**
+   * Like {@link queryQuads} but returns the constructed/described graph as the
+   * engine's raw N-Triples string (a syntactic subset of Turtle, so also a
+   * valid `text/turtle` document) — for forwarding to a serializer sink or
+   * writing to a file without RDF/JS term materialisation.
+   */
+  queryQuadsString(sparql: string): string {
+    return this.#inner.queryQuads(sparql);
+  }
+
+  /**
+   * Streams a graph-valued query's result as RDF/JS {@link Quad}s, one at a
+   * time, with the constructed graph crossing the wasm boundary in batches of
+   * `batchSize` triples (default 1024) so a large graph is never held whole on
+   * the JS side. Works with both `for…of` and `for await…of`; abandoning the
+   * iterator early (`break`) frees the wasm-side cursor. (Caveat: the engine
+   * materialises the full graph inside wasm before the first batch; the bound
+   * is on the JS-side copy.)
+   */
+  *queryQuadsStream(sparql: string, batchSize = 1024): Generator<Quad, void, undefined> {
+    const cursor = this.#inner.queryQuadsChunks(sparql, batchSize);
+    try {
+      for (;;) {
+        const chunk = cursor.next();
+        if (chunk === undefined) break;
+        yield* parseNTriples(chunk);
+      }
+    } finally {
+      cursor.free();
+    }
   }
 
   /**
