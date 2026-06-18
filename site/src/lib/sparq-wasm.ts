@@ -15,6 +15,24 @@ import {
   rowsToNQuads,
 } from "./repl-dataset";
 
+/**
+ * [OPUS-4.8] sq-5teq — a forward-only cursor over a SELECT result's solution rows,
+ * mirroring the wasm `SolutionCursor` export ({@link WasmStore.queryCursor}). Each
+ * {@link next} yields the next BATCH of up to `batchSize` solutions as a SELF-CONTAINED
+ * SPARQL 1.1 JSON document (so it can be `JSON.parse`d on its own), or `undefined` once
+ * every solution has been yielded. The consumer never holds more than one batch, so
+ * peak JS memory is bounded by `batchSize` rather than by the whole result. `vars`,
+ * `rowCount` and `batchSize` introspect the (wasm-side materialised) result; `free`
+ * releases the cursor (call it if you stop early).
+ */
+export interface WasmSolutionCursor {
+  next(): string | undefined;
+  vars(): string[];
+  rowCount(): number;
+  batchSize(): number;
+  free(): void;
+}
+
 export interface WasmStore {
   readonly size: number;
   query(sparql: string): string; // SELECT/ASK -> SPARQL 1.1 JSON results document
@@ -24,6 +42,13 @@ export interface WasmStore {
   updateInPlace(sparql: string): void; // INSERT/DELETE/LOAD/graph-mgmt -> mutate store
   explain(sparql: string): string; // planning-only plan text (every query form)
   explainAnalyze(sparql: string): string; // plan + per-operator trace (SELECT/ASK only)
+  // [OPUS-4.8] sq-5teq — the @jeswr/sparq browser-API surface the /surface/javascript-wasm
+  // page demos live: a streaming cursor, a materialisation-free count, the ASK fast path,
+  // and an incremental quad-level delta (applied in place through the engine's overlay).
+  count(sparql: string): number; // SELECT solution count, read from the index where possible
+  ask(sparql: string): boolean; // ASK fast path: a plain boolean, no SELECT materialised
+  queryCursor(sparql: string, batchSize: number): WasmSolutionCursor; // batched row cursor
+  applyDelta(inserts: string, deletes: string): void; // O(batch) N-Quads delta, in place
   // [OPUS-4.8] sq-egy6 — the SHACL `validate` binding. Present only when the bundle
   // is built with `--features shacl` (the site's default `build:wasm`, and the
   // published `@jeswr/sparq`, both enable it). Stateless: it does NOT consult the
@@ -91,6 +116,114 @@ export function datasetSize(store: WasmStore): number {
   } catch {
     return store.size;
   }
+}
+
+// [OPUS-4.8] sq-5teq — the RDF/JS `match()` term shape the demo uses: `null` (and the
+// empty string in the UI) is a wildcard; a non-empty string is an N-Triples term
+// (`<iri>`, `"literal"`, `"v"^^<dt>` …) inlined verbatim into the generated SELECT.
+export type MatchTerm = string | null;
+
+/** One position of a generated triple pattern: a constant term or a fresh variable. */
+function patternPosition(term: MatchTerm, variable: string): string {
+  const t = term?.trim();
+  return t ? t : `?${variable}`;
+}
+
+/**
+ * [OPUS-4.8] sq-5teq — RDF/JS `match()`-style quad lookup over a wasm {@link WasmStore},
+ * the same generated-SELECT strategy `@jeswr/sparq`'s `SparqStore.match` uses: each of
+ * subject/predicate/object/graph is either a wildcard (a fresh `?s`/`?p`/`?o`/`?g`
+ * variable) or an inlined constant N-Triples term. The graph wildcard spans the default
+ * graph AND every named graph. Returns the matching rows as SPARQL-JSON bindings.
+ */
+export function matchQuads(
+  store: WasmStore,
+  subject: MatchTerm = null,
+  predicate: MatchTerm = null,
+  object: MatchTerm = null,
+  graph: MatchTerm = null,
+): SparqlResults["results"]["bindings"] {
+  const json = store.query(matchSelect(subject, predicate, object, graph));
+  return (JSON.parse(json) as SparqlResults).results.bindings;
+}
+
+/**
+ * [OPUS-4.8] sq-5teq — `match(…).length` without materialising the matched terms, via the
+ * engine's index-level {@link WasmStore.count} (the count of a generated SELECT over the
+ * same pattern {@link matchQuads} builds). This is `countQuads()` in `@jeswr/sparq`.
+ */
+export function countQuads(
+  store: WasmStore,
+  subject: MatchTerm = null,
+  predicate: MatchTerm = null,
+  object: MatchTerm = null,
+  graph: MatchTerm = null,
+): number {
+  return store.count(matchSelect(subject, predicate, object, graph));
+}
+
+/** The generated SELECT a `match()`/`countQuads()` lookup runs (shared so both agree). */
+function matchSelect(
+  subject: MatchTerm,
+  predicate: MatchTerm,
+  object: MatchTerm,
+  graph: MatchTerm,
+): string {
+  const s = patternPosition(subject, "s");
+  const p = patternPosition(predicate, "p");
+  const o = patternPosition(object, "o");
+  const triple = `${s} ${p} ${o}`;
+  const g = graph?.trim();
+  const where = g
+    ? `{ GRAPH ${g} { ${triple} } }`
+    : `{ { ${triple} } UNION { GRAPH ?g { ${triple} } } }`;
+  return `SELECT * WHERE ${where}`;
+}
+
+/** One batch a {@link streamQueryRows} pull surfaced: the rows plus the running totals. */
+export interface CursorBatch {
+  /** 1-based index of this batch. */
+  index: number;
+  /** The rows in THIS batch (at most `batchSize`). */
+  rows: SparqlResults["results"]["bindings"];
+  /** Total rows yielded so far, across all batches pulled. */
+  cumulative: number;
+}
+
+/**
+ * [OPUS-4.8] sq-5teq — stream a SELECT query's rows one BATCH at a time through the wasm
+ * `queryCursor` cursor (mirrors `@jeswr/sparq`'s `queryBindingsStream`): pull a batch of
+ * up to `batchSize` self-contained SPARQL-JSON rows, hand it to `onBatch`, drop it, pull
+ * the next — so the consumer never holds more than one batch. Returns the cursor's
+ * introspection (`vars`, `rowCount`, `batchSize`) once drained. The wasm cursor is always
+ * freed, even if `onBatch` throws. An empty result yields exactly one empty batch.
+ */
+export function streamQueryRows(
+  store: WasmStore,
+  sparql: string,
+  batchSize: number,
+  onBatch?: (batch: CursorBatch) => void,
+): { vars: string[]; rowCount: number; batchSize: number } {
+  const cursor = store.queryCursor(sparql, batchSize);
+  const meta = {
+    vars: cursor.vars(),
+    rowCount: cursor.rowCount(),
+    batchSize: cursor.batchSize(),
+  };
+  try {
+    let index = 0;
+    let cumulative = 0;
+    for (;;) {
+      const chunk = cursor.next();
+      if (chunk === undefined) break;
+      const rows = (JSON.parse(chunk) as SparqlResults).results.bindings;
+      cumulative += rows.length;
+      onBatch?.({ index: ++index, rows, cumulative });
+    }
+  } finally {
+    cursor.free();
+  }
+  return meta;
 }
 
 let modulePromise: Promise<WasmModule> | null = null;
