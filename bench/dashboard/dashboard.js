@@ -26,9 +26,13 @@
   // (see .github/workflows/bench-ec2.yml `name: sparq engine (EC2)`). The per-commit gh-runner
   // series (SERIES) is the dense history that drives the trend/family/scaling views; the EC2 series
   // is a quieter, full-scale, higher-fidelity tier. When it is present we PREFER it for the FEATURED
-  // block (the at-a-glance public-suite comparison) because it is env-matched to the same-box
-  // competitor gathers, and we tag the chosen tier so the reader sees the provenance. Graceful: when
-  // the EC2 series is absent (not yet live), everything falls back to the per-commit series.
+  // block (the at-a-glance public-suite comparison) because it runs on the SAME c7g Graviton arm64
+  // instance FAMILY as the competitor gathers. NB (sq-c0kd): same family is NOT same box — the
+  // nightly tier runs a larger SIZE (c7g.4xlarge, 16 vCPU) than the ephemeral competitor gathers
+  // (c7g.xlarge, 4 vCPU), so absolute µs are NOT directly comparable across the two sizes; we tag the
+  // chosen tier so the reader sees the provenance and we never place a nightly sparq number beside a
+  // competitor cell as a same-box speedup. Graceful: when the EC2 series is absent (not yet live),
+  // everything falls back to the per-commit series.
   var EC2_SERIES = 'sparq engine (EC2)';
 
   // ---- competitor reference data (sq-i0nm parent) --------------------------
@@ -459,7 +463,8 @@
   // [OPUS-4.8] sq-aas7 (design sq-i0nm §E): choose which series feeds the FEATURED block, PREFERRING
   // the EC2/nightly tier when it is present + non-empty, else falling back to the per-commit
   // gh-runner tier. Returns { tier, seriesName, entries, hasEc2 }:
-  //   - tier        — 'nightly' (EC2, env-matched to the same-box competitor gathers) or 'per-commit'
+  //   - tier        — 'nightly' (EC2, same c7g instance family as the competitor gathers — larger
+  //                   size, NOT same box) or 'per-commit'
   //                   (gh-runner CI band — noisier, cross-env vs the gathered competitor numbers).
   //   - seriesName  — the github-action-benchmark series name actually used.
   //   - entries     — that series' chronological entries array (>= 1 element when non-empty).
@@ -483,14 +488,17 @@
 
   // [OPUS-4.8] sq-aas7: a display descriptor for a featured tier — { kind, text, title }. `kind` is a
   // CSS-class suffix (tier-nightly / tier-per-commit). Pure + node-testable; the renderer turns it
-  // into a .pill tier badge in the featured header. The nightly tier is env-matched to the same-box
-  // competitor gathers (ephemeral EC2); the per-commit tier is the noisier gh-runner CI band.
+  // into a .pill tier badge in the featured header. The nightly tier runs on the same c7g Graviton
+  // arm64 instance FAMILY as the competitor gathers — but a larger SIZE (c7g.4xlarge vs the gathers'
+  // c7g.xlarge), so it is NOT same-box and the two are not directly comparable; the per-commit tier
+  // is the noisier gh-runner CI band.
   function tierDescriptor(tier) {
     if (tier === 'nightly') {
       return { kind: 'tier-nightly', text: 'nightly · EC2',
         title: 'featured numbers are from the weekly EC2/nightly heavy-benchmark series '
-             + '(sparq engine (EC2)) — a quiet, full-scale, env-matched tier, preferred over the '
-             + 'per-commit gh-runner band when present' };
+             + '(sparq engine (EC2)) — a quiet, full-scale tier on the same c7g instance family as '
+             + 'the competitor gathers, but a larger instance size, so not directly comparable to '
+             + 'the competitor cells; preferred over the per-commit gh-runner band when present' };
     }
     return { kind: 'tier-per-commit', text: 'per-commit · gh-runner',
       title: 'featured numbers are from the per-commit gh-runner CI series (sparq engine) — the '
@@ -929,15 +937,18 @@
     }
     // [OPUS-4.8] sq-aas7: TIER BADGE — show which series these featured numbers came from (the
     // EC2/nightly tier when present, else the per-commit gh-runner band) so the provenance is
-    // visible at a glance. The competitor cells (gathered on ephemeral EC2) are env-matched to the
-    // nightly tier; when we fell back to the per-commit band they are cross-env, so the note says so.
+    // visible at a glance. The competitor cells (gathered on ephemeral c7g.xlarge EC2) share the
+    // nightly tier's c7g instance FAMILY but not its SIZE (nightly is c7g.4xlarge), so we say "same
+    // family" not "same box" and never present the two as a direct speedup; when we fell back to the
+    // per-commit band they are cross-env, so the note says so.
     var td = tierDescriptor(featured.tier);
     var tierRow = el('div', { 'class': 'featured-tier' }, [
       el('span', { 'class': 'pill tier-badge ' + td.kind, text: td.text, title: td.title })
     ]);
     tierRow.appendChild(el('span', { 'class': 'featured-tier-note',
       text: featured.tier === 'nightly'
-        ? 'EC2/nightly heavy-benchmark series (env-matched to the same-box competitor gathers).'
+        ? 'EC2/nightly heavy-benchmark series — same c7g instance family as the competitor gathers, '
+          + 'but a larger size (not same box), so not a direct competitor comparison.'
         : (featured.hasEc2
             ? 'per-commit gh-runner CI band.'
             : 'per-commit gh-runner CI band — the EC2/nightly series is not present yet, so '
@@ -1330,8 +1341,9 @@
   // so they can render once competitors.json resolves, without re-blocking the summary first paint.
   function paintFeaturedAndScaling(entries, competitors) {
     if (!entries) return;
-    // [OPUS-4.8] sq-aas7: the FEATURED block prefers the EC2/nightly series when present (env-matched
-    // to the competitor gathers); the families/scaling views below keep using the dense per-commit
+    // [OPUS-4.8] sq-aas7: the FEATURED block prefers the EC2/nightly series when present (same c7g
+    // instance family as the competitor gathers, larger size — not same box); the families/scaling
+    // views below keep using the dense per-commit
     // history (`entries`). pickFeaturedSeries() reads the merged BENCHMARK_DATA so it sees the EC2
     // series merged in by boot()'s fetch; graceful fall-back to per-commit when EC2 is absent.
     var picked = pickFeaturedSeries(typeof window !== 'undefined' ? window.BENCHMARK_DATA : null);
