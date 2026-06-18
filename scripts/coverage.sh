@@ -101,6 +101,40 @@ NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nigh
 # DOCUMENTED here so the exclusion is never silent.
 VECTORS_HEAVY_SKIP="recall_at_10_vs_brute_force_on_50k"   # matches HNSW + DiskANN 50k
 
+# ---- conformance-binary merge (sq-bjct, NIGHTLY tier only) [OPUS-4.8] --------
+# The W3C SPARQL + inference suites run as the sparq-conformance /
+# sparq-inference-conformance BINARIES (`cargo run`), NOT as `cargo test`. So a
+# plain `cargo llvm-cov --package sparq-core` (which only runs that crate's
+# `cargo test`) does NOT count the suites' deep exercise of sparq-core /
+# sparq-engine — their per-crate floors otherwise reflect only unit+integration
+# tests.
+#
+# In the nightly/full tiers we MERGE the two conformance binaries' coverage into
+# the sparq-core / sparq-engine reports via cargo-llvm-cov's documented
+# accumulate-then-report flow (profraw is NOT clobbered between `--no-report`
+# invocations; it only resets on `clean`):
+#   1. `cargo llvm-cov clean --workspace`            — empty the profraw dir
+#   2. `cargo llvm-cov test  --no-report -p X ...`   — capture X's unit+integration
+#      tests' profraw (no report yet)
+#   3. `cargo llvm-cov run   --no-report --bin sparq-conformance ...`            \
+#      `cargo llvm-cov run   --no-report --bin sparq-inference-conformance ...`  —
+#      capture each suite binary's profraw ON TOP of (2) without wiping it
+#   4. `cargo llvm-cov report -p X --json --summary-only` — merge ALL accumulated
+#      profraw and emit X's line% over the merged set.
+# Step 4's report for package X therefore includes every X line that any of
+# (2)/(3) executed. We `report -p X` per crate so the number stays attributed to
+# X alone (the binaries themselves stay floor-0 / presence-gated).
+#
+# This roughly DOUBLES the core/engine measurement cost (the suites are a second
+# heavy exercise on top of the tests), which is exactly why it is nightly-only —
+# the per-commit tier keeps the cheap test-only measurement unchanged. Both suite
+# binaries skip suites whose fixtures are absent (fetched above), so the step is a
+# graceful no-op-on-X if fixtures could not be fetched (the test-only profraw from
+# (2) still yields a valid, if lower, number — never an empty/failed measurement).
+CONFORMANCE_MERGE_CRATES="sparq-core sparq-engine"
+# Enable the merge only outside the cheap per-commit tier (set to 0 to force-disable).
+CONFORMANCE_MERGE="${CONFORMANCE_MERGE:-auto}"
+
 # ---- fixtures (idempotent; no-ops when already pinned) ----------------------
 if [ "$FETCH_FIXTURES" = "1" ]; then
   echo "==> Fetching pinned W3C fixtures (idempotent)…"
@@ -123,8 +157,103 @@ trap 'rm -rf "$WORK"' EXIT
 declare -a ROWS=()
 TOTAL_START=$(date +%s)
 
+# [OPUS-4.8] sq-bjct: decide whether THIS crate's measurement should merge the
+# conformance binaries' coverage. Yes only when (a) the crate is one of the
+# CONFORMANCE_MERGE_CRATES, AND (b) the merge is enabled for this tier: "auto"
+# enables it for any tier except per-commit (it ~doubles core/engine cost), and an
+# explicit CONFORMANCE_MERGE=1/0 forces it on/off (1 even lets a `full`-tier ad-hoc
+# run merge; 0 disables for debugging / a fast nightly).
+want_conformance_merge() {
+  local crate="$1"
+  case " $CONFORMANCE_MERGE_CRATES " in *" $crate "*) ;; *) return 1 ;; esac
+  case "$CONFORMANCE_MERGE" in
+    0|false|no) return 1 ;;
+    1|true|yes) return 0 ;;
+    auto|*)     [ "$TIER" != "per-commit" ] && return 0 || return 1 ;;
+  esac
+}
+
+# [OPUS-4.8] sq-bjct: measure ONE crate with the conformance binaries MERGED into its
+# report (nightly tier). Uses cargo-llvm-cov's accumulate-then-report flow — see the
+# CONFORMANCE-BINARY MERGE header block for the full rationale. Emits the SAME JSON row
+# shape as measure(), tagging features += "conformance-merge" so the summary records that
+# this crate's number includes the suite binaries. On any failure to capture the merged
+# profraw it leaves rc!=0, and the caller falls through to the unmeasured-row path (the
+# robust gate then re-measures), so this never silently produces a low number.
+measure_merged() {
+  local crate="$1"
+  local -a features=("conformance-merge")
+  local -a feat_flags=()
+  # sparq-core keeps its mmap,dict-spill security surface (see PER-CRATE QUIRKS).
+  if [ "$crate" = "sparq-core" ]; then
+    feat_flags+=(--features mmap,dict-spill); features+=("mmap" "dict-spill")
+  fi
+  local start end rc=0 json="$WORK/$crate.json" err="$WORK/$crate.err"
+  start=$(date +%s)
+  : > "$err"
+  {
+    # 1. Start from an empty profraw set so ONLY this measurement's runs count.
+    cargo llvm-cov clean --workspace &&
+    # 2. Capture the crate's own unit+integration tests (serial — same profraw-race
+    #    mitigation as measure(); see sq-x4jy). No report yet.
+    cargo llvm-cov test --no-report --package "$crate" "${feat_flags[@]}" \
+      -- --test-threads=1 &&
+    # 3. Capture each suite binary ON TOP of (2) without wiping the profraw. Reports
+    #    are written into $WORK so they never litter the repo root.
+    cargo llvm-cov run --no-report --release -p sparq-conformance \
+      --bin sparq-conformance -- --report "$WORK/conformance-report.md" &&
+    cargo llvm-cov run --no-report --release -p sparq-conformance \
+      --bin sparq-inference-conformance -- --report "$WORK/inference-report.md" &&
+    # 4. Merge ALL accumulated profraw and emit X's line% over the merged set.
+    #    NB: `report` does NOT accept --features (that is a build-time flag, applied
+    #    in steps 2-3 which chose what code was compiled); passing it here errors with
+    #    "invalid option '--features' for subcommand 'report'". The report just
+    #    summarises the accumulated profraw for package X.
+    cargo llvm-cov report --package "$crate" \
+      --summary-only --json --output-path "$json"
+  } >/dev/null 2>>"$err" || rc=$?
+  end=$(date +%s)
+
+  if [ "$rc" -ne 0 ] || [ ! -s "$json" ]; then
+    echo "  !! $crate (conformance-merge) FAILED to measure (rc=$rc) — see error tail:"
+    tail -8 "$err" | sed 's/^/     /'
+    ROWS+=("$(python3 - "$crate" "$((end-start))" <<'PY'
+import json,sys
+print(json.dumps({"crate":sys.argv[1],"seconds":int(sys.argv[2]),"measured":False}))
+PY
+)")
+    return
+  fi
+
+  local feats_json
+  feats_json=$(printf '%s\n' "${features[@]}" | python3 -c 'import sys,json;print(json.dumps([l for l in sys.stdin.read().split("\n") if l]))')
+  local row
+  row=$(python3 - "$crate" "$json" "$((end-start))" "$feats_json" <<'PY'
+import json,sys
+crate,path,secs,feats=sys.argv[1],sys.argv[2],int(sys.argv[3]),json.loads(sys.argv[4])
+d=json.load(open(path))
+t=d["data"][0]["totals"]["lines"]
+print(json.dumps({"crate":crate,"lines_pct":round(t["percent"],2),
+  "lines_covered":t["covered"],"lines_total":t["count"],
+  "seconds":secs,"features":feats,"skipped_tests":[],"measured":True}))
+PY
+)
+  ROWS+=("$row")
+  printf "  %-20s lines=%6s%%  %4ss  feat=%s\n" "$crate" \
+    "$(echo "$row" | python3 -c 'import sys,json;print(json.load(sys.stdin)["lines_pct"])')" \
+    "$((end-start))" "${features[*]}"
+}
+
 measure() {
   local crate="$1"; shift
+  # [OPUS-4.8] sq-bjct: in the nightly/full tiers, sparq-core / sparq-engine are
+  # measured with the W3C conformance binaries MERGED into the report (those suites
+  # run as BINARIES, not `cargo test`, so the plain per-crate measurement misses
+  # their deep exercise of these crates). Per-commit is unchanged.
+  if want_conformance_merge "$crate"; then
+    measure_merged "$crate"
+    return
+  fi
   local features=()           # array of feature names recorded in JSON
   local skips=()              # array of skipped-test substrings recorded in JSON
   local -a cargo_args=(--package "$crate")
