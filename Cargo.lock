@@ -3306,7 +3306,7 @@ dependencies = [
 name = "sparq-canon"
 version = "0.1.0"
 dependencies = [
- "digest 0.10.7",
+ "digest 0.11.3",
  "oxrdf 0.2.4",
  "oxrdf 0.3.3",
  "oxttl 0.1.8",

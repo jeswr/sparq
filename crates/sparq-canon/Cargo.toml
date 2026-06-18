@@ -39,7 +39,7 @@ oxttl01 = { package = "oxttl", version = "0.1.8" }
 # RDFC-1.0's hash-function trait, re-exported as `sparq_canon::Digest` so callers
 # of the `*_with` profile functions can name a hasher without a direct dep.
 # [OPUS-4.8] Pinned to 0.10 to match rdf-canon 0.15.3's `Digest` bound (see sha2 note below).
-digest = "0.10"
+digest = "0.11"
 
 [dev-dependencies]
 sparq-engine = { path = "../sparq-engine" }
