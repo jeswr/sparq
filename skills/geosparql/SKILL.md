@@ -61,6 +61,16 @@ pub fn geof_registry() -> sparq_engine::FunctionRegistry;
 // drive with:  sparq_engine::query_with_functions(&graph, sparql, &reg) -> Result<QueryResult, String>
 //   or scope another entry point: sparq_engine::with_functions(&reg, || sparq_engine::ask(&g, q))
 
+// --- GeoSPARQL query-rewrite extension: topology PROPERTY forms (`engine` feature) ---
+// Expands `?a geo:sfWithin ?b` (sf*/eh*/rcc8*) triple patterns into
+// `(geo:hasDefaultGeometry|geo:hasGeometry)/geo:asWKT` geometry-resolution joins +
+// the matching `geof:` FILTER. Run the returned PreparedQuery UNDER geof_registry().
+// Opt-in entry point only — the standard sparq_engine entry points still match a
+// geo:sfWithin predicate as an ordinary asserted triple (W3C conformance unaffected).
+pub fn geosparql_rewrite(sparql: &str) -> Result<sparq_engine::PreparedQuery, String>;
+pub fn rewrite_query(q: spargebra::Query) -> spargebra::Query;   // algebra-level form
+pub fn is_topology_property(iri: &str) -> bool;                  // recognises the geo: topology IRIs
+
 // --- geof: as plain Rust over GeoGeometry (always available) ---
 pub fn distance(a: &GeoGeometry, b: &GeoGeometry, unit: Unit) -> Result<f64, GeoError>;
 pub fn sf_within(a, b) -> Result<bool, GeoError>;   // + sf_equals/disjoint/intersects/touches/
@@ -92,6 +102,16 @@ let r = query_with_functions(&g,
    SELECT ?city ?region WHERE {
      ?city <http://ex/loc> ?pt . ?region <http://ex/area> ?poly .
      FILTER(geof:sfWithin(?pt, ?poly)) }", &geof_registry()).unwrap();
+```
+
+**Topology PROPERTY form via the query-rewrite extension** — write the relation as a triple, not a FILTER; the rewrite resolves each feature's default geometry and applies the matching `geof:`:
+```rust
+let prepared = sparq_geo::geosparql_rewrite(
+  "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+   SELECT ?city WHERE { ?city geo:sfWithin <http://ex/region> }").unwrap();
+let reg = geof_registry();
+let r = sparq_engine::with_functions(&reg, || sparq_engine::query_prepared(&g, &prepared)).unwrap();
+// Needs ?city (geo:hasDefaultGeometry|geo:hasGeometry)/geo:asWKT <wktLiteral> in the data.
 ```
 
 **Chain geometry-producing + relation functions in one expression:** `geof:envelope` / `geof:buffer` return a `geo:wktLiteral` that feeds straight back into another `geof:` call:

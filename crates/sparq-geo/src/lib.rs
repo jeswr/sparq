@@ -11,6 +11,8 @@ pub mod provider;
 pub mod registry;
 #[cfg(feature = "reproject")]
 pub mod reproject;
+#[cfg(feature = "engine")]
+pub mod rewrite; // [OPUS-4.8] sq-9g58: GeoSPARQL query-rewrite extension (topology property forms)
 
 pub use geof::Unit;
 pub use gml::parse_gml_literal; // [OPUS-4.8]
@@ -22,6 +24,8 @@ pub use literal::{
 pub use provider::GeoIndexProvider;
 #[cfg(feature = "engine")]
 pub use registry::geof_registry;
+#[cfg(feature = "engine")]
+pub use rewrite::{geosparql_rewrite, is_topology_property, rewrite_query}; // [OPUS-4.8] sq-9g58
 
 /// The GeoSPARQL vocabulary IRIs this crate touches.
 pub mod vocab {
