@@ -102,3 +102,32 @@ impl std::fmt::Display for GeoError {
 }
 
 impl std::error::Error for GeoError {}
+
+#[cfg(test)]
+mod error_display_tests {
+    // [OPUS-4.8] sq-9g58 coverage: every GeoError Display arm renders its
+    // payload. These arms (CrsMismatch / NonGeographicCrs / UnknownUnit) were
+    // unexercised — Parse / Unsupported are hit by the parser/eval tests.
+    use super::GeoError;
+
+    #[test]
+    fn each_variant_renders_its_payload() {
+        let parse = GeoError::Parse("bad wkt".to_string()).to_string();
+        assert!(parse.contains("bad wkt"), "{parse}");
+
+        let crs = GeoError::CrsMismatch("urn:a".to_string(), "urn:b".to_string()).to_string();
+        assert!(crs.contains("urn:a") && crs.contains("urn:b"), "{crs}");
+
+        let non_geo = GeoError::NonGeographicCrs("urn:proj".to_string()).to_string();
+        assert!(non_geo.contains("urn:proj") && non_geo.contains("geographic"), "{non_geo}");
+
+        let unit = GeoError::UnknownUnit("urn:furlong".to_string()).to_string();
+        assert!(unit.contains("urn:furlong") && unit.contains("unit"), "{unit}");
+
+        let unsup = GeoError::Unsupported("no can do".to_string()).to_string();
+        assert!(unsup.contains("no can do"), "{unsup}");
+
+        // The error implements std::error::Error (trait-object usable).
+        let _: &dyn std::error::Error = &GeoError::Parse("x".to_string());
+    }
+}
