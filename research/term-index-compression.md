@@ -116,9 +116,12 @@ then sort + assign ranks + drop the map.
 
 ## 2. Prioritised plan for sparq's dictionary
 
-Bytes/term figures are *expected* and tagged with their basis. sparq has **no
-measured dictionary bytes/term or load-throughput baseline yet** (BENCHMARKS.md has
-none) — establishing that baseline is itself the first action (§3).
+Bytes/term figures are *expected* and tagged with their basis. The "expected"
+deltas below are validated against **our** measured baseline — the `bench/dict`
+harness ([OPUS-4.8] sq-9w0t) now reports the dictionary's bytes/term (arena +
+blob/browser mode), per-class composition, and dict-build throughput on
+Wikidata-shaped + Uniprot-shaped vocab, so each lever's %-claim is sized against
+sparq's own numbers (see §3), not borrowed prior-art ratios alone.
 
 ### (a) Adopt now — low risk, compose cleanly, keep the hot path
 
@@ -301,23 +304,40 @@ Why it, over the others:
   commit better sequenced as the deliberate M4 ValueId step. A1 has no such
   ripple.
 
-**What to measure to validate it (and to establish the missing baseline):**
+**What to measure to validate it (the baseline now exists):**
 
-There is currently **no measured dictionary baseline in BENCHMARKS.md** — so the
-first job is to add three metrics to the bench harness and capture them *before*
-and *after* A1, on the same datasets the architecture already targets (DBLP-390M
-first; a Wikidata sample for IRI-heavy validation).
+The baseline that §1/§2 used to call missing **now exists** — the `bench/dict`
+harness ([OPUS-4.8] sq-9w0t; `bench/dict/README.md`, registered in
+`bench/benchmarks.toml` as `dict-baseline`) measures all three metrics below
+on the two named shapes (Wikidata-shaped + the prefix-rich Uniprot-shaped vocab),
+via the production `Graph::load_reader_parallel` ingest path. It reports the
+bytes/term + composition figures as DETERMINISTIC, load-robust numbers and the
+throughput as a quiet-box figure. A1 (and A2/A3) should be re-run through it
+*before* and *after* and the delta captured here. (Per repo policy markdown
+carries no hard-coded perf numbers; run the harness for the live figures.) Two
+findings already worth flagging from the baseline run:
+- On the prefix-rich Uniprot shape the **arena** mode's per-`Stored`-slot overhead
+  can EXCEED the naive whole-string size (tiny suffixes, fat `Box<str>`+enum slot)
+  — direct corroboration of A0's "remaining gap" (migrate `Vec<Stored>` to a
+  packed byte arena). The **blob/browser** mode is already well below naive.
+- The naive denominator double-counts datatype IRIs that sparq's arena already
+  dedups into the side `datatypes` table, so A3's per-literal residual is smaller
+  than the naive bytes suggest — size A3 against the harness's `distinct datatype
+  IRIs` line, not the naive total.
 
-1. **Bytes/term (the headline).** Extend `Dict::heap_bytes()` (already present) to
-   report `dictionary_heap_bytes / dict.len()` split by class (IRI / literal /
-   bnode). Target: A1 roughly halves the IRI-class figure; report the whole-vocab
-   delta against QLever's −45% Wikidata datapoint as the sanity check. Also report
-   **total dictionary heap as a % of total store RAM** — the architecture's claim
-   is the dictionary is ~half of memory; confirm it, then watch it fall.
-2. **Load throughput (intern hot path must not regress).** triples/s end-to-end on
-   the bulk loader (bar: QLever ~1.7M triples/s on DBLP-390M, `ARCHITECTURE.md` §2).
-   A1 adds a `memchr` split + a tiny prefix probe per IRI; confirm the regression is
-   in the noise. This is the guard that A1 did not quietly slow ingest.
+1. **Bytes/term (the headline).** The harness reports
+   `Dict::heap_bytes() / Dict::len()` (the same `B/term` the CLI load summary
+   prints) in both the arena and blob/browser storage modes, plus a per-class
+   composition (IRI / literal / language-tagged / blank / triple-term). Target: A1
+   roughly halves the IRI-class figure; report the whole-vocab delta against
+   QLever's −45% Wikidata datapoint as the sanity check. Also report **total
+   dictionary heap as a % of total store RAM** — the architecture's claim is the
+   dictionary is ~half of memory; confirm it, then watch it fall.
+2. **Load throughput (intern hot path must not regress).** triples/s and terms/s
+   end-to-end on the bulk loader — the `dict-baseline bench` row, median of 3 (bar:
+   QLever ~1.7M triples/s on DBLP-390M, `ARCHITECTURE.md` §2). A1 adds a `memchr`
+   split + a tiny prefix probe per IRI; confirm the regression is in the noise on an
+   idle box. This is the guard that A1 did not quietly slow ingest.
 3. **Query latency (the order/materialisation side).** Per-query mean/median on the
    M1 query set, watching specifically (a) projection latency (id→term now does a
    prefix concat — confirm it stays sub-µs/term and does not dominate
