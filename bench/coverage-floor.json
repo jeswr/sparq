@@ -50,7 +50,8 @@
       "floor": 87
     },
     "sparq-serve": {
-      "floor": 83
+      "floor": 92,
+      "note": "[OPUS-4.8] sq-fggn: behavioural tests for the lowest-covered modules (footprint commutativity, scheduler public surface, PodId/WriteError display) lifted measured line% 84.82 -> 94.47; floor = floor(measured) - 2 margin."
     },
     "sparq-server": {
       "floor": 85
