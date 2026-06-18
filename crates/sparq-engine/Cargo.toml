@@ -136,7 +136,13 @@ quick-xml = { version = "0.40", default-features = false, optional = true }
 # endpoints without bundling webpki-roots. [OPUS-4.8]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uuid = { version = "1", features = ["v4"] }
-ureq = { version = "2", default-features = false, features = ["tls", "native-certs"], optional = true }
+# [OPUS-4.8] sq-g2xs: ureq 3 (was 2) to migrate off the archived/unmaintained `rustls-pemfile`
+# (RUSTSEC-2025-0134). ureq 2 pulled it transitively via `rustls-native-certs 0.7`; ureq 3 uses
+# `rustls-native-certs 0.8` (which dropped `rustls-pemfile` in favour of `rustls-pki-types`'
+# `PemObject`). `rustls,platform-verifier` is the faithful successor of ureq 2's
+# `tls,native-certs`: TLS via rustls, server-cert validation against the OS trust store (via
+# `rustls-platform-verifier`) rather than a bundled CA set — same runtime trust behaviour as before.
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
 
 [dev-dependencies]
 # The dict-consolidation differential test compares the serial, sharded-parallel and

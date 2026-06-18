@@ -188,6 +188,14 @@ fn service_default_deny_refuses_loopback_endpoint() {
             || err.to_lowercase().contains("dns"),
         "expected an egress/SSRF refusal, got: {err}"
     );
+    // [OPUS-4.8] sq-g2xs: the SSRF refusal originates in the ureq-3 resolver (as a
+    // `ureq::Error::Io(PermissionDenied)`); the stable `SERVICE_EGRESS_REFUSED_MARKER`
+    // the server `contains()`-classifies as a 403 (http.rs) MUST survive ureq-3's error
+    // wrapping all the way out through `HttpTransport::fetch`. Guard that contract.
+    assert!(
+        err.contains(sparq_engine::SERVICE_EGRESS_REFUSED_MARKER),
+        "the egress-refusal marker must survive ureq-3 error wrapping, got: {err}"
+    );
 }
 
 #[test]

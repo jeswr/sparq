@@ -20,23 +20,23 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # registry — a yanked crate is an unbuildable / pulled release.
 yanked = "deny"
 # Advisory IDs to tolerate — each MUST carry a justification. The policy here is
-# strict on what matters: a real VULNERABILITY or a YANKED crate FAILS the gate
-# (nothing below is one). The remaining entry is an `unmaintained` *informational*
-# advisory on a TRANSITIVE dep with NO safe upgrade available today; it is
-# tracked as a bead to migrate off (see reason in the `reason`). Re-audit when an
-# upgrade path appears — drop the entry and the gate re-flags it.
+# strict on what matters: a real VULNERABILITY or a YANKED crate FAILS the gate.
+# There are currently NO ignored advisories — the list is empty so the gate
+# re-flags anything new.
 #
 # RUSTSEC-2024-0436 (unmaintained `paste` proc-macro, bead sq-l8bv) was dropped:
 # the GPU stack (wgpu et al.) no longer pulls `paste` transitively, so the crate
 # is absent from Cargo.lock and the advisory no longer matches any crate. The
 # ignore is therefore removed so the gate re-flags any regression that
 # reintroduces `paste`.
-ignore = [
-  # `rustls-pemfile` is archived; its code now lives in rustls-pki-types. Pulled
-  # in via ureq -> rustls-native-certs. "No safe upgrade is available" per the
-  # advisory (needs an upstream ureq/rustls-native-certs bump). Bead: sq-g2xs.
-  { id = "RUSTSEC-2025-0134", reason = "unmaintained `rustls-pemfile`, transitive via ureq->rustls-native-certs, no vuln + no safe upgrade; tracked in bead sq-g2xs" },
-]
+#
+# RUSTSEC-2025-0134 (unmaintained `rustls-pemfile`, bead sq-g2xs) was dropped:
+# the federation HTTP client was migrated from ureq 2 → ureq 3, whose
+# `rustls-native-certs 0.8` no longer depends on the archived `rustls-pemfile`
+# (its code moved into `rustls-pki-types`' `PemObject`). The crate is now absent
+# from Cargo.lock, so the ignore is removed and the gate re-flags any regression
+# that reintroduces it.
+ignore = []
 
 [licenses]
 # Confidence floor for SPDX detection from license text (cargo-deny default).
@@ -84,11 +84,13 @@ exceptions = [
   #     `WITH` expression just isn't matched by the bare "Apache-2.0" entry).
   #     Build-dep of pyo3 -> sparq-py.
   { crate = "target-lexicon@0.13.5", allow = ["Apache-2.0 WITH LLVM-exception"] },
-  # --- webpki-roots (CDLA-Permissive-2.0 — Community Data License Agreement,
-  #     a permissive data licence covering the bundled Mozilla CA root set).
-  #     Two majors are in the tree (via ureq and reqwest/hyper-rustls).
-  { crate = "webpki-roots@0.26.11", allow = ["CDLA-Permissive-2.0"] },
-  { crate = "webpki-roots@1.0.7",   allow = ["CDLA-Permissive-2.0"] },
+  # --- webpki-roots / webpki-root-certs (CDLA-Permissive-2.0 — Community Data License
+  #     Agreement, a permissive data licence covering the bundled Mozilla CA root set).
+  #     Pulled in by the rustls TLS stack (ureq 3, reqwest/hyper-rustls). [OPUS-4.8] sq-g2xs:
+  #     ureq 3's rustls feature adds `webpki-root-certs` (the DER-encoded variant) alongside
+  #     `webpki-roots`; the stale `webpki-roots@0.26.11` exception was dropped (no longer in tree).
+  { crate = "webpki-roots@1.0.7",      allow = ["CDLA-Permissive-2.0"] },
+  { crate = "webpki-root-certs@1.0.8", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [bans]
