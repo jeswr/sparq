@@ -929,6 +929,22 @@ pub fn run_cell_networked(
             let (opened, gates) = coord.sort(dealer, &col_values)?;
             (opened.iter().copied().sum(), gates)
         }
+        QueryClass::HiddenBoundedPath => {
+            // The hidden bounded property path (sq-py8h) has no live-wire
+            // `Coordinator` driver: its cost is wired into the ANALYTIC matrix
+            // runner via `bench::model_bounded_path` /
+            // `hidden_path::planner::BoundedPathPlan::comm_counter` (sq-py8h.5), not
+            // this loopback transport harness. Refuse honestly here rather than
+            // fabricate a wire run — the modelled cost is the counted metric, and a
+            // networked driver for the operator is separate, deferred work.
+            // [OPUS-4.8]
+            return Err(MpcError::not_yet(
+                "hidden bounded property-path over the live-wire transport harness",
+                "sq-py8h (operator cost is modelled analytically via bench::run_matrix / \
+                 BoundedPathPlan::comm_counter, sq-py8h.5; a Coordinator wire driver is \
+                 separate deferred work)",
+            ));
+        }
     };
     let wall_clock = start.elapsed();
 

@@ -795,6 +795,12 @@ pub fn eval_bounded_path_hidden_slots(
     oblivious_set_output(backend, &candidates, 2, bound)
 }
 
+/// Planner guard + cost-model wiring for the hidden bounded property-path operator
+/// (`sq-py8h.5`): reject statically-large unrolls, refuse a hidden UNBOUNDED path
+/// fail-closed via [`MpcError::NoBackendSatisfies`], and emit the operator's modelled
+/// communication cost through [`crate::metrics::CommCounter`]. `[OPUS-4.8]`
+pub mod planner;
+
 #[cfg(test)]
 mod bounded_tests;
 #[cfg(test)]
