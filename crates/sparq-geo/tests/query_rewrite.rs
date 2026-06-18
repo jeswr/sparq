@@ -188,6 +188,134 @@ ex:a ex:knows ex:b .
     assert_eq!(got, vec!["<http://example.org/b>".to_string()]);
 }
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-5ts8 — query-rewrite conformance for the OTHER two OGC
+// topology-relation families.
+//
+// The OGC `/conf/query-rewrite-extension` conformance class spans all THREE
+// topology-relation families — Simple Features (`geo:sf*`), Egenhofer
+// (`geo:eh*`) and RCC8 (`geo:rcc8*`). The fixtures above cover only `sf*`; the
+// rewrite (`src/rewrite.rs`) recognises all three (see `TOPOLOGY_RELATIONS`)
+// but, until now, only `sf*` was proven end-to-end. These fixtures close that
+// gap: an `eh*` and an `rcc8*` property form, answered with NO asserted
+// topology triple, over polygons whose expected relation is the authoritative
+// ground truth from
+// `tests/relations.rs::egenhofer_and_rcc8_partition_region_pairs`
+// (SMALL ⊏ BIG ⇒ ehInside / rcc8ntpp; BIG ∥ FAR ⇒ ehDisjoint / rcc8dc).
+// ---------------------------------------------------------------------------
+
+/// Polygons whose pairwise Egenhofer/RCC8 relations are pinned by the lexical
+/// truth table in `tests/relations.rs`. SMALL lies strictly inside BIG; FAR is
+/// disjoint from both. Each feature resolves through `geo:hasDefaultGeometry`.
+const REGIONS_TTL: &str = r#"
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+@prefix ex:  <http://example.org/> .
+
+ex:small  geo:hasDefaultGeometry ex:smallGeom .
+ex:smallGeom geo:asWKT "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))"^^geo:wktLiteral .
+
+ex:big    geo:hasDefaultGeometry ex:bigGeom .
+ex:bigGeom geo:asWKT "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))"^^geo:wktLiteral .
+
+ex:far    geo:hasDefaultGeometry ex:farGeom .
+ex:farGeom geo:asWKT "POLYGON((9 9, 10 9, 10 10, 9 10, 9 9))"^^geo:wktLiteral .
+
+# No asserted geo:eh*/geo:rcc8* triple anywhere.
+"#;
+
+#[test]
+fn egenhofer_property_form_resolves_default_geometry() {
+    let graph = Graph::load_str(REGIONS_TTL, "turtle").unwrap();
+    // ?f geo:ehInside ex:big — SMALL is the one region strictly inside BIG.
+    // (BIG is ehEquals, not ehInside, of itself; FAR is ehDisjoint.)
+    let got = run(
+        &graph,
+        "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+         PREFIX ex:  <http://example.org/>
+         SELECT ?f WHERE { ?f geo:ehInside ex:big }",
+    );
+    assert_eq!(
+        got,
+        vec!["<http://example.org/small>".to_string()],
+        "ehInside property form must select exactly the region strictly inside BIG"
+    );
+}
+
+#[test]
+fn egenhofer_disjoint_property_form() {
+    let graph = Graph::load_str(REGIONS_TTL, "turtle").unwrap();
+    // ?f geo:ehDisjoint ex:far — BIG and SMALL are both disjoint from FAR; FAR
+    // is ehEquals (not ehDisjoint) of itself.
+    let got = run(
+        &graph,
+        "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+         PREFIX ex:  <http://example.org/>
+         SELECT ?f WHERE { ?f geo:ehDisjoint ex:far }",
+    );
+    assert_eq!(
+        got,
+        vec![
+            "<http://example.org/big>".to_string(),
+            "<http://example.org/small>".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn rcc8_ntpp_property_form_resolves_default_geometry() {
+    let graph = Graph::load_str(REGIONS_TTL, "turtle").unwrap();
+    // ?f geo:rcc8ntpp ex:big — SMALL is a non-tangential proper part of BIG.
+    // rcc8ntpp is irreflexive, so BIG is NOT rcc8ntpp of itself; FAR is rcc8dc.
+    let got = run(
+        &graph,
+        "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+         PREFIX ex:  <http://example.org/>
+         SELECT ?f WHERE { ?f geo:rcc8ntpp ex:big }",
+    );
+    assert_eq!(
+        got,
+        vec!["<http://example.org/small>".to_string()],
+        "rcc8ntpp property form must select exactly the non-tangential proper part of BIG"
+    );
+}
+
+#[test]
+fn rcc8_inverse_direction_property_form() {
+    let graph = Graph::load_str(REGIONS_TTL, "turtle").unwrap();
+    // ex:big geo:rcc8ntppi ?f — the inverse: BIG has SMALL as a non-tangential
+    // proper part (rcc8ntppi is rcc8ntpp with the arguments swapped).
+    let got = run(
+        &graph,
+        "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+         PREFIX ex:  <http://example.org/>
+         SELECT ?f WHERE { ex:big geo:rcc8ntppi ?f }",
+    );
+    assert_eq!(got, vec!["<http://example.org/small>".to_string()]);
+}
+
+#[test]
+fn egenhofer_standard_entry_point_does_not_rewrite() {
+    // HONESTY anchor mirroring `standard_entry_point_does_not_rewrite` for the
+    // Egenhofer family: WITHOUT geosparql_rewrite, a geo:ehInside predicate binds
+    // only asserted triples (there are none), so zero results.
+    let graph = Graph::load_str(REGIONS_TTL, "turtle").unwrap();
+    let reg = geof_registry();
+    let r = with_functions(&reg, || {
+        sparq_engine::query(
+            &graph,
+            "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+             PREFIX ex:  <http://example.org/>
+             SELECT ?f WHERE { ?f geo:ehInside ex:big }",
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        r.len(),
+        0,
+        "the STANDARD entry point must NOT auto-expand the eh* property form"
+    );
+}
+
 #[test]
 fn rewrite_is_a_no_op_for_non_topology_queries() {
     // The algebra-level entry point leaves a topology-free query structurally
