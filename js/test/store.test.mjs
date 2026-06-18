@@ -432,3 +432,95 @@ test('engine errors surface as JS exceptions', async () => {
   assert.throws(() => store.queryBindings('SELECT ?s WHERE { broken'), /error|expected/i);
   assert.throws(() => store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'), /SELECT/);
 });
+
+// [OPUS-4.8] sq-1gkw: CONSTRUCT/DESCRIBE through queryQuads() / queryQuadsString() /
+// queryQuadsStream(), parsed back to RDF/JS quads.
+test('queryQuads() returns CONSTRUCT result as RDF/JS quads', async () => {
+  const store = await load();
+  const quads = store.queryQuads(
+    'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }',
+  );
+  // Three name triples (alice, bob, _:org) -> three constructed triples.
+  assert.equal(quads.length, 3);
+  const label = quads.find((q) => q.subject.value === 'http://ex/alice');
+  assert.ok(label, 'alice was constructed');
+  assert.equal(label.predicate.value, 'http://ex/label');
+  assert.equal(label.object.termType, 'Literal');
+  assert.equal(label.object.value, 'Alice');
+  assert.equal(label.graph.termType, 'DefaultGraph');
+  // The language tag survives the N-Triples round-trip.
+  const bob = quads.find((q) => q.subject.value === 'http://ex/bob');
+  assert.equal(bob.object.language, 'en');
+  // A blank-node subject is preserved (label is engine-assigned but present).
+  const org = quads.find((q) => q.object.value === 'ACME');
+  assert.equal(org.subject.termType, 'BlankNode');
+});
+
+test('queryQuads() returns DESCRIBE concise bounded description', async () => {
+  const store = await load();
+  const quads = store.queryQuads('DESCRIBE <http://ex/bob>');
+  // CBD of ex:bob = its outgoing triples (name + age); nothing inbound.
+  assert.ok(quads.every((q) => q.subject.value === 'http://ex/bob'));
+  assert.ok(quads.some((q) => q.predicate.value === 'http://ex/name' && q.object.value === 'Bob'));
+  const age = quads.find((q) => q.predicate.value === 'http://ex/age');
+  assert.equal(age.object.termType, 'Literal');
+  assert.equal(age.object.datatype.value, `${XSD}integer`);
+  assert.equal(age.object.value, '25');
+});
+
+test('queryQuadsString() returns the raw N-Triples document', async () => {
+  const store = await load();
+  const nt = store.queryQuadsString(
+    'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }',
+  );
+  assert.match(nt, /<http:\/\/ex\/alice> <http:\/\/ex\/label> "Alice" \./);
+  // Parsing the string and the quads path agree.
+  const fromString = store.queryQuads(
+    'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }',
+  );
+  assert.equal(nt.trim().split('\n').filter((l) => l.trim()).length, fromString.length);
+});
+
+test('queryQuadsStream() yields the same quads as queryQuads()', async () => {
+  const store = await load();
+  const q = 'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }';
+  const whole = store.queryQuads(q);
+  const streamed = [...store.queryQuadsStream(q, 1)];
+  assert.equal(streamed.length, whole.length);
+  // Multiset-equal regardless of batch boundaries.
+  for (const w of whole) {
+    assert.ok(streamed.some((s) => s.equals(w)), `streamed result contains ${w.subject.value}`);
+  }
+});
+
+test('queryQuadsStream() frees the cursor when abandoned early', async () => {
+  const store = await load();
+  const q = 'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }';
+  const it = store.queryQuadsStream(q, 1);
+  const first = it.next();
+  assert.equal(first.done, false);
+  it.return(); // triggers the finally{} cursor.free()
+  // Store is still usable afterwards.
+  assert.equal(store.queryQuads(q).length, 3);
+});
+
+test('queryQuads() rejects a SELECT / ASK query', async () => {
+  const store = await load();
+  assert.throws(() => store.queryQuads('SELECT ?s WHERE { ?s ?p ?o }'), /CONSTRUCT.*DESCRIBE/i);
+});
+
+test('queryQuads() round-trips datatyped, escaped and IRI-object terms', async () => {
+  const store = await SparqStore.fromString(
+    `@prefix ex: <http://ex/> .
+     ex:s ex:quote "a \\"q\\" \\n b" ; ex:link ex:target ; ex:n "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .`,
+    'turtle',
+  );
+  const quads = store.queryQuads('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+  const quote = quads.find((q) => q.predicate.value === 'http://ex/quote');
+  assert.equal(quote.object.value, 'a "q" \n b'); // escapes decoded
+  const link = quads.find((q) => q.predicate.value === 'http://ex/link');
+  assert.equal(link.object.termType, 'NamedNode');
+  assert.equal(link.object.value, 'http://ex/target');
+  const num = quads.find((q) => q.predicate.value === 'http://ex/n');
+  assert.equal(num.object.datatype.value, `${XSD}decimal`);
+});

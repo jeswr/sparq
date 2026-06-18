@@ -4,7 +4,7 @@
  * token scanner to detect the query form (SELECT/ASK/…) without a parser.
  */
 import type * as RDF from '@rdfjs/types';
-import { BlankNode, DataFactory, Literal, NamedNode } from './terms.js';
+import { BlankNode, DataFactory, Literal, NamedNode, Quad } from './terms.js';
 
 // --- SPARQL 1.1 JSON results → RDF/JS terms -----------------------------------------------------
 
@@ -216,6 +216,121 @@ export function quadsToNQuads(quads: Iterable<RDF.Quad>): string {
     out += `${termToNT(quad.subject)} ${termToNT(quad.predicate)} ${termToNT(quad.object)}${graph} .\n`;
   }
   return out;
+}
+
+// --- N-Triples → RDF/JS quads -------------------------------------------------------------------
+
+/**
+ * Decodes the N-Triples / Turtle string-escape sequences the engine's
+ * serialiser can emit inside an `IRIREF` or a quoted literal: the single-char
+ * escapes (`\t \b \n \r \f \" \' \\`) and the numeric `\uXXXX` / `\UXXXXXXXX`
+ * forms. `pos` points just past the opening delimiter; returns the decoded
+ * value and the index of the closing `end` delimiter.
+ */
+function unescapeNT(input: string, pos: number, end: '"' | '>'): { value: string; next: number } {
+  let out = '';
+  let i = pos;
+  const n = input.length;
+  while (i < n) {
+    const c = input[i]!;
+    if (c === end) return { value: out, next: i };
+    if (c === '\\') {
+      const e = input[i + 1];
+      switch (e) {
+        case 't': out += '\t'; i += 2; break;
+        case 'b': out += '\b'; i += 2; break;
+        case 'n': out += '\n'; i += 2; break;
+        case 'r': out += '\r'; i += 2; break;
+        case 'f': out += '\f'; i += 2; break;
+        case '"': out += '"'; i += 2; break;
+        case "'": out += "'"; i += 2; break;
+        case '\\': out += '\\'; i += 2; break;
+        case 'u': {
+          out += String.fromCodePoint(parseInt(input.slice(i + 2, i + 6), 16));
+          i += 6;
+          break;
+        }
+        case 'U': {
+          out += String.fromCodePoint(parseInt(input.slice(i + 2, i + 10), 16));
+          i += 10;
+          break;
+        }
+        default:
+          throw new Error(`invalid N-Triples escape \\${e ?? ''}`);
+      }
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  throw new Error(`unterminated N-Triples ${end === '"' ? 'literal' : 'IRI'}`);
+}
+
+/** Reads one N-Triples term (IRI / blank node / literal) starting at `pos`. */
+function parseTerm(line: string, pos: number): { term: RDF.Term; next: number } {
+  const c = line[pos];
+  if (c === '<') {
+    const { value, next } = unescapeNT(line, pos + 1, '>');
+    return { term: new NamedNode(value), next: next + 1 };
+  }
+  if (c === '_' && line[pos + 1] === ':') {
+    let i = pos + 2;
+    // PN_CHARS-ish run: stop at whitespace or the line terminator dot.
+    while (i < line.length && !/[\s]/.test(line[i]!)) i++;
+    return { term: new BlankNode(line.slice(pos + 2, i)), next: i };
+  }
+  if (c === '"') {
+    const { value, next } = unescapeNT(line, pos + 1, '"');
+    let i = next + 1;
+    if (line[i] === '@') {
+      let j = i + 1;
+      while (j < line.length && /[A-Za-z0-9-]/.test(line[j]!)) j++;
+      const tag = line.slice(i + 1, j);
+      // RDF 1.2 base-direction: `@lang--dir`.
+      const dirMatch = /^(.*?)--(ltr|rtl)$/.exec(tag);
+      if (dirMatch) {
+        return { term: new Literal(value, { language: dirMatch[1]!, direction: dirMatch[2] as 'ltr' | 'rtl' }), next: j };
+      }
+      return { term: new Literal(value, tag), next: j };
+    }
+    if (line[i] === '^' && line[i + 1] === '^') {
+      const dt = parseTerm(line, i + 2);
+      return { term: new Literal(value, dt.term as RDF.NamedNode), next: dt.next };
+    }
+    return { term: new Literal(value), next: i };
+  }
+  throw new Error(`unexpected token ${JSON.stringify(c ?? '')} parsing N-Triples term`);
+}
+
+/**
+ * Parses an N-Triples document (the exact form the engine's CONSTRUCT /
+ * DESCRIBE serialiser emits — `<s> <p> <o> .`, one triple per line, absolute
+ * IRIs, canonical literal escapes) into RDF/JS {@link Quad}s in the default
+ * graph. Blank-node labels are preserved verbatim (the engine freshens
+ * template bnodes per solution, so labels are already globally unique). Blank
+ * lines are skipped; a malformed line throws.
+ */
+export function parseNTriples(nt: string): Quad[] {
+  const quads: Quad[] = [];
+  for (const raw of nt.split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    const s = parseTerm(line, 0);
+    let i = s.next;
+    while (line[i] === ' ' || line[i] === '\t') i++;
+    const p = parseTerm(line, i);
+    i = p.next;
+    while (line[i] === ' ' || line[i] === '\t') i++;
+    const o = parseTerm(line, i);
+    quads.push(
+      new Quad(
+        s.term as RDF.Quad_Subject,
+        p.term as RDF.Quad_Predicate,
+        o.term as RDF.Quad_Object,
+      ),
+    );
+  }
+  return quads;
 }
 
 // --- query-form detection ------------------------------------------------------------------------

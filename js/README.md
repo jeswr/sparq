@@ -14,6 +14,9 @@ browser. (The wasm bundle bytes are tracked per-commit on the perf dashboard,
   UNION, MINUS, BIND, VALUES, aggregates, ORDER BY, DISTINCT/LIMIT/OFFSET,
   sub-SELECT) and ASK — both evaluated natively (ASK early-exits at the first
   solution).
+- SPARQL 1.1 CONSTRUCT / DESCRIBE: `queryQuads()` returns the constructed
+  graph as RDF/JS `Quad`s, `queryQuadsString()` as raw N-Triples, and
+  `queryQuadsStream()` streams a large graph one quad at a time.
 - Named graphs (`options.dataset`): `GRAPH <iri>` / `GRAPH ?g` patterns,
   `FROM` / `FROM NAMED`, graph-aware `match()`.
 - SPARQL 1.1 Update over the full dataset (`INSERT/DELETE DATA` with `GRAPH`
@@ -98,6 +101,14 @@ for (const row of store.queryBindings(
 // ASK → boolean
 store.queryBoolean('PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }'); // true
 
+// CONSTRUCT / DESCRIBE → RDF/JS quads (default graph)
+for (const quad of store.queryQuads(
+  'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }',
+)) {
+  console.log(quad.subject.value, quad.predicate.value, quad.object.value);
+}
+store.queryQuadsString('DESCRIBE <http://ex/bob>'); // raw N-Triples string
+
 // RDF/JS-style triple lookup (generated SELECT under the hood)
 store.match(null, DF.namedNode('http://ex/name'), null); // → Quad[]
 store.countQuads(null, DF.namedNode('http://ex/name'));  // → 2 (no materialisation)
@@ -177,7 +188,7 @@ verified warm-up from `GET /dictionary/{dict-id}` for the *next* request.
   loaded with `options.dataset`; `size`/`heapBytes` always report the default
   graph (use `countQuads()` for dataset totals). `dataset` is not combinable
   with `compressed` yet.
-- CONSTRUCT / DESCRIBE / federated queries are not supported (tracked in beads — `bd list -l area:js`).
+- Federated (`SERVICE`) queries are not exposed at the JS wrapper layer (tracked in beads — `bd list -l area:js`).
 - `validate()` (SHACL) runs in-process and is best for small documents
   (~10–100 triples); for large data graphs validate server-side via the
   `sparq-server` HTTP `validate` path. It needs a `--features shacl` bundle

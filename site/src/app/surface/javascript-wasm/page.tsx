@@ -87,11 +87,15 @@ export default function JavascriptWasmSurfacePage() {
         <>
           <p>
             The <code className="font-mono">SparqStore</code> wrapper&apos;s{" "}
-            <code className="font-mono">query()</code> covers SELECT/ASK; reach for the
-            raw <code className="font-mono">queryQuads()</code> binding for
-            CONSTRUCT / DESCRIBE. The lean bundle omits REGEX/REPLACE and the wall-clock
-            query budget (see the SPARQL surface), trading a smaller download for those
-            native-only features.
+            <code className="font-mono">query()</code> covers SELECT/ASK; CONSTRUCT /
+            DESCRIBE are on the wrapper via{" "}
+            <code className="font-mono">queryQuads()</code> (RDF/JS quads),{" "}
+            <code className="font-mono">queryQuadsString()</code> (N-Triples), and{" "}
+            <code className="font-mono">queryQuadsStream()</code>; drop to the raw{" "}
+            <code className="font-mono">Store</code> only to skip term
+            materialisation. The lean bundle omits REGEX/REPLACE and the
+            wall-clock query budget (see the SPARQL surface), trading a smaller
+            download for those native-only features.
           </p>
         </>
       }
