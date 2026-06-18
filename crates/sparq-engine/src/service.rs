@@ -692,6 +692,18 @@ pub(crate) fn parse_srx(text: &str) -> Result<ServiceRelation, String> {
 // ---------------------------------------------------------------------------
 // SSRF egress policy (default-deny private / internal ranges) [OPUS-4.8]
 // ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] (sq-iu0c) Stable marker substring embedded in EVERY engine error string
+/// for a SERVICE egress refusal (a host blocked by the allowlist / default-deny SSRF
+/// policy). It survives the transport-error wrapping in `HttpTransport::fetch`, so a
+/// network-exposed host (e.g. `sparq-server`) can `contains()`-classify the refusal as a
+/// **policy** decision — an honest `403`-style status — rather than a server-fault `500`.
+/// This mirrors the existing `"query budget exceeded (timeout)"` → `503` marker pattern.
+///
+/// The marker is deliberately generic (it names no host) so it is safe to surface; the
+/// host detail still travels in the surrounding (server-log-only) error text.
+pub const SERVICE_EGRESS_REFUSED_MARKER: &str = "SERVICE egress refused";
+
 //
 // The `SERVICE` clause turns an attacker-controlled SPARQL string into an
 // outbound HTTP request from the engine host (threat-model B4 / T-SERVICE-SSRF,
@@ -977,7 +989,7 @@ impl ureq::Resolver for EgressFilterResolver {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
-                    "SERVICE egress refused: host {host:?} is not on the SERVICE allowlist \
+                    "{SERVICE_EGRESS_REFUSED_MARKER}: host {host:?} is not on the SERVICE allowlist \
                      (strict allowlist-only policy; add it via --service-allow / SPARQ_SERVICE_ALLOW \
                      on the server, or with_service_egress_policy in an embedder)"
                 ),
@@ -992,7 +1004,7 @@ impl ureq::Resolver for EgressFilterResolver {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
-                    "SERVICE egress refused: {netloc} resolves only to private/internal addresses \
+                    "{SERVICE_EGRESS_REFUSED_MARKER}: {netloc} resolves only to private/internal addresses \
                      (default-deny SSRF policy; allowlist the host via with_service_egress_allow)"
                 ),
             ));

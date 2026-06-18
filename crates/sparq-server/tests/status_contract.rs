@@ -463,3 +463,46 @@ async fn all_error_bodies_are_sanitized_json() {
         "error body must not echo the caller's input: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-iu0c) PERMANENT-but-distinct class: a blocked SERVICE egress is a 403
+// POLICY refusal, NOT the 500 a server-fault execution error gives. A retry classifier must
+// see a permanent 403 (ask the operator to allowlist the host), never a transient 5xx.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "service")]
+#[tokio::test]
+async fn blocked_service_egress_is_permanent_403() {
+    // Default config => empty egress allowlist + default-deny SSRF: a non-SILENT SERVICE to a
+    // loopback endpoint is refused before any network call. A short query timeout bounds any
+    // regression that would dial. (127.0.0.1 is a private address, so the default-deny SSRF
+    // branch refuses it even without the strict allowlist-only `serve()` wiring.)
+    let config = ServerConfig {
+        query_timeout: Some(Duration::from_secs(2)),
+        ..ServerConfig::default()
+    };
+    let base = spawn_with(DATA, config).await;
+    let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . \
+             SERVICE <http://127.0.0.1:9/> { ?s ex:name ?name } }";
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", q)])
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    assert_eq!(status, 403, "a blocked SERVICE egress is a 403 policy refusal");
+    assert!(!is_transient(status), "403 must classify as PERMANENT (allowlist the host)");
+    let body = resp.text().await.unwrap();
+    assert_structured_error(&body);
+    // The refused host detail is sanitized out of the body (classify on status, not text).
+    assert!(
+        !body.contains("127.0.0.1"),
+        "the refused host must not reach the client body: {body}"
+    );
+    // The stable generic class names the egress allowlist so a consumer can act.
+    assert!(
+        body.to_lowercase().contains("egress allowlist"),
+        "403 body carries the documented generic egress-refusal sentinel: {body}"
+    );
+}
