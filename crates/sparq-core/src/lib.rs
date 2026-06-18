@@ -636,11 +636,13 @@ impl Graph {
     /// Loads triples from an RDF document (default graph only for M1; named
     /// graphs from TriG/N-Quads are folded into the default graph). Returns the
     /// built graph. `format`: "turtle" | "ntriples" | "nquads" | "trig" | "jsonld"
-    /// (also "json-ld" / "application/ld+json"). JSON-LD is recognised only when the
-    /// crate is built with the OPT-IN `jsonld` feature (it links `oxjsonld`); without the
-    /// feature a "jsonld" format falls through to the Turtle arm. JSON-LD `@graph` named
-    /// graphs are folded into the default graph here; use [`load_dataset`](Self::load_dataset)
-    /// to preserve them.
+    /// (plus the usual aliases — "ttl"/"text/turtle", "nt", "nq", "json-ld" /
+    /// "application/ld+json", …). JSON-LD is recognised only when the crate is built with
+    /// the OPT-IN `jsonld` feature (it links `oxjsonld`). [OPUS-4.8] (sq-m2pc) An
+    /// UNRECOGNISED `format` is now an `Err` — it is NOT silently parsed as Turtle (so a
+    /// "jsonld" string in a build without the feature errors rather than mis-parsing).
+    /// JSON-LD `@graph` named graphs are folded into the default graph here; use
+    /// [`load_dataset`](Self::load_dataset) to preserve them.
     pub fn load_str(text: &str, format: &str) -> Result<Graph, String> {
         let (dict, triples) = Self::parse_to_triples(text, format)?;
         Ok(Self::from_parts(dict, triples))
@@ -665,7 +667,10 @@ impl Graph {
         }
 
         match format {
-            "ntriples" | "n-triples" => {
+            // [OPUS-4.8] (sq-m2pc) `nt`/`application/n-triples` are accepted aliases (the
+            // extension + media type) — previously they only "worked" by falling through the
+            // catch-all and parsing N-Triples AS Turtle; now they take the fast N-Triples path.
+            "ntriples" | "n-triples" | "nt" | "application/n-triples" => {
                 // N-Triples is one statement per line, so the input can be split at
                 // newline boundaries and parsed + interned in parallel (each thread
                 // builds a partial dictionary, then the partials are merged).
@@ -680,7 +685,7 @@ impl Graph {
                     return Ok((d, t));
                 }
             }
-            "nquads" | "n-quads" => {
+            "nquads" | "n-quads" | "nq" | "application/n-quads" => {
                 for q in NQuadsParser::new().for_slice(bytes) {
                     let q = q.map_err(|e| e.to_string())?;
                     push_triple!(&q.subject, &q.predicate, &q.object);
@@ -703,7 +708,10 @@ impl Graph {
                     push_triple!(&q.subject, &q.predicate, &q.object);
                 }
             }
-            _ => {
+            // [OPUS-4.8] (sq-m2pc) Turtle is gated on its explicit alias set — NOT a
+            // catch-all — so a typo'd or unsupported `format` errors below instead of
+            // silently parsing as Turtle and returning `Ok`.
+            _ if is_turtle_format(format) => {
                 // Turtle is not line-oriented, but it splits at top-level statement
                 // terminators (with the @prefix preamble shared into each chunk), parsed in
                 // parallel with a serial fallback on any mis-split — see parse_turtle_parallel.
@@ -719,6 +727,7 @@ impl Graph {
                     }
                 }
             }
+            _ => return Err(unknown_format_err(format)),
         }
 
         Ok((dict, triples))
@@ -757,7 +766,8 @@ impl Graph {
             }};
         }
         match format {
-            "ntriples" | "n-triples" | "nquads" | "n-quads" => {
+            "ntriples" | "n-triples" | "nt" | "application/n-triples" | "nquads" | "n-quads"
+            | "nq" | "application/n-quads" => {
                 return Self::parse_to_triples(text, format);
             }
             "trig" | "application/trig" => {
@@ -782,7 +792,9 @@ impl Graph {
                     push_triple!(&q.subject, &q.predicate, &q.object);
                 }
             }
-            _ => {
+            // [OPUS-4.8] (sq-m2pc) Turtle is gated on its explicit alias set, mirroring
+            // `parse_to_triples`; an unknown `format` errors instead of parsing as Turtle.
+            _ if is_turtle_format(format) => {
                 let parser = TurtleParser::new()
                     .with_base_iri(base)
                     .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
@@ -791,6 +803,7 @@ impl Graph {
                     push_triple!(&t.subject, &t.predicate, &t.object);
                 }
             }
+            _ => return Err(unknown_format_err(format)),
         }
 
         Ok((dict, triples))
@@ -3747,6 +3760,31 @@ fn is_jsonld_format(format: &str) -> bool {
     matches!(format, "jsonld" | "json-ld" | "application/ld+json")
 }
 
+/// [OPUS-4.8] (sq-m2pc) Whether `format` names the Turtle serialization. The single
+/// authority for the Turtle alias set, kept in lock-step with the CLI's `is_known_format`.
+/// `parse_to_triples`/`parse_to_triples_with_base` previously fell back to Turtle for ANY
+/// unrecognised string (so a typo'd or unsupported format silently parsed as Turtle and
+/// returned `Ok`); they now gate on this set and reject the unknown rest.
+fn is_turtle_format(format: &str) -> bool {
+    matches!(
+        format,
+        "turtle" | "ttl" | "text/turtle" | "application/turtle"
+    )
+}
+
+/// [OPUS-4.8] (sq-m2pc) The error returned by `parse_to_triples`/`…_with_base` for a
+/// format string they do not recognise — the replacement for the old silent
+/// "unknown ⇒ Turtle" catch-all. The `jsonld` entry only appears when that opt-in
+/// feature is compiled in (the only build in which a "jsonld"/"json-ld" string parses).
+fn unknown_format_err(format: &str) -> String {
+    let known = if cfg!(feature = "jsonld") {
+        "turtle | ntriples | nquads | trig | jsonld"
+    } else {
+        "turtle | ntriples | nquads | trig"
+    };
+    format!("unknown RDF format {format:?} (known: {known})")
+}
+
 /// Splits a byte buffer into ~`target` ranges, each ending on a newline so no
 /// (single-line) N-Triples statement is split across a boundary.
 #[cfg(feature = "parallel")]
@@ -6263,6 +6301,54 @@ mod tests {
             }
         }
         differential(&sparse, 24);
+    }
+
+    /// [OPUS-4.8] (sq-m2pc) `parse_to_triples` / `parse_to_triples_with_base` (and the
+    /// `load_str` wrappers over them) must REJECT a format string they do not recognise,
+    /// instead of the old catch-all that silently parsed everything-unknown as Turtle and
+    /// returned `Ok`. The Turtle alias set (`turtle`/`ttl`/`text/turtle`/`application/turtle`)
+    /// keeps working, as do the line-based + trig formats; only the genuinely-unknown rest
+    /// errors.
+    #[test]
+    fn parse_to_triples_rejects_unknown_format() {
+        // Valid Turtle body — would parse cleanly IF routed to the Turtle arm, so a passing
+        // assertion below proves the format string (not the document) is what got rejected.
+        let ttl = "<http://ex/s> <http://ex/p> <http://ex/o> .";
+
+        // Every accepted Turtle alias still parses to the one triple.
+        for fmt in ["turtle", "ttl", "text/turtle", "application/turtle"] {
+            let g = Graph::load_str(ttl, fmt)
+                .unwrap_or_else(|e| panic!("alias {fmt:?} must parse as Turtle, got {e}"));
+            assert_eq!(g.len(), 1, "alias {fmt:?}");
+            // and the with_base entry agrees.
+            let gb = Graph::load_str_with_base(ttl, fmt, "http://base/")
+                .unwrap_or_else(|e| panic!("alias {fmt:?} (base) must parse, got {e}"));
+            assert_eq!(gb.len(), 1, "alias {fmt:?} (base)");
+        }
+
+        // The line-based / trig formats (and their `nt`/`nq` extension aliases) are
+        // unaffected — they route to their own parser, not the catch-all.
+        assert!(Graph::load_str(ttl, "ntriples").is_ok());
+        assert!(Graph::load_str(ttl, "nt").is_ok(), "nt is an N-Triples alias");
+        assert!(Graph::parse_to_triples(ttl, "application/n-triples").is_ok());
+
+        // Unknown / typo'd / unsupported strings now ERROR instead of silently parsing as
+        // Turtle. Empty string is included — it must not be a Turtle alias either.
+        for bogus in ["bogusfmt", "turtl", "Turtle", "rdfxml", "n3", ""] {
+            // (`Result::Ok` carries `(Dict, Vec<…>)`, which is not `Debug`, so `expect_err`
+            // cannot be used — match on the error directly.)
+            let e = match Graph::parse_to_triples(ttl, bogus) {
+                Err(e) => e,
+                Ok(_) => panic!("unknown format {bogus:?} must error, not fall back to Turtle"),
+            };
+            assert!(e.contains(bogus), "error should name the bad format: {e}");
+            assert!(
+                Graph::parse_to_triples_with_base(ttl, bogus, "http://base/").is_err(),
+                "with_base path must also reject {bogus:?}"
+            );
+            // The public `load_str` wrappers propagate the same error.
+            assert!(Graph::load_str(ttl, bogus).is_err(), "load_str must reject {bogus:?}");
+        }
     }
 
     /// [OPUS-4.8] (sq-ev37) The public `Graph::load_dataset("…","trig")` entry point (which under
