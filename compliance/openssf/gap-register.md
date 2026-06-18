@@ -29,15 +29,18 @@ remediation lives in the supply-chain / slsa frameworks.
 code-scanning alerts**. `scorecard.yml` previously uploaded its SARIF to the GitHub Security
 tab, which surfaced five Scorecard *scores* as "alerts": `BranchProtection` (high),
 `CodeReview` (high), `Maintained` (high), `VulnerabilitiesID` (high), `CIIBestPractices`
-(low). **None is a code vulnerability** — they are posture scores, and four are inherent to
-this repo's operating model:
+(low). **None is a code vulnerability** — they are posture scores, and the inherent-by-design
+ones (`CodeReview`, `BranchProtection`) cannot be raised by a code change in this repo's
+operating model. The residual-alert triage below also covers `Fuzzing`, named alongside
+`Vulnerabilities` / `Maintained` in the residual-triage bead **sq-cgzx**:
 
 | Scorecard check | Why it scores low (honest) | Disposition |
 |---|---|---|
 | `CodeReviewID` | Scorecard infers review from merged-PR history and discounts self-approval; this is a solo-maintained, agent-driven repo (Copilot + CODEOWNERS ruleset, not a 2-human-reviewer flow). | Inherent-by-design (GX-OSSF-3). Dismissed from code-scanning; not a fixable code issue. |
 | `BranchProtectionID` | The live ruleset (`docs/branch-protection.md`) is ruleset-based, not classic branch-protection; Scorecard scores classic settings (stale-review-dismissal, required approvers) the model intentionally does not use. | Inherent-by-design (GX-OSSF-3). Dismissed. |
-| `MaintainedID` | Scored 0 only because the repo is **<90 days old**; mechanical, self-resolves with age. | Time-based, not fixable now. Dismissed. |
-| `VulnerabilitiesID` | Re-surfaces the **`unmaintained`** RustSec advisory already triaged-with-a-bead in `deny.toml` (RUSTSEC-2025-0134 `rustls-pemfile`/sq-g2xs) + one transitive JS devDep advisory (GHSA-qx2v-qp2m-jg93, PostCSS, site tooling). (RUSTSEC-2024-0436 `paste`/sq-l8bv was dropped: the GPU stack no longer pulls `paste`, so it left the tree and the ignore was removed.) **No fixable security advisory** — the cargo-deny advisory gate (GX-1, #210) is un-degraded and would FAIL on a real one. | Already-accepted informational; no new fix. Dismissed. |
+| `MaintainedID` | Scored low only because the repo is **<90 days old** (Scorecard's `Maintained` check counts recent commits/issue activity over the trailing 90 days); mechanical, self-resolves with age and ongoing commit cadence. | Time-based, not fixable now. Dismissed; residual-triage bead sq-cgzx. |
+| `VulnerabilitiesID` | Re-surfaces the **`unmaintained`** RustSec advisory already triaged-with-a-bead in `deny.toml` (RUSTSEC-2025-0134 `rustls-pemfile`/sq-g2xs) + one transitive JS devDep advisory (GHSA-qx2v-qp2m-jg93, PostCSS, site tooling). (RUSTSEC-2024-0436 `paste`/sq-l8bv was dropped: the GPU stack no longer pulls `paste`, so it left the tree and the ignore was removed.) **No fixable security advisory** — the cargo-deny advisory gate (GX-1, #210) is un-degraded and would FAIL on a real one. | Already-accepted informational; no new fix. Dismissed; residual-triage bead sq-cgzx. |
+| `FuzzingID` | **Now satisfied — no longer the "OSS-Fuzz = future" informational gap the bead anticipated.** Coverage-guided fuzzing is wired: [`fuzz.yml`](../../.github/workflows/fuzz.yml) runs `cargo-fuzz` (PR smoke + daily heavy tier) over the RDF/SPARQL parsers and the mmap store loader, plus the SHACL differential lane [`shacl-diff-fuzz.yml`](../../.github/workflows/shacl-diff-fuzz.yml) (bead **sq-ovnf**, closed). Scorecard's `Fuzzing` check detects the `cargo-fuzz` integration and scores it. OSS-Fuzz onboarding remains an optional future maturity nudge, not a posture failure. | Satisfied by `fuzz.yml`/`shacl-diff-fuzz.yml` (sq-ovnf). No fix needed; residual-triage bead sq-cgzx. |
 | `CIIBestPracticesID` | The OpenSSF Best-Practices badge is not filed (GX-4) — a human-owned external step. | Known gap GX-4 (sq-toze.5). Dismissed; tracked. |
 
 **Decision (option a):** keep Scorecard as the **public score + badge** (`publish_results:
@@ -45,8 +48,10 @@ true` → OpenSSF dashboard) and **stop uploading its SARIF to code-scanning** (
 `upload-sarif` step + the now-unneeded `security-events: write` scope). The full posture
 detail remains on the public dashboard and as the build artifact; it no longer pollutes the
 Security tab. The five pre-existing alerts were dismissed (`won't fix`) with the per-row
-reasons above. This loses no certification evidence — the score/badge is the OpenSSF
-artifact, the Security tab was redundant noise.
+reasons above (and the residual `Vulnerabilities` / `Maintained` / `Fuzzing` triage of
+**sq-cgzx** is recorded in the same table — `Fuzzing` is now satisfied, the other two are
+informational/time-based). This loses no certification evidence — the score/badge is the
+OpenSSF artifact, the Security tab was redundant noise.
 
 ## Closed gaps (cite as evidence, do not re-open)
 
