@@ -52,6 +52,24 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # [OPUS-4.8] sq-sski: do NOT let Dependabot version-bump dtolnay/rust-toolchain.
+      # Its release tags are *Rust toolchain versions*, not action releases — the
+      # trailing `# 1.88` comment on the MSRV-check pin in .github/workflows/ci.yml is
+      # the declared workspace floor (root Cargo.toml `[workspace.package]
+      # rust-version = "1.88"`, driven by geo@0.33.1 + the released ox* parser stack).
+      # Bumping that pin to e.g. 1.100 would raise the *tested* floor above the
+      # *declared* floor, so the MSRV job would stop verifying the declared floor —
+      # defeating its purpose. This pin must move only in lockstep with the root
+      # rust-version, by hand. Dependabot grouped PR #26 (actions-minor-patch) kept
+      # proposing 1.88->1.100; ignore minor/major version-updates here so it stops
+      # re-opening. The action stays SHA-pinned and tracked: security-updates are NOT
+      # ignored, and every other action in this ecosystem still gets its grouped
+      # minor/patch bumps.
+      - dependency-name: "dtolnay/rust-toolchain"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
 
   # ---- npm (the @jeswr/sparq wasm package) ----
   - package-ecosystem: npm
