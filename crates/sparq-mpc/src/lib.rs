@@ -181,6 +181,11 @@ pub mod holder;
 pub mod join;
 pub mod metrics;
 pub mod partial;
+// [OPUS-4.8] sq-dl81: the domain-separated, collision-resistant Term->Fp join-key
+// encoder + the injectivity (no-false-match) contract the hidden-value join rests
+// on. Turns "the holder's untested encoding responsibility" into a documented hash
+// with a stated birthday bound plus a fail-closed collision-detection path.
+pub mod term_encode;
 // [OPUS-4.8] sq-6y92: the end-to-end federated MPC pipeline DRIVER — the glue
 // that composes holder → share → join → secure-threshold → reconstruct →
 // ProofStatement into one worked four-flatmates federated response (architecture
@@ -312,6 +317,8 @@ pub use oblivious::{
     SortByResult, SortCost, SortWithKeysResult, SortingNetwork, Switch, WaksmanNetwork,
 };
 pub use partial::{HolderId, MpcError, PartialResult};
+// [OPUS-4.8] sq-dl81: the collision-resistant Term->Fp join-key encoder surface.
+pub use term_encode::{encode_term, Collision, EncodeError, KeyEncoder, DOMAIN_TAG};
 // [OPUS-4.8] sq-6y92: the federated-pipeline driver surface (architecture §4.3).
 pub use pipeline::{
     federation_holder_id, run_federated, FederatedQuery, FederatedResponse, Flatmate,

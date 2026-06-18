@@ -3426,6 +3426,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.2",
  "oxrdf 0.3.3",
+ "sha2 0.11.0",
  "sparq-core",
  "sparq-engine",
  "subtle",

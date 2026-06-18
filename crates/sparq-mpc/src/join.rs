@@ -322,9 +322,14 @@ fn canonicalize_rows(rows: &mut [Vec<Option<Term>>]) {
 /// on a match.
 ///
 /// The key is `Fp` because the secret-shared equality primitive operates over
-/// the field; the holder is responsible for encoding its private key term into
-/// `Fp` (in production via a collision-resistant hash whose pre-image stays
-/// secret-shared and is proven in-circuit — out of scope here; see doc).
+/// the field; the holder encodes its private key term into `Fp` via the
+/// documented, collision-resistant [`crate::term_encode::encode_term`] (a
+/// domain-separated SHA-512 folded into the field, with a stated birthday bound),
+/// or — to GUARANTEE injectivity for a concrete key set rather than rely on the
+/// bound — through [`crate::term_encode::KeyEncoder`], which fails closed on a
+/// false-match collision before any key is shared. The in-circuit proof that the
+/// opened key equals `encode_term(term)` for the holder's real term stays the M4
+/// collaborative-proof job (the encoder is its on-ramp).
 #[derive(Debug, Clone)]
 pub struct HiddenKeyedRows {
     /// The holder that owns these rows.
@@ -364,11 +369,16 @@ pub struct HiddenKeyedRows {
 ///   circuit-PSI uses oblivious hashing / cuckoo bins to cut this to ~linear;
 ///   that optimisation (Q3, RQ2b — BGP-join obliviousness cost) is NOT done. The
 ///   all-pairs version is correct but not the SOTA cost profile.
-/// - The field encoding of the key is the holder's responsibility; a production
-///   build needs a collision-resistant hash whose correctness is proven inside
-///   the collaborative proof (M4). Here equality in `Fp` stands in for term
-///   equality and is exact only if the encoding is injective on the inputs (the
-///   differential test guarantees this by construction).
+/// - The field encoding of the key now has a documented, collision-resistant
+///   construction — [`crate::term_encode::encode_term`] (domain-separated SHA-512
+///   folded into the field) with a stated birthday bound, plus
+///   [`crate::term_encode::KeyEncoder`] for a fail-closed exact-injectivity check
+///   over a concrete key set (sq-dl81). Equality in `Fp` is then a SOUND stand-in
+///   for term equality except on a birthday collision (`≈ q²/2^62`, negligible in
+///   the ≤10⁴-row regime), which `KeyEncoder` detects. What is STILL deferred to
+///   the collaborative proof (M4) is the in-circuit guarantee that the opened key
+///   actually equals `encode_term` of the holder's real term — the encoding-
+///   *correctness* proof, for which this encoder is the on-ramp.
 /// - Malicious security (a party feeding inconsistent shares) is NOT provided —
 ///   semi-honest only, exactly as [`ShamirBackend`] states.
 ///
