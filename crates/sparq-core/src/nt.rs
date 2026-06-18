@@ -35,7 +35,7 @@ const MAX_TRIPLE_TERM_DEPTH: usize = 128;
 /// `oxrdf::Term` stored in the parent graph's `named` vec. `Ord`/`Hash` give a deterministic
 /// per-graph grouping independent of parse order.
 #[cfg(feature = "parallel")]
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GraphKey {
     Iri(String),
     Blank(String),
@@ -700,6 +700,82 @@ mod tests {
         assert!(
             e.contains("nested more than") && e.contains("levels deep"),
             "must be the depth-limit error, got: {e}"
+        );
+    }
+
+    // [OPUS-4.8] (sq-cpm) The N-Quads 4th field is an OPTIONAL `graphLabel`, and the RDF 1.2
+    // N-Quads grammar restricts it to `IRIREF | BLANK_NODE_LABEL` (prod. `graphLabel`) — a
+    // literal or a triple term in graph position is a syntax error, not a fourth quad component.
+    // `parse_quads_chunk` resolves the graph bucket via `graph_key` (IRI/blank only) and
+    // `span_term` (object-only triple-term rule), so these cases must be rejected; an absent 4th
+    // field routes to the default (`None`) graph.
+    // `parse_quads_chunk` returns `Dict` (no `Debug`/`PartialEq`), so these helpers pull just the
+    // graph-key column and the per-graph triple counts out of the bucket vec for assertions.
+    #[cfg(feature = "parallel")]
+    fn quad_graph_keys(line: &[u8]) -> Result<Vec<(Option<GraphKey>, usize)>, String> {
+        parse_quads_chunk(line).map(|buckets| {
+            buckets.into_iter().map(|(g, _dict, triples)| (g, triples.len())).collect()
+        })
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn nquads_graph_label_accepts_iri_and_blank_only() {
+        // IRI graph label: routes the triple into a named-graph bucket keyed by that IRI.
+        let iri_g = b"<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n";
+        assert_eq!(
+            quad_graph_keys(iri_g).expect("IRI graph label must parse"),
+            vec![(Some(GraphKey::Iri("http://ex/g".to_owned())), 1)],
+            "the triple lands in the IRI-keyed graph"
+        );
+
+        // Blank-node graph label.
+        let blank_g = b"<http://ex/s> <http://ex/p> <http://ex/o> _:g0 .\n";
+        assert_eq!(
+            quad_graph_keys(blank_g).expect("blank-node graph label must parse"),
+            vec![(Some(GraphKey::Blank("g0".to_owned())), 1)],
+            "blank-node graph label key"
+        );
+
+        // No 4th field: the triple is in the default graph (`None`).
+        let default_g = b"<http://ex/s> <http://ex/p> <http://ex/o> .\n";
+        assert_eq!(
+            quad_graph_keys(default_g).expect("triple with no graph label must parse"),
+            vec![(None, 1)],
+            "absent graph label is the default graph"
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn nquads_graph_label_rejects_literal() {
+        // A literal in the 4th position is not a valid `graphLabel`.
+        let lit_g = b"<http://ex/s> <http://ex/p> <http://ex/o> \"g\" .\n";
+        let e = quad_graph_keys(lit_g).expect_err("a literal graph label must be rejected");
+        assert!(
+            e.contains("graph name must be an IRI or blank node"),
+            "message must explain the IRI/blank-only rule, got: {e}"
+        );
+
+        // A typed literal likewise.
+        let typed_g = b"<http://ex/s> <http://ex/p> <http://ex/o> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n";
+        assert!(
+            quad_graph_keys(typed_g).is_err(),
+            "a typed-literal graph label must be rejected"
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn nquads_graph_label_rejects_triple_term() {
+        // A triple term `<<( … )>>` is OBJECT-ONLY; it is not a valid `graphLabel`. The span walk
+        // (`span_term`) reaches the `<<(` opener in graph position and rejects it with the
+        // position-aware message.
+        let tt_g = b"<http://ex/s> <http://ex/p> <http://ex/o> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> .\n";
+        let e = quad_graph_keys(tt_g).expect_err("a triple-term graph label must be rejected");
+        assert!(
+            e.contains("only valid in OBJECT position"),
+            "message must explain the object-only rule, got: {e}"
         );
     }
 }
