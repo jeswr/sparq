@@ -96,6 +96,15 @@ table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem
 .badge-extensional { background: var(--badge-extensional-bg); color: var(--badge-extensional-fg); }
 .badge-mode { background: var(--badge-mode-bg); color: var(--badge-mode-fg); }
 
+/* [OPUS-4.8] sq-aas7: FEATURED-tier provenance badge. Shows whether the featured numbers came from
+   the EC2/nightly series (preferred when present) or the per-commit gh-runner band. Reuses the
+   .pill base; nightly is the "best/promoted" colour, per-commit a muted neutral. */
+.featured-tier { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 14px; }
+.tier-badge { min-width: 0; cursor: help; }
+.tier-nightly { background: var(--best-bg); color: var(--best-fg); }
+.tier-per-commit { background: var(--na); color: var(--muted); }
+.featured-tier-note { font-size: 0.82rem; color: var(--muted); }
+
 .chart-group { margin-bottom: 26px; }
 .chart-group h3 {
   margin: 0 0 12px; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em;

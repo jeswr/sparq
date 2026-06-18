@@ -214,6 +214,55 @@ eq(lubmComp && lubmComp.oxigraph, 200, 'competitor matched by canonical stem (na
 ok(watdivComp && watdivComp.oxigraph === undefined, 'unmatched competitor cell stays absent (renders —)');
 
 // ============================================================================================
+// [OPUS-4.8] sq-aas7 — nightly-priority featured tier: pickFeaturedSeries / tierDescriptor and the
+// buildFeatured `tier` carry. The featured block PREFERS the EC2/nightly series when present, falls
+// back to the per-commit gh-runner series otherwise (graceful when EC2 absent).
+// ============================================================================================
+ok(typeof D.pickFeaturedSeries === 'function', 'dashboard.js exports pickFeaturedSeries');
+ok(typeof D.tierDescriptor === 'function', 'dashboard.js exports tierDescriptor');
+eq(D.SERIES, 'sparq engine', 'SERIES constant is the per-commit series name');
+eq(D.EC2_SERIES, 'sparq engine (EC2)', 'EC2_SERIES constant matches bench-ec2.yml');
+
+// EC2 present + non-empty -> nightly tier chosen, with the EC2 entries.
+const ec2Entry = [{ commit: { id: 'ec2', message: 'n', url: '#' }, date: 1,
+  benches: [{ name: 'lubm_q06_count_us', value: 80, unit: 'µs' }] }];
+const commitEntry = [{ commit: { id: 'cc', message: 'c', url: '#' }, date: 2,
+  benches: [{ name: 'lubm_q06_count_us', value: 99, unit: 'µs' }] }];
+const pickedNightly = D.pickFeaturedSeries({ entries: { 'sparq engine': commitEntry, 'sparq engine (EC2)': ec2Entry } });
+eq(pickedNightly.tier, 'nightly', 'pickFeaturedSeries prefers EC2/nightly when present');
+eq(pickedNightly.seriesName, 'sparq engine (EC2)', 'nightly pick reports the EC2 series name');
+ok(pickedNightly.hasEc2 === true, 'nightly pick flags hasEc2');
+eq(pickedNightly.entries, ec2Entry, 'nightly pick returns the EC2 entries');
+
+// EC2 absent -> graceful fall-back to per-commit.
+const pickedCommit = D.pickFeaturedSeries({ entries: { 'sparq engine': commitEntry } });
+eq(pickedCommit.tier, 'per-commit', 'pickFeaturedSeries falls back to per-commit when EC2 absent');
+ok(pickedCommit.hasEc2 === false, 'per-commit pick flags hasEc2 false (EC2 absent -> graceful)');
+eq(pickedCommit.entries, commitEntry, 'per-commit pick returns the per-commit entries');
+// EC2 present but EMPTY -> still per-commit (an empty nightly series must not win).
+const pickedEmptyEc2 = D.pickFeaturedSeries({ entries: { 'sparq engine': commitEntry, 'sparq engine (EC2)': [] } });
+eq(pickedEmptyEc2.tier, 'per-commit', 'an EMPTY EC2 series does not override per-commit');
+// missing data object -> per-commit + empty (no throw).
+let pickThrew = false; let pickedNone = null;
+try { pickedNone = D.pickFeaturedSeries(undefined); } catch (e) { pickThrew = true; }
+ok(!pickThrew, 'pickFeaturedSeries(undefined) does not throw');
+ok(pickedNone && pickedNone.tier === 'per-commit' && pickedNone.entries.length === 0,
+   'pickFeaturedSeries(undefined) -> per-commit, empty entries');
+
+// tierDescriptor: distinct kinds + non-empty text/title.
+const tdN = D.tierDescriptor('nightly'); const tdC = D.tierDescriptor('per-commit');
+eq(tdN.kind, 'tier-nightly', 'tierDescriptor(nightly) kind');
+eq(tdC.kind, 'tier-per-commit', 'tierDescriptor(per-commit) kind');
+ok(tdN.text && tdN.title && tdC.text && tdC.title, 'tier descriptors carry text + title');
+
+// buildFeatured carries the chosen tier through to the view (and defaults to per-commit).
+const featNightly = D.buildFeatured(ec2Entry, null, pickedNightly);
+eq(featNightly.tier, 'nightly', 'buildFeatured carries the nightly tier from opts');
+ok(featNightly.hasEc2 === true, 'buildFeatured carries hasEc2');
+const featDefault = D.buildFeatured(commitEntry, null);
+eq(featDefault.tier, 'per-commit', 'buildFeatured defaults to per-commit when no opts (legacy callers)');
+
+// ============================================================================================
 // [OPUS-4.8] sq-viby — scaling comparison: size/depth axis derived from the metric NAME.
 // ============================================================================================
 ok(typeof D.sizeAxisOf === 'function', 'dashboard.js exports sizeAxisOf');
@@ -613,8 +662,18 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
   ok(vecSec && vecSec.children.some(function (c) {
     return (c.attributes['class'] || '').indexOf('family-empty') !== -1;
   }), 'DOM: an empty family (Vector/ANN) renders a "not yet reported" placeholder (honest coverage)');
-  // featured host should contain at least one suite section with a table.
-  const featuredSection = hosts.featured.children[0];
+  // [OPUS-4.8] sq-aas7: the featured host opens with a TIER badge row (the shim has no fetch, so the
+  // EC2 series is absent -> the per-commit tier badge), then the suite sections.
+  const tierRow = hosts.featured.children.filter(function (c) {
+    return (c.attributes['class'] || '').indexOf('featured-tier') === 0;
+  })[0];
+  ok(tierRow, 'DOM: featured host renders a tier badge row (sq-aas7)');
+  const tierPill = tierRow && tierRow.querySelectorAll('span.tier-badge')[0];
+  ok(tierPill && classList(tierPill).indexOf('tier-per-commit') !== -1,
+     'DOM: tier badge is per-commit (EC2 series absent in the shim -> graceful fall-back)');
+  ok(tierPill && classList(tierPill).indexOf('pill') !== -1, 'DOM: tier badge reuses the .pill base class');
+  // featured host should contain at least one suite section with a table (after the tier row).
+  const featuredSection = hosts.featured.children.filter(function (c) { return c.tagName === 'section'; })[0];
   ok(featuredSection && featuredSection.tagName === 'section', 'DOM: featured host holds suite sections');
   // #1 — the featured table's first column header is "Metric" (not "Query"): the cell may hold
   // non-query metrics. Walk section -> table -> thead -> tr -> first th.
