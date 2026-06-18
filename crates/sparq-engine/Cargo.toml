@@ -55,7 +55,7 @@ zk = []
 # additionally `cfg(not(wasm32))`-gated and never enter the wasm bundle even if the
 # feature were turned on for a wasm target. When off, zero federation/HTTP code
 # compiles. [OPUS-4.8]
-service = ["dep:serde_json", "dep:ureq"]
+service = ["dep:serde_json", "dep:ureq", "dep:quick-xml"]
 # [OPUS-4.8] (sq-678h) RDF serializer matrix: Turtle / TriG / N-Quads writers
 # (`serialize` module). The base build can already *parse* every format but only
 # *write* N-Triples (`triples_to_ntriples`, always on). This feature adds the missing
@@ -101,6 +101,13 @@ sha2 = { version = "0.11", optional = true }
 # already in the workspace tree (sparq-conformance, sparq-server) and is
 # platform-independent, but it is only ever pulled in when `service` is on.
 serde_json = { version = "1", optional = true }
+# [OPUS-4.8] (sq-ycu) SPARQL-Results-XML (SRX) parsing for the `service` feature. Some
+# endpoints ignore the `Accept: …+json` header and return XML; without an SRX parser the
+# whole SERVICE call fails. quick-xml is platform-independent (it carries no HTTP/TLS, so
+# it is safe in the main dep block, like serde_json) and is already in the workspace tree
+# (sparq-conformance, sparq-geo). Pulled in only when `service` is on. `default-features =
+# false` drops its (unused) serde derive support.
+quick-xml = { version = "0.40", default-features = false, optional = true }
 
 # UUID()/STRUUID() need an OS RNG; depending on uuid from the wasm build would drag
 # getrandom into the browser dependency graph, so the functions are native-only.
