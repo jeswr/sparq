@@ -99,6 +99,20 @@ vectorized = []
 # caller bumps the version on every mutation, and non-deterministic queries (NOW/RAND/
 # UUID/SERVICE/custom fns, detected by `cache::is_cacheable`) are never stored.
 result-cache = []
+# [OPUS-4.8] (sq-it1x) MVCC / ACID multi-statement transaction isolation. A
+# `txn::TransactionManager` providing SNAPSHOT-ISOLATION read transactions (a cheap
+# `GraphSnapshot` of the current committed generation) and serialized write transactions
+# with FIRST-COMMITTER-WINS write-write conflict detection (optimistic concurrency
+# control), all built on the existing copy-on-write delta-overlay substrate
+# (`Graph::fork`/`snapshot`/`apply_delta`). Per the design record
+# (research/concurrent-serving-litreview-A-mvcc-benchmarks.md §A.1), a single-writer
+# store with snapshot reads is trivially serializable (SI = serializability); the OCC
+# conflict check additionally serializes concurrent writers safely. OPT-IN and OFF by
+# default — when off, zero txn code compiles and the default native + wasm builds are
+# byte-identical. Pulls in ZERO new dependencies (std `Mutex`/`Arc` + the crate's own
+# `update_in_place_capturing` write-set capture; oxrdf/rustc-hash are already direct deps)
+# and contains no `unsafe`.
+txn = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

@@ -402,6 +402,35 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   let r3 = cache.get_or_eval(&graph, &q, version, &QueryBudget::unlimited())?; // miss (fresh)
   # Ok::<(), String>(())
   ```
+- **MVCC / ACID transaction isolation** is the non-default `txn` cargo feature (bead `sq-it1x`):
+  `txn::TransactionManager::new(graph)` owns one logical graph and hands out **snapshot-isolation**
+  read transactions (`begin_read()` → a cheap point-in-time view that derefs to `&Graph`, immune to
+  later commits) and serialized **write** transactions (`begin_write()` → a copy-on-write fork).
+  `WriteTxn::update(sparql)` applies SPARQL `UPDATE`s to the private fork (read-your-own-writes via
+  `w.graph()`); `commit()` returns the new `u64` version, or `CommitError::Conflict` under
+  **first-committer-wins** if a concurrent writer published an overlapping write set since the txn
+  began (the whole body is then discarded — atomic rollback). A stale but *non*-conflicting writer's
+  resolved delta is replayed onto the current generation, so no commit is lost. For a single writer
+  the conflict check never fires (SI = serializability); durability is inherited from a directory-
+  backed graph's WAL. Built on the COW delta-overlay substrate; when off, zero txn code compiles and
+  the default build is byte-identical (no new deps).
+
+  ```rust
+  // Cargo.toml: sparq-engine = { version = "0.1", features = ["txn"] }
+  use sparq_engine::txn::{CommitError, TransactionManager};
+  let m = TransactionManager::new(graph);
+  // Snapshot-isolation read: this view never changes underneath us.
+  let snap = m.begin_read();
+  let _n = sparq_engine::count(&snap, "SELECT * WHERE { ?s ?p ?o }")?;
+  // Write txn: fork, mutate the private copy, commit (first-committer-wins).
+  let mut w = m.begin_write();
+  w.update("INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }")?;
+  match w.commit() {
+      Ok(version) => println!("committed as v{version}"),
+      Err(CommitError::Conflict { .. }) => { /* retry against the new state */ }
+  }
+  # Ok::<(), String>(())
+  ```
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`
   powers MD5/SHA*; `parallel` enables rayon scan/join/sort/aggregate. The **wasm** crate
   (`sparq-wasm`) disables defaults, so on `wasm32-unknown-unknown` REGEX/hash builtins and

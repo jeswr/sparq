@@ -56,6 +56,12 @@ pub use construct::{
     construct_with_budget, describe, describe_prepared, describe_prepared_with_budget,
     describe_with_budget, triples_to_ntriples,
 };
+// [OPUS-4.8] (sq-it1x) Opt-in MVCC / ACID transaction isolation. NON-DEFAULT `txn`
+// feature — when off, zero transaction code compiles and the default native + wasm builds
+// are byte-identical (no new deps). Built on the COW delta-overlay substrate
+// (`Graph::fork`/`snapshot`/`apply_delta`).
+#[cfg(feature = "txn")]
+pub mod txn;
 #[cfg(feature = "cs-planner")]
 pub use cs::{with_cs_table, CsSet, CsTable};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
