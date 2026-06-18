@@ -216,7 +216,7 @@ jobs:
   # Rust-gated, so it is validated HERE rather than only when Rust changes). HARD (no
   # "advisory"/"informational" in the name) so ci-summary gates on it.
   ci-scripts:
-    name: ci-scripts (disk-reclaim self-test)
+    name: ci-scripts (CI-helper self-tests + workflow lints)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -232,6 +232,17 @@ jobs:
       # No compile / no files / no subprocess (mirrors perf-gate.py --self-test in bench.yml).
       - name: Self-test coverage-gate.py (ratchet + monotonicity aggregation logic)
         run: python3 scripts/coverage-gate.py --self-test
+      # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
+      # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
+      # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
+      # action installs NOTHING and the downstream `cargo <tool>` ENOENTs — silently making
+      # the gate VACUOUS (exactly the coverage-gate regression root-caused 2026-06-18). The
+      # self-test guards the lint's own logic; the second step ENFORCES it over the live
+      # workflows. No compile / no deps (stdlib-only, mirrors coverage-gate.py --self-test).
+      - name: Self-test install-action tool-selector gate (pure logic)
+        run: python3 scripts/check-install-action-tool.py --self-test
+      - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
+        run: python3 scripts/check-install-action-tool.py
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
