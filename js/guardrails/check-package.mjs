@@ -1,0 +1,114 @@
+#!/usr/bin/env node
+// Publish guardrail + git-pin verification for the `@jeswr/sparq` npm binding.
+// [OPUS-4.8] sq-bkag (follow-up to #623 / sq-c4ej).
+//
+// WHY THIS EXISTS
+// ----------------
+// `@jeswr/sparq` is not yet on npm under its settled name, so the only way a
+// consumer (e.g. PSS) can depend on it today is to PIN A GIT BUILD:
+//
+//     "@jeswr/sparq": "github:jeswr/sparq#<sha>"   # with package.json `directory: "js"`
+//
+// A git-pinned install does NOT ship `dist/` or `wasm/` (both are .gitignored).
+// npm rebuilds them by running the package's `prepare` lifecycle script on
+// install. If `prepare` is missing/broken, or the publish `files` allowlist
+// drops the wasm, the consumer silently gets a binding with no engine — an
+// `import` that throws at runtime, not at install. That is the exact failure
+// mode this guard turns into a hard, pre-publish / pre-pin error.
+//
+// WHAT IT CHECKS (no network, no Rust toolchain required — inspects the tree
+// `npm pack` WOULD ship via `npm pack --dry-run --json`):
+//   1. `prepare` is wired so a git-pinned `npm install` builds the binding.
+//   2. The publish allowlist (`files`) names `dist` and `wasm`.
+//   3. The packed tarball actually contains the JS entrypoint (`main`), the
+//      type entrypoint (`types`), and the wasm artifact (`wasm/*_bg.wasm`).
+//   4. The package self-identifies as `@jeswr/sparq` (settled name guard).
+//
+// USAGE
+//   node guardrails/check-package.mjs           # check the packable tree
+//   npm run check:package                        # same, via package.json
+//
+// As a git-pin verification step a CONSUMER runs (after `npm install` resolves
+// the git pin) to prove the engine landed:
+//   node -e "import('@jeswr/sparq').then(m=>m.SparqStore.fromString('<a> <b> <c> .','ntriples')).then(s=>{s.free?.();console.log('ok')})"
+
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const EXPECTED_NAME = '@jeswr/sparq';
+
+const failures = [];
+const fail = (msg) => failures.push(msg);
+
+const pkg = JSON.parse(readFileSync(resolve(pkgDir, 'package.json'), 'utf8'));
+
+// (4) settled-name guard — a rename must be deliberate, not silent.
+if (pkg.name !== EXPECTED_NAME) {
+  fail(`package name is "${pkg.name}", expected the settled name "${EXPECTED_NAME}"`);
+}
+
+// (1) git-pin install builds the binding: `prepare` runs on `npm install` of a
+//     git dependency. Without it, a git-pinned consumer gets no dist/ or wasm/.
+const scripts = pkg.scripts ?? {};
+if (!scripts.prepare) {
+  fail(
+    'missing `scripts.prepare`: a git-pinned `npm install` will not build dist/ or wasm/ ' +
+      '(both are .gitignored), so consumers pinning a git build get a binding with no engine',
+  );
+} else if (!/build/.test(scripts.prepare)) {
+  fail(`\`scripts.prepare\` ("${scripts.prepare}") does not invoke a build step`);
+}
+
+// (2) publish allowlist names the built outputs.
+const files = pkg.files ?? [];
+for (const required of ['dist', 'wasm']) {
+  if (!files.includes(required)) {
+    fail(`package.json \`files\` allowlist is missing "${required}" — it would be omitted from the published/packed tarball`);
+  }
+}
+
+// (3) the tree `npm pack` would ship actually contains the entrypoints + wasm.
+// `npm pack --dry-run --json` runs `prepack` and reports the resulting file
+// list WITHOUT writing a tarball or touching the network.
+let packed;
+try {
+  const out = execFileSync('npm', ['pack', '--dry-run', '--json'], {
+    cwd: pkgDir,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  packed = JSON.parse(out);
+} catch (err) {
+  fail(`\`npm pack --dry-run\` failed (the package is not packable): ${err.message}`);
+}
+
+if (packed) {
+  const entries = (packed[0]?.files ?? []).map((f) => f.path);
+  const has = (pred) => entries.some(pred);
+
+  const main = (pkg.main ?? '').replace(/^\.\//, '');
+  const types = (pkg.types ?? '').replace(/^\.\//, '');
+  if (main && !entries.includes(main)) {
+    fail(`packed tarball is missing the \`main\` entrypoint "${main}"`);
+  }
+  if (types && !entries.includes(types)) {
+    fail(`packed tarball is missing the \`types\` entrypoint "${types}"`);
+  }
+  if (!has((p) => /^wasm\/.*_bg\.wasm$/.test(p))) {
+    fail('packed tarball is missing the wasm artifact (wasm/*_bg.wasm) — the binding would have no engine');
+  }
+  if (!has((p) => /^wasm\/.*\.js$/.test(p))) {
+    fail('packed tarball is missing the wasm JS glue (wasm/*.js)');
+  }
+}
+
+if (failures.length) {
+  console.error(`check-package: ${failures.length} guardrail failure(s) for ${EXPECTED_NAME}:`);
+  for (const f of failures) console.error(`  - ${f}`);
+  process.exit(1);
+}
+
+console.log(`check-package: ${EXPECTED_NAME} is publishable + git-pin-installable (prepare + files + packed dist/wasm verified).`);

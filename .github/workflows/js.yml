@@ -38,6 +38,8 @@ jobs:
             target
           key: js-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
+      # wasm-pack BEFORE `npm ci`: the package's `prepare` lifecycle (sq-bkag git-pin
+      # build) runs on `npm ci` and needs wasm-pack on PATH to compile the wasm engine.
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
@@ -50,8 +52,10 @@ jobs:
       - name: Test (node --test)
         run: npm test
 
-      - name: Pack check
-        run: npm pack --dry-run
+      # Publish guardrail + git-pin verification (sq-bkag): `prepare` wired, the
+      # `files` allowlist intact, and the packed tarball actually ships dist/ + wasm/.
+      - name: Package guardrail check
+        run: npm run check:package
 
       - name: Report wasm size
         run: ls -l wasm/sparq_wasm_bg.wasm
