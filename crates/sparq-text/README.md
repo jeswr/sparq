@@ -108,9 +108,25 @@ or heavyweight pieces.
   prefix token scores as one pseudo-term (its expansions' postings unioned).
 - **Maintenance**: `apply_delta` indexes newly inserted string literals
   incrementally; deletions are a documented no-op (the dictionary retains
-  terms until `Graph::compact`, so the incremental index stays *exactly*
-  equal to a rebuild — pinned by a differential test — and orphaned literal
-  ids simply join to zero triples). After `Graph::compact`, rebuild.
+  terms, so the incremental index stays *exactly* equal to a rebuild — pinned
+  by a differential test — and orphaned literal ids simply join to zero
+  triples). In-process `Graph::compact` keeps every dictionary id, so the
+  index stays valid across it.
+- **Durability / sharing — rebuild-on-boot + reconcile contract** <!-- [OPUS-4.8] sq-oddt -->:
+  `TextIndex` has **no on-disk format** and is not shared between processes —
+  the durable `Graph` (its WAL/blob) is the source of truth. Under a
+  stateless-core invariant the index follows a documented **rebuild-on-boot +
+  reconcile** contract: **boot** rebuilds it with `TextIndex::build` over the
+  freshly opened graph (the index is a pure function of the dictionary); a warm
+  index that outlives updates is brought current in `O(new terms)` by
+  `index.reconcile(&graph)` — scans only the dictionary tail appended since the
+  last build (the boot-free fast path when you do not hold the insert batches
+  for `apply_delta`), after which `index == TextIndex::build(&graph)`.
+  `index.indexed_dict_len()` is the generation marker, `is_consistent_with(&graph)`
+  the cheap staleness check, and `needs_rebuild(&graph)` flags the one
+  unrepairable case — a *reopened, durably-recompacted* base whose persisted
+  store dropped orphaned terms and renumbered ids (a shorter dictionary) — which
+  mandates a fresh `build`. See the `index` module docs for the full contract.
 - **Phrase queries (opt-in positions)**: `TextIndex::build_with_positions`
   records each token's offsets within its document in a *separate* parallel
   structure, and `TextIndex::phrase("foo bar")` returns the literal ids where
