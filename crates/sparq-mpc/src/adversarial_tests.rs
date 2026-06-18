@@ -812,6 +812,99 @@ mod robust_props {
             }
         }
     }
+
+    /// PROPERTY (bead **sq-ji5f**, decision: the honest envelope is DETECT-only).
+    /// The honest-majority constructor fixes `t = ⌊(n−1)/2⌋`, so the equality /
+    /// mult open at degree `2t` has correction budget
+    /// `e_max = ⌊(n − (2t+1))/2⌋`. We sweep EVERY honest-majority party count the
+    /// constructor will build and assert `e_max == 0` for all of them — odd `n`
+    /// (`n = 2t+1`, zero redundancy → no detection) AND even `n` (`n = 2t+2`,
+    /// exactly one redundant share → detect-and-abort). So the production
+    /// equality primitive can at best DETECT (even `n`) and NEVER auto-CORRECTS a
+    /// cheater: a flipped verdict is never silently repaired into the honest one.
+    /// Robust correction (`e_max ≥ 1`) at degree `2t` would need `n ≥ 2t+3`, which
+    /// the constructor never provisions for the equality open (see the
+    /// `…_corrects_…_when_overprovisioned` prop, which builds the degree-`2t`
+    /// sharing DIRECTLY at `n ≥ 2t+3` — no honest-majority `secure_equal` path
+    /// reaches it).
+    #[test]
+    fn honest_majority_equality_open_has_zero_correction_budget() {
+        for n in 2usize..=24 {
+            let backend = ShamirBackend::new_seeded(n, 0xC0DE + n as u64).unwrap();
+            let t = backend.threshold();
+            assert_eq!(t, (n - 1) / 2, "honest-majority t = ⌊(n−1)/2⌋");
+            // One multiplication needs the 2t+1 <= n headroom.
+            assert!(n > 2 * t, "n={n} t={t}: equality open needs n >= 2t+1");
+            let degree = 2 * t;
+            // Redundant shares at the product degree, and the RS correction budget.
+            let redundancy = n - (degree + 1);
+            let e_max = redundancy / 2;
+            assert_eq!(
+                e_max, 0,
+                "sq-ji5f: honest-majority n={n} (t={t}) must give ZERO correction \
+                 budget at degree 2t (got e_max={e_max}); the equality open DETECTS \
+                 at most, never auto-corrects"
+            );
+            // Cross-check the two reachable regimes the constructor produces.
+            if n % 2 == 1 {
+                assert_eq!(
+                    redundancy, 0,
+                    "odd honest-majority n={n}: n = 2t+1, zero redundancy at degree 2t \
+                     (tampering undetectable — MAC is the deferred WI-4 fix, sq-6d6g)"
+                );
+            } else {
+                assert_eq!(
+                    redundancy, 1,
+                    "even honest-majority n={n}: n = 2t+2, exactly one redundant share \
+                     at degree 2t (detect-and-abort only, e_max=0)"
+                );
+            }
+        }
+    }
+
+    /// PROPERTY (bead **sq-ji5f**): the FUNCTIONAL counterpart of the budget
+    /// arithmetic above — on every even honest-majority `n` (the only regime with
+    /// redundancy), a tampered degree-`2t` product share is DETECT-and-ABORT and
+    /// is NEVER silently corrected back to the honest verdict. The reconstruction
+    /// must therefore return `Err(Tampered)`, not `Ok(honest_value)`: with
+    /// `e_max = 0` the RS checker has no correction budget, so "correct the
+    /// cheater away" is provably unreachable on the honest-majority equality path.
+    #[test]
+    fn honest_majority_equality_open_never_corrects_tamper() {
+        let mut rng = Lcg(0x5111_CE5A);
+        for &n in &[4usize, 6, 8, 10] {
+            let backend = ShamirBackend::new_seeded(n, 0xA17 + n as u64).unwrap();
+            let t = backend.threshold();
+            assert_eq!(n - (2 * t + 1), 1, "even honest-majority n: one redundant share");
+            for _ in 0..120 {
+                let mut dealer = backend.dealer();
+                // EQUAL keys ⇒ honest m = 0 (a "match"); tampering tries to flip it.
+                let key = fp(rng.next_fp());
+                let sa = dealer.share(key);
+                let sb = dealer.share(key);
+                let mask = dealer.draw_nonzero_fp();
+                let r = dealer.share(mask);
+                let d = shamir::sub_shares(&sa, &sb).unwrap();
+                let m_shares = mul_shares_raw(&d, &r).unwrap();
+                let mut tampered = m_shares.clone();
+                let i = rng.next_in(n);
+                let mut delta = rng.next_fp();
+                if delta == 0 {
+                    delta = 1;
+                }
+                tampered[i].y = tampered[i].y.add(fp(delta));
+                match reconstruct_degree(&tampered, 2 * t) {
+                    Err(MpcError::Tampered { .. }) => { /* detect-and-abort — the honest envelope */ }
+                    Ok(v) => panic!(
+                        "sq-ji5f: n={n} t={t} has e_max=0, so the equality open must \
+                         DETECT-and-ABORT a tampered share, never silently correct it \
+                         (got Ok({v:?}))"
+                    ),
+                    Err(other) => panic!("n={n}: must be Tampered (detect-only), got {other:?}"),
+                }
+            }
+        }
+    }
 }
 
 // =====================================================================
