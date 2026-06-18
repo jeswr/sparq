@@ -21,6 +21,15 @@
   'use strict';
 
   var SERIES = 'sparq engine';
+  // [OPUS-4.8] sq-aas7 (design sq-i0nm §E): the EC2/nightly heavy-benchmark series. github-action-
+  // benchmark writes it to a SEPARATE data dir (dev/bench-ec2/data.js) under the series NAME below
+  // (see .github/workflows/bench-ec2.yml `name: sparq engine (EC2)`). The per-commit gh-runner
+  // series (SERIES) is the dense history that drives the trend/family/scaling views; the EC2 series
+  // is a quieter, full-scale, higher-fidelity tier. When it is present we PREFER it for the FEATURED
+  // block (the at-a-glance public-suite comparison) because it is env-matched to the same-box
+  // competitor gathers, and we tag the chosen tier so the reader sees the provenance. Graceful: when
+  // the EC2 series is absent (not yet live), everything falls back to the per-commit series.
+  var EC2_SERIES = 'sparq engine (EC2)';
 
   // ---- competitor reference data (sq-i0nm parent) --------------------------
   // [OPUS-4.8] Versioned STATIC competitor data, EMBEDDED so the live GitHub Pages page renders it
@@ -447,7 +456,48 @@
   //   { engines:[{id,label,version,env}], values:{ "<metric stem or name>": { "<engineId>": <µs> } } }
   // We match on the raw metric NAME first, then the stem (name minus _us), so the competitor file
   // can key either way. We never invent numbers — a missing key is simply absent.
-  function buildFeatured(entries, competitors) {
+  // [OPUS-4.8] sq-aas7 (design sq-i0nm §E): choose which series feeds the FEATURED block, PREFERRING
+  // the EC2/nightly tier when it is present + non-empty, else falling back to the per-commit
+  // gh-runner tier. Returns { tier, seriesName, entries, hasEc2 }:
+  //   - tier        — 'nightly' (EC2, env-matched to the same-box competitor gathers) or 'per-commit'
+  //                   (gh-runner CI band — noisier, cross-env vs the gathered competitor numbers).
+  //   - seriesName  — the github-action-benchmark series name actually used.
+  //   - entries     — that series' chronological entries array (>= 1 element when non-empty).
+  //   - hasEc2      — whether an EC2/nightly series with data was available at all (drives the
+  //                   "EC2 absent" graceful note in the renderer).
+  // `data` is the merged BENCHMARK_DATA shape ({ entries: { "<series>": [...] } }). Pure +
+  // node-testable; tolerant of a missing data / entries object (-> per-commit, empty).
+  function pickFeaturedSeries(data) {
+    var allEntries = (data && data.entries) || {};
+    var ec2 = allEntries[EC2_SERIES];
+    var commit = allEntries[SERIES];
+    var hasEc2 = Array.isArray(ec2) && ec2.length > 0;
+    if (hasEc2) {
+      return { tier: 'nightly', seriesName: EC2_SERIES, entries: ec2, hasEc2: true };
+    }
+    return {
+      tier: 'per-commit', seriesName: SERIES,
+      entries: Array.isArray(commit) ? commit : [], hasEc2: false
+    };
+  }
+
+  // [OPUS-4.8] sq-aas7: a display descriptor for a featured tier — { kind, text, title }. `kind` is a
+  // CSS-class suffix (tier-nightly / tier-per-commit). Pure + node-testable; the renderer turns it
+  // into a .pill tier badge in the featured header. The nightly tier is env-matched to the same-box
+  // competitor gathers (ephemeral EC2); the per-commit tier is the noisier gh-runner CI band.
+  function tierDescriptor(tier) {
+    if (tier === 'nightly') {
+      return { kind: 'tier-nightly', text: 'nightly · EC2',
+        title: 'featured numbers are from the weekly EC2/nightly heavy-benchmark series '
+             + '(sparq engine (EC2)) — a quiet, full-scale, env-matched tier, preferred over the '
+             + 'per-commit gh-runner band when present' };
+    }
+    return { kind: 'tier-per-commit', text: 'per-commit · gh-runner',
+      title: 'featured numbers are from the per-commit gh-runner CI series (sparq engine) — the '
+           + 'EC2/nightly series is not present yet, so this noisier CI band is shown' };
+  }
+
+  function buildFeatured(entries, competitors, opts) {
     var latest = entries[entries.length - 1];
     var bySuite = {};
     latest.benches.forEach(function (b) {
@@ -473,8 +523,15 @@
       if (bySuite[f.key]) groups.push({ suite: f.key, title: f.title,
         rows: sortRows(bySuite[f.key].rows), references: referencesForSuite(competitors, f.key) });
     });
+    // [OPUS-4.8] sq-aas7: carry the chosen-tier provenance so renderFeatured can show a tier badge
+    // and an env-match note. `opts` is { tier, seriesName, hasEc2 } from pickFeaturedSeries(); when
+    // omitted (legacy callers / tests passing only entries) it defaults to the per-commit tier so the
+    // existing behaviour is unchanged.
+    var tier = (opts && opts.tier) || 'per-commit';
     return { commit: latest.commit, date: latest.date, groups: groups,
-             competitorEngines: competitorEngines(competitors) };
+             competitorEngines: competitorEngines(competitors),
+             tier: tier, seriesName: (opts && opts.seriesName) || SERIES,
+             hasEc2: !!(opts && opts.hasEc2) };
   }
 
   // SEAM helper (sq-t0c3): read the per-engine competitor numbers for one metric, or {} when the
@@ -729,6 +786,9 @@
                        FEATURED_SUITES: FEATURED_SUITES, featuredSuiteOf: featuredSuiteOf,
                        buildFeatured: buildFeatured, competitorsFor: competitorsFor,
                        competitorEngines: competitorEngines,
+                       // sq-aas7 (nightly-priority featured tier + tier badge)
+                       SERIES: SERIES, EC2_SERIES: EC2_SERIES,
+                       pickFeaturedSeries: pickFeaturedSeries, tierDescriptor: tierDescriptor,
                        // sq-rltn (top-level capability families + summary-first family view)
                        FAMILIES: FAMILIES, familyOf: familyOf, buildFamilies: buildFamilies,
                        // sq-i0nm (embedded versioned competitor data + per-suite references)
@@ -867,6 +927,22 @@
         text: 'No recognised public-suite metrics in the latest commit yet.' }));
       return;
     }
+    // [OPUS-4.8] sq-aas7: TIER BADGE — show which series these featured numbers came from (the
+    // EC2/nightly tier when present, else the per-commit gh-runner band) so the provenance is
+    // visible at a glance. The competitor cells (gathered on ephemeral EC2) are env-matched to the
+    // nightly tier; when we fell back to the per-commit band they are cross-env, so the note says so.
+    var td = tierDescriptor(featured.tier);
+    var tierRow = el('div', { 'class': 'featured-tier' }, [
+      el('span', { 'class': 'pill tier-badge ' + td.kind, text: td.text, title: td.title })
+    ]);
+    tierRow.appendChild(el('span', { 'class': 'featured-tier-note',
+      text: featured.tier === 'nightly'
+        ? 'EC2/nightly heavy-benchmark series (env-matched to the same-box competitor gathers).'
+        : (featured.hasEc2
+            ? 'per-commit gh-runner CI band.'
+            : 'per-commit gh-runner CI band — the EC2/nightly series is not present yet, so '
+              + 'competitor numbers below were gathered on a different (EC2) box.') }));
+    host.appendChild(tierRow);
     var engines = featured.competitorEngines; // [] until sq-t0c3 lands
     featured.groups.forEach(function (g) {
       var section = el('section', { 'class': 'featured-suite' }, [
@@ -1254,7 +1330,13 @@
   // so they can render once competitors.json resolves, without re-blocking the summary first paint.
   function paintFeaturedAndScaling(entries, competitors) {
     if (!entries) return;
-    renderFeatured(buildFeatured(entries, competitors));  // sq-xvow
+    // [OPUS-4.8] sq-aas7: the FEATURED block prefers the EC2/nightly series when present (env-matched
+    // to the competitor gathers); the families/scaling views below keep using the dense per-commit
+    // history (`entries`). pickFeaturedSeries() reads the merged BENCHMARK_DATA so it sees the EC2
+    // series merged in by boot()'s fetch; graceful fall-back to per-commit when EC2 is absent.
+    var picked = pickFeaturedSeries(typeof window !== 'undefined' ? window.BENCHMARK_DATA : null);
+    var featEntries = picked.entries.length ? picked.entries : entries;
+    renderFeatured(buildFeatured(featEntries, competitors, picked));  // sq-xvow + sq-aas7 tier
     renderSameBox(competitors);                           // sq-ays7 (same-box SPARQL comparison)
     renderScaling(buildScalingFamilies(entries));         // sq-viby
   }
@@ -1269,6 +1351,28 @@
   //       PREFERRED source); fall back to the embedded COMPETITORS_DATA if the fetch fails. Then
   //       render the featured-suites + scaling cards. Keeps the embedded copy ONLY as a fallback so
   //       the live Pages page still works if the JSON is not served.
+  // [OPUS-4.8] sq-aas7: fetch + extract the EC2/nightly series from the sibling dev/bench-ec2/data.js.
+  // That file is a github-action-benchmark `data.js` that does `window.BENCHMARK_DATA = {…}`; we run
+  // it in a SHADOWED scope with a throwaway `window` so it cannot clobber the page's real global,
+  // then read the EC2 series out of the captured object. Returns a Promise<entries[]|null>; resolves
+  // null on ANY failure (no EC2 data dir yet, fetch/CORS error, parse/shape error) so the caller
+  // degrades to the per-commit series. The path is RELATIVE to dev/bench/ (where the dashboard is
+  // served), so `../bench-ec2/data.js` reaches the EC2 dir on the published Pages site.
+  function fetchEc2Series() {
+    return window.fetch('../bench-ec2/data.js', { cache: 'no-cache' })
+      .then(function (r) { return r.ok ? r.text() : null; })
+      .then(function (src) {
+        if (!src) return null;
+        var sandbox = { BENCHMARK_DATA: null };
+        // eslint-disable-next-line no-new-func
+        (new Function('window', src))(sandbox);
+        var data = sandbox.BENCHMARK_DATA;
+        var ec2 = data && data.entries && data.entries[EC2_SERIES];
+        return (Array.isArray(ec2) && ec2.length) ? ec2 : null;
+      })
+      .catch(function () { return null; });
+  }
+
   function boot() {
     var entries = paintSummary();                        // (1) instant first paint
 
@@ -1283,6 +1387,23 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (json) { if (json) { window.METRIC_LABELS = json; paintSummary(); } })
       .catch(function () { /* graceful: keep structural labels */ });
+
+    // [OPUS-4.8] sq-aas7 (design sq-i0nm §E): pull the EC2/nightly series so the featured block can
+    // PREFER it. github-action-benchmark writes that series to a SIBLING data dir
+    // (dev/bench-ec2/data.js) whose script REASSIGNS window.BENCHMARK_DATA — so we cannot simply
+    // <script src> it (it would clobber the per-commit series). Instead fetch it as TEXT and run it
+    // with a captured global, then merge ONLY its `sparq engine (EC2)` entry back into the live
+    // BENCHMARK_DATA. GRACEFUL on every failure (404 when EC2 not live, file:// CORS, parse error):
+    // we keep the per-commit series and the featured block falls back to it. The featured repaint in
+    // (3)'s competitor handler runs AFTER this resolves only by luck of ordering, so we ALSO repaint
+    // featured here once the merge lands (idempotent — renderFeatured wipes its host first).
+    fetchEc2Series().then(function (ec2Entries) {
+      if (ec2Entries && ec2Entries.length && window.BENCHMARK_DATA && window.BENCHMARK_DATA.entries) {
+        window.BENCHMARK_DATA.entries[EC2_SERIES] = ec2Entries;
+        // repaint featured with whatever competitor data is currently resolved (embedded or fetched).
+        paintFeaturedAndScaling(entries, window.COMPETITORS || COMPETITORS_DATA);
+      }
+    });
 
     // (3) competitors — fetch competitors.json (single sink), fall back to the embedded mirror.
     window.fetch('competitors.json', { cache: 'no-cache' })
