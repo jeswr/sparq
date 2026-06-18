@@ -636,6 +636,22 @@ jobs:
         run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: "-D warnings"
+      # [OPUS-4.8] sq-hqmm: invoke the standalone bench/dict (dict-baseline) selftest from a CI
+      # lane. bench/dict carries its OWN `[workspace]` table (the same isolation pattern as
+      # bench/parse and bench/serve), so the `cargo clippy --workspace` + the workspace nextest
+      # archive above NEVER reach it — its structural invariants (every dictionary term classified
+      # exactly once, `Dict::into_blob` preserving the term count, positive footprints) live ONLY in
+      # its `selftest` subcommand and were unchecked by any lane. This step clippy-gates the crate
+      # (under -D warnings, since the workspace clippy can't) and runs `dict-baseline selftest` so a
+      # harness regression (a composition miscount, an into_blob that drops terms) fails CI. It is
+      # in-process + dataset-free + makes no wall-clock claim, so it is deterministic in CI (the
+      # README documents `selftest` as the CI-runnable check; this is the lane that runs it). It is a
+      # SEPARATE workspace (own target dir), so sparq-core compiles once more here in debug — but the
+      # registry/git deps come warm from rust-cache, and a debug build keeps the added cost small.
+      - name: bench/dict standalone selftest (clippy + invariant checks)
+        run: |
+          cargo clippy --manifest-path bench/dict/Cargo.toml --all-targets -- -D warnings
+          cargo run --manifest-path bench/dict/Cargo.toml -- selftest
       # Informational until the deferred `cargo fmt --all` reformat lands (see rustfmt.toml).
       - name: rustfmt (informational)
         run: cargo fmt --all --check
