@@ -157,7 +157,7 @@ and *verifiable* by wiring it into the ZK/MPC disclosure split it already has.
 
 ### 2.1 The composition (where each existing primitive plugs in)
 
-```
+```text
         ODRL policy (per-asset / per-graph)            ← declarative, standard, auditable
         Permission(action=query, purpose=P,
                    recipient∈{nodeB,nodeC})
@@ -257,7 +257,7 @@ FIT legend: `clear-fit:<component>` = lands in an existing/obvious crate;
 | 10 | **Data-spaces / IDSA-Gaia-X interop profile** (ingest ODRL usage policies from EDC connectors; speak the dataspace dialect) | `ambiguous-ask-user` (ecosystem-scope call) | 3 | L | Big strategic upside (plug sparq into the EU data-spaces stack) but large surface + depends on #1–#6; is this in sparq's mission scope? @jeswr call. [IDS Usage Control](https://international-data-spaces-association.github.io/DataspaceConnector/Documentation/v5/UsageControl) |
 
 **Suggested sequencing:** #1 → #2/#3 (clear-fit, ship usage-control single-node value fast) → #7 →
-#4/#8/#9 → then the research arc #5 → #6 (gated on RQ1 soundness + an @jeswr scope decision) → #10
+# 4/#8/#9 → then the research arc #5 → #6 (gated on RQ1 soundness + an @jeswr scope decision) → #10
 (ecosystem, optional).
 
 **Clear-fit vs ambiguous, summarized:**

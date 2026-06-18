@@ -196,9 +196,9 @@ consumer yet).**
   (`src/plan.rs:180`): greedy left-deep order seeded by smallest leaf; per-join
   **bind-vs-hash** decision in `cost_join` (`plan.rs:272-314`) — `bind_cost = L·(request_cost
   + fan_out)` vs `hash_cost = R + L`; a large hash-class join (`L + R > stream_threshold`) is
-  tagged `JoinAlgo::Streaming`. CS star estimate in `star_estimate` (`plan.rs:319`). Public
-  surface: `JoinAlgo` (`Bind`/`Hash`/`Streaming`), `JoinNode`, `JoinTree::join_order()`,
-  `PlanOptions { request_cost, stream_threshold }` (`plan.rs:71-175`).
+  tagged`JoinAlgo::Streaming`. CS star estimate in`star_estimate`(`plan.rs:319`). Public
+  surface:`JoinAlgo`(`Bind`/`Hash`/`Streaming`),`JoinNode`,`JoinTree::join_order()`,
+  `PlanOptions { request_cost, stream_threshold }`(`plan.rs:71-175`).
 - **Streaming join OPERATOR** — `StreamJoin` (`src/stream.rs:256`): a symmetric
   (XJoin-style) non-blocking hash join, push-based `push_left`/`push_right`, with bounded
   **operator spill** to a temp file (`StreamJoinOptions::mem_budget_tuples`,
@@ -292,7 +292,7 @@ glue**:
 
 Five layers, top to bottom. Each names the existing sparq seam it reuses.
 
-```
+```text
                           ┌─────────────────────────────────────────────┐
    query string  ────────▶│  sparq-fedclient  (NEW, opt-in crate)        │
                           │                                              │
@@ -480,7 +480,7 @@ two-term cost); lazy incremental streaming; an EXPLAIN that surfaces chosen phys
 
 **Proposed crate: `sparq-fedclient`** (new workspace member, `publish = false`).
 
-```
+```text
 sparq-fedclient  (NEW; feature `fedclient`, OFF by default)
    ├── depends on  sparq-fedplan   (feature `fedplan`)   — planner + StreamJoin (REUSE)
    ├── depends on  sparq-engine    (feature `service`)   — SERVICE transport + VALUES + SSRF + local eval (REUSE)

@@ -139,7 +139,7 @@ Root site at `https://jeswr.github.io/sparq/`. Sidebar nav grouped by the surfac
 (`skills/SKILL.md` is the canonical taxonomy source). Each group is a sidebar section; each
 surface is a page; the three flagships are top-billed "Showcase" pages.
 
-```
+```text
 /                         Landing / overview — what sparq is, the live REPL teaser,
                           three flagship cards, the surface grid, "all runs in your tab"
 /showcase/zk-car-hire     ★ Flagship 1 — ZK cross-credential car-hire
@@ -415,7 +415,7 @@ bundle), explicitly **not** a prerequisite.
 Children of `sq-4r4b` (foundation → parallel demos + new-wasm bundles + flagships → deploy).
 Created with `bd create` (see §7 for actual ids assigned at creation). Dependency intent:
 
-```
+```text
 F1 site-shell+theme  (foundation — port the pod-manager design language, shell, routing, REPL component)
    ├─ depends: nothing
    │

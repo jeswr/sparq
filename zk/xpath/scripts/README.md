@@ -84,7 +84,7 @@ This ensures:
 
 ### Generated Structure
 
-```
+```text
 xpath/
 ├── src/
 │   ├── lib.nr          # Updated to include stubs module

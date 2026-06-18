@@ -59,6 +59,7 @@ Jesse's unifying construct is a **verifiable data sublanguage**: a declarative q
 - **Multi-key homomorphic signatures (MKHS).** A *direct alternative* to commit+SNARK for multi-issuer data: issuers' signatures homomorphically carry correctness of a function over data signed by distinct keys, publicly verifiable [eprint 2024/895]. Gives authenticity+correctness but **not hiding**; fully-succinct lattice MKHS practicality is unproven. Worth evaluating against the coZK route; complementary, not a replacement.
 
 ### 3.5 FHE / TEE — honest comparison as MPC+ZK alternatives
+
 | Axis | FHE (+vFHE) | TEE (Nitro/TDX/SEV, +ZK) | **MPC + ZK (this work)** |
 |---|---|---|---|
 | Query maturity | research (~10K rows, ArcEDB) | **production** (DuckDB-SGX2) | high (Senate/ORQ); graph analog exists |

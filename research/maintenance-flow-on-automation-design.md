@@ -52,7 +52,7 @@ rules → auto-created follow-on beads) but trigger it from CI on PR-merge, not
 from a beads internal hook, and we do the gateable subset as a hard merge gate
 instead of a reactive bead.
 
-```
+```text
                  ┌─────────────────────────── a change is proposed (PR) ───────────────────────────┐
                  │                                                                                   │
    ┌─────────────▼──────────────┐                                          ┌─────────────────────────▼─────────────┐

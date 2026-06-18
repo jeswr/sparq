@@ -201,7 +201,7 @@ with it.
 **Public inputs of `join_eq` (declaration order = the audit-#1 reconstruction
 order):**
 
-```
+```text
 challenge:        pub Field         // verifier nonce (replay binding S2.5) — field 0, as every member
 commit_a:         pub Field         // graph-A commitment  C(G_a)  == scan-A.commitments[g_a]
 commit_b:         pub Field         // graph-B commitment  C(G_b)  == scan-B.commitments[g_b]
@@ -212,7 +212,7 @@ slot_b:           pub u32           // graph-B join slot in {0,1,2} (== query-de
 
 **Private witnesses:**
 
-```
+```text
 enc_a:    [[Field;3]; N_a]   counts_a: u32   // graph-A contents + size (same shape as scan-A)
 enc_b:    [[Field;3]; N_b]   counts_b: u32   // graph-B contents + size
 row_a:    [Field; 3]                         // the joined row of A
@@ -225,7 +225,7 @@ blinding: Field                              // per-presentation blinder for joi
 
 **The relation (sketch — mirrors `scan.nr`'s present-in-graph discipline):**
 
-```
+```text
 // 1. Re-commit both graphs to their PUBLIC commitments (binds the witnessed
 //    contents to the SAME C(G) the scan proofs expose — §2.3 anti-row-swap).
 assert_eq(commit_fold(map(h3, enc_a), counts_a), commit_a);   // == scan.nr:96-108
@@ -402,7 +402,7 @@ from each pairwise `assert(a_val == b_val)` plus the shared-commitment check.)
   `join_edges: Vec<JoinEdge>` on `ProofManifest` (`manifest.rs:604-607`, alongside
   `binding_edges`):
 
-  ```
+  ```text
   pub struct JoinEdge {
       pub scan_a: usize,  pub graph_a: usize,   // which scan sub-proof + which commitments[g]
       pub scan_b: usize,  pub graph_b: usize,
@@ -473,7 +473,7 @@ a deployment not using hidden joins stays on the disclosed-row path. For each
 
 ### 3.5 Concrete flow sketch
 
-```
+```text
 prover:   for each cross-credential shared variable in the query plan:
             witness row_a, row_b from the two graphs it holds; take the PUBLIC
             join slots slot_a/slot_b from the query (the shared variable's positions);

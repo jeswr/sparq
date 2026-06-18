@@ -64,7 +64,7 @@ What an attacker would target, in priority order:
 
 ## Trust boundaries
 
-```
+```text
                           ┌─────────────────────────────────────────────────┐
  untrusted RDF bytes ────▶│ (B1) parser  (oxttl + sparq-core chunking)       │
  (file / HTTP body)       └─────────────────────────────────────────────────┘

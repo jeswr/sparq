@@ -96,7 +96,7 @@ Restrict the decoder so only tokens that keep the output on a valid grammar path
 
 Map NL mentions to IRIs. Often the single largest error source on open-domain.
 
-- **GENRE** (autoregressive entity retrieval) — generate the canonical entity name, constrained to KG titles. (referenced widely in KGQA linking) 
+- **GENRE** (autoregressive entity retrieval) — generate the canonical entity name, constrained to KG titles. (referenced widely in KGQA linking)
 - **Generative Relation Linking** (IBM, 2021) — seq2seq for relation linking on QALD/LC-QuAD. <https://arxiv.org/pdf/2108.07337>
 - **Spinach** (Stanford OVAL, 2024): agentic SPARQL-based information navigation. A ReAct loop with five actions (search Wikidata, fetch entity page, view property examples, run SPARQL, stop) that *builds the query incrementally* ("start simple, gradually build toward the complete query") using **the full expressiveness of SPARQL for exploration**, not one-edge-at-a-time. Reports (0-shot, GPT-4o): **QALD-7 62.2% EM / 74.6% F1 (+30.1pp), QALD-9-plus 58.3 / 71.6 (+27.0pp), QALD-10 63.1 / 69.5 (+10.0pp), WikiWebQuestions 61.2 / 72.3** (within 1.6pp of a *fine-tuned* baseline). Introduces the **Spinach dataset** (320 hard real Wikidata-forum questions, avg 8.89 clauses/query vs 2.63 for WikiWebQuestions); on it Spinach scores 16.4 EM / 45.3 F1 vs ToG+GPT-4 at 1.8 / 7.2 (**+38.1pp F1**). This is the strongest evidence that **live KG exploration beats static pre-linking** on hard open-domain. <https://arxiv.org/html/2407.11417v1>
 - **mKGQAgent** (Perevalov et al., 2025-07; Text2SPARQL'25 **winner**): human-inspired *modular agent* — planning, entity/relation linking, **template grounding**, and iterative SPARQL refinement, with utility tools (vector search + full-text search over the schema + live endpoint querying) and an **experience pool** for ICL. 1st on both DBpedia and Corporate tracks. <https://arxiv.org/pdf/2507.16971>, <https://ceur-ws.org/Vol-4094/>
@@ -197,7 +197,7 @@ Sources: QALD-10 <https://www.researchgate.net/publication/376009186>; LC-QuAD2/
 
 New crate `crates/sparq-nlq` (mirrors how `sparq-reason` is separated), behind a workspace cargo feature `nlq`. The default engine never compiles it.
 
-```
+```text
 crates/sparq-nlq/
   src/
     lib.rs            // ask(), Conversation, public API
@@ -232,7 +232,7 @@ Reference impls: `ApiBackend` (OpenAI/Anthropic/Ollama-compatible HTTP), `WasmBa
 
 ### 7.3 The `ask` pipeline (agentic, composes a+c+d+e+f)
 
-```
+```text
 ask(question, &mut conversation) -> Answer { sparql, results, explanation, confidence }
 ```
 

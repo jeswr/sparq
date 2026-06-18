@@ -5,8 +5,9 @@
 #
 #   HARD gates (FAIL the build; picked up by the ci-summary aggregator):
 #     • markdownlint  — structural markdown defects over the user-facing + governance
-#                       doc surface (root docs, skills/, docs/, crates/). Tuned to the
-#                       repo's house style via .markdownlint-cli2.jsonc.
+#                       doc surface (root docs, skills/, docs/, crates/, and — as of
+#                       sq-rqyo — research/ + zk/). Tuned to the repo's house style via
+#                       .markdownlint-cli2.jsonc.
 #     • typos         — high-confidence spelling errors in those same docs (markdown
 #                       only), with a domain allowlist in _typos.toml.
 #     • internal-links — lychee --offline over those docs: every relative link AND
@@ -19,8 +20,9 @@
 #                       beads sq-toze.35 / sq-qhy4.)
 #
 #   ADVISORY (continue-on-error → reported in the job summary, never block a merge):
-#     • markdownlint-advisory — same rules over the WHOLE repo (research/, zk/, bench/)
-#                       so the staged-rollout backlog stays visible (tracked: sq-<TBD>).
+#     • markdownlint-advisory — same rules over the WHOLE repo MINUS the HARD-gated dirs
+#                       (research/ + zk/ are now HARD, per sq-rqyo); covers the remaining
+#                       not-yet-clean dirs (bench/, .claude/) so any backlog stays visible.
 #     • vale          — prose hygiene: weasel words, wordy phrases, adjective puffery.
 #     • external-links — lychee online: dead http(s) links (network-flaky → advisory).
 #     • no-perf-numbers — greps docs for baked-in benchmark figures (AGENTS.md rule).
@@ -251,7 +253,7 @@ jobs:
           {
             echo "### markdownlint-advisory (whole repo): ${n} finding(s)"
             echo ""
-            echo "Out-of-HARD-scope dirs (research/, zk/, bench/, .claude/) — staged rollout."
+            echo "Out-of-HARD-scope dirs (bench/, .claude/) — staged rollout. (research/ + zk/ are HARD as of sq-rqyo.)"
             echo ""
             echo '```'
             grep -oE ' (MD[0-9]+/[a-z0-9-]+)' md-advisory.txt | sort | uniq -c | sort -rn || true

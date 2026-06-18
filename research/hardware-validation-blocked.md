@@ -14,14 +14,14 @@ launch call.
 
 **Rung 1 — spot c7i.48xlarge (192 vCPU, 2 sockets, 384 GB):**
 
-```
+```text
 --- RUNG 1 (spot c7i.48xlarge) FAILED 2026-06-11T11:10:40Z ---
 aws: [ERROR]: An error occurred (AuthFailure.ServiceLinkedRoleCreationNotPermitted) when calling the RunInstances operation: The provided credentials do not have permission to create the service-linked role for EC2 Spot Instances.
 ```
 
 **Rung 2 — on-demand c7i.48xlarge:**
 
-```
+```text
 --- RUNG 2 (on-demand c7i.48xlarge) FAILED 2026-06-11T11:11:10Z ---
 aws: [ERROR]: An error occurred (VcpuLimitExceeded) when calling the RunInstances operation: You have requested more vCPU capacity than your current vCPU limit of 16 allows for the instance bucket that the specified instance type belongs to. Please visit http://aws.amazon.com/contact-us/ec2-request to request an adjustment to this limit.
 ```

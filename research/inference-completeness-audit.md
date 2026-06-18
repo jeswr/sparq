@@ -114,7 +114,7 @@ suite) stays green.)
 | cax-adc | ✅ **(this thread)** | clash, members list |
 | dt-type1/2, dt-eq, dt-not-type | ◑ harness-level **by design** | literal datatype typing/value equality are VALUE-SPACE judgements, not triple joins: materializing dt-eq means a `sameAs` edge for every co-valued literal pair (quadratic in literals), and dt-type2 types every literal occurrence. The harness D-machinery compares values at entailment-check time instead; rdf-mt passes 48/48 incl. every datatype case. dt-diff's only rule-consequence (clash with derived sameAs) IS in the store path as the literal-sameAs clash. |
 | dt-diff | ✅ **(this thread)** | as the literal-sameAs clash |
-| scm-cls | ◑ partial **by design** | per declared class: `c ⊑ c`, `c ≡ c`, `c ⊑ owl:Thing`, `owl:Nothing ⊑ c` — reflexive tautologies plus 2·|classes| Thing/Nothing edges that no rule premise consumes (every rule joining on `subClassOf` is a no-op on reflexive edges) and no query wants un-asked. Added by the SPARQL-regime layer where the regime explicitly demands them; the entailment suite passes. |
+| scm-cls | ◑ partial **by design** | per declared class: `c ⊑ c`, `c ≡ c`, `c ⊑ owl:Thing`, `owl:Nothing ⊑ c` — reflexive tautologies plus 2·\|classes\| Thing/Nothing edges that no rule premise consumes (every rule joining on `subClassOf` is a no-op on reflexive edges) and no query wants un-asked. Added by the SPARQL-regime layer where the regime explicitly demands them; the entailment suite passes. |
 | scm-sco, scm-spo | ✅ | rdfs11/5 |
 | scm-eqc1, scm-eqp1 | ✅ | equivalence folded into subsumption both ways |
 | scm-eqc2, scm-eqp2 | ✅ **(this thread)** | mutual subsumption ⊢ equivalence (post-pass) |

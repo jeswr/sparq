@@ -90,7 +90,7 @@ realizable on the now-merged degree-reduction backend):
 | **`a (p){1,k} b`** (bounded `+`) | between 1 and `k` hops of `p` | UNION of `k` fixed chains, lengths `1..k` | **YES** — `k` BGP chains, deduped (§2.2) |
 | **`a (p){0,k} b`** (bounded `*`, reflexive) | between 0 and `k` hops | the `{1,k}` union PLUS the reflexive `a = b` pair (length-0) | **YES** — add the diagonal (§2.3) |
 | **`a (p?) b`** (`ZeroOrOnePath`, the special case `{0,1}`) | 0 or 1 hop | reflexive pair ∪ one 1-hop pattern | **YES** |
-| **`a (p₁ | p₂) b`** (alternation) | one hop via `p₁` OR `p₂` | UNION of fixed chains, one per branch | **YES** — union of fixed BGPs (§2.4) |
+| **`a (p₁ \| p₂) b`** (alternation) | one hop via `p₁` OR `p₂` | UNION of fixed chains, one per branch | **YES** — union of fixed BGPs (§2.4) |
 | **bounded nesting / composition** of the above | e.g. `a (p/q){1,k} b` | distribute the bound; each fixed-length expansion is a fixed BGP | **YES** if every repetition operator carries an explicit finite bound |
 
 **Honest boundary conditions (stated, not hidden):**
@@ -139,7 +139,7 @@ on top.
 A fixed exactly-`k` path `?a (p){k} ?b` introduces `k−1` **fresh intermediate variables**
 `?z₁ … ?z_{k−1}` and rewrites to the `k`-pattern conjunctive BGP
 
-```
+```text
 ?a p ?z₁ .  ?z₁ p ?z₂ .  …  ?z_{k−2} p ?z_{k−1} .  ?z_{k−1} p ?b .
 ```
 
