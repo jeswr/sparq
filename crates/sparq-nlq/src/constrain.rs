@@ -466,4 +466,306 @@ mod tests {
         assert_eq!(edit_distance("abc", "abc"), 0);
         assert_eq!(edit_distance("", "abc"), 3);
     }
+
+    /// The set of unknown-predicate IRIs reported for `q`, sorted for order-insensitive
+    /// comparison. Asserting on this proves the algebra walk actually *descended* into
+    /// the construct under test (an undescended arm would report nothing). [OPUS-4.8]
+    fn unknown_iris(q: &str) -> Vec<String> {
+        let g = graph();
+        let mut iris: Vec<String> = unknown_terms(&g, &parse(q))
+            .into_iter()
+            .map(|u| u.iri)
+            .collect();
+        iris.sort();
+        iris
+    }
+
+    #[test]
+    fn union_descends_into_both_branches() {
+        // One unknown predicate in each UNION branch — both must be reported.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { { ?s ex:gone ?o } UNION { ?s ex:missing ?o } }",
+        );
+        assert_eq!(
+            iris,
+            vec![
+                "http://example.org/gone".to_string(),
+                "http://example.org/missing".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn minus_descends_into_both_branches() {
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o MINUS { ?s ex:nope ?o } }",
+        );
+        assert_eq!(iris, vec!["http://example.org/nope".to_string()]);
+    }
+
+    #[test]
+    fn optional_leftjoin_descends_into_right_and_its_filter() {
+        // OPTIONAL lowers to a LeftJoin whose `expression` is the inline FILTER; the
+        // unknown predicate lives in an EXISTS inside that join condition, so this also
+        // exercises the LeftJoin.expression -> walk_expr -> Exists -> walk_pattern path.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE {\n\
+               ?s ex:knows ?o\n\
+               OPTIONAL { ?s ex:label ?l FILTER EXISTS { ?s ex:phantom ?x } }\n\
+             }",
+        );
+        // `ex:label` is also absent from the fixture; both should surface.
+        assert_eq!(
+            iris,
+            vec![
+                "http://example.org/label".to_string(),
+                "http://example.org/phantom".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_expression_binary_and_unary_and_exists_are_walked() {
+        // FILTER ( EXISTS{...} && ! EXISTS{...} ) — exercises the binary (And), unary
+        // (Not) and Exists arms of walk_expr, each carrying a distinct unknown predicate
+        // through a nested EXISTS pattern.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE {\n\
+               ?s ex:knows ?o\n\
+               FILTER ( EXISTS { ?s ex:a ?z } && ! EXISTS { ?s ex:b ?z } )\n\
+             }",
+        );
+        assert_eq!(
+            iris,
+            vec![
+                "http://example.org/a".to_string(),
+                "http://example.org/b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn bind_extend_expression_is_walked() {
+        // BIND lowers to Extend{expression}; the EXISTS inside the bound expression must
+        // be descended.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?b WHERE {\n\
+               ?s ex:knows ?o\n\
+               BIND( EXISTS { ?s ex:bound ?z } AS ?b )\n\
+             }",
+        );
+        assert_eq!(iris, vec!["http://example.org/bound".to_string()]);
+    }
+
+    #[test]
+    fn function_call_if_and_coalesce_expression_args_are_walked() {
+        // COALESCE(IF(EXISTS{p1}, ..., ...), ...) inside a FILTER reaches the
+        // FunctionCall/If/Coalesce arms of walk_expr.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE {\n\
+               ?s ex:knows ?o\n\
+               FILTER( COALESCE( IF( EXISTS { ?s ex:cond ?z }, true, false ), false ) )\n\
+             }",
+        );
+        assert_eq!(iris, vec!["http://example.org/cond".to_string()]);
+    }
+
+    #[test]
+    fn property_path_reverse_sequence_alternative_and_negated_set_are_walked() {
+        // ^ex:r1 / (ex:r2 | ex:r3) and a negated property set !(ex:r4) — exercises
+        // Reverse, Sequence, Alternative and NegatedPropertySet in walk_path. All four
+        // predicates are absent from the fixture.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE {\n\
+               ?s ^ex:r1 / (ex:r2 | ex:r3) ?o .\n\
+               ?s !(ex:r4) ?z\n\
+             }",
+        );
+        assert_eq!(
+            iris,
+            vec![
+                "http://example.org/r1".to_string(),
+                "http://example.org/r2".to_string(),
+                "http://example.org/r3".to_string(),
+                "http://example.org/r4".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn property_path_zero_or_one_is_walked() {
+        // ex:r? lowers to a ZeroOrOne path.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:opt? ?o }",
+        );
+        assert_eq!(iris, vec!["http://example.org/opt".to_string()]);
+    }
+
+    #[test]
+    fn modifiers_distinct_orderby_slice_group_are_transparent() {
+        // DISTINCT + GROUP BY + ORDER BY + LIMIT all wrap the inner pattern; the walk
+        // must see through every modifier layer to the unknown predicate underneath.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT DISTINCT ?s WHERE { ?s ex:hidden ?o }\n\
+             GROUP BY ?s ORDER BY ?s LIMIT 10",
+        );
+        assert_eq!(iris, vec!["http://example.org/hidden".to_string()]);
+    }
+
+    #[test]
+    fn graph_block_inner_is_walked() {
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { GRAPH ?g { ?s ex:ingraph ?o } }",
+        );
+        assert_eq!(iris, vec!["http://example.org/ingraph".to_string()]);
+    }
+
+    #[test]
+    fn values_block_carries_no_vocabulary() {
+        // A VALUES-only body binds data, not schema; nothing is flagged (the Values arm
+        // is a no-op by design).
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { VALUES ?s { ex:alice ex:bob } }",
+        );
+        assert!(iris.is_empty());
+    }
+
+    #[test]
+    fn service_block_vocabulary_is_out_of_scope() {
+        // A SERVICE block's predicates belong to a remote dictionary; they must NOT be
+        // flagged against the local store.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { SERVICE <http://remote.example/sparql> { ?s ex:remote ?o } }",
+        );
+        assert!(iris.is_empty());
+    }
+
+    #[test]
+    fn construct_walks_both_template_and_where() {
+        // CONSTRUCT { ?s ex:outT ?o } WHERE { ?s ex:inW ?o } — the walk must cover both
+        // the template (walk_triple) and the WHERE pattern.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             CONSTRUCT { ?s ex:outT ?o } WHERE { ?s ex:inW ?o }",
+        );
+        assert_eq!(
+            iris,
+            vec![
+                "http://example.org/inW".to_string(),
+                "http://example.org/outT".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn ask_query_pattern_is_walked() {
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             ASK { ?s ex:asked ?o }",
+        );
+        assert_eq!(iris, vec!["http://example.org/asked".to_string()]);
+    }
+
+    #[test]
+    fn quoted_triple_subject_and_object_predicates_are_descended() {
+        // RDF 1.2 triple terms nest predicates in subject and object position; the walk
+        // recurses into both. spargebra lowers `<< ?a ex:inner ?b >>` to a reifier whose
+        // predicate is `rdf:reifies`, so that vocabulary term (absent from our fixture)
+        // also surfaces — what matters is that BOTH nested `ex:inner`/`ex:innerObj`
+        // predicates are reached, proving the TermPattern::Triple descent fires.
+        let iris = unknown_iris(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { << ?a ex:inner ?b >> ex:knows << ?c ex:innerObj ?d >> }",
+        );
+        assert!(
+            iris.contains(&"http://example.org/inner".to_string()),
+            "subject-position nested predicate must be reached, got {iris:?}"
+        );
+        assert!(
+            iris.contains(&"http://example.org/innerObj".to_string()),
+            "object-position nested predicate must be reached, got {iris:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_unknown_term_is_reported_once() {
+        // Same unknown predicate twice (two BGP triples) — de-duplicated to one report.
+        let g = graph();
+        let q = parse(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:dup ?o . ?o ex:dup ?z }",
+        );
+        let unknowns = unknown_terms(&g, &q);
+        assert_eq!(unknowns.len(), 1);
+        assert_eq!(unknowns[0].iri, "http://example.org/dup");
+    }
+
+    #[test]
+    fn same_iri_in_predicate_and_class_role_are_distinct_reports() {
+        // `ex:Foo` used both as a predicate and as an rdf:type object: the (iri, role)
+        // key keeps them separate, so two distinct UnknownTerms are produced.
+        let g = graph();
+        let q = parse(
+            "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n\
+             PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:Foo ?o . ?o rdf:type ex:Foo }",
+        );
+        let mut roles: Vec<TermRole> = unknown_terms(&g, &q)
+            .into_iter()
+            .filter(|u| u.iri == "http://example.org/Foo")
+            .map(|u| u.role)
+            .collect();
+        roles.sort_by_key(|r| r.label());
+        assert_eq!(roles, vec![TermRole::Class, TermRole::Predicate]);
+    }
+
+    #[test]
+    fn suggestions_capped_and_ordered_by_edit_distance() {
+        // A namespace with several near-neighbours: suggestions are capped at
+        // MAX_SUGGESTIONS and the distance-1 terms beat the distance-2 one.
+        let ttl = r#"
+            @prefix ex: <http://example.org/> .
+            ex:a ex:val1 1 ; ex:val2 2 ; ex:val3 3 ; ex:val4 4 ; ex:valXY 9 .
+        "#;
+        let g = Graph::load_str(ttl, "turtle").expect("graph parses");
+        let q = parse(
+            "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:val0 ?o }",
+        );
+        let unknowns = unknown_terms(&g, &q);
+        assert_eq!(unknowns.len(), 1);
+        let s = &unknowns[0].suggestions;
+        assert!(s.len() <= MAX_SUGGESTIONS, "capped, got {s:?}");
+        assert!(!s.is_empty(), "near neighbours exist, got {s:?}");
+        // `ex:val1..val4` are edit-distance 1 from `ex:val0`; `ex:valXY` is distance 2,
+        // so within the cap the distance-1 terms win and `valXY` does not lead.
+        assert_ne!(s[0], "http://example.org/valXY");
+    }
+
+    #[test]
+    fn repair_message_handles_unknown_with_no_suggestions() {
+        // The no-hint branch of dictionary_repair_message (empty suggestions): the term
+        // is listed but no "did you mean" clause is appended.
+        let unknowns = vec![UnknownTerm {
+            iri: "http://other.example/bar".into(),
+            role: TermRole::Class,
+            suggestions: vec![],
+        }];
+        let msg = dictionary_repair_message(&unknowns);
+        assert!(msg.contains("class <http://other.example/bar>"));
+        assert!(!msg.contains("did you mean"));
+        assert!(msg.contains("appear in the schema summary"));
+    }
 }

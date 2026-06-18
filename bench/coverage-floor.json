@@ -38,7 +38,8 @@
       "floor": 88
     },
     "sparq-nlq": {
-      "floor": 85
+      "floor": 91,
+      "note": "[OPUS-4.8] sq-1jte: behavioural tests for the lowest-covered module (constrain.rs algebra walk — UNION/MINUS/OPTIONAL/FILTER-EXISTS/BIND/IF/COALESCE/property-path variants/GRAPH/SERVICE/VALUES/CONSTRUCT/ASK/quoted-triple descent + dedup + suggestion ranking) lifted constrain.rs line% 69.31 -> 93.65 and the crate 88.52 -> 93.44; floor = floor(measured) - 2 margin."
     },
     "sparq-parse": {
       "floor": 91
