@@ -17,6 +17,7 @@ const BUILT_SURFACES = new Set([
   "mpc",
   "zk",
   "streaming-rsp",
+  "full-text",
 ]);
 const PLACEHOLDER_SURFACES = ALL_SURFACES.filter(
   (s) =>
