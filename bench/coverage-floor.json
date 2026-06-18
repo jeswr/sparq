@@ -16,7 +16,7 @@
       "note": "test-driver crate: the W3C suites run as the BINARIES (cargo run), so `cargo llvm-cov --package` (which runs cargo test) sees only a few unit tests. Low % is expected; floor 0."
     },
     "sparq-core": {
-      "floor": 78
+      "floor": 90
     },
     "sparq-engine": {
       "floor": 83
