@@ -377,6 +377,13 @@ mod tests {
     /// whole direction's votes zeroed the tie-break collapses the graph into a SINGLE
     /// community, so asserting the two distinct communities (and the membership) catches both
     /// the :133 and :136 `+=`→`*=` mutants.
+    ///
+    /// This is deterministic because [`NodeGraph`] assigns node indices in a CANONICAL
+    /// (ascending-term) order — see `NodeGraph::build_with`. Before that fix the index order
+    /// followed `Graph::iter_ids`, i.e. dictionary-id order, which the parallel sharded dict
+    /// merge (`sparq-core` `parallel` feature, on by default) assigns thread-count-dependently;
+    /// on this near-balanced graph that visiting order flipped LP between one and two
+    /// communities, so this exact assertion was green locally but collapsed-to-one in CI.
     #[test]
     fn label_propagation_two_communities_exact_membership() {
         let nt = r#"
@@ -449,5 +456,34 @@ mod tests {
         let a = ng.index_of(a_id).unwrap();
         assert_eq!(ng.term(&g, a), iri("http://e/a"));
         assert_eq!(ng.dict_id(a), a_id);
+    }
+
+    /// [OPUS-4.8] sq-lqty determinism regression: `NodeGraph` must assign node indices in
+    /// CANONICAL ascending-term order, independent of the dictionary-id order (which the
+    /// parallel sharded loader assigns thread-count-dependently). This is the invariant that
+    /// makes the order-sensitive `label_propagation` partition reproducible across hosts; the
+    /// failing CI for this PR was exactly its absence. We assert the terms are in ascending
+    /// order — the property every `NodeGraph` consumer can now rely on — using IRIs whose
+    /// document order (`d`, `a`, `c`, `b`) differs from their sorted order (`a`, `b`, `c`, `d`).
+    #[test]
+    fn node_indices_are_canonical_term_order() {
+        let nt = r#"
+<http://e/d> <http://p/k> <http://e/a> .
+<http://e/c> <http://p/k> <http://e/b> .
+"#;
+        let g = Graph::load_str(nt, "nt").unwrap();
+        let ng = NodeGraph::build(&g);
+        let terms: Vec<String> = (0..ng.len()).map(|i| ng.term(&g, i).to_string()).collect();
+        let mut sorted = terms.clone();
+        sorted.sort();
+        assert_eq!(
+            terms, sorted,
+            "node indices are not in canonical term order"
+        );
+        // And the specific expected mapping: a→0, b→1, c→2, d→3 regardless of load order.
+        assert_eq!(idx(&g, &ng, "http://e/a"), 0);
+        assert_eq!(idx(&g, &ng, "http://e/b"), 1);
+        assert_eq!(idx(&g, &ng, "http://e/c"), 2);
+        assert_eq!(idx(&g, &ng, "http://e/d"), 3);
     }
 }

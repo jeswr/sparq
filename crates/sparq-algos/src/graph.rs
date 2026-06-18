@@ -64,11 +64,26 @@ impl NodeGraph {
     /// **collapsed** (an unweighted simple-digraph view): `a → b` asserted by three
     /// predicates is one edge, so PageRank and degree count it once. Self-loops
     /// (`s == o`) are kept — they are meaningful for PageRank's stationary mass.
+    ///
+    /// # Determinism
+    ///
+    /// Node indices `0..n` are assigned in **canonical ascending-term order** (the
+    /// `oxrdf::Term` total order), NOT in graph traversal / dictionary-id order. This makes
+    /// the view — and hence every algorithm over it — REPRODUCIBLE regardless of how the
+    /// source graph's dictionary ids were assigned. That matters because `sparq-core`'s
+    /// parallel sharded dictionary merge (the default `parallel` feature) assigns ids in a
+    /// thread-count-dependent order, so `iter_ids` (id-sorted) visits nodes differently on a
+    /// 2-core vs an 8-core host. Order-sensitive heuristics such as
+    /// [`label_propagation`](crate::label_propagation) would otherwise return a
+    /// host-dependent partition for the same graph; canonicalising the node order here pins a
+    /// single answer. [OPUS-4.8] sq-lqty.
     pub fn build_with(graph: &Graph, filter: NodeFilter) -> NodeGraph {
-        // Map sparq-core dict id -> dense node index, assigned in first-seen order.
+        // Map sparq-core dict id -> provisional (first-seen) node index. The final indices
+        // are re-derived below in canonical term order, so this first pass only needs to
+        // dedupe nodes and edges; its index values are temporary.
         let mut index_of: FxHashMap<Id, u32> = FxHashMap::default();
         let mut dict_ids: Vec<Id> = Vec::new();
-        // Deduplicated directed edges as (src_index, dst_index).
+        // Deduplicated directed edges as (src_index, dst_index) in PROVISIONAL index space.
         let mut edge_set: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
 
         let intern = |id: Id, index_of: &mut FxHashMap<Id, u32>, dict_ids: &mut Vec<Id>| -> u32 {
@@ -94,7 +109,28 @@ impl NodeGraph {
         }
 
         let n = dict_ids.len();
-        let mut edges: Vec<(u32, u32)> = edge_set.into_iter().collect();
+
+        // Canonicalise: assign final node index 0..n in ascending canonical-term order, so
+        // the whole view is independent of the (possibly thread-count-dependent) dictionary-id
+        // order. The sort key is the term's canonical string form (`Term`'s `Display`, the
+        // N-Triples lexical form — a stable total order; `Term` itself is not `Ord`). Keys are
+        // distinct because dictionary terms are distinct. `perm[old_index]` is the node's final
+        // index; `dict_ids` is reordered to match.
+        let keys: Vec<String> = dict_ids
+            .iter()
+            .map(|&id| graph.dict.term(id).to_string())
+            .collect();
+        let mut order: Vec<u32> = (0..n as u32).collect();
+        order.sort_unstable_by(|&p, &q| keys[p as usize].cmp(&keys[q as usize]));
+        let mut perm = vec![0u32; n];
+        for (new_ix, &old_ix) in order.iter().enumerate() {
+            perm[old_ix as usize] = new_ix as u32;
+        }
+        let dict_ids: Vec<Id> = order.iter().map(|&old| dict_ids[old as usize]).collect();
+        let mut edges: Vec<(u32, u32)> = edge_set
+            .into_iter()
+            .map(|(s, d)| (perm[s as usize], perm[d as usize]))
+            .collect();
 
         // Build forward CSR (sorted by src).
         edges.sort_unstable();
