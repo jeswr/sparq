@@ -51,6 +51,13 @@ shacl-af = ["shacl", "sparq-shacl/shacl-af"]
 # code and stays under the perf-gate floor. The site REPL build (js `build:wasm`) turns this
 # on so the upload/URL loader keeps the JSON-LD capability.
 jsonld = ["sparq-core/jsonld"]
+# [OPUS-4.8] sq-0ptd (gh-54): OPT-IN `REGEX` / `REPLACE` in the browser. `sparq-engine`'s
+# `regex` feature is default-ON for native but this crate disables the engine's defaults
+# (to keep the regex automata out of the lean bundle — the `wasm_bundle_bytes` perf-gate
+# floor), so `REGEX`/`REPLACE` are compiled OUT by default. Turn this on to forward to
+# `sparq-engine/regex` and get them back (CONTAINS/STRSTARTS/STRENDS/LCASE/... are always
+# present — they are not behind this feature). OFF by default; the lean bundle is unchanged.
+regex = ["sparq-engine/regex"]
 
 [dev-dependencies]
 # [OPUS-4.8] sq-9qz6 pt2 — headless wasm test harness. Exercises the #[wasm_bindgen]

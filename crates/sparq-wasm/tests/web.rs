@@ -265,6 +265,47 @@ fn query_quads_chunks_reassemble() {
     );
 }
 
+// ---- sq-0ptd (gh-54): string functions retained in the real wasm Store ----
+
+/// CONTAINS / STRSTARTS / LCASE are exercisable through the REAL exported `Store::query`
+/// in a genuine wasm runtime — none is compiled out for `wasm32`. This proves the trio the
+/// gh-54 audit calls out survives the wasm build end to end (the native
+/// `regression_string_functions` test asserts the same via the engine path).
+#[wasm_bindgen_test]
+fn string_functions_retained() {
+    let data = r#"@prefix ex: <http://ex/> .
+        ex:a ex:name "Alice" . ex:b ex:name "BOB" . ex:c ex:name "carol" ."#;
+    let store = Store::load(data, "turtle").unwrap();
+
+    // STRSTARTS: only "Alice" starts with "Al".
+    let j = store
+        .query(r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(STRSTARTS(?n, "Al")) }"#)
+        .unwrap();
+    assert!(j.contains("\"value\":\"Alice\""), "STRSTARTS: {j}");
+    assert_eq!(j.matches("\"n\":{").count(), 1, "STRSTARTS one row: {j}");
+
+    // CONTAINS over LCASE: "BOB"->"bob" and "carol" both contain "o".
+    let j = store
+        .query(r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(CONTAINS(LCASE(?n), "o")) }"#)
+        .unwrap();
+    assert_eq!(
+        j.matches("\"n\":{").count(),
+        2,
+        "CONTAINS(LCASE(..)) matches BOB + carol: {j}"
+    );
+
+    // LCASE as a projected (BIND) value.
+    let j = store
+        .query(
+            r#"PREFIX ex: <http://ex/> SELECT ?l WHERE { ex:b ex:name ?n BIND(LCASE(?n) AS ?l) }"#,
+        )
+        .unwrap();
+    assert!(
+        j.contains("\"value\":\"bob\""),
+        "LCASE projects lowercase: {j}"
+    );
+}
+
 // ---- compressed store: identical results, smaller footprint ----
 
 /// `loadCompressed` returns byte-identical SELECT JSON to the raw store and reports a
