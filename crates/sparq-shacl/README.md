@@ -157,13 +157,20 @@ implemented. A component node — typed `sh:ConstraintComponent` or any
 (`sh:validator`, or the kind-specific `sh:nodeValidator`/`sh:propertyValidator`,
 chosen per shape kind, §6.2.2) activates on any shape that carries the
 parameter predicates. The validator runs with `$this`, `$value`, each parameter
-VALUE (`$paramName`) and (on a property shape) `$PATH` pre-bound; `sh:ask`
-validators run per value node (`false` ⇒ violation), `sh:select` validators run
-per focus node (each solution a violation, §6.3). `sh:optional true` parameters
-need not be present. The component's IRI is the
-`sh:sourceConstraintComponent`. The remaining §6 limit is the full
-`sparql/pre-binding` semantics (rejecting variable re-binding, `$shapesGraph`) —
-see the open beads for this crate (`bd list -l area:sparq-shacl`).
+VALUE (`$paramName`, where the variable name is the **local name of the
+parameter's `sh:path` IRI** — *not* its `sh:name` display label, §6.2.1) and (on
+a property shape) `$PATH` pre-bound; `sh:ask` validators run per value node
+(`false` ⇒ violation), `sh:select` validators run per focus node (each solution
+a violation, §6.3). `$PATH` is a property PATH, not a term, so — like the §5.2
+`sh:sparql` path — it is bound by re-parsing the validator per property shape
+with the path's SPARQL property-path form substituted, rather than via the
+VALUES table the term bindings use. `sh:optional true` parameters need not be
+present. The component's IRI is the `sh:sourceConstraintComponent`. Pinned by
+the W3C `sparql/component` sub-suite (`w3c_sparql_component.rs`, which resolves
+the suite's `owl:imports <http://datashapes.org/dash>` against a vendored,
+minimal pinned excerpt at `tests/vendor/dash.ttl`). The remaining §6 limit is the
+full `sparql/pre-binding` semantics (rejecting variable re-binding,
+`$shapesGraph`) — see the open beads for this crate (`bd list -l area:sparq-shacl`).
 
 **SHACL Advanced Features rules (`sh:rule` + `sh:values`, SHACL-AF) — opt-in
 feature `shacl-af`:** an *inference* step (it produces triples; it is not part of

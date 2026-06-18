@@ -231,6 +231,20 @@ let shapes = Graph::load_str(r#"
 // sh:propertyValidator are preferred over the generic sh:validator by shape kind (§6.2.2).
 ```
 
+On a PROPERTY shape, a validator that references the `$PATH` variable gets it
+pre-bound to the shape's property path (SHACL §6.3). Because `$PATH` is a SPARQL
+property PATH (not a term), it is bound — like the §5.2 `sh:sparql` path — by
+re-parsing the validator per property shape with the path's property-path form
+textually substituted, rather than via the VALUES table the term bindings
+(`$this` / `$value` / `$paramName`) use. The re-parsed per-shape validator is
+held off the public `Component` enum in a crate-private store; the public
+`Component::CustomSparql { component, args, path_validator }` variant carries
+only an `Option<usize>` index into it (`path_validator`), present when the
+shape is a property shape, the chosen validator references `$PATH`, and the
+substituted query re-parses — otherwise `None` and the component's shared
+(path-free) validator is used as-is. Each `$paramName` variable is the LOCAL
+NAME of the parameter's `sh:path` IRI (not its `sh:name` display label, §6.2.1).
+
 **Relative-IRI test files / a base IRI** — `Graph::load_str` exposes no base, so use:
 
 ```rust
@@ -358,15 +372,17 @@ the suite is not fetched).
   an algebra-level VALUES on the parsed query — it lands below solution modifiers, so
   `LIMIT`/`ORDER BY`/`DISTINCT`/`SELECT *` behave correctly. `sh:prefixes` chases
   `sh:declare`(`sh:prefix`/`sh:namespace`) transitively through `owl:imports`.
-- **§6 limits:** the W3C `sparql/component/*` suite is NOT directly runnable offline (it
-  `owl:imports` the external `http://datashapes.org/dash` vocabulary); declare custom
-  components inline in your shapes graph. Full `sparql/pre-binding` semantics (rejecting
+- **§6 limits:** the W3C `sparql/component/*` suite `owl:imports` the external
+  `http://datashapes.org/dash` vocabulary; it is run offline (`tests/w3c_sparql_component.rs`)
+  by resolving that import against a vendored, minimal pinned excerpt at
+  `crates/sparq-shacl/tests/vendor/dash.ttl`. Full `sparql/pre-binding` semantics (rejecting
   variable re-binding, `$shapesGraph`) are out of scope — see the crate's open beads (`bd list -l area:sparq-shacl`).
 - **W3C conformance:** 98/98 of the core `sht:Validate` suite passes. Reproduce with
   `crates/sparq-shacl/fetch-shacl-tests.sh` then
   `cargo test -p sparq-shacl --test w3c_core` (self-skips if the gitignored suite is absent).
 - §6 SPARQL-based constraint *components* are implemented and tested
-  (`tests/sparql_components.rs`); the crate README documents them under
+  (`tests/sparql_components.rs` plus the W3C `sparql/component` sub-suite in
+  `tests/w3c_sparql_component.rs`); the crate README documents them under
   "Supported constraint components".
 
 ## See also

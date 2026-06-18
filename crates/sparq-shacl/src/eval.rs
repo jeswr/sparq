@@ -1,7 +1,9 @@
 //! Constraint-component evaluation: walks each targeted shape's focus nodes and
 //! emits [`ValidationResult`]s via direct graph scans (no SPARQL round-trip).
 
-use crate::model::{sh, Component, ComponentDef, Shape, ShapesModel, Target};
+use crate::model::{
+    sh, Component, ComponentDef, PreparedComponentValidator, Shape, ShapesModel, Target,
+};
 use crate::path::Path;
 use crate::report::ValidationResult;
 use crate::sparql::{ComponentResultFields, PreparedValidator};
@@ -809,9 +811,19 @@ impl<'a> Validator<'a> {
             // activated on this shape. ASK validators run per value node
             // (ASK=false → violation); SELECT validators run per focus node
             // (each solution → violation). Parameters are pre-bound as $paramName.
-            Component::CustomSparql { component, args } => {
-                self.eval_custom_component(sid, focus, values, *component, args, out)
-            }
+            Component::CustomSparql {
+                component,
+                args,
+                path_validator,
+            } => self.eval_custom_component(
+                sid,
+                focus,
+                values,
+                *component,
+                args,
+                path_validator.map(|i| &self.shapes.path_validators[i]),
+                out,
+            ),
             // [OPUS-4.8] (sq-mk9n, `shacl-af`) `sh:expression`
             // (`sh:ExpressionConstraintComponent`): a value node is violated when
             // the node expression does NOT evaluate to `{ true }` for that value.
@@ -931,6 +943,7 @@ impl<'a> Validator<'a> {
     /// shape) `$PATH` pre-bound; ASK validators additionally run per VALUE NODE
     /// with `$value` pre-bound (ASK=false → one violation for that value),
     /// SELECT validators run once per focus node (§5.2 solution→result mapping).
+    #[allow(clippy::too_many_arguments)]
     fn eval_custom_component(
         &mut self,
         sid: usize,
@@ -938,13 +951,22 @@ impl<'a> Validator<'a> {
         values: &[Term],
         cidx: usize,
         args: &[Option<Term>],
+        path_validator: Option<&PreparedComponentValidator>,
         out: &mut Vec<ValidationResult>,
     ) {
         let comp: &ComponentDef = &self.shapes.components[cidx];
         let shape = &self.shapes.shapes[sid];
         let is_property_shape = shape.path.is_some();
-        let Some(validator) = comp.validator_for(is_property_shape) else {
-            return; // no usable validator for this shape kind (lenient)
+        // [OPUS-4.8] `$PATH` pre-binding (SHACL §6.3): a property shape whose
+        // chosen validator references `$PATH` carries a per-shape re-parsed
+        // validator (built at model-build time, with the shape's property-path
+        // expression substituted). Prefer it; otherwise use the shared one.
+        let validator = match path_validator {
+            Some(v) => v,
+            None => match comp.validator_for(is_property_shape) {
+                Some(v) => v,
+                None => return, // no usable validator for this shape kind (lenient)
+            },
         };
         let message = validator.message.clone();
         let component_iri = match &comp.node {
@@ -962,14 +984,12 @@ impl<'a> Validator<'a> {
                 param_bindings.push((p.var.clone(), term.clone()));
             }
         }
-        // NOTE (scope): `$PATH` pre-binding for `sh:propertyValidator` is NOT done.
-        // `$PATH` is a SPARQL property PATH (not a term) so it cannot be supplied
-        // via the VALUES table the parameter/`$this`/`$value` bindings use, and the
-        // component's validator query is pre-parsed (shared across shapes), so the
-        // textual `$PATH` substitution the §5.2 `sh:sparql` path performs cannot be
-        // applied per-shape here. ASK validators get `$value` (the value node) and
-        // the parameters, which covers the common property-validator pattern. See
-        // the module/TODO scope note.
+        // `$PATH` (SHACL §6.3): a property PATH, not a term, so it cannot ride the
+        // VALUES table the `$this`/`$value`/`$paramName` bindings use. Instead the
+        // chosen validator is RE-PARSED per property shape with the path's SPARQL
+        // property-path form textually substituted (the `path_validator` above) —
+        // the same approach the §5.2 `sh:sparql` path takes. `$this`/`$value`/the
+        // parameters still pre-bind through VALUES below.
         let shape_path = shape.path.clone();
         let severity = shape.severity.clone();
         let shape_messages = shape.messages.clone();
