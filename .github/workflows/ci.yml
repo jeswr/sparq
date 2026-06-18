@@ -1189,8 +1189,18 @@ jobs:
     # zero-copy dictionary, SIMD) so a PR that ADDS unsafe is visible in the run summary
     # without blocking. Non-gating by design: every step is `continue-on-error: true`
     # (cargo-geiger fails the run on some dependency-graph shapes, and we never want this
-    # report to break CI). Promote to a gate later only with a checked-in unsafe-count
-    # ratchet (mirroring the coverage/conformance idiom) — out of scope here.
+    # report to break CI).
+    #
+    # [OPUS-4.8] sq-4plh: the "promote to a gate later only with a checked-in unsafe-count
+    # ratchet (mirroring the coverage/conformance idiom)" follow-up this comment used to
+    # anticipate IS NOW DONE — see the `unsafe-register (count ratchet)` job above
+    # (sq-toze.6 / cert gap GX-5, PR #217): it ratchets the first-party `unsafe` count per
+    # crate against the checked-in floor in `bench/unsafe-snapshot.json` (the
+    # `bench/coverage-floor.json` analogue) and FAILS a PR that adds an unsafe site without
+    # a `compliance/memsafety/unsafe-register.md` row + re-seed. That job — not this one —
+    # is the gate; this `geiger` job stays informational (cargo-geiger is too heavy/flaky
+    # for a per-PR gating lane), so the two are complementary: GATE via the source-scan
+    # ratchet, VISIBILITY via cargo-geiger.
     name: unsafe report (cargo-geiger, informational)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
