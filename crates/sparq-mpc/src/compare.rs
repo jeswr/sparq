@@ -168,13 +168,51 @@ pub const DECOMP_MASK_BITS: usize = 60;
 /// cleartext-operand [`COMPARE_BITS`] (60) because the in-MPC path masks the sum
 /// and opens `sum + r`: with `p = 2^61−1` there is only ~60 bits of mask headroom,
 /// so a `2^{-40}`-hiding mask leaves only 20 bits for the value. This trade-off is
-/// stated, not hidden (see the module "magnitude bound" doc and the follow-up
-/// bead for lifting it via a larger field or a square-root random-bit protocol).
+/// stated, not hidden.
+///
+/// [OPUS-4.8] sq-bgsn — this slack is **lifted** by the Rabbit-style path
+/// (`secure_bit_decompose_rabbit`, [`RABBIT_VALUE_BITS`] = 60): it recovers the
+/// value EXACTLY through the modular wrap instead of avoiding it, so it has no
+/// value/mask slack and supports the full field width. `disclose_threshold_verdict`
+/// now routes through that path; this masked-open primitive is retained for the
+/// (lower-magnitude) malicious twin in [`crate::auth_disclose`] and the differential
+/// regression tests.
 pub const DECOMP_VALUE_BITS: usize = DECOMP_MASK_BITS - DECOMP_STAT_SECURITY_BITS;
 
 /// The exclusive upper bound a sum must respect for the in-MPC bit-decomposition
 /// threshold verdict: `2^DECOMP_VALUE_BITS = 2^20 = 1_048_576`.
 pub const DECOMP_VALUE_MAX_EXCLUSIVE: u64 = 1u64 << DECOMP_VALUE_BITS;
+
+// =============================================================================
+// [OPUS-4.8] sq-bgsn — WIDER MAGNITUDE via a Rabbit-style (eprint 2021/119)
+// non-masked-open bit-decomposition. The masked-open path above caps the value at
+// 2^20 because its mask must be κ = 40 bits WIDER than the value AND `value + r`
+// must not wrap p = 2^61−1 — only 60 bits of headroom, minus the 40-bit gap, = 20.
+// Rabbit removes the slack by RECOVERING the value EXACTLY through the modular wrap
+// (`x = c − r + w·p`, `w = 1{c < r}`) rather than AVOIDING the wrap, so the value
+// can span the FULL field width. See `secure_bit_decompose_rabbit`.
+// =============================================================================
+
+/// [OPUS-4.8] sq-bgsn — bit-width of the **full-field** random mask `[r]` in the
+/// Rabbit-style bit-decomposition: `ℓ = ⌈log₂ p⌉ = 61` for `p = 2^61−1`. The mask
+/// `r` is drawn uniform over `[0, 2^ℓ)` (a sum of `ℓ` square-protocol bits, so no
+/// party knows it), which COVERS the whole field. Unlike the masked-open path the
+/// mask is **not** bounded below the value — the wrap is corrected arithmetically,
+/// so there is no value/mask slack to spend.
+pub const RABBIT_MASK_BITS: usize = 61;
+
+/// [OPUS-4.8] sq-bgsn — the **supported magnitude bound** of the Rabbit-style
+/// in-MPC bit-decomposition: the value must be `< 2^`[`RABBIT_VALUE_BITS`]. Because
+/// the wrap is recovered exactly (no statistical slack), this is the **full**
+/// cleartext-operand width [`COMPARE_BITS`] = 60 — a 40-bit lift over the
+/// masked-open path's [`DECOMP_VALUE_BITS`] = 20. A 60-bit value is canonical and
+/// unambiguous in `p = 2^61−1`, so the recovered bits are exact for any value in
+/// `[0, 2^60)`.
+pub const RABBIT_VALUE_BITS: usize = COMPARE_BITS;
+
+/// [OPUS-4.8] sq-bgsn — the exclusive upper bound a value must respect for the
+/// Rabbit-style threshold verdict: `2^RABBIT_VALUE_BITS = 2^60`.
+pub const RABBIT_VALUE_MAX_EXCLUSIVE: u64 = 1u64 << RABBIT_VALUE_BITS;
 
 /// Fail-closed range check: an operand must be a canonical field element strictly
 /// below `2^COMPARE_BITS`, else the bit-decomposition comparison could wrap the
@@ -516,6 +554,13 @@ fn square_protocol_random_bit(dealer: &mut ShamirDealer) -> Result<Vec<Share>, M
 /// the cleartext-dealt version) — but here `r` is the sum of bits NO party knows.
 /// Costs `L` square-protocol bits = `L` secure multiplications + `L` opens
 /// (constant-round per bit). Honest-majority, semi-honest.
+///
+/// [OPUS-4.8] sq-bgsn — now TEST-ONLY: the production `disclose_threshold_verdict`
+/// routes through the Rabbit-style [`secure_bit_decompose_rabbit`] (full field
+/// width), which generates its full-field mask via [`deal_full_field_solved_bits`].
+/// This `DECOMP_MASK_BITS`-wide generator is retained as the masked-open path's
+/// reference for the differential regression tests.
+#[cfg(test)]
 fn deal_random_solved_bits_via_square_protocol(
     dealer: &mut ShamirDealer,
 ) -> Result<(Vec<Share>, Vec<Vec<Share>>), MpcError> {
@@ -589,6 +634,15 @@ fn secret_or(dealer: &mut ShamirDealer, a: &[Share], b: &[Share]) -> Result<Vec<
 ///
 /// Returns the `L` LSB-first secret-shared bits of `a` (each a fresh degree-`t`
 /// sharing of a 0/1). Honest-majority, semi-honest.
+///
+/// [OPUS-4.8] sq-bgsn — now TEST-ONLY: superseded on the production
+/// `disclose_threshold_verdict` path by the Rabbit-style
+/// [`secure_bit_decompose_rabbit`], which recovers the value exactly through the
+/// modular wrap (no statistical slack) and so supports the full
+/// [`RABBIT_VALUE_BITS`] = 60 magnitude rather than this path's
+/// [`DECOMP_VALUE_BITS`] = 20. Retained for the masked-open regression tests and as
+/// the semi-honest reference of the malicious twin [`crate::auth_disclose`].
+#[cfg(test)]
 fn secure_bit_decompose(
     dealer: &mut ShamirDealer,
     a: &ShamirBackend,
@@ -650,6 +704,313 @@ fn secure_bit_decompose(
         out.push(a_k);
     }
     Ok(out)
+}
+
+// =============================================================================
+// [OPUS-4.8] sq-bgsn — Rabbit-style (eprint 2021/119) FULL-FIELD-WIDTH in-MPC
+// bit-decomposition. Recovers the value EXACTLY through the modular wrap instead of
+// avoiding it, so it carries NO statistical value/mask slack and supports the full
+// `RABBIT_VALUE_BITS = 60` magnitude (vs the masked-open path's 20).
+// =============================================================================
+
+/// [OPUS-4.8] sq-bgsn — `[a ⊕ b]` (logical XOR) of two secret-shared bits:
+/// `a + b − 2·a·b`. One secure multiplication (the `a·b` term); the rest is local.
+/// Used by the Rabbit bit-add / bit-sub circuits.
+fn secret_xor(dealer: &mut ShamirDealer, a: &[Share], b: &[Share]) -> Result<Vec<Share>, MpcError> {
+    let and = secret_and(dealer, a, b)?;
+    let sum = shamir::add_shares(a, b)?;
+    shamir::sub_shares(&sum, &shamir::scale(&and, Fp::new(2)))
+}
+
+/// [OPUS-4.8] sq-bgsn — the Rabbit **`LTBits`** comparison of a PUBLIC integer `c`
+/// against the secret-shared bits `[r]_B` (LSB-first), returning a fresh degree-`t`
+/// sharing of the bit `w = 1{c < r}`. This is the wrap indicator the full-field
+/// decomposition needs: `c = (x + r) mod p` wrapped the modulus iff `c < r` (proved
+/// in the `secure_bit_decompose_rabbit` doc).
+///
+/// Same MSB-first "first differing bit decides" recurrence as
+/// [`greater_than_public_bits_with`], but oriented for `c < r` with `c` public and
+/// `r` shared: scanning MSB→LSB, `c < r` is decided by the first bit where
+/// `c_k = 0, r_k = 1` (with all higher bits equal). Tracking `eq` = "all higher bits
+/// equal so far":
+///
+/// ```text
+/// lt = 0 ; eq = 1
+/// for k from L-1 downto 0:
+///     lt = lt + eq · ((1 - c_k) · r_k)   // c_k=0, r_k=1 ⇒ c<r at the first diff
+///     eq = eq · (1 - (c_k - r_k)^2)      // bits equal ⇒ keep scanning
+/// ```
+///
+/// `c_k` is public, so `(1 - c_k)·r_k` and the `(c_k == r_k)` map are LOCAL affine
+/// ops on the shared bit; the only secure multiplications are the `eq`/`lt` chain
+/// steps. Returns the shared `[w]`; nothing is opened.
+fn rabbit_lt_bits_public_less_than_shared(
+    dealer: &mut ShamirDealer,
+    c: u64,
+    r_bits: &[Vec<Share>],
+) -> Result<Vec<Share>, MpcError> {
+    let n = dealer.parties();
+    let mut lt = const_sharing(n, Fp::zero());
+    let mut eq = const_sharing(n, Fp::one());
+    let l = r_bits.len();
+    for k in (0..l).rev() {
+        let c_k = (c >> k) & 1;
+        let r_k = &r_bits[k];
+        // (c_k == r_k) with c_k PUBLIC: c_k=1 ⇒ r_k; c_k=0 ⇒ 1 − r_k. And the
+        // "c<r here" term ((1 − c_k)·r_k): c_k=1 ⇒ 0 (no contribution); c_k=0 ⇒ r_k.
+        let eq_here: Vec<Share> = if c_k == 1 {
+            // c_k=1 ⇒ the "c<r here" term is 0 (public constant), so `lt` is
+            // unchanged — skip the wasted mul. (c_k == r_k) == r_k.
+            r_k.clone()
+        } else {
+            // c_k=0 ⇒ "c<r here" = eq · r_k IS a real secure multiplication.
+            let term = secret_and(dealer, &eq, r_k)?;
+            lt = shamir::add_shares(&lt, &term)?;
+            // (c_k == r_k) == 1 − r_k.
+            shamir::add_constant(&shamir::scale(r_k, Fp::one().neg()), Fp::one())
+        };
+        // eq = eq · (c_k == r_k) — one secure multiplication.
+        eq = secret_and(dealer, &eq, &eq_here)?;
+    }
+    Ok(lt)
+}
+
+/// [OPUS-4.8] sq-bgsn — a fresh full-field random mask `[r]` together with its
+/// `L = `[`RABBIT_MASK_BITS`] secret-shared bits (LSB-first), `r ∈ [0, 2^L)` uniform
+/// and produced so NO party knows it (every bit a [`square_protocol_random_bit`],
+/// only `c = a²` opened). Identical construction to
+/// `deal_random_solved_bits_via_square_protocol` (test-only) but `L = RABBIT_MASK_BITS`
+/// (the full field width `61`) rather than [`DECOMP_MASK_BITS`]. `[r] = Σ_k [r_k]·2^k` is
+/// a FREE local linear combination, so `[r]` and the `[r_k]` are consistent by
+/// construction. Honest-majority, semi-honest.
+fn deal_full_field_solved_bits(
+    dealer: &mut ShamirDealer,
+) -> Result<(Vec<Share>, Vec<Vec<Share>>), MpcError> {
+    let n = dealer.parties();
+    let mut r_bits: Vec<Vec<Share>> = Vec::with_capacity(RABBIT_MASK_BITS);
+    let mut r_value = const_sharing(n, Fp::zero());
+    for k in 0..RABBIT_MASK_BITS {
+        let bit_sharing = square_protocol_random_bit(dealer)?;
+        let weighted = shamir::scale(&bit_sharing, Fp::new(1u64 << k));
+        r_value = shamir::add_shares(&r_value, &weighted)?;
+        r_bits.push(bit_sharing);
+    }
+    Ok((r_value, r_bits))
+}
+
+/// [OPUS-4.8] sq-bgsn — ripple-carry **bit ADD** of a PUBLIC `W`-bit integer `c`
+/// (its bits are constants) with a vector of SHARED bits where each shared bit is a
+/// known public AND-factor times `[w]` — concretely `addend_k = p_k · [w]` for the
+/// `w·p` term (`p_k` public, `[w]` a single shared bit). Returns the `W` LSB-first
+/// shared result bits of `c + w·p`. The carry chain costs ONE secure multiplication
+/// per output bit (the `x ∧ carry` term inside the full-adder). `w·p_k` is `p_k`
+/// times `[w]` (a local scale of the single `[w]` sharing), so forming the addend is
+/// free; only the carry propagation costs mults.
+fn rabbit_add_public_and_w_times_const(
+    dealer: &mut ShamirDealer,
+    c: u64,
+    w: &[Share],
+    konst: u64,
+    width: usize,
+) -> Result<Vec<Vec<Share>>, MpcError> {
+    let n = dealer.parties();
+    let mut out: Vec<Vec<Share>> = Vec::with_capacity(width);
+    let mut carry = const_sharing(n, Fp::zero()); // [0]
+    for k in 0..width {
+        let c_k = (c >> k) & 1;
+        // addend_k = konst_k · [w] : konst_k public ⇒ a free local scale of [w].
+        let addend_k = if (konst >> k) & 1 == 1 {
+            w.to_vec()
+        } else {
+            const_sharing(n, Fp::zero())
+        };
+        // x = c_k XOR addend_k (public XOR shared, local affine): c_k=1 ⇒ 1−addend_k.
+        let x = if c_k == 1 {
+            shamir::add_constant(&shamir::scale(&addend_k, Fp::one().neg()), Fp::one())
+        } else {
+            addend_k.clone()
+        };
+        // sum_k = x XOR carry = x + carry − 2·x·carry (one secure mult).
+        let x_and_carry = secret_and(dealer, &x, &carry)?;
+        let sum_k = {
+            let s = shamir::add_shares(&x, &carry)?;
+            shamir::sub_shares(&s, &shamir::scale(&x_and_carry, Fp::new(2)))?
+        };
+        // carry_out = MAJ(c_k, addend_k, carry) = (c_k ∧ addend_k) ∨ (carry ∧ (c_k ⊕ addend_k)).
+        // c_k public: c_k∧addend_k = c_k? addend_k : 0 ; the carry term is carry ∧ x.
+        let ck_and_addend = if c_k == 1 {
+            addend_k.clone()
+        } else {
+            const_sharing(n, Fp::zero())
+        };
+        carry = secret_or(dealer, &ck_and_addend, &x_and_carry)?;
+        out.push(sum_k);
+    }
+    Ok(out)
+}
+
+/// [OPUS-4.8] sq-bgsn — ripple-borrow **bit SUB** `[a]_B = lhs_B ⊖ [r]_B`, where
+/// `lhs_B` is a vector of SHARED bits (LSB-first) and `[r]_B` is a vector of SHARED
+/// bits, returning the `width` LSB-first shared difference bits. Each step costs
+/// secure multiplications for the borrow chain (the same full-subtractor shape as
+/// `secure_bit_decompose`'s borrow loop, but both operands are shared so the result
+/// bit's XOR also costs a mult).
+fn rabbit_sub_shared_bits(
+    dealer: &mut ShamirDealer,
+    lhs_bits: &[Vec<Share>],
+    r_bits: &[Vec<Share>],
+    width: usize,
+) -> Result<Vec<Vec<Share>>, MpcError> {
+    let n = dealer.parties();
+    let zero = const_sharing(n, Fp::zero());
+    let mut out: Vec<Vec<Share>> = Vec::with_capacity(width);
+    let mut borrow = const_sharing(n, Fp::zero()); // [0]
+    for k in 0..width {
+        let l_k = lhs_bits.get(k).unwrap_or(&zero);
+        let r_k = r_bits.get(k).unwrap_or(&zero);
+        // x = l_k XOR r_k (both shared) — one secure mult.
+        let x = secret_xor(dealer, l_k, r_k)?;
+        // a_k = x XOR borrow — one secure mult.
+        let a_k = secret_xor(dealer, &x, &borrow)?;
+        // borrow_out = (¬l_k ∧ r_k) ∨ (¬x ∧ borrow). ¬l_k = 1 − l_k (local).
+        let not_l = shamir::add_constant(&shamir::scale(l_k, Fp::one().neg()), Fp::one());
+        let notl_and_r = secret_and(dealer, &not_l, r_k)?;
+        let not_x = shamir::add_constant(&shamir::scale(&x, Fp::one().neg()), Fp::one());
+        let notx_and_borrow = secret_and(dealer, &not_x, &borrow)?;
+        borrow = secret_or(dealer, &notl_and_r, &notx_and_borrow)?;
+        out.push(a_k);
+    }
+    Ok(out)
+}
+
+/// [OPUS-4.8] sq-bgsn — **Rabbit-style FULL-FIELD in-MPC bit-decomposition** of an
+/// EXISTING secret-shared value `[x]` (`x ∈ [0, p)`) into its
+/// [`RABBIT_VALUE_BITS`] secret-shared bits (LSB-first), WITHOUT ever reconstructing
+/// `x` and WITHOUT the masked-open path's statistical value/mask slack. This is the
+/// sq-bgsn lift: it supports the **full** `2^`[`RABBIT_VALUE_BITS`] = `2^60`
+/// magnitude, a 40-bit widening over the masked-open `secure_bit_decompose`'s `2^20`.
+///
+/// ## Protocol (Rabbit, eprint 2021/119 — non-masked-open via exact wrap recovery)
+///
+/// 1. Deal a fresh full-field solved-bits mask `([r], [r]_B)` with `r ∈ [0, 2^L)`
+///    uniform, `L = `[`RABBIT_MASK_BITS`] = 61 (no party knows `r`;
+///    [`deal_full_field_solved_bits`]).
+/// 2. **Open `c = (x + r) mod p`.** This is the ONLY opening. Because the mask spans
+///    the full field width, `c` is (near-)uniform over `[0, p)` and reveals (near-)
+///    nothing about `x` — the *bias* away from uniform is `≤ 1/2^61` (the mask draws
+///    from `[0, 2^61)` while `p = 2^61 − 1`, so the post-`mod p` distribution has a
+///    `2^{-61}` statistical distance from uniform — see "Hiding" below). `x` itself
+///    is **never opened**.
+/// 3. **Exact wrap recovery.** Over the integers `x = c − r + w·p`, where `w ∈ {0,1}`
+///    indicates whether `x + r ≥ p` (the addition wrapped). The wrap is decided by a
+///    PUBLIC-vs-SHARED bitwise less-than: `w = 1{c < r}` =
+///    [`rabbit_lt_bits_public_less_than_shared`]`(c, [r]_B)`. (Proof: in the wrap
+///    case `c = x + r − p`, and `c < r ⇔ x < p` which always holds; in the no-wrap
+///    case `c = x + r ≥ r`. So `c < r ⇔ wrap`.) The bits of `x` then come from a
+///    two-stage bit circuit: `[t]_B = c_B + w·p` ([`rabbit_add_public_and_w_times_const`])
+///    then `[x]_B = [t]_B ⊖ [r]_B` ([`rabbit_sub_shared_bits`]). The arithmetic is
+///    exact (`x < p < 2^61`, `c + w·p < 2p < 2^62`), so a `W = L + 1` working width
+///    holds it with no overflow; the returned [`RABBIT_VALUE_BITS`] low bits are
+///    `x`'s bits and the (truncated) higher bits are zero for in-range `x`.
+///
+/// ## Why this is sound (no value leak, no slack)
+///
+/// The value's shares are NEVER all brought together: step 2 opens `c = (x+r) mod p`,
+/// not `x`. Unlike the masked-open path, the mask is NOT required to be wider than
+/// the value — the wrap is *recovered*, not *avoided* — so there is no slack bit and
+/// the value may be the full field width. The recovered `[x]_B` are fresh degree-`t`
+/// sharings; `x` is never reconstructed.
+///
+/// ## Hiding (stated honestly — `2^{-61}`, not perfect)
+///
+/// `r` is a sum of `L = 61` exactly-uniform bits, so it is uniform over `[0, 2^61)`,
+/// which is ONE element wider than `p = 2^61 − 1`. After `mod p` the value `0` is
+/// hit by both `r = 0` and `r = p`, giving `c`'s distribution a statistical distance
+/// `≤ 1/p ≈ 2^{-61}` from uniform — so observing `c` carries at most a `2^{-61}`
+/// advantage about `x` (a *cryptographic-strength* gap, and independent of the value
+/// magnitude, unlike the masked-open path's `2^{-40}` that was coupled to the 20-bit
+/// cap). This is the Rabbit benefit: the slack is gone and the residual leakage is
+/// the field-size floor, not a tunable value/mask trade-off.
+///
+/// ## Magnitude bound (caller precondition)
+///
+/// Correct only while `x < 2^`[`RABBIT_VALUE_BITS`] so the recovered low bits capture
+/// the whole value. Because `x` is a SHARING this cannot be checked here without
+/// disclosing it; it is a precondition the caller proves in-protocol (the lifted
+/// `verify_value_in_range_rabbit`). Honest-majority, semi-honest.
+fn secure_bit_decompose_rabbit(
+    dealer: &mut ShamirDealer,
+    backend: &ShamirBackend,
+    x_shares: &[Share],
+) -> Result<Vec<Vec<Share>>, MpcError> {
+    // 1. Fresh full-field solved-bits (no party knows r).
+    let (r_value, r_bits) = deal_full_field_solved_bits(dealer)?;
+
+    // 2. Open c = (x + r) mod p — the ONLY opening; (near-)uniform, hides x.
+    let masked = shamir::add_shares(x_shares, &r_value)?;
+    let c = backend.reconstruct(&masked)?.value();
+
+    // 3a. Wrap indicator w = 1{c < r} via the public-vs-shared LTBits.
+    let w = rabbit_lt_bits_public_less_than_shared(dealer, c, &r_bits)?;
+
+    // 3b. t_B = c + w·p (public c, public p, shared single bit w); width L+1 holds
+    //     c + w·p < 2p < 2^62 with no overflow.
+    let width = RABBIT_MASK_BITS + 1;
+    let t_bits = rabbit_add_public_and_w_times_const(dealer, c, &w, crate::field::P, width)?;
+
+    // 3c. x_B = t_B ⊖ r_B (both shared). The low RABBIT_VALUE_BITS bits are x's bits.
+    let mut x_bits = rabbit_sub_shared_bits(dealer, &t_bits, &r_bits, width)?;
+    x_bits.truncate(RABBIT_VALUE_BITS);
+    Ok(x_bits)
+}
+
+/// [OPUS-4.8] sq-bgsn — **in-protocol range proof of a secret-shared value** for the
+/// Rabbit path: PROVES `value ∈ [0, 2^`[`RABBIT_VALUE_BITS`]`)` from the recovered
+/// bits WITHOUT reconstructing the value, the lifted twin of
+/// the masked-open `verify_sum_in_range` (test-only). Two secret zero-tests over the
+/// recovered shared bits:
+///
+/// 1. the bits faithfully recompose the value: `value == Σ_{k<RABBIT_VALUE_BITS}
+///    b_k·2^k` (no field wrap / no content above the recovered window); AND
+/// 2. the value is below the supported magnitude — vacuously implied by (1) here,
+///    since the Rabbit decomposition returns exactly [`RABBIT_VALUE_BITS`] bits, so
+///    a faithful recomposition already lies in `[0, 2^RABBIT_VALUE_BITS)`. We keep
+///    clause (1) (the field-wrap soundness check) and assert the recomposition is
+///    `< 2^RABBIT_VALUE_BITS` by the bit count, exactly as the masked-open guard
+///    reasons about wrap.
+///
+/// On violation it returns a fail-closed [`MpcError::Protocol`] (abort) rather than
+/// feeding a corrupted decomposition to the comparator. Only one masked `v·r` zero-
+/// test product is opened (uniform-nonzero / zero), so the value is never
+/// reconstructed. Honest-majority, semi-honest.
+fn verify_value_in_range_rabbit(
+    dealer: &mut ShamirDealer,
+    value_shares: &[Share],
+    value_bits: &[Vec<Share>],
+) -> Result<(), MpcError> {
+    let n = dealer.parties();
+    // Recompose from the RABBIT_VALUE_BITS recovered bits (a FREE local linear comb).
+    let mut recomposed = const_sharing(n, Fp::zero());
+    for (k, bit) in value_bits.iter().enumerate() {
+        let weighted = shamir::scale(bit, Fp::new(1u64 << k));
+        recomposed = shamir::add_shares(&recomposed, &weighted)?;
+    }
+    // Clause (1): no field wrap / fits the recovered window ⇔ value − Σ b_k 2^k == 0.
+    // Because the decomposition returns exactly RABBIT_VALUE_BITS bits, a faithful
+    // recomposition is itself < 2^RABBIT_VALUE_BITS — so this single zero-test is
+    // EXACTLY value ∈ [0, 2^RABBIT_VALUE_BITS).
+    let recompose_diff = shamir::sub_shares(value_shares, &recomposed)?;
+    if !secret_is_zero(dealer, &recompose_diff)? {
+        return Err(MpcError::Protocol(format!(
+            "disclose_threshold_verdict (Rabbit): in-protocol range proof FAILED — the \
+             secret-shared value does not equal the bit-composition of its recovered \
+             {RABBIT_VALUE_BITS} bits (the value has content above bit {RABBIT_VALUE_BITS}, i.e. \
+             value >= 2^{RABBIT_VALUE_BITS} = {RABBIT_VALUE_MAX_EXCLUSIVE}). The verdict would be \
+             derived from a truncated decomposition, so it is REJECTED fail-closed rather than \
+             returned wrong."
+        )));
+    }
+    Ok(())
 }
 
 /// [OPUS-4.8] sq-nx0s — **secret zero-test that opens ONLY a uniform mask product,
@@ -718,7 +1079,14 @@ fn secret_is_zero(dealer: &mut ShamirDealer, v: &[Share]) -> Result<bool, MpcErr
 /// The verdict bit is opened separately by the caller.
 ///
 /// Honest-majority, semi-honest (inherits the module security model).
-pub(crate) fn verify_sum_in_range(
+///
+/// [OPUS-4.8] sq-bgsn — now TEST-ONLY: the production `disclose_threshold_verdict`
+/// path range-proves the Rabbit decomposition via `verify_value_in_range_rabbit`
+/// (full field width). This masked-open range proof is retained as the regression
+/// reference and as the semi-honest model of the malicious twin's
+/// `auth_disclose::auth_verify_sum_in_range`.
+#[cfg(test)]
+fn verify_sum_in_range(
     dealer: &mut ShamirDealer,
     sum_shares: &[Share],
     sum_bits: &[Vec<Share>],
@@ -937,19 +1305,32 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// [`crate::backend::MpcBackend::run_secure`]); `public_threshold` is the public
 /// bar (e.g. £100k). Only the 1-bit verdict ever leaves the computation.
 ///
-/// ## [OPUS-4.8] sq-g7t5 — the sum is bit-decomposed IN-MPC, never reconstructed
+/// ## [OPUS-4.8] sq-g7t5/sq-bgsn — the sum is bit-decomposed IN-MPC, never reconstructed
 ///
 /// This NO LONGER reconstructs the sum locally. The previous implementation called
 /// `backend.reconstruct(sum_shares)` to obtain the cleartext total and re-deal its
 /// bits — an in-process-simulation shortcut. That shortcut is GONE. The sum is now
-/// bit-decomposed via `secure_bit_decompose` (masked-open bit-decomposition,
-/// Damgård et al. TCC'06): a fresh dealer-random mask `[r]` is added to `[sum]` and
-/// ONLY `c = sum + r` is opened (statistically hiding the sum, `2^{−κ}` advantage,
-/// `κ = `[`DECOMP_STAT_SECURITY_BITS`]); the sum's bits are then recovered by a
-/// secret-shared bitwise subtraction `c ⊖ [r]`. **The sum's shares are never all
-/// brought together; `reconstruct(sum_shares)` is never called.** The recovered
-/// shared bits feed `greater_than_public_bits`, and only the final verdict bit is
-/// opened ([`open_verdict`]).
+/// bit-decomposed via the Rabbit-style `secure_bit_decompose_rabbit` (eprint
+/// 2021/119): a fresh full-field-width random mask `[r]` (`r ∈ [0, 2^61)`, no party
+/// knows it) is added to `[sum]` and ONLY `c = (sum + r) mod p` is opened — a
+/// (near-)uniform value carrying at most a `2^{−61}` statistical advantage about the
+/// sum, INDEPENDENT of the sum's magnitude (the field-size floor, not a tunable
+/// value/mask slack). The sum's bits are recovered EXACTLY through the modular wrap
+/// (`sum = c − r + w·p`, `w = 1{c < r}` from a public-vs-shared `LTBits`). **The
+/// sum's shares are never all brought together; `reconstruct(sum_shares)` is never
+/// called.** The recovered shared bits feed `greater_than_public_bits_with`, and
+/// only the final verdict bit is opened ([`open_verdict`]).
+///
+/// ### [OPUS-4.8] sq-bgsn — the magnitude slack is GONE (wider supported range)
+///
+/// The earlier masked-open primitive (`secure_bit_decompose`, now test-only) masked
+/// the sum with a `κ = `[`DECOMP_STAT_SECURITY_BITS`]-bit-wider mask and required
+/// `sum + r < p` (no wrap), which — with `p = 2^61−1` and a `2^{−40}` gap — left only
+/// [`DECOMP_VALUE_BITS`] = 20 bits for the value. The Rabbit path RECOVERS the wrap
+/// instead of avoiding it, so it carries no slack and supports the **full**
+/// [`RABBIT_VALUE_BITS`] = 60 magnitude (`2^60`) — a 40-bit lift. The malicious twin
+/// [`crate::auth_disclose`] still uses the lower-magnitude masked-open path; its
+/// Rabbit upgrade is tracked separately.
 ///
 /// ## Security tier — honest-majority, semi-honest (NOT malicious)
 ///
@@ -957,41 +1338,35 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// "Security model" doc). Each multiplication in the decomposition + comparison
 /// routes through [`ShamirDealer::degree_reduce`], which has no in-protocol check
 /// that a deviating party re-shared honestly — so this is semi-honest-only, not
-/// malicious. The masked open is statistically (not info-theoretically) hiding
-/// because `p = 2^61−1` is too small for a perfect mask above the value width.
+/// malicious. The masked open is statistically (not info-theoretically) hiding —
+/// `2^{−61}` distance from uniform, because `r` draws from `[0, 2^61)` while
+/// `p = 2^61−1` — a cryptographic-strength gap independent of the value magnitude.
 ///
-/// ## Magnitude bound — BOTH the sum and the threshold are now fail-closed
+/// ## Magnitude bound — BOTH the sum and the threshold are fail-closed
 ///
-/// Both the SUM and `public_threshold` must be `< 2^`[`DECOMP_VALUE_BITS`]` = 2^20
-/// = 1_048_576` (the statistically-safe no-wrap range — see [`DECOMP_VALUE_BITS`]),
-/// much smaller than the cleartext-operand [`COMPARE_BITS`] because the in-MPC path
-/// masks the sum; it nonetheless covers the four-flatmates use case (£10^6 < 2^20).
+/// Both the SUM and `public_threshold` must be `< 2^`[`RABBIT_VALUE_BITS`]` = 2^60`
+/// (the full cleartext-operand width — see [`RABBIT_VALUE_BITS`]); the
+/// four-flatmates use case (£10^6) is many orders of magnitude clear.
 ///
-/// ### [OPUS-4.8] sq-nx0s — the sum bound is now an IN-PROTOCOL range proof
+/// ### [OPUS-4.8] sq-nx0s/sq-bgsn — the sum bound is an IN-PROTOCOL range proof
 ///
-/// Previously the sum bound was a CALLER PRECONDITION (documented, not enforced):
-/// an out-of-range sum silently produced a WRONG verdict because the magnitude of a
-/// SHARING cannot be read off the shares. That seam is now CLOSED. After the in-MPC
-/// bit-decomposition, `verify_sum_in_range` PROVES — without reconstructing the
-/// sum — that `sum ∈ [0, 2^DECOMP_VALUE_BITS)`, via two secret zero-tests over the
-/// recovered shared bits:
-/// 1. `sum == Σ b_k·2^k` (the bits faithfully recompose the sum: no field wrap, no
-///    content above bit [`DECOMP_MASK_BITS`]); AND
-/// 2. every bit `>= DECOMP_VALUE_BITS` is zero (the sum is below the supported
-///    magnitude).
+/// The magnitude of a SHARING cannot be read off the shares, so an over-magnitude
+/// sum would otherwise silently truncate and produce a WRONG verdict. After the
+/// in-MPC bit-decomposition, `verify_value_in_range_rabbit` PROVES — without
+/// reconstructing the sum — that `sum ∈ [0, 2^RABBIT_VALUE_BITS)` via a secret
+/// zero-test of the recompose difference `sum − Σ_{k<60} b_k·2^k`: because the
+/// Rabbit decomposition returns exactly [`RABBIT_VALUE_BITS`] bits, a faithful
+/// recomposition is itself `< 2^RABBIT_VALUE_BITS`, so the single zero-test is
+/// exactly the range check. On violation the function returns a fail-closed
+/// [`MpcError::Protocol`] (abort) — the verdict is **rejected, not returned wrong**.
+/// The zero-test opens ONLY a uniform `v·r` mask product, so the sum is STILL never
+/// reconstructed.
 ///
-/// Clause (1) is what makes this SOUND against field wraparound — a magnitude-only
-/// check would wrongly accept large wrapping sums whose recovered low bits look
-/// small (see `verify_sum_in_range`). On violation the function returns a
-/// fail-closed [`MpcError::Protocol`] (abort) — the verdict is **rejected, not
-/// returned wrong**. Each zero-test opens ONLY a uniform `v·r` mask product (zero
-/// in range, uniform-nonzero otherwise), so the sum is STILL never reconstructed.
-///
-/// - **`public_threshold`** is a public `u64`, so it is range-checked fail-closed
-///   up front (returns [`MpcError::Protocol`] before any protocol work if it is
-///   `>= 2^DECOMP_VALUE_BITS`).
+/// - **`public_threshold`** is a public `u64`, range-checked fail-closed up front
+///   (returns [`MpcError::Protocol`] before any protocol work if it is
+///   `>= 2^RABBIT_VALUE_BITS`).
 /// - **The sum** is range-checked in-protocol AFTER its bit-decomposition (the
-///   range proof above), so an out-of-range sum now aborts rather than yielding a
+///   range proof above), so an over-magnitude sum aborts rather than yielding a
 ///   silent wrong verdict.
 pub fn disclose_threshold_verdict(
     backend: &ShamirBackend,
@@ -1005,28 +1380,34 @@ pub fn disclose_threshold_verdict(
     // [OPUS-4.8] Fail closed on the raw `u64` BEFORE `Fp::new` reduces mod p. A
     // `public_threshold` outside the safe range would either wrap the modulus
     // (>= p) or exceed the bit-decomposition's representable magnitude — both
-    // silently compare against the wrong bar. The in-MPC path's safe range is
-    // `< 2^DECOMP_VALUE_BITS` (the statistically-masked, no-wrap magnitude), MUCH
-    // smaller than the cleartext-operand `< 2^COMPARE_BITS`. Reject anything else.
-    if public_threshold >= DECOMP_VALUE_MAX_EXCLUSIVE {
+    // silently compare against the wrong bar.
+    //
+    // [OPUS-4.8] sq-bgsn — the safe range is now `< 2^RABBIT_VALUE_BITS = 2^60` (the
+    // FULL field width), lifted from the masked-open path's `2^DECOMP_VALUE_BITS =
+    // 2^20`: this routes through the Rabbit-style `secure_bit_decompose_rabbit`,
+    // which recovers the sum EXACTLY through the modular wrap and so carries no
+    // value/mask slack. Reject anything `>= 2^RABBIT_VALUE_BITS`.
+    if public_threshold >= RABBIT_VALUE_MAX_EXCLUSIVE {
         return Err(MpcError::Protocol(format!(
             "disclose_threshold_verdict: public_threshold = {public_threshold} is out of range \
-             (must be < 2^{DECOMP_VALUE_BITS} = {DECOMP_VALUE_MAX_EXCLUSIVE}; the in-MPC \
-             bit-decomposition masks the secret sum and opens only `sum + r`, so with \
-             p = 2^61-1 the statistically-safe no-wrap magnitude is 2^{DECOMP_VALUE_BITS}, \
-             not the cleartext-operand 2^{COMPARE_BITS})"
+             (must be < 2^{RABBIT_VALUE_BITS} = {RABBIT_VALUE_MAX_EXCLUSIVE}; the in-MPC \
+             Rabbit bit-decomposition recovers the secret sum through the modular wrap, so with \
+             p = 2^61-1 the supported magnitude is the full cleartext-operand 2^{COMPARE_BITS})"
         )));
     }
     let mut dealer = backend.dealer();
-    // Bit-decompose the EXISTING sum sharing IN-MPC. The sum is NEVER reconstructed
-    // (only `sum + r`, statistically masked, is opened inside `secure_bit_decompose`).
-    let sum_bits = secure_bit_decompose(&mut dealer, backend, sum_shares)?;
-    // [OPUS-4.8] sq-nx0s — IN-PROTOCOL range proof of the secret-shared sum. PROVES
-    // sum ∈ [0, 2^DECOMP_VALUE_BITS) from the recovered bits WITHOUT reconstructing
-    // the sum: an out-of-range sum (field-wrapped or over-magnitude) is REJECTED
-    // fail-closed here, rather than feeding a corrupted decomposition to the
-    // comparator and returning a silent wrong verdict.
-    verify_sum_in_range(&mut dealer, sum_shares, &sum_bits)?;
+    // [OPUS-4.8] sq-bgsn — bit-decompose the EXISTING sum sharing IN-MPC via the
+    // Rabbit-style FULL-FIELD path. The sum is NEVER reconstructed (only the
+    // (near-)uniform `c = (sum + r) mod p` is opened inside
+    // `secure_bit_decompose_rabbit`), and the supported magnitude is the full
+    // `2^RABBIT_VALUE_BITS` — a 40-bit lift over the masked-open primitive.
+    let sum_bits = secure_bit_decompose_rabbit(&mut dealer, backend, sum_shares)?;
+    // [OPUS-4.8] sq-nx0s/sq-bgsn — IN-PROTOCOL range proof of the secret-shared sum.
+    // PROVES sum ∈ [0, 2^RABBIT_VALUE_BITS) from the recovered bits WITHOUT
+    // reconstructing the sum: an over-magnitude sum is REJECTED fail-closed here,
+    // rather than feeding a truncated decomposition to the comparator and returning
+    // a silent wrong verdict.
+    verify_value_in_range_rabbit(&mut dealer, sum_shares, &sum_bits)?;
     // The recovered shared bits feed the public-threshold comparator; the threshold's
     // bits are public constants. Open ONLY the verdict bit.
     let verdict_shares = greater_than_public_bits_with(&mut dealer, &sum_bits, public_threshold)?;
@@ -1333,20 +1714,21 @@ mod tests {
 
     #[test]
     fn disclose_threshold_out_of_range_public_threshold_fails_closed() {
-        // [OPUS-4.8] sq-g7t5 — the in-MPC bit-decomposition path masks the secret
-        // sum and opens only `sum + r`, so its statistically-safe magnitude bound is
-        // `2^DECOMP_VALUE_BITS = 2^20` (NOT the cleartext-operand 2^COMPARE_BITS).
-        // A `public_threshold` outside this safe range must be REJECTED fail-closed,
-        // NOT silently reduced mod p by `Fp::new`. We exercise three distinct hazards:
+        // [OPUS-4.8] sq-bgsn — the production path now uses the Rabbit-style
+        // full-field bit-decomposition, so the safe magnitude bound is
+        // `2^RABBIT_VALUE_BITS = 2^60` (the full cleartext-operand width), lifted from
+        // the masked-open path's `2^20`. A `public_threshold` >= 2^60 must still be
+        // REJECTED fail-closed (NOT silently reduced mod p by `Fp::new`), but values
+        // in `[2^20, 2^60)` — which the OLD bound rejected — are now ACCEPTED. We
+        // exercise both halves of the lifted boundary:
         //   (a) threshold >= p (= 2^61 - 1): `Fp::new` would wrap it to an in-range
         //       element, silently comparing the sum against the WRONG bar.
-        //   (b) threshold in [2^20, p): canonical Fp / representable in 60 bits, but
-        //       outside the in-MPC masked-decomposition's safe magnitude.
-        //   (c) threshold in [2^20, 2^60): the OLD bound would have accepted these;
-        //       the tightened in-MPC bound rejects them.
-        // All must surface a descriptive Protocol error from disclose_threshold_verdict.
+        //   (b) threshold in [2^60, p): canonical Fp / representable in 60+ bits, but
+        //       at/over the supported magnitude — rejected.
+        //   (c) threshold in [2^20, 2^60): the OLD masked-open bound rejected these;
+        //       the lifted Rabbit bound now ACCEPTS them.
         let backend = ShamirBackend::new_seeded(5, 0x7e57).unwrap();
-        // A small, legitimate secret-shared sum (100_000 < 2^20) to compare against.
+        // A small, legitimate secret-shared sum to compare against.
         let summed = {
             use crate::backend::MpcBackend;
             let shared: Vec<Vec<Share>> = [50_000u64, 50_000]
@@ -1362,7 +1744,7 @@ mod tests {
             let err = disclose_threshold_verdict(&backend, &summed[0], over_p).unwrap_err();
             match err {
                 MpcError::Protocol(m) => assert!(
-                    m.contains("out of range") && m.contains("2^20"),
+                    m.contains("out of range") && m.contains("2^60"),
                     "expected fail-closed range error for threshold {over_p}, got: {m}"
                 ),
                 other => panic!("expected Protocol range error, got {other:?}"),
@@ -1377,31 +1759,35 @@ mod tests {
             Err(MpcError::Protocol(_))
         ));
 
-        // (b)+(c) threshold in [2^20, p): canonical Fp but out of the in-MPC
-        // masked-decomposition's safe range — refused fail-closed. Includes values
-        // the OLD (2^60) bound would have wrongly accepted (COMPARE_MAX_EXCLUSIVE-1).
-        for in_field_but_oob in [
-            DECOMP_VALUE_MAX_EXCLUSIVE,
-            DECOMP_VALUE_MAX_EXCLUSIVE + 1,
-            COMPARE_MAX_EXCLUSIVE - 1, // old bound would have allowed this; now rejected
-            COMPARE_MAX_EXCLUSIVE,
-            (1u64 << 61) - 2,
+        // (b) threshold at/over 2^60 (the lifted bound) — refused fail-closed.
+        for over_bound in [
+            RABBIT_VALUE_MAX_EXCLUSIVE,     // 2^60, first out-of-range
+            RABBIT_VALUE_MAX_EXCLUSIVE + 1, // 2^60 + 1
+            (1u64 << 61) - 2,               // near p
         ] {
             assert!(
                 matches!(
-                    disclose_threshold_verdict(&backend, &summed[0], in_field_but_oob),
+                    disclose_threshold_verdict(&backend, &summed[0], over_bound),
                     Err(MpcError::Protocol(_))
                 ),
-                "threshold {in_field_but_oob} (>= 2^20) must fail closed"
+                "threshold {over_bound} (>= 2^60) must fail closed"
             );
         }
 
-        // The maximum IN-range threshold (2^20 - 1) is still accepted (boundary is
-        // exclusive) — the guard rejects only out-of-range values, not valid ones.
-        assert!(
-            disclose_threshold_verdict(&backend, &summed[0], DECOMP_VALUE_MAX_EXCLUSIVE - 1)
-                .is_ok()
-        );
+        // (c) threshold in [2^20, 2^60): the OLD masked-open bound rejected these; the
+        // lifted Rabbit bound ACCEPTS them (the headline magnitude widening).
+        for now_in_range in [
+            DECOMP_VALUE_MAX_EXCLUSIVE,     // 2^20 — was first-rejected, now accepted
+            DECOMP_VALUE_MAX_EXCLUSIVE + 1, // 2^20 + 1
+            1u64 << 30,                     // well above 2^20
+            1u64 << 50,                     // deep in the lifted range
+            RABBIT_VALUE_MAX_EXCLUSIVE - 1, // 2^60 - 1, max in-range threshold
+        ] {
+            assert!(
+                disclose_threshold_verdict(&backend, &summed[0], now_in_range).is_ok(),
+                "threshold {now_in_range} (in [2^20, 2^60)) must now be ACCEPTED (sq-bgsn lift)"
+            );
+        }
     }
 
     #[test]
@@ -1700,30 +2086,30 @@ mod tests {
     #[test]
     fn disclose_threshold_in_mpc_out_of_range_sum_is_handled() {
         // FIELD-EDGE / OVERFLOW SAFETY: a sum at/above the supported magnitude bound
-        // must NOT silently return a wrong verdict. [OPUS-4.8] sq-nx0s: the sum bound
-        // is now an IN-PROTOCOL range proof (`verify_sum_in_range`), so an
-        // out-of-range sum is REJECTED fail-closed — see the dedicated
-        // `disclose_threshold_in_mpc_out_of_range_sum_rejected_*` tests below for the
-        // rejection matrix. Here we pin the bound constant and confirm the boundary
-        // in-range value is ACCEPTED and correct.
+        // must NOT silently return a wrong verdict. [OPUS-4.8] sq-bgsn: the production
+        // path's bound is now the full Rabbit `2^RABBIT_VALUE_BITS = 2^60`, range-
+        // proved in-protocol (`verify_value_in_range_rabbit`) — see the dedicated
+        // out-of-range rejection tests above for the matrix. Here we pin the lifted
+        // bound constant and confirm the boundary in-range value is ACCEPTED.
         const {
-            assert!(DECOMP_VALUE_MAX_EXCLUSIVE == 1 << 20);
-            assert!(DECOMP_VALUE_BITS == 20);
+            assert!(RABBIT_VALUE_MAX_EXCLUSIVE == 1 << 60);
+            assert!(RABBIT_VALUE_BITS == 60);
+            // The Rabbit path is a strict widening over the masked-open path's bound.
+            assert!(RABBIT_VALUE_BITS > DECOMP_VALUE_BITS);
         }
-        // The max in-range sum compares correctly.
-        let (b, s) = shared_sum(5, 5, &[DECOMP_VALUE_MAX_EXCLUSIVE - 1]);
+        // The new max in-range sum (2^60 - 1) compares correctly.
+        let (b, s) = shared_value(5, 5, RABBIT_VALUE_MAX_EXCLUSIVE - 1);
         let out = disclose_threshold_verdict(&b, &s, 100_000).unwrap();
         assert!(
             verdict_bool(&out),
-            "max in-range sum (2^20-1) > 100k → true"
+            "max in-range sum (2^60 - 1) > 100k → true"
         );
-        // c = sum + r stays below the modulus for the max sum and max mask:
-        // (2^20 - 1) + (2^60 - 1) < 2^61 - 1 = p. Assert the no-wrap headroom.
-        let max_c = (DECOMP_VALUE_MAX_EXCLUSIVE - 1) + ((1u64 << DECOMP_MASK_BITS) - 1);
-        assert!(
-            max_c < crate::field::P,
-            "masked open must not wrap the modulus"
-        );
+        // Unlike the masked-open path, the Rabbit open `c = (sum + r) mod p` cannot
+        // wrap-out-of-range: it is taken mod p by construction. A sum at 2^60 - 1 is
+        // fully recoverable (the wrap is corrected, not avoided).
+        const {
+            assert!(RABBIT_VALUE_MAX_EXCLUSIVE - 1 < crate::field::P);
+        }
     }
 
     // =========================================================================
@@ -1746,14 +2132,20 @@ mod tests {
 
     #[test]
     fn in_range_sums_pass_the_range_proof_and_give_correct_verdict() {
-        // CORE matrix — in-range half. 0, 1, mid, and 2^L - 1 (max in-range) all
+        // CORE matrix — in-range half. [OPUS-4.8] sq-bgsn — with the Rabbit lift the
+        // in-range window is `[0, 2^60)`, so this now includes sums DEEP above the old
+        // 2^20 bound (a 1<<30 and a 1<<50) plus the new max-in-range `2^60 - 1` — ALL
         // pass the in-protocol range proof and yield the correct verdict.
         let thr = 100_000u64;
         let in_range: &[u64] = &[
             0,
             1,
             500_000,                        // mid
-            DECOMP_VALUE_MAX_EXCLUSIVE - 1, // 2^20 - 1, max in-range
+            DECOMP_VALUE_MAX_EXCLUSIVE - 1, // 2^20 - 1 (old max-in-range; still fine)
+            DECOMP_VALUE_MAX_EXCLUSIVE,     // 2^20 — was rejected by the old bound
+            1u64 << 30,                     // well above the old bound
+            1u64 << 50,                     // deep in the lifted range
+            RABBIT_VALUE_MAX_EXCLUSIVE - 1, // 2^60 - 1, new max-in-range
         ];
         for n in [3usize, 5, 7] {
             for (idx, &sum) in in_range.iter().enumerate() {
@@ -1771,23 +2163,19 @@ mod tests {
 
     #[test]
     fn out_of_range_sum_is_rejected_fail_closed_not_wrong_verdict() {
-        // CORE matrix — out-of-range half (THE new guarantee). A sum >=
-        // 2^DECOMP_VALUE_BITS, including the first out-of-range value, a few above
-        // it, a value in (2^20, 2^60) (within the L-bit decomposition but over the
-        // magnitude bound), and a value that wraps the field under the masked open
-        // (near `p`), must ALL return a fail-closed Protocol error — never a verdict.
+        // CORE matrix — out-of-range half (THE fail-closed guarantee). [OPUS-4.8]
+        // sq-bgsn — the in-range window is now `[0, 2^60)`, so a sum at/above 2^60
+        // (the first out-of-range value, 2^60, and values up near `p`) must ALL return
+        // a fail-closed Protocol error — never a verdict. (Sums in `[2^20, 2^60)` are
+        // now ACCEPTED; see `in_range_sums_pass_the_range_proof_and_give_correct_verdict`.)
         let p = crate::field::P;
         let oob: &[u64] = &[
-            DECOMP_VALUE_MAX_EXCLUSIVE,      // 2^20, first out-of-range
-            DECOMP_VALUE_MAX_EXCLUSIVE + 1,  // 2^20 + 1
-            DECOMP_VALUE_MAX_EXCLUSIVE + 99, // 2^20 + k
-            1u64 << 30,                      // well above 2^20, below 2^60
-            1u64 << 59,                      // high bit inside the L=60 window
-            (1u64 << 60) - 1,                // 2^60 - 1: max representable in L bits, OOB
-            1u64 << 60,                      // 2^60: above the decomposition window
-            p - 1,                           // near p: masked open `sum + r` WRAPS the field
+            RABBIT_VALUE_MAX_EXCLUSIVE,      // 2^60, first out-of-range
+            RABBIT_VALUE_MAX_EXCLUSIVE + 1,  // 2^60 + 1
+            RABBIT_VALUE_MAX_EXCLUSIVE + 99, // 2^60 + k
+            (1u64 << 60) + (1u64 << 59),     // 1.5·2^60, well above the bound
+            p - 1,                           // near p
             p - 12345,
-            p / 2,
         ];
         for n in [3usize, 5, 7] {
             for (idx, &sum) in oob.iter().enumerate() {
@@ -1804,7 +2192,7 @@ mod tests {
                     }
                     Ok(out) => panic!(
                         "n={n} OOB sum {sum}: range proof did NOT fire — returned a verdict {:?} \
-                         (this is the silent-wrong-verdict bug sq-nx0s closes)",
+                         (this is the silent-wrong-verdict bug the range proof closes)",
                         verdict_bool(&out)
                     ),
                 }
@@ -1814,24 +2202,24 @@ mod tests {
 
     #[test]
     fn range_proof_boundary_max_in_range_accepts_first_out_of_range_rejects() {
-        // BOUNDARY: sum == 2^L - 1 (max in-range, value_bits) ACCEPTS; sum == 2^L
-        // (first out-of-range) REJECTS. (Here "L" for the magnitude bound is
-        // DECOMP_VALUE_BITS = 20, the supported sum width.)
+        // BOUNDARY: sum == 2^RABBIT_VALUE_BITS - 1 (max in-range) ACCEPTS; sum ==
+        // 2^RABBIT_VALUE_BITS (first out-of-range) REJECTS. [OPUS-4.8] sq-bgsn — the
+        // magnitude bound is now the full RABBIT_VALUE_BITS = 60 (lifted from 20).
         for n in [3usize, 5, 7] {
-            // Max in-range: 2^20 - 1 accepted.
-            let (b_ok, s_ok) = shared_value(n, 6000 + n as u64, DECOMP_VALUE_MAX_EXCLUSIVE - 1);
+            // Max in-range: 2^60 - 1 accepted.
+            let (b_ok, s_ok) = shared_value(n, 6000 + n as u64, RABBIT_VALUE_MAX_EXCLUSIVE - 1);
             assert!(
                 disclose_threshold_verdict(&b_ok, &s_ok, 0).is_ok(),
-                "n={n}: max in-range sum 2^20-1 must be ACCEPTED"
+                "n={n}: max in-range sum 2^60-1 must be ACCEPTED"
             );
-            // First out-of-range: 2^20 rejected.
-            let (b_bad, s_bad) = shared_value(n, 6500 + n as u64, DECOMP_VALUE_MAX_EXCLUSIVE);
+            // First out-of-range: 2^60 rejected.
+            let (b_bad, s_bad) = shared_value(n, 6500 + n as u64, RABBIT_VALUE_MAX_EXCLUSIVE);
             assert!(
                 matches!(
                     disclose_threshold_verdict(&b_bad, &s_bad, 0),
                     Err(MpcError::Protocol(_))
                 ),
-                "n={n}: first out-of-range sum 2^20 must be REJECTED fail-closed"
+                "n={n}: first out-of-range sum 2^60 must be REJECTED fail-closed"
             );
         }
     }
@@ -1911,6 +2299,41 @@ mod tests {
                 assert!(
                     !secret_is_zero(&mut dealer, &nz).unwrap(),
                     "n={n} v={v}: nonzero ⇒ not zero"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn masked_open_verify_sum_in_range_accepts_in_range_rejects_oob() {
+        // [OPUS-4.8] sq-bgsn — the masked-open `secure_bit_decompose` +
+        // `verify_sum_in_range` path is now TEST-ONLY (the production
+        // `disclose_threshold_verdict` uses the Rabbit path), but it remains the
+        // semi-honest REFERENCE of the malicious twin `auth_disclose::auth_verify_sum_in_range`.
+        // Pin its contract directly: an in-range sum (< 2^DECOMP_VALUE_BITS) passes the
+        // masked-open range proof; an out-of-range sum (>= 2^DECOMP_VALUE_BITS, or one
+        // whose masked open wraps the field) is REJECTED fail-closed.
+        for n in [3usize, 5] {
+            // In-range: passes.
+            for &sum in &[0u64, 1, 100_000, DECOMP_VALUE_MAX_EXCLUSIVE - 1] {
+                let (backend, shares) = shared_value(n, 11_000 + sum, sum);
+                let mut dealer = backend.dealer();
+                let bits = secure_bit_decompose(&mut dealer, &backend, &shares).unwrap();
+                verify_sum_in_range(&mut dealer, &shares, &bits).unwrap_or_else(|e| {
+                    panic!("n={n} masked-open in-range sum {sum} rejected: {e:?}")
+                });
+            }
+            // Out-of-range (>= 2^20) and field-wrapping (near p): rejected fail-closed.
+            for &sum in &[DECOMP_VALUE_MAX_EXCLUSIVE, 1u64 << 30, crate::field::P - 1] {
+                let (backend, shares) = shared_value(n, 22_000 + (sum & 0xFFFF), sum);
+                let mut dealer = backend.dealer();
+                let bits = secure_bit_decompose(&mut dealer, &backend, &shares).unwrap();
+                assert!(
+                    matches!(
+                        verify_sum_in_range(&mut dealer, &shares, &bits),
+                        Err(MpcError::Protocol(_))
+                    ),
+                    "n={n} masked-open OOB sum {sum} must be REJECTED fail-closed"
                 );
             }
         }
@@ -2300,5 +2723,167 @@ mod tests {
             square_protocol_random_bit(&mut dealer).is_err(),
             "deficient party count must fail closed in the square-protocol open"
         );
+    }
+
+    // =========================================================================
+    // [OPUS-4.8] sq-bgsn — Rabbit-style FULL-FIELD in-MPC bit-decomposition. The
+    // load-bearing proofs:
+    //   - `rabbit_bit_decompose_recovers_full_field_values`: the recovered bits
+    //     reconstruct to the true bits of the (never-opened) value across the FULL
+    //     `[0, 2^60)` range — including the high-bit values the masked-open path's
+    //     2^20 cap could never reach.
+    //   - `rabbit_lt_bits_*`: the public-vs-shared LTBits wrap indicator matches the
+    //     plaintext `1{c < r}`.
+    //   - `disclose_threshold_rabbit_matches_plaintext_at_large_magnitudes`: the
+    //     verdict matches the plaintext reference for sums WAY above the old bound.
+    //   - `rabbit_open_is_independent_of_the_value`: the masked open is (near-)
+    //     uniform and does not pin the value (the privacy invariant).
+    // =========================================================================
+
+    #[test]
+    fn rabbit_bit_decompose_recovers_full_field_values() {
+        // CORRECTNESS across the FULL field range (the bead's headline): the
+        // Rabbit decomposition recovers shared bits whose reconstruction equals the
+        // plaintext bits of the never-opened value — for values that the masked-open
+        // path (capped at 2^20) could NEVER decompose. Several party counts.
+        let values: &[u64] = &[
+            0,
+            1,
+            42,
+            100_000,
+            DECOMP_VALUE_MAX_EXCLUSIVE - 1, // 2^20 - 1 (old max)
+            DECOMP_VALUE_MAX_EXCLUSIVE,     // 2^20 (old first-OOB; Rabbit handles it)
+            1u64 << 30,
+            1u64 << 45,
+            1u64 << 59,                      // a high bit deep above the old cap
+            RABBIT_VALUE_MAX_EXCLUSIVE - 1,  // 2^60 - 1, max in-range
+            (1u64 << 59) | (1u64 << 20) | 7, // mixed high+low bits
+        ];
+        for n in [3usize, 5, 7] {
+            for (idx, &v) in values.iter().enumerate() {
+                let (backend, shares) = shared_value(n, 80_000 + idx as u64 + n as u64, v);
+                let mut dealer = backend.dealer();
+                let bits = secure_bit_decompose_rabbit(&mut dealer, &backend, &shares).unwrap();
+                assert_eq!(bits.len(), RABBIT_VALUE_BITS, "n={n}: Rabbit bit count");
+                let mut recovered = 0u64;
+                for (k, bit) in bits.iter().enumerate() {
+                    let b = backend.reconstruct(bit).unwrap();
+                    assert!(
+                        b == Fp::zero() || b == Fp::one(),
+                        "n={n} v={v} bit[{k}] not 0/1: {}",
+                        b.value()
+                    );
+                    if b == Fp::one() {
+                        recovered |= 1u64 << k;
+                    }
+                }
+                assert_eq!(
+                    recovered, v,
+                    "n={n}: Rabbit recovered {recovered} != value {v}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rabbit_lt_bits_matches_plaintext_wrap_indicator() {
+        // The LTBits wrap indicator [w] = 1{c < r} (c public, r shared) must
+        // reconstruct to the plaintext `c < r` across a spread of (c, r) incl. equal,
+        // off-by-one, and full-width pairs.
+        let cases: &[(u64, u64)] = &[
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (5, 5),
+            (100_000, 100_001),
+            (100_001, 100_000),
+            ((1u64 << 60) - 1, 1u64 << 60),
+            (1u64 << 60, (1u64 << 60) - 1),
+            ((1u64 << 61) - 2, (1u64 << 61) - 1),
+        ];
+        for n in [3usize, 5, 7] {
+            for (idx, &(c, r)) in cases.iter().enumerate() {
+                let backend = ShamirBackend::new_seeded(n, 90_000 + idx as u64 + n as u64).unwrap();
+                let mut dealer = backend.dealer();
+                // Share r's bits (LSB-first), RABBIT_MASK_BITS wide.
+                let r_bits: Vec<Vec<Share>> = (0..RABBIT_MASK_BITS)
+                    .map(|k| dealer.share(Fp::new((r >> k) & 1)))
+                    .collect();
+                let w = rabbit_lt_bits_public_less_than_shared(&mut dealer, c, &r_bits).unwrap();
+                let got = backend.reconstruct(&w).unwrap();
+                let expect = if c < r { Fp::one() } else { Fp::zero() };
+                assert_eq!(
+                    got, expect,
+                    "n={n} c={c} r={r}: LTBits wrap indicator wrong"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn disclose_threshold_rabbit_matches_plaintext_at_large_magnitudes() {
+        // END-TO-END at magnitudes the masked-open path could never reach: the
+        // verdict must equal the plaintext `sum > threshold` for sums WAY above the
+        // old 2^20 cap, at and around large thresholds, several party counts.
+        let cases: &[(u64, u64)] = &[
+            (1u64 << 30, 1u64 << 29),                     // sum > thr, both large
+            (1u64 << 29, 1u64 << 30),                     // sum < thr
+            ((1u64 << 40) + 1, 1u64 << 40),               // just over a 2^40 bar
+            (1u64 << 40, 1u64 << 40),                     // equal → false (strict >)
+            (RABBIT_VALUE_MAX_EXCLUSIVE - 1, 1u64 << 50), // max-in-range > big thr
+            (1u64 << 50, RABBIT_VALUE_MAX_EXCLUSIVE - 1), // big < max-in-range thr
+            (12_345_678_901, 12_345_678_900),             // adjacent, ~2^34
+        ];
+        for n in [3usize, 5, 7] {
+            for (idx, &(sum, thr)) in cases.iter().enumerate() {
+                let (backend, shares) = shared_value(n, 95_000 + idx as u64 + n as u64, sum);
+                let out = disclose_threshold_verdict(&backend, &shares, thr).unwrap();
+                assert_eq!(
+                    verdict_bool(&out),
+                    sum > thr,
+                    "n={n} sum={sum} thr={thr}: Rabbit large-magnitude verdict disagreed \
+                     with the plaintext reference"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rabbit_open_is_independent_of_the_value() {
+        // PRIVACY: the masked open c = (value + r) mod p with r uniform over [0, 2^61)
+        // is (near-)uniform and carries no value/mask slack — for ANY two values, a
+        // given opened c is consistent with both (an appropriate r'), so observing c
+        // tells a party (near-)nothing about which value it came from. We assert the
+        // algebraic hiding fact (the unit-test of the bound), NOT a reconstruct of any
+        // real value — mirroring `masked_open_is_independent_of_the_sum`.
+        let p = crate::field::P;
+        let mask_hi = 1u128 << RABBIT_MASK_BITS; // 2^61
+        for &v in &[0u64, 1, 100_000, 1u64 << 40, RABBIT_VALUE_MAX_EXCLUSIVE - 1] {
+            for &v_prime in &[0u64, 42, 1u64 << 35, RABBIT_VALUE_MAX_EXCLUSIVE - 1] {
+                for &r in &[0u64, 1, (1u64 << 60), (1u64 << 61) - 1] {
+                    let c = ((v as u128 + r as u128) % (p as u128)) as u64;
+                    // An r' that explains the SAME c under v': r' ≡ c - v' (mod p),
+                    // and we need r' ∈ [0, 2^61) to be a legal mask. Because the mask
+                    // range (2^61) is one wider than p, every residue class [0, p) has
+                    // a representative in [0, 2^61) — so a legal r' ALWAYS exists.
+                    let r_prime = ((c as u128 + p as u128 - v_prime as u128) % (p as u128)) as u64;
+                    assert!(
+                        (r_prime as u128) < mask_hi,
+                        "explaining mask r' must be legal"
+                    );
+                    assert_eq!(
+                        ((v_prime as u128 + r_prime as u128) % (p as u128)) as u64,
+                        c,
+                        "the open c must be explainable by BOTH values (hiding)"
+                    );
+                }
+            }
+        }
+        // And: the Rabbit path has NO value/mask slack — the mask spans the full
+        // field width, so the magnitude bound equals the full COMPARE_BITS.
+        const {
+            assert!(RABBIT_VALUE_BITS == COMPARE_BITS);
+            assert!(RABBIT_MASK_BITS == 61);
+        }
     }
 }

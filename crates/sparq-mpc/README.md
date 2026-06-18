@@ -71,18 +71,28 @@ the opened key equals `encode_term` of the holder's real term); the encoder is a
 substrate, not itself a security claim. Blank-node labels are keyed verbatim (no
 cross-graph blank-node identity — canonicalise first if you need it).
 
-## Threshold verdict — in-MPC bit-decomposition of the secret-shared sum (sq-g7t5 / sq-nx0s / sq-mnv5)
+## Threshold verdict — in-MPC bit-decomposition of the secret-shared sum (sq-g7t5 / sq-nx0s / sq-mnv5 / sq-bgsn)
 
 `disclose_threshold_verdict` (`compare.rs`) answers `sum > threshold` while
 disclosing **only the boolean verdict bit**, never the integer total. It does
 this by bit-decomposing the *existing* secret-shared sum **in-MPC** — the local
-`reconstruct(sum_shares)` shortcut is **gone** (`sq-g7t5`). The decomposition is
-the masked-open protocol (Damgård et al. TCC'06): a random mask `[r]` is added to
-`[sum]`, only the statistically-hiding `c = sum + r` is opened (gap
-`κ = DECOMP_STAT_SECURITY_BITS = 40`), and the sum's bits are recovered by a
-secret-shared borrow-subtraction `c ⊖ [r]`. The sum bound is an **in-protocol
-range proof** (`sq-nx0s`), so an out-of-range sum aborts fail-closed rather than
-returning a silent wrong verdict.
+`reconstruct(sum_shares)` shortcut is **gone** (`sq-g7t5`).
+
+**[OPUS-4.8] `sq-bgsn` — the production path is now the Rabbit-style full-field
+decomposition.** Rather than the masked-open protocol (which masked the sum with a
+`κ = 40`-bit-wider mask and required `sum + r < p`, capping the magnitude at
+`2^DECOMP_VALUE_BITS = 2^20`), `secure_bit_decompose_rabbit` (Rabbit, eprint
+2021/119) RECOVERS the sum exactly *through* the modular wrap: a full-field-width
+mask `[r]` (`r ∈ [0, 2^61)`, no party knows it) is added and only the
+(near-)uniform `c = (sum + r) mod p` is opened, then `sum = c − r + w·p` is
+recovered bitwise with the wrap indicator `w = 1{c < r}` from a public-vs-shared
+`LTBits`. This carries **no value/mask slack**, so the supported magnitude is the
+**full** `2^RABBIT_VALUE_BITS = 2^60` — a 40-bit lift — and the open's residual
+leakage is the `2^{-61}` field-size floor, not a tunable trade-off. The sum bound
+is an **in-protocol range proof** (`sq-nx0s` / `verify_value_in_range_rabbit`), so
+an over-magnitude sum aborts fail-closed rather than returning a silent wrong
+verdict. The masked-open `secure_bit_decompose` is retained (test-only) as the
+semi-honest reference of the malicious twin (below).
 
 **[OPUS-4.8] `sq-mnv5` — deployment-grade random-bit sub-protocol (this slice).**
 The mask `[r]` and its bits previously came from `deal_random_solved_bits`, where
@@ -100,13 +110,14 @@ secure multiplication + one open per bit.
 
 This is **honest-majority, semi-honest only** — like every other operator in this
 crate, it is **not** maliciously secure (the `a²` open and the `degree_reduce` <!-- privacy-claims-allow: NEGATIVE usage — explicitly denies malicious security (semi-honest only); sq-qhy4 -->
-re-sharings are unauthenticated; `sq-qhy4` external sign-off is still **pending**),
-and the magnitude bound is unchanged (`DECOMP_VALUE_BITS = 20`, covers the
-four-flatmates `10^6`). The two residual `sq-mnv5` deployment items remain open
-follow-ups:
+re-sharings are unauthenticated; `sq-qhy4` external sign-off is still **pending**).
+The `sq-mnv5` deployment items:
 
-- **Wider magnitude** — `p = 2^61−1` forces the 20-bit bound; lift via a larger
-  field or a non-masked-open comparison (Rabbit, eprint 2021/119). Still open.
+- **Wider magnitude** — **CLOSED by `sq-bgsn`** on the semi-honest production path:
+  the Rabbit-style `secure_bit_decompose_rabbit` lifts the bound from `2^20` to the
+  full field width `2^RABBIT_VALUE_BITS = 2^60` (it recovers the value through the
+  wrap, so it has no slack). The **malicious twin** (`auth_disclose`) still uses the
+  lower-magnitude (`< 2^20`) masked-open path; its Rabbit upgrade is a follow-up.
 - **Malicious security** — carry IT-MACs (`sq-km34.*`) through the decomposition +
   comparison chain and MAC-check the verdict before open. **Partly closed by
   `sq-ka8m`** (`auth_compare`): the malicious-with-abort *comparison chain* over
