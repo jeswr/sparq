@@ -222,8 +222,12 @@ fn hash_blank(label: &str) -> u64 {
 /// its components, NOT strings. Unlike the other term kinds this hash is dict-relative
 /// (the ids are), so a `Term::Triple` is hashed only AFTER its children are resolved in
 /// the target dict (`intern`/`lookup` handle this; `hash_term` cannot).
+/// [OPUS-4.8] (sq-jvbr) `pub(crate)` so the dict-spill external builder can content-address
+/// an RDF 1.2 triple term by its components' FINAL dense ids when it assembles the
+/// triple-term dictionary records (the same `(hash, id)` pair `save_mmap`/`into_merged`
+/// produce), keeping `dict-hash.bin`/`dict-hid.bin` consistent for triple terms too.
 #[inline]
-fn hash_triple_ids(ids: [Id; 3]) -> u64 {
+pub(crate) fn hash_triple_ids(ids: [Id; 3]) -> u64 {
     let mut h = rustc_hash::FxHasher::default();
     h.write_u8(3);
     h.write_u32(ids[0]);
@@ -1963,14 +1967,12 @@ impl Dict {
     }
 
     /// [OPUS-4.8] (sq-hxgb) Whether this dict stores any RDF 1.2 triple term
-    /// (`Stored::Triple`), used to GUARD a path that cannot represent them.
+    /// (`Stored::Triple`).
     //
-    // [OPUS-4.8] (sq-87bq) Since the sharded in-RAM/external merge gained structural
-    // triple-term support (sq-t3rt) and the in-memory `merge_partials` serial-fallback guard
-    // was removed, the SOLE remaining caller is the DICT-SPILL external builder's rejection
-    // (`reject_triple_terms_in_external_build`, `#[cfg(feature = "dict-spill")]`), whose
-    // content-only on-disk term records still cannot encode a triple term (tracked as sq-jvbr).
-    // Gated to `dict-spill` so the method is not dead code on the default / wasm builds, which
+    // [OPUS-4.8] (sq-jvbr) The SOLE caller is the DICT-SPILL external builder's
+    // `SpillInterner::intern_batch` (`#[cfg(feature = "dict-spill")]`), which uses it to SKIP
+    // the serial triple-term arena pass on the common triple-term-free hot path. Gated to
+    // `dict-spill` so the method is not dead code on the default / wasm builds, which
     // `clippy -D warnings` (`-D dead-code`) would otherwise reject. (`any_triple_terms`, the
     // implementation, stays ungated — `intern_partials` uses it on every build.)
     #[cfg(feature = "dict-spill")]

@@ -5248,9 +5248,9 @@ fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
                     continue;
                 }
                 let partials = parse_block(&block)?;
-                // [OPUS-4.8] (sq-hxgb) The sharded/spill consolidation cannot represent
-                // triple terms; fail clearly rather than panic / corrupt (see helper).
-                reject_triple_terms_in_external_build(&partials)?;
+                // [OPUS-4.8] (sq-jvbr) The dict-spill consolidation now interns RDF 1.2 triple
+                // terms structurally (`SpillInterner::intern_batch` → `finalize_triple_terms`),
+                // so no rejection here — like the sharded path (sq-t3rt).
                 if ptx.send(partials).is_err() {
                     return Ok(());
                 }
@@ -5288,28 +5288,6 @@ fn parse_block(bytes: &[u8]) -> Result<ChunkPartials, String> {
         .collect::<Result<Vec<_>, _>>()?;
     build_timing::record(t_parse, &build_timing::PARSE_NS);
     Ok(partials)
-}
-
-/// [OPUS-4.8] (sq-jvbr) The DICT-SPILL external N-Triples builder consolidates partial
-/// dicts through a HASH-SHARDED, disk-staged interner whose on-disk term records are
-/// content-only (`serialize_termparts`) — it has no representation for an RDF 1.2 triple
-/// term `<<( … )>>`, whose content IS its components' ids (resolvable only after the whole
-/// external dedup). So it surfaces a CLEAR error rather than panicking / corrupting.
-///
-/// The SHARDED in-RAM external builder (`build_external_ntriples_sharded`) NO LONGER needs
-/// this: as of sq-t3rt `ShardedDict::intern_partials` interns triple terms structurally into
-/// a dedicated triple shard. Giving the dict-spill staging the same is tracked as sq-jvbr;
-/// until then this guard keeps that path honest.
-#[cfg(feature = "dict-spill")]
-fn reject_triple_terms_in_external_build(partials: &[(Dict, Vec<[Id; 3]>)]) -> Result<(), String> {
-    if partials.iter().any(|(d, _)| d.has_triple_terms()) {
-        return Err("N-Triples: RDF 1.2 triple terms `<<( … )>>` are not yet supported by the \
-                    dict-spill external builder; build with the default sharded path \
-                    (SPARQ_DICT_SPILL unset) or load this document in memory \
-                    (Graph::load_str/load_reader) instead (sq-jvbr)"
-            .to_string());
-    }
-    Ok(())
 }
 
 /// Env-gated (`SPARQ_BUILD_TIMING`) phase-time accumulators for the parallel ingest path,
@@ -7773,9 +7751,11 @@ mod tests {
 
     /// [OPUS-4.8] The spilled external build still supports its mmap'd read-back path, and
     /// it rejects non-N-Triples formats with a clear error (the documented restriction).
-    /// [OPUS-4.8] (sq-jvbr) It also still rejects RDF 1.2 triple terms with a clear error
-    /// (unlike the sharded path, which now handles them — sq-t3rt): the dict-spill staging
-    /// has no representation for a triple term, so the guard must stay live and tested.
+    /// [OPUS-4.8] (sq-jvbr) It now ACCEPTS RDF 1.2 triple terms (previously rejected): the
+    /// `SpillInterner` interns them structurally into an in-RAM triple-term arena finalised
+    /// after the leaf consolidation (`finalize_triple_terms`), so a triple-term document
+    /// builds and opens. Full differential coverage vs the sharded/serial/in-memory paths is
+    /// in `dict_spill_triple_terms_match_in_memory` below; this just checks the smoke path.
     #[cfg(feature = "dict-spill")]
     #[test]
     fn dict_spill_rejects_non_ntriples_and_opens_mmap() {
@@ -7785,14 +7765,20 @@ mod tests {
             .expect_err("spill build must reject non-ntriples");
         assert!(err.contains("N-Triples"), "error must name the restriction: {err}");
 
-        // RDF 1.2 triple terms are rejected by the dict-spill path (sq-jvbr) with an
-        // actionable error that points at the working alternatives.
+        // RDF 1.2 triple terms now build through the dict-spill path (sq-jvbr) and open.
         let tt = "<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
                   <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> .\n";
-        let tt_err = Graph::build_external_spill(tt.as_bytes(), "ntriples", &dir.join("tt"), 64, &cfg)
-            .expect_err("dict-spill build must reject triple terms (sq-jvbr)");
-        assert!(tt_err.contains("triple term"), "error must name triple terms: {tt_err}");
-        assert!(tt_err.contains("sharded") || tt_err.contains("memory"), "error must point at a working path: {tt_err}");
+        let tt_dir = dir.join("tt");
+        Graph::build_external_spill(tt.as_bytes(), "ntriples", &tt_dir, 64, &cfg)
+            .expect("dict-spill build must now accept triple terms (sq-jvbr)");
+        let tg = Graph::open(&tt_dir).unwrap();
+        assert_eq!(tg.len(), 1, "the single reifier statement is materialised");
+        let ttobj = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::NamedNode::new("http://ex/a").unwrap(),
+            oxrdf::NamedNode::new("http://ex/b").unwrap(),
+            Term::NamedNode(oxrdf::NamedNode::new("http://ex/c").unwrap()),
+        )));
+        assert!(tg.id_of(&ttobj).is_some(), "the triple term `<<( a b c )>>` must be a first-class dict term");
 
         let nt = "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
                   <http://ex/a> <http://ex/p> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n";
@@ -7802,6 +7788,100 @@ mod tests {
         let g = Graph::open(&ok_dir).unwrap();
         assert_eq!(g.len(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-jvbr) The DICT-SPILL external builder now interns RDF 1.2 triple terms
+    /// `<<( … )>>` structurally: leaf components spill/dedup as usual, while triple-term
+    /// OCCURRENCES go to an in-RAM arena (rare reification metadata, like the sharded path's
+    /// serial second pass) and are finalised — content-addressed by their components' FINAL
+    /// ids, deduped, assigned ids AFTER every leaf — in `finalize_triple_terms`. The built
+    /// store must round-trip identically (term-level, order-independent) to the in-memory
+    /// loader and the serial/sharded external builds. A tiny memory budget forces cache
+    /// eviction/epochs + many sort runs, exercising the staged-id remap windows under spill.
+    ///
+    /// Coverage (mirrors the sharded differential test):
+    /// - a triple term shared by TWO statements (must dedup to ONE id);
+    /// - components in distinct namespaces (route to different leaf shards);
+    /// - a leaf SHARED between a plain triple and a triple-term component;
+    /// - a NESTED triple term (a triple term in another's object slot);
+    /// - a blank-node component;
+    /// - bulk rows so the document spans multiple parse blocks AND triggers epoch resets.
+    #[cfg(feature = "dict-spill")]
+    #[test]
+    fn dict_spill_triple_terms_match_in_memory() {
+        use store::BUILT;
+        let mut nt = String::new();
+        for i in 0..3000u32 {
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 211,
+                i % 11,
+                i % 500
+            ));
+            if i % 500 == 0 {
+                // Shared triple term across two statements; cross-namespace components.
+                nt.push_str("<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
+                nt.push_str("<http://ex/r1b> <http://ex/sameAs> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
+            }
+        }
+        // A leaf shared between a plain triple and a triple-term component.
+        nt.push_str("<http://ex/knows> <http://ex/about> <http://alpha.example/alice> .\n");
+        // Blank-node component.
+        nt.push_str("<http://ex/r2> <http://ex/about> <<( _:b0 <http://ex/p> \"v\" )>> .\n");
+        // Nested triple term.
+        nt.push_str("<http://ex/r3> <http://ex/nested> <<( <http://gamma.example/x> <http://delta.example/q> <<( <http://eps.example/a> <http://zeta.example/b> <http://eta.example/c> )>> )>> .\n");
+
+        let mem = Graph::load_str(&nt, "ntriples").expect("in-memory loader must accept triple terms");
+
+        let base = std::env::temp_dir().join(format!("sparq_spill_tt_{}", std::process::id()));
+        let spill_dir = base.join("spill");
+        // Tiny budget -> epoch resets + many sort runs (exercises the remap windows).
+        let cfg = dictspill::SpillConfig { mem_budget: 64 << 10, disk_floor: 0 };
+        Graph::build_external_spill(nt.as_bytes(), "ntriples", &spill_dir, 256, &cfg)
+            .expect("dict-spill build must accept triple terms (sq-jvbr)");
+        let sp = Graph::open(&spill_dir).unwrap();
+        assert_eq!(sp.len(), mem.len(), "spill triple count differs from in-memory");
+        assert_eq!(sp.dict.len(), mem.dict.len(), "spill dict size differs from in-memory");
+
+        let dump = |g: &Graph| {
+            let scan = g.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(dump(&sp), dump(&mem), "spill-built store differs from in-memory (triple terms)");
+
+        // The shared triple term must be ONE dict entry referenced by both reifiers.
+        let tt = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::NamedNode::new("http://alpha.example/alice").unwrap(),
+            oxrdf::NamedNode::new("http://beta.example/age").unwrap(),
+            Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER)),
+        )));
+        let tt_id = sp.id_of(&tt).expect("the shared triple term must be in the spill dict");
+        let r1 = sp.id_of(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1").unwrap())).unwrap();
+        let r1b = sp.id_of(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1b").unwrap())).unwrap();
+        let obj_of = |s: Id| {
+            let scan = sp.store.scan(&[Some(s), None, None]);
+            assert_eq!(scan.rows.len(), 1, "reifier must have exactly one statement");
+            scan.to_spo(&scan.rows[0])[2]
+        };
+        assert_eq!(obj_of(r1), tt_id, "<r1>'s object is the shared triple term");
+        assert_eq!(obj_of(r1b), tt_id, "<r1b>'s object is the SAME shared triple-term id");
+
+        // Sanity: the triple-term-free permutation/dict bytes are still produced (no perm
+        // file is empty), proving the staged-triple remap fed every triple through.
+        for &perm in BUILT {
+            let f = spill_dir.join(format!("perm{}.bin", perm as usize));
+            assert!(std::fs::metadata(&f).map(|m| m.len() > 0).unwrap_or(false), "perm {f:?} must be non-empty");
+        }
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// [OPUS-4.8] (sq-t3rt) The SHARDED external builder now handles RDF 1.2 triple terms
@@ -7823,8 +7903,8 @@ mod tests {
     /// - enough bulk rows that the input spans multiple parse blocks/chunks (cross-chunk
     ///   partial merge), with the reification metadata interleaved among them.
     ///
-    /// (The dict-spill path still rejects triple terms — that is bead sq-jvbr, deliberately
-    /// not fixed here to avoid a conflicting edit.)
+    /// (The dict-spill path now also supports triple terms — sq-jvbr; see
+    /// `dict_spill_triple_terms_match_in_memory`.)
     #[cfg(all(feature = "mmap", feature = "parallel"))]
     #[test]
     fn external_build_triple_terms_sharded_matches_serial_and_memory() {

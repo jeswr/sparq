@@ -252,11 +252,11 @@ cargo build -p sparq-cli --features serialize-rdf
   a `<<( … )>>` in subject/predicate position is rejected with a precise error). Triple terms
   may nest, take blank-node/literal components, and are content-addressed (an identical triple
   term shares one dict id). They load through **every** path — serial, parallel-chunked,
-  streaming-pipelined, and the sharded external builder — at full parallelism (the in-memory
-  parallel merge no longer drops to a serial fallback when they are present). The **dict-spill**
-  external builder is the one exception: it rejects triple terms with a clear error (its
-  content-only on-disk records can't encode them — bead sq-jvbr); use the default sharded path
-  or an in-memory load for RDF-star + dict-spill datasets. In **Turtle/TriG**, the SPARQL-1.2
+  streaming-pipelined, the sharded external builder, and the **dict-spill** external builder
+  (sq-jvbr: triple-term occurrences take an in-RAM arena finalised after the spilled leaf
+  consolidation, content-addressed by their components' final ids and assigned ids after every
+  leaf) — at full parallelism (the in-memory parallel merge no longer drops to a serial
+  fallback when they are present). In **Turtle/TriG**, the SPARQL-1.2
   reification sugar is supported via the Turtle parser: the reifying triple `<< s p o >>`
   (subject or object position, optionally `<< s p o ~ reifier >>`) and the annotation block
   `s p o {| … |}` desugar to the standard `rdf:reifies <<( s p o )>>` form (the annotation block
