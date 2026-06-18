@@ -110,7 +110,7 @@ jobs:
     # than running away (matches miri.yml / asan.yml posture).
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Kani pins its own internal toolchain via `cargo kani setup`, but it still needs a host
       # Rust toolchain to build the cargo-kani driver. Pin the same nightly date as the other
       # nightly lanes so a toolchain bump moves them together. (Kani tracks a recent stable/

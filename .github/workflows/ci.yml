@@ -69,7 +69,7 @@ jobs:
       # the bind posture/entrypoint) still gets the image smoke even though the matrix skips.
       docker_changed: ${{ steps.decide.outputs.docker_changed }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Only run the path filter on pull_request; on every other event we force-run the
       # full matrix (see decide step), so the filter's result is irrelevant there and we
       # skip it to avoid the unreliable push/merge_group base-diff.
@@ -132,7 +132,7 @@ jobs:
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # [OPUS-4.8] sq-c76x: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
       # build + `nextest archive` write. The stock ubuntu-latest runner ships ~14 GB free
       # on `/`; the archive (.tar.zst of every workspace test binary) plus the warm
@@ -300,7 +300,7 @@ jobs:
           - name: bulk 3/3
             partition: "count:3/3"
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # [OPUS-4.8] sq-c76x: reclaim ~20-30 GB BEFORE downloading/extracting the nextest
       # archive and running the shard. This is the PRIMARY site of the `No space left on
       # device` bulk-shard failures: the bulk shards `--extract-to .` the archived
@@ -418,7 +418,7 @@ jobs:
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
@@ -608,7 +608,7 @@ jobs:
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt, clippy
@@ -669,7 +669,7 @@ jobs:
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust (pinned MSRV)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.88
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -691,7 +691,7 @@ jobs:
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C test suites (pinned)
@@ -747,7 +747,7 @@ jobs:
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C SHACL test suite (pinned)
@@ -793,7 +793,7 @@ jobs:
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run OGC GeoSPARQL topology compliance ratchet
@@ -844,7 +844,7 @@ jobs:
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch inference test suites (pinned)
@@ -907,7 +907,7 @@ jobs:
     if: github.event_name != 'schedule' && needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
       # instrumented build. cargo-llvm-cov compiles the workspace per-crate with coverage
       # instrumentation AND writes a `.profraw` per test, on a runner that starts with only
@@ -1024,7 +1024,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
       # FULL-tier instrumented build. This nightly job adds the heavy sparq-vectors 50k
       # recall/diskann tests on top of the per-crate llvm-cov instrumentation + per-test
@@ -1103,7 +1103,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Free runner disk before mutation build
         # cargo-mutants builds the workspace many times (one rebuild per mutant); reclaim
         # space first like coverage-nightly. Best-effort, no-ops on absent paths.
@@ -1176,7 +1176,7 @@ jobs:
     name: unsafe-register (count ratchet)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Ratchet first-party unsafe count against the snapshot
         # Fails CI if a crate's live `unsafe` count exceeds bench/unsafe-snapshot.json.
         # The fix is always: add a row to compliance/memsafety/unsafe-register.md + a
@@ -1207,7 +1207,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-geiger
@@ -1253,7 +1253,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
       - name: Build image (load into the local daemon)
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
