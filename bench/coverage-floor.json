@@ -72,7 +72,7 @@
       "note": "per-commit floor is measured with the two *_recall_at_10_vs_brute_force_on_50k tests SKIPPED; the nightly tier measures the full set."
     },
     "sparq-wasm": {
-      "floor": 77
+      "floor": 93
     },
     "sparq-zk": {
       "floor": 88
