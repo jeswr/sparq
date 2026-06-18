@@ -68,7 +68,7 @@
     },
     "sparq-serve": {
       "had_integration_dir": true,
-      "min_tests": 54
+      "min_tests": 78
     },
     "sparq-server": {
       "had_integration_dir": true,
