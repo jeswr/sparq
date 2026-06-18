@@ -3746,7 +3746,18 @@ fn stream_write_numerics(path: &std::path::Path, n: usize, num: &NumData) -> std
     const BLOCK: usize = 1 << 16; // ids per flush (512 KiB of f64)
     let mut buf: Vec<f64> = Vec::with_capacity(BLOCK.min(n));
     let flush = |w: &mut std::io::BufWriter<std::fs::File>, buf: &mut Vec<f64>| -> std::io::Result<()> {
-        // SAFETY: reinterpret the contiguous f64 block as bytes for writing.
+        // SAFETY: reinterpret the contiguous f64 block as bytes for writing. (sq-7ph8)
+        // - `buf` is a live `Vec<f64>` of `buf.len()` initialised elements; `size_of_val(&buf[..])`
+        //   = `len * 8` covers exactly that contiguous, fully-initialised region (no over-read).
+        // - target `u8` has alignment 1; the f64 source is over-aligned, so the cast never
+        //   produces a misaligned access.
+        // - the bytes are only READ (passed to `write_all`), never written through the alias.
+        // - the `&[u8]` is consumed within this closure before `buf.clear()`; it never escapes
+        //   the source borrow, so no dangling/provenance issue.
+        // - native-endian reinterpret, identical to `write_numerics` above and symmetric with the
+        //   native-endian read in `NumData::as_slice`: this cache is rebuilt locally, never shipped
+        //   cross-arch, so write-native + read-native round-trips. Byte-identical to the old dense
+        //   write (asserted by `streamed_caches_byte_identical_to_dense`).
         let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..])) };
         w.write_all(bytes)?;
         buf.clear();
@@ -3784,7 +3795,13 @@ fn stream_write_temporals(path: &std::path::Path, n: usize, temp: &TempData) -> 
     // "not temporal" decode, so the instant value of a flag-0 cell is irrelevant on read).
     let mut fbuf: Vec<f64> = Vec::with_capacity(BLOCK.min(n));
     let flush_f = |w: &mut std::io::BufWriter<std::fs::File>, buf: &mut Vec<f64>| -> std::io::Result<()> {
-        // SAFETY: reinterpret the contiguous f64 block as bytes for writing.
+        // SAFETY: reinterpret the contiguous f64 instant block as bytes for writing. (sq-7ph8)
+        // Same invariants as `stream_write_numerics::flush`: `size_of_val(&buf[..]) = len*8` views
+        // exactly the live, initialised `Vec<f64>` region; `u8` has align 1 so no misalignment;
+        // the bytes are read-only (fed to `write_all`); the `&[u8]` never escapes this closure
+        // (consumed before `buf.clear()`); native-endian, symmetric with the native-endian temporal
+        // read path and byte-identical to `write_temporals`. The trailing flag column below is a
+        // plain `Vec<u8>` write (no unsafe).
         let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..])) };
         w.write_all(bytes)?;
         buf.clear();
