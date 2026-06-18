@@ -11,6 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page renders on docs.rs (the front page now comes from README.md via include_str!).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # Opt-in stream processing (the sparq-reason / sparq-shacl isolation pattern): a
 # SEPARATE crate so the core engine carries zero streaming code, deps, or runtime
 # cost by default — RSP is engaged only by depending on this crate. Nothing in

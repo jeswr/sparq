@@ -11,6 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page and every feature-gated item (`federation-descriptors`) render on docs.rs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # Opt-in schema introspection (GenAI phase 2 — see research/genai-design.md and
 # research/genai-ontology-introspection.md). This is a SEPARATE crate so the core
 # engine carries zero introspection code; it consumes only sparq-core's PUBLIC

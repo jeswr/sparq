@@ -1,38 +1,7 @@
-//! sparq-introspect: **ontology/schema introspection** over a [`sparq_core::Graph`] —
-//! the effective schema a knowledge graph *actually uses*, mined from the store's
-//! sorted permutation indexes (GenAI phase 2, see `research/genai-design.md` §2 and
-//! `research/genai-ontology-introspection.md`).
-//!
-//! Everything is a **sorted scan, never a join-engine call**:
-//!
-//! - **Characteristic sets** (Neumann & Moerkotte, ICDE 2011): one SPO scan groups
-//!   subjects by their exact predicate set — subjects are contiguous, predicates within
-//!   a subject run are sorted, so the per-subject predicate list falls out of run
-//!   boundaries. Each distinct set carries its subject count and per-predicate triple
-//!   counts (the paper's structure: `count(C)` + per-predicate multiplicity).
-//! - **Schema summary**: class extents from the `rdf:type` block (one POS range),
-//!   per-class predicate usage with coverage ratios, per-predicate global stats
-//!   (triples, distinct subjects/objects, literal-vs-IRI object split, datatype
-//!   distribution, sample values), and **observed** domain/range histograms — the
-//!   most-common subject/object classes per predicate — alongside any **declared**
-//!   `rdfs:domain`/`rdfs:range` triples present.
-//! - **Vocabulary detection**: namespaces in use (IRIs split at the last `#`/`/`, the
-//!   same split the dictionary itself stores) with distinct-term counts, recognised
-//!   against a bundled table of well-known vocabularies.
-//!
-//! - **Cross-class join hints**: the `(subject_class) --predicate--> (object_class)`
-//!   edge table with per-edge triple counts ([`JoinHints`]), mined in the same SPO
-//!   scan — the join-cardinality signal beyond the per-predicate observed range.
-//!
-//! Outputs: the [`Introspection`] struct tree, [`Introspection::to_json`] (the machine
-//! surface for LLM grounding), [`Introspection::to_text_summary`] (a compact,
-//! most-important-first digest under a character budget — the prompt-ready "schema
-//! card" deck the design doc prescribes), [`Introspection::to_void`] (a W3C VoID
-//! dataset description, as N-Triples), and [`Introspection::schema_summary_for`] (a
-//! retrieval-mode digest scoped to a set of seed IRIs, for large-schema KGs).
-//!
-//! The crate is opt-in and read-only over the public `sparq-core` API; the default
-//! engine build does not include it and carries no introspection code.
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// rust fences are API-map sketches marked `ignore` (they reference an external graph).
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use oxrdf::vocab::xsd;

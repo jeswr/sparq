@@ -11,6 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page and every feature-gated item (`engine`, `cjk`, …) render on docs.rs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # Opt-in full-text search. This is a SEPARATE crate (the sparq-geo shape) so the core
 # engine — and in particular the wasm build — carries zero text-search code or
 # dependencies; full-text support is engaged only by depending on this crate. The

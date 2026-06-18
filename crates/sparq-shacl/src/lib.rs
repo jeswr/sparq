@@ -1,43 +1,7 @@
-//! sparq-shacl: opt-in SHACL Core + SHACL-SPARQL validation over
-//! [`sparq_core::Graph`]s.
-//!
-//! Parse a shapes graph into a shapes model, evaluate every SHACL Core
-//! constraint component against a data graph by direct index-backed scans,
-//! evaluate `sh:sparql` constraints (SHACL §5.2) and SPARQL-based constraint
-//! COMPONENTS (`sh:ConstraintComponent`, SHACL §6) by routing their
-//! `sh:select`/`sh:ask` through `sparq-engine` (with `$this`/`$value`/`$PATH`
-//! and `$paramName` pre-binding), and produce a [`ValidationReport`] (with
-//! Turtle and plain-text renderings of the SHACL report vocabulary).
-//!
-//! This crate follows the `sparq-reason` isolation pattern: it is NOT a
-//! dependency of any other sparq crate by default — the core engine and the
-//! default wasm bundle carry zero SHACL code unless a consumer opts in by
-//! depending on it. (`sparq-engine`, pulled in for `sh:sparql`, does not depend
-//! on this crate, so there is no cycle.) The browser/JS consumer opts in via
-//! `sparq-wasm`'s non-default `shacl` feature (sq-yqi1, #162), which exposes
-//! [`validate`] as a `Store::validate(...)` wasm binding; on that wasm32 build the
-//! `sparq-engine` dependency drops its defaults so rayon never enters the bundle.
-//!
-//! ```
-//! use sparq_core::Graph;
-//!
-//! let data = Graph::load_str(r#"
-//!     @prefix ex: <http://example.org/> .
-//!     ex:alice a ex:Person ; ex:age "thirty" .
-//! "#, "turtle").unwrap();
-//! let shapes = Graph::load_str(r#"
-//!     @prefix sh: <http://www.w3.org/ns/shacl#> .
-//!     @prefix ex: <http://example.org/> .
-//!     @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-//!     ex:PersonShape a sh:NodeShape ;
-//!       sh:targetClass ex:Person ;
-//!       sh:property [ sh:path ex:age ; sh:datatype xsd:integer ] .
-//! "#, "turtle").unwrap();
-//!
-//! let report = sparq_shacl::validate(&data, &shapes);
-//! assert!(!report.conforms);
-//! assert_eq!(report.results.len(), 1);
-//! ```
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// `## Usage` rust fences are compiled as doctests (hidden `#`-scaffolding inside them).
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod eval;

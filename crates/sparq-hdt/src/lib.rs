@@ -1,39 +1,7 @@
-//! sparq-hdt: load HDT (Header Dictionary Triples) archives into a sparq [`Graph`].
-//!
-//! HDT (<https://www.rdfhdt.org/>, W3C member submission) is the de-facto binary
-//! archive format for RDF: the dictionary is Plain-Front-Coded and the triples are
-//! a bitmap-compressed adjacency list, so files are a fraction of the size of
-//! (even gzipped) N-Triples and load without text parsing. This crate wraps the
-//! maintained [`hdt`] crate's reader — which supports the standard layout written
-//! by hdt-cpp / hdt-java: FourSectionDictionary (PFC) + BitmapTriples, SPO order —
-//! and streams its dictionary + triples into a sparq graph:
-//!
-//! ```no_run
-//! let graph = sparq_hdt::load("dataset.hdt").unwrap();
-//! ```
-//!
-//! Writing back out (`Graph` -> `.hdt`) is opt-in behind the `write` cargo feature.
-//! It encodes the FourSectDict (Plain Front Coding) + BitmapTriples sections
-//! DIRECTLY from sparq's in-memory dictionary + triples (the inverse of the decoder)
-//! — no temporary N-Triples round-trip — see `save` and `src/encode.rs`:
-//!
-//! ```no_run
-//! # #[cfg(feature = "write")]
-//! # fn demo(graph: &sparq_core::Graph) -> Result<(), sparq_hdt::Error> {
-//! sparq_hdt::save(graph, "out.hdt")?;        // or out.hdt.gz / .hdt.zst / .hdt.bz2
-//! # Ok(()) }
-//! ```
-//!
-//! The translation works at the **id level**: each distinct HDT dictionary id is
-//! decompressed to its term string ONCE, interned into the sparq [`Dict`], and the
-//! mapping memoized in a flat per-section table — so the term set is never
-//! materialized twice and the per-triple work is three array lookups.
-//!
-//! Compressed containers — `.hdt.gz` (gzip), `.hdt.zst` (zstd) and `.hdt.bz2`
-//! (bzip2), as publishers ship them — are detected by MAGIC BYTES (not file name)
-//! and decompressed on the fly, STREAMING (the decompressed `.hdt` is never fully
-//! materialized) by every entry point; [`header`] exposes the archive's metadata
-//! triples (the H in HDT) as a queryable sparq [`Graph`].
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// quickstart fence is a `no_run` doctest (it opens a `.hdt` file that need not exist).
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use sparq_core::dict::{Dict, Id};

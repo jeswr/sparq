@@ -1,39 +1,7 @@
-//! sparq-nlq: natural-language questions over a [`sparq_core::Graph`], answered with
-//! SPARQL (GenAI phase 3 — `research/genai-design.md` §2, `research/genai-nl-to-sparql.md`).
-//!
-//! The loop is deliberately **lean** (the SPARQL-LLM finding: retrieve + repair beats
-//! sprawling agents):
-//!
-//! ```text
-//!            ┌──────────────────────────────────────────────────────┐
-//!            │ GROUND   sparq_introspect::to_text_summary(budget)   │
-//!            │          + few-shot examples + the question          │
-//!            └───────────────────────────┬──────────────────────────┘
-//!                                        ▼
-//!            ┌──────────────────────────────────────────────────────┐
-//!      ┌────▶│ GENERATE Llm::complete(prompt) -> completion         │
-//!      │     └───────────────────────────┬──────────────────────────┘
-//!      │                                 ▼
-//!      │     ┌──────────────────────────────────────────────────────┐
-//!      │     │ VALIDATE extract ```sparql block, spargebra parse    │
-//!      │     └───────────┬──────────────────────────┬───────────────┘
-//!      │           parse error                  parses
-//!      │                 │                          ▼
-//!      │     ┌───────────┴───────────┐  ┌──────────────────────────┐
-//!      └─────┤ REPAIR (≤ N rounds:   │  │ EXECUTE sparq_engine::   │
-//!      ▲     │ error + failed query  │  │ query_with_budget        │
-//!      │     │ back to the LLM)      │  └────────────┬─────────────┘
-//!      │     └───────────────────────┘     exec error│        ok
-//!      └──────────────────────────────────◀──────────┘         ▼
-//!                                              Answer { sparql, result,
-//!                                                       repairs, transcript }
-//! ```
-//!
-//! The LLM sits behind the [`Llm`] trait. CI never touches the network:
-//! [`ReplayLlm`] serves recorded prompt→completion pairs from a JSON fixture, and
-//! [`RecordingLlm`] wraps any backend to produce such fixtures. A thin Anthropic
-//! Messages-API client (`AnthropicLlm`) is available behind
-//! the non-default `live` feature.
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// quickstart fences are `no_run` doctests (they open a fixture file / the `live` API).
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use std::cell::RefCell;

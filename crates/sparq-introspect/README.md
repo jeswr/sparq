@@ -10,7 +10,7 @@ a SOTA star-join cardinality estimator).
 
 ## 🚀 Quickstart
 
-```rust
+```rust,ignore
 use sparq_introspect::{Introspection, BuildOptions};
 
 let ix = Introspection::build(&graph);              // or build_with(&graph, &BuildOptions{..})
@@ -70,7 +70,7 @@ ix.schema_summary_for(&seeds, 2500)           // retrieval-mode: schema scoped t
   **single named graph** when you pass that graph's sub-`Graph`. Each named graph of a
   quad dataset (loaded via `Graph::load_dataset` from N-Quads / TriG) is a self-contained
   `Graph`, fetched by name with [`Graph::named_graph(&name)`][named-graph] (sq-quuu):
-  ```rust
+  ```rust,ignore
   let g1 = graph.named_graph(&ex_g1).expect("graph exists");
   let card = sparq_introspect::Introspection::build(g1); // schema card for ex:g1 alone
   ```

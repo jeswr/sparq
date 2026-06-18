@@ -7,7 +7,7 @@ ARE the feature store, so similarity stays correct under incremental updates for
 
 ## 🚀 Quickstart
 
-```rust
+```rust,ignore
 use sparq_sim::{Sim, SimConfig, SignatureMode, weighted_jaccard};
 
 let sim = Sim::new(&graph);                       // defaults: PredicateNeighbor + IDF
@@ -51,7 +51,7 @@ weighted_jaccard(&sig_a, &sig_b);        // for callers that cache signatures
   [`sparq-vectors`](../sparq-vectors) crate covers the text side and ships dependency-free
   fusion helpers, so the two signals combine without either crate depending on the other:
 
-  ```rust
+  ```rust,ignore
   use sparq_sim::Sim;
   use sparq_vectors::{fuse_rrf, RRF_K};
 
@@ -73,7 +73,7 @@ that graph's sub-`Graph`. On a quad dataset (loaded via `Graph::load_dataset` fr
 N-Quads / TriG) each named graph is a self-contained `Graph`; fetch one by name with
 [`Graph::named_graph(&name)`][named-graph] (sq-quuu) and build a per-graph `Sim` over it:
 
-```rust
+```rust,ignore
 let g1 = graph.named_graph(&ex_g1).expect("graph exists");
 let sim = sparq_sim::Sim::new(g1); // signatures + similarity scoped to ex:g1 alone
 ```

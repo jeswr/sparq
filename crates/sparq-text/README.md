@@ -16,18 +16,22 @@ subjects/predicates is the store's ordinary permutation-index work.
 ## Library use
 
 ```rust
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sparq_core::Graph;
 use sparq_text::TextIndex;
 
-let graph = Graph::load_str(ttl, "turtle")?;
-let index = TextIndex::build(&graph);     // one dict scan; rayon-sharded with `parallel`
+# let ttl = r#"<http://ex/a> <http://www.w3.org/2000/01/rdf-schema#label> "the quick brown fox" ."#;
+let mut graph = Graph::load_str(ttl, "turtle")?;
+let mut index = TextIndex::build(&graph); // one dict scan; rayon-sharded with `parallel`
 
 let hits = index.search("quick fox");     // AND of tokens, BM25-ranked best-first
 let any  = index.search_any("fox dog");   // OR
 let auto = index.search("auto*");         // *-suffix = prefix token (autocomplete)
 for hit in &hits {
     let literal = graph.dict.term(hit.id); // hit.id IS the dict id; hit.score is BM25
+#   let _ = literal;
 }
+# let _ = (any, auto);
 
 // Phrase (adjacency) search is OPT-IN: it needs token positions, so build the
 // position-enabled index. The cheap default above stores NO positions.
@@ -36,11 +40,14 @@ let ids  = pidx.phrase("quick brown fox"); // literal ids where the tokens are
                                            // adjacent & in order (ascending ids)
 // Proximity/slop: the ranked, bounded-gap variant over the same positions.
 let near = pidx.phrase_near("quick fox", 2); // Vec<Hit>, best-first; score 1/(1+gap)
-
+# let _ = (ids, near);
 
 // Incremental upkeep, mirroring Graph::apply_delta (the GeoIndex shape):
+# let inserts: Vec<[oxrdf::Term; 3]> = Vec::new();
+# let deletes: Vec<[oxrdf::Term; 3]> = Vec::new();
 graph.apply_delta(&inserts, &deletes)?;
 index.apply_delta(&graph, &inserts, &deletes);
+# Ok(()) }
 ```
 
 ## Running `text:` inside SPARQL (the `engine` feature, default on)
@@ -57,8 +64,16 @@ The magic predicates live under `http://sparq.dev/text#`:
 | `?lit text:score ?s` | binds the relevance score (`xsd:double`) — BM25 for `text:matches`/`text:matchesAny`, proximity (`1/(1+gap)`) for `text:near`; must accompany exactly one such scored match on `?lit` in the same BGP <!-- [OPUS-4.8] --> |
 
 ```rust
+# // The `text:` magic predicates need the default-on `engine` feature; gated so the
+# // doctest is a no-op under `--no-default-features`.
+# #[cfg(feature = "engine")]
+# fn demo() -> Result<(), Box<dyn std::error::Error>> {
+# use sparq_core::Graph;
 use sparq_text::{query_text, TextIndex};
 
+# let graph = Graph::load_str(
+#     r#"<http://ex/p> <http://ex/title> "the quick brown fox" ."#, "turtle")?;
+# let index = TextIndex::build(&graph);
 let r = query_text(&graph, r#"
     PREFIX text: <http://sparq.dev/text#>
     SELECT ?post ?s WHERE {
@@ -66,6 +81,10 @@ let r = query_text(&graph, r#"
       ?title text:matches "fox" .
       ?title text:score ?s .
     } ORDER BY DESC(?s)"#, &index)?;
+# let _ = r;
+# Ok(())
+# }
+# fn main() {}
 ```
 
 `query_text` parses, **rewrites** each magic pattern into an inline `VALUES`
