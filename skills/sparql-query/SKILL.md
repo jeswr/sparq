@@ -375,6 +375,33 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   wired into the query evaluator — `query`/`query_json`/etc. are unchanged whether the feature is on
   or off. When off, zero columnar code compiles and the default native + wasm builds are
   byte-identical (no new dependencies; no `unsafe`).
+- **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
+  `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
+  `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through
+  `cache.get_or_eval(&graph, &query, version, &budget)` (returns an `Arc<QueryResult>`). It re-serves
+  the same read query against a slowly-changing graph without re-executing. **Soundness contract**:
+  the engine evaluates against a borrowed `&Graph` and can't see mutations, so the **caller bumps the
+  `u64` version on every mutation** (`apply_delta`/`update`/reload) — a hit is only returned for the
+  current version. **Non-deterministic queries are never stored** — `NOW`/`RAND`/`UUID`/`STRUUID`/
+  `BNODE`, a remote `SERVICE`, or any custom function / aggregate; `is_cacheable(&query)` reports this
+  conservatively, and `get_or_eval` evaluates those fresh every time. Keying on the parsed algebra
+  makes the cache insensitive to whitespace / comments / prefix spelling. `cache.stats()` exposes
+  hit/miss/entry counts; `cache.clear()` drops all entries. When off, zero cache code compiles, the
+  default build is byte-identical, and no new dependencies are added.
+
+  ```rust
+  // Cargo.toml: sparq-engine = { version = "0.1", features = ["result-cache"] }
+  use sparq_engine::{PreparedQuery, QueryBudget, ResultCache};
+  let cache = ResultCache::new(256);          // up to 256 distinct results, LRU
+  let q = PreparedQuery::parse("SELECT ?s WHERE { ?s ?p ?o }")?.into_query();
+  let mut version = 0u64;
+  let r1 = cache.get_or_eval(&graph, &q, version, &QueryBudget::unlimited())?; // miss
+  let r2 = cache.get_or_eval(&graph, &q, version, &QueryBudget::unlimited())?; // hit (same Arc)
+  // ... mutate the graph, then bump the epoch so the next read re-evaluates:
+  version += 1;
+  let r3 = cache.get_or_eval(&graph, &q, version, &QueryBudget::unlimited())?; // miss (fresh)
+  # Ok::<(), String>(())
+  ```
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`
   powers MD5/SHA*; `parallel` enables rayon scan/join/sort/aggregate. The **wasm** crate
   (`sparq-wasm`) disables defaults, so on `wasm32-unknown-unknown` REGEX/hash builtins and
