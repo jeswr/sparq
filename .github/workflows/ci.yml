@@ -1076,10 +1076,14 @@ jobs:
     # (drop "advisory") + flipping the step to fail on a regression, once broadly seeded.
     # Until then `continue-on-error: true` keeps the run green while it seeds.
     #
-    # SEEDED SO FAR (honest): sparq-canon and sparq-parse carry a real committed ceiling in
-    # bench/mutants-baseline.json from a local cargo-mutants run; every other crate is
-    # measured + reported here and gets its ceiling seeded on its first nightly run. The
-    # baseline's absence of a crate is NOT a claim that it has zero surviving mutants.
+    # SEEDED SO FAR (honest): the crates listed in bench/mutants-baseline.json carry a real
+    # committed ceiling from an actual cargo-mutants run (sparq-canon, sparq-parse from the
+    # original local run; sparq-algos added locally under sq-ep3f). Every OTHER crate in
+    # CRATES below is measured + reported here and gets its ceiling seeded on its first
+    # nightly run (download the mutants-outcomes-nightly artifact, run
+    # scripts/mutants-gate.py --seed on each outcomes.json, commit — sq-ep3f). The
+    # baseline's absence of a crate is NOT a claim that it has zero surviving mutants — it
+    # just has not been measured yet.
     name: mutation ratchet (cargo-mutants, advisory)
     needs: nightly-gate
     if: needs.nightly-gate.outputs.fresh == 'true'

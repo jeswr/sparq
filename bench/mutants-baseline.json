@@ -8,6 +8,14 @@
     "Regenerate after tests improve: cargo mutants -p <crate> -o target/mutants/<crate> && scripts/mutants-gate.py --seed target/mutants/<crate>/outcomes.json"
   ],
   "crates": {
+    "sparq-algos": {
+      "caught": 110,
+      "caught_pct": 84.09,
+      "ceiling": 23,
+      "measured_surviving": 21,
+      "timeout": 1,
+      "unviable": 3
+    },
     "sparq-canon": {
       "caught": 28,
       "caught_pct": 80.0,
