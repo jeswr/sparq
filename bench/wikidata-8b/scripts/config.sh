@@ -16,13 +16,21 @@ DEADMAN_MIN="${DEADMAN_MIN:-2400}"        # 40 h hard cost ceiling ($17.04)
 # MUST be a public-main commit WITH dict-spill merged. Empty = refuse to launch.
 SPARQ_SHA="${SPARQ_SHA:-}"
 CHUNK_MILLIONS="${CHUNK_MILLIONS:-32}"
-# TODO(dict-spill): verify env names + values against the merged implementation.
-# Candidates from in-flight branch ../sparq-dictspill @ 5069b33:
-#   SPARQ_DICT_SPILL=1|on|auto, SPARQ_DICT_SPILL_BUDGET_MB, SPARQ_DICT_SPILL_DISK_FLOOR_MB
+# dict-spill is MERGED (sparq-core/dictspill.rs; PRs #29/#582/#670). Env gate confirmed
+# against the merged impl (SpillConfig::from_lookup):
+#   SPARQ_DICT_SPILL=1|on|auto  — 0/off/unset keeps the in-RAM consolidation
+#   SPARQ_DICT_SPILL_BUDGET_MB  — dedup-cache + sort-run budget (default: 1/4 of RAM)
+#   SPARQ_DICT_SPILL_DISK_FLOOR_MB — abort-before-fill floor (default 1024)
+# NOTE: the budget governs the dedup caches + external-sort run buffers ONLY; it does
+# NOT count the chunk×12 B triple-run buffer or the ~0.5–1 GiB parse pipeline, so the
+# real peak RSS is budget + that floor. 8192 MB ⇒ ~9–10 GiB peak on the 15 GiB box.
 DICT_SPILL_ENV="${DICT_SPILL_ENV:-SPARQ_DICT_SPILL=1 SPARQ_DICT_SPILL_BUDGET_MB=8192}"
-# TODO(dict-spill): verify cargo feature plumbing — on the in-flight branch the
-# feature lives on sparq-core only (sparq-cli does not re-export it).
-CARGO_FEATURES="${CARGO_FEATURES:---features sparq-core/dict-spill}"
+# Cargo feature plumbing CONFIRMED post-merge: `dict-spill` is a DEFAULT feature of
+# sparq-cli (crates/sparq-cli/Cargo.toml: default = ["mmap","mimalloc","dict-spill"]),
+# so a plain `cargo build --release -p sparq-cli` already compiles the spill path —
+# no extra --features needed. Left empty by default; the old `--features
+# sparq-core/dict-spill` is redundant and references a sub-crate feature directly.
+CARGO_FEATURES="${CARGO_FEATURES:-}"
 
 # --- data ------------------------------------------------------------------
 DUMP_URL="${DUMP_URL:-https://dumps.wikimedia.org/wikidatawiki/entities/latest-truthy.nt.gz}"

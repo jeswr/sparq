@@ -14,8 +14,8 @@ BUILD_TIMEOUT_S="${4:-86400}"; SWAP_ABORT_MIB="${5:-24576}"; DISK_ABORT_FREE_GB=
 PARSE_CHECKPOINT_S="${7:-18000}"
 DUMP_URL="${8:-https://dumps.wikimedia.org/wikidatawiki/entities/latest-truthy.nt.gz}"
 DL_WORKERS="${9:-4}"
-DICT_SPILL_ENV="${10:-SPARQ_DICT_SPILL=1 SPARQ_DICT_SPILL_BUDGET_MB=8192}"  # TODO(dict-spill): verify at merge
-CARGO_FEATURES="${11:---features sparq-core/dict-spill}"                    # TODO(dict-spill): verify at merge
+DICT_SPILL_ENV="${10:-SPARQ_DICT_SPILL=1 SPARQ_DICT_SPILL_BUDGET_MB=8192}"  # merged env gate (SpillConfig::from_lookup)
+CARGO_FEATURES="${11:-}"  # dict-spill is a DEFAULT sparq-cli feature post-merge; no extra --features needed
 
 DRY="${DRY_RUN:-0}"
 X() { if [ "$DRY" = 1 ]; then echo "DRY+ $*"; else eval "$*"; fi; }
@@ -78,7 +78,8 @@ X "command -v cargo >/dev/null || curl --proto '=https' --tlsv1.2 -sSf https://s
 X ". '$HOME/.cargo/env'"
 X "git clone -q https://github.com/jeswr/sparq.git '$HOME/sparq'"
 X "cd '$HOME/sparq' && git checkout -q '$SHA_PIN' && git rev-parse HEAD > '$R/sha.txt'"
-# TODO(dict-spill): confirm feature plumbing post-merge (sparq-cli may re-export it).
+# dict-spill is a DEFAULT sparq-cli feature post-merge, so the plain build compiles the
+# spill path; $CARGO_FEATURES is empty unless an A/B run overrides it (e.g. to add a feature).
 X "cd '$HOME/sparq' && cargo build --release -q -p sparq-cli $CARGO_FEATURES 2> '$R/cargo-build.log'"
 CLI="$HOME/sparq/target/release/sparq-cli"
 X "'$CLI' --help > '$R/cli-help.txt' 2>&1 || true"
