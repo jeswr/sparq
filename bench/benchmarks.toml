@@ -381,6 +381,26 @@ records_to  = "stdout; analysis research/custom-parsers-baseline.md"
 status      = "ok"
 
 [[benchmark]]
+# [OPUS-4.8] (sq-9w0t) The dictionary bytes/term + dict-load-throughput baseline that
+# GATES the term-index-compression plan (research/term-index-compression.md §2-§3). The
+# B/term + composition figures are DETERMINISTIC (load-robust); throughput is quiet-box.
+id          = "dict-baseline"
+name        = "Term-index (dictionary) BASELINE harness"
+category    = "ingest"
+measures    = "dict bytes/term (arena + blob/browser mode) vs naive whole-string; per-class composition (IRI/literal/lang/blank/triple); A1 prefix/suffix split + distinct namespaces; A3 datatype-IRI + lang bytes; dict-build throughput (triples/s, terms/s, MB/s, median of 3)"
+invoke      = "cd bench/dict && cargo build --release && ./target/release/dict-baseline gen 200000 data && ./target/release/dict-baseline bench data/wikidata.nt   # also bench data/uniprot.nt; selftest for CI invariants"
+source      = "bench/dict/{README.md,Cargo.toml}, dict-baseline bin; Dict::heap_bytes()/len()/iter() in crates/sparq-core/src/dict.rs"
+dataset     = "data/ (gitignored): deterministic fixed-seed Wikidata-shaped (wd/wdt IRIs + lang/numeric/date literals) and Uniprot-shaped (long purl.uniprot.org IRIs) vocab; gen <entities> <out-dir>"
+quiet_box_sensitive = true
+pinning     = "entity count; fixed SplitMix64 seeds; fat LTO build to match shipped ingest"
+records_to  = "stdout; analysis research/term-index-compression.md §3"
+# Internal baseline micro-bench (gate-establishing measurement that feeds the ingest
+# harness + the term-index-compression plan), like parse-baseline/compress-bench — not a
+# capability dashboard card. The escape hatch in scripts/check-new-bench-registered.py §2.1.
+featured    = false
+status      = "ok"
+
+[[benchmark]]
 id          = "compress-bench"
 name        = "Compressed result-serialization (D4)"
 category    = "compression"

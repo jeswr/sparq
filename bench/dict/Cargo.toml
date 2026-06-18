@@ -1,0 +1,39 @@
+# [OPUS-4.8] BASELINE MEASUREMENT harness for the term-index (dictionary)
+# compression design (research/term-index-compression.md §2-§3). Deliberately a
+# STANDALONE cargo project (own [workspace] table, same isolation pattern as
+# bench/parse and bench/serve) so nothing here touches the root workspace or the
+# wasm build. Nothing here is production code; each measurement's numbers are
+# recorded in the research document so every later dictionary-compression
+# %-claim (A1 prefix factoring sq-xhwf, A2 extended inline ValueIds, the
+# prototype FSST/PFC tier) is gated on OUR repo's measured baseline rather than
+# borrowed prior-art numbers (the empirical-honesty prerequisite, bead sq-9w0t).
+[package]
+name = "dict-baseline"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# The root workspace patches spargebra with the vendored W3C-conformance fork;
+# sparq-core's build depends on the same graph, so this detached project must
+# apply the same patch.
+[patch.crates-io]
+spargebra = { path = "../../vendor/spargebra" }
+
+[dependencies]
+# The dictionary under measurement lives in sparq-core; the production ingest
+# path (`Graph::load_reader_parallel`) builds it exactly as `sparq-cli ingest`
+# does, so the measured bytes/term + load throughput are the SHIPPED numbers.
+sparq-core = { path = "../../crates/sparq-core", features = ["parallel"] }
+
+[[bin]]
+name = "dict-baseline"
+path = "src/main.rs"
+
+# Match the root workspace release profile (sparq-cli ships with fat LTO), so the
+# measured load throughput reflects the shipped build, not a debug one.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
