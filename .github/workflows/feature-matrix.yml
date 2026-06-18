@@ -177,6 +177,22 @@ jobs:
             crate: sparq-engine
             features: window-functions
             test: true
+          # [OPUS-4.8] sq-it1x: opt-in MVCC / ACID transaction isolation. The whole `txn`
+          # module (`src/txn.rs`, gated `pub mod txn` in lib.rs) and its in-src unit tests
+          # (`txn::tests::*`, 3) plus the whole-file `tests/mvcc_txn.rs` suite (13;
+          # `#![cfg(feature = "txn")]`) are all `#[cfg(feature = "txn")]`, so the default
+          # build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+          # `--features`) compiled them EMPTY and ran ZERO of the 16 tests — the silent
+          # "compiled EMPTY ... tests never ran" gap this lane exists to close. No new dep
+          # (`txn = []`, reuses the existing snapshot/delta-overlay substrate) and no
+          # `not(feature)` divergence, so a single isolated leg (matching the per-feature
+          # engine legs above) covers it; verified `cargo test -p sparq-engine --features
+          # txn` runs all 16 tests and `cargo clippy -p sparq-engine --features txn
+          # --all-targets -- -D warnings` is clean.
+          - name: sparq-engine (txn)
+            crate: sparq-engine
+            features: txn
+            test: true
           # sparq-cli: the `dump` re-serializer (forwards sparq-engine/serialize-rdf).
           - name: sparq-cli (serialize-rdf)
             crate: sparq-cli
