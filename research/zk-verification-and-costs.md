@@ -191,4 +191,4 @@ does not change what is proven or the zero-knowledge (age-hiding) property.**
 - Gate snapshot (authoritative, `sq-pzet`/`sq-mj2z` baseline): `crates/sparq-zk-compose/tests/gate_count_snapshot.json` (mirror: `bench/zk-compose/gate_counts_latest.json`)
 - Cost curve (indicative): `bench/zk-compose/family_cost_curve.json`; browser perf: `research/zk-browser-perf-assessment.md`
 - Per-member machine-readable cost + semantics table: `site/src/data/zk-circuit-costs.json`
-- Soundness status: `research/zk-soundness-audit.md` (`sq-qhy4`/`sq-9hrn`/`sq-1s2`); `zk/compose/STATUS.md` (note: its inventory line cites a stale `revoke_unset_d10 = 822`; the committed snapshot `899` is authoritative)
+- Soundness status: `research/zk-soundness-audit.md` (`sq-qhy4`/`sq-9hrn`/`sq-1s2`); `zk/compose/STATUS.md` (its hard-coded gate-count block has been replaced by a pointer to the authoritative catalog above, so the gate counts here are the single source of truth)
