@@ -19,7 +19,7 @@ now CLOSED** by `.github/workflows/asan.yml` (sq-hybl).
 
 | ID | What | Evidence it is closed |
 |---|---|---|
-| GX-5a | No per-site unsafe justification register | `compliance/memsafety/unsafe-register.md` — 56 rows, 100% of first-party sites. |
+| GX-5a | No per-site unsafe justification register | `compliance/memsafety/unsafe-register.md` — 58 rows, 100% of first-party sites. |
 | GX-5b | cargo-geiger informational only (no gating ratchet) | `scripts/unsafe-gate.py` + `bench/unsafe-snapshot.json` + the **gating** `unsafe-register (count ratchet)` CI lane in `ci.yml`. cargo-geiger stays as a separate visibility lane. |
 | GX-5c | B5 mmap sites "not attested in one place" | The coverage matrix in `controls.md` + the oracle (`mmap_corruption_oracle.rs`) + fuzz (`graph_open.rs`) citations attest each B5 site. |
 | **MS-G2** | First-party `clippy::undocumented_unsafe_blocks` lint missing (the `// SAFETY:` token was enforced by review + register, not mechanically) | **CLOSED (sq-8wbn, [OPUS-4.8]).** `#![warn(clippy::undocumented_unsafe_blocks)]` is now a crate-root attribute on all 5 unsafe-bearing crates (sparq-core, sparq-vectors, sparq-cli, sparq-zk-compose, sparq-bench); the 6 sites the lint flagged were normalised to a literal `// SAFETY:` comment immediately preceding each `unsafe` block/impl (the two `SlotPtr` `Send`/`Sync` pairs in `dict.rs`/`dictspill.rs`, plus `lib.rs` `from_raw_parts_mut` over `MmapMut` and the test `remove_var`). The existing `clippy --all-targets -D warnings` gate now mechanically rejects any new undocumented `unsafe`. |
@@ -30,7 +30,7 @@ now CLOSED** by `.github/workflows/asan.yml` (sq-hybl).
 |---|---|---|---|---|
 | ~~MS-G3~~ | ~~No standalone AddressSanitizer lane outside cargo-fuzz.~~ | ~~Low~~ | **CLOSED (sq-hybl, [OPUS-4.8]).** Added `.github/workflows/asan.yml` — a standalone ASan lane that runs the deterministic mmap corruption corpus (`crates/sparq-core/tests/mmap_corruption_oracle.rs` under `--features mmap,dict-spill`, plus the `sparq-vectors` `store`/`diskann` open-validation corpus) under `RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu`. So the B5 reads now execute under ASan against the *deterministic* corpus, not only as deep as the fuzz corpus reaches. **Nightly schedule + workflow_dispatch only** (no PR/merge_group trigger — `-Zbuild-std` rebuilds std under ASan, many minutes), so it is a non-blocking UB safety net (cf. miri.yml / the nightly fuzz tier) and the `ci-summary / gate` aggregator never discovers/waits on it; the job name also carries the `informational` token belt-and-braces. | — (done) |
 | **MS-G4** | **No formal verification / model checking of the unsafe core.** Assurance is Miri + oracle + fuzz + per-site argument (strong *testing/justification*) but not a *proof* of the mmap validators (`MappedDict::validate`, `VectorStore::open_validated`, DiskANN `open`). | **Low** (assurance ceiling, not a defect) | **PARTLY ADDRESSED (sq-hkud, [OPUS-4.8]) — see the feasibility verdict below.** Kani is a *tractable + worthwhile* fit for the `.spqv` validator and a bounded proof now exists for it; the dict mmap validator needs a refactor first (scoped as follow-up). | sq-hkud (this work) + a follow-up bead for the dict-validator seam |
-| **MS-G5** | **Cross-doc unsafe-count drift.** `research/threat-model.md` says sparq-core has "39 sites"; the register/snapshot/ratchet say **42**. The register is authoritative; the threat-model prose is stale. | **Low** | One-line fix to `research/threat-model.md` (owned by the threat-model doc, not this framework) — update "39" → "42" (or reference the ratchet snapshot so it can't drift again). | `docs: sync threat-model unsafe-count to the ratchet snapshot (39→42)` (P2, sq-toze) |
+| **MS-G5** | **Cross-doc unsafe-count drift.** `research/threat-model.md` says sparq-core has "42 sites" (lines 21, 118); the register/snapshot/ratchet say **44** since the sq-vkz7 one-pass compressed external build added two `compress.rs`/`lib.rs` sites. The register is authoritative; the threat-model prose is again one step stale (it was synced 39→42 by sq-pro0 but has not picked up sq-vkz7). | **Low** | One-line fix to `research/threat-model.md` (owned by the threat-model doc, not this framework) — update "42" → "44" (better: reference the `unsafe-gate.py` snapshot directly so the prose can't drift again on the next `unsafe` churn). | `docs: sync threat-model sparq-core unsafe-count to the ratchet snapshot (42→44)` (P2, sq-toze) |
 
 ## MS-G4 — Kani feasibility verdict (sq-hkud, [OPUS-4.8])
 
@@ -82,15 +82,15 @@ remain external by definition; the AUDIT-READY label stands.
 - **Miri does not gate per-PR.** Intentional — Miri is ~100× native; it is a nightly UB
   safety net (like fuzz-nightly / zk-toolchain). The per-PR gate is the *ratchet* (MS-3) +
   `clippy -D warnings` (MS-10) + the oracle/fuzz smoke. Not a gap.
-- **Miri does not run the 16 mmap + 7 dict-spill sites.** Structural (Miri rejects
+- **Miri does not run the 18 mmap + 7 dict-spill sites.** Structural (Miri rejects
   file-backed mappings) — covered by the oracle + fuzz+ASan instead. Documented, not a gap.
 - **Third-party `unsafe` (memmap2/libc/rayon/hdt) is not in this register.** Scoped to the
   supply-chain lane (cargo-deny, SBOM/VEX). Correct separation of concerns, not a gap.
 
 ## Honest overall posture
 
-The memsafety framework is **substantively PASS**: the unsafe surface is confined (26 forbid
-crates), fully enumerated + justified (56-site register), gated by a merge-blocking ratchet,
+The memsafety framework is **substantively PASS**: the unsafe surface is confined (30 forbid
+crates), fully enumerated + justified (58-site register), gated by a merge-blocking ratchet,
 and covered by a Miri+oracle+fuzz+ASan matrix with the B5 boundary explicitly handled. The
 open gaps are **not** missing safety — they are (a) [CLOSED] the first-party
 `undocumented_unsafe_blocks` lint, now enforced on all 5 unsafe crates (MS-G2, sq-8wbn),
