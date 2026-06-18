@@ -168,6 +168,15 @@ verified warm-up from `GET /dictionary/{dict-id}` for the *next* request.
   `fromCompressed` uses `node:zlib` in Node (which loops members) and
   `DecompressionStream` in the browser (single-member only); multi-frame
   **zstd** decodes fully everywhere via the bundled fzstd.
+- **SPARQL-injection guard.** `match()`/`countQuads()` build a query string and
+  `addQuads`/`applyDelta`/`fromQuads` build N-Quads, both embedding RDF/JS terms
+  via `termToNT`. Hostile term values cannot break out of their token: IRIs are
+  percent-encoded over the full `IRIREF`-illegal set (`< > " { } | ^` `` ` ``
+  `\` and `#x00–#x20`, so a `>` in an ACL-pointer IRI becomes `%3E`) and literal
+  values escape `"`, `\` and all control chars — the same rules QLever's lexer
+  enforces. This is proved end-to-end against the engine's real parser in
+  `test/injection.test.mjs`. Note percent-encoding is canonicalising: an IRI
+  value that *contains* illegal chars stores under its encoded form.
 
 ## Benchmarks
 
