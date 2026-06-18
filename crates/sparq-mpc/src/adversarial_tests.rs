@@ -875,7 +875,11 @@ mod robust_props {
         for &n in &[4usize, 6, 8, 10] {
             let backend = ShamirBackend::new_seeded(n, 0xA17 + n as u64).unwrap();
             let t = backend.threshold();
-            assert_eq!(n - (2 * t + 1), 1, "even honest-majority n: one redundant share");
+            assert_eq!(
+                n - (2 * t + 1),
+                1,
+                "even honest-majority n: one redundant share"
+            );
             for _ in 0..120 {
                 let mut dealer = backend.dealer();
                 // EQUAL keys ⇒ honest m = 0 (a "match"); tampering tries to flip it.
@@ -894,7 +898,8 @@ mod robust_props {
                 }
                 tampered[i].y = tampered[i].y.add(fp(delta));
                 match reconstruct_degree(&tampered, 2 * t) {
-                    Err(MpcError::Tampered { .. }) => { /* detect-and-abort — the honest envelope */ }
+                    Err(MpcError::Tampered { .. }) => { /* detect-and-abort — the honest envelope */
+                    }
                     Ok(v) => panic!(
                         "sq-ji5f: n={n} t={t} has e_max=0, so the equality open must \
                          DETECT-and-ABORT a tampered share, never silently correct it \
