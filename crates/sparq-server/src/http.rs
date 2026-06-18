@@ -93,9 +93,7 @@ pub(crate) fn with_extensions<T>(f: impl FnOnce() -> T) -> T {
 /// code exists, so there is nothing to gate (a SERVICE clause errors at execution).
 #[cfg(feature = "service")]
 pub(crate) fn with_engine_scope<T>(config: &ServerConfig, f: impl FnOnce() -> T) -> T {
-    sparq_engine::with_service_egress_policy(true, config.service_allow.engine_entries(), || {
-        with_extensions(f)
-    })
+    with_engine_scope_allow(&config.service_allow, f)
 }
 
 #[cfg(not(feature = "service"))]
@@ -104,9 +102,86 @@ pub(crate) fn with_engine_scope<T>(_config: &ServerConfig, f: impl FnOnce() -> T
     with_extensions(f)
 }
 
+/// [OPUS-4.8] (sq-9xoh) Runs an engine call inside the per-request engine scope using an
+/// EXPLICIT, already-resolved SERVICE egress allowlist instead of the static
+/// [`ServerConfig::service_allow`].
+///
+/// This is the per-request / per-query egress-policy override seam. The static
+/// [`with_engine_scope`] always installs the operator-configured allowlist; on the READ path a
+/// multi-tenant / gateway deployment can instead derive an allowlist from the request (e.g. an
+/// auth token or a header) via [`ServerConfig::service_allow_override`] and pass it here. The
+/// installed policy is identical in shape to [`with_engine_scope`] — STRICT (allowlist-only)
+/// mode, so an empty allowlist still refuses ALL federation — only the host SET differs, and it
+/// is scoped to this one closure (the thread-local guard is dropped at the end), so it cannot
+/// leak into another request that later runs on the same blocking-pool worker.
+///
+/// The resolved allowlist must be computed by the caller BEFORE the engine call is spawned
+/// (request headers are not `'static`); [`ServerConfig::resolve_service_allow`] does that and
+/// yields an owned [`ServiceAllowlist`](crate::service_config::ServiceAllowlist) that moves into
+/// the `spawn_blocking` closure.
+#[cfg(feature = "service")]
+pub(crate) fn with_engine_scope_allow<T>(
+    allow: &crate::service_config::ServiceAllowlist,
+    f: impl FnOnce() -> T,
+) -> T {
+    sparq_engine::with_service_egress_policy(true, allow.engine_entries(), || with_extensions(f))
+}
+
+/// [OPUS-4.8] (sq-9xoh) Without the `service` feature there is no federation code to gate, so
+/// the per-request allowlist is inert — this is exactly [`with_extensions`], mirroring the
+/// `#[cfg(not(feature = "service"))]` form of [`with_engine_scope`].
+#[cfg(not(feature = "service"))]
+#[inline(always)]
+pub(crate) fn with_engine_scope_allow<T>(
+    _allow: &crate::service_config::ServiceAllowlist,
+    f: impl FnOnce() -> T,
+) -> T {
+    with_extensions(f)
+}
+
 // ---------------------------------------------------------------------------
 // Hardening configuration (T15)
 // ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] (sq-9xoh) A per-request SERVICE egress allowlist override hook (see
+/// [`ServerConfig::service_allow_override`]). Given a request's headers it returns
+/// `Some(allowlist)` to use that allowlist (in STRICT mode) for this one request, or `None` to
+/// fall back to the operator's static [`ServerConfig::service_allow`].
+///
+/// A thin newtype over the boxed closure so [`ServerConfig`] can keep deriving [`Debug`] (a bare
+/// `dyn Fn` is not `Debug`) and so the construction site reads clearly. Held behind an [`Arc`] so
+/// [`ServerConfig`] stays cheaply [`Clone`].
+/// [OPUS-4.8] (sq-9xoh) The boxed per-request resolver behind a [`ServiceAllowOverride`]: maps a
+/// request's headers to `Some(allowlist)` (use it) or `None` (fall back to the static config).
+#[cfg(feature = "service")]
+type ServiceAllowResolver =
+    dyn Fn(&HeaderMap) -> Option<crate::service_config::ServiceAllowlist> + Send + Sync;
+
+#[cfg(feature = "service")]
+#[derive(Clone)]
+pub struct ServiceAllowOverride(std::sync::Arc<ServiceAllowResolver>);
+
+#[cfg(feature = "service")]
+impl ServiceAllowOverride {
+    /// Wraps a per-request resolver closure. It is called once per READ request with that
+    /// request's headers; returning `Some` substitutes the allowlist for that request, `None`
+    /// falls back to the static [`ServerConfig::service_allow`].
+    pub fn new(
+        f: impl Fn(&HeaderMap) -> Option<crate::service_config::ServiceAllowlist>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+}
+
+#[cfg(feature = "service")]
+impl std::fmt::Debug for ServiceAllowOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ServiceAllowOverride(<fn>)")
+    }
+}
 
 /// Tunable guards that make the endpoint safe to expose publicly (T15).
 #[derive(Debug, Clone)]
@@ -387,6 +462,34 @@ pub struct ServerConfig {
     /// this field is still present (so the config shape is stable) but inert: no
     /// federation code is compiled and a SERVICE clause errors at execution as before.
     pub service_allow: crate::service_config::ServiceAllowlist,
+    /// [OPUS-4.8] (sq-9xoh) OPTIONAL per-request SERVICE egress allowlist override hook for
+    /// multi-tenant / gateway deployments. The operator installs ONE static allowlist in
+    /// [`service_allow`](Self::service_allow); a gateway in front of many tenants may instead want
+    /// the reachable SERVICE host set to depend on the REQUEST (e.g. derived from a bearer token or
+    /// a header that names the calling tenant). When set, this closure is invoked once per READ
+    /// request with that request's headers and, if it returns `Some(allowlist)`, THAT allowlist
+    /// replaces [`service_allow`](Self::service_allow) for the duration of that one request's engine
+    /// call (installed in STRICT/allowlist-only mode exactly like the static one — an empty returned
+    /// allowlist therefore DENIES all SERVICE for that request). Returning `None` falls back to the
+    /// static [`service_allow`](Self::service_allow), so an unconfigured request behaves identically
+    /// to today.
+    ///
+    /// `None` (the default) keeps the historical behaviour exactly: every request uses the single
+    /// static [`service_allow`](Self::service_allow). Applied via
+    /// [`resolve_service_allow`](Self::resolve_service_allow) on the read path (SELECT / ASK /
+    /// CONSTRUCT / DESCRIBE / EXPLAIN ANALYZE), where the request headers are in scope. The hook is
+    /// NOT applied to the SPARQL-Update writer path: updates are sequenced and group-committed on a
+    /// single shared writer thread with no per-request header context, and batch-mates may carry
+    /// different tokens, so a per-request egress override there is ill-defined — UPDATE WHERE-clause
+    /// federation continues to use the operator's static [`service_allow`](Self::service_allow).
+    ///
+    /// This field exists only with the `service` cargo feature (there is no federation code to gate
+    /// otherwise). The closure must be `Send + Sync` because [`ServerConfig`] is shared across the
+    /// async handlers and the blocking pool; it is held behind an [`Arc`] so [`ServerConfig`] stays
+    /// `Clone`. The hook MUST NOT relax the strict posture by other means — it can only narrow or
+    /// substitute the host set; the policy is always allowlist-only.
+    #[cfg(feature = "service")]
+    pub service_allow_override: Option<ServiceAllowOverride>,
     /// [OPUS-4.8] (sq-o7o0, ASVS V14.5.3) First-party CORS origin allowlist. `sparq-server`
     /// is a SPARQL DATA API, so its safe default is to emit **no CORS headers** — a
     /// cross-origin browser `fetch` cannot read a response with no
@@ -540,6 +643,10 @@ impl Default for ServerConfig {
             auth_token_read: false,
             // [OPUS-4.8] sq-4w18: safe default — empty allowlist = deny ALL SERVICE.
             service_allow: crate::service_config::ServiceAllowlist::default(),
+            // [OPUS-4.8] sq-9xoh: no per-request override by default — every request uses the
+            // single static `service_allow`, exactly as before this hook existed.
+            #[cfg(feature = "service")]
+            service_allow_override: None,
             // [OPUS-4.8] sq-o7o0: safe default — empty allowlist = NO CORS headers (a
             // cross-origin browser read is blocked, the historical posture for a data API).
             cors_allow: crate::cors_config::CorsAllowlist::default(),
@@ -571,6 +678,43 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+    /// [OPUS-4.8] (sq-9xoh) Resolves the EFFECTIVE SERVICE egress allowlist for one READ
+    /// request: the per-request [`service_allow_override`](Self::service_allow_override) hook if it
+    /// is installed AND returns `Some` for these headers, otherwise the static
+    /// [`service_allow`](Self::service_allow).
+    ///
+    /// Returns an owned [`ServiceAllowlist`](crate::service_config::ServiceAllowlist) so the caller
+    /// can move it into the `spawn_blocking` closure that runs the engine call (request headers are
+    /// not `'static`, so the resolution MUST happen before the spawn). Whatever it returns is
+    /// installed in STRICT (allowlist-only) mode by the crate-internal `with_engine_scope_allow`, so
+    /// an empty result (whether the override returned an empty allowlist or the static one is empty)
+    /// still denies ALL SERVICE — the override can only narrow or substitute the host set, never
+    /// relax the fail-closed posture.
+    ///
+    /// With no override installed (the default) this is a clone of the static allowlist, so the
+    /// resolved result is identical to today's static behaviour.
+    #[cfg(feature = "service")]
+    pub fn resolve_service_allow(
+        &self,
+        headers: &HeaderMap,
+    ) -> crate::service_config::ServiceAllowlist {
+        match &self.service_allow_override {
+            Some(hook) => (hook.0)(headers).unwrap_or_else(|| self.service_allow.clone()),
+            None => self.service_allow.clone(),
+        }
+    }
+
+    /// [OPUS-4.8] (sq-9xoh) Without the `service` feature there is no federation code and no
+    /// override hook, so the effective allowlist is always the static one — this just clones it,
+    /// keeping the read-path callsites feature-uniform.
+    #[cfg(not(feature = "service"))]
+    pub fn resolve_service_allow(
+        &self,
+        _headers: &HeaderMap,
+    ) -> crate::service_config::ServiceAllowlist {
+        self.service_allow.clone()
+    }
+
     /// Defaults overridden by the `SPARQ_QUERY_TIMEOUT` (seconds; `0` disables),
     /// `SPARQ_UPDATE_WHERE_TIMEOUT` ([OPUS-4.8] sq-nulp: the separate, typically-shorter
     /// writer-side WHERE deadline that bounds writer-queue head-of-line blocking from a slow
@@ -3633,12 +3777,17 @@ async fn run_query_pinned(
         let q = sparql.to_string();
         let analyze = explain == ExplainMode::Analyze;
         let budget = make_budget(&config, true);
+        // [OPUS-4.8] sq-9xoh: resolve the per-request SERVICE egress allowlist HERE (headers are
+        // not `'static`, so it must happen before the spawn) and move it into the worker.
+        let allow = config.resolve_service_allow(headers);
         let task = tokio::task::spawn_blocking(move || {
             let graph = gen.snapshot();
             // [OPUS-4.8] sq-4w18: EXPLAIN ANALYZE executes (can hit SERVICE), so it runs
             // under the egress allowlist policy like a normal query; plan-only is a dry
             // run but is wrapped identically for uniformity (it never dials).
-            let r = with_engine_scope(&cfg, || {
+            // [OPUS-4.8] sq-9xoh: under the request-resolved allowlist (the static one unless a
+            // per-request override hook is installed).
+            let r = with_engine_scope_allow(&allow, || {
                 if analyze {
                     sparq_engine::explain_analyze_with_budget(graph, &q, &budget)
                 } else {
@@ -3660,6 +3809,10 @@ async fn run_query_pinned(
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
     let fmt = negotiate(accept);
     let config = state.config.clone();
+    // [OPUS-4.8] sq-9xoh: the per-request SERVICE egress allowlist for this read (the static
+    // `service_allow` unless a per-request override hook is installed). Resolved here while the
+    // request headers are still in scope, then cloned into the per-form worker closure.
+    let allow = config.resolve_service_allow(headers);
 
     match prepared.form {
         QueryForm::Select | QueryForm::Ask => {
@@ -3667,8 +3820,9 @@ async fn run_query_pinned(
             let select = prepared.runnable;
             let budget = make_budget(&config, !is_ask);
             let cfg = config.clone();
+            let allow = allow.clone();
             let task = tokio::task::spawn_blocking(move || {
-                with_engine_scope(&cfg, || {
+                with_engine_scope_allow(&allow, || {
                     if is_ask {
                         match sparq_engine::ask_with_budget(gen.snapshot(), &select, &budget) {
                             Ok(value) => {
@@ -3704,7 +3858,8 @@ async fn run_query_pinned(
                 // [OPUS-4.8] sq-rt6v: produce the triple list once, then serialise it in the
                 // negotiated graph syntax — N-Triples (default), prefix-compacting Turtle, or
                 // RDF/XML — rather than always emitting N-Triples.
-                match with_engine_scope(&cfg, || {
+                // [OPUS-4.8] sq-9xoh: under the request-resolved SERVICE egress allowlist.
+                match with_engine_scope_allow(&allow, || {
                     sparq_engine::construct_or_describe_with_budget(gen.snapshot(), &query, &budget)
                 }) {
                     Ok(triples) => {
@@ -5966,6 +6121,101 @@ mod service_allow_config_tests {
             e,
             vec![".internal".to_string(), "sparql.example.org".to_string()]
         );
+    }
+
+    // [OPUS-4.8] (sq-9xoh) Per-request / per-query egress-policy override hook.
+    #[cfg(feature = "service")]
+    mod override_hook {
+        use super::ServiceAllowlist;
+        use crate::http::ServiceAllowOverride;
+        use crate::ServerConfig;
+        use axum::http::{HeaderMap, HeaderValue};
+
+        fn allow_of(entry: &str) -> ServiceAllowlist {
+            let mut a = ServiceAllowlist::default();
+            a.add(entry).unwrap();
+            a
+        }
+
+        /// A config whose static allowlist is `static.example.org` plus the given override hook.
+        fn cfg_with(override_hook: Option<ServiceAllowOverride>) -> ServerConfig {
+            ServerConfig {
+                service_allow: allow_of("static.example.org"),
+                service_allow_override: override_hook,
+                ..Default::default()
+            }
+        }
+
+        /// A hook keyed on an `x-tenant-allow` header: present => `Some(that host)`, absent => `None`.
+        fn tenant_header_hook() -> ServiceAllowOverride {
+            ServiceAllowOverride::new(|h: &HeaderMap| {
+                h.get("x-tenant-allow")
+                    .and_then(|v| v.to_str().ok())
+                    .map(allow_of)
+            })
+        }
+
+        #[test]
+        fn no_hook_resolves_to_static_allowlist() {
+            // The default (no override) MUST behave exactly like the static config: the
+            // resolved allowlist is the static one regardless of headers.
+            let cfg = cfg_with(None);
+            assert!(cfg.service_allow_override.is_none());
+            let resolved = cfg.resolve_service_allow(&HeaderMap::new());
+            assert_eq!(
+                resolved.engine_entries(),
+                vec!["static.example.org".to_string()],
+                "with no override hook the resolved allowlist is the static one",
+            );
+        }
+
+        #[test]
+        fn hook_some_replaces_static_allowlist() {
+            // A hook that returns Some(allowlist) substitutes it for the static one — the
+            // per-request host set, derived here from a header value.
+            let cfg = cfg_with(Some(tenant_header_hook()));
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-tenant-allow",
+                HeaderValue::from_static("tenant.example.org"),
+            );
+            let resolved = cfg.resolve_service_allow(&headers);
+            assert_eq!(
+                resolved.engine_entries(),
+                vec!["tenant.example.org".to_string()],
+                "the override replaces the static allowlist for this request",
+            );
+        }
+
+        #[test]
+        fn hook_none_falls_back_to_static_allowlist() {
+            // A hook that returns None for these headers (e.g. no tenant header) falls back to
+            // the static allowlist — never an accidental open or empty deny.
+            let cfg = cfg_with(Some(tenant_header_hook()));
+            // No x-tenant-allow header => hook returns None => static fallback.
+            let resolved = cfg.resolve_service_allow(&HeaderMap::new());
+            assert_eq!(
+                resolved.engine_entries(),
+                vec!["static.example.org".to_string()],
+                "a None override falls back to the static allowlist",
+            );
+        }
+
+        #[test]
+        fn hook_empty_allowlist_denies_all_for_that_request() {
+            // The override can only NARROW: an empty returned allowlist still installs STRICT
+            // mode, so it denies ALL SERVICE for that request even though the static config
+            // allowed a host. (This asserts the resolved value; the strict-install is in
+            // with_engine_scope_allow.)
+            let cfg = cfg_with(Some(ServiceAllowOverride::new(|_h: &HeaderMap| {
+                Some(ServiceAllowlist::default())
+            })));
+            let resolved = cfg.resolve_service_allow(&HeaderMap::new());
+            assert!(
+                resolved.is_empty(),
+                "an override returning an empty allowlist denies all SERVICE for that request",
+            );
+        }
     }
 }
 
