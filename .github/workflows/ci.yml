@@ -1002,10 +1002,17 @@ jobs:
     # [OPUS-4.8] NIGHTLY heavy-coverage tier (sq-hbg7). Runs the FULL per-crate
     # set INCLUDING the sparq-vectors 50k recall/diskann accuracy tests that the
     # per-commit `coverage` job skips (those run >10 min for that one crate under
-    # llvm-cov instrumentation — too slow for per-commit, hence this split). The
-    # gate is the SAME floor file; --check verifies the nightly numbers still meet
-    # their floors. Triggered by the `schedule:` cron (or manual dispatch), and only
-    # when the nightly-gate says HEAD changed since the last nightly.
+    # llvm-cov instrumentation — too slow for per-commit, hence this split).
+    #
+    # [OPUS-4.8] sq-bjct: this tier ALSO merges the W3C SPARQL + inference conformance
+    # BINARIES (sparq-conformance / sparq-inference-conformance — they run as `cargo
+    # run`, NOT `cargo test`) into the sparq-core / sparq-engine llvm-cov reports
+    # (scripts/coverage.sh measure_merged, auto-enabled for tier!=per-commit). Those two
+    # crates are gated here on their HIGHER `nightly_floor` (bench/coverage-floor.json),
+    # while the per-commit `coverage` job still gates the cheaper test-only `floor`. The
+    # gate driver reads the summary's `tier` and applies nightly_floor automatically.
+    # Triggered by the `schedule:` cron (or manual dispatch), and only when the
+    # nightly-gate says HEAD changed since the last nightly.
     name: coverage (nightly, full incl. heavy vectors)
     needs: nightly-gate
     if: needs.nightly-gate.outputs.fresh == 'true'

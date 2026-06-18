@@ -16,10 +16,14 @@
       "note": "test-driver crate: the W3C suites run as the BINARIES (cargo run), so `cargo llvm-cov --package` (which runs cargo test) sees only a few unit tests. Low % is expected; floor 0."
     },
     "sparq-core": {
-      "floor": 90
+      "floor": 90,
+      "nightly_floor": 90,
+      "nightly_note": "[OPUS-4.8] sq-bjct: nightly_floor gates the NIGHTLY tier, whose measurement MERGES the W3C SPARQL + inference conformance BINARIES (they run as `cargo run`, not `cargo test`) into this crate's llvm-cov report — a higher number than the test-only per-commit `floor`. See scripts/coverage.sh measure_merged + the coverage-nightly job. Merged measurement 92.44% (test-only ~91.3%); floor = floor(measured) - 2 margin lands at the base floor here, so the binaries' contribution is documented + gated, not yet a higher number."
     },
     "sparq-engine": {
-      "floor": 83
+      "floor": 83,
+      "nightly_floor": 85,
+      "nightly_note": "[OPUS-4.8] sq-bjct: nightly_floor gates the NIGHTLY tier, whose measurement MERGES the W3C SPARQL + inference conformance BINARIES (they run as `cargo run`, not `cargo test`) into this crate's llvm-cov report — a higher number than the test-only per-commit `floor`. See scripts/coverage.sh measure_merged + the coverage-nightly job. Merged measurement 87.31% lifts the nightly floor to 85 (base test-only floor 83); floor = floor(measured) - 2 margin."
     },
     "sparq-geo": {
       "floor": 87
