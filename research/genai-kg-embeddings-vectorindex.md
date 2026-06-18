@@ -108,7 +108,7 @@ strong one (**ComplEx**) or the best all-rounder (**RotatE**) and invest the bud
 | **TransH / TransR** | `d` (+ rel-space) | project to relation hyperplane/space | medium (TransR has `d²` per relation) | as TransE | 1-to-N, N-to-N |
 | **DistMult** | `d` | `⟨h,r,t⟩` (trilinear) | low | as TransE | symmetric relations only |
 | **ComplEx** | `2d` (ℂ) | `Re⟨h,r,t̄⟩` | low | as TransE | antisymmetry; strong cheap baseline |
-| **RotatE** | `2d` (ℂ) | `−‖h∘r−t‖`, |r|=1 | low-medium | as TransE | symmetry+inversion+composition |
+| **RotatE** | `2d` (ℂ) | `−‖h∘r−t‖`, `\|r\|=1` | low-medium | as TransE | symmetry+inversion+composition |
 | **RESCAL** | `d` ent, `d²` rel | `hᵀ Mr t` | high (`d²`/relation) | as TransE | expressive, few relations |
 | **ConvE** | `d` + CNN weights | CNN over reshaped (h,r) | medium-high | needs CNN forward, not just lookup | parameter-efficient deep |
 
@@ -322,7 +322,7 @@ fixed-stride array.** Then:
 
 ### 4.2 File format (mmap) — sketch
 
-```
+```text
 sparq-vectors file  (.spqv)  — little-endian, 64-byte-aligned, mmap/zero-copy
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Header { magic, version, dim, dtype(f32|f16|i8|pq), stride,           │

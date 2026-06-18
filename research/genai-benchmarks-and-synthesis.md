@@ -145,7 +145,7 @@ Break end-to-end into: **(1) LLM generation** (model + tokens; report model + ha
 
 ### A.5 Proposed harness layout (version-pinned, scriptable)
 
-```
+```text
 crates/sparq-genai-bench/            # opt-in; feature = "genai-bench"; not in default workspace build
   Cargo.toml                         # pins every dataset version via a manifest
   manifest.toml                      # dataset name -> {url, sha256, date, license}
@@ -172,7 +172,7 @@ bench/genai/
 
 **Canonical results table format** (one per dataset; machine spec in caption):
 
-```
+```text
 ### <dataset> — <metric>  (machine: M1 Air 8-core, 16GB, single-thread)
 | system        | mode        | metric1 | metric2 | build s | RSS MiB | notes        |
 |---------------|-------------|--------:|--------:|--------:|--------:|--------------|

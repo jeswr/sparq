@@ -279,6 +279,7 @@ SOTA protocol for that cell with its round/comm class. "sparq" = where the crate
 ### 4.1 The CHEAP zone (BUILT or near-BUILT)
 
 #### SUM / COUNT (linear aggregate) — the sweet spot
+
 | Config | Tier | Most performant known protocol | sparq today |
 |---|---|---|---|
 | SH, HM, any N, LAN/WAN | **BUILT** | linear secret-sharing → **free local addition, 0 mult rounds, O(n) total comm for the single open** | `run_secure` cumulative sum (`shamir.rs`), differentially tested == plaintext sum |
@@ -293,6 +294,7 @@ threshold *comparison* `>£100k`, which is currently disclosed-and-verifier-reco
 leaks the boolean) or needs P5 to keep the sum itself secret (OPEN — see §4.2 comparison).
 
 #### FILTER (=, ≠) / single-term BGP equality
+
 | Config | Tier | Most performant | sparq |
 |---|---|---|---|
 | SH, HM, any N | **BUILT** | equality-to-zero: `d=a−b`, mask `m=d·r`, open `m`; `m==0 ⇔ equal`. 1 mult + 1 open. Leaks only the match bit. | `secure_equal` (`join.rs:411`) |
@@ -301,6 +303,7 @@ leaks the boolean) or needs P5 to keep the sum itself secret (OPEN — see §4.2
 | any, DM | KNOWN | SPDZ equality (MAC-checked) | no backend |
 
 #### Inner JOIN (hidden key) / cross-credential hidden join
+
 | Config | Tier | Most performant | sparq |
 |---|---|---|---|
 | SH, HM, any N | **BUILT (naive)** | sparq runs **all-pairs** `O(\|L\|·\|R\|)` `secure_equal`. **SOTA is O(n log n)** ORQ sort-merge join-aggregation OR ~linear **circuit-PSI** (cuckoo+simple hashing; VOLE-PSI eprint 2021/266) | `HiddenValueJoin` all-pairs (`join.rs:443`); SOTA = bead **sq-ujz8 OPEN** |
@@ -321,6 +324,7 @@ upper bound and the batched lower bound IS the round-count-explosion risk, made 
 shaped WAN slowdown awaits the netem/EC2 run (`netprofiles.rs::wan()` + sq-hoaj).
 
 #### UNION
+
 | Config | Tier | Most performant | sparq |
 |---|---|---|---|
 | SH/Mal, HM, hidden | **KNOWN (substrate BUILT)** | oblivious **concat + pad + shuffle** (P3) so a row's source side is hidden — the shuffle is BUILT and sound | shuffle BUILT (`oblivious.rs`); the UNION wrapper (concat+pad) not wired |
@@ -336,6 +340,7 @@ shaped WAN slowdown awaits the netem/EC2 run (`netprofiles.rs::wan()` + sq-hoaj)
 > BUILT primitives (and the SOTA sort-merge join `sq-ujz8`), not a missing keystone.
 
 #### FILTER (<, ≤, >) — secure comparison
+
 | Config | Tier | Most performant known protocol | sparq |
 |---|---|---|---|
 | disclosed operands | **BUILT (crypto-free)** | verifier recomputes the comparison | `operator_descriptor(Comparison)` honestly reports "no in-crypto guarantee" (`shamir.rs:250`) |
@@ -364,18 +369,21 @@ comparison (Rabbit, eprint 2021/119); (b) **malicious security** — thread IT-M
 through the decomposition/comparison chain and MAC-check the verdict before open.
 
 #### MIN / MAX
+
 | Config | Tier | Most performant | sparq |
 |---|---|---|---|
 | disclosed | BUILT (verifier) | recompute | convention #4 |
 | hidden | **primitives BUILT; operator integration remaining** | comparison **tournament** (O(log n) rounds, n−1 comparisons) for a single extreme; or oblivious-**sort** then take the end (reuses the BUILT sort network) | **[RECONCILED 2026-06-16]** P5 (`sq-rrz4`) and P4 (`sq-dvuc`) are CLOSED — the comparator the tournament/sort needs is BUILT; wiring the MIN/MAX operator over it is the remaining integration step |
 
 #### GROUP BY (hidden key) / GROUP_CONCAT / HAVING
+
 | Config | Tier | Most performant | sparq |
 |---|---|---|---|
 | disclosed key | **BUILT-able (verifier)** | recompute group-agg over disclosed keys | convention #4 (HAVING/GROUP-BY-over-hidden is *forbidden* in RQ1 by design) |
 | hidden key | **primitives BUILT; operator integration remaining** | **ORQ**: oblivious sort-on-key (P6) + segmented prefix-sum gated by a secret is-new-group bit (P4 chain) — O(n log n) work, O(log n) rounds | **[RECONCILED 2026-06-16]** sort substrate BUILT and P4/P5 (`sq-dvuc`/`sq-rrz4`) CLOSED — the segmented scan + is-new-group bit now have their primitives; the GROUP-BY operator integration is the remaining step |
 
 #### DISTINCT / ORDER BY / LIMIT (top-k)
+
 | Config | Tier | Most performant | sparq |
 |---|---|---|---|
 | disclosed | **BUILT (verifier)** | recompute over disclosed multiset (no-proof-of-revealed-properties) | convention #4 — the fast default |
@@ -384,12 +392,14 @@ through the decomposition/comparison chain and MAC-check the verdict before open
 | LIMIT/top-k, hidden | **primitives BUILT; operator integration remaining** | oblivious **selection** (partial sort) or sort + reveal padded prefix | **[RECONCILED 2026-06-16]** P5/P6 primitives BUILT (`sq-rrz4` CLOSED); operator integration remaining |
 
 #### OPTIONAL (left-join) / MINUS (anti-join)
+
 | Config | Tier | Most performant | sparq |
 |---|---|---|---|
 | disclosed | BUILT (verifier) | recompute | convention #4 |
 | hidden | **P4 BUILT; awaits sort-merge join** | **ORQ** outer/anti: same sort-merge, different gating bits + a per-left-row "had-any-match" OR-fold (P4) to drive NULL padding (OPTIONAL) / row retention (MINUS) | **[RECONCILED 2026-06-16]** P4 (`sq-dvuc`) CLOSED; the OR-fold primitive exists. The remaining dependency is the SOTA sort-merge join (`sq-ujz8`, OPEN) it composes over |
 
 #### BIND / expression eval / arithmetic
+
 | Config | Tier | Most performant | sparq |
 |---|---|---|---|
 | `+`,`−`,`× const` on secrets | **BUILT** | linear (free) | `add_shares`/`scale`/`add_constant` |
@@ -399,6 +409,7 @@ through the decomposition/comparison chain and MAC-check the verdict before open
 | string ops, hashing, regex | **OPEN/KNOWN** | Boolean circuit via **GMW** (round-per-AND-depth) or **garbled/BMR** (constant-round, WAN winner) — the worst case for Shamir SS | wrong family for sparq's Shamir core; would need a Boolean backend |
 
 #### AVG
+
 | Config | Tier | Most performant | sparq |
 |---|---|---|---|
 | disclosed/public count | **near-BUILT** | secure SUM (free) ÷ public count (free scale by inverse) | SUM BUILT; division-by-public-constant is a free scale |
@@ -407,17 +418,20 @@ through the decomposition/comparison chain and MAC-check the verdict before open
 ### 4.3 The OUT-OF-REACH zone
 
 #### Property paths (`*`, `+`, arbitrary length)
+
 | Config | Tier | Note |
 |---|---|---|
 | unbounded length, hidden graph | **OPEN / effectively IMPOSSIBLE at scale** | transitive closure of a SECRET edge set leaks structure (each fixpoint iteration reveals reachability growth) and is super-linear; GORAM does ego-centric traversal but is *confidentiality-only*, not correct/attested. **Scope to BOUNDED length only** (unroll to a fixed hop count), where it reduces to a fixed BGP chain (P4+P6). |
 | **bounded length, disclosed global-IRI keys** | **[RECONCILED 2026-06-16] BUILT** | The tractable bounded slice has landed for the crypto-free disclosed-key regime — `bounded_path.rs` (`sq-py8h` CLOSED) unrolls to a fixed hop count over disclosed global IRIs. The bounded-length-over-*secret*-edges variant (P4+P6 BGP chain) remains the integration follow-on. |
 
 #### Data-dependent private indexing (any operator over a store larger than RAM-in-MPC)
+
 | Config | Tier | Note |
 |---|---|---|
 | private random access | **OPEN (KNOWN protocols exist, none in sparq)** | **DORAM** (Duoram USENIX'23 2-/3-party; Floram; 3PDORAM) — O((κ+D) log N)/access. Only needed once data exceeds in-MPC RAM; Duoram's 2-/3-party specialisation would force a **backend split** conflicting with sparq's any-N Shamir commitment (parent open-Q 7). |
 
 #### Function/query privacy (hiding which BGP)
+
 | Config | Tier | Note |
 |---|---|---|
 | hide the query | **KNOWN but deliberately FORGONE** | PFE / universal circuit (Mohassel–Sadeghian eprint 2013/137): O(z log z) Boolean, up to O(z⁵) arith — almost never worth it. sparq deliberately publishes the query (verifier ISSUES it). The only residual query-side leak is the **join match structure** (§5 L2). |

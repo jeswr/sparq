@@ -1,12 +1,13 @@
 // markdownlint-cli2 config — HARD documentation-quality gate (bead sq-5fd1). [OPUS-4.8]
 //
-// SCOPE (staged rollout): this HARD gate covers the user-facing + governance doc
-// surface that is already clean — the top-level governance docs, the `skills/` usage
-// tree (the source of truth for using sparq), `docs/`, and every crate README/doc.
-// `research/` and `zk/` (design records + research scaffolds) carry a large backlog
-// of cosmetic violations (mostly missing code-fence languages); bringing them under
-// the HARD gate is tracked as a follow-up bead. They are still checked in the
-// ADVISORY job (whole-repo, continue-on-error) so the backlog stays visible.
+// SCOPE: this HARD gate covers the user-facing + governance doc surface — the
+// top-level governance docs, the `skills/` usage tree (the source of truth for using
+// sparq), `docs/`, every crate README/doc, AND (as of sq-rqyo) the `research/` design
+// records + the `zk/` research scaffolds, whose ~97-violation cosmetic backlog (mostly
+// missing code-fence languages) has been cleared. The only carve-out is third-party
+// `vendor/` trees (e.g. `zk/xpath/vendor`), kept in `ignores` below. `bench/` markdown
+// is still out of HARD scope and is checked ADVISORY-only (whole-repo) so any new
+// backlog there stays visible.
 //
 // RULESET: markdownlint defaults, MINUS the rules that fight this repo's deliberate
 // house style (long unwrapped lines, bare/autolink URLs, inline HTML for the logo +
@@ -39,12 +40,14 @@
     "MD031": false, // blanks around fenced code
     "MD032": false  // blanks around lists
   },
-  // HARD-gate scope: governance docs + skills/ + docs/ + crates/.
+  // HARD-gate scope: governance docs + skills/ + docs/ + crates/ + research/ + zk/.
   "globs": [
     "*.md",
     "skills/**/*.md",
     "docs/**/*.md",
-    "crates/**/*.md"
+    "crates/**/*.md",
+    "research/**/*.md",
+    "zk/**/*.md"
   ],
   "ignores": [
     "node_modules",

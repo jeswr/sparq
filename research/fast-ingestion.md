@@ -29,7 +29,7 @@ zstd (#1, now done) is the single biggest win — bzip2 was 70% of E2E wall-time
 (overlap, done) hiding the now-fast zstd decompress under the parse, compressed ingest runs
 at ~uncompressed speed (measured 4.6 s vs 4.4 s on 10M). #3 (radix) is the only remaining
 open lever (tracked in beads) and is measure-first/questionable on the bandwidth-bound M1;
-#4 (parallel sibling sorts, done) already removed the build stage as the second wall.
+# 4 (parallel sibling sorts, done) already removed the build stage as the second wall.
 
 **Recipe for the full Wikidata dump:** `zstd -9 -T0` the 42.8 GB `.bz2` → `.zst` once
 (parallel, one-time), then `sparq-cli build dump.nt.zst ntriples out 8` — ingest is now

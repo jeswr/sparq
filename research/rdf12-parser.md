@@ -57,7 +57,7 @@ Asserted-vs-term distinction:
 | Asserted? | A quoted triple was **not** asserted, but `<< s p o >>` in subject **and** object positions both existed | Triple term is **never** asserted; allowed in **object only** |
 | Subject position | Quoted triple allowed as subject | **Forbidden** as subject |
 | Reification mechanism | Quoted triple *is* the identifier (term identity) | Separate **reifier** node linked via `rdf:reifies` to the triple term |
-| Annotation `{| |}` | annotated the quoted triple directly | desugars to `reifier rdf:reifies <<( … )>>` + annotation triples on the reifier |
+| Annotation `{\| \|}` | annotated the quoted triple directly | desugars to `reifier rdf:reifies <<( … )>>` + annotation triples on the reifier |
 
 Oxigraph's own summary: "RDF 1.2 includes triple terms using a slightly different syntax as RDF-star … raw triple terms are now written `<<( ts tp to )>>` … and not `<< s p o >>`." (https://github.com/oxigraph/oxigraph/releases/tag/v0.5.0)
 
@@ -65,10 +65,12 @@ Oxigraph's own summary: "RDF 1.2 includes triple terms using a slightly differen
 
 > "A **reifying triple** is a triple where the predicate is `rdf:reifies` and the object is a triple term. The subject of that triple is called a **reifier**, and it can be the subject or object of other triples." (https://www.w3.org/TR/rdf12-concepts/)
 
+<!-- -->
+
 > "The subset of triples including the reifier as subject … is called a **triple annotation**" (when the triple term corresponds to an asserted triple). (https://www.w3.org/TR/rdf12-concepts/)
 
 Vocabulary terms and IRIs (from RDF 1.2 Schema, https://www.w3.org/TR/rdf12-schema/):
-- **`rdf:reifies`** = `http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies`, `rdf:type rdf:Property`, **`rdfs:domain rdfs:Resource`**, **`rdfs:range rdfs:Proposition`**, "associates a resource with a proposition". 
+- **`rdf:reifies`** = `http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies`, `rdf:type rdf:Property`, **`rdfs:domain rdfs:Resource`**, **`rdfs:range rdfs:Proposition`**, "associates a resource with a proposition".
   - ⚠️ **Note the discrepancy to resolve in code:** the Schema doc gives the *range as `rdfs:Proposition`* (the semantic class of propositions, `http://www.w3.org/2000/01/rdf-schema#Proposition`). Triple terms denote propositions, so syntactically the object of `rdf:reifies` is always a triple term, but the declared `rdfs:range` is the semantic class `rdfs:Proposition`, **not** a syntactic `rdf:TripleTerm` class. Some secondary sources loosely say "range `rdf:TripleTerm`" — do not rely on that; the normative Schema says `rdfs:Proposition`.
 - **`rdf:TripleTerm`** — as of these drafts, **not defined as a vocabulary class** in the Schema or namespace document. "Triple term" is an abstract-syntax concept, not a vocabulary IRI. Do not emit/expect an `rdf:TripleTerm` class.
 - **`rdf:langString`** = `…#langString`, `rdf:type rdfs:Datatype`, "The datatype of language-tagged string values".
@@ -98,7 +100,7 @@ RDF 1.2 Semantics (CR, https://www.w3.org/TR/rdf12-semantics/) interprets a grou
 
 Source: https://www.w3.org/TR/rdf12-n-triples/ (WD 15 May 2026) and editor's draft BNF https://w3c.github.io/rdf-n-triples/spec/ntriples.bnf. Productions quoted verbatim:
 
-```
+```text
 [1]  ntriplesDoc      ::= statement? (EOL statement)* EOL?
 [2]  statement        ::= directive | triple
 [3]  directive        ::= versionDirective
@@ -112,7 +114,7 @@ Source: https://www.w3.org/TR/rdf12-n-triples/ (WD 15 May 2026) and editor's dra
 [11] tripleTerm       ::= '<<(' subject predicate object ')>>'
 ```
 Terminals (unchanged from 1.1 except `LANG_DIR`):
-```
+```text
 [13] IRIREF               ::= '<' ([^#x00-#x20<>"{}|^`\] | UCHAR)* '>'
 [14] BLANK_NODE_LABEL     ::= '_:' (PN_CHARS_U | [0-9]) ((PN_CHARS | '.')* PN_CHARS)?
 [15] LANG_DIR             ::= '@' [a-zA-Z]+ ('-' [a-zA-Z0-9]+)* ('--' [a-zA-Z]+)?
@@ -133,7 +135,7 @@ Spec prose: "A triple term is represented as a `tripleTerm` with `subject`, `pre
 ### 2.2 N-Quads 1.2 — delta
 
 Source: https://www.w3.org/TR/rdf12-n-quads/ (WD 01 June 2026):
-```
+```text
 [1]  nquadsDoc  ::= statement? (EOL statement)* EOL?
 [2]  statement  ::= directive | quad
 [6]  quad       ::= subject predicate object graphLabel? '.'
@@ -150,7 +152,7 @@ N-Quads = N-Triples + an **optional 4th `graphLabel`** before the `.` (`[6]`). T
 ### 2.3 Turtle 1.2 — full grammar (new productions in bold context)
 
 Source: https://www.w3.org/TR/rdf12-turtle/ (WD 28 May 2026), §6.5. Verbatim:
-```
+```text
 [1]  turtleDoc            ::= statement*
 [2]  statement            ::= directive | ( triples '.' )
 [3]  directive            ::= prefixID | base | version | sparqlPrefix | sparqlBase | sparqlVersion
@@ -193,7 +195,7 @@ Source: https://www.w3.org/TR/rdf12-turtle/ (WD 28 May 2026), §6.5. Verbatim:
 [42] LANG_DIR             ::= '@' [a-zA-Z]+ ( '-' [a-zA-Z0-9]+ )* ( '--' [a-zA-Z]+ )?
 ```
 Selected terminals (note the new `<<(`/`)>>`/`{|`/`|}`/`~` tokens; rest unchanged from Turtle 1.1):
-```
+```text
 [38] IRIREF                ::= '<' ( [^#x00-#x20<>"{}|^`\] | UCHAR )* '>'
 [41] BLANK_NODE_LABEL      ::= '_:' ( PN_CHARS_U | [0-9] ) ( ( PN_CHARS | '.' )* PN_CHARS )?
 [43] INTEGER               ::= [+-]? [0-9]+
@@ -220,7 +222,7 @@ Note the asymmetry: inside a `reifiedTriple` (`<< … >>`) the subject may itsel
 ### 2.4 TriG 1.2 — delta
 
 Source: https://www.w3.org/TR/rdf12-trig/ (WD 01 June 2026):
-```
+```text
 [1] trigDoc        ::= (directive | block)*
 [2] block          ::= triplesOrGraph | wrappedGraph | triples2 | ("GRAPH" labelOrSubject wrappedGraph)
 [3] triplesOrGraph ::= (labelOrSubject (wrappedGraph | (predicateObjectList '.')))
@@ -237,11 +239,11 @@ Source: https://www.w3.org/TR/rdf12-trig/ (WD 01 June 2026):
 These desugaring rules are the heart of the Turtle/TriG parser. All examples quoted from https://www.w3.org/TR/rdf12-turtle/.
 
 **(a) Bare reified triple as object** — `reifiedTriple` in `rtObject`/object position **asserts the inner triple** and yields a reifier:
-```
+```text
 << :employee38 :jobTitle "Assistant Designer" ~ _:id >> :accordingTo :employee22 .
 ```
 expands to:
-```
+```text
 _:id rdf:reifies <<( :employee38 :jobTitle "Assistant Designer" )>> .
 _:id :accordingTo :employee22 .
 ```
@@ -250,11 +252,11 @@ _:id :accordingTo :employee22 .
 **Reifier defaulting:** "If no reifiers are present, or a reifier is not immediately followed by an iri or BlankNode, **a fresh RDF blank node is allocated**, as with `<< :s :p :o >>` or `<< :s :p :o ~ >>`." (https://www.w3.org/TR/rdf12-turtle/)
 
 **(b) Annotation with explicit reifier + block:**
-```
+```text
 :alice :name "Alice" ~ :t {| :statedBy :bob ; :recorded "2021-07-07"^^xsd:date |} .
 ```
 expands to:
-```
+```text
 :alice :name "Alice" .
 :t rdf:reifies <<( :alice :name "Alice" )>> .
 :t :statedBy :bob .
@@ -262,11 +264,11 @@ expands to:
 ```
 
 **(c) Annotation block, implicit reifier (fresh blank node):**
-```
+```text
 :alice :name "Alice" {| :statedBy :bob |} .
 ```
 expands to:
-```
+```text
 :alice :name "Alice" .
 _:b0 rdf:reifies <<( :alice :name "Alice" )>> .
 _:b0 :statedBy :bob .
@@ -274,11 +276,11 @@ _:b0 :statedBy :bob .
 "If such blocks are not immediately preceded by explicit reifiers, each block is associated with a **fresh RDF blank node** allocated as its reifier." (https://www.w3.org/TR/rdf12-turtle/)
 
 **(d) Multiple reifiers on one triple** — each mints its own reifying triple, all pointing at the **same** triple term:
-```
+```text
 :alice :name "Alice" ~ :stmt1 ~ :stmt2 .
 ```
 →
-```
+```text
 :alice :name "Alice" .
 :stmt1 rdf:reifies <<( :alice :name "Alice" )>> .
 :stmt2 rdf:reifies <<( :alice :name "Alice" )>> .

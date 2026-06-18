@@ -557,7 +557,7 @@ A contribution flows through these stages. Cheap glue runs in the orchestrator; 
 stages (drafting, review, benchmark runs) are delegated to subagents per the project's
 delegation discipline.
 
-```
+```text
                        sparq contribution (A: DB perf | B: SemWeb | C: crypto-WIP)
                                           │
    ┌──────────────────────────────────────┴───────────────────────────────────────┐

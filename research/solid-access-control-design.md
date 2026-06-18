@@ -141,7 +141,7 @@ Three layers:
 
 Relevant supported features (verified in `mod.rs`/`parser.rs`):
 
-- `@prefix`, `{ … } => { … }` forward rules, `<= ` backward rules, lists `( … )`.
+- `@prefix`, `{ … } => { … }` forward rules, `<=` backward rules, lists `( … )`.
 - **`log:notIncludes` / `log:includes`** with an *empty-formula subject* (`{}`) = scoped
   negation-as-failure **against the current store**. Critical semantics: rules containing
   negation are re-evaluated every fixpoint round, but **derived facts are never retracted**
@@ -286,7 +286,7 @@ the session layer needs it, §3.4).
 
 For graphs and IRI structure (things the single-graph reasoner cannot see):
 
-```
+```text
 <R>  solidx:isResource true .          # every pod graph + every structural container prefix
 <R>  solidx:ownAcl <R.acl> .           # iff graph <R.acl> exists      (WAC)
 <R>  solidx:ownAcr <R.acr> .           # iff graph <R.acr> exists      (ACP)
@@ -827,4 +827,3 @@ Reading the numbers honestly:
    containment; that would be a separate, explicitly-scoped *structural-only* (IRI
    slash-semantics) derivation spike, never a content-reading one (`research/sparq-solid-scope.md`
    area 2). <!-- [OPUS-4.8] sq-3jtd.4 -->
-

@@ -199,7 +199,7 @@ this repo's native curve.
   `hpk` into the **same signed object that already binds `C(G)`**. Concretely,
   extend the audit-#12 message family with a holder-bound variant:
 
-  ```
+  ```text
   commitment_message_with_holder(C(G), salt, status_ref, holder_pk_digest)
       = Poseidon2([ZKSIG_C4, C(G), salt, status_ref, holder_pk_digest])
   holder_pk_digest = Poseidon2([ZKSIG_HK, hpk.x, hpk.y])   // domain-separated key digest
@@ -344,7 +344,7 @@ the freshness PoP (G2).
 
 - **New module `holder.nr`** (sibling of `issuer.nr`). The relation:
 
-  ```
+  ```text
   pub fn holder_pok(challenge: Field, holder_pk_digest: Field,   // public
                     hsk: Field, hpk: Point, e_k_unused: ()) {    // private (hsk, hpk)
       assert_on_curve(hpk);

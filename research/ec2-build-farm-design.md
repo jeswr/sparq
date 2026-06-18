@@ -39,7 +39,7 @@ same-box `sq-sxso` lane that stalls when co-resident) — they share no instance
 
 ## 2. The launcher interface (`scripts/ec2-buildfarm.sh`)
 
-```
+```text
 scripts/ec2-buildfarm.sh <branch|#PR> [region]   # launch ephemeral box, run gate, self-terminate
 scripts/ec2-buildfarm.sh --dry-run <branch|#PR>   # print the plan + the user-data; launch NOTHING
 scripts/ec2-buildfarm.sh --self-test              # hermetic unit test (no aws, no network)
@@ -131,7 +131,7 @@ re-launchable, so a spot reclaim just means "re-run", with no result loss (the r
 before the explicit terminate; a reclaim before the sentinel is detected and reported, not silently
 swallowed).
 
-**Per-gate cost.** A ~40-min worst-case gate at ~$0.13/hr ≈ **$0.087 per branch gate** (spot);
+**Per-gate cost.** A ~40-min worst-case gate at ~$0.13/hr ≈ **$0.087 per branch gate**(spot);
 on-demand ≈ $0.41. A typical ~25-min gate ≈ **$0.054** (spot).
 
 **Cost at the cap (the worst case the maintainer should price).** All 12 boxes running for the full

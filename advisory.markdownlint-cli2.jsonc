@@ -1,10 +1,14 @@
 // markdownlint-cli2 ADVISORY config — whole-repo visibility (bead sq-5fd1). [OPUS-4.8]
 //
 // Same tuned ruleset as the HARD config (.markdownlint-cli2.jsonc) but globbed over
-// the ENTIRE corpus (research/, zk/, bench/, .claude/ included). Run ONLY by the
-// `markdownlint-advisory` job (continue-on-error) so the staged-rollout backlog in
+// the corpus that is NOT yet under the HARD gate (bench/, .claude/, …). Run ONLY by
+// the `markdownlint-advisory` job (continue-on-error) so any staged-rollout backlog in
 // the not-yet-clean dirs stays visible without blocking merges. As those dirs are
-// cleaned, fold them into the HARD config's `globs` and shrink this one.
+// cleaned, fold them into the HARD config's `globs` and add them to `ignores` here.
+//
+// research/ + zk/ were cleaned and promoted to the HARD gate (sq-rqyo), so they are
+// ignored below — the HARD job (markdownlint, no `--config`) now owns them; keeping
+// them here too would only duplicate the (now-zero) report.
 {
   "config": {
     "default": true,
@@ -33,6 +37,9 @@
     "**/target",
     "vendor",
     "**/vendor",
-    "zk/xpath/vendor"
+    "zk/xpath/vendor",
+    // sq-rqyo: research/ + zk/ are now HARD-gated — exclude here to avoid double-reporting.
+    "research",
+    "zk"
   ]
 }

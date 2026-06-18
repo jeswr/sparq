@@ -229,7 +229,7 @@ Precompute a small **MinHash signature per entity** over its predicate/neighbour
 
 ### 7.4 Inference-aware similarity (materialization × similarity)
 `sparq` can do reasoning. Two interacting ideas:
-- Compute structural features (§7.2) over the **materialized closure** (e.g. `rdfs:subClassOf`/`subPropertyOf`-expanded types/predicates) so similarity respects the ontology (two entities are "same type" via a common superclass). 
+- Compute structural features (§7.2) over the **materialized closure** (e.g. `rdfs:subClassOf`/`subPropertyOf`-expanded types/predicates) so similarity respects the ontology (two entities are "same type" via a common superclass).
 - **But** heed "More is not Always Better" (A-box materialization can *hurt* embeddings): make closure **opt-in per signal** and benchmark both. Likely sweet spot: expand the **T-box** (type/predicate hierarchies) for structural features, but *not* full A-box materialization for text embeddings.
 
 ### 7.5 Dict-locality-aware quantization / layout

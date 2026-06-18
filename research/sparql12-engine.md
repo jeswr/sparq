@@ -67,7 +67,7 @@ The two syntaxes are deliberately distinct (this trips up implementers migrating
 > A reifying triple is a triple where the predicate is **rdf:reifies** and the object is a triple term. The subject of that triple is called a **reifier**. … A reifiedTriple is syntactic sugar representing a reifying triple … `<< :s :p :o ~ :IRIREF >>` … If no reifiers are present, or a reifier is not immediately followed by an iri or BlankNode, a fresh RDF blank node is allocated.
 
 Expansion (Turtle Examples 23–25):
-```
+```text
 << :employee38 :jobTitle "Assistant Designer" >> :accordingTo :employee22 .
 # ≡
 _:id rdf:reifies <<( :employee38 :jobTitle "Assistant Designer" )>> .
@@ -80,7 +80,7 @@ _:id :accordingTo :employee22 .
 
 From [§17.4.6](https://www.w3.org/TR/sparql12-query/#x17-4-6-functions-on-triple-terms). **The current names are `TRIPLE`/`isTRIPLE`/`SUBJECT`/`PREDICATE`/`OBJECT`** — there is no `hasTRIPLE` or `TRIPLE_TERM` function (those were never adopted):
 
-```
+```text
 triple-term TRIPLE(RDF-term subj, RDF-term pred, RDF-term obj)
 RDF-term    SUBJECT(triple-term tt)
 RDF-term    PREDICATE(triple-term tt)
@@ -93,7 +93,7 @@ xsd:boolean isTRIPLE(RDF-term term)
 - `isTRIPLE(term)`: true iff term is a triple term, else false (no error).
 
 **Directional language-string functions** ([§17.4.2.9–.11, .17](https://www.w3.org/TR/sparql12-query/#x17-4-2-9-langdir)):
-```
+```text
 xsd:string LANGDIR(literal ltrl)                                  // base direction "ltr"/"rtl", or "" if none; error on non-literal
 xsd:boolean hasLANG(RDF-term term)                                // literal has a language tag (datatype rdf:langString or rdf:dirLangString)
 xsd:boolean hasLANGDIR(RDF-term term)                             // literal has a base direction (datatype rdf:dirLangString)
@@ -133,7 +133,7 @@ EBNF per XML 1.1 §6. Entry points: `QueryUnit`, `UpdateUnit`. LL(1) with upperc
 
 **The new/changed productions for triple terms, reifiers, annotations, version, and directional literals** (delimiters preserved exactly):
 
-```
+```text
 [4]   Prologue          ::= ( BaseDecl | PrefixDecl | VersionDecl )*
 [7]   VersionDecl       ::= 'VERSION' VersionSpecifier
 [8]   VersionSpecifier  ::= STRING_LITERAL1 | STRING_LITERAL2
@@ -186,8 +186,8 @@ EBNF per XML 1.1 §6. Entry points: `QueryUnit`, `UpdateUnit`. LL(1) with upperc
 
 **Where each form is allowed (the load-bearing constraints):**
 - A **TripleTerm `<<( )>>`** is reachable via `VarOrTerm` [115] → it may sit in **subject or object** of a triple pattern *syntactically*, but matching against a graph only succeeds in object position (see §18.1.3 below). In data/expressions it's restricted: `TripleTermData` [122] (used in `VALUES`/quad-data) forbids variables and forbids non-IRI subjects; `ExprTripleTerm` [137] (in expressions/`BIND`) allows only IRI/var in subject and IRI/var in predicate.
-- A **ReifiedTriple `<< >>`** is reachable via `GraphNode`/`GraphNodePath` [113][114] and `ReifiedTripleBlock` [58][59] → it can be a subject (it heads a property list) or an object. It carries an optional `Reifier` (`~ id`).
-- **Annotation blocks `{| |}`** [110][112] attach to an `Object`/`ObjectPath` via `Annotation`/`AnnotationPath` [86][93][109][111] — a *sequence* of reifiers/blocks.
+- A **ReifiedTriple `<< >>`** is reachable via `GraphNode`/`GraphNodePath` `[113][114]` and `ReifiedTripleBlock` `[58][59]` → it can be a subject (it heads a property list) or an object. It carries an optional `Reifier` (`~ id`).
+- **Annotation blocks `{| |}`** `[110][112]` attach to an `Object`/`ObjectPath` via `Annotation`/`AnnotationPath` `[86][93][109][111]` — a *sequence* of reifiers/blocks.
 - Nesting: `ReifiedTripleSubject/Object` and `TripleTermSubject/Object` recurse into `ReifiedTriple`/`TripleTerm`, so arbitrary nesting is allowed syntactically.
 
 **Grammar note (reifier/annotation restriction), quoted from §19.7:**
@@ -257,7 +257,7 @@ Existing types: `uri`, `literal` (+ optional `xml:lang`/`datatype`), `bnode`.
 
 ### Conformance test suite — `w3c/rdf-tests`, `sparql/sparql12/`
 The suite **exists in `main`** (the published HTML index still says "coming soon"). Run from the repo, not the rendered page. Directory layout (GitHub API on `w3c/rdf-tests`):
-```
+```text
 sparql/sparql12/
   manifest.ttl
   eval-triple-terms/        basic-*.{rq,srj}, construct-*.{rq,ttl}, data-*.ttl

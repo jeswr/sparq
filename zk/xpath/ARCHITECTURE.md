@@ -10,7 +10,7 @@ This library provides Noir implementations of XPath/XQuery functions as defined 
 
 Following the pattern established by [noir_IEEE754](https://github.com/jeswr/noir_IEEE754), the project uses a workspace with multiple packages to manage the codebase and tests efficiently:
 
-```
+```text
 noir_XPath/
 ├── Nargo.toml                          # Workspace configuration
 ├── ARCHITECTURE.md                     # This file

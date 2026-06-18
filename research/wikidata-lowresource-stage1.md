@@ -28,7 +28,7 @@ Data: live `https://dumps.wikimedia.org/wikidatawiki/entities/latest-truthy.nt.g
 first 16 GiB fetched by 2 ranged-HTTP workers (1 GiB ranges). Slices are the first
 N lines, one streaming pass each, recompressed BOTH ways during the pass:
 
-```
+```text
 rapidgzip -d -c -P 2 truthy-head.gz | head -n $N \
   | tee >(pigz -p 2 -6 -c > $L.nt.gz) >(wc -l > $L.count) \
   | zstd -3 -T2 -q -f -o $L.nt.zst
@@ -37,14 +37,14 @@ rapidgzip -d -c -P 2 truthy-head.gz | head -n $N \
 Each build (fresh idx dir, caches dropped, single run — medians are a luxury at this
 budget; noted honestly):
 
-```
+```text
 SPARQ_SHARDED_DICT=1 SPARQ_BUILD_TIMING=1 /usr/bin/time -v \
   sparq-cli build $L.nt.{gz,zst} ntriples ~/idx 32     # 32M-triple chunks
 ```
 
 Validation per build (mmap open + COUNTs, RSS via /usr/bin/time -v):
 
-```
+```text
 sparq-cli query-mmap ~/idx 'SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }'
 sparq-cli query-mmap ~/idx '... { ?s <http://www.wikidata.org/prop/direct/P31> ?o }'
 sparq-cli query-mmap ~/idx '... { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?o }'
@@ -53,7 +53,7 @@ sparq-cli query-mmap ~/idx '... { ?s <http://www.w3.org/2000/01/rdf-schema#label
 In-memory contrast at 100 M (the "RDFox-style all-in-RAM" data point), cgroup-capped so
 an over-RAM attempt OOMs instead of silently swapping:
 
-```
+```text
 sudo systemd-run --scope --wait -p MemoryMax=15G -p MemorySwapMax=0 \
   /usr/bin/time -v sparq-cli query 100M.nt.zst ntriples 'SELECT (COUNT(*) AS ?c) ...'
 ```

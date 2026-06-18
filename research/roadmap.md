@@ -11,7 +11,7 @@ EC2 boxes).
 
 ## 1. The work threads
 
-### T1 — Many-core parallelism & NUMA scaling  *(primary goal: near-linear to ~196 cores)*
+## T1 — Many-core parallelism & NUMA scaling  *(primary goal: near-linear to ~196 cores)*
 Source: `research/parallelism-scaling.md`. Touches the hot path: `exec.rs`, `lib.rs`, `dict.rs`.
 - **T1.0 (days, low-risk):** mimalloc/jemalloc global allocator (one line, gated off wasm);
   rayon worker pinning; `numactl --interleave=all` probe; **thread-local `LocalVocab` + deferred
@@ -34,7 +34,7 @@ Source: `research/parallelism-scaling.md`. Touches the hot path: `exec.rs`, `lib
   matches the M1 (1.82× @4), so the `merge_remap` ceiling is a **real measured
   serialization target**, not core asymmetry. NUMA + >8-thread questions still blocked.
 
-### T2 — Wikidata ingestion under 24 min
+## T2 — Wikidata ingestion under 24 min
 Source: `research/wikidata-ingestion-benchmark.md`, `fast-ingestion.md` (the measured
 M1 build rate is single-sourced there). 24 min for ~9.4 B truthy ⇒ need ~6.5 M/s.
 - **The one bottleneck is `Dict::merge_remap`** (profiled) — the mandatory global-id serialization
@@ -61,25 +61,25 @@ M1 build rate is single-sourced there). 24 min for ~9.4 B truthy ⇒ need ~6.5 M
   See "Rung 5 MEASURED" in `research/wikidata-ingestion-benchmark.md` +
   `research/hardware-validation-blocked.md`.
 
-### T3 — Tagged/inline ValueIds (u64)  *(#23 + #26; foundational)*
+## T3 — Tagged/inline ValueIds (u64)  *(#23 + #26; foundational)*
 Inline numerics/dates/decimals into the id so range FILTER + ORDER BY skip the dict (QLever's main
 remaining compute edge). Blocked today: u32 inline range is exhausted → needs **u64 Id**. Changes
 the fundamental `Id` type across `dict.rs`, `exec.rs`, the store, `lib.rs`. **Memory tradeoff**
 (doubles perm width → may cost bandwidth-bound scans) → must be measured both ways. *Foundational:
 every hot-path edit (T1, T4) builds on the Id representation.*
 
-### T4 — Compressed on-disk permutation blocks (PForDelta/prefix)
+## T4 — Compressed on-disk permutation blocks (PForDelta/prefix)
 The one place QLever still wins: smaller on-disk index at billions (a **disk-footprint** win, not
 speed — sparq already wins query speed). Touches the store/index + every scan in `exec.rs`. Risk:
 decode cost in the hot loop. Source: `term-index-compression.md`, `bit-level-encoding.md`,
 `dict-compression-measured.md`.
 
-### T5 — Inference completion  *(sparq-reason; isolated crate)*
+## T5 — Inference completion  *(sparq-reason; isolated crate)*
 - **T5.1 (#27): DONE** — OWL-RL single-pass extension (monotone subset out of the fixpoint, ~6.5×).
 - **Independent:** `sparq-reason` depends on `sparq-core` but **not** on `exec.rs` → does not
   conflict with T1/T3/T4.
 
-### T12 — Inference FEATURE COMPLETENESS  *(sparq-reason; isolated; user-requested)*
+## T12 — Inference FEATURE COMPLETENESS  *(sparq-reason; isolated; user-requested)*
 The goal is **feature-complete inference**, especially **Notation3 toward EYE-reasoner parity**.
 Current state: the N3 forward chainer executes `{ premise } => { conclusion }` rules to a fixpoint
 (semi-naive, FactIndex-accelerated) with variables + formulae, and the v1 builtins are the
@@ -96,7 +96,7 @@ each validated against EYE's own test cases (`sparq-reason/tests/eye_cases.rs`):
 - **Discipline:** each builtin batch ships with EYE-validated tests; differential against the prior
   closure to guarantee no regression. `sparq-reason` only — conflict-free with the engine threads.
 
-### T6 — RDF 1.2 / SPARQL 1.2
+## T6 — RDF 1.2 / SPARQL 1.2
 Source: `rdf12-parser.md`, `rdf12-indexing.md`, `sparql12-engine.md`.
 - **T6a — parser** (triple terms, RDF-star successor syntax): `sparq-core` parser files —
   **independent** of the exec cluster.
@@ -104,7 +104,7 @@ Source: `rdf12-parser.md`, `rdf12-indexing.md`, `sparql12-engine.md`.
   T3/T4).
 - **T6c — engine** (SPARQL 1.2 algebra/eval): touches `exec.rs` (conflicts with T1).
 
-### T7 — AI / GenAI supports  *(4 new feature-gated crates; isolated)*
+## T7 — AI / GenAI supports  *(4 new feature-gated crates; isolated)*
 Source: `genai-*.md` (5 reports). Crates: `sparq-sim` (structural IRI similarity from the 6 perms —
 training-free, the novel edge), `sparq-introspect` (characteristic sets — **also feeds the planner**,
 soft-links to T1/optimisation), `sparq-nlq` (NL→SPARQL retrieve-repair loop), `sparq-vectors` (mmap
@@ -112,17 +112,17 @@ embedding store + ANN). One-directional dep, zero main-path impact → **indepen
 sequence *after* inference (T5) + RDF/SPARQL 1.2 (T6) are optimised. First step: synthesise the 5
 reports into one prioritised design doc.
 
-### T8 — Measurement harness  *(sparq-bench; additive, independent)*
+## T8 — Measurement harness  *(sparq-bench; additive, independent)*
 `sparq-bench` has **no thread-count sweep today**. Add one reporting per-subsystem parallel
 *efficiency* vs `RAYON_NUM_THREADS` (load / scan / join / aggregate / serialise / infer). This is the
 instrument T1 and T2 are blind without. Additive — conflicts with nothing.
 
-### T9 — SPARQL feature gaps
+## T9 — SPARQL feature gaps
 - **Named graphs / GRAPH** — currently errors (`exec.rs:893`). Needs a quad store or graph-column.
 - Property paths (`*`/`+`/`/`), SERVICE federation, remaining aggregates/expressions (the `M2:`
   markers at `exec.rs:2375/2640`). These touch `exec.rs` (conflict with T1).
 
-### T10 — SPARQL 1.1/1.2 Update  *(store mutation; core cluster)*
+## T10 — SPARQL 1.1/1.2 Update  *(store mutation; core cluster)*
 The store is currently **immutable** (built once, queried). Update needs incremental insert/delete:
 `INSERT DATA` / `DELETE DATA` / `DELETE…INSERT…WHERE` / `LOAD` / `CLEAR` / `CREATE` / `DROP` /
 `COPY` / `MOVE` / `ADD`. Touches the **store + dict** (mutable permutation indexes + dict growth /
@@ -134,7 +134,7 @@ the out-of-core mmap store). **Conflicts with the core cluster** (T1/T3/T4 all t
 Strongly interacts with T9 (GRAPH targets in `WITH`/`USING`/`GRAPH` update clauses) → do T9's
 quad/graph-column model and T10 together.
 
-### T11 — HTTP server, W3C-conformant  *(new `sparq-server` crate; mostly independent)*
+## T11 — HTTP server, W3C-conformant  *(new `sparq-server` crate; mostly independent)*
 Expose the engine over HTTP per the W3C specs:
 - **SPARQL 1.1/1.2 Protocol** — `query` via GET + POST (`application/sparql-query` and
   url-encoded), `update` via POST (`application/sparql-update`); content negotiation for result
@@ -158,7 +158,7 @@ Two clusters touch the same files and **must be serialised within the cluster** 
 branch at a time); everything else is **independent** and can run concurrently on its own
 worktree/box.
 
-```
+```text
  CORE HOT-PATH CLUSTER (exec.rs + dict.rs + store + lib.rs load)  — serialise internally
    T3 (u64 ids)  ──foundational──►  T1 (parallelism/NUMA)  ◄──shares merge_remap──  T2 (ingestion)
                          │                      ▲
@@ -267,47 +267,47 @@ the WASM build's performance or bundle size** (and zero default-engine impact). 
 wasm-build CI job stays mandatory, and T14 adds a tracked **bundle-size metric** to the benchmark
 series so any size regression is visible per commit.
 
-### T13 — W3C conformance suites in CI  *(correctness credibility; independent)*
+## T13 — W3C conformance suites in CI  *(correctness credibility; independent)*
 Run the official `w3c/rdf-tests` suites (SPARQL 1.1 query evaluation + update + protocol; RDF 1.2
 syntax) against the engine/server. Manifest-driven runner (parse `manifest.ttl`, evaluate, compare
 against expected results with bag/set semantics). Report a pass-rate scoreboard in CI (informational
 first, ratchet to a gate as coverage climbs). New dev-only crate `sparq-conformance`.
 
-### T14 — RDF/JS bindings + npm  *(distribution; wasm)*
+## T14 — RDF/JS bindings + npm  *(distribution; wasm)*
 Expose sparq-wasm through the RDF/JS Dataset/Store/Query interfaces; TypeScript types; publish to
 npm. Add a wasm **bundle-size tracking** metric to the benchmark CI. The natural channel for the
 rdfjs ecosystem; benchmark vs Oxigraph-wasm + Comunica.
 
-### T15 — Server production hardening  *(server; independent)*
+## T15 — Server production hardening  *(server; independent)*
 Request timeouts + concurrency limits (tower layers), payload/result-size caps, cooperative query
 cancellation (row-budget checks in the executor — the part needing engine support), structured
 errors. Without this a public endpoint is one cross-product away from OOM.
 
-### T16 — CONSTRUCT / DESCRIBE + streaming results  *(engine + server)*
+## T16 — CONSTRUCT / DESCRIBE + streaming results  *(engine + server)*
 An RDF-graph result API in the engine; CONSTRUCT/DESCRIBE evaluation; chunked/streaming
 serialization on the server (and lazy SELECT streaming — pairs with the Tier-3 pipelined work).
 
-### T17 — Incremental updates + durability  *(store)*
+## T17 — Incremental updates + durability  *(store)*
 Delta-overlay updates (insert/delete sets merged at query time; periodic compaction) replacing the
 O(n) rebuild; write-ahead log + recovery → sparq becomes a database, not just a query engine.
 Readers keep snapshot isolation via the existing Arc-swap design.
 
-### T18 — Incremental reasoning (DRed/counting)  *(sparq-reason)*
+## T18 — Incremental reasoning (DRed/counting)  *(sparq-reason)*
 Maintain RDFS/OWL closures incrementally under INSERT/DELETE instead of full re-materialization
 (RDFox's headline capability). Composes with T17; the materialization tests are the oracle.
 
-### T19 — SHACL validation  *(new opt-in crate `sparq-shacl`)*
+## T19 — SHACL validation  *(new opt-in crate `sparq-shacl`)*
 Core constraint components + targets evaluated via the query engine; W3C SHACL test suite as the
 gate (fits the T13 conformance harness).
 
-### T20 — Releases & packaging  *(infrastructure)*
+## T20 — Releases & packaging  *(infrastructure)*
 crates.io publication, GitHub Releases wired to dist.yml binaries, Docker image for the server,
 Homebrew formula. Versioning + changelog.
 
-### T21 — Python bindings  *(adoption)*
+## T21 — Python bindings  *(adoption)*
 pyo3 bindings + an rdflib Store backend; wheels via maturin in CI.
 
-### T22 — EXPLAIN + observability  *(engine + server)* ✅
+## T22 — EXPLAIN + observability  *(engine + server)* ✅
 Query-plan introspection (EXPLAIN endpoint/CLI flag showing plan choice, cardinality estimates,
 per-operator timings) + Prometheus metrics on the server.
 **Done:** engine `explain()` — a planning-only dry run that replays the executor's own GOO
@@ -318,7 +318,7 @@ flag check per operator entry when off). Server: `?explain=`/`Accept: text/x-spa
 `/sparql`, plus a hand-rolled Prometheus `/metrics` (requests by endpoint/status, `/sparql`
 latency histogram, subscription/triple gauges, update counter). See the server README.
 
-### T23 — Subscription API (SPARQL subscriptions)  *(server; SEPA-inspired)*
+## T23 — Subscription API (SPARQL subscriptions)  *(server; SEPA-inspired)*
 Subscribe to a SPARQL query over WebSocket: initial result, then ADDED/REMOVED binding diffs after
 each committed update. Model on the SEPA member submission (SPARQL 1.1 Subscribe Language /
 Secure Event Protocol) — the spec lineage Blazegraph never shipped. v1: post-commit re-evaluation +
@@ -326,7 +326,7 @@ result diffing (hash rows; correct, simple) with debounce/coalescing; v2: increm
 reusing T17's deltas (only re-run when the delta's predicates intersect the query's). Adjacent to
 Solid Notifications channels for that ecosystem.
 
-### T24 — Previously-parked features, now unparked (all opt-in, wasm-neutral)
+## T24 — Previously-parked features, now unparked (all opt-in, wasm-neutral)
 - **T24a HDT format** (`sparq-hdt`): read (and later write) HDT archives — HDT's dict+triples
   layout maps naturally onto sparq's model; big research-community win.
 - **T24b GeoSPARQL** (`sparq-geo`): geometry literals, spatial functions + an R-tree index.

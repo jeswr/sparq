@@ -31,6 +31,7 @@ So the dict is already near the cheap-win frontier on real data; the remaining d
 levers are modest or memory-gated. Recorded so we don't over-invest in FSST.
 
 ## Correctness on real Wikidata (sparq vs Oxigraph, 2M triples)
+
 | query | rows | matches Oxigraph |
 |---|--:|:--:|
 | `?s schema:name ?n` (scan) | 408,836 | ✓ |

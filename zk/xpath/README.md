@@ -13,11 +13,17 @@ A Noir library implementing XPath 2.0 functions and operators required by SPARQL
 > [!CAUTION]
 > **Under Development**: This library is still under active development. APIs may change without notice and some features may be incomplete or missing.
 
+<!-- -->
+
 > [!CAUTION]
 > **Security Warning**: This library has not been security reviewed and should not be used in production systems without a thorough audit.
 
+<!-- -->
+
 > [!WARNING]
 > **AI-Generated Code**: This library is largely AI-generated. While it has been tested, there may be edge cases or subtle bugs that have not been discovered.
+
+<!-- -->
 
 > [!NOTE]
 > **Test Coverage Limitations**: The following limitations apply:
@@ -43,14 +49,14 @@ xpath = { git = "https://github.com/jeswr/noir_XPath", tag = "v0.1.0", directory
 ### Currently Implemented
 
 - **Boolean Operations**: `fn:not`, `op:boolean-equal`, `op:boolean-less-than`, `op:boolean-greater-than`, logical AND/OR
-- **Numeric Operations**: 
+- **Numeric Operations**:
   - Integer: add, subtract, multiply, divide, mod, abs, round, ceil, floor, min, max
   - Comparisons: equal, less-than, greater-than
 - **String Operations**:
   - Basic: string-length, substring, upper-case, lower-case
   - Search: starts-with, ends-with, contains
   - Manipulation: substring-before, substring-after, concat
-- **DateTime Operations**: 
+- **DateTime Operations**:
   - Construction: from epoch microseconds, from components
   - Component extraction: year, month, day, hours, minutes, seconds, microseconds, timezone
   - Comparisons: equal, less-than, greater-than
@@ -78,7 +84,7 @@ xpath = { git = "https://github.com/jeswr/noir_XPath", tag = "v0.1.0", directory
 
 ## SPARQL 1.1 Coverage
 
-This library implements XPath 2.0 functions and operators required by SPARQL 1.1. 
+This library implements XPath 2.0 functions and operators required by SPARQL 1.1.
 
 **Quick Summary:**
 - ✅ **56+ functions fully implemented** (boolean, integer numeric, datetime, duration, aggregates)
@@ -270,7 +276,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for details.
 
 ## Project Structure
 
-```
+```text
 noir_XPath/
 ├── xpath/                    # Main library
 │   └── src/
