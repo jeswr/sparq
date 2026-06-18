@@ -204,9 +204,13 @@ export function HttpServerWalkthrough() {
         </div>
         <p className="measure text-sm text-muted-foreground">
           Every request below was run against a local{" "}
-          <code className="font-mono">sparq-server</code> and its response recorded
-          verbatim. Copy a recipe, point it at your own running endpoint, and you get the
-          same output.
+          <code className="font-mono">sparq-server</code> (default build) and its response
+          recorded. The query/CONSTRUCT result bodies are deterministic — copy a recipe,
+          point it at your own running endpoint over the same seed, and you get the same
+          bytes. A few fields are inherently run-dependent (the{" "}
+          <code className="font-mono">date:</code> header, and the{" "}
+          <code className="font-mono">/metrics</code> request counters and histogram
+          timings); those are shown as one representative capture.
         </p>
         <div className="grid gap-4 lg:grid-cols-2">
           {RECIPES.map((r) => (

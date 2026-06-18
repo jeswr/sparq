@@ -48,8 +48,13 @@ export default function HttpServerSurfacePage() {
             lean wasm bundle, and this static site has no backend to host it. So — honestly — this
             page is a <strong className="text-foreground">captured-I/O walkthrough</strong>: every
             curl request and every SSE frame here is <em>real recorded output</em> from a running{" "}
-            <code className="font-mono">sparq-server</code>, replayed in your tab. Run the same
-            binary yourself and you get byte-for-byte the same responses.
+            <code className="font-mono">sparq-server</code> (default build), replayed in your tab.
+            The query, CONSTRUCT and subscription result payloads are{" "}
+            <strong className="text-foreground">deterministic</strong> — run the same binary over
+            the same seed and you get the same bytes. (A few inherently run-dependent fields — the{" "}
+            <code className="font-mono">date:</code> header, the{" "}
+            <code className="font-mono">/metrics</code> request counters and timings — are shown as
+            one representative capture, not a byte-reproducible promise.)
           </p>
         </>
       }
