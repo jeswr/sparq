@@ -440,6 +440,29 @@ impl HiddenValueJoin {
     /// `m = (a - b)·r` is opened at degree `2t`; `m == 0 ⇔ a == b`, and for unequal
     /// keys `m` is uniform nonzero — so ONLY the match bit is revealed, never either
     /// key or their difference.
+    ///
+    /// **Integrity envelope — DETECT-only, never CORRECT (bead sq-ji5f; decision
+    /// = the honest envelope).** The degree-`2t` open routes through
+    /// [`shamir::reconstruct_degree`] → the WI-1 Reed–Solomon checker, but the
+    /// honest-majority constructor fixes `t = ⌊(n−1)/2⌋`, so the equality open's
+    /// correction budget at degree `2t` is `e_max = ⌊(n − (2t+1))/2⌋ = 0` for
+    /// EVERY party count the constructor builds:
+    ///
+    /// - **odd `n`** (`n = 2t+1`): zero RS redundancy at degree `2t` ⇒ tampering
+    ///   is information-theoretically undetectable (a MAC is the deferred WI-4
+    ///   fix, bead sq-6d6g) — NOT claimed otherwise;
+    /// - **even `n`** (`n = 2t+2`): exactly one redundant share ⇒ a tampered
+    ///   product share is DETECTED and the open aborts with [`MpcError::Tampered`].
+    ///
+    /// So this primitive can at best **detect-and-abort** under an honest majority
+    /// and NEVER auto-corrects a cheater. Robust correction (`e_max ≥ 1`) at
+    /// degree `2t` would need `n ≥ 2t+3`, which is deliberately NOT provisioned
+    /// here: the bead weighed (a) over-provisioning the party set, (b) a
+    /// BGW/DN degree-reduction round before the open, and (c) leaving
+    /// detect-and-abort as the honest envelope, and chose (c) — robustness is out
+    /// of scope for the honest-majority equality test and would change the trust
+    /// model. The arithmetic and behaviour are pinned by the `sq-ji5f` properties
+    /// in `adversarial_tests` (`honest_majority_equality_open_*`).
     fn secure_equal_shared(
         &self,
         dealer: &mut ShamirDealer,
