@@ -9,9 +9,11 @@
 # a solo-maintained, agent-driven repo with ruleset-based (not 2-reviewer) protection
 # — they are not actionable code-scanning alerts and merely polluted the dashboard
 # (the standing requirement is ZERO open code-scanning alerts). The `Vulnerabilities`
-# check likewise only re-surfaces the two `unmaintained` RustSec advisories already
-# triaged-with-beads in `deny.toml` (RUSTSEC-2024-0436 paste / sq-l8bv, RUSTSEC-
-# 2025-0134 rustls-pemfile / sq-g2xs) — no fixable advisory. So Scorecard stays as
+# check likewise only re-surfaces the `unmaintained` RustSec advisory already
+# triaged-with-a-bead in `deny.toml` (RUSTSEC-2025-0134 rustls-pemfile / sq-g2xs)
+# — no fixable advisory. (RUSTSEC-2024-0436 `paste` / sq-l8bv was dropped: the GPU
+# stack no longer pulls `paste`, so it left the tree and the ignore was removed.)
+# So Scorecard stays as
 # the badge/score; it no longer feeds code-scanning. See compliance/openssf/
 # gap-register.md (GX-OSSF-3) and compliance/cis/gap-register.md.
 #

@@ -25,7 +25,7 @@ documentation) would inspect.
 | **GATING** PR-time advisory check (un-degraded) | `.github/workflows/supply-chain.yml#audit` step "cargo-deny check (advisories) — GATING" | `cargo deny check advisories` exits 0 on a clean tree; removing a justified `ignore` makes it exit non-zero (proves it is fail-closed, not cosmetic). |
 | Fail-closed advisory/license/source policy | `deny.toml` (`yanked = "deny"`, permissive-only license allowlist, crates.io-only sources) | `cargo deny check bans sources licenses` (the always-gating subset) + `cargo deny check advisories`. |
 | Daily advisory watchdog (defence-in-depth) | `.github/workflows/dependency-monitoring.yml` | Scheduled run opens/updates one idempotent `security:dependency-vuln` issue on a finding. |
-| The two tolerated advisories are justified + VEX'd | `deny.toml [advisories].ignore` ↔ `supply-chain/vex.cdx.json` | Both are `unmaintained` *informational* (paste → sq-l8bv, rustls-pemfile → sq-g2xs); VEX `analysis.state = not_affected`. Each ignore = one VEX entry, 1:1. |
+| The tolerated advisory is justified + VEX'd | `deny.toml [advisories].ignore` ↔ `supply-chain/vex.cdx.json` | One `unmaintained` *informational* (rustls-pemfile → sq-g2xs); VEX `analysis.state = not_affected`. Each ignore = one VEX entry, 1:1. (paste/RUSTSEC-2024-0436 → sq-l8bv was dropped: the GPU stack no longer pulls `paste`, so it left the tree and the ignore + VEX entry were removed.) |
 
 ## E3 — SBOM (Annex I Part II.1)
 

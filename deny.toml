@@ -21,14 +21,17 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 # Advisory IDs to tolerate — each MUST carry a justification. The policy here is
 # strict on what matters: a real VULNERABILITY or a YANKED crate FAILS the gate
-# (nothing below is one). The two entries are `unmaintained` *informational*
-# advisories on TRANSITIVE deps with NO safe upgrade available today; they are
-# tracked as beads to migrate off (see reason in each `reason`). Re-audit when an
+# (nothing below is one). The remaining entry is an `unmaintained` *informational*
+# advisory on a TRANSITIVE dep with NO safe upgrade available today; it is
+# tracked as a bead to migrate off (see reason in the `reason`). Re-audit when an
 # upgrade path appears — drop the entry and the gate re-flags it.
+#
+# RUSTSEC-2024-0436 (unmaintained `paste` proc-macro, bead sq-l8bv) was dropped:
+# the GPU stack (wgpu et al.) no longer pulls `paste` transitively, so the crate
+# is absent from Cargo.lock and the advisory no longer matches any crate. The
+# ignore is therefore removed so the gate re-flags any regression that
+# reintroduces `paste`.
 ignore = [
-  # `paste` (proc-macro) is no longer maintained. Transitive via the GPU stack
-  # (wgpu) and others; no vulnerability, no drop-in successor yet. Bead: sq-l8bv.
-  { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro `paste`, transitive (wgpu et al.), no vuln + no safe upgrade; tracked in bead sq-l8bv" },
   # `rustls-pemfile` is archived; its code now lives in rustls-pki-types. Pulled
   # in via ureq -> rustls-native-certs. "No safe upgrade is available" per the
   # advisory (needs an upstream ureq/rustls-native-certs bump). Bead: sq-g2xs.
