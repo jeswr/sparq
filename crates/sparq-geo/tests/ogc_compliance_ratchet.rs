@@ -42,9 +42,12 @@
 //! * The official OGC CITE / TEAM-Engine conformance suite itself (live-endpoint
 //!   HTTP harness) — not vendored.
 //! * The RDFS/OWL **Geometry / Feature class** entailment requirements
-//!   (`geo:Feature`, `geo:Geometry`, the `geo:hasGeometry` reasoning rules).
+//!   (`geo:Feature`, `geo:Geometry`, the `geo:hasGeometry` reasoning rules) —
+//!   now covered by `tests/entailment.rs` (sq-5ts8), which drives the generic
+//!   `sparq-reason` RDFS/OWL-RL closure over the GeoSPARQL ontology axioms.
 //! * The **query rewrite extension** (the `geo:sfWithin`-style triple-pattern
-//!   property forms, as opposed to the `geof:` filter functions tested here).
+//!   property forms, as opposed to the `geof:` filter functions tested here) —
+//!   NOT implemented; the gap is pinned by `tests/entailment.rs` (sq-5ts8).
 //! * Non-topological `geof:` functions (`distance`, `buffer`, set operations,
 //!   `boundary`/`envelope`/`convexHull`) — covered by `tests/relations.rs`, not
 //!   this topology ratchet.

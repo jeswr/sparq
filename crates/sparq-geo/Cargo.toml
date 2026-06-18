@@ -84,3 +84,10 @@ rustc-hash.workspace = true
 # [OPUS-4.8] sq-8xug: rand-ecosystem 0.10. `random_range` moved from the `Rng`
 # trait to `RngExt` in 0.10, so the test/example imports use the prelude.
 rand = "0.10"
+# [OPUS-4.8] sq-5ts8: TEST-ONLY. The GeoSPARQL RDFS/OWL Feature/Geometry class
+# entailment conformance fixture (tests/entailment.rs) drives the generic
+# RDFS / OWL-RL closure over the GeoSPARQL ontology axioms — engine support for
+# the entailment requirements is `sparq-reason`'s rule set, not new geo code, so
+# the dependency is dev-only and the shipped crate is unaffected. `default-features
+# = false` drops the rayon `parallel` feature the closure does not need here.
+sparq-reason = { path = "../sparq-reason", version = "0.1.0", default-features = false }
