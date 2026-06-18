@@ -252,8 +252,12 @@ export const GROUPS: SurfaceGroup[] = [
         href: "/surface/http-server",
         title: "HTTP server",
         blurb: "SPARQL 1.1 Protocol endpoint, GSP, /metrics, WS/SSE subscriptions.",
-        tier: "hosted",
+        // [OPUS-4.8] sq-rnwc: tier-e. No backend behind the static Pages site, so the
+        // honest surface is a captured curl + SSE-frame walkthrough (incl. a live
+        // subscription firing on a committed UPDATE), not a live hosted endpoint.
+        tier: "walkthrough",
         icon: Server,
+        built: true,
       },
       {
         slug: "cli",
