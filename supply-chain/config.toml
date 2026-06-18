@@ -134,7 +134,7 @@ version = "2.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.bzip2]]
-version = "0.5.2"
+version = "0.6.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.bzip2-sys]]
@@ -519,6 +519,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.khronos_api]]
 version = "3.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.libbz2-rs-sys]]
+version = "0.2.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.libc]]
