@@ -34,7 +34,8 @@ Geometry parsing and algorithms wrap the standard pure-Rust geo stack
 | 8.7 | `geof:getSRID` | ✅ the CRS IRI as `xsd:anyURI` |
 | 8.3/8.4 | Core RDF shape: `geo:hasGeometry`, `geo:hasDefaultGeometry`, `geo:asWKT` | ✅ extracted by `GeoIndex::build` (default + named graphs) |
 | 8.5.2 | `geo:gmlLiteral` | ✅ GML Simple-Features geometry profile (`parse_gml_literal`): `gml:Point`, `gml:LineString`, `gml:Polygon` (exterior + interior rings), `gml:MultiPoint`/`MultiCurve`/`MultiSurface` (+ the GML 2 `MultiLineString`/`MultiPolygon` aggregates); `srsName`→CRS (incl. URN/`EPSG:` spellings, EPSG:4326 axis swap) identical to the WKT path; `geof:` functions and `GeoIndex` (`geo:asGML`) treat it interchangeably with WKT. `gml:Envelope`, arc-segment `gml:Curve`/`Surface`, and 3-D coordinates are deferred (clean `GeoError::Unsupported`; `bd list -l area:sparq-geo`) |
-| 7 / 9 | RIF/SPARQL rewrite rules, `geor:` query rewriting | ❌ needs engine-level query rewriting (tracked in beads, `bd list -l area:sparq-geo`) |
+| 6 (Req 4–7) | RDFS/OWL **entailment** requirements — `geo:Feature`/`geo:Geometry`/`geo:SpatialObject` class hierarchy + the `geo:hasGeometry`/`geo:hasDefaultGeometry` property axioms | ✅ via the GENERIC `sparq-reason` RDFS / OWL-RL closure over the GeoSPARQL ontology axioms (no geo-specific reasoner); conformance fixture: [`tests/entailment.rs`](tests/entailment.rs) [OPUS-4.8] sq-5ts8 |
+| 7 / 9 | **Query-rewrite extension** — `geo:sfWithin`-style topology TRIPLE-PATTERN property forms, and the RIF/SPARQL `geor:` rewrite rules | ❌ needs engine-level query rewriting; the `geof:` FILTER functions are the supported surface (the property form is NOT auto-expanded — pinned by `tests/entailment.rs::query_rewrite_property_form_is_not_yet_supported`). Tracked: sq-5ts8 (`bd list -l area:sparq-geo`) |
 
 Formal OGC conformance testing is **skipped** (the official suite needs a full
 SPARQL endpoint harness); the table above is the implemented subset.
