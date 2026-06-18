@@ -13,7 +13,6 @@ export {
   quadsToNQuads,
   parseNTriples,
   detectQueryForm,
-  askToSelect,
   SparqlJsonRowsParser,
   type SparqlJsonTerm,
   type SparqlJsonResults,

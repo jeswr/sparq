@@ -384,18 +384,4 @@ export function detectQueryForm(sparql: string): { form: QueryForm; index: numbe
   return undefined;
 }
 
-/**
- * Rewrites an ASK query to an equivalent `SELECT *` query. `ASK WHERE {…}`
- * and `ASK {…}` are both valid SPARQL after substituting `SELECT *`.
- *
- * Legacy helper: the engine now evaluates ASK natively (with first-solution
- * early exit), so `SparqStore` no longer rewrites — kept for callers that
- * target SELECT-only endpoints.
- */
-export function askToSelect(sparql: string): string {
-  const form = detectQueryForm(sparql);
-  if (!form || form.form !== 'ASK') throw new Error('not an ASK query');
-  return `${sparql.slice(0, form.index)}SELECT *${sparql.slice(form.index + form.length)}`;
-}
-
 export { DataFactory };

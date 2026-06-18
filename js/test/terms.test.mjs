@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DataFactory as DF, askToSelect, detectQueryForm, quadsToNQuads, termToNT } from '../dist/index.js';
+import { DataFactory as DF, detectQueryForm, quadsToNQuads, termToNT } from '../dist/index.js';
 
 test('DataFactory produces spec-compliant terms', () => {
   const n = DF.namedNode('http://ex/a');
@@ -54,8 +54,4 @@ test('query-form detection skips prologue, comments, IRIs and strings', () => {
   assert.equal(detectQueryForm('BASE <http://ex/SELECT> # SELECT?\nDESCRIBE <http://ex/x>').form, 'DESCRIBE');
   assert.equal(detectQueryForm('PREFIX construct: <http://ex/> CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }').form, 'CONSTRUCT');
   assert.equal(detectQueryForm('PREFIX ex: <http://ex/>'), undefined);
-
-  assert.equal(askToSelect('ASK { ?s ?p ?o }'), 'SELECT * { ?s ?p ?o }');
-  assert.equal(askToSelect('PREFIX ex: <http://ex/>\nASK WHERE { ?s ?p ?o }'), 'PREFIX ex: <http://ex/>\nSELECT * WHERE { ?s ?p ?o }');
-  assert.throws(() => askToSelect('SELECT * WHERE { ?s ?p ?o }'), /not an ASK/);
 });
