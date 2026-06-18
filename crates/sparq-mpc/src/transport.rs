@@ -97,6 +97,21 @@ pub enum Message {
     /// Coordinator → party: run this query-class step over the shares you hold.
     /// Carries the opcode so a party process is a thin protocol executor.
     Step(StepCode),
+    /// Coordinator → party (network-tier oblivious shuffle / sort, sq-bdbv): apply
+    /// ONE compare-exchange / permutation switch to the share-COLUMN you hold. The
+    /// gate acts on wire indices `(a, b)` (row positions, `a < b`); `swap` is the
+    /// public realised control bit / comparator outcome for THIS gate. A `swap`
+    /// exchanges the party's two share-points at those rows (pure-local relabeling,
+    /// degree `t` preserved — the same local swap the in-process
+    /// [`crate::oblivious`] network does); a non-swap leaves them. This is the
+    /// per-switch / per-comparison message the bead asks for — unlike the
+    /// single-round aggregate/join, the shuffle/sort drive one `Swap` per network
+    /// gate, so the round count is the network's gate count. The switch TOPOLOGY
+    /// (`a`, `b`) is data-INDEPENDENT (a function of the row count only — the
+    /// obliviousness substrate); only the boolean varies, and for the shuffle it is
+    /// a fresh random permutation's routing bit, for the disclosed-key sort the
+    /// public comparator outcome. `[OPUS-4.8]`
+    Swap { a: u32, b: u32, swap: bool },
     /// Either direction: protocol is done for this cell; close cleanly.
     Done,
 }
@@ -111,6 +126,14 @@ pub enum StepCode {
     /// locally multiply them (degree-`2t` product) and send each product share
     /// back to open. The match bit is `product == 0`.
     MulAndOpen,
+    /// Oblivious shuffle / sort (sq-bdbv): you hold ONE share-point per row (a
+    /// column of the secret-shared rows). Receive the dealt column, then a stream
+    /// of [`Message::Swap`] gates (the permutation network's switches / the sort
+    /// network's compare-exchanges, in application order), apply each locally to
+    /// your column, and on [`Message::Done`] send the whole permuted column back to
+    /// open. Multi-round: one `Swap` per network gate. The party never learns the
+    /// permutation as a whole — only the per-gate boolean — and never reconstructs.
+    SwapNetworkAndOpen,
 }
 
 impl StepCode {
@@ -118,12 +141,14 @@ impl StepCode {
         match self {
             StepCode::SumAndOpen => 1,
             StepCode::MulAndOpen => 2,
+            StepCode::SwapNetworkAndOpen => 3,
         }
     }
     fn from_byte(b: u8) -> Result<Self, MpcError> {
         match b {
             1 => Ok(StepCode::SumAndOpen),
             2 => Ok(StepCode::MulAndOpen),
+            3 => Ok(StepCode::SwapNetworkAndOpen),
             other => Err(MpcError::Protocol(format!("unknown StepCode {other}"))),
         }
     }
@@ -134,6 +159,7 @@ const TAG_SHARES: u8 = 1;
 const TAG_OPEN: u8 = 2;
 const TAG_STEP: u8 = 3;
 const TAG_DONE: u8 = 4;
+const TAG_SWAP: u8 = 5;
 
 fn write_share(buf: &mut Vec<u8>, s: &Share) {
     buf.extend_from_slice(&s.x.to_be_bytes());
@@ -176,6 +202,12 @@ impl Message {
                 body.push(TAG_STEP);
                 body.push(code.to_byte());
             }
+            Message::Swap { a, b, swap } => {
+                body.push(TAG_SWAP);
+                body.extend_from_slice(&a.to_be_bytes());
+                body.extend_from_slice(&b.to_be_bytes());
+                body.push(if *swap { 1 } else { 0 });
+            }
             Message::Done => body.push(TAG_DONE),
         }
         let mut frame = Vec::with_capacity(4 + body.len());
@@ -212,6 +244,26 @@ impl Message {
                     return Err(MpcError::Protocol("short Step frame".into()));
                 }
                 Ok(Message::Step(StepCode::from_byte(body[off])?))
+            }
+            TAG_SWAP => {
+                // 4 (a) + 4 (b) + 1 (swap flag).
+                if off + 9 > body.len() {
+                    return Err(MpcError::Protocol("short Swap frame".into()));
+                }
+                let a = u32::from_be_bytes(body[off..off + 4].try_into().unwrap());
+                off += 4;
+                let b = u32::from_be_bytes(body[off..off + 4].try_into().unwrap());
+                off += 4;
+                let swap = match body[off] {
+                    0 => false,
+                    1 => true,
+                    other => {
+                        return Err(MpcError::Protocol(format!(
+                            "Swap flag must be 0 or 1, got {other}"
+                        )))
+                    }
+                };
+                Ok(Message::Swap { a, b, swap })
             }
             TAG_DONE => Ok(Message::Done),
             other => Err(MpcError::Protocol(format!("unknown frame tag {other}"))),
@@ -369,6 +421,59 @@ pub fn run_party<S: Read + Write>(chan: &mut Channel<S>) -> Result<(), MpcError>
                     });
                 }
                 chan.send(&Message::Open(products))?;
+            }
+            Message::Step(StepCode::SwapNetworkAndOpen) => {
+                // Next frame: this party's column — ONE share-point per row, all at
+                // this party's single evaluation point `x`. The party then receives
+                // a stream of `Swap` gates (one per network switch / compare-
+                // exchange) terminated by `Done`, applies each locally to its
+                // column, and sends the whole permuted column back to open. The
+                // party never reconstructs and never learns the permutation as a
+                // whole — only the per-gate public boolean. [OPUS-4.8] sq-bdbv.
+                let mut column = match chan.recv()? {
+                    Message::Shares(v) => v,
+                    other => {
+                        return Err(MpcError::Protocol(format!(
+                            "SwapNetworkAndOpen: expected Shares, got {other:?}"
+                        )))
+                    }
+                };
+                // An empty column is a protocol fault (mirrors the SumAndOpen
+                // guard): a zero-row shuffle/sort ships nothing to open and would
+                // open an empty batch. Fail closed before applying gates.
+                if column.is_empty() {
+                    return Err(MpcError::Protocol(
+                        "SwapNetworkAndOpen: empty share column (no rows)".into(),
+                    ));
+                }
+                loop {
+                    match chan.recv()? {
+                        Message::Swap { a, b, swap } => {
+                            let (a, b) = (a as usize, b as usize);
+                            if a >= column.len() || b >= column.len() {
+                                return Err(MpcError::Protocol(format!(
+                                    "Swap gate ({a},{b}) out of range for column length {}",
+                                    column.len()
+                                )));
+                            }
+                            if a == b {
+                                return Err(MpcError::Protocol(format!(
+                                    "Swap gate touches one wire twice (a == b == {a})"
+                                )));
+                            }
+                            if swap {
+                                column.swap(a, b);
+                            }
+                        }
+                        Message::Done => break,
+                        other => {
+                            return Err(MpcError::Protocol(format!(
+                                "SwapNetworkAndOpen: expected Swap or Done, got {other:?}"
+                            )))
+                        }
+                    }
+                }
+                chan.send(&Message::Open(column))?;
             }
             Message::Done => return Ok(()),
             other => {
@@ -545,6 +650,142 @@ impl<S: Read + Write> Coordinator<S> {
         Ok(matches)
     }
 
+    /// Run the **oblivious shuffle** over a `scale`-row secret-shared column
+    /// (sq-bdbv). The coordinator (playing the dealer, as the in-process
+    /// [`crate::oblivious::shuffle`] does) shares the `scale` row values, samples a
+    /// fresh uniformly-random secret permutation, routes it through the AS-Waksman
+    /// [`WaksmanNetwork`](crate::oblivious::WaksmanNetwork) to obtain the per-switch
+    /// control bits, then drives the network over the wire one switch at a time —
+    /// the multi-round per-switch exchange the bead asks for. Returns the opened
+    /// shuffled column (the reconstructed row values, in their permuted order) so
+    /// the caller can assert it is a permutation of the input multiset. The number
+    /// of switch rounds driven is reported via [`Coordinator`]'s caller (see
+    /// [`run_cell_networked`]).
+    ///
+    /// `values` are the cleartext row values the dealer shares (the in-process
+    /// `check_shuffle` uses `i*7+1`; the network runner passes the same). The
+    /// permutation never leaves the coordinator's routing layer — only the
+    /// per-switch boolean (already part of a data-independent topology) crosses the
+    /// wire, exactly as the in-process simulation's local swap models.
+    pub fn shuffle(
+        &mut self,
+        dealer: &mut ShamirDealer,
+        values: &[u64],
+    ) -> Result<(Vec<u64>, u64), MpcError> {
+        if values.is_empty() {
+            return Err(MpcError::Protocol("shuffle: no rows (empty column)".into()));
+        }
+        let n_rows = values.len();
+        let net = crate::oblivious::WaksmanNetwork::new(n_rows);
+        // Sample the fresh secret permutation + route it to per-switch control bits.
+        // Same unbiased sampler the in-process `shuffle` uses (no second RNG path).
+        let perm = crate::oblivious::sample_random_permutation(dealer, n_rows)?;
+        let bits = net.route(&perm)?;
+        let gates: Vec<(usize, usize)> = net.switches().iter().map(|s| (s.a, s.b)).collect();
+        let opened = self.run_swap_network(dealer, values, &gates, &bits)?;
+        // Reconstruct each row at degree t (a swap is local relabeling — degree t
+        // preserved, so the open degree is the deal degree).
+        let t = self.backend.threshold();
+        let result = reconstruct_rows(&opened, t)?;
+        Ok((result, gates.len() as u64))
+    }
+
+    /// Run the **oblivious sort** (disclosed-key ORDER BY path) over a `scale`-row
+    /// secret-shared column (sq-bdbv). The coordinator shares the `scale` row
+    /// values, builds the Batcher odd-even-mergesort
+    /// [`SortingNetwork`](crate::oblivious::SortingNetwork) (a data-independent
+    /// compare-exchange sequence), decides each compare-exchange against the
+    /// **disclosed** sort keys (the sound shippable regime — see
+    /// [`crate::oblivious::sort_with_keys`]; the secret VALUES stay shared, only the
+    /// public keys drive the comparisons), and drives one compare-exchange per round
+    /// over the wire. Returns the opened sorted column (ascending) + the round
+    /// count. Mirrors the in-process `bench::check_sort`, but over the transport.
+    ///
+    /// The comparator is over PUBLIC keys (here the keys equal the values, as the
+    /// in-process gate does), so no secure comparator is needed; the access PATTERN
+    /// over the sharings is still the fixed network (the obliviousness substrate).
+    pub fn sort(
+        &mut self,
+        dealer: &mut ShamirDealer,
+        values: &[u64],
+    ) -> Result<(Vec<u64>, u64), MpcError> {
+        if values.is_empty() {
+            return Err(MpcError::Protocol("sort: no rows (empty column)".into()));
+        }
+        let n_rows = values.len();
+        let net = crate::oblivious::SortingNetwork::new(n_rows);
+        // Disclosed keys = the row values (matches the in-process `sort_with_keys`
+        // gate, which swaps on strict greater-than → stable ascending). The keys are
+        // tracked in lockstep with the swap decisions so each gate's bit is the
+        // public comparator outcome AT THAT POINT in the network.
+        let mut keys: Vec<u64> = values.to_vec();
+        let gates: Vec<(usize, usize)> = net.compare_exchanges().to_vec();
+        let mut bits = Vec::with_capacity(gates.len());
+        for &(i, j) in &gates {
+            let swap = keys[i] > keys[j];
+            if swap {
+                keys.swap(i, j);
+            }
+            bits.push(swap);
+        }
+        let opened = self.run_swap_network(dealer, values, &gates, &bits)?;
+        let t = self.backend.threshold();
+        let result = reconstruct_rows(&opened, t)?;
+        Ok((result, gates.len() as u64))
+    }
+
+    /// Shared driver for the oblivious shuffle / sort network tier (sq-bdbv): deal
+    /// each party its share-COLUMN (one share-point per row), drive the gate stream
+    /// (`Step` → `Shares` → `Swap`* → `Done`), and collect each party's opened
+    /// permuted column. Returns `opened[row]` = the `Vec<Share>` for that output row
+    /// (one share per party), ready to reconstruct. The `gates`/`bits` are PUBLIC
+    /// (the data-independent topology + the per-gate control bit); the parties apply
+    /// them as local swaps — no field multiplication, degree `t` preserved.
+    fn run_swap_network(
+        &mut self,
+        dealer: &mut ShamirDealer,
+        values: &[u64],
+        gates: &[(usize, usize)],
+        bits: &[bool],
+    ) -> Result<Vec<Vec<Share>>, MpcError> {
+        if gates.len() != bits.len() {
+            return Err(MpcError::Protocol(format!(
+                "run_swap_network: {} gates != {} control bits",
+                gates.len(),
+                bits.len()
+            )));
+        }
+        let n_rows = values.len();
+        // Share each row value → a full sharing; party p gets the point at index p.
+        let sharings: Vec<Vec<Share>> = values.iter().map(|&v| dealer.share(Fp::new(v))).collect();
+        // Deal: Step opcode, then this party's column of one share-point per row.
+        for (p, chan) in self.channels.iter_mut().enumerate() {
+            chan.send(&Message::Step(StepCode::SwapNetworkAndOpen))?;
+            let column: Vec<Share> = sharings.iter().map(|s| s[p]).collect();
+            chan.send(&Message::Shares(column))?;
+        }
+        // Drive the gate stream: one `Swap` per network switch / compare-exchange,
+        // to EVERY party, then a `Done` that ends the swap phase. Multi-round: the
+        // round count is the gate count (unlike the single-round aggregate/join).
+        for (&(i, j), &swap) in gates.iter().zip(bits) {
+            for chan in self.channels.iter_mut() {
+                chan.send(&Message::Swap {
+                    a: i as u32,
+                    b: j as u32,
+                    swap,
+                })?;
+            }
+        }
+        for chan in self.channels.iter_mut() {
+            chan.send(&Message::Done)?; // end of swap phase → party opens its column.
+        }
+        // Open: each party returns its whole permuted column (n_rows shares).
+        let opened = self.collect_opens(n_rows)?;
+        // End the cell (the outer Done the party's run loop returns on).
+        self.broadcast_done()?;
+        Ok(opened)
+    }
+
     /// Collect one [`Message::Open`] frame from every party and transpose it into
     /// `count` columns (one per opened value), each a `Vec<Share>` ready to
     /// reconstruct. Errors if any party returns the wrong shape.
@@ -576,6 +817,17 @@ impl<S: Read + Write> Coordinator<S> {
         }
         Ok(())
     }
+}
+
+/// Reconstruct each opened row (one `Vec<Share>` per output row, transposed by
+/// [`Coordinator::collect_opens`]) at degree `t` to its cleartext value. Used by
+/// the oblivious shuffle / sort network drivers (sq-bdbv): a swap is local
+/// relabeling, so the open degree equals the deal degree `t`. [OPUS-4.8]
+fn reconstruct_rows(opened: &[Vec<Share>], t: usize) -> Result<Vec<u64>, MpcError> {
+    opened
+        .iter()
+        .map(|row| shamir::reconstruct_degree(row, t).map(|v| v.value()))
+        .collect()
 }
 
 // =============================================================================
@@ -654,10 +906,29 @@ pub fn run_cell_networked(
             // are independent ⇒ one network round; the batched lower bound).
             (matches, 2u64)
         }
-        QueryClass::ObliviousShuffle | QueryClass::ObliviousSort => return Err(MpcError::not_yet(
-            "oblivious shuffle/sort over the network transport",
-            "sq-tg6b follow-up bead (representative cells aggregate + hidden-join shipped first)",
-        )),
+        QueryClass::ObliviousShuffle => {
+            // Canonical input column (same shape as the in-process `check_shuffle`:
+            // `i*7+1`), shared + obliviously permuted over the wire. The reported
+            // `result` is the multiset-invariant COLUMN SUM: it equals the input
+            // sum iff every row survived the wire exactly once (no row lost,
+            // duplicated, or corrupted), the load-bearing correctness anchor for a
+            // shuffle (which must not reveal — or alter — the multiset). The full
+            // permuted column + permutation-of-input check lives in the in-crate
+            // tests that call `Coordinator::shuffle` directly. [OPUS-4.8] sq-bdbv.
+            let col_values: Vec<u64> = (0..scale as u64).map(|i| i * 7 + 1).collect();
+            let (opened, gates) = coord.shuffle(dealer, &col_values)?;
+            (opened.iter().copied().sum(), gates)
+        }
+        QueryClass::ObliviousSort => {
+            // Canonical reverse-sorted input (same as the in-process `check_sort`:
+            // `scale-i`) so the sort has work to do. The reported `result` is the
+            // multiset-invariant COLUMN SUM (same anchor as the shuffle); the
+            // ascending-order + permutation-of-input check lives in the in-crate
+            // tests that call `Coordinator::sort` directly. [OPUS-4.8] sq-bdbv.
+            let col_values: Vec<u64> = (0..scale as u64).map(|i| scale as u64 - i).collect();
+            let (opened, gates) = coord.sort(dealer, &col_values)?;
+            (opened.iter().copied().sum(), gates)
+        }
     };
     let wall_clock = start.elapsed();
 
@@ -710,6 +981,17 @@ mod tests {
             }]),
             Message::Step(StepCode::SumAndOpen),
             Message::Step(StepCode::MulAndOpen),
+            Message::Step(StepCode::SwapNetworkAndOpen),
+            Message::Swap {
+                a: 0,
+                b: 7,
+                swap: true,
+            },
+            Message::Swap {
+                a: 3,
+                b: 4,
+                swap: false,
+            },
             Message::Done,
         ];
         for m in &msgs {
@@ -812,16 +1094,152 @@ mod tests {
         assert_eq!(cell.result as usize, 3);
     }
 
+    // [OPUS-4.8] sq-bdbv: the oblivious shuffle + sort now run over the SAME
+    // Coordinator/Channel transport, multi-round (one `Swap` per network gate). The
+    // load-bearing anchor is the networked result == in-process result, exactly as
+    // for the aggregate/join.
+
+    /// Helper: spin up `n` party threads over loopback and return a coordinator (the
+    /// in-test stand-in for the process-per-party runner, same as
+    /// `run_cell_networked`). Returns the coordinator + the join handles.
+    fn loopback_coordinator(
+        backend: &ShamirBackend,
+    ) -> (
+        Coordinator<TcpStream>,
+        Vec<std::thread::JoinHandle<Result<(), MpcError>>>,
+    ) {
+        let n = backend.parties();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut handles = Vec::with_capacity(n);
+        for _ in 0..n {
+            handles.push(std::thread::spawn(move || -> Result<(), MpcError> {
+                let stream = TcpStream::connect(addr).unwrap();
+                stream.set_nodelay(true).ok();
+                let mut chan = Channel::new(stream);
+                run_party(&mut chan)
+            }));
+        }
+        let mut channels = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_nodelay(true).ok();
+            channels.push(Channel::new(stream));
+        }
+        let coord = Coordinator::new(channels, backend.clone()).unwrap();
+        (coord, handles)
+    }
+
     #[test]
-    fn oblivious_classes_are_honestly_deferred_on_the_network_tier() {
-        // The brief ships the two representative cells (aggregate + hidden join);
-        // shuffle/sort over the network is a beaded follow-up, and must FAIL
-        // CLOSED (NotYetImplemented), never silently return a fake number.
-        let backend = ShamirBackend::new_seeded(3, 1).unwrap();
+    fn networked_shuffle_preserves_multiset_over_the_wire() {
+        // A networked oblivious shuffle must open to a PERMUTATION of the input
+        // multiset — never lose, duplicate, or corrupt a row across the per-switch
+        // exchange. (The permutation itself is secret; we assert only the multiset
+        // invariant + that the network actually drove > 0 switch rounds.)
+        for &n in &[2usize, 3, 5, 7] {
+            let backend =
+                ShamirBackend::new_seeded(n, 0x5_FF_1E_u64.wrapping_add(n as u64)).unwrap();
+            let values: Vec<u64> = (0..8u64).map(|i| i * 7 + 1).collect();
+            let (mut coord, handles) = loopback_coordinator(&backend);
+            let mut dealer = backend.dealer();
+            let (opened, gates) = coord.shuffle(&mut dealer, &values).unwrap();
+            for h in handles {
+                h.join().unwrap().unwrap();
+            }
+            let mut got = opened.clone();
+            let mut want = values.clone();
+            got.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(got, want, "n={n}: shuffle must preserve the multiset");
+            assert!(gates > 0, "n={n}: shuffle must drive > 0 switch rounds");
+        }
+    }
+
+    #[test]
+    fn networked_sort_orders_ascending_and_preserves_multiset() {
+        // A networked oblivious (disclosed-key) sort must open ASCENDING and be a
+        // permutation of the input multiset.
+        for &n in &[2usize, 3, 5, 7] {
+            let backend = ShamirBackend::new_seeded(n, 0xB47C4E).unwrap();
+            // Reverse-sorted input so the network has real work.
+            let values: Vec<u64> = (0..9u64).map(|i| 9 - i).collect();
+            let (mut coord, handles) = loopback_coordinator(&backend);
+            let mut dealer = backend.dealer();
+            let (opened, gates) = coord.sort(&mut dealer, &values).unwrap();
+            for h in handles {
+                h.join().unwrap().unwrap();
+            }
+            assert!(
+                opened.windows(2).all(|w| w[0] <= w[1]),
+                "n={n}: sort must open ascending, got {opened:?}"
+            );
+            let mut got = opened.clone();
+            let mut want = values.clone();
+            got.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(got, want, "n={n}: sort must preserve the multiset");
+            assert!(
+                gates > 0,
+                "n={n}: sort must drive > 0 compare-exchange rounds"
+            );
+        }
+    }
+
+    #[test]
+    fn networked_shuffle_matches_in_process_multiset() {
+        // THE cross-tier anchor for the shuffle: the networked multiset (column sum
+        // is multiset-invariant) equals the in-process shuffle's multiset on the
+        // SAME canonical input the runner uses (`i*7+1`).
+        use crate::bench::check_shuffle;
+        for &n in &[2usize, 3, 5, 7] {
+            let backend = ShamirBackend::new_seeded(n, 0x511FF1E).unwrap();
+            let mut dealer = backend.dealer();
+            // In-process correctness gate must pass (multiset preserved).
+            assert!(check_shuffle(&mut dealer, backend.threshold(), 8).unwrap());
+            // Networked: the column-sum result equals the canonical input sum.
+            let mut dealer2 = backend.dealer();
+            let cell =
+                run_cell_networked(QueryClass::ObliviousShuffle, &backend, &mut dealer2, &[], 8)
+                    .unwrap();
+            let want: u64 = (0..8u64).map(|i| i * 7 + 1).sum();
+            assert_eq!(cell.result, want, "n={n}: networked shuffle multiset sum");
+            assert!(cell.total_bytes() > 0);
+            assert!(cell.rounds > 1, "shuffle is multi-round (per-switch)");
+        }
+    }
+
+    #[test]
+    fn networked_sort_matches_in_process() {
+        use crate::bench::check_sort;
+        for &n in &[2usize, 3, 5, 7] {
+            let backend = ShamirBackend::new_seeded(n, 0x504C).unwrap();
+            let mut dealer = backend.dealer();
+            assert!(check_sort(&mut dealer, backend.threshold(), 9).unwrap());
+            let mut dealer2 = backend.dealer();
+            let cell =
+                run_cell_networked(QueryClass::ObliviousSort, &backend, &mut dealer2, &[], 9)
+                    .unwrap();
+            let want: u64 = (1..=9u64).sum();
+            assert_eq!(cell.result, want, "n={n}: networked sort multiset sum");
+            assert!(cell.total_bytes() > 0);
+            assert!(
+                cell.rounds > 1,
+                "sort is multi-round (per-compare-exchange)"
+            );
+        }
+    }
+
+    #[test]
+    fn networked_shuffle_rejects_empty_column() {
+        // Empty input must FAIL CLOSED (mirrors the aggregate empty-input guard).
+        let backend = ShamirBackend::new_seeded(3, 0xE3).unwrap();
         let mut dealer = backend.dealer();
-        let err = run_cell_networked(QueryClass::ObliviousShuffle, &backend, &mut dealer, &[], 8)
+        let err = run_cell_networked(QueryClass::ObliviousShuffle, &backend, &mut dealer, &[], 0)
             .unwrap_err();
-        assert!(matches!(err, MpcError::NotYetImplemented { .. }));
+        match err {
+            MpcError::Protocol(msg) => assert!(msg.contains("no rows"), "got: {msg}"),
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
     }
 
     // [OPUS-4.8] PR #96: an empty aggregate input must FAIL CLOSED on the network

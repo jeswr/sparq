@@ -23,6 +23,15 @@
 //                --query aggregate --parties 3
 //   cargo run    -p sparq-mpc --features insecure-test-rng --example mpc_net_bench -- \
 //                --query join --parties 5 --scale 4 --json
+//   cargo run    -p sparq-mpc --features insecure-test-rng --example mpc_net_bench -- \
+//                --query shuffle --parties 5 --scale 8         # [OPUS-4.8] sq-bdbv
+//   cargo run    -p sparq-mpc --features insecure-test-rng --example mpc_net_bench -- \
+//                --query sort --parties 5 --scale 8 --json     # [OPUS-4.8] sq-bdbv
+//
+// The four cells: `aggregate` + `join` are single-round (deal → local op → open);
+// `shuffle` (AS-Waksman switches) + `sort` (Batcher compare-exchanges) are
+// MULTI-round — one `Swap` per network gate — so their `rounds` count is the
+// network's gate count, the per-switch/per-comparison wall-clock the bead asks for.
 //
 // (Building the example wires the sibling `mpc_party` binary the driver spawns.)
 
@@ -72,8 +81,10 @@ fn main() {
     let query_class = match query.as_str() {
         "aggregate" | "sum" => QueryClass::CumulativeSumAggregate,
         "join" | "hidden-join" => QueryClass::HiddenValueEquiJoin,
+        "shuffle" => QueryClass::ObliviousShuffle,
+        "sort" => QueryClass::ObliviousSort,
         other => {
-            eprintln!("unknown --query '{other}' (use: aggregate | join)");
+            eprintln!("unknown --query '{other}' (use: aggregate | join | shuffle | sort)");
             std::process::exit(2);
         }
     };
@@ -130,10 +141,18 @@ fn run(
             let reference = check_hidden_join(&backend, scale)? as u64;
             (Vec::new(), reference)
         }
-        _ => {
-            return Err("network tier ships aggregate + hidden-join cells; \
-                         oblivious shuffle/sort is a beaded follow-up (sq-tg6b)"
-                .into())
+        QueryClass::ObliviousShuffle => {
+            // The reference is the multiset-invariant column SUM of the canonical
+            // `i*7+1` input (the in-process `check_shuffle` correctness gate asserts
+            // the SAME multiset is preserved). [OPUS-4.8] sq-bdbv.
+            let reference: u64 = (0..scale as u64).map(|i| i * 7 + 1).sum();
+            (Vec::new(), reference)
+        }
+        QueryClass::ObliviousSort => {
+            // Reference = multiset-invariant column sum of the canonical reverse-
+            // sorted `scale-i` input. [OPUS-4.8] sq-bdbv.
+            let reference: u64 = (0..scale as u64).map(|i| scale as u64 - i).sum();
+            (Vec::new(), reference)
         }
     };
 
@@ -171,7 +190,18 @@ fn run(
     let (result, rounds) = match query_class {
         QueryClass::CumulativeSumAggregate => (coord.aggregate(&mut dealer, &values)?, 2u64),
         QueryClass::HiddenValueEquiJoin => (coord.hidden_join(&mut dealer, scale)?, 2u64),
-        _ => unreachable!("guarded above"),
+        QueryClass::ObliviousShuffle => {
+            // Same canonical input as the in-process reference; report the multiset-
+            // invariant column sum + the per-switch round count. [OPUS-4.8] sq-bdbv.
+            let col: Vec<u64> = (0..scale as u64).map(|i| i * 7 + 1).collect();
+            let (opened, gates) = coord.shuffle(&mut dealer, &col)?;
+            (opened.iter().copied().sum(), gates)
+        }
+        QueryClass::ObliviousSort => {
+            let col: Vec<u64> = (0..scale as u64).map(|i| scale as u64 - i).collect();
+            let (opened, gates) = coord.sort(&mut dealer, &col)?;
+            (opened.iter().copied().sum(), gates)
+        }
     };
     let wall_clock = start.elapsed();
     let (bytes_sent, bytes_recv) = coord.byte_totals();
