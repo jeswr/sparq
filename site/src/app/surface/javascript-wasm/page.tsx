@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Boxes } from "lucide-react";
 
 import { SurfaceContent } from "@/components/surface-content";
+import { JavascriptWasmDemo } from "@/components/javascript-wasm-demo";
 
 export const metadata: Metadata = {
   title: "JavaScript / WASM",
@@ -34,7 +35,8 @@ export default function JavascriptWasmSurfacePage() {
             <code className="font-mono">Store</code>, loads Turtle, and runs your
             SPARQL — all in the tab. A thin raw <code className="font-mono">Store</code>{" "}
             class is available if you want SPARQL-JSON strings with no JS-side term
-            materialisation.
+            materialisation. The panels below call the API directly against one seeded
+            store, in your tab.
           </p>
         </>
       }
@@ -45,19 +47,19 @@ export default function JavascriptWasmSurfacePage() {
         },
         {
           title: "Streaming cursors",
-          body: "Iterate large SELECT results without materialising the whole table.",
+          body: "Iterate large SELECT results in batches without materialising the whole table.",
         },
         {
           title: "count() without materialising",
-          body: "Get a result count without building every binding.",
+          body: "Get a solution count, read from the index, without building every binding.",
         },
         {
           title: "RDF/JS match() / countQuads()",
-          body: "The standard Source interface for pattern matching over the store.",
+          body: "The standard Source interface for triple-pattern matching over the store.",
         },
         {
           title: "applyDelta / SPARQL Update",
-          body: "Apply quad deltas or SPARQL Update to mutate the store.",
+          body: "Apply quad-level deltas or SPARQL Update to mutate the store in place.",
         },
         {
           title: "Raw Store class",
@@ -71,12 +73,22 @@ export default function JavascriptWasmSurfacePage() {
             live demo on this site calls this API. In Node it loads the same wasm
             binary; in the browser it streams it on first use.
           </p>
+          <p>
+            The demo below seeds a six-person Turtle graph, then exercises{" "}
+            <code className="font-mono">queryCursor()</code>,{" "}
+            <code className="font-mono">match()</code>/
+            <code className="font-mono">countQuads()</code>,{" "}
+            <code className="font-mono">count()</code> and{" "}
+            <code className="font-mono">applyDelta()</code> against it — all in your tab.
+          </p>
         </>
       }
       caveat={
         <>
           <p>
-            CONSTRUCT / DESCRIBE are on the wrapper via{" "}
+            The <code className="font-mono">SparqStore</code> wrapper&apos;s{" "}
+            <code className="font-mono">query()</code> covers SELECT/ASK; CONSTRUCT /
+            DESCRIBE are on the wrapper via{" "}
             <code className="font-mono">queryQuads()</code> (RDF/JS quads),{" "}
             <code className="font-mono">queryQuadsString()</code> (N-Triples), and{" "}
             <code className="font-mono">queryQuadsStream()</code>; drop to the raw{" "}
@@ -95,6 +107,8 @@ export default function JavascriptWasmSurfacePage() {
           external: true,
         },
       ]}
-    />
+    >
+      <JavascriptWasmDemo />
+    </SurfaceContent>
   );
 }

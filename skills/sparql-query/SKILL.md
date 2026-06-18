@@ -336,7 +336,10 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   cloud-metadata IP) / unique-local / unspecified address is refused (checked on the *resolved* IP,
   so DNS rebinding can't bypass it). To federate to a trusted internal endpoint, allowlist its host
   for the scope: `with_service_egress_allow([host.to_string()], || query(&g, q))`. Public endpoints
-  need no opt-in.
+  need no opt-in. Every egress-refusal error string carries the stable
+  `sparq_engine::SERVICE_EGRESS_REFUSED_MARKER` substring (`sq-iu0c`), so a network-exposed host can
+  `contains()`-classify a blocked `SERVICE` as an authorization-policy refusal (e.g. HTTP `403`)
+  rather than a server fault — `sparq-server` does exactly this.
 - **`SERVICE` bind-join (`VALUES` pushdown)** — when a `SERVICE` sub-query is the right side of a
   join (or `OPTIONAL`) whose join variables are already bound by the left side, sparq pushes a
   *block* of those bindings into the remote query as a `VALUES` clause (the brTPF/FedX "bound join")

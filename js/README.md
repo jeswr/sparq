@@ -45,6 +45,33 @@ npm run build   # wasm-pack build ../crates/sparq-wasm (--features shacl) + tsc
 npm test        # node --test against the built dist/
 ```
 
+### Pinning a git build (before the npm release)
+
+Until `@jeswr/sparq` is published to npm under its settled name, depend on it by
+**pinning a git build**. The package's `prepare` script compiles the wasm engine
++ TypeScript on install, so a git pin yields a working binding (the registry
+tarball ships those prebuilt). Add to the consumer's `package.json`:
+
+```jsonc
+"dependencies": {
+  // pin an immutable commit; `directory: "js"` is read from this package.json
+  "@jeswr/sparq": "github:jeswr/sparq#<commit-sha>"
+}
+```
+
+A git-pinned install needs the Rust → wasm toolchain on the build machine
+(`rustup target add wasm32-unknown-unknown` + `cargo install wasm-pack`); without
+it `prepare` fails loudly with the install command rather than silently shipping
+an engine-less binding. After install, verify the engine actually landed:
+
+```sh
+node -e "import('@jeswr/sparq').then(m=>m.SparqStore.fromString('<a> <b> <c> .','ntriples')).then(s=>{s.free?.();console.log('ok')})"
+```
+
+Maintainers run the publish guardrail this repo gates on — `npm run
+check:package` — which proves `prepare` is wired, the `files` allowlist is
+intact, and the packed tarball actually ships `dist/` + `wasm/*_bg.wasm`.
+
 The default build (and the published bundle) ships with `--features shacl` so
 `SparqStore.validate` works out of the box. SHACL is not free in the wasm
 binary — it pulls in the SHACL engine + `regex` + the SPARQL query path for

@@ -40,8 +40,10 @@
     "build": "npm run build:wasm && npm run build:ts",
     "test": "node --test \"test/*.test.mjs\"",
     "bench": "node bench/vs-oxigraph.mjs",
+    "check:package": "node guardrails/check-package.mjs",
     "prepack:skills": "rm -rf skills AGENTS.md && cp -R ../skills skills && cp ../AGENTS.md AGENTS.md",
-    "prepack": "npm run build && npm run prepack:skills"
+    "prepack": "npm run build && npm run prepack:skills",
+    "prepare": "node guardrails/prepare-build.mjs"
   },
   "keywords": [
     "rdf",

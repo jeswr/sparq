@@ -1,0 +1,276 @@
+// [OPUS-4.8] sq-py8h.4 — tests for hidden-key endpoint DISTINCT.
+use super::*;
+use crate::shamir::ShamirBackend;
+use std::collections::BTreeSet;
+
+fn iri(s: &str) -> Term {
+    Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!("http://ex/{s}")))
+}
+
+fn pair(a_key: u64, b_key: u64, a: &str, b: &str) -> SecretEndpointPair {
+    SecretEndpointPair {
+        a_key: Fp::new(a_key),
+        b_key: Fp::new(b_key),
+        a_term: iri(a),
+        b_term: iri(b),
+    }
+}
+
+/// The clear-text DISTINCT oracle: the set of distinct `(a_term, b_term)` pairs
+/// keyed by the SECRET `(a_key, b_key)` (the dedup is over the secret keys, not the
+/// terms — though in a well-formed input each secret key maps to one term).
+fn clear_distinct(pairs: &[SecretEndpointPair]) -> BTreeSet<(u64, u64)> {
+    pairs
+        .iter()
+        .map(|p| (p.a_key.value(), p.b_key.value()))
+        .collect()
+}
+
+/// The DISTINCT result's surviving disclosed term pairs as a sorted set of strings.
+fn result_set(part: &PartialResult) -> BTreeSet<(String, String)> {
+    part.rows
+        .iter()
+        .map(|r| {
+            let a = format!("{:?}", r[0]);
+            let b = format!("{:?}", r[1]);
+            (a, b)
+        })
+        .collect()
+}
+
+#[test]
+fn distinct_collapses_duplicate_secret_pairs() {
+    let backend = ShamirBackend::new_seeded(3, 99).unwrap();
+    // (1,2) appears 3×, (3,4) appears 2×, (5,6) once → 3 distinct.
+    let pairs = vec![
+        pair(1, 2, "a", "b"),
+        pair(3, 4, "c", "d"),
+        pair(1, 2, "a", "b"),
+        pair(5, 6, "e", "f"),
+        pair(1, 2, "a", "b"),
+        pair(3, 4, "c", "d"),
+    ];
+    let bound = pairs.len();
+    let out = distinct_hidden_pairs(&backend, &pairs, bound).unwrap();
+
+    // The result is exactly the 3 distinct pairs (each surviving once).
+    assert_eq!(
+        out.rows.len(),
+        3,
+        "duplicates must collapse to distinct set"
+    );
+    let got = result_set(&out);
+    let expected: BTreeSet<(String, String)> = [
+        (
+            format!("{:?}", Some(iri("a"))),
+            format!("{:?}", Some(iri("b"))),
+        ),
+        (
+            format!("{:?}", Some(iri("c"))),
+            format!("{:?}", Some(iri("d"))),
+        ),
+        (
+            format!("{:?}", Some(iri("e"))),
+            format!("{:?}", Some(iri("f"))),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn differential_against_cleartext_distinct_many_shapes() {
+    // Drive a range of multiplicities / orderings and compare cardinalities to the
+    // clear-text DISTINCT oracle.
+    let shapes: Vec<Vec<(u64, u64)>> = vec![
+        vec![(1, 1)],
+        vec![(1, 1), (1, 1)],
+        vec![(1, 2), (2, 1)], // (1,2) != (2,1): order matters in the composite key
+        vec![(1, 2), (2, 1), (1, 2), (2, 1), (3, 3)],
+        vec![
+            (7, 7),
+            (7, 8),
+            (8, 7),
+            (7, 7),
+            (8, 7),
+            (9, 9),
+            (9, 9),
+            (9, 9),
+        ],
+        vec![(5, 5), (4, 4), (3, 3), (2, 2), (1, 1)], // reverse-sorted, all distinct
+        vec![(2, 2), (2, 2), (2, 2), (2, 2)],         // all identical → 1
+    ];
+    for (s, shape) in shapes.iter().enumerate() {
+        let backend = ShamirBackend::new_seeded(3, 1000 + s as u64).unwrap();
+        let pairs: Vec<SecretEndpointPair> = shape
+            .iter()
+            .map(|&(a, b)| pair(a, b, &format!("a{a}"), &format!("b{b}")))
+            .collect();
+        let bound = pairs.len();
+        let out = distinct_hidden_pairs(&backend, &pairs, bound).unwrap();
+        let expected = clear_distinct(&pairs);
+        assert_eq!(
+            out.rows.len(),
+            expected.len(),
+            "shape {s} {shape:?}: distinct count must match clear-text oracle"
+        );
+        // Every surviving term pair must correspond to a distinct secret key (no
+        // spurious or dropped pair). Map terms back via the (well-formed) key→term.
+        let got = result_set(&out);
+        let want: BTreeSet<(String, String)> = expected
+            .iter()
+            .map(|&(a, b)| {
+                (
+                    format!("{:?}", Some(iri(&format!("a{a}")))),
+                    format!("{:?}", Some(iri(&format!("b{b}")))),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got, want,
+            "shape {s}: surviving pairs must match the oracle"
+        );
+    }
+}
+
+#[test]
+fn padding_reveals_exactly_bound_slots() {
+    let backend = ShamirBackend::new_seeded(3, 7).unwrap();
+    let pairs = vec![
+        pair(1, 2, "a", "b"),
+        pair(1, 2, "a", "b"),
+        pair(3, 4, "c", "d"),
+    ];
+    let bound = 8; // padded well above |pairs|
+    let (slots, cost) = distinct_hidden_pairs_slots(&backend, &pairs, bound).unwrap();
+    assert_eq!(
+        slots.len(),
+        bound,
+        "exactly B slots are revealed (L1 bound)"
+    );
+    let real = slots
+        .iter()
+        .filter(|s| matches!(s, OutputSlot::Row(_)))
+        .count();
+    assert_eq!(real, 2, "2 distinct pairs survive; the rest are dummies");
+    assert_eq!(cost.rows, 3);
+    assert_eq!(cost.output_bound, bound);
+    // The sort over 3 items pays >0 compare-exchanges; the adjacent scan is N−1.
+    assert!(cost.sort_compare_exchanges >= 1);
+    assert_eq!(cost.adjacent_equalities, 2);
+}
+
+#[test]
+fn empty_and_singleton() {
+    let backend = ShamirBackend::new_seeded(3, 3).unwrap();
+    // Empty input → empty distinct set, B may be 0.
+    let out = distinct_hidden_pairs(&backend, &[], 0).unwrap();
+    assert!(out.rows.is_empty());
+    // Singleton → itself.
+    let one = vec![pair(42, 43, "x", "y")];
+    let out = distinct_hidden_pairs(&backend, &one, 1).unwrap();
+    assert_eq!(out.rows.len(), 1);
+}
+
+#[test]
+fn bound_below_row_count_fails_closed() {
+    let backend = ShamirBackend::new_seeded(3, 5).unwrap();
+    let pairs = vec![pair(1, 1, "a", "a"), pair(2, 2, "b", "b")];
+    let err = distinct_hidden_pairs(&backend, &pairs, 1).unwrap_err();
+    match err {
+        MpcError::Protocol(m) => assert!(m.contains("truncate"), "got: {m}"),
+        other => panic!("expected Protocol truncate error, got {other:?}"),
+    }
+}
+
+#[test]
+fn out_of_range_key_fails_closed() {
+    let backend = ShamirBackend::new_seeded(3, 5).unwrap();
+    let pairs = vec![SecretEndpointPair {
+        a_key: Fp::new(COMPARE_MAX_EXCLUSIVE), // exactly the exclusive bound → out of range
+        b_key: Fp::new(1),
+        a_term: iri("a"),
+        b_term: iri("b"),
+    }];
+    let err = distinct_hidden_pairs(&backend, &pairs, 1).unwrap_err();
+    match err {
+        MpcError::Protocol(m) => assert!(m.contains("COMPARE_BITS"), "got: {m}"),
+        other => panic!("expected Protocol range error, got {other:?}"),
+    }
+}
+
+#[test]
+fn too_few_parties_fails_closed() {
+    // n = 3, t = 2 → 3 < 2t+1 = 5: the degree reduction has no headroom. The public
+    // constructors can never build this (they pin t = ⌊(n−1)/2⌋), so use the
+    // test-only unchecked-threshold escape hatch to hit the fail-closed guard.
+    let backend = ShamirBackend::with_unchecked_threshold(3, 2);
+    let pairs = vec![pair(1, 1, "a", "a")];
+    let err = distinct_hidden_pairs(&backend, &pairs, 1).unwrap_err();
+    match err {
+        MpcError::Protocol(m) => assert!(m.contains("2t+1"), "got: {m}"),
+        other => panic!("expected Protocol party-count error, got {other:?}"),
+    }
+}
+
+#[test]
+fn too_many_rows_fails_closed() {
+    let backend = ShamirBackend::new_seeded(3, 5).unwrap();
+    let pairs: Vec<SecretEndpointPair> = (0..(MAX_DISTINCT_ROWS + 1) as u64)
+        .map(|i| pair(i % 100, i % 50, "a", "b"))
+        .collect();
+    let err = distinct_hidden_pairs(&backend, &pairs, pairs.len()).unwrap_err();
+    match err {
+        MpcError::Protocol(m) => assert!(m.contains("MAX_DISTINCT_ROWS"), "got: {m}"),
+        other => panic!("expected Protocol cap error, got {other:?}"),
+    }
+}
+
+/// The sort's compare-exchange ACCESS PATTERN is a function of N only (the
+/// obliviousness substrate): two inputs of the same length pay the same gate count
+/// regardless of their secret key values / ordering.
+#[test]
+fn sort_access_pattern_is_data_independent() {
+    let backend = ShamirBackend::new_seeded(3, 11).unwrap();
+    let sorted = vec![
+        pair(1, 1, "a", "a"),
+        pair(2, 2, "b", "b"),
+        pair(3, 3, "c", "c"),
+    ];
+    let reversed = vec![
+        pair(3, 3, "c", "c"),
+        pair(2, 2, "b", "b"),
+        pair(1, 1, "a", "a"),
+    ];
+    let dups = vec![
+        pair(7, 7, "z", "z"),
+        pair(7, 7, "z", "z"),
+        pair(7, 7, "z", "z"),
+    ];
+    let (_s1, c1) = distinct_hidden_pairs_slots(&backend, &sorted, 3).unwrap();
+    let (_s2, c2) = distinct_hidden_pairs_slots(&backend, &reversed, 3).unwrap();
+    let (_s3, c3) = distinct_hidden_pairs_slots(&backend, &dups, 3).unwrap();
+    assert_eq!(c1.sort_compare_exchanges, c2.sort_compare_exchanges);
+    assert_eq!(c1.sort_compare_exchanges, c3.sort_compare_exchanges);
+    assert_eq!(c1.adjacent_equalities, c2.adjacent_equalities);
+}
+
+/// The conditional-swap actually sorts: after the sort the keep-bits collapse
+/// duplicates that were NOT adjacent in the input (the sort must bring equal keys
+/// together for the adjacent scan to see them).
+#[test]
+fn non_adjacent_duplicates_collapse() {
+    let backend = ShamirBackend::new_seeded(3, 21).unwrap();
+    // (1,1) and (1,1) are separated by other pairs; only a correct sort makes them
+    // adjacent so the adjacent-equality scan dedups them.
+    let pairs = vec![
+        pair(1, 1, "a", "a"),
+        pair(9, 9, "i", "i"),
+        pair(5, 5, "e", "e"),
+        pair(1, 1, "a", "a"),
+        pair(9, 9, "i", "i"),
+    ];
+    let out = distinct_hidden_pairs(&backend, &pairs, pairs.len()).unwrap();
+    assert_eq!(out.rows.len(), 3, "(1,1),(5,5),(9,9) distinct");
+}

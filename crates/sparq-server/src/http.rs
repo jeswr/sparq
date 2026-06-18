@@ -3955,6 +3955,17 @@ fn engine_error_response(e: &str, config: &ServerConfig, apply_max_results: bool
             &format!("result exceeds the server's working-set byte limit ({max} bytes, --max-query-bytes (memory cap)); narrow the query (e.g. project fewer variables, add LIMIT) or raise the limit"),
         );
     }
+    // [OPUS-4.8] (sq-iu0c) A SERVICE to a host the egress allowlist / default-deny SSRF
+    // policy blocked is a POLICY decision, not a server fault — surface it as an honest 403
+    // (Forbidden), distinct from the generic 500 below, so clients and alerting can tell a
+    // refused federation target apart from a real execution failure. The engine marks every
+    // such refusal with `SERVICE_EGRESS_REFUSED_MARKER`, which survives the transport-error
+    // wrapping. Gated on the `service` feature: with it off, no SERVICE clause can run, so
+    // the marker can never appear.
+    #[cfg(feature = "service")]
+    if e.contains(sparq_engine::SERVICE_EGRESS_REFUSED_MARKER) {
+        return forbidden_egress(e);
+    }
     execution_error(e)
 }
 
@@ -5190,6 +5201,20 @@ fn sanitized_error(status: StatusCode, class: &str, safe_msg: &str, detail: &str
     json_error(status, safe_msg)
 }
 
+/// [OPUS-4.8] (sq-iu0c) A SERVICE egress refusal → HTTP 403 (Forbidden). The engine `msg`
+/// names the refused host (an info-leak / SSRF-probe oracle), so it is SANITIZED: the client
+/// gets only a stable, generic policy-refusal class message; the host detail goes to the
+/// server log via [`sanitized_error`], the same posture as [`execution_error`].
+#[cfg(feature = "service")]
+fn forbidden_egress(msg: &str) -> Response {
+    sanitized_error(
+        StatusCode::FORBIDDEN,
+        "service-egress-refused",
+        "SERVICE federation refused: the requested endpoint is not permitted by the server's egress allowlist",
+        msg,
+    )
+}
+
 fn execution_error(msg: &str) -> Response {
     // Engine error strings can embed term text drawn from the loaded graph — withhold them
     // from the client; the operator sees the full message in the server log.
@@ -6028,5 +6053,58 @@ mod durable_degrade_tests {
         let cfg = ServerConfig::default();
         let resp = update_rejection_response("some parse error", &cfg);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+/// [OPUS-4.8] (sq-iu0c) The HTTP status CONTRACT for a SERVICE egress refusal: a blocked
+/// SERVICE (host not on the allowlist / default-deny SSRF policy) is an authorization
+/// POLICY decision, not a server fault — it maps to HTTP 403 (Forbidden), NOT the 500 the
+/// generic execution-error path would give. The host-naming engine detail is still
+/// withheld from the client body (sanitized to the server log).
+#[cfg(all(test, feature = "service"))]
+mod egress_refusal_status_tests {
+    use super::{engine_error_response, ServerConfig};
+    use axum::http::StatusCode;
+    use sparq_engine::SERVICE_EGRESS_REFUSED_MARKER;
+
+    #[tokio::test]
+    async fn blocked_service_maps_to_403_and_hides_host_detail() {
+        let cfg = ServerConfig::default();
+        // Mirror the engine's full refusal string, which embeds the marker AND the refused
+        // host — exactly what the engine surfaces through the transport-error wrapping.
+        let engine_err = format!(
+            "SERVICE: request to http://internal.example/ failed: {SERVICE_EGRESS_REFUSED_MARKER}: \
+             host \"internal.example\" is not on the SERVICE allowlist (strict allowlist-only policy)"
+        );
+        let resp = engine_error_response(&engine_err, &cfg, true);
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a blocked SERVICE is a policy refusal (403), not a server fault (500)",
+        );
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        // The host (an info-leak / SSRF-probe oracle) must NOT reach the client.
+        assert!(
+            !body.contains("internal.example"),
+            "the refused host must NOT reach the client body: {body:?}",
+        );
+        // The client still learns it was a policy refusal it can act on.
+        assert!(
+            body.to_lowercase().contains("service") && body.to_lowercase().contains("refus"),
+            "the client must get a stable egress-refusal class message: {body:?}",
+        );
+    }
+
+    #[test]
+    fn unrelated_execution_error_still_500() {
+        // A genuine execution error (not an egress refusal) keeps its 500 — the 403 sniff
+        // must not hijack the generic execution-error path.
+        let cfg = ServerConfig::default();
+        let resp = engine_error_response("some evaluation blew up", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

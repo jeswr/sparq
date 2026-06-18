@@ -176,6 +176,14 @@ pub mod bounded_path;
 // `oblivious_set_output` (padded+shuffled to B). Intermediate node-sets are never
 // reconstructed. Honest-majority / semi-honest only. See the module docs.
 pub mod field;
+// [OPUS-4.8] sq-py8h.4: hidden-key endpoint DISTINCT — collapse duplicate SECRET
+// endpoint pairs (both endpoints private keys) via the secret-control oblivious sort
+// (SortingNetwork compare-exchange decided by a never-opened secure comparator +
+// arithmetic conditional swap) + adjacent-equality scan (secret keep-bit) +
+// oblivious compaction (oblivious_set_output). The gated sub-piece of the bounded
+// property-path operator; needs the now-landed secure comparator (sq-rrz4) + degree
+// reduction (sq-dvuc). Honest-majority / semi-honest only. See the module docs.
+pub mod hidden_distinct;
 pub mod hidden_path;
 pub mod holder;
 pub mod join;
@@ -289,6 +297,13 @@ pub use hidden_path::{
     eval_bounded_path_hidden, eval_bounded_path_hidden_slots, eval_exact_k_chain_hidden,
     eval_exact_k_chain_hidden_slots, HiddenBoundedPath, HiddenEdge, HiddenEdges, HiddenNode,
     PredicatedEdge, PredicatedEdges, MAX_CHAIN_TUPLES,
+};
+// [OPUS-4.8] sq-py8h.4: the hidden-key endpoint DISTINCT surface — collapse
+// duplicate SECRET endpoint pairs (oblivious sort by a never-opened secure
+// comparator + adjacent-equality keep-bit + oblivious compaction).
+pub use hidden_distinct::{
+    distinct_hidden_pairs, distinct_hidden_pairs_oblivious, distinct_hidden_pairs_slots,
+    DistinctCost, SecretEndpointPair, MAX_DISTINCT_ROWS,
 };
 // [OPUS-4.8] sq-py8h.5: the planner guard + cost-model surface for the hidden
 // bounded property-path operator (reject statically-large unrolls, refuse a hidden

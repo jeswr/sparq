@@ -19,6 +19,12 @@ mod service;
 // (threat-model B4 / sq-2v6f). [OPUS-4.8]
 #[cfg(feature = "service")]
 pub use service::with_service_egress_allow;
+// [OPUS-4.8] (sq-iu0c) Stable marker substring in every SERVICE egress-refusal engine
+// error, so a network-exposed host (sparq-server) can classify a blocked SERVICE as a
+// policy refusal (403-style) rather than a server fault (500), mirroring the existing
+// `"query budget exceeded (timeout)"` → 503 pattern.
+#[cfg(feature = "service")]
+pub use service::SERVICE_EGRESS_REFUSED_MARKER;
 // Strict allowlist-only egress policy: only listed hosts reachable (even public ones
 // off the list are refused). The network-exposed server wires this to --service-allow
 // so federation is restricted to operator-configured endpoints. [OPUS-4.8] (sq-4w18)
