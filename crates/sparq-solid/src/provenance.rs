@@ -91,3 +91,91 @@ impl AccessProvenance {
             .map(|(r, p)| (r.as_str(), p.creator.as_deref(), p.owner.as_deref()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // [OPUS-4.8] sq-2xdr — behaviour tests for the trusted creator/owner channel. The
+    // `iter()` accessor is `pub(crate)` (consumed by the loader), so it can only be
+    // exercised from an in-crate test, not an integration test.
+    use super::*;
+
+    #[test]
+    fn empty_map_knows_no_creator_or_owner() {
+        // `new()` and `default()` must agree: an empty, fail-closed map.
+        let prov = AccessProvenance::new();
+        assert!(prov.is_empty());
+        assert_eq!(prov.creator("r"), None);
+        assert_eq!(prov.owner("r"), None);
+        assert_eq!(prov.iter().count(), 0);
+    }
+
+    #[test]
+    fn set_creator_and_owner_are_independent_per_resource() {
+        let mut prov = AccessProvenance::new();
+        prov.set_creator("r1", "https://alice.ex/#me");
+        // setting only the creator leaves the owner unknown (fail-closed for OwnerAgent)
+        assert_eq!(prov.creator("r1"), Some("https://alice.ex/#me"));
+        assert_eq!(prov.owner("r1"), None);
+        assert!(!prov.is_empty());
+
+        prov.set_owner("r1", "https://bob.ex/#me");
+        // owner is now set WITHOUT disturbing the creator on the same entry
+        assert_eq!(prov.creator("r1"), Some("https://alice.ex/#me"));
+        assert_eq!(prov.owner("r1"), Some("https://bob.ex/#me"));
+
+        // a second resource carrying only an owner is fully independent
+        prov.set_owner("r2", "https://carol.ex/#me");
+        assert_eq!(prov.creator("r2"), None);
+        assert_eq!(prov.owner("r2"), Some("https://carol.ex/#me"));
+    }
+
+    #[test]
+    fn set_replaces_previous_value() {
+        let mut prov = AccessProvenance::new();
+        prov.set_creator("r1", "https://old.ex/#me");
+        prov.set_creator("r1", "https://new.ex/#me");
+        assert_eq!(prov.creator("r1"), Some("https://new.ex/#me"));
+        prov.set_owner("r1", "https://o1.ex/#me");
+        prov.set_owner("r1", "https://o2.ex/#me");
+        assert_eq!(prov.owner("r1"), Some("https://o2.ex/#me"));
+    }
+
+    #[test]
+    fn iter_yields_every_resource_with_its_optional_facts() {
+        let mut prov = AccessProvenance::new();
+        prov.set_creator("r1", "https://alice.ex/#me");
+        prov.set_owner("r1", "https://alice.ex/#me");
+        prov.set_owner("r2", "https://bob.ex/#me"); // creator unknown
+        prov.set_creator("r3", "https://carol.ex/#me"); // owner unknown
+
+        let mut seen: Vec<(String, Option<String>, Option<String>)> = prov
+            .iter()
+            .map(|(r, c, o)| (r.to_owned(), c.map(str::to_owned), o.map(str::to_owned)))
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                (
+                    "r1".to_owned(),
+                    Some("https://alice.ex/#me".to_owned()),
+                    Some("https://alice.ex/#me".to_owned())
+                ),
+                ("r2".to_owned(), None, Some("https://bob.ex/#me".to_owned())),
+                (
+                    "r3".to_owned(),
+                    Some("https://carol.ex/#me".to_owned()),
+                    None
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn impl_into_string_accepts_owned_keys_and_values() {
+        // the `impl Into<String>` bounds accept owned String keys/values, not just &str.
+        let mut prov = AccessProvenance::new();
+        prov.set_creator(String::from("r1"), String::from("https://alice.ex/#me"));
+        assert_eq!(prov.creator("r1"), Some("https://alice.ex/#me"));
+    }
+}
