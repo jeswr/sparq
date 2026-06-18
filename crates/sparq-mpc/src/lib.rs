@@ -238,6 +238,16 @@ pub mod transport;
 #[cfg(test)]
 mod adversarial_tests;
 
+// [OPUS-4.8] sq-2fms: federation-level OWA / omission negative suite. Test-only.
+// The adversarial-share suite (`adversarial_tests`) pins SHARE-level tampering;
+// this is its FEDERATION-level complement: a dropped holder / truncated partial /
+// omitted row/contributor must not FORGE a valid result (a guarantee that holds
+// today — omission only loses completeness), while honestly PINNING that such an
+// omission is NOT yet cryptographically detectable pre-M4 (no §4.3-step-1
+// signed-count binding). See the module docs.
+#[cfg(test)]
+mod owa_omission_tests;
+
 // [OPUS-4.8] sq-7leq: encode the witness-validation-before-proving TEST
 // OBLIGATION for the collaborative-proof (coZK) path (re-audit §3, bead sq-9hrn).
 // Test-only. A PASSING meta-test pins the current honest fail-closed posture (the
