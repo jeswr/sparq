@@ -368,6 +368,13 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   `PARTITION BY` are inline-deferred (use the programmatic API). The custom-aggregate side DOES ride real SPARQL `GROUP BY` (a declared aggregate
   IRI is part of the SPARQL 1.1 extension grammar). When the feature is off, zero window/aggregate-registry
   code compiles and the default build is byte-identical (no new dependencies). See the recipes above.
+- **Vectorized columnar primitives** are the non-default `vectorized` cargo feature (M4 plan, bead
+  `sq-hvfe`): the `chunk` module's `DataChunk` (a column-major, vector-at-a-time id-level batch),
+  a numeric FILTER comparison kernel (`DataChunk::select_numeric` → a `SelVec`), and a
+  selection/gather kernel (`DataChunk::apply_selection`). This is a **building block**, NOT yet
+  wired into the query evaluator — `query`/`query_json`/etc. are unchanged whether the feature is on
+  or off. When off, zero columnar code compiles and the default native + wasm builds are
+  byte-identical (no new dependencies; no `unsafe`).
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`
   powers MD5/SHA*; `parallel` enables rayon scan/join/sort/aggregate. The **wasm** crate
   (`sparq-wasm`) disables defaults, so on `wasm32-unknown-unknown` REGEX/hash builtins and

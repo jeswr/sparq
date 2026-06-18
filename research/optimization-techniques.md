@@ -22,8 +22,15 @@ From `research/ARCHITECTURE.md` and `research/BENCHMARKS.md`:
   budget, GOO above**; cardinality from block-metadata counts + per-relation
   multiplicities + **characteristic sets** for stars.
 - **Execution:** a **materialising evaluator** — builds `Vec<SmallVec<[Id;4]>>`
-  rows. **No vectorization, no SIMD kernels, no compilation.** Vectorized
-  `DataChunk` execution is the M4 plan (not implemented; bead `sq-hvfe`). <!-- [OPUS-4.8] -->
+  rows. **No SIMD kernels, no compilation, and the query evaluator is still
+  row-at-a-time.** The first building block of the vectorized `DataChunk` M4 path
+  has landed (bead `sq-hvfe`): `sparq-engine`'s opt-in `vectorized` feature ships a
+  column-major `DataChunk` intermediate plus a numeric-FILTER comparison kernel
+  (→ selection vector) and a selection/gather kernel — the vector-at-a-time analogue
+  of the row evaluator's per-row FILTER, with a tested row↔column equivalence
+  contract. It is **NOT yet wired into the evaluator** (`query`/`query_json` are
+  unchanged); the remaining work is the morsel-driven pipeline + vectorized joins
+  (roadmap T1.3). <!-- [OPUS-4.8] -->
 - **Two targets:** native billion-scale (beat QLever) **and** a sub-~1.5 MB-gzip
   WASM browser build (Solid/RDFJS), where the only vector path is `+simd128`
   autovectorization and shipping a JIT is impractical.
