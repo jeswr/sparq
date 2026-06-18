@@ -213,6 +213,10 @@ jobs:
       # pushed image; the OIDC token is what signs the provenance attestation.
       id-token: write
       attestations: write
+      # [OPUS-4.8] sq-p9xq: upload the released image's Trivy SARIF to the
+      # code-scanning dashboard (Security tab) so a vuln in the published artifact
+      # is visible there, not just in the run log.
+      security-events: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
@@ -246,6 +250,49 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Smoke test the image (docker run + /health + ASK query)
         run: scripts/docker-smoke.sh sparq-server:smoke 3030
+      # [OPUS-4.8] sq-p9xq: SCAN BEFORE PUSH. cargo-deny gates the Rust dependency tree, but
+      # the distroless base layer (glibc / libgcc / CA certs) is outside that scope — a CVE
+      # disclosed there would ship in the released image unscanned. Trivy scans the exact
+      # `sparq-server:smoke` artifact built above (same bytes that get pushed) for OS-package
+      # AND library vulns, and FAILS the release on a FIXABLE HIGH/CRITICAL so a vulnerable
+      # image never reaches ghcr.io. `container-scan.yml` runs the same scan on PRs/main/weekly
+      # against the Dockerfile; this is the release-gate copy that scans the published bytes.
+      #   exit-code: 1   => fail the step (and the release) on a non-ignored match.
+      #   ignore-unfixed => only FIXABLE vulns gate; a CVE with no upstream fix yet cannot
+      #                     block a release (it is still surfaced in the SARIF pass below).
+      #   trivyignores   => the shared .trivyignore allowlist for triaged/accepted CVEs.
+      - name: Trivy scan released image (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: sparq-server:smoke
+          scan-type: image
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          trivyignores: .trivyignore
+      # Second pass: SARIF for the code-scanning dashboard. exit-code 0 (the gating decision
+      # is the table pass above) and includes unfixed findings so the Security tab shows the
+      # full picture of the released image for triage.
+      - name: Trivy scan released image (SARIF for code-scanning)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: sparq-server:smoke
+          scan-type: image
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          trivyignores: .trivyignore
+      - name: Upload Trivy SARIF to code-scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-release-image
       - name: Build and push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
