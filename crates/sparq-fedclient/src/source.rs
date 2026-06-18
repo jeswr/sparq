@@ -479,7 +479,7 @@ fn endpoint_host(endpoint: &str) -> Option<String> {
 
 /// The production [`Transport`]: a blocking ureq POST (SPARQL Protocol §2.1.2 — `query=`
 /// form-encoded body, `Accept: application/sparql-results+json`) that **closes the
-/// DNS-rebinding TOCTOU re-resolve window** by installing an SSRF [`Resolver`](ureq::Resolver)
+/// DNS-rebinding TOCTOU re-resolve window** by installing an SSRF [`Resolver`](ureq::unversioned::resolver::Resolver)
 /// on the ureq agent itself.
 ///
 /// # Why this exists (bead sq-25xk, follow-up to sq-rsxf)
@@ -551,78 +551,96 @@ impl HttpTransport {
     }
 }
 
-/// ureq [`Resolver`](ureq::Resolver) that enforces the SSRF egress policy on the *resolved*
+/// ureq [`Resolver`](ureq::unversioned::resolver::Resolver) that enforces the SSRF egress policy on the *resolved*
 /// addresses (DNS-rebinding-safe): it resolves the host, drops every [`is_forbidden_ip`]
 /// address (unless the bare host is on the allowlist), and returns only the survivors — so
 /// ureq dials only vetted IPs and there is no resolve-then-re-resolve gap. Mirrors the
 /// engine's `service.rs` `EgressFilterResolver` and this crate's `discovery::EgressFilterResolver`.
 /// [OPUS-4.8] sq-25xk.
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
 struct EgressFilterResolver {
     allow_private: std::sync::Arc<HashSet<String>>,
 }
 
+// [OPUS-4.8] sq-g2xs: ureq-3's `Resolver` takes a parsed `&http::Uri` (+ config + timeout) and
+// returns an `ArrayVec<SocketAddr, 16>` rather than ureq-2's `&str` netloc → `Vec`. The SSRF
+// policy is byte-for-byte the ureq-2 one (default-deny private/internal, allowlist-to-reopen,
+// DNS-rebinding-safe); the shared `crate::ureq_egress` helpers carry the ureq-3 boilerplate so
+// the three sparq-fedclient transports share one implementation. (The engine SERVICE resolver
+// applies equivalent, unit-tested logic via its own inline copy — `sparq-engine` cannot depend on
+// `sparq-fedclient` — so it does not share this module.)
 #[cfg(not(target_arch = "wasm32"))]
-impl ureq::Resolver for EgressFilterResolver {
-    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
-        use std::net::ToSocketAddrs;
-        // `netloc` is `host:port`; the allowlist is keyed by the bare host. rsplit on ':' to
-        // keep IPv6 literals, which arrive bracketed (`[::1]:80`) — then strip the brackets.
-        let host = match netloc.rsplit_once(':') {
-            Some((h, _)) => h,
-            None => netloc,
-        };
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        let allowed = self.allow_private.contains(&host.to_ascii_lowercase());
-        let permitted: Vec<std::net::SocketAddr> = netloc
-            .to_socket_addrs()?
-            .filter(|sa| allowed || !is_forbidden_ip(sa.ip()))
-            .collect();
-        if permitted.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "federation egress refused: {netloc} resolves only to private/internal \
-                     addresses (default-deny SSRF policy; allowlist the host on the EgressGuard)"
-                ),
-            ));
-        }
-        Ok(permitted)
+impl ureq::unversioned::resolver::Resolver for EgressFilterResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let (host_port, host) = crate::ureq_egress::uri_host_port(uri).ok_or_else(|| {
+            crate::ureq_egress::egress_refused(format!(
+                "federation egress refused: request URI {uri} has no host authority to vet"
+            ))
+        })?;
+        let allowed = self.allow_private.contains(&host);
+        crate::ureq_egress::filter_resolved(&host_port, allowed, is_forbidden_ip, || {
+            format!(
+                "federation egress refused: {host_port} resolves only to private/internal \
+                 addresses (default-deny SSRF policy; allowlist the host on the EgressGuard)"
+            )
+        })
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Transport for HttpTransport {
     fn fetch(&self, endpoint: &str, query: &str) -> Result<String, String> {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(self.timeout)
+        // [OPUS-4.8] sq-g2xs: ureq-3 builds an `Agent` from a `Config` + a custom resolver via
+        // `Agent::with_parts`; the resolver carries the default-deny SSRF policy exactly as in
+        // ureq 2 — ureq connects only to the addresses the resolver returns, so the
+        // resolved-and-vetted IP IS the dialled IP (no DNS-rebinding re-resolve window). [sq-25xk]
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
             .user_agent(concat!("sparq-fedclient/", env!("CARGO_PKG_VERSION")))
-            // Default-deny SSRF egress filter, INSIDE ureq's resolver: ureq connects only to
-            // the addresses this resolver returns, so the resolved-and-vetted IP is the IP
-            // dialled — no DNS-rebinding re-resolve window. [OPUS-4.8] sq-25xk.
-            .resolver(EgressFilterResolver {
-                allow_private: std::sync::Arc::clone(&self.allow_private),
-            })
             .build();
+        let agent = ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::new(),
+            EgressFilterResolver {
+                allow_private: std::sync::Arc::clone(&self.allow_private),
+            },
+        );
         // SPARQL Protocol §2.1.2: query via POST with `application/x-www-form-urlencoded`
         // `query=` — the broadly-supported method, not subject to URL-length limits. Same
         // shape as `sparq-engine`'s SERVICE transport so a sub-query travels identically.
         match agent
             .post(endpoint)
-            .set("Accept", "application/sparql-results+json")
-            .send_form(&[("query", query)])
+            .header("Accept", "application/sparql-results+json")
+            .send_form([("query", query)])
         {
-            Ok(r) => r
-                .into_string()
+            // ureq-3 caps `read_to_string` at 10 MiB by default; a federated SELECT result can
+            // exceed that, so raise the limit (a finite cap still bounds memory).
+            Ok(mut r) => r
+                .body_mut()
+                .with_config()
+                .limit(MAX_BODY_BYTES)
+                .read_to_string()
                 .map_err(|e| format!("fedclient: reading response from {endpoint}: {e}")),
-            // ureq surfaces non-2xx as `Error::Status`; treat transport + HTTP errors uniformly.
-            Err(ureq::Error::Status(code, _)) => {
-                Err(format!("fedclient: endpoint {endpoint} returned HTTP {code}"))
-            }
+            // ureq-3 surfaces non-2xx as `Error::StatusCode`; treat transport + HTTP errors uniformly.
+            Err(ureq::Error::StatusCode(code)) => Err(format!(
+                "fedclient: endpoint {endpoint} returned HTTP {code}"
+            )),
             Err(e) => Err(format!("fedclient: request to {endpoint} failed: {e}")),
         }
     }
 }
+
+/// Max bytes read from a federation response body. ureq-3's default `read_to_string` cap is
+/// 10 MiB; a federated SELECT / TPF fragment can legitimately exceed that, so we raise it to a
+/// generous-but-finite bound (memory stays bounded). [OPUS-4.8] sq-g2xs.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_BODY_BYTES: u64 = 1024 * 1024 * 1024;
 
 // ─── The FederatedSource trait (design §4.1) ────────────────────────────────────────
 
@@ -1134,27 +1152,34 @@ impl FragmentTransport for HttpFragmentTransport {
             Some(next) => next.to_string(),
             None => Self::first_page_url(url, pattern, bindings),
         };
-        let agent = ureq::AgentBuilder::new()
-            .timeout(self.timeout)
+        // [OPUS-4.8] sq-g2xs: ureq-3 `Agent::with_parts` with the default-deny SSRF resolver —
+        // ureq dials only the addresses the resolver returns, so the vetted IP IS the dialled IP
+        // (no DNS-rebinding re-resolve window). Same resolver as the SRJ `HttpTransport`.
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
             .user_agent(concat!("sparq-fedclient/", env!("CARGO_PKG_VERSION")))
-            // Default-deny SSRF egress filter INSIDE ureq's resolver: ureq dials only the
-            // addresses this resolver returns, so the vetted IP IS the dialled IP — no DNS-
-            // rebinding re-resolve window. Same resolver as the SRJ `HttpTransport`. [OPUS-4.8].
-            .resolver(EgressFilterResolver {
-                allow_private: std::sync::Arc::clone(&self.allow_private),
-            })
             .build();
+        let agent = ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::new(),
+            EgressFilterResolver {
+                allow_private: std::sync::Arc::clone(&self.allow_private),
+            },
+        );
         let body = match agent
             .get(&request_url)
             // TriG is a Turtle superset; ask for either so a server that serves Turtle (the
             // conventional TPF serialisation) or TriG (named graphs) both parse.
-            .set("Accept", "application/trig, text/turtle")
+            .header("Accept", "application/trig, text/turtle")
             .call()
         {
-            Ok(r) => r
-                .into_string()
+            Ok(mut r) => r
+                .body_mut()
+                .with_config()
+                .limit(MAX_BODY_BYTES)
+                .read_to_string()
                 .map_err(|e| format!("fedclient: reading fragment from {request_url}: {e}"))?,
-            Err(ureq::Error::Status(code, _)) => {
+            Err(ureq::Error::StatusCode(code)) => {
                 return Err(format!(
                     "fedclient: fragment server {request_url} returned HTTP {code}"
                 ))
@@ -2190,10 +2215,33 @@ mod tests {
         }
     }
 
+    /// [OPUS-4.8] sq-g2xs: invoke the ureq-3 `Resolver` for a `host:port` netloc by building the
+    /// `http://<netloc>/` URI the resolver parses, with a default `Config` + no-deadline timeout.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_netloc(
+        r: &EgressFilterResolver,
+        netloc: &str,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        use ureq::unversioned::resolver::Resolver;
+        let uri: ureq::http::Uri = format!("http://{netloc}/").parse().unwrap();
+        let config = ureq::Agent::config_builder().build();
+        // The resolver ignores the timeout; build a no-deadline one.
+        let timeout = ureq::unversioned::transport::NextTimeout {
+            after: ureq::unversioned::transport::time::Duration::NotHappening,
+            reason: ureq::Timeout::Global,
+        };
+        r.resolve(&uri, &config, timeout)
+    }
+
+    /// `true` iff `e` is the egress-refusal `PermissionDenied` io error.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_permission_denied(e: &ureq::Error) -> bool {
+        matches!(e, ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolver_refuses_private_metadata_and_loopback_literals() {
-        use ureq::Resolver;
         // The default-deny resolver must refuse every private/internal IP literal — ureq is
         // never handed a dialable address (so a re-bound DNS answer cannot connect to it).
         for netloc in [
@@ -2206,12 +2254,11 @@ mod tests {
             "[fc00::1]:80",          // IPv6 unique-local (bracketed)
             "[::ffff:127.0.0.1]:80", // v4-mapped loopback can't smuggle through a v6 literal
         ] {
-            match resolver_with(&[]).resolve(netloc) {
+            match resolve_netloc(&resolver_with(&[]), netloc) {
                 Ok(addrs) => panic!("{netloc} should have been refused, got {addrs:?}"),
-                Err(e) => assert_eq!(
-                    e.kind(),
-                    std::io::ErrorKind::PermissionDenied,
-                    "{netloc} must be refused with PermissionDenied"
+                Err(e) => assert!(
+                    is_permission_denied(&e),
+                    "{netloc} must be refused with PermissionDenied, got {e:?}"
                 ),
             }
         }
@@ -2220,10 +2267,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolver_permits_public_literal() {
-        use ureq::Resolver;
         // A public address survives the filter and is handed back to ureq to dial.
-        let addrs = resolver_with(&[])
-            .resolve("8.8.8.8:80")
+        let addrs = resolve_netloc(&resolver_with(&[]), "8.8.8.8:80")
             .expect("a public IP must be permitted by the egress resolver");
         assert!(
             addrs.iter().any(|sa| sa.ip().to_string() == "8.8.8.8"),
@@ -2234,11 +2279,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolver_allowlist_reopens_private_literal() {
-        use ureq::Resolver;
         // An allowlisted private host is permitted even though it resolves privately — the
         // allowlist bridged from the EgressGuard re-opens it at the socket-resolution layer.
-        let addrs = resolver_with(&["10.0.0.5"])
-            .resolve("10.0.0.5:443")
+        let addrs = resolve_netloc(&resolver_with(&["10.0.0.5"]), "10.0.0.5:443")
             .expect("an allowlisted private host must be permitted");
         assert!(addrs.iter().any(|sa| sa.ip().to_string() == "10.0.0.5"));
     }

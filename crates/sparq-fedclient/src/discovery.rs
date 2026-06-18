@@ -493,61 +493,78 @@ impl HttpFetcher {
 /// (unless the bare host is on the allowlist), and returns only survivors — so ureq dials
 /// only vetted IPs. Mirrors the engine's `EgressFilterResolver`.
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
 struct EgressFilterResolver {
     allow_private: std::sync::Arc<std::collections::HashSet<String>>,
 }
 
+// [OPUS-4.8] sq-g2xs: ureq-3's `Resolver` takes a parsed `&http::Uri` (+ config + timeout) and
+// returns an `ArrayVec<SocketAddr, 16>` rather than ureq-2's `&str` netloc → `Vec`. The SSRF
+// policy is byte-for-byte the ureq-2 one; the shared `crate::ureq_egress` helpers carry the
+// ureq-3 boilerplate so the three sparq-fedclient transports share one implementation. (The engine
+// SERVICE resolver applies equivalent, unit-tested logic via its own inline copy — `sparq-engine`
+// cannot depend on `sparq-fedclient` — so it does not share this module.)
 #[cfg(not(target_arch = "wasm32"))]
-impl ureq::Resolver for EgressFilterResolver {
-    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
-        use std::net::ToSocketAddrs;
-        // `netloc` is `host:port`; the allowlist is keyed by the bare host. rsplit on ':' to
-        // keep IPv6 literals, which arrive bracketed (`[::1]:80`) — strip the brackets.
-        let host = match netloc.rsplit_once(':') {
-            Some((h, _)) => h,
-            None => netloc,
-        };
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        let allowed = self.allow_private.contains(&host.to_ascii_lowercase());
-        let permitted: Vec<std::net::SocketAddr> = netloc
-            .to_socket_addrs()?
-            .filter(|sa| allowed || !is_forbidden_ip(sa.ip()))
-            .collect();
-        if permitted.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "discovery egress refused: {netloc} resolves only to private/internal \
-                     addresses (default-deny SSRF policy; allow it with \
-                     HttpFetcher::allow_private_host)"
-                ),
-            ));
-        }
-        Ok(permitted)
+impl ureq::unversioned::resolver::Resolver for EgressFilterResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let (host_port, host) = crate::ureq_egress::uri_host_port(uri).ok_or_else(|| {
+            crate::ureq_egress::egress_refused(format!(
+                "discovery egress refused: request URI {uri} has no host authority to vet"
+            ))
+        })?;
+        let allowed = self.allow_private.contains(&host);
+        crate::ureq_egress::filter_resolved(&host_port, allowed, is_forbidden_ip, || {
+            format!(
+                "discovery egress refused: {host_port} resolves only to private/internal \
+                 addresses (default-deny SSRF policy; allow it with \
+                 HttpFetcher::allow_private_host)"
+            )
+        })
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Fetcher for HttpFetcher {
     fn get(&self, url: &str, accept: &str) -> Result<String, String> {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(self.timeout)
+        // [OPUS-4.8] sq-g2xs: ureq-3 `Agent::with_parts` + the default-deny SSRF resolver — ureq
+        // dials only the addresses the resolver returns (the vetted IP is the dialled IP).
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
             .user_agent(concat!("sparq-fedclient/", env!("CARGO_PKG_VERSION")))
-            .resolver(EgressFilterResolver {
-                allow_private: std::sync::Arc::clone(&self.allow_private),
-            })
             .build();
-        match agent.get(url).set("Accept", accept).call() {
-            Ok(r) => r
-                .into_string()
+        let agent = ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::new(),
+            EgressFilterResolver {
+                allow_private: std::sync::Arc::clone(&self.allow_private),
+            },
+        );
+        match agent.get(url).header("Accept", accept).call() {
+            // ureq-3 caps `read_to_string` at 10 MiB by default; raise it to match the other
+            // transports (a finite cap still bounds memory).
+            Ok(mut r) => r
+                .body_mut()
+                .with_config()
+                .limit(DISCOVERY_MAX_BODY_BYTES)
+                .read_to_string()
                 .map_err(|e| format!("discovery: reading response from {url}: {e}")),
-            Err(ureq::Error::Status(code, _)) => {
+            Err(ureq::Error::StatusCode(code)) => {
                 Err(format!("discovery: {url} returned HTTP {code}"))
             }
             Err(e) => Err(format!("discovery: request to {url} failed: {e}")),
         }
     }
 }
+
+/// Max bytes read from a discovery (VoID/SD) response body. ureq-3's default `read_to_string`
+/// cap is 10 MiB; raised to a generous-but-finite bound (memory stays bounded). [OPUS-4.8] sq-g2xs.
+#[cfg(not(target_arch = "wasm32"))]
+const DISCOVERY_MAX_BODY_BYTES: u64 = 256 * 1024 * 1024;
 
 // ─── Orchestration: discover() ────────────────────────────────────────────────────────
 
@@ -980,91 +997,101 @@ _:c1 <http://rdfs.org/ns/void#entities> "100"^^<http://www.w3.org/2001/XMLSchema
         }
     }
 
+    /// [OPUS-4.8] sq-g2xs: invoke the ureq-3 `Resolver` for a `host:port` netloc by building the
+    /// `http://<netloc>/` URI the resolver parses, with a default `Config` + no-deadline timeout.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_netloc(
+        r: &EgressFilterResolver,
+        netloc: &str,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        use ureq::unversioned::resolver::Resolver;
+        let uri: ureq::http::Uri = format!("http://{netloc}/").parse().unwrap();
+        let config = ureq::Agent::config_builder().build();
+        let timeout = ureq::unversioned::transport::NextTimeout {
+            after: ureq::unversioned::transport::time::Duration::NotHappening,
+            reason: ureq::Timeout::Global,
+        };
+        r.resolve(&uri, &config, timeout)
+    }
+
+    /// `true` iff `e` is the egress-refusal `PermissionDenied` io error.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_permission_denied(e: &ureq::Error) -> bool {
+        matches!(e, ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolve_refuses_private_v4_literal() {
-        use ureq::Resolver;
         // A bare host:port whose ONLY resolved address is private must be refused outright —
         // ureq never sees a dialable address.
-        let err = resolver_denying()
-            .resolve("10.0.0.5:443")
+        let err = resolve_netloc(&resolver_denying(), "10.0.0.5:443")
             .expect_err("a private-only host must be refused by the egress resolver");
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(is_permission_denied(&err), "got {err:?}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolve_refuses_cloud_metadata_literal() {
-        use ureq::Resolver;
         // The 169.254.169.254 cloud-metadata IP is the canonical SSRF target — refused.
-        let err = resolver_denying()
-            .resolve("169.254.169.254:80")
+        let err = resolve_netloc(&resolver_denying(), "169.254.169.254:80")
             .expect_err("cloud-metadata IP must be refused");
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(is_permission_denied(&err), "got {err:?}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolve_strips_ipv6_brackets_and_refuses_loopback() {
-        use ureq::Resolver;
         // The IPv6 loopback arrives bracketed (`[::1]:80`); the resolver must strip the
         // brackets to recover the host, classify ::1 as forbidden, and refuse.
-        let err = resolver_denying()
-            .resolve("[::1]:80")
+        let err = resolve_netloc(&resolver_denying(), "[::1]:80")
             .expect_err("bracketed IPv6 loopback must be refused");
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(is_permission_denied(&err), "got {err:?}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolve_permits_public_v4_literal() {
-        use ureq::Resolver;
         // A public address survives the filter and is handed back to ureq to dial.
-        let addrs = resolver_denying()
-            .resolve("8.8.8.8:80")
+        let addrs = resolve_netloc(&resolver_denying(), "8.8.8.8:80")
             .expect("a public address must survive the egress filter");
-        assert_eq!(addrs, vec!["8.8.8.8:80".parse().unwrap()]);
+        assert!(addrs.iter().any(|sa| sa.ip().to_string() == "8.8.8.8"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolve_permits_public_v6_literal() {
-        use ureq::Resolver;
         // A public IPv6 literal (bracketed) is bracket-stripped, classified public, kept.
-        let addrs = resolver_denying()
-            .resolve("[2606:4700:4700::1111]:443")
+        let addrs = resolve_netloc(&resolver_denying(), "[2606:4700:4700::1111]:443")
             .expect("a public IPv6 address must survive");
-        assert_eq!(addrs, vec!["[2606:4700:4700::1111]:443".parse().unwrap()]);
+        assert!(addrs
+            .iter()
+            .any(|sa| sa.ip().to_string() == "2606:4700:4700::1111"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolve_allowlist_reopens_private_v4_literal() {
-        use ureq::Resolver;
         // The allowlist bypass (`HttpFetcher::allow_private_host`): the SAME private literal
         // refused by the default-deny resolver is now dialled because the bare host is on the
         // allowlist. This is the only path that lets a private federation endpoint through.
-        let addrs = resolver_allowing("10.0.0.5")
-            .resolve("10.0.0.5:443")
+        let addrs = resolve_netloc(&resolver_allowing("10.0.0.5"), "10.0.0.5:443")
             .expect("an allowlisted private host must be permitted");
-        assert_eq!(addrs, vec!["10.0.0.5:443".parse().unwrap()]);
+        assert!(addrs.iter().any(|sa| sa.ip().to_string() == "10.0.0.5"));
         // And it is exactly that host that opens it: a DIFFERENT allowlist entry does not.
-        let err = resolver_allowing("192.168.0.1")
-            .resolve("10.0.0.5:443")
+        let err = resolve_netloc(&resolver_allowing("192.168.0.1"), "10.0.0.5:443")
             .expect_err("allowlisting a different host must not re-open 10.0.0.5");
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(is_permission_denied(&err), "got {err:?}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolve_allowlist_match_is_case_insensitive() {
-        use ureq::Resolver;
         // `allow_private_host` lower-cases its key; the resolver lower-cases the parsed host,
         // so an IPv6 literal with upper-case hex digits still matches its allowlist entry.
         // (`fc00::AB` is unique-local ⇒ forbidden unless allowlisted.)
-        let addrs = resolver_allowing("fc00::ab")
-            .resolve("[fc00::AB]:80")
+        let addrs = resolve_netloc(&resolver_allowing("fc00::ab"), "[fc00::AB]:80")
             .expect("case-insensitive allowlist match must permit the private host");
-        assert_eq!(addrs, vec!["[fc00::AB]:80".parse().unwrap()]);
+        assert!(addrs.iter().any(|sa| sa.ip().to_string() == "fc00::ab"));
     }
 }

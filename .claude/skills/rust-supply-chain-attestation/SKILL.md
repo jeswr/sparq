@@ -47,12 +47,14 @@ can't parse the vendored `spargebra`, which needs `edition2024` / cargo >= 1.85)
   crates.io allowed. The vendored `spargebra` is a `[patch.crates-io]` PATH source
   (a path patch is not a registry/git source, so it doesn't trip the gate);
   `allow-git = []` is the hook for any deliberately-allowed future git source.
-- **Advisories ignore list:** only `unmaintained` *informational* advisories on
-  transitive deps with no safe upgrade (today: `rustls-pemfile` via ureq → bead
-  sq-g2xs). A real **vulnerability** or a **yanked** crate FAILS the gate.
-  (`paste` via wgpu → bead sq-l8bv was previously ignored under RUSTSEC-2024-0436;
-  the GPU stack dropped `paste`, so it left the tree and the ignore was removed —
-  the gate now re-flags any regression that reintroduces it.)
+- **Advisories ignore list:** currently **empty** — reserved for `unmaintained`
+  *informational* advisories on transitive deps with no safe upgrade, each with a
+  `reason` + tracking bead. A real **vulnerability** or a **yanked** crate FAILS the
+  gate. Both former ignores were retired: `paste` via wgpu (sq-l8bv, RUSTSEC-2024-0436)
+  left the tree when the GPU stack dropped it; `rustls-pemfile` via ureq (sq-g2xs,
+  RUSTSEC-2025-0134) was eliminated by migrating the federation HTTP client ureq 2 →
+  ureq 3 (whose `rustls-native-certs 0.8` no longer depends on the archived crate). The
+  gate now re-flags any regression that reintroduces either.
 
 ### The advisories-gate gap (GX-1 — know this)
 `cargo deny check advisories` is currently **`continue-on-error` (non-gating)**:

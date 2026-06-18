@@ -956,7 +956,7 @@ impl HttpTransport {
     }
 }
 
-/// ureq [`Resolver`](ureq::Resolver) wrapper that enforces the SSRF egress policy
+/// ureq [`Resolver`](ureq::unversioned::resolver::Resolver) wrapper that enforces the SSRF egress policy
 /// on the *resolved* addresses (DNS-rebinding-safe). [OPUS-4.8]
 ///
 /// It resolves `netloc` with the standard system resolver, drops every address
@@ -966,65 +966,127 @@ impl HttpTransport {
 /// `PermissionDenied` error rather than an empty set, which surfaces to the
 /// caller as a SERVICE failure (and an empty result under SILENT).
 #[cfg(all(feature = "service", not(target_arch = "wasm32")))]
+#[derive(Debug)]
 struct EgressFilterResolver;
 
+// [OPUS-4.8] sq-g2xs: the ureq-3 `Resolver` trait takes a parsed `&http::Uri` (+ `Config` +
+// timeout) and returns an `ArrayVec<SocketAddr, 16>` rather than ureq-2's `&str` netloc → `Vec`.
+// The SSRF logic is otherwise byte-for-byte the ureq-2 policy: derive `host:port` from the URI
+// authority + scheme default port, key the allowlist by the bare host, resolve, drop every
+// `is_forbidden_ip` address (unless allowlisted), and refuse with a `PermissionDenied` io error
+// (carried as `ureq::Error::Io`, so the `SERVICE_EGRESS_REFUSED_MARKER` survives the wrapping
+// and the kind stays `PermissionDenied` for the egress tests). A refusal is a HARD error (never
+// an empty address set), so ureq cannot fall through to an unguarded dial.
+
+/// `host:port` (for resolution) + bare host (for the allowlist key, IPv6 brackets stripped,
+/// lowercased) from a ureq-3 request [`Uri`](ureq::http::Uri). `port` falls back to the scheme
+/// default (443 for https, 80 otherwise). [OPUS-4.8] sq-g2xs.
 #[cfg(all(feature = "service", not(target_arch = "wasm32")))]
-impl ureq::Resolver for EgressFilterResolver {
-    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
-        use std::net::ToSocketAddrs;
-        // `netloc` is `host:port`; the allowlist is keyed by the bare host (the
-        // authority without the port). rsplit on ':' to keep IPv6 literals — those
-        // come bracketed as `[::1]:80`, so strip the brackets too.
-        let host = match netloc.rsplit_once(':') {
-            Some((h, _)) => h,
-            None => netloc,
-        };
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        let allowed = egress_policy::is_allowed(host);
-        // [OPUS-4.8] (sq-4w18) STRICT (AllowlistOnly) mode — the server's policy —
-        // refuses any host not on the allowlist BEFORE resolving DNS, so a host that
-        // is not explicitly permitted never triggers even a lookup (no network at all,
-        // and no public-IP escape hatch). An empty allowlist here = deny ALL SERVICE.
-        if !allowed && egress_policy::mode() == egress_policy::Mode::AllowlistOnly {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "{SERVICE_EGRESS_REFUSED_MARKER}: host {host:?} is not on the SERVICE allowlist \
-                     (strict allowlist-only policy; add it via --service-allow / SPARQ_SERVICE_ALLOW \
-                     on the server, or with_service_egress_policy in an embedder)"
-                ),
-            ));
+fn uri_host_port(uri: &ureq::http::Uri) -> Option<(String, String)> {
+    let authority = uri.authority()?;
+    let host = authority.host();
+    if host.is_empty() {
+        return None;
+    }
+    let port = authority.port_u16().unwrap_or_else(|| {
+        match uri.scheme_str() {
+            Some("https") => 443,
+            _ => 80,
         }
-        let all: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
-        let permitted: Vec<std::net::SocketAddr> = all
-            .into_iter()
+    });
+    // The authority host keeps IPv6 brackets (`[::1]`); strip them for the allowlist key and
+    // for `to_socket_addrs` (which wants the bare host + a separate port).
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    Some((format!("{bare}:{port}"), bare.to_ascii_lowercase()))
+}
+
+/// Wrap a refusal reason as a `PermissionDenied` [`ureq::Error::Io`], preserving both the kind
+/// (the egress tests assert on it) and the [`SERVICE_EGRESS_REFUSED_MARKER`] text. [OPUS-4.8].
+#[cfg(all(feature = "service", not(target_arch = "wasm32")))]
+fn egress_refused(reason: String) -> ureq::Error {
+    ureq::Error::Io(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        reason,
+    ))
+}
+
+#[cfg(all(feature = "service", not(target_arch = "wasm32")))]
+impl ureq::unversioned::resolver::Resolver for EgressFilterResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        use std::net::ToSocketAddrs;
+        let (host_port, host) = uri_host_port(uri).ok_or_else(|| {
+            egress_refused(format!(
+                "{SERVICE_EGRESS_REFUSED_MARKER}: request URI {uri} has no host authority to vet"
+            ))
+        })?;
+        let allowed = egress_policy::is_allowed(&host);
+        // [OPUS-4.8] (sq-4w18) STRICT (AllowlistOnly) mode — the server's policy — refuses any
+        // host not on the allowlist BEFORE resolving DNS, so a host that is not explicitly
+        // permitted never triggers even a lookup. An empty allowlist here = deny ALL SERVICE.
+        if !allowed && egress_policy::mode() == egress_policy::Mode::AllowlistOnly {
+            return Err(egress_refused(format!(
+                "{SERVICE_EGRESS_REFUSED_MARKER}: host {host:?} is not on the SERVICE allowlist \
+                 (strict allowlist-only policy; add it via --service-allow / SPARQ_SERVICE_ALLOW \
+                 on the server, or with_service_egress_policy in an embedder)"
+            )));
+        }
+        let resolved = host_port.to_socket_addrs().map_err(ureq::Error::Io)?;
+        let mut permitted: ureq::unversioned::resolver::ResolvedSocketAddrs = arrayvec_default();
+        // `ResolvedSocketAddrs` is a fixed-capacity `ArrayVec<_, 16>`; cap to its capacity (the
+        // same `MAX_ADDRS` ureq's own resolver uses) so `push` never overruns the backing array.
+        for sa in resolved
             .filter(|sa| allowed || !is_forbidden_ip(sa.ip()))
-            .collect();
+            .take(RESOLVED_ADDRS_CAP)
+        {
+            permitted.push(sa);
+        }
         if permitted.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "{SERVICE_EGRESS_REFUSED_MARKER}: {netloc} resolves only to private/internal addresses \
-                     (default-deny SSRF policy; allowlist the host via with_service_egress_allow)"
-                ),
-            ));
+            return Err(egress_refused(format!(
+                "{SERVICE_EGRESS_REFUSED_MARKER}: {host_port} resolves only to private/internal addresses \
+                 (default-deny SSRF policy; allowlist the host via with_service_egress_allow)"
+            )));
         }
         Ok(permitted)
     }
 }
 
+/// Capacity of ureq-3's [`ResolvedSocketAddrs`](ureq::unversioned::resolver::ResolvedSocketAddrs)
+/// (`ArrayVec<SocketAddr, 16>`). Matches ureq's own `MAX_ADDRS`. [OPUS-4.8] sq-g2xs.
+#[cfg(all(feature = "service", not(target_arch = "wasm32")))]
+const RESOLVED_ADDRS_CAP: usize = 16;
+
+/// An empty [`ResolvedSocketAddrs`](ureq::unversioned::resolver::ResolvedSocketAddrs) backing
+/// store (a fixed-capacity `ArrayVec`). [OPUS-4.8] sq-g2xs.
+#[cfg(all(feature = "service", not(target_arch = "wasm32")))]
+fn arrayvec_default() -> ureq::unversioned::resolver::ResolvedSocketAddrs {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    // `ArrayVec::from_fn` fills the backing array, but the logical length starts at 0
+    // (the same idiom ureq's `DefaultResolver::empty` uses), so it is genuinely empty.
+    ureq::unversioned::resolver::ArrayVec::from_fn(|_| {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+    })
+}
+
 #[cfg(all(feature = "service", not(target_arch = "wasm32")))]
 impl Transport for HttpTransport {
     fn fetch(&self, endpoint: &str, query: &str) -> Result<String, String> {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(self.timeout)
+        // [OPUS-4.8] sq-g2xs: ureq-3 builds an `Agent` from a `Config` + a custom resolver via
+        // `Agent::with_parts`; the resolver carries the default-deny SSRF policy exactly as in
+        // ureq 2 (the resolved-and-vetted IP is the dialled IP — no DNS-rebinding re-resolve).
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
             .user_agent(concat!("sparq-engine/", env!("CARGO_PKG_VERSION")))
-            // Default-deny SSRF egress filter: vets the resolved IP before connect,
-            // so a SERVICE endpoint pointing at loopback / RFC1918 / link-local /
-            // cloud-metadata is refused (unless allowlisted). DNS-rebinding-safe:
-            // ureq connects only to the addresses this resolver returns. [OPUS-4.8]
-            .resolver(EgressFilterResolver)
             .build();
+        let agent = ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::new(),
+            EgressFilterResolver,
+        );
         // POST with the query in an `application/x-www-form-urlencoded` `query=` field
         // (SPARQL Protocol §2.1.2 "query via POST with URL-encoded parameters") — the
         // most broadly supported method and not subject to URL-length limits.
@@ -1032,24 +1094,35 @@ impl Transport for HttpTransport {
             .post(endpoint)
             // Prefer JSON, but accept XML — some endpoints ignore `Accept` and only emit
             // SPARQL-Results-XML, which `parse_results` now handles (bead sq-ycu). [OPUS-4.8]
-            .set(
+            .header(
                 "Accept",
                 "application/sparql-results+json, application/sparql-results+xml;q=0.9",
             )
-            .send_form(&[("query", query)]);
+            .send_form([("query", query)]);
         match resp {
-            Ok(r) => r
-                .into_string()
+            // ureq-3 caps `read_to_string` at 10 MiB by default; a federated SELECT result can
+            // exceed that, so raise the limit generously (a finite cap still bounds memory).
+            Ok(mut r) => r
+                .body_mut()
+                .with_config()
+                .limit(SERVICE_MAX_BODY_BYTES)
+                .read_to_string()
                 .map_err(|e| format!("SERVICE: reading response from {endpoint}: {e}")),
-            // ureq surfaces non-2xx as `Error::Status`; treat both transport and HTTP
+            // ureq-3 surfaces non-2xx as `Error::StatusCode`; treat both transport and HTTP
             // errors uniformly (the caller decides SILENT vs propagate).
-            Err(ureq::Error::Status(code, _)) => {
+            Err(ureq::Error::StatusCode(code)) => {
                 Err(format!("SERVICE: endpoint {endpoint} returned HTTP {code}"))
             }
             Err(e) => Err(format!("SERVICE: request to {endpoint} failed: {e}")),
         }
     }
 }
+
+/// Max bytes read from a SERVICE response body. ureq-3's default `read_to_string` cap is 10 MiB;
+/// a federated SELECT can legitimately exceed that, so we raise it to a generous-but-finite bound
+/// (memory is still bounded — a runaway endpoint cannot OOM the engine). [OPUS-4.8] sq-g2xs.
+#[cfg(all(feature = "service", not(target_arch = "wasm32")))]
+const SERVICE_MAX_BODY_BYTES: u64 = 1024 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Tests (parser + transport seam; no public network)
@@ -1567,38 +1640,53 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     mod resolver {
         use super::*;
-        use ureq::Resolver;
+
+        /// [OPUS-4.8] sq-g2xs: invoke the ureq-3 `Resolver` for a `host:port` netloc by building
+        /// the `http://<netloc>/` URI the resolver parses (default `Config` + no-deadline timeout).
+        fn resolve_netloc(
+            netloc: &str,
+        ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+            use ureq::unversioned::resolver::Resolver;
+            let uri: ureq::http::Uri = format!("http://{netloc}/").parse().unwrap();
+            let config = ureq::Agent::config_builder().build();
+            let timeout = ureq::unversioned::transport::NextTimeout {
+                after: ureq::unversioned::transport::time::Duration::NotHappening,
+                reason: ureq::Timeout::Global,
+            };
+            EgressFilterResolver.resolve(&uri, &config, timeout)
+        }
+
+        /// `true` iff `e` is the egress-refusal `PermissionDenied` io error.
+        fn is_permission_denied(e: &ureq::Error) -> bool {
+            matches!(e, ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied)
+        }
 
         #[test]
         fn resolver_refuses_loopback_endpoint() {
             // 127.0.0.1 resolves to itself; with no allowlist the policy must
             // refuse it with PermissionDenied — never returning a dial-able addr.
-            let r = EgressFilterResolver;
-            let err = r.resolve("127.0.0.1:8080").unwrap_err();
-            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            let err = resolve_netloc("127.0.0.1:8080").unwrap_err();
+            assert!(is_permission_denied(&err), "got {err:?}");
         }
 
         #[test]
         fn resolver_refuses_cloud_metadata_endpoint() {
-            let r = EgressFilterResolver;
-            let err = r.resolve("169.254.169.254:80").unwrap_err();
-            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            let err = resolve_netloc("169.254.169.254:80").unwrap_err();
+            assert!(is_permission_denied(&err), "got {err:?}");
         }
 
         #[test]
         fn resolver_refuses_ipv6_loopback_endpoint() {
-            let r = EgressFilterResolver;
             // ureq passes IPv6 netlocs bracketed.
-            let err = r.resolve("[::1]:80").unwrap_err();
-            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            let err = resolve_netloc("[::1]:80").unwrap_err();
+            assert!(is_permission_denied(&err), "got {err:?}");
         }
 
         #[test]
         fn resolver_allows_public_endpoint() {
-            let r = EgressFilterResolver;
             // 8.8.8.8 is a literal so no DNS lookup happens; it is global, so it
             // passes the filter and comes back as a dial-able address.
-            let addrs = r.resolve("8.8.8.8:443").unwrap();
+            let addrs = resolve_netloc("8.8.8.8:443").unwrap();
             assert_eq!(addrs.len(), 1);
             assert_eq!(addrs[0].ip(), v4(8, 8, 8, 8));
         }
@@ -1606,9 +1694,8 @@ mod tests {
         #[test]
         fn resolver_permits_allowlisted_private_endpoint() {
             // With 127.0.0.1 on the allowlist, the loopback endpoint is dial-able.
-            let r = EgressFilterResolver;
             let addrs = with_service_egress_allow(["127.0.0.1".to_string()], || {
-                r.resolve("127.0.0.1:8080")
+                resolve_netloc("127.0.0.1:8080")
             })
             .unwrap();
             assert_eq!(addrs.len(), 1);
@@ -1619,41 +1706,47 @@ mod tests {
 
         #[test]
         fn strict_refuses_public_host_off_the_allowlist() {
-            let r = EgressFilterResolver;
-            let err = with_service_egress_policy(true, std::iter::empty(), || r.resolve("8.8.8.8:443"))
-                .unwrap_err();
-            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            let err = with_service_egress_policy(true, std::iter::empty(), || {
+                resolve_netloc("8.8.8.8:443")
+            })
+            .unwrap_err();
+            assert!(is_permission_denied(&err), "got {err:?}");
         }
 
         #[test]
         fn strict_empty_allowlist_denies_all() {
-            let r = EgressFilterResolver;
             for netloc in ["8.8.8.8:443", "1.1.1.1:80", "127.0.0.1:8080"] {
-                let err = with_service_egress_policy(true, std::iter::empty(), || r.resolve(netloc))
-                    .unwrap_err();
-                assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{netloc} must be refused");
+                let err = with_service_egress_policy(true, std::iter::empty(), || {
+                    resolve_netloc(netloc)
+                })
+                .unwrap_err();
+                assert!(is_permission_denied(&err), "{netloc} must be refused, got {err:?}");
             }
         }
 
         #[test]
         fn strict_permits_allowlisted_host() {
-            let r = EgressFilterResolver;
-            let addrs = with_service_egress_policy(true, ["8.8.8.8".to_string()], || r.resolve("8.8.8.8:443"))
-                .unwrap();
+            let addrs = with_service_egress_policy(true, ["8.8.8.8".to_string()], || {
+                resolve_netloc("8.8.8.8:443")
+            })
+            .unwrap();
             assert_eq!(addrs.len(), 1);
             assert_eq!(addrs[0].ip(), v4(8, 8, 8, 8));
 
-            let addrs = with_service_egress_policy(true, ["127.0.0.1".to_string()], || r.resolve("127.0.0.1:8080"))
-                .unwrap();
+            let addrs = with_service_egress_policy(true, ["127.0.0.1".to_string()], || {
+                resolve_netloc("127.0.0.1:8080")
+            })
+            .unwrap();
             assert_eq!(addrs.len(), 1);
             assert!(addrs[0].ip().is_loopback());
         }
 
         #[test]
         fn non_strict_resolver_allows_public_off_list() {
-            let r = EgressFilterResolver;
-            let addrs = with_service_egress_policy(false, std::iter::empty(), || r.resolve("8.8.8.8:443"))
-                .unwrap();
+            let addrs = with_service_egress_policy(false, std::iter::empty(), || {
+                resolve_netloc("8.8.8.8:443")
+            })
+            .unwrap();
             assert_eq!(addrs.len(), 1);
         }
     }
