@@ -163,14 +163,34 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
   (`f64::from(value)`, exact for `value < 2^53`), so there is NO prover-free
   `a_bits`. A float FILTER now participates in a composed proof via a binding edge
   to a scan (e2e: `filter_f64_composes_end_to_end`). The raw `filter_f64` building
-  block (free bits) remains for non-composed use. DEFERRED: the GENERAL fragment
-  (fractional/scientific lexical forms, rounded values) needs a full in-circuit
-  decimal→IEEE-754 parser with round-to-nearest-even over an arbitrary lexical
-  form — unbudgeted; the integer-valued fragment is enforced by the digit-only
-  token (an out-of-fragment operand is unprovable, never mis-bound). Query-text
-  FILTER→float mapping also deferred (sparq-zk `fragment_filters` parses only the
-  xsd:integer FILTER fragment); a float FILTER composes via the binding edge +
-  its own verified sub-proof.
+  block (free bits) remains for non-composed use. PARTIALLY ADVANCED ([OPUS-4.8]
+  sq-mslu): the general decimal→IEEE-754 conversion CORE for a FRACTIONAL /
+  SCIENTIFIC lexical form now exists as a tested, gate-counted building block —
+  `filter_f64_dec` (`sparq_zk_compose_core::filter_float::filter_f64_decimal_check`
+  / `decimal_to_f64_integer_valued`). It takes the lexically-parsed operand
+  components `(sign, mantissa_int, dexp)` (value = `mantissa_int·10^dexp`) and
+  converts to the correctly-rounded double via a SINGLE `f64::from(u128)` op —
+  round-to-nearest-even, the IEEE default. This is SOUND for the integer-VALUED
+  fragment (`dexp ≥ 0`, exact integer ≤ `u128`), so a fractional/scientific
+  LEXICAL form whose VALUE is an integer (`1.5E3`, `100.0`, `1.0E1`) is now
+  covered, including RNE rounding above `2^53` (`1E20`). MEASURED at **4380 gates**
+  (`bb gates -s ultra_honk`, gate-count snapshot row), well within budget vs the
+  17416 of a bound member. STILL DEFERRED, with two distinct remaining pieces:
+  (a) the genuinely-FRACTIONAL-VALUE case (`dexp < 0`, e.g. `0.1`) — a composition
+  of the library's individually-correctly-rounded ops DOUBLE-rounds and can miss
+  the nearest double by 1 ULP, so it is REJECTED in-circuit rather than shipped
+  unsound; a sound general parser needs the full strtod core (exact bignum
+  `mantissa·2^?` vs `10^|dexp|` with an explicit RNE tie decision — Clinger /
+  Eisel-Lemire), unbudgeted; and (b) MANIFEST COMPOSABILITY of even the
+  integer-valued-fractional member, which additionally needs to rebuild the
+  operand's canonical N-Triples token in-circuit — and the canonical xsd:double
+  lexical form is the SHORTEST-ROUND-TRIP print (Grisu/Ryu), so binding it needs
+  in-circuit float PRINTING (the "sparq-zk API gaps" item below), distinct from
+  parsing. Both are expected to be subsumed by #514's value-lane, which signs the
+  IEEE-754 bits directly and removes in-circuit literal parsing/printing entirely.
+  Query-text FILTER→float mapping also deferred (sparq-zk `fragment_filters` parses
+  only the xsd:integer FILTER fragment); a float FILTER composes via the binding
+  edge + its own verified sub-proof.
 - **SIGNED `xsd:integer` + `xsd:decimal` FILTER composition** ([OPUS-4.8] sq-7lrq)
   — IMPLEMENTED. The sq-1q9h members (`filter_signed_int_d{md}`,
   `filter_decimal_i{id}_f{fd}`) are now manifest-composable: `CircuitId` /

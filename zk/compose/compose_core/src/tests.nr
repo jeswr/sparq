@@ -10,7 +10,9 @@
 //! pipeline ports -- the bit-compatibility requirement for commitment
 //! recomputation in-circuit.
 
-use crate::filter_float::filter_f64_check;
+use crate::filter_float::{
+    decimal_to_f64_integer_valued, filter_f64_check, filter_f64_decimal_check,
+};
 use crate::filter_int::{filter_int_check, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_NE};
 use crate::filter_signed::{filter_decimal_check, filter_signed_int_check};
 use crate::hashes::{commit_fold, h2, h3, TYPE_CODE_LITERAL};
@@ -384,6 +386,57 @@ fn filter_f64_ieee_edge_cases() {
 #[test(should_fail_with = "float filter verdict mismatch")]
 fn filter_f64_rejects_lying_verdict() {
     filter_f64_check(F64_TWO_POINT_FIVE, F64_ONE_POINT_FIVE, OP_LT, true);
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-mslu: general xsd:double decimal->IEEE conversion core for
+// fractional / scientific lexical forms (sound integer-VALUED fragment).
+// Oracle bit patterns are Rust f64 (round-to-nearest-even), so the in-circuit
+// `f64::from(u128)` must reproduce them exactly.
+// ---------------------------------------------------------------------------
+
+global F64_FIFTEEN_HUNDRED: u64 = 0x4097700000000000; // 1.5E3 = 1500
+global F64_TEN: u64 = 0x4024000000000000; // 1.0E1 = 10
+global F64_HUNDRED: u64 = 0x4059000000000000; // 100.0 = 100
+global F64_1E20: u64 = 0x4415af1d78b58c40; // 1E20 (rounded, > 2^53)
+
+#[test]
+fn decimal_scientific_integer_valued_conversions() {
+    // "1.5E3" -> mantissa 15, dexp 2 -> 15 * 10^2 = 1500.
+    assert_eq(decimal_to_f64_integer_valued(false, 15, 2), F64_FIFTEEN_HUNDRED);
+    // "1.0E1" -> mantissa 1, dexp 1 -> 10.
+    assert_eq(decimal_to_f64_integer_valued(false, 1, 1), F64_TEN);
+    // "100.0" -> mantissa 100, dexp 0 -> 100.
+    assert_eq(decimal_to_f64_integer_valued(false, 100, 0), F64_HUNDRED);
+    // Negative sign onto the bit pattern: "-1.5E3" -> -1500.
+    assert_eq(decimal_to_f64_integer_valued(true, 15, 2), F64_FIFTEEN_HUNDRED | 0x8000000000000000);
+}
+
+#[test]
+fn decimal_conversion_rounds_to_nearest_even_above_2pow53() {
+    // 1E20 exceeds 2^53, so the single f64::from(u128) op must round (RNE).
+    // mantissa 1, dexp 20.
+    assert_eq(decimal_to_f64_integer_valued(false, 1, 20), F64_1E20);
+}
+
+#[test]
+fn filter_f64_decimal_compares() {
+    // 1500 < 2.5? no. 1500 > 10? yes. 1500 == 1500 (from "1.5E3" vs b=1500)?
+    filter_f64_decimal_check(false, 15, 2, F64_TWO_POINT_FIVE, OP_LT, false);
+    filter_f64_decimal_check(false, 15, 2, F64_TEN, OP_GT, true);
+    filter_f64_decimal_check(false, 15, 2, F64_FIFTEEN_HUNDRED, OP_EQ, true);
+}
+
+#[test(should_fail_with = "float filter verdict mismatch")]
+fn filter_f64_decimal_rejects_lying_verdict() {
+    // 1500 < 10 is false; claiming true must be rejected.
+    filter_f64_decimal_check(false, 15, 2, F64_TEN, OP_LT, true);
+}
+
+#[test(should_fail_with = "base-10 exponent out of u128 exact range")]
+fn filter_f64_decimal_rejects_oversized_exponent() {
+    // dexp = 39 cannot keep the exact integer inside u128.
+    let _ = decimal_to_f64_integer_valued(false, 1, 39);
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,4 +1417,12 @@ fn join_eq_mixed_slots_multi_row_accepts() {
         row_b,
         JB,
     );
+}
+
+#[test(should_fail)]
+fn decimal_conversion_rejects_u128_overflow() {
+    // mantissa near u128::MAX times 10^1 overflows u128; Noir must constrain
+    // the multiply to no-overflow (sound: a prover cannot pick a wrapping value).
+    let near_max: u128 = 0xffffffffffffffffffffffffffffffff;
+    let _ = decimal_to_f64_integer_valued(false, near_max, 1);
 }
