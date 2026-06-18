@@ -37,6 +37,7 @@
     "build:wasm": "wasm-pack build ../crates/sparq-wasm --target web --release -- --features shacl,jsonld && npm run _copy:wasm",
     "build:wasm:lean": "wasm-pack build ../crates/sparq-wasm --target web --release && npm run _copy:wasm",
     "build:reason-wasm": "wasm-pack build ../crates/sparq-reason-wasm --target web --release -- --features explain",
+    "build:rsp-wasm": "wasm-pack build ../crates/sparq-rsp-wasm --target web --release",
     "build:ts": "tsc",
     "build": "npm run build:wasm && npm run build:ts",
     "test": "node --test \"test/*.test.mjs\"",

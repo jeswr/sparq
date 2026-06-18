@@ -16,6 +16,7 @@ const BUILT_SURFACES = new Set([
   "inference",
   "mpc",
   "zk",
+  "streaming-rsp",
 ]);
 const PLACEHOLDER_SURFACES = ALL_SURFACES.filter(
   (s) =>
