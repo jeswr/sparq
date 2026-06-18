@@ -98,6 +98,11 @@ jobs:
         run: cargo install wasm-pack --locked
       - name: Install npm dependencies
         run: npm ci
+      # Publish guardrail (sq-bkag): refuse to publish a binding that would ship without its
+      # wasm engine, that drops dist/wasm from the `files` allowlist, or that lost the `prepare`
+      # git-pin build hook. Runs BEFORE publish so a broken package fails the job, not the consumer.
+      - name: Package guardrail check
+        run: npm run check:package
       # `prepack` (build:wasm + build:ts + bundle skills) runs automatically on `npm publish`,
       # producing the same tree `npm pack --dry-run` validates in js.yml. We require a modern npm
       # (>=11.5.1 ships with node 22) so --provenance is supported.
