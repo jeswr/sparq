@@ -32,7 +32,7 @@
 //! offset 12   degree R    u32   (max out-neighbours)    4 bytes
 //! offset 16   count       u64   (nodes = store vectors) 8 bytes
 //! offset 24   medoid      u32   (entry-point slot)      4 bytes
-//! offset 28   reserved    zero  (encoding tag etc.)     4 bytes
+//! offset 28   enc_tag     u32   (0 = none, 1 = PQ cache) 4 bytes
 //! offset 32   fingerprint graph fingerprint            24 bytes
 //!             (dict_len: u64, triple_count: u64, content_hash: u64)
 //! offset 56   nodes       [count × NODE_RECORD]         count·record bytes
@@ -42,6 +42,13 @@
 //!   degree    u32                  number of valid neighbours (≤ R)
 //!   vector    [dim] f32            the L2-NORMALIZED vector (search reads it here)
 //!   nbrs      [R] u32              neighbour SLOT indices; entries ≥ degree are padding
+//!
+//! [OPUS-4.8] (sq-qamd) the optional PQ_SECTION (present iff enc_tag == 1, appended after nodes):
+//!   magic     b"SPQP"              4 bytes
+//!   cb_len    u64                  length of the codebook block that follows
+//!   codebook  [cb_len] bytes       ProductQuantizer::to_bytes (dim, m, k + centroids)
+//!   stride    u32                  code length M (== codebook M)
+//!   codes     [count × M] bytes    per-slot PQ codes, slot order (== node-record order)
 //! ```
 //!
 //! A node's vector and its adjacency are **co-located in one record** (the DiskANN locality
@@ -51,20 +58,23 @@
 //!
 //! # Honest scope vs. full DiskANN
 //!
-//! This is the **Vamana on-disk graph with full-precision vectors searched from the mmap**.
-//! Full DiskANN additionally keeps a **PQ-compressed** copy of every vector resident in RAM to
-//! rank candidates without touching disk, reading full-precision vectors only to re-rank the
-//! beam. That quantization layer now exists ([OPUS-4.8] sq-nq5,
-//! [`quant`](crate::quant) — [`ProductQuantizer`](crate::quant::ProductQuantizer) +
-//! [`EncodedStore`](crate::quant::EncodedStore) + [`DistanceTable`](crate::quant::DistanceTable))
-//! as a standalone, tested encoder/decoder/distance-estimator, but `search_slots` below is
-//! **unchanged** — it still searches full-precision from the mmap. Wiring the PQ candidate cache
-//! into the greedy search (rank on codes in RAM, re-rank the beam off the mmap) is the recorded
-//! follow-up; see `quant.rs`'s "intended use" note and this crate's open beads
-//! (`bd list -l area:sparq-vectors`). At the scales where the graph
-//! fits in page cache (the regime this unblocks: skip the per-process rebuild) the two are
-//! equivalent; PQ matters only when the vectors themselves exceed RAM. The `.spqg` header
-//! reserves 4 bytes for an encoding tag so a PQ variant lands as a backwards-compatible bump.
+//! The default build is the **Vamana on-disk graph with full-precision vectors searched from the
+//! mmap**. Full DiskANN additionally keeps a **PQ-compressed** copy of every vector resident in RAM
+//! to rank candidates without touching disk, reading full-precision vectors only to re-rank the
+//! beam. That quantization layer ([OPUS-4.8] sq-nq5,
+//! [`quant`](crate::quant) — [`ProductQuantizer`] + [`EncodedStore`] + [`DistanceTable`])
+//! is now **wired into the search path** ([OPUS-4.8] sq-qamd): build with
+//! [`DiskAnnIndex::build_with_pq`] and the greedy search ranks each visited node's neighbours by an
+//! ADC [`DistanceTable`] lookup against the in-RAM codes (no disk), reading the full-precision
+//! vector from the mmap only for the final beam it re-ranks — DiskANN's "search on PQ, re-rank on
+//! disk" loop. Without the PQ section (the plain [`build`](DiskAnnIndex::build) /
+//! [`build_with`](DiskAnnIndex::build_with) path) `search_slots` is unchanged: it computes every
+//! candidate distance from the full-precision mmap, exactly as before. At the scales where the graph
+//! fits in page cache (the regime the plain index unblocks: skip the per-process rebuild) the two
+//! are recall-equivalent up to the PQ approximation; PQ matters most when the vectors themselves
+//! exceed RAM. The `.spqg` header's 4 reserved bytes carry an **encoding tag** (`0` = no cache,
+//! `1` = a trailing PQ section), so the PQ variant is a backwards-compatible addition: a plain
+//! reader sees the tag and a longer file but the node-record layout is byte-identical.
 //!
 //! [OPUS-4.8] (sq-32i5) The header also carries a **graph fingerprint** (offset 32..56) binding
 //! the index to the graph it was built against — see [`crate::fingerprint`] and
@@ -74,6 +84,7 @@
 //! are reported as unverifiable.
 
 use crate::fingerprint::{self, Fingerprint, FINGERPRINT_LEN};
+use crate::quant::{DistanceTable, EncodedStore, PqConfig, ProductQuantizer};
 use crate::store::VectorStore;
 use memmap2::Mmap;
 use oxrdf::Term;
@@ -92,6 +103,15 @@ pub const SPQG_VERSION: u32 = 2;
 const HEADER_LEN_V1: usize = 32;
 /// Header length of the current (version-2) format: the v1 header + the fingerprint block.
 const HEADER_LEN: usize = HEADER_LEN_V1 + FINGERPRINT_LEN;
+/// Byte offset of the encoding tag (the 4 reserved bytes of the v1/v2 header).
+const ENC_TAG_OFFSET: usize = 28;
+/// Encoding tag: no PQ candidate cache — the file ends at the last node record (default).
+const ENC_TAG_NONE: u32 = 0;
+/// [OPUS-4.8] (sq-qamd) Encoding tag: a **PQ candidate-cache section** follows the node records
+/// (codebook + per-slot codes). See `PqSection` for the trailing block's layout.
+const ENC_TAG_PQ: u32 = 1;
+/// First four bytes of the trailing PQ section (a guard against a truncated/garbled tail).
+const PQ_SECTION_MAGIC: [u8; 4] = *b"SPQP";
 
 /// Vamana build/search parameters. Defaults follow the DiskANN paper's small-graph regime
 /// and are tuned to clear [`ann`](crate::ann)'s recall@10 ≥ 0.95 gate on the same synthetic
@@ -357,9 +377,39 @@ const fn record_len(dim: usize, degree: usize) -> usize {
     8 + dim * 4 + degree * 4
 }
 
+/// [OPUS-4.8] (sq-qamd) The trailing PQ candidate-cache section: the fitted quantizer plus every
+/// vector's PQ code, ready to be appended after the node records when the encoding tag is `1`.
+struct PqSection {
+    pq: ProductQuantizer,
+    codes: EncodedStore,
+}
+
+impl PqSection {
+    /// Serializes the section to the on-disk byte layout documented in the module header
+    /// (`SPQP` magic, codebook length + codebook, stride, then the flat per-slot codes).
+    fn to_bytes(&self) -> Vec<u8> {
+        let cb = self.pq.to_bytes();
+        let codes = self.codes.codes();
+        let mut out = Vec::with_capacity(4 + 8 + cb.len() + 4 + codes.len());
+        out.extend_from_slice(&PQ_SECTION_MAGIC);
+        out.extend_from_slice(&(cb.len() as u64).to_le_bytes());
+        out.extend_from_slice(&cb);
+        out.extend_from_slice(&(self.codes.stride() as u32).to_le_bytes());
+        out.extend_from_slice(codes);
+        out
+    }
+}
+
 /// Writes the built graph to `path` as a `.spqg` file (one node record per node). `fingerprint`
 /// (offset 32..56) binds the index to its graph; `None` writes an unverifiable (all-zero) block.
-fn write_graph(b: &Builder, path: &Path, fingerprint: Option<Fingerprint>) -> Result<(), String> {
+/// `pq` (when `Some`) appends a `PqSection` after the node records and sets the encoding tag to
+/// [`ENC_TAG_PQ`]; its `codes` MUST be in the same slot order as the node records.
+fn write_graph(
+    b: &Builder,
+    path: &Path,
+    fingerprint: Option<Fingerprint>,
+    pq: Option<&PqSection>,
+) -> Result<(), String> {
     if cfg!(target_endian = "big") {
         return Err(".spqg is a little-endian format; big-endian targets are unsupported".into());
     }
@@ -372,8 +422,11 @@ fn write_graph(b: &Builder, path: &Path, fingerprint: Option<Fingerprint>) -> Re
     header[12..16].copy_from_slice(&(r as u32).to_le_bytes());
     header[16..24].copy_from_slice(&(count as u64).to_le_bytes());
     header[24..28].copy_from_slice(&b.medoid.to_le_bytes());
-    // [OPUS-4.8] (sq-32i5) Graph fingerprint at offset 32..56 (offset 28..32 stays the reserved
-    // encoding tag). `None` leaves a zeroed block, which `check_graph` treats as unverifiable.
+    // [OPUS-4.8] (sq-qamd) Encoding tag at offset 28..32: `1` when a PQ section is appended below,
+    // else `0`. (sq-32i5) Graph fingerprint at offset 32..56; `None` leaves a zeroed block, which
+    // `check_graph` treats as unverifiable.
+    let enc_tag = if pq.is_some() { ENC_TAG_PQ } else { ENC_TAG_NONE };
+    header[ENC_TAG_OFFSET..ENC_TAG_OFFSET + 4].copy_from_slice(&enc_tag.to_le_bytes());
     if let Some(fp) = fingerprint {
         header[HEADER_LEN_V1..HEADER_LEN].copy_from_slice(&fp.to_bytes());
     }
@@ -401,6 +454,11 @@ fn write_graph(b: &Builder, path: &Path, fingerprint: Option<Fingerprint>) -> Re
         }
         w.write_all(&rec).map_err(|e| format!("write {}: {e}", path.display()))?;
     }
+    // [OPUS-4.8] (sq-qamd) Trailing PQ candidate-cache section (encoding tag == 1).
+    if let Some(section) = pq {
+        w.write_all(&section.to_bytes())
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
     let f = w.into_inner().map_err(|e| format!("flush {}: {e}", path.display()))?;
     f.sync_all().map_err(|e| format!("fsync {}: {e}", path.display()))?;
     Ok(())
@@ -427,6 +485,18 @@ pub struct DiskAnnIndex {
     /// Byte offset where node records begin: [`HEADER_LEN`] (v2) or [`HEADER_LEN_V1`] (legacy v1).
     /// Every record read keys off this so both versions are read correctly by the same code.
     data_offset: usize,
+    /// [OPUS-4.8] (sq-qamd) The in-RAM PQ candidate cache (codebook + per-slot codes), or `None`
+    /// for a plain index (encoding tag `0`). When present, [`search_slots`](Self::search_slots)
+    /// ranks each visited node's neighbours by an ADC table lookup against these codes and re-ranks
+    /// the final beam off the mmap; when `None` it computes every distance from the mmap as before.
+    pq: Option<PqCache>,
+}
+
+/// [OPUS-4.8] (sq-qamd) The decoded PQ candidate cache: the fitted quantizer and the per-slot
+/// codes (slot order == node-record order, so a graph slot indexes the codes directly).
+struct PqCache {
+    pq: ProductQuantizer,
+    codes: EncodedStore,
 }
 
 impl DiskAnnIndex {
@@ -446,7 +516,7 @@ impl DiskAnnIndex {
         path: P,
         cfg: VamanaConfig,
     ) -> Result<DiskAnnIndex, String> {
-        Self::build_inner(store, path, cfg, None)
+        Self::build_inner(store, path, cfg, None, None)
     }
 
     /// [OPUS-4.8] (sq-32i5) Like [`build`](Self::build) but binds the index to `graph` (embeds its
@@ -469,7 +539,30 @@ impl DiskAnnIndex {
         cfg: VamanaConfig,
         graph: &Graph,
     ) -> Result<DiskAnnIndex, String> {
-        Self::build_inner(store, path, cfg, Some(Fingerprint::of(graph)))
+        Self::build_inner(store, path, cfg, Some(Fingerprint::of(graph)), None)
+    }
+
+    /// [OPUS-4.8] (sq-qamd) Builds the Vamana graph **with a PQ candidate cache**: in addition to
+    /// the full-precision node records, it fits a [`ProductQuantizer`] over `store` (with `pq_cfg`),
+    /// encodes every vector into the in-RAM code cache, and persists both alongside the graph (the
+    /// trailing PQ section, encoding tag `1`). The opened index then searches DiskANN-style: rank
+    /// candidates on the RAM codes (no disk), re-rank the final beam off the mmap. Recall is
+    /// approximate (the PQ approximation) but no disk page is touched until the re-rank, so it scales
+    /// to stores whose full-precision vectors exceed RAM.
+    ///
+    /// Errors if `pq_cfg` is invalid for `store`'s dimension (see [`ProductQuantizer::fit`]) or the
+    /// store is empty (PQ needs at least one training vector — use the plain
+    /// [`build_with`](Self::build_with) for an empty store).
+    pub fn build_with_pq<P: AsRef<Path>>(
+        store: &VectorStore,
+        path: P,
+        cfg: VamanaConfig,
+        pq_cfg: PqConfig,
+    ) -> Result<DiskAnnIndex, String> {
+        let pq = ProductQuantizer::fit(store.dim(), store.iter().map(|(_, v)| v), pq_cfg)?;
+        let codes = pq.encode_store(store)?;
+        let section = PqSection { pq, codes };
+        Self::build_inner(store, path, cfg, None, Some(section))
     }
 
     fn build_inner<P: AsRef<Path>>(
@@ -477,6 +570,7 @@ impl DiskAnnIndex {
         path: P,
         cfg: VamanaConfig,
         fingerprint: Option<Fingerprint>,
+        pq: Option<PqSection>,
     ) -> Result<DiskAnnIndex, String> {
         if cfg.build_beam < cfg.degree {
             return Err(format!(
@@ -485,7 +579,7 @@ impl DiskAnnIndex {
             ));
         }
         let b = build_graph(store, &cfg);
-        write_graph(&b, path.as_ref(), fingerprint)?;
+        write_graph(&b, path.as_ref(), fingerprint, pq.as_ref())?;
         let mut idx = Self::open(path)?;
         idx.search_beam = cfg.search_beam;
         Ok(idx)
@@ -545,18 +639,38 @@ impl DiskAnnIndex {
         }
         let record_len = record_len(dim, degree);
         // Checked size arithmetic — reject a malformed header before it wraps past the bounds check.
-        let expect = count
+        // `nodes_end` is the byte just past the last node record; the file is exactly that long for
+        // a plain index, or longer (a trailing PQ section) when the encoding tag is `1`.
+        let nodes_end = count
             .checked_mul(record_len)
             .and_then(|body| body.checked_add(data_offset))
             .ok_or_else(|| {
                 format!("{origin}: dim={dim} degree={degree} count={count} overflows the file size")
             })?;
-        if map.len() != expect {
-            return Err(format!(
-                "{origin}: file is {} bytes, expected {expect} for dim={dim} degree={degree} count={count}",
-                map.len()
-            ));
-        }
+        // [OPUS-4.8] (sq-qamd) Encoding tag at offset 28..32 (reserved bytes of the header).
+        let enc_tag =
+            u32::from_le_bytes(map[ENC_TAG_OFFSET..ENC_TAG_OFFSET + 4].try_into().unwrap());
+        let pq = match enc_tag {
+            ENC_TAG_NONE => {
+                if map.len() != nodes_end {
+                    return Err(format!(
+                        "{origin}: file is {} bytes, expected {nodes_end} for dim={dim} degree={degree} count={count}",
+                        map.len()
+                    ));
+                }
+                None
+            }
+            ENC_TAG_PQ => {
+                if map.len() < nodes_end {
+                    return Err(format!(
+                        "{origin}: file is {} bytes, shorter than the {nodes_end}-byte node body",
+                        map.len()
+                    ));
+                }
+                Some(Self::parse_pq_section(&map[nodes_end..], count, dim, &origin)?)
+            }
+            t => return Err(format!("{origin}: unsupported encoding tag {t}")),
+        };
         if count > 0 && medoid as usize >= count {
             return Err(format!("{origin}: medoid {medoid} out of range (count {count})"));
         }
@@ -570,7 +684,67 @@ impl DiskAnnIndex {
             search_beam: VamanaConfig::default().search_beam,
             fingerprint,
             data_offset,
+            pq,
         })
+    }
+
+    /// [OPUS-4.8] (sq-qamd) Parses the trailing PQ section (`tail` begins right after the last node
+    /// record). Validates the magic, the codebook (which re-checks its own `dim`/`m`/`k`), that the
+    /// codebook's `dim` matches the graph's, and that exactly `count × M` code bytes are present (no
+    /// trailing slop) so a later code read is always in bounds. Errors are descriptive.
+    fn parse_pq_section(
+        tail: &[u8],
+        count: usize,
+        dim: usize,
+        origin: &str,
+    ) -> Result<PqCache, String> {
+        let hdr = 4 + 8; // magic + codebook length
+        if tail.len() < hdr {
+            return Err(format!("{origin}: truncated PQ section header"));
+        }
+        if tail[0..4] != PQ_SECTION_MAGIC {
+            return Err(format!("{origin}: PQ section has bad magic"));
+        }
+        let cb_len: usize = u64::from_le_bytes(tail[4..12].try_into().unwrap())
+            .try_into()
+            .map_err(|_| format!("{origin}: PQ codebook length exceeds the address space"))?;
+        let cb_end = hdr
+            .checked_add(cb_len)
+            .and_then(|e| e.checked_add(4)) // + stride u32
+            .ok_or_else(|| format!("{origin}: PQ section length overflows"))?;
+        if tail.len() < cb_end {
+            return Err(format!("{origin}: truncated PQ codebook"));
+        }
+        let pq = ProductQuantizer::from_bytes(&tail[hdr..hdr + cb_len])
+            .map_err(|e| format!("{origin}: {e}"))?;
+        if pq.dim() != dim {
+            return Err(format!("{origin}: PQ codebook dim {} != graph dim {dim}", pq.dim()));
+        }
+        let stride = u32::from_le_bytes(tail[hdr + cb_len..cb_end].try_into().unwrap()) as usize;
+        if stride != pq.m() {
+            return Err(format!("{origin}: PQ section stride {stride} != codebook M {}", pq.m()));
+        }
+        let want_codes = count
+            .checked_mul(stride)
+            .ok_or_else(|| format!("{origin}: PQ code array length overflows"))?;
+        if tail.len() != cb_end + want_codes {
+            return Err(format!(
+                "{origin}: PQ code array is {} bytes, expected {want_codes} (count {count} × M {stride})",
+                tail.len() - cb_end
+            ));
+        }
+        let codes =
+            EncodedStore::from_parts((0..count as u32).collect(), tail[cb_end..].to_vec(), stride)
+                .map_err(|e| format!("{origin}: {e}"))?;
+        Ok(PqCache { pq, codes })
+    }
+
+    /// [OPUS-4.8] (sq-qamd) Whether this index carries an in-RAM PQ candidate cache (built via
+    /// [`build_with_pq`](Self::build_with_pq) / persisted as the trailing PQ section). When `true`,
+    /// [`nearest`](Self::nearest) ranks candidates on the codes and re-ranks the beam off the mmap;
+    /// when `false` it searches full-precision throughout.
+    pub fn has_pq_cache(&self) -> bool {
+        self.pq.is_some()
     }
 
     /// The index's vector dimension.
@@ -616,9 +790,18 @@ impl DiskAnnIndex {
     /// Greedy beam search of width `beam` from the medoid toward `query` (already normalized),
     /// returning the `k` best `(slot, cosine)` pairs, best first. Each visited node is one
     /// contiguous record read from the map.
+    ///
+    /// [OPUS-4.8] (sq-qamd) When the index carries a PQ candidate cache (built via
+    /// [`build_with_pq`](Self::build_with_pq)) the beam is driven by RAM-only ADC distance
+    /// estimates against the codes ([`search_slots_pq`](Self::search_slots_pq)) and only the final
+    /// beam is re-ranked off the mmap; otherwise every candidate distance is the exact mmap
+    /// distance, as before.
     fn search_slots(&self, query: &[f32], k: usize, beam: usize) -> Vec<(u32, f32)> {
         if self.count == 0 {
             return Vec::new();
+        }
+        if let Some(cache) = &self.pq {
+            return self.search_slots_pq(cache, query, k, beam);
         }
         let beam = beam.max(k).max(1);
         let mut working: Vec<Cand> = Vec::with_capacity(beam + self.degree);
@@ -649,6 +832,61 @@ impl DiskAnnIndex {
         working.truncate(k);
         // d² over unit vectors → cosine: cos = 1 − d²/2.
         working.into_iter().map(|c| (c.slot, 1.0 - c.dist / 2.0)).collect()
+    }
+
+    /// [OPUS-4.8] (sq-qamd) DiskANN's "search on PQ, re-rank on disk" greedy beam search. The
+    /// frontier `working` holds **PQ-estimated** `d²` (an ADC [`DistanceTable`] lookup against the
+    /// in-RAM codes — no disk touched while traversing), so the beam is ranked from RAM. After the
+    /// walk, the surviving beam is **re-ranked against the full-precision mmap vectors** and the top
+    /// `k` of *those* exact distances are returned, so the reported cosine is exact even though the
+    /// path was guided by the lossy codes. `query` is already L2-normalized (the cosine convention).
+    fn search_slots_pq(
+        &self,
+        cache: &PqCache,
+        query: &[f32],
+        k: usize,
+        beam: usize,
+    ) -> Vec<(u32, f32)> {
+        let beam = beam.max(k).max(1);
+        let table = DistanceTable::new(&cache.pq, query);
+        // PQ-estimated d² for a slot's code (slot order == code order).
+        let pq_dist = |slot: u32| table.distance(cache.codes.code(slot as usize));
+        let mut working: Vec<Cand> = Vec::with_capacity(beam + self.degree);
+        let mut in_working = vec![false; self.count];
+        let mut expanded = vec![false; self.count];
+        let start = self.medoid;
+        working.push(Cand { dist: pq_dist(start), slot: start });
+        in_working[start as usize] = true;
+        loop {
+            let next = working.iter().filter(|c| !expanded[c.slot as usize]).min().copied();
+            let Some(cur) = next else { break };
+            expanded[cur.slot as usize] = true;
+            let neighbours: Vec<u32> = self.node_neighbours(cur.slot).collect();
+            for nbr in neighbours {
+                if in_working[nbr as usize] {
+                    continue;
+                }
+                in_working[nbr as usize] = true;
+                working.push(Cand { dist: pq_dist(nbr), slot: nbr });
+            }
+            if working.len() > beam {
+                working.sort_unstable();
+                working.truncate(beam);
+            }
+        }
+        // Re-rank the surviving beam against full-precision mmap vectors (the only disk reads), then
+        // keep the top `k` by EXACT distance — so the returned cosine matches the full-precision
+        // searchers even though the traversal was PQ-guided.
+        working.sort_unstable();
+        working.truncate(beam);
+        let mut reranked: Vec<Cand> = working
+            .into_iter()
+            .map(|c| Cand { dist: sq_dist(query, self.node_vector(c.slot)), slot: c.slot })
+            .collect();
+        reranked.sort_unstable();
+        reranked.truncate(k);
+        // d² over unit vectors → cosine: cos = 1 − d²/2.
+        reranked.into_iter().map(|c| (c.slot, 1.0 - c.dist / 2.0)).collect()
     }
 
     /// [OPUS-4.8] (sq-1wc1) **Filtered** greedy beam search: traverse the Vamana graph
