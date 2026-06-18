@@ -600,8 +600,8 @@ fn intersection_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometr
         // Line ∩ line.
         (Some(1), Some(1)) => Ok(line_line_intersection(a, b)),
         // Line ∩ polygon (clip the line to the polygon).
-        (Some(1), Some(2)) => Ok(clip_lines_to_polygon(a, &polygonal(b).unwrap())),
-        (Some(2), Some(1)) => Ok(clip_lines_to_polygon(b, &polygonal(a).unwrap())),
+        (Some(1), Some(2)) => Ok(intersect_line_with_polygon(a, &polygonal(b).unwrap())),
+        (Some(2), Some(1)) => Ok(intersect_line_with_polygon(b, &polygonal(a).unwrap())),
         _ => Err(GeoError::Unsupported(format!(
             "geof:intersection does not support {} ∩ {}",
             wkt_type_name(a),
@@ -662,64 +662,33 @@ fn point_on_linestring(c: Coord<f64>, ls: &LineString<f64>) -> bool {
     ls.lines().any(|seg| seg.coordinate_position(&c) != CoordPos::Outside)
 }
 
-/// Clip a 1-D operand to a polygon: the portions of each segment whose
-/// midpoint lies inside-or-on the polygon, after splitting every segment at its
-/// boundary crossings. Returns a (MULTI)LINESTRING (or, when the line only
-/// touches the polygon at isolated points, a MULTIPOINT of those points).
-fn clip_lines_to_polygon(line: &Geometry<f64>, poly: &MultiPolygon<f64>) -> Geometry<f64> {
-    let mut pieces: Vec<LineString<f64>> = Vec::new();
+/// Clip a 1-D operand to a polygon (line ∩ polygon): the portions of the line
+/// lying inside-or-on the polygon. Routed through the same `i_overlay`
+/// string-line clip as line − polygon (`clip_line_by_polygon`) for a single
+/// shared, robustly-noded clipper across both halves of the partition;
+/// `invert == false` keeps the in-polygon portions and `boundary_included ==
+/// true` keeps a span running ALONG the boundary (the polygon is a CLOSED set),
+/// the exact complement of the `(invert: true, boundary_included: true)` rule
+/// used for line − polygon. Returns a (MULTI)LINESTRING, or — when the line
+/// only touches the polygon at isolated points (which `i_overlay` drops as
+/// zero-length pieces) — a MULTIPOINT of those touch points. [OPUS-4.8]
+fn intersect_line_with_polygon(line: &Geometry<f64>, poly: &MultiPolygon<f64>) -> Geometry<f64> {
+    let pieces = clip_line_by_polygon(line, poly, false, true);
+    if !pieces.is_empty() {
+        return collect_lines(pieces);
+    }
+    // No 1-D overlap: the line may still graze the polygon at isolated vertices.
+    // `i_overlay` drops these zero-length pieces, so recover them directly as a
+    // MULTIPOINT (matching the prior hand-rolled fallback).
     let mut touch_points: Vec<Coord<f64>> = Vec::new();
-    // Boundary segments of the polygon, for crossing computation.
-    let boundary: Vec<Line<f64>> = poly
-        .0
-        .iter()
-        .flat_map(|p| {
-            std::iter::once(p.exterior().clone())
-                .chain(p.interiors().iter().cloned())
-                .flat_map(|r| r.lines().collect::<Vec<_>>())
-        })
-        .collect();
     for ls in line_strings(line) {
-        for seg in ls.lines() {
-            // Parametric positions (t in [0,1]) where this segment meets the
-            // polygon boundary, plus the endpoints.
-            let mut ts: Vec<f64> = vec![0.0, 1.0];
-            for bseg in &boundary {
-                if let Some(LineIntersection::SinglePoint { intersection, .. }) =
-                    line_intersection(seg, *bseg)
-                {
-                    ts.push(param_of(seg, intersection));
-                }
-            }
-            ts.retain(|t| t.is_finite() && (0.0..=1.0).contains(t));
-            ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
-            ts.dedup_by(|x, y| (*x - *y).abs() <= 1e-12);
-            // Keep each sub-segment whose midpoint is inside-or-on the polygon.
-            for w in ts.windows(2) {
-                let (t0, t1) = (w[0], w[1]);
-                if t1 - t0 <= 1e-12 {
-                    continue;
-                }
-                let mid = at_param(seg, (t0 + t1) / 2.0);
-                if poly.coordinate_position(&mid) != CoordPos::Outside {
-                    pieces.push(LineString(vec![at_param(seg, t0), at_param(seg, t1)]));
-                }
+        for c in ls.0 {
+            if poly.coordinate_position(&c) != CoordPos::Outside {
+                touch_points.push(c);
             }
         }
     }
-    merge_pieces(&mut pieces);
-    if pieces.is_empty() {
-        // Possibly the line only grazes the polygon at isolated vertices.
-        for ls in line_strings(line) {
-            for c in ls.0 {
-                if poly.coordinate_position(&c) != CoordPos::Outside {
-                    touch_points.push(c);
-                }
-            }
-        }
-        return collect_points(touch_points);
-    }
-    collect_lines(pieces)
+    collect_points(touch_points)
 }
 
 /// The parameter t∈[0,1] of `c` along `seg` (projection onto the longer axis;
