@@ -822,7 +822,11 @@ impl Graph {
         if is_jsonld_format(format) {
             return Self::load_dataset_serial(text, format);
         }
-        if !matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
+        // [OPUS-4.8] (sq-01yr) The N-Quads/TriG dataset aliases — including `nq`/
+        // `application/n-quads` (mirroring sq-m2pc) — take the dataset path so their named
+        // graphs are preserved; everything else defers to `load_str` (which itself rejects
+        // unknown formats under sq-m2pc rather than folding them into Turtle).
+        if !is_dataset_format(format) {
             return Self::load_str(text, format);
         }
         // [OPUS-4.8] (sq-25r3) N-Quads is newline-delimited, so a byte-range chunk-parallel parse
@@ -841,7 +845,7 @@ impl Graph {
         // between two serial parses).
         #[cfg(feature = "parallel")]
         {
-            if matches!(format, "nquads" | "n-quads") {
+            if matches!(format, "nquads" | "n-quads" | "nq" | "application/n-quads") {
                 Self::load_nquads_parallel(text.as_bytes())
             } else {
                 Self::load_trig_parallel(text.as_bytes())
@@ -886,13 +890,23 @@ impl Graph {
             };
         }
         match format {
-            "nquads" | "n-quads" => group!(NQuadsParser::new()),
+            // [OPUS-4.8] (sq-01yr) The N-Quads alias set (incl. `nq`/`application/n-quads`,
+            // mirroring the `parse_to_triples` set from sq-m2pc) — single authority in
+            // `is_nquads_format`.
+            _ if is_nquads_format(format) => group!(NQuadsParser::new()),
             // [OPUS-4.8] sq-dvyi: JSON-LD yields quads with a graph name, so the same
             // per-graph bucketing applies — `@graph`/`@id` named graphs are preserved.
             // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
             #[cfg(feature = "jsonld")]
             _ if is_jsonld_format(format) => group!(JsonLdParser::new()),
-            _ => group!(TriGParser::new()),
+            // [OPUS-4.8] (sq-01yr) TriG is gated on its explicit alias set — NOT a catch-all —
+            // mirroring the `parse_to_triples` Turtle fix (sq-m2pc). A typo'd or unsupported
+            // dataset `format` now ERRORS here instead of silently parsing as TriG and
+            // returning `Ok`. `load_dataset` already routes non-dataset formats to `load_str`,
+            // but the direct callers (the `jsonld`/non-`parallel` paths and the TriG-parallel
+            // serial fallback) inherited this independent silent fallback.
+            _ if is_trig_format(format) => group!(TriGParser::new()),
+            _ => return Err(unknown_format_err(format)),
         }
         let build_terms = |triples: &[[Term; 3]]| -> Graph {
             let mut dict = Dict::new();
@@ -3772,6 +3786,30 @@ fn is_turtle_format(format: &str) -> bool {
     )
 }
 
+/// [OPUS-4.8] (sq-01yr) Whether `format` names the TriG serialization. The single authority
+/// for the TriG alias set, mirroring [`is_turtle_format`]. `load_dataset_serial` previously
+/// fell back to TriG for ANY string that was not N-Quads/JSON-LD (so a typo'd or unsupported
+/// dataset format silently parsed as TriG and returned `Ok`); it now gates on this set and
+/// rejects the unknown rest via [`unknown_format_err`].
+fn is_trig_format(format: &str) -> bool {
+    matches!(format, "trig" | "application/trig")
+}
+
+/// [OPUS-4.8] (sq-01yr) Whether `format` names a quad-bearing dataset serialization (N-Quads
+/// or TriG, plus their aliases) that `load_dataset` routes through the per-graph dataset path
+/// to PRESERVE named graphs. Any other format defers to `load_str` (which folds named graphs
+/// into the default graph, and rejects genuinely-unknown strings under sq-m2pc). JSON-LD is
+/// handled by its own `is_jsonld_format` gate ahead of this check, so it is not listed here.
+fn is_nquads_format(format: &str) -> bool {
+    matches!(format, "nquads" | "n-quads" | "nq" | "application/n-quads")
+}
+
+/// [OPUS-4.8] (sq-01yr) The set of dataset formats `load_dataset` takes through the per-graph
+/// path — the union of [`is_nquads_format`] and [`is_trig_format`].
+fn is_dataset_format(format: &str) -> bool {
+    is_nquads_format(format) || is_trig_format(format)
+}
+
 /// [OPUS-4.8] (sq-m2pc) The error returned by `parse_to_triples`/`…_with_base` for a
 /// format string they do not recognise — the replacement for the old silent
 /// "unknown ⇒ Turtle" catch-all. The `jsonld` entry only appears when that opt-in
@@ -6348,6 +6386,50 @@ mod tests {
             );
             // The public `load_str` wrappers propagate the same error.
             assert!(Graph::load_str(ttl, bogus).is_err(), "load_str must reject {bogus:?}");
+        }
+    }
+
+    /// [OPUS-4.8] (sq-01yr) `load_dataset_serial` (the serial dataset reference, reached by the
+    /// `jsonld`/non-`parallel` paths and the TriG-parallel serial fallback) had its OWN
+    /// independent `_ => TriGParser` catch-all, so ANY string that was not N-Quads/JSON-LD —
+    /// including typos and unsupported formats — silently parsed as TriG and returned `Ok`.
+    /// It now gates TriG on its explicit alias set (mirroring the `parse_to_triples` Turtle fix,
+    /// sq-m2pc) and rejects the unknown rest. The public `load_dataset` entry — which routes
+    /// non-dataset formats to `load_str` first — must agree on the rejection.
+    #[test]
+    fn load_dataset_rejects_unknown_format() {
+        // A one-quad N-Quads body — valid for the dataset path, so a passing assertion proves
+        // the FORMAT string (not the document) is what gets rejected below.
+        let nq = "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .";
+        // A one-statement TriG body in the default graph.
+        let trig = "<http://ex/s> <http://ex/p> <http://ex/o> .";
+
+        // Accepted dataset aliases still load through the serial reference.
+        for fmt in ["nquads", "n-quads", "nq", "application/n-quads"] {
+            let g = Graph::load_dataset_serial(nq, fmt)
+                .unwrap_or_else(|e| panic!("alias {fmt:?} must parse as N-Quads, got {e}"));
+            assert_eq!(g.named.len() + g.len(), 1, "alias {fmt:?}");
+        }
+        for fmt in ["trig", "application/trig"] {
+            let g = Graph::load_dataset_serial(trig, fmt)
+                .unwrap_or_else(|e| panic!("alias {fmt:?} must parse as TriG, got {e}"));
+            assert_eq!(g.len(), 1, "alias {fmt:?}");
+        }
+
+        // Unknown / typo'd / unsupported strings now ERROR instead of silently parsing as TriG.
+        // `trg` is the load-bearing case: previously it hit the catch-all and parsed as TriG.
+        for bogus in ["bogusfmt", "trg", "TriG", "rdfxml", ""] {
+            let e = match Graph::load_dataset_serial(trig, bogus) {
+                Err(e) => e,
+                Ok(_) => panic!("unknown format {bogus:?} must error, not fall back to TriG"),
+            };
+            assert!(e.contains(bogus), "error should name the bad format: {e}");
+            // The public `load_dataset` entry must also reject it: it routes a non-dataset
+            // format to `load_str`, which rejects the unknown string under sq-m2pc.
+            assert!(
+                Graph::load_dataset(trig, bogus).is_err(),
+                "public load_dataset must reject {bogus:?}"
+            );
         }
     }
 
