@@ -13,17 +13,29 @@
 use std::time::Instant;
 
 fn main() {
-    let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let runs = 3;
 
     eprintln!("generating {n} synthetic triples + HDT (in-memory, one-time)...");
     let bytes = generate_hdt_bytes(n);
-    eprintln!("hdt bytes: {} ({:.1} MiB)", bytes.len(), bytes.len() as f64 / (1024.0 * 1024.0));
+    eprintln!(
+        "hdt bytes: {} ({:.1} MiB)",
+        bytes.len(),
+        bytes.len() as f64 / (1024.0 * 1024.0)
+    );
 
     // Confirm identical output before timing.
     let g_direct = sparq_hdt::load_reader(std::io::Cursor::new(bytes.clone())).unwrap();
-    let g_upstream = sparq_hdt::load_reader_via_upstream(std::io::Cursor::new(bytes.clone())).unwrap();
-    assert_eq!(g_direct.store.len(), g_upstream.store.len(), "graphs must match");
+    let g_upstream =
+        sparq_hdt::load_reader_via_upstream(std::io::Cursor::new(bytes.clone())).unwrap();
+    assert_eq!(
+        g_direct.store.len(),
+        g_upstream.store.len(),
+        "graphs must match"
+    );
     let triples = g_direct.store.len();
     println!("loaded {triples} triples (direct == upstream store len)\n");
 
@@ -69,7 +81,10 @@ fn generate_hdt_bytes(n: usize) -> Vec<u8> {
     for _ in 0..n {
         let s = rng() % 100_000;
         let p = rng() % 50;
-        let _ = write!(nt, "<http://bench.example/e{s}> <http://bench.example/vocab/p{p}> ");
+        let _ = write!(
+            nt,
+            "<http://bench.example/e{s}> <http://bench.example/vocab/p{p}> "
+        );
         match rng() % 5 {
             0 => {
                 let _ = write!(nt, "<http://bench.example/e{}>", rng() % 100_000);
@@ -81,10 +96,19 @@ fn generate_hdt_bytes(n: usize) -> Vec<u8> {
                 let _ = write!(nt, "\"etikett {}\"@de", rng() % 1_000_000);
             }
             3 => {
-                let _ = write!(nt, "\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", rng() % 100_000);
+                let _ = write!(
+                    nt,
+                    "\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+                    rng() % 100_000
+                );
             }
             _ => {
-                let _ = write!(nt, "\"{}.{:02}\"^^<http://www.w3.org/2001/XMLSchema#decimal>", rng() % 1000, rng() % 100);
+                let _ = write!(
+                    nt,
+                    "\"{}.{:02}\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+                    rng() % 1000,
+                    rng() % 100
+                );
             }
         }
         nt.push_str(" .\n");
