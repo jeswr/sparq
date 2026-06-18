@@ -1,0 +1,58 @@
+# [OPUS-4.8] Vendored, pinned MINIMAL excerpt of the DASH Data Shapes vocabulary
+# (http://datashapes.org/dash), for the offline W3C SHACL `sparql/component/*`
+# conformance suite (sq-wys).
+#
+# Why a minimal excerpt, not the full graph: the W3C component tests
+# (validator-001, optional-001, propertyValidator-select-001) carry
+# `owl:imports <http://datashapes.org/dash>` only as an artefact of their
+# upstream conversion from datashapes.org. Each test DECLARES its own constraint
+# component LOCALLY (a subclass of sh:ConstraintComponent with its own
+# sh:validator), and references NO `dash:` term beyond the `@prefix` line. The
+# full upstream dash.ttl (≈2.4k lines) additionally defines dozens of its OWN
+# sh:ConstraintComponents (dash:CoExistsWithConstraintComponent, …) — merging
+# those into a test's shapes graph would ACTIVATE extra constraints and corrupt
+# the expected validation reports. So this excerpt carries only:
+#   * the `dash:` prefix declaration, and
+#   * the standard SHACL SPARQL-validator class vocabulary the components build on
+#     (rdfs:subClassOf the sh: types), which is inert (adds no component),
+# so that `owl:imports <http://datashapes.org/dash>` RESOLVES to attributable,
+# pinned content without changing any validation outcome.
+#
+# Source: http://datashapes.org/dash @ the suite-pinned upstream
+#   (w3c/data-shapes b6e73695d6196f33d7ce3ba47094a10fbc298e65). Bump deliberately
+#   alongside crates/sparq-shacl/fetch-shacl-tests.sh.
+
+@prefix dash: <http://datashapes.org/dash#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+<http://datashapes.org/dash>
+  a owl:Ontology ;
+  rdfs:label "DASH Data Shapes Vocabulary (minimal vendored excerpt)" ;
+  owl:imports <http://www.w3.org/ns/shacl#> ;
+  sh:declare [
+      sh:namespace "http://datashapes.org/dash#"^^xsd:anyURI ;
+      sh:prefix "dash" ;
+    ] ;
+.
+
+# The SHACL SPARQL-based validator vocabulary the constraint-component machinery
+# is built on (SHACL §6.2.3). These are inert class declarations — they introduce
+# no sh:ConstraintComponent, so importing them cannot add a constraint.
+sh:SPARQLAskValidator
+  a rdfs:Class ;
+  rdfs:label "SPARQL ASK validator" ;
+  rdfs:subClassOf sh:Validator ;
+.
+sh:SPARQLSelectValidator
+  a rdfs:Class ;
+  rdfs:label "SPARQL SELECT validator" ;
+  rdfs:subClassOf sh:Validator ;
+.
+sh:Validator
+  a rdfs:Class ;
+  rdfs:label "Validator" ;
+.

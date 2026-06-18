@@ -120,6 +120,16 @@ pub enum Component {
     CustomSparql {
         component: usize,
         args: Vec<Option<Term>>,
+        /// [OPUS-4.8] Index into the model's `path_validators` store of a
+        /// per-shape validator with the shape's property path substituted for `$PATH`
+        /// query variable (SHACL §6.3), present only when the shape is a PROPERTY
+        /// shape, the chosen validator references `$PATH`, and the substituted
+        /// query re-parses. When set it OVERRIDES the component's shared
+        /// (path-free) validator for this occurrence; otherwise the shared
+        /// validator is used as-is (node shapes, or `$PATH`-free validators). An
+        /// index (not the value) keeps the crate-private validator type off this
+        /// public enum.
+        path_validator: Option<usize>,
     },
     /// [OPUS-4.8] (sq-mk9n, `shacl-af`) `sh:expression` — the SHACL-AF
     /// *Expression Constraint* (`sh:ExpressionConstraintComponent`): a value node
@@ -153,6 +163,32 @@ pub(crate) struct ComponentParameter {
     /// `sh:optional true` — the parameter need not be present for the component
     /// to activate (a mandatory parameter must be present).
     pub optional: bool,
+}
+
+impl PreparedComponentValidator {
+    /// Whether the validator query text references the `$PATH` / `?PATH` query
+    /// variable — i.e. it must be re-parsed per property shape with the shape's
+    /// path substituted (SHACL §6.3). A cheap textual probe (the whole-token
+    /// match is done by `substitute_path_var`); a false positive only costs a
+    /// re-parse that produces the same query.
+    pub fn references_path(&self) -> bool {
+        self.raw.contains("PATH")
+    }
+
+    /// Re-parses this validator with `$PATH` / `?PATH` substituted by the SPARQL
+    /// property-path expression `pp` (SHACL §6.3 pre-binds `$PATH` to the property
+    /// shape's path). Returns `None` if the substituted query no longer parses
+    /// (ill-formed → the component occurrence is then skipped, lenient).
+    pub fn with_path(&self, pp: &str) -> Option<PreparedComponentValidator> {
+        let substituted = substitute_path_var(&self.raw, pp);
+        let prepared = crate::sparql::PreparedValidator::build(&substituted, self.is_ask)?;
+        Some(PreparedComponentValidator {
+            prepared,
+            message: self.message.clone(),
+            raw: substituted,
+            is_ask: self.is_ask,
+        })
+    }
 }
 
 /// [OPUS-4.8] A SPARQL-based constraint component declaration (SHACL §6.2): its
@@ -193,6 +229,15 @@ impl ComponentDef {
 pub(crate) struct PreparedComponentValidator {
     pub prepared: crate::sparql::PreparedValidator,
     pub message: Option<String>,
+    /// The validator's full query text (prefixes already prepended) and whether
+    /// it is an `sh:ask`. Retained so a `sh:propertyValidator` can be RE-PARSED
+    /// per property shape with the shape's path substituted for the `$PATH`
+    /// query variable (SHACL §6.3 pre-binds `$PATH` to the shape's property path,
+    /// which — being a property PATH, not a term — cannot go through the VALUES
+    /// table the other pre-bindings use, so it is a textual substitution like the
+    /// §5.2 `sh:sparql` path). `None` for blank text would never compile.
+    pub raw: String,
+    pub is_ask: bool,
 }
 
 /// A `sh:sparql` constraint's components (SHACL §5.2): the `sh:select` query,
@@ -247,6 +292,12 @@ pub struct ShapesModel {
     /// [`Component::CustomSparql`]. The registry is keyed (for activation) on the
     /// mandatory parameter predicates each component declares.
     pub(crate) components: Vec<ComponentDef>,
+    /// [OPUS-4.8] (sq-wys) Per-shape `sh:propertyValidator`s re-parsed with the
+    /// shape's path substituted for the `$PATH` query variable (SHACL §6.3),
+    /// referenced by [`Component::CustomSparql`]'s `path_validator` index. Kept
+    /// off the public `Component` enum so the (crate-private) prepared-validator
+    /// type is not exposed (same pattern as `sparql` / `expressions`).
+    pub(crate) path_validators: Vec<PreparedComponentValidator>,
     /// [OPUS-4.8] (sq-vg3y) Precomputed `sh:closed sh:ByTypes` property closures
     /// (SHACL-1.2 §4.8.1 `collectProperties`): for each shapes-graph node, the
     /// IRI properties reachable via `sh:property/sh:path` transitively through
@@ -271,6 +322,7 @@ impl ShapesModel {
             targeted: Vec::new(),
             sparql: Vec::new(),
             components: Vec::new(),
+            path_validators: Vec::new(),
             by_types_closures: FxHashMap::default(),
             #[cfg(feature = "shacl-af")]
             expressions: Vec::new(),
@@ -764,6 +816,14 @@ impl ShapesModel {
         // MANDATORY parameter predicates the shape all uses. The bound parameter
         // values (one object per parameter; `None` for an absent optional one)
         // are captured now and pre-bound as `$paramName` at evaluation time.
+        // The shape's SPARQL property-path form, used for `$PATH` pre-binding on
+        // property-shape component activations (computed once).
+        let path_pp = shape_path.as_ref().and_then(Path::to_sparql_property_path);
+        // Collect activations first: the `self.components` borrow below is
+        // immutable, so the per-shape `$PATH` re-parse (which pushes into
+        // `self.path_validators`) is deferred to after the loop.
+        let mut activations: Vec<(usize, Vec<Option<Term>>, Option<PreparedComponentValidator>)> =
+            Vec::new();
         for (cidx, comp) in self.components.iter().enumerate() {
             let mut args: Vec<Option<Term>> = Vec::with_capacity(comp.parameters.len());
             let mut activates = true;
@@ -776,11 +836,30 @@ impl ShapesModel {
                 args.push(value);
             }
             if activates && !comp.parameters.is_empty() {
-                shape.components.push(Component::CustomSparql {
-                    component: cidx,
-                    args,
+                // [OPUS-4.8] On a property shape, pre-bind `$PATH` (SHACL §6.3):
+                // re-parse the chosen validator with the shape's property-path
+                // expression substituted for the `$PATH` query variable. `$PATH`
+                // is a property PATH (not a term), so — like the §5.2 `sh:sparql`
+                // path — it is a textual substitution rather than a VALUES row.
+                let path_validator = path_pp.as_deref().and_then(|pp| {
+                    comp.validator_for(true)
+                        .filter(|v| v.references_path())
+                        .and_then(|v| v.with_path(pp))
                 });
+                activations.push((cidx, args, path_validator));
             }
+        }
+        for (cidx, args, path_validator) in activations {
+            let path_validator = path_validator.map(|v| {
+                let idx = self.path_validators.len();
+                self.path_validators.push(v);
+                idx
+            });
+            shape.components.push(Component::CustomSparql {
+                component: cidx,
+                args,
+                path_validator,
+            });
         }
 
         shape
@@ -1037,12 +1116,15 @@ fn parse_component_parameters(g: &GraphView, node: &Term) -> Vec<ComponentParame
             Some(Term::NamedNode(n)) => n.as_str().to_string(),
             _ => continue,
         };
-        // The pre-bound variable name: sh:name if a literal, else the predicate's
-        // local name (after the last '#' or '/').
-        let var = match g.object(&p, &sh("name")) {
-            Some(Term::Literal(l)) => l.value().to_string(),
-            _ => local_name(&predicate),
-        };
+        // [OPUS-4.8] The pre-bound variable name is the LOCAL NAME of the
+        // parameter's `sh:path` IRI (SHACL §6.2.1: "the values of these parameters
+        // [...] pre-bound [...] using the local name of the IRI of sh:path"), NOT
+        // `sh:name` — which is only a human-readable display label. The W3C
+        // `propertyValidator-select-001` test makes this load-bearing: its
+        // parameter is `sh:path ex:lang ; sh:name "language"` yet the validator
+        // query references `$lang` (the path local name), so binding `$language`
+        // would leave `$lang` unbound and the constraint would never fire.
+        let var = local_name(&predicate);
         let optional = matches!(
             g.object(&p, &sh("optional")),
             Some(Term::Literal(l)) if l.value() == "true"
@@ -1087,7 +1169,12 @@ fn parse_validator(
         Some(Term::Literal(l)) => Some(l.value().to_string()),
         _ => None,
     };
-    Some(PreparedComponentValidator { prepared, message })
+    Some(PreparedComponentValidator {
+        prepared,
+        message,
+        raw: full,
+        is_ask,
+    })
 }
 
 /// Substitutes the `$PATH` / `?PATH` query variable (a SHACL property-shape
