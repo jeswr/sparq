@@ -127,10 +127,20 @@ VECTORS_HEAVY_SKIP="recall_at_10_vs_brute_force_on_50k"   # matches HNSW + DiskA
 #
 # This roughly DOUBLES the core/engine measurement cost (the suites are a second
 # heavy exercise on top of the tests), which is exactly why it is nightly-only —
-# the per-commit tier keeps the cheap test-only measurement unchanged. Both suite
-# binaries skip suites whose fixtures are absent (fetched above), so the step is a
-# graceful no-op-on-X if fixtures could not be fetched (the test-only profraw from
-# (2) still yields a valid, if lower, number — never an empty/failed measurement).
+# the per-commit tier keeps the cheap test-only measurement unchanged.
+#
+# FIXTURE-ABSENCE BEHAVIOUR (NOT a graceful degrade): step (3)'s suite binaries
+# REQUIRE their fixtures. If `<root>/sparql` (sparq-conformance) or the inference
+# RDF-tests dir (sparq-inference-conformance) is absent, that binary prints
+# "test data not found … run scripts/fetch-*.sh first" and `std::process::exit(2)`s
+# (see crates/sparq-conformance/src/main.rs and src/bin/inference.rs) — it does NOT
+# skip-and-continue. A non-zero exit BREAKS measure_merged()'s `&&` chain, so step
+# (4)'s `report` never runs, rc!=0, and the crate is recorded UNMEASURED — the
+# step-2 test-only profraw is DISCARDED for that crate, not reported as a lower
+# number. So fixtures must be present (fetched above) for the merge to produce a
+# number at all; on absence the crate falls through to the unmeasured-row path
+# (which the robust gate then re-measures test-only). This is fail-closed, not a
+# silent lower measurement.
 CONFORMANCE_MERGE_CRATES="sparq-core sparq-engine"
 # Enable the merge only outside the cheap per-commit tier (set to 0 to force-disable).
 CONFORMANCE_MERGE="${CONFORMANCE_MERGE:-auto}"
@@ -177,9 +187,11 @@ want_conformance_merge() {
 # report (nightly tier). Uses cargo-llvm-cov's accumulate-then-report flow — see the
 # CONFORMANCE-BINARY MERGE header block for the full rationale. Emits the SAME JSON row
 # shape as measure(), tagging features += "conformance-merge" so the summary records that
-# this crate's number includes the suite binaries. On any failure to capture the merged
-# profraw it leaves rc!=0, and the caller falls through to the unmeasured-row path (the
-# robust gate then re-measures), so this never silently produces a low number.
+# this crate's number includes the suite binaries. On ANY failure to capture the merged
+# profraw — including fixture-absence, where a suite binary `exit(2)`s and breaks the `&&`
+# chain BEFORE step (4)'s report (see the FIXTURE-ABSENCE note in the header) — it leaves
+# rc!=0 and the caller falls through to the unmeasured-row path (the robust gate then
+# re-measures test-only). It records the crate UNMEASURED rather than a silent low number.
 measure_merged() {
   local crate="$1"
   local -a features=("conformance-merge")
