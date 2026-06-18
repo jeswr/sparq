@@ -136,6 +136,15 @@ a time per `AGENTS.md`). This frontier is exactly what `push-frontier.sh` must p
   branch only when it has **unpushed local commits** (`origin/<branch>..HEAD ≠ 0`, or
   never pushed) — an `--no-merged`/ancestor test would flag all of them and empty the
   frontier. Run `worktree-gc.sh --apply` at idle so stale worktrees do not pile up.
+* **Partition by primary-CODE crate, not just the label surface (sq-6ip4).** A bead's
+  conflict SURFACE is inferred from its title label (e.g. `genai`/`introspect` for its
+  READMEs/SKILLs), but its actual `.rs` changes may land in a *different* crate. Wave
+  `wm5fcnlqj` picked two `sparq-core` beads in one wave (#597 + #598) because their labels
+  diverged yet both edited `crates/sparq-core/src/lib.rs` → merge-conflict risk.
+  `push-frontier.sh` therefore reserves each bead on **two lanes**: its label surface
+  *and* its **primary-code crate**, inferred from an explicit `crates/<crate>/…/*.rs` path
+  in the bead's title+description (a known-crate, `.rs`-only probe — `infer_code_crate`).
+  Two beads touching one crate's source never co-launch even when their labels differ.
 
 The two independent ceilings from `AGENTS.md` both apply and are
 HARD: the **box CPU budget** (6 cargo-heavy locally) and the **Anthropic API
