@@ -420,10 +420,11 @@ Semantics:
   merely hidden. **Honest scope:** it cannot reach bytes already copied **off-box** (filesystem
   snapshots, block-level COW history, external backups) — those remain the operator's
   responsibility. See `compliance/privacy/retention-erasure-runbook.md` §7a.
-- **Deferred hardening (beaded, not yet wired):** byte-accounted durability metrics, online
-  compaction tuning under sustained write load, and WAL-durable `CLEAR`/`DROP GRAPH <g>` of an
-  *existing* named graph (today those operations are applied in memory and persisted only at the
-  next compaction).
+- **Deferred hardening (beaded, not yet wired):** byte-accounted durability metrics and online
+  compaction tuning under sustained write load. <!-- [OPUS-4.8] de-staled: WAL-durable CLEAR/DROP GRAPH landed (sq-glw2); see durable-erasure note above -->
+  (WAL-durable `CLEAR`/`DROP GRAPH <g>` of an *existing* named graph **has landed** — sq-glw2,
+  via `Graph::clear_default_durable` / `drop_named_durable` with interrupted-drop crash recovery —
+  so it is no longer deferred.)
 
 ## 🐳 Running the container image (ghcr.io)
 

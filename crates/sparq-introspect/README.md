@@ -98,7 +98,7 @@ and the olympics summary names the dataset's actual classes (asserted by
 cargo run -p sparq-introspect --example olympics_introspect --release
 ```
 
-Tests: 14 unit (`src/lib.rs`: characteristic-set exactness, coverage, object
+Tests: 15 unit (`src/lib.rs`: characteristic-set exactness, coverage, object
 kinds/datatypes/samples, observed-vs-declared domain/range, vocabularies, JSON validity,
 text-summary budget, join hints, VoID export, retrieval mode) plus 1 integration
 (`tests/olympics.rs`, skip-if-absent at 1.78M scale).

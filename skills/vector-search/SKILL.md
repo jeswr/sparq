@@ -682,10 +682,13 @@ path (recipe 10), and does **not** transfer to this approximate path. Implement 
   its **build** is single-threaded (slower than the rayon HNSW build) — only the **open** is
   cheap. `ef_search` / `search_beam` must be ≥ the `k` you query.
 - **DiskANN honest scope:** `DiskAnnIndex` searches full-precision vectors straight from the
-  mmap. The PQ-compressed in-RAM candidate cache that *full* DiskANN ranks on
-  (`quant.rs`) exists and is tested but is **not yet wired into** `search_slots` (recorded
-  follow-up in the crate's open beads, `bd list -l area:sparq-vectors`); run the PQ-filter + re-rank loop yourself
-  (recipe 4).
+  mmap by default. The PQ-compressed in-RAM candidate cache that *full* DiskANN ranks on
+  (`quant.rs`) exists, is tested, and **is now wired into** `search_slots` (sq-qamd / #620):
+  when a PQ cache is present, `search_slots` dispatches to `search_slots_pq` — rank on the
+  RAM-resident codes, re-rank the final beam off the mmap. Build it via
+  `DiskAnnIndex::build_with_pq` and check `has_pq_cache()`; recipe 4 shows the same loop the
+  index now drives internally. <!-- [OPUS-4.8] de-staled: PQ cache wired into search_slots (sq-qamd/#620) -->
+  Without a PQ cache, search stays full-precision-from-mmap as above.
 - **Filtered ANN (`filtered-ann` feature):** predicate-constrained search returns only ids in the
   `IdMask`, and **every returned id is guaranteed in the mask**. An **empty** mask -> no results
   (distinct from passing no mask = an unfiltered search); a **full** mask -> identical to the
