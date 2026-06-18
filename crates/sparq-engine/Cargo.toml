@@ -89,6 +89,16 @@ window-functions = []
 # Pulls in ZERO new dependencies (sparq-core is already a direct dep) and contains no
 # `unsafe` — the kernels are plain index loops the compiler auto-vectorises.
 vectorized = []
+# [OPUS-4.8] (sq-a9cn) Materialised-view / query-result cache: a bounded, version-aware
+# LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed by `(parsed
+# query algebra, caller graph-version)`. Vendor-parity operational-perf feature for
+# endpoints that re-serve the same read query against a slowly-changing graph. OPT-IN and
+# OFF by default: when off, zero cache code compiles and the default native + wasm builds
+# are byte-identical. Pulls in ZERO new dependencies (std `HashMap`/`Mutex`/`Arc` only)
+# and contains no `unsafe`. Caching is SOUND only under the documented contract — the
+# caller bumps the version on every mutation, and non-deterministic queries (NOW/RAND/
+# UUID/SERVICE/custom fns, detected by `cache::is_cacheable`) are never stored.
+result-cache = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

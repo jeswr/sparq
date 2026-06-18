@@ -1,6 +1,11 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
+// [OPUS-4.8] (sq-a9cn) Opt-in materialised-view / query-result cache. NON-DEFAULT
+// `result-cache` feature — when off, zero cache code compiles and the default native +
+// wasm builds are byte-identical (no new deps).
+#[cfg(feature = "result-cache")]
+pub mod cache;
 mod construct;
 #[cfg(feature = "cs-planner")]
 pub mod cs;
@@ -205,6 +210,10 @@ pub use aggregate::{
 };
 #[cfg(feature = "window-functions")]
 pub use window_syntax::{query_over, query_over_with_budget};
+// [OPUS-4.8] (sq-a9cn) Materialised-view / query-result cache re-exports (NON-DEFAULT
+// `result-cache` feature).
+#[cfg(feature = "result-cache")]
+pub use cache::{is_cacheable, CacheStats, ResultCache};
 
 // [OPUS-4.8] (sq-hvfe) Vectorized (columnar / vector-at-a-time) execution primitives —
 // the first building block of the M4 plan (research/optimization-techniques.md). NON-DEFAULT
@@ -418,7 +427,7 @@ pub fn ask_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget)
 /// [`dataset::build_active`]. `None` (the common case) means: evaluate against
 /// the store itself. Every query entry point calls this once after parsing, so
 /// the no-clause path costs exactly one `Option` check.
-fn active_dataset(graph: &Graph, q: &Query) -> Option<Graph> {
+pub(crate) fn active_dataset(graph: &Graph, q: &Query) -> Option<Graph> {
     q.dataset().map(|ds| dataset::build_active(graph, ds))
 }
 
