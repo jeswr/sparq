@@ -33,10 +33,13 @@ tied directly to the post-batch re-evaluation table in `AGENTS.md`.
 
 ### The conformance-ratchet "never lower" rule
 
-The committed conformance floors (`conformance-report.md`,
-`inference-conformance-report.md`, the SHACL floors, `bench/perf-baseline.json`, the
-coverage floors) are **ratchets: they only ever go UP.** Never lower a ratchet to make a
-change pass — fix the regression instead. If a test newly diverges for a *documented,
+The conformance floors are **ratchets: they only ever go UP.** They are reported by
+[`sparq-conformance`](crates/sparq-conformance) — the SPARQL report (`conformance-report.md`)
+is git-ignored and regenerated locally by `cargo run -p sparq-conformance` (CI re-runs it and
+publishes it as an artifact), while the inference report is committed at
+[`inference-conformance-report.md`](inference-conformance-report.md). The SHACL floors,
+`bench/perf-baseline.json`, and the coverage floors ratchet the same way. Never lower a ratchet
+to make a change pass — fix the regression instead. If a test newly diverges for a *documented,
 spec-justified* reason, record the rationale in the report alongside the divergence
 (don't just drop the count). Raising a floor when coverage genuinely improves is
 encouraged.
