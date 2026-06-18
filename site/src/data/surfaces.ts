@@ -156,6 +156,7 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "RDFS / OWL 2 RL / N3 closure + proof trees.",
         tier: "live-new-wasm",
         icon: Brain,
+        built: true,
       },
       {
         slug: "shacl",

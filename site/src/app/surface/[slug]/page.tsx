@@ -13,6 +13,7 @@ const BUILT_SURFACES = new Set([
   "data-formats",
   "javascript-wasm",
   "shacl",
+  "inference",
   "mpc",
   "zk",
 ]);
