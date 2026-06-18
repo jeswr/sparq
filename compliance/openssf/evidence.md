@@ -136,8 +136,8 @@ flag where sparq also satisfies **silver/gold**.
 - **Fuzzing** — [`fuzz.yml`](../../.github/workflows/fuzz.yml) (cargo-fuzz, PR + daily) + [`shacl-diff-fuzz.yml`](../../.github/workflows/shacl-diff-fuzz.yml).
 - **Security-Policy** — [`SECURITY.md`](../../SECURITY.md) + [`.well-known/security.txt`](../../.well-known/security.txt).
 - **Signed-Releases** — [`release.yml`](../../.github/workflows/release.yml): `attest-build-provenance` (Sigstore SLSA) + `SHA256SUMS` + container `provenance: mode=max`.
-- **Branch-Protection** — [`docs/branch-protection.md`](../../docs/branch-protection.md) (doc-of-record; live ruleset is out-of-repo).
-- **Code-Review** — branch-protection ≥1 review + CODEOWNERS + Copilot auto-review ([`CODEOWNERS`](../../CODEOWNERS)).
+- **Branch-Protection** — [`docs/branch-protection.md`](../../docs/branch-protection.md) (doc-of-record; live ruleset out-of-repo). The solo-maintainer score-depression, the compensating controls, and a `gh api …/rulesets` verification procedure (with a rule-by-rule match table) are documented in its [§Solo-maintainer & the Scorecard score](../../docs/branch-protection.md#solo-maintainer--the-scorecard-code-review--branch-protection-score) (GX-OSSF-3 / sq-sto1).
+- **Code-Review** — solo-maintainer, agent-driven: there is no second human, so the live ruleset sets `required_approving_review_count: 0` (documented honestly, **not** faked with a Scorecard-discounted self-approval); the **compensating** automated review layer is Copilot code review on push + the CodeQL code-scanning gate + conversation-resolution. [`CODEOWNERS`](../../CODEOWNERS) records ownership for when a second reviewer is added. See [`docs/branch-protection.md` §Solo-maintainer](../../docs/branch-protection.md#solo-maintainer--the-scorecard-code-review--branch-protection-score).
 - **CI-Tests** — [`ci.yml`](../../.github/workflows/ci.yml) on every PR, aggregated by `ci-summary`.
 - **License** — [`LICENSE`](../../LICENSE) (MIT).
 - **Binary-Artifacts** — none committed.
