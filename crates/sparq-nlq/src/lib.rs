@@ -50,6 +50,7 @@ pub use sparq_engine::{QueryBudget, QueryResult};
 #[cfg(feature = "live")]
 pub mod live;
 
+pub mod constrain;
 pub mod eval;
 
 // ---------------------------------------------------------------------------
@@ -227,6 +228,27 @@ pub struct NlqConfig {
     /// is read at prompt time), so one [`Nlq`] can be reconfigured grounded vs
     /// ungrounded; the eval harness drives both off the same graph. [OPUS-4.8] sq-05rv
     pub ground: bool,
+    /// N2 **dictionary-grounded constraint** ([`constrain`], `sq-9yjp`). When `true`,
+    /// a query that parses is additionally checked against the **live dictionary**
+    /// *before* execution: every predicate / `rdf:type` class IRI must be a term the
+    /// store actually holds (via [`sparq_core::Graph::id_of`]). An ungrounded IRI
+    /// matches no triple — a *valid-but-wrong* query — so it becomes a targeted repair
+    /// signal ("predicate X not in the dictionary; did you mean Y?") with
+    /// nearest-namespace candidates pulled from the dictionary, exactly as
+    /// `research/genai-nl-to-sparql.md` §6 prescribes. Strict logit-level
+    /// grammar-constrained *decoding* is not implementable against the Anthropic
+    /// Messages API (no logit/grammar parameter); this is the design doc's API-backend
+    /// fallback (§11).
+    ///
+    /// **Default `false`** — and deliberately so. The check is an *additive* constraint
+    /// with a real false-positive: a query whose answer is legitimately empty (a class
+    /// with no instances, e.g. `SELECT ?r WHERE { ?r a ex:Robot }` over a robot-free
+    /// graph) uses a perfectly valid term that is simply *absent* from the dictionary,
+    /// and must not be "repaired". So it stays opt-in, the same way [`ground`](Self::ground)
+    /// is a knob: the exec-accuracy harness measures raw model accuracy with it off,
+    /// and a caller who wants tighter grounding (accepting that empty-answer questions
+    /// then need it off) sets it `true`. [OPUS-4.8] sq-9yjp
+    pub check_dictionary: bool,
 }
 
 impl Default for NlqConfig {
@@ -256,6 +278,7 @@ impl Default for NlqConfig {
                 },
             ],
             ground: true,
+            check_dictionary: false,
         }
     }
 }
@@ -275,6 +298,11 @@ pub enum TurnOutcome {
     ParseError(String),
     /// The engine rejected or aborted the (syntactically valid) query.
     ExecError(String),
+    /// N2 dictionary constraint (`sq-9yjp`): the query parsed and executed, but used a
+    /// predicate / class IRI absent from the live dictionary (so it matched no
+    /// triples). Carries the ungrounded terms; the repair message lists them with
+    /// nearest-namespace suggestions. [OPUS-4.8]
+    UngroundedTerms(Vec<constrain::UnknownTerm>),
 }
 
 /// One generate→validate(→execute) round, kept verbatim for auditability — the
@@ -476,24 +504,40 @@ impl<'g> Nlq<'g> {
                             let msg = e.to_string();
                             (Some(q), Some((msg.clone(), TurnOutcome::ParseError(msg))))
                         }
-                        // EXECUTE under the budget. Engine-side failures (unsupported
-                        // form, budget trip) are also repairable signals.
-                        Ok(_) => {
-                            match query_with_budget(self.graph, &q, &self.execution_budget()) {
-                                Err(e) => (Some(q), Some((e.clone(), TurnOutcome::ExecError(e)))),
-                                Ok(result) => {
-                                    transcript.push(Turn {
-                                        prompt,
-                                        completion,
-                                        sparql: Some(q.clone()),
-                                        outcome: TurnOutcome::Ok { rows: result.len() },
-                                    });
-                                    return Ok(Answer {
-                                        sparql: q,
-                                        result,
-                                        repairs: round,
-                                        transcript,
-                                    });
+                        Ok(parsed) => {
+                            // N2 dictionary constraint (`sq-9yjp`): a query whose
+                            // predicate/class IRIs are not in the live dictionary
+                            // cannot match — turn it into a targeted repair signal
+                            // BEFORE spending an execution on a guaranteed-empty query.
+                            let unknowns = if self.config.check_dictionary {
+                                constrain::unknown_terms(self.graph, &parsed)
+                            } else {
+                                Vec::new()
+                            };
+                            if !unknowns.is_empty() {
+                                let msg = constrain::dictionary_repair_message(&unknowns);
+                                (Some(q), Some((msg, TurnOutcome::UngroundedTerms(unknowns))))
+                            } else {
+                                // EXECUTE under the budget. Engine-side failures
+                                // (unsupported form, budget trip) are repairable too.
+                                match query_with_budget(self.graph, &q, &self.execution_budget()) {
+                                    Err(e) => {
+                                        (Some(q), Some((e.clone(), TurnOutcome::ExecError(e))))
+                                    }
+                                    Ok(result) => {
+                                        transcript.push(Turn {
+                                            prompt,
+                                            completion,
+                                            sparql: Some(q.clone()),
+                                            outcome: TurnOutcome::Ok { rows: result.len() },
+                                        });
+                                        return Ok(Answer {
+                                            sparql: q,
+                                            result,
+                                            repairs: round,
+                                            transcript,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -721,5 +765,72 @@ mod tests {
             "expected a budget trip, got {:?}",
             err.transcript[0].outcome
         );
+    }
+
+    /// N2 (`sq-9yjp`): an ungrounded predicate is a repair signal, and the repair
+    /// prompt carries the dictionary feedback + suggestion. The model fixes it and the
+    /// loop succeeds — the dictionary constraint paid for itself.
+    #[test]
+    fn ungrounded_predicate_triggers_dictionary_repair() {
+        let g = tiny_graph();
+        // First completion uses `ex:know` (not in the dictionary); the repair prompt
+        // must surface the dictionary message + the `ex:knows` suggestion; second
+        // completion is grounded.
+        let cfg = NlqConfig {
+            check_dictionary: true,
+            ..NlqConfig::default()
+        };
+        let nlq = Nlq::with_config(
+            &g,
+            Box::new(FnLlm(|prompt| {
+                if prompt.contains("not in the dataset's dictionary") {
+                    assert!(prompt.contains("http://example.org/knows")); // suggestion
+                    Ok("```sparql\nPREFIX ex: <http://example.org/>\n\
+                        SELECT ?s WHERE { ?s ex:knows ?o }\n```"
+                        .to_string())
+                } else {
+                    Ok("```sparql\nPREFIX ex: <http://example.org/>\n\
+                        SELECT ?s WHERE { ?s ex:know ?o }\n```"
+                        .to_string())
+                }
+            })),
+            cfg,
+        );
+        let a = nlq.ask("Who knows whom?").expect("repair succeeds");
+        assert_eq!(a.repairs, 1);
+        assert_eq!(a.transcript.len(), 2);
+        assert!(
+            matches!(&a.transcript[0].outcome, TurnOutcome::UngroundedTerms(u)
+                if u.len() == 1 && u[0].iri == "http://example.org/know"),
+            "got {:?}",
+            a.transcript[0].outcome
+        );
+        assert_eq!(a.transcript[1].outcome, TurnOutcome::Ok { rows: 1 });
+    }
+
+    /// Disabling the constraint accepts the (valid-but-empty) query as-is — the
+    /// pre-N2 behaviour stays available.
+    #[test]
+    fn check_dictionary_false_accepts_ungrounded_query() {
+        let g = tiny_graph();
+        let cfg = NlqConfig {
+            check_dictionary: false,
+            max_repair_rounds: 0,
+            ..NlqConfig::default()
+        };
+        let nlq = Nlq::with_config(
+            &g,
+            Box::new(FnLlm(|_| {
+                Ok("```sparql\nPREFIX ex: <http://example.org/>\n\
+                    SELECT ?s WHERE { ?s ex:know ?o }\n```"
+                    .to_string())
+            })),
+            cfg,
+        );
+        let a = nlq
+            .ask("Who knows whom?")
+            .expect("accepted without the dict check");
+        assert_eq!(a.repairs, 0);
+        assert_eq!(a.result.len(), 0); // ungrounded predicate → empty, but accepted
     }
 }
