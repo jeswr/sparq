@@ -1417,9 +1417,13 @@ impl Graph {
         std::fs::create_dir_all(dir)?;
         self.store.save(dir)?; // folds any delta-overlay into the persisted permutations
         self.dict.save_mmap(dir)?; // includes appended (delta-overlay) terms
-        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())?;
-        let (tf, ti) = self.dense_temporals();
-        write_temporals(&dir.join("temporals.bin"), &tf, &ti)?;
+        // [OPUS-4.8] (sq-7ph8) STREAM the numeric/temporal caches block-by-block straight from
+        // the in-RAM cache instead of materialising a whole-dictionary dense intermediate
+        // (`dense_numerics`/`dense_temporals`) first — bounding the finalize RSS peak for a
+        // SPARSE/FORKED cache (the common non-numeric/non-temporal case).
+        let n = self.dict.len();
+        stream_write_numerics(&dir.join("numerics.bin"), n, &self.numerics)?;
+        stream_write_temporals(&dir.join("temporals.bin"), n, &self.temporals)?;
         self.save_named(dir, false)
     }
 
@@ -1433,9 +1437,10 @@ impl Graph {
         std::fs::create_dir_all(dir)?;
         self.store.save_compressed(dir)?; // folds any delta-overlay, like `save`
         self.dict.save_mmap(dir)?;
-        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())?;
-        let (tf, ti) = self.dense_temporals();
-        write_temporals(&dir.join("temporals.bin"), &tf, &ti)?;
+        // [OPUS-4.8] (sq-7ph8) Stream the caches block-by-block — see `save` for the rationale.
+        let n = self.dict.len();
+        stream_write_numerics(&dir.join("numerics.bin"), n, &self.numerics)?;
+        stream_write_temporals(&dir.join("temporals.bin"), n, &self.temporals)?;
         // [OPUS-4.8] (sq-3ui0) Named graphs are persisted block-compressed too.
         self.save_named(dir, true)
     }
@@ -1538,58 +1543,6 @@ impl Graph {
     /// zero-cost slice borrows, identical to a raw store). No-op on raw/mapped indexes.
     pub fn decompress_indexes(&mut self) {
         self.store.decompress_to_ram();
-    }
-
-    /// The full dense numeric cache (one f64 per dictionary term) for persisting: the
-    /// owned/mmap'd dense backing extended over any APPENDED terms, or recomputed when
-    /// no dense backing covers the dictionary (the sparse browser mode).
-    #[cfg(feature = "mmap")]
-    fn dense_numerics(&self) -> std::borrow::Cow<'_, [f64]> {
-        let n = self.dict.len();
-        match &self.numerics {
-            NumData::Owned(v) if v.len() == n => std::borrow::Cow::Borrowed(v),
-            NumData::Mapped(_, extra) => {
-                let dense = self.numerics.as_slice();
-                if dense.len() == n {
-                    return std::borrow::Cow::Borrowed(dense);
-                }
-                let mut v = dense.to_vec();
-                v.resize(n, f64::NAN);
-                for (&id, &val) in extra {
-                    v[(id - 1) as usize] = val;
-                }
-                std::borrow::Cow::Owned(v)
-            }
-            _ => std::borrow::Cow::Owned(numerics_of(&self.dict)),
-        }
-    }
-
-    /// The full dense temporal cache columns (flag byte + f64 instant per dictionary
-    /// term) for persisting — the temporal twin of [`dense_numerics`](Self::dense_numerics).
-    #[cfg(feature = "mmap")]
-    fn dense_temporals(&self) -> (Vec<u8>, Vec<f64>) {
-        let n = self.dict.len();
-        let split = |cells: &[TempCell]| -> (Vec<u8>, Vec<f64>) {
-            (cells.iter().map(|c| c.flag).collect(), cells.iter().map(|c| c.instant).collect())
-        };
-        match &self.temporals {
-            TempData::Owned(cells) if cells.len() == n => split(cells),
-            TempData::Mapped(m, extra) => {
-                let len = TempData::mapped_len(m);
-                // SAFETY: temporals.bin starts with `len` f64 (page-aligned mmap base).
-                let minst = unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<f64>(), len) };
-                let mut flags = m[len * 8..len * 9].to_vec();
-                let mut instants = minst.to_vec();
-                flags.resize(n, 0);
-                instants.resize(n, f64::NAN);
-                for (&id, &t) in extra {
-                    flags[(id - 1) as usize] = temp_flag(t);
-                    instants[(id - 1) as usize] = t.instant;
-                }
-                (flags, instants)
-            }
-            _ => split(&temporals_of(&self.dict)),
-        }
     }
 
     /// Opens a graph saved by [`save`](Self::save) with its permutation indexes AND
@@ -3774,6 +3727,91 @@ fn write_numerics(path: &std::path::Path, nums: &[f64]) -> std::io::Result<()> {
     // SAFETY: reinterpret the contiguous f64 cache as bytes for writing.
     let bytes = unsafe { std::slice::from_raw_parts(nums.as_ptr().cast::<u8>(), std::mem::size_of_val(nums)) };
     std::fs::write(path, bytes)
+}
+
+/// [OPUS-4.8] (sq-7ph8) STREAM-writes the dense `numerics.bin` (`n` little-endian f64, the
+/// same layout [`write_numerics`] emits and [`Graph::open`] mmaps) DIRECTLY from the cache,
+/// in fixed-size blocks, without first materialising a whole-dictionary dense `Vec<f64>`.
+///
+/// The in-RAM save path used to call `numerics_of`/`dense_numerics`, which for a SPARSE or
+/// FORKED cache rebuilds an O(distinct-terms) dense `Vec` (8 B/term) purely to write it — an
+/// RSS spike on top of the resident dict. Probing the cache per id (`lookup`, O(1)) and
+/// flushing a small reusable block buffer keeps peak resident memory at the block size, the
+/// same bounded-write discipline the dict-spill path (`dictspill.rs`) already uses. The bytes
+/// written are identical: NaN for non-numeric ids, the cached f64 otherwise.
+#[cfg(feature = "mmap")]
+fn stream_write_numerics(path: &std::path::Path, n: usize, num: &NumData) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    const BLOCK: usize = 1 << 16; // ids per flush (512 KiB of f64)
+    let mut buf: Vec<f64> = Vec::with_capacity(BLOCK.min(n));
+    let flush = |w: &mut std::io::BufWriter<std::fs::File>, buf: &mut Vec<f64>| -> std::io::Result<()> {
+        // SAFETY: reinterpret the contiguous f64 block as bytes for writing.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..])) };
+        w.write_all(bytes)?;
+        buf.clear();
+        Ok(())
+    };
+    for id in 1..=n as Id {
+        buf.push(num.lookup(id).unwrap_or(f64::NAN));
+        if buf.len() == BLOCK {
+            flush(&mut w, &mut buf)?;
+        }
+    }
+    if !buf.is_empty() {
+        flush(&mut w, &mut buf)?;
+    }
+    w.flush()
+}
+
+/// [OPUS-4.8] (sq-7ph8) STREAM-writes the dense `temporals.bin` (`n` little-endian f64
+/// instants then `n` flag bytes — the layout [`write_temporals`] emits and
+/// [`TempData::lookup`]/[`Graph::open`] read) DIRECTLY from the cache, without first
+/// materialising the two whole-dictionary dense columns `dense_temporals` builds.
+///
+/// `dense_temporals` always allocated a fresh `(Vec<u8>, Vec<f64>)` (9 B/term) even when the
+/// in-RAM cache is SPARSE (the usual non-temporal case: a tiny map), a transient
+/// O(distinct-terms) RSS spike purely to feed the writer. Here the instants are streamed in
+/// one id pass (probing `lookup`, O(1)) through a small reusable f64 block; the flags follow
+/// in a second pass through a small `u8` block. Peak resident memory is the block size, not
+/// the dictionary — matching the streamed dict-spill write. Output bytes are identical.
+#[cfg(feature = "mmap")]
+fn stream_write_temporals(path: &std::path::Path, n: usize, temp: &TempData) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    const BLOCK: usize = 1 << 16;
+    // Pass 1: the f64 instant column (NaN for non-temporal ids — temp_flag 0 carries the
+    // "not temporal" decode, so the instant value of a flag-0 cell is irrelevant on read).
+    let mut fbuf: Vec<f64> = Vec::with_capacity(BLOCK.min(n));
+    let flush_f = |w: &mut std::io::BufWriter<std::fs::File>, buf: &mut Vec<f64>| -> std::io::Result<()> {
+        // SAFETY: reinterpret the contiguous f64 block as bytes for writing.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..])) };
+        w.write_all(bytes)?;
+        buf.clear();
+        Ok(())
+    };
+    for id in 1..=n as Id {
+        fbuf.push(temp.lookup(id).map(|t| t.instant).unwrap_or(f64::NAN));
+        if fbuf.len() == BLOCK {
+            flush_f(&mut w, &mut fbuf)?;
+        }
+    }
+    if !fbuf.is_empty() {
+        flush_f(&mut w, &mut fbuf)?;
+    }
+    // Pass 2: the flag byte column.
+    let mut gbuf: Vec<u8> = Vec::with_capacity(BLOCK.min(n));
+    for id in 1..=n as Id {
+        gbuf.push(temp.lookup(id).map(temp_flag).unwrap_or(0));
+        if gbuf.len() == BLOCK {
+            w.write_all(&gbuf)?;
+            gbuf.clear();
+        }
+    }
+    if !gbuf.is_empty() {
+        w.write_all(&gbuf)?;
+    }
+    w.flush()
 }
 
 fn subject_term(s: &oxrdf::NamedOrBlankNode) -> Term {
@@ -8983,6 +9021,84 @@ mod tests {
         g.save_compressed(&dir).unwrap();
         assert_eq!(Graph::open(&dir).unwrap().len(), 3);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-7ph8) The streamed numerics/temporals save must write BYTE-IDENTICAL
+    /// `numerics.bin`/`temporals.bin` to the old dense-materialise path — for a DENSE-owned
+    /// cache, a SPARSE cache (`into_compressed`), AND a graph carrying temporal literals — so
+    /// the bounded-RSS finalize is purely a memory optimisation, never an on-disk format change.
+    /// We prove it by comparing the streamed files against a reference dense computation done
+    /// directly off the dictionary, and by checking the exact on-disk sizes (`n*8`, `n*9`).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn streamed_caches_byte_identical_to_dense() {
+        // A mix: numeric literals, temporal literals (dateTime + date), and many plain IRIs/
+        // strings so the caches are MOSTLY empty — the case that used to spike a dense buffer.
+        let ttl = "@prefix : <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             :a :v 1.5 . :b :v 2.5 . :c :n \"42\"^^xsd:integer .\n\
+             :d :t \"2020-01-02T03:04:05Z\"^^xsd:dateTime .\n\
+             :e :t \"2021-06-07\"^^xsd:date .\n\
+             :f :label \"just a string\" . :g :p :a . :h :p :b .";
+
+        // Reference dense bytes computed straight from a dict (the pre-streaming layout):
+        // `n` LE f64 numerics; then `n` LE f64 temporal instants followed by `n` flag bytes.
+        let reference = |dict: &Dict| -> (Vec<u8>, Vec<u8>) {
+            let n = dict.len();
+            let mut num = Vec::new();
+            let mut inst = Vec::new();
+            let mut flags = Vec::new();
+            for id in 1..=n as Id {
+                num.extend_from_slice(&numeric_of(&dict.term(id)).to_le_bytes());
+                match temporal_of_id(dict, id) {
+                    Some(t) => {
+                        inst.extend_from_slice(&t.instant.to_le_bytes());
+                        flags.push(temp_flag(t));
+                    }
+                    None => {
+                        inst.extend_from_slice(&f64::NAN.to_le_bytes());
+                        flags.push(0);
+                    }
+                }
+            }
+            inst.extend_from_slice(&flags); // temporals.bin = instants || flags
+            (num, inst)
+        };
+
+        for sparse in [false, true] {
+            for compressed in [false, true] {
+                let g = {
+                    let g = Graph::load_str(ttl, "turtle").unwrap();
+                    if sparse { g.into_compressed() } else { g }
+                };
+                let (want_num, want_temp) = reference(&g.dict);
+                let dir = std::env::temp_dir()
+                    .join(format!("sparq_stream_caches_{}_{sparse}_{compressed}", std::process::id()));
+                std::fs::remove_dir_all(&dir).ok();
+                if compressed {
+                    g.save_compressed(&dir).unwrap();
+                } else {
+                    g.save(&dir).unwrap();
+                }
+
+                let got_num = std::fs::read(dir.join("numerics.bin")).unwrap();
+                let got_temp = std::fs::read(dir.join("temporals.bin")).unwrap();
+                let n = g.dict.len();
+                assert_eq!(got_num.len(), n * 8, "numerics.bin size (sparse={sparse} compressed={compressed})");
+                assert_eq!(got_temp.len(), n * 9, "temporals.bin size (sparse={sparse} compressed={compressed})");
+                assert_eq!(got_num, want_num, "streamed numerics != dense (sparse={sparse} compressed={compressed})");
+                assert_eq!(got_temp, want_temp, "streamed temporals != dense (sparse={sparse} compressed={compressed})");
+
+                // And the caches still resolve after a re-open (mmap path).
+                let g2 = Graph::open(&dir).unwrap();
+                // 42 is an xsd:integer, inline-encoded into its id (never in numerics.bin); the
+                // decimals 1.5/2.5 are the cache entries that must round-trip.
+                let nums: Vec<f64> = g2.dict.iter().filter_map(|(id, _)| g2.numeric_value(id)).collect();
+                assert!(nums.contains(&1.5) && nums.contains(&2.5), "numerics survive: {nums:?}");
+                let temporal_count = g2.dict.iter().filter(|(id, _)| g2.temporal_value(*id).is_some()).count();
+                assert_eq!(temporal_count, 2, "both temporal literals survive (sparse={sparse} compressed={compressed})");
+                std::fs::remove_dir_all(&dir).ok();
+            }
+        }
     }
 
     /// [OPUS-4.8] (sq-x32t) Recursively reads every regular file under `dir` and returns true iff
