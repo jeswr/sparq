@@ -84,6 +84,17 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain*'
               - '.github/workflows/ci.yml'
+              # [OPUS-4.8] sq-spfg: the checked-in coverage/mutation FLOOR files are ratchet
+              # inputs the `coverage` job's --check-monotonic gate validates. Without these,
+              # a PR that lowers ONLY a floor (no .rs/Cargo/ci.yml change) sets
+              # rust_changed=false, SKIPS the coverage job, and bypasses the monotonicity
+              # gate at the PR level (merge_group force-true still catches it in the queue,
+              # but the PR-level gate should fire too). List them so a floor-only PR runs the
+              # gate that guards exactly those files. mutants-baseline.json is included
+              # defensively for when the advisory mutation ratchet is promoted to gating.
+              - 'bench/coverage-floor.json'
+              - 'bench/coverage-presence.json'
+              - 'bench/mutants-baseline.json'
             docker:
               - 'Dockerfile'
               - '**/Dockerfile'
