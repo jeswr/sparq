@@ -37,10 +37,15 @@ The full measured answer, tables, and the recommendation live in
   - `group_aggregate` — COUNT+SUM GROUP BY (keys pre-densified to
     `0..g ≤ 512`) with two-level (workgroup-shared → global) atomics.
 - `src/cpu.rs` — scalar CPU reference implementations: the correctness oracles
-  and the single-thread baselines.
+  and the single-thread baselines. Its `#[cfg(test)]` module pins each
+  reference to an *independent* brute-force oracle (half-open band, IEEE `>`,
+  O(n·m) probe, per-group recount), so the CPU fallback is validated on every
+  `cargo test` even with no GPU present.
 - `tests/correctness.rs` — GPU vs CPU on random data + IEEE-754 edge cases
-  (NaN/±inf/-0.0/subnormals). Skips (passes, with a stderr note) when no
-  adapter exists.
+  (NaN/±inf/-0.0/subnormals), plus a randomized differential sweep that
+  re-seeds across sizes/selectivities/group-counts/probe-domains (sizes
+  straddling the 256-wide workgroup and the 65535×256 2D-dispatch boundary).
+  Skips (passes, with a stderr note) when no adapter exists.
 - `examples/gpu_bench.rs` — the experiment. Interleaved best-of-N over four
   legs per kernel × {1M, 10M, 100M} elements: `cpu1` (scalar), `cpuN`
   (rayon all-cores), `gpu resident` (column already in device memory),
