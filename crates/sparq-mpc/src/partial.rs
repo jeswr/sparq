@@ -97,11 +97,16 @@ pub enum MpcError {
     /// ([`MpcError::Protocol`]) nor a deferred stub ([`MpcError::NotYetImplemented`]):
     /// it means a party fed an inconsistent share value, so the result is
     /// REFUSED rather than silently corrupted. `cheaters` lists the evaluation
-    /// points (`Share::x`) identified as off-curve where attribution is possible
-    /// (best-effort when correction itself is impossible — detection is sound,
-    /// attribution is heuristic). NOTE: at exactly `t+1` shares (no redundancy)
-    /// tampering is information-theoretically undetectable and this is NEVER
-    /// returned there — see [`crate::robust::reconstruct_robust`].
+    /// points (`Share::x`) identified as off-curve. On this abort path it is the
+    /// off-curve set of the MOST self-consistent (minimum-disagreement) reference
+    /// fit — sound (names only true cheaters) in the first abort band of `e+1`
+    /// errors, best-effort beyond it where the honest set is genuinely
+    /// unidentifiable: detection is sound, blame is heuristic. Sound, exact
+    /// attribution is available on the SUCCESS path via
+    /// [`crate::robust::reconstruct_robust_attributed`]. NOTE: at exactly `t+1`
+    /// shares (no redundancy) tampering is information-theoretically undetectable
+    /// and this is NEVER returned there — see
+    /// [`crate::robust::reconstruct_robust`].
     Tampered { detail: String, cheaters: Vec<u64> },
     /// **No registered backend satisfies the stated security requirement** — the
     /// fail-closed result of [`crate::backend::BackendRegistry::select`] (sq-a6p1).
