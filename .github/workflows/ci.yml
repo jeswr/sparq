@@ -1008,6 +1008,95 @@ jobs:
           name: coverage-summary-nightly
           path: target/coverage/coverage-summary.json
 
+  mutants-nightly-advisory:
+    # [OPUS-4.8] NIGHTLY MUTATION-TESTING RATCHET (sq-8kt3, epic sq-qcnn). The test-QUALITY
+    # companion to the coverage ratchet: line coverage proves a line RAN, mutation testing
+    # proves a test would NOTICE if that line's behaviour changed (it catches vacuous /
+    # assertion-light tests that 100% line coverage hides). cargo-mutants rebuilds + reruns
+    # the suite ONCE PER MUTANT, so it is FAR too slow for per-commit — like coverage-nightly
+    # it is schedule + workflow_dispatch only, behind the same nightly-gate freshness check,
+    # and is NEVER on the per-PR required `ci-summary` path (that would blow the PR budget).
+    #
+    # ADVISORY (non-gating) FOR NOW — the job NAME contains the whole word "advisory", so the
+    # ci-summary aggregator (.github/workflows/ci-summary.yml `\b(advisory|informational)\b`)
+    # excludes it from the gating set: even a `failure` here cannot block a merge. This is
+    # the deliberate bootstrap idiom (mirroring how `geiger` started, and how the coverage
+    # ratchet seeded its floor before gating): we seed bench/mutants-baseline.json across the
+    # workspace over the first few nightly runs, then PROMOTE to gating by renaming the job
+    # (drop "advisory") + flipping the step to fail on a regression, once broadly seeded.
+    # Until then `continue-on-error: true` keeps the run green while it seeds.
+    #
+    # SEEDED SO FAR (honest): sparq-canon and sparq-parse carry a real committed ceiling in
+    # bench/mutants-baseline.json from a local cargo-mutants run; every other crate is
+    # measured + reported here and gets its ceiling seeded on its first nightly run. The
+    # baseline's absence of a crate is NOT a claim that it has zero surviving mutants.
+    name: mutation ratchet (cargo-mutants, advisory)
+    needs: nightly-gate
+    if: needs.nightly-gate.outputs.fresh == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true # advisory while the baseline seeds; remove when promoted to gating
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Free runner disk before mutation build
+        # cargo-mutants builds the workspace many times (one rebuild per mutant); reclaim
+        # space first like coverage-nightly. Best-effort, no-ops on absent paths.
+        run: ./scripts/ci-free-disk.sh
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # cargo-mutants
+        with:
+          tool: cargo-mutants@25.3.1
+      - name: Run cargo-mutants per crate + ratchet against the baseline
+        # Per-crate (--package), one mutants.out dir per crate, so a slow/large crate cannot
+        # starve the others and the gate can attribute survivors precisely. The static
+        # exclusions (presence-gated / non-host crates) live in .cargo/mutants.toml. sparq-core
+        # is measured with its representative features (mmap,dict-spill) exactly like the
+        # coverage lane's PER-CRATE QUIRK. The 120-min budget is generous; per-crate failures
+        # are tolerated (continue-on-error) while seeding — the gate verdict is the --check.
+        run: |
+          set -o pipefail
+          mkdir -p target/mutants
+          # Crates measured by the mutation ratchet. Mirrors the coverage PER_COMMIT set
+          # MINUS the presence-gated / non-host crates excluded in .cargo/mutants.toml.
+          CRATES="sparq-canon sparq-parse sparq-introspect sparq-prov sparq-algos \
+                  sparq-core sparq-engine sparq-reason sparq-shacl sparq-geo sparq-text \
+                  sparq-hdt sparq-rsp sparq-sim sparq-solid sparq-nlq sparq-mpc \
+                  sparq-serve sparq-server sparq-zk sparq-zk-compose sparq-vectors \
+                  sparq-fedplan sparq-fedclient sparq-policy"
+          for c in $CRATES; do
+            echo "::group::cargo-mutants $c"
+            feat=()
+            # shellcheck disable=SC2054 # mmap,dict-spill is ONE cargo arg, not two elements
+            [ "$c" = "sparq-core" ] && feat=(--features mmap,dict-spill)
+            # Tolerate a per-crate failure while seeding (advisory). The OUTCOMES file is
+            # what the gate reads; a crate that fails to produce one is simply not checked.
+            cargo mutants -p "$c" "${feat[@]}" -o "target/mutants/$c" || \
+              echo "WARN: cargo-mutants $c did not complete cleanly (advisory)"
+            echo "::endgroup::"
+          done
+          # Collect every produced outcomes.json and run the ratchet --check. While advisory
+          # (continue-on-error) a regression here is REPORTED but does not block; promotion to
+          # gating drops continue-on-error + this job's "advisory" name token.
+          OUTCOMES=$(find target/mutants -name outcomes.json)
+          echo "outcomes files: $OUTCOMES"
+          if [ -n "$OUTCOMES" ]; then
+            # shellcheck disable=SC2086 # intentional word-split: each path is a separate arg
+            python3 scripts/mutants-gate.py --check $OUTCOMES \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no outcomes produced — nothing to check" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload mutation outcomes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants-outcomes-nightly
+          path: target/mutants/*/mutants.out/outcomes.json
+
   unsafe-register:
     # [OPUS-4.8] sq-toze.6 / cert gap GX-5: GATING `unsafe`-count RATCHET. This is the
     # promotion the `geiger` job's own comment anticipated ("Promote to a gate later

@@ -1,0 +1,51 @@
+# [OPUS-4.8] cargo-mutants config for the per-crate MUTATION-TESTING RATCHET (sq-8kt3,
+# epic sq-qcnn). This is the test-QUALITY companion to the line-coverage ratchet
+# (scripts/coverage-gate.py + bench/coverage-floor.json): line coverage proves a line
+# RAN, mutation testing proves a test would NOTICE if that line's behaviour changed —
+# it catches vacuous / assertion-light tests that 100% line coverage happily hides.
+#
+# This file holds only the STATIC defaults (exclusions). The per-crate ratchet metric +
+# floor lives in bench/mutants-baseline.json and is enforced by scripts/mutants-gate.py.
+# cargo-mutants is SLOW (it rebuilds + reruns the test suite once per mutant), so the
+# gate runs in the NIGHTLY tier only (.github/workflows/ci.yml `mutants-nightly`), NEVER
+# per-commit — exactly mirroring the coverage nightly/full split.
+#
+# EXCLUSIONS — rationale mirrors bench/coverage-floor.json's floor:0 crates:
+#   • sparq-cli / sparq-conformance / sparq-gpu are PRESENCE-gated, not %-gated, in the
+#     coverage ratchet: sparq-cli tests spawn the COMPILED binary as a subprocess (a
+#     mutant in the library code is not exercised by an out-of-process assert_cmd test,
+#     so it would survive spuriously), sparq-conformance is a test-DRIVER run as a binary
+#     (`cargo run`), and sparq-gpu needs a real device. Mutating them would produce
+#     misleading "surviving mutant" noise, so they are excluded here for the same reason
+#     they carry floor:0 there.
+#   • The *-wasm / sparq-py crates are excluded: wasm32 / pyo3 targets are not the host
+#     test profile cargo-mutants drives, and sparq-bench is a harness crate with no tests.
+# These are FILE globs (cargo-mutants matches globs containing a slash against the whole
+# path). Per-crate scoping in CI is done with `--package`; these globs are the belt-and-
+# braces so an accidental `--test-workspace` run still skips them.
+exclude_globs = [
+    "crates/sparq-cli/**",
+    "crates/sparq-conformance/**",
+    "crates/sparq-gpu/**",
+    "crates/sparq-py/**",
+    "crates/sparq-bench/**",
+    "crates/*-wasm/**",
+]
+
+# EXCLUDE-BY-NAME (regex over the mutant descriptions `--list` shows): cargo-mutants
+# already SKIPS `unreachable!()`, `panic!`-only and `unimplemented!()`-bodied functions
+# by default (it will not generate a mutant whose only effect is to remove a panic),
+# but we additionally exclude mutations of the panic/invariant CONSTRUCTORS so a
+# defensive `assert!`/`debug_assert!` invariant arm is not counted as an "untested"
+# survivor. Matched against the names printed by `cargo mutants --list`.
+exclude_re = [
+    "replace .* with Default::default\\(\\) in .*unreachable",
+]
+
+# Generated / derive code: cargo-mutants does not mutate `#[derive(...)]` expansions
+# (it works on the pre-macro-expansion source), so derives need no explicit exclusion.
+#
+# We do NOT set `all_features`/`features` globally here — sparq-core's representative
+# surface needs `--features mmap,dict-spill` (see scripts/coverage.sh's PER-CRATE QUIRKS);
+# the CI lane passes per-crate features explicitly, exactly as the coverage lane does,
+# rather than baking a one-size feature set into this shared config.
