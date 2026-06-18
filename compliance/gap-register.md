@@ -67,10 +67,10 @@ watch item).
 
 | ID | Gap | Sev | Bead |
 |---|---|---|---|
-| MS-G2 | No first-party `clippy::undocumented_unsafe_blocks` lint (enforced by register + review + count ratchet; 6/56 sites use an adjacent block comment, not the literal `// SAFETY:` token) | P1 | `sq-toze` (memsafety: enable lint on the 5 unsafe crates) |
-| MS-G3 | No standalone AddressSanitizer lane outside cargo-fuzz (oracle MS-7 runs without ASan) | P2 | `sq-toze` (ASan over the corruption oracle) |
-| MS-G4 | No formal verification / model-checking of the unsafe mmap validators (Kani/Prusti) — assurance ceiling, not a defect | P2 | `sq-toze` (evaluate Kani bounded-proof) |
-| MS-G5 | Cross-doc unsafe-count drift (`research/threat-model.md` says 39, register/ratchet say 42) | P2 | `sq-toze` (sync threat-model count) |
+| ~~MS-G2~~ | ~~No first-party `clippy::undocumented_unsafe_blocks` lint~~ — **CLOSED (sq-8wbn).** `#![warn(clippy::undocumented_unsafe_blocks)]` is now crate-root on all 5 unsafe crates; the `-D warnings` gate mechanically rejects any undocumented `unsafe` (tree verified clippy-clean). | — | CLOSED |
+| ~~MS-G3~~ | ~~No standalone AddressSanitizer lane outside cargo-fuzz~~ — **CLOSED (sq-hybl).** `.github/workflows/asan.yml` runs the deterministic mmap corruption corpus under `-Zsanitizer=address` (nightly, non-blocking). | — | CLOSED |
+| MS-G4 | No formal verification / model-checking of the unsafe mmap validators (Kani/Prusti) — assurance ceiling, not a defect. Partly addressed: a Kani bounded-proof of the `.spqv` validator exists (sq-hkud); the dict validator awaits an `&[u8]`-seam refactor. | P2 | `sq-toze` (Kani follow-up on dict validator) |
+| MS-G5 | Cross-doc unsafe-count drift (`research/threat-model.md` says 42, register/ratchet say 44 after sq-vkz7) | P2 | `sq-toze` (sync threat-model count) |
 
 ### ASVS — applicable controls PASS; external verification AUDIT-READY
 
@@ -178,8 +178,8 @@ watch item).
 | Severity | Count | Notes |
 |---|---|---|
 | **P0 / CRITICAL** | **3** | CR-G1 (external cryptographer), CDMC CD-1 + CD-2 (lineage + access-audit data-maturity). CR-G1 is **external-required**. |
-| **P1 / High** | **~9** | GX-10, GX-12, GX-4, GAP-ISO-1, GX-CRA-1, GX-CRA-2, MS-G2, CDMC CD-3/4/5/8 (P1 cluster). GAP-ISO-1 is an **org act**. *(GX-9 closed — sq-toze.23, dist.yml binaries now SLSA Build L2.)* |
-| **P2 / Medium** | **~12** | GX-8 (one row, recurs in 5 slices; the SBOM slice's GS-2 is this same gap), SSDF-G1(=GX-8), MS-G3/G4/G5, ASVS-G1/G3, GAP-ISO-2, GX-CRA-3, PR-G3, CR-G4/G5, CDMC CD-6/7. *(GS-1/3/4/5/6 closed — sq-toze.26/27/28/29/30; per-component supplier, JS SBOM, CycloneDX 1.5, VEX↔deny sync, abs-path leak all RESOLVED & CI-gated.)* |
+| **P1 / High** | **~8** | GX-10, GX-12, GX-4, GAP-ISO-1, GX-CRA-1, GX-CRA-2, CDMC CD-3/4/5/8 (P1 cluster). GAP-ISO-1 is an **org act**. *(GX-9 closed — sq-toze.23, dist.yml binaries now SLSA Build L2. MS-G2 closed — sq-8wbn, first-party `undocumented_unsafe_blocks` lint.)* |
+| **P2 / Medium** | **~11** | GX-8 (one row, recurs in 5 slices; the SBOM slice's GS-2 is this same gap), SSDF-G1(=GX-8), MS-G4/G5, ASVS-G1/G3, GAP-ISO-2, GX-CRA-3, PR-G3, CR-G4/G5, CDMC CD-6/7. *(GS-1/3/4/5/6 closed — sq-toze.26/27/28/29/30. MS-G3 closed — sq-hybl, standalone ASan lane.)* |
 | **P3 / Low** | **~7** | GX-11, GX-OSSF-2/3, ASVS-G2/G4, PR-G2/G4/G5. *(GX-13 closed — sq-toze.36, Dockerfile HEALTHCHECK via in-binary `--health-probe`.)* |
 
 Counts collapse the recurring cross-cutting gaps (GX-8, GX-9, GX-10, GX-12) to **one row each**; the

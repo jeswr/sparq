@@ -7,39 +7,41 @@ Each control in [`controls.md`](./controls.md) is backed here by the **exact** f
 test, or CI job, plus the command an auditor re-runs to confirm it. Paths are
 repo-relative. No timing is recorded (NON-CANONICAL EC2 box).
 
-## MS-1 — confined unsafe surface (26 `forbid` crates, 5 unsafe crates)
+## MS-1 — confined unsafe surface (30 `forbid` crates, 5 unsafe crates)
 
 ```sh
 grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | sed 's#crates/##;s#/src.*##' | sort -u
 ```
-→ 26 crates: sparq-canon, sparq-conformance, sparq-engine, sparq-fedclient, sparq-fedplan,
-sparq-geo, sparq-gpu, sparq-hdt, sparq-introspect, sparq-mpc, sparq-nlq, sparq-parse,
-sparq-policy, sparq-prov, sparq-py, sparq-reason, sparq-reason-wasm, sparq-rsp, sparq-serve,
-sparq-server, sparq-shacl, sparq-sim, sparq-solid, sparq-text, sparq-wasm, sparq-zk.
+→ 30 crates: sparq-algos, sparq-canon, sparq-conformance, sparq-engine, sparq-fedclient,
+sparq-fedplan, sparq-geo, sparq-gpu, sparq-hdt, sparq-introspect, sparq-mpc, sparq-nlq,
+sparq-parse, sparq-policy, sparq-prov, sparq-py, sparq-reason, sparq-reason-wasm, sparq-rsp,
+sparq-rsp-wasm, sparq-serve, sparq-server, sparq-shacl, sparq-shacl-wasm, sparq-sim,
+sparq-solid, sparq-text, sparq-text-wasm, sparq-wasm, sparq-zk.
 
 ```sh
-ls crates/ | wc -l            # → 31 total crates
+ls -d crates/*/ | wc -l       # → 35 total crates
 ```
-Accounting: **26 forbid + 5 with unsafe (sparq-core, sparq-vectors, sparq-cli,
-sparq-zk-compose, sparq-bench) = 31.** No crate is unaccounted-for. <!-- [OPUS-4.8] sq-pro0:
-count re-verified on this branch — 31 workspace crates, 26 `#![forbid(unsafe_code)]` roots,
-5 unsafe-bearing. The 56-site / per-crate figures (MS-2) are unchanged. -->
+Accounting: **30 forbid + 5 with unsafe (sparq-core, sparq-vectors, sparq-cli,
+sparq-zk-compose, sparq-bench) = 35.** No crate is unaccounted-for. <!-- [OPUS-4.8] sq-toze.16:
+count re-verified on this branch — 35 workspace crates, 30 `#![forbid(unsafe_code)]` roots,
+5 unsafe-bearing (sq-algos + the 3 *-wasm split crates joined the forbid set since the
+sq-pro0 26/31 snapshot). The 58-site / per-crate figures (MS-2) reflect sq-vkz7. -->
 
-## MS-2 — 56-site register, count-verified
+## MS-2 — 58-site register, count-verified
 
 ```sh
-python3 scripts/unsafe-gate.py --list | tail -1     # → TOTAL=56
+python3 scripts/unsafe-gate.py --list | tail -1     # → TOTAL=58
 ```
 Per-crate (from `--check`, matching `bench/unsafe-snapshot.json` and the register §headers):
 
 | crate | snapshot | live | register rows |
 |---|---:|---:|---:|
-| sparq-core | 42 | 42 | 42 |
+| sparq-core | 44 | 44 | 44 |
 | sparq-vectors | 9 | 9 | 9 |
 | sparq-cli | 2 | 2 | 2 |
 | sparq-zk-compose | 2 | 2 | 2 |
 | sparq-bench | 1 | 1 | 1 |
-| **total** | **56** | **56** | **56** |
+| **total** | **58** | **58** | **58** |
 
 Every row carries the site kind, the invariant relied on, and how it is bounded — see
 [`unsafe-register.md`](./unsafe-register.md).
@@ -72,27 +74,34 @@ informational)`, `continue-on-error: true`, every step `continue-on-error`. The 
 the ratchet (MS-3) is the gate. (cargo-geiger cannot run the virtual workspace manifest —
 hence the deterministic scan in MS-3 is what we actually ratchet.)
 
-## MS-5 — per-site `// SAFETY:` (50/56 literal token; 6 adjacent-block-comment)
+## MS-5 — per-site `// SAFETY:`, lint-enforced (MS-G2 CLOSED, sq-8wbn)
+
+Every `unsafe` block/impl carries a `// SAFETY:` argument immediately preceding it, and the
+requirement is now **mechanically enforced** — the formerly-open MS-G2 gap is CLOSED.
+
+```sh
+grep -rn 'undocumented_unsafe_blocks' \
+  crates/sparq-core/src/lib.rs crates/sparq-vectors/src/lib.rs \
+  crates/sparq-cli/src/main.rs crates/sparq-zk-compose/src/lib.rs \
+  crates/sparq-bench/src/main.rs
+# → #![warn(clippy::undocumented_unsafe_blocks)] in all 5 unsafe-bearing crate roots
+```
+Because the workspace gate is `cargo clippy --all-targets -- -D warnings` (MS-10), that
+`warn` is promoted to a hard error: any `unsafe` block/impl/`extern` without a preceding
+`// SAFETY:` comment **fails CI**. Verified clippy-clean on the live tree
+(`cargo clippy -p sparq-core --all-targets` → no `undocumented_unsafe_blocks` diagnostics).
 
 ```sh
 for c in sparq-core sparq-vectors sparq-cli sparq-zk-compose sparq-bench; do
-  echo -n "$c: "; grep -rn 'SAFETY:' crates/$c/src | wc -l; done
-# sparq-core: 36  sparq-vectors: 9  sparq-cli: 2  sparq-zk-compose: 2  sparq-bench: 1  → 50
+  echo -n "$c: "; grep -rn '// SAFETY:' crates/$c/src | wc -l; done
+# sparq-core: 45  sparq-vectors: 9  sparq-cli: 3  sparq-zk-compose: 3  sparq-bench: 2  → 62 ≥ 58
 ```
-The 6 sites without the literal token, each WITH an adjacent justification comment:
-- `crates/sparq-core/src/dict.rs:483` — `from_utf8_unchecked`, preceded by a 5-line
-  "TRUSTED fast path … untrusted mmap path MUST NOT reach here … bead sq-znld" comment.
-- `crates/sparq-core/src/dict.rs:2192-2193` — `unsafe impl Send/Sync for SlotPtr`,
-  preceded by the "routes each … slot to exactly one shard, nobody reads until the
-  parallel scope ends" comment.
-- `crates/sparq-core/src/dictspill.rs:720-721` — the `dict-spill` `SlotPtr` Send/Sync pair,
-  same disjoint-routing justification above.
-
-**Honest caveat (→ gap MS-G2):** these are *documented*, but not via the literal
-`// SAFETY:` token, and there is **no** first-party `clippy::undocumented_unsafe_blocks`
-lint enforcing the token. The register's earlier sentence "clippy
-`undocumented_unsafe_blocks` is the local enforcement" overstated this — corrected here and
-tracked as MS-G2.
+The 6 sites that previously relied on an adjacent block comment without the literal token —
+the `from_utf8_unchecked` TRUSTED fast path (`dict.rs:483`) and the two `unsafe impl
+Send`/`Sync for SlotPtr` pairs (`dict.rs:2391-2394`, `dictspill.rs:723-726`) — were
+normalised so a `// SAFETY:` line sits in the comment block directly above each `unsafe`,
+which is what makes the lint pass. Enforcement is now **lint + register + count ratchet**,
+no longer review alone.
 
 ## MS-6 — Miri lane
 
@@ -176,7 +185,7 @@ register explicitly scopes third-party `unsafe` (memmap2/libc/rayon/hdt) OUT to 
 
 ## MS-12 — edition-2024 unsafe (test-only env)
 
-`unsafe-register.md` rows `src/lib.rs:6229` (`set_var`) + `:6231` (`remove_var`) — TEST-only
+`unsafe-register.md` rows `src/lib.rs:7480` (`set_var`) + `:7484` (`remove_var`) — TEST-only
 (`external_quads_fd_*`), single-threaded, var restored before return; counted by the ratchet.
 
 ## MS-13 — no unsafe in the untrusted-text path
@@ -190,12 +199,16 @@ The parser/planner/executor/reasoner/SHACL layers are in the MS-1 forbid list (o
 
 ### Verified-but-noted inconsistencies (for the auditor)
 
-1. **`research/threat-model.md` says "39 sites" in sparq-core**, the register/snapshot say
-   **42**. The register is the authoritative count (it is the GX-5 artifact + the ratchet
-   source). The threat-model number is stale prose. This framework does not own
+1. **`research/threat-model.md` says "42 sites" in sparq-core** (lines 21, 118), the
+   register/snapshot say **44** (the sq-vkz7 one-pass compressed external build added two
+   `compress.rs`/`lib.rs` sites). The register is the authoritative count (it is the GX-5
+   artifact + the ratchet source). The threat-model number is one step stale prose (it was
+   synced 39→42 by sq-pro0 but has not picked up sq-vkz7). This framework does not own
    `threat-model.md`; tracked as low-severity drift MS-G5 (one-line fix for the doc owner).
-2. The register's `undocumented_unsafe_blocks` enforcement sentence is an overstatement
-   (MS-G2) — corrected in MS-5/evidence and in the register itself.
+2. The register's former `undocumented_unsafe_blocks` enforcement sentence (which once
+   overstated lint enforcement, MS-G2) is now **accurate**: the lint IS enabled crate-root
+   on all 5 unsafe-bearing crates and the tree is clippy-clean under it (MS-G2 CLOSED,
+   sq-8wbn). MS-5/evidence and the register reflect the closed state.
 3. **ASan lane (MS-9b / asan.yml) — tested-vs-untested boundary (sq-hybl, honest).** The
    sparq-core lane command (`RUSTFLAGS=-Zsanitizer=address` + `-Zbuild-std` + a non-musl GNU
    `--target` + `ASAN_OPTIONS=detect_leaks=0` over `mmap_corruption_oracle --features
