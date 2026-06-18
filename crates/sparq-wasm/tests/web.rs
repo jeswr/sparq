@@ -306,6 +306,41 @@ fn string_functions_retained() {
     );
 }
 
+/// [OPUS-4.8] sq-0ptd (gh-54): the NEGATIVE half of the audit — REGEX/REPLACE are compiled
+/// OUT of the lean default browser bundle (the `regex` feature is OFF here) — asserted on the
+/// REAL `wasm32` target where it is actually observable. `sparq-wasm` disables
+/// `sparq-engine`'s defaults, and the wasm build links only `sparq-wasm`'s own (regex-off)
+/// `sparq-engine` — it does NOT unify the rest of the workspace's default-feature
+/// `sparq-engine` deps, so regex is genuinely absent. (The mirror native unit test was
+/// removed: a native `--workspace` build unifies `sparq-engine/regex` ON via other crates,
+/// making the native negative unobservable — see the note in `lib.rs`.) Through the real
+/// exported `Store::query`, a REGEX/REPLACE query is REJECTED (the `JsError` Err arm), not
+/// silently empty. `--features regex` re-enables them (positive half: `string_functions`
+/// always-present trio above + the native `regex_present_when_enabled`).
+#[cfg(not(feature = "regex"))]
+#[wasm_bindgen_test]
+fn regex_compiled_out_by_default() {
+    let data = r#"@prefix ex: <http://ex/> . ex:a ex:name "Alice" ."#;
+    let store = Store::load(data, "turtle").unwrap();
+    assert!(
+        store
+            .query(
+                r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(REGEX(?n, "^Al")) }"#,
+            )
+            .is_err(),
+        "REGEX with the `regex` feature off must be rejected (not silently empty)"
+    );
+    // REPLACE is gated identically.
+    assert!(
+        store
+            .query(
+                r#"PREFIX ex: <http://ex/> SELECT (REPLACE(?n, "A", "X") AS ?r) WHERE { ?s ex:name ?n }"#,
+            )
+            .is_err(),
+        "REPLACE with the `regex` feature off must be rejected"
+    );
+}
+
 // ---- compressed store: identical results, smaller footprint ----
 
 /// `loadCompressed` returns byte-identical SELECT JSON to the raw store and reports a

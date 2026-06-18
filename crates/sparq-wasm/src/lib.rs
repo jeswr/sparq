@@ -902,43 +902,19 @@ mod tests {
         );
     }
 
-    /// REGEX is **compiled OUT of the lean default bundle**: with the `regex` feature off (the
-    /// state the published lean bundle ships and the state `cargo test -p sparq-wasm` runs in),
-    /// a query that uses `REGEX` is **rejected** — the engine returns an
-    /// `"unsupported SPARQL function: Regex"` error, which the wasm `Store::query` wrapper
-    /// surfaces as the `JsError` Err arm (not a silently-empty result). This is the negative
-    /// half of the gh-54 string-function audit; `regex_present_when_enabled` is the positive
-    /// half under `--features regex`. `REPLACE` is gated the same way.
-    ///
-    /// NOTE the `not(feature = "shacl")` guard: this native test detects the engine's regex
-    /// state via this crate's `regex` feature, but on a NON-wasm target `sparq-shacl` depends
-    /// on `sparq-engine` WITH its defaults (regex on), so building with `shacl` force-enables
-    /// the shared engine's `regex` through Cargo feature unification even though this crate's
-    /// own `regex` feature is off. On the real `wasm32` target `sparq-shacl` uses the
-    /// no-defaults engine, so regex IS compiled out of the shipped SHACL bundle too — but a
-    /// native `--features shacl` build cannot observe that, so the negative assertion is scoped
-    /// to the regex-and-shacl-free native build (the lean default `cargo test -p sparq-wasm`).
-    #[cfg(all(not(feature = "regex"), not(feature = "shacl")))]
-    #[test]
-    fn regex_compiled_out_by_default() {
-        let data = r#"@prefix ex: <http://ex/> . ex:a ex:name "Alice" ."#;
-        let g = Graph::load_str(data, "turtle").unwrap();
-        let err = sparq_engine::query_json(
-            &g,
-            r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(REGEX(?n, "^Al")) }"#,
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("Regex") || err.to_lowercase().contains("unsupported"),
-            "REGEX with the `regex` feature off must be rejected, got: {err}"
-        );
-        // REPLACE is gated identically.
-        assert!(sparq_engine::query_json(
-            &g,
-            r#"PREFIX ex: <http://ex/> SELECT (REPLACE(?n, "A", "X") AS ?r) WHERE { ?s ex:name ?n }"#,
-        )
-        .is_err());
-    }
+    // [OPUS-4.8] sq-0ptd (gh-54): the NEGATIVE half of the audit — "REGEX/REPLACE are
+    // compiled OUT of the lean default bundle" — is asserted ONLY on the real `wasm32`
+    // target, in `tests/web.rs::regex_compiled_out_by_default`. It is NOT a native unit
+    // test, and deliberately so: `sparq-engine`'s `regex` feature is part of its DEFAULT
+    // set, and many OTHER workspace crates (sparq-mpc, sparq-prov, sparq-bench, …) depend
+    // on `sparq-engine` with default features. In ANY native `cargo nextest --workspace`
+    // build — which is exactly what the CI test-archive lane runs — Cargo FEATURE
+    // UNIFICATION compiles a SINGLE `sparq-engine` with `regex` ON, so a native query that
+    // uses REGEX SUCCEEDS regardless of this crate's own `regex` feature. A native negative
+    // assertion is therefore unobservable/unsound (a `not(feature = "shacl")` guard does not
+    // help — shacl is not the only unification source). Only the `wasm32` build links
+    // `sparq-wasm`'s own (no-defaults, regex-off) `sparq-engine` without unifying the rest of
+    // the workspace, so regex IS genuinely compiled out there and the negative is testable.
 
     /// With `--features regex` the wasm crate forwards to `sparq-engine/regex` and REGEX works
     /// — the positive half of the audit, asserting the opt-in lever actually re-enables it.
