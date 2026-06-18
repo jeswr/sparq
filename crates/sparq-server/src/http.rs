@@ -1968,7 +1968,15 @@ pub fn router(state: AppState) -> Router {
 
 /// `GET /metrics` — Prometheus text exposition (T22). The gauges (graph triple
 /// count, active subscriptions) are read at scrape time from live state.
-async fn metrics_endpoint(State(state): State<AppState>) -> Response {
+///
+/// [OPUS-4.8] sq-9jrx: the exposition leaks the live graph triple count and the
+/// active-subscription count, so it is treated as a READ and gated by
+/// `--auth-token-read` like any other GET (mirrors QLever, which keeps its stats
+/// endpoint behind the same token). `/health` stays ungated for liveness probes.
+async fn metrics_endpoint(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
     let triples = state.current().snapshot().len();
     let subs = state.subs.active_count();
     let body = state.metrics().render(subs, triples);

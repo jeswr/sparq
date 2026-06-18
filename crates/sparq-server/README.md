@@ -36,6 +36,10 @@ surface** (PSS gh-46), with an **optional read gate**:
 - **`--auth-token-read`** (env `SPARQ_AUTH_TOKEN_READ=1`) — ALSO gate **reads** (SPARQL query,
   GSP `GET`/`HEAD`, AND the subscription read surfaces — see below) with the same token. Off by
   default (QLever-style: writes gated, reads open). Has no effect unless a token is also configured.
+  [OPUS-4.8] (`sq-9jrx`) The Prometheus **`GET /metrics`** exposition is also gated by
+  `--auth-token-read`: its gauges leak the live graph triple count and the active-subscription
+  count, so it is treated as a read (mirrors QLever, which keeps its stats endpoint behind the
+  same token). **`/health` stays ungated** for liveness probes.
 - The 401 is **identical for a missing vs a wrong token**, so an attacker cannot learn whether
   a token was presented.
 - The subscription transports — the **`/subscriptions` WebSocket** and the

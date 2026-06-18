@@ -338,6 +338,88 @@ async fn reads_gated_when_read_gate_on() {
 }
 
 // ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-9jrx: /metrics is a READ (it leaks the live triple count and the
+// active-subscription count), so it is gated by --auth-token-read like any other
+// GET. /health stays ungated for liveness probes.
+// ---------------------------------------------------------------------------
+
+/// With only a write-token, `/metrics` stays OPEN (no Authorization needed) — same
+/// as any other read in write-only mode.
+#[tokio::test]
+async fn metrics_open_when_only_write_token_set() {
+    let base = spawn_with(token_config(false)).await;
+    let cl = client();
+    let r = cl.get(format!("{base}/metrics")).send().await.unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "/metrics must be open with only a write-token"
+    );
+    assert!(r.text().await.unwrap().contains("sparq_graph_triples"));
+}
+
+/// With `--auth-token-read` on, `/metrics` is GATED: no token => 401 with
+/// `WWW-Authenticate: Bearer` (and the gauges are NOT disclosed); correct token => 200.
+#[tokio::test]
+async fn metrics_gated_when_read_gate_on() {
+    let base = spawn_with(token_config(true)).await;
+    let cl = client();
+
+    // No header => 401, and the body must NOT contain the leaked gauges.
+    let unauth = cl.get(format!("{base}/metrics")).send().await.unwrap();
+    assert_eq!(
+        unauth.status(),
+        401,
+        "/metrics must be gated with --auth-token-read"
+    );
+    assert_eq!(
+        unauth
+            .headers()
+            .get("www-authenticate")
+            .map(|v| v.to_str().unwrap()),
+        Some("Bearer"),
+        "the /metrics 401 must carry WWW-Authenticate: Bearer"
+    );
+    assert!(
+        !unauth.text().await.unwrap().contains("sparq_graph_triples"),
+        "a gated /metrics must not disclose the triple-count gauge"
+    );
+
+    // Wrong token => still 401.
+    let wrong = cl
+        .get(format!("{base}/metrics"))
+        .header("authorization", "Bearer not-the-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401, "wrong token on /metrics => 401");
+
+    // Correct token => 200 and the exposition is served.
+    let authed = cl
+        .get(format!("{base}/metrics"))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authed.status(), 200, "correct token => /metrics 200");
+    assert!(authed.text().await.unwrap().contains("sparq_graph_triples"));
+}
+
+/// `/health` stays UNGATED for liveness probes even with `--auth-token-read` on.
+#[tokio::test]
+async fn health_open_even_when_read_gate_on() {
+    let base = spawn_with(token_config(true)).await;
+    let cl = client();
+    let r = cl.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "/health must stay open for liveness even under --auth-token-read"
+    );
+    assert_eq!(r.text().await.unwrap(), "ok");
+}
+
+// ---------------------------------------------------------------------------
 // Mutation classification (not route): UPDATE via the query path
 // ---------------------------------------------------------------------------
 

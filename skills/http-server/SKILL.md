@@ -39,6 +39,9 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > too (bead `sq-cxk5`, closing the prior read-auth bypass): the SSE GET takes the
 > `Authorization: Bearer` header; the WS upgrade accepts that header OR (for browsers, which
 > cannot set headers on a WS handshake) a `Sec-WebSocket-Protocol: bearer.<token>` subprotocol.
+> The Prometheus `GET /metrics` endpoint is gated by `--auth-token-read` as well (bead
+> `sq-9jrx`): its gauges leak the live triple count and active-subscription count, so it is a
+> read; `/health` stays ungated for liveness probes.
 > With no read gate, both are open (back-compatible). The server binds **loopback by default** and **refuses a non-loopback
 > bind** (e.g. `0.0.0.0`) unless you set `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`) OR the
 > whole surface is authenticated (`--auth-token` AND `--auth-token-read`) — a write-token
@@ -330,7 +333,7 @@ curl -X POST 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
 curl -X DELETE 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'
 
 curl http://127.0.0.1:3030/health                               # -> "ok"
-curl http://127.0.0.1:3030/metrics                              # Prometheus text exposition
+curl http://127.0.0.1:3030/metrics                              # Prometheus text exposition (gated by --auth-token-read; sq-9jrx)
 
 # Admin WAL compaction / vacuum for ERASURE-COMPLETENESS (sq-x32t). POST-only; gated by the
 # WRITE token. Physically purges data removed by DELETE / DROP (incl. orphaned literal VALUES) from the
