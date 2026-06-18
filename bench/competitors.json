@@ -88,6 +88,31 @@
       "dashboard_engine_id": "qlever"
     },
     {
+      "id": "fuseki",
+      "name": "Apache Jena Fuseki + TDB2",
+      "kind": "http-sparql",
+      "role": "[OPUS-4.8 sq-gbq0] Tier-1 SPARQL-1.1 reference SERVER (per research/competitor-benchmark-landscape.md §1): the canonical Jena/TDB2 store reviewers expect as the mainstream baseline + a CORRECTNESS ORACLE (cross-check COUNT/result-size before any timing). NOT the speed target — Fuseki is Java/JVM, single-machine, and lands mid/back-of-pack vs QLever (the speed rival stays QLever). Apache-2.0 -> numbers are publishable (no DeWitt/benchmark-publication clause). Adapter kind `http-sparql` (POST a SELECT/COUNT query -> parse SPARQL-results-JSON -> count) reusing scripts/bench-adapters/http_sparql_adapter.py, the SAME shared unit the QLever path uses and the one the Virtuoso bead (sq-gji9) inherits. tdb2.tdbloader bulk-loads NT/TTL and Fuseki serves SPARQL 1.1, so it runs every existing sparq suite unmodified.",
+      "pinned_version": "apache-jena-fuseki + TDB2 (pin the Fuseki distribution version or the Docker image DIGEST at gather time)",
+      "version_source": "the resolved Docker image DIGEST (`docker inspect --format '{{index .RepoDigests 0}}'`) — this digest IS the recorded version identifier — or, for a from-tarball install, the `fuseki --version` / distribution version. The SPARQL endpoint reports no build string, so the digest/distribution version IS the recorded identifier; recorded in the gather results file at run time.",
+      "install_recipe": "use the first-party jena-fuseki-docker image (Apache-2.0; Dockerfile + compose + helper scripts), OR a community image (stain/jena-fuseki, secoresearch/fuseki), OR download apache-jena-fuseki-<ver>.tar.gz + apache-jena-<ver>.tar.gz (for tdb2.tdbloader) and put bin/ on PATH. Docker-based -> gather-only on a Docker EC2 box (no Docker on the dev box; zero recurring CI cost). gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
+      "run_recipe": "PREP (gather box): bulk-load the suite corpus with `tdb2.tdbloader --loc <DB> <data.nt|.ttl>`, start Fuseki over <DB> (`fuseki-server --loc <DB> /ds` or the Docker image), then for each suite .rq drive the endpoint: `scripts/gather-competitors.sh --run --only fuseki` with SPARQL_ENDPOINT=<http://host:3030/ds/query> SPARQL_QUERY_FILE=<suite>/queries/<q>.rq set; the dispatch calls scripts/bench-adapters/http_sparql_adapter.py (POST query -> parse SPARQL-JSON -> count). COLD + min-of-N; COUNT(*) compute-mode headline. Cross-check the COUNT/result-size against sparq BEFORE trusting any timing.",
+      "adapter": {
+        "endpoint_env": "SPARQL_ENDPOINT",
+        "query_file_env": "SPARQL_QUERY_FILE",
+        "note": "POST each suite query (or its `SELECT (COUNT(*) AS ?n)` compute-mode wrap) to the Fuseki /query endpoint; parse SPARQL-results-JSON, count solutions (or read ?n). Methodology extends bench/CATALOG.md QUIET-BOX: gather ONCE on an otherwise-idle box, same machine+suite+scale back-to-back vs sparq, COLD + min-of-N. Cross-check COUNT/result-size first."
+      },
+      "comparable_suites": [
+        { "sparq_suite": "sp2b",   "note": "SP2Bench corpus; load .nt via tdb2.tdbloader, run queries/*.rq against the endpoint. COUNT(*) compute-mode headline; cross-check result-size vs sparq first." },
+        { "sparq_suite": "watdiv", "note": "WatDiv SF=1 corpus; comparable in count mode (same .rq workload as the QLever/Oxigraph WatDiv comparison)." },
+        { "sparq_suite": "lubm",   "note": "LUBM EXTENSIONAL tier ONLY — Fuseki/TDB2 does not materialize OWL 2 RL by default, so the entailed tier (Q6/Q9/Q11/Q12/Q13) is NOT comparable as-loaded; scope to the extensional queries (like Oxigraph/QLever)." },
+        { "sparq_suite": "bsbm",   "note": "BSBM Explore corpus via the endpoint; CONSTRUCT/DESCRIBE forms compare produced-triple counts." },
+        { "sparq_suite": "dbpsb",  "note": "DBPSB/FEASIBLE DBpedia cut; the suite Jena/Fuseki is most-reported on in the literature." }
+      ],
+      "version_env_metadata": "gather records the Fuseki Docker image DIGEST (or the distribution version / `fuseki --version`) + java -version + the host env block. Results land git-ignored in bench/competitor-results/fuseki-<suite>-<UTC>.json; promote into engines/values only deliberately, reviewed in-diff.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "fuseki"
+    },
+    {
       "id": "eye",
       "name": "EYE (Euler Yet another proof Engine)",
       "kind": "binary",
