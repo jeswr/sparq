@@ -118,6 +118,17 @@ Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>
 Nlq::prompt_for(&self, question: &str) -> String          // deterministic; for building fixtures
 Nlq::repair_prompt_for(&self, question, failed_sparql, error) -> String
 
+// Index-grounded entity/relation linking (sparq-sim) — opt-in via NlqConfig.link_entities.
+// Resolves the question's proper nouns to concrete IRIs in THIS store's dictionary and
+// surfaces them (with structurally-similar siblings from sparq_sim::Sim::most_similar) in
+// the grounding prompt. Usable standalone:
+sparq_nlq::link::EntityLinker::build(graph: &Graph, expand_k: usize, max_links: usize)
+EntityLinker::link(&self, question: &str) -> Linking
+// Linking { entities: Vec<LinkedEntity>, relations: Vec<LinkedRelation> }
+//   LinkedEntity { mention, iri: NamedNode, label, exact: bool, similar: Vec<NamedNode> }
+//   LinkedRelation { mention, iri: NamedNode, triples: u64 }
+Linking::to_prompt_section(&self) -> Option<String>      // None when nothing linked
+
 // Answer { sparql: String, result: QueryResult, repairs: usize, transcript: Vec<Turn> }
 // NlqError { message: String, transcript: Vec<Turn> }  (impls Error/Display)
 // QueryResult { vars: Vec<Variable>, rows: Vec<Vec<Option<Term>>> } — re-exported by sparq-nlq.
@@ -128,7 +139,10 @@ Nlq::repair_prompt_for(&self, question, failed_sparql, error) -> String
 (`Some(10s)`, native only), `max_rows` (`Some(1_000_000)`), `examples`
 (two schema-agnostic few-shots), `ground` (`true` — the grounded loop the fixtures
 were recorded under; set `false` for the ungrounded baseline the exec-accuracy
-harness measures grounding against — see below).
+harness measures grounding against — see below), `link_entities` (`false` — opt-in
+sparq-sim entity/relation linking appended to the grounded prompt; flipping it on a
+recorded dataset means re-recording, since the prompt string changes), `link_expand_k`
+(`3` — structurally-similar siblings per linked entity) and `max_links` (`8`).
 
 `sparq_nlq::eval` — the **exec-accuracy harness** (the design doc's accuracy gate,
 `research/genai-design.md` §4). It grades the *executed* query the QALD way — **answer-set
@@ -340,4 +354,4 @@ the fixtures encode.)
   `sparql-formal-semantics` — the verifiable/private query estate, orthogonal to this
   retrieval surface.
 </skill_md>
-<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples, ground }", "sparq_nlq::eval::EvalCase::new(question, gold_sparql)", "sparq_nlq::eval::run_config(graph, cases, llm, config, Linking) -> Report", "sparq_nlq::eval::run_comparison(graph, cases, base_config, make_llm) -> Comparison", "Comparison::headline_grounding_pays() -> bool / summary() -> String", "F1::score(&AnswerSet, &AnswerSet) -> F1 / is_exact() -> bool ; AnswerSet::from_result(&QueryResult)", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")"]
+<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples, ground, link_entities, link_expand_k, max_links }", "sparq_nlq::link::EntityLinker::build(graph: &Graph, expand_k: usize, max_links: usize)", "EntityLinker::link(&self, question: &str) -> Linking", "sparq_nlq::link::Linking { entities: Vec<LinkedEntity>, relations: Vec<LinkedRelation> } ; Linking::to_prompt_section(&self) -> Option<String>", "sparq_nlq::eval::EvalCase::new(question, gold_sparql)", "sparq_nlq::eval::run_config(graph, cases, llm, config, Linking) -> Report", "sparq_nlq::eval::run_comparison(graph, cases, base_config, make_llm) -> Comparison", "Comparison::headline_grounding_pays() -> bool / summary() -> String", "F1::score(&AnswerSet, &AnswerSet) -> F1 / is_exact() -> bool ; AnswerSet::from_result(&QueryResult)", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")"]

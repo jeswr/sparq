@@ -45,6 +45,16 @@ llm.save("my_session.json")?;                   // replayable fixture for later
 - **Grounded generation** — the introspect crate's token-budgeted schema summary (exact
   counts from the store's permutation indexes, not guesses) plus two schema-agnostic
   few-shot examples.
+- **Index-grounded entity/relation linking** ([`link`](src/link.rs), opt-in via
+  `NlqConfig::link_entities`, default **off**) — resolves the question's proper nouns to
+  the concrete IRIs present in *this* store (label index over `rdfs:label` / `skos:prefLabel`
+  / `schema:name` / `foaf:name` / `dc:title`) and its predicate local-names, then expands
+  each linked entity with its structurally-similar siblings via
+  [`sparq-sim`](../sparq-sim)'s `Sim::most_similar` — the index-driven candidate generator,
+  no model and no network. Those linked IRIs are appended to the grounding prompt so the
+  model writes value/entity-bound queries against real IRIs instead of guesses
+  (`research/genai-nl-to-sparql.md` §2.6/§8.3). Off by default because it changes the prompt
+  string — re-record fixtures before enabling it on a recorded dataset. <!-- [OPUS-4.8] sq-uw40 -->
 - **Validate before execute** — parses with `spargebra` *before* the engine sees the
   query, so the repair round gets a real parser error; execution failures (unsupported
   forms, `QueryBudget` trips) are repair signals too.
@@ -83,8 +93,14 @@ llm.save("my_session.json")?;                   // replayable fixture for later
   live path (`live_exec_accuracy`, `#[cfg(feature = "live")]` **and** `#[ignore]`'d) needs a
   real key, the olympics dump, and a **canonical** measurement host (not a CI/sandbox box) —
   open work in bead `sq-g0lw`.
-- **Not yet wired**: entity/relation linking from `sparq-sim` (bead `sq-uw40`) and
-  N2 grammar-constrained decoding against the live dictionary (bead `sq-9yjp`).
+- **Wired, opt-in, not yet measured against a real model**: index-grounded
+  entity/relation linking from `sparq-sim` (`NlqConfig::link_entities`, bead `sq-uw40`).
+  The label/IRI matching and the structural-sibling expansion are CI-gated on an
+  in-memory graph; whether it lifts live exec-accuracy is part of the open live
+  measurement (`sq-g0lw`). The complementary lexical/exact literal-value tier is
+  bead `sq-na0q`.
+- **Not yet wired**: N2 grammar-constrained decoding against the live dictionary
+  (bead `sq-9yjp`).
 - `AnthropicLlm` is compile-checked in CI (`--features live`) but never called there; no
   test touches the network. <!-- [OPUS-4.8] sq-05rv sq-g0lw -->
 
