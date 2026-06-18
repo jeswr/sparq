@@ -52,6 +52,7 @@ pub mod live;
 
 pub mod constrain;
 pub mod eval;
+pub mod link;
 
 // ---------------------------------------------------------------------------
 // The LLM boundary
@@ -228,6 +229,22 @@ pub struct NlqConfig {
     /// is read at prompt time), so one [`Nlq`] can be reconfigured grounded vs
     /// ungrounded; the eval harness drives both off the same graph. [OPUS-4.8] sq-05rv
     pub ground: bool,
+    /// Entity & relation linking ([`link`]): resolve the question's proper nouns to
+    /// concrete IRIs in this store and surface them (with structurally-similar siblings
+    /// from `sparq-sim`) in the grounding prompt — the design's index-grounded linking
+    /// (`research/genai-nl-to-sparql.md` §2.6/§8.3). OFF by default because enabling it
+    /// changes the prompt string (and therefore any recorded [`ReplayLlm`] fixture must
+    /// be re-recorded); only takes effect when [`ground`](Self::ground) is also `true`.
+    /// Construction builds the linker (one scan per present label predicate) so it can be
+    /// toggled per `ask` without rebuilding the [`Nlq`]. [OPUS-4.8] sq-uw40
+    pub link_entities: bool,
+    /// How many structurally-similar siblings ([`sparq_sim::Sim::most_similar`]) to
+    /// attach to each linked entity (0 disables the expansion, linking labels only).
+    /// Only read when [`link_entities`](Self::link_entities) is `true`.
+    pub link_expand_k: usize,
+    /// Cap on linked entities (and, separately, relations) rendered into the prompt, so
+    /// the linking section stays bounded. Only read when linking is on.
+    pub max_links: usize,
     /// N2 **dictionary-grounded constraint** ([`constrain`], `sq-9yjp`). When `true`,
     /// a query that parses is additionally checked against the **live dictionary**
     /// *before* execution: every predicate / `rdf:type` class IRI must be a term the
@@ -278,6 +295,11 @@ impl Default for NlqConfig {
                 },
             ],
             ground: true,
+            // Linking off by default: it changes the prompt string (re-record fixtures
+            // before flipping it on a recorded dataset). [OPUS-4.8] sq-uw40
+            link_entities: false,
+            link_expand_k: 3,
+            max_links: 8,
             check_dictionary: false,
         }
     }
@@ -373,6 +395,10 @@ impl std::error::Error for NlqError {}
 pub struct Nlq<'g> {
     graph: &'g Graph,
     schema_summary: String,
+    /// The entity/relation linker — built (and the label index scanned) once at
+    /// construction when [`NlqConfig::link_entities`] is set, then reused per `ask`.
+    /// `None` when linking is off (the default), so the loop pays nothing for it.
+    linker: Option<link::EntityLinker<'g>>,
     llm: Box<dyn Llm>,
     config: NlqConfig,
 }
@@ -385,9 +411,13 @@ impl<'g> Nlq<'g> {
     pub fn with_config(graph: &'g Graph, llm: Box<dyn Llm>, config: NlqConfig) -> Self {
         let schema_summary =
             Introspection::build(graph).to_text_summary(config.summary_budget_chars);
+        let linker = config
+            .link_entities
+            .then(|| link::EntityLinker::build(graph, config.link_expand_k, config.max_links));
         Self {
             graph,
             schema_summary,
+            linker,
             llm,
             config,
         }
@@ -420,6 +450,15 @@ impl<'g> Nlq<'g> {
                 p.push('\n');
             }
             p.push('\n');
+            // Index-grounded entity/relation linking (sparq-sim), appended to the schema
+            // deck when enabled. Adds nothing — and leaves the prompt byte-identical — if
+            // the question linked nothing. [OPUS-4.8] sq-uw40
+            if let Some(linker) = &self.linker {
+                if let Some(section) = linker.link(question).to_prompt_section() {
+                    p.push_str(&section);
+                    p.push('\n');
+                }
+            }
         } else {
             // Ungrounded: no schema deck. The model must guess vocabulary — the
             // baseline that grounding has to beat.
@@ -742,6 +781,81 @@ mod tests {
         let nlq = Nlq::new(&g, Box::new(replay));
         let err = nlq.ask("Something never recorded?").unwrap_err();
         assert!(err.message.contains("replay miss"), "{}", err.message);
+    }
+
+    fn linkable_graph() -> Graph {
+        let ttl = r#"
+            @prefix ex: <http://example.org/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:tarantino a ex:Director ; rdfs:label "Quentin Tarantino" ; ex:directed ex:pulp .
+            ex:nolan a ex:Director ; rdfs:label "Christopher Nolan" ; ex:directed ex:inception .
+            ex:pulp a ex:Film ; rdfs:label "Pulp Fiction" ; ex:director ex:tarantino .
+            ex:inception a ex:Film ; rdfs:label "Inception" ; ex:director ex:nolan .
+        "#;
+        Graph::load_str(ttl, "turtle").expect("graph parses")
+    }
+
+    #[test]
+    fn linking_off_by_default_leaves_prompt_unchanged() {
+        let g = linkable_graph();
+        let nlq = Nlq::new(&g, Box::new(FnLlm(|_| Err("unused".into()))));
+        let p = nlq.prompt_for("What did Quentin Tarantino direct?");
+        assert!(!p.contains("# Linked from the question"));
+    }
+
+    #[test]
+    fn linking_on_injects_linked_iris_and_siblings() {
+        let g = linkable_graph();
+        let cfg = NlqConfig {
+            link_entities: true,
+            link_expand_k: 3,
+            ..NlqConfig::default()
+        };
+        let nlq = Nlq::with_config(&g, Box::new(FnLlm(|_| Err("unused".into()))), cfg);
+        let p = nlq.prompt_for("Who is the director of films by Quentin Tarantino?");
+        assert!(
+            p.contains("# Linked from the question"),
+            "linking section missing"
+        );
+        assert!(
+            p.contains("http://example.org/tarantino"),
+            "linked entity IRI missing"
+        );
+        // sparq-sim should surface the sibling Director (same structural shape).
+        assert!(
+            p.contains("http://example.org/nolan"),
+            "structural sibling missing"
+        );
+        // The relation "director" should link from the word "director".
+        assert!(
+            p.contains("http://example.org/director"),
+            "linked relation missing"
+        );
+    }
+
+    #[test]
+    fn linking_does_not_break_the_ask_loop() {
+        let g = linkable_graph();
+        let cfg = NlqConfig {
+            link_entities: true,
+            ..NlqConfig::default()
+        };
+        // The model echoes a query that uses the linked IRI; the loop must run normally.
+        let q = "PREFIX ex: <http://example.org/>\n\
+                 SELECT ?film WHERE { ?film ex:director ex:tarantino }";
+        let nlq = Nlq::with_config(
+            &g,
+            Box::new(FnLlm(move |prompt: &str| {
+                assert!(prompt.contains("# Linked from the question"));
+                Ok(format!("```sparql\n{q}\n```"))
+            })),
+            cfg,
+        );
+        let a = nlq
+            .ask("What did Quentin Tarantino direct?")
+            .expect("loop succeeds with linking on");
+        assert_eq!(a.repairs, 0);
+        assert_eq!(a.result.len(), 1); // ex:pulp
     }
 
     #[test]
