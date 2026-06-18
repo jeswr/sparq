@@ -30,7 +30,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 # (a non-trivial dep tree we deliberately drop on the read path, see below). Reading
 # stays default and sophia-free; only writers pay for it.
 [features]
-write = ["hdt/sophia"]
+# [OPUS-4.8] hdt 0.7 split the N-Triples -> HDT writer (`Hdt::read_nt`) out of the
+# `sophia` feature into a dedicated `nt` feature, so the writer needs BOTH.
+write = ["hdt/sophia", "hdt/nt"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library via flate2) for `.hdt.gz` inflate — a measured 1.5–3×
 # at ~zero code change. SAFE because sparq-hdt is native-only and never in the sparq-wasm
@@ -85,7 +87,7 @@ rayon = { workspace = true }
 # The `sophia` feature provides hdt's (experimental) N-Triples -> HDT writer
 # (`Hdt::read_nt`), used ONLY to build .hdt round-trip fixtures / benchmark inputs
 # from N-Triples ground truth in-process.
-hdt = { version = "0.7", features = ["sophia"] }
+hdt = { version = "0.7", features = ["sophia", "nt"] }
 # [OPUS-4.8] sq-117n: per-test unique, auto-cleaned scratch dirs. The roundtrip
 # tests build `.hdt` archives by writing an N-Triples file to disk and reading it
 # back with `Hdt::read_nt`; using FIXED `CARGO_TARGET_TMPDIR` subdir names let
