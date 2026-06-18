@@ -289,3 +289,35 @@ spot quota; or (b) a Standard on-demand vCPU limit bump to ≥24 (then plain `ba
 hwrun/rung5-launch.sh`); or (c) run it from a session that is NOT on the 8-vCPU dev box so
 the on-demand headroom is free again. Tracked on sq-3l43; the deferred 192-core full
 validation is sq-bj3.
+
+### 2026-06-18 re-confirmation — BOTH paths STILL blocked (no change, no fabrication) [OPUS-4.8]
+
+Re-probed live from the same work-box session before re-attempting; the account envelope
+is unchanged from the 2026-06-17 attempt above, so **the `dict-consolidate(serial)` figure
+at 1 B is still NOT produced and none is recorded here.** Evidence captured this session:
+
+- Running instances unchanged: prod `t3.large` (2 vCPU) + dev `r7g.2xlarge`
+  `sparq-dev-claude` (8 vCPU) = 10 vCPU Standard on-demand. No `purpose=sparq-hw-validation`
+  instances exist (orphan-clean before and after).
+- **On-demand still `VcpuLimitExceeded`.** The sanctioned self-terminating launch
+  (`bash hwrun/rung5-launch.sh`, `--instance-initiated-shutdown-behavior terminate` +
+  dead-man `shutdown -h +150` + cleanup trap) aborted at `RunInstances`: *"requested more
+  vCPU capacity than your current vCPU limit of 16 … for the instance bucket"* (10 used + 8
+  for a fresh `r7i.2xlarge` = 18 > 16). The pre-flight + cleanup trap left no instance,
+  keypair, or SG behind. NB: a bare `--dry-run` RunInstances misleadingly reports "would
+  have succeeded" because dry-run does NOT evaluate the per-bucket vCPU quota — only a real
+  `RunInstances` surfaces the limit, so the dry-run cannot be used as the go/no-go signal.
+- **Spot still `AuthFailure.ServiceLinkedRoleCreationNotPermitted`.** A real spot
+  `RunInstances` probe is refused: the scoped SSO deploy role
+  (`AWSReservedSSO_PSSSingleInstanceDeploy`) cannot create the one-time
+  `AWSServiceRoleForEC2Spot` service-linked role, and cannot `iam:GetRole` to check whether
+  it already exists. `servicequotas:GetServiceQuota` is likewise denied, so the limits
+  cannot be read from this principal — only inferred from the live `RunInstances` verdicts.
+
+Not run in-place on the dev box instead: it is **aarch64 (Neoverse-V1)**, not the x86-64
+(Xeon Platinum 8488C) of the rung-5 baseline, so a figure from it would not be comparable
+to the 137.9 s + 62.2 s x86 split this re-measurement compares against; it is also the
+shared agent box (a ~12-min full-core 1 B build would contend with other agents, and the
+~84 GB index would crowd the shared root volume). The bead scopes a dedicated,
+self-terminating r7i.2xlarge precisely to avoid both. Unblock paths (a)/(b)/(c) above are
+unchanged; producing the figure remains the responsibility of whoever satisfies one of them.
