@@ -11,6 +11,8 @@ v3, §S4.E). Drives the per-property Noir circuit family at
 > **Internal crate — not published** to crates.io (`publish = false`): nothing in
 > the workspace depends on it, so default and wasm builds are byte-identical either way.
 
+<!-- separate, distinct blockquotes: the internal-crate note above vs. the soundness caveat below (MD028) -->
+
 > **NOT-yet-sound** (standing caveat — sq-qhy4 / sq-9hrn; remediation epic sq-1s2).
 > No soundness, zero-knowledge, or privacy property is claimed as achieved; the
 > verifier's soundness is the subject of the open external audit
