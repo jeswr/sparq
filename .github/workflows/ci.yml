@@ -892,6 +892,17 @@ jobs:
         uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # cargo-llvm-cov
       - name: Test-presence gate (fast, no compile)
         run: python3 scripts/coverage-presence.py --check
+      - name: Coverage-floor MONOTONICITY gate (ratchet only rises, fast, no compile)
+        # [OPUS-4.8] sq-neq8: FAIL if THIS branch LOWERS/DROPS any crate's coverage floor
+        # vs origin/main. --check-robust only compares measured-vs-floor, so a floor
+        # DECREASE in a PR is otherwise invisible — exactly how #661 (sq-cafc) silently
+        # re-seeded sparq-serve 92->83 (caught by a human, not CI). Mirrors the conformance
+        # ratchet's only-rises enforcement. A deliberate, reviewed regression must add
+        # --allow-lower to this command in the PR (and a reviewer must approve it).
+        # Cheap (no compile) so it fails fast before the instrumented build.
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          python3 scripts/coverage-gate.py --check-monotonic --base-ref origin/main
       - name: Measure + enforce per-crate coverage (per-commit tier, max-remeasure gate)
         # [OPUS-4.8] sq-x4jy: ROBUST per-crate MAX-REMEASURE gate. Measure once, then
         # --check-robust re-measures ONLY the crates below floor (up to K=3 total

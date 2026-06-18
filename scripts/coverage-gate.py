@@ -29,6 +29,16 @@
 #                             per-crate MAX(lines_pct), writing the result (used by an
 #                             external shell loop, and unit-tested directly).
 #
+#   --check-monotonic         [OPUS-4.8] sq-neq8: RATCHET-DIRECTION gate. Diff THIS branch's
+#                             bench/coverage-floor.json floors against the BASE (default
+#                             `origin/main:bench/coverage-floor.json`, overridable via
+#                             --base-ref / --base-file) and FAIL (exit 1) if a PR LOWERS any
+#                             crate's floor. --check only compares measured-vs-floor, so a
+#                             floor DECREASE in a PR is otherwise INVISIBLE — exactly how
+#                             #661 silently dropped sparq-serve 92->83 (caught by a human,
+#                             not CI). A deliberate, reviewed regression must pass --allow-
+#                             lower. New crates and RAISED floors always pass.
+#
 # THE MAX-REMEASURE PRINCIPLE (sq-x4jy) [OPUS-4.8]
 # ------------------------------------------------
 # llvm-cov instrumentation only ever UNDERCOUNTS: when a test process aborts/OOMs or a
@@ -204,6 +214,33 @@ def sub_floor_crates(summary, floors):
             out.append(crate)
     return sorted(out)
 
+def floor_regressions(base_floors, new_floors):
+    """[OPUS-4.8] sq-neq8: PURE — return the list of (crate, base_floor, new_floor) tuples
+    where the new floor file LOWERED a crate's floor relative to `base_floors`.
+
+    Both args are the `crates` mapping of a floor file (crate -> {"floor": N} | N). A crate
+    only in `new_floors` (a newly-added crate) is NOT a regression; a crate only in
+    `base_floors` (dropped from the floor file) is reported separately by the caller — it is
+    NOT a *floor* lowering but it IS a way to erode the ratchet, so the caller treats a drop
+    as a regression too. Here we report only the floor DECREASES; equal/raised floors pass."""
+    out = []
+    for crate, bentry in sorted(base_floors.items()):
+        if crate not in new_floors:
+            continue  # dropped-crate handling is the caller's (it is reported, not silent)
+        bf, nf = floor_of(bentry), floor_of(new_floors[crate])
+        if nf < bf:
+            out.append((crate, bf, nf))
+    return out
+
+
+def dropped_crates(base_floors, new_floors):
+    """[OPUS-4.8] sq-neq8: PURE — crates present in the BASE floor file but ABSENT from the
+    new one. Removing a crate's floor row erodes the ratchet just as a floor decrease does
+    (its coverage is no longer gated at all), so --check-monotonic treats it as a regression
+    unless --allow-lower is given."""
+    return sorted(c for c in base_floors if c not in new_floors)
+
+
 def merge_max(prev, new):
     """Pure: return a NEW summary that is `prev` with each crate's coverage replaced by
     the per-crate MAX(lines_pct) seen across `prev` and `new`.
@@ -305,6 +342,74 @@ def check_robust(summary_path, floor_path, k, require_all,
     print("==> final verdict (canonical --check over the per-crate-MAX summary):")
     return check(out_path, floor_path, require_all)
 
+def _load_floors_obj(doc):
+    """A floor file's `crates` map, accepting either the full doc or a bare crates map."""
+    return doc["crates"] if isinstance(doc, dict) and "crates" in doc else doc
+
+
+def _base_floors_from_git(base_ref, floor_path, log=print):
+    """[OPUS-4.8] sq-neq8: load the BASE floor file from git (`<base_ref>:<repo-rel path>`).
+    Returns the `crates` map, or None if the base ref / path is unavailable (e.g. the file
+    did not exist on base — a brand-new floor file cannot regress anything, so the caller
+    fail-OPENs). Resolves the floor's path relative to the repo root so the git pathspec is
+    correct regardless of CWD."""
+    try:
+        root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        rel = os.path.relpath(os.path.abspath(floor_path), root)
+        # git uses forward slashes in pathspecs on every platform.
+        rel = rel.replace(os.sep, "/")
+        r = subprocess.run(["git", "show", f"{base_ref}:{rel}"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            log(f"  note: base '{base_ref}:{rel}' unavailable "
+                f"({r.stderr.strip() or 'not found'}) — monotonic gate fail-OPEN (PASS)")
+            return None
+        return _load_floors_obj(json.loads(r.stdout))
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as e:
+        log(f"  note: could not read base floors via git ({e}) — fail-OPEN (PASS)")
+        return None
+
+
+def check_monotonic(floor_path, base_ref, base_file, allow_lower, log=print):
+    """[OPUS-4.8] sq-neq8: FAIL if THIS branch's floor file LOWERS or DROPS any crate's floor
+    vs the base (origin/main by default). Mirrors the conformance ratchet's only-rises rule.
+    `--allow-lower` permits a deliberate, reviewed regression. Returns an exit code."""
+    new_floors = _load_floors_obj(load(floor_path))
+    if base_file is not None:
+        base_floors = _load_floors_obj(load(base_file))
+        src = base_file
+    else:
+        base_floors = _base_floors_from_git(base_ref, floor_path, log=log)
+        src = f"{base_ref}:{os.path.basename(floor_path)}"
+    if base_floors is None:
+        log("coverage monotonic gate: no base to compare — PASS")
+        return 0
+
+    regressions = floor_regressions(base_floors, new_floors)
+    dropped = dropped_crates(base_floors, new_floors)
+    log(f"==> coverage monotonic gate: comparing floors vs {src}")
+    for crate, bf, nf in regressions:
+        log(f"  LOWERED  {crate:<20} floor {bf} -> {nf}")
+    for crate in dropped:
+        log(f"  DROPPED  {crate:<20} (floor {floor_of(base_floors[crate])} -> absent)")
+    bad = bool(regressions) or bool(dropped)
+    if not bad:
+        log("  ok: every base crate's floor is preserved or RAISED")
+        log("coverage monotonic gate: PASS")
+        return 0
+    if allow_lower:
+        log("  --allow-lower: the floor regression(s) above are an EXPLICIT, reviewed "
+            "decrease — PASS")
+        log("coverage monotonic gate: PASS (--allow-lower)")
+        return 0
+    log(f"::error::coverage floor regressed for {len(regressions)} crate(s) and "
+        f"{len(dropped)} dropped crate(s) vs {src}. The coverage ratchet only RISES "
+        f"(sq-neq8). If this lowering is intentional, re-run with --allow-lower.")
+    log("coverage monotonic gate: FAIL")
+    return 1
+
+
 def main():
     # --self-test is a standalone mode (mirrors scripts/perf-gate.py --self-test):
     # unit-test the PURE aggregation logic on synthetic measurement sequences, no files.
@@ -316,17 +421,25 @@ def main():
         sys.exit(_cli_merge_max(sys.argv[1:]))
 
     ap = argparse.ArgumentParser(description="per-crate coverage ratchet gate")
-    ap.add_argument("summary", help="coverage-summary.json from scripts/coverage.sh")
+    # `summary` is required for --seed/--check/--check-robust but NOT for --check-monotonic
+    # (which diffs floor FILES, not a measured summary); validated below after parsing.
+    ap.add_argument("summary", nargs="?", default=None,
+                    help="coverage-summary.json from scripts/coverage.sh "
+                         "(not used by --check-monotonic)")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--seed", action="store_true", help="(re)generate the floor file")
     g.add_argument("--check", action="store_true", help="enforce the floor file")
     g.add_argument("--check-robust", action="store_true",
                    help="[OPUS-4.8] robust gate: re-measure ONLY sub-floor crates up to "
                         "K times, keep the per-crate MAX, fail only if still below floor")
+    g.add_argument("--check-monotonic", action="store_true",
+                   help="[OPUS-4.8] sq-neq8: FAIL if the floor file LOWERS/DROPS any crate's "
+                        "floor vs the base (origin/main); the ratchet only RISES")
     ap.add_argument("--floor", default=os.path.join(os.path.dirname(__file__), "..",
                     "bench", "coverage-floor.json"))
     ap.add_argument("--allow-lower", action="store_true",
-                    help="permit --seed to LOWER a floor (deliberate regression)")
+                    help="permit --seed/--check-monotonic to LOWER a floor "
+                         "(deliberate, reviewed regression)")
     ap.add_argument("--require-all", action="store_true",
                     help="--check fails if a floor crate is absent from the summary")
     ap.add_argument("-k", "--max-measurements", type=int, default=DEFAULT_K,
@@ -334,8 +447,19 @@ def main():
     ap.add_argument("--out", default=None,
                     help="--check-robust: write the final per-crate-MAX summary here "
                          "(default: overwrite the input summary)")
+    ap.add_argument("--base-ref", default="origin/main",
+                    help="--check-monotonic: git ref of the base floor file "
+                         "(default origin/main)")
+    ap.add_argument("--base-file", default=None,
+                    help="--check-monotonic: compare against a base floor FILE on disk "
+                         "instead of a git ref (overrides --base-ref)")
     a = ap.parse_args()
     floor = os.path.abspath(a.floor)
+    if a.check_monotonic:
+        sys.exit(check_monotonic(floor, a.base_ref, a.base_file, a.allow_lower))
+    if a.summary is None:
+        ap.error("the 'summary' argument is required for "
+                 "--seed/--check/--check-robust")
     if a.seed:
         sys.exit(seed(a.summary, floor, a.allow_lower))
     if a.check_robust:
@@ -463,6 +587,26 @@ def self_test():
     code5, _ = robust_aggregate(lambda cs: (_ for _ in ()).throw(AssertionError(
         "should not re-measure when all pass")), init5, FLOORS, k=3, log=quiet)
     assert code5 == 0
+
+    # === MONOTONIC gate (sq-neq8): floor-vs-base ratchet direction =============
+    # floor_regressions: only DECREASES are returned; raises / equal / new pass.
+    base = {"a": {"floor": 80}, "b": 83, "c": {"floor": 90}}
+    # b lowered 83->70 (bare-int form), c raised, a equal, d is new -> only b regresses.
+    nw = {"a": {"floor": 80}, "b": {"floor": 70}, "c": {"floor": 95}, "d": {"floor": 50}}
+    assert floor_regressions(base, nw) == [("b", 83, 70)], floor_regressions(base, nw)
+    # the exact #661 shape: sparq-serve 92 -> 83 silently lowered by a re-seed.
+    b661 = {"sparq-serve": {"floor": 92}}
+    n661 = {"sparq-serve": {"floor": 83}}
+    assert floor_regressions(b661, n661) == [("sparq-serve", 92, 83)], "must catch #661"
+    # no regression when every floor is preserved or raised.
+    assert floor_regressions(base, {"a": {"floor": 80}, "b": 83, "c": {"floor": 91}}) == []
+    # a DROPPED crate is not a "floor lowering" but IS reported by dropped_crates.
+    assert dropped_crates(base, {"a": {"floor": 80}, "c": {"floor": 90}}) == ["b"], \
+        dropped_crates(base, {"a": {"floor": 80}, "c": {"floor": 90}})
+    assert dropped_crates(base, nw) == []  # nothing dropped (a,b,c all present)
+    # a brand-new crate present only in `new` is never a regression.
+    assert floor_regressions(base, {**base, "z": {"floor": 99}}) == []
+    assert dropped_crates(base, {**base, "z": {"floor": 99}}) == []
 
     print("coverage-gate self-test: ALL ASSERTIONS PASSED")
     return 0
