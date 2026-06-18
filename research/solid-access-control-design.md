@@ -812,4 +812,19 @@ Reading the numbers honestly:
    today): a *precise* per-solution check for variable `GRAPH ?var` template slots (today:
    require write on every store graph), and the `auth:append`-only insert-into-absent-graph
    edge. <!-- [OPUS-4.8] sq-xor3 -->
+7. **Containment / `ldp:contains` view ownership** — **DECIDED: PSS-written, not
+   sparq-derived** (sq-3jtd.4). A container's `ldp:contains` listing is explicit content the
+   storage layer (PSS) writes in its UPDATE bodies; sparq-solid stores it as ordinary triples
+   in the container's named graph (`fixture.rs`) and treats it as opaque content — it never
+   derives `ldp:contains` from IRI structure, mutates/re-derives it on a write, or reads it
+   into the reasoner. Containment *ancestry* is derived structurally (`solidx:parent`/
+   `solidx:ancestor`, §3.2) only to drive ACL inheritance and is never surfaced as
+   `ldp:contains`. Rationale: (i) avoids re-deriving a view on every write; (ii) keeps the
+   §2.4 content/reasoner boundary clean — a derived listing would have to read pod content;
+   (iii) the engine's atomic multi-op UPDATE (sq-ycle) is exactly the mechanism that keeps the
+   PSS-written listing consistent. The invariant is pinned by
+   `tests/containment_view_ownership.rs`. **Revisit only if** PSS asks sparq to own
+   containment; that would be a separate, explicitly-scoped *structural-only* (IRI
+   slash-semantics) derivation spike, never a content-reading one (`research/sparq-solid-scope.md`
+   area 2). <!-- [OPUS-4.8] sq-3jtd.4 -->
 
