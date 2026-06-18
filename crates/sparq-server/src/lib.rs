@@ -111,6 +111,15 @@ pub use http::{
 /// crate root next to [`ServerConfig`].
 pub use service_config::ServiceAllowlist;
 
+/// [OPUS-4.8] (sq-9xoh) The per-request SERVICE egress allowlist override hook type, re-exported
+/// at the crate root next to [`ServerConfig`]. Construct it with
+/// [`ServiceAllowOverride::new`](http::ServiceAllowOverride::new) and install it on
+/// [`ServerConfig::service_allow_override`] for a multi-tenant / gateway deployment that derives
+/// the reachable SERVICE host set per request. Present only with the `service` cargo feature
+/// (which implies `server`).
+#[cfg(feature = "service")]
+pub use http::ServiceAllowOverride;
+
 /// [OPUS-4.8] (sq-o7o0, ASVS V14.5.3) The first-party CORS origin allowlist config type,
 /// re-exported at the crate root next to [`ServerConfig`].
 pub use cors_config::CorsAllowlist;

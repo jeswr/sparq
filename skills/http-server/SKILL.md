@@ -903,6 +903,20 @@ is ignored.
   filter), `sq-iu0c` (the `403` classification). Embedders that drive the engine directly use
   `sparq_engine::with_service_egress_policy(strict, [host], || …)` /
   `with_service_egress_allow([host], || …)`.
+  - **Per-request / per-query egress override (`sq-9xoh`, feature `service`).** A multi-tenant
+    or gateway deployment can make the reachable SERVICE host set depend on the *request* instead
+    of the single static allowlist: set `ServerConfig::service_allow_override` to a
+    `ServiceAllowOverride::new(|headers| …)` hook (a `Fn(&HeaderMap) -> Option<ServiceAllowlist>`,
+    `Send + Sync`). It is invoked once per **read** request (SELECT / ASK / CONSTRUCT / DESCRIBE /
+    EXPLAIN ANALYZE); returning `Some(allowlist)` substitutes that allowlist for that one request
+    (installed in the same STRICT/allowlist-only mode — an empty returned allowlist therefore
+    **denies all** SERVICE for the request), and `None` falls back to the static `service_allow`.
+    `None` (the default) keeps the historical single-allowlist behaviour exactly. The hook can
+    only narrow or substitute the host set — it can never relax the fail-closed posture. It is
+    **not** applied to the SPARQL-Update writer path: updates are sequenced and group-committed on
+    one shared writer thread with no per-request header context (batch-mates may carry different
+    tokens), so federated `INSERT … WHERE` updates continue to use the operator's static
+    `service_allow`.
 - **Feature flags.** `server` (default-on) pulls axum/tokio/tower — the binary needs it
   (`required-features = ["server"]`). `time-travel` (default **off**) enables
   `?generation=N` pinning, the `Sparq-Generation` header, `AppState::at`, and the
