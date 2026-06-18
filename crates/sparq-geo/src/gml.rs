@@ -48,7 +48,8 @@
 use crate::literal::{swap_xy, Crs, GeoGeometry};
 use crate::GeoError;
 use geo_types::{
-    Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
+    Coord, Geometry, GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon,
+    Point, Polygon,
 };
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
@@ -73,7 +74,21 @@ fn unescape_attr_value(raw: &[u8]) -> Result<String, GeoError> {
 ///
 /// The CRS comes from the root element's `srsName` attribute (GeoSPARQL Req 11);
 /// absent, it defaults to CRS84 — the same default the WKT path uses.
+///
+/// An EMPTY lexical form (an empty or whitespace-only string) is the EMPTY
+/// geometry (GeoSPARQL Req 16 — the GML counterpart of the empty `wktLiteral`),
+/// returned as an empty `GEOMETRYCOLLECTION` in CRS84 exactly as the WKT path
+/// represents emptiness. A well-formed GML aggregate element that carries NO
+/// members (e.g. `<gml:MultiPoint/>`, `<gml:MultiGeometry/>`) is likewise the
+/// empty geometry rather than a parse error. [OPUS-4.8] sq-mzmh
 pub fn parse_gml_literal(lex: &str) -> Result<GeoGeometry, GeoError> {
+    // R16: an empty/whitespace-only lexical form is the empty geometry.
+    if lex.trim().is_empty() {
+        return Ok(GeoGeometry {
+            crs: Crs::Crs84,
+            geometry: Geometry::GeometryCollection(GeometryCollection(Vec::new())),
+        });
+    }
     let node = parse_root(lex)?;
     let crs = node.crs.clone();
     let geometry = build_geometry(&node)?;
@@ -229,6 +244,11 @@ fn build_geometry(node: &Node) -> Result<Geometry<f64>, GeoError> {
         "multisurface" | "multipolygon" => {
             Ok(Geometry::MultiPolygon(build_multisurface(node)?))
         }
+        // A heterogeneous aggregate: the GML 3 `gml:MultiGeometry` and the GML 2
+        // `gml:GeometryCollection`. An empty one is the empty geometry (R16). [OPUS-4.8]
+        "multigeometry" | "geometrycollection" => {
+            Ok(Geometry::GeometryCollection(build_geometrycollection(node)?))
+        }
         "envelope" => Err(GeoError::Unsupported(
             "GML gml:Envelope not supported (tracked as a bead); use a Polygon".to_string(),
         )),
@@ -366,11 +386,7 @@ fn build_multipoint(node: &Node) -> Result<MultiPoint<f64>, GeoError> {
             points.push(build_point(p)?);
         }
     }
-    if points.is_empty() {
-        return Err(GeoError::Parse(
-            "GML gml:MultiPoint has no gml:pointMember(s)".to_string(),
-        ));
-    }
+    // An empty gml:MultiPoint is the empty geometry (R16), not an error. [OPUS-4.8]
     Ok(MultiPoint::new(points))
 }
 
@@ -394,11 +410,7 @@ fn build_multicurve(node: &Node) -> Result<MultiLineString<f64>, GeoError> {
             lines.push(build_linestring(ls)?);
         }
     }
-    if lines.is_empty() {
-        return Err(GeoError::Parse(
-            "GML gml:MultiCurve has no gml:curveMember(s)".to_string(),
-        ));
-    }
+    // An empty gml:MultiCurve is the empty geometry (R16), not an error. [OPUS-4.8]
     Ok(MultiLineString::new(lines))
 }
 
@@ -422,10 +434,24 @@ fn build_multisurface(node: &Node) -> Result<MultiPolygon<f64>, GeoError> {
             polys.push(build_polygon(poly)?);
         }
     }
-    if polys.is_empty() {
-        return Err(GeoError::Parse(
-            "GML gml:MultiSurface has no gml:surfaceMember(s)".to_string(),
-        ));
-    }
+    // An empty gml:MultiSurface is the empty geometry (R16), not an error. [OPUS-4.8]
     Ok(MultiPolygon::new(polys))
+}
+
+/// A `gml:MultiGeometry` / `gml:GeometryCollection`: every `gml:geometryMember`
+/// (or `gml:geometryMembers`) recursively built. An empty one is the empty
+/// geometry (R16). [OPUS-4.8] sq-mzmh
+fn build_geometrycollection(node: &Node) -> Result<GeometryCollection<f64>, GeoError> {
+    let mut geoms = Vec::new();
+    for member in node.children_named("geometrymember") {
+        for child in &member.children {
+            geoms.push(build_geometry(child)?);
+        }
+    }
+    for members in node.children_named("geometrymembers") {
+        for child in &members.children {
+            geoms.push(build_geometry(child)?);
+        }
+    }
+    Ok(GeometryCollection(geoms))
 }
