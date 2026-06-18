@@ -13,14 +13,18 @@ exec error repair, else return `Answer { sparql, result, repairs, transcript }`.
 
 ## 🚀 Quickstart
 
-```rust
+```rust,no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# use sparq_core::Graph;
 use sparq_nlq::{Nlq, ReplayLlm};
 
+# let graph = Graph::load_str("", "turtle")?;
 // Offline / CI path: serve recorded prompt→completion pairs from a fixture.
 let replay = ReplayLlm::from_file("tests/fixtures/olympics_replay.json")?;
 let nlq = Nlq::new(&graph, Box::new(replay));
 let answer = nlq.ask("How many athletes are on each team?")?;
 println!("{}\n{} rows, {} repair(s)", answer.sparql, answer.result.len(), answer.repairs);
+# Ok(()) }
 ```
 
 ```sh
@@ -29,15 +33,25 @@ cargo add sparq-nlq --features live
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-```rust
+```rust,no_run
+# // `live::AnthropicLlm` needs the non-default `live` feature (network); gated so the
+# // doctest is a no-op under the default build.
+# #[cfg(feature = "live")]
+# fn demo() -> Result<(), Box<dyn std::error::Error>> {
+# use sparq_core::Graph;
 use std::rc::Rc;
 use sparq_nlq::{live::AnthropicLlm, Nlq, NlqConfig, RecordingLlm};
 
+# let graph = Graph::load_str("", "turtle")?;
 let llm = Rc::new(RecordingLlm::new(AnthropicLlm::from_env()?)); // record while you go
 let nlq = Nlq::with_config(&graph, Box::new(Rc::clone(&llm)),
     NlqConfig { max_repair_rounds: 3, ..NlqConfig::default() });
 let answer = nlq.ask("Which team has the most athletes?")?;
 llm.save("my_session.json")?;                   // replayable fixture for later
+# let _ = answer;
+# Ok(())
+# }
+# fn main() {}
 ```
 
 ## ✨ Features

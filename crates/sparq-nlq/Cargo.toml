@@ -20,6 +20,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page and the `live`-gated `AnthropicLlm` items render on docs.rs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 # `live` enables AnthropicLlm (network access to the Anthropic Messages API).
 # OFF by default: CI and the eval harness run entirely on recorded fixtures.

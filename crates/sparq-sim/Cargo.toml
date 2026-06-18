@@ -11,6 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page renders on docs.rs (the front page now comes from README.md via include_str!).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # Opt-in structural similarity (T7, GenAI phase 1 — see research/genai-design.md). This
 # is a SEPARATE crate so the core engine carries zero similarity code; it consumes only
 # sparq-core's PUBLIC read API (dict lookups, permutation-index scans, predicate stats).

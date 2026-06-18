@@ -4,14 +4,19 @@ Opt-in [HDT](https://www.rdfhdt.org/) (Header Dictionary Triples) reader (and,
 behind the `write` feature, writer) for the sparq RDF engine: load `.hdt` archives
 straight into a `sparq_core::Graph`, and save a `Graph` back out.
 
-```rust
+```rust,no_run
+# fn main() -> Result<(), sparq_hdt::Error> {
 let graph = sparq_hdt::load("dataset.hdt")?;   // .hdt.gz sniffed + decompressed too
 let meta  = sparq_hdt::header("dataset.hdt")?; // the HDT header (VoID stats, provenance) as a Graph
 // query them like any other sparq graph
 
 // writing (opt-in `write` feature): Graph -> .hdt (honours .gz/.zst/.bz2 by extension)
 # #[cfg(feature = "write")]
+# {
 sparq_hdt::save(&graph, "out.hdt")?;
+# }
+# let _ = &meta;
+# Ok(()) }
 ```
 
 In sparq-cli (behind the opt-in `hdt` cargo feature —

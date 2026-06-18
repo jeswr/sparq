@@ -1,27 +1,8 @@
-//! sparq-sim: **training-free structural entity similarity** over a [`sparq_core::Graph`].
-//!
-//! An entity's **structural signature** is the set of `(direction, predicate, neighbor)`
-//! pairs it participates in: outgoing pairs from an SPO range scan (`(e, p, o)` →
-//! `(Out, p, o)`) and incoming pairs from an OSP/OPS range scan (`(s, p, e)` →
-//! `(In, p, s)`). Both are single contiguous index ranges in the store's existing
-//! permutation indexes, so a signature costs `O(log n + degree(e))` — no embeddings, no
-//! training, no extra state; the indexes ARE the feature store, and stay correct under
-//! incremental updates.
-//!
-//! Similarity is a **weighted Jaccard** over two signatures. With predicate-IDF
-//! weighting (the default) each element `(d, p, n)` weighs `1 + ln(|G| / freq(p))`,
-//! using the per-predicate triple counts the store already keeps for its query planner
-//! ([`sparq_core::store::PredStat`]) — so sharing a rare predicate counts for more than
-//! sharing `rdf:type` with half the graph.
-//!
-//! `most_similar` generates candidates **through the indexes, not a full scan**: every
-//! entity sharing a signature element with the query is found by one range scan per
-//! element (POS for "who else has `(p, n)` outgoing", SPO for incoming). See
-//! [`Sim::most_similar`] for the precise complexity and the (documented) frequency-cap
-//! approximation.
-//!
-//! Everything here is read-only over the public `sparq-core` API; the crate is opt-in
-//! and the default engine build does not include it.
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// rust fences are API-map sketches marked `ignore` (they reference an external graph and
+// the sibling `sparq-vectors` crate, which is not a dependency of `sparq-sim`).
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use oxrdf::{NamedNode, Term};

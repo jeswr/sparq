@@ -1,40 +1,7 @@
-//! sparq-text: **opt-in full-text search over literals** for the sparq RDF engine.
-//!
-//! Three layers, bottom-up:
-//!
-//! 1. [`tokenize`] — the shared tokenizer: UAX #29 Unicode word segmentation
-//!    (`unicode-segmentation`) + Unicode lowercasing. No stemming, no stopword
-//!    list, no diacritic folding — deterministic and language-neutral; query
-//!    tokens may end in `*` for prefix (autocomplete) matching. An opt-in
-//!    [`Analyzer::CjkNgram`] adds character-bigram indexing for unspaced CJK
-//!    text (`東京都` → `東京`,`京都`) so a multi-char CJK term is no longer the
-//!    low-precision AND of its individual ideographs; the default
-//!    [`Analyzer::Unicode`] is byte-for-byte unchanged. [OPUS-4.8] sq-m3ln
-//! 2. [`index`] — [`TextIndex`]: an owned BM25 inverted index over the string
-//!    literals (`xsd:string` + language-tagged) of a sparq
-//!    [`Graph`](sparq_core::Graph)'s dictionary. The dictionary term id of a
-//!    literal IS its document id, so [`TextIndex::search`] /
-//!    [`search_any`](TextIndex::search_any) return literal ids that join back
-//!    to triples through the store's ordinary permutation indexes. Deltas are
-//!    mirrored incrementally via [`TextIndex::apply_delta`] (the
-//!    `GeoIndex::apply_delta` shape).
-//! 3. [`rewrite`] (default-on `engine` feature) — the `text:` magic
-//!    predicates ([`vocab`]): `?lit text:matches "query"` (AND of tokens,
-//!    `*`-suffix prefix tokens), `?lit text:matchesAny "query"` (OR),
-//!    `?lit text:phrase "foo bar"` (adjacent, in-order tokens — needs a
-//!    positions-enabled index), `?lit text:near "foo bar"` (proximity/slop:
-//!    in-order within a bounded gap, relevance-ranked — `text:slop N` sets the
-//!    gap budget), and `?lit text:score ?s` (the relevance score). [OPUS-4.8]
-//!    [`query_text`] rewrites them into
-//!    inline `VALUES` over the index's hits at the spargebra-algebra level and
-//!    executes through sparq-engine's prepared-query seam
-//!    (`PreparedQuery: From<spargebra::Query>`) — the engine itself is
-//!    untouched.
-//!
-//! No existing sparq crate depends on this one (in particular the wasm build
-//! carries zero text-search code); full-text support is engaged only by
-//! depending on `sparq-text` — mirroring how `sparq-geo` and `sparq-vectors`
-//! stay out of the default build.
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// `## Library use` fence is a compiled doctest; the `query_text` fence is `engine`-gated.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod index;

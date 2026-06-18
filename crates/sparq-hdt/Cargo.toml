@@ -17,6 +17,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page and every feature-gated item (`write`, `zlib-ng`) render on docs.rs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # [OPUS-4.8] sq-2te: HDT WRITE support (`save`: sparq `Graph` -> `.hdt`).
 # Opt-in because the only tractable path on hdt 0.4 is the crate's `Hdt::read_nt`
 # (N-Triples -> FourSectDict PFC + BitmapTriples) + `Hdt::write`, BOTH gated behind

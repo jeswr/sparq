@@ -17,6 +17,12 @@ readme = "README.md"
 # the wasm graph ONLY by `sparq-wasm`'s non-default `shacl` feature (sq-yqi1, #162),
 # in which case the wasm32 dep rows below keep the bundle lean (no rayon/regex/digest).
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page and every feature-gated item (e.g. `shacl-af`) render on docs.rs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).

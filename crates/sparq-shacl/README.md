@@ -255,6 +255,7 @@ undefined).
 ## Usage
 
 ```rust
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sparq_core::Graph;
 
 let data = Graph::load_str(r#"
@@ -283,6 +284,8 @@ if !report.conforms {
 // Severity-aware gating: `conforms` counts EVERY result (the spec's
 // sh:conforms); for CI-style "warnings don't fail the build" use:
 if report.conforms_violations_only() { /* only sh:Warning / sh:Info results */ }
+# assert!(!report.conforms);
+# Ok(()) }
 ```
 
 A CLI-style end-to-end run via the bundled example
@@ -300,10 +303,15 @@ For repeated validation of many data graphs against one shapes graph, parse
 the shapes once:
 
 ```rust
+# use sparq_core::Graph;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let shapes = Graph::load_str("", "turtle")?;
+# let data_graphs: Vec<Graph> = Vec::new();
 let model = sparq_shacl::ShapesModel::parse(&shapes);
 for data in data_graphs {
     let report = sparq_shacl::validate_with_model(&data, &model);
 }
+# Ok(()) }
 ```
 
 ## Scope and non-goals

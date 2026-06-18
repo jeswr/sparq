@@ -5,6 +5,7 @@ windowed **continuous SPARQL queries** over timestamped triple streams, as a
 deterministic **library** — no async runtime, no wall clock, no service.
 
 ```rust
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 use oxrdf::{Literal, NamedNode, Term};
 use sparq_rsp::{ContinuousQuery, R2S, WindowSpec};
 
@@ -15,10 +16,17 @@ let mut q = ContinuousQuery::register(
 )?
 .with_r2s(R2S::RStream);                          // the default: full result per window
 
+# let triple: [Term; 3] = [
+#     NamedNode::new_unchecked("http://ex/sensor1").into(),
+#     NamedNode::new_unchecked("http://ex/reading").into(),
+#     Literal::from(10).into(),
+# ];
+# let ts: u64 = 0;
 q.push(triple, ts, |result| {                     // fires once per CLOSED window
     println!("[{}, {}): {:?}", result.start, result.end, result.rows);
 })?;
 q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
+# Ok(()) }
 ```
 
 The classic RSP-QL pipeline, one type each:
@@ -54,7 +62,9 @@ transformation, with R2S as exact set diffs over the constructed graphs), and
 Beyond the programmatic API above, the crate parses the **RSP-QL textual query
 language** and joins across **multiple named windows**:
 
-```rust
+```rust,no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use oxrdf::{NamedNode, Term};
 use sparq_rsp::ContinuousMultiQuery;
 
 // Join sensor READINGS (stream :temp, window :w1) with the ROOM each sensor is
@@ -68,7 +78,15 @@ SELECT ?room ?v WHERE {
 FROM NAMED WINDOW <http://ex/w1> ON <http://ex/temp> RANGE 10 STEP 10
 FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 10 STEP 10")?;
 
+# let meta_stream = NamedNode::new_unchecked("http://ex/meta");
+# let triple: [Term; 3] = [
+#     NamedNode::new_unchecked("http://ex/s").into(),
+#     NamedNode::new_unchecked("http://ex/in").into(),
+#     NamedNode::new_unchecked("http://ex/room1").into(),
+# ];
+# let ts: u64 = 0;
 q.push(&meta_stream, triple, ts, |r| { /* full join result per tick */ })?;
+# Ok(()) }
 ```
 
 - **Parser** (`RspqlQuery::parse`): `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM]
@@ -198,7 +216,7 @@ above the saving is within run-to-run noise.
 
 ## Tests
 
-`cargo test -p sparq-rsp` — 33 integration tests + 3 doctests pinning:
+`cargo test -p sparq-rsp` — 33 integration tests plus the README doctests, pinning:
 boundary inclusivity (`[start, end)`), tumbling partition / sliding overlap,
 window origin `t0` (shifted bounds, pre-origin arrivals, anchor far from the
 origin), empty-window reporting, `step > range` gaps, out-of-order within
