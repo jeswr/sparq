@@ -214,34 +214,64 @@ def seed(summary_path, floor_path, allow_lower):
     return 0
 
 def check(summary_path, floor_path, require_all):
+    # [OPUS-4.8] sq-039g: distinguish MISSING (a crate entirely ABSENT from this tier's
+    # summary — legitimately not run in this tier, e.g. a nightly-only crate in a
+    # per-commit summary; fatal only with --require-all) from UNMEASURED (a crate that
+    # WAS attempted in this tier but whose coverage step ERRORED — coverage.sh records a
+    # row with "measured": false, e.g. sparq-conformance exit 2 when fixtures are absent,
+    # or — the dangerous case — sparq-core/sparq-engine failing to measure because a
+    # fixture-dependent test aborted). An unmeasured crate WITH A NON-ZERO (effective)
+    # FLOOR is ALWAYS fatal: it is supposed to be gated on its floor, and a failed
+    # measurement would otherwise SILENTLY un-gate it. That was the bug — a measure-
+    # failure was lumped into `missing`, so it was caught ONLY under --require-all, which
+    # the nightly/per-commit --check-robust invocations do NOT pass. An unmeasured crate
+    # with an effective floor of 0 (the ARTIFACT_ZERO crates) is not %-gated anyway, so
+    # its measure-failure is reported but not fatal (the test-presence gate guards it).
     s = load(summary_path); floors = load(floor_path)["crates"]
     measured = s["crates"]
     tier = s.get("tier")            # [OPUS-4.8] sq-bjct: tier-aware nightly_floor
-    fails, missing, oks = [], [], []
+    fails, missing, unmeasured, oks = [], [], [], []
     for crate, fentry in sorted(floors.items()):
         floor = effective_floor(fentry, tier)
         row = measured.get(crate)
-        if row is None or not row.get("measured", False):
-            missing.append(crate); continue
+        if row is None:
+            missing.append((crate, floor)); continue
+        if not row.get("measured", False):
+            unmeasured.append((crate, floor)); continue
         val = row["lines_pct"]
         if val + 1e-9 < floor:
             fails.append((crate, val, floor))
         else:
             oks.append((crate, val, floor))
+    # A crate that failed to MEASURE but carries a real (>0) effective floor is a hard
+    # failure regardless of --require-all; a floor-0 (artifact) crate is not %-gated.
+    unmeasured_gated = [(c, f) for c, f in unmeasured if f > 0]
     for crate, val, floor in oks:
         print(f"  ok   {crate:<20} {val:6.2f}% >= floor {floor}")
-    for crate in missing:
-        flag = "MISSING (not in this tier's summary)"
-        print(f"  --   {crate:<20} {flag}")
+    for crate, floor in missing:
+        print(f"  --   {crate:<20} MISSING (not in this tier's summary)")
+    for crate, floor in unmeasured:
+        if floor > 0:
+            print(f"  FAIL {crate:<20} UNMEASURED (measure step errored) "
+                  f"— floor {floor} NOT enforced")
+        else:
+            print(f"  --   {crate:<20} UNMEASURED (measure step errored) "
+                  f"— floor 0, not %-gated")
     for crate, val, floor in fails:
         print(f"  FAIL {crate:<20} {val:6.2f}% < floor {floor}")
-    bad = bool(fails) or (require_all and bool(missing))
+    bad = bool(fails) or bool(unmeasured_gated) or (require_all and bool(missing))
     if fails:
         print(f"::error::coverage regressed below the floor for {len(fails)} crate(s)")
+    if unmeasured_gated:
+        print(f"::error::{len(unmeasured_gated)} crate(s) FAILED TO MEASURE but have a "
+              f"non-zero floor (would otherwise be SILENTLY un-gated): "
+              f"{', '.join(c for c, _ in unmeasured_gated)}")
     if require_all and missing:
         print(f"::error::{len(missing)} floor crate(s) absent from the summary "
-              f"(--require-all): {', '.join(missing)}")
-    print(f"\ncoverage gate: {len(oks)} ok / {len(fails)} fail / {len(missing)} missing")
+              f"(--require-all): {', '.join(c for c, _ in missing)}")
+    print(f"\ncoverage gate: {len(oks)} ok / {len(fails)} fail / "
+          f"{len(unmeasured)} unmeasured ({len(unmeasured_gated)} gated) / "
+          f"{len(missing)} missing")
     return 1 if bad else 0
 
 # --- pure aggregation primitives (unit-tested by --self-test) -----------------
@@ -723,6 +753,59 @@ def self_test():
     # adding a nightly_floor where base had none is fine; base floor unchanged.
     assert floor_regressions({"core": {"floor": 90}},
                              {"core": {"floor": 90, "nightly_floor": 92}}) == []
+
+    # === UNMEASURED vs MISSING in check() (sq-039g) [OPUS-4.8] ==================
+    # The bug: a crate present in the summary with "measured": false (its coverage step
+    # ERRORED — e.g. conformance fixtures absent -> sparq-conformance exit 2, or a
+    # fixture-dependent sparq-core test aborting) was lumped into `missing`, so it was
+    # fatal ONLY under --require-all. The per-commit / nightly --check-robust gate does
+    # NOT pass --require-all, so such a crate was SILENTLY un-gated instead of gated on
+    # its floor. Fix: an UNMEASURED crate with a non-zero (effective) floor ALWAYS fails;
+    # a genuinely-MISSING crate keeps the --require-all semantics; a floor-0 unmeasured
+    # crate (artifact) is reported but not fatal.
+    import tempfile, contextlib, io
+    def run_check(summary_crates, floor_crates, require_all, tier=None):
+        """Drive the real check() over tempfile summary + floor; return its exit code."""
+        sdoc = {"crates": {k: (crate(*v) if isinstance(v, tuple) else crate(v))
+                           for k, v in summary_crates.items()}}
+        if tier is not None:
+            sdoc["tier"] = tier
+        fdoc = {"crates": floor_crates}
+        with tempfile.NamedTemporaryFile("w", suffix=".sum.json", delete=False) as sf, \
+             tempfile.NamedTemporaryFile("w", suffix=".floor.json", delete=False) as ff:
+            json.dump(sdoc, sf); sp = sf.name
+            json.dump(fdoc, ff); fp = ff.name
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return check(sp, fp, require_all)
+        finally:
+            os.unlink(sp); os.unlink(fp)
+
+    FL = {"a": {"floor": 80}, "z": {"floor": 0, "note": "artifact"}}
+    # a crate that MEASURED at/above floor + an artifact-zero crate -> PASS.
+    assert run_check({"a": 90.0, "z": (0.0,)}, FL, require_all=False) == 0
+    # UNMEASURED gated crate (a present, measured:false, floor 80) -> FAIL even WITHOUT
+    # --require-all (the core of sq-039g: a measure-failure must not silently un-gate).
+    assert run_check({"a": (0, False), "z": (0.0,)}, FL, require_all=False) == 1, \
+        "unmeasured crate with a non-zero floor MUST fail without --require-all"
+    # ...and it still fails WITH --require-all (regression guard).
+    assert run_check({"a": (0, False), "z": (0.0,)}, FL, require_all=True) == 1
+    # UNMEASURED ARTIFACT crate (z, floor 0) is NOT fatal — not %-gated, presence-gated.
+    assert run_check({"a": 90.0, "z": (0, False)}, FL, require_all=False) == 0, \
+        "an unmeasured floor-0 (artifact) crate must not fail the gate"
+    # genuinely-MISSING crate (absent from summary) keeps the --require-all semantics:
+    #   not fatal without --require-all ...
+    assert run_check({"a": 90.0}, FL, require_all=False) == 0, \
+        "a crate absent from the summary is not fatal without --require-all"
+    #   ... fatal WITH --require-all.
+    assert run_check({"a": 90.0}, FL, require_all=True) == 1, \
+        "an absent crate must fail under --require-all"
+    # The exact sq-039g danger: a conformance-fixture-dependent crate (sparq-core, real
+    # floor) failing to MEASURE under the nightly tier -> FAIL even without --require-all.
+    FLC = {"sparq-core": {"floor": 90, "nightly_floor": 94}}
+    assert run_check({"sparq-core": (0, False)}, FLC, require_all=False,
+                     tier="nightly") == 1, \
+        "sparq-core failing to measure (fixtures absent) must FAIL the nightly gate"
 
     print("coverage-gate self-test: ALL ASSERTIONS PASSED")
     return 0
