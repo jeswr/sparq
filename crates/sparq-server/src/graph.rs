@@ -191,6 +191,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_rdfxml_rejects_an_invalid_base_iri() {
+        // [OPUS-4.8] sq-4vao: the `base` (the GSP graph IRI) is fed to `with_base_iri`; a
+        // syntactically invalid base must fail FAST with a clear message (the caller maps it
+        // to a 400) rather than silently parsing against no base. A bare space is not a valid IRI.
+        let err = parse_rdfxml(b"<?xml version=\"1.0\"?><rdf:RDF/>", Some("not a valid iri"))
+            .expect_err("an invalid base IRI must be rejected");
+        assert!(err.contains("invalid base IRI"), "unexpected message: {err}");
+        assert!(err.contains("not a valid iri"), "message should echo the bad base: {err}");
+    }
+
+    #[test]
     fn parse_then_serialize_roundtrips_through_turtle() {
         // Parse a hand-written RDF/XML doc, re-serialise as prefix Turtle, and confirm the
         // triples survive (value-equal as a set).

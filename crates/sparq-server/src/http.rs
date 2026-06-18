@@ -6116,6 +6116,62 @@ mod hardening_unit_tests {
 }
 
 #[cfg(test)]
+mod json_error_tests {
+    //! [OPUS-4.8] sq-4vao: the `{"error":"…"}` envelope every error response carries hand-rolls
+    //! its JSON-string escaping (it is built without `serde_json` to stay dependency-light on the
+    //! hot error path). A message containing a quote / backslash / control character MUST be
+    //! escaped or the envelope is malformed (and an unescaped `"` is a JSON-injection vector that
+    //! lets a reflected error string break out of the `error` value). These pin every escape arm
+    //! and confirm the result re-parses as the intended JSON object.
+    use super::json_error;
+    use axum::http::StatusCode;
+
+    async fn body_of(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn escapes_quote_backslash_and_control_characters() {
+        // A hostile/reflected message exercising every special arm: `"`, `\`, the named control
+        // escapes (`\n` `\r` `\t`), and an "other" control char () that takes the \u{:04x} arm.
+        let msg = "a\"b\\c\nd\re\tf\u{0001}g";
+        let resp = json_error(StatusCode::BAD_REQUEST, msg);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_of(resp).await;
+        // The raw, unescaped quote must NOT appear inside the value (only the two envelope quotes).
+        assert_eq!(body, "{\"error\":\"a\\\"b\\\\c\\nd\\re\\tf\\u0001g\"}");
+        // And it must round-trip back to the ORIGINAL message through a real JSON parser.
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"], msg);
+    }
+
+    #[tokio::test]
+    async fn ordinary_message_is_passed_through_and_is_valid_json() {
+        let resp = json_error(StatusCode::NOT_FOUND, "no such graph");
+        let body = body_of(resp).await;
+        assert_eq!(body, "{\"error\":\"no such graph\"}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"], "no such graph");
+    }
+
+    #[tokio::test]
+    async fn sanitized_error_withholds_the_sensitive_detail_from_the_body() {
+        // [OPUS-4.8] sq-4vao: the info-leak guard (#241 posture) — the response body MUST carry
+        // ONLY the generic class message, never the `detail` (which may echo caller input, a
+        // loaded-data fragment, or a filesystem path). The detail goes to the server-side log.
+        let detail = "patient_alice_smith is not a valid subject (/srv/data/phi.ttl)";
+        let resp = super::sanitized_error(StatusCode::BAD_REQUEST, "parse_error", "invalid RDF in request body", detail);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_of(resp).await;
+        assert_eq!(body, "{\"error\":\"invalid RDF in request body\"}");
+        // The sensitive fragments must not have leaked into the client-facing body.
+        assert!(!body.contains("alice_smith"), "leaked loaded-data fragment: {body}");
+        assert!(!body.contains("/srv/data"), "leaked filesystem path: {body}");
+    }
+}
+
+#[cfg(test)]
 mod service_allow_config_tests {
     //! The default posture and the ServerConfig <-> engine-entries plumbing. These are
     //! pure (no process-env mutation) so they parallelise; the env-precedence path
@@ -6303,6 +6359,136 @@ mod durable_degrade_tests {
         let cfg = ServerConfig::default();
         let resp = update_rejection_response("some parse error", &cfg);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
+mod gsp_helpers_tests {
+    //! [OPUS-4.8] sq-4vao: the pure Graph-Store-Protocol write helpers that mint the
+    //! server-side SPARQL UPDATE from a request body. These are security-relevant — a graph
+    //! IRI is interpolated into a `<…>` term, so `escape_iri` must neutralise the IRIREF
+    //! delimiters that would otherwise let a crafted graph name inject SPARQL — and the
+    //! body-decode entry point classifies an unsupported media type / non-UTF-8 body. The
+    //! end-to-end GSP behaviour is in tests/protocol.rs; these pin the building blocks.
+    use super::{base_iri, body_to_ntriples, escape_iri, graph_data_block, GraphRef};
+    use axum::body::Bytes;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn escape_iri_percent_encodes_iriref_delimiters_and_controls() {
+        // A benign IRI is unchanged.
+        assert_eq!(escape_iri("http://ex/g"), "http://ex/g");
+        // The IRIREF-forbidden delimiters that would break out of the `<…>` term are
+        // percent-encoded (uppercase hex), so a crafted graph name cannot inject SPARQL.
+        assert_eq!(escape_iri("a>b"), "a%3Eb");
+        assert_eq!(escape_iri("a b"), "a%20b");
+        assert_eq!(escape_iri("a{b}c"), "a%7Bb%7Dc");
+        assert_eq!(escape_iri("a\\b"), "a%5Cb");
+        // A control character (below 0x20) is percent-encoded too.
+        assert_eq!(escape_iri("a\u{0001}b"), "a%01b");
+        // The classic injection attempt — closing the term and appending an op — is neutralised:
+        // the `>` and `{`/`}` and spaces are all encoded, so no second clause can form.
+        let injected = escape_iri("http://ex/g> ;\nDROP ALL ;\n<x");
+        assert!(!injected.contains('>'), "unescaped '>' would close the IRIREF: {injected}");
+        assert!(!injected.contains(' '), "unescaped space is invalid in an IRIREF: {injected}");
+    }
+
+    #[test]
+    fn graph_data_block_wraps_named_graphs_and_passes_default_through() {
+        let nt = "<http://ex/s> <http://ex/p> <http://ex/o> .\n";
+        // The default graph takes the N-Triples bare.
+        assert_eq!(graph_data_block(&GraphRef::Default, nt), nt);
+        // A named graph is wrapped in `GRAPH <iri> { … }`, with the IRI escaped.
+        let block = graph_data_block(&GraphRef::Named("http://ex/g".into()), nt);
+        assert!(block.starts_with("GRAPH <http://ex/g> {\n"), "block: {block}");
+        assert!(block.trim_end().ends_with('}'), "block: {block}");
+        assert!(block.contains(nt), "block must carry the triples: {block}");
+    }
+
+    #[test]
+    fn base_iri_is_the_named_graph_iri_or_none_for_default() {
+        assert_eq!(base_iri(&GraphRef::Default), None);
+        assert_eq!(base_iri(&GraphRef::Named("http://ex/g".into())), Some("http://ex/g"));
+    }
+
+    #[test]
+    fn body_to_ntriples_rejects_an_unsupported_content_type() {
+        // A non-RDF Content-Type → 415 Unsupported Media Type, BEFORE any parse is attempted.
+        let body = Bytes::from_static(b"{}");
+        let resp = body_to_ntriples(&body, "application/json", None).unwrap_err();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn body_to_ntriples_rejects_a_non_utf8_text_body() {
+        // A declared text RDF body that is not valid UTF-8 → 400 (the `from_utf8` guard arm).
+        let body = Bytes::from_static(b"\xFF\xFE not utf-8");
+        let resp = body_to_ntriples(&body, "text/turtle", None).unwrap_err();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn body_to_ntriples_roundtrips_valid_turtle_to_canonical_ntriples() {
+        let body = Bytes::from_static(b"@prefix ex: <http://ex/> . ex:a ex:p ex:b .");
+        let nt = body_to_ntriples(&body, "text/turtle", None).expect("valid turtle parses");
+        assert!(nt.contains("<http://ex/a> <http://ex/p> <http://ex/b> ."), "got: {nt}");
+    }
+}
+
+#[cfg(test)]
+mod dataset_override_tests {
+    //! [OPUS-4.8] sq-4vao: the SPARQL 1.1 Protocol §2.1.4 / §2.2 dataset-override parsing
+    //! (`default-graph-uri` / `named-graph-uri` / `using-*`) and the UPDATE rewrite wrapper that
+    //! maps an override failure onto the right HTTP 400. The end-to-end protocol behaviour is in
+    //! tests/protocol.rs; these pin the pure parse + the rewrite-error → Response mapping.
+    use super::{form_decode, query_dataset_override, rewrite_update, update_dataset_override};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn update_and_query_overrides_read_repeated_protocol_params() {
+        // The §2.2 UPDATE override reads the repeated `using-*` params (multi-valued by design).
+        let over = update_dataset_override("using-graph-uri=http://ex/a&using-named-graph-uri=http://ex/n&using-graph-uri=http://ex/b");
+        assert_eq!(over.default, vec!["http://ex/a", "http://ex/b"]);
+        assert_eq!(over.named, vec!["http://ex/n"]);
+        // The §2.1.4 query override reads the `*-graph-uri` family; unrelated params are ignored.
+        let q = query_dataset_override("default-graph-uri=http://ex/d&query=SELECT&named-graph-uri=http://ex/n");
+        assert_eq!(q.default, vec!["http://ex/d"]);
+        assert_eq!(q.named, vec!["http://ex/n"]);
+    }
+
+    #[test]
+    fn rewrite_update_passes_through_when_no_override_is_present() {
+        let over = update_dataset_override(""); // empty => is_empty() => verbatim
+        let rewritten = rewrite_update("INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }", &over).unwrap();
+        assert_eq!(rewritten, "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }");
+    }
+
+    #[test]
+    fn rewrite_update_rejects_using_param_alongside_in_string_using_clause() {
+        // §2.2 protocol error: the `using-graph-uri` param must not be combined with an in-update
+        // USING clause. The wrapper maps the UsingConflict to a 400 with the explanatory message.
+        let over = update_dataset_override("using-graph-uri=http://ex/a");
+        let update = "DELETE { ?s ?p ?o } USING <http://ex/g> WHERE { ?s ?p ?o }";
+        let resp = rewrite_update(update, &over).unwrap_err();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn rewrite_update_reports_a_malformed_update_as_400() {
+        // A non-empty override forces a parse; a malformed update is a 400 (the Malformed arm),
+        // with the offending detail withheld from the body (sanitized_error).
+        let over = update_dataset_override("using-graph-uri=http://ex/a");
+        let resp = rewrite_update("DELETE WHERE {", &over).unwrap_err();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn form_decode_handles_plus_percent_and_a_malformed_escape() {
+        // `+` decodes to a space, `%XX` to the byte, and a malformed/truncated `%` is kept literal.
+        assert_eq!(form_decode("a+b"), "a b");
+        assert_eq!(form_decode("a%2Fb"), "a/b"); // %2F => '/'
+        assert_eq!(form_decode("a%2fb"), "a/b"); // lowercase hex digits too
+        assert_eq!(form_decode("a%zzb"), "a%zzb"); // not hex => literal '%'
     }
 }
 

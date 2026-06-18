@@ -372,6 +372,38 @@ mod tests {
     }
 
     #[test]
+    fn xml_text_body_escapes_markup_characters() {
+        // [OPUS-4.8] sq-4vao: a literal value containing XML-significant characters must be
+        // escaped in the `<literal>` text body, NOT emitted verbatim — otherwise a literal like
+        // `<script>` would break the results document (and be an injection vector). Exercises the
+        // `<` and `>` body arms (the `&` arm too) of `xml_text_escape_body`.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:v \"a < b & c > d\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r = query(&g, "PREFIX ex: <http://ex/> SELECT ?v WHERE { ?s ex:v ?v }").unwrap();
+        let xml = select_to_xml(&r);
+        assert!(xml.contains("<literal>a &lt; b &amp; c &gt; d</literal>"), "unescaped markup: {xml}");
+        // The raw, unescaped sequence must NOT appear anywhere in the document.
+        assert!(!xml.contains("a < b & c > d"), "literal leaked raw markup: {xml}");
+    }
+
+    #[test]
+    fn xml_triple_term_with_a_blank_node_subject() {
+        // [OPUS-4.8] sq-4vao: a quoted triple whose SUBJECT is a blank node exercises the
+        // `NamedOrBlankNode::BlankNode` subject arm of the `<triple>` XML encoder (the existing
+        // triple-term test only covers a named-node subject). The bnode label is data-dependent,
+        // so assert on the structural `<bnode>` element, not its id.
+        let g = Graph::load_str("PREFIX : <http://ex/>\n<< _:s :b :c >> :certainty 0.9 .", "turtle").unwrap();
+        let r = query(&g, "SELECT ?t WHERE { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }").unwrap();
+        let xml = select_to_xml(&r);
+        assert!(xml.contains("<triple><subject><bnode>"), "expected a bnode subject in the triple term: {xml}");
+        assert!(xml.contains("<predicate><uri>http://ex/b</uri></predicate>"), "got: {xml}");
+        assert!(xml.contains("<object><uri>http://ex/c</uri></object>"), "got: {xml}");
+    }
+
+    #[test]
     fn ask_serialisers() {
         assert_eq!(ask_to_json(true), "{\"head\":{},\"boolean\":true}");
         assert_eq!(ask_to_json(false), "{\"head\":{},\"boolean\":false}");
