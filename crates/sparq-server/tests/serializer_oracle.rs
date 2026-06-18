@@ -38,7 +38,7 @@
 use oxrdf::{BlankNode, Literal, NamedNode, Term, Triple, Variable};
 use sparesults::{QueryResultsFormat, QueryResultsParser, ReaderQueryResultsParserOutput};
 use sparq_engine::{query, QueryResult};
-use sparq_server::results::{select_to_csv, select_to_tsv, select_to_xml};
+use sparq_server::results::{ask_to_json, ask_to_xml, select_to_csv, select_to_tsv, select_to_xml};
 
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
@@ -75,6 +75,25 @@ fn reparse_reference(bytes: &[u8], format: QueryResultsFormat) -> (Vec<Variable>
                 })
                 .collect();
             (vars, rows)
+        }
+    }
+}
+
+/// Re-parses an ASK boolean document with the reference `sparesults` parser and recovers the
+/// boolean value. Panics if the parser rejects the document or yields SELECT solutions instead
+/// of a boolean — i.e. if our `ask_to_xml` / `ask_to_json` produced something a real consumer
+/// would not read back as the boolean we intended.
+fn reparse_boolean(bytes: &[u8], format: QueryResultsFormat) -> bool {
+    let parser = QueryResultsParser::from_format(format);
+    match parser.for_reader(bytes).unwrap_or_else(|e| {
+        panic!(
+            "reference parser REJECTED our ASK {format:?} output: {e}\n--- output ---\n{}",
+            String::from_utf8_lossy(bytes)
+        )
+    }) {
+        ReaderQueryResultsParserOutput::Boolean(b) => b,
+        ReaderQueryResultsParserOutput::Solutions(_) => {
+            panic!("expected an ASK boolean from {format:?}, got SELECT solutions")
         }
     }
 }
@@ -365,6 +384,33 @@ fn oracle_empty_and_no_var_results_roundtrip() {
     // XML for the structural contract and CSV for well-formedness.
     let xml = select_to_xml(&unit);
     assert_lossless_roundtrip("unit-row", &unit, &xml, QueryResultsFormat::Xml, true);
+}
+
+// ---------------------------------------------------------------------------
+// ASK boolean oracle — round-trip ask_to_xml / ask_to_json through sparesults.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_ask_boolean_roundtrip() {
+    // Both ASK serialisers, for both truth values, must re-parse via the reference parser
+    // back to the SAME boolean (and as the Boolean variant, not SELECT solutions). The
+    // pre-existing inline tests only `contains`-checked the byte; this proves the documents
+    // are well-formed SPARQL-results that a real consumer reads back correctly.
+    for value in [true, false] {
+        let xml = ask_to_xml(value);
+        assert_eq!(
+            reparse_boolean(xml.as_bytes(), QueryResultsFormat::Xml),
+            value,
+            "ASK/XML boolean must round-trip for {value}\n--- output ---\n{xml}"
+        );
+
+        let json = ask_to_json(value);
+        assert_eq!(
+            reparse_boolean(json.as_bytes(), QueryResultsFormat::Json),
+            value,
+            "ASK/JSON boolean must round-trip for {value}\n--- output ---\n{json}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
