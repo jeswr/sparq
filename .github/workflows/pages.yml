@@ -106,6 +106,15 @@ jobs:
           npm ci
           npm run build:wasm
 
+      # [OPUS-4.8] sq-0po6 — build the tier-b "W-reason" bundle (crates/sparq-reason-wasm,
+      # with --features explain) that drives the live /surface/inference page. Its
+      # wasm-pack output stays in the crate's pkg/; the site's prebuild sync-wasm step
+      # copies it into public/wasm/reason/. Separate from the lean bundle so the landing
+      # page stays light (the page lazy-loads it on first interaction).
+      - name: Build W-reason wasm bundle
+        working-directory: js
+        run: npm run build:reason-wasm
+
       # [OPUS-4.8] sq-gum8 — install the Typst CLI so the paper-factory build step
       # (site/scripts/build-papers.mjs, run by `prebuild`) can compile site/papers/*.typ
       # into the downloadable PDFs + the in-site HTML renders. Pinned to a release tag +

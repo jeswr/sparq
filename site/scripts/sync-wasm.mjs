@@ -28,3 +28,34 @@ for (const f of files) {
   await copyFile(join(src, f), join(dest, f));
 }
 console.log(`[sync-wasm] copied ${files.length} files → public/wasm/`);
+
+// [OPUS-4.8] sq-0po6 — also sync the tier-b "W-reason" bundle that drives
+// /surface/inference (crates/sparq-reason-wasm, built with `--features explain` by
+// `js/`'s `build:reason-wasm`). Its wasm-pack output stays in the crate's own pkg/
+// (it is NOT part of the published @jeswr/sparq package), so we copy it from there
+// into public/wasm/reason/. This bundle is OPTIONAL: if it has not been built (e.g. a
+// quick `next dev` that skips it), we WARN and skip rather than fail — the inference
+// page surfaces a clear "bundle failed to load" state at runtime in that case.
+const reasonSrc = join(here, "..", "..", "crates", "sparq-reason-wasm", "pkg");
+const reasonDest = join(dest, "reason");
+const reasonFiles = [
+  "sparq_reason_wasm.js",
+  "sparq_reason_wasm_bg.wasm",
+  "sparq_reason_wasm.d.ts",
+];
+
+try {
+  await access(join(reasonSrc, "sparq_reason_wasm_bg.wasm"));
+  await mkdir(reasonDest, { recursive: true });
+  for (const f of reasonFiles) {
+    await copyFile(join(reasonSrc, f), join(reasonDest, f));
+  }
+  console.log(
+    `[sync-wasm] copied ${reasonFiles.length} files → public/wasm/reason/ (W-reason)`,
+  );
+} catch {
+  console.warn(
+    `[sync-wasm] W-reason bundle not found at ${reasonSrc}; /surface/inference will not\n` +
+      `            run live. Build it:  (cd ../js && npm run build:reason-wasm)`,
+  );
+}
