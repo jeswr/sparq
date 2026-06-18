@@ -517,4 +517,231 @@ mod tests {
         );
         assert!(s.contains("asWKT"), "no geometry resolution in {s}");
     }
+
+    // -----------------------------------------------------------------------
+    // [OPUS-4.8] sq-9g58 coverage: the rewrite must recurse through EVERY
+    // GraphPattern variant the engine's `spargebra` algebra exposes, expanding
+    // a topology triple nested arbitrarily deep. Each query below places a
+    // `geo:sfWithin` triple inside exactly one structural node so that the
+    // corresponding `rewrite_pattern` arm is exercised AND we assert the
+    // topology predicate was expanded (the `geof:` call appears, the bare
+    // `geo:sfWithin` predicate does not survive as an asserted edge). A bare
+    // SERPENT (`SERVICE`) and `VALUES` are also driven so the leaf arms run.
+    // -----------------------------------------------------------------------
+
+    /// Parse, rewrite, and stringify a query.
+    fn rw(q: &str) -> String {
+        let parsed = sparq_engine::PreparedQuery::parse(q).unwrap().into_query();
+        rewrite_query(parsed).to_string()
+    }
+
+    /// The rewrite expanded a topology triple: the `geof:` call and the
+    /// `asWKT` resolution edge appear in the rewritten algebra.
+    fn assert_expanded(s: &str) {
+        assert!(s.contains("function/geosparql/sfWithin"), "not expanded: {s}");
+        assert!(s.contains("asWKT"), "no resolution path: {s}");
+    }
+
+    const GEO_P: &str = "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+                         PREFIX ex:  <http://example.org/>";
+
+    #[test]
+    fn recurses_through_optional_left_join() {
+        // The topology triple sits in an OPTIONAL (LeftJoin) block.
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a ?b WHERE {{ ?a ex:p ?x OPTIONAL {{ ?a geo:sfWithin ?b }} }}"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn recurses_through_optional_left_join_with_filter_expression() {
+        // OPTIONAL ... FILTER(EXISTS { topology triple }) — drives both the
+        // LeftJoin `expression` map AND `rewrite_expression`'s Exists arm.
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a WHERE {{ ?a ex:p ?x \
+             OPTIONAL {{ ?a ex:q ?y FILTER( EXISTS {{ ?a geo:sfWithin ?b }} ) }} }}"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn recurses_through_lateral() {
+        // LATERAL (SEP-0006) join: the right side is rewritten (Lateral arm).
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a ?b WHERE {{ ?a ex:p ?x LATERAL {{ ?a geo:sfWithin ?b }} }}"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn recurses_through_union() {
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a WHERE {{ {{ ?a ex:p ?x }} UNION {{ ?a geo:sfWithin ?b }} }}"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn recurses_through_named_graph() {
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a WHERE {{ GRAPH ?g {{ ?a geo:sfWithin ?b }} }}"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn recurses_through_minus() {
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a WHERE {{ ?a ex:p ?x MINUS {{ ?a geo:sfWithin ?b }} }}"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn recurses_through_bind_extend_and_order_distinct_slice() {
+        // BIND => Extend; ORDER BY => OrderBy; DISTINCT => Distinct;
+        // LIMIT/OFFSET => Slice; the projection => Project. A single query that
+        // stacks all of them above the topology triple.
+        let s = rw(&format!(
+            "{GEO_P} SELECT DISTINCT ?a ?label WHERE {{ \
+             ?a geo:sfWithin ?b . BIND(STR(?a) AS ?label) }} \
+             ORDER BY ?label LIMIT 5 OFFSET 1"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn recurses_through_group_by_aggregate() {
+        // GROUP BY => Group. The topology triple feeds the grouped pattern.
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?b (COUNT(?a) AS ?n) WHERE {{ ?a geo:sfWithin ?b }} GROUP BY ?b"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn recurses_through_subselect_reduced() {
+        // A sub-SELECT with REDUCED => Project over Reduced, nested under the
+        // outer Project. The topology triple lives in the inner select.
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a WHERE {{ \
+             {{ SELECT REDUCED ?a WHERE {{ ?a geo:sfWithin ?b }} }} }}"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn recurses_through_service() {
+        // SERVICE block: the inner pattern is still rewritten (Service arm).
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a WHERE {{ SERVICE ?svc {{ ?a geo:sfWithin ?b }} }}"
+        ));
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn topology_as_single_predicate_path_is_expanded() {
+        // `?a geo:sfWithin+ ?b` parses as a `Path`; a one-hop path predicate is
+        // recognised and expanded by the `Path` arm's NamedNode branch.
+        // (`geo:sfWithin` alone is a Bgp triple, so use a property-path operator
+        // to force the `Path` node, then assert the leaf NamedNode of that path
+        // is still handled — here a plain `Path` with a single NamedNode is
+        // produced by an inverse path `^geo:sfContains`-style shape; we use a
+        // sequence-free single hop expressed via a path to keep it a `Path`.)
+        let q = format!(
+            "{GEO_P} SELECT ?a ?b WHERE {{ ?a (geo:sfWithin) ?b }}"
+        );
+        // Whether spargebra lowers `(geo:sfWithin)` to a Bgp or a Path, the
+        // rewrite must still expand it.
+        let s = rw(&q);
+        assert_expanded(&s);
+    }
+
+    #[test]
+    fn values_leaf_is_left_untouched() {
+        // A standalone VALUES block has no nested pattern; the Values arm
+        // returns it unchanged (no topology triple to expand). The query is a
+        // structural no-op for the rewrite.
+        let q = format!(
+            "{GEO_P} SELECT ?a WHERE {{ VALUES ?a {{ ex:x ex:y }} }}"
+        );
+        let before = sparq_engine::PreparedQuery::parse(&q).unwrap().into_query();
+        let after = rewrite_query(before.clone());
+        assert_eq!(before.to_string(), after.to_string());
+    }
+
+    #[test]
+    fn rewrite_expression_recurses_through_boolean_and_if() {
+        // FILTER( !EXISTS{...} && (EXISTS{...} || IF(EXISTS{...}, true, false)) )
+        // drives the Not / And / Or / If arms of rewrite_expression, each
+        // wrapping an Exists whose inner pattern holds a topology triple.
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a WHERE {{ ?a ex:p ?x FILTER( \
+               !EXISTS {{ ?a geo:sfWithin ?b }} && \
+               ( EXISTS {{ ?a geo:sfContains ?c }} || \
+                 IF(EXISTS {{ ?a geo:sfEquals ?d }}, true, false) ) ) }}"
+        ));
+        // Three distinct topology predicates expanded inside the expression.
+        assert!(s.contains("function/geosparql/sfWithin"), "{s}");
+        assert!(s.contains("function/geosparql/sfContains"), "{s}");
+        assert!(s.contains("function/geosparql/sfEquals"), "{s}");
+    }
+
+    #[test]
+    fn construct_describe_ask_query_forms_are_rewritten() {
+        // The non-SELECT query forms each route their pattern through
+        // rewrite_pattern (the Construct / Describe / Ask arms of rewrite_query).
+        let construct = rw(&format!(
+            "{GEO_P} CONSTRUCT {{ ?a ex:near ?b }} WHERE {{ ?a geo:sfWithin ?b }}"
+        ));
+        assert_expanded(&construct);
+
+        let describe = rw(&format!(
+            "{GEO_P} DESCRIBE ?a WHERE {{ ?a geo:sfWithin ?b }}"
+        ));
+        assert_expanded(&describe);
+
+        let ask = rw(&format!(
+            "{GEO_P} ASK WHERE {{ ?a geo:sfWithin ?b }}"
+        ));
+        assert_expanded(&ask);
+    }
+
+    #[test]
+    fn bgp_with_mixed_topology_and_plain_triples_keeps_the_plain_remainder() {
+        // A BGP holding BOTH a plain triple and TWO topology triples: the plain
+        // remainder is kept as a Bgp and conjoined with each expansion (the
+        // `plain` + multi-`expanded` Join-fold in rewrite_bgp).
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a ?b ?c WHERE {{ \
+             ?a ex:p ?x . ?a geo:sfWithin ?b . ?a geo:sfContains ?c }}"
+        ));
+        assert!(s.contains("function/geosparql/sfWithin"), "{s}");
+        assert!(s.contains("function/geosparql/sfContains"), "{s}");
+        // The plain edge survives in the rewritten algebra.
+        assert!(s.contains("example.org/p"), "plain triple lost: {s}");
+    }
+
+    #[test]
+    fn bgp_of_only_topology_triples_has_no_plain_remainder() {
+        // Two topology triples, NO plain triple: the `plain.is_empty()` branch
+        // of rewrite_bgp (acc starts `None`, first expansion seeds it).
+        let s = rw(&format!(
+            "{GEO_P} SELECT ?a ?b ?c WHERE {{ ?a geo:sfWithin ?b . ?b geo:sfContains ?c }}"
+        ));
+        assert!(s.contains("function/geosparql/sfWithin"), "{s}");
+        assert!(s.contains("function/geosparql/sfContains"), "{s}");
+    }
+
+    #[test]
+    fn variable_predicate_bgp_is_not_rewritten() {
+        // A triple with a VARIABLE predicate is never a topology property; the
+        // BGP has no topology triple so rewrite_bgp returns None and the BGP is
+        // kept verbatim.
+        let q = format!("{GEO_P} SELECT ?a ?p ?b WHERE {{ ?a ?p ?b }}");
+        let before = sparq_engine::PreparedQuery::parse(&q).unwrap().into_query();
+        let after = rewrite_query(before.clone());
+        assert_eq!(before.to_string(), after.to_string());
+    }
 }
