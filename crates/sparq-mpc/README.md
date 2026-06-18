@@ -45,6 +45,32 @@ also realises this now (it was previously gated on the secure-compare round
 sq-rrz4/sq-dvuc, which has since landed). No soundness/security claim beyond the
 documented semi-honest model is made.
 
+### Term → Fp join-key encoding & the injectivity contract (sq-dl81)
+
+The hidden join's secret-shared field-equality is a SOUND stand-in for RDF **term
+equality** only if the `Term → Fp` encoding is **injective on the join domain** —
+a collision is a *false match* (a disclosed row that does not exist in the
+plaintext answer), and the differential tests cannot see it because they pick
+hand-injective small-int keys by construction. `term_encode.rs` closes that gap:
+
+- **`encode_term(&Term) → Fp`** — a documented, collision-resistant encoder,
+  `reduce_mod_p(SHA-512(DOMAIN_TAG ‖ ntriples(term)))`. SHA-512 output is
+  (random-oracle) uniform over `F_p` (`p = 2^61 − 1`), so two distinct terms
+  collide only with the **birthday probability** `≈ q² / 2^62` over `q` distinct
+  terms (50% near `q ≈ 2^30.5`; `≈ 2.2×10⁻¹¹` at `q = 10⁴`, far above the
+  ≤10⁴-row hidden-join regime). It is variant-disambiguating (an IRI and a
+  same-text literal never collide) and folds datatype/language tags into the key.
+- **`KeyEncoder`** — converts that *statistical* bound into a *checkable* one for
+  a concrete key set: it records every encoded term and returns
+  `EncodeError::Collision` (fail-closed) if two DISTINCT terms ever map to the
+  same `Fp`, BEFORE any key is secret-shared. Re-encoding the same term is not a
+  collision (recurring equi-join key).
+
+This is the **on-ramp** to the M4 in-circuit *encoding-correctness* proof (that
+the opened key equals `encode_term` of the holder's real term); the encoder is a
+substrate, not itself a security claim. Blank-node labels are keyed verbatim (no
+cross-graph blank-node identity — canonicalise first if you need it).
+
 ## Threshold verdict — in-MPC bit-decomposition of the secret-shared sum (sq-g7t5 / sq-nx0s / sq-mnv5)
 
 `disclose_threshold_verdict` (`compare.rs`) answers `sum > threshold` while

@@ -83,3 +83,15 @@ getrandom = "0.4"
 # Fp / Share secret operands on drop. Mark for Fable crypto re-review.
 zeroize = { version = "1", features = ["zeroize_derive"] }
 subtle = "2"
+
+# [OPUS-4.8] sq-dl81: a vetted cryptographic hash for the domain-separated
+# Term->Fp join-key encoder (`crate::term_encode`). The hidden-value join's
+# secret-shared field-equality is a SOUND stand-in for RDF term equality ONLY
+# if the encoding is injective on the join domain; a uniform-output hash makes
+# a collision (a false match) a quantified birthday event over the field rather
+# than the holder's untested responsibility. SHA-512 is already in the
+# workspace tree (sparq-engine's `digest` feature), is native-only (the crate's
+# wasm-exclusion invariant is intact), and gives a 64-byte uniform digest we
+# fold into the 61-bit Mersenne field. Pinned to the same 0.11 line sparq-engine
+# uses so the workspace resolves a single `sha2`/`digest` version.
+sha2 = "0.11"
