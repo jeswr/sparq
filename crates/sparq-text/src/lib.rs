@@ -5,7 +5,11 @@
 //! 1. [`tokenize`] — the shared tokenizer: UAX #29 Unicode word segmentation
 //!    (`unicode-segmentation`) + Unicode lowercasing. No stemming, no stopword
 //!    list, no diacritic folding — deterministic and language-neutral; query
-//!    tokens may end in `*` for prefix (autocomplete) matching.
+//!    tokens may end in `*` for prefix (autocomplete) matching. An opt-in
+//!    [`Analyzer::CjkNgram`] adds character-bigram indexing for unspaced CJK
+//!    text (`東京都` → `東京`,`京都`) so a multi-char CJK term is no longer the
+//!    low-precision AND of its individual ideographs; the default
+//!    [`Analyzer::Unicode`] is byte-for-byte unchanged. [OPUS-4.8] sq-m3ln
 //! 2. [`index`] — [`TextIndex`]: an owned BM25 inverted index over the string
 //!    literals (`xsd:string` + language-tagged) of a sparq
 //!    [`Graph`](sparq_core::Graph)'s dictionary. The dictionary term id of a
@@ -39,6 +43,7 @@ pub mod rewrite;
 pub mod tokenize;
 
 pub use index::{Hit, TextIndex};
+pub use tokenize::Analyzer;
 #[cfg(feature = "engine")]
 pub use rewrite::{prepare_text, query_text, query_text_with_budget, rewrite_query};
 

@@ -121,7 +121,7 @@
 //! the contract. This marker is part of the index's state, so the incremental
 //! and rebuilt indexes the differential test compares are equal on it too.
 
-use crate::tokenize::{tokenize, tokenize_query, QueryToken};
+use crate::tokenize::{tokenize_query_with, tokenize_with, Analyzer, QueryToken};
 use oxrdf::Term;
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{Id, TermParts};
@@ -177,6 +177,13 @@ pub struct TextIndex {
     /// Part of the index state, so a rebuilt and an incrementally-maintained
     /// index over the same graph compare equal on it. [OPUS-4.8]
     indexed_dict_len: usize,
+    /// The tokenization strategy this index was built with — used for BOTH
+    /// indexing and querying so the two always agree. The default
+    /// [`Analyzer::Unicode`] reproduces the historical behaviour exactly;
+    /// [`Analyzer::CjkNgram`] is the opt-in CJK character-bigram analyzer. Part
+    /// of the index state, so two indexes built with different analyzers are not
+    /// equal. [OPUS-4.8] sq-m3ln
+    analyzer: Analyzer,
 }
 
 /// The lexical value of a string literal (plain `xsd:string` or
@@ -200,7 +207,49 @@ impl TextIndex {
     /// use [`build_with_positions`](Self::build_with_positions) for phrase
     /// search.
     pub fn build(graph: &Graph) -> TextIndex {
-        Self::build_with(graph, false)
+        Self::build_with(graph, false, Analyzer::Unicode)
+    }
+
+    /// Like [`build`](Self::build) but with an explicit [`Analyzer`] — pass
+    /// [`Analyzer::CjkNgram`] for the opt-in CJK character-bigram analyzer (a
+    /// multi-char CJK term then matches as the AND of *its* bigrams, not of its
+    /// individual ideographs). The index records its analyzer, so
+    /// [`search`](Self::search) and friends tokenize the query the same way.
+    /// No positions; combine with positions via
+    /// [`build_with_positions_analyzer`](Self::build_with_positions_analyzer).
+    /// [OPUS-4.8] sq-m3ln
+    pub fn build_with_analyzer(graph: &Graph, analyzer: Analyzer) -> TextIndex {
+        Self::build_with(graph, false, analyzer)
+    }
+
+    /// The position-enabled counterpart of
+    /// [`build_with_analyzer`](Self::build_with_analyzer): records token offsets
+    /// (so [`phrase`](Self::phrase) / [`phrase_near`](Self::phrase_near) work)
+    /// AND uses `analyzer` for tokenization. With [`Analyzer::CjkNgram`] a phrase
+    /// is over the bigram stream, so `phrase("東京都")` requires the bigrams
+    /// `東京` then `京都` consecutive — exactly the original ideograph adjacency.
+    /// [OPUS-4.8] sq-m3ln
+    pub fn build_with_positions_analyzer(graph: &Graph, analyzer: Analyzer) -> TextIndex {
+        Self::build_with(graph, true, analyzer)
+    }
+
+    /// An empty index that records token positions and uses `analyzer`, for the
+    /// incremental/delta-fed case (the [`with_positions`](Self::with_positions)
+    /// counterpart with an explicit analyzer). [OPUS-4.8] sq-m3ln
+    pub fn with_positions_analyzer(analyzer: Analyzer) -> TextIndex {
+        TextIndex { positions: Some(BTreeMap::new()), analyzer, ..Default::default() }
+    }
+
+    /// An empty index that uses `analyzer` (the `TextIndex::default()`
+    /// counterpart with an explicit analyzer), for the delta-fed case without
+    /// positions. [OPUS-4.8] sq-m3ln
+    pub fn with_analyzer(analyzer: Analyzer) -> TextIndex {
+        TextIndex { analyzer, ..Default::default() }
+    }
+
+    /// The [`Analyzer`] this index was built/seeded with. [OPUS-4.8] sq-m3ln
+    pub fn analyzer(&self) -> Analyzer {
+        self.analyzer
     }
 
     /// Like [`build`](Self::build) but additionally records token positions, so
@@ -209,7 +258,7 @@ impl TextIndex {
     /// of the BM25 tables; reach for it only when phrase search is needed.
     /// [OPUS-4.8]
     pub fn build_with_positions(graph: &Graph) -> TextIndex {
-        Self::build_with(graph, true)
+        Self::build_with(graph, true, Analyzer::Unicode)
     }
 
     /// An empty index that records token positions as documents are added
@@ -220,20 +269,23 @@ impl TextIndex {
         TextIndex { positions: Some(BTreeMap::new()), ..Default::default() }
     }
 
+    // Note: `Analyzer::default()` is `Unicode`, so `TextIndex::default()` and
+    // `with_positions()` keep the historical analyzer. [OPUS-4.8] sq-m3ln
+
     /// Whether this index records token positions (i.e. supports
     /// [`phrase`](Self::phrase)). [OPUS-4.8]
     pub fn has_positions(&self) -> bool {
         self.positions.is_some()
     }
 
-    fn build_with(graph: &Graph, positions: bool) -> TextIndex {
-        let mut idx = Self::build_docs(graph, positions);
+    fn build_with(graph: &Graph, positions: bool, analyzer: Analyzer) -> TextIndex {
+        let mut idx = Self::build_docs(graph, positions, analyzer);
         // Pin the generation marker to the dictionary we just scanned in full.
         idx.indexed_dict_len = graph.dict.len();
         idx
     }
 
-    fn build_docs(graph: &Graph, positions: bool) -> TextIndex {
+    fn build_docs(graph: &Graph, positions: bool, analyzer: Analyzer) -> TextIndex {
         #[cfg(feature = "parallel")]
         {
             // Shard the id range; per-shard sub-indexes concatenate cleanly
@@ -248,7 +300,7 @@ impl TextIndex {
                 let parts: Vec<TextIndex> = (0..shards)
                     .into_par_iter()
                     .map(|s| {
-                        let mut idx = Self::new(positions);
+                        let mut idx = Self::new(positions, analyzer);
                         for i in (s * chunk)..((s + 1) * chunk).min(n) {
                             let id = (i + 1) as Id;
                             if let Some(text) = text_value(&graph.dict.term_parts(id)) {
@@ -258,14 +310,14 @@ impl TextIndex {
                         idx
                     })
                     .collect();
-                let mut out = Self::new(positions);
+                let mut out = Self::new(positions, analyzer);
                 for part in parts {
                     out.append_shard(part);
                 }
                 return out;
             }
         }
-        let mut idx = Self::new(positions);
+        let mut idx = Self::new(positions, analyzer);
         for (id, parts) in graph.dict.iter() {
             if let Some(text) = text_value(&parts) {
                 idx.add_doc(id, text);
@@ -274,10 +326,11 @@ impl TextIndex {
         idx
     }
 
-    /// An empty index with positions on/off.
-    fn new(positions: bool) -> TextIndex {
+    /// An empty index with positions on/off and an explicit analyzer.
+    fn new(positions: bool, analyzer: Analyzer) -> TextIndex {
         TextIndex {
             positions: positions.then(BTreeMap::new),
+            analyzer,
             ..Default::default()
         }
     }
@@ -321,7 +374,7 @@ impl TextIndex {
     /// Tokenizes `text` and adds it as document `id`. Caller guarantees `id`
     /// is not already indexed.
     fn add_doc(&mut self, id: Id, text: &str) {
-        let tokens = tokenize(text);
+        let tokens = tokenize_with(text, self.analyzer);
         self.docs.insert(id, tokens.len() as u32);
         self.total_tokens += tokens.len() as u64;
         // Record this token's position the moment we enumerate it (positions
@@ -542,7 +595,7 @@ impl TextIndex {
     /// (a phrase match is boolean adjacency, not a BM25 ranking). [OPUS-4.8]
     ///
     /// The query is analyzed by the SAME pipeline as the indexed text (UAX #29
-    /// segmentation + Unicode casefolding, via [`tokenize`]), so the phrase
+    /// segmentation + Unicode casefolding, via [`tokenize`](crate::tokenize::tokenize)), so the phrase
     /// tokens match exactly how the literals were tokenized. A trailing `*` is
     /// NOT a prefix marker here — it is segmentation punctuation, as in any
     /// document text. An empty phrase (no word tokens) matches nothing.
@@ -558,7 +611,7 @@ impl TextIndex {
             .positions
             .as_ref()
             .expect("phrase() requires a positional index: build with TextIndex::build_with_positions");
-        let tokens = tokenize(query);
+        let tokens = tokenize_with(query, self.analyzer);
         if tokens.is_empty() {
             return Vec::new();
         }
@@ -634,7 +687,7 @@ impl TextIndex {
     /// [`search`](Self::search) uses.
     ///
     /// The query is analyzed by the SAME pipeline as the indexed text (UAX #29
-    /// segmentation + Unicode casefolding, via [`tokenize`]); a trailing `*` is
+    /// segmentation + Unicode casefolding, via [`tokenize`](crate::tokenize::tokenize)); a trailing `*` is
     /// NOT a prefix marker (it is segmentation punctuation). An empty phrase (no
     /// word tokens) returns no hits. A single-token phrase is presence (gap 0,
     /// score 1.0) for any `slop`.
@@ -649,7 +702,7 @@ impl TextIndex {
         let positions = self.positions.as_ref().expect(
             "phrase_near() requires a positional index: build with TextIndex::build_with_positions",
         );
-        let tokens = tokenize(query);
+        let tokens = tokenize_with(query, self.analyzer);
         if tokens.is_empty() {
             return Vec::new();
         }
@@ -720,7 +773,7 @@ impl TextIndex {
     }
 
     fn run(&self, query: &str, all: bool) -> Vec<Hit> {
-        let mut qtokens = tokenize_query(query);
+        let mut qtokens = tokenize_query_with(query, self.analyzer);
         // A duplicated token must not double-score ("fox fox" == "fox").
         qtokens.dedup();
         let mut seen: Vec<&QueryToken> = Vec::new();
