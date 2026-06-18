@@ -111,6 +111,17 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   is unaffected (still cost-model'd) — the approximate seam swaps only the unfiltered scan.
 - **Verbalization** — `verbalize` / `embed_entities` render `<label>. a <type>. <description>`
   per entity (multilingual, char-budgeted); `embed_labels` is the label-only special case.
+- **Graph scoping** — every `&Graph` entry point (`verbalize`, `embed_entities`,
+  `embed_labels`, `nearest_term*`) reads the store of whatever `Graph` it is handed: the
+  **default graph** for the top-level `&graph`, or a **single named graph** when you pass
+  that graph's sub-`Graph`. On a quad dataset (N-Quads / TriG via `Graph::load_dataset`)
+  each named graph is a self-contained `Graph`; fetch one by name with
+  [`Graph::named_graph(&name)`](https://docs.rs/sparq-core/latest/sparq_core/struct.Graph.html#method.named_graph)
+  (sq-quuu) and embed / verbalize / query that graph alone. Verbalization labels never
+  cross graphs and there is no union-of-all-graphs mode — build a store per graph (or over
+  the default graph) on a multi-graph dataset rather than expecting the quads to be merged.
+  A store's graph **fingerprint** (above) is computed over the exact `Graph` it was built
+  from, so a per-named-graph store and the default-graph store carry distinct fingerprints.
 - **Quantization** — `ScalarQuantizer` (4×) and `ProductQuantizer` (asymmetric distance) for
   large stores; `Embedder` is provider-agnostic.
 - **Live embeddings (opt-in)** — the default build is **socket-free** (no HTTP client). The

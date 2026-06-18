@@ -322,6 +322,14 @@ the fixtures encode.)
 - **Cost.** Introspection is `O(|G| + |dict|)` (sorted scans, no GROUP BY); measured
   ~0.1 s build on 1.78M triples. LLM-excluded `ask` latency is the engine's query
   time (p50 ~10 ms at olympics scale) — the LLM round trip dominates wall clock.
+- **Graph scoping (sq-quuu).** `Introspection::build(&graph)` describes the **store of
+  the `Graph` it is handed** — the **default graph** for the top-level `&graph`, or a
+  **single named graph** when you pass that graph's sub-`Graph`. A schema card / VoID is
+  always scoped to exactly one graph; there is **no cross-graph or union-of-all-graphs
+  build**. On a quad dataset (N-Quads / TriG via `Graph::load_dataset`) each named graph
+  is a self-contained `Graph`; fetch one by name with `graph.named_graph(&name)` and
+  introspect it alone — `let card = Introspection::build(graph.named_graph(&g)?);`. Run it
+  per graph (or over the default graph) rather than expecting it to merge the quads.
 
 ## See also
 

@@ -134,6 +134,13 @@ reward. See the [`vector-search`](../vector-search/SKILL.md) skill for `fuse_sco
 - `max_pair_frequency` is an **approximation knob on candidate generation only** — it
   never changes the exact score of a returned candidate, but a very rare entity reachable
   only through a hub element could be missed at the default cap.
+- **Graph scoping (sq-quuu).** `Sim::new(&graph)` operates on the store of the `Graph`
+  it is handed — the **default graph** for the top-level `&graph`, or a **single named
+  graph** when you pass that graph's sub-`Graph`. On a quad dataset (N-Quads / TriG via
+  `Graph::load_dataset`) each named graph is a self-contained `Graph`; fetch one by name
+  with `graph.named_graph(&name)` and build `Sim::new(graph.named_graph(&g)?)`. Signatures
+  never reach **across** graphs and there is no union-of-all-graphs mode — choose the graph
+  (or the default graph) explicitly; the quads are not merged for you.
 
 _(status: Verified against `crates/sparq-sim/src/lib.rs` + README and the crate's tests
 (13 unit tests in `src/lib.rs`; 1 integration test `tests/olympics.rs` that skips when
