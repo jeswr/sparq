@@ -3379,6 +3379,7 @@ dependencies = [
  "rand 0.10.1",
  "rstar 0.13.0",
  "rustc-hash 2.1.2",
+ "spargebra",
  "sparq-core",
  "sparq-engine",
  "sparq-reason",

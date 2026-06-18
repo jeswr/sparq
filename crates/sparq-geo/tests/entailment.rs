@@ -34,19 +34,20 @@
 //! geo:defaultGeometry    rdfs:subPropertyOf geo:hasDefaultGeometry .  # 1.1
 //! ```
 //!
-//! # 2. Query-rewrite extension (NOT exercised — gap is asserted, not faked)
+//! # 2. Query-rewrite extension (implemented — see `tests/query_rewrite.rs`)
 //!
 //! The GeoSPARQL *query-rewrite extension* lets a TRIPLE PATTERN with a topology
 //! property predicate — `?a geo:sfWithin ?b` — be answered as if the
-//! corresponding `geof:sfWithin(?a,?b)` FILTER had been written, by rewriting
-//! the pattern at query time. sparq's engine implements the `geof:` FILTER
-//! functions and a spatial pushdown for them, but DOES NOT implement the
-//! property-form rewrite: a `geo:sfWithin` predicate is matched as an ordinary
-//! asserted triple (it binds only if the relation was materialised in the data).
-//! Rather than ship a fixture that pretends otherwise, [`query_rewrite_property_form_is_not_yet_supported`]
-//! pins the current behaviour so the gap is explicit and a future implementation
-//! flips a documented assertion. Tracked: sq-5ts8 (this bead stays open for the
-//! rewrite half) — see the crate README's GeoSPARQL conformance section.
+//! corresponding `geof:sfWithin(?a,?b)` FILTER had been written. As of sq-9g58
+//! sparq implements this as a SPARQL ALGEBRA rewrite on the dedicated
+//! [`sparq_geo::geosparql_rewrite`] entry point (end-to-end fixtures live in
+//! `tests/query_rewrite.rs`). It is NOT a materialization rule: the property form
+//! is not derived into the graph by the RDFS/OWL closure — it is expanded at
+//! query time into geometry-resolution joins + a `geof:` FILTER. The test below,
+//! [`query_rewrite_property_form_is_not_materialized`], pins exactly that boundary:
+//! the *reasoner* still does not (and must not) manufacture a `geo:sfWithin`
+//! triple — that is the query-rewrite path's job, on its own entry point, leaving
+//! the standard entry points (and RDFS materialization) W3C-conformant.
 
 use oxrdf::vocab::{rdf, rdfs};
 use oxrdf::{NamedNode, Term};
@@ -351,22 +352,19 @@ fn entailment_is_idempotent() {
     );
 }
 
-/// HONEST gap marker for the GeoSPARQL *query-rewrite extension*.
+/// The query-rewrite extension is a QUERY-TIME transform, NOT a materialization
+/// rule: the RDFS/OWL reasoner must not manufacture a `geo:sfWithin` triple.
 ///
-/// sparq does NOT rewrite a `geo:sfWithin` (etc.) TRIPLE PATTERN into the
-/// `geof:sfWithin` FILTER; the property is treated as an ordinary predicate.
-/// We assert that current behaviour over the dict so the gap is pinned (not
-/// silently claimed as supported). When the rewrite lands, this assertion
-/// changes from "absent" to "entailed/derivable" in the same commit, and
-/// sq-5ts8's rewrite half can close.
-///
-/// Concretely: with only `ex:smallGeom geof:sfWithin`-eligible geometry data —
-/// and NO asserted `ex:small geo:sfWithin ex:big` triple — the topology
-/// property is not present in the (RDFS-closed) graph, because no rule and no
-/// rewrite manufactures it. The `geof:sfWithin` FILTER function (tested in the
-/// topology ratchet) is the supported surface; the property form is not.
+/// The property form IS supported — via [`sparq_geo::geosparql_rewrite`], with
+/// end-to-end fixtures in `tests/query_rewrite.rs`. This test pins the
+/// complementary boundary: even though the geometries genuinely stand in the
+/// `sfWithin` relation, the RDFS closure does NOT derive the topology property
+/// (no rule manufactures it), so a `geo:sfWithin` predicate matched on the
+/// STANDARD (non-rewrite) entry points binds only asserted triples — there are
+/// none here. The rewrite path (separate entry point) is what answers the
+/// property form; the reasoner stays W3C-conformant. [OPUS-4.8] sq-9g58
 #[test]
-fn query_rewrite_property_form_is_not_yet_supported() {
+fn query_rewrite_property_form_is_not_materialized() {
     const GEO_SF_WITHIN: &str = "http://www.opengis.net/ont/geosparql#sfWithin";
 
     let mut dict = Dict::new();
@@ -391,9 +389,11 @@ fn query_rewrite_property_form_is_not_yet_supported() {
     let mut triples = vec![[small, as_wkt, small_wkt], [big, as_wkt, big_wkt]];
     materialize_rdfs(&mut dict, &mut triples);
 
-    // The property form is NOT derived: no `ex:small geo:sfWithin ex:big`.
-    // (If a query-rewrite extension is added, flip this to assert presence /
-    // queryability and close the rewrite half of sq-5ts8.)
+    // The property form is NOT MATERIALIZED: no `ex:small geo:sfWithin ex:big`
+    // triple is derived into the graph by the RDFS closure. (The relation IS
+    // queryable via the query-rewrite extension — `sparq_geo::geosparql_rewrite`,
+    // tested in `tests/query_rewrite.rs` — which expands the property form at
+    // query time rather than materializing it.)
     assert_not_entailed(
         &dict,
         &triples,
