@@ -154,6 +154,16 @@ mod tests {
     }
 
     #[test]
+    fn non_utf8_status_line_is_unhealthy() {
+        // [OPUS-4.8] sq-4vao: a status line whose bytes are not valid UTF-8 (a hostile or
+        // corrupt peer) must fail closed at the `from_utf8` guard rather than panic — the
+        // `0xFF` byte is an invalid UTF-8 start byte, so the whole line fails to decode.
+        assert!(!probe_healthy(b"\xFF\xFE 200 OK\r\n\r\n"));
+        // Invalid bytes after the protocol token are equally rejected.
+        assert!(!probe_healthy(b"HTTP/1.1 \xFF\xFF\r\n\r\n"));
+    }
+
+    #[test]
     fn status_line_without_trailing_crlf_still_parses() {
         // Defensive: a response truncated to just the status line is still classified.
         assert!(probe_healthy(b"HTTP/1.1 200 OK"));

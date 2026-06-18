@@ -55,7 +55,8 @@
       "note": "[OPUS-4.8] sq-fggn: behavioural tests for the lowest-covered modules (footprint commutativity, scheduler public surface, PodId/WriteError display) lifted measured line% 84.82 -> 94.47; floor = floor(measured) - 2 margin."
     },
     "sparq-server": {
-      "floor": 85
+      "floor": 86,
+      "note": "[OPUS-4.8] sq-4vao: behavioural tests for the lowest-covered modules (subscription reevaluate_step/subscribe_init diff + refusal classes, budget->SSE-status + RDF-1.2 triple-term encoding, the json_error/sanitized_error info-leak envelope, the GSP escape_iri/body-decode helpers, and the SPARQL-Protocol dataset-override rewrite) lifted measured line% 86.38 -> 88.14; floor = floor(measured) - 2 margin."
     },
     "sparq-shacl": {
       "floor": 90
