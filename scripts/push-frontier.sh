@@ -20,7 +20,13 @@
 #   MINUS  conflict-collisions                    (emit at most ONE bead per crate /
 #                                                  surface; serialise the hot lanes:
 #                                                  the site, and the sparq-server
-#                                                  http.rs auth path — <=1 in flight)
+#                                                  http.rs auth path — <=1 in flight.
+#                                                  A bead is reserved on TWO lanes: its
+#                                                  label SURFACE *and* its primary-CODE
+#                                                  crate — the crate its touched .rs
+#                                                  paths land in (sq-6ip4) — so two beads
+#                                                  editing one crate never co-launch even
+#                                                  when their labels diverge)
 #   MINUS  epics / "[epic]"-tagged umbrellas        (issue_type=epic, or a title the
 #                                                  maintainer tagged "[epic]", is an
 #                                                  UMBRELLA not a work unit — you dispatch
@@ -135,6 +141,38 @@ infer_surface() {
   printf '\n'
 }
 
+# [OPUS-4.8] sq-6ip4: PRIMARY-CODE-CRATE probe (partition by touched .rs paths, not just label).
+# Given a bead's TITLE+DESCRIPTION text on $1 and the known crate short-names on $2, echo the
+# crate that the bead's CODE changes land in -- inferred from an explicit `crates/<crate>/.../*.rs`
+# path mention -- or "" if none is found. This is a SEPARATE signal from infer_surface: a bead's
+# conflict SURFACE (label) can be e.g. "genai"/"introspect" (its READMEs/SKILLs) while its actual
+# code lives in sparq-core. The wave wm5fcnlqj bug: #597 and #598 both edited
+# crates/sparq-core/src/lib.rs but had DIFFERENT surface labels, so the label-only partition let
+# BOTH launch -> merge-conflict risk. By ALSO reserving the primary-code crate, two beads that
+# touch the same crate's .rs files never launch in one wave even when their labels diverge.
+#
+# Only an explicit `crates/<crate>/<...>.rs` path counts (a precise, low-false-positive signal):
+#   - the crate segment must be a KNOWN crate short-name (validated against $2), so a stray
+#     `crates/foo/` for a non-existent crate is ignored;
+#   - the path must end in `.rs`, so a bare doc/readme reference doesn't reserve the crate.
+# The FIRST matching crate wins (one primary-code crate per bead; deterministic). Pure text (no
+# bd/git), so the self-test exercises it hermetically.
+infer_code_crate() {
+  local text="$1" crates="$2" c lc seg
+  # Normalise the haystack to lowercase (crate dirs are lowercase by convention).
+  lc="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
+  # Pull every `crates/<seg>/.../<file>.rs` occurrence in order; return the first whose <seg>
+  # is a KNOWN crate. grep -o yields one match per line; we validate each against $crates.
+  while IFS= read -r seg; do
+    [ -n "$seg" ] || continue
+    for c in $crates; do
+      if [ "$seg" = "$c" ]; then printf '%s\n' "$c"; return 0; fi
+    done
+  done < <(printf '%s\n' "$lc" | grep -oE 'crates/[a-z0-9_-]+/[a-z0-9_./-]*\.rs' 2>/dev/null \
+            | sed -E 's#^crates/([a-z0-9_-]+)/.*#\1#')
+  printf '\n'
+}
+
 # [OPUS-4.8] sq-8rpq: in-flight reservation by UNPUSHED worktree branches (not every branch).
 # inflight_wt_branch <branch> <unpushed-count> : echo <branch> iff it is an IN-FLIGHT
 # signal, i.e. iff it has UNPUSHED local commits. <unpushed-count> is the number of
@@ -241,6 +279,32 @@ self_test() {
   got="$(inflight_wt_branch 'sq-squash-merged' 0)"
   _check "pushed/squash-merged branch NOT in-flight" "$got" ""
 
+  # --- primary-code-crate probe (sq-6ip4) ---------------------------------------------
+  # The code-crate is inferred from an explicit `crates/<crate>/.../*.rs` path in the bead's
+  # title+description, INDEPENDENT of its label surface. This is the wave wm5fcnlqj fix: a
+  # bead labelled genai/introspect whose code lives in crates/sparq-core/src/lib.rs must
+  # reserve sparq-core so a second sparq-core bead can't launch in the same wave.
+  got="$(infer_code_crate 'named-graph scoping for GenAI introspect — edits crates/sparq-core/src/lib.rs' "$CR")"
+  _check "desc .rs path -> code crate (the bug)"   "$got" "sparq-core"
+
+  got="$(infer_code_crate 'sq-6ip4 scheduler: code lives in crates/sparq-core/src/lib.rs' "$CR")"
+  _check "explicit crates/<crate>/...rs path"      "$got" "sparq-core"
+
+  got="$(infer_code_crate 'forge gate regression in crates/sparq-zk-compose/tests/forge_gates.rs' "$CR")"
+  _check "tests/ .rs path under a crate"           "$got" "sparq-zk-compose"
+
+  got="$(infer_code_crate 'no code path here, just prose about sparq-core internals' "$CR")"
+  _check "crate NAME but no .rs path -> none"      "$got" ""
+
+  got="$(infer_code_crate 'doc tweak to crates/sparq-core/README.md only' "$CR")"
+  _check "non-.rs path (README) -> none"           "$got" ""
+
+  got="$(infer_code_crate 'edits crates/not-a-crate/src/lib.rs (unknown crate)' "$CR")"
+  _check "unknown crate segment -> none"           "$got" ""
+
+  got="$(infer_code_crate 'first crates/sparq-core/src/a.rs then crates/sparq-mpc/src/b.rs' "$CR")"
+  _check "first known .rs crate wins"              "$got" "sparq-core"
+
   echo
   if [ "$fails" -eq 0 ]; then log "self-test PASSED"; return 0; fi
   die "self-test FAILED ($fails check(s))"
@@ -322,8 +386,11 @@ is_inflight() {
 # --- 2. read bd ready ------------------------------------------------------------------
 READY_JSON="$(bd ready --json 2>/dev/null)" || die "bd ready --json failed"
 
-# Emit "id<TAB>priority<TAB>title" lines, sorted by priority asc (P0 first) then id.
-# EXCLUDE epics — an epic is an umbrella, not a dispatchable work unit (see header).
+# Emit "id<TAB>priority<TAB>title<TAB>description" lines, sorted by priority asc (P0 first) then
+# id. EXCLUDE epics — an epic is an umbrella, not a dispatchable work unit (see header). The
+# DESCRIPTION column (sq-6ip4) feeds the primary-code-crate probe: a bead's code may live in a
+# crate its title never names, so we scan the description for an explicit `crates/<crate>/*.rs`
+# path. Tabs/newlines are flattened so each bead stays on one row.
 ROWS="$(printf '%s' "$READY_JSON" | python3 -c '
 import json,sys
 data=json.load(sys.stdin)
@@ -331,6 +398,8 @@ def key(it):
     try: p=int(it.get("priority",9))
     except Exception: p=9
     return (p, it.get("id",""))
+def flat(s):
+    return (s or "").replace("\t"," ").replace("\n"," ").replace("\r"," ")
 for it in sorted(data, key=key):
     # Exclude umbrellas: a real epic type, or a bead the maintainer tagged "[epic]"
     # in its title (the explicit convention for "this is a container, not a unit").
@@ -341,7 +410,8 @@ for it in sorted(data, key=key):
     print("\t".join([
         it.get("id",""),
         str(it.get("priority","")),
-        (it.get("title","") or "").replace("\t"," ").replace("\n"," "),
+        flat(it.get("title","")),
+        flat(it.get("description","")),
     ]))
 ' 2>/dev/null)" || die "could not parse bd ready --json"
 
@@ -353,20 +423,25 @@ for it in sorted(data, key=key):
 declare -A TAKEN          # surface -> 1 once occupied (by in-flight or emitted)
 emitted=0
 
-# Seed TAKEN with the surfaces of in-flight beads so we never emit a second bead that
-# would collide with work already running.
-while IFS=$'\t' read -r id prio title; do
+# Seed TAKEN with the surfaces AND primary-code crates of in-flight beads so we never emit a
+# second bead that would collide with work already running -- on EITHER lane (sq-6ip4): the
+# label surface (infer_surface) and the touched-.rs crate (infer_code_crate). Reserving both
+# means an in-flight bead whose code lives in sparq-core blocks another sparq-core bead even
+# if the two carry different labels.
+while IFS=$'\t' read -r id prio title desc; do
   [ -n "$id" ] || continue
   if is_inflight "$id"; then
     surface="$(infer_surface "$title" "$CRATES")"
+    code_crate="$(infer_code_crate "$title $desc" "$CRATES")"
     [ -n "$surface" ] && TAKEN["$surface"]=1
-    [ "$EXPLAIN" -eq 1 ] && log "DROP  $id  [in-flight: open PR] surface=${surface:-(unscoped)}"
+    [ -n "$code_crate" ] && TAKEN["$code_crate"]=1
+    [ "$EXPLAIN" -eq 1 ] && log "DROP  $id  [in-flight: open PR] surface=${surface:-(unscoped)} code-crate=${code_crate:-(none)}"
   fi
 done <<< "$ROWS"
 
 # Now walk in priority order and emit launchable beads.
 OUT=""
-while IFS=$'\t' read -r id prio title; do
+while IFS=$'\t' read -r id prio title desc; do
   [ -n "$id" ] || continue
 
   if is_inflight "$id"; then
@@ -374,6 +449,10 @@ while IFS=$'\t' read -r id prio title; do
   fi
 
   surface="$(infer_surface "$title" "$CRATES")"
+  # sq-6ip4: the primary CODE crate (touched .rs paths), probed from title+description. It is a
+  # SECOND conflict lane on top of the label surface, so two beads that edit the same crate's
+  # source never launch in one wave even when their labels diverge (the wave wm5fcnlqj bug).
+  code_crate="$(infer_code_crate "$title $desc" "$CRATES")"
 
   if [ "$emitted" -ge "$CAP" ]; then
     [ "$EXPLAIN" -eq 1 ] && log "DROP  $id  [CPU ceiling $CAP reached]"
@@ -385,11 +464,17 @@ while IFS=$'\t' read -r id prio title; do
     continue
   fi
 
-  # Launch it.
+  if [ -n "$code_crate" ] && [ "${TAKEN[$code_crate]:-0}" = "1" ]; then
+    [ "$EXPLAIN" -eq 1 ] && log "DROP  $id  [code-crate '$code_crate' already taken (conflict-collision)]"
+    continue
+  fi
+
+  # Launch it. Reserve BOTH lanes so a later bead colliding on either is held back.
   [ -n "$surface" ] && TAKEN["$surface"]=1
+  [ -n "$code_crate" ] && TAKEN["$code_crate"]=1
   OUT+="$(printf '%s\t%s\t%s' "$id" "${surface:-(unscoped)}" "$title")"$'\n'
   emitted=$((emitted + 1))
-  [ "$EXPLAIN" -eq 1 ] && log "KEEP  $id  surface=${surface:-(unscoped)}  P$prio"
+  [ "$EXPLAIN" -eq 1 ] && log "KEEP  $id  surface=${surface:-(unscoped)} code-crate=${code_crate:-(none)}  P$prio"
 done <<< "$ROWS"
 
 # --- 4. print the launchable frontier --------------------------------------------------

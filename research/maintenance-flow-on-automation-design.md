@@ -153,14 +153,26 @@ lifecycle-hook subsystem + a rule config + an evaluator). That is exactly the
 - **Extend beads (fork a typed close-time rule engine):** **No.** Not supported
   in v1.0.5; would be a real subsystem to build and carry; the highest-value
   catch is at merge anyway, which beads cannot see.
-- **Upstream a small beads contribution:** **Maybe, narrow and optional.** A
-  genuinely small, generally-useful upstream contribution would be a
-  **bead-lifecycle hook** (run a configured command on `bd close`, analogous to
-  the existing git-hook subsystem) — that would let *any* beads user wire
-  on-close automation without a fork. Worth a low-priority upstream *proposal
-  issue* (per our roll-your-own-then-upstream norm), but **we do not block on
-  it** and **do not need it** — the CI merge-trigger covers our case. The custom
-  `types`/`labels` we *will* use are already upstream.
+- **Upstream a small beads contribution:** **Now moot — upstream already shipped
+  it.** When this design was written (against beads v1.0.5) the genuinely small,
+  generally-useful upstream contribution would have been a **bead-lifecycle hook**
+  (run a configured command on `bd close`, analogous to the existing git-hook
+  subsystem) so *any* beads user could wire on-close automation without a fork —
+  worth a low-priority upstream *proposal issue* per our roll-your-own-then-upstream
+  norm, but never blocking and never needed (the CI merge-trigger covers our case).
+  **Update (2026-06, bead `sq-ncvq.17`):** before filing we checked upstream and
+  found this feature **already requested, implemented, and merged** — the canonical
+  repo (`github.com/steveyegge/beads` now redirects to `gastownhall/beads`) carries
+  issue [#1754 "Beads lifecycle hooks (post-create, post-close, post-update)"][bd1754]
+  in state **CLOSED / COMPLETED**, and the on-close hook fires from `bd close` /
+  `bd update --status closed` per merged PR #2754 (the `on_close` hook), with live
+  test coverage (`TestUpdateCloseHookFiring`, cf. issues #3800 / #3802 / #3805) and a
+  config subsystem exposing `on_close` / `on_update` / `on_complete` (cf. #3782).
+  Filing a proposal issue now would duplicate an already-implemented feature on a
+  ~480-open-issue tracker, so per our **honesty + repo-hygiene** norms — don't ship a
+  no-op; don't add maintainer noise — we **do not file** it, and treat the upstream
+  action as satisfied. We still **do not need** the hook ourselves. The custom
+  `types` / `labels` we *will* use were already upstream too. [OPUS-4.8]
 - **Build a thin sparq-local layer:** **Yes** — this is the recommendation:
   1. a handful of new **diff-aware DoD checks** (Python, the existing idiom),
      wired into `ci-summary`;
@@ -460,10 +472,14 @@ report accompanying this doc). Structure:
   skill gaps (B), EXPLAIN-JS asymmetry (C), ZK dashboard row + others (D),
   conformance-scoreboard consolidation (E).
 - **Optional upstream**: a low-priority beads "on-close lifecycle hook" proposal
-  issue (not blocking).
+  issue (not blocking). **Resolved (sq-ncvq.17):** not filed — upstream already
+  shipped the on-close hook ([`gastownhall/beads#1754`][bd1754], CLOSED/COMPLETED);
+  filing would duplicate a merged feature. See §1.4. [OPUS-4.8]
 
 Dependencies: the drift-scanner (`drift-scan.py`) is a dependency-free leaf that
 unblocks an *automated* full sweep; the gate beads are independent of each
 other; the flow-on config bead blocks `flow-on.py` which blocks `flow-on.yml`;
 the AGENTS.md-annotation bead depends on the gate beads existing (so it can name
 them).
+
+[bd1754]: https://github.com/gastownhall/beads/issues/1754

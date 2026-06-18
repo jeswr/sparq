@@ -163,6 +163,29 @@ jobs:
       - name: VEX ↔ deny.toml drift check — GATING
         run: python3 scripts/check-vex-deny-drift.py
 
+  # ---- OpenSSF Best-Practices (CII) self-cert evidence gate ----
+  # [OPUS-4.8] sq-toze.5 (GX-4): the machine-readable badge self-certification
+  # (compliance/openssf/best-practices-self-cert.json) is the import-ready, structured form
+  # of the drafted bestpractices.dev answers. This job keeps it HONEST at PR time: every
+  # cited evidence path must resolve to a real repo artifact, every status/family token must
+  # be legal, ids unique, and a `filed:true` may never appear without a recorded badge_url —
+  # so the "evidence-grounded" self-cert can never silently drift as files move or tokens
+  # change. Filing the badge on bestpractices.dev itself stays an EXTERNAL human-owned step;
+  # this gate covers only the in-repo answer payload. Pure-stdlib Python (json/pathlib on the
+  # runner's 3.12); runs the hermetic self-test first so a regression in the check itself is
+  # caught. ALWAYS-ON (no rust-change gating: the inputs are checked-in markdown/JSON, not the
+  # dependency graph). NOTE: the job name has NO "advisory"/"informational" WHOLE WORD, so the
+  # ci-summary aggregator treats it as GATING (intentional).
+  openssf-selfcert:
+    name: OpenSSF Best-Practices self-cert evidence (GX-4) — GATING
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: self-cert evidence-gate self-test
+        run: python3 scripts/tests/test_bestpractices_evidence.py
+      - name: self-cert evidence check — GATING
+        run: python3 scripts/check-bestpractices-evidence.py
+
   # ---- CycloneDX SBOM ----
   sbom:
     name: generate CycloneDX SBOM

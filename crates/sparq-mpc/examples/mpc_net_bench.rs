@@ -154,6 +154,17 @@ fn run(
             let reference: u64 = (0..scale as u64).map(|i| scale as u64 - i).sum();
             (Vec::new(), reference)
         }
+        QueryClass::HiddenBoundedPath => {
+            // The hidden bounded property path (sq-py8h.5) has no live-wire driver —
+            // its cost is modelled analytically (bench::run_matrix /
+            // BoundedPathPlan::comm_counter), not measured over the socket. The CLI
+            // never selects it; this arm keeps the match exhaustive. [OPUS-4.8]
+            return Err(
+                "hidden-bounded-path has no networked driver (cost is modelled \
+                        analytically via bench::run_matrix, sq-py8h.5)"
+                    .into(),
+            );
+        }
     };
 
     // Bind loopback; port 0 ⇒ OS-assigned. The parties connect here.
@@ -201,6 +212,12 @@ fn run(
             let col: Vec<u64> = (0..scale as u64).map(|i| scale as u64 - i).collect();
             let (opened, gates) = coord.sort(&mut dealer, &col)?;
             (opened.iter().copied().sum(), gates)
+        }
+        QueryClass::HiddenBoundedPath => {
+            // Unreachable from the CLI (no string maps to it); the analytic cost is
+            // the only modelled path for this class. Keep the match exhaustive.
+            // [OPUS-4.8] sq-py8h.5
+            return Err("hidden-bounded-path has no networked driver".into());
         }
     };
     let wall_clock = start.elapsed();

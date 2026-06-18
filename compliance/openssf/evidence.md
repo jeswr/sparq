@@ -31,6 +31,16 @@ Format per criterion: **`criterion_id`** — *Answer* (Met / Met w/justification
 — evidence. Criterion ids follow bestpractices.dev. This drafts the **passing** level; notes
 flag where sparq also satisfies **silver/gold**.
 
+> **Machine-readable twin.** The same answers exist in import-ready structured form at
+> [`best-practices-self-cert.json`](./best-practices-self-cert.json) (one object per criterion:
+> `status` + `justification` + repo-relative `evidence` path(s)). That file is what a maintainer
+> transcribes into the bestpractices.dev form, and it is **CI-gated** by
+> [`scripts/check-bestpractices-evidence.py`](../../scripts/check-bestpractices-evidence.py)
+> (`supply-chain.yml#openssf-selfcert`): every cited evidence path must resolve to a real
+> artifact and every status/family token must be legal, so this prose and the JSON cannot drift
+> out of step with the repo. The JSON keeps `project.filed = false` until the badge is actually
+> filed (GX-4, the external human-owned step).
+
 ### Basics
 - **`description_good`** — Met — [`README.md`](../../README.md) one-line pitch + what/why.
 - **`interact`** — Met — GitHub issues/PRs/Discussions; [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
