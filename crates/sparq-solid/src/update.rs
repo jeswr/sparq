@@ -24,16 +24,19 @@
 //! - a write to a graph the actor cannot write in the required mode is denied and the
 //!   store is **not** mutated (the check runs entirely before [`update_in_place`]);
 //! - a `DELETE/INSERT … WHERE` template with a `GRAPH ?var` slot is resolved
-//!   *precisely* ([OPUS-4.8] sq-biss): the operation's WHERE pattern is evaluated to
-//!   enumerate the CONCRETE graphs `?var` actually binds to, and write is required only
-//!   on THOSE graphs (per the read path's per-graph model) — not on every store graph.
-//!   This stays fail-closed: the WHERE is evaluated against **exactly the dataset the
-//!   engine will instantiate the templates over** (the full store, re-scoped by `USING`
-//!   — see the soundness note on [`resolve_var_graphs`]), so the graphs checked are
-//!   exactly the graphs the apply could touch; if any binding is not a writable named
-//!   graph the update is denied, and any binding that cannot be reduced to a concrete
-//!   named graph (a blank-node graph name, or a WHERE the analysis cannot evaluate)
-//!   falls back to the conservative all-graphs check below (never a hole);
+//!   *precisely* ([OPUS-4.8] sq-biss, extended to `USING`/`WITH` by sq-cnor): the
+//!   operation's WHERE pattern is evaluated to enumerate the CONCRETE graphs `?var`
+//!   actually binds to, and write is required only on THOSE graphs (per the read path's
+//!   per-graph model) — not on every store graph. This stays fail-closed: the WHERE is
+//!   evaluated against **exactly the dataset the engine will instantiate the templates
+//!   over** — the full store, or, when the operation carries a `USING (NAMED)` / `WITH`
+//!   clause, the same active dataset the engine's `build_using` assembles, re-expressed
+//!   as an explicit `FROM`/`FROM NAMED` clause (see the soundness note on
+//!   [`resolve_var_graphs`]) — so the graphs checked are exactly the graphs the apply
+//!   could touch; if any binding is not a writable named graph the update is denied, and
+//!   any binding that cannot be reduced to a concrete named graph (a blank-node graph
+//!   name, or a WHERE the analysis cannot evaluate) falls back to the conservative
+//!   all-graphs check below (never a hole);
 //! - a target whose graph name cannot be determined statically by the above — a
 //!   `CLEAR`/`DROP` of `ALL`/`NAMED` graphs, or a `GRAPH ?var` slot that fell back —
 //!   is treated *conservatively*: the actor must be able to write **every** named graph
@@ -253,6 +256,31 @@ fn analyze(upd: &Update) -> WriteReqs {
     reqs
 }
 
+/// Re-express an update's `USING (NAMED)` / `WITH` re-scope as a query `FROM`/`FROM NAMED`
+/// dataset clause that makes the query side's [`sparq_engine::query`] assemble the SAME
+/// active dataset the engine's apply builds via `Dataset::build_using`. [OPUS-4.8] sq-cnor.
+///
+/// `build_using` and the query-side `build_active` treat the `default` (FROM) graphs
+/// identically (merge the listed store graphs; an absent one contributes nothing). They
+/// diverge only on `named`:
+///
+/// - `Some(list)` (explicit `USING NAMED`): both keep exactly `list`. We pass it through
+///   unchanged — an absent name denotes the empty graph on the query side and contributes
+///   no binding under `build_using` either, so the `GRAPH ?g` enumeration is identical.
+/// - `None` (the parser's encoding of `WITH`, which re-scopes only the default graph):
+///   `build_using` keeps ALL the store's named graphs, but a query's empty `FROM NAMED`
+///   keeps NONE. We therefore materialize `named` as an explicit `FROM NAMED` of every
+///   store named graph (excluding the reserved auth view, which the apply never exposes to
+///   the WHERE either) so the query keeps the same set.
+fn rescope_dataset(graph: &sparq_core::Graph, u: &QueryDataset) -> QueryDataset {
+    let named = match &u.named {
+        Some(list) => list.clone(),
+        // WITH: make the implicit "all store named graphs" explicit for the query side.
+        None => store_named_graphs(graph),
+    };
+    QueryDataset { default: u.default.clone(), named: Some(named) }
+}
+
 /// Resolve a `DELETE/INSERT … WHERE` operation's `GRAPH ?var` template slots into the
 /// concrete (named-graph, need) requirements its solutions actually produce.
 /// [OPUS-4.8] sq-biss.
@@ -275,15 +303,27 @@ fn analyze(upd: &Update) -> WriteReqs {
 /// wildcard already computed, only tightened to the graphs that genuinely appear as
 /// targets.
 ///
-/// Fail-closed cases that fall back to the wildcard (rather than risk a hole):
+/// # `USING`/`WITH` re-scope ([OPUS-4.8] sq-cnor)
 ///
-/// - the operation carries a `USING`/`WITH` clause: the apply re-scopes the WHERE through
-///   `Dataset::build_using`, whose `named: None` (the parser's encoding of `WITH`) keeps
-///   ALL store named graphs — but a plain query's `FROM`/`FROM NAMED` (`build_active`)
-///   treats `named: None` as the EMPTY named set, so a serialized SELECT would
-///   *under-count* the `GRAPH ?g` bindings. Rather than reproduce the update-side dataset
-///   semantics (private to the engine), we stay conservative whenever a re-scope is
-///   present — `Err(need)`;
+/// When the operation carries a `USING (NAMED)` / `WITH` clause the apply re-scopes the
+/// WHERE through `Dataset::build_using`, which a *plain* SELECT (`dataset: None`) does NOT
+/// reproduce: `build_using`'s `named: None` (the parser's encoding of `WITH`, which only
+/// re-scopes the DEFAULT graph) keeps ALL the store's named graphs, whereas a query whose
+/// `FROM NAMED` list is empty keeps NONE — so a naive serialized SELECT would *under-count*
+/// the `GRAPH ?g` bindings and open a hole. We close the gap by handing the binding SELECT
+/// the EXACT same active dataset the engine builds, re-expressed as a query dataset clause
+/// ([`rescope_dataset`]): the `USING` default graphs become `FROM`, and the named set is
+/// either the explicit `USING NAMED` list or — for `WITH` (`named: None`) — an explicit
+/// `FROM NAMED` of every store named graph (the set `build_using` keeps). The query side's
+/// [`sparq_engine::query`] then assembles the identical active dataset
+/// (`dataset::build_active` with `default`/`named` matching `build_using` graph-for-graph;
+/// the two diverge only on a view intersection, and no dataset view is installed on the
+/// write-check path — `check` calls the full-store `query`, not `query_view`). The
+/// enumerated bindings therefore equal the engine's, so the resolution stays precise even
+/// under `USING`/`WITH`.
+///
+/// Fail-closed cases that still fall back to the wildcard (rather than risk a hole):
+///
 /// - the WHERE cannot be evaluated (parse/serialize/engine error) — `Err(need)`;
 /// - a slot binds to a **blank-node** graph name: the engine *would* write to it
 ///   ([`gnp_subst`] accepts blank nodes), but the auth view only ever grants write on
@@ -300,16 +340,14 @@ fn resolve_var_graphs(
     // every slot.
     let fallback = r.slots.iter().map(|(_, n)| *n).fold(Need::WriteOrAppend, strongest);
 
-    // USING/WITH re-scopes the WHERE in a way a plain query cannot faithfully reproduce
-    // (see the doc note) — fail closed to the conservative all-graphs check.
-    if r.using.is_some() {
-        return Err(fallback);
-    }
-
     // Build `SELECT ?v… { WHERE }` and evaluate it exactly as the engine instantiates the
-    // templates: the full store, no dataset re-scope (the USING/WITH case bailed above).
+    // templates. With no `USING`/`WITH` the active dataset is the full store
+    // (`dataset: None`); with a re-scope we re-express the engine's `build_using` active
+    // dataset as an explicit FROM/FROM NAMED clause so the SELECT enumerates the SAME
+    // bindings the apply will ([OPUS-4.8] sq-cnor).
+    let dataset = r.using.as_ref().map(|u| rescope_dataset(graph, u));
     let select = Query::Select {
-        dataset: None,
+        dataset,
         pattern: GraphPattern::Project {
             inner: Box::new(r.pattern.clone()),
             variables: r.slots.iter().map(|(v, _)| v.clone()).collect(),
@@ -669,20 +707,17 @@ mod differential_writeset_tests {
         );
     }
 
-    /// CASE 4 — the WITH-clause variant (PSS shapes can carry `WITH`). `resolve_var_graphs`
-    /// DELIBERATELY bails to the conservative all-graphs wildcard whenever a USING/WITH
-    /// re-scope is present (`update.rs` ~line 305; root-caused in sq-cnor): a plain serialized
-    /// SELECT cannot reproduce the apply's `build_using` dataset (`WITH` keeps ALL store named
-    /// graphs, a query's `FROM NAMED` of `named: None` keeps NONE), so a precise resolution
-    /// could UNDER-count and open a hole. We therefore verify the SECURITY property directly:
-    /// the conservative target (every store named graph) is a SUPERSET of what the engine
-    /// actually writes. A superset can only DENY (never leak) — sound, the invariant holds in
-    /// the safe direction. (When sq-cnor tightens this to a precise set, this test's superset
-    /// check still holds and the equality below documents the tightening target.)
+    /// CASE 4 — the WITH-clause variant (PSS shapes can carry `WITH`). [OPUS-4.8] sq-cnor
+    /// tightened `resolve_var_graphs` so a `USING`/`WITH` re-scope is now resolved PRECISELY:
+    /// the binding SELECT is handed the same active dataset the apply's `build_using` builds
+    /// (`rescope_dataset` re-expresses `WITH`'s implicit "all store named graphs" as an explicit
+    /// `FROM NAMED` list), so it enumerates the SAME `GRAPH ?g` bindings the engine writes. The
+    /// precise set must now EQUAL the engine write set — no longer the conservative wildcard.
     #[test]
-    fn with_clause_falls_back_to_sound_over_approximation() {
+    fn with_clause_resolves_precisely_to_engine_write_set() {
         // WITH re-scopes the operation's DEFAULT graph to r1; the GRAPH ?g slot still ranges
-        // over named graphs. The resolver sees a re-scope and bails (USING is Some).
+        // over named graphs. The resolver re-expresses the re-scope as a FROM NAMED clause and
+        // resolves precisely.
         let upd = "\
             WITH <https://pod.ex/r1> \
             DELETE { GRAPH ?g { ?s <https://ex.dev/ns#aclPointer> ?p } } \
@@ -691,53 +726,64 @@ mod differential_writeset_tests {
                                 OPTIONAL { ?s <https://ex.dev/ns#aclPointer> ?p } } }";
 
         let graph = pss_dataset();
-        // resolve_var_graphs returns Err(_) -> the precise set is undefined; PodStore falls
-        // back to the all-graphs wildcard.
-        assert!(
-            resolve_var_graph_set(&graph, upd).is_none(),
-            "WITH/USING re-scope must trigger the conservative wildcard fallback"
-        );
-
-        // The conservative target set is EVERY named graph in the store.
-        let conservative: BTreeSet<String> = store_named_graphs(&graph)
-            .iter()
-            .map(|n| n.as_str().to_owned())
-            .collect();
+        let precise =
+            resolve_var_graph_set(&graph, upd).expect("WITH re-scope now resolves precisely (sq-cnor)");
 
         let mut applied = pss_dataset();
         let (written, default) = engine_write_set(&mut applied, upd);
 
         // WITH re-scopes the operation's DEFAULT graph, but EVERY quad pattern in the DELETE,
         // INSERT and WHERE templates here is explicitly `GRAPH ?g { … }`-scoped, so no triple
-        // lands in (or is read from) the default graph: the WITH target is never written. Assert
-        // that signal rather than dropping it — a regression that started routing writes to the
-        // WITH default graph would otherwise pass the subset check below unnoticed.
+        // lands in (or is read from) the default graph: the WITH target is never written.
         assert!(
             !default,
             "WITH default-graph re-scope must NOT produce a default-graph write when every \
              template quad is explicitly GRAPH ?g-scoped"
         );
 
-        // SECURITY invariant in the safe direction: the authorization target (all store
-        // graphs) is a SUPERSET of the engine's actual write set — never an under-approximation
-        // (which would let a write escape auth). Over-approximation is sound; it only denies.
-        assert!(
-            written.is_subset(&conservative),
-            "fallback wildcard must COVER every graph the engine writes (no under-approx hole): \
-             engine wrote {written:?}, wildcard covers {conservative:?}"
+        // The precise set now EQUALS the engine's actual write set (exactly r1+r2) — the sq-cnor
+        // gap is closed; no escalation to the all-store wildcard.
+        assert_eq!(
+            precise, written,
+            "WITH: precise resolve_var_graphs set must EQUAL the engine's actual write set"
         );
-        // Document the precision gap (sq-cnor): the engine actually writes only r1+r2, but the
-        // wildcard demands write on the whole store -> the fallback is a strict over-approx here.
-        let real: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2"]
+        let expect: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2"]
             .map(String::from)
             .into();
+        assert_eq!(written, expect, "engine wrote exactly r1+r2 under WITH");
+    }
+
+    /// CASE 5 — `USING NAMED` restricts the GRAPH ?g range to the listed graphs only ([OPUS-4.8]
+    /// sq-cnor). The binding SELECT must mirror `build_using`'s explicit named set: `?g` binds
+    /// only within the `USING NAMED` graphs, so a resource with a title that is NOT named in the
+    /// USING clause must NOT appear in the precise set (and the engine does not write it). This
+    /// proves the re-scope is honoured precisely, not just passed through as the whole store.
+    #[test]
+    fn using_named_restricts_precise_set_to_listed_graphs() {
+        // Only r1 is in USING NAMED; r2 has a title too but is excluded. `?g` can bind ONLY r1.
+        let upd = "\
+            DELETE { GRAPH ?g { ?s <https://ex.dev/ns#aclPointer> ?p } } \
+            INSERT { GRAPH ?g { ?s <https://ex.dev/ns#aclPointer> <https://pod.ex/new.acl> } } \
+            USING NAMED <https://pod.ex/r1> \
+            WHERE  { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t . \
+                                OPTIONAL { ?s <https://ex.dev/ns#aclPointer> ?p } } }";
+
+        let graph = pss_dataset();
+        let precise =
+            resolve_var_graph_set(&graph, upd).expect("USING NAMED resolves precisely (sq-cnor)");
+
+        let mut applied = pss_dataset();
+        let (written, default) = engine_write_set(&mut applied, upd);
+        assert!(!default, "no default-graph write in this shape");
+
         assert_eq!(
-            written, real,
-            "engine's real WITH write set is exactly r1+r2"
+            precise, written,
+            "USING NAMED: precise set must EQUAL the engine write set (only the listed graph)"
         );
-        assert!(
-            real.is_subset(&conservative) && conservative.len() > real.len(),
-            "wildcard is a STRICT over-approximation of the engine write set (the sq-cnor gap)"
+        let expect: BTreeSet<String> = ["https://pod.ex/r1"].map(String::from).into();
+        assert_eq!(
+            written, expect,
+            "USING NAMED <r1> restricts the write set to r1 (r2 excluded despite its title)"
         );
     }
 }

@@ -340,24 +340,45 @@ fn var_graph_empty_binding_is_a_permitted_noop() {
 }
 
 #[test]
-fn var_graph_with_using_clause_falls_back_to_conservative() {
-    // A USING/WITH re-scope on a variable-GRAPH op cannot be faithfully reproduced by a
-    // plain SELECT (the apply's `build_using` keeps all store named graphs for `WITH`,
-    // while a query's FROM-only dataset has an EMPTY named set), so precise resolution
-    // would UNDER-count the bound graphs. The check fails closed to the all-graphs
-    // wildcard: CAROL — who could write this exact team2-bounded delete WITHOUT the WITH
-    // clause (var_graph_precise_allows_authorized_subset) — is now denied, because she
-    // cannot write every store graph.
+fn var_graph_with_clause_resolves_precisely() {
+    // [OPUS-4.8] sq-cnor: a `WITH`/`USING` re-scope on a variable-GRAPH op is now resolved
+    // PRECISELY (no longer the conservative all-graphs fallback). The binding SELECT is handed
+    // the same active dataset the apply's `build_using` builds — for `WITH` (which re-scopes
+    // only the DEFAULT graph), `named: None` keeps all store named graphs, re-expressed as an
+    // explicit `FROM NAMED` of every store named graph. Every quad here is `GRAPH ?g`-scoped,
+    // so the `WITH` default graph never participates; `?g` resolves to exactly the team2
+    // content graphs CAROL owns — so she is now PERMITTED, just as without the WITH clause
+    // (var_graph_precise_allows_authorized_subset).
     let mut s = wac_store();
     let before = graph_len(&s, TEAM2_DOC);
+    assert!(before > 0, "team2 doc has a title triple to delete");
     let upd = format!(
         "WITH <{TEAM2_DOC}> \
          DELETE {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} }} \
          WHERE  {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} FILTER(STRSTARTS(STR(?g), \"https://pod.ex/team2/\")) }}"
     );
+    s.update_as(&sess(Some(CAROL)), &upd)
+        .expect("precise WITH-clause resolution: carol may delete titles across team2 she owns");
+    assert_eq!(graph_len(&s, TEAM2_DOC), before - 1, "title deleted from a bound team2 graph");
+}
+
+#[test]
+fn var_graph_with_clause_precise_still_denies_unwritable_binding() {
+    // The precise WITH/USING resolution must NOT confuse the re-scope with a free pass: CAROL
+    // can READ mixed4 but WRITE none of it. A `WITH`-carrying variable-GRAPH delete whose `?g`
+    // binds to the (readable, unwritable) mixed4 graphs is still DENIED, store untouched —
+    // exactly as the no-WITH precise path denies (var_graph_precise_denies_readable_but_unwritable_binding).
+    let mut s = wac_store();
+    let before = graph_len(&s, MIXED4_DOC);
+    assert!(before > 0, "mixed4 doc non-empty");
+    let upd = format!(
+        "WITH <{MIXED4_DOC}> \
+         DELETE {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} }} \
+         WHERE  {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} FILTER(STRSTARTS(STR(?g), \"https://pod.ex/mixed4/\")) }}"
+    );
     let r = s.update_as(&sess(Some(CAROL)), &upd);
-    assert!(r.is_err(), "USING/WITH variable-graph op falls back to conservative deny: {r:?}");
-    assert_eq!(graph_len(&s, TEAM2_DOC), before, "conservative fallback applied nothing");
+    assert!(r.is_err(), "WITH does not waive write-auth: carol may read but not write mixed4 -> denied: {r:?}");
+    assert_eq!(graph_len(&s, MIXED4_DOC), before, "denied WITH variable-graph delete changed nothing");
 }
 
 // --- [OPUS-4.8] sq-3jtd.2: fail-closed-BEFORE-apply — a DENIED update mutates NOTHING ---
