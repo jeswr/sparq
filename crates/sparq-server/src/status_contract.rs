@@ -44,6 +44,7 @@
 //! | `204 No Content` | SPARQL Update / GSP write committed (durable once acked, if `--persist`) | -- | success |
 //! | `400 Bad Request` | malformed query / malformed UPDATE / malformed RDF body / malformed TPF pattern / `GET /sparql` with no `query` / unparsable `?generation` / not-yet-published generation | **permanent** | fix the request; do **not** retry as-is |
 //! | `401 Unauthorized` | a write (or, with `--auth-token-read`, a read) without a valid Bearer token; carries `WWW-Authenticate: Bearer` + `Cache-Control: no-store`; **byte-identical for a missing vs a wrong token** | **permanent** | obtain/correct the token; do **not** retry as-is |
+//! | `403 Forbidden` | (`service` feature) a non-`SILENT` `SERVICE` to a host the egress **allowlist** / default-deny SSRF policy refused (`--service-allow` / `SPARQ_SERVICE_ALLOW`, `sq-4w18`/`sq-iu0c`) -- a **policy** refusal, NOT a server fault | **permanent** | the endpoint is off the server's egress allowlist; do **not** retry -- ask the operator to allowlist it (or use `SERVICE SILENT` to tolerate the refusal) |
 //! | `404 Not Found` | unknown route / GSP `GET` of a named graph that does not exist | **permanent** | -- |
 //! | `405 Method Not Allowed` | method not allowed on the route; carries `Allow` | **permanent** | use a listed method |
 //! | `410 Gone` | (`time-travel` feature) `?generation=N` aged out of the retention window | **permanent** | the snapshot is gone; do not retry that pin |
@@ -63,7 +64,11 @@
 //!     retry once durability recovers is safe and will not double-apply), and a subscription
 //!     **capacity** refusal.
 //! - **Permanent (retrying the identical request cannot help):** everything else --
-//!   `400` / `401` / `404` / `405` / `410` / `413` / `415`.
+//!   `400` / `401` / `403` / `404` / `405` / `410` / `413` / `415`.
+//!   - **`403` is a policy refusal, not a fault.** A blocked `SERVICE` (egress allowlist) is a
+//!     deliberate authorization decision; the same query against the same server config is
+//!     refused every time. Retrying does not help -- the host must be allowlisted (or the
+//!     query must use `SERVICE SILENT`, which swallows the refusal to the empty relation).
 //!   - **`413` is the load-bearing one a `5xx`-only classifier gets wrong.** A result-cap
 //!     `413` is an **honest refusal**, not a truncation and not a transient load signal: the
 //!     same query against the same data crosses the same cap every time. The correct action is

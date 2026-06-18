@@ -894,8 +894,13 @@ is ignored.
   host must be on the allowlist. The allowlist applies uniformly to queries, ASK,
   CONSTRUCT/DESCRIBE, subscriptions and federated `INSERT … WHERE` updates, and is enforced
   before any socket is opened (DNS-rebinding-safe, on the *resolved* IP). The startup log
-  prints the effective allowlist. Beads `sq-4w18` (this wiring), `sq-2v6f` (the engine SSRF
-  filter). Embedders that drive the engine directly use
+  prints the effective allowlist. A non-`SILENT` `SERVICE` that is refused is an honest
+  **`403 Forbidden`** (`sq-iu0c`) — a *policy* refusal, distinct from the `500` an
+  unclassified execution error gives, so clients and alerting can tell a blocked egress
+  target apart from a real server fault (the refused host is sanitized out of the body and
+  goes only to the server log). `SERVICE SILENT` still swallows the refusal to the empty
+  relation (no `403`). Beads `sq-4w18` (this wiring), `sq-2v6f` (the engine SSRF
+  filter), `sq-iu0c` (the `403` classification). Embedders that drive the engine directly use
   `sparq_engine::with_service_egress_policy(strict, [host], || …)` /
   `with_service_egress_allow([host], || …)`.
 - **Feature flags.** `server` (default-on) pulls axum/tokio/tower — the binary needs it
