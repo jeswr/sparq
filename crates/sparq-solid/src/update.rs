@@ -270,13 +270,22 @@ fn analyze(upd: &Update) -> WriteReqs {
 /// - `None` (the parser's encoding of `WITH`, which re-scopes only the default graph):
 ///   `build_using` keeps ALL the store's named graphs, but a query's empty `FROM NAMED`
 ///   keeps NONE. We therefore materialize `named` as an explicit `FROM NAMED` of every
-///   store named graph (excluding the reserved auth view, which the apply never exposes to
-///   the WHERE either) so the query keeps the same set.
+///   store named graph — **including the reserved [`AUTH_GRAPH`](crate::AUTH_GRAPH) view**.
+///   This is load-bearing for soundness ([OPUS-4.8] sq-cnor): `build_using(named: None)`
+///   keeps the auth view in the active dataset, so `GRAPH ?g` CAN bind to it and the engine
+///   CAN record a Delta to it. If we excluded the auth view here the precise resolved set
+///   would *under-count* the engine write set — a binding to the auth view would escape the
+///   per-graph check and let a `WITH … DELETE/INSERT { GRAPH ?g … }` transiently mutate the
+///   authorization view. Including it means a binding to the auth view appears in the precise
+///   set, and since no session is ever granted write/append on the auth view itself,
+///   [`allowed`] denies — fail-closed. (Contrast [`store_named_graphs`], used by the
+///   conservative *wildcard* path, which deliberately excludes the auth view.)
 fn rescope_dataset(graph: &sparq_core::Graph, u: &QueryDataset) -> QueryDataset {
     let named = match &u.named {
         Some(list) => list.clone(),
-        // WITH: make the implicit "all store named graphs" explicit for the query side.
-        None => store_named_graphs(graph),
+        // WITH: make the implicit "all store named graphs" explicit for the query side —
+        // the SAME set `build_using(named: None)` keeps, auth view included.
+        None => engine_using_named_graphs(graph),
     };
     QueryDataset { default: u.default.clone(), named: Some(named) }
 }
@@ -321,6 +330,14 @@ fn rescope_dataset(graph: &sparq_core::Graph, u: &QueryDataset) -> QueryDataset 
 /// write-check path — `check` calls the full-store `query`, not `query_view`). The
 /// enumerated bindings therefore equal the engine's, so the resolution stays precise even
 /// under `USING`/`WITH`.
+///
+/// The `WITH` named set explicitly INCLUDES the reserved [`AUTH_GRAPH`](crate::AUTH_GRAPH)
+/// view, because `build_using(named: None)` does: `GRAPH ?g` can therefore bind to the auth
+/// view and the engine can record a write to it. That binding shows up in the precise set
+/// here, and since no session is granted write/append on the auth view, [`allowed`] denies —
+/// fail-closed. (Were the auth view dropped from the materialized set the precise resolution
+/// would under-count the engine write set and a `WITH … { GRAPH ?g … }` could transiently
+/// mutate the authorization view; that hole is closed by [`engine_using_named_graphs`].)
 ///
 /// Fail-closed cases that still fall back to the wildcard (rather than risk a hole):
 ///
@@ -394,13 +411,39 @@ fn allowed(auth: &AuthIndex, s: &Session, g: &NamedNode, need: Need) -> bool {
     }
 }
 
-/// Every named graph currently in the store except the reserved auth view.
+/// Every named graph currently in the store except the reserved auth view. Used by the
+/// conservative *wildcard* check (CLEAR/DROP ALL|NAMED, or a var-graph op that bailed): the
+/// actor must hold write on every *user* graph, and the auth view is never user-writable, so
+/// excluding it here is correct — the auth view is protected by re-materialization, not by a
+/// write grant.
 fn store_named_graphs(graph: &sparq_core::Graph) -> Vec<NamedNode> {
     graph
         .named
         .iter()
         .filter_map(|(n, _)| match n {
             Term::NamedNode(nn) if nn.as_str() != crate::AUTH_GRAPH => Some(nn.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every named-node graph the engine's `Dataset::build_using(named: None)` keeps in the
+/// active dataset for a `WITH` re-scope — i.e. EVERY store named graph, **including the
+/// reserved [`AUTH_GRAPH`](crate::AUTH_GRAPH) view** (and any future reserved view). This is
+/// the set [`rescope_dataset`] must hand the binding SELECT so the precise resolved
+/// var-graph set EQUALS the engine write set under `WITH`; see that function for why the auth
+/// view must be present (fail-closed deny, not a silent under-count). [OPUS-4.8] sq-cnor.
+///
+/// (Blank-node graph names cannot be expressed in a `FROM NAMED` clause and contribute no
+/// binding the actor could ever be authorized for, so they are excluded here exactly as the
+/// query-side dataset builder excludes them; a var-graph slot that binds to a blank-node
+/// graph is independently caught fail-closed by [`resolve_var_graphs`].)
+fn engine_using_named_graphs(graph: &sparq_core::Graph) -> Vec<NamedNode> {
+    graph
+        .named
+        .iter()
+        .filter_map(|(n, _)| match n {
+            Term::NamedNode(nn) => Some(nn.clone()),
             _ => None,
         })
         .collect()
@@ -536,15 +579,28 @@ mod differential_writeset_tests {
     /// `r1` ALSO holds the optional `aclPointer` triple that PSS's `setAclPointer` keys its
     /// OPTIONAL off. A third graph `r3` holds an unrelated triple (no title) so a title-keyed
     /// WHERE never binds it — present to prove the resolver does not over-count the store.
+    ///
+    /// CRITICAL ([OPUS-4.8] sq-cnor): the fixture ALSO seeds a `title` triple in the reserved
+    /// [`crate::AUTH_GRAPH`] view. `Dataset::build_using(named: None)` (the `WITH` re-scope)
+    /// keeps the auth view, so a title-keyed `GRAPH ?g` WHERE makes `?g` bind to it and the
+    /// engine records a write there. The guard tests therefore expect the engine write set to
+    /// INCLUDE the auth view, and the WITH guard catches the original under-count: the prior
+    /// `rescope_dataset` dropped the auth view from the materialized `FROM NAMED` set, so the
+    /// precise resolved set MISSED it while the engine wrote it — `precise != written`. With
+    /// the auth view restored to the materialized set the two are equal again (and the
+    /// production `check` path then DENIES, since no session is write-granted on the auth view).
     fn pss_dataset() -> Graph {
         let nq = "\
 <https://pod.ex/r1#it> <https://ex.dev/ns#title> \"r1\" <https://pod.ex/r1> .
 <https://pod.ex/r1#it> <https://ex.dev/ns#aclPointer> <https://pod.ex/r1.acl> <https://pod.ex/r1> .
 <https://pod.ex/r2#it> <https://ex.dev/ns#title> \"r2\" <https://pod.ex/r2> .
 <https://pod.ex/r3#it> <https://ex.dev/ns#other> \"r3\" <https://pod.ex/r3> .
+<https://sparq.dev/auth#it> <https://ex.dev/ns#title> \"auth\" <urn:sparq:auth> .
 ";
         Graph::load_dataset(nq, "nquads").expect("fixture loads")
     }
+
+    const AUTH: &str = crate::AUTH_GRAPH;
 
     /// The set of named graphs `sparq_engine::update_in_place` ACTUALLY writes for `sparql`,
     /// observed via the engine's own resolved effect log (`UpdateEffect::Delta { slot, … }`
@@ -631,17 +687,21 @@ mod differential_writeset_tests {
         assert!(!default, "no default-graph write in this shape");
 
         // The DELETE half only produces a quad for r1 (where OPTIONAL bound `?p`); the INSERT
-        // half produces a quad for r1 AND r2 (both have a title). The engine writes r1 and r2.
-        // resolve_var_graphs must enumerate EXACTLY {r1, r2} — never r3 (no title), never the
+        // half produces a quad for every graph with a title — r1, r2 AND the seeded auth view
+        // (a plain no-USING update runs over the full store, which build_using also keeps).
+        // resolve_var_graphs must enumerate EXACTLY that set — never r3 (no title), never the
         // whole store.
         assert_eq!(
             precise, written,
             "precise resolve_var_graphs set must EQUAL the engine's actual write set"
         );
-        let expect: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2"]
+        let expect: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2", AUTH]
             .map(String::from)
             .into();
-        assert_eq!(written, expect, "engine wrote exactly r1+r2");
+        assert_eq!(
+            written, expect,
+            "engine wrote exactly r1+r2+auth (every titled graph)"
+        );
     }
 
     /// CASE 2 — OPTIONAL that does NOT bind for some rows: the precise set must still equal the
@@ -667,18 +727,21 @@ mod differential_writeset_tests {
         let (written, default) = engine_write_set(&mut applied, upd);
         assert!(!default);
 
-        // `?g` binds to r1 and r2 (both have a title). The engine writes both — r1 via
-        // delete+insert, r2 via insert only (its DELETE quad is dropped, `?p` unbound). r3 is
-        // never bound. The precise set must be exactly that, with NO phantom r3 and NO
-        // escalation to all-store.
+        // `?g` binds to every titled graph — r1, r2 and the auth view. The engine writes all
+        // of them — r1 via delete+insert, r2/auth via insert only (their DELETE quad is
+        // dropped, `?p` unbound). r3 is never bound. The precise set must be exactly that, with
+        // NO phantom r3 and NO escalation to all-store.
         assert_eq!(
             precise, written,
             "OPTIONAL-unbound: precise set must EQUAL the engine write set"
         );
-        let expect: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2"]
+        let expect: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2", AUTH]
             .map(String::from)
             .into();
-        assert_eq!(written, expect, "engine wrote exactly r1+r2 (r3 unbound)");
+        assert_eq!(
+            written, expect,
+            "engine wrote exactly r1+r2+auth (r3 unbound)"
+        );
     }
 
     /// CASE 3 — an OPTIONAL whose WHERE key is ABSENT everywhere, so `?g` binds to NOTHING:
@@ -713,6 +776,15 @@ mod differential_writeset_tests {
     /// (`rescope_dataset` re-expresses `WITH`'s implicit "all store named graphs" as an explicit
     /// `FROM NAMED` list), so it enumerates the SAME `GRAPH ?g` bindings the engine writes. The
     /// precise set must now EQUAL the engine write set — no longer the conservative wildcard.
+    ///
+    /// SOUNDNESS GUARD ([OPUS-4.8] sq-cnor): the fixture seeds a `title` triple in the auth
+    /// view, which `build_using(named: None)` keeps, so the engine's write set INCLUDES the
+    /// auth view. The earlier `rescope_dataset` excluded the auth view from the materialized
+    /// `FROM NAMED` list, so the precise resolved set MISSED it — `precise != written` — an
+    /// under-count that let a `WITH … { GRAPH ?g … }` slip a write to the authorization view
+    /// past the per-graph check. This assertion FAILS on that prior code and PASSES once the
+    /// auth view is restored to the materialized set; the production `check` then DENIES the
+    /// op fail-closed (no session is write-granted on the auth view).
     #[test]
     fn with_clause_resolves_precisely_to_engine_write_set() {
         // WITH re-scopes the operation's DEFAULT graph to r1; the GRAPH ?g slot still ranges
@@ -741,16 +813,25 @@ mod differential_writeset_tests {
              template quad is explicitly GRAPH ?g-scoped"
         );
 
-        // The precise set now EQUALS the engine's actual write set (exactly r1+r2) — the sq-cnor
-        // gap is closed; no escalation to the all-store wildcard.
+        // The precise set now EQUALS the engine's actual write set — exactly r1+r2 AND the auth
+        // view (every titled graph build_using keeps). The sq-cnor under-count is closed; no
+        // escalation to the all-store wildcard, and crucially the auth view is no longer missed.
         assert_eq!(
             precise, written,
             "WITH: precise resolve_var_graphs set must EQUAL the engine's actual write set"
         );
-        let expect: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2"]
+        assert!(
+            written.contains(AUTH),
+            "the engine's WITH write set includes the auth view (build_using keeps it) — the \
+             precise set must too, or a write to the auth view escapes the per-graph check"
+        );
+        let expect: BTreeSet<String> = ["https://pod.ex/r1", "https://pod.ex/r2", AUTH]
             .map(String::from)
             .into();
-        assert_eq!(written, expect, "engine wrote exactly r1+r2 under WITH");
+        assert_eq!(
+            written, expect,
+            "engine wrote exactly r1+r2+auth under WITH"
+        );
     }
 
     /// CASE 5 — `USING NAMED` restricts the GRAPH ?g range to the listed graphs only ([OPUS-4.8]

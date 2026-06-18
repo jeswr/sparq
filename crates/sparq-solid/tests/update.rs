@@ -381,6 +381,35 @@ fn var_graph_with_clause_precise_still_denies_unwritable_binding() {
     assert_eq!(graph_len(&s, MIXED4_DOC), before, "denied WITH variable-graph delete changed nothing");
 }
 
+#[test]
+fn var_graph_with_clause_denies_binding_to_auth_view() {
+    // [OPUS-4.8] sq-cnor — the AUTH_GRAPH under-count regression guard at the PRODUCTION
+    // `check` boundary. `Dataset::build_using(named: None)` (the `WITH` re-scope) keeps EVERY
+    // store named graph in the active dataset, INCLUDING the reserved `urn:sparq:auth` view.
+    // So a `WITH … DELETE { GRAPH ?g { … } } WHERE { GRAPH ?g { ?s <auth#read> ?o } }` makes
+    // `?g` bind to the auth view and the engine WOULD write it. The prior `rescope_dataset`
+    // dropped the auth view from the materialized `FROM NAMED` set, so the precise resolver
+    // MISSED that binding — the op could be (wrongly) PERMITTED and transiently mutate the
+    // authorization view. With the auth view restored to the materialized set the binding is
+    // resolved, and since no session is ever write-granted on the auth view the op is DENIED
+    // fail-closed. The auth view must be untouched.
+    let mut s = wac_store();
+    let auth = "urn:sparq:auth";
+    let before = graph_len(&s, auth);
+    assert!(before > 0, "materialized auth view holds the WAC grant triples");
+    // `auth#read` triples exist ONLY in the auth view, so `?g` binds exactly {urn:sparq:auth}.
+    let upd = "WITH <https://pod.ex/team2/c3/g0/d0.ttl> \
+               DELETE { GRAPH ?g { ?s ?p ?o } } \
+               WHERE  { GRAPH ?g { ?s <https://sparq.dev/ns/auth#read> ?o . ?s ?p ?o } }";
+    let r = s.update_as(&sess(Some(CAROL)), upd);
+    assert!(
+        r.is_err(),
+        "a WITH var-graph op whose ?g binds to the auth view must be DENIED (no write grant on \
+         the auth view); was: {r:?}"
+    );
+    assert_eq!(graph_len(&s, auth), before, "denied op left the auth view untouched");
+}
+
 // --- [OPUS-4.8] sq-3jtd.2: fail-closed-BEFORE-apply — a DENIED update mutates NOTHING ---
 //
 // The tests above assert per-graph triple COUNTS are unchanged on a deny. This block
