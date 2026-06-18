@@ -1298,3 +1298,141 @@ mod resolve_iri_tests {
         }
     }
 }
+
+// ---- behavioural tests for the public N3 parser surface (sq-jd5s) [OPUS-4.8] ----
+// Drive the `parse` / `parse_with_base` / `parse_turtle_with_base` API and assert on the
+// produced facts/rules and on the error path, exercising the lowest-covered parser branches.
+#[cfg(test)]
+mod parse_surface_tests {
+    use super::*;
+
+    fn iri(s: &str) -> Term {
+        Term::Iri(s.into())
+    }
+
+    #[test]
+    fn prefixed_names_and_a_keyword_and_base_resolution() {
+        // @base resolves the relative IRI <Alice>; `a` is rdf:type; the prefixed name expands.
+        let p = parse_with_base(
+            "@prefix ex: <http://ex/> . <Alice> a ex:Person .",
+            "http://base/",
+        )
+        .expect("valid turtle-ish N3");
+        assert_eq!(p.facts.len(), 1);
+        assert_eq!(
+            p.facts[0],
+            [iri("http://base/Alice"), iri(RDF_TYPE), iri("http://ex/Person")],
+            "relative subject resolved against @base; `a` -> rdf:type; prefix expanded"
+        );
+        assert_eq!(p.base, "http://base/");
+    }
+
+    #[test]
+    fn typed_lang_bool_integer_decimal_double_literals() {
+        let p = parse(
+            r#"<http://ex/s> <http://ex/p> "txt"@en, "v"^^<http://ex/dt>, true, 42, 3.5, 6.0e2 ."#,
+        )
+        .expect("literal object list");
+        let objs: Vec<&Term> = p.facts.iter().map(|t| &t[2]).collect();
+        let rdf_lang_string = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+        assert!(
+            objs.contains(&&Term::Lit("txt".into(), rdf_lang_string.into(), Some("en".into()))),
+            "lang-tagged literal carries rdf:langString + the lowercased tag"
+        );
+        assert!(objs.contains(&&Term::Lit("v".into(), "http://ex/dt".into(), None)), "typed");
+        assert!(objs.contains(&&Term::Lit("true".into(), XSD_BOOLEAN.into(), None)), "boolean");
+        assert!(objs.contains(&&Term::Lit("42".into(), XSD_INTEGER.into(), None)), "integer");
+        assert!(objs.contains(&&Term::Lit("3.5".into(), XSD_DECIMAL.into(), None)), "decimal");
+        assert!(objs.contains(&&Term::Lit("6.0e2".into(), XSD_DOUBLE.into(), None)), "double");
+    }
+
+    #[test]
+    fn forward_and_backward_rules_and_sameas_sugar() {
+        // `=>` is a forward rule; `<=` is a backward rule; `=` is owl:sameAs sugar.
+        let p = parse(
+            "{ ?x <http://ex/p> ?y } => { ?x <http://ex/q> ?y } .\n\
+             { <http://ex/a> <http://ex/r> <http://ex/b> } <= true .\n\
+             <http://ex/a> = <http://ex/b> .",
+        )
+        .expect("rules + sameAs");
+        assert_eq!(p.rules.len(), 1, "one forward rule");
+        assert_eq!(p.rules[0].premise.len(), 1);
+        assert_eq!(p.rules[0].conclusion.len(), 1);
+        assert_eq!(p.backward_rules.len(), 1, "one backward rule");
+        assert!(p.backward_rules[0].premise.is_empty(), "`<= true` is an empty premise");
+        assert!(
+            p.facts.iter().any(|t| t[1] == iri(OWL_SAME_AS)),
+            "`=` desugars to owl:sameAs"
+        );
+    }
+
+    #[test]
+    fn is_of_inverse_predicate_swaps_subject_object() {
+        // `<http://ex/b> is <http://ex/p> of <http://ex/a>` asserts (a p b) — inverse predicate.
+        let p = parse("<http://ex/b> is <http://ex/p> of <http://ex/a> .").expect("is..of");
+        assert_eq!(
+            p.facts[0],
+            [iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b")],
+            "`X is P of Y` asserts (Y P X)"
+        );
+    }
+
+    #[test]
+    fn collection_expands_to_first_rest_nil() {
+        // A `( ... )` list object is materialised as an N3 List term value.
+        let p = parse("<http://ex/s> <http://ex/p> ( <http://ex/a> <http://ex/b> ) .")
+            .expect("collection");
+        match &p.facts[0][2] {
+            Term::List(items) => {
+                assert_eq!(items, &vec![iri("http://ex/a"), iri("http://ex/b")], "list members");
+            }
+            other => panic!("expected a List object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_and_object_lists_with_semicolon_and_comma() {
+        // `;` shares the subject; `,` shares subject+predicate.
+        let p = parse(
+            "<http://ex/s> <http://ex/p> <http://ex/o1>, <http://ex/o2> ; <http://ex/q> <http://ex/o3> .",
+        )
+        .expect("predicate/object lists");
+        assert_eq!(p.facts.len(), 3, "two objects on p + one on q");
+        assert!(p.facts.iter().all(|t| t[0] == iri("http://ex/s")), "subject shared via `;`");
+    }
+
+    #[test]
+    fn strict_turtle_rejects_n3_only_constructs() {
+        // parse_turtle_with_base is STRICT W3C Turtle: N3-only forms are syntax errors.
+        for src in [
+            "{ ?x <http://ex/p> ?y } => { ?x <http://ex/q> ?y } .", // formula + =>
+            "?x <http://ex/p> <http://ex/o> .",                     // ?var
+            "<http://ex/a> = <http://ex/b> .",                      // = sugar
+            "<http://ex/b> is <http://ex/p> of <http://ex/a> .",    // is..of
+        ] {
+            assert!(
+                parse_turtle_with_base(src, "").is_err(),
+                "strict Turtle must reject N3-only construct: {src}"
+            );
+        }
+        // ...but it ACCEPTS plain Turtle.
+        let ok = parse_turtle_with_base("<http://ex/s> <http://ex/p> <http://ex/o> .", "")
+            .expect("plain turtle accepted in strict mode");
+        assert_eq!(ok.facts.len(), 1);
+        assert!(ok.rules.is_empty() && ok.backward_rules.is_empty());
+    }
+
+    #[test]
+    fn malformed_input_returns_err_not_panic() {
+        // Each is a genuinely-broken document the parser must REPORT (Err) rather than panic on —
+        // exercising distinct error-return branches.
+        for bad in [
+            "<http://ex/s> <http://ex/p>",                  // missing object + terminator
+            "<http://ex/s> <http://ex/p> \"unterminated .", // unterminated string literal
+            "{ ?x <http://ex/p> ?y => .",                   // unbalanced formula brace
+            "<http://ex/s> <http://ex/p> \"v\"@1bad .",      // invalid language tag (digit-led)
+        ] {
+            assert!(parse(bad).is_err(), "expected a parse error for: {bad:?}");
+        }
+    }
+}

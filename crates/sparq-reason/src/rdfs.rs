@@ -644,4 +644,200 @@ mod tests {
         assert_eq!(added2, 0, "second materialization adds nothing");
         assert_eq!(triples.len(), n, "idempotent");
     }
+
+    // ---- behavioural tests for the lowest-covered rdfs.rs paths (sq-jd5s) [OPUS-4.8] ----
+
+    /// Sort a closure map's value vecs so reachable-set comparisons are order-independent.
+    fn sorted(mut m: FxHashMap<Id, Vec<Id>>) -> FxHashMap<Id, Vec<Id>> {
+        for v in m.values_mut() {
+            v.sort_unstable();
+        }
+        m
+    }
+
+    #[test]
+    fn transitive_closure_chain_diamond_and_cycle() {
+        // A 4-node CHAIN 1->2->3->4: 1 reaches {2,3,4}, 2 reaches {3,4}, 3 reaches {4}.
+        let chain: FxHashMap<Id, Vec<Id>> =
+            [(1, vec![2]), (2, vec![3]), (3, vec![4])].into_iter().collect();
+        let c = sorted(transitive_closure(&chain));
+        assert_eq!(c[&1], vec![2, 3, 4], "chain head reaches all descendants");
+        assert_eq!(c[&2], vec![3, 4]);
+        assert_eq!(c[&3], vec![4]);
+        // A DIAMOND 1->2, 1->3, 2->4, 3->4: 1 reaches {2,3,4}, and 4 is reached once (deduped).
+        let diamond: FxHashMap<Id, Vec<Id>> =
+            [(1, vec![2, 3]), (2, vec![4]), (3, vec![4])].into_iter().collect();
+        let d = sorted(transitive_closure(&diamond));
+        assert_eq!(d[&1], vec![2, 3, 4], "diamond apex reaches all, 4 not duplicated");
+        // A CYCLE 1->2->1: BFS over the `seen` set terminates and each node reaches the whole SCC.
+        let cycle: FxHashMap<Id, Vec<Id>> = [(1, vec![2]), (2, vec![1])].into_iter().collect();
+        let cy = sorted(transitive_closure(&cycle));
+        assert_eq!(cy[&1], vec![1, 2], "cycle: node reaches itself + peer (no infinite loop)");
+        assert_eq!(cy[&2], vec![1, 2]);
+    }
+
+    #[test]
+    fn close_dr_inherits_through_superproperty_and_subclass() {
+        // p sp q ; q domain D ; D sc C.  close_dr(domain) over p must yield {D, C}: p inherits
+        // q's domain (rdfs7-into-rdfs2), and the typing class D is closed UP the subclass graph.
+        let sp_closure: FxHashMap<Id, Vec<Id>> = [(1 /*p*/, vec![2 /*q*/])].into_iter().collect();
+        let sc_closure: FxHashMap<Id, Vec<Id>> = [(10 /*D*/, vec![11 /*C*/])].into_iter().collect();
+        let domain: FxHashMap<Id, Vec<Id>> = [(2 /*q*/, vec![10 /*D*/])].into_iter().collect();
+        let full = sorted(close_dr(&domain, &sp_closure, &sc_closure));
+        assert_eq!(full[&1], vec![10, 11], "p inherits q's domain D, closed up to C");
+        assert_eq!(full[&2], vec![10, 11], "q itself keeps D + its superclass C");
+    }
+
+    #[test]
+    fn rdfs_index_derive_fires_every_rule_in_both_delta_directions() {
+        // Drive RdfsIndex (the semi-naive incremental path used by the OWL fixpoint) directly,
+        // asserting each rule fires whether THIS triple is the schema edge or the data edge.
+        let mut dict = Dict::new();
+        let v = Vocab::intern(&mut dict);
+        let (a, b, cc, p, q, s, o) = (
+            ex(&mut dict, "A"), ex(&mut dict, "B"), ex(&mut dict, "C"),
+            ex(&mut dict, "p"), ex(&mut dict, "q"), ex(&mut dict, "s"), ex(&mut dict, "o"),
+        );
+        let mut idx = RdfsIndex::default();
+        // Seed the index with schema + data so both delta directions have a join partner.
+        for t in [
+            [a, v.sub_class, b],  // A sc B
+            [b, v.sub_class, cc], // B sc C
+            [p, v.sub_prop, q],   // p sp q
+            [s, p, o],            // data: s p o
+            [s, v.ty, a],         // data: s type A
+        ] {
+            idx.insert(t, &v);
+        }
+        let derive = |idx: &RdfsIndex, t: [Id; 3]| {
+            let mut out = Vec::new();
+            idx.derive(t, &v, &mut out);
+            out
+        };
+        // rdfs11 forward (A sc B as premise, B sc C in index) ⊢ A sc C.
+        assert!(derive(&idx, [a, v.sub_class, b]).contains(&[a, v.sub_class, cc]), "rdfs11 fwd");
+        // rdfs11 backward (B sc C as premise, A sc B in index) ⊢ A sc C.
+        assert!(derive(&idx, [b, v.sub_class, cc]).contains(&[a, v.sub_class, cc]), "rdfs11 bwd");
+        // rdfs9 via subclass edge (A sc B, s type A in index) ⊢ s type B.
+        assert!(derive(&idx, [a, v.sub_class, b]).contains(&[s, v.ty, b]), "rdfs9 via sc-edge delta");
+        // rdfs9 via type edge (s type A, A sc B in index) ⊢ s type B.
+        assert!(derive(&idx, [s, v.ty, a]).contains(&[s, v.ty, b]), "rdfs9 via type-edge delta");
+        // rdfs7 via subprop edge (p sp q, s p o in index) ⊢ s q o.
+        assert!(derive(&idx, [p, v.sub_prop, q]).contains(&[s, q, o]), "rdfs7 via sp-edge delta");
+        // rdfs7 via data edge (s p o, p sp q in index) ⊢ s q o.
+        assert!(derive(&idx, [s, p, o]).contains(&[s, q, o]), "rdfs7 via data-edge delta");
+        // rdfs2/rdfs3: a data edge whose predicate has domain/range, plus the schema-edge deltas.
+        let dprop = ex(&mut dict, "dprop");
+        let mut idx2 = RdfsIndex::default();
+        for t in [[dprop, v.domain, cc], [dprop, v.range, cc], [s, dprop, o]] {
+            idx2.insert(t, &v);
+        }
+        // data-edge delta: (s dprop o) with dprop having domain+range ⊢ s type C and o type C.
+        assert!(derive(&idx2, [s, dprop, o]).contains(&[s, v.ty, cc]), "rdfs2 on data-edge delta");
+        assert!(derive(&idx2, [s, dprop, o]).contains(&[o, v.ty, cc]), "rdfs3 on data-edge delta");
+        // domain-edge delta: (dprop domain C) joins the existing (s,o) assertion ⊢ s type C.
+        assert!(derive(&idx2, [dprop, v.domain, cc]).contains(&[s, v.ty, cc]), "rdfs2 on domain-edge delta");
+        // range-edge delta: (dprop range C) ⊢ o type C.
+        assert!(derive(&idx2, [dprop, v.range, cc]).contains(&[o, v.ty, cc]), "rdfs3 on range-edge delta");
+    }
+
+    #[test]
+    fn equivalent_class_and_property_fold_bidirectionally() {
+        // MonoOwl.equiv_class folds into subClassOf BOTH ways (scm-eqc): A ≡ B means x type A ⊢
+        // x type B. Likewise equiv_prop (scm-eqp): p ≡ q rewrites m p n ⊢ m q n. This mono.equiv_*
+        // path is untouched by the plain materialize_rdfs tests.
+        let mut dict = Dict::new();
+        let v = Vocab::intern(&mut dict);
+        let (a, b, p, q, x, m, n) = (
+            ex(&mut dict, "A"), ex(&mut dict, "B"), ex(&mut dict, "p"), ex(&mut dict, "q"),
+            ex(&mut dict, "x"), ex(&mut dict, "m"), ex(&mut dict, "n"),
+        );
+        let mono = MonoOwl {
+            equiv_class: vec![(a, b)],
+            equiv_prop: vec![(p, q)],
+            ..MonoOwl::default()
+        };
+        let mut triples = vec![[x, v.ty, a], [m, p, n]];
+        rdfs_closure(&mut dict, &mut triples, false, &mono);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[x, v.ty, b]), "equivalentClass: x type A ⊢ x type B");
+        assert!(set.contains(&[a, v.sub_class, b]), "equivalentClass emits A sc B");
+        assert!(set.contains(&[b, v.sub_class, a]), "equivalentClass emits B sc A (both ways)");
+        assert!(set.contains(&[m, q, n]), "equivalentProperty: m p n ⊢ m q n");
+        assert!(set.contains(&[p, v.sub_prop, q]), "equivalentProperty emits p sp q");
+        assert!(set.contains(&[q, v.sub_prop, p]), "equivalentProperty emits q sp p (both ways)");
+    }
+
+    #[test]
+    fn symmetric_property_emits_swapped_edge() {
+        // owl:SymmetricProperty (prp-symp): m knows n ⊢ n knows m. Drives the PropExpand
+        // orientation-flip path (build_prop_expand symmetric branch + emit swapped emission).
+        let mut dict = Dict::new();
+        let (knows, m, n) = (ex(&mut dict, "knows"), ex(&mut dict, "m"), ex(&mut dict, "n"));
+        let mono = MonoOwl { symmetric: [knows].into_iter().collect(), ..MonoOwl::default() };
+        let mut triples = vec![[m, knows, n]];
+        rdfs_closure(&mut dict, &mut triples, false, &mono);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[n, knows, m]), "prp-symp: symmetric edge is swapped");
+    }
+
+    #[test]
+    fn inverse_of_emits_swapped_predicate() {
+        // owl:inverseOf (prp-inv): hasParent inverse hasChild ; a hasParent b ⊢ b hasChild a.
+        let mut dict = Dict::new();
+        let (hp, hc, a, b) = (
+            ex(&mut dict, "hasParent"), ex(&mut dict, "hasChild"),
+            ex(&mut dict, "a"), ex(&mut dict, "b"),
+        );
+        let mono = MonoOwl {
+            inverse: [(hp, vec![hc]), (hc, vec![hp])].into_iter().collect(),
+            ..MonoOwl::default()
+        };
+        let mut triples = vec![[a, hp, b]];
+        rdfs_closure(&mut dict, &mut triples, false, &mono);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[b, hc, a]), "prp-inv: inverse predicate with swapped s/o");
+    }
+
+    #[test]
+    fn emit_dr_closure_emits_scm_dom_rng_triples() {
+        // With emit_dr_closure = true (the OWL-RL scm-dom1/2 + scm-rng1/2 path), the saturated
+        // domain/range sets are themselves emitted as domain/range triples — and inherited through
+        // subPropertyOf. p sp q ; q domain D ⊢ (p domain D) emitted; off by default (RDFS).
+        let mut dict = Dict::new();
+        let v = Vocab::intern(&mut dict);
+        let (p, q, d) = (ex(&mut dict, "p"), ex(&mut dict, "q"), ex(&mut dict, "D"));
+        let base = vec![[p, v.sub_prop, q], [q, v.domain, d]];
+        // Default RDFS: scm-dom NOT emitted.
+        let mut off = base.clone();
+        rdfs_closure(&mut dict, &mut off, false, &MonoOwl::default());
+        let off_set: FxHashSet<[Id; 3]> = off.iter().copied().collect();
+        assert!(!off_set.contains(&[p, v.domain, d]), "scm-dom is off in plain RDFS");
+        // emit_dr_closure: p inherits q's domain as an explicit (p domain D) triple.
+        let mut on = base;
+        rdfs_closure(&mut dict, &mut on, true, &MonoOwl::default());
+        let on_set: FxHashSet<[Id; 3]> = on.iter().copied().collect();
+        assert!(on_set.contains(&[p, v.domain, d]), "scm-dom: subproperty inherits domain triple");
+        assert!(on_set.contains(&[q, v.domain, d]), "scm-dom: q's own domain re-emitted");
+    }
+
+    #[test]
+    fn duplicate_input_triples_do_not_underflow_added_count() {
+        // A loader may pass the SAME triple twice. The rebuild dedups, so `added` is the DERIVED
+        // set size (not len-after - len-before, which would underflow). Here there is one derivable
+        // fact (rdfs9), so added == 1 despite the duplicate input.
+        let mut dict = Dict::new();
+        let (dog, animal, rex) =
+            (ex(&mut dict, "Dog"), ex(&mut dict, "Animal"), ex(&mut dict, "rex"));
+        let (sc, ty) =
+            (iri(&mut dict, rdfs::SUB_CLASS_OF.as_str()), iri(&mut dict, rdf::TYPE.as_str()));
+        let mut triples = vec![[dog, sc, animal], [rex, ty, dog], [rex, ty, dog]];
+        let added = materialize_rdfs(&mut dict, &mut triples);
+        assert_eq!(added, 1, "only (rex type Animal) is new; duplicate input must not underflow");
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(has(&dict, &set, "http://ex/rex", rdf::TYPE.as_str(), "http://ex/Animal"));
+        // The output is deduplicated: the duplicate input appears exactly once.
+        let dupes = triples.iter().filter(|&&t| t == [rex, ty, dog]).count();
+        assert_eq!(dupes, 1, "duplicate input collapsed in the rebuilt output");
+    }
 }
