@@ -39,8 +39,11 @@ let k    = num_communities(&comm);
 ## ✨ Features
 
 - **`NodeGraph`** — a directed, predicate-erased CSR view of the graph keyed by dense node
-  indices, built in one pass over `Graph::iter_ids`; forward + reverse adjacency, parallel
-  edges collapsed, self-loops kept. Maps each node back to its dictionary `Id` / `Term`.
+  indices, built from a single pass over `Graph::iter_ids`; forward + reverse adjacency,
+  parallel edges collapsed, self-loops kept. Maps each node back to its dictionary `Id` /
+  `Term`. Node indices are assigned in **canonical ascending-term order**, so the view (and
+  every algorithm over it) is reproducible across hosts regardless of the dictionary-id order
+  the parallel loader picks — see `NodeGraph::build_with`.
 - **PageRank** — the random-surfer power method with correct dangling-node mass
   redistribution; deterministic (no RNG), converges in L1 to a configurable tolerance.
 - **Degree centrality** — In / Out / Total, raw counts or normalised to `[0, 1]`, plus a
