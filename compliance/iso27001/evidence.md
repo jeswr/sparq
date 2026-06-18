@@ -129,9 +129,11 @@ and flagged a false gap; the file is at the root and is correct — no gap.)
 
 ## Conformance ratchets (A.8.29 Security testing / A.8.32 Change management)
 
-The "never-lower" conformance floors (`conformance-report.md`,
-`inference-conformance-report.md`, SHACL floors, `bench/perf-baseline.json`, coverage
-floors) are described in `CONTRIBUTING.md` §"The conformance-ratchet 'never lower' rule".
+The "never-lower" conformance floors (reported by `sparq-conformance` — the SPARQL
+`conformance-report.md` is git-ignored and regenerated locally / published by CI, the
+inference `inference-conformance-report.md` is committed — plus the SHACL floors,
+`bench/perf-baseline.json`, and coverage floors) are described in `CONTRIBUTING.md`
+§"The conformance-ratchet 'never lower' rule".
 They are change-management acceptance criteria: a PR that regresses conformance cannot land.
 
 ## Security testing lanes (A.8.29)
