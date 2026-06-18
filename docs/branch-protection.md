@@ -15,8 +15,13 @@ recreated.
 
 ## Required status checks
 
-PRs must be **up to date with `main`** before merging. There is now exactly **ONE**
-required status check — the aggregator:
+There is exactly **ONE** required status check — the aggregator. The live ruleset's
+`required_status_checks` rule lists a single context (`gate`, from the `ci-summary`
+workflow) and sets `strict_required_status_checks_policy: false` — i.e. PRs are **not**
+forced to be re-based up-to-date with `main` before merging. This is consistent with the
+solo-maintainer reality (a single serialized merge train: branches are gated and merged
+one at a time per `AGENTS.md`, so a strict up-to-date requirement would only add churn
+without a second concurrent author to race against). The required check is:
 
 | Required check (job name) | Workflow | What it gates |
 |---|---|---|
@@ -82,34 +87,60 @@ From the binding/packaging workflows (when those surfaces are exercised):
 
 ## Required reviews
 
-- **At least 1 approving review**, and **require review from Code Owners**
-  (see [`CODEOWNERS`](../CODEOWNERS)). A change to a high-risk path
-  (`sparq-zk*`, `sparq-mpc`, `sparq-core`, `sparq-server`, `.github/`, `deny.toml`,
-  `SECURITY.md`) therefore needs the listed owner's approval.
-- **Dismiss stale approvals** when new commits are pushed.
+> **Solo-maintainer reality (read this first).** sparq is a **single-maintainer,
+> agent-driven** repository: every PR is authored by `@jeswr` or by an automated SPARQL
+> agent acting on his behalf. GitHub does **not** let an author approve their own PR, so a
+> *human-approval* requirement (`required_approving_review_count ≥ 1` and/or
+> `require_code_owner_review`) would **deadlock** the merge train — there is no second human
+> to approve. The **live ruleset therefore sets `required_approving_review_count: 0` and
+> `require_code_owner_review: false` deliberately**, and substitutes a *bot/automated*
+> review layer (Copilot code review on push + CodeQL code-scanning gate + the `ci-summary`
+> aggregator + conversation-resolution) for the missing second human. This is the same
+> reality OpenSSF Scorecard's `Code-Review` / `Branch-Protection` checks score down — see
+> [§Solo-maintainer & the Scorecard score](#solo-maintainer--the-scorecard-code-review--branch-protection-score)
+> below; the settings here are written to match **what is actually enforced**, not an
+> aspirational two-human flow the repo cannot run.
+
+- **Approving reviews — `0` required (deliberate, solo-maintainer).** The live ruleset's
+  `pull_request` rule sets `required_approving_review_count: 0` and
+  `require_code_owner_review: false`. [`CODEOWNERS`](../CODEOWNERS) still records ownership
+  of the high-risk paths (`sparq-zk*`, `sparq-mpc`, `sparq-core`, `sparq-server`,
+  `.github/`, `deny.toml`, `SECURITY.md`) so that *if/when* a second trusted reviewer is
+  added, code-owner review can be flipped on without re-deriving who owns what; today it
+  documents intent rather than gating.
+- **Stale-approval dismissal — `false` (no human approvals to dismiss).** With zero required
+  human approvals there is nothing to stale-dismiss; the live ruleset sets
+  `dismiss_stale_reviews_on_push: false` to match. (Copilot review *does* re-run on push —
+  `review_on_push: true`.)
 - **Require the automated code review** (GitHub Copilot code review + the CodeQL
-  code-scanning review). Enable "Request Copilot code review automatically" for `main`
-  PRs, and treat **CodeQL code-scanning alerts** as blocking — pair the ruleset with a
-  *code-scanning results* check requiring no new `error`/`high`-severity CodeQL alerts.
-  (The CodeQL run itself is also aggregated by `ci-summary` as the `CodeQL analysis
-  (rust)` check-run; the code-scanning *results* requirement is the complementary
-  alert-severity gate.)
+  code-scanning review). The live ruleset enables Copilot code review on push
+  (`copilot_code_review` rule, `review_on_push: true`) and treats **CodeQL code-scanning
+  alerts** as blocking via the `code_scanning` rule (`CodeQL`, `alerts_threshold:
+  errors_and_warnings`, `security_alerts_threshold: all`). The CodeQL run is also aggregated
+  by `ci-summary` as the `CodeQL analysis (rust)` check-run; the code-scanning *results*
+  rule is the complementary alert-severity gate.
 - **Require conversation resolution before merging** — all PR review threads (human and
-  bot, incl. Copilot/CodeQL) must be resolved. (Also listed under "Other settings".)
+  bot, incl. Copilot/CodeQL) must be resolved (live ruleset `pull_request`
+  `required_review_thread_resolution: true`). (Also listed under "Other settings".)
+- **Code-quality rule active.** The live ruleset also carries a `code_quality` rule
+  (`severity: all`), GitHub's built-in PR quality signal, alongside the checks above.
 
 ## History and push rules
 
-- **Require linear history** — merges to `main` must not introduce merge commits
-  (use squash or rebase merges). This matches the "gate and merge one branch at a time"
-  discipline in `AGENTS.md`.
-- **Block force pushes** to `main`.
-- **Block branch deletion** for `main`.
+- **Require linear history** — merges to `main` must not introduce merge commits. The live
+  ruleset enforces this by allowing **only the squash merge method**
+  (`pull_request.allowed_merge_methods: ["squash"]`) and a `non_fast_forward` rule, which
+  matches the "gate and merge one branch at a time" discipline in `AGENTS.md`.
+- **Block force pushes** to `main` (live ruleset `non_fast_forward` rule).
+- **Block branch deletion** for `main` (live ruleset `deletion` rule).
 
 ## Other settings
 
-- **Do not allow bypassing the above** — apply the rules to administrators too
-  (include administrators / no bypass actors), so the gate is uniform.
-- **Require conversation resolution before merging** (all PR review threads resolved).
+- **Do not allow bypassing the above** — the rules apply to administrators too. The live
+  ruleset has an **empty `bypass_actors` list** and reports `current_user_can_bypass:
+  never`, so the gate is uniform (no bypass actors, including the owner).
+- **Require conversation resolution before merging** (all PR review threads resolved —
+  `required_review_thread_resolution: true`).
 
 ## How this maps to the merge discipline
 
@@ -117,9 +148,11 @@ From the binding/packaging workflows (when those surfaces are exercised):
 conformance/perf/coverage ratchets, all green*, with parallel worktrees gated and merged
 **one branch at a time**. The single required check — `ci-summary / gate` — is the CI
 enforcement of that gate: it aggregates every other check-run, so the gate stays complete
-even as jobs are added or renamed. Linear history + one CODEOWNERS approval + the
-up-to-date requirement + conversation resolution enforce the one-at-a-time merge
-discipline. When a new ratchet or gate is added to a CI workflow it is covered
+even as jobs are added or renamed. Linear history (squash-only) + the automated review
+layer (Copilot + CodeQL code-scanning) + conversation resolution enforce the one-at-a-time
+merge discipline — human approvals are **not** required (solo-maintainer; see
+[§Solo-maintainer & the Scorecard score](#solo-maintainer--the-scorecard-code-review--branch-protection-score)).
+When a new ratchet or gate is added to a CI workflow it is covered
 automatically (no ruleset edit needed); update the informational table above so reviewers
 keep an accurate map.
 
@@ -130,3 +163,81 @@ keep an accurate map.
 > branch tip** — that action selects the toolchain from the `action.yml` content at the
 > ref (input default `stable`, or a hard-wired `1.88.0`), not from the ref *name*, so
 > the SHA pin preserves toolchain selection (verified against the action source).
+
+## Solo-maintainer & the Scorecard Code-Review / Branch-Protection score
+
+<!-- [OPUS-4.8] Solo-maintainer evidence for OpenSSF Scorecard Code-Review /
+     Branch-Protection (bead sq-sto1, gap GX-OSSF-3). -->
+
+This section is the **doc-of-record evidence** for why OpenSSF Scorecard's `Code-Review`
+and `Branch-Protection` checks score below 10 for this repository, and what *compensating*
+controls stand in. It is the in-repo half of gap **GX-OSSF-3**
+([`compliance/openssf/gap-register.md`](../compliance/openssf/gap-register.md)); the
+remaining half is the maintainer periodically re-confirming the **live** ruleset against
+this document (procedure below).
+
+### Why the score is depressed (honest, not a defect)
+
+- **`Code-Review`** — Scorecard infers code review from **merged-PR history** and
+  **discounts self-approval**. In a single-maintainer, agent-driven repo there is no second
+  human to record an independent approving review, so the history-derived signal is weak by
+  construction. The repo does **not** fake this with a self-approval (which Scorecard
+  discounts anyway and which the [`AGENTS.md`](../AGENTS.md) honesty posture forbids).
+- **`Branch-Protection`** — Scorecard rewards *classic*-branch-protection settings such as
+  `required_approving_review_count ≥ 1`, `require_code_owner_review`, and
+  stale-review-dismissal. The live model deliberately sets all three to the
+  "no second human" values (`0` / `false` / `false`, see [§Required reviews](#required-reviews)),
+  so those particular sub-signals do not earn points even though the *substantive*
+  protections (no force-push, no deletion, squash-only linear history, conversation
+  resolution, CodeQL alert gate, no bypass actors, a required CI aggregator) are all
+  present and enforced.
+
+These are **inherent to the operating model**, not fixable code changes — consistent with
+the disposition recorded in `compliance/openssf/gap-register.md` (the Scorecard SARIF is no
+longer uploaded to code-scanning precisely because these are posture *scores*, not code
+alerts).
+
+### Compensating controls (what substitutes for the missing second human)
+
+| Missing classic signal | Compensating control (live + enforced) |
+|---|---|
+| Independent human approving review | **GitHub Copilot code review on every PR** (`copilot_code_review`, `review_on_push: true`) — an automated, independent reviewer recorded on the PR. |
+| Code-owner gate | **CodeQL code-scanning gate** (`code_scanning` rule, `CodeQL`, `errors_and_warnings`) — blocks merge on new alerts; plus the SHA-pinned clippy/test/conformance gate aggregated by `ci-summary`. |
+| Review-thread accountability | **Conversation resolution required** (`required_review_thread_resolution: true`) — every Copilot/CodeQL thread must be resolved before merge. |
+| "Trusted committer only" | **No bypass actors** (`bypass_actors: []`, `current_user_can_bypass: never`) — the gate applies to the owner too; **squash-only** + **no force-push** + **no deletion** keep history linear and auditable. |
+
+The agent operating discipline (`AGENTS.md`) adds a *process* layer on top: changes land via
+PR (never direct push), and an out-of-band Codex/roborev review pass is run before arming a
+PR for merge. That review is not visible to Scorecard's history heuristic, but it is the
+real independent-review substitute in practice.
+
+### Verifying the live ruleset matches this document
+
+The live ruleset is configured **out-of-repo** and cannot be asserted from a tracked file,
+so confirm it with the GitHub API (read-only token is sufficient):
+
+```sh
+# List rulesets on the default branch and grab the `main` ruleset id.
+gh api repos/jeswr/sparq/rulesets
+
+# Dump the full rule set and eyeball it against this document.
+gh api repos/jeswr/sparq/rulesets/<id> | python3 -m json.tool
+```
+
+As verified on the date of this commit, the live `main` ruleset
+(`enforcement: active`, `bypass_actors: []`) carries exactly these rules, all of which match
+the sections above:
+
+| Live rule (`type`) | Key parameters | Doc section |
+|---|---|---|
+| `deletion` | — | History and push rules |
+| `non_fast_forward` | — | History and push rules (force-push + linear history) |
+| `pull_request` | `required_approving_review_count: 0`, `require_code_owner_review: false`, `dismiss_stale_reviews_on_push: false`, `required_review_thread_resolution: true`, `allowed_merge_methods: ["squash"]` | Required reviews |
+| `required_status_checks` | one context `gate`, `strict_required_status_checks_policy: false` | Required status checks |
+| `code_quality` | `severity: all` | Required reviews |
+| `code_scanning` | `CodeQL`, `alerts_threshold: errors_and_warnings`, `security_alerts_threshold: all` | Required reviews |
+| `copilot_code_review` | `review_on_push: true`, `review_draft_pull_requests: false` | Required reviews |
+
+If a future check finds drift (e.g. a rule added or a parameter changed), update **this
+table and the matching section above in the same commit** so the doc-of-record never lags
+the live ruleset.
