@@ -297,22 +297,29 @@ NOT-yet-sound per sq-qhy4). Cross-checked equal to the dense builder for every
 - `bench/zk-compose/`: gate counts (bb gates ultra_honk) + prove/verify
   wall-clock + README + regen scripts.
 
-## Gate counts (ultra_honk circuit_size)
+## Gate counts + prove/verify timing
 
-scan_k1_n16_r4=5958  scan_k2_n16_r8=11011  scan_k2_n64_r8=34379
-filter_int_d{1,2,4}=17416 (blake3-block-bound, d-invariant)  filter_f64=3113
-revoke_unset_d10=822  hidden_issuer_d4=16932 (two ~251-bit BJJ scalar muls; sq-z9l)
+Authoritative figures live in the benchmark catalog — do NOT hard-code them here
+(this avoids the drift that previously left this section citing stale gate counts):
 
-## Prove/verify (small e2e, darwin arm64)
+- gate counts (`bb gates` ultra_honk `circuit_size`), per member:
+  `bench/zk-compose/gate_counts_latest.json` (snapshot test:
+  `crates/sparq-zk-compose/tests/gate_count_snapshot.json`).
+- prove/verify wall-clock + proof size: `bench/zk-compose/prove_verify_timing.json`.
+- family cost curve: `bench/zk-compose/family_cost_curve.json`.
 
-filter_int_d1: prove 1.13s, verify 0.16s, proof 14656 B
-scan_k1_n16_r4: prove 1.62s, verify 0.95s, proof 14656 B
+Regenerate via `bench/zk-compose/scripts/gate_counts.sh` /
+`bench/zk-compose/scripts/prove_verify.sh`. `filter_int_*` is blake3-block-bound
+(d-invariant); `hidden_issuer_d4` is dominated by two ~251-bit BJJ scalar muls
+(sq-z9l). [OPUS-4.8]
 
 ## DONE / verified
 
 - compose_core: 22/22 nargo tests. compose crate: 10/10 + 1 ignored.
 - Poseidon2 + filter_int encoding bit-compatible with sparq-zk (verified).
-- wasm byte gate: see commit (must stay 1,643,095).
+- wasm byte gate: enforced deterministically per-commit by the `wasm_bundle_bytes`
+  benchmark gate (`bench/benchmarks.toml`, CI `bench.yml`) — the authoritative
+  value lives there, not in this doc. [OPUS-4.8]
 
 ### Exact next command (if resuming)
 

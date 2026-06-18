@@ -329,8 +329,8 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
   most-selective-first with a `max(4k, 64)` stop. Re-measured on the real
   olympics eval: Sport precision@10 0.000 (0/0) → 1.000 (400/400), City 0.500
   (2/4) → 0.995 (398/400), full 2400/2400 candidate coverage, ~0.3 ms mean
-  latency cost. The per-element IDF hub budget recorded in the TODO is
-  measured-and-rejected (the eval is saturated); numbers in `sparq-sim/TODO.md`.
+  latency cost. The per-element IDF hub budget was investigated and is
+  measured-and-rejected (the eval is saturated).
 
 - **Streaming store builds, weighted RRF, bytes-backed open (`sparq-vectors`)**
   — `StreamingWriter` removes the build-phase RAM ceiling (vectors append
