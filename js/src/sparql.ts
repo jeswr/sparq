@@ -116,12 +116,64 @@ export class SparqlJsonRowsParser {
 
 // --- RDF/JS terms → N-Triples / SPARQL syntax ---------------------------------------------------
 
+/**
+ * Escapes a literal lexical form for the inside of a `"…"` N-Triples /
+ * SPARQL `STRING_LITERAL_QUOTE`. Escapes `\`, `"`, and the whole C0 control
+ * range plus DEL — the SPARQL grammar forbids a raw `#x22`/`#x5C`/`#xA`/`#xD`
+ * inside a single-quoted string, and a raw control byte (e.g. TAB or NUL) is
+ * exactly what an attacker would use to slip past a naive `"`-only escaper.
+ * `\n`/`\r`/`\t`/`\b`/`\f` use their short forms; every other control char
+ * becomes a `\uXXXX` escape.
+ *
+ * This is the SPARQL-injection guard for literal *values*: the output cannot
+ * close its own quote or emit a raw newline, so a hostile value (e.g. an
+ * ACL-derived label) stays confined to the literal token when the result is
+ * re-parsed by sparq's own SPARQL lexer.
+ */
 function escapeLiteral(value: string): string {
-  return value
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r');
+  // " \  and C0 controls (#x00–#x1F) + DEL (#x7F).
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/["\\\x00-\x1f\x7f]/g, (c) => {
+    switch (c) {
+      case '\\':
+        return '\\\\';
+      case '"':
+        return '\\"';
+      case '\n':
+        return '\\n';
+      case '\r':
+        return '\\r';
+      case '\t':
+        return '\\t';
+      case '\b':
+        return '\\b';
+      case '\f':
+        return '\\f';
+      default:
+        return `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+    }
+  });
+}
+
+/**
+ * Percent-encodes the characters the SPARQL/Turtle `IRIREF` production forbids
+ * inside `<…>` — `< > " { } | ^` `` ` `` `\` and every codepoint in `#x00–#x20`
+ * (controls and space). Without this a hostile IRI value — most importantly one
+ * carrying a `>`, e.g. an ACL pointer IRI taken from untrusted input — could
+ * close its own `<…>` bracket and inject arbitrary SPARQL.
+ *
+ * This is the SPARQL-injection guard for IRI *values*; it matches the illegal
+ * set QLever's lexer rejects, so a value that round-trips here parses to the
+ * same single IRI term in sparq's parser. Percent-encoding is IRI-preserving:
+ * an endpoint dereferences the encoded form to the same resource.
+ */
+function escapeIri(value: string): string {
+  // IRIREF illegal set: < > " { } | ^ ` \ and #x00–#x20 (controls + space).
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[<>"{}|^`\\\x00-\x20]/g, (c) => {
+    const code = c.charCodeAt(0);
+    return `%${code.toString(16).toUpperCase().padStart(2, '0')}`;
+  });
 }
 
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
@@ -130,7 +182,7 @@ const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 export function termToNT(term: RDF.Term): string {
   switch (term.termType) {
     case 'NamedNode':
-      return `<${term.value}>`;
+      return `<${escapeIri(term.value)}>`;
     case 'BlankNode':
       return `_:${term.value}`;
     case 'Literal': {
@@ -139,7 +191,7 @@ export function termToNT(term: RDF.Term): string {
         const dir = term.direction != null && term.direction !== '' ? `--${term.direction}` : '';
         return `${quoted}@${term.language}${dir}`;
       }
-      if (term.datatype.value !== XSD_STRING) return `${quoted}^^<${term.datatype.value}>`;
+      if (term.datatype.value !== XSD_STRING) return `${quoted}^^<${escapeIri(term.datatype.value)}>`;
       return quoted;
     }
     case 'DefaultGraph':
