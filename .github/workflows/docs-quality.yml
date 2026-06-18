@@ -243,6 +243,21 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [OPUS-4.8] sq-d8or: the built-docs-site link gate (scripts/check-site-links.sh) is
+      # invoked on the publish path in pages.yml (after `next build`), where the static export
+      # exists. Its remap of the /sparq GitHub-Pages base path + its TEETH (a broken internal
+      # link / dangling #anchor must fail) are easy to break silently when the export's link
+      # shape changes, so the hermetic self-test is run HERE on every PR — it builds a tiny
+      # synthetic export and asserts both a clean pass and that a dead link fails. lychee is
+      # provisioned for this self-test the same SHA-pinned way pages.yml installs it.
+      - name: shellcheck check-site-links.sh + its self-test
+        run: shellcheck scripts/check-site-links.sh scripts/tests/test_check_site_links.sh
+      - name: Install lychee (for the site-links self-test)
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: lychee@0.23.0
+      - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
+        run: bash scripts/tests/test_check_site_links.sh
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:

@@ -157,6 +157,27 @@ jobs:
           npm ci
           npm run build   # prebuild copies js/wasm → site/public/wasm + builds papers, then next build → out/
 
+      # [OPUS-4.8] sq-d8or — anti-drift: link-check the BUILT site HTML before publish.
+      # The docs-quality `internal-links` job (sq-5fd1) lychee-checks the repo MARKDOWN;
+      # this extends that scope to the static-export HTML the Pages site actually serves —
+      # catching renamed routes / stale cross-links / dangling #anchors that markdown linting
+      # cannot see. lychee runs --offline (deterministic, no network) over site/out, remapping
+      # the /sparq GitHub-Pages base path to the export root. Runs BEFORE the dev/ overlay so
+      # it checks only THIS site's source (the overlaid benchmark dashboard is excluded by the
+      # script anyway). The remap + teeth live in a shared, self-tested script
+      # (scripts/check-site-links.sh + scripts/tests/test_check_site_links.sh, run in
+      # docs-quality's ci-scripts job) so the logic is pinned and reusable locally. A broken
+      # internal link FAILS the build → no broken deploy. lychee is installed via the same
+      # SHA-pinned taiki-e/install-action this repo already trusts (cf. docs-quality typos);
+      # 0.23.0 is the version lycheeverse/lychee-action@v2.8.0 ships, so behaviour matches the
+      # markdown gate.
+      - name: Install lychee
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: lychee@0.23.0
+      - name: Link-check the static-export HTML (lychee --offline)
+        run: bash scripts/check-site-links.sh site/out
+
       # ---- Preserve the existing benchmark dashboard at /sparq/dev/ ----
       - name: Overlay benchmark dashboard (dev/) from benchmark-data
         working-directory: site

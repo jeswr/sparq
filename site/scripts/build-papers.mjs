@@ -28,6 +28,20 @@ const PAPERS_DIR = join(SITE, "papers");
 const PDF_OUT_DIR = join(SITE, "public", "papers");
 const HTML_OUT_DIR = join(SITE, "src", "generated", "papers");
 
+// [OPUS-4.8] sq-d8or — anti-drift "GENERATED at build time" header for the build-copied
+// HTML fragments under src/generated/papers/. The fragment is the in-site render compiled
+// from the tracked papers/<slug>.typ source on every `prebuild`; it is git-ignored
+// (site/.gitignore: /src/generated/) and must NEVER be hand-edited. A leading HTML comment
+// is invisible when the route injects the fragment via dangerouslySetInnerHTML, so it adds
+// no render cost while making the provenance unmistakable to anyone who opens the file.
+// `source` is the .typ this fragment was compiled from.
+function generatedHeader(source) {
+  return (
+    `<!-- GENERATED at build time by site/scripts/build-papers.mjs from papers/${source} -->\n` +
+    `<!-- DO NOT EDIT: regenerate with \`npm run build-papers\` (or \`npm run build\`). -->\n`
+  );
+}
+
 // ---- resolve the typst binary -------------------------------------------------------------
 function resolveTypst() {
   const candidates = [
@@ -122,7 +136,8 @@ function compilePaper(typst, paper, evidenceJson) {
   const full = readFileSync(htmlOut, "utf8");
   const body = full.match(/<body[^>]*>([\s\S]*)<\/body>/i);
   const fragment = body ? body[1] : full;
-  writeFileSync(htmlOut, fragment, "utf8");
+  // [OPUS-4.8] sq-d8or — stamp the build-time provenance header (invisible HTML comment).
+  writeFileSync(htmlOut, generatedHeader(paper.source) + fragment, "utf8");
 
   console.log(`[paper-factory] built ${paper.slug}: ${pdfOut} + ${htmlOut}`);
 }
@@ -150,7 +165,8 @@ function main() {
     for (const p of papers) {
       const placeholder = `<p class="paper-placeholder">This paper renders from <code>papers/${p.source}</code>. ` +
         `Install the Typst CLI to build it locally; CI builds it automatically.</p>`;
-      writeFileSync(join(HTML_OUT_DIR, `${p.slug}.html`), placeholder, "utf8");
+      // [OPUS-4.8] sq-d8or — same build-time provenance header on the placeholder fragment.
+      writeFileSync(join(HTML_OUT_DIR, `${p.slug}.html`), generatedHeader(p.source) + placeholder, "utf8");
       // a 1-line text PDF stand-in is not produced; the route guards a missing PDF asset.
     }
     return;
