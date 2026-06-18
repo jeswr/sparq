@@ -65,6 +65,21 @@ ix.schema_summary_for(&seeds, 2500)           // retrieval-mode: schema scoped t
 - **Retrieval-mode summary** (`schema_summary_for(seeds, budget)`) — a seed-scoped digest
   for KGs whose full schema overflows a prompt; filters the already-mined profiles by IRI
   (no re-scan).
+- **Graph scoping** — `Introspection::build(&graph)` introspects the store of whatever
+  `Graph` it is handed: the **default graph** when you pass the top-level `&graph`, and a
+  **single named graph** when you pass that graph's sub-`Graph`. Each named graph of a
+  quad dataset (loaded via `Graph::load_dataset` from N-Quads / TriG) is a self-contained
+  `Graph`, fetched by name with [`Graph::named_graph(&name)`][named-graph] (sq-quuu):
+  ```rust
+  let g1 = graph.named_graph(&ex_g1).expect("graph exists");
+  let card = sparq_introspect::Introspection::build(g1); // schema card for ex:g1 alone
+  ```
+  There is **no cross-graph or union-of-all-graphs** build: a VoID / schema card is always
+  scoped to exactly one graph, so on a multi-graph dataset run it per graph (or over the
+  default graph) rather than expecting it to merge the quads. Default-graph-only crates
+  silently mixing graphs was sq-quuu; this is the documented + supported scope.
+
+  [named-graph]: https://docs.rs/sparq-core/latest/sparq_core/struct.Graph.html#method.named_graph
 - **Cost & zero impact** — `O(|G| + |dict|)` time, output-sized memory plus the
   subject→types map. Separate opt-in crate: no core crate depends on it, the default
   build does not compile it, and it is read-only over `sparq-core`'s public scan surface

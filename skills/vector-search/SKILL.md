@@ -643,6 +643,17 @@ path (recipe 10), and does **not** transfer to this approximate path. Implement 
 - **Keys are dictionary term ids** (`sparq_core::dict::Id`, a `u32`). Resolve a `Term` with
   `graph.id_of(&term) -> Option<Id>` and an `Id` back with `graph.dict.term(id)`. Coverage
   is **sparse by design** — only entities get vectors, not every literal.
+- **Graph scoping (sq-quuu).** Every `&Graph` entry point (`verbalize`, `embed_entities`,
+  `embed_labels`, `nearest_term*`) reads the store of the `Graph` it is handed — the
+  **default graph** for the top-level `&graph`, or a **single named graph** when you pass
+  that graph's sub-`Graph`. On a quad dataset (N-Quads / TriG via `Graph::load_dataset`)
+  each named graph is a self-contained `Graph`; fetch one by name with
+  `graph.named_graph(&name)` and build a store **per graph** (or over the default graph).
+  Verbalization labels never cross graphs and there is no union-of-all-graphs mode — the
+  quads are not merged for you. Because keys are dict ids and a named graph has its **own**
+  dictionary, a store is bound to **one** `Graph`: the per-named-graph store and the
+  default-graph store carry distinct fingerprints, so `check_graph` catches a cross-graph
+  mix-up.
 - **Dim must match.** `VectorStore::create(path, dim)` fixes `dim`; `embed_*` errors if
   `embedder.dim() != store.dim()`. `embed_labels`/`embed_entities` leave the store
   **unfinalized** — call `store.finalize()` before opening/searching (or before a fresh

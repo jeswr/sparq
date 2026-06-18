@@ -65,6 +65,25 @@ weighted_jaccard(&sig_a, &sig_b);        // for callers that cache signatures
   Over-fetch each signal (k = 50 for a top-10 fusion) so the fusion has overlap to reward.
   `fuse_scores(&text, &structural, alpha, k)` is the tunable min-max-normalized alternative.
 
+## Graph scoping
+
+`Sim::new(&graph)` operates on the store of whatever `Graph` it is handed — the **default
+graph** when you pass the top-level `&graph`, or a **single named graph** when you pass
+that graph's sub-`Graph`. On a quad dataset (loaded via `Graph::load_dataset` from
+N-Quads / TriG) each named graph is a self-contained `Graph`; fetch one by name with
+[`Graph::named_graph(&name)`][named-graph] (sq-quuu) and build a per-graph `Sim` over it:
+
+```rust
+let g1 = graph.named_graph(&ex_g1).expect("graph exists");
+let sim = sparq_sim::Sim::new(g1); // signatures + similarity scoped to ex:g1 alone
+```
+
+Signatures never reach **across** graphs and there is no union-of-all-graphs mode: a
+similarity query is always scoped to exactly one graph. On a multi-graph dataset choose
+the graph (or the default graph) explicitly rather than expecting the quads to be merged.
+
+[named-graph]: https://docs.rs/sparq-core/latest/sparq_core/struct.Graph.html#method.named_graph
+
 ## Measured results — olympics
 
 `bench/qlever-olympics/olympics.nt` (134,730 foaf:Person + SportsTeam/SportsEvent/

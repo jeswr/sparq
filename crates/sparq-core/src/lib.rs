@@ -1134,6 +1134,26 @@ impl Graph {
         }
     }
 
+    /// [OPUS-4.8] (sq-quuu) Returns the named graph whose name term is exactly `name`, or
+    /// `None` if this dataset has no such named graph. Each named graph is itself a
+    /// self-contained [`Graph`] (its own dictionary + permutation indexes), so the returned
+    /// `&Graph` can be passed anywhere a `&Graph` is accepted — in particular to the read-only
+    /// GenAI crates (`sparq-introspect`, `sparq-sim`, `sparq-vectors`), which operate over the
+    /// store of whatever `Graph` they are handed. This is the per-name way to scope those crates
+    /// to a single named graph instead of the (default-graph) `self`.
+    ///
+    /// It is the per-name companion to
+    /// [`for_named_graphs_with_prefix`](Self::for_named_graphs_with_prefix) (which is
+    /// prefix-scoped). It is a linear scan over the `named` Vec (a dataset's distinct graphs are
+    /// typically few); for a prefix sweep use the indexed prefix method instead.
+    ///
+    /// The DEFAULT graph is `self` itself — it is not part of `named` and is not returned here;
+    /// pass `&graph` directly to scope introspect/sim/vectors to the default graph.
+    #[inline]
+    pub fn named_graph(&self, name: &Term) -> Option<&Graph> {
+        self.named.iter().find(|(n, _)| n == name).map(|(_, g)| g)
+    }
+
     /// Streaming loader: parses an RDF document incrementally from a reader (so a
     /// gzip / bzip2 decompression stream can be ingested without holding the whole
     /// document in memory). Same formats as [`load_str`](Self::load_str). The
@@ -5523,6 +5543,37 @@ mod tests {
             collect(&g, "http://ex/a/"),
             ["http://ex/a/1", "http://ex/a/10", "http://ex/a/2", "http://ex/a/3"]
         );
+    }
+
+    /// [OPUS-4.8] (sq-quuu) `named_graph(name)` returns the per-name named-graph `&Graph` so the
+    /// read-only GenAI crates can be scoped to one graph of a quad dataset. The returned graph
+    /// holds EXACTLY that graph's triples (not the default graph, not a mixture across graphs),
+    /// and an unknown name yields `None`.
+    #[test]
+    fn named_graph_by_name_scopes_to_one_graph() {
+        let nq = "<http://ex/a> <http://ex/p> <http://ex/x> <http://ex/g1> .\n\
+                  <http://ex/b> <http://ex/p> <http://ex/y> <http://ex/g1> .\n\
+                  <http://ex/c> <http://ex/p> <http://ex/z> <http://ex/g2> .\n\
+                  <http://ex/d> <http://ex/p> <http://ex/w> .\n"; // default graph
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+        // The default graph (`g` itself) holds only the one default-graph triple.
+        assert_eq!(g.len(), 1);
+
+        let g1 = Term::NamedNode(NamedNode::new("http://ex/g1").unwrap());
+        let g2 = Term::NamedNode(NamedNode::new("http://ex/g2").unwrap());
+        let missing = Term::NamedNode(NamedNode::new("http://ex/none").unwrap());
+
+        let sub1 = g.named_graph(&g1).expect("ex:g1 exists");
+        assert_eq!(sub1.len(), 2, "ex:g1 holds exactly its two triples");
+        let sub2 = g.named_graph(&g2).expect("ex:g2 exists");
+        assert_eq!(sub2.len(), 1, "ex:g2 holds exactly its one triple");
+        assert!(g.named_graph(&missing).is_none(), "unknown name -> None");
+
+        // The scoped sub-graph really is a usable `&Graph`: its own dictionary resolves the
+        // members it contains and NOT a member of a sibling graph.
+        let iri = |s: &str| Term::NamedNode(NamedNode::new(s).unwrap());
+        assert!(sub1.id_of(&iri("http://ex/a")).is_some()); // ex:a is in ex:g1
+        assert!(sub1.id_of(&iri("http://ex/c")).is_none()); // ex:c is NOT in ex:g1
     }
 
     #[cfg(feature = "parallel")]
