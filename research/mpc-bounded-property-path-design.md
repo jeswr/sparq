@@ -21,11 +21,11 @@ the **only tractable family of property paths under MPC over a secret graph**.
 - [`mpc-sparql-capability-matrix.md`](./mpc-sparql-capability-matrix.md) — adopts its
   capability-tier vocabulary (BUILT / KNOWN / OPEN / IMPOSSIBLE), its primitive-class ladder
   (P0–P7), and its two-regime split (DISCLOSED / HIDDEN). This record **resolves its single
-  property-path cell** (matrix §2 row "Property paths", §4.3) into a full operator design. One
-  correction to that record: it still says `degree_reduce` is *"in-flight in PR #119, not yet
-  merged"* (matrix §1.2); **PR #119 has since merged**, so the P4 keystone this operator depends
-  on is now BUILT on `main` ([`shamir.rs:406`](../crates/sparq-mpc/src/shamir.rs)). That is what
-  makes this bead actionable now rather than blocked.
+  property-path cell** (matrix §2 row "Property paths", §4.3) into a full operator design. The P4
+  keystone this operator depends on — `degree_reduce` (BGW reshare-and-recombine, PR #119,
+  `sq-dvuc`) — is **BUILT on `main`** ([`degree_reduce`](../crates/sparq-mpc/src/shamir.rs)); the
+  matrix §1.2 reflects that (its earlier "in-flight in PR #119, not yet merged" draft note was
+  reconciled in `sq-k4of`). That is what makes this bead actionable now rather than blocked.
 - [`mpc-security-models-and-benchmarks.md`](./mpc-security-models-and-benchmarks.md) — the
   3-axis security taxonomy, the seven-channel leakage taxonomy, the honest-envelope framing. §4
   here uses its vocabulary verbatim.
