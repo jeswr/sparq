@@ -410,6 +410,25 @@ impl HiddenValueJoin {
     /// cleartext after sharing except to deal the shares — exactly what a dealer
     /// does. It returns the boolean match WITHOUT reconstructing `a` or `b`.
     ///
+    /// ## Leakage — the L2 match-graph leak (characterised, sq-4vgx)
+    ///
+    /// The match bit IS opened (the `m == 0?` test reconstructs `m`). For ONE pair
+    /// that single bit is the minimum a join must compute, but the all-pairs driver
+    /// [`Self::join`] calls this on EVERY `(i, j)`, so the party driving the opens
+    /// learns the **entire bipartite match graph** — exactly which left row matched
+    /// which right row — even though the keys themselves stay hidden (`m` is a
+    /// uniform nonzero for unequal keys, so neither key nor their difference leaks).
+    /// That match graph reveals the join-key fan-out / multiplicity distribution (a
+    /// strong fingerprint of the hidden key distribution): leak **L2** in the
+    /// leakage taxonomy (`research/mpc-sparql-capability-matrix.md` §5, "L2 per-pair
+    /// match graph / fan-out"). This is the CHEAP-but-LEAKY tier — it leaks strictly
+    /// more than the output multiset alone. [`Self::batched_join`]'s oblivious
+    /// output bounds the result-set leaks (L1/L2 of the *output*), and
+    /// [`Self::fully_oblivious_batched_join`] closes L2 at the DECISION by keeping
+    /// the per-pair bit secret-shared via [`secure_equal_to_bit`] — never opened.
+    /// The leak is PINNED by `secure_equal_leaks_full_bipartite_match_graph` so this
+    /// boundary is a regression-guarded property, not just prose.
+    ///
     /// **Consistency-checked open (sq-7q9i, WI-2).** The product `m = d·r` is a
     /// degree-`2t` Reed–Solomon codeword over the `n` party points; the open
     /// routes through [`shamir::reconstruct_degree`] → the WI-1 RS checker at
@@ -497,6 +516,20 @@ impl HiddenValueJoin {
     /// `left.payload_vars ++ right.payload_vars` (the key is NOT projected — it
     /// stays hidden). Result is attributed to the synthetic federation holder and
     /// canonicalised so the disclosed multiset is order-independent.
+    ///
+    /// ## Leakage — this is the CHEAP-but-LEAKY tier (L2 not closed; sq-4vgx)
+    ///
+    /// This all-pairs loop opens `secure_equal` for EVERY `(i, j)` pair, so
+    /// the party driving the opens learns the full **bipartite match graph** — which
+    /// left row matched which right row (leak **L2**; see `secure_equal` and
+    /// `research/mpc-sparql-capability-matrix.md` §5). The keys/values stay hidden,
+    /// but the match-graph fan-out fingerprints the hidden key distribution. The
+    /// output is also exactly the true match count (leak **L1**). Use this only when
+    /// the per-pair match structure is acceptable to reveal; for the oblivious
+    /// output use [`Self::batched_join`] (bounds L1/L2 of the result set) and for the
+    /// decision-time fix use [`Self::fully_oblivious_batched_join`] (the per-pair bit
+    /// is secret-shared, never opened). The L2 leak here is PINNED by
+    /// `secure_equal_leaks_full_bipartite_match_graph`.
     pub fn join(
         &self,
         left: &HiddenKeyedRows,
@@ -1494,6 +1527,127 @@ mod hidden_value_tests {
                 );
             }
         }
+    }
+
+    // ===================== sq-4vgx: PIN the L2 match-graph leak =====================
+    //
+    // The spike's deliverable: pin, with a test, exactly what the CHEAP-but-LEAKY
+    // scalar all-pairs path (`HiddenValueJoin::join` / `secure_equal`) reveals,
+    // BEFORE any fix — so the privacy boundary between the leaky tier and the
+    // oblivious tier (`fully_oblivious_batched_join`, sq-xhaw) is a regression-
+    // guarded property, not just prose. These tests assert the leak EXISTS in the
+    // scalar path (it is the documented cheap tier) and is ABSENT (per-pair) in the
+    // fully-oblivious path. If a future refactor silently routed the leaky path as
+    // though it were oblivious, the first test would still pass (the leak is real)
+    // but `fully_oblivious_*` already pins the no-open property — together they
+    // fence the boundary.
+
+    /// PIN (sq-4vgx): the scalar all-pairs `secure_equal` driver learns the EXACT
+    /// bipartite match graph. We play the role of the party driving the opens:
+    /// call `secure_equal` on every `(i, j)` and collect each opened verdict. The
+    /// recovered incidence matrix must equal the TRUE bipartite match graph — i.e.
+    /// the open path leaks not just the match COUNT but precisely which left row
+    /// matched which right row (leak L2). The hidden KEY values are still never
+    /// recovered (only the per-pair equality bit), which we also assert.
+    #[test]
+    fn secure_equal_leaks_full_bipartite_match_graph() {
+        // Two left rows and three right rows over a small private-key domain. The
+        // keys themselves are secret; the match GRAPH is what leaks.
+        let lkeys = [7u64, 9];
+        let rkeys = [7u64, 9, 7]; // r0,r2 share L's 7; r1 shares L's 9
+        let true_graph: Vec<Vec<bool>> = lkeys
+            .iter()
+            .map(|&lk| rkeys.iter().map(|&rk| lk == rk).collect())
+            .collect();
+
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(5, 0x4F60).unwrap());
+        let mut dealer = join.backend.dealer();
+
+        // Drive the opens exactly as `HiddenValueJoin::join` does — and record the
+        // per-pair verdict the driver observes.
+        let observed: Vec<Vec<bool>> = lkeys
+            .iter()
+            .map(|&lk| {
+                rkeys
+                    .iter()
+                    .map(|&rk| {
+                        join.secure_equal(&mut dealer, Fp::new(lk), Fp::new(rk))
+                            .unwrap()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // THE LEAK: the driver reconstructs the full bipartite match graph, not
+        // merely the match count. (This is L2 — the cheap-tier leak the oblivious
+        // path closes.)
+        assert_eq!(
+            observed, true_graph,
+            "scalar secure_equal driver must reveal the exact per-pair match graph (L2 leak pinned)"
+        );
+
+        // The match graph fingerprints the key fan-out: L's key 7 has fan-out 2 on
+        // the right, key 9 fan-out 1 — directly readable from the observed rows.
+        let fanout: Vec<usize> = observed
+            .iter()
+            .map(|row| row.iter().filter(|&&b| b).count())
+            .collect();
+        assert_eq!(
+            fanout,
+            vec![2, 1],
+            "per-key fan-out is readable from the leak"
+        );
+    }
+
+    /// PIN (sq-4vgx, companion): two key configurations that yield the SAME output
+    /// multiset SIZE (and the same total match count) but DIFFERENT bipartite match
+    /// graphs are DISTINGUISHABLE through the scalar open path — which is precisely
+    /// the privacy loss the oblivious tier removes. Config A: a 2×2 block on one key
+    /// (fan-out [2,2] across two left rows → 4 matches won't help; use disjoint).
+    /// We pick two graphs with the SAME number of true cells but different shapes.
+    #[test]
+    fn scalar_match_graph_distinguishes_equal_size_different_shape() {
+        // Both configs: 2 left rows × 2 right rows, with exactly 2 matching pairs —
+        // identical match COUNT, so the count alone cannot tell them apart.
+        // Config A — diagonal: (l0,r0) and (l1,r1) match.
+        let a_l = [1u64, 2];
+        let a_r = [1u64, 2];
+        // Config B — one left row matches BOTH right rows (key fan-out 2), the other
+        // matches neither: (l0,r0) and (l0,r1) match. Same 2 matches, different graph.
+        let b_l = [5u64, 8];
+        let b_r = [5u64, 5];
+
+        let graph_of = |lk: &[u64], rk: &[u64]| -> Vec<Vec<bool>> {
+            let join = HiddenValueJoin::new(ShamirBackend::new_seeded(5, 0x4F61).unwrap());
+            let mut dealer = join.backend.dealer();
+            lk.iter()
+                .map(|&l| {
+                    rk.iter()
+                        .map(|&r| {
+                            join.secure_equal(&mut dealer, Fp::new(l), Fp::new(r))
+                                .unwrap()
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+
+        let ga = graph_of(&a_l, &a_r);
+        let gb = graph_of(&b_l, &b_r);
+
+        let count = |g: &Vec<Vec<bool>>| g.iter().flatten().filter(|&&b| b).count();
+        assert_eq!(
+            count(&ga),
+            count(&gb),
+            "both configs have the same match count"
+        );
+        // Yet the observed match GRAPHS differ — the scalar path leaks the SHAPE,
+        // not just the size. This is exactly the L2 information the oblivious
+        // output + secret-shared-bit decision (sq-jnkm / sq-xhaw) hide.
+        assert_ne!(
+            ga, gb,
+            "equal-count configs must be distinguishable via the scalar match-graph leak (L2)"
+        );
     }
 }
 
