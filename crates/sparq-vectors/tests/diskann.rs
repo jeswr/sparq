@@ -7,7 +7,7 @@
 //! 3. **parity with the in-RAM searchers** on tiny separable clusters, and the degenerate
 //!    all-zero-query contract shared with `nearest_exact` / `VectorIndex`.
 
-use sparq_vectors::{nearest_exact, DiskAnnIndex, VamanaConfig, VectorStore};
+use sparq_vectors::{nearest_exact, DiskAnnIndex, PqConfig, VamanaConfig, VectorStore};
 // [OPUS-4.8] (sq-ip3a) HNSW is the approximate backend — `approx-ann` only (the disk-vs-HNSW
 // parity test below is gated to match).
 #[cfg(feature = "approx-ann")]
@@ -207,6 +207,151 @@ fn empty_and_singleton_graphs_roundtrip() {
     for p in [&store_path, &graph_path, &store_path1, &graph_path1] {
         let _ = std::fs::remove_file(p);
     }
+}
+
+// [OPUS-4.8] (sq-qamd) PQ candidate cache wired into the DiskANN search path: build with a PQ
+// section, confirm it persists + reloads, the codes drive the beam (RAM-only ranking) and the
+// final beam is re-ranked off the mmap so the reported cosine is EXACT, and recall stays high.
+
+#[test]
+fn pq_index_persists_and_reloads_the_candidate_cache() {
+    const N: usize = 2_000;
+    const DIM: usize = 32;
+    let store_path = tmp("diskann-pq-rt.spqv");
+    let graph_path = tmp("diskann-pq-rt.spqg");
+    let mut store = VectorStore::create(&store_path, DIM).unwrap();
+    let mut state = 0xA11CE_u64;
+    for i in 0..N {
+        store.put((i as u32) * 5 + 1, &rand_vec(&mut state, DIM)).unwrap();
+    }
+    store.finalize().unwrap();
+
+    let built = DiskAnnIndex::build_with_pq(
+        &store,
+        &graph_path,
+        VamanaConfig::default(),
+        PqConfig::default(),
+    )
+    .unwrap();
+    assert!(built.has_pq_cache(), "build_with_pq must produce a PQ candidate cache");
+    assert_eq!(built.len(), N);
+
+    // Reopen from the file alone — the PQ section must reload (no rebuild).
+    let reopened = DiskAnnIndex::open(&graph_path).unwrap();
+    assert!(reopened.has_pq_cache(), "reopened index must carry the persisted PQ cache");
+    assert_eq!(reopened.len(), N);
+    assert_eq!(reopened.dim(), DIM);
+
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(&graph_path);
+}
+
+#[test]
+fn pq_returned_cosines_are_exact_after_rerank() {
+    // The re-rank reads full-precision vectors off the mmap, so a returned (id, cosine) must equal
+    // the EXACT cosine of that id to the query — the PQ approximation guides the beam but never
+    // leaks into the reported score.
+    const N: usize = 2_000;
+    const DIM: usize = 32;
+    const K: usize = 10;
+    let store_path = tmp("diskann-pq-exact.spqv");
+    let graph_path = tmp("diskann-pq-exact.spqg");
+    let mut store = VectorStore::create(&store_path, DIM).unwrap();
+    let mut state = 0xBEEF_u64;
+    for i in 0..N {
+        store.put((i as u32) + 1, &rand_vec(&mut state, DIM)).unwrap();
+    }
+    store.finalize().unwrap();
+
+    let idx = DiskAnnIndex::build_with_pq(
+        &store,
+        &graph_path,
+        VamanaConfig::default(),
+        PqConfig::default(),
+    )
+    .unwrap();
+
+    let mut q_state = 0xF00D_u64;
+    for _ in 0..30 {
+        let q = rand_vec(&mut q_state, DIM);
+        let approx = idx.nearest(&q, K);
+        // Returned scores must be sorted best-first and equal the exact cosine for each id.
+        let exact_all = nearest_exact(&store, &q, N);
+        for w in approx.windows(2) {
+            assert!(w[0].1 >= w[1].1 - 1e-6, "results not sorted best-first");
+        }
+        for &(id, cos) in &approx {
+            let exact = exact_all
+                .iter()
+                .find(|&&(eid, _)| eid == id)
+                .map(|&(_, c)| c)
+                .expect("returned id must exist in the store");
+            assert!(
+                (cos - exact).abs() < 1e-5,
+                "re-ranked cosine {cos} for id {id} != exact {exact}"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(&graph_path);
+}
+
+#[test]
+fn pq_recall_at_10_stays_high() {
+    // PQ-guided search is approximate, but with the re-rank it should still recover most of the
+    // true top-K. A gentle gate (≥ 0.80) over a moderate set — well clear of chance.
+    const N: usize = 10_000;
+    const DIM: usize = 32;
+    const K: usize = 10;
+    const QUERIES: usize = 100;
+    let store_path = tmp("diskann-pq-recall.spqv");
+    let graph_path = tmp("diskann-pq-recall.spqg");
+    let mut store = VectorStore::create(&store_path, DIM).unwrap();
+    let mut state = 0xC0FFEE_u64;
+    for i in 0..N {
+        store.put((i as u32) * 7 + 3, &rand_vec(&mut state, DIM)).unwrap();
+    }
+    store.finalize().unwrap();
+
+    // A wider beam compensates for the lossy codes; M=16 gives 2 dims/subspace at DIM=32.
+    let cfg = VamanaConfig { search_beam: 200, ..Default::default() };
+    let idx = DiskAnnIndex::build_with_pq(&store, &graph_path, cfg, PqConfig::default()).unwrap();
+    assert!(idx.has_pq_cache());
+
+    let mut q_state = 0xDECAF_u64;
+    let mut hits = 0usize;
+    for _ in 0..QUERIES {
+        let q = rand_vec(&mut q_state, DIM);
+        let exact: Vec<u32> = nearest_exact(&store, &q, K).into_iter().map(|(id, _)| id).collect();
+        let approx: Vec<u32> = idx.nearest(&q, K).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(approx.len(), K);
+        hits += approx.iter().filter(|id| exact.contains(id)).count();
+    }
+    let recall = hits as f64 / (QUERIES * K) as f64;
+    eprintln!("DiskANN+PQ recall@{K} over {QUERIES} queries on {N}x{DIM}: {recall:.4}");
+    assert!(recall >= 0.80, "PQ recall@{K} gate failed: {recall:.4} < 0.80");
+
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(&graph_path);
+}
+
+#[test]
+fn plain_index_has_no_pq_cache() {
+    let store_path = tmp("diskann-nopq.spqv");
+    let graph_path = tmp("diskann-nopq.spqg");
+    let mut store = VectorStore::create(&store_path, 8).unwrap();
+    let mut state = 1_u64;
+    for i in 0..100 {
+        store.put(i + 1, &rand_vec(&mut state, 8)).unwrap();
+    }
+    store.finalize().unwrap();
+    let idx = DiskAnnIndex::build(&store, &graph_path).unwrap();
+    assert!(!idx.has_pq_cache(), "plain build must not carry a PQ cache");
+    let reopened = DiskAnnIndex::open(&graph_path).unwrap();
+    assert!(!reopened.has_pq_cache());
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(&graph_path);
 }
 
 #[test]

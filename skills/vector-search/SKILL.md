@@ -111,8 +111,10 @@ impl VectorIndex { fn nearest(&self, query: &[f32], k) -> Vec<(Id, f32)>;
 // --- persistent on-disk ANN (src/diskann.rs) ---
 DiskAnnIndex::build(&VectorStore, path) / ::build_with(&store, path, VamanaConfig{degree, build_beam, search_beam, alpha, seed})
 DiskAnnIndex::build_for(&store, path, &Graph) / ::build_with_for(&store, path, cfg, &Graph)  // embeds the graph fingerprint
-DiskAnnIndex::open(path) -> Result<DiskAnnIndex, String>                        // mmap + header check, NO rebuild
+DiskAnnIndex::build_with_pq(&store, path, cfg, PqConfig) -> Result<..>          // [OPUS-4.8] sq-qamd: + a PQ candidate cache (search on codes, re-rank off mmap); persisted as a trailing .spqg section (encoding tag 1)
+DiskAnnIndex::open(path) -> Result<DiskAnnIndex, String>                        // mmap + header check, NO rebuild (reloads any PQ section)
 impl DiskAnnIndex { fn nearest(&self, &[f32], k) -> Vec<(Id, f32)>; fn nearest_term(..) -> Vec<(Term, f32)>; fn len()/dim();
+                    fn has_pq_cache() -> bool;                                  // [OPUS-4.8] sq-qamd: PQ-guided search when true
                     fn fingerprint() -> Option<Fingerprint>; fn check_graph(&store, &Graph) -> Result<(), String>;
                     fn nearest_term_checked(&Term, &Graph, &store, k) -> Result<Vec<(Term, f32)>, String> }
 sibling_graph_path(&Path) -> PathBuf                                            // foo.spqv -> foo.spqg
@@ -150,10 +152,12 @@ nearest_filtered_overfetch_default(&backend, query, &IdMask, k) -> Vec<(Id, f32)
 // --- quantization for large stores (src/quant.rs) ---
 ScalarQuantizer::fit(dim, vectors: impl IntoIterator<Item=&[f32]>) -> Result<ScalarQuantizer, String>   // f32->u8, 4x
 ProductQuantizer::fit(dim, vectors, PqConfig{m, k, iters, seed}) -> Result<ProductQuantizer, String>    // M bytes/vec, 8-32x
+ProductQuantizer::to_bytes() -> Vec<u8> / ::from_bytes(&[u8]) -> Result<ProductQuantizer, String>       // [OPUS-4.8] sq-qamd: persist/reload the codebook (e.g. in a .spqg PQ section)
 impl {Scalar,Product}Quantizer { fn encode(&self, &[f32]) -> Vec<u8>; fn reconstruct(&self, &[u8]) -> Vec<f32>;
                                   fn encode_store(&self, &VectorStore) -> Result<EncodedStore, String> }
 DistanceTable::new(&ProductQuantizer, query: &[f32]);  fn distance(&self, code)->f32; fn cosine(&self, code)->f32  // ADC
 EncodedStore::rank_pq(&self, &DistanceTable, k) -> Vec<(Id, f32)>;  cosine_from_sq_dist(sq: f32) -> f32
+EncodedStore::from_parts(ids, codes, stride) -> Result<EncodedStore, String> / ::codes() -> &[u8]       // [OPUS-4.8] sq-qamd: reload a persisted candidate cache
 
 // --- hybrid fusion (src/fuse.rs) --- lists are (item, f64) best-first; deterministic ties
 fuse_rrf(lists: &[&[(T, f64)]], k: f64 /*RRF_K=60.0*/, top_k) -> Vec<(T, f64)>
@@ -260,8 +264,20 @@ let hits = index.nearest(query, 10);                    // Vec<(Id, cosine)>, re
 ### 4. Quantize a large store, then PQ-filter + full-precision re-rank (the DiskANN loop)
 
 PQ codes are a coarse RAM-resident *filter*, not a final ranking — re-rank the candidates
-against the full-precision store. (This loop is NOT yet wired into `DiskAnnIndex`; drive it
-yourself.)
+against the full-precision store. [OPUS-4.8] sq-qamd: `DiskAnnIndex::build_with_pq` now drives
+this loop INSIDE the index (rank each visited node's neighbours on the in-RAM codes, re-rank the
+final beam off the mmap — `nearest` reports the exact full-precision cosine), and persists the
+codebook + codes as a trailing `.spqg` section so `open` reloads the cache with no rebuild:
+
+```rust
+use sparq_vectors::{DiskAnnIndex, PqConfig, VamanaConfig, VectorStore};
+let store = VectorStore::open("entities.spqv")?;
+let idx = DiskAnnIndex::build_with_pq(&store, "entities.spqg", VamanaConfig::default(), PqConfig::default())?;
+assert!(idx.has_pq_cache());
+let top10 = idx.nearest(query, 10);                    // PQ-guided traversal, exact re-ranked cosine
+```
+
+To drive the same coarse-filter-then-re-rank loop by hand (e.g. over the exact store with no graph):
 
 ```rust
 use sparq_vectors::{cosine, DistanceTable, ProductQuantizer, PqConfig, VectorStore};
