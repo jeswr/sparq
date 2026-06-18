@@ -311,14 +311,18 @@ pub use hidden_distinct::{
 pub use hidden_path::planner::{
     plan_hidden_bounded_path, BoundedPathPlan, HiddenPathRequest, PathUpperBound,
 };
-// [OPUS-4.8] sq-rrz4 + sq-g7t5: the secure-comparison surface (verdict-only
-// disclosure). sq-g7t5 adds the in-MPC bit-decomposition magnitude-bound constants
-// for `disclose_threshold_verdict` (the sum is now bit-decomposed in-MPC, never
-// reconstructed; its supported magnitude is `< 2^DECOMP_VALUE_BITS`).
+// [OPUS-4.8] sq-rrz4 + sq-g7t5 + sq-bgsn: the secure-comparison surface (verdict-only
+// disclosure). The in-MPC bit-decomposition magnitude-bound constants for
+// `disclose_threshold_verdict` (the sum is bit-decomposed in-MPC, never
+// reconstructed). sq-bgsn lifts the production path to the Rabbit-style full-field
+// decomposition, so the supported magnitude is now `< 2^RABBIT_VALUE_BITS = 2^60`
+// (the `RABBIT_*` constants), up from the masked-open path's `< 2^DECOMP_VALUE_BITS
+// = 2^20` (the `DECOMP_*` constants, retained for the malicious twin / tests).
 pub use compare::{
     disclose_threshold_verdict, open_verdict, secure_equal_to_bit, secure_greater_than,
     secure_threshold, COMPARE_BITS, COMPARE_MAX_EXCLUSIVE, DECOMP_MASK_BITS,
-    DECOMP_STAT_SECURITY_BITS, DECOMP_VALUE_BITS, DECOMP_VALUE_MAX_EXCLUSIVE,
+    DECOMP_STAT_SECURITY_BITS, DECOMP_VALUE_BITS, DECOMP_VALUE_MAX_EXCLUSIVE, RABBIT_MASK_BITS,
+    RABBIT_VALUE_BITS, RABBIT_VALUE_MAX_EXCLUSIVE,
 };
 // [OPUS-4.8] sq-ka8m: the malicious-secure (honest-majority, with-abort) comparison
 // surface — IT-MAC-carried decompose+compare chain, verdict MAC-checked before open.

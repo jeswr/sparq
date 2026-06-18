@@ -249,7 +249,9 @@ fn auth_masked_bit_decompose(
 
 /// [OPUS-4.8] sq-m4zi/sq-e7ma — **MAC-checked in-protocol range proof of the
 /// secret-shared sum**, the malicious-with-abort twin of the semi-honest
-/// [`crate::compare::verify_sum_in_range`] (sq-nx0s). Given the AUTHENTICATED sum
+/// `crate::compare::verify_sum_in_range` (sq-nx0s; that masked-open reference is
+/// now test-only after the sq-bgsn Rabbit lift on the semi-honest production path).
+/// Given the AUTHENTICATED sum
 /// `[[sum]]` and the `L = `[`DECOMP_MASK_BITS`] AUTHENTICATED bits `[[b_0..b_{L-1}]]`
 /// that [`auth_masked_bit_decompose`] recovered, it PROVES — without reconstructing the
 /// sum — that `sum ∈ [0, 2^`[`DECOMP_VALUE_BITS`]`)` via the SAME two secret zero-tests
