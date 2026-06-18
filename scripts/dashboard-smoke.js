@@ -107,6 +107,39 @@ summary.groups.forEach(function (g) {
 ok(sawWatdivRow, 'watdiv row present in summary');
 
 // ============================================================================================
+// [OPUS-4.8] sq-19z8 — per-metric SEMANTIC badges (LUBM regime + result mode).
+// semanticBadges() surfaces the label record's `regime` (extensional vs entailed OWL-RL closure)
+// and `mode` (count/materialize/json/…) fields — which previously lived ONLY in the title tooltip —
+// as small badge descriptors the DOM renders as muted .pill spans next to the metric label.
+// ============================================================================================
+ok(typeof D.semanticBadges === 'function', 'dashboard.js exports semanticBadges');
+
+// LUBM entailed query (regime=entailed, mode=count): two badges, regime FIRST then mode.
+const entBadges = D.semanticBadges('lubm_q04_count_us');
+eq(entBadges.length, 2, 'entailed LUBM query -> two badges (regime + mode)');
+eq(entBadges[0].kind, 'badge-entailed', 'first badge is the entailed-regime kind');
+eq(entBadges[0].text, 'entailed', 'entailed-regime badge text');
+ok(/OWL-RL closure|reasoning/i.test(entBadges[0].title), 'entailed badge title explains the reasoning regime');
+eq(entBadges[1].kind, 'badge-mode', 'second badge is the result-mode kind');
+eq(entBadges[1].text, 'count', 'mode badge text is the result mode');
+
+// LUBM extensional query (regime=extensional): muted extensional kind, distinct from entailed.
+const extBadges = D.semanticBadges('lubm_q01_count_us');
+eq(extBadges[0].kind, 'badge-extensional', 'extensional LUBM query -> extensional-regime badge');
+eq(extBadges[0].text, 'extensional', 'extensional-regime badge text');
+ok(/asserted|no entailment|closure/i.test(extBadges[0].title), 'extensional badge title explains no-closure');
+
+// A metric with a mode but NO regime (e.g. BSBM) -> exactly one mode badge, no regime badge.
+const modeOnly = D.semanticBadges('bsbm_query01_count_us');
+eq(modeOnly.length, 1, 'mode-only metric -> a single (mode) badge');
+eq(modeOnly[0].kind, 'badge-mode', 'mode-only metric badge is the mode kind');
+
+// A metric with NEITHER field (load/store/dict) -> no badges (rows stay clean).
+eq(D.semanticBadges('load_s').length, 0, 'load_s has no semantic badges');
+// An UNLABELLED metric -> no badges (never sprout a misleading pill on the fallback path).
+eq(D.semanticBadges('totally_new_metric_count_us').length, 0, 'unlabelled metric has no semantic badges');
+
+// ============================================================================================
 // [OPUS-4.8] sq-xvow — featured well-known suites at the TOP (+ competitor seam for sq-t0c3).
 // ============================================================================================
 ok(typeof D.featuredSuiteOf === 'function', 'dashboard.js exports featuredSuiteOf');
@@ -555,6 +588,17 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
   const sparqlSec = famSections.filter(function (s) { return s.attributes.id === 'fam-sparql'; })[0];
   const sparqlTable = sparqlSec && sparqlSec.children.filter(function (c) { return c.tagName === 'table'; })[0];
   ok(sparqlTable, 'DOM: SPARQL family renders a summary table synchronously (first paint)');
+  // [OPUS-4.8] sq-19z8: the LUBM row (lubm_q06_count_us — entailed OWL-RL closure, mode=count)
+  // carries its semantic badges as .metric-badge pills next to the label, not just in the tooltip.
+  const sparqlBadges = sparqlSec ? sparqlSec.querySelectorAll('span.metric-badge') : [];
+  ok(sparqlBadges.length > 0, 'DOM: SPARQL family rows render .metric-badge pills (sq-19z8)');
+  ok(sparqlBadges.some(function (b) { return classList(b).indexOf('badge-entailed') !== -1; }),
+     'DOM: the entailed LUBM row shows a .badge-entailed regime pill');
+  ok(sparqlBadges.some(function (b) { return classList(b).indexOf('badge-mode') !== -1 && b.textContent === 'count'; }),
+     'DOM: the LUBM row shows a .badge-mode "count" result-mode pill');
+  // every semantic badge reuses the .pill base class (sq-19z8 reuses the Δ-pill styling).
+  ok(sparqlBadges.every(function (b) { return classList(b).indexOf('pill') !== -1; }),
+     'DOM: semantic badges reuse the .pill base class');
   // first paint must NOT have built any chart: the trend grid lives inside a <details> and is empty
   // until expanded. Confirm the details/summary disclosure exists with an EMPTY chart-grid.
   const sparqlDetails = sparqlSec && sparqlSec.children.filter(function (c) { return c.tagName === 'details'; })[0];

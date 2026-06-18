@@ -214,6 +214,45 @@
     return parts.join('\n');
   }
 
+  // [OPUS-4.8] sq-19z8: per-metric SEMANTIC badges derived from the label record (sq-ocuf already
+  // emits `regime` for LUBM — extensional vs entailed OWL-RL closure — and `mode` for the result
+  // shape — count/materialize/json/…). These two fields previously surfaced ONLY in the title-attr
+  // tooltip; this returns small badge descriptors so the renderer can show them as muted pills next
+  // to the metric label, making the reasoning delta + serialization mode visible at a glance.
+  //
+  // Returns an ordered array of { kind, text, title } (empty when the metric has neither field, e.g.
+  // a load/store/dict metric, so most rows stay badge-free). `kind` is a CSS-class suffix:
+  //   - regime -> 'badge-entailed' (LUBM reasoning, OWL-RL closure) or 'badge-extensional' (asserted
+  //     triples only, no entailment). The entailed/extensional split is the reasoning delta.
+  //   - mode   -> 'badge-mode' (count / materialize / json / closure / validate / …), the result
+  //     serialization/consumption mode the latency was measured under.
+  // Pure + node-testable. We DO NOT invent badges for unlabelled metrics (lookup() returns null ->
+  // []), so the structural-fallback path never sprouts a misleading pill.
+  function semanticBadges(name) {
+    var rec = lookup(name);
+    if (!rec) return [];
+    var out = [];
+    if (rec.regime) {
+      var entailed = rec.regime === 'entailed';
+      out.push({
+        kind: entailed ? 'badge-entailed' : 'badge-extensional',
+        text: rec.regime,
+        title: entailed
+          ? 'entailed — measured over the OWL-RL closure (materialised entailments), so this is the reasoning-on path'
+          : 'extensional — measured over the asserted triples only (no entailment / closure)'
+      });
+    }
+    if (rec.mode) {
+      out.push({
+        kind: 'badge-mode',
+        text: rec.mode,
+        title: 'result mode: ' + rec.mode +
+          ' — the serialization/consumption mode this latency was measured under'
+      });
+    }
+    return out;
+  }
+
   // The suite a metric belongs to (drives table sections + chart groups). Falls back to the old
   // structural classifier so an unlabelled metric is grouped, never orphaned.
   function suiteFor(name) {
@@ -685,7 +724,7 @@
                        trendPoints: trendPoints, GROUP_ORDER: GROUP_ORDER,
                        labelFor: labelFor, labelForBare: labelForBare,
                        suiteFor: suiteFor, titleFor: titleFor,
-                       lookup: lookup,
+                       lookup: lookup, semanticBadges: semanticBadges,
                        // sq-xvow (featured well-known suites + competitor seam)
                        FEATURED_SUITES: FEATURED_SUITES, featuredSuiteOf: featuredSuiteOf,
                        buildFeatured: buildFeatured, competitorsFor: competitorsFor,
@@ -718,6 +757,20 @@
     return el('span', { 'class': 'pill pill-worse',
       text: '+' + (Math.round(delta.pct * 10) / 10).toFixed(1) + '%',
       title: 'vs all-time best' });
+  }
+
+  // [OPUS-4.8] sq-19z8: render the per-metric semantic badges (regime + mode) as muted .pill spans,
+  // wrapped in a .metric-badges inline row. Returns null when a metric has no badges (most rows), so
+  // the caller can skip appending. Reuses the .pill base class; the kind-specific class (sq-19z8
+  // CSS) gives each its muted colour.
+  function badges(name) {
+    var bs = semanticBadges(name);
+    if (!bs.length) return null;
+    var wrap = el('span', { 'class': 'metric-badges' });
+    bs.forEach(function (b) {
+      wrap.appendChild(el('span', { 'class': 'pill metric-badge ' + b.kind, text: b.text, title: b.title }));
+    });
+    return wrap;
   }
 
   var PALETTE = ['#2563eb', '#16a34a', '#dc2626', '#9333ea', '#ea580c', '#0891b2', '#ca8a04', '#db2777'];
@@ -843,8 +896,12 @@
       table.appendChild(el('thead', null, [el('tr', null, headCells)]));
       var tbody = el('tbody');
       g.rows.forEach(function (r) {
+        // [OPUS-4.8] sq-19z8: label-line carries any regime/mode semantic badges inline.
+        var labelLine = el('span', { 'class': 'metric-label', text: r.label });
+        var bdg = badges(r.name);
+        if (bdg) labelLine.appendChild(bdg);
         var metricCell = el('td', { 'class': 'metric', title: r.title }, [
-          el('span', { 'class': 'metric-label', text: r.label }),
+          labelLine,
           el('code', { 'class': 'metric-stem', text: r.name })
         ]);
         var cells = [
@@ -1108,8 +1165,12 @@
       ])]));
       var tbody = el('tbody');
       fam.rows.forEach(function (r) {
+        // [OPUS-4.8] sq-19z8: label-line carries any regime/mode semantic badges inline.
+        var labelLine = el('span', { 'class': 'metric-label', text: r.label });
+        var bdg = badges(r.name);
+        if (bdg) labelLine.appendChild(bdg);
         var metricCell = el('td', { 'class': 'metric', title: r.title }, [
-          el('span', { 'class': 'metric-label', text: r.label }),
+          labelLine,
           el('code', { 'class': 'metric-stem', text: r.name })
         ]);
         var tr = el('tr', null, [
