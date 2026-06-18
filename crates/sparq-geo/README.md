@@ -243,21 +243,21 @@ node). `GeoIndex::apply_delta(graph, inserts, deletes)` mirrors a
 
 ## Benchmark
 
-`cargo run --release -p sparq-geo --example bench_geo` — 100 000 random CRS84
-points over an 8°×8° window (country-sized), 1 000 query points, Apple M-class
-laptop (2026-06-10):
+Run it yourself — no figures are baked in here (per the repo's
+no-hard-coded-performance-numbers rule; cite the generated data, not a markdown
+snapshot):
 
-```text
-graph load     : 100000 asWKT triples in 81.05ms
-index build    : 100000 entries in 96.15ms (1.04 Mentries/s)
-within     1km :      1.1 µs/query (0.7 avg hits)
-within    10km :     16.9 µs/query (63.0 avg hits)
-within    50km :    396.6 µs/query (1483.1 avg hits)
-nearest k=1     :      5.5 µs/query
-nearest k=10    :     32.5 µs/query
-nearest k=100   :    236.7 µs/query
-intersects box :     34.4 µs/query (389.8 avg hits, 0.5°x0.5° boxes)
+```sh
+cargo run --release -p sparq-geo --example bench_geo
 ```
 
-Query cost is dominated by the number of true hits refined (the 50 km radius
-touches ~1.5 k points); pure pruning (1 km / k=1) is a microsecond or two.
+The example loads 100 000 random CRS84 points over an 8°×8° (country-sized)
+window and times graph load, index build, `within` at several radii, `nearest`
+at several `k`, and `intersects` over boxes, printing per-query latencies and
+average hit counts.
+
+Shape of the result (qualitative, machine-independent): query cost is dominated
+by the number of true hits the AABB pre-filter must refine — a large radius
+(many hits) costs far more per query than tight pruning (`within 1km` / `k=1`),
+which bottoms out at the rstar walk cost. Use the example's own output for
+numbers on your hardware. <!-- [OPUS-4.8] de-baked machine-specific latencies; see AGENTS.md "No hard-coded performance numbers" -->

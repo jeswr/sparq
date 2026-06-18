@@ -224,7 +224,8 @@ that was ever secret today; it closes the gap for any future secret-value
 inversion. **No arithmetic result changes** — `pow_ct` and `pow_vartime` are
 proven to agree over a spread of bases/exponents (`field.rs` tests
 `pow_ct_agrees_with_pow_vartime`, `inv_via_pow_ct_is_multiplicative_inverse`), and
-all 270 existing MPC tests (disclosure-minimisation, MAC-soundness, hidden-join,
-tamper-detection, comparison) pass UNCHANGED, so protocol behaviour is identical.
+the entire existing MPC test suite at that time (disclosure-minimisation, MAC-soundness,
+hidden-join, tamper-detection, comparison) passed UNCHANGED, so protocol behaviour is
+identical. <!-- [OPUS-4.8] de-staled a point-in-time count (was "270"); the live count drifts, the invariant ("no behaviour change") is what's load-bearing here — run `cargo test -p sparq-mpc` for the current total -->
 
 This is a **defense-in-depth / latent-gap** fix, NOT a soundness fix.
