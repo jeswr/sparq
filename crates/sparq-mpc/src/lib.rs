@@ -337,7 +337,7 @@ pub use oblivious_join::{
     MatchBit, ObliviousOutput, ObliviousOutputCost, OutputSlot,
 };
 pub use rng::{MpcRng, SecureRng};
-pub use robust::reconstruct_robust;
+pub use robust::{reconstruct_robust, reconstruct_robust_attributed, RobustReconstruction};
 // [OPUS-4.8] sq-km34.1: `MacSession` mints the session-global `[α]` and produces
 // authenticated sharings; `ShamirDealer::new_mac_session` is the entry point.
 pub use shamir::{MacSession, ShamirBackend, Share};
