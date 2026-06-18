@@ -3414,12 +3414,14 @@ dependencies = [
 name = "sparq-introspect"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "sparq-core",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
