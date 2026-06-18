@@ -370,4 +370,35 @@ mod tests {
             Some(0)
         );
     }
+
+    #[test]
+    fn lex_metadata_aggregate_returns_all_values() {
+        // [OPUS-4.8] sq-9g58 coverage: the aggregate `lex::metadata` helper (the
+        // single-call form a materialising loader uses) — distinct from the
+        // per-property `lex::dimension` etc. that the test above drives.
+        use crate::vocab::WKT_LITERAL;
+        let m = lex::metadata("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", WKT_LITERAL).unwrap();
+        assert_eq!(m.dimension, Some(2));
+        assert_eq!(m.coordinate_dimension, Some(2));
+        assert_eq!(m.spatial_dimension, Some(2));
+        assert!(!m.is_empty);
+        assert!(m.is_simple);
+        assert!(m.has_serialization.contains("POLYGON"));
+    }
+
+    #[test]
+    fn degenerate_linestring_is_simple() {
+        // [OPUS-4.8] sq-9g58 coverage: linestring_is_simple's `< 2 points`
+        // early-return arm. An EMPTY linestring has no vertices and is simple.
+        assert!(meta("LINESTRING EMPTY").is_simple);
+    }
+
+    #[test]
+    fn collinear_self_overlapping_linestring_is_not_simple() {
+        // [OPUS-4.8] sq-9g58 coverage: linestring_is_simple's COLLINEAR
+        // intersection arm — a curve whose segments overlap along a shared line
+        // (it doubles back over itself) is NOT simple.
+        // (0 0)->(3 0)->(1 0): the second segment lies ON the first.
+        assert!(!meta("LINESTRING(0 0, 3 0, 1 0)").is_simple);
+    }
 }

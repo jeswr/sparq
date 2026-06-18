@@ -921,7 +921,12 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
+        # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
+        # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
+        # is MANDATORY — without it install-action installs NOTHING and `cargo llvm-cov` ENOENTs.
         uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
       - name: Test-presence gate (fast, no compile)
         run: python3 scripts/coverage-presence.py --check
       - name: Coverage-floor MONOTONICITY gate (ratchet only rises, fast, no compile)
@@ -1034,7 +1039,12 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
+        # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
+        # install-action — the @<tool> ref is dropped by the SHA pin, so without this the
+        # tool is silently NOT installed and `cargo llvm-cov` ENOENTs (see per-commit job).
         uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
       - name: Test-presence gate
         run: python3 scripts/coverage-presence.py --check
       - name: Measure + enforce per-crate coverage (FULL tier, max-remeasure gate)
