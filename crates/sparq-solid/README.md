@@ -387,6 +387,22 @@ indistinguishable from an absent one. Before the first `materialize_*` call ever
 at load. See [`SECURITY.md`](../../SECURITY.md) for the project security policy and the
 design doc for the full threat model.
 
+## Containment / `ldp:contains` ownership — PSS-written, not sparq-derived ([OPUS-4.8] sq-3jtd.4)
+
+A container's `ldp:contains` listing is **explicit content written by the storage layer
+(PSS)**, not a sparq-derived or sparq-materialized view. sparq-solid stores `ldp:contains`
+as ordinary triples in the container's named graph and treats them as opaque content: it
+**never** derives `ldp:contains` from IRI structure, mutates or re-derives it on a write,
+or reads it into the reasoner. Containment *ancestry* is derived structurally from IRI
+slash-semantics (`solidx:parent`/`solidx:ancestor`, design doc §3.2) purely to drive ACL
+inheritance — that derivation never surfaces as `ldp:contains`. Keeping containment
+PSS-written avoids re-deriving a view on every write, keeps the §2.4 content/reasoner
+security boundary clean (a derived listing would have to read pod content), and lets the
+engine's atomic multi-op `UPDATE` keep the explicit triples consistent. The decision and
+the conditions under which a structural-only sparq-side derivation would be revisited are
+recorded in the design doc §7 item 7 and `research/sparq-solid-scope.md` area 2. The invariant is
+pinned by `tests/containment_view_ownership.rs`.
+
 ## 📚 Learn more
 
 - **Design + threat model + measured baseline** —

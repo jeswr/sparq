@@ -39,6 +39,55 @@ const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, n
 MINUS, BIND, VALUES, aggregation (GROUP BY / HAVING), ORDER BY, DISTINCT/LIMIT/
 OFFSET, sub-SELECT.
 
+### Query forms + string functions (all retained)
+
+Every SPARQL query *form* is exported — SELECT/ASK via `query` / `ask` (plus the
+streaming `queryCursor` / `queryChunks`) and **CONSTRUCT / DESCRIBE** via `queryQuads`
+/ `queryQuadsChunks`, which return the constructed graph as **N-Triples** (a valid
+`text/turtle` subset). The non-regex string functions are kept in the wasm build —
+`CONTAINS`, `STRSTARTS`, `LCASE` (and `UCASE`, `STRENDS`, `SUBSTR`, `STRLEN`, `CONCAT`,
+`STRBEFORE`/`STRAFTER`, …); these share one `sparq-engine`/`sparq-core` with native, so
+they behave identically. (Regression-tested natively and in a real wasm runtime — see the
+`string_functions` tests.) Tracked as the gh-54 read-replica-tier audit (bead `sq-0ptd`).
+
+**`REGEX` / `REPLACE` are the one exception — compiled OUT of the lean default bundle.**
+They live behind `sparq-engine`'s default-on `regex` feature, and this crate disables the
+engine's defaults to keep the regex automata out of the browser bundle, so on a default-built
+`Store` a query that uses `REGEX` / `REPLACE` is **rejected** (an `"unsupported SPARQL
+function"` error surfaced as the `JsError` Err arm — not a silently-empty result). Build with
+`--features regex` (the wasm crate forwards it to `sparq-engine/regex`) — or prefer
+`CONTAINS` / `STRSTARTS` / `STRENDS` — if you need them in wasm.
+
+### Persistence is native-only — no `save` / `open` / `mmap` in wasm
+
+The native `Graph::save` / `open` / `save_compressed` family and the mmap-backed
+dictionary/store map-in path are **deliberately not exported** to wasm: they take a
+`std::path::Path` and rely on a POSIX **filesystem** and **`mmap`** (`memmap2`), which a
+browser/edge wasm sandbox does not provide. The whole `mmap` Cargo feature is off in this
+crate's `sparq-core` dependency, and on-disk persistence stays on the native (container)
+tier. A wasm store is built fresh each session with `Store.load` / `loadCompressed` from
+in-memory bytes the host already holds (IndexedDB, `fetch`, a `File`); to materialise a
+store's contents back out for the host to persist, run a
+`CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }` through `queryQuads` and store the N-Triples.
+There is **no binary snapshot format across the wasm boundary**.
+
+### Single-threaded + append-only growth + the 32-bit ceiling
+
+- **Single-threaded.** No `rayon` in the bundle (wasm has no threads here): loads and
+  queries run on the one (main) thread; no parallel scan/parse.
+- **Append-only delta growth.** `updateInPlace` / `applyDelta` mutate through the engine's
+  delta overlay: the permutation indexes and the dictionary grow **append-only** (existing
+  term ids stay valid — never renumbered) and deletes are *masked*, not reclaimed. Steady
+  writing therefore **monotonically grows** the footprint until a rebuild — re-`load`, or
+  use the immutable-rebuild `update` (which returns a fresh compacted store), to fold the
+  overlay back down and reclaim deleted space. The wasm tier is read-replica-shaped
+  (load → query), not a long-lived mutable primary.
+- **32-bit linear-memory ceiling.** `wasm32` linear memory is **4 GiB** addressable, and a
+  real tab is happier well under ~2 GiB — that, not CPU, is the binding scale limit.
+  `loadCompressed` is the lever for fitting a bigger graph under it (see "Browser memory
+  bound" below); append-only growth eats into the same budget, and `heapBytes()` lets a host
+  watch the current footprint.
+
 \* **`"jsonld"` (and `"json-ld"` / `"application/ld+json"`) is parsed only when
 built with the opt-in `jsonld` feature** — `wasm-pack build … --release -- --features jsonld`.
 It links the `oxjsonld` parser (~0.35 MiB raw, pre-`wasm-opt`), so it is **OFF by default**
