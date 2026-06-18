@@ -501,7 +501,9 @@ struct EgressFilterResolver {
 // [OPUS-4.8] sq-g2xs: ureq-3's `Resolver` takes a parsed `&http::Uri` (+ config + timeout) and
 // returns an `ArrayVec<SocketAddr, 16>` rather than ureq-2's `&str` netloc → `Vec`. The SSRF
 // policy is byte-for-byte the ureq-2 one; the shared `crate::ureq_egress` helpers carry the
-// ureq-3 boilerplate so every federation resolver applies identical, audited logic.
+// ureq-3 boilerplate so the three sparq-fedclient transports share one implementation. (The engine
+// SERVICE resolver applies equivalent, unit-tested logic via its own inline copy — `sparq-engine`
+// cannot depend on `sparq-fedclient` — so it does not share this module.)
 #[cfg(not(target_arch = "wasm32"))]
 impl ureq::unversioned::resolver::Resolver for EgressFilterResolver {
     fn resolve(

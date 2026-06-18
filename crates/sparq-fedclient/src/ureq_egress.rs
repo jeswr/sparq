@@ -6,14 +6,19 @@
 //! timeout) and returns an `ArrayVec<SocketAddr, 16>` ([`ResolvedSocketAddrs`]) rather than
 //! ureq 2's `&str` netloc → `Vec<SocketAddr>`.
 //!
-//! Three federation transports (`source::HttpTransport`, `source::HttpFragmentTransport`,
-//! `discovery::HttpFetcher`) install a custom resolver that enforces the **same** default-deny
-//! SSRF policy: resolve the host, drop every private/internal address (unless the bare host is
-//! explicitly allowlisted), and return only the survivors — so ureq dials only vetted IPs and
-//! there is no DNS-rebinding re-resolve window. This module factors the ureq-3 boilerplate
-//! (URI→host:port parse, the capacity-bounded filtered resolve, the refusal error) into one
-//! place so all three resolvers share identical, audited logic. Native-only; only built when the
-//! `fedclient` feature pulls ureq in.
+//! The three sparq-fedclient transports (`source::HttpTransport`,
+//! `source::HttpFragmentTransport`, `discovery::HttpFetcher`) install a custom resolver that
+//! enforces the **same** default-deny SSRF policy: resolve the host, drop every private/internal
+//! address (unless the bare host is explicitly allowlisted), and return only the survivors — so
+//! ureq dials only vetted IPs and there is no DNS-rebinding re-resolve window. This module factors
+//! the ureq-3 boilerplate (URI→host:port parse, the capacity-bounded filtered resolve, the refusal
+//! error) into one place so those three transports share one implementation. Native-only; only
+//! built when the `fedclient` feature pulls ureq in.
+//!
+//! The engine SERVICE resolver (`sparq-engine`'s `service.rs`) applies the *same* egress/SSRF
+//! logic, but keeps its own equivalent inline copy of these helpers because `sparq-engine` must
+//! not depend on `sparq-fedclient`. The two implementations are equivalent and unit-tested (not
+//! externally security-audited); they do not share this module.
 
 use std::net::IpAddr;
 use std::net::ToSocketAddrs;
