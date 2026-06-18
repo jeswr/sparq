@@ -86,7 +86,12 @@ Update (data lives in the default + named graphs):
 
 - `update(&Graph, &str) -> Result<Graph, String>` — returns a NEW graph (O(n) rebuild).
 - `update_in_place(&mut Graph, &str) -> Result<(), String>` — incremental delta-overlay, O(batch);
-  WAL-durable for directory-backed graphs.
+  WAL-durable for directory-backed graphs. NON-atomic on error: a failing op leaves the earlier
+  ops' partial prefix applied (request-level atomicity is the caller's responsibility).
+- `update_in_place_atomic(&mut Graph, &str) -> Result<(), String>` (+ `_with_budget`) — request-ATOMIC
+  delta-overlay: forks, applies, and commits back ONLY if every op succeeds (else `graph` is left at
+  its pre-request state). Use this for SPARQL-1.1 all-or-nothing semantics from a direct library
+  consumer without writing your own fork/seal recovery.
 - `update_in_place_capturing(&mut Graph, &str, &QueryBudget) -> Result<Vec<UpdateEffect>, String>`
   + `apply_effects(&mut Graph, &[UpdateEffect])` — apply once, capturing the RESOLVED delta, then
   replay it onto a second (e.g. durable mirror) graph WITHOUT re-executing the text. Use this when
@@ -320,9 +325,11 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
 - **Only SELECT/ASK** go through `query`/`query_json`/`count`; CONSTRUCT/DESCRIBE have their own
   functions, and a form mismatch is a clean `Err` (e.g. `ask()` on a SELECT).
 - **`SELECT *`** never exposes blank-node "variables" (`_:x` in a pattern is an existential var).
-- **`update` vs `update_in_place`** — `update` returns a fresh `Graph` (input borrowed, untouched);
-  `update_in_place(&mut g, …)` mutates via the delta overlay (call `Graph::compact` periodically).
-  `LOAD` only resolves `file://`; set the base dir with `with_load_base(path, || update(...))`.
+- **`update` vs `update_in_place` vs `update_in_place_atomic`** — `update` returns a fresh `Graph`
+  (input borrowed, untouched, atomic by construction); `update_in_place(&mut g, …)` mutates via the
+  delta overlay (call `Graph::compact` periodically) but is NON-atomic on error; `update_in_place_atomic`
+  forks-and-seals so an in-place mutation is all-or-nothing. `LOAD` only resolves `file://`; set the
+  base dir with `with_load_base(path, || update(...))`.
 - **SPARQL `SERVICE` federation** is the non-default `service` cargo feature (pulls `ureq`; off on
   wasm). When enabled, outbound `SERVICE` fetches go through a **default-deny SSRF egress filter**:
   an endpoint that resolves to a loopback / RFC1918 / link-local (incl. the `169.254.169.254`

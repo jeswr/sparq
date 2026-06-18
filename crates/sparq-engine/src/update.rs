@@ -649,6 +649,44 @@ pub fn update_in_place_capturing(
     Ok(effects)
 }
 
+/// [OPUS-4.8] (sq-o1wp) Request-ATOMIC variant of [`update_in_place`]: applies the whole
+/// `;`-separated update request to a private [`fork`](Graph::fork) and only commits it back into
+/// `graph` (by replacing `*graph`) when EVERY operation succeeds. On any error — a parse failure,
+/// a non-SILENT failing `LOAD`, or a budget/WHERE blow-up on operation *K* — the partial fork is
+/// discarded and `graph` is left EXACTLY at its pre-request state (full rollback).
+///
+/// This packages, as a safe public default, the request-level-atomicity pattern the production
+/// serve writer already uses (fork → apply → seal-only-on-`Ok`; see
+/// `fork_and_seal_recovers_request_atomicity`). The bare [`update_in_place`] primitive is, by its
+/// documented contract, NON-atomic on error: a failing later operation leaves the earlier ops'
+/// partial prefix applied (see `in_place_request_is_partial_on_error_by_contract`). That is the
+/// fast path the serve writer wraps; a *direct library consumer* that does not implement its own
+/// fork/seal recovery should reach for THIS function to get SPARQL 1.1's all-or-nothing request
+/// semantics without the footgun.
+///
+/// Cost: one [`fork`](Graph::fork) (O(pending delta), not O(triples)) plus the in-place apply. The
+/// fork carries no WAL/redo-journal, so the committed state inherits `graph`'s durability story
+/// only after the swap — for a directory-backed graph prefer the serve writer path, which seals
+/// through the durable base. Runs under an unlimited [`crate::QueryBudget`]; use
+/// [`update_in_place_atomic_with_budget`] to bound a `DELETE/INSERT … WHERE`.
+pub fn update_in_place_atomic(graph: &mut Graph, sparql: &str) -> Result<(), String> {
+    update_in_place_atomic_with_budget(graph, sparql, &crate::QueryBudget::unlimited())
+}
+
+/// [OPUS-4.8] (sq-o1wp) [`update_in_place_atomic`] under a cooperative [`crate::QueryBudget`] (the
+/// budget bounds a `DELETE/INSERT … WHERE` exactly as in [`update_in_place_with_budget`]). The
+/// fork is applied under the budget; a budget-exceeded error rolls the request back whole.
+pub fn update_in_place_atomic_with_budget(
+    graph: &mut Graph,
+    sparql: &str,
+    budget: &crate::QueryBudget,
+) -> Result<(), String> {
+    let mut working = graph.fork();
+    update_in_place_with_budget(&mut working, sparql, budget)?;
+    *graph = working;
+    Ok(())
+}
+
 /// The shared in-place apply core. When `sink` is `Some`, every operation's RESOLVED effect is
 /// recorded into it so a durable mirror can replay the exact committed delta (see
 /// [`update_in_place_capturing`]); when `None`, capture is fully elided.
@@ -1812,6 +1850,52 @@ mod update_contract {
         assert_eq!(dataset_count(&published), 3, "an all-succeed request seals the fully-applied working copy");
         // The base the fork came from is, throughout, untouched by either request.
         assert_eq!(dump(&base), snapshot, "the published base is never mutated by a working-copy apply");
+    }
+
+    /// [OPUS-4.8] (sq-o1wp) [`update_in_place_atomic`] packages the fork → apply → seal-only-on-`Ok`
+    /// pattern as a safe public default, so a DIRECT library consumer gets SPARQL-1.1 all-or-nothing
+    /// request semantics WITHOUT writing its own recovery. Pins both arms: a failing multi-op request
+    /// leaves `graph` exactly at its pre-request snapshot (full rollback — the hazard the bare
+    /// `update_in_place` leaks per `in_place_request_is_partial_on_error_by_contract`), and an
+    /// all-succeed request commits every operation in place.
+    #[test]
+    fn in_place_atomic_rolls_back_whole_request_on_error() {
+        let mut g = Graph::load_str("@prefix : <http://ex/> . :seed :p :o .", "turtle").unwrap();
+        let snapshot = dump(&g);
+        assert_eq!(dataset_count(&g), 1);
+
+        // A request: a VALID INSERT DATA, then a non-SILENT LOAD that fails (op K = 2).
+        let failing = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; LOAD <http://ex/nope.ttl>";
+        let r = update_in_place_atomic(&mut g, failing);
+        assert!(r.is_err(), "the request reports the failure");
+        // Unlike the bare in-place path, the valid INSERT DATA prefix is NOT committed.
+        assert_eq!(dump(&g), snapshot, "atomic in-place rolls the dataset back to its pre-request snapshot");
+        assert_eq!(dataset_count(&g), 1, "the pre-failure prefix must NOT have committed in place");
+
+        // The all-succeed counterpart commits every operation in place.
+        let ok = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; INSERT DATA { :c :p :d }";
+        update_in_place_atomic(&mut g, ok).expect("an all-succeed request commits in place");
+        assert_eq!(dataset_count(&g), 3, "an all-succeed request commits every operation in place");
+    }
+
+    /// [OPUS-4.8] (sq-o1wp) A parse error never mutates `graph` under the atomic wrapper (the fork is
+    /// built but `parse_update` fails before any op applies), and the budgeted entry point shares the
+    /// same all-or-nothing contract.
+    #[test]
+    fn in_place_atomic_parse_error_and_budget_entry_point() {
+        let mut g = Graph::load_str("@prefix : <http://ex/> . :seed :p :o .", "turtle").unwrap();
+        let snapshot = dump(&g);
+        assert!(update_in_place_atomic(&mut g, "NOT A VALID UPDATE").is_err(), "parse error is reported");
+        assert_eq!(dump(&g), snapshot, "a parse error leaves the graph untouched");
+
+        // Budgeted entry point: an all-succeed request under an unlimited budget commits.
+        update_in_place_atomic_with_budget(
+            &mut g,
+            "PREFIX : <http://ex/> INSERT DATA { :a :p :b }",
+            &crate::QueryBudget::unlimited(),
+        )
+        .expect("budgeted atomic apply commits an all-succeed request");
+        assert_eq!(dataset_count(&g), 2, "the budgeted atomic apply committed the insert");
     }
 }
 
