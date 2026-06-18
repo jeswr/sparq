@@ -34,6 +34,10 @@ sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
 # Validation: parse the generated query to algebra BEFORE touching the engine, so the
 # repair round gets a real parser error message.
 spargebra.workspace = true
+# N2 dictionary-grounded constraint (`constrain.rs`, sq-9yjp): build oxrdf NamedNode/Term
+# to probe the live dictionary via Graph::id_of. Workspace-pinned so the term type is
+# byte-identical to sparq-core's (id_of takes oxrdf::Term).
+oxrdf.workspace = true
 # Record/replay fixtures (prompt -> completion pairs) are plain JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
