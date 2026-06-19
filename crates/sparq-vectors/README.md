@@ -75,9 +75,10 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   and reopen **that** (`Graph::open`, frozen id order); **never** re-parse the source RDF
   (pinned in `tests/staleness_contract.rs`).
 - **Incremental add / remove / update (opt-in `delta`)** — a `.spqv` is build-once-immutable; the
-  `delta` feature adds an **in-RAM delta sidecar** (`add`/`remove`/`update` → append map + tombstones)
-  that `get`/`iter`/search transparently union (honouring tombstones), generation-tied to the base
-  (sq-32i5). `compact` folds it into a from-scratch-equivalent base. **In-RAM only** (lost on drop; `compact` is the durability path); a persisted delta is a tracked follow-up. No new dep. See rustdoc/SKILL.
+  `delta` feature adds a **delta sidecar** (`add`/`remove`/`update` → append map + tombstones) that
+  `get`/`iter`/search transparently union (honouring tombstones), generation-tied to the base
+  (sq-32i5); `compact` folds it into a from-scratch-equivalent base. `save_delta`/`open_with_delta`
+  persist+replay it to a crash-durable `.spqd` (tmp+fsync+rename, partial-write & mismatched-base detected) so mutations survive a restart without a compact. No new dep. See rustdoc/SKILL.
 - **Verbalization, quantization, hybrid fusion** — `verbalize` / `embed_entities` render
   per-entity text (multilingual, char-budgeted, single named graph at a time);
   `ScalarQuantizer` (4×) and `ProductQuantizer` for large stores; `fuse_rrf` /

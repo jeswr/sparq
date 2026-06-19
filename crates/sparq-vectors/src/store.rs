@@ -747,6 +747,133 @@ impl VectorStore {
         fresh.finalize()?;
         Ok(fresh)
     }
+
+    /// [OPUS-4.8] (sq-7e50) The conventional persisted-delta sidecar path for a `.spqv` base at
+    /// `base`: the base path with `d` substituted for the trailing `v` (`foo.spqv` → `foo.spqd`),
+    /// or `base` + `.spqd` if it does not end in `.spqv`. Used by [`save_delta`](Self::save_delta)
+    /// and [`open_with_delta`](Self::open_with_delta) so a delta lives next to its base by default.
+    pub fn sibling_delta_path(base: &Path) -> PathBuf {
+        let s = base.as_os_str().to_string_lossy();
+        if let Some(stem) = s.strip_suffix(".spqv") {
+            PathBuf::from(format!("{}.spqd", stem))
+        } else {
+            let mut p = base.as_os_str().to_os_string();
+            p.push(".spqd");
+            PathBuf::from(p)
+        }
+    }
+
+    /// [OPUS-4.8] (sq-7e50) **Persists the in-RAM delta** to a `.spqd` sidecar at
+    /// [`sibling_delta_path`](Self::sibling_delta_path) of this store's base path, so incremental
+    /// add/remove/update survive a process restart without a [`compact`](Self::compact). Returns the
+    /// sidecar path written. Crash-durable: the bytes are written to a sibling `.spqd-tmp`, `fsync`ed
+    /// (`sync_all`), then atomically `rename`d over the final path — a crash mid-write leaves the
+    /// previous sidecar (or none) intact, never a half-written file at the live path (the same
+    /// discipline as [`StreamingWriter`]). The header carries this store's bound graph fingerprint
+    /// (the generation tie), so [`open_with_delta`](Self::open_with_delta) rejects the sidecar
+    /// against a mismatched base.
+    ///
+    /// A store with NO pending delta writes an empty (header-only) sidecar — replaying it is a no-op,
+    /// and it still carries the generation so a stale base is still caught. See [`save_delta_to`](Self::save_delta_to) to
+    /// choose the path explicitly.
+    pub fn save_delta(&self) -> Result<PathBuf, String> {
+        let path = Self::sibling_delta_path(&self.path);
+        self.save_delta_to(&path)?;
+        Ok(path)
+    }
+
+    /// [OPUS-4.8] (sq-7e50) Like [`save_delta`](Self::save_delta) but persists the `.spqd` sidecar to
+    /// an explicit `path`. Serializes the in-RAM delta (or an empty delta bound to this store's
+    /// fingerprint if none has been started — so the generation tie is still recorded), writing it
+    /// crash-durably (tmp + `sync_all` + atomic rename).
+    pub fn save_delta_to<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        let path = path.as_ref();
+        // An unstarted delta persists as an empty delta bound to THIS store's generation, so a
+        // reopened base still validates the (empty) sidecar against its fingerprint.
+        let bytes = match &self.delta {
+            Some(d) => d.to_bytes(self.dim),
+            None => crate::delta::VectorDelta::new(self.fingerprint).to_bytes(self.dim),
+        };
+        let tmp = {
+            let mut p = path.as_os_str().to_os_string();
+            p.push("-tmp");
+            PathBuf::from(p)
+        };
+        // Write the full sidecar to the tmp path, fsync it, then atomically rename it over the
+        // final path. On any error the partial tmp is removed so a live `.spqd` is never replaced
+        // by a half-written one.
+        let write_tmp = || -> std::io::Result<()> {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp, path)
+        };
+        write_tmp().map_err(|e| {
+            std::fs::remove_file(&tmp).ok();
+            format!("save_delta {}: {e}", path.display())
+        })
+    }
+
+    /// [OPUS-4.8] (sq-7e50) Whether a persisted `.spqd` delta sidecar exists at
+    /// [`sibling_delta_path`](Self::sibling_delta_path) of `base`.
+    pub fn has_persisted_delta(base: &Path) -> bool {
+        Self::sibling_delta_path(base).exists()
+    }
+
+    /// [OPUS-4.8] (sq-7e50) **Opens a `.spqv` base AND replays its persisted `.spqd` delta**, so a
+    /// store reopened after a restart reads the SAME effective (base + delta) view it had before the
+    /// handle dropped — no [`compact`](Self::compact) required. Equivalent to
+    /// [`open`](Self::open)`(base)` followed by reading the sidecar at
+    /// [`sibling_delta_path`](Self::sibling_delta_path) and [`apply_delta`](Self::apply_delta)ing it,
+    /// so all of the existing guards apply:
+    ///
+    ///   * the base is fully validated exactly as [`open`](Self::open),
+    ///   * the persisted delta's `dim` must match the base (else a descriptive `Err`),
+    ///   * the persisted delta's base-generation fingerprint must match the base store's bound
+    ///     fingerprint — `apply_delta` REJECTS a sidecar written against a different graph generation
+    ///     (the sq-32i5 generation tie), so a stale `.spqd` against a rebuilt base can never mis-key,
+    ///   * a truncated / corrupt sidecar is rejected by [`VectorDelta::from_bytes`](crate::delta::VectorDelta)
+    ///     (the exact-length partial-write guard), never read out of bounds.
+    ///
+    /// If NO sidecar exists this is exactly [`open`](Self::open) (the store reads the bare base).
+    pub fn open_with_delta<P: AsRef<Path>>(base: P) -> Result<VectorStore, String> {
+        let base = base.as_ref();
+        let delta_path = Self::sibling_delta_path(base);
+        Self::open_with_delta_at(base, &delta_path)
+    }
+
+    /// [OPUS-4.8] (sq-7e50) Like [`open_with_delta`](Self::open_with_delta) but reads the persisted
+    /// delta from an explicit `delta_path`. If `delta_path` does not exist, returns the bare opened
+    /// base (no error — a base with no sidecar is the no-delta case).
+    pub fn open_with_delta_at<P: AsRef<Path>, Q: AsRef<Path>>(
+        base: P,
+        delta_path: Q,
+    ) -> Result<VectorStore, String> {
+        let base = base.as_ref();
+        let delta_path = delta_path.as_ref();
+        let mut store = VectorStore::open(base)?;
+        if !delta_path.exists() {
+            return Ok(store);
+        }
+        let bytes = std::fs::read(delta_path)
+            .map_err(|e| format!("read {}: {e}", delta_path.display()))?;
+        let (delta, delta_dim) = crate::delta::VectorDelta::from_bytes(&bytes)
+            .map_err(|e| format!("{}: {e}", delta_path.display()))?;
+        if delta_dim != store.dim {
+            return Err(format!(
+                "{}: delta dimension {} does not match the base store dimension {}",
+                delta_path.display(),
+                delta_dim,
+                store.dim
+            ));
+        }
+        // `apply_delta` enforces the generation tie (delta fingerprint == base fingerprint).
+        store
+            .apply_delta(delta)
+            .map_err(|e| format!("{}: {e}", delta_path.display()))?;
+        Ok(store)
+    }
 }
 
 /// [OPUS-4.8] (sq-pi44) A one-line description of a delta/store generation for the mismatch error.

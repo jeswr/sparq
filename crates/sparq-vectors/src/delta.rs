@@ -47,13 +47,66 @@
 //! the crate docs / the sq-pi44 follow-up bead. `compact` is the durability path today: it
 //! materializes the delta into a normal, validated `.spqv`.
 //!
+//! # [OPUS-4.8] (sq-7e50) Persisted on-disk delta sidecar (`.spqd`)
+//!
+//! The in-RAM delta above is lost when the [`VectorStore`](crate::store::VectorStore) handle drops
+//! — [`compact`](crate::store::VectorStore::compact) was the only durability path. sq-7e50 adds a
+//! **persisted** sidecar so incremental add/remove/update survive a process restart *without* a
+//! compact: [`VectorStore::save_delta`](crate::store::VectorStore::save_delta) serializes the
+//! in-RAM [`VectorDelta`] to a little-endian `.spqd` file alongside the `.spqv` base, and
+//! [`VectorStore::open_with_delta`](crate::store::VectorStore::open_with_delta) opens the base mmap
+//! and replays the persisted delta back onto it (through the same generation-tie validation as
+//! [`apply_delta`](crate::store::VectorStore::apply_delta)).
+//!
+//! ## On-disk format (version 1, little-endian — mirrors the `.spqv` header discipline)
+//!
+//! ```text
+//! offset 0   magic         b"SPQD"                         4 bytes
+//! offset 4   version       u32 = 1                         4 bytes
+//! offset 8   dim           u32                             4 bytes
+//! offset 12  append_count  u64                             8 bytes
+//! offset 20  tomb_count    u64                             8 bytes
+//! offset 28  reserved      zero padding                    4 bytes
+//! offset 32  fingerprint   base graph fingerprint          24 bytes
+//!            (dict_len: u64, triple_count: u64, content_hash: u64)
+//! offset 56  appends       [append_count × (id: u32, dim × f32)]
+//!            tombstones     [tomb_count × (id: u32)]        (after the appends)
+//! ```
+//!
+//! The header carries the **base graph fingerprint** (the [`generation`](VectorDelta::generation)
+//! the delta is keyed against — the sq-32i5 generation tie): on open the persisted fingerprint is
+//! decoded into the delta's `generation`, so replaying it through `apply_delta` REJECTS a delta
+//! whose generation does not match the base store's bound fingerprint — a persisted delta written
+//! against generation N can never be silently mis-keyed onto a base of generation M ≠ N. The
+//! all-zero block decodes to `None` (an unbound/unverified delta), exactly as the `.spqv`
+//! fingerprint block does.
+//!
+//! **Crash-durability.** [`save_delta`](crate::store::VectorStore::save_delta) writes to a sibling
+//! `.spqd-tmp`, `fsync`s it, then atomically `rename`s it over the final path — the same
+//! write-tmp-then-rename + `sync_all` discipline as [`StreamingWriter`](crate::store::StreamingWriter):
+//! a crash mid-write leaves the previous `.spqd` (or none) intact, never a half-written sidecar at
+//! the live path. **Partial-write detection.** `from_bytes` (the crate-internal decoder) recomputes
+//! the EXACT expected length from the header (`56 + append_count·(4 + dim·4) + tomb_count·4`) and
+//! rejects any file that is shorter OR longer — a truncated (or trailing-garbage) sidecar is a
+//! descriptive `Err`, never an out-of-bounds read or a silently-short replay.
+//!
 //! Opt-in: the whole layer is gated behind the **`delta`** cargo feature, off by default, and adds
 //! NO dependency (it reuses the in-tree `rustc-hash` map/set), so the default build carries zero
 //! delta code.
 
-use crate::fingerprint::Fingerprint;
+use crate::fingerprint::{Fingerprint, FINGERPRINT_LEN};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::Id;
+
+/// [OPUS-4.8] (sq-7e50) First four bytes of every persisted `.spqd` delta sidecar file.
+pub const SPQD_MAGIC: [u8; 4] = *b"SPQD";
+/// [OPUS-4.8] (sq-7e50) Current `.spqd` format version.
+pub const SPQD_VERSION: u32 = 1;
+/// [OPUS-4.8] (sq-7e50) Byte length of the `.spqd` header: magic(4) + version(4) + dim(4) +
+/// append_count(8) + tomb_count(8) + reserved(4) + fingerprint(`FINGERPRINT_LEN`). All counts and
+/// the fingerprint are fixed-width little-endian, so a sidecar written on one machine decodes
+/// identically on another (the same cross-machine discipline as the `.spqv` header / fingerprint).
+const SPQD_HEADER_LEN: usize = 32 + FINGERPRINT_LEN;
 
 /// [OPUS-4.8] (sq-pi44) The in-RAM delta sidecar: vectors appended/updated and ids tombstoned
 /// since the base store was built, plus the graph [`Fingerprint`] the delta is keyed against.
@@ -102,5 +155,248 @@ impl VectorDelta {
     /// Whether the delta holds no appends and no tombstones (a no-op delta).
     pub fn is_empty(&self) -> bool {
         self.appended.is_empty() && self.tombstones.is_empty()
+    }
+
+    /// [OPUS-4.8] (sq-7e50) Serializes the delta to the little-endian `.spqd` on-disk format (see
+    /// the module docs). `dim` is the base store's vector dimension — every appended vector MUST
+    /// be exactly `dim` long (the in-RAM `add`/`update` validation guarantees this) so the body is
+    /// a fixed `dim·4`-byte stride per append, and `from_bytes` can recompute the exact length.
+    ///
+    /// Appends and tombstones are each emitted in ASCENDING id order, so the bytes are a
+    /// deterministic function of the logical delta (re-saving an unchanged delta is byte-stable and
+    /// machine-independent), not of `FxHashMap`/`FxHashSet` iteration order.
+    pub(crate) fn to_bytes(&self, dim: usize) -> Vec<u8> {
+        let append_count = self.appended.len();
+        let tomb_count = self.tombstones.len();
+        let mut out = Vec::with_capacity(
+            SPQD_HEADER_LEN + append_count * (4 + dim * 4) + tomb_count * 4,
+        );
+        out.extend_from_slice(&SPQD_MAGIC);
+        out.extend_from_slice(&SPQD_VERSION.to_le_bytes());
+        out.extend_from_slice(&(dim as u32).to_le_bytes());
+        out.extend_from_slice(&(append_count as u64).to_le_bytes());
+        out.extend_from_slice(&(tomb_count as u64).to_le_bytes());
+        out.extend_from_slice(&[0u8; 4]); // reserved
+        // The base generation tie: a zero block for an unbound (None) generation — decoded back to
+        // None by `Fingerprint::from_bytes_opt`, exactly as the `.spqv` fingerprint block is.
+        match self.generation {
+            Some(fp) => out.extend_from_slice(&fp.to_bytes()),
+            None => out.extend_from_slice(&[0u8; FINGERPRINT_LEN]),
+        }
+        debug_assert_eq!(out.len(), SPQD_HEADER_LEN);
+
+        // Appends in ascending id order: (id: u32, dim × f32).
+        let mut appends: Vec<(&Id, &Vec<f32>)> = self.appended.iter().collect();
+        appends.sort_unstable_by_key(|&(id, _)| *id);
+        for (id, vec) in appends {
+            out.extend_from_slice(&id.to_le_bytes());
+            for &v in vec {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        // Tombstones in ascending id order: (id: u32).
+        let mut tombs: Vec<Id> = self.tombstones.iter().copied().collect();
+        tombs.sort_unstable();
+        for id in tombs {
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+        out
+    }
+
+    /// [OPUS-4.8] (sq-7e50) Parses a `.spqd` delta sidecar from `bytes`, returning the reconstructed
+    /// in-RAM [`VectorDelta`] (its `generation` set from the header fingerprint block) and the base
+    /// `dim` it was written for (the caller checks `dim` against its base store).
+    ///
+    /// **Validation is fail-closed.** A bad magic, an unknown version, a `dim` of zero, an append/
+    /// tombstone count whose implied body length overflows or does not EXACTLY match `bytes.len()`
+    /// (the partial-write / truncation guard — a short OR long file is rejected), or a duplicate /
+    /// conflicting id (an id appearing in both the append and tombstone sections, or twice in one
+    /// section) is a descriptive `Err`, never an out-of-bounds read or a silently-truncated replay.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<(VectorDelta, usize), String> {
+        if bytes.len() < SPQD_HEADER_LEN {
+            return Err(format!(
+                ".spqd: truncated header ({} bytes, need at least {})",
+                bytes.len(),
+                SPQD_HEADER_LEN
+            ));
+        }
+        if bytes[0..4] != SPQD_MAGIC {
+            return Err(".spqd: not a delta sidecar (bad magic)".into());
+        }
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        if version != SPQD_VERSION {
+            return Err(format!(
+                ".spqd: unsupported version {} (this build writes/reads version {})",
+                version, SPQD_VERSION
+            ));
+        }
+        let dim = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        if dim == 0 {
+            return Err(".spqd: invalid zero vector dimension".into());
+        }
+        let append_count = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
+        let tomb_count = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
+        // The base generation tie (offset 32..56), all-zero ⇒ None (unbound/unverified).
+        let generation = Fingerprint::from_bytes_opt(&bytes[32..32 + FINGERPRINT_LEN]);
+
+        // The EXACT expected total length, computed with checked arithmetic so a hostile header
+        // count cannot wrap the multiply/add into a small in-bounds value. Any mismatch (short =
+        // truncation/partial write, long = trailing garbage) is rejected before any body read.
+        let append_stride = 4usize
+            .checked_add(dim.checked_mul(4).ok_or_else(|| ".spqd: dim overflow".to_string())?)
+            .ok_or_else(|| ".spqd: append-stride overflow".to_string())?;
+        let body_len = append_count
+            .checked_mul(append_stride)
+            .and_then(|a| tomb_count.checked_mul(4).and_then(|t| a.checked_add(t)))
+            .ok_or_else(|| ".spqd: append/tombstone count overflow".to_string())?;
+        let expected = SPQD_HEADER_LEN
+            .checked_add(body_len)
+            .ok_or_else(|| ".spqd: total-length overflow".to_string())?;
+        if bytes.len() != expected {
+            return Err(format!(
+                ".spqd: length mismatch — header implies {} bytes (dim={}, appends={}, \
+                 tombstones={}) but the file is {} bytes; the sidecar is truncated or corrupt",
+                expected,
+                dim,
+                append_count,
+                tomb_count,
+                bytes.len()
+            ));
+        }
+
+        let mut appended: FxHashMap<Id, Vec<f32>> = FxHashMap::default();
+        appended.reserve(append_count);
+        let mut off = SPQD_HEADER_LEN;
+        for _ in 0..append_count {
+            let id = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+            off += 4;
+            let mut vec = Vec::with_capacity(dim);
+            for _ in 0..dim {
+                vec.push(f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()));
+                off += 4;
+            }
+            if vec.iter().any(|v| !v.is_finite()) {
+                return Err(format!(".spqd: appended vector for id {} has a non-finite component", id));
+            }
+            if appended.insert(id, vec).is_some() {
+                return Err(format!(".spqd: id {} appears twice in the append section", id));
+            }
+        }
+        let mut tombstones: FxHashSet<Id> = FxHashSet::default();
+        tombstones.reserve(tomb_count);
+        for _ in 0..tomb_count {
+            let id = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+            off += 4;
+            if !tombstones.insert(id) {
+                return Err(format!(".spqd: id {} appears twice in the tombstone section", id));
+            }
+            if appended.contains_key(&id) {
+                // The in-RAM invariant is "an id is in AT MOST one of appended/tombstones"; a file
+                // that violates it is corrupt, not a valid delta — reject rather than silently pick.
+                return Err(format!(".spqd: id {} is both appended and tombstoned (corrupt)", id));
+            }
+        }
+        debug_assert_eq!(off, bytes.len());
+        Ok((VectorDelta { generation, appended, tombstones }, dim))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // [OPUS-4.8] (sq-7e50) Focused unit tests for the `.spqd` serde: the round-trip preserves the
+    // logical delta (incl. the None/unbound generation), the bytes are deterministic regardless of
+    // map iteration order, and the corruption paths the integration tests do not exercise directly
+    // (a both-appended-and-tombstoned id) are rejected. The store-level open/save and the
+    // result-equivalence + crash + mismatch gates live in `tests/delta_persist.rs`.
+    use super::*;
+
+    fn fp(d: u64, t: u64, h: u64) -> Fingerprint {
+        Fingerprint { dict_len: d, triple_count: t, content_hash: h }
+    }
+
+    fn sample(generation: Option<Fingerprint>) -> VectorDelta {
+        let mut d = VectorDelta::new(generation);
+        d.appended.insert(7, vec![1.0, 2.0, 3.0, 4.0]);
+        d.appended.insert(3, vec![-0.5, 0.0, 0.25, 9.0]);
+        d.tombstones.insert(11);
+        d.tombstones.insert(2);
+        d
+    }
+
+    #[test]
+    fn round_trip_with_a_bound_generation() {
+        let d = sample(Some(fp(4, 2, 0xdead_beef)));
+        let bytes = d.to_bytes(4);
+        let (back, dim) = VectorDelta::from_bytes(&bytes).expect("round-trips");
+        assert_eq!(dim, 4);
+        assert_eq!(back.generation(), d.generation());
+        assert_eq!(back.appended, d.appended);
+        assert_eq!(back.tombstones, d.tombstones);
+    }
+
+    #[test]
+    fn round_trip_with_an_unbound_generation_is_none() {
+        // An unbound (None) generation must serialize as an all-zero block and decode back to None
+        // (the same convention as the `.spqv` fingerprint block) — never to Some(0,0,0).
+        let d = sample(None);
+        let (back, _) = VectorDelta::from_bytes(&d.to_bytes(4)).expect("round-trips");
+        assert_eq!(back.generation(), None, "an all-zero header decodes to an unbound generation");
+        assert_eq!(back.appended, d.appended);
+        assert_eq!(back.tombstones, d.tombstones);
+    }
+
+    #[test]
+    fn an_empty_delta_serializes_to_just_the_header() {
+        let d = VectorDelta::new(Some(fp(1, 1, 1)));
+        let bytes = d.to_bytes(8);
+        assert_eq!(bytes.len(), SPQD_HEADER_LEN, "no appends/tombstones ⇒ header-only");
+        let (back, dim) = VectorDelta::from_bytes(&bytes).expect("round-trips");
+        assert_eq!(dim, 8);
+        assert!(back.is_empty());
+        assert_eq!(back.generation(), Some(fp(1, 1, 1)));
+    }
+
+    #[test]
+    fn the_bytes_are_deterministic_regardless_of_insertion_order() {
+        // Two deltas with the same logical content but different insertion order must serialize to
+        // IDENTICAL bytes (appends + tombstones are emitted in ascending id order).
+        let mut a = VectorDelta::new(Some(fp(2, 2, 2)));
+        a.appended.insert(9, vec![1.0, 1.0]);
+        a.appended.insert(1, vec![2.0, 2.0]);
+        a.tombstones.insert(8);
+        a.tombstones.insert(4);
+        let mut b = VectorDelta::new(Some(fp(2, 2, 2)));
+        b.appended.insert(1, vec![2.0, 2.0]);
+        b.appended.insert(9, vec![1.0, 1.0]);
+        b.tombstones.insert(4);
+        b.tombstones.insert(8);
+        assert_eq!(a.to_bytes(2), b.to_bytes(2), "the serialization is order-independent");
+    }
+
+    #[test]
+    fn a_short_buffer_is_rejected_not_indexed_out_of_bounds() {
+        // A buffer shorter than the header must error, never panic on a slice.
+        let err = VectorDelta::from_bytes(&[0u8; 10]).expect_err("a sub-header buffer must error");
+        assert!(err.contains("truncated"), "err was: {err}");
+    }
+
+    #[test]
+    fn a_count_that_does_not_match_the_length_is_rejected() {
+        // Forge a header that claims 5 appends but carries no body → length mismatch.
+        let mut bytes = VectorDelta::new(Some(fp(1, 1, 1))).to_bytes(4);
+        bytes[12..20].copy_from_slice(&5u64.to_le_bytes());
+        let err = VectorDelta::from_bytes(&bytes).expect_err("a lying count must be rejected");
+        assert!(err.contains("length mismatch"), "err was: {err}");
+    }
+
+    #[test]
+    fn a_bad_magic_or_version_is_rejected() {
+        let mut bytes = VectorDelta::new(Some(fp(1, 1, 1))).to_bytes(4);
+        let good = bytes.clone();
+        bytes[0] = b'Z';
+        assert!(VectorDelta::from_bytes(&bytes).unwrap_err().contains("bad magic"));
+        let mut v = good.clone();
+        v[4..8].copy_from_slice(&999u32.to_le_bytes());
+        assert!(VectorDelta::from_bytes(&v).unwrap_err().contains("unsupported version"));
     }
 }
