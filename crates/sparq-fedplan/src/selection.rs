@@ -378,4 +378,228 @@ mod tests {
             "low/zero estimate must not prune the source"
         );
     }
+
+    // ============================================================================
+    // [OPUS-4.8] sq-bif.3 — correctness suite: previously-uncovered selection branches
+    // (object-authority prune, the full CostFed cardinality matrix incl. both-bound and
+    // the unknown-distinct-objects fallback, the literal/non-IRI prune paths, multi-source
+    // union + ordering, and the PatternSources accessors). Drives the REAL `select_sources`
+    // / `estimate_cardinality` / `can_contribute` code, not a re-implementation.
+    // ============================================================================
+
+    fn foaf(local: &str) -> String {
+        format!("http://xmlns.com/foaf/0.1/{}", local)
+    }
+    fn lit(s: &str) -> Term {
+        Term::Literal(s.to_string())
+    }
+
+    // ---- Rule 2 (authority prune) also fires on the OBJECT position, symmetrically with
+    //      the subject path the existing tests cover. A COMPLETE-authority source with a
+    //      foreign-authority bound OBJECT is pruned; a local-authority object is kept.
+    #[test]
+    fn complete_authority_prunes_foreign_object_but_keeps_local() {
+        let src = SourceDescriptor::builder(SourceId::new("DBp"))
+            .predicate(pred(&foaf("knows"), 200, 100, 80))
+            .authorities_complete() // I only mint foaf-authority terms.
+            .build();
+        let srcs = [src];
+        // foreign-authority OBJECT ⇒ pruned (the object branch of Rule 2).
+        let foreign = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("knows")),
+            iri("http://www.wikidata.org/entity/Q42"),
+        )]);
+        assert!(
+            select_sources(&foreign, &srcs)[0].is_empty(),
+            "foreign-authority bound object must prune a complete-authority source"
+        );
+        // local-authority OBJECT ⇒ kept.
+        let local = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("knows")),
+            iri(&foaf("agentY")),
+        )]);
+        assert!(
+            !select_sources(&local, &srcs)[0].is_empty(),
+            "local-authority bound object stays in the capability set"
+        );
+    }
+
+    // ---- A bound LITERAL object never triggers an authority prune (a literal has no
+    //      authority), even on a complete-authority source — recall-safe.
+    #[test]
+    fn literal_object_never_authority_prunes() {
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .predicate(pred(&foaf("name"), 300, 300, 290))
+            .authorities_complete()
+            .build();
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("name")),
+            lit("\"Alice\""),
+        )]);
+        assert_eq!(
+            select_sources(&bgp, &[src])[0].candidates.len(),
+            1,
+            "a bound literal object has no authority ⇒ no authority prune"
+        );
+    }
+
+    // ---- CostFed cardinality: the both-bound `(true, true)` branch =
+    //      triples / (distinctSubjects · distinctObjects), and the bound-object
+    //      `distinct_objects == 0` unknown-fallback branch (⇒ conservative `triples`).
+    #[test]
+    fn costfed_cardinality_both_bound_and_unknown_objects() {
+        // knows: 200 triples, 100 subjects, 80 objects.
+        let a = source_a();
+        // both bound ⇒ 200 / (100 * 80) = 0.025.
+        let both = TriplePattern::new(iri("http://ex/x"), iri(&foaf("knows")), iri("http://ex/y"));
+        assert_eq!(estimate_cardinality(&both, &a), 200.0 / (100.0 * 80.0));
+
+        // A predicate whose distinct_objects is UNKNOWN (0): bound-object falls back to the
+        // conservative full triple count (recall-safe over-estimate, never prunes).
+        let unknown_obj = SourceDescriptor::builder(SourceId::new("U"))
+            .predicate(pred("http://ex/p", 500, 250, 0)) // objects unknown.
+            .build();
+        let ob = TriplePattern::new(var("s"), iri("http://ex/p"), iri("http://ex/y"));
+        assert_eq!(
+            estimate_cardinality(&ob, &unknown_obj),
+            500.0,
+            "unknown distinct-objects ⇒ conservative full-triples estimate"
+        );
+        // …and with the SAME predicate, a bound SUBJECT still divides by distinct_subjects
+        // (250) even though objects are unknown: 500 / 250 = 2.
+        let sb = TriplePattern::new(iri("http://ex/x"), iri("http://ex/p"), var("o"));
+        assert_eq!(estimate_cardinality(&sb, &unknown_obj), 2.0);
+    }
+
+    // ---- The both-bound estimate is floored at 0 and the `triples`/`distinct*` are floored
+    //      at 1 so a tiny/degenerate partition never divides by zero (it stays a positive
+    //      probe-sized estimate, which — being just an estimate — never prunes).
+    #[test]
+    fn costfed_cardinality_degenerate_counts_do_not_divide_by_zero() {
+        let degenerate = SourceDescriptor::builder(SourceId::new("D"))
+            .predicate(pred("http://ex/p", 0, 0, 0)) // everything unknown / zero.
+            .build();
+        let both = TriplePattern::new(iri("http://ex/x"), iri("http://ex/p"), iri("http://ex/y"));
+        let est = estimate_cardinality(&both, &degenerate);
+        assert!(est.is_finite(), "no division by zero on a degenerate partition");
+        assert!(est >= 0.0, "estimate is floored at 0");
+        assert_eq!(est, 1.0, "triples.max(1)/(1*1) = 1 for an all-zero partition");
+    }
+
+    // ---- The open-predicate estimate is the source's total triples, floored at 1 even for
+    //      an empty source (this is also the `estimate_cardinality` fallback for a non-IRI
+    //      predicate position).
+    #[test]
+    fn estimate_open_predicate_is_total_triples_bounded() {
+        let a = source_a(); // total_triples 1000.
+        let open = TriplePattern::new(var("s"), var("p"), var("o"));
+        assert_eq!(estimate_cardinality(&open, &a), 1000.0);
+        // A source with total_triples 0 still yields a positive (floored-at-1) estimate.
+        let empty = SourceDescriptor::builder(SourceId::new("E")).build();
+        assert_eq!(
+            estimate_cardinality(&open, &empty),
+            1.0,
+            "open-predicate estimate is total_triples.max(1)"
+        );
+    }
+
+    // ---- Multi-source union: a pattern matched by SEVERAL sources retains them all, in
+    //      ascending source-index order, and `total_cardinality` sums the per-source
+    //      estimates (the per-pattern input size the join planner starts from).
+    #[test]
+    fn multi_source_union_orders_and_sums() {
+        // Three sources, all holding foaf:knows with different triple counts.
+        let s0 = SourceDescriptor::builder(SourceId::new("s0"))
+            .predicate(pred(&foaf("knows"), 100, 100, 100))
+            .build();
+        let s1 = SourceDescriptor::builder(SourceId::new("s1"))
+            .predicate(pred(&foaf("knows"), 50, 50, 50))
+            .build();
+        let s2 = SourceDescriptor::builder(SourceId::new("s2"))
+            .predicate(pred(&foaf("name"), 999, 999, 999)) // no knows ⇒ pruned for this pattern.
+            .build();
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("knows")),
+            var("o"),
+        )]);
+        let sel = select_sources(&bgp, &[s0, s1, s2]);
+        let cands = &sel[0].candidates;
+        assert_eq!(cands.len(), 2, "only the two knows-holders are retained");
+        // Ascending source index (s0 then s1); s2 pruned.
+        assert_eq!(cands[0].source, 0);
+        assert_eq!(cands[1].source, 1);
+        // Open ?s knows ?o ⇒ each source contributes its full predicate triple count.
+        assert_eq!(cands[0].estimated_cardinality, 100.0);
+        assert_eq!(cands[1].estimated_cardinality, 50.0);
+        assert_eq!(
+            sel[0].total_cardinality(),
+            150.0,
+            "union cardinality is the sum over retained sources"
+        );
+        assert!(!sel[0].is_empty());
+        assert_eq!(sel[0].pattern, 0);
+    }
+
+    // ---- A pattern NO source can answer yields an empty `PatternSources`
+    //      (`is_empty` true, `total_cardinality` 0). The join planner reads this as a
+    //      zero-input leaf, not as a reason to drop the pattern (recall is the selector's
+    //      job, not the planner's).
+    #[test]
+    fn pattern_with_no_matching_source_is_empty() {
+        let only_name = SourceDescriptor::builder(SourceId::new("N"))
+            .predicate(pred(&foaf("name"), 10, 10, 10))
+            .build();
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("knows")), // no source holds knows.
+            var("o"),
+        )]);
+        let sel = select_sources(&bgp, &[only_name]);
+        assert!(sel[0].is_empty());
+        assert_eq!(sel[0].total_cardinality(), 0.0);
+    }
+
+    // ---- An rdf:type pattern with a VARIABLE class object is never class-pruned (no bound
+    //      class to test), even on a source that declares a class section — recall-safe.
+    #[test]
+    fn variable_class_object_is_never_class_pruned() {
+        let declares = SourceDescriptor::builder(SourceId::new("C"))
+            .predicate(pred(RDF_TYPE, 10, 10, 5))
+            .class(ClassPartition {
+                class: "http://ex/Company".into(),
+                entities: 5,
+            })
+            .build();
+        // ?x rdf:type ?c — the class is a variable ⇒ the bound-class prune cannot fire.
+        let bgp = Bgp::new(vec![TriplePattern::new(var("x"), iri(RDF_TYPE), var("c"))]);
+        assert_eq!(
+            select_sources(&bgp, &[declares])[0].candidates.len(),
+            1,
+            "a variable class object must keep the source (no bound class to prove absent)"
+        );
+    }
+
+    // ---- Per-pattern independence: in a multi-pattern BGP the selection is computed
+    //      independently per pattern, and the returned `PatternSources.pattern` indices line
+    //      up with the BGP positions (the planner relies on this alignment).
+    #[test]
+    fn selection_is_per_pattern_and_index_aligned() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri(&foaf("knows")), var("o")),
+            TriplePattern::new(var("o"), iri(&foaf("name")), var("n")),
+        ]);
+        let sel = select_sources(&bgp, &[source_a(), source_b()]);
+        assert_eq!(sel.len(), 2);
+        assert_eq!(sel[0].pattern, 0);
+        assert_eq!(sel[1].pattern, 1);
+        // Pattern 0 (knows) ⇒ only A; pattern 1 (name) ⇒ only B.
+        assert_eq!(sel[0].candidates.len(), 1);
+        assert_eq!(sel[0].candidates[0].source, 0);
+        assert_eq!(sel[1].candidates.len(), 1);
+        assert_eq!(sel[1].candidates[0].source, 1);
+    }
 }

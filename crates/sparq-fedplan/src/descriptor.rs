@@ -624,4 +624,252 @@ _:st2 <http://sparq.dev/ns/cs#avgMultiplicity> "2.0"^^<http://www.w3.org/2001/XM
             200.0
         );
     }
+
+    // ============================================================================
+    // [OPUS-4.8] sq-bif.3 — correctness suite: previously-uncovered descriptor branches
+    // (the parse error path, the char-set validation/normalisation guards, the top-level
+    // void:triples max-merge, authority_of edge cases, may_hold_authority on an
+    // unparseable IRI under a complete set, and the is_subset / star-estimate non-cover
+    // paths). Drives the REAL parser/builder/estimator, not a re-implementation.
+    // ============================================================================
+
+    // ---- A malformed N-Triples descriptor is a clean Err (not a panic / partial parse).
+    #[test]
+    fn parse_void_nt_malformed_is_error() {
+        let bad = "<http://s/> this is not n-triples";
+        let r = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), bad);
+        assert!(r.is_err(), "malformed N-Triples must return Err");
+        assert!(
+            r.unwrap_err().contains("malformed descriptor N-Triples"),
+            "the error message names the malformed-descriptor cause"
+        );
+    }
+
+    // ---- An EMPTY descriptor document parses to a valid, empty descriptor (no partitions,
+    //      0 total triples, authority-incomplete).
+    #[test]
+    fn parse_void_nt_empty_document() {
+        let d = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), "").unwrap();
+        assert_eq!(d.total_triples, 0);
+        assert!(d.char_sets().is_empty());
+        assert!(!d.declares_any_class());
+        assert!(!d.authorities_complete());
+    }
+
+    // ---- Top-level dataset `void:triples` takes the MAX over several values on an IRI
+    //      subject (mirrors the parser's `total_triples.max(n)`), and a `void:triples` on a
+    //      BLANK subject is a partition count, not the dataset total.
+    #[test]
+    fn parse_void_nt_total_triples_takes_max() {
+        let nt = r#"<http://s/> <http://rdfs.org/ns/void#triples> "100"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://s/> <http://rdfs.org/ns/void#triples> "500"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://s/> <http://rdfs.org/ns/void#triples> "300"^^<http://www.w3.org/2001/XMLSchema#integer> .
+"#;
+        let d = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), nt).unwrap();
+        assert_eq!(d.total_triples, 500, "dataset total is the max of the served values");
+    }
+
+    // ---- The builder DROPS a characteristic set with `subjects == 0` (degenerate, mirrors
+    //      the engine's CsTable::new) and one whose `predicates`/`avg_multiplicity` lengths
+    //      disagree (malformed) — but keeps a valid one.
+    #[test]
+    fn builder_drops_degenerate_char_sets() {
+        let d = SourceDescriptor::builder(SourceId::new("S"))
+            // subjects == 0 ⇒ dropped.
+            .char_set(CharSet {
+                predicates: vec!["http://ex/a".into()],
+                subjects: 0,
+                avg_multiplicity: vec![1.0],
+            })
+            // length mismatch (2 predicates, 1 multiplicity) ⇒ dropped.
+            .char_set(CharSet {
+                predicates: vec!["http://ex/a".into(), "http://ex/b".into()],
+                subjects: 10,
+                avg_multiplicity: vec![1.0],
+            })
+            // valid ⇒ kept.
+            .char_set(CharSet {
+                predicates: vec!["http://ex/c".into()],
+                subjects: 7,
+                avg_multiplicity: vec![3.0],
+            })
+            .build();
+        assert_eq!(d.char_sets().len(), 1, "only the valid char set survives");
+        assert_eq!(d.char_sets()[0].subjects, 7);
+        assert_eq!(d.char_sets()[0].predicates, vec!["http://ex/c".to_string()]);
+    }
+
+    // ---- The builder NORMALISES an out-of-order char set's predicates to ascending order,
+    //      carrying the aligned `avg_multiplicity` with them (so the binary-search superset
+    //      walk in `star_cardinality` stays correct).
+    #[test]
+    fn builder_sorts_char_set_predicates_keeping_multiplicity_aligned() {
+        // Supplied descending: (b, 2.0), (a, 1.0) ⇒ must become (a,1.0),(b,2.0).
+        let d = SourceDescriptor::builder(SourceId::new("S"))
+            .char_set(CharSet {
+                predicates: vec!["http://ex/b".into(), "http://ex/a".into()],
+                subjects: 100,
+                avg_multiplicity: vec![2.0, 1.0],
+            })
+            .build();
+        let cs = &d.char_sets()[0];
+        assert_eq!(
+            cs.predicates,
+            vec!["http://ex/a".to_string(), "http://ex/b".to_string()],
+            "predicates normalised to ascending order"
+        );
+        assert_eq!(
+            cs.avg_multiplicity,
+            vec![1.0, 2.0],
+            "avg_multiplicity follows its predicate through the sort"
+        );
+        // The aligned sort keeps the star estimate correct: 100 subjects * a(1) * b(2) = 200.
+        assert_eq!(
+            d.star_cardinality(&["http://ex/a".into(), "http://ex/b".into()]),
+            200.0
+        );
+    }
+
+    // ---- `authority_of` edge cases beyond the existing test: an IRI with an empty host
+    //      (`http:///path` ⇒ host_len 0 ⇒ None), an authority-only IRI (no path), and a
+    //      query/fragment immediately after the host.
+    #[test]
+    fn authority_of_edge_cases() {
+        // Empty host between `://` and the first `/` ⇒ None (never prunes).
+        assert_eq!(authority_of("http:///path"), None);
+        // Authority with no path at all ⇒ the whole thing is the authority.
+        assert_eq!(
+            authority_of("https://example.org"),
+            Some("https://example.org".to_string())
+        );
+        // Query / fragment delimit the authority just like `/`.
+        assert_eq!(
+            authority_of("http://h.example?q=1"),
+            Some("http://h.example".to_string())
+        );
+        assert_eq!(
+            authority_of("http://h.example#frag"),
+            Some("http://h.example".to_string())
+        );
+    }
+
+    // ---- A COMPLETE-authority source keeps a pattern whose bound IRI has NO extractable
+    //      authority (a `urn:`/relative IRI): `may_hold_authority` returns true (cannot rule
+    //      out) even under a complete set — the recall-safe unparseable-authority default.
+    #[test]
+    fn complete_authority_keeps_unparseable_iri() {
+        let d = SourceDescriptor::builder(SourceId::new("S"))
+            .predicate(PredPartition {
+                predicate: "http://ex/p".into(),
+                triples: 10,
+                distinct_subjects: 10,
+                distinct_objects: 10,
+            })
+            .authorities_complete()
+            .build();
+        // A urn: subject has no `://` authority ⇒ cannot be ruled out ⇒ kept.
+        assert!(
+            d.may_hold_authority("urn:isbn:123"),
+            "an unparseable-authority IRI is never pruned, even under a complete set"
+        );
+        // A known foreign http authority IS ruled out (the complete set is active).
+        assert!(!d.may_hold_authority("http://elsewhere.example/x"));
+        // The source's own predicate authority is kept.
+        assert!(d.may_hold_authority("http://ex/something"));
+    }
+
+    // ---- `may_hold_authority` always returns true on an INCOMPLETE authority set, even for
+    //      a clearly-foreign IRI (the default VoID-parsed posture).
+    #[test]
+    fn incomplete_authority_set_never_rules_out() {
+        let d = SourceDescriptor::builder(SourceId::new("S"))
+            .predicate(PredPartition {
+                predicate: "http://ex/p".into(),
+                triples: 10,
+                distinct_subjects: 10,
+                distinct_objects: 10,
+            })
+            .build(); // NOT authorities_complete.
+        assert!(d.may_hold_authority("http://anything.example/at-all"));
+    }
+
+    // ---- `star_subjects` / `star_cardinality` over a query the served sets do NOT all
+    //      cover: only the sets that are a SUPERSET of the query contribute; a query no set
+    //      covers yields 0. Exercises the `is_subset` merge-walk Greater/exhausted branches.
+    #[test]
+    fn star_estimate_only_counts_covering_sets() {
+        let d = SourceDescriptor::builder(SourceId::new("S"))
+            // set {a,b}: 100 subjects, a 1×, b 2×.
+            .char_set(CharSet {
+                predicates: vec!["http://ex/a".into(), "http://ex/b".into()],
+                subjects: 100,
+                avg_multiplicity: vec![1.0, 2.0],
+            })
+            // set {a}: 50 subjects, a 1×.
+            .char_set(CharSet {
+                predicates: vec!["http://ex/a".into()],
+                subjects: 50,
+                avg_multiplicity: vec![1.0],
+            })
+            .build();
+        let a = "http://ex/a".to_string();
+        let b = "http://ex/b".to_string();
+        let z = "http://ex/z".to_string();
+        // {a} ⊆ both sets ⇒ 100 + 50 subjects.
+        assert_eq!(d.star_subjects(std::slice::from_ref(&a)), 150);
+        // {a,b} ⊆ only the first set ⇒ 100 subjects, cardinality 100*1*2 = 200.
+        assert_eq!(d.star_subjects(&[a.clone(), b.clone()]), 100);
+        assert_eq!(d.star_cardinality(&[a.clone(), b]), 200.0);
+        // {a,z} ⊆ NO set (z absent ⇒ the merge walk hits Greater/exhausted) ⇒ 0.
+        assert_eq!(d.star_subjects(&[a.clone(), z.clone()]), 0);
+        assert_eq!(d.star_cardinality(&[a, z]), 0.0);
+        // An EMPTY query is a subset of every set ⇒ subjects summed, cardinality = subjects.
+        assert_eq!(d.star_subjects(&[]), 150);
+        assert_eq!(d.star_cardinality(&[]), 150.0);
+    }
+
+    // ---- A char set with NO served sets reports 0 for any non-empty query (no fabrication).
+    #[test]
+    fn star_estimate_with_no_char_sets_is_zero() {
+        let d = SourceDescriptor::builder(SourceId::new("S"))
+            .predicate(PredPartition {
+                predicate: "http://ex/a".into(),
+                triples: 100,
+                distinct_subjects: 100,
+                distinct_objects: 100,
+            })
+            .build();
+        assert_eq!(d.star_subjects(&["http://ex/a".into()]), 0);
+        assert_eq!(d.star_cardinality(&["http://ex/a".into()]), 0.0);
+    }
+
+    // ---- Accessors line up: `predicate`/`has_predicate`/`class`/`has_class`/`id` read back
+    //      what the builder put in, and return None/false for absent keys.
+    #[test]
+    fn descriptor_accessors_round_trip() {
+        let d = SourceDescriptor::builder(SourceId::new("http://s/"))
+            .total_triples(42)
+            .predicate(PredPartition {
+                predicate: "http://ex/p".into(),
+                triples: 10,
+                distinct_subjects: 5,
+                distinct_objects: 4,
+            })
+            .class(ClassPartition {
+                class: "http://ex/C".into(),
+                entities: 3,
+            })
+            .build();
+        assert_eq!(d.id(), &SourceId::new("http://s/"));
+        assert_eq!(d.total_triples, 42);
+        assert!(d.has_predicate("http://ex/p"));
+        assert!(!d.has_predicate("http://ex/absent"));
+        assert_eq!(d.predicate("http://ex/p").unwrap().triples, 10);
+        assert!(d.predicate("http://ex/absent").is_none());
+        assert!(d.has_class("http://ex/C"));
+        assert!(!d.has_class("http://ex/Absent"));
+        assert_eq!(d.class("http://ex/C").unwrap().entities, 3);
+        assert!(d.class("http://ex/Absent").is_none());
+        assert!(d.declares_any_class());
+    }
 }
