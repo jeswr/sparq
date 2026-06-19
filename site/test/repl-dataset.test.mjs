@@ -16,6 +16,9 @@ import {
   classifyQueryForm,
   isGraphForm,
   modeSupportsForm,
+  NAMED_GRAPH_STATS_QUERY,
+  DEFAULT_GRAPH_COUNT_QUERY,
+  parseGraphStats,
 } from "../src/lib/repl-dataset.ts";
 
 test("isDatasetFormat is true exactly for the quad-bearing formats", () => {
@@ -251,4 +254,94 @@ test("modeSupportsForm: EXPLAIN / ANALYZE are UNavailable for SPARQL Update", ()
   assert.equal(modeSupportsForm("analyze", "update"), false);
   // Run still works — the Update can still be executed.
   assert.equal(modeSupportsForm("run", "update"), true);
+});
+
+// [OPUS-4.8] sq-daru — the dataset panel: named-graph list with per-graph triple counts.
+// The two queries are reused engine-supported SPARQL (no new Store API); `parseGraphStats`
+// is the pure parser that turns their SPARQL-JSON into the panel's typed rows. The
+// SPARQL-JSON fixtures below are the EXACT shape the wasm engine returns (verified live:
+// a GROUP BY ?g list of named graphs, and a standalone default-graph COUNT — each `?c` an
+// xsd:integer literal whose `value` is the integer string).
+
+test("NAMED_GRAPH_STATS_QUERY groups per named graph and excludes the default graph", () => {
+  // GROUP BY over GRAPH ?g lists exactly the named graphs; the default graph is not a
+  // GRAPH, so it is counted separately by DEFAULT_GRAPH_COUNT_QUERY.
+  assert.match(NAMED_GRAPH_STATS_QUERY, /GRAPH \?g/);
+  assert.match(NAMED_GRAPH_STATS_QUERY, /GROUP BY \?g/);
+  assert.match(NAMED_GRAPH_STATS_QUERY, /COUNT\(\*\)/);
+  // The default-graph count uses the unqualified BGP (matches only the default graph).
+  assert.match(DEFAULT_GRAPH_COUNT_QUERY, /WHERE \{ \?s \?p \?o \}/);
+  assert.doesNotMatch(DEFAULT_GRAPH_COUNT_QUERY, /GRAPH/);
+});
+
+const XSD_INT = "http://www.w3.org/2001/XMLSchema#integer";
+const count = (v) => ({ type: "literal", value: v, datatype: XSD_INT });
+const uri = (v) => ({ type: "uri", value: v });
+
+test("parseGraphStats always emits the default graph first, then the named graphs in order", () => {
+  // The exact wasm-engine result shape (verified live).
+  const defaultJson = { head: { vars: ["c"] }, results: { bindings: [{ c: count("2") }] } };
+  const namedJson = {
+    head: { vars: ["g", "c"] },
+    results: {
+      bindings: [
+        { g: uri("http://ex/g1"), c: count("2") },
+        { g: uri("http://ex/g2"), c: count("1") },
+      ],
+    },
+  };
+  const stats = parseGraphStats(defaultJson, namedJson);
+  assert.deepEqual(stats, [
+    { iri: null, isDefault: true, count: 2 },
+    { iri: "http://ex/g1", isDefault: false, count: 2 },
+    { iri: "http://ex/g2", isDefault: false, count: 1 },
+  ]);
+});
+
+test("parseGraphStats shows the default graph alone (count 0) for an empty store", () => {
+  // An empty store: the default-graph COUNT is 0 and there are no named-graph rows. The
+  // default graph is STILL listed (count 0) so the panel is honest about an empty dataset.
+  const defaultJson = { head: { vars: ["c"] }, results: { bindings: [{ c: count("0") }] } };
+  const namedJson = { head: { vars: ["g", "c"] }, results: { bindings: [] } };
+  assert.deepEqual(parseGraphStats(defaultJson, namedJson), [
+    { iri: null, isDefault: true, count: 0 },
+  ]);
+});
+
+test("parseGraphStats handles a triple-only dataset (default graph only, no named graphs)", () => {
+  // The common case: a Turtle dataset has only the default graph.
+  const defaultJson = { results: { bindings: [{ c: count("142") }] } };
+  const namedJson = { results: { bindings: [] } };
+  assert.deepEqual(parseGraphStats(defaultJson, namedJson), [
+    { iri: null, isDefault: true, count: 142 },
+  ]);
+});
+
+test("parseGraphStats defaults a missing/unparseable count to 0 rather than NaN", () => {
+  // A partial / malformed result must still render: an absent default binding -> 0, a
+  // named-graph row with a non-numeric count -> 0 (never NaN in the UI).
+  const defaultJson = { results: { bindings: [] } };
+  const namedJson = {
+    results: { bindings: [{ g: uri("http://ex/g1"), c: { type: "literal", value: "x" } }] },
+  };
+  assert.deepEqual(parseGraphStats(defaultJson, namedJson), [
+    { iri: null, isDefault: true, count: 0 },
+    { iri: "http://ex/g1", isDefault: false, count: 0 },
+  ]);
+});
+
+test("parseGraphStats skips a defensive named-graph row that does not bind ?g", () => {
+  const defaultJson = { results: { bindings: [{ c: count("1") }] } };
+  const namedJson = {
+    results: {
+      bindings: [
+        { c: count("9") }, // no ?g — skipped
+        { g: uri("http://ex/g1"), c: count("3") },
+      ],
+    },
+  };
+  assert.deepEqual(parseGraphStats(defaultJson, namedJson), [
+    { iri: null, isDefault: true, count: 1 },
+    { iri: "http://ex/g1", isDefault: false, count: 3 },
+  ]);
 });
