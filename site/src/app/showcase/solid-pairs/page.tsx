@@ -92,9 +92,9 @@ export default function SolidFlagshipPage() {
         <p>
           This page demonstrates that with a small fixed Pod — a public profile,
           private health data, a shared calendar, and private notes — and a
-          selector for (user, app) pairs. Pick two pairs, run the one query, and
-          watch the answers diverge, with the WAC/ACP grant that produced each
-          result shown alongside it.
+          selector for (user, app) pairs. Pick two pairs, run a query (the demo
+          one, or your own), and watch the answers diverge, with the WAC/ACP grant
+          that produced each result shown alongside it.
         </p>
       </section>
 
@@ -102,9 +102,11 @@ export default function SolidFlagshipPage() {
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">Try it</h2>
         <p className="text-sm text-muted-foreground">
-          The query is identical for every pair. What differs is the authorized
-          named-graph set the engine restricts to — the materialized access-control
-          decision for that (agent, client).
+          The query is the same for both pairs on a given run &mdash; and you can{" "}
+          <strong className="text-foreground">edit it and re-run</strong>. What differs
+          is the authorized named-graph set the engine restricts to: the materialized
+          access-control decision for that (agent, client), injected as a{" "}
+          <code className="font-mono">FROM NAMED</code> clause around whatever you type.
         </p>
         <SolidPairsDemo />
       </section>

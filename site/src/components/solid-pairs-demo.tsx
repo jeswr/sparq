@@ -2,13 +2,20 @@
 
 // [OPUS-4.8] sq-4r4b — the interactive Solid (user, app)-pair demo.
 //
-// Pick an (agent, client) pair → run the SAME SPARQL query over the SAME Pod → see the
+// Pick an (agent, client) pair → run a SPARQL query over the SAME Pod → see the
 // access-controlled result set that pair gets. The headline insight: identical query,
 // identical Pod, DIFFERENT rows — because WAC/ACP restricts the named graphs each
 // requester may read. The restriction runs LIVE in your tab: the wasm engine evaluates
 // the query rewritten with the pair's `FROM NAMED <authorized-graphs>` set (sparq-solid's
 // `rewrite_for`). The access-control DECISION (which graphs) is the materialized
 // sparq-solid output, precomputed at build time — see the honesty section on the page.
+//
+// [OPUS-4.8] sq-p6p7 (#797/#549) — the query is now EDITABLE. The user can rewrite the
+// demo query and re-run it for both pairs; the per-pair `FROM NAMED <authorized-graphs>`
+// restriction is injected around WHATEVER query they type, so the access-control eval
+// re-runs over their own SPARQL. The default query is preserved as the reset target.
+// Results render generically from the result `head.vars` (so a custom projection / ASK
+// works), with the original `?graph ?s ?p ?o` shape still getting the rich per-graph diff.
 
 import * as React from "react";
 import {
@@ -23,6 +30,7 @@ import {
   ShieldOff,
   KeyRound,
   ArrowRight,
+  RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -39,9 +47,14 @@ import { cn } from "@/lib/utils";
 import {
   loadSparq,
   formatTerm,
+  resultVars,
+  resultRows,
+  isAskResult,
+  askValue,
   type SparqlResults,
   type WasmStore,
 } from "@/lib/sparq-wasm";
+import { SparqlEditor } from "@/components/sparql-editor";
 import { rewriteForGraphs } from "@/lib/solid-acl";
 import {
   SESSIONS,
@@ -55,9 +68,15 @@ import {
 } from "@/data/solid-pod";
 
 interface RunResult {
-  rows: SparqlResults["results"]["bindings"];
+  /** The full parsed SPARQL-JSON result (SELECT bindings OR an ASK boolean). */
+  results: SparqlResults;
   ms: number;
   rewritten: string;
+}
+
+/** The SELECT solution rows of a run (empty for an ASK), via the shared helper. */
+function runRows(r: RunResult): SparqlResults["results"]["bindings"] {
+  return resultRows(r.results);
 }
 
 type RunState =
@@ -74,12 +93,15 @@ function shortGraph(iri: string): string {
 export function SolidPairsDemo() {
   const [sessionId, setSessionId] = React.useState<string>(SESSIONS[0].id);
   const [compareId, setCompareId] = React.useState<string>(SESSIONS[3].id);
+  // [OPUS-4.8] sq-p6p7 — the user-editable query, seeded with the demo default.
+  const [query, setQuery] = React.useState<string>(SHARED_QUERY);
   const [state, setState] = React.useState<RunState>({ kind: "idle" });
   const [compareState, setCompareState] = React.useState<RunState>({ kind: "idle" });
   const storeRef = React.useRef<WasmStore | null>(null);
 
   const session = SESSIONS.find((s) => s.id === sessionId)!;
   const compare = SESSIONS.find((s) => s.id === compareId)!;
+  const isDefaultQuery = query === SHARED_QUERY;
 
   const ensureStore = React.useCallback(async (): Promise<WasmStore> => {
     if (storeRef.current) return storeRef.current;
@@ -91,35 +113,56 @@ export function SolidPairsDemo() {
     return store;
   }, []);
 
+  // [OPUS-4.8] sq-p6p7 — runs WHATEVER query the user typed for a pair, after injecting
+  // that pair's `FROM NAMED <authorized-graphs>` restriction (sparq-solid's rewrite_for).
+  // So the access-control eval re-runs over the custom query exactly as over the default.
   const runFor = React.useCallback(
-    async (s: PodSession): Promise<RunResult> => {
+    async (s: PodSession, sparql: string): Promise<RunResult> => {
       const store = await ensureStore();
-      const rewritten = rewriteForGraphs(SHARED_QUERY, s.authorizedGraphs);
+      const rewritten = rewriteForGraphs(sparql, s.authorizedGraphs);
       const t0 = performance.now();
       const json = store.query(rewritten);
       const ms = performance.now() - t0;
       const parsed = JSON.parse(json) as SparqlResults;
-      return { rows: parsed.results?.bindings ?? [], ms, rewritten };
+      return { results: parsed, ms, rewritten };
     },
     [ensureStore],
   );
 
   const run = React.useCallback(async () => {
+    // A custom query is just text — guard the empty/whitespace case before touching wasm.
+    if (query.trim().length === 0) {
+      const message = "Enter a SPARQL query to run.";
+      setState({ kind: "error", message });
+      setCompareState({ kind: "idle" });
+      toast.error("Empty query", { description: message });
+      return;
+    }
     try {
       setState({ kind: "loading" });
       setCompareState({ kind: "loading" });
-      const [a, b] = await Promise.all([runFor(session), runFor(compare)]);
+      // A bad custom query throws inside the wasm engine — caught below and shown as a
+      // friendly inline message (per pair) instead of crashing the page.
+      const [a, b] = await Promise.all([
+        runFor(session, query),
+        runFor(compare, query),
+      ]);
       setState({ kind: "done", result: a });
       setCompareState({ kind: "done", result: b });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setState({ kind: "error", message });
-      setCompareState({ kind: "idle" });
+      setCompareState({ kind: "error", message });
       toast.error("Query failed", { description: message });
     }
-  }, [runFor, session, compare]);
+  }, [runFor, session, compare, query]);
 
-  // Re-run automatically when a selector changes, if we've already run once.
+  const resetQuery = React.useCallback(() => {
+    setQuery(SHARED_QUERY);
+  }, []);
+
+  // Re-run automatically when a selector changes, if we've already run once. (Editing the
+  // query does NOT auto-run — the user drives that with the Run button.)
   const hasRun = state.kind === "done" || state.kind === "error";
   React.useEffect(() => {
     if (hasRun) void run();
@@ -130,20 +173,56 @@ export function SolidPairsDemo() {
 
   return (
     <div className="space-y-6">
-      {/* The shared query — identical for everyone. */}
+      {/* The query — editable, but identical for both pairs on a given run. */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">1 · One query, one Pod</CardTitle>
+          <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base">
+            <span>1 · One query, one Pod</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={resetQuery}
+              disabled={isDefaultQuery}
+            >
+              <RotateCcw className="size-3" aria-hidden="true" />
+              Reset to demo query
+            </Button>
+          </CardTitle>
           <CardDescription>
-            This exact query runs for <em>every</em> (user, app) pair, against the
-            same four-document Pod. Nothing about the query changes — only{" "}
-            <strong>who is asking, from which app</strong>.
+            This query runs for <em>both</em> (user, app) pairs, against the same
+            four-document Pod. <strong>Edit it and re-run</strong> — only{" "}
+            <strong>who is asking, from which app</strong> changes the rows that come
+            back, because each pair&rsquo;s authorized named-graph set is injected as a{" "}
+            <code className="font-mono">FROM NAMED</code> restriction around whatever
+            you type.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <pre className="overflow-x-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed">
-            {SHARED_QUERY}
-          </pre>
+          {/* [OPUS-4.8] sq-p6p7 — editable query via the existing SparqlEditor (overlay
+              highlighting + missing-prefix help); no new editor dependency. */}
+          <SparqlEditor
+            value={query}
+            onChange={setQuery}
+            rows={9}
+            ariaLabel="SPARQL query for the Solid access-control demo"
+            id="solid-pairs-query"
+          />
+          <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+            <KeyRound
+              className="mt-0.5 size-3.5 shrink-0 text-primary"
+              aria-hidden="true"
+            />
+            <span>
+              Access control still applies to your query: it is evaluated only over the
+              named graphs the pair may read. Wrap patterns in{" "}
+              <code className="font-mono">GRAPH ?g {`{ … }`}</code> to read across the
+              authorized documents — a query against the default graph alone returns
+              nothing here, because a Pod&rsquo;s data lives in its per-document named
+              graphs (and that is the fail-closed default).
+            </span>
+          </p>
           <PodMap />
         </CardContent>
       </Card>
@@ -182,7 +261,9 @@ export function SolidPairsDemo() {
               )}
               {state.kind === "loading"
                 ? "Loading engine…"
-                : "Run the same query for both pairs"}
+                : isDefaultQuery
+                  ? "Run the demo query for both pairs"
+                  : "Run your query for both pairs"}
             </Button>
           </div>
         </CardContent>
@@ -195,14 +276,16 @@ export function SolidPairsDemo() {
           state={state}
           accent="primary"
           otherRows={
-            compareState.kind === "done" ? compareState.result.rows : undefined
+            compareState.kind === "done"
+              ? runRows(compareState.result)
+              : undefined
           }
         />
         <SessionResult
           session={compare}
           state={compareState}
           accent="muted"
-          otherRows={state.kind === "done" ? state.result.rows : undefined}
+          otherRows={state.kind === "done" ? runRows(state.result) : undefined}
         />
       </div>
     </div>
@@ -331,9 +414,15 @@ function SessionResult({
   const visibleGraphs = session.authorizedGraphs;
   const empty = visibleGraphs.length === 0;
 
-  // Which graphs the OTHER pair sees but this one does not (and vice versa) → the diff.
+  // The SELECT solution rows of this run (empty for an ASK answer).
+  const rows = result ? runRows(result) : [];
+  // The per-graph diff is only meaningful when the projection carries a ?graph column
+  // (the default demo query does). For a custom query without it, fall back to a plain
+  // row-count delta so the comparison still degrades gracefully.
+  const hasGraphVar =
+    !!result && resultVars(result.results).includes("graph");
   const otherGraphs = otherRows ? graphSet(otherRows) : null;
-  const thisGraphs = result ? graphSet(result.rows) : new Set<string>();
+  const thisGraphs = hasGraphVar ? graphSet(rows) : new Set<string>();
 
   return (
     <Card
@@ -390,10 +479,10 @@ function SessionResult({
         {/* The actual result rows from the live engine. */}
         <ResultRows state={state} session={session} />
 
-        {/* The diff line vs the other pair. */}
-        {result && otherGraphs && (
+        {/* The diff line vs the other pair. ASK answers have no rows to diff. */}
+        {result && !isAskResult(result.results) && otherGraphs && (
           <DiffSummary
-            thisCount={result.rows.length}
+            thisCount={rows.length}
             otherCount={otherRows!.length}
             extra={[...thisGraphs].filter((g) => !otherGraphs.has(g))}
           />
@@ -495,53 +584,94 @@ function ResultRows({ state, session }: { state: RunState; session: PodSession }
     );
   }
 
-  const rows = state.result.rows;
+  // [OPUS-4.8] sq-p6p7 — render generically so a custom query works. ASK answers show a
+  // boolean; SELECT answers render a table whose columns come from the result head.vars
+  // (the default ?graph ?s ?p ?o is just one such projection). CONSTRUCT/DESCRIBE return
+  // no SPARQL-JSON bindings here, so they surface as "no solutions" — noted in the UI.
+  const results = state.result.results;
+  if (isAskResult(results)) {
+    const value = askValue(results) === true;
+    return (
+      <div className="space-y-1.5">
+        <ResultHeader rowCount={null} ms={state.result.ms} />
+        <div
+          className={cn(
+            "rounded-lg p-3 text-sm font-medium",
+            value
+              ? "bg-[color-mix(in_oklch,var(--success)_15%,transparent)] text-[var(--success)]"
+              : "bg-muted text-muted-foreground",
+          )}
+        >
+          ASK → {value ? "true" : "false"}
+        </div>
+      </div>
+    );
+  }
+
+  const vars = resultVars(results);
+  const rows = resultRows(results);
   return (
     <div className="space-y-1.5">
-      <div
-        className="flex items-center justify-between text-xs font-semibold"
-        aria-live="polite"
-      >
-        <span className="flex items-center gap-1.5">
-          <FileText className="size-3.5 text-primary" aria-hidden="true" />
-          Result set
-        </span>
-        <span className="tabular text-muted-foreground">
-          {rows.length} row{rows.length === 1 ? "" : "s"} · {state.result.ms.toFixed(1)} ms · live
-        </span>
-      </div>
+      <ResultHeader rowCount={rows.length} ms={state.result.ms} />
       {rows.length === 0 ? (
         <p className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
           No solutions. {session.authorizedGraphs.length === 0
             ? "Fail-closed: this pair has no authorized graphs, so the Pod looks empty to it."
-            : "This pair's authorized graphs held no matching triples."}
+            : "This pair's authorized graphs held no matching triples (a query against the default graph alone returns nothing — wrap patterns in GRAPH ?g)."}
         </p>
       ) : (
         <div className="max-h-72 overflow-auto rounded-lg border">
           <table className="w-full text-left text-[12px]">
             <thead className="sticky top-0 bg-muted/80 backdrop-blur">
               <tr>
-                <th className="px-2 py-1.5 font-medium">graph</th>
-                <th className="px-2 py-1.5 font-medium">s</th>
-                <th className="px-2 py-1.5 font-medium">p</th>
-                <th className="px-2 py-1.5 font-medium">o</th>
+                {vars.map((v) => (
+                  <th key={v} className="px-2 py-1.5 font-medium">
+                    ?{v}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {rows.map((row, i) => (
                 <tr key={i} className="border-t">
-                  <td className="px-2 py-1 font-mono text-[10.5px] text-muted-foreground">
-                    {shortGraph(row["graph"]?.value ?? "")}
-                  </td>
-                  <td className="px-2 py-1 font-mono text-[11px]">{compact(formatTerm(row["s"]))}</td>
-                  <td className="px-2 py-1 font-mono text-[11px]">{compact(formatTerm(row["p"]))}</td>
-                  <td className="px-2 py-1 font-mono text-[11px]">{formatTerm(row["o"])}</td>
+                  {vars.map((v) => (
+                    <td
+                      key={v}
+                      className="px-2 py-1 font-mono text-[11px]"
+                    >
+                      {compact(formatTerm(row[v]))}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+function ResultHeader({
+  rowCount,
+  ms,
+}: {
+  rowCount: number | null;
+  ms: number;
+}) {
+  return (
+    <div
+      className="flex items-center justify-between text-xs font-semibold"
+      aria-live="polite"
+    >
+      <span className="flex items-center gap-1.5">
+        <FileText className="size-3.5 text-primary" aria-hidden="true" />
+        Result set
+      </span>
+      <span className="tabular text-muted-foreground">
+        {rowCount !== null && `${rowCount} row${rowCount === 1 ? "" : "s"} · `}
+        {ms.toFixed(1)} ms · live
+      </span>
     </div>
   );
 }
