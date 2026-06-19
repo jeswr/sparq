@@ -31,8 +31,10 @@ Grounded in `crates/sparq-vectors` (+ `-sim`, `-introspect`, `-nlq`, `-text`) an
 - **Search:** exact brute-force (`nearest_exact`), in-RAM **HNSW** (`VectorIndex`, via `instant-distance`),
   persistent on-disk **DiskANN/Vamana** (`.spqg`, build-once/open-no-rebuild). All cosine-identical.
 - **Quantization:** `ScalarQuantizer` (f32→u8, 4×) and `ProductQuantizer` (PQ, asymmetric distance / ADC,
-  8–32×) with a PQ-filter → full-precision re-rank recipe. (PQ candidate cache exists/tested but is **not
-  yet wired into** `DiskAnnIndex.search_slots` — manual loop only.)
+  8–32×) with a PQ-filter → full-precision re-rank recipe. The PQ candidate cache **is now wired into**
+  `DiskAnnIndex.search_slots` (sq-qamd / #620): `build_with_pq` persists a trailing `.spqg` PQ section and
+  `search_slots` dispatches to `search_slots_pq` (rank the beam on RAM-only PQ codes, re-rank survivors off
+  the mmap); the manual loop is the same loop the index now drives internally.
 - **Embeddings:** produced **out-of-process** (provider-agnostic `Embedder` trait; opt-in `provider` /
   `embeddings` features carry an OpenAI-compatible `/v1/embeddings` client). `verbalize` /
   `embed_entities` render `<label>. a <type>. <description>` (Wikidata/BLINK shape, Weaviate prefix
@@ -178,7 +180,7 @@ consistent with the architecture) · `ambiguous-ask-user`. Impact 1–5 (5 = pro
 | **V4** | **In-query hybrid + RRF in SPARQL** — fuse `text:` BM25 + `vec:` cosine (+ `sparq-sim`) at the query layer (`vec:hybrid`/weighted-RRF), not just the Rust library | clear-fit:sparq-vectors `fuse.rs` + the V1 rewriter | 4 | M | Dense+sparse hybrid beats either alone on BEIR/MS-MARCO `[established]`; sparq already has **both signals + the fuse helpers** — only the SPARQL exposure is missing. Weaviate/Qdrant make this a first-class query. <https://en.wikipedia.org/wiki/Learned_sparse_retrieval>; in-repo `genai-text-embedding-practices.md` §4 |
 | **V5** | **RaBitQ binary quantization tier** — 1-bit + popcount with the unbiased estimator; multi-bit 4/5/7 levels; replaces/augments the binary path next to SQ/PQ | clear-fit:sparq-vectors `quant.rs` | 4 | M | Modern binary tier sparq lacks; AND+popcount is single-cycle, 768-d recall >94% at 1-bit, theoretical error bound. Closes the quantization frontier vs Milvus `IVF_RABITQ`. `[established]` RaBitQ SIGMOD'24 (10.1145/3654970) |
 | **V6** | **Cross-encoder rerank seam (stage-2)** — over-fetch N via ANN/RRF, rerank by an out-of-process reranker behind a trait (mirrors the `Embedder`/`Llm` seam) | clear-fit:sparq-vectors (new `rerank` trait) | 3 | S | Standard two-stage RAG; +up-to-10 nDCG over bi-encoders, K∈[50,200] `[established]`. Cheap, model out-of-process, matches sparq's "model lives outside the engine" discipline. <https://arxiv.org/pdf/2510.04757> |
-| **V7** | **Wire the PQ candidate cache into `DiskAnnIndex.search_slots`** — finish the designed-but-unwired PQ-filter → full-precision rerank loop inside the on-disk index | clear-fit:sparq-vectors `diskann.rs` | 3 | S | Already-built/tested `quant.rs` cache is **not yet in** `search_slots` (skill "DiskANN honest scope"); finishing it makes DiskANN truly external-memory at billion-scale. Low-risk completion of existing work. In-repo skill + crate beads |
+| ~~**V7**~~ | ~~**Wire the PQ candidate cache into `DiskAnnIndex.search_slots`**~~ — **SHIPPED** (sq-qamd / #620): `build_with_pq` persists a trailing `.spqg` PQ section and `search_slots` dispatches to `search_slots_pq` (rank the beam on RAM-only PQ codes, re-rank survivors off the mmap), so DiskANN is now external-memory at billion-scale. No longer a recommendation. | clear-fit:sparq-vectors `diskann.rs` | — | — | Graduated to landed work. |
 | **V8** | **Named / multi-vector per entity** — store >1 vector per dict id (e.g. structural KGE + text + per-language) under named slots; per-query slot selection | new-component-but-fits (`.spqv` format ext) | 3 | M | Commercial table stakes (Qdrant/Weaviate named vectors); the late-fusion design (`genai-kg-embeddings-vectorindex.md` §6.6) wants ≥2 modalities. Currently one f32/id. Per-language stores are the Wikidata pattern. <https://qdrant.tech/blog/2025-recap/> |
 | **V9** | **RDF-native GraphRAG retriever** — `vec:`/filtered-ANN seed entities → exact graph-neighbourhood expansion (SPARQL) → provenance-carrying context pack, all local/WASM | new-component-but-fits (compose V1+V2+`sparq-nlq`/`-introspect`) | 4 | L | GraphRAG today is property-graph + LLM-built, weak semantics; sparq offers RDF+OWL/N3 reasoning + **provenance** + browser-local. HybridRAG (vector+graph) ~85% vs ~70% vector-only (secondary). The product-defining composition. `[established]` MS GraphRAG; arXiv:2408.04948 |
 | V10 | **MUVERA fixed-dim encoding for late-interaction** — if multi-vector ever needed, encode to single-vector MIPS so the existing ANN index serves it | ambiguous-ask-user (only if doc-RAG enters scope) | 2 | L | Multi-vector (ColBERT) is doc-retrieval-shaped, not entity-shaped; MUVERA avoids a bespoke MaxSim index. Park until a doc-RAG use-case is confirmed. `[established]` MUVERA NeurIPS'24; WARP 2025 |
@@ -201,7 +203,7 @@ consistent with the architecture) · `ambiguous-ask-user`. Impact 1–5 (5 = pro
 **Tier 2 — close the commercial feature parity (cheap, high-leverage):**
 4. **V4 in-query hybrid+RRF** — both signals + fuse helpers already exist; only SPARQL exposure is missing
    (rides on V1).
-5. **V7 wire the PQ cache into DiskANN** — finish existing, tested code (effort S).
+5. ~~**V7 wire the PQ cache into DiskANN**~~ — **SHIPPED** (sq-qamd / #620); no longer a recommendation.
 6. **V5 RaBitQ** + **V6 cross-encoder rerank seam** — modern quantization + the standard stage-2; both
    models/codecs stay out-of-process.
 

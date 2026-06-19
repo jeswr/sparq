@@ -149,5 +149,7 @@ v0.1.0, opt-in (GenAI phase 1, `research/genai-design.md`), zero `unsafe`
 (`#![forbid(unsafe_code)]`). Measured quality/latency gates (same-class precision@10;
 `Predicates`-mode class-separation AUC; `most_similar(k=10)` latency) are enforced by
 the `olympics_eval` example — run it for the (non-canonical) numbers rather than baking
-them here. The entity/relation-linking hook into `sparq-nlq` is a documented follow-on,
-not yet wired. Code carries [OPUS-4.8] review markers pending re-review.)_
+them here. The entity/relation-linking hook into `sparq-nlq` is now wired (sq-uw40 / #647):
+`crates/sparq-nlq/src/link.rs` depends on this crate (`use sparq_sim::Sim;`) and expands each
+linked entity with its `Sim::most_similar` structural siblings during NL→SPARQL grounding,
+covered by an integration test. Code carries [OPUS-4.8] review markers pending re-review.)_
