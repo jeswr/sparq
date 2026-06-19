@@ -7,26 +7,26 @@ Each control in [`controls.md`](./controls.md) is backed here by the **exact** f
 test, or CI job, plus the command an auditor re-runs to confirm it. Paths are
 repo-relative. No timing is recorded (NON-CANONICAL EC2 box).
 
-## MS-1 — confined unsafe surface (30 `forbid` crates, 5 unsafe crates)
+## MS-1 — confined unsafe surface (31 `forbid` crates, 5 unsafe crates)
 
 ```sh
 grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | sed 's#crates/##;s#/src.*##' | sort -u
 ```
-→ 30 crates: sparq-algos, sparq-canon, sparq-conformance, sparq-engine, sparq-fedclient,
-sparq-fedplan, sparq-geo, sparq-gpu, sparq-hdt, sparq-introspect, sparq-mpc, sparq-nlq,
-sparq-parse, sparq-policy, sparq-prov, sparq-py, sparq-reason, sparq-reason-wasm, sparq-rsp,
-sparq-rsp-wasm, sparq-serve, sparq-server, sparq-shacl, sparq-shacl-wasm, sparq-sim,
+→ 31 crates: sparq-algos, sparq-canon, sparq-conformance, sparq-engine, sparq-fedclient,
+sparq-fedplan, sparq-fedplan-mpc, sparq-geo, sparq-gpu, sparq-hdt, sparq-introspect, sparq-mpc,
+sparq-nlq, sparq-parse, sparq-policy, sparq-prov, sparq-py, sparq-reason, sparq-reason-wasm,
+sparq-rsp, sparq-rsp-wasm, sparq-serve, sparq-server, sparq-shacl, sparq-shacl-wasm, sparq-sim,
 sparq-solid, sparq-text, sparq-text-wasm, sparq-wasm, sparq-zk.
 
 ```sh
-ls -d crates/*/ | wc -l       # → 35 total crates
+ls -d crates/*/ | wc -l       # → 36 total crates
 ```
-Accounting: **30 forbid + 5 with unsafe (sparq-core, sparq-vectors, sparq-cli,
-sparq-zk-compose, sparq-bench) = 35.** No crate is unaccounted-for. <!-- [OPUS-4.8] sq-toze.16:
-count re-verified on this branch — 35 workspace crates, 30 `#![forbid(unsafe_code)]` roots,
-5 unsafe-bearing (sq-algos + the 3 *-wasm split crates joined the forbid set since the
-sq-pro0 26/31 snapshot). The 59-site / per-crate figures (MS-2) reflect the current
-`bench/unsafe-snapshot.json` (`total=59`, sparq-core 45). -->
+Accounting: **31 forbid + 5 with unsafe (sparq-core, sparq-vectors, sparq-cli,
+sparq-zk-compose, sparq-bench) = 36.** No crate is unaccounted-for. <!-- [OPUS-4.8] sq-toze.16:
+count re-verified on this branch — 36 workspace crates, 31 `#![forbid(unsafe_code)]` roots,
+5 unsafe-bearing (sparq-fedplan-mpc joined the forbid set in #798; sq-algos + the 3 *-wasm
+split crates joined earlier, since the sq-pro0 26/31 snapshot). The 59-site / per-crate
+figures (MS-2) reflect the current `bench/unsafe-snapshot.json` (`total=59`, sparq-core 45). -->
 
 ## MS-2 — 59-site register, count-verified
 
