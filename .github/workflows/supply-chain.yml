@@ -137,9 +137,27 @@ jobs:
         uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: cargo-vet
-      # `--locked` so vet evaluates the committed Cargo.lock, not a freshly-resolved tree.
+      # [OPUS-4.8] Populate the cargo cache so the subsequent `--frozen` vet can run
+      # fully offline (its precondition is "the cargo cache is populated or deps are
+      # vendored"). `--locked` keeps it to the committed Cargo.lock.
+      - name: Populate cargo cache (for offline vet)
+        run: cargo fetch --locked
+      # [OPUS-4.8] `--locked --frozen`: verify EVERY crate against the COMMITTED
+      # supply-chain/imports.lock + config.toml exemptions WITHOUT re-fetching the
+      # remote `[imports.*]` audit aggregations at run time. Plain `cargo vet --locked`
+      # still re-pulls those 6 upstream audit sets (Mozilla/Google/Bytecode-Alliance/
+      # ISRG/Embark/Zcash) and re-aggregates them in memory on every run; a transient
+      # bad/partial upstream response (observed: a `publisher.wasm-encoder` block fetched
+      # without its `user-id` field -> "missing field `user-id`" toml parse error) then
+      # reds this GATING leg and the whole ci-summary gate on an unrelated PR — while a
+      # concurrent run on `main` that sampled good data passes (seen on PRs #693/#704,
+      # bead sq-miwt). `--frozen` makes the attestation deterministic: it proves the
+      # ratchet against the checked-in evidence, and a genuinely-new/unaudited crate
+      # still FAILS (the committed imports.lock won't cover it). Imports are refreshed
+      # deliberately by re-running `cargo vet` (without `--frozen`) when updating the
+      # checked-in supply-chain/ evidence, not implicitly inside the gate.
       - name: cargo-vet check — GATING
-        run: cargo vet --locked
+        run: cargo vet --locked --frozen
 
   # ---- VEX ↔ deny.toml drift gate ----
   # [OPUS-4.8] sq-toze.29 (GS-5): the published VEX (supply-chain/vex.cdx.json) and the
