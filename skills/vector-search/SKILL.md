@@ -649,6 +649,18 @@ path (recipe 10), and does **not** transfer to this approximate path. Implement 
   thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force
   (`nearest_exact`, answer-exact) + the hand-rolled on-disk Vamana graph (`DiskAnnIndex`, no extra
   dep). Approximate search is **APPROXIMATE** — recall < 1.0, NOT answer-exact (recipes 2 & 11).
+- **Reference-library verification (sq-6te5).** The recall floors are anchored not only against
+  this crate's own exact searcher but against an **established ANN library** (hnswlib/FAISS):
+  `tests/ref_lib_verify.rs` loads a committed fixture (`tests/fixtures/hnswlib_ref.tsv`, a REAL
+  hnswlib capture) and asserts (a) `nearest_exact` reproduces numpy's exact-kNN oracle exactly —
+  same metric, same corpus — and (b) sparq-vectors' DiskANN (and HNSW under `approx-ann`) clears
+  hnswlib's OWN recall on the shared oracle. **This runs in CI with no native deps** — the corpus
+  is regenerated from a splitmix64 seed on both sides (bit-identical Python and Rust), so the
+  fixture is just neighbour ids. The **live** hnswlib re-capture
+  (`scripts/capture_hnswlib_ref.py`, needs numpy + hnswlib) is `#[ignore]`d / **gather-only**: run
+  `cargo test -p sparq-vectors --test ref_lib_verify -- --ignored` (optionally
+  `VECTOR_PY=<venv>/bin/python`). Recall numbers are work-box NON-CANONICAL and are recomputed off
+  the ids, never baked.
 - **`HashEmbedder` is TEST-ONLY.** It is lexical n-gram hashing with **no semantics**
   ("car" and "automobile" are unrelated). Use it to exercise the store/ANN/pipeline; bring
   a real `Embedder` for actual retrieval.
