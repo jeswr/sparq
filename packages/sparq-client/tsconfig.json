@@ -14,5 +14,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "src/conformance.ts"]
+  "exclude": ["node_modules"]
 }

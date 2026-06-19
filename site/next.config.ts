@@ -36,6 +36,12 @@ const basePath =
 
 const nextConfig: NextConfig = {
   output: "export",
+  // [OPUS-4.8] sq-jpki — the repo now has repo-root npm workspaces (a root package.json with
+  // a `workspaces` field + a root package-lock.json). Next would otherwise INFER the workspace
+  // root from the multiple lockfiles it sees (root + site/package-lock.json) and emit a warning;
+  // pin the file-tracing root to the monorepo root explicitly so the static export's tracing is
+  // deterministic and the warning is gone. `__dirname` is site/, so the repo root is one up.
+  outputFileTracingRoot: path.resolve(__dirname, ".."),
   // Only emit basePath/assetPrefix when there IS a prefix. An empty basePath must not be
   // set as `assetPrefix: ""` either — leaving both unset is exactly the root-relative
   // behaviour the Tauri webview needs.
@@ -50,10 +56,12 @@ const nextConfig: NextConfig = {
     config.resolve.extensionAlias = {
       ".js": [".ts", ".tsx", ".js", ".jsx"],
     };
-    // [OPUS-4.8] sq-2e93 — resolve the shared framework-agnostic client
-    // (`packages/sparq-client`) to its TS source. The package is consumed via a path
-    // alias (no repo-root workspaces yet — see research/gui-design.md §3), so the
-    // bundler needs this alias to follow the import the same way tsconfig `paths` does.
+    // [OPUS-4.8] sq-2e93 / sq-jpki — resolve the shared framework-agnostic client
+    // (`packages/sparq-client`) to its TS SOURCE. The repo now has repo-root npm workspaces
+    // (so `node_modules/@sparq/client` symlinks the package), but the package's `main`/`types`
+    // point at `src/index.ts` and the site bundles from source; this alias (matching the
+    // tsconfig `paths` entry) keeps the bundler following the import to the TS source the same
+    // way in both the workspace and a bare `site/`-only install.
     config.resolve.alias = {
       ...config.resolve.alias,
       "@sparq/client": path.resolve(

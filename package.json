@@ -1,0 +1,21 @@
+{
+  "name": "sparq-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Repo-root npm workspaces for the sparq JavaScript/TypeScript surfaces: the shared @sparq/client (the single wasm Store surface, re-exporting the generated d.ts), the Next.js showcase site, the @jeswr/sparq npm wrapper, and the Tauri GUI e2e harness. The Rust workspace is governed separately by Cargo.toml. [OPUS-4.8] sq-jpki",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "js",
+    "site",
+    "gui/e2e"
+  ],
+  "scripts": {
+    "typecheck:client": "npm run typecheck --workspace @sparq/client",
+    "check:wasm-types": "npm run check:wasm-types --workspace @sparq/client",
+    "sync:wasm-types": "npm run sync:wasm-types --workspace @sparq/client"
+  },
+  "engines": {
+    "node": ">=18.20.0"
+  }
+}
