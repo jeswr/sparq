@@ -208,7 +208,7 @@ all-permutations order-independence test.
 
 `sparq-fedplan` is the planning *brain* with **no consumer** — it plans, but nothing
 fetches descriptors or issues a query. The consumer is a separate opt-in crate,
-**`sparq-fedclient`** (epic **sq-dnko** / sq-3183, design `research/federation-client-design.md`):
+**`sparq-fedclient`** (epic **sq-dnko** / sq-3183, architecture `research/federation-client-design.md`):
 the streaming federation **client** that discovers each remote source's capability, lowers
 a query BGP into this crate's `Bgp`, calls `select_sources` + `plan_bgp`, interprets the
 resulting `JoinTree` into physical operators (Bind → VALUES bind-join, Hash/Streaming →

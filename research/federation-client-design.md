@@ -1,73 +1,75 @@
-# Streaming Federation Client — design record (epic sq-3183) [OPUS-4.8]
+# Streaming Federation Client — architecture (`sparq-fedclient`, epic sq-3183) [OPUS-4.8]
 
-> 🤖 SPARQ agent. Design-for-maintainer-review. This is a **design record**, not an
-> implementation. It proposes a new **opt-in crate** that is a **streaming federation
-> CLIENT** over heterogeneous remote RDF sources. It is grounded FIRST in sparq's
-> *actual* federation code (so it proposes the real gap, not a re-proposal of what
-> exists), then distils the SOTA, then specifies an architecture that **reuses**
-> `sparq-fedplan` (planner + streaming operator) and `sparq-engine` (local eval +
-> SERVICE bind-join + SSRF guard) and stays **out of** `sparq-core` / `sparq-engine`.
+> 🤖 SPARQ agent. **Graduated** (bead `sq-zwr4`) from a *design record* to an
+> **architecture document**: the 8-phase build plan it once proposed (Phases 0–7)
+> is **fully shipped** — every phase maps to a module in
+> `crates/sparq-fedclient/src/`, the umbrella epic **sq-dnko** is **CLOSED**, and the
+> latest slice (native HTTP `FragmentTransport` + brTPF/TPF, bead `sq-yzca`) landed on
+> `main` (#548). This doc now describes **what the federation client does and where**
+> — verified against the crate source, not the original plan. The speculative
+> phased-build framing has been dropped; the §"Honest risks & hard parts" caveats are
+> preserved because they remain true of the shipped code.
+>
+> **Companions.** Task-oriented USE guidance for the planner this client reuses, and a
+> phase-by-phase landing narrative, live in
+> [`skills/federated-planning/SKILL.md`](../skills/federated-planning/SKILL.md). The
+> crate's own one-screen overview is
+> [`crates/sparq-fedclient/README.md`](../crates/sparq-fedclient/README.md). This file
+> is the **architecture-of-record**: the layered model, the module map, the reuse
+> seams, and the honest limits.
 >
 > **Honesty mandate.** Every claim about sparq is traced to a file + symbol. Every
 > quantitative claim from the literature is *theirs* and workload-specific — none is a
 > sparq measurement. sparq's ZK/MPC estate is not externally audited and is irrelevant
 > here. Work-box timings are non-canonical and are not cited. The `StreamJoin`
 > correctness invariant cited below is **test-asserted in-crate**, not independently
-> benchmarked. This record makes **architectural predictions**, not measured claims:
-> any "better than Comunica" statement is a hypothesis to be validated head-to-head
-> (FedBench / WatDiv / LDBC) before being asserted as fact.
+> benchmarked. Any "better than Comunica" statement is an architectural **hypothesis**
+> to be validated head-to-head (FedBench / WatDiv / LDBC) before being asserted as fact.
 >
 > Model: Opus 4.8 (Fable unavailable — flag for re-review when Fable returns).
 
 ---
 
-## 1. Problem & scope
+## 1. What the federation client is
 
-### 1.1 What we are building
-
-A **streaming federation client**: a component that, given one SPARQL query and a set of
-**heterogeneous remote sources** (full SPARQL endpoints, bindings-restricted TPF servers,
-plain TPF servers, RDF dumps / HDT files, and the *local* sparq engine), **discovers each
-source's capability**, **plans** a federated execution that pushes the most precise
-sub-query each source can answer, and **streams** results back through non-blocking
-federation operators — emitting solutions before any input is exhausted and before the
-whole query completes.
+`sparq-fedclient` is a **streaming federation client**: given one SPARQL query and a set
+of **heterogeneous remote sources** (full SPARQL endpoints, bindings-restricted brTPF
+servers, plain TPF servers, and the *local* sparq engine), it **discovers** each source's
+capability, **plans** a federated execution that pushes the most precise sub-query each
+source can answer, and **streams** results back through non-blocking federation operators —
+emitting solutions before any input is exhausted and before the whole query completes.
 
 This is the **client** half of federation — the query *consumer* that fans out to many
-servers — distinct from the **server** half (sparq-server's discovery descriptors, §3).
+servers — distinct from the **server** half (sparq-server's discovery descriptors, §4.3).
 
-### 1.2 Hard scope constraint: a separate, opt-in crate — explicitly NOT in core
+### 1.1 Opt-in, out of `sparq-core`/`sparq-engine` (load-bearing)
 
-The client is a **new standalone workspace member** (proposed name **`sparq-fedclient`**,
-§5), gated behind an OFF-by-default cargo feature, following the project's
-opt-in-feature-architecture rule. It is **explicitly NOT** in `sparq-core` or
-`sparq-engine`:
+The client is a standalone workspace member, `publish = false`, gated behind the
+**`fedclient` cargo feature (OFF by default)**; the adaptive half adds a further
+default-OFF `fedclient-adaptive` feature. A build that does not enable `fedclient`
+compiles an **empty crate** (`crates/sparq-fedclient/src/lib.rs:12-138` — every module is
+`#[cfg(feature = "fedclient")]`-gated).
 
-- `sparq-core` (terms, dictionary, graph, ingest) gains **nothing** — no network, no async
-  runtime, no federation types.
-- `sparq-engine` gains **nothing new**: the federation client *depends on* the engine (for
-  local BGP evaluation and the existing `service` machinery) but the engine never depends
-  on the client. The default engine build and the WASM artifact are byte-identical with or
-  without `sparq-fedclient`.
+`sparq-core` (terms, dictionary, graph, ingest) gains nothing — no network, no async
+runtime, no federation types. `sparq-engine` gains nothing: the client *depends on* the
+engine (for local BGP evaluation and the existing `service` machinery) but the engine
+**never** depends on the client. **The default engine build and the WASM artifact are
+byte-identical with or without `sparq-fedclient`.** This boundary is proved before any
+logic and re-checked on every build (§5).
 
-This mirrors the existing boundary: `sparq-fedplan` is already a standalone member with
-**no `sparq-core`/`sparq-engine` dependency** and is `publish = false`, feature-gated
-`fedplan` OFF by default (`crates/sparq-fedplan/Cargo.toml:29`, `src/lib.rs:71-100`); a
-build without the feature *compiles an empty crate*. The federation client sits one layer
-above: it is allowed to depend on the engine (unlike fedplan, which deliberately does not),
-but the dependency arrow only ever points *into* the engine, never out of it.
+### 1.2 Out of scope (named, not hand-waved)
 
-### 1.3 Out of scope (named, not hand-waved)
-
-- Re-architecting the engine's result model into a global async stream (the engine stays
-  materialised; the client owns the streaming boundary — see §4.4 and the honest caveat in
-  §7).
-- Link-Traversal Query Processing (follow-your-nose over unknown link graphs). LTQP is a
-  separate paradigm (Comunica's `query-sparql-link-traversal`); it can be a *later* opt-in
-  mode but is not part of this crate's first delivery.
-- Becoming a TPF/brTPF *server* — sparq-server is a full-SPARQL endpoint, not an LDF
-  server (`grep` finds no TPF/brTPF/Hydra fragment endpoint in `crates/sparq-server/src`;
-  the only "fragment" hits are unrelated error-redaction comments).
+- **Re-architecting the engine into a global async stream.** The engine stays materialised;
+  the client owns the streaming boundary (see §4.4 and the honest limit in §7).
+- **Link-Traversal Query Processing** (follow-your-nose over unknown link graphs) — a
+  separate paradigm (Comunica's `query-sparql-link-traversal`); a possible *later* opt-in
+  mode, not part of this crate.
+- **Becoming a TPF/brTPF *server*.** sparq-server is a full-SPARQL endpoint, not an LDF
+  server. (The client *consumes* fragment servers; it does not host one.)
+- **The pushed-down streaming bind-join.** A `JoinAlgo::Bind` / brTPF leaf currently runs as
+  a complete (unbound) scan that the interpreter hash-joins locally — the same multiset, a
+  different execution discipline. The per-block streaming bind-join feeder is a roadmap bead
+  under epic sq-3183 (§7), not shipped.
 
 ---
 
@@ -166,147 +168,107 @@ Fragments (server answers star subqueries), smart-KG (ship compressed HDT predic
 partitions, client evaluates locally), and the **Heterogeneous-LDF federation framework**
 (Heling & Acosta, WWW 2022, arXiv:2102.03269) — a **single client federating across mixed
 interface types**, modelling each member's capabilities to pick the right access method per
-source. *This is the endgame the present design targets* (minus the SaGe/SPF/smart-KG
-adapters, deferred): endpoint > brTPF > TPF > dump/HDT > local engine, chosen per source.
+source. *This is the endgame the client targets* (minus the SaGe/SPF/smart-KG adapters, not
+built): endpoint > brTPF > TPF > dump/HDT > local engine, chosen per source.
 
 ---
 
-## 3. Where sparq is today, and the precise GAP
+## 3. The sparq seams it reuses, and the gap it filled
 
-Every claim here is traced to a file + symbol. Verified directly against the tree at the
-base of this branch.
+Every claim here is traced to a file + symbol against the current tree.
 
-### 3.1 What EXISTS and is reusable
+### 3.1 What it REUSES (none of it re-implemented in the client)
 
-**A. `crates/sparq-fedplan/` — a pure, no-I/O planner + streaming operator (opt-in, no
-consumer yet).**
+**A. `crates/sparq-fedplan/` — the pure, no-I/O planner + streaming operator (opt-in).**
 
 - **Source selection** — `select_sources(bgp, sources) -> Vec<PatternSources>`
-  (`src/selection.rs:95`): HiBISCuS-style **recall-safe** pruning via `can_contribute`
-  (`selection.rs:123`) — three positive-evidence prune rules (bound-predicate, bound-class,
-  bound subject/object authority only when `authorities_complete`, which a VoID-parsed
-  descriptor never is, so it stays disabled — recall-safe). CostFed-style skew-aware
-  per-(pattern, source) cardinality in `estimate_cardinality` (`selection.rs:171`).
-- **Source descriptor model** — `SourceDescriptor` (`src/descriptor.rs:90`), built via
+  (`selection.rs:95`): HiBISCuS-style **recall-safe** pruning via `can_contribute`
+  (`selection.rs:123`); CostFed-style skew-aware per-(pattern, source) cardinality in
+  `estimate_cardinality` (`selection.rs:171`).
+- **Source descriptor model** — `SourceDescriptor` (`descriptor.rs:90`), built via
   `builder()` or **`SourceDescriptor::from_void_nt(id, nt)`** (`descriptor.rs:322`), which
-  parses exactly the VoID + `scs:` N-Triples a sparq-server emits. Carries `PredPartition`,
+  parses exactly the VoID + `scs:` N-Triples a sparq-server emits (`PredPartition`,
   `ClassPartition`, `CharSet`, and the Neumann–Moerkotte `star_cardinality` /
-  `star_subjects` estimates (`descriptor.rs:203-232`).
+  `star_subjects` estimates).
 - **Join planner** — `plan_bgp(bgp, selection, descriptors, opts) -> Option<JoinTree>`
-  (`src/plan.rs:180`): greedy left-deep order seeded by smallest leaf; per-join
-  **bind-vs-hash** decision in `cost_join` (`plan.rs:272-314`) — `bind_cost = L·(request_cost
-  + fan_out)` vs `hash_cost = R + L`; a large hash-class join (`L + R > stream_threshold`) is
-  tagged`JoinAlgo::Streaming`. CS star estimate in`star_estimate`(`plan.rs:319`). Public
-  surface:`JoinAlgo`(`Bind`/`Hash`/`Streaming`),`JoinNode`,`JoinTree::join_order()`,
-  `PlanOptions { request_cost, stream_threshold }`(`plan.rs:71-175`).
-- **Streaming join OPERATOR** — `StreamJoin` (`src/stream.rs:256`): a symmetric
-  (XJoin-style) non-blocking hash join, push-based `push_left`/`push_right`, with bounded
-  **operator spill** to a temp file (`StreamJoinOptions::mem_budget_tuples`,
-  `SpillStore::{TempFile,Memory}`). Plus `blocking_hash_join` oracle and `run_streaming`
-  driver. The correctness invariant (streamed+spilled result is multiset-equal to the
-  blocking join, any interleaving / any budget) is **test-asserted in-crate only**.
-- **Light pattern model** — `Bgp`, `TriplePattern`, `Term`, `Var` (`src/pattern.rs`),
-  deliberately decoupled from the engine's spargebra algebra.
-- **Wiring status: `sparq-fedplan` has ZERO consumers.** `grep` confirms it is referenced
-  only by its own `Cargo.toml` and the workspace `Cargo.toml`; nothing in `sparq-engine` /
-  `sparq-server` / `sparq-cli` depends on it. **It plans, but nothing consumes the plan and
-  no fetch is ever issued.**
+  (`plan.rs:180`): greedy left-deep order; per-join **bind-vs-hash** decision in `cost_join`;
+  large hash-class joins tagged `JoinAlgo::Streaming`. Public surface: `JoinAlgo`
+  (`Bind`/`Hash`/`Streaming`), `JoinNode`, `JoinTree::join_order()`, `PlanOptions`.
+- **Streaming join OPERATOR** — `StreamJoin` (`stream.rs`): a symmetric (XJoin-style)
+  non-blocking hash join, push-based, with bounded **operator spill** to a temp file. The
+  correctness invariant (streamed+spilled result multiset-equal to the blocking join, any
+  interleaving / any budget) is **test-asserted in-crate only**.
+- **Adaptive RE-planner** — `AdaptiveExecutor` (`fedplan` `adaptive` module, behind the
+  `adaptive-replan` feature, bead `sq-7s4z`): the divergence trigger, hysteresis margin,
+  suffix re-ordering, latency weighting, and the commutativity soundness proof. The client
+  *drives* it; it does not re-implement it.
 
-**B. `crates/sparq-engine/src/service.rs` + `eval_service` in `exec.rs` — the SERVICE-clause
-executor (opt-in `service` feature, `Cargo.toml:58`).**
+**B. `crates/sparq-engine/src/service.rs` + `eval_service`/`try_bound_join_service` in
+`exec.rs` — the SERVICE-clause executor (opt-in `service` feature).**
 
-- `eval_remote(transport, endpoint, query)` (`service.rs:73`) → `Transport::fetch`
-  (`service.rs:66`) → `parse_srj` (`service.rs:250`). Production transport `HttpTransport`
-  is a **blocking ureq POST**, form-encoded, `Accept: application/sparql-results+json`, 30 s
-  timeout (gated off wasm).
-- **Bound join (brTPF/FedX-style VALUES pushdown)** — `try_bound_join_service`
-  (`exec.rs:2077`): collects DISTINCT, fully-bound, **pushable** join-key tuples
-  (`pushable_term` rejects bnodes/triple-terms), renders `VALUES` blocks
-  (`render_values_block`) of `bind_block_size()` (default `DEFAULT_BIND_BLOCK = 50`,
-  tunable via `with_service_bound_join_block_size` / `SPARQ_SERVICE_BIND_BLOCK`), sends
-  `SELECT * WHERE { VALUES… inner }` per block, and **accumulates ALL blocks into `acc_rows`
-  before joining**. Wired into `Join`/`LeftJoin`, symmetric on either side.
-- **SSRF egress policy** — default-DENY private/internal ranges via `is_forbidden_ip`
-  (`service.rs:406`) installed as ureq's resolver `EgressFilterResolver` (DNS-rebinding-safe);
-  modes `DenyPrivate` / `AllowlistOnly`; scoped via `with_service_egress_allow` /
-  `with_service_egress_policy`. The server installs strict `AllowlistOnly`. **This is a
-  genuine differentiator** — most engines ship SSRF-open `SERVICE`.
-- **SILENT** → join identity. The SRJ parser handles uri/bnode/literal/typed-literal/
-  triple-term and round-trips RDF 1.2 `its:dir` direction.
+- `eval_remote` → `Transport::fetch(endpoint, query) -> String` → `parse_srj`. Production
+  transport `HttpTransport` is a blocking ureq POST, form-encoded, `Accept:
+  application/sparql-results+json` (gated off wasm).
+- **Bound join (brTPF/FedX-style VALUES pushdown)** — `try_bound_join_service`: DISTINCT,
+  fully-bound, pushable join-key tuples rendered into `VALUES` blocks of `bind_block_size()`
+  (default `DEFAULT_BIND_BLOCK = 50`).
+- **SSRF egress policy** — default-DENY private/internal ranges via `is_forbidden_ip`,
+  installed as ureq's resolver `EgressFilterResolver` (DNS-rebinding-safe). **A genuine
+  differentiator** — most engines ship SSRF-open `SERVICE`. The client reuses this guard for
+  every native transport.
 
 **C. `crates/sparq-server/` — the SERVER side (NOT a TPF/brTPF server).** SPARQL 1.1
 Protocol + Graph Store HTTP; **federation DISCOVERY descriptors** (opt-in
-`federation-descriptors` feature + flag, both OFF): `void_descriptor` serves
-`/.well-known/void` and `service_description` serves `GET /sparql` with no query
-(`descriptors.rs:148`, `:173`). VoID rides with the `scs:` characteristic-set extension via
-`Introspection::to_void_with_cs` (`sparq-introspect/src/lib.rs:1053`) — the **exact
-producer** for `SourceDescriptor::from_void_nt`. No TPF/brTPF/Hydra fragment endpoint exists.
+`federation-descriptors` feature, OFF): `void_descriptor` serves `/.well-known/void` and
+`service_description` serves `GET /sparql` with no query. VoID rides with the `scs:`
+characteristic-set extension via `Introspection::to_void_with_cs`
+(`sparq-introspect/src/lib.rs`) — the **exact producer** for `SourceDescriptor::from_void_nt`.
+A brTPF binding-block server wire landed under `sq-dxhb` (the text wire the client's `wire`
+module also speaks, §4.6).
 
-**D. Result model is MATERIALISED, not a federation-grade stream.** `QueryResult { vars,
-rows: Vec<Vec<Option<Term>>> }` (`sparq-engine/src/lib.rs:597`) is fully materialised; every
-public entry returns it; there is **no solution-level `Iterator`/`next`**. Internally,
-`eval_graph_pattern` builds a full `Bindings` relation at every operator node (joins are
-blocking; SERVICE results fetched fully then joined). The only streaming surface is
-**byte-level**: `query_json_chunks_with_budget` (`lib.rs:546`) chops the serialised JSON
-string into 64 KiB chunks (`JSON_CHUNK_BYTES`, `lib.rs:540`). No solution-level pipelined
-iterator, no cross-source streaming.
+**D. The engine result model is MATERIALISED.** `QueryResult { vars, rows }`
+(`sparq-engine/src/lib.rs`) is fully materialised; there is **no solution-level
+`Iterator`**. The client therefore owns the streaming boundary itself (§4.4); a local
+sub-BGP evaluation through the engine remains a materialised call (§7).
 
-### 3.2 The precise GAP (what the client must fill)
+### 3.2 The gap the client filled
 
 The planning brain, the CS cardinality model, the streaming-join operator, the per-source
-SPARQL adapter + bind-join primitive, the SSRF guard, and the discovery *payload*
-producer/consumer seam are **all done and reusable**. The missing piece is the **execution
-glue**:
-
-1. **Network execution over heterogeneous sources.** The only network path is `service.rs`'s
-   blocking ureq POST to a full SPARQL endpoint speaking SRJ. The `Transport` trait
-   (`service.rs:66`) is `fetch(endpoint, query) -> String` — it assumes "send SPARQL, get
-   SRJ", so it is **not** a general source abstraction. There is no source-type-polymorphic
-   adapter interface (Comunica's `IQuerySource`); no TPF/brTPF/dump/HDT adapter exists.
-2. **Capability discovery + most-precise-query-per-source.** `fedplan` consumes descriptors
-   but **never fetches them**, and there is **no client-side Service-Description parser**
-   (the server has only a writer, `descriptors.rs`). A client must GET `/.well-known/void` +
-   SD per source, hand the served N-Triples to `from_void_nt` (this seam exists), read SD to
-   learn supported features, and negotiate which precise sub-query each source can answer.
-3. **Streaming federation operators wired to real fetches.** `StreamJoin` is the right shape
-   but `run_streaming` consumes `&[Tuple]` **slices** with a fixed schedule
-   (`stream.rs:446`) — i.e. fully-known inputs, no async source. A client must feed federated
-   sub-result *streams* into `StreamJoin` at their arrival rates, and bridge fedplan's light
-   `Tuple`/`Term`/`Var` model to the engine's spargebra / `oxrdf::Term` / id-level
-   `Bindings`.
-4. **An interpreter that turns a `JoinTree` into fetches.** `JoinTree`/`JoinNode`/`JoinAlgo`
-   is a static plan with **no executor**: nothing turns a `Bind` node into VALUES-pushdown, a
-   `Hash` node into a local hash join, or a `Streaming` node into a fed `StreamJoin`. The plan
-   speaks pattern *indices* and source *indices* with **no mapping to endpoint URLs /
-   transports**.
-5. **Adaptive re-planning.** Explicitly deferred and unbuilt (fedplan `README.md:100-103`,
-   `lib.rs:62-68`): the plan is static; no feedback loop from observed cardinalities/rates.
-   (The harder ANAPSID half.)
-6. **Async / concurrency.** The SERVICE transport is blocking, one request at a time; bound-
-   join blocks are issued sequentially and fully accumulated (`exec.rs:2165`). A client wants
-   concurrent fan-out to N sources, backpressured streaming, and incremental emission.
+SPARQL adapter + bind-join primitive, the SSRF guard, and the discovery payload
+producer/consumer seam were all done and reusable. The client supplied the **execution glue**:
+network execution over heterogeneous sources, capability discovery + most-precise-query
+selection, streaming federation operators wired to real fetches, an interpreter that turns a
+`JoinTree` into fetches (the missing index→adapter mapping), adaptive re-planning, and
+bounded concurrent fan-out. All of this is now shipped — §4 describes it as built.
 
 ---
 
-## 4. Proposed architecture
+## 4. Architecture (as built) — five layers + the module map
 
-Five layers, top to bottom. Each names the existing sparq seam it reuses.
+Five layers, top to bottom. Each names the existing sparq seam it reuses **and the module
+that realises it**.
 
 ```text
                           ┌─────────────────────────────────────────────┐
-   query string  ────────▶│  sparq-fedclient  (NEW, opt-in crate)        │
-                          │                                              │
-   (4.1) Source registry  │  SourceType: Endpoint | BrTpf | Tpf | Local  │
-   + capability discovery  │   ▲ discover(): GET VoID+SD, parse → SourceDescriptor (REUSE from_void_nt)
-                          │   │   + Capability (which features pushable)  │
-   (4.2) Planner bridge    │  parse → light Bgp; select_sources;          │
-                          │  plan_bgp → JoinTree   (REUSE sparq-fedplan)  │
-   (4.3) Pushdown          │  per leaf/group: build the MOST PRECISE      │
-                          │  sub-query the source can answer             │
-   (4.4) Physical exec     │  JoinTree → operators:                       │
-                          │   Bind→VALUES/brTPF | Hash→local | Streaming→StreamJoin (REUSE)
-                          │   over an async SolutionStream                │
-   (4.5) Adaptive          │  feedback: observed card/rate → re-plan       │
+   query string  ────────▶│  sparq-fedclient  (opt-in crate, feature     │
+                          │                    `fedclient`, OFF)          │
+   discovery / capability │  discovery.rs:  GET VoID+SD → Capability      │
+                          │   (REUSE from_void_nt) + ASK-probe fallback   │
+   source abstraction      │  source.rs:  SourceType {Endpoint|BrTpf|Tpf  │
+                          │   |Local}, FederatedSource, Capability,       │
+                          │   Endpoint + Tpf/BrTpf adapters, Transport,   │
+                          │   FragmentTransport, EgressGuard              │
+   planner bridge          │  planner.rs:  lower BGP → fedplan Bgp;        │
+                          │   select_sources; plan_bgp; SourceResolver    │
+                          │   (index → adapter)         (REUSE fedplan)   │
+   pushdown                │  pushdown.rs:  exclusive groups; push_group;  │
+                          │   common_variable_check; render_values_block  │
+   physical exec           │  operators.rs / stream.rs:  JoinTree →        │
+                          │   Bind/Hash/Streaming → StreamJoin (REUSE),   │
+                          │   Local → sparq-engine eval; SolutionStream,  │
+                          │   ScatterPool; wire.rs brTPF block codec      │
+   adaptive (opt-in)       │  adaptive.rs:  observed card → re-plan suffix │
+                          │   (REUSE fedplan AdaptiveExecutor)            │
                           └───────────────┬──────────────────────────────┘
                                           │ local BGP eval, term interning, SSRF guard
                                           ▼
@@ -314,175 +276,164 @@ Five layers, top to bottom. Each names the existing sparq seam it reuses.
                           sparq-core    (UNCHANGED)
 ```
 
-### 4.1 Source-type abstraction + capability discovery
+| Layer | Module | What it does (verified) | Reuses |
+| --- | --- | --- | --- |
+| Capability discovery | `discovery.rs` | GET SD (`GET <endpoint>` no `query`) + `/.well-known/void`, parse → `Capability` (+ optional `SourceDescriptor`); FedX-style ASK-probe fallback; SSRF-guarded `Fetcher` seam | `from_void_nt`; engine SSRF guard |
+| Source abstraction | `source.rs` | `SourceType {Endpoint\|BrTpf\|Tpf\|Local}`, `FederatedSource` trait, fine-grained `Capability`, `Endpoint` (SRJ) + `TpfSource`/`BrTpfSource` (fragment) adapters, `Transport`/`FragmentTransport` seams, native `HttpTransport`/`HttpFragmentTransport` behind `EgressGuard` | engine SRJ transport + SSRF resolver |
+| Planner bridge | `planner.rs` | lower query BGP → fedplan light `Bgp`; `SourceResolver` (plan pattern/source *index* → `TriplePattern` / adapter); `lower_leaf` / `lower_leaf_fragment` | `select_sources`, `plan_bgp` |
+| Pushdown | `pushdown.rs` | FedX `exclusive_groups`; `push_group` (max evaluable sub-algebra: projection + capability-covered FILTERs + ORDER/LIMIT); the **exact** `common_variable_check`; `render_values_block` / `bind_block_size` | engine `service.rs` block primitive (mirrored) |
+| Physical exec | `operators.rs`, `stream.rs` | `materialize_single_source` / `materialize_multi_source` (materialised left-deep) + `stream_single_source` / `stream_multi_source` (the `SolutionStream` boundary, `ScatterPool` bounded blocking pool, `StreamingJoin` over fedplan's `StreamJoin`) | fedplan `StreamJoin`; engine local eval |
+| brTPF block wire | `wire.rs` | compact self-describing BINARY mapping wire (`encode_bindings`/`decode_bindings`) + the line-oriented TEXT wire (`encode_bindings_text`) the server parses — a codec only | server brTPF wire (`sq-dxhb`) |
+| Adaptive re-plan | `adaptive.rs` (feature `fedclient-adaptive`) | `execute_adaptive_single_source`: leaf-scan records REAL observed cardinalities, then re-plans the unjoined remainder at each operator boundary, at most once per boundary | fedplan `AdaptiveExecutor` |
 
-A `SourceType` enum with one adapter per interface, each implementing a single trait — the
-sparq analogue of Comunica's hypermedia "negotiate down to the most-capable handler", but
-with a **fine-grained, statically-resolved** capability descriptor instead of Comunica's
-coarse "service-description? / search-form? / totalItems?" runtime check.
+### 4.1 Source-type abstraction + capability discovery (`source.rs`, `discovery.rs`)
 
-```rust
-/// What a source can do — far richer than Comunica's coarse model.
-pub struct Capability {
-    pub interface: Interface,            // Endpoint | BrTpf | Tpf | LocalEngine
-    pub sparql_version: Option<SparqlVersion>, // from SD sd:supportedLanguage
-    pub pushable_filters: FilterClass,   // which FILTER ops / expressions evaluate remotely
-    pub bind_join: BindJoin,             // VALUES (endpoint) | maxMpR(n) (brTPF) | none (TPF)
-    pub aggregates: bool, pub property_paths: bool,
-    pub order_limit: bool,               // can ORDER BY / LIMIT be pushed?
-    pub result_formats: Vec<MediaType>,  // from SD sd:resultFormat
-}
+A `SourceType` enum with one adapter per interface, each implementing the `FederatedSource`
+trait — the sparq analogue of Comunica's hypermedia "negotiate down to the most-capable
+handler", but with a **fine-grained, statically-resolved** `Capability` descriptor (interface,
+SPARQL version, pushable FILTER class, bind-join mode, aggregates / property-paths /
+ORDER+LIMIT pushability, result formats) instead of Comunica's coarse "service-description? /
+search-form? / totalItems?" runtime check.
 
-pub trait FederatedSource {
-    /// Discover capability + statistics (one-shot, cached).
-    fn discover(&self) -> Result<(Capability, Option<SourceDescriptor>), FedError>;
-    /// Stream solutions for the most-precise sub-query this source can answer.
-    fn execute(&self, sub: &SubQuery) -> SolutionStream;
-}
-```
+- **Endpoint discovery.** GET the SD document (`GET <endpoint>` no `query`) + `/.well-known/void`,
+  parse VoID+`scs:` via the existing **`SourceDescriptor::from_void_nt`** seam (the
+  producer/consumer match exists end-to-end: server `to_void_with_cs` → client `from_void_nt`),
+  parse SD into a `Capability` (the one genuinely-new client-side parser this layer needed).
+  ASK-probe fallback when nothing is published. Every fetch is behind a default-deny
+  SSRF-guarded `Fetcher`.
+- **Fragment sources.** `TpfSource` / `BrTpfSource` read the Hydra `hydra:totalItems` count
+  (cardinality oracle) and answer one triple pattern completely over the `FragmentTransport`
+  seam. The native `HttpFragmentTransport` serialises the Hydra URI template
+  (`?subject=&predicate=&object=` + the brTPF `values` block), follows `hydra:next` to
+  exhaustion, and parses the Turtle/TriG body (splitting Hydra/VoID control triples from data).
+- **Local.** Capability is "everything"; statistics from `sparq-introspect`; evaluation
+  through `sparq-engine` (no network; the SSRF guard is moot).
 
-- **Discovery.** For an `Endpoint`: GET `/.well-known/void` and the SD document (`GET
-  /sparql` with no query), parse the VoID+`scs:` N-Triples with the existing
-  **`SourceDescriptor::from_void_nt`** seam (`descriptor.rs:322`) — *the producer/consumer
-  match already exists end-to-end* (server `to_void_with_cs` → client `from_void_nt`). Parse
-  SD into `Capability`. **A client-side SD parser is the one genuinely new parser this layer
-  needs** (the server has only the writer). For a `BrTpf`/`Tpf` source: read the
-  Hydra/`hydra:totalItems` count + search template (cardinality oracle + bind-join capability
-  flag). For `Local`: capability is "everything", statistics from `sparq-introspect`. When no
-  descriptor is published: fall back to **ASK probes** (FedX-style) for bound patterns, and
-  to per-fragment count metadata (TPF). `discover()` is cached so the hot path pays nothing.
+### 4.2 Planner-to-physical bridge — REUSE `sparq-fedplan` (`planner.rs`)
 
-### 4.2 Planner-to-physical-operator bridge — REUSE `sparq-fedplan`
-
-The client **does not write a new planner.** It:
-
-1. Lowers the parsed query's BGP(s) into fedplan's light `Bgp`/`TriplePattern`/`Term`/`Var`
-   (`pattern.rs`). (Non-BGP algebra — UNION, OPTIONAL, sub-SELECT, aggregation — is handled
-   by composing fedplan-planned BGP sub-results through engine operators; see §7 caveat.)
-2. Builds one `SourceDescriptor` per discovered source (§4.1) and calls
-   **`select_sources`** then **`plan_bgp`** (with `PlanOptions::request_cost` /
-   `stream_threshold` tuned per the discovered transport — a high `request_cost` for a
-   per-tuple TPF source pushes the planner toward hash/streaming).
-3. Resolves the plan's **pattern indices → patterns** and **source indices → endpoint URLs /
-   adapters** (the missing mapping called out in §3.2(4)).
-
-The cost-based join order, the bind-vs-hash decision, and the CS star cardinality are
-**already correct, tested, and deterministic** — the client supplies the descriptors and
+The client **does not write a new planner.** It lowers the parsed query's BGP into fedplan's
+light `Bgp`/`TriplePattern`/`Term`/`Var`, builds one `SourceDescriptor` per discovered source,
+and calls **`select_sources`** then **`plan_bgp`**. The plan speaks pattern *indices* and
+source *indices* with no endpoint mapping; **`SourceResolver`** is the index→adapter resolution
+layer (it pairs the BGP and the adapter slice, requires them in the same order, and range-checks
+every lookup). The cost-based join order, the bind-vs-hash decision, and the CS star cardinality
+are already correct, tested, and deterministic — the client supplies the descriptors and
 consumes the `JoinTree`.
 
-### 4.3 Capability-aware pushdown — ask each server its MOST PRECISE answerable query
+### 4.3 Capability-aware pushdown — ask each server its MOST PRECISE answerable query (`pushdown.rs`)
 
-For each leaf and each FedX-style **exclusive group** (a connected sub-pattern whose only
-relevant source is one member), the client builds the **maximal evaluable sub-algebra** for
-that source's `Capability` and pushes it:
+For each FedX-style **exclusive group** (`exclusive_groups`: a connected sub-pattern whose only
+retained source is one member — exactly-one-source, same-source, share-a-variable, via
+union-find), `push_group` builds the **maximal evaluable sub-algebra** for that source's
+`Capability`:
 
-- **Full endpoint** — decompose into exclusive groups, push each as one `SERVICE`-style
-  subquery; push **projections** (only the join + output variables), **filters** the
-  endpoint's `pushable_filters` cover (decomposing combined/disjunctive filters; pushing a
-  conjunct only when its variables are bound in the group — the **common-variable check**
-  Comunica is documented to omit), and `ORDER BY`/`LIMIT` when `order_limit`. Bind-join across
-  groups via **VALUES blocks**, reusing `render_values_block` + `bind_block_size`
-  (`service.rs:192`, `:107`).
-- **brTPF** — bind-join with `maxMpR`-sized binding blocks (the same block primitive, but the
-  block size is `Capability::bind_join`'s `maxMpR` rather than the VALUES default; use POST to
-  lift the GET cap).
-- **Plain TPF** — per-pattern fetch with greedy client-side join driven by the count metadata;
-  no bind pushdown (capability says none), so the planner's `request_cost` is set high so it
-  prefers fetching the whole (selective) fragment and hash-joining locally.
-- **Local engine** — evaluate the sub-BGP directly through `sparq-engine` on the local
-  `Graph` (no network; the SSRF guard is moot).
+- **Full endpoint** — the whole group as one multi-pattern `SELECT`: projection trimmed to the
+  join + output vars, the FILTER conjuncts the source's `FilterClass` covers **and** that pass
+  the `common_variable_check`, `ORDER`/`LIMIT` when the capability allows. Bind-join across
+  groups via **VALUES blocks** (`render_values_block` + `bind_block_size`).
+- **Fragment source** (brTPF/TPF) — one triple pattern only (no collapse, no FILTER pushed —
+  honest about a fragment server's access unit); brTPF carries a `maxMpR`-bounded binding block.
+- **Local engine** — evaluate the sub-BGP directly.
 
-Anything a source cannot evaluate is **kept locally** (the engine evaluates the residual).
-Pushdown only ever *narrows* what a source returns, so it is correctness-preserving by the
-same argument the existing `try_bound_join_service` uses (VALUES inner-joins the pushed
-bindings; the local join reattaches them identically).
+`common_variable_check(filter, group_vars)` is the **exact** check Comunica is documented to
+omit (#834/#609): push a conjunct **only when every variable it references is bound by the
+group**. Pushdown only ever *narrows* what a source returns, so it is correctness-preserving by
+the same argument the engine's `try_bound_join_service` uses; anything a source cannot evaluate
+is kept local (the engine evaluates the residual).
 
-### 4.4 Streaming federation operators — REUSE `StreamJoin` + `sparq-engine` local eval
+### 4.4 Streaming federation operators — REUSE `StreamJoin` + engine local eval (`operators.rs`, `stream.rs`)
 
-- **`SolutionStream`** — the new async/iterator abstraction the client owns at its boundary
-  (the engine stays materialised, §3.2(3)). Adapters yield `SolutionStream`s; operators
-  consume and produce them. Backpressured and bounded (Rust ownership + explicit buffer
-  bounds + spill — *not* a GC heap, structurally avoiding Comunica's documented heap-OOM and
-  broken-backpressure bugs, issue #846/#676/#835).
-- **Bind-join operator** (`JoinAlgo::Bind`) — gather a block of upstream bindings, push via
-  VALUES/brTPF (§4.3), stream matches. This is exactly the existing `try_bound_join_service`
-  generalised from "accumulate ALL blocks then join" to "emit per block as it returns".
-- **Symmetric-hash operator** (`JoinAlgo::Hash` / `JoinAlgo::Streaming`) — feed each side's
-  `SolutionStream` into **`StreamJoin`** (`stream.rs`), which already builds+probes both sides
-  non-blocking and spills over-budget partitions. The single new piece is a **stream feeder**
-  replacing `run_streaming`'s `&[Tuple]` slices, plus the **light-Tuple ↔ engine-`Bindings`
-  bridge** (§3.2(3)) so engine-evaluated local results and remote sub-results can be joined.
-- **Concurrent fan-out** — issue independent leaf/group fetches concurrently (the blocking
-  ureq transport is single-shot; the client wraps it with a bounded worker pool, or adopts an
-  async transport behind the same `Transport` seam). First results stream as soon as the
-  earliest source responds.
+- **`SolutionStream`** (`stream.rs`) — the bounded, backpressured `Iterator` the client owns at
+  its boundary (the engine stays materialised, §7), built over a `std::sync::mpsc::sync_channel`
+  (the channel bound *is* the backpressure). Adapters yield it; operators consume and produce it.
+  Bounded by Rust ownership + explicit buffer bounds + the reused `StreamJoin` spill — not a GC
+  heap, structurally avoiding Comunica's documented heap-OOM/broken-backpressure bugs.
+- **Materialised interpreter** (`materialize_single_source`) — walks the `JoinTree`, fetches each
+  leaf's SRJ through the Phase-2 adapter, parses it, and natural-joins in the plan's join order
+  with a left-deep hash join. Result equals local `sparq-engine` evaluation of the same query
+  (the load-bearing invariant, `tests/planner_result_equals_local_eval.rs`).
+- **Streaming interpreter** (`stream_single_source`) — fans each leaf's blocking fetch onto the
+  bounded `ScatterPool` and chains the leaves through `StreamingJoin` (which drives fedplan's
+  `StreamJoin` over two `SolutionStream`s, bridging `oxrdf::Term` rows ↔ the light `Tuple` model
+  via the canonical N-Triples form). Results **emit before inputs are exhausted**; the streamed
+  multiset is multiset-equal to the materialised result for any source-arrival interleaving
+  (`tests/streaming_result_equals_phase3.rs`, with injected delays + a forced spill).
+- **Multi-source UNION-per-leaf** (`materialize_multi_source` / `stream_multi_source`, bead
+  `sq-7yf0`) — a leaf the planner retained >1 source for is answered as the **bag-union** of
+  every retained source's solutions (SPARQL UNION multiset semantics). The single-source entry
+  points keep the fail-closed `InterpError::MultiSource` contract; multi-source is the opt-in
+  entry point.
+- **Concurrent fan-out** — the `ScatterPool` is a bounded **blocking thread-pool** over the
+  blocking transport: **no async runtime is pulled in**; all concurrency is `std`-only and
+  confined to the opt-in crate (the §7 async/runtime decision, resolved this way).
 
-### 4.5 Adaptive re-planning (the deferred ANAPSID half) — LANDED (Phase 7, `sq-ij5x`)
+### 4.5 Adaptive re-planning (the ANAPSID half) — `adaptive.rs`, feature `fedclient-adaptive`
 
-Last and hardest. A feedback loop: each operator reports **observed** cardinality / arrival
-rate; when these diverge materially from the `JoinTree` estimate (or a source stalls), the
-client re-invokes `plan_bgp` on the *unjoined remainder* with corrected leaf cardinalities,
-switching a `Bind` node to `Hash`/`Streaming` (or re-ordering) for the not-yet-executed
-suffix. This is opt-in and bounded (re-plan at most once per operator boundary) to avoid
-thrash.
+A feedback loop: a leaf-scan phase fetches each leaf once through the real adapter and records
+its **REAL observed row count**; an adaptive join-ordering phase then drives fedplan's
+`AdaptiveExecutor` — at each operator boundary it re-invokes the planner on the **unjoined
+remainder** when an observation diverges past `divergence_factor`, adopting the cheaper suffix
+only when it clears the hysteresis margin, **at most once per boundary** (no thrash). The
+re-plan DECISION engine (trigger, hysteresis, suffix re-ordering, soundness proof) lives in
+`sparq-fedplan`'s `AdaptiveExecutor` (bead `sq-7s4z`); the client supplies real observed
+cardinalities and joins the re-ordered suffix with the same `natural_join`. **Re-planning
+changes the plan, never the answer** — the adaptive result is multiset-equal to the static plan
+and to local engine eval (`tests/adaptive_result_equals_static.rs`, across a genuine
+large-divergence switch). Behind the default-OFF `fedclient-adaptive` feature (which pulls
+`sparq-fedplan/adaptive-replan`); off → the `adaptive` module compiles to nothing.
 
-**Status: implemented** as `sparq_fedclient::adaptive::execute_adaptive_single_source`, behind
-the default-OFF `fedclient-adaptive` feature (which pulls `sparq-fedplan/adaptive-replan`). The
-re-plan DECISION engine — the divergence trigger, the hysteresis margin, the suffix re-ordering,
-and the commutativity soundness proof — already lived in `sparq-fedplan`'s `AdaptiveExecutor`
-(`sq-7s4z`); Phase 7 is the client-side execution loop that drives it with **real observed
-cardinalities** (a leaf-scan phase records each leaf's true row count, then an adaptive
-join-ordering phase re-plans the unjoined remainder at each boundary). Re-planning changes the
-plan, never the answer — the adaptive result is multiset-equal to the static plan and to local
-engine eval, verified across a genuine large-divergence switch
-(`tests/adaptive_result_equals_static.rs`). The ANAPSID "adaptive operator" refinement (estimate
-a leaf's cardinality from a *prefix* of its rows while still streaming it) and live source
-failover remain roadmap beads under epic sq-3183.
+The ANAPSID "adaptive operator" refinement (estimate a leaf's cardinality from a *prefix* of its
+rows while still streaming it) and live source failover remain roadmap beads under epic sq-3183.
 
-### 4.6 How this does BETTER than Comunica (architectural predictions, not measurements)
+### 4.6 The brTPF binding-block wire codec — `wire.rs`
 
-Comunica's own authors state its goal is **"modularity, and not absolute performance"**
-(ISWC 2018), and its maintainers catalogue the gaps (issue #846). The predictions below are
-grounded in those *documented* gaps and must be validated head-to-head before being asserted
-as fact (§7).
+The brTPF bind-join attaches a SET of upstream solution mappings (a `&[FragBinding]` block, at
+most `maxMpR`) to each fragment request. The sparq server (`sq-dxhb`) parses a **line-oriented
+TEXT wire** (one mapping per line, `position=term` pairs, each term N-Triples-decorated). The
+`wire` module adds the **compact, self-describing BINARY wire** (`encode_bindings` /
+`decode_bindings`) — a 1-byte per-mapping header bitmask records which of `s`/`p`/`o` is bound
+(the header bit IS the name), a 1-byte kind tag distinguishes IRI/blank/literal (bare lexical
+bytes, length-prefixed, no framing) — plus the text-wire writer (`encode_bindings_text`) so a
+client can speak either form. A 4-byte magic (`BINARY_MAGIC`, ASCII `bTPF`) + 1-byte
+`BINARY_VERSION` make a future revision detectable, and `decode_bindings` validates every length
+(a truncated / bad-magic / bad-kind buffer is a clean `WireError`, never a panic — the crate is
+`forbid(unsafe_code)`). **Honest scope — a codec only:** it converts `&[FragBinding]` ↔ bytes; it
+issues no request. The native `HttpFragmentTransport` attaches the **text** form on the `values`
+parameter; the binary wire is the compact alternative a body-carrying transport emits.
 
-1. **Precise, capability-aware pushdown vs Comunica's coarse model.** Comunica's capability
-   model is "service-description? / search-form? / totalItems?" and it admits FILTER/
-   expression pushdown gaps and a **missing common-variable check** (#834/#609). A
-   fine-grained `Capability` (§4.1) lets the client push the **maximal evaluable sub-algebra**
-   per source and only when shared variables exist.
-2. **Real cost-based join ordering with a true cardinality estimator.** Comunica has **no
-   selectivity estimator** beyond `totalItems × selectivityModifier (default 0.0001)` — a
-   magic constant, not a statistic; their own EXPLAIN shows `bindCardEst:~2` vs `cardReal:43`.
-   sparq reuses **characteristic-set** star cardinality (`fedplan` `star_cardinality`) and a
-   cost-based bind-vs-hash decision — and the meta-finding (Qudus et al.) is that *estimation
-   accuracy* is the dominant factor in plan quality.
-3. **No mediation indirection in the hot path.** Comunica broadcasts a `test`-phase estimate
-   to every subscribed actor on every bus, every operator. sparq resolves operator/algorithm
-   choice at plan time and runs a monomorphised Rust pipeline.
-4. **Bounded-memory streaming with real backpressure** (Rust ownership + `StreamJoin` spill)
-   vs Comunica's documented heap-OOM + broken backpressure.
-5. **Dictionary-encoded execution** end-to-end (Comunica lists "dictionary-encoded triple
-   processing not implemented") for the *local* portion.
-6. **SSRF-safe `SERVICE` by default** (the engine's `EgressFilterResolver`) — most engines
-   ship SSRF-open federation.
+### 4.7 How this aims to do BETTER than Comunica (architectural predictions, not measurements)
 
-**What to KEEP from Comunica** (genuinely good design): capability negotiation as a
-first-class step; the multi-dimensional join cost model (CPU + memory + **blocking** + **I/O**
-— the latter two are the right shape for networked sources, and richer than fedplan's current
-two-term cost); lazy incremental streaming; an EXPLAIN that surfaces chosen physical operator
-+ estimated-vs-actual cardinality; adaptive deferral **when sources are genuinely unknown**
-(opt-in mode, not default).
+Comunica's own authors state its goal is **"modularity, and not absolute performance"** (ISWC
+2018), and its maintainers catalogue the gaps (issue #846). The predictions below are grounded
+in those *documented* gaps and must be validated head-to-head before being asserted as fact (§7).
+
+1. **Precise, capability-aware pushdown vs Comunica's coarse model.** A fine-grained
+   `Capability` (§4.1) + the exact `common_variable_check` (§4.3) lets the client push the
+   maximal evaluable sub-algebra per source, only when shared variables exist — Comunica admits
+   FILTER/expression pushdown gaps and a missing common-variable check (#834/#609).
+2. **Real cost-based join ordering with a true cardinality estimator.** sparq reuses
+   characteristic-set star cardinality (`fedplan` `star_cardinality`) + a cost-based bind-vs-hash
+   decision; Comunica has no selectivity estimator beyond `totalItems × 0.0001`.
+3. **No mediation indirection in the hot path** — operator/algorithm choice resolved at plan
+   time, a monomorphised Rust pipeline.
+4. **Bounded-memory streaming with real backpressure** (Rust ownership + `StreamJoin` spill).
+5. **Dictionary-encoded execution** end-to-end for the *local* portion.
+6. **SSRF-safe `SERVICE` by default** (the engine's `EgressFilterResolver`).
+
+**What to KEEP from Comunica** (genuinely good design): capability negotiation as a first-class
+step; the multi-dimensional join cost model (CPU + memory + **blocking** + **I/O**); lazy
+incremental streaming; an EXPLAIN that surfaces chosen physical operator + estimated-vs-actual
+cardinality; adaptive deferral **when sources are genuinely unknown** (opt-in mode, not default).
 
 ---
 
 ## 5. Crate / dependency boundaries — proving it stays OUT of core
 
-**Proposed crate: `sparq-fedclient`** (new workspace member, `publish = false`).
+`sparq-fedclient` is a workspace member, `publish = false`.
 
 ```text
-sparq-fedclient  (NEW; feature `fedclient`, OFF by default)
-   ├── depends on  sparq-fedplan   (feature `fedplan`)   — planner + StreamJoin (REUSE)
+sparq-fedclient  (feature `fedclient`, OFF by default; `fedclient-adaptive` for §4.5)
+   ├── depends on  sparq-fedplan   (feature `fedplan` / `adaptive-replan`) — planner + StreamJoin + AdaptiveExecutor (REUSE)
    ├── depends on  sparq-engine    (feature `service`)   — SERVICE transport + VALUES + SSRF + local eval (REUSE)
    ├── depends on  sparq-introspect (optional)           — local-source stats
    └── depends on  oxrdf / spargebra (already in tree)   — term + algebra types
@@ -491,97 +442,37 @@ sparq-fedclient  (NEW; feature `fedclient`, OFF by default)
    the arrow into sparq-engine is one-way: engine NEVER depends on fedclient.
 ```
 
-Boundary proofs (all enforceable in CI):
+The boundary is **proved before any logic** and re-checked on every build, in both feature
+states, by two complementary checks (so neither `sparq-core` nor `sparq-engine` gains an edge
+*to* `sparq-fedclient`):
 
-- **`sparq-core` gains zero dependents.** The federation client never appears in
-  `sparq-core/Cargo.toml` (it can't — core is the leaf). A `cargo tree -p sparq-core` shows no
-  fedclient edge.
-- **`sparq-engine` is unchanged.** No `sparq-fedclient` entry in `sparq-engine/Cargo.toml`;
-  the dependency arrow points *into* the engine. The default engine build (`default =
-  ["parallel","regex","digest"]`, `Cargo.toml:32`) and the WASM artifact are byte-identical
-  with or without the new crate — guaranteed because nothing in the default graph references
-  it.
-- **Feature-gated OFF by default**, exactly like `fedplan` (`fedplan = []`, off) and
-  `service` (`service = [...]`, off): a build that does not enable `fedclient` compiles
-  nothing of it. CI builds the crate in both feature states (off → empty; on → full) as the
-  `fedplan`/`service` crates already do.
-- **Mirrors existing precedent**: `sparq-fedplan`, `sparq-canon`, `sparq-prov`, `sparq-mpc`,
-  `sparq-zk` are all standalone opt-in members; `sparq-fedclient` is one more.
+- **`scripts/fedclient-boundary-guard.sh`** — a CI step (in `feature-matrix.yml`) that inverts
+  the dependency graph (`cargo tree -i sparq-fedclient`) and fails if `sparq-core` or
+  `sparq-engine` appears as a dependent.
+- **`crates/sparq-fedclient/tests/boundary.rs`** — a hermetic `cargo metadata` test asserting
+  the same invariant from inside the suite.
+
+Feature-gated OFF by default exactly like `fedplan` and `service`: a build that does not enable
+`fedclient` compiles nothing of it; the default engine build and the WASM artifact are
+byte-identical with or without the crate. Mirrors the existing precedent (`sparq-fedplan`,
+`sparq-canon`, `sparq-prov`, `sparq-mpc`, `sparq-zk` are all standalone opt-in members).
 
 ---
 
-## 6. Phased build plan — each phase a crisp future-bead deliverable + its test
+## 6. Honest risks & hard parts (no over-claim)
 
-Each phase is a small, independently-reviewable slice (smallest context-independent
-deliverable), with build+clippy+tests green in both feature states before PR. Each becomes a
-bead under epic **sq-3183**.
-
-- **Phase 0 — crate skeleton + boundary CI.** Create `sparq-fedclient` (empty behind feature
-  `fedclient`, OFF), wire into the workspace, add the dependency edges (fedplan + engine
-  `service`). **Test:** `cargo build`/`clippy`/`test` green with the feature off (empty crate)
-  and on (skeleton); a CI check asserts `sparq-core` and `sparq-engine` have **no** edge to
-  `sparq-fedclient` (`cargo tree` grep). *Deliverable: the boundary, proven, before any logic.*
-
-- **Phase 1 — discovery client + SD parser.** Fetch `/.well-known/void` + SD per endpoint
-  source; parse VoID+`scs:` via the existing `from_void_nt`; write the new **client-side SD
-  parser** → `Capability`; ASK-probe fallback. **Test:** against a local sparq-server with
-  `--federation-descriptors`, `discover()` returns a `SourceDescriptor` round-tripping the
-  server's `to_void_with_cs` output and a `Capability` listing the advertised
-  languages/formats; an endpoint with no descriptors falls back to ASK and still produces a
-  usable (coarser) `Capability`.
-
-- **Phase 2 — `SourceType`/`FederatedSource` abstraction + the Endpoint adapter.** The trait
-  (§4.1) plus a `Endpoint` adapter that wraps the engine's existing SRJ transport behind
-  `execute(&SubQuery) -> SolutionStream`. **Test:** an `Endpoint::execute` of a simple BGP
-  against a loopback sparq-server returns the same solutions as the engine evaluating it
-  locally; SSRF guard rejects a private-IP endpoint by default.
-
-- **Phase 3 — planner bridge + plan interpreter (single-source, no streaming yet).** Lower a
-  query BGP to fedplan's `Bgp`; run `select_sources` + `plan_bgp`; map plan indices →
-  adapters; walk the `JoinTree` materialising each node (correctness first, streaming later).
-  **Test:** a 3-pattern chained BGP over one endpoint yields results equal to the engine's
-  local evaluation of the same data; `join_order()` matches the planner's choice.
-
-- **Phase 4 — capability-aware pushdown + exclusive groups + VALUES bind-join.** Build the
-  maximal pushable sub-algebra per group (projection + common-variable-checked filters);
-  bind-join across groups via the reused `render_values_block`. **Test:** a federated query
-  over two endpoints returns the complete, correct result; an instrumented transport asserts
-  the pushed sub-queries carry the expected `VALUES` blocks and projected variables, and that
-  a filter is pushed only when its variables are bound in the group (the common-variable
-  check).
-
-- **Phase 5 — streaming operators (`SolutionStream` + StreamJoin feeder + bind-join
-  streaming).** Replace materialisation with the `SolutionStream`; feed sides into
-  `StreamJoin`; emit bind-join results per block; concurrent fan-out. **Test:** results are
-  emitted before all inputs are exhausted (the non-blocking property, mirroring fedplan's
-  `emits_before_inputs_exhausted`); the streamed federated result is **multiset-equal** to the
-  Phase-3 materialised result for any source-arrival interleaving (the `StreamJoin` invariant,
-  extended to the fed feeder).
-
-- **Phase 6 — brTPF + TPF adapters.** Add the bind-restricted (`maxMpR`) and plain-TPF
-  adapters and their count-metadata cardinality. **Test:** against a fixture brTPF/TPF server,
-  a query returns the complete result; the brTPF adapter issues `maxMpR`-bounded binding
-  blocks and the plain-TPF adapter falls back to greedy count-driven client-side joins.
-
-- **Phase 7 — adaptive re-planning (opt-in).** Feedback loop: observed cardinality/rate →
-  re-`plan_bgp` the unjoined remainder; switch algorithm/order for the suffix; bounded to
-  avoid thrash. **Test:** a query whose true cardinality diverges >10× from the descriptor
-  estimate produces a different (cheaper) suffix plan than the static plan, and the same
-  (correct) result multiset; re-planning fires at most once per operator boundary.
-
----
-
-## 7. Honest risks & hard parts (no over-claim)
+*(Carried verbatim-in-spirit from the original design record — every one of these still holds
+of the shipped code; verified against the crate source for this graduation, bead `sq-zwr4`.)*
 
 - **Pushdown correctness is the sharpest edge.** Pushing a filter/projection/ORDER/LIMIT a
   source evaluates with *different* semantics (numeric coercion, collation, language-tag/
   datatype handling, `NaN`, timezone) than local evaluation can silently change results. The
   safe rule: push only the sub-algebra whose remote semantics are provably identical to local;
-  when in doubt, **keep it local**. The existing `try_bound_join_service` already takes this
-  posture (it falls back to verbatim forwarding on any non-pushable shape — blank node, triple
-  term, variable endpoint, unbound key). The client must keep that discipline as the surface
-  grows, and the common-variable check must be exact (push a conjunct only when all its
-  variables are bound in the group).
+  when in doubt, **keep it local**. The engine's `try_bound_join_service` takes this posture
+  (it falls back to verbatim forwarding on any non-pushable shape — blank node, triple term,
+  variable endpoint, unbound key), and the client keeps that discipline as the surface grows:
+  the `common_variable_check` is exact (push a conjunct only when all its variables are bound in
+  the group — `pushdown.rs:329`).
 
 - **Partial-capability fallback.** A source may advertise SPARQL 1.1 but reject a specific
   feature at runtime (timeouts, query-complexity limits, partial SD). The client must degrade
@@ -596,40 +487,46 @@ bead under epic **sq-3183**.
   size; an under-sized block re-introduces request explosion (Comunica's documented #1196).
   Completeness itself is preserved by these interfaces (they return all matching triples for a
   pattern/binding), but *performance* completeness — finishing in acceptable time/bandwidth —
-  is workload-dependent and **must not be over-promised**.
+  is workload-dependent and **must not be over-promised**. **Live note:** the pushed-down
+  *streaming* bind-join is not yet shipped — a `JoinAlgo::Bind`/brTPF leaf runs as a complete
+  scan the interpreter hash-joins locally (`operators.rs:344-365`); the per-block streaming
+  feeder is a roadmap bead. The result multiset is identical; the request/bandwidth
+  optimisation that brTPF's `maxMpR` exists to deliver is the part still ahead.
 
-- **The engine boundary is materialised; the client owns the stream.** `sparq-engine` returns
-  a fully-materialised `QueryResult` and evaluates operators blocking (§3.1.D). This design
-  does **not** re-architect the engine into a global async stream; the client streams at *its*
+- **The engine boundary is materialised; the client owns the stream.** `sparq-engine` returns a
+  fully-materialised `QueryResult` and evaluates operators blocking (§3.1.D). This design does
+  **not** re-architect the engine into a global async stream; the client streams at *its*
   boundary (adapter outputs + federation operators), and local sub-BGP evaluation through the
-  engine remains a materialised call. That is a deliberate, honest limit: end-to-end
-  solution-level laziness *through* the engine is out of scope and would be a much larger
-  change.
+  engine remains a materialised call (`stream.rs:8-14`). That is a deliberate, honest limit:
+  end-to-end solution-level laziness *through* the engine is out of scope and would be a much
+  larger change.
 
-- **Async/runtime choice is a real decision.** The engine's transport is blocking ureq; true
-  concurrent fan-out wants either a bounded blocking worker pool or an async runtime behind the
-  `Transport` seam. Introducing an async runtime is a dependency-weight and complexity cost
-  that must stay **inside the opt-in crate** (never leaking into core/engine). The first
-  delivery can use a bounded thread pool over the existing blocking transport to avoid pulling
-  an async runtime into the tree prematurely.
+- **Async/runtime choice was a real decision — resolved without an async runtime.** The
+  engine's transport is blocking ureq; true concurrent fan-out wants either a bounded blocking
+  worker pool or an async runtime. The client uses a **bounded blocking thread pool**
+  (`ScatterPool`, `operators.rs:694`) over the existing blocking transport — **no async runtime
+  is pulled into the tree**, and all concurrency stays `std`-only and inside the opt-in crate
+  (never leaking into core/engine). An async transport behind the same `Transport` seam remains
+  a future option if measurement warrants it.
 
-- **Adaptive re-planning can thrash or regress.** Re-planning on noisy early estimates can pick
-  a worse suffix; it is opt-in, bounded (at most once per operator boundary), and must be
-  measured before being recommended. ANAPSID-style adaptivity genuinely wins only when
-  cardinalities are *unknowable* up front — where descriptors exist and are accurate, the
-  static cost-based plan is simpler and at least as good.
+- **Adaptive re-planning can thrash or regress.** Re-planning on noisy early estimates can pick a
+  worse suffix; it is opt-in (`fedclient-adaptive`), bounded (at most once per operator boundary,
+  hysteresis margin + `max_replans` budget), and must be measured before being recommended.
+  ANAPSID-style adaptivity genuinely wins only when cardinalities are *unknowable* up front —
+  where descriptors exist and are accurate, the static cost-based plan is simpler and at least as
+  good (which is why it stays the default).
 
 - **The "better than Comunica" claims are predictions, not measurements.** Every advantage in
-  §4.6 is an *architectural* prediction grounded in Comunica's own documented gaps. Comunica is
-  battle-tested across many real interfaces and has a large SPARQL-1.1 operator surface; "we
-  have a better cost model" is only an advantage once `sparq-fedclient` reaches comparable
-  interface + SPARQL-1.1 completeness, and it must be validated head-to-head (FedBench / WatDiv
-  / LDBC) before being stated as fact. No timings appear in this record; the in-crate
-  `StreamJoin` correctness invariant is test-asserted, not independently audited.
+  §4.7 is an *architectural* prediction grounded in Comunica's own documented gaps. Comunica is
+  battle-tested across many real interfaces and has a large SPARQL-1.1 operator surface; "we have
+  a better cost model" is only an advantage once `sparq-fedclient` reaches comparable interface +
+  SPARQL-1.1 completeness, and it must be validated head-to-head (FedBench / WatDiv / LDBC)
+  before being stated as fact. No timings appear in this record; the in-crate `StreamJoin`
+  correctness invariant is test-asserted, not independently audited.
 
 ---
 
-## 8. References (primary)
+## 7. References (primary)
 
 - Verborgh, Hartig et al., *Triple Pattern Fragments*, JWS 2016 —
   https://linkeddatafragments.org/publications/jws2016.pdf
@@ -650,13 +547,15 @@ bead under epic **sq-3183**.
   the comunica.dev architecture/joins/hypermedia/explain docs, and maintainer issue #846
   (https://github.com/comunica/comunica/issues/846).
 
-### sparq code grounding (this branch's base)
+### sparq code grounding (current tree)
 
-`crates/sparq-fedplan/src/{lib.rs,selection.rs,plan.rs,descriptor.rs,stream.rs,pattern.rs}`;
-`crates/sparq-engine/src/service.rs` + `exec.rs` (`eval_service` 1976, `try_bound_join_service`
-2077); `crates/sparq-engine/src/lib.rs` (`QueryResult` 597, `query_json_chunks_with_budget`
-546); `crates/sparq-engine/Cargo.toml` (`service` 58); `crates/sparq-server/src/descriptors.rs`;
-`crates/sparq-introspect/src/lib.rs` (`to_void_with_cs` 1053); and `research/
-feature-research-{federation,hartig}.md`.
+`crates/sparq-fedclient/src/{lib.rs,discovery.rs,source.rs,planner.rs,pushdown.rs,operators.rs,stream.rs,adaptive.rs,wire.rs}`
++ `tests/`; `crates/sparq-fedplan/src/{lib.rs,selection.rs,plan.rs,descriptor.rs,stream.rs,pattern.rs,adaptive.rs}`;
+`crates/sparq-engine/src/service.rs` + `exec.rs` (`eval_service`, `try_bound_join_service`);
+`crates/sparq-engine/src/lib.rs` (`QueryResult`); `crates/sparq-server/src/descriptors.rs`;
+`crates/sparq-introspect/src/lib.rs` (`to_void_with_cs`); `scripts/fedclient-boundary-guard.sh`;
+and `research/feature-research-{federation,hartig}.md`. Task-oriented USE guidance:
+`skills/federated-planning/SKILL.md`. Crate overview: `crates/sparq-fedclient/README.md`.
 
-[OPUS-4.8] — flagged for Fable re-review when available.
+[OPUS-4.8] — graduated from a design record to an architecture doc under bead `sq-zwr4`;
+flagged for Fable re-review when available.
