@@ -246,7 +246,11 @@ cargo build -p sparq-cli --features serialize-rdf
   fast path applies to N-Triples and Turtle in `load_str`; `load_reader_parallel`'s
   pipelined parser is **N-Triples only** (other formats silently fall back to serial
   `load_reader`). With `parallel` off (e.g. the wasm build, `--no-default-features`),
-  everything parses serially.
+  everything parses serially. The parallel and serial parses are pinned **result-equivalent**
+  by a differential test (`crates/sparq-core/tests/parallel_serial_load_differential.rs`,
+  sq-bif.13): the same Turtle + N-Triples document loaded under `--features parallel` and under
+  `--no-default-features` answers every term-level probe (triple/term counts, full dump,
+  pattern scans) identically to a feature-independent reference graph.
 - **RDF 1.2 triple terms are first-class.** A triple term `<<( s p o )>>` is a
   real `oxrdf::Term::Triple` (object position only — RDF 1.2 makes triple terms object-only;
   a `<<( … )>>` in subject/predicate position is rejected with a precise error). Triple terms
@@ -272,8 +276,13 @@ cargo build -p sparq-cli --features serialize-rdf
 - **`build_external` / `open` / `save` require the `mmap` feature** (native only). The
   N-Triples external path also honors `SPARQ_SHARDED_DICT` (default on with ≥2 threads)
   and, with the `dict-spill` feature + `SPARQ_DICT_SPILL` env, bounds peak build RSS by
-  spilling the term dictionary to disk (byte-identical output). External build folds
-  N-Quads/TriG named graphs into the default graph (only `load_dataset` preserves them).
+  spilling the term dictionary to disk (byte-identical output). The spill path's activation
+  + mmap-reload edges are pinned by `crates/sparq-core/tests/dict_spill_activation.rs`
+  (sq-bif.13): a tiny `mem_budget` (constant cache eviction across many epochs + many spilled
+  sort runs) yields a build byte-identical to a comfortable-budget build, a `disk_floor` above
+  free disk aborts cleanly through the spill pipeline's resource gate, and a spill-built store
+  reloads via `Graph::open` (and re-saves raw/compressed) to identical content. External build
+  folds N-Quads/TriG named graphs into the default graph (only `load_dataset` preserves them).
 - **HDT is opt-in and native-only.** `sparq-hdt` MSRV is **1.87** (the wrapped `hdt` crate),
   above the workspace's 1.85 — in the CLI it is gated behind `--features hdt`. It carries
   zero code into the wasm build. Compression containers are detected by **magic bytes, not
