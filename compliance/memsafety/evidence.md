@@ -25,23 +25,24 @@ Accounting: **30 forbid + 5 with unsafe (sparq-core, sparq-vectors, sparq-cli,
 sparq-zk-compose, sparq-bench) = 35.** No crate is unaccounted-for. <!-- [OPUS-4.8] sq-toze.16:
 count re-verified on this branch — 35 workspace crates, 30 `#![forbid(unsafe_code)]` roots,
 5 unsafe-bearing (sq-algos + the 3 *-wasm split crates joined the forbid set since the
-sq-pro0 26/31 snapshot). The 58-site / per-crate figures (MS-2) reflect sq-vkz7. -->
+sq-pro0 26/31 snapshot). The 59-site / per-crate figures (MS-2) reflect the current
+`bench/unsafe-snapshot.json` (`total=59`, sparq-core 45). -->
 
-## MS-2 — 58-site register, count-verified
+## MS-2 — 59-site register, count-verified
 
 ```sh
-python3 scripts/unsafe-gate.py --list | tail -1     # → TOTAL=58
+python3 scripts/unsafe-gate.py --list | tail -1     # → TOTAL=59
 ```
 Per-crate (from `--check`, matching `bench/unsafe-snapshot.json` and the register §headers):
 
 | crate | snapshot | live | register rows |
 |---|---:|---:|---:|
-| sparq-core | 44 | 44 | 44 |
+| sparq-core | 45 | 45 | 45 |
 | sparq-vectors | 9 | 9 | 9 |
 | sparq-cli | 2 | 2 | 2 |
 | sparq-zk-compose | 2 | 2 | 2 |
 | sparq-bench | 1 | 1 | 1 |
-| **total** | **58** | **58** | **58** |
+| **total** | **59** | **59** | **59** |
 
 Every row carries the site kind, the invariant relied on, and how it is bounded — see
 [`unsafe-register.md`](./unsafe-register.md).

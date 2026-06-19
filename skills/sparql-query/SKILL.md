@@ -347,11 +347,23 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   the rows the endpoint returns and the data transferred. It is **on by default** — a
   correctness-preserving optimisation of the existing `SERVICE` path (the answer is identical to the
   unbound-then-local-join path; `SILENT`, `OPTIONAL`/left-join, multi-var and empty-binding edge cases
-  are all preserved) — and **falls back to the verbatim forward** when it can't apply (variable
-  endpoint, no bound join var, a join key bound to a blank node). The only tuning knob is the block
+  are all preserved) — and **falls back to the verbatim forward** when it can't apply (no bound join
+  var, a join key bound to a blank node). The only tuning knob is the block
   size (distinct binding tuples per remote request): **opt-in** via
   `with_service_bound_join_block_size(n, || query(&g, q))` or the `SPARQ_SERVICE_BIND_BLOCK` env var
   (default ~50). The knob never changes results — only the remote-request count vs per-request size.
+- **`SERVICE ?ep` variable endpoint** (`sq-d4p`) — a `SERVICE ?ep { P }` whose endpoint variable is
+  bound by the surrounding query is evaluated per SPARQL 1.1: the bind-join path partitions the
+  already-bound left rows by their `?ep` value and dispatches one bind-join **per distinct endpoint
+  IRI**, tagging each remote row with `?ep = <that endpoint>` so the surrounding join re-attaches it
+  to exactly the left rows that named that endpoint. A left row whose `?ep` is unbound or not an IRI
+  names no valid endpoint and contributes no federated answer. A **top-level** `SERVICE ?ep` with
+  nothing to bind it still errors (or, under `SILENT`, yields the join identity). (No new public API —
+  this is a behavioural addition on the `service` feature.)
+- **Per-query `SERVICE` timeout** (`sq-d4p`) — the SERVICE HTTP transport's socket timeout is now
+  bounded by the active `QueryBudget` deadline (it caps at `min(remaining-until-deadline, default)`
+  with a small non-zero floor), so a `SERVICE` fetch under a tight `deadline` no longer blocks for the
+  full default on an unresponsive endpoint.
 - **Window functions + custom aggregate registry** are the non-default `window-functions` cargo
   feature. **Window functions are a NON-STANDARD extension** — there is no W3C-REC SPARQL `OVER`
   syntax. sparq exposes them as a programmatic pass over a `QueryResult` (the SQL:2003 model
