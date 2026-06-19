@@ -61,6 +61,10 @@
       "had_integration_dir": false,
       "min_tests": 13
     },
+    "sparq-policy": {
+      "had_integration_dir": true,
+      "min_tests": 130
+    },
     "sparq-prov": {
       "had_integration_dir": true,
       "min_tests": 30

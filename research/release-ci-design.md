@@ -35,9 +35,9 @@ the manual path has fallen behind:
 
 Supporting facts, all verified in this checkout:
 
-- **Versioning is a single locked version.** All 35 workspace crates set
-  `version.workspace = true` (verified: `grep -l 'version.workspace = true' crates/*/Cargo.toml`
-  returns 35), inheriting one value `[workspace.package] version = "0.1.0"`
+- **Versioning is a single locked version.** All 36 workspace crates set
+  `version.workspace = true` (verified 2026-06-19: `grep -l 'version.workspace = true' crates/*/Cargo.toml`
+  returns 36), inheriting one value `[workspace.package] version = "0.1.0"`
   (`Cargo.toml:18`). There is no independent per-crate versioning. Several crates also
   carry hard-coded `version = "0.1.0"` pins on internal path-deps, so a bump touches two
   kinds of location — the dual-bump chore `docs/release.md` documents by hand.
@@ -334,8 +334,8 @@ the credential/store-signing items are `needs:user` and sit at the end of their 
 
 ## Files cited (all real, in this checkout)
 
-- `Cargo.toml` (`:18` workspace version; 35-member workspace; no `[workspace.metadata.dist]`)
-- `crates/*/Cargo.toml` (all 35 use `version.workspace = true`; 17 publishable;
+- `Cargo.toml` (`:18` workspace version; 36-member workspace; no `[workspace.metadata.dist]`)
+- `crates/*/Cargo.toml` (all 36 use `version.workspace = true`; 17 publishable;
   `crates/sparq-algos/Cargo.toml` has no `publish = false`;
   `crates/sparq-server/Cargo.toml` `[[bin]] name = "sparq-server"`,
   `required-features = ["server"]`)

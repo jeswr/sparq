@@ -67,7 +67,7 @@ assigned **one framework** (your worktree branch is `cert-<framework>`). Produce
   gap to a higher level (e.g. cargo-auditable, reproducibility evidence).
 - **OpenSSF Scorecard + Best-Practices/CII Badge** — Scorecard is wired; produce the Best-Practices
   (bestpractices.dev) self-certification questionnaire mapping + raise the Scorecard score.
-- **Memory-safety attestation** — the `#![forbid(unsafe_code)]` posture (23 crates), the concentrated
+- **Memory-safety attestation** — the `#![forbid(unsafe_code)]` posture (31 crates as of 2026-06-19), the concentrated
   unsafe surface in `sparq-core` (mmap/dict-spill/SIMD, the B5 boundary), Miri + fuzz + the oracle for
   the sites Miri can't reach; a per-unsafe-site justification register and (ideally) an unsafe-count
   ratchet promoting cargo-geiger from informational to gating.

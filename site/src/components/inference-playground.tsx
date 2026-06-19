@@ -45,6 +45,8 @@ import {
   shortenTerm,
   type Triple,
 } from "@/lib/inference";
+// [OPUS-4.8] sq-8uew — Turtle syntax-highlighting input editor (Turtle mode only).
+import { RdfEditor } from "@/components/rdf-editor";
 import {
   INFERENCE_EXAMPLES,
   type InferenceMode,
@@ -241,14 +243,27 @@ export function InferencePlayground() {
               ? "N3 rules + facts"
               : "Ontology + facts (Turtle)"}
           </label>
-          <textarea
-            id="reason-data"
-            value={data}
-            spellCheck={false}
-            onChange={(e) => setData(e.target.value)}
-            rows={12}
-            className="w-full resize-y rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-          />
+          {/* [OPUS-4.8] sq-8uew — Turtle syntax highlighting for the Turtle ontology+facts
+              input. N3 mode keeps the plain textarea: the Turtle lexer would mis-style
+              N3-specific rule syntax (`{ } => @forAll`), so we only highlight pure Turtle. */}
+          {mode === "n3" ? (
+            <textarea
+              id="reason-data"
+              value={data}
+              spellCheck={false}
+              onChange={(e) => setData(e.target.value)}
+              rows={12}
+              className="w-full resize-y rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+            />
+          ) : (
+            <RdfEditor
+              id="reason-data"
+              ariaLabel="Ontology and facts (Turtle)"
+              value={data}
+              onChange={setData}
+              rows={12}
+            />
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
