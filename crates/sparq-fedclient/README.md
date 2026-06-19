@@ -7,10 +7,11 @@ local sparq engine) — the query *consumer* half of federation. It discovers ea
 source's capability, reuses the `sparq-fedplan` cost-based planner, pushes the most
 precise sub-query each source can answer (FedX exclusive groups; an exact
 common-variable FILTER-pushdown safety check), and streams results through
-non-blocking operators behind a default-deny SSRF egress guard. The full design
-(architecture, phased build plan, honest risks, and the load-bearing dependency
-boundary that keeps it out of `sparq-core`/`sparq-engine` and the wasm artifact)
-lives in [`research/federation-client-design.md`](../../research/federation-client-design.md).
+non-blocking operators behind a default-deny SSRF egress guard. The architecture
+(layered model + per-module map, the reuse seams, honest risks, and the load-bearing
+dependency boundary that keeps it out of `sparq-core`/`sparq-engine` and the wasm
+artifact) lives in
+[`research/federation-client-design.md`](../../research/federation-client-design.md).
 
 > **Internal crate — not published** to crates.io (`publish = false`). Opt-in and
 > OFF by default (`fedclient` / `fedclient-adaptive` cargo features), native-only
@@ -18,7 +19,7 @@ lives in [`research/federation-client-design.md`](../../research/federation-clie
 > claim is asserted here — any "better than Comunica" prediction in the design
 > record must be validated head-to-head before being stated as fact.
 
-Design: [`research/federation-client-design.md`](../../research/federation-client-design.md).
+Architecture: [`research/federation-client-design.md`](../../research/federation-client-design.md).
 Planner it reuses: [`skills/federated-planning/SKILL.md`](../../skills/federated-planning/SKILL.md).
 Contributing: [`AGENTS.md`](../../AGENTS.md).
 
