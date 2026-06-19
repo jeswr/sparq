@@ -16,6 +16,8 @@ import {
   EyeOff,
   ShieldCheck,
   ShieldAlert,
+  Inbox,
+  Dice5,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -228,18 +230,21 @@ function MpcResultPanels({
             </table>
           </div>
           <p className="mt-3 text-xs text-muted-foreground">
-            Read a <strong>column</strong> to see what one party receives: a
-            mixture of one share from every party. No column reveals any single
-            input — addition over shares is what produces the answer.
+            Each <strong>column</strong> is what one party receives: a mixture of
+            one share from every party. The next step lays each column out as that
+            party&rsquo;s received view to show no column reveals any single input.
           </p>
         </CardContent>
       </Card>
 
-      {/* 3 · local sums → combine */}
+      {/* 3 · each party's RECEIVED view — what one party actually holds */}
+      <ReceivedViewPanel result={result} revealMatrix={revealMatrix} />
+
+      {/* 4 · local sums → combine */}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">
-            3 · Add over shares (free, zero-round)
+            4 · Add over shares (free, zero-round)
           </CardTitle>
           <CardDescription>
             Each party sums the column of shares it holds. Combining these local
@@ -273,10 +278,10 @@ function MpcResultPanels({
         </CardContent>
       </Card>
 
-      {/* 4 · reveal ONLY the verdict bit — the money shot */}
+      {/* 5 · reveal ONLY the verdict bit — the money shot */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">4 · Reveal only the verdict</CardTitle>
+          <CardTitle className="text-base">5 · Reveal only the verdict</CardTitle>
           <CardDescription>
             The secure comparison opens exactly one bit:{" "}
             <code className="font-mono">total ≥ {gbp(THRESHOLD)}</code>. The exact
@@ -364,5 +369,97 @@ function MpcResultPanels({
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+// [OPUS-4.8] sq-3hrc — each party's RECEIVED VIEW: the single column of shares
+// it ends up holding (one share from every party, including itself). The point
+// the spec calls out: any set of at most `t` shares — and here a party sees
+// exactly one share per other party — is uniform-random and INDEPENDENT of any
+// secret, so a party's whole received view leaks nothing about anyone's value.
+function ReceivedViewPanel({
+  result,
+  revealMatrix,
+}: {
+  result: MpcResult;
+  revealMatrix: boolean;
+}) {
+  const n = result.parties.length;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">
+          3 · What each party actually receives
+        </CardTitle>
+        <CardDescription>
+          Every party ends up holding one column of the matrix: a single share
+          from each of the {n} parties. Each card below is one party&rsquo;s
+          entire <strong>received view</strong> — and it is uniform random.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {result.received.map((column, j) => (
+            <div
+              key={j}
+              className="space-y-2 rounded-xl bg-muted/40 p-3 ring-1 ring-foreground/10"
+            >
+              <div className="flex items-center gap-1.5 text-sm font-medium">
+                <Inbox className="size-3.5 text-primary" aria-hidden="true" />
+                {result.parties[j].name}&rsquo;s view
+              </div>
+              <ul className="space-y-1">
+                {column.map((share, i) => {
+                  const own = i === j;
+                  return (
+                    <li
+                      key={i}
+                      className="flex items-center justify-between gap-2 text-xs"
+                    >
+                      <span className="text-muted-foreground">
+                        {own ? (
+                          <>
+                            own share{" "}
+                            <Badge variant="default" className="ml-0.5">
+                              kept
+                            </Badge>
+                          </>
+                        ) : (
+                          <>from {result.parties[i].name}</>
+                        )}
+                      </span>
+                      <span className="tabular font-mono text-[11px]">
+                        {revealMatrix ? share.toLocaleString() : "••••"}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </div>
+        <p className="flex items-start gap-2 rounded-lg bg-muted/50 p-3 text-xs text-muted-foreground">
+          <Dice5
+            className="mt-0.5 size-4 shrink-0 text-[var(--success)]"
+            aria-hidden="true"
+          />
+          <span>
+            <strong className="text-foreground">
+              Any single column reveals nothing.
+            </strong>{" "}
+            Because every share except the last is sampled uniformly at random,
+            any set of at most the reconstruction threshold{" "}
+            <code className="font-mono">t</code> of them — and a party only ever
+            sees its own column — is uniformly random and{" "}
+            <em>statistically independent</em> of every party&rsquo;s private
+            value. A view is indistinguishable from random noise until the
+            parties <em>jointly</em> open the final result. (This independence
+            is the confidentiality property the protocol relies on under its
+            honest-majority, semi-honest assumption — not a malicious-security
+            guarantee.)
+          </span>
+        </p>
+      </CardContent>
+    </Card>
   );
 }

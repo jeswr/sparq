@@ -198,21 +198,27 @@ export default function MpcFlagshipPage() {
               <strong className="text-foreground">no production security claim</strong>.
               It is honest-majority <strong className="text-foreground">semi-honest</strong>{" "}
               only — confidentiality holds against parties that follow the protocol
-              but try to learn more, not against actively-cheating parties in every
-              configuration. The collaborative zero-knowledge{" "}
-              <em>proof of correctness and source-attestation</em> is a stub that
-              returns <code className="font-mono">NotYetImplemented</code>. So this
-              demo does <strong className="text-foreground">not</strong> prove the
-              result is correct, only that the disclosure pattern is minimal.
+              but try to learn more, <strong className="text-foreground">not</strong> against
+              actively-cheating (malicious) parties, and the confidentiality argument
+              assumes an honest majority. The collaborative zero-knowledge{" "}
+              <em>proof of correctness and source-attestation</em> layer is a{" "}
+              <strong className="text-foreground">stub</strong> that returns{" "}
+              <code className="font-mono">NotYetImplemented</code> (tracked as beads{" "}
+              <code className="font-mono">sq-9hrn</code> /{" "}
+              <code className="font-mono">sq-qhy4</code>). So this demo does{" "}
+              <strong className="text-foreground">not</strong> prove the result is
+              correct — there is no soundness guarantee — only that the disclosure
+              pattern is minimal under the semi-honest, honest-majority assumption.
             </p>
             <p>
               No external cryptographer has reviewed sparq&rsquo;s bespoke MPC. Per
               the project&rsquo;s published <code className="font-mono">SECURITY.md</code>{" "}
               posture, treat this as a research / explainer artifact, not a
               certified secure-computation system. The crypto-review readiness doc
-              states it plainly: <code className="font-mono">sparq-mpc</code> carries
-              no confidentiality, correctness, attestation, or malicious-security
-              guarantee today.
+              (<code className="font-mono">compliance/cryptoreview/</code>, gap{" "}
+              <code className="font-mono">CR-G1</code>) states it plainly:{" "}
+              <code className="font-mono">sparq-mpc</code> carries no confidentiality,
+              correctness, attestation, or malicious-security guarantee today.
             </p>
           </CardContent>
         </Card>
