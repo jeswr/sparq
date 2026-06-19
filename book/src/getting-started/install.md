@@ -40,12 +40,20 @@ cargo run --release -p sparq-server -- --addr 127.0.0.1:3030 --format turtle dat
 
 ## Use it as a library
 
-```rust,ignore
-use sparq_core::Graph;
+The snippet below is **not hand-written prose** — it is the `quickstart` region of
+[`crates/sparq-engine/examples/quickstart.rs`](https://github.com/jeswr/sparq/blob/main/crates/sparq-engine/examples/quickstart.rs),
+embedded verbatim via mdBook's `{{#rustdoc_include}}`. That file is compiled and run by
+`cargo test -p sparq-engine --examples`, so this example cannot silently drift from the
+public API:
 
-let turtle = r#"<http://example.org/alice> a <http://schema.org/Person> ."#;
-let g = Graph::load_str(turtle, "turtle")?;
-let _rows = sparq_engine::query(&g, "SELECT ?s WHERE { ?s a <http://schema.org/Person> }")?;
+<!-- [OPUS-4.8] sq-384j — tested-example embedding. The fence is `rust,ignore` so
+`mdbook test` does NOT recompile the snippet standalone: it references the workspace
+crates `sparq-core`/`sparq-engine`, which a bare rustdoc invocation cannot resolve
+(that is the "mdbook-keeper only if inline blocks need workspace deps" case from the
+bead — avoided here by letting `cargo test` be the compile-and-run gate on the real
+file). The anchor keeps the guide a fragment of a passing test. -->
+```rust,ignore
+{{#rustdoc_include ../../../crates/sparq-engine/examples/quickstart.rs:quickstart}}
 ```
 
 ## The contributor gate
