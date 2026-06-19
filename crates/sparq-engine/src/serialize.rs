@@ -221,9 +221,17 @@ fn write_subject(subj: &NamedOrBlankNode, prefixes: &Prefixes, out: &mut String)
 
 /// Serializes a set of triples as Turtle: a `@prefix` header for every prefix actually
 /// used, then grouped predicate-object lists per subject (`s p1 o1, o2 ; p2 o3 .`), with
-/// `a` standing in for `rdf:type`. Output is deterministic (subjects in first-seen order,
-/// predicates grouped, objects in input order). Only the prefixes that are used appear in
-/// the header.
+/// `a` standing in for `rdf:type`. Only the prefixes that are used appear in the header.
+///
+/// Row order is a faithful, deterministic function *of the input slice*: subjects in
+/// first-seen order, predicates grouped, objects in input order. It is **not** canonicalised
+/// — the writer applies no sort. So when the input slice's own order is unspecified, the
+/// output order is too: the [`graph_to_turtle`] family feeds the store's `iter_ids()`
+/// (dict-id / SPO-index) order, which is thread-count-dependent (`sparq-core`'s parallel
+/// sharded dict merge), so a serialised graph dump can differ across thread counts. That is
+/// spec-permitted (Turtle defines no canonical triple order) and not pinned anywhere
+/// canonical today; see `research/dict-id-order-determinism-audit.md`. A golden over a
+/// serialised graph must canonicalise (sort the rendered rows) or pin `RAYON_NUM_THREADS`.
 pub fn write_turtle(triples: &[Triple], prefixes: &Prefixes) -> String {
     let mut out = String::new();
     write_prefix_header(triples, prefixes, &mut out);
@@ -447,7 +455,11 @@ pub fn write_nquads(graphs: &[NamedGraph<'_>]) -> String {
 // Graph -> bytes convenience wrappers (pull triples out of a live Graph).
 // ---------------------------------------------------------------------------
 
-/// Materializes the default graph's triples in stable store order.
+/// Materializes the default graph's triples in store order: `iter_ids()` walks the SPO
+/// permutation index, i.e. dict-id order. That is stable *for a fixed build/thread count*
+/// but thread-count-dependent across builds (`sparq-core`'s sharded dict merge), so the
+/// downstream writers do not produce a canonical row order — see the [`write_turtle`] doc
+/// and `research/dict-id-order-determinism-audit.md`.
 fn graph_triples(graph: &Graph) -> Vec<Triple> {
     graph
         .iter_ids()
@@ -1057,7 +1069,11 @@ fn write_context(all: &[Triple], prefixes: &Prefixes, out: &mut String) {
 ///   dataset shape), wrapped under `@context` for the compacted form.
 ///
 /// `prefixes` is consulted only for [`JsonLdForm::Compacted`]; the expanded/flattened forms
-/// always emit full IRIs. Output is deterministic (subjects and predicates in first-seen order).
+/// always emit full IRIs. Node and predicate order is a faithful function of the input
+/// slice (subjects and predicates in first-seen order) with no canonicalising sort, so —
+/// as with [`write_turtle`] — the [`graph_to_jsonld`] family inherits the store's
+/// thread-count-dependent row order. JSON-LD specifies no canonical node order; see
+/// `research/dict-id-order-determinism-audit.md`.
 pub fn write_jsonld(graphs: &[NamedGraph<'_>], form: JsonLdForm, prefixes: &Prefixes) -> String {
     let pfx = (form == JsonLdForm::Compacted).then_some(prefixes);
     let mut out = String::new();

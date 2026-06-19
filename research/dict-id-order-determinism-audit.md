@@ -141,7 +141,7 @@ rows faithfully in engine order and add no sort. `GROUP BY` output and `CONSTRUC
 `DESCRIBE` triple order inherit the same scan order transitively. Spec-permitted; not
 pinned canonically.
 
-### ORDER BY tie order — OBSERVABLE (unspecified), with a separate parallel-sort note
+### ORDER BY tie order — OBSERVABLE (unspecified), inherits the dict-id order only
 
 `crates/sparq-engine/src/exec.rs::order_bindings`. The comparator returns
 `Ordering::Equal` for rows that tie on all `ORDER BY` keys (no secondary tie-breaker).
@@ -149,14 +149,21 @@ The serial path uses `sort_by` (a **stable** sort), so ties keep their *input* o
 which is the dict-id-dependent scan order, hence thread-count-dependent. SPARQL leaves the
 relative order of `ORDER BY`-tied solutions unspecified, so this is conformant.
 
-Note (orthogonal, pre-existing): the large-result parallel path uses `par_sort_by`
-(`exec.rs`), which is **not stable**, so for `>= PAR_THRESHOLD` rows the tie order is
-non-deterministic *even at a fixed thread count*. This is a separate determinism wrinkle
-that does not originate from dict-ids; flagged here only because it shares the
-"unspecified-order surface" with the dict-id question. A W3C `ORDER BY` test is normally
-authored so the order is fully determined (no ambiguous ties), so this rarely bites
-conformance — but a future internal golden test over a *tied* `ORDER BY` result would be
-host-flaky.
+**Correction (sq-8m65 follow-up, [OPUS-4.8]):** an earlier revision of this note claimed the
+large-result parallel path uses a *non-stable* sort (`par_sort_by`), making tie order
+non-deterministic *even at a fixed thread count*, as a separate cause from dict-ids. **That
+is wrong.** `keyed.par_sort_by(cmp)` (`exec.rs`) is rayon's **stable** parallel sort —
+rayon's `par_sort_by` is documented as "stable (i.e., does not reorder equal elements)",
+an adaptive parallel merge sort; the *unstable* rayon entry point is `par_sort_unstable_by`,
+which this path does **not** use (it has used `par_sort_by` since the parallel-ORDER-BY
+commit `1ebbf32a`). So the parallel path preserves the `b.rows` input order of tied rows
+exactly like the serial `sort_by`. At a **fixed thread count** the tie order is therefore
+fully deterministic; the only residual variation is that `b.rows` is itself in dict-id /
+scan order, which is thread-count-dependent — i.e. the *same* umbrella dict-id-order
+property as the other surfaces above, **not** a separate parallel-sort defect. There is no
+fixed-thread-count non-determinism to fix here. A future internal golden over a *tied*
+`ORDER BY` result is still host-flaky for the dict-id reason (covered by the
+golden-determinism contributor note), not because of an unstable sort.
 
 ### Vector-store graph fingerprint — WATCH (real robustness sharp edge, fails closed)
 
@@ -222,15 +229,21 @@ but it is worth a fix so the same graph fingerprints identically at any thread c
    identical `content_hash`, plus a test that a real dict shift (added/removed term) still
    changes it. Decide the lexical-fold-cost vs. commutative-collision trade-off with the
    maintainer. (WATCH item above.)
-2. **Bead — golden/snapshot determinism guard.** Add a lightweight test-helper +
-   contributor note (and, if cheap, a CI lint) so that any test pinning serialised RDF or an
-   unordered/tied result either sorts by term first or sets `RAYON_NUM_THREADS`. Codifies the
-   discipline that prevents a #691-style host-flaky golden from being introduced.
-3. **Bead (optional, separate cause) — stabilise large-result `ORDER BY` tie order.**
-   Make the parallel `ORDER BY` path's tie order deterministic at a fixed thread count
-   (stable parallel sort, or a deterministic secondary tie-break key), independent of the
-   dict-id question. Spec-optional, but removes a real intra-host non-determinism on
-   `>= PAR_THRESHOLD` tied results.
+2. **Bead — golden/snapshot determinism guard** (sq-8qzz). **RESOLVED ([OPUS-4.8])** as the
+   contributor-note option: `CONTRIBUTING.md` now carries "A golden over serialised RDF or an
+   unordered/tied result must canonicalise or pin threads", codifying the discipline. No
+   heavy harness/CI-lint was built — the audit verified no current test is at risk, so a
+   forward-looking convention is the honest minimum.
+3. **Bead (separate cause?) — stabilise large-result `ORDER BY` tie order** (sq-8m65).
+   **CLOSED as not-an-issue ([OPUS-4.8]):** the premise was a misreading — `par_sort_by` is
+   already rayon's **stable** sort (see the corrected ORDER-BY-tie section above), so the
+   parallel path's tie order is *already* deterministic at a fixed thread count. There is no
+   separate intra-host non-determinism to remove; adding a total-order tie-breaker would cost
+   a term materialisation per tied row for an order SPARQL leaves unspecified. The sort site
+   now carries a comment recording this.
+
+(Phased item 1 — the `sparq-vectors` fingerprint fix — tracks as sq-xhiv (P2), handled
+separately from this determinism-follow-up batch.)
 4. **Bead (optional, hygiene) — fix the misleading `write_turtle` doc-comment.** Reword
    "Output is deterministic …" to scope the claim to the function's input slice and note that
    `graph_*` serialisers inherit the store's (thread-count-dependent) row order; cross-reference

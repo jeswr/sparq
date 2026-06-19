@@ -44,6 +44,33 @@ spec-justified* reason, record the rationale in the report alongside the diverge
 (don't just drop the count). Raising a floor when coverage genuinely improves is
 encouraged.
 
+<!-- [OPUS-4.8] sq-8qzz: contributor note guarding new golden/snapshot tests against the
+     thread-count-dependent dict-id order. No current test is at risk (the audit verified
+     this) — this is a forward-looking convention, not a fix for a present bug. -->
+### A golden over serialised RDF or an unordered/tied result must canonicalise or pin threads
+
+`sparq-core` assigns dictionary ids in a **thread-count-dependent** order (the parallel
+sharded dict merge, `default_shards = (rayon::current_num_threads()*2).clamp(4,64)`), and
+that id order surfaces — spec-permittedly — in several **observable but unspecified** places:
+RDF serialisation row order (Turtle / TriG / N-Quads / N-Triples / JSON-LD), `SELECT` row
+order without `ORDER BY`, `CONSTRUCT` / `DESCRIBE` triple order, and `ORDER BY`-tie order.
+None is a correctness bug (the SPARQL / RDF specs leave all of them unspecified), and no
+golden/snapshot file in the repo pins any of them today — the conformance harness compares
+unordered results as a **bag (multiset)** and existing snapshot/differential tests sort the
+rendered rows by term before asserting.
+
+So if you add a test that pins one of those outputs **as an exact string / file**, make it
+robust to thread count one of two ways, or it will be host-flaky exactly like the #691
+`label_propagation` test was:
+
+- **Canonicalise** — sort the rendered rows (or compare as a set/multiset of term strings)
+  before asserting. This is the default; it matches every existing test.
+- **Pin threads** — set `RAYON_NUM_THREADS=1` for that test if you genuinely must assert an
+  exact byte sequence (rare; prefer canonicalising). CI does not pin threads on the
+  conformance / bulk shards, and nextest runs shards on differently-sized runners.
+
+Background and the full per-surface analysis: `research/dict-id-order-determinism-audit.md`.
+
 ### Every `unsafe` block needs a `// SAFETY:` comment and a register row
 
 `sparq`'s `unsafe` is confined to five crates (mmap loaders, the zero-copy dictionary,
