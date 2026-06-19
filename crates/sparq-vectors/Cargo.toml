@@ -120,6 +120,13 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
 # a library dependency of this crate — it stays a test-only dependency and never enters the published
 # graph; the fingerprint itself depends only on sparq-core's public read API.
 rayon = { workspace = true }
+# [OPUS-4.8] (sq-k5qq) DEV-only: the throughput/diskann harnesses emit an optional,
+# strictly-additive `SPARQ_VECTORS_JSON=<path>` results document (dependency-free
+# `format!`-built JSON — no serde in the harness itself); this dev-dep parses that emit
+# back so the round-trip test catches a malformed document. `serde_json` is ALSO an
+# OPTIONAL runtime dep (the `provider`/`embeddings` features) — listing it here makes it
+# available to the test targets in BOTH feature states, independent of those features.
+serde_json = "1"
 
 # [OPUS-4.8] sq-ip3a: the bench example measures HNSW (`VectorIndex`) recall/build, so it needs the
 # approximate backend. Gating it on `approx-ann` keeps `cargo build --all-targets` (default features)

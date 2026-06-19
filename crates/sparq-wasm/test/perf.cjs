@@ -2,8 +2,48 @@
 // the WASM (browser) runtime, where memory and main-thread time are scarcest.
 //   wasm-pack build --target nodejs --release --out-dir pkg-node
 //   node test/perf.cjs
+//   node test/perf.cjs --json /tmp/wasm-perf.json   # strictly-additive emit
+//
+// [OPUS-4.8] (sq-k5qq) `--json <path>` writes the SAME per-workload timings STDOUT prints
+// as a stable, hand-built JSON document (the JS analogue of the Rust harnesses'
+// dependency-free `format!`-JSON; mpc_net_bench::cell_json). STDOUT is byte-for-byte
+// unchanged whether or not the flag is present; every `ms` is best-effort, MEASURED on the
+// running host — ADVISORY + NON-CANONICAL (stated in the emitted `note`) — nothing committed.
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const { Store } = require("../pkg-node/sparq_wasm.js");
+
+// Extracts `--json <path>` from argv (a bare `--json` is a usage error), so the run is
+// byte-identical when the flag is absent.
+function takeJsonArg(argv) {
+  const i = argv.indexOf("--json");
+  if (i === -1) return null;
+  if (i + 1 >= argv.length) {
+    console.error("`--json` requires a path argument: --json <path>");
+    process.exit(2);
+  }
+  return argv[i + 1];
+}
+// Hand-built results document. `rows` is [{label, ms}]; the assertion COUNTS in the body
+// are the deterministic gate, the timings are advisory (the note says so). Serialised with
+// JSON.stringify, which escapes the label strings; a self-test JSON.parse runs every time.
+function resultsJson(meta, rows) {
+  return JSON.stringify(
+    {
+      harness: "sparq-wasm perf",
+      ...meta,
+      note:
+        "every `ms` is best-effort latency MEASURED on the running host — ADVISORY, " +
+        "NON-CANONICAL (this dev box) — do not bake into committed files; the in-harness " +
+        "assertion counts are the deterministic gate",
+      rows,
+    },
+    null,
+    2,
+  );
+}
+const JSON_PATH = takeJsonArg(process.argv.slice(2));
+const ROWS = [];
 
 // Deterministic ~400k-triple graph (50k people, 8 triples each: type/name/age/city
 // + 4 follows).
@@ -22,6 +62,7 @@ const t0 = process.hrtime.bigint();
 const store = Store.load(ttl, "turtle");
 const loadMs = Number(process.hrtime.bigint() - t0) / 1e6;
 console.log(`loaded ${store.size} triples in ${loadMs.toFixed(0)} ms\n`);
+ROWS.push({ label: "load", ms: loadMs });
 
 function time(label, fn) {
   let best = Infinity, out;
@@ -31,6 +72,7 @@ function time(label, fn) {
     best = Math.min(best, Number(process.hrtime.bigint() - s) / 1e6);
   }
   console.log(`  ${label.padEnd(34)} ${best.toFixed(3)} ms`);
+  ROWS.push({ label, ms: best }); // [OPUS-4.8] (sq-k5qq) capture for the optional --json emit
   return out;
 }
 
@@ -83,3 +125,16 @@ const cOpt = time("count(name OPTIONAL age)", () =>
 assert.equal(cOpt, N);
 
 console.log("\nall WASM streaming assertions passed ✓");
+
+// [OPUS-4.8] (sq-k5qq) Build the results document and SELF-TEST it (round-trips through a
+// real JSON.parse on every run — catches a malformed emit). Writing the file is
+// strictly-additive: only when `--json <path>` was given; STDOUT above is unchanged.
+const DOC = resultsJson({ triples: store.size }, ROWS);
+const parsed = JSON.parse(DOC); // would throw on a malformed document
+assert.equal(parsed.harness, "sparq-wasm perf");
+assert.ok(parsed.note.includes("NON-CANONICAL"));
+assert.ok(Array.isArray(parsed.rows) && parsed.rows.length === ROWS.length);
+if (JSON_PATH) {
+  fs.writeFileSync(JSON_PATH, DOC);
+  console.error(`wrote ${ROWS.length} result rows to ${JSON_PATH}`);
+}
