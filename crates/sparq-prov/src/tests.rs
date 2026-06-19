@@ -171,3 +171,159 @@ fn rejects_non_graph_queries() {
     assert!(derive_construct(&g(), "SELECT * WHERE { ?s ?p ?o }", cfg()).is_err());
     assert!(derive_construct(&g(), "ASK { ?s ?p ?o }", cfg()).is_err());
 }
+
+// ── sq-bif.4: correctness-suite additions — gaps in the CONSTRUCT/datetime/config
+// surface (uncovered branches + edge cases). [OPUS-4.8] ──────────────────────────
+
+/// `ProvConfig::with_inputs` is the documented constructor for the common "name the
+/// source dataset(s)" case; exercise it directly (not only via the README doc-test) and
+/// confirm it populates `used` and leaves the rest at their defaults.
+#[test]
+fn with_inputs_constructor_sets_used_and_defaults() {
+    let inputs = [
+        NamedNode::new_unchecked("http://ex/g1"),
+        NamedNode::new_unchecked("http://ex/g2"),
+    ];
+    let config = ProvConfig::with_inputs(inputs.clone());
+    assert_eq!(config.used, inputs);
+    // The other fields are the `Default` values.
+    assert!(config.activity.is_none());
+    assert!(config.entity.is_none());
+    assert!(config.agent.is_none());
+
+    // …and the inputs flow through to the `used`/`wasDerivedFrom` edges of a real
+    // derivation, so the constructor is wired correctly end-to-end.
+    let d = derive_construct(
+        &g(),
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        ProvConfig {
+            clock: fixed_clock,
+            ..ProvConfig::with_inputs(inputs.clone())
+        },
+    )
+    .unwrap();
+    let lines: HashSet<String> = d.prov_graph().iter().map(line).collect();
+    let a = d.activity().as_str();
+    let e = d.entity().as_str();
+    for input in &inputs {
+        let iri = input.as_str();
+        assert!(lines.contains(&format!(
+            "<{a}> <http://www.w3.org/ns/prov#used> <{iri}> ."
+        )));
+        assert!(lines.contains(&format!(
+            "<{e}> <http://www.w3.org/ns/prov#wasDerivedFrom> <{iri}> ."
+        )));
+    }
+}
+
+/// `Derivation::timing()` exposes the captured start/end instants; under a fixed clock
+/// they equal the configured instant (start == end for a same-clock derivation), and the
+/// `startedAtTime` literal must agree with the reported start.
+#[test]
+fn timing_reports_the_captured_instants() {
+    let d = derive_construct(
+        &g(),
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        cfg(),
+    )
+    .unwrap();
+    let (started, ended) = d.timing();
+    // The fixed clock returns the same instant for both reads.
+    assert_eq!(started, fixed_clock());
+    assert_eq!(ended, fixed_clock());
+    assert!(ended >= started, "end must not precede start");
+    // The reported start matches the emitted startedAtTime literal.
+    let lines: HashSet<String> = d.prov_graph().iter().map(line).collect();
+    assert!(lines
+        .iter()
+        .any(|l| l.contains("#startedAtTime>") && l.contains("2023-11-14T22:13:20Z")));
+}
+
+/// A CONSTRUCT whose WHERE matches nothing derives the empty graph — a valid PROV
+/// derivation that generated zero triples. The activity/entity + lineage edges still
+/// stand (an activity that produced an empty result is still an activity).
+#[test]
+fn empty_construct_is_still_a_derivation() {
+    let d = derive_construct(
+        &g(),
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:nonexistent ?a }",
+        cfg(),
+    )
+    .unwrap();
+    assert!(d.triples().is_empty(), "no match ⇒ empty derived graph");
+    // The lineage record is unchanged: the activity ran, the entity (empty result) was
+    // generated and derived from the named input.
+    let lines: HashSet<String> = d.prov_graph().iter().map(line).collect();
+    assert!(lines.iter().any(|l| l.contains("#wasGeneratedBy>")));
+    assert!(lines.iter().any(|l| l.contains("#wasDerivedFrom>")));
+    assert!(lines.iter().any(|l| l.contains("#Activity>")));
+    assert!(lines.iter().any(|l| l.contains("#Entity>")));
+}
+
+/// The activity carries the verbatim query text as a `prov:value` recipe and the kind as
+/// an `rdfs:label` — the human-facing annotations that make the lineage self-describing.
+#[test]
+fn activity_records_kind_label_and_query_recipe() {
+    let q = "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }";
+    let d = derive_construct(&g(), q, cfg()).unwrap();
+    let lines: HashSet<String> = d.prov_graph().iter().map(line).collect();
+    let a = d.activity().as_str();
+    // CONSTRUCT kind as rdfs:label.
+    assert!(lines.contains(&format!(
+        "<{a}> <http://www.w3.org/2000/01/rdf-schema#label> \"CONSTRUCT\" ."
+    )));
+    // The exact query text as prov:value.
+    assert!(lines.contains(&format!(
+        "<{a}> <http://www.w3.org/ns/prov#value> \"{q}\" ."
+    )));
+}
+
+/// Every emitted `startedAtTime`/`endedAtTime` literal is typed `xsd:dateTime` — never an
+/// untyped/`xsd:string` literal (a PROV-O conformance point).
+#[test]
+fn timing_literals_are_typed_xsd_datetime() {
+    let d = derive_construct(
+        &g(),
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        cfg(),
+    )
+    .unwrap();
+    for t in d.prov_graph() {
+        if t.predicate.as_str().ends_with("AtTime") {
+            match &t.object {
+                Term::Literal(lit) => assert_eq!(
+                    lit.datatype(),
+                    xsd::DATE_TIME,
+                    "timing literal must be xsd:dateTime"
+                ),
+                other => panic!("timing object must be a literal, got {:?}", other),
+            }
+        }
+    }
+}
+
+/// `datetime_literal` is the bridge from a captured `SystemTime` to the emitted
+/// `xsd:dateTime` literal. A pre-epoch instant (before 1970) yields the documented
+/// clamp-to-epoch behaviour rather than a panic — a defensive boundary on the clock.
+#[test]
+fn datetime_literal_clamps_pre_epoch_to_unix_epoch() {
+    // SystemTime before UNIX_EPOCH ⇒ duration_since errors ⇒ clamped to epoch (0).
+    let pre_epoch = UNIX_EPOCH - Duration::from_secs(10_000);
+    let lit = datetime_literal(pre_epoch);
+    assert_eq!(lit.value(), "1970-01-01T00:00:00Z");
+    assert_eq!(lit.datatype(), xsd::DATE_TIME);
+}
+
+/// `datetime_literal` truncates sub-second precision to whole seconds (the lexical is
+/// `…SSZ`, no fraction) — so two instants in the same second format identically.
+#[test]
+fn datetime_literal_truncates_subsecond_precision() {
+    let base = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let with_nanos = base + Duration::from_nanos(999_999_999);
+    assert_eq!(
+        datetime_literal(base).value(),
+        datetime_literal(with_nanos).value(),
+        "sub-second precision is truncated to whole seconds"
+    );
+    assert_eq!(datetime_literal(base).value(), "2023-11-14T22:13:20Z");
+}

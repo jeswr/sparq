@@ -116,6 +116,12 @@ Honesty boundaries:
 
 - **Deletes are invalidations, not derivations** — a deleted triple is never
   `wasGeneratedBy`/`wasDerivedFrom`. A pure-delete update generates **no** result entity.
+- **Ground DATA ops record the declared operand batch, not a store-diff** — `INSERT DATA`
+  lineage attributes the operand triples as generated even if they were already asserted,
+  and `DELETE DATA` records the operand triples as invalidated even if absent. The
+  operation *declares* that data added / removed; the resolved effect log carries the
+  operand. (`DELETE … WHERE` that matches nothing is, by contrast, a true no-op — no
+  delta, no invalidation entity.)
 - **Structural ops** (`CLEAR` / `DROP` / `CREATE`) change a graph's existence/emptiness,
   not its triples-as-data — they are reflected only in the activity kind label, with **no**
   per-triple entity (no sound per-triple derivation to assert).

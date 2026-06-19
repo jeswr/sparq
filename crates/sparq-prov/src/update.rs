@@ -767,4 +767,297 @@ mod tests {
             .iter()
             .any(|t| t.predicate.as_str() == "http://www.w3.org/ns/prov#wasGeneratedBy"));
     }
+
+    // ── sq-bif.4: UPDATE-lineage correctness-suite additions — uncovered branches in
+    // the effect partitioning, kind classification, and edge cases. [OPUS-4.8] ────────
+
+    /// `UpdateDerivation::timing()` reports the captured activity window; under a fixed
+    /// clock the start equals the end and both equal the configured instant.
+    #[test]
+    fn update_timing_reports_the_captured_instants() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            cfg(),
+        )
+        .unwrap();
+        let (started, ended) = d.timing();
+        assert_eq!(started, fixed_clock());
+        assert_eq!(ended, fixed_clock());
+        assert!(ended >= started);
+    }
+
+    /// `INSERT DATA` whose triple is *already present* records the operand batch as the
+    /// generated entity: the engine's `Delta` effect for a ground DATA op carries the
+    /// declared operand triples (it does not store-diff against pre-existing data), so the
+    /// lineage attributes the asserted-into-existence triple to the activity. This is the
+    /// correct reading for `INSERT DATA` — the operation *asserts* that data regardless of
+    /// prior presence. The kind label distinguishes it as INSERT DATA.
+    #[test]
+    fn insert_data_records_operand_batch_as_generation() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            // ex:alice ex:age 30 is already asserted in DATA — INSERT DATA re-asserts it.
+            "PREFIX ex: <http://ex/> INSERT DATA { ex:alice ex:age 30 }",
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(d.inserted().len(), 1, "the operand triple is the generated data");
+        assert!(d.deleted().is_empty());
+        let ls = lines(&d);
+        assert!(ls.iter().any(|l| l.contains("#wasGeneratedBy>")));
+        assert!(ls.contains(&format!(
+            "<{}> <http://www.w3.org/2000/01/rdf-schema#label> \"INSERT DATA\" .",
+            d.activity().as_str()
+        )));
+    }
+
+    /// `DELETE DATA` of a triple records the operand batch as a retraction (an
+    /// invalidation entity) regardless of whether the triple was present — the operation
+    /// *declares* that data removed, and the resolved effect log carries the operand. The
+    /// kind is classified as DELETE DATA.
+    #[test]
+    fn delete_data_records_operand_batch_as_invalidation() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> DELETE DATA { ex:nobody ex:age 99 }",
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(d.deleted().len(), 1, "the operand triple is the retracted data");
+        assert!(d.inserted().is_empty());
+        let ls = lines(&d);
+        // One invalidation entity for the declared retraction; never generated/derived.
+        assert_eq!(
+            ls.iter().filter(|l| l.contains("#wasInvalidatedBy>")).count(),
+            1
+        );
+        assert!(ls.iter().all(|l| !l.contains("#wasGeneratedBy>")));
+        assert!(ls.contains(&format!(
+            "<{}> <http://www.w3.org/2000/01/rdf-schema#label> \"DELETE DATA\" .",
+            d.activity().as_str()
+        )));
+    }
+
+    /// A `DELETE … WHERE` whose pattern matches nothing genuinely commits no delta, so the
+    /// engine records no `Delta` effect: the derivation retracts nothing and emits no
+    /// invalidation entity (a true no-op retraction — the correct PROV reading).
+    #[test]
+    fn delete_where_no_match_is_a_noop() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> DELETE { ?s ex:age ?a } WHERE { ?s ex:nonexistent ?a }",
+            cfg(),
+        )
+        .unwrap();
+        assert!(d.inserted().is_empty());
+        assert!(d.deleted().is_empty(), "no WHERE match ⇒ no retraction");
+        let ls = lines(&d);
+        assert!(ls.iter().all(|l| !l.contains("#wasInvalidatedBy>")));
+        assert!(ls.iter().all(|l| !l.contains("#wasGeneratedBy>")));
+        // The activity still ran and consulted its inputs.
+        assert!(ls.iter().any(|l| l.contains("#used>")));
+    }
+
+    /// `DELETE DATA` of present triples is a pure invalidation — each retracted triple is
+    /// a fresh blank-node `prov:Entity` `wasInvalidatedBy` the activity, never generated.
+    #[test]
+    fn delete_data_invalidates_each_present_triple() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> DELETE DATA { ex:alice ex:age 30 . ex:bob ex:age 25 }",
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(d.deleted().len(), 2);
+        assert!(d.inserted().is_empty());
+        let ls = lines(&d);
+        let inval = ls.iter().filter(|l| l.contains("#wasInvalidatedBy>")).count();
+        assert_eq!(inval, 2, "one invalidation entity per deleted triple");
+        // Each invalidated entity is a fresh blank node (no IRI subject for retracted
+        // triples — they no longer exist to be named by value).
+        assert!(ls
+            .iter()
+            .filter(|l| l.contains("#wasInvalidatedBy>"))
+            .all(|l| l.starts_with("_:")));
+        // A pure delete generates nothing.
+        assert!(ls.iter().all(|l| !l.contains("#wasGeneratedBy>")));
+    }
+
+    /// Structural ops (`CLEAR`/`DROP`/`CREATE`) carry no resolved triple set, so the
+    /// derivation enumerates no inserts/deletes and emits no per-triple entity — the
+    /// deliberate honesty boundary documented in the module. They still parse + apply.
+    #[test]
+    fn structural_ops_emit_no_per_triple_entity() {
+        for op in [
+            "CLEAR DEFAULT",
+            "DROP SILENT DEFAULT",
+            "CREATE SILENT GRAPH <http://ex/g>",
+        ] {
+            let mut graph = g();
+            let d = derive_update(&mut graph, op, cfg()).unwrap();
+            assert!(d.inserted().is_empty(), "{} inserts nothing", op);
+            assert!(d.deleted().is_empty(), "{} enumerates no deletes", op);
+            let ls = lines(&d);
+            // No generated entity, no per-triple invalidation entity.
+            assert!(
+                ls.iter().all(|l| !l.contains("#wasGeneratedBy>")),
+                "{} must not generate an entity",
+                op
+            );
+            assert!(
+                ls.iter().all(|l| !l.contains("#wasInvalidatedBy>")),
+                "{} must not enumerate invalidations",
+                op
+            );
+            // …but it IS recorded as an activity (kind label "SPARQL UPDATE").
+            assert!(ls.iter().any(|l| l.contains("#Activity>")));
+        }
+    }
+
+    /// The emitted lineage of a pure-delete update is well-formed RDF with blank-node
+    /// invalidation entities, and round-trips through both the loader and an independent
+    /// N-Triples parser.
+    #[test]
+    fn pure_delete_lineage_round_trips() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> DELETE { ?s ex:name ?n } WHERE { ?s ex:name ?n }",
+            cfg(),
+        )
+        .unwrap();
+        let nt = d.prov_ntriples();
+        let reloaded = Graph::load_str(&nt, "turtle").expect("PROV-O must be valid RDF");
+        assert_eq!(reloaded.len(), d.prov_graph().len());
+        use oxttl::NTriplesParser;
+        let parsed: Vec<_> = NTriplesParser::new()
+            .for_reader(nt.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("well-formed N-Triples");
+        assert_eq!(parsed.len(), d.prov_graph().len());
+    }
+
+    /// `terms_to_triple` defensively rejects a malformed resolved triple — a literal or
+    /// blank-node *predicate*, or a literal *subject* — by skipping it (returning `None`)
+    /// rather than panicking. The SPARQL grammar never produces these, but the converter
+    /// is the boundary, so the guard is exercised directly.
+    #[test]
+    fn terms_to_triple_skips_malformed_shapes() {
+        use oxrdf::{BlankNode, Literal, NamedNode as NN};
+        let iri = || Term::NamedNode(NN::new_unchecked("http://ex/p"));
+        let lit = || Term::Literal(Literal::new_simple_literal("x"));
+        let blank = || Term::BlankNode(BlankNode::default());
+
+        // Well-formed: IRI subject, IRI predicate, any object.
+        assert!(terms_to_triple(&[iri(), iri(), lit()]).is_some());
+        // Well-formed: blank-node subject.
+        assert!(terms_to_triple(&[blank(), iri(), iri()]).is_some());
+        // Malformed: literal subject ⇒ skipped.
+        assert!(terms_to_triple(&[lit(), iri(), iri()]).is_none());
+        // Malformed: literal predicate ⇒ skipped.
+        assert!(terms_to_triple(&[iri(), lit(), iri()]).is_none());
+        // Malformed: blank-node predicate ⇒ skipped.
+        assert!(terms_to_triple(&[iri(), blank(), iri()]).is_none());
+    }
+
+    /// `partition_effects` splits a `Delta` effect log into inserts / deletes preserving
+    /// capture order. Built from a `Delta` (the only externally-expressible variant — its
+    /// fields erase to `Option<Term>` + `[Term; 3]`), so the converter is exercised on a
+    /// hand-built log; the structural-marker skip path is covered by the real-engine
+    /// `structural_ops_emit_no_per_triple_entity` test.
+    #[test]
+    fn partition_effects_splits_and_preserves_order() {
+        use oxrdf::NamedNode as NN;
+        let term = |s: &str| Term::NamedNode(NN::new_unchecked(s));
+        let t = |o: &str| [term("http://ex/s"), term("http://ex/p"), term(o)];
+        let effects = vec![UpdateEffect::Delta {
+            slot: None, // default graph
+            inserts: vec![t("http://ex/a"), t("http://ex/b")],
+            deletes: vec![t("http://ex/c")],
+        }];
+        let (inserted, deleted) = partition_effects(&effects);
+        assert_eq!(inserted.len(), 2, "two resolved inserts, order preserved");
+        assert_eq!(deleted.len(), 1, "one resolved delete");
+        assert_eq!(inserted[0].object, term("http://ex/a"));
+        assert_eq!(inserted[1].object, term("http://ex/b"));
+        assert_eq!(deleted[0].object, term("http://ex/c"));
+    }
+
+    /// `strip_prologue` skips a leading `BASE <…>` declaration (as well as `PREFIX`) so
+    /// `kind_label` classifies the first real operation, not the prologue keyword.
+    #[test]
+    fn kind_label_strips_base_prologue() {
+        assert_eq!(
+            kind_label("BASE <http://ex/> INSERT DATA { <s> <p> <o> }"),
+            "INSERT DATA"
+        );
+        // Mixed BASE + PREFIX prologue before the operation.
+        assert_eq!(
+            kind_label("BASE <http://ex/> PREFIX ex: <http://ex/> DELETE DATA { <s> <p> <o> }"),
+            "DELETE DATA"
+        );
+    }
+
+    /// A trailing top-level `;` with nothing after it is NOT a multi-op body — `is_multi_op`
+    /// returns false for a single operation that merely ends in a separator.
+    #[test]
+    fn kind_label_trailing_semicolon_is_single_op() {
+        assert_eq!(
+            kind_label("INSERT DATA { <a> <b> <c> } ;"),
+            "INSERT DATA",
+            "a lone trailing ';' is not a second operation"
+        );
+        // Whitespace after the trailing ';' is also not an op.
+        assert_eq!(kind_label("INSERT DATA { <a> <b> <c> } ;   "), "INSERT DATA");
+    }
+
+    /// A `;` inside a single-quoted string literal and inside an IRI is data / part of the
+    /// term, never an operation boundary — `is_multi_op`/`has_top_level_semicolon` must
+    /// ignore both. (Covers the single-quote and IRI-skip arms of both scanners.)
+    #[test]
+    fn semicolon_in_squote_and_iri_is_not_a_boundary() {
+        // ';' inside a single-quoted literal in INSERT DATA: still one op.
+        assert_eq!(
+            kind_label("INSERT DATA { <http://ex/s> <http://ex/p> 'a; b' }"),
+            "INSERT DATA"
+        );
+        // ';' that only ever appears inside an <IRI> is not a boundary.
+        assert_eq!(
+            kind_label("INSERT DATA { <http://ex/a;b> <http://ex/p> <http://ex/o> }"),
+            "INSERT DATA"
+        );
+        // A genuine top-level ';' (outside braces/strings/IRIs) IS a multi-op boundary.
+        assert_eq!(
+            kind_label("DROP DEFAULT ; CREATE GRAPH <http://ex/g>"),
+            "SPARQL UPDATE"
+        );
+    }
+
+    /// A multi-op body whose FIRST operation contains a quoted `;` (inside a template
+    /// literal) before the real top-level `;` op-boundary: the precise second-pass scanner
+    /// (`has_top_level_semicolon`) must skip the in-string `;` (tracking both double- and
+    /// single-quote state) and still find the genuine boundary ⇒ multi-op.
+    #[test]
+    fn quoted_semicolon_before_real_boundary_is_still_multi_op() {
+        // Double-quoted ';' inside the first INSERT DATA template, then a real ';' boundary.
+        assert_eq!(
+            kind_label(
+                "INSERT DATA { <http://ex/s> <http://ex/p> \"a; b\" } ; DROP DEFAULT"
+            ),
+            "SPARQL UPDATE"
+        );
+        // Single-quoted ';' inside the first template, then a real ';' boundary.
+        assert_eq!(
+            kind_label(
+                "INSERT DATA { <http://ex/s> <http://ex/p> 'a; b' } ; CREATE GRAPH <http://ex/g>"
+            ),
+            "SPARQL UPDATE"
+        );
+    }
 }
