@@ -227,4 +227,33 @@
     background-color: color-mix(in oklch, var(--muted) 60%, transparent);
     font-weight: 600;
   }
+
+  /* [OPUS-4.8] sq-n5aw — SPARQL syntax-highlight token colours for the query editor.
+     One class per `SparqlTokenType` from `@sparq/client`. Colours reuse the existing
+     design-system tokens (`--primary`, `--chart-*`, `--muted-foreground`), which already
+     carry light + dark variants, so highlighting follows the theme automatically and adds no
+     new palette. `plain`/`punctuation` inherit `--foreground` (no class needed). */
+  .sq-tok-keyword {
+    color: var(--primary);
+    font-weight: 600;
+  }
+  .sq-tok-variable {
+    color: var(--chart-5);
+  }
+  .sq-tok-iri {
+    color: var(--chart-1);
+  }
+  .sq-tok-prefixed {
+    color: var(--chart-2);
+  }
+  .sq-tok-string {
+    color: var(--chart-4);
+  }
+  .sq-tok-number {
+    color: var(--chart-3);
+  }
+  .sq-tok-comment {
+    color: var(--muted-foreground);
+    font-style: italic;
+  }
 }

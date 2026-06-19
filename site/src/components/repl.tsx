@@ -36,6 +36,8 @@ import {
   DatasetViewer,
   type ActiveDataset,
 } from "@/components/repl-datasets";
+// [OPUS-4.8] sq-n5aw — the syntax-highlighting SPARQL editor replaces the plain <textarea>.
+import { SparqlEditor } from "@/components/sparql-editor";
 
 // [OPUS-4.8] sq-vfbm — the REPL now dispatches across the whole lean-bundle query
 // surface, so the result state carries one variant per shape of answer: a solution
@@ -324,13 +326,12 @@ export function Repl() {
         <label htmlFor="repl-query" className="sr-only">
           SPARQL query
         </label>
-        <textarea
+        <SparqlEditor
           id="repl-query"
+          ariaLabel="SPARQL query"
           value={sparql}
-          spellCheck={false}
-          onChange={(e) => setSparql(e.target.value)}
+          onChange={setSparql}
           rows={9}
-          className="w-full resize-y rounded-lg border bg-muted/40 p-3 font-mono text-[13px] leading-relaxed outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
         />
 
         <div className="flex flex-wrap items-center gap-3">

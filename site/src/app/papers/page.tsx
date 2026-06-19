@@ -20,6 +20,7 @@ import {
   STATUS_VARIANT,
   FAMILY_LABEL,
 } from "@/data/papers";
+import { withBasePath } from "@/lib/base-path";
 
 export const metadata: Metadata = {
   title: "Papers",
@@ -27,9 +28,10 @@ export const metadata: Metadata = {
     "Academic papers generated from sparq contributions — each authored once in Typst, bound to live evidence, and built into both an in-site render and a downloadable PDF. Numbers are gated to deterministic, machine-independent evidence.",
 };
 
-// basePath-aware PDF asset link (the site is served under /sparq on GitHub Pages).
+// basePath-aware PDF asset link. [OPUS-4.8] sq-9vw5 — env-switched (was hardcoded `/sparq`)
+// so the PDF resolves under both the Pages `/sparq` prefix and the Tauri root-relative build.
 function pdfHref(slug: string): string {
-  return `/sparq/papers/${slug}.pdf`;
+  return withBasePath(`/papers/${slug}.pdf`);
 }
 
 export default function PapersIndexPage() {

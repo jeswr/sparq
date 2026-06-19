@@ -347,6 +347,29 @@ export async function sparqShaclValidate(
   return JSON.parse(store.validate(data, shapes, format)) as ShaclReport;
 }
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-n5aw — the framework-agnostic SPARQL EDITOR core (highlighting + prefixes).
+// Re-exported so the site (and the Tauri webview) consume the same dependency-free tokenizer
+// and common-prefix logic. The React overlay editor lives in the site component tree; this is
+// the part that "transfers" to any GUI framework unchanged.
+// ---------------------------------------------------------------------------
+
+export {
+  type SparqlToken,
+  type SparqlTokenType,
+  tokenizeSparql,
+} from "./sparql-highlight.js";
+
+export {
+  type PrefixBinding,
+  COMMON_PREFIXES,
+  declaredPrefixes,
+  usedPrefixes,
+  missingCommonPrefixes,
+  renderPrefixLines,
+  withPrefixes,
+} from "./sparql-prefixes.js";
+
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {
   if (!t) return "";
