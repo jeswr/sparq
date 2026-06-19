@@ -380,6 +380,15 @@ export {
   tokenizeSparql,
 } from "./sparql-highlight.js";
 
+// [OPUS-4.8] sq-8uew — the Turtle/TriG/N-Triples/N-Quads highlighting tokenizer, the sibling
+// of `tokenizeSparql`. Shares the `SparqlTokenType` token classes (so one CSS palette styles
+// both) and powers the RDF-document highlighting in the playground results / dataset views.
+export {
+  type TurtleToken,
+  type TurtleTokenType,
+  tokenizeTurtle,
+} from "./turtle-highlight.js";
+
 export {
   type PrefixBinding,
   COMMON_PREFIXES,
