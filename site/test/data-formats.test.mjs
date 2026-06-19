@@ -1,6 +1,6 @@
-// [OPUS-4.8] sq-j50v — unit tests for the /surface/data-formats demo helpers: the
-// four-format sample catalogue and the in-tab gzip round-trip. These cover the pure,
-// framework-free logic (no React, no wasm); the engine-level parse of each sample is
+// [OPUS-4.8] sq-j50v / sq-ixc3.1 — unit tests for the /surface/data-formats demo helpers: the
+// sample catalogue (four text formats + JSON-LD) and the in-tab gzip round-trip. These cover
+// the pure, framework-free logic (no React, no wasm); the engine-level parse of each sample is
 // covered by the Rust tests + js/test/store.test.mjs. Run via `npm run test:unit`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,10 +14,10 @@ import {
   formatBytes,
 } from "../src/lib/data-formats.ts";
 
-test("the catalogue covers exactly the four text formats", () => {
+test("the catalogue covers the four text formats plus JSON-LD", () => {
   assert.deepEqual(
     FORMAT_SAMPLES.map((f) => f.format),
-    ["turtle", "ntriples", "nquads", "trig"],
+    ["turtle", "ntriples", "nquads", "trig", "jsonld"],
   );
 });
 
@@ -30,11 +30,17 @@ test("every sample is non-empty and carries the right named-graph syntax", () =>
   assert.match(sampleFor("trig").sample, /ex:social\s*\{/);
   // The triple-only formats do NOT (no 4th term / no graph block).
   assert.doesNotMatch(sampleFor("turtle").sample, /\{/);
+  // The JSON-LD sample is real JSON-LD: it carries a `@context` and a `@graph`.
+  assert.match(sampleFor("jsonld").sample, /"@context"/);
+  assert.match(sampleFor("jsonld").sample, /"@graph"/);
 });
 
 test("isDatasetFormat is true exactly for the quad-bearing formats", () => {
   assert.equal(isDatasetFormat("nquads"), true);
   assert.equal(isDatasetFormat("trig"), true);
+  // JSON-LD can carry named graphs (`@graph` under an outer `@id`), so it routes through
+  // loadDataset too.
+  assert.equal(isDatasetFormat("jsonld"), true);
   assert.equal(isDatasetFormat("turtle"), false);
   assert.equal(isDatasetFormat("ntriples"), false);
 });
