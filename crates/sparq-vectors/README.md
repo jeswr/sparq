@@ -100,6 +100,14 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   throughput gates are `cargo test`s (`tests/recall.rs`, `tests/diskann.rs`,
   `tests/quant.rs`, `tests/throughput.rs`), with live numbers on the
   [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+- **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs`
+  anchors the approximate recall against **hnswlib** (the FAISS/hnswlib reference): it loads
+  a committed real-hnswlib capture (`tests/fixtures/hnswlib_ref.tsv`), checks that
+  `nearest_exact` reproduces the captured numpy exact-kNN oracle, and that DiskANN (and HNSW
+  under `approx-ann`) clears hnswlib's own recall on that shared oracle. Runs in CI with **no
+  native deps** — the corpus is regenerated deterministically on both sides. The **live**
+  hnswlib re-capture (`scripts/capture_hnswlib_ref.py`) is `#[ignore]`d and gather-only (needs
+  numpy + hnswlib). Recall figures are work-box NON-CANONICAL.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
