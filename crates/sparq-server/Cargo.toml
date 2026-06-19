@@ -165,6 +165,21 @@ brtpf = ["tpf"]
 # `SPARQ_SHACL=1` (`ServerConfig::shacl`), mirroring `tpf` / `federation-descriptors`;
 # validation is a READ over the store, so it is gated by the read auth like any GET.
 shacl = ["server", "dep:sparq-shacl"]
+# [OPUS-4.8] (sq-hj4n, gh-916) `n3-patch` (default OFF) adds the OPTIONAL Solid-style N3-Patch
+# (`solid:InsertDeletePatch`, media type `text/n3`) dialect to the Graph-Store-Protocol `PATCH`
+# method. With it on, a `PATCH` carrying a `text/n3` body is parsed into its `solid:deletes` /
+# `solid:inserts` / `solid:where` formulas and translated into ONE atomic graph-scoped SPARQL
+# Update submitted through the SAME sequenced group-commit writer the `application/sparql-update`
+# PATCH path uses (so it inherits atomicity + the auth gate). The N3 parsing rides the `oxttl`
+# `N3Parser` — `oxttl` is ALREADY a server dependency (the GSP read-side Turtle serialiser), so
+# this pulls NO new dependency. The OTHER PATCH dialect (`application/sparql-update` body) is
+# ALWAYS-ON and is NOT behind this feature. Without the `n3-patch` feature the N3-Patch parser +
+# its dispatch arm are `#[cfg]`-stripped: a `text/n3` PATCH body is then a plain `415` and the
+# crate is byte-identical to before — sparq-core / sparq-engine / the wasm bundle untouched
+# either way (sparq-wasm depends on sparq-core/-engine directly, never on sparq-server). STILL OFF
+# AT RUNTIME by default even when compiled in — the operator must additionally set `--n3-patch` /
+# `SPARQ_N3_PATCH=1` (`ServerConfig::n3_patch`), mirroring `tpf` / `shacl` / `federation-descriptors`.
+n3-patch = ["server"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
