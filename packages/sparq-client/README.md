@@ -26,6 +26,25 @@ copy is the **single source of truth**, kept byte-identical to a fresh wasm buil
   unchanged; a desktop GUI passes its own `tauri://` / `file://` origin).
 - The framework-agnostic query helpers: `matchQuads`, `countQuads`, `streamQueryRows`,
   `sparqShaclValidate`, `formatTerm`.
+- **RDF-document display + serialisation helpers** (`sq-8uew` / `sq-gb4o`, all dependency-free
+  and DOM-free so the site and the Tauri 2 webview share one copy): `prettyTurtle(input, opts?)`
+  / `prettyTrig(input, opts?)` reshape the engine's FLAT N-Triples / N-Quads
+  CONSTRUCT/DESCRIBE output (`WasmStore.queryQuads` is N-Triples only) into idiomatic, indented
+  Turtle/TriG — `@prefix` abbreviation, one block per subject, `;`/`,` predicate-object lists,
+  `a` for `rdf:type` — while staying ROUND-TRIP-EQUIVALENT (re-parsing the output yields the
+  same triple set; literals, blank-node labels and RDF 1.2 triple terms `<<( s p o )>>` are
+  lossless) and NEVER throwing (an unparseable line passes through verbatim).
+  `PrettyTurtleOptions` takes `{ prefixes?, indent?, abbreviate? }`; `parseNTriples(input)`
+  exposes the underlying tokeniser (`{ statements, passthrough }`) over the `RdfTerm` /
+  `RdfStatement` shapes. `tokenizeTurtle(text)` is the sibling Turtle/TriG/N-Triples/N-Quads
+  highlighting tokenizer (`TurtleToken` / `TurtleTokenType`) — compose as pretty-print THEN
+  highlight. The `sparql-prefixes` helpers recover prefix bindings from a query so the pretty
+  view abbreviates result IRIs with the USER's own declared prefixes: `declaredPrefixBindings`
+  / `declaredPrefixes` / `usedPrefixes` / `missingCommonPrefixes` / `renderPrefixLines` /
+  `withPrefixes`, plus the `COMMON_PREFIXES` well-known registry and the `PrefixBinding` type.
+  (The PARSE direction — Turtle/SHACL-Compact text → engine — is the engine's job, not this
+  package's: SHACL Compact Syntax *display* lives in `site/` and its parser is tracked under a
+  separate `sparq-shacl` bead.)
 - **Endpoint mode** (`src/endpoint.ts`, `sq-2mke`): the SPARQL 1.1 Protocol HTTP client —
   the companion to the in-tab `WasmStore`. Run the SAME editor against any running
   `sparq-server` (or any conformant endpoint) over `fetch`. `runEndpointQuery(config, sparql)`
