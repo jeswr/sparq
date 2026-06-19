@@ -370,6 +370,24 @@ export {
   withPrefixes,
 } from "./sparql-prefixes.js";
 
+// [OPUS-4.8] sq-x0kp — the framework-agnostic SPARQL-RESULTS formatting core (table
+// extraction, CSV/TSV export, raw-JSON pretty-print, ASK discrimination). Pure data shaping
+// over the SPARQL-JSON shapes above, re-exported so the site results panel AND the Tauri
+// webview render the same cells from one source.
+export {
+  type ResultTable,
+  resultVars,
+  resultRows,
+  isAskResult,
+  askValue,
+  extractTable,
+  csvCell,
+  tsvCell,
+  resultsToCsv,
+  resultsToTsv,
+  formatSparqlJson,
+} from "./results.js";
+
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {
   if (!t) return "";
