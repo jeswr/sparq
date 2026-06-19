@@ -91,6 +91,13 @@ exceptions = [
   #     `webpki-roots`; the stale `webpki-roots@0.26.11` exception was dropped (no longer in tree).
   { crate = "webpki-roots@1.0.7",      allow = ["CDLA-Permissive-2.0"] },
   { crate = "webpki-root-certs@1.0.8", allow = ["CDLA-Permissive-2.0"] },
+  # --- libbz2-rs-sys (bzip2-1.0.6 — the "bzip2 and libbzip2 License v1.0.6", a
+  #     BSD-style permissive licence; FSF-Free, freely redistributable, no
+  #     copyleft). This is the pure-Rust libbz2 rewrite that `bzip2 0.6` links by
+  #     default instead of the C libbz2; `bzip2 0.6.1` itself is MIT OR Apache-2.0
+  #     (already allowed). Scoped per-crate so the broad allowlist stays
+  #     permissive-only. [OPUS-4.8] PR #700 (dependabot bzip2 0.5 -> 0.6).
+  { crate = "libbz2-rs-sys@0.2.5", allow = ["bzip2-1.0.6"] },
 ]
 
 [bans]

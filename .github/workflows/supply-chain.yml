@@ -133,29 +133,30 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # [OPUS-4.8] PIN the cargo-vet version. The committed supply-chain/imports.lock
+      # contains a `trusted-publisher = "github:..."` publisher entry (crates.io Trusted
+      # Publishing), whose parsing was ONLY added in cargo-vet 0.10.2 (CHANGELOG #671,
+      # 2026-01-12). An UNPINNED `tool: cargo-vet` resolves to whatever the installed
+      # install-action build defaults to: v2.81.10 had no native cargo-vet support and
+      # fell back to cargo-binstall -> 0.10.2 (parses it, PASS), but v2.82.0 added native
+      # cargo-vet support pinned to 0.10.0, which CANNOT parse `trusted-publisher` and dies
+      # with `missing field user-id for key publisher.wasm-encoder` -> reds this GATING leg.
+      # That divergence is exactly what broke PR #704 (the install-action 2.81->2.82 bump).
+      # Pinning to >= 0.10.2 makes the version independent of the install-action default so
+      # the GATING parse is reproducible. Bump this in lock-step with any new imports.lock
+      # schema feature. (bead sq-miwt)
       - name: Install cargo-vet
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          tool: cargo-vet
-      # [OPUS-4.8] Populate the cargo cache so the subsequent `--frozen` vet can run
-      # fully offline (its precondition is "the cargo cache is populated or deps are
-      # vendored"). `--locked` keeps it to the committed Cargo.lock.
-      - name: Populate cargo cache (for offline vet)
+          tool: cargo-vet@0.10.2
+      # [OPUS-4.8] `--locked` pins evaluation to the committed Cargo.lock. `--frozen`
+      # (requires the cargo cache populated, hence the `cargo fetch --locked` above) keeps
+      # the verification deterministic — it does NOT re-resolve the tree — while still
+      # FAILING on a genuinely new/unaudited crate (the committed imports.lock won't cover
+      # it). Imports are refreshed deliberately by re-running `cargo vet` (without
+      # `--frozen`) when updating the checked-in supply-chain/ evidence, not in the gate.
+      - name: Populate cargo cache (for --frozen vet)
         run: cargo fetch --locked
-      # [OPUS-4.8] `--locked --frozen`: verify EVERY crate against the COMMITTED
-      # supply-chain/imports.lock + config.toml exemptions WITHOUT re-fetching the
-      # remote `[imports.*]` audit aggregations at run time. Plain `cargo vet --locked`
-      # still re-pulls those 6 upstream audit sets (Mozilla/Google/Bytecode-Alliance/
-      # ISRG/Embark/Zcash) and re-aggregates them in memory on every run; a transient
-      # bad/partial upstream response (observed: a `publisher.wasm-encoder` block fetched
-      # without its `user-id` field -> "missing field `user-id`" toml parse error) then
-      # reds this GATING leg and the whole ci-summary gate on an unrelated PR — while a
-      # concurrent run on `main` that sampled good data passes (seen on PRs #693/#704,
-      # bead sq-miwt). `--frozen` makes the attestation deterministic: it proves the
-      # ratchet against the checked-in evidence, and a genuinely-new/unaudited crate
-      # still FAILS (the committed imports.lock won't cover it). Imports are refreshed
-      # deliberately by re-running `cargo vet` (without `--frozen`) when updating the
-      # checked-in supply-chain/ evidence, not implicitly inside the gate.
       - name: cargo-vet check — GATING
         run: cargo vet --locked --frozen
 
