@@ -1,3 +1,4 @@
+<!-- [OPUS-4.8] sq-inzv: README brought to template. -->
 # sparq-solid
 
 <p>
@@ -6,20 +7,17 @@
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-**Solid Pod access control** over the [sparq](../../README.md) engine.
-
-Pods are stored as **named graph per document**; their WAC (`.acl`) / ACP (`.acr`)
-access-control documents stay as plain, queryable triples, and their semantics are encoded
-as **N3 rules** (run by `sparq-reason`) that materialize a queryable authorization view in
-`<urn:sparq:auth>`. Every SPARQL query is then filtered per `(WebID, client)` session to the
-authorized graph set — **fail-closed**, with zero Solid-specific code in the engine (this
-crate is a dependency of nothing in the workspace).
+**Solid Pod access control** over the [sparq](../../README.md) engine. Pods are stored as **named
+graph per document**; their WAC (`.acl`) / ACP (`.acr`) access-control documents stay as plain,
+queryable triples, and their semantics are encoded as **N3 rules** (run by `sparq-reason`) that
+materialize a queryable authorization view in `<urn:sparq:auth>`. Every SPARQL query is then filtered
+per `(WebID, client)` session to the authorized graph set — **fail-closed**, with zero Solid-specific
+code in the engine (this crate is depended on by nothing else in the workspace).
 
 ## 🚀 Quickstart
 
 ```rust
-# // [OPUS-4.8] hidden main returns Result<(), String>: the engine's API errors are
-# // `String`, which does not impl std::error::Error, so `?` cannot widen to Box<dyn Error>.
+# // [OPUS-4.8] hidden main returns Result<(), String>: engine API errors are `String` (no Error impl, so `?` can't widen to Box<dyn Error>).
 # fn main() -> Result<(), String> {
 use sparq_core::Graph;
 use sparq_solid::{Mode, PodStore, Session};
@@ -39,381 +37,83 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 
 ## ✨ Features
 
-- **WAC + ACP** — Web Access Control (`.acl`) and Access Control Policy (`.acr`), including
-  inheritance, agent classes, groups, the `allOf`/`anyOf`/`noneOf` combinators, the ACP
-  matcher's `acp:agent` / `acp:client` / `acp:issuer` attributes (the three-dimensional
-  `(agent, client, issuer)` principal — a Matcher can gate on the OIDC issuer that vouched
-  for the requester, not just the WebID), the `acp:CreatorAgent` / `acp:OwnerAgent` matchers
-  (the context agent must be the resource's creator / owner), and normative deny-overrides.
-  The full support matrix is in the design doc (linked below).
-- **Trusted creator/owner provenance** — `acp:CreatorAgent` / `acp:OwnerAgent` matchers
-  resolve against per-resource creator/owner WebIDs the storage layer supplies through the
-  trusted [`AccessProvenance`] channel and `PodStore::materialize_acp_with`. These facts are
-  asserted by the caller (who minted the resource); they come from that channel **only** and
-  never from graph content. The loader hard-rejects any control-document triple whose
-  predicate is in the derivation-internal `solidx:` namespace, so a writer can embed
-  `<r> solidx:creator <self>` in neither a content document NOR the `.acr` they control and
-  thereby grant themselves access (design doc §2.4) — this also closes forged
-  `solidx:appliesToResource` policy-redirection. Each grant is resource-scoped: the creator
-  of `R1` is never granted `R2`. A `CreatorAgent`/`OwnerAgent` matcher also composes under
-  the same `allOf` with a second, independent concrete-WebID `acp:agent` matcher
-  ([OPUS-4.8] sq-az1b): the two agent constraints are intersected, so the degenerate case
-  where that WebID equals the resource's creator/owner is granted (resource-scoping intact),
-  and the case where it is a different fixed WebID grants nobody — correct-by-soundness (an
-  unsatisfiable "be both the creator and a distinct fixed WebID" conjunction), not a gap.
-  With no provenance supplied, no such matcher grants (fail-closed). [OPUS-4.8] sq-3jtd.5.
-- **Triples-native** — pods, ACL/ACR documents, and the materialized authorization view are
-  all ordinary named graphs; "who can read G?" is one SPARQL pattern.
-- **Zero-copy enforcement** — the default query path evaluates through the engine's zero-copy
-  dataset view (no per-query graph copy); a v1 `FROM NAMED` rewrite is kept as a portability
-  path that enforces the same policy on any standard SPARQL 1.1 engine.
-- **Write-path gating** — `update_as` / `update_as_acp` check every graph an update could
-  mutate before applying it, and auto-re-materialize on `.acl`/`.acr` writes.
-- **ODRL bridge (opt-in, research-track)** — behind the off-by-default `odrl-bridge`
-  cargo feature, `materialize_permission` / `PodStore::materialize_odrl_permission` runs the
-  [`sparq-policy`](../sparq-policy) ODRL evaluator and, on a **definite Permit**, materializes
-  the equivalent WAC/ACP grant into the auth view — so the existing graph-level enforcement
-  honours it with **no new enforcement engine**. A matched **Prohibition** materializes the dual
-  `auth:deny*` triple (`materialize_prohibition` / `materialize_policy`), and the existing
-  enforcement applies **deny-overrides** ([OPUS-4.8] sq-w693). `materialize_odrl_permission_conditional`
-  (sq-hiz4) persists a faithfully-mappable recipient/assignee constraint as a **re-checked**
-  ACP `auth:ConditionalGrant` instead of a one-shot allow. See below.
+- **WAC + ACP** — Web Access Control (`.acl`) and Access Control Policy (`.acr`): inheritance, agent
+  classes, groups, `allOf`/`anyOf`/`noneOf`, the ACP matcher's three-dimensional `(agent, client,
+  issuer)` principal, `acp:CreatorAgent`/`acp:OwnerAgent`, and normative deny-overrides. Full
+  support matrix in the design doc.
+- **Trusted creator/owner provenance** — `acp:CreatorAgent`/`acp:OwnerAgent` resolve only against
+  per-resource WebIDs the storage layer supplies through the trusted `AccessProvenance` channel,
+  **never** graph content. The loader hard-rejects any control-document triple in the
+  derivation-internal `solidx:` namespace, so a writer cannot embed `solidx:creator`/
+  `solidx:appliesToResource` to self-grant. Each grant is resource-scoped; with no provenance, no
+  such matcher grants (fail-closed).
+- **Triples-native + zero-copy enforcement** — pods, ACL/ACR docs, and the auth view are all
+  ordinary named graphs ("who can read G?" is one SPARQL pattern); the default path evaluates
+  through the engine's zero-copy dataset view, with a v1 `FROM NAMED` rewrite kept as a portability
+  path for any standard SPARQL 1.1 engine.
+- **Write-path gating** — `update_as` / `update_as_acp` check every graph an update could mutate
+  before applying, and auto-re-materialize on `.acl`/`.acr` writes.
+- **ODRL bridge (opt-in `odrl-bridge`, research-track — not a production cutover)** — runs the
+  [`sparq-policy`](../sparq-policy) ODRL evaluator and materializes the equivalent WAC/ACP grant (or
+  dual `auth:deny*`) into the auth view, no new enforcement engine (zero ODRL code by default). See below.
 
-## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge` feature) — [OPUS-4.8] sq-h3uk
+## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge`)
 
-The single-node bridge of epic sq-3183 (**research-track, not a production cutover**). Enable
-it with `--features odrl-bridge` (it pulls in the optional `sparq-policy` dependency only then;
-the default build carries zero ODRL code). A matched ODRL `Permission` becomes a concrete
-`principal auth:<mode> graph` triple in `<urn:sparq:auth>`, **appended** to whatever WAC/ACP
-view already exists.
+A matched ODRL `Permission` becomes a concrete `principal auth:<mode> graph` triple **appended** to
+`<urn:sparq:auth>`; the *request* action maps conservatively to the narrowest WAC mode (`odrl:use`
+deliberately **unmapped → no grant**), and a Prohibition maps to the dual `auth:deny*`.
+**Fail-closed:** a grant materializes **only** on a definite Permit + a mappable action + a concrete
+party + target (a deny **only** on a genuine prohibition match) — a Deny, unsatisfied constraint,
+undischarged duty, unmapped action, or partyless/targetless request materializes **nothing**.
 
-**Action → mode mapping** (the ODRL *request* action is mapped; conservative — a Permit only
-ever grants the narrowest mode the action denotes):
+**Re-checked conditions vs frozen one-shots.** `materialize_odrl_permission_conditional` persists a
+*faithfully-mappable* constraint as an ACP `auth:ConditionalGrant` re-checked per session (the
+`recipient`/`assignee` matchers, incl. `neq` "everyone EXCEPT X", and an `odrl:dateTime` inclusive
+window re-checked against `Session::now`, **fail-closed with no clock**). `purpose`/`count`/strict
+bounds have **no** stateless analogue, so they stay **one-shot** (checked once via
+`sparq_policy::evaluate` — a missing value is *unprovable* → fail-closed, **no DPV purpose-hierarchy
+subsumption**; a lapsed bound is caught on the next `refresh_odrl_grant`). A mixed rule with any
+unmappable constraint falls back **entirely** to one-shot (never drop a bound and over-grant).
+**`odrl:count` is stateful, ACP is stateless** — it stays one-shot; real stateful enforcement is
+`sparq-policy`'s opt-in `count-enforcement` feature (deferred bead). Full mapping detail in the SKILL.
 
-| ODRL action (`odrl:`)                         | WAC/ACP mode            |
-|-----------------------------------------------|-------------------------|
-| `read`, `display`, `present`, `print`, `play` | `acl:Read`              |
-| `append`                                      | `acl:Append`            |
-| `modify`, `delete`, `write`                   | `acl:Write`             |
-| anything else (incl. the `odrl:use` umbrella) | **unmapped → no grant** |
+**Refresh / revocation.** Bridged grants are tracked in a ledger; `refresh_odrl_grant(s)` rebuilds
+the view from the static baseline plus a replay of still-valid entries, retracting any that no longer
+hold. **Deny retraction is asymmetric (fail-OPEN risk):** a bridged `auth:deny*` is retracted **only**
+on a *definite* `Withdrawn` verdict (`sparq_policy::prohibition_status`) — kept on `Applies`/`Ambiguous`,
+since reusing the grant rule would re-admit a carved-out party. Static grants are never in the ledger,
+so refresh can't widen or drop them.
 
-`odrl:use` is deliberately left unmapped: it subsumes every action, so picking one WAC mode
-for it would have to pick the widest — request `odrl:read` explicitly instead (a `use`
-permission in the policy still *grants* a concrete `read` request, and the bridge maps that
-concrete request).
+## Conformance, security & containment
 
-**Fail-closed:** a grant is materialized **only** on a definite Permit *and* a mappable action
-*and* a concrete party (WebID) + target graph. A Deny, an unsatisfied constraint, an
-undischarged duty, an unmapped action, or a partyless/targetless request materializes
-**nothing** — access is never widened on ambiguity.
-
-### Prohibitions → explicit `auth:deny*` (deny-overrides) — [OPUS-4.8] sq-w693
-
-A matched ODRL **Prohibition** is the dual of a Permit: `materialize_prohibition` /
-`PodStore::materialize_odrl_prohibition` materializes it as the explicit
-`principal auth:deny<Mode> graph` triple the enforcement already understands, via the **same**
-action→mode mapping above (`denyRead` / `denyWrite` / `denyAppend` / `denyControl`).
-`materialize_policy` / `PodStore::materialize_odrl_policy` does both sides at once.
-
-| ODRL Prohibition action (`odrl:`)             | materialized deny predicate |
-|-----------------------------------------------|-----------------------------|
-| `read`, `display`, `present`, `print`, `play` | `auth:denyRead`             |
-| `append`                                      | `auth:denyAppend`           |
-| `modify`, `delete`, `write`                   | `auth:denyWrite`            |
-| anything else (incl. the `odrl:use` umbrella) | **unmapped → no deny**      |
-
-**Deny-overrides:** the deny is honoured by the **existing, unchanged** enforcement — the
-session layer already computes `∪ allow ∖ ∪ deny` (`AuthIndex::accessible`) and `Mode::from_pred`
-already parses `auth:deny*`, so a materialized deny **beats any allow grant** for the same
-principal+target+mode. No new enforcement engine; the bridge only emits the triple. (Within a
-single policy the ODRL evaluator *also* applies deny-overrides upstream — the would-be Permit
-returns `allow == false`, so its allow triple is never even emitted when a prohibition carves
-the request out.)
-
-**Fail-closed (deny):** a deny is materialized **only** when a prohibition *matches* the request
-(decided by `sparq_policy::matched_prohibition` — the evaluator's own conflict test, *not*
-`Decision.allow == false`, which conflates a carve-out with a plain no-permission deny) *and* the
-action is mappable *and* the party+target are concrete. An unmatched / unmapped / partyless /
-targetless prohibition materializes **nothing**; an unmappable carve-out is *reported* in
-`reasons`, never silently dropped (dropping a deny would widen access).
-
-### Constraint → ACP **conditional** grant (`materialize_odrl_permission_conditional`) — [OPUS-4.8] sq-hiz4
-
-The one-shot `materialize_odrl_permission` *freezes* every constraint into a single allow
-scoped to the supplied request party. `materialize_odrl_permission_conditional` persists a
-**faithfully-mappable** constraint as an ACP `auth:ConditionalGrant` (the existing `noneOf`
-machinery) so the granted agent is **re-checked per session** through the unchanged
-enforcement path — not by re-running the ODRL evaluator. Constraints with no faithful ACP
-analogue keep the one-shot behaviour.
-
-| ODRL constraint | Operator | Maps to | Behaviour |
-|---|---|---|---|
-| `odrl:recipient` / `odrl:assignee` | `eq` / `isA` | `auth:agent <webid>` (agent matcher) | **re-checked condition** |
-| `odrl:recipient` / `odrl:assignee` | `isPartOf` | one `auth:agent` head per set member | **re-checked condition** |
-| `odrl:recipient` / `odrl:assignee` | `neq` ("everyone EXCEPT X") | `auth:Public` grant + `auth:exceptMatcher` carving out `X` (ACP `noneOf`) | **re-checked condition** ([OPUS-4.8] sq-5037) |
-| `odrl:recipient` / `odrl:assignee` | order (`lt`/`gt`/…) | — (not meaningful on a recipient) | one-shot (frozen) |
-| `odrl:purpose` | any | — (ACP session has no purpose) | one-shot (frozen) |
-| `odrl:dateTime` | `lteq` ("until T") / `gteq` ("from T") | `auth:notAfter` / `auth:notBefore` window on the grant | **re-checked condition (live clock)** ([OPUS-4.8] sq-0q7n) |
-| `odrl:dateTime` | strict (`lt`/`gt`) | — (no inclusive `auth:notBefore`/`notAfter` analogue) | one-shot (frozen) |
-| `odrl:count` | any | — (ACP is stateless; no per-session usage counter) | one-shot (frozen) in the bridge¹ |
-| *no constraint* | — | `auth:agent auth:Public` | re-checked (public) |
-
-**Why recipient/assignee + dateTime:** the ACP session re-check carries `(agent, client,
-issuer)` and now an optional request clock `Session::now`. The recipient-of-data *is* the
-session agent, and an `odrl:dateTime` window *is* the request instant, so both re-check with
-identical semantics. Purpose/count have no stateless per-session analogue, so persisting them
-would require a looser approximation that could over-grant — rejected.
-
-**`odrl:dateTime` → live-clock window** — [OPUS-4.8] sq-0q7n. An inclusive bound
-(`dateTime lteq T` → `auth:notAfter T`, `dateTime gteq T` → `auth:notBefore T`) is persisted
-onto the `ConditionalGrant` as an `xsd:dateTime` literal and **re-checked against
-`Session::now` per request** by `cond_applies` (`window_admits`). A lapsed window therefore
-denies *immediately on the next request* — it no longer waits for a `refresh_odrl_grant` pass
-to retract the frozen allow. **Fail-closed:** a windowed grant evaluated with `now == None`
-(no clock supplied) never applies, exactly mirroring the ODRL evaluator's fail-closed
-`dateTime` constraint with no request-context value; two `lteq`/two `gteq` bounds keep the
-*tightest* (the intersection); strict `lt`/`gt` stay one-shot to avoid an inclusive/exclusive
-off-by-one. A time-windowed **deny** is NOT persisted as a live window (a lapsed deny would
-fail OPEN — the carved-out party would regain access); a dateTime-windowed prohibition stays
-one-shot. Bind the clock with `Session::at("2026-06-17T09:00:00Z")` or set `Session::now`.
-
-**`recipient neq X` → ACP `noneOf` ("everyone EXCEPT X")** — [OPUS-4.8] sq-5037. A
-`recipient neq X` rule emits a `ConditionalGrant` whose head is the positive recipient set
-(or `auth:Public` when there is none) plus one `auth:exceptMatcher <m>` per excluded `X`;
-the matcher `<m>` carries the accept-set facts the session layer reads
-(`solidx:acceptsAgentP <X>` + `solidx:acceptsClientP auth:AnyClient`). `AuthIndex` then
-suppresses the grant for any session the matcher accepts — `X` under any client — so every
-session keeps the grant **except** `X`. This is byte-for-byte the shape the ACP `noneOf`
-rules (`rules/acp-c.n3`) emit, re-checked by the same `cond_applies` path. **Fail-closed:** a
-`neq` recipient inside the reserved pair encoding cannot become an enforceable matcher (it
-would impersonate a minted pair principal), so rather than emit an exception that silently
-fails to bite — which would re-admit `X` — the whole rule falls back to the one-shot path
-(never widen to a public everyone-except grant on an unenforceable exclusion).
-
-**Combined `recipient eq A AND neq B` (one rule)** — [OPUS-4.8] sq-5037. The constraints are
-AND-combined: the bridge emits a single `ConditionalGrant` headed by `A` (the positive `eq`) carrying
-an `auth:exceptMatcher` carving out `B` (the `neq`) — the per-head exception. Only `A` keeps
-the grant (everyone else fails the `eq` head; `B` is doubly excluded).
-
-### Constraint-conditional **DENY** (`materialize_odrl_prohibition_conditional`) — [OPUS-4.8] sq-4r70
-
-The dual of the conditional grant: a matched **prohibition** whose recipient/assignee constraints
-map faithfully (same table above) is persisted as a re-checked `auth:ConditionalGrant` with
-**`auth:effect auth:Deny`** rather than a frozen one-shot `auth:deny*`. The carve-out is
-re-verified per session through the SAME `AuthIndex::accessible` path, and **composes with
-deny-overrides**: a matching deny condition adds the target to the `denied` set, which is
-subtracted from `allowed` — so a conditional deny **beats any allow** for the same
-principal+target+mode. A prohibition `recipient eq carol` → a deny on carol's sessions;
-`recipient neq bob` → a deny on everyone EXCEPT bob (an `exceptMatcher` carving bob back IN).
-**Fail-closed:** a prohibition carrying an unmappable constraint (`purpose`/`dateTime`/`count`)
-falls back to the one-shot `materialize_odrl_prohibition` (frozen) so the bound is still enforced;
-a reserved-encoded recipient falls back to one-shot rather than emit a deny that silently fails
-to bite (which would FAIL OPEN — a dropped deny widens access). Tracked as
-`BridgeKind::ProhibitionConditional`; refresh re-checks the carve-out per session and retracts the
-deny only when the prohibition is genuinely withdrawn (deny-retraction, sq-2pcf).
-
-¹ **Stateful `odrl:count` enforcement** — [OPUS-4.8] sq-zi5w. `odrl:count` limits the *number
-of times* a permission may be exercised; faithful enforcement is **stateful** (a usage counter
-persisting across requests), which ACP — stateless, with static matcher accept-sets and no
-per-session counter — cannot express, so the bridge keeps it **one-shot** (the limit is checked
-once against any count value the request supplies, at materialization). The actual stateful
-enforcement lives in `sparq-policy`'s opt-in `count-enforcement` feature
-(`evaluate_and_exercise` + the injectable `UsageCounterStore`; atomic `try_consume`,
-fail-closed on an unavailable counter — see the [`sparq-policy` README](../sparq-policy/README.md)).
-Wiring that path *through* this stateless ACP bridge — so a bridged grant self-retracts once the
-count is reached — is a distinct, more invasive change and is a **deferred bead**.
-
-**`odrl:purpose` enforcement through the bridge (faithful, fail-closed)** — [OPUS-4.8] sq-q56r.
-Purpose has no re-checked-condition analogue (above), so it stays **one-shot**: the bound is
-checked **once**, against the request's stated purpose, by the same `sparq_policy::evaluate`
-the one-shot `materialize_odrl_permission` / `materialize_odrl_prohibition` run — then a grant
-(or `auth:deny*`) is materialized only if it held. So a purpose-gated rule is enforced
-end-to-end through the *real* `accessible` / `query_as` path, never claimed-but-unchecked:
-a **matching** stated purpose grants; a **mismatch** denies; a **missing** purpose is
-*unprovable* → fail-closed (the permission does not grant; the prohibition is not carved out
-— "no purpose stated" is never "any purpose allowed"). **Match is exact** (IRI/string
-equality, or `isPartOf` over the named set, or `neq`) — **no** purpose hierarchy / DPV
-subsumption. Because the check is one-shot, a purpose-gated grant is scoped to the request
-party it was materialized for; a *changed* stated purpose is re-evaluated on the next
-`refresh_odrl_grant` (sq-dpk4). A DPV purpose taxonomy / hierarchy match is a deferred bead.
-
-**`odrl:dateTime` time-window enforcement through the bridge** — [OPUS-4.8] sq-idnv. Like
-purpose, a time window has **no** re-checked-condition analogue (ACP matcher accept-sets are
-static — there is no "now" dimension), so it stays **one-shot**: the window is checked once,
-against the instant the request supplies (`Request::at(..)`), by the same `sparq_policy::evaluate`
-the one-shot path runs — a grant (or `auth:deny*`) materializes only if the instant was inside the
-window. A **missing** time is *unprovable* → fail-closed. Because the check is one-shot, a *lapsed*
-window is caught on the next `refresh_odrl_grant` (re-evaluate with a `now` past the bound → the
-grant emits nothing → retracted; sq-dpk4). Re-checking the clock live inside ACP is a deferred bead.
-
-**Fail-safe on mixed constraints:** a condition is persisted **only** when *every* constraint
-on the rule maps faithfully. A rule mixing a mappable recipient with an unmappable
-`dateTime`/`purpose`/`count` falls back **entirely** to the one-shot path — persisting only
-the recipient would silently drop the other bound and over-grant. Reserved-encoded recipient
-IRIs are dropped from the grant head (anti-impersonation).
-
-### Refresh / revocation of bridged grants — [OPUS-4.8] sq-dpk4
-
-The `materialize_odrl_*` calls only **append**. When the ODRL policy changes — a permission is
-**withdrawn**, a **time window lapses**, or a re-evaluation now **Denies** — a previously
-materialized grant must lose access (the sq-h3uk/#280 correctness gap), and a wholesale static
-WAC/ACP re-materialization must not silently clobber a still-valid bridged grant. A `PodStore`
-tracks each bridged grant in a **ledger** and provides a refresh entry point:
-
-- **Provenance.** Every bridged auth triple is mirrored verbatim into a separate reserved graph
-  `<urn:sparq:auth-bridged>` (`AUTH_BRIDGED_GRAPH`): a triple is **bridged** iff it appears
-  there, **static** otherwise. The enforcement reader (`AuthIndex`) is unchanged — it still
-  reads `<urn:sparq:auth>`. The provenance graph lives in the reserved `urn:sparq:` space, so a
-  loaded dataset cannot forge it.
-- **Refresh / retract.** `PodStore::refresh_odrl_grant(&policy, &request, kind)` updates the
-  tracked grant slot `(kind, target, party)` with the new policy / request context, then
-  rebuilds the view as `static_baseline ∪ replay(still-valid bridged entries)`: it resets
-  `<urn:sparq:auth>` to the static baseline captured at the last `materialize_wac`/`_acp`,
-  clears the provenance graph, and re-evaluates every tracked `(policy, request)` through its
-  original bridge entry point. An entry that no longer holds emits nothing → it is **retracted**
-  (access gone). `refresh_odrl_grants()` (no args) replays everything as-tracked; a static
-  re-materialization auto-reconciles (valid bridged grants are replayed back on top).
-- **Fail-closed (access retraction).** A withdrawn / lapsed / now-Denied / now-prohibited /
-  ambiguous re-evaluation of an **allow grant** loses access — the underlying evaluator is
-  fail-closed, so on doubt the grant is retracted, never left stale. A **static** WAC/ACP grant
-  is never in the ledger, never re-evaluated, and always in the captured baseline (captured as
-  the materializer output verbatim, not by subtracting provenance — so a static grant
-  byte-identical to a bridged one still survives a refresh) — refresh can neither widen nor drop it.
-- **Deny retraction is asymmetric — [OPUS-4.8] sq-2pcf.** A bridged `auth:deny*` (a
-  `BridgeKind::Prohibition` / `Policy` entry) carves access *out*, so retracting it *restores*
-  access — that must happen only when the ODRL Prohibition is **definitely** withdrawn or
-  lapsed, never on doubt. Reusing the grant rule would be **fail-OPEN** (an unprovable carve-out
-  would restore access). Deny refresh therefore consults `sparq_policy::prohibition_status`
-  (`Applies` / `Ambiguous` / `Withdrawn`): the deny is **retracted only on `Withdrawn`** — no
-  prohibition structurally names the request, or every one carries a constraint that is
-  *definitely* false given the supplied evidence (e.g. a `dateTime < bound` window with an
-  actual time past the bound). On `Applies` **or** `Ambiguous` (a structurally-matching
-  prohibition whose constraint is unprovable for lack of evidence) the deny is **kept**
-  (re-emitted). A retracted deny may re-expose an allow grant for the same
-  principal+target+mode — correct, because the prohibition is genuinely gone. Static `auth:deny*`
-  rules are never in the ledger and so are never retracted.
-
-## WAC conformance harness — [OPUS-4.8] sq-3jtd.8
-
-A library-level **WAC conformance harness** (`sparq_solid::wac_conformance`) exercises this
-crate's WAC authorization engine (`materialize_wac` + `AuthIndex::accessible`) against the
-[Solid Web Access Control specification](https://solidproject.org/TR/wac) at the *library*
-level. A scenario is declared as data — an `.acl`-document corpus (built with `AclBuilder`)
-plus a table of expected `(agent, client, mode, resource) → allow | deny` decisions — and the
-harness asserts the engine reproduces every expected decision, reporting all mismatches at
-once. The scenario corpus lives in [`tests/conformance_wac.rs`](tests/conformance_wac.rs); it
-isolates each WAC construct: `acl:agent` on the resource's own ACL (`acl:accessTo`),
-`acl:agentClass foaf:Agent` (public) / `acl:AuthenticatedAgent`, `acl:agentGroup` via
-`vcard:hasMember`, `acl:default` inheritance vs `acl:accessTo`, **nearest-ACL shadowing** (the
-key WAC difference from ACP's cumulative inheritance — a closer ACL replaces, not adds to, the
-ancestors'), resource-specific override, the `acl:origin` (user, application) pair, mode
-independence, `acl:Control` governing the resource's `.acl` document, the fail-closed no-ACL
-case, and the multi-agent union.
-
-```rust
-use sparq_solid::wac_conformance::{AclBuilder, WacScenario};
-use sparq_solid::conformance::{Decision, Expect};
-use sparq_solid::Mode;
-
-let doc = "https://pod.example/notes/n1";
-let mut acl = AclBuilder::new();
-acl.access_to(doc, |a| a.agent("https://alice.example/card#me").mode(Mode::Read));
-acl.document(doc);
-
-let report = WacScenario::new("agent-allow")
-    .acl(acl)
-    .expect(Expect::agent("https://alice.example/card#me").read(doc).is(Decision::Allow))
-    .expect(Expect::anonymous().read(doc).is(Decision::Deny))
-    .run().expect("materializes");
-assert!(report.passed());
-```
-
-The decision/expectation/report vocabulary (`conformance::{Decision, Expect, ScenarioReport}`)
-is **shared** with the ACP harness below — both compare the same allow/deny binary against the
-same `AuthIndex::accessible` verdict; only the corpus shape differs. A `run_via_podstore` twin
-additionally proves the public `PodStore` method-form path (the one a PSS integration uses, with
-the per-session cache) reproduces the same decisions. The **scope decision is identical to ACP's**
-(below): library-level decision parity, not CTH-over-HTTP (PSS's), with the CSS differential
-oracle research-open. The table-driven corpus is the natural input for that future oracle.
-
-## ACP conformance harness — [OPUS-4.8] sq-3jtd.9
-
-A library-level **ACP conformance harness** (`sparq_solid::conformance`) exercises this
-crate's ACP authorization engine (`materialize_acp` + `AuthIndex::accessible`) against the
-[Solid ACP specification](https://solidproject.org/TR/acp) at the *library* level. A scenario
-is declared as data — an ACR-document corpus (built with `AcrBuilder`) plus a table of expected
-`(agent, client, mode, resource) → allow | deny` decisions — and the harness asserts the engine
-reproduces every expected decision, reporting all mismatches at once. The scenario corpus lives
-in [`tests/conformance_acp.rs`](tests/conformance_acp.rs); it covers `acp:agent`/`acp:client`
-matchers, `acp:PublicAgent`/`acp:AuthenticatedAgent`, `acp:allOf`/`acp:anyOf`/`acp:noneOf`, the
-native (user, application) pair, deny-overrides, cumulative ancestor inheritance, mode
-independence, and the fail-closed no-policy case.
-
-```rust
-use sparq_solid::conformance::{AcrBuilder, AcpScenario, Decision, Expect};
-use sparq_solid::Mode;
-
-let doc = "https://pod.example/notes/n1";
-let mut acr = AcrBuilder::new();
-acr.access_control(doc, |p| p.allow(Mode::Read).any_of_agent("https://alice.example/card#me"));
-acr.document(doc);
-
-let report = AcpScenario::new("agent-allow")
-    .acr(acr)
-    .expect(Expect::agent("https://alice.example/card#me").read(doc).is(Decision::Allow))
-    .expect(Expect::anonymous().read(doc).is(Decision::Deny))
-    .run().expect("materializes");
-assert!(report.passed());
-```
-
-**Scope decision (honest):** this is the realistic, achievable conformance signal for an
-authorization *oracle*. Driving the Solid Conformance Test Harness (CTH) over HTTP is
-out-of-scope — this crate has no HTTP surface; that belongs to the Solid server,
-conformance-tested *through* it. A differential check against a JS reference evaluator
-(Community Solid Server / Inrupt ESS — same corpus, diff decisions) is the credible *second*
-oracle but is research-open (JS-toolchain cost) and is **not** built here; it is captured as a
-follow-up. See [`research/sparq-solid-scope.md`](../../research/sparq-solid-scope.md) §4 for the
-full rationale. The harness is complementary to `tests/acp.rs` (a hand-derived access matrix
-over one realistic pod) — it gives spec-construct coverage with small, independently-failing
-cases.
-
-## Security posture — fail-closed
-
-Absence of a grant means a graph is **invisible**, and a non-authorized graph is
-indistinguishable from an absent one. Before the first `materialize_*` call every session
-(including the pod owner's) sees nothing. The reasoner is fed only ACL/ACR + structural facts
-— never pod *content* — so no writable document can grant itself access; the reserved
-`urn:sparq:` namespace is rejected on input and forged `<urn:sparq:auth>` graphs are stripped
-at load. See [`SECURITY.md`](../../SECURITY.md) for the project security policy and the
-design doc for the full threat model.
-
-## Containment / `ldp:contains` ownership — PSS-written, not sparq-derived ([OPUS-4.8] sq-3jtd.4)
-
-A container's `ldp:contains` listing is **explicit content written by the storage layer
-(PSS)**, not a sparq-derived or sparq-materialized view. sparq-solid stores `ldp:contains`
-as ordinary triples in the container's named graph and treats them as opaque content: it
-**never** derives `ldp:contains` from IRI structure, mutates or re-derives it on a write,
-or reads it into the reasoner. Containment *ancestry* is derived structurally from IRI
-slash-semantics (`solidx:parent`/`solidx:ancestor`, design doc §3.2) purely to drive ACL
-inheritance — that derivation never surfaces as `ldp:contains`. Keeping containment
-PSS-written avoids re-deriving a view on every write, keeps the §2.4 content/reasoner
-security boundary clean (a derived listing would have to read pod content), and lets the
-engine's atomic multi-op `UPDATE` keep the explicit triples consistent. The decision and
-the conditions under which a structural-only sparq-side derivation would be revisited are
-recorded in the design doc §7 item 7 and `research/sparq-solid-scope.md` area 2. The invariant is
-pinned by `tests/containment_view_ownership.rs`.
+- **WAC + ACP conformance harnesses** (`sparq_solid::wac_conformance` / `conformance`) assert the
+  engine against the [WAC](https://solidproject.org/TR/wac) / [ACP](https://solidproject.org/TR/acp)
+  specs at the *library* level (data-declared `(agent, client, mode, resource) → allow|deny`
+  scenarios). **Scope (honest):** the realistic library-level oracle, **not** the Solid
+  CTH-over-HTTP (this crate has no HTTP surface); a JS-reference differential oracle is
+  **research-open**, not built here (`research/sparq-solid-scope.md` §4).
+- **Security posture — fail-closed.** Absence of a grant makes a graph **invisible** and
+  indistinguishable from an absent one. The reasoner is fed only ACL/ACR + structural facts —
+  **never pod content** — so no writable document can grant itself access; the reserved `urn:sparq:`
+  namespace is rejected on input and forged `<urn:sparq:auth>` graphs are stripped at load.
+- **`ldp:contains` is PSS-written, not sparq-derived** — stored as opaque content, **never** derived
+  from IRI structure, mutated on a write, or read into the reasoner. Containment *ancestry* is derived
+  structurally only to drive ACL inheritance; pinned by `tests/containment_view_ownership.rs`.
 
 ## 📚 Learn more
 
+- **How-to** — [`skills/access-control/SKILL.md`](../../skills/access-control/SKILL.md) (public
+  API, WAC/ACP capability notes, conformance harnesses, the full ODRL-bridge mapping detail).
 - **Design + threat model + measured baseline** —
-  [`research/solid-access-control-design.md`](../../research/solid-access-control-design.md)
-  (storage model, WAC/ACP support matrix, the strata, security boundaries).
+  [`research/solid-access-control-design.md`](../../research/solid-access-control-design.md) (storage
+  model, support matrix, strata, security boundaries) and the scope decisions in
+  [`research/sparq-solid-scope.md`](../../research/sparq-solid-scope.md).
 - **API reference** — [docs.rs/sparq-solid](https://docs.rs/sparq-solid); runnable walk-through
   `cargo run -p sparq-solid --example quickstart --release`.
-- **Performance** — not baked into docs; the two query paths are measured side by side in
+- **Performance** — not baked into docs; the two query paths are measured side by side via
   `cargo run -p sparq-solid --example bench --release` and on the
   [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
-- **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+- **Contribute** — [`AGENTS.md`](../../AGENTS.md), [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
 
