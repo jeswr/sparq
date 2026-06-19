@@ -307,5 +307,6 @@ match some_result {
 
 ## See also
 
+- `sparq-fedplan-mpc` (opt-in crate, `fedplan-mpc` feature OFF by default) — the **untrusted-planner → MPC-routing seam** that will eventually *produce* the `Vec<OperatorRouting>` / `FederatedQuery` this crate's pipeline today receives hand-written. **Phase 1 (bead sq-2q1x) is a skeleton only:** it lands the per-source `SourcePrivacyDescriptor` (**default-deny** — a predicate is private unless explicitly marked `Disclosability::Public`) plus typed, panic-free stubs (`select_private_sources` / `route_operators` / `assemble_leakage_envelope`) that return `SeamError::Deferred` naming their gate. It performs **no** MPC and makes **no** privacy/soundness claim; the privacy-bearing phases (source-selection pruning, disclosed/hidden routing, leakage-envelope + dual ratification, attestation) are deferred and audit-gated (`sq-9hrn` / `sq-qhy4`). See `research/mpc-untrusted-planner-routing-design.md`.
 - `mpc-protocols` — the SOTA / primitive background (secret sharing, garbled circuits, collaborative zk-SNARKs, authenticated-input MPC) behind the trust-model and primitive choices here.
 - `noir-circuit-patterns`, `noir-optimisation`, `verifiable-credentials-zk`, `sparql-formal-semantics` — the single-prover ZK estate this crate will eventually compose with for the (deferred) collaborative proof.
