@@ -31,7 +31,11 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   (`application/sparql-update` → `204`, atomic), including the protocol dataset-override params.
 - **Named graphs + Graph Store Protocol** — a full RDF dataset (`GRAPH` patterns, cross-graph
   joins, `FROM`/`FROM NAMED`, graph-scoped updates through the same writer) plus GSP `GET`/`HEAD`
-  read and `PUT`/`POST`/`DELETE` write (indirect `?graph=`/`?default` or direct request-URI).
+  read and `PUT`/`POST`/`DELETE`/`PATCH` write (indirect `?graph=`/`?default` or direct request-URI).
+  A `PATCH` applies an **atomic, graph-scoped in-place modify**: an always-on
+  `application/sparql-update` body (executed atomically through the same writer, with its WHERE
+  dataset scoped to the addressed graph), and — behind the OPT-IN `n3-patch` feature + `--n3-patch`
+  flag — a Solid-style `text/n3` **N3-Patch** (`solid:InsertDeletePatch`).
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
   GSP read in N-Triples / prefix-Turtle / RDF-XML; streamed SELECT bodies. Plus **EXPLAIN /
   EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket + SSE** live SELECT diffs.
@@ -47,7 +51,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   (`?generation=N` snapshot pinning), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
-  (`POST /shacl/validate`), `audit-log`/`access-audit` (access trails), `zlib-ng` (faster gzip).
+  (`POST /shacl/validate`), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  `audit-log`/`access-audit` (access trails), `zlib-ng` (faster gzip).
 
 ## Security posture (essentials — full detail in the SKILL)
 

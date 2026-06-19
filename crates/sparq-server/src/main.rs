@@ -108,6 +108,10 @@
 //!                             endpoint `POST /shacl/validate`: POST a shapes graph, the server validates
 //!                             its loaded data graph against it. Read-only. Off by default
 //!                                                                        [off, env SPARQ_SHACL=1]
+//!   --n3-patch                [OPUS-4.8 sq-hj4n] (feature `n3-patch`) enable the OPT-IN Solid N3-Patch
+//!                             (`text/n3`) dialect on the Graph-Store-Protocol `PATCH` method. The
+//!                             always-on `application/sparql-update` PATCH dialect needs no flag.
+//!                             Off by default                            [off, env SPARQ_N3_PATCH=1]
 //!   --verbose                 per-request logging (TraceLayer)
 //!   --log-full-requests       [OPUS-4.8 sq-toze.34] OPT OUT of request-log redaction: log the
 //!                             raw request URI (incl. the full `?query=` SPARQL text) verbatim.
@@ -366,6 +370,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // loaded data graph against it. Read-only. Off by default (env SPARQ_SHACL=1).
             #[cfg(feature = "shacl")]
             "--shacl" => config.shacl = true,
+            // [OPUS-4.8] sq-hj4n (gh-916): OPT-IN Solid N3-Patch (text/n3) PATCH dialect on the
+            // Graph-Store-Protocol graph route. The always-on application/sparql-update PATCH
+            // dialect needs no flag; this enables the OPTIONAL text/n3 one. Off by default
+            // (env SPARQ_N3_PATCH=1).
+            #[cfg(feature = "n3-patch")]
+            "--n3-patch" => config.n3_patch = true,
             // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).
@@ -415,6 +425,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [OPUS-4.8] sq-hj4n: surface the OPT-IN N3-Patch PATCH dialect flag (feature n3-patch).
+                let n3_patch = if cfg!(feature = "n3-patch") {
+                    " [--n3-patch]"
+                } else {
+                    ""
+                };
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
@@ -422,7 +438,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl} \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n  \
                      or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \
