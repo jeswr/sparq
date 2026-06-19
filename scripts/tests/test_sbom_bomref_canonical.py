@@ -41,11 +41,48 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 NORMALIZE_JQ = REPO_ROOT / "scripts" / "sbom-normalize.jq"
+
+# [OPUS-4.8] sq-90ew: `cargo cyclonedx` internally runs `cargo metadata`, whose crates.io
+# fetch is TRANSIENTLY flaky on hosted runners (observed `curl ... [16] Error in the HTTP2
+# framing layer` -> non-zero exit at ~9-12s). PR #750 wrapped the cyclonedx invocation in the
+# WORKFLOW STEPS, but this live-SBOM self-test (run in the GATING GS-6/GS-7 job) executes its
+# OWN `cargo cyclonedx` BEFORE those wrapped steps, so the flake could still fail an unrelated
+# PR (same root cause as the supplier/purl self-tests, main run #27810325920, post-#750).
+# Mirror the #750 shell retry here: bounded 3 attempts, fixed 10s sleep, retry ONLY the
+# GENERATION subprocess. This wraps NO assertion — a real GS-6 bom-ref/host-path violation is
+# judged AFTER generation, on the produced files, and still fails. A genuine outage (all 3
+# attempts fail) re-raises -> the test errors.
+_CYCLONEDX_ATTEMPTS = 3
+_CYCLONEDX_RETRY_SLEEP_S = 10
+
+
+def _generate_workspace_sbom() -> None:
+    """Run `cargo cyclonedx --all` (writes <crate>.cdx.json next to each Cargo.toml), with a
+    bounded retry around ONLY the transient crates.io-fetch flake. Re-raises the last
+    CalledProcessError if every attempt fails (a genuine outage / toolchain break)."""
+    last_exc: subprocess.CalledProcessError | None = None
+    for attempt in range(1, _CYCLONEDX_ATTEMPTS + 1):
+        try:
+            subprocess.run(
+                ["cargo", "cyclonedx", "--all", "--format", "json", "--spec-version", "1.5"],
+                cwd=REPO_ROOT, check=True, capture_output=True,
+            )
+            return
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+            if attempt >= _CYCLONEDX_ATTEMPTS:
+                break
+            print(f"cargo cyclonedx attempt {attempt} failed; retrying in "
+                  f"{_CYCLONEDX_RETRY_SLEEP_S}s...", file=sys.stderr)
+            time.sleep(_CYCLONEDX_RETRY_SLEEP_S)
+    assert last_exc is not None
+    raise last_exc
 
 # A ref that still embeds a build-machine path. Mirrors gen-sbom-vex.sh's belt-and-braces
 # guard, but we assert it over the parsed ref STRINGS, not a raw grep, so a structurally
@@ -217,12 +254,9 @@ class TestLiveWorkspaceSBOM(unittest.TestCase):
     def test_real_normalized_sbom_has_no_host_path_in_refs(self):
         if not shutil.which("cargo-cyclonedx") or not _jq_available():
             self.skipTest("cargo-cyclonedx / jq not available")
-        subprocess.run(
-            ["cargo", "cyclonedx", "--all", "--format", "json", "--spec-version", "1.5"],
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-        )
+        # [OPUS-4.8] sq-90ew: GENERATION only, with the transient-flake retry. The GS-6
+        # host-path / bom-ref assertions below run ONCE on the produced files (NOT retried).
+        _generate_workspace_sbom()
         try:
             judged = 0
             for crate in ("sparq-server", "sparq-cli"):
