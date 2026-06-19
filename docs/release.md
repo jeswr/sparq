@@ -20,9 +20,10 @@ here for the runbook:
 ## 0a. Crate-name availability
 
 Availability snapshot as of **2026-06-14** (crates.io API: a 404 / "does not exist" =
-available; a 200 = taken). All 16 publishable crates plus the top-level `sparq` name were
-checked; the npm and PyPI surface names are included for completeness. Re-run before the
-first publish — registries change.
+available; a 200 = taken). The original snapshot covered 16 publishable crates plus the
+top-level `sparq` name; the npm and PyPI surface names are included for completeness. The
+publishable set is **17** (sparq-algos was missed in the 2026-06-14 snapshot — see the row
+flagged *not yet re-checked* below). Re-run before the first publish — registries change.
 
 For the **PyPI** row, that re-run is one command (`scripts/check-pypi-name.py --check`,
 sq-ed5): it reads the distribution name from `crates/sparq-py/pyproject.toml` (`sparq-rdf`)
@@ -52,11 +53,14 @@ taken name itself.
 | `sparq-rsp` | crates.io | available |
 | `sparq-solid` | crates.io | available |
 | `sparq-nlq` | crates.io | available |
+| `sparq-algos` | crates.io | not yet re-checked (added to the publishable set after the 2026-06-14 snapshot — sq-v286.1) |
 | `@jeswr/sparq` | npm | available |
 | `sparq` | PyPI | **taken** — unrelated `shiventi/sparq` (SJSU degree-planning API client, latest 0.2.6) |
 | `sparq-rdf` | PyPI | chosen distribution name (owner-approved; `pip install sparq-rdf`, `import sparq`) |
 
-**Conclusion:** all crates.io names and the npm scope are clear to publish as-is. The PyPI
+**Conclusion:** every crates.io name checked in the 2026-06-14 snapshot and the npm scope are
+clear to publish as-is; `sparq-algos` (the 17th publishable crate) still needs its one-off
+availability check before the first publish (the re-run noted above covers it). The PyPI
 **distribution** name `sparq` is taken by a real, unrelated, actively-maintained package, so
 the Python wheel ships as **`sparq-rdf`** (owner-approved; `sq-8slf`). This is the only name
 that changed — the **import** name stays `sparq` (`import sparq`), and no crates.io / npm
@@ -116,17 +120,22 @@ in sync until they're unified. (The retired `macos-13` runner label has been rep
 
 ## 4. crates.io publication
 
-**16 crates publish.** The publish order follows the dependency DAG, leaf-first (a crate's
+<!-- [OPUS-4.8] sq-v286.1: reconciled 16 → 17 publishable crates. sparq-algos has full
+crates.io metadata and no `publish = false`, so publish.yml's `crates` job already packages
++ attests it; it is added below as a core-only leaf (depends on sparq-core only — verified
+in crates/sparq-algos/Cargo.toml — and nothing in the workspace depends on it). -->
+**17 crates publish.** The publish order follows the dependency DAG, leaf-first (a crate's
 deps must exist on crates.io before it can be verified):
 
 ```text
 sparq-core                      # no internal deps — first
   ├── sparq-introspect          # core only                ┐
   ├── sparq-reason              # core only                │ order among these
-  ├── sparq-hdt                 # core only                │ six doesn't matter
+  ├── sparq-hdt                 # core only                │ seven doesn't matter
   ├── sparq-shacl               # core only                │
   ├── sparq-sim                 # core only                │
-  └── sparq-vectors             # core only                ┘
+  ├── sparq-vectors             # core only                │
+  └── sparq-algos               # core only                ┘
 sparq-engine                    # core + introspect — after both
   ├── sparq-geo                 # core + engine            ┐
   ├── sparq-serve               # core + engine            │ order among these
@@ -148,6 +157,7 @@ cargo publish -p sparq-hdt
 cargo publish -p sparq-shacl
 cargo publish -p sparq-sim
 cargo publish -p sparq-vectors
+cargo publish -p sparq-algos        # [OPUS-4.8] sq-v286.1 — core-only leaf (17th publishable crate)
 
 # CHECKPOINT before sparq-engine: the crates.io package resolves UPSTREAM spargebra 0.4.6,
 # not the vendored copy (the [patch]/path override is stripped on publish). Dry-run it
