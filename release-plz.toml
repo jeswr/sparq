@@ -1,0 +1,138 @@
+# release-plz configuration for the sparq workspace.
+#
+# [OPUS-4.8] sq-v286.3 (child of the automated-semantic-release epic sq-v286).
+# Design record: research/release-ci-design.md (§2 tool selection, §5/§6 sequencing).
+#
+# 🤖 SPARQ agent. Honest scope note: this file configures release-plz's
+# version + changelog POLICY only. It deliberately does NOT add the release-plz
+# WORKFLOW (that is the dependent bead sq-v286.4) and does NOT touch
+# release.yml / dist.yml / publish.yml (a sibling bead owns those). The keys
+# below take effect only once a release-plz workflow exists; until then this is
+# inert configuration.
+#
+# Why this file exists — the one workspace decision release-plz forces
+# (design §2 "The one workspace decision release-plz forces"):
+# release-plz DEFAULTS TO INDEPENDENT per-crate versions, but sparq uses a
+# single LOCKED workspace version (every crate inherits
+# [workspace.package] version in the root Cargo.toml via
+# `version.workspace = true`). To preserve that locked model, every publishable
+# crate is placed in ONE `version_group` ("sparq") below: release-plz assigns
+# all packages that share a version_group the SAME (highest computed) next
+# version, so they keep bumping together — e.g. 0.1.0 -> 0.2.0 in lockstep —
+# instead of drifting to per-crate versions. Without this, adoption would
+# silently start versioning the 17 publishable crates independently.
+
+[workspace]
+# Automate the version + changelog that docs/release.md §1–§2 do by hand today
+# (the core argument for adoption: the hand-maintained CHANGELOG.md [Unreleased]
+# section has gone stale — design §1). changelog_update / git_release_enable /
+# git_tag_enable / semver_check default to true; set explicitly for clarity.
+changelog_update = true
+# Layer cargo-semver-checks API-break detection on top of conventional-commit
+# parsing (design §2 point 2) — catches a real API break shipped under a
+# fix:/feat: message.
+semver_check = true
+# One workspace-wide SemVer tag (NOT release-plz's multi-package default of
+# `{{ package }}-v{{ version }}`). A single `vX.Y.Z` tag is what the existing
+# release.yml / dist.yml fire on (their `tags: ['v*']` trigger) and matches the
+# locked single-version model. Design §6 step 4: merging the release PR tags
+# `vX.Y.Z`, which fires release.yml unchanged.
+git_tag_name = "v{{ version }}"
+
+# --- The locked version_group: all 17 publishable crates ---------------------
+# These are exactly the crates under crates/* WITHOUT `publish = false`
+# (verified against crates/*/Cargo.toml; count reconciled to 17 incl. sparq-algos
+# in docs/release.md via #783 / sq-v286.1). The remaining 18 workspace members
+# (sparq-bench, -canon, -conformance, -fedclient, -fedplan, -gpu, -mpc, -parse,
+# -policy, -prov, -py, -reason-wasm, -rsp-wasm, -shacl-wasm, -text-wasm, -wasm,
+# -zk, -zk-compose) are `publish = false` and are intentionally omitted — they
+# never reach crates.io, so they are not versioned by release-plz.
+#
+# Each entry pins `changelog_path = "CHANGELOG.md"` so all 17 crates write to
+# the SINGLE root Keep-a-Changelog file (the locked model has one changelog,
+# not 17 per-crate ones); changelog_path is a per-package-only key.
+
+[[package]]
+name = "sparq-algos"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-cli"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-core"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-engine"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-geo"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-hdt"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-introspect"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-nlq"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-reason"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-rsp"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-serve"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-server"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-shacl"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-sim"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-solid"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-text"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-vectors"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
