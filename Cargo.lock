@@ -3413,6 +3413,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-fedplan-mpc"
+version = "0.1.0"
+dependencies = [
+ "sparq-fedplan",
+ "sparq-mpc",
+]
+
+[[package]]
 name = "sparq-geo"
 version = "0.1.0"
 dependencies = [
