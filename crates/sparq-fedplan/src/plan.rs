@@ -642,4 +642,290 @@ mod tests {
         assert_eq!(a.join_order(), b.join_order());
         assert_eq!(a.total_cost, b.total_cost);
     }
+
+    // ============================================================================
+    // [OPUS-4.8] sq-bif.3 — correctness suite: previously-uncovered plan branches
+    // (the disconnected/Cartesian arm, the independence-estimate non-star fallback, every
+    // `star_estimate` None path, multi-source star summation, JoinNode::cardinality on a
+    // leaf, total_cost accumulation, and request_cost driving the bind/hash flip). Drives
+    // the REAL `plan_bgp` / `cost_join` / `star_estimate` code.
+    // ============================================================================
+
+    // ---- A BGP whose patterns share NO variable is a Cartesian product: the planner has no
+    //      connected arm to prefer, so it joins on `l * r` and never errors. The output
+    //      cardinality of the (only) join is the product of the two leaf cardinalities.
+    #[test]
+    fn disconnected_bgp_is_cartesian_product() {
+        // ?a :p ?b  and  ?c :q ?d — no shared variable.
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("a"), iri("http://ex/p"), var("b")),
+            TriplePattern::new(var("c"), iri("http://ex/q"), var("d")),
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/p", 4, 4, 4)) // leaf card 4 (seed).
+            .predicate(pred("http://ex/q", 5, 5, 5)) // leaf card 5.
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let tree = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        // The smaller (4) seeds; the join's output is the Cartesian product 4 * 5 = 20.
+        assert_eq!(
+            tree.root.cardinality(),
+            20.0,
+            "disconnected join output is the product of the two leaf cardinalities"
+        );
+        // Both patterns still appear exactly once.
+        let mut order = tree.join_order();
+        order.sort();
+        assert_eq!(order, vec![0, 1]);
+    }
+
+    // ---- A connected NON-star join (a chain ?s :p ?o . ?o :q ?z — no shared SUBJECT
+    //      variable, so the characteristic-set star estimate does not apply) uses the
+    //      independence fallback: out = l*r/max(|L|,|R|), bounded by the Cartesian product.
+    #[test]
+    fn chain_join_uses_independence_estimate_not_cartesian() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("o"), iri("http://ex/q"), var("z")), // joins on ?o
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/p", 100, 100, 100))
+            .predicate(pred("http://ex/q", 40, 40, 40))
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let tree = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        // Seed is the smaller leaf (:q, 40). Independence: l=40, r=100,
+        // ndv = max(40, 100) = 100 ⇒ out = 40*100/100 = 40. Strictly below the
+        // Cartesian product 40*100 = 4000, proving the independence path (not Cartesian).
+        let out = tree.root.cardinality();
+        assert_eq!(out, 40.0, "chain join uses the independence estimate");
+        assert!(out < 40.0 * 100.0, "independence estimate is below the Cartesian product");
+    }
+
+    // ---- `star_estimate` returns None (⇒ independence fallback) when the star arm REPEATS a
+    //      predicate already in the star: the CS model cannot condition on the same predicate
+    //      twice. A 2-arm star on the SAME predicate must therefore NOT pick up the CS
+    //      cardinality of the existing covering set.
+    #[test]
+    fn repeated_predicate_star_arm_falls_back_to_independence() {
+        // ?s :a ?x . ?s :a ?y — both arms use predicate :a (same star subject ?s).
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/a"), var("x")),
+            TriplePattern::new(var("s"), iri("http://ex/a"), var("y")),
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/a", 100, 100, 100))
+            .char_set(CharSet {
+                predicates: vec!["http://ex/a".into()],
+                subjects: 100,
+                avg_multiplicity: vec![1.0],
+            })
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let tree = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        // Independence: l=r=100, ndv=max(100,100)=100 ⇒ out = 100*100/100 = 100.
+        assert_eq!(
+            tree.root.cardinality(),
+            100.0,
+            "a repeated-predicate star arm falls back to independence (CS can't condition)"
+        );
+    }
+
+    // ---- `star_estimate` returns None when NO served characteristic set covers the star's
+    //      predicate set: a 2-arm star on a source with predicate stats but no covering CS
+    //      falls back to independence rather than fabricating a CS cardinality.
+    #[test]
+    fn star_with_no_covering_charset_falls_back() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/a"), var("x")),
+            TriplePattern::new(var("s"), iri("http://ex/b"), var("y")),
+        ]);
+        // CS covers only {a}, never {a,b} ⇒ no covering set for the joined star.
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/a", 100, 100, 100))
+            .predicate(pred("http://ex/b", 60, 60, 60))
+            .char_set(CharSet {
+                predicates: vec!["http://ex/a".into()],
+                subjects: 100,
+                avg_multiplicity: vec![1.0],
+            })
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let tree = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        // Independence (seed :b, 60): l=60, r=100, ndv=max(60,100)=100 ⇒ 60*100/100 = 60.
+        assert_eq!(
+            tree.root.cardinality(),
+            60.0,
+            "no covering characteristic set ⇒ independence fallback, not a CS estimate"
+        );
+    }
+
+    // ---- A multi-source star sums the characteristic-set estimate over the sources retained
+    //      for the joining arm (a multi-source star is a UNION): two sources each with the
+    //      same covering CS contribute additively.
+    #[test]
+    fn multi_source_star_sums_charset_estimates() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/a"), var("x")),
+            TriplePattern::new(var("s"), iri("http://ex/b"), var("y")),
+        ]);
+        // Two sources BOTH holding {a,b} with the same CS (100 subjects, a 1×, b 2× ⇒ 200).
+        let mk = |id: &str| {
+            SourceDescriptor::builder(SourceId::new(id))
+                .total_triples(10_000)
+                .predicate(pred("http://ex/a", 100, 100, 100))
+                .predicate(pred("http://ex/b", 200, 100, 100))
+                .char_set(CharSet {
+                    predicates: vec!["http://ex/a".into(), "http://ex/b".into()],
+                    subjects: 100,
+                    avg_multiplicity: vec![1.0, 2.0],
+                })
+                .build()
+        };
+        let srcs = [mk("S0"), mk("S1")];
+        let sel = select_sources(&bgp, &srcs);
+        let tree = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        // Each source's covering CS gives 200; the union over the two retained sources sums
+        // to 400 (NOT a per-source 200 — that would silently drop a source's contribution).
+        assert_eq!(
+            tree.root.cardinality(),
+            400.0,
+            "multi-source star sums the CS estimate over retained sources (union)"
+        );
+    }
+
+    // ---- JoinNode::cardinality reads the right variant for both a Leaf and a Join, and
+    //      total_cost is the SUM of every join node's cost (a 3-pattern plan has 2 joins).
+    #[test]
+    fn total_cost_accumulates_over_join_nodes() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("o"), iri("http://ex/q"), var("z")),
+            TriplePattern::new(var("z"), iri("http://ex/r"), var("w")),
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/p", 1000, 1000, 1000))
+            .predicate(pred("http://ex/q", 10, 10, 10))
+            .predicate(pred("http://ex/r", 500, 500, 500))
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let tree = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        // total_cost re-summed by walking the tree must equal the reported field.
+        assert_eq!(tree.total_cost, sum_cost(&tree.root));
+        // The root is a Join (3 patterns ⇒ 2 joins); its cardinality is the Join variant.
+        assert!(matches!(tree.root, JoinNode::Join { .. }));
+        // A 3-pattern join has a non-zero total cost (two real joins).
+        assert!(tree.total_cost > 0.0);
+    }
+
+    // ---- request_cost is the knob that flips bind→hash: with a SMALL left, raising
+    //      request_cost high enough makes each per-row bound request dominate a full scan, so
+    //      the planner switches the same join from Bind to Hash purely on the knob.
+    #[test]
+    fn request_cost_knob_flips_bind_to_hash() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("s"), iri("http://ex/q"), var("z")),
+        ]);
+        // Left (:p) small (10), right (:q) large (1000): low request_cost ⇒ Bind wins.
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/p", 10, 10, 10))
+            .predicate(pred("http://ex/q", 1000, 1000, 1000))
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let cheap = plan_bgp(
+            &bgp,
+            &sel,
+            &srcs,
+            &PlanOptions {
+                request_cost: 1.0,
+                ..PlanOptions::default()
+            },
+        )
+        .unwrap();
+        if let JoinNode::Join { algo, .. } = &cheap.root {
+            assert_eq!(*algo, JoinAlgo::Bind, "cheap requests ⇒ bind join on a small left");
+        } else {
+            panic!("expected a join");
+        }
+        // Now make each request very expensive: L*(req+f) overtakes R+L ⇒ Hash.
+        let pricey = plan_bgp(
+            &bgp,
+            &sel,
+            &srcs,
+            &PlanOptions {
+                request_cost: 10_000.0,
+                ..PlanOptions::default()
+            },
+        )
+        .unwrap();
+        if let JoinNode::Join { algo, .. } = &pricey.root {
+            assert_eq!(*algo, JoinAlgo::Hash, "expensive requests flip the same join to hash");
+        } else {
+            panic!("expected a join");
+        }
+    }
+
+    // ---- An empty `selection` slice (even with a non-empty BGP) yields no plan — the
+    //      `selection.is_empty()` guard in `plan_bgp`.
+    #[test]
+    fn empty_selection_yields_no_plan() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/p"),
+            var("o"),
+        )]);
+        assert!(plan_bgp(&bgp, &[], &[], &PlanOptions::default()).is_none());
+    }
+
+    // ---- A connected pattern is ALWAYS preferred over a disconnected (Cartesian) one as the
+    //      NEXT arm, even when the disconnected leaf is smaller: the planner avoids a
+    //      Cartesian product while any connected arm remains. (Seed selection is purely
+    //      smallest-leaf; the connected-vs-disconnected preference is the *next-arm* rule, so
+    //      the fixture makes the seed a connected pattern with the global-minimum leaf.)
+    #[test]
+    fn connected_arm_preferred_over_smaller_disconnected() {
+        // ?s :p ?o . ?o :q ?z  (chain, connected) + ?a :mid ?b (disconnected).
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("o"), iri("http://ex/q"), var("z")),
+            TriplePattern::new(var("a"), iri("http://ex/mid"), var("b")),
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/p", 1, 1, 1)) // global-min leaf ⇒ connected SEED.
+            .predicate(pred("http://ex/q", 100, 100, 100)) // connected, large.
+            .predicate(pred("http://ex/mid", 5, 5, 5)) // disconnected, smaller than :q.
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let order = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default())
+            .unwrap()
+            .join_order();
+        // Seed is :p (index 0, card 1). The next arm prefers the CONNECTED :q (index 1,
+        // card 100) over the smaller DISCONNECTED :mid (index 2, card 5), so the Cartesian
+        // arm is deferred to last.
+        assert_eq!(order[0], 0, ":p (global-min, connected) seeds");
+        assert_eq!(
+            order[1], 1,
+            "the connected :q is preferred as the next arm over the smaller disconnected :mid"
+        );
+        assert_eq!(
+            *order.last().unwrap(),
+            2,
+            "the disconnected (Cartesian) arm is deferred to last"
+        );
+    }
 }

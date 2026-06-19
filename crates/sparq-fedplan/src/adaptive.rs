@@ -898,7 +898,7 @@ mod tests {
     use crate::descriptor::{PredPartition, SourceDescriptor, SourceId};
     use crate::pattern::{TriplePattern, Var};
     use crate::plan::plan_bgp;
-    use crate::selection::select_sources;
+    use crate::selection::{select_sources, SourceCandidate};
     use crate::stream::Tuple;
 
     fn pred(p: &str, triples: u64, subjects: u64, objects: u64) -> PredPartition {
@@ -1670,5 +1670,272 @@ mod tests {
             "EWMA-reordered result MUST equal the static plan's result multiset"
         );
         assert!(!static_result.is_empty(), "fixture must produce some rows");
+    }
+
+    // ============================================================================
+    // [OPUS-4.8] sq-bif.3 — correctness suite: previously-uncovered adaptive branches
+    // (the <2-remaining + advance-to-empty edge cases, the `corrected_selection`
+    // even-spread + empty-candidate branches, `diverges` directionality, the input clamps
+    // on `record_*`, `clamp_alpha` NaN, `pattern_slowest_latency` max-over-sources, and the
+    // exec_oracle Cartesian path). Drives the REAL adaptive helpers + AdaptiveExecutor.
+    // ============================================================================
+
+    // ---- A re-plan with FEWER than two remaining patterns has nothing to reorder ⇒
+    //      NoDivergence, regardless of how divergent the stats are.
+    #[test]
+    fn fewer_than_two_remaining_never_replans() {
+        let bgp = chain_bgp();
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/p", 1000, 1000, 1000))
+            .predicate(pred("http://ex/q", 10, 10, 10))
+            .predicate(pred("http://ex/r", 500, 500, 500))
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        let mut exec = AdaptiveExecutor::new(
+            &bgp,
+            &srcs,
+            &sel,
+            &plan,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        );
+        // Advance until only ONE pattern remains.
+        let _ = exec.advance();
+        let _ = exec.advance();
+        assert_eq!(exec.remaining_order().len(), 1);
+        // Wildly divergent stats, but nothing left to reorder.
+        let mut stats = RuntimeStats::new();
+        stats.record_leaf_cardinality(exec.remaining_order()[0], 1.0);
+        assert_eq!(exec.maybe_replan(&stats), ReplanOutcome::NoDivergence);
+    }
+
+    // ---- `advance` walks the whole suffix then returns None (the executor's stage cursor).
+    #[test]
+    fn advance_consumes_then_returns_none() {
+        let bgp = chain_bgp();
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/p", 1000, 1000, 1000))
+            .predicate(pred("http://ex/q", 10, 10, 10))
+            .predicate(pred("http://ex/r", 500, 500, 500))
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        let mut exec = AdaptiveExecutor::new(
+            &bgp,
+            &srcs,
+            &sel,
+            &plan,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        );
+        let mut consumed = Vec::new();
+        while let Some(p) = exec.advance() {
+            consumed.push(p);
+        }
+        assert_eq!(consumed.len(), 3, "exactly the three patterns are consumed");
+        assert!(exec.remaining_order().is_empty());
+        assert_eq!(exec.advance(), None, "advancing past the end is None");
+        // The executed order equals the consume order (prefix is built in stage order).
+        assert_eq!(exec.executed_order(), &consumed[..]);
+    }
+
+    // ---- `diverges` fires in BOTH directions and is silent within the band. Pins the
+    //      `o > k·e` (blow-up) and `e > k·o` (collapse) arms and the no-divergence middle.
+    #[test]
+    fn diverges_is_symmetric() {
+        let policy = ReplanPolicy {
+            divergence_factor: 4.0,
+            ..ReplanPolicy::default()
+        };
+        // Blow-up: observed 5× the estimate (> 4×) ⇒ diverges.
+        assert!(diverges(100.0, 500.0, &policy));
+        // Collapse: estimate 5× the observed (> 4×) ⇒ diverges.
+        assert!(diverges(500.0, 100.0, &policy));
+        // Within the band either way ⇒ no divergence.
+        assert!(!diverges(100.0, 300.0, &policy)); // 3× up.
+        assert!(!diverges(300.0, 100.0, &policy)); // 3× down.
+        assert!(!diverges(100.0, 100.0, &policy)); // exact.
+        // Floors: a zero estimate/observation is treated as 1 (no divide-by-zero, no spurious
+        // infinite divergence). observed 0 vs estimate 1 ⇒ e(1) > 4·o(1)? no ⇒ stable.
+        assert!(!diverges(0.0, 0.0, &policy));
+        // estimate 100 vs observed 0 ⇒ e(100) > 4·o.max(1)=4 ⇒ diverges (collapse to nothing).
+        assert!(diverges(100.0, 0.0, &policy));
+    }
+
+    // ---- `corrected_selection` SCALES each source's share to the observed total when the
+    //      prior estimate was non-zero, preserving the per-source skew.
+    #[test]
+    fn corrected_selection_scales_preserving_skew() {
+        // Two sources for one pattern with a 3:1 estimate split (75 / 25 = 100 total).
+        let s0 = SourceDescriptor::builder(SourceId::new("s0"))
+            .predicate(pred("http://ex/p", 75, 75, 75))
+            .build();
+        let s1 = SourceDescriptor::builder(SourceId::new("s1"))
+            .predicate(pred("http://ex/p", 25, 25, 25))
+            .build();
+        let bgp = Bgp::new(vec![TriplePattern::new(v("s"), iri("http://ex/p"), v("o"))]);
+        let sel = select_sources(&bgp, &[s0, s1]);
+        assert_eq!(sel[0].total_cardinality(), 100.0);
+        // Observe the real total is 400 (4× the estimate).
+        let mut stats = RuntimeStats::new();
+        stats.record_leaf_cardinality(0, 400.0);
+        let corrected = corrected_selection(&sel, &stats);
+        // Total hits the observation …
+        assert_eq!(corrected[0].total_cardinality(), 400.0);
+        // … and the 3:1 skew is preserved (300 / 100).
+        assert_eq!(corrected[0].candidates[0].estimated_cardinality, 300.0);
+        assert_eq!(corrected[0].candidates[1].estimated_cardinality, 100.0);
+    }
+
+    // ---- `corrected_selection` EVEN-SPREADS the observation when the prior estimate total
+    //      was EXACTLY zero (no skew signal to scale on): each source gets observed / n.
+    //      `select_sources` never produces an exactly-zero candidate estimate (every retained
+    //      estimate is floored above 0), so we drive the `old_total == 0` branch by handing
+    //      `corrected_selection` a `PatternSources` with zeroed candidate estimates directly.
+    #[test]
+    fn corrected_selection_even_spreads_when_no_prior_signal() {
+        let ps = PatternSources {
+            pattern: 0,
+            candidates: vec![
+                SourceCandidate {
+                    source: 0,
+                    estimated_cardinality: 0.0,
+                },
+                SourceCandidate {
+                    source: 1,
+                    estimated_cardinality: 0.0,
+                },
+            ],
+        };
+        assert_eq!(ps.total_cardinality(), 0.0, "prior estimate total is exactly zero");
+        let mut stats = RuntimeStats::new();
+        stats.record_leaf_cardinality(0, 40.0);
+        let corrected = corrected_selection(std::slice::from_ref(&ps), &stats);
+        // With no skew to scale on, the observation is spread EVENLY: 40 / 2 = 20 each.
+        assert_eq!(corrected[0].candidates.len(), 2);
+        assert_eq!(corrected[0].candidates[0].estimated_cardinality, 20.0);
+        assert_eq!(corrected[0].candidates[1].estimated_cardinality, 20.0);
+        assert_eq!(corrected[0].total_cardinality(), 40.0);
+    }
+
+    // ---- `corrected_selection` leaves a pattern with NO observation untouched, and a
+    //      pattern with no candidates (no source) untouched (the empty-candidate guard).
+    #[test]
+    fn corrected_selection_passes_through_unobserved_and_empty() {
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .predicate(pred("http://ex/p", 100, 100, 100))
+            .build();
+        // Pattern 0 has a source (:p); pattern 1 has none (:absent ⇒ empty candidates).
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(v("s"), iri("http://ex/p"), v("o")),
+            TriplePattern::new(v("o"), iri("http://ex/absent"), v("z")),
+        ]);
+        let sel = select_sources(&bgp, &[src]);
+        assert!(sel[1].is_empty(), "pattern 1 has no source");
+        // Record an observation ONLY for the empty pattern 1 (exercises the empty-candidate
+        // early-return) and NONE for pattern 0 (exercises the no-observation passthrough).
+        let mut stats = RuntimeStats::new();
+        stats.record_leaf_cardinality(1, 999.0);
+        let corrected = corrected_selection(&sel, &stats);
+        // Pattern 0 unchanged (no observation).
+        assert_eq!(corrected[0].total_cardinality(), sel[0].total_cardinality());
+        // Pattern 1 stays empty (no candidates to distribute onto — the guard returns it).
+        assert!(corrected[1].is_empty());
+        assert_eq!(corrected[1].total_cardinality(), 0.0);
+    }
+
+    // ---- `record_leaf_cardinality` and `record_source_latency` clamp a negative input to 0
+    //      (a count/latency is never negative). The EWMA then treats the clamped 0 as the
+    //      seed.
+    #[test]
+    fn record_inputs_clamp_negatives() {
+        let mut stats = RuntimeStats::new();
+        stats.record_leaf_cardinality(0, -5.0);
+        assert_eq!(stats.observed_leaf(0), Some(0.0), "negative cardinality clamps to 0");
+        stats.record_source_latency(1, -10.0);
+        assert_eq!(stats.observed_latency_of(1), Some(0.0), "negative latency clamps to 0");
+    }
+
+    // ---- `clamp_alpha` maps NaN to the default α (a NaN would poison the EWMA), and clamps
+    //      ≤0 up to strictly-positive and >1 down to 1.
+    #[test]
+    fn latency_alpha_clamps_nan_and_range() {
+        assert_eq!(
+            RuntimeStats::with_latency_alpha(f64::NAN).latency_alpha(),
+            RuntimeStats::DEFAULT_LATENCY_ALPHA,
+            "NaN α falls back to the default"
+        );
+        assert!(RuntimeStats::with_latency_alpha(-1.0).latency_alpha() > 0.0);
+        assert_eq!(RuntimeStats::with_latency_alpha(2.0).latency_alpha(), 1.0);
+        assert_eq!(
+            RuntimeStats::with_latency_alpha(0.5).latency_alpha(),
+            0.5,
+            "an in-range α is kept verbatim"
+        );
+    }
+
+    // ---- `pattern_slowest_latency` returns the MAX over the pattern's retained sources (a
+    //      union is bottlenecked by its slowest arm), and None when no source of the pattern
+    //      has any observation.
+    #[test]
+    fn slowest_latency_is_max_over_pattern_sources() {
+        // One pattern retained on two sources (s0, s1) via the same predicate.
+        let s0 = SourceDescriptor::builder(SourceId::new("s0"))
+            .predicate(pred("http://ex/p", 10, 10, 10))
+            .build();
+        let s1 = SourceDescriptor::builder(SourceId::new("s1"))
+            .predicate(pred("http://ex/p", 10, 10, 10))
+            .build();
+        let bgp = Bgp::new(vec![TriplePattern::new(v("s"), iri("http://ex/p"), v("o"))]);
+        let sel = select_sources(&bgp, &[s0, s1]);
+        assert_eq!(sel[0].candidates.len(), 2);
+        let policy = ReplanPolicy::default();
+        // No observations ⇒ None ⇒ inert factor 1.0.
+        let mut stats = RuntimeStats::new();
+        assert_eq!(pattern_slowest_latency(0, &sel, &stats), None);
+        assert_eq!(pattern_latency_factor(0, &sel, &stats, &policy), 1.0);
+        // Source 0 fast (50), source 1 slow (300): the slowest (300) wins.
+        stats.record_source_latency(0, 50.0);
+        stats.record_source_latency(1, 300.0);
+        assert_eq!(pattern_slowest_latency(0, &sel, &stats), Some(300.0));
+        // factor for 300 (3× baseline 100) = 1 + 0.5·(3-1) = 2.0.
+        assert_eq!(pattern_latency_factor(0, &sel, &stats, &policy), 2.0);
+    }
+
+    // ---- The exec_oracle Cartesian path: two patterns sharing NO variable cross-product,
+    //      and the order-independence of evaluate holds across the Cartesian join too.
+    #[test]
+    fn exec_oracle_cartesian_join_is_order_independent() {
+        // ?a :p ?b  and  ?c :q ?d — disjoint variable sets.
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(v("a"), iri("http://ex/p"), v("b")),
+            TriplePattern::new(v("c"), iri("http://ex/q"), v("d")),
+        ]);
+        let solutions: SolutionSets = vec![
+            vec![t(&[("a", "a1"), ("b", "b1")]), t(&[("a", "a2"), ("b", "b2")])],
+            vec![t(&[("c", "c1"), ("d", "d1")])],
+        ];
+        let forward = evaluate(&bgp, &solutions, &[0, 1]);
+        let backward = evaluate(&bgp, &solutions, &[1, 0]);
+        // 2 × 1 = 2 rows, each carrying all four variables.
+        assert_eq!(forward.len(), 2);
+        assert!(multiset_eq(&forward, &backward), "Cartesian eval is order-independent");
+        // Every row binds all four variables (full cross product merge).
+        for row in &forward {
+            assert_eq!(row.bindings().len(), 4);
+        }
+    }
+
+    // ---- An empty join order evaluates to the empty result (the `order.is_empty()` guard).
+    #[test]
+    fn exec_oracle_empty_order_is_empty() {
+        let bgp = chain_bgp();
+        let solutions: SolutionSets = vec![vec![], vec![], vec![]];
+        assert!(evaluate(&bgp, &solutions, &[]).is_empty());
     }
 }
