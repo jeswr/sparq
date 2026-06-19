@@ -54,6 +54,8 @@ import {
 import { DatasetPanel } from "@/components/repl-dataset-panel";
 // [OPUS-4.8] sq-n5aw — the syntax-highlighting SPARQL editor replaces the plain <textarea>.
 import { SparqlEditor } from "@/components/sparql-editor";
+// [OPUS-4.8] sq-8uew — Turtle/N-Triples syntax highlighting for the CONSTRUCT/DESCRIBE graph.
+import { RdfHighlight } from "@/components/rdf-highlight";
 // [OPUS-4.8] sq-2mke — endpoint mode: the Connect panel + the SPARQL 1.1 Protocol client.
 import { ConnectPanel } from "@/components/connect-panel";
 // [OPUS-4.8] sq-9ij6 — endpoint mode: the live subscriptions view (SSE result deltas).
@@ -696,9 +698,10 @@ function ResultPanel({ state }: { state: RunState }) {
       );
     }
     return (
-      <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed">
-        {state.ntriples}
-      </pre>
+      <RdfHighlight
+        text={state.ntriples}
+        className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
+      />
     );
   }
   if (state.kind === "explain") {

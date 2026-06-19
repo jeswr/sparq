@@ -415,6 +415,22 @@ eq(D.familyOf('rsp_throughput').key, 'rsp', 'unlabelled RSP-throughput metric ->
 eq(D.familyOf('sim_most_similar_us').key, 'genai', 'unlabelled similarity metric -> GenAI family');
 eq(D.familyOf('introspect_build_s').key, 'genai', 'unlabelled introspection metric -> GenAI family');
 eq(D.familyOf('gpu_filter_us').key, 'gpu', 'unlabelled GPU-kernel metric -> GPU family');
+// [OPUS-4.8] sq-5o5.5-.9: the featured=false trend-only dispositions. NL→SPARQL (nlq) is part of the
+// GenAI estate; MPC gets its OWN caveated trend family (modelled counting tier, semi-honest). The
+// sim/introspect/nlq/mpc benches are flagged `featured = false` in bench/benchmarks.toml (trend-only,
+// NO competitor card), and route to a real dashboard family so coverage is HONEST, not silent.
+ok(D.FAMILIES.some(function (f) { return f.key === 'mpc'; }), 'FAMILIES includes the new mpc family (trend-only, featured=false)');
+eq(D.familyOf('nlq_ground_us').key, 'genai', 'unlabelled NL→SPARQL (nlq) metric -> GenAI family');
+eq(D.familyOf('nlq_ask_us').key, 'genai', 'unlabelled nlq ask-loop metric -> GenAI family');
+eq(D.familyOf('mpc_rounds').key, 'mpc', 'unlabelled modelled-MPC rounds metric -> MPC family');
+// the load-bearing one: an MPC `_bytes` counting-tier metric must NOT be sunk into Core by the
+// generic "Memory / Size" STRUCTURAL fallback — its `mpc` capability prefix wins (sq-5o5.8).
+eq(D.familyOf('mpc_join_bytes').key, 'mpc', 'modelled-MPC byte-count metric -> MPC family (capability prefix beats the structural Memory/Size fallback)');
+eq(D.familyOf('mpcmatrix_total_bytes').key, 'mpc', 'mpc-matrix byte-count metric -> MPC family');
+// wasm-bundle is a deterministic SIZE GATE, not its own capability card: wasm_bundle_bytes stays in
+// Core (the `wasm` token is a Core prefix + its Memory/Size suite) — featured=false only means "no
+// competitor card", it does not move the size gate out of Core (sq-5o5.9).
+eq(D.familyOf('wasm_bundle_bytes').key, 'core', 'wasm bundle-size byte gate -> Core family (size gate, NOT a separate capability card)');
 // selective + u64 are SPARQL micro-suites (cli `bench` q01_* stems) — recognise them under SPARQL.
 eq(D.familyOf('selective_q01_count_us').key, 'sparql', 'unlabelled selective-join metric -> SPARQL family');
 eq(D.familyOf('u64_q03_materialize_us').key, 'sparql', 'unlabelled u64 value-id metric -> SPARQL family');

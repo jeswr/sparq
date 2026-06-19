@@ -41,6 +41,8 @@ import {
   formatBytes,
   type DataFormat,
 } from "@/lib/data-formats";
+// [OPUS-4.8] sq-8uew — Turtle/TriG/N-Triples/N-Quads syntax-highlighting input editor.
+import { RdfEditor } from "@/components/rdf-editor";
 
 // The whole-dataset enumeration: default graph UNION every named graph, so a sample of an
 // N-Quads / TriG document shows its named-graph rows too (?g bound). Same shape the REPL uses.
@@ -193,13 +195,13 @@ export function DataFormatsDemo() {
           <label htmlFor="data-formats-input" className="sr-only">
             RDF document to parse
           </label>
-          <textarea
+          {/* [OPUS-4.8] sq-8uew — syntax-highlighting Turtle/TriG/N-Triples/N-Quads input. */}
+          <RdfEditor
             id="data-formats-input"
+            ariaLabel="RDF document to parse"
             value={text}
-            spellCheck={false}
-            onChange={(e) => setText(e.target.value)}
+            onChange={setText}
             rows={10}
-            className="w-full resize-y rounded-lg border bg-muted/40 p-3 font-mono text-[13px] leading-relaxed outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
           />
 
           <div className="flex items-center gap-3">

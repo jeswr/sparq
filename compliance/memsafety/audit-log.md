@@ -11,7 +11,7 @@ roles adversarially against the *actual repo*, not the docs.
 > rounds below are the point-in-time figures verified *at audit time* (20
 > `#![forbid(unsafe_code)]` crates / 25 total, 56-site register, MS-G2 then OPEN) and are
 > preserved as the historical record — **do not rewrite them**. The workspace has since grown:
-> the *current* figures are **30 `#![forbid(unsafe_code)]` crates of 35 total**, with the
+> the *current* figures are **31 `#![forbid(unsafe_code)]` crates of 36 total**, with the
 > unsafe surface still confined to the same 5 crates and the register now at **59 sites**
 > (sparq-core 45; per the current `bench/unsafe-snapshot.json` / `unsafe-gate.py --list`).
 > **MS-G2 (the first-party clippy `undocumented_unsafe_blocks`
