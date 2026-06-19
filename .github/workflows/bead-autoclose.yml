@@ -80,7 +80,24 @@ jobs:
             --subject "$SUBJECT" \
             --jsonl .beads/issues.jsonl
 
-      - name: Commit the regenerated bead JSONL back to main (only if it changed)
+      # [OPUS-4.8] FAIL-SOFT push (sq-roe3). The default GITHUB_TOKEN CANNOT push to the
+      # protected `main` branch: the repo ruleset (id 17688455, rules: pull_request +
+      # required_status_checks "gate" + code_scanning + non_fast_forward) rejects a direct
+      # push with `GH013: Repository rule violations` and an empty bypass list. Confirmed on
+      # the first real run (bead-autoclose.yml #27828093722, PR #830):
+      #   remote: error: GH013: Repository rule violations found for refs/heads/main
+      #   remote: - Changes must be made through a pull request.
+      #   remote: - Required status check "gate" is expected.
+      #   remote: - Code scanning is waiting for results from CodeQL ...
+      # Until a ruleset bypass-list entry for the github-actions bot exists (owner-only,
+      # needs:user) OR bead-state is folded into the periodic .beads-export PR (sq-2xdg),
+      # the push WILL be rejected. This job runs post-merge (on `closed`) and never gates a
+      # PR, so a red run is pure noise — but it should not be red. We therefore treat a
+      # rejected push as a best-effort no-op: warn clearly and exit 0. The bead-ID
+      # extraction + close logic above still runs every time, so the moment pushing becomes
+      # possible (bypass added) this lands the close with no further change. The orchestrator
+      # closes beads manually in the interim.
+      - name: Commit the regenerated bead JSONL back to main (best-effort; non-fatal on ruleset-blocked push)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -95,5 +112,15 @@ jobs:
           git add .beads/issues.jsonl
           git commit -m "chore(beads): auto-close bead(s) mapped to merged PR #${PR_NUMBER} [skip ci]" \
                      -m "Durable replacement for the ephemeral watcher b1kzhfxq5 (sq-84a8). [OPUS-4.8]"
+          # Best-effort push. A protected-branch ruleset rejection (GH013) or a
+          # non-fast-forward race must NOT fail this non-gating post-merge job. Disable
+          # `errexit` only around the push so we can inspect its status and fail soft.
+          set +e
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          push_rc=$?
+          set -e
+          if [ "$push_rc" -ne 0 ]; then
+            echo "::warning title=bead-autoclose push declined::Could not push the .beads close for PR #${PR_NUMBER} to protected main (git push exit ${push_rc}; likely GH013 ruleset rejection — direct pushes to main are blocked). Best-effort no-op: the bead-ID extraction + close logic ran, but the commit was NOT landed. Resolve by adding the github-actions bot to the main ruleset bypass list (owner-only; sq-roe3 needs:user) or folding bead-state into the periodic .beads-export PR (sq-2xdg). The orchestrator closes the bead(s) manually in the meantime."
+            exit 0
+          fi
           echo "committed + pushed bead auto-close for PR #${PR_NUMBER} to main."
