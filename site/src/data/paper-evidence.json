@@ -221,6 +221,42 @@
       "family": "coZK witness-validation re-audit (negative result)",
       "source": "research/zk-soundness-audit.md 'Confirmed Issues' — the 12 numbered confirmed findings of the prior single-prover verifier soundness audit (the estate the collaborative path would plug into); the external single-prover audit gate is bead sq-qhy4",
       "note": "Number of confirmed soundness findings in the prior adversarial audit of the single-prover ZK verifier — the estate the collaborative multi-prover path would build on top of. Cited only to establish that the foundation is itself under an open external-audit gate (sq-qhy4): the single-prover audit was internally re-audited 'sound-as-landed for its threat model' after a v1 documented NOT sound, but no accredited external cryptographer has reviewed it, and sq-qhy4 audits the single-prover verifier only — it does NOT discharge the multi-prover construction this re-audit (sq-9hrn) governs. A deterministic structural count over the committed audit document, not a measurement, and not a security claim."
+    },
+    "policy_bridge.deny_overrides_correct": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "family": "ODRL access-control bridge",
+      "source": "crates/sparq-solid/tests/odrl_bridge.rs::deny_overrides_allow_through_enforcement (and permit_plus_prohibition_same_subject_is_denied)",
+      "note": "Proven by assertion: when a matched ODRL Permission and a matched ODRL Prohibition both apply to the same principal, action, and target, the materialised deny carved into the auth view wins through the unchanged enforcement layer (which computes union-of-allow minus union-of-deny), so the principal's accessible set for that mode is empty. Deny-overrides is the ODRL Formal-Semantics conflict default and the bridge re-uses the existing access-control engine rather than adding one. A deterministic boolean invariant, not a timing, and not a security claim about the wider system."
+    },
+    "policy_bridge.fail_closed_deny_retraction": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "family": "ODRL access-control bridge",
+      "source": "crates/sparq-solid/tests/odrl_bridge.rs::ambiguous_prohibition_reeval_keeps_deny_fail_closed (and definitely_lapsed_prohibition_retracts_deny)",
+      "note": "Proven by assertion on the refresh path: a materialised deny is retracted only when re-evaluation proves the underlying prohibition is definitely withdrawn; an ambiguous (unprovable) re-evaluation KEEPS the deny so access is never silently widened on uncertainty. This asymmetric, fail-closed retraction rule (three-valued: Applies / Ambiguous / Withdrawn) is a deterministic boolean invariant, not a timing."
+    },
+    "policy_bridge.conditional_grant_rechecked": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "family": "ODRL access-control bridge",
+      "source": "crates/sparq-solid/tests/odrl_bridge.rs::recipient_constraint_persists_as_rechecked_condition",
+      "note": "Proven by assertion: a faithfully-mappable ODRL recipient constraint is persisted as an ACP conditional grant that is re-checked per session, so only the named recipient is granted (and the materialising party is not auto-granted). An unmappable constraint (for example a purpose constraint) falls back to a one-shot evaluation rather than being mis-encoded as a re-checked condition. A deterministic boolean invariant, not a timing."
+    },
+    "policy_bridge.count_enforcement_atomic": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "family": "ODRL access-control bridge",
+      "source": "crates/sparq-policy/tests/odrl_count.rs::lteq_grants_n_then_denies (and base_deny_consumes_nothing, budget_isolated_per_party_and_target)",
+      "note": "Proven by assertion behind the opt-in count-enforcement feature: a stateful odrl:count constraint grants exactly up to its limit and then denies, consuming exactly one unit of budget per grant and zero on a denial, with budgets isolated per (rule, party, target). A deterministic boolean invariant over an integer counter, not a timing."
     }
   }
 }

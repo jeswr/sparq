@@ -110,6 +110,20 @@ export const PAPERS: Paper[] = [
       "Deterministic conformance ratchet floors: Solid WAC decision parity (12) and Solid ACP decision parity (12), as the two newest rows of a 7-suite cross-family scoreboard totalling 3442, each floor CI-enforced, monotone, and guarded against drift. No latency claim and no security/soundness claim; library-level decision parity only, not HTTP/CTH wire conformance.",
   },
   {
+    slug: "odrl-policy-bridge",
+    source: "odrl-policy-bridge.typ",
+    title:
+      "Compiling ODRL Usage Policies into a Queryable Access-Control View for Solid/SPARQL: A Single-Node, Fail-Closed Conditional-Grant Bridge",
+    blurb:
+      "A single-node bridge that compiles a matched ODRL Permission/Prohibition into the same triples the engine's existing, queryable WAC/ACP view already understands — no new enforcement engine. The honest evidence is answer-safety (deny-overrides, asymmetric fail-closed deny retraction, re-checked conditional grants, atomic count enforcement) plus the CI-enforced WAC/ACP decision-parity floors the bridge materialises into. The federated ODRL→MPC / ODRL-Duty→ZK disclosure composition is deferred as honest future work; the crypto estate is research-grade and not externally audited.",
+    authors: "Jesse Wright · the sparq project",
+    venue: "ISWC / ESWC (policy / systems-integration)",
+    status: "publishable-now",
+    family: "B",
+    evidence:
+      "Deterministic, test-proven answer-safety invariants of the bridge (deny-overrides correct; asymmetric fail-closed deny retraction; recipient constraints persist as re-checked conditional grants with one-shot fallback; atomic stateful count enforcement) plus the CI-enforced, drift-guarded Solid WAC (12) and ACP (12) decision-parity ratchet floors it feeds. No latency claim; ODRL→access-control mapping is an integration, not a novel semantics. The federated/ZK disclosure half is explicitly deferred (research-grade crypto, not externally audited; sq-qhy4).",
+  },
+  {
     slug: "unsafe-attestation",
     source: "unsafe-attestation.typ",
     title:
