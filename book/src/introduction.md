@@ -16,7 +16,9 @@ compressed on-disk format, a WebAssembly build, and a W3C-conformant HTTP server
 
 > **Status: experimental research engine.** The API is unstable and pre-1.0. Conformance against
 > the W3C SPARQL, SHACL, and inference suites is tracked by CI ratchets that only ever go up.
-> SERVICE federation is not yet fully implemented (see
+> SPARQL `SERVICE` federation ships behind the opt-in `service` cargo feature (off in the
+> default build); when built in it is default-DENY-all egress, allowlisted per host as an SSRF
+> guard (see
 > [`research/roadmap.md`](https://github.com/jeswr/sparq/blob/main/research/roadmap.md)).
 
 ## How it is published
