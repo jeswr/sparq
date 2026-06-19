@@ -47,6 +47,12 @@ Run sparq alone (background):
      bench/qlever-100m/queries <iters> count`
 then read each query's µs from stdout and divide the QLever ms above by it.
 
+For a machine-readable run, append `--json <path>` (e.g. `… count --json /tmp/run.json`):
+the STDOUT TSV is unchanged and the same measured fields (`name` / `rows` / `min_micros`,
+min-of-iters) are ALSO written to `<path>` as a JSON document — the structured-benchmark-catalog
+shape. `bench-mmap` takes the same flag. The emitted numbers are whatever the running host
+measured (NON-CANONICAL); never commit them.
+
 ## sparq vs QLever — compute-only comparison (2026-06-09, native QLever 0.5.47 reproduced)
 
 Re-ran QLever natively (Homebrew `qlever-server`, SYSTEM=native, cold/cache-cleared) — numbers
