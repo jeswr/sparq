@@ -93,7 +93,21 @@ export const PAPERS: Paper[] = [
     status: "publishable-now",
     family: "B",
     evidence:
-      "Deterministic conformance ratchet floors: OGC GeoSPARQL topology (119) as one row of a 5-suite cross-family scoreboard totalling 3418, each floor CI-enforced, monotone, and guarded against drift. No latency claim; spatial algorithms are standard prior art.",
+      "Deterministic conformance ratchet floors: OGC GeoSPARQL topology (119) as one row of a 7-suite cross-family scoreboard totalling 3442, each floor CI-enforced, monotone, and guarded against drift. No latency claim; spatial algorithms are standard prior art.",
+  },
+  {
+    slug: "solid-acl-conformance",
+    source: "solid-acl-conformance.typ",
+    title:
+      "Library-Level Solid Access-Control Conformance: WAC and ACP Decision-Parity Ratchets Joining a Cross-Family Scoreboard",
+    blurb:
+      "A library-level conformance signal for both Solid access-control models: a per-construct, fail-closed-checked decision-parity corpus for WAC and for ACP, each ratcheted to a monotone floor and registered as a row of the single cross-family scoreboard with a drift guard. The honest evidence is conformance, not speed, and no security property is claimed; HTTP / CTH wire conformance is explicitly out of scope.",
+    authors: "Jesse Wright · the sparq project",
+    venue: "ISWC resources / in-use track (or demo)",
+    status: "publishable-now",
+    family: "B",
+    evidence:
+      "Deterministic conformance ratchet floors: Solid WAC decision parity (12) and Solid ACP decision parity (12), as the two newest rows of a 7-suite cross-family scoreboard totalling 3442, each floor CI-enforced, monotone, and guarded against drift. No latency claim and no security/soundness claim; library-level decision parity only, not HTTP/CTH wire conformance.",
   },
 ];
 

@@ -105,23 +105,41 @@
       "source": "crates/sparq-shacl/tests/w3c_sparql.rs::SHACL_SPARQL_FLOOR (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
       "note": "W3C SHACL-SPARQL (sh:sparql node + property constraint sub-suites) ratchet floor. Deterministic; CI-enforced; may only rise."
     },
+    "conformance.solid_wac_floor": {
+      "value": 12,
+      "unit": "passing-scenarios",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "Solid WAC",
+      "source": "crates/sparq-solid/tests/conformance_wac.rs::WAC_SCENARIO_FLOOR (mirrored in crates/sparq-conformance/src/scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "Solid Web Access Control (WAC) library-level decision-parity ratchet floor: a monotone lower bound on the number of minimal per-construct .acl scenarios whose (agent, client, mode, resource) allow/deny decisions all match the WAC spec semantics, run through materialize_wac + AuthIndex::accessible. Deterministic and machine-independent (a const a test asserts over a fixed scenario table), not a timing; CI-enforced; may only rise."
+    },
+    "conformance.solid_acp_floor": {
+      "value": 12,
+      "unit": "passing-scenarios",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "Solid ACP",
+      "source": "crates/sparq-solid/tests/conformance_acp.rs::ACP_SCENARIO_FLOOR (mirrored in crates/sparq-conformance/src/scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "Solid Access Control Policy (ACP) library-level decision-parity ratchet floor: a monotone lower bound on the number of minimal per-construct ACR scenarios whose (agent, client, mode, resource) allow/deny decisions all match the ACP spec semantics, run through materialize_acp + AuthIndex::accessible. Deterministic and machine-independent (a const a test asserts over a fixed scenario table), not a timing; CI-enforced; may only rise."
+    },
     "conformance.cross_family_total": {
-      "value": 3418,
+      "value": 3442,
       "unit": "passing-assertions",
       "environment": "canonical",
       "kind": "conformance-ratchet-floor",
-      "family": "cross-family (5 suites)",
+      "family": "cross-family (7 suites)",
       "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES (sum of all ratchet_floor; rendered by render_scoreboard as the total row)",
-      "note": "Sum of the five cross-family conformance ratchet floors (SPARQL 1229 + inference 1967 + SHACL core 98 + SHACL-SPARQL 5 + GeoSPARQL 119). A single deterministic, CI-enforced, monotone index across crates. If any individual floor rises this total must be updated in lock-step (the same scoreboard const is the source)."
+      "note": "Sum of the seven cross-family conformance ratchet floors (SPARQL 1229 + inference 1967 + SHACL core 98 + SHACL-SPARQL 5 + GeoSPARQL 119 + Solid WAC 12 + Solid ACP 12). A single deterministic, CI-enforced, monotone index across crates. If any individual floor rises this total must be updated in lock-step (the same scoreboard const is the source). Updated from the prior 3418 / 5-suite value after the Solid WAC + ACP decision-parity ratchets (sq-j174) joined the central scoreboard."
     },
     "conformance.suite_count": {
-      "value": 5,
+      "value": 7,
       "unit": "suites",
       "environment": "canonical",
       "kind": "conformance-ratchet-floor",
       "family": "cross-family",
       "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES.len()",
-      "note": "Number of distinct conformance suites the central scoreboard registers and ratchets across crates (W3C SPARQL, inference, SHACL core, SHACL-SPARQL, OGC GeoSPARQL)."
+      "note": "Number of distinct conformance suites the central scoreboard registers and ratchets across crates (W3C SPARQL, inference, SHACL core, SHACL-SPARQL, OGC GeoSPARQL, Solid WAC decision parity, Solid ACP decision parity)."
     }
   }
 }

@@ -148,13 +148,20 @@ scoreboard registers #headline("conformance.suite_count") suites with a combined
     [OGC GeoSPARQL topology],
     [OGC GeoSPARQL],
     [#headline("conformance.geosparql_topology_floor")],
+    [Solid WAC decision parity],
+    [Solid WAC],
+    [#headline("conformance.solid_wac_floor")],
+    [Solid ACP decision parity],
+    [Solid ACP],
+    [#headline("conformance.solid_acp_floor")],
     table.cell(colspan: 2)[*Total (#headline("conformance.suite_count") suites)*],
     [*#headline("conformance.cross_family_total")*],
   ),
   caption: [
     The cross-family conformance ratchet: every suite the project gates, in one registry, each
-    with a monotone floor. The spatial layer (last row) is one suite among five spanning four
-    spec families. Each floor is a deterministic integer CI enforces and that may only rise.
+    with a monotone floor. The spatial layer (fifth row) is one suite among
+    #headline("conformance.suite_count") spanning six spec families. Each floor is a
+    deterministic integer CI enforces and that may only rise.
   ],
 )
 
