@@ -140,6 +140,51 @@
       "family": "cross-family",
       "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES.len()",
       "note": "Number of distinct conformance suites the central scoreboard registers and ratchets across crates (W3C SPARQL, inference, SHACL core, SHACL-SPARQL, OGC GeoSPARQL, Solid WAC decision parity, Solid ACP decision parity)."
+    },
+    "memsafety.unsafe_sites_total": {
+      "value": 59,
+      "unit": "unsafe-sites",
+      "environment": "canonical",
+      "kind": "unsafe-count-ratchet-ceiling",
+      "family": "memory-safety attestation",
+      "source": "bench/unsafe-snapshot.json::total (enforced by scripts/unsafe-gate.py --check; CI job 'unsafe-register (count ratchet)' in .github/workflows/ci.yml; per-site rows in compliance/memsafety/unsafe-register.md)",
+      "note": "Total first-party unsafe sites across the whole crates/ workspace, as counted by a deterministic comment-/string-stripped keyword scan (scripts/unsafe-gate.py). This is a CI-ENFORCED RATCHET CEILING: the gate fails a PR whose live count RISES above this snapshot without a matching register row + a // SAFETY: comment + a re-seed; smaller is always allowed. Deterministic and machine-independent (a source scan over committed code, not a timing). It is a COUNT/COVERAGE discipline, NOT a proof of memory safety — it bounds and documents the unsafe surface, it does not prove the absence of undefined behaviour."
+    },
+    "memsafety.unsafe_crates": {
+      "value": 5,
+      "unit": "crates",
+      "environment": "canonical",
+      "kind": "unsafe-surface-partition",
+      "family": "memory-safety attestation",
+      "source": "bench/unsafe-snapshot.json::crates (keys: sparq-core, sparq-vectors, sparq-cli, sparq-zk-compose, sparq-bench); accounting in compliance/memsafety/evidence.md MS-1",
+      "note": "Number of first-party crates that contain ANY unsafe code. Deterministic: the unsafe surface is confined to exactly these five crates; the snapshot carries a per-crate count for each, and a new unsafe block anywhere else fails to compile (forbid(unsafe_code)). Machine-independent partition of the workspace, not a measurement."
+    },
+    "memsafety.forbid_crates": {
+      "value": 30,
+      "unit": "crates",
+      "environment": "canonical",
+      "kind": "unsafe-surface-partition",
+      "family": "memory-safety attestation",
+      "source": "compliance/memsafety/evidence.md MS-1 (grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | de-duplicated by crate); 30 of 35 workspace crates",
+      "note": "Number of first-party crates carrying a crate-root #![forbid(unsafe_code)], which makes any unsafe block in that crate a COMPILE ERROR. Deterministic and machine-independent (a de-duplicated source grep over committed code). 30 forbid + 5 unsafe-bearing = 35 total workspace crates; no crate is unaccounted-for."
+    },
+    "memsafety.total_crates": {
+      "value": 35,
+      "unit": "crates",
+      "environment": "canonical",
+      "kind": "unsafe-surface-partition",
+      "family": "memory-safety attestation",
+      "source": "compliance/memsafety/evidence.md MS-1 (ls -d crates/*/ | wc -l); accounting 30 forbid + 5 unsafe = 35",
+      "note": "Total first-party crates in the workspace. Deterministic structural count; the basis for the confinement accounting (30 forbid + 5 unsafe-bearing = 35, nothing unaccounted-for)."
+    },
+    "memsafety.unsafe_sites_core": {
+      "value": 45,
+      "unit": "unsafe-sites",
+      "environment": "canonical",
+      "kind": "unsafe-count-ratchet-ceiling",
+      "family": "memory-safety attestation",
+      "source": "bench/unsafe-snapshot.json::crates['sparq-core']; 45 register rows in compliance/memsafety/unsafe-register.md §sparq-core; enforced by scripts/unsafe-gate.py --check",
+      "note": "Unsafe sites in sparq-core, the single crate concentrating the storage/dictionary/mmap/parallel-scatter/SIMD unsafe (threat-model boundary B5). The largest share of the 59; ratchet-enforced per-crate. Deterministic source scan, not a measurement."
     }
   }
 }
