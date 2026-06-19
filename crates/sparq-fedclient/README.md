@@ -22,6 +22,8 @@ Design: [`research/federation-client-design.md`](../../research/federation-clien
 Planner it reuses: [`skills/federated-planning/SKILL.md`](../../skills/federated-planning/SKILL.md).
 Contributing: [`AGENTS.md`](../../AGENTS.md).
 
+Correctness suite under `tests/` (gated on the `fedclient` feature; the default build compiles it to nothing) — run on the REAL path, with local `sparq-engine` evaluation as the canonical answer: result-equivalence (planner / streaming / multi-source UNION / adaptive vs. static), fail-closed wire & error paths (SRJ decode, brTPF binary codec, interpreter), discovery + source-adapter error paths (incl. the SSRF egress guard), and the one-way `sparq-core`/`sparq-engine` dependency boundary.
+
 ## License
 
 [MIT](../../LICENSE).
