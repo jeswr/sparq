@@ -3716,6 +3716,7 @@ dependencies = [
  "instant-distance",
  "memmap2",
  "oxrdf 0.3.3",
+ "rayon",
  "reqwest",
  "rustc-hash 2.1.2",
  "serde_json",
