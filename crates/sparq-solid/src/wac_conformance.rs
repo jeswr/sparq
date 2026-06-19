@@ -371,6 +371,23 @@ impl WacScenario {
         &self.name
     }
 
+    /// The scenario's accumulated N-Quads corpus (its `.acl` graphs + document
+    /// placeholders). [OPUS-4.8] sq-t58w.7 — exposed read-only so a SECOND consumer (the
+    /// differential oracle, `tests/differential_oracle.rs`) can feed the IDENTICAL RDF to
+    /// an **independent** procedural WAC evaluator without re-emitting it. This is the raw
+    /// input the engine's [`WacScenario::run`] loads via `Graph::load_dataset`; a
+    /// different-paradigm reference reader parses the same bytes by hand.
+    pub fn nquads_str(&self) -> &str {
+        &self.nquads
+    }
+
+    /// The scenario's expected `(agent, client, mode, resource) → decision` table.
+    /// [OPUS-4.8] sq-t58w.7 — exposed read-only so the differential oracle can use the hand
+    /// table as a THIRD decider alongside the engine and the reference evaluator.
+    pub fn expects(&self) -> &[Expect] {
+        &self.expects
+    }
+
     /// Materialize the scenario's WAC corpus and check every expected decision against the
     /// engine's verdict, returning a [`ScenarioReport`].
     ///
