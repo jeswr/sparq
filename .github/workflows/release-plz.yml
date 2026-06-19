@@ -104,6 +104,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create + push the v<version> git tag
+      # [OPUS-4.8] sq-v286.11 — crates.io TRUSTED-PUBLISHING FLIP (step b of release-plz.toml's
+      # `publish` note). UNCOMMENT the next line together with the auth-action step + the
+      # CARGO_REGISTRY_TOKEN env below, and set `publish = true` in release-plz.toml:
+      # id-token: write  # OIDC token crates-io-auth-action exchanges for a short-lived crates.io token
     steps:
       - name: Checkout (full history for tag detection)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -112,16 +116,26 @@ jobs:
           persist-credentials: false
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # [OPUS-4.8] sq-v286.11 — crates.io TRUSTED-PUBLISHING FLIP (continued). When flipping
+      # `publish = true`, release-plz runs `cargo publish` BEFORE tagging and needs a crates.io
+      # credential in CARGO_REGISTRY_TOKEN. crates.io Trusted Publishing (GA 2025-07, RFC 3691)
+      # supplies a SHORT-LIVED token via OIDC — no long-lived secret. UNCOMMENT this step (it
+      # must run BEFORE the release-plz step) and wire its `token` output into the env below:
+      #   - name: Mint short-lived crates.io token (OIDC trusted publishing)
+      #     id: cratesio-auth
+      #     uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
       # [OPUS-4.8] sq-v286.4: `release` command. With `publish = false` +
       # `git_release_enable = false` in release-plz.toml, this creates ONLY the v<version>
-      # git tag — it skips cargo publish (needs:user token, sq-v286.5) and skips its own
-      # GitHub Release (release.yml owns that). The pushed tag then triggers release.yml.
+      # git tag — it skips cargo publish and skips its own GitHub Release (release.yml owns
+      # that). The pushed tag then triggers release.yml.
       - name: Run release-plz (create v<version> tag on version commit)
         uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         with:
           command: release
         env:
-          # Tagging is a forge operation done with GITHUB_TOKEN. No CARGO_REGISTRY_TOKEN is
-          # passed because crates.io publish is disabled (publish = false) until the
-          # needs:user token lands (sq-v286.5).
+          # Tagging is a forge operation done with GITHUB_TOKEN.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # [OPUS-4.8] sq-v286.11 — crates.io TRUSTED-PUBLISHING FLIP (step b, continued). With
+          # `publish = false`, no crates.io credential is passed (publish is skipped, only the
+          # tag is cut). To flip, UNCOMMENT the auth-action step above + this line:
+          # CARGO_REGISTRY_TOKEN: ${{ steps.cratesio-auth.outputs.token }}
