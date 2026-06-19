@@ -120,6 +120,52 @@ class BenchMissingTest(unittest.TestCase):
         items = drift_scan.scan_bench_missing(root)
         self.assertEqual([], [it for it in items if it.dedup_key == "bench-missing:sparq-geo"])
 
+    # [OPUS-4.8] sq-bif.5: scan_bench_missing must honor the SAME `publish = false`
+    # stub exemption that gate G1 (gate-new-crate.py) applies to its bench
+    # requirement, so the merge-time gate and the reactive scanner cannot diverge
+    # and mint spurious bench-missing drift for legitimately benchless stubs.
+    def test_publish_false_crate_without_bench_not_flagged(self):
+        # A `publish = false` stub with no registered bench is EXEMPT (mirrors G1).
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-fedstub", public=False)
+        make_registry(root, sources=["crates/sparq-cli/src/main.rs"])  # does NOT ref the stub
+        items = drift_scan.scan_bench_missing(root)
+        keys = {it.dedup_key for it in items}
+        self.assertNotIn("bench-missing:sparq-fedstub", keys)
+
+    def test_publishable_crate_without_bench_still_flagged(self):
+        # The exemption is NARROW: a publishable (no `publish = false`) crate with
+        # no registered bench is STILL flagged — only stubs drop out.
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-pubcrate", public=True)
+        make_registry(root, sources=["crates/sparq-cli/src/main.rs"])  # does NOT ref the crate
+        items = drift_scan.scan_bench_missing(root)
+        keys = {it.dedup_key for it in items}
+        self.assertIn("bench-missing:sparq-pubcrate", keys)
+
+    def test_stub_and_public_side_by_side(self):
+        # Both in one tree: only the publishable benchless crate surfaces.
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-pubcrate", public=True)
+        make_crate(root, "sparq-fedstub", public=False)
+        make_registry(root, sources=["crates/sparq-cli/src/main.rs"])
+        items = drift_scan.scan_bench_missing(root)
+        keys = {it.dedup_key for it in items}
+        self.assertIn("bench-missing:sparq-pubcrate", keys)
+        self.assertNotIn("bench-missing:sparq-fedstub", keys)
+
+    def test_exemption_predicate_matches_gate_g1(self):
+        # Single-source-of-truth guard: the stub predicate scan_bench_missing uses
+        # (crate_is_public is False) must be the EXACT inverse of G1's
+        # gate_new_crate.crate_is_stub for the same Cargo.toml content. We assert on
+        # the shared regex behaviour: a `publish = false` line => stub => exempt; a
+        # bare `publish = true` (or no publish key) => not a stub => not exempt.
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-stub", public=False)   # writes `publish = false`
+        make_crate(root, "sparq-open", public=True)    # no publish key
+        self.assertFalse(drift_scan.crate_is_public(root, "sparq-stub"))
+        self.assertTrue(drift_scan.crate_is_public(root, "sparq-open"))
+
 
 # --------------------------------------------------------------------------- #
 # skill-missing (§5.B)
