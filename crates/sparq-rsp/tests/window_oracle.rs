@@ -22,8 +22,9 @@
 //!    covering window has closed).
 //! 4. **Eviction + report-strategy determinism** — evicted windows never leak
 //!    into later results; repeated identical runs are byte-identical.
-//! 5. **EvalMode 3-way equivalence** — Rebuild / PersistentDict / Delta produce
-//!    the same per-window result against the oracle on the same stream.
+//! 5. **EvalMode 4-way equivalence** — Rebuild / PersistentDict / Delta /
+//!    Snapshot produce the same per-window result against the oracle on the
+//!    same stream.
 //!
 //! The oracle is deliberately INDEPENDENT of `eval.rs`: it re-implements the
 //! window-membership predicate from the spec docs and uses the batch engine
@@ -499,14 +500,15 @@ fn empty_windows_match_batch_zero_result() {
 }
 
 // =================================================================
-// 5. EVALMODE 3-WAY EQUIVALENCE against the oracle
+// 5. EVALMODE 4-WAY EQUIVALENCE against the oracle
 // =================================================================
 
-/// All three materialisation strategies (Rebuild / PersistentDict / Delta) must
-/// each independently satisfy the batch oracle on the SAME stream — a stronger
-/// claim than "they agree with each other": each agrees with batch ground truth.
-/// Uses a sliding window with overlap, duplicate triples and empty windows so
-/// the delta diff and the persistent-dict compaction are both exercised.
+/// All four materialisation strategies (Rebuild / PersistentDict / Delta /
+/// Snapshot) must each independently satisfy the batch oracle on the SAME
+/// stream — a stronger claim than "they agree with each other": each agrees with
+/// batch ground truth. Uses a sliding window with overlap, duplicate triples and
+/// empty windows so the delta diff, the persistent-dict compaction and the
+/// overlay-snapshot evaluation are all exercised.
 #[test]
 fn all_eval_modes_satisfy_the_oracle() {
     let sparql = "SELECT ?s (SUM(?v) AS ?sum) (COUNT(?v) AS ?n) \
@@ -519,12 +521,14 @@ fn all_eval_modes_satisfy_the_oracle() {
         script.push((val(&format!("s{}", ts % 2), (ts % 4) as i32), ts));
     }
     script.push((t("x", "p", "gap"), 90)); // force empty windows between data
-    for mode in [EvalMode::Rebuild, EvalMode::PersistentDict, EvalMode::Delta] {
+    for mode in
+        [EvalMode::Rebuild, EvalMode::PersistentDict, EvalMode::Delta, EvalMode::Snapshot]
+    {
         assert_streamed_equals_batch(sparql, spec, mode, 0, &script);
     }
 }
 
-/// The three modes are also IDENTICAL to each other window-for-window (bounds +
+/// The four modes are also IDENTICAL to each other window-for-window (bounds +
 /// rows), not merely each correct vs batch — pins that mode choice is a pure
 /// performance knob with no observable effect, including under R2S=RSTREAM.
 #[test]
@@ -538,8 +542,10 @@ fn eval_modes_byte_identical_to_each_other() {
     let rebuild = run_streamed(sparql, spec, EvalMode::Rebuild, &script);
     let persistent = run_streamed(sparql, spec, EvalMode::PersistentDict, &script);
     let delta = run_streamed(sparql, spec, EvalMode::Delta, &script);
+    let snapshot = run_streamed(sparql, spec, EvalMode::Snapshot, &script);
     assert_eq!(rebuild, persistent, "PersistentDict diverged from Rebuild");
     assert_eq!(rebuild, delta, "Delta diverged from Rebuild");
+    assert_eq!(rebuild, snapshot, "Snapshot diverged from Rebuild");
 }
 
 /// The oracle also holds under an R2S that is NOT RSTREAM: ISTREAM emits the
@@ -716,7 +722,12 @@ fn fuzz_in_order_streams_streamed_equals_batch() {
                     script.push((val(&sensor, v), ts));
                 }
                 let spec = WindowSpec::time(range, step);
-                for mode in [EvalMode::Rebuild, EvalMode::PersistentDict, EvalMode::Delta] {
+                for mode in [
+                    EvalMode::Rebuild,
+                    EvalMode::PersistentDict,
+                    EvalMode::Delta,
+                    EvalMode::Snapshot,
+                ] {
                     let streamed = run_streamed(sparql, spec, mode, &script);
                     for (start, end, stream_rows) in &streamed {
                         let g = batch_graph_for_window(&script, *start, *end, 0);

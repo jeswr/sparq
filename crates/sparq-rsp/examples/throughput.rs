@@ -55,7 +55,8 @@ fn run(label: &str, range: u64, step: u64, sparql: &str, mode: EvalMode) {
 }
 
 fn run_all_modes(label: &str, range: u64, step: u64, sparql: &str) {
-    for mode in [EvalMode::Rebuild, EvalMode::PersistentDict, EvalMode::Delta] {
+    for mode in [EvalMode::Rebuild, EvalMode::PersistentDict, EvalMode::Delta, EvalMode::Snapshot]
+    {
         run(label, range, step, sparql, mode);
     }
     println!();
