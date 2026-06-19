@@ -40,6 +40,24 @@ npm run test:e2e   # Playwright — headless browser smoke tests (see below)
 wasm-pack `--target web` output from `js/wasm/`. The `prebuild` script runs it
 automatically before `next build`.
 
+### Build modes — `basePath` (Pages vs Tauri) — `sq-9vw5`
+
+`next.config.ts` env-switches `basePath`/`assetPrefix` off `NEXT_PUBLIC_BASE_PATH` so the
+**same** `out/` export serves two hosts. The `@sparq/client` wasm loader keys its runtime
+asset URLs off the *same* env var, so the build-time route prefix and the runtime wasm-fetch
+prefix stay in lockstep.
+
+| Host | Command | `basePath` | When |
+|---|---|---|---|
+| **GitHub Pages** (default) | `npm run build` | `/sparq` | served under `https://jeswr.github.io/sparq/` — every asset/route is `/sparq`-prefixed |
+| **Tauri 2 webview** | `NEXT_PUBLIC_BASE_PATH='' npm run build` | `''` (root-relative) | the desktop GUI serves the export from the `tauri://` root, where a `/sparq` prefix would 404 |
+
+The env var is read once in `next.config.ts`: **unset** keeps the historical `/sparq` default
+(no caller change); an explicit **empty string** selects the root-relative export; a malformed
+value falls back to the Pages default. The GUI's `gui/src-tauri/tauri.conf.json`
+`beforeBuildCommand` already passes `NEXT_PUBLIC_BASE_PATH=''`, so a Tauri build gets the
+right export with no extra step.
+
 ### Browser smoke tests (Playwright)
 
 `e2e/` holds headless-browser smoke tests driven by Playwright against a real `next dev`

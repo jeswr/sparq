@@ -26,6 +26,7 @@ import {
 } from "@/data/papers";
 import { LATEST, GENERATED_AT } from "@/data/benchmarks";
 import evidence from "@/data/paper-evidence.json";
+import { withBasePath } from "@/lib/base-path";
 
 export function generateStaticParams() {
   return PAPERS.map((p) => ({ slug: p.slug }));
@@ -70,9 +71,10 @@ function provenanceFor(): Provenance {
   };
 }
 
-// basePath-aware PDF asset link (served under /sparq on GitHub Pages).
+// basePath-aware PDF asset link. [OPUS-4.8] sq-9vw5 — env-switched (was hardcoded `/sparq`)
+// so the PDF resolves under both the Pages `/sparq` prefix and the Tauri root-relative build.
 function pdfHref(slug: string): string {
-  return `/sparq/papers/${slug}.pdf`;
+  return withBasePath(`/papers/${slug}.pdf`);
 }
 
 export default async function PaperPage({

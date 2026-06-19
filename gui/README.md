@@ -49,14 +49,17 @@ the full native store rather than the WASM read-replica. Its `#[cfg(test)]` test
 engine calls **directly** (no Tauri runtime), so they are the locally-runnable proof that the
 command layer is wired to the real engine, even when the full Tauri build is CI-only.
 
-## Frontend reuse + the basePath caveat
+## Frontend reuse + the basePath switch (`sq-9vw5`)
 
 The webview loads the site's static export (`frontendDist: "../../site/out"`). The site
-hardcodes `basePath: "/sparq"` for GitHub Pages, but a Tauri webview serves from the
-`tauri://` root, so the export the GUI consumes **must** be built with
-`NEXT_PUBLIC_BASE_PATH=''` (the `beforeBuildCommand` does this). Wiring the env-switch fully
-into `site/next.config.ts` is tracked as a follow-up bead — `tauri.conf.json` records the
-requirement and is structurally valid today.
+defaults to `basePath: "/sparq"` for GitHub Pages, but a Tauri webview serves from the
+`tauri://` root, so the export the GUI consumes **must** be built root-relative
+(`basePath: ""`). `site/next.config.ts` now **env-switches** `basePath`/`assetPrefix` off
+`NEXT_PUBLIC_BASE_PATH`: the `beforeBuildCommand` passes `NEXT_PUBLIC_BASE_PATH=''`, so the
+GUI's export is root-relative with no extra step. Hand-written absolute asset hrefs (the
+favicon, the COOP/COEP service-worker `<Script src>`, the paper PDF links) read the **same**
+env var via `site/src/lib/base-path.ts`, so they move with the build mode too. See the
+"Build modes" table in [`site/README.md`](../site/README.md).
 
 ## Shared TS client
 

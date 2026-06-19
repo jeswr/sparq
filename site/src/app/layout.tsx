@@ -7,6 +7,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/layout/app-shell";
+import { withBasePath } from "@/lib/base-path";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -21,7 +22,10 @@ export const metadata: Metadata = {
   },
   description:
     "sparq is a state-of-the-art Rust RDF + SPARQL engine with a browser WASM port. This showcase runs real sparq — SPARQL, ZK proofs, MPC, Solid — live in your tab, honestly labelled where it cannot.",
-  icons: { icon: "/sparq/logo.svg" },
+  // [OPUS-4.8] sq-9vw5 — basePath-switched so the favicon resolves under both the Pages
+  // `/sparq` prefix AND the Tauri root-relative build (a hardcoded `/sparq/…` is NOT
+  // rewritten by Next, so it must read the env-derived base path).
+  icons: { icon: withBasePath("/logo.svg") },
 };
 
 export const viewport: Viewport = {
@@ -40,12 +44,14 @@ export default function RootLayout({
         {/* [OPUS-4.8] coi-serviceworker shim — synthesises COOP/COEP so
             `window.crossOriginIsolated` becomes true on GitHub Pages (which cannot
             set those headers itself). That unlocks SharedArrayBuffer, so @aztec/bb.js
-            can spin worker threads and the in-tab ZK prover multithreads (~4x). Loaded
+            can spin worker threads and the in-tab ZK prover multithreads. Loaded
             beforeInteractive with an absolute, basePath-prefixed src so the service
-            worker registers from /sparq/coi-serviceworker.js with scope /sparq/. It
-            changes only thread count — never what any proof proves or its ZK property. */}
+            worker registers from `${basePath}/coi-serviceworker.js` with that scope.
+            [OPUS-4.8] sq-9vw5 — basePath-switched (was hardcoded `/sparq/…`) so it
+            resolves under both Pages and the Tauri root-relative build. It changes only
+            thread count — never what any proof proves or its ZK property. */}
         <Script
-          src="/sparq/coi-serviceworker.js"
+          src={withBasePath("/coi-serviceworker.js")}
           strategy="beforeInteractive"
         />
       </head>
