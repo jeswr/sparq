@@ -34,6 +34,13 @@
 # the lockfile is the source of truth). `--validate` (cyclonedx-npm default) validates
 # the output against the bundled CycloneDX 1.5 schema; we DON'T pass `--no-validate`.
 #
+# [OPUS-4.8] sq-jpki: `--no-workspaces`. The repo adopted repo-root npm workspaces (a root
+# package.json whose `workspaces` field includes `js`); without this flag cyclonedx-npm would
+# climb to that root and report the WHOLE-MONOREPO component (`sparq-monorepo`) as the SBOM's
+# root, which is wrong here — this SBOM is scoped to the PUBLISHED `@jeswr/sparq` package only
+# (the monorepo root is never published). `--no-workspaces` keeps the root component anchored
+# to `@jeswr/sparq` and its own dependency tree, exactly as before the workspace adoption.
+#
 # Requires: node, npx (cyclonedx-npm is run via npx at the pinned version). Usage:
 #   VERSION=v1.2.3 scripts/gen-js-sbom.sh        # explicit version
 #   scripts/gen-js-sbom.sh                       # derives version from git describe
@@ -83,6 +90,7 @@ echo "    -> runtime tree (--omit dev): $runtime_out"
     --spec-version 1.5 \
     --output-format JSON \
     --package-lock-only \
+    --no-workspaces \
     --omit dev \
     --mc-type library \
     --output-file "$runtime_out" )
@@ -93,6 +101,7 @@ echo "    -> full build tree (incl. dev): $dev_out"
     --spec-version 1.5 \
     --output-format JSON \
     --package-lock-only \
+    --no-workspaces \
     --mc-type library \
     --output-file "$dev_out" )
 
