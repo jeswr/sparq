@@ -59,7 +59,13 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   so this is sparq's own probe, not a TEAM-Engine run.
 - **WKT + GML, two serializations** — `geo:wktLiteral` and the GML Simple-Features
   profile of `geo:gmlLiteral` parse to the same `geo_types` + CRS and interoperate in
-  one `geof:` call. `gml:Envelope`, arc segments, and 3-D coords are deferred as a clean
+  one `geof:` call. Beyond the GML-SF profile, a few real-world (non-SF) forms are
+  parsed additively into the same 2-D model: `gml:Envelope` (-> bbox `Polygon`),
+  arc-segment `gml:Curve` / `gml:Surface` (`gml:Arc` / `gml:ArcString` /
+  `gml:CircularArcByCenterPoint`), **densified** to a polyline at a fixed `5°`-per-chord
+  step — an approximation, since `geo_types` has no circular-arc type — and 3-D
+  (`srsDimension="3"`) coordinates, whose Z ordinate is parsed then projected out (the
+  model is 2-D). Tessellated patches (`gml:Triangle` / `gml:TIN`) stay a clean
   `GeoError::Unsupported` (`bd list -l area:sparq-geo`).
 - **CRS handling** — CRS84 (default) / EPSG:4326 (axis-order normalised); other CRS IRIs
   carried verbatim (relations valid within one CRS); opt-in CRS84 reprojection for a
