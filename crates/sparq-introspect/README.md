@@ -27,6 +27,10 @@ ix.to_text_summary(2500)                      // prompt-ready digest, most-impor
 ix.to_void("http://ex.org/dataset")           // W3C VoID description, as N-Triples (valid Turtle)
 ix.to_void_with_cs("http://ex.org/dataset")   // VoID + characteristic-set source stats (scs: ext)
 ix.schema_summary_for(&seeds, 2500)           // retrieval-mode: schema scoped to seed IRIs
+
+// Persisted *.introspect sidecar — mine once, summarise forever without rescanning:
+ix.save(sparq_introspect::sidecar_path_for("data/g.nt"))?;        // → data/g.nt.introspect
+let ix = sparq_introspect::Introspection::load("data/g.nt.introspect")?; // O(output) reload
 ```
 
 ## ✨ Features
@@ -36,11 +40,19 @@ ix.schema_summary_for(&seeds, 2500)           // retrieval-mode: schema scoped t
   per-predicate triple counts (avg multiplicity = `predicate_triples[i] / subjects`),
   and the `rdf:type` histogram of its subjects. Top sets retained, exact tail aggregates.
 - **Schema summary** — classes with instance counts; per-class predicate usage with
-  subject/triple counts and **coverage ratios**; per-predicate global stats (triples,
+  subject/triple counts, **coverage ratios**, and **per-class sample object labels**
+  (`ClassPredicate::samples` — drawn only from *this* class's triples, so a minority
+  class shows its OWN representative values instead of the predicate's global minimum,
+  which may belong entirely to a larger class); per-predicate global stats (triples,
   distinct subjects/objects, literal-vs-IRI split, datatype distribution, deterministic
   sample values); and **observed domain/range** (most-common subject/object classes,
   inferred from usage) alongside any **declared** `rdfs:domain`/`rdfs:range` — real KGs
   are under-declared and mis-typed, so usage wins and both are reported.
+- **Persisted `*.introspect` sidecar** (`save` / `load` / `from_json`,
+  [`sidecar_path_for`]) — write the mined schema as JSON next to the dataset, then
+  reload it `O(output)` instead of re-mining the graph (`O(|G| + |dict|)`); the format is
+  exactly `to_json`'s, so a sidecar is also a plain JSON document. Every export
+  (`to_text_summary`, `schema_summary_for`, `to_void`, …) runs off the loaded struct.
 - **Cross-class join hints** — the `(subject_class) --predicate--> (object_class)` edge
   table with per-edge triple counts, mined in the *same* SPO scan as the characteristic
   sets; top edges by triple count, capped with exact tail aggregates.
@@ -98,10 +110,11 @@ and the olympics summary names the dataset's actual classes (asserted by
 cargo run -p sparq-introspect --example olympics_introspect --release
 ```
 
-Tests: 15 unit (`src/lib.rs`: characteristic-set exactness, coverage, object
+Tests: 20 unit (`src/lib.rs`: characteristic-set exactness, coverage, object
 kinds/datatypes/samples, observed-vs-declared domain/range, vocabularies, JSON validity,
-text-summary budget, join hints, VoID export, retrieval mode) plus 1 integration
-(`tests/olympics.rs`, skip-if-absent at 1.78M scale).
+text-summary budget, join hints, VoID export, retrieval mode, per-class sample isolation,
+persisted-sidecar round-trip) plus 1 integration (`tests/olympics.rs`, skip-if-absent at
+1.78M scale).
 
 ## 📚 Learn more
 
