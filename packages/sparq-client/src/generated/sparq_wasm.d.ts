@@ -237,23 +237,30 @@ export class Store {
      */
     queryQuadsChunks(sparql: string, batch_size: number): QuadChunks;
     /**
-     * [OPUS-4.8] sq-fe1s: serialises the store's contents to a **Turtle** or **TriG**
-     * document string.
+     * [OPUS-4.8] sq-fe1s / sq-ixc3.5: serialises the store's contents to a **Turtle**,
+     * **TriG**, or **JSON-LD** document string.
      *
-     * `format` is `"turtle"` (default graph only) or `"trig"` (the whole dataset:
-     * default graph at top level, named graphs as `GRAPH <g> { … }` blocks);
-     * `"ttl"` and the media types `"text/turtle"` / `"application/trig"` are also
-     * accepted (case-insensitive).
+     * `format` (case-insensitive) is one of:
+     * * `"turtle"` (aliases `"ttl"`, `"text/turtle"`) — the default graph only.
+     * * `"trig"` (alias `"application/trig"`) — the whole dataset: default graph at
+     *   top level, named graphs as `GRAPH <g> { … }` blocks.
+     * * `"jsonld"` / `"json-ld"` / `"application/ld+json"` — JSON-LD 1.1, **expanded**
+     *   form by default; `"jsonld-expanded"` / `"jsonld-flattened"` /
+     *   `"jsonld-compacted"` pick the form explicitly (`json-ld-…` accepted too).
+     *   JSON-LD always emits the whole dataset.
      *
-     * When `pretty` is `true` the output is the blank-line-separated, **sorted**
-     * (emission-order-independent), indented pretty shape — the same byte shape the
-     * site's `prettyTurtle` reshaper produces — driven by `indent` (the
-     * continuation-line indent unit; `undefined`/`null` ⇒ two spaces) and
-     * `abbreviate` (emit a sorted `@prefix` header + compact IRIs to `prefix:local`,
-     * vs keep every IRI in full `<…>` form). When `pretty` is `false` the compact
-     * single-pass writer is used and `indent` is ignored (`abbreviate` still chooses
-     * CURIE compaction). The well-known prefixes (`rdf`, `rdfs`, `xsd`, `owl`,
-     * `schema`, `foaf`, `dc`, `skos`, `sh`) are assumed for compaction.
+     * When `pretty` is `true` the output is indented: Turtle/TriG use the
+     * blank-line-separated, **sorted** (emission-order-independent) `prettyTurtle`
+     * shape; JSON-LD uses the structurally re-indented document. The `indent` arg is
+     * the indent unit (`undefined`/`null` ⇒ two spaces). When `pretty` is `false` the
+     * compact / minified writer is used and `indent` is ignored.
+     *
+     * `abbreviate` applies to **Turtle/TriG only**: `true` emits a sorted `@prefix`
+     * header and compacts IRIs to `prefix:local`; `false` keeps every IRI in full
+     * `<…>` form. It is **ignored for JSON-LD** — IRI abbreviation there is selected by
+     * the `jsonld-compacted` form (which carries a prefix `@context`), not this flag.
+     * The well-known prefixes (`rdf`, `rdfs`, `xsd`, `owl`, `schema`, `foaf`, `dc`,
+     * `skos`, `sh`) are assumed for compaction.
      *
      * This is the document-export counterpart to [`query_quads`](Self::query_quads),
      * which returns a CONSTRUCT/DESCRIBE *result graph* as flat N-Triples: `serialize`
@@ -261,7 +268,8 @@ export class Store {
      * not one of the recognised values (a `JsError`); serialisation itself is
      * infallible. Available only when the crate is built with the OPT-IN
      * `serialize-rdf` feature — the site REPL bundle enables it; the lean default
-     * bundle does not.
+     * bundle does not. (JSON-LD *serialise-out* needs no extra feature: the writers
+     * live under `serialize-rdf`; the `jsonld` feature is INGEST-only.)
      */
     serialize(format: string, pretty: boolean, indent: string | null | undefined, abbreviate: boolean): string;
     /**
