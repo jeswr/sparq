@@ -178,25 +178,87 @@ jobs:
       - name: Link-check the static-export HTML (lychee --offline)
         run: bash scripts/check-site-links.sh site/out
 
-      # ---- Preserve the existing benchmark dashboard at /sparq/dev/ ----
-      - name: Overlay benchmark dashboard (dev/) from benchmark-data
+      # ---- Preserve the existing benchmark dashboard(s) at /sparq/dev/ ----
+      # [OPUS-4.8] sq-zngy — fold ALL `dev/bench*` subtrees (not just dev/bench).
+      # bench.yml writes benchmark-data:dev/bench (benchmark-data-dir-path: dev/bench);
+      # bench-ec2.yml writes benchmark-data:dev/bench-ec2 (benchmark-data-dir-path:
+      # dev/bench-ec2) — a SECOND live dashboard dir on the SAME benchmark-data branch.
+      # The `git archive origin/benchmark-data dev` below already carries the ENTIRE
+      # dev/ tree verbatim (so any dev/bench* subtree that exists on the branch lands in
+      # out/dev/ — the EC2 dashboard does NOT 404 after the Pages-source cutover). The
+      # per-subtree assertion that follows makes that GLOB explicit + regression-proof:
+      # every dev/bench* on the branch MUST appear in the assembled artifact, so a future
+      # narrowing of the archive scope (e.g. back to just `dev/bench`) fails the build.
+      - name: Overlay benchmark dashboard(s) (dev/bench*) from benchmark-data
         working-directory: site
         run: |
           set -euo pipefail
           if git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet origin/benchmark-data >/dev/null; then
-            echo "Overlaying dev/ from origin/benchmark-data into out/dev/"
+            echo "Overlaying dev/ (all dev/bench* subtrees) from origin/benchmark-data into out/dev/"
             mkdir -p out/dev
-            # Extract ONLY the dev/ subtree of benchmark-data straight into out/dev/.
+            # Extract the WHOLE dev/ subtree of benchmark-data straight into out/dev/.
+            # This carries every dev/bench* dashboard dir (dev/bench, dev/bench-ec2, …).
             git -C "$GITHUB_WORKSPACE" archive origin/benchmark-data dev \
               | tar -x --strip-components=1 -C out/dev
-            test -f out/dev/bench/index.html \
-              && echo "OK: out/dev/bench/index.html present (dashboard preserved)" \
-              || { echo "ERROR: dashboard index missing after overlay"; exit 1; }
+            # GLOB-FOLD ASSERTION: every dev/bench* subtree that exists on the branch must
+            # have been folded into the artifact. Catches a regressed/narrowed archive scope.
+            missing=0
+            while IFS= read -r sub; do
+              [ -n "$sub" ] || continue
+              if [ -d "out/dev/${sub#dev/}" ]; then
+                echo "OK: folded benchmark-data:${sub} -> out/dev/${sub#dev/}"
+              else
+                echo "::error::benchmark-data:${sub} exists on the branch but is MISSING from the Pages artifact (overlay regression)"
+                missing=1
+              fi
+            done < <(git -C "$GITHUB_WORKSPACE" ls-tree -d --name-only origin/benchmark-data dev/ \
+                       | grep -E '^dev/bench' || true)
+            [ "$missing" -eq 0 ] || { echo "::error::one or more dev/bench* dashboards were not folded into out/dev/"; exit 1; }
           else
             echo "::warning::origin/benchmark-data not found — dashboard NOT overlaid this run."
           fi
           # Static-export hygiene: disable Jekyll so _next/ assets are served.
           touch out/.nojekyll
+
+      # [OPUS-4.8] sq-zngy — ARTIFACT-LEVEL smoke check (NOT a live-URL check).
+      # The Pages Source flip to "GitHub Actions" (sq-vbq9) is a pending needs:user action,
+      # so a live https://jeswr.github.io/sparq/dev/... probe would 404 pre-cutover and would
+      # be wrong. This step instead asserts the ASSEMBLED Pages output dir (site/out, the exact
+      # tree handed to upload-pages-artifact below) — so it catches the dev/bench* reconciliation
+      # regression regardless of the Pages-source state. It verifies the artifact CONTENTS, NOT
+      # that the site is being served.
+      - name: Smoke-check assembled Pages artifact (dev/bench* dashboards)
+        working-directory: site
+        run: |
+          set -euo pipefail
+          fail=0
+          # Core dashboard (dev/bench) MUST always be present — these are hard requirements.
+          #   present:            dev/bench/index.html, dev/bench/dashboard.js
+          #   present + NON-EMPTY: dev/bench/data.js (the benchmark series; empty = broken overlay)
+          for f in out/dev/bench/index.html out/dev/bench/dashboard.js; do
+            if [ -f "$f" ]; then echo "OK present: ${f#out/}"; else echo "::error::missing required artifact file: ${f#out/}"; fail=1; fi
+          done
+          if [ -s out/dev/bench/data.js ]; then
+            echo "OK present + non-empty: dev/bench/data.js ($(wc -c < out/dev/bench/data.js) bytes)"
+          else
+            echo "::error::dev/bench/data.js is missing or EMPTY in the assembled artifact"; fail=1
+          fi
+          # EC2 dashboard (dev/bench-ec2): assert presence-in-artifact IFF it exists on the
+          # benchmark-data branch. bench-ec2.yml is not live until AWS_BENCH_ROLE_ARN is set, so
+          # dev/bench-ec2 may not exist on the branch yet — hard-failing on its absence would
+          # brick every deploy and regress sq-iigf. But once the EC2 lane HAS pushed, a missing
+          # out/dev/bench-ec2/index.html means the overlay dropped a subtree → hard fail.
+          if git -C "$GITHUB_WORKSPACE" ls-tree -d --name-only origin/benchmark-data dev/bench-ec2 2>/dev/null | grep -q .; then
+            if [ -f out/dev/bench-ec2/index.html ]; then
+              echo "OK present: dev/bench-ec2/index.html (EC2 dashboard folded)"
+            else
+              echo "::error::dev/bench-ec2 exists on benchmark-data but dev/bench-ec2/index.html is MISSING from the artifact"; fail=1
+            fi
+          else
+            echo "::warning::dev/bench-ec2 not yet present on benchmark-data (bench-ec2.yml has not pushed) — skipping its artifact assertion this run"
+          fi
+          [ "$fail" -eq 0 ] || { echo "::error::Pages artifact smoke check failed — see errors above"; exit 1; }
+          echo "OK: Pages artifact smoke check passed" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

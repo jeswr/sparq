@@ -20,7 +20,14 @@
 #   intentionally omitted. See the PR description for the dependency note.
 #
 # When the cutover bead lands, this lane gains the deploy job (configure-pages +
-# upload-pages-artifact + deploy-pages, all SHA-pinned) and folds dev/bench* in.
+# upload-pages-artifact + deploy-pages, all SHA-pinned).
+#
+# [OPUS-4.8] sq-zngy — NOTE: the live Pages producer is pages.yml, not this scaffold.
+# The `dev/bench*` dashboard fold (bench.yml's dev/bench + bench-ec2.yml's dev/bench-ec2,
+# both on the benchmark-data branch) and the assembled-artifact smoke check live in
+# pages.yml's build job ("Overlay benchmark dashboard(s) (dev/bench*)" + "Smoke-check
+# assembled Pages artifact"). If this mdBook lane ever absorbs the Pages deploy, carry
+# that glob-fold + smoke check over rather than re-deriving them.
 
 name: docs
 
