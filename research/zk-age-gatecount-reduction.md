@@ -9,7 +9,12 @@ that reaches ~4k WITHOUT trading away any soundness-enforcing constraint?*
 
 Parent context: epic **sq-1s2** ("ZK query-proof build-out + in-circuit privacy
 upgrades"). Companion analyses: `research/zk-soundness-audit.md`,
-`research/zk-verifier-reaudit.md`, `research/zk-hidden-join-design.md`. NO
+`research/zk-verifier-reaudit.md`, `research/zk-hidden-join-design.md`. The
+**implementation-design follow-up** for the §3.1 numeric value lane — the
+field-native value-first encoding with a per-datatype `VALUE_HOOK`, mapped to the
+actual code, with the new value-collapse soundness issue and the SPARQL
+gate-benchmark catalog — is
+[`research/zk-field-native-encoding.md`](./zk-field-native-encoding.md). NO
 production circuit change is made by this record (see §4 for the decision and the
 impl beads); it is a design-for-review.
 
