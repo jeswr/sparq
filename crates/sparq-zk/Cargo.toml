@@ -15,6 +15,18 @@ publish = false
 # artifact, and every other crate's dependency graph are untouched by it.
 # (Verified by the byte-identical wasm gate in the zk-core branch report.)
 
+[features]
+default = []
+# [OPUS-4.8] sq-zzxt: the `value-only` commitment method — a single value-first
+# leaf with the lexical-identity hash DROPPED (term identity lost entirely). It is
+# a BENCHMARK / RESEARCH comparison dial only and NEVER a production default
+# (`research/zk-configurable-commitment-design.md` §2.2, §10 default (2)). OFF by
+# default: a normal build CANNOT construct or parse the value-only method, and the
+# `commit::CommitmentMethod::ValueOnlyV1` variant is compiled out — the feature
+# name is the warning. LEAN: adds NO dependency. (`string-canonical` and
+# `dual-leaf` are always available; only the research dial is gated.)
+commitment-value-only = []
+
 [dependencies]
 # sparq term model / store / engine. The engine dep turns on its non-default
 # `zk` feature (the zk-trace executor seam); that feature only exists inside
