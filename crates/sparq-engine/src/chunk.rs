@@ -284,7 +284,14 @@ mod tests {
         let unit = DataChunk::from_columns(vec![], 3).unwrap();
         assert_eq!(unit.len(), 3);
         assert_eq!(unit.width(), 0);
-        assert_eq!(unit.to_rows(), vec![vec![], vec![], vec![]]);
+        // [OPUS-4.8] (sq-xx3u) Annotate the expected value as `Vec<Vec<Id>>`. The inner
+        // `vec![]` literals carry no elements to pin their type, and once `serde_json`
+        // unifies into the test build's dependency graph (3+ features, e.g.
+        // `service`/`serialize-rdf`), its `impl PartialEq<serde_json::Value> for u32`
+        // makes the `Id: PartialEq<_>` resolution ambiguous (E0282/E0283). The explicit
+        // type fixes the element to `Id` regardless of which `PartialEq` impls are in scope.
+        let expected: Vec<Vec<Id>> = vec![vec![], vec![], vec![]];
+        assert_eq!(unit.to_rows(), expected);
     }
 
     #[test]
