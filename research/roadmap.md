@@ -123,8 +123,14 @@ instrument T1 and T2 are blind without. Additive — conflicts with nothing.
   `GRAPH ?g { … }`, `FROM` / `FROM NAMED` and `GRAPH`-block / `WITH` / `USING (NAMED)` Updates all
   scope over them (`exec.rs` `eval_graph_named`; `update.rs`), and the RDF/JS surface exposes a
   DatasetCore-faithful, graph-aware `match(s,p,o,g)` (JS `options.dataset` → `SparqStore.match`).
-- Property paths (`*`/`+`/`/`), SERVICE federation, remaining aggregates/expressions (the `M2:`
-  markers at `exec.rs:2375/2640`). These touch `exec.rs` (conflict with T1).
+- **Property paths — DONE** (`*`/`+`/`?`/`/`/`|`/`^`/`!`): `exec.rs` `eval_path`.
+- **SERVICE federation — DONE** (sq-6gob): SPARQL 1.1 `SERVICE` ships behind the opt-in `service`
+  cargo feature (off in the default build), in-`exec.rs` SERVICE-algebra (`eval_service`) plus a
+  bound-join pushdown (`try_bound_join_service`); default-DENY-all egress, allowlisted per host as
+  an SSRF guard (see [`crates/sparq-server/README.md`](../crates/sparq-server/README.md)).
+- Remaining aggregates/expressions: the standard-aggregate fallthrough (`M2: unsupported aggregate`
+  in `exec.rs`'s `eval_aggregate`) and a few unsupported SPARQL functions. These touch `exec.rs`
+  (conflict with T1).
 
 ## T10 — SPARQL 1.1/1.2 Update  *(store mutation; core cluster)*
 The store is currently **immutable** (built once, queried). Update needs incremental insert/delete:
