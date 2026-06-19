@@ -237,6 +237,34 @@ export class Store {
      */
     queryQuadsChunks(sparql: string, batch_size: number): QuadChunks;
     /**
+     * [OPUS-4.8] sq-fe1s: serialises the store's contents to a **Turtle** or **TriG**
+     * document string.
+     *
+     * `format` is `"turtle"` (default graph only) or `"trig"` (the whole dataset:
+     * default graph at top level, named graphs as `GRAPH <g> { … }` blocks);
+     * `"ttl"` and the media types `"text/turtle"` / `"application/trig"` are also
+     * accepted (case-insensitive).
+     *
+     * When `pretty` is `true` the output is the blank-line-separated, **sorted**
+     * (emission-order-independent), indented pretty shape — the same byte shape the
+     * site's `prettyTurtle` reshaper produces — driven by `indent` (the
+     * continuation-line indent unit; `undefined`/`null` ⇒ two spaces) and
+     * `abbreviate` (emit a sorted `@prefix` header + compact IRIs to `prefix:local`,
+     * vs keep every IRI in full `<…>` form). When `pretty` is `false` the compact
+     * single-pass writer is used and `indent` is ignored (`abbreviate` still chooses
+     * CURIE compaction). The well-known prefixes (`rdf`, `rdfs`, `xsd`, `owl`,
+     * `schema`, `foaf`, `dc`, `skos`, `sh`) are assumed for compaction.
+     *
+     * This is the document-export counterpart to [`query_quads`](Self::query_quads),
+     * which returns a CONSTRUCT/DESCRIBE *result graph* as flat N-Triples: `serialize`
+     * writes the **store itself** in a readable syntax. Errors only if `format` is
+     * not one of the recognised values (a `JsError`); serialisation itself is
+     * infallible. Available only when the crate is built with the OPT-IN
+     * `serialize-rdf` feature — the site REPL bundle enables it; the lean default
+     * bundle does not.
+     */
+    serialize(format: string, pretty: boolean, indent: string | null | undefined, abbreviate: boolean): string;
+    /**
      * Applies a SPARQL 1.1 Update (`INSERT DATA`, `DELETE DATA`, `CLEAR`,
      * `DELETE/INSERT … WHERE` on the default graph) and returns the **new** store —
      * the receiver is immutable and remains valid. Mirrors `sparq_engine::update`'s
@@ -314,6 +342,7 @@ export interface InitOutput {
     readonly store_queryCursor: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_queryQuads: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_queryQuadsChunks: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly store_serialize: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly store_size: (a: number) => number;
     readonly store_update: (a: number, b: number, c: number) => [number, number, number];
     readonly store_updateInPlace: (a: number, b: number, c: number) => [number, number];

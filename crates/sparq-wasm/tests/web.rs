@@ -411,6 +411,65 @@ fn apply_delta_batch() {
         .unwrap());
 }
 
+// ---- [OPUS-4.8] sq-fe1s: the opt-in `serialize` binding, in real wasm ----
+//
+// These exercise the REAL exported `Store::serialize(format, pretty, indent, abbreviate)`
+// through the wasm/JS boundary — both the document string it returns (the pretty-Turtle /
+// pretty-TriG shape) and the `JsError` arm for an unknown format. Compiled only under the
+// `serialize-rdf` feature, exactly as the binding is. The native `#[cfg(test)]` tests in
+// src/serialize.rs assert byte-parity with the engine writer; this proves the method
+// actually exports to and runs in wasm, and that the unknown-format Err arm (which DOES
+// touch `JsError::new`, untestable natively) surfaces as an `Err` rather than a trap.
+#[cfg(feature = "serialize-rdf")]
+mod serialize {
+    use super::*;
+
+    /// Pretty Turtle through the wasm `Store::serialize` returns a non-empty document with
+    /// a `@prefix` header (abbreviate=true) carrying the store's triples.
+    #[wasm_bindgen_test]
+    fn serialize_turtle_pretty() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let ttl = store
+            .serialize("turtle", true, Some("  ".to_string()), true)
+            .unwrap();
+        // The well-known `xsd:` prefix (used by the integer ages) is declared + compacted.
+        assert!(ttl.contains("@prefix xsd:"), "prefix header: {ttl}");
+        assert!(ttl.contains("xsd:integer"), "datatype compacted: {ttl}");
+        // The data is present (ex: is not a well-known prefix, so it stays in full form).
+        assert!(ttl.contains("<http://ex/alice>"), "subject present: {ttl}");
+        assert!(ttl.contains("\"Bob\"@en"), "lang tag preserved: {ttl}");
+    }
+
+    /// `abbreviate=false` keeps every IRI in full `<…>` form with no `@prefix` header.
+    #[wasm_bindgen_test]
+    fn serialize_turtle_no_abbreviate() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let ttl = store.serialize("turtle", true, None, false).unwrap();
+        assert!(!ttl.contains("@prefix"), "no header when abbreviate=false: {ttl}");
+        assert!(ttl.contains("<http://ex/alice>"), "full IRIs: {ttl}");
+    }
+
+    /// Pretty TriG over a dataset emits a `GRAPH <g> { … }` block for the named graph.
+    #[wasm_bindgen_test]
+    fn serialize_trig_named_graph() {
+        let nq = "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g1> .\n";
+        let store = Store::load_dataset(nq, "nquads").unwrap();
+        let trig = store.serialize("trig", true, None, true).unwrap();
+        assert!(trig.contains("GRAPH"), "named graph as a GRAPH block: {trig}");
+    }
+
+    /// An unknown format string surfaces as the `JsError` Err arm across the boundary, not
+    /// a trap — the error path JS relies on (`try { store.serialize("xml", …) } catch`).
+    #[wasm_bindgen_test]
+    fn serialize_unknown_format_is_err() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        assert!(
+            store.serialize("rdfxml", true, None, true).is_err(),
+            "an unrecognised format must return Err, not panic"
+        );
+    }
+}
+
 // ---- [OPUS-4.8] sq-yqi1 (#162): the opt-in SHACL `validate` binding, in real wasm ----
 //
 // These exercise the REAL exported `Store::validate(data, shapes, format)` through the
