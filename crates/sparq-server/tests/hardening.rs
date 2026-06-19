@@ -741,23 +741,27 @@ async fn unauthorized_error_is_clean_and_actionable() {
     assert!(!body.contains("the-write-token"), "401 leaked the token: {body}");
 }
 
-/// The not-found (404) class: structured shape and no internals. A BARE unmatched route is
-/// axum's catch-all 404, whose body is empty (`{"error":""}`) — trivially leak-free but with
-/// no actionable category; that empty-body 404 is captured as deferred work (a bead). A 404
-/// that a HANDLER mints (a `GET /.well-known/void` when the federation-descriptor feature/flag
-/// is off) DOES carry the generic "not found" category, so we assert the categorised shape
-/// there and only the no-internals property on the bare route.
+/// The not-found (404) class: structured shape, an actionable category, and no internals.
+/// [OPUS-4.8] (sq-pj6u) A BARE unmatched route now goes through the router fallback
+/// (`unmatched_route`), so its body is the CATEGORISED `{"error":"not found"}` envelope —
+/// previously it was axum's catch-all empty 404 that `json_error_bodies` wrapped into the
+/// uncategorised `{"error":""}`. So we now assert the same categorised + clean shape on the
+/// bare route as on a HANDLER-minted 404 (a `GET /.well-known/void` when the
+/// federation-descriptor feature/flag is off). The message is server-constructed and never
+/// echoes the request path, so it stays leak-free.
 #[tokio::test]
 async fn not_found_error_is_clean() {
     let base = spawn_with(DATA, ServerConfig::default()).await;
-    // Bare unmatched route: empty body, but it must still be clean (no internal markers).
+    // Bare unmatched route: now the categorised `{"error":"not found"}` body, still clean.
     let resp = client().get(format!("{base}/no-such-route")).send().await.unwrap();
     assert_eq!(resp.status(), 404);
     let body = resp.text().await.unwrap();
-    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
-    for marker in FORBIDDEN_INTERNALS {
-        assert!(!body.contains(marker), "404 leaked an internal marker {marker:?}: {body}");
-    }
+    // [OPUS-4.8] (sq-pj6u) Non-empty, categorised `not found` — no longer `{"error":""}`.
+    assert_clean_error(&body, "not found");
+    assert_ne!(
+        body, "{\"error\":\"\"}",
+        "unmatched-route 404 must now be CATEGORISED, not the bare empty envelope"
+    );
 }
 
 /// A blanket assertion across the main client-facing failure classes (malformed query,
