@@ -177,6 +177,11 @@ table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem
   margin: 0 0 10px; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em;
   color: var(--accent); font-weight: 700;
 }
+/* [OPUS-4.8] sq-5o5.3: per-suite honest framing caption (e.g. the ZK estate's circuit-COST,
+   not-speed, research-grade / not-audited note). Muted + italic, like the scaling/refs captions. */
+.featured-suite-note {
+  font-size: 0.74rem; color: var(--muted); font-style: italic; margin: -4px 0 10px; line-height: 1.5;
+}
 .featured-table th.competitor-col, .featured-table td.competitor-col { color: var(--muted); }
 /* sparq's own column reads slightly stronger than competitor columns so the engine-under-test is
    visually anchored. */

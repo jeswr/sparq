@@ -419,6 +419,26 @@
     // like-for-like axis (query-over-HDT is a NON-goal — different data structure); the
     // hdt-cpp competitor (bench/competitors.json) is decode-only, gather-only via docker.
     { key: 'HDT',           title: 'HDT load-and-decode', aliases: ['hdt', 'snikmeta'] },
+    // [OPUS-4.8] sq-5o5.3: PROMOTE the ZK estate to a featured card (the maintainer treats ZK as a
+    // genuine differentiator, unlike the trend-only suites). One card groups the whole estate: the
+    // `zk-compose` circuit-gate counts (zk_compose_<member>_gates) + the `zk` commitment-pipeline
+    // and `zk-trace` overhead criterion means (zk_commit_* / zk_canon_* / zk_poseidon2_* / zk_trace_*).
+    // `key` matches the metric-labels.json suite ("Zero-knowledge"); the aliases also carry the bare
+    // `zk` family token (which clears scripts/drift-scan.py::scan_dashboard_row's `dashboard-row:zk`)
+    // and the per-bench slugs, plus the metric-name prefixes for the structural fallback.
+    //
+    // HONESTY (sq-5o5.3): the headline ZK figures are `bb gates -s ultra_honk` CIRCUIT-SIZE counts
+    // (unit `gates`, from the committed bench/zk-compose/gate_counts_latest.json snapshot) — a
+    // circuit-COST measurement, NOT throughput/speed. The zk_commit_*/zk_trace_* rows are µs
+    // criterion MEANS (NON-canonical trend signals). `note` frames the card as circuit-cost and
+    // states ZK is research-grade / not externally audited, so the card never implies a speed claim
+    // or an audited guarantee. No numbers live here — the rows come from the registered bench feed.
+    { key: 'Zero-knowledge', title: 'Zero-knowledge (commit · trace · circuit)',
+      aliases: ['zero-knowledge', 'zk', 'zk-trace', 'zk-compose', 'zktrace', 'zkcompose'],
+      note: 'Circuit-COST card: the headline figures are bb gates -s ultra_honk circuit-size '
+          + '(gate-count) measurements — NOT speed/throughput. The µs rows are non-canonical '
+          + 'criterion trend means. The ZK estate is research-grade and not externally audited; '
+          + 'smaller circuit size is better.' },
     { key: 'BSBM',          title: 'BSBM',          aliases: ['bsbm'] },
     { key: 'DBPSB',         title: 'DBPSB',         aliases: ['dbpsb', 'dbpedia sparql benchmark'] },
     // [OPUS-4.8] sq-i0nm: the synthetic qlever-style suite carries the one in-repo competitor
@@ -529,6 +549,9 @@
       // the comparison table — never aligned into a same-row competitor cell (those stay n/a unless a
       // same-scale gather fills `values`). A suite with rows but no references just omits the note.
       if (bySuite[f.key]) groups.push({ suite: f.key, title: f.title,
+        // [OPUS-4.8] sq-5o5.3: carry the optional FEATURED_SUITES `note` (the ZK estate's
+        // circuit-cost / research-grade framing) through to renderFeatured's caption.
+        note: f.note,
         rows: sortRows(bySuite[f.key].rows), references: referencesForSuite(competitors, f.key) });
     });
     // [OPUS-4.8] sq-aas7: carry the chosen-tier provenance so renderFeatured can show a tier badge
@@ -959,6 +982,10 @@
       var section = el('section', { 'class': 'featured-suite' }, [
         el('h3', { 'class': 'featured-title', text: g.title })
       ]);
+      // [OPUS-4.8] sq-5o5.3: optional per-suite NOTE — an honest framing caption shown under the
+      // suite title (e.g. the ZK estate's "circuit-COST, not speed; research-grade / not audited"
+      // disclaimer). Pure DOM, only rendered when the FEATURED_SUITES entry carries `note`.
+      if (g.note) section.appendChild(el('p', { 'class': 'featured-suite-note', text: g.note }));
       var table = el('table', { 'class': 'summary-table featured-table' });
       var headCells = [
         // [OPUS-4.8] Header is "Metric" (matching the summary table) — the cell holds a general
