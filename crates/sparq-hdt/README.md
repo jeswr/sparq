@@ -83,6 +83,9 @@ size on disk, load time, and throughput for each. Run it for the numbers:
 
 ```sh
 cargo run --release -p sparq-hdt --example bench_load
+# add `-- --json <path>` to also write the same measurements as a machine-readable
+# JSON document (STDOUT unchanged; timings are advisory/non-canonical, nothing committed)
+cargo run --release -p sparq-hdt --example bench_load -- --json /tmp/hdt.json
 ```
 
 HDT loads faster than gunzip-and-parse. On synthetic data with mostly unique literal

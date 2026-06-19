@@ -31,3 +31,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
 oxrdf.workspace = true
 rustc-hash.workspace = true
+
+# [OPUS-4.8] (sq-cxji) Test-only: PARSE the `examples/olympics_eval.rs` `--json` emit
+# back to assert it is valid, well-shaped JSON. The emit itself stays serde-free
+# (hand-built `format!`, mirroring `mpc_net_bench::cell_json`); serde_json is a
+# dev-dependency so it never enters the crate's published graph.
+[dev-dependencies]
+serde_json = "1"

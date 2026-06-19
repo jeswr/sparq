@@ -94,3 +94,8 @@ hdt = { version = "0.4", features = ["sophia"] }
 # under `cargo test` parallelism. `tempfile::tempdir()` hands each invocation a
 # unique directory (auto-removed on drop), so no two tests can ever collide.
 tempfile = "3"
+# [OPUS-4.8] (sq-cxji) Test-only: PARSE the `examples/bench_load.rs` `--json` emit back
+# to assert it is valid, well-shaped JSON. The emit itself stays serde-free (hand-built
+# `format!`, mirroring `mpc_net_bench::cell_json`); serde_json is a dev-dependency so it
+# never enters the crate's published graph.
+serde_json = "1"
