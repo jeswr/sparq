@@ -48,6 +48,22 @@
 //!
 //! [OPUS-4.8] sq-0qip — surfaced from `sparq-zk::canon` (Fable unavailable; flag
 //! for re-review when Fable returns).
+//!
+//! ## Opt-in NON-STANDARD RDF-1.2 triple-term profile (`rdf12-triple-terms`)
+//!
+//! Triple terms (`Term::Triple`, the RDF-1.2 `<<( s p o )>>` object) are
+//! **outside** the W3C RDFC-1.0 data model, so the standard paths above fail
+//! closed with [`CanonError::TripleTerm`]. Enabling the **opt-in, off-by-default**
+//! `rdf12-triple-terms` cargo feature adds a *separate, clearly non-standard* v2
+//! profile (`canonicalize_rdf12`, `canonicalize_triples_rdf12`, …) that
+//! natively re-implements the RDFC-1.0 algorithm over oxrdf-0.3 and **descends
+//! the Hash-N-Degree-Quads gossip into triple-term objects**, so blank nodes
+//! nested inside triple terms get relabelled. It is byte-identical to the
+//! standard path on triple-term-free input. This is **not** W3C RDFC-1.0
+//! (RDF-1.2 canonicalization is unsettled upstream); see the `rdf12` module
+//! (only present with the feature on). With the feature OFF the crate is
+//! byte-identical to before — the standard surface still returns
+//! [`CanonError::TripleTerm`] on triple terms.
 
 #![forbid(unsafe_code)]
 
@@ -55,6 +71,18 @@ use oxrdf::{GraphName, Quad, Triple};
 use oxttl::NQuadsParser;
 use sparq_core::Graph;
 use std::collections::HashMap;
+
+/// **NON-STANDARD, opt-in (`rdf12-triple-terms` feature).** Native RDF-1.2
+/// triple-term canonicalization profile — see the [module docs](rdf12) and the
+/// crate-level banner. Not W3C RDFC-1.0.
+#[cfg(feature = "rdf12-triple-terms")]
+pub mod rdf12;
+
+#[cfg(feature = "rdf12-triple-terms")]
+pub use rdf12::{
+    canonicalize_graph_content_rdf12, canonicalize_rdf12, canonicalize_triples_rdf12,
+    issue_dataset_rdf12,
+};
 
 /// The hash-function trait RDFC-1.0 is parameterized over (`digest::Digest`),
 /// re-exported so callers of [`canonicalize_quads_with`] / [`issue_quads_with`]
@@ -66,8 +94,10 @@ pub use digest::Digest;
 /// Canonicalization failure (RDFC-1.0 over sparq's term model).
 #[derive(Debug)]
 pub enum CanonError {
-    /// RDF 1.2 triple terms are outside RDFC-1.0's data model; a dataset
-    /// containing them cannot be canonicalized.
+    /// RDF 1.2 triple terms are outside W3C RDFC-1.0's data model; the
+    /// standard paths fail closed on them. Enable the opt-in `rdf12-triple-terms`
+    /// feature and use the non-standard `canonicalize_rdf12` /
+    /// `canonicalize_triples_rdf12` profile to canonicalize triple terms.
     TripleTerm,
     /// Bridge serialization/parse failure (should not happen for RDFC-1.0-model
     /// content; surfaced rather than swallowed).
@@ -82,7 +112,8 @@ impl std::fmt::Display for CanonError {
             CanonError::TripleTerm => {
                 write!(
                     f,
-                    "RDF 1.2 triple terms cannot be canonicalized (RDFC-1.0 data model)"
+                    "RDF 1.2 triple terms are outside the W3C RDFC-1.0 data model; \
+                     enable the `rdf12-triple-terms` profile to canonicalize them"
                 )
             }
             CanonError::Bridge(e) => write!(f, "oxrdf bridge error: {e}"),
