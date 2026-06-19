@@ -21,6 +21,7 @@ const BUILT_SURFACES = new Set([
   "http-server",
   "genai",
   "vector",
+  "geosparql",
 ]);
 const PLACEHOLDER_SURFACES = ALL_SURFACES.filter(
   (s) =>
