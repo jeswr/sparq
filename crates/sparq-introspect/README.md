@@ -74,6 +74,7 @@ let ix = sparq_introspect::Introspection::load("data/g.nt.introspect")?; // O(ou
   predicate, and `sh:maxCount 1` exactly when avg multiplicity is 1. Constraints are mined
   from what the data asserts — a data-grounded effective-schema floor, not an aspirational
   contract. Sets with no universal class yield a reusable but target-less shape.
+- **ABSTAT-style type minimalization** (`BuildOptions::minimalize_types`, off by default) — folds each subject's types to the most-specific set via the in-graph `rdfs:subClassOf` closure (no OWL/fetch; cycles tolerated); default full-type output unchanged. See the rustdoc.
 - **Vocabulary detection** — namespaces in use (split at the last `#`/`/`) with distinct-term
   counts, recognised against a bundled offline table (rdf/rdfs/owl/xsd/foaf/skos/schema.org/
   dcterms/wd/dbo/…).

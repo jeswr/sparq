@@ -79,6 +79,13 @@ for row in &answer.result.rows {                  // Vec<Vec<Option<oxrdf::Term>
 // sized for LLM grounding; tune with build_with.
 Introspection::build(graph: &Graph) -> Introspection
 Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection
+// opts.minimalize_types (default false, sq-lc3): ABSTAT-style type minimalization —
+// fold each subject's types to the most-specific via the graph's own rdfs:subClassOf
+// chains (transitive closure of in-graph edges; no ontology fetch, no OWL reasoning;
+// cycles tolerated as equivalence). A subject typed both dbo:SportsEvent and dbo:Sport
+// (SportsEvent ⊑ Sport) is then profiled ONLY under the minimal dbo:SportsEvent.
+// Applies uniformly to class extents, per-class usage, CS type histograms, observed
+// domain/range, and join hints. Additive (no new dependency); default = full profile.
 
 // Renderers.
 Introspection::to_text_summary(&self, budget_chars: usize) -> String   // schema card

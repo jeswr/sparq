@@ -14,6 +14,11 @@ use sparq_core::Graph;
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
 const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
+// [OPUS-4.8] sq-lc3: the class-subsumption predicate driving ABSTAT-style type
+// minimalization. A `(C rdfs:subClassOf D)` triple makes `D` a superclass of `C`
+// (proper when `C ≠ D`); minimalization drops a subject's superclass types in favour
+// of its most-specific (minimal) types — see `BuildOptions::minimalize_types`.
+const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const VOID_NS: &str = "http://rdfs.org/ns/void#";
 /// [OPUS-4.8] sq-bde: the W3C SHACL namespace. [`Introspection::to_shacl`] exports each
@@ -152,6 +157,25 @@ pub struct BuildOptions {
     pub max_join_hints: usize,
     /// Sample values are truncated to this many characters.
     pub max_sample_chars: usize,
+    /// [OPUS-4.8] sq-lc3: **ABSTAT-style type minimalization** over the graph's
+    /// `rdfs:subClassOf` hierarchy. When `true`, before any pattern is mined each
+    /// subject's asserted type set is folded to its **minimal** (most-specific) types:
+    /// a type `D` is dropped from a subject iff the subject also carries some type `C`
+    /// for which `(C rdfs:subClassOf+ D)` holds and `C ≠ D` — i.e. `D` is a proper
+    /// superclass of an asserted (more specific) class of the same subject. The
+    /// subsumption relation is the transitive closure of the `rdfs:subClassOf` triples
+    /// **present in the graph** (no external ontology fetch, no OWL reasoning); cycles
+    /// are tolerated (mutually-`subClassOf` classes are treated as equivalent and none
+    /// is dropped). Minimalization is applied uniformly: it changes `class_instances`,
+    /// per-class predicate usage, characteristic-set `rdf:type` histograms, observed
+    /// domain/range, and the cross-class join hints — every pattern reads the same
+    /// minimalized type map. Untyped subjects, literal/blank type objects, and classes
+    /// with no `subClassOf` edge are unaffected.
+    ///
+    /// Default `false`: the mined schema reports **every** asserted type (the ABSTAT
+    /// "full" profile). This is opt-in and additive — it neither pulls a new dependency
+    /// nor changes the default output.
+    pub minimalize_types: bool,
 }
 
 impl Default for BuildOptions {
@@ -163,6 +187,9 @@ impl Default for BuildOptions {
             max_namespaces: 200,
             max_join_hints: 1000,
             max_sample_chars: 60,
+            // [OPUS-4.8] sq-lc3: report every asserted type by default; minimalization
+            // is opt-in.
+            minimalize_types: false,
         }
     }
 }
@@ -508,18 +535,44 @@ impl Introspection {
         let id_of = |iri: &str| graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(iri)));
         let type_id = id_of(RDF_TYPE);
 
-        // ---- 1. Type map: subject -> class ids, class -> instance count. One range
-        // scan of the rdf:type block. Only IRI objects count as classes.
+        // ---- 1. Type map: subject -> class ids. One range scan of the rdf:type block.
+        // Only IRI objects count as classes.
         let mut subj_types: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
-        let mut class_instances: FxHashMap<Id, u64> = FxHashMap::default();
         if let Some(tid) = type_id {
             let scan = graph.store.scan(&[None, Some(tid), None]);
             for row in scan.rows.iter() {
                 let [s, _, c] = scan.to_spo(row);
                 if is_iri(graph, c) {
                     subj_types.entry(s).or_default().push(c);
-                    *class_instances.entry(c).or_default() += 1;
                 }
+            }
+        }
+
+        // [OPUS-4.8] sq-lc3: ABSTAT-style type minimalization over the graph's
+        // `rdfs:subClassOf` hierarchy. Opt-in (`BuildOptions::minimalize_types`) and
+        // applied here, once, so EVERY downstream pattern (class extents, per-class
+        // predicate usage, characteristic-set type histograms, observed domain/range,
+        // cross-class join hints) reads the same minimal type map. We fold each
+        // subject's asserted type set to its most-specific members: a type `D` is
+        // dropped iff the subject also carries some `C ≠ D` with `(C subClassOf+ D)` —
+        // i.e. `D` is a proper superclass of a more specific asserted class. The
+        // subsumption relation is the transitive closure of the `subClassOf` edges
+        // present in the graph; cycles are tolerated (treated as class equivalence, so
+        // neither member is dropped on account of the other).
+        if opts.minimalize_types && !subj_types.is_empty() {
+            if let Some(supers) = build_superclass_closure(graph) {
+                for types in subj_types.values_mut() {
+                    minimalize_type_set(types, &supers);
+                }
+            }
+        }
+
+        // class -> instance count, derived from the (possibly minimalized) type map so
+        // it stays consistent with every other pattern.
+        let mut class_instances: FxHashMap<Id, u64> = FxHashMap::default();
+        for classes in subj_types.values() {
+            for &c in classes {
+                *class_instances.entry(c).or_default() += 1;
             }
         }
 
@@ -1577,6 +1630,105 @@ fn is_iri(graph: &Graph, id: Id) -> bool {
     !dict::is_inline(id) && matches!(graph.dict.term_parts(id), TermParts::Iri { .. })
 }
 
+/// [OPUS-4.8] sq-lc3: build the **transitive** superclass relation from the graph's
+/// `rdfs:subClassOf` triples — `supers[c]` is the set of classes strictly above `c`
+/// (every `d` with `c subClassOf+ d`, excluding `c` itself). Returns `None` when the
+/// graph carries no `rdfs:subClassOf` predicate at all (the common case — minimalization
+/// is then a no-op and the caller skips it).
+///
+/// Only IRI–IRI `subClassOf` edges are considered (literal/blank class terms are
+/// ignored). The closure is computed by repeated relaxation over the direct edges until
+/// a fixpoint, so multi-step chains (`A ⊑ B ⊑ C` ⇒ `C ∈ supers[A]`) and cycles both
+/// settle: in a cycle every member ends up in every other member's superclass set, so
+/// [`minimalize_type_set`] — which never drops a class that is *also* a superclass of
+/// the class it would be dropped for — keeps both, treating them as equivalent.
+fn build_superclass_closure(graph: &Graph) -> Option<FxHashMap<Id, FxHashMap<Id, ()>>> {
+    let sub_id = graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(RDFS_SUBCLASS_OF)))?;
+    // Direct edges: c -> { d : (c subClassOf d) }.
+    let mut direct: FxHashMap<Id, FxHashMap<Id, ()>> = FxHashMap::default();
+    let scan = graph.store.scan(&[None, Some(sub_id), None]);
+    for row in scan.rows.iter() {
+        let [c, _, d] = scan.to_spo(row);
+        if c != d && is_iri(graph, c) && is_iri(graph, d) {
+            direct.entry(c).or_default().insert(d, ());
+        }
+    }
+    drop(scan);
+    if direct.is_empty() {
+        // The predicate exists in the dictionary but no usable edge was asserted.
+        return Some(FxHashMap::default());
+    }
+
+    // Transitive closure by fixpoint relaxation over the direct edges. Graphs carry
+    // few `subClassOf` edges relative to data triples, so a naive O(edges × iterations)
+    // pass is ample (and avoids any heavy graph-algorithm dependency — core stays lean).
+    let mut supers = direct.clone();
+    let keys: Vec<Id> = supers.keys().copied().collect();
+    loop {
+        let mut changed = false;
+        for &c in &keys {
+            // Pull every superclass-of-a-superclass into c's set. Snapshot the current
+            // closure parents to avoid borrowing `supers` mutably and immutably at once.
+            let parents: Vec<Id> = supers[&c].keys().copied().collect();
+            let mut additions: Vec<Id> = Vec::new();
+            for p in parents {
+                if let Some(grand) = supers.get(&p) {
+                    for &g in grand.keys() {
+                        if g != c && !supers[&c].contains_key(&g) {
+                            additions.push(g);
+                        }
+                    }
+                }
+            }
+            if !additions.is_empty() {
+                let set = supers.get_mut(&c).expect("c is a known key");
+                for g in additions {
+                    set.insert(g, ());
+                }
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Some(supers)
+}
+
+/// [OPUS-4.8] sq-lc3: fold one subject's asserted type list to its **minimal**
+/// (most-specific) members. A type `d` is removed iff some *other* type `c` in the same
+/// asserted list has `d` among its strict superclasses (`c subClassOf+ d`) AND `c` is
+/// not itself subsumed by `d` (the cycle / mutual-equivalence guard — when `c` and `d`
+/// subsume each other neither is dropped). Order is preserved for the survivors;
+/// duplicates already present in the list are also collapsed.
+fn minimalize_type_set(types: &mut Vec<Id>, supers: &FxHashMap<Id, FxHashMap<Id, ()>>) {
+    if types.len() <= 1 {
+        return;
+    }
+    // Snapshot the original set so the "dropped because a more specific sibling exists"
+    // test is against the full asserted set, not a partially-pruned one.
+    let original: Vec<Id> = types.clone();
+    let mut seen: FxHashMap<Id, ()> = FxHashMap::default();
+    types.retain(|&d| {
+        // Collapse duplicates deterministically (keep first occurrence).
+        if seen.insert(d, ()).is_some() {
+            return false;
+        }
+        // Keep `d` unless some sibling `c` is strictly more specific than `d`.
+        let dropped = original.iter().any(|&c| {
+            if c == d {
+                return false;
+            }
+            let c_subclass_of_d = supers.get(&c).is_some_and(|s| s.contains_key(&d));
+            let d_subclass_of_c = supers.get(&d).is_some_and(|s| s.contains_key(&c));
+            // `c` is a proper subclass of `d` (and not mutually equivalent) ⇒ `d` is a
+            // superclass type that ABSTAT drops in favour of the minimal `c`.
+            c_subclass_of_d && !d_subclass_of_c
+        });
+        !dropped
+    });
+}
+
 /// [OPUS-4.8] sq-3n4: renders an object id to the sample-string form used by every
 /// histogram in this crate — literals quoted (`"v"`, `"v"@en`), IRIs bare, blanks
 /// `_:b`, triple terms via the dict's Display — truncated to `max_chars`. Factored out
@@ -1793,6 +1945,100 @@ mod tests {
         let company = &ix.classes[1];
         assert_eq!(company.class, ex("Company"));
         assert_eq!(company.instances, 1);
+    }
+
+    // [OPUS-4.8] sq-lc3: ABSTAT-style type minimalization over rdfs:subClassOf.
+    #[test]
+    fn minimalize_types_keeps_only_the_minimal_class() {
+        // The bead's olympics shape: a subject typed both as a subclass and its
+        // declared superclass (dbo:SportsEvent rdfs:subClassOf dbo:Sport). Here
+        // :swimming100m is typed both :SportsEvent and :Sport, with
+        // :SportsEvent rdfs:subClassOf :Sport.
+        let g = graph(
+            ":swimming100m rdf:type :SportsEvent , :Sport ; :name \"100m\" .
+             :SportsEvent rdfs:subClassOf :Sport .",
+        );
+
+        // Default (minimalize_types = false): BOTH types are reported.
+        let full = Introspection::build(&g);
+        let full_classes: Vec<&str> = full.classes.iter().map(|c| c.class.as_str()).collect();
+        assert!(
+            full_classes.contains(&ex("SportsEvent").as_str())
+                && full_classes.contains(&ex("Sport").as_str()),
+            "without minimalization both the subclass and superclass type appear: {:?}",
+            full_classes
+        );
+
+        // Opt-in minimalization: only the minimal (most-specific) type survives.
+        let opts = BuildOptions {
+            minimalize_types: true,
+            ..BuildOptions::default()
+        };
+        let min = Introspection::build_with(&g, &opts);
+        let min_classes: Vec<&str> = min.classes.iter().map(|c| c.class.as_str()).collect();
+        assert_eq!(
+            min_classes,
+            vec![ex("SportsEvent").as_str()],
+            "minimalization drops the superclass :Sport, keeping only :SportsEvent"
+        );
+        // The surviving class still carries the subject's predicate usage.
+        let se = &min.classes[0];
+        assert_eq!(se.instances, 1);
+        assert!(se.predicates.iter().any(|p| p.predicate == ex("name")));
+
+        // The characteristic set's rdf:type histogram is likewise minimal.
+        let cs = &min.characteristic_sets.sets[0];
+        let cs_classes: Vec<&str> = cs.classes.iter().map(|c| c.iri.as_str()).collect();
+        assert_eq!(cs_classes, vec![ex("SportsEvent").as_str()]);
+    }
+
+    // [OPUS-4.8] sq-lc3: minimalization follows multi-step subClassOf chains and does
+    // not cross-contaminate independent subjects.
+    #[test]
+    fn minimalize_types_chain_and_independence() {
+        // Chain :C ⊑ :B ⊑ :A. A subject typed all three folds to :C only.
+        // A second, independent subject typed only :A keeps :A (it has no more
+        // specific sibling).
+        let g = graph(
+            ":x rdf:type :A , :B , :C .
+             :y rdf:type :A .
+             :C rdfs:subClassOf :B . :B rdfs:subClassOf :A .",
+        );
+        let opts = BuildOptions {
+            minimalize_types: true,
+            ..BuildOptions::default()
+        };
+        let ix = Introspection::build_with(&g, &opts);
+        // :C: 1 instance (x). :A: 1 instance (y). :B: dropped entirely.
+        let c = ix.classes.iter().find(|p| p.class == ex("C")).unwrap();
+        assert_eq!(c.instances, 1);
+        let a = ix.classes.iter().find(|p| p.class == ex("A")).unwrap();
+        assert_eq!(a.instances, 1);
+        assert!(
+            ix.classes.iter().all(|p| p.class != ex("B")),
+            "transitive superclass :B is dropped for x and was never the minimal type"
+        );
+    }
+
+    // [OPUS-4.8] sq-lc3: a subClassOf cycle (mutually-equivalent classes) is tolerated —
+    // neither member is dropped.
+    #[test]
+    fn minimalize_types_tolerates_cycles() {
+        let g = graph(
+            ":x rdf:type :P , :Q .
+             :P rdfs:subClassOf :Q . :Q rdfs:subClassOf :P .",
+        );
+        let opts = BuildOptions {
+            minimalize_types: true,
+            ..BuildOptions::default()
+        };
+        let ix = Introspection::build_with(&g, &opts);
+        let names: Vec<&str> = ix.classes.iter().map(|c| c.class.as_str()).collect();
+        assert!(
+            names.contains(&ex("P").as_str()) && names.contains(&ex("Q").as_str()),
+            "mutually-subClassOf classes are equivalent; neither is dropped: {:?}",
+            names
+        );
     }
 
     #[test]
