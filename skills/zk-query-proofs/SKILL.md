@@ -225,6 +225,7 @@ let art = prover.prove_in(&CircuitId::RevokeUnset { depth }, &toml, std::path::P
 - **Replay/freshness:** use `FileSeenNonces` (durable: `flock` + `fsync`, single-host) in production. `InMemorySeenNonces` is non-durable, test-only (a restart reopens the replay window). For multi-host, back `SeenNonces` with a DB UNIQUE constraint / CAS store.
 - **Toolchain pin:** `nargo 1.0.0-beta.21`, `bb 5.0.0-nightly.20260324`, bb target `noir-recursive`. Other versions may change the public-input byte layout the audit-#1 reconstruction byte-compares against.
 - **Maturity:** v1, authored by Opus 4.8 while Fable was unavailable; flagged for ZK re-review. Treat as a research seam, not a hardened product.
+- **Planned encoding change (NOT implemented):** a field-native value-hook (`VALUE_HOOK`) term/literal encoding is **PLANNED** at research grade (design: `research/zk-field-native-encoding.md`); it is unimplemented and audit-gated, registered as an open external-audit obligation — see gap-register **CR-G8** / `sq-qhy4`. It makes no soundness or privacy claim; the behavioural caveats land WITH the implementation (`sq-j506`). [OPUS-4.8] <!-- privacy-claims-allow: forward pointer to an unimplemented, audit-gated encoding change registered as an OPEN obligation; asserts no soundness/privacy property; sq-qhy4 / CR-G8 -->
 
 ## See also
 

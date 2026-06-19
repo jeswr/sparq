@@ -15,7 +15,10 @@ circuits and proof composition will consume — bit-compatible with
 > **Internal crate — not published** to crates.io (`publish = false`). Circuits
 > and proof composition are later deliverables; **no soundness or privacy claim**
 > is made for this pipeline today (see the ZK verifier soundness status in the
-> repo's security records).
+> repo's security records). A field-native value-hook term/literal encoding change
+> is **PLANNED** (research-grade, NOT implemented, audit-gated) — it is registered
+> as an open external-audit obligation, see gap-register **CR-G8** / `sq-qhy4`.
+> <!-- [OPUS-4.8] privacy-claims-allow: forward pointer to an unimplemented, audit-gated encoding change registered as an OPEN obligation; asserts no soundness/privacy property; sq-qhy4 / CR-G8 -->
 
 Design: [`research/zkp-query-proofs-plan.md`](../../research/zkp-query-proofs-plan.md).
 Contributing: [`AGENTS.md`](../../AGENTS.md).
