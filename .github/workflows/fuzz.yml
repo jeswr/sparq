@@ -69,7 +69,7 @@ jobs:
     # hung target fails with a clear timeout rather than running away.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
       # cargo-fuzz build. Each libFuzzer/sancov-instrumented target links a sanitizer
       # runtime + its own `fuzz/target` tree, on a runner that starts with only ~14 GB free
