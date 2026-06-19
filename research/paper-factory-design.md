@@ -283,6 +283,21 @@ The factory makes the two load-bearing constraints **mechanical**, not advisory:
    any C-family draft that uses "secure" / "verifiable" / "private" as a *proven* claim
    rather than a *design goal*. A C-family paper graduates to a real venue (PoPETs / USENIX)
    only when sq-qhy4 (and, for the multi-prover path, sq-9hrn) close.
+3. **[OPUS-4.8] Coarse phrase/number gate over the paper surface (beads sq-mkza / sq-4hga /
+   sq-mraf).** The two repo-wide CI honesty gates were extended to also scan the factory's own
+   authored surface: `check-no-perf-numbers.py` scans the paper `.typ` sources (accessor-aware,
+   result-shaped numbers only) and the prose (`note`/free-text) fields of `paper-evidence.json`;
+   `check-privacy-claims.sh` scans those `.typ` + the evidence JSON for the absolute forbidden
+   ZK/MPC soundness/privacy phrases. Both consume **one shared forbidden-phrase list**
+   (`scripts/honesty-phrases.json`) so the gate and the build cannot drift, and
+   `build-papers.mjs` re-runs both at the build boundary (fail-closed) so the factory can never
+   serve an un-scanned paper. See `research/paper-factory-honesty-gate-coverage.md` for the
+   design. **Scope caveat (do not over-sell):** this is the **coarse** phrase/number class only
+   — a hard-coded result-shaped figure, or one of a fixed set of unqualified phrases. A **subtle
+   semantic overclaim** (unsupported generality, an implied superiority claim phrased without a
+   forbidden phrase/unit, an unfair-baseline framing) is **not** mechanically catchable and
+   stays the Stage-5 human/subagent claims↔evidence review's job. Reading the gate's green as a
+   semantic-soundness guarantee would itself breach the empirical-honesty mandate.
 
 The Stage-5 claims↔evidence review also applies the general SIGPLAN-7 + Heiser
 benchmarking-crimes rubric (no overclaiming, fair baselines, error bars, full platform

@@ -32,8 +32,14 @@ GATE="${ROOT}/scripts/check-privacy-claims.sh"
 # `set -euo pipefail` and runs the scan at source-time, so we instead lift just the
 # variable-definition block (everything up to the `mapfile` that begins the scan).
 # This keeps the test reading the SAME patterns the gate ships — no duplication.
+#
+# [OPUS-4.8] sq-mraf: the gate now LOADS its forbidden-phrase list from the shared
+# scripts/honesty-phrases.json (via the _phrases_field/_phrases_array helpers defined
+# from `PHRASES_JSON=` onward), so we lift the block from that anchor — exercising the
+# real JSON-load path, not a hand-copied list. ROOT is set above; the helpers read the
+# real shared file, so a drift between the JSON and what the gate uses is caught here.
 # --------------------------------------------------------------------------- #
-DEFS="$(sed -n '/^ALLOW_MARKER=/,/^mapfile -t FILES/p' "$GATE" | sed '/^mapfile -t FILES/d')"
+DEFS="$(sed -n '/^PHRASES_JSON=/,/^mapfile -t FILES/p' "$GATE" | sed '/^mapfile -t FILES/d')"
 # shellcheck disable=SC1090,SC2086
 eval "$DEFS"
 

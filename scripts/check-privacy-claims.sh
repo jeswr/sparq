@@ -39,9 +39,29 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# [OPUS-4.8] sq-mraf (Option C) — the FORBIDDEN-PHRASE patterns are loaded from the SINGLE
+# shared source of truth `scripts/honesty-phrases.json` so this gate and the build-boundary
+# assertion in site/scripts/build-papers.mjs cannot drift. The JSON is the canonical list;
+# the per-line classification logic (which tier exempts how) stays HERE, unchanged.
+#
 # Inline allow-list marker: a scanned line containing this token is exempt. The text
 # AFTER the marker is the required human justification (audit trail). [OPUS-4.8]
-ALLOW_MARKER='privacy-claims-allow'
+PHRASES_JSON="${ROOT}/scripts/honesty-phrases.json"
+[ -f "$PHRASES_JSON" ] || { echo "::error::shared honesty-phrase list not found at ${PHRASES_JSON} (sq-mraf)"; exit 2; }
+
+# Read a top-level string field from the shared JSON. python3 is already a hard CI dep
+# (scripts/check-no-perf-numbers.py); using it (not jq) keeps the toolchain identical.
+_phrases_field() {  # _phrases_field <jsonpath-key>
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$PHRASES_JSON" "$1"
+}
+# Read a top-level array field as NUL-delimited entries (so a pattern may contain any char).
+_phrases_array() {  # _phrases_array <jsonpath-key> -> writes \0-joined items to stdout
+  python3 -c 'import json,sys
+items = json.load(open(sys.argv[1]))[sys.argv[2]]
+sys.stdout.write("\0".join(items))' "$PHRASES_JSON" "$1"
+}
+
+ALLOW_MARKER="$(_phrases_field allowMarker)"
 
 # FORBIDDEN phrases — settled-property claim shapes for the ZK/MPC estate. Case-
 # insensitive, extended-regex. Each is a phrasing that, UNHEDGED, asserts a privacy
@@ -68,24 +88,18 @@ ALLOW_MARKER='privacy-claims-allow'
 #                      "NOT sound", "is not sound", "unsound", and the project's
 #                      canonical hedged verdict "SOUND as landed for the … threat
 #                      model" all still PASS.
-PATTERNS=(
-  'zero[- ]?knowledge[- ]secure'
-  'provably[- ](private|secure|sound)'
-  'sound(ness)?[- ](verifier|proof)s?'
-  'privacy[- ]?preserving'
-  'malicious(ly)?[- ]secure'
-  'cryptographically[- ](private|sound|secure)'
-  '(fully|completely|totally|unconditionally|perfectly)[- ]sound'
-)
+# Loaded from the shared list (`absoluteForbiddenPatterns`) — see sq-mraf note above.
+mapfile -d '' -t PATTERNS < <(_phrases_array absoluteForbiddenPatterns)
 
 # [OPUS-4.8] Predicate-form soundness overclaim, subject-anchored on a ZK/MPC artifact
 # noun + copula + "sound" (e.g. "the verifier is sound", "the proofs are sound", "the
 # protocol is sound"). The anchoring keeps it OFF honest non-crypto "is sound" lines.
-ZK_ARTIFACT='(verifier|proof|protocol|scheme|circuit|prover|snark|construction|the[- ]zk[- ]?(system|estate|pipeline))'
+# Both parts come from the shared list so build-papers.mjs reuses the identical regex.
+ZK_ARTIFACT="$(_phrases_field soundnessArtifact)"
 # Copula clause: the artifact noun, then is/are/'s/'re, then "sound" — allowing up to two
 # intervening conjoined adjectives ("complete and sound", "correct, complete and sound")
 # so the PR-#391 shape ("…are COMPLETE and SOUND") is caught, not just bare "is sound".
-COPULA='[- ]+(is|are|s|re)[- ]+([a-z]+[- ,]+(and[- ]+)?){0,2}sound'
+COPULA="$(_phrases_field soundnessCopula)"
 SOUNDNESS_CLAIMS=(
   "${ZK_ARTIFACT}s?${COPULA}"
 )
@@ -101,8 +115,8 @@ SOUNDNESS_CLAIMS=(
 # words) — NO broad lexical escape hatch like a bare "if"/"claim", so an overclaim can't
 # slip past on an incidental word; verified that no honest in-repo line relies on those.
 # An over-matched legitimate line still has the explicit `privacy-claims-allow:` escape.
-# Case-insensitive (matched with grep -i below).
-NEGATOR_HEDGE_RE='\bnot\b|\bnever\b|\bno\b|\bn'"'"'t\b|\bun(sound|verified|audited)|not[- ]yet|yet[- ]to|\bopen\b|\bpending\b|\bunverified\b|\bremediat|sound[- ]+as[- ]+landed|sound[- ]+for[- ]+(the[- ]+)?(integrity|threat|assumed|stated)|\bwhether\b|\bquestion\b'
+# Case-insensitive (matched with grep -i below). Loaded from the shared list.
+NEGATOR_HEDGE_RE="$(_phrases_field negatorHedge)"
 
 # Path surface to scan = the OUTWARD claim surface (docs/READMEs/skills/site copy /
 # the compliance index / the published-paper Typst sources). Excludes:
@@ -123,10 +137,20 @@ NEGATOR_HEDGE_RE='\bnot\b|\bnever\b|\bno\b|\bn'"'"'t\b|\bun(sound|verified|audit
 # a paper comment is still authored text, matching this gate's coarse-phrase posture.
 # This catches the COARSE unqualified-claim class; a subtle semantic overclaim phrased
 # around the patterns remains Stage-5 human review.
+#
+# [OPUS-4.8] bead sq-4hga: the paper-factory EVIDENCE file
+# `site/src/data/paper-evidence.json` is also added — its human `note` / free-text fields
+# are published-paper provenance prose (they surface inline via the `provenance()` helper),
+# so an unqualified ZK/MPC claim hidden in a record `note` must trip the SAME patterns. The
+# whole JSON is scanned line-by-line (the coarse posture); a JSON-string `note` may carry
+# the inline `privacy-claims-allow:` marker just like any other line. The accessor-driven
+# numeric values are NOT prose and are unaffected. (The perf-number half of the
+# evidence-prose scan lives in scripts/check-no-perf-numbers.py, its natural home.)
 mapfile -t FILES < <(
   git ls-files \
     '*.md' '*.mdx' '*.tsx' '*.ts' \
     'site/papers/*.typ' 'site/papers/**/*.typ' \
+    'site/src/data/paper-evidence.json' \
     ':!:research/**' \
     ':!:**/*audit*.md' \
     ':!:.claude/agents/**' \

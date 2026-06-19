@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "[OPUS-4.8] sq-mraf (Option C) — the SINGLE shared source of truth for the ZK/MPC",
+    "privacy/soundness FORBIDDEN-PHRASE list, consumed by BOTH honesty entry points so",
+    "they cannot drift:",
+    "  1. scripts/check-privacy-claims.sh   — the CI gate over the outward claim surface",
+    "     (docs / READMEs / skills / site copy / the published-paper .typ sources).",
+    "  2. site/scripts/build-papers.mjs     — the build-boundary assertion: every .typ the",
+    "     factory compiles AND the prose (note/free-text) fields of paper-evidence.json are",
+    "     re-scanned with THIS list, so the factory can never serve an un-scanned paper.",
+    "WHY: the v1 ZK verifier is NOT externally audited and sparq-mpc is honest-majority",
+    "semi-honest only (SECURITY.md; research/zk-*-audit.md; bead sq-qhy4). An UNHEDGED claim",
+    "of a settled ZK/MPC privacy/soundness property is a high-severity honesty defect. This is",
+    "a COARSE phrase gate, not an NLP classifier — it catches the unqualified-claim phrase",
+    "class; a subtle semantic overclaim phrased around these patterns remains Stage-5 human",
+    "review (skills/academic-paper/SKILL.md). DO NOT WEAKEN a pattern to make a line pass —",
+    "hedge the wording or add the inline allow marker. Patterns are case-insensitive ERE,",
+    "valid in BOTH POSIX grep -E (bash gate) and the JS RegExp engine (build-papers.mjs)."
+  ],
+  "schemaVersion": 1,
+  "allowMarker": "privacy-claims-allow",
+  "absoluteForbiddenPatterns": [
+    "zero[- ]?knowledge[- ]secure",
+    "provably[- ](private|secure|sound)",
+    "sound(ness)?[- ](verifier|proof)s?",
+    "privacy[- ]?preserving",
+    "malicious(ly)?[- ]secure",
+    "cryptographically[- ](private|sound|secure)",
+    "(fully|completely|totally|unconditionally|perfectly)[- ]sound"
+  ],
+  "_soundnessPredicateNote": [
+    "Predicate-form soundness overclaim, subject-anchored on a ZK/MPC artifact noun + copula",
+    "+ 'sound' (e.g. 'the verifier is sound', 'the proofs are sound'). EXEMPT if the line",
+    "carries the allow marker OR a same-line negator/hedge (negatorHedge below). The bash gate",
+    "(check-privacy-claims.sh) is the source of truth for the exact assembly of these two parts;",
+    "build-papers.mjs reuses them for the paper-evidence.json prose + .typ build-boundary scan."
+  ],
+  "soundnessArtifact": "(verifier|proof|protocol|scheme|circuit|prover|snark|construction|the[- ]zk[- ]?(system|estate|pipeline))",
+  "soundnessCopula": "[- ]+(is|are|s|re)[- ]+([a-z]+[- ,]+(and[- ]+)?){0,2}sound",
+  "negatorHedge": "\\bnot\\b|\\bnever\\b|\\bno\\b|\\bn't\\b|\\bun(sound|verified|audited)|not[- ]yet|yet[- ]to|\\bopen\\b|\\bpending\\b|\\bunverified\\b|\\bremediat|sound[- ]+as[- ]+landed|sound[- ]+for[- ]+(the[- ]+)?(integrity|threat|assumed|stated)|\\bwhether\\b|\\bquestion\\b"
+}
