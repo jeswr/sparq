@@ -16,6 +16,13 @@ use sparq_introspect::{Introspection, BuildOptions};
 
 let ix = Introspection::build(&graph);              // or build_with(&graph, &BuildOptions{..})
 
+// ABSTAT-style type minimalization (opt-in): fold each subject's types to the
+// most-specific via the graph's own rdfs:subClassOf chains, so e.g. a subject typed
+// both dbo:SportsEvent and dbo:Sport (SportsEvent ⊑ Sport) is profiled only under the
+// minimal dbo:SportsEvent — not both.
+let opts = BuildOptions { minimalize_types: true, ..BuildOptions::default() };
+let ix_min = Introspection::build_with(&graph, &opts);
+
 ix.classes              // Vec<ClassProfile>      — by instance count, with per-class usage
 ix.predicates           // Vec<PredicateProfile>  — global stats + observed/declared domain/range
 ix.characteristic_sets  // CharacteristicSets     — top sets + exact tail aggregates
@@ -74,6 +81,18 @@ let ix = sparq_introspect::Introspection::load("data/g.nt.introspect")?; // O(ou
   predicate, and `sh:maxCount 1` exactly when avg multiplicity is 1. Constraints are mined
   from what the data asserts — a data-grounded effective-schema floor, not an aspirational
   contract. Sets with no universal class yield a reusable but target-less shape.
+- **ABSTAT-style type minimalization** (`BuildOptions::minimalize_types`, off by default) —
+  folds each subject's asserted types to the **minimal** (most-specific) set via the graph's
+  own `rdfs:subClassOf` chains: a type `D` is dropped from a subject whenever the subject also
+  carries a `C` with `C rdfs:subClassOf+ D` (`C ≠ D`), so a subject typed both
+  `dbo:SportsEvent` and `dbo:Sport` (where `SportsEvent ⊑ Sport`) is profiled only under the
+  minimal `dbo:SportsEvent`. The subsumption relation is the transitive closure of the
+  `subClassOf` triples **present in the graph** — no external ontology fetch and no OWL
+  reasoning — and `subClassOf` cycles are tolerated as class-equivalence (neither member
+  dropped). It applies uniformly to class extents, per-class usage, characteristic-set type
+  histograms, observed domain/range, and the cross-class join hints. Additive: no new
+  dependency, and the default output (every asserted type — the ABSTAT "full" profile) is
+  unchanged.
 - **Vocabulary detection** — namespaces in use (split at the last `#`/`/`) with distinct-term
   counts, recognised against a bundled offline table (rdf/rdfs/owl/xsd/foaf/skos/schema.org/
   dcterms/wd/dbo/…).
