@@ -7,7 +7,7 @@
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sparq_core::dict::{self, Id, TermParts, INLINE_BASE};
 use sparq_core::Graph;
 
@@ -36,6 +36,25 @@ const VOID_NS: &str = "http://rdfs.org/ns/void#";
 /// `void:triples` (Σ triples that predicate emits across the set's subjects), so a
 /// VoID-aware-but-cs-unaware client still reads a meaningful property partition.
 const CS_NS: &str = "http://sparq.dev/ns/cs#";
+
+/// [OPUS-4.8] sq-3n4: the conventional file extension for a persisted introspection
+/// sidecar — the mined effective schema as JSON, written next to the source dataset so
+/// later processes can produce summaries / VoID without re-mining the graph. See
+/// [`Introspection::save`]/[`Introspection::load`] and [`sidecar_path_for`].
+pub const SIDECAR_EXTENSION: &str = "introspect";
+
+/// [OPUS-4.8] sq-3n4: the conventional sidecar path for a dataset — the dataset path
+/// with [`SIDECAR_EXTENSION`] **appended** (not replacing the dataset's own extension),
+/// so `data/olympics.nt` ⇒ `data/olympics.nt.introspect`. Appending (rather than
+/// swapping the extension) keeps the sidecar unambiguous when two datasets differ only
+/// by extension (`g.nt` vs `g.ttl`) and mirrors how companion files like `*.nt.gz` read.
+pub fn sidecar_path_for(dataset: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let p = dataset.as_ref();
+    let mut name = p.file_name().unwrap_or(p.as_os_str()).to_os_string();
+    name.push(".");
+    name.push(SIDECAR_EXTENSION);
+    p.with_file_name(name)
+}
 
 /// Well-known vocabularies, recognised by namespace: `(prefix, namespace, title)`.
 /// Bundled (offline, WASM-safe) — no network lookup.
@@ -143,7 +162,7 @@ impl Default for BuildOptions {
 }
 
 /// An IRI with a count — the unit of every histogram in this crate.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Counted {
     pub iri: String,
     pub count: u64,
@@ -151,7 +170,7 @@ pub struct Counted {
 
 /// One distinct **characteristic set** (Neumann & Moerkotte): the exact set of
 /// predicates emitted by some group of subjects.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CharacteristicSet {
     /// The predicate IRIs, sorted lexicographically (deterministic across store
     /// builds — dictionary-id order varies with the build path).
@@ -168,7 +187,7 @@ pub struct CharacteristicSet {
 }
 
 /// The characteristic-set table: the retained top sets plus exact tail aggregates.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CharacteristicSets {
     /// Total number of *distinct* characteristic sets in the graph.
     pub distinct: u64,
@@ -180,7 +199,7 @@ pub struct CharacteristicSets {
 }
 
 /// Usage of one predicate on instances of one class.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassPredicate {
     pub predicate: String,
     /// Instances of the class with at least one triple via this predicate.
@@ -189,10 +208,20 @@ pub struct ClassPredicate {
     pub triples: u64,
     /// `subjects / instances` of the class, in `[0, 1]`.
     pub coverage: f64,
+    /// [OPUS-4.8] sq-3n4: sample object values **scoped to this class** (literals
+    /// quoted, IRIs bare), bounded by [`BuildOptions::samples_per_predicate`]. Unlike
+    /// [`PredicateProfile::samples`] — which are global across every subject of the
+    /// predicate and so can show values that belong only to a *different*, larger class
+    /// (the "looks odd on minority classes" problem) — these are drawn only from triples
+    /// whose subject is an instance of *this* class. Selection is the lexicographically
+    /// smallest rendered distinct values among that class's objects, so it is
+    /// deterministic across store builds (dictionary-id order varies with the build
+    /// path).
+    pub samples: Vec<String>,
 }
 
 /// A class (an `rdf:type` object) and how its instances are described.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassProfile {
     pub class: String,
     pub instances: u64,
@@ -201,7 +230,7 @@ pub struct ClassProfile {
 }
 
 /// Triple counts by object kind for one predicate (the literal-vs-IRI split).
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct ObjectKinds {
     pub iri: u64,
     pub literal: u64,
@@ -210,7 +239,7 @@ pub struct ObjectKinds {
 }
 
 /// Global statistics for one predicate.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PredicateProfile {
     pub predicate: String,
     pub triples: u64,
@@ -242,7 +271,7 @@ pub struct PredicateProfile {
 
 /// A namespace in use, with its distinct-term count and (when recognised) the
 /// well-known prefix and title from the bundled vocabulary table.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VocabularyUse {
     pub namespace: String,
     pub prefix: Option<String>,
@@ -252,7 +281,7 @@ pub struct VocabularyUse {
 }
 
 /// The detected vocabularies: top namespaces plus exact tail aggregates.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Vocabularies {
     /// Total number of distinct namespaces in the dictionary.
     pub distinct: u64,
@@ -270,7 +299,7 @@ pub struct Vocabularies {
 /// `(C, p, D)` cell is incremented. It quantifies which classes actually join through
 /// which predicate, the join-cardinality signal a planner or NL→SPARQL prompt wants
 /// beyond the per-predicate global observed range.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JoinHint {
     pub subject_class: String,
     pub predicate: String,
@@ -283,7 +312,7 @@ pub struct JoinHint {
 }
 
 /// The cross-class join-hint table: the retained top edges plus exact tail aggregates.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JoinHints {
     /// Total number of *distinct* `(C, p, D)` edges observed.
     pub distinct: u64,
@@ -296,7 +325,7 @@ pub struct JoinHints {
 
 /// The full introspection result. Build with [`Introspection::build`]; export with
 /// [`to_json`](Introspection::to_json) / [`to_text_summary`](Introspection::to_text_summary).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Introspection {
     pub triples: u64,
     /// Distinct subjects.
@@ -326,6 +355,20 @@ struct PredAcc {
     domains: FxHashMap<Id, u64>,
 }
 
+/// [OPUS-4.8] sq-3n4: per (class, predicate) accumulator — usage counts plus the
+/// class-scoped sample labels. `samples` holds the lex-smallest distinct rendered
+/// object values seen on triples of this predicate whose subject is an instance of the
+/// class (bounded by [`BuildOptions::samples_per_predicate`]).
+#[derive(Default)]
+struct ClassPredAcc {
+    /// Instances of the class with at least one triple via this predicate.
+    subjects: u64,
+    /// Total triples via this predicate whose subject is an instance of the class.
+    triples: u64,
+    /// Class-scoped sample object values, lex-smallest distinct first.
+    samples: Vec<String>,
+}
+
 /// Per-characteristic-set accumulator.
 /// Keep the `cap` lexicographically smallest sample strings, ascending — the
 /// selection (not just the order) is then independent of dictionary-id assignment.
@@ -339,6 +382,20 @@ fn keep_min_sample(samples: &mut Vec<String>, cap: usize, s: String) {
             samples.sort_unstable();
         }
     }
+}
+
+/// [OPUS-4.8] sq-3n4: as [`keep_min_sample`], but skips a value already retained — the
+/// per-class sample path feeds *every* triple's object (not the POS-collapsed distinct
+/// objects the per-predicate path sees), so the same value can arrive repeatedly; this
+/// keeps the retained set a set of **distinct** rendered values, matching the
+/// per-predicate samples' distinct-object semantics.
+fn keep_min_sample_distinct(samples: &mut Vec<String>, cap: usize, s: String) {
+    // A repeated value that is already retained, or one not smaller than the current
+    // max once the cap is full, contributes nothing — cheap guards before the insert.
+    if samples.contains(&s) {
+        return;
+    }
+    keep_min_sample(samples, cap, s);
 }
 
 struct CsAcc {
@@ -467,7 +524,12 @@ impl Introspection {
         // one pass.
         let mut cs: FxHashMap<Box<[Id]>, CsAcc> = FxHashMap::default();
         let mut preds: FxHashMap<Id, PredAcc> = FxHashMap::default();
-        let mut class_preds: FxHashMap<Id, FxHashMap<Id, (u64, u64)>> = FxHashMap::default();
+        // [OPUS-4.8] sq-3n4: per (class, predicate): (subjects, triples, class-scoped
+        // sample labels). The samples are the lex-smallest distinct rendered objects
+        // among triples whose subject is an instance of the class — so a minority class
+        // shows ITS OWN representative values, not the predicate's global minimum (which
+        // can belong entirely to a different, larger class).
+        let mut class_preds: FxHashMap<Id, FxHashMap<Id, ClassPredAcc>> = FxHashMap::default();
         // Cross-class join hints: (subject_class, predicate, object_class) -> triples.
         // Filled in the same scan — when the subject is typed AND the object is a typed
         // IRI, the cell for every (C, p, D) the subject's/object's types span is bumped.
@@ -509,6 +571,22 @@ impl Introspection {
                                 }
                             }
                         }
+                        // [OPUS-4.8] sq-3n4: class-scoped sample labels. Render this
+                        // typed subject's object once and offer it to each of the
+                        // subject's classes' (class, predicate) sample sets — so a
+                        // minority class keeps its OWN representative values instead of
+                        // the predicate's global minimum. Rendered identically to the
+                        // global per-predicate samples; the distinct-keeping helper
+                        // matches their distinct-object semantics.
+                        let rendered = render_object_sample(graph, o3, opts.max_sample_chars);
+                        for &c in ts {
+                            let cp = class_preds.entry(c).or_default().entry(p).or_default();
+                            keep_min_sample_distinct(
+                                &mut cp.samples,
+                                opts.samples_per_predicate,
+                                rendered.clone(),
+                            );
+                        }
                     }
                     k += 1;
                 }
@@ -528,8 +606,8 @@ impl Introspection {
                     for &c in ts {
                         *pa.domains.entry(c).or_default() += 1;
                         let cp = class_preds.entry(c).or_default().entry(p).or_default();
-                        cp.0 += 1;
-                        cp.1 += ms[idx];
+                        cp.subjects += 1;
+                        cp.triples += ms[idx];
                     }
                 }
             }
@@ -589,70 +667,36 @@ impl Introspection {
                 }
                 let n = (k - i) as u64;
                 acc.distinct += 1;
+                // Kind / datatype / observed-range accounting (needs `n` + the parts).
                 if dict::is_inline(o) {
                     acc.kinds.literal += n;
                     *acc.datatypes.entry(XSD_INTEGER.to_string()).or_default() += n;
-                    keep_min_sample(
-                        &mut acc.samples,
-                        opts.samples_per_predicate,
-                        format!("\"{}\"", o - INLINE_BASE),
-                    );
                 } else {
                     match graph.dict.term_parts(o) {
-                        TermParts::Iri { prefix, suffix } => {
+                        TermParts::Iri { .. } => {
                             acc.kinds.iri += n;
                             if let Some(ts) = subj_types.get(&o) {
                                 for &c in ts {
                                     *acc.ranges.entry(c).or_default() += 1;
                                 }
                             }
-                            keep_min_sample(
-                                &mut acc.samples,
-                                opts.samples_per_predicate,
-                                truncate_chars(
-                                    &format!("{prefix}{suffix}"),
-                                    opts.max_sample_chars,
-                                ),
-                            );
                         }
-                        TermParts::Lit {
-                            value,
-                            datatype,
-                            lang,
-                        } => {
+                        TermParts::Lit { datatype, .. } => {
                             acc.kinds.literal += n;
                             *acc.datatypes.entry(datatype.to_string()).or_default() += n;
-                            let rendered = match lang {
-                                Some(l) => format!("\"{value}\"@{l}"),
-                                None => format!("\"{value}\""),
-                            };
-                            keep_min_sample(
-                                &mut acc.samples,
-                                opts.samples_per_predicate,
-                                truncate_chars(&rendered, opts.max_sample_chars),
-                            );
                         }
-                        TermParts::Blank(b) => {
-                            acc.kinds.blank += n;
-                            keep_min_sample(
-                                &mut acc.samples,
-                                opts.samples_per_predicate,
-                                truncate_chars(&format!("_:{b}"), opts.max_sample_chars),
-                            );
-                        }
-                        TermParts::Triple(_) => {
-                            acc.kinds.triple_term += n;
-                            keep_min_sample(
-                                &mut acc.samples,
-                                opts.samples_per_predicate,
-                                truncate_chars(
-                                    &graph.dict.term(o).to_string(),
-                                    opts.max_sample_chars,
-                                ),
-                            );
-                        }
+                        TermParts::Blank(_) => acc.kinds.blank += n,
+                        TermParts::Triple(_) => acc.kinds.triple_term += n,
                     }
                 }
+                // Sample label — rendered by the shared helper so the global samples and
+                // the per-class samples ([OPUS-4.8] sq-3n4) are byte-identical. Distinct
+                // objects are already run-collapsed here, so `keep_min_sample` suffices.
+                keep_min_sample(
+                    &mut acc.samples,
+                    opts.samples_per_predicate,
+                    render_object_sample(graph, o, opts.max_sample_chars),
+                );
                 i = k;
             }
             objs.insert(p, acc);
@@ -741,11 +785,12 @@ impl Introspection {
                     .get(&c)
                     .map(|m| {
                         m.iter()
-                            .map(|(&p, &(subj, tri))| ClassPredicate {
+                            .map(|(&p, cp)| ClassPredicate {
                                 predicate: iri_str(p),
-                                subjects: subj,
-                                triples: tri,
-                                coverage: subj as f64 / instances.max(1) as f64,
+                                subjects: cp.subjects,
+                                triples: cp.triples,
+                                coverage: cp.subjects as f64 / instances.max(1) as f64,
+                                samples: cp.samples.clone(),
                             })
                             .collect()
                     })
@@ -902,6 +947,39 @@ impl Introspection {
     /// for LLM grounding (and for any other tool).
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("introspection serialises to JSON")
+    }
+
+    /// [OPUS-4.8] sq-3n4: parses a persisted introspection back from the JSON
+    /// [`to_json`](Introspection::to_json) produced — the in-memory inverse of
+    /// [`save`](Introspection::save)/[`load`](Introspection::load) for callers that hold
+    /// the bytes themselves (e.g. a WASM tab that cached the sidecar in IndexedDB). Once
+    /// rehydrated, every O(output) export — [`to_text_summary`](Introspection::to_text_summary),
+    /// [`schema_summary_for`](Introspection::schema_summary_for),
+    /// [`to_void`](Introspection::to_void), … — runs off the struct with **no graph
+    /// rescan**, the whole point of the sidecar.
+    pub fn from_json(json: &str) -> serde_json::Result<Introspection> {
+        serde_json::from_str(json)
+    }
+
+    /// [OPUS-4.8] sq-3n4: writes the introspection to a persisted **`*.introspect`
+    /// sidecar** — the mined effective schema as JSON, alongside the source graph — so a
+    /// later process can produce summaries / VoID / retrieval-mode cards **without
+    /// rescanning the graph** ([`build`](Introspection::build) is `O(|G| + |dict|)`;
+    /// reloading the sidecar is `O(output)`). The conventional extension is
+    /// [`SIDECAR_EXTENSION`] (`.introspect`); see [`sidecar_path_for`] to derive it from
+    /// a dataset path. The format is exactly [`to_json`](Introspection::to_json)'s, so a
+    /// sidecar is also a plain JSON document any other tool can read.
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_json())
+    }
+
+    /// [OPUS-4.8] sq-3n4: loads a persisted [`save`](Introspection::save) sidecar. A
+    /// malformed sidecar surfaces as [`std::io::ErrorKind::InvalidData`] (so the one
+    /// `io::Result` covers both the read and the parse). Round-trips
+    /// [`save`](Introspection::save) exactly.
+    pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Introspection> {
+        let json = std::fs::read_to_string(path)?;
+        Self::from_json(&json).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// Emits a [W3C VoID](https://www.w3.org/TR/void/) description of the dataset as
@@ -1110,7 +1188,11 @@ impl Introspection {
                     } else {
                         String::new()
                     };
-                    let hint = self.predicate_hint(&cp.predicate, &mut prefixes);
+                    let hint = self.predicate_hint(
+                        &cp.predicate,
+                        cp.samples.first().map(|s| s.as_str()),
+                        &mut prefixes,
+                    );
                     body.push(format!(
                         "- {} — {}/{} subjects ({pct}%{mult}){hint}",
                         prefixes.compact(&cp.predicate),
@@ -1220,9 +1302,18 @@ impl Introspection {
     }
 
     /// A short range hint for a predicate line in the class section: the dominant
-    /// observed range class, else the dominant literal datatype, plus one sample —
-    /// from the predicate's GLOBAL profile (per-class counts, global hints).
-    fn predicate_hint(&self, predicate: &str, prefixes: &mut PrefixAssigner) -> String {
+    /// observed range class, else the dominant literal datatype (from the predicate's
+    /// GLOBAL profile), plus one sample. [OPUS-4.8] sq-3n4: when `class_sample` is
+    /// supplied (the class-scoped sample for this predicate) it is preferred for the
+    /// `e.g.` example — so a minority class shows ITS OWN representative value rather
+    /// than the predicate's global minimum, which may belong only to a larger class; the
+    /// global sample is the fallback when the class has none.
+    fn predicate_hint(
+        &self,
+        predicate: &str,
+        class_sample: Option<&str>,
+        prefixes: &mut PrefixAssigner,
+    ) -> String {
         let Some(p) = self.predicates.iter().find(|p| p.predicate == predicate) else {
             return String::new();
         };
@@ -1232,7 +1323,7 @@ impl Introspection {
         } else if let Some(dt) = p.datatypes.first() {
             hint.push_str(&format!(" → {}", prefixes.compact(&dt.iri)));
         }
-        if let Some(s) = p.samples.first() {
+        if let Some(s) = class_sample.or_else(|| p.samples.first().map(|s| s.as_str())) {
             hint.push_str(&format!(", e.g. {}", prefixes.compact(s)));
         }
         hint
@@ -1273,7 +1364,11 @@ impl Introspection {
                     .take(12)
                 {
                     let pct = (cp.coverage * 100.0).round() as u64;
-                    let hint = self.predicate_hint(&cp.predicate, &mut prefixes);
+                    let hint = self.predicate_hint(
+                        &cp.predicate,
+                        cp.samples.first().map(|s| s.as_str()),
+                        &mut prefixes,
+                    );
                     body.push(format!(
                         "- {} — {}/{} subjects ({pct}%){hint}",
                         prefixes.compact(&cp.predicate),
@@ -1380,6 +1475,35 @@ impl Introspection {
 /// Whether a dictionary id names an IRI (inline ids are integers, never IRIs).
 fn is_iri(graph: &Graph, id: Id) -> bool {
     !dict::is_inline(id) && matches!(graph.dict.term_parts(id), TermParts::Iri { .. })
+}
+
+/// [OPUS-4.8] sq-3n4: renders an object id to the sample-string form used by every
+/// histogram in this crate — literals quoted (`"v"`, `"v"@en`), IRIs bare, blanks
+/// `_:b`, triple terms via the dict's Display — truncated to `max_chars`. Factored out
+/// of the per-predicate POS scan so the per-class sample labels render objects
+/// byte-for-byte identically (same selection key, same truncation).
+fn render_object_sample(graph: &Graph, o: Id, max_chars: usize) -> String {
+    if dict::is_inline(o) {
+        return format!("\"{}\"", o - INLINE_BASE);
+    }
+    match graph.dict.term_parts(o) {
+        TermParts::Iri { prefix, suffix } => {
+            truncate_chars(&format!("{prefix}{suffix}"), max_chars)
+        }
+        TermParts::Lit {
+            value,
+            lang,
+            datatype: _,
+        } => {
+            let rendered = match lang {
+                Some(l) => format!("\"{value}\"@{l}"),
+                None => format!("\"{value}\""),
+            };
+            truncate_chars(&rendered, max_chars)
+        }
+        TermParts::Blank(b) => truncate_chars(&format!("_:{b}"), max_chars),
+        TermParts::Triple(_) => truncate_chars(&graph.dict.term(o).to_string(), max_chars),
+    }
 }
 
 /// Truncates to `max` characters on a char boundary, appending `…` when cut.
@@ -2032,5 +2156,208 @@ mod tests {
             let t = ix.schema_summary_for(&[person], budget);
             assert!(t.chars().count() <= budget, "budget {budget} overflow");
         }
+    }
+
+    /// [OPUS-4.8] sq-3n4: per-class sample labels isolate a minority class. The shared
+    /// predicate `:p` is used by a large `:Big` class (with the lexicographically
+    /// smallest object values) and a one-instance `:Minor` class (a large value). The
+    /// global per-predicate samples are the small `:Big` values — so the minority class
+    /// must NOT borrow them; its own `samples` field carries its own value, and the text
+    /// summary renders it on the minority class's line.
+    #[test]
+    fn per_class_samples_isolate_minority_class() {
+        let g = graph(
+            ":b1 a :Big ; :p \"aaa\" .
+             :b2 a :Big ; :p \"aab\" .
+             :b3 a :Big ; :p \"aac\" .
+             :m1 a :Minor ; :p \"zzz\" .",
+        );
+        let ix = Introspection::build(&g);
+
+        // The GLOBAL predicate samples are the lex-smallest across every subject — the
+        // :Big values; "zzz" is NOT among them.
+        let gp = ix
+            .predicates
+            .iter()
+            .find(|p| p.predicate == ex("p"))
+            .unwrap();
+        assert_eq!(gp.samples, vec!["\"aaa\"", "\"aab\"", "\"aac\""]);
+        assert!(!gp.samples.iter().any(|s| s == "\"zzz\""));
+
+        let class = |name: &str| ix.classes.iter().find(|c| c.class == ex(name)).unwrap();
+        let class_pred = |name: &str| {
+            class(name)
+                .predicates
+                .iter()
+                .find(|cp| cp.predicate == ex("p"))
+                .unwrap()
+        };
+
+        // The minority class's sample is ITS OWN value, not the global :Big minimum.
+        let minor = class_pred("Minor");
+        assert_eq!(minor.samples, vec!["\"zzz\""]);
+        // The big class's per-class samples are its own values (capped at 3).
+        let big = class_pred("Big");
+        assert_eq!(big.samples, vec!["\"aaa\"", "\"aab\"", "\"aac\""]);
+
+        // The text summary renders the minority class's own example on its line — the
+        // exact "looks odd on minority classes" defect the bead names.
+        let s = ix.to_text_summary(4000);
+        let minor_line = s
+            .lines()
+            .find(|l| l.contains(":p ") && l.contains("1/1"))
+            .unwrap_or_else(|| panic!("minority :p line missing:\n{s}"));
+        assert!(
+            minor_line.contains("zzz"),
+            "minority class line must show its own sample, not the global min:\n{minor_line}"
+        );
+        assert!(
+            !minor_line.contains("aaa"),
+            "minority class line must not borrow the dominant class's sample:\n{minor_line}"
+        );
+
+        // The per-class samples survive a JSON round-trip on the public surface.
+        let v: serde_json::Value = serde_json::from_str(&ix.to_json()).unwrap();
+        let classes = v["classes"].as_array().unwrap();
+        let minor_json = classes.iter().find(|c| c["class"] == ex("Minor")).unwrap();
+        let p_json = minor_json["predicates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|cp| cp["predicate"] == ex("p"))
+            .unwrap();
+        assert_eq!(p_json["samples"][0], "\"zzz\"");
+    }
+
+    /// [OPUS-4.8] sq-3n4: per-class samples are bounded by `samples_per_predicate` and
+    /// hold DISTINCT values (the per-class path feeds every triple, not POS-collapsed
+    /// distinct objects, so repeats must be de-duplicated).
+    #[test]
+    fn per_class_samples_distinct_and_bounded() {
+        // :Thing instances repeat the value "dup" and add three distinct others.
+        let g = graph(
+            ":a a :Thing ; :p \"dup\" , \"dup\" , \"m\" .
+             :b a :Thing ; :p \"dup\" , \"n\" .
+             :c a :Thing ; :p \"o\" .",
+        );
+        let opts = BuildOptions {
+            samples_per_predicate: 2,
+            ..BuildOptions::default()
+        };
+        let ix = Introspection::build_with(&g, &opts);
+        let thing = ix.classes.iter().find(|c| c.class == ex("Thing")).unwrap();
+        let cp = thing
+            .predicates
+            .iter()
+            .find(|cp| cp.predicate == ex("p"))
+            .unwrap();
+        // Cap honoured, lex-smallest distinct: "dup", "m" (NOT a duplicated "dup").
+        assert_eq!(cp.samples.len(), 2);
+        assert_eq!(cp.samples, vec!["\"dup\"", "\"m\""]);
+        let mut sorted = cp.samples.clone();
+        sorted.dedup();
+        assert_eq!(sorted.len(), cp.samples.len(), "samples must be distinct");
+    }
+
+    /// [OPUS-4.8] sq-3n4: the persisted `*.introspect` sidecar round-trips byte-exactly
+    /// through `save`/`load`, and a loaded sidecar produces the same O(output) summaries
+    /// as the freshly-built one WITHOUT re-touching the graph.
+    #[test]
+    fn sidecar_save_load_roundtrip() {
+        let g = graph(
+            ":alice rdf:type foaf:Person ; foaf:name \"Alice\" ; foaf:age 30 ; :worksAt :acme .
+             :bob   rdf:type foaf:Person ; foaf:name \"Bob\" .
+             :acme  rdf:type :Company ; :name \"Acme\" .",
+        );
+        let ix = Introspection::build(&g);
+
+        // Unique temp path (no extra dev-deps): pid + a nanosecond stamp.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "sparq-introspect-sidecar-{}-{stamp}.introspect",
+            std::process::id()
+        ));
+
+        ix.save(&path).expect("save sidecar");
+        let loaded = Introspection::load(&path).expect("load sidecar");
+        let _ = std::fs::remove_file(&path);
+
+        // Byte-exact JSON round-trip (struct equality via its canonical serialisation).
+        assert_eq!(ix.to_json(), loaded.to_json());
+        // Headline numbers and a deep field survive.
+        assert_eq!(loaded.triples, ix.triples);
+        assert_eq!(loaded.entities, ix.entities);
+        assert_eq!(loaded.classes.len(), ix.classes.len());
+        assert_eq!(
+            loaded.characteristic_sets.distinct,
+            ix.characteristic_sets.distinct
+        );
+        // Per-class samples (sq-3n4's other half) survive into the sidecar too.
+        let loaded_person = loaded
+            .classes
+            .iter()
+            .find(|c| c.class == "http://xmlns.com/foaf/0.1/Person")
+            .unwrap();
+        assert!(loaded_person
+            .predicates
+            .iter()
+            .any(|cp| !cp.samples.is_empty()));
+
+        // The whole point: every O(output) export runs off the loaded struct, no rescan.
+        assert_eq!(
+            loaded.to_text_summary(4000),
+            ix.to_text_summary(4000),
+            "loaded sidecar must reproduce the summary exactly"
+        );
+        assert_eq!(
+            loaded.to_void("http://ex.org/dataset"),
+            ix.to_void("http://ex.org/dataset")
+        );
+    }
+
+    /// [OPUS-4.8] sq-3n4: `from_json` is the in-memory inverse of `to_json`, and a
+    /// missing / malformed sidecar surfaces as a clean `io::Error`.
+    #[test]
+    fn sidecar_from_json_and_error_paths() {
+        let g = graph(":a rdf:type :T ; :p \"v\" .");
+        let ix = Introspection::build(&g);
+        let back = Introspection::from_json(&ix.to_json()).expect("parse own JSON");
+        assert_eq!(back.to_json(), ix.to_json());
+
+        // A nonexistent path is a NotFound io::Error (read failure).
+        let err = Introspection::load("/no/such/sparq-introspect-sidecar.introspect").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+        // Malformed JSON surfaces as InvalidData (parse failure mapped into io).
+        let bad = std::env::temp_dir().join(format!(
+            "sparq-introspect-bad-{}.introspect",
+            std::process::id()
+        ));
+        std::fs::write(&bad, b"{ not valid introspect json ]").unwrap();
+        let err = Introspection::load(&bad).unwrap_err();
+        let _ = std::fs::remove_file(&bad);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// [OPUS-4.8] sq-3n4: the conventional sidecar path appends `.introspect` to the
+    /// dataset name (keeping the dataset's own extension), so two datasets differing only
+    /// by extension get distinct sidecars.
+    #[test]
+    fn sidecar_path_convention() {
+        use std::path::Path;
+        assert_eq!(
+            sidecar_path_for("data/olympics.nt"),
+            Path::new("data/olympics.nt.introspect")
+        );
+        assert_eq!(
+            sidecar_path_for("data/olympics.ttl"),
+            Path::new("data/olympics.ttl.introspect")
+        );
+        // Distinct datasets that share a stem but differ by extension never collide.
+        assert_ne!(sidecar_path_for("g.nt"), sidecar_path_for("g.ttl"));
+        assert_eq!(SIDECAR_EXTENSION, "introspect");
     }
 }
