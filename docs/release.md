@@ -24,6 +24,15 @@ available; a 200 = taken). All 16 publishable crates plus the top-level `sparq` 
 checked; the npm and PyPI surface names are included for completeness. Re-run before the
 first publish — registries change.
 
+For the **PyPI** row, that re-run is one command (`scripts/check-pypi-name.py --check`,
+sq-ed5): it reads the distribution name from `crates/sparq-py/pyproject.toml` (`sparq-rdf`)
+and queries the PyPI JSON API with the same 404-available / 200-taken convention, exiting 0
+(available) / 1 (taken) / 2 (indeterminate). `--expect available|taken` asserts the expected
+state for a `&&` chain before `maturin upload`; `--name <n>` checks an explicit name. (Live
+mode needs network; the hermetic decision-table + name-reader self-test runs in CI's
+`ci-scripts` lane.) crates.io has no separate pre-flight script — `cargo publish` aborts on a
+taken name itself.
+
 | Name | Registry | Status |
 |---|---|---|
 | `sparq` | crates.io | available |

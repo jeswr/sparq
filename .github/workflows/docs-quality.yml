@@ -276,6 +276,15 @@ jobs:
         run: shellcheck scripts/tests/test_typ_honesty_gates.sh
       - name: Self-test the .typ honesty-gate coverage (perf + privacy, both directions)
         run: bash scripts/tests/test_typ_honesty_gates.sh
+      # [OPUS-4.8] sq-ed5: the pre-publish PyPI distribution-name availability check
+      # (scripts/check-pypi-name.py) is the runnable half of docs/release.md §0a — its
+      # LIVE `--check` mode hits the PyPI JSON API (network) and is maintainer-run at
+      # release time, but its PURE decision table (200/404/other -> verdict) + the
+      # pyproject `[project] name` reader are hermetic. The self-test ALSO pins the
+      # declared distribution name to `sparq-rdf` (the bare `sparq` is taken — sq-8slf),
+      # so a silent rename back to the taken name fails CI here. Stdlib-only, no network.
+      - name: Self-test check-pypi-name.py (decision table + dist-name reader)
+        run: python3 scripts/check-pypi-name.py --self-test
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
