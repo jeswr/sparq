@@ -7,13 +7,15 @@ import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
 import { LogoGallery } from "@/components/brand/logo-gallery";
 
-// [OPUS-4.8] sq-jnh9 — shield + lightning logo CONCEPTS gallery for issue #207.
-// Additive: it does NOT replace the live favicon/header Logo; it is a chooser the
-// maintainer can eyeball in the exported site before picking a direction.
+// [OPUS-4.8] sq-8pbx — shield + lightning logo CONCEPTS gallery for issue #207.
+// ROUND 2: the maintainer rejected the entire first round (too generic). This is a
+// fresh, higher-quality set with tighter silhouettes and chunkier favicon-legible
+// bolts. Additive: it does NOT replace the live favicon/header Logo; it is a chooser
+// the maintainer can eyeball in the exported site before picking a direction.
 export const metadata: Metadata = {
   title: "Logo concepts",
   description:
-    "Shield + lightning-bolt logo concepts for sparq (issue #207) — security + speed, in the teal brand palette. Concepts to choose from; they do not replace the current mark yet.",
+    "Shield + lightning-bolt logo concepts for sparq (issue #207) — security + speed, in the teal brand palette. A fresh, higher-quality round; concepts to choose from, they do not replace the current mark yet.",
 };
 
 export default function BrandPage() {
@@ -35,15 +37,19 @@ export default function BrandPage() {
           Shield + lightning logo concepts
         </h1>
         <p className="measure text-muted-foreground">
-          A fresh pass on the sparq mark around a{" "}
+          A <strong>second, higher-quality round</strong> on the sparq mark around a{" "}
           <strong>shield fused with a lightning bolt</strong> — the two pillars of
           sparq, <strong>security</strong> (verifiable / ZK query proofs) and{" "}
-          <strong>speed</strong> (a fast SPARQL engine). Every concept reuses the
-          real site palette: the privacy-first teal brand token (the same{" "}
-          <code>--primary</code> used across the site) and the established warm
-          spark accent. Marks use <code>currentColor</code> where it helps, so they
-          follow the light / dark theme; each is previewed below on both a light and
-          a dark field and at favicon sizes.
+          <strong>speed</strong> (a fast SPARQL engine). The first round was rejected
+          for reading too generically; this set rebuilds each mark with a{" "}
+          <strong>tighter, more modern silhouette</strong> (flatter shoulders /
+          confident point, or a real app-tile squircle — not a floppy heraldic
+          pentagon) and a <strong>chunky negative-space bolt</strong> that stays
+          legible at 16px. Every concept uses the real site teal (the same{" "}
+          <code>--primary</code> token, with an sRGB hex fallback for standalone
+          export) and leans far less on the warm accent that cluttered the first
+          round. Each is previewed below on both a light and a dark field and at
+          favicon sizes.
         </p>
         <p className="measure text-sm text-muted-foreground">
           These are <strong>concepts to choose from</strong> — they do not replace
@@ -57,8 +63,12 @@ export default function BrandPage() {
           >
             issue #207
           </a>
-          . Pick a direction (or mix and match a mark with a wordmark treatment) and
-          it can be wired into the favicon + header in a follow-up.
+          . Each mark was rasterised at 16 / 32 / 64 / 256px on light and dark fields
+          during design and the geometry tuned against what the rendered pixels
+          actually showed (no external image-generation API was available, so these
+          are hand-authored SVGs). Pick a direction (or mix and match a mark with a
+          wordmark treatment) and it can be wired into the favicon + header in a
+          follow-up.
         </p>
       </header>
 
