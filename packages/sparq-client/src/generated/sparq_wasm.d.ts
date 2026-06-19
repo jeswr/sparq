@@ -181,6 +181,36 @@ export class Store {
      */
     static loadDataset(text: string, format: string): Store;
     /**
+     * [OPUS-4.8] sq-quly (#796): parses a **SHACL Compact Syntax (SCS)** document
+     * into the equivalent SHACL **shapes graph** and returns it as a **pretty
+     * Turtle** string.
+     *
+     * `text` is an SCS document (the W3C compact syntax — `shape`/`shapeClass`,
+     * path expressions, `[min..max]`, `nodeKind`, `@`shape-refs, `param=value`,
+     * `!`/`|`, nested `{…}` and `[…]`, directives). `base` (optional) is the base
+     * IRI that relative IRIs and the `owl:Ontology` subject resolve against; pass
+     * `undefined`/`null` for the SCS no-`BASE` convention
+     * (`urn:x-base:default`). A document-level `BASE` directive overrides it.
+     *
+     * The returned Turtle is byte-for-byte what [`serialize`](Self::serialize)
+     * produces for the same graph with `("turtle", pretty=true, indent="  ",
+     * abbreviate=true)` — a sorted, blank-line-separated, `@prefix`-headed document
+     * (the `sh:` / `rdf:` / `rdfs:` / `xsd:` / `owl:` well-known prefixes are
+     * compacted). It re-parses as standard Turtle, and the shapes it carries
+     * validate data **identically** to the equivalent hand-written Turtle shapes —
+     * it is the same triples [`validate`](Self::validate) consumes. This is the
+     * SCS *input* counterpart for the playground's "Compact → shapes" mode.
+     *
+     * This is a **stateless** one-shot — it does not consult the receiver's stored
+     * triples (build a throwaway store with `Store.load("", "turtle")` to call it).
+     * Errors only when SCS parsing fails (a `JsError` carrying the parser's message
+     * + 1-based line); serialising the parsed graph is infallible. Available only
+     * when the crate is built with the OPT-IN `scs` feature (which implies `shacl`
+     * + `serialize-rdf`) — the site REPL bundle enables it; the lean default bundle
+     * does not.
+     */
+    parseShaclCompact(text: string, base?: string | null): string;
+    /**
      * Runs a SELECT query and returns the results as a SPARQL 1.1 JSON string
      * (`application/sparql-results+json`). Benefits from the engine's streaming
      * optimisations: LIMIT stops the scan early, numeric FILTERs are pushed into
@@ -355,6 +385,7 @@ export interface InitOutput {
     readonly store_load: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_loadCompressed: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_loadDataset: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly store_parseShaclCompact: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly store_query: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_queryChunks: (a: number, b: number, c: number) => [number, number, number];
     readonly store_queryCursor: (a: number, b: number, c: number, d: number) => [number, number, number];

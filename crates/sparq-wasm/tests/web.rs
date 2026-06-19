@@ -676,3 +676,81 @@ mod shacl {
         assert!(bad.is_err(), "a truncated data graph must return Err");
     }
 }
+
+// ---- [OPUS-4.8] sq-quly (#796): the opt-in SCS parse binding, in real wasm ----
+//
+// These exercise the REAL exported `Store::parseShaclCompact(text, base?)` through the
+// wasm/JS boundary — both the shapes-graph Turtle string it returns AND the JsError arm
+// for a malformed SCS document (which DOES touch `JsError::new`, untestable natively).
+// Compiled only under the `scs` feature, exactly as the binding is. The native
+// `#[cfg(test)]` tests in src/scs.rs assert the engine-writer parity + that the parsed
+// shapes drive validation; this proves the method actually exports to and runs in wasm.
+#[cfg(feature = "scs")]
+mod scs {
+    use super::*;
+
+    // SCS document exercising a shapeClass + property shapes with a path, datatype and
+    // a `[1..1]` cardinality (the playground "Compact → shapes" input shape).
+    const SCS: &str = "\
+PREFIX ex: <http://example.org/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+shapeClass ex:Person {
+\tex:name xsd:string [1..1] .
+\tex:age xsd:integer .
+}
+";
+
+    /// `parseShaclCompact` parses an SCS document and returns the shapes graph as a
+    /// Turtle string carrying the key shape triples (the node-shape type, the Person
+    /// shape IRI, and both property paths) — proved across the JS boundary in a real
+    /// wasm32 runtime. The returned document re-parses through `Store.load`.
+    #[wasm_bindgen_test]
+    fn parse_shacl_compact_round_trips() {
+        let store = Store::load("", "turtle").expect("empty store loads");
+        let ttl = store
+            .parse_shacl_compact(SCS, None)
+            .expect("SCS must parse + serialise across the boundary");
+        // Key shape triples present.
+        assert!(ttl.contains("sh:NodeShape"), "node shape type: {ttl}");
+        assert!(
+            ttl.contains("<http://example.org/Person>"),
+            "Person shape IRI: {ttl}"
+        );
+        assert!(
+            ttl.contains("<http://example.org/name>"),
+            "ex:name path: {ttl}"
+        );
+        assert!(
+            ttl.contains("<http://example.org/age>"),
+            "ex:age path: {ttl}"
+        );
+        // The returned Turtle re-parses (a real, loadable shapes graph) — round-trip.
+        let reparsed = Store::load(&ttl, "turtle").expect("shapes Turtle re-parses");
+        assert!(reparsed.size() > 0, "shapes graph is non-empty");
+    }
+
+    /// The explicit `base` argument resolves a relative shape IRI when the SCS document
+    /// declares no `BASE` — the optional second arg crosses the boundary correctly.
+    #[wasm_bindgen_test]
+    fn parse_shacl_compact_uses_base_argument() {
+        let store = Store::load("", "turtle").unwrap();
+        let ttl = store
+            .parse_shacl_compact("shape <#S> {\n}\n", Some("http://b.example/".to_string()))
+            .unwrap();
+        assert!(
+            ttl.contains("<http://b.example/#S>"),
+            "base argument resolves the relative IRI: {ttl}"
+        );
+    }
+
+    /// A malformed SCS document surfaces as the `JsError` Err arm across the boundary,
+    /// not a trap — the error path JS relies on (`try { store.parseShaclCompact(...) }`).
+    #[wasm_bindgen_test]
+    fn scs_parse_error_is_err() {
+        let store = Store::load("", "turtle").unwrap();
+        // An unterminated shape block is a parse error.
+        let bad = store.parse_shacl_compact("shape <#S> {\n", None);
+        assert!(bad.is_err(), "a malformed SCS document must return Err, not panic");
+    }
+}
