@@ -223,7 +223,7 @@ swallowing a syntax error).
 - **Chunked-vs-serial differential oracle**: `parallel_turtle_bnodes_match_serial`
   (`lib.rs:3357`) asserts `canon_bnodes(chunked) == canon_bnodes(serial)` over
   pathological docs (shared bnode labels across boundaries, anonymous nests,
-  collections, RDF-star); companions at `lib.rs:3205, 3255, 3488`; N-Triples
+  collections, RDF 1.2 triple terms); companions at `lib.rs:3205, 3255, 3488`; N-Triples
   equivalents at `lib.rs:4109` and `lib.rs:4159` (short-read streaming path).
 - **Rejection oracles**: `parallel_turtle_rejects_malformed` (`lib.rs:3590`,
   8 malformed inputs, asserts both serial and chunked return `Err` at fan-out

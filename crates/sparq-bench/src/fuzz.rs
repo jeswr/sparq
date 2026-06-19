@@ -256,7 +256,7 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         // Agreement with Oxigraph over thousands of cases validates the spilled id
         // assignment + streamed dictionary end-to-end. The parsed graph is re-serialized
         // to N-Triples (the only format the spill path accepts; the generated Turtle is
-        // RDF-star-free, so terms round-trip exactly).
+        // triple-term-free, so terms round-trip exactly).
         let g = if std::env::var("SPARQ_FUZZ_DICTSPILL").is_ok() {
             let scan = g.store.scan(&[None, None, None]);
             let mut nt = String::new();

@@ -81,7 +81,7 @@ is met retroactively and correctly.
   chunks; each chunk-worker interns into it (component-level, no per-chunk owned `Dict`); one parallel
   final remap via `finish_sharded`. Single-thread keeps the proven serial path. The earlier blocker —
   the sharded interner rejected RDF 1.2 triple terms — is **gone**: `sq-87bq` made the sharded merge
-  consolidate triple terms (`lib.rs:3634-3641`), so Turtle (which can carry RDF-star) is now eligible.
+  consolidate triple terms (`lib.rs:3634-3641`), so Turtle (which can carry RDF 1.2 triple terms) is now eligible.
 - **Opt-in/lean note:** Already under the existing `parallel` feature; no new dep, no core-bloat.
 - **How measured (canonical runner, NOT this EC2 box):** `bench/parse` `bench-ttl` 1T-vs-8T scaling
   ratio on the predicate-grouped Wikidata-shaped Turtle slice, before/after. The durable claim is the

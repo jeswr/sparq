@@ -180,9 +180,8 @@ variable repeated, vars under GRAPH, and annotation sugar `:s :p :o {| :q :z |}`
 Constant triple-term machinery works (12 passes incl. all-graph-triples dumps and
 constant matches), but: `=` value-equality between triple terms whose inner literals
 are value-equal-but-not-identical (`01` vs `1`) fails; ORDER BY does not implement the
-SPARQL 1.2 total order extension (triple terms sort AFTER literals; `Embedded triple -
-ORDER BY` / `ordering` put them elsewhere); `Pattern - Nesting 1` loses a doubly-nested
-match.
+SPARQL 1.2 total order extension (triple terms sort AFTER literals; the
+`Embedded triple - ORDER BY` / `ordering` W3C SPARQL 1.2 test cases put them elsewhere); `Pattern - Nesting 1` loses a doubly-nested match. <!-- terminology-allow: "Embedded triple - ORDER BY" is the verbatim W3C SPARQL 1.2 test-case name (manifest label), cited as-is, not prose. -->
 
 #### F17. EBV type-error propagation (1.2 `expression/not-not`) — 1 test
 `!!?v` over `"a"@en`, `"z"^^xsd:boolean`, ill-typed numerics etc. must leave `?ebv`

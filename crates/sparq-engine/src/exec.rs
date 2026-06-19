@@ -3727,7 +3727,7 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
     if view::default_is_empty() {
         return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
-    // RDF 1.2 quoted-triple patterns with variables decompose into synthetic-variable
+    // RDF 1.2 triple-term patterns with variables decompose into synthetic-variable
     // slots + structural-unification relations, joined by the ordinary machinery (F14).
     let (rewritten, constraints) = extract_quoted_constraints(patterns);
     if !constraints.is_empty() {
@@ -3748,21 +3748,21 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
     eval_bgp_binary(graph, patterns, &[])
 }
 
-// ---- RDF 1.2 quoted-triple patterns with variables (F14) ----------------------
+// ---- RDF 1.2 triple-term patterns with variables (F14) ----------------------
 
-/// Prefix for the synthetic variables standing in for a quoted-triple pattern slot
+/// Prefix for the synthetic variables standing in for a triple-term pattern slot
 /// (like [`BNODE_VAR_PREFIX`], `#` cannot appear in a SPARQL VARNAME).
 const QT_VAR_PREFIX: &str = "#qt#";
 
-/// One BGP slot that held a quoted-triple pattern CONTAINING VARIABLES, replaced by a
+/// One BGP slot that held a triple-term pattern CONTAINING VARIABLES, replaced by a
 /// synthetic variable. Its relation enumerates every stored triple term and unifies it
-/// structurally against the quoted pattern, binding the inner variables.
+/// structurally against the triple-term pattern, binding the inner variables.
 struct QuotedConstraint {
     var: Variable,
     pattern: TriplePattern,
 }
 
-/// `true` when a quoted-triple pattern has a variable / blank node anywhere inside
+/// `true` when a triple-term pattern has a variable / blank node anywhere inside
 /// (such a pattern cannot resolve to a single dictionary id).
 fn quoted_has_var(t: &TriplePattern) -> bool {
     fn slot(tp: &TermPattern) -> bool {
@@ -3775,9 +3775,9 @@ fn quoted_has_var(t: &TriplePattern) -> bool {
     slot(&t.subject) || matches!(t.predicate, NamedNodePattern::Variable(_)) || slot(&t.object)
 }
 
-/// Rewrites the BGP: every subject/object slot holding a variable-carrying quoted-triple
-/// pattern becomes a fresh synthetic variable, with the quoted pattern recorded as a
-/// [`QuotedConstraint`]. Ground quoted triples are untouched (they resolve to one id).
+/// Rewrites the BGP: every subject/object slot holding a variable-carrying triple-term
+/// pattern becomes a fresh synthetic variable, with the triple-term pattern recorded as a
+/// [`QuotedConstraint`]. Ground triple terms are untouched (they resolve to one id).
 fn extract_quoted_constraints(patterns: &[TriplePattern]) -> (Vec<TriplePattern>, Vec<QuotedConstraint>) {
     let mut out = Vec::with_capacity(patterns.len());
     let mut constraints: Vec<QuotedConstraint> = Vec::new();
@@ -3797,7 +3797,7 @@ fn extract_quoted_constraints(patterns: &[TriplePattern]) -> (Vec<TriplePattern>
     (out, constraints)
 }
 
-/// The variables of a quoted-triple pattern in first-occurrence order (blank nodes as
+/// The variables of a triple-term pattern in first-occurrence order (blank nodes as
 /// their synthetic existential variables), appended to `out` without duplicates.
 fn collect_quoted_vars(t: &TriplePattern, out: &mut Vec<Variable>) {
     fn push(out: &mut Vec<Variable>, v: Variable) {
@@ -3857,8 +3857,8 @@ fn bind_quoted_var(v: &Variable, id: Id, vars: &[Variable], binds: &mut [Id]) ->
     }
 }
 
-/// Structurally unifies a quoted-triple pattern against a stored triple term's
-/// component ids, recursing through nested quoted patterns.
+/// Structurally unifies a triple-term pattern against a stored triple term's
+/// component ids, recursing through nested triple-term patterns.
 fn unify_quoted(graph: &Graph, pat: &TriplePattern, comps: [Id; 3], vars: &[Variable], binds: &mut [Id]) -> bool {
     fn slot(graph: &Graph, tp: &TermPattern, id: Id, vars: &[Variable], binds: &mut [Id]) -> bool {
         match tp {
@@ -3917,7 +3917,7 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     if view::default_is_empty() {
         return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
-    // Quoted-triple patterns with variables (F14): the conjunctive-flattening path calls
+    // Triple-term patterns with variables (F14): the conjunctive-flattening path calls
     // this directly (bypassing eval_bgp), so the decomposition must happen here too.
     // The rewrite preserves pattern count/order, so `pat_filters` indexes stay aligned.
     let (rewritten, constraints) = extract_quoted_constraints(patterns);
@@ -8440,9 +8440,9 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
         TermPattern::BlankNode(b) => Ok(Term::BlankNode(b.clone())),
         TermPattern::Literal(l) => Ok(Term::Literal(l.clone())),
         TermPattern::Variable(_) => Err("variable where a term was expected".into()),
-        // RDF-star GROUND triple term `<<( s p o )>>` (RDF 1.2): build the structural
+        // GROUND triple term `<<( s p o )>>` (RDF 1.2): build the structural
         // `Term::Triple`, which the dictionary interns/looks up by its component ids.
-        // A variable INSIDE a quoted-triple pattern (sq-kbs / T6) is handled UPSTREAM by
+        // A variable INSIDE a triple-term pattern (sq-kbs / T6) is handled UPSTREAM by
         // BGP decomposition (`extract_quoted_constraints` -> `quoted_relation`), which
         // rewrites any variable-carrying quoted slot into a synthetic variable before this
         // resolver runs. So in a parsed query this function only ever sees a GROUND triple
@@ -9579,7 +9579,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_structural_roundtrip_output() {
-        // Loading RDF-star Turtle and selecting the triple term materialises a structural
+        // Loading RDF 1.2 triple-term Turtle and selecting the triple term materialises a structural
         // `Term::Triple` (oxrdf formats it as `<<( … )>>`), NOT the old canonical-string
         // literal stopgap.
         let g = Graph::load_str("PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .", "turtle").unwrap();
@@ -9647,7 +9647,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_variables_inside_quoted_patterns() {
-        // F14: variables inside quoted-triple patterns MATCH structurally against the
+        // F14: variables inside triple-term patterns MATCH structurally against the
         // stored triple terms, binding the inner variables.
         let g = Graph::load_str(
             "PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .\n<< :bob :age 25 >> :certainty 0.4 .\n:alice :name \"Alice\" .",
@@ -9674,7 +9674,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_quoted_pattern_var_positions_bind() {
-        // sq-kbs (T6): a variable in EACH position of a quoted-triple pattern binds to
+        // sq-kbs (T6): a variable in EACH position of a triple-term pattern binds to
         // the matching component of the stored triple term, and the bound VALUES are
         // exactly the subject/predicate/object of the reified statement.
         let g = Graph::load_str(
@@ -9732,7 +9732,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_quoted_pattern_all_vars_enumerate() {
-        // sq-kbs (T6): `<< ?s ?p ?o >>` enumerates EVERY stored quoted triple, binding all
+        // sq-kbs (T6): `<< ?s ?p ?o >>` enumerates EVERY stored triple term, binding all
         // three slots, and the count equals the number of distinct reified statements.
         let g = Graph::load_str(
             "PREFIX : <http://ex/>\n\
@@ -9754,7 +9754,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_quoted_pattern_nested_one_level() {
-        // sq-kbs (T6): a quoted triple NESTED (one level) inside a quoted-triple pattern
+        // sq-kbs (T6): a triple term NESTED (one level) inside a triple-term pattern
         // unifies recursively — the inner variables bind to the inner statement's parts.
         let g = Graph::load_str(
             "PREFIX : <http://ex/>\n<< << :alice :age 30 >> :statedBy :bob >> :certainty 0.8 .",

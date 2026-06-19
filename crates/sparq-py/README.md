@@ -55,7 +55,7 @@ g.ask("PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }")   # -> True
   OWL 2 RL clash list. Notation3 rules load via `sparq.Graph.load_n3(...)` or apply
   to an existing graph with `g.reason_n3_with(rules)` — the graph's blank nodes are
   renamed under a reserved `sparqg` prefix first, so a rule's blank-node label
-  cannot alias an existing data node; RDF-star triple terms have no N3 form and are
+  cannot alias an existing data node; RDF 1.2 triple terms have no N3 form and are
   rejected there.
 - **Opt-in BM25 full-text search** — `g.text_search("ali*")` (ranked
   `[(Term, score), …]`; `any=True` for OR, `limit=n` for top-n) and the `text:`

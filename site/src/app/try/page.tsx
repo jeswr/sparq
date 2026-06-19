@@ -20,7 +20,7 @@ export default function TryPage() {
           sent to a server. The lean bundle ships the parser, triplestore and SPARQL
           1.1/1.2 engine: SELECT / ASK / CONSTRUCT / DESCRIBE and SPARQL Update
           (INSERT / DELETE, mutating the in-tab store), over BGP, FILTER, OPTIONAL, UNION,
-          MINUS, BIND, VALUES, aggregates, property paths, sub-SELECT and RDF-star. Switch
+          MINUS, BIND, VALUES, aggregates, property paths, sub-SELECT and RDF 1.2 triple terms. Switch
           to the EXPLAIN / ANALYZE mode to inspect the query plan.
         </p>
         <p className="measure text-muted-foreground">

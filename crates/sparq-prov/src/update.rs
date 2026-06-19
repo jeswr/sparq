@@ -311,7 +311,7 @@ fn partition_effects(effects: &[UpdateEffect]) -> (Vec<Triple>, Vec<Triple>) {
 ///
 /// In well-formed RDF the subject is a NamedNode or BlankNode and the predicate a
 /// NamedNode; the engine only ever produces such triples for the data operations (the
-/// SPARQL grammar forbids a literal/quoted-triple subject or a non-IRI predicate). A
+/// SPARQL grammar forbids a literal/triple-term subject or a non-IRI predicate). A
 /// malformed shape is skipped rather than panicking — defensive, never expected.
 fn terms_to_triple(terms: &[Term; 3]) -> Option<Triple> {
     let subject = match &terms[0] {

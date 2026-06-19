@@ -147,7 +147,7 @@ Grounded in `crates/sparq-vectors` (+ `-sim`, `-introspect`, `-nlq`, `-text`) an
   <https://arxiv.org/pdf/2408.04948>, <https://www.microsoft.com/en-us/research/blog/lazygraphrag-setting-a-new-standard-for-quality-and-cost/>.
   **Almost all GraphRAG is property-graph/Cypher + LLM-built graphs with weak/no formal semantics** — the
   opening for an RDF+OWL/N3, out-of-core, **provenance-carrying** GraphRAG.
-- **Provenance-carrying grounded answers.** SPARQL `GRAPH` + RDF-star justification → every answer triple
+- **Provenance-carrying grounded answers.** SPARQL `GRAPH` + RDF 1.2 triple-term justification → every answer triple
   carries source + (for inferred triples) rule + premises. The antidote to "trust-me" RAG; KGs reduce LLM
   hallucination (survey arXiv:2311.07914) `[established]`.
 

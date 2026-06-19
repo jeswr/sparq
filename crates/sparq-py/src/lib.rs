@@ -110,7 +110,7 @@ impl Term {
                 // round-trips through `query` at parity with `query_json`.
                 direction: l.direction().map(|d| d.to_string()),
             },
-            // RDF-star quoted triple: keep the N-Triples rendering as the value.
+            // RDF 1.2 triple term: keep the N-Triples rendering as the value.
             oxrdf::Term::Triple(t) => Term {
                 kind: "triple".into(),
                 value: t.to_string(),
@@ -468,7 +468,7 @@ impl Graph {
     /// The graph's triples join the document as ground facts. This graph's blank
     /// nodes are renamed under a reserved `sparqg` prefix before composition, so
     /// a blank-node label in `rules` can NOT alias an existing data node (rule-
-    /// local blanks stay rule-local; review 1961). RDF-star triple terms have no
+    /// local blanks stay rule-local; review 1961). RDF 1.2 triple terms have no
     /// N3 form and are rejected.
     fn reason_n3_with(&mut self, py: Python<'_>, rules: &str) -> PyResult<usize> {
         use std::fmt::Write as _;
@@ -655,7 +655,7 @@ impl Graph {
     // `pyo3_runtime.PanicException` instead of `panic = "abort"` killing the
     // interpreter. The engine itself proved robust — no normal-input
     // query/update/load reaches a panic (verified empirically while writing
-    // test_parity.py: division-by-zero, bad regex, RDF-star, unsupported
+    // test_parity.py: division-by-zero, bad regex, RDF 1.2 triple terms, unsupported
     // patterns all return a clean ValueError), so there is no organic input that
     // drives a panic. This private hook is the only reliable way to assert the
     // unwind path is wired correctly. The leading underscore marks it private;

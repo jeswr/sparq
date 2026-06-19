@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn xml_triple_term_with_a_blank_node_subject() {
-        // [OPUS-4.8] sq-4vao: a quoted triple whose SUBJECT is a blank node exercises the
+        // [OPUS-4.8] sq-4vao: a triple term whose SUBJECT is a blank node exercises the
         // `NamedOrBlankNode::BlankNode` subject arm of the `<triple>` XML encoder (the existing
         // triple-term test only covers a named-node subject). The bnode label is data-dependent,
         // so assert on the structural `<bnode>` element, not its id.

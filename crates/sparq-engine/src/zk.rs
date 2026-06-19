@@ -68,7 +68,7 @@
 //! [`PatternMatches::graph`]).
 //!
 //! NOT captured — marked instead: property-path expansion and RDF-1.2
-//! quoted-triple structural-unification relations scan the store without
+//! triple-term structural-unification relations scan the store without
 //! per-pattern attribution; they record an [`Op::Path`] /
 //! [`Op::QuotedTriples`] marker so a consumer can FAIL CLOSED
 //! ([`ZkTrace::first_uncaptured`]) instead of building an insufficient
@@ -179,7 +179,7 @@ pub enum Op {
     Group,
     /// Property-path expansion — inputs NOT captured (fail closed).
     Path,
-    /// RDF-1.2 quoted-triple unification relation — inputs NOT captured.
+    /// RDF 1.2 triple-term unification relation — inputs NOT captured.
     QuotedTriples,
 }
 
@@ -445,7 +445,7 @@ pub(crate) fn record_scan_ids(
 /// constant (a term not in the dictionary ⇒ provably empty input set) or a
 /// pattern short-circuited by a sibling's emptiness. The key is built from
 /// the algebra pattern, since unresolvable constants have no ids. `None`
-/// keys (quoted-triple slots) are skipped — the [`Op::QuotedTriples`] marker
+/// keys (triple-term slots) are skipped — the [`Op::QuotedTriples`] marker
 /// covers them.
 pub(crate) fn record_empty_pattern(pattern: Option<PatternKey>) {
     let Some(pattern) = pattern else { return };
@@ -466,7 +466,7 @@ pub(crate) fn record_empty_pattern(pattern: Option<PatternKey>) {
     });
 }
 
-/// The [`PatternKey`] of an algebra triple pattern (`None` for quoted-triple
+/// The [`PatternKey`] of an algebra triple pattern (`None` for triple-term
 /// slots — those take the [`Op::QuotedTriples`] marker path). Blank nodes in
 /// query patterns are non-distinguished variables; they key as a reserved
 /// variable name (the stage-1 fragment rejects them anyway).

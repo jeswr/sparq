@@ -9,7 +9,7 @@
 
 Hartig's corpus is unusually well-aligned with sparq's two open research fronts:
 **federation** (SERVICE, source selection, heterogeneous interfaces) and
-**broad-SPARQL** (RDF-star/RDF 1.2 completeness, OPTIONAL/well-designed semantics,
+**broad-SPARQL** (RDF 1.2 completeness, OPTIONAL/well-designed semantics,
 provenance, property paths on the Web). He is a primary author on the standards
 (RDF-star CG report, RDF 1.2, SPARQL 1.2) and on the foundational theory
 (link traversal, Linked Data Fragments, FedQPL, cost models).
@@ -26,13 +26,13 @@ Inventory from the codebase (paths are repo-relative):
 | Hartig theme | sparq status today |
 |---|---|
 | **SPARQL SERVICE / federation** | **Present.** `crates/sparq-engine/src/service.rs` + `eval_service` in `crates/sparq-engine/src/exec.rs`. Blocking `ureq` HTTP SPARQL client (`HttpTransport`, service.rs:443) behind a `Transport` trait; SPARQL-Results-JSON parser (`parse_srj`, service.rs:81) incl. RDF 1.2 `triple` bindings + base-direction. `SERVICE SILENT` supported. Strong default-deny SSRF egress filter. **Gaps:** the inner pattern is forwarded **verbatim** as `SELECT * WHERE {…}`, materialised, then joined locally — **no bindings pushdown, no source selection, no cost model, no `SERVICE ?var`** (explicitly rejected, exec.rs:1959). A local `bind_join` (exec.rs:4464) exists but is an intra-engine index-nested-loop join, *not* federation-level bound joins. |
-| **RDF-star / SPARQL-star / RDF 1.2 triple terms** | **Present, RDF 1.2 flavour.** Triple terms are first-class RDF terms via `oxrdf::Term::Triple` (`rdf-12` feature). Custom N-Triples/N-Quads parser handles `<<( s p o )>>` triple terms (object position only — `crates/sparq-core/src/nt.rs:314`, subject-position rejected nt.rs:534); Turtle/TriG via `oxttl`. All SPARQL-star functions present (`TRIPLE`, `isTRIPLE`, `SUBJECT`, `PREDICATE`, `OBJECT` — exec.rs:7066–7099) plus `rdf:reifies` reification (exec.rs:8921). **Gaps:** subject-position triple terms in the custom NT parser; sharded parallel-dict merge falls back when triple terms present (`crates/sparq-core/src/lib.rs:3645`, the `has_triple_terms` serial-path guard); no annotation-syntax sugar (`{\| … \|}`). |
+| **RDF 1.2 triple terms (+ SPARQL 1.2)** | **Present, RDF 1.2 flavour.** Triple terms are first-class RDF terms via `oxrdf::Term::Triple` (`rdf-12` feature). Custom N-Triples/N-Quads parser handles `<<( s p o )>>` triple terms (object position only — `crates/sparq-core/src/nt.rs:314`, subject-position rejected nt.rs:534); Turtle/TriG via `oxttl`. All SPARQL 1.2 triple-term functions present (`TRIPLE`, `isTRIPLE`, `SUBJECT`, `PREDICATE`, `OBJECT` — exec.rs:7066–7099) plus `rdf:reifies` reification (exec.rs:8921). **Gaps:** subject-position triple terms in the custom NT parser; sharded parallel-dict merge falls back when triple terms present (`crates/sparq-core/src/lib.rs:3645`, the `has_triple_terms` serial-path guard); no annotation-syntax sugar (`{\| … \|}`). |
 | **Triple Pattern Fragments / LDF / brTPF** | **Absent.** Zero matches for `TPF`/`brTPF`/`hydra`/`linked data fragment` in `crates/*/src`. |
 | **Link traversal / follow-your-nose** | **Absent.** `traversal`/`reachability` only refer to in-engine property-path closure (`eval_path`, exec.rs:2568); `dereference` only in `FROM`/`LOAD`/`owl:imports`. No web link-traversal query mode. |
 | **Provenance (annotated RDF / why-where)** | **Absent as a data model.** Only: LLM-transcript "provenance" in `sparq-nlq`, reasoner first-derivation provenance (`crates/sparq-reason/src/incremental_explain.rs`), HDT VoID header metadata. Named graphs (`GRAPH`) exist but are not wired as a provenance model. |
 | **SPARQL optimiser / semantics** | **Present.** Greedy Operator Ordering (`goo_seed`/`goo_pick`, exec.rs:3476/3605) on cardinality + ndv estimates; characteristic-set table (`cs.rs`) for star patterns; WCOJ Leapfrog Triejoin for cyclic BGPs vs binary sort-merge for acyclic; filter pushdown; bag (multiset) semantics throughout. **Gap:** no explicit **well-designed-pattern / OPT+** OPTIONAL rewriting. |
 
-So Hartig's work touches **two present-but-shallow** areas (SERVICE federation, RDF-star)
+So Hartig's work touches **two present-but-shallow** areas (SERVICE federation, RDF 1.2 triple terms)
 and **three entirely missing** areas (TPF/brTPF, link traversal, provenance) plus an
 **optimiser refinement** (well-designed OPTIONAL).
 
@@ -120,7 +120,7 @@ c_Match / c_All / c_None reachability criteria) rather than the whole Web.
 
 ---
 
-## 4. RDF-star / SPARQL-star → RDF 1.2 triple terms + SPARQL 1.2
+## 4. RDF 1.2 triple terms + SPARQL 1.2 (formerly RDF-star / SPARQL-star)
 
 **Summary.** Hartig co-originated RDF*/SPARQL* (statement-level metadata by embedding a
 triple as the subject/object of another triple) and co-chaired its standardisation into
@@ -135,7 +135,7 @@ reification, with the annotation syntax `{| … |}` and `rdf:reifies`.
 - W3C *RDF 1.2 Concepts* (CR, Apr 2026) and *SPARQL 1.2 Query Language* (WD) — Hartig editor.
 
 **sparq status & candidate features.** sparq is **already strong here** (first-class triple
-terms, all SPARQL-star functions, `rdf:reifies`). The candidate features are **completeness
+terms, all SPARQL 1.2 triple-term functions, `rdf:reifies`). The candidate features are **completeness
 gaps**, not greenfield:
 - **(4a) Subject-position triple terms in the custom N-Triples/N-Quads parser**
   (currently object-only, nt.rs:534) → **FIT: `clear-fit:sparq-core/nt`. Impact 2. Effort S.**
@@ -143,7 +143,7 @@ gaps**, not greenfield:
   the matching SPARQL annotation syntax, tracking the moving SPARQL 1.2 WD → **FIT:
   `clear-fit:sparq-engine` (+ parser). Impact 3. Effort M.**
 - **(4c) Triple-term-aware sharded dictionary merge** (remove the `has_triple_terms`
-  fallback at `crates/sparq-core/src/lib.rs:3645` so RDF-star bulk loads keep full parallelism) → **FIT:
+  fallback at `crates/sparq-core/src/lib.rs:3645` so RDF 1.2 triple-term bulk loads keep full parallelism) → **FIT:
   `clear-fit:sparq-core`. Impact 2. Effort M.**
 - **(4d) Conformance-track SPARQL 1.2 as the spec finalises** (Hartig is editor; sparq
   should follow the rec) → **FIT: `clear-fit:sparq-engine`. Impact 3. Effort M (ongoing).**
@@ -181,7 +181,7 @@ finds none (the existing `LeftJoin` handling is plain evaluation + a count-pushd
 **Summary.** Hartig's early line treats provenance as a first-class, queryable citizen:
 a provenance model distinguishing data-creation vs data-access provenance, publishing/
 consuming provenance metadata on the Web, and **tSPARQL** (trust-weighted SPARQL). The
-RDF-star work later gives the *mechanism* (statement-level annotation) for carrying
+RDF 1.2 triple-term work later gives the *mechanism* (statement-level annotation) for carrying
 provenance/trust/temporal annotations inline.
 
 **Key works.**
@@ -197,7 +197,7 @@ provenance/trust/temporal annotations inline.
 - **(6) Provenance-carrying query answers** — track which source graph / named graph / triple
   term each binding derived from, and optionally surface it on results (a where-provenance
   annotation). This composes naturally with (i) federation §1–3 (per-source attribution),
-  (ii) RDF-star §4 (annotations as the carrier), and (iii) sparq's **GenAI grounding** story
+  (ii) RDF 1.2 triple terms §4 (annotations as the carrier), and (iii) sparq's **GenAI grounding** story
   (citable provenance for LLM-grounded answers — a strong differentiator). A lightweight
   first cut: propagate the contributing `GRAPH` IRI(s) through the binding. → **FIT:
   `ambiguous-ask-user`** — the *scope* (named-graph attribution vs full why/where-provenance
@@ -251,7 +251,7 @@ literature ties the feature to a measurable win:
    new-component-but-fits / clear-fit.* sparq's permutation indexes make a low-cost,
    cacheable, federatable TPF source nearly free; the client makes sparq a first-class LDF
    consumer. Together with §2 these turn sparq into a heterogeneous federation peer.
-3. **RDF-star / RDF 1.2 + SPARQL 1.2 completeness (§4a–4d).** *Impact 2–3, Effort S–M,
+3. **RDF 1.2 + SPARQL 1.2 completeness (§4a–4d).** *Impact 2–3, Effort S–M,
    clear-fit.* sparq is already strong; these are cheap, standards-tracking completeness wins
    on a spec Hartig edits — subject-position triple terms, annotation syntax, triple-term
    sharded merge, SPARQL 1.2 conformance.
@@ -271,7 +271,7 @@ literature ties the feature to a measurable win:
 **Net:** Hartig's corpus most strongly pushes sparq toward becoming a **proper federation
 peer** — both *producer* (TPF source, §1a) and *smart consumer* (brTPF bindings pushdown
 §2, source selection + cost model §7) — while offering cheap, standards-aligned completeness
-wins on the **RDF-star/RDF 1.2/SPARQL 1.2** front he co-authors, and a **provenance** story
+wins on the **RDF 1.2 / SPARQL 1.2** front he co-authors, and a **provenance** story
 that dovetails with sparq's GenAI grounding differentiator.
 
 ---

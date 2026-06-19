@@ -8,7 +8,7 @@
 //! file targets exactly those uncovered branches against the REAL parser (no mock), asserting
 //! each malformed/partial shape is a clean `Err` (never a panic, never a wrong term) and each
 //! well-formed-but-previously-untested term kind (bnode / typed-literal / language tag /
-//! RDF-1.2 directional literal / RDF-star triple term) decodes to the exact `oxrdf::Term`.
+//! RDF 1.2 directional literal / RDF 1.2 triple term) decodes to the exact `oxrdf::Term`.
 //!
 //! It also exercises [`solutions_equal`](sparq_fedclient::solutions_equal) on the **negative**
 //! side — distinct multisets, different multiplicities, different bound terms must compare
@@ -127,7 +127,7 @@ fn unknown_binding_type_is_clean_error() {
     assert!(err.contains("unknown binding type"), "got {}", err);
 }
 
-// ─── RDF-star triple-term branches (srj_term "triple") ──────────────────────────────────
+// ─── RDF 1.2 triple-term branches (srj_term "triple") ──────────────────────────────────
 
 #[test]
 fn triple_term_round_trips() {

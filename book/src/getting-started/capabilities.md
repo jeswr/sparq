@@ -15,7 +15,7 @@ usage guide.
 | SPARQL query | [SPARQL 1.1](https://www.w3.org/TR/sparql11-query/) / [1.2](https://www.w3.org/TR/sparql12-query/) | [sparql-query](https://github.com/jeswr/sparq/blob/main/skills/sparql-query/SKILL.md) |
 | SPARQL Update | [SPARQL 1.1 Update](https://www.w3.org/TR/sparql11-update/) | [sparql-query](https://github.com/jeswr/sparq/blob/main/skills/sparql-query/SKILL.md) |
 | RDF parsing & ingest | Turtle / N-Triples / N-Quads / TriG (+ `.gz` / `.bz2` / `.zst`) | [data-formats](https://github.com/jeswr/sparq/blob/main/skills/data-formats/SKILL.md) |
-| RDF-star / quoted triples | [RDF 1.2 Concepts](https://www.w3.org/TR/rdf12-concepts/) | [sparql-query](https://github.com/jeswr/sparq/blob/main/skills/sparql-query/SKILL.md) |
+| RDF 1.2 triple terms | [RDF 1.2 Concepts](https://www.w3.org/TR/rdf12-concepts/) | [sparql-query](https://github.com/jeswr/sparq/blob/main/skills/sparql-query/SKILL.md) |
 | RDFS / OWL-RL / N3 reasoning | [RDFS](https://www.w3.org/TR/rdf-schema/), [OWL 2 RL](https://www.w3.org/TR/owl2-profiles/#OWL_2_RL), [N3](https://w3c.github.io/N3/spec/) | [inference](https://github.com/jeswr/sparq/blob/main/skills/inference/SKILL.md) |
 | SHACL validation | [SHACL](https://www.w3.org/TR/shacl/) | [shacl-validation](https://github.com/jeswr/sparq/blob/main/skills/shacl-validation/SKILL.md) |
 | Full-text search | BM25 over RDF literals | [full-text-search](https://github.com/jeswr/sparq/blob/main/skills/full-text-search/SKILL.md) |

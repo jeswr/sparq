@@ -121,7 +121,7 @@ export const GROUPS: SurfaceGroup[] = [
         slug: "sparql",
         href: "/surface/sparql",
         title: "SPARQL 1.1 / 1.2",
-        blurb: "SELECT / ASK / CONSTRUCT / UPDATE, property paths, RDF-star.",
+        blurb: "SELECT / ASK / CONSTRUCT / UPDATE, property paths, RDF 1.2 triple terms.",
         tier: "live",
         icon: FileCode2,
         built: true,

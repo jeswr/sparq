@@ -35,7 +35,7 @@ the-capability-fused-into-SPARQL-over-RDF, which is the actual product).
 ## 1. The Fuseki verdict, in full
 
 Fuseki + TDB2 is the de-facto reference RDF server in the SPARQL world. It has the most
-complete and most-trusted SPARQL 1.1 implementation (plus early SPARQL-1.2/RDF-star work),
+complete and most-trusted SPARQL 1.1 implementation (plus early SPARQL 1.2 / RDF 1.2 work),
 ships the canonical W3C test-suite pass, and appears as a baseline in essentially every
 triplestore-benchmark paper: DBPSB, FEASIBLE, BSBM, WDBench, and the recent Sparqloscope
 (ISWC 2025) all include Jena/Fuseki ([DBPSB][dbpsb], [FEASIBLE][feasible], [WDBench][wdbench],

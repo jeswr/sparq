@@ -247,7 +247,7 @@ cargo build -p sparq-cli --features serialize-rdf
   pipelined parser is **N-Triples only** (other formats silently fall back to serial
   `load_reader`). With `parallel` off (e.g. the wasm build, `--no-default-features`),
   everything parses serially.
-- **RDF 1.2 triple terms / RDF-star are first-class.** A triple term `<<( s p o )>>` is a
+- **RDF 1.2 triple terms are first-class.** A triple term `<<( s p o )>>` is a
   real `oxrdf::Term::Triple` (object position only — RDF 1.2 makes triple terms object-only;
   a `<<( … )>>` in subject/predicate position is rejected with a precise error). Triple terms
   may nest, take blank-node/literal components, and are content-addressed (an identical triple

@@ -271,7 +271,7 @@ pub(crate) fn render_values_block(vars: &[Variable], tuples: &[Vec<Term>]) -> St
 /// to a single result document, so a local bnode label is meaningless to the remote
 /// endpoint — pushing it would silently change semantics. A **triple term** (RDF 1.2
 /// `<<( … )>>`) is conservatively excluded too: not every endpoint accepts it in
-/// VALUES, and a join key is rarely a quoted triple. When a join-key tuple contains
+/// VALUES, and a join key is rarely a triple term. When a join-key tuple contains
 /// any non-pushable term the caller abandons the bound-join for the verbatim path,
 /// preserving exact semantics.
 #[cfg(feature = "service")]
@@ -1431,7 +1431,7 @@ mod tests {
 
     #[test]
     fn srx_triple_term_parses() {
-        // SPARQL 1.2 quoted-triple value: << <s> <p> "o" >>.
+        // SPARQL 1.2 triple-term value: <<( <s> <p> "o" )>>.
         let body = format!(
             r#"<sparql xmlns="{SRX_NS}">
               <head><variable name="t"/></head>
