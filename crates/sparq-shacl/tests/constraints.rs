@@ -929,3 +929,89 @@ fn unique_values_for_no_values_conforms() {
     let r = run("ex:a a ex:Thing . ex:b a ex:Thing .", shapes);
     assert!(r.conforms, "{}", r.to_text());
 }
+
+// ---- [OPUS-4.8] (sq-bif.10) genuinely-dark eval.rs dispatch branches ----
+//
+// The sq-qap0 datatype/pattern tests exercised only WELL-FORMED literals and a
+// VALID regex. These pin the still-dark conjuncts: the `&& well_formed(l)` FALSE
+// branch in `Component::Datatype` (right datatype IRI, ill-formed lexical value)
+// and the `regex_for(..) == None` branch in `Component::Pattern` (an invalid
+// pattern compiles to no regex, so every value violates — fail-closed/lenient).
+
+/// `sh:datatype` is NOT satisfied by a literal that carries the right datatype IRI
+/// but whose lexical value is ill-formed for it — the `well_formed(l)` conjunct.
+/// `"abc"^^xsd:integer` and `"5.5"^^xsd:integer` both have datatype xsd:integer yet
+/// are lexically invalid; `"42"^^xsd:integer` is well-formed and conforms.
+#[test]
+fn datatype_rejects_ill_formed_lexical_value() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:v ; sh:datatype xsd:integer ] .
+    "#;
+    // Three values all TYPED xsd:integer: "abc" (non-numeric) and "5.5" (decimal,
+    // not an integer) are ill-formed; "42" is well-formed.
+    let data = r#"
+        ex:n ex:v "abc"^^xsd:integer , "5.5"^^xsd:integer , "42"^^xsd:integer .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // Exactly the two ill-formed values are flagged; "42" passes.
+    assert_eq!(
+        count_component(&r, "DatatypeConstraintComponent"),
+        2,
+        "{}",
+        r.to_text()
+    );
+    assert_eq!(
+        flagged_values(&r),
+        vec![
+            "\"5.5\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string(),
+            "\"abc\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string(),
+        ],
+        "{}",
+        r.to_text()
+    );
+}
+
+/// A bounded integer datatype (`xsd:byte`) rejects an out-of-range lexical value
+/// even though it is a syntactically valid integer — the range arm of
+/// `well_formed`. `"300"` exceeds the signed-byte range (-128..=127).
+#[test]
+fn datatype_rejects_out_of_range_bounded_integer() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:v ; sh:datatype xsd:byte ] .
+    "#;
+    let r = run(
+        r#"ex:n ex:v "300"^^xsd:byte , "100"^^xsd:byte ."#,
+        shapes,
+    );
+    assert!(!r.conforms, "{}", r.to_text());
+    // "300" is out of the byte range; "100" is in range.
+    assert_eq!(count_component(&r, "DatatypeConstraintComponent"), 1);
+    assert_eq!(
+        flagged_values(&r),
+        vec!["\"300\"^^<http://www.w3.org/2001/XMLSchema#byte>".to_string()]
+    );
+}
+
+/// An invalid `sh:pattern` (a regex that fails to compile) yields NO compiled
+/// regex, so `Component::Pattern` flags EVERY value (fail-closed). This pins the
+/// `regex_for(..) == None` branch, never reached by a valid pattern. The unbalanced
+/// `[` is a lexical regex error.
+#[test]
+fn pattern_with_invalid_regex_flags_all_values() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "[" ] .
+    "#;
+    // Two values; both are flagged because the pattern never compiles.
+    let r = run(r#"ex:n ex:code "ab" , "cd" ."#, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(
+        count_component(&r, "PatternConstraintComponent"),
+        2,
+        "an uncompilable pattern fails every value: {}",
+        r.to_text()
+    );
+}
