@@ -70,7 +70,8 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
 - **API reference** — [docs.rs/sparq-rsp](https://docs.rs/sparq-rsp).
 - **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md).
 - **Performance** — the `throughput` example
-  (`cargo run --release -p sparq-rsp --example throughput`) and
+  (`cargo run --release -p sparq-rsp --example throughput`; append `-- --json <path>` to
+  also write the same rows as a machine-readable JSON document, STDOUT unchanged) and
   [`bench/rsp/`](../../bench/rsp); the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 

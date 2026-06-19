@@ -3451,6 +3451,7 @@ dependencies = [
  "flate2",
  "hdt",
  "rayon",
+ "serde_json",
  "sparq-core",
  "tempfile",
  "zstd",
@@ -3571,6 +3572,7 @@ version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
  "rustc-hash 2.1.2",
+ "serde_json",
  "spargebra",
  "sparq-core",
  "sparq-engine",
@@ -3664,6 +3666,7 @@ version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
  "rustc-hash 2.1.2",
+ "serde_json",
  "sparq-core",
 ]
 

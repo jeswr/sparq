@@ -95,6 +95,9 @@ perf dashboard.
 
 ```sh
 cargo run -p sparq-sim --example olympics_eval --release
+# add `-- --json <path>` to also write the same accuracy + latency metrics as a
+# machine-readable JSON document (STDOUT unchanged; latency advisory/non-canonical)
+cargo run -p sparq-sim --example olympics_eval --release -- --json /tmp/sim.json
 ```
 
 **The two AUCs.** Pairwise AUC asks "do two random same-class entities score higher than

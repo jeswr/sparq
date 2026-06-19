@@ -118,6 +118,9 @@ and the olympics summary names the dataset's actual classes (asserted by
 
 ```sh
 cargo run -p sparq-introspect --example olympics_introspect --release
+# add `-- --json <path>` to also write the same measurements as a machine-readable
+# JSON document (STDOUT unchanged; timings are advisory/non-canonical, nothing committed)
+cargo run -p sparq-introspect --example olympics_introspect --release -- --json /tmp/introspect.json
 ```
 
 Tests: 22 unit (`src/lib.rs`: characteristic-set exactness, coverage, object
