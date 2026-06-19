@@ -19,6 +19,7 @@
   "sideEffects": false,
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "typecheck:conformance": "tsc --noEmit --project tsconfig.conformance.json",
     "build": "tsc"
   },
   "keywords": [
