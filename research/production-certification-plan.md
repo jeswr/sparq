@@ -56,7 +56,7 @@ sparq is different in three load-bearing ways, and the framework set must follow
 | **SLSA build provenance** | A dependency's supply-chain trust hinges on *verifiable build provenance*. sparq already emits `attest-build-provenance` + buildkit `provenance: mode=max` on release; declare the honest level (≈L2 on GitHub-hosted runners) + the gap to higher (reproducibility, cargo-auditable). |
 | **OpenSSF Scorecard + Best-Practices (CII) Badge** | The de-facto open-source-security posture signal consumers check. Scorecard is wired (`scorecard.yml`, `publish_results`); add the Best-Practices self-certification + raise the score. |
 | **EU Cyber Resilience Act (CRA)** | sparq, distributed on crates.io/npm/PyPI/ghcr, is a "product with digital elements." CRA's Annex I essential requirements + vuln-handling obligations (coordinated disclosure, SBOM, security updates, support period) are the *binding regulatory* regime — replaces Cyber Essentials as the right "you must do this to ship in the EU" anchor. |
-| **Memory-safety attestation** | sparq's headline safety claim. Attest the `#![forbid(unsafe_code)]` posture (23 crates), enumerate + justify the concentrated `sparq-core` unsafe (mmap/dict-spill/SIMD = threat-model boundary **B5**), and the Miri + fuzz + oracle coverage; promote cargo-geiger to a gating unsafe-count ratchet. |
+| **Memory-safety attestation** | sparq's headline safety claim. Attest the `#![forbid(unsafe_code)]` posture (31 of the 34 lib crates as of 2026-06-19 — verify live with `grep -lE 'forbid\(unsafe_code\)' $(git ls-files 'crates/*/src/lib.rs') \| wc -l`; the three lib crates that do NOT forbid are `sparq-core`, `sparq-vectors`, `sparq-zk-compose`), enumerate + justify the concentrated `sparq-core` unsafe (mmap/dict-spill/SIMD = threat-model boundary **B5**), and the Miri + fuzz + oracle coverage; promote cargo-geiger to a gating unsafe-count ratchet. |
 | **Cryptographic review (ZK/MPC)** | sparq ships `sparq-zk`/`sparq-zk-compose`/`sparq-mpc`. A documented crypto review of the soundness/privacy claims (anchored on `research/zk-soundness-audit.md`), constant-time + FIPS considerations, and the explicit "research scaffold, NO guarantee" statement. External-cryptographer sign-off is out of agent scope. |
 
 ### Final target set (12 worktrees)
@@ -98,7 +98,7 @@ nightly), Miri lane (nightly, `sparq-core`), SLSA `attest-build-provenance` + bu
 mode=max` + SHA256SUMS on release, distroless non-root SHA-pinned `Dockerfile` + docker-smoke gate,
 SHA-pinned actions (policy), ci-summary branch-protection aggregator, `SECURITY.md` (GHSA + email,
 response targets, the ZK-not-sound + MPC-deferred caveats), `research/threat-model.md` (STRIDE,
-boundaries B1–B5), `#![forbid(unsafe_code)]` in 23 crates, daily dependency-monitoring advisory
+boundaries B1–B5), `#![forbid(unsafe_code)]` in 31 crates, daily dependency-monitoring advisory
 watchdog, Dependabot (4 ecosystems), CODEOWNERS, CONTRIBUTING.md (with disclosure redirect).
 
 ### Cross-cutting gaps
