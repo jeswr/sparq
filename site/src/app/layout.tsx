@@ -41,15 +41,36 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
+        {/* [OPUS-4.8] sq-9zjy — basePath the vendored SW's self-registration fallback.
+            coi-serviceworker.js falls back to `window.coiServiceWorkerPath` (else its
+            hardcoded literal `/sparq/coi-serviceworker.js`) when `document.currentScript`
+            is null — which can happen in the Tauri webview, where that `/sparq/…` literal
+            404s. Seed the hook from the same env-derived basePath the external <Script>
+            below uses, BEFORE that script runs, so the last-resort path is correct under
+            both Pages (`/sparq/…`) and the Tauri root-relative build (`/coi-serviceworker.js`).
+            This sets ONLY which URL the SW registers from — it never touches what coi
+            synthesises (COOP/COEP → SharedArrayBuffer for the prover's worker threads,
+            a thread-count optimisation), and NEVER any ZK soundness/property. Editing the
+            vendored file is avoided by design; this is the hook it already reads. */}
+        <Script
+          id="coi-serviceworker-path"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{
+            __html: `window.coiServiceWorkerPath=${JSON.stringify(
+              withBasePath("/coi-serviceworker.js"),
+            )};`,
+          }}
+        />
         {/* [OPUS-4.8] coi-serviceworker shim — synthesises COOP/COEP so
             `window.crossOriginIsolated` becomes true on GitHub Pages (which cannot
             set those headers itself). That unlocks SharedArrayBuffer, so @aztec/bb.js
-            can spin worker threads and the in-tab ZK prover multithreads. Loaded
-            beforeInteractive with an absolute, basePath-prefixed src so the service
-            worker registers from `${basePath}/coi-serviceworker.js` with that scope.
-            [OPUS-4.8] sq-9vw5 — basePath-switched (was hardcoded `/sparq/…`) so it
-            resolves under both Pages and the Tauri root-relative build. It changes only
-            thread count — never what any proof proves or its ZK property. */}
+            can spin worker threads and the in-tab ZK prover multithreads. The native
+            Tauri webview sets those headers natively; this shim is Pages-specific.
+            Loaded beforeInteractive with an absolute, basePath-prefixed src so the
+            service worker registers from `${basePath}/coi-serviceworker.js` with that
+            scope. [OPUS-4.8] sq-9vw5 — basePath-switched (was hardcoded `/sparq/…`) so
+            it resolves under both Pages and the Tauri root-relative build. It changes
+            only thread count — never what any proof proves or its ZK property. */}
         <Script
           src={withBasePath("/coi-serviceworker.js")}
           strategy="beforeInteractive"
