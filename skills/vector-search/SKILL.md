@@ -112,8 +112,17 @@ store.update(id, &[f32]) -> Result<(), String>   // replace an EXISTING id's vec
 store.compact(out_path, &Graph) -> Result<VectorStore, String>  // fold delta into a FRESH base == a from-scratch rebuild
 store.has_delta() -> bool;  store.delta() -> Option<&VectorDelta>;  store.take_delta() -> Option<VectorDelta>
 store.apply_delta(VectorDelta) -> Result<(), String>  // GENERATION TIE: rejects a delta whose fingerprint != this base's
-// `put` is UNCHANGED (still errs after finalize) — `add` is the additive path. delta is IN-RAM ONLY (lost on drop; `compact`
-//   is the durability path) — persisted on-disk delta sidecar is a tracked follow-up. On a build-phase store add==put.
+// --- PERSISTED on-disk delta sidecar (.spqd) --- [OPUS-4.8] sq-7e50; same `delta` feature, no new dep
+store.save_delta() -> Result<PathBuf, String>          // persist the in-RAM delta to a sibling .spqd (tmp+fsync+rename)
+store.save_delta_to(path) -> Result<(), String>        // …to an explicit path; an unstarted delta persists empty+gen-bound
+VectorStore::open_with_delta(base) -> Result<VectorStore, String>   // open base mmap + replay the persisted sibling .spqd
+VectorStore::open_with_delta_at(base, delta_path) -> Result<..>     // …from an explicit delta path (no sidecar ⇒ bare base)
+VectorStore::sibling_delta_path(&Path) -> PathBuf;  VectorStore::has_persisted_delta(&Path) -> bool
+// `.spqd` = little-endian header (magic SPQD, v1, dim, append/tomb counts, BASE fingerprint @ off 32) + appends + tombstones.
+// CRASH-DURABLE (tmp+fsync+atomic rename, StreamingWriter discipline); PARTIAL-WRITE detected (exact-length check, fail-closed);
+// open routes through apply_delta so a sidecar from a DIFFERENT graph generation is REJECTED, never silently mis-keyed.
+// `put` is UNCHANGED (still errs after finalize) — `add` is the additive path; `compact` is the in-base durability path,
+//   `save_delta`/`open_with_delta` the survive-a-restart-without-compact path. On a build-phase store add==put.
 
 // --- search (src/ann.rs) --- all return cosine in [-1,1], best first; zero query -> empty
 nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan
@@ -649,7 +658,7 @@ path (recipe 10), and does **not** transfer to this approximate path. Implement 
 ### 12. Incremental add / remove / update without a full rebuild (opt-in, feature = `delta`)
 
 A `.spqv` is build-once-immutable, so one new/removed entity would otherwise force a full re-embed +
-rebuild. The `delta` feature adds an in-RAM **delta sidecar** over the immutable base — `add` / `remove`
+rebuild. The `delta` feature adds a **delta sidecar** over the immutable base — `add` / `remove`
 / `update` write an append map + tombstone set, and `get` / `iter` / `len` (hence search) transparently
 union base+delta and honour tombstones. `compact` folds it back into a fresh base. Lean (no new dep).
 
@@ -665,17 +674,26 @@ store.remove(stale_id);                              // tombstone (returns bool;
 // search transparently sees the delta — no rebuild, no extra API:
 let hits = sparq_vectors::nearest_exact(&store, &query, 10);
 
-// fold the delta into a fresh base == a from-scratch rebuild over the final vector set:
+// PERSIST the delta so the mutations survive a restart WITHOUT a compact (sq-7e50):
+store.save_delta()?;                                 // crash-durable .spqd sibling (tmp+fsync+rename)
+// …later, in a fresh process: reopen the base AND replay the persisted delta:
+let reopened = VectorStore::open_with_delta("graph.spqv")?;  // == the (base + delta) view it had before
+
+// or fold the delta into a fresh base == a from-scratch rebuild over the final vector set:
 let compacted = store.compact("graph.spqv", &graph)?;   // bound to graph's fingerprint generation
 # Ok::<(), String>(())
 ```
 
 **Generation tie.** A delta carries the graph **generation** (the sq-32i5 fingerprint) it was built
 against; `apply_delta` rejects a delta whose generation differs from the receiving base, so its dict-ids
-can never mis-key onto a different graph. **Honesty (load-bearing):** the delta is **in-RAM only** — it
-is lost when the handle is dropped (the base file is unchanged until `compact` writes a new one). A
-*persisted* on-disk delta sidecar is a tracked follow-up; `compact` is the durability path today. `put`
-is unchanged (still errors after `finalize`) — `add` is the additive path.
+can never mis-key onto a different graph. The persisted `.spqd` header carries that same generation, so
+`open_with_delta` routes the replay through `apply_delta` and a sidecar written against a *different*
+graph generation is rejected, never silently mis-keyed. **Durability (sq-7e50).** Two durability paths:
+`compact` materializes the delta into a fresh validated `.spqv`; `save_delta` persists the *delta itself*
+to a crash-durable `.spqd` (write-tmp + `fsync` + atomic rename) that `open_with_delta` replays on reopen
+— so incremental mutations survive a process restart with no compact. A truncated/torn sidecar is
+detected (an exact-length check) and rejected, never read out of bounds. `put` is unchanged (still errors
+after `finalize`) — `add` is the additive path.
 
 ## Gotchas / feature flags / prerequisites
 
@@ -687,11 +705,12 @@ is unchanged (still errors after `finalize`) — `add` is the additive path.
   dependency and the base engine/core query path is byte-identical (see recipe 8). There is
   still no `SERVICE`/function binding. Predicate-constrained (filtered) ANN (recipe 9) is a
   separate **non-default `filtered-ann`** feature — also lean (no new dep, no engine pull).
-- **Incremental add/remove/update is the non-default `delta` feature (sq-pi44).** Also lean (no new
-  dep, no engine pull). With it OFF the store is build-once-immutable as before (`put` errors after
-  `finalize`; no `add`/`remove`/`update`/`compact`); with it ON those methods write an in-RAM delta
-  the read paths consult transparently (recipe 12). The delta is **in-RAM only** (lost on handle drop;
-  `compact` is the durability path) — a persisted on-disk delta sidecar is a tracked follow-up.
+- **Incremental add/remove/update is the non-default `delta` feature (sq-pi44, persistence sq-7e50).**
+  Also lean (no new dep, no engine pull). With it OFF the store is build-once-immutable as before
+  (`put` errors after `finalize`; no `add`/`remove`/`update`/`compact`/`save_delta`); with it ON those
+  methods write a delta the read paths consult transparently (recipe 12). The delta lives in RAM on the
+  handle; `save_delta` persists it to a crash-durable `.spqd` sidecar and `open_with_delta` replays it,
+  so mutations survive a restart without a `compact` (the two durability paths).
 - **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
   index (`VectorIndex`/`HnswConfig`) and the `ApproxBackend` are gated behind it — it is the only
   thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force
