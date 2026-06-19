@@ -3688,6 +3688,7 @@ dependencies = [
  "rand 0.10.1",
  "rayon",
  "rustc-hash 2.1.2",
+ "serde_json",
  "spargebra",
  "sparq-core",
  "sparq-engine",

@@ -46,6 +46,17 @@ bzcat /path/to/truthy.nt.bz2 | head -n 1500000 > data/wikidata-slice.nt
 Each number is the median of 3 runs, wall clock. MB/s is over the
 *decompressed* input bytes. Run on an otherwise idle machine.
 
+Any subcommand also accepts a trailing `--json <path>` that writes the SAME
+measured rows as a dependency-free JSON document (the machine-readable
+results-emit, sq-ghjc) — STDOUT is the unchanged markdown either way:
+
+```sh
+./target/release/parse-baseline bench-nt data/wikidata-slice.nt --json results.json
+```
+
+The emitted numbers are whatever the running machine measured — non-canonical
+(the `note` field says so); do not commit them.
+
 ## D4: compressed result serialization (`compress-bench`)
 
 Measures `crates/sparq-parse`'s `CompressedSink` (multi-member gzip /

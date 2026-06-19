@@ -91,6 +91,14 @@ FTS_N=1000000 bench/fts/run.sh
 ci-bench hook consumes (`sparq-text` is the *isolated* FTS crate — not a `sparq-cli`
 dependency — so the runner is a crate `--example`, not a CLI subcommand).
 
+A trailing `--json <path>` additionally writes the same rows (deterministic `count` +
+advisory `us`) as a dependency-free JSON document (sq-ghjc) — STDOUT stays the pure TSV
+`run.sh` parses, so the flag never disturbs the hard count gate:
+
+```sh
+cargo run --release -p sparq-text --example bench_text -- 100000 0 3 --json fts-results.json
+```
+
 ## Competitors
 
 **Be honest: Solr / Elasticsearch are NOT SPARQL competitors** (no RDF/SPARQL surface; RDF4J

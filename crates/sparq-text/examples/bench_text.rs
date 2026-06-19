@@ -92,10 +92,114 @@ fn fixed_queries(n: usize) -> Vec<(String, String)> {
 /// sub-second; the hit-count SUM over this set is the deterministic gate).
 const QUERIES: usize = 200;
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-ghjc) --json <path> machine-readable results emit
+// ---------------------------------------------------------------------------
+//
+// Strictly-additive: a trailing `--json <path>` writes the SAME `name/count/us`
+// rows (plus the run parameters) as a stable, DEPENDENCY-FREE JSON document — the
+// hand-built `format!` convention from `crates/sparq-mpc/examples/mpc_net_bench.rs`
+// (no serde dep). STDOUT stays byte-for-byte the pure TSV the `bench/fts/run.sh`
+// gate parses whether or not the flag is present; the flag is stripped from argv
+// BEFORE the positional `[N] [seed] [iters]` parse so the gate's positional call
+// (`bench_text <N> <seed> <iters>`, no flag) is wholly unaffected.
+
+/// Extracts `--json <path>` (and its value) from argv, returning argv WITHOUT the
+/// flag pair so the positional `[N] [seed] [iters]` indexing is unchanged. A bare
+/// `--json` is a usage error (exit 2), mirroring `sparq-cli`'s identical flag.
+fn take_json_flag(args: Vec<String>) -> (Vec<String>, Option<String>) {
+    let mut out = Vec::with_capacity(args.len());
+    let mut json_path = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--json" {
+            match args.get(i + 1) {
+                Some(p) => {
+                    json_path = Some(p.clone());
+                    i += 2;
+                    continue;
+                }
+                None => {
+                    eprintln!("`--json` requires a path argument: --json <path>");
+                    std::process::exit(2);
+                }
+            }
+        }
+        out.push(args[i].clone());
+        i += 1;
+    }
+    (out, json_path)
+}
+
+/// Minimal JSON string escaper (the dependency-free emit). Workload names are static
+/// ASCII identifiers, so this covers the realistic input; anything else still yields
+/// valid `\uXXXX` escapes.
+fn json_str(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for c in raw.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Serialises the run to stable, dependency-free JSON. The `rows` array carries one
+/// object per workload with the SAME `name`/`count`/`us` fields the TSV prints; the
+/// `count` column is the DETERMINISTIC gate value (corpus-stable), while `us`/`build_us`
+/// are best-of-iters timings — ADVISORY and NON-CANONICAL (this dev box), stated in
+/// `note`. `n`/`seed`/`iters` record the corpus the document describes.
+fn results_json(
+    n: usize,
+    seed: u64,
+    iters: usize,
+    rows: &[(String, usize, f64)],
+    bytes_per_doc: usize,
+    build_us: f64,
+) -> String {
+    let mut s = String::new();
+    s.push_str("{\n");
+    s.push_str("  \"harness\": \"sparq-text bench_text\",\n");
+    s.push_str(&format!("  \"n\": {n},\n"));
+    s.push_str(&format!("  \"seed\": {seed},\n"));
+    s.push_str(&format!("  \"iters\": {iters},\n"));
+    s.push_str(
+        "  \"note\": \"`count` columns are DETERMINISTIC (the bench/fts/expected.tsv gate); \
+         `us`/`build_us` are best-of-iters wall-clock MEASURED on the running host — ADVISORY, \
+         NON-CANONICAL (this dev box) — do not bake into committed files\",\n",
+    );
+    s.push_str("  \"rows\": [\n");
+    for (name, count, us) in rows.iter() {
+        // Every workload row is ALWAYS followed by the bytes_per_doc gate row below,
+        // so each gets a trailing comma; only the gate row (last) omits it.
+        s.push_str(&format!(
+            "    {{ \"name\": {}, \"count\": {count}, \"us\": {us:.1} }},\n",
+            json_str(name)
+        ));
+    }
+    // The deterministic index-footprint gate row (count = integer B/doc; us = advisory build µs).
+    // This is the LAST element of `rows`, hence no trailing comma.
+    s.push_str(&format!(
+        "    {{ \"name\": \"bytes_per_doc\", \"count\": {bytes_per_doc}, \"us\": {build_us:.1} }}\n"
+    ));
+    s.push_str("  ]\n");
+    s.push_str("}\n");
+    s
+}
+
 fn main() {
-    let n: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_N);
-    let seed: u64 = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_SEED);
-    let iters: usize = std::env::args().nth(3).and_then(|a| a.parse().ok()).unwrap_or(3);
+    let (args, json_path) = take_json_flag(std::env::args().collect());
+    let n: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_N);
+    let seed: u64 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_SEED);
+    let iters: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(3);
     let iters = iters.max(1);
 
     // ---- data generation + graph load ------------------------------------------------
@@ -215,4 +319,75 @@ fn main() {
     }
     // The deterministic index-footprint gate (count = integer B/doc; us = advisory build time).
     println!("bytes_per_doc\t{bytes_per_doc}\t{build_us:.1}");
+
+    // [OPUS-4.8] (sq-ghjc) Strictly-additive JSON emit: only when `--json <path>` was
+    // given. STDOUT above is the unchanged TSV the bench/fts gate parses.
+    if let Some(path) = json_path {
+        let doc = results_json(n, seed, iters, &rows, bytes_per_doc, build_us);
+        if let Err(e) = std::fs::write(&path, doc) {
+            eprintln!("error writing --json results to {path}: {e}");
+            std::process::exit(1);
+        }
+        eprintln!("wrote {} result rows to {path}", rows.len() + 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-ghjc) --json emit tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_flag_extraction() {
+        let argv: Vec<String> = ["bench_text", "100", "0", "3", "--json", "/tmp/o.json"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (positional, path) = take_json_flag(argv);
+        // The positional `[N] [seed] [iters]` contract the fts gate relies on is intact.
+        assert_eq!(positional, vec!["bench_text", "100", "0", "3"]);
+        assert_eq!(path.as_deref(), Some("/tmp/o.json"));
+        // Absent flag -> argv unchanged, no path.
+        let plain: Vec<String> = ["bench_text", "100"].iter().map(|s| s.to_string()).collect();
+        let (p2, none) = take_json_flag(plain.clone());
+        assert_eq!(p2, plain);
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn json_str_escapes() {
+        assert_eq!(json_str("and_terms"), "\"and_terms\"");
+        assert_eq!(json_str("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
+    }
+
+    #[test]
+    fn results_json_shape_and_keys() {
+        let rows = vec![
+            ("and_terms".to_string(), 42usize, 1.5f64),
+            ("or_terms".to_string(), 99usize, 2.25f64),
+        ];
+        let doc = results_json(100, 0, 3, &rows, 64, 12.5);
+        // The dependency-free emit must round-trip through a REAL serde_json parse — this
+        // is what catches a malformed document (e.g. a missing inter-row comma).
+        let v: serde_json::Value = serde_json::from_str(&doc).expect("emit must be valid JSON");
+        assert_eq!(v["harness"], "sparq-text bench_text");
+        assert_eq!(v["n"], 100);
+        assert_eq!(v["seed"], 0);
+        assert_eq!(v["iters"], 3);
+        assert!(v["note"].as_str().unwrap().contains("NON-CANONICAL"));
+        let arr = v["rows"].as_array().expect("rows is an array");
+        // 2 workloads + the deterministic bytes_per_doc gate row.
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["name"], "and_terms");
+        assert_eq!(arr[0]["count"], 42);
+        assert!(arr[0]["us"].is_number());
+        assert_eq!(arr[1]["name"], "or_terms");
+        assert_eq!(arr[1]["count"], 99);
+        // The gate row is last and carries the integer footprint + advisory build µs.
+        assert_eq!(arr[2]["name"], "bytes_per_doc");
+        assert_eq!(arr[2]["count"], 64);
+        assert!((arr[2]["us"].as_f64().unwrap() - 12.5).abs() < 1e-9);
+    }
 }
