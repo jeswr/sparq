@@ -18,19 +18,24 @@
 #                       only). A hit fails unless the line carries an inline
 #                       `privacy-claims-allow: <why>` marker. (scripts/check-privacy-claims.sh;
 #                       beads sq-toze.35 / sq-qhy4.)
+#     • no-perf-numbers — greps user-facing docs for baked-in benchmark figures (AGENTS.md
+#                       house rule; scripts/check-no-perf-numbers.py --enforce). PROMOTED
+#                       from advisory to HARD by sq-8ic6 once the backlog cleared (the last
+#                       stray, skills/cli/SKILL.md's inline ratio, was reworded to cite the
+#                       canonical measured source). Deterministic, grep-only, no network.
 #
-#   ADVISORY (continue-on-error → reported in the job summary, never block a merge):
+#   ADVISORY (continue-on-error / --advisory exit-0 → reported, never block a merge):
 #     • markdownlint-advisory — same rules over the WHOLE repo MINUS the HARD-gated dirs
 #                       (research/ + zk/ are now HARD, per sq-rqyo); covers the remaining
 #                       not-yet-clean dirs (bench/, .claude/) so any backlog stays visible.
 #     • vale          — prose hygiene: weasel words, wordy phrases, adjective puffery.
 #     • external-links — lychee online: dead http(s) links (network-flaky → advisory).
-#     • no-perf-numbers — greps docs for baked-in benchmark figures (AGENTS.md rule).
 #     • readme-template — crate-README length cap + required sections (pairs w/ sq-9jw5).
+#                       Still advisory: 67-deviation backlog owned by the sq-9jw5 epic.
 #
-# WHY this split: markdownlint/typos/internal-links are deterministic and already pass
-# on the scoped doc surface, so they gate. Vale/external-links/the custom checks either
-# carry a large pre-existing backlog or depend on network/another in-flight bead
+# WHY this split: markdownlint/typos/internal-links/no-perf-numbers are deterministic and
+# already pass on the scoped doc surface, so they gate. Vale/external-links/readme-template
+# either carry a large pre-existing backlog or depend on network/another in-flight bead
 # (sq-9jw5), so they advise until their scope is clean, then flip to HARD.
 #
 # ci-summary aggregation: it polls every check-run on the head commit and fails iff one
@@ -340,8 +345,38 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-  custom-checks:
-    name: custom-checks (perf-numbers + readme-template, advisory)
+  # [OPUS-4.8] sq-8ic6: PROMOTED to a HARD gate. The no-perf-numbers backlog cleared —
+  # `scripts/check-no-perf-numbers.py --enforce` is GREEN on main (the last residual stray,
+  # `skills/cli/SKILL.md:111`'s "~12× faster" ratio, was reworded to point at the canonical
+  # measured source instead of baking the figure inline; same pattern as
+  # skills/data-formats/SKILL.md). So the no-perf-numbers house rule (AGENTS.md) now FAILS
+  # the build instead of advising. The check is deterministic (grep-only, no network). The
+  # job NAME carries no "advisory"/"informational" token, so the ci-summary aggregator gates
+  # on it. The README-template check stays ADVISORY (below) — its 67-deviation backlog is
+  # owned by the sq-9jw5 README-overhaul epic and is not yet clean. [OPUS-4.8]
+  no-perf-numbers:
+    name: no-perf-numbers (docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: No hard-coded performance numbers in user-facing docs — GATING
+        run: python3 scripts/check-no-perf-numbers.py --enforce
+
+  # [OPUS-4.8] Still ADVISORY (bead sq-8ic6 left this leg un-promoted, honestly): the crate-
+  # README template (length cap + required sections) has a 67-deviation backlog across 35
+  # READMEs, owned by the sq-9jw5 README-overhaul epic (sq-puyy/sq-my8/…). Promoting it now
+  # would red docs-quality on main + every PR. Flip to --enforce + drop continue-on-error
+  # (and rename out of the "advisory" exclusion) once that scope is clean. The check runs
+  # in --advisory mode (reports findings but always exits 0) so the job concludes SUCCESS;
+  # the job-level continue-on-error is defence-in-depth and the "advisory" token in the NAME
+  # is a third belt — the ci-summary aggregator excludes it either way. [OPUS-4.8]
+  readme-template:
+    name: readme-template (template, advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -351,7 +386,5 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
-      - name: No hard-coded performance numbers in user-facing docs
-        run: python3 scripts/check-no-perf-numbers.py --advisory
       - name: Crate-README length cap + required sections (template, sq-9jw5)
         run: python3 scripts/check-readme-template.py --advisory
