@@ -8,7 +8,7 @@ sparq is a from-scratch **RDF triplestore and SPARQL 1.1 engine in Rust** — di
 
 - **Rust crates** (crates.io): `sparq-core`, `sparq-engine` (core), `sparq-cli`, `sparq-server`, plus opt-in capability crates (`sparq-reason`, `sparq-shacl`, `sparq-geo`, `sparq-text`, `sparq-rsp`, `sparq-hdt`, `sparq-solid`, ...).
 - **npm**: `@jeswr/sparq` — RDF/JS-typed API over the wasm build, zero runtime deps.
-- **PyPI**: `sparq` — pyo3/maturin bindings.
+- **PyPI**: `sparq-rdf` (import name `sparq`) — pyo3/maturin bindings.
 
 Status: experimental research engine; the API is unstable.
 
