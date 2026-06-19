@@ -81,3 +81,11 @@ Each prints a markdown block; numbers + analysis are recorded in
 In-process invariant checks — every term is classified exactly once, `into_blob`
 preserves the term count, footprints are positive. Not a performance claim; purely
 structural, so it runs deterministically in CI without a dataset or a quiet box.
+
+Because this is a standalone cargo project (own `[workspace]` table), the root
+workspace's `cargo clippy --workspace` + nextest lanes never reach it. The CI
+`clippy (gate) + fmt` job (`.github/workflows/ci.yml`) therefore clippy-gates this
+crate and runs `dict-baseline selftest` directly (`--manifest-path
+bench/dict/Cargo.toml`), so a harness regression — a composition miscount, an
+`into_blob` that drops terms — fails CI rather than passing unobserved (bead
+**sq-hqmm**).
