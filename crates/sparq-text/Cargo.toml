@@ -72,3 +72,8 @@ unicode-segmentation = "1"
 # [OPUS-4.8] sq-8xug: rand-ecosystem 0.10. `random_range`/`random` moved from the
 # `Rng` trait to `RngExt` in 0.10, so the test/example imports use the prelude.
 rand = "0.10"
+# [OPUS-4.8] (sq-ghjc) Test-only: PARSE the dependency-free `bench_text --json` emit
+# back to assert it is valid JSON with the documented shape. The emit itself stays
+# serde-free (hand-built `format!`); serde_json is a dev-dependency so it never enters
+# the library, its dependents, or the wasm bundle (`sparq-text-wasm`).
+serde_json = "1"

@@ -1,7 +1,10 @@
 //! Baseline measurements for the custom-parsers design (one bin, subcommands).
 //! Numbers land in research/custom-parsers-baseline.md.
 //!
-//! Subcommands:
+//! Subcommands (a trailing `--json <path>` on any subcommand also writes the same
+//! measured rows as a dependency-free JSON document — sq-ghjc; STDOUT is unchanged):
+//!
+//! ```text
 //!   gen <entities> <out.nt> <out.ttl>   deterministic synthetic dataset (same
 //!                                       generator as crates/sparq-bench/src/dataset.rs)
 //!   to-ttl <in.nt> <out.ttl>            convert N-Triples to Turtle via the oxttl
@@ -26,6 +29,7 @@
 //!                                       parallel NT path) [sq-q6a1, sq-7ge0].
 //!   bench-hdt-zip <file.hdt>            decompress+parse MB/s of <file.hdt>.{gz,zst,bz2}
 //!                                       via the direct decoder (expects those files)
+//! ```
 
 // Match the production CLI: sparq-cli ingest runs under mimalloc.
 #[global_allocator]
@@ -34,12 +38,186 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use sparq_core::Graph;
 use std::hint::black_box;
 use std::io::{Read, Write};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 const ITERS: usize = 3;
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-ghjc) --json <path> machine-readable results emit
+// ---------------------------------------------------------------------------
+//
+// The table-printing subcommands (`bench-nt`, `bench-ttl`, `bench-zip`,
+// `ab-ttl-intern`, `bench-hdt`, `bench-hdt-zip`) emit ad-hoc markdown so a doc
+// can `run the harness` rather than restate frozen numbers (sq-5vm). This adds a
+// strictly-additive `--json <path>` that mirrors the SAME measured rows as a
+// stable, DEPENDENCY-FREE JSON document — the hand-built `format!` convention
+// from `crates/sparq-mpc/examples/mpc_net_bench.rs::cell_json` and the
+// `suite_results_json` sq-d7d added to `sparq-cli`. NO serde dep is added.
+//
+// STDOUT is byte-for-byte unchanged whether or not `--json` is present: the
+// collector silently accumulates every `row(..)` call (and the `ab-ttl-intern`
+// special rows) and `main` writes the document at the end only when a path was
+// given. The numbers are whatever THIS machine measured — NON-CANONICAL — so the
+// emitted `note` says so and nothing here is committed.
+
+/// One captured measurement row: an ORDERED list of `(key, raw_json_value)` pairs.
+/// Heterogeneous by design — `row()` pushes the 6-column table shape, while
+/// `ab-ttl-intern` pushes its own `strategy`/`mtriples_s`/`ns_per_triple` shape —
+/// so each subcommand serialises exactly the fields it measured.
+type JsonRow = Vec<(&'static str, String)>;
+
+/// Global, lazily-initialised JSON-emit state. `path` is the `--json <path>`
+/// destination (None disables emit entirely); `subcommand`/`dataset`/`note` label
+/// the run; `rows` accumulates every captured measurement. Behind a `Mutex` only so
+/// the parallel benches (which call `row()` from the main thread, but via rayon
+/// pools that could in principle move it) never race — emit is not on any hot path.
+struct JsonCollector {
+    path: Option<String>,
+    subcommand: String,
+    dataset: String,
+    rows: Vec<JsonRow>,
+}
+
+static JSON: OnceLock<Mutex<JsonCollector>> = OnceLock::new();
+
+fn json_collector() -> &'static Mutex<JsonCollector> {
+    JSON.get_or_init(|| {
+        Mutex::new(JsonCollector {
+            path: None,
+            subcommand: String::new(),
+            dataset: String::new(),
+            rows: Vec::new(),
+        })
+    })
+}
+
+/// Records the run-level labels (subcommand + dataset name) once, at dispatch.
+fn json_init(subcommand: &str, dataset: &str) {
+    let mut c = json_collector().lock().unwrap();
+    c.subcommand = subcommand.to_string();
+    c.dataset = dataset.to_string();
+}
+
+/// Records the `--json <path>` destination (only set when the flag was present).
+fn json_set_path(path: &str) {
+    json_collector().lock().unwrap().path = Some(path.to_string());
+}
+
+/// Appends one captured measurement row.
+fn json_push(row: JsonRow) {
+    json_collector().lock().unwrap().rows.push(row);
+}
+
+/// Extracts a `--json <path>` flag (and its value) from the raw argv, returning the
+/// positional args WITHOUT the flag pair. The subcommands index their operands
+/// positionally (`args[2]`, `args[3]`, ...), so the flag is removed BEFORE dispatch to
+/// keep the historical positional contract intact whether the flag is present or not.
+/// A bare `--json` with no following value is a usage error (exit 2), mirroring
+/// `sparq-cli`'s identical flag.
+fn take_json_flag(args: &[String]) -> (Vec<String>, Option<String>) {
+    let mut out = Vec::with_capacity(args.len());
+    let mut json_path = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--json" {
+            match args.get(i + 1) {
+                Some(p) => {
+                    json_path = Some(p.clone());
+                    i += 2;
+                    continue;
+                }
+                None => {
+                    eprintln!("`--json` requires a path argument: --json <path>");
+                    std::process::exit(2);
+                }
+            }
+        }
+        out.push(args[i].clone());
+        i += 1;
+    }
+    (out, json_path)
+}
+
+/// Minimal JSON string escaper for the dependency-free emit — escapes the characters
+/// JSON requires (`"`, `\`, the C0 control set incl. the named whitespace escapes).
+/// Task labels are static ASCII and dataset names are file stems, so this covers the
+/// realistic input; anything else still produces valid `\uXXXX` escapes.
+fn json_str(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for c in raw.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Serialises the accumulated rows to the `--json` path, if one was given. Called
+/// once at the end of `main`. The shape mirrors `suite_results_json`: a top-level
+/// object carrying the run labels + an honest non-canonical `note`, and a `rows`
+/// array of one object per captured measurement (each row's keys are exactly the
+/// fields that subcommand measured). Writes nothing (and is a no-op) when `--json`
+/// was absent — STDOUT is the only output in that case.
+fn json_flush() {
+    let c = json_collector().lock().unwrap();
+    let Some(path) = c.path.clone() else {
+        return;
+    };
+    let mut s = String::new();
+    s.push_str("{\n");
+    s.push_str("  \"harness\": \"bench/parse parse-baseline\",\n");
+    s.push_str(&format!("  \"subcommand\": {},\n", json_str(&c.subcommand)));
+    s.push_str(&format!("  \"dataset\": {},\n", json_str(&c.dataset)));
+    s.push_str(&format!("  \"iters\": {ITERS},\n"));
+    s.push_str(
+        "  \"note\": \"median/best-of-iters wall-clock MEASURED on the running host; \
+         NON-CANONICAL (whatever this machine measured) — do not bake into committed files\",\n",
+    );
+    s.push_str("  \"rows\": [\n");
+    for (i, row) in c.rows.iter().enumerate() {
+        s.push_str("    {");
+        for (j, (k, v)) in row.iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(" {}: {}", json_str(k), v));
+        }
+        s.push_str(" }");
+        if i + 1 < c.rows.len() {
+            s.push(',');
+        }
+        s.push('\n');
+    }
+    s.push_str("  ]\n");
+    s.push_str("}\n");
+    if let Err(e) = std::fs::write(&path, s) {
+        eprintln!("error writing --json results to {path}: {e}");
+        std::process::exit(1);
+    }
+    eprintln!("wrote {} result rows to {path}", c.rows.len());
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let argv: Vec<String> = std::env::args().collect();
+    let (args, json_path) = take_json_flag(&argv);
+    if let Some(p) = &json_path {
+        json_set_path(p);
+    }
+    // Label the run (subcommand + dataset) for the JSON emit, where a dataset path
+    // is the conventional second operand. Harmless when `--json` is absent.
+    if let Some(sub) = args.get(1) {
+        let dataset = args.get(2).map(|p| dataset_name(p)).unwrap_or("");
+        json_init(sub, dataset);
+    }
     match args.get(1).map(String::as_str) {
         Some("gen") => gen(args[2].parse().unwrap(), &args[3], &args[4]),
         Some("to-ttl") => to_ttl(&args[2], &args[3]),
@@ -55,10 +233,12 @@ fn main() {
         // Internal: load ONE path once in a fresh process, print its peak RSS.
         Some("hdt-rss") => hdt_rss(&args[2], &args[3]),
         _ => {
-            eprintln!("usage: parse-baseline gen|to-ttl|compress|bench-nt|bench-ttl|ab-ttl-intern|bench-zip|gen-hdt|bench-hdt|bench-hdt-zip ...");
+            eprintln!("usage: parse-baseline gen|to-ttl|compress|bench-nt|bench-ttl|ab-ttl-intern|bench-zip|gen-hdt|bench-hdt|bench-hdt-zip ... [--json <results.json>]");
             std::process::exit(2);
         }
     }
+    // Strictly-additive: writes the JSON document only when `--json <path>` was given.
+    json_flush();
 }
 
 // ---------------------------------------------------------------------------
@@ -79,10 +259,24 @@ fn median<F: FnMut()>(mut f: F) -> f64 {
 }
 
 /// Prints one markdown row: task, threads, seconds, input MB/s, Mtriples/s.
+///
+/// [OPUS-4.8] (sq-ghjc) Also captures the SAME measured fields for the optional
+/// `--json` emit. The push is unconditional and cheap; `json_flush` only writes a
+/// file when a `--json <path>` was given, so STDOUT is unaffected either way.
 fn row(dataset: &str, task: &str, threads: usize, secs: f64, bytes: usize, triples: usize) {
     let mbs = bytes as f64 / 1e6 / secs;
     let mts = triples as f64 / 1e6 / secs;
     println!("| {dataset} | {task} | {threads} | {secs:.3} | {mbs:.0} | {mts:.2} |");
+    json_push(vec![
+        ("dataset", json_str(dataset)),
+        ("task", json_str(task)),
+        ("threads", threads.to_string()),
+        ("secs", format!("{secs:.6}")),
+        ("bytes", bytes.to_string()),
+        ("triples", triples.to_string()),
+        ("mb_s", format!("{mbs:.3}")),
+        ("mtriples_s", format!("{mts:.3}")),
+    ]);
 }
 
 fn pool(n: usize) -> rayon::ThreadPool {
@@ -110,8 +304,12 @@ fn bench_nt(path: &str) {
     // Triple count (for triples/s) via oxttl, also validates the slice parses.
     let triples = oxttl::NTriplesParser::new()
         .for_slice(bytes)
-        .map(|r| r.expect("dataset must parse"))
-        .count();
+        // [OPUS-4.8] (sq-ghjc) fold-count keeps the parse validation (expect) while
+        // satisfying clippy::suspicious_map (map+count would warn): count + panic on error.
+        .fold(0usize, |acc, r| {
+            r.expect("dataset must parse");
+            acc + 1
+        });
     eprintln!("{name}: {} bytes, {triples} triples", bytes.len());
     println!("| dataset | task | threads | s | MB/s | Mtriples/s |");
     println!("|---|---|---|---|---|---|");
@@ -133,7 +331,7 @@ fn bench_nt(path: &str) {
 
     // oxttl, parse only (discard triples): pure parser cost, no interning/index.
     let secs = median(|| {
-        let n = oxttl::NTriplesParser::new().for_slice(bytes).map(|r| r.unwrap()).count();
+        let n = oxttl::NTriplesParser::new().for_slice(bytes).fold(0usize, |acc, r| { r.unwrap(); acc + 1 });
         black_box(n);
     });
     row(name, "oxttl NT parse-only", 1, secs, bytes.len(), triples);
@@ -281,6 +479,26 @@ fn ab_ttl_intern(path: &str) {
         "| {name} | **ratio old/new** | **{:.3}×** | | |",
         mo / mn
     );
+    // [OPUS-4.8] (sq-ghjc) Capture the intern-A/B shape (distinct from the standard
+    // `row()` columns) for the optional `--json` emit. Same measured numbers as the
+    // markdown rows above; the ratio is recorded as a single labelled row.
+    let intern_row = |strategy: &'static str, median_s: f64| -> JsonRow {
+        vec![
+            ("dataset", json_str(name)),
+            ("strategy", json_str(strategy)),
+            ("rounds", ROUNDS.to_string()),
+            ("median_s", format!("{median_s:.6}")),
+            ("mtriples_s", format!("{:.3}", n as f64 / 1e6 / median_s)),
+            ("ns_per_triple", format!("{:.3}", median_s * 1e9 / n as f64)),
+        ]
+    };
+    json_push(intern_row("OLD owned-Term intern", mo));
+    json_push(intern_row("NEW (T1) borrowed intern", mn));
+    json_push(vec![
+        ("dataset", json_str(name)),
+        ("strategy", json_str("ratio old/new")),
+        ("ratio_old_new", format!("{:.3}", mo / mn)),
+    ]);
     eprintln!(
         "intern-only A/B: OLD {mo:.4}s, NEW {mn:.4}s, speedup {:.3}× ({:.1}% of intern step removed)",
         mo / mn,
@@ -300,15 +518,19 @@ fn bench_ttl(path: &str) {
 
     let triples = oxttl::TurtleParser::new()
         .for_slice(bytes)
-        .map(|r| r.expect("dataset must parse"))
-        .count();
+        // [OPUS-4.8] (sq-ghjc) fold-count keeps the parse validation (expect) while
+        // satisfying clippy::suspicious_map (map+count would warn): count + panic on error.
+        .fold(0usize, |acc, r| {
+            r.expect("dataset must parse");
+            acc + 1
+        });
     eprintln!("{name}: {} bytes, {triples} triples", bytes.len());
     println!("| dataset | task | threads | s | MB/s | Mtriples/s |");
     println!("|---|---|---|---|---|---|");
 
     // oxttl, parse only.
     let secs = median(|| {
-        let n = oxttl::TurtleParser::new().for_slice(bytes).map(|r| r.unwrap()).count();
+        let n = oxttl::TurtleParser::new().for_slice(bytes).fold(0usize, |acc, r| { r.unwrap(); acc + 1 });
         black_box(n);
     });
     row(name, "oxttl Turtle parse-only", 1, secs, bytes.len(), triples);
@@ -359,8 +581,12 @@ fn bench_zip(path: &str) {
 
     let triples = oxttl::NTriplesParser::new()
         .for_slice(&raw)
-        .map(|r| r.expect("dataset must parse"))
-        .count();
+        // [OPUS-4.8] (sq-ghjc) fold-count keeps the parse validation (expect) while
+        // satisfying clippy::suspicious_map (map+count would warn): count + panic on error.
+        .fold(0usize, |acc, r| {
+            r.expect("dataset must parse");
+            acc + 1
+        });
     eprintln!(
         "{name}: raw {} B, gz {} B ({:.2}x), zst {} B ({:.2}x), {triples} triples",
         raw.len(),
@@ -875,5 +1101,89 @@ fn bench_hdt_zip(path: &str) {
             black_box(g.store.len());
         });
         row(name, &format!("{ext} decode+parse (direct, {ratio:.2}x compressed)"), 1, secs, plain.len(), triples);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-ghjc) --json emit tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--json <path>` is stripped from the positional argv (so the subcommands'
+    /// positional indexing is unaffected) and its value is returned; the escaper
+    /// produces RFC-valid JSON strings; and the full emit round-trips through a
+    /// real `serde_json` parse with the documented shape + keys. One test only,
+    /// because the collector is a process-global `OnceLock` (parallel tests would
+    /// race its `rows`); this drives the whole emit path end-to-end in isolation.
+    #[test]
+    fn json_flag_and_emit_round_trip() {
+        // --- flag extraction keeps positional args intact -------------------------
+        let argv: Vec<String> = ["parse-baseline", "bench-nt", "data.nt", "--json", "/tmp/out.json"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (positional, path) = take_json_flag(&argv);
+        assert_eq!(positional, vec!["parse-baseline", "bench-nt", "data.nt"]);
+        assert_eq!(path.as_deref(), Some("/tmp/out.json"));
+        // Absent flag -> args unchanged, no path.
+        let (p2, none) = take_json_flag(&argv[..3]);
+        assert_eq!(p2, argv[..3]);
+        assert!(none.is_none());
+
+        // --- string escaper produces valid JSON strings ---------------------------
+        assert_eq!(json_str("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
+        assert_eq!(json_str("plain"), "\"plain\"");
+
+        // --- full emit round-trips through serde_json -----------------------------
+        json_init("bench-nt", "data.nt");
+        let tmp = std::env::temp_dir().join(format!("sq-ghjc-emit-{}.json", std::process::id()));
+        json_set_path(tmp.to_str().unwrap());
+        // A standard table row (the `row()` shape) ...
+        json_push(vec![
+            ("dataset", json_str("data.nt")),
+            ("task", json_str("oxttl NT parse-only")),
+            ("threads", 1.to_string()),
+            ("secs", format!("{:.6}", 0.5_f64)),
+            ("bytes", 100usize.to_string()),
+            ("triples", 4usize.to_string()),
+            ("mb_s", format!("{:.3}", 0.2_f64)),
+            ("mtriples_s", format!("{:.3}", 0.008_f64)),
+        ]);
+        // ... and a heterogeneous (intern-A/B) row to prove the shape is per-row.
+        json_push(vec![
+            ("dataset", json_str("data.nt")),
+            ("strategy", json_str("ratio old/new")),
+            ("ratio_old_new", format!("{:.3}", 1.25_f64)),
+        ]);
+        json_flush();
+
+        let doc = std::fs::read_to_string(&tmp).expect("emit file written");
+        let _ = std::fs::remove_file(&tmp);
+        let v: serde_json::Value = serde_json::from_str(&doc).expect("emit must be valid JSON");
+
+        assert_eq!(v["harness"], "bench/parse parse-baseline");
+        assert_eq!(v["subcommand"], "bench-nt");
+        assert_eq!(v["dataset"], "data.nt");
+        assert_eq!(v["iters"], ITERS);
+        assert!(v["note"].as_str().unwrap().contains("NON-CANONICAL"));
+
+        let rows = v["rows"].as_array().expect("rows is an array");
+        assert_eq!(rows.len(), 2);
+        // Standard row keys.
+        let r0 = &rows[0];
+        assert_eq!(r0["task"], "oxttl NT parse-only");
+        assert_eq!(r0["threads"], 1);
+        assert_eq!(r0["bytes"], 100);
+        assert_eq!(r0["triples"], 4);
+        assert!(r0["secs"].is_number());
+        assert!(r0["mb_s"].is_number());
+        assert!(r0["mtriples_s"].is_number());
+        // Heterogeneous row keeps its own keys (no leakage from the table shape).
+        let r1 = &rows[1];
+        assert_eq!(r1["strategy"], "ratio old/new");
+        assert!(r1["ratio_old_new"].is_number());
+        assert!(r1.get("threads").is_none());
     }
 }
