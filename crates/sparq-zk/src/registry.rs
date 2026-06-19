@@ -68,8 +68,25 @@ pub const ZK_STATUS: &str = "https://sparq.dev/ns/zk#status";
 pub const ZK_INGESTED: &str = "https://sparq.dev/ns/zk#ingested";
 /// Datatype of commitment/salt literals.
 pub const ZK_FIELD: &str = "https://sparq.dev/ns/zk#field";
-/// The v1 commitment scheme id (this crate's pipeline).
+/// The v1 commitment scheme id (this crate's pipeline) — the `string-canonical`
+/// commitment method ([`crate::commit::CommitmentMethod::StringCanonicalV1`]),
+/// the byte-unchanged default. Retained verbatim for back-compat.
 pub const ZK_SCHEME_POSEIDON2_RDFC10_V1: &str = "https://sparq.dev/ns/zk#poseidon2-rdfc10-v1";
+/// The `dual-leaf` commitment scheme id (value handle AND lexical-identity hash)
+/// — [`crate::commit::CommitmentMethod::DualLeafV1`]. Selecting it records the
+/// #769-accepted INV-VL downgrade on the entry (config only here; the leaf
+/// encoding is the audit-gated `sq-j506` — NOT implemented in this crate yet).
+// [OPUS-4.8] sq-zzxt: configurable-commitment scheme IRIs (design
+// `research/zk-configurable-commitment-design.md` §2.1).
+pub const ZK_SCHEME_POSEIDON2_DUALLEAF_V1: &str = "https://sparq.dev/ns/zk#poseidon2-dualleaf-v1";
+/// The `value-only` commitment scheme id (value handle only, lexical hash
+/// dropped) — [`crate::commit::CommitmentMethod::ValueOnlyV1`], a
+/// **benchmark / research dial** (§10 default (2)). The IRI const is always
+/// present, but the method that selects it is compiled out unless the
+/// OFF-by-default `commitment-value-only` feature is enabled, so a default build
+/// cannot select it.
+// [OPUS-4.8] sq-zzxt.
+pub const ZK_SCHEME_POSEIDON2_VALUEHOOK_V1: &str = "https://sparq.dev/ns/zk#poseidon2-valuehook-v1";
 pub const ZK_STATUS_ACTIVE: &str = "https://sparq.dev/ns/zk#active";
 pub const ZK_STATUS_REVOKED: &str = "https://sparq.dev/ns/zk#revoked";
 const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
@@ -146,6 +163,37 @@ impl RegistryEntry {
             status: Status::Active,
             ingested: None,
         }
+    }
+
+    /// The [`CommitmentMethod`](crate::commit::CommitmentMethod) this entry's
+    /// `zk:scheme` IRI selects, or `None` if the recorded scheme is one this build
+    /// does not understand.
+    ///
+    /// **Fail-closed** (sq-zzxt, design §10 default (1)): an unknown/unrecognized
+    /// `zk:scheme` — including the `value-only` research-dial IRI when the
+    /// `commitment-value-only` feature is OFF — returns `None`, never a default. A
+    /// verifier that requires a known method MUST reject an entry whose
+    /// [`Self::method`] is `None` rather than assume `string-canonical`. The method
+    /// is **in-circuit-affecting**, so a later `(method, circuit)` dispatch matrix
+    /// (sq-cfmv) consumes this to refuse an illegal pairing.
+    // [OPUS-4.8] sq-zzxt: commitment-method selection over the `zk:scheme` slot.
+    pub fn method(&self) -> Option<crate::commit::CommitmentMethod> {
+        crate::commit::CommitmentMethod::from_scheme_iri(self.scheme.as_str())
+    }
+
+    /// Records a [`CommitmentMethod`](crate::commit::CommitmentMethod) on this entry
+    /// by writing its distinct `zk:scheme` IRI into the `scheme` slot (config
+    /// plumbing). Use at ingest/issuance to mark how the graph was committed.
+    ///
+    /// Note this is **config only**: it does NOT re-commit the graph under a
+    /// different leaf shape (that is the audit-gated `sq-j506` host-encoding bead);
+    /// it records the selection so the method is an explicit, recorded property
+    /// rather than the silent hard-wired `string-canonical` default.
+    // [OPUS-4.8] sq-zzxt.
+    #[must_use]
+    pub fn with_method(mut self, method: crate::commit::CommitmentMethod) -> Self {
+        self.scheme = method.scheme_node();
+        self
     }
 
     /// An attested entry: a freshly committed graph signed by an issuer
@@ -722,5 +770,54 @@ mod tests {
     fn proof_graph_convention() {
         let d = NamedNode::new("https://dmv.example/vc/lic-123").unwrap();
         assert_eq!(proof_graph_name(&d).as_str(), "https://dmv.example/vc/lic-123?proof");
+    }
+
+    // [OPUS-4.8] sq-zzxt: commitment-method selection over the `zk:scheme` slot.
+
+    #[test]
+    fn fresh_entry_defaults_to_string_canonical_method() {
+        use crate::commit::CommitmentMethod;
+        let e = RegistryEntry::new(
+            NamedNode::new("https://dmv.example/vc/m-default").unwrap(),
+            Fr::from(1u64),
+            salt_from_bytes(&[1u8; 32]),
+        );
+        // The byte-unchanged default: a fresh entry records string-canonical.
+        assert_eq!(e.scheme.as_str(), ZK_SCHEME_POSEIDON2_RDFC10_V1);
+        assert_eq!(e.method(), Some(CommitmentMethod::StringCanonicalV1));
+    }
+
+    #[test]
+    fn with_method_records_and_round_trips_through_store() {
+        use crate::commit::CommitmentMethod;
+        let e = RegistryEntry::new(
+            NamedNode::new("https://dmv.example/vc/m-dual").unwrap(),
+            Fr::from(7u64),
+            salt_from_bytes(&[2u8; 32]),
+        )
+        .with_method(CommitmentMethod::DualLeafV1);
+        assert_eq!(e.scheme.as_str(), ZK_SCHEME_POSEIDON2_DUALLEAF_V1);
+        assert_eq!(e.method(), Some(CommitmentMethod::DualLeafV1));
+
+        // The method survives a round-trip through the registry graph (the scheme
+        // IRI is serialized + re-read unchanged).
+        let mut g = Graph::load_str("", "turtle").unwrap();
+        install_registry(&mut g, std::slice::from_ref(&e)).unwrap();
+        let back = read_registry(&g);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].method(), Some(CommitmentMethod::DualLeafV1));
+    }
+
+    #[test]
+    fn unknown_scheme_iri_yields_no_method_fail_closed() {
+        // An entry recording a scheme this build does not understand maps to None
+        // (fail-closed) — a verifier must reject it, not assume a default.
+        let mut e = RegistryEntry::new(
+            NamedNode::new("https://dmv.example/vc/m-bogus").unwrap(),
+            Fr::from(3u64),
+            salt_from_bytes(&[4u8; 32]),
+        );
+        e.scheme = NamedNode::new_unchecked("https://sparq.dev/ns/zk#poseidon2-bogus-v9");
+        assert_eq!(e.method(), None);
     }
 }

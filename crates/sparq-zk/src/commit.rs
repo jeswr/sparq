@@ -18,6 +18,166 @@ use crate::poseidon2;
 use oxrdf::Triple;
 use std::collections::HashMap;
 
+// [OPUS-4.8] sq-zzxt: the commitment-method config registry.
+//
+// This is the config-plumbing layer of the maintainer-greenlit (#769)
+// configurable-commitment build-out (design: `research/zk-configurable-commitment-design.md`,
+// §2 / §10; foundation: `research/zk-field-native-encoding.md`, #794). It selects
+// HOW a graph was committed, recorded as a distinct `zk:scheme` IRI on the
+// registry entry, so a verifier can fail closed on an unknown/mismatched method.
+//
+// SCOPE: config ONLY. This module introduces NO circuit, NO leaf-shape change,
+// and NO dual-leaf/value-only encoding — those are separate, audit-gated beads
+// (`sq-j506` dual-leaf host encoding, `sq-cfmv` per-method circuit dispatch). The
+// existing `string-canonical` pipeline (`encode.rs`/`commit.rs`) is byte-unchanged
+// and stays the default. The method axis is the single source of truth that a
+// later `(method, circuit)` dispatch matrix (sq-cfmv) will consume.
+//
+// HONESTY (load-bearing — `research/zk-configurable-commitment-design.md` §0/§7,
+// `research/zk-field-native-encoding.md` §5): the dual-leaf method carries the
+// INV-VL downgrade — the in-circuit invariant "the compared value equals the
+// parse of the committed lexical bytes" is REMOVED for the value-FILTER lane,
+// so value<->lexical agreement migrates from a machine-enforced circuit property
+// to TRUSTED-ISSUER-HONESTY (#769 accepted at research grade; gap CR-G8). The
+// whole ZK estate is remediated + internally re-audited but NOT externally
+// audited (sq-qhy4, P0); nothing here is a soundness or privacy guarantee.
+
+/// How a named graph was committed — the selectable commitment method over the
+/// existing `zk:scheme` registry slot ([`crate::registry::RegistryEntry::scheme`]).
+///
+/// This is a **closed enum, by design** (`research/zk-configurable-commitment-design.md`
+/// §10 default (1)): the method is **in-circuit-affecting** (it determines which
+/// leaf shape a graph was committed under and therefore which circuit family is
+/// legal against it — sq-cfmv), so it must **fail closed** on an unknown method
+/// rather than admit an open trait an attacker could extend. An unrecognized
+/// `zk:scheme` IRI maps to `None`, never to a default (see [`Self::from_scheme_iri`]).
+///
+/// The method is chosen **at ingest** (issuance time) and is **immutable for that
+/// graph's commitment**: a graph committed under one method's leaf shape cannot
+/// later be proven with a circuit that expects a different shape.
+///
+/// # Per-method honesty (NOT a guarantee)
+/// - [`StringCanonicalV1`](Self::StringCanonicalV1): the conservative default and
+///   back-compat anchor — the only method implemented end-to-end today. The
+///   in-circuit INV-VL invariant holds for its value-FILTER lane.
+/// - [`DualLeafV1`](Self::DualLeafV1): the value-optimised method for new issuance
+///   (#769). It **REMOVES INV-VL** — value<->lexical agreement rests on trusted-
+///   issuer honesty (machine-enforced -> issuer-honesty downgrade), accepted at
+///   research grade per #769 and registered as an **open external-audit obligation**
+///   (gap CR-G8 / sq-qhy4). The leaf encoding itself is NOT implemented here (config
+///   only; impl is sq-j506).
+/// - `ValueOnlyV1` (feature `commitment-value-only` only): a **benchmark / research
+///   dial**, never a production default (§10 default (2)). It loses term identity
+///   entirely (no lexical component). It is **compiled out by default**; the feature
+///   name is the warning. See the feature-gated variant below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommitmentMethod {
+    /// (i) `string-canonical` (`zk:poseidon2-rdfc10-v1`): blake3 over the canonical
+    /// N-Triples lexical token only; the in-circuit INV-VL invariant is
+    /// machine-enforced for the value-FILTER lane. **Today's implemented default.**
+    StringCanonicalV1,
+    /// (iii) `dual-leaf` (`zk:poseidon2-dualleaf-v1`): a value handle AND a
+    /// lexical-identity hash in one leaf. **REMOVES INV-VL** (value<->lexical
+    /// agreement becomes trusted-issuer-honesty, #769 accepted at research grade;
+    /// CR-G8 / sq-qhy4). Config-only here; the leaf encoding is sq-j506 (NOT
+    /// implemented). [OPUS-4.8]
+    DualLeafV1,
+    /// (ii) `value-only` (`zk:poseidon2-valuehook-v1`): a single value-first leaf;
+    /// the lexical hash is **dropped**, so term identity is lost entirely. A
+    /// **benchmark / research comparison dial only** — never select for real
+    /// issuance (`research/zk-configurable-commitment-design.md` §2.2, §10 default
+    /// (2)). Gated behind the OFF-by-default `commitment-value-only` feature so a
+    /// normal build cannot select it. [OPUS-4.8]
+    #[cfg(feature = "commitment-value-only")]
+    ValueOnlyV1,
+}
+
+impl CommitmentMethod {
+    /// The byte-unchanged, back-compat default ([`Self::StringCanonicalV1`]).
+    /// `value-only` is NEVER a default (§10 default (2)); `dual-leaf` is opt-in per
+    /// graph at ingest, not a default.
+    pub const DEFAULT: CommitmentMethod = CommitmentMethod::StringCanonicalV1;
+
+    /// The `zk:scheme` IRI that records this method on a [`RegistryEntry`].
+    ///
+    /// [`RegistryEntry`]: crate::registry::RegistryEntry
+    pub const fn scheme_iri(self) -> &'static str {
+        match self {
+            CommitmentMethod::StringCanonicalV1 => {
+                crate::registry::ZK_SCHEME_POSEIDON2_RDFC10_V1
+            }
+            CommitmentMethod::DualLeafV1 => crate::registry::ZK_SCHEME_POSEIDON2_DUALLEAF_V1,
+            #[cfg(feature = "commitment-value-only")]
+            CommitmentMethod::ValueOnlyV1 => crate::registry::ZK_SCHEME_POSEIDON2_VALUEHOOK_V1,
+        }
+    }
+
+    /// Parse a method from its `zk:scheme` IRI. **Fail-closed**: an unknown or
+    /// unrecognized IRI returns `None` (never a default) — the closed-enum
+    /// discipline that lets a verifier reject a graph committed under a method it
+    /// does not understand (§10 default (1)). When the `commitment-value-only`
+    /// feature is OFF, the value-only IRI is unknown and rejected, so a build that
+    /// did not opt into the research dial cannot be tricked into selecting it.
+    pub fn from_scheme_iri(iri: &str) -> Option<CommitmentMethod> {
+        match iri {
+            crate::registry::ZK_SCHEME_POSEIDON2_RDFC10_V1 => {
+                Some(CommitmentMethod::StringCanonicalV1)
+            }
+            crate::registry::ZK_SCHEME_POSEIDON2_DUALLEAF_V1 => Some(CommitmentMethod::DualLeafV1),
+            #[cfg(feature = "commitment-value-only")]
+            crate::registry::ZK_SCHEME_POSEIDON2_VALUEHOOK_V1 => {
+                Some(CommitmentMethod::ValueOnlyV1)
+            }
+            _ => None,
+        }
+    }
+
+    /// The `zk:scheme` IRI as an [`oxrdf::NamedNode`], for writing a method onto a
+    /// [`RegistryEntry`].
+    ///
+    /// [`RegistryEntry`]: crate::registry::RegistryEntry
+    pub fn scheme_node(self) -> oxrdf::NamedNode {
+        oxrdf::NamedNode::new_unchecked(self.scheme_iri())
+    }
+
+    /// Whether this method is sound to select for **production / real issuance** at
+    /// the config layer. Honest, NOT a guarantee: `string-canonical` is the
+    /// conservative anchor; `dual-leaf` carries the #769-accepted INV-VL downgrade
+    /// (so `true` here only means "not a research-only dial", not "audited" — the
+    /// estate is NOT externally audited, sq-qhy4); `value-only` is a research dial
+    /// and returns `false`. Callers that refuse research-only methods can gate on
+    /// this; it does **not** assert any cryptographic property.
+    pub const fn is_production_selectable(self) -> bool {
+        match self {
+            CommitmentMethod::StringCanonicalV1 | CommitmentMethod::DualLeafV1 => true,
+            #[cfg(feature = "commitment-value-only")]
+            CommitmentMethod::ValueOnlyV1 => false,
+        }
+    }
+
+    /// Whether this method removes the in-circuit INV-VL invariant (value =
+    /// parse(committed lexical)) for the value-FILTER lane — i.e. whether
+    /// value<->lexical agreement rests on trusted-issuer honesty rather than a
+    /// machine-enforced circuit property. Honest per-method statement, NOT a
+    /// guarantee: `dual-leaf` and `value-only` remove it (CR-G8 / sq-qhy4, #769
+    /// accepted at research grade); `string-canonical` retains it. See the module
+    /// doc and `research/zk-field-native-encoding.md` §5.
+    pub const fn removes_inv_vl(self) -> bool {
+        match self {
+            CommitmentMethod::StringCanonicalV1 => false,
+            CommitmentMethod::DualLeafV1 => true,
+            #[cfg(feature = "commitment-value-only")]
+            CommitmentMethod::ValueOnlyV1 => true,
+        }
+    }
+}
+
+impl Default for CommitmentMethod {
+    fn default() -> Self {
+        CommitmentMethod::DEFAULT
+    }
+}
+
 /// Commitment failure.
 #[derive(Debug)]
 pub enum CommitError {
@@ -145,6 +305,121 @@ mod tests {
             assert_ne!(l1, l2, "every bnode-bearing leaf must be salt-separated");
         }
         assert_ne!(c1.commitment, c2.commitment);
+    }
+
+    // [OPUS-4.8] sq-zzxt: the commitment-method config registry.
+
+    #[test]
+    fn method_default_is_string_canonical() {
+        // §10 default: string-canonical is THE default (back-compat anchor); the
+        // byte-unchanged pipeline. Neither dual-leaf nor value-only is ever default.
+        assert_eq!(CommitmentMethod::default(), CommitmentMethod::StringCanonicalV1);
+        assert_eq!(CommitmentMethod::DEFAULT, CommitmentMethod::StringCanonicalV1);
+    }
+
+    #[test]
+    fn method_scheme_iri_round_trips() {
+        // parse(serialize(m)) == m for every method present in this build.
+        for m in commitment_methods_in_build() {
+            let iri = m.scheme_iri();
+            assert_eq!(
+                CommitmentMethod::from_scheme_iri(iri),
+                Some(m),
+                "scheme IRI must round-trip for {:?}",
+                m
+            );
+            // The NamedNode serialization carries the same IRI.
+            assert_eq!(m.scheme_node().as_str(), iri);
+        }
+    }
+
+    #[test]
+    fn method_scheme_iris_are_distinct() {
+        // Each method MUST carry a DISTINCT zk:scheme IRI so a registry entry
+        // records exactly how it was committed and a verifier can fail closed on
+        // a mismatch (design §2.1).
+        let iris: Vec<&str> = commitment_methods_in_build().iter().map(|m| m.scheme_iri()).collect();
+        let mut sorted = iris.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), iris.len(), "scheme IRIs must be pairwise distinct");
+    }
+
+    #[test]
+    fn method_string_canonical_iri_is_unchanged() {
+        // The existing string-canonical scheme IRI is retained byte-for-byte
+        // (back-compat: every already-issued credential records this IRI).
+        assert_eq!(
+            CommitmentMethod::StringCanonicalV1.scheme_iri(),
+            "https://sparq.dev/ns/zk#poseidon2-rdfc10-v1"
+        );
+        // And it is precisely the legacy const the registry already used.
+        assert_eq!(
+            CommitmentMethod::StringCanonicalV1.scheme_iri(),
+            crate::registry::ZK_SCHEME_POSEIDON2_RDFC10_V1
+        );
+    }
+
+    #[test]
+    fn method_parse_is_fail_closed_on_unknown() {
+        // §10 default (1): an unknown / unrecognized zk:scheme IRI returns None,
+        // NEVER a default — the closed-enum, fail-closed discipline.
+        assert_eq!(CommitmentMethod::from_scheme_iri("https://sparq.dev/ns/zk#poseidon2-bogus"), None);
+        assert_eq!(CommitmentMethod::from_scheme_iri(""), None);
+        assert_eq!(CommitmentMethod::from_scheme_iri("not-an-iri"), None);
+        // The signature cryptosuite IRI is a DIFFERENT axis — not a commitment method.
+        assert_eq!(
+            CommitmentMethod::from_scheme_iri(crate::registry::ZK_SCHEME_POSEIDON2_RDFC10_V1.replace("rdfc10", "schnorr").as_str()),
+            None
+        );
+    }
+
+    #[test]
+    fn method_dual_leaf_records_inv_vl_downgrade() {
+        // Honest per-method posture: dual-leaf REMOVES INV-VL (issuer-honesty
+        // downgrade, #769 accepted, CR-G8); string-canonical retains it.
+        assert!(!CommitmentMethod::StringCanonicalV1.removes_inv_vl());
+        assert!(CommitmentMethod::DualLeafV1.removes_inv_vl());
+        // dual-leaf is still production-selectable (the #769-accepted method), even
+        // though it carries the downgrade — `is_production_selectable` is NOT an
+        // audit/soundness claim, only "not a research-only dial".
+        assert!(CommitmentMethod::StringCanonicalV1.is_production_selectable());
+        assert!(CommitmentMethod::DualLeafV1.is_production_selectable());
+    }
+
+    // value-only is the research dial: gated OFF by default. With the feature ON it
+    // exists but is NEVER production-selectable and loses term identity (removes
+    // INV-VL is trivially true — there is no lexical component at all). §10 default (2).
+    #[cfg(feature = "commitment-value-only")]
+    #[test]
+    fn value_only_is_research_dial_only() {
+        let m = CommitmentMethod::ValueOnlyV1;
+        assert!(!m.is_production_selectable(), "value-only must never be production-selectable");
+        assert!(m.removes_inv_vl());
+        assert_eq!(m.scheme_iri(), "https://sparq.dev/ns/zk#poseidon2-valuehook-v1");
+        assert_eq!(CommitmentMethod::from_scheme_iri(m.scheme_iri()), Some(m));
+    }
+
+    // With the feature OFF the value-only IRI must be UNKNOWN (rejected): a build
+    // that did not opt into the research dial cannot select it.
+    #[cfg(not(feature = "commitment-value-only"))]
+    #[test]
+    fn value_only_iri_is_rejected_without_the_feature() {
+        assert_eq!(
+            CommitmentMethod::from_scheme_iri("https://sparq.dev/ns/zk#poseidon2-valuehook-v1"),
+            None,
+            "value-only must be unselectable when the commitment-value-only feature is OFF"
+        );
+    }
+
+    /// Every `CommitmentMethod` variant compiled into THIS build (the
+    /// feature-state-aware set the round-trip/distinctness tests sweep).
+    fn commitment_methods_in_build() -> Vec<CommitmentMethod> {
+        #[allow(unused_mut)]
+        let mut v = vec![CommitmentMethod::StringCanonicalV1, CommitmentMethod::DualLeafV1];
+        #[cfg(feature = "commitment-value-only")]
+        v.push(CommitmentMethod::ValueOnlyV1);
+        v
     }
 
     #[test]
