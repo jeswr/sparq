@@ -58,7 +58,8 @@ let k    = num_communities(&comm);
 
 - The capability skill: [`skills/graph-analytics/SKILL.md`](../../skills/graph-analytics/SKILL.md).
 - Source: `src/graph.rs` (the view), `src/pagerank.rs`, `src/centrality.rs`,
-  `src/community.rs`. Tests live in each module and in `tests/`.
+  `src/community.rs`. Tests live in `src/lib.rs` under a single `#[cfg(test)]` module
+  (there is no `tests/` directory).
 
 These are **topology** algorithms: edges are unweighted and predicate-erased. To analyse a
 sub-graph (e.g. only `foaf:knows` edges), filter the source graph first; predicate-weighted
