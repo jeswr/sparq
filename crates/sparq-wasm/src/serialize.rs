@@ -13,7 +13,7 @@
 //! This module reimplements nothing: it calls straight through to the engine
 //! serialiser the native CLI / HTTP surface uses, so a `Store.serialize("turtle",
 //! true, …)` is byte-identical to `sparq_engine::serialize::graph_to_turtle_pretty_with`
-//! over the same graph, and `Store.serialize("jsonld-expanded", true, …)` is
+//! over the same graph, and `Store.serialize("jsonld-expanded", true, …, None)` is
 //! byte-identical to `graph_to_jsonld_pretty_with(.., JsonLdForm::Expanded, ..)`
 //! (asserted by the native `src/serialize.rs` parity tests and the `wasm32` headless
 //! `tests/web.rs` tests). Routing JSON-LD through this SAME method lets the site
@@ -31,7 +31,7 @@
 //!
 //! ## Surface
 //!
-//! `serialize(format, pretty, indent, abbreviate)`:
+//! `serialize(format, pretty, indent, abbreviate, prefixes?)`:
 //!
 //! * `format` (case-insensitive) — one of:
 //!   * `"turtle"` (aliases `"ttl"`, `"text/turtle"`) — the **default graph only**.
@@ -50,18 +50,68 @@
 //!   and compact IRIs to `prefix:local`; `false` to keep every IRI in full `<…>` form.
 //!   **Ignored for JSON-LD** — IRI abbreviation there is selected by the
 //!   `jsonld-compacted` form (which carries a prefix `@context`), not by this flag.
+//! * `prefixes?` — an OPTIONAL caller-supplied prefix map: a JS array of `[prefix, iri]`
+//!   pairs (e.g. `[["ex", "http://example.org/"], ["schema", "https://schema.org/"]]`).
+//!   When omitted (`undefined` / `null`) the engine's well-known [`default_prefixes`] are
+//!   used — **byte-for-byte the prior behaviour**, so every existing caller is unchanged.
+//!   When supplied, those prefixes drive Turtle/TriG `@prefix` compaction and the JSON-LD
+//!   compacted `@context`, so a caller can match its own prefix policy (the site's
+//!   `COMMON_PREFIXES`, a query's declared `PREFIX` lines) and get byte-parity output. A
+//!   malformed entry (not a two-string array) is rejected with a `JsError`.
 //!
-//! An unknown `format` is rejected with a clear `JsError` (never a silent empty
-//! string), so a typo surfaces rather than producing a wrong document.
+//! An unknown `format` (or a malformed `prefixes`) is rejected with a clear `JsError`
+//! (never a silent empty string), so a typo surfaces rather than producing a wrong
+//! document.
 
 use sparq_engine::serialize::{
-    default_prefixes, graph_to_jsonld_pretty_with, graph_to_jsonld_with, graph_to_trig,
-    graph_to_trig_pretty_with, graph_to_turtle_pretty_with, graph_to_turtle_with, JsonLdForm,
-    JsonLdPrettyOptions, PrettyOptions,
+    default_prefixes, graph_to_jsonld_pretty_with, graph_to_jsonld_with, graph_to_trig_pretty_with,
+    graph_to_trig_with, graph_to_turtle_pretty_with, graph_to_turtle_with, prefixes_from_pairs,
+    JsonLdForm, JsonLdPrettyOptions, Prefixes, PrettyOptions,
 };
+use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 use crate::Store;
+
+/// [OPUS-4.8] sq-l5kr: turns the optional JS `prefixes` argument into the engine
+/// [`Prefixes`] map the writers consume.
+///
+/// * `None` (the JS caller passed `undefined` / `null` / omitted the argument) reproduces
+///   the prior behaviour exactly — the engine's [`default_prefixes`] (`schema` →
+///   `http://schema.org/`, the `rdf`/`rdfs`/`xsd`/`owl`/`foaf`/`dc`/`skos`/`sh` set), so
+///   every existing caller and golden is byte-for-byte unchanged.
+/// * `Some(array)` is read as an ordered `[[prefix, iri], …]` list — each element a
+///   2-entry JS array of strings — and turned into the map via [`prefixes_from_pairs`]
+///   (last write wins on a duplicate label). This lets a caller serialise under its OWN
+///   prefix policy (e.g. the site's `COMMON_PREFIXES`: `schema` → `https://schema.org/`
+///   plus `dcterms`/`prov`/`geo`/`void`/`ex` → `http://example.org/`, or a query's parsed
+///   `PREFIX` declarations) and get byte-parity output.
+///
+/// A malformed element (not a 2-string array) is rejected with a clear `JsError` rather
+/// than silently dropped, so a bad prefix map surfaces instead of producing a wrong
+/// document. An empty array means "no prefixes" (every IRI stays full `<…>`).
+fn resolve_prefixes(prefixes: Option<js_sys::Array>) -> Result<Prefixes, JsError> {
+    let Some(arr) = prefixes else {
+        return Ok(default_prefixes());
+    };
+    let mut pairs: Vec<(String, String)> = Vec::with_capacity(arr.length() as usize);
+    for (i, entry) in arr.iter().enumerate() {
+        let pair: js_sys::Array = entry.dyn_into().map_err(|_| {
+            JsError::new(&format!(
+                "prefixes[{}] must be a [prefix, iri] array of two strings",
+                i
+            ))
+        })?;
+        let prefix = pair.get(0).as_string().ok_or_else(|| {
+            JsError::new(&format!("prefixes[{}][0] (the prefix label) must be a string", i))
+        })?;
+        let iri = pair.get(1).as_string().ok_or_else(|| {
+            JsError::new(&format!("prefixes[{}][1] (the namespace IRI) must be a string", i))
+        })?;
+        pairs.push((prefix, iri));
+    }
+    Ok(prefixes_from_pairs(pairs))
+}
 
 /// The output format the wasm `Store::serialize` understands. Kept private — the JS
 /// surface takes a `&str` (the same convention as `Store::load`'s `format`).
@@ -121,15 +171,25 @@ impl Store {
     /// header and compacts IRIs to `prefix:local`; `false` keeps every IRI in full
     /// `<…>` form. It is **ignored for JSON-LD** — IRI abbreviation there is selected by
     /// the `jsonld-compacted` form (which carries a prefix `@context`), not this flag.
-    /// The well-known prefixes (`rdf`, `rdfs`, `xsd`, `owl`, `schema`, `foaf`, `dc`,
-    /// `skos`, `sh`) are assumed for compaction.
+    ///
+    /// `prefixes` is an OPTIONAL caller-supplied prefix map: a JS array of
+    /// `[prefix, iri]` pairs (e.g. `[["ex", "http://example.org/"], ["schema",
+    /// "https://schema.org/"]]`). When omitted (`undefined` / `null`) the engine's
+    /// well-known defaults (`rdf`, `rdfs`, `xsd`, `owl`, `schema` → `http://schema.org/`,
+    /// `foaf`, `dc`, `skos`, `sh`) are used — **byte-for-byte the prior behaviour**. When
+    /// supplied, those prefixes drive Turtle/TriG `@prefix` compaction and the JSON-LD
+    /// compacted `@context` instead, so a caller can match its OWN prefix policy (the
+    /// site's `COMMON_PREFIXES` with `https://schema.org/` + `dcterms`/`prov`/`geo`/`void`/
+    /// `ex`, or a query's declared `PREFIX` lines) and get byte-parity output. A malformed
+    /// entry (not a two-string array) is rejected with a `JsError`. Only used for
+    /// compaction (Turtle/TriG with `abbreviate=true`, JSON-LD `jsonld-compacted`).
     ///
     /// This is the document-export counterpart to [`query_quads`](Self::query_quads),
     /// which returns a CONSTRUCT/DESCRIBE *result graph* as flat N-Triples: `serialize`
     /// writes the **store itself** in a readable syntax. Errors only if `format` is
-    /// not one of the recognised values (a `JsError`); serialisation itself is
-    /// infallible. Available only when the crate is built with the OPT-IN
-    /// `serialize-rdf` feature — the site REPL bundle enables it; the lean default
+    /// not one of the recognised values, or `prefixes` is malformed (a `JsError`);
+    /// serialisation itself is infallible. Available only when the crate is built with the
+    /// OPT-IN `serialize-rdf` feature — the site REPL bundle enables it; the lean default
     /// bundle does not. (JSON-LD *serialise-out* needs no extra feature: the writers
     /// live under `serialize-rdf`; the `jsonld` feature is INGEST-only.)
     pub fn serialize(
@@ -138,6 +198,7 @@ impl Store {
         pretty: bool,
         indent: Option<String>,
         abbreviate: bool,
+        prefixes: Option<js_sys::Array>,
     ) -> Result<String, JsError> {
         let fmt = SerFormat::parse(format).ok_or_else(|| {
             JsError::new(&format!(
@@ -146,7 +207,8 @@ impl Store {
                 format
             ))
         })?;
-        let prefixes = default_prefixes();
+        // [OPUS-4.8] sq-l5kr: the caller's prefix policy (or the engine default when absent).
+        let prefixes = resolve_prefixes(prefixes)?;
         // JSON-LD selects its form via the `format` string (not `abbreviate`); the
         // `indent`/`pretty` args carry through identically to the Turtle/TriG path.
         if let SerFormat::JsonLd(form) = fmt {
@@ -176,12 +238,12 @@ impl Store {
                 // `abbreviate=false` "full IRIs" choice is a PRETTY-only option, so an
                 // empty prefix map is passed to suppress CURIE compaction in that case.
                 SerFormat::Turtle if abbreviate => graph_to_turtle_with(&self.graph, &prefixes),
-                SerFormat::Turtle => {
-                    graph_to_turtle_with(&self.graph, &sparq_engine::serialize::Prefixes::new())
-                }
-                // The non-pretty TriG writer (`graph_to_trig`) always uses the default
-                // prefixes; full-IRI TriG is only available through the pretty path.
-                SerFormat::Trig => graph_to_trig(&self.graph),
+                SerFormat::Turtle => graph_to_turtle_with(&self.graph, &Prefixes::new()),
+                // [OPUS-4.8] sq-l5kr: the compact TriG path now honours the caller's prefix
+                // map via `graph_to_trig_with` (previously it always used default_prefixes()).
+                // `abbreviate=false` suppresses compaction with an empty map, matching Turtle.
+                SerFormat::Trig if abbreviate => graph_to_trig_with(&self.graph, &prefixes),
+                SerFormat::Trig => graph_to_trig_with(&self.graph, &Prefixes::new()),
                 SerFormat::JsonLd(_) => unreachable!("JSON-LD handled above"),
             }
         };
@@ -210,7 +272,7 @@ mod tests {
     fn serialize_turtle_pretty_matches_engine() {
         let store = Store::load(DATA, "turtle").unwrap();
         let got = store
-            .serialize("turtle", true, Some("  ".to_string()), true)
+            .serialize("turtle", true, Some("  ".to_string()), true, None)
             .unwrap();
         let g = Graph::load_str(DATA, "turtle").unwrap();
         let want = graph_to_turtle_pretty_with(&g, &default_prefixes(), &PrettyOptions::default());
@@ -232,10 +294,10 @@ mod tests {
     fn serialize_turtle_pretty_custom_indent() {
         let store = Store::load(DATA, "turtle").unwrap();
         let two = store
-            .serialize("turtle", true, Some("  ".to_string()), true)
+            .serialize("turtle", true, Some("  ".to_string()), true, None)
             .unwrap();
         let four = store
-            .serialize("turtle", true, Some("    ".to_string()), true)
+            .serialize("turtle", true, Some("    ".to_string()), true, None)
             .unwrap();
         assert_ne!(two, four, "indent option must affect the output");
         let g = Graph::load_str(DATA, "turtle").unwrap();
@@ -249,7 +311,7 @@ mod tests {
             "custom-indent output must equal the engine output with the same opts"
         );
         // `indent` defaulting: passing `None` matches the two-space default explicitly.
-        let dflt = store.serialize("turtle", true, None, true).unwrap();
+        let dflt = store.serialize("turtle", true, None, true, None).unwrap();
         assert_eq!(dflt, two, "None indent uses the two-space default");
     }
 
@@ -257,7 +319,7 @@ mod tests {
     #[test]
     fn serialize_turtle_pretty_no_abbreviate() {
         let store = Store::load(DATA, "turtle").unwrap();
-        let full = store.serialize("turtle", true, None, false).unwrap();
+        let full = store.serialize("turtle", true, None, false, None).unwrap();
         assert!(
             !full.contains("@prefix"),
             "no prefix header when abbreviate=false: {full}"
@@ -283,7 +345,7 @@ mod tests {
     fn serialize_trig_pretty_named_graph() {
         let nq = "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g1> .\n";
         let store = Store::load_dataset(nq, "nquads").unwrap();
-        let got = store.serialize("trig", true, None, true).unwrap();
+        let got = store.serialize("trig", true, None, true, None).unwrap();
         assert!(got.contains("GRAPH"), "named graph as a GRAPH block: {got}");
         let g = Graph::load_dataset(nq, "nquads").unwrap();
         let want = graph_to_trig_pretty_with(&g, &default_prefixes(), &PrettyOptions::default());
@@ -294,20 +356,79 @@ mod tests {
     #[test]
     fn serialize_turtle_compact_matches_engine() {
         let store = Store::load(DATA, "turtle").unwrap();
-        let got = store.serialize("turtle", false, None, true).unwrap();
+        let got = store.serialize("turtle", false, None, true, None).unwrap();
         let g = Graph::load_str(DATA, "turtle").unwrap();
         let want = graph_to_turtle_with(&g, &default_prefixes());
         assert_eq!(got, want, "wasm compact Turtle must equal the engine output");
+    }
+
+    // ---- [OPUS-4.8] sq-l5kr: the optional caller-supplied prefix map ----
+    //
+    // The `prefixes` arg is a `js_sys::Array`, which can only be CONSTRUCTED in a real
+    // wasm runtime (`js_sys::Array::new()` traps off-wasm). So the native tests here pin
+    // the `None` (default) arm — the load-bearing **back-compat** invariant — across
+    // every format; the `Some(prefix-map)` arm (the new capability: `http://example.org/x`
+    // -> `ex:x` and `https://schema.org/`) is exercised across the JS boundary by
+    // `tests/web.rs::serialize_with_prefix_map`.
+
+    /// `prefixes = None` (the default arm) reproduces `default_prefixes()` BYTE-FOR-BYTE for
+    /// every format — the back-compat guarantee that adding the optional argument changed no
+    /// existing output. (Equivalently: every other native test above passes `None` and still
+    /// matches the engine `*_with(.., &default_prefixes(), ..)` writers.)
+    #[test]
+    fn serialize_none_prefixes_reproduces_default_byte_for_byte() {
+        let nq = "<http://ex/s> <http://ex/p> <http://schema.org/y> <http://ex/g1> .\n\
+                  <http://ex/s> <http://schema.org/q> \"v\" .\n";
+        let store = Store::load_dataset(nq, "nquads").unwrap();
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+        let dp = default_prefixes();
+        // Pretty Turtle (default graph), pretty TriG (whole dataset), compact TriG, and
+        // JSON-LD compacted — each `None`-arm output equals the engine default-prefix writer.
+        assert_eq!(
+            store.serialize("turtle", true, None, true, None).unwrap(),
+            graph_to_turtle_pretty_with(&g, &dp, &PrettyOptions::default()),
+            "pretty Turtle None arm == default_prefixes",
+        );
+        assert_eq!(
+            store.serialize("trig", true, None, true, None).unwrap(),
+            graph_to_trig_pretty_with(&g, &dp, &PrettyOptions::default()),
+            "pretty TriG None arm == default_prefixes",
+        );
+        assert_eq!(
+            store.serialize("trig", false, None, true, None).unwrap(),
+            graph_to_trig_with(&g, &dp),
+            "compact TriG None arm == default_prefixes (now honoured via graph_to_trig_with)",
+        );
+        assert_eq!(
+            store.serialize("jsonld-compacted", false, None, true, None).unwrap(),
+            graph_to_jsonld_with(&g, JsonLdForm::Compacted, &dp),
+            "JSON-LD compacted None arm == default_prefixes",
+        );
+        // The default schema namespace is HTTP — so http://schema.org/y compacts.
+        assert!(
+            store
+                .serialize("trig", true, None, true, None)
+                .unwrap()
+                .contains("schema:y"),
+            "default (http) schema namespace compacts http://schema.org/y",
+        );
+    }
+
+    /// `resolve_prefixes(None)` is exactly `default_prefixes()` — the unit-level back-compat
+    /// invariant, independent of any serialiser run.
+    #[test]
+    fn resolve_prefixes_none_is_default() {
+        assert_eq!(resolve_prefixes(None).unwrap(), default_prefixes());
     }
 
     /// Format parsing is case-insensitive and accepts the media types / `ttl` alias.
     #[test]
     fn serialize_format_aliases() {
         let store = Store::load(DATA, "turtle").unwrap();
-        let a = store.serialize("turtle", true, None, true).unwrap();
+        let a = store.serialize("turtle", true, None, true, None).unwrap();
         for alias in ["TURTLE", "Ttl", "text/turtle"] {
             assert_eq!(
-                store.serialize(alias, true, None, true).unwrap(),
+                store.serialize(alias, true, None, true, None).unwrap(),
                 a,
                 "alias {alias} must serialise as turtle"
             );
@@ -334,7 +455,9 @@ mod tests {
             ("jsonld-flattened", JsonLdForm::Flattened),
             ("jsonld-compacted", JsonLdForm::Compacted),
         ] {
-            let got = store.serialize(fmt, true, Some("  ".to_string()), true).unwrap();
+            let got = store
+                .serialize(fmt, true, Some("  ".to_string()), true, None)
+                .unwrap();
             let opts = JsonLdPrettyOptions {
                 indent: "  ".to_string(),
             };
@@ -353,15 +476,15 @@ mod tests {
     fn serialize_jsonld_minified_matches_engine_and_ignores_abbreviate() {
         let store = Store::load(DATA, "turtle").unwrap();
         let g = Graph::load_str(DATA, "turtle").unwrap();
-        let got = store.serialize("jsonld-compacted", false, None, true).unwrap();
+        let got = store.serialize("jsonld-compacted", false, None, true, None).unwrap();
         let want = graph_to_jsonld_with(&g, JsonLdForm::Compacted, &default_prefixes());
         assert_eq!(got, want, "wasm minified JSON-LD must equal the engine output");
         // `abbreviate` is a no-op for JSON-LD: true vs false produces identical bytes.
-        let with_abbrev_off = store.serialize("jsonld-compacted", false, None, false).unwrap();
+        let with_abbrev_off = store.serialize("jsonld-compacted", false, None, false, None).unwrap();
         assert_eq!(got, with_abbrev_off, "abbreviate is ignored for JSON-LD");
         // Compacted carries a prefix `@context`; expanded does not.
         assert!(got.contains("@context"), "compacted form has @context: {got}");
-        let expanded = store.serialize("jsonld-expanded", false, None, true).unwrap();
+        let expanded = store.serialize("jsonld-expanded", false, None, true, None).unwrap();
         assert!(!expanded.contains("@context"), "expanded form has no @context: {expanded}");
     }
 
@@ -372,8 +495,12 @@ mod tests {
     fn serialize_jsonld_pretty_custom_indent() {
         let store = Store::load(DATA, "turtle").unwrap();
         let g = Graph::load_str(DATA, "turtle").unwrap();
-        let two = store.serialize("jsonld-expanded", true, Some("  ".to_string()), true).unwrap();
-        let four = store.serialize("jsonld-expanded", true, Some("    ".to_string()), true).unwrap();
+        let two = store
+            .serialize("jsonld-expanded", true, Some("  ".to_string()), true, None)
+            .unwrap();
+        let four = store
+            .serialize("jsonld-expanded", true, Some("    ".to_string()), true, None)
+            .unwrap();
         assert_ne!(two, four, "indent option must affect the JSON-LD output");
         let opts = JsonLdPrettyOptions {
             indent: "    ".to_string(),
@@ -383,7 +510,7 @@ mod tests {
             graph_to_jsonld_pretty_with(&g, JsonLdForm::Expanded, &default_prefixes(), &opts),
             "custom-indent JSON-LD must equal the engine output with the same opts"
         );
-        let dflt = store.serialize("jsonld-expanded", true, None, true).unwrap();
+        let dflt = store.serialize("jsonld-expanded", true, None, true, None).unwrap();
         assert_eq!(dflt, two, "None indent uses the two-space default for JSON-LD");
     }
 
@@ -395,7 +522,7 @@ mod tests {
     fn serialize_jsonld_round_trips() {
         let store = Store::load(DATA, "turtle").unwrap();
         for fmt in ["jsonld-expanded", "jsonld-flattened", "jsonld-compacted"] {
-            let doc = store.serialize(fmt, true, None, true).unwrap();
+            let doc = store.serialize(fmt, true, None, true, None).unwrap();
             let reparsed = Graph::load_str(&doc, "jsonld").unwrap();
             assert_eq!(
                 reparsed.len(),
