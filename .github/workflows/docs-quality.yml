@@ -303,6 +303,16 @@ jobs:
         run: shellcheck scripts/tests/test_build_papers_honesty_boundary.sh
       - name: Self-test the build-papers.mjs build-boundary honesty assertion (sq-mraf)
         run: bash scripts/tests/test_build_papers_honesty_boundary.sh
+      # [OPUS-4.8] sq-dhss (epic sq-lhwo): the agent-efficiency Phase-1 telemetry
+      # harness (scripts/agent-telemetry/) is the BLOCKING measurement baseline —
+      # it parses Claude Code transcript JSONL and aggregates token/cache/$ usage
+      # per agent + per wave so every later efficiency %-claim is measured on OUR
+      # repo. Its parser is regression-covered by a hermetic stdlib-unittest suite
+      # over a CHECKED-IN SYNTHETIC fixture (no real session data). Stdlib-only, no
+      # network — run here so a parser regression reds CI before the baseline is
+      # trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
+      - name: Self-test agent-telemetry harness (parser + cache-ratio + cost math)
+        run: python3 scripts/agent-telemetry/tests/test_agent_telemetry.py
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
