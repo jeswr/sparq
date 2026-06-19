@@ -106,10 +106,10 @@ pub struct Suite {
 /// * SHACL-SPARQL 5 — `sparq-shacl` `w3c_sparql.rs` `SHACL_SPARQL_FLOOR = 5`.
 /// * OGC GeoSPARQL 119 — `sparq-geo` `ogc_compliance_ratchet.rs`
 ///   `OGC_RATCHET_FLOOR = 119`.
-/// * Solid WAC 12 — `sparq-solid` `conformance_wac.rs` `WAC_SCENARIO_FLOOR = 12`
-///   (sq-j174).
-/// * Solid ACP 12 — `sparq-solid` `conformance_acp.rs` `ACP_SCENARIO_FLOOR = 12`
-///   (sq-j174).
+/// * Solid WAC 12 — `sparq-solid` `tests/common/mod.rs` `WAC_SCENARIO_FLOOR = 12`
+///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
+/// * Solid ACP 12 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 12`
+///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
