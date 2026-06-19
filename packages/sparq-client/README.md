@@ -70,6 +70,25 @@ copy is the **single source of truth**, kept byte-identical to a fresh wasm buil
   renders a live row exactly like a queried one. It reuses endpoint mode's `EndpointConfig` +
   bearer posture verbatim, runs the SAME `connectionSafetyWarnings` classifier, and **bypasses no
   server gate** (the SSE read surface is gated by `--auth-token-read` exactly as `/sparql` GET).
+- **Server health / capabilities** (`src/server-health.ts`, `sq-he72`): reads the connected
+  server's OPERATIONAL surface, reusing the SAME `EndpointConfig` + bearer posture.
+  `fetchServerHealth(config)` reads `/health`, the Prometheus `/metrics`, the opt-in VoID
+  (`/.well-known/void`) and the opt-in SPARQL Service Description (a `GET /sparql` with no
+  `query`) concurrently off the configured endpoint's ORIGIN (the operational endpoints live at
+  the server root, NOT under `/sparql` — `deriveServerUrl` does the path swap), and returns each
+  as a discriminated `FetchOutcome` (`ok` / `not-exposed` / `unauthorized` / `error`).
+  `parsePrometheusMetrics` is a focused, dependency-free parser for the server's hand-rolled
+  Prometheus [text exposition format] (`crates/sparq-server/src/metrics.rs`) → `MetricFamily[]`
+  (HELP / TYPE / labelled samples, with histogram buckets grouped under their base family).
+  `extractVoidSummary` / `extractServiceDescription` reshape the RDF descriptors (requested as
+  `application/n-triples`, parsed via `parseNTriples`) into readable `VoidSummary` /
+  `ServiceDescriptionSummary` facts (dataset counts; endpoint, supported languages, features,
+  result/input formats, registered extension functions, named graphs). Crucially, a disabled
+  opt-in feature answers `404`, surfaced as `not-exposed` — an **honest "the operator turned this
+  off"**, never a fabricated metric or capability. Consumes the existing `sparq-server` API and
+  **bypasses no server gate**.
+
+  [text exposition format]: https://prometheus.io/docs/instrumenting/exposition_formats/
 
 ## Endpoint-mode safety posture (honest, never an overclaim)
 

@@ -499,6 +499,40 @@ export {
   splitSseFrames,
 } from "./subscriptions.js";
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-he72 — server health / capabilities: read the connected server's
+// operational surface (`/health`, the Prometheus `/metrics`, and the opt-in VoID / SPARQL
+// Service Description). Reuses the SAME `EndpointConfig` + bearer posture as the query client;
+// parses the Prometheus text exposition + the RDF descriptors into readable structures, and
+// reports the server's honest `404` for a disabled opt-in feature as a `"not-exposed"`
+// outcome (never a fabricated value). Consumes the existing `sparq-server` API; bypasses no
+// gate; claims no capability the server does not advertise.
+// ---------------------------------------------------------------------------
+
+export {
+  type CapabilitiesSummary,
+  type FetchOutcome,
+  type MetricFamily,
+  type MetricSample,
+  type MetricType,
+  type NamedGraphSummary,
+  type ParsedMetrics,
+  type ServerHealth,
+  type ServiceDescriptionSummary,
+  type VoidSummary,
+  HEALTH_PATH,
+  METRICS_PATH,
+  VOID_PATH,
+  deriveServerUrl,
+  extractCapabilities,
+  extractServiceDescription,
+  extractVoidSummary,
+  fetchServerHealth,
+  formatMetricLabels,
+  parsePrometheusMetrics,
+  shortenIri,
+} from "./server-health.js";
+
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {
   if (!t) return "";

@@ -61,6 +61,8 @@ import { TurtleResult } from "@/components/rdf-highlight";
 import { ConnectPanel } from "@/components/connect-panel";
 // [OPUS-4.8] sq-9ij6 — endpoint mode: the live subscriptions view (SSE result deltas).
 import { SubscriptionsView } from "@/components/subscriptions-view";
+// [OPUS-4.8] sq-he72 — endpoint mode: the server health / capabilities panel (metrics + VoID/SD).
+import { ServerHealthPanel } from "@/components/server-health-panel";
 import { type EndpointConfig, runEndpointQuery } from "@sparq/client";
 
 // [OPUS-4.8] sq-vfbm — the REPL now dispatches across the whole lean-bundle query
@@ -532,6 +534,13 @@ export function Repl() {
             renders an honest "switch on endpoint mode" hint otherwise. It reuses the SAME
             endpoint config + bearer/connection-safety posture the Connect panel established. */}
         <SubscriptionsView config={endpointConfig} active={endpointActive} />
+
+        {/* [OPUS-4.8] sq-he72 — the server health / capabilities panel. Reads the connected
+            server's /health, Prometheus /metrics, and the opt-in VoID / SPARQL Service
+            Description, rendering "not exposed" honestly when the operator left a feature off.
+            Like the subscriptions view, it only runs in endpoint mode and reuses the SAME
+            endpoint config + bearer/connection-safety posture. */}
+        <ServerHealthPanel config={endpointConfig} active={endpointActive} />
       </CardContent>
 
       <DatasetViewer
