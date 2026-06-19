@@ -97,6 +97,11 @@ store.fingerprint() -> Option<Fingerprint>;  store.check_graph(&Graph) -> Result
 // fingerprint = dict_len + triple_count + content_hash over the dict term SET in a dict-id-order-INDEPENDENT (sorted) order
 //   (sq-xhiv: stable across RAYON_NUM_THREADS, so re-loading the same RDF at a different thread count does NOT spuriously
 //   mismatch; a genuine term add/remove/edit still does); legacy v1 files open but check_graph errs
+// ID-KEYED STALENESS CONTRACT (sq-wlzi): the store is keyed by RAW dict id, so a passing check_graph is NECESSARY but NOT
+//   SUFFICIENT -- the thread-count-stable fingerprint ALSO passes a re-parse of the same RDF whose ids merely permuted, which
+//   then serves the WRONG vector. To SERVE a persisted .spqv/.spqg: persist its graph (Graph::save) and reopen THAT graph
+//   (Graph::open -- mmaps the FROZEN id order) to resolve query terms; NEVER re-parse the source RDF (Graph::load_str etc.).
+//   (Graph::save/open need sparq-core's `mmap` feature.) Round-trip vs re-parse trap pinned in tests/staleness_contract.rs.
 
 // --- search (src/ann.rs) --- all return cosine in [-1,1], best first; zero query -> empty
 nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan

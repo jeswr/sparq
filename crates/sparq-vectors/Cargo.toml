@@ -105,6 +105,15 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # only and never enters the published dependency graph.
 [dev-dependencies]
 sparq-sim = { path = "../sparq-sim" }
+# [OPUS-4.8] sq-wlzi: DEV-only. The id-keyed-staleness-contract test (tests/staleness_contract.rs)
+# demonstrates the SOUND serving path — persist the build graph with `Graph::save`, reopen it with
+# `Graph::open` (which mmaps the FROZEN dict id order), and query the id-keyed store against THAT —
+# vs the re-parse trap (`Graph::load_str` at a different RAYON_NUM_THREADS reshuffles the dict ids,
+# so the store serves the WRONG vectors). `Graph::save`/`open` are gated behind sparq-core's `mmap`
+# feature, so we enable it for the test build ONLY. This does NOT change the published default build:
+# a dev-dependency feature is local to this crate's test/example/bench targets and never propagates
+# to downstream consumers of `sparq-vectors`.
+sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
 # [OPUS-4.8] sq-xhiv: DEV-only. The fingerprint thread-count-stability regression tests drive the
 # SAME parallel sharded dict merge the loader uses at two explicit thread counts via a scoped rayon
 # pool (`RAYON_NUM_THREADS` is read once per process, so it cannot be varied mid-test). rayon is NOT

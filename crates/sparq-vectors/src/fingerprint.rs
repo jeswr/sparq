@@ -57,6 +57,37 @@
 //! graph (it makes no integrity, soundness, or tamper-resistance claim against a motivated party).
 //! dict_len + triple_count are folded alongside it precisely so the common shift cases
 //! (terms added/removed, triples added/removed) are caught structurally even before the hash.
+//!
+//! # [OPUS-4.8] (sq-wlzi) The id-keyed STALENESS CONTRACT — serve via `Graph::open`, never a re-parse
+//!
+//! A passing [`check_against`] is **necessary but NOT sufficient** for a correct query, and the
+//! sq-xhiv thread-count-stability above is exactly why. The store/index are keyed by **raw dict id**;
+//! the fingerprint deliberately folds only the term *set*, so it is **blind to a pure id permutation
+//! of an unchanged term set**. That blindness is the right call for the fingerprint's job (catch a
+//! genuine term change, ignore a thread-count reshuffle), but it means the fingerprint **cannot** tell
+//! a graph with the build-time `id → term` binding apart from the *same* graph re-parsed at a different
+//! `RAYON_NUM_THREADS` (whose ids permuted). Both fingerprint identically, so `check_against` passes
+//! BOTH — yet only the first resolves the id-keyed store correctly; the re-parse serves a **different,
+//! real term's vector** under the queried term's id (a plausible-looking but WRONG neighbour, no error).
+//!
+//! The CONTRACT that closes this gap is a **usage discipline**, not a code check:
+//!
+//! > To serve a persisted `.spqv` / `.spqg`, **persist the graph it was built against**
+//! > (`Graph::save`) and **reopen THAT graph** (`Graph::open`, which mmaps the **frozen** dict id
+//! > order) to resolve query terms. **NEVER re-parse the source RDF** (`Graph::load_str` /
+//! > `load_reader` / `load_dataset`): the parallel sharded dict merge assigns thread-count-dependent
+//! > ids, so a re-parse yields a different `id → term` binding than the store was keyed against. (The
+//! > `mmap` feature on `sparq-core` gates `Graph::save`/`Graph::open`.)
+//!
+//! An id-keyed store/index is valid ONLY against the **exact graph generation it was built against**.
+//! The persisted dict is the only thread-count-independent id binding sparq-core exposes, so reopening
+//! it is the only sound way to recover that generation. `check_against` remains a worthwhile guard for
+//! the cases it *can* catch (a term added/removed/edited ⇒ a changed term set ⇒ a changed fingerprint),
+//! but it is a backstop, not the primary safety mechanism — the discipline above is. The round-trip
+//! and the re-parse trap are pinned end-to-end in `tests/staleness_contract.rs`. A larger, optional
+//! redesign that would make a *logically*-identical graph queryable at any thread count — re-resolving
+//! neighbours by **term** rather than raw id (a term-keyed store/index/mask) — is tracked as a separate
+//! follow-up (it changes the on-disk format and the `IdMask` mask-cache key; not a doc change).
 
 use sparq_core::dict::{is_inline, Dict, Id, TermParts, INLINE_BASE};
 use sparq_core::Graph;
