@@ -197,6 +197,34 @@ jobs:
       #   ANTI-LOOP (two independent guards): (1) the commit message carries [skip ci]; (2) this workflow's
       #   on.push.paths-ignore excludes bench/perf-baseline.json, so a floor-only commit can't re-trigger it.
       # main only — PRs (esp. forks) get a read-only token and must never write to main. exit 3 = no change.
+      #
+      # [OPUS-4.8] FAIL-SOFT + FETCH-REBASE the commit-back (sq-llxc; sibling of sq-roe3 / PR #856). The
+      # default GITHUB_TOKEN CANNOT push to protected `main`: this `push:main` run's HEAD is already
+      # behind the remote tip (other merges land during the long bench job) so the direct `git push
+      # HEAD:main` is rejected `! [rejected] HEAD -> main (fetch first)` (a non_fast_forward race), and
+      # even past that race the `main` ruleset (id 17688455: pull_request + required_status_checks "gate"
+      # + code_scanning + non_fast_forward, EMPTY bypass list) rejects it with `GH013`. Confirmed RED on
+      # Benchmarks runs #27827073571 and #27826231986 (both push:main):
+      #     1 file changed, 2 insertions(+), 2 deletions(-)
+      #     ! [rejected]        HEAD -> main (fetch first)
+      #     error: failed to push some refs to 'https://github.com/jeswr/sparq.git'
+      # Under `set -euo pipefail` that turned the whole Benchmarks job RED on every improving push, AND
+      # the floor never landed (the ratchet is silently a no-op on this path). Two changes below:
+      #   (1) FETCH-REBASE: before the push, fetch the latest origin/main and rebase the floor-only commit
+      #       onto it, so WHEN pushing is enabled the non_fast_forward race is survived (commit applies
+      #       onto the current tip). bench/perf-baseline.json is touched by nothing else, so this rebase
+      #       never conflicts.
+      #   (2) FAIL-SOFT push: disable errexit only around the push, capture its exit code, and on non-zero
+      #       emit a clear ::warning:: (naming the non_fast_forward / GH013 cause) and exit 0 so the job
+      #       stays GREEN whether or not the push lands. The MEASUREMENT + perf-gate comparison above are
+      #       UNTOUCHED — only this main-only commit-back is made non-fatal and race-safe.
+      # RULESET-COMPATIBLE PATH (true floor-landing, deferred — same as sq-roe3/#856):
+      #   Option A — add the github-actions bot to the `main` ruleset bypass list (owner-only → needs:user)
+      #              so the rebased push actually lands; OR
+      #   Option C — fold the baseline update into the periodic .beads / data-sync PR (sq-2xdg) through the
+      #              normal PR → gate → merge flow.
+      # The fail-soft is the immediate fix (stops the red runs); the floor-landing is deferred to that
+      # decision.
       - name: Auto-ratchet the perf floor (commit improvements back to main)
         if: github.ref == 'refs/heads/main'
         env:
@@ -224,7 +252,26 @@ jobs:
           git add bench/perf-baseline.json
           git commit -m "chore(bench): auto-ratchet perf floor to new best-ever [skip ci]" \
                      -m "Lowered by the bench workflow after a measured improvement (sq-52e perf ratchet)."
+          # FETCH-REBASE the floor-only commit onto the latest origin/main tip so the push survives the
+          # non_fast_forward race (main moves ahead during the long bench job). bench/perf-baseline.json
+          # is written by nothing else, so this rebase never conflicts; if it somehow does, fail soft.
+          if git fetch origin main 2>/dev/null && git rebase FETCH_HEAD 2>/dev/null; then
+            echo "rebased the floor-only commit onto the latest origin/main tip."
+          else
+            git rebase --abort 2>/dev/null || true
+            echo "::warning title=perf-floor rebase skipped::Could not rebase the floor commit onto origin/main (fetch or rebase failed); attempting push as-is."
+          fi
+          # Best-effort push. A protected-branch ruleset rejection (GH013) or a residual non_fast_forward
+          # race must NOT fail this non-gating main-only commit-back. Disable errexit only around the push
+          # so we can inspect its status and fail soft (the measurement + perf-gate above are untouched).
+          set +e
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          push_rc=$?
+          set -e
+          if [ "$push_rc" -ne 0 ]; then
+            echo "::warning title=perf-floor push declined::Could not push the tightened perf floor to protected main (git push exit ${push_rc}; likely a non_fast_forward race or the GH013 ruleset rejection — direct pushes to main are blocked, empty bypass list). Best-effort no-op: the perf measurement + hard gate ran and the floor WAS computed, but the bench/perf-baseline.json update was NOT landed. Resolve by adding the github-actions bot to the main ruleset bypass list (owner-only; sq-llxc/sq-roe3 needs:user) or folding the baseline update into the periodic .beads / data-sync PR (sq-2xdg). The floor only tightens via a human/orchestrator commit in the meantime."
+            exit 0
+          fi
           echo "committed + pushed tightened perf floor to main."
       # [OPUS-4.8] First-run bootstrap: github-action-benchmark does
       # `git fetch origin benchmark-data:benchmark-data` and hard-fails with

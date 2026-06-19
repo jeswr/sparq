@@ -210,7 +210,7 @@ fn serialize_termparts(tp: &TermParts, out: &mut Vec<u8>) {
             // content is their components' ids (resolvable only after the leaf dedup), so they
             // take the dedicated in-RAM triple-term arena (`SpillInterner::triples`) and are
             // finalised in `finalize_triple_terms`. This leaf serializer must never see one.
-            panic!("RDF-star triple terms take the triple-term arena, not the leaf serializer (sq-jvbr)")
+            panic!("RDF 1.2 triple terms take the triple-term arena, not the leaf serializer (sq-jvbr)")
         }
     }
 }

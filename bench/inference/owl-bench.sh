@@ -8,9 +8,18 @@
 #   4. owl-restrictions — 50k individuals × someValuesFrom/hasValue/intersection restrictions
 #                         + equivalence + inverse (the class-feature fixpoint path)
 # Prints min-of-3 seconds per workload (parses the CLI's "in Xs" line).
+#
+# [OPUS-4.8] (sq-k5qq) Strictly-additive machine-readable emit: set OWL_BENCH_JSON to a
+# path and the run ALSO writes the SAME per-workload min-of-3 seconds to that file as a
+# stable, hand-built JSON document (the shell analogue of the Rust harnesses'
+# dependency-free `format!`-JSON). STDOUT (the printf table) is byte-for-byte unchanged
+# whether or not the env var is set; the seconds are best-effort, MEASURED on the running
+# host — ADVISORY + NON-CANONICAL (stated in the emitted `note`) — nothing is committed.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 CLI="${SPARQ_CLI:-target/release/sparq-cli}"
+JSON_OUT="${OWL_BENCH_JSON:-}"
+JSON_ROWS=""   # accumulated `{ ... }` row objects, comma-joined at the end
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 # 1+2: instance-heavy RDFS
@@ -47,8 +56,27 @@ run() { # name file profile
     if [ -z "$best" ] || awk "BEGIN{exit !($t < $best)}"; then best="$t"; fi
   done
   printf '%-18s %ss\n' "$1" "$best"
+  # [OPUS-4.8] (sq-k5qq) accumulate one JSON row for the optional --json emit. Workload
+  # name + profile are static idents (JSON-safe to quote); seconds is a bare JSON number.
+  if [ -n "$JSON_OUT" ]; then
+    local row="{ \"workload\": \"$1\", \"profile\": \"$3\", \"seconds\": $best }"
+    if [ -z "$JSON_ROWS" ]; then JSON_ROWS="$row"; else JSON_ROWS="$JSON_ROWS,$row"; fi
+  fi
 }
 run rdfs-instances "$TMP/rdfs.ttl" rdfs
 run owl-route-rdfs "$TMP/rdfs.ttl" owl
 run owl-transitive "$TMP/trans.ttl" owl
 run owl-restrictions "$TMP/restr.ttl" owl
+
+# [OPUS-4.8] (sq-k5qq) Strictly-additive JSON emit: write the accumulated rows only when
+# OWL_BENCH_JSON was set. The STDOUT table above is unchanged either way.
+if [ -n "$JSON_OUT" ]; then
+  {
+    printf '{\n'
+    printf '  "harness": "sparq-reason owl-bench",\n'
+    printf '  "note": "every min-of-3 second figure is best-effort, MEASURED on the running host — ADVISORY, NON-CANONICAL (this dev box) — do not bake into committed files",\n'
+    printf '  "rows": [ %s ]\n' "$JSON_ROWS"
+    printf '}\n'
+  } > "$JSON_OUT"
+  echo "wrote results JSON to $JSON_OUT" >&2
+fi
