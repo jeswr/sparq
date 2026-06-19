@@ -110,6 +110,15 @@ PER_COMMIT_CRATES=(
   # WITH --features count-enforcement (the `case` in measure() below names it) — a default
   # build compiles that whole surface out and reports a non-representative number.
   sparq-policy
+  # [OPUS-4.8] sq-bif.8 / sq-bif.9: two OPT-IN, standalone crates that nothing in the
+  # default build depends on, both untracked by BOTH gates. Unlike the federation/policy
+  # crates above they have NO opt-in features (sparq-algos: `default = []` only; sparq-canon:
+  # no `[features]` table), so their WHOLE surface is compiled in a default-feature build —
+  # they need NO `case` arm in measure() and are measured exactly as-is. sparq-canon's number
+  # reflects its tests/rdf_canon_suite.rs driving the full 86-entry W3C RDFC-1.0 manifest plus
+  # the focused bnode-isomorphism / oxrdf-bridge unit cases; sparq-algos' reflects the inline
+  # PageRank/centrality/community oracles plus the tests/topology_oracles.rs integration suite.
+  sparq-algos sparq-canon
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
