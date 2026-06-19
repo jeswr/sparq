@@ -25,6 +25,14 @@
       "nightly_floor": 85,
       "nightly_note": "[OPUS-4.8] sq-bjct: nightly_floor gates the NIGHTLY tier, whose measurement MERGES the W3C SPARQL + inference conformance BINARIES (they run as `cargo run`, not `cargo test`) into this crate's llvm-cov report — a higher number than the test-only per-commit `floor`. See scripts/coverage.sh measure_merged + the coverage-nightly job. Merged measurement 87.31% lifts the nightly floor to 85 (base test-only floor 83); floor = floor(measured) - 2 margin."
     },
+    "sparq-fedclient": {
+      "floor": 89,
+      "note": "[OPUS-4.8] sq-bif.1: OPT-IN streaming federation CLIENT. Measured WITH its whole-surface features on (--features fedclient,fedclient-adaptive — see scripts/coverage.sh measure() case; a default-feature build is an empty crate). Measured line% 91.71 (4361/4753); floor = floor(measured) - 2 margin. Conservative seed measured on a non-canonical work box; the floor is the CI-enforced ratchet of record."
+    },
+    "sparq-fedplan": {
+      "floor": 94,
+      "note": "[OPUS-4.8] sq-bif.1: OPT-IN cost-based federated planner. Measured WITH --features fedplan,adaptive-replan (its surface is entirely feature-gated). Measured line% 96.04 (2307/2402); floor = floor(measured) - 2 margin. Conservative work-box seed; CI is the ratchet of record."
+    },
     "sparq-geo": {
       "floor": 87
     },
@@ -48,11 +56,23 @@
     "sparq-parse": {
       "floor": 91
     },
+    "sparq-prov": {
+      "floor": 94,
+      "note": "[OPUS-4.8] sq-bif.1: OPT-IN W3C PROV-O lineage. CONSTRUCT/UPDATE lineage core is default-on; measured WITH --features reason (the sparq-reason proof-tree -> PROV-O bridge module + its tests/reason_prov.rs). Measured line% 96.70 (762/788); floor = floor(measured) - 2 margin. Conservative work-box seed; CI is the ratchet of record."
+    },
     "sparq-reason": {
       "floor": 82
     },
+    "sparq-reason-wasm": {
+      "floor": 0,
+      "note": "[OPUS-4.8] sq-bif.1: tier-b WASM bundle (cdylib+rlib). Its gate-exercising surface is the #[wasm_bindgen] JS API exercised ONLY by `wasm-pack test --node` (tests/web.rs is #[wasm_bindgen_test]); a NATIVE `cargo llvm-cov` runs 0 of those and reports a misleadingly-low ~55% over the rlib helpers alone — a measurement artifact in the same class as sparq-cli (subprocess) / sparq-gpu (device-gated). Floor 0 + PRESENCE-gated (bench/coverage-presence.json) instead of an unenforceable %; not added to scripts/coverage.sh."
+    },
     "sparq-rsp": {
       "floor": 87
+    },
+    "sparq-rsp-wasm": {
+      "floor": 0,
+      "note": "[OPUS-4.8] sq-bif.1: tier-b WASM bundle (cdylib+rlib). #[wasm_bindgen] JS API exercised only by `wasm-pack test --node`; native llvm-cov reports a misleadingly-low ~60% (rlib helpers only) — measurement artifact (cf. sparq-cli). Floor 0 + PRESENCE-gated; not measured by scripts/coverage.sh."
     },
     "sparq-serve": {
       "floor": 92,
@@ -65,6 +85,10 @@
     "sparq-shacl": {
       "floor": 90
     },
+    "sparq-shacl-wasm": {
+      "floor": 0,
+      "note": "[OPUS-4.8] sq-bif.1: tier-b WASM bundle (cdylib+rlib). #[wasm_bindgen] JS API exercised only by `wasm-pack test --node`; native llvm-cov reports a misleadingly-low ~79% (rlib helpers only) — measurement artifact (cf. sparq-cli). Floor 0 + PRESENCE-gated; not measured by scripts/coverage.sh."
+    },
     "sparq-sim": {
       "floor": 94
     },
@@ -73,6 +97,10 @@
     },
     "sparq-text": {
       "floor": 90
+    },
+    "sparq-text-wasm": {
+      "floor": 0,
+      "note": "[OPUS-4.8] sq-bif.1: tier-b WASM bundle (cdylib+rlib). #[wasm_bindgen] JS API exercised only by `wasm-pack test --node`; native llvm-cov reports a misleadingly-low ~80% (rlib helpers only) — measurement artifact (cf. sparq-cli). Floor 0 + PRESENCE-gated; not measured by scripts/coverage.sh."
     },
     "sparq-vectors": {
       "floor": 91,
