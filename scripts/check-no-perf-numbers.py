@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -253,6 +254,80 @@ def scan_typst_file(path: str) -> list[tuple[int, str, str]]:
     return findings
 
 
+# --- paper-evidence.json prose scan ----------------------------------------------
+# [OPUS-4.8] bead sq-4hga. The paper-factory evidence file carries human PROSE in its `note`
+# (and the top-level `_comment`) free-text fields, which surface inline in a published paper
+# via the `provenance()` helper. A result-shaped perf number typed into a record `note` (e.g.
+# "…runs at 12× faster on WatDiv…") would bypass the canonical accessor discipline exactly
+# like one typed into a `.typ` — so the SAME result-shaped PERF_PATTERNS are applied to those
+# prose strings only. Everything else is left alone by design:
+#   - Structured numeric metadata (`value`, `n_vectors`, `dim`, `k`, `n_queries`,
+#     `scatter_penalty`, `schemaVersion`) is the canonical data path — the values a paper
+#     cites THROUGH the accessor — the legitimate counterpart of the `.typ` accessor-call skip.
+#   - The `source` field is a test/dataset PATH (e.g. "…recall.rs::hnsw_recall_at_10_vs_brute_
+#     force_on_50k"), NOT prose: a count-like token in a test name is a legitimate identifier,
+#     not a published claim, so `source` is deliberately NOT in the prose set.
+# The narrow result-shaped net also means bare setup counts inside a `note` ("on a 20k
+# synthetic set") are left alone (no throughput/latency/ratio unit). Honest scope: COARSE
+# perf-number class only; a subtle semantic overclaim in a note remains Stage-5 human review
+# (and the privacy-phrase half of the note scan is covered by check-privacy-claims.sh).
+EVIDENCE_PATH = "site/src/data/paper-evidence.json"
+# Only these string fields are PROSE; every other string (and all numbers) is structured data.
+EVIDENCE_PROSE_FIELDS = frozenset({"note", "_comment"})
+
+
+def scan_evidence_json(path: str) -> list[tuple[int, str, str]]:
+    """Scan the prose (`note`/`_comment`) fields of paper-evidence.json (bead sq-4hga).
+
+    Reports the 1-based line number of the offending prose field within the file, so a CI
+    reader can jump straight to it (the JSON is pretty-printed, one field per line).
+    """
+    findings: list[tuple[int, str, str]] = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read()
+    except (OSError, UnicodeDecodeError) as e:
+        raise FileReadError(f"{path}: could not read: {e}") from e
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        # A malformed evidence file is a hard failure, not a silent skip — the build-time
+        # honesty gate (build-papers.mjs) also parses it, but surfacing here keeps the
+        # perf gate from passing a file it could not actually inspect.
+        raise FileReadError(f"{path}: invalid JSON: {e}") from e
+
+    # Map line numbers for the prose values so findings point at the real line. We re-scan
+    # the raw text for each offending value rather than trust json positions (stdlib json
+    # gives none), which is exact enough: prose `note`s are unique strings in this file.
+    lines = raw.splitlines()
+
+    def line_of(substr: str) -> int:
+        for i, ln in enumerate(lines, 1):
+            if substr in ln:
+                return i
+        return 0
+
+    def walk(obj, field_name: str | None) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                walk(v, k)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v, field_name)
+        elif isinstance(obj, str) and field_name in EVIDENCE_PROSE_FIELDS:
+            if any(sub in obj for sub in ALLOW_LINE_SUBSTRINGS):
+                return
+            for pat, label in PERF_PATTERNS:
+                m = pat.search(obj)
+                if m:
+                    snippet = m.group(0).strip()
+                    findings.append((line_of(snippet), label, snippet))
+                    break
+
+    walk(data, None)
+    return findings
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -272,6 +347,12 @@ def main() -> int:
     args = ap.parse_args()
 
     files = args.paths or [p for p in tracked_sources() if not is_exempt_path(p)]
+    # [OPUS-4.8] bead sq-4hga: in default (whole-tree) mode, also scan the paper-evidence
+    # prose fields. Added explicitly because the file is *.json (not in SCAN_GLOBS) and its
+    # scan is field-aware, not line-shaped. An explicit-paths invocation that names the file
+    # gets the same field-aware dispatch below.
+    if not args.paths and os.path.exists(EVIDENCE_PATH) and EVIDENCE_PATH not in files:
+        files = [*files, EVIDENCE_PATH]
 
     total = 0
     read_errors = 0  # [OPUS-4.8] unreadable files — never silently skipped
@@ -281,8 +362,11 @@ def main() -> int:
             continue
         try:
             # [OPUS-4.8] sq-mkza: `.typ` paper sources use the accessor-aware,
-            # result-shaped-only scan; everything else uses the markdown scan.
-            if path.endswith(".typ"):
+            # result-shaped-only scan; sq-4hga: the evidence JSON uses the field-aware
+            # prose scan; everything else uses the markdown scan.
+            if path.endswith("paper-evidence.json"):
+                file_findings = scan_evidence_json(path)
+            elif path.endswith(".typ"):
                 file_findings = scan_typst_file(path)
             else:
                 file_findings = scan_file(path)

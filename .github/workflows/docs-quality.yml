@@ -285,6 +285,17 @@ jobs:
       # so a silent rename back to the taken name fails CI here. Stdlib-only, no network.
       - name: Self-test check-pypi-name.py (decision table + dist-name reader)
         run: python3 scripts/check-pypi-name.py --self-test
+      # [OPUS-4.8] sq-mraf: the build-BOUNDARY honesty assertion in
+      # site/scripts/build-papers.mjs re-runs BOTH shared gates over the exact paper
+      # sources + paper-evidence.json before any artifact is written, so the factory can
+      # never serve an un-scanned / violating paper. This self-test drives the REAL
+      # build-papers.mjs against a throwaway site mirror and asserts a planted .typ perf
+      # number / evidence-note ZK-claim ABORTS the build fail-closed (no artifact written),
+      # while clean sources pass. HARD job — a boundary regression also reds ci-summary.
+      - name: shellcheck the build-boundary honesty self-test
+        run: shellcheck scripts/tests/test_build_papers_honesty_boundary.sh
+      - name: Self-test the build-papers.mjs build-boundary honesty assertion (sq-mraf)
+        run: bash scripts/tests/test_build_papers_honesty_boundary.sh
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
