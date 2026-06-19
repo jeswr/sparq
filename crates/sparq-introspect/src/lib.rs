@@ -16,6 +16,12 @@ const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
 const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const VOID_NS: &str = "http://rdfs.org/ns/void#";
+/// [OPUS-4.8] sq-bde: the W3C SHACL namespace. [`Introspection::to_shacl`] exports each
+/// mined characteristic set as an `sh:NodeShape` under this namespace — a CS ≈ a node
+/// shape (Neumann & Moerkotte's per-entity-type predicate co-occurrence is exactly the
+/// "what properties does an entity of this kind carry, and how often" question SHACL's
+/// property shapes describe).
+const SHACL_NS: &str = "http://www.w3.org/ns/shacl#";
 /// [OPUS-4.8] sq-mr32 (federation A3/Z2): the **sparq characteristic-set** extension
 /// vocabulary. VoID has no native term for per-entity-type predicate co-occurrence
 /// statistics (the Neumann & Moerkotte characteristic sets sparq mines), so the served
@@ -1148,6 +1154,100 @@ impl Introspection {
         out
     }
 
+    /// [OPUS-4.8] sq-bde: export each mined characteristic set as a W3C **SHACL node
+    /// shape**, returned as one N-Triples document (valid Turtle).
+    ///
+    /// A characteristic set (Neumann & Moerkotte: the exact set of predicates a group of
+    /// subjects emits, with per-predicate multiplicity) maps almost one-to-one onto an
+    /// `sh:NodeShape`: "an entity of this kind carries exactly these properties, this
+    /// many times". The mined statistics are derived **only from what the data actually
+    /// asserts**, so every constraint emitted is one the current graph already satisfies
+    /// — the shapes describe the effective schema, they are not an aspirational contract.
+    /// (A consumer who wants a stricter contract edits the generated shapes; a CS is the
+    /// data-grounded floor.)
+    ///
+    /// Per retained set (`self.characteristic_sets.sets`, already bounded by
+    /// [`BuildOptions::max_char_sets`] and ordered by descending subject count, so the
+    /// document is bounded and deterministic):
+    ///
+    /// ```text
+    /// _:shapeN a sh:NodeShape ;
+    ///     sh:targetClass <C> ;              # one per class universal to the set (see below)
+    ///     scs:subjects "<count(C)>"^^xsd:integer ;   # provenance: how many subjects
+    ///     sh:property _:shapeN_M .
+    /// _:shapeN_M a sh:PropertyShape ;
+    ///     sh:path <predicate> ;
+    ///     sh:minCount 1 ;                   # always: every subject in the set emits it
+    ///     sh:maxCount 1 .                   # ONLY when the set's avg multiplicity is 1
+    /// ```
+    ///
+    /// Soundness of the cardinality constraints (each holds for *every* subject in the
+    /// set, by the definition of a characteristic set):
+    /// - `sh:minCount 1` — a subject is in this set iff it emits **exactly** this
+    ///   predicate set, so each listed predicate occurs at least once on every subject.
+    /// - `sh:maxCount 1` — emitted only when `predicate_triples[i] == subjects`, i.e. the
+    ///   summed occurrence count equals the subject count. Since each subject emits the
+    ///   predicate at least once, an equal sum forces exactly one per subject. Any larger
+    ///   sum (avg multiplicity > 1) means some subject is multi-valued, so no `sh:maxCount`
+    ///   is emitted — never an unsound upper bound.
+    ///
+    /// `sh:targetClass <C>` is emitted only for a class **universal** to the set — one
+    /// whose subject count within the set equals the set's total subject count, so every
+    /// instance the shape would target genuinely has this exact predicate set. (The
+    /// per-set `classes` histogram is bounded by [`BuildOptions::max_classes_per_histogram`];
+    /// a universal class with count == subjects is necessarily retained, as it is the most
+    /// common.) `rdf:type` itself is expressed through targeting, so it is **not** repeated
+    /// as an `sh:property`. A set whose subjects share no universal class (untyped or
+    /// heterogeneous entities) yields a **target-less** node shape — still a valid,
+    /// reusable schema template, just not auto-applied to any class.
+    ///
+    /// The `scs:subjects` provenance triple (see `CS_NS`) records the support behind each
+    /// shape; a SHACL processor that does not know the term simply ignores it.
+    pub fn to_shacl(&self) -> String {
+        use std::fmt::Write as _;
+        let sh = |local: &str| format!("{SHACL_NS}{local}");
+        let cs = |local: &str| format!("{CS_NS}{local}");
+        let iri = |s: &str| NamedNode::new_unchecked(s).to_string();
+        let int = |n: u64| Literal::new_typed_literal(n.to_string(), xsd::INTEGER).to_string();
+
+        let mut out = String::new();
+        for (si, set) in self.characteristic_sets.sets.iter().enumerate() {
+            let snode = format!("_:shape{si}");
+            let _ = writeln!(out, "{snode} <{RDF_TYPE}> <{}> .", sh("NodeShape"));
+            // Provenance: subjects backing this shape (the set's support count).
+            let _ = writeln!(out, "{snode} <{}> {} .", cs("subjects"), int(set.subjects));
+
+            // sh:targetClass for every class UNIVERSAL to the set (count == subjects), so
+            // each targeted instance genuinely carries this exact predicate set.
+            for c in &set.classes {
+                if c.count == set.subjects {
+                    let _ = writeln!(out, "{snode} <{}> {} .", sh("targetClass"), iri(&c.iri));
+                }
+            }
+
+            // One sh:property per predicate (rdf:type is carried by sh:targetClass, not
+            // repeated as a property shape).
+            let mut pi = 0u64;
+            for (pred, &triples) in set.predicates.iter().zip(&set.predicate_triples) {
+                if pred == RDF_TYPE {
+                    continue;
+                }
+                let pnode = format!("_:shape{si}_{pi}");
+                pi += 1;
+                let _ = writeln!(out, "{snode} <{}> {pnode} .", sh("property"));
+                let _ = writeln!(out, "{pnode} <{RDF_TYPE}> <{}> .", sh("PropertyShape"));
+                let _ = writeln!(out, "{pnode} <{}> {} .", sh("path"), iri(pred));
+                // Always: every subject in the set emits this predicate at least once.
+                let _ = writeln!(out, "{pnode} <{}> {} .", sh("minCount"), int(1));
+                // Exactly-one only when the summed occurrences equal the subject count.
+                if triples == set.subjects {
+                    let _ = writeln!(out, "{pnode} <{}> {} .", sh("maxCount"), int(1));
+                }
+            }
+        }
+        out
+    }
+
     /// Renders a compact, prompt-ready text digest under `budget_chars` characters,
     /// most important information first: dataset totals, then a prefix glossary of
     /// exactly the namespaces the summary uses, then classes (with per-class predicate
@@ -2122,6 +2222,148 @@ mod tests {
         assert!(
             withcs.contains("1.0000"),
             "avg multiplicity should render as a fixed-precision decimal: {withcs}"
+        );
+    }
+
+    /// [OPUS-4.8] sq-bde: each characteristic set exports as a SHACL `sh:NodeShape` — a
+    /// universal class becomes `sh:targetClass`, every (non-type) predicate a
+    /// `sh:PropertyShape` with `sh:minCount 1`, and `sh:maxCount 1` exactly when the set's
+    /// avg multiplicity for that predicate is 1. The whole document is valid RDF.
+    #[test]
+    fn shacl_exports_char_sets_as_node_shapes() {
+        // Three characteristic sets:
+        //  - {type, name}          ×2  (alice, bob)   — Person universal, name single
+        //  - {type, name, worksAt} ×1  (carol)        — Person universal, worksAt ×2 multi
+        //  - {label}               ×1  (untyped doc)  — no universal class, single
+        let g = graph(
+            ":alice rdf:type foaf:Person ; foaf:name \"Alice\" .
+             :bob   rdf:type foaf:Person ; foaf:name \"Bob\" .
+             :carol rdf:type foaf:Person ; foaf:name \"Carol\" ; :worksAt :acme , :globex .
+             :doc   rdfs:label \"A note\" .",
+        );
+        let ix = Introspection::build(&g);
+        let shacl = ix.to_shacl();
+
+        // Whole document re-parses as valid N-Triples (hence valid Turtle).
+        let triples: Vec<oxrdf::Triple> = oxttl::NTriplesParser::new()
+            .for_slice(shacl.as_bytes())
+            .map(|t| t.expect("SHACL export is valid N-Triples"))
+            .collect();
+
+        let sh = |l: &str| format!("{SHACL_NS}{l}");
+        let cs = |l: &str| format!("{CS_NS}{l}");
+        let person = "http://xmlns.com/foaf/0.1/Person";
+        let name = "http://xmlns.com/foaf/0.1/name";
+        let works = ex("worksAt");
+        let label = "http://www.w3.org/2000/01/rdf-schema#label";
+        let int1 = oxrdf::Literal::new_typed_literal("1", oxrdf::vocab::xsd::INTEGER).to_string();
+
+        // One sh:NodeShape per retained set (here all three are retained).
+        let node_shapes = triples
+            .iter()
+            .filter(|t| {
+                t.predicate.as_str() == RDF_TYPE
+                    && t.object.to_string() == format!("<{}>", sh("NodeShape"))
+            })
+            .count();
+        assert_eq!(node_shapes, ix.characteristic_sets.sets.len());
+        assert_eq!(node_shapes, 3, "three distinct characteristic sets");
+
+        // sh:targetClass Person is emitted (universal to the two Person sets); a
+        // target-less shape exists for the untyped {label} set (no universal class).
+        let target_person = triples
+            .iter()
+            .filter(|t| {
+                t.predicate.as_str() == sh("targetClass")
+                    && t.object.to_string() == format!("<{person}>")
+            })
+            .count();
+        assert_eq!(target_person, 2, "Person targets the two typed sets");
+        // No targetClass ever points at a class that is only a minority of a set, and the
+        // untyped set yields zero targets total beyond the two Person ones.
+        let total_targets = triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == sh("targetClass"))
+            .count();
+        assert_eq!(total_targets, 2, "only universal classes are targeted");
+
+        // rdf:type is expressed via targeting — never repeated as a property shape path.
+        assert!(
+            !triples.iter().any(|t| t.predicate.as_str() == sh("path")
+                && t.object.to_string() == format!("<{RDF_TYPE}>")),
+            "rdf:type must not appear as an sh:path"
+        );
+
+        // Helper: collect the (path -> set of predicate-IRIs that carry a given sh: term).
+        let paths_with = |term: &str| -> Vec<String> {
+            // pnode -> path
+            let path_of: std::collections::HashMap<String, String> = triples
+                .iter()
+                .filter(|t| t.predicate.as_str() == sh("path"))
+                .map(|t| (t.subject.to_string(), t.object.to_string()))
+                .collect();
+            triples
+                .iter()
+                .filter(|t| {
+                    t.predicate.as_str() == sh(term) && t.object.to_string() == int1
+                })
+                .filter_map(|t| path_of.get(&t.subject.to_string()).cloned())
+                .collect()
+        };
+
+        // Every (non-type) predicate of every set gets sh:minCount 1.
+        let min_paths = paths_with("minCount");
+        for p in [name, &works, label] {
+            assert!(
+                min_paths.contains(&format!("<{p}>")),
+                "sh:minCount 1 for {p}: {shacl}"
+            );
+        }
+
+        // sh:maxCount 1 ONLY for single-valued predicates: name (1 each) and label (1),
+        // never worksAt (carol has 2 → avg multiplicity 2, unsound to bound).
+        let max_paths = paths_with("maxCount");
+        assert!(max_paths.contains(&format!("<{name}>")), "name is single-valued");
+        assert!(max_paths.contains(&format!("<{label}>")), "label is single-valued");
+        assert!(
+            !max_paths.contains(&format!("<{works}>")),
+            "worksAt is multi-valued — no sh:maxCount: {shacl}"
+        );
+
+        // Provenance: each shape carries scs:subjects with its support count, and the
+        // support counts match the mined sets exactly (2 + 1 + 1).
+        let mut supports: Vec<u64> = triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == cs("subjects"))
+            .map(|t| {
+                if let oxrdf::Term::Literal(l) = &t.object {
+                    l.value().parse::<u64>().unwrap()
+                } else {
+                    panic!("scs:subjects must be a literal")
+                }
+            })
+            .collect();
+        supports.sort_unstable();
+        assert_eq!(supports, vec![1, 1, 2]);
+
+        // Property shapes are typed sh:PropertyShape.
+        assert!(triples.iter().any(|t| t.predicate.as_str() == RDF_TYPE
+            && t.object.to_string() == format!("<{}>", sh("PropertyShape"))));
+    }
+
+    /// [OPUS-4.8] sq-bde: the empty graph yields an empty (but valid) SHACL document.
+    #[test]
+    fn shacl_empty_graph_is_empty_and_valid() {
+        let g = graph("");
+        let ix = Introspection::build(&g);
+        let shacl = ix.to_shacl();
+        assert!(shacl.is_empty(), "no sets → no shapes");
+        // Trivially parses.
+        assert_eq!(
+            oxttl::NTriplesParser::new()
+                .for_slice(shacl.as_bytes())
+                .count(),
+            0
         );
     }
 

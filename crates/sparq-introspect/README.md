@@ -26,6 +26,7 @@ ix.to_json()                                  // pretty JSON — the machine sur
 ix.to_text_summary(2500)                      // prompt-ready digest, most-important-first, ≤ N chars
 ix.to_void("http://ex.org/dataset")           // W3C VoID description, as N-Triples (valid Turtle)
 ix.to_void_with_cs("http://ex.org/dataset")   // VoID + characteristic-set source stats (scs: ext)
+ix.to_shacl()                                 // characteristic sets → W3C SHACL node shapes
 ix.schema_summary_for(&seeds, 2500)           // retrieval-mode: schema scoped to seed IRIs
 
 // Persisted *.introspect sidecar — mine once, summarise forever without rescanning:
@@ -71,6 +72,15 @@ let ix = sparq_introspect::Introspection::load("data/g.nt.introspect")?; // O(ou
   that primes a remote CostFed/Odyssey-class source-selector with star/multi-join
   cardinalities. Served at `GET /.well-known/void` behind the opt-in
   `federation-descriptors` feature.
+- **SHACL node-shape export** (`to_shacl`) — each mined characteristic set as a W3C
+  [SHACL](https://www.w3.org/TR/shacl/) `sh:NodeShape` (N-Triples / valid Turtle): a
+  `sh:targetClass` for every class **universal** to the set (so the shape auto-applies
+  only where every instance genuinely has the set's predicates), one `sh:PropertyShape`
+  (`sh:path` + `sh:minCount 1`) per non-type predicate, and `sh:maxCount 1` exactly when
+  that predicate's avg multiplicity is 1. The constraints are mined from what the data
+  asserts, so the graph already validates against them — a data-grounded effective-schema
+  floor, not an aspirational contract. Sets with no universal class yield a reusable but
+  target-less shape.
 - **Vocabulary detection** — namespaces in use (split at the last `#`/`/`, the split the
   dictionary stores) with distinct-term counts, recognised against a bundled offline
   table (rdf/rdfs/owl/xsd/foaf/skos/schema.org/dcterms/wd/dbo/…).
@@ -110,11 +120,11 @@ and the olympics summary names the dataset's actual classes (asserted by
 cargo run -p sparq-introspect --example olympics_introspect --release
 ```
 
-Tests: 20 unit (`src/lib.rs`: characteristic-set exactness, coverage, object
+Tests: 24 unit (`src/lib.rs`: characteristic-set exactness, coverage, object
 kinds/datatypes/samples, observed-vs-declared domain/range, vocabularies, JSON validity,
-text-summary budget, join hints, VoID export, retrieval mode, per-class sample isolation,
-persisted-sidecar round-trip) plus 1 integration (`tests/olympics.rs`, skip-if-absent at
-1.78M scale).
+text-summary budget, join hints, VoID export, SHACL node-shape export, retrieval mode,
+per-class sample isolation, persisted-sidecar round-trip) plus 1 integration
+(`tests/olympics.rs`, skip-if-absent at 1.78M scale).
 
 ## 📚 Learn more
 

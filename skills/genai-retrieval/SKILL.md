@@ -11,8 +11,9 @@ crates that compose:
 - **`sparq-introspect`** — mines the *effective schema* a graph actually uses
   (classes, per-class predicate usage, observed domain/range, characteristic sets,
   cross-class join hints, namespaces) by sorted scans over the store indexes — and
-  renders it as a **token-budgeted text "schema card"**, **VoID** (N-Triples), or
-  full **JSON** for LLM grounding / agent retrieval context.
+  renders it as a **token-budgeted text "schema card"**, **VoID** (N-Triples),
+  **SHACL node shapes** (characteristic sets → `sh:NodeShape`), or full **JSON** for
+  LLM grounding / agent retrieval context.
 - **`sparq-nlq`** — a deliberately lean **NL→SPARQL loop**: ground (with the
   introspect summary) → generate (an `Llm` behind a trait) → validate (`spargebra`
   parse) → execute (`sparq-engine` under a `QueryBudget`) → repair (≤ N rounds). The
@@ -46,6 +47,7 @@ let ix = Introspection::build(&graph);
 let card = ix.to_text_summary(2500);          // prompt-ready schema card, ≤ 2500 chars
 let json = ix.to_json();                       // full machine surface for an agent
 let void = ix.to_void("http://ex.org/dataset");// W3C VoID, as N-Triples
+let shacl = ix.to_shacl();                      // characteristic sets → SHACL node shapes (N-Triples)
 # Ok::<(), String>(())
 ```
 
@@ -82,6 +84,7 @@ Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection
 Introspection::to_text_summary(&self, budget_chars: usize) -> String   // schema card
 Introspection::to_json(&self) -> String                                // pretty JSON
 Introspection::to_void(&self, dataset_iri: &str) -> String             // VoID N-Triples
+Introspection::to_shacl(&self) -> String                               // CS → SHACL node shapes (N-Triples)
 Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String
 
 // Persisted *.introspect sidecar (sq-3n4): mine once, summarise forever — reload is
@@ -265,6 +268,19 @@ let void_nt = Introspection::build(&graph).to_void("http://ex.org/dataset");
 // propertyPartition per predicate. NOTE: void:distinctObjects is NOT emitted.
 ```
 
+**4b. Bootstrap SHACL shapes from the effective schema.** Each characteristic set becomes
+an `sh:NodeShape`; output is N-Triples (valid Turtle):
+
+```rust
+let shapes_nt = Introspection::build(&graph).to_shacl();
+// Per characteristic set: a sh:NodeShape with sh:targetClass for every class UNIVERSAL
+// to the set (count == subjects), one sh:PropertyShape (sh:path + sh:minCount 1) per
+// non-type predicate, and sh:maxCount 1 only when that predicate is single-valued across
+// the set (avg multiplicity 1). Constraints are mined from what the data asserts, so the
+// graph already validates against them — a data-grounded floor to edit, not a contract.
+// Sets with no universal class yield a reusable but target-less shape.
+```
+
 **5. Tune the introspection for a huge or noisy KG.** Bound the histograms and tables:
 
 ```rust
@@ -380,4 +396,4 @@ the fixtures encode.)
   `sparql-formal-semantics` — the verifiable/private query estate, orthogonal to this
   retrieval surface.
 </skill_md>
-<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "Introspection::save(&self, path: impl AsRef<Path>) -> io::Result<()>", "Introspection::load(path: impl AsRef<Path>) -> io::Result<Introspection>", "Introspection::from_json(json: &str) -> serde_json::Result<Introspection>", "sparq_introspect::sidecar_path_for(dataset: impl AsRef<Path>) -> PathBuf", "sparq_introspect::SIDECAR_EXTENSION: &str", "ClassPredicate { predicate, subjects, triples, coverage, samples: Vec<String> }  (samples = per-class sample labels, sq-3n4)", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples, ground, link_entities, link_expand_k, max_links, check_dictionary }", "sparq_nlq::link::EntityLinker::build(graph: &Graph, expand_k: usize, max_links: usize)", "EntityLinker::link(&self, question: &str) -> Linking", "sparq_nlq::link::Linking { entities: Vec<LinkedEntity>, relations: Vec<LinkedRelation> } ; Linking::to_prompt_section(&self) -> Option<String>", "sparq_nlq::constrain::unknown_terms(graph: &Graph, query: &spargebra::Query) -> Vec<UnknownTerm>", "sparq_nlq::constrain::dictionary_repair_message(unknowns: &[UnknownTerm]) -> String", "sparq_nlq::constrain::UnknownTerm { iri, role: TermRole, suggestions }", "sparq_nlq::eval::EvalCase::new(question, gold_sparql)", "sparq_nlq::eval::run_config(graph, cases, llm, config, Linking) -> Report", "sparq_nlq::eval::run_comparison(graph, cases, base_config, make_llm) -> Comparison", "Comparison::headline_grounding_pays() -> bool / summary() -> String", "F1::score(&AnswerSet, &AnswerSet) -> F1 / is_exact() -> bool ; AnswerSet::from_result(&QueryResult)", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")"]
+<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::to_shacl(&self) -> String  (characteristic sets → W3C SHACL node shapes, N-Triples; sq-bde)", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "Introspection::save(&self, path: impl AsRef<Path>) -> io::Result<()>", "Introspection::load(path: impl AsRef<Path>) -> io::Result<Introspection>", "Introspection::from_json(json: &str) -> serde_json::Result<Introspection>", "sparq_introspect::sidecar_path_for(dataset: impl AsRef<Path>) -> PathBuf", "sparq_introspect::SIDECAR_EXTENSION: &str", "ClassPredicate { predicate, subjects, triples, coverage, samples: Vec<String> }  (samples = per-class sample labels, sq-3n4)", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples, ground, link_entities, link_expand_k, max_links, check_dictionary }", "sparq_nlq::link::EntityLinker::build(graph: &Graph, expand_k: usize, max_links: usize)", "EntityLinker::link(&self, question: &str) -> Linking", "sparq_nlq::link::Linking { entities: Vec<LinkedEntity>, relations: Vec<LinkedRelation> } ; Linking::to_prompt_section(&self) -> Option<String>", "sparq_nlq::constrain::unknown_terms(graph: &Graph, query: &spargebra::Query) -> Vec<UnknownTerm>", "sparq_nlq::constrain::dictionary_repair_message(unknowns: &[UnknownTerm]) -> String", "sparq_nlq::constrain::UnknownTerm { iri, role: TermRole, suggestions }", "sparq_nlq::eval::EvalCase::new(question, gold_sparql)", "sparq_nlq::eval::run_config(graph, cases, llm, config, Linking) -> Report", "sparq_nlq::eval::run_comparison(graph, cases, base_config, make_llm) -> Comparison", "Comparison::headline_grounding_pays() -> bool / summary() -> String", "F1::score(&AnswerSet, &AnswerSet) -> F1 / is_exact() -> bool ; AnswerSet::from_result(&QueryResult)", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")"]
