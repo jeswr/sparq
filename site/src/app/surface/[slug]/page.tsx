@@ -20,6 +20,7 @@ const BUILT_SURFACES = new Set([
   "full-text",
   "http-server",
   "genai",
+  "vector",
 ]);
 const PLACEHOLDER_SURFACES = ALL_SURFACES.filter(
   (s) =>

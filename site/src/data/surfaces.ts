@@ -185,9 +185,16 @@ export const GROUPS: SurfaceGroup[] = [
         slug: "vector",
         href: "/surface/vector",
         title: "Vector",
-        blurb: "Embedding store + cosine top-k (HNSW / DiskANN) + hybrid fusion.",
-        tier: "hosted",
+        blurb: "Embedding store + cosine top-k (HNSW / DiskANN) + k-NN inside SPARQL.",
+        // [OPUS-4.8] sq-dwdm: tier-e. sparq-vectors is an opt-in native crate (nothing in
+        // the workspace or the lean wasm bundle depends on it, and the vec: magic predicate
+        // sits behind the non-default vec-predicate feature), and the static Pages site has
+        // no backend — so the honest surface is a captured-output walkthrough (the real
+        // Usain Bolt label-embedding run + real vec:nearest / vec:search result tables,
+        // answer-exact backend), not a live hosted endpoint.
+        tier: "walkthrough",
         icon: Binary,
+        built: true,
       },
       {
         slug: "genai",
