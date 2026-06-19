@@ -91,8 +91,10 @@ pub use rewrite::{prepare_vec_approx, query_vec_approx, query_vec_approx_with_bu
 pub use sparq_engine::{query_prepared, PreparedQuery, QueryBudget, QueryResult};
 // [OPUS-4.8] (sq-pi44) The incremental delta sidecar value type — `delta` feature only. The
 // add/remove/update/compact APIs live on `VectorStore` (also `delta`-gated).
+// [OPUS-4.8] (sq-7e50) The persisted `.spqd` sidecar magic/version — the save/open APIs
+// (`save_delta`/`open_with_delta`/`sibling_delta_path`) live on `VectorStore` (also `delta`-gated).
 #[cfg(feature = "delta")]
-pub use delta::VectorDelta;
+pub use delta::{VectorDelta, SPQD_MAGIC, SPQD_VERSION};
 pub use store::{StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION};
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
