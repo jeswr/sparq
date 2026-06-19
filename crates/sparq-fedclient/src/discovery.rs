@@ -690,7 +690,13 @@ fn ask_probe(endpoint: &str, fetcher: &dyn Fetcher) -> Result<bool, String> {
 }
 
 /// Extracts the `boolean` field from a SPARQL-Results-JSON ASK response. Deliberately a tiny
-/// tolerant scan rather than a JSON dependency — the only shape we need is `"boolean": true`.
+/// scan rather than a JSON dependency — the only shape we need is `"boolean": true|false`.
+///
+/// The match is STRICT: the value must be an exact lowercase JSON `true`/`false` literal whose
+/// next character is a value boundary (end-of-input, ASCII whitespace, or a JSON structural
+/// `,` / `}` / `]`). This rejects junk-suffixed tokens like `trueish` / `falsex` / `truex`
+/// that a `starts_with` scan would silently read as a boolean (per the SPARQL 1.1 Query
+/// Results JSON format, the value of `boolean` is a JSON boolean — lowercase, case-sensitive).
 fn parse_ask_boolean(body: &str) -> Result<bool, String> {
     // Find the "boolean" key and read the following true/false token.
     let key = body
@@ -702,12 +708,20 @@ fn parse_ask_boolean(body: &str) -> Result<bool, String> {
         .strip_prefix(':')
         .ok_or_else(|| "discovery: malformed ASK response (no ':' after \"boolean\")".to_string())?
         .trim_start();
-    if after.starts_with("true") {
+    // A literal ends at a JSON value boundary: end-of-input, ASCII whitespace, or a structural
+    // delimiter. `trueish` etc. fail this because the next char (`i`) is none of those.
+    let bounded = |rest: &str| {
+        rest.chars()
+            .next()
+            .map(|c| c.is_ascii_whitespace() || matches!(c, ',' | '}' | ']'))
+            .unwrap_or(true)
+    };
+    if after.strip_prefix("true").is_some_and(bounded) {
         Ok(true)
-    } else if after.starts_with("false") {
+    } else if after.strip_prefix("false").is_some_and(bounded) {
         Ok(false)
     } else {
-        Err("discovery: ASK response \"boolean\" was neither true nor false".to_string())
+        Err("discovery: ASK response \"boolean\" was not an exact JSON true/false".to_string())
     }
 }
 
@@ -927,10 +941,51 @@ _:c1 <http://rdfs.org/ns/void#entities> "100"^^<http://www.w3.org/2001/XMLSchema
 
     #[test]
     fn ask_boolean_parsing() {
+        // Legitimate SPARQL-Results-JSON ASK shapes the function already handled — still parse.
         assert!(parse_ask_boolean(r#"{"boolean": true}"#).unwrap());
         assert!(!parse_ask_boolean(r#"{"boolean":false}"#).unwrap());
         assert!(parse_ask_boolean(r#"{ "head": {}, "boolean" : true }"#).unwrap());
         assert!(parse_ask_boolean(r#"{"results":{}}"#).is_err());
+    }
+
+    #[test]
+    fn ask_boolean_strict_exact_token() {
+        // ACCEPT: every JSON value boundary after the exact literal — `}`, `,`, `]`, whitespace,
+        // and end-of-input — for both true and false.
+        assert!(parse_ask_boolean(r#"{"boolean":true}"#).unwrap());
+        assert!(parse_ask_boolean(r#"{"boolean":true,"x":1}"#).unwrap());
+        assert!(parse_ask_boolean(r#"{"head":{},"boolean":true ,"more":0}"#).unwrap());
+        assert!(parse_ask_boolean("\"boolean\": true").unwrap()); // EOF boundary
+        assert!(parse_ask_boolean("\"boolean\":true\n").unwrap()); // newline boundary
+        assert!(parse_ask_boolean(r#"{"a":["boolean":true]}"#).unwrap()); // `]` boundary
+        assert!(!parse_ask_boolean(r#"{"boolean":false}"#).unwrap());
+        assert!(!parse_ask_boolean(r#"{"boolean": false , "x":1}"#).unwrap());
+        assert!(!parse_ask_boolean("\"boolean\":false").unwrap()); // EOF boundary
+
+        // REJECT: junk-suffixed tokens the old `starts_with` scan silently accepted. THIS is the
+        // sq-2gfe regression guard — `trueish` must NOT be read as `true`.
+        assert!(parse_ask_boolean(r#"{"boolean": trueish}"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean": falsey}"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean": truex}"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean": falsex}"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean": true_}"#).is_err()); // `_` is not a boundary
+
+        // REJECT: truncated / empty / malformed values (a prefix that is not the exact literal).
+        assert!(parse_ask_boolean(r#"{"boolean": tr}"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean": fal}"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean":}"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean": }"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean"}"#).is_err()); // no ':' after key
+        assert!(parse_ask_boolean("").is_err()); // empty body
+        assert!(parse_ask_boolean("   ").is_err()); // whitespace-only
+
+        // REJECT: wrong case (JSON booleans are lowercase; the SPARQL spec inherits this).
+        assert!(parse_ask_boolean(r#"{"boolean": True}"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean": FALSE}"#).is_err());
+
+        // REJECT: wrong JSON type for `boolean` (string / number).
+        assert!(parse_ask_boolean(r#"{"boolean": "true"}"#).is_err());
+        assert!(parse_ask_boolean(r#"{"boolean": 1}"#).is_err());
     }
 
     // ---- well-known VoID URL derivation --------------------------------------------
