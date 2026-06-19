@@ -82,9 +82,12 @@ with the snapshot, or if a gap carries a non-null gate number. After an
 **intentional** circuit change, re-run `scripts/gate_counts.sh` (re-baseline the
 snapshot) and then re-run the catalog generator to re-join the new numbers.
 
-> The website surface that renders this catalog (a `/benchmarks` or `/papers`
-> gate-cost / coverage table) is a separate follow-on bead (sq-1s2.1.3) — this is
-> the DATA layer only.
+> This file is the **DATA layer**. The website surface that renders it (the
+> SPARQL → ZK coverage + gate-cost table on `/benchmarks/zk`) landed in sq-1s2.1.3
+> (#777): `site/scripts/sync-zk-catalog.mjs` copies this JSON into
+> `site/src/data/zk-sparql-catalog.generated.json`, which the
+> `ZkSparqlCatalog` component (`site/src/components/benchmarks/zk-sparql-catalog.tsx`)
+> renders — so the rendered numbers always trace back to this snapshot-joined data.
 
 ## sq-pn2: full-family prove/verify cost curve
 
