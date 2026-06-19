@@ -205,6 +205,36 @@ def registered_bench_ids(root: Path) -> list[str]:
     return ids
 
 
+def featured_false_bench_ids(root: Path) -> set[str]:
+    """[OPUS-4.8] sq-5o5.2 — every benchmark `id` whose `[[benchmark]]` block sets
+    `featured = false` in bench/benchmarks.toml.
+
+    `featured = false` is the design's documented escape hatch (registry schema
+    header; research/maintenance-flow-on-automation-design.md §2.1) for a suite
+    that is intentionally trend-only — catalogued + visible in trend history, but
+    NOT promoted as a head-to-head competitor card on the capability dashboard.
+    It makes NO performance claim; it is purely a dashboard DISPOSITION.
+
+    The merge-time gate G3 (scripts/check-new-bench-registered.py) already accepts
+    this flag as a dashboard disposition; this reactive scanner did NOT, so the two
+    halves of the maintenance-flow-on system could disagree (G3 would pass a
+    suite that drift-scan still flagged). We mirror G3's predicate EXACTLY — split
+    on the `[[benchmark]]` header, then per block test the same
+    `^\\s*featured\\s*=\\s*false\\b` regex G3's registry_blocks() uses — so the two
+    tools share one definition of an intentionally-unfeatured suite and cannot
+    diverge again."""
+    text = bench_registry_sources(root)
+    ids: set[str] = set()
+    # Split on the table-array header; chunk[0] is the file preamble (no id).
+    for chunk in re.split(r"(?m)^\s*\[\[benchmark\]\]\s*$", text)[1:]:
+        idm = re.search(r'^\s*id\s*=\s*"([^"]+)"', chunk, re.MULTILINE)
+        if not idm:
+            continue
+        if re.search(r"^\s*featured\s*=\s*false\b", chunk, re.MULTILINE):
+            ids.add(idm.group(1))
+    return ids
+
+
 def crates_named_in_skills(root: Path) -> set[str]:
     """Every sparq-<x> crate token mentioned in ANY skills/**/SKILL.md.
 
@@ -367,10 +397,22 @@ def scan_dashboard_row(root: Path) -> list[DriftItem]:
     leading token of it) appears in the FEATURED_SUITES block's aliases. This
     is intentionally loose (the dashboard matches on aliases/tokens too) — its
     job is to flag whole FAMILIES with no promotion (e.g. the entire ZK family),
-    not to perfectly mirror the JS alias matcher."""
+    not to perfectly mirror the JS alias matcher.
+
+    A suite also clears the drift if its `[[benchmark]]` entry sets
+    `featured = false` (sq-5o5.2): that is the design's documented trend-only
+    DISPOSITION — catalogued + in trend history but not a head-to-head competitor
+    card — and it makes NO performance claim. Honoring it here keeps this reactive
+    scanner in lock-step with the merge-time gate G3, which already accepts the same
+    flag (scripts/check-new-bench-registered.py)."""
     featured = dashboard_featured_keys(root)
     if not featured:
         return []
+    # [OPUS-4.8] sq-5o5.2: ids explicitly flagged `featured = false` in
+    # bench/benchmarks.toml are an intentional trend-only DISPOSITION (the design's
+    # documented escape hatch, honored by gate G3) — they clear the dashboard-row
+    # drift without a FEATURED_SUITES competitor card and without any perf claim.
+    featured_false = featured_false_bench_ids(root)
     items: list[DriftItem] = []
     seen_families: set[str] = set()
     for bid in registered_bench_ids(root):
@@ -385,6 +427,13 @@ def scan_dashboard_row(root: Path) -> list[DriftItem]:
         if family in DASHBOARD_EXEMPT_FAMILIES or bid.startswith("sparq-bench"):
             continue
         if family in seen_families:
+            continue
+        # An explicit `featured = false` on THIS bench's entry is a dashboard
+        # disposition (trend-only) — it clears the drift like a FEATURED_SUITES
+        # row would, with no perf claim. We do NOT add the family to seen_families
+        # here (matching the featured-row skip below), so a sibling id in the same
+        # family that is NOT dispositioned can still surface the gap.
+        if bid in featured_false:
             continue
         # Featured iff the family token or the full id appears in the block.
         if family in featured or bid in featured:

@@ -55,16 +55,25 @@ def make_crate(root: Path, name: str, *, public: bool = True) -> None:
     _write(root, f"crates/{name}/Cargo.toml", body)
 
 
-def make_registry(root: Path, sources: list[str], ids: list[str] | None = None) -> None:
+def make_registry(
+    root: Path,
+    sources: list[str],
+    ids: list[str] | None = None,
+    featured_false: set[str] | None = None,
+) -> None:
     """Write a minimal bench/benchmarks.toml with the given `source` lines (and
-    optionally `id` lines for the dashboard scanner)."""
+    optionally `id` lines for the dashboard scanner). Any id in `featured_false`
+    gets a `featured = false` line in its block (sq-5o5.2 dashboard disposition)."""
     ids = ids or []
+    featured_false = featured_false or set()
     lines = []
     n = max(len(sources), len(ids))
     for i in range(n):
         lines.append("[[benchmark]]")
         if i < len(ids):
             lines.append(f'id          = "{ids[i]}"')
+            if ids[i] in featured_false:
+                lines.append("featured    = false")
         if i < len(sources):
             lines.append(f'source      = "{sources[i]}"')
         lines.append("")
@@ -270,6 +279,60 @@ class DashboardRowTest(unittest.TestCase):
         make_dashboard(self.root, featured_tokens=["lubm"])
         items = drift_scan.scan_dashboard_row(self.root)
         self.assertEqual([], items)
+
+    # [OPUS-4.8] sq-5o5.2: a `featured = false` entry is an intentional trend-only
+    # DISPOSITION that clears the dashboard-row drift WITHOUT a FEATURED_SUITES
+    # competitor card and WITHOUT any perf claim. drift-scan must honor it so it
+    # stays in lock-step with the merge-time gate G3 (check-new-bench-registered.py),
+    # which already accepts the same flag.
+    def test_featured_false_clears_drift(self):
+        make_registry(
+            self.root,
+            sources=["s", "s"],
+            ids=["gpu-bench", "lubm"],
+            featured_false={"gpu-bench"},  # gpu marked trend-only
+        )
+        make_dashboard(self.root, featured_tokens=["lubm"])  # gpu NOT in FEATURED_SUITES
+        items = drift_scan.scan_dashboard_row(self.root)
+        keys = {it.dedup_key for it in items}
+        self.assertNotIn("dashboard-row:gpu", keys)
+
+    def test_featured_false_collects_helper_ids(self):
+        # The helper must report exactly the ids whose block carries featured=false.
+        make_registry(
+            self.root,
+            sources=["s", "s", "s"],
+            ids=["gpu-bench", "operator-coverage", "lubm"],
+            featured_false={"gpu-bench", "operator-coverage"},
+        )
+        self.assertEqual(
+            {"gpu-bench", "operator-coverage"},
+            drift_scan.featured_false_bench_ids(self.root),
+        )
+
+    def test_featured_false_clears_multi_id_family(self):
+        # A multi-id family is only cleared when EVERY non-exempt id is
+        # dispositioned (the bead marks all 4 inference ids); marking only one
+        # leaves the sibling to surface the gap, matching the FEATURED_SUITES skip.
+        make_registry(
+            self.root,
+            sources=["s", "s"],
+            ids=["inference-eye-comparison", "inference-owl-bench"],
+            featured_false={"inference-eye-comparison"},  # only ONE of two
+        )
+        make_dashboard(self.root, featured_tokens=["lubm"])
+        keys = {it.dedup_key for it in drift_scan.scan_dashboard_row(self.root)}
+        self.assertIn("dashboard-row:inference", keys)  # sibling still flags it
+        # Now disposition BOTH → family clears.
+        make_registry(
+            self.root,
+            sources=["s", "s"],
+            ids=["inference-eye-comparison", "inference-owl-bench"],
+            featured_false={"inference-eye-comparison", "inference-owl-bench"},
+        )
+        make_dashboard(self.root, featured_tokens=["lubm"])
+        keys = {it.dedup_key for it in drift_scan.scan_dashboard_row(self.root)}
+        self.assertNotIn("dashboard-row:inference", keys)
 
 
 # --------------------------------------------------------------------------- #

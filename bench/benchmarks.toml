@@ -127,6 +127,9 @@ dataset     = "sparq-bench synthetic dump (deterministic WatDiv-flavoured social
 quiet_box_sensitive = true  # wall-clock latency; trend-only, NOT in the deterministic perf-gate (scripts/perf-gate.py)
 pinning     = "query dir + mode; dataset deterministic; queries pinned to fixed subjects so result counts are scale-stable"
 records_to  = "stdout (TSV); CI emits op_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh"
+# [OPUS-4.8] sq-5o5.2: trend-only operator-latency coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 # [OPUS-4.8] sq-0jp — SP2Bench (well-known suite) at CI scale; per-commit subset + heavy tier.
@@ -266,6 +269,9 @@ dataset     = "dense follows graph (N nodes x4 edges) + rare premium leaf; gen2.
 quiet_box_sensitive = true
 pinning     = "gen.py seed fixed (random.seed(7)); pin N + fanout"
 records_to  = "stdout; tables in bench/selective/README.md; analysis research/predicate-transfer-measured.md"
+# [OPUS-4.8] sq-5o5.2: trend-only join-strategy characterization, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -279,6 +285,9 @@ dataset     = "literal-heavy synthetic, ~5N triples (int inline / big int / deci
 quiet_box_sensitive = true
 pinning     = "deterministic generator (index-derived values); pin N"
 records_to  = "stdout (TSV)"
+# [OPUS-4.8] sq-5o5.2: trend-only value-path cost probe, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 # =============================================================================
@@ -488,6 +497,9 @@ dataset     = "socrates (vendored), DeepTaxonomy dt1k/10k/100k (gen_deeptaxonomy
 quiet_box_sensitive = true
 pinning     = "EYE version (v11.24.4 / SWI-Prolog), pinned generators; use CLI engine-internal 'in Xs' timer for load-robust comparison"
 records_to  = "bench/inference/eye-comparison.md"
+# [OPUS-4.8] sq-5o5.2: trend-only inference-closure coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -501,6 +513,9 @@ dataset     = "synthesized in-script: 100k individuals x depth-20 subClassOf; 2k
 quiet_box_sensitive = true
 pinning     = "in-script generators are deterministic; trans chain capped at 2k (quadratic closure)"
 records_to  = "stdout; bench/inference/eye-comparison.md (RDFS/OWL section)"
+# [OPUS-4.8] sq-5o5.2: trend-only inference-closure coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -514,6 +529,9 @@ dataset     = "bench/qlever-olympics/olympics.nt (1.78M triples, gitignored — 
 quiet_box_sensitive = true  # single-shot timings (not best-of-N); orders of magnitude are stable
 pinning     = "olympics dataset version; synthesized TBox defined in olympics_tbox"
 records_to  = "stdout; bench/inference/incremental-bench.md"
+# [OPUS-4.8] sq-5o5.2: trend-only incremental-maintenance coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -527,6 +545,10 @@ dataset     = "~1.1k-graph WAC fixture (+ ACP variant), built in-crate (sparq_so
 quiet_box_sensitive = true
 pinning     = "in-crate fixture is deterministic"
 records_to  = "stdout; cross-checked in bench/inference/incremental-bench.md (0.84s WAC re-run baseline)"
+# [OPUS-4.8] sq-5o5.2: trend-only Solid WAC/ACP auth-view coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion (esp. as a Solid
+# differentiator) deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 # [OPUS-4.8] sq-r06h — ODRL usage-control evaluator (opt-in sparq-policy crate).
@@ -541,6 +563,9 @@ dataset     = "synthetic ODRL Set of N permissions (assignee + target + dateTime
 quiet_box_sensitive = true
 pinning     = "in-example synthetic policy is deterministic; pin N for comparable numbers"
 records_to  = "stdout (us per phase)"
+# [OPUS-4.8] sq-5o5.2: trend-only ODRL policy-eval coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 # =============================================================================
@@ -773,6 +798,10 @@ dataset     = "synthetic column data generated in-example"
 quiet_box_sensitive = true
 pinning     = "column sizes fixed; GPU backend availability"
 records_to  = "stdout"
+# [OPUS-4.8] sq-5o5.2: trend-only CPU-vs-GPU kernel experiment, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion (esp. as a GPU
+# differentiator) deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -910,6 +939,9 @@ dataset     = "RDF Semantics rdf-mt / OWL 2 RL / N3 / SPARQL entailment suites, 
 quiet_box_sensitive = false
 pinning     = "fetched suite revisions (see fetch-inference-suites.sh)"
 records_to  = "stdout + inference-conformance-report.md"
+# [OPUS-4.8] sq-5o5.2: conformance scoreboard (correctness, not perf) in the inference family;
+# trend-only — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 # =============================================================================
