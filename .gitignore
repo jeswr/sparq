@@ -1,9 +1,4 @@
 /target
-# [OPUS-4.8] sq-jpki — repo-root npm workspaces (package.json `workspaces`) hoist a single
-# node_modules/ at the root (and may leave per-workspace node_modules/ for un-hoistable deps).
-# Ignore node_modules anywhere in the tree. (Each JS package already ignored its own; this
-# adds the now-hoisted root tree.)
-node_modules/
 /.qlever-venv
 /bench/native-qlever/
 # Competitor gather output (scripts/gather-competitors.sh) — regenerable, never committed.
