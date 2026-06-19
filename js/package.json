@@ -41,6 +41,8 @@
     "build:text-wasm": "wasm-pack build ../crates/sparq-text-wasm --target web --release",
     "build:ts": "tsc",
     "build": "npm run build:wasm && npm run build:ts",
+    "typecheck": "tsc --noEmit",
+    "typecheck:conformance": "tsc --noEmit -p tsconfig.conformance.json",
     "test": "node --test \"test/*.test.mjs\"",
     "bench": "node bench/vs-oxigraph.mjs",
     "check:package": "node guardrails/check-package.mjs",
@@ -59,6 +61,7 @@
   ],
   "devDependencies": {
     "@rdfjs/types": "^2.0.1",
+    "@sparq/client": "*",
     "@types/node": "^25.9.3",
     "typescript": "^6.0.3"
   },

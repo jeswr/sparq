@@ -1,0 +1,15 @@
+// [OPUS-4.8] sq-jpki.2 — DEV-ONLY typecheck config for the wasm `Store` single-source-of-truth
+// conformance assertion (`src/wasm-conformance.ts`), which the published-emit `tsconfig.json`
+// EXCLUDES (so nothing referencing the private `@sparq/client` workspace package reaches
+// `js/dist/`). This config typechecks the WHOLE `src/` tree INCLUDING the conformance file with
+// `noEmit`, so a binding drift between the shipped `js/wasm/sparq_wasm.d.ts` and the shared
+// `@sparq/client` generated surface fails CI without emitting anything. Run via
+// `npm run typecheck:conformance`.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -4,6 +4,18 @@
  * `file:` URLs); in the browser/Deno the default `fetch`-relative-to-module
  * path is used. Initialisation is idempotent and memoised.
  */
+// [OPUS-4.8] sq-jpki.2 — `Store`/`WasmStore` come from the wasm-pack build artifact
+// `../wasm/sparq_wasm.js` (the d.ts the published `@jeswr/sparq` SHIPS — `js/wasm/` is in the
+// publish `files` allowlist). That d.ts is NOT a hand-written mirror: it is the wasm-pack
+// GENERATED surface, and it is kept BYTE-IDENTICAL to `@sparq/client`'s tracked
+// `src/generated/sparq_wasm.d.ts` by `@sparq/client`'s `check:wasm-types` guard. So `js/`,
+// the site, and the (proposed) GUI all type against ONE canonical generated `Store` surface
+// (research/gui-design.md §0/§4) — `js/` simply references the COPY it ships so the published
+// package stays self-contained (a TS consumer of `@jeswr/sparq` must not need the private
+// `@sparq/client` workspace package). `src/wasm-conformance.ts` (dev-only, `noEmit`) asserts
+// at compile time that this shipped artifact type is structurally identical to the shared
+// `@sparq/client` surface, so the single-source-of-truth relationship is CI-guarded from the
+// `js/` side too and the two copies cannot silently diverge.
 import initWasm, { Store as WasmStore } from '../wasm/sparq_wasm.js';
 
 let ready: Promise<void> | undefined;
