@@ -3,9 +3,30 @@
 // `node --test` can import and unit-test pure helpers WITHOUT pulling in a heavy
 // test runner (vitest/jest) or a separate build step. Type-erasure only; no
 // type-checking (that is the job of `next build`).
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+
+// [OPUS-4.8] sq-x0kp — rewrite an explicit `.js` import specifier to the sibling `.ts`
+// source when that `.ts` exists. The shared `@sparq/client` package uses the NodeNext
+// `.js`-extension convention on its INTERNAL imports (e.g. `import … from "./index.js"`),
+// which its own `tsc` build needs; but Node's default resolver — which `node --test` uses
+// for these on-the-fly-transpiled modules — would look for a literal `index.js` that does
+// not exist on disk. Mapping `.js` → `.ts` (only when the `.ts` is present, so real `.js`
+// files still resolve normally) lets the unit tests import that package's source unchanged.
+// Pure test-support; it changes nothing the bundler / `tsc` see.
+export async function resolve(specifier, context, next) {
+  if (specifier.endsWith('.js') && (specifier.startsWith('./') || specifier.startsWith('../'))) {
+    try {
+      const tsUrl = new URL(specifier.slice(0, -'.js'.length) + '.ts', context.parentURL);
+      await access(fileURLToPath(tsUrl));
+      return next(tsUrl.href, context);
+    } catch {
+      // No sibling `.ts` — fall through to the default resolution of the real `.js`.
+    }
+  }
+  return next(specifier, context);
+}
 
 export async function load(url, context, next) {
   if (url.endsWith('.ts') && !url.endsWith('.d.ts')) {

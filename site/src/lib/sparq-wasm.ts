@@ -34,6 +34,7 @@ export {
   type CursorBatch,
   type LoadSparqOptions,
   type MatchTerm,
+  type ResultTable,
   type ShaclReport,
   type ShaclResult,
   type SparqlBinding,
@@ -50,6 +51,16 @@ export {
   prewarmSparq,
   sparqShaclValidate,
   streamQueryRows,
+  // [OPUS-4.8] sq-x0kp — the framework-agnostic results-formatting core (table extraction,
+  // CSV/TSV export, raw-JSON pretty-print, ASK discrimination) the REPL result panel draws.
+  extractTable,
+  resultVars,
+  resultRows,
+  isAskResult,
+  askValue,
+  resultsToCsv,
+  resultsToTsv,
+  formatSparqlJson,
 } from "@sparq/client";
 
 /**

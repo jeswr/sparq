@@ -1,7 +1,16 @@
 "use client";
 
 import * as React from "react";
-import { Play, Loader2, Database, Zap, CheckCircle2 } from "lucide-react";
+import {
+  Play,
+  Loader2,
+  Database,
+  Zap,
+  CheckCircle2,
+  Table2,
+  Braces,
+  Download,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -19,10 +28,14 @@ import {
   prewarmSparq,
   storeToNQuads,
   datasetSize,
-  formatTerm,
+  extractTable,
+  resultsToCsv,
+  resultsToTsv,
+  formatSparqlJson,
   type SparqlResults,
   type WasmStore,
 } from "@/lib/sparq-wasm";
+import { downloadText } from "@/lib/download";
 import {
   classifyQueryForm,
   isGraphForm,
@@ -482,6 +495,8 @@ function ResultPanel({ state }: { state: RunState }) {
   if (state.kind === "boolean") {
     return (
       <div
+        data-result-kind="boolean"
+        data-ask-value={state.value ? "true" : "false"}
         className={cn(
           "rounded-lg p-3 text-sm font-medium",
           state.value
@@ -527,39 +542,178 @@ function ResultPanel({ state }: { state: RunState }) {
   }
   if (state.kind !== "select") return null;
 
-  const { vars } = state.results.head;
-  const rows = state.results.results.bindings;
-  if (rows.length === 0) {
-    return (
-      <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-        No solutions.
-      </p>
-    );
-  }
+  return <SelectResult results={state.results} />;
+}
+
+// [OPUS-4.8] sq-x0kp — the structured SELECT results view (GUI MVP item 2). It carries a
+// TABLE ⇄ raw-SPARQL-JSON view toggle and CSV/TSV/JSON exports. The pure shaping — the typed
+// table, the CSV/TSV documents, the pretty-printed JSON — comes from the framework-agnostic
+// `@sparq/client` helpers, so this component is just the React host that draws them (and the
+// Tauri webview draws the SAME cells from the SAME helpers). The view-mode is local to one
+// result render; switching the view never re-runs the query.
+type ResultView = "table" | "json";
+
+function SelectResult({ results }: { results: SparqlResults }) {
+  const [view, setView] = React.useState<ResultView>("table");
+  // Re-default to the table whenever a NEW result arrives (a re-run yields a fresh `results`
+  // object), so a fresh query always lands on the typed table, not whatever view was last
+  // toggled. `results` identity changes per run.
+  React.useEffect(() => setView("table"), [results]);
+
+  const table = React.useMemo(() => extractTable(results), [results]);
+  const hasRows = table.rows.length > 0;
+
   return (
-    <div className="overflow-x-auto rounded-lg border">
-      <table className="w-full text-left text-sm">
-        <thead className="bg-muted/50">
-          <tr>
-            {vars.map((v) => (
-              <th key={v} className="px-3 py-2 font-medium">
-                ?{v}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, i) => (
-            <tr key={i} className="border-t">
-              {vars.map((v) => (
-                <td key={v} className="px-3 py-1.5 font-mono text-[12.5px]">
-                  {formatTerm(row[v])}
-                </td>
+    <div className="space-y-2" data-result-kind="select">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <ResultViewTabs view={view} onChange={setView} />
+        {/* Exports operate on the WHOLE result (every solution), independent of the view. */}
+        <div className="flex items-center gap-1.5">
+          <ExportButton
+            label="CSV"
+            onClick={() =>
+              downloadText("sparql-results.csv", resultsToCsv(results), "text/csv")
+            }
+          />
+          <ExportButton
+            label="TSV"
+            onClick={() =>
+              downloadText(
+                "sparql-results.tsv",
+                resultsToTsv(results),
+                "text/tab-separated-values",
+              )
+            }
+          />
+          <ExportButton
+            label="JSON"
+            onClick={() =>
+              downloadText(
+                "sparql-results.json",
+                formatSparqlJson(results),
+                "application/sparql-results+json",
+              )
+            }
+          />
+        </div>
+      </div>
+
+      {view === "json" ? (
+        <pre
+          data-result-view="json"
+          className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed"
+        >
+          {formatSparqlJson(results)}
+        </pre>
+      ) : !hasRows ? (
+        <p
+          data-result-view="table"
+          className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground"
+        >
+          No solutions.
+        </p>
+      ) : (
+        <div
+          data-result-view="table"
+          className="max-h-96 overflow-auto rounded-lg border"
+        >
+          <table className="w-full text-left text-sm">
+            <thead className="sticky top-0 bg-muted/80 backdrop-blur">
+              <tr>
+                {table.vars.map((v) => (
+                  <th key={v} className="px-3 py-2 font-medium">
+                    ?{v}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {table.rows.map((row, i) => (
+                <tr key={i} className="border-t">
+                  {row.map((cell, j) => (
+                    <td
+                      key={table.vars[j]}
+                      className="px-3 py-1.5 font-mono text-[12.5px]"
+                    >
+                      {cell}
+                    </td>
+                  ))}
+                </tr>
               ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
+  );
+}
+
+// [OPUS-4.8] sq-x0kp — the TABLE ⇄ JSON view toggle for a SELECT result. Same `role="tablist"`
+// design-token pattern as the Run/EXPLAIN ModeTabs above, so the two selectors read as one
+// family.
+function ResultViewTabs({
+  view,
+  onChange,
+}: {
+  view: ResultView;
+  onChange: (v: ResultView) => void;
+}) {
+  const tabs: { value: ResultView; label: string; Icon: typeof Table2 }[] = [
+    { value: "table", label: "Table", Icon: Table2 },
+    { value: "json", label: "JSON", Icon: Braces },
+  ];
+  return (
+    <div
+      role="tablist"
+      aria-label="Result view"
+      className="inline-flex rounded-lg border bg-muted/40 p-0.5"
+    >
+      {tabs.map((t) => (
+        <button
+          key={t.value}
+          type="button"
+          role="tab"
+          aria-selected={view === t.value}
+          title={
+            t.value === "table"
+              ? "Show the bindings as a typed table"
+              : "Show the raw SPARQL 1.1 JSON results document"
+          }
+          onClick={() => onChange(t.value)}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+            view === t.value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <t.Icon className="size-3.5" />
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// [OPUS-4.8] sq-x0kp — one export button (CSV / TSV / JSON). Reuses the `outline` Button
+// tokens; the download itself is the site-local `downloadText` DOM helper (the bytes come
+// from the framework-agnostic exporters).
+function ExportButton({
+  label,
+  onClick,
+}: {
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={onClick}
+      title={`Download the result as ${label}`}
+    >
+      <Download className="size-3.5" />
+      {label}
+    </Button>
   );
 }
