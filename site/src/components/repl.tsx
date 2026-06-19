@@ -50,6 +50,8 @@ import {
   DatasetViewer,
   type ActiveDataset,
 } from "@/components/repl-datasets";
+// [OPUS-4.8] sq-daru — the dataset panel: named-graph list with per-graph triple counts.
+import { DatasetPanel } from "@/components/repl-dataset-panel";
 // [OPUS-4.8] sq-n5aw — the syntax-highlighting SPARQL editor replaces the plain <textarea>.
 import { SparqlEditor } from "@/components/sparql-editor";
 // [OPUS-4.8] sq-2mke — endpoint mode: the Connect panel + the SPARQL 1.1 Protocol client.
@@ -98,6 +100,11 @@ export function Repl() {
   const [size, setSize] = React.useState<number | null>(null);
   const [engine, setEngine] = React.useState<EngineState>("cold");
   const [viewerOpen, setViewerOpen] = React.useState(false);
+  // [OPUS-4.8] sq-daru — monotonic version bumped whenever the in-tab dataset's CONTENT
+  // changes (a new dataset loaded, a merge, or an in-tab Update). The dataset panel keys
+  // its per-graph-count re-read off it, so an Update that leaves the total size unchanged
+  // but moves triples between graphs still refreshes the panel.
+  const [datasetVersion, setDatasetVersion] = React.useState(0);
   const [active, setActive] = React.useState<ActiveDataset>({
     label: DEFAULT_DATASET.label,
     description: DEFAULT_DATASET.description,
@@ -129,6 +136,8 @@ export function Repl() {
       const store = loadIntoStore(Store, text, format);
       storeRef.current = store;
       setSize(datasetSize(store));
+      // [OPUS-4.8] sq-daru — new store content: refresh the dataset panel's per-graph counts.
+      setDatasetVersion((v) => v + 1);
       return store;
     },
     [],
@@ -252,6 +261,9 @@ export function Repl() {
         const ms = performance.now() - t0;
         const sizeAfter = datasetSize(store);
         setSize(sizeAfter);
+        // [OPUS-4.8] sq-daru — an in-tab Update mutated the store (and may have moved
+        // triples between graphs even if the total is unchanged): refresh the panel.
+        setDatasetVersion((v) => v + 1);
         setState({ kind: "update", sizeBefore, sizeAfter, ms });
         return;
       }
@@ -329,6 +341,8 @@ export function Repl() {
         } else {
           storeRef.current = incoming;
           setSize(datasetSize(incoming));
+          // [OPUS-4.8] sq-daru — replaced the store directly (not via buildStore): refresh.
+          setDatasetVersion((v) => v + 1);
           setActive({
             label,
             description: `Custom ${format} dataset loaded in your tab.`,
@@ -430,6 +444,15 @@ export function Repl() {
           onSelectBuiltin={selectBuiltin}
           onLoadText={loadText}
           disabled={controlsDisabled || endpointActive}
+        />
+
+        {/* [OPUS-4.8] sq-daru — the dataset panel: the loaded dataset's graphs (default +
+            named) with per-graph triple counts, refreshed on every content change. Hidden
+            in endpoint mode (the remote server owns its own dataset). */}
+        <DatasetPanel
+          store={storeRef.current}
+          refreshKey={datasetVersion}
+          hidden={endpointActive}
         />
 
         <div className="flex flex-wrap gap-1.5">

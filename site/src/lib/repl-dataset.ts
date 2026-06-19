@@ -229,6 +229,88 @@ export function modeSupportsForm(mode: RunMode, form: QueryForm): boolean {
   return form !== "update";
 }
 
+// [OPUS-4.8] sq-daru — dataset panel: per-graph triple counts.
+//
+// The panel enumerates the loaded dataset's graphs with a triple count each, so a user
+// can see at a glance how the data is partitioned (default graph + every named graph).
+// It reuses queries the engine already supports rather than a new Store method:
+//
+//   • NAMED-GRAPH stats — one row per named graph with its triple count. `GROUP BY ?g`
+//     over `GRAPH ?g { ?s ?p ?o }` lists exactly the named graphs (the default graph is
+//     NOT a GRAPH and so is excluded — it is counted separately).
+//   • DEFAULT-GRAPH count — the default graph's triple count on its own.
+//
+// Both are pure strings here (no React/DOM/wasm) so they are unit-testable; the parser
+// `parseGraphStats` turns the two SPARQL-JSON documents into the typed rows the panel
+// renders, and is itself pure + framework-free.
+
+/** The named-graph stats query: one solution per named graph, `?g` = graph IRI,
+ *  `?c` = its triple count. The default graph is not a GRAPH, so it is excluded. */
+export const NAMED_GRAPH_STATS_QUERY =
+  "SELECT ?g (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g ORDER BY ?g";
+
+/** The default-graph triple count (a single solution binding `?c`). */
+export const DEFAULT_GRAPH_COUNT_QUERY =
+  "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }";
+
+/** One row of the dataset panel: a graph and its triple count. `iri` is `null` for the
+ *  default graph (it has no IRI) and the graph IRI for a named graph. */
+export interface GraphStat {
+  /** The named-graph IRI, or `null` for the default graph. */
+  iri: string | null;
+  /** True for the default graph (always present, even when empty). */
+  isDefault: boolean;
+  /** The triple count in this graph. */
+  count: number;
+}
+
+/** A structural subset of a parsed SPARQL-JSON results document — just what
+ *  {@link parseGraphStats} reads. Lets the parser stay framework-free and avoids a hard
+ *  dependency on the full `SparqlResults` shape for the (pure) unit tests. */
+export interface SparqlResultsLike {
+  results?: {
+    bindings?: Array<Record<string, { value?: string } | undefined>>;
+  };
+}
+
+/** Parses a COUNT solution's `?c` value to a non-negative integer, or `0` if absent /
+ *  unparseable (a robust default so the panel never shows `NaN`). */
+function countFromBinding(value: string | undefined): number {
+  if (value == null) return 0;
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+/**
+ * Turns the two SPARQL-JSON documents — {@link DEFAULT_GRAPH_COUNT_QUERY} and
+ * {@link NAMED_GRAPH_STATS_QUERY} — into the typed {@link GraphStat} rows the dataset
+ * panel renders. The default graph is ALWAYS the first row (even with a count of 0, so
+ * the panel is honest about an empty default graph); the named graphs follow in the
+ * query's order. Malformed/absent counts default to 0 rather than throwing, so a partial
+ * result still renders. Pure + framework-free (takes already-parsed JSON), so it
+ * unit-tests directly.
+ */
+export function parseGraphStats(
+  defaultCount: SparqlResultsLike,
+  namedStats: SparqlResultsLike,
+): GraphStat[] {
+  const defaultBinding = defaultCount.results?.bindings?.[0];
+  const stats: GraphStat[] = [
+    {
+      iri: null,
+      isDefault: true,
+      count: countFromBinding(defaultBinding?.c?.value),
+    },
+  ];
+  for (const row of namedStats.results?.bindings ?? []) {
+    const iri = row.g?.value;
+    // A named-graph row must bind ?g; skip any defensive mis-shape.
+    if (iri == null) continue;
+    stats.push({ iri, isDefault: false, count: countFromBinding(row.c?.value) });
+  }
+  return stats;
+}
+
 /**
  * Serialises {@link ALL_QUADS_QUERY} solution rows to an N-Quads document: a triple
  * line (`s p o .`) when `?g` is unbound (default graph), a quad line
