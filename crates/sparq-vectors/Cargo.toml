@@ -113,6 +113,16 @@ sparq-sim = { path = "../sparq-sim" }
 name = "bench_vectors"
 required-features = ["approx-ann"]
 
+# [OPUS-4.8] sq-dwdm: the site /surface/vector capture harness exercises the `vec:`
+# magic predicate (query_vec), so it needs `vec-predicate`. Registering the requirement
+# keeps `cargo build --all-targets` (default features) green when the feature is out of
+# the build — the example body is `#![cfg(feature = "vec-predicate")]`, so without the
+# requirement a default-feature build would strip even `main` (E0601). The file is a
+# build-and-run capture harness only — no library code, no new dependency.
+[[example]]
+name = "capture_surface_vector"
+required-features = ["vec-predicate"]
+
 # [OPUS-4.8] sq-hkud (epic sq-toze, gap MS-G4) — register the `kani` cfg so the
 # `#[cfg(kani)]` bounded-proof harness in `store.rs` does not trip `-D warnings`
 # (unexpected_cfgs) on the NORMAL build. `cargo kani` sets this cfg itself when it
