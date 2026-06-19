@@ -1,0 +1,148 @@
+# [OPUS-4.8] sq-v286.2: the SINGLE source of truth for the hardware-tiered sparq-cli build
+# matrix. Reusable workflow (`workflow_call`) invoked by release.yml (versioned archives +
+# SHA256SUMS) and dist.yml (bare per-tier binaries for the fat-package launcher). Before this,
+# release.yml#package and dist.yml#build carried two hand-synced copies of the same 10-tier
+# matrix + identical build steps — the duplication the release-CI design record flags to remove
+# (research/release-ci-design.md §5 "Reuse, do not duplicate" and §6 sequencing item 2:
+# "Unify the duplicated build matrix via workflow_call").
+#
+# The matrix (runner labels + target triple + target-cpu + binary extension) and the build
+# steps (checkout -> Rust+target -> cargo-auditable -> `cargo auditable build`) are now defined
+# ONCE here. Each caller selects the artifact SHAPE via the `mode` input:
+#   mode: archive  -> release.yml: tar.gz / zip of binary + README + LICENSE + CHANGELOG,
+#                     uploaded as pkg-<tier>; the release job adds SHA256SUMS over them.
+#   mode: binary   -> dist.yml: bare binary copied to sparq-cli-<tier><ext>, uploaded as
+#                     sparq-cli-<tier>; the launcher's fat package selects from these.
+# Both modes embed the dependency manifest via cargo-auditable (GX-7 / GX-9) and emit an
+# identical SLSA build-provenance attestation over whatever bytes they upload (sq-zqq6).
+#
+# Microarch tier rationale (target-cpu=native is a NO-OP on Apple silicon; the x86-64
+# {,-v2,-v3,-v4} ladder; arm64 neoverse-n1 +lse; win-arm64 cross-linked from the x64 runner)
+# is unchanged - see research/hardware/optimization-findings.md.
+name: build-matrix
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "Artifact shape: 'archive' (versioned tar.gz/zip + docs, for release.yml) or 'binary' (bare per-tier binary, for dist.yml)."
+        required: true
+        type: string
+
+# Default read-only; the matrix job opts into the OIDC + attestation writes it needs (below).
+# A reusable workflow's effective permissions are the INTERSECTION of this declaration and the
+# permissions the CALLER's invoking job grants - both callers grant id-token+attestations:write.
+permissions:
+  contents: read
+
+jobs:
+  # ---- build + package per hardware tier (THE shared matrix) ----
+  build:
+    name: ${{ inputs.mode == 'archive' && 'package' || 'build' }} ${{ matrix.tier }}
+    runs-on: ${{ matrix.os }}
+    # sq-zqq6 / GX-9: build-provenance attestation over the uploaded bytes needs the OIDC
+    # token + attestation write. Read-only on the repo otherwise.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- Apple ----
+          # Apple silicon (M1-M4): ONE binary, no target-cpu (Darwin baseline already enables
+          # every Apple-silicon feature - measured; see research/hardware/optimization-findings.md).
+          - { tier: arm64-darwin,     os: macos-14,         target: aarch64-apple-darwin,      cpu: "",          ext: "" }
+          # Intel Macs: x86-64-v3 (every Intel Mac since ~2015 / Haswell has AVX2).
+          # macos-*-intel is the supported Intel runner line (the retired macos-13 label is gone).
+          - { tier: x64-darwin,       os: macos-15-intel,   target: x86_64-apple-darwin,       cpu: x86-64-v3,   ext: "" }
+          # ---- x86-64 Linux ----
+          # baseline (SSE2) + v2 (SSE4.2) + v3 (AVX2/BMI2/FMA) + v4 (AVX-512). The launcher
+          # picks the tier by /proc/cpuinfo.
+          - { tier: x64-baseline,     os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64,      ext: "" }
+          - { tier: x64-v2,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v2,   ext: "" }
+          - { tier: x64-v3,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v3,   ext: "" }
+          - { tier: x64-v4,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v4,   ext: "" }
+          # Generic aarch64 Linux (Graviton/Ampere, Raspberry Pi 4+): neoverse-n1 + LSE.
+          - { tier: arm64-linux,      os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, cpu: neoverse-n1, ext: "" }
+          # ---- Windows ----
+          - { tier: win-x64-baseline, os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64,      ext: ".exe" }
+          - { tier: win-x64-v3,       os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64-v3,   ext: ".exe" }
+          # Windows on ARM - cross-compiled from the x64 runner (MSVC cross-links; no cross/QEMU).
+          - { tier: win-arm64,        os: windows-latest,   target: aarch64-pc-windows-msvc,   cpu: "",          ext: ".exe" }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust + target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+      # GX-7 / GX-9: cargo-auditable embeds the exact dependency manifest (versions + sources)
+      # INTO the released binary, so the shipped artifact is self-describing for post-build audit
+      # (`cargo audit bin <file>` / `auditable info <file>`). Negligible size cost; no runtime overhead.
+      - name: Install cargo-auditable
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: cargo-auditable
+      - name: Build (${{ matrix.cpu || 'default-cpu' }})
+        shell: bash
+        run: |
+          FLAGS=""
+          [ -n "${{ matrix.cpu }}" ] && FLAGS="-Ctarget-cpu=${{ matrix.cpu }}"
+          [ "${{ matrix.tier }}" = "arm64-linux" ] && FLAGS="$FLAGS -Ctarget-feature=+lse"
+          # `cargo auditable build` is a drop-in for `cargo build` that embeds the dep
+          # manifest into the binary (GX-7); `--locked` pins the materials (Cargo.lock).
+          RUSTFLAGS="$FLAGS" cargo auditable build --release --locked -p sparq-cli --target ${{ matrix.target }}
+
+      # ---- archive mode (release.yml): versioned tar.gz/zip + README + LICENSE + CHANGELOG ----
+      - name: Package (binary + README + LICENSE + CHANGELOG)
+        if: inputs.mode == 'archive'
+        shell: bash
+        run: |
+          PKG="sparq-cli-${GITHUB_REF_NAME}-${{ matrix.tier }}"
+          mkdir -p "pkg/$PKG"
+          cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "pkg/$PKG/"
+          cp README.md "pkg/$PKG/"
+          # LICENSE is copied when present (license = MIT is declared in Cargo.toml; adding
+          # the LICENSE file itself is on the pre-release checklist in docs/release.md).
+          if [ -f LICENSE ]; then cp LICENSE "pkg/$PKG/"; fi
+          if [ -f CHANGELOG.md ]; then cp CHANGELOG.md "pkg/$PKG/"; fi
+          cd pkg
+          case "${{ matrix.tier }}" in
+            win-*) 7z a "$PKG.zip" "$PKG" ;;
+            *)     tar czf "$PKG.tar.gz" "$PKG" ;;
+          esac
+      - name: Attest build provenance (archives)
+        if: inputs.mode == 'archive'
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            pkg/*.tar.gz
+            pkg/*.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: inputs.mode == 'archive'
+        with:
+          name: pkg-${{ matrix.tier }}
+          path: |
+            pkg/*.tar.gz
+            pkg/*.zip
+          if-no-files-found: error
+
+      # ---- binary mode (dist.yml): bare per-tier binary for the launcher fat-package ----
+      - name: Stage dist binary
+        if: inputs.mode == 'binary'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}"
+      - name: Attest build provenance (dist binary)
+        if: inputs.mode == 'binary'
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: inputs.mode == 'binary'
+        with:
+          name: sparq-cli-${{ matrix.tier }}
+          path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
