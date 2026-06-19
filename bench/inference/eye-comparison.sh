@@ -16,10 +16,19 @@
 #   anc500     — transitive ancestor chain, 500 links (quadratic closure ~125k)
 #   grid30     — 30x30 grid reachability (edge → reach; reach+edge → reach)
 # Results: bench/inference/eye-comparison.md
+#
+# [OPUS-4.8] (sq-k5qq) Strictly-additive machine-readable emit: set SPARQ_INFER_JSON to a
+# path and the run ALSO writes the SAME per-workload wall seconds to that file as a stable,
+# hand-built JSON document (the shell analogue of the Rust harnesses' dependency-free
+# `format!`-JSON). STDOUT (the printf table) is byte-for-byte unchanged whether or not the
+# env var is set; the seconds are best-effort, MEASURED on the running host — ADVISORY +
+# NON-CANONICAL (stated in the emitted `note`) — nothing is committed.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 CLI="${SPARQ_CLI:-target/release/sparq-cli}"
 EYE="${EYE:-eye}"
+JSON_OUT="${SPARQ_INFER_JSON:-}"
+JSON_ROWS=""   # accumulated `{ ... }` row objects, comma-joined at the end
 B="$(mktemp -d)"; trap 'rm -rf "$B"' EXIT
 
 cp crates/sparq-reason/tests/eye/socrates.n3 "$B/socrates.n3"
@@ -54,6 +63,21 @@ mon() { # min-of-N wall seconds: mon <runs> <cmd…>
   echo "$best"
 }
 
+# [OPUS-4.8] (sq-k5qq) Append one JSON row to the accumulator. Args: workload, sparq_s,
+# eye_s ("skipped" emits a null + "skipped": true). Workload names are static idents, so a
+# JSON-safe quote is enough; numeric seconds are emitted as bare JSON numbers.
+add_json_row() {
+  [ -n "$JSON_OUT" ] || return 0
+  local w="$1" sparq="$2" eye="$3" eye_field
+  if [ "$eye" = skipped ]; then
+    eye_field='"eye_seconds": null, "eye_skipped": true'
+  else
+    eye_field="\"eye_seconds\": $eye, \"eye_skipped\": false"
+  fi
+  local row="{ \"workload\": \"$w\", \"sparq_seconds\": $sparq, $eye_field }"
+  if [ -z "$JSON_ROWS" ]; then JSON_ROWS="$row"; else JSON_ROWS="$JSON_ROWS,$row"; fi
+}
+
 printf '%-10s %12s %12s\n' workload sparq eye
 for w in socrates dt1k dt10k dt100k anc500 grid30; do
   s=$(mon 3 "$CLI" reason "$B/$w.n3" n3 n3 /dev/null)
@@ -63,9 +87,24 @@ for w in socrates dt1k dt10k dt100k anc500 grid30; do
   # minutes per EYE run: single run, documented as such in eye-comparison.md.
   if [ "$w" = dt100k ] && [ -z "${EYE_DT100K:-}" ]; then
     printf '%12s\n' 'skipped'
+    add_json_row "$w" "$s" skipped
     continue
   fi
   eruns=3; case "$w" in dt10k|dt100k|anc500|grid30) eruns=1;; esac
   e=$(mon "$eruns" "$EYE" --quiet --nope "$B/$w.n3" --pass)
   printf '%11ss\n' "$e"
+  add_json_row "$w" "$s" "$e"
 done
+
+# [OPUS-4.8] (sq-k5qq) Strictly-additive JSON emit: write the accumulated rows only when
+# SPARQ_INFER_JSON was set. The STDOUT table above is unchanged either way.
+if [ -n "$JSON_OUT" ]; then
+  {
+    printf '{\n'
+    printf '  "harness": "sparq-reason vs EYE (eye-comparison)",\n'
+    printf '  "note": "every wall-second figure is best-effort, MEASURED on the running host — ADVISORY, NON-CANONICAL (this dev box) — do not bake into committed files",\n'
+    printf '  "rows": [ %s ]\n' "$JSON_ROWS"
+    printf '}\n'
+  } > "$JSON_OUT"
+  echo "wrote results JSON to $JSON_OUT" >&2
+fi

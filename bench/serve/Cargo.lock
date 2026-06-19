@@ -980,6 +980,7 @@ name = "serve-spikes"
 version = "0.0.0"
 dependencies = [
  "mimalloc",
+ "serde_json",
  "spargebra",
  "sparq-core",
  "sparq-engine",
@@ -1269,9 +1270,9 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
-version = "0.6.11"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
+checksum = "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
 dependencies = [
  "bitflags",
  "bytes",
@@ -1279,7 +1280,9 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "percent-encoding",
  "pin-project-lite",
+ "tokio",
  "tower-layer",
  "tower-service",
  "tracing",
