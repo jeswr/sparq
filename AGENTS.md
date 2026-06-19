@@ -327,22 +327,40 @@ This is the standing orchestration loop that ties the sections above together. R
 
 **Done when** `bd ready` minus `needs:user` is empty and no PR / agent / CI is in flight.
 
-### Orchestration automation scripts (manual-invoke; mechanical substrate for the loop)
+### Orchestration automation (mostly manual-invoke scripts + one durable CI; mechanical substrate for the loop)
 
 The deterministic, no-judgment parts of the loop above are factored into small shell
 scripts under `scripts/`. They follow the mechanical-vs-judgment boundary set out in
 `research/orchestration-automation-design.md` (PR #374): **automate the DETECTION and
 the bookkeeping; never automate the DECISION.** The first three (PR #374 Phases A/C/F)
 are shipped; `worktree-gc.sh` (sq-6xdr) is a later addition that follows the same
-discipline (dry-run default, mutation behind `--apply`). They are **invoked manually for
-now** — there are deliberately **no
-auto-running mutating hooks or monitors wired yet**; wiring them (a `SessionStart`
-orphan-check hook, a merge-watcher monitor, a `PostToolUse` bead-export hook) is a
-documented follow-up in the design doc's phased plan (§5, Beads B/D/E + H), to be added
-only after the scripts are proven in manual use. Each script is `bash -n`/`shellcheck`
-clean and carries a `--dry-run-self-test` (hermetic; no network).
+discipline (dry-run default, mutation behind `--apply`). These shell scripts are
+**invoked manually**. The **one piece of auto-running, mutating automation that IS wired**
+is the durable bead-autoclose CI (`.github/workflows/bead-autoclose.yml`, sq-84a8, below) —
+it replaced an ephemeral session-scoped watcher (`b1kzhfxq5`) that did not persist across
+sessions, so beads stayed `in_progress` after their PR merged and the orchestrator closed
+them by hand each tick. The other deferred hooks (a `SessionStart` orphan-check hook, a
+`PostToolUse` bead-export hook) remain a documented follow-up in the design doc's phased
+plan (§5, Beads D/E + H), to be added only after the scripts are proven in manual use. Each
+shell script is `bash -n`/`shellcheck` clean and carries a `--dry-run-self-test` (hermetic;
+no network); the Python close-script carries a `--self-test`.
 
-- **`scripts/bead-close-on-merge.sh <pr> [--apply]`** (Phase A) — closes the bead a PR
+- **`.github/workflows/bead-autoclose.yml` + `scripts/ci-close-merged-beads.py`**
+  (sq-84a8) — the **durable** auto-close-on-merge. On a merged PR
+  (`pull_request: [closed]` gated on `merged == true` — the same shape as `flow-on.yml`),
+  it extracts the `sq-XXXX(.NN)` bead token(s) from the PR title + merge-commit subject,
+  closes ONLY matched beads that are currently open/in_progress/blocked (idempotent;
+  already-closed → no-op; minimal in-place edit of `.beads/issues.jsonl`), and commits the
+  result back to `main` with `[skip ci]` (least-privilege `contents: write`, the same
+  bot-commit idiom `bench.yml` uses for the perf floor). It runs AFTER merge, so it is
+  **NOT a gate** and never registers as a required check (`ci-summary / gate` polls the PR
+  head while the PR is OPEN; this workflow does not trigger on the open-PR events). It does
+  NOT install `bd` / rebuild the Dolt DB in CI — a full `bd export` round-trip churns ~1/3 of
+  the file cosmetically and would fight the orchestrator's canonical export — so it edits
+  the JSONL directly in the committed compact+ASCII style. The merge is verified against
+  the GitHub API as defense-in-depth on top of the `merged == true` event gate.
+- **`scripts/bead-close-on-merge.sh <pr> [--apply]`** (Phase A) — the **manual** sibling of
+  the bead-autoclose CI, for orchestrator use outside CI: closes the bead a PR
   maps to, but **only after verifying the merge against the API** (`gh pr view --json
   mergedAt` must be non-null; a parsed log/monitor line is never the source of truth).
   Resolves the bead id from an `sq-XXXX` token in the PR title or in a linked issue's
