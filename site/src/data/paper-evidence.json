@@ -1,5 +1,5 @@
 {
-  "_comment": "[OPUS-4.8] sq-gum8 — paper-bound EVIDENCE for the academic paper factory. Distinct from benchmarks.generated.json (which is per-commit TIMING, all environment=indicative on the dev work-box). Every record here is a DETERMINISTIC, machine-INDEPENDENT metric (recall floor / answer-safety invariant / cost-model crossover) lifted from a real test in crates/sparq-vectors/tests, so environment=canonical. The honesty gate in scripts/build-papers.mjs FAILS the build if a paper-bound headline table references an environment=indicative record. To add a number a paper may cite as a headline, it MUST appear here as environment=canonical and trace to a named test (the `source` field).",
+  "_comment": "[OPUS-4.8] sq-gum8 — paper-bound EVIDENCE for the academic paper factory. Distinct from benchmarks.generated.json (which is per-commit TIMING, all environment=indicative on the dev work-box). Every record here is a DETERMINISTIC, machine-INDEPENDENT metric (recall floor / answer-safety invariant / cost-model crossover / conformance ratchet floor) lifted from a real test or the central conformance scoreboard, so environment=canonical. The honesty gate in scripts/build-papers.mjs FAILS the build if a paper-bound headline table references an environment=indicative record. To add a number a paper may cite as a headline, it MUST appear here as environment=canonical and trace to a named test or const (the `source` field).",
   "schemaVersion": 1,
   "records": {
     "filtered_ann.recall_at_10_floor": {
@@ -59,6 +59,69 @@
       "scatter_penalty": 2.0,
       "source": "crates/sparq-vectors/src/cost.rs::CostModel::decision_crossover_default_penalty (tests/cost_model.rs)",
       "note": "Deterministic decision rule (not a measured latency): pre-filter is chosen iff m*scatter_penalty <= n, i.e. with the default scatter_penalty 2.0, iff the mask admits <= half the store. Whichever branch is picked the returned top-k is identical, so a mis-estimate costs throughput, never correctness."
+    },
+    "conformance.geosparql_topology_floor": {
+      "value": 119,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "OGC GeoSPARQL",
+      "source": "crates/sparq-geo/tests/ogc_compliance_ratchet.rs::OGC_RATCHET_FLOOR (mirrored in crates/sparq-conformance/src/scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "OGC GeoSPARQL topology compliance ratchet floor: a monotone lower bound on passing sf/eh/rcc8 topology + WKT/GML equivalence assertions that CI enforces and that may only RISE. Deterministic and machine-independent (a const a test asserts), not a timing."
+    },
+    "conformance.sparql_floor": {
+      "value": 1229,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "W3C SPARQL",
+      "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES (W3C SPARQL row); enforced by ci.yml job conformance (RATCHET=1229)",
+      "note": "W3C SPARQL 1.0/1.1/1.2 query+update+syntax ratchet floor (pass + documented divergence). Deterministic; CI-enforced; may only rise."
+    },
+    "conformance.inference_floor": {
+      "value": 1967,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "W3C RDF Semantics + OWL + N3",
+      "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES (inference row); enforced by ci.yml job inference-conformance (RATCHET=1967)",
+      "note": "Inference (rdf-mt / OWL 2 RL / N3 / entailment / rdf-turtle) ratchet floor (pass + documented divergence). Deterministic; CI-enforced; may only rise."
+    },
+    "conformance.shacl_core_floor": {
+      "value": 98,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "W3C SHACL",
+      "source": "crates/sparq-shacl/tests/w3c_core.rs::BASELINE_PASS (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "W3C SHACL core (data-shapes sht:Validate) ratchet floor. Deterministic; CI-enforced; may only rise."
+    },
+    "conformance.shacl_sparql_floor": {
+      "value": 5,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "W3C SHACL",
+      "source": "crates/sparq-shacl/tests/w3c_sparql.rs::SHACL_SPARQL_FLOOR (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "W3C SHACL-SPARQL (sh:sparql node + property constraint sub-suites) ratchet floor. Deterministic; CI-enforced; may only rise."
+    },
+    "conformance.cross_family_total": {
+      "value": 3418,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "cross-family (5 suites)",
+      "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES (sum of all ratchet_floor; rendered by render_scoreboard as the total row)",
+      "note": "Sum of the five cross-family conformance ratchet floors (SPARQL 1229 + inference 1967 + SHACL core 98 + SHACL-SPARQL 5 + GeoSPARQL 119). A single deterministic, CI-enforced, monotone index across crates. If any individual floor rises this total must be updated in lock-step (the same scoreboard const is the source)."
+    },
+    "conformance.suite_count": {
+      "value": 5,
+      "unit": "suites",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "cross-family",
+      "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES.len()",
+      "note": "Number of distinct conformance suites the central scoreboard registers and ratchets across crates (W3C SPARQL, inference, SHACL core, SHACL-SPARQL, OGC GeoSPARQL)."
     }
   }
 }

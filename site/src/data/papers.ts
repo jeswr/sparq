@@ -81,6 +81,20 @@ export const PAPERS: Paper[] = [
     evidence:
       "Methodology contribution — reports no performance number as evidence; demonstrates the canonical/indicative honesty gate this factory enforces.",
   },
+  {
+    slug: "geosparql-optin-crate",
+    source: "geosparql-optin-crate.typ",
+    title:
+      "A Conformant, Opt-In GeoSPARQL Layer for a Dictionary-Id RDF Engine, Backed by a Cross-Family Conformance Ratchet",
+    blurb:
+      "An opt-in GeoSPARQL 1.0/1.1 layer that imposes no cost on a core or wasm build that never uses it, reusing the host engine's extension-function registry and generic entailment. The honest evidence is conformance, not speed: an OGC topology floor that is one row of a single cross-family, CI-enforced, drift-guarded ratchet.",
+    authors: "Jesse Wright · the sparq project",
+    venue: "ISWC resources / in-use track (or demo)",
+    status: "publishable-now",
+    family: "B",
+    evidence:
+      "Deterministic conformance ratchet floors: OGC GeoSPARQL topology (119) as one row of a 5-suite cross-family scoreboard totalling 3418, each floor CI-enforced, monotone, and guarded against drift. No latency claim; spatial algorithms are standard prior art.",
+  },
 ];
 
 export function paperBySlug(slug: string): Paper | undefined {
