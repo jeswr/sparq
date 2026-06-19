@@ -31,6 +31,15 @@ STATUS.md
 /gui/e2e/package-lock.json
 /packages/*/package-lock.json
 
+# [OPUS-4.8] sq-1bc9 — repo-root npm-workspaces installs hoist deps into the ROOT
+# node_modules/ (and members keep their own). Only some members ship a node_modules
+# .gitignore line (js/site/gui-e2e do; packages/sparq-client does NOT), and the repo
+# root had none — so a root `npm ci` left node_modules/ untracked and stageable.
+# Ignore node_modules everywhere (unanchored — covers the root + every nested member) plus
+# an explicit packages/*/node_modules/ so an installed dep can never be accidentally staged.
+node_modules/
+/packages/*/node_modules/
+
 # Claude Code agent worktrees (transient scratch; the tracked skills under .claude/skills/ stay)
 /.claude/worktrees/
 

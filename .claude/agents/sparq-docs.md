@@ -16,6 +16,7 @@ Follow the **sub-agent shared contract** — `AGENTS.md` § *The sub-agent share
   - Work-box/EC2 numbers are NON-canonical.
   - The **privacy-claims CI gate is LIVE** — an unqualified ZK/MPC privacy/soundness claim fails the build; caveat the wording or add an inline `privacy-claims-allow: <why>` marker on a legitimately negated/historical mention.
 - **Public-API → SKILL.md rule:** when a crate's public surface changes, keep its `skills/<surface>/SKILL.md` current. Repo hygiene: knowledge goes in AGENTS.md / CLAUDE.md / SKILL.md / crate README / a `research/` record — never a scratch/handover doc; tasks go to beads, not `TODO.md`.
+- **README cap (GATING `readme-template`):** if you add or grow a crate `README.md`, run `python3 scripts/check-readme-template.py --enforce` → **0 deviations** before opening the PR; keep crate READMEs **≤120 lines** (**≤30** for a `publish = false` stub carrying the `<!-- internal-stub -->` directive) — verbose API detail belongs in rustdoc/`SKILL.md`, not the README. (The `readme-template` leg in `docs-quality.yml` is HARD.)
 
 ## Honesty
 Non-sycophantic. If a doc claims something the code doesn't do (or vice-versa), report the discrepancy plainly. Capture any genuinely-new follow-up as a LIST in your report (orchestrator beads it). No empty PRs — if nothing needs changing, say so and don't open one.
