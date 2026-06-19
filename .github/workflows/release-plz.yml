@@ -1,0 +1,127 @@
+# Automated semantic-release driver (release-plz) — epic sq-v286, item sq-v286.4.
+#
+# [OPUS-4.8] 🤖 SPARQ agent. Design record: research/release-ci-design.md
+#   §2  (tool selection: release-plz, release-PR model, git-cliff changelog engine)
+#   §6  item 4 ("Add the release-plz release-pr + release workflow … on merge tags
+#       vX.Y.Z, which fires the EXISTING release.yml unchanged").
+#
+# WHAT THIS DOES — the two-step release-plz flow, anchored on release-plz.toml
+# (#789 / sq-v286.3: the version_group over the 17 publishable crates that keeps the
+# locked single-version model):
+#
+#   1. release-pr  — on every push to main, release-plz reads the conventional-commit
+#                    history (+ cargo-semver-checks API-break detection), computes the
+#                    next single workspace version, and opens/UPDATES one "Release-PR"
+#                    that bumps the version across the version_group + rewrites
+#                    CHANGELOG.md (git-cliff) + updates Cargo.lock. Nothing is released
+#                    yet — a human reviews + merges that PR.
+#
+#   2. release     — when the Release-PR MERGES, its version-bump commit lands on main;
+#                    this push re-runs the workflow and `release-plz release` detects the
+#                    new version is not yet tagged and CREATES the `v<version>` git tag
+#                    (name from release-plz.toml `git_tag_name = "v{{ version }}"`).
+#
+# THE HANDOFF — tag → reuse existing release.yml (the whole point; do NOT duplicate the
+# build matrix here). The EXISTING release.yml triggers on `push: tags: ["v*"]`, so the
+# tag this job creates fires release.yml unchanged → its proven build-matrix.yml archive
+# matrix + CycloneDX SBOM/VEX + SLSA provenance + SHA256SUMS + GitHub Release + ghcr
+# container path all run exactly as today. This workflow adds NO build/package steps.
+#
+# SCOPE / RECONCILIATION (design §6 item 4 "Reconcile the two crates.io paths"):
+#   * GitHub Release ownership — release.yml's `release` job creates the GitHub Release
+#     (archives + SBOM/VEX + SHA256SUMS). release-plz's own GitHub-release creation is
+#     therefore DISABLED (`git_release_enable = false` in release-plz.toml) so the two do
+#     not collide on the same tag. release-plz creates the TAG ONLY; release.yml owns the
+#     Release. This is the "scope release-plz to the tag only" arm of design §6 item 4.
+#   * crates.io publish — kept MANUAL for now (`publish = false` in release-plz.toml):
+#     the `CARGO_REGISTRY_TOKEN` secret does not exist yet (it is the needs:user bead
+#     sq-v286.5 "complete out-of-repo publish prerequisites"). With publish disabled,
+#     `release-plz release` skips `cargo publish` and proceeds straight to tag creation —
+#     without that, cargo-publish-before-tag would fail with no token and the tag (hence
+#     the whole release) would never be cut. Flip to release-plz-driven publish once the
+#     token lands (then publish.yml only ATTESTS .crate bytes — the point of adoption).
+#
+# CARE — this workflow does NOT run on this PR (its triggers are push:main and the
+# Release-PR-merge push, never pull_request / merge_group), so it does NOT register on the
+# `ci-summary / gate` aggregator and cannot block this PR. The trade-off: a defect surfaces
+# only at release time, so trigger keys / action inputs / permissions / the tag→release.yml
+# handoff were hand-verified (see the PR body).
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+# Default to no permissions; each job opts into exactly what it needs (least privilege).
+permissions: {}
+
+# Serialize release-plz runs on main so two quick pushes cannot race to open/update the
+# same Release-PR. cancel-in-progress: false — never abort a run that may be cutting a
+# tag/release mid-flight (matches release-plz's documented recommendation).
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- 1. Release-PR: open/update the version-bump + changelog PR on every push to main.
+  release-plz-pr:
+    name: release-plz / Release-PR
+    # Guard against forks: release-plz needs repo write + would open PRs on a fork clone.
+    # Mirrors bench-ec2.yml's `github.repository == 'jeswr/sparq'` guard.
+    if: github.repository == 'jeswr/sparq'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # commit the version bump + changelog onto the Release-PR branch
+      pull-requests: write  # open / update the Release-PR
+    steps:
+      - name: Checkout (full history for changelog generation)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # release-plz / git-cliff walk the full commit history to build the changelog.
+          fetch-depth: 0
+          # Do not leave the default GITHUB_TOKEN in the local git config; release-plz uses
+          # its own `token:` input for forge operations (release-plz docs recommendation).
+          persist-credentials: false
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # [OPUS-4.8] sq-v286.4: official release-plz action, SHA-pinned (code-scanning=0;
+      # the repo SHA-pins ALL actions). v0.5.130 — pin verified to peel to this commit via
+      # `gh api repos/release-plz/action/git/tags/<annotated> --jq .object.sha`.
+      - name: Run release-plz (open/update Release-PR)
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        with:
+          command: release-pr
+        env:
+          # GITHUB_TOKEN is what release-plz uses to open/update the Release-PR.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- 2. release: when the Release-PR's version commit is on main, create the v<version>
+  #         git tag. That tag fires the EXISTING release.yml (push: tags: ["v*"]) which does
+  #         all the building/packaging/releasing. No build matrix here by design.
+  release-plz-release:
+    name: release-plz / tag (handoff to release.yml)
+    if: github.repository == 'jeswr/sparq'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create + push the v<version> git tag
+    steps:
+      - name: Checkout (full history for tag detection)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # [OPUS-4.8] sq-v286.4: `release` command. With `publish = false` +
+      # `git_release_enable = false` in release-plz.toml, this creates ONLY the v<version>
+      # git tag — it skips cargo publish (needs:user token, sq-v286.5) and skips its own
+      # GitHub Release (release.yml owns that). The pushed tag then triggers release.yml.
+      - name: Run release-plz (create v<version> tag on version commit)
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        with:
+          command: release
+        env:
+          # Tagging is a forge operation done with GITHUB_TOKEN. No CARGO_REGISTRY_TOKEN is
+          # passed because crates.io publish is disabled (publish = false) until the
+          # needs:user token lands (sq-v286.5).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

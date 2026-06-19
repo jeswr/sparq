@@ -3,12 +3,13 @@
 # [OPUS-4.8] sq-v286.3 (child of the automated-semantic-release epic sq-v286).
 # Design record: research/release-ci-design.md (§2 tool selection, §5/§6 sequencing).
 #
-# 🤖 SPARQ agent. Honest scope note: this file configures release-plz's
-# version + changelog POLICY only. It deliberately does NOT add the release-plz
-# WORKFLOW (that is the dependent bead sq-v286.4) and does NOT touch
-# release.yml / dist.yml / publish.yml (a sibling bead owns those). The keys
-# below take effect only once a release-plz workflow exists; until then this is
-# inert configuration.
+# 🤖 SPARQ agent. This file configures release-plz's version + changelog POLICY.
+# It was authored under sq-v286.3 as inert configuration; sq-v286.4 then added the
+# release-plz WORKFLOW (.github/workflows/release-plz.yml) that ACTIVATES it, plus the
+# two tag-only handoff keys near the bottom of [workspace] (git_release_enable = false,
+# publish = false) that this file's keys take effect through. It still does NOT touch
+# release.yml / dist.yml / publish.yml (those stay sibling-owned); the handoff is via the
+# `vX.Y.Z` tag only.
 #
 # Why this file exists — the one workspace decision release-plz forces
 # (design §2 "The one workspace decision release-plz forces"):
@@ -38,6 +39,26 @@ semver_check = true
 # locked single-version model. Design §6 step 4: merging the release PR tags
 # `vX.Y.Z`, which fires release.yml unchanged.
 git_tag_name = "v{{ version }}"
+
+# --- Tag-only handoff to release.yml (activated by the release-plz WORKFLOW) -----------
+# [OPUS-4.8] sq-v286.4 (the workflow bead this file's header defers "activation" to;
+# .github/workflows/release-plz.yml). The two keys below are what make the `release-plz
+# release` command create the `vX.Y.Z` tag ONLY, so the tag hands off cleanly to the
+# existing release.yml (design §6 item 4: "scope release-plz to the tag only").
+#
+# git_release_enable = false — release.yml's `release` job already creates the GitHub
+#   Release (archives + CycloneDX SBOM/VEX + SHA256SUMS, via build-matrix.yml). Leaving
+#   release-plz's default `true` would make release-plz ALSO create a GitHub Release for
+#   the same tag → a collision (duplicate/empty release racing release.yml). Disable it:
+#   release-plz creates the tag, release.yml owns the Release.
+git_release_enable = false
+# publish = false — crates.io publish stays MANUAL for now. The `CARGO_REGISTRY_TOKEN`
+#   secret does not exist yet (needs:user bead sq-v286.5). release-plz runs `cargo publish`
+#   BEFORE creating the tag, so with the default `true` and no token the publish step would
+#   fail and the tag would never be cut. Disabling publish lets `release-plz release`
+#   skip straight to tagging. Flip to `true` (release-plz-driven publish, publish.yml then
+#   only attests .crate bytes) once sq-v286.5 provisions the token — "the point of adoption".
+publish = false
 
 # --- The locked version_group: all 17 publishable crates ---------------------
 # These are exactly the crates under crates/* WITHOUT `publish = false`
