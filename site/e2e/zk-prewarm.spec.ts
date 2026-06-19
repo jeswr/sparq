@@ -86,3 +86,47 @@ test("the cold start happens at most once even across a second proof", async ({ 
   await expect(page.locator('[data-proof-verified="true"]')).toBeVisible({ timeout: 90_000 });
   expect(await coldStarts(page)).toBe(1);
 });
+
+// [OPUS-4.8] sq-8dx2 — the FL1 composition reaches an ELIGIBLE verdict once the one live
+// relation (the age-gate) is proven+verified in-tab, and the per-circuit progress list
+// shows the age-gate verified while every OTHER member stays "composed" (never a fake
+// verified tick). This guards the load-bearing honesty: a green row == a real in-tab
+// check, which is only ever the age-gate.
+test("the composition reaches ELIGIBLE with only the age-gate verified live", async ({ page }) => {
+  await gotoReady(page);
+
+  await page.getByRole("button", { name: "Generate ZK proof" }).click();
+  await expect(page.locator('[data-proof-verified="true"]')).toBeVisible({ timeout: 90_000 });
+
+  // The composed verdict flips to ELIGIBLE.
+  await expect(page.locator('[data-zk-verdict="eligible"]')).toBeVisible();
+
+  // The age-gate row is verified; every other row remains "composed" (NOT verified).
+  await expect(page.locator('[data-zk-step="filter-age"]')).toHaveAttribute(
+    "data-zk-step-status",
+    "verified",
+  );
+  const composedRows = page.locator('[data-zk-step]:not([data-zk-step="filter-age"])');
+  const n = await composedRows.count();
+  expect(n).toBeGreaterThan(0);
+  for (let i = 0; i < n; i++) {
+    await expect(composedRows.nth(i)).toHaveAttribute("data-zk-step-status", "composed");
+  }
+});
+
+// [OPUS-4.8] sq-8dx2 — the FALLBACK: switch to "Captured + verify" and run a REAL in-tab
+// bb.js verifyProof over the captured ProofManifest's bundled age-gate sub-proof. The
+// bundled bytes are a genuine UltraHonk transcript; this asserts the live verify passes.
+test("captured-manifest fallback verifies a real proof in-tab", async ({ page }) => {
+  await gotoReady(page);
+
+  await page.getByRole("button", { name: "Captured + verify" }).click();
+  await page.getByRole("button", { name: "Verify captured proof" }).click();
+
+  const verifyCard = page.locator("[data-verify-result]");
+  await expect(verifyCard).toBeVisible({ timeout: 90_000 });
+  await expect(verifyCard).toHaveAttribute("data-verify-ok", "true");
+
+  // The composed verdict also reaches ELIGIBLE on the fallback path.
+  await expect(page.locator('[data-zk-verdict="eligible"]')).toBeVisible();
+});

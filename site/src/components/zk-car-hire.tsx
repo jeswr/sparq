@@ -18,6 +18,8 @@ import {
   CircleAlert,
   Cpu,
   KeyRound,
+  CircleDot,
+  PackageCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -33,9 +35,11 @@ import { cn } from "@/lib/utils";
 import {
   proveAgeEligibility,
   prewarmProver,
+  verifyCapturedManifest,
   PROVABLE_AGES,
   AGE_THRESHOLD,
   type ProofResult,
+  type VerifyResult,
 } from "@/lib/zk-prover";
 import {
   CREDENTIAL_TURTLE,
@@ -43,6 +47,7 @@ import {
   DISCLOSURE,
   CIRCUIT_FAMILY,
   CIRCUIT_FAMILY_EXPLAINER,
+  COMPOSITION_MEMBERS,
   PUBLIC_INPUT_LABELS,
   type FamilyStatus,
 } from "@/data/zk-car-hire";
@@ -57,6 +62,30 @@ type Phase =
   | { kind: "rejected"; message: string } // under-age → unsatisfiable
   | { kind: "error"; message: string };
 
+// [OPUS-4.8] sq-8dx2 — the verify-only fallback phases (captured manifest + live
+// in-tab verify), kept separate from the live-prove Phase so each path's status copy
+// stays exact and honest.
+type VerifyPhase =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "verifying" }
+  | { kind: "done"; result: VerifyResult }
+  | { kind: "error"; message: string };
+
+// [OPUS-4.8] sq-8dx2 — which engine the page runs. `prove` = fresh live UltraHonk proof
+// of the age-gate (the default — "proving in your tab right now"). `verify` = the
+// captured-manifest fallback: replay a real captured proof and verify it live in-tab
+// (for browsers/devices where proving is too heavy). Both are REAL cryptography; only
+// the age-gate relation is ever checked in-browser either way.
+type RunMode = "prove" | "verify";
+
+// [OPUS-4.8] sq-8dx2 — per-circuit progress status for the composition list. `live`
+// rows transition queued→active→verified during a run; `composed` rows are members
+// proven NATIVELY and never run in-browser — they are NEVER shown as "verified",
+// only as composed-not-bundled, so no reader mistakes the demo for a full live
+// composition. `rejected` marks the age-gate when the claim is unsatisfiable.
+type StepStatus = "queued" | "active" | "verified" | "rejected" | "composed";
+
 // [OPUS-4.8] Prover warm-up lifecycle, surfaced as a subtle indicator — mirrors the
 // SPARQL REPL's Engine pill. The dynamic-import + circuit fetch + Barretenberg WASM
 // instantiate is kicked off on mount (prewarmProver) so the first "Generate ZK proof"
@@ -66,6 +95,8 @@ type ProverState = "cold" | "warming" | "ready" | "error";
 export function ZkCarHire() {
   const [age, setAge] = React.useState(30);
   const [phase, setPhase] = React.useState<Phase>({ kind: "idle" });
+  const [verifyPhase, setVerifyPhase] = React.useState<VerifyPhase>({ kind: "idle" });
+  const [mode, setMode] = React.useState<RunMode>("prove");
   const [prover, setProver] = React.useState<ProverState>("cold");
 
   // Pre-warm the in-browser ZK prover in the background on mount, off the render path.
@@ -123,10 +154,38 @@ export function ZkCarHire() {
     }
   }, [age]);
 
+  // [OPUS-4.8] sq-8dx2 — the fallback: fetch the captured ProofManifest and run a REAL
+  // bb.js verifyProof over its bundled age-gate sub-proof, live in your tab. Proving
+  // (the expensive part) was done ahead of time; only the cheap verify runs here, so
+  // this path works where live proving is too heavy. The proof bytes are a genuine
+  // UltraHonk transcript — a tampered byte makes verify return false.
+  const runVerify = React.useCallback(async () => {
+    try {
+      setVerifyPhase({ kind: "loading" });
+      await new Promise((r) => setTimeout(r, 0));
+      setVerifyPhase({ kind: "verifying" });
+      const result = await verifyCapturedManifest();
+      setProver("ready");
+      setVerifyPhase({ kind: "done", result });
+      if (!result.verified) {
+        toast.error("Captured proof did not verify", {
+          description: "The in-tab verifier rejected the bundled proof.",
+        });
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setVerifyPhase({ kind: "error", message });
+      toast.error("Verify failed", { description: message });
+    }
+  }, []);
+
   const busy =
     phase.kind === "loading" ||
     phase.kind === "proving" ||
     phase.kind === "verifying";
+
+  const verifyBusy =
+    verifyPhase.kind === "loading" || verifyPhase.kind === "verifying";
 
   const statusText =
     phase.kind === "loading"
@@ -145,7 +204,62 @@ export function ZkCarHire() {
                 ? "Proving failed."
                 : "Idle — choose an age and generate a proof.";
 
+  const verifyStatusText =
+    verifyPhase.kind === "loading"
+      ? "Loading the Barretenberg verifier (WASM)…"
+      : verifyPhase.kind === "verifying"
+        ? "Verifying the captured age-gate proof in your tab…"
+        : verifyPhase.kind === "done"
+          ? verifyPhase.result.verified
+            ? "Captured proof verified — in your tab."
+            : "Captured proof did NOT verify."
+          : verifyPhase.kind === "error"
+            ? "Verify failed."
+            : "Idle — verify the captured proof.";
+
   const underAge = age < AGE_THRESHOLD;
+
+  // [OPUS-4.8] sq-8dx2 — derive each composition row's honest status from the live run.
+  // The age-gate (filter) is the ONLY member touched by an in-browser proof/verify; it
+  // tracks the active phase. Every other member is `composed` (proven natively, NOT run
+  // in-browser) and NEVER shows as "verified". This keeps the progress list truthful: a
+  // green tick on a row means a real in-tab check happened, which is only ever the
+  // age-gate.
+  const ageGateStatus: StepStatus =
+    mode === "prove"
+      ? phase.kind === "loading" || phase.kind === "proving"
+        ? "active"
+        : phase.kind === "verifying"
+          ? "active"
+          : phase.kind === "done"
+            ? phase.result.verified
+              ? "verified"
+              : "queued"
+            : phase.kind === "rejected"
+              ? "rejected"
+              : "queued"
+      : verifyPhase.kind === "loading" || verifyPhase.kind === "verifying"
+        ? "active"
+        : verifyPhase.kind === "done"
+          ? verifyPhase.result.verified
+            ? "verified"
+            : "queued"
+          : "queued";
+
+  const steps = COMPOSITION_MEMBERS.map((m) => ({
+    member: m,
+    status: m.live ? ageGateStatus : ("composed" as StepStatus),
+    gates: ZK_MEMBERS.find((x) => x.member === m.snapshot)?.gate_count ?? null,
+  }));
+
+  // The composed eligibility verdict is reached ONLY when the one live relation (the
+  // age-gate) was cryptographically checked in your tab. It is honestly scoped: the
+  // other members are composed-not-bundled, so this is "ELIGIBLE — as far as the live
+  // age-gate proves", not a full-composition guarantee. The honesty panel says so.
+  const liveVerified =
+    mode === "prove"
+      ? phase.kind === "done" && phase.result.verified && phase.result.eligible
+      : verifyPhase.kind === "done" && verifyPhase.result.verified;
 
   return (
     <div className="space-y-8">
@@ -236,29 +350,65 @@ export function ZkCarHire() {
               </p>
             </div>
 
-            <div className="flex items-center gap-3">
-              <Button onClick={run} disabled={busy}>
-                {busy ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Play className="size-4" />
-                )}
-                Generate ZK proof
-              </Button>
-              <p
-                aria-live="polite"
-                role="status"
-                className="text-xs text-muted-foreground"
-              >
-                {statusText}
-              </p>
-            </div>
+            {/* [OPUS-4.8] sq-8dx2 — engine toggle: live-prove (default) vs the
+                captured-manifest + live-verify fallback for heavier browsers. */}
+            <ModeToggle mode={mode} setMode={setMode} disabled={busy || verifyBusy} />
+
+            {mode === "prove" ? (
+              <div className="flex items-center gap-3">
+                <Button onClick={run} disabled={busy}>
+                  {busy ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Play className="size-4" />
+                  )}
+                  Generate ZK proof
+                </Button>
+                <p
+                  aria-live="polite"
+                  role="status"
+                  className="text-xs text-muted-foreground"
+                >
+                  {statusText}
+                </p>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3">
+                <Button onClick={runVerify} disabled={verifyBusy}>
+                  {verifyBusy ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <PackageCheck className="size-4" />
+                  )}
+                  Verify captured proof
+                </Button>
+                <p
+                  aria-live="polite"
+                  role="status"
+                  className="text-xs text-muted-foreground"
+                >
+                  {verifyStatusText}
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
 
+      {/* ── Per-circuit composition progress + the aria-live status pill ── */}
+      <CompositionPanel
+        steps={steps}
+        mode={mode}
+        eligible={liveVerified}
+        running={mode === "prove" ? busy : verifyBusy}
+      />
+
       {/* ── Verdict ── */}
-      <VerdictPanel phase={phase} age={age} />
+      {mode === "prove" ? (
+        <VerdictPanel phase={phase} age={age} />
+      ) : (
+        <VerifyVerdictPanel phase={verifyPhase} />
+      )}
 
       {/* ── Reveal vs hide ── */}
       <DisclosurePanel />
@@ -273,6 +423,277 @@ export function ZkCarHire() {
       <HonestyPanel />
     </div>
   );
+}
+
+// [OPUS-4.8] sq-8dx2 — the live-prove vs captured-verify engine toggle. Live-prove is
+// the default ("a real proof in your tab right now"); the captured-manifest fallback
+// runs only the cheap verify, for browsers/devices where proving is too heavy. Both
+// paths are REAL cryptography — only the age-gate relation is checked in-browser either
+// way (see the composition panel + honesty note).
+function ModeToggle({
+  mode,
+  setMode,
+  disabled,
+}: {
+  mode: RunMode;
+  setMode: (m: RunMode) => void;
+  disabled: boolean;
+}) {
+  const opts: { key: RunMode; label: string; hint: string }[] = [
+    { key: "prove", label: "Live prove", hint: "fresh proof in your tab (default)" },
+    { key: "verify", label: "Captured + verify", hint: "fallback — replays a captured proof" },
+  ];
+  return (
+    <div
+      className="flex flex-col gap-1.5"
+      role="group"
+      aria-label="Proving mode"
+      data-zk-mode={mode}
+    >
+      <div className="inline-flex w-fit rounded-lg bg-muted p-0.5 ring-1 ring-foreground/10">
+        {opts.map((o) => (
+          <button
+            key={o.key}
+            type="button"
+            aria-pressed={mode === o.key}
+            disabled={disabled}
+            onClick={() => setMode(o.key)}
+            className={cn(
+              "rounded-md px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50",
+              mode === o.key
+                ? "bg-card text-foreground ring-1 ring-foreground/10"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        {opts.find((o) => o.key === mode)?.hint}
+      </p>
+    </div>
+  );
+}
+
+// [OPUS-4.8] sq-8dx2 — the per-circuit composition progress list + the aria-live
+// status pill, ending in the composed verdict. The age-gate row transitions live
+// (queued→active→verified); every other member is rendered as "composed natively · not
+// run in-browser" and NEVER shows a verified tick — so a green row always means a real
+// in-tab check happened (which is only ever the age-gate). The composed ELIGIBLE
+// verdict is honestly scoped to what was actually verified live.
+function StepIcon({ status }: { status: StepStatus }) {
+  if (status === "active") return <Loader2 className="size-4 animate-spin text-primary" />;
+  if (status === "verified") return <CircleCheck className="size-4 text-[var(--success)]" />;
+  if (status === "rejected") return <CircleAlert className="size-4 text-[var(--warning)]" />;
+  if (status === "composed")
+    return <CircleDot className="size-4 text-muted-foreground/60" aria-hidden />;
+  return <CircleDot className="size-4 text-muted-foreground/40" aria-hidden />;
+}
+
+function stepStatusLabel(status: StepStatus): string {
+  switch (status) {
+    case "active":
+      return "checking in your tab…";
+    case "verified":
+      return "verified in your tab";
+    case "rejected":
+      return "unsatisfiable — no proof";
+    case "composed":
+      return "composed natively · not run in-browser";
+    default:
+      return "queued";
+  }
+}
+
+function CompositionPanel({
+  steps,
+  mode,
+  eligible,
+  running,
+}: {
+  steps: { member: (typeof COMPOSITION_MEMBERS)[number]; status: StepStatus; gates: number | null }[];
+  mode: RunMode;
+  eligible: boolean;
+  running: boolean;
+}) {
+  const liveCount = steps.filter((s) => s.member.live).length;
+  const total = steps.length;
+  // The aria-live pill summarises the run for assistive tech without scraping rows.
+  const pill = running
+    ? mode === "prove"
+      ? "Proving the age-gate in your tab…"
+      : "Verifying the captured proof in your tab…"
+    : eligible
+      ? "ELIGIBLE — the live age-gate proof verified in your tab"
+      : "Idle — run the composition to check eligibility";
+  return (
+    <Card data-zk-composition>
+      <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Cpu className="size-4 text-primary" />
+          The composed presentation — per-circuit progress
+        </CardTitle>
+        <Badge
+          variant={eligible ? "success" : running ? "muted" : "outline"}
+          aria-live="polite"
+          role="status"
+          data-zk-pill
+          className="max-w-[18rem] truncate"
+        >
+          {running && <Loader2 className="size-3 animate-spin" />}
+          {!running && eligible && <CircleCheck className="size-3" />}
+          {pill}
+        </Badge>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="measure text-sm text-muted-foreground">
+          A full car-hire presentation composes one sub-proof per relation:{" "}
+          <strong>2× scan + filter (age ≥ 25) + 2× hidden-issuer + revocation + join
+          (same holder) + holder proof-of-possession</strong>. Below, each member shows
+          its honest status. Exactly <strong>one</strong> of the {total} members — the
+          age-gate <code className="font-mono">filter_int</code> — is proven and verified{" "}
+          <strong>live in your browser</strong>; the other {total - liveCount} are
+          compiled, gate-counted and proven by the native crate over{" "}
+          <code className="font-mono">bb</code>, but are <strong>not</strong> run
+          in-browser here. A green tick means a real in-tab cryptographic check
+          happened.
+        </p>
+        <ol className="space-y-1.5">
+          {steps.map((s, i) => (
+            <li
+              key={s.member.key}
+              data-zk-step={s.member.key}
+              data-zk-step-status={s.status}
+              className={cn(
+                "flex items-start gap-3 rounded-lg border bg-card p-3",
+                s.status === "active" && "ring-1 ring-primary/40",
+                s.status === "verified" && "ring-1 ring-[var(--success)]/30",
+              )}
+            >
+              <span className="flex size-6 shrink-0 items-center justify-center">
+                <StepIcon status={s.status} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <span className="text-sm font-medium">
+                    {i + 1}. {s.member.label}
+                  </span>
+                  <code className="font-mono text-[11px] text-muted-foreground">
+                    {s.member.snapshot}
+                  </code>
+                  {s.gates != null && (
+                    <span className="tabular text-[11px] text-muted-foreground">
+                      · {s.gates.toLocaleString()} gates
+                    </span>
+                  )}
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  {s.member.proves}
+                </span>
+              </span>
+              <span className="shrink-0">
+                {s.member.live ? (
+                  <Badge variant={s.status === "verified" ? "success" : "muted"}>
+                    {stepStatusLabel(s.status)}
+                  </Badge>
+                ) : (
+                  <Badge variant="muted">composed (native)</Badge>
+                )}
+              </span>
+            </li>
+          ))}
+        </ol>
+        <div
+          className={cn(
+            "rounded-lg p-4 text-center",
+            eligible
+              ? "bg-[color-mix(in_oklch,var(--success)_14%,transparent)] text-[var(--success)]"
+              : "bg-muted text-muted-foreground",
+          )}
+          data-zk-verdict={eligible ? "eligible" : "pending"}
+        >
+          <p className="text-xs uppercase tracking-wide opacity-80">
+            Composed verdict
+          </p>
+          <p className="text-2xl font-semibold">
+            {eligible ? "ELIGIBLE" : "—"}
+          </p>
+          <p className="mt-1 text-xs opacity-90">
+            {eligible
+              ? "as far as the live age-gate proves — the other members are composed natively, not verified in-browser here (research-grade, not externally audited)"
+              : "run the age-gate to reach a verdict"}
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// [OPUS-4.8] sq-8dx2 — the fallback verdict: a captured proof verified live in-tab.
+function VerifyVerdictPanel({ phase }: { phase: VerifyPhase }) {
+  if (phase.kind === "error") {
+    return (
+      <pre className="overflow-x-auto rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-xs text-destructive">
+        {phase.message}
+      </pre>
+    );
+  }
+  if (phase.kind !== "done") return null;
+  const r = phase.result;
+  return (
+    <Card data-verify-result data-verify-ok={r.verified ? "true" : "false"}>
+      <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
+        <CardTitle className="flex items-center gap-2 text-base">
+          {r.verified ? (
+            <CircleCheck className="size-5 text-[var(--success)]" />
+          ) : (
+            <CircleAlert className="size-5 text-destructive" />
+          )}
+          Captured proof — verified live in your tab
+        </CardTitle>
+        <Badge variant={r.verified ? "success" : "muted"} className="tabular">
+          {r.threads === 1 ? "single-thread" : `${r.threads} threads`}
+        </Badge>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-muted-foreground">
+          This is the <strong>fallback</strong> path: proving (the expensive part) was
+          captured ahead of time into a <code className="font-mono">ProofManifest</code>{" "}
+          (<code className="font-mono">{r.member}</code>) — the bundled bytes are a{" "}
+          <strong>real</strong> UltraHonk transcript, and the verify you just ran is a
+          genuine in-tab <code className="font-mono">bb.js verifyProof</code>. A single
+          tampered byte would make it reject. It proves the same age-gate relation
+          (<em>{r.relation}</em>); the hidden age is not among the captured public inputs.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Stat label="Verified in your tab" value={r.verified ? "yes" : "no"} />
+          <Stat
+            label="Proof size"
+            value={`${(r.proofByteLength / 1024).toFixed(1)} KB`}
+            sub={`${Math.round(r.proofByteLength / 32)} fields`}
+          />
+          <Stat label="Verify time" value={`${r.verifyMs.toFixed(0)} ms`} sub="non-canonical" />
+          <Stat label="Captured" value={r.capturedAt} />
+        </div>
+        <a
+          className="inline-flex items-center gap-1.5 text-xs text-primary underline-offset-4 hover:underline"
+          href={`${siteBasePath()}/zk/car-hire-manifest.json`}
+          download
+        >
+          <PackageCheck className="size-3.5" />
+          Download the captured ProofManifest (JSON)
+        </a>
+      </CardContent>
+    </Card>
+  );
+}
+
+// [OPUS-4.8] sq-8dx2 — basePath for in-site download links (Pages serves under /sparq;
+// local `next dev` and Tauri use ''). Mirrors next.config.ts's NEXT_PUBLIC_BASE_PATH
+// switch and src/lib/zk-prover.ts's fetch path.
+function siteBasePath(): string {
+  return process.env.NEXT_PUBLIC_BASE_PATH ?? "/sparq";
 }
 
 // [OPUS-4.8] Subtle prover-readiness pill. Reuses the badge tokens; never blocks the

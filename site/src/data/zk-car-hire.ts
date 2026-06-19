@@ -114,6 +114,86 @@ export const CIRCUIT_FAMILY: CircuitRow[] = [
   },
 ];
 
+/** [OPUS-4.8] sq-8dx2 — the per-circuit COMPOSITION the full car-hire presentation
+ *  assembles, in presentation order, including the duplicated members (2× scan, 2×
+ *  hidden_issuer). Each entry drives one row in the live progress list. Exactly ONE
+ *  member is proven+verified LIVE in your browser (the age-gate FILTER); every other
+ *  member is `live: false` and is rendered as "composed natively · not run in-browser"
+ *  — never with a fake live tick. This list MUST stay honest: do not flip a `live`
+ *  flag without a real in-tab proof behind it. The `snapshot` id binds the gate count
+ *  to the deterministic snapshot JSON. */
+export interface CompositionMember {
+  /** Stable row key (unique even where the circuit member repeats, e.g. the 2 scans). */
+  key: string;
+  /** Operator-family label shown to the reader. */
+  label: string;
+  /** The compiled circuit-member id (binds gate count to the snapshot JSON). */
+  snapshot: string;
+  /** One-line statement of what this member proves in the car-hire presentation. */
+  proves: string;
+  /** True ONLY for the member actually proven+verified live in your tab (filter_int). */
+  live: boolean;
+}
+
+export const COMPOSITION_MEMBERS: CompositionMember[] = [
+  {
+    key: "scan-govid",
+    label: "Scan · gov-ID graph",
+    snapshot: "scan_k2_n64_r8",
+    proves: "the age + holder rows genuinely come from the committed gov-ID credential",
+    live: false,
+  },
+  {
+    key: "scan-licence",
+    label: "Scan · DVLA graph",
+    snapshot: "scan_k2_n64_r8",
+    proves: "the holder + validity rows genuinely come from the committed licence credential",
+    live: false,
+  },
+  {
+    key: "filter-age",
+    label: "Filter · age ≥ 25",
+    snapshot: "filter_int_d2",
+    proves: "the hidden age satisfies ≥ 25 — the only age fact disclosed (proven live here)",
+    live: true,
+  },
+  {
+    key: "issuer-govid",
+    label: "Hidden issuer · gov-ID",
+    snapshot: "hidden_issuer_d4",
+    proves: "the gov-ID was signed by a trusted issuer, without revealing which key",
+    live: false,
+  },
+  {
+    key: "issuer-licence",
+    label: "Hidden issuer · DVLA",
+    snapshot: "hidden_issuer_d4",
+    proves: "the licence was signed by a trusted issuer, without revealing which key",
+    live: false,
+  },
+  {
+    key: "revoke",
+    label: "Revocation · not revoked",
+    snapshot: "revoke_unset_d10",
+    proves: "the licence is not revoked, at a hidden status-list index",
+    live: false,
+  },
+  {
+    key: "join",
+    label: "Join · same holder",
+    snapshot: "join_eq_na16_nb16",
+    proves: "both credentials share one holder, without disclosing who",
+    live: false,
+  },
+  {
+    key: "holder-pok",
+    label: "Holder · proof of possession",
+    snapshot: "holder_pok",
+    proves: "the presenter possesses the bound holder key",
+    live: false,
+  },
+];
+
 /** Human labels for the public-input vector of the age-gate circuit. The age is
  *  NOT in this list — that is the whole point. */
 export const PUBLIC_INPUT_LABELS = [

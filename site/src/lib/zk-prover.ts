@@ -45,6 +45,43 @@ export const PROVABLE_AGES = Object.keys(AGE_OPERAND_ENC)
 
 export const AGE_THRESHOLD = 25;
 
+/**
+ * [OPUS-4.8] sq-8dx2 — the fallback "captured ProofManifest + live in-tab verify".
+ *
+ * `verifyCapturedManifest` fetches the pre-captured car-hire manifest
+ * (`/zk/car-hire-manifest.json`, produced by `scripts/capture-zk-manifest.mjs`) and
+ * runs a GENUINE bb.js `verifyProof` over its single bundled sub-proof — the age-gate
+ * — in your tab. This is the honest fallback for devices/browsers where live PROVING
+ * (the expensive part) is too heavy: verify is cheap, and the bundled proof bytes are
+ * a real UltraHonk transcript (a tamper of any byte makes verify reject). It is NOT a
+ * fresh proof — it replays one captured proof and checks it live. The hidden age is
+ * not among the captured public inputs.
+ */
+export interface CapturedSubProof {
+  member: string;
+  relation: string;
+  proof: number[];
+  publicInputs: string[];
+}
+export interface CapturedManifest {
+  type: string;
+  note: string;
+  circuit: string;
+  capturedAt: string;
+  subProof: CapturedSubProof;
+}
+export interface VerifyResult {
+  /** True iff bb.js verified the captured sub-proof in-tab. */
+  verified: boolean;
+  member: string;
+  relation: string;
+  proofByteLength: number;
+  publicInputs: string[];
+  capturedAt: string;
+  verifyMs: number;
+  threads: number;
+}
+
 export interface ProofResult {
   /** The disclosed eligibility verdict (the only age-derived bit revealed). */
   eligible: boolean;
@@ -275,6 +312,45 @@ export async function proveAgeEligibility(age: number): Promise<ProofResult> {
     publicInputs: proof.publicInputs,
     verified,
     proveMs,
+    verifyMs,
+    threads,
+  };
+}
+
+/**
+ * [OPUS-4.8] sq-8dx2 — fetch the captured car-hire manifest and VERIFY its bundled
+ * sub-proof live in-tab with bb.js. The expensive proving was done ahead of time
+ * (`scripts/capture-zk-manifest.mjs`); this runs only the cheap verify, so it works on
+ * browsers/devices where live proving is too heavy. The proof bytes are a real
+ * UltraHonk transcript — a single flipped byte makes `verifyProof` return false, which
+ * is the honest "this is a real cryptographic check, not a mock" outcome. Throws on a
+ * fetch/parse failure (the caller surfaces it).
+ */
+export async function verifyCapturedManifest(): Promise<VerifyResult> {
+  const res = await fetch(`${basePath()}/zk/car-hire-manifest.json`);
+  if (!res.ok) throw new Error(`manifest fetch failed: ${res.status}`);
+  const manifest = (await res.json()) as CapturedManifest;
+  const sp = manifest.subProof;
+
+  const { backend, threads } = await loadProver();
+  const proofBytes = Uint8Array.from(sp.proof);
+
+  const t0 = performance.now();
+  // Same keccak-oracle flavour the proof was captured with — a mismatch would make a
+  // valid captured proof spuriously reject.
+  const verified = await backend.verifyProof(
+    { proof: proofBytes, publicInputs: sp.publicInputs },
+    PROOF_OPTIONS,
+  );
+  const verifyMs = performance.now() - t0;
+
+  return {
+    verified,
+    member: sp.member,
+    relation: sp.relation,
+    proofByteLength: proofBytes.length,
+    publicInputs: sp.publicInputs,
+    capturedAt: manifest.capturedAt,
     verifyMs,
     threads,
   };
