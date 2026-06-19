@@ -458,5 +458,53 @@ def test_open_missing_dir(tmp_path):
         sparq.Graph.open(tmp_path / "nope")
 
 
+# --- copy -------------------------------------------------------------------
+
+
+def test_copy_is_equal_but_independent():
+    graph = g()
+    c = graph.copy()
+    assert len(c) == len(graph) == 7
+    q = "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a } ORDER BY ?a"
+    assert c.query_json(q) == graph.query_json(q)
+    # Mutating the copy does NOT touch the original ...
+    c.update("INSERT DATA { <http://ex/dave> <http://ex/age> 40 }")
+    assert len(c) == 8 and len(graph) == 7
+    assert not graph.ask("PREFIX ex: <http://ex/> ASK { ex:dave ex:age 40 }")
+    # ... and mutating the original after copying does NOT touch the copy.
+    graph.update("INSERT DATA { <http://ex/erin> <http://ex/age> 50 }")
+    assert len(graph) == 8 and len(c) == 8
+    assert not c.ask("PREFIX ex: <http://ex/> ASK { ex:erin ex:age 50 }")
+
+
+def test_copy_reason_independent():
+    graph = sparq.Graph.load(RDFS_DATA)
+    c = graph.copy()
+    c.reason("rdfs")
+    q = "PREFIX ex: <http://ex/> ASK { ex:rex a ex:Animal }"
+    assert c.ask(q)          # entailment materialised on the copy
+    assert not graph.ask(q)  # original untouched by the copy's reasoning
+
+
+def test_copy_preserves_named_graphs():
+    nq = (
+        "<http://ex/a> <http://ex/p> <http://ex/b> .\n"
+        "<http://ex/c> <http://ex/p> <http://ex/d> <http://ex/g1> .\n"
+    )
+    graph = sparq.Graph.load(nq, format="nquads")
+    c = graph.copy()
+    assert len(c) == 1  # default graph
+    assert c.ask("ASK { GRAPH <http://ex/g1> { <http://ex/c> <http://ex/p> <http://ex/d> } }")
+
+
+def test_copy_has_fresh_text_index():
+    graph = g()
+    graph.build_text_index()           # force the original's index to exist
+    c = graph.copy()
+    # The copy lazily builds its own index; text search works on it independently.
+    hits = c.text_search("alic*")
+    assert any(h[0].value == "Alice" for h in hits)
+
+
 def test_version():
     assert isinstance(sparq.__version__, str) and sparq.__version__

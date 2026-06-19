@@ -104,6 +104,11 @@ g.query_text("""
     } ORDER BY DESC(?score)
 """)                                  # text: magic predicates inside plain SPARQL
 
+# A cheap, logically-independent copy (Arc-shared structural snapshot: O(pending
+# delta), not O(triples)). The original and the copy mutate separately.
+c = g.copy()
+c.update('INSERT DATA { <http://ex/dave> <http://ex/age> 40 }')   # only c changes
+
 # Persist / reopen with memory-mapped indexes (out-of-core path).
 g.save("./mydb")
 g4 = sparq.Graph.open("./mydb")
@@ -132,4 +137,8 @@ g4 = sparq.Graph.open("./mydb")
   `text:matchesAny` an OR, `*`-suffixed tokens match as prefixes, and
   `text:score` binds the BM25 score. Hits are frozen per call: the cached index
   is invalidated by every mutating call and lazily rebuilt.
+- `copy()` returns a logically-independent graph over the core's Arc-shared
+  structural snapshot (O(pending delta), not O(triples)); mutating either the
+  original or the copy leaves the other unchanged. Named graphs are copied; the
+  copy starts with no full-text index and lazily rebuilds its own.
 - Long-running calls (load, query, update, reason, text search) release the GIL.
