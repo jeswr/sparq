@@ -219,9 +219,16 @@ export const GROUPS: SurfaceGroup[] = [
         slug: "geosparql",
         href: "/surface/geosparql",
         title: "GeoSPARQL",
-        blurb: "geof: functions + R-tree GeoIndex with a map overlay.",
-        tier: "hosted",
+        blurb: "geof: functions + sf*/eh*/rcc8* + R-tree GeoIndex with a map overlay.",
+        // [OPUS-4.8] sq-ndaz: tier-e. sparq-geo is an opt-in native crate (the core engine
+        // + lean wasm bundle carry zero geometry code; the server exposes geof: only behind
+        // its non-default `geo` feature), and the static Pages site has no backend — so the
+        // honest surface is a captured-output walkthrough (the real London–Paris distance
+        // < 400 km query, within-polygon spatial join, topology-property rewrite, and R-tree
+        // GeoIndex metres, all answer-exact), not a live hosted endpoint.
+        tier: "walkthrough",
         icon: MapPin,
+        built: true,
       },
       {
         slug: "streaming-rsp",
