@@ -1,32 +1,38 @@
-# [OPUS-4.8] sq-2e93 — GUI CI lane: build / lint / typecheck the Tauri 2 GUI scaffold.
+# [OPUS-4.8] sq-2e93 / sq-bu69 — GUI CI lane: build / lint / typecheck / clippy the Tauri 2
+# GUI, now extended to the per-platform build+clippy MATRIX the design record specifies.
 #
 # WHY: the GUI design record (research/gui-design.md §3) calls for a PATH-SCOPED,
 # NON-merge-queue lane modelled on site-e2e.yml / js.yml. It validates the things a dev box
 # without the webview system libraries (webkit2gtk / WebView2 / WKWebView) cannot:
 #   1. the shared framework-agnostic TS client (packages/sparq-client) typechecks,
-#   2. the site still builds AND typechecks consuming that shared package,
-#   3. the Tauri crate (gui/src-tauri) compiles + clippies CLEAN against the real engine,
-#      with the webkit2gtk + friends system deps installed here.
+#   2. the site still builds AND typechecks (next lint + tsc) consuming that shared package,
+#   3. the Tauri crate (gui/src-tauri) compiles + clippies CLEAN against the real engine, on
+#      EVERY desktop platform the release matrix ships (macOS / Linux x64 + arm64 / Windows).
 #
-# SCOPE: PRs that touch gui/**, packages/**, or this workflow. A Rust-/docs-only PR skips it
-# (no run, so the required `ci-summary / gate` simply never waits on it — cross-workflow
-# `needs:` is impossible, exactly as documented in site-e2e.yml). It is NOT a `merge_group`
-# lane. Re-runs on push to main for post-merge cover.
+# SCOPE: PRs that touch gui/**, packages/sparq-client/**, or this workflow. A Rust-/docs-only
+# PR skips it (no run, so the required `ci-summary / gate` simply never waits on it —
+# cross-workflow `needs:` is impossible, exactly as documented in site-e2e.yml). It is NOT a
+# `merge_group` lane (ci-summary.yml never cross-workflow needs gui.yml). Re-runs on push to
+# main for post-merge cover.
 #
 # GATING vs ADVISORY (the `ci-summary / gate` aggregator polls EVERY check-run on the head
 # commit cross-workflow; it EXCLUDES only names matching the whole word `advisory`/
-# `informational`, so a job's NAME decides whether it gates):
+# `informational` — `\b(advisory|informational)\b` — so a job's NAME decides whether it
+# gates). [OPUS-4.8] This bit gui.yml once (PR #748): a per-platform job WITHOUT the token is
+# treated as GATING, and a macOS/Windows runner-image/webview flake would then break the
+# `ci-summary / gate` for EVERY PR. So:
 #   * "shared TS client typecheck" and "site build + typecheck (consuming @sparq/client)"
-#     are the load-bearing deliverable — they GATE (no excluded keyword in their names).
-#   * "Tauri crate build + clippy (Linux, advisory)" is ADVISORY: its name carries the
-#     `advisory` keyword so the aggregator excludes it, and `continue-on-error: true` keeps
-#     its result from ever failing `ci-summary`. The Tauri scaffold builds on LINUX only;
-#     the design's full per-platform (macOS/Windows) matrix is a later step, so a single
-#     Linux lane is the honest MVP and stays advisory until reliably green across the matrix
-#     (bead sq-var9 promotes it to a hard gate then). It DOES build green today (the earlier
-#     `unknown field "//"` tauri.conf.json failure — a JSON comment key rejected by
-#     tauri-build's deny_unknown_fields `build` table — was fixed in this change; that
-#     caveat now lives in gui/src-tauri/build.rs).
+#     are the load-bearing deliverable and are PROVEN green (Linux, TS-only) — they GATE (no
+#     excluded keyword in their names).
+#   * the per-platform Tauri "GUI build + clippy (…, advisory)" matrix and the
+#     "GUI tauri-driver e2e smoke (Linux, advisory)" job carry the `advisory` keyword so the
+#     aggregator excludes them, AND set `continue-on-error: true`, so a webview/runner-image
+#     flake on a platform we have not yet proven reliably green can never turn `ci-summary`
+#     red. The Linux rows (ubuntu-latest x64 + ubuntu-24.04-arm) build green today; the
+#     macOS/Windows rows and the tauri-driver harness are documented-untested in CI and stay
+#     advisory until proven across the full matrix — at which point bead sq-var9 drops the
+#     keyword + `continue-on-error` (and the maintainer adds gui to the branch-protection
+#     required-contexts, a `needs:user` repo-settings action) to PROMOTE them to a hard gate.
 #
 # Every action below is SHA-pinned (Scorecard Pinned-Dependencies); the lane is
 # least-privilege (contents: read).
@@ -36,20 +42,21 @@ on:
   pull_request:
     paths:
       - "gui/**"
-      - "packages/**"
+      - "packages/sparq-client/**"
       - ".github/workflows/gui.yml"
   push:
     branches: [main]
     paths:
       - "gui/**"
-      - "packages/**"
+      - "packages/sparq-client/**"
       - ".github/workflows/gui.yml"
 
 # Least-privilege default (Scorecard TokenPermissions): read-only; this lane never writes.
 permissions:
   contents: read
 
-# One in-flight run per PR/branch; cancel a superseded run (the Tauri build is expensive).
+# One in-flight run per PR/branch; cancel a superseded run (the per-platform Tauri build is
+# expensive — the design calls out cancel-in-progress for exactly this reason).
 concurrency:
   group: gui-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -139,26 +146,49 @@ jobs:
         working-directory: site
         run: npm run build
 
+  # [OPUS-4.8] sq-bu69 — per-platform Tauri build + clippy matrix.
+  #
+  # ADVISORY (see the header): every matrix row's NAME carries the `advisory` keyword, so the
+  # `ci-summary / gate` aggregator excludes the whole leg, and `continue-on-error: true` keeps
+  # a macOS/Windows webview or runner-image flake from ever turning `ci-summary` red. The
+  # Linux rows build green today (reproduced locally on arm64 with the same clippy/build/test
+  # commands); the macOS/Windows rows are documented-untested in CI this pass — they stay
+  # advisory until proven across the full matrix (bead sq-var9 promotes the leg to a hard
+  # gate then). The TS + site-build jobs above remain GATING.
+  #
+  # Runner labels are the EXACT set proven in release.yml's desktop build matrix
+  # (macos-14 = Apple silicon, macos-15-intel = Intel Mac, ubuntu-latest = x86_64 Linux,
+  # ubuntu-24.04-arm = aarch64 Linux, windows-latest = Windows) so the GUI CI matrix and the
+  # release matrix cannot drift. macOS/Windows ship their webview (WKWebView / WebView2) with
+  # the OS, so only the Linux rows install the webkit2gtk system libraries.
   tauri-build:
-    name: Tauri crate build + clippy (Linux, advisory)
-    runs-on: ubuntu-latest
-    # ADVISORY: the `advisory` keyword in `name:` makes the `ci-summary / gate` aggregator
-    # exclude this leg, and `continue-on-error: true` keeps a webview/runner-image flake on
-    # this Linux-only scaffold lane from ever turning `ci-summary` red. Promote to a hard
-    # gate (drop `continue-on-error` + the keyword) once reliably green across the full
-    # per-platform matrix — bead sq-var9. The TS + site-build jobs above remain GATING.
+    name: "GUI build + clippy (${{ matrix.label }}, advisory)"
+    runs-on: ${{ matrix.os }}
     continue-on-error: true
-    timeout-minutes: 40
+    timeout-minutes: 45
+    strategy:
+      # Do not let one platform's failure cancel the others — each row is independent
+      # diagnostic signal while the leg is advisory.
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, label: arm64-darwin }
+          - { os: macos-15-intel, label: x64-darwin }
+          - { os: ubuntu-latest, label: x64-linux }
+          - { os: ubuntu-24.04-arm, label: arm64-linux }
+          - { os: windows-latest, label: win-x64 }
     defaults:
       run:
         working-directory: gui/src-tauri
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # The Tauri webview system libraries (webkit2gtk + GTK/soup/appindicator). These are
-      # exactly what a typical dev box lacks, so the full `cargo build` of the GUI crate is
-      # validated HERE rather than locally.
-      - name: Install Tauri system dependencies
+      # The Tauri webview system libraries (webkit2gtk + GTK/soup/appindicator) are LINUX-ONLY:
+      # macOS (WKWebView) and Windows (WebView2) ship their webview with the OS, so the cargo
+      # build there needs no extra system packages. These are exactly what a typical Linux dev
+      # box lacks, so the full `cargo build` of the GUI crate is validated HERE.
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -181,7 +211,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             gui/src-tauri/target
-          key: gui-tauri-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock') }}
+          key: gui-tauri-${{ matrix.label }}-${{ hashFiles('gui/src-tauri/Cargo.lock') }}
 
       # clippy with -D warnings, inheriting the repo's lint bar. Builds against the real
       # engine path deps (sparq-engine / sparq-core).
@@ -195,3 +225,67 @@ jobs:
       # sparq-engine link and need no display server.
       - name: Test (engine command layer)
         run: cargo test
+
+  # [OPUS-4.8] sq-bu69 — tauri-driver (WebDriver) e2e smoke.
+  #
+  # ADVISORY + DOCUMENTED-UNTESTED. The design (§3 E2E) is explicit that Tauri's webview e2e
+  # uses tauri-driver (WebDriver), NOT Playwright's Chromium — so this is a NEW harness, not a
+  # reuse of site-e2e.yml. tauri-driver supports Linux (via WebKitWebDriver, headless under
+  # xvfb) and Windows (via Edge WebDriver); macOS has no WKWebView WebDriver, so the smoke is
+  # Linux-only. The full WebDriver test client + a launch-and-run-a-query assertion against the
+  # bundled shell is NOT wired this pass: a reliable headless tauri-driver run needs the site
+  # `out/` frontend bundle prebuilt, a matching tauri.conf `frontendDist`, WebKitWebDriver +
+  # tauri-driver pinned versions, and xvfb display plumbing — too much untested surface to ship
+  # as a green gate. This job therefore only SCAFFOLDS + DOCUMENTS the harness so the
+  # follow-up has a concrete starting point; the real launch+query assertion is tracked as a
+  # bead (see sq-var9). The `advisory` keyword excludes it from `ci-summary / gate` and
+  # `continue-on-error: true` makes its result strictly non-gating. Promote (drop both, add
+  # the real assertion) when reliably green.
+  tauri-e2e:
+    name: "GUI tauri-driver e2e smoke (Linux, advisory)"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: gui/src-tauri
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Tauri system dependencies (+ WebKitWebDriver, xvfb)
+        run: |
+          sudo apt-get update
+          # webkit2gtk-driver provides WebKitWebDriver, the WebDriver server tauri-driver
+          # proxies on Linux; xvfb gives the headless runner a virtual display for the webview.
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            webkit2gtk-driver \
+            xvfb
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      - name: Build the GUI shell (debug)
+        run: cargo build
+
+      # SCAFFOLD: prove the harness pieces resolve (the driver binary + WebKitWebDriver are on
+      # PATH and a virtual display starts). The real WebDriver session — start tauri-driver,
+      # connect a WebDriver client, launch the bundled shell, run a query, assert results — is
+      # the follow-up tracked in the bead; this step is a documented placeholder so the lane
+      # exists and stays honestly advisory rather than shipping a flaky green claim.
+      - name: tauri-driver harness smoke (documented-untested)
+        run: |
+          set -euo pipefail
+          echo "tauri-driver on PATH:"; command -v tauri-driver
+          echo "WebKitWebDriver on PATH:"; command -v WebKitWebDriver
+          # Confirm a virtual display starts (the env a real headless tauri-driver run needs).
+          xvfb-run --auto-servernum bash -c 'echo "xvfb display ready: $DISPLAY"'
+          echo "harness scaffold OK — real launch+query WebDriver assertion is a follow-up (see bead)."
