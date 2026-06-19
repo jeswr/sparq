@@ -1,96 +1,41 @@
-# Build hardware-tiered sparq-cli release binaries on NATIVE runners.
+# Build hardware-tiered sparq-cli binaries on NATIVE runners (the launcher's fat package
+# selects the right tier per host).
+#
+# [OPUS-4.8] sq-v286.2: the per-tier build matrix + build steps + per-tier SLSA attestation
+# are no longer inlined here. They live ONCE in the reusable workflow `build-matrix.yml`,
+# which this workflow invokes with `mode: binary` (bare per-tier binaries uploaded as
+# sparq-cli-<tier>). release.yml calls the same reusable workflow with `mode: archive`.
+#
+# Trigger: manual dispatch ONLY. The `tags: ["v*"]` push trigger has been REMOVED — it
+# double-built the binaries against release.yml (which also fires on `v*`). release.yml is now
+# the single tag-driven release entry point; dist.yml exists for ad-hoc/out-of-band tier
+# builds. This is research/release-ci-design.md §5 ("dist/release double-build ... Drop
+# dist.yml's tags: trigger (keep workflow_dispatch)") and §6 sequencing item 2.
 #
 # Each tier is compiled on a runner of its own architecture (no cross-toolchain needed),
-# which is the robust path: aarch64 builds on macos-14 (Apple silicon), x86-64 tiers on
-# ubuntu. Microarch tiers exist only where they pay off — see
-# research/hardware/optimization-findings.md (target-cpu=native is a NO-OP on Apple
-# silicon, so darwin ships a single binary).
-#
-# Triggers: version tags (v*) and manual dispatch only — never on ordinary pushes.
+# except win-arm64 which cross-links from the x64 Windows runner. Microarch tiers exist only
+# where they pay off - see research/hardware/optimization-findings.md (target-cpu=native is a
+# NO-OP on Apple silicon, so darwin ships a single binary).
 name: dist
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
-# [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions): the build matrix only
-# reads the repo and uploads artifacts (artifact upload needs no extra repo-scope token).
+# [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions). The called workflow's
+# matrix job needs the OIDC + attestation writes for SLSA provenance; the calling job below
+# grants them as the ceiling passed down to build-matrix.yml.
 permissions:
   contents: read
 
 jobs:
+  # sq-toze.23 (GX-9): the per-tier dist binaries the launcher's fat-package selects from carry
+  # SLSA build provenance (id-token: write signs the in-toto provenance; attestations: write
+  # pushes it to the GitHub store). Read-only on the repo otherwise (dist uploads workflow
+  # artifacts, it does not create a Release).
   build:
-    name: ${{ matrix.tier }}
-    runs-on: ${{ matrix.os }}
-    # [OPUS-4.8] sq-toze.23 (GX-9): the per-tier dist binaries the launcher's fat-package
-    # selects from must carry SLSA build provenance too — not only the release.yml archives.
-    # The OIDC token (`id-token: write`) is what Sigstore Fulcio signs the in-toto provenance
-    # with; `attestations: write` lets the run push the attestation to the GitHub store.
-    # Still read-only on the repo otherwise (no `contents: write`: dist uploads workflow
-    # artifacts, it does not create a Release).
     permissions:
       contents: read
       id-token: write
       attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # ---- Apple ----
-          # Apple silicon (M1–M4): ONE binary, no target-cpu (Darwin baseline already enables
-          # every Apple-silicon feature; native unlocks zero new instructions — measured).
-          - { tier: arm64-darwin,     os: macos-14,         target: aarch64-apple-darwin,      cpu: "",          ext: "" }
-          # Intel Macs: x86-64-v3 (every Intel Mac since ~2015 / Haswell has AVX2).
-          - { tier: x64-darwin,       os: macos-15-intel,   target: x86_64-apple-darwin,       cpu: x86-64-v3,   ext: "" }
-          # ---- x86-64 Linux (servers + the launcher's fat package) ----
-          # baseline (SSE2, runs anywhere) + v2 (SSE4.2, ~2009+) + v3 (AVX2/BMI2/FMA, common
-          # modern) + v4 (AVX-512, newest). The launcher picks by /proc/cpuinfo.
-          - { tier: x64-baseline,     os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64,      ext: "" }
-          - { tier: x64-v2,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v2,   ext: "" }
-          - { tier: x64-v3,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v3,   ext: "" }
-          - { tier: x64-v4,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v4,   ext: "" }
-          # Generic aarch64 Linux (Graviton/Ampere servers, Raspberry Pi 4+): neoverse-n1 + LSE.
-          - { tier: arm64-linux,      os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, cpu: neoverse-n1, ext: "" }
-          # ---- Windows (the largest consumer desktop platform) ----
-          - { tier: win-x64-baseline, os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64,      ext: ".exe" }
-          - { tier: win-x64-v3,       os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64-v3,   ext: ".exe" }
-          # Windows on ARM (Surface Pro X, Snapdragon X Elite) — cross-compiled from the x64 runner.
-          - { tier: win-arm64,        os: windows-latest,   target: aarch64-pc-windows-msvc,   cpu: "",          ext: ".exe" }
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust + target
-        shell: bash
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }}
-      # [OPUS-4.8] sq-toze.23 (GX-9): mirror release.yml#package — cargo-auditable embeds
-      # the resolved dependency manifest INTO the binary so the dist artifact is self-describing
-      # for post-build audit (`cargo audit bin <file>`), matching the attested release archives.
-      - name: Install cargo-auditable
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
-        with:
-          tool: cargo-auditable
-      - name: Build (${{ matrix.cpu || 'default-cpu' }})
-        shell: bash
-        run: |
-          FLAGS=""
-          [ -n "${{ matrix.cpu }}" ] && FLAGS="-Ctarget-cpu=${{ matrix.cpu }}"
-          [ "${{ matrix.tier }}" = "arm64-linux" ] && FLAGS="$FLAGS -Ctarget-feature=+lse"
-          # `cargo auditable build` is a drop-in for `cargo build`; `--locked` pins the
-          # materials (Cargo.lock) so the build is fully described — same as release.yml.
-          RUSTFLAGS="$FLAGS" cargo auditable build --release --locked -p sparq-cli --target ${{ matrix.target }}
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}"
-      # [OPUS-4.8] sq-toze.23 (GX-9): SLSA build provenance over the per-tier dist binary.
-      # Same mechanism as release.yml#package — actions/attest-build-provenance emits a
-      # signed in-toto SLSA provenance predicate binding the binary's digest to this workflow
-      # run (Sigstore Fulcio cert keyed to the GitHub OIDC identity; Rekor inclusion proof).
-      # Verify with: gh attestation verify dist/sparq-cli-<tier> --repo <owner>/sparq
-      - name: Attest build provenance (dist binary)
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
-        with:
-          subject-path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sparq-cli-${{ matrix.tier }}
-          path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
+    uses: ./.github/workflows/build-matrix.yml
+    with:
+      mode: binary

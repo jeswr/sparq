@@ -1,17 +1,17 @@
 # GitHub Release pipeline (T20): tag `vX.Y.Z` -> build, package, checksum, release, docker.
 #
-# DESIGN: this workflow is SELF-CONTAINED — it duplicates dist.yml's build matrix instead of
-# `workflow_call`-ing it, for two reasons:
-#   1. dist.yml has no `workflow_call` trigger and adding one means editing a file another
-#      work-thread owns; a reusable-workflow refactor is a deliberate follow-up, not a hidden
-#      edit. Until then the matrices MUST be kept in sync by hand (both carry this note's
-#      tier table; see dist.yml for the per-tier rationale).
-#   2. Release artifacts have a different shape from dist artifacts: versioned archives
-#      (tar.gz / zip) containing the binary + README + LICENSE + CHANGELOG, plus a SHA256SUMS
-#      manifest — not dist's bare per-tier binaries.
-# Both workflows currently fire on tags; that double-builds the binaries. Harmless but
-# wasteful — once this lands, the maintainer can drop the `tags` trigger from dist.yml
-# (keeping its workflow_dispatch for ad-hoc builds). See docs/release.md.
+# [OPUS-4.8] sq-v286.2: the per-hardware-tier build matrix is no longer inlined here. It is
+# defined ONCE in the reusable workflow `build-matrix.yml` and invoked below with
+# `mode: archive` (the `package` job is a `workflow_call`). release.yml remains THE entry point
+# for cutting a release (it fires on a `v*` tag and is the path the release-plz tag flow will
+# drive — research/release-ci-design.md §6 item 4); dist.yml is now dispatch-only and calls the
+# same reusable matrix with `mode: binary`. This ends the hand-synced double-matrix +
+# double-build the design record flags (§5 "Reuse, do not duplicate"; §6 item 2 "Unify the
+# duplicated build matrix via workflow_call; drop dist.yml's tags trigger").
+#
+# Release artifacts keep their distinct shape vs dist's bare binaries: versioned archives
+# (tar.gz / zip) containing the binary + README + LICENSE + CHANGELOG, plus a SHA256SUMS
+# manifest — produced by the reusable workflow's `archive` mode + the `release` job below.
 #
 # Triggers: version tags only. NO schedule, NO pull_request — releasing is a deliberate act.
 name: release
@@ -25,98 +25,21 @@ permissions:
   contents: read
 
 jobs:
-  # ---- 1. build + package per hardware tier (mirror of dist.yml's matrix) ----
+  # ---- 1. build + package per hardware tier ----
+  # [OPUS-4.8] sq-v286.2: invoke the shared reusable matrix in `archive` mode. The 10-tier
+  # runner-label matrix + build steps + the sq-zqq6 SLSA archive attestation all live in
+  # build-matrix.yml now (single source of truth); this caller only selects the artifact shape.
+  # The reusable workflow's matrix job attests + uploads `pkg-<tier>`; the `release` job below
+  # consumes those artifacts. `permissions:` here is the ceiling passed down to the called
+  # workflow — it must grant the OIDC + attestation writes the attestation step needs.
   package:
-    name: package ${{ matrix.tier }}
-    runs-on: ${{ matrix.os }}
-    # [OPUS-4.8] sq-zqq6: build-provenance attestation over the packaged archives
-    # needs the OIDC token + attestation write. Read-only otherwise.
     permissions:
       contents: read
       id-token: write
       attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # ---- Apple ----
-          # Apple silicon (M1–M4): ONE binary, no target-cpu (Darwin baseline already enables
-          # every Apple-silicon feature — measured; see research/hardware/optimization-findings.md).
-          - { tier: arm64-darwin,     os: macos-14,         target: aarch64-apple-darwin,      cpu: "",          ext: "" }
-          # Intel Macs: x86-64-v3 (every Intel Mac since ~2015 / Haswell has AVX2).
-          # Deliberate divergence from dist.yml: its macos-13 label has been retired by
-          # GitHub; macos-*-intel is the supported Intel runner line (dist.yml needs the
-          # same fix — flagged in docs/release.md, not edited here).
-          - { tier: x64-darwin,       os: macos-15-intel,   target: x86_64-apple-darwin,       cpu: x86-64-v3,   ext: "" }
-          # ---- x86-64 Linux ----
-          # baseline (SSE2) + v2 (SSE4.2) + v3 (AVX2/BMI2/FMA) + v4 (AVX-512).
-          - { tier: x64-baseline,     os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64,      ext: "" }
-          - { tier: x64-v2,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v2,   ext: "" }
-          - { tier: x64-v3,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v3,   ext: "" }
-          - { tier: x64-v4,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v4,   ext: "" }
-          # Generic aarch64 Linux (Graviton/Ampere, Raspberry Pi 4+): neoverse-n1 + LSE.
-          - { tier: arm64-linux,      os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, cpu: neoverse-n1, ext: "" }
-          # ---- Windows ----
-          - { tier: win-x64-baseline, os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64,      ext: ".exe" }
-          - { tier: win-x64-v3,       os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64-v3,   ext: ".exe" }
-          # Windows on ARM — cross-compiled from the x64 runner.
-          - { tier: win-arm64,        os: windows-latest,   target: aarch64-pc-windows-msvc,   cpu: "",          ext: ".exe" }
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust + target
-        shell: bash
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }}
-      # [OPUS-4.8] sq-toze.8 (GX-7): cargo-auditable embeds the exact dependency
-      # manifest (versions + sources) INTO the released binary, so the shipped artifact
-      # is self-describing for post-build audit (`cargo audit bin <file>` / `auditable
-      # info <file>`). Negligible size cost; no runtime overhead.
-      - name: Install cargo-auditable
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
-        with:
-          tool: cargo-auditable
-      - name: Build (${{ matrix.cpu || 'default-cpu' }})
-        shell: bash
-        run: |
-          FLAGS=""
-          [ -n "${{ matrix.cpu }}" ] && FLAGS="-Ctarget-cpu=${{ matrix.cpu }}"
-          [ "${{ matrix.tier }}" = "arm64-linux" ] && FLAGS="$FLAGS -Ctarget-feature=+lse"
-          # `cargo auditable build` is a drop-in for `cargo build` that embeds the dep
-          # manifest into the binary (GX-7); same flags, same output path.
-          RUSTFLAGS="$FLAGS" cargo auditable build --release --locked -p sparq-cli --target ${{ matrix.target }}
-      - name: Package (binary + README + LICENSE + CHANGELOG)
-        shell: bash
-        run: |
-          PKG="sparq-cli-${GITHUB_REF_NAME}-${{ matrix.tier }}"
-          mkdir -p "pkg/$PKG"
-          cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "pkg/$PKG/"
-          cp README.md "pkg/$PKG/"
-          # LICENSE is copied when present (license = MIT is declared in Cargo.toml; adding
-          # the LICENSE file itself is on the pre-release checklist in docs/release.md).
-          if [ -f LICENSE ]; then cp LICENSE "pkg/$PKG/"; fi
-          if [ -f CHANGELOG.md ]; then cp CHANGELOG.md "pkg/$PKG/"; fi
-          cd pkg
-          case "${{ matrix.tier }}" in
-            win-*) 7z a "$PKG.zip" "$PKG" ;;
-            *)     tar czf "$PKG.tar.gz" "$PKG" ;;
-          esac
-      # [OPUS-4.8] sq-zqq6: SLSA build provenance over the packaged archives.
-      # Generates a signed attestation (Sigstore) binding each archive's digest
-      # to this workflow run; verifiable with `gh attestation verify <file>`.
-      - name: Attest build provenance (archives)
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
-        with:
-          subject-path: |
-            pkg/*.tar.gz
-            pkg/*.zip
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: pkg-${{ matrix.tier }}
-          path: |
-            pkg/*.tar.gz
-            pkg/*.zip
-          if-no-files-found: error
+    uses: ./.github/workflows/build-matrix.yml
+    with:
+      mode: archive
 
   # ---- 1b. per-release CycloneDX SBOM + VEX ----
   # [OPUS-4.8] sq-toze.3 (GX-2): emit a CycloneDX SBOM for each released binary plus a VEX
