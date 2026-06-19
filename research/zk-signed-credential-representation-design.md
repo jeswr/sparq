@@ -43,7 +43,7 @@ measured exception to the never-hash-strings-in-circuit house rule").
 
 `sparq-zk` commits every term **off-circuit** (`crates/sparq-zk/src/encode.rs:46-62`):
 
-```
+```text
 Enc_t(term) = h2(type_code, h_s(value))
 ```
 
@@ -149,7 +149,7 @@ a new **value lane** is added for the typed-value-bearing literals.
 
 For a typed literal `l` with datatype IRI `dt` and a canonical typed value `v`:
 
-```
+```text
 Enc_str(l) = h2(TYPE_CODE_LITERAL, blake3(canonical_token))           // UNCHANGED — encode.rs:52-55
 Enc_val(l) = h2(TYPE_CODE_TYPED_VALUE, h3(VALUE_DOMAIN, v_field, dt_field))
 ```
