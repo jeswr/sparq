@@ -111,6 +111,11 @@ jobs:
         run: cargo install wasm-pack --locked
 
       # Build the lean wasm bundle (crates/sparq-wasm → js/wasm) that the live REPL loads.
+      # [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: `js/` is now a workspace member and the
+      # per-member lock was dropped; this `npm ci` (run in js/) installs the js member's closure
+      # FROM the repo-root `package-lock.json`. wasm-pack is already on PATH (installed above), so
+      # js/'s `prepare` git-pin build is satisfied. `npm run build:wasm` then (re)builds the lean
+      # bundle explicitly, exactly as before — the export tree this produces is unchanged.
       - name: Build sparq wasm bundle
         working-directory: js
         run: |
@@ -162,6 +167,13 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/typst" --version
 
+      # [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: `site/` is a workspace member; this
+      # `npm ci` (run in site/) installs the site member's dependency closure FROM the repo-root
+      # `package-lock.json` (no per-member lock anymore). It does NOT re-run js/'s wasm `prepare`
+      # (a member-dir `npm ci` installs only that member's closure), so the wasm bundle built in
+      # the step above is preserved. `npm run build` then runs prebuild (sync js/wasm →
+      # site/public/wasm + build papers) and `next build` → out/ with basePath /sparq, exactly as
+      # before — the migration changes only WHERE deps resolve from, not the produced out/ tree.
       - name: Build static site
         working-directory: site
         run: |

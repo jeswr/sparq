@@ -80,6 +80,11 @@ jobs:
         with:
           node-version: 22
 
+      # [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: packages/sparq-client is a workspace
+      # member and the per-member lock was dropped. `npm install` (run in packages/sparq-client)
+      # resolves the member's deps via the repo-root workspace, installing into the hoisted root
+      # node_modules; the typecheck then runs against that tree. (This lane uses `npm install`,
+      # not `npm ci`, so it is tolerant of a not-yet-regenerated lock — unchanged behaviour.)
       - name: Install dependencies
         run: npm install
 
