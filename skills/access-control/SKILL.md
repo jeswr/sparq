@@ -210,9 +210,11 @@ scenario runner over this crate's own ACP engine (`materialize_acp` +
 table of expected `(agent, client, mode, resource) → Allow | Deny` decisions — and the
 harness asserts the engine reproduces every expected decision, reporting **all** mismatches
 at once. The module is **always compiled** (no feature gate; it depends only on the
-always-present ACP path). The scenario corpus that consumes it lives in
-`crates/sparq-solid/tests/conformance_acp.rs` (12 scenarios / 40 decisions, plus a negative
-control asserting a wrong expectation is *reported*, not panicked).
+always-present ACP path). The scenario corpus is a single reusable source in
+`crates/sparq-solid/tests/common/` (`common::acp_corpus()`, 12 scenarios / 40 decisions),
+consumed by `crates/sparq-solid/tests/conformance_acp.rs` (the parity test, plus a negative
+control asserting a wrong expectation is *reported*, not panicked) so a second test target —
+the differential oracle (`sq-t58w.7`) — can run the IDENTICAL scenarios without copy-paste.
 
 What it is — and is NOT (honest scope, mirrors the module/README/`research/sparq-solid-scope.md` §4):
 
@@ -264,9 +266,12 @@ table-driven scenario runner, but over this crate's **WAC** engine (`materialize
 semantics. A scenario is an `.acl`-document corpus (`AclBuilder`) plus a table of expected
 `(agent, client, mode, resource) → Allow | Deny` decisions; the harness asserts the engine
 reproduces every one, reporting all mismatches at once. Always compiled (no feature gate).
-The corpus lives in `crates/sparq-solid/tests/conformance_wac.rs` (12 scenarios / 40+
-decisions, a `run_via_podstore` parity test over the full `PodStore` method-form path, and a
-negative control). The honest-scope caveats are **identical** to the ACP harness's (library
+The corpus is a single reusable source in `crates/sparq-solid/tests/common/`
+(`common::wac_corpus()`, 12 scenarios / 40+ decisions), consumed by
+`crates/sparq-solid/tests/conformance_wac.rs` (the parity test, a `run_via_podstore` parity
+test over the full `PodStore` method-form path, and a negative control) and reusable by a
+second test target — the differential oracle (`sq-t58w.7`) — without copy-paste. The
+honest-scope caveats are **identical** to the ACP harness's (library
 decision parity, NOT a normative-CTH pass; CTH-over-HTTP out-of-scope; CSS differential oracle
 research-open).
 
