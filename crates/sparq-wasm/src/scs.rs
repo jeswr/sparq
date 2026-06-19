@@ -73,9 +73,11 @@ impl Store {
         // REUSE the existing engine-writer path: wrap the shapes graph in a throwaway
         // Store and emit it through `Store::serialize` (the #900/#923 serializer),
         // rather than rolling a second serialiser. Pretty Turtle, 2-space indent,
-        // prefixes on — the readable default a UI can show straight away.
+        // abbreviate on; `prefixes = None` ([OPUS-4.8] sq-l5kr serialize signature)
+        // selects the engine's well-known defaults — the readable default a UI can
+        // show straight away, byte-for-byte the prior 4-arg default-prefix output.
         let shapes_store = Store { graph };
-        shapes_store.serialize("turtle", true, Some("  ".to_string()), true)
+        shapes_store.serialize("turtle", true, Some("  ".to_string()), true, None)
     }
 }
 
@@ -151,7 +153,7 @@ shapeClass ex:Person {
         let shapes = parse_scs_to_graph(SCS, DEFAULT_BASE).unwrap();
         let via_store = Store { graph: shapes };
         let store_ttl = via_store
-            .serialize("turtle", true, Some("  ".to_string()), true)
+            .serialize("turtle", true, Some("  ".to_string()), true, None)
             .unwrap();
         let via_engine = graph_to_turtle_pretty_with(
             &via_store.graph,
