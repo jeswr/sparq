@@ -122,6 +122,26 @@ fn void_export_runs_on_wasm() {
     assert!(with_cs.contains("http://sparq.dev/ns/cs#CharacteristicSet"));
 }
 
+/// [OPUS-4.8] sq-bde: the SHACL node-shape export (`to_shacl`) runs on wasm and emits a
+/// node shape per characteristic set with property shapes for its predicates.
+#[wasm_bindgen_test]
+fn shacl_export_runs_on_wasm() {
+    let ix = Introspection::build(&graph());
+    let shacl = ix.to_shacl();
+    // One sh:NodeShape per retained characteristic set.
+    let node_shapes = shacl
+        .matches("<http://www.w3.org/ns/shacl#NodeShape>")
+        .count();
+    assert_eq!(node_shapes, ix.characteristic_sets.sets.len());
+    assert!(node_shapes > 0);
+    // foaf:Person is universal to the two-Person set, so it targets at least one shape.
+    assert!(shacl.contains("http://www.w3.org/ns/shacl#targetClass"));
+    assert!(shacl.contains("http://xmlns.com/foaf/0.1/Person"));
+    // Property shapes carry sh:path + sh:minCount for the set's predicates.
+    assert!(shacl.contains("http://www.w3.org/ns/shacl#path"));
+    assert!(shacl.contains("http://www.w3.org/ns/shacl#minCount"));
+}
+
 /// The planner-facing id-space accessor (`characteristic_set_ids`) runs on wasm and its
 /// subject counts agree with the IRI-resolved table's distinct-set count.
 #[wasm_bindgen_test]
