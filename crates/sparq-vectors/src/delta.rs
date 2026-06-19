@@ -33,14 +33,14 @@
 //!
 //! A delta is only meaningful against the graph generation it was built against — the ids it
 //! appends/tombstones are that generation's dictionary ids. A [`VectorDelta`] therefore carries
-//! the [`Fingerprint`] of the graph it targets, and [`VectorStore::apply_delta`] REJECTS a delta
+//! the [`Fingerprint`] of the graph it targets, and [`VectorStore::apply_delta`](crate::store::VectorStore::apply_delta) REJECTS a delta
 //! whose generation does not match the base store's bound fingerprint (gate: a delta tied to
 //! generation N applied to a base of generation M ≠ N is an error, not a silent mis-key). This
 //! reuses the sq-32i5 header fingerprint rather than inventing a second staleness mechanism.
 //!
 //! # Scope (honest boundary)
 //!
-//! The delta is **in-RAM only**: it lives on the open [`VectorStore`] handle and is lost when the
+//! The delta is **in-RAM only**: it lives on the open [`VectorStore`](crate::store::VectorStore) handle and is lost when the
 //! handle is dropped (the base `.spqv` on disk is unchanged until
 //! [`compact`](crate::store::VectorStore::compact) writes a new one). A *persisted* delta sidecar
 //! (its own on-disk format, crash-durable across process restarts) is tracked as a follow-up — see
@@ -65,7 +65,7 @@ use sparq_core::dict::Id;
 #[derive(Clone, Debug, Default)]
 pub struct VectorDelta {
     /// The graph generation this delta targets, or `None` for a delta over a store with no base
-    /// fingerprint. [`VectorStore::apply_delta`] checks it against the receiving store.
+    /// fingerprint. [`VectorStore::apply_delta`](crate::store::VectorStore::apply_delta) checks it against the receiving store.
     pub(crate) generation: Option<Fingerprint>,
     /// `id → vector` for vectors added or updated since the base; SHADOWS the base for a shared id.
     pub(crate) appended: FxHashMap<Id, Vec<f32>>,
