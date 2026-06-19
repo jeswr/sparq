@@ -27,9 +27,11 @@ fn acp_conformance_corpus_decision_parity() {
 
     let mut failures = String::new();
     let mut total_decisions = 0usize;
+    let mut fail = 0usize;
     for r in &reports {
         total_decisions += r.checked();
         if !r.passed() {
+            fail += 1;
             failures.push_str(&r.to_string());
         }
     }
@@ -38,8 +40,20 @@ fn acp_conformance_corpus_decision_parity() {
         "ACP conformance mismatch(es) across {} scenarios / {total_decisions} decisions:\n{failures}",
         reports.len(),
     );
+    // [OPUS-4.8] sq-t58w.6 — the RATCHET line. The corpus move into `tests/common`
+    // dropped the stdout summary the `solid-conformance` CI job greps; restore it in
+    // the SHACL/geo runner shape (`pass N / fail M (floor F)`) so the belt-and-braces
+    // grep gate re-checks the scenario count. `pass` is the count of passing scenarios
+    // over the full corpus, so `>= floor` holds. KEEP this exact format — the CI grep
+    // (`.github/workflows/ci.yml`) matches `ACP scenarios pass [0-9]+ / fail`.
+    let pass = reports.len() - fail;
+    println!("ACP scenarios pass {pass} / fail {fail} (floor {ACP_SCENARIO_FLOOR})");
     // Guard against a corpus that silently checks nothing.
     assert_eq!(reports.len(), ACP_SCENARIO_FLOOR, "expected 12 scenarios");
+    assert!(
+        pass >= ACP_SCENARIO_FLOOR,
+        "ACP conformance scenario count regressed: {pass} < floor {ACP_SCENARIO_FLOOR}"
+    );
     assert!(
         total_decisions >= 35,
         "expected a substantive decision table, got {total_decisions}"
