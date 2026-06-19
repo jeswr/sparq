@@ -34,7 +34,11 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   json (`--format`), CONSTRUCT/DESCRIBE as N-Triples.
 - **`build` / `query-mmap`** — build an on-disk index once, then query it memory-mapped
   without loading the dataset into RAM.
-- **`bench`** — run a directory of `*.rq` queries N times each, one TSV timing line per query.
+- **`bench` / `bench-mmap`** — run a directory of `*.rq` queries N times each, one TSV timing
+  line per query. Pass `--json <path>` to ALSO write the per-query results (`name` / `rows` /
+  `min_micros`, min-of-iters) to `<path>` as a machine-readable JSON document (the
+  structured-benchmark-catalog shape); the STDOUT TSV is unchanged. Measured numbers are
+  whatever the running host reports and are non-canonical — never commit them.
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
 - **Transparent decompression** — `.gz` / `.bz2` / `.zst` inputs detected by content.
   The gzip path defaults to the pure-Rust `miniz_oxide` backend; the opt-in, native-only
