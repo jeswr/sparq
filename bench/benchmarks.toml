@@ -547,13 +547,19 @@ status      = "ok"
 # ZK — commitment pipeline, trace seam, circuit gate counts, prove/verify
 # =============================================================================
 
+# [OPUS-4.8] sq-5o5.1 — the `source` names crates/sparq-zk/ explicitly because this
+# standalone criterion project links it as a path dependency (bench/zk/Cargo.toml:
+# `sparq-zk = { path = "../../crates/sparq-zk" }`) and measures its commitment
+# pipeline. That crate-under-test path is what makes this bench COUNT as sparq-zk's
+# registered coverage (drift-scan.py::crate_has_registered_bench / gate-new-crate G1
+# match `source = … crates/<crate>/`); without it sparq-zk false-flagged bench-missing.
 [[benchmark]]
 id          = "zk-commit-throughput"
 name        = "sparq-zk commitment-pipeline criterion bench"
 category    = "zk"
 measures    = "triples/s + mean time: RDFC10 canon (iri/bnode x 64/256/1024), end-to-end commit, leaves+fold, Poseidon2 permutation + hash40"
 invoke      = "cd bench/zk && cargo bench"
-source      = "bench/zk/{Cargo.toml,README.md}, benches/zk_throughput.rs (groups: canon, commit, poseidon2)"
+source      = "bench/zk/{Cargo.toml,README.md}, benches/zk_throughput.rs (groups: canon, commit, poseidon2); crate under test crates/sparq-zk/ (linked via bench/zk/Cargo.toml path dep)"
 dataset     = "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain)"
 quiet_box_sensitive = true
 pinning     = "standalone cargo project (own workspace), fat LTO release profile; baseline recorded 2026-06-13 fanless M1"
@@ -573,13 +579,21 @@ pinning     = "standalone cargo project; sparq-engine built WITH the non-default
 records_to  = "criterion output; baseline table in bench/zk-trace/README.md"
 status      = "ok"
 
+# [OPUS-4.8] sq-5o5.1 — the `source` names crates/sparq-zk-compose/ explicitly: the
+# member set this bench gates is READ from that crate's regression snapshot
+# (gate_counts.sh derives MEMBERS from crates/sparq-zk-compose/tests/gate_count_snapshot.json,
+# the same source the in-crate gate_count_regression test baselines against), so this
+# bench is the registered gate-count coverage for the sparq-zk-compose prover crate.
+# That crate-under-test path is what makes it COUNT as sparq-zk-compose's coverage
+# (drift-scan.py::crate_has_registered_bench / gate-new-crate G1 match
+# `source = … crates/<crate>/`); without it sparq-zk-compose false-flagged bench-missing.
 [[benchmark]]
 id          = "zk-compose-gates"
 name        = "zk/compose circuit gate counts (bb gates)"
 category    = "zk"
 measures    = "ultra_honk circuit_size (gate count) per circuit-family member; ground-truth per noir-optimisation skill"
 invoke      = "bench/zk-compose/scripts/gate_counts.sh > bench/zk-compose/gate_counts_latest.json"
-source      = "bench/zk-compose/scripts/gate_counts.sh, README.md; circuits in zk/compose/"
+source      = "bench/zk-compose/scripts/gate_counts.sh, README.md; circuits in zk/compose/; member set read from crates/sparq-zk-compose/tests/gate_count_snapshot.json (crate under test)"
 dataset     = "compiled Noir circuits (nargo compile --workspace); no external data"
 quiet_box_sensitive = false  # gate counts are deterministic given toolchain
 pinning     = "nargo 1.0.0-beta.21, bb 5.0.0-nightly.20260324; members list fixed in script"
