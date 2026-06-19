@@ -10,6 +10,7 @@ import {
   Table2,
   Braces,
   Download,
+  PlugZap,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -51,6 +52,9 @@ import {
 } from "@/components/repl-datasets";
 // [OPUS-4.8] sq-n5aw — the syntax-highlighting SPARQL editor replaces the plain <textarea>.
 import { SparqlEditor } from "@/components/sparql-editor";
+// [OPUS-4.8] sq-2mke — endpoint mode: the Connect panel + the SPARQL 1.1 Protocol client.
+import { ConnectPanel } from "@/components/connect-panel";
+import { type EndpointConfig, runEndpointQuery } from "@sparq/client";
 
 // [OPUS-4.8] sq-vfbm — the REPL now dispatches across the whole lean-bundle query
 // surface, so the result state carries one variant per shape of answer: a solution
@@ -62,7 +66,15 @@ type RunState =
   | { kind: "select"; results: SparqlResults; ms: number }
   | { kind: "boolean"; value: boolean; ms: number }
   | { kind: "graph"; ntriples: string; triples: number; ms: number }
-  | { kind: "update"; sizeBefore: number; sizeAfter: number; ms: number }
+  // [OPUS-4.8] sq-2mke — `endpoint` marks an update applied to a REMOTE server (no
+  // before/after in-tab count), so the result copy stays honest about which store mutated.
+  | {
+      kind: "update";
+      sizeBefore: number;
+      sizeAfter: number;
+      ms: number;
+      endpoint?: boolean;
+    }
   | { kind: "explain"; plan: string; analyze: boolean; ms: number }
   | { kind: "error"; message: string };
 
@@ -92,6 +104,16 @@ export function Repl() {
     DEFAULT_DATASET.id,
   );
   const storeRef = React.useRef<WasmStore | null>(null);
+
+  // [OPUS-4.8] sq-2mke — endpoint mode. When `endpointActive`, queries route to a running
+  // SPARQL 1.1 Protocol endpoint over the shared `@sparq/client` HTTP client instead of the
+  // in-tab WASM store. The config (URL + optional bearer token) is lifted here so `run()`
+  // can dispatch on it; the Connect panel owns the form + safety UX.
+  const [endpointActive, setEndpointActive] = React.useState(false);
+  const [endpointConfig, setEndpointConfig] = React.useState<EndpointConfig>({
+    url: "http://127.0.0.1:3030/sparql",
+    token: "",
+  });
 
   // Build (or rebuild) the store from RDF text + format. Centralises error handling so
   // every load path (default, picker, upload, URL) reports failures the same way.
@@ -149,12 +171,64 @@ export function Repl() {
     return store;
   }, [buildStore]);
 
+  // [OPUS-4.8] sq-2mke — endpoint-mode execution path. Routes the SAME editor text to the
+  // configured SPARQL 1.1 Protocol endpoint over the shared `@sparq/client` HTTP client.
+  // The form is classified to the four wire shapes (SELECT / ASK / CONSTRUCT-DESCRIBE /
+  // Update) and the response parsed accordingly. EXPLAIN / ANALYZE are NOT routed here —
+  // they are an in-tab planner introspection, so those modes stay WASM-only (the UI grays
+  // them in endpoint mode). The bearer token is sent only in the Authorization header by
+  // the client; it is never logged or echoed by the REPL.
+  const runEndpoint = React.useCallback(async () => {
+    setState({ kind: "running" });
+    const t0 = performance.now();
+    const result = await runEndpointQuery(endpointConfig, sparql);
+    const ms = performance.now() - t0;
+    switch (result.kind) {
+      case "select":
+        setState({ kind: "select", results: result.results, ms });
+        return;
+      case "boolean":
+        setState({ kind: "boolean", value: result.value, ms });
+        return;
+      case "graph": {
+        const trimmed = result.ntriples.trim();
+        const triples = trimmed === "" ? 0 : trimmed.split("\n").length;
+        setState({ kind: "graph", ntriples: trimmed, triples, ms });
+        return;
+      }
+      case "update":
+        // The endpoint owns the dataset; we cannot read a before/after size cheaply, so
+        // surface the server's 204 acknowledgement honestly without inventing a count.
+        setState({
+          kind: "update",
+          sizeBefore: 0,
+          sizeAfter: 0,
+          ms,
+          endpoint: true,
+        });
+        return;
+    }
+  }, [endpointConfig, sparql]);
+
   // [OPUS-4.8] sq-vfbm — dispatch across the whole lean-bundle query surface. EXPLAIN /
   // ANALYZE modes render the planner's plan text (every form for EXPLAIN; SELECT/ASK for
   // ANALYZE). Otherwise we classify the SPARQL form and route to the matching wasm export:
   // SELECT/ASK -> query (JSON), CONSTRUCT/DESCRIBE -> queryQuads (N-Triples), and an Update
   // keyword -> updateInPlace (mutates the in-tab store; we re-count the dataset after).
   const run = React.useCallback(async () => {
+    // [OPUS-4.8] sq-2mke — when endpoint mode is active, the query runs on the remote
+    // server, not the in-tab store. EXPLAIN / ANALYZE remain a WASM-only planner view, so
+    // a "run" in endpoint mode always executes the query (the mode tabs are grayed).
+    if (endpointActive) {
+      try {
+        await runEndpoint();
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        setState({ kind: "error", message });
+        toast.error("Endpoint query failed", { description: message });
+      }
+      return;
+    }
     try {
       const store = await ensureStore();
       const form = classifyQueryForm(sparql);
@@ -206,7 +280,7 @@ export function Repl() {
         description: message,
       });
     }
-  }, [ensureStore, sparql, mode]);
+  }, [ensureStore, sparql, mode, endpointActive, runEndpoint]);
 
   // Switch to a built-in dataset: reload the store, reset the count + active descriptor.
   const selectBuiltin = React.useCallback(
@@ -289,6 +363,13 @@ export function Repl() {
     if (!modeSupportsForm(mode, form)) setMode("run");
   }, [mode, form]);
 
+  // [OPUS-4.8] sq-2mke — EXPLAIN / ANALYZE are an in-tab planner introspection (they call
+  // the WASM `explain`/`explainAnalyze`), so in endpoint mode they are unavailable; snap
+  // back to "run" so the next click executes the query against the endpoint.
+  React.useEffect(() => {
+    if (endpointActive && mode !== "run") setMode("run");
+  }, [endpointActive, mode]);
+
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
@@ -297,30 +378,56 @@ export function Repl() {
           Live SPARQL REPL
         </CardTitle>
         <div className="flex items-center gap-2">
-          <EngineIndicator engine={engine} />
-          {size !== null && (
-            <button
-              type="button"
-              onClick={() => setViewerOpen(true)}
-              aria-label={`View the ${size} triples in the loaded dataset`}
-              className="rounded-4xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-            >
-              <Badge
-                variant="muted"
-                className="tabular cursor-pointer transition-colors hover:bg-muted-foreground/20"
-              >
-                <Database className="size-3" /> {size} triples
-              </Badge>
-            </button>
+          {endpointActive ? (
+            // [OPUS-4.8] sq-2mke — in endpoint mode the in-tab WASM engine state + triple
+            // count are irrelevant; show that queries route to the remote endpoint.
+            <Badge variant="default" aria-live="polite">
+              <PlugZap className="size-3" /> Endpoint mode
+            </Badge>
+          ) : (
+            <>
+              <EngineIndicator engine={engine} />
+              {size !== null && (
+                <button
+                  type="button"
+                  onClick={() => setViewerOpen(true)}
+                  aria-label={`View the ${size} triples in the loaded dataset`}
+                  className="rounded-4xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+                >
+                  <Badge
+                    variant="muted"
+                    className="tabular cursor-pointer transition-colors hover:bg-muted-foreground/20"
+                  >
+                    <Database className="size-3" /> {size} triples
+                  </Badge>
+                </button>
+              )}
+            </>
           )}
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        <ConnectPanel
+          config={endpointConfig}
+          onConfigChange={setEndpointConfig}
+          active={endpointActive}
+          onActiveChange={setEndpointActive}
+        />
+
+        {/* The in-tab dataset controls manage the WASM store; in endpoint mode the
+            endpoint owns the data, so they are disabled with an honest note. */}
+        {endpointActive ? (
+          <p className="rounded-lg border bg-muted/30 p-2.5 text-xs text-muted-foreground">
+            Endpoint mode is active — queries run against the configured server, which owns
+            its own dataset. The in-tab dataset picker below is for the WASM engine; switch
+            back to <span className="font-medium">In-tab WASM</span> to use it.
+          </p>
+        ) : null}
         <DatasetControls
           activeBuiltinId={activeBuiltinId}
           onSelectBuiltin={selectBuiltin}
           onLoadText={loadText}
-          disabled={controlsDisabled}
+          disabled={controlsDisabled || endpointActive}
         />
 
         <div className="flex flex-wrap gap-1.5">
@@ -356,7 +463,13 @@ export function Repl() {
             )}
             {mode === "run" ? "Run query" : "Run EXPLAIN"}
           </Button>
-          <ModeTabs mode={mode} onChange={setMode} disabled={busy} form={form} />
+          <ModeTabs
+            mode={mode}
+            onChange={setMode}
+            disabled={busy}
+            form={form}
+            endpointMode={endpointActive}
+          />
           <p aria-live="polite" className="text-xs text-muted-foreground">
             {state.kind === "select" &&
               `${state.results.results.bindings.length} rows · ${state.ms.toFixed(1)} ms`}
@@ -364,14 +477,19 @@ export function Repl() {
             {state.kind === "graph" &&
               `${state.triples} triples · ${state.ms.toFixed(1)} ms`}
             {state.kind === "update" &&
-              `store ${state.sizeBefore} → ${state.sizeAfter} triples · ${state.ms.toFixed(1)} ms`}
+              (state.endpoint
+                ? `endpoint write acknowledged · ${state.ms.toFixed(1)} ms`
+                : `store ${state.sizeBefore} → ${state.sizeAfter} triples · ${state.ms.toFixed(1)} ms`)}
             {state.kind === "explain" &&
               `plan ${state.analyze ? "+ trace " : ""}· ${state.ms.toFixed(1)} ms`}
             {state.kind === "running" &&
-              (mode === "run"
-                ? "Running on the wasm engine…"
-                : "Planning on the wasm engine…")}
+              (endpointActive
+                ? "Running on the endpoint…"
+                : mode === "run"
+                  ? "Running on the wasm engine…"
+                  : "Planning on the wasm engine…")}
             {state.kind === "idle" &&
+              !endpointActive &&
               engine === "warming" &&
               "Pre-warming the wasm engine…"}
           </p>
@@ -424,11 +542,15 @@ function ModeTabs({
   onChange,
   disabled,
   form,
+  endpointMode,
 }: {
   mode: RunMode;
   onChange: (m: RunMode) => void;
   disabled: boolean;
   form: QueryForm;
+  // [OPUS-4.8] sq-2mke — in endpoint mode EXPLAIN / ANALYZE are unavailable (they drive
+  // the in-tab WASM planner, not the remote server), so those tabs are grayed.
+  endpointMode: boolean;
 }) {
   const tabs: { value: RunMode; label: string; title: string }[] = [
     { value: "run", label: "Run", title: "Execute the query / update" },
@@ -452,8 +574,10 @@ function ModeTabs({
       {tabs.map((t) => {
         // Gray out a mode the current query form cannot use (EXPLAIN/ANALYZE on an
         // Update). The engine still validates — this only stops the user picking a
-        // mode that would parse-error.
-        const unsupported = !modeSupportsForm(t.value, form);
+        // mode that would parse-error. EXPLAIN/ANALYZE are also unavailable in endpoint
+        // mode (an in-tab planner introspection, not a protocol operation).
+        const planMode = t.value !== "run";
+        const unsupported = !modeSupportsForm(t.value, form) || (endpointMode && planMode);
         const tabDisabled = disabled || unsupported;
         return (
           <button
@@ -463,9 +587,11 @@ function ModeTabs({
             aria-selected={mode === t.value}
             aria-disabled={unsupported}
             title={
-              unsupported
-                ? `${t.label} is unavailable for SPARQL Update — it plans a query`
-                : t.title
+              endpointMode && planMode
+                ? `${t.label} runs the in-tab WASM planner — switch to In-tab WASM to use it`
+                : unsupported
+                  ? `${t.label} is unavailable for SPARQL Update — it plans a query`
+                  : t.title
             }
             disabled={tabDisabled}
             onClick={() => onChange(t.value)}
@@ -509,6 +635,17 @@ function ResultPanel({ state }: { state: RunState }) {
     );
   }
   if (state.kind === "update") {
+    // [OPUS-4.8] sq-2mke — endpoint updates mutate the REMOTE server (the protocol acks a
+    // 204 with no body), so we cannot show a before/after count without inventing one.
+    if (state.endpoint) {
+      return (
+        <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+          <span className="font-medium text-foreground">Update applied</span> on the
+          endpoint — the server acknowledged the write (HTTP 204, no body). Run a SELECT
+          against the same endpoint to see the change.
+        </div>
+      );
+    }
     const delta = state.sizeAfter - state.sizeBefore;
     const sign = delta > 0 ? "+" : "";
     return (
