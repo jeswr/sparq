@@ -33,16 +33,24 @@ six-member car-hire flagship has **never been assembled and verified as one unit
 
 | Member (family) | Primitive | Public inputs | Hidden (private) | Status |
 | --- | --- | --- | --- | --- |
-| `filter_int` (`d1..d4`) | range / comparison over a hidden integer | `challenge, operand_enc, op, bound, expected` | the value's decimal digits | **LIVE** (`d2`); `d1/d3/d4` wired (compiled, real prove/verify tests) |
+| `filter_int` (`d1..d4`) | range / comparison over a hidden non-negative integer | `challenge, operand_enc, op, bound, expected` | the value's decimal digits | **LIVE** (`d2`); `d1/d3/d4` wired (compiled, real prove/verify tests) |
+| `filter_signed_int` (`d2`, `d4`) | sign-aware range / comparison over a hidden **signed** `xsd:integer` | `challenge, operand_enc, op, bound_neg, bound, expected` | the value's sign flag + magnitude digits | WIRED (compiled, manifest-composable; extends `filter_int` to negatives) |
+| `filter_decimal` (`i3_f2`) | fixed-point comparison over a hidden `xsd:decimal` (3 int + 2 frac digits) | `challenge, operand_enc, op, bound_neg, bound_scaled, expected` | sign flag + integer-part + fraction digits | WIRED (compiled, manifest-composable; host pre-scales the bound to `FD=2`) |
 | `filter_f64` (raw + `d1..d4`) | comparison over IEEE-754 doubles | `challenge, operand_enc, op, b_bits, expected` | the value's decimal digits | WIRED (composable `d1..d4`); raw `filter_f64` is a non-composable building block |
 | `scan` (`k{1,2}_n{16,64}_r{4,8}`, 8 members) | set-membership **+ completeness** (BGP scan over K committed graphs) | `challenge, commitments[K], pattern, disclosed rows[R], row_count, attribution[K]` | per-graph counts + term encodings | WIRED (all 8 compiled, prove/verify/tamper tests) |
 | `join_eq` (`na{16,64}_nb{16,64}`, 4 members) | equality-join (hidden cross-credential JOIN, single-prover) | `challenge, commit_a, commit_b, join_commitment, slot_a, slot_b` | both graphs' enc/counts, the two joined rows, the join value, a blinder | WIRED (4 compiled; the joined entity never appears in a public input) |
 | `hidden_issuer` (`d4`) | signature-verification + set-membership | `challenge, m, key_set_root` | issuer `pk`, signature `(R,s)`, reduced challenge, membership index+path | WIRED/DESIGNED (gadget + binding complete; inherits the open soundness audit; **additive only**) |
 | `holder_pok` | proof-of-possession / proof-of-knowledge | `challenge, holder_pk_digest` | `hsk`, `hpk_x`, `hpk_y` | WIRED/DESIGNED (compiled; in-circuit hidden-key tier B2 deferred — landed binding is the clear-key B1 tier) |
+| `holder_set` (`d4`) | hidden-holder set-membership PoK (B2 tier) | `challenge, holder_set_root` | `hsk`, `hpk_x`, `hpk_y`, `index`, `siblings` | WIRED/DESIGNED (compiled; the holder-key digest is **not** public here — hides *which* holder; verifier binds only the set root) |
 | `revoke_unset` (`d10`) | non-membership / hidden-index status | `challenge, root, index_commitment` | `index`, `bit(=0)`, blinding, Merkle siblings | WIRED/DESIGNED (compiled; clear-index path still leaks the index unless the committed-index path is used) |
 
-All 24 members compile and have gate-count baselines; the family-completeness gate
-(`every_derivable_id_has_a_compiled_member`) enforces no silent unprovability.
+All 28 members compile and have gate-count baselines; the family-completeness gate
+(`every_derivable_id_has_a_compiled_member`) enforces no silent unprovability, and
+`snapshot_covers_every_member` (tests/gate_count.rs) enforces a baseline for every
+compiled `zk/compose/` member, so a new member cannot ship without a gate-count
+row. (The four members added since the prior revision of this report —
+`filter_signed_int_d2/d4`, `filter_decimal_i3_f2` from `sq-7lrq`/`sq-1q9h`, and
+`holder_set_d4` from `sq-3c00` — are all manifest-composable and covered below.)
 
 ### What the live demo proves today (exactly one statement)
 
@@ -78,9 +86,14 @@ wiring them into the browser as a follow-up.
 Gate counts below are the **deterministic** committed snapshot
 (`bb gates -s ultra_honk` `circuit_size`; bb `5.0.0-nightly.20260324`; nargo
 `1.0.0-beta.21`; 3% regression tolerance absorbs ~0.5–0.75% cross-platform variance).
-Four members were independently re-run on this box and matched the snapshot to the
-gate: `filter_int_d2 = 17416`, `revoke_unset_d10 = 899`, `scan_k1_n16_r4 = 5991`,
-`hidden_issuer_d4 = 16932`.
+Members independently re-run on this box matched the snapshot to the gate:
+`filter_int_d2 = 17416`, `revoke_unset_d10 = 899`, `scan_k1_n16_r4 = 5991`,
+`hidden_issuer_d4 = 16932`, and — for this revision — the four newly-added members
+`filter_signed_int_d2 = 17416`, `filter_signed_int_d4 = 17416`,
+`filter_decimal_i3_f2 = 17416`, and `holder_set_d4 = 10650`. The bench mirror
+`bench/zk-compose/gate_counts_latest.json` is regenerated from the same snapshot
+member list and a CI test (tests/gate_count.rs) fails if the two ever disagree, so
+the catalog and the regression gate cannot drift.
 
 > **All timings below are INDICATIVE / NON-CANONICAL** (native `bb prove` or Node
 > `generateProof` on a shared EC2 work box), not a benchmark of record. Per project
@@ -97,10 +110,13 @@ gate: `filter_int_d2 = 17416`, `revoke_unset_d10 = 899`, `scan_k1_n16_r4 = 5991`
 | `join_eq_na64_nb64` | 18681 | Largest hidden cross-credential join (64×64) |
 | `filter_int_d1..d4` | 17416 | Flat in D — blake3 over the canonical token fits one 64-byte block |
 | `filter_f64_d1..d4` | 17416 | Same token-binding cost as `filter_int` (tie) |
+| `filter_signed_int_d2` / `_d4` | 17416 | Signed `xsd:integer`; same canonical-token blake3 binding — tie, flat in magnitude-digit count |
+| `filter_decimal_i3_f2` | 17416 | `xsd:decimal` (3 int + 2 frac digits); same token binding — tie |
 | `hidden_issuer_d4` | 16932 | In-circuit signature verification — heaviest non-scan / non-filter operator |
 | `scan_k1_n64_r4` | 14923 | |
 | `join_eq_na16_nb64` / `na64_nb16` | 12885 | Equal by bucket-size symmetry |
 | `scan_k2_n16_r8` | 11261 | |
+| `holder_set_d4` | 10650 | Hidden-holder set-membership: `holder_pok`'s scalar-mul + a depth-4 Merkle fold |
 | `holder_pok` | 10334 | One ~251-bit scalar-mul |
 | `scan_k2_n16_r4` | 9254 | |
 | `scan_k1_n16_r8` | 7038 | |
@@ -110,9 +126,15 @@ gate: `filter_int_d2 = 17416`, `revoke_unset_d10 = 899`, `scan_k1_n16_r4 = 5991`
 | `revoke_unset_d10` | 899 | **Cheapest.** Depth-10 Merkle bit-unset |
 
 Scaling: scan members scale ~linearly in `k*n`, with `r` adding a row-soundness pass.
-Filter is **flat in `D`** (the digit count only changes what leaks, not the gate
-count). The signature member is dominated by elliptic-curve scalar multiplication,
-not hashing.
+Every token-bound filter member ties at **17416** — `filter_int`, `filter_f64`
+(composable `d1..d4`), the signed-integer `filter_signed_int_d2/d4`, and the decimal
+`filter_decimal_i3_f2` — because the cost driver is the single-block blake3 over the
+canonical N-Triples token, which is identical regardless of the operand's sign,
+fractional part, or digit count. Filter is therefore **flat in `D`** (the digit
+count only changes what leaks, not the gate count) and flat across the integer →
+signed → decimal extension. The signature member is dominated by elliptic-curve
+scalar multiplication, not hashing; `holder_set_d4` (10650) is `holder_pok`'s
+scalar-mul plus the depth-4 set-membership fold (≈ +316 gates over `holder_pok`).
 
 ### Hotspots
 

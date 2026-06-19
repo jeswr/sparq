@@ -55,6 +55,36 @@
       "source": "snapshot; gate_counts_latest.json=17416; family_cost_curve.json prove ~1.071s (non-canonical). Flat in D."
     },
     {
+      "member": "filter_signed_int_d2",
+      "proves": "The hidden SIGNED xsd:integer behind operand_enc satisfies (value op bound) == expected under signed order, value bound to the committed '[-]?<digits>' token, without disclosing it (2 magnitude digits). Extends filter_int to negatives.",
+      "primitive": "sign-aware range/comparison over a hidden signed xsd:integer (in-circuit blake3 operand-to-commitment binding; sign flag + magnitude digits)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-7lrq/sq-1q9h); RE-RAN bb gates this box = 17416 (match); gate_counts_latest.json=17416. Same single-block blake3 canonical-token binding as filter_int -> same 17416 gates. Flat in magnitude-digit count."
+    },
+    {
+      "member": "filter_signed_int_d4",
+      "proves": "Same as filter_signed_int_d2 for a 4-magnitude-digit hidden signed xsd:integer (choosing this member leaks ceil(log10(|value|)), the documented envelope leak).",
+      "primitive": "sign-aware range/comparison over a hidden signed xsd:integer (in-circuit blake3 operand-to-commitment binding)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-7lrq/sq-1q9h); RE-RAN bb gates this box = 17416 (match); gate_counts_latest.json=17416. Flat in magnitude-digit count."
+    },
+    {
+      "member": "filter_decimal_i3_f2",
+      "proves": "The hidden xsd:decimal behind operand_enc satisfies (value op bound) == expected at FD=2 fixed-point places, value bound to the committed '[-]?<int>.<frac>' token, without disclosing it (3 integer + 2 fraction digits). The host pre-scales the FILTER constant to bound_scaled = round(|bound| * 100).",
+      "primitive": "fixed-point comparison over a hidden xsd:decimal (in-circuit blake3 operand-to-commitment binding; sign flag + integer-part + fraction digits)",
+      "exercised_live": false,
+      "gate_count": 17416,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-7lrq/sq-1q9h); RE-RAN bb gates this box = 17416 (match); gate_counts_latest.json=17416. Same single-block blake3 canonical-token binding as filter_int -> same 17416 gates."
+    },
+    {
       "member": "filter_f64",
       "proves": "Raw IEEE-754 double comparison building block (free a_bits, NON-composable; no committed-token binding).",
       "primitive": "range/comparison over IEEE-754 doubles (raw bits, building block only)",
@@ -242,7 +272,17 @@
       "gate_count": 10334,
       "prove_ms_t1": null,
       "prove_ms_tN": null,
-      "source": "snapshot (sq-xqfg). One ~251-bit scalar-mul. The in-circuit hidden-key tier (B2) is DEFERRED at the manifest seam; the LANDED holder binding is the clear-key B1 tier that discloses hpk."
+      "source": "snapshot (sq-xqfg). One ~251-bit scalar-mul. holder_pok publishes the issuer-attested holder_pk_digest (clear-digest tier); the hidden-holder tier (does not disclose the digest) is the separate holder_set_d4 circuit below. The manifest verify seam for the hidden-key tier is DEFERRED; the LANDED holder binding wired into verify_manifest is the clear-key B1 tier that discloses hpk."
+    },
+    {
+      "member": "holder_set_d4",
+      "proves": "I am SOME holder in the committed holder set (public holder_set_root): I know a holder secret hsk with hpk = hsk*G on Baby-JubJub (on-curve, non-identity, hsk < L) whose holder-key digest is a member of the set, at a HIDDEN index along a HIDDEN authentication path — disclosing NEITHER the holder key NOR WHICH holder it is. Depth-4 = up to 16 holders. holder_pk_digest is NOT public here (the hidden-holder upgrade over holder_pok).",
+      "primitive": "hidden-holder set-membership proof-of-knowledge (Baby-JubJub key-pair PoK + hidden-key Poseidon2 Merkle membership, hidden-holder tier B2)",
+      "exercised_live": false,
+      "gate_count": 10650,
+      "prove_ms_t1": null,
+      "prove_ms_tN": null,
+      "source": "snapshot (sq-3c00); RE-RAN bb gates this box = 10650 (match); gate_counts_latest.json=10650. holder_pok's scalar-mul/on-curve/<L checks (steps 1-4) plus a depth-4 set-membership Merkle fold replacing the clear-digest binding -> ~+316 gates over holder_pok. ADDITIVE only; the verifier binds only holder_set_root."
     },
     {
       "member": "revoke_unset_d10",
