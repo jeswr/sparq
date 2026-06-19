@@ -351,6 +351,21 @@ jobs:
       # trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
       - name: Self-test agent-telemetry harness (parser + cache-ratio + cost math)
         run: python3 scripts/agent-telemetry/tests/test_agent_telemetry.py
+      # [OPUS-4.8] sq-f04e: gen-js-sbom.sh DERIVES a standalone per-member lock via
+      # scripts/derive-workspace-member-lock.mjs, then cyclonedx-npm shells out to `npm ls
+      # --omit=dev`. A workspace-to-workspace dep edge (a `link: true` node — a published member
+      # depending on a sibling @sparq/* in packages/*) USED TO derive a dangling link stub that
+      # crashed npm ls with "Cannot read properties of undefined (reading 'extraneous')" -> exit
+      # 254 (the cryptic SBOM-lane failure discovered in #876/sq-jpki.2). The fix materializes the
+      # link target + its nested closure. This hermetic self-test (synthetic root lock, no network,
+      # node+npm only) pins the TEETH: a member with a workspace-link dev dep derives a lock on
+      # which BOTH `npm ls --omit=dev` and the full `npm ls` exit 0, while the runtime (--omit=dev)
+      # closure stays exactly the real runtime dep set (no dev-link leak into the published SBOM
+      # surface). HARD job (no "advisory" token) — a regression reds the ci-summary gate.
+      - name: shellcheck gen-js-sbom.sh + the derive-lock self-test
+        run: shellcheck scripts/gen-js-sbom.sh scripts/tests/test_derive_workspace_member_lock.sh
+      - name: "Self-test derive-workspace-member-lock.mjs (workspace-link materialization — sq-f04e)"
+        run: bash scripts/tests/test_derive_workspace_member_lock.sh
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
