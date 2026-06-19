@@ -23,6 +23,18 @@
 //! but `check_graph` reports them as unverifiable — see [`VectorStore::open`] and the back-compat
 //! note there.
 //!
+//! [OPUS-4.8] (sq-wlzi) **ID-KEYED STALENESS CONTRACT.** Because every embedding is keyed by the
+//! build-time dictionary id, a store is valid ONLY against the **exact graph generation it was built
+//! against**. To serve it, persist that graph (`Graph::save`) and reopen THAT graph (`Graph::open`,
+//! which mmaps the **frozen** dict id order — both gated by `sparq-core`'s `mmap` feature) to resolve
+//! query terms — **never re-parse the source RDF** (`Graph::load_str` et al.): sparq-core's parallel
+//! sharded dict merge assigns thread-count-dependent ids, so a re-parse produces a *different*
+//! `id → term` binding and `get`/`nearest_term` mis-resolve. `check_graph` is a
+//! backstop, **not** a sufficient guard for this case — the sq-xhiv fingerprint folds the term *set*
+//! and is thread-count-stable, so it PASSES a re-parse of the same RDF even though the ids permuted.
+//! See [`crate::fingerprint`] for the full rationale and `tests/staleness_contract.rs` for the
+//! round-trip-vs-trap demonstration.
+//!
 //! Coverage is **sparse by design**: in an RDF graph only entities get embeddings, not
 //! every literal, so vectors are stored densely in *insertion* slots and the trailing
 //! sorted `(id, slot)` index maps dictionary ids to slots — `get` on an mmap'd store is

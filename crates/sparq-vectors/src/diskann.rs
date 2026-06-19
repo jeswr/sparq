@@ -82,6 +82,17 @@
 //! so an index built against a different graph generation would silently mis-resolve; the checked
 //! query entry points reject that. Version-1 files (no fingerprint, 32-byte header) still open but
 //! are reported as unverifiable.
+//!
+//! [OPUS-4.8] (sq-wlzi) **ID-KEYED STALENESS CONTRACT.** Each node record stores its term's
+//! build-time dictionary id, and neighbour entries are stored slots — so this index, like the
+//! [`VectorStore`] under it, is valid ONLY against the **exact graph generation it was built
+//! against**. To serve it, persist that graph (`Graph::save`) and reopen THAT graph (`Graph::open`,
+//! which mmaps the **frozen** dict id order — both gated by `sparq-core`'s `mmap` feature) to resolve
+//! query terms — **never re-parse the source RDF** (`Graph::load_str` et al.): sparq-core's parallel
+//! sharded dict merge assigns thread-count-dependent ids, so a re-parse gives a *different*
+//! `id → term` binding and `nearest_term` mis-resolves. `check_graph` is a
+//! backstop, **not** a sufficient guard — the sq-xhiv fingerprint is thread-count-stable, so it PASSES
+//! a re-parse of the same RDF whose ids permuted. See [`crate::fingerprint`] for the full rationale.
 
 use crate::fingerprint::{self, Fingerprint, FINGERPRINT_LEN};
 use crate::quant::{DistanceTable, EncodedStore, PqConfig, ProductQuantizer};

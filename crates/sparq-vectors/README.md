@@ -63,6 +63,13 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   which assigns dict ids in a thread-count-dependent order — fingerprints **identically** and does
   not spuriously mismatch, while a genuine term add / remove / edit still changes it. (It is an
   integrity check for accidental staleness, not a security/tamper primitive — see the module docs.)
+  **Id-keyed staleness contract (sq-wlzi):** because the store is keyed by raw dict id, a passing
+  `check_graph` is **necessary but not sufficient** — the thread-count-stable fingerprint also passes
+  a re-parse of the same RDF whose ids merely *permuted*, which then serves the **wrong** vector. So
+  to serve a persisted store/index, persist its graph (`Graph::save`) and reopen **that** graph
+  (`Graph::open`, which mmaps the frozen id order) to resolve query terms — **never** re-parse the
+  source RDF (`Graph::load_str` etc.). The round-trip vs the re-parse trap is pinned in
+  `tests/staleness_contract.rs`.
 - **`StreamingWriter`** — build stores bigger than RAM with O(1) build-phase memory;
   byte-identical output to the in-RAM builder.
 - **Search** — `nearest_exact` (answer-exact ground-truth baseline) and the persistent on-disk
