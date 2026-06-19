@@ -60,6 +60,34 @@
 //! re-plan trigger, so the whole latency path is smoothed consistently. A source with no
 //! observation has no EWMA and contributes `factor = 1.0` (inert), exactly as before.
 //!
+//! ## EWMA refinements (sq-3xkz, sq-b51o follow-up) — per-source α, time-aware decay, eviction
+//!
+//! Three opt-in refinements sharpen the EWMA when stats are reused across queries — each defaults
+//! to **off**, so the default path is byte-identical to the plain single-global-α EWMA above:
+//!
+//! * **Per-source adaptive α** ([`RuntimeStats::set_source_alpha`]). The global
+//!   [`RuntimeStats::latency_alpha`] is now a *fallback*: a source with a per-source override is
+//!   smoothed at its own α (a steady source can stay calm, a bursty one can track faster). This
+//!   ships the MECHANISM + a sensible default (an **empty** override map ⇒ every source uses the
+//!   global α ⇒ the prior behaviour reproduced). Choosing a *good* per-source α needs a real
+//!   federated workload to measure against — that tuning is **deferred** (it is not derivable on a
+//!   non-canonical work box), so no α value is claimed optimal here.
+//! * **Time-aware decay** ([`RuntimeStats::record_source_latency_after`]). The plain EWMA
+//!   equal-weights samples regardless of the wall-clock gap between them; with a half-life set
+//!   ([`RuntimeStats::set_decay_half_life`]) a sample recorded after an elapsed gap `Δt` folds in
+//!   at an effective α inflated toward `1.0` as `Δt` grows past the half-life — so older stats
+//!   decay toward the prior and a fresh sample after a long idle gap is trusted more than one that
+//!   arrives back-to-back. The elapsed gap is **passed in** (the clock is injectable, never read
+//!   here), so the decay is deterministic and testable.
+//! * **Staleness / eviction** ([`RuntimeStats::evict_stale`]). A `RuntimeStats` reused across
+//!   queries can carry entries that are now too old to trust; `evict_stale(max_age)` drops every
+//!   source whose logical age ([`RuntimeStats::source_age`]) exceeds a configurable threshold, so
+//!   a stale latency stops biasing the planner. Age is measured on the same injectable logical
+//!   clock the decay uses.
+//!
+//! All three are **cost/ordering only** — they change *which* latency the cost model reads and
+//! *when*, never the result multiset; the soundness boundary below is untouched.
+//!
 //! The weighting is deliberately simple and **honest about being a heuristic** (see
 //! [`ReplanPolicy::latency_weight`]): for a candidate pattern, take the **slowest** observed
 //! latency over the sources retained for it (a union is bottlenecked by its slowest arm),
@@ -222,12 +250,44 @@ pub struct RuntimeStats {
     /// more, biasing the re-plan toward faster sources / deferring the slow one (see
     /// [`ReplanPolicy::latency_weight`]). Affects cost/ordering ONLY, never the result multiset.
     observed_latency: HashMap<usize, f64>,
-    /// [OPUS-4.8] sq-b51o follow-up. EWMA smoothing factor α ∈ (0, 1] applied per source in
-    /// [`Self::record_source_latency`]: `ewma_new = α·observed + (1−α)·ewma_prev`. A
-    /// **hand-picked HEURISTIC**, default [`Self::DEFAULT_LATENCY_ALPHA`] (`0.3`) — see the
-    /// module docs. Lower = calmer/laggier, higher = twitchier/faster-tracking; not derived
-    /// from a workload. Clamped to `(0, 1]` on construction.
+    /// [OPUS-4.8] sq-b51o follow-up. **Global** (fallback) EWMA smoothing factor α ∈ (0, 1]
+    /// applied per source in [`Self::record_source_latency`]: `ewma_new = α·observed +
+    /// (1−α)·ewma_prev`. A **hand-picked HEURISTIC**, default [`Self::DEFAULT_LATENCY_ALPHA`]
+    /// (`0.3`) — see the module docs. Lower = calmer/laggier, higher = twitchier/faster-tracking;
+    /// not derived from a workload. Clamped to `(0, 1]` on construction. A per-source override in
+    /// [`Self::source_alpha`] takes precedence over this global value when present
+    /// ([OPUS-4.8] sq-3xkz).
     latency_alpha: f64,
+    /// [OPUS-4.8] sq-3xkz. **Per-source** EWMA α override map. When a source has an entry here it
+    /// is used in preference to the global [`Self::latency_alpha`], so each source can be smoothed
+    /// at its own rate (a steady source can keep a low/calm α; a bursty one a higher/twitchier
+    /// α). Empty by default — and an empty map means EVERY source falls back to the global α, so
+    /// the default path is **byte-identical** to the prior single-global-α behaviour
+    /// (back-compat). Values are clamped to `(0, 1]` on insert, same as the global. Still a
+    /// HEURISTIC: the MECHANISM to set α per source, not a tuned α — tuning needs a real
+    /// federated workload (deferred, sq-3xkz).
+    source_alpha: HashMap<usize, f64>,
+    /// [OPUS-4.8] sq-3xkz. Optional **time-aware decay** half-life, in the same abstract time
+    /// units the elapsed gap is passed in. `None` (default) ⇒ **no** time decay: a sample folds in
+    /// at the plain per-source α regardless of the wall-clock gap since the previous sample, so
+    /// the default path reproduces the prior equal-weighting EWMA exactly (back-compat). `Some(h)`
+    /// ⇒ a sample recorded via [`Self::record_source_latency_after`] with an elapsed gap `Δt`
+    /// folds in at an **inflated** effective α that grows toward `1.0` as `Δt` grows past `h`
+    /// (older stats decay toward the new sample / prior), so a long idle gap lets a fresh sample
+    /// dominate rather than being averaged equally with a now-stale history. Injectable/elapsed-in
+    /// so it stays deterministic — the clock is never read directly here.
+    decay_half_life: Option<f64>,
+    /// [OPUS-4.8] sq-3xkz. Per-source **logical age**: the value of [`Self::clock`] at the moment
+    /// that source was last updated. Used purely for [`Self::evict_stale`] / [`Self::source_age`];
+    /// it never affects the EWMA value. Sources recorded via the plain (no-elapsed)
+    /// [`Self::record_source_latency`] are stamped at the current [`Self::clock`] (age 0 at record
+    /// time).
+    last_seen: HashMap<usize, f64>,
+    /// [OPUS-4.8] sq-3xkz. Monotone **logical clock** (abstract units), advanced ONLY by the
+    /// `elapsed` arg of [`Self::record_source_latency_after`] / [`Self::advance_clock`]. Starts at
+    /// `0.0`. Deterministic by construction — there is no hidden wall-clock read; the caller owns
+    /// the time source and passes elapsed gaps in, so tests are reproducible.
+    clock: f64,
 }
 
 impl Default for RuntimeStats {
@@ -236,6 +296,10 @@ impl Default for RuntimeStats {
             observed_leaf_card: HashMap::new(),
             observed_latency: HashMap::new(),
             latency_alpha: RuntimeStats::DEFAULT_LATENCY_ALPHA,
+            source_alpha: HashMap::new(),
+            decay_half_life: None,
+            last_seen: HashMap::new(),
+            clock: 0.0,
         }
     }
 }
@@ -264,9 +328,40 @@ impl RuntimeStats {
         }
     }
 
-    /// The configured latency EWMA smoothing factor α (always in `(0, 1]`).
+    /// The configured **global** latency EWMA smoothing factor α (always in `(0, 1]`). This is
+    /// the fallback used for any source without a per-source override
+    /// ([`Self::set_source_alpha`]).
     pub fn latency_alpha(&self) -> f64 {
         self.latency_alpha
+    }
+
+    /// [OPUS-4.8] sq-3xkz. Set a **per-source** EWMA α override for `source` (clamped to
+    /// `(0, 1]`), taking precedence over the global [`Self::latency_alpha`] for that source's
+    /// subsequent [`Self::record_source_latency`] / [`Self::record_source_latency_after`] folds.
+    /// This is the MECHANISM for adaptive per-source smoothing — a steady source can keep a calm
+    /// (low) α while a bursty one runs twitchier (high). With **no** override set anywhere the
+    /// behaviour is byte-identical to the prior single-global-α path (back-compat). NOTE: the
+    /// *value* to use is a heuristic; actually tuning it needs a real federated workload — not
+    /// shipped here (sq-3xkz).
+    pub fn set_source_alpha(&mut self, source: usize, alpha: f64) {
+        self.source_alpha.insert(source, Self::clamp_alpha(alpha));
+    }
+
+    /// [OPUS-4.8] sq-3xkz. Builder form of [`Self::set_source_alpha`]: returns `self` with the
+    /// per-source α override applied, for chaining at construction.
+    pub fn with_source_alpha(mut self, source: usize, alpha: f64) -> RuntimeStats {
+        self.set_source_alpha(source, alpha);
+        self
+    }
+
+    /// [OPUS-4.8] sq-3xkz. The **effective** EWMA α for `source`: its per-source override
+    /// ([`Self::set_source_alpha`]) if present, else the global [`Self::latency_alpha`]. With an
+    /// empty override map this is always the global α, so the default path is unchanged.
+    pub fn effective_alpha(&self, source: usize) -> f64 {
+        self.source_alpha
+            .get(&source)
+            .copied()
+            .unwrap_or(self.latency_alpha)
     }
 
     /// Clamp a requested α into the valid `(0, 1]` range (a degenerate `α ≤ 0` would freeze
@@ -279,6 +374,53 @@ impl RuntimeStats {
         alpha.clamp(f64::MIN_POSITIVE, 1.0)
     }
 
+    /// [OPUS-4.8] sq-3xkz. Enable **time-aware decay** with a `half_life` (abstract time units,
+    /// the same scale the elapsed gap is later passed in). A non-finite or non-positive value
+    /// **disables** decay (sets it back to `None`), the back-compat default. See
+    /// [`Self::decay_half_life`] for the semantics; the actual decay applies only on samples fed
+    /// through [`Self::record_source_latency_after`].
+    pub fn set_decay_half_life(&mut self, half_life: f64) {
+        self.decay_half_life = if half_life.is_finite() && half_life > 0.0 {
+            Some(half_life)
+        } else {
+            None
+        };
+    }
+
+    /// [OPUS-4.8] sq-3xkz. Builder form of [`Self::set_decay_half_life`].
+    pub fn with_decay_half_life(mut self, half_life: f64) -> RuntimeStats {
+        self.set_decay_half_life(half_life);
+        self
+    }
+
+    /// [OPUS-4.8] sq-3xkz. The configured time-aware-decay half-life, or `None` when decay is off.
+    pub fn decay_half_life(&self) -> Option<f64> {
+        self.decay_half_life
+    }
+
+    /// [OPUS-4.8] sq-3xkz. The current logical clock (abstract units), advanced only by the
+    /// `elapsed` arg of [`Self::record_source_latency_after`] / [`Self::advance_clock`].
+    pub fn clock(&self) -> f64 {
+        self.clock
+    }
+
+    /// [OPUS-4.8] sq-3xkz. Advance the logical clock by `elapsed` (abstract units; a negative or
+    /// non-finite value is treated as `0`). Lets a caller age the store between queries without
+    /// recording a sample (e.g. before a bulk [`Self::evict_stale`]). Deterministic — elapsed is
+    /// supplied by the caller, never read from a wall clock.
+    pub fn advance_clock(&mut self, elapsed: f64) {
+        self.clock += elapsed.max(0.0);
+    }
+
+    /// [OPUS-4.8] sq-3xkz. The **logical age** of `source` — `clock − last_seen[source]`, i.e. how
+    /// much logical time has elapsed since this source was last recorded — or `None` if the source
+    /// has no observation. Always `≥ 0` (the clock is monotone). Drives [`Self::evict_stale`].
+    pub fn source_age(&self, source: usize) -> Option<f64> {
+        self.last_seen
+            .get(&source)
+            .map(|seen| (self.clock - seen).max(0.0))
+    }
+
     /// Record the *observed* cardinality of a pattern's leaf (the real row count its
     /// source(s) returned). Overwrites any prior observation for that pattern.
     pub fn record_leaf_cardinality(&mut self, pattern: usize, observed: f64) {
@@ -286,25 +428,99 @@ impl RuntimeStats {
     }
 
     /// Record an *observed* latency sample for `source` (abstract time units), folding it into
-    /// that source's **EWMA**: `ewma_new = α·observed + (1−α)·ewma_prev`, where α is
-    /// [`Self::latency_alpha`]. The **first** sample for a source seeds the average
+    /// that source's **EWMA**: `ewma_new = α·observed + (1−α)·ewma_prev`, where α is the
+    /// source's [`Self::effective_alpha`] (its per-source override, else the global
+    /// [`Self::latency_alpha`]). The **first** sample for a source seeds the average
     /// (`ewma = observed`); subsequent samples decay the history. The smoothed value — not the
     /// raw sample — is what [`Self::observed_latency_of`] returns and the cost model/trigger
     /// read, so a single transient spike is damped (anti-thrash) while a sustained shift
     /// converges. [OPUS-4.8] sq-b51o follow-up. Affects cost/ordering ONLY, never results.
+    ///
+    /// This is the **time-unaware** fold: it folds at the plain per-source α regardless of any
+    /// wall-clock gap (back-compat). For time-aware decay pass the elapsed gap to
+    /// [`Self::record_source_latency_after`] ([OPUS-4.8] sq-3xkz). The source is stamped at the
+    /// current logical [`Self::clock`] (age 0 at record time).
     pub fn record_source_latency(&mut self, source: usize, latency: f64) {
+        self.fold_latency(source, latency, self.effective_alpha(source));
+    }
+
+    /// [OPUS-4.8] sq-3xkz. Record a latency sample for `source` `elapsed` abstract time units
+    /// after the previous one, applying **time-aware decay**: the longer the gap, the more the
+    /// stale history is decayed and the more the new sample is trusted.
+    ///
+    /// Concretely the logical [`Self::clock`] advances by `elapsed`, and the **effective** fold α
+    /// is inflated from the source's base α `α₀` ([`Self::effective_alpha`]) toward `1.0` by the
+    /// decay weight `d = 1 − 0.5^(Δt / half_life) ∈ [0, 1)`:
+    ///
+    /// > `α_eff = α₀ + (1 − α₀)·d`
+    ///
+    /// so at `Δt = 0` (no gap) `α_eff = α₀` (identical to [`Self::record_source_latency`]); at one
+    /// half-life `d = 0.5`; and as `Δt → ∞`, `α_eff → 1` (the new sample fully replaces the
+    /// now-stale history — older stats decay toward the prior). With **no** half-life configured
+    /// ([`Self::set_decay_half_life`] never called) decay is off and this folds at the plain α
+    /// regardless of `elapsed`, so it matches [`Self::record_source_latency`] on the value
+    /// (it still advances the clock + stamps `last_seen`, which feeds [`Self::evict_stale`]).
+    /// The first sample for a source seeds the average (no history to decay). Deterministic: the
+    /// caller owns the time source and passes `elapsed` in — no wall clock is read here.
+    pub fn record_source_latency_after(&mut self, source: usize, latency: f64, elapsed: f64) {
+        let gap = elapsed.max(0.0);
+        self.clock += gap;
+        let base = self.effective_alpha(source);
+        let alpha = match self.decay_half_life {
+            // Only inflate α when there IS a prior value to decay; a fresh source seeds verbatim.
+            Some(half_life) if self.observed_latency.contains_key(&source) => {
+                let decay = 1.0 - 0.5_f64.powf(gap / half_life);
+                // α_eff = α₀ + (1 − α₀)·decay, clamped into (0, 1].
+                Self::clamp_alpha(base + (1.0 - base) * decay)
+            }
+            _ => base,
+        };
+        self.fold_latency(source, latency, alpha);
+    }
+
+    /// [OPUS-4.8] sq-3xkz. The shared EWMA fold: seed on the first sample for `source`, otherwise
+    /// blend at `alpha`. Always stamps the source's `last_seen` at the current logical clock so
+    /// [`Self::source_age`] / [`Self::evict_stale`] track recency. `alpha` is assumed already
+    /// clamped into `(0, 1]` by the caller.
+    fn fold_latency(&mut self, source: usize, latency: f64, alpha: f64) {
         let observed = latency.max(0.0);
-        let entry = self.observed_latency.entry(source);
-        match entry {
+        match self.observed_latency.entry(source) {
             std::collections::hash_map::Entry::Occupied(mut o) => {
                 let prev = *o.get();
-                let next = self.latency_alpha * observed + (1.0 - self.latency_alpha) * prev;
+                let next = alpha * observed + (1.0 - alpha) * prev;
                 o.insert(next);
             }
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(observed);
             }
         }
+        self.last_seen.insert(source, self.clock);
+    }
+
+    /// [OPUS-4.8] sq-3xkz. **Staleness eviction.** Drop every source whose [`Self::source_age`]
+    /// (`clock − last_seen`) is **strictly greater** than `max_age` (abstract time units) — entries
+    /// older than the threshold are removed from both the EWMA map and the age map, so a long-lived
+    /// `RuntimeStats` reused across queries does not let a stale latency keep biasing the planner.
+    /// Returns the number of sources evicted. A non-finite or negative `max_age` evicts nothing
+    /// (treated as "never stale"). Sources at exactly `max_age` are kept (boundary-inclusive
+    /// retention). Advance the clock first (via [`Self::record_source_latency_after`] or
+    /// [`Self::advance_clock`]) so ages reflect the gap since each source was last seen.
+    pub fn evict_stale(&mut self, max_age: f64) -> usize {
+        if !max_age.is_finite() || max_age < 0.0 {
+            return 0;
+        }
+        let clock = self.clock;
+        let stale: Vec<usize> = self
+            .last_seen
+            .iter()
+            .filter(|&(_, &seen)| (clock - seen).max(0.0) > max_age)
+            .map(|(&source, _)| source)
+            .collect();
+        for source in &stale {
+            self.observed_latency.remove(source);
+            self.last_seen.remove(source);
+        }
+        stale.len()
     }
 
     /// The observed leaf cardinality for `pattern`, if recorded.
@@ -1670,6 +1886,167 @@ mod tests {
             "EWMA-reordered result MUST equal the static plan's result multiset"
         );
         assert!(!static_result.is_empty(), "fixture must produce some rows");
+    }
+
+    // ============================================================================
+    // [OPUS-4.8] sq-3xkz — EWMA refinements: per-source adaptive α, time-aware decay,
+    // staleness eviction. All deterministic (elapsed gaps passed in, no wall clock).
+    // ============================================================================
+
+    // ---- (a) PER-SOURCE α DEFAULT REPRODUCES THE GLOBAL-α RESULT. With NO per-source override
+    //      set, `effective_alpha` is the global α for every source and the EWMA value is
+    //      bit-identical to the pre-refinement single-global-α path — the back-compat anchor.
+    #[test]
+    fn per_source_alpha_default_reproduces_global() {
+        // Drive the SAME sample sequence through (1) a plain global-α store and (2) a store with
+        // the per-source override map present-but-empty; the EWMA must agree at every step.
+        let mut global = RuntimeStats::with_latency_alpha(0.3);
+        let mut adaptive = RuntimeStats::with_latency_alpha(0.3); // override map empty.
+        for &s in &[100.0, 1000.0, 1000.0, 200.0] {
+            global.record_source_latency(0, s);
+            adaptive.record_source_latency(0, s);
+        }
+        // Effective α with no override IS the global α …
+        assert_eq!(adaptive.effective_alpha(0), 0.3, "no override ⇒ global α");
+        // … and the smoothed value is byte-identical to the global-α path.
+        assert_eq!(
+            adaptive.observed_latency_of(0),
+            global.observed_latency_of(0),
+            "empty per-source override map reproduces the global-α EWMA exactly"
+        );
+    }
+
+    // ---- (a) A PER-SOURCE override actually changes that source's α (and ONLY that source).
+    //      Source 0 keeps the global 0.3; source 1 is overridden to 1.0 (no smoothing).
+    #[test]
+    fn per_source_alpha_override_takes_precedence() {
+        let mut stats = RuntimeStats::with_latency_alpha(0.3).with_source_alpha(1, 1.0);
+        assert_eq!(stats.effective_alpha(0), 0.3, "source 0 falls back to global α");
+        assert_eq!(stats.effective_alpha(1), 1.0, "source 1 uses its override");
+        // Source 0 smooths (0.3·1000 + 0.7·100 = 370) …
+        stats.record_source_latency(0, 100.0);
+        stats.record_source_latency(0, 1000.0);
+        assert_eq!(stats.observed_latency_of(0), Some(370.0));
+        // … source 1 does NOT (α = 1 ⇒ last sample wins).
+        stats.record_source_latency(1, 100.0);
+        stats.record_source_latency(1, 1000.0);
+        assert_eq!(stats.observed_latency_of(1), Some(1000.0), "override α=1 ⇒ no smoothing");
+        // Override is clamped into (0,1] like the global.
+        let clamped = RuntimeStats::new().with_source_alpha(2, 5.0).with_source_alpha(3, 0.0);
+        assert_eq!(clamped.effective_alpha(2), 1.0, "α>1 clamps to 1");
+        assert!(clamped.effective_alpha(3) > 0.0, "α≤0 clamps to strictly positive");
+    }
+
+    // ---- (b) TIME-AWARE DECAY weights a LARGE-GAP sample more than a back-to-back one.
+    //      Deterministic: the elapsed gap is passed in. With a half-life set, the same
+    //      (prev=100, sample=1000) fold yields a HIGHER smoothed value when the gap is large
+    //      (history decayed) than when the gap is zero (plain α).
+    #[test]
+    fn time_aware_decay_weights_large_gap_sample() {
+        let half_life = 100.0;
+        // Establish the same prior (single seed of 100.0) in three stores, all base α 0.3.
+        let mut no_gap = RuntimeStats::with_latency_alpha(0.3).with_decay_half_life(half_life);
+        let mut one_hl = RuntimeStats::with_latency_alpha(0.3).with_decay_half_life(half_life);
+        let mut big_gap = RuntimeStats::with_latency_alpha(0.3).with_decay_half_life(half_life);
+        for s in [&mut no_gap, &mut one_hl, &mut big_gap] {
+            s.record_source_latency(0, 100.0); // seed
+        }
+        // Δt = 0 ⇒ decay weight 0 ⇒ plain α 0.3 ⇒ 0.3·1000 + 0.7·100 = 370.
+        no_gap.record_source_latency_after(0, 1000.0, 0.0);
+        assert_eq!(
+            no_gap.observed_latency_of(0),
+            Some(370.0),
+            "zero gap ⇒ identical to the plain-α fold (decay weight 0)"
+        );
+        // Δt = one half-life ⇒ decay weight 0.5 ⇒ α_eff = 0.3 + 0.7·0.5 = 0.65 ⇒
+        // 0.65·1000 + 0.35·100 = 685.
+        one_hl.record_source_latency_after(0, 1000.0, half_life);
+        let one = one_hl.observed_latency_of(0).unwrap();
+        assert!((one - 685.0).abs() < 1e-9, "one half-life ⇒ α_eff 0.65 ⇒ 685, got {}", one);
+        // Δt = 10 half-lives ⇒ decay weight 1 − 0.5^10 ≈ 0.999 ⇒ α_eff ≈ 1 ⇒ value ≈ the new
+        // sample 1000 (the now-stale history is almost fully decayed away).
+        big_gap.record_source_latency_after(0, 1000.0, 10.0 * half_life);
+        let big = big_gap.observed_latency_of(0).unwrap();
+        assert!(big > 999.0, "a large-gap sample dominates (history decayed): got {}", big);
+        // The ordering is the load-bearing property: larger gap ⇒ the fresh sample weighs more.
+        assert!(
+            big > one && one > no_gap.observed_latency_of(0).unwrap(),
+            "a larger elapsed gap weights the new sample MORE (370 < 685 < ~1000)"
+        );
+    }
+
+    // ---- (b) With NO half-life configured, `record_source_latency_after` folds at the plain α
+    //      regardless of the gap — identical VALUE to `record_source_latency` (back-compat),
+    //      while still advancing the clock + stamping last_seen for eviction.
+    #[test]
+    fn decay_off_matches_plain_fold_but_advances_clock() {
+        let mut decay_off = RuntimeStats::with_latency_alpha(0.3); // no half-life set
+        let mut plain = RuntimeStats::with_latency_alpha(0.3);
+        decay_off.record_source_latency(0, 100.0);
+        plain.record_source_latency(0, 100.0);
+        // A huge gap, but decay is OFF ⇒ folds at plain α 0.3 ⇒ 370, same as the plain path.
+        decay_off.record_source_latency_after(0, 1000.0, 1_000_000.0);
+        plain.record_source_latency(0, 1000.0);
+        assert_eq!(
+            decay_off.observed_latency_of(0),
+            plain.observed_latency_of(0),
+            "no half-life ⇒ the elapsed gap does not change the EWMA value (back-compat)"
+        );
+        // …but the clock DID advance and the source IS aged (recency tracked for eviction).
+        assert_eq!(decay_off.clock(), 1_000_000.0);
+        assert_eq!(decay_off.source_age(0), Some(0.0), "just-recorded ⇒ age 0");
+    }
+
+    // ---- (b) A non-positive / non-finite half-life DISABLES decay (back to the off default).
+    #[test]
+    fn non_positive_half_life_disables_decay() {
+        assert_eq!(RuntimeStats::new().with_decay_half_life(0.0).decay_half_life(), None);
+        assert_eq!(RuntimeStats::new().with_decay_half_life(-5.0).decay_half_life(), None);
+        assert_eq!(
+            RuntimeStats::new().with_decay_half_life(f64::INFINITY).decay_half_life(),
+            None
+        );
+        assert_eq!(RuntimeStats::new().with_decay_half_life(50.0).decay_half_life(), Some(50.0));
+    }
+
+    // ---- (c) STALENESS EVICTION drops an over-age entry and keeps a fresh one. Deterministic:
+    //      ages come from the injected elapsed gaps, not a wall clock.
+    #[test]
+    fn evict_stale_drops_over_age_entry() {
+        let mut stats = RuntimeStats::new();
+        // Source 0 recorded at clock 0.
+        stats.record_source_latency(0, 100.0);
+        // Source 1 recorded 1000 units later (clock advances to 1000 via the elapsed arg).
+        stats.record_source_latency_after(1, 200.0, 1000.0);
+        // Now source 0 is 1000 units old; source 1 is fresh (age 0).
+        assert_eq!(stats.source_age(0), Some(1000.0));
+        assert_eq!(stats.source_age(1), Some(0.0));
+        // Evict anything older than 500 units ⇒ source 0 goes, source 1 stays.
+        let evicted = stats.evict_stale(500.0);
+        assert_eq!(evicted, 1, "exactly the one over-age source is evicted");
+        assert_eq!(stats.observed_latency_of(0), None, "stale source 0 dropped");
+        assert_eq!(stats.observed_latency_of(1), Some(200.0), "fresh source 1 kept");
+        assert_eq!(stats.source_age(0), None, "its age entry is gone too");
+    }
+
+    // ---- (c) Eviction boundary: a source at EXACTLY max_age is kept (strictly-greater drops);
+    //      a non-finite / negative threshold evicts nothing; `advance_clock` ages without a sample.
+    #[test]
+    fn evict_stale_boundary_and_guards() {
+        let mut stats = RuntimeStats::new();
+        stats.record_source_latency(0, 100.0); // clock 0
+        stats.advance_clock(300.0); // age source 0 to 300 without recording a sample
+        assert_eq!(stats.source_age(0), Some(300.0));
+        // Exactly at the threshold ⇒ retained (boundary-inclusive).
+        assert_eq!(stats.evict_stale(300.0), 0, "age == max_age is kept");
+        assert_eq!(stats.observed_latency_of(0), Some(100.0));
+        // A negative / NaN threshold evicts nothing.
+        assert_eq!(stats.evict_stale(-1.0), 0);
+        assert_eq!(stats.evict_stale(f64::NAN), 0);
+        assert_eq!(stats.observed_latency_of(0), Some(100.0));
+        // Just past the threshold ⇒ evicted.
+        assert_eq!(stats.evict_stale(299.0), 1, "age > max_age is dropped");
+        assert_eq!(stats.observed_latency_of(0), None);
     }
 
     // ============================================================================
