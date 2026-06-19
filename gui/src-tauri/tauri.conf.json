@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "sparq",
+  "version": "0.1.0",
+  "identifier": "io.github.jeswr.sparq",
+  "build": {
+    "beforeDevCommand": "cd ../../site && npm run dev",
+    "beforeBuildCommand": "cd ../../site && NEXT_PUBLIC_BASE_PATH='' npm run build",
+    "devUrl": "http://localhost:3000/sparq",
+    "frontendDist": "../../site/out"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "sparq — RDF + SPARQL workbench",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "RDF + SPARQL workbench (MVP scaffold)",
+    "longDescription": "A cross-platform desktop workbench for the sparq RDF + SPARQL engine. Reuses the sparq web frontend in a native webview and links the engine directly as native Rust (full native store, not the WASM read-replica). MVP scaffold."
+  }
+}
