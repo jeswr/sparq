@@ -1,3 +1,4 @@
+<!-- [OPUS-4.8] sq-4lvq: README brought to template (deferred from sq-inzv). -->
 # sparq-sim
 
 **Training-free structural entity similarity** for the sparq RDF engine — an **opt-in**
@@ -52,14 +53,11 @@ weighted_jaccard(&sig_a, &sig_b);        // for callers that cache signatures
   fusion helpers, so the two signals combine without either crate depending on the other:
 
   ```rust,ignore
-  use sparq_sim::Sim;
-  use sparq_vectors::{fuse_rrf, RRF_K};
-
   let structural = Sim::new(&graph).most_similar(&query, 50);
   let text: Vec<(_, f64)> = index.nearest_term(&query, &graph, &store, 50)
       .into_iter().map(|(t, s)| (t, s as f64)).collect();
   // Reciprocal Rank Fusion: rank-based, no score normalization needed.
-  let hybrid = fuse_rrf(&[&text, &structural], RRF_K, 10);
+  let hybrid = sparq_vectors::fuse_rrf(&[&text, &structural], sparq_vectors::RRF_K, 10);
   ```
 
   Over-fetch each signal (k = 50 for a top-10 fusion) so the fusion has overlap to reward.
@@ -68,10 +66,9 @@ weighted_jaccard(&sig_a, &sig_b);        // for callers that cache signatures
 ## Graph scoping
 
 `Sim::new(&graph)` operates on the store of whatever `Graph` it is handed — the **default
-graph** when you pass the top-level `&graph`, or a **single named graph** when you pass
-that graph's sub-`Graph`. On a quad dataset (loaded via `Graph::load_dataset` from
-N-Quads / TriG) each named graph is a self-contained `Graph`; fetch one by name with
-[`Graph::named_graph(&name)`][named-graph] (sq-quuu) and build a per-graph `Sim` over it:
+graph** for the top-level `&graph`, or a **single named graph** for that graph's
+sub-`Graph`. On a quad dataset each named graph is a self-contained `Graph`; fetch one by
+name with [`Graph::named_graph(&name)`][named-graph] (sq-quuu) and build a per-graph `Sim`:
 
 ```rust,ignore
 let g1 = graph.named_graph(&ex_g1).expect("graph exists");
@@ -90,14 +87,13 @@ the graph (or the default graph) explicitly rather than expecting the quads to b
 Olympics/Sport/City), ground truth = `rdf:type`, **type triples excluded** (leakage rule,
 design doc §5.5), stratified per-class sampling. The `olympics_eval` example reports
 quality + latency and checks the gates (same-class precision@10; `Predicates`-mode
-class-separation AUC; `most_similar(k=10)` latency); the absolute figures live on the
-perf dashboard.
+class-separation AUC; `most_similar(k=10)` latency); absolute figures live on the perf
+dashboard.
 
 ```sh
 cargo run -p sparq-sim --example olympics_eval --release
-# add `-- --json <path>` to also write the same accuracy + latency metrics as a
-# machine-readable JSON document (STDOUT unchanged; latency advisory/non-canonical)
-cargo run -p sparq-sim --example olympics_eval --release -- --json /tmp/sim.json
+# add `-- --json <path>` to also write accuracy + latency as machine-readable JSON
+# (STDOUT unchanged; latency advisory/non-canonical)
 ```
 
 **The two AUCs.** Pairwise AUC asks "do two random same-class entities score higher than
@@ -107,8 +103,8 @@ membership. Role similarity is the `Predicates` mode's job (near-perfect separat
 ranking task the crate is built for — `most_similar` retrieving same-class entities — is
 measured by precision@10, high across every class.
 
-Tests: 13 unit (`src/lib.rs`: Jaccard math, symmetry, direction, IDF ordering, exclusions,
-mode semantics, hub-cap behaviour, neighbor-sparse fallback, AUC gate) plus 1 integration
+Tests: 13 unit (Jaccard math, symmetry, direction, IDF ordering, exclusions, mode
+semantics, hub-cap, neighbor-sparse fallback, AUC gate) plus 1 integration
 (`tests/olympics.rs`, skip-if-absent at 1.78M scale).
 
 ## 📚 Learn more

@@ -1,8 +1,13 @@
+<!-- [OPUS-4.8] sq-4lvq: README brought to template (deferred from sq-inzv). -->
 # sparq-hdt
 
 Opt-in [HDT](https://www.rdfhdt.org/) (Header Dictionary Triples) reader (and,
 behind the `write` feature, writer) for the sparq RDF engine: load `.hdt` archives
-straight into a `sparq_core::Graph`, and save a `Graph` back out.
+straight into a `sparq_core::Graph`, and save a `Graph` back out. This is a separate
+crate so the core engine — and in particular the wasm build — carries zero HDT code
+or dependencies. Native-only by design.
+
+## 🚀 Quickstart
 
 ```rust,no_run
 # fn main() -> Result<(), sparq_hdt::Error> {
@@ -23,10 +28,7 @@ In sparq-cli (behind the opt-in `hdt` cargo feature —
 `cargo build -p sparq-cli --features hdt`), the `hdt` format argument or a
 `.hdt`/`.hdt.gz` file extension routes loading through this crate.
 
-This is a separate crate so the core engine — and in particular the wasm build —
-carries zero HDT code or dependencies. Native-only by design.
-
-## What it does
+## ✨ Features
 
 - Wraps the maintained [`hdt`](https://crates.io/crates/hdt) crate
   (KonradHoeffner/hdt, MIT) for the binary decode rather than reimplementing the
@@ -52,68 +54,51 @@ carries zero HDT code or dependencies. Native-only by design.
 - **Header access**: `header()` / `header_reader()` decode just the dataset
   metadata triples (the "H" in HDT) into a queryable `Graph` without touching
   the dictionary/triples sections.
+- **Writing** (opt-in `write` feature): `save(&graph, path)` serialises a `Graph` to a
+  standard-layout `.hdt` (or `.hdt.gz`/`.hdt.zst`/`.hdt.bz2`, chosen by the output
+  extension), encoding the HDT sections **directly** from sparq's in-memory dictionary +
+  triple ids (`src/encode.rs`) — no temporary N-Triples file, no text re-parse. The bytes
+  are interoperable standard HDT v1.0; the PFC dictionary and the BitmapTriples payload are
+  byte-for-byte identical to the upstream builder's output (proven in
+  `tests/write_roundtrip.rs`). HDT carries a single default graph, so named graphs are
+  ignored; an RDF 1.2 quoted-triple term cannot be written (standard HDT has no
+  representation for it) and `save` returns `Error::Term`.
 
 ## Validation
 
-`tests/roundtrip.rs`:
-
-- `snikmeta.hdt` — a real-world archive vendored from the `hdt` crate's test suite
-  (i.e. not produced by this code path) — must load to exactly the same 328-triple
-  set as its N-Triples rendering loaded through sparq's own parser.
-- A term-zoo N-Triples document round-tripped through a generated HDT archive
-  (unicode, lang tags, datatypes, blank nodes, shared subject/object terms,
-  inline-integer literals) must match sparq's direct N-Triples load.
-
-`tests/write_roundtrip.rs` (the `write` feature): a `Graph` saved with `save` and
-reloaded with `load` must equal the original term set — over the term zoo, a
-multi-block graph, the empty graph, all three compression containers, and the
-upstream-oracle load path (so the bytes `save` writes are spec-conformant, not just
-something our own decoder accepts). One test goes further still: the direct
-encoder's **FourSectDict PFC bytes and BitmapTriples payload are byte-for-byte
-identical** to the upstream builder's output (`Hdt::read_nt` + `Hdt::write`) for the
-same graph (only the triples control-info preamble's property order differs — an
-upstream `HashMap` ordering both encoders share). The direct path also writes no
-temporary scratch file.
+`tests/roundtrip.rs`: `snikmeta.hdt` — a real-world archive vendored from the `hdt` crate's
+test suite (not produced by this code path) — must load to exactly the same triple set as
+its N-Triples rendering loaded through sparq's own parser; and a term-zoo N-Triples document
+(unicode, lang tags, datatypes, blank nodes, shared subject/object terms, inline-integer
+literals) round-tripped through a generated HDT archive must match sparq's direct N-Triples
+load. `tests/write_roundtrip.rs` (the `write` feature): a saved-then-reloaded `Graph` must
+equal the original term set over the term zoo, a multi-block graph, the empty graph, all
+three compression containers, and the upstream-oracle load path — and one test asserts the
+encoder's FourSectDict PFC bytes and BitmapTriples payload are byte-for-byte identical to the
+upstream builder's output (`Hdt::read_nt` + `Hdt::write`).
 
 ## Load throughput
 
-The `bench_load` example loads ~1M synthetic triples (100k subjects, 50 predicates,
-mixed IRI/literal objects) from a `.hdt` archive vs the equivalent `.nt.gz`, reporting
-size on disk, load time, and throughput for each. Run it for the numbers:
+The `bench_load` example loads ~1M synthetic triples from a `.hdt` archive vs the equivalent
+`.nt.gz`, reporting size, load time, and throughput. HDT loads faster than gunzip-and-parse;
+on real corpora with heavier term reuse HDT archives are typically several times smaller than
+gzipped N-Triples, which is the format's main draw alongside no-text-parse loading. Run it for
+the numbers (tracked figures live on the perf dashboard):
 
 ```sh
 cargo run --release -p sparq-hdt --example bench_load
-# add `-- --json <path>` to also write the same measurements as a machine-readable
-# JSON document (STDOUT unchanged; timings are advisory/non-canonical, nothing committed)
+# add `-- --json <path>` to also write the measurements as machine-readable JSON
+# (STDOUT unchanged; timings are advisory/non-canonical, nothing committed)
 cargo run --release -p sparq-hdt --example bench_load -- --json /tmp/hdt.json
 ```
 
-HDT loads faster than gunzip-and-parse. On synthetic data with mostly unique literal
-objects the HDT file is about the size of the `.nt.gz`; on real corpora with heavier
-term reuse HDT archives are typically several times smaller than gzipped N-Triples,
-which is the format's main draw alongside no-text-parse loading.
+## 📚 Learn more
 
-## Writing (opt-in `write` feature)
+- Skill: `skills/hdt-format/SKILL.md`
+- Perf dashboard: <https://jeswr.github.io/sparq/dev/bench>
+- Not yet supported / open work: `bd list -l area:sparq-hdt` (the decode-only ingest fast
+  path; upstream notes in `UPSTREAM.md`).
 
-`save(&graph, path)` serialises a `Graph` to a standard-layout `.hdt` (or
-`.hdt.gz` / `.hdt.zst` / `.hdt.bz2`, chosen by the output extension). HDT carries a
-single default graph, so named graphs are ignored.
+## License
 
-**How.** `save` encodes the HDT sections **directly** from sparq's in-memory
-dictionary + triple ids (`src/encode.rs`, the inverse of `src/decode.rs`) — **no
-temporary N-Triples file, no text re-parse**. It feeds the wrapped crate's public
-section builders/writers (`DictSectPFC::compress` for the four PFC sections,
-`TriplesBitmap::from_triples` for the SPO BitmapTriples) and replays
-`Hdt::write`'s section order (global control info → header → `FourSectDict` →
-`TriplesBitmap`). The bytes are interoperable standard HDT v1.0; the PFC dictionary
-and the BitmapTriples payload are byte-for-byte identical to the upstream builder's
-output (proven in `tests/write_roundtrip.rs`). Enable with `--features write`.
-
-A graph containing an RDF 1.2 quoted-triple term cannot be written (standard HDT
-has no representation for it); `save` returns `Error::Term` in that case.
-
-## Not (yet) supported
-
-See the open beads for this crate (`bd list -l area:sparq-hdt`): the decode-only
-ingest fast path (we already roll our own in `decode.rs`; upstream builds
-pattern-query indexes ingest never uses — queued in `UPSTREAM.md`).
+MIT. [OPUS-4.8] sq-4lvq
