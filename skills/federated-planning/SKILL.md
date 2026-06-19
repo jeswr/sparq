@@ -182,6 +182,26 @@ to join (the **suffix**).
   shift converges past it in a few samples. The `latency_floor`/`latency_cap` clamp is kept as a
   **final guard**. `RuntimeStats::with_latency_alpha(α)` overrides (α = 1.0 ⇒ un-smoothed
   last-sample behaviour); higher α = faster-tracking/twitchier, lower α = calmer/laggier.
+- **EWMA refinements (sq-3xkz) — per-source α, time-aware decay, eviction — all opt-in,
+  default-off.** Three knobs sharpen the EWMA when a `RuntimeStats` is reused across queries;
+  each defaults to off so the default path is byte-identical to the single-global-α EWMA above.
+  - **Per-source adaptive α.** `RuntimeStats::set_source_alpha(source, α)` /
+    `with_source_alpha` gives a source its own smoothing rate; `latency_alpha` is the *fallback*
+    and `effective_alpha(source)` resolves the override-else-global α. An **empty** override map
+    ⇒ every source uses the global α ⇒ the prior behaviour reproduced. This ships the MECHANISM
+    + a sensible default; choosing a *good* per-source α needs a real federated workload, so that
+    **tuning is deferred** — no α value is claimed optimal.
+  - **Time-aware decay.** The plain EWMA equal-weights samples regardless of the gap between
+    them; `record_source_latency_after(source, latency, elapsed)` with a half-life set
+    (`set_decay_half_life` / `with_decay_half_life`) inflates the effective α toward `1.0` as the
+    elapsed gap grows past the half-life (`α_eff = α₀ + (1−α₀)·(1 − 0.5^(Δt/half_life))`), so a
+    fresh sample after a long idle gap is trusted more and stale history decays toward the prior.
+    The elapsed gap is **passed in** (the logical clock is injectable, never read internally), so
+    the decay is deterministic + testable. No half-life ⇒ folds at the plain α (back-compat).
+  - **Staleness / eviction.** `evict_stale(max_age)` drops every source whose `source_age`
+    (`clock − last_seen`, on the same injectable logical clock) exceeds the threshold (strictly
+    greater; equal is kept), returning the count evicted — so a stale latency stops biasing a
+    long-lived store. `advance_clock(elapsed)` ages entries without recording a sample.
 - **Hysteresis** — the re-planned suffix is adopted **only** if its estimated remaining cost
   (cardinality- **and** latency-weighted) beats the current suffix's by more than
   `ReplanPolicy::improvement_margin` (default 10%), with a hard `max_replans` budget
