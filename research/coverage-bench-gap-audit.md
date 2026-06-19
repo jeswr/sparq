@@ -11,6 +11,32 @@ feature-matrix lane, and the benchmark registry) — NOT by running the heavy
 both epics are **already heavily executed** — most children are closed and the registry is
 comprehensive. The headline is "substantially covered; one genuine new gap."
 
+> **UPDATE 2026-06-19 — decomposition pass (SPARQ agent, `[OPUS-4.8]`).** Two findings
+> below are now **stale** and were corrected when sq-bif/sq-5o5 were decomposed into pickable
+> children:
+>
+> - **Finding #4 is obsolete.** `crates/sparq-fedplan` and `crates/sparq-prov` are no longer
+>   empty scratch dirs — they (plus `sparq-fedclient`) are now **tracked workspace members**
+>   with real `src/` + tests (~30/50/150 `#[test]`s). The brief's premise that they are
+>   bench-/test-coverage candidates is **correct**.
+> - **Finding #1 (audit-log) is resolved** — `sq-wuft` (audit-log + filtered-ann
+>   feature-matrix legs) is now **closed**.
+>
+> The real, verified gaps found in this pass (and beaded): seven newer crates
+> (`sparq-fedclient`, `sparq-fedplan`, `sparq-prov`, and the four `-wasm` binding crates) are
+> absent from **both** `bench/coverage-floor.json` AND `bench/coverage-presence.json` despite
+> carrying real tests — neither coverage gate tracks them (`sq-bif.1`, then per-crate suites
+> `sq-bif.2/.3/.4`). The "9 bench-missing crates" drift items are mostly a **tool divergence**:
+> `gate-new-crate.py` (G1) exempts `publish = false` crates from the bench requirement, but
+> `drift-scan.py::scan_bench_missing` does not — reconciling that clears 5-7 false items
+> (`sq-bif.5`). The ZK estate's benches **exist** (`bench/zk*`) but are `source`-attributed to
+> `bench/` paths not `crates/`, so they read as bench-missing — an attribution fix (`sq-5o5.1`),
+> with FEATURED-row promotion as a follow-up (`sq-5o5.3`). The "14 dashboard-row" drift items
+> are mostly registered-but-non-promotable suites needing the documented `featured = false`
+> escape hatch (`sq-5o5.2`); the GenAI rows (sim/introspect/nlq) are already owned by the open
+> `sq-v4if`. The "prettier dashboard + latest-commit summary table" is **done** (`sq-apq`
+> closed). No manufactured gaps; legitimate exemptions left un-beaded.
+
 ## Method — the signals I read (not re-ran)
 
 - **Coverage ratchet** `bench/coverage-floor.json` (per-crate line-% floors, only-rises) +
@@ -89,7 +115,7 @@ Verified open and correctly scoped; not re-beaded:
   micro-bench, deterministic serve/server micro-metric, FedBench (blocked on SERVICE).
 - `sq-v4if`: wire the four GenAI crates into the nightly perf gates.
 
-### 4. NOT A GAP — stale empty scratch dirs `crates/sparq-fedplan`, `crates/sparq-prov`
+### 4. ~~NOT A GAP — stale empty scratch dirs `crates/sparq-fedplan`, `crates/sparq-prov`~~ (SUPERSEDED 2026-06-19 — see the UPDATE block above; these are now real tracked crates)
 
 Both directories exist on disk but are **empty and git-untracked** (no `Cargo.toml`, no `src/`,
 `git ls-files` returns nothing). They are not workspace members and not real crates — local
