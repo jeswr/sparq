@@ -54,10 +54,15 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
 - **`VectorStore`** — memory-mapped `.spqv` store; `get` is one binary search + a contiguous
   `&[f32]`; corrupt files are rejected up front. `open_from_bytes` for filesystem-less use.
 - **Graph-staleness guard** — stores are keyed by dictionary id, so a store built against one
-  graph silently mis-resolves after a dict-id-shifting rebuild. Both `.spqv`/`.spqg` headers
-  embed a graph **fingerprint** (`with_fingerprint` / `build_for`); the checked query paths
+  graph silently mis-resolves after a graph change that shifts dict ids. Both `.spqv`/`.spqg`
+  headers embed a graph **fingerprint** (`with_fingerprint` / `build_for`); the checked query paths
   (`nearest_term_exact_checked`, `DiskAnnIndex::nearest_term_checked`, `check_graph`) return a
-  descriptive error on a mismatch instead of wrong neighbours.
+  descriptive error on a mismatch instead of wrong neighbours. The fingerprint folds the dictionary
+  **term set** in a **dict-id-order-independent** (sorted) order, so it is **stable across
+  `RAYON_NUM_THREADS`** (sq-xhiv): re-loading the *same* source RDF at a different thread count —
+  which assigns dict ids in a thread-count-dependent order — fingerprints **identically** and does
+  not spuriously mismatch, while a genuine term add / remove / edit still changes it. (It is an
+  integrity check for accidental staleness, not a security/tamper primitive — see the module docs.)
 - **`StreamingWriter`** — build stores bigger than RAM with O(1) build-phase memory;
   byte-identical output to the in-RAM builder.
 - **Search** — `nearest_exact` (answer-exact ground-truth baseline) and the persistent on-disk

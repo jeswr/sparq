@@ -94,7 +94,9 @@ embed_entities(&Graph, &mut VectorStore, &impl Embedder, &EntityTextConfig) -> R
 VectorStore::create(p, dim)?.with_fingerprint(&Graph)   // bind store to its graph; finalize embeds it in the .spqv header
 StreamingWriter::create_with_fingerprint(p, dim, &Graph) // same for the streaming builder
 store.fingerprint() -> Option<Fingerprint>;  store.check_graph(&Graph) -> Result<(), String>   // None / mismatch -> Err
-// fingerprint = dict_len + triple_count + content_hash over id-ordered dict terms; legacy v1 files open but check_graph errs
+// fingerprint = dict_len + triple_count + content_hash over the dict term SET in a dict-id-order-INDEPENDENT (sorted) order
+//   (sq-xhiv: stable across RAYON_NUM_THREADS, so re-loading the same RDF at a different thread count does NOT spuriously
+//   mismatch; a genuine term add/remove/edit still does); legacy v1 files open but check_graph errs
 
 // --- search (src/ann.rs) --- all return cosine in [-1,1], best first; zero query -> empty
 nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan
@@ -182,9 +184,11 @@ prepare_vec_approx(&Graph, &str, &VectorStore, &DiskAnnIndex) -> Result<Prepared
 //   The FILTERED path is unchanged (still cost-model'd nearest_filtered_costed); approx seam = unfiltered scan only.
 // [OPUS-4.8] sq-36ol: with `filtered-ann` ALSO on, the BGP→IdMask a constrained `vec:` neighbour
 //   derives is CACHED across prepares, keyed by (constraining sub-BGP, graph Fingerprint). The
-//   fingerprint folds dict_len + triple_count + an id-ordered content hash, so ANY graph change
-//   misses the cache and recomputes — a stale mask is never served (invalidation is SOUND; when in
-//   doubt it misses). The cache is thread-local and transparent (no API change; same answers).
+//   fingerprint folds dict_len + triple_count + a content hash over the dict term SET in a
+//   dict-id-order-INDEPENDENT (sorted) order (sq-xhiv), so ANY genuine graph change misses the cache
+//   and recomputes — a stale mask is never served (invalidation is SOUND; when in doubt it misses) —
+//   while a thread-count-only dict-id permutation of an unchanged graph correctly HITS (same mask).
+//   The cache is thread-local and transparent (no API change; same answers).
 ```
 
 ## Common recipes

@@ -105,6 +105,12 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # only and never enters the published dependency graph.
 [dev-dependencies]
 sparq-sim = { path = "../sparq-sim" }
+# [OPUS-4.8] sq-xhiv: DEV-only. The fingerprint thread-count-stability regression tests drive the
+# SAME parallel sharded dict merge the loader uses at two explicit thread counts via a scoped rayon
+# pool (`RAYON_NUM_THREADS` is read once per process, so it cannot be varied mid-test). rayon is NOT
+# a library dependency of this crate — it stays a test-only dependency and never enters the published
+# graph; the fingerprint itself depends only on sparq-core's public read API.
+rayon = { workspace = true }
 
 # [OPUS-4.8] sq-ip3a: the bench example measures HNSW (`VectorIndex`) recall/build, so it needs the
 # approximate backend. Gating it on `approx-ann` keeps `cargo build --all-targets` (default features)
