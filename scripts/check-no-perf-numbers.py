@@ -80,17 +80,40 @@ ALLOW_PATH_PREFIXES = [
     ".github/",
 ]
 
-# Globs of files to scan (markdown only).
-SCAN_GLOBS = ["*.md"]
+# Globs of files to scan. Markdown is the original surface; the published-paper Typst
+# sources (`site/papers/**/*.typ`) are ALSO scanned so a hard-coded perf figure typed
+# directly into a paper — the highest-stakes OUTWARD surface — trips the gate too
+# (bead sq-mkza). The `.typ` glob is git-tracked workspace-wide, so it is narrowed to
+# the paper tree by TYPST_SCAN_PREFIX below; non-paper `.typ` (if any ever appear) are
+# left alone. Result numbers in a paper are meant to flow through the Typst data
+# accessor (`paper-evidence.json` → `#headline(...)` / `#ev(...)`), NOT be typed inline.
+SCAN_GLOBS = ["*.md", "*.typ"]
+
+# Only `.typ` files under this prefix are scanned (the paper-factory sources). The
+# accessor-aware, result-shaped-only `.typ` scan (scan_typst_file) is deliberately
+# NARROWER than the markdown scan — see its docstring and design record
+# research/paper-factory-honesty-gate-coverage.md §7 (Option b: scan for result-shaped
+# numerics only, leave free-typed setup counts — dataset sizes / dimensions / k — alone,
+# for author ergonomics). It catches only the COARSE perf-number class; subtle semantic
+# overclaims remain Stage-5 human review.
+TYPST_SCAN_PREFIX = "site/papers/"
 
 
-def tracked_markdown() -> list[str]:
-    """All git-tracked markdown files (deterministic, no untracked scratch)."""
+def is_typst_paper(path: str) -> bool:
+    return path.endswith(".typ") and path.startswith(TYPST_SCAN_PREFIX)
+
+
+def tracked_sources() -> list[str]:
+    """All git-tracked files in scope (markdown everywhere; `.typ` only under the
+    paper tree). Deterministic, no untracked scratch."""
     out = subprocess.run(
         ["git", "ls-files", *SCAN_GLOBS],
         capture_output=True, text=True, check=True,
     ).stdout
-    return [p for p in out.splitlines() if p]
+    return [
+        p for p in out.splitlines()
+        if p and (p.endswith(".md") or is_typst_paper(p))
+    ]
 
 
 def is_exempt_path(path: str) -> bool:
@@ -138,6 +161,98 @@ def scan_file(path: str) -> list[tuple[int, str, str]]:
     return findings
 
 
+# --- Typst (.typ) paper scan ------------------------------------------------------
+# [OPUS-4.8] bead sq-mkza. The paper-factory rule is: RESULT numbers flow through the
+# Typst data accessor (`paper-evidence.json` → `#headline(key)` / `#ev(key)` /
+# `#provenance(key)`), so the PDF and the in-site HTML cannot disagree and a number
+# auto-updates with the evidence. A result-shaped figure typed DIRECTLY into prose
+# bypasses that single-source discipline — that is what this scan flags. It reuses the
+# SAME result-shaped PERF_PATTERNS as the markdown scan (a number adjacent to a
+# throughput / latency / speed-up / size-per-record unit), so it is NARROW by
+# construction: bare SETUP counts (dataset sizes, dimensions, k, query counts, years,
+# citation numbers) are NOT result-shaped and are left alone (design §7, Option b).
+#
+# Two `.typ`-specific suppressions, so the accessor path and Typst comments never trip:
+#   - ACCESSOR-AWARE: the value a paper is allowed to cite comes IN through an accessor
+#     call whose argument is a string KEY (e.g. `#headline("ann.recall_at_10_floor")`),
+#     never a numeric literal — so we strip accessor-call argument spans before matching.
+#     This makes the legitimate canonical-data path provably unflaggable even if a future
+#     key string happened to contain a unit-like substring.
+#   - COMMENTS: Typst `//` line comments and `/* … */` block comments are author notes,
+#     not published claims — stripped before matching (mirrors the markdown code-fence skip).
+# Honest scope: this catches only the COARSE hard-coded-number class. A subtle semantic
+# overclaim phrased without a result-shaped unit is NOT caught here — that remains
+# Stage-5 human review (and the build-time headline() canonical gate in bench.typ).
+
+# Accessor calls whose (string-key) argument span must be removed before scanning, so a
+# unit-like substring inside a legitimate evidence KEY can never be read as a perf claim.
+TYPST_ACCESSOR_CALL_RE = re.compile(
+    r"#(?:headline|ev|provenance)\s*\([^)]*\)", re.I
+)
+
+
+def _strip_typst_noise(line: str, in_block_comment: bool) -> tuple[str, bool]:
+    """Return (scannable-text, still-in-block-comment) for one Typst source line.
+
+    Removes `/* … */` block-comment spans (possibly multi-line), `//` line comments,
+    and accessor-call argument spans — what's left is the free-typed prose the gate
+    actually judges. Conservative: a `//` or `/*` inside a string literal is rare in
+    these papers and erring toward STRIPPING (a false-negative on a contrived line)
+    is the safe direction for an author-ergonomics gate; the result tables themselves
+    are accessor-driven and unaffected.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        if in_block_comment:
+            end = line.find("*/", i)
+            if end == -1:
+                return "".join(out), True  # comment continues past EOL
+            i = end + 2
+            in_block_comment = False
+            continue
+        # Start of a block comment?
+        if line.startswith("/*", i):
+            in_block_comment = True
+            i += 2
+            continue
+        # Start of a line comment? (rest of the line is a comment)
+        if line.startswith("//", i):
+            break
+        out.append(line[i])
+        i += 1
+    text = "".join(out)
+    # Remove accessor-call argument spans (the canonical-data path).
+    text = TYPST_ACCESSOR_CALL_RE.sub(" ", text)
+    return text, in_block_comment
+
+
+def scan_typst_file(path: str) -> list[tuple[int, str, str]]:
+    """Accessor-aware, result-shaped-only scan of a paper `.typ` source (bead sq-mkza)."""
+    findings: list[tuple[int, str, str]] = []
+    in_block_comment = False
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for lineno, raw in enumerate(fh, 1):
+                line = raw.rstrip("\n")
+                # The inline allow-substrings (incl. the explicit `perf-ok:` opt-out and
+                # the canonical-home pointers) apply here too, on the RAW line.
+                if any(sub in line for sub in ALLOW_LINE_SUBSTRINGS):
+                    continue
+                scannable, in_block_comment = _strip_typst_noise(line, in_block_comment)
+                if not scannable.strip():
+                    continue
+                for pat, label in PERF_PATTERNS:
+                    m = pat.search(scannable)
+                    if m:
+                        findings.append((lineno, label, m.group(0).strip()))
+                        break  # one finding per line is enough to flag it
+    except (OSError, UnicodeDecodeError) as e:
+        raise FileReadError(f"{path}: could not read: {e}") from e
+    return findings
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -150,12 +265,13 @@ def main() -> int:
     )
     ap.add_argument(
         "paths", nargs="*",
-        help="optional explicit paths to scan (default: all git-tracked markdown, "
-             "minus the bench/research/changelog allowlisted homes)",
+        help="optional explicit paths to scan (default: all git-tracked markdown + the "
+             "paper-factory .typ sources, minus the bench/research/changelog "
+             "allowlisted homes). A `.typ` path uses the accessor-aware Typst scan.",
     )
     args = ap.parse_args()
 
-    files = args.paths or [p for p in tracked_markdown() if not is_exempt_path(p)]
+    files = args.paths or [p for p in tracked_sources() if not is_exempt_path(p)]
 
     total = 0
     read_errors = 0  # [OPUS-4.8] unreadable files — never silently skipped
@@ -164,7 +280,12 @@ def main() -> int:
         if not args.paths and is_exempt_path(path):
             continue
         try:
-            file_findings = scan_file(path)
+            # [OPUS-4.8] sq-mkza: `.typ` paper sources use the accessor-aware,
+            # result-shaped-only scan; everything else uses the markdown scan.
+            if path.endswith(".typ"):
+                file_findings = scan_typst_file(path)
+            else:
+                file_findings = scan_file(path)
         except FileReadError as e:
             # [OPUS-4.8] Warn on stderr always; in --enforce/non-advisory mode this
             # also counts as a failure below so a hidden file can't pass silently.

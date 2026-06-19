@@ -105,16 +105,28 @@ SOUNDNESS_CLAIMS=(
 NEGATOR_HEDGE_RE='\bnot\b|\bnever\b|\bno\b|\bn'"'"'t\b|\bun(sound|verified|audited)|not[- ]yet|yet[- ]to|\bopen\b|\bpending\b|\bunverified\b|\bremediat|sound[- ]+as[- ]+landed|sound[- ]+for[- ]+(the[- ]+)?(integrity|threat|assumed|stated)|\bwhether\b|\bquestion\b'
 
 # Path surface to scan = the OUTWARD claim surface (docs/READMEs/skills/site copy /
-# the compliance index). Excludes:
+# the compliance index / the published-paper Typst sources). Excludes:
 #   - research/ + the audit docs : design records that must name the properties to
 #     argue (un)soundness — the honesty source of truth, not a claim surface.
 #   - this script + its CI wiring : they QUOTE the forbidden phrases by definition.
 #   - the privacy/cryptoreview compliance bodies : they exist to discuss the gap and
 #     are line-marked where they legitimately name a phrase.
 #   - .git/target/node_modules/vendor : not authored claim surface.
+#
+# [OPUS-4.8] bead sq-mkza: the paper-factory `.typ` sources (`site/papers/*.typ` +
+# `site/papers/**/*.typ`, i.e. the pilot papers AND `_lib/*.typ`) are added — a `.typ`
+# paper IS a published outward claim, so an unqualified ZK/MPC soundness/privacy claim
+# typed into paper prose must trip the SAME absolute patterns as any README/site copy.
+# The exact inline-allow marker (`privacy-claims-allow: <why>`) and the same-line
+# negator/hedge exemption apply UNCHANGED (the per-line classification below is reused
+# verbatim). Typst `//`/`/* */` comments are NOT stripped here — a forbidden phrase in
+# a paper comment is still authored text, matching this gate's coarse-phrase posture.
+# This catches the COARSE unqualified-claim class; a subtle semantic overclaim phrased
+# around the patterns remains Stage-5 human review.
 mapfile -t FILES < <(
   git ls-files \
     '*.md' '*.mdx' '*.tsx' '*.ts' \
+    'site/papers/*.typ' 'site/papers/**/*.typ' \
     ':!:research/**' \
     ':!:**/*audit*.md' \
     ':!:.claude/agents/**' \

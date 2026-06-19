@@ -263,6 +263,19 @@ jobs:
           tool: lychee@0.23.0
       - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
         run: bash scripts/tests/test_check_site_links.sh
+      # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
+      # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
+      # OUTWARD surface. Before sq-mkza a hard-coded "12× faster" or an unqualified
+      # "maliciously secure" typed straight into a paper tripped NEITHER gate. The
+      # harness drives the REAL gate scripts (the perf gate by explicit `.typ` path;
+      # the privacy gate via a throwaway git repo, since it enumerates with
+      # `git ls-files`) and asserts a planted violation FAILS while the accessor /
+      # comment / negator / allow-marker paths PASS. HARD job (no "advisory" token),
+      # so a coverage regression also reds the ci-summary gate.
+      - name: shellcheck the .typ honesty-gate self-test
+        run: shellcheck scripts/tests/test_typ_honesty_gates.sh
+      - name: Self-test the .typ honesty-gate coverage (perf + privacy, both directions)
+        run: bash scripts/tests/test_typ_honesty_gates.sh
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
