@@ -4,6 +4,8 @@
 # Produces, into $OUT_DIR (default: ./sbom):
 #   - sparq-cli-<version>.sbom.cdx.json     CycloneDX SBOM for the released sparq-cli binary
 #   - sparq-server-<version>.sbom.cdx.json  CycloneDX SBOM for the released sparq-server binary
+#   - sparq-gui-<version>.sbom.cdx.json     CycloneDX SBOM for the Tauri desktop GUI shell
+#                                           (gui/src-tauri; sq-8n1c — the released desktop bundles)
 #   - sparq-<version>.vex.cdx.json          the checked-in VEX (supply-chain/vex.cdx.json) with
 #                                           the released version + a generated timestamp stamped in
 #
@@ -63,6 +65,30 @@ done
 
 # Discard the per-member SBOMs we don't ship (keeps the worktree clean for `git status`).
 find crates -name '*.cdx.json' -delete
+
+# [OPUS-4.8] sq-8n1c: per-release CycloneDX SBOM for the Tauri desktop GUI shell. The release
+# ships UNSIGNED desktop bundles (.dmg/.msi/.exe/.deb/.AppImage) built from gui/src-tauri, so
+# its dependency tree (Tauri + the webview bindings) must be enumerated for "SBOM rides for
+# free" to be literally true. The GUI crate is a STANDALONE crate root (its own empty
+# `[workspace]`, excluded from the main workspace), so the `cargo cyclonedx --all` above does
+# NOT reach it — generate it separately from inside gui/src-tauri. cargo-cyclonedx resolves the
+# dependency graph from Cargo.lock WITHOUT compiling (no webkit/system libs needed), so this
+# runs on the same plain ubuntu runner as the rest of this script. Default feature set, to
+# match the shipped bundle. Then normalize (abs-path scrub) + leak-check identically to the
+# CLI/server SBOMs above.
+if [ -f gui/src-tauri/Cargo.toml ]; then
+  echo "==> generating CycloneDX SBOM (GUI shell, sparq ${VERSION})"
+  ( cd gui/src-tauri && cargo cyclonedx --format json --spec-version 1.5 )
+  gui_src="gui/src-tauri/sparq-gui.cdx.json"
+  gui_dst="$OUT_DIR/sparq-gui-${VERSION}.sbom.cdx.json"
+  jq -f "$NORMALIZE_JQ" "$gui_src" > "$gui_dst"
+  find gui/src-tauri -name '*.cdx.json' -delete
+  if grep -qE 'path\+file://|download_url=file://|/home/' "$gui_dst"; then
+    echo "ERROR: host path leaked into $gui_dst after normalization" >&2
+    exit 1
+  fi
+  echo "    -> $gui_dst (abs-path-normalized)"
+fi
 
 echo "==> stamping VEX (sparq ${VERSION})"
 VEX_OUT="$OUT_DIR/sparq-${VERSION}.vex.cdx.json"

@@ -86,10 +86,187 @@ jobs:
           path: sbom/*.json
           if-no-files-found: error
 
+  # ---- 1c. Tauri desktop GUI bundles (UNSIGNED) ----
+  # [OPUS-4.8] sq-8n1c: build the cross-platform Tauri 2 desktop INSTALLERS — .dmg (+ .app)
+  # on macOS, .msi + NSIS .exe on Windows, .deb + .AppImage on Linux — as ADDITIONAL release
+  # artifacts on the same desktop platforms the `package` matrix already covers, per the GUI
+  # design record (research/gui-design.md §3 "Releases"). They are SLSA build-provenance
+  # attested here (subject-path below), uploaded as `pkg-gui-<label>`, and the `release` job's
+  # `pattern: pkg-*` download then folds them into SHA256SUMS + the GitHub Release for free —
+  # so the existing SBOM/VEX/provenance/checksum estate covers them with no bespoke wiring.
+  #
+  # UNSIGNED — and that is a deliberate, honest limitation, NOT an oversight:
+  #   * macOS bundles are NOT codesigned/notarized (Apple Developer ID cert + notarytool key
+  #     are maintainer-held) -> Gatekeeper will quarantine them on download.
+  #   * Windows .msi/.exe are NOT Authenticode-signed (EV/OV cert is maintainer-held)
+  #     -> SmartScreen will warn on download.
+  # Real OS-level signing is the SEPARATE needs:user bead sq-v286.8 (Apple Developer ID +
+  # Windows Authenticode); this job MUST NOT fabricate signing. The SLSA attestation below
+  # proves WHO BUILT the bundle (build provenance), which is orthogonal to and NOT a substitute
+  # for OS code-signing. Until sq-v286.8 lands, these are test-/developer-install bundles.
+  #
+  # SCOPE — desktop installers only. The matrix covers exactly the desktop (platform, arch)
+  # pairs that produce a native installer, one row per pair (NOT per microarch tier — a .deb is
+  # arch-keyed, not -Ctarget-cpu-keyed, so the x64-linux baseline/v2/v3/v4 split the `package`
+  # matrix carries collapses to ONE Linux-x64 bundle row here). Runner labels are the EXACT set
+  # proven in build-matrix.yml + gui.yml so the GUI and CLI/server matrices cannot drift.
+  #
+  # win-arm64 is DELIBERATELY ABSENT: build-matrix.yml produces the aarch64-pc-windows-msvc
+  # CLI/server binaries by CROSS-LINKING from the x64 Windows runner, but the Tauri bundler runs
+  # the host-arch installer toolchain (NSIS/WiX) and cannot reliably cross-bundle an arm64
+  # Windows installer from an x64 host — so there is no win-arm64 GUI installer this pass (an
+  # honest gap, not a silent drop). Mobile (Android .aab / iOS .ipa) is the separate net-new
+  # bead sq-v286.9 — no rows here.
+  gui-bundle:
+    name: "GUI desktop bundle ${{ matrix.label }} (unsigned)"
+    runs-on: ${{ matrix.os }}
+    # SLSA build-provenance attestation over the produced bundles needs the OIDC token +
+    # attestation write; read-only on the repo otherwise (uploads a workflow artifact, the
+    # `release` job creates the Release).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    timeout-minutes: 60
+    strategy:
+      # One platform's bundler failure must not cancel the others — each desktop installer is
+      # independent. (A failed row WILL fail the `release` job via `needs`, which is correct:
+      # a release should not silently ship missing a platform's installer.)
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, label: arm64-darwin }
+          - { os: macos-15-intel, label: x64-darwin }
+          - { os: ubuntu-latest, label: x64-linux }
+          - { os: ubuntu-24.04-arm, label: arm64-linux }
+          - { os: windows-latest, label: win-x64 }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The Tauri webview + bundler system libraries are LINUX-ONLY (macOS ships WKWebView,
+      # Windows ships WebView2). This is the SAME apt set gui.yml installs to build the GUI
+      # crate; the bundler additionally needs the deb/appimage tooling, which these packages
+      # (+ patchelf, used by the AppImage bundler) provide.
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      # The Tauri `beforeBuildCommand` (tauri.conf.json) builds the site static export, whose
+      # `prebuild` hook (site/scripts/sync-wasm.mjs) needs the wasm bundle present in js/wasm/.
+      # Mirror gui.yml's site-build job: build the lean shacl,jsonld wasm bundle FIRST, then
+      # `cargo tauri build` drives the site export + the native bundle.
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build wasm bundle (shacl,jsonld)
+        working-directory: js
+        run: npm run build:wasm
+
+      - name: Install @sparq/client + site dependencies
+        shell: bash
+        run: |
+          (cd packages/sparq-client && npm install)
+          (cd site && npm install)
+
+      # tauri-cli (the `cargo tauri build` driver). Installed via `cargo install … --locked`,
+      # the SAME pattern gui.yml uses for wasm-pack / tauri-driver (a cargo install is not a
+      # pinned GitHub Action, so no SHA pin applies); `^2` tracks the Tauri 2 line the crate
+      # depends on (gui/src-tauri/Cargo.toml `tauri = { version = "2" }`).
+      - name: Install tauri-cli (v2)
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      # Build the UNSIGNED desktop bundle. `cargo tauri build` runs from gui/src-tauri, drives
+      # the `beforeBuildCommand` (the root-relative site export, NEXT_PUBLIC_BASE_PATH=''),
+      # compiles the native Rust shell, and bundles installers for the host platform into
+      # gui/src-tauri/target/release/bundle/<format>/. `--ci` disables interactive prompts;
+      # no signing env vars are set, so the bundles are produced UNSIGNED (see the job header
+      # — signing is needs:user sq-v286.8). `--verbose` aids first-CI-run diagnosis.
+      #
+      # PROVEN vs DOCUMENTED-UNTESTED (honest status — this workflow is tag-triggered, so it
+      # does NOT run on this PR; validate on the first real `v*` tag):
+      #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): the GUI crate build + webkit deps are
+      #     already proven green in gui.yml; the .deb/.AppImage bundle step is the new surface.
+      #   * macOS rows: WKWebView ships with the OS; the .dmg/.app bundle is documented-untested.
+      #   * Windows row: WebView2 ships with the OS, BUT tauri.conf.json's beforeBuildCommand
+      #     (`cd ../../site && NEXT_PUBLIC_BASE_PATH='' npm run build`) uses a Unix inline
+      #     env-var prefix that the default Windows shell (cmd) does NOT support. Making that
+      #     command Windows-portable is a gui/ (tauri.conf.json) change OUT OF SCOPE for this
+      #     release-workflow bead and is captured as a follow-up; the Windows row is therefore
+      #     documented-untested and may need that conf fix before its .msi/.exe row goes green.
+      - name: Build Tauri desktop bundle (unsigned)
+        working-directory: gui/src-tauri
+        run: cargo tauri build --ci --verbose
+
+      # Collect every produced installer into a flat staging dir under a stable, tier-keyed
+      # name so the release SHA256SUMS / Release assets are predictable. Tauri names bundles
+      # `<productName>_<version>_<arch>.<ext>` (e.g. `sparq_0.1.0_amd64.deb`), so we glob the
+      # bundle tree (resilient to the exact arch token) and prefix each with the matrix label.
+      # `if-no-files-found: error` on the upload + this `set -e` glob guard mean a bundler that
+      # silently produced nothing FAILS the job rather than shipping an empty release row.
+      - name: Stage GUI bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="gui/src-tauri/target/release/bundle"
+          OUT="gui-bundles"
+          mkdir -p "$OUT"
+          shopt -s nullglob globstar
+          found=0
+          # .dmg/.app (macOS), .deb/.AppImage/.rpm (Linux), .msi/.exe (Windows NSIS+WiX).
+          for f in "$BUNDLE_DIR"/dmg/*.dmg \
+                   "$BUNDLE_DIR"/deb/*.deb \
+                   "$BUNDLE_DIR"/appimage/*.AppImage \
+                   "$BUNDLE_DIR"/rpm/*.rpm \
+                   "$BUNDLE_DIR"/msi/*.msi \
+                   "$BUNDLE_DIR"/nsis/*.exe; do
+            base="$(basename "$f")"
+            cp "$f" "$OUT/sparq-gui-${GITHUB_REF_NAME}-${{ matrix.label }}-${base}"
+            found=$((found + 1))
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "ERROR: tauri build produced no installer bundles under $BUNDLE_DIR" >&2
+            find "$BUNDLE_DIR" -maxdepth 2 -type f 2>/dev/null || true
+            exit 1
+          fi
+          echo "staged $found GUI bundle(s) for ${{ matrix.label }}:"
+          ls -1 "$OUT"
+
+      # SLSA build-provenance over EVERY produced bundle (the subject-path) — this is the
+      # "rides for free" claim made literal: the bundle digests are bound to this workflow run
+      # and verifiable with `gh attestation verify <bundle> --repo <repo>`. (Provenance != OS
+      # code-signing; see the job header.)
+      - name: Attest build provenance (GUI bundles)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: gui-bundles/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pkg-gui-${{ matrix.label }}
+          path: gui-bundles/*
+          if-no-files-found: error
+
   # ---- 2. checksums + GitHub Release ----
   release:
     name: create GitHub Release
-    needs: [package, sbom]
+    needs: [package, sbom, gui-bundle]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release + upload assets — the only write this pipeline needs
@@ -118,7 +295,9 @@ jobs:
 
             `SHA256SUMS` covers every attached archive plus the CycloneDX SBOM + VEX: `shasum -a 256 -c SHA256SUMS`.
 
-            **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ github.ref_name }}.sbom.cdx.json`), a CycloneDX SBOM for the published npm/WASM client (`sparq-js-${{ github.ref_name }}.sbom.cdx.json` runtime tree + `sparq-js-dev-${{ github.ref_name }}.sbom.cdx.json` full build tree), and a VEX (`sparq-${{ github.ref_name }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
+            **Desktop GUI bundles (UNSIGNED).** This release also includes cross-platform [sparq GUI](https://github.com/${{ github.repository }}/tree/${{ github.ref_name }}/gui) desktop installers (`sparq-gui-${{ github.ref_name }}-*`): macOS `.dmg`, Windows `.msi` + NSIS `.exe`, and Linux `.deb` + `.AppImage`. **These bundles are NOT code-signed or notarized.** On macOS, Gatekeeper will quarantine them; on Windows, SmartScreen will warn. OS-level code-signing (Apple Developer ID notarization + Windows Authenticode) requires maintainer-held credentials and is tracked separately — until then, treat the GUI bundles as developer/test installs. The SLSA attestation below proves *who built* each bundle (build provenance); it is not a substitute for OS code-signing. (No `win-arm64` GUI installer yet — the Tauri bundler cannot cross-bundle it from the x64 Windows runner; no mobile app bundles yet.)
+
+            **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ github.ref_name }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ github.ref_name }}.sbom.cdx.json`), a CycloneDX SBOM for the published npm/WASM client (`sparq-js-${{ github.ref_name }}.sbom.cdx.json` runtime tree + `sparq-js-dev-${{ github.ref_name }}.sbom.cdx.json` full build tree), and a VEX (`sparq-${{ github.ref_name }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
           fail_on_unmatched_files: true
 
   # ---- 3. server container -> ghcr.io ----
