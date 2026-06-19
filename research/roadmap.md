@@ -118,7 +118,11 @@ reports into one prioritised design doc.
 instrument T1 and T2 are blind without. Additive — conflicts with nothing.
 
 ## T9 — SPARQL feature gaps
-- **Named graphs / GRAPH** — currently errors (`exec.rs:893`). Needs a quad store or graph-column.
+- **Named graphs / GRAPH — DONE** (sq-uls). The store is now a quad store: TriG / N-Quads /
+  JSON-LD `@graph` named graphs are preserved (`Graph::load_dataset`), `GRAPH <iri> { … }` /
+  `GRAPH ?g { … }`, `FROM` / `FROM NAMED` and `GRAPH`-block / `WITH` / `USING (NAMED)` Updates all
+  scope over them (`exec.rs` `eval_graph_named`; `update.rs`), and the RDF/JS surface exposes a
+  DatasetCore-faithful, graph-aware `match(s,p,o,g)` (JS `options.dataset` → `SparqStore.match`).
 - Property paths (`*`/`+`/`/`), SERVICE federation, remaining aggregates/expressions (the `M2:`
   markers at `exec.rs:2375/2640`). These touch `exec.rs` (conflict with T1).
 
