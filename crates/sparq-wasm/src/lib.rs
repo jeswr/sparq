@@ -77,6 +77,14 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "shacl")]
 mod shacl;
 
+// [OPUS-4.8] sq-fe1s: the opt-in `Store::serialize(format, …)` RDF-writer binding.
+// Behind the non-default `serialize-rdf` feature so the lean bundle carries zero
+// serializer code; the module adds a `#[wasm_bindgen] impl Store` method to the
+// `Store` below, calling straight through to `sparq-engine`'s pretty Turtle / TriG
+// writers (byte-identical to the native serialiser).
+#[cfg(feature = "serialize-rdf")]
+mod serialize;
+
 /// An immutable, dictionary-encoded RDF store queryable with SPARQL.
 #[wasm_bindgen]
 pub struct Store {

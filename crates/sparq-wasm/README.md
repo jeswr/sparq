@@ -51,6 +51,12 @@ const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, n
   `shacl` feature exposes a stateless `Store.validate(data, shapes, format)`
   (a drop-in for `rdf-validate-shacl`), also OFF by default. The `count()` family is
   **lazy** — counted straight from the sorted indexes with no per-solution row.
+- **Opt-in pretty serialiser.** The `serialize-rdf` feature (OFF by default) exposes
+  `Store.serialize(format, pretty, indent, abbreviate)` — the store's contents as a
+  **Turtle** (default graph) or **TriG** (whole dataset) document, in the engine's
+  pretty (sorted, blank-line-separated, indented) shape or the compact writer. It
+  calls straight through to `sparq-engine`'s pretty writers, so the output is
+  byte-identical to the native serialiser; the lean bundle carries no serializer code.
 - **Persistence is native-only** — the native `Graph::save` / `open` /
   `save_compressed` family and the mmap-backed map-in path are **deliberately not
   exported**: they need a POSIX filesystem and `mmap`, which a browser/edge wasm

@@ -965,6 +965,23 @@ pub fn graph_to_trig_pretty(graph: &Graph) -> String {
     write_trig_pretty(&view, &default_prefixes(), &PrettyOptions::default())
 }
 
+/// [OPUS-4.8] sq-fe1s: Serializes a [`Graph`] (default + named graphs) as PRETTY TriG with
+/// caller-supplied prefixes and options — the TriG-side symmetry of
+/// [`graph_to_turtle_pretty_with`], so a consumer that already holds a [`Graph`] can choose
+/// the indent / abbreviation without rebuilding the `(name, triples)` view by hand.
+pub fn graph_to_trig_pretty_with(
+    graph: &Graph,
+    prefixes: &Prefixes,
+    opts: &PrettyOptions,
+) -> String {
+    let owned = dataset_graphs(graph);
+    let view: Vec<NamedGraph<'_>> = owned
+        .iter()
+        .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+        .collect();
+    write_trig_pretty(&view, prefixes, opts)
+}
+
 // ===========================================================================
 // JSON-LD 1.1.
 //

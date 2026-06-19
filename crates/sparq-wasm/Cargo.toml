@@ -58,6 +58,13 @@ jsonld = ["sparq-core/jsonld"]
 # `sparq-engine/regex` and get them back (CONTAINS/STRSTARTS/STRENDS/LCASE/... are always
 # present — they are not behind this feature). OFF by default; the lean bundle is unchanged.
 regex = ["sparq-engine/regex"]
+# [OPUS-4.8] sq-fe1s: expose `sparq-engine`'s pretty Turtle / TriG writers as the
+# `Store::serialize(format, …)` wasm binding (so a browser store can emit a readable
+# Turtle/TriG document of its contents, not just the flat N-Triples `queryQuads` returns).
+# Forwards to `sparq-engine/serialize-rdf` (which carries the whole serializer matrix and
+# pulls NO new dependency). OFF by default so the lean `wasm_bundle_bytes` baseline is
+# byte-identical to before; the site REPL build (js `build:wasm`) turns it on.
+serialize-rdf = ["sparq-engine/serialize-rdf"]
 
 [dev-dependencies]
 # [OPUS-4.8] sq-9qz6 pt2 — headless wasm test harness. Exercises the #[wasm_bindgen]
