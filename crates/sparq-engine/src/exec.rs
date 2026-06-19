@@ -8451,7 +8451,7 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
             let subject: oxrdf::NamedOrBlankNode = match term_pattern_to_term(&t.subject)? {
                 Term::NamedNode(n) => n.into(),
                 Term::BlankNode(b) => b.into(),
-                _ => return Err("RDF-star triple-term subject must be an IRI or blank node".into()),
+                _ => return Err("RDF 1.2 triple-term subject must be an IRI or blank node".into()),
             };
             let predicate = match &t.predicate {
                 NamedNodePattern::NamedNode(n) => n.clone(),
