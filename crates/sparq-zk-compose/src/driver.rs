@@ -314,3 +314,153 @@ fn run(tool: &str, cmd: &mut Command) -> Result<(), DriverError> {
     }
     Ok(())
 }
+
+// [OPUS-4.8] sq-bif.6: GLUE unit tests for the nargo/bb subprocess wrapper's
+// ERROR-classification + tag-based path isolation. These are toolchain-FREE: they
+// drive the error arms with a guaranteed-absent binary (the `Spawn` arm) and a
+// real-but-failing binary (the `Tool` arm), and check the tag-isolation file-naming
+// glue against a scratch dir — NO nargo/bb proving, NO cryptographic claim. The
+// real proving e2e lives in `tests/e2e.rs`, gated on the toolchain being present.
+#[cfg(test)]
+mod driver_glue_tests {
+    use super::*;
+
+    /// A name no executable on a sane PATH resolves to — drives the `Spawn` arm
+    /// (`std::io::Error` from a failed `fork`/`exec`) deterministically, with or
+    /// without the nargo/bb toolchain installed.
+    const ABSENT_TOOL: &str = "sparq-zk-compose-no-such-tool-xyzzy";
+    /// A binary that EXISTS but always exits non-zero — drives the `Tool` arm
+    /// (the process ran but reported failure). POSIX `false` is universally present.
+    const FAILING_TOOL: &str = "/usr/bin/false";
+
+    // --- error classification: the `run` helper --------------------------
+
+    /// Spawning a non-existent tool is classified as `DriverError::Spawn` (a typed
+    /// error carrying the io source), NOT a panic / unwrap. This is the contract the
+    /// public `compile`/`prove`/`canonical_vk` wrappers rely on.
+    #[test]
+    fn run_missing_tool_is_spawn_error_not_panic() {
+        let err = run(ABSENT_TOOL, &mut Command::new(ABSENT_TOOL))
+            .expect_err("a non-existent tool must surface an error, never spawn");
+        match err {
+            DriverError::Spawn { tool, source } => {
+                assert_eq!(tool, ABSENT_TOOL, "the Spawn error names the failing tool");
+                // The io source is NotFound (the binary is not on PATH).
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected Spawn classification, got {:?}", other),
+        }
+    }
+
+    /// A tool that runs but exits non-zero is classified as `DriverError::Tool`
+    /// (distinct from `Spawn`) and carries the tool name. `false` writes nothing to
+    /// stderr, so the captured stderr is empty — the glue still classifies on the
+    /// exit status, not on stderr content.
+    #[test]
+    fn run_failing_tool_is_tool_error_distinct_from_spawn() {
+        let err = run("false", &mut Command::new(FAILING_TOOL))
+            .expect_err("a non-zero exit must be an error");
+        match err {
+            DriverError::Tool { tool, stderr } => {
+                assert_eq!(tool, "false", "the Tool error names the failing tool");
+                assert!(stderr.is_empty(), "`false` emits no stderr");
+            }
+            other => panic!("expected Tool classification, got {:?}", other),
+        }
+    }
+
+    /// A tool that exists and exits zero is `Ok(())` — the success arm of the same
+    /// classifier (so the error tests above are not vacuously always-erroring).
+    #[test]
+    fn run_succeeding_tool_is_ok() {
+        run("true", &mut Command::new("/usr/bin/true")).expect("exit 0 is Ok");
+    }
+
+    // --- Display + From glue ---------------------------------------------
+
+    /// Each `DriverError` variant renders a distinct, human-readable message that
+    /// names its tool / cause — the operator-facing surface the CLI prints.
+    #[test]
+    fn display_renders_each_variant_distinctly() {
+        let spawn = DriverError::Spawn {
+            tool: "nargo".into(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+        };
+        let tool = DriverError::Tool {
+            tool: "bb".into(),
+            stderr: "boom".into(),
+        };
+        let io = DriverError::Io(std::io::Error::other("disk full"));
+        let s_msg = spawn.to_string();
+        let t_msg = tool.to_string();
+        let io_msg = io.to_string();
+        assert!(s_msg.contains("spawn") && s_msg.contains("nargo"), "Spawn names the tool");
+        assert!(t_msg.contains("bb") && t_msg.contains("boom"), "Tool carries name + stderr");
+        assert!(io_msg.contains("io error") && io_msg.contains("disk full"));
+        // The three renderings are mutually distinct (no two variants collide).
+        assert_ne!(s_msg, t_msg);
+        assert_ne!(t_msg, io_msg);
+        assert_ne!(s_msg, io_msg);
+    }
+
+    /// `?` on a bare `std::io::Error` lands in the `Io` arm via the `From` impl
+    /// (the `std::fs::read`/`write`/`create_dir_all` calls in `prove`/`verify_with`
+    /// rely on this conversion).
+    #[test]
+    fn io_error_converts_into_io_variant() {
+        let e: DriverError = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope").into();
+        match e {
+            DriverError::Io(inner) => assert_eq!(inner.kind(), std::io::ErrorKind::PermissionDenied),
+            other => panic!("io::Error must convert to DriverError::Io, got {:?}", other),
+        }
+    }
+
+    // --- tag-based witness-path isolation --------------------------------
+
+    /// The tag-isolation glue (roborev codex job 2180): a non-empty `tag` MUST route
+    /// the prover-input toml AND the emitted witness to per-call-unique paths so two
+    /// concurrent witness generations against the SAME member cannot clobber each
+    /// other's `Prover.toml` / `target/<pkg>_w.gz`. We verify this WITHOUT a real
+    /// toolchain: `gen_witness_tagged` writes the toml BEFORE spawning nargo, so even
+    /// though `nargo execute` then fails (no compiled member in this scratch dir), the
+    /// two tags leave two DISTINCT, COEXISTING toml files — the collision-avoidance
+    /// property. The failure is the typed `Tool` error (no witness produced), never a
+    /// panic, and its message names the per-tag witness file.
+    #[test]
+    fn tagged_witness_paths_do_not_collide() {
+        let tmp = std::env::temp_dir().join(format!("sq-bif6-driver-{}", std::process::id()));
+        let id = CircuitId::FilterInt { d: 1 };
+        let pkg = id.package();
+        // The package dir must exist for the toml write to land.
+        std::fs::create_dir_all(tmp.join(&pkg)).expect("scratch package dir");
+        std::fs::create_dir_all(tmp.join("target")).expect("scratch target dir");
+        let prover = CircuitProver::new(&tmp);
+
+        // Two distinct tags -> two distinct prover-input toml files in the package
+        // dir. If `nargo` is absent this is a Spawn error AFTER the toml write; if
+        // present it is a Tool error (no member compiled) — either way the toml is
+        // written first, which is the isolation behaviour we assert.
+        let r_a = prover.gen_witness_tagged(&id, "challenge = \"0x1\"\n", "taga");
+        let r_b = prover.gen_witness_tagged(&id, "challenge = \"0x2\"\n", "tagb");
+        assert!(r_a.is_err() && r_b.is_err(), "no real witness without the toolchain");
+
+        let toml_a = tmp.join(&pkg).join("Prover_taga.toml");
+        let toml_b = tmp.join(&pkg).join("Prover_tagb.toml");
+        assert!(toml_a.exists(), "tag `taga` wrote its own Prover_taga.toml");
+        assert!(toml_b.exists(), "tag `tagb` wrote its own Prover_tagb.toml");
+        assert_ne!(toml_a, toml_b, "the two tags use distinct toml paths");
+        // The two inputs coexist with their original, non-clobbered contents — the
+        // collision the tag isolation prevents.
+        assert_eq!(std::fs::read_to_string(&toml_a).unwrap(), "challenge = \"0x1\"\n");
+        assert_eq!(std::fs::read_to_string(&toml_b).unwrap(), "challenge = \"0x2\"\n");
+
+        // The empty tag uses the LEGACY shared `Prover.toml` name (distinct from any
+        // tagged name), so a tagged call never overwrites the untagged one.
+        let _ = prover.gen_witness_tagged(&id, "challenge = \"0x3\"\n", "");
+        let toml_shared = tmp.join(&pkg).join("Prover.toml");
+        assert!(toml_shared.exists(), "empty tag uses the shared Prover.toml name");
+        assert_ne!(toml_shared, toml_a, "shared name differs from a tagged name");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

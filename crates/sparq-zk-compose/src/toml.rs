@@ -543,3 +543,280 @@ pub fn prover_toml_for(
     };
     Ok(out)
 }
+
+// [OPUS-4.8] sq-bif.6: GLUE unit tests for the witness `Prover.toml` SERIALIZATION
+// — the `FieldHex` hex round-trip, the array-vs-scalar rendering shape, the
+// declaration-order field layout each `*_prover_toml` emits, and the recoverable
+// missing-witness error arms of the public `prover_toml_for`. These cover the
+// NON-cryptographic serialization plumbing ONLY; no soundness / privacy property is
+// asserted (the circuit family is NOT-yet-sound, sq-qhy4). The real prove/verify
+// e2e lives in `tests/e2e.rs`, gated on the nargo/bb toolchain.
+#[cfg(test)]
+mod toml_glue_tests {
+    use super::*;
+    use crate::build::FilterSignedWitness;
+    use crate::manifest::FilterOp;
+    use sparq_zk::field::Fr;
+
+    fn fh(s: &str) -> FieldHex {
+        FieldHex(s.to_string())
+    }
+
+    // --- FieldHex hex round-trip + rejection -----------------------------
+
+    /// `FieldHex` round-trips through the field: `from_field(to_field) == self`
+    /// (canonicalised), and a value re-rendered is byte-stable. This is the
+    /// representation every `*_prover_toml` writes verbatim, so its round-trip is
+    /// load-bearing for the witness contract.
+    #[test]
+    fn field_hex_round_trips_through_the_field() {
+        let f = Fr::from(0x1a2bu64);
+        let hex = FieldHex::from_field(&f);
+        // The canonical rendering is 0x-prefixed 64-nibble hex.
+        assert!(hex.0.starts_with("0x") && hex.0.len() == 66, "canonical 0x + 64 nibbles");
+        // Parse back to the same field element.
+        assert_eq!(hex.to_field(), Some(f), "to_field inverts from_field");
+        // Re-rendering the parsed field is byte-identical (idempotent canonical form).
+        assert_eq!(FieldHex::from_field(&hex.to_field().unwrap()), hex);
+        // A short, non-canonical literal parses to the SAME field element (the
+        // circuit reduces 0x-hex), so the toml may carry either form.
+        assert_eq!(fh("0x1a2b").to_field(), Some(f));
+    }
+
+    /// Malformed hex returns `None` from `to_field` — the parse never panics, so a
+    /// hand-edited / corrupt manifest surfaces a recoverable error.
+    #[test]
+    fn field_hex_rejects_malformed_input() {
+        assert_eq!(fh("0xzz").to_field(), None, "non-hex digits rejected");
+        assert_eq!(fh("").to_field(), None, "empty rejected");
+        assert_eq!(fh(&format!("0x{}", "f".repeat(65))).to_field(), None, "over-long rejected");
+    }
+
+    // --- scalar vs array rendering shape ---------------------------------
+
+    /// `filter_int_prover_toml` renders SCALARS as quoted Field literals and the
+    /// digit witness as an inline ARRAY of quoted bytes, in the declaration order
+    /// the `filter_int_d{d}` member's `main` expects.
+    #[test]
+    fn filter_int_toml_scalar_and_array_shape_and_order() {
+        let toml = filter_int_prover_toml(
+            &fh("0x1"),       // challenge
+            &fh("0xabc"),     // operand_enc
+            FilterOp::Gt.code(),
+            42,               // bound
+            true,             // expected
+            b"123",
+        );
+        // Scalars: quoted Field literals (nargo's toml reader accepts 0x-prefixed).
+        assert!(toml.contains("challenge = \"0x1\"\n"));
+        assert!(toml.contains("operand_enc = \"0xabc\"\n"));
+        assert!(toml.contains("op = \"2\"\n"), "FilterOp::Gt.code() == 2, rendered as a string");
+        assert!(toml.contains("bound = \"42\"\n"), "u64 bound is a quoted Field");
+        // expected is a BARE bool (not quoted) — the circuit's `pub bool`.
+        assert!(toml.contains("expected = true\n"));
+        // digits: an inline array of quoted ASCII codepoints, one per decimal digit.
+        assert!(toml.contains("digits = [\"49\", \"50\", \"51\"]\n"), "b'1'=49, b'2'=50, b'3'=51");
+        // Declaration order: challenge < operand_enc < op < bound < expected < digits.
+        let order: Vec<&str> = ["challenge", "operand_enc", "op", "bound", "expected", "digits"]
+            .iter()
+            .map(|k| {
+                let pat = format!("{} =", k);
+                assert!(toml.contains(&pat), "field `{}` present", k);
+                *k
+            })
+            .collect();
+        let positions: Vec<usize> = order
+            .iter()
+            .map(|k| toml.find(&format!("{} =", k)).unwrap())
+            .collect();
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "fields in declaration order");
+    }
+
+    /// `scan_prover_toml` renders the nested `enc` as `[[[..];3];N];K]` and emits
+    /// the bool vectors (`pattern_is_const`, `attribution`) as BARE-bool arrays —
+    /// the array-shape contract the scan member's `main` consumes.
+    #[test]
+    fn scan_toml_nested_array_and_bool_array_shape() {
+        let commitments = [fh("0xc0"), fh("0xc1")];
+        let pattern_is_const = [true, false, true];
+        let pattern_const_enc = [fh("0xs"), fh("0x0"), fh("0xo")];
+        let rows = [[fh("0x1"), fh("0x2"), fh("0x3")]];
+        let attribution = [true, false];
+        let counts = [2u32, 1u32];
+        let g0 = vec![[fh("0xa"), fh("0xb"), fh("0xc")], [fh("0xd"), fh("0xe"), fh("0xf")]];
+        let g1 = vec![[fh("0x4"), fh("0x5"), fh("0x6")]];
+        let enc = [g0, g1];
+        let toml = scan_prover_toml(
+            &fh("0x9"),
+            &commitments,
+            &pattern_is_const,
+            &pattern_const_enc,
+            &rows,
+            1,
+            &attribution,
+            &counts,
+            &enc,
+        );
+        // commitments: flat array of quoted Fields.
+        assert!(toml.contains("commitments = [\"0xc0\", \"0xc1\"]\n"));
+        // pattern_is_const + attribution: BARE bools (not quoted).
+        assert!(toml.contains("pattern_is_const = [true, false, true]\n"));
+        assert!(toml.contains("attribution = [true, false]\n"));
+        // row_count + counts: quoted Field-ish.
+        assert!(toml.contains("row_count = \"1\"\n"));
+        assert!(toml.contains("counts = [\"2\", \"1\"]\n"));
+        // rows: [[Field;3]] — one inner triple here.
+        assert!(toml.contains("rows = [[\"0x1\", \"0x2\", \"0x3\"]]\n"));
+        // enc: [[[Field;3];N];K] — two graphs, the first with two triples.
+        assert!(
+            toml.contains(
+                "enc = [[[\"0xa\", \"0xb\", \"0xc\"], [\"0xd\", \"0xe\", \"0xf\"]], \
+                 [[\"0x4\", \"0x5\", \"0x6\"]]]\n"
+            ),
+            "nested K-by-N-by-3 array; toml was:\n{}",
+            toml
+        );
+    }
+
+    /// `filter_signed_int_prover_toml` and `filter_decimal_prover_toml` render the
+    /// PRIVATE `neg` flag as a bare bool and the magnitude / int / frac digit arrays
+    /// in the member's declaration order (the sq-7lrq members).
+    #[test]
+    fn signed_and_decimal_toml_shape_and_order() {
+        let signed = filter_signed_int_prover_toml(
+            &fh("0x1"),
+            &fh("0xop"),
+            FilterOp::Lt.code(),
+            true,     // bound_neg
+            7,        // bound magnitude
+            false,    // expected
+            true,     // neg (operand)
+            b"42",
+        );
+        assert!(signed.contains("bound_neg = true\n"), "bound sign is a bare bool");
+        assert!(signed.contains("bound = \"7\"\n"));
+        assert!(signed.contains("neg = true\n"), "operand sign is a bare bool");
+        assert!(signed.contains("mag_digits = [\"52\", \"50\"]\n"), "b'4'=52, b'2'=50");
+
+        let decimal = filter_decimal_prover_toml(
+            &fh("0x1"),
+            &fh("0xop"),
+            FilterOp::Ge.code(),
+            false,    // bound_neg
+            12345,    // bound_scaled
+            true,     // expected
+            false,    // neg
+            b"123",
+            b"45",
+        );
+        assert!(decimal.contains("bound_scaled = \"12345\"\n"));
+        assert!(decimal.contains("int_digits = [\"49\", \"50\", \"51\"]\n"));
+        assert!(decimal.contains("frac_digits = [\"52\", \"53\"]\n"));
+    }
+
+    // --- pad / canonical-digits helpers ----------------------------------
+
+    /// `pad_hex` / `pad_rows` extend to the member's bucket length with ZERO field
+    /// elements (the circuit's inactive padding slots) and never truncate.
+    #[test]
+    fn pad_helpers_extend_with_zero_and_never_truncate() {
+        let padded = pad_hex(vec![fh("0x1")], 3);
+        assert_eq!(padded.len(), 3);
+        assert_eq!(padded[0], fh("0x1"));
+        assert_eq!(padded[1], FieldHex("0x0".to_string()), "pad slot is the zero field element");
+        // Already-long input is left intact (no truncation).
+        let same = pad_hex(vec![fh("0xa"), fh("0xb")], 1);
+        assert_eq!(same.len(), 2, "pad_hex never shortens");
+
+        let rows = pad_rows(vec![[fh("0x1"), fh("0x2"), fh("0x3")]], 2);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1], [FieldHex("0x0".into()), FieldHex("0x0".into()), FieldHex("0x0".into())]);
+    }
+
+    /// `canonical_digits` is the ASCII-decimal byte witness the digit arrays carry.
+    #[test]
+    fn canonical_digits_are_ascii_decimal_bytes() {
+        assert_eq!(canonical_digits(0), b"0");
+        assert_eq!(canonical_digits(1234), b"1234");
+        assert_eq!(canonical_digits(u64::MAX), u64::MAX.to_string().as_bytes());
+    }
+
+    // --- prover_toml_for: dispatch + recoverable missing-witness errors --
+
+    /// `prover_toml_for` on a `FilterInt` input returns the member id + a toml that
+    /// matches the direct `filter_int_prover_toml` rendering — the public dispatcher
+    /// agrees with the per-member renderer.
+    #[test]
+    fn prover_toml_for_filter_int_dispatches_to_member_renderer() {
+        let inputs = ProofInputs::FilterInt {
+            id: CircuitId::FilterInt { d: 2 },
+            operand_enc: fh("0xab"),
+            op: FilterOp::Eq,
+            bound: 50,
+            expected: true,
+        };
+        let (id, toml) =
+            prover_toml_for(&inputs, &fh("0x1"), &[], &[], b"50", None, None)
+                .expect("filter_int needs no extra witness");
+        assert_eq!(id, CircuitId::FilterInt { d: 2 });
+        let direct = filter_int_prover_toml(&fh("0x1"), &fh("0xab"), FilterOp::Eq.code(), 50, true, b"50");
+        assert_eq!(toml, direct, "dispatcher output matches the member renderer");
+    }
+
+    /// A `JoinEq` input WITHOUT its private `JoinWitness` returns the recoverable
+    /// `JoinEqMissingWitness` error — NOT a panic in this public fn (the witness
+    /// holds the join's private inputs the manifest never carries).
+    #[test]
+    fn prover_toml_for_join_eq_without_witness_is_recoverable_error() {
+        let inputs = ProofInputs::JoinEq {
+            id: CircuitId::JoinEq { n_a: 16, n_b: 16 },
+            commit_a: fh("0x0a"),
+            commit_b: fh("0x0b"),
+            join_commitment: fh("0x0c"),
+            slot_a: 0,
+            slot_b: 2,
+        };
+        let err = prover_toml_for(&inputs, &fh("0x1"), &[], &[], &[], None, None)
+            .expect_err("join_eq without its witness must be an Err, never a panic");
+        assert_eq!(err, ProverTomlError::JoinEqMissingWitness);
+        // And the message points the caller at build_join / the join_witness arg.
+        assert!(err.to_string().contains("build_join"), "the error message is actionable");
+    }
+
+    /// A `FilterSignedInt` / `FilterDecimal` input WITHOUT its `FilterSignedWitness`
+    /// returns the recoverable `FilterSignedMissingWitness` error (the sign flag +
+    /// canonical digits live in the witness, not the manifest).
+    #[test]
+    fn prover_toml_for_signed_without_witness_is_recoverable_error() {
+        let inputs = ProofInputs::FilterSignedInt {
+            id: CircuitId::FilterSignedInt { md: 2 },
+            operand_enc: fh("0xop"),
+            op: FilterOp::Lt,
+            bound_neg: false,
+            bound: 9,
+            expected: true,
+        };
+        let err = prover_toml_for(&inputs, &fh("0x1"), &[], &[], &[], None, None)
+            .expect_err("signed-int without its witness must be an Err");
+        assert_eq!(err, ProverTomlError::FilterSignedMissingWitness);
+
+        // Supplying the witness renders successfully and carries the operand sign.
+        let w = FilterSignedWitness { neg: true, int_digits: vec![b'4', b'2'], frac_digits: vec![] };
+        let (id, toml) = prover_toml_for(&inputs, &fh("0x1"), &[], &[], &[], None, Some(&w))
+            .expect("with witness it renders");
+        assert_eq!(id, CircuitId::FilterSignedInt { md: 2 });
+        assert!(toml.contains("neg = true\n") && toml.contains("mag_digits = [\"52\", \"50\"]\n"));
+    }
+
+    /// The two `ProverTomlError` variants render distinct, actionable messages and
+    /// compare by value (the public error is `PartialEq`).
+    #[test]
+    fn prover_toml_error_variants_are_distinct() {
+        let a = ProverTomlError::JoinEqMissingWitness;
+        let b = ProverTomlError::FilterSignedMissingWitness;
+        assert_ne!(a, b);
+        assert_ne!(a.to_string(), b.to_string());
+        assert!(a.to_string().contains("join_eq"));
+        assert!(b.to_string().contains("FilterSignedWitness"));
+    }
+}
