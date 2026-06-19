@@ -82,10 +82,12 @@ echo "== 2. check-privacy-claims gate scans paper .typ sources =="
 
 # The privacy gate enumerates its surface with `git ls-files`, so the fixture must be a
 # TRACKED file in a git repo. Build a throwaway repo that mirrors site/papers/ and copy
-# in the REAL gate script so its in-repo `cd $ROOT` + ls-files run against the fixture.
+# in the REAL gate script + the shared forbidden-phrase list it loads (bead sq-mraf) so its
+# in-repo `cd $ROOT` + ls-files run against the fixture with the REAL patterns.
 REPO="${TMP}/repo"
-mkdir -p "${REPO}/scripts" "${REPO}/site/papers"
+mkdir -p "${REPO}/scripts" "${REPO}/site/papers" "${REPO}/site/src/data"
 cp "$PRIV_GATE" "${REPO}/scripts/check-privacy-claims.sh"
+cp "${ROOT}/scripts/honesty-phrases.json" "${REPO}/scripts/honesty-phrases.json"
 (
   cd "$REPO"
   git init -q
@@ -120,7 +122,60 @@ TYP
 code="$(run_priv)"
 expect_exit 0 "privacy: hedged + allow-marked claim in .typ => clean" "$code"
 
+# [OPUS-4.8] bead sq-4hga — the gates also scan the PROSE (note/free-text) fields of
+# site/src/data/paper-evidence.json: a forbidden perf number or ZK/MPC claim hidden in a
+# record `note` (which surfaces in a paper via the provenance() helper) must be caught too.
+echo "== 3. honesty gates scan paper-evidence.json prose (note) fields =="
+
+# Remove the .typ fixture so this section's verdict is attributable to the JSON alone.
+rm -f "${REPO}/site/papers/planted.typ"
+
+# 3a. PERF: a result-shaped number in a record `note` must FAIL the perf gate (exit 1). The
+#     perf gate dispatches a *paper-evidence.json path → the field-aware prose scan, so we can
+#     drive it by explicit path (no git repo needed for the perf half).
+mkdir -p "${TMP}/ev/site/src/data"
+cat > "${TMP}/ev/site/src/data/paper-evidence.json" <<'JSON'
+{ "records": { "x.foo": {
+  "value": 0.9, "environment": "canonical", "source": "crates/x/tests/y.rs::z",
+  "note": "Our engine is 12× faster than the baseline on a 20000-vector set." } } }
+JSON
+set +e
+python3 "$PERF_GATE" --enforce "${TMP}/ev/site/src/data/paper-evidence.json" >/dev/null 2>&1
+code=$?
+set -e
+expect_exit 1 "perf: planted '12× faster' in an evidence note => fail" "$code"
+
+# 3b. PERF: a bare SETUP count in a note (no result-shaped unit) must NOT trip — the narrow net.
+cat > "${TMP}/ev/site/src/data/paper-evidence.json" <<'JSON'
+{ "records": { "x.foo": {
+  "value": 0.9, "environment": "canonical", "source": "crates/x/tests/y.rs::z",
+  "note": "Asserted floor on a 20000-vector, 32-dim synthetic set; machine-independent." } } }
+JSON
+set +e
+python3 "$PERF_GATE" --enforce "${TMP}/ev/site/src/data/paper-evidence.json" >/dev/null 2>&1
+code=$?
+set -e
+expect_exit 0 "perf: bare setup counts in an evidence note => clean" "$code"
+
+# 3c. PRIVACY: an unqualified ZK/MPC claim in a record `note` must FAIL the privacy gate. Reuse
+#     the throwaway repo (the privacy gate enumerates with git ls-files; paper-evidence.json is
+#     on its surface — bead sq-4hga).
+cat > "${REPO}/site/src/data/paper-evidence.json" <<'JSON'
+{ "records": { "x.foo": {
+  "note": "The verifier is sound and the construction is privacy-preserving." } } }
+JSON
+code="$(run_priv)"
+expect_exit 1 "privacy: planted 'verifier is sound' + 'privacy-preserving' in an evidence note => fail" "$code"
+
+# 3d. PRIVACY: the same mentions HEDGED + ALLOW-MARKED in a note must PASS (exit 0).
+cat > "${REPO}/site/src/data/paper-evidence.json" <<'JSON'
+{ "records": { "x.foo": {
+  "note": "The verifier is NOT yet sound pending external audit; privacy-claims-allow: hedged note." } } }
+JSON
+code="$(run_priv)"
+expect_exit 0 "privacy: hedged + allow-marked claim in an evidence note => clean" "$code"
+
 echo ""
 echo "test_typ_honesty_gates: ${pass} passed, ${fail} failed."
 [ "$fail" -eq 0 ] || exit 1
-echo "test_typ_honesty_gates: OK — both honesty gates cover site/papers/**/*.typ."
+echo "test_typ_honesty_gates: OK — both honesty gates cover site/papers/**/*.typ + paper-evidence.json prose."

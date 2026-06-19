@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE = resolve(__dirname, "..");
+const REPO_ROOT = resolve(SITE, ".."); // [OPUS-4.8] sq-mraf: to invoke the shared gates.
 const EVIDENCE_PATH = join(SITE, "src", "data", "paper-evidence.json");
 const PAPERS_DIR = join(SITE, "papers");
 const PDF_OUT_DIR = join(SITE, "public", "papers");
@@ -111,6 +112,68 @@ function runHonestyGate() {
   );
 }
 
+// ---- the build-BOUNDARY honesty assertion (bead sq-mraf, Option C) -------------------------
+// [OPUS-4.8] The data-layer runHonestyGate() above validates the evidence-record *envelope*
+// (environment/source/value) but never reads PROSE — the .typ paper text or the human `note`
+// fields. To guarantee the factory can NEVER serve an un-scanned paper, we RE-RUN the two real
+// CI honesty gates here, at the build boundary, over the exact paper sources we are about to
+// compile + the evidence file:
+//   - scripts/check-no-perf-numbers.py --enforce <each .typ> <paper-evidence.json>
+//       (the Python gate dispatches a `.typ` path → the accessor-aware Typst scan, and a
+//        paper-evidence.json path → the prose-field scan — beads sq-mkza + sq-4hga).
+//   - scripts/check-privacy-claims.sh  (whole-tree; its git-ls-files surface already includes
+//       site/papers/**/*.typ + paper-evidence.json — beads sq-mkza + sq-4hga).
+// Both gates consume the SINGLE shared forbidden-phrase list (scripts/honesty-phrases.json),
+// so there is ONE source of truth and zero drift between the CI gate and this build boundary.
+// FAIL-CLOSED: a non-zero gate exit aborts the build (the artifacts are never written). This
+// is deliberately strict — a published paper is the highest-stakes outward surface, so an
+// un-scanned or violating paper must not compile. python3 + bash are stdlib-level CI deps
+// (the gates already run in docs-quality.yml); a genuinely missing interpreter is itself a
+// build failure, not a silent skip.
+//
+// HONEST SCOPE: re-running the gates here catches the same COARSE class (forbidden phrase /
+// hard-coded result number); it does NOT catch a subtle semantic overclaim — that remains the
+// Stage-5 claims↔evidence human review in skills/academic-paper/SKILL.md.
+function runBuildBoundaryHonestyScan(papers) {
+  const perfGate = join(REPO_ROOT, "scripts", "check-no-perf-numbers.py");
+  const privacyGate = join(REPO_ROOT, "scripts", "check-privacy-claims.sh");
+  const sharedList = join(REPO_ROOT, "scripts", "honesty-phrases.json");
+  for (const p of [perfGate, privacyGate, sharedList]) {
+    if (!existsSync(p)) {
+      console.error(`\n[paper-factory] BUILD-BOUNDARY HONESTY SCAN: required gate missing: ${p}\n`);
+      process.exit(1);
+    }
+  }
+  const typPaths = papers.map((p) => join(PAPERS_DIR, p.source)).filter((t) => existsSync(t));
+
+  const run = (label, cmd, cmdArgs) => {
+    try {
+      // inherit stderr so a finding is visible; capture nothing — the gate self-reports.
+      execFileSync(cmd, cmdArgs, { cwd: REPO_ROOT, stdio: ["ignore", "inherit", "inherit"] });
+    } catch (e) {
+      const code = typeof e.status === "number" ? e.status : 1;
+      console.error(
+        `\n[paper-factory] BUILD-BOUNDARY HONESTY SCAN FAILED (${label}, exit ${code}).\n` +
+          "  A paper .typ source or an evidence note carries a forbidden ZK/MPC claim or a\n" +
+          "  hard-coded result number. Hedge the wording / route the number through the\n" +
+          "  paper-evidence.json accessor, or add the inline allow marker. The factory will\n" +
+          "  not serve an un-scanned paper. (Shared list: scripts/honesty-phrases.json.)\n",
+      );
+      process.exit(1);
+    }
+  };
+
+  // Perf gate over the exact paper sources + the evidence file (explicit paths => --enforce).
+  run("no-perf-numbers", "python3", [perfGate, "--enforce", ...typPaths, EVIDENCE_PATH]);
+  // Privacy gate (whole-tree; already covers the paper surface + the evidence file).
+  run("privacy-claims", "bash", [privacyGate]);
+
+  console.log(
+    `[paper-factory] build-boundary honesty scan passed: ${typPaths.length} paper source(s) ` +
+      "+ paper-evidence.json scanned by both honesty gates (shared phrase list).",
+  );
+}
+
 // ---- compile one paper to PDF + HTML ------------------------------------------------------
 function compilePaper(typst, paper, evidenceJson) {
   const typPath = join(PAPERS_DIR, paper.source);
@@ -148,6 +211,12 @@ function main() {
 
   const typst = resolveTypst();
   const papers = readRegistry();
+
+  // [OPUS-4.8] sq-mraf: build-boundary honesty assertion — re-run the two shared honesty
+  // gates over the exact paper sources + evidence file BEFORE any compile/placeholder is
+  // written, so the factory can never serve an un-scanned or violating paper. Runs even when
+  // typst is absent (the scan is independent of compilation). FAIL-CLOSED.
+  runBuildBoundaryHonestyScan(papers);
 
   mkdirSync(PDF_OUT_DIR, { recursive: true });
   mkdirSync(HTML_OUT_DIR, { recursive: true });

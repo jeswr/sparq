@@ -134,6 +134,18 @@ on one IAM step), publish **only the deterministic metrics** (conformance counts
 floors, byte-identity / answer-safety invariants, gate/round/byte counts) — those are
 canonical today and are exactly what `paper-evidence.json` holds.
 
+3. **Coarse phrase/number gate over the paper surface — `check-no-perf-numbers.py` +
+   `check-privacy-claims.sh`** (beads sq-mkza / sq-4hga / sq-mraf). Both CI gates also scan
+   the paper `.typ` sources **and** the prose (`note`/free-text) fields of
+   `paper-evidence.json`: a result-shaped number typed inline (not routed through the
+   accessor) trips the perf gate (accessor-call spans + Typst comments are skipped, so the
+   canonical data path is unflaggable); an unqualified ZK/MPC soundness/privacy phrase trips
+   the privacy gate (with the same `privacy-claims-allow: <why>` inline marker + same-line
+   negator/hedge exemption). They share **one** forbidden-phrase list
+   (`scripts/honesty-phrases.json`), and `build-papers.mjs` re-runs both at the build
+   boundary. This is a **COARSE** class only — see Stage 5 for what it does and does **not**
+   catch; do not read its green as a semantic-correctness guarantee.
+
 ---
 
 ## Stage 3 — Draft: single-source Typst, bound to live data
@@ -250,6 +262,22 @@ subagent section-reviewers + one cross-cutting honesty/repro reviewer) **blocks*
   must be a design goal, with the sq-qhy4 soundness-gap disclaimer present.
 - **Overclaiming / implied generality, weak/unfair baselines, missing ablations, no error
   bars, irreproducibility** (the SIGPLAN-7 + benchmarking-crimes findings from Stage 3).
+
+**What is — and is NOT — mechanically gated (do not over-sell the gate).** [OPUS-4.8] As of
+beads sq-mkza / sq-4hga / sq-mraf, the two CI honesty gates also scan the paper-factory's own
+surface: `check-no-perf-numbers.py` scans the paper `.typ` sources (accessor-aware, result-
+shaped numbers only) **and** the prose (`note`/free-text) fields of `paper-evidence.json`;
+`check-privacy-claims.sh` scans those `.typ` + the evidence JSON for the absolute forbidden
+ZK/MPC phrases. Both consume **one shared forbidden-phrase list**
+(`scripts/honesty-phrases.json`), and `build-papers.mjs` re-runs both at the build boundary
+so the factory cannot serve an un-scanned paper (`scripts/tests/test_typ_honesty_gates.sh` +
+`scripts/tests/test_build_papers_honesty_boundary.sh` pin this). **But this is a COARSE,
+mechanical class only** — a hard-coded result-shaped number, or one of a fixed set of
+unqualified soundness/privacy phrases. A **subtle semantic overclaim** — an unsupported
+"generalises to all RDF stores", an implied causal/superiority claim phrased without a
+forbidden phrase or a result-unit, an unfair-baseline framing — is **NOT** caught by any
+gate and **remains this Stage-5 human/subagent review's responsibility**. Treating the gate's
+green as a soundness guarantee would itself be an empirical-honesty violation.
 
 Resolve **all** findings before publish. Final check: the claims↔evidence loop is closed and
 every headline number is canonical.
