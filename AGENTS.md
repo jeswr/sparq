@@ -149,7 +149,7 @@ The **"Enforced by"** column names what *catches* a missed follow-up, so prose a
 | storage/encoding (`sparq-core` store/dict/compress, mmap, dict-spill) | the deterministic perf-gate metrics; byte-identity differentials; coverage with `--features dict-spill`; the **`fuzz` lane**'s `graph_open` target (`.github/workflows/fuzz.yml`) — corrupts the on-disk store files (`perm*.bin` / `dict-meta.bin` / sidecars / `named.bin`) and asserts `Graph::open` returns `Err`, never a panic/OOM/UB (T-MMAP-FUZZ) | **E** (perf-gate + byte-diff + graph_open fuzz) |
 | a new `unsafe` block / `unsafe fn` | a `// SAFETY:` justification (lint-required) + a row in `compliance/memsafety/unsafe-register.md`; re-seed `bench/unsafe-snapshot.json`; the crate in the Miri lane | **E** / **G4-subsumed** (`unsafe-gate.py` count ratchet + `clippy::undocumented_unsafe_blocks` + `miri.yml`) |
 | an opt-in cargo feature, or a test behind a **default-OFF** feature ([OPUS-4.8] sq-vya1) | wire the suite into a **`feature-matrix.yml` leg** (`.github/workflows/feature-matrix.yml`, job `opt-in-features` — per-leg `cargo test -p <crate> --features <set>`, each leg a required `ci-summary` check). The `ci.yml` nextest archive carries **only** `approx-ann,filtered-ann,vec-predicate`; any other default-OFF feature's test compiles EMPTY there and runs silently-zero, so its coverage is the job of `feature-matrix.yml`. Prove a suite is reached: `cargo nextest list -p <crate> --features <set>` must SHOW its test names | **E** (`feature-matrix.yml` legs) |
-| a **new crate** (`crates/<x>/Cargo.toml`) | a `README.md` (template), a registered bench in `bench/benchmarks.toml` (or `publish = false` stub), and a `skills/<surface>/SKILL.md` if it is a public surface | **G1** (`gate-new-crate.py`); escape `<!-- flow-on-exempt: reason -->` |
+| a **new crate** (`crates/<x>/Cargo.toml`) | a `README.md` (template — concise: **≤120 lines**, or a **≤30-line** `publish = false` stub carrying the `<!-- internal-stub -->` directive; verbose API detail belongs in rustdoc/`SKILL.md`, not the README), a registered bench in `bench/benchmarks.toml` (or `publish = false` stub), and a `skills/<surface>/SKILL.md` if it is a public surface | **G1** (`gate-new-crate.py`); the README length/sections leg of `check-readme-template.py` (HARD in `docs-quality.yml`); escape `<!-- flow-on-exempt: reason -->` |
 | a **new bench suite** (`bench/<suite>/`) | register it in `bench/benchmarks.toml` **and** add a `FEATURED_SUITES` row in `bench/dashboard/dashboard.js` (or flag `featured = false`) | **G3** (`check-new-bench-registered.py`) + `flow-on:new-bench-dashboard-row` (mints the dashboard-row bead — produced out-of-band) |
 | a competitor-relevant engine/store path (with the `competitor-relevant` label) | refresh competitor baselines (`bench/` gather harness → `bench/competitors.json`) | `flow-on:competitor-feature-gather` (un-gateable — out-of-band gather) |
 | a `research/*.md` design that is now shipped | graduate it: rewrite into an architecture doc or fold into the crate README / `SKILL.md`; convert any stale "not implemented" claim to a bead | **norm** (*Documents must stay current*) |
@@ -327,22 +327,40 @@ This is the standing orchestration loop that ties the sections above together. R
 
 **Done when** `bd ready` minus `needs:user` is empty and no PR / agent / CI is in flight.
 
-### Orchestration automation scripts (manual-invoke; mechanical substrate for the loop)
+### Orchestration automation (mostly manual-invoke scripts + one durable CI; mechanical substrate for the loop)
 
 The deterministic, no-judgment parts of the loop above are factored into small shell
 scripts under `scripts/`. They follow the mechanical-vs-judgment boundary set out in
 `research/orchestration-automation-design.md` (PR #374): **automate the DETECTION and
 the bookkeeping; never automate the DECISION.** The first three (PR #374 Phases A/C/F)
 are shipped; `worktree-gc.sh` (sq-6xdr) is a later addition that follows the same
-discipline (dry-run default, mutation behind `--apply`). They are **invoked manually for
-now** — there are deliberately **no
-auto-running mutating hooks or monitors wired yet**; wiring them (a `SessionStart`
-orphan-check hook, a merge-watcher monitor, a `PostToolUse` bead-export hook) is a
-documented follow-up in the design doc's phased plan (§5, Beads B/D/E + H), to be added
-only after the scripts are proven in manual use. Each script is `bash -n`/`shellcheck`
-clean and carries a `--dry-run-self-test` (hermetic; no network).
+discipline (dry-run default, mutation behind `--apply`). These shell scripts are
+**invoked manually**. The **one piece of auto-running, mutating automation that IS wired**
+is the durable bead-autoclose CI (`.github/workflows/bead-autoclose.yml`, sq-84a8, below) —
+it replaced an ephemeral session-scoped watcher (`b1kzhfxq5`) that did not persist across
+sessions, so beads stayed `in_progress` after their PR merged and the orchestrator closed
+them by hand each tick. The other deferred hooks (a `SessionStart` orphan-check hook, a
+`PostToolUse` bead-export hook) remain a documented follow-up in the design doc's phased
+plan (§5, Beads D/E + H), to be added only after the scripts are proven in manual use. Each
+shell script is `bash -n`/`shellcheck` clean and carries a `--dry-run-self-test` (hermetic;
+no network); the Python close-script carries a `--self-test`.
 
-- **`scripts/bead-close-on-merge.sh <pr> [--apply]`** (Phase A) — closes the bead a PR
+- **`.github/workflows/bead-autoclose.yml` + `scripts/ci-close-merged-beads.py`**
+  (sq-84a8) — the **durable** auto-close-on-merge. On a merged PR
+  (`pull_request: [closed]` gated on `merged == true` — the same shape as `flow-on.yml`),
+  it extracts the `sq-XXXX(.NN)` bead token(s) from the PR title + merge-commit subject,
+  closes ONLY matched beads that are currently open/in_progress/blocked (idempotent;
+  already-closed → no-op; minimal in-place edit of `.beads/issues.jsonl`), and commits the
+  result back to `main` with `[skip ci]` (least-privilege `contents: write`, the same
+  bot-commit idiom `bench.yml` uses for the perf floor). It runs AFTER merge, so it is
+  **NOT a gate** and never registers as a required check (`ci-summary / gate` polls the PR
+  head while the PR is OPEN; this workflow does not trigger on the open-PR events). It does
+  NOT install `bd` / rebuild the Dolt DB in CI — a full `bd export` round-trip churns ~1/3 of
+  the file cosmetically and would fight the orchestrator's canonical export — so it edits
+  the JSONL directly in the committed compact+ASCII style. The merge is verified against
+  the GitHub API as defense-in-depth on top of the `merged == true` event gate.
+- **`scripts/bead-close-on-merge.sh <pr> [--apply]`** (Phase A) — the **manual** sibling of
+  the bead-autoclose CI, for orchestrator use outside CI: closes the bead a PR
   maps to, but **only after verifying the merge against the API** (`gh pr view --json
   mergedAt` must be non-null; a parsed log/monitor line is never the source of truth).
   Resolves the bead id from an `sq-XXXX` token in the PR title or in a linked issue's
@@ -415,6 +433,7 @@ Everything you produce has exactly **one** correct home. Putting it anywhere els
 - **Durable knowledge → `AGENTS.md` / `CLAUDE.md`, a `skills/<surface>/SKILL.md`, a crate `README.md`, or a `research/` design record — whichever fits.** Workspace-wide conventions and contributor rules go here in `AGENTS.md` (Claude Code also auto-reads `CLAUDE.md`, which just points here). Usage knowledge goes in the matching skill. Per-crate caveats go in that crate's `README.md`. Design rationale and measured verdicts go in `research/` — or, for the rationale behind a specific deferred task, in that bead's description / `--design` field.
 - **Do NOT commit narrative scratch docs.** No `HANDOVER*.md`, no `SESSION*.md`, no "current state" / "what I'm doing now" / progress-log markdown in the repo. Session and orchestration state belongs in beads (for work) or in your own un-tracked notes — never in a tracked file. The only living operational markdown allowed is **genuine reference** (a runbook, the benchmark catalog) and **generated reports** (the CI-published perf/conformance data) — not a story about a session.
 - **No hard-coded performance numbers in markdown** (restated; see the section above): cite the generated structured data, not a baked-in figure.
+- **RDF/SPARQL terminology → match the W3C specs.** Before writing or editing any doc that names an RDF/SPARQL feature, check [`skills/terminology/SKILL.md`](./skills/terminology/SKILL.md) — the single source of truth for preferred wording (say **RDF 1.2** / **SPARQL 1.2** and **triple term** / **reifier** / **reified triple**, never the community-era "RDF-star" / "RDF\*" / "SPARQL-star" / "quoted triple" / "embedded triple"). Enforced by the `terminology` HARD gate (`scripts/check-terminology.py` in `docs-quality.yml`); a hit fails the build unless the line is a legitimate proper-noun / paper-title / third-party-doc / URL mention or carries an inline `terminology-allow: <why>` marker.
 
 Honour these homes and the repo never accumulates stale TODO lists or handover docs — no clean-up pass is ever needed.
 

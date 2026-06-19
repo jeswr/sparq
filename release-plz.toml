@@ -52,12 +52,23 @@ git_tag_name = "v{{ version }}"
 #   the same tag → a collision (duplicate/empty release racing release.yml). Disable it:
 #   release-plz creates the tag, release.yml owns the Release.
 git_release_enable = false
-# publish = false — crates.io publish stays MANUAL for now. The `CARGO_REGISTRY_TOKEN`
-#   secret does not exist yet (needs:user bead sq-v286.5). release-plz runs `cargo publish`
-#   BEFORE creating the tag, so with the default `true` and no token the publish step would
-#   fail and the tag would never be cut. Disabling publish lets `release-plz release`
-#   skip straight to tagging. Flip to `true` (release-plz-driven publish, publish.yml then
-#   only attests .crate bytes) once sq-v286.5 provisions the token — "the point of adoption".
+# publish = false — crates.io publish stays MANUAL for now. release-plz runs `cargo publish`
+#   BEFORE creating the tag, so with the default `true` and no working credential the publish
+#   step would fail and the tag would never be cut. Disabling publish lets `release-plz release`
+#   skip straight to tagging.
+#
+#   [OPUS-4.8] sq-v286.11: the crates.io FLIP is now a coordinated config-flip (no long-lived
+#   token needed — crates.io Trusted Publishing went GA 2025-07, RFC 3691). The CI side is
+#   pre-wired in .github/workflows/release-plz.yml (a commented `crates-io-auth-action` OIDC
+#   block on the `release-plz-release` job). To flip:
+#     (a) needs:user — register the crates.io Trusted Publisher for EACH of the 17 publishable
+#         crates (owner `jeswr`, repo `sparq`, workflow `release-plz.yml`); crates.io requires
+#         each crate to ALREADY EXIST (one bootstrap `cargo publish` per crate, leaf-first per
+#         docs/release.md §4), then enable trusted publishing on each crate's Settings page;
+#     (b) uncomment the auth-action block + its `id-token: write` permission in release-plz.yml;
+#     (c) set this key to `true`.
+#   release-plz then publishes in dep order with the short-lived OIDC token, and publish.yml's
+#   `crates` job reverts to attest-only over the .crate bytes — "the point of adoption".
 publish = false
 
 # --- The locked version_group: all 17 publishable crates ---------------------

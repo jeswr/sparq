@@ -855,6 +855,18 @@ directly to untrusted clients), and ensure the front sets/overwrites the header 
 cannot inject an arbitrary WebID. With no trusted header configured (the default) any such header
 is ignored.
 
+**Composing the two audit sinks (`sq-bif.14`).** `audit-log` (a process-global `tracing` sink) and
+`access-audit` (a per-`AppState` JSON-Lines file sink) can be compiled in and turned on at runtime
+TOGETHER. They hook the SAME request handler, so a single request emits BOTH records. The
+load-bearing invariant — verified by `tests/audit_composition.rs` (gated on
+`--features audit-log,access-audit`) — is that the two independently-derived records AGREE on the
+request's operation, the ACTUALLY-enforced decision, the HTTP status, and the NON-reversible query
+`fingerprint` (both sinks share the same FNV-1a-over-trimmed-text fingerprint), and that the
+redaction boundary holds in BOTH (neither writes the raw query text or the Bearer token, and the
+fingerprint never leaks to the HTTP response body) for an allowed AND a denied request. This is a
+redaction-posture invariant, not an unqualified security guarantee — the audit trail records
+identities and resource IRIs by design (see the privacy-boundary note above).
+
 ## Gotchas / feature flags / prerequisites
 
 - **Auth — optional Bearer write gate; loopback-by-default; non-loopback bind refused
@@ -973,13 +985,21 @@ is ignored.
   `AppState::try_with_config` (returns the durable-open error). Deferred hardening (beaded):
   byte-accounted durability metrics, graceful degradation on a *transient* disk error (today a
   durability failure refuses the write rather than losing it), and WAL-durable `CLEAR`/`DROP
-  GRAPH <g>` of an existing named graph. (sq-7cxr / gh-44.)
+  GRAPH <g>` of an existing named graph. (sq-7cxr / gh-44.) The fail-closed contract under a
+  durable-write failure is regression-guarded over HTTP by `tests/persist.rs` via the
+  `test-seams`-only seal seam (`AppState::with_config_inject_durable_failure`): a refused write
+  returns `503` and is NEVER published, the writer thread survives, reads keep serving the last
+  published snapshot, and a recovered write is durable across a restart — covered for a transient
+  burst, a permanent jam, AND (sq-bif.14) an INTERLEAVED recover→fail→recover sequence whose final
+  durable set is exactly the successful writes (no refused write resurrects).
 - **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
   (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.
 - **Error bodies.** Every error is structured JSON `{"error": "..."}` with
   `Content-Type: application/json` (the `405` keeps its `Allow` header). POST query
   requires `Content-Type: application/sparql-query` or `application/x-www-form-urlencoded`
-  (else `415`); a GET without `query=` is `400`.
+  (else `415`); a GET without `query=` is `400`. An **unmatched route** is a `404` with the
+  categorised body `{"error":"not found"}` ([OPUS-4.8] sq-pj6u — previously the bare
+  `{"error":""}`); the message is server-constructed and never echoes the requested path.
 - **Transient vs permanent status contract (for retry classifiers — sq-r5bv / gh-50).** A retry
   classifier should treat **only `429` and `503` as transient** (a retry of the identical request
   may succeed): `429` is a concurrency shed (the request never ran), `503` is a query/UPDATE

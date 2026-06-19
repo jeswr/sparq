@@ -7,6 +7,14 @@
     "Regenerate after a deliberate coverage rise: scripts/coverage.sh && scripts/coverage-gate.py --seed target/coverage/coverage-summary.json"
   ],
   "crates": {
+    "sparq-algos": {
+      "floor": 97,
+      "note": "[OPUS-4.8] sq-bif.8: OPT-IN graph analytics (PageRank / degree centrality / WCC + label-propagation communities). Standalone crate (`default = []`, no opt-in features) measured with default features \u2014 its whole surface compiles in a default build. Measured line% 99.14 (575/580) over the inline src oracles + the new tests/topology_oracles.rs (dangling-node PageRank, disconnected/chain WCC+LP, all-singleton communities, NodeFilter::All literal path); floor = floor(measured) - 2 margin. Conservative work-box seed; CI's --check-robust is the ratchet of record."
+    },
+    "sparq-canon": {
+      "floor": 77,
+      "note": "[OPUS-4.8] sq-bif.9: OPT-IN RDFC-1.0 (RDF Dataset Canonicalization) public API. Standalone crate (no `[features]` table) measured with default features. Measured line% 79.04 (181/229) over tests/rdf_canon_suite.rs (full 86-entry W3C manifest: eval + issued-id map + negative poison-graph) + the new tests/bnode_isomorphism_and_bridge.rs (bnode-isomorphism equivalence, oxrdf-bridge triple-term/Display/literal-roundtrip edge paths); floor = floor(measured) - 2 margin. Conservative work-box seed; CI is the ratchet of record."
+    },
     "sparq-cli": {
       "floor": 0,
       "note": "subprocess artifact: tests spawn the COMPILED binary (assert_cmd / CARGO_BIN_EXE), not the instrumented profile \u2014 line% is ~0 by construction, not a real gap. Presence-gated instead."
@@ -55,6 +63,10 @@
     },
     "sparq-parse": {
       "floor": 91
+    },
+    "sparq-policy": {
+      "floor": 90,
+      "note": "[OPUS-4.8] sq-bif.7: OPT-IN ODRL usage-control policy. The stateless evaluator (parse/eval/compare/hierarchy) is default-on; measured WITH --features count-enforcement (the stateful odrl:count counter-store modules count/count_file/count_backend + their #![cfg(feature)] integration tests — see scripts/coverage.sh measure() case; a default build compiles that surface out). Measured line% 92.79 (1429/1540); floor = floor(measured) - 2 margin. Conservative work-box seed; CI's --check-robust is the ratchet of record."
     },
     "sparq-prov": {
       "floor": 94,

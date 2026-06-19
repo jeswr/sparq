@@ -7,10 +7,14 @@
 #   - the `sparq-rdf` PyPI wheels (crates/sparq-py, maturin-built) — PEP-740 attestations
 #
 # HONEST SCOPE BOUNDARY (see compliance/slsa/):
-#   * npm     — native provenance. `npm publish --provenance` runs in this GitHub Actions
-#               OIDC context (id-token: write); npm's registry records a Sigstore-signed
-#               in-toto SLSA provenance statement bound to this workflow run. A consumer
-#               verifies it with `npm audit signatures`. THIS IS THE PROVENANCE-EMITTING PATH.
+#   * npm     — native provenance via OIDC TRUSTED PUBLISHING. [OPUS-4.8] sq-v286.11: the npm
+#               job authenticates with the GitHub Actions OIDC token (id-token: write) — NO
+#               long-lived NPM_TOKEN — exchanging it for a short-lived publish credential, and
+#               npm's registry records a Sigstore-signed in-toto SLSA provenance statement bound
+#               to this workflow run. A consumer verifies with `npm audit signatures`. THIS IS A
+#               PROVENANCE-EMITTING PATH. ONE-TIME needs:user: register the npm Trusted Publisher
+#               for @jeswr/sparq (owner `jeswr`, repo `sparq`, workflow file `publish.yml`); the
+#               package must already exist, so one bootstrap publish precedes it (see npm job).
 #   * crates.io — crates.io has NO published-package provenance mechanism upstream as of this
 #               writing (no equivalent of npm `--provenance`). The tractable equivalent we CAN
 #               do is attest the packaged `.crate` artifact (the exact bytes `cargo publish`
@@ -68,19 +72,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ---- npm: @jeswr/sparq with native Sigstore provenance ----
-  # Runs only when a maintainer asks for it (manual input) OR on a published release where the
-  # NPM_TOKEN secret is configured. `npm publish --provenance` requires the OIDC token + a
-  # registry-url; npm then records a signed SLSA provenance statement for the version.
+  # ---- npm: @jeswr/sparq via OIDC TRUSTED PUBLISHING (no NPM_TOKEN) ----
+  # [OPUS-4.8] sq-v286.11 (maintainer #758): switched from a long-lived NPM_TOKEN to npm's
+  # OIDC Trusted Publishing (GA 2025-07-31, github.blog/changelog/2025-07-31). The npm CLI
+  # detects the GitHub Actions OIDC environment (granted by `id-token: write` below), exchanges
+  # the OIDC token with the registry for a short-lived publish credential, and records the
+  # Sigstore-signed SLSA provenance statement automatically — NO static token is read or stored.
+  # Runs only when a maintainer asks for it (manual input) OR on a published release.
+  #
+  # ONE-TIME needs:user step (cannot be a repo file — it is registry-side config): on npmjs.com,
+  # @jeswr/sparq must have a Trusted Publisher registered (npmjs.com/package/@jeswr/sparq/access
+  # -> "Trusted Publisher"): organization/user `jeswr`, repository `sparq`, workflow FILENAME
+  # `publish.yml` (filename only, with extension — NOT a path), environment left blank (this job
+  # uses none). npm trusted publishing requires the package to ALREADY EXIST, so the maintainer
+  # does ONE bootstrap `npm publish` with a granular token, then registers the trusted publisher
+  # and removes the token — every CI publish thereafter is tokenless. See docs/release.md.
   npm:
-    name: npm publish (--provenance)
+    name: npm publish (OIDC trusted publishing)
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'release' ||
       (github.event_name == 'workflow_dispatch' && inputs.publish_npm)
     permissions:
       contents: read
-      id-token: write # OIDC token npm uses to mint the provenance attestation
+      id-token: write # OIDC token npm exchanges for a short-lived publish credential + provenance signing
     defaults:
       run:
         working-directory: js
@@ -92,8 +107,19 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
-          # registry-url is REQUIRED for provenance + sets up the auth env for NODE_AUTH_TOKEN.
+          # registry-url is still REQUIRED: it writes the .npmrc `//registry.npmjs.org/:...`
+          # line the OIDC flow keys off (and selects the public registry the token is minted
+          # for). Under trusted publishing no NODE_AUTH_TOKEN is read — the npm CLI mints a
+          # short-lived credential from the OIDC token at publish time.
           registry-url: "https://registry.npmjs.org"
+      # [OPUS-4.8] sq-v286.11: OIDC trusted publishing requires npm CLI >= 11.5.1. Node 22's
+      # BUNDLED npm can be older (verified locally: Node 20/22 images have shipped npm 10.x),
+      # so pin an npm that supports trusted publishing rather than relying on the bundled one.
+      # `npm@^11.5.1` is the documented floor (docs.npmjs.com/trusted-publishers).
+      - name: Pin npm CLI >= 11.5.1 (trusted-publishing floor)
+        run: |
+          npm install -g 'npm@^11.5.1'
+          npm --version
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
       - name: Install npm dependencies
@@ -104,14 +130,16 @@ jobs:
       - name: Package guardrail check
         run: npm run check:package
       # `prepack` (build:wasm + build:ts + bundle skills) runs automatically on `npm publish`,
-      # producing the same tree `npm pack --dry-run` validates in js.yml. We require a modern npm
-      # (>=11.5.1 ships with node 22) so --provenance is supported.
-      - name: Publish to npm with provenance
-        # provenance: emit the Sigstore-signed SLSA build-provenance statement bound to this run.
-        # access public: @jeswr/sparq is a scoped package; scoped packages default to restricted.
+      # producing the same tree `npm pack --dry-run` validates in js.yml.
+      - name: Publish to npm (OIDC trusted publishing + provenance)
+        # NO `env: NODE_AUTH_TOKEN` — trusted publishing authenticates via the GitHub Actions
+        # OIDC token (id-token: write). The npm CLI detects the OIDC environment and exchanges
+        # it for a short-lived publish credential; no long-lived NPM_TOKEN is stored anywhere.
+        # --provenance: provenance is emitted by default under trusted publishing, but the flag
+        #   is kept as an explicit belt-and-suspenders (a practitioner-reported edge case where
+        #   it was not auto-attached); it is a no-op when already on.
+        # --access public: @jeswr/sparq is a scoped package; scoped packages default to restricted.
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       # Verify the just-published version actually carries a registry provenance attestation, so a
       # misconfigured publish (missing OIDC / old npm) fails the job instead of silently shipping an
       # unattested package. `npm view <pkg>@<ver> dist.attestations` returns the registry-recorded
@@ -225,7 +253,11 @@ jobs:
           - runner: macos-latest
             target: aarch64-apple-darwin
             manylinux: ""
-          - runner: macos-13
+          # [OPUS-4.8] sq-v286.12: macos-13 was retired by GitHub. macos-15-intel is the
+          # supported Intel-Mac runner line (matches dist.yml + release.yml), so the
+          # x86_64-apple-darwin wheel arch is preserved — NOT macos-14/macos-latest, which
+          # are Apple silicon and would clash with the aarch64-apple-darwin line above.
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             manylinux: ""
           - runner: windows-latest

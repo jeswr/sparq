@@ -55,8 +55,12 @@ The webview loads the site's static export (`frontendDist: "../../site/out"`). T
 defaults to `basePath: "/sparq"` for GitHub Pages, but a Tauri webview serves from the
 `tauri://` root, so the export the GUI consumes **must** be built root-relative
 (`basePath: ""`). `site/next.config.ts` now **env-switches** `basePath`/`assetPrefix` off
-`NEXT_PUBLIC_BASE_PATH`: the `beforeBuildCommand` passes `NEXT_PUBLIC_BASE_PATH=''`, so the
-GUI's export is root-relative with no extra step. Hand-written absolute asset hrefs (the
+`NEXT_PUBLIC_BASE_PATH`: the `beforeBuildCommand` runs the site's `build:tauri` script
+(`cross-env NEXT_PUBLIC_BASE_PATH= npm run build`), which sets the env var to an **empty
+string** cross-platform — `cross-env` is the portable shim so the same command works under a
+Unix shell and Windows `cmd.exe` (the bare `NEXT_PUBLIC_BASE_PATH='' npm run build` inline
+prefix is a Unix-shell idiom that `cmd.exe` does not parse, which broke the win-x64 installer
+row). So the GUI's export is root-relative with no extra step. Hand-written absolute asset hrefs (the
 favicon, the COOP/COEP service-worker `<Script src>`, the paper PDF links) read the **same**
 env var via `site/src/lib/base-path.ts`, so they move with the build mode too. See the
 "Build modes" table in [`site/README.md`](../site/README.md).

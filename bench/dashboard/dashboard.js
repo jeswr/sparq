@@ -604,13 +604,19 @@
   // surfaces + reasoning). The drift scan flagged that MANY registered benchmark families
   // (bench/benchmarks.toml) had NO dashboard row at all — most notably the entire ZK estate
   // (zk / zk-trace / zk-compose), plus Solid/WAC access-control, HDT ingest, RSP streaming,
-  // GenAI (similarity / introspection) and the GPU kernel experiment. These are stdout/criterion
-  // benches today (they do NOT yet emit into ci-bench.sh's customSmallerIsBetter feed), so the rows
-  // below render as "not yet reported" until a ci-bench hook lands — which is exactly the dashboard's
-  // HONEST graceful-degradation contract (buildFamilies keeps every family, count 0 -> a nav chip +
-  // a "not yet reported" section). When a hook DOES start emitting (e.g. `zk_commit_us`,
-  // `hdt_load_s`, …), the metric lands in the right family automatically via these prefixes — no
-  // further dashboard change. The headline gap (ZK) is listed FIRST among the new families.
+  // GenAI (similarity / introspection / NL→SPARQL) and the GPU kernel experiment. So the rows below
+  // render as "not yet reported" until a ci-bench hook lands — exactly the dashboard's HONEST
+  // graceful-degradation contract (buildFamilies keeps every family, count 0 -> a nav chip + a "not
+  // yet reported" section). When a hook DOES start emitting, the metric lands in the right family
+  // automatically via these prefixes — no further dashboard change.
+  //
+  // [OPUS-4.8] sq-k0km UPDATE — ci-bench hooks have since LANDED for: ZK (zk_compose_*_gates +
+  // zk_commit_*/zk_trace_* criterion means), HDT (snikmeta_* load-decode counts + hdt_load_s), RSP
+  // (rsp_*_rows per-window counts), Solid (solid_* WAC/ACP auth-view counts) and GenAI's NL→SPARQL
+  // (nlq_* offline-loop counts). Those families now render REAL data. STILL "not yet reported" (and
+  // HONESTLY so): GenAI's sim/introspect suites (need the gitignored 1.78M-triple olympics.nt — NOT
+  // in CI), the GPU experiment (no GPU on gh runners) and MPC (modelled tier). Those are
+  // EC2/dataset-gathered and intentionally not in the per-commit feed.
   var FAMILIES = [
     { key: 'core',     title: 'Core (load · dict · memory)', kind: 'core',
       suites: ['pipeline', 'memory / size'],
@@ -659,11 +665,31 @@
     { key: 'rsp', title: 'RDF Stream Processing (continuous queries)', kind: 'capability',
       suites: ['rsp', 'rdf stream processing', 'streaming'],
       prefixes: ['rsp', 'stream', 'window'] },
-    { key: 'genai', title: 'GenAI (similarity · introspection)', kind: 'capability',
-      suites: ['similarity', 'introspect', 'introspection', 'genai'],
-      prefixes: ['sim', 'similarity', 'introspect'] },
+    { key: 'genai', title: 'GenAI (similarity · introspection · NL→SPARQL)', kind: 'capability',
+      // [OPUS-4.8] sq-5o5.5-.7 (featured = false trend-only disposition): the sim
+      // (sim-olympics-eval), introspect (introspect-olympics) AND nlq (nlq-offline-bench)
+      // bench families are part of the GenAI estate. Their benchmarks.toml entries are
+      // flagged `featured = false` — a trend-only DISPOSITION, NOT a head-to-head
+      // competitor card (promote-to-card would make a perf claim + needs a same-scale
+      // canonical-host gather; deferred to the maintainer). They route here so the
+      // dashboard renders them as a GenAI trend row (or "not yet reported" until a
+      // ci-bench hook emits, the same HONEST graceful-degradation contract as the other
+      // capability families). NL→SPARQL adds the `nlq`/`nl→sparql` suite + `nlq` prefix.
+      suites: ['similarity', 'introspect', 'introspection', 'genai', 'nlq', 'nl→sparql', 'nl-to-sparql'],
+      prefixes: ['sim', 'similarity', 'introspect', 'nlq'] },
     { key: 'gpu', title: 'GPU kernels (experimental)', kind: 'capability',
-      suites: ['gpu'], prefixes: ['gpu'] }
+      suites: ['gpu'], prefixes: ['gpu'] },
+    // [OPUS-4.8] sq-5o5.8 (featured = false trend-only disposition): the mpc family
+    // (mpc-bench-matrix). HONESTY: this is a DETERMINISTIC MODELLED-cost counting tier
+    // (bytes/party · rounds · multiplications), NOT a measured wall-clock competitor
+    // card, and MPC here is semi-honest-only with a ZK estate that is NOT externally
+    // audited — so it is registered as its OWN trend row (never swallowed into Core /
+    // never a head-to-head perf card), and its benchmarks.toml entry is `featured = false`.
+    // Prefixes cover the likely ci-bench emit names (mpc_*_bytes / mpc_rounds / mpc_mults /
+    // mpcmatrix_*); the row renders "not yet reported" until such a hook lands.
+    { key: 'mpc', title: 'Secure MPC (modelled counting tier · semi-honest)', kind: 'capability',
+      suites: ['mpc', 'secure mpc', 'multi-party computation'],
+      prefixes: ['mpc', 'mpcmatrix'] }
   ];
 
   // The top-level family a metric belongs to. Consults suiteFor() (label-map driven) FIRST, then a
@@ -673,17 +699,35 @@
   function familyOf(name) {
     var suite = (suiteFor(name) || '').toLowerCase();
     var token = (name || '').toLowerCase().split('_')[0];
-    // suite match first (the source of truth)
-    for (var i = 0; i < FAMILIES.length; i++) {
-      if (FAMILIES[i].suites.indexOf(suite) !== -1) return FAMILIES[i];
+    // [OPUS-4.8] sq-5o5.8: suiteFor()'s STRUCTURAL fallback groups (assigned to an unlabelled
+    // metric by shape, not a deliberate label-map placement) are too generic to bucket a metric
+    // that ALSO carries an explicit capability token. e.g. a modelled-MPC `mpc_join_bytes` gets the
+    // structural "Memory / Size" group purely from its `_bytes` suffix — that must NOT silently sink
+    // it into Core when its `mpc` prefix names a real capability family. So a structural-fallback
+    // suite does NOT win over a capability prefix; a REAL (label-map) suite still does.
+    var STRUCTURAL_FALLBACK = { 'memory / size': 1, 'pipeline': 1, 'other': 1 };
+    var suiteIsStructural = Object.prototype.hasOwnProperty.call(STRUCTURAL_FALLBACK, suite);
+    // suite match first (the source of truth) — but only when it is a REAL label-map suite.
+    if (!suiteIsStructural) {
+      for (var i = 0; i < FAMILIES.length; i++) {
+        if (FAMILIES[i].suites.indexOf(suite) !== -1) return FAMILIES[i];
+      }
     }
     // structural prefix fallback. We must check CAPABILITY families (shacl/geo/fts/vector/
-    // reasoning) BEFORE core+sparql so a capability metric is never mis-bucketed into SPARQL by a
-    // generic `op`/`q` prefix. FAMILIES is declared in DISPLAY order (core, sparql, then the
-    // capability families), so a single forward pass would hit sparql first; do an explicit
-    // two-pass scan — capability families first (kind === 'capability'), then the rest.
+    // reasoning/mpc) BEFORE core+sparql so a capability metric is never mis-bucketed into SPARQL by a
+    // generic `op`/`q` prefix NOR into Core by a generic `_bytes` structural suite. FAMILIES is
+    // declared in DISPLAY order (core, sparql, then the capability families), so a single forward
+    // pass would hit core/sparql first; do an explicit two-pass scan — capability families first
+    // (kind === 'capability'), then the rest.
     for (var j = 0; j < FAMILIES.length; j++) {
       if (FAMILIES[j].kind === 'capability' && FAMILIES[j].prefixes.indexOf(token) !== -1) return FAMILIES[j];
+    }
+    // A structural-fallback suite that maps to core/sparql still applies here (it was deferred above
+    // ONLY to let a capability prefix win) — e.g. `rdfs_infer_s`'s "Pipeline" group keeps it in Core.
+    if (suiteIsStructural) {
+      for (var s = 0; s < FAMILIES.length; s++) {
+        if (FAMILIES[s].suites.indexOf(suite) !== -1) return FAMILIES[s];
+      }
     }
     for (var k = 0; k < FAMILIES.length; k++) {
       if (FAMILIES[k].kind !== 'capability' && FAMILIES[k].prefixes.indexOf(token) !== -1) return FAMILIES[k];

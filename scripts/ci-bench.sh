@@ -166,6 +166,25 @@ RSP_RUN=bench/rsp/run.sh
 # (a contention-robust RATIO) are trend-only (NOT in scripts/perf-gate.py). Registry:
 # bench/benchmarks.toml (hdt-suite); details: bench/hdt/README.md.
 HDT_RUN=bench/hdt/run.sh
+# [OPUS-4.8] Solid WAC/ACP per-commit hook (sq-k0km). Like RSP/HDT the runner is a crate
+# EXAMPLE (sparq-solid's `bench`) that only needs `cargo`. run.sh is the self-asserting entry
+# point: it materialises the in-crate WAC + ACP fixtures and asserts every DETERMINISTIC
+# STRUCTURAL count (named-graph/quad/auth-triple/authorized-row counts — a pure function of the
+# FIXED fixture, byte-stable across machines) vs bench/solid/expected.tsv (exit 1 on drift), then
+# prints the `<metric>\t<value>\tcount` contract. These light up the dashboard's Solid/access-
+# control family row (familyOf: `solid_*` -> solid). Registry: bench/benchmarks.toml
+# (solid-wac-bench); details: bench/solid/README.md.
+SOLID_RUN=bench/solid/run.sh
+# [OPUS-4.8] sparq-nlq OFFLINE NL->SPARQL per-commit hook (sq-k0km). Crate-example runner
+# (sparq-nlq's `bench`), cargo-only, FULLY OFFLINE (no network, no `live` feature). run.sh pins
+# N and asserts the DETERMINISTIC counts (synthetic triples / grounded-prompt chars / ask rows /
+# repair rounds — a pure function of N + the synthetic schema) vs bench/nlq/expected.tsv (exit 1
+# on drift), then prints the `<metric>\t<value>\t<unit>` contract. These light up the dashboard's
+# GenAI family row (familyOf: `nlq_*` -> genai). HONESTY: offline deterministic core only; the
+# sibling GenAI suites (sim-olympics-eval / introspect-olympics) need the gitignored 1.78M-triple
+# olympics.nt dataset (NOT in CI) and the GPU suite needs a GPU backend (NOT on gh runners) — both
+# are EC2/dataset-gathered, NOT wired here. Registry: bench/benchmarks.toml (nlq-offline-bench).
+NLQ_RUN=bench/nlq/run.sh
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -676,7 +695,13 @@ elif command -v cargo >/dev/null 2>&1 && [ -x "$VECTOR_RUN" ]; then
   # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
   # Let cargo's staleness detection decide (a no-op rebuild is cheap); do NOT swallow a real
   # compile failure (it must fail the gate, not silently skip the ANN recall check).
-  if ! cargo build --release -q -p sparq-vectors --example bench_vectors; then
+  # [OPUS-4.8] sq-k9o2: --features approx-ann is REQUIRED here. The example links `VectorIndex`
+  # (the in-RAM HNSW backend, `#[cfg(feature = "approx-ann")]` in src/lib.rs) and its Cargo.toml
+  # `[[example]]` block declares `required-features = ["approx-ann"]`. Naming the target WITHOUT
+  # the feature is a hard `error: target bench_vectors requires the features: approx-ann` (exit
+  # 101) — the failure that RED-ed main after #807 added that `required-features` line. The flag
+  # is crate-scoped (`-p sparq-vectors`), so it widens NO other crate's feature set.
+  if ! cargo build --release -q -p sparq-vectors --example bench_vectors --features approx-ann; then
     echo "ERROR: bench_vectors example failed to build" >&2
     exit 1
   fi
@@ -845,6 +870,74 @@ elif command -v cargo >/dev/null 2>&1 && [ -f "$ZK_HARVEST" ]; then
   fi
 else
   echo "note: zk criterion suites skipped (cargo not on PATH or $ZK_HARVEST missing)" >&2
+fi
+
+# [OPUS-4.8] Solid WAC/ACP per-commit hook (sq-k0km). Crate-example runner (sparq-solid's
+# `bench`), cargo-only — so, exactly like the RSP/HDT/ZK-criterion hooks, PINNED to the
+# MAIN/local tier (run on push-to-main or a LOCAL run where GITHUB_REF is unset; SKIPPED on
+# the PR tier) to keep the example build off per-PR CI. run.sh asserts every DETERMINISTIC
+# count vs expected.tsv internally (exit 1 on drift), failing the whole ci-bench run on a
+# regression exactly like RSP/HDT. We harvest its `<metric>\t<value>\tcount` stdout; every row
+# is a DETERMINISTIC structural count emitted for the dashboard's Solid family card (correctness
+# is the run.sh internal gate, so these are trend rows, NOT perf-gate ratchets).
+SOLID_BIN=target/release/examples/bench
+SOLID_REF="${GITHUB_REF:-}"
+if [ -n "$SOLID_REF" ] && [ "$SOLID_REF" != "refs/heads/main" ]; then
+  echo "note: solid skipped (PR tier — sparq-solid example build/run is main-only, like the rsp/hdt hooks)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$SOLID_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, AND the example target name `bench` is shared
+  # by several crates, so build sparq-solid's IMMEDIATELY before invoking run.sh to be sure the
+  # binary on disk is this crate's.
+  if ! cargo build --release -q -p sparq-solid --example bench; then
+    echo "ERROR: sparq-solid bench example failed to build" >&2
+    exit 1
+  fi
+  if SOLID_BIN="$SOLID_BIN" bash "$SOLID_RUN" > "$TMP/solid.tsv" 2>"$TMP/solid.err"; then
+    while IFS=$'\t' read -r metric value unit; do
+      [ -n "${metric:-}" ] && [ -n "${value:-}" ] || continue
+      add "$metric" "${unit:-count}" "$value"
+    done < "$TMP/solid.tsv"
+  else
+    echo "ERROR: solid run.sh failed (auth-view count regression)" >&2
+    cat "$TMP/solid.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: solid skipped (cargo not on PATH or $SOLID_RUN missing)" >&2
+fi
+
+# [OPUS-4.8] sparq-nlq OFFLINE NL->SPARQL per-commit hook (sq-k0km). Crate-example runner
+# (sparq-nlq's `bench`), cargo-only + FULLY OFFLINE — so, like the solid/rsp/hdt hooks, PINNED
+# to the MAIN/local tier (SKIPPED on the PR tier). run.sh pins N and asserts every DETERMINISTIC
+# count vs expected.tsv internally (exit 1 on drift), failing the whole ci-bench run on a
+# regression. We harvest its `<metric>\t<value>\t<unit>` stdout for the dashboard's GenAI family
+# card (correctness is the run.sh internal gate, so these are trend rows). The sibling GenAI
+# suites (sim/introspect) need the gitignored olympics.nt (NOT in CI) and the GPU suite needs a
+# GPU backend (NOT on gh runners): both are EC2/dataset-gathered and intentionally NOT emitted.
+NLQ_BIN=target/release/examples/bench
+NLQ_REF="${GITHUB_REF:-}"
+if [ -n "$NLQ_REF" ] && [ "$NLQ_REF" != "refs/heads/main" ]; then
+  echo "note: nlq skipped (PR tier — sparq-nlq example build/run is main-only, like the solid/rsp/hdt hooks)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$NLQ_RUN" ]; then
+  # Always (re)build IMMEDIATELY before run.sh: the example target name `bench` is shared by
+  # several crates (e.g. sparq-solid's, built just above), so this build resets the on-disk
+  # binary to sparq-nlq's before the runner invokes it.
+  if ! cargo build --release -q -p sparq-nlq --example bench; then
+    echo "ERROR: sparq-nlq bench example failed to build" >&2
+    exit 1
+  fi
+  if NLQ_BIN="$NLQ_BIN" bash "$NLQ_RUN" > "$TMP/nlq.tsv" 2>"$TMP/nlq.err"; then
+    while IFS=$'\t' read -r metric value unit; do
+      [ -n "${metric:-}" ] && [ -n "${value:-}" ] || continue
+      add "$metric" "${unit:-count}" "$value"
+    done < "$TMP/nlq.tsv"
+  else
+    echo "ERROR: nlq run.sh failed (offline-loop count regression)" >&2
+    cat "$TMP/nlq.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: nlq skipped (cargo not on PATH or $NLQ_RUN missing)" >&2
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.

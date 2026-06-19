@@ -9,7 +9,7 @@
 The **[RDF](https://www.w3.org/TR/rdf12-concepts/) triplestore** at the heart of
 [sparq](../../README.md) — the storage substrate every other sparq crate builds on.
 
-Load [RDF 1.2](https://www.w3.org/TR/rdf12-concepts/) (named graphs and quoted triple terms
+Load [RDF 1.2](https://www.w3.org/TR/rdf12-concepts/) (named graphs and triple terms
 included) from the text formats, in memory or out-of-core for datasets larger than RAM, and
 scan triple patterns. How the store is laid out and why is in the design docs linked below.
 
@@ -39,7 +39,7 @@ assert_eq!(count, 1);
 - **Out-of-core store** — query datasets larger than RAM from a memory-mapped on-disk store,
   with optional block compression and near-zero resident heap.
 - **Named graphs & RDF 1.2** — full quad storage and
-  [quoted triple terms](https://www.w3.org/TR/rdf12-concepts/).
+  [triple terms](https://www.w3.org/TR/rdf12-concepts/).
 
 ## 📚 Learn more
 

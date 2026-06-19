@@ -33,7 +33,7 @@ Requires the webview system libraries (`libwebkit2gtk-4.1-dev`, …), `webkit2gt
 ```bash
 # 1. Build the frontend the webview embeds (root-relative, as the GUI consumes it).
 cd js && npm install && npm run build:wasm:lean
-cd ../site && npm install && NEXT_PUBLIC_BASE_PATH='' npm run build
+cd ../site && npm install && npm run build:tauri   # = cross-env NEXT_PUBLIC_BASE_PATH= npm run build (root-relative)
 
 # 2. Build the shell binary (embeds site/out at compile time).
 cd ../gui/src-tauri && cargo build

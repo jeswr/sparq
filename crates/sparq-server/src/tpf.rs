@@ -595,7 +595,7 @@ fn spo_to_triple(
     let subject = match graph.dict.term(s) {
         Term::NamedNode(n) => oxrdf::NamedOrBlankNode::NamedNode(n),
         Term::BlankNode(b) => oxrdf::NamedOrBlankNode::BlankNode(b),
-        // A literal or a quoted-triple subject cannot be a NamedOrBlankNode — drop the row
+        // A literal or a triple-term subject cannot be a NamedOrBlankNode — drop the row
         // (never arises from a well-formed store; we are total rather than panic).
         Term::Literal(_) | Term::Triple(_) => return None,
     };

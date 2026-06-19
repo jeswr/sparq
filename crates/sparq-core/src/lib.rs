@@ -2232,7 +2232,7 @@ impl Graph {
     /// with the distinct-term count — terms spill to disk and are externally
     /// deduplicated/ranked into EXACTLY the ids the (default) sharded in-RAM
     /// consolidation assigns, so every output file is byte-identical to
-    /// [`build_external`](Self::build_external)'s. N-Triples only (the same RDF-star
+    /// [`build_external`](Self::build_external)'s. N-Triples only (the same RDF 1.2 triple-term
     /// restriction as the sharded path). Design: research/external-dictionary.md.
     #[cfg(feature = "dict-spill")]
     pub fn build_external_spill<R: std::io::Read + Send>(
@@ -4081,7 +4081,7 @@ fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
     // machinery the sharded external builder (sq-t3rt, #91) and the pipelined in-RAM loader
     // (`load_ntriples_pipelined`) already use successfully with triple terms; the earlier
     // `has_triple_terms ⇒ serial` guard here (added by sq-hxgb before that path was wired in)
-    // is therefore stale and removed, so RDF-star bulk loads keep full parse parallelism.
+    // is therefore stale and removed, so triple-term bulk loads keep full parse parallelism.
     // One rayon thread: the sharded merge would only add routing/consolidation overhead —
     // keep the proven serial merge (also the byte-reference the differential tests pin).
     if rayon::current_num_threads() <= 1 {
@@ -4238,10 +4238,10 @@ fn intern_subject_ref(dict: &mut Dict, s: &oxrdf::NamedOrBlankNode) -> Id {
 }
 
 /// [OPUS-4.8] (T1) Intern an oxttl-parsed object `Term` from its BORROWED components — the object
-/// slot is the one that can be a literal or (RDF-star) a quoted triple. IRIs/blank nodes/literals
+/// slot is the one that can be a literal or (RDF 1.2) a triple term. IRIs/blank nodes/literals
 /// dispatch straight to the component interners with `&str` views; a nested triple term recurses
 /// (its s/p/o are interned first, then the triple is stored by component ids, matching
-/// `Dict::intern(&Term::Triple(_))`). No owned `Term` is built for the common non-star case.
+/// `Dict::intern(&Term::Triple(_))`). No owned `Term` is built for the common non-triple-term case.
 #[cfg(feature = "parallel")]
 #[inline]
 fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
@@ -4251,7 +4251,7 @@ fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
         Term::Literal(l) => {
             dict.intern_lit(l.value(), l.datatype().as_str(), crate::dict::lang_with_dir(l).as_deref())
         }
-        // RDF-star quoted triple: rare; fall back to the owned-Term path (handles nesting +
+        // RDF 1.2 triple term: rare; fall back to the owned-Term path (handles nesting +
         // content-addressed triple ids identically to the serial parser).
         Term::Triple(_) => dict.intern(o),
     }
@@ -4641,7 +4641,7 @@ fn parse_turtle_chunked(bytes: &[u8], target: usize) -> Result<(Dict, Vec<[Id; 3
     // a partial here is structurally identical to an N-Triples block's partial: the merge
     // sees only ground terms and labelled blank nodes and unifies them by term equality,
     // exactly as the serial `merge_remap` loop did. RDF-1.2 triple terms are consolidated by
-    // the sharded merge too (sq-87bq), so quoted-triple Turtle stays eligible. The output
+    // the sharded merge too (sq-87bq), so triple-term Turtle stays eligible. The output
     // (term + triple set) is identical to the serial merge — pinned by the
     // `parallel_turtle_*_match_serial` differential oracles below.
     Ok(merge_partials(partials))
@@ -5687,15 +5687,15 @@ mod tests {
         assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
     }
 
-    /// [OPUS-4.8] sq-t267: RDF 1.2 / RDF-star quoted triples must parse IDENTICALLY through the
-    /// chunk-parallel Turtle path and the serial path — including a quoted triple that lands at a
+    /// [OPUS-4.8] sq-t267: RDF 1.2 triple terms must parse IDENTICALLY through the
+    /// chunk-parallel Turtle path and the serial path — including a triple term that lands at a
     /// CHUNK BOUNDARY. The terminator pre-scan ([`next_terminator`]) treats the `<` of `<<( … )>>`
     /// as an IRI start and scans to the first `>`, so it skips the whole triple term as one opaque
     /// span; the load-bearing risk is a DECIMAL or a `.`-bearing IRI *inside* the term being misread
     /// as a top-level statement terminator (which would split a chunk mid-triple-term and corrupt
-    /// the parse). This pins chunked == serial for: (a) plain quoted-triple objects, (b) a decimal
+    /// the parse). This pins chunked == serial for: (a) plain triple-term objects, (b) a decimal
     /// INSIDE the triple term, (c) the `{| … |}` annotation form (asserts base triple + reifies +
-    /// annotation), and (d) a single LARGE quoted-triple statement whose body straddles the split
+    /// annotation), and (d) a single LARGE triple-term statement whose body straddles the split
     /// point — the chunk boundary falls right after its terminator, not inside it.
     #[cfg(feature = "parallel")]
     #[test]
@@ -5717,7 +5717,7 @@ mod tests {
             (pt.len(), st.len())
         };
 
-        // (a) Plain quoted-triple objects, one statement each, many statements so the splitter
+        // (a) Plain triple-term objects, one statement each, many statements so the splitter
         //     puts chunk boundaries BETWEEN triple-term statements. The `>` inside `>>` and the
         //     `<` of `<<(` must not desync the terminator scan.
         let mut plain = String::from("@prefix : <http://ex/> .\n");
@@ -5750,7 +5750,7 @@ mod tests {
         assert!(annot.len() > 8192);
         differential(&annot, 32, true);
 
-        // (d) A SINGLE large quoted-triple statement (long IRIs, internal newlines/decimals)
+        // (d) A SINGLE large triple-term statement (long IRIs, internal newlines/decimals)
         //     padded with ground statements either side, so a chunk boundary falls right AFTER
         //     the big statement's terminator — exercising the boundary-adjacent case without
         //     splitting the term itself. chunked == serial is the witness it stayed intact.
@@ -6740,7 +6740,7 @@ mod tests {
 
         // Positive controls: well-formed Turtle MUST parse (so the oracle is not vacuous), covering
         // the constructs the T1 interner has to keep handling — prefixed names, full IRIs, blank
-        // nodes, collections, language tags, datatyped + plain literals, RDF-star quoted triples.
+        // nodes, collections, language tags, datatyped + plain literals, RDF 1.2 triple terms.
         let good: &[&str] = &[
             "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\n",
             "<http://ex/s> <http://ex/p> \"plain\" .\n",

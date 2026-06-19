@@ -277,7 +277,7 @@ fn walk_triple<F: FnMut(&str, TermRole)>(tp: &TriplePattern, f: &mut F) {
             }
         }
     }
-    // Quoted triple terms (RDF 1.2, `sparql-12`, always enabled here) can nest
+    // Triple terms (RDF 1.2, `sparql-12`, always enabled here) can nest
     // predicates/classes; descend.
     if let TermPattern::Triple(inner) = &tp.subject {
         walk_triple(inner, f);

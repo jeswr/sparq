@@ -12,8 +12,10 @@ loaders live in `sparq-core`; the binary HDT archive format (including content-s
 
 > Direction note: these crates **parse RDF in**. To write RDF *out*, sparq-engine ships the
 > **RDF writer matrix** behind its opt-in `serialize-rdf` feature — Turtle / TriG / N-Quads /
-> JSON-LD 1.1 writers (`sparq_engine::serialize::*`); the N-Triples writer
-> (`triples_to_ntriples`) is always on. See recipe 6.
+> JSON-LD 1.1 writers (`sparq_engine::serialize::*`), plus deterministic **pretty** (indented)
+> variants — Turtle / TriG (`graph_to_turtle_pretty`, the long-term engine home for the site
+> formatter) and JSON-LD (`graph_to_jsonld_pretty`); the N-Triples writer (`triples_to_ntriples`)
+> is always on. See recipe 6.
 
 ## Quickstart
 
@@ -198,7 +200,7 @@ N-Triples writer (`triples_to_ntriples`) is always on. Enable with
 
 ```rust
 use sparq_engine::serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads,
-                              graph_to_jsonld, JsonLdForm};
+                              graph_to_jsonld, graph_to_jsonld_pretty, JsonLdForm};
 
 let g = sparq_core::Graph::load_dataset(trig_src, "trig")?;
 let ttl = graph_to_turtle(&g);   // Turtle: @prefix header, `a` for rdf:type, predicate-object
@@ -209,6 +211,7 @@ let jx  = graph_to_jsonld(&g, JsonLdForm::Expanded);    // JSON-LD 1.1, fully-ex
                                                         //   array, no @context (whole dataset).
 let jf  = graph_to_jsonld(&g, JsonLdForm::Flattened);   //   node-merged, `@graph`-framed.
 let jc  = graph_to_jsonld(&g, JsonLdForm::Compacted);   //   basic prefix `@context` (default_prefixes).
+let jp  = graph_to_jsonld_pretty(&g, JsonLdForm::Expanded); // same docs, indented (multi-line).
 ```
 
 Lower-level entry points take `&[oxrdf::Triple]` (e.g. CONSTRUCT output) directly:
@@ -227,13 +230,46 @@ a list cell referenced more than once, carrying an extra predicate, cyclic, or n
 by `rdf:nil` — is left as ordinary `rdf:first`/`rdf:rest` triples, so the round-trip stays
 lossless either way (the empty list `()` stays an `rdf:nil` reference, never `@list`).
 
+**Pretty Turtle / TriG (idiomatic, deterministic).** Alongside the plain writers, the same
+feature exposes a *pretty* variant — `graph_to_turtle_pretty(&g)` / `graph_to_trig_pretty(&g)`,
+or the lower-level `write_turtle_pretty(triples, &prefixes, &opts)` /
+`write_trig_pretty(&named_graphs, &prefixes, &opts)` with a `PrettyOptions { indent, abbreviate }`
+(default: two-space indent, abbreviation on). Two differences from `graph_to_turtle`: (1) output
+is **emission-order-independent** — subjects, predicates and objects are sorted by their
+canonical N-Triples spelling and `rdf:type` (`a`) sorts first in each block, so the same triple
+SET always renders to the same bytes (the plain writer preserves the store's `iter_ids()` order,
+which is thread-count-dependent); (2) the **output shape** matches the site's `prettyTurtle`
+reshaper (`packages/sparq-client/src/pretty-turtle.ts`, sq-gb4o / #805) — a prefix-alphabetical
+used-only `@prefix` header, blank-line-separated subject blocks, the subject on its own line,
+predicate lines at one indent (`;`-joined, `.`-terminated), and object lists wrapped onto
+continuation lines (`,\n` + two indents). It is round-trip-correct (re-parses to the same triple
+set) and reuses the same escaping/term helpers, so literals (datatype/lang, implicit `xsd:string`
+dropped), blank nodes, and RDF 1.2 triple terms `<<( s p o )>>` are all reproduced losslessly.
+This is the long-term engine home for the site-side TS formatter; the wasm-surface exposure
+(so the site can drop its formatter) is a deferred follow-up.
+
+**Pretty (indented) JSON-LD.** The JSON-LD writers have a matching pretty variant —
+`graph_to_jsonld_pretty(&g, form)` / `write_jsonld_pretty(&named_graphs, form, &prefixes, &opts)`,
+or the `graph_to_jsonld_pretty_with(&g, form, &prefixes, &opts)` wrapper — taking
+`JsonLdPrettyOptions { indent }` (default: two-space indent). Unlike the Turtle pretty writer
+this is **whitespace-only**: it produces the *exact* minified JSON-LD document and re-indents it
+(each `{`/`[` opens an indented level, each member/element on its own line; empty `{}`/`[]` stay
+compact). So it reuses the minified writer's already-deterministic first-seen subject/predicate
+ordering unchanged, round-trips to the identical RDF, and stays dependency-free (a small
+hand-written JSON re-indenter — no `serde_json`, which is dev-only). Indentation is presentation
+only; the document content is byte-for-byte the minified form plus newlines/indent.
+
 From the CLI (opt-in `serialize-rdf` feature) — re-serialize a loaded document to stdout:
 
 ```bash
 cargo build -p sparq-cli --features serialize-rdf
 ./target/.../sparq-cli dump data.trig trig nquads
-#   out-format: turtle | trig | nquads | ntriples | jsonld[-expanded|-flattened|-compacted]
-#   (bare `jsonld` == jsonld-expanded)
+#   out-format: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples
+#              | jsonld[-expanded|-flattened|-compacted]
+#              | jsonld-pretty[-expanded|-flattened|-compacted]
+#   (bare `jsonld` == jsonld-expanded; `turtle-pretty`/`trig-pretty` emit the deterministic,
+#    idiomatic Turtle/TriG from recipe 6 — sorted, blank-line-separated subject blocks;
+#    the `jsonld-pretty*` forms emit indented JSON-LD, bare `jsonld-pretty` == expanded)
 ```
 
 ## Gotchas / feature flags / prerequisites
@@ -246,8 +282,12 @@ cargo build -p sparq-cli --features serialize-rdf
   fast path applies to N-Triples and Turtle in `load_str`; `load_reader_parallel`'s
   pipelined parser is **N-Triples only** (other formats silently fall back to serial
   `load_reader`). With `parallel` off (e.g. the wasm build, `--no-default-features`),
-  everything parses serially.
-- **RDF 1.2 triple terms / RDF-star are first-class.** A triple term `<<( s p o )>>` is a
+  everything parses serially. The parallel and serial parses are pinned **result-equivalent**
+  by a differential test (`crates/sparq-core/tests/parallel_serial_load_differential.rs`,
+  sq-bif.13): the same Turtle + N-Triples document loaded under `--features parallel` and under
+  `--no-default-features` answers every term-level probe (triple/term counts, full dump,
+  pattern scans) identically to a feature-independent reference graph.
+- **RDF 1.2 triple terms are first-class.** A triple term `<<( s p o )>>` is a
   real `oxrdf::Term::Triple` (object position only — RDF 1.2 makes triple terms object-only;
   a `<<( … )>>` in subject/predicate position is rejected with a precise error). Triple terms
   may nest, take blank-node/literal components, and are content-addressed (an identical triple
@@ -272,8 +312,13 @@ cargo build -p sparq-cli --features serialize-rdf
 - **`build_external` / `open` / `save` require the `mmap` feature** (native only). The
   N-Triples external path also honors `SPARQ_SHARDED_DICT` (default on with ≥2 threads)
   and, with the `dict-spill` feature + `SPARQ_DICT_SPILL` env, bounds peak build RSS by
-  spilling the term dictionary to disk (byte-identical output). External build folds
-  N-Quads/TriG named graphs into the default graph (only `load_dataset` preserves them).
+  spilling the term dictionary to disk (byte-identical output). The spill path's activation
+  + mmap-reload edges are pinned by `crates/sparq-core/tests/dict_spill_activation.rs`
+  (sq-bif.13): a tiny `mem_budget` (constant cache eviction across many epochs + many spilled
+  sort runs) yields a build byte-identical to a comfortable-budget build, a `disk_floor` above
+  free disk aborts cleanly through the spill pipeline's resource gate, and a spill-built store
+  reloads via `Graph::open` (and re-saves raw/compressed) to identical content. External build
+  folds N-Quads/TriG named graphs into the default graph (only `load_dataset` preserves them).
 - **HDT is opt-in and native-only.** `sparq-hdt` MSRV is **1.87** (the wrapped `hdt` crate),
   above the workspace's 1.85 — in the CLI it is gated behind `--features hdt`. It carries
   zero code into the wasm build. Compression containers are detected by **magic bytes, not

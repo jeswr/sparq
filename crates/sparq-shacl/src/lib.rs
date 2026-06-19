@@ -12,12 +12,21 @@ mod report;
 // cargo feature so the base validation path carries zero rule code when off.
 #[cfg(feature = "shacl-af")]
 pub mod rules;
+// [OPUS-4.8] (sq-v0b8, #796) SHACL Compact Syntax (SCS) PARSER (text → shapes
+// triples) — OPT-IN behind the `scs` cargo feature so the base validation path
+// (and the default + wasm bundles) carry zero parser code when off.
+#[cfg(feature = "scs")]
+pub mod scs;
 mod sparql;
 pub mod view;
 
 pub use model::{Component, Shape, ShapesModel, Target};
 pub use path::Path;
 pub use report::{ValidationReport, ValidationResult};
+
+// [OPUS-4.8] (sq-v0b8) SHACL Compact Syntax parser public surface (feature `scs`).
+#[cfg(feature = "scs")]
+pub use scs::{parse as parse_scs, parse_to_graph as parse_scs_to_graph, ScsError, DEFAULT_BASE};
 
 // [OPUS-4.8] SHACL-AF rules + node-expression public surface (feature `shacl-af`).
 #[cfg(feature = "shacl-af")]

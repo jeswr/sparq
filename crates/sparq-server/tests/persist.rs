@@ -594,6 +594,152 @@ async fn persistent_durable_write_error_repeated_503_reads_survive() {
 }
 
 // ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-bif.14) MULTI-STEP / SEQUENCED durable-write failure injection.
+//
+// The two tests above fail a CONTIGUOUS PREFIX of seals (a transient burst that clears, or a
+// permanent jam). They do not exercise the INTERLEAVED path: a writer that recovers, takes more
+// durable writes, then fails AGAIN, then recovers again — the realistic flapping-disk / quota-
+// bouncing failure mode. This test drives that sequence over HTTP through the SAME `test-seams`
+// seal seam and asserts the graceful-degradation contract holds at EVERY step:
+//   * each seal that the injected hook fails → the in-flight write is refused 503 and is NEVER
+//     published (fail-closed), so the live row count does NOT advance on a failed step;
+//   * each seal the hook lets through → 204 and the row count advances by exactly that write;
+//   * the writer SURVIVES every failure (the server keeps serving across the whole sequence);
+//   * the cumulative live set after the sequence is EXACTLY the successful writes (no failed
+//     write leaked in, no successful write lost), and that set is durable across a restart.
+// The seam's hook is a stateful `FnMut`, so the per-seal failure decision is driven by a seal
+// counter — failures land at chosen, NON-prefix positions.
+// ---------------------------------------------------------------------------
+
+/// Boots a `--persist` server whose Nth durable seal fails iff `fail_on` contains N (0-based over
+/// the seals that actually reach the durable commit). `test-seams` only. Unlike
+/// `start_with_transient_failures` (which fails the first `n_fail` seals), this fails an ARBITRARY
+/// SET of seal indices, so a recover→fail→recover sequence can be modelled exactly.
+#[cfg(feature = "test-seams")]
+async fn start_with_failures_at(config: ServerConfig, fail_on: &'static [usize]) -> Server {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    let graph = Graph::load_str("", "turtle").unwrap();
+    let seal_idx = Arc::new(AtomicUsize::new(0));
+    let hook: Box<dyn FnMut() -> Option<String> + Send> = Box::new(move || {
+        let n = seal_idx.fetch_add(1, Ordering::SeqCst);
+        if fail_on.contains(&n) {
+            Some(format!("injected durable-write error at seal #{}", n))
+        } else {
+            None
+        }
+    });
+    let state = AppState::with_config_inject_durable_failure(graph, config, hook)
+        .expect("durable open with injected failure seam");
+    let app = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    Server { base: format!("http://{}", addr), shutdown: Some(tx), task: Some(task) }
+}
+
+/// A SEQUENCED outage: durable writes succeed, then a seal fails, then writes recover, then a seal
+/// fails AGAIN, then recovers — interleaved with reads. At every step fail-closed holds (a refused
+/// write never lands, a recovered write does), the writer survives the whole sequence, and the
+/// final live set is EXACTLY the successful writes, durable across a restart. `test-seams` only.
+#[cfg(feature = "test-seams")]
+#[tokio::test]
+async fn sequenced_durable_failures_recover_and_refail_fail_closed() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+
+    // Fail the 2nd and 4th durable seals (0-based seal indices 1 and 3). So the planned outcome
+    // for writes w0..w4 is: w0 ok, w1 REFUSED, w2 ok, w3 REFUSED, w4 ok → 3 live rows.
+    let s = start_with_failures_at(persist_config(scratch.path()), &[1, 3]).await;
+
+    // `(should_fail, subject)` for five writes; we track the live count as we go so each step's
+    // assertion depends on the PREVIOUS steps having behaved (a regression that mis-publishes a
+    // refused write, or drops a good one, shifts the running count and trips a later assert).
+    let plan = [false, true, false, true, false];
+    let mut expected_live: usize = 0;
+
+    for (i, should_fail) in plan.iter().enumerate() {
+        let status = post_update(
+            &cl,
+            &s.base,
+            &format!("INSERT DATA {{ <http://ex/w{}> <http://ex/p> <http://ex/v> }}", i),
+        )
+        .await;
+
+        if *should_fail {
+            assert_eq!(
+                status, 503,
+                "write w{} hits an injected durable failure → must be refused 503",
+                i
+            );
+            // Fail-closed: the refused write is NOT in the live view.
+            assert!(
+                !ask(&cl, &s.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+                "a refused (non-durable) write w{} must NOT be published",
+                i
+            );
+        } else {
+            assert_eq!(
+                status, 204,
+                "write w{} seals durably → must succeed 204 (writer survived prior failures)",
+                i
+            );
+            expected_live += 1;
+            // The successful write IS in the live view.
+            assert!(
+                ask(&cl, &s.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+                "a successful write w{} must be published",
+                i
+            );
+        }
+
+        // The running cumulative count matches exactly the successful writes so far — reads keep
+        // being served from the last published snapshot the whole way through the outage.
+        assert_eq!(
+            count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await,
+            expected_live,
+            "after step w{} the live set must be exactly the successful writes so far",
+            i
+        );
+    }
+
+    assert_eq!(expected_live, 3, "plan sanity: w0, w2, w4 should have committed");
+
+    // The surviving live set is durable across a clean restart: exactly the successful writes,
+    // and NONE of the refused ones ever resurrect.
+    s.stop().await;
+    let s2 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(
+        count_rows(&cl, &s2.base, "SELECT * WHERE { ?s ?p ?o }").await,
+        3,
+        "the successful writes must survive a restart (they really were made durable)",
+    );
+    for i in [0usize, 2, 4] {
+        assert!(
+            ask(&cl, &s2.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+            "committed write w{} must survive the restart",
+            i
+        );
+    }
+    for i in [1usize, 3] {
+        assert!(
+            !ask(&cl, &s2.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+            "refused write w{} must NEVER resurrect after a restart",
+            i
+        );
+    }
+    s2.stop().await;
+}
+
+// ---------------------------------------------------------------------------
 // [OPUS-4.8] (sq-x32t, epic sq-toze.33) ADMIN WAL COMPACTION / VACUUM — erasure-completeness.
 // ---------------------------------------------------------------------------
 

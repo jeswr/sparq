@@ -200,10 +200,18 @@ cargo publish -p sparq-server
 >   (external — see `compliance/openssf/gap-register.md` GX-OSSF-2 / `compliance/gap-register.md`
 >   GX-10). Do **not** describe a crates.io publish as "signed".
 > - **npm `@jeswr/sparq` — native Sigstore provenance** via [`publish.yml`](../.github/workflows/publish.yml)'s
->   `npm` job (`npm publish --provenance` in the GitHub OIDC context); consumers verify with
->   `npm audit signatures`.
+>   `npm` job. [OPUS-4.8] sq-v286.11: the job now authenticates with **OIDC trusted publishing**
+>   (no `NPM_TOKEN`) — npm exchanges the GitHub Actions OIDC token for a short-lived publish
+>   credential and records the Sigstore-signed provenance automatically; consumers verify with
+>   `npm audit signatures`. See §8 for the one-time Trusted-Publisher registration.
 > - **PyPI `sparq-rdf` — native PEP-740 attestations** via Trusted Publishing (see the
->   "Python wheels" section below) once the maintainer registers the Trusted Publisher.
+>   "Python wheels" section below + §8) once the maintainer registers the Trusted Publisher.
+>
+> [OPUS-4.8] sq-v286.11: **crates.io Trusted Publishing** (GA 2025-07, RFC 3691) is now available
+> as an *authentication* mechanism (a short-lived OIDC token via `rust-lang/crates-io-auth-action`,
+> in place of a long-lived `CARGO_REGISTRY_TOKEN`). It is **not** a provenance/signing scheme — it
+> does **not** put a provenance link on the crates.io page — so the "do not describe a crates.io
+> publish as signed" caveat above is unchanged. The CI side of the auth flip is pre-wired (§8).
 
 ## 5. Docker (manual / local)
 
@@ -281,3 +289,73 @@ informationally on pushes to main (`.github/workflows/python.yml`); release publ
 > fails to mint an OIDC token (no static API token is stored). Once registered, every published
 > release emits native PyPI provenance (the "Provenance" panel on the release-files page;
 > consumers verify with `pypi-attestations verify` / `gh attestation verify`).
+
+<!-- [OPUS-4.8] sq-v286.11 (maintainer #758): CI publishing via OIDC trusted publishing. -->
+## 8. CI publishing — OIDC trusted publishers (the one-time `needs:user` registry-side steps)
+
+[OPUS-4.8] sq-v286.11 (maintainer #758): "publishing via CI with semantic release, using trusted
+OIDC publishing for npm, and whatever the best practices are for the python ecosystem." The repo
+holds only the **workflows**; each registry's **trust config is a one-time maintainer action** in
+that registry's web UI (it cannot live in a repo file — that is the whole point of OIDC: the
+registry, not a stored secret, decides which workflow it trusts). All three legs use the GitHub
+Actions OIDC token (`id-token: write`); **no long-lived `NPM_TOKEN` / `CARGO_REGISTRY_TOKEN` is
+stored**. Honest bootstrap note: **npm and crates.io require the package/crate to already exist**
+(register the trusted publisher *after* one manual bootstrap publish); **PyPI supports a *pending*
+publisher** so the very first publish can be trusted-publishing too.
+
+### 8a. npm `@jeswr/sparq` — WIRED (`publish.yml` `npm` job)
+
+The `npm` job authenticates entirely via OIDC trusted publishing (no `NODE_AUTH_TOKEN`). It pins
+`npm@^11.5.1` (the trusted-publishing CLI floor — Node 22's bundled npm can be older) and keeps
+`--provenance --access public`.
+
+**needs:user (npmjs.com):** `@jeswr/sparq` must already exist on npm, so:
+1. ONE bootstrap publish with a short-lived **granular** access token (delete the token after).
+2. npmjs.com → `@jeswr/sparq` → **Settings → Trusted Publisher** → *GitHub Actions*:
+   - Organization or user: **`jeswr`**
+   - Repository: **`sparq`**
+   - Workflow filename: **`publish.yml`** (filename only, with extension — **not** a path)
+   - Environment: **leave blank** (the `npm` job uses no GitHub Environment)
+   - Allowed actions: **`npm publish`**
+
+Every subsequent CI publish is tokenless and provenance-bearing (`npm audit signatures`).
+
+### 8b. PyPI `sparq-rdf` — WIRED (`publish.yml` `pypi-publish` job)
+
+Already implemented to current best practice: `pypa/gh-action-pypi-publish` with `attestations: true`
++ OIDC `id-token: write` + GitHub `environment: pypi`, no API token. Emits native PEP-740 provenance.
+
+**needs:user (pypi.org):** PyPI → (project `sparq-rdf` if it exists, else *Your projects → Publishing*
+for a **pending** publisher) → **Add a new publisher** → *GitHub*:
+   - PyPI Project Name: **`sparq-rdf`**
+   - Owner: **`jeswr`**, Repository: **`sparq`**
+   - Workflow name: **`publish.yml`**
+   - Environment: **`pypi`** (matches the `pypi-publish` job's `environment:`)
+
+Because PyPI allows a *pending* publisher, no manual bootstrap upload is required.
+
+### 8c. crates.io (17 crates) — CI side PRE-WIRED, flip is one config change (`release-plz.yml` + `release-plz.toml`)
+
+crates.io Trusted Publishing (GA 2025-07, RFC 3691) supplies a short-lived OIDC token via
+`rust-lang/crates-io-auth-action` — no `CARGO_REGISTRY_TOKEN`. The CI side is pre-wired as a
+commented block on `release-plz.yml`'s `release-plz-release` job; `release-plz.toml` keeps
+`publish = false` until the trust config exists (so a `publish=true` with no credential can't break
+tag-cutting). This is the "config-flip" the design record (§6 item 4) calls "the point of adoption".
+
+**needs:user (crates.io), per the 17 publishable crates (`docs/release.md` §4 DAG), leaf-first:**
+1. ONE bootstrap `cargo publish` per crate (crates.io requires each crate to already exist).
+2. For **each** crate: crates.io → crate → **Settings → Trusted Publishing → Add** → *GitHub*:
+   - Repository owner: **`jeswr`**, Repository name: **`sparq`**
+   - Workflow filename: **`release-plz.yml`**
+   - Environment: **leave blank** (the `release-plz-release` job uses no GitHub Environment)
+
+**Then flip (three coordinated edits):**
+- `release-plz.yml`: uncomment `id-token: write`, the `rust-lang/crates-io-auth-action` step
+  (SHA-pinned `c6f97d4…` # v1.0.5), and the `CARGO_REGISTRY_TOKEN: ${{ steps.cratesio-auth.outputs.token }}` env.
+- `release-plz.toml`: set `publish = true`.
+- `publish.yml`'s `crates` job then reverts to attest-only over the `.crate` bytes (release-plz
+  becomes the publisher; the out-of-band attestation stays as the verifiable-bytes evidence).
+
+> Provenance honesty: crates.io trusted publishing is an **auth** mechanism only — it does **not**
+> put a provenance link on the crates.io page (no upstream scheme exists, unlike npm/PyPI). The
+> "do not describe a crates.io publish as signed" caveat in §4 is unchanged.

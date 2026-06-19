@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   CheckCircle2,
   XCircle,
+  FileCode2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -24,10 +25,16 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { RdfHighlight } from "@/components/rdf-highlight";
 import {
   prewarmSparq,
+  loadSparq,
+  loadIntoStore,
+  matchQuads,
   sparqShaclValidate,
   type ShaclReport,
+  type SparqlBinding,
+  type SparqlTerm,
 } from "@/lib/sparq-wasm";
 import {
   componentName,
@@ -36,6 +43,12 @@ import {
   severityName,
   shortenIri,
 } from "@/lib/shacl-report";
+import {
+  shapesToCompact,
+  type ScsPrefix,
+  type ScsTerm,
+  type ScsTriple,
+} from "@/lib/shacl-compact";
 import { SHACL_EXAMPLES } from "@/data/shacl-examples";
 
 type RunState =
@@ -44,8 +57,49 @@ type RunState =
   | { kind: "report"; report: ShaclReport; ms: number }
   | { kind: "error"; message: string };
 
+// [OPUS-4.8] sq-pvg2 (#796) — the shapes-graph -> SHACL Compact Syntax render, kept
+// separate from the validation RunState so the compact view does not depend on a
+// validation run (it serialises the SHAPES textarea, not the data graph).
+type CompactState =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "done"; text: string; unsupported: string[] }
+  | { kind: "error"; message: string };
+
 type EngineState = "cold" | "warming" | "ready" | "error";
-type View = "results" | "turtle";
+type View = "results" | "turtle" | "compact";
+
+// Turtle `@prefix p: <iri> .` OR SPARQL-style `PREFIX p: <iri>` declarations. The
+// shared `declaredPrefixBindings` only matches the SPARQL form; the SHACL Turtle
+// shapes need this @-aware pass to recover the user's prefix labels for the compact
+// output. Best-effort over the text (an unrecovered prefix only means the IRI is
+// emitted in `<…>` form, never wrong output).
+const PREFIX_RE = /(?:^|\s)(?:@?prefix|PREFIX)\s+([A-Za-z][\w.-]*)?:\s*<([^>]*)>/gi;
+
+function extractPrefixes(turtle: string): ScsPrefix[] {
+  const out: ScsPrefix[] = [];
+  const seen = new Set<string>();
+  for (const m of turtle.matchAll(PREFIX_RE)) {
+    const prefix = m[1] ?? "";
+    if (seen.has(prefix)) continue;
+    seen.add(prefix);
+    out.push({ prefix, iri: m[2] });
+  }
+  return out;
+}
+
+// Map a SPARQL-JSON term (the `{type,value,datatype,xml:lang}` shape the wasm SELECT
+// yields) to the serializer's structural `ScsTerm`.
+function toScsTerm(t: SparqlTerm): ScsTerm {
+  if (t.type === "uri") return { termType: "NamedNode", value: t.value };
+  if (t.type === "bnode") return { termType: "BlankNode", value: t.value };
+  return {
+    termType: "Literal",
+    value: t.value,
+    datatype: t.datatype,
+    language: t["xml:lang"],
+  };
+}
 
 const DEFAULT = SHACL_EXAMPLES[0];
 
@@ -53,6 +107,7 @@ export function ShaclPlayground() {
   const [data, setData] = React.useState(DEFAULT.data);
   const [shapes, setShapes] = React.useState(DEFAULT.shapes);
   const [state, setState] = React.useState<RunState>({ kind: "idle" });
+  const [compact, setCompact] = React.useState<CompactState>({ kind: "idle" });
   const [engine, setEngine] = React.useState<EngineState>("cold");
   const [activeExample, setActiveExample] = React.useState<string>(DEFAULT.id);
   const [view, setView] = React.useState<View>("results");
@@ -93,6 +148,34 @@ export function ShaclPlayground() {
     }
   }, [data, shapes]);
 
+  // [OPUS-4.8] sq-pvg2 (#796) — render the SHAPES graph in SHACL Compact Syntax.
+  // Parses the shapes Turtle with the same wasm engine, pulls every triple out via
+  // `matchQuads`, and serialises with the dependency-free `shapesToCompact`. Switches
+  // the report view to the Compact tab so the result is visible immediately.
+  const renderCompact = React.useCallback(async () => {
+    setView("compact");
+    setCompact({ kind: "running" });
+    try {
+      const Store = await loadSparq();
+      const store = loadIntoStore(Store, shapes, "turtle");
+      const rows: SparqlBinding[] = matchQuads(store);
+      const triples: ScsTriple[] = rows.flatMap((row) => {
+        const { s, p, o } = row;
+        if (!s || !p || !o) return [];
+        return [
+          { subject: toScsTerm(s), predicate: toScsTerm(p), object: toScsTerm(o) },
+        ];
+      });
+      const { text, unsupported } = shapesToCompact(triples, extractPrefixes(shapes));
+      setEngine("ready");
+      setCompact({ kind: "done", text, unsupported });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setCompact({ kind: "error", message });
+      toast.error("Could not render compact syntax", { description: message });
+    }
+  }, [shapes]);
+
   const selectExample = React.useCallback((id: string) => {
     const ex = SHACL_EXAMPLES.find((e) => e.id === id);
     if (!ex) return;
@@ -100,9 +183,11 @@ export function ShaclPlayground() {
     setShapes(ex.shapes);
     setActiveExample(id);
     setState({ kind: "idle" });
+    setCompact({ kind: "idle" });
   }, []);
 
   const busy = state.kind === "running";
+  const compactBusy = compact.kind === "running";
 
   return (
     <Card>
@@ -164,7 +249,7 @@ export function ShaclPlayground() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={run} disabled={busy}>
+          <Button onClick={run} disabled={busy || compactBusy}>
             {busy ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
@@ -172,20 +257,40 @@ export function ShaclPlayground() {
             )}
             Validate
           </Button>
-          {state.kind === "report" && (
-            <ViewTabs view={view} onChange={setView} />
+          <Button
+            variant="outline"
+            onClick={renderCompact}
+            disabled={busy || compactBusy}
+            title="Render the shapes graph in SHACL Compact Syntax"
+          >
+            {compactBusy ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <FileCode2 className="size-4" />
+            )}
+            Compact syntax
+          </Button>
+          {(state.kind === "report" || compact.kind === "done") && (
+            <ViewTabs
+              view={view}
+              onChange={setView}
+              hasReport={state.kind === "report"}
+              hasCompact={compact.kind === "done"}
+            />
           )}
           <p aria-live="polite" className="text-xs text-muted-foreground">
             {state.kind === "report" &&
               `${state.report.results.length} result${state.report.results.length === 1 ? "" : "s"} · ${state.ms.toFixed(1)} ms`}
             {state.kind === "running" && "Validating on the wasm engine…"}
+            {compact.kind === "running" && "Rendering compact syntax…"}
             {state.kind === "idle" &&
+              compact.kind === "idle" &&
               engine === "warming" &&
               "Pre-warming the wasm engine…"}
           </p>
         </div>
 
-        <ResultPanel state={state} view={view} />
+        <ResultPanel state={state} compact={compact} view={view} />
       </CardContent>
     </Card>
   );
@@ -216,13 +321,24 @@ function EngineIndicator({ engine }: { engine: EngineState }) {
 function ViewTabs({
   view,
   onChange,
+  hasReport,
+  hasCompact,
 }: {
   view: View;
   onChange: (v: View) => void;
+  hasReport: boolean;
+  hasCompact: boolean;
 }) {
   const tabs: { value: View; label: string }[] = [
-    { value: "results", label: "Results" },
-    { value: "turtle", label: "W3C Turtle" },
+    ...(hasReport
+      ? ([
+          { value: "results", label: "Results" },
+          { value: "turtle", label: "W3C Turtle" },
+        ] as const)
+      : []),
+    ...(hasCompact
+      ? ([{ value: "compact", label: "Compact syntax" }] as const)
+      : []),
   ];
   return (
     <div
@@ -251,7 +367,20 @@ function ViewTabs({
   );
 }
 
-function ResultPanel({ state, view }: { state: RunState; view: View }) {
+function ResultPanel({
+  state,
+  compact,
+  view,
+}: {
+  state: RunState;
+  compact: CompactState;
+  view: View;
+}) {
+  // The Compact tab is driven by the (validation-independent) compact render.
+  if (view === "compact") {
+    return <CompactPanel compact={compact} />;
+  }
+
   if (state.kind === "error") {
     return (
       <pre className="overflow-x-auto rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
@@ -271,6 +400,61 @@ function ResultPanel({ state, view }: { state: RunState; view: View }) {
         </pre>
       ) : (
         <ResultList report={report} />
+      )}
+    </div>
+  );
+}
+
+// [OPUS-4.8] sq-pvg2 (#796) — renders the shapes-graph -> SHACL Compact Syntax output,
+// highlighted via the shared Turtle highlighter (the compact grammar's prefixes / IRIs
+// / strings / numbers / comments tokenise compatibly). Any construct the compact
+// grammar cannot carry (logical constraints, shape references) is listed explicitly
+// rather than silently dropped, so the output never looks falsely complete.
+function CompactPanel({ compact }: { compact: CompactState }) {
+  if (compact.kind === "error") {
+    return (
+      <pre className="overflow-x-auto rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+        {compact.message}
+      </pre>
+    );
+  }
+  if (compact.kind !== "done") {
+    return (
+      <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+        Rendering…
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {compact.text ? (
+        <RdfHighlight
+          text={compact.text}
+          className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
+          data-testid="scs-output"
+        />
+      ) : (
+        <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+          No SHACL node shapes found in the shapes graph.
+        </p>
+      )}
+      {compact.unsupported.length > 0 && (
+        <div className="space-y-1.5 rounded-lg border border-[var(--warning)]/30 bg-[color-mix(in_oklch,var(--warning)_8%,transparent)] p-3">
+          <Badge variant="warning">
+            {compact.unsupported.length} not expressible in compact syntax
+          </Badge>
+          <ul className="space-y-1 text-xs text-muted-foreground">
+            {compact.unsupported.map((u, i) => (
+              <li key={i}>{u}</li>
+            ))}
+          </ul>
+          <p className="text-xs text-muted-foreground">
+            SHACL Compact Syntax has no form for logical constraints (sh:and /
+            sh:or / sh:xone / sh:not) or shape references (sh:node), so those are
+            listed here rather than dropped — the compact output stays honest
+            about what it carries.
+          </p>
+        </div>
       )}
     </div>
   );

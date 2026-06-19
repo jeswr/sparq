@@ -67,8 +67,31 @@ CDX_NPM="@cyclonedx/cyclonedx-npm@5.0.0"
 
 JS_DIR="$REPO_ROOT/js"
 LOCKFILE="$JS_DIR/package-lock.json"
+
+# [OPUS-4.8] sq-jpki.1: repo-root npm-workspaces migration — the per-member
+# `js/package-lock.json` was DROPPED as redundant; the single source of truth is the repo-root
+# `package-lock.json`. cyclonedx-npm's `--package-lock-only` reads a lock CO-LOCATED with the
+# manifest it scans, so we DERIVE a transient, self-contained `js/package-lock.json` out of the
+# root lock (preserving the EXACT pinned versions; no `^`-range re-resolution, no network — the
+# js-sbom lane is deliberately install-free + deterministic). We pass `--no-workspaces` to
+# cyclonedx so it does NOT climb to the workspace root + report `sparq-monorepo` as the root
+# component; the SBOM stays anchored at the published client `@jeswr/sparq` (root component
+# name `sparq`), exactly as before the migration. The derived lock is scratch — removed on exit.
+ROOT_LOCK="$REPO_ROOT/package-lock.json"
+if [ ! -f "$ROOT_LOCK" ]; then
+  echo "ERROR: repo-root $ROOT_LOCK not found — cannot derive the JS client lock for SBOM" >&2
+  exit 1
+fi
+DERIVED_LOCK=0
 if [ ! -f "$LOCKFILE" ]; then
-  echo "ERROR: $LOCKFILE not found — cannot SBOM the JS client" >&2
+  node "$REPO_ROOT/scripts/derive-workspace-member-lock.mjs" js "$LOCKFILE"
+  DERIVED_LOCK=1
+  # Remove the transient derived lock on ANY exit so it can never be staged/committed and the
+  # working tree is left as it was found (single root lock; no per-member lock).
+  trap 'if [ "$DERIVED_LOCK" -eq 1 ]; then rm -f "$LOCKFILE"; fi' EXIT
+fi
+if [ ! -f "$LOCKFILE" ]; then
+  echo "ERROR: $LOCKFILE not found and could not be derived — cannot SBOM the JS client" >&2
   exit 1
 fi
 
@@ -83,6 +106,7 @@ echo "    -> runtime tree (--omit dev): $runtime_out"
     --spec-version 1.5 \
     --output-format JSON \
     --package-lock-only \
+    --no-workspaces \
     --omit dev \
     --mc-type library \
     --output-file "$runtime_out" )
@@ -93,6 +117,7 @@ echo "    -> full build tree (incl. dev): $dev_out"
     --spec-version 1.5 \
     --output-format JSON \
     --package-lock-only \
+    --no-workspaces \
     --mc-type library \
     --output-file "$dev_out" )
 

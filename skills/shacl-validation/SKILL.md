@@ -87,6 +87,29 @@ pub fn load_turtle_with_base(text: &str, base: &str) -> Result<Graph, String>;
 pub fn graph_from_triples<I: IntoIterator<Item = oxrdf::Triple>>(triples: I) -> Graph;
 ```
 
+**SHACL Compact Syntax (SCS) parser** *(opt-in feature `scs`)* — the *parse*
+direction of the W3C SCS (`sparq_shacl::scs::…`, re-exported at the crate root):
+
+```rust
+// Parse SCS text -> SHACL shapes triples (relative IRIs + the owl:Ontology subject
+// resolve against `base`; pass DEFAULT_BASE for the no-`BASE` convention).
+pub fn parse_scs(text: &str, base: &str) -> Result<Vec<oxrdf::Triple>, ScsError>;
+
+// Same, then build a queryable Graph ready to feed `validate`.
+pub fn parse_scs_to_graph(text: &str, base: &str) -> Result<Graph, ScsError>;
+
+pub const DEFAULT_BASE: &str;   // "urn:x-base:default"
+pub struct ScsError { pub line: usize, pub message: String }   // typed; never a silent mis-parse
+```
+
+It emits the SAME shapes triples `validate` consumes, so an SCS document validates
+data identically to the equivalent Turtle. Covers the grammar the W3C `shacl12-cs`
+corpus exercises (32/32 fixtures round-trip graph-isomorphically): directives,
+`shape`/`shapeClass`, full path expressions, `[min..max]`, `nodeKind`, bare-IRI
+`sh:datatype`-vs-`sh:class`, `@`shape-refs (`sh:node`), `param=value`, `!` (`sh:not`),
+`|` (`sh:or`), nested `{...}` shapes (`sh:node`), and `[ ... ]` arrays (`sh:in` /
+`sh:ignoredProperties`). The wasm `Store` binding is deferred (sq-quly).
+
 `ShapesModel` (`sparq_shacl::ShapesModel`):
 
 ```rust
@@ -351,6 +374,13 @@ the suite is not fetched).
   are absent. SHACL-AF rules are an INFERENCE step (they produce triples), not a
   validation step — they do not affect `validate(..)`'s report; validate the
   `expand(..)`-ed graph if you want constraints to see inferred triples.
+- **The SHACL Compact Syntax parser is OPT-IN behind the `scs` cargo feature.**
+  With it off the `scs` module and the `parse_scs` / `parse_scs_to_graph` / `ScsError`
+  / `DEFAULT_BASE` symbols are absent (zero parser code compiled in). It adds no new
+  dependencies. Coverage is honest: any construct outside the supported grammar
+  returns a typed `ScsError` rather than mis-parsing. Both the SCS parse and the
+  reference Turtle must resolve relative IRIs against the same `base` to agree, so
+  the round-trip test passes the fixture's `BASE` (or `DEFAULT_BASE`) to both sides.
 - **Rule fixpoint is bounded.** `apply_rules` iterates the rule schedule until a
   pass infers nothing, capped at `rules::MAX_ITERATIONS` (100); `Inference::capped`
   flags a non-terminating rule set (e.g. a CONSTRUCT minting a fresh blank node each

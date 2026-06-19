@@ -1,13 +1,20 @@
 # @sparq/client
 
 Framework-agnostic TypeScript client for the **sparq** WASM engine. This is the **single
-shared declaration** of the `WasmStore` surface (the `crates/sparq-wasm` `Store` exposed over
+shared entry point** for the `WasmStore` surface (the `crates/sparq-wasm` `Store` exposed over
 wasm-bindgen) plus the loaders and query helpers around it.
 
 It exists to remove the drift liability flagged in `research/gui-design.md` (§0 / §4): the
 WASM `Store` TS interface was **hand-redeclared** inside `site/src/lib/sparq-wasm.ts`, so any
 future GUI would have become a **third** hand-copy kept in sync by hand. The site now
 re-exports the surface from here; the (proposed) Tauri 2 GUI consumes the same package.
+
+As of `sq-jpki` the surface is no longer hand-mirrored at all: `WasmStore`,
+`WasmSolutionCursor` and `WasmStoreCtor` are **aliases over the wasm-pack-GENERATED `Store` /
+`SolutionCursor` classes** (re-exported from `src/generated/sparq_wasm.d.ts`, the tracked
+verbatim build output — see [`src/generated/README.md`](src/generated/README.md)). That tracked
+copy is the **single source of truth**, kept byte-identical to a fresh wasm build by
+`npm run check:wasm-types`.
 
 ## What's in it
 
@@ -19,6 +26,25 @@ re-exports the surface from here; the (proposed) Tauri 2 GUI consumes the same p
   unchanged; a desktop GUI passes its own `tauri://` / `file://` origin).
 - The framework-agnostic query helpers: `matchQuads`, `countQuads`, `streamQueryRows`,
   `sparqShaclValidate`, `formatTerm`.
+- **RDF-document display + serialisation helpers** (`sq-8uew` / `sq-gb4o`, all dependency-free
+  and DOM-free so the site and the Tauri 2 webview share one copy): `prettyTurtle(input, opts?)`
+  / `prettyTrig(input, opts?)` reshape the engine's FLAT N-Triples / N-Quads
+  CONSTRUCT/DESCRIBE output (`WasmStore.queryQuads` is N-Triples only) into idiomatic, indented
+  Turtle/TriG — `@prefix` abbreviation, one block per subject, `;`/`,` predicate-object lists,
+  `a` for `rdf:type` — while staying ROUND-TRIP-EQUIVALENT (re-parsing the output yields the
+  same triple set; literals, blank-node labels and RDF 1.2 triple terms `<<( s p o )>>` are
+  lossless) and NEVER throwing (an unparseable line passes through verbatim).
+  `PrettyTurtleOptions` takes `{ prefixes?, indent?, abbreviate? }`; `parseNTriples(input)`
+  exposes the underlying tokeniser (`{ statements, passthrough }`) over the `RdfTerm` /
+  `RdfStatement` shapes. `tokenizeTurtle(text)` is the sibling Turtle/TriG/N-Triples/N-Quads
+  highlighting tokenizer (`TurtleToken` / `TurtleTokenType`) — compose as pretty-print THEN
+  highlight. The `sparql-prefixes` helpers recover prefix bindings from a query so the pretty
+  view abbreviates result IRIs with the USER's own declared prefixes: `declaredPrefixBindings`
+  / `declaredPrefixes` / `usedPrefixes` / `missingCommonPrefixes` / `renderPrefixLines` /
+  `withPrefixes`, plus the `COMMON_PREFIXES` well-known registry and the `PrefixBinding` type.
+  (The PARSE direction — Turtle/SHACL-Compact text → engine — is the engine's job, not this
+  package's: SHACL Compact Syntax *display* lives in `site/` and its parser is tracked under a
+  separate `sparq-shacl` bead.)
 - **Endpoint mode** (`src/endpoint.ts`, `sq-2mke`): the SPARQL 1.1 Protocol HTTP client —
   the companion to the in-tab `WasmStore`. Run the SAME editor against any running
   `sparq-server` (or any conformant endpoint) over `fetch`. `runEndpointQuery(config, sparql)`
@@ -44,6 +70,25 @@ re-exports the surface from here; the (proposed) Tauri 2 GUI consumes the same p
   renders a live row exactly like a queried one. It reuses endpoint mode's `EndpointConfig` +
   bearer posture verbatim, runs the SAME `connectionSafetyWarnings` classifier, and **bypasses no
   server gate** (the SSE read surface is gated by `--auth-token-read` exactly as `/sparql` GET).
+- **Server health / capabilities** (`src/server-health.ts`, `sq-he72`): reads the connected
+  server's OPERATIONAL surface, reusing the SAME `EndpointConfig` + bearer posture.
+  `fetchServerHealth(config)` reads `/health`, the Prometheus `/metrics`, the opt-in VoID
+  (`/.well-known/void`) and the opt-in SPARQL Service Description (a `GET /sparql` with no
+  `query`) concurrently off the configured endpoint's ORIGIN (the operational endpoints live at
+  the server root, NOT under `/sparql` — `deriveServerUrl` does the path swap), and returns each
+  as a discriminated `FetchOutcome` (`ok` / `not-exposed` / `unauthorized` / `error`).
+  `parsePrometheusMetrics` is a focused, dependency-free parser for the server's hand-rolled
+  Prometheus [text exposition format] (`crates/sparq-server/src/metrics.rs`) → `MetricFamily[]`
+  (HELP / TYPE / labelled samples, with histogram buckets grouped under their base family).
+  `extractVoidSummary` / `extractServiceDescription` reshape the RDF descriptors (requested as
+  `application/n-triples`, parsed via `parseNTriples`) into readable `VoidSummary` /
+  `ServiceDescriptionSummary` facts (dataset counts; endpoint, supported languages, features,
+  result/input formats, registered extension functions, named graphs). Crucially, a disabled
+  opt-in feature answers `404`, surfaced as `not-exposed` — an **honest "the operator turned this
+  off"**, never a fabricated metric or capability. Consumes the existing `sparq-server` API and
+  **bypasses no server gate**.
+
+  [text exposition format]: https://prometheus.io/docs/instrumenting/exposition_formats/
 
 ## Endpoint-mode safety posture (honest, never an overclaim)
 
@@ -71,45 +116,49 @@ and the browser's transport rules, as classified `SafetyWarning`s (each with a s
   wasm-pack glue needs at load time (`window.location`, dynamic `import()`), both guarded so
   the module is importable under `tsc` / Node type-checking.
 
-## Consumption today (and the §4 generated-surface step)
+## Consumption (repo-root npm workspaces) — `sq-jpki`
 
-The site imports this package via a **TypeScript path alias** (`@sparq/client` →
-`../packages/sparq-client/src`), not an npm dependency — there is no repo-root `package.json`
-or workspaces field today, and adopting npm/pnpm workspaces is a separate reviewable change to
-the JS build topology (`research/gui-design.md` §3 "Tooling caveat"). The alias keeps the
-static export building with **no new install and no lockfile change**.
+The repo now has **repo-root npm workspaces** (a root `package.json` with a `workspaces` field
+spanning `packages/*`, `site`, `js`, `gui/e2e`), so a root `npm install` symlinks
+`node_modules/@sparq/client` → this package. The site still resolves `@sparq/client` to this
+package's **TypeScript source** (`src/index.ts`) via a `tsconfig` path + a matching
+`next.config.ts` webpack alias — the site bundles from source rather than from a built `dist/`,
+and the alias keeps that resolution identical in both the workspace and a bare `site/`-only
+install. (Per-package `package-lock.json` files are retained so the existing `npm ci`-in-subdir
+CI lanes — `pages.yml`, `site-e2e.yml` — keep working unchanged; migrating those to install
+from the workspace root with the single root lock is a follow-up for the CI lane.)
 
-### Generated-surface conformance guard — `sq-06gq`
+### Single-source-of-truth guard — the tracked generated d.ts
 
-The design's §4 end-state — re-exporting the **wasm-pack-generated** `sparq_wasm.d.ts`
-directly so the `Store` surface is generated, not hand-mirrored — has a hard prerequisite: the
-generated d.ts lives in the **git-ignored** build-artifact tree `js/wasm/` (see
-`js/.gitignore`), so it does not exist until `cd js && npm run build:wasm` runs. A literal
-`import` of it in `src/index.ts` would break the bare-package `tsc` (the `gui.yml`
-`shared-client` job typechecks this package with **no** wasm build).
+The design's §4 end-state — the `Store` surface is **generated, not hand-mirrored** — is now
+realised. The hand-written `WasmStore` / `WasmSolutionCursor` / `WasmStoreCtor` interface block
+is **deleted**; those names alias the wasm-pack-generated `Store` / `SolutionCursor` classes,
+re-exported from the tracked `src/generated/sparq_wasm.d.ts`.
 
-The CI-safe step taken now is a **compile-time conformance guard** (`src/conformance.ts` +
-`tsconfig.conformance.json`): it imports the generated `Store` type via the
-`#sparq-wasm-generated` path alias and asserts the hand-written surface stays a faithful
-**subset** of the generated `Store`, so any future drift (a renamed/retyped/dropped method)
-becomes a type error. Run it where the artifact exists:
+The generated d.ts lives in the **git-ignored** build tree `js/wasm/` (`js/.gitignore`), so it
+does not exist until `cd js && npm run build:wasm` runs — which is why a **tracked verbatim
+copy** is checked in: it is the only type source the artifact-free bare `tsc` (the `gui.yml`
+`shared-client` job, no wasm build) can resolve. To stop that tracked copy from silently
+drifting from the actual binding, `npm run check:wasm-types` asserts it is **byte-identical** to
+a freshly built `js/wasm/sparq_wasm.d.ts`:
 
 ```bash
 (cd ../../js && npm run build:wasm)   # produces js/wasm/sparq_wasm.d.ts
-npm run typecheck:conformance         # asserts WasmStore stays a subset of generated Store
+npm run check:wasm-types              # FAILS if src/generated/sparq_wasm.d.ts has drifted
 ```
 
-It is wired into the `gui.yml` `site-with-shared-client` job (which builds the bundle) and is
-**excluded** from the bare `npm run typecheck`, so the artifact-free `shared-client` CI job is
-unaffected. The two deliberate divergences are asserted explicitly: `validate` is optional here
-(the lean bundle may omit the `shacl` binding) and `queryCursor` returns the narrowed
-`WasmSolutionCursor` rather than the generated `SolutionCursor`.
+`check:wasm-types` is wired into the `gui.yml` `site-with-shared-client` job (which builds the
+bundle); where no fresh bundle is present it SKIPs cleanly (exit 0), so the artifact-free
+`shared-client` job is unaffected. After a binding change, re-sync the tracked copy and commit
+it:
 
-This package collapsed today's **two** hand-copies into **one** (consumed by the site and the
-GUI), and the surface is now drift-checked against the generated d.ts. **Eliminating** the last
-hand-copy — re-exporting the generated d.ts as the literal source so the hand mirror can be
-deleted — needs repo-root npm/pnpm workspaces (so the package resolves a *tracked*,
-always-present generated d.ts) and is tracked as a follow-up bead.
+```bash
+(cd ../../js && npm run build:wasm)
+npm run sync:wasm-types               # copies the fresh js/wasm d.ts into src/generated/
+```
+
+This eliminates the last hand-copy: the export **is** the generated type, and a hand mirror
+cannot silently reappear because the byte-identity check ties the tracked surface to the engine.
 
 ## Honesty
 

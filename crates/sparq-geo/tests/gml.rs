@@ -294,12 +294,305 @@ fn malformed_gml_is_a_clean_error() {
 }
 
 #[test]
-fn deferred_types_are_clean_unsupported() {
-    // gml:Envelope is deliberately deferred (a bead) -> a clean Unsupported,
-    // not a parse failure or a panic.
-    let env = r#"<gml:Envelope srsName="http://www.opengis.net/def/crs/OGC/1.3/CRS84">
-        <gml:lowerCorner>0 0</gml:lowerCorner><gml:upperCorner>4 4</gml:upperCorner></gml:Envelope>"#;
-    assert!(matches!(parse_gml_literal(env), Err(GeoError::Unsupported(_))));
+fn still_deferred_types_are_clean_unsupported() {
+    // [OPUS-4.8] sq-47vu: gml:Envelope, arc-segment Curve/Surface, and 3-D coords
+    // are now SUPPORTED (see the dedicated tests below). What remains deferred —
+    // tessellated TIN/TriangulatedSurface patches and non-PolygonPatch surface
+    // patches — must still be a clean Unsupported, never a panic or wrong answer.
+    let cases = [
+        // A gml:Surface whose patch is a gml:Triangle (a tessellation patch), not
+        // a gml:PolygonPatch: deferred.
+        r#"<gml:Surface><gml:patches>
+             <gml:Triangle><gml:exterior><gml:LinearRing>
+               <gml:posList>0 0 1 0 0 1 0 0</gml:posList>
+             </gml:LinearRing></gml:exterior></gml:Triangle>
+           </gml:patches></gml:Surface>"#,
+        // A gml:Curve segment kind we do not interpolate (e.g. a clothoid).
+        r#"<gml:Curve><gml:segments>
+             <gml:Clothoid/>
+           </gml:segments></gml:Curve>"#,
+    ];
+    for lex in cases {
+        assert!(
+            matches!(parse_gml_literal(lex), Err(GeoError::Unsupported(_))),
+            "expected Unsupported for {lex:?}, got {:?}",
+            parse_gml_literal(lex)
+        );
+    }
+}
+
+// ---- Beyond GML-SF: Envelope, arc Curve/Surface, 3-D coords (sq-47vu) -------
+// [OPUS-4.8]
+
+#[test]
+fn envelope_becomes_bbox_polygon() {
+    // gml:Envelope(lowerCorner=0 0, upperCorner=4 4) -> the closed 5-point
+    // rectangle, identical to the WKT bbox polygon (roundtrip equivalence).
+    let g = parse_gml_literal(
+        r#"<gml:Envelope srsName="http://www.opengis.net/def/crs/OGC/1.3/CRS84">
+             <gml:lowerCorner>0 0</gml:lowerCorner>
+             <gml:upperCorner>4 4</gml:upperCorner>
+           </gml:Envelope>"#,
+    )
+    .unwrap();
+    assert_eq!(g.crs, Crs::Crs84);
+    let expected = Polygon::new(
+        LineString::new(vec![
+            Coord { x: 0.0, y: 0.0 },
+            Coord { x: 4.0, y: 0.0 },
+            Coord { x: 4.0, y: 4.0 },
+            Coord { x: 0.0, y: 4.0 },
+            Coord { x: 0.0, y: 0.0 },
+        ]),
+        vec![],
+    );
+    assert_eq!(g.geometry, Geometry::Polygon(expected.clone()));
+    // Roundtrip: the same rectangle as the equivalent WKT polygon.
+    let wkt = parse_wkt_literal("POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))").unwrap();
+    assert_eq!(g, wkt);
+}
+
+#[test]
+fn envelope_epsg4326_axis_swapped() {
+    // EPSG:4326 corners are lat/long; like every geometry, they axis-swap to the
+    // internal long/lat, so the bbox covers x in [-1,1], y in [50,52].
+    let g = parse_gml_literal(
+        r#"<gml:Envelope srsName="urn:ogc:def:crs:EPSG::4326">
+             <gml:lowerCorner>50 -1</gml:lowerCorner>
+             <gml:upperCorner>52 1</gml:upperCorner>
+           </gml:Envelope>"#,
+    )
+    .unwrap();
+    assert_eq!(g.crs, Crs::Epsg4326);
+    if let Geometry::Polygon(p) = &g.geometry {
+        let xs: Vec<f64> = p.exterior().coords().map(|c| c.x).collect();
+        let ys: Vec<f64> = p.exterior().coords().map(|c| c.y).collect();
+        assert_eq!(xs.iter().cloned().fold(f64::INFINITY, f64::min), -1.0);
+        assert_eq!(xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max), 1.0);
+        assert_eq!(ys.iter().cloned().fold(f64::INFINITY, f64::min), 50.0);
+        assert_eq!(ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max), 52.0);
+    } else {
+        panic!("expected a Polygon, got {:?}", g.geometry);
+    }
+}
+
+/// The max distance of any densified vertex from the true circle of radius `r`
+/// centred at `c` — should be ~0 (the vertices lie ON the circle; densification
+/// only approximates the arc BETWEEN them by chords).
+fn max_radial_error(coords: &[Coord<f64>], c: Coord<f64>, r: f64) -> f64 {
+    coords
+        .iter()
+        .map(|p| (((p.x - c.x).powi(2) + (p.y - c.y).powi(2)).sqrt() - r).abs())
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn arc_string_densifies_to_linestring_within_tolerance() {
+    // A gml:Curve with one gml:ArcString through three points of the unit circle:
+    // (1,0) -> (0,1) -> (-1,0), i.e. the upper semicircle centred at the origin.
+    let g = parse_gml_literal(
+        r#"<gml:Curve><gml:segments>
+             <gml:ArcString><gml:posList>1 0  0 1  -1 0</gml:posList></gml:ArcString>
+           </gml:segments></gml:Curve>"#,
+    )
+    .unwrap();
+    let ls = match &g.geometry {
+        Geometry::LineString(ls) => ls,
+        other => panic!("expected a LineString, got {other:?}"),
+    };
+    let coords: Vec<Coord<f64>> = ls.coords().cloned().collect();
+    // The endpoints are exact, and every vertex lies on the unit circle.
+    assert!((coords.first().unwrap().x - 1.0).abs() < 1e-9);
+    assert!((coords.last().unwrap().x + 1.0).abs() < 1e-9);
+    assert!(coords.len() > 10, "semicircle densified to {} pts", coords.len());
+    // Vertices sit on the circle to f64 precision; the polyline approximation is
+    // the chords BETWEEN them, bounded by the 5-degree-per-chord step.
+    assert!(max_radial_error(&coords, Coord { x: 0.0, y: 0.0 }, 1.0) < 1e-9);
+    // Sagitta (chord-to-arc) bound for the fixed 5-degree step on a unit circle:
+    // r*(1 - cos(2.5 deg)) ~= 9.5e-4. Allow generous headroom.
+    let max_step_deg = coords
+        .windows(2)
+        .map(|w| {
+            let a0 = w[0].y.atan2(w[0].x);
+            let a1 = w[1].y.atan2(w[1].x);
+            (a1 - a0).abs().to_degrees()
+        })
+        .fold(0.0, f64::max);
+    assert!(max_step_deg <= 5.0 + 1e-6, "max angular step {max_step_deg} deg");
+}
+
+#[test]
+fn circular_arc_by_center_point_densifies() {
+    // A quarter circle, radius 2 centred at (10, 10), 0 deg -> 90 deg.
+    let g = parse_gml_literal(
+        r#"<gml:Curve><gml:segments>
+             <gml:CircularArcByCenterPoint>
+               <gml:pos>10 10</gml:pos>
+               <gml:radius>2</gml:radius>
+               <gml:startAngle>0</gml:startAngle>
+               <gml:endAngle>90</gml:endAngle>
+             </gml:CircularArcByCenterPoint>
+           </gml:segments></gml:Curve>"#,
+    )
+    .unwrap();
+    let ls = match &g.geometry {
+        Geometry::LineString(ls) => ls,
+        other => panic!("expected a LineString, got {other:?}"),
+    };
+    let coords: Vec<Coord<f64>> = ls.coords().cloned().collect();
+    let center = Coord { x: 10.0, y: 10.0 };
+    // Starts at angle 0 (12, 10), ends at angle 90 (10, 12).
+    assert!((coords.first().unwrap().x - 12.0).abs() < 1e-9);
+    assert!((coords.last().unwrap().y - 12.0).abs() < 1e-9);
+    // Every vertex is exactly radius 2 from the centre.
+    assert!(max_radial_error(&coords, center, 2.0) < 1e-9);
+    // 90 deg / 5 deg = 18 chords -> 19 vertices.
+    assert_eq!(coords.len(), 19);
+}
+
+#[test]
+fn arc_by_center_full_circle_when_no_end_angle() {
+    // No endAngle -> a full 360-degree circle (closed back to the start).
+    let g = parse_gml_literal(
+        r#"<gml:Curve><gml:segments>
+             <gml:CircularArcByCenterPoint>
+               <gml:pos>0 0</gml:pos><gml:radius>1</gml:radius><gml:startAngle>0</gml:startAngle>
+             </gml:CircularArcByCenterPoint>
+           </gml:segments></gml:Curve>"#,
+    )
+    .unwrap();
+    let ls = match &g.geometry {
+        Geometry::LineString(ls) => ls,
+        other => panic!("expected a LineString, got {other:?}"),
+    };
+    let coords: Vec<Coord<f64>> = ls.coords().cloned().collect();
+    assert!(max_radial_error(&coords, Coord { x: 0.0, y: 0.0 }, 1.0) < 1e-9);
+    // Closes (first ~= last).
+    let (f, l) = (coords.first().unwrap(), coords.last().unwrap());
+    assert!((f.x - l.x).abs() < 1e-9 && (f.y - l.y).abs() < 1e-9);
+}
+
+#[test]
+fn curve_with_linestring_segment_is_linear() {
+    // A gml:Curve whose only segment is a linear gml:LineStringSegment is just
+    // the polyline through its control points (no densification).
+    let g = parse_gml_literal(
+        r#"<gml:Curve><gml:segments>
+             <gml:LineStringSegment><gml:posList>0 0 1 1 2 0</gml:posList></gml:LineStringSegment>
+           </gml:segments></gml:Curve>"#,
+    )
+    .unwrap();
+    let expected = LineString::new(vec![
+        Coord { x: 0.0, y: 0.0 },
+        Coord { x: 1.0, y: 1.0 },
+        Coord { x: 2.0, y: 0.0 },
+    ]);
+    assert_eq!(g.geometry, Geometry::LineString(expected));
+}
+
+#[test]
+fn curve_joins_mixed_segments() {
+    // A linear segment followed by an arc segment sharing the join point (1,0):
+    // the duplicate join vertex is dropped, producing one continuous polyline.
+    let g = parse_gml_literal(
+        r#"<gml:Curve><gml:segments>
+             <gml:LineStringSegment><gml:posList>-1 0 1 0</gml:posList></gml:LineStringSegment>
+             <gml:ArcString><gml:posList>1 0 0 1 -1 0</gml:posList></gml:ArcString>
+           </gml:segments></gml:Curve>"#,
+    )
+    .unwrap();
+    let ls = match &g.geometry {
+        Geometry::LineString(ls) => ls,
+        other => panic!("expected a LineString, got {other:?}"),
+    };
+    let coords: Vec<Coord<f64>> = ls.coords().cloned().collect();
+    // Starts at (-1,0) (line), the join (1,0) appears exactly once.
+    assert_eq!(coords.first().unwrap(), &Coord { x: -1.0, y: 0.0 });
+    let join_count = coords
+        .iter()
+        .filter(|c| (c.x - 1.0).abs() < 1e-9 && c.y.abs() < 1e-9)
+        .count();
+    assert_eq!(join_count, 1, "join point (1,0) should appear once");
+}
+
+#[test]
+fn surface_with_arc_ring_densifies_to_polygon() {
+    // A gml:Surface whose single PolygonPatch exterior is a gml:Ring built from a
+    // gml:Curve of two semicircle arcs forming a full circle of radius 1.
+    let g = parse_gml_literal(
+        r#"<gml:Surface><gml:patches><gml:PolygonPatch>
+             <gml:exterior><gml:Ring>
+               <gml:curveMember><gml:Curve><gml:segments>
+                 <gml:ArcString><gml:posList>1 0 0 1 -1 0</gml:posList></gml:ArcString>
+                 <gml:ArcString><gml:posList>-1 0 0 -1 1 0</gml:posList></gml:ArcString>
+               </gml:segments></gml:Curve></gml:curveMember>
+             </gml:Ring></gml:exterior>
+           </gml:PolygonPatch></gml:patches></gml:Surface>"#,
+    )
+    .unwrap();
+    let p = match &g.geometry {
+        Geometry::Polygon(p) => p,
+        other => panic!("expected a Polygon, got {other:?}"),
+    };
+    let ring: Vec<Coord<f64>> = p.exterior().coords().cloned().collect();
+    // Vertices lie on the unit circle; the ring is closed.
+    assert!(max_radial_error(&ring, Coord { x: 0.0, y: 0.0 }, 1.0) < 1e-9);
+    assert_eq!(ring.first().unwrap(), ring.last().unwrap(), "ring must close");
+}
+
+#[test]
+fn three_d_srs_dimension_drops_z() {
+    // srsDimension="3": XYZ parses (previously rejected as an odd-ordinate error),
+    // and Z is projected out so the result equals its 2-D twin.
+    let g = parse_gml_literal(
+        r#"<gml:Point srsName="http://www.opengis.net/def/crs/OGC/1.3/CRS84" srsDimension="3">
+             <gml:pos>1 2 99</gml:pos></gml:Point>"#,
+    )
+    .unwrap();
+    assert_eq!(g.geometry, Geometry::Point(Point::new(1.0, 2.0)));
+    assert_eq!(g, parse_wkt_literal("POINT(1 2)").unwrap());
+}
+
+#[test]
+fn three_d_linestring_drops_z() {
+    // A 3-D posList: 3 XYZ tuples -> 3 XY vertices (Z dropped).
+    let g = parse_gml_literal(
+        r#"<gml:LineString srsDimension="3">
+             <gml:posList>0 0 5 1 1 6 2 0 7</gml:posList></gml:LineString>"#,
+    )
+    .unwrap();
+    let expected = LineString::new(vec![
+        Coord { x: 0.0, y: 0.0 },
+        Coord { x: 1.0, y: 1.0 },
+        Coord { x: 2.0, y: 0.0 },
+    ]);
+    assert_eq!(g.geometry, Geometry::LineString(expected));
+}
+
+#[test]
+fn three_d_srs_dimension_on_pos_element() {
+    // srsDimension may sit on the gml:pos itself, not just the root.
+    let g = parse_gml_literal(
+        r#"<gml:Point><gml:pos srsDimension="3">7 8 9</gml:pos></gml:Point>"#,
+    )
+    .unwrap();
+    assert_eq!(g.geometry, Geometry::Point(Point::new(7.0, 8.0)));
+}
+
+#[test]
+fn two_d_unchanged_when_no_srs_dimension() {
+    // Regression guard: with NO srsDimension, a 6-number posList is still 3 XY
+    // vertices (the historical 2-D behaviour), never 2 XYZ vertices.
+    let g = parse_gml_literal(
+        r#"<gml:LineString><gml:posList>0 0 1 1 2 0</gml:posList></gml:LineString>"#,
+    )
+    .unwrap();
+    let expected = LineString::new(vec![
+        Coord { x: 0.0, y: 0.0 },
+        Coord { x: 1.0, y: 1.0 },
+        Coord { x: 2.0, y: 0.0 },
+    ]);
+    assert_eq!(g.geometry, Geometry::LineString(expected));
 }
 
 // ---- Equivalence with the WKT twin ------------------------------------------

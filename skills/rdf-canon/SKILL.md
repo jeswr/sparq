@@ -88,7 +88,7 @@ if you want them without canonicalizing.
 
 `CanonError` has three variants:
 
-- `TripleTerm` — the dataset contains an RDF-1.2 quoted triple as an object;
+- `TripleTerm` — the dataset contains an RDF 1.2 triple term as an object;
   these are outside RDFC-1.0's data model and cannot be canonicalized.
 - `Canonicalization(String)` — `rdf-canon` rejected the dataset. This includes
   the **HNDQ call-limit guard**: RDFC-1.0 has pathological-input blow-ups, so a

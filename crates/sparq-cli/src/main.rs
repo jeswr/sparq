@@ -920,13 +920,15 @@ fn load(path: &str, format: &str) -> sparq_core::Graph {
 /// jsonld[-expanded|-flattened|-compacted]}. Turtle emits only the default graph (named graphs
 /// need a dataset format); trig/nquads/jsonld emit the full dataset. JSON-LD defaults to the
 /// expanded form; `jsonld-flattened` / `jsonld-compacted` select the other 1.1 document forms.
+/// [OPUS-4.8] (sq-ixc3.3) `jsonld-pretty[-expanded|-flattened|-compacted]` emit the same
+/// JSON-LD documents in an indented, multi-line shape (whitespace-only over the minified writer).
 /// Behind the opt-in `serialize-rdf` cargo feature.
 #[cfg(feature = "serialize-rdf")]
 fn cmd_dump(args: &[String]) {
     let (path, in_fmt, out_fmt) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(i), Some(o)) => (p.as_str(), i.as_str(), o.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli dump <file[.gz|.bz2|.zst]> <in-format> <out-format>\n  out-format: turtle | trig | nquads | ntriples | jsonld[-expanded|-flattened|-compacted]");
+            eprintln!("usage: sparq-cli dump <file[.gz|.bz2|.zst]> <in-format> <out-format>\n  out-format: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples | jsonld[-expanded|-flattened|-compacted] | jsonld-pretty[-expanded|-flattened|-compacted]");
             std::process::exit(2);
         }
     };
@@ -934,6 +936,9 @@ fn cmd_dump(args: &[String]) {
     use sparq_engine::serialize::JsonLdForm;
     let serialized = match out_fmt {
         "turtle" | "ttl" => sparq_engine::serialize::graph_to_turtle(&g),
+        // [OPUS-4.8] (sq-ixc3.2) idiomatic, deterministic pretty Turtle / TriG.
+        "turtle-pretty" | "ttl-pretty" => sparq_engine::serialize::graph_to_turtle_pretty(&g),
+        "trig-pretty" => sparq_engine::serialize::graph_to_trig_pretty(&g),
         "trig" => sparq_engine::serialize::graph_to_trig(&g),
         "nquads" | "n-quads" => sparq_engine::serialize::graph_to_nquads(&g),
         "jsonld" | "json-ld" | "jsonld-expanded" => {
@@ -941,6 +946,17 @@ fn cmd_dump(args: &[String]) {
         }
         "jsonld-flattened" => sparq_engine::serialize::graph_to_jsonld(&g, JsonLdForm::Flattened),
         "jsonld-compacted" => sparq_engine::serialize::graph_to_jsonld(&g, JsonLdForm::Compacted),
+        // [OPUS-4.8] (sq-ixc3.3) pretty (indented) JSON-LD — whitespace-only over the minified
+        // forms above. `jsonld-pretty` defaults to expanded, matching `jsonld`.
+        "jsonld-pretty" | "json-ld-pretty" | "jsonld-pretty-expanded" => {
+            sparq_engine::serialize::graph_to_jsonld_pretty(&g, JsonLdForm::Expanded)
+        }
+        "jsonld-pretty-flattened" => {
+            sparq_engine::serialize::graph_to_jsonld_pretty(&g, JsonLdForm::Flattened)
+        }
+        "jsonld-pretty-compacted" => {
+            sparq_engine::serialize::graph_to_jsonld_pretty(&g, JsonLdForm::Compacted)
+        }
         // N-Triples stays on the always-on writer (the default graph as `s p o .` lines).
         "ntriples" | "n-triples" => {
             let triples: Vec<oxrdf::Triple> = g
@@ -967,7 +983,7 @@ fn cmd_dump(args: &[String]) {
             sparq_engine::triples_to_ntriples(&triples)
         }
         other => {
-            eprintln!("unknown out-format '{other}' (known: turtle | trig | nquads | ntriples | jsonld[-expanded|-flattened|-compacted])");
+            eprintln!("unknown out-format '{other}' (known: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples | jsonld[-expanded|-flattened|-compacted] | jsonld-pretty[-expanded|-flattened|-compacted])");
             std::process::exit(2);
         }
     };

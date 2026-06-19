@@ -23,7 +23,7 @@
 #    assert it reaches Python as a catchable exception.
 #
 #    EMPIRICAL NOTE: the engine itself proved robust — no organic SPARQL input
-#    (division by zero, malformed regex, RDF-star, unsupported graph patterns,
+#    (division by zero, malformed regex, RDF 1.2 triple terms, unsupported graph patterns,
 #    out-of-range SUBSTR, arithmetic overflow, ...) reaches a Rust panic; every
 #    such case returns a clean `ValueError`. So a dedicated panic hook is the
 #    only reliable way to test the unwind boundary; see the source comment on
@@ -95,7 +95,7 @@ def _rows_via_json(graph, sparql):
                     "direction": direction,
                 }
             elif kind == "triple":
-                # The JSON writer nests the quoted triple; `Term` renders it as an
+                # The JSON writer nests the triple term; `Term` renders it as an
                 # N-Triples string. Compare only kind here (value rendering differs
                 # by design) — the dedicated triple-term test covers the value.
                 row[var] = {"kind": "triple"}
@@ -361,12 +361,12 @@ def test_update_parity_round_trip_count_and_content():
 
 
 # ===========================================================================
-# (a'') RDF-1.2 triple term (quoted triple) round-trip
+# (a'') RDF 1.2 triple term round-trip
 # ===========================================================================
 
 # Turtle reification: << ex:a ex:b ex:c >> ex:certainty "0.9" . The engine models
-# this with the RDF-1.2 reification vocabulary (a fresh bnode rdf:reifies the
-# quoted triple), so the quoted triple surfaces as a Term of kind "triple".
+# this with the RDF 1.2 reification vocabulary (a fresh bnode rdf:reifies the
+# triple term), so the triple term surfaces as a Term of kind "triple".
 STAR_DATA = '@prefix ex: <http://ex/> . << ex:a ex:b ex:c >> ex:certainty "0.9" .'
 
 
@@ -379,9 +379,9 @@ def test_triple_term_roundtrips_as_kind_triple():
     o = res.rows[0]["o"]
     assert o.kind == "triple"
     assert o.language is None and o.datatype is None
-    # Value is the N-Triples rendering of the quoted triple.
+    # Value is the N-Triples rendering of the triple term.
     assert o.value == "<http://ex/a> <http://ex/b> <http://ex/c>"
-    # repr passes the quoted-triple rendering straight through (no extra quoting).
+    # repr passes the triple-term rendering straight through (no extra quoting).
     assert repr(o) == "Term(<http://ex/a> <http://ex/b> <http://ex/c>)"
 
 

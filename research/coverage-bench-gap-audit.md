@@ -69,7 +69,7 @@ bench (or `publish=false`) for every new crate.
 
 **Most prior gaps are already beaded and closed.** sq-bif's children (per-builtin error-path
 table, serializer oracle, UPDATE atomicity, SHACL property-path, HDT differential, MPC
-adversarial, RDF1.2/rdf-star, the coverage gate itself, …) are nearly all `✓`. sq-5o5's
+adversarial, RDF 1.2 triple terms, the coverage gate itself, …) are nearly all `✓`. sq-5o5's
 suites (WatDiv/BSBM/SP2Bench/DBPSB/LUBM, operator-coverage, dashboard, vectors-throughput,
 py FFI micro-bench) are nearly all `✓`. The open children are already-scoped follow-ups
 (below) — I did NOT re-bead them.

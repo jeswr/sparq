@@ -80,6 +80,11 @@ jobs:
         with:
           node-version: 22
 
+      # [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: packages/sparq-client is a workspace
+      # member and the per-member lock was dropped. `npm install` (run in packages/sparq-client)
+      # resolves the member's deps via the repo-root workspace, installing into the hoisted root
+      # node_modules; the typecheck then runs against that tree. (This lane uses `npm install`,
+      # not `npm ci`, so it is tolerant of a not-yet-regenerated lock — unchanged behaviour.)
       - name: Install dependencies
         run: npm install
 
@@ -119,20 +124,23 @@ jobs:
         working-directory: js
         run: npm run build:wasm
 
-      # [OPUS-4.8] sq-06gq — with the wasm-pack GENERATED `sparq_wasm.d.ts` now present in
-      # js/wasm/, run the @sparq/client GENERATED-surface conformance typecheck. It asserts the
-      # package's hand-written WasmStore mirror stays a faithful subset of the generated
-      # `Store`, so any future drift (a renamed/retyped/dropped method) fails CI here. (The
-      # `shared-client` job above runs the package's bare typecheck WITHOUT this artifact, so
-      # this is the only lane that can see the generated d.ts — the design's §4 source of
-      # truth.)
+      # [OPUS-4.8] sq-jpki — the @sparq/client hand-written WasmStore mirror is now DELETED:
+      # the package re-exports the wasm-pack GENERATED `Store` surface from the TRACKED copy
+      # `packages/sparq-client/src/generated/sparq_wasm.d.ts`. With the freshly built
+      # js/wasm/sparq_wasm.d.ts now present, assert that tracked copy is BYTE-IDENTICAL to it,
+      # so a binding change that was not re-synced (`npm run sync:wasm-types`) fails CI here
+      # rather than letting the tracked d.ts drift from the engine. (The `shared-client` job
+      # above runs the bare typecheck WITHOUT the artifact, resolving the Store surface from the
+      # tracked copy; this is the only lane that can verify the tracked copy still matches a
+      # fresh build — the design's §4 single-source-of-truth check.) This replaces the obsolete
+      # sq-06gq subset-conformance guard, which checked a mirror that no longer exists.
       - name: Install @sparq/client dependencies
         working-directory: packages/sparq-client
         run: npm install
 
-      - name: "@sparq/client generated-surface conformance (vs js/wasm d.ts)"
+      - name: "@sparq/client tracked wasm d.ts byte-identical to fresh build"
         working-directory: packages/sparq-client
-        run: npm run typecheck:conformance
+        run: npm run check:wasm-types
 
       - name: Install site dependencies
         working-directory: site

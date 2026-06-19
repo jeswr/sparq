@@ -950,7 +950,7 @@ mod tests {
 
     #[test]
     fn term_json_encodes_an_rdf12_triple_term() {
-        // The `oxrdf::Term::Triple` arm (the SPARQL 1.2 quoted-triple-term encoding) is the only
+        // The `oxrdf::Term::Triple` arm (the SPARQL 1.2 triple-term encoding) is the only
         // term shape the existing tests miss. A solution row whose object is a triple term must
         // serialise to `{"type":"triple","value":{subject,predicate,object}}`.
         use oxrdf::{Literal, NamedNode, Term, Triple};

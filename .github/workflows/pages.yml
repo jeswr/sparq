@@ -8,9 +8,13 @@
 # at /sparq/dev/bench/.
 #
 # HOW /dev/bench IS PRESERVED (traced):
-#   1. Pages is served at https://jeswr.github.io/sparq/. Today (build_type: legacy)
-#      the source is the `benchmark-data` branch root: a root index.html redirect +
-#      a dev/ tree (dev/bench/{index.html,dashboard.js,dashboard.css,data.js,...}).
+#   1. Pages is served at https://jeswr.github.io/sparq/ from this workflow
+#      (build_type: workflow — the "GitHub Actions" source; the earlier "Deploy from a
+#      branch" legacy source has been retired). The benchmark dashboard formerly served
+#      from the `benchmark-data` branch root (a root index.html redirect + a dev/ tree:
+#      dev/bench/{index.html,dashboard.js,dashboard.css,data.js,...}) is now carried into
+#      THIS workflow's artifact via the overlay step below, so /sparq/dev/bench/ keeps
+#      working under the single Actions-built artifact.
 #   2. This workflow does NOT touch the `benchmark-data` branch — bench.yml keeps
 #      writing data.js + dev/bench/* there exactly as before. We only READ it.
 #   3. After `next build` writes the showcase to out/ (with its OWN root index.html),
@@ -19,13 +23,20 @@
 #      verbatim, so https://jeswr.github.io/sparq/dev/bench/ keeps working.
 #   4. `out/.nojekyll` disables Jekyll so `_next/` (underscore-prefixed) assets serve.
 #
-# ONE-TIME PAGES SETTING (needs:user): the repo's Pages source must be switched from
-# "Deploy from a branch" (legacy) to "GitHub Actions" in Settings → Pages for this
-# workflow's deploy step to publish. Until that flip, the existing legacy dashboard
-# keeps serving untouched and this workflow's deploy step is a no-op/failure that
-# never modifies the live site. (The alternative — committing out/ onto benchmark-data —
-# was rejected: it couples site source to the data branch and races bench.yml's root
-# index.html seed.)
+# PAGES SOURCE (DONE — no longer needs:user): the repo's Pages source is already set to
+# "GitHub Actions" (sq-vbq9 resolved; `gh api repos/jeswr/sparq/pages` reports
+# build_type: workflow), so this workflow's deploy step IS the live publisher — the site
+# at https://jeswr.github.io/sparq/ is served from the artifact below, not from any branch
+# root. No repo-settings action is outstanding for this workflow. (The alternative —
+# committing out/ onto benchmark-data — was rejected: it couples site source to the data
+# branch and races bench.yml's root index.html seed.)
+#
+# OPEN PRODUCT DECISION (sq-svtt, NOT a settings flip): Pages has ONE deploy slot and this
+# workflow owns the /sparq/ root. The mdBook guide (sq-w9sr/sq-h0tr) wants a published
+# home too; until that root question is decided (guide at /guide subpath vs at root vs a
+# merged deploy), docs.yml deliberately ships NO deploy job (build-validate only) so a
+# second deploy-pages cannot race + overwrite this showcase. That decision does not block
+# or affect the current live deploy.
 
 name: pages
 
@@ -100,6 +111,11 @@ jobs:
         run: cargo install wasm-pack --locked
 
       # Build the lean wasm bundle (crates/sparq-wasm → js/wasm) that the live REPL loads.
+      # [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: `js/` is now a workspace member and the
+      # per-member lock was dropped; this `npm ci` (run in js/) installs the js member's closure
+      # FROM the repo-root `package-lock.json`. wasm-pack is already on PATH (installed above), so
+      # js/'s `prepare` git-pin build is satisfied. `npm run build:wasm` then (re)builds the lean
+      # bundle explicitly, exactly as before — the export tree this produces is unchanged.
       - name: Build sparq wasm bundle
         working-directory: js
         run: |
@@ -151,6 +167,13 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/typst" --version
 
+      # [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: `site/` is a workspace member; this
+      # `npm ci` (run in site/) installs the site member's dependency closure FROM the repo-root
+      # `package-lock.json` (no per-member lock anymore). It does NOT re-run js/'s wasm `prepare`
+      # (a member-dir `npm ci` installs only that member's closure), so the wasm bundle built in
+      # the step above is preserved. `npm run build` then runs prebuild (sync js/wasm →
+      # site/public/wasm + build papers) and `next build` → out/ with basePath /sparq, exactly as
+      # before — the migration changes only WHERE deps resolve from, not the produced out/ tree.
       - name: Build static site
         working-directory: site
         run: |
@@ -221,12 +244,13 @@ jobs:
           touch out/.nojekyll
 
       # [OPUS-4.8] sq-zngy — ARTIFACT-LEVEL smoke check (NOT a live-URL check).
-      # The Pages Source flip to "GitHub Actions" (sq-vbq9) is a pending needs:user action,
-      # so a live https://jeswr.github.io/sparq/dev/... probe would 404 pre-cutover and would
-      # be wrong. This step instead asserts the ASSEMBLED Pages output dir (site/out, the exact
-      # tree handed to upload-pages-artifact below) — so it catches the dev/bench* reconciliation
-      # regression regardless of the Pages-source state. It verifies the artifact CONTENTS, NOT
-      # that the site is being served.
+      # This step asserts the ASSEMBLED Pages output dir (site/out, the exact tree handed to
+      # upload-pages-artifact below) rather than probing the live https://jeswr.github.io/sparq/dev/...
+      # URL: the artifact check is deterministic + decoupled from deploy/propagation timing
+      # (the live URL lags this run by the deploy + CDN flush), and it catches the dev/bench*
+      # reconciliation regression at build time, BEFORE upload. It verifies the artifact
+      # CONTENTS, NOT that the site is being served. (Pages source is already build_type:
+      # workflow, so this artifact IS what goes live.)
       - name: Smoke-check assembled Pages artifact (dev/bench* dashboards)
         working-directory: site
         run: |

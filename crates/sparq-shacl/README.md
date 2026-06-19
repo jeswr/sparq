@@ -80,6 +80,19 @@ For many data graphs against one shapes graph, parse once with
   inverse / `zeroOrMore`·`oneOrMore`·`zeroOrOne`), `sh:targetNode`/`Class`/
   `SubjectsOf`/`ObjectsOf` + implicit class targets, plus `sh:severity` / `sh:message` /
   `sh:deactivated`.
+- **SHACL Compact Syntax parser (opt-in `scs`)** — `parse_scs(text, base)` /
+  `parse_scs_to_graph(text, base)` turn a [W3C SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/)
+  document into the same shapes triples `validate` consumes (the *parse* direction of the
+  SCS surface; the *display* direction ships client-side in the site). It round-trips
+  **32/32** of the vendored W3C `shacl12-cs` valid fixtures graph-isomorphically
+  (`cargo test -p sparq-shacl --features scs --test scs_roundtrip`). A hand-rolled lexer +
+  recursive-descent parser over the `SHACLC.g4` grammar — directives (`BASE`/`IMPORTS`/
+  `PREFIX` with the four implicit prefixes), `shape`/`shapeClass`, path expressions
+  (`^` / `/` / `|` / `?*+` / grouping), `[min..max]` counts, `nodeKind`, bare-IRI
+  `sh:datatype`-vs-`sh:class`, `@`shape-refs, `param=value`, `!`negation (`sh:not`),
+  `|` disjunction (`sh:or`), nested `{...}` shapes and `[ ... ]` arrays. Adds **zero new
+  dependencies**; unsupported constructs return a typed `ScsError` (never a silent
+  mis-parse). Off ⇒ none of it compiles. The wasm `Store` binding is deferred (sq-quly).
 
 ## 📚 Learn more
 

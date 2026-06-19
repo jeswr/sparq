@@ -41,9 +41,32 @@
 //! `srsName` is read from the OUTERMOST geometry element (GML allows it on inner
 //! elements; the SF profile keeps it on the root, which is what we honour).
 //!
-//! Deferred (clean `GeoError::Unsupported`, tracked as beads): `gml:Envelope`,
-//! the `gml:Curve`/`gml:Surface` arc-segment forms, `gml:srsDimension="3"`
-//! 3-D coordinates, and `gml:Triangle`/`gml:PolygonPatch` tessellations.
+//! ## Beyond GML-SF — real GML that is NOT in the gmlLiteral profile [OPUS-4.8] sq-47vu
+//!
+//! The GeoSPARQL `geo:gmlLiteral` profile is GML Simple-Features, but data in the
+//! wild carries a few non-SF forms. These parse ADDITIVELY on the SAME path (they
+//! never change how an SF literal parses) and are projected into the crate's
+//! existing 2-D [`geo_types`] model:
+//!
+//! * `gml:Envelope` — `gml:lowerCorner` / `gml:upperCorner` -> the 5-point bbox
+//!   rectangle [`Polygon`] (`minx miny -> maxx miny -> maxx maxy -> minx maxy ->
+//!   minx miny`), so a bounding box can flow into the same topology machinery.
+//! * `gml:Curve` / `gml:Surface` with arc segments — a `gml:Curve` is a sequence
+//!   of `gml:segments`; we handle `gml:LineStringSegment` (linear),
+//!   `gml:Arc` / `gml:ArcString` (a poly-arc through point triples) and
+//!   `gml:CircularArcByCenterPoint` (centre + radius + start/end angle). Arc
+//!   segments are **densified** to a polyline at a fixed angular step of
+//!   [`ARC_STEP_DEG`] degrees per chord; the result is an APPROXIMATION (each arc
+//!   is replaced by line segments), so downstream topology/area are approximate to
+//!   that resolution. A `gml:Surface` is `gml:patches` of `gml:PolygonPatch`,
+//!   whose rings may themselves contain arc segments and are densified the same way.
+//! * `gml:srsDimension="3"` — 3-D coordinates parse as XYZ; the crate's geometry
+//!   model is 2-D ([`geo_types::Coord<f64>`] has no Z), so **Z is parsed then
+//!   projected out** (dropped). XY-only literals are unaffected.
+//!
+//! Deferred still (clean `GeoError::Unsupported`, tracked as beads):
+//! `gml:Triangle` / `gml:PolygonPatch` tessellated `gml:TriangulatedSurface` /
+//! `gml:TIN`, and elliptic / non-circular-arc interpolations.
 
 use crate::literal::{swap_xy, Crs, GeoGeometry};
 use crate::GeoError;
@@ -100,13 +123,18 @@ pub fn parse_gml_literal(lex: &str) -> Result<GeoGeometry, GeoError> {
 // ---- Stage 1: XML -> a small geometry DOM ----------------------------------
 
 /// A parsed GML element: its local name, its `srsName`-derived CRS, the
-/// whitespace-collapsed text it directly contained, and its child elements.
+/// coordinate dimension in force, the whitespace-collapsed text it directly
+/// contained, and its child elements.
 #[derive(Debug)]
 struct Node {
     /// Local name (namespace prefix stripped), lower-cased for matching.
     name: String,
     /// CRS resolved from the nearest `srsName` (root element's, in practice).
     crs: Crs,
+    /// Coordinate dimension from the nearest `srsDimension` (`2` if none seen),
+    /// inherited downward like `crs`. `3` means XYZ — Z is dropped on parse
+    /// (the geometry model is 2-D). [OPUS-4.8] sq-47vu
+    dim: usize,
     /// Concatenated character data directly inside this element.
     text: String,
     children: Vec<Node>,
@@ -151,15 +179,53 @@ fn crs_from_srs_name(srs: &str) -> Crs {
     }
 }
 
+/// Scans a start/empty element's attributes for `srsName` (-> [`Crs`]) and
+/// `srsDimension` (-> coordinate dimension), updating the inherited values in
+/// place so they propagate to descendants. Both attributes are matched on their
+/// LOCAL name, exactly as element names are. [OPUS-4.8] sq-47vu
+fn scan_element_attrs(
+    e: &quick_xml::events::BytesStart<'_>,
+    inherited_crs: &mut Crs,
+    inherited_dim: &mut usize,
+) -> Result<(Crs, usize), GeoError> {
+    let mut crs = inherited_crs.clone();
+    let mut dim = *inherited_dim;
+    for attr in e.attributes().flatten() {
+        match local_name(attr.key.as_ref()).as_str() {
+            "srsname" => {
+                let val = unescape_attr_value(&attr.value)?;
+                crs = crs_from_srs_name(&val);
+                *inherited_crs = crs.clone();
+            }
+            "srsdimension" => {
+                let val = unescape_attr_value(&attr.value)?;
+                // A malformed srsDimension is ignored (defaults stay), never a
+                // hard error — the coordinate count is the real arbiter.
+                if let Ok(d) = val.trim().parse::<usize>() {
+                    if d >= 2 {
+                        dim = d;
+                        *inherited_dim = d;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((crs, dim))
+}
+
 /// Reads the whole lexical form into a single root [`Node`] tree, propagating
-/// the root `srsName` down to children (so inner geometry builders see the CRS).
+/// the root `srsName` / `srsDimension` down to children (so inner geometry
+/// builders see the CRS and coordinate dimension).
 fn parse_root(lex: &str) -> Result<Node, GeoError> {
     let mut reader = Reader::from_str(lex.trim());
     reader.config_mut().trim_text(true);
     let mut stack: Vec<Node> = Vec::new();
     let mut root: Option<Node> = None;
-    // The CRS in force: set by the first srsName seen, inherited downward.
+    // The CRS / dimension in force: set by the first srsName / srsDimension seen,
+    // inherited downward (dimension defaults to 2-D when none is declared).
     let mut inherited_crs = Crs::Crs84;
+    let mut inherited_dim = 2usize;
 
     loop {
         match reader.read_event() {
@@ -167,15 +233,9 @@ fn parse_root(lex: &str) -> Result<Node, GeoError> {
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref());
-                let mut crs = inherited_crs.clone();
-                for attr in e.attributes().flatten() {
-                    if local_name(attr.key.as_ref()) == "srsname" {
-                        let val = unescape_attr_value(&attr.value)?;
-                        crs = crs_from_srs_name(&val);
-                        inherited_crs = crs.clone();
-                    }
-                }
-                stack.push(Node { name, crs, text: String::new(), children: Vec::new() });
+                let (crs, dim) =
+                    scan_element_attrs(&e, &mut inherited_crs, &mut inherited_dim)?;
+                stack.push(Node { name, crs, dim, text: String::new(), children: Vec::new() });
             }
             Ok(Event::Text(t)) => {
                 if let Some(top) = stack.last_mut() {
@@ -204,15 +264,9 @@ fn parse_root(lex: &str) -> Result<Node, GeoError> {
             // Empty self-closing element, e.g. <gml:pos/> (degenerate) — keep it.
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref());
-                let mut crs = inherited_crs.clone();
-                for attr in e.attributes().flatten() {
-                    if local_name(attr.key.as_ref()) == "srsname" {
-                        let val = unescape_attr_value(&attr.value)?;
-                        crs = crs_from_srs_name(&val);
-                        inherited_crs = crs.clone();
-                    }
-                }
-                let node = Node { name, crs, text: String::new(), children: Vec::new() };
+                let (crs, dim) =
+                    scan_element_attrs(&e, &mut inherited_crs, &mut inherited_dim)?;
+                let node = Node { name, crs, dim, text: String::new(), children: Vec::new() };
                 match stack.last_mut() {
                     Some(parent) => parent.children.push(node),
                     None => root = Some(node),
@@ -249,26 +303,32 @@ fn build_geometry(node: &Node) -> Result<Geometry<f64>, GeoError> {
         "multigeometry" | "geometrycollection" => {
             Ok(Geometry::GeometryCollection(build_geometrycollection(node)?))
         }
-        "envelope" => Err(GeoError::Unsupported(
-            "GML gml:Envelope not supported (tracked as a bead); use a Polygon".to_string(),
-        )),
-        "curve" | "surface" => Err(GeoError::Unsupported(format!(
-            "GML gml:{} (arc/segment form) not in the SF profile (tracked as a bead)",
-            if node.name == "curve" { "Curve" } else { "Surface" }
-        ))),
+        // [OPUS-4.8] sq-47vu: real-GML-but-not-SF forms, parsed additively (see
+        // the module header). gml:Envelope -> a bbox Polygon; gml:Curve /
+        // gml:Surface with arc segments -> arc densification.
+        "envelope" => Ok(Geometry::Polygon(build_envelope(node)?)),
+        "curve" => Ok(Geometry::LineString(build_curve(node)?)),
+        "surface" => Ok(Geometry::Polygon(build_surface(node)?)),
         other => Err(GeoError::Parse(format!(
             "unrecognised GML geometry element <{other}>"
         ))),
     }
 }
 
-/// Parses a whitespace/comma-separated coordinate run into `(x, y)` pairs.
+/// Parses a whitespace/comma-separated coordinate run into `(x, y)` pairs at the
+/// given coordinate `dim`ension.
 ///
 /// GML `gml:posList` / `gml:pos` use whitespace separators; the GML 2
 /// `gml:coordinates` element uses `,` between the ordinates of a tuple and
 /// (by default) a space between tuples. We accept both by treating `,` as a
-/// separator too — adequate for the 2-D SF profile (default cs/ts).
-fn parse_coords(text: &str) -> Result<Vec<Coord<f64>>, GeoError> {
+/// separator too — adequate for the SF profile (default cs/ts).
+///
+/// `dim` is the per-tuple ordinate count from the nearest `srsDimension`
+/// (`2` when none was declared, preserving the historical 2-D behaviour). For
+/// `dim == 3` the third ordinate (Z) is parsed then **dropped**: the crate's
+/// geometry model is 2-D, so 3-D coordinates are projected onto the XY plane
+/// (documented in the module header). [OPUS-4.8] sq-47vu
+fn parse_coords(text: &str, dim: usize) -> Result<Vec<Coord<f64>>, GeoError> {
     let nums: Vec<f64> = text
         .split([' ', '\t', '\n', '\r', ','])
         .filter(|t| !t.is_empty())
@@ -280,35 +340,41 @@ fn parse_coords(text: &str) -> Result<Vec<Coord<f64>>, GeoError> {
     if nums.is_empty() {
         return Err(GeoError::Parse("GML: empty coordinate list".to_string()));
     }
-    if !nums.len().is_multiple_of(2) {
+    if dim < 2 || !nums.len().is_multiple_of(dim) {
         return Err(GeoError::Parse(format!(
-            "GML: odd ordinate count {} (only 2-D SF coordinates supported)",
-            nums.len()
+            "GML: ordinate count {} is not a multiple of srsDimension {}",
+            nums.len(),
+            dim
         )));
     }
-    Ok(nums.chunks_exact(2).map(|p| Coord { x: p[0], y: p[1] }).collect())
+    // Take the first two ordinates (X, Y) of each `dim`-wide tuple; any Z (and
+    // beyond) is projected out.
+    Ok(nums.chunks_exact(dim).map(|p| Coord { x: p[0], y: p[1] }).collect())
 }
 
 /// The coordinate run of a positional element, from any of the SF spellings:
-/// `gml:posList`, one-or-more `gml:pos`, or the GML 2 `gml:coordinates`.
+/// `gml:posList`, one-or-more `gml:pos`, or the GML 2 `gml:coordinates`. The
+/// effective coordinate dimension is the element's own (a `gml:pos` /
+/// `gml:posList` may carry its own `srsDimension`) else the inherited one.
 fn coords_of(node: &Node) -> Result<Vec<Coord<f64>>, GeoError> {
     if let Some(pl) = node.child("poslist") {
-        return parse_coords(&pl.text);
+        return parse_coords(&pl.text, pl.dim);
     }
     if let Some(c) = node.child("coordinates") {
-        return parse_coords(&c.text);
+        // The GML 2 gml:coordinates element predates srsDimension; it is 2-D.
+        return parse_coords(&c.text, 2);
     }
     let pos: Vec<&Node> = node.children_named("pos").collect();
     if !pos.is_empty() {
         let mut out = Vec::new();
         for p in pos {
-            out.extend(parse_coords(&p.text)?);
+            out.extend(parse_coords(&p.text, p.dim)?);
         }
         return Ok(out);
     }
     // A bare element carrying inline text (some encoders put it directly).
     if !node.text.is_empty() {
-        return parse_coords(&node.text);
+        return parse_coords(&node.text, node.dim);
     }
     Err(GeoError::Parse(format!(
         "GML <{}>: no gml:pos / gml:posList / gml:coordinates",
@@ -454,4 +520,340 @@ fn build_geometrycollection(node: &Node) -> Result<GeometryCollection<f64>, GeoE
         }
     }
     Ok(GeometryCollection(geoms))
+}
+
+// ---- Beyond GML-SF: Envelope, arc-segment Curve/Surface (sq-47vu) [OPUS-4.8] -
+
+/// The fixed angular resolution at which circular arcs are densified to a
+/// polyline: at most this many DEGREES of arc per chord. A smaller value means a
+/// closer polyline approximation and more vertices; `5°` keeps the worst-case
+/// chord-to-arc sagitta error under ~0.1% of the radius while staying cheap. The
+/// densified geometry is an APPROXIMATION — there is no true circular-arc type in
+/// the 2-D `geo_types` model — so any downstream topology/length/area is accurate
+/// only to this resolution. This is deliberately NOT tunable in v1 (the gmlLiteral
+/// profile is GML-SF, which has no arcs at all; this is a best-effort ingest of
+/// real-world non-SF GML).
+pub const ARC_STEP_DEG: f64 = 5.0;
+
+/// `gml:Envelope` -> the bbox rectangle [`Polygon`]. The corners come from
+/// `gml:lowerCorner` (min X, min Y) and `gml:upperCorner` (max X, max Y); some
+/// encoders instead give two `gml:pos`, which we accept as a fallback. The result
+/// is the closed 5-point ring `(minx miny) (maxx miny) (maxx maxy) (minx maxy)
+/// (minx miny)`. Axis-order normalisation (EPSG:4326 swap) is applied uniformly
+/// by the caller, exactly as for every other geometry.
+fn build_envelope(node: &Node) -> Result<Polygon<f64>, GeoError> {
+    let corner = |which: &str| -> Result<Option<Coord<f64>>, GeoError> {
+        match node.child(which) {
+            Some(c) => {
+                let pts = parse_coords(&c.text, c.dim)?;
+                let p = pts.first().ok_or_else(|| {
+                    GeoError::Parse(format!("GML gml:Envelope <{}> has no coordinate", which))
+                })?;
+                Ok(Some(*p))
+            }
+            None => Ok(None),
+        }
+    };
+    let (lower, upper) = match (corner("lowercorner")?, corner("uppercorner")?) {
+        (Some(l), Some(u)) => (l, u),
+        _ => {
+            // Fallback: two gml:pos children (lower then upper).
+            let pos: Vec<&Node> = node.children_named("pos").collect();
+            if pos.len() == 2 {
+                let l = *parse_coords(&pos[0].text, pos[0].dim)?.first().ok_or_else(|| {
+                    GeoError::Parse("GML gml:Envelope: empty gml:pos".to_string())
+                })?;
+                let u = *parse_coords(&pos[1].text, pos[1].dim)?.first().ok_or_else(|| {
+                    GeoError::Parse("GML gml:Envelope: empty gml:pos".to_string())
+                })?;
+                (l, u)
+            } else {
+                return Err(GeoError::Parse(
+                    "GML gml:Envelope needs gml:lowerCorner + gml:upperCorner (or two gml:pos)"
+                        .to_string(),
+                ));
+            }
+        }
+    };
+    let (minx, miny) = (lower.x, lower.y);
+    let (maxx, maxy) = (upper.x, upper.y);
+    let ring = LineString::new(vec![
+        Coord { x: minx, y: miny },
+        Coord { x: maxx, y: miny },
+        Coord { x: maxx, y: maxy },
+        Coord { x: minx, y: maxy },
+        Coord { x: minx, y: miny },
+    ]);
+    Ok(Polygon::new(ring, vec![]))
+}
+
+/// `gml:Curve` -> a single densified [`LineString`]. A curve is a sequence of
+/// `gml:segments` whose members are joined end-to-end. Each segment is either a
+/// `gml:LineStringSegment` (linear, taken verbatim) or an arc form
+/// (`gml:Arc` / `gml:ArcString` / `gml:CircularArcByCenterPoint`) densified to a
+/// polyline at [`ARC_STEP_DEG`].
+fn build_curve(node: &Node) -> Result<LineString<f64>, GeoError> {
+    let segments = node.child("segments").ok_or_else(|| {
+        GeoError::Parse("GML gml:Curve missing gml:segments".to_string())
+    })?;
+    let coords = densify_segments(&segments.children)?;
+    if coords.len() < 2 {
+        return Err(GeoError::Parse(
+            "GML gml:Curve produced fewer than two coordinates".to_string(),
+        ));
+    }
+    Ok(LineString::new(coords))
+}
+
+/// Builds the joined-and-densified coordinate run for a list of curve SEGMENT
+/// elements (the children of `gml:segments`, or of a `gml:Ring`'s curve member).
+/// Consecutive segments share a boundary point, so the duplicate start of each
+/// following segment is dropped.
+fn densify_segments(segs: &[Node]) -> Result<Vec<Coord<f64>>, GeoError> {
+    let mut out: Vec<Coord<f64>> = Vec::new();
+    let mut any = false;
+    for seg in segs {
+        let seg_coords = match seg.name.as_str() {
+            // Linear / geodesic segment: its control points ARE the polyline
+            // vertices (a 2-D geodesic between two points is the chord).
+            "linestringsegment" | "geodesicstring" => coords_of(seg)?,
+            // Arc forms through control points (point triples).
+            "arc" | "arcstring" => densify_arc_string(&coords_of(seg)?)?,
+            // Centre + radius + start/end angle.
+            "circulararcbycenterpoint" | "arcbycenterpoint" => {
+                densify_arc_by_center(seg)?
+            }
+            other => {
+                return Err(GeoError::Unsupported(format!(
+                    "GML curve segment <{other}> not supported (linear / Arc / ArcString / \
+                     CircularArcByCenterPoint only)"
+                )))
+            }
+        };
+        append_joined(&mut out, seg_coords);
+        any = true;
+    }
+    if !any {
+        return Err(GeoError::Parse("GML gml:segments has no segment".to_string()));
+    }
+    Ok(out)
+}
+
+/// Appends `next` onto `out`, dropping a leading point that coincides with the
+/// current tail (segments share their boundary vertex).
+fn append_joined(out: &mut Vec<Coord<f64>>, next: Vec<Coord<f64>>) {
+    let mut iter = next.into_iter();
+    if let (Some(&last), Some(first)) = (out.last(), iter.clone().next()) {
+        if (last.x - first.x).abs() < f64::EPSILON && (last.y - first.y).abs() < f64::EPSILON {
+            iter.next(); // skip the duplicate join point
+        }
+    }
+    out.extend(iter);
+}
+
+/// Densifies a `gml:Arc` / `gml:ArcString`: a poly-arc through control points,
+/// each consecutive (start, mid, end) TRIPLE (stepping by two) defining one
+/// circular arc. `gml:Arc` is the degenerate case of exactly three points.
+fn densify_arc_string(pts: &[Coord<f64>]) -> Result<Vec<Coord<f64>>, GeoError> {
+    // An Arc/ArcString is one or more 3-point arcs sharing endpoints, so the
+    // control-point count is odd and at least 3 (3, 5, 7, ...).
+    if pts.len() < 3 || pts.len().is_multiple_of(2) {
+        return Err(GeoError::Parse(format!(
+            "GML Arc/ArcString needs an odd number (>=3) of control points, got {}",
+            pts.len()
+        )));
+    }
+    let mut out: Vec<Coord<f64>> = vec![pts[0]];
+    let mut i = 0;
+    while i + 2 < pts.len() {
+        let arc = densify_three_point_arc(pts[i], pts[i + 1], pts[i + 2]);
+        // The first vertex of `arc` is `pts[i]`, already the current tail.
+        append_joined(&mut out, arc);
+        i += 2;
+    }
+    Ok(out)
+}
+
+/// The polyline through three points `(a, b, c)` along the circular arc that
+/// passes through all three, sampled at most [`ARC_STEP_DEG`] degrees apart. If
+/// the three points are collinear (no finite circumcentre) the arc degenerates to
+/// the two chords `a-b-c`.
+fn densify_three_point_arc(a: Coord<f64>, b: Coord<f64>, c: Coord<f64>) -> Vec<Coord<f64>> {
+    // Circumcentre of triangle abc (intersection of perpendicular bisectors).
+    // d = 2 * (ax(by-cy) + bx(cy-ay) + cx(ay-by)); collinear when d ~ 0.
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if d.abs() < 1e-12 {
+        return vec![a, b, c]; // collinear: just the chords
+    }
+    let a2 = a.x * a.x + a.y * a.y;
+    let b2 = b.x * b.x + b.y * b.y;
+    let c2 = c.x * c.x + c.y * c.y;
+    let ux = (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d;
+    let uy = (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d;
+    let center = Coord { x: ux, y: uy };
+    let r = ((a.x - ux).powi(2) + (a.y - uy).powi(2)).sqrt();
+
+    let ang = |p: Coord<f64>| (p.y - center.y).atan2(p.x - center.x);
+    let a_ang = ang(a);
+    let b_ang = ang(b);
+    let c_ang = ang(c);
+
+    // Direction: does going a->b->c sweep counter-clockwise (positive cross)?
+    let cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    let ccw = cross > 0.0;
+
+    // Total sweep a->c in the chosen direction, validated to pass through b.
+    let sweep = directed_sweep(a_ang, c_ang, ccw);
+    let to_b = directed_sweep(a_ang, b_ang, ccw);
+    // If b is not between a and c in this direction, the geometry is ill-posed;
+    // fall back to the chords rather than producing a wrong-way arc.
+    if to_b > sweep + 1e-9 {
+        return vec![a, b, c];
+    }
+
+    let step = ARC_STEP_DEG.to_radians();
+    let n = (sweep / step).ceil().max(1.0) as usize;
+    let mut out = Vec::with_capacity(n + 1);
+    for k in 0..=n {
+        let t = sweep * (k as f64) / (n as f64);
+        let theta = if ccw { a_ang + t } else { a_ang - t };
+        out.push(Coord { x: center.x + r * theta.cos(), y: center.y + r * theta.sin() });
+    }
+    out
+}
+
+/// The positive sweep angle (in `[0, 2π)`) from `from` to `to` going CCW, or its
+/// complement going CW.
+fn directed_sweep(from: f64, to: f64, ccw: bool) -> f64 {
+    let two_pi = std::f64::consts::TAU;
+    let mut delta = if ccw { to - from } else { from - to };
+    while delta < 0.0 {
+        delta += two_pi;
+    }
+    while delta >= two_pi {
+        delta -= two_pi;
+    }
+    delta
+}
+
+/// Densifies a `gml:CircularArcByCenterPoint` / `gml:ArcByCenterPoint`: a centre
+/// (`gml:pos`), a `gml:radius`, and `gml:startAngle` / `gml:endAngle` in degrees.
+/// GML measures these angles counter-clockwise from the +X axis. A full circle
+/// (start == end) sweeps the whole 360°.
+fn densify_arc_by_center(seg: &Node) -> Result<Vec<Coord<f64>>, GeoError> {
+    let center_node = seg
+        .child("pos")
+        .ok_or_else(|| GeoError::Parse("GML ArcByCenterPoint missing gml:pos centre".to_string()))?;
+    let center = *parse_coords(&center_node.text, center_node.dim)?
+        .first()
+        .ok_or_else(|| GeoError::Parse("GML ArcByCenterPoint: empty centre".to_string()))?;
+    let num = |name: &str| -> Result<f64, GeoError> {
+        seg.child(name)
+            .map(|n| n.text.trim().parse::<f64>())
+            .transpose()
+            .map_err(|_| {
+                GeoError::Parse(format!("GML ArcByCenterPoint: non-numeric gml:{}", name))
+            })?
+            .ok_or_else(|| GeoError::Parse(format!("GML ArcByCenterPoint missing gml:{}", name)))
+    };
+    let radius = num("radius")?;
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err(GeoError::Parse(
+            "GML ArcByCenterPoint: radius must be a positive number".to_string(),
+        ));
+    }
+    let start = num("startangle")?.to_radians();
+    // A missing endAngle, or endAngle == startAngle, is a full circle.
+    let end = match seg.child("endangle") {
+        Some(n) => n
+            .text
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| GeoError::Parse("GML ArcByCenterPoint: non-numeric gml:endAngle".to_string()))?
+            .to_radians(),
+        None => start + std::f64::consts::TAU,
+    };
+    let mut sweep = end - start;
+    if sweep.abs() < 1e-12 {
+        sweep = std::f64::consts::TAU; // start == end -> full circle
+    }
+    let step = ARC_STEP_DEG.to_radians();
+    let n = (sweep.abs() / step).ceil().max(1.0) as usize;
+    let mut out = Vec::with_capacity(n + 1);
+    for k in 0..=n {
+        let theta = start + sweep * (k as f64) / (n as f64);
+        out.push(Coord { x: center.x + radius * theta.cos(), y: center.y + radius * theta.sin() });
+    }
+    Ok(out)
+}
+
+/// `gml:Surface` -> a single [`Polygon`]. A surface is `gml:patches` of (in the
+/// near-SF case) ONE `gml:PolygonPatch`, whose `gml:exterior` / `gml:interior`
+/// boundaries are rings that may themselves contain arc segments (a `gml:Ring`
+/// wrapping curve members) and are densified the same way. Only the first patch
+/// is taken (a multi-patch surface is beyond a single `geo_types::Polygon`).
+fn build_surface(node: &Node) -> Result<Polygon<f64>, GeoError> {
+    let patches = node.child("patches").ok_or_else(|| {
+        GeoError::Parse("GML gml:Surface missing gml:patches".to_string())
+    })?;
+    let patch = patches
+        .child("polygonpatch")
+        .or_else(|| patches.child("rectangle"))
+        .ok_or_else(|| {
+            GeoError::Unsupported(
+                "GML gml:Surface: only gml:PolygonPatch patches supported".to_string(),
+            )
+        })?;
+    let ext_wrap = patch
+        .child("exterior")
+        .or_else(|| patch.child("outerboundaryis"))
+        .ok_or_else(|| {
+            GeoError::Parse("GML gml:PolygonPatch missing gml:exterior".to_string())
+        })?;
+    let exterior = build_surface_ring(ext_wrap)?;
+    let mut interiors = Vec::new();
+    for wrap in patch
+        .children_named("interior")
+        .chain(patch.children_named("innerboundaryis"))
+    {
+        interiors.push(build_surface_ring(wrap)?);
+    }
+    Ok(Polygon::new(exterior, interiors))
+}
+
+/// A patch boundary ring: either a plain `gml:LinearRing` (handled by the SF
+/// [`build_ring`]) or a `gml:Ring` whose `gml:curveMember`s carry arc segments,
+/// which are densified and joined into one closed ring.
+fn build_surface_ring(wrap: &Node) -> Result<LineString<f64>, GeoError> {
+    if wrap.child("linearring").is_some() {
+        return build_ring(wrap);
+    }
+    if let Some(ring) = wrap.child("ring") {
+        let mut coords: Vec<Coord<f64>> = Vec::new();
+        for member in ring.children_named("curvemember") {
+            let curve = member.child("curve").ok_or_else(|| {
+                GeoError::Unsupported(
+                    "GML gml:Ring member is not a gml:Curve".to_string(),
+                )
+            })?;
+            let segments = curve.child("segments").ok_or_else(|| {
+                GeoError::Parse("GML gml:Curve in ring missing gml:segments".to_string())
+            })?;
+            append_joined(&mut coords, densify_segments(&segments.children)?);
+        }
+        if coords.len() < 4 {
+            return Err(GeoError::Parse(
+                "GML gml:Ring produced fewer than four coordinates".to_string(),
+            ));
+        }
+        // Close the ring if the densified arcs did not return exactly to start.
+        if let (Some(&first), Some(&last)) = (coords.first(), coords.last()) {
+            if (first.x - last.x).abs() > 1e-9 || (first.y - last.y).abs() > 1e-9 {
+                coords.push(first);
+            }
+        }
+        return Ok(LineString::new(coords));
+    }
+    // A bare LinearRing-less boundary: try the SF ring builder (handles inline pos).
+    build_ring(wrap)
 }

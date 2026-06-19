@@ -25,7 +25,13 @@ fn const_floor_in(rel_from_workspace: &str, const_name: &str) -> usize {
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     for line in src.lines() {
         let line = line.trim();
-        // Match e.g. `const BASELINE_PASS: usize = 98;` (ignoring any trailing comment).
+        // [OPUS-4.8] sq-t58w.6 — tolerate an optional `pub ` visibility prefix. The
+        // Solid WAC/ACP floor consts moved into the shared `tests/common/mod.rs`
+        // module where they are declared `pub const` (so both conformance test
+        // binaries can read them); the SHACL/geo floors remain bare `const`. Match
+        // e.g. `const BASELINE_PASS: usize = 98;` AND `pub const WAC_SCENARIO_FLOOR:
+        // usize = 12;` (ignoring any trailing comment).
+        let line = line.strip_prefix("pub ").unwrap_or(line);
         if let Some(rest) = line.strip_prefix("const ") {
             if let Some(after_name) = rest.strip_prefix(const_name) {
                 // Guard against a longer const that merely starts with `const_name`
@@ -65,14 +71,18 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "OGC_RATCHET_FLOOR",
     ),
     // [OPUS-4.8] sq-j174 — the Solid WAC + ACP decision-parity ratchets.
+    // [OPUS-4.8] sq-t58w.6 — the floor consts moved from `conformance_{wac,acp}.rs`
+    // into the shared `tests/common/mod.rs` parity-corpus module (so both the
+    // conformance suites AND the differential oracle read ONE floor); point the
+    // floor-sync guard at the new single source. Floor value unchanged (12).
     (
         "Solid WAC decision parity",
-        "crates/sparq-solid/tests/conformance_wac.rs",
+        "crates/sparq-solid/tests/common/mod.rs",
         "WAC_SCENARIO_FLOOR",
     ),
     (
         "Solid ACP decision parity",
-        "crates/sparq-solid/tests/conformance_acp.rs",
+        "crates/sparq-solid/tests/common/mod.rs",
         "ACP_SCENARIO_FLOOR",
     ),
 ];

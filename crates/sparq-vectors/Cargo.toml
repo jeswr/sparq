@@ -37,6 +37,17 @@ default = []
 # engine-side automatic BGP → mask wiring (a filtered form of the `vec:` predicate) is wired in
 # `rewrite.rs` and activates when this composes with `vec-predicate` (sq-bvmd, follow-up to sq-1wc1).
 filtered-ann = []
+# [OPUS-4.8] sq-pi44: incremental add / remove / update of vectors against an already-finalized
+# store via an in-RAM DELTA SIDECAR (+ `compact` to fold it back into a fresh base), so a single
+# graph change no longer forces a full re-embed + file rebuild. OPT-IN and OFF by default; a LEAN
+# feature — it adds NO new dependency (the append map + tombstone set reuse the in-tree
+# `rustc-hash`) and pulls in NEITHER the engine NOR any heavy crate, so the default `sparq-vectors`
+# build carries zero delta code. Gates `delta.rs` (the `VectorDelta` value) and the
+# `VectorStore::{add,remove,update,compact,apply_delta,take_delta,delta,has_delta}` methods; the
+# read paths (`get`/`iter`/`len`) consult the delta only under this feature. The delta is IN-RAM
+# only (lost on handle drop; `compact` is the durability path) — a persisted on-disk delta sidecar
+# is a tracked follow-up.
+delta = []
 # [OPUS-4.8] sq-ip3a (epic sq-3183, follow-up to sq-7hx6): the **approximate** ANN backend.
 # OPT-IN and OFF by default — this is the feature that pulls the heavy HNSW crate
 # (`instant-distance`) into the dependency graph. With it OFF the default `sparq-vectors` build
@@ -120,6 +131,13 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
 # a library dependency of this crate — it stays a test-only dependency and never enters the published
 # graph; the fingerprint itself depends only on sparq-core's public read API.
 rayon = { workspace = true }
+# [OPUS-4.8] (sq-k5qq) DEV-only: the throughput/diskann harnesses emit an optional,
+# strictly-additive `SPARQ_VECTORS_JSON=<path>` results document (dependency-free
+# `format!`-built JSON — no serde in the harness itself); this dev-dep parses that emit
+# back so the round-trip test catches a malformed document. `serde_json` is ALSO an
+# OPTIONAL runtime dep (the `provider`/`embeddings` features) — listing it here makes it
+# available to the test targets in BOTH feature states, independent of those features.
+serde_json = "1"
 
 # [OPUS-4.8] sq-ip3a: the bench example measures HNSW (`VectorIndex`) recall/build, so it needs the
 # approximate backend. Gating it on `approx-ann` keeps `cargo build --all-targets` (default features)

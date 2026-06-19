@@ -4,10 +4,20 @@
     "Counted from source (no compile) by scripts/coverage-presence.py, run every commit by the .github/workflows/ci.yml coverage job. The floor only RISES (--seed will not lower without --allow-lower). Regenerate after adding tests: scripts/coverage-presence.py --seed."
   ],
   "crates": {
+    "sparq-algos": {
+      "had_integration_dir": true,
+      "min_tests": 26,
+      "note": "[OPUS-4.8] sq-bif.8: 28 #[test]s measured (22 inline src oracles + 6 tests/topology_oracles.rs integration cases); floor 26 leaves a small margin. integration dir added by this bead."
+    },
     "sparq-bench": {
       "had_integration_dir": false,
       "min_tests": 0,
       "note": "perf-harness crate (benchmarks, not #[test]s)"
+    },
+    "sparq-canon": {
+      "had_integration_dir": true,
+      "min_tests": 12,
+      "note": "[OPUS-4.8] sq-bif.9: 14 #[test]s measured (5 inline src + 7 tests/bnode_isomorphism_and_bridge.rs + 2 tests/rdf_canon_suite.rs manifest drivers); floor 12 leaves a small margin. The suite itself spans the full 86-entry W3C RDFC-1.0 manifest inside those driver tests."
     },
     "sparq-cli": {
       "had_integration_dir": true,
@@ -60,6 +70,10 @@
     "sparq-parse": {
       "had_integration_dir": false,
       "min_tests": 13
+    },
+    "sparq-policy": {
+      "had_integration_dir": true,
+      "min_tests": 130
     },
     "sparq-prov": {
       "had_integration_dir": true,

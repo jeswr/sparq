@@ -58,7 +58,7 @@ By default: **no auth, loopback-only.** Hardening is opt-in but honest where it 
   (`--auth-token-read`) — a write-token alone still leaves reads open on a remote bind. The 401 is
   byte-identical for a missing vs a wrong token. The Bearer gate is one shared secret with no
   per-user identity — for real authz front it with a gateway or [`sparq-solid`](../sparq-solid), over TLS.
-- **Error responses do not leak internals** — every error is a generic `{"error":"…"}` class (never the caller's input, an RDF fragment, a path, or a token); detail to the log, class to the body (regression-guarded by `tests/hardening.rs`).
+- **Error responses do not leak internals** — every error is a generic `{"error":"…"}` class (never the caller's input, an RDF fragment, a path, or a token); detail to the log, class to the body (regression-guarded by `tests/hardening.rs`). An unmatched route is a categorised `404 {"error":"not found"}` (the message never echoes the requested path).
 - **Stable retry contract** — **transient** (`429`/`503`): retry; **permanent** (`4xx`): fix the
   request — a `413` row/byte cap is a permanent honest refusal, **not** a silent truncation;
   **defect** (`500`): surface, don't hot-retry. Versioned table in the `status_contract` crate doc.

@@ -41,6 +41,10 @@ import {
   formatBytes,
   type DataFormat,
 } from "@/lib/data-formats";
+// [OPUS-4.8] sq-8uew — Turtle/TriG/N-Triples/N-Quads syntax-highlighting input editor.
+import { RdfEditor } from "@/components/rdf-editor";
+// [OPUS-4.8] sq-ixc3.1 — JSON-LD syntax-highlighting input editor (the remaining picker format).
+import { JsonLdEditor } from "@/components/jsonld-editor";
 
 // The whole-dataset enumeration: default graph UNION every named graph, so a sample of an
 // N-Quads / TriG document shows its named-graph rows too (?g bound). Same shape the REPL uses.
@@ -193,14 +197,26 @@ export function DataFormatsDemo() {
           <label htmlFor="data-formats-input" className="sr-only">
             RDF document to parse
           </label>
-          <textarea
-            id="data-formats-input"
-            value={text}
-            spellCheck={false}
-            onChange={(e) => setText(e.target.value)}
-            rows={10}
-            className="w-full resize-y rounded-lg border bg-muted/40 p-3 font-mono text-[13px] leading-relaxed outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-          />
+          {/* [OPUS-4.8] sq-8uew / sq-ixc3.1 — syntax-highlighting input. JSON-LD is JSON (a
+              different tokenizer), so the picker routes it to the JSON-LD editor; the four text
+              formats share the Turtle-family editor. Both reuse the shared `.sq-tok-*` palette. */}
+          {format === "jsonld" ? (
+            <JsonLdEditor
+              id="data-formats-input"
+              ariaLabel="JSON-LD document to parse"
+              value={text}
+              onChange={setText}
+              rows={10}
+            />
+          ) : (
+            <RdfEditor
+              id="data-formats-input"
+              ariaLabel="RDF document to parse"
+              value={text}
+              onChange={setText}
+              rows={10}
+            />
+          )}
 
           <div className="flex items-center gap-3">
             <Button onClick={runParse} disabled={busy || disabled}>

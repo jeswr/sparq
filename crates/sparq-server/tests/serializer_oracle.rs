@@ -32,7 +32,7 @@
 //! Inputs are an **adversarial battery** (hand-built `QueryResult`s with embedded newline /
 //! comma / double-quote / leading+trailing whitespace, language-tagged, datatyped
 //! `xsd:integer`/`xsd:dateTime`, XML-significant IRIs, blank nodes, unbound cells, and an
-//! RDF-1.2 quoted-triple term) plus an **engine-driven random battery** (random graphs
+//! RDF 1.2 triple term) plus an **engine-driven random battery** (random graphs
 //! queried through the real engine — the same generator style as the engine's exec tests).
 
 use oxrdf::{BlankNode, Literal, NamedNode, Term, Triple, Variable};
@@ -346,7 +346,7 @@ fn oracle_multi_var_with_unbound_cells_roundtrip() {
 
 #[test]
 fn oracle_rdf_star_triple_term_roundtrip() {
-    // RDF 1.2 quoted triple term as a binding value. XML uses the <triple> element; TSV uses
+    // RDF 1.2 triple term as a binding value. XML uses the <triple> element; TSV uses
     // the `<<( … )>>` term syntax; both must re-parse to the SAME nested Triple. (CSV is the
     // lossy Display fallback, checked lexically.)
     let qt = Term::Triple(Box::new(Triple::new(

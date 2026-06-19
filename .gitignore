@@ -21,6 +21,16 @@ __pycache__/
 /.roborev/
 STATUS.md
 
+# [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: the SINGLE source of truth is the
+# repo-root /package-lock.json (tracked). Per-workspace-member lockfiles are redundant and
+# must never be committed — they would drift from the root lock. scripts/gen-js-sbom.sh
+# transiently DERIVES js/package-lock.json from the root lock (and removes it on exit); pin
+# these paths ignored so a stray member lock can never re-enter the tree.
+/js/package-lock.json
+/site/package-lock.json
+/gui/e2e/package-lock.json
+/packages/*/package-lock.json
+
 # Claude Code agent worktrees (transient scratch; the tracked skills under .claude/skills/ stay)
 /.claude/worktrees/
 

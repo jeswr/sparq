@@ -50,12 +50,19 @@ import {
   DatasetViewer,
   type ActiveDataset,
 } from "@/components/repl-datasets";
+// [OPUS-4.8] sq-daru — the dataset panel: named-graph list with per-graph triple counts.
+import { DatasetPanel } from "@/components/repl-dataset-panel";
 // [OPUS-4.8] sq-n5aw — the syntax-highlighting SPARQL editor replaces the plain <textarea>.
 import { SparqlEditor } from "@/components/sparql-editor";
+// [OPUS-4.8] sq-8uew — Turtle/N-Triples syntax highlighting for the CONSTRUCT/DESCRIBE graph.
+// [OPUS-4.8] sq-gb4o (#805) — pretty/indented Turtle (with a raw N-Triples toggle) for the graph.
+import { TurtleResult } from "@/components/rdf-highlight";
 // [OPUS-4.8] sq-2mke — endpoint mode: the Connect panel + the SPARQL 1.1 Protocol client.
 import { ConnectPanel } from "@/components/connect-panel";
 // [OPUS-4.8] sq-9ij6 — endpoint mode: the live subscriptions view (SSE result deltas).
 import { SubscriptionsView } from "@/components/subscriptions-view";
+// [OPUS-4.8] sq-he72 — endpoint mode: the server health / capabilities panel (metrics + VoID/SD).
+import { ServerHealthPanel } from "@/components/server-health-panel";
 import { type EndpointConfig, runEndpointQuery } from "@sparq/client";
 
 // [OPUS-4.8] sq-vfbm — the REPL now dispatches across the whole lean-bundle query
@@ -67,7 +74,9 @@ type RunState =
   | { kind: "running" }
   | { kind: "select"; results: SparqlResults; ms: number }
   | { kind: "boolean"; value: boolean; ms: number }
-  | { kind: "graph"; ntriples: string; triples: number; ms: number }
+  // [OPUS-4.8] sq-gb4o (#805) — `query` carries the SPARQL text the graph came from so the
+  // pretty-Turtle view can abbreviate IRIs using the query's own PREFIX declarations.
+  | { kind: "graph"; ntriples: string; triples: number; ms: number; query: string }
   // [OPUS-4.8] sq-2mke — `endpoint` marks an update applied to a REMOTE server (no
   // before/after in-tab count), so the result copy stays honest about which store mutated.
   | {
@@ -98,6 +107,11 @@ export function Repl() {
   const [size, setSize] = React.useState<number | null>(null);
   const [engine, setEngine] = React.useState<EngineState>("cold");
   const [viewerOpen, setViewerOpen] = React.useState(false);
+  // [OPUS-4.8] sq-daru — monotonic version bumped whenever the in-tab dataset's CONTENT
+  // changes (a new dataset loaded, a merge, or an in-tab Update). The dataset panel keys
+  // its per-graph-count re-read off it, so an Update that leaves the total size unchanged
+  // but moves triples between graphs still refreshes the panel.
+  const [datasetVersion, setDatasetVersion] = React.useState(0);
   const [active, setActive] = React.useState<ActiveDataset>({
     label: DEFAULT_DATASET.label,
     description: DEFAULT_DATASET.description,
@@ -129,6 +143,8 @@ export function Repl() {
       const store = loadIntoStore(Store, text, format);
       storeRef.current = store;
       setSize(datasetSize(store));
+      // [OPUS-4.8] sq-daru — new store content: refresh the dataset panel's per-graph counts.
+      setDatasetVersion((v) => v + 1);
       return store;
     },
     [],
@@ -195,7 +211,7 @@ export function Repl() {
       case "graph": {
         const trimmed = result.ntriples.trim();
         const triples = trimmed === "" ? 0 : trimmed.split("\n").length;
-        setState({ kind: "graph", ntriples: trimmed, triples, ms });
+        setState({ kind: "graph", ntriples: trimmed, triples, ms, query: sparql });
         return;
       }
       case "update":
@@ -252,6 +268,9 @@ export function Repl() {
         const ms = performance.now() - t0;
         const sizeAfter = datasetSize(store);
         setSize(sizeAfter);
+        // [OPUS-4.8] sq-daru — an in-tab Update mutated the store (and may have moved
+        // triples between graphs even if the total is unchanged): refresh the panel.
+        setDatasetVersion((v) => v + 1);
         setState({ kind: "update", sizeBefore, sizeAfter, ms });
         return;
       }
@@ -262,7 +281,7 @@ export function Repl() {
         const ms = performance.now() - t0;
         const trimmed = ntriples.trim();
         const triples = trimmed === "" ? 0 : trimmed.split("\n").length;
-        setState({ kind: "graph", ntriples: trimmed, triples, ms });
+        setState({ kind: "graph", ntriples: trimmed, triples, ms, query: sparql });
         return;
       }
 
@@ -329,6 +348,8 @@ export function Repl() {
         } else {
           storeRef.current = incoming;
           setSize(datasetSize(incoming));
+          // [OPUS-4.8] sq-daru — replaced the store directly (not via buildStore): refresh.
+          setDatasetVersion((v) => v + 1);
           setActive({
             label,
             description: `Custom ${format} dataset loaded in your tab.`,
@@ -432,6 +453,15 @@ export function Repl() {
           disabled={controlsDisabled || endpointActive}
         />
 
+        {/* [OPUS-4.8] sq-daru — the dataset panel: the loaded dataset's graphs (default +
+            named) with per-graph triple counts, refreshed on every content change. Hidden
+            in endpoint mode (the remote server owns its own dataset). */}
+        <DatasetPanel
+          store={storeRef.current}
+          refreshKey={datasetVersion}
+          hidden={endpointActive}
+        />
+
         <div className="flex flex-wrap gap-1.5">
           {EXAMPLE_QUERIES.map((q) => (
             <Button
@@ -504,6 +534,13 @@ export function Repl() {
             renders an honest "switch on endpoint mode" hint otherwise. It reuses the SAME
             endpoint config + bearer/connection-safety posture the Connect panel established. */}
         <SubscriptionsView config={endpointConfig} active={endpointActive} />
+
+        {/* [OPUS-4.8] sq-he72 — the server health / capabilities panel. Reads the connected
+            server's /health, Prometheus /metrics, and the opt-in VoID / SPARQL Service
+            Description, rendering "not exposed" honestly when the operator left a feature off.
+            Like the subscriptions view, it only runs in endpoint mode and reuses the SAME
+            endpoint config + bearer/connection-safety posture. */}
+        <ServerHealthPanel config={endpointConfig} active={endpointActive} />
       </CardContent>
 
       <DatasetViewer
@@ -673,9 +710,11 @@ function ResultPanel({ state }: { state: RunState }) {
       );
     }
     return (
-      <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed">
-        {state.ntriples}
-      </pre>
+      <TurtleResult
+        text={state.ntriples}
+        query={state.query}
+        className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
+      />
     );
   }
   if (state.kind === "explain") {

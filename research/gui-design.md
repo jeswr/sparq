@@ -181,7 +181,7 @@ SPARQL engine and ~20 showcase surfaces. The job is consolidation into a credibl
 
 | Engine capability (real surface) | GUI feature | Current tier / state |
 |---|---|---|
-| SPARQL 1.1/1.2 SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE, paths, RDF-star, EXPLAIN/ANALYZE (lean wasm) | Query editor + results + plan view | **`live`** — `repl.tsx` dispatches all forms + EXPLAIN/ANALYZE via `sparq-wasm.ts` (`query`, `queryQuads`, `updateInPlace`, `explain`, `explainAnalyze`, `queryCursor`, `count`, `ask`, `applyDelta`) |
+| SPARQL 1.1/1.2 SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE, paths, RDF 1.2 triple terms, EXPLAIN/ANALYZE (lean wasm) | Query editor + results + plan view | **`live`** — `repl.tsx` dispatches all forms + EXPLAIN/ANALYZE via `sparq-wasm.ts` (`query`, `queryQuads`, `updateInPlace`, `explain`, `explainAnalyze`, `queryCursor`, `count`, `ask`, `applyDelta`) |
 | Ingest: Turtle/N-Triples/N-Quads/TriG/JSON-LD (+ compressed) | Upload / paste / URL-load, named-graph-preserving | **`live`** — `repl-datasets.tsx` + `loadIntoStore`. HDT is native-only (`skills/hdt-format`), not in the wasm bundle |
 | SHACL Core + SHACL-SPARQL → W3C report | Shapes editor + report with `sh:detail` | **`live`** — `validate` (gated `--features shacl`), `shacl-playground.tsx` |
 | RDFS / OWL-RL / N3 closure + proof trees | Materialize + proof-tree view | **`live-new-wasm`** — `inference-playground.tsx`, `reason-wasm.ts` |

@@ -18,6 +18,14 @@
 #                       only). A hit fails unless the line carries an inline
 #                       `privacy-claims-allow: <why>` marker. (scripts/check-privacy-claims.sh;
 #                       beads sq-toze.35 / sq-qhy4.)
+#     • terminology    — greps the doc surface for deprecated RDF/SPARQL wording: the
+#                       community-era "RDF-star"/"RDF*"/"SPARQL-star"/"quoted triple"/
+#                       "embedded triple" are now RDF 1.2 / SPARQL 1.2 / "triple term" /
+#                       "reified triple". A hit fails unless the line is a proper noun
+#                       (the W3C RDF-star WG/CG), a paper title, a third-party doc name, a
+#                       URL, or carries `terminology-allow: <why>`. research/ is exempt
+#                       (prior-art discussion). Source of truth: skills/terminology/SKILL.md.
+#                       (scripts/check-terminology.py; bead sq-2p8z / issue #812.)
 #     • no-perf-numbers — greps user-facing docs for baked-in benchmark figures (AGENTS.md
 #                       house rule; scripts/check-no-perf-numbers.py --enforce). PROMOTED
 #                       from advisory to HARD by sq-8ic6 once the backlog cleared (the last
@@ -216,6 +224,36 @@ jobs:
       - name: Self-test the privacy-claims gate (both directions)
         run: bash scripts/tests/test_privacy_claims.sh
 
+  # [OPUS-4.8] sq-2p8z (issue #812): the terminology HARD gate. The feature historically
+  # nicknamed "RDF-star"/"RDF*" is STANDARDISED in RDF 1.2 (the construct is a "triple
+  # term", with "reifiers"/"reified triples" + rdf:reifies); "SPARQL-star" → "SPARQL 1.2".
+  # The community spellings are imprecise (a non-spec version name AND the wrong, old
+  # subject+object model), so no user-facing / governance markdown may carry them. The
+  # script greps the same doc surface the other HARD gates use (root *.md + skills/ +
+  # docs/ + crates/), exempts research/ (the sanctioned home for prior-art + competitor
+  # discussion), and recognises the legitimate proper-noun / paper-title / third-party-
+  # doc-name / URL exceptions (+ an inline `terminology-allow: <why>` marker). The single
+  # source of truth for preferred wording is skills/terminology/SKILL.md. Deterministic,
+  # grep-only, no network. HARD (no advisory token) → the ci-summary aggregator gates on it.
+  terminology:
+    name: terminology (RDF 1.2 / SPARQL 1.2 wording)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      # Pins the gate's own classification before it is trusted to guard the docs:
+      # should-FAIL banned spellings must fire AND should-PASS proper-noun / paper-title /
+      # third-party-doc / URL / allow-marker lines (+ the GeoSPARQL / italic-closer / bold
+      # false-positive families) must not regress. Hermetic (no git/network).
+      - name: Self-test the terminology gate (both directions)
+        run: python3 scripts/check-terminology.py --self-test
+      - name: No deprecated RDF-star/SPARQL-star/quoted-triple wording — GATING
+        run: python3 scripts/check-terminology.py
+
   # [OPUS-4.8] sq-6uc7: HARD self-tests for the shared CI disk-reclaim script
   # (scripts/ci-free-disk.sh). #462 folded `/usr/local/share/boost` + the env-named
   # `$AGENT_TOOLSDIRECTORY` toolcache into that one script (instead of a 2nd inline
@@ -313,6 +351,21 @@ jobs:
       # trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
       - name: Self-test agent-telemetry harness (parser + cache-ratio + cost math)
         run: python3 scripts/agent-telemetry/tests/test_agent_telemetry.py
+      # [OPUS-4.8] sq-f04e: gen-js-sbom.sh DERIVES a standalone per-member lock via
+      # scripts/derive-workspace-member-lock.mjs, then cyclonedx-npm shells out to `npm ls
+      # --omit=dev`. A workspace-to-workspace dep edge (a `link: true` node — a published member
+      # depending on a sibling @sparq/* in packages/*) USED TO derive a dangling link stub that
+      # crashed npm ls with "Cannot read properties of undefined (reading 'extraneous')" -> exit
+      # 254 (the cryptic SBOM-lane failure discovered in #876/sq-jpki.2). The fix materializes the
+      # link target + its nested closure. This hermetic self-test (synthetic root lock, no network,
+      # node+npm only) pins the TEETH: a member with a workspace-link dev dep derives a lock on
+      # which BOTH `npm ls --omit=dev` and the full `npm ls` exit 0, while the runtime (--omit=dev)
+      # closure stays exactly the real runtime dep set (no dev-link leak into the published SBOM
+      # surface). HARD job (no "advisory" token) — a regression reds the ci-summary gate.
+      - name: shellcheck gen-js-sbom.sh + the derive-lock self-test
+        run: shellcheck scripts/gen-js-sbom.sh scripts/tests/test_derive_workspace_member_lock.sh
+      - name: "Self-test derive-workspace-member-lock.mjs (workspace-link materialization — sq-f04e)"
+        run: bash scripts/tests/test_derive_workspace_member_lock.sh
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:

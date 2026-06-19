@@ -2100,6 +2100,15 @@ pub fn router(state: AppState) -> Router {
     // See [`shacl_validate_endpoint`].
     #[cfg(feature = "shacl")]
     let routes = routes.route("/shacl/validate", post(shacl_validate_endpoint));
+    // [OPUS-4.8] (sq-pj6u) Categorised unmatched-route 404. Without an explicit fallback,
+    // axum answers an unmatched path with a 404 whose body is EMPTY; `json_error_bodies`
+    // then wraps that into the uncategorised `{"error":""}` envelope — leak-free but with no
+    // actionable category. Register a fallback that mints the SAME structured 404 a handler
+    // does for a disabled opt-in route (`{"error":"not found"}`), so every unmatched route
+    // carries the stable `not found` category. The message is a fixed, server-constructed
+    // string — it never echoes the request path, so the body stays leak-free (no internal
+    // paths, no stack info, no request internals), matching the existing error contract.
+    let routes = routes.fallback(unmatched_route);
     let routes = routes.with_state(state.clone());
     // The metrics middleware wraps the WHOLE hardened stack so shed requests
     // (429), body-limit rejections (413) and panics (500) are counted with the
@@ -2108,6 +2117,17 @@ pub fn router(state: AppState) -> Router {
         state,
         crate::metrics::track,
     ))
+}
+
+/// [OPUS-4.8] (sq-pj6u) Router fallback for any path that matched no route: a CATEGORISED,
+/// leak-free `404 Not Found`. Returns the same structured `{"error":"not found"}` envelope a
+/// handler mints for a disabled opt-in route (e.g. `/.well-known/void`, `/tpf`,
+/// `/shacl/validate` with their flags off), so an unmatched route is no longer the bare
+/// `{"error":""}` axum produces. The message is a fixed, server-constructed string and the
+/// request path is deliberately NOT echoed — the body discloses no internal path, stack
+/// information or request internal, exactly the [`json_error`] info-leak posture (#241).
+async fn unmatched_route() -> Response {
+    json_error(StatusCode::NOT_FOUND, "not found")
 }
 
 /// `GET /metrics` — Prometheus text exposition (T22). The gauges (graph triple
@@ -4612,6 +4632,16 @@ async fn gsp_delete(state: &AppState, graph: GraphRef) -> Response {
         }
         GraphRef::Named(iri) => {
             if !graph_exists(state, &graph) {
+                // [OPUS-4.8] (sq-ttv2) The 404 reflects the REQUESTED graph IRI. Assessed and
+                // accepted as standard REST: `iri` is the CLIENT'S OWN input — either the
+                // verbatim `?graph=<uri>` value (indirect identification) or
+                // `http://<Host>/graphs/<path>` reconstructed from the client's request line +
+                // Host header (direct identification, `graph_store_direct` →
+                // `direct_graph_iri`). It carries NO server-internal information (no filesystem
+                // path, no enumeration of OTHER stored graphs, no engine state), so echoing it
+                // back is not an info leak — it is the addressed resource, exactly as a REST 404
+                // names the resource that was not found. Stays inside the structured
+                // `{"error":...}` envelope, so it matches the error contract.
                 return json_error(
                     StatusCode::NOT_FOUND,
                     &format!("graph <{iri}> does not exist"),

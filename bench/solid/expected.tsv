@@ -1,0 +1,26 @@
+# [OPUS-4.8] (sq-k0km) Solid WAC/ACP suite DETERMINISTIC golden counts. These are a pure
+# function of the in-crate fixture (sparq_solid::fixture::{wac_fixture, acp_fixture}) — the
+# materialised auth-view sizes + authorized-subset row counts — so they are byte-stable
+# across machines (NOT wall-clock). Format: <metric>\t<count>.
+#
+# DERIVED by RUNNING crates/sparq-solid/examples/bench.rs and reading its stdout (not
+# guessed); bench/solid/run.sh re-runs it every commit and exits 1 on any drift, exactly
+# like LUBM's row-count diff / HDT's load-decode diff / RSP's per-window-row diff. The ms
+# timings the example also prints are NON-CANONICAL (dev/gh-runner box) and are NOT asserted.
+#
+#   solid_wac_named_graphs      named graphs in the WAC fixture
+#   solid_wac_quads             total quads across the WAC fixture's named graphs
+#   solid_wac_auth_triples      triples in the materialised WAC auth view (materialize_wac)
+#   solid_acp_auth_triples      triples in the materialised ACP auth view (materialize_acp,
+#                               3 strata)
+#   solid_alice_readable_graphs graphs visible to ALICE in Mode::Read (AuthIndex walk)
+#   solid_full_dataset_rows     rows of the title query over the FULL dataset (GRAPH ?g)
+#   solid_authorized_rows       rows of the title query restricted to alice's authorized
+#                               subset (query_as / query_as_rewrite assert-equal)
+solid_wac_named_graphs	1148
+solid_wac_quads	3060
+solid_wac_auth_triples	3783
+solid_acp_auth_triples	6355
+solid_alice_readable_graphs	800
+solid_full_dataset_rows	864
+solid_authorized_rows	599

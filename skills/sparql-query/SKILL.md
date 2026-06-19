@@ -1,6 +1,6 @@
 ---
 name: sparql-query
-description: Run SPARQL 1.1/1.2 queries (SELECT/ASK/CONSTRUCT/DESCRIBE) and UPDATE against the sparq RDF engine in Rust — load RDF into a sparq_core::Graph, then use sparq_engine::{query, ask, query_json, count, construct, describe, update}; covers property paths, RDF-star quoted triples, aggregates/subqueries, custom extension functions (query_with_functions / FunctionRegistry), prepared queries, query budgets/timeouts, named-graph dataset views, and EXPLAIN. Use when an agent or developer needs to embed/execute SPARQL over sparq.
+description: Run SPARQL 1.1/1.2 queries (SELECT/ASK/CONSTRUCT/DESCRIBE) and UPDATE against the sparq RDF engine in Rust — load RDF into a sparq_core::Graph, then use sparq_engine::{query, ask, query_json, count, construct, describe, update}; covers property paths, RDF 1.2 triple terms, aggregates/subqueries, custom extension functions (query_with_functions / FunctionRegistry), prepared queries, query budgets/timeouts, named-graph dataset views, and EXPLAIN. Use when an agent or developer needs to embed/execute SPARQL over sparq.
 ---
 
 # sparq SPARQL query surface
@@ -156,12 +156,13 @@ sparq_engine::query(&g,
     "PREFIX ex: <http://ex/> SELECT ?x WHERE { ex:alice ex:knows+ ?x }").unwrap();   // transitive
 ```
 
-**RDF-star / RDF 1.2 quoted triples** (`<< s p o >>`) — stored structurally; patterns with variables
-inside the quoted triple match. Load with the `rdf-12` feature enabled on oxrdf/oxttl (default in
-this workspace). In Turtle/TriG you can write the reifying triple `<< s p o >>` (subject or object
-position, optionally `<< s p o ~ reifier >>`) or the annotation block `s p o {| … |}` (which also
-**asserts** the base triple); both desugar to the standard `rdf:reifies <<( s p o )>>` form. The
-underlying triple TERM `<<( s p o )>>` is **object-position only** (RDF 1.2). See the SPARQL-star
+**RDF 1.2 triple terms** (`<<( s p o )>>`) — stored structurally; patterns with variables
+inside the triple term match. Load with the `rdf-12` feature enabled on oxrdf/oxttl (default in
+this workspace). In Turtle/TriG you can write the reified triple `<< s p o >>` (the
+`reifiedTriple` sugar; subject or object position, optionally `<< s p o ~ reifier >>`) or the
+annotation block `s p o {| … |}` (which also **asserts** the base triple); both desugar to the
+standard `rdf:reifies <<( s p o )>>` form. The triple term `<<( s p o )>>` itself (the `tripleTerm`
+production) is **object-position only** (RDF 1.2). See the SPARQL 1.2 triple-term
 functions `TRIPLE`/`isTRIPLE`/`SUBJECT`/`PREDICATE`/`OBJECT` for constructing/decomposing them.
 
 ```rust

@@ -6,7 +6,7 @@ import { SurfaceContent } from "@/components/surface-content";
 export const metadata: Metadata = {
   title: "SPARQL 1.1 / 1.2",
   description:
-    "SELECT / ASK / CONSTRUCT / UPDATE, property paths, RDF-star quoted triples, aggregates, subqueries — the sparq SPARQL engine, live in your tab.",
+    "SELECT / ASK / CONSTRUCT / UPDATE, property paths, RDF 1.2 triple terms, aggregates, subqueries — the sparq SPARQL engine, live in your tab.",
 };
 
 export default function SparqlSurfacePage() {
@@ -29,7 +29,7 @@ export default function SparqlSurfacePage() {
           <p>
             The query surface covers the algebra you would expect — basic graph
             patterns, FILTER, OPTIONAL, UNION, MINUS, BIND, VALUES, aggregates and
-            GROUP BY, sub-SELECT, and property paths — plus RDF-star quoted triples
+            GROUP BY, sub-SELECT, and property paths — plus RDF 1.2 triple terms
             and named-graph dataset views.
           </p>
         </>
@@ -48,8 +48,8 @@ export default function SparqlSurfacePage() {
           body: "Sequence, alternative, inverse, and the transitive *, +, ? operators.",
         },
         {
-          title: "RDF-star",
-          body: "Quoted triples as subjects/objects, queried with the << >> syntax.",
+          title: "RDF 1.2 triple terms",
+          body: "Triple terms in object position, written <<( s p o )>> and queried with the triple-term functions.",
         },
         {
           title: "Aggregates & subqueries",

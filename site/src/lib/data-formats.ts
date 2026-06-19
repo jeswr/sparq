@@ -11,7 +11,7 @@
 // unit-test directly under `node --test` (the Web Streams API is in Node ≥ 18).
 
 /** The engine format string each picker entry loads through. */
-export type DataFormat = "turtle" | "ntriples" | "nquads" | "trig";
+export type DataFormat = "turtle" | "ntriples" | "nquads" | "trig" | "jsonld";
 
 export interface FormatSample {
   /** Engine format string for `Store.load` / `Store.loadDataset`. */
@@ -70,7 +70,34 @@ ex:social {
 }
 `;
 
-/** The four text formats, each with a live sample the picker seeds the textarea with. */
+// [OPUS-4.8] sq-ixc3.1 — JSON-LD: the same Alice/Bob graph as a `@context`-abbreviated node
+// array. Engine-side JSON-LD parsing is the site wasm bundle's opt-in `jsonld` feature
+// (oxjsonld). Compact-IRI keys (`foaf:name`) resolve via the `@context`, `@type` is the rdf:type
+// shorthand, and `@id` carries the node IRI — the linked-data structure the `@…`-keyword
+// highlighting makes legible.
+const JSONLD_SAMPLE = `{
+  "@context": {
+    "ex": "http://example.org/",
+    "foaf": "http://xmlns.com/foaf/0.1/",
+    "knows": { "@id": "foaf:knows", "@type": "@id" }
+  },
+  "@graph": [
+    {
+      "@id": "ex:alice",
+      "@type": "foaf:Person",
+      "foaf:name": "Alice",
+      "knows": "ex:bob"
+    },
+    {
+      "@id": "ex:bob",
+      "@type": "foaf:Person",
+      "foaf:name": { "@value": "Bob", "@language": "en" }
+    }
+  ]
+}
+`;
+
+/** The five RDF formats, each with a live sample the picker seeds the textarea with. */
 export const FORMAT_SAMPLES: FormatSample[] = [
   {
     format: "turtle",
@@ -100,10 +127,19 @@ export const FORMAT_SAMPLES: FormatSample[] = [
     blurb: "Turtle plus { … } named-graph blocks.",
     sample: TRIG_SAMPLE,
   },
+  {
+    format: "jsonld",
+    label: "JSON-LD",
+    ext: ".jsonld",
+    blurb: "JSON for linked data — `@context`-mapped IRIs, `@id`, `@type`, `@graph`.",
+    sample: JSONLD_SAMPLE,
+  },
 ];
 
-/** Whether a format carries named graphs (so the REPL must use `loadDataset`). */
-const DATASET_FORMATS = new Set<DataFormat>(["nquads", "trig"]);
+// [OPUS-4.8] sq-ixc3.1: JSON-LD can carry named graphs (`@graph` under an outer `@id`), so it
+// joins nquads/trig as a dataset format routed through `loadDataset` (mirrors repl-dataset.ts).
+/** Whether a format carries named graphs (so the demo must use `loadDataset`). */
+const DATASET_FORMATS = new Set<DataFormat>(["nquads", "trig", "jsonld"]);
 
 /** True for the quad-bearing formats (`nquads` / `trig`). */
 export function isDatasetFormat(format: DataFormat): boolean {
