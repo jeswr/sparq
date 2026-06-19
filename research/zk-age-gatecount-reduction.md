@@ -215,6 +215,39 @@ Two curve-preserving / curve-changing levers:
   and challenge-reduction binds — A9 in §3.4 — all stay), so it does **not** touch
   the soundness-enforcing equalities, only the coordinate system. Plausibly 3–5× on
   the scalar-mul body — **must be measured**.
+
+  **[OPUS-4.8] sq-hb75 MEASURED RESULT — REJECTED (a no-win, not the projected 3–5×
+  win).** Implemented and measured on this box (`bb gates -s ultra_honk`,
+  `circuit_size`; toolchain `nargo 1.0.0-beta.21` / `bb 5.0.0-nightly.20260324`):
+  rewriting `point_add`/`scalar_mul` into extended twisted-Edwards `(X,Y,T,Z)`
+  coordinates (HWCD-2008 `add-2008-hwcd`, one deferred `1/Z` normalisation per
+  scalar-mul) **REGRESSED** every affected member, it did not reduce them:
+
+  | Member | affine baseline | extended (unified add) | extended (+ dedicated `dbl-2008-hwcd`) |
+  | --- | ---: | ---: | ---: |
+  | `hidden_issuer_d4` | **16,932** | 21,433 (+26.6%) | 20,433 (+20.7%) |
+  | `holder_pok` | **10,334** | 12,582 (+21.8%) | 12,082 (+16.9%) |
+  | `holder_set_d4` | **10,650** | 12,898 (+21.1%) | 12,398 (+16.4%) |
+
+  All 81 `compose_core` in-circuit `nargo test` cases (the REAL-signature
+  `schnorr_verify` / `holder_pok` accept vectors + the tamper/forge/off-curve/
+  identity reject vectors) passed in BOTH the affine and extended forms — so the
+  rewrite was algebraically equivalent and every A9 bind survived; it simply costs
+  MORE gates. **Root cause** (`bb gates --include_gates_per_opcode`, `holder_pok`):
+  the affine form compiles to 6,770 ACIR opcodes of which **1,003 cost ZERO backend
+  gates** — a Field division `q = a/b` on UltraHonk/Barretenberg lowers to a
+  witnessed quotient with a single `q*b == a` constraint that the optimiser fuses
+  into its consumer for free. The extended form replaces those near-free divisions
+  with ~1,750 extra BILLED Field multiplications (the 4th coordinate `T` propagation
+  + the `E·F, G·H, E·H, F·G` products), none of which fold away (7,771 opcodes,
+  7,261 of them one-gate). The textbook "~2000 expensive inversions → 1" premise is
+  **false on this backend**: affine division here is ~1 native gate, so there is no
+  inversion cost to defer. This is the noir-optimisation thesis (PR #37 / the
+  `shr_sticky` spike) recurring — intuition misfires; the measured number governs.
+  Per the bead's gate, the circuit change was reverted (no `.nr` change shipped);
+  the snapshot is unchanged. **Do not re-run this spike.** A future win on these
+  members, if any, would come from lever (b) (the audit-gated Grumpkin re-key to the
+  native `multi_scalar_mul` black-box), not from a coordinate-system change.
 - **(b) Re-key issuer signatures to Grumpkin** so Noir's native
   `multi_scalar_mul`/`embedded_curve_add` black-boxes apply (~10× on the scalar-mul).
   **Blocked as a drop-in**: `sig.rs` signs over **Baby-JubJub**, and those black-boxes
@@ -369,7 +402,14 @@ captured as beads, children of the ZK epic **sq-1s2**, linking this record:
   (sq-qhy4). Expected member ~3,200 gates (estimate; must be measured).
 - **sq-hb75** — rewrite `issuer.nr` `point_add`/`scalar_mul` in projective/extended
   TE coordinates (one normalisation per scalar-mul); re-measure. Curve-preserving
-  (keeps all A9 binds); the issuer/holder members' ~4k path.
+  (keeps all A9 binds). **[OPUS-4.8] DONE / measured / REJECTED:** implemented and
+  measured (see §3.3 lever (a) for the numbers); the extended-coordinate rewrite was
+  algebraically equivalent (all 81 in-circuit oracle tests passed in both forms) but
+  **regressed** every member by +16–27% on `bb gates`, not the projected 3–5× win —
+  affine Field division is ~1 native gate on this UltraHonk backend, so there is no
+  inversion cost to defer. The circuit change was reverted (no `.nr` change shipped,
+  snapshot unchanged). Not the issuer/holder members' path; that is lever (b), the
+  audit-gated Grumpkin re-key.
 
 ## 5. Standing measurement warning
 
