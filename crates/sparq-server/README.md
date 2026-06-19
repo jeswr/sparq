@@ -96,13 +96,8 @@ distributed/sharded writer is an **explicit Phase-2 non-goal**; the external-top
 ## Durable persistence (`--persist DIR`)
 
 `--persist <DIR>` makes the on-disk index the durable source of truth (QLever's `--persist-updates`):
-every update is WAL-fsync'd **before the `204` ack**, so a restart replays the WAL with no rebuild.
-A rejected update is never persisted; a durable-write failure refuses the write with a **retryable
-`503`** (never acked, writer stays alive — fail-closed). The persisted delta is the resolved acked
-value, so non-deterministic updates (`NOW()`/`RAND()`/`LOAD`) persist exactly what the client saw.
-WAL compaction (`POST /admin/compact` or offline `sparq-cli compact`) physically purges deleted
-bytes — incl. orphaned literal values — for erasure-completeness, but **cannot** reach bytes copied
-off-box (snapshots, backups — operator's responsibility). See the SKILL for the compaction details.
+every update is WAL-fsync'd **before the `204` ack** (restart replays the WAL, no rebuild); a rejected
+update is never persisted, a durable-write failure refuses with a **retryable `503`** (fail-closed), and WAL compaction (`POST /admin/compact` / `sparq-cli compact`) purges deleted bytes for erasure-completeness but **cannot** reach off-box copies (snapshots/backups) — see the SKILL.
 
 ## 📚 Learn more
 
