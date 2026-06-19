@@ -1,144 +1,86 @@
+<!-- [OPUS-4.8] sq-inzv: full-template README — the published sparq-rdf Python bindings. -->
 # sparq (Python bindings)
-
-> **PyPI distribution `sparq-rdf`, import name `sparq`.** Install with
-> `pip install sparq-rdf`, then `import sparq` in your code. The distribution and
-> import names differ because the bare `sparq` name is taken on PyPI by an unrelated
-> package; the importable module is unaffected.
 
 Python bindings for the [sparq](https://github.com/jeswr/sparq) RDF + SPARQL engine:
 a dictionary-encoded triplestore with six permutation indexes, a SPARQL 1.1 query
 engine (SELECT / ASK / CONSTRUCT / DESCRIBE), SPARQL Update over the full dataset
 (named graphs included), opt-in RDFS / OWL-RL / Notation3 reasoning with OWL
-inconsistency reporting, and opt-in BM25 full-text search (`sparq-text`'s
-`text:` magic predicates) — compiled to a native extension module with
-[pyo3](https://pyo3.rs) and packaged with [maturin](https://www.maturin.rs)
+inconsistency reporting, and opt-in BM25 full-text search — compiled to a native
+extension with [pyo3](https://pyo3.rs) and packaged with [maturin](https://www.maturin.rs)
 (abi3: one wheel per platform covers CPython ≥ 3.9).
 
-## Install (development)
+> Distributed via PyPI, not crates.io (`publish = false`). It ships to **PyPI as the
+> distribution `sparq-rdf`** (`pip install sparq-rdf`), with **import name `sparq`**
+> (`import sparq`) — the bare `sparq` PyPI name is taken by an unrelated package; the
+> importable module is unaffected.
+
+## 🚀 Quickstart
 
 ```sh
-python3 -m venv .venv-py && . .venv-py/bin/activate
-pip install maturin pytest
-cd crates/sparq-py
-maturin develop            # debug build into the venv
-pytest tests               # run the test suite
+pip install sparq-rdf      # then: import sparq
 ```
-
-Release wheels: `maturin build --profile python-release` (release optimisation with
-unwinding panics — the workspace's default `release` profile is `panic = "abort"`,
-which would turn any Rust panic into a hard interpreter abort).
-
-## Usage
 
 ```python
 import sparq
 
-# Load from a string of RDF data, or from a file path (str or pathlib.Path).
 g = sparq.Graph.load("""
     @prefix ex: <http://ex/> .
     ex:alice ex:knows ex:bob ; ex:age 30 .
     ex:bob   ex:age 25 .
-""")                                  # format defaults to "turtle"
-g = sparq.Graph.load("data.nt")       # format inferred from the extension
-len(g)                                # number of triples
+""")                                   # format defaults to "turtle"
+len(g)                                 # number of triples
 
 # SELECT -> QueryResult: .vars + .rows (list of {var: Term} dicts).
 res = g.query("PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a } ORDER BY ?a")
-res.vars                              # ['s', 'a']
 for row in res:
-    print(row["s"].value, row["a"].value)
-# Term has .kind ("uri" | "literal" | "bnode"), .value, .language, .datatype,
-# value-based __eq__/__hash__, and an N-Triples-ish __repr__.
+    print(row["s"].value, row["a"].value)   # Term: .kind, .value, .language, .datatype
 
-# Unbound variables (e.g. from OPTIONAL) are simply absent from the row dict.
-
-# The fast path: SPARQL 1.1 JSON results, serialised straight from the dictionary.
-g.query_json("SELECT * WHERE { ?s ?p ?o }")   # -> str
-
-# ASK (native: evaluation early-exits at the first solution).
+g.query_json("SELECT * WHERE { ?s ?p ?o }")  # fast path: SPARQL 1.1 JSON str
 g.ask("PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }")   # -> True
-
-# CONSTRUCT / DESCRIBE -> list of (subject, predicate, object) Term triples.
-for s, p, o in g.construct(
-    "PREFIX ex: <http://ex/> CONSTRUCT { ?s a ex:Person } WHERE { ?s ex:age ?a }"
-):
-    print(s.value, p.value, o.value)
-g.describe("DESCRIBE <http://ex/alice>")  # concise bounded description (CBD)
-
-# SPARQL Update, applied in place (INSERT/DELETE DATA, DELETE/INSERT ... WHERE,
-# CLEAR/DROP/CREATE/ADD/COPY/MOVE). Named graphs are fully supported: GRAPH-scoped
-# data and templates, USING (NAMED), and the graph-management operations.
-g.update('INSERT DATA { <http://ex/carol> <http://ex/age> 35 }')
-g.update('INSERT DATA { GRAPH <http://ex/g1> { <http://ex/a> <http://ex/p> <http://ex/b> } }')
-g.ask('ASK { GRAPH <http://ex/g1> { ?s ?p ?o } }')                  # -> True
-
-# Opt-in reasoning: materialize the RDFS or OWL-RL closure in place.
-added = g.reason("rdfs")              # returns the number of entailed triples added
-g.reason("owl")                       # OWL 2 RL subset (includes RDFS)
-g.inconsistencies()                   # OWL 2 RL clash report: list of descriptions
-                                      # (run reason("owl") first for entailed clashes)
-
-# Notation3 reasoning: load rules + facts from one N3 document ...
-g2 = sparq.Graph.load_n3("""
-    @prefix ex: <http://ex/> .
-    ex:socrates a ex:Man .
-    { ?x a ex:Man } => { ?x a ex:Mortal } .
-""")
-g2.ask("PREFIX ex: <http://ex/> ASK { ex:socrates a ex:Mortal }")   # True
-
-# ... or apply caller-supplied N3 rules to an already-loaded graph, in place:
-g3 = sparq.Graph.load("@prefix ex: <http://ex/> . ex:plato a ex:Man .")
-g3.reason_n3_with("@prefix ex: <http://ex/> . { ?x a ex:Man } => { ?x a ex:Mortal } .")
-g3.ask("PREFIX ex: <http://ex/> ASK { ex:plato a ex:Mortal }")      # True
-
-# Full-text search (BM25 over the default graph's string literals). The index
-# is built lazily on first use, cached, and invalidated by update()/reason()/
-# reason_n3_with(); build_text_index() builds it eagerly, drop_text_index()
-# frees it (the next call lazily rebuilds).
-g.text_search("ali*")                 # ranked [(Term, score), ...]; AND of tokens,
-g.text_search("alice bob", any=True)  # ... any=True for OR, limit=n for top-n
-g.query_text("""
-    PREFIX text: <http://sparq.dev/text#>
-    SELECT ?s ?score WHERE {
-        ?s ?p ?lit . ?lit text:matches "ali*" . ?lit text:score ?score
-    } ORDER BY DESC(?score)
-""")                                  # text: magic predicates inside plain SPARQL
-
-# A cheap, logically-independent copy (Arc-shared structural snapshot: O(pending
-# delta), not O(triples)). The original and the copy mutate separately.
-c = g.copy()
-c.update('INSERT DATA { <http://ex/dave> <http://ex/age> 40 }')   # only c changes
-
-# Persist / reopen with memory-mapped indexes (out-of-core path).
-g.save("./mydb")
-g4 = sparq.Graph.open("./mydb")
 ```
 
-### Notes & limits
+## ✨ Features
 
-- `Graph.load` treats a `str` as a **file path** only when a file with that name
-  exists (and the string has no newline); otherwise it parses it as RDF content.
-  `os.PathLike` (e.g. `pathlib.Path`) is always a file path.
-- All four query forms are native: SELECT (`query` / `query_json`), ASK (`ask`),
-  CONSTRUCT (`construct`), DESCRIBE (`describe`, concise-bounded-description
-  semantics). Named graphs loaded from N-Quads/TriG or created by updates are
-  queryable via `GRAPH` and survive `update()` / `reason()` / `reason_n3_with()`.
-- `update()` / `reason()` / `reason_n3_with()` rebuild the immutable store (O(n)
-  per call). Reasoning materializes over the **default graph** (named graphs are
-  carried across the rebuild untouched). `len(g)` counts default-graph triples.
-- `reason_n3_with(rules)` runs the rules document over the graph's triples. The
-  graph's blank nodes are renamed under a reserved `sparqg` prefix first, so a
-  blank-node label in the rules can NOT alias an existing data node (rule-local
-  blanks stay rule-local); RDF-star triple terms have no N3 form and are
+- **All four query forms are native.** SELECT (`query` / `query_json`), ASK (`ask`),
+  CONSTRUCT (`construct` → `(s, p, o)` Term triples), DESCRIBE (`describe`,
+  concise-bounded-description semantics). Named graphs from N-Quads/TriG or updates
+  are queryable via `GRAPH`.
+- **SPARQL Update, applied in place** — INSERT/DELETE DATA, DELETE/INSERT … WHERE,
+  CLEAR/DROP/CREATE/ADD/COPY/MOVE. Named graphs are fully supported (GRAPH-scoped
+  data and templates, USING (NAMED), graph management). `update()` / `reason()` /
+  `reason_n3_with()` rebuild the immutable store (O(n) per call).
+- **Opt-in reasoning** — `g.reason("rdfs")` / `g.reason("owl")` materialize the
+  closure over the **default graph** in place (named graphs carried across
+  untouched) and return the entailed-triple count; `g.inconsistencies()` reports the
+  OWL 2 RL clash list. Notation3 rules load via `sparq.Graph.load_n3(...)` or apply
+  to an existing graph with `g.reason_n3_with(rules)` — the graph's blank nodes are
+  renamed under a reserved `sparqg` prefix first, so a rule's blank-node label
+  cannot alias an existing data node; RDF-star triple terms have no N3 form and are
   rejected there.
-- Full-text (`text_search` / `query_text`) indexes the **default graph**'s plain
-  and language-tagged string literals only (named graphs keep their own
-  dictionaries and are not indexed); `text:matches` is an AND of tokens,
-  `text:matchesAny` an OR, `*`-suffixed tokens match as prefixes, and
-  `text:score` binds the BM25 score. Hits are frozen per call: the cached index
-  is invalidated by every mutating call and lazily rebuilt.
-- `copy()` returns a logically-independent graph over the core's Arc-shared
-  structural snapshot (O(pending delta), not O(triples)); mutating either the
-  original or the copy leaves the other unchanged. Named graphs are copied; the
-  copy starts with no full-text index and lazily rebuilds its own.
-- Long-running calls (load, query, update, reason, text search) release the GIL.
+- **Opt-in BM25 full-text search** — `g.text_search("ali*")` (ranked
+  `[(Term, score), …]`; `any=True` for OR, `limit=n` for top-n) and the `text:`
+  magic predicates inside plain SPARQL via `g.query_text(...)` (`text:matches` AND,
+  `text:matchesAny` OR, `*`-suffix prefixes, `text:score` binds BM25). The index
+  covers the **default graph's** string literals, is built lazily, cached, and
+  invalidated by every mutating call.
+- **Cheap structural copy + persistence.** `g.copy()` is a logically-independent
+  Arc-shared snapshot (O(pending delta), not O(triples)); the original and copy
+  mutate separately. `g.save("./mydb")` / `sparq.Graph.open("./mydb")` persist and
+  reopen with memory-mapped indexes (out-of-core path).
+- **GIL-friendly.** Long-running calls (load, query, update, reason, text search)
+  release the GIL. `Graph.load` treats a `str` as a **file path** only when a file
+  with that name exists and the string has no newline; `os.PathLike` is always a
+  path; otherwise the string is parsed as RDF content.
+
+## 📚 Learn more
+
+- **How-to** — [`skills/python/SKILL.md`](../../skills/python/SKILL.md).
+- **Develop** — `maturin develop` (debug build into the venv) + `pytest tests`.
+  Release wheels: `maturin build --profile python-release` (release with unwinding
+  panics — the workspace default `release` profile is `panic = "abort"`, which would
+  turn a Rust panic into a hard interpreter abort).
+- **Contribute** — [`AGENTS.md`](../../AGENTS.md).
+
+## License
+
+[MIT](../../LICENSE).
