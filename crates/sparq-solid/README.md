@@ -39,18 +39,16 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 
 - **WAC + ACP** — Web Access Control (`.acl`) and Access Control Policy (`.acr`): inheritance, agent
   classes, groups, `allOf`/`anyOf`/`noneOf`, the ACP matcher's three-dimensional `(agent, client,
-  issuer)` principal, `acp:CreatorAgent`/`acp:OwnerAgent`, and normative deny-overrides. Full
-  support matrix in the design doc.
+  issuer)` principal, `acp:CreatorAgent`/`acp:OwnerAgent`, normative deny-overrides (matrix in the design doc).
 - **Trusted creator/owner provenance** — `acp:CreatorAgent`/`acp:OwnerAgent` resolve only against
   per-resource WebIDs the storage layer supplies through the trusted `AccessProvenance` channel,
   **never** graph content. The loader hard-rejects any control-document triple in the
-  derivation-internal `solidx:` namespace, so a writer cannot embed `solidx:creator`/
-  `solidx:appliesToResource` to self-grant. Each grant is resource-scoped; with no provenance, no
-  such matcher grants (fail-closed).
+  derivation-internal `solidx:` namespace, so a writer cannot embed `solidx:creator` to self-grant.
+  Each grant is resource-scoped; with no provenance, no such matcher grants (fail-closed).
 - **Triples-native + zero-copy enforcement** — pods, ACL/ACR docs, and the auth view are all
   ordinary named graphs ("who can read G?" is one SPARQL pattern); the default path evaluates
   through the engine's zero-copy dataset view, with a v1 `FROM NAMED` rewrite kept as a portability
-  path for any standard SPARQL 1.1 engine.
+  path for standard SPARQL 1.1 engines.
 - **Write-path gating** — `update_as` / `update_as_acp` check every graph an update could mutate
   before applying, and auto-re-materialize on `.acl`/`.acr` writes.
 - **ODRL bridge (opt-in `odrl-bridge`, research-track — not a production cutover)** — runs the
@@ -90,28 +88,30 @@ so refresh can't widen or drop them.
   engine against the [WAC](https://solidproject.org/TR/wac) / [ACP](https://solidproject.org/TR/acp)
   specs at the *library* level (data-declared `(agent, client, mode, resource) → allow|deny`
   scenarios). **Scope (honest):** the realistic library-level oracle, **not** the Solid
-  CTH-over-HTTP (this crate has no HTTP surface); a JS-reference differential oracle is
-  **research-open**, not built here (`research/sparq-solid-scope.md` §4).
-- **Security posture — fail-closed.** Absence of a grant makes a graph **invisible** and
-  indistinguishable from an absent one. The reasoner is fed only ACL/ACR + structural facts —
-  **never pod content** — so no writable document can grant itself access; the reserved `urn:sparq:`
-  namespace is rejected on input and forged `<urn:sparq:auth>` graphs are stripped at load.
+  CTH-over-HTTP (no HTTP surface here) — see `research/sparq-solid-scope.md` §4.
+- **In-repo differential oracle** (`tests/differential_oracle.rs`) runs the shared corpus through
+  THREE deciders — the engine (N3 rules), an **independent procedural reference evaluator**
+  (`tests/reference/`, a *different paradigm*, no shared code) and the hand `Expect` table — and
+  asserts **zero divergence** (fail-closed). A correctness oracle, **not** a security audit.
+- **Security posture — fail-closed.** Absence of a grant makes a graph **invisible**. The reasoner
+  is fed only ACL/ACR + structural facts — **never pod content** — so no writable document can
+  grant itself access; the reserved `urn:sparq:` namespace is rejected on input and forged
+  `<urn:sparq:auth>` graphs are stripped at load.
 - **`ldp:contains` is PSS-written, not sparq-derived** — stored as opaque content, **never** derived
   from IRI structure, mutated on a write, or read into the reasoner. Containment *ancestry* is derived
-  structurally only to drive ACL inheritance; pinned by `tests/containment_view_ownership.rs`.
+  structurally only to drive ACL inheritance (pinned by `tests/containment_view_ownership.rs`).
 
 ## 📚 Learn more
 
 - **How-to** — [`skills/access-control/SKILL.md`](../../skills/access-control/SKILL.md) (public
-  API, WAC/ACP capability notes, conformance harnesses, the full ODRL-bridge mapping detail).
-- **Design + threat model + measured baseline** —
-  [`research/solid-access-control-design.md`](../../research/solid-access-control-design.md) (storage
-  model, support matrix, strata, security boundaries) and the scope decisions in
-  [`research/sparq-solid-scope.md`](../../research/sparq-solid-scope.md).
-- **API reference** — [docs.rs/sparq-solid](https://docs.rs/sparq-solid); runnable walk-through
+  API, WAC/ACP notes, conformance harnesses + the differential oracle, ODRL-bridge mapping detail).
+- **Design + threat model** —
+  [`research/solid-access-control-design.md`](../../research/solid-access-control-design.md) (model,
+  matrix, strata, boundaries) + scope [`research/sparq-solid-scope.md`](../../research/sparq-solid-scope.md).
+- **API reference** — [docs.rs/sparq-solid](https://docs.rs/sparq-solid); walk-through
   `cargo run -p sparq-solid --example quickstart --release`.
-- **Performance** — not baked into docs; the two query paths are measured side by side via
-  `cargo run -p sparq-solid --example bench --release` and on the
+- **Performance** — not baked into docs; the two query paths are measured via
+  `cargo run -p sparq-solid --example bench --release` + the
   [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md), [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 

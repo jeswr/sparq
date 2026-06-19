@@ -249,7 +249,9 @@ Public surface (`pub mod conformance`, re-exported from the crate root for the e
 - `AcpScenario` — `new(name)`, `.acr(AcrBuilder)` / `.nquads(&str)` (the corpus),
   `.expect(Expect)` / `.expect_all(iter)` (the decision table), `.run() ->
   Result<ScenarioReport, String>` (materializes + checks). `run_corpus(&[AcpScenario])` runs
-  a whole corpus.
+  a whole corpus. Read-only accessors `.name()`, `.nquads_str() -> &str` (the raw N-Quad
+  corpus the engine loads) and `.expects() -> &[Expect]` (the decision table) let a SECOND
+  consumer — the differential oracle — feed the IDENTICAL corpus to an independent decider.
 - `Expect` — one expected decision, built fluently: `Expect::agent(webid)` /
   `Expect::anonymous()` / `Expect::pair(agent, client)`, then `.read/.write/.append/.control(
   resource)`, then `.is(Decision::Allow | Decision::Deny)`.
@@ -293,10 +295,43 @@ ScenarioReport}`):
   `.expect_all(iter)`, `.run() -> Result<ScenarioReport, String>` (materializes via the free
   `AuthIndex` path + checks), and `.run_via_podstore()` (the same check through the full
   `PodStore` method form — proves the path a PSS integration uses). `run_corpus(&[WacScenario])`
-  runs a whole corpus.
+  runs a whole corpus. Read-only accessors `.name()`, `.nquads_str() -> &str` and `.expects()
+  -> &[Expect]` expose the raw corpus + decision table to the differential oracle (below).
 - The `Expect` builder, `Decision`, and `ScenarioReport` are the same shared types as the ACP
   harness — `Expect::agent(webid)` / `Expect::anonymous()` / `Expect::pair(agent, client)`,
   `.read/.write/.append/.control(resource)`, `.is(Decision::Allow | Deny)`.
+
+## Differential oracle — [OPUS-4.8] sq-t58w.7
+
+`crates/sparq-solid/tests/differential_oracle.rs` is a **three-way agreement check** that
+runs the shared parity corpus (`common::wac_corpus()` / `common::acp_corpus()`) through
+THREE deciders for every `(agent, client, mode, resource)` request and asserts they all
+agree:
+
+1. **the engine** — `materialize_{wac,acp}` + `AuthIndex::accessible` (the **N3-rules**
+   paradigm — `rules/*.n3` run by `sparq-reason`);
+2. **an independent reference evaluator** — `crates/sparq-solid/tests/reference/{wac,acp}.rs`,
+   a from-scratch **PROCEDURAL** reading of the WAC/ACP spec over a hand-parsed model. Its
+   whole value is being a **different paradigm**: it shares **no** code with `materialize.rs`
+   / `loader.rs` / `rules/*.n3`, and parses the corpus with its own tiny N-Quad reader (not
+   `Graph::load_dataset`), so a shared bug cannot hide in both deciders;
+3. **the hand `Expect` table** — the human-authored expected decision in each scenario.
+
+A **divergence** is recorded whenever any two disagree; an unclassifiable/erroring request
+(failed load/materialize, or a reference parse error) counts as a divergence — **fail-closed**.
+The test asserts `divergences == 0` and prints, in the SHACL/geo runner shape (so a CI ratchet
+can grep it):
+
+```text
+WAC differential pairs <N> / divergences 0 (floor 0)
+ACP differential pairs <N> / divergences 0 (floor 0)
+```
+
+It is a **correctness oracle over the parity corpus, not a security audit**, and the reference
+evaluator implements exactly the constructs the corpus exercises (anything it does not
+recognise fails closed → a divergence). Pure in-crate Rust — no JS toolchain, no network, no
+clock, no Docker. A JS-reference differential twin (vs. `@solidlab/policy-engine` /
+`@solid/acl-check`) is a separate research-open follow-up (`sq-t58w.9`), NOT built here.
 
 ## Security posture — fail-closed
 
