@@ -5851,6 +5851,17 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
         }
         Ordering::Equal
     };
+    // ORDER BY tie handling [OPUS-4.8]: `cmp` returns `Ordering::Equal` only for rows that
+    // tie on *every* ORDER BY key (no secondary tie-breaker), and SPARQL leaves the relative
+    // order of ORDER BY-tied solutions unspecified, so any tie order is conformant. We still
+    // keep it *deterministic at a fixed thread count*: both branches use a STABLE sort
+    // (`rayon::par_sort_by` is a stable parallel merge sort, same guarantee as `slice::sort_by`),
+    // so ties retain their `b.rows` (scan) input order rather than being shuffled by the
+    // parallel partitioning. The only residual cross-thread-count variation is that `b.rows`
+    // itself is in dict-id (scan) order, which is thread-count-dependent — that is the
+    // umbrella dict-id-order property (research/dict-id-order-determinism-audit.md), not a
+    // tie-break defect in this sort. So no total-order tie-breaker is added: it would cost a
+    // term materialisation per tied row for an order the spec does not constrain.
     #[cfg(feature = "parallel")]
     if keyed.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
