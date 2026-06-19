@@ -358,8 +358,42 @@ jobs:
           # Per-leg cache key so each crate+feature combination keeps its own warm
           # target dir (the feature set changes the compiled artifacts).
           shared-key: feature-matrix-${{ matrix.crate }}-${{ matrix.features }}
+      - name: Fetch dependencies (retry transient crates.io fetch)
+        # [OPUS-4.8] sq-hhxc: these `opt-in <crate>` legs were failing ~8s in with exit 101
+        # — i.e. in EARLY SETUP (registry resolve/fetch), BEFORE any real compile (8s is far
+        # too short to build) — on PRs that don't touch the crate (#721/#724). The transient
+        # crates.io fetch that `cargo build` does up front (before compiling) is the flake.
+        # Pull it out into a dedicated, bounded shell retry so the registry hiccup is
+        # absorbed here and the subsequent build resolves from the warm cache. Fails only if
+        # all 3 attempts fail (a genuine outage). No new GitHub Action dependency.
+        run: |
+          set -euo pipefail
+          n=0
+          until cargo fetch --locked; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "::error::cargo fetch failed after $n attempts (registry outage?)" >&2
+              exit 1
+            fi
+            echo "cargo fetch attempt $n failed; retrying in 10s..." >&2
+            sleep 10
+          done
       - name: Build (-p ${{ matrix.crate }} --features ${{ matrix.features }})
-        run: cargo build -p ${{ matrix.crate }} --features ${{ matrix.features }}
+        # [OPUS-4.8] sq-hhxc: bounded shell retry as a safety net — with the cache warmed by
+        # the fetch step above this normally compiles offline, but retry guards any residual
+        # transient network touch during resolution (fail only if all attempts fail).
+        run: |
+          set -euo pipefail
+          n=0
+          until cargo build -p ${{ matrix.crate }} --features ${{ matrix.features }}; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "::error::cargo build failed after $n attempts" >&2
+              exit 1
+            fi
+            echo "cargo build attempt $n failed; retrying in 10s..." >&2
+            sleep 10
+          done
       - name: Test (-p ${{ matrix.crate }} --features ${{ matrix.features }})
         if: matrix.test
         run: cargo test -p ${{ matrix.crate }} --features ${{ matrix.features }}
