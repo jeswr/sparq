@@ -54,6 +54,8 @@ import {
 import { SparqlEditor } from "@/components/sparql-editor";
 // [OPUS-4.8] sq-2mke — endpoint mode: the Connect panel + the SPARQL 1.1 Protocol client.
 import { ConnectPanel } from "@/components/connect-panel";
+// [OPUS-4.8] sq-9ij6 — endpoint mode: the live subscriptions view (SSE result deltas).
+import { SubscriptionsView } from "@/components/subscriptions-view";
 import { type EndpointConfig, runEndpointQuery } from "@sparq/client";
 
 // [OPUS-4.8] sq-vfbm — the REPL now dispatches across the whole lean-bundle query
@@ -496,6 +498,12 @@ export function Repl() {
         </div>
 
         <ResultPanel state={state} />
+
+        {/* [OPUS-4.8] sq-9ij6 — the live subscriptions view. Only meaningful in endpoint
+            mode (it streams from a real, mutating server's /subscriptions/sse), so it
+            renders an honest "switch on endpoint mode" hint otherwise. It reuses the SAME
+            endpoint config + bearer/connection-safety posture the Connect panel established. */}
+        <SubscriptionsView config={endpointConfig} active={endpointActive} />
       </CardContent>
 
       <DatasetViewer

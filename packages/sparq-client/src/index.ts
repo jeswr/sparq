@@ -417,6 +417,33 @@ export {
   wsSubprotocols,
 } from "./endpoint.js";
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-9ij6 — live subscriptions: the SSE transport of the server's
+// `/subscriptions` surface. Subscribe a SELECT and stream the result DELTAS as the dataset
+// mutates, reusing the SAME `EndpointConfig` + bearer posture as the endpoint query client
+// (the token is sent only in the `Authorization: Bearer` header the server's SSE read gate
+// validates). Consumes the existing `sparq-server` subscriptions API; bypasses no gate.
+// ---------------------------------------------------------------------------
+
+export {
+  type SubscribedAck,
+  type SubscriptionNotification,
+  type SubscriptionError,
+  type SubscriptionEvent,
+  type SubscriptionHandlers,
+  type SubscriptionHandle,
+  type LiveResultSet,
+  applyNotification,
+  buildSubscriptionUrl,
+  emptyLiveResultSet,
+  frameData,
+  liveResults,
+  openSubscription,
+  parseSubscriptionData,
+  rowKey,
+  splitSseFrames,
+} from "./subscriptions.js";
+
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {
   if (!t) return "";

@@ -31,6 +31,19 @@ re-exports the surface from here; the (proposed) Tauri 2 GUI consumes the same p
   `bearer.<token>` subprotocol the server's WS handshake accepts (browsers cannot set an
   `Authorization` header on a WS upgrade). This client **consumes** the existing server API and
   **never bypasses a server gate** — it claims no security the server does not provide.
+- **Live subscriptions** (`src/subscriptions.ts`, `sq-9ij6`): the SSE transport of the server's
+  `/subscriptions` surface — the companion to endpoint mode for the LIVE case.
+  `openSubscription(config, query, handlers)` subscribes a SELECT to `/subscriptions/sse` over
+  `fetch` + a streaming `ReadableStream` reader (NOT native `EventSource`, which cannot set an
+  `Authorization` header — so the SAME bearer token a query uses reaches an authenticated
+  server) and drives `onOpen` / `onEvent` / `onClose(error?)`. `buildSubscriptionUrl` derives the
+  SSE URL from the same `EndpointConfig`; `parseSubscriptionData` parses the SEPA envelopes
+  (`subscribed` / `notification` / `error`); `applyNotification` reduces the streamed
+  added/removed diffs onto a `LiveResultSet` keyed by the server's canonical row key (`rowKey`),
+  and `liveResults` shapes it back into a `SparqlResults` document so the SAME `extractTable`
+  renders a live row exactly like a queried one. It reuses endpoint mode's `EndpointConfig` +
+  bearer posture verbatim, runs the SAME `connectionSafetyWarnings` classifier, and **bypasses no
+  server gate** (the SSE read surface is gated by `--auth-token-read` exactly as `/sparql` GET).
 
 ## Endpoint-mode safety posture (honest, never an overclaim)
 
