@@ -1,0 +1,35 @@
+# [OPUS-4.8] sq-h0tr — mdBook guide scaffold for the sparq docs site.
+#
+# This is the SCAFFOLD only (book.toml + SUMMARY.md + a few real content pages).
+# Single-source {{#include}} wiring of guide pages from README/SKILL.md is a
+# FOLLOW-UP bead (sq-im8u); tested-example {{#rustdoc_include}} embedding is
+# sq-384j. The pages here are intentionally short, hand-written prose distilled
+# from the existing AGENTS.md/README/SKILL content (not lorem), so the tree is
+# real and renders, and the include-wiring bead can replace the prose in place.
+#
+# Reproducible build (CI pins the exact mdbook version — see .github/workflows/docs.yml):
+#   mdbook build book      # → book/book/ (the rendered site)
+#   mdbook test  book      # compile-checks any ```rust fences
+
+[book]
+title = "sparq — guide"
+description = "Guide to sparq, a SOTA RDF triplestore and SPARQL 1.1/1.2 engine in Rust."
+authors = ["Jesse Wright"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+# mdBook EXITS 0 even on a broken {{#include}}/anchor (rust-lang/mdBook#1094), so
+# the CI workflow greps the build log for "[ERROR]" in addition to this flag.
+create-missing = false
+
+[output.html]
+# Pages will eventually serve this under /sparq/... (a sub-path of the GitHub
+# Pages base path). The exact mount point + the Pages-source cutover is deferred
+# to the publishing bead (sq-fymm / sq-w9sr) — see docs.yml header. git-repository
+# links keep working regardless of mount point.
+git-repository-url = "https://github.com/jeswr/sparq"
+edit-url-template = "https://github.com/jeswr/sparq/edit/main/book/{path}"
+default-theme = "rust"
+preferred-dark-theme = "ayu"
