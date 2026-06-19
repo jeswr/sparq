@@ -388,6 +388,35 @@ export {
   formatSparqlJson,
 } from "./results.js";
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-2mke — endpoint mode: the SPARQL 1.1 Protocol HTTP client.
+// The companion to the in-tab WASM `Store` above — run the SAME editor against any
+// running SPARQL 1.1 Protocol endpoint over `fetch`, with bearer-auth and the honest
+// connection-safety classifier. Consumes the existing `sparq-server` API; bypasses no
+// server gate; claims no security the server does not provide.
+// ---------------------------------------------------------------------------
+
+export {
+  type EndpointConfig,
+  type EndpointForm,
+  type EndpointResult,
+  type PreparedRequest,
+  type SafetyCode,
+  type SafetyLevel,
+  type SafetyWarning,
+  EndpointError,
+  SPARQL_GRAPH_NTRIPLES,
+  SPARQL_RESULTS_JSON,
+  buildSparqlRequest,
+  classifyEndpointForm,
+  connectionSafetyWarnings,
+  hasBlockingWarning,
+  isLoopbackHost,
+  parseEndpointUrl,
+  runEndpointQuery,
+  wsSubprotocols,
+} from "./endpoint.js";
+
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {
   if (!t) return "";

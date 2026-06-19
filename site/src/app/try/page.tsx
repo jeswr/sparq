@@ -5,7 +5,7 @@ import { Repl } from "@/components/repl";
 export const metadata: Metadata = {
   title: "Live SPARQL REPL",
   description:
-    "Run real SPARQL queries against a sample RDF graph using the sparq engine compiled to WebAssembly — live in your browser tab, nothing sent to a server.",
+    "Run real SPARQL queries with the sparq engine compiled to WebAssembly — live in your browser tab by default — or connect the same editor to a running sparq-server over the SPARQL 1.1 Protocol.",
 };
 
 export default function TryPage() {
@@ -15,13 +15,22 @@ export default function TryPage() {
         <h1 className="text-2xl font-semibold">Live SPARQL REPL</h1>
         <p className="measure text-muted-foreground">
           The shared engine component. Edit the query, pick an example, and run —
-          every query executes against the sample graph using the real sparq Rust
-          engine compiled to WebAssembly. The lean bundle ships the parser,
-          triplestore and SPARQL 1.1/1.2 engine: SELECT / ASK / CONSTRUCT / DESCRIBE
-          and SPARQL Update (INSERT / DELETE, mutating the in-tab store), over BGP,
-          FILTER, OPTIONAL, UNION, MINUS, BIND, VALUES, aggregates, property paths,
-          sub-SELECT and RDF-star. Switch to the EXPLAIN / ANALYZE mode to inspect
-          the query plan.
+          by default every query executes against the sample graph using the real sparq
+          Rust engine compiled to WebAssembly, entirely in your browser tab with nothing
+          sent to a server. The lean bundle ships the parser, triplestore and SPARQL
+          1.1/1.2 engine: SELECT / ASK / CONSTRUCT / DESCRIBE and SPARQL Update
+          (INSERT / DELETE, mutating the in-tab store), over BGP, FILTER, OPTIONAL, UNION,
+          MINUS, BIND, VALUES, aggregates, property paths, sub-SELECT and RDF-star. Switch
+          to the EXPLAIN / ANALYZE mode to inspect the query plan.
+        </p>
+        <p className="measure text-muted-foreground">
+          The <span className="font-medium text-foreground">Connect</span> panel runs the
+          same editor against any running sparq-server over the SPARQL 1.1 Protocol —
+          enter an endpoint URL and an optional bearer token. The token is sent only in the
+          HTTP <code className="font-mono text-[0.9em]">Authorization</code> header; the
+          panel surfaces honest connection-safety warnings (a token over plaintext to a
+          non-loopback host, a cross-origin request the server must opt in via CORS, a
+          SERVICE clause the server refuses by default) and never bypasses a server gate.
         </p>
       </header>
       <Repl />

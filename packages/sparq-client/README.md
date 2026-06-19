@@ -19,6 +19,34 @@ re-exports the surface from here; the (proposed) Tauri 2 GUI consumes the same p
   unchanged; a desktop GUI passes its own `tauri://` / `file://` origin).
 - The framework-agnostic query helpers: `matchQuads`, `countQuads`, `streamQueryRows`,
   `sparqShaclValidate`, `formatTerm`.
+- **Endpoint mode** (`src/endpoint.ts`, `sq-2mke`): the SPARQL 1.1 Protocol HTTP client —
+  the companion to the in-tab `WasmStore`. Run the SAME editor against any running
+  `sparq-server` (or any conformant endpoint) over `fetch`. `runEndpointQuery(config, sparql)`
+  classifies the form (`classifyEndpointForm`), builds the request (`buildSparqlRequest`: a
+  direct `application/sparql-query` POST for reads with per-form `Accept`, a direct
+  `application/sparql-update` POST for writes, bearer-auth in the `Authorization` header only),
+  and parses the response per form (SELECT/ASK JSON, CONSTRUCT/DESCRIBE N-Triples, a `204`
+  update ack). `connectionSafetyWarnings(config)` is the pure, honest connection-safety
+  classifier that drives the Connect-panel UX; `wsSubprotocols(token)` derives the
+  `bearer.<token>` subprotocol the server's WS handshake accepts (browsers cannot set an
+  `Authorization` header on a WS upgrade). This client **consumes** the existing server API and
+  **never bypasses a server gate** — it claims no security the server does not provide.
+
+## Endpoint-mode safety posture (honest, never an overclaim)
+
+`connectionSafetyWarnings` mirrors the real `sparq-server` posture (`crates/sparq-server/README.md`)
+and the browser's transport rules, as classified `SafetyWarning`s (each with a stable `code`):
+
+- `invalid-url` / `mixed-content` (**error**, hard block): not a valid http(s) URL; or an HTTPS
+  page cannot `fetch` a plaintext `http:` endpoint (the browser blocks it before any request).
+- `token-over-plaintext` / `non-loopback-no-tls` (**warning**): a bearer token — or the query and
+  results — sent over plaintext `http:` to a **non-loopback** host travel in cleartext. (A token
+  over **loopback** `http:` stays on the machine, so it is only an `info` note.) The server's
+  Bearer gate is one shared secret with no per-user identity.
+- `service-allowlist` / `cors-required` (**info**): a `SERVICE` clause is refused before any
+  socket unless the operator set the egress allowlist (off / default-DENY); and the server emits
+  **no CORS headers** by default, so a cross-origin browser fetch is blocked until an origin is
+  opted in (`--cors-allow-origin`).
 
 ## What's NOT in it (deliberately)
 
