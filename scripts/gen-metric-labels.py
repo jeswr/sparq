@@ -565,6 +565,63 @@ def build():
         "mode": "ratio", "unit": "ratio",
     }
 
+    # 13.6) SOLID WAC/ACP auth-view suite (sq-k0km). The ci-bench `solid` hook (bench/solid/run.sh)
+    # emits DETERMINISTIC STRUCTURAL counts — a pure function of the in-crate WAC + ACP fixtures
+    # (sparq_solid::fixture), byte-stable across machines (NOT wall-clock). These are the gate (the
+    # run.sh self-assertion vs bench/solid/expected.tsv) and the dashboard's Solid/access-control
+    # family card data. The `suite` lowercases to "solid", which the dashboard's `solid` FAMILY
+    # (familyOf) matches, so every metric routes to the Solid card. The metric STEMS here MUST match
+    # what scripts/ci-bench.sh emits so the gen-metric-labels --check drift gate stays green.
+    SOLID_DATASET = ("in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by "
+                     "sparq_solid::fixture::{wac_fixture, acp_fixture}")
+    SOLID_GATE = {
+        "solid_wac_named_graphs": "named graphs in the WAC fixture",
+        "solid_wac_quads": "total quads across the WAC fixture's named graphs",
+        "solid_wac_auth_triples": "triples in the materialised WAC auth view (materialize_wac)",
+        "solid_acp_auth_triples": "triples in the materialised ACP auth view (materialize_acp, 3 strata)",
+        "solid_alice_readable_graphs": "graphs visible to ALICE in Mode::Read (AuthIndex walk)",
+        "solid_full_dataset_rows": "rows of the title query over the FULL dataset (GRAPH ?g)",
+        "solid_authorized_rows": "rows of the title query restricted to alice's authorized subset",
+    }
+    for name, desc in SOLID_GATE.items():
+        labels[name] = {
+            "label": "Solid %s — WAC/ACP auth-view count" % name.replace("solid_", ""),
+            "suite": "Solid", "dataset": SOLID_DATASET,
+            "query": desc, "mode": "count", "unit": "count",
+        }
+
+    # 13.7) GenAI — sparq-nlq OFFLINE NL->SPARQL suite (sq-k0km). The ci-bench `nlq` hook
+    # (bench/nlq/run.sh) emits DETERMINISTIC counts at a PINNED N=2000 — a pure function of N + the
+    # synthetic typed schema (no external data, no network, offline fixed-completion stub LLM), so
+    # byte-stable across machines (NOT wall-clock). These are the gate (run.sh self-assertion vs
+    # bench/nlq/expected.tsv) and the dashboard's GenAI family card data. The `nlq` token / "NL→SPARQL"
+    # suite both route the metrics to the dashboard's `genai` FAMILY (familyOf). HONESTY: offline
+    # deterministic core only — LIVE exec-accuracy on a canonical host is a SEPARATE concern (sq-qidj/
+    # sq-g0lw, EC2-blocked) and the sibling sim/introspect GenAI suites need the gitignored olympics.nt
+    # (NOT in CI); both are EC2/dataset-gathered, not in this feed.
+    NLQ_DATASET = ("synthetic typed graph generated in-example at N=2000 entities "
+                   "(rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, "
+                   "offline stub LLM (no `live` feature, no network)")
+    labels["nlq_synth_triples"] = {
+        "label": "NL→SPARQL synthetic graph — triple count",
+        "suite": "NL→SPARQL", "dataset": NLQ_DATASET,
+        "query": "triples in the synthetic typed graph (3 per entity)", "mode": "count", "unit": "count"}
+    labels["nlq_prompt_chars"] = {
+        "label": "NL→SPARQL grounded prompt — char length (token-budget proxy)",
+        "suite": "NL→SPARQL", "dataset": NLQ_DATASET,
+        "query": "length of the schema-grounded prompt prompt_for(question) builds; smaller = leaner",
+        "mode": "count", "unit": "chars"}
+    labels["nlq_ask_result_rows"] = {
+        "label": "NL→SPARQL ask loop — result rows",
+        "suite": "NL→SPARQL", "dataset": NLQ_DATASET,
+        "query": "rows the full ask loop returns (GROUP BY ?type -> one row per type)",
+        "mode": "count", "unit": "count"}
+    labels["nlq_ask_repairs"] = {
+        "label": "NL→SPARQL ask loop — repair rounds",
+        "suite": "NL→SPARQL", "dataset": NLQ_DATASET,
+        "query": "repair rounds the ask loop needed (0 = stub's first SPARQL was valid + executable)",
+        "mode": "count", "unit": "count"}
+
     # 14) ZERO-KNOWLEDGE family (sq dashboard-data-feed; ci-bench ZK hooks). EVERY ZK metric
     # name leads with the token `zk` so the dashboard's Zero-knowledge family prefix routing
     # buckets it. Three feeds, each grounded in an EXISTING bench (bench/benchmarks.toml zk-*):

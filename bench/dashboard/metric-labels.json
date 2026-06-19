@@ -969,6 +969,38 @@
       "regime": "extensional",
       "unit": "µs"
     },
+    "nlq_ask_repairs": {
+      "label": "NL→SPARQL ask loop — repair rounds",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "repair rounds the ask loop needed (0 = stub's first SPARQL was valid + executable)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "nlq_ask_result_rows": {
+      "label": "NL→SPARQL ask loop — result rows",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "rows the full ask loop returns (GROUP BY ?type -> one row per type)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "nlq_prompt_chars": {
+      "label": "NL→SPARQL grounded prompt — char length (token-budget proxy)",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "length of the schema-grounded prompt prompt_for(question) builds; smaller = leaner",
+      "mode": "count",
+      "unit": "chars"
+    },
+    "nlq_synth_triples": {
+      "label": "NL→SPARQL synthetic graph — triple count",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "triples in the synthetic typed graph (3 per entity)",
+      "mode": "count",
+      "unit": "count"
+    },
     "op_q01_bgp_count": {
       "label": "Operator — BGP — single triple pattern, count",
       "suite": "Operators",
@@ -1876,6 +1908,62 @@
       "suite": "HDT",
       "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
       "query": "stored triples of the decoded graph (load-and-decode-to-native)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_acp_auth_triples": {
+      "label": "Solid acp_auth_triples — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "triples in the materialised ACP auth view (materialize_acp, 3 strata)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_alice_readable_graphs": {
+      "label": "Solid alice_readable_graphs — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "graphs visible to ALICE in Mode::Read (AuthIndex walk)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_authorized_rows": {
+      "label": "Solid authorized_rows — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "rows of the title query restricted to alice's authorized subset",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_full_dataset_rows": {
+      "label": "Solid full_dataset_rows — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "rows of the title query over the FULL dataset (GRAPH ?g)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_auth_triples": {
+      "label": "Solid wac_auth_triples — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "triples in the materialised WAC auth view (materialize_wac)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_named_graphs": {
+      "label": "Solid wac_named_graphs — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "named graphs in the WAC fixture",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_quads": {
+      "label": "Solid wac_quads — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "total quads across the WAC fixture's named graphs",
       "mode": "count",
       "unit": "count"
     },
