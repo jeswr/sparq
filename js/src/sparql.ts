@@ -210,7 +210,7 @@ export function quadsToNQuads(quads: Iterable<RDF.Quad>): string {
   let out = '';
   for (const quad of quads) {
     if (quad.subject.termType === 'Quad' || quad.object.termType === 'Quad') {
-      throw new Error('RDF-star quoted triples are not supported');
+      throw new Error('RDF 1.2 triple terms are not supported');
     }
     const graph = quad.graph.termType === 'DefaultGraph' ? '' : ` ${termToNT(quad.graph)}`;
     out += `${termToNT(quad.subject)} ${termToNT(quad.predicate)} ${termToNT(quad.object)}${graph} .\n`;

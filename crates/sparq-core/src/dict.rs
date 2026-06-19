@@ -1369,7 +1369,7 @@ impl Dict {
             TermParts::Lit { value, datatype, lang } => self.intern_lit(value, datatype, *lang),
             TermParts::Blank(b) => self.intern_blank(b),
             TermParts::Triple(_) => {
-                panic!("RDF-star triple terms must be interned structurally (intern_triple_ids), not via the parts-based leaf path")
+                panic!("RDF 1.2 triple terms must be interned structurally (intern_triple_ids), not via the parts-based leaf path")
             }
         }
     }
@@ -2281,7 +2281,7 @@ impl ShardedDict {
         for (tag, idx, t) in items {
             assert!(
                 !matches!(t, Term::Triple(_)),
-                "RDF-star triple terms are not supported by the sharded bulk interner; use the serial loader"
+                "RDF 1.2 triple terms are not supported by the sharded bulk interner; use the serial loader"
             );
             let s = (hash_term(&t) % n as u64) as usize;
             buckets[s].push((tag, idx, t));
