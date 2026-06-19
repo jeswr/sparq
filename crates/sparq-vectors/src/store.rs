@@ -774,7 +774,7 @@ impl VectorStore {
     /// against a mismatched base.
     ///
     /// A store with NO pending delta writes an empty (header-only) sidecar — replaying it is a no-op,
-    /// and it still carries the generation so a stale base is still caught. See [`save_delta_to`] to
+    /// and it still carries the generation so a stale base is still caught. See [`save_delta_to`](Self::save_delta_to) to
     /// choose the path explicitly.
     pub fn save_delta(&self) -> Result<PathBuf, String> {
         let path = Self::sibling_delta_path(&self.path);

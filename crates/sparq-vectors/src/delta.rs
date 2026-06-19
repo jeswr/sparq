@@ -85,7 +85,7 @@
 //! `.spqd-tmp`, `fsync`s it, then atomically `rename`s it over the final path — the same
 //! write-tmp-then-rename + `sync_all` discipline as [`StreamingWriter`](crate::store::StreamingWriter):
 //! a crash mid-write leaves the previous `.spqd` (or none) intact, never a half-written sidecar at
-//! the live path. **Partial-write detection.** [`from_bytes`](VectorDelta::from_bytes) recomputes
+//! the live path. **Partial-write detection.** `from_bytes` (the crate-internal decoder) recomputes
 //! the EXACT expected length from the header (`56 + append_count·(4 + dim·4) + tomb_count·4`) and
 //! rejects any file that is shorter OR longer — a truncated (or trailing-garbage) sidecar is a
 //! descriptive `Err`, never an out-of-bounds read or a silently-short replay.
