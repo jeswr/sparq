@@ -1,0 +1,93 @@
+# Conventional-Commits PR-title validator — bead sq-v286.5. [OPUS-4.8] 🤖 SPARQ agent.
+#
+# WHY (the release-plz prerequisite): release-plz (release-plz.yml, #792) infers the
+# semver bump from the Conventional-Commit history. Because `main` merges PRs with
+# "Squash and merge", the PR TITLE becomes the squash commit's SUBJECT — so the title
+# is the thing release-plz / git-cliff actually parse to decide patch-vs-minor-vs-major.
+# A non-conventional title (e.g. "design: …") parses as a non-bumping commit and is
+# silently dropped from the changelog + version computation. This check validates the
+# PR title against the Conventional-Commits grammar so the squash subject is always a
+# release-plz-parseable conventional commit.
+#
+# ALLOWED TYPES (the `types:` input below, == the Conventional-Commits standard set the
+# repo already uses — see `git log` / merged PR titles):
+#   feat      → release-plz cuts a MINOR bump (new functionality)
+#   fix       → PATCH bump (bug fix)
+#   perf      → PATCH bump
+#   docs ci chore test refactor build style revert → NO version bump (housekeeping)
+# MAJOR bumps use the Conventional-Commits BREAKING-CHANGE convention, BOTH forms of
+# which the conventional-commits parser this action wraps recognise:
+#   • a `!` after the type/scope in the TITLE — e.g.  `feat!: drop the legacy planner`
+#     or  `feat(sparq-core)!: …`  → release-plz cuts a MAJOR bump.
+#   • a `BREAKING CHANGE:` (or `BREAKING-CHANGE:`) footer in the PR BODY / commit body.
+# Exercising `feat!:` / `BREAKING CHANGE` is the second half of sq-v286.5: it is how a
+# release-plz-driven MAJOR is requested once we are post-1.0.
+#
+# GATING POSTURE — ADVISORY (deliberate, NOT a hard gate yet). [OPUS-4.8]
+# The check NAME below contains the whole word "advisory", so ci-summary.yml's
+# `\b(advisory|informational)\b` rule EXCLUDES it from the required gating set — a
+# non-conventional title reports a red ✗ here as a SIGNAL but CANNOT block the merge.
+# WHY advisory and not hard: a hard gate would have to be true of every in-flight PR
+# title the moment it lands, and at authoring time open PR #207 ("design: sparq logo
+# redesign proposals …") uses a non-standard `design:` type, so a hard gate would
+# spuriously red an unrelated, already-open PR — the #748-class "a new gating job breaks
+# the train for everyone" risk this repo guards against. The repo's titles are ALREADY
+# ~98% conventional (only #207 open, and historically only #689 `bench:` / #752
+# `docs/ci:`), so promotion to a HARD gate is a small follow-up: once the stragglers are
+# renamed/merged, drop the " (advisory)" suffix from the job NAME below (no logic change)
+# and ci-summary will start gating on it automatically. Tracked as a follow-up bead.
+#
+# We do NOT touch ci-summary.yml's aggregator logic; advisory exclusion is purely by the
+# name token, exactly as the existing advisory legs (markdownlint-advisory, vale, …) do.
+name: pr-title
+
+# Title is only meaningful on a pull_request. Re-validate when the title changes
+# (`edited`), on (re)open, and on new pushes — the activity types the action documents.
+# NOT on merge_group: a merge_group ref has no PR title to validate, and being advisory
+# it needs no presence there; ci-summary handles a smaller sibling set on that ref fine.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+# Least privilege: the validator only READS the PR (its title) to post the check result.
+permissions:
+  pull-requests: read
+
+# One validation per PR; cancel a superseded run when the title is edited again quickly.
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    # NAME carries the "advisory" token so ci-summary.yml excludes it from the gate
+    # (see the GATING POSTURE note above). Renaming away the suffix later PROMOTES it.
+    name: conventional-commits (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      # [OPUS-4.8] sq-v286.5: amannn/action-semantic-pull-request, SHA-pinned to the
+      # v6.1.1 commit (the repo SHA-pins ALL actions; code-scanning=0). Verified the tag
+      # peels to this commit via `gh api .../git/ref/tags/v6.1.1 --jq .object.sha`.
+      - name: Validate PR title is a Conventional Commit
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # The Conventional-Commits standard type set the repo uses. `feat!:` /
+          # `feat(scope)!:` and a `BREAKING CHANGE:` footer are recognised by the
+          # underlying conventional-commits parser regardless of this list — the `!`
+          # / footer mark the MAJOR break, the type still has to be one of these.
+          types: |
+            feat
+            fix
+            docs
+            chore
+            ci
+            test
+            refactor
+            perf
+            build
+            style
+            revert
+          # A scope is optional — e.g. both `feat: …` and `feat(sparq-core): …` are fine.
+          requireScope: false
