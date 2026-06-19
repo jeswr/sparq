@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   COMMON_PREFIXES,
   declaredPrefixes,
+  declaredPrefixBindings,
   usedPrefixes,
   missingCommonPrefixes,
   renderPrefixLines,
@@ -30,6 +31,16 @@ test("declaredPrefixes reads PREFIX declarations (case-insensitive, empty prefix
   assert.ok(declared.has("ex"));
   assert.ok(declared.has("")); // the empty prefix `:`
   assert.equal(declared.has("rdf"), false);
+});
+
+test("declaredPrefixBindings recovers prefix -> IRI (case-insensitive, empty prefix, first wins)", () => {
+  const q = `PREFIX foaf: <http://xmlns.com/foaf/0.1/>\nprefix ex: <http://example.org/>\nPREFIX : <http://base/>\nPREFIX ex: <http://later/>\nSELECT * {}`;
+  const bindings = declaredPrefixBindings(q);
+  const byPrefix = Object.fromEntries(bindings.map((b) => [b.prefix, b.iri]));
+  assert.equal(byPrefix.foaf, "http://xmlns.com/foaf/0.1/");
+  assert.equal(byPrefix.ex, "http://example.org/"); // first declaration wins
+  assert.equal(byPrefix[""], "http://base/"); // the empty prefix `:`
+  assert.equal(declaredPrefixBindings("SELECT * {}").length, 0);
 });
 
 test("usedPrefixes finds prefixed names but not IRIs or variables", () => {

@@ -29,7 +29,8 @@ import {
   type WasmStore,
 } from "@/lib/sparq-wasm";
 // [OPUS-4.8] sq-8uew — Turtle/N-Triples/N-Quads syntax highlighting for the text view.
-import { RdfHighlight } from "@/components/rdf-highlight";
+// [OPUS-4.8] sq-gb4o (#805) — pretty/indented Turtle (+ raw N-Triples/N-Quads toggle) text view.
+import { TurtleResult } from "@/components/rdf-highlight";
 import {
   ALL_QUADS_BODY,
   FORMAT_OPTIONS,
@@ -405,8 +406,7 @@ export function DatasetViewer({
             size="sm"
             onClick={() => setView("ntriples")}
           >
-            <FileText className="size-3.5" />{" "}
-            {hasGraphs ? "N-Quads" : "N-Triples"}
+            <FileText className="size-3.5" /> {hasGraphs ? "TriG" : "Turtle"}
           </Button>
         </div>
 
@@ -456,8 +456,9 @@ export function DatasetViewer({
               </tbody>
             </table>
           ) : (
-            <RdfHighlight
+            <TurtleResult
               text={serialised}
+              rawLabel={hasGraphs ? "N-Quads" : "N-Triples"}
               className="overflow-x-auto p-3 text-[12px] leading-relaxed"
             />
           )}

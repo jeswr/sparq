@@ -41,6 +41,11 @@ export const COMMON_PREFIXES: readonly PrefixBinding[] = [
 // prefix `:`). Used to read which prefixes a query already declares.
 const DECLARED_RE = /(?:^|\s)PREFIX\s+([A-Za-z][\w.-]*)?:\s*<[^>]*>/gi;
 
+// As above, but also CAPTURES the namespace IRI between the angle brackets, so a query's full
+// `prefix -> IRI` bindings can be recovered (e.g. to abbreviate result IRIs with the user's own
+// prefixes). Group 1 is the (optional) label, group 2 the IRI.
+const DECLARED_WITH_IRI_RE = /(?:^|\s)PREFIX\s+([A-Za-z][\w.-]*)?:\s*<([^>]*)>/gi;
+
 // A used prefixed-name's prefix label, e.g. `foaf` in `foaf:name`. Excludes IRIs, variables,
 // and the `_:bnode` form. The label must start a token (preceded by start/whitespace/`{(,;.[`).
 const USED_RE = /(?:^|[\s{(,;.[])([A-Za-z][\w.-]*):[A-Za-z_]/g;
@@ -50,6 +55,24 @@ const USED_RE = /(?:^|[\s{(,;.[])([A-Za-z][\w.-]*):[A-Za-z_]/g;
 export function declaredPrefixes(query: string): Set<string> {
   const out = new Set<string>();
   for (const m of query.matchAll(DECLARED_RE)) out.add(m[1] ?? "");
+  return out;
+}
+
+/**
+ * The full `prefix -> namespace-IRI` bindings a query DECLARES (via `PREFIX foo: <…>`). The
+ * empty prefix `:` is represented by the empty-string label. First declaration of a label wins.
+ * Best-effort over the highlight grammar (not a full parse) — intended for re-using the user's
+ * own prefixes when abbreviating result IRIs (see `prettyTurtle`). [OPUS-4.8] sq-gb4o (#805)
+ */
+export function declaredPrefixBindings(query: string): PrefixBinding[] {
+  const out: PrefixBinding[] = [];
+  const seen = new Set<string>();
+  for (const m of query.matchAll(DECLARED_WITH_IRI_RE)) {
+    const prefix = m[1] ?? "";
+    if (seen.has(prefix)) continue;
+    seen.add(prefix);
+    out.push({ prefix, iri: m[2] });
+  }
   return out;
 }
 
