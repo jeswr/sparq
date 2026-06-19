@@ -16,9 +16,9 @@
 //!  * the VoID best-effort branch: a **malformed VoID** is silently ignored (descriptor stays
 //!    `None`), not fatal;
 //!  * [`well_known_void_url`] over query-string / fragment / IPv6-authority / no-path endpoints;
-//!  * the `parse_ask_boolean` behaviour through `discover` (the tolerant scanner accepts a
-//!    `true`/`false` token), and the [`Capability::ask_fallback`] / [`MediaType`] units the
-//!    round-trip exercises only implicitly.
+//!  * the `parse_ask_boolean` behaviour through `discover` (the strict scanner accepts only an
+//!    exact JSON `true`/`false` literal at a value boundary; sq-2gfe), and the
+//!    [`Capability::ask_fallback`] / [`MediaType`] units the round-trip exercises only implicitly.
 //!
 //! Gated on `fedclient`; the default build compiles this file to nothing.
 //!
