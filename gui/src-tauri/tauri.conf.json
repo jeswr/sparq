@@ -4,7 +4,6 @@
   "version": "0.1.0",
   "identifier": "io.github.jeswr.sparq",
   "build": {
-    "//": "[OPUS-4.8] sq-2e93 — the GUI reuses the site's Next.js frontend. `beforeBuildCommand` builds the static export; `frontendDist` is that export tree. IMPORTANT: the site hardcodes basePath '/sparq' for GitHub Pages, but a Tauri webview serves from the `tauri://` root, so the export consumed here MUST be built with NEXT_PUBLIC_BASE_PATH='' / basePath '' (env-switched). Wiring that env-switch into the site config is a follow-up bead; this config records the requirement and is structurally valid today.",
     "beforeDevCommand": "cd ../../site && npm run dev",
     "beforeBuildCommand": "cd ../../site && NEXT_PUBLIC_BASE_PATH='' npm run build",
     "devUrl": "http://localhost:3000/sparq",

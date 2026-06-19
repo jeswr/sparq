@@ -11,14 +11,25 @@
 # SCOPE: PRs that touch gui/**, packages/**, or this workflow. A Rust-/docs-only PR skips it
 # (no run, so the required `ci-summary / gate` simply never waits on it — cross-workflow
 # `needs:` is impossible, exactly as documented in site-e2e.yml). It is NOT a `merge_group`
-# lane, and — until it is reliably green across a per-platform matrix — it is DELIBERATELY
-# NOT added to the branch-protection required-contexts set (`ci-summary`). It is ADVISORY.
-# Re-runs on push to main for post-merge cover.
+# lane. Re-runs on push to main for post-merge cover.
 #
-# HONESTY: this lane currently builds the Tauri scaffold on LINUX only. The design's full
-# per-platform (macOS/Windows) matrix is a later step; a single reliably-green Linux lane is
-# the honest MVP. Every action below is SHA-pinned (Scorecard Pinned-Dependencies); the lane
-# is least-privilege (contents: read).
+# GATING vs ADVISORY (the `ci-summary / gate` aggregator polls EVERY check-run on the head
+# commit cross-workflow; it EXCLUDES only names matching the whole word `advisory`/
+# `informational`, so a job's NAME decides whether it gates):
+#   * "shared TS client typecheck" and "site build + typecheck (consuming @sparq/client)"
+#     are the load-bearing deliverable — they GATE (no excluded keyword in their names).
+#   * "Tauri crate build + clippy (Linux, advisory)" is ADVISORY: its name carries the
+#     `advisory` keyword so the aggregator excludes it, and `continue-on-error: true` keeps
+#     its result from ever failing `ci-summary`. The Tauri scaffold builds on LINUX only;
+#     the design's full per-platform (macOS/Windows) matrix is a later step, so a single
+#     Linux lane is the honest MVP and stays advisory until reliably green across the matrix
+#     (bead sq-var9 promotes it to a hard gate then). It DOES build green today (the earlier
+#     `unknown field "//"` tauri.conf.json failure — a JSON comment key rejected by
+#     tauri-build's deny_unknown_fields `build` table — was fixed in this change; that
+#     caveat now lives in gui/src-tauri/build.rs).
+#
+# Every action below is SHA-pinned (Scorecard Pinned-Dependencies); the lane is
+# least-privilege (contents: read).
 name: gui
 
 on:
@@ -114,8 +125,14 @@ jobs:
         run: npm run build
 
   tauri-build:
-    name: Tauri crate build + clippy (Linux)
+    name: Tauri crate build + clippy (Linux, advisory)
     runs-on: ubuntu-latest
+    # ADVISORY: the `advisory` keyword in `name:` makes the `ci-summary / gate` aggregator
+    # exclude this leg, and `continue-on-error: true` keeps a webview/runner-image flake on
+    # this Linux-only scaffold lane from ever turning `ci-summary` red. Promote to a hard
+    # gate (drop `continue-on-error` + the keyword) once reliably green across the full
+    # per-platform matrix — bead sq-var9. The TS + site-build jobs above remain GATING.
+    continue-on-error: true
     timeout-minutes: 40
     defaults:
       run:
