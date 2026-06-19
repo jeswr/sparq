@@ -25,24 +25,6 @@ How-to + the covered/deferred matrix: [`skills/zk-query-proofs/SKILL.md`](../../
 Benchmarks (gate counts, timing): [`bench/zk-compose/`](../../bench/zk-compose).
 Contributing: [`AGENTS.md`](../../AGENTS.md).
 
-## Testing
-
-Two layers:
-
-- **Toolchain-free glue unit tests** (fast, run by default `cargo test`): the
-  `#[cfg(test)]` modules in `build.rs` / `driver.rs` / `toml.rs` exercise the
-  NON-cryptographic composition plumbing — circuit-family id derivation
-  (`derive_*_id`: smallest-fitting bucket, EXACT digit-count discipline,
-  out-of-family `None` never a wrong member, package-name determinism), the
-  nargo/bb subprocess wrapper's typed error classification (`Spawn` vs `Tool`
-  vs `Io`) and tag-based witness-path isolation, and `Prover.toml` witness
-  serialization (`FieldHex` hex round-trip, scalar-vs-array shape, declaration
-  order, the recoverable missing-witness error arms). These assert nothing about
-  in-circuit soundness or any privacy property — the verifier is **not-yet-sound**
-  (see the caveat above, sq-qhy4).
-- **Toolchain e2e tests** (`tests/`): the real prove/verify path via nargo/bb,
-  which skip cleanly when the toolchain is absent from `PATH`.
-
 ## License
 
 [MIT](../../LICENSE).
