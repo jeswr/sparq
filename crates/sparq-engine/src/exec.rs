@@ -9873,6 +9873,41 @@ mod path_pushdown_tests {
         }
     }
 
+    /// [OPUS-4.8] (sq-5kr) Pin the bound-endpoint shortcuts that AVOID the
+    /// full-store scans: `p*`/`p?` over a bound endpoint must emit ITS reflexive
+    /// pair (not the whole `graph_nodes()` domain), and a bound-endpoint `!(...)`
+    /// must return only that node's non-excluded edges from the narrowed scan.
+    /// The load-bearing case is a CONSTANT endpoint absent from the data
+    /// (`:z`, which occurs in no triple): the zero-length rules still bind
+    /// `<z> p* <z>` / `<z> p? <z>`, whereas a reflexive pass over `graph_nodes()`
+    /// would never see `:z` and would WRONGLY drop the solution — so this guards
+    /// against a regression to the old domain-scan reflexive logic.
+    #[test]
+    fn bound_endpoint_zero_length_and_negated_avoid_full_store_scan() {
+        // :a -e-> :b ; :a -f-> :c .  :z occurs in NO triple.
+        let g = Graph::load_str("@prefix : <http://ex/> .\n:a :e :b . :a :f :c .\n", "turtle").unwrap();
+        let rows = |sparql: &str| rowset(&crate::query(&g, &format!("{PFX}{sparql}")).unwrap());
+        let ask = |sparql: &str| !crate::query(&g, &format!("{PFX}{sparql}")).unwrap().rows.is_empty();
+        let want = |items: &[&str]| {
+            let mut v: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+
+        // Bound-subject `p*`: reflexive self + the one `:e` hop (NOT the node domain).
+        assert_eq!(rows("SELECT ?y WHERE { :a :e* ?y }"), want(&["<http://ex/a>", "<http://ex/b>"]));
+        // Bound-subject `p?`: reflexive self + the one `:e` hop.
+        assert_eq!(rows("SELECT ?y WHERE { :a :e? ?y }"), want(&["<http://ex/a>", "<http://ex/b>"]));
+        // Constant endpoint ABSENT from the data still has its zero-length self-pair.
+        assert_eq!(rows("SELECT ?y WHERE { :z :e* ?y }"), want(&["<http://ex/z>"]));
+        assert!(ask("ASK WHERE { :z :e? :z }"), "absent-term :z must satisfy its own :e? self-pair");
+        // Bound-subject negated set: only :a's non-:e edges (the :f hop), narrowed scan.
+        assert_eq!(rows("SELECT ?y WHERE { :a !:e ?y }"), want(&["<http://ex/c>"]));
+        // Bound-OBJECT negated set: subjects reaching :c via a non-:e predicate (:a -f-> :c).
+        assert_eq!(rows("SELECT ?x WHERE { ?x !:e :c }"), want(&["<http://ex/a>"]));
+    }
+
     /// The row budget must fire INSIDE a single-source traversal (not only
     /// between traversal roots): one long chain, one start node, tiny budget.
     #[test]

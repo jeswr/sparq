@@ -1,10 +1,28 @@
 # SPARQL 1.1 property-path support — assessment
 
-Date: 2026-06-12. Scope: `crates/sparq-engine` (algebra from `spargebra`, execution in `exec.rs`). Read-only code review; no builds run.
+Date: 2026-06-12 (original review). Scope: `crates/sparq-engine` (algebra from `spargebra`, execution in `exec.rs`).
+
+> **Update (2026-06-12, commit `47d43294` "perf(engine): push bound endpoints into
+> property-path evaluation"):** the three ranked performance improvements at the end
+> of this document have since LANDED. Bound endpoints are now pushed into a
+> single-source directed traversal (`directed_reach`), `?x p+ ?x` resolves via SCC
+> (`cyclic_nodes`) rather than the all-pairs closure, the budget is checked *inside*
+> the traversal, and the full-store scans for the zero-length node domain /
+> `NegatedPropertySet` are avoided when an endpoint is bound — `p*`/`p?` emit only the
+> bound node's reflexive pair, and `!(...)` skips excluded predicate blocks wholesale
+> on the P-sorted permutation. **Sections 1–4 describe the PRE-optimisation code; their
+> line numbers are stale** and they are retained as the design record. §5 summarises the
+> behaviour as shipped. (sq-5kr, [OPUS-4.8])
 
 ## Verdict
 
-**COMPLETE (semantics) / PARTIAL (performance)** — every SPARQL 1.1 path operator is evaluated natively and the W3C `sparql11/property-path` suite passes 33/33, but evaluation always materialises the path's *entire* (start,end) relation before applying bound endpoints, so bound-endpoint recursive paths (`:alice :knows+ ?x`) cost the same as fully-unbound ones: a whole-graph transitive closure.
+**COMPLETE (semantics) / COMPLETE (bound-endpoint performance, since `47d43294`)** —
+every SPARQL 1.1 path operator is evaluated natively and the W3C
+`sparql11/property-path` suite passes 33/33. At the time of the original review,
+evaluation always materialised the path's *entire* (start,end) relation before
+applying bound endpoints, so bound-endpoint recursive paths (`:alice :knows+ ?x`) cost
+the same as fully-unbound ones: a whole-graph transitive closure. That pathology has
+since been fixed — see the update note above and §5.
 
 ## 1. Per-operator status
 
@@ -52,8 +70,48 @@ For `?x :knows+ ?y` — or, critically, even `:alice :knows+ ?x` — on a graph 
 
 The budget guard (max-rows/deadline) converts the blow-up into an error/truncation when limits are installed, but does not make bound-endpoint queries fast.
 
-## Highest-value improvements (ranked)
+## 5. Current behaviour (as shipped, commit `47d43294`)
 
-1. **Push bound endpoints into a directed traversal** for `+`/`*`/`?` (and recursively through `Reverse`/`Sequence`/`Alternative`): single-source BFS over `[Some(s), Some(pid), None]` range scans (or reverse via OPS for a bound object), with the existing visited-set for cycles. Turns the dominant `:s p+ ?x` case from `O(V·E)` all-pairs into `O(E_reachable)`. The TODO comment at exec.rs:1928–1933 already anticipates this. *Difficulty: medium* — `eval_path` must hand endpoint context into `path_pairs` (signature change + per-operator bound-propagation rules), but the store API already supports the needed scans.
-2. **Lazy/streaming closure with early termination for both-bound and same-variable cases** (`:a p+ :b` as reachability test that stops on hit; `?x p+ ?x` as per-SCC cycle detection) plus per-start budget checks *inside* the BFS loop (currently checked only once per start node at exec.rs:2132, so a single huge BFS can overshoot the budget). *Difficulty: low–medium* — local changes to `transitive_closure_pairs` and the budget placement.
-3. **Avoid full-store scans for the zero-length node domain and NegatedPropertySet**: when an endpoint is bound, `p*`/`p?` need only that node's reflexive pair, not `graph_nodes()` over the whole store; `!(...)` can iterate predicate ranges of the P-sorted permutation and skip excluded predicate blocks wholesale instead of filtering every triple. *Difficulty: low* — both are localised to `path_pairs`/`graph_nodes`, with conformance tests as the safety net.
+All three improvements that the original review ranked below have LANDED; the
+pathology in §4 no longer applies to bound-endpoint queries. Code anchors are
+functions (not line numbers) so they stay valid as the file moves:
+
+- **Bound endpoints pushed into a directed traversal** (was ranked #1). `eval_path`
+  hands a `PathEnds { s, o }` hint into `path_pairs`, which for `+`/`*`/`?` (and,
+  recursively, through `Reverse`/`Sequence`/`Alternative`) runs `directed_reach`: a
+  single-source, budget-checked BFS whose frontier expansion is a sorted range scan
+  (`[Some(s), Some(pid), None]` forward, `[None, Some(pid), Some(o)]` reverse for a
+  bound object). The both-bound case is a reachability TEST that stops on hit. Turns
+  the dominant `:s p+ ?x` case from `O(V·E)` all-pairs into `O(E_reachable)`. The
+  contract on `PathEnds` makes the pushdown a pure optimisation: a sub-evaluation may
+  ignore the hint and return extra pairs, and `eval_path` post-filters as the
+  correctness backstop.
+- **Early termination + per-SCC same-variable case + in-traversal budget** (was
+  ranked #2). `?x p+ ?x` resolves via Kosaraju SCC (`cyclic_nodes`, `O(V+E)`) rather
+  than the all-pairs closure; the zero-length operators' diagonal is exactly the node
+  domain. The row/deadline budget is now checked *inside* `directed_reach` (every 1024
+  pops), so a single runaway traversal respects it promptly — pinned by
+  `budget_fires_inside_directed_traversal`.
+- **No full-store scans for the zero-length node domain / `NegatedPropertySet`** (was
+  ranked #3, this bead — sq-5kr). `path_pairs` emits only the bound node's reflexive
+  pair for `p*`/`p?` (the `graph_nodes()` whole-store scan now runs *only* for a
+  genuinely both-unbound `*`/`?`, where the answer truly IS the whole node domain, and
+  for the `?x p*/p? ?x` diagonal). `negated_property_pairs` narrows to the bound
+  endpoint's triples when one end is bound, and for the both-unbound case walks the
+  P-leading permutation (`scan_sorted(&[None,None,None], 1)`) and skips each excluded
+  predicate's contiguous block wholesale via `partition_point`, instead of a
+  `[None,None,None]` scan that probes the excluded set per triple.
+
+Regression coverage lives in `mod path_pushdown_tests` (and `mod path_tests`) in
+`exec.rs`:
+`pushdown_matches_full_closure_for_all_operators_and_binding_shapes` (every operator,
+incl. `:e*`/`:e?`/`!:e`/`!(:e|:f)`, against the full-closure oracle for subject-bound,
+object-bound, both-bound and same-variable shapes) and
+`negated_property_set_matches_filter_oracle` (the block-skip scan vs a plain
+scan + predicate `FILTER`).
+
+## Remaining (out of scope here)
+
+The both-unbound recursive case is still the spec-correct eager all-pairs closure
+(§4 still applies when NEITHER endpoint is bound) — a streaming/lazy both-unbound
+closure remains a possible future improvement, but is a separate, larger change.
