@@ -25,14 +25,18 @@
 #     are the load-bearing deliverable and are PROVEN green (Linux, TS-only) — they GATE (no
 #     excluded keyword in their names).
 #   * the per-platform Tauri "GUI build + clippy (…, advisory)" matrix and the
-#     "GUI tauri-driver e2e smoke (Linux, advisory)" job carry the `advisory` keyword so the
+#     "GUI tauri-driver e2e (Linux, advisory)" job carry the `advisory` keyword so the
 #     aggregator excludes them, AND set `continue-on-error: true`, so a webview/runner-image
 #     flake on a platform we have not yet proven reliably green can never turn `ci-summary`
 #     red. The Linux rows (ubuntu-latest x64 + ubuntu-24.04-arm) build green today; the
-#     macOS/Windows rows and the tauri-driver harness are documented-untested in CI and stay
-#     advisory until proven across the full matrix — at which point bead sq-var9 drops the
-#     keyword + `continue-on-error` (and the maintainer adds gui to the branch-protection
-#     required-contexts, a `needs:user` repo-settings action) to PROMOTE them to a hard gate.
+#     macOS/Windows rows stay advisory until proven across the full matrix. [OPUS-4.8] sq-pnnl
+#     — the tauri-driver e2e is now a REAL launch+run-a-query assertion (gui/e2e, not the old
+#     no-op scaffold), but the headless WebKitWebDriver + tauri-driver + xvfb webview session
+#     is a NEW surface whose CI reliability is unproven, so it KEEPS the `advisory` token +
+#     `continue-on-error` and is strictly non-gating. Bead sq-var9 drops the keyword +
+#     `continue-on-error` (and the maintainer adds gui to the branch-protection
+#     required-contexts, a `needs:user` repo-settings action) to PROMOTE them to a hard gate
+#     once reliably green.
 #
 # Every action below is SHA-pinned (Scorecard Pinned-Dependencies); the lane is
 # least-privilege (contents: read).
@@ -226,29 +230,35 @@ jobs:
       - name: Test (engine command layer)
         run: cargo test
 
-  # [OPUS-4.8] sq-bu69 — tauri-driver (WebDriver) e2e smoke.
+  # [OPUS-4.8] sq-pnnl — tauri-driver (WebDriver) e2e: REAL launch + run-a-query assertion.
   #
-  # ADVISORY + DOCUMENTED-UNTESTED. The design (§3 E2E) is explicit that Tauri's webview e2e
-  # uses tauri-driver (WebDriver), NOT Playwright's Chromium — so this is a NEW harness, not a
-  # reuse of site-e2e.yml. tauri-driver supports Linux (via WebKitWebDriver, headless under
-  # xvfb) and Windows (via Edge WebDriver); macOS has no WKWebView WebDriver, so the smoke is
-  # Linux-only. The full WebDriver test client + a launch-and-run-a-query assertion against the
-  # bundled shell is NOT wired this pass: a reliable headless tauri-driver run needs the site
-  # `out/` frontend bundle prebuilt, a matching tauri.conf `frontendDist`, WebKitWebDriver +
-  # tauri-driver pinned versions, and xvfb display plumbing — too much untested surface to ship
-  # as a green gate. This job therefore only SCAFFOLDS + DOCUMENTS the harness so the
-  # follow-up has a concrete starting point; the real launch+query assertion is tracked as a
-  # bead (see sq-var9). The `advisory` keyword excludes it from `ci-summary / gate` and
-  # `continue-on-error: true` makes its result strictly non-gating. Promote (drop both, add
-  # the real assertion) when reliably green.
+  # This REPLACES the earlier no-op scaffold smoke (sq-bu69), which only confirmed
+  # tauri-driver / WebKitWebDriver / xvfb were on PATH. The job now builds the frontend the
+  # webview embeds, builds the desktop shell binary, and drives it through tauri-driver: it
+  # launches the shell headless (xvfb), waits for the in-tab WASM REPL to mount + the engine
+  # to warm, ENTERS a SPARQL SELECT into the editor, clicks Run, and ASSERTS the result table
+  # renders with the expected binding. The harness lives in gui/e2e (run-e2e.mjs, webdriverio).
+  #
+  # The design (research/gui-design.md §3 E2E) is explicit that Tauri's webview e2e uses
+  # tauri-driver (WebDriver), NOT Playwright's Chromium — so this is a NEW harness, not a reuse
+  # of site-e2e.yml. tauri-driver supports Linux (via WebKitWebDriver, headless under xvfb) and
+  # Windows (via Edge WebDriver); macOS has no WKWebView WebDriver, so the e2e is Linux-only.
+  #
+  # ADVISORY — DELIBERATELY KEPT (the #748-class risk). The frontend-build + shell-build
+  # prerequisites are reproduced locally, but the headless WebKitWebDriver + tauri-driver +
+  # xvfb webview session itself is a NEW surface whose CI reliability is not yet proven across
+  # multiple runs, and it cannot be reproduced on a box without the webkit2gtk system libs. So
+  # the job NAME keeps the whole-word `advisory` token (the `ci-summary / gate` aggregator
+  # excludes `\b(advisory|informational)\b`) AND `continue-on-error: true`, so a flaky webview
+  # session can NEVER turn `ci-summary` red for every PR. The assertion RUNS (it is no longer a
+  # no-op) — it is just non-gating until proven reliably green. Promotion to a hard gate (drop
+  # the token + continue-on-error, add gui to branch-protection required contexts, a
+  # `needs:user` repo-settings action) is the separate follow-up tracked by bead sq-var9.
   tauri-e2e:
-    name: "GUI tauri-driver e2e smoke (Linux, advisory)"
+    name: "GUI tauri-driver e2e (Linux, advisory)"
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 30
-    defaults:
-      run:
-        working-directory: gui/src-tauri
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -268,24 +278,62 @@ jobs:
             webkit2gtk-driver \
             xvfb
 
+      # wasm32 target is needed to build the lean WASM bundle the in-tab REPL runs.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Cache cargo (gui e2e)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/src-tauri/target
+          key: gui-e2e-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      # Build the frontend the Tauri webview embeds. The shell's `cargo build` embeds whatever
+      # is in `site/out` at COMPILE TIME, so the frontend MUST be built first. The site export
+      # is root-relative (NEXT_PUBLIC_BASE_PATH='') because a Tauri webview serves from the
+      # custom-protocol root, not GitHub Pages' /sparq basePath (gui/README.md).
+      - name: Build the lean WASM bundle (the in-tab engine)
+        working-directory: js
+        run: |
+          npm install
+          npm run build:wasm:lean
+
+      - name: Build the site static export (root-relative; embedded by the shell)
+        working-directory: site
+        run: |
+          npm install
+          NEXT_PUBLIC_BASE_PATH='' npm run build
+
+      # Build the desktop shell binary (debug). With site/out present, tauri_build embeds the
+      # frontend into the `sparq-gui` binary tauri-driver will launch.
+      - name: Build the GUI shell (debug, embeds the frontend)
+        working-directory: gui/src-tauri
+        run: cargo build
 
       - name: Install tauri-driver
         run: cargo install tauri-driver --locked
 
-      - name: Build the GUI shell (debug)
-        run: cargo build
+      - name: Install the e2e harness dependencies
+        working-directory: gui/e2e
+        run: npm ci
 
-      # SCAFFOLD: prove the harness pieces resolve (the driver binary + WebKitWebDriver are on
-      # PATH and a virtual display starts). The real WebDriver session — start tauri-driver,
-      # connect a WebDriver client, launch the bundled shell, run a query, assert results — is
-      # the follow-up tracked in the bead; this step is a documented placeholder so the lane
-      # exists and stays honestly advisory rather than shipping a flaky green claim.
-      - name: tauri-driver harness smoke (documented-untested)
-        run: |
-          set -euo pipefail
-          echo "tauri-driver on PATH:"; command -v tauri-driver
-          echo "WebKitWebDriver on PATH:"; command -v WebKitWebDriver
-          # Confirm a virtual display starts (the env a real headless tauri-driver run needs).
-          xvfb-run --auto-servernum bash -c 'echo "xvfb display ready: $DISPLAY"'
-          echo "harness scaffold OK — real launch+query WebDriver assertion is a follow-up (see bead)."
+      # The REAL assertion: launch the shell through tauri-driver under a virtual display, run
+      # a SPARQL SELECT in the in-tab WASM REPL, and assert the result table renders. APP_BINARY
+      # is the absolute path to the just-built debug binary. `continue-on-error` above keeps a
+      # webview/driver flake strictly non-gating while this NEW harness is proven on CI.
+      - name: Run the tauri-driver WebDriver e2e (headless under xvfb)
+        working-directory: gui/e2e
+        env:
+          APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+        run: xvfb-run --auto-servernum npm run test:e2e
