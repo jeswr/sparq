@@ -34,7 +34,7 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   [1.2](https://www.w3.org/TR/sparql12-query/) over your data; conformance is tracked by the
   CI ratchets (see the root [`README.md`](../../README.md)).
 - **Named graphs** — query across an active dataset with `GRAPH` and `FROM` / `FROM NAMED`.
-- **RDF 1.2 / RDF-star** — match [quoted triple terms](https://www.w3.org/TR/rdf12-concepts/),
+- **RDF 1.2 triple terms** — match [triple terms](https://www.w3.org/TR/rdf12-concepts/),
   including variables inside them.
 - **Query plan introspection** — `EXPLAIN` and `EXPLAIN ANALYZE`.
 - **Custom functions** — register Rust closures under function IRIs (the

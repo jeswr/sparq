@@ -83,7 +83,7 @@ const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 /// of [`crate::intern_hdt_term`], so the round trip is the identity on sparq ids.
 ///
 /// Returns `Err` for an RDF 1.2 triple term (`<< s p o >>`): standard HDT's term
-/// model has no quoted-triple representation, so such a graph cannot be written to a
+/// model has no triple-term representation, so such a graph cannot be written to a
 /// spec-conformant `.hdt` (this matches the read side, which never produces one).
 fn hdt_term_string(dict: &Dict, id: Id) -> Result<String, Error> {
     // Inline-integer ids encode the value directly and are NOT in the record store, so

@@ -646,7 +646,7 @@ fn require_var(t: &TermPattern, what: &str) -> Result<Variable, String> {
 }
 
 /// Maps a dictionary [`Term`] to a [`GroundTerm`] for a VALUES row, or `None`
-/// for a blank node / quoted triple (not expressible in a VALUES neighbour slot).
+/// for a blank node / triple term (not expressible in a VALUES neighbour slot).
 fn term_to_ground(t: Term) -> Option<GroundTerm> {
     match t {
         Term::NamedNode(n) => Some(GroundTerm::NamedNode(n)),

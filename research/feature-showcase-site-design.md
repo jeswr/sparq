@@ -148,7 +148,7 @@ surface is a page; the three flagships are top-billed "Showcase" pages.
 
 Core engine
   /try                    The live SPARQL REPL (the shared engine component)
-  /surface/sparql         SPARQL 1.1/1.2 — SELECT/ASK/CONSTRUCT/UPDATE, paths, RDF-star
+  /surface/sparql         SPARQL 1.1/1.2 — SELECT/ASK/CONSTRUCT/UPDATE, paths, RDF 1.2 triple terms
                           (EXPLAIN exists as `sparq_engine::explain*` but is NOT yet a wasm
                            export → needs a new binding (tier-b) before it is in-tab live)
   /surface/data-formats   Turtle / N-Triples / N-Quads / TriG + compressed ingest
@@ -196,7 +196,7 @@ Legend: **(a)** existing wasm · **(b)** new wasm bundle · **(c)** bb.js · **(
 
 | Surface | Verdict | How / what runs | Honest caveat |
 |---|---|---|---|
-| **sparql-query** | **(a) LIVE** | The shipped wasm Store: SELECT/ASK/CONSTRUCT/UPDATE, BGP+WCOJ, FILTER, OPTIONAL, UNION, MINUS, BIND, VALUES, aggregates, paths, sub-SELECT, RDF-star. | REGEX/REPLACE are compiled out of the lean bundle; QueryBudget deadline is native-only (row-cap only in wasm). |
+| **sparql-query** | **(a) LIVE** | The shipped wasm Store: SELECT/ASK/CONSTRUCT/UPDATE, BGP+WCOJ, FILTER, OPTIONAL, UNION, MINUS, BIND, VALUES, aggregates, paths, sub-SELECT, RDF 1.2 triple terms. | REGEX/REPLACE are compiled out of the lean bundle; QueryBudget deadline is native-only (row-cap only in wasm). |
 | **data-formats** | **(a) LIVE** | `load`/`loadDataset` over the 4 text formats; gzip/zstd-compressed RDF ingest via `SparqStore.fromCompressed()` (JS-side decompress → `fromString`). (`loadCompressed` is unrelated — it stores the *index* block-compressed, not a gzip/zstd input decoder.) | HDT, mmap/external-memory, parallel fast paths are native-only → walkthrough for those. |
 | **javascript-wasm** | **(a) LIVE** | This *is* the engine; the page documents the `@jeswr/sparq` API (streaming cursors, `match()`, `count`, `applyDelta`) by calling it. | — |
 | **inference** | **(b) NEW wasm bundle** | `sparq-reason` is pure-Rust forward-chaining; a `sparq-reason-wasm` bundle (RDFS/OWL2RL/N3 closure + `why()` proof tree) is portable. Pulls `regex` → larger bundle, lazy-loaded on this page only. | If the regex/rule-engine wasm size is unacceptable, fall back to **(e)** hosted/walkthrough. Confirm wasm-portability as a build spike. |

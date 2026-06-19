@@ -126,7 +126,7 @@ misleadingly low and flaky.
 - **P0 stand up the coverage gate** (§2.3) WITH fixtures + conformance binaries included.
 - **P1 UPDATE SILENT/non-SILENT outcome table + request-level atomicity rollback**
   (sparq-engine). (model: WAL all-or-nothing tests)
-- **P1 RDF 1.2 / rdf-star in UPDATE, CONSTRUCT templates, and the PARALLEL Turtle chunk path**
+- **P1 RDF 1.2 triple terms in UPDATE, CONSTRUCT templates, and the PARALLEL Turtle chunk path**
   (engine+core): SELECT side strong; ingest/template/serialize + quoted-triple-at-chunk-
   boundary are gaps.
 - **P1 MPC adversarial-share negative suite + "no fake crypto" stub gate** (sparq-mpc): assert

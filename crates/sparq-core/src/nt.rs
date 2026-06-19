@@ -22,7 +22,7 @@ use std::borrow::Cow;
 /// process. `object_term`/`triple_term` (and the no-intern `span_object`/`span_triple_term`
 /// graph-scan mirror) recurse once per `<<(` nesting level on the OBJECT axis; an adversarial
 /// input such as `<<( <<( … )>> )>>` repeated 10k deep would otherwise blow the stack. The cap
-/// is far deeper than any real RDF-star data nests (triple-term nesting beyond a handful of
+/// is far deeper than any real RDF 1.2 data nests (triple-term nesting beyond a handful of
 /// levels is unheard of in practice) yet shallow enough to keep recursion within the stack.
 /// Kept in step with spargebra's `MAX_RECURSION_DEPTH` (the SPARQL side of the same control).
 const MAX_TRIPLE_TERM_DEPTH: usize = 128;
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn nested_triple_term_at_limit_parses() {
         // One level below the cap must still parse cleanly — the bound is high enough that no
-        // real RDF-star data is rejected. `MAX_TRIPLE_TERM_DEPTH` is the number of `<<(` levels,
+        // real RDF 1.2 data is rejected. `MAX_TRIPLE_TERM_DEPTH` is the number of `<<(` levels,
         // so a line nested exactly `MAX_TRIPLE_TERM_DEPTH` deep is accepted.
         let line = nested_triple_term_line(MAX_TRIPLE_TERM_DEPTH);
         let mut d = Dict::new();

@@ -228,7 +228,7 @@ Throughput target: QLever's vocab 0.4 h + global-id 0.2 h on Wikidata.
 SPARQL 1.1 (variable predicates are common in real queries; six give every join
 input pre-sorted on every variable for sort-free merge joins and supply LFTJ its
 orders). The 3-cover {SPO, POS, OSP} answers all 8 abstract patterns and is the
-memory-constrained fallback. For quads/RDF-star, add a 4th graph column and the
+memory-constrained fallback. For quads/RDF 1.2 triple terms, add a 4th graph column and the
 extra orders later. `[qlever-six-permutations]`, `[perm-coverage-3of6]`,
 `[wcoj-index-orders]`, `[engine-permutation-survey]`.
 
