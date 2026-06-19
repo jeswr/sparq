@@ -2,7 +2,7 @@
   "name": "@sparq/client",
   "version": "0.1.0",
   "private": true,
-  "description": "Framework-agnostic TypeScript client for the sparq WASM engine — the single shared declaration of the WasmStore surface plus loaders/query helpers, consumed by the Next.js site and the (proposed) Tauri 2 GUI.",
+  "description": "Framework-agnostic TypeScript client for the sparq WASM engine — re-exports the wasm-pack-generated Store surface plus loaders/query helpers, consumed by the Next.js site and the (proposed) Tauri 2 GUI.",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -19,7 +19,8 @@
   "sideEffects": false,
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "typecheck:conformance": "tsc --noEmit --project tsconfig.conformance.json",
+    "check:wasm-types": "node scripts/check-wasm-types.mjs",
+    "sync:wasm-types": "node scripts/sync-wasm-types.mjs",
     "build": "tsc"
   },
   "keywords": [
