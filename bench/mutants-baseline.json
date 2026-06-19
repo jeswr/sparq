@@ -9,10 +9,10 @@
   ],
   "crates": {
     "sparq-algos": {
-      "caught": 110,
-      "caught_pct": 84.09,
-      "ceiling": 23,
-      "measured_surviving": 21,
+      "caught": 125,
+      "caught_pct": 95.45,
+      "ceiling": 8,
+      "measured_surviving": 6,
       "timeout": 1,
       "unviable": 3
     },

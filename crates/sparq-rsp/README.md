@@ -1,8 +1,23 @@
+<!-- [OPUS-4.8] sq-puyy: trimmed to the concise per-crate README template (sq-9jw5). -->
 # sparq-rsp
 
-RSP-QL-style RDF stream processing for the [sparq](../../README.md) engine:
+<p>
+  <a href="https://crates.io/crates/sparq-rsp"><img src="https://img.shields.io/crates/v/sparq-rsp.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/sparq-rsp"><img src="https://docs.rs/sparq-rsp/badge.svg" alt="docs.rs"></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
+
+**Opt-in RSP-QL-style RDF stream processing** for the [sparq](../../README.md) engine:
 windowed **continuous SPARQL queries** over timestamped triple streams, as a
 deterministic **library** — no async runtime, no wall clock, no service.
+
+The engine never reads a clock: timestamps are application-supplied `u64`s and time
+advances only through pushed values, so the whole pipeline is a pure function of the
+pushed `(triple, ts)` sequence — replayable, unit-testable, wasm-safe. Like
+`sparq-reason` / `sparq-shacl` it is **isolated**: nothing in the workspace depends on
+it, so the core engine and the wasm build carry zero streaming code.
+
+## 🚀 Quickstart
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,203 +44,34 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
 # Ok(()) }
 ```
 
-The classic RSP-QL pipeline, one type each:
+## ✨ Features
 
-| stage | type | role |
-|---|---|---|
-| stream | `TripleStream` / push API | `(triple, u64 timestamp)` elements, app-supplied timestamps |
-| S2R | `WindowSpec` + `WindowedStream` | `RANGE w STEP s [t0]` time windows / `ROWS n [SLIDE s]` count windows, incremental |
-| R2R | registered SPARQL | each closed window materialised into a `sparq_core::Graph` (per `EvalMode`, below), evaluated by `sparq-engine` |
-| R2S | `R2S::{RStream, IStream, DStream}` | full / added / removed rows per window, delivered as `WindowResult` callbacks |
+- **Windows (S2R)** — `WindowSpec::time` half-open `[t0 + k·step, t0 + k·step + range)`
+  time windows (tumbling, or overlapping when `step < range`) and `WindowSpec::count`
+  CQL-style row windows; closure is driven by the `max_ts − max_delay` watermark, with
+  out-of-order tolerance and empty-window reporting.
+- **Continuous queries (R2R)** — `ContinuousQuery` (SELECT), `ContinuousConstruct`
+  (CONSTRUCT, stream-to-stream), and `ContinuousAsk` (ASK), each parsed **once** at
+  `register` into a `sparq_engine::PreparedQuery` and re-run per closed window.
+- **Relation-to-stream (R2S)** — `R2S::{RStream, IStream, DStream}`: full / added /
+  removed rows per window, computed as multiset diffs over 64-bit row hashes.
+- **RSP-QL surface syntax + multi-window joins** — `RspqlQuery::parse` reads
+  `REGISTER … FROM NAMED WINDOW <w> ON <s> RANGE … STEP …`, and `ContinuousMultiQuery`
+  joins across named windows on one synchronized event-time clock.
+- **Pluggable materialisation (`EvalMode`)** — `PersistentDict` (default, compacted
+  dictionary), `Rebuild` (v1 baseline), and `Delta`, all producing identical results.
 
-Three query forms: `ContinuousQuery` (SELECT → `WindowResult` rows),
-`ContinuousConstruct` (CONSTRUCT → `GraphResult` triples — stream-to-stream
-transformation, with R2S as exact set diffs over the constructed graphs), and
-`ContinuousAsk` (ASK → one `AskResult` boolean per window).
+## 📚 Learn more
 
-## Design: deterministic by construction
+- **How-to** — [`skills/streaming-rsp/SKILL.md`](../../skills/streaming-rsp/SKILL.md)
+  (window semantics, R2S diffs, eval modes, RSP-QL syntax, the wasm tier).
+- **API reference** — [docs.rs/sparq-rsp](https://docs.rs/sparq-rsp).
+- **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md).
+- **Performance** — the `throughput` example
+  (`cargo run --release -p sparq-rsp --example throughput`) and
+  [`bench/rsp/`](../../bench/rsp); the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+- **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
-- **The engine never reads a clock.** Timestamps are application-supplied
-  `u64`s (logical ticks, epoch millis, sequence numbers — your choice of
-  scale). Time advances only through pushed timestamps, via the watermark
-  `max_ts_seen − max_delay`. The entire pipeline is a pure function of the
-  pushed `(triple, ts)` sequence: replayable, unit-testable, wasm-safe.
-- **No tokio / threads.** Synchronous push + callback. Wrapping pushes in an
-  async runtime, a thread, or a browser timer is the embedder's one-liner, not
-  this crate's dependency tree.
-- **Isolated crate** (the `sparq-reason` / `sparq-shacl` pattern): nothing in
-  the workspace depends on it; the core engine and the wasm build carry zero
-  streaming code.
+## License
 
-## RSP-QL surface syntax + multi-window joins
-
-Beyond the programmatic API above, the crate parses the **RSP-QL textual query
-language** and joins across **multiple named windows**:
-
-```rust,no_run
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-use oxrdf::{NamedNode, Term};
-use sparq_rsp::ContinuousMultiQuery;
-
-// Join sensor READINGS (stream :temp, window :w1) with the ROOM each sensor is
-// in (stream :meta, window :w2), per synchronized tumbling window.
-let mut q = ContinuousMultiQuery::register("\
-REGISTER STREAM <http://ex/out> AS
-SELECT ?room ?v WHERE {
-  WINDOW <http://ex/w1> { ?s <http://ex/value> ?v }
-  WINDOW <http://ex/w2> { ?s <http://ex/in> ?room }
-}
-FROM NAMED WINDOW <http://ex/w1> ON <http://ex/temp> RANGE 10 STEP 10
-FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 10 STEP 10")?;
-
-# let meta_stream = NamedNode::new_unchecked("http://ex/meta");
-# let triple: [Term; 3] = [
-#     NamedNode::new_unchecked("http://ex/s").into(),
-#     NamedNode::new_unchecked("http://ex/in").into(),
-#     NamedNode::new_unchecked("http://ex/room1").into(),
-# ];
-# let ts: u64 = 0;
-q.push(&meta_stream, triple, ts, |r| { /* full join result per tick */ })?;
-# Ok(()) }
-```
-
-- **Parser** (`RspqlQuery::parse`): `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM]
-  <out> AS`, `FROM NAMED WINDOW <w> ON <s> [RANGE <dur> [STEP <dur>]]` (tumbling
-  when `STEP` is omitted), and `WINDOW <w> { … }` rewritten to standard SPARQL
-  `GRAPH <w> { … }` — spargebra parses the embedded BGP/algebra. Durations are
-  ISO-8601 (`PT10S`, `PT1M30S`, `P1D`; seconds resolution) or bare integers
-  (logical ticks). IRIs may be `<…>` or prefixed names resolved against the
-  body's `PREFIX`/`BASE`. **Scoped out:** window variables (`WINDOW ?w`), `ROWS`
-  count windows, the `t0`/`max_delay` parameters, and relative `NOW-PT…TO…`
-  window bounds (use the programmatic `WindowSpec` for those).
-- **Multi-window join** (`ContinuousMultiQuery`): each declared window keeps its
-  own S2R state over the stream it reads; pushes are tagged with their stream.
-  All windows share one event-time clock (a triple on one stream advances the
-  watermark of windows on the others, via `WindowedStream::advance`), so closure
-  is synchronized. At each tick every window contributes its latest-closed
-  content as a **named graph** keyed by the window IRI; the engine's
-  cross-named-graph join then binds variables shared between `WINDOW <w1>` and
-  `WINDOW <w2>`. RSTREAM (full per-tick result) for now; ISTREAM/DSTREAM over a
-  multi-window join is a documented follow-up (tracked in beads, `bd list -l area:sparq-rsp`).
-
-## Window semantics (exact, pinned by tests)
-
-**Time windows** (`WindowSpec::time(range, step)`):
-
-- Windows are **half-open intervals `[t0 + k·step, t0 + k·step + range)`**,
-  `k = 0, 1, 2, …` — start bound **inclusive**, end bound **exclusive**.
-  `RANGE 10 STEP 10` yields `[0,10) [10,20) …`: a triple at `ts = 10` belongs
-  to `[10,20)` only — tumbling windows partition the timeline with no double
-  counting. The RSP-QL window origin `t0` defaults to 0 and is set with
-  `.with_t0(t0)`; an arrival before `t0` belongs to no window (not counted
-  late — no window ever covered it) but still advances the watermark.
-- `step < range` ⇒ sliding windows **overlap**: with `RANGE 10 STEP 5`, a
-  triple at `ts = 7` is in both `[0,10)` and `[5,15)`.
-- A window **closes** — its content is frozen, the query runs, the callback
-  fires — when the watermark (`max_ts − max_delay`) reaches its end.
-  `with_max_delay(d)` is the out-of-order tolerance: arrivals up to `d` ticks
-  behind the newest timestamp still land in their windows. A triple whose
-  *every* covering window has closed is dropped and counted
-  (`late_dropped()`).
-- **Empty windows are reported** (evaluated and delivered) when the watermark
-  jumps a gap — DSTREAM requires observing results *disappear*. Windows wholly
-  closed at the initial watermark (the first arrival's `ts − max_delay`) are
-  skipped (a stream starting at `ts = 10⁹` does not replay a billion empties),
-  and the lateness contract holds across the first push: a first push at
-  `ts = 12` with `max_delay = 5` leaves `[0,10)` open for a later `ts = 8`.
-- `step > range` leaves uncovered gaps; a gap timestamp belongs to no window
-  and is not "late" — but it still advances the watermark (event time passed),
-  closing earlier windows.
-- `flush()` is end-of-stream: closes every window up to the last timestamp
-  seen, ignoring `max_delay`.
-
-**Count windows** (`WindowSpec::count(rows)`, CQL-style): the last
-`min(rows, arrivals)` triples in **arrival order** (timestamps carried but
-irrelevant to membership), reported on every arrival — or every `slide`-th
-with `.with_slide(s)`. Reported bounds are the inclusive `[first.ts, last.ts]`
-of the content.
-
-**Materialisation is set-semantic:** a window is an RDF *graph*, so the same
-triple at several timestamps within one window counts once.
-
-## R2S semantics
-
-SPARQL SELECT results are multisets of rows; diffs respect that:
-
-- **RSTREAM** — the full result of every window (RSP-QL default, stateless).
-- **ISTREAM** — multiset difference `current ∖ previous`: rows *added* since
-  the previous window. First window diffs against empty (emits everything).
-- **DSTREAM** — `previous ∖ current`: rows *removed*. Emits nothing for the
-  first window; a row "disappears" only when a later (possibly empty) window
-  closes without it — rows in the final window are never DSTREAMed.
-
-Diffs are computed as **64-bit row hashes** (`FxHasher` over the bound terms)
-counted as multisets — O(rows) per window, no row sorting. Emission order is
-deterministic: ISTREAM keeps the engine's row order of the current window,
-DSTREAM that of the previous window. (A 64-bit hash collision between two
-distinct rows of one query could suppress a diff; accepted as vanishingly
-unlikely.)
-
-## Evaluation modes (R2R materialisation)
-
-How each closed window becomes the graph the engine evaluates is the
-`EvalMode` (`.with_mode(…)`, same results in all three — pinned by tests):
-
-- **`Rebuild`** — the v1 baseline: fresh dictionary + fresh indexes per
-  window. Nothing persists between windows, so memory is bounded by one
-  window even on unbounded-vocabulary streams.
-- **`PersistentDict`** (default) — ONE dictionary for the continuous query's
-  lifetime: terms interned once at push time, per-window graphs built from
-  already-interned `[Id; 3]`s via `Graph::from_parts`. Removes term
-  hashing/allocation from the window loop. The dictionary is COMPACTED as terms
-  age out of every live window (refcount-exact liveness: a term is kept iff some
-  live window still references it), so it stays bounded by the live window
-  vocabulary rather than growing with the all-time vocabulary — a 30 000-tick
-  churning-vocabulary stream (all-time vocab 60 001) peaks at ~2 063 dictionary
-  terms. `ContinuousQuery::dict_len()` exposes the live size.
-- **`Delta`** — ONE live graph + `Graph::apply_delta(inserts, deletes)` per
-  slide (set-semantic diff between consecutive windows), compacted when the
-  pending overlay outgrows the window. Measured slower than `PersistentDict`
-  everywhere (see below); kept because its per-slide work is O(changes).
-
-## Throughput
-
-The `throughput` example benchmarks the three [`EvalMode`]s (Rebuild v1,
-PersistentDict, Delta) head-to-head over 1 M synthetic sensor readings (100 sensors,
-1 triple/tick) across tumbling / sliding / GROUP BY window scenarios, reporting
-triples/s per mode. Run it for the numbers:
-
-```sh
-cargo run --release -p sparq-rsp --example throughput
-```
-
-`PersistentDict` wins every scenario over the v1 rebuild (the sliding rows are
-exactly the "~90 % of each build is redone work" case) and is the default. `Delta`
-never wins: `apply_delta` works at the term level (interning inserts, `id_of` per
-delete) and overlay rows are re-sorted per scan, so its savings are eaten before the
-engine runs. The remaining per-window cost in `PersistentDict` is the index build
-(`TripleStore::from_triples`) plus the numeric/temporal caches (O(dictionary) per
-window) — removing those needs the core cheap-snapshot seam (tracked in beads).
-
-The registered query is parsed ONCE at `register` time into a
-`sparq_engine::PreparedQuery`; each window executes the prepared algebra
-(no per-window parse). Parsing the AVG query above costs ~2.6 µs, so this
-only shows up at very high window rates: RANGE 10 tumbling windows dropped
-~17 % per window (11.8 → 9.8 µs median, interleaved A/B); at RANGE 100 and
-above the saving is within run-to-run noise.
-
-## Tests
-
-`cargo test -p sparq-rsp` — 33 integration tests plus the README doctests, pinning:
-boundary inclusivity (`[start, end)`), tumbling partition / sliding overlap,
-window origin `t0` (shifted bounds, pre-origin arrivals, anchor far from the
-origin), empty-window reporting, `step > range` gaps, out-of-order within
-`max_delay` vs. too-late drops, ROWS / SLIDE / arrival-order membership,
-scripted ISTREAM and DSTREAM traces (including disappearance via an empty
-window), multiset diff semantics, set-semantic materialisation, three-way
-eval-mode equivalence (incl. delta compaction + multi-timestamp eviction),
-PersistentDict dictionary compaction (bounded growth under high vocabulary
-churn, results identical to the uncompacted reference),
-CONSTRUCT (RSTREAM/ISTREAM/DSTREAM set diffs) and ASK per window,
-register-time validation of all three query forms, and end-to-end
-AVG-per-window.
+[MIT](../../LICENSE).
