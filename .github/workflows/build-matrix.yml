@@ -1,20 +1,30 @@
-# [OPUS-4.8] sq-v286.2: the SINGLE source of truth for the hardware-tiered sparq-cli build
-# matrix. Reusable workflow (`workflow_call`) invoked by release.yml (versioned archives +
+# [OPUS-4.8] sq-v286.2: the SINGLE source of truth for the hardware-tiered sparq native-binary
+# build matrix. Reusable workflow (`workflow_call`) invoked by release.yml (versioned archives +
 # SHA256SUMS) and dist.yml (bare per-tier binaries for the fat-package launcher). Before this,
 # release.yml#package and dist.yml#build carried two hand-synced copies of the same 10-tier
 # matrix + identical build steps — the duplication the release-CI design record flags to remove
 # (research/release-ci-design.md §5 "Reuse, do not duplicate" and §6 sequencing item 2:
 # "Unify the duplicated build matrix via workflow_call").
 #
+# [OPUS-4.8] sq-v286.6: this matrix ships BOTH native binaries per tier — `sparq-cli` AND
+# `sparq-server` — closing the release-CI design record's §3c / §4 gap ("sparq-server native
+# binary archive — a real gap … ships ONLY as a container today … add a second `-p sparq-server`
+# build; feasible-now") and §6 sequencing item 6. sparq-server carries no sys/C/platform dep that
+# sparq-cli does not already build on all 10 tiers — its only C dependency (mimalloc, the global
+# allocator) is the SAME `mimalloc 0.1` sparq-cli enables by default, so it cross-builds on every
+# tier (incl. the single win-arm64 MSVC cross-link) by parity with the proven sparq-cli matrix.
+# Its binary target requires the `server` feature, which is default-on, so a plain `-p sparq-server`
+# build produces the binary.
+#
 # The matrix (runner labels + target triple + target-cpu + binary extension) and the build
-# steps (checkout -> Rust+target -> cargo-auditable -> `cargo auditable build`) are now defined
-# ONCE here. Each caller selects the artifact SHAPE via the `mode` input:
-#   mode: archive  -> release.yml: tar.gz / zip of binary + README + LICENSE + CHANGELOG,
+# steps (checkout -> Rust+target -> cargo-auditable -> two `cargo auditable build` invocations)
+# are now defined ONCE here. Each caller selects the artifact SHAPE via the `mode` input:
+#   mode: archive  -> release.yml: tar.gz / zip of BOTH binaries + README + LICENSE + CHANGELOG,
 #                     uploaded as pkg-<tier>; the release job adds SHA256SUMS over them.
-#   mode: binary   -> dist.yml: bare binary copied to sparq-cli-<tier><ext>, uploaded as
-#                     sparq-cli-<tier>; the launcher's fat package selects from these.
-# Both modes embed the dependency manifest via cargo-auditable (GX-7 / GX-9) and emit an
-# identical SLSA build-provenance attestation over whatever bytes they upload (sq-zqq6).
+#   mode: binary   -> dist.yml: bare binaries copied to sparq-{cli,server}-<tier><ext>, uploaded
+#                     as sparq-cli-<tier>; the launcher's fat package selects from these.
+# Both modes embed the dependency manifest via cargo-auditable (GX-7 / GX-9) into EACH binary and
+# emit an SLSA build-provenance attestation over EVERY byte they upload — both binaries (sq-zqq6).
 #
 # Microarch tier rationale (target-cpu=native is a NO-OP on Apple silicon; the x86-64
 # {,-v2,-v3,-v4} ladder; arm64 neoverse-n1 +lse; win-arm64 cross-linked from the x64 runner)
@@ -85,7 +95,7 @@ jobs:
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
           tool: cargo-auditable
-      - name: Build (${{ matrix.cpu || 'default-cpu' }})
+      - name: Build sparq-cli + sparq-server (${{ matrix.cpu || 'default-cpu' }})
         shell: bash
         run: |
           FLAGS=""
@@ -93,16 +103,28 @@ jobs:
           [ "${{ matrix.tier }}" = "arm64-linux" ] && FLAGS="$FLAGS -Ctarget-feature=+lse"
           # `cargo auditable build` is a drop-in for `cargo build` that embeds the dep
           # manifest into the binary (GX-7); `--locked` pins the materials (Cargo.lock).
+          # [OPUS-4.8] sq-v286.6: build BOTH shipped binaries with the SAME tier flags so the
+          # microarch tier + cargo-auditable posture cover sparq-server identically to sparq-cli.
+          # sparq-server's binary target has `required-features = ["server"]`, which is in its
+          # `default` set, so a plain `-p sparq-server` build produces the binary (no extra
+          # `--features` needed). One build per package keeps the dep manifest each binary embeds
+          # scoped to that binary's own tree.
           RUSTFLAGS="$FLAGS" cargo auditable build --release --locked -p sparq-cli --target ${{ matrix.target }}
+          RUSTFLAGS="$FLAGS" cargo auditable build --release --locked -p sparq-server --target ${{ matrix.target }}
 
       # ---- archive mode (release.yml): versioned tar.gz/zip + README + LICENSE + CHANGELOG ----
-      - name: Package (binary + README + LICENSE + CHANGELOG)
+      # [OPUS-4.8] sq-v286.6: the per-tier archive now carries BOTH binaries (sparq-cli +
+      # sparq-server). The archive name is unchanged (`sparq-cli-<ver>-<tier>`) to keep the
+      # release SHA256SUMS / asset naming consistent — release.yml downloads `pkg-*` wholesale
+      # and sums every file, so it is agnostic to the archive's internal contents.
+      - name: Package (binaries + README + LICENSE + CHANGELOG)
         if: inputs.mode == 'archive'
         shell: bash
         run: |
           PKG="sparq-cli-${GITHUB_REF_NAME}-${{ matrix.tier }}"
           mkdir -p "pkg/$PKG"
           cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "pkg/$PKG/"
+          cp "target/${{ matrix.target }}/release/sparq-server${{ matrix.ext }}" "pkg/$PKG/"
           cp README.md "pkg/$PKG/"
           # LICENSE is copied when present (license = MIT is declared in Cargo.toml; adding
           # the LICENSE file itself is on the pre-release checklist in docs/release.md).
@@ -129,20 +151,28 @@ jobs:
             pkg/*.zip
           if-no-files-found: error
 
-      # ---- binary mode (dist.yml): bare per-tier binary for the launcher fat-package ----
-      - name: Stage dist binary
+      # ---- binary mode (dist.yml): bare per-tier binaries for the launcher fat-package ----
+      # [OPUS-4.8] sq-v286.6: stage BOTH bare binaries per tier. Both are uploaded under the
+      # existing `sparq-cli-<tier>` artifact name (dist.yml's launcher selects by tier); the
+      # attestation covers both.
+      - name: Stage dist binaries
         if: inputs.mode == 'binary'
         shell: bash
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}"
-      - name: Attest build provenance (dist binary)
+          cp "target/${{ matrix.target }}/release/sparq-server${{ matrix.ext }}" "dist/sparq-server-${{ matrix.tier }}${{ matrix.ext }}"
+      - name: Attest build provenance (dist binaries)
         if: inputs.mode == 'binary'
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          subject-path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
+          subject-path: |
+            dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
+            dist/sparq-server-${{ matrix.tier }}${{ matrix.ext }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: inputs.mode == 'binary'
         with:
           name: sparq-cli-${{ matrix.tier }}
-          path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
+          path: |
+            dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
+            dist/sparq-server-${{ matrix.tier }}${{ matrix.ext }}
