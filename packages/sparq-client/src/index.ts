@@ -389,10 +389,25 @@ export {
   tokenizeTurtle,
 } from "./turtle-highlight.js";
 
+// [OPUS-4.8] sq-gb4o (#805) — the pretty/indented Turtle serialiser. The engine answers
+// CONSTRUCT/DESCRIBE (and the dataset viewer's all-quads query) as FLAT N-Triples; this reshapes
+// that into idiomatic grouped Turtle (`@prefix` abbreviation, subject blocks, `;`/`,` lists)
+// while staying round-trip-equivalent. Dependency-free + DOM-free so the site and the Tauri
+// webview share it. Compose with the highlighter as pretty-print THEN `tokenizeTurtle`.
+export {
+  type PrettyTurtleOptions,
+  type RdfStatement,
+  type RdfTerm,
+  parseNTriples,
+  prettyTrig,
+  prettyTurtle,
+} from "./pretty-turtle.js";
+
 export {
   type PrefixBinding,
   COMMON_PREFIXES,
   declaredPrefixes,
+  declaredPrefixBindings,
   usedPrefixes,
   missingCommonPrefixes,
   renderPrefixLines,

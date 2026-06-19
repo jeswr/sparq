@@ -55,7 +55,8 @@ import { DatasetPanel } from "@/components/repl-dataset-panel";
 // [OPUS-4.8] sq-n5aw — the syntax-highlighting SPARQL editor replaces the plain <textarea>.
 import { SparqlEditor } from "@/components/sparql-editor";
 // [OPUS-4.8] sq-8uew — Turtle/N-Triples syntax highlighting for the CONSTRUCT/DESCRIBE graph.
-import { RdfHighlight } from "@/components/rdf-highlight";
+// [OPUS-4.8] sq-gb4o (#805) — pretty/indented Turtle (with a raw N-Triples toggle) for the graph.
+import { TurtleResult } from "@/components/rdf-highlight";
 // [OPUS-4.8] sq-2mke — endpoint mode: the Connect panel + the SPARQL 1.1 Protocol client.
 import { ConnectPanel } from "@/components/connect-panel";
 // [OPUS-4.8] sq-9ij6 — endpoint mode: the live subscriptions view (SSE result deltas).
@@ -71,7 +72,9 @@ type RunState =
   | { kind: "running" }
   | { kind: "select"; results: SparqlResults; ms: number }
   | { kind: "boolean"; value: boolean; ms: number }
-  | { kind: "graph"; ntriples: string; triples: number; ms: number }
+  // [OPUS-4.8] sq-gb4o (#805) — `query` carries the SPARQL text the graph came from so the
+  // pretty-Turtle view can abbreviate IRIs using the query's own PREFIX declarations.
+  | { kind: "graph"; ntriples: string; triples: number; ms: number; query: string }
   // [OPUS-4.8] sq-2mke — `endpoint` marks an update applied to a REMOTE server (no
   // before/after in-tab count), so the result copy stays honest about which store mutated.
   | {
@@ -206,7 +209,7 @@ export function Repl() {
       case "graph": {
         const trimmed = result.ntriples.trim();
         const triples = trimmed === "" ? 0 : trimmed.split("\n").length;
-        setState({ kind: "graph", ntriples: trimmed, triples, ms });
+        setState({ kind: "graph", ntriples: trimmed, triples, ms, query: sparql });
         return;
       }
       case "update":
@@ -276,7 +279,7 @@ export function Repl() {
         const ms = performance.now() - t0;
         const trimmed = ntriples.trim();
         const triples = trimmed === "" ? 0 : trimmed.split("\n").length;
-        setState({ kind: "graph", ntriples: trimmed, triples, ms });
+        setState({ kind: "graph", ntriples: trimmed, triples, ms, query: sparql });
         return;
       }
 
@@ -698,8 +701,9 @@ function ResultPanel({ state }: { state: RunState }) {
       );
     }
     return (
-      <RdfHighlight
+      <TurtleResult
         text={state.ntriples}
+        query={state.query}
         className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
       />
     );
