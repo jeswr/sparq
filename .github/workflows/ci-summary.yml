@@ -35,8 +35,9 @@
 #   • "markdownlint-advisory (whole repo)"            (docs-quality.yml)
 #   • "external-links (lychee online, advisory)"      (docs-quality.yml)
 #   • "vale (prose, advisory)"                        (docs-quality.yml)
-#   • "readme-template (template, advisory)"          (docs-quality.yml; sq-8ic6 split
-#                                                      no-perf-numbers off to a HARD gate)
+# ([OPUS-4.8] sq-8ic6: "readme-template (template, advisory)" was PROMOTED to the HARD
+#  gate "readme-template (template)" — no advisory token, so it now GATES — once the
+#  sq-9jw5 README-overhaul backlog cleared and sq-ixsf tightened the stub classifier.)
 # REQUIRED checks (gate / build+test / clippy / coverage / the conformance + perf
 # ratchets / wasm / MSRV / supply-chain / …) do NOT contain those words, so they
 # still gate normally. Rationale: an advisory job that concludes `failure` (e.g.
