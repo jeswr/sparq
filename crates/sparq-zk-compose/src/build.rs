@@ -758,3 +758,251 @@ pub fn build_join(
         },
     })
 }
+
+// [OPUS-4.8] sq-bif.6: GLUE unit tests for the circuit-family id derivation —
+// the (data shape -> compiled member) plumbing the prover AND verifier both call
+// so a proof can only fit its member. These cover the NON-cryptographic
+// composition logic ONLY (bucket selection, exact-digit-count discipline,
+// out-of-family rejection, package-name determinism); they assert NOTHING about
+// in-circuit soundness or any privacy guarantee (the verifier remains NOT-yet-sound,
+// sq-qhy4 — external accredited-cryptographer sign-off pending).
+#[cfg(test)]
+mod derive_id_tests {
+    use super::*;
+
+    // --- scan (k, n, r) bucket lattice -----------------------------------
+
+    /// `derive_scan_id` maps the largest-graph size / disclosed-row count to the
+    /// SMALLEST compiled bucket that fits, and the result is deterministic.
+    #[test]
+    fn scan_id_picks_smallest_fitting_bucket_and_is_deterministic() {
+        // n picks 16 for <=16 triples, 64 for 17..=64. r picks 4 for <=4, 8 for 5..=8.
+        let id = derive_scan_id(1, 10, 3).expect("10<=16, 3<=4 fits");
+        assert_eq!(id, CircuitId::Scan { k: 1, n: 16, r: 4 });
+        // Exactly-N (the bucket boundary) selects that bucket, not the next.
+        assert_eq!(
+            derive_scan_id(2, 16, 4),
+            Some(CircuitId::Scan { k: 2, n: 16, r: 4 }),
+            "max_graph == 16 and match_rows == 4 fit the {{16,4}} bucket exactly"
+        );
+        // One over a boundary rolls up to the next compiled bucket.
+        assert_eq!(
+            derive_scan_id(1, 17, 5),
+            Some(CircuitId::Scan { k: 1, n: 64, r: 8 }),
+            "17 triples needs n=64; 5 rows needs r=8"
+        );
+        // Determinism: same inputs -> identical id across repeated calls.
+        assert_eq!(derive_scan_id(2, 64, 8), derive_scan_id(2, 64, 8));
+    }
+
+    /// A zero size / zero match-count is clamped to the smallest live bucket
+    /// (the circuit always commits at least one slot / discloses at least the
+    /// padded row word), not rejected.
+    #[test]
+    fn scan_id_clamps_zero_to_smallest_bucket() {
+        assert_eq!(
+            derive_scan_id(1, 0, 0),
+            Some(CircuitId::Scan { k: 1, n: 16, r: 4 }),
+            "max_graph/match_rows clamp up to 1, selecting the smallest bucket"
+        );
+    }
+
+    /// Out-of-family inputs return `None` (a clean error at the call site),
+    /// never a wrong member: an uncompiled `k`, or a size past every bucket.
+    #[test]
+    fn scan_id_out_of_family_is_none() {
+        assert!(derive_scan_id(3, 10, 3).is_none(), "k=3 is not compiled");
+        assert!(derive_scan_id(0, 10, 3).is_none(), "k=0 is not compiled");
+        assert!(
+            derive_scan_id(1, 65, 3).is_none(),
+            "65 triples exceeds the largest n bucket (64)"
+        );
+        assert!(
+            derive_scan_id(1, 10, 9).is_none(),
+            "9 rows exceeds the largest r bucket (8)"
+        );
+    }
+
+    // --- filter_int / filter_f64 EXACT digit-count discipline (sq-wto) ----
+
+    /// `derive_filter_int_id` is an EXACT digit-count match: every compiled D in
+    /// `FILTER_INT_D_VALUES` yields its own member; the count drives the id.
+    #[test]
+    fn filter_int_id_exact_match_per_compiled_digit_count() {
+        for &d in FILTER_INT_D_VALUES {
+            assert_eq!(
+                derive_filter_int_id(d),
+                Some(CircuitId::FilterInt { d }),
+                "compiled D={} derives its own filter_int member",
+                d
+            );
+        }
+        // 0 clamps to the 1-digit canonical form ("0").
+        assert_eq!(derive_filter_int_id(0), Some(CircuitId::FilterInt { d: 1 }));
+    }
+
+    /// The sq-wto correctness invariant: an out-of-family digit count returns
+    /// `None` — NOT the next-larger member (which would be silently unprovable
+    /// because the `digits: [u8; D]` witness pins the count to D exactly).
+    #[test]
+    fn filter_int_id_out_of_family_is_none_not_wrong_d() {
+        // 5 is the first count past the compiled 1..=4 range — the regression
+        // the differential fuzzer (sq-61g) caught: 5 must NOT derive d=anything.
+        assert_eq!(derive_filter_int_id(5), None, "d=5 has no member (sq-wto)");
+        for d in [6u32, 10, 19, 20, 100] {
+            assert!(
+                derive_filter_int_id(d).is_none(),
+                "out-of-family digit count {} must return None, never a wrong-D member",
+                d
+            );
+        }
+    }
+
+    /// `filter_f64` shares the EXACT-match discipline with `filter_int`.
+    #[test]
+    fn filter_f64_id_exact_match_and_out_of_family_none() {
+        for &d in FILTER_F64_D_VALUES {
+            assert_eq!(derive_filter_f64_id(d), Some(CircuitId::FilterF64 { d }));
+        }
+        assert_eq!(derive_filter_f64_id(0), Some(CircuitId::FilterF64 { d: 1 }));
+        assert_eq!(derive_filter_f64_id(5), None, "no f64 member past the compiled range");
+        assert!(derive_filter_f64_id(16).is_none(), "16 digits is past the f64 family");
+    }
+
+    // --- filter_signed_int (md magnitude-digit) ---------------------------
+
+    /// `derive_filter_signed_int_id` is an EXACT magnitude-digit-count match over
+    /// the compiled `{2, 4}` set; the IN-RANGE gap (3) and out-of-family counts
+    /// both return `None` (never a wrong-MD member).
+    #[test]
+    fn filter_signed_int_id_exact_match_with_gap() {
+        for &md in FILTER_SIGNED_INT_MD_VALUES {
+            assert_eq!(
+                derive_filter_signed_int_id(md),
+                Some(CircuitId::FilterSignedInt { md })
+            );
+        }
+        // 3 is INSIDE [2,4] numerically but is NOT a compiled member — exact match.
+        assert_eq!(
+            derive_filter_signed_int_id(3),
+            None,
+            "md=3 is not compiled ({{2,4}} only); exact match returns None, not md=4"
+        );
+        // 1 clamps from 0 but is also uncompiled.
+        assert_eq!(derive_filter_signed_int_id(0), None, "md clamps to 1, which is uncompiled");
+        assert!(derive_filter_signed_int_id(5).is_none(), "md=5 out of family");
+    }
+
+    // --- filter_decimal (id, fd) pair ------------------------------------
+
+    /// `derive_filter_decimal_id` matches the `(int_digits, frac_digits)` PAIR
+    /// exactly against the compiled set; a wrong integer OR fraction count gives
+    /// `None`.
+    #[test]
+    fn filter_decimal_id_exact_pair_match() {
+        for &(id, fd) in FILTER_DECIMAL_ID_FD_VALUES {
+            assert_eq!(
+                derive_filter_decimal_id(id, fd),
+                Some(CircuitId::FilterDecimal { id, fd }),
+                "compiled ({},{}) pair derives its member",
+                id,
+                fd
+            );
+        }
+        // The lone compiled member is (3, 2). Either coordinate off => None.
+        assert_eq!(derive_filter_decimal_id(3, 2), Some(CircuitId::FilterDecimal { id: 3, fd: 2 }));
+        assert_eq!(derive_filter_decimal_id(2, 2), None, "wrong integer-digit count");
+        assert_eq!(derive_filter_decimal_id(3, 3), None, "wrong fraction-digit count");
+        assert_eq!(derive_filter_decimal_id(4, 2), None, "wrong integer-digit count");
+        // int_digits clamps to >=1 (canonical "0.xx" has one integer digit).
+        assert_eq!(
+            derive_filter_decimal_id(0, 2),
+            None,
+            "id clamps to 1; (1,2) is not the compiled (3,2) member"
+        );
+    }
+
+    // --- join_eq (n_a, n_b) bucket pair ----------------------------------
+
+    /// `derive_join_eq_id` selects the smallest fitting `JOIN_EQ_N_BUCKETS` bucket
+    /// for EACH side independently (mirrors the scan n-bucket discipline), so the
+    /// four `(16|64, 16|64)` combinations are all reachable.
+    #[test]
+    fn join_eq_id_buckets_each_side_independently() {
+        assert_eq!(derive_join_eq_id(10, 10), Some(CircuitId::JoinEq { n_a: 16, n_b: 16 }));
+        assert_eq!(derive_join_eq_id(16, 64), Some(CircuitId::JoinEq { n_a: 16, n_b: 64 }));
+        assert_eq!(derive_join_eq_id(64, 16), Some(CircuitId::JoinEq { n_a: 64, n_b: 16 }));
+        assert_eq!(derive_join_eq_id(17, 50), Some(CircuitId::JoinEq { n_a: 64, n_b: 64 }));
+        // Exactly-N boundary selects that bucket.
+        assert_eq!(derive_join_eq_id(16, 16), Some(CircuitId::JoinEq { n_a: 16, n_b: 16 }));
+        // Clamp zero to the smallest bucket on either side.
+        assert_eq!(derive_join_eq_id(0, 0), Some(CircuitId::JoinEq { n_a: 16, n_b: 16 }));
+    }
+
+    /// Either side past every compiled bucket returns `None`, never a wrong-N member.
+    #[test]
+    fn join_eq_id_out_of_family_is_none() {
+        assert!(derive_join_eq_id(65, 16).is_none(), "n_a=65 exceeds the largest bucket");
+        assert!(derive_join_eq_id(16, 65).is_none(), "n_b=65 exceeds the largest bucket");
+    }
+
+    // --- package() name determinism + distinctness -----------------------
+
+    /// `CircuitId::package()` is a pure, deterministic function of the id, and it
+    /// names DISTINCT members for distinct (family × bucket) ids — the property
+    /// the driver relies on to locate the right `zk/compose/<pkg>` directory.
+    #[test]
+    fn package_names_are_deterministic_and_distinct_per_family_and_bucket() {
+        let ids = [
+            CircuitId::Scan { k: 1, n: 16, r: 4 },
+            CircuitId::Scan { k: 2, n: 16, r: 4 },
+            CircuitId::Scan { k: 1, n: 64, r: 4 },
+            CircuitId::Scan { k: 1, n: 16, r: 8 },
+            CircuitId::FilterInt { d: 1 },
+            CircuitId::FilterInt { d: 4 },
+            CircuitId::FilterF64 { d: 1 },
+            CircuitId::FilterSignedInt { md: 2 },
+            CircuitId::FilterDecimal { id: 3, fd: 2 },
+            CircuitId::JoinEq { n_a: 16, n_b: 64 },
+            CircuitId::JoinEq { n_a: 64, n_b: 16 },
+        ];
+        // Deterministic: the same id renders the same package name every call.
+        for id in &ids {
+            assert_eq!(id.package(), id.package(), "package() is pure");
+        }
+        // Distinct: no two distinct ids collide on a package name (one directory
+        // per member — a collision would prove the wrong relation under a shared dir).
+        let mut names: Vec<String> = ids.iter().map(|i| i.package()).collect();
+        let total = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), total, "every distinct id maps to a distinct package dir");
+        // Spot-check the exact wire names the zk/compose/ directories use.
+        assert_eq!(CircuitId::Scan { k: 2, n: 64, r: 8 }.package(), "scan_k2_n64_r8");
+        assert_eq!(CircuitId::FilterInt { d: 3 }.package(), "filter_int_d3");
+        assert_eq!(CircuitId::FilterF64 { d: 2 }.package(), "filter_f64_d2");
+        assert_eq!(CircuitId::FilterSignedInt { md: 4 }.package(), "filter_signed_int_d4");
+        assert_eq!(CircuitId::FilterDecimal { id: 3, fd: 2 }.package(), "filter_decimal_i3_f2");
+        assert_eq!(CircuitId::JoinEq { n_a: 64, n_b: 64 }.package(), "join_eq_na64_nb64");
+    }
+
+    /// The scan / filter_int builders thread the SAME derive-id discipline: the
+    /// id carried in the built `ProofInputs` equals the id `derive_*` returns for
+    /// the same shape, and an out-of-family operand makes the whole build `None`.
+    #[test]
+    fn builders_carry_the_derived_id_and_propagate_out_of_family_none() {
+        // A 3-digit operand builds the filter_int_d3 member.
+        let enc = encode_int_literal(123);
+        let (inputs, digits) =
+            build_filter_int(enc, 123, FilterOp::Gt, 100, true).expect("3-digit operand has d3");
+        assert_eq!(*inputs.circuit_id(), CircuitId::FilterInt { d: 3 });
+        assert_eq!(digits, b"123", "digit witness is the canonical decimal bytes");
+        // A 5-digit operand is out of family -> the builder returns None (sq-wto),
+        // exactly as derive_filter_int_id(5) does.
+        let enc5 = encode_int_literal(12345);
+        assert!(
+            build_filter_int(enc5, 12345, FilterOp::Lt, 0, false).is_none(),
+            "5-digit operand: out-of-family build is None, never a wrong-D witness"
+        );
+    }
+}
