@@ -85,6 +85,23 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-solid/tests/common/mod.rs",
         "ACP_SCENARIO_FLOOR",
     ),
+    // [OPUS-4.8] sq-t58w.8 — the Solid WAC + ACP DIFFERENTIAL ORACLE ratchets. Both
+    // rows mirror the SAME hard divergence-count floor const (`DIVERGENCE_FLOOR = 0`)
+    // declared in `tests/differential_oracle.rs` (the oracle landed under sq-t58w.7).
+    // Unlike the scenario-count floors above (which rise as the corpus grows), the
+    // only acceptable divergence count is 0, so this floor is the fixed 0 — and this
+    // guard pins the central scoreboard's `ratchet_floor: 0` to that source const so
+    // the two can never silently diverge.
+    (
+        "Solid WAC differential oracle",
+        "crates/sparq-solid/tests/differential_oracle.rs",
+        "DIVERGENCE_FLOOR",
+    ),
+    (
+        "Solid ACP differential oracle",
+        "crates/sparq-solid/tests/differential_oracle.rs",
+        "DIVERGENCE_FLOOR",
+    ),
 ];
 
 #[test]
@@ -138,10 +155,13 @@ fn scoreboard_renders_all_suites() {
             suite.label
         );
     }
-    // The consolidation claim: SHACL + GeoSPARQL (sq-ncvq.16) and Solid WAC/ACP
-    // (sq-j174) now appear in this central report.
+    // The consolidation claim: SHACL + GeoSPARQL (sq-ncvq.16), Solid WAC/ACP
+    // decision parity (sq-j174), and the Solid WAC/ACP differential oracles
+    // (sq-t58w.8) now all appear in this central report.
     assert!(md.contains("W3C SHACL core"));
     assert!(md.contains("OGC GeoSPARQL"));
     assert!(md.contains("Solid WAC decision parity"));
     assert!(md.contains("Solid ACP decision parity"));
+    assert!(md.contains("Solid WAC differential oracle"));
+    assert!(md.contains("Solid ACP differential oracle"));
 }
