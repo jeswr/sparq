@@ -44,3 +44,13 @@ sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 # SPARQL Update text (`Footprint::of_sparql`). Workspace-patched to the vendored
 # W3C-conformance fork, same as the engine — both parsers must agree on syntax.
 spargebra.workspace = true
+
+[features]
+# [OPUS-4.8] sq-jluc: the response-bytes result cache (research/concurrent-serving.md
+# §5 row 2 + §6.3) — OPT-IN and OFF by default. It is a LEAN feature: it adds NO new
+# dependency (the cache key/map reuse the in-tree `rustc-hash` and `std::hash`; the
+# values are `Arc<[u8]>` response bodies) and pulls in neither HTTP nor async machinery
+# (library-first §6.1: the cache stores opaque bytes + a caller-derived visibility-scope
+# key and never depends on `sparq-solid`). The default build carries zero cache code.
+default = []
+result-cache = []

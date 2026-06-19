@@ -49,6 +49,40 @@ cargo run -p sparq-server -- --format turtle data.ttl
   one new immutable generation; serialisability is by construction.
 - **Sync, runtime-agnostic, library-first** — no HTTP or async-runtime types;
   consumers wrap it. It must never enter `sparq-wasm`'s dependency graph.
+- **Response-bytes result cache** *(opt-in: `--features result-cache`, OFF by
+  default)* — see below.
+
+## 🗃️ Result cache (opt-in, `result-cache` feature)
+
+A serving-layer cache from a request *identity* to the complete pre-serialized
+response body, so a repeated read returns bytes in tens of nanoseconds instead of
+re-executing. **OFF by default**; the default build carries zero cache code and no
+extra dependency.
+
+- **Key = (canonical-query × visibility-scope × per-pod epoch-vector)** (design
+  §6.3). The query is cheaply canonicalized (whitespace, and opt-in variable
+  renaming). The **visibility scope** is the identity of the *accessible graph set*
+  a request runs under — derive a `ScopeKey` from
+  `sparq_solid::AuthIndex::accessible(session, mode)`, **never** from the WebID
+  (the Hasura lesson). Many WebIDs that share one public-read scope collapse to one
+  key.
+- **Access-control isolation is correctness, not privacy.** Bytes cached for one
+  scope can never be served to a different scope (a different scope MUST miss —
+  tested). This enforces the access-control boundary the auth layer defines; it is
+  **not itself a confidentiality/privacy guarantee** (no cryptographic claim; it
+  trusts a faithfully-derived scope key).
+- **Invalidation = per-pod (per-named-graph) epoch bumps.** Each entry records the
+  epoch of the graphs its query touched; a write to any of them makes it stale.
+  Queries with an unbounded read footprint pin the global generation (invalidated
+  by any write).
+- **Single-flight leases** collapse a stampede on a hot uncached key into one
+  execution + N waiters. **Byte-budget LRU + admission**: oversize/streaming bodies
+  are never cached.
+
+The cache stores opaque `Arc<[u8]>` bodies and a caller-derived `ScopeKey`; it never
+depends on `sparq-solid` and never parses a query. It is a **different layer** from
+`sparq-engine`'s embedded `result-cache` (the in-engine algebra-keyed LRU). Perf
+targets (design §6.3) require a canonical host and are validated there, not in-tree.
 
 ## 📚 Learn more
 

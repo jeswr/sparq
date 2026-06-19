@@ -190,6 +190,21 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   that complementary hole. Pass `None` on either to opt back out of that guard.
 - Re-exports for cache layers/tests: `PinnedGen`, `GLOBAL_POD: &str`
   (`"urn:sparq:pod:global"`), and `sparq_serve::{Epoch, PodEpochs, PodId}`.
+- **Response-bytes result cache** (opt-in, `sparq-serve`'s `result-cache` feature,
+  OFF by default — [OPUS-4.8] sq-jluc). A serving-layer cache from a request
+  *identity* to the pre-serialized response body, distinct from `sparq-engine`'s
+  in-engine algebra-keyed `result-cache`. Public surface (feature-gated):
+  `sparq_serve::{ResultCache, CacheConfig, ScopeKey, ReadFootprint, LeaseOutcome,
+  CacheStats}`. **Key = canonical-query × visibility-scope × per-pod epoch-vector**
+  (`ResultCache::lease`/`get`): the **scope** is the identity of the accessible
+  graph set (`ScopeKey::of_graphs(AuthIndex::accessible(session, mode))`), **never**
+  the WebID — bytes cached for one access scope can never be served to another (an
+  access-control correctness invariant, *not* a privacy guarantee). Invalidation is
+  per-pod epoch bumps (`ReadFootprint::Pods`) or the global generation
+  (`ReadFootprint::Unbounded`); single-flight leases dedup a stampede; a byte-budget
+  LRU + admission bound keeps it from caching oversize/streaming bodies. Wiring it
+  into the axum endpoint and the canonical perf-validation are follow-ups (the perf
+  targets need a canonical host).
 - Serializer/negotiation helpers (always compiled, no `server` feature): module
   `sparq_server::negotiate` — `fn negotiate(accept: Option<&str>) -> Format`,
   `fn negotiate_graph(accept: Option<&str>) -> GraphFormat`; module
