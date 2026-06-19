@@ -2,7 +2,9 @@
 //!
 //! A thin, allocation-conscious wrapper over the workspace's public APIs:
 //!
-//! * `Graph` wraps `sparq_core::Graph` (load / save / open / len).
+//! * `Graph` wraps `sparq_core::Graph` (load / save / open / len). `Graph.copy`
+//!   returns a cheap, logically-independent copy over the core's structural
+//!   snapshot (Arc-shared immutable base) — O(pending delta), not O(triples).
 //! * `Graph.query` / `Graph.query_json` / `Graph.ask` / `Graph.construct` /
 //!   `Graph.describe` call `sparq_engine` (all four query forms are native:
 //!   ASK early-exits, CONSTRUCT/DESCRIBE return term triples).
@@ -610,6 +612,31 @@ impl Graph {
     fn inconsistencies(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         let inner = &self.inner;
         Ok(py.detach(|| sparq_reason::inconsistencies(&inner.dict, &all_triples(inner))))
+    }
+
+    /// A cheap, logically-INDEPENDENT copy of this graph that can then be
+    /// mutated separately — `update` / `reason` / `reason_n3_with` on either the
+    /// original or the copy leave the other untouched.
+    ///
+    /// Built on the core's structural snapshot (`sparq_core::Graph::snapshot`):
+    /// the immutable base storage (the six permutation indexes, the frozen
+    /// dictionary base, the numeric caches) is `Arc`-shared, so this is
+    /// O(pending delta), NEVER O(triples) — it duplicates neither the indexes nor
+    /// the dictionary arena. (The first copy of a freshly-loaded graph pays a
+    /// one-time O(n) freeze to mint the shareable base; subsequent copies of the
+    /// frozen lineage are cheap.) Named graphs are copied too.
+    ///
+    /// The cached full-text index is NOT carried over: the copy starts without
+    /// one and lazily rebuilds on its first `text_search` / `query_text`, exactly
+    /// as a freshly loaded graph would (the same lazy-rebuild policy a mutating
+    /// swap uses). [OPUS-4.8] sq-6h8
+    fn copy(&self, py: Python<'_>) -> Graph {
+        let inner = &self.inner;
+        // `snapshot()` yields an immutable point-in-time view; `into_graph()`
+        // drops the read-only wrapper, leaving an independently-mutable `Graph`
+        // that already owns its own Arc-shared base + per-generation delta.
+        let copied = py.detach(|| inner.snapshot().into_graph());
+        Graph { inner: copied, text: None }
     }
 
     /// Number of triples in the default graph.

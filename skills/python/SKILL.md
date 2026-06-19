@@ -61,6 +61,7 @@ All on the `sparq.Graph` class (the only entry point). Constructors are static m
 - `g.text_search(query, any=False, limit=None) -> list[(Term, float)]` — BM25 search over the default graph's string literals; best-first `(literal Term, score)`. AND of tokens by default; `any=True` is OR; `*`-suffix token = prefix match; `limit` keeps top-n.
 - `g.query_text(sparql) -> QueryResult` — SELECT that may use `text:` magic predicates (see recipe below).
 - `g.build_text_index() -> int` / `g.drop_text_index() -> None` — eagerly build (returns indexed-literal count) / free the cached full-text index.
+- `g.copy() -> Graph` — a cheap, logically-independent copy (over the core's Arc-shared structural snapshot, O(pending delta), not O(triples)); the original and the copy can then be mutated separately (`update`/`reason`/`reason_n3_with` on one leaves the other untouched). Named graphs are copied; the copy lazily rebuilds its own full-text index.
 - `len(g)` — default-graph triple count; `repr(g)` → `"Graph(N triples)"`.
 
 `QueryResult`: `.vars: list[str]`, `.rows: list[dict[str, Term]]`, plus `len(res)`, `res[i]` (negative indices/slices ok), and iteration.
