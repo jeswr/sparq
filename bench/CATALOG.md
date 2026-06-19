@@ -345,7 +345,7 @@ bench/bsbm/run.sh                     # BSBM Explore -pc 300 (JRE + unzip): gen 
 bench/lubm/run.sh                     # LUBM(1) (javac + rapper): gen + OWL-RL closure + both tiers + row diff
 bench/shacl/run.sh                    # SHACL (javac + rapper): LUBM ABox x 5 shapes + violations/conforms/focus_nodes diff
 cargo build --release -p sparq-text --example bench_text && bench/fts/run.sh   # Full-text (no external tool): synthetic BM25 corpus + hit-count/bytes-per-doc diff
-cargo build --release -p sparq-vectors --example bench_vectors && bench/vector/run.sh   # Vector/ANN (no external tool): synthetic corpus + recall@10-deficit gate (HNSW/Vamana/PQ)
+cargo build --release -p sparq-vectors --example bench_vectors --features approx-ann && bench/vector/run.sh   # Vector/ANN (no external tool; --features approx-ann required — example links HNSW VectorIndex): synthetic corpus + recall@10-deficit gate (HNSW/Vamana/PQ)
 bench/geo/run.sh                      # GeoSPARQL (cargo only): fixed ~100k point corpus + within/nearest/geof: result-set-size + compliance-pass diff (counts-not-coords)
 cargo build --release -p sparq-rsp --example rsp_oracle && bench/rsp/run.sh   # RSP-QL (cargo only): clock-free fixed (triple,ts) replay + DETERMINISTIC per-window row-count gate (3 EvalModes) + SRBench correctness oracle
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate

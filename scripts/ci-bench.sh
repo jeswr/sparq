@@ -676,7 +676,13 @@ elif command -v cargo >/dev/null 2>&1 && [ -x "$VECTOR_RUN" ]; then
   # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
   # Let cargo's staleness detection decide (a no-op rebuild is cheap); do NOT swallow a real
   # compile failure (it must fail the gate, not silently skip the ANN recall check).
-  if ! cargo build --release -q -p sparq-vectors --example bench_vectors; then
+  # [OPUS-4.8] sq-k9o2: --features approx-ann is REQUIRED here. The example links `VectorIndex`
+  # (the in-RAM HNSW backend, `#[cfg(feature = "approx-ann")]` in src/lib.rs) and its Cargo.toml
+  # `[[example]]` block declares `required-features = ["approx-ann"]`. Naming the target WITHOUT
+  # the feature is a hard `error: target bench_vectors requires the features: approx-ann` (exit
+  # 101) — the failure that RED-ed main after #807 added that `required-features` line. The flag
+  # is crate-scoped (`-p sparq-vectors`), so it widens NO other crate's feature set.
+  if ! cargo build --release -q -p sparq-vectors --example bench_vectors --features approx-ann; then
     echo "ERROR: bench_vectors example failed to build" >&2
     exit 1
   fi

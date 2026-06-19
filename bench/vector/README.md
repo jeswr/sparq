@@ -74,7 +74,9 @@ non-canonical): the ci-bench hook harvests one `vectors_<workload>_query_us` per
 ## Running it
 
 ```sh
-cargo build --release -p sparq-vectors --example bench_vectors
+# the example links the HNSW `VectorIndex`, so the build needs the `approx-ann` feature
+# (the example's Cargo.toml `required-features`); without it cargo errors out (exit 101).
+cargo build --release -p sparq-vectors --example bench_vectors --features approx-ann
 bench/vector/run.sh                    # self-asserting: exit 1 on any recall regression
 # heavier substrate (advisory timing; HNSW/DiskANN scale with N):
 VEC_N=200000 bench/vector/run.sh

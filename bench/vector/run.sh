@@ -30,7 +30,7 @@ BIN="${BENCH_VECTORS:-$ROOT/target/release/examples/bench_vectors}"
 
 if [ ! -x "$BIN" ]; then
   echo "[vector] ERROR: bench_vectors not found at $BIN" >&2
-  echo "[vector]   build: cargo build --release -p sparq-vectors --example bench_vectors" >&2
+  echo "[vector]   build: cargo build --release -p sparq-vectors --example bench_vectors --features approx-ann" >&2
   exit 1
 fi
 
