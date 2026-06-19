@@ -1,0 +1,29 @@
+// [OPUS-4.8] sq-jpki.2 — DEV-ONLY typecheck config for the wasm `Store` single-source-of-truth
+// conformance assertion (`src/wasm-conformance.ts`), which the published-emit `tsconfig.json`
+// EXCLUDES (so nothing referencing the private `@sparq/client` workspace package reaches
+// `js/dist/`). This config typechecks the WHOLE `src/` tree INCLUDING the conformance file with
+// `noEmit`, so a binding drift between the shipped `js/wasm/sparq_wasm.d.ts` and the shared
+// `@sparq/client` generated surface fails CI without emitting anything. Run via
+// `npm run typecheck:conformance`.
+//
+// [OPUS-4.8] sq-jpki.2 (SBOM fix): the conformance file's `@sparq/client/wasm-store` import is
+// resolved here by a tsconfig `paths` mapping pointing DIRECTLY at `@sparq/client`'s tracked
+// generated d.ts — NOT by a `package.json` dependency on `@sparq/client`. That keeps the
+// `js/` (`@jeswr/sparq`) manifest free of any `@sparq/client` dependency edge, so the
+// published-client CycloneDX SBOM (`scripts/gen-js-sbom.sh` → `npm ls … --omit=dev
+// --workspaces=false`) never sees an unresolved workspace-link edge (which crashed npm-ls with
+// `Cannot read properties of undefined (reading 'extraneous')`, exit 254). The dev-only,
+// `noEmit` conformance assertion still type-checks against the REAL `@sparq/client` surface, so
+// the single-source-of-truth guard is fully preserved and non-vacuous. `module`/
+// `moduleResolution: NodeNext` (inherited) honour `paths`.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "@sparq/client/wasm-store": ["../packages/sparq-client/src/generated/sparq_wasm.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
