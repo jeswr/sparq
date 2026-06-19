@@ -38,7 +38,8 @@ export function PaperProvenance({ prov }: { prov: Provenance }) {
       </div>
       <p>
         Numbers in this paper are injected at build time from the paper-bound evidence file
-        and trace to named tests in <code>crates/sparq-vectors/tests</code>. Of{" "}
+        and trace to named tests and conformance-ratchet constants in the sparq crates (each
+        record names its <code>source</code>). Of{" "}
         {prov.canonical + prov.indicative} evidence records,{" "}
         <strong className="text-foreground">{prov.canonical}</strong> are{" "}
         <strong className="text-foreground">canonical</strong> (deterministic,
