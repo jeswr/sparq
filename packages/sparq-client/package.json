@@ -1,0 +1,36 @@
+{
+  "name": "@sparq/client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Framework-agnostic TypeScript client for the sparq WASM engine — the single shared declaration of the WasmStore surface plus loaders/query helpers, consumed by the Next.js site and the (proposed) Tauri 2 GUI.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "keywords": [
+    "rdf",
+    "sparql",
+    "wasm",
+    "webassembly",
+    "triplestore"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

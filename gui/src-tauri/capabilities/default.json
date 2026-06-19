@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "[OPUS-4.8] sq-2e93 — default capability for the sparq GUI main window: the minimal core-window permissions plus the file-open dialog (for loading an RDF file from disk into the native store, the MVP 'real local store' path). Least-privilege: no shell, no arbitrary FS, no HTTP — the engine runs in-process over IPC.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
+}

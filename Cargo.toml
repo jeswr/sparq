@@ -5,7 +5,13 @@ members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crat
 # (libFuzzer codegen), so it is excluded from the workspace to keep the STABLE
 # `cargo build`/`cargo test`/`clippy --workspace` gate from ever trying to compile it.
 # Build/run it only via `cargo +nightly fuzz run <target>` from `fuzz/`. [OPUS-4.8]
-exclude = ["vendor/spargebra", "fuzz"]
+exclude = ["vendor/spargebra", "fuzz", "gui/src-tauri"]
+# `gui/src-tauri` (bead sq-2e93) is the Tauri 2 desktop GUI scaffold. It has its OWN
+# `[workspace]` table (a standalone crate root) AND is excluded here so Tauri's heavy,
+# webview-system-lib-dependent dependency tree (webkit2gtk / WebView2 / WKWebView) never
+# enters the required `cargo build --workspace` / `clippy --workspace` gate, which runs on
+# CI runners without those libs. The GUI is built/linted/typechecked in its own path-scoped
+# `.github/workflows/gui.yml` lane (which installs the system deps). [OPUS-4.8]
 
 # Vendored spargebra 0.4.6 with surgical W3C-conformance parser fixes (see
 # vendor/spargebra/SPARQ-PATCHES.md and docs/upstream-proposals.md — each fix is

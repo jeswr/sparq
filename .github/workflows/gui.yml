@@ -1,0 +1,165 @@
+# [OPUS-4.8] sq-2e93 — GUI CI lane: build / lint / typecheck the Tauri 2 GUI scaffold.
+#
+# WHY: the GUI design record (research/gui-design.md §3) calls for a PATH-SCOPED,
+# NON-merge-queue lane modelled on site-e2e.yml / js.yml. It validates the things a dev box
+# without the webview system libraries (webkit2gtk / WebView2 / WKWebView) cannot:
+#   1. the shared framework-agnostic TS client (packages/sparq-client) typechecks,
+#   2. the site still builds AND typechecks consuming that shared package,
+#   3. the Tauri crate (gui/src-tauri) compiles + clippies CLEAN against the real engine,
+#      with the webkit2gtk + friends system deps installed here.
+#
+# SCOPE: PRs that touch gui/**, packages/**, or this workflow. A Rust-/docs-only PR skips it
+# (no run, so the required `ci-summary / gate` simply never waits on it — cross-workflow
+# `needs:` is impossible, exactly as documented in site-e2e.yml). It is NOT a `merge_group`
+# lane, and — until it is reliably green across a per-platform matrix — it is DELIBERATELY
+# NOT added to the branch-protection required-contexts set (`ci-summary`). It is ADVISORY.
+# Re-runs on push to main for post-merge cover.
+#
+# HONESTY: this lane currently builds the Tauri scaffold on LINUX only. The design's full
+# per-platform (macOS/Windows) matrix is a later step; a single reliably-green Linux lane is
+# the honest MVP. Every action below is SHA-pinned (Scorecard Pinned-Dependencies); the lane
+# is least-privilege (contents: read).
+name: gui
+
+on:
+  pull_request:
+    paths:
+      - "gui/**"
+      - "packages/**"
+      - ".github/workflows/gui.yml"
+  push:
+    branches: [main]
+    paths:
+      - "gui/**"
+      - "packages/**"
+      - ".github/workflows/gui.yml"
+
+# Least-privilege default (Scorecard TokenPermissions): read-only; this lane never writes.
+permissions:
+  contents: read
+
+# One in-flight run per PR/branch; cancel a superseded run (the Tauri build is expensive).
+concurrency:
+  group: gui-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shared-client:
+    name: shared TS client typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/sparq-client
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Typecheck (@sparq/client)
+        run: npm run typecheck
+
+  site-with-shared-client:
+    name: site build + typecheck (consuming @sparq/client)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The site's static export hard-fails without the wasm bundle; build it first
+      # (wasm-pack target, then the lean shacl,jsonld bundle the site syncs into public/).
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: gui-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build wasm bundle (shacl,jsonld)
+        working-directory: js
+        run: npm run build:wasm
+
+      - name: Install site dependencies
+        working-directory: site
+        run: npm install
+
+      - name: Site lint
+        working-directory: site
+        run: npm run lint
+
+      - name: Site typecheck
+        working-directory: site
+        run: npx tsc --noEmit
+
+      - name: Site static export build (consumes @sparq/client)
+        working-directory: site
+        run: npm run build
+
+  tauri-build:
+    name: Tauri crate build + clippy (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: gui/src-tauri
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The Tauri webview system libraries (webkit2gtk + GTK/soup/appindicator). These are
+      # exactly what a typical dev box lacks, so the full `cargo build` of the GUI crate is
+      # validated HERE rather than locally.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+
+      - name: Cache cargo (gui crate)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/src-tauri/target
+          key: gui-tauri-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock') }}
+
+      # clippy with -D warnings, inheriting the repo's lint bar. Builds against the real
+      # engine path deps (sparq-engine / sparq-core).
+      - name: Clippy (-D warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build (debug)
+        run: cargo build
+
+      # The native engine command-layer tests (engine.rs) — they exercise the direct
+      # sparq-engine link and need no display server.
+      - name: Test (engine command layer)
+        run: cargo test

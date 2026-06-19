@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { NextConfig } from "next";
 
 // [OPUS-4.8] sq-8thu — static-export config for GitHub Pages.
@@ -17,6 +18,17 @@ const nextConfig: NextConfig = {
   webpack: (config) => {
     config.resolve.extensionAlias = {
       ".js": [".ts", ".tsx", ".js", ".jsx"],
+    };
+    // [OPUS-4.8] sq-2e93 — resolve the shared framework-agnostic client
+    // (`packages/sparq-client`) to its TS source. The package is consumed via a path
+    // alias (no repo-root workspaces yet — see research/gui-design.md §3), so the
+    // bundler needs this alias to follow the import the same way tsconfig `paths` does.
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      "@sparq/client": path.resolve(
+        __dirname,
+        "../packages/sparq-client/src/index.ts",
+      ),
     };
     return config;
   },
