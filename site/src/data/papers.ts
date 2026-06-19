@@ -109,6 +109,20 @@ export const PAPERS: Paper[] = [
     evidence:
       "Deterministic conformance ratchet floors: Solid WAC decision parity (12) and Solid ACP decision parity (12), as the two newest rows of a 7-suite cross-family scoreboard totalling 3442, each floor CI-enforced, monotone, and guarded against drift. No latency claim and no security/soundness claim; library-level decision parity only, not HTTP/CTH wire conformance.",
   },
+  {
+    slug: "unsafe-attestation",
+    source: "unsafe-attestation.typ",
+    title:
+      "Auditing the unsafe: A Confined, Registered, CI-Ratcheted unsafe-Rust Surface as a Machine-Checkable Memory-Safety Attestation for an RDF Engine",
+    blurb:
+      "How an RDF engine makes its unsafe-Rust surface auditable rather than trusted: confined to 5 of 35 crates by compile-time forbiddance, counted at 59 sites behind a required CI ratchet that gates any growth, justified per-site in a lint-pinned register, and bounded by a layered Miri / corruption-oracle / fuzz / sanitizer coverage matrix. The honest evidence is coverage and discipline, not a proof of soundness: no claim that the engine is free of undefined behaviour, and the open soundness gaps on the untrusted-input mmap boundary are named, not hidden.",
+    authors: "Jesse Wright · the sparq project",
+    venue: "Security-engineering / resources / in-use track (or workshop)",
+    status: "publishable-now",
+    family: "A",
+    evidence:
+      "Deterministic, committed, CI-enforced integers: an unsafe-site count ratchet (59 sites, ceiling-gated), a crate confinement partition (30 forbid + 5 unsafe-bearing = 35), and a 100%-coverage per-site register, plus a Miri/fuzz/ASan coverage matrix. No latency claim and explicitly NOT a proof of memory safety; open soundness gaps on the untrusted-input boundary are stated.",
+  },
 ];
 
 export function paperBySlug(slug: string): Paper | undefined {
