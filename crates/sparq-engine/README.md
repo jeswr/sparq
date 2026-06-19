@@ -93,7 +93,11 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   lists (`,`), `a` for `rdf:type`, used-only `@prefix` abbreviation, and *emission-order-independent*
   output (sorted, so the same triple set always renders to the same bytes). It matches the
   output shape of the site's `prettyTurtle` reshaper — the long-term engine home for that
-  TS formatter — and is round-trip-correct (re-parses to the same triple set). The N-Triples
+  TS formatter — and is round-trip-correct (re-parses to the same triple set). The JSON-LD
+  writers have a matching **pretty** (indented) variant (`graph_to_jsonld_pretty` /
+  `write_jsonld_pretty` / the `*_with` wrappers taking `JsonLdPrettyOptions { indent }`): a
+  whitespace-only pass over the minified writer — same deterministic ordering, round-trips
+  identically, dependency-free (a hand-written JSON re-indenter, no `serde_json`). The N-Triples
   writer (`triples_to_ntriples`) is always on. When the feature is off, zero serializer code
   compiles, the default build is byte-identical, and **no new dependencies** are added (the
   writers reuse the existing `oxrdf` term model). See
