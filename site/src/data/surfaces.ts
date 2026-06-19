@@ -194,8 +194,14 @@ export const GROUPS: SurfaceGroup[] = [
         href: "/surface/genai",
         title: "GenAI / NLQ",
         blurb: "Schema-card / VoID introspection + natural-language → SPARQL loop.",
-        tier: "hosted",
+        // [OPUS-4.8] sq-3was: tier-e. sparq-nlq is an opt-in native crate (it can pull a
+        // model behind a trait), not in the lean wasm bundle, and the static Pages site
+        // has no backend — so the honest surface is a captured-output walkthrough (real
+        // schema card + real executed result tables, scripted-fixture model step), not a
+        // live hosted endpoint.
+        tier: "walkthrough",
         icon: Sparkles,
+        built: true,
       },
     ],
   },
@@ -252,8 +258,12 @@ export const GROUPS: SurfaceGroup[] = [
         href: "/surface/http-server",
         title: "HTTP server",
         blurb: "SPARQL 1.1 Protocol endpoint, GSP, /metrics, WS/SSE subscriptions.",
-        tier: "hosted",
+        // [OPUS-4.8] sq-rnwc: tier-e. No backend behind the static Pages site, so the
+        // honest surface is a captured curl + SSE-frame walkthrough (incl. a live
+        // subscription firing on a committed UPDATE), not a live hosted endpoint.
+        tier: "walkthrough",
         icon: Server,
+        built: true,
       },
       {
         slug: "cli",
