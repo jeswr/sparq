@@ -22,12 +22,6 @@ Design: [`research/federation-client-design.md`](../../research/federation-clien
 Planner it reuses: [`skills/federated-planning/SKILL.md`](../../skills/federated-planning/SKILL.md).
 Contributing: [`AGENTS.md`](../../AGENTS.md).
 
-Capability discovery prefers a published Service Description and falls back to a FedX-style
-`ASK { ?s ?p ?o }` reachability probe; the probe's SPARQL-Results-JSON answer is parsed
-**strictly** — the `boolean` value must be an exact lowercase JSON `true`/`false` literal at a
-value boundary, so a junk-suffixed token (`trueish` / `falsex`) is rejected, not silently read
-as a boolean (sq-2gfe).
-
 Correctness suite under `tests/` (gated on the `fedclient` feature; the default build compiles it to nothing) — run on the REAL path, with local `sparq-engine` evaluation as the canonical answer: result-equivalence (planner / streaming / multi-source UNION / adaptive vs. static), fail-closed wire & error paths (SRJ decode, brTPF binary codec, interpreter), discovery + source-adapter error paths (incl. the SSRF egress guard), and the one-way `sparq-core`/`sparq-engine` dependency boundary.
 
 ## License
