@@ -19,6 +19,7 @@ const BUILT_SURFACES = new Set([
   "streaming-rsp",
   "full-text",
   "http-server",
+  "genai",
 ]);
 const PLACEHOLDER_SURFACES = ALL_SURFACES.filter(
   (s) =>
