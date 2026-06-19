@@ -293,6 +293,38 @@ Notes on a few that need care:
   documented-untested in the authoring worktree** (no Docker there) — validate on the
   next `GATHER_QLEVER=1` gather. (The separate `bench/qlever-*` suites use the upstream
   `qlever` Python CLI instead; this same-box recipe is the standalone Docker variant.)
+- **Same-box SPARQL gather — diagnose-and-avoid-the-stall hardening of the sparq+Oxigraph
+  half** (sq-sxso). The Oxigraph half of [`scripts/gather-ec2-sparql.sh`](../scripts/gather-ec2-sparql.sh)
+  used to have NO per-step timeout and NO timestamped sentinel, so a hung step (a heavy
+  from-source `cargo build`, or a pathological SP2Bench query in Oxigraph) burned the whole
+  window with no `/root/GATHER_DONE` — the observed **"73 min, no sentinel"** stall, the same
+  class the QLever recipe above already fixed. Three measured-rooted fixes (LOCALLY REPRODUCED:
+  at only 50k triples the prebuilt Oxigraph CLI ran `q07` in ~38 s and `q08` past 60 s — so at
+  the old 250k default those unselective SP2Bench joins are minutes-long in Oxigraph, which is
+  the stall):
+  1. **Per-step timestamped logging** — every phase calls `step "…"`, which UTC-stamps a line
+     into `/var/log/gather.log` AND appends it to `/root/GATHER_STEP`. The orchestrator pulls
+     that file (and surfaces the LAST step LIVE while polling, and on the no-sentinel path), so
+     a stalled run names EXACTLY the hung phase instead of being invisible. The step log is also
+     embedded in the result envelope (`step_log`).
+  2. **Prebuilt, SHA-pinned Oxigraph CLI** (default) — `oxigraph load` into an on-disk store +
+     `oxigraph query` per `.rq` (min-of-N, JSON-results count). This removes the from-source
+     `cargo build -p sparq-bench` Oxigraph compile from the critical path (a likely build-time
+     hang on the small fallback box). Pinned to **v0.5.9** by `sha256` (aarch64 + x86_64; the
+     gather box is arm64). Set `OXI_EMBEDDED=1` for the in-process in-RAM embedded path instead
+     — the envelope records `oxigraph_mode` (`prebuilt-cli` on-disk vs `embedded` in-RAM) so the
+     load regime is never silently conflated.
+  3. **Hard per-step `timeout` + smaller configurable dataset** — each phase is wrapped in a
+     `timeout` (per-phase `STEP_*_TIMEOUT` caps) and the per-query Oxigraph loop is per-query
+     timeout-bounded (`STEP_OXI_QUERY_TIMEOUT`, default 120 s), so a pathological query records
+     `ERROR` (honest-n/a) and the gather moves on instead of hanging. The default corpus is
+     smaller (`SP2B_TRIPLES` default **100000**, was 250000) for a cheap smoke/gather; raise to
+     250000 for the full per-commit scale.
+  **HONESTY:** this is the SCRIPT-side diagnostic + avoidance hardening, authored + locally
+  reproduced on the aarch64 work box (the prebuilt-CLI load/query lane was run end to end). The
+  actual confirmation that a real gather now reaches `GATHER_DONE` without stalling **requires
+  one EC2 gather run** — that green-gather confirmation is a follow-up. Competitor numbers from
+  this gather remain **non-canonical** (ephemeral EC2 / work box), per the QUIET-BOX note above.
 
 ## Replicate everything — quickstart
 
