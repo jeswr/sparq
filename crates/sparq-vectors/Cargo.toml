@@ -37,6 +37,17 @@ default = []
 # engine-side automatic BGP → mask wiring (a filtered form of the `vec:` predicate) is wired in
 # `rewrite.rs` and activates when this composes with `vec-predicate` (sq-bvmd, follow-up to sq-1wc1).
 filtered-ann = []
+# [OPUS-4.8] sq-pi44: incremental add / remove / update of vectors against an already-finalized
+# store via an in-RAM DELTA SIDECAR (+ `compact` to fold it back into a fresh base), so a single
+# graph change no longer forces a full re-embed + file rebuild. OPT-IN and OFF by default; a LEAN
+# feature — it adds NO new dependency (the append map + tombstone set reuse the in-tree
+# `rustc-hash`) and pulls in NEITHER the engine NOR any heavy crate, so the default `sparq-vectors`
+# build carries zero delta code. Gates `delta.rs` (the `VectorDelta` value) and the
+# `VectorStore::{add,remove,update,compact,apply_delta,take_delta,delta,has_delta}` methods; the
+# read paths (`get`/`iter`/`len`) consult the delta only under this feature. The delta is IN-RAM
+# only (lost on handle drop; `compact` is the durability path) — a persisted on-disk delta sidecar
+# is a tracked follow-up.
+delta = []
 # [OPUS-4.8] sq-ip3a (epic sq-3183, follow-up to sq-7hx6): the **approximate** ANN backend.
 # OPT-IN and OFF by default — this is the feature that pulls the heavy HNSW crate
 # (`instant-distance`) into the dependency graph. With it OFF the default `sparq-vectors` build

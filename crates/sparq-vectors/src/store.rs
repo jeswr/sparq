@@ -149,6 +149,15 @@ pub struct VectorStore {
     /// slot→id for mmap mode (the on-disk index is sorted by id, the data by slot);
     /// built lazily on the first [`iter`](Self::iter), O(count) once.
     inverse: std::sync::OnceLock<Vec<Id>>,
+    /// [OPUS-4.8] (sq-pi44) The in-RAM delta sidecar: vectors appended/updated and ids tombstoned
+    /// since the immutable base was built. `None` until the first delta mutation
+    /// ([`add`](Self::add)/[`remove`](Self::remove)/[`update`](Self::update)) allocates it, bound to
+    /// the base fingerprint. Every read path
+    /// ([`get`](Self::get)/[`iter`](Self::iter)/[`len`](Self::len)) consults it transparently;
+    /// [`compact`](Self::compact) folds it back into a fresh base. Gated behind the opt-in `delta`
+    /// feature, so the default build carries no delta state. See [`crate::delta`].
+    #[cfg(feature = "delta")]
+    delta: Option<crate::delta::VectorDelta>,
 }
 
 impl VectorStore {
@@ -168,6 +177,8 @@ impl VectorStore {
             fingerprint: None,
             data_offset: HEADER_LEN,
             inverse: std::sync::OnceLock::new(),
+            #[cfg(feature = "delta")]
+            delta: None,
         })
     }
 
@@ -302,6 +313,8 @@ impl VectorStore {
             fingerprint,
             data_offset,
             inverse: std::sync::OnceLock::new(),
+            #[cfg(feature = "delta")]
+            delta: None,
         })
     }
 
@@ -379,14 +392,36 @@ impl VectorStore {
 
     /// The vector for term `id`, or `None` if it has none. Works in both phases:
     /// a hash lookup during build, a binary search over the mmap'd index after.
+    ///
+    /// [OPUS-4.8] (sq-pi44) With the `delta` feature, the in-RAM delta is consulted FIRST: a
+    /// tombstoned id reads as absent, an appended/updated id reads its delta vector (shadowing the
+    /// base), and any other id reads the immutable base — so search transparently sees the delta.
     pub fn get(&self, id: Id) -> Option<&[f32]> {
+        #[cfg(feature = "delta")]
+        if let Some(delta) = &self.delta {
+            if delta.tombstones.contains(&id) {
+                return None;
+            }
+            if let Some(v) = delta.appended.get(&id) {
+                return Some(v.as_slice());
+            }
+        }
+        self.base_get(id)
+    }
+
+    /// The vector for `id` from the immutable base only (no delta) — the original `get` body. The
+    /// delta-aware [`get`](Self::get) calls this after consulting the delta.
+    fn base_get(&self, id: Id) -> Option<&[f32]> {
         match &self.backing {
             Backing::Build { data, slots, .. } => {
                 let slot = *slots.get(&id)? as usize;
                 Some(&data[slot * self.dim..(slot + 1) * self.dim])
             }
             Backing::Map(map) => {
-                let count = self.len();
+                // [OPUS-4.8] (sq-pi44) The BASE count (not the delta-aware `len`): this reads the
+                // on-disk index, and the delta-aware `len` calls back into `base_get`, so using it
+                // here would recurse infinitely.
+                let count = self.base_len();
                 let index = &map[self.data_offset + count * self.dim * 4..];
                 let id_at = |i: usize| -> Id {
                     u32::from_le_bytes(index[i * 8..i * 8 + 4].try_into().unwrap())
@@ -410,8 +445,27 @@ impl VectorStore {
         }
     }
 
-    /// Number of stored vectors.
+    /// Number of stored vectors — the EFFECTIVE count once the in-RAM delta (appended/updated
+    /// vectors and tombstones) is applied. With the `delta` feature off, or no delta yet, this is
+    /// the base count.
     pub fn len(&self) -> usize {
+        #[cfg(feature = "delta")]
+        if let Some(delta) = &self.delta {
+            // effective = base − (base ids that are tombstoned) − (base ids shadowed by an append)
+            //             + (appended ids). Tombstones and appends are disjoint by construction, so
+            // a base id is double-counted with the appended set only via the `append` branch.
+            let base = self.base_len();
+            let removed = delta.tombstones.iter().filter(|&&id| self.base_get(id).is_some()).count();
+            let shadowed =
+                delta.appended.keys().filter(|&&id| self.base_get(id).is_some()).count();
+            return base - removed - shadowed + delta.appended.len();
+        }
+        self.base_len()
+    }
+
+    /// The base (on-disk / build-phase) vector count, ignoring any in-RAM delta — the original
+    /// `len` body. The delta-aware [`len`](Self::len) builds on this.
+    fn base_len(&self) -> usize {
         match &self.backing {
             Backing::Build { ids, .. } => ids.len(),
             Backing::Map(map) => u64::from_le_bytes(map[12..20].try_into().unwrap()) as usize,
@@ -452,16 +506,51 @@ impl VectorStore {
         fingerprint::check_against(self.fingerprint, graph, fingerprint::Artifact::Store, &origin)
     }
 
-    /// Iterates all `(id, vector)` pairs in insertion-slot order (the dense data
-    /// order) — what ANN index construction consumes.
+    /// Iterates all `(id, vector)` pairs — what ANN index construction consumes. Base entries come
+    /// first in insertion-slot order, then any delta-appended entries.
+    ///
+    /// [OPUS-4.8] (sq-pi44) With the `delta` feature, the EFFECTIVE set is yielded: a tombstoned
+    /// base id is skipped, a base id shadowed by a delta append is skipped (the appended vector is
+    /// yielded instead, from the delta tail), and delta-only appends are appended after the base —
+    /// so search over `iter` transparently unions base+delta and honours tombstones.
     pub fn iter(&self) -> impl Iterator<Item = (Id, &[f32])> + '_ {
-        let count = self.len();
-        (0..count).map(move |slot| match &self.backing {
-            Backing::Build { data, ids, .. } => {
-                (ids[slot], &data[slot * self.dim..(slot + 1) * self.dim])
-            }
-            Backing::Map(map) => (self.slot_id(map, slot), self.slot_vector(map, slot)),
-        })
+        let base_count = self.base_len();
+        let base = (0..base_count)
+            .map(move |slot| match &self.backing {
+                Backing::Build { data, ids, .. } => {
+                    (ids[slot], &data[slot * self.dim..(slot + 1) * self.dim])
+                }
+                Backing::Map(map) => (self.slot_id(map, slot), self.slot_vector(map, slot)),
+            })
+            .filter(move |&(id, _)| self.base_id_is_live(id));
+        base.chain(self.delta_iter())
+    }
+
+    /// Whether base id `id` survives the delta into the effective view: not tombstoned and not
+    /// shadowed by a delta append (the append is yielded from the delta tail instead, to avoid a
+    /// duplicate). Always `true` with the `delta` feature off / no delta.
+    #[allow(unused_variables)]
+    fn base_id_is_live(&self, id: Id) -> bool {
+        #[cfg(feature = "delta")]
+        if let Some(delta) = &self.delta {
+            return !delta.tombstones.contains(&id) && !delta.appended.contains_key(&id);
+        }
+        true
+    }
+
+    /// The delta-appended `(id, vector)` pairs (empty with the `delta` feature off / no delta), to
+    /// chain after the base in [`iter`](Self::iter).
+    fn delta_iter(&self) -> impl Iterator<Item = (Id, &[f32])> + '_ {
+        #[cfg(feature = "delta")]
+        {
+            self.delta
+                .iter()
+                .flat_map(|d| d.appended.iter().map(|(&id, v)| (id, v.as_slice())))
+        }
+        #[cfg(not(feature = "delta"))]
+        {
+            std::iter::empty()
+        }
     }
 
     /// The id stored at insertion `slot` (mmap mode). The on-disk index only maps
@@ -498,6 +587,177 @@ impl VectorStore {
         // f32-aligned; the range is in bounds (validated in `open`); f32 accepts any bit pattern;
         // the slice borrows the backing, owned by `self`.
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, self.dim) }
+    }
+}
+
+// [OPUS-4.8] (sq-pi44) The incremental delta layer: add / remove / update against a finalized store
+// plus `compact`. Gated behind the opt-in `delta` feature so the default build carries no delta
+// surface. See [`crate::delta`] for the design and the honest in-RAM-only scope.
+#[cfg(feature = "delta")]
+impl VectorStore {
+    /// The in-RAM delta sidecar, allocated on first mutation and bound to the base store's
+    /// fingerprint (the generation the appended/tombstoned ids are keyed against).
+    fn delta_mut(&mut self) -> &mut crate::delta::VectorDelta {
+        let generation = self.fingerprint;
+        self.delta.get_or_insert_with(|| crate::delta::VectorDelta::new(generation))
+    }
+
+    /// [OPUS-4.8] (sq-pi44) **Add a NEW vector** for term `id` against an already-finalized store,
+    /// writing it to the in-RAM delta (no file rebuild). Errors on the same vector validation as
+    /// [`put`](Self::put) (dimension, finiteness, non-zero direction), or if `id` ALREADY has an
+    /// effective vector (present in the base and not tombstoned, or already in the delta) — use
+    /// [`update`](Self::update) to replace an existing one. May be called before or after
+    /// `finalize`; on a build-phase store it is equivalent to `put`.
+    pub fn add(&mut self, id: Id, vector: &[f32]) -> Result<(), String> {
+        validate_vector(self.dim, id, vector)?;
+        // On a build-phase store, route to the in-RAM data exactly like `put` (no delta needed).
+        if matches!(self.backing, Backing::Build { .. }) {
+            return self.put(id, vector);
+        }
+        if self.get(id).is_some() {
+            return Err(format!(
+                "id {id} already has a vector; use `update` to replace it"
+            ));
+        }
+        let delta = self.delta_mut();
+        delta.tombstones.remove(&id);
+        delta.appended.insert(id, vector.to_vec());
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-pi44) **Remove** term `id`'s vector from the effective view by tombstoning it
+    /// in the in-RAM delta (no file rebuild). A subsequent [`get`](Self::get)/[`iter`](Self::iter)
+    /// excludes it. Works whether the id lives in the base or only in the delta. Returns `true` if
+    /// the id had an effective vector that this removed, `false` if it had none (a no-op). On a
+    /// build-phase store the vector is dropped directly from the in-RAM build set.
+    pub fn remove(&mut self, id: Id) -> bool {
+        let dim = self.dim;
+        // Build phase: drop directly from the accumulating data (re-pack the dense slots).
+        if let Backing::Build { data, slots, ids } = &mut self.backing {
+            let Some(slot) = slots.remove(&id) else { return false };
+            let slot = slot as usize;
+            // Remove the dense vector and the id at `slot`, then renumber the slots after it.
+            data.drain(slot * dim..(slot + 1) * dim);
+            ids.remove(slot);
+            for s in slots.values_mut() {
+                if (*s as usize) > slot {
+                    *s -= 1;
+                }
+            }
+            return true;
+        }
+        let had = self.get(id).is_some();
+        if had {
+            let delta = self.delta_mut();
+            delta.appended.remove(&id);
+            delta.tombstones.insert(id);
+        }
+        had
+    }
+
+    /// [OPUS-4.8] (sq-pi44) **Update** (replace) the vector for an EXISTING term `id`, writing the
+    /// new vector to the in-RAM delta (no file rebuild). Errors on the same vector validation as
+    /// [`put`](Self::put), or if `id` has no effective vector to replace (use [`add`](Self::add)
+    /// for a new id). On a build-phase store it rewrites the in-RAM vector in place.
+    pub fn update(&mut self, id: Id, vector: &[f32]) -> Result<(), String> {
+        validate_vector(self.dim, id, vector)?;
+        let dim = self.dim;
+        if self.get(id).is_none() {
+            return Err(format!("id {id} has no vector to update; use `add` for a new id"));
+        }
+        // Build phase: rewrite the dense slot in place.
+        if let Backing::Build { data, slots, .. } = &mut self.backing {
+            if let Some(&slot) = slots.get(&id) {
+                let slot = slot as usize;
+                data[slot * dim..(slot + 1) * dim].copy_from_slice(vector);
+                return Ok(());
+            }
+        }
+        let delta = self.delta_mut();
+        delta.tombstones.remove(&id);
+        delta.appended.insert(id, vector.to_vec());
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-pi44) Whether this store has any pending in-RAM delta (appends or tombstones)
+    /// not yet folded into the base by [`compact`](Self::compact).
+    pub fn has_delta(&self) -> bool {
+        self.delta.as_ref().is_some_and(|d| !d.is_empty())
+    }
+
+    /// [OPUS-4.8] (sq-pi44) The pending delta (appended/updated vectors + tombstones + the
+    /// generation it is bound to), or `None` if none has been started. Read-only; for the
+    /// generation-tie staleness check ([`apply_delta`](Self::apply_delta)) and introspection.
+    pub fn delta(&self) -> Option<&crate::delta::VectorDelta> {
+        self.delta.as_ref()
+    }
+
+    /// [OPUS-4.8] (sq-pi44) Removes and returns the pending in-RAM delta, leaving the store reading
+    /// the bare base again. Pair with [`apply_delta`](Self::apply_delta) to move a delta from one
+    /// store handle to another (the generation tie guards a mismatch).
+    pub fn take_delta(&mut self) -> Option<crate::delta::VectorDelta> {
+        self.delta.take()
+    }
+
+    /// [OPUS-4.8] (sq-pi44) Installs `delta` onto this store, REJECTING it if its bound graph
+    /// generation does not match this base store's fingerprint — a delta built against generation N
+    /// must not be applied to a base of generation M ≠ N (its ids would mis-key). Both a present
+    /// mismatch and a delta-without-generation against a fingerprinted base (or vice-versa) are
+    /// errors; only an exact generation match (or both `None`, the unverified-by-design case) is
+    /// accepted. Replaces any delta already present.
+    pub fn apply_delta(&mut self, delta: crate::delta::VectorDelta) -> Result<(), String> {
+        if delta.generation() != self.fingerprint {
+            return Err(format!(
+                "delta generation mismatch: the delta was built against {}, this store is {} — \
+                 applying it would mis-key the appended/tombstoned ids",
+                describe_generation(delta.generation()),
+                describe_generation(self.fingerprint),
+            ));
+        }
+        self.delta = Some(delta);
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-pi44) **Compaction**: folds the in-RAM delta into a FRESH base `.spqv` at
+    /// `out_path`, returning the opened, fully validated store. The result is **equivalent to a
+    /// from-scratch rebuild over the same final vector set**: its `get`/`iter`/`len` agree exactly
+    /// with a store built by `create` + `put` over `self.iter()`'s effective `(id, vector)` pairs.
+    /// The new base is bound to `graph`'s fingerprint (pass the SAME graph the effective ids are
+    /// keyed by); the compacted store carries no delta.
+    ///
+    /// `out_path` may equal the base path — the new file is written first, then opened, so a
+    /// same-path compaction replaces the old base atomically enough for the single-writer contract
+    /// (concurrent external mutation is out of contract, as for [`open`](Self::open)).
+    pub fn compact<P: Into<PathBuf>>(
+        &self,
+        out_path: P,
+        graph: &Graph,
+    ) -> Result<VectorStore, String> {
+        let out_path = out_path.into();
+        let mut fresh = VectorStore::create(&out_path, self.dim)?.with_fingerprint(graph);
+        // Collect first so the new file is independent of `self`'s mmap (which may be the same
+        // path): `iter()` yields the effective base+delta view in a deterministic order, and `put`
+        // re-sorts the id→slot index on `finalize`, so the output is order-independent of the
+        // collection order — i.e. byte-for-byte a from-scratch rebuild for the same id→vector map.
+        let pairs: Vec<(Id, Vec<f32>)> =
+            self.iter().map(|(id, v)| (id, v.to_vec())).collect();
+        for (id, v) in &pairs {
+            fresh.put(*id, v)?;
+        }
+        fresh.finalize()?;
+        Ok(fresh)
+    }
+}
+
+/// [OPUS-4.8] (sq-pi44) A one-line description of a delta/store generation for the mismatch error.
+#[cfg(feature = "delta")]
+fn describe_generation(fp: Option<Fingerprint>) -> String {
+    match fp {
+        Some(f) => format!(
+            "generation(dict_len={}, triples={}, hash={:#018x})",
+            f.dict_len, f.triple_count, f.content_hash
+        ),
+        None => "an unbound/unverified generation".to_string(),
     }
 }
 
