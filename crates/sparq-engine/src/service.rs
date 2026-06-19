@@ -47,12 +47,26 @@
 //! local-loopback transport, so the SRJ parser and the algebra integration are
 //! exercised without a public network dependency.
 //!
-//! ## Out of scope
+//! ## `SERVICE ?var` (variable endpoint)
 //!
-//! * `SERVICE ?var` (a *variable* endpoint): the endpoint IRI is only known once the
-//!   surrounding bindings are produced, which requires a per-solution remote call. We
-//!   reject it with a clear error (or, under `SILENT`, the empty result) rather than
-//!   silently mis-evaluating — see [`eval_service`] in `exec.rs`.
+//! `SERVICE ?ep { P }` — where the endpoint is a *variable* — is supported when `?ep` is
+//! bound by the surrounding query (bead sq-d4p). The engine evaluates it per SPARQL 1.1
+//! semantics (one substituted `SERVICE μ(?ep) { P }` per in-scope solution μ): it
+//! partitions the already-evaluated left bindings by their `?ep` value and dispatches one
+//! bind-join *per distinct endpoint IRI*, tagging each remote row with its `?ep` so the
+//! surrounding join re-attaches it (see `exec::bound_join_variable_endpoint`). A left
+//! solution whose `?ep` is UNBOUND or not an IRI names no valid endpoint and contributes
+//! no federated answer. A TOP-LEVEL `SERVICE ?ep` with nothing to bind it (no surrounding
+//! relation) has no endpoint to call and is still rejected with a clear error (or, under
+//! `SILENT`, the empty result) — see `exec::eval_service`.
+//!
+//! ## Timeout
+//!
+//! The remote round-trip is bounded by the active [`QueryBudget`](crate::QueryBudget)
+//! deadline (bead sq-d4p): [`HttpTransport::with_budget`] caps its socket timeout at the
+//! budget's remaining time (never above the built-in [`DEFAULT_SERVICE_TIMEOUT`]), so a
+//! query under a tight deadline does not block for the full default on an unresponsive
+//! endpoint. With no deadline installed the built-in default applies.
 
 use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple, Variable};
 
@@ -947,12 +961,48 @@ pub(crate) struct HttpTransport {
     timeout: std::time::Duration,
 }
 
+/// The transport's own finite default round-trip timeout, used when no per-query
+/// budget deadline constrains it further. A slow/unreachable endpoint cannot hang the
+/// engine past this; SILENT then turns the timeout into an empty result. [OPUS-4.8]
+#[cfg(all(feature = "service", not(target_arch = "wasm32")))]
+pub(crate) const DEFAULT_SERVICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Floor on a budget-derived SERVICE timeout. A deadline that is already expired (or
+/// within a few ms) would otherwise yield a zero/near-zero socket timeout that fails
+/// every dial instantly; we still give the round-trip a brief window, and the engine's
+/// own cooperative budget check (`exec::budget::check`) reports the over-deadline query
+/// as `"query budget exceeded (timeout)"` either way. [OPUS-4.8] (sq-d4p)
+#[cfg(all(feature = "service", not(target_arch = "wasm32")))]
+pub(crate) const MIN_SERVICE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
 #[cfg(all(feature = "service", not(target_arch = "wasm32")))]
 impl HttpTransport {
-    pub(crate) fn new() -> Self {
-        // A finite default so an unreachable/slow endpoint cannot hang the engine
-        // indefinitely; SILENT then turns this into an empty result.
-        HttpTransport { timeout: std::time::Duration::from_secs(30) }
+    /// Construct a transport whose per-request timeout is the active query budget's
+    /// remaining time, capped by the built-in [`DEFAULT_SERVICE_TIMEOUT`]. [OPUS-4.8] (sq-d4p)
+    ///
+    /// `remaining` is the time left until the [`QueryBudget`](crate::QueryBudget)
+    /// deadline (from `exec::budget::remaining_timeout`):
+    /// * `None` — no deadline installed → use the built-in default in full.
+    /// * `Some(d)` — bound the remote round-trip by `min(d, default)`, so a query under
+    ///   a tight deadline does not block for the full default on an unresponsive
+    ///   endpoint. (The budget's *local* cooperative check only fires AFTER the blocking
+    ///   HTTP call returns, so without this cap the deadline would not bite the remote
+    ///   call.) A non-zero floor ([`MIN_SERVICE_TIMEOUT`]) is applied so a nearly- or
+    ///   just-expired deadline still attempts a quick round-trip rather than a
+    ///   guaranteed-instant failure; the local budget check then converts an
+    ///   over-deadline query into the timeout error.
+    pub(crate) fn with_budget(remaining: Option<std::time::Duration>) -> Self {
+        let timeout = match remaining {
+            None => DEFAULT_SERVICE_TIMEOUT,
+            Some(d) => d.min(DEFAULT_SERVICE_TIMEOUT).max(MIN_SERVICE_TIMEOUT),
+        };
+        HttpTransport { timeout }
+    }
+
+    /// The configured per-request timeout (test accessor for the budget-cap logic).
+    #[cfg(test)]
+    pub(crate) fn timeout_for_test(&self) -> std::time::Duration {
+        self.timeout
     }
 }
 

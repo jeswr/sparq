@@ -217,6 +217,29 @@ pub(crate) mod budget {
         ACTIVE.with(|a| a.get().on)
     }
 
+    /// Time remaining until the installed wall-clock deadline, if any. [OPUS-4.8] (sq-d4p)
+    ///
+    /// The SERVICE HTTP transport uses this to bound a remote round-trip by the SAME
+    /// budget that bounds local evaluation: a query under a 5s deadline must not block
+    /// for the transport's fixed default on an unresponsive endpoint. Returns:
+    /// * `None` — no deadline installed (no budget, or a row/byte-only budget); the
+    ///   transport keeps its own finite default.
+    /// * `Some(Duration::ZERO)` — the deadline has already passed; the caller should
+    ///   refuse the remote call immediately rather than dial.
+    /// * `Some(d)` — the remaining time, which the transport caps its own default to.
+    ///
+    /// Always compiled only off-wasm (no `Instant` there, and the `service` feature
+    /// never reaches a wasm build).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(not(feature = "service"), allow(dead_code))]
+    #[inline]
+    pub(crate) fn remaining_timeout() -> Option<std::time::Duration> {
+        ACTIVE.with(|a| {
+            let lim = a.get();
+            lim.deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()))
+        })
+    }
+
     /// `true` once the budget is exhausted (sticky) — row-producing loops break
     /// on it; `rows` is the loop's current output size.
     #[inline]
@@ -2163,12 +2186,16 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
 /// This is the fallback path: when the SERVICE is the right side of a join whose join
 /// vars are already bound, [`try_bound_join_service`] instead pushes those bindings as
 /// a `VALUES` block (the bind-join, bead sq-sjkj) and this verbatim forward is skipped.
-/// `eval_service` still runs for a top-level / unbound SERVICE and for every case the
-/// bind-join declines (variable endpoint, no bound join var, blank-node join key).
+/// A VARIABLE endpoint that the surrounding query binds is likewise handled there
+/// (per-endpoint dispatch, bead sq-d4p). `eval_service` still runs for a top-level /
+/// unbound SERVICE and for every case the bind-join declines (no bound join var,
+/// blank-node join key, or a variable endpoint with nothing to bind it).
 ///
 /// * `name` is a `NamedNodePattern`: a concrete IRI endpoint is evaluated; a
-///   `?var` (variable) endpoint is OUT OF SCOPE (it requires a per-solution remote
-///   call) — it errors, or, under SILENT, yields the join identity.
+///   `?var` (variable) endpoint reaching THIS path has no surrounding binding to supply
+///   the endpoint IRI (a top-level `SERVICE ?ep`), so there is nothing to call — it
+///   errors, or, under SILENT, yields the join identity. (A bindable variable endpoint
+///   never reaches here; it is dispatched by [`try_bound_join_service`].)
 /// * `silent`: on ANY failure (variable endpoint, DNS/connect error, non-2xx,
 ///   malformed body), produce a single empty solution (the identity for join) so the
 ///   surrounding query keeps its bindings and does not fail.
@@ -2285,13 +2312,33 @@ fn try_bound_join_service(
     };
     let silent = *silent;
 
-    // Only a concrete-IRI endpoint can be bound-joined; a variable endpoint is the
-    // documented scope-out handled by the verbatim path.
+    // The endpoint is either a concrete IRI (the original bind-join) or a VARIABLE
+    // (`SERVICE ?ep { … }`, bead sq-d4p). A variable endpoint is dispatched per
+    // distinct endpoint IRI bound by `left`: see `bound_join_variable_endpoint`.
     let endpoint = match name {
         NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
-        NamedNodePattern::Variable(_) => return Ok(None),
+        NamedNodePattern::Variable(ep_var) => {
+            return bound_join_variable_endpoint(graph, local, left, ep_var, inner, silent);
+        }
     };
 
+    bound_join_to_endpoint(graph, local, left, &endpoint, inner, silent)
+}
+
+/// Bind-join the SERVICE sub-`inner` against one CONCRETE `endpoint` over the `left`
+/// bindings, returning the interned remote relation (see [`try_bound_join_service`] for
+/// the contract). Factored out so the variable-endpoint path
+/// ([`bound_join_variable_endpoint`]) can call it once per distinct endpoint IRI.
+/// [OPUS-4.8] (sq-sjkj / sq-d4p)
+#[cfg(feature = "service")]
+fn bound_join_to_endpoint(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    left: &Bindings,
+    endpoint: &str,
+    inner: &GraphPattern,
+    silent: bool,
+) -> Result<Option<Bindings>, String> {
     // The remote pattern's in-scope variables; the join keys are the ones ALSO bound
     // by `left`. We must intersect with `left.vars` (textual) so the VALUES we push
     // names variables the remote pattern actually mentions.
@@ -2367,7 +2414,7 @@ fn try_bound_join_service(
         // Inject the VALUES inside the SELECT * group, alongside the inner pattern, so
         // the remote inner-joins the pushed bindings with its pattern.
         let query = format!("SELECT * WHERE {{ {values} {inner_sparql} }}");
-        match service_transport::with(|t| crate::service::eval_remote(t, &endpoint, &query)) {
+        match service_transport::with(|t| crate::service::eval_remote(t, endpoint, &query)) {
             Ok(rel) => {
                 acc_rows.extend(rel.rows);
                 if acc_vars.is_none() {
@@ -2396,6 +2443,147 @@ fn try_bound_join_service(
     let vars = acc_vars.unwrap_or_else(|| join_vars.clone());
     let rel = crate::service::ServiceRelation { vars, rows: acc_rows };
     Ok(Some(service_relation_to_bindings(graph, local, rel)))
+}
+
+/// Evaluate `SERVICE ?ep { inner }` — a VARIABLE endpoint — against the `left`
+/// bindings, by dispatching one bind-join PER DISTINCT endpoint IRI that `left` binds
+/// to `ep_var`. [OPUS-4.8] (sq-d4p)
+///
+/// SPARQL 1.1 federated query evaluates `SERVICE ?ep { P }` per in-scope solution μ:
+/// substitute μ(?ep) for ?ep and evaluate `SERVICE μ(?ep) { P }`. The `left` relation
+/// IS those in-scope solutions, so we partition `left` by its `?ep` binding and run the
+/// existing bind-join ([`bound_join_to_endpoint`]) once per endpoint, then TAG every
+/// remote row with `?ep = <that endpoint IRI>` so the surrounding join re-attaches the
+/// remote rows to exactly the left rows that named that endpoint. The union of the
+/// per-endpoint relations is the SERVICE result.
+///
+/// Returns:
+/// * `Ok(Some(rel))` — the per-endpoint dispatch applied; `rel` carries `?ep` plus the
+///   remote variables, ready for the caller's `join_bindings` / `left_outer_join`.
+/// * `Ok(None)` — cannot dispatch (the endpoint variable is not bound by `left`, or the
+///   bind-join declined for every endpoint — e.g. no shared join variable); the caller
+///   falls back to the verbatim `eval_service`, which reports the documented
+///   variable-endpoint error (or, under SILENT, the join identity).
+/// * `Err(_)` — a non-SILENT remote failure (propagated).
+///
+/// A left row whose `?ep` is UNBOUND or not an IRI names no valid endpoint, so it
+/// contributes no remote solution (it simply finds no `?ep`-tagged remote row to join
+/// with) — matching per-solution `evalService`, where substituting a non-IRI yields no
+/// federated answer for that solution.
+#[cfg(feature = "service")]
+fn bound_join_variable_endpoint(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    left: &Bindings,
+    ep_var: &Variable,
+    inner: &GraphPattern,
+    silent: bool,
+) -> Result<Option<Bindings>, String> {
+    // The endpoint variable must be a left column (bound by the surrounding query);
+    // otherwise there is nothing to dispatch on — defer to the verbatim path.
+    let Some(ep_col) = left.col(ep_var) else {
+        return Ok(None);
+    };
+    if left.rows.is_empty() {
+        return Ok(None);
+    }
+
+    // Partition the left rows by their endpoint id, preserving first-seen order so the
+    // dispatch (and the resulting row order) is deterministic. A row whose `?ep` is
+    // unbound or a non-IRI term is dropped from dispatch (it names no endpoint).
+    let mut order: Vec<Id> = Vec::new();
+    let mut groups: FxHashMap<Id, Vec<Row>> = FxHashMap::default();
+    for row in &left.rows {
+        let id = row[ep_col];
+        if id == NO_ID {
+            continue; // unbound endpoint — no remote call for this solution.
+        }
+        match term_of(graph, local, id) {
+            Some(Term::NamedNode(_)) => {}
+            _ => continue, // a non-IRI ?ep is not a valid endpoint — skip.
+        }
+        // The sub-left for an endpoint reuses the FULL left layout (same `vars`), so the
+        // recursive bind-join reads join-key columns positionally exactly as before.
+        groups
+            .entry(id)
+            .or_insert_with(|| {
+                order.push(id);
+                Vec::new()
+            })
+            .push(row.clone());
+    }
+    if order.is_empty() {
+        // No left row binds `?ep` to a concrete endpoint IRI: nothing to dispatch, and
+        // (for an inner join) the result is empty. Defer to the verbatim path so SILENT
+        // vs error is decided uniformly.
+        return Ok(None);
+    }
+
+    // Resolve the endpoint IRI strings once (id -> "http://…").
+    let mut acc_vars: Vec<Variable> = vec![ep_var.clone()];
+    let mut acc_rows: Vec<Row> = Vec::new();
+    // Whether at least one endpoint's bind-join actually applied. If EVERY endpoint
+    // declined (e.g. no shared join var), there is no faithful pushdown — defer wholly
+    // to the verbatim path rather than returning a partial/empty result.
+    let mut any_applied = false;
+
+    for id in order {
+        let sub_rows = groups.remove(&id).expect("group for ordered id");
+        let endpoint = match term_of(graph, local, id) {
+            Some(Term::NamedNode(n)) => n.into_string(),
+            _ => continue, // unreachable: filtered above.
+        };
+        let sub_left = Bindings::unsorted(left.vars.clone(), sub_rows);
+        let Some(rel) = bound_join_to_endpoint(graph, local, &sub_left, &endpoint, inner, silent)?
+        else {
+            // This endpoint's sub-join declined the pushdown (no shared join var, an
+            // unbound/blank join key, …). For correctness we cannot mix a pushed
+            // endpoint with a verbatim one, so abandon the whole variable-endpoint
+            // pushdown and let the verbatim path handle it.
+            return Ok(None);
+        };
+        any_applied = true;
+        // Tag every remote row with `?ep = <endpoint>` (its first column) and align the
+        // remaining columns to the accumulated header, extending `acc_vars` with any new
+        // remote variable as it first appears.
+        for v in &rel.vars {
+            if !acc_vars.contains(v) {
+                acc_vars.push(v.clone());
+            }
+        }
+        // Column index of each accumulated var within THIS endpoint's relation (skip
+        // `?ep`, which the remote relation does not carry).
+        let src_col: Vec<Option<usize>> = acc_vars
+            .iter()
+            .map(|v| if v == ep_var { None } else { rel.col(v) })
+            .collect();
+        for r in &rel.rows {
+            let mut out: Row = SmallVec::with_capacity(acc_vars.len());
+            for (i, c) in src_col.iter().enumerate() {
+                if i == 0 {
+                    out.push(id); // the `?ep` column.
+                } else {
+                    out.push(c.map(|j| r[j]).unwrap_or(NO_ID));
+                }
+            }
+            acc_rows.push(out);
+        }
+    }
+
+    if !any_applied {
+        return Ok(None);
+    }
+
+    // Normalise every row to the final header width (a later endpoint may have added a
+    // variable absent from an earlier one; those earlier rows get `NO_ID` in the new
+    // column).
+    let width = acc_vars.len();
+    for r in &mut acc_rows {
+        while r.len() < width {
+            r.push(NO_ID);
+        }
+    }
+    Ok(Some(Bindings::unsorted(acc_vars, acc_rows)))
 }
 
 /// Test/embedder seam for the SERVICE HTTP transport. By default `with` runs the
@@ -2438,7 +2626,14 @@ pub(crate) mod service_transport {
                 None => {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        f(&crate::service::HttpTransport::new())
+                        // [OPUS-4.8] (sq-d4p) Bound the remote round-trip by the active
+                        // QueryBudget deadline: a query under a 5s budget must not block
+                        // for the transport's fixed 30s default on an unresponsive
+                        // endpoint. `remaining_timeout()` is `None` when no deadline is
+                        // installed, in which case the transport keeps its own default.
+                        f(&crate::service::HttpTransport::with_budget(
+                            super::budget::remaining_timeout(),
+                        ))
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
@@ -10236,9 +10431,12 @@ mod service_exec_tests {
     }
 
     #[test]
-    fn variable_endpoint_is_scoped_out() {
+    fn variable_endpoint_unbound_top_level_errors() {
+        // A variable endpoint with NOTHING to bind it (the surrounding pattern produces
+        // no row binding `?e`) has no endpoint to call: the verbatim path errors
+        // (non-SILENT) / yields the identity (SILENT). [OPUS-4.8] (sq-d4p)
         let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a a ex:T .", "turtle").unwrap();
-        // No transport installed: a variable endpoint must error BEFORE any fetch.
+        // No `ex:ep` data => `?s ex:ep ?e` yields 0 rows => empty left => verbatim path.
         let p = pattern(
             "PREFIX ex: <http://ex/> SELECT ?s WHERE \
              { ?s a ex:T . ?s ex:ep ?e . SERVICE ?e { ?s ex:p ?o } }",
@@ -10251,8 +10449,203 @@ mod service_exec_tests {
             "PREFIX ex: <http://ex/> SELECT ?s WHERE \
              { ?s a ex:T . ?s ex:ep ?e . SERVICE SILENT ?e { ?s ex:p ?o } }",
         );
-        // The ?e join with no ex:ep data yields 0 rows; the point is it does not error.
         assert!(eval_select(&g, &p2).is_ok());
+    }
+
+    // ---------------------------------------------------------------------
+    // SERVICE ?var — variable endpoint, per-endpoint dispatch. [OPUS-4.8] (sq-d4p)
+    // ---------------------------------------------------------------------
+
+    /// A transport that routes each query to a distinct remote `Graph` keyed by the
+    /// endpoint IRI, recording the (endpoint, query) pairs it served. Lets a test prove
+    /// that `SERVICE ?ep` dials the RIGHT endpoint per left binding of `?ep`.
+    struct RemoteByEndpoint {
+        graphs: std::collections::HashMap<String, Graph>,
+        seen: Rc<RefCell<Vec<(String, String)>>>,
+    }
+    impl Transport for RemoteByEndpoint {
+        fn fetch(&self, e: &str, q: &str) -> Result<String, String> {
+            self.seen.borrow_mut().push((e.to_string(), q.to_string()));
+            match self.graphs.get(e) {
+                Some(g) => crate::query_json(g, q),
+                None => Err(format!("no such endpoint {e}")),
+            }
+        }
+    }
+
+    /// `local` data binds each person to the endpoint that knows their name.
+    fn persons_with_endpoints() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> . \
+             ex:alice ex:ep <http://r1/> . \
+             ex:bob   ex:ep <http://r2/> . \
+             ex:carol ex:ep <http://r1/> .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn variable_endpoint_dispatches_per_endpoint() {
+        // alice & carol -> r1 ; bob -> r2. Each remote knows only its own names.
+        let r1 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:alice ex:name \"Alice\" . ex:carol ex:name \"Carol\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r2 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:bob ex:name \"Bob\" .",
+            "turtle",
+        )
+        .unwrap();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut graphs = std::collections::HashMap::new();
+        graphs.insert("http://r1/".to_string(), r1);
+        graphs.insert("http://r2/".to_string(), r2);
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        let res = eval_select(&persons_with_endpoints(), &pattern(q)).unwrap();
+        let mut got = canon(&res);
+        got.sort();
+        let mut expect = vec![
+            vec![Some("<http://ex/alice>".to_string()), Some("\"Alice\"".to_string())],
+            vec![Some("<http://ex/bob>".to_string()), Some("\"Bob\"".to_string())],
+            vec![Some("<http://ex/carol>".to_string()), Some("\"Carol\"".to_string())],
+        ];
+        expect.sort();
+        assert_eq!(got, expect, "each person resolved against its own endpoint");
+        // Two distinct endpoints => exactly two remote requests (one bind-join each).
+        let endpoints: std::collections::HashSet<String> =
+            seen.borrow().iter().map(|(e, _)| e.clone()).collect();
+        assert_eq!(endpoints.len(), 2, "dialled both r1 and r2, and only those");
+    }
+
+    #[test]
+    fn variable_endpoint_optional_keeps_unmatched() {
+        // carol's endpoint r1 does NOT know her name -> under OPTIONAL she survives
+        // unbound; alice (r1) and bob (r2) get names.
+        let r1 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:alice ex:name \"Alice\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r2 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:bob ex:name \"Bob\" .",
+            "turtle",
+        )
+        .unwrap();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut graphs = std::collections::HashMap::new();
+        graphs.insert("http://r1/".to_string(), r1);
+        graphs.insert("http://r2/".to_string(), r2);
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . OPTIONAL { SERVICE ?e { ?s ex:name ?name } } }";
+        let res = eval_select(&persons_with_endpoints(), &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 3, "all three persons survive the left join");
+        let name_i = res.vars.iter().position(|v| v.as_str() == "name").unwrap();
+        let named = res.rows.iter().filter(|r| r[name_i].is_some()).count();
+        assert_eq!(named, 2, "only alice/bob got a name; carol's endpoint lacked it");
+    }
+
+    #[test]
+    fn variable_endpoint_silent_failure_keeps_left() {
+        // A failing transport under SILENT must keep the left rows unchanged (identity),
+        // exactly like the concrete-endpoint SILENT path.
+        let _g = service_transport::install(Box::new(Boom));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE \
+                 { ?s ex:ep ?e . SERVICE SILENT ?e { ?s ex:name ?name } }";
+        let res = eval_select(&persons_with_endpoints(), &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 3, "SILENT remote failure keeps all three persons");
+    }
+
+    #[test]
+    fn variable_endpoint_non_iri_binding_yields_no_remote_row() {
+        // A literal-valued `?e` is not a valid endpoint -> that solution contributes no
+        // remote row (inner join drops it). alice (valid r1) survives; dave (literal) does not.
+        let local = Graph::load_str(
+            "@prefix ex: <http://ex/> . \
+             ex:alice ex:ep <http://r1/> . \
+             ex:dave  ex:ep \"not-an-iri\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r1 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:alice ex:name \"Alice\" .",
+            "turtle",
+        )
+        .unwrap();
+        let mut graphs = std::collections::HashMap::new();
+        graphs.insert("http://r1/".to_string(), r1);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        let res = eval_select(&local, &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 1, "only the valid-IRI endpoint produced a row");
+        // The literal endpoint was never dialled.
+        assert!(
+            seen.borrow().iter().all(|(e, _)| e == "http://r1/"),
+            "only the valid IRI endpoint was contacted"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Per-query timeout wired to the QueryBudget deadline. [OPUS-4.8] (sq-d4p)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn http_transport_timeout_tracks_budget() {
+        use crate::service::{HttpTransport, DEFAULT_SERVICE_TIMEOUT, MIN_SERVICE_TIMEOUT};
+        use std::time::Duration;
+        // No deadline -> the built-in default in full.
+        assert_eq!(HttpTransport::with_budget(None).timeout_for_test(), DEFAULT_SERVICE_TIMEOUT);
+        // A deadline tighter than the default caps the round-trip to the remaining time.
+        let tight = Duration::from_secs(5);
+        assert_eq!(HttpTransport::with_budget(Some(tight)).timeout_for_test(), tight);
+        // A deadline looser than the default never RAISES the timeout above the default.
+        let loose = Duration::from_secs(120);
+        assert_eq!(
+            HttpTransport::with_budget(Some(loose)).timeout_for_test(),
+            DEFAULT_SERVICE_TIMEOUT
+        );
+        // An already-expired (zero) deadline still gets the small non-zero floor.
+        assert_eq!(
+            HttpTransport::with_budget(Some(Duration::ZERO)).timeout_for_test(),
+            MIN_SERVICE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn budget_remaining_timeout_reflects_deadline() {
+        use std::time::{Duration, Instant};
+        // No budget installed -> None.
+        assert!(budget::remaining_timeout().is_none());
+        // A future deadline -> Some(positive), bounded by the deadline.
+        let b = crate::QueryBudget {
+            deadline: Some(Instant::now() + Duration::from_secs(10)),
+            ..crate::QueryBudget::unlimited()
+        };
+        let _g = budget::install(&b);
+        let r = budget::remaining_timeout().expect("deadline installed");
+        assert!(r <= Duration::from_secs(10) && r > Duration::from_secs(8), "got {r:?}");
+        // An expired deadline saturates to ZERO (never panics / underflows).
+        let b2 = crate::QueryBudget {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            ..crate::QueryBudget::unlimited()
+        };
+        let _g2 = budget::install(&b2);
+        assert_eq!(budget::remaining_timeout(), Some(Duration::ZERO));
     }
 }
 
