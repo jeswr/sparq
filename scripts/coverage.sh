@@ -93,6 +93,16 @@ PER_COMMIT_CRATES=(
   sparq-parse sparq-gpu sparq-wasm sparq-zk sparq-zk-compose
   sparq-vectors                # measured with the two 50k tests SKIPPED (see below)
   sparq-conformance            # low %, floor 0 (test driver) — kept for presence
+  # [OPUS-4.8] sq-bif.1: the three OPT-IN native crates that were untracked by BOTH
+  # coverage gates. Their whole surface is feature-gated (fedclient/fedplan empty by
+  # default; prov has a `reason` extra), so they MUST be measured WITH those features
+  # on — the `case` in measure() below names them, or a default-feature build would
+  # report an empty-crate number. The 4 tier-b `-wasm` crates are NOT added here:
+  # their gate-exercising surface is the `#[wasm_bindgen]` JS API that only the
+  # `wasm-pack test --node` runner reaches, so a NATIVE llvm-cov number is a
+  # misleadingly-low artifact (measured 55-79% native; same class as sparq-cli's
+  # subprocess artifact) — they are floor-0 + presence-gated in the JSONs instead.
+  sparq-fedclient sparq-fedplan sparq-prov
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
@@ -300,6 +310,25 @@ measure() {
       if [ "$TIER" = "per-commit" ]; then
         subcmd="test"; test_args+=(--skip "$VECTORS_HEAVY_SKIP"); skips+=("$VECTORS_HEAVY_SKIP")
       fi ;;
+    # [OPUS-4.8] sq-bif.1: the opt-in federation/provenance crates are ENTIRELY
+    # feature-gated — a default-feature `cargo llvm-cov -p <crate>` would build an
+    # empty crate and report a meaningless number. Name the features that turn the
+    # whole surface ON so the measured line% reflects the real (feature-on) code the
+    # floor gates. (Mirrors the sparq-core `--features mmap,dict-spill` quirk above.)
+    sparq-fedclient)
+      # `fedclient` enables the module surface + REUSE seams; `fedclient-adaptive`
+      # turns on the Phase-7 adaptive re-planning module (its tests are gated on it).
+      cargo_args+=(--features fedclient,fedclient-adaptive)
+      features+=("fedclient" "fedclient-adaptive") ;;
+    sparq-fedplan)
+      # `fedplan` enables the planner; `adaptive-replan` the live re-planning module.
+      cargo_args+=(--features fedplan,adaptive-replan)
+      features+=("fedplan" "adaptive-replan") ;;
+    sparq-prov)
+      # `reason` turns on the sparq-reason proof-tree -> PROV-O lineage bridge module
+      # (its integration test, tests/reason_prov.rs, is gated on it). The CONSTRUCT/
+      # update lineage core is default-on.
+      cargo_args+=(--features reason); features+=("reason") ;;
   esac
 
   local start end rc=0 json="$WORK/$crate.json"
