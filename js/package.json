@@ -61,10 +61,7 @@
   ],
   "devDependencies": {
     "@rdfjs/types": "^2.0.1",
-    "@solid/acl-check": "^0.4.5",
-    "@solidlab/policy-engine": "^0.0.2",
     "@types/node": "^25.9.3",
-    "n3": "^1.26.0",
     "typescript": "^6.0.3"
   },
   "dependencies": {
