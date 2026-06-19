@@ -29,6 +29,12 @@
 //!   A native writer (no json-ld crate, zero new deps) built on the same oxrdf terms,
 //!   implementing the Deserialize-to-RDF inverse: it emits exactly the node objects the
 //!   JSON-LD-to-RDF algorithm would consume back into this triple set.
+//! * [`graph_to_jsonld_pretty`] / [`write_jsonld_pretty`] (+ the `*_with` wrappers,
+//!   sq-ixc3.3) — the same JSON-LD documents in an indented, multi-line shape. A
+//!   whitespace-only presentation pass ([`JsonLdPrettyOptions`]) layered over the
+//!   minified writer (the byte content is the minified document re-indented), so it
+//!   reuses the same deterministic ordering and round-trips identically. Still
+//!   dependency-free: a tiny hand-written JSON re-indenter, no serde_json (dev-only).
 //!
 //! ## Canonical interop note
 //!
@@ -1589,6 +1595,165 @@ pub fn graph_to_jsonld_with(graph: &Graph, form: JsonLdForm, prefixes: &Prefixes
     write_jsonld(&view, form, prefixes)
 }
 
+// ===========================================================================
+// [OPUS-4.8] (sq-ixc3.3) PRETTY (indented) JSON-LD.
+//
+// The minified writers above assemble their document into a flat `String` token by
+// token. The pretty writers produce *exactly that same document* and then re-indent
+// it structurally — splitting `{`/`[`/`,`/`}`/`]` onto their own lines with a
+// configurable indent. This is the same strategy the pretty Turtle writer mirrors
+// (`write_turtle_pretty`, sq-ixc3.2): a separate presentation step layered over the
+// already-deterministic core. It is *whitespace-only*:
+//
+//   * the token stream is untouched (no reordering, no value rewriting), so the
+//     already-deterministic first-seen subject / predicate ordering is preserved
+//     verbatim and the output is byte-for-byte the minified document with newlines
+//     and indentation inserted only at structural punctuation; and
+//   * pretty output therefore parses back to the same RDF as the minified output
+//     (asserted by the `jsonld_pretty_*` round-trip + minified-equivalence tests).
+//
+// Dependency-free, exactly like the minified writer: a tiny hand-written JSON
+// re-indenter (no serde_json — that is a dev-only dependency; no json-ld crate).
+// ===========================================================================
+
+/// Options for the pretty JSON-LD writers. Mirrors [`PrettyOptions`] (the pretty
+/// Turtle / TriG option struct) in shape so the two stay consistent: a single
+/// configurable indent unit. JSON-LD has no IRI-abbreviation toggle here — IRI
+/// abbreviation is already selected by [`JsonLdForm::Compacted`].
+#[derive(Clone, Debug)]
+pub struct JsonLdPrettyOptions {
+    /// Indent unit applied once per nesting level. Default: two spaces.
+    pub indent: String,
+}
+
+impl Default for JsonLdPrettyOptions {
+    fn default() -> Self {
+        JsonLdPrettyOptions {
+            indent: "  ".to_string(),
+        }
+    }
+}
+
+/// Re-indents a *minified* JSON document (no insignificant whitespace, as produced by
+/// the writers above) into the pretty form: each `{`/`[` opens a new indented level,
+/// each member / element starts on its own line, and `}`/`]` closes back. An empty
+/// `{}` / `[]` stays on one line.
+///
+/// This is purely a presentation pass — it copies every non-structural byte verbatim
+/// and only inserts newlines + `indent`-repeats at structural punctuation, so the
+/// resulting document is semantically identical to its input (same tokens, same order).
+///
+/// JSON string literals are tracked so that a `{`, `[`, `,`, `}`, `]`, or `:` appearing
+/// *inside* a string value (e.g. an IRI like `http://ex/` or a `_:b0` label) is copied
+/// literally and never mistaken for structure. The minified input is already valid JSON
+/// (the writers above guarantee it), so this scanner does not need to validate.
+fn reindent_json(minified: &str, indent: &str) -> String {
+    let mut out = String::with_capacity(minified.len() + minified.len() / 4);
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut chars = minified.chars().peekable();
+
+    // Pushes a newline followed by `level` indent units.
+    let newline = |out: &mut String, level: usize| {
+        out.push('\n');
+        for _ in 0..level {
+            out.push_str(indent);
+        }
+    };
+
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '{' | '[' => {
+                let close = if c == '{' { '}' } else { ']' };
+                // An immediately-closing empty container stays compact: `{}` / `[]`.
+                if chars.peek() == Some(&close) {
+                    out.push(c);
+                    out.push(chars.next().expect("peeked close char"));
+                } else {
+                    depth += 1;
+                    out.push(c);
+                    newline(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(c);
+            }
+            ',' => {
+                out.push(c);
+                newline(&mut out, depth);
+            }
+            ':' => {
+                // `"key": value` — one space after the colon (the conventional shape).
+                out.push(c);
+                out.push(' ');
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Serializes an RDF dataset as a *pretty* (indented) JSON-LD 1.1 document in `form`,
+/// with a caller-supplied indent. The byte content is exactly [`write_jsonld`]'s output
+/// re-indented (whitespace only) — see the [pretty JSON-LD section](self) notes — so it
+/// parses back to the same RDF and `prefixes` is consulted only for
+/// [`JsonLdForm::Compacted`], identically to the minified writer.
+pub fn write_jsonld_pretty(
+    graphs: &[NamedGraph<'_>],
+    form: JsonLdForm,
+    prefixes: &Prefixes,
+    opts: &JsonLdPrettyOptions,
+) -> String {
+    let minified = write_jsonld(graphs, form, prefixes);
+    reindent_json(&minified, &opts.indent)
+}
+
+/// Serializes a [`Graph`] as PRETTY JSON-LD 1.1 in `form`, using the [`default_prefixes`]
+/// for the compacted form's `@context` and the default [`JsonLdPrettyOptions`] (two-space
+/// indent). The pretty analogue of [`graph_to_jsonld`].
+pub fn graph_to_jsonld_pretty(graph: &Graph, form: JsonLdForm) -> String {
+    graph_to_jsonld_pretty_with(
+        graph,
+        form,
+        &default_prefixes(),
+        &JsonLdPrettyOptions::default(),
+    )
+}
+
+/// [`graph_to_jsonld_pretty`] with a caller-supplied prefix map (for the compacted
+/// `@context`) and pretty options.
+pub fn graph_to_jsonld_pretty_with(
+    graph: &Graph,
+    form: JsonLdForm,
+    prefixes: &Prefixes,
+    opts: &JsonLdPrettyOptions,
+) -> String {
+    let owned = dataset_graphs(graph);
+    let view: Vec<NamedGraph<'_>> = owned
+        .iter()
+        .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+        .collect();
+    write_jsonld_pretty(&view, form, prefixes, opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2633,5 +2798,253 @@ ex:bob
         let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
         assert_eq!(doc.matches("\"@list\"").count(), 2, "both lists collapse:\n{doc}");
         assert_jsonld_list_iso(&g);
+    }
+
+    // ---- [OPUS-4.8] (sq-ixc3.3) PRETTY (indented) JSON-LD ----
+    //
+    // The pretty writer is a whitespace-only presentation pass over the minified writer.
+    // The tests pin two load-bearing properties:
+    //   1. equivalence — stripping insignificant whitespace from the pretty output yields
+    //      the exact minified document (the token stream is untouched), AND the pretty
+    //      output round-trips to the identical RDF graph; and
+    //   2. shape — golden expected text for a small fixed graph in each form, so any
+    //      accidental indentation change is caught.
+
+    /// Removes JSON whitespace *outside* string literals — the inverse of `reindent_json`'s
+    /// insertions. Used only in tests to prove the pretty pass is whitespace-only.
+    fn strip_json_ws(pretty: &str) -> String {
+        let mut out = String::with_capacity(pretty.len());
+        let mut in_string = false;
+        let mut escaped = false;
+        for c in pretty.chars() {
+            if in_string {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match c {
+                '"' => {
+                    in_string = true;
+                    out.push(c);
+                }
+                ' ' | '\t' | '\n' | '\r' => {} // insignificant outside a string
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    /// Asserts, for every form, that the pretty output (default options) (a) is still valid
+    /// JSON, (b) collapses back to exactly the minified writer's bytes, and (c) re-parses to
+    /// the same RDF as the minified document.
+    fn assert_jsonld_pretty_equiv(g0: &Graph) {
+        for form in [
+            JsonLdForm::Expanded,
+            JsonLdForm::Flattened,
+            JsonLdForm::Compacted,
+        ] {
+            let minified = graph_to_jsonld(g0, form);
+            let pretty = graph_to_jsonld_pretty(g0, form);
+            // (a) valid JSON.
+            let _: Value = serde_json::from_str(&pretty)
+                .unwrap_or_else(|e| panic!("{form:?} pretty produced invalid JSON: {e}\n{pretty}"));
+            // (b) whitespace-only: stripping the inserted whitespace recovers the minified doc.
+            assert_eq!(
+                strip_json_ws(&pretty),
+                minified,
+                "{form:?} pretty is not the minified doc + whitespace\n--- pretty ---\n{pretty}"
+            );
+            // (c) parses back to the same RDF as the minified doc.
+            let nq = jsonld_to_nquads(&pretty);
+            let g1 = Graph::load_dataset(&nq, "nquads").unwrap_or_else(|e| {
+                panic!("{form:?} pretty re-parse failed: {e}\n--- pretty ---\n{pretty}\n--- nq ---\n{nq}")
+            });
+            assert_eq!(
+                nt_sorted(g0),
+                nt_sorted(&g1),
+                "{form:?} pretty default-graph round-trip\n--- pretty ---\n{pretty}\n--- nq ---\n{nq}"
+            );
+        }
+    }
+
+    #[test]
+    fn jsonld_pretty_equiv_basic() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:alice a ex:Person ; ex:knows ex:bob ; ex:name "Alice" .
+               ex:bob ex:name "Bob" ."#,
+            "turtle",
+        )
+        .unwrap();
+        assert_jsonld_pretty_equiv(&g);
+    }
+
+    #[test]
+    fn jsonld_pretty_equiv_literals_and_lists() {
+        // Native-coerced scalars, a typed literal, a language tag, and a collapsed @list.
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+               ex:s ex:n 42 ;
+                    ex:flag true ;
+                    ex:d "1.5"^^xsd:double ;
+                    ex:greet "hi"@en ;
+                    ex:items ( "a" "b" ) ."#,
+            "turtle",
+        )
+        .unwrap();
+        // @list collapse renames blank nodes, so only assert validity + whitespace-only-ness
+        // + a fixed point here (the label-sensitive RDF check is covered by the basic case).
+        for form in [
+            JsonLdForm::Expanded,
+            JsonLdForm::Flattened,
+            JsonLdForm::Compacted,
+        ] {
+            let minified = graph_to_jsonld(&g, form);
+            let pretty = graph_to_jsonld_pretty(&g, form);
+            let _: Value = serde_json::from_str(&pretty)
+                .unwrap_or_else(|e| panic!("{form:?} pretty invalid JSON: {e}\n{pretty}"));
+            assert_eq!(
+                strip_json_ws(&pretty),
+                minified,
+                "{form:?} not whitespace-only"
+            );
+        }
+    }
+
+    #[test]
+    fn jsonld_pretty_equiv_named_graph() {
+        let g = Graph::load_dataset(
+            r#"<http://ex/s> <http://ex/p> "v" .
+               <http://ex/s> <http://ex/p2> <http://ex/o> <http://ex/g> ."#,
+            "nquads",
+        )
+        .unwrap();
+        assert_jsonld_pretty_equiv(&g);
+    }
+
+    #[test]
+    fn jsonld_pretty_empty_graph() {
+        let g = Graph::load_str("", "turtle").unwrap();
+        // Expanded with no triples is the empty array; pretty keeps it compact.
+        assert_eq!(graph_to_jsonld_pretty(&g, JsonLdForm::Expanded), "[]");
+    }
+
+    #[test]
+    fn jsonld_pretty_custom_indent() {
+        let g = Graph::load_str(r#"<http://ex/s> <http://ex/p> "v" ."#, "turtle").unwrap();
+        let opts = JsonLdPrettyOptions {
+            indent: "\t".to_string(),
+        };
+        let pretty =
+            graph_to_jsonld_pretty_with(&g, JsonLdForm::Expanded, &default_prefixes(), &opts);
+        // Custom indent is still whitespace-only over the minified doc.
+        assert_eq!(
+            strip_json_ws(&pretty),
+            graph_to_jsonld(&g, JsonLdForm::Expanded)
+        );
+        assert!(pretty.contains('\t'), "tab indent should appear:\n{pretty}");
+        assert!(!pretty.contains("  "), "no two-space runs with a tab indent:\n{pretty}");
+    }
+
+    #[test]
+    fn jsonld_pretty_golden_expanded() {
+        // A small, fixed single-subject graph: one rdf:type, one IRI value, one plain literal.
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s a ex:T ; ex:p ex:o ; ex:name "n" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let pretty = graph_to_jsonld_pretty(&g, JsonLdForm::Expanded);
+        let expected = "\
+[
+  {
+    \"@id\": \"http://ex/s\",
+    \"@type\": [
+      \"http://ex/T\"
+    ],
+    \"http://ex/p\": [
+      {
+        \"@id\": \"http://ex/o\"
+      }
+    ],
+    \"http://ex/name\": [
+      {
+        \"@value\": \"n\"
+      }
+    ]
+  }
+]";
+        assert_eq!(pretty, expected, "actual:\n{pretty}");
+    }
+
+    #[test]
+    fn jsonld_pretty_golden_flattened() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:p "n" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let pretty = graph_to_jsonld_pretty(&g, JsonLdForm::Flattened);
+        let expected = "\
+{
+  \"@graph\": [
+    {
+      \"@id\": \"http://ex/s\",
+      \"http://ex/p\": [
+        {
+          \"@value\": \"n\"
+        }
+      ]
+    }
+  ]
+}";
+        assert_eq!(pretty, expected, "actual:\n{pretty}");
+    }
+
+    #[test]
+    fn jsonld_pretty_golden_compacted() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:p "n" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let pretty = graph_to_jsonld_pretty_with(
+            &g,
+            JsonLdForm::Compacted,
+            &ex_prefixes(),
+            &JsonLdPrettyOptions::default(),
+        );
+        // The `@context` lists every prefix the minified writer would (here `ex` plus `xsd`,
+        // because a plain literal's implicit xsd:string datatype is noted by `write_context`).
+        // The pretty pass adds no members — it only indents, so the context matches the
+        // minified writer exactly.
+        let expected = "\
+{
+  \"@context\": {
+    \"ex\": \"http://ex/\",
+    \"xsd\": \"http://www.w3.org/2001/XMLSchema#\"
+  },
+  \"@graph\": [
+    {
+      \"@id\": \"ex:s\",
+      \"ex:p\": [
+        {
+          \"@value\": \"n\"
+        }
+      ]
+    }
+  ]
+}";
+        assert_eq!(pretty, expected, "actual:\n{pretty}");
     }
 }

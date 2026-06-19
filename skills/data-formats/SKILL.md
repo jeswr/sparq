@@ -12,9 +12,10 @@ loaders live in `sparq-core`; the binary HDT archive format (including content-s
 
 > Direction note: these crates **parse RDF in**. To write RDF *out*, sparq-engine ships the
 > **RDF writer matrix** behind its opt-in `serialize-rdf` feature — Turtle / TriG / N-Quads /
-> JSON-LD 1.1 writers (`sparq_engine::serialize::*`), plus a deterministic **pretty** Turtle /
-> TriG variant (`graph_to_turtle_pretty`, the long-term engine home for the site formatter);
-> the N-Triples writer (`triples_to_ntriples`) is always on. See recipe 6.
+> JSON-LD 1.1 writers (`sparq_engine::serialize::*`), plus deterministic **pretty** (indented)
+> variants — Turtle / TriG (`graph_to_turtle_pretty`, the long-term engine home for the site
+> formatter) and JSON-LD (`graph_to_jsonld_pretty`); the N-Triples writer (`triples_to_ntriples`)
+> is always on. See recipe 6.
 
 ## Quickstart
 
@@ -199,7 +200,7 @@ N-Triples writer (`triples_to_ntriples`) is always on. Enable with
 
 ```rust
 use sparq_engine::serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads,
-                              graph_to_jsonld, JsonLdForm};
+                              graph_to_jsonld, graph_to_jsonld_pretty, JsonLdForm};
 
 let g = sparq_core::Graph::load_dataset(trig_src, "trig")?;
 let ttl = graph_to_turtle(&g);   // Turtle: @prefix header, `a` for rdf:type, predicate-object
@@ -210,6 +211,7 @@ let jx  = graph_to_jsonld(&g, JsonLdForm::Expanded);    // JSON-LD 1.1, fully-ex
                                                         //   array, no @context (whole dataset).
 let jf  = graph_to_jsonld(&g, JsonLdForm::Flattened);   //   node-merged, `@graph`-framed.
 let jc  = graph_to_jsonld(&g, JsonLdForm::Compacted);   //   basic prefix `@context` (default_prefixes).
+let jp  = graph_to_jsonld_pretty(&g, JsonLdForm::Expanded); // same docs, indented (multi-line).
 ```
 
 Lower-level entry points take `&[oxrdf::Triple]` (e.g. CONSTRUCT output) directly:
@@ -246,6 +248,17 @@ dropped), blank nodes, and RDF 1.2 triple terms `<<( s p o )>>` are all reproduc
 This is the long-term engine home for the site-side TS formatter; the wasm-surface exposure
 (so the site can drop its formatter) is a deferred follow-up.
 
+**Pretty (indented) JSON-LD.** The JSON-LD writers have a matching pretty variant —
+`graph_to_jsonld_pretty(&g, form)` / `write_jsonld_pretty(&named_graphs, form, &prefixes, &opts)`,
+or the `graph_to_jsonld_pretty_with(&g, form, &prefixes, &opts)` wrapper — taking
+`JsonLdPrettyOptions { indent }` (default: two-space indent). Unlike the Turtle pretty writer
+this is **whitespace-only**: it produces the *exact* minified JSON-LD document and re-indents it
+(each `{`/`[` opens an indented level, each member/element on its own line; empty `{}`/`[]` stay
+compact). So it reuses the minified writer's already-deterministic first-seen subject/predicate
+ordering unchanged, round-trips to the identical RDF, and stays dependency-free (a small
+hand-written JSON re-indenter — no `serde_json`, which is dev-only). Indentation is presentation
+only; the document content is byte-for-byte the minified form plus newlines/indent.
+
 From the CLI (opt-in `serialize-rdf` feature) — re-serialize a loaded document to stdout:
 
 ```bash
@@ -253,8 +266,10 @@ cargo build -p sparq-cli --features serialize-rdf
 ./target/.../sparq-cli dump data.trig trig nquads
 #   out-format: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples
 #              | jsonld[-expanded|-flattened|-compacted]
-#   (bare `jsonld` == jsonld-expanded; the `-pretty` forms emit the deterministic,
-#    idiomatic Turtle/TriG from recipe 6 — sorted, blank-line-separated subject blocks)
+#              | jsonld-pretty[-expanded|-flattened|-compacted]
+#   (bare `jsonld` == jsonld-expanded; `turtle-pretty`/`trig-pretty` emit the deterministic,
+#    idiomatic Turtle/TriG from recipe 6 — sorted, blank-line-separated subject blocks;
+#    the `jsonld-pretty*` forms emit indented JSON-LD, bare `jsonld-pretty` == expanded)
 ```
 
 ## Gotchas / feature flags / prerequisites
