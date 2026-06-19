@@ -503,7 +503,7 @@ fn t0_on_count_window_panics() {
 
 // ---------------------------------------------------------------- eval modes
 
-/// All three materialisation strategies are OBSERVATIONALLY IDENTICAL: the
+/// All four materialisation strategies are OBSERVATIONALLY IDENTICAL: the
 /// same scripted stream (sliding overlap, duplicate triples across windows,
 /// numeric aggregation, empty windows) produces the same per-window results.
 #[test]

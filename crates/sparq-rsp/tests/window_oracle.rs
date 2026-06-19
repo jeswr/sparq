@@ -693,7 +693,7 @@ impl Rng {
 
 /// Deterministic fuzz: many seeded random IN-ORDER streams (timestamps
 /// non-decreasing, so no tuple is ever late and the naive timestamp oracle is
-/// exact) across tumbling AND sliding specs, several queries, all three eval
+/// exact) across tumbling AND sliding specs, several queries, all four eval
 /// modes — each emitted window must equal the batch over its tuples. This is the
 /// broad differential net: a closure/eviction/materialisation bug on SOME shape
 /// would surface as a streamed-vs-batch divergence on SOME seed.

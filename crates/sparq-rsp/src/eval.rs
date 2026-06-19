@@ -1,6 +1,6 @@
 //! Window materialisation strategies (the R2R step's graph production):
 //! how each closed window becomes the [`sparq_core::Graph`] the engine
-//! evaluates. See [`EvalMode`] for the three strategies and the crate README
+//! evaluates. See [`EvalMode`] for the four strategies and the crate README
 //! for the measured throughput of each.
 
 use oxrdf::Term;
@@ -12,7 +12,7 @@ use crate::window::{Window, WindowSpec, WindowedStream};
 
 /// How each closed window's graph is materialised for evaluation.
 ///
-/// All three modes produce IDENTICAL query results (pinned by tests); they
+/// All four modes produce IDENTICAL query results (pinned by tests); they
 /// differ only in how much per-window work is redone. Numbers below are the
 /// crate benchmark (`examples/throughput.rs`, see README).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
