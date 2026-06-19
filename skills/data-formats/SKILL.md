@@ -218,8 +218,12 @@ Lower-level entry points take `&[oxrdf::Triple]` (e.g. CONSTRUCT output) directl
 `write_turtle(triples, &prefixes)`, `write_trig(&named_graphs, &prefixes)`,
 `write_nquads(&named_graphs)`, `write_jsonld(&named_graphs, JsonLdForm::Expanded, &prefixes)`;
 `default_prefixes()` supplies the common namespaces, or pass your own `Prefixes` (a
-`BTreeMap<String, String>`) — only prefixes actually used are emitted (the Turtle/TriG header,
-or the JSON-LD compacted `@context`). Round-trip (parse → serialize → re-parse) is isomorphic
+`BTreeMap<String, String>`) — `prefixes_from_pairs([(prefix, iri), …])` builds one from an
+ordered `(prefix, iri)` pair list (e.g. a query's parsed `PREFIX` lines or a `[[prefix, iri], …]`
+array). The `graph_to_*_with` convenience wrappers (`graph_to_turtle_with`, `graph_to_trig_with`,
+`graph_to_jsonld_with`, and the pretty `*_with`) take that same map, so the whole-graph path can
+also serialise under an explicit prefix policy. Only prefixes actually used are emitted (the
+Turtle/TriG header, or the JSON-LD compacted `@context`). Round-trip (parse → serialize → re-parse) is isomorphic
 for every form. **JSON-LD specifics:** `xsd:string`/`rdf:langString` stay implicit
 (`@value` + optional `@language`); every other datatype is preserved as `@type`; canonical
 `xsd:integer`/`xsd:boolean` literals coerce to native JSON scalars only when lossless (leading

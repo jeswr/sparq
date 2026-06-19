@@ -18,6 +18,13 @@ sparq-core = { path = "../sparq-core", default-features = false }
 sparq-engine = { path = "../sparq-engine", default-features = false }
 oxrdf.workspace = true
 wasm-bindgen = "0.2"
+# [OPUS-4.8] sq-l5kr: only linked behind the opt-in `serialize-rdf` feature, for the
+# `Store::serialize(.., prefixes?)` binding to read a caller-supplied JS `[[prefix, iri], …]`
+# array. `js-sys` is already in the wasm graph (wasm-bindgen / getrandom pull it), so this is
+# NOT a new external dependency; it is wasm-portable (not in the wasm-deps-guard forbidden
+# set). OPTIONAL so the lean default bundle — which has no `serialize` method — links zero of
+# it and stays byte-identical.
+js-sys = { version = "0.3", optional = true }
 # [OPUS-4.8] sq-yqi1 (#162): SHACL validation in the browser, OPT-IN behind the
 # `shacl` feature (OFF by default). The DEFAULT bundle carries zero SHACL code, so the
 # lean baseline (and the wasm-deps-guard, which checks the default graph) is unchanged.
@@ -72,7 +79,10 @@ regex = ["sparq-engine/regex"]
 # Forwards to `sparq-engine/serialize-rdf` (which carries the whole serializer matrix and
 # pulls NO new dependency). OFF by default so the lean `wasm_bundle_bytes` baseline is
 # byte-identical to before; the site REPL build (js `build:wasm`) turns it on.
-serialize-rdf = ["sparq-engine/serialize-rdf"]
+# [OPUS-4.8] sq-l5kr: also pulls `js-sys` so the `prefixes?` arg (a caller-supplied
+# `[[prefix, iri], …]` JS array) can be read; `js-sys` is already in the wasm graph, so this
+# adds no new external dependency, and stays OFF the lean default bundle.
+serialize-rdf = ["sparq-engine/serialize-rdf", "dep:js-sys"]
 
 [dev-dependencies]
 # [OPUS-4.8] sq-9qz6 pt2 — headless wasm test harness. Exercises the #[wasm_bindgen]

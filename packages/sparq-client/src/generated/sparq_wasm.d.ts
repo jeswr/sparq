@@ -289,19 +289,29 @@ export class Store {
      * header and compacts IRIs to `prefix:local`; `false` keeps every IRI in full
      * `<…>` form. It is **ignored for JSON-LD** — IRI abbreviation there is selected by
      * the `jsonld-compacted` form (which carries a prefix `@context`), not this flag.
-     * The well-known prefixes (`rdf`, `rdfs`, `xsd`, `owl`, `schema`, `foaf`, `dc`,
-     * `skos`, `sh`) are assumed for compaction.
+     *
+     * `prefixes` is an OPTIONAL caller-supplied prefix map: a JS array of
+     * `[prefix, iri]` pairs (e.g. `[["ex", "http://example.org/"], ["schema",
+     * "https://schema.org/"]]`). When omitted (`undefined` / `null`) the engine's
+     * well-known defaults (`rdf`, `rdfs`, `xsd`, `owl`, `schema` → `http://schema.org/`,
+     * `foaf`, `dc`, `skos`, `sh`) are used — **byte-for-byte the prior behaviour**. When
+     * supplied, those prefixes drive Turtle/TriG `@prefix` compaction and the JSON-LD
+     * compacted `@context` instead, so a caller can match its OWN prefix policy (the
+     * site's `COMMON_PREFIXES` with `https://schema.org/` + `dcterms`/`prov`/`geo`/`void`/
+     * `ex`, or a query's declared `PREFIX` lines) and get byte-parity output. A malformed
+     * entry (not a two-string array) is rejected with a `JsError`. Only used for
+     * compaction (Turtle/TriG with `abbreviate=true`, JSON-LD `jsonld-compacted`).
      *
      * This is the document-export counterpart to [`query_quads`](Self::query_quads),
      * which returns a CONSTRUCT/DESCRIBE *result graph* as flat N-Triples: `serialize`
      * writes the **store itself** in a readable syntax. Errors only if `format` is
-     * not one of the recognised values (a `JsError`); serialisation itself is
-     * infallible. Available only when the crate is built with the OPT-IN
-     * `serialize-rdf` feature — the site REPL bundle enables it; the lean default
+     * not one of the recognised values, or `prefixes` is malformed (a `JsError`);
+     * serialisation itself is infallible. Available only when the crate is built with the
+     * OPT-IN `serialize-rdf` feature — the site REPL bundle enables it; the lean default
      * bundle does not. (JSON-LD *serialise-out* needs no extra feature: the writers
      * live under `serialize-rdf`; the `jsonld` feature is INGEST-only.)
      */
-    serialize(format: string, pretty: boolean, indent: string | null | undefined, abbreviate: boolean): string;
+    serialize(format: string, pretty: boolean, indent: string | null | undefined, abbreviate: boolean, prefixes?: Array<any> | null): string;
     /**
      * Applies a SPARQL 1.1 Update (`INSERT DATA`, `DELETE DATA`, `CLEAR`,
      * `DELETE/INSERT … WHERE` on the default graph) and returns the **new** store —
@@ -381,20 +391,20 @@ export interface InitOutput {
     readonly store_queryCursor: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_queryQuads: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_queryQuadsChunks: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly store_serialize: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly store_serialize: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly store_size: (a: number) => number;
     readonly store_update: (a: number, b: number, c: number) => [number, number, number];
     readonly store_updateInPlace: (a: number, b: number, c: number) => [number, number];
     readonly store_validate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly querychunks_next: (a: number) => [number, number];
     readonly __wbg_querychunks_free: (a: number, b: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __externref_drop_slice: (a: number, b: number) => void;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }

@@ -149,8 +149,9 @@ surface is a page; the three flagships are top-billed "Showcase" pages.
 Core engine
   /try                    The live SPARQL REPL (the shared engine component)
   /surface/sparql         SPARQL 1.1/1.2 — SELECT/ASK/CONSTRUCT/UPDATE, paths, RDF 1.2 triple terms
-                          (EXPLAIN exists as `sparq_engine::explain*` but is NOT yet a wasm
-                           export → needs a new binding (tier-b) before it is in-tab live)
+                          (EXPLAIN / EXPLAIN ANALYZE are now wasm exports — `Store.explain` /
+                           `Store.explainAnalyze` over `sparq_engine::explain*` (sq-ncvq.14 / #269),
+                           so plan introspection is in-tab live in the lean default bundle)
   /surface/data-formats   Turtle / N-Triples / N-Quads / TriG + compressed ingest
   /surface/javascript-wasm  The @jeswr/sparq browser/Node API (streaming, match, applyDelta)
 
