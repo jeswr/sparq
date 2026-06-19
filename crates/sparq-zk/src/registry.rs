@@ -80,7 +80,7 @@ pub const ZK_SCHEME_POSEIDON2_RDFC10_V1: &str = "https://sparq.dev/ns/zk#poseido
 // `research/zk-configurable-commitment-design.md` §2.1).
 pub const ZK_SCHEME_POSEIDON2_DUALLEAF_V1: &str = "https://sparq.dev/ns/zk#poseidon2-dualleaf-v1";
 /// The `value-only` commitment scheme id (value handle only, lexical hash
-/// dropped) — [`crate::commit::CommitmentMethod::ValueOnlyV1`], a
+/// dropped) — `CommitmentMethod::ValueOnlyV1`, a
 /// **benchmark / research dial** (§10 default (2)). The IRI const is always
 /// present, but the method that selects it is compiled out unless the
 /// OFF-by-default `commitment-value-only` feature is enabled, so a default build
