@@ -11,8 +11,10 @@
 #     the gates predate or the heuristics missed. It complements, never gates.
 #
 # DRIFT CLASSES (each maps to a §5 finding in the design doc):
-#   bench-missing       a crate with NO registered benchmark in bench/benchmarks.toml
-#                       (cross-ref `source = crates/<x>` vs crates/*/)            §5.A
+#   bench-missing       a PUBLISHABLE crate with NO registered benchmark in
+#                       bench/benchmarks.toml (cross-ref `source = crates/<x>` vs
+#                       crates/*/). Honors gate G1's `publish = false` stub
+#                       exemption (sq-bif.5), so benchless stubs are not flagged. §5.A
 #   skill-missing       a PUBLIC crate named in NO skills/**/SKILL.md             §5.B
 #   explain-asymmetry   a public-surface capability present in Rust/HTTP but
 #                       absent from the WASM/JS binding (best-effort)             §5.C
@@ -243,11 +245,27 @@ def dashboard_featured_keys(root: Path) -> str:
 # Drift scanners — one per class. Each returns a list[DriftItem].
 # --------------------------------------------------------------------------- #
 def scan_bench_missing(root: Path) -> list[DriftItem]:
-    """§5.A — crates with NO registered benchmark in bench/benchmarks.toml."""
+    """§5.A — crates with NO registered benchmark in bench/benchmarks.toml.
+
+    [OPUS-4.8] sq-bif.5: honor the SAME `publish = false` exemption the merge-time
+    gate G1 (scripts/gate-new-crate.py) applies to its bench requirement (a). G1's
+    `publish = false` escape hatch (design §2.1) marks an intentional stub that is
+    exempt from needing a registered benchmark; the reactive scanner must mirror
+    that or it mints spurious `bench-missing` drift for crates that are legitimately
+    benchless by design. We reuse `crate_is_public` (whose predicate is the exact
+    inverse of G1's `crate_is_stub` — the identical `^\\s*publish\\s*=\\s*false\\b`
+    regex), so the two tools share one definition of "stub" and cannot diverge
+    again. This is a tool-consistency fix, NOT new bench coverage — no benchmarks
+    are added; the exempted crates remain genuinely unbenched, which is fine for a
+    `publish = false` stub exactly as G1 allows at merge time."""
     registry = bench_registry_sources(root)
     items: list[DriftItem] = []
     for crate in list_crates(root):
         if crate in BENCH_EXEMPT_CRATES:
+            continue
+        if not crate_is_public(root, crate):
+            # `publish = false` stub: exempt, mirroring gate-new-crate.py's G1
+            # bench-requirement exemption (single source of truth: crate_is_public).
             continue
         if crate_has_registered_bench(registry, crate):
             continue
