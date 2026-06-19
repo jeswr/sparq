@@ -1,3 +1,4 @@
+<!-- [OPUS-4.8] sq-4lvq: README brought to template (deferred from sq-inzv). -->
 # sparq-introspect
 
 **Ontology / schema introspection** for the sparq RDF engine — an **opt-in** crate
@@ -37,97 +38,73 @@ let ix = sparq_introspect::Introspection::load("data/g.nt.introspect")?; // O(ou
 ## ✨ Features
 
 - **Characteristic sets** (Neumann & Moerkotte, ICDE 2011) — one SPO scan groups
-  subjects by their *exact* predicate set; each distinct set carries its subject count,
-  per-predicate triple counts (avg multiplicity = `predicate_triples[i] / subjects`),
-  and the `rdf:type` histogram of its subjects. Top sets retained, exact tail aggregates.
+  subjects by their *exact* predicate set; each set carries its subject count,
+  per-predicate triple counts (avg multiplicity), and the `rdf:type` histogram of its
+  subjects. Top sets retained, exact tail aggregates.
 - **Schema summary** — classes with instance counts; per-class predicate usage with
   subject/triple counts, **coverage ratios**, and **per-class sample object labels**
-  (`ClassPredicate::samples` — drawn only from *this* class's triples, so a minority
-  class shows its OWN representative values instead of the predicate's global minimum,
-  which may belong entirely to a larger class); per-predicate global stats (triples,
-  distinct subjects/objects, literal-vs-IRI split, datatype distribution, deterministic
-  sample values); and **observed domain/range** (most-common subject/object classes,
-  inferred from usage) alongside any **declared** `rdfs:domain`/`rdfs:range` — real KGs
-  are under-declared and mis-typed, so usage wins and both are reported.
+  (`ClassPredicate::samples`, drawn only from *this* class's triples, so a minority class
+  shows its OWN representative values rather than the predicate's global minimum); plus
+  **observed domain/range** (most-common subject/object classes, inferred from usage)
+  alongside any **declared** `rdfs:domain`/`rdfs:range` — real KGs are under-declared and
+  mis-typed, so usage wins and both are reported.
 - **Persisted `*.introspect` sidecar** (`save` / `load` / `from_json`,
-  [`sidecar_path_for`]) — write the mined schema as JSON next to the dataset, then
-  reload it `O(output)` instead of re-mining the graph (`O(|G| + |dict|)`); the format is
-  exactly `to_json`'s, so a sidecar is also a plain JSON document. Every export
-  (`to_text_summary`, `schema_summary_for`, `to_void`, …) runs off the loaded struct.
-- **Cross-class join hints** — the `(subject_class) --predicate--> (object_class)` edge
-  table with per-edge triple counts, mined in the *same* SPO scan as the characteristic
-  sets; top edges by triple count, capped with exact tail aggregates.
-- **Text summary** (`to_text_summary(budget_chars)`) — header totals → prefix glossary
-  (only the namespaces the body uses; well-known prefixes, `nsN` otherwise) → classes
-  with coverage + range hints + samples → characteristic-set patterns → predicate stats.
-  Lines drop greedily at the budget; a final `…` marks elision.
+  [`sidecar_path_for`]) — write the mined schema as JSON next to the dataset, then reload it
+  `O(output)` instead of re-mining `O(|G| + |dict|)`; the format is exactly `to_json`'s, so a
+  sidecar is also a plain JSON document. Every export runs off the loaded struct.
+- **Cross-class join hints** — the `(subject_class) --predicate--> (object_class)` edge table
+  with per-edge triple counts, mined in the *same* SPO scan as the characteristic sets.
+- **Text summary** (`to_text_summary(budget_chars)`) — header totals → prefix glossary →
+  classes with coverage + range hints + samples → characteristic-set patterns → predicate
+  stats. Lines drop greedily at the budget; a final `…` marks elision.
 - **VoID export** (`to_void`) — a [W3C VoID](https://www.w3.org/TR/void/) description as
   N-Triples (parses as Turtle too — no serializer dep), with exact `void:triples`,
-  `void:entities`, `void:distinctSubjects`, `void:classes`, `void:properties`, plus a
-  `void:classPartition` and `void:propertyPartition` each. `void:distinctObjects` is
-  **not** emitted — omitted rather than misleading (no global de-duplicated count kept).
-- **VoID + characteristic-set source stats** (`to_void_with_cs`, federation A3/Z2) — a
-  strict superset of `to_void`, then the mined sets under a documented sparq extension
-  vocab `scs:` (`<http://sparq.dev/ns/cs#>`); the served federation-descriptor surface
-  that primes a remote CostFed/Odyssey-class source-selector with star/multi-join
-  cardinalities. Served at `GET /.well-known/void` behind the opt-in
-  `federation-descriptors` feature.
+  `void:entities`, `void:distinctSubjects`, `void:classes`, `void:properties`, and a
+  `void:classPartition`/`void:propertyPartition` each. `void:distinctObjects` is **not**
+  emitted — omitted rather than misleading (no global de-duplicated count kept).
+- **VoID + characteristic-set source stats** (`to_void_with_cs`, federation A3/Z2) — a strict
+  superset of `to_void` plus the mined sets under a documented sparq extension vocab `scs:`
+  (`<http://sparq.dev/ns/cs#>`); the served federation-descriptor surface that primes a remote
+  CostFed/Odyssey-class source-selector with star/multi-join cardinalities. Served at
+  `GET /.well-known/void` behind the opt-in `federation-descriptors` feature.
 - **SHACL node-shape export** (`to_shacl`) — each mined characteristic set as a W3C
-  [SHACL](https://www.w3.org/TR/shacl/) `sh:NodeShape` (N-Triples / valid Turtle): a
-  `sh:targetClass` for every class **universal** to the set (so the shape auto-applies
-  only where every instance genuinely has the set's predicates), one `sh:PropertyShape`
-  (`sh:path` + `sh:minCount 1`) per non-type predicate, and `sh:maxCount 1` exactly when
-  that predicate's avg multiplicity is 1. The constraints are mined from what the data
-  asserts, so the graph already validates against them — a data-grounded effective-schema
-  floor, not an aspirational contract. Sets with no universal class yield a reusable but
-  target-less shape.
-- **Vocabulary detection** — namespaces in use (split at the last `#`/`/`, the split the
-  dictionary stores) with distinct-term counts, recognised against a bundled offline
-  table (rdf/rdfs/owl/xsd/foaf/skos/schema.org/dcterms/wd/dbo/…).
-- **Retrieval-mode summary** (`schema_summary_for(seeds, budget)`) — a seed-scoped digest
-  for KGs whose full schema overflows a prompt; filters the already-mined profiles by IRI
-  (no re-scan).
+  [SHACL](https://www.w3.org/TR/shacl/) `sh:NodeShape`: a `sh:targetClass` for every class
+  **universal** to the set (so the shape auto-applies only where every instance genuinely has
+  the predicates), one `sh:PropertyShape` (`sh:path` + `sh:minCount 1`) per non-type
+  predicate, and `sh:maxCount 1` exactly when avg multiplicity is 1. Constraints are mined
+  from what the data asserts — a data-grounded effective-schema floor, not an aspirational
+  contract. Sets with no universal class yield a reusable but target-less shape.
+- **Vocabulary detection** — namespaces in use (split at the last `#`/`/`) with distinct-term
+  counts, recognised against a bundled offline table (rdf/rdfs/owl/xsd/foaf/skos/schema.org/
+  dcterms/wd/dbo/…).
+- **Retrieval-mode summary** (`schema_summary_for(seeds, budget)`) — a seed-scoped digest for
+  KGs whose full schema overflows a prompt; filters the already-mined profiles by IRI (no
+  re-scan).
 - **Graph scoping** — `Introspection::build(&graph)` introspects the store of whatever
-  `Graph` it is handed: the **default graph** when you pass the top-level `&graph`, and a
-  **single named graph** when you pass that graph's sub-`Graph`. Each named graph of a
-  quad dataset (loaded via `Graph::load_dataset` from N-Quads / TriG) is a self-contained
-  `Graph`, fetched by name with [`Graph::named_graph(&name)`][named-graph] (sq-quuu):
-  ```rust,ignore
-  let g1 = graph.named_graph(&ex_g1).expect("graph exists");
-  let card = sparq_introspect::Introspection::build(g1); // schema card for ex:g1 alone
-  ```
-  There is **no cross-graph or union-of-all-graphs** build: a VoID / schema card is always
-  scoped to exactly one graph, so on a multi-graph dataset run it per graph (or over the
-  default graph) rather than expecting it to merge the quads. Default-graph-only crates
-  silently mixing graphs was sq-quuu; this is the documented + supported scope.
+  `Graph` it is handed: the **default graph** for the top-level `&graph`, a **single named
+  graph** for that graph's sub-`Graph` (fetch by name with
+  [`Graph::named_graph(&name)`][named-graph], sq-quuu). There is **no cross-graph or
+  union-of-all-graphs** build: a VoID / schema card is always scoped to exactly one graph, so
+  on a multi-graph dataset run it per graph rather than expecting it to merge the quads.
 
   [named-graph]: https://docs.rs/sparq-core/latest/sparq_core/struct.Graph.html#method.named_graph
-- **Cost & zero impact** — `O(|G| + |dict|)` time, output-sized memory plus the
-  subject→types map. Separate opt-in crate: no core crate depends on it, the default
-  build does not compile it, and it is read-only over `sparq-core`'s public scan surface
-  (works against raw, mmap'd, and compressed storage).
+- **Cost & zero impact** — `O(|G| + |dict|)` time, output-sized memory plus the subject→types
+  map. Separate opt-in crate: no core crate depends on it, the default build does not compile
+  it, and it is read-only over `sparq-core`'s public scan surface.
 
 ## Measured results
 
-The `olympics_introspect` example reports load / build / `to_json` / `to_text_summary`
-time over the olympics (1.78M triples) and qlever-synthetic (10M) fixtures (paths via
-`SPARQ_OLYMPICS_NT` / `SPARQ_SYNTHETIC_NT`). The design-doc §4 gates: the introspection
-scan stays within dataset load time; summary generation is quick relative to that load;
-and the olympics summary names the dataset's actual classes (asserted by
-`tests/olympics.rs`). Tracked figures live on the perf dashboard.
+The `olympics_introspect` example reports load / build / `to_json` / `to_text_summary` time
+over the olympics (1.78M triples) and qlever-synthetic (10M) fixtures (paths via
+`SPARQ_OLYMPICS_NT` / `SPARQ_SYNTHETIC_NT`); the design-doc §4 gates (scan stays within load
+time; summary fast relative to load; the olympics summary names the dataset's actual classes,
+asserted by `tests/olympics.rs`). Tracked figures live on the perf dashboard.
 
 ```sh
 cargo run -p sparq-introspect --example olympics_introspect --release
-# add `-- --json <path>` to also write the same measurements as a machine-readable
-# JSON document (STDOUT unchanged; timings are advisory/non-canonical, nothing committed)
-cargo run -p sparq-introspect --example olympics_introspect --release -- --json /tmp/introspect.json
+# add `-- --json <path>` to also write the measurements as machine-readable JSON
+# (STDOUT unchanged; timings are advisory/non-canonical, nothing committed)
 ```
-
-Tests: 22 unit (`src/lib.rs`: characteristic-set exactness, coverage, object
-kinds/datatypes/samples, observed-vs-declared domain/range, vocabularies, JSON validity,
-text-summary budget, join hints, VoID export, SHACL node-shape export, retrieval mode,
-per-class sample isolation, persisted-sidecar round-trip) plus 1 integration
-(`tests/olympics.rs`, skip-if-absent at 1.78M scale).
 
 ## 📚 Learn more
 
@@ -139,4 +116,4 @@ per-class sample isolation, persisted-sidecar round-trip) plus 1 integration
 
 ## License
 
-MIT. [OPUS-4.8] sq-lsxd
+MIT. [OPUS-4.8] sq-4lvq
