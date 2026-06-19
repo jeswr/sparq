@@ -5,7 +5,7 @@
   "identifier": "io.github.jeswr.sparq",
   "build": {
     "beforeDevCommand": "cd ../../site && npm run dev",
-    "beforeBuildCommand": "cd ../../site && NEXT_PUBLIC_BASE_PATH='' npm run build",
+    "beforeBuildCommand": "cd ../../site && npm run build:tauri",
     "devUrl": "http://localhost:3000/sparq",
     "frontendDist": "../../site/out"
   },
