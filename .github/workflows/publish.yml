@@ -253,7 +253,11 @@ jobs:
           - runner: macos-latest
             target: aarch64-apple-darwin
             manylinux: ""
-          - runner: macos-13
+          # [OPUS-4.8] sq-v286.12: macos-13 was retired by GitHub. macos-15-intel is the
+          # supported Intel-Mac runner line (matches dist.yml + release.yml), so the
+          # x86_64-apple-darwin wheel arch is preserved — NOT macos-14/macos-latest, which
+          # are Apple silicon and would clash with the aarch64-apple-darwin line above.
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             manylinux: ""
           - runner: windows-latest
