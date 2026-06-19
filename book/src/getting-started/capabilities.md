@@ -1,6 +1,6 @@
 <!-- [OPUS-4.8] sq-h0tr — scaffold page. Distilled from the README "Features" list
 (no lorem). The ZK / MPC entries KEEP the research-scaffold / not-externally-audited
-caveats from the source — do not relabel them as sound or maliciously secure
+caveats from the source — do not relabel them as sound or maliciously secure (privacy-claims-allow: meta-instruction WARNING against relabeling as sound/maliciously-secure, not an achieved-property claim; sq-toze.35)
 (privacy-claims gate). The include-wiring bead (sq-im8u) will single-source each
 capability description from its skills/<surface>/SKILL.md. -->
 
@@ -39,7 +39,8 @@ numbers as indicative, not as an audited cryptographic guarantee.
   [security caveat](https://github.com/jeswr/sparq/blob/main/SECURITY.md) and the
   [zk-query-proofs guide](https://github.com/jeswr/sparq/blob/main/skills/zk-query-proofs/SKILL.md).
 - **Federated MPC** — models evaluating SPARQL across parties with multi-party computation. It is
-  honest-majority semi-honest, **not** maliciously secure. See
+  honest-majority semi-honest, **not** maliciously secure. <!-- privacy-claims-allow: NEGATIVE caveat — explicitly denies malicious security (semi-honest only); sq-qhy4 -->
+  See
   [SECURITY.md](https://github.com/jeswr/sparq/blob/main/SECURITY.md) and the
   [mpc guide](https://github.com/jeswr/sparq/blob/main/skills/mpc/SKILL.md).
 
