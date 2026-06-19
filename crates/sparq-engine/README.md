@@ -84,6 +84,20 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   (`Graph::fork`/`snapshot`/`apply_delta` + `update_in_place_capturing`/`apply_effects`); when the
   feature is off, zero transaction code compiles, the default build is byte-identical, and no new
   dependencies are added.
+- **RDF writer matrix** *(opt-in `serialize-rdf` feature, OFF by default)* — write a `Graph`
+  (or `&[oxrdf::Triple]`) back out as Turtle / TriG / N-Quads / JSON-LD 1.1
+  (`serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads, graph_to_jsonld, …}`), plus a
+  deterministic **pretty** Turtle / TriG variant
+  (`graph_to_turtle_pretty` / `graph_to_trig_pretty`, or `write_turtle_pretty` with
+  `PrettyOptions { indent, abbreviate }`): subject grouping, predicate-object lists (`;`), object
+  lists (`,`), `a` for `rdf:type`, used-only `@prefix` abbreviation, and *emission-order-independent*
+  output (sorted, so the same triple set always renders to the same bytes). It matches the
+  output shape of the site's `prettyTurtle` reshaper — the long-term engine home for that
+  TS formatter — and is round-trip-correct (re-parses to the same triple set). The N-Triples
+  writer (`triples_to_ntriples`) is always on. When the feature is off, zero serializer code
+  compiles, the default build is byte-identical, and **no new dependencies** are added (the
+  writers reuse the existing `oxrdf` term model). See
+  [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more

@@ -15,6 +15,11 @@
 //!
 //! * [`write_turtle`] — Turtle with `@prefix` compaction, predicate-object lists,
 //!   `a` for `rdf:type`, and correct literal / IRI / blank-node escaping.
+//! * [`write_turtle_pretty`] / [`write_trig_pretty`] (+ the `graph_to_*_pretty` wrappers,
+//!   sq-ixc3.2) — the same Turtle/TriG but in the *pretty* shape of the site's
+//!   `prettyTurtle` reshaper (#805): blank-line-separated, configurable-indent subject
+//!   blocks with **emission-order-independent** (sorted) output. The long-term engine
+//!   home for that site-side TS formatter.
 //! * [`write_trig`] — Turtle blocks wrapped in `GRAPH <g> { … }` for named graphs.
 //! * [`write_nquads`] — N-Triples with the 4th graph column.
 //! * [`graph_to_turtle`] / [`graph_to_trig`] / [`graph_to_nquads`] — pull the triples
@@ -531,6 +536,427 @@ pub fn graph_to_nquads(graph: &Graph) -> String {
         .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
         .collect();
     write_nquads(&view)
+}
+
+// ===========================================================================
+// Pretty Turtle.
+//
+// [OPUS-4.8] (sq-ixc3.2) The long-term engine home for the site-side pretty
+// reshaper shipped in #805 (sq-gb4o, `packages/sparq-client/src/pretty-turtle.ts`).
+// The site reshapes the engine's flat N-Triples in TS; this produces idiomatic
+// Turtle directly so the CLI / server / wasm all get it for free.
+//
+// This differs from the plain [`write_turtle`] above in two load-bearing ways:
+//
+//   1. STABLE, INPUT-ORDER-INDEPENDENT output. `write_turtle` preserves the input
+//      slice's order (which, fed from `iter_ids()`, is thread-count-dependent — see
+//      that function's doc). The pretty writer SORTS subjects, predicates, and objects
+//      by their canonical N-Triples spelling, so the same triple SET always renders to
+//      the same bytes regardless of emission order. `rdf:type` (`a`) sorts first within
+//      a subject block (idiomatic Turtle).
+//
+//   2. The OUTPUT SHAPE of the site's `prettyTurtle`: blank-line-separated subject
+//      blocks, a configurable indent unit (default two spaces), object lists wrapped
+//      onto continuation lines (`, ` becomes `,\n{indent}{indent}`), and a
+//      prefix-alphabetical used-only `@prefix` header separated from the body by a
+//      blank line. Matching the shape lets the site later DROP its TS formatter and
+//      call this through the wasm surface (deferred — see the crate README / bead).
+//
+// Round-trip correctness is identical to `write_turtle` (it reuses the same term
+// rendering + escaping helpers), and is asserted by the `pretty_*` tests below.
+// ===========================================================================
+
+/// Options for the pretty Turtle / TriG writers. Mirrors the site `prettyTurtle`
+/// option contract (`PrettyTurtleOptions`) so the two stay shape-compatible.
+#[derive(Clone, Debug)]
+pub struct PrettyOptions {
+    /// Indent unit for predicate / object continuation lines. Default: two spaces.
+    pub indent: String,
+    /// When `false`, no `@prefix` header is emitted and every IRI stays in full
+    /// `<…>` form. Default: `true`.
+    pub abbreviate: bool,
+}
+
+impl Default for PrettyOptions {
+    fn default() -> Self {
+        PrettyOptions {
+            indent: "  ".to_string(),
+            abbreviate: true,
+        }
+    }
+}
+
+/// The canonical N-Triples spelling of a term — the stable sort key. This is exactly
+/// the byte form oxrdf's `Display` produces (the same form the parsers accept), so it
+/// is total, deterministic, and label-stable for blank nodes.
+fn nt_key(term: &Term) -> String {
+    term.to_string()
+}
+
+/// The N-Triples spelling of a subject (IRI or blank node) — the stable sort key.
+fn nt_subject_key(subj: &NamedOrBlankNode) -> String {
+    subj.to_string()
+}
+
+/// One subject's predicate-object lists for the pretty writer, sorted for determinism:
+/// predicates by sort key (`a`/rdf:type first), each predicate's objects by N-Triples
+/// spelling, de-duplicated.
+struct PrettySubject {
+    subject: NamedOrBlankNode,
+    /// `(predicate_render_key, predicate_iri_or_a, objects)` triples in sorted order.
+    /// `predicate_iri_or_a` is the IRI string, or the literal `a` marker so the renderer
+    /// can re-derive the `a` shorthand without re-checking the IRI.
+    predicates: Vec<PrettyPredicate>,
+}
+
+struct PrettyPredicate {
+    /// The predicate IRI (rdf:type included — `a` is decided at render time).
+    iri: oxrdf::NamedNode,
+    /// Objects in stable N-Triples order, de-duplicated.
+    objects: Vec<Term>,
+}
+
+/// Groups triples by subject → predicate → objects with the site's stable ordering:
+/// subjects sorted by N-Triples spelling, predicates by sort key (`rdf:type` first),
+/// objects by N-Triples spelling and de-duplicated.
+fn group_sorted(triples: &[Triple]) -> Vec<PrettySubject> {
+    use std::collections::BTreeMap;
+    // subject_nt -> (subject, pred_sortkey -> (predicate, obj_nt -> object))
+    type PredMap = BTreeMap<String, (oxrdf::NamedNode, BTreeMap<String, Term>)>;
+    let mut by_subject: BTreeMap<String, (NamedOrBlankNode, PredMap)> = BTreeMap::new();
+
+    for t in triples {
+        let skey = nt_subject_key(&t.subject);
+        let entry = by_subject
+            .entry(skey)
+            .or_insert_with(|| (t.subject.clone(), BTreeMap::new()));
+        // `rdf:type` sorts first within the block: key it with a leading control char
+        // (U+0001) that orders before any IRI's `<`. Anything else sorts by its IRI.
+        let pkey = if t.predicate.as_str() == RDF_TYPE {
+            "\u{0001}".to_string()
+        } else {
+            t.predicate.as_str().to_string()
+        };
+        let pred = entry
+            .1
+            .entry(pkey)
+            .or_insert_with(|| (t.predicate.clone(), BTreeMap::new()));
+        pred.1.entry(nt_key(&t.object)).or_insert_with(|| t.object.clone());
+    }
+
+    by_subject
+        .into_values()
+        .map(|(subject, preds)| PrettySubject {
+            subject,
+            predicates: preds
+                .into_values()
+                .map(|(iri, objs)| PrettyPredicate {
+                    iri,
+                    objects: objs.into_values().collect(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Renders one graph's worth of triples as grouped, sorted, indented Turtle blocks
+/// (no `@prefix` header — the caller assembles that once). `base_indent` prefixes every
+/// line (a TriG graph-block indent). Returns the joined block text, or empty for no
+/// triples. Mirrors the site's `renderGraphBody`.
+fn pretty_graph_body(
+    triples: &[Triple],
+    base_indent: &str,
+    opts: &PrettyOptions,
+    prefixes: &Prefixes,
+) -> String {
+    let groups = group_sorted(triples);
+    let mut blocks: Vec<String> = Vec::with_capacity(groups.len());
+    for g in &groups {
+        let mut block = String::new();
+        block.push_str(base_indent);
+        write_subject_pretty(&g.subject, opts.abbreviate, prefixes, &mut block);
+        for (pi, pred) in g.predicates.iter().enumerate() {
+            block.push('\n');
+            block.push_str(base_indent);
+            block.push_str(&opts.indent);
+            // `a` for rdf:type, else the (optionally abbreviated) IRI.
+            if pred.iri.as_str() == RDF_TYPE {
+                block.push('a');
+            } else if opts.abbreviate {
+                write_iri(pred.iri.as_str(), prefixes, &mut block);
+            } else {
+                escape_iri(pred.iri.as_str(), &mut block);
+            }
+            block.push(' ');
+            let sep = format!(",\n{}{}{}", base_indent, opts.indent, opts.indent);
+            for (oi, o) in pred.objects.iter().enumerate() {
+                if oi > 0 {
+                    block.push_str(&sep);
+                }
+                write_term_maybe(o, opts.abbreviate, prefixes, &mut block);
+            }
+            if pi + 1 == g.predicates.len() {
+                block.push_str(" .");
+            } else {
+                block.push_str(" ;");
+            }
+        }
+        blocks.push(block);
+    }
+    blocks.join("\n\n")
+}
+
+/// Renders a subject for the pretty writer. With `abbreviate`, an IRI is prefix-compacted;
+/// without it, IRIs stay full `<…>`. Blank nodes are `_:label` either way.
+fn write_subject_pretty(subj: &NamedOrBlankNode, abbreviate: bool, prefixes: &Prefixes, out: &mut String) {
+    match subj {
+        NamedOrBlankNode::NamedNode(n) if abbreviate => write_iri(n.as_str(), prefixes, out),
+        NamedOrBlankNode::NamedNode(n) => escape_iri(n.as_str(), out),
+        NamedOrBlankNode::BlankNode(b) => {
+            out.push_str("_:");
+            out.push_str(b.as_str());
+        }
+    }
+}
+
+/// Renders any term for the pretty writer, honouring `abbreviate`. Without abbreviation,
+/// IRIs (including a literal's datatype and any nested triple-term IRI) stay full `<…>`;
+/// literals still drop the implicit `xsd:string`/`rdf:langString` datatype (canonical short
+/// form, not prefix compaction). With abbreviation it is exactly [`write_term`].
+fn write_term_maybe(term: &Term, abbreviate: bool, prefixes: &Prefixes, out: &mut String) {
+    if abbreviate {
+        write_term(term, prefixes, out);
+    } else {
+        write_term_full(term, out);
+    }
+}
+
+/// Renders any term with NO prefix compaction — every IRI is a full `<…>` IRIREF. Reuses the
+/// same escaping helpers (so a re-parse is exact); only the prefix step is skipped.
+fn write_term_full(term: &Term, out: &mut String) {
+    match term {
+        Term::NamedNode(n) => escape_iri(n.as_str(), out),
+        Term::BlankNode(b) => {
+            out.push_str("_:");
+            out.push_str(b.as_str());
+        }
+        Term::Literal(l) => {
+            out.push('"');
+            escape_string(l.value(), out);
+            out.push('"');
+            if let Some(lang) = l.language() {
+                out.push('@');
+                out.push_str(lang);
+            } else {
+                let dt = l.datatype().as_str();
+                if dt != "http://www.w3.org/2001/XMLSchema#string"
+                    && dt != "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+                {
+                    out.push_str("^^");
+                    escape_iri(dt, out);
+                }
+            }
+        }
+        Term::Triple(t) => {
+            out.push_str("<<( ");
+            write_subject_pretty(&t.subject, false, &Prefixes::new(), out);
+            out.push(' ');
+            escape_iri(t.predicate.as_str(), out);
+            out.push(' ');
+            write_term_full(&t.object, out);
+            out.push_str(" )>>");
+        }
+    }
+}
+
+/// Serializes a set of triples as PRETTY Turtle: a prefix-alphabetical, used-only
+/// `@prefix` header, then blank-line-separated subject blocks with stable (sorted)
+/// ordering and a configurable indent. See the module-level [pretty section](self)
+/// notes for how this differs from [`write_turtle`].
+///
+/// The output is round-trip-correct: re-parsing it yields the same triple set as the
+/// input (the same property [`write_turtle`] holds, reusing the same term/escaping
+/// helpers).
+pub fn write_turtle_pretty(triples: &[Triple], prefixes: &Prefixes, opts: &PrettyOptions) -> String {
+    let body = pretty_graph_body(triples, "", opts, prefixes);
+    let mut sections: Vec<String> = Vec::new();
+    if opts.abbreviate {
+        if let Some(header) = pretty_prefix_header(triples, prefixes, "") {
+            sections.push(header);
+        }
+    }
+    if !body.is_empty() {
+        sections.push(body);
+    }
+    sections.join("\n\n")
+}
+
+/// Builds the `@prefix` header for the pretty writers: prefix-alphabetical, listing only
+/// the prefixes whose namespace is the chosen compaction for at least one IRI in
+/// `triples`. Returns `None` when nothing compacts. `indent` prefixes each line (a TriG
+/// shared-header indent — currently always empty, kept for symmetry with the site).
+fn pretty_prefix_header(triples: &[Triple], prefixes: &Prefixes, indent: &str) -> Option<String> {
+    let mut used: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut probe = String::new();
+    let mut note = |iri: &str| {
+        probe.clear();
+        write_iri(iri, prefixes, &mut probe);
+        if !probe.starts_with('<') {
+            if let Some((pfx, _)) = probe.split_once(':') {
+                if let Some((k, _)) = prefixes.get_key_value(pfx) {
+                    used.insert(k.as_str());
+                }
+            }
+        }
+    };
+    for t in triples {
+        collect_pretty_iris(&Term::from(t.subject.clone()), &mut note);
+        // `rdf:type` renders as `a` — never declares the rdf: prefix on its own account.
+        if t.predicate.as_str() != RDF_TYPE {
+            note(t.predicate.as_str());
+        }
+        collect_pretty_iris(&t.object, &mut note);
+    }
+    if used.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for (i, pfx) in used.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let ns = &prefixes[*pfx];
+        let mut ns_esc = String::new();
+        escape_iri(ns, &mut ns_esc);
+        let _ = write!(out, "{}@prefix {}: {} .", indent, pfx, ns_esc);
+    }
+    Some(out)
+}
+
+/// Like [`collect_iris`] but matches the PRETTY render exactly: a literal's *implicit*
+/// `xsd:string` / `rdf:langString` datatype is dropped at render time (never written), so
+/// it must not cause its prefix to be declared in the header. Every other IRI is noted.
+fn collect_pretty_iris(term: &Term, note: &mut impl FnMut(&str)) {
+    match term {
+        Term::NamedNode(n) => note(n.as_str()),
+        Term::Literal(l) => {
+            if l.language().is_none() {
+                let dt = l.datatype().as_str();
+                if dt != "http://www.w3.org/2001/XMLSchema#string"
+                    && dt != "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+                {
+                    note(dt);
+                }
+            }
+        }
+        Term::Triple(t) => {
+            collect_pretty_iris(&Term::from(t.subject.clone()), note);
+            note(t.predicate.as_str());
+            collect_pretty_iris(&t.object, note);
+        }
+        Term::BlankNode(_) => {}
+    }
+}
+
+/// Serializes a [`Graph`]'s default graph as PRETTY Turtle with the [`default_prefixes`]
+/// and the default [`PrettyOptions`] (two-space indent, abbreviation on).
+pub fn graph_to_turtle_pretty(graph: &Graph) -> String {
+    write_turtle_pretty(
+        &graph_triples(graph),
+        &default_prefixes(),
+        &PrettyOptions::default(),
+    )
+}
+
+/// Serializes a [`Graph`]'s default graph as PRETTY Turtle with caller-supplied prefixes
+/// and options.
+pub fn graph_to_turtle_pretty_with(
+    graph: &Graph,
+    prefixes: &Prefixes,
+    opts: &PrettyOptions,
+) -> String {
+    write_turtle_pretty(&graph_triples(graph), prefixes, opts)
+}
+
+/// Serializes a dataset as PRETTY TriG: a single shared, prefix-alphabetical `@prefix`
+/// header over every graph, then the default graph's blocks at top level, then each named
+/// graph wrapped in a `GRAPH <g> { … }` block. Graph order: default graph first, then
+/// named graphs by their N-Triples spelling. Mirrors the site's `prettyTrig`.
+pub fn write_trig_pretty(
+    graphs: &[NamedGraph<'_>],
+    prefixes: &Prefixes,
+    opts: &PrettyOptions,
+) -> String {
+    // The shared header is computed over the union of every graph's triples (every IRI
+    // that appears anywhere in the dataset).
+    let all: Vec<Triple> = graphs
+        .iter()
+        .flat_map(|(_, ts)| ts.iter().cloned())
+        .collect();
+
+    // Partition: default graph (name `None`) first, then named graphs sorted by their
+    // N-Triples spelling.
+    let mut named: Vec<&NamedGraph<'_>> = graphs.iter().filter(|(n, _)| n.is_some()).collect();
+    named.sort_by_key(|a| nt_key(a.0.expect("named-graph filter guarantees Some")));
+
+    let mut sections: Vec<String> = Vec::new();
+    if opts.abbreviate {
+        if let Some(header) = pretty_prefix_header(&all, prefixes, "") {
+            sections.push(header);
+        }
+    }
+
+    // Default graph(s) at top level.
+    for (name, ts) in graphs {
+        if name.is_none() && !ts.is_empty() {
+            let body = pretty_graph_body(ts, "", opts, prefixes);
+            if !body.is_empty() {
+                sections.push(body);
+            }
+        }
+    }
+    // Named graphs as GRAPH blocks.
+    for (name, ts) in named {
+        if ts.is_empty() {
+            continue;
+        }
+        let mut block = String::new();
+        block.push_str("GRAPH ");
+        match name.expect("named-graph filter guarantees Some") {
+            Term::NamedNode(n) => {
+                if opts.abbreviate {
+                    write_iri(n.as_str(), prefixes, &mut block);
+                } else {
+                    escape_iri(n.as_str(), &mut block);
+                }
+            }
+            Term::BlankNode(b) => {
+                block.push_str("_:");
+                block.push_str(b.as_str());
+            }
+            other => {
+                // A literal/triple-term graph name is not legal RDF; render its canonical
+                // N-Triples form so nothing is silently lost (the parser surfaces it).
+                let _ = write!(block, "{}", other);
+            }
+        }
+        block.push_str(" {\n");
+        block.push_str(&pretty_graph_body(ts, &opts.indent, opts, prefixes));
+        block.push_str("\n}");
+        sections.push(block);
+    }
+    sections.join("\n\n")
+}
+
+/// Serializes a [`Graph`] (default + named graphs) as PRETTY TriG with the
+/// [`default_prefixes`] and default [`PrettyOptions`].
+pub fn graph_to_trig_pretty(graph: &Graph) -> String {
+    let owned = dataset_graphs(graph);
+    let view: Vec<NamedGraph<'_>> = owned
+        .iter()
+        .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+        .collect();
+    write_trig_pretty(&view, &default_prefixes(), &PrettyOptions::default())
 }
 
 // ===========================================================================
@@ -1314,6 +1740,157 @@ mod tests {
             r#"<http://ex/r> <http://ex/reifies> <<( <http://ex/a> <http://ex/b> "v" )>> .
                <http://ex/r> <http://ex/note> "plain" ."#,
         );
+    }
+
+    // =======================================================================
+    // [OPUS-4.8] (sq-ixc3.2) PRETTY Turtle writer tests — round-trip + golden
+    // output matching the site's `prettyTurtle` shape (#805 / sq-gb4o reference).
+    // =======================================================================
+
+    /// A small prefix map matching what the site/query would declare, so abbreviation is
+    /// actually exercised (the engine's `default_prefixes()` has no `ex:`).
+    fn ex_prefixes() -> Prefixes {
+        let mut p = default_prefixes();
+        p.insert("ex".to_string(), "http://ex/".to_string());
+        p
+    }
+
+    /// Round-trip: PRETTY Turtle re-parses to the same triple SET.
+    fn assert_pretty_iso(original_ttl: &str) {
+        let g0 = Graph::load_str(original_ttl, "turtle").unwrap();
+        let ttl = write_turtle_pretty(&graph_triples(&g0), &ex_prefixes(), &PrettyOptions::default());
+        let g1 = Graph::load_str(&ttl, "turtle").unwrap();
+        assert_eq!(
+            nt_sorted(&g0),
+            nt_sorted(&g1),
+            "pretty turtle round-trip\n--- serialized ---\n{ttl}"
+        );
+    }
+
+    #[test]
+    fn pretty_golden_output_matches_site_shape() {
+        // The exact byte shape the site's `prettyTurtle` emits: prefix-alphabetical
+        // used-only header, blank-line-separated subject blocks (sorted), `a` first,
+        // two-space indent, `;` between predicates, `.` terminator, objects sorted.
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:alice a ex:Person ; ex:knows ex:bob, ex:carol ; ex:name "Alice" .
+               ex:bob ex:name "Bob" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let ttl = write_turtle_pretty(&graph_triples(&g), &ex_prefixes(), &PrettyOptions::default());
+        let expected = "\
+@prefix ex: <http://ex/> .
+
+ex:alice
+  a ex:Person ;
+  ex:knows ex:bob,
+    ex:carol ;
+  ex:name \"Alice\" .
+
+ex:bob
+  ex:name \"Bob\" .";
+        assert_eq!(ttl, expected, "golden pretty output\n--- got ---\n{ttl}");
+    }
+
+    #[test]
+    fn pretty_ordering_is_emission_independent() {
+        // Two inputs with the SAME triple set in DIFFERENT order must produce identical
+        // pretty output — the determinism the flat `write_turtle` does NOT guarantee.
+        let a = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:p ex:o3, ex:o1, ex:o2 ; ex:a ex:x ; a ex:T ."#,
+            "turtle",
+        )
+        .unwrap();
+        let b = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:a ex:x ; ex:p ex:o2, ex:o1, ex:o3 . ex:s a ex:T ."#,
+            "turtle",
+        )
+        .unwrap();
+        let opts = PrettyOptions::default();
+        let pa = write_turtle_pretty(&graph_triples(&a), &ex_prefixes(), &opts);
+        let pb = write_turtle_pretty(&graph_triples(&b), &ex_prefixes(), &opts);
+        assert_eq!(pa, pb, "pretty output must be emission-order-independent\n{pa}\n---\n{pb}");
+        // `a` sorts first within the block.
+        assert!(pa.starts_with("@prefix"), "{pa}");
+        assert!(pa.contains("ex:s\n  a ex:T ;"), "rdf:type 'a' sorts first:\n{pa}");
+    }
+
+    #[test]
+    fn pretty_round_trips_all_term_kinds() {
+        assert_pretty_iso(
+            r#"@prefix ex: <http://ex/> .
+               @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+               ex:alice a ex:Person ; ex:knows ex:bob ; ex:age "30"^^xsd:integer ;
+                        ex:label "Alice"@en, "Alicia"@es ; ex:plain "just a string" ;
+                        ex:bn [ ex:x "y" ] .
+               ex:r ex:reifies <<( ex:a ex:b "v" )>> .
+               <http://weird/has%20space> <http://weird/p?x=1> "lit\nwith\tescapes" ."#,
+        );
+    }
+
+    #[test]
+    fn pretty_empty_graph_is_empty_string() {
+        let g = Graph::load_str("", "turtle").unwrap();
+        assert_eq!(graph_to_turtle_pretty(&g), "");
+    }
+
+    #[test]
+    fn pretty_no_abbreviate_keeps_full_iris_and_no_header() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s a ex:T ; ex:p "v" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let opts = PrettyOptions {
+            abbreviate: false,
+            ..PrettyOptions::default()
+        };
+        let ttl = write_turtle_pretty(&graph_triples(&g), &ex_prefixes(), &opts);
+        assert!(!ttl.contains("@prefix"), "no header when abbreviate=false:\n{ttl}");
+        assert!(ttl.contains("<http://ex/s>"), "IRIs stay full:\n{ttl}");
+        // `a` shorthand for rdf:type is still used even without prefix compaction.
+        assert!(ttl.contains("\n  a <http://ex/T>"), "'a' kept:\n{ttl}");
+        // Still round-trips.
+        let g2 = Graph::load_str(&ttl, "turtle").unwrap();
+        assert_eq!(nt_sorted(&g), nt_sorted(&g2), "{ttl}");
+    }
+
+    #[test]
+    fn pretty_custom_indent() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:p "v" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let opts = PrettyOptions {
+            indent: "\t".to_string(),
+            ..PrettyOptions::default()
+        };
+        let ttl = write_turtle_pretty(&graph_triples(&g), &ex_prefixes(), &opts);
+        assert!(ttl.contains("\n\tex:p "), "tab indent honoured:\n{ttl:?}");
+    }
+
+    #[test]
+    fn pretty_trig_round_trips_named_graphs() {
+        let data = r#"@prefix ex: <http://ex/> .
+            ex:a ex:p ex:b .
+            GRAPH ex:g1 { ex:x a ex:T ; ex:k "in g1" . }
+            GRAPH ex:g2 { ex:m ex:n ex:o . }"#;
+        let g0 = Graph::load_dataset(data, "trig").unwrap();
+        let owned = dataset_graphs(&g0);
+        let view: Vec<NamedGraph<'_>> = owned.iter().map(|(n, ts)| (n.as_ref(), ts.as_slice())).collect();
+        let tg = write_trig_pretty(&view, &ex_prefixes(), &PrettyOptions::default());
+        // Shape: shared header, GRAPH blocks, indented bodies.
+        assert!(tg.contains("@prefix ex:"), "shared header:\n{tg}");
+        assert!(tg.contains("GRAPH ex:g1 {"), "named-graph block:\n{tg}");
+        let g1 = Graph::load_dataset(&tg, "trig").unwrap();
+        assert_dataset_iso(&g0, &g1, &tg);
     }
 
     #[test]

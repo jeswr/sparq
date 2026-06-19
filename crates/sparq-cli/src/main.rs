@@ -926,7 +926,7 @@ fn cmd_dump(args: &[String]) {
     let (path, in_fmt, out_fmt) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(i), Some(o)) => (p.as_str(), i.as_str(), o.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli dump <file[.gz|.bz2|.zst]> <in-format> <out-format>\n  out-format: turtle | trig | nquads | ntriples | jsonld[-expanded|-flattened|-compacted]");
+            eprintln!("usage: sparq-cli dump <file[.gz|.bz2|.zst]> <in-format> <out-format>\n  out-format: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples | jsonld[-expanded|-flattened|-compacted]");
             std::process::exit(2);
         }
     };
@@ -934,6 +934,9 @@ fn cmd_dump(args: &[String]) {
     use sparq_engine::serialize::JsonLdForm;
     let serialized = match out_fmt {
         "turtle" | "ttl" => sparq_engine::serialize::graph_to_turtle(&g),
+        // [OPUS-4.8] (sq-ixc3.2) idiomatic, deterministic pretty Turtle / TriG.
+        "turtle-pretty" | "ttl-pretty" => sparq_engine::serialize::graph_to_turtle_pretty(&g),
+        "trig-pretty" => sparq_engine::serialize::graph_to_trig_pretty(&g),
         "trig" => sparq_engine::serialize::graph_to_trig(&g),
         "nquads" | "n-quads" => sparq_engine::serialize::graph_to_nquads(&g),
         "jsonld" | "json-ld" | "jsonld-expanded" => {
