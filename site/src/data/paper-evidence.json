@@ -185,6 +185,42 @@
       "family": "memory-safety attestation",
       "source": "bench/unsafe-snapshot.json::crates['sparq-core']; 45 register rows in compliance/memsafety/unsafe-register.md §sparq-core; enforced by scripts/unsafe-gate.py --check",
       "note": "Unsafe sites in sparq-core, the single crate concentrating the storage/dictionary/mmap/parallel-scatter/SIMD unsafe (threat-model boundary B5). The largest share of the 59; ratchet-enforced per-crate. Deterministic source scan, not a measurement."
+    },
+    "cozk.reaudit_lenses": {
+      "value": 4,
+      "unit": "audit-lenses",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "coZK witness-validation re-audit (negative result)",
+      "source": "research/mpc-cozk-reaudit.md §2 per-lens table + the four '### Lens N' sections (bead sq-9hrn); each maps a documented eprint 2025/1026 collaborative-zk-SNARK failure mode onto the intended multi-prover stack",
+      "note": "Number of eprint 2025/1026 (Garg-Goel-Jain-Roberts-Sekar, CRYPTO'25) collaborative-zk-SNARK failure-mode lenses the adversarial re-audit assigns a verdict to: (1) witness-extension leakage, (2) malicious-compiler insecurity, (3) the honest-majority 'free malicious security' iff-validate-before-proving conditional, (4) the unaudited TACEO co-snarks dependency. A deterministic structural count over the committed re-audit document, not a measurement. This is NOT a soundness result: every lens is assigned RE-OPEN (not CLOSED) precisely because the collaborative path is unbuilt and cannot be certified."
+    },
+    "cozk.test_obligation_clauses": {
+      "value": 5,
+      "unit": "test-obligation-clauses",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "coZK witness-validation re-audit (negative result)",
+      "source": "research/mpc-cozk-reaudit.md §3 (the R-WV requirement) — T1, T2, T3, T4 + clause C; encoded in crates/sparq-mpc/src/witness_validation_tests.rs (bead sq-7leq)",
+      "note": "Number of clauses in the R-WV (witness-validation-before-proving) test obligation that converts the eprint 2025/1026 precondition into an enforceable build-time gate: T1 inconsistent-share abort-before-open, T2 witness-extension leakage probe, T3 validate-before-prove is load-bearing not advisory, T4 commitment-binding of the validated witness, and clause C the construction-provenance documentary/CI assertion. A deterministic structural count over the committed re-audit + the encoded test module. The obligation is necessary, explicitly NOT claimed sufficient, and its disposition is OPEN, not met — no collaborative prover exists to validate a witness against."
+    },
+    "cozk.deferred_proof_methods": {
+      "value": 6,
+      "unit": "trait-methods",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "coZK witness-validation re-audit (negative result)",
+      "source": "crates/sparq-mpc/src/proof.rs — the CollaborativeProof::{prove, verify}, Attestation::attest_source trait methods plus their stub-test counterparts, each returning MpcError::NotYetImplemented with a named gate; the deferred-prover meta-test gate_state::deferred_prover_never_proves_over_any_witness in witness_validation_tests.rs pins the fail-closed posture",
+      "note": "Number of grep-counted collaborative-proof / attestation entry points in proof.rs that return MpcError::NotYetImplemented (a gate-naming fail-closed error) rather than executing — the committed evidence that the collaborative path is unbuilt. A deterministic source-scan count over committed code, not a measurement. This is the load-bearing honesty of the negative result: there is no shippable collaborative prover to forge against, so the re-audit cannot certify soundness; it can only encode the precondition as a gate that fires if a future prove() starts returning Ok(..) while R-WV is unmet."
+    },
+    "cozk.single_prover_audit_issues": {
+      "value": 12,
+      "unit": "confirmed-issues",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "coZK witness-validation re-audit (negative result)",
+      "source": "research/zk-soundness-audit.md 'Confirmed Issues' — the 12 numbered confirmed findings of the prior single-prover verifier soundness audit (the estate the collaborative path would plug into); the external single-prover audit gate is bead sq-qhy4",
+      "note": "Number of confirmed soundness findings in the prior adversarial audit of the single-prover ZK verifier — the estate the collaborative multi-prover path would build on top of. Cited only to establish that the foundation is itself under an open external-audit gate (sq-qhy4): the single-prover audit was internally re-audited 'sound-as-landed for its threat model' after a v1 documented NOT sound, but no accredited external cryptographer has reviewed it, and sq-qhy4 audits the single-prover verifier only — it does NOT discharge the multi-prover construction this re-audit (sq-9hrn) governs. A deterministic structural count over the committed audit document, not a measurement, and not a security claim."
     }
   }
 }
