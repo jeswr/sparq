@@ -488,7 +488,7 @@ impl Graph {
                         let term = inner.dict.term(id);
                         match term {
                             oxrdf::Term::Triple(_) => {
-                                return Err("RDF-star triple terms cannot participate in N3 reasoning".into());
+                                return Err("RDF 1.2 triple terms cannot participate in N3 reasoning".into());
                             }
                             // [OPUS-4.8] roborev 1961: rename this graph's blank
                             // nodes under the reserved `sparqg` prefix before

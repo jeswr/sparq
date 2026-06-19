@@ -7,7 +7,7 @@ import { ShaclPlayground } from "@/components/shacl-playground";
 export const metadata: Metadata = {
   title: "SHACL",
   description:
-    "Validate RDF against SHACL shapes with the sparq engine — SHACL Core constraints, SHACL-SPARQL, custom constraint components, and the W3C validation report, live in your tab.",
+    "Validate RDF against SHACL shapes with the sparq engine — SHACL Core constraints, SHACL-SPARQL, custom constraint components, the W3C validation report, and a SHACL Compact Syntax view, live in your tab.",
 };
 
 export default function ShaclSurfacePage() {
@@ -15,7 +15,7 @@ export default function ShaclSurfacePage() {
     <SurfaceContent
       icon={ShieldCheck}
       title="SHACL"
-      statement="Validate RDF data against shapes — SHACL Core, SHACL-SPARQL, and the W3C validation report."
+      statement="Validate RDF data against shapes — SHACL Core, SHACL-SPARQL, the W3C validation report, and a live SHACL Compact Syntax view."
       tier="live"
       intro={
         <>
@@ -64,6 +64,10 @@ export default function ShaclSurfacePage() {
           title: "Path expressions",
           body: "Property paths in shape targets and constraints, reusing the engine's path evaluator.",
         },
+        {
+          title: "SHACL Compact Syntax (display)",
+          body: "Render the shapes graph in the W3C compact notation — node/property shapes, paths, counts and value constraints — beside the W3C report.",
+        },
       ]}
       runsNote={
         <>
@@ -89,6 +93,20 @@ export default function ShaclSurfacePage() {
             validate large graphs server-side via the{" "}
             <code className="font-mono">sparq-server</code> HTTP{" "}
             <code className="font-mono">validate</code> path.
+          </p>
+          <p>
+            The <strong className="text-foreground">Compact syntax</strong> view is
+            the <em>display</em> direction only (shapes &rarr; compact). It is
+            best-effort: SHACL Compact Syntax has no form for logical constraints
+            (<code className="font-mono">sh:and</code> /{" "}
+            <code className="font-mono">sh:or</code> /{" "}
+            <code className="font-mono">sh:xone</code> /{" "}
+            <code className="font-mono">sh:not</code>) or shape references{" "}
+            (<code className="font-mono">sh:node</code>), which the view lists
+            explicitly rather than dropping. The <em>parse</em> direction (compact
+            text &rarr; shapes) is a full grammar that belongs in the{" "}
+            <code className="font-mono">sparq-shacl</code> engine and is tracked
+            separately.
           </p>
         </>
       }

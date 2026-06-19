@@ -26,6 +26,14 @@ sparq-serve = { path = "../../crates/sparq-serve" }
 spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
 mimalloc = "0.1"
 
+# [OPUS-4.8] (sq-k5qq / sq-5vm.1) TEST-only: every spike (writer_spike, plus snapshot_spike,
+# cache_spike, stream_spike, point_spike, update_stream_spike, pss_update_throughput) emits an
+# optional, strictly-additive `--json <path>` results document (dependency-free `format!`-built
+# JSON — no serde in the harness itself); this dev-dep parses that emit back so the per-binary
+# round-trip test catches a malformed document.
+[dev-dependencies]
+serde_json = "1"
+
 [[bin]]
 name = "loadgen"
 path = "src/bin/loadgen.rs"

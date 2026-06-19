@@ -6,12 +6,94 @@
 //!    byte-identical neighbours, the acceptance criterion of sq-7zc;
 //! 3. **parity with the in-RAM searchers** on tiny separable clusters, and the degenerate
 //!    all-zero-query contract shared with `nearest_exact` / `VectorIndex`.
+//!
+//! [OPUS-4.8] (sq-k5qq) Strictly-additive machine-readable emit: set `SPARQ_VECTORS_JSON`
+//! to a path and the recall gate ALSO writes its deterministic recall + advisory build/query
+//! timings there as a stable, DEPENDENCY-FREE JSON document (mirroring
+//! `crates/sparq-mpc/examples/mpc_net_bench.rs::cell_json`). These tests run under `cargo test`
+//! with NO CLI args, so the path comes from an env var, not a `--json` flag. STDERR is
+//! byte-for-byte unchanged whether or not the env var is set; the timings are ADVISORY +
+//! NON-CANONICAL (this dev box) and nothing is committed. serde_json is a TEST-only dev-dep.
 
 use sparq_vectors::{nearest_exact, DiskAnnIndex, PqConfig, VamanaConfig, VectorStore};
 // [OPUS-4.8] (sq-ip3a) HNSW is the approximate backend — `approx-ann` only (the disk-vs-HNSW
 // parity test below is gated to match).
 #[cfg(feature = "approx-ann")]
 use sparq_vectors::VectorIndex;
+use std::time::Instant;
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-k5qq) SPARQ_VECTORS_JSON=<path> machine-readable results emit.
+// Dependency-free `format!`-built JSON, the same idiom as tests/throughput.rs.
+// ---------------------------------------------------------------------------
+
+/// The env var that, when set to a path, makes a measurement test ALSO write its
+/// metrics there as JSON. Shared with `tests/throughput.rs`.
+const JSON_ENV: &str = "SPARQ_VECTORS_JSON";
+
+/// Minimal JSON string escaper (the dependency-free emit).
+fn json_str(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for c in raw.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Serialise the workload dimensions + captured `metrics` to stable, dependency-free JSON.
+/// `recall` is a DETERMINISTIC float at the pinned `(N, seed)` workload; the timings are
+/// ADVISORY + NON-CANONICAL (stated in `note`).
+fn results_json(
+    harness: &str,
+    n: usize,
+    dim: usize,
+    k: usize,
+    queries: usize,
+    metrics: &[(&str, f64)],
+) -> String {
+    let mut s = String::new();
+    s.push_str("{\n");
+    s.push_str(&format!("  \"harness\": {},\n", json_str(harness)));
+    s.push_str(&format!("  \"n\": {n},\n  \"dim\": {dim},\n  \"k\": {k},\n  \"queries\": {queries},\n"));
+    s.push_str(
+        "  \"note\": \"`recall` is DETERMINISTIC at the pinned (N, seed) workload; the \
+         build/query timings are best-effort, MEASURED on the running host — ADVISORY, \
+         NON-CANONICAL (this dev box) — do not bake into committed files\",\n",
+    );
+    s.push_str("  \"metrics\": {\n");
+    for (i, (key, val)) in metrics.iter().enumerate() {
+        let comma = if i + 1 < metrics.len() { "," } else { "" };
+        s.push_str(&format!("    {}: {val:.6}{comma}\n", json_str(key)));
+    }
+    s.push_str("  }\n");
+    s.push_str("}\n");
+    s
+}
+
+/// Write the JSON document iff `SPARQ_VECTORS_JSON` is set. Returns whether it wrote.
+fn maybe_write_json(doc: &str) -> bool {
+    match std::env::var(JSON_ENV) {
+        Ok(path) if !path.is_empty() => {
+            if let Err(e) = std::fs::write(&path, doc) {
+                eprintln!("error writing {JSON_ENV} results to {path}: {e}");
+            } else {
+                eprintln!("wrote results JSON to {path}");
+            }
+            true
+        }
+        _ => false,
+    }
+}
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E3779B97F4A7C15);
@@ -50,12 +132,15 @@ fn diskann_recall_at_10_vs_brute_force_on_50k() {
     }
     store.finalize().unwrap();
 
+    let t = Instant::now();
     let index = DiskAnnIndex::build(&store, &graph_path).unwrap();
+    let build = t.elapsed();
     assert_eq!(index.len(), N);
     assert_eq!(index.dim(), DIM);
 
     let mut q_state = 0xDECAF_u64;
     let mut hits = 0usize;
+    let t = Instant::now();
     for _ in 0..QUERIES {
         let q = rand_vec(&mut q_state, DIM);
         let exact: Vec<u32> =
@@ -65,12 +150,61 @@ fn diskann_recall_at_10_vs_brute_force_on_50k() {
         assert_eq!(approx.len(), K);
         hits += approx.iter().filter(|id| exact.contains(id)).count();
     }
+    let query = t.elapsed();
     let recall = hits as f64 / (QUERIES * K) as f64;
     eprintln!("DiskANN recall@{K} over {QUERIES} queries on {N}x{DIM}: {recall:.4}");
     assert!(recall >= 0.90, "recall@{K} gate failed: {recall:.4} < 0.90");
 
+    // [OPUS-4.8] (sq-k5qq) Strictly-additive: writes only when SPARQ_VECTORS_JSON is set;
+    // the stderr line above is unchanged either way. `recall` is the deterministic gate value.
+    let doc = results_json(
+        "sparq-vectors diskann recall",
+        N,
+        DIM,
+        K,
+        QUERIES,
+        &[
+            ("recall", recall),
+            ("build_ms", build.as_secs_f64() * 1e3),
+            ("query_ms_per_query", query.as_secs_f64() * 1e3 / QUERIES as f64),
+        ],
+    );
+    maybe_write_json(&doc);
+
     let _ = std::fs::remove_file(&store_path);
     let _ = std::fs::remove_file(&graph_path);
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-k5qq) The dependency-free emit must round-trip through a REAL
+// serde_json parse — this runs in BOTH feature states (no approx-ann gate).
+// ---------------------------------------------------------------------------
+#[test]
+fn json_round_trips() {
+    assert_eq!(json_str("recall"), "\"recall\"");
+    assert_eq!(json_str("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
+
+    let doc = results_json(
+        "sparq-vectors diskann recall",
+        50_000,
+        32,
+        10,
+        100,
+        &[("recall", 0.97), ("build_ms", 1234.5)],
+    );
+    let v: serde_json::Value = serde_json::from_str(&doc).expect("emit must be valid JSON");
+    assert_eq!(v["harness"], "sparq-vectors diskann recall");
+    assert_eq!(v["n"], 50_000);
+    assert_eq!(v["dim"], 32);
+    assert_eq!(v["k"], 10);
+    assert_eq!(v["queries"], 100);
+    assert!(v["note"].as_str().unwrap().contains("NON-CANONICAL"));
+    assert!(v["metrics"]["recall"].is_number());
+    assert!(v["metrics"]["build_ms"].is_number());
+
+    let empty = results_json("h", 1, 1, 1, 1, &[]);
+    let v2: serde_json::Value = serde_json::from_str(&empty).expect("empty metrics is valid JSON");
+    assert!(v2["metrics"].as_object().unwrap().is_empty());
 }
 
 #[test]
