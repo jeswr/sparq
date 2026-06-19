@@ -7,7 +7,7 @@ import { DataFormatsDemo } from "@/components/data-formats-demo";
 export const metadata: Metadata = {
   title: "Data formats",
   description:
-    "Parse and load RDF into a sparq Graph — Turtle, N-Triples, N-Quads, TriG, compressed dumps, and the binary HDT archive format.",
+    "Parse and load RDF into a sparq Graph — Turtle, N-Triples, N-Quads, TriG, JSON-LD, compressed dumps, and the binary HDT archive format.",
 };
 
 export default function DataFormatsSurfacePage() {
@@ -34,6 +34,13 @@ export default function DataFormatsSurfacePage() {
             crate.
           </p>
           <p>
+            <strong className="text-foreground">JSON-LD 1.1</strong> (JSON for
+            linked data) parses through the opt-in{" "}
+            <code className="font-mono text-foreground">jsonld</code> feature
+            (oxjsonld) — which the site&apos;s wasm bundle enables, so the picker
+            below reads it too.
+          </p>
+          <p>
             These crates parse RDF <em>in</em>; to write RDF <em>out</em>, the
             engine ships a writer matrix (Turtle / TriG / N-Quads / JSON-LD 1.1)
             behind its <code className="font-mono">serialize-rdf</code> feature,
@@ -45,6 +52,10 @@ export default function DataFormatsSurfacePage() {
         {
           title: "Turtle / N-Triples / N-Quads / TriG",
           body: "All four text formats, with named-graph preservation for the quad formats.",
+        },
+        {
+          title: "JSON-LD 1.1",
+          body: "JSON for linked data — parsed via the opt-in jsonld feature (oxjsonld), which the site bundle enables.",
         },
         {
           title: "Compressed ingest",
@@ -71,7 +82,7 @@ export default function DataFormatsSurfacePage() {
         <>
           <p>
             <strong className="text-foreground">Live in your tab</strong> for the
-            four text formats — the demo above runs the same{" "}
+            four text formats and JSON-LD — the demo above runs the same{" "}
             <code className="font-mono">Store.load</code> /{" "}
             <code className="font-mono">loadDataset</code> loaders that ship in{" "}
             <code className="font-mono">@jeswr/sparq</code>, compiled to wasm. The

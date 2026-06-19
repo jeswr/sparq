@@ -389,6 +389,17 @@ export {
   tokenizeTurtle,
 } from "./turtle-highlight.js";
 
+// [OPUS-4.8] sq-ixc3.1 — the JSON-LD highlighting tokenizer, the third sibling of
+// `tokenizeSparql`/`tokenizeTurtle`, completing the data-formats picker's set. JSON-LD is JSON,
+// so this is a small forgiving JSON lexer (keys / string values / numbers / `true`/`false`/
+// `null` / `@…` JSON-LD keywords / punctuation). Shares the `SparqlTokenType` classes (so one
+// CSS palette styles all three) and powers the JSON-LD editor/display on the site.
+export {
+  type JsonLdToken,
+  type JsonLdTokenType,
+  tokenizeJsonLd,
+} from "./jsonld-highlight.js";
+
 // [OPUS-4.8] sq-gb4o (#805) — the pretty/indented Turtle serialiser. The engine answers
 // CONSTRUCT/DESCRIBE (and the dataset viewer's all-quads query) as FLAT N-Triples; this reshapes
 // that into idiomatic grouped Turtle (`@prefix` abbreviation, subject blocks, `;`/`,` lists)
