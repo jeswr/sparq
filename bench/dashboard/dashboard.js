@@ -604,13 +604,19 @@
   // surfaces + reasoning). The drift scan flagged that MANY registered benchmark families
   // (bench/benchmarks.toml) had NO dashboard row at all — most notably the entire ZK estate
   // (zk / zk-trace / zk-compose), plus Solid/WAC access-control, HDT ingest, RSP streaming,
-  // GenAI (similarity / introspection) and the GPU kernel experiment. These are stdout/criterion
-  // benches today (they do NOT yet emit into ci-bench.sh's customSmallerIsBetter feed), so the rows
-  // below render as "not yet reported" until a ci-bench hook lands — which is exactly the dashboard's
-  // HONEST graceful-degradation contract (buildFamilies keeps every family, count 0 -> a nav chip +
-  // a "not yet reported" section). When a hook DOES start emitting (e.g. `zk_commit_us`,
-  // `hdt_load_s`, …), the metric lands in the right family automatically via these prefixes — no
-  // further dashboard change. The headline gap (ZK) is listed FIRST among the new families.
+  // GenAI (similarity / introspection / NL→SPARQL) and the GPU kernel experiment. So the rows below
+  // render as "not yet reported" until a ci-bench hook lands — exactly the dashboard's HONEST
+  // graceful-degradation contract (buildFamilies keeps every family, count 0 -> a nav chip + a "not
+  // yet reported" section). When a hook DOES start emitting, the metric lands in the right family
+  // automatically via these prefixes — no further dashboard change.
+  //
+  // [OPUS-4.8] sq-k0km UPDATE — ci-bench hooks have since LANDED for: ZK (zk_compose_*_gates +
+  // zk_commit_*/zk_trace_* criterion means), HDT (snikmeta_* load-decode counts + hdt_load_s), RSP
+  // (rsp_*_rows per-window counts), Solid (solid_* WAC/ACP auth-view counts) and GenAI's NL→SPARQL
+  // (nlq_* offline-loop counts). Those families now render REAL data. STILL "not yet reported" (and
+  // HONESTLY so): GenAI's sim/introspect suites (need the gitignored 1.78M-triple olympics.nt — NOT
+  // in CI), the GPU experiment (no GPU on gh runners) and MPC (modelled tier). Those are
+  // EC2/dataset-gathered and intentionally not in the per-commit feed.
   var FAMILIES = [
     { key: 'core',     title: 'Core (load · dict · memory)', kind: 'core',
       suites: ['pipeline', 'memory / size'],
