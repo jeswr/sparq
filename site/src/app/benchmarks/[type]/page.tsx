@@ -12,6 +12,7 @@ import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SuiteGroup } from "@/components/benchmarks/suite-group";
 import { ZkCircuitCostBreakdown } from "@/components/benchmarks/zk-circuit-costs";
+import { ZkSparqlCatalog } from "@/components/benchmarks/zk-sparql-catalog";
 import {
   FAMILIES,
   LATEST,
@@ -71,6 +72,14 @@ export default async function BenchmarkTypePage({
           (which are empty until a ci-bench hook emits zk_* metrics). It is the snapshot of
           record for the family's per-member gate counts, independent of the CI feed. */}
       {family.key === "zk" && <ZkCircuitCostBreakdown />}
+
+      {/* [OPUS-4.8] sq-1s2.1.3 — the comprehensive SPARQL→ZK gate-cost / coverage catalog
+          (src/data/zk-sparql-catalog.generated.json, synced from
+          bench/zk-compose/sparql_feature_catalog.json). A coverage map per SPARQL-1.1
+          feature → circuit member(s) → circuit_size, flagging the two honest high-gate
+          categories and the not-yet-ZK-provable gaps. Sits below the per-member cost
+          breakdown, above the CI-feed groups. */}
+      {family.key === "zk" && <ZkSparqlCatalog />}
 
       {groups.length === 0 ? (
         <div className="rounded-lg bg-muted/40 p-6 text-sm text-muted-foreground">
