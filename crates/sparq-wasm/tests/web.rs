@@ -430,7 +430,7 @@ mod serialize {
     fn serialize_turtle_pretty() {
         let store = Store::load(DATA, "turtle").unwrap();
         let ttl = store
-            .serialize("turtle", true, Some("  ".to_string()), true)
+            .serialize("turtle", true, Some("  ".to_string()), true, None)
             .unwrap();
         // The well-known `xsd:` prefix (used by the integer ages) is declared + compacted.
         assert!(ttl.contains("@prefix xsd:"), "prefix header: {ttl}");
@@ -444,7 +444,7 @@ mod serialize {
     #[wasm_bindgen_test]
     fn serialize_turtle_no_abbreviate() {
         let store = Store::load(DATA, "turtle").unwrap();
-        let ttl = store.serialize("turtle", true, None, false).unwrap();
+        let ttl = store.serialize("turtle", true, None, false, None).unwrap();
         assert!(!ttl.contains("@prefix"), "no header when abbreviate=false: {ttl}");
         assert!(ttl.contains("<http://ex/alice>"), "full IRIs: {ttl}");
     }
@@ -454,7 +454,7 @@ mod serialize {
     fn serialize_trig_named_graph() {
         let nq = "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g1> .\n";
         let store = Store::load_dataset(nq, "nquads").unwrap();
-        let trig = store.serialize("trig", true, None, true).unwrap();
+        let trig = store.serialize("trig", true, None, true, None).unwrap();
         assert!(trig.contains("GRAPH"), "named graph as a GRAPH block: {trig}");
     }
 
@@ -464,7 +464,7 @@ mod serialize {
     fn serialize_unknown_format_is_err() {
         let store = Store::load(DATA, "turtle").unwrap();
         assert!(
-            store.serialize("rdfxml", true, None, true).is_err(),
+            store.serialize("rdfxml", true, None, true, None).is_err(),
             "an unrecognised format must return Err, not panic"
         );
     }
@@ -493,7 +493,7 @@ mod serialize {
             ("jsonld-compacted", JsonLdForm::Compacted),
         ] {
             let got = store
-                .serialize(fmt, true, Some("  ".to_string()), true)
+                .serialize(fmt, true, Some("  ".to_string()), true, None)
                 .unwrap();
             let want = graph_to_jsonld_pretty_with(&g, form, &default_prefixes(), &opts);
             assert_eq!(got, want, "wasm pretty JSON-LD ({fmt}) must equal the engine output");
@@ -501,8 +501,97 @@ mod serialize {
         }
         // The compacted form carries a prefix `@context`; expanded does not — a quick
         // shape check that the form selection actually reached the writer.
-        let compacted = store.serialize("jsonld-compacted", true, None, true).unwrap();
+        let compacted = store
+            .serialize("jsonld-compacted", true, None, true, None)
+            .unwrap();
         assert!(compacted.contains("@context"), "compacted has @context: {compacted}");
+    }
+
+    // ---- [OPUS-4.8] sq-l5kr: the OPTIONAL caller-supplied prefix map, in real wasm ----
+
+    /// A caller-supplied `prefixes` array (`[[prefix, iri], …]`) drives compaction across
+    /// the JS boundary: `http://example.org/x` abbreviates to `ex:x`, and the SITE's
+    /// `https://schema.org/` (note HTTPS — `default_prefixes()` uses HTTP) is used for the
+    /// `schema` prefix. This is the new capability the native tests can't reach (a
+    /// `js_sys::Array` only exists in a real wasm runtime), and the byte-for-byte parity
+    /// with the engine writer fed the SAME pair list is the load-bearing invariant.
+    #[wasm_bindgen_test]
+    fn serialize_with_prefix_map() {
+        use sparq_core::Graph;
+        use sparq_engine::serialize::{
+            graph_to_jsonld_with, graph_to_turtle_pretty_with, prefixes_from_pairs, JsonLdForm,
+            PrettyOptions,
+        };
+        use wasm_bindgen::JsValue;
+
+        let data = "<http://example.org/x> a <https://schema.org/Thing> ;\n\
+                       <http://example.org/p> <https://schema.org/y> .\n";
+        let store = Store::load(data, "turtle").unwrap();
+
+        // Build the JS `[[prefix, iri], …]` array the binding reads.
+        let prefixes = js_sys::Array::new();
+        for (p, n) in [
+            ("ex", "http://example.org/"),
+            ("schema", "https://schema.org/"),
+        ] {
+            let pair = js_sys::Array::new();
+            pair.push(&JsValue::from_str(p));
+            pair.push(&JsValue::from_str(n));
+            prefixes.push(&pair);
+        }
+
+        // Pretty Turtle through the binding with the custom map.
+        let got = store
+            .serialize("turtle", true, Some("  ".to_string()), true, Some(prefixes.clone()))
+            .unwrap();
+        // Byte-for-byte equal to the engine writer fed the SAME pair list.
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let map = prefixes_from_pairs([
+            ("ex", "http://example.org/"),
+            ("schema", "https://schema.org/"),
+        ]);
+        let want = graph_to_turtle_pretty_with(&g, &map, &PrettyOptions::default());
+        assert_eq!(got, want, "wasm prefix-map Turtle must equal the engine output:\n{got}");
+        // The new capability: example.org abbreviates and the HTTPS schema is used.
+        assert!(got.contains("ex:x"), "ex:x abbreviated: {got}");
+        assert!(got.contains("ex:p"), "ex:p abbreviated: {got}");
+        assert!(got.contains("schema:Thing"), "https schema type: {got}");
+        assert!(
+            got.contains("@prefix schema: <https://schema.org/> ."),
+            "HTTPS schema namespace in header: {got}"
+        );
+        assert!(!got.contains("http://schema.org/"), "no default HTTP schema: {got}");
+
+        // The same custom policy reaches the JSON-LD compacted `@context`.
+        let jc = store
+            .serialize("jsonld-compacted", false, None, true, Some(prefixes))
+            .unwrap();
+        let jc_want = graph_to_jsonld_with(&g, JsonLdForm::Compacted, &map);
+        assert_eq!(jc, jc_want, "wasm prefix-map JSON-LD must equal the engine output:\n{jc}");
+        assert!(jc.contains("\"schema\":\"https://schema.org/\""), "@context https schema: {jc}");
+
+        // `None` (omitted) keeps using the engine defaults — back-compat across the boundary:
+        // `http://example.org/` is NOT a default prefix, so those IRIs stay full `<…>`.
+        let dflt = store.serialize("turtle", true, None, true, None).unwrap();
+        assert!(
+            dflt.contains("<http://example.org/x>"),
+            "None arm uses defaults (no ex: prefix), so example.org stays full: {dflt}"
+        );
+    }
+
+    /// A malformed `prefixes` entry (an element that is not a two-string array) is rejected
+    /// with an `Err` across the boundary, not a silent wrong document or a trap.
+    #[wasm_bindgen_test]
+    fn serialize_malformed_prefix_map_is_err() {
+        use wasm_bindgen::JsValue;
+        let store = Store::load(DATA, "turtle").unwrap();
+        // An element that is a bare string, not a `[prefix, iri]` array.
+        let bad = js_sys::Array::new();
+        bad.push(&JsValue::from_str("not-a-pair"));
+        assert!(
+            store.serialize("turtle", true, None, true, Some(bad)).is_err(),
+            "a malformed prefixes entry must return Err, not panic or silently drop"
+        );
     }
 }
 

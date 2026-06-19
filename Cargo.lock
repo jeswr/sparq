@@ -3740,6 +3740,7 @@ name = "sparq-wasm"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "js-sys",
  "oxrdf 0.3.3",
  "sparq-core",
  "sparq-engine",

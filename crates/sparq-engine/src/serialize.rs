@@ -82,6 +82,34 @@ pub fn default_prefixes() -> Prefixes {
     .collect()
 }
 
+/// [OPUS-4.8] (sq-l5kr) Builds a [`Prefixes`] map from a caller-supplied list of
+/// `(prefix, namespace-IRI)` pairs — the explicit-prefix-policy entry point.
+///
+/// The `graph_to_*_with` / `write_*` writers already take a [`Prefixes`] (a
+/// `BTreeMap`); this is the convenience that turns an *ordered pair list* (e.g. a JS
+/// `[[prefix, iri], …]` array, or a SPARQL query's parsed `PREFIX` declarations) into
+/// that map without the caller depending on `BTreeMap` literals. It lets a consumer get
+/// byte-parity output under *its own* prefix policy — for example the site's
+/// `COMMON_PREFIXES` (`schema` → `https://schema.org/`, plus `dcterms` / `prov` / `geo` /
+/// `void` / `ex` → `http://example.org/`), which differs from [`default_prefixes`]
+/// (`schema` → `http://schema.org/`, no `ex`).
+///
+/// On a duplicate prefix label the **last** pair wins (`BTreeMap` insertion order), so a
+/// caller can layer overrides after a base set. The empty-string label is the default
+/// (`@prefix : <…>`) namespace, exactly as elsewhere in this module. Namespace IRIs are
+/// taken verbatim — no validation — so a malformed IRI simply never matches any term and
+/// abbreviates nothing (the writer falls back to the full `<IRI>`, never corrupt output).
+pub fn prefixes_from_pairs<P, N>(pairs: impl IntoIterator<Item = (P, N)>) -> Prefixes
+where
+    P: Into<String>,
+    N: Into<String>,
+{
+    pairs
+        .into_iter()
+        .map(|(p, n)| (p.into(), n.into()))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Escaping helpers (shared by Turtle / TriG; N-Triples / N-Quads delegate to
 // oxrdf's canonical `Display`).
@@ -526,12 +554,20 @@ fn dataset_graphs(graph: &Graph) -> Vec<(Option<Term>, Vec<Triple>)> {
 
 /// Serializes a [`Graph`] (default + named graphs) as TriG with the [`default_prefixes`].
 pub fn graph_to_trig(graph: &Graph) -> String {
+    graph_to_trig_with(graph, &default_prefixes())
+}
+
+/// [OPUS-4.8] (sq-l5kr) Serializes a [`Graph`] (default + named graphs) as TriG with a
+/// caller-supplied prefix map — the non-pretty counterpart to [`graph_to_turtle_with`], so
+/// the compact TriG path can also honour an explicit prefix policy (e.g. the site's
+/// `COMMON_PREFIXES`) instead of only the well-known defaults.
+pub fn graph_to_trig_with(graph: &Graph, prefixes: &Prefixes) -> String {
     let owned = dataset_graphs(graph);
     let view: Vec<NamedGraph<'_>> = owned
         .iter()
         .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
         .collect();
-    write_trig(&view, &default_prefixes())
+    write_trig(&view, prefixes)
 }
 
 /// Serializes a [`Graph`] (default + named graphs) as N-Quads.
@@ -3063,5 +3099,105 @@ ex:bob
   ]
 }";
         assert_eq!(pretty, expected, "actual:\n{pretty}");
+    }
+
+    // =======================================================================
+    // [OPUS-4.8] (sq-l5kr) Caller-supplied prefix policy via `prefixes_from_pairs`.
+    //
+    // The wasm `Store.serialize(.., prefixes?)` binding (and any other caller wanting
+    // byte-parity output under its OWN prefix policy) feeds an ordered `(prefix, iri)`
+    // pair list through `prefixes_from_pairs` into the same `*_with` writers. These two
+    // tests are the load-bearing invariants the bead calls out:
+    //   (a) the `default_prefixes()` pair list reproduces the prior default output
+    //       byte-for-byte (back-compat — `None`/absent on the binding keeps using it); and
+    //   (b) a custom map abbreviates `http://example.org/x` -> `ex:x` and uses the SITE's
+    //       `https://schema.org/` (which `default_prefixes()` — `http://schema.org/` — does
+    //       NOT), i.e. a caller's prefix policy actually reaches the writer.
+    // =======================================================================
+
+    #[test]
+    fn prefixes_from_pairs_matches_default_byte_for_byte() {
+        // Rebuilding `default_prefixes()` from its own pair list and serialising must be
+        // byte-identical to serialising with `default_prefixes()` directly — the back-compat
+        // path the wasm binding takes when no `prefixes` map is supplied.
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+               ex:s a <http://schema.org/Thing> ; ex:n "30"^^xsd:integer ; ex:label "v" .
+               <http://schema.org/x> <http://schema.org/p> ex:s ."#,
+            "turtle",
+        )
+        .unwrap();
+        // The exact `(prefix, iri)` pairs `default_prefixes()` holds, as a pair list.
+        let pairs: Vec<(String, String)> = default_prefixes().into_iter().collect();
+        let rebuilt = prefixes_from_pairs(pairs);
+        assert_eq!(rebuilt, default_prefixes(), "round-trips through pairs");
+
+        let opts = PrettyOptions::default();
+        // Pretty Turtle / TriG / JSON-LD all reproduce the default output byte-for-byte.
+        assert_eq!(
+            graph_to_turtle_pretty_with(&g, &rebuilt, &opts),
+            graph_to_turtle_pretty_with(&g, &default_prefixes(), &opts),
+            "pretty Turtle byte-parity with default_prefixes",
+        );
+        assert_eq!(
+            graph_to_trig_pretty_with(&g, &rebuilt, &opts),
+            graph_to_trig_pretty_with(&g, &default_prefixes(), &opts),
+            "pretty TriG byte-parity with default_prefixes",
+        );
+        assert_eq!(
+            graph_to_jsonld_with(&g, JsonLdForm::Compacted, &rebuilt),
+            graph_to_jsonld_with(&g, JsonLdForm::Compacted, &default_prefixes()),
+            "JSON-LD compacted byte-parity with default_prefixes",
+        );
+        // And `http://schema.org/Thing` compacts to `schema:Thing` (the default `schema`).
+        assert!(
+            graph_to_turtle_pretty_with(&g, &rebuilt, &opts).contains("schema:Thing"),
+            "default schema namespace compacts http://schema.org/Thing",
+        );
+    }
+
+    #[test]
+    fn custom_prefix_map_abbreviates_example_org_and_uses_https_schema() {
+        // A SITE-style prefix policy: `ex` -> http://example.org/ and `schema` ->
+        // https://schema.org/ (note: HTTPS — differs from default_prefixes()'s HTTP schema).
+        let g = Graph::load_str(
+            r#"<http://example.org/x> a <https://schema.org/Thing> ;
+                   <http://example.org/p> <https://schema.org/y> ."#,
+            "turtle",
+        )
+        .unwrap();
+        let prefixes = prefixes_from_pairs([
+            ("ex", "http://example.org/"),
+            ("schema", "https://schema.org/"),
+        ]);
+        let opts = PrettyOptions::default();
+        let ttl = graph_to_turtle_pretty_with(&g, &prefixes, &opts);
+        // `http://example.org/x` -> `ex:x` (subject), `http://example.org/p` -> `ex:p`.
+        assert!(ttl.contains("ex:x"), "subject abbreviated to ex:x:\n{ttl}");
+        assert!(ttl.contains("ex:p"), "predicate abbreviated to ex:p:\n{ttl}");
+        // `https://schema.org/Thing` -> `schema:Thing` (the HTTPS site namespace), and
+        // `https://schema.org/y` -> `schema:y`.
+        assert!(ttl.contains("schema:Thing"), "https schema type:\n{ttl}");
+        assert!(ttl.contains("schema:y"), "https schema object:\n{ttl}");
+        // The header declares the HTTPS schema, never the default HTTP one.
+        assert!(
+            ttl.contains("@prefix schema: <https://schema.org/> ."),
+            "header carries the HTTPS schema namespace:\n{ttl}",
+        );
+        assert!(
+            !ttl.contains("http://schema.org/"),
+            "the default HTTP schema namespace must not appear:\n{ttl}",
+        );
+        // Same custom policy reaches the JSON-LD compacted `@context`.
+        let jc = graph_to_jsonld_with(&g, JsonLdForm::Compacted, &prefixes);
+        assert!(jc.contains("\"ex\":\"http://example.org/\""), "@context ex:\n{jc}");
+        assert!(
+            jc.contains("\"schema\":\"https://schema.org/\""),
+            "@context https schema:\n{jc}",
+        );
+        // And round-trips (re-parses to the same triple set).
+        let g2 = Graph::load_str(&ttl, "turtle").unwrap();
+        assert_eq!(nt_sorted(&g), nt_sorted(&g2), "custom-prefix Turtle round-trip:\n{ttl}");
     }
 }

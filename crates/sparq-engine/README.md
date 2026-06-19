@@ -86,8 +86,9 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   dependencies are added.
 - **RDF writer matrix** *(opt-in `serialize-rdf` feature, OFF by default)* — write a `Graph`
   (or `&[oxrdf::Triple]`) back out as Turtle / TriG / N-Quads / JSON-LD 1.1
-  (`serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads, graph_to_jsonld, …}`), plus a
-  deterministic **pretty** Turtle / TriG variant
+  (`serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads, graph_to_jsonld, …}`; the
+  `*_with` variants + `prefixes_from_pairs([(prefix, iri), …])` accept a caller's own prefix
+  policy). Plus a deterministic **pretty** Turtle / TriG variant
   (`graph_to_turtle_pretty` / `graph_to_trig_pretty`, or `write_turtle_pretty` with
   `PrettyOptions { indent, abbreviate }`): subject grouping, predicate-object lists (`;`), object
   lists (`,`), `a` for `rdf:type`, used-only `@prefix` abbreviation, and *emission-order-independent*
