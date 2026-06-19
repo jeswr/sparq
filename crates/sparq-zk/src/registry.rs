@@ -291,19 +291,15 @@ impl RegistryEntry {
         ) else {
             return false;
         };
-        if crate::sig::SignatureScheme::from_cryptosuite_iri(cs.as_str()).is_none() {
-            return false;
-        }
-        let (Some(pk), Some(sig)) = (
-            crate::sig::public_key_from_hex(pk_hex),
-            crate::sig::signature_from_hex(sig_hex),
-        ) else {
-            return false;
-        };
         let list_id = crate::sig::status_list_id_to_field(sl.as_str());
         let status_ref = crate::sig::status_ref_digest(&list_id, idx, ver);
         let msg = crate::sig::commitment_message_with_status(&self.commitment, &self.salt, &status_ref);
-        crate::sig::verify(&pk, &msg, &sig)
+        // [OPUS-4.8] sq-1hsl: route through the pluggable OFF-circuit signature
+        // seam. `verify_commitment_with_scheme` resolves the cryptosuite to its
+        // `IssuerSignatureScheme` and fails closed on an unknown cryptosuite or
+        // malformed key/signature hex — byte-identical accept/reject to the prior
+        // inline `from_cryptosuite_iri` + parse + `verify` block.
+        crate::sig::verify_commitment_with_scheme(cs.as_str(), pk_hex, &msg, sig_hex)
     }
 
     /// Verify that this entry's recorded signature is a valid issuer signature
@@ -319,21 +315,15 @@ impl RegistryEntry {
         else {
             return false;
         };
-        // Only the v1 scheme is verifiable in-tree; an unknown cryptosuite is
-        // unverifiable => fail closed.
-        if crate::sig::SignatureScheme::from_cryptosuite_iri(cs.as_str()).is_none() {
-            return false;
-        }
-        let (Some(pk), Some(sig)) = (
-            crate::sig::public_key_from_hex(pk_hex),
-            crate::sig::signature_from_hex(sig_hex),
-        ) else {
-            return false;
-        };
         // [OPUS-4.8] audit #9: issuance via `issued` signs the SALT-BOUND
         // message, so verification recomputes it over `(commitment, salt)`.
         let msg = crate::sig::commitment_message_with_salt(&self.commitment, &self.salt);
-        crate::sig::verify(&pk, &msg, &sig)
+        // [OPUS-4.8] sq-1hsl: route through the pluggable OFF-circuit signature
+        // seam. Only the v1 scheme is verifiable in-tree; an unknown cryptosuite
+        // (no resolved `IssuerSignatureScheme`) or malformed key/signature hex
+        // fails closed — byte-identical to the prior inline `from_cryptosuite_iri`
+        // + parse + `verify` block.
+        crate::sig::verify_commitment_with_scheme(cs.as_str(), pk_hex, &msg, sig_hex)
     }
 
     /// Serializes the entry as triples of the registry graph.

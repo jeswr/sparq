@@ -14,14 +14,14 @@ circuits and proof composition will consume — bit-compatible with
 
 > **Internal crate — not published** to crates.io (`publish = false`). Circuits and
 > proof composition are later deliverables; **no soundness or privacy claim** is made
-> for this pipeline today. A config-only **commitment-method registry**
-> (`commit::CommitmentMethod`: closed, fail-closed selection over `zk:scheme` —
-> `string-canonical` default · `dual-leaf` · the OFF-by-default `commitment-value-only`
-> research dial; sq-zzxt) records the method but adds no circuit; the value-hook /
-> `dual-leaf` encoding itself is **PLANNED, NOT implemented, audit-gated**, and `dual-leaf`
-> carries the #769-accepted INV-VL downgrade — open external-audit obligations
-> (**CR-G8** / `sq-qhy4`; design `research/zk-configurable-commitment-design.md`).
-> <!-- [OPUS-4.8] privacy-claims-allow: unimplemented audit-gated encoding + opt-in config plumbing, registered as an OPEN obligation; asserts no soundness/privacy property; sq-qhy4 / CR-G8 -->
+> for this pipeline today. Config-only **commitment-method registry** (`commit::CommitmentMethod`:
+> CLOSED fail-closed selection over `zk:scheme` — `string-canonical` default · `dual-leaf` ·
+> the OFF-by-default `commitment-value-only` research dial; sq-zzxt) records the method but adds
+> no circuit; the value-hook / `dual-leaf` encoding is **PLANNED, NOT implemented, audit-gated**
+> and `dual-leaf` carries the #769-accepted INV-VL downgrade (**CR-G8** / `sq-qhy4`; design
+> `research/zk-configurable-commitment-design.md`). The OFF-circuit issuer-signature seam is the OPEN
+> `sig::IssuerSignatureScheme` trait (sq-1hsl) with Schnorr-over-Baby-JubJub (`SchnorrBjjScheme`) the byte-unchanged default impl — additive, asserting no soundness claim.
+> <!-- [OPUS-4.8] privacy-claims-allow: unimplemented audit-gated encoding + opt-in config/seam plumbing, registered as an OPEN obligation; asserts no soundness/privacy property; sq-qhy4 / CR-G8 -->
 
 Design: [`research/zkp-query-proofs-plan.md`](../../research/zkp-query-proofs-plan.md). Contributing: [`AGENTS.md`](../../AGENTS.md).
 
