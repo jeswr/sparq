@@ -193,6 +193,36 @@ jobs:
             crate: sparq-engine
             features: txn
             test: true
+          # [OPUS-4.8] sq-bif.12: vectorized (columnar / vector-at-a-time) primitives. The
+          # `chunk` module (`pub mod chunk` + the `DataChunk`/`VecCmp`/`SelVec` re-exports),
+          # its 9 in-src unit tests AND the new end-to-end differential suite
+          # (`tests/vectorized_exec_differential.rs`, `#![cfg(feature = "vectorized")]`,
+          # which proves the columnar gather/selection kernels are multiset-equal to the
+          # scalar SPARQL FILTER path) are ALL `#[cfg(feature = "vectorized")]`, so the
+          # default build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+          # `--features`) compiled them EMPTY and ran ZERO of them — the silent gap this lane
+          # exists to close, and `vectorized` had NO leg here. No new dep (`vectorized = []`,
+          # only sparq-core's already-direct `Graph`/`Id`) and no `not(feature=…)`
+          # divergence, so one isolated leg (matching the per-feature engine legs above)
+          # covers it; verified `cargo nextest list -p sparq-engine --features vectorized`
+          # shows the previously-skipped differential tests.
+          - name: sparq-engine (vectorized)
+            crate: sparq-engine
+            features: vectorized
+            test: true
+          # [OPUS-4.8] sq-bif.12: the materialised-view / query-result cache. The `cache`
+          # module + the `ResultCache`/`CacheStats`/`is_cacheable` re-exports and the whole
+          # `tests/result_cache.rs` suite (`#![cfg(feature = "result-cache")]`, incl. the new
+          # INSERT/DELETE/UPDATE/CLEAR write-invalidation tests) are all
+          # `#[cfg(feature = "result-cache")]`, so the default build compiled them EMPTY and
+          # ran ZERO of them — `result-cache` had NO leg here (a pre-existing silent gap). No
+          # new dep (`result-cache = []`, std `HashMap`/`Mutex`/`Arc` only) and no
+          # `not(feature=…)` divergence, so one isolated leg covers it; verified `cargo
+          # nextest list -p sparq-engine --features result-cache` shows the result_cache tests.
+          - name: sparq-engine (result-cache)
+            crate: sparq-engine
+            features: result-cache
+            test: true
           # sparq-cli: the `dump` re-serializer (forwards sparq-engine/serialize-rdf).
           - name: sparq-cli (serialize-rdf)
             crate: sparq-cli
