@@ -98,3 +98,9 @@ memmap2 = { workspace = true }
 flate2 = "1"
 bzip2 = "0.6"
 zstd = "0.13"
+# [OPUS-4.8] (sq-d7d) `bench`/`bench-mmap` emit a dependency-free JSON results document via
+# `--json <path>` (the runtime CLI adds NO serde dep — it hand-builds the JSON like
+# mpc_net_bench::cell_json). serde_json is a TEST-ONLY dep so cli_contract.rs can prove the
+# emitted document is genuinely valid, parseable JSON with the expected keys (a stronger
+# assertion than substring checks). Dev-deps never enter the shipped binary or its MSRV.
+serde_json = "1"

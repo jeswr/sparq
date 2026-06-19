@@ -611,6 +611,69 @@ fn bench_emits_one_tsv_line_per_query_including_construct() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// [OPUS-4.8] (sq-d7d) `bench --json <path>` writes a machine-readable results document
+/// ALONGSIDE the unchanged STDOUT TSV. Asserts: (a) STDOUT is still exactly one TSV line per
+/// query (JSON is additive, not a replacement); (b) the file is genuinely VALID, parseable JSON
+/// (parsed with serde_json, not substring-matched); (c) it carries the expected top-level keys +
+/// a `queries` array whose entries mirror the TSV fields (`name`, `rows`, `min_micros`).
+#[test]
+fn bench_json_flag_writes_parseable_results_with_expected_keys() {
+    let dir = scratch("bench-json");
+    let data = write(&dir, "data.nt", NT);
+    let qd = dir.join("q");
+    std::fs::create_dir_all(&qd).unwrap();
+    write(&qd, "a_all.rq", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }");
+    write(&qd, "b_ask.rq", "ASK { ?s <http://ex/knows> ?o }");
+    let out = dir.join("results.json");
+
+    let (code, stdout, stderr) =
+        run3(&["bench", s(&data), "ntriples", s(&qd), "1", "count", "--json", s(&out)]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    // (a) STDOUT TSV is unchanged — still one line per query, byte-for-byte the historical shape.
+    let lines: Vec<&str> = stdout.lines().filter(|l| l.contains('\t')).collect();
+    assert_eq!(lines.len(), 2, "expected 2 TSV lines on STDOUT, got: {stdout}");
+    assert!(lines[0].starts_with("a_all\t3\t"), "line0: {}", lines[0]);
+    assert!(lines[1].starts_with("b_ask\t1\t"), "line1: {}", lines[1]);
+
+    // (b) The file exists and is VALID, parseable JSON.
+    let raw = std::fs::read_to_string(&out).expect("--json results file should exist");
+    let doc: serde_json::Value = serde_json::from_str(&raw).expect("results file must be valid JSON");
+
+    // (c) Expected top-level keys + run parameters.
+    assert_eq!(doc["harness"], "sparq-cli bench", "harness key: {raw}");
+    assert_eq!(doc["mode"], "count", "mode key: {raw}");
+    assert_eq!(doc["iters"], 1, "iters key: {raw}");
+    assert!(doc["note"].is_string(), "note caveat present: {raw}");
+
+    // The `queries` array mirrors the TSV: one entry per *.rq, sorted by name, each carrying
+    // the SAME measured fields (name / rows / min_micros).
+    let queries = doc["queries"].as_array().expect("queries must be an array");
+    assert_eq!(queries.len(), 2, "one entry per query: {raw}");
+    assert_eq!(queries[0]["name"], "a_all", "first query name: {raw}");
+    assert_eq!(queries[0]["rows"], 3, "first query rows: {raw}");
+    assert!(queries[0]["min_micros"].is_number(), "min_micros numeric: {raw}");
+    assert_eq!(queries[1]["name"], "b_ask", "second query name: {raw}");
+    assert_eq!(queries[1]["rows"], 1, "second query rows (ASK): {raw}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// [OPUS-4.8] (sq-d7d) A bare `--json` with no path is a usage error (exit 2), mirroring the
+/// rest of the CLI's value-flag contract.
+#[test]
+fn bench_json_flag_requires_a_path() {
+    let dir = scratch("bench-json-nopath");
+    let data = write(&dir, "data.nt", NT);
+    let qd = dir.join("q");
+    std::fs::create_dir_all(&qd).unwrap();
+    write(&qd, "a_all.rq", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }");
+
+    let (code, _stdout, stderr) = run3(&["bench", s(&data), "ntriples", s(&qd), "1", "--json"]);
+    assert_eq!(code, 2, "bare --json is a usage error; stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn compare_compress_reports_footprint() {
     let dir = scratch("compare-compress");

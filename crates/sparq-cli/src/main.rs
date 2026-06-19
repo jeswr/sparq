@@ -1190,11 +1190,42 @@ fn die_query(e: String) -> ! {
     std::process::exit(1);
 }
 
+/// [OPUS-4.8] (sq-d7d) Extract a `--json <path>` results-emit flag (and its value) from the
+/// positional argument vector, returning `(positional_args_without_the_flag, Option<path>)`.
+/// `bench` / `bench-mmap` index their other arguments positionally (`args.get(N)`), so the
+/// flag+value pair is removed BEFORE positional parsing rather than handled inline — this keeps
+/// the historical positional contract intact whether the flag is present or absent. A bare
+/// `--json` with no following value is a usage error (exit 2), mirroring the rest of the CLI.
+fn take_json_flag(args: &[String]) -> (Vec<String>, Option<String>) {
+    let mut out = Vec::with_capacity(args.len());
+    let mut json_path = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--json" {
+            match args.get(i + 1) {
+                Some(p) => {
+                    json_path = Some(p.clone());
+                    i += 2;
+                    continue;
+                }
+                None => {
+                    eprintln!("`--json` requires a path argument: --json <path>");
+                    std::process::exit(2);
+                }
+            }
+        }
+        out.push(args[i].clone());
+        i += 1;
+    }
+    (out, json_path)
+}
+
 fn cmd_bench(args: &[String]) {
+    let (args, json_path) = take_json_flag(args);
     let (path, format, dir) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(d)) => (p, f, d),
         _ => {
-            eprintln!("usage: sparq-cli bench <data-file> <format> <queries-dir> [iters]");
+            eprintln!("usage: sparq-cli bench <data-file> <format> <queries-dir> [iters] [count|materialize|json] [--json <results.json>]");
             std::process::exit(2);
         }
     };
@@ -1205,7 +1236,7 @@ fn cmd_bench(args: &[String]) {
         std::process::exit(2);
     }
     let g = load(path, format);
-    run_query_suite(&g, dir, iters, mode);
+    run_query_suite(&g, dir, iters, mode, json_path.as_deref());
 }
 
 /// `bench-mmap <dir> <queries-dir> [iters] [count|materialize|json]` — same as `bench`
@@ -1213,10 +1244,11 @@ fn cmd_bench(args: &[String]) {
 /// be measured without loading it into RAM. Used to compare sparq's compute against the
 /// stored QLever baselines at 100M+ on a 16 GB machine.
 fn cmd_bench_mmap(args: &[String]) {
+    let (args, json_path) = take_json_flag(args);
     let (dir, qdir) = match (args.get(2), args.get(3)) {
         (Some(d), Some(q)) => (d.as_str(), q.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli bench-mmap <index-dir> <queries-dir> [iters] [count|materialize|json] [decompress]");
+            eprintln!("usage: sparq-cli bench-mmap <index-dir> <queries-dir> [iters] [count|materialize|json] [decompress] [--json <results.json>]");
             std::process::exit(2);
         }
     };
@@ -1234,12 +1266,26 @@ fn cmd_bench_mmap(args: &[String]) {
         g.decompress_indexes();
         eprintln!("decompressed indexes to RAM in {:.3}s | committed heap ~{:.3} GB", t.elapsed().as_secs_f64(), g.heap_bytes() as f64 / 1e9);
     }
-    run_query_suite(&g, qdir, iters, mode);
+    run_query_suite(&g, qdir, iters, mode, json_path.as_deref());
+}
+
+/// One measured row of the query suite — the same fields the TSV reports
+/// (`name`, `rows`, `min_micros`), captured so they can be serialised to JSON.
+/// [OPUS-4.8] (sq-d7d)
+struct SuiteRow {
+    name: String,
+    /// `Ok(min_micros)` for a successful query (with `rows`), or `Err(message)` if it failed.
+    outcome: Result<(usize, f64), String>,
 }
 
 /// Runs every `*.rq` in `dir` (sorted) `iters` times in `mode`, printing one TSV line
 /// per query: `<name>\t<rows>\t<min_micros>`.
-fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str) {
+///
+/// [OPUS-4.8] (sq-d7d) When `json_path` is `Some`, the SAME measured fields are ALSO written
+/// to that path as a machine-readable JSON document (the structured-benchmark-catalog pattern,
+/// mirroring `bench/memtier` / `mpc_net_bench`'s dependency-free emit). STDOUT is byte-for-byte
+/// unchanged whether or not the flag is present — JSON is strictly additive.
+fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str, json_path: Option<&str>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| {
             eprintln!("error reading {dir}: {e}");
@@ -1251,6 +1297,7 @@ fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str) {
         .collect();
     entries.sort();
 
+    let mut results: Vec<SuiteRow> = Vec::with_capacity(entries.len());
     for path in entries {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         let sparql = std::fs::read_to_string(&path).unwrap();
@@ -1288,9 +1335,85 @@ fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str) {
                 }
             }
         }
-        match err {
+        match &err {
             None => println!("{name}\t{rows}\t{best:.1}"),
             Some(e) => println!("{name}\tERROR\t{e}"),
         }
+        let outcome = match err {
+            None => Ok((rows, best)),
+            Some(e) => Err(e),
+        };
+        results.push(SuiteRow { name, outcome });
     }
+
+    if let Some(p) = json_path {
+        let doc = suite_results_json(mode, iters, &results);
+        if let Err(e) = std::fs::write(p, doc) {
+            eprintln!("error writing --json results to {p}: {e}");
+            std::process::exit(1);
+        }
+        eprintln!("wrote {} query results to {p}", results.len());
+    }
+}
+
+/// [OPUS-4.8] (sq-d7d) Serialise a query-suite run to stable, dependency-free JSON — the same
+/// hand-built `format!` convention as `mpc_net_bench::cell_json` (no serde_json dep added to the
+/// CLI). The shape mirrors the catalog pattern: a top-level object carrying the run parameters +
+/// an honest `note` (these are the numbers THIS machine measured — non-canonical), and a
+/// `queries` array of one object per `*.rq`, each with the SAME fields the TSV prints
+/// (`name`, `rows`, `min_micros`) or an `error` string when the query failed.
+fn suite_results_json(mode: &str, iters: usize, rows: &[SuiteRow]) -> String {
+    let mut s = String::new();
+    s.push_str("{\n");
+    s.push_str("  \"harness\": \"sparq-cli bench\",\n");
+    s.push_str(&format!("  \"mode\": {},\n", json_str(mode)));
+    s.push_str(&format!("  \"iters\": {iters},\n"));
+    s.push_str(
+        "  \"note\": \"min-of-iters wall-clock MEASURED on the running host; \
+         NON-CANONICAL (whatever this machine measured) — do not bake into committed files\",\n",
+    );
+    s.push_str("  \"queries\": [\n");
+    for (i, r) in rows.iter().enumerate() {
+        s.push_str("    {\n");
+        s.push_str(&format!("      \"name\": {}", json_str(&r.name)));
+        match &r.outcome {
+            Ok((rows, micros)) => {
+                s.push_str(&format!(",\n      \"rows\": {rows}"));
+                s.push_str(&format!(",\n      \"min_micros\": {micros:.1}\n"));
+            }
+            Err(e) => {
+                s.push_str(&format!(",\n      \"error\": {}\n", json_str(e)));
+            }
+        }
+        s.push_str("    }");
+        if i + 1 < rows.len() {
+            s.push(',');
+        }
+        s.push('\n');
+    }
+    s.push_str("  ]\n");
+    s.push_str("}\n");
+    s
+}
+
+/// [OPUS-4.8] (sq-d7d) Minimal JSON string escaper for the dependency-free emit — escapes the
+/// characters JSON requires (`"`, `\`, and the C0 control set incl. the named whitespace
+/// escapes). Query names are file stems and error strings are engine messages, so this covers
+/// the realistic input; anything else still produces valid `\uXXXX` escapes.
+fn json_str(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for c in raw.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
