@@ -665,7 +665,7 @@ id          = "vector-ann-bench"
 name        = "Vector / ANN — recall@10 vs exact-kNN (HNSW / Vamana / PQ), as a deficit"
 category    = "query"
 measures    = "per-searcher recall@10 vs nearest_exact emitted as a DEFICIT (recall_deficit_milli = round((1-recall)*1000); design G4 — smaller-is-better, slots into mode:auto with zero perf-gate change), plus advisory per-query latency + HNSW build time. run.sh carries a HARD self-asserting gate: diskann/pq deficits are EXACT-gated vs expected.tsv (single-threaded fixed-seed builds => byte-deterministic) AND clear their floors; hnsw is FLOOR-gated only (instant-distance build is rayon-parallel => +/-1 deficit jitter, so exact equality would flake). The diskann/pq deficits additionally have a mode:auto ratchet (vectors_diskann_recall_at10 / vectors_pq_recall_at10 in bench/perf-baseline.json). Timing is ADVISORY (mode:noise, trend-only)"
-invoke      = "cargo build --release -p sparq-vectors --example bench_vectors && bench/vector/run.sh   # self-contained: synthetic in-process corpus (N=50000 seed=0), assert recall deficits vs expected.tsv; CI runs it via scripts/ci-bench.sh -> vectors_<searcher>_recall_at10 + vectors_<searcher>_query_us"
+invoke      = "cargo build --release -p sparq-vectors --example bench_vectors --features approx-ann && bench/vector/run.sh   # --features approx-ann is required (the example links the HNSW VectorIndex; the example declares required-features); self-contained: synthetic in-process corpus (N=50000 seed=0), assert recall deficits vs expected.tsv; CI runs it via scripts/ci-bench.sh -> vectors_<searcher>_recall_at10 + vectors_<searcher>_query_us"
 source      = "bench/vector/{gen.sh,run.sh,expected.tsv,README.md}; crates/sparq-vectors/examples/bench_vectors.rs (the G1 TSV-emitting runner; same recall measurement as tests/{recall,diskann,quant}.rs); scripts/ci-bench.sh (vector hook); competitors bench/competitors.json (ann-benchmarks python-lib: hnswlib/faiss/scann/diskann-ref)"
 dataset     = "SYNTHETIC, generated in-process (no external generator): N seeded 32-d vectors (splitmix64), HNSW/DiskANN substrate scales with N; PQ on a FIXED 10k clustered set (quant.rs regime). Per-commit N=50000 seed=0 (the same 50k x 32 set the crate recall gates use). recall@10 vs the nearest_exact brute-force ground truth is deterministic at the pinned (N, seed) for diskann/pq; hnsw has +/-1 parallel-build jitter. The big published ANN datasets (SIFT1M / GloVe-100-angular) recall-QPS Pareto is gather-tier (follow-up bead)"
 quiet_box_sensitive = true  # wall-clock query/build time trend-only, NOT in scripts/perf-gate.py; the recall-deficit diff IS a hard gate (deterministic for diskann/pq, floor-gated for hnsw)
@@ -816,6 +816,14 @@ quiet_box_sensitive = true
 pinning     = "olympics dataset version; ground truth = rdf:type classes"
 records_to  = "stdout; research/genai-design.md §4 gate"
 status      = "ok"
+# [OPUS-4.8] sq-5o5.5: trend-only DISPOSITION (featured = false). The sim metrics
+# route to the GenAI capability family on the dashboard (familyOf: `sim_*` -> genai),
+# so the suite is accounted for as a trend row — but it is NOT promoted to a
+# head-to-head FEATURED_SUITES competitor card. A competitor card would make a perf
+# claim and needs a same-scale canonical-host gather (sq-v4if / competitor-gather,
+# EC2-blocked); promote-to-card is deferred to the maintainer. `featured = false`
+# is the documented escape hatch honored by gate G3 and the drift scanner (§5.D).
+featured    = false
 
 [[benchmark]]
 id          = "introspect-olympics"
@@ -829,6 +837,13 @@ quiet_box_sensitive = true
 pinning     = "dataset version"
 records_to  = "stdout; research/genai-design.md §4 gate"
 status      = "ok"
+# [OPUS-4.8] sq-5o5.6: trend-only DISPOSITION (featured = false). The introspect
+# metrics route to the GenAI capability family on the dashboard (familyOf:
+# `introspect_*` -> genai) as a trend row, but the suite is NOT a head-to-head
+# FEATURED_SUITES competitor card. Promote-to-card (which makes a perf claim +
+# needs a canonical-host gather) is deferred to the maintainer. `featured = false`
+# is the documented escape hatch honored by gate G3 and the drift scanner (§5.D).
+featured    = false
 
 # [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-nlq OFFLINE NL→SPARQL micro-bench.
 # Closes the bench-missing drift item for sparq-nlq. Pure offline: the LLM is an
@@ -847,6 +862,13 @@ quiet_box_sensitive = true
 pinning     = "in-example synthetic graph is deterministic; pin N for comparable numbers; offline path (no `live` feature)"
 records_to  = "stdout (us per phase)"
 status      = "ok"
+# [OPUS-4.8] sq-5o5.7: trend-only DISPOSITION (featured = false). NL→SPARQL is part
+# of the GenAI estate; the nlq metrics route to the GenAI capability family on the
+# dashboard (familyOf: `nlq_*` -> genai) as a trend row. It is NOT a head-to-head
+# FEATURED_SUITES competitor card — the trend-only disposition makes NO perf claim.
+# HONESTY: LIVE exec-accuracy on a canonical host (sq-qidj / sq-g0lw, EC2-blocked) is
+# a SEPARATE concern and is NOT required to clear this dashboard-row drift.
+featured    = false
 
 # [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-serve concurrent-serving-core
 # micro-bench. Closes the bench-missing drift item for sparq-serve. Lightweight:
@@ -888,6 +910,14 @@ quiet_box_sensitive = false  # modelled bytes/rounds/mults are DETERMINISTIC (co
 pinning     = "DEFAULT_PARTIES {2,3,5,7}, join/shuffle scales fixed in the example; correctness-gate seed 0x5347585140D5043... fixed under insecure-test-rng (simulation reproducibility only, NEVER a production claim)"
 records_to  = "stdout (human table + JSON schema); research/mpc design record §5"
 status      = "ok"
+# [OPUS-4.8] sq-5o5.8: trend-only DISPOSITION (featured = false). This is a
+# DETERMINISTIC MODELLED-cost counting tier (bytes/rounds/mults), NOT a measured
+# wall-clock competitor card — promoting a head-to-head perf card would be
+# inappropriate (modelled, not measured). The mpc metrics route to the MPC capability
+# family on the dashboard as a trend row. HONESTY: MPC here is semi-honest-only and
+# the ZK estate is NOT externally audited — any dashboard text stays caveated and the
+# privacy-claims CI gate must pass. `featured = false` is the documented escape hatch.
+featured    = false
 
 # [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-wasm browser-bundle size.
 # Closes the bench-missing drift item for sparq-wasm. The wasm crate is a thin
@@ -910,6 +940,15 @@ quiet_box_sensitive = false  # byte count is fully deterministic (runner-noise-i
 pinning     = "release profile + wasm32-unknown-unknown target; the crate's no-default-features (no rayon) + compact 3-perm cfg pin the bundle composition"
 records_to  = "stdout (wc -c); CI emits wasm_bundle_bytes into benchmark-data (dev/bench) via scripts/ci-bench.sh (a DETERMINISTIC regression gate, NOT trend-only)"
 status      = "ok"
+# [OPUS-4.8] sq-5o5.9: featured = false records that this is a deterministic
+# browser-bundle-size BYTE GATE, NOT a query-perf head-to-head FEATURED_SUITES
+# competitor card — sparq-wasm's query logic is already measured via the
+# CLI/operator-coverage suites over the same engine. The `wasm_bundle_bytes` metric
+# routes to the Core family on the dashboard and remains the per-commit DETERMINISTIC
+# regression gate it already is (see records_to above); `featured = false` only means
+# "no competitor card", it does NOT relax that regression gate. The proposed wasm
+# query micro-bench (sq-5pnl, a NEW wasm_query_us metric) is a SEPARATE concern.
+featured    = false
 
 # =============================================================================
 # CONFORMANCE — correctness against official W3C suites (NOT perf)

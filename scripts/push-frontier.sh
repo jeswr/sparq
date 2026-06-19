@@ -27,11 +27,22 @@
 #                                                  paths land in (sq-6ip4) — so two beads
 #                                                  editing one crate never co-launch even
 #                                                  when their labels diverge)
-#   MINUS  epics / "[epic]"-tagged umbrellas        (issue_type=epic, or a title the
-#                                                  maintainer tagged "[epic]", is an
-#                                                  UMBRELLA not a work unit — you dispatch
-#                                                  its child tasks, never "the epic";
-#                                                  excluded so the frontier is launchable)
+#   MINUS  needs:user / needs:maintainer beads      (LABELLED gated-on-a-human-action: publish a
+#                                                  license, flip a Pages setting, file an upstream
+#                                                  issue. Not agent-launchable, so never in the
+#                                                  autonomous frontier. bd ready returns them, so
+#                                                  filter on the needs: label here — sq-p7nw.)
+#   MINUS  umbrellas (epics + PARENTS-with-ready-children)
+#                                                 (issue_type=epic, OR a "[epic]"-tagged title,
+#                                                  OR any bead that is the PARENT of >=1 OTHER
+#                                                  ready bead (a decomposed feature/task whose
+#                                                  sq-<id>.N children are the real atomic work).
+#                                                  An umbrella is a container, not a work unit —
+#                                                  you dispatch its CHILDREN, never "the umbrella"
+#                                                  — so it is excluded and its ready children are
+#                                                  surfaced in its place. sq-p7nw: feature-typed
+#                                                  parents (sq-bif, sq-5o5, ...) used to leak in
+#                                                  here and starve their children of slots.)
 #   MINUS  HELD-scope beads                         (a maintainer can HOLD an entire impl
 #                                                  lane behind one open "design"/research PR;
 #                                                  while #514 (the signed typed-value design)
@@ -398,7 +409,7 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run-self-test) self_test; exit 0 ;;
     --explain)           EXPLAIN=1 ;;
-    -h|--help)           sed -n '2,49p' "$0"; exit 0 ;;
+    -h|--help)           sed -n '2,60p' "$0"; exit 0 ;;
     *)                   die "unknown argument: $arg (try --explain, --dry-run-self-test, --help)" ;;
   esac
 done
@@ -497,31 +508,84 @@ if [ "$EXPLAIN" -eq 1 ]; then
 fi
 
 # --- 2. read bd ready ------------------------------------------------------------------
-READY_JSON="$(bd ready --json 2>/dev/null)" || die "bd ready --json failed"
+# `--limit 0` => UNLIMITED. `bd ready` defaults to --limit 100 (and `bd list` to 50): without
+# this the frontier was silently truncated to the first 100 ready beads by (priority,id) sort,
+# so lower-sorting LAUNCHABLE beads — in particular many epic-CHILD beads (sq-bif.6/.8/.9,
+# sq-5o5.*, sq-jpki.*, ...) — fell off the end before the cap/dedup even ran. The scheduler then
+# starved on epics + a handful of top-level beads while clean, atomic children sat invisible
+# (sq-p7nw). We pull the FULL ready set here and let the CPU-ceiling cap (§3) do the bounding.
+READY_JSON="$(bd ready --json --limit 0 2>/dev/null)" || die "bd ready --json failed"
 
 # Emit "id<TAB>priority<TAB>title<TAB>description" lines, sorted by priority asc (P0 first) then
-# id. EXCLUDE epics — an epic is an umbrella, not a dispatchable work unit (see header). The
-# DESCRIPTION column (sq-6ip4) feeds the primary-code-crate probe: a bead's code may live in a
+# id. EXCLUDE umbrellas — a parent bead is a container, not a dispatchable work unit (see header).
+# The DESCRIPTION column (sq-6ip4) feeds the primary-code-crate probe: a bead's code may live in a
 # crate its title never names, so we scan the description for an explicit `crates/<crate>/*.rs`
 # path. Tabs/newlines are flattened so each bead stays on one row.
+#
+# sq-p7nw: "umbrella" is NOT just `issue_type=="epic"`. A bead can be a feature/task-typed PARENT
+# whose decomposed CHILDREN (sq-<parent>.N, linked by a parent-child dependency) are the real
+# atomic work — e.g. sq-bif (type=feature) is the parent of sq-bif.6.../, sq-5o5 (type=feature)
+# of sq-5o5.*. The OLD filter only dropped literal-epic / "[epic]"-titled beads, so these
+# feature-typed parents were emitted AS launchable while their ready children competed for (and
+# lost) the same frontier slots — the scheduler launched "the umbrella" instead of its children.
+# We now also drop any bead that is the PARENT of one or more OTHER beads present in this ready
+# set: that parent's actual work has been decomposed into children which are themselves ready and
+# WILL be surfaced. A literal epic is still always dropped even when it has no ready children
+# (an epic is never itself a work unit). A childless non-epic parent reference (parent points at a
+# bead not in the ready set) does NOT make anything an umbrella — only beads with >=1 READY child
+# are treated as containers, so we never drop a genuine leaf.
 ROWS="$(printf '%s' "$READY_JSON" | python3 -c '
 import json,sys
 data=json.load(sys.stdin)
+# Parents that have at least one OTHER bead in the ready set pointing at them as parent.
+# Both an explicit "parent" field and the parent-child dependency edge are honoured (bd
+# exposes either depending on version); a self-referential parent is ignored.
+ready_ids={it.get("id") for it in data}
+umbrella_parents=set()
+for it in data:
+    cid=it.get("id")
+    pid=it.get("parent")
+    if pid and pid!=cid:
+        umbrella_parents.add(pid)
+    for dep in (it.get("dependencies") or []):
+        if (dep.get("type") or "")=="parent-child":
+            p=dep.get("depends_on_id")
+            if p and p!=cid:
+                umbrella_parents.add(p)
 def key(it):
     try: p=int(it.get("priority",9))
     except Exception: p=9
     return (p, it.get("id",""))
 def flat(s):
     return (s or "").replace("\t"," ").replace("\n"," ").replace("\r"," ")
+def is_needs_gated(it):
+    # A "needs:user"/"needs:maintainer"-LABELLED bead is gated on a human action (publish a
+    # license, flip a GitHub Pages setting, file an upstream issue, ...). It is NOT
+    # agent-launchable, so it must never enter the autonomous frontier. bd ready returns these
+    # (they are open + unblocked by bead-deps), so we filter on the label here. The label is the
+    # reliable signal — the title prefix is inconsistent (some carry it, some do not). sq-p7nw:
+    # before --limit 0 these mostly fell past the 100-row truncation by accident; now that the
+    # full ready set is read, the filter must be explicit so a needs-gated bead cannot leak in.
+    for lbl in (it.get("labels") or []):
+        if (lbl or "").lower().startswith("needs:"):
+            return True
+    return False
 for it in sorted(data, key=key):
-    # Exclude umbrellas: a real epic type, or a bead the maintainer tagged "[epic]"
-    # in its title (the explicit convention for "this is a container, not a unit").
+    iid=it.get("id","")
+    # Always drop a literal epic, or a bead the maintainer tagged "[epic]" in its title.
     if (it.get("issue_type") or "") == "epic":
         continue
     if (it.get("title") or "").lstrip().lower().startswith("[epic]"):
         continue
+    # Drop human-gated beads (needs:user / needs:maintainer) — not agent-launchable (sq-p7nw).
+    if is_needs_gated(it):
+        continue
+    # sq-p7nw: drop a PARENT whose children (>=1) are present in this ready set — it is an
+    # umbrella; its ready children are surfaced in its place. (A childless parent is a leaf.)
+    if iid in umbrella_parents:
+        continue
     print("\t".join([
-        it.get("id",""),
+        iid,
         str(it.get("priority","")),
         flat(it.get("title","")),
         flat(it.get("description","")),

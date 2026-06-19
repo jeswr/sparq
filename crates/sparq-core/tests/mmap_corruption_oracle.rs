@@ -281,11 +281,11 @@ fn dict_blob_non_utf8_is_rejected_not_ub() {
 /// [OPUS-4.8] sq-cvug — a graph containing RDF 1.2 quoted/triple terms `<<( s p o )>>` so
 /// the store holds tag-3 records whose components cross-reference other dictionary ids. The
 /// byte-flip sweeps above never synthesise these from the plain `sample_graph` (no triple
-/// terms in it), so this focused test drives the quoted-triple reconstruction path directly.
+/// terms in it), so this focused test drives the triple-term reconstruction path directly.
 fn sample_star_graph() -> Graph {
     let mut nt = String::new();
     for i in 0..40u32 {
-        // A quoted triple term in the OBJECT position (the RDF 1.2 N-Triples grammar) — a
+        // A triple term in the OBJECT position (the RDF 1.2 N-Triples grammar) — a
         // tag-3 record whose subject/predicate/object are themselves dictionary ids.
         nt.push_str(&format!(
             "<http://example.org/s/{i}> <http://example.org/says> <<( <http://example.org/inner/{i}> <http://example.org/p> \"object {i}\" )>> .\n"
@@ -294,7 +294,7 @@ fn sample_star_graph() -> Graph {
     Graph::load_str(&nt, "nt").expect("valid RDF 1.2 N-Triples with triple terms")
 }
 
-/// sq-cvug — a quoted-triple component id that is IN RANGE but resolves to the WRONG KIND
+/// sq-cvug — a triple-term component id that is IN RANGE but resolves to the WRONG KIND
 /// (e.g. a literal where the subject must be IRI/blank) used to hit `reconstruct_triple`'s
 /// `unreachable!()` → a clean panic (DoS) on a hostile/corrupt store. We exercise the whole
 /// store-shaped boundary: save a store with triple terms, brute-force flip every byte of the

@@ -616,7 +616,7 @@ fn kind_rank(t: &Term) -> u8 {
         Term::BlankNode(_) => 0,
         Term::NamedNode(_) => 1,
         Term::Literal(_) => 2,
-        // oxrdf may expose a Triple term under rdf-star; order it last, stably.
+        // oxrdf may expose a Triple term under RDF 1.2; order it last, stably.
         _ => 3,
     }
 }

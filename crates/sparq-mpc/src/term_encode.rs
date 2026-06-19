@@ -28,7 +28,7 @@
 //!
 //! - **Canonical pre-image.** The term is serialised in its **N-Triples**
 //!   lexical form (oxrdf's [`std::fmt::Display`]): IRIs as `<…>`, literals as
-//!   `"…"`, `"…"^^<dt>`, or `"…"@lang`, blank nodes as `_:id`, quoted triples
+//!   `"…"`, `"…"^^<dt>`, or `"…"@lang`, blank nodes as `_:id`, triple terms
 //!   recursively. That serialisation is itself injective on terms *up to blank-
 //!   node label* (see the caveat below), and crucially it disambiguates the
 //!   VARIANTS — an IRI `<x>` and a plain literal `"x"` never share a pre-image —

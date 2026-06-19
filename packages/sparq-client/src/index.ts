@@ -1,11 +1,19 @@
-// [OPUS-4.8] sq-2e93 — framework-agnostic sparq WASM client.
+// [OPUS-4.8] sq-2e93 / sq-jpki — framework-agnostic sparq WASM client.
 //
-// This is the ONE TypeScript declaration of the sparq-wasm `Store` surface plus the
+// This is the framework-agnostic entry point for the sparq-wasm `Store` surface plus the
 // loaders / query helpers around it. It exists to kill the drift liability the GUI design
 // record (`research/gui-design.md` §0 / §4) flags: the WASM `Store` TS interface was
-// hand-redeclared inside `site/src/lib/sparq-wasm.ts`, so any future GUI would have become
-// a THIRD hand-copy. Both the Next.js site and the (proposed) Tauri 2 GUI now consume this
+// hand-redeclared inside `site/src/lib/sparq-wasm.ts`, so any future GUI would have become a
+// THIRD hand-copy. Both the Next.js site and the (proposed) Tauri 2 GUI now consume this
 // single source.
+//
+// [OPUS-4.8] sq-jpki — the `Store` surface here is NO LONGER hand-redeclared: `WasmStore` /
+// `WasmSolutionCursor` / `WasmStoreCtor` are aliases over the wasm-pack-GENERATED `Store` /
+// `SolutionCursor` classes (re-exported from `./generated/sparq_wasm.js`, the tracked verbatim
+// build output). `npm run check:wasm-types` keeps that tracked copy byte-identical to a fresh
+// `js/wasm` build, so the mirror cannot reappear and the surface cannot drift from the engine
+// binding (§4's end-state). Everything BELOW the type re-export — the loaders, the SPARQL-JSON
+// / SHACL render shapes, the `match()`/cursor helpers — is genuine framework-agnostic code.
 //
 // It is deliberately FRAMEWORK-AGNOSTIC: no React, no Next.js, no DOM beyond the two
 // globals the wasm-pack glue needs at load time (`window.location`, dynamic `import()`).
@@ -20,66 +28,72 @@
 // never bake in a benchmark number.
 
 // ---------------------------------------------------------------------------
-// The WASM `Store` surface (the single declaration; mirrors crates/sparq-wasm).
+// The WASM `Store` surface — re-exported from the wasm-pack GENERATED d.ts.
 // ---------------------------------------------------------------------------
+//
+// [OPUS-4.8] sq-jpki — the hand-redeclared `WasmStore` / `WasmSolutionCursor` /
+// `WasmStoreCtor` mirror that used to live here is DELETED. `research/gui-design.md`
+// §0/§4's end-state ("kill the hand-redeclared `WasmStore` drift") is now realised: these
+// names are aliases over the wasm-pack-generated `Store` / `SolutionCursor` classes — the
+// SINGLE source of truth. The generated d.ts is the verbatim build output for the site's
+// `--features shacl,jsonld` bundle, tracked at `./generated/sparq_wasm.d.ts` (the live
+// output in `js/wasm/` is git-ignored, so the bare-package typecheck has no other type
+// source); `npm run check:wasm-types` asserts the tracked copy stays byte-identical to a
+// freshly built `js/wasm/sparq_wasm.d.ts`, so the mirror cannot silently reappear and the
+// surface cannot drift from the engine binding. A `.js` specifier resolves to the sibling
+// `.d.ts` under `moduleResolution: "bundler"`; this is a type-only import (nothing emitted).
+
+import type {
+  Store as GeneratedStore,
+  SolutionCursor as GeneratedSolutionCursor,
+  InitInput,
+  InitOutput,
+} from "./generated/sparq_wasm.js";
 
 /**
- * A forward-only cursor over a SELECT result's solution rows, mirroring the wasm
- * `SolutionCursor` export ({@link WasmStore.queryCursor}). Each {@link next} yields the
- * next BATCH of up to `batchSize` solutions as a SELF-CONTAINED SPARQL 1.1 JSON document
- * (so it can be `JSON.parse`d on its own), or `undefined` once every solution has been
- * yielded. The consumer never holds more than one batch, so peak JS memory is bounded by
- * `batchSize` rather than by the whole result. `vars`, `rowCount` and `batchSize`
- * introspect the (wasm-side materialised) result; `free` releases the cursor (call it if
- * you stop early).
+ * A forward-only cursor over a SELECT result's solution rows — the wasm-pack-generated
+ * `SolutionCursor` ({@link WasmStore.queryCursor}). Each {@link WasmSolutionCursor.next}
+ * yields the next BATCH of up to `batchSize` solutions as a SELF-CONTAINED SPARQL 1.1 JSON
+ * document (so it can be `JSON.parse`d on its own), or `undefined` once every solution has
+ * been yielded. The consumer never holds more than one batch, so peak JS memory is bounded
+ * by `batchSize` rather than by the whole result. `vars`, `rowCount` and `batchSize`
+ * introspect the (wasm-side materialised) result; `free` releases the cursor (call it if you
+ * stop early). This is an alias over the generated class, not a hand re-declaration.
  */
-export interface WasmSolutionCursor {
-  next(): string | undefined;
-  vars(): string[];
-  rowCount(): number;
-  batchSize(): number;
-  free(): void;
-}
+export type WasmSolutionCursor = GeneratedSolutionCursor;
 
 /**
- * The sparq-wasm `Store` surface, as exposed across the wasm-bindgen boundary. This is the
- * ONE hand-written mirror of the wasm-pack-generated `sparq_wasm.d.ts`; the GUI design
- * record's §4 plan to re-export the generated `.d.ts` directly is deferred (see the package
- * README) — for now this single copy replaces the two that previously existed.
+ * The sparq-wasm `Store` surface, as exposed across the wasm-bindgen boundary — an alias
+ * over the wasm-pack-GENERATED `Store` class (the single source of truth; see the header).
+ * It carries the full generated surface — `query` / `queryQuads` / `updateInPlace` /
+ * `explain` / `explainAnalyze` / `count` / `ask` / `queryCursor` / `applyDelta` / `size`,
+ * plus the broader generated set (`askWithMaxRows`, `heapBytes`, `loadCompressed`,
+ * `queryChunks`, `queryQuadsChunks`, `update`) and the SHACL `validate(data, shapes, format)`
+ * binding the site's `--features shacl,jsonld` bundle emits.
  */
-export interface WasmStore {
-  readonly size: number;
-  query(sparql: string): string; // SELECT/ASK -> SPARQL 1.1 JSON results document
-  queryQuads(sparql: string): string; // CONSTRUCT/DESCRIBE -> N-Triples document
-  // SPARQL Update (mutates this store in place) and the EXPLAIN introspection forms.
-  updateInPlace(sparql: string): void; // INSERT/DELETE/LOAD/graph-mgmt -> mutate store
-  explain(sparql: string): string; // planning-only plan text (every query form)
-  explainAnalyze(sparql: string): string; // plan + per-operator trace (SELECT/ASK only)
-  // The @jeswr/sparq browser-API surface: a streaming cursor, a materialisation-free
-  // count, the ASK fast path, and an incremental quad-level delta (applied in place
-  // through the engine's overlay).
-  count(sparql: string): number; // SELECT solution count, read from the index where possible
-  ask(sparql: string): boolean; // ASK fast path: a plain boolean, no SELECT materialised
-  queryCursor(sparql: string, batchSize: number): WasmSolutionCursor; // batched row cursor
-  applyDelta(inserts: string, deletes: string): void; // O(batch) N-Quads delta, in place
-  // The SHACL `validate` binding. Present only when the bundle is built with
-  // `--features shacl` (the site's default `build:wasm`, and the published `@jeswr/sparq`,
-  // both enable it). Stateless: it does NOT consult the receiver's stored triples — it
-  // parses `data`/`shapes` and validates one-shot.
-  validate?: (data: string, shapes: string, format: string) => string;
-}
+export type WasmStore = GeneratedStore;
 
-/** The static `Store` constructor surface (the two named-graph load modes). */
-export interface WasmStoreCtor {
-  /** Loads RDF, FOLDING any named graphs into the default graph. */
-  load(text: string, format: string): WasmStore;
-  /** Loads RDF, PRESERVING named graphs (N-Quads / TriG) as separate graphs. */
-  loadDataset(text: string, format: string): WasmStore;
-}
+/**
+ * The static `Store` constructor surface (the named-graph load modes `load` / `loadDataset`,
+ * plus the generated `loadCompressed`). This is the STATIC side of the generated `Store`
+ * class (`typeof Store`), so {@link loadSparq}'s resolved value exposes the factory methods a
+ * caller invokes as `Store.load(...)` / `Store.loadDataset(...)`.
+ */
+export type WasmStoreCtor = typeof GeneratedStore;
 
-/** The wasm-pack ESM module surface this client loads at runtime. */
+/**
+ * The wasm-pack ESM module surface this client loads at runtime: the generated default
+ * init function (it instantiates the wasm module) plus the generated `Store` class. The
+ * loader calls `default({ module_or_path })` and reads `.Store`; both are taken from the
+ * generated d.ts so this surface tracks the bundle.
+ */
 export interface WasmModule {
-  default: (opts?: { module_or_path: string | URL }) => Promise<unknown>;
+  default: (
+    module_or_path?:
+      | { module_or_path: InitInput | Promise<InitInput> }
+      | InitInput
+      | Promise<InitInput>,
+  ) => Promise<InitOutput>;
   Store: WasmStoreCtor;
 }
 
@@ -338,13 +352,19 @@ export async function sparqShaclValidate(
   // `validate` is a stateless one-shot, but it is exposed as an instance method on the wasm
   // `Store`, so we need any receiver. An empty store is the cheapest.
   const store = Store.load("", format);
-  if (typeof store.validate !== "function") {
+  // The tracked generated d.ts is the site's `--features shacl,jsonld` bundle, so `validate`
+  // is type-declared as present — but the bundle actually LOADED at runtime is decided by the
+  // asset URL, not by this type, and a lean (no-`shacl`) bundle omits the binding. Keep the
+  // defensive runtime check via a possibly-undefined view so a lean bundle yields a clear
+  // error rather than a `store.validate is not a function` crash.
+  const validate = (store as { validate?: WasmStore["validate"] }).validate;
+  if (typeof validate !== "function") {
     throw new Error(
       "This wasm bundle was built without the SHACL feature (no validate binding). " +
         "Rebuild sparq-wasm with --features shacl.",
     );
   }
-  return JSON.parse(store.validate(data, shapes, format)) as ShaclReport;
+  return JSON.parse(validate(data, shapes, format)) as ShaclReport;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +379,15 @@ export {
   type SparqlTokenType,
   tokenizeSparql,
 } from "./sparql-highlight.js";
+
+// [OPUS-4.8] sq-8uew — the Turtle/TriG/N-Triples/N-Quads highlighting tokenizer, the sibling
+// of `tokenizeSparql`. Shares the `SparqlTokenType` token classes (so one CSS palette styles
+// both) and powers the RDF-document highlighting in the playground results / dataset views.
+export {
+  type TurtleToken,
+  type TurtleTokenType,
+  tokenizeTurtle,
+} from "./turtle-highlight.js";
 
 export {
   type PrefixBinding,

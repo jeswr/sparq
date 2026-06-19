@@ -398,7 +398,7 @@ fn stored_eq_term(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[Name
 }
 
 /// [OPUS-4.8] sq-cvug — the safe placeholders `reconstruct_triple` substitutes when a
-/// quoted-triple component id is IN RANGE but resolves to the WRONG term KIND (e.g. a
+/// triple-term component id is IN RANGE but resolves to the WRONG term KIND (e.g. a
 /// literal id in the subject/predicate position). This can only arise from a tampered,
 /// checksum-less mmap'd index (threat-model B5 / T-MMAP-DoS); the trusted in-process
 /// interner only ever stores a valid `(IRI|blank, IRI, any-term)` shape. Decoding such a
@@ -604,7 +604,7 @@ fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
     }
 }
 
-/// [OPUS-4.8] sq-cvug — depth-bounded term resolution for the quoted-triple reconstruction
+/// [OPUS-4.8] sq-cvug — depth-bounded term resolution for the triple-term reconstruction
 /// recursion. A validly-built store nests triple terms only shallowly (each is interned
 /// after its components, so the structure is a finite DAG), but a TAMPERED mmap'd index
 /// could encode a self/cyclic component reference that would recurse without bound →
@@ -865,7 +865,7 @@ fn validate_dict_bytes(
         let bytes: [u8; 8] = offsets.get(start..end)?.try_into().ok()?;
         Some(u64::from_le_bytes(bytes) as usize)
     };
-    // [OPUS-4.8] sq-cvug — quoted-triple `(own_id, subject, predicate)` ids collected
+    // [OPUS-4.8] sq-cvug — triple-term `(own_id, subject, predicate)` ids collected
     // during the parse pass, verified for KIND once every record offset is known in range.
     let mut triple_sp: Vec<(Id, Id, Id)> = Vec::new();
     for idx in 0..len {
@@ -889,7 +889,7 @@ fn validate_dict_bytes(
                 }
             }
             StoredRef::Triple(ids) => {
-                // A quoted-triple term's components are themselves dictionary ids; an
+                // A triple term's components are themselves dictionary ids; an
                 // inline-integer id (>= INLINE_BASE) or a real term id (1..=len) is in
                 // range, but 0 or a dangling id would later index OOB. Beyond range, a
                 // validly-built store interns each component BEFORE the triple (see
@@ -969,10 +969,10 @@ mod kani_proofs {
     /// Symbolic buffer ceiling. The four byte regions are independently symbolic but length-
     /// coupled to `len` by the early size checks, so a small `len` plus a small blob exercises
     /// every branch — the size-arithmetic rejections, the record parse + table-index range
-    /// checks, the quoted-triple component/kind checks, and the hashid range loop — while
+    /// checks, the triple-term component/kind checks, and the hashid range loop — while
     /// keeping the bounded exploration tractable.
     const MAX_LEN: usize = 2; // up to 2 terms
-    const MAX_BLOB: usize = 24; // a couple of small records / one quoted-triple (1+12) + slack
+    const MAX_BLOB: usize = 24; // a couple of small records / one triple term (1+12) + slack
 
     /// Fills a `Vec<u8>` of a symbolic length `<= cap` with symbolic bytes.
     fn symbolic_bytes(cap: usize) -> Vec<u8> {
@@ -2268,10 +2268,10 @@ impl ShardedDict {
     /// inline integers are handled by the caller), returning `(tag, idx, temp-id)`. The
     /// per-shard interning runs in parallel (each shard is single-writer → no contention).
     ///
-    /// RDF-star triple terms are NOT supported by the sharded interner (a triple's
+    /// RDF 1.2 triple terms are NOT supported by the sharded interner (a triple's
     /// component terms would be interned both in their hash-routed shard and alongside
     /// the triple, breaking the term↔id bijection on merge); the N-Triples bulk loaders
-    /// that feed it reject RDF-star syntax before it could reach here.
+    /// that feed it reject triple-term syntax before it could reach here.
     pub fn intern_terms(&mut self, items: Vec<(u32, Id, Term)>) -> Vec<(u32, Id, Id)> {
         // Leaves route across the `n_leaf` LEAF shards only; the trailing triple shard is
         // reserved for `intern_partials`'s structural second pass (see the type doc).
@@ -2659,7 +2659,7 @@ mod tests {
         assert_eq!(d.len(), 0, "no inline integer is stored in the dictionary");
     }
 
-    /// [OPUS-4.8] sq-cvug — a quoted-triple component id that is IN RANGE but resolves to the
+    /// [OPUS-4.8] sq-cvug — a triple-term component id that is IN RANGE but resolves to the
     /// WRONG KIND (a literal where the subject must be IRI/blank, or where the predicate must
     /// be an IRI) used to hit `reconstruct_triple`'s `unreachable!()` → a clean panic (DoS) on
     /// a hostile/corrupt mmap'd index. It must now FAIL CLOSED to a safe placeholder, never
@@ -3221,7 +3221,7 @@ mod tests {
         validate_dict_bytes(&[], &[], &[], &[], 0, &[], &[]).expect("an empty store validates");
     }
 
-    /// [OPUS-4.8] sq-ueuk — the seam must reject a tampered quoted-triple whose component id
+    /// [OPUS-4.8] sq-ueuk — the seam must reject a tampered triple term whose component id
     /// forward-references (or self-references) its own id, which would otherwise drive the
     /// reconstruct recursion unbounded. Build a single triple term whose subject id equals its
     /// own id and confirm it is refused at the `&[u8]` boundary (no panic / no stack blowup).

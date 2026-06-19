@@ -22,7 +22,7 @@ and `research/ARCHITECTURE.md`:
 - **SPARQL 1.1 query + update**, plus **SPARQL 1.2 / RDF 1.2** triple-terms and
   `langdir`/base-direction (`crates/sparq-engine/src/json.rs` emits SPARQL-1.2 JSON
   `its:dir`; `crates/sparq-engine/src/dataset.rs` carries `TripleTerm`s; SERVICE handles
-  1.2 triple terms). RDF-star quoted triples.
+  1.2 triple terms). RDF 1.2 triple terms.
 - **Property paths**, aggregates/GROUP BY/HAVING, subqueries, BIND/VALUES,
   OPTIONAL/MINUS/UNION, DISTINCT, named-graph dataset views, EXISTS.
 - **Custom extension functions** (SPARQL 17.6) via `FunctionRegistry` /

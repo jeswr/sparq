@@ -103,6 +103,13 @@ PER_COMMIT_CRATES=(
   # misleadingly-low artifact (measured 55-79% native; same class as sparq-cli's
   # subprocess artifact) — they are floor-0 + presence-gated in the JSONs instead.
   sparq-fedclient sparq-fedplan sparq-prov
+  # [OPUS-4.8] sq-bif.7: the OPT-IN ODRL usage-control policy crate, untracked by BOTH
+  # gates. The STATELESS evaluator (parse/eval/compare/hierarchy) is default-on, but the
+  # stateful `odrl:count` counter stores (the `count`/`count_file`/`count_backend` modules
+  # + their tests) are `#![cfg(feature = "count-enforcement")]`. So it MUST be measured
+  # WITH --features count-enforcement (the `case` in measure() below names it) — a default
+  # build compiles that whole surface out and reports a non-representative number.
+  sparq-policy
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
@@ -329,6 +336,13 @@ measure() {
       # (its integration test, tests/reason_prov.rs, is gated on it). The CONSTRUCT/
       # update lineage core is default-on.
       cargo_args+=(--features reason); features+=("reason") ;;
+    # [OPUS-4.8] sq-bif.7: `count-enforcement` turns on the stateful `odrl:count`
+    # counter-store surface (the `count`/`count_file`/`count_backend` modules + their
+    # `#![cfg(feature = "count-enforcement")]` integration tests). The stateless ODRL
+    # evaluator is default-on; without this feature that whole surface is compiled out
+    # and the number is non-representative. (Mirrors the sparq-prov `reason` quirk above.)
+    sparq-policy)
+      cargo_args+=(--features count-enforcement); features+=("count-enforcement") ;;
   esac
 
   local start end rc=0 json="$WORK/$crate.json"

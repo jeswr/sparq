@@ -98,7 +98,7 @@ each validated against EYE's own test cases (`sparq-reason/tests/eye_cases.rs`):
 
 ## T6 — RDF 1.2 / SPARQL 1.2
 Source: `rdf12-parser.md`, `rdf12-indexing.md`, `sparql12-engine.md`.
-- **T6a — parser** (triple terms, RDF-star successor syntax): `sparq-core` parser files —
+- **T6a — parser** (triple terms, the RDF 1.2 successor to RDF-star syntax): `sparq-core` parser files —
   **independent** of the exec cluster.
 - **T6b — indexing** (triple terms in the store): joins the **store/id cluster** (conflicts with
   T3/T4).
@@ -354,5 +354,5 @@ Solid Notifications channels for that ecosystem.
   WebGPU-in-browser): `research/gpu-verdict.md`; harness stays in-tree as the re-test rig.
 
 **Sequencing/dependencies:** T13/T15/T20/T21/T22 are independent → agent-parallel now. T14 after
-the in-flight RDF-star merge (wasm API surface). T16 before T23-CONSTRUCT subscriptions. T17 → T18
+the in-flight RDF 1.2 triple-term merge (wasm API surface). T16 before T23-CONSTRUCT subscriptions. T17 → T18
 → T23-v2 chain. T24x each fully independent opt-in crates.

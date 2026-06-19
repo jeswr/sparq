@@ -73,7 +73,7 @@ standard it implements.
   ([guide](skills/sparql-query/SKILL.md)).
 - **RDF parsing & ingest** — load and parse Turtle, N-Triples, N-Quads, and TriG, with
   transparent `.gz` / `.bz2` / `.zst` decompression ([guide](skills/data-formats/SKILL.md)).
-- **RDF-star / quoted triples** — store and query triple terms per
+- **RDF 1.2 triple terms** — store and query triple terms per
   [RDF 1.2 Concepts](https://www.w3.org/TR/rdf12-concepts/) ([guide](skills/sparql-query/SKILL.md)).
 - **Custom extension functions** — register your own Rust functions under IRIs and call them in
   SPARQL ([docs/extension-functions.md](docs/extension-functions.md)).
