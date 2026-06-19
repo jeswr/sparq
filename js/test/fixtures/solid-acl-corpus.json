@@ -1,0 +1,869 @@
+{
+  "_generated": "sparq-solid engine decisions (AuthIndex::accessible) — sq-t58w.9 generator",
+  "scenarios": [
+    {
+      "mechanism": "wac",
+      "name": "agent-accessTo",
+      "nquads": "<https://pod.example/agent/d1.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/agent/d1.acl> .\n<https://pod.example/agent/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/agent/d1> <https://pod.example/agent/d1.acl> .\n<https://pod.example/agent/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://pod.example/agent/d1.acl> .\n<https://pod.example/agent/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/agent/d1.acl> .\n<https://pod.example/agent/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/agent/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/agent/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/agent/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/agent/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "agentClass-foaf-Agent-public",
+      "nquads": "<https://pod.example/public/d1.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/public/d1.acl> .\n<https://pod.example/public/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/public/d1> <https://pod.example/public/d1.acl> .\n<https://pod.example/public/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#agentClass> <http://xmlns.com/foaf/0.1/Agent> <https://pod.example/public/d1.acl> .\n<https://pod.example/public/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/public/d1.acl> .\n<https://pod.example/public/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/public/d1> .\n",
+      "requests": [
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/public/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/public/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/public/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": "https://app.example",
+          "mode": "Read",
+          "resource": "https://pod.example/public/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/public/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "agentClass-AuthenticatedAgent",
+      "nquads": "<https://pod.example/authn/d1.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/authn/d1.acl> .\n<https://pod.example/authn/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/authn/d1> <https://pod.example/authn/d1.acl> .\n<https://pod.example/authn/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#agentClass> <http://www.w3.org/ns/auth/acl#AuthenticatedAgent> <https://pod.example/authn/d1.acl> .\n<https://pod.example/authn/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/authn/d1.acl> .\n<https://pod.example/authn/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/authn/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/authn/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/authn/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/authn/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "agentGroup-vcard-members",
+      "nquads": "<https://pod.example/team/d1.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/team/d1.acl> .\n<https://pod.example/team/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/team/d1> <https://pod.example/team/d1.acl> .\n<https://pod.example/team/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#agentGroup> <https://pod.example/groups/team#g> <https://pod.example/team/d1.acl> .\n<https://pod.example/groups/team#g> <http://www.w3.org/2006/vcard/ns#hasMember> <https://bob.example/card#me> <https://pod.example/groups/team> .\n<https://pod.example/groups/team#g> <http://www.w3.org/2006/vcard/ns#hasMember> <https://carol.example/card#me> <https://pod.example/groups/team> .\n<https://pod.example/team/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/team/d1.acl> .\n<https://pod.example/team/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.example/team/d1.acl> .\n<https://pod.example/team/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/team/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/team/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/team/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Write",
+          "resource": "https://pod.example/team/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://dave.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/team/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/team/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "default-inheritance-vs-accessTo",
+      "nquads": "<https://pod.example/c/.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/c/.acl> .\n<https://pod.example/c/.acl#auth0> <http://www.w3.org/ns/auth/acl#default> <https://pod.example/c/> <https://pod.example/c/.acl> .\n<https://pod.example/c/.acl#auth0> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://pod.example/c/.acl> .\n<https://pod.example/c/.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/c/.acl> .\n<https://pod.example/c/sub/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/c/sub/d1> .\n<https://pod.example/c/#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/c/> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/c/sub/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/c/sub/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/c/",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "nearest-acl-shadows-ancestor",
+      "nquads": "<https://pod.example/.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/.acl> .\n<https://pod.example/.acl#auth0> <http://www.w3.org/ns/auth/acl#default> <https://pod.example/> <https://pod.example/.acl> .\n<https://pod.example/.acl#auth0> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://pod.example/.acl> .\n<https://pod.example/.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/.acl> .\n<https://pod.example/proj/.acl#auth1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/proj/.acl> .\n<https://pod.example/proj/.acl#auth1> <http://www.w3.org/ns/auth/acl#default> <https://pod.example/proj/> <https://pod.example/proj/.acl> .\n<https://pod.example/proj/.acl#auth1> <http://www.w3.org/ns/auth/acl#agent> <https://bob.example/card#me> <https://pod.example/proj/.acl> .\n<https://pod.example/proj/.acl#auth1> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/proj/.acl> .\n<https://pod.example/proj/c/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/proj/c/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/proj/c/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/proj/c/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/proj/c/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "resource-specific-override",
+      "nquads": "<https://pod.example/docs/.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/docs/.acl> .\n<https://pod.example/docs/.acl#auth0> <http://www.w3.org/ns/auth/acl#default> <https://pod.example/docs/> <https://pod.example/docs/.acl> .\n<https://pod.example/docs/.acl#auth0> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://pod.example/docs/.acl> .\n<https://pod.example/docs/.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/docs/.acl> .\n<https://pod.example/docs/#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/docs/> .\n<https://pod.example/docs/d0.acl#auth1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/docs/d0.acl> .\n<https://pod.example/docs/d0.acl#auth1> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/docs/d0> <https://pod.example/docs/d0.acl> .\n<https://pod.example/docs/d0.acl#auth1> <http://www.w3.org/ns/auth/acl#agent> <https://bob.example/card#me> <https://pod.example/docs/d0.acl> .\n<https://pod.example/docs/d0.acl#auth1> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/docs/d0.acl> .\n<https://pod.example/docs/d0#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/docs/d0> .\n<https://pod.example/docs/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/docs/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/docs/d0",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/docs/d0",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/docs/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/docs/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "origin-user-app-pair",
+      "nquads": "<https://pod.example/origin/d1.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/origin/d1.acl> .\n<https://pod.example/origin/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/origin/d1> <https://pod.example/origin/d1.acl> .\n<https://pod.example/origin/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#agent> <https://bob.example/card#me> <https://pod.example/origin/d1.acl> .\n<https://pod.example/origin/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#origin> <https://app.example> <https://pod.example/origin/d1.acl> .\n<https://pod.example/origin/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/origin/d1.acl> .\n<https://pod.example/origin/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/origin/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://bob.example/card#me",
+          "client": "https://app.example",
+          "mode": "Read",
+          "resource": "https://pod.example/origin/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": "https://evil.example",
+          "mode": "Read",
+          "resource": "https://pod.example/origin/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/origin/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": "https://app.example",
+          "mode": "Read",
+          "resource": "https://pod.example/origin/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/origin/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "mode-independence",
+      "nquads": "<https://pod.example/modes/rw.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/modes/rw.acl> .\n<https://pod.example/modes/rw.acl#auth0> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/modes/rw> <https://pod.example/modes/rw.acl> .\n<https://pod.example/modes/rw.acl#auth0> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://pod.example/modes/rw.acl> .\n<https://pod.example/modes/rw.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/modes/rw.acl> .\n<https://pod.example/modes/rw.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.example/modes/rw.acl> .\n<https://pod.example/modes/ro.acl#auth1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/modes/ro.acl> .\n<https://pod.example/modes/ro.acl#auth1> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/modes/ro> <https://pod.example/modes/ro.acl> .\n<https://pod.example/modes/ro.acl#auth1> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://pod.example/modes/ro.acl> .\n<https://pod.example/modes/ro.acl#auth1> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/modes/ro.acl> .\n<https://pod.example/modes/rw#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/modes/rw> .\n<https://pod.example/modes/ro#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/modes/ro> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/modes/rw",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Write",
+          "resource": "https://pod.example/modes/rw",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/modes/ro",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Write",
+          "resource": "https://pod.example/modes/ro",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Append",
+          "resource": "https://pod.example/modes/ro",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "control-governs-acl-document",
+      "nquads": "<https://pod.example/ctl/d1.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/ctl/d1.acl> .\n<https://pod.example/ctl/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/ctl/d1> <https://pod.example/ctl/d1.acl> .\n<https://pod.example/ctl/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://pod.example/ctl/d1.acl> .\n<https://pod.example/ctl/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/ctl/d1.acl> .\n<https://pod.example/ctl/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://pod.example/ctl/d1.acl> .\n<https://pod.example/ctl/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/ctl/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/ctl/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Control",
+          "resource": "https://pod.example/ctl/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/ctl/d1.acl",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Write",
+          "resource": "https://pod.example/ctl/d1.acl",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/ctl/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/ctl/d1.acl",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "fail-closed-no-acl",
+      "nquads": "<https://pod.example/orphan/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/orphan/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/orphan/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/orphan/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "wac",
+      "name": "multi-agent-union",
+      "nquads": "<https://pod.example/multi/d1.acl#auth0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.example/multi/d1.acl> .\n<https://pod.example/multi/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.example/multi/d1> <https://pod.example/multi/d1.acl> .\n<https://pod.example/multi/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#agent> <https://bob.example/card#me> <https://pod.example/multi/d1.acl> .\n<https://pod.example/multi/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#agent> <https://carol.example/card#me> <https://pod.example/multi/d1.acl> .\n<https://pod.example/multi/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/multi/d1.acl> .\n<https://pod.example/multi/d1.acl#auth0> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.example/multi/d1.acl> .\n<https://pod.example/multi/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/multi/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/multi/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": null,
+          "mode": "Write",
+          "resource": "https://pod.example/multi/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/multi/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "agent-anyOf-allow",
+      "nquads": "<https://pod.example/agent/d1.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/agent/d1> <https://pod.example/agent/d1.acr> .\n<https://pod.example/agent/d1.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/agent/d1.acr#ctl0> <https://pod.example/agent/d1.acr> .\n<https://pod.example/agent/d1.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/agent/d1.acr#pol0> <https://pod.example/agent/d1.acr> .\n<https://pod.example/agent/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/agent/d1.acr> .\n<https://pod.example/agent/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/agent/d1.acr#m0-anyOf0> <https://pod.example/agent/d1.acr> .\n<https://pod.example/agent/d1.acr#m0-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <https://alice.example/card#me> <https://pod.example/agent/d1.acr> .\n<https://pod.example/agent/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/agent/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/agent/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/agent/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/agent/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "public-agent",
+      "nquads": "<https://pod.example/public/d1.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/public/d1> <https://pod.example/public/d1.acr> .\n<https://pod.example/public/d1.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/public/d1.acr#ctl0> <https://pod.example/public/d1.acr> .\n<https://pod.example/public/d1.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/public/d1.acr#pol0> <https://pod.example/public/d1.acr> .\n<https://pod.example/public/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/public/d1.acr> .\n<https://pod.example/public/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/public/d1.acr#m0-anyOf0> <https://pod.example/public/d1.acr> .\n<https://pod.example/public/d1.acr#m0-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#PublicAgent> <https://pod.example/public/d1.acr> .\n<https://pod.example/public/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/public/d1> .\n",
+      "requests": [
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/public/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/public/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/public/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": "https://app.example",
+          "mode": "Read",
+          "resource": "https://pod.example/public/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "authenticated-agent",
+      "nquads": "<https://pod.example/authn/d1.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/authn/d1> <https://pod.example/authn/d1.acr> .\n<https://pod.example/authn/d1.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/authn/d1.acr#ctl0> <https://pod.example/authn/d1.acr> .\n<https://pod.example/authn/d1.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/authn/d1.acr#pol0> <https://pod.example/authn/d1.acr> .\n<https://pod.example/authn/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/authn/d1.acr> .\n<https://pod.example/authn/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/authn/d1.acr#m0-anyOf0> <https://pod.example/authn/d1.acr> .\n<https://pod.example/authn/d1.acr#m0-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#AuthenticatedAgent> <https://pod.example/authn/d1.acr> .\n<https://pod.example/authn/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/authn/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/authn/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/authn/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/authn/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "allOf-user-app-pair",
+      "nquads": "<https://pod.example/pair/d1.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/pair/d1> <https://pod.example/pair/d1.acr> .\n<https://pod.example/pair/d1.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/pair/d1.acr#ctl0> <https://pod.example/pair/d1.acr> .\n<https://pod.example/pair/d1.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/pair/d1.acr#pol0> <https://pod.example/pair/d1.acr> .\n<https://pod.example/pair/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/pair/d1.acr> .\n<https://pod.example/pair/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.example/pair/d1.acr#m0-allOf0> <https://pod.example/pair/d1.acr> .\n<https://pod.example/pair/d1.acr#m0-allOf0> <http://www.w3.org/ns/solid/acp#agent> <https://bob.example/card#me> <https://pod.example/pair/d1.acr> .\n<https://pod.example/pair/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.example/pair/d1.acr#m0-allOf1> <https://pod.example/pair/d1.acr> .\n<https://pod.example/pair/d1.acr#m0-allOf1> <http://www.w3.org/ns/solid/acp#client> <https://app.example> <https://pod.example/pair/d1.acr> .\n<https://pod.example/pair/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/pair/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://bob.example/card#me",
+          "client": "https://app.example",
+          "mode": "Read",
+          "resource": "https://pod.example/pair/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": "https://evil.example",
+          "mode": "Read",
+          "resource": "https://pod.example/pair/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/pair/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": "https://app.example",
+          "mode": "Read",
+          "resource": "https://pod.example/pair/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/pair/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "allOf-single-matcher-pair",
+      "nquads": "<https://pod.example/pair2/d1.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/pair2/d1> <https://pod.example/pair2/d1.acr> .\n<https://pod.example/pair2/d1.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/pair2/d1.acr#ctl0> <https://pod.example/pair2/d1.acr> .\n<https://pod.example/pair2/d1.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/pair2/d1.acr#pol0> <https://pod.example/pair2/d1.acr> .\n<https://pod.example/pair2/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/pair2/d1.acr> .\n<https://pod.example/pair2/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.example/pair2/d1.acr#m0-allOf0> <https://pod.example/pair2/d1.acr> .\n<https://pod.example/pair2/d1.acr#m0-allOf0> <http://www.w3.org/ns/solid/acp#agent> <https://bob.example/card#me> <https://pod.example/pair2/d1.acr> .\n<https://pod.example/pair2/d1.acr#m0-allOf0> <http://www.w3.org/ns/solid/acp#client> <https://app.example> <https://pod.example/pair2/d1.acr> .\n<https://pod.example/pair2/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/pair2/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://bob.example/card#me",
+          "client": "https://app.example",
+          "mode": "Read",
+          "resource": "https://pod.example/pair2/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": "https://evil.example",
+          "mode": "Read",
+          "resource": "https://pod.example/pair2/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": "https://app.example",
+          "mode": "Read",
+          "resource": "https://pod.example/pair2/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "deny-overrides",
+      "nquads": "<https://pod.example/deny/d1.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/deny/d1> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/deny/d1.acr#ctl0> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/deny/d1.acr#pol0> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/deny/d1.acr#m0-anyOf0> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr#m0-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#PublicAgent> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/deny/d1> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/deny/d1.acr#ctl1> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr#ctl1> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/deny/d1.acr#pol1> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr#pol1> <http://www.w3.org/ns/solid/acp#deny> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr#pol1> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/deny/d1.acr#m1-anyOf0> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1.acr#m1-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <https://bob.example/card#me> <https://pod.example/deny/d1.acr> .\n<https://pod.example/deny/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/deny/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/deny/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/deny/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/deny/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "noneOf-public-except-carol",
+      "nquads": "<https://pod.example/except/d1.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/except/d1> <https://pod.example/except/d1.acr> .\n<https://pod.example/except/d1.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/except/d1.acr#ctl0> <https://pod.example/except/d1.acr> .\n<https://pod.example/except/d1.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/except/d1.acr#pol0> <https://pod.example/except/d1.acr> .\n<https://pod.example/except/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/except/d1.acr> .\n<https://pod.example/except/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/except/d1.acr#m0-anyOf0> <https://pod.example/except/d1.acr> .\n<https://pod.example/except/d1.acr#m0-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#PublicAgent> <https://pod.example/except/d1.acr> .\n<https://pod.example/except/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#noneOf> <https://pod.example/except/d1.acr#m0-noneOf1> <https://pod.example/except/d1.acr> .\n<https://pod.example/except/d1.acr#m0-noneOf1> <http://www.w3.org/ns/solid/acp#agent> <https://carol.example/card#me> <https://pod.example/except/d1.acr> .\n<https://pod.example/except/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/except/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/except/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/except/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/except/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/except/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "memberAccessControl-inheritance",
+      "nquads": "<https://pod.example/team/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/team/> <https://pod.example/team/.acr> .\n<https://pod.example/team/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.example/team/.acr#ctl0> <https://pod.example/team/.acr> .\n<https://pod.example/team/.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/team/.acr#pol0> <https://pod.example/team/.acr> .\n<https://pod.example/team/.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/team/.acr> .\n<https://pod.example/team/.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/team/.acr#m0-anyOf0> <https://pod.example/team/.acr> .\n<https://pod.example/team/.acr#m0-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <https://alice.example/card#me> <https://pod.example/team/.acr> .\n<https://pod.example/team/sub/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/team/sub/d1> .\n<https://pod.example/team/#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/team/> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/team/sub/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/team/sub/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/team/",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "cumulative-inheritance",
+      "nquads": "<https://pod.example/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/> <https://pod.example/.acr> .\n<https://pod.example/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.example/.acr#ctl0> <https://pod.example/.acr> .\n<https://pod.example/.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/.acr#pol0> <https://pod.example/.acr> .\n<https://pod.example/.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/.acr> .\n<https://pod.example/.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/.acr#m0-anyOf0> <https://pod.example/.acr> .\n<https://pod.example/.acr#m0-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <https://alice.example/card#me> <https://pod.example/.acr> .\n<https://pod.example/proj/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/proj/> <https://pod.example/proj/.acr> .\n<https://pod.example/proj/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.example/proj/.acr#ctl1> <https://pod.example/proj/.acr> .\n<https://pod.example/proj/.acr#ctl1> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/proj/.acr#pol1> <https://pod.example/proj/.acr> .\n<https://pod.example/proj/.acr#pol1> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/proj/.acr> .\n<https://pod.example/proj/.acr#pol1> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/proj/.acr#m1-anyOf0> <https://pod.example/proj/.acr> .\n<https://pod.example/proj/.acr#m1-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <https://bob.example/card#me> <https://pod.example/proj/.acr> .\n<https://pod.example/proj/c/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/proj/c/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/proj/c/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/proj/c/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/proj/c/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "mode-independence",
+      "nquads": "<https://pod.example/modes/rw.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/modes/rw> <https://pod.example/modes/rw.acr> .\n<https://pod.example/modes/rw.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/modes/rw.acr#ctl0> <https://pod.example/modes/rw.acr> .\n<https://pod.example/modes/rw.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/modes/rw.acr#pol0> <https://pod.example/modes/rw.acr> .\n<https://pod.example/modes/rw.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/modes/rw.acr> .\n<https://pod.example/modes/rw.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Write> <https://pod.example/modes/rw.acr> .\n<https://pod.example/modes/rw.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/modes/rw.acr#m0-anyOf0> <https://pod.example/modes/rw.acr> .\n<https://pod.example/modes/rw.acr#m0-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <https://alice.example/card#me> <https://pod.example/modes/rw.acr> .\n<https://pod.example/modes/ro.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/modes/ro> <https://pod.example/modes/ro.acr> .\n<https://pod.example/modes/ro.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/modes/ro.acr#ctl1> <https://pod.example/modes/ro.acr> .\n<https://pod.example/modes/ro.acr#ctl1> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/modes/ro.acr#pol1> <https://pod.example/modes/ro.acr> .\n<https://pod.example/modes/ro.acr#pol1> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/modes/ro.acr> .\n<https://pod.example/modes/ro.acr#pol1> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/modes/ro.acr#m1-anyOf0> <https://pod.example/modes/ro.acr> .\n<https://pod.example/modes/ro.acr#m1-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <https://alice.example/card#me> <https://pod.example/modes/ro.acr> .\n<https://pod.example/modes/rw#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/modes/rw> .\n<https://pod.example/modes/ro#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/modes/ro> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/modes/rw",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Write",
+          "resource": "https://pod.example/modes/rw",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/modes/ro",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Write",
+          "resource": "https://pod.example/modes/ro",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "fail-closed-no-policy",
+      "nquads": "<https://pod.example/orphan/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/orphan/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/orphan/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        },
+        {
+          "agent": null,
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/orphan/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    },
+    {
+      "mechanism": "acp",
+      "name": "anyOf-disjunction",
+      "nquads": "<https://pod.example/anyof/d1.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.example/anyof/d1> <https://pod.example/anyof/d1.acr> .\n<https://pod.example/anyof/d1.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.example/anyof/d1.acr#ctl0> <https://pod.example/anyof/d1.acr> .\n<https://pod.example/anyof/d1.acr#ctl0> <http://www.w3.org/ns/solid/acp#apply> <https://pod.example/anyof/d1.acr#pol0> <https://pod.example/anyof/d1.acr> .\n<https://pod.example/anyof/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.example/anyof/d1.acr> .\n<https://pod.example/anyof/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Write> <https://pod.example/anyof/d1.acr> .\n<https://pod.example/anyof/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/anyof/d1.acr#m0-anyOf0> <https://pod.example/anyof/d1.acr> .\n<https://pod.example/anyof/d1.acr#m0-anyOf0> <http://www.w3.org/ns/solid/acp#agent> <https://bob.example/card#me> <https://pod.example/anyof/d1.acr> .\n<https://pod.example/anyof/d1.acr#pol0> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.example/anyof/d1.acr#m0-anyOf1> <https://pod.example/anyof/d1.acr> .\n<https://pod.example/anyof/d1.acr#m0-anyOf1> <http://www.w3.org/ns/solid/acp#agent> <https://carol.example/card#me> <https://pod.example/anyof/d1.acr> .\n<https://pod.example/anyof/d1#it> <https://ex.dev/ns#prop> \"x\" <https://pod.example/anyof/d1> .\n",
+      "requests": [
+        {
+          "agent": "https://bob.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/anyof/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://carol.example/card#me",
+          "client": null,
+          "mode": "Write",
+          "resource": "https://pod.example/anyof/d1",
+          "sparqDecision": "allow",
+          "specExpect": "allow"
+        },
+        {
+          "agent": "https://alice.example/card#me",
+          "client": null,
+          "mode": "Read",
+          "resource": "https://pod.example/anyof/d1",
+          "sparqDecision": "deny",
+          "specExpect": "deny"
+        }
+      ]
+    }
+  ]
+}
