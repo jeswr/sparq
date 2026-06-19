@@ -59,6 +59,14 @@ default = []
 # `sh:sparql` path already depends on (CONSTRUCT for sh:SPARQLRule, ASK for
 # sh:condition gating). See `skills/shacl-validation/SKILL.md` and the crate README.
 shacl-af = []
+# [OPUS-4.8] sq-v0b8 (#796): SHACL Compact Syntax (SCS) PARSER — text → SHACL
+# shapes triples (the parse direction of the SCS surface; the display direction
+# ships client-side in the site). OPT-IN: a hand-rolled lexer + recursive-descent
+# parser over `oxrdf` term construction the crate already pulls in, so this adds
+# ZERO new dependencies and the base validation path (plus the default + wasm
+# bundles) carry no parser code when off. See the crate README and
+# `skills/shacl-validation/SKILL.md`.
+scs = []
 
 [dev-dependencies]
 # [OPUS-4.8] sq-55c1: the differential-fuzz harness (tests/diff_fuzz.rs) talks to
