@@ -64,6 +64,17 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-geo/tests/ogc_compliance_ratchet.rs",
         "OGC_RATCHET_FLOOR",
     ),
+    // [OPUS-4.8] sq-j174 — the Solid WAC + ACP decision-parity ratchets.
+    (
+        "Solid WAC decision parity",
+        "crates/sparq-solid/tests/conformance_wac.rs",
+        "WAC_SCENARIO_FLOOR",
+    ),
+    (
+        "Solid ACP decision parity",
+        "crates/sparq-solid/tests/conformance_acp.rs",
+        "ACP_SCENARIO_FLOOR",
+    ),
 ];
 
 #[test]
@@ -104,8 +115,8 @@ fn all_crate_test_suites_are_guarded() {
     }
 }
 
-/// The scoreboard renders and lists all five suites — smoke check on the binary's
-/// output shape.
+/// The scoreboard renders and lists every registered suite — smoke check on the
+/// binary's output shape.
 #[test]
 fn scoreboard_renders_all_suites() {
     let md = sparq_conformance::scoreboard::render_scoreboard();
@@ -117,7 +128,10 @@ fn scoreboard_renders_all_suites() {
             suite.label
         );
     }
-    // The consolidation claim: SHACL + GeoSPARQL now appear in this central report.
+    // The consolidation claim: SHACL + GeoSPARQL (sq-ncvq.16) and Solid WAC/ACP
+    // (sq-j174) now appear in this central report.
     assert!(md.contains("W3C SHACL core"));
     assert!(md.contains("OGC GeoSPARQL"));
+    assert!(md.contains("Solid WAC decision parity"));
+    assert!(md.contains("Solid ACP decision parity"));
 }

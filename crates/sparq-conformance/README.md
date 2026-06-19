@@ -10,7 +10,8 @@ sit on shared manifest-walking / result-comparison machinery:
 - `sparq-inference-conformance` — the reasoning suites (RDF Semantics, OWL 2 RL,
   N3, SPARQL entailment regimes) run against `sparq-reason`.
 - `sparq-conformance-scoreboard` — the consolidated index of every conformance
-  ratchet across the workspace (SPARQL, inference, W3C SHACL, OGC GeoSPARQL).
+  ratchet across the workspace (SPARQL, inference, W3C SHACL, OGC GeoSPARQL,
+  Solid WAC + ACP).
 
 Why it exists: it is the regression oracle that turns "is sparq spec-conformant?"
 into a number CI can ratchet upward and never let slip.

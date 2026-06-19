@@ -4,11 +4,13 @@
 //! several disconnected places: the W3C SPARQL suites (this crate's
 //! `sparq-conformance` binary), the inference suites (`sparq-inference-conformance`),
 //! the W3C SHACL core + SHACL-SPARQL suites (crate-local `cargo test` runners in
-//! `sparq-shacl`), and the OGC GeoSPARQL topology ratchet (a crate-local
-//! `cargo test` in `sparq-geo`). The drift-scanner (`scripts/drift-scan.py`
-//! §5.E `conformance-split`) flagged the SHACL + geo ratchets as living OUTSIDE
-//! the central scoreboard, so no single artifact answered "what conformance does
-//! sparq claim, and at what floor?".
+//! `sparq-shacl`), the OGC GeoSPARQL topology ratchet (a crate-local `cargo test`
+//! in `sparq-geo`), and the Solid WAC + ACP library-level decision-parity suites
+//! (crate-local `cargo test` runners in `sparq-solid`). The drift-scanner
+//! (`scripts/drift-scan.py` §5.E `conformance-split`) flagged the SHACL + geo
+//! ratchets (sq-ncvq.16), then the Solid WAC/ACP ratchets (sq-j174), as living
+//! OUTSIDE the central scoreboard, so no single artifact answered "what conformance
+//! does sparq claim, and at what floor?".
 //!
 //! This registry is that single source of truth. It enumerates EVERY conformance
 //! suite the project ratchets — across crates — with, for each: the spec family,
@@ -20,13 +22,14 @@
 //!
 //! ## Why a registry, not a merged runner
 //!
-//! The SHACL + geo runners are NOT re-implemented here. They depend on
-//! `sparq-shacl` / `sparq-geo`, and this crate must stay free of those deps —
-//! exactly the constraint `crates/sparq-shacl/tests/w3c_core.rs` records in its
-//! own header ("Manifest-walking helpers are modelled on `sparq-conformance`'s
-//! (copied, not shared — that crate is dev-only and must not become a
-//! dependency)"). Pulling sparq-shacl/sparq-geo into the conformance crate would
-//! invert that and couple the SPARQL/inference scoreboard to the SHACL/geo build.
+//! The SHACL + geo + Solid runners are NOT re-implemented here. They depend on
+//! `sparq-shacl` / `sparq-geo` / `sparq-solid`, and this crate must stay free of
+//! those deps — exactly the constraint `crates/sparq-shacl/tests/w3c_core.rs`
+//! records in its own header ("Manifest-walking helpers are modelled on
+//! `sparq-conformance`'s (copied, not shared — that crate is dev-only and must not
+//! become a dependency)"). Pulling sparq-shacl/sparq-geo/sparq-solid into the
+//! conformance crate would invert that and couple the SPARQL/inference scoreboard
+//! to the SHACL/geo/Solid build.
 //! So consolidation happens at the REPORTING layer: the floors live here as the
 //! authoritative list, the runners stay where their dependencies are, and a guard
 //! test (`tests/scoreboard_floors.rs`) hermetically reads the crate-local
@@ -103,6 +106,10 @@ pub struct Suite {
 /// * SHACL-SPARQL 5 — `sparq-shacl` `w3c_sparql.rs` `SHACL_SPARQL_FLOOR = 5`.
 /// * OGC GeoSPARQL 119 — `sparq-geo` `ogc_compliance_ratchet.rs`
 ///   `OGC_RATCHET_FLOOR = 119`.
+/// * Solid WAC 12 — `sparq-solid` `conformance_wac.rs` `WAC_SCENARIO_FLOOR = 12`
+///   (sq-j174).
+/// * Solid ACP 12 — `sparq-solid` `conformance_acp.rs` `ACP_SCENARIO_FLOOR = 12`
+///   (sq-j174).
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -149,6 +156,31 @@ pub const SUITES: &[Suite] = &[
         floor_basis: "pass",
         note: "hand-curated sf/eh/rcc8 topology + WKT/GML equivalence assertions",
     },
+    // [OPUS-4.8] sq-j174 — the Solid WAC + ACP library-level decision-parity suites
+    // (harness landed under sq-3jtd.8). The runners stay crate-local in sparq-solid
+    // (the dev-only conformance crate must not take sparq-solid as a dep — same
+    // constraint as SHACL/geo); the central scoreboard REPORTS them with their
+    // ratchet floors, kept in lock-step by `tests/scoreboard_floors.rs`. The floor
+    // is the scenario COUNT each corpus must cover (a corpus that silently shrinks is
+    // a coverage regression), exactly the in-source ratchet shape geo uses.
+    Suite {
+        label: "Solid WAC decision parity",
+        family: "Solid WAC",
+        runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_wac" },
+        ci_job: "solid-conformance",
+        ratchet_floor: 12,
+        floor_basis: "scenario",
+        note: "library-level allow/deny parity over minimal per-construct WAC .acl scenarios",
+    },
+    Suite {
+        label: "Solid ACP decision parity",
+        family: "Solid ACP",
+        runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_acp" },
+        ci_job: "solid-conformance",
+        ratchet_floor: 12,
+        floor_basis: "scenario",
+        note: "library-level allow/deny parity over minimal per-construct ACP ACR scenarios",
+    },
 ];
 
 /// Render the registry as one markdown scoreboard. This is a STATIC view of what
@@ -165,8 +197,9 @@ pub fn render_scoreboard() -> String {
         "The single index of EVERY conformance suite sparq ratchets, across crates. \
          Each suite has a pass-count (or pass+divergence) FLOOR that CI enforces and \
          that may only RISE. The per-suite detail reports are produced by the runners \
-         in the *run* column; this table is the consolidated map (sq-ncvq.16 — \
-         previously the SHACL + GeoSPARQL ratchets lived outside this scoreboard).\n"
+         in the *run* column; this table is the consolidated map (sq-ncvq.16 brought \
+         the SHACL + GeoSPARQL ratchets in; sq-j174 the Solid WAC + ACP ones — all \
+         previously lived outside this scoreboard).\n"
     );
     let _ = writeln!(
         md,

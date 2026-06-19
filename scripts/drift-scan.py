@@ -101,18 +101,18 @@ BENCH_EXEMPT_CRATES = frozenset(
 # Bench FAMILIES (leading id token) that the design (§5.D) accepts as
 # intentionally unfeatured on the capability dashboard: internal harness
 # runners, SPIKES, external-cost suites, and the raw ingest micro-benches.
-# [OPUS-4.8] sq-ncvq.16: crates whose crate-local conformance ratchet is now
-# CONSOLIDATED into the central sparq-conformance scoreboard registry
+# [OPUS-4.8] sq-ncvq.16 + sq-j174: crates whose crate-local conformance ratchet is
+# now CONSOLIDATED into the central sparq-conformance scoreboard registry
 # (crates/sparq-conformance/src/scoreboard.rs `SUITES`). Their runners stay
-# crate-local (they depend on sparq-shacl / sparq-geo, which the dev-only
-# conformance crate must not take on as deps), but the central scoreboard now
-# REPORTS them alongside SPARQL/inference with their ratchet floors, and a guard
+# crate-local (they depend on sparq-shacl / sparq-geo / sparq-solid, which the
+# dev-only conformance crate must not take on as deps), but the central scoreboard
+# now REPORTS them alongside SPARQL/inference with their ratchet floors, and a guard
 # test (crates/sparq-conformance/tests/scoreboard_floors.rs) keeps the floors in
 # lock-step. So these are no longer a `conformance-split` drift — the split the
 # §5.E finding flagged is closed. The scanner derives the live set from the
 # registry source (so adding a crate to `SUITES` auto-exempts it), falling back to
 # this literal set if the registry can't be read.
-CONFORMANCE_CONSOLIDATED_FALLBACK = frozenset({"sparq-shacl", "sparq-geo"})
+CONFORMANCE_CONSOLIDATED_FALLBACK = frozenset({"sparq-shacl", "sparq-geo", "sparq-solid"})
 
 DASHBOARD_EXEMPT_FAMILIES = frozenset(
     {

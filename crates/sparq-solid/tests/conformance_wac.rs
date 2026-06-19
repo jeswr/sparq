@@ -270,6 +270,17 @@ fn multi_agent_union() -> WacScenario {
         .expect(Expect::agent(ALICE).read(doc).is(Decision::Deny))
 }
 
+/// [OPUS-4.8] sq-j174 — the WAC conformance RATCHET FLOOR: the minimum number of
+/// scenarios the corpus must cover. May only RISE (add a scenario, raise the floor);
+/// a drop is a coverage regression and fails the parity test below. This `const` is
+/// the single enforced source of the floor, mirrored (and kept in lock-step) by the
+/// central conformance scoreboard registry
+/// (`crates/sparq-conformance/src/scoreboard.rs` `SUITES`, guard test
+/// `crates/sparq-conformance/tests/scoreboard_floors.rs`) and the `solid-conformance`
+/// CI job — exactly as `sparq-shacl` `BASELINE_PASS` / `sparq-geo`
+/// `OGC_RATCHET_FLOOR` are.
+const WAC_SCENARIO_FLOOR: usize = 12;
+
 /// The full corpus.
 fn corpus() -> Vec<WacScenario> {
     vec![
@@ -306,8 +317,17 @@ fn wac_conformance_corpus_decision_parity() {
         "WAC conformance mismatch(es) across {} scenarios / {total_decisions} decisions:\n{failures}",
         reports.len(),
     );
+    // [OPUS-4.8] sq-j174 — the RATCHET: the corpus must cover at least the floor of
+    // scenarios (it may only RISE). Printed in the SHACL/geo runner shape
+    // (`pass N / fail M (floor F)`) so the `solid-conformance` CI job can re-check
+    // it with the same belt-and-braces grep gate.
+    let pass = reports.len();
+    println!("WAC scenarios pass {pass} / fail 0 (floor {WAC_SCENARIO_FLOOR})");
+    assert!(
+        pass >= WAC_SCENARIO_FLOOR,
+        "WAC conformance scenario count regressed: {pass} < floor {WAC_SCENARIO_FLOOR}"
+    );
     // Guard against a corpus that silently checks nothing.
-    assert_eq!(reports.len(), 12, "expected 12 scenarios");
     assert!(
         total_decisions >= 40,
         "expected a substantive decision table, got {total_decisions}"

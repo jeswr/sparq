@@ -841,6 +841,59 @@ jobs:
             geo-conformance.out
             conformance-scoreboard.md
 
+  solid-conformance:
+    # [OPUS-4.8] sq-j174 — Solid WAC + ACP conformance RATCHET, promoted to a
+    # DEDICATED gating job so it is surfaced in the central conformance scoreboard
+    # alongside SPARQL / inference / SHACL / GeoSPARQL (it formerly ran only inside
+    # the generic `cargo test --workspace` shards, invisible as a conformance check).
+    # The ratchet is the in-source library-level decision-parity corpus in
+    # crates/sparq-solid/tests/conformance_wac.rs + conformance_acp.rs (NOT
+    # fixture-gated — no fetch needed): each runner asserts a scenario-count FLOOR
+    # (WAC_SCENARIO_FLOOR / ACP_SCENARIO_FLOOR) that may only RISE. This job runs
+    # both runners with --nocapture and re-checks the printed
+    # `<WAC|ACP> scenarios pass N / fail M (floor F)` line as the same
+    # belt-and-braces `>= floor` gate the SHACL/geo jobs use. Never lower the floor
+    # (raise WAC_SCENARIO_FLOOR / ACP_SCENARIO_FLOOR as the corpus grows).
+    name: Solid WAC/ACP conformance (ratchet — wac >= 12, acp >= 12)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Run Solid WAC + ACP decision-parity suites
+        # The runners assert their own pinned floors; capture the output so the grep
+        # gate below re-checks the scenario counts.
+        run: |
+          cargo test -p sparq-solid --test conformance_wac --test conformance_acp -- --nocapture \
+            | tee solid-conformance.out
+      - name: Enforce ratchet (scenario counts must not regress)
+        run: |
+          WAC_FLOOR=12
+          ACP_FLOOR=12
+          # runners print: "<WAC|ACP> scenarios pass <n> / fail <m> (floor <f>)"
+          WAC_PASS=$(grep -oE 'WAC scenarios pass [0-9]+ / fail' solid-conformance.out | grep -oE '[0-9]+' | head -1)
+          ACP_PASS=$(grep -oE 'ACP scenarios pass [0-9]+ / fail' solid-conformance.out | grep -oE '[0-9]+' | head -1)
+          echo "Solid WAC scenarios: ${WAC_PASS:-unknown} (floor $WAC_FLOOR); Solid ACP scenarios: ${ACP_PASS:-unknown} (floor $ACP_FLOOR)"
+          [ -n "$WAC_PASS" ] && [ "$WAC_PASS" -ge "$WAC_FLOOR" ] || { echo "::error::Solid WAC regressed below the ratchet (${WAC_PASS:-?} < $WAC_FLOOR)"; exit 1; }
+          [ -n "$ACP_PASS" ] && [ "$ACP_PASS" -ge "$ACP_FLOOR" ] || { echo "::error::Solid ACP regressed below the ratchet (${ACP_PASS:-?} < $ACP_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # [OPUS-4.8] sq-j174: render the ONE central scoreboard index (all suites +
+        # floors across crates) into this job's step summary, so the Solid job
+        # surfaces where it sits in the whole conformance picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: solid-conformance
+          path: |
+            solid-conformance.out
+            conformance-scoreboard.md
+
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
     # (W3C OWL WG test cases), the w3c/N3 community-group suite, and
