@@ -532,9 +532,11 @@ fn eval_modes_produce_identical_results() {
     let rebuild = run(EvalMode::Rebuild);
     let persistent = run(EvalMode::PersistentDict);
     let delta = run(EvalMode::Delta);
+    let snapshot = run(EvalMode::Snapshot);
     assert!(!rebuild.is_empty());
     assert_eq!(rebuild, persistent, "PersistentDict diverged from the rebuild baseline");
     assert_eq!(rebuild, delta, "Delta diverged from the rebuild baseline");
+    assert_eq!(rebuild, snapshot, "Snapshot diverged from the rebuild baseline");
 }
 
 /// Delta mode stays correct across overlay compactions (churn > window) and
@@ -566,6 +568,10 @@ fn delta_mode_compaction_and_multi_timestamp_eviction() {
         out
     };
     assert_eq!(run(EvalMode::Delta), run(EvalMode::Rebuild));
+    // [OPUS-4.8] (sq-j39) Snapshot shares Delta's live-graph maintenance (incl.
+    // the same overlay-compaction trigger and multi-timestamp eviction), so it
+    // too must track the rebuild baseline across many compactions.
+    assert_eq!(run(EvalMode::Snapshot), run(EvalMode::Rebuild));
 }
 
 /// [OPUS-4.8] PersistentDict dictionary compaction (sq-lhg): a long synthetic

@@ -59,7 +59,9 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
   `REGISTER … FROM NAMED WINDOW <w> ON <s> RANGE … STEP …`, and `ContinuousMultiQuery`
   joins across named windows on one synchronized event-time clock.
 - **Pluggable materialisation (`EvalMode`)** — `PersistentDict` (default, compacted
-  dictionary), `Rebuild` (v1 baseline), and `Delta`, all producing identical results.
+  dictionary), `Rebuild` (v1 baseline), `Delta` (one live graph, per-slide delta), and
+  `Snapshot` (one live graph + a cheap O(overlay) immutable point-in-time snapshot per
+  closed window), all producing identical results.
 
 ## 📚 Learn more
 

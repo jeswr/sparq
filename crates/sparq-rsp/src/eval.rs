@@ -52,6 +52,29 @@ pub enum EvalMode {
     /// the engine evaluation itself is cheap relative to an index rebuild.
     /// Like `PersistentDict`, the live graph's dictionary grows monotonically.
     Delta,
+    /// [OPUS-4.8] (sq-j39) The TRUE overlay-snapshot mode: identical per-slide
+    /// maintenance to [`Delta`](Self::Delta) — ONE live mutable graph evolved by
+    /// `Graph::apply_delta` over the set-semantic diff between consecutive
+    /// windows — but each closed window is evaluated over a cheap, IMMUTABLE
+    /// [`Graph::snapshot`](sparq_core::Graph::snapshot) of that live graph rather
+    /// than a borrow into it.
+    ///
+    /// The snapshot is `O(pending overlay)`, never `O(triples)`: the live
+    /// graph's compacted base (the six permutation indexes + the dictionary
+    /// arena) is `Arc`-shared into the snapshot, so only the small per-slide
+    /// delta is copied. The result is a logically-independent, point-in-time,
+    /// `Send + Sync` view of the window — unaffected by the next slide's
+    /// mutation — so unlike [`Delta`](Self::Delta) (whose `&Graph` borrow ties
+    /// the engine's read to the live graph and forbids retaining it) the engine
+    /// could hold or publish this graph across windows. That is what makes it
+    /// the production serving shape: keep one mutable master, hand out one cheap
+    /// immutable snapshot per closed window.
+    ///
+    /// Results are IDENTICAL to every other mode (pinned by the equivalence
+    /// tests). It is a thin wrapper over `Delta`'s maintenance, so its per-slide
+    /// cost is the same `O(changes)` plus one O(overlay) snapshot per window;
+    /// the snapshot itself adds no index rebuild.
+    Snapshot,
 }
 
 /// Compact the delta-mode overlay when the cumulative churn since the last
@@ -115,6 +138,15 @@ enum Materializer {
         /// Inserts + deletes applied since the last compaction.
         churn: usize,
     },
+    /// [OPUS-4.8] (sq-j39) Same live-graph maintenance as `Delta`; differs only
+    /// in that each closed window is evaluated over `graph.snapshot()` (an O(1)
+    /// immutable point-in-time view) rather than `&*graph`.
+    Snapshot {
+        window: WindowedStream<[Term; 3]>,
+        graph: Box<Graph>,
+        prev: Vec<[Term; 3]>,
+        churn: usize,
+    },
 }
 
 /// One windowed stream + one [`EvalMode`]: pushes elements, and surfaces every
@@ -139,6 +171,12 @@ impl WindowEval {
                 prev: Vec::new(),
                 churn: 0,
             },
+            EvalMode::Snapshot => Materializer::Snapshot {
+                window: WindowedStream::empty(spec),
+                graph: Box::new(Graph::from_parts(Dict::new(), Vec::new())),
+                prev: Vec::new(),
+                churn: 0,
+            },
         };
         WindowEval { mode, m }
     }
@@ -149,16 +187,18 @@ impl WindowEval {
 
     pub fn spec(&self) -> WindowSpec {
         match &self.m {
-            Materializer::Rebuild { window } | Materializer::Delta { window, .. } => window.spec(),
+            Materializer::Rebuild { window }
+            | Materializer::Delta { window, .. }
+            | Materializer::Snapshot { window, .. } => window.spec(),
             Materializer::PersistentDict { window, .. } => window.spec(),
         }
     }
 
     pub fn late_dropped(&self) -> u64 {
         match &self.m {
-            Materializer::Rebuild { window } | Materializer::Delta { window, .. } => {
-                window.late_dropped()
-            }
+            Materializer::Rebuild { window }
+            | Materializer::Delta { window, .. }
+            | Materializer::Snapshot { window, .. } => window.late_dropped(),
             Materializer::PersistentDict { window, .. } => window.late_dropped(),
         }
     }
@@ -181,9 +221,9 @@ impl WindowEval {
 
     pub fn push(&mut self, triple: [Term; 3], ts: u64) {
         match &mut self.m {
-            Materializer::Rebuild { window } | Materializer::Delta { window, .. } => {
-                window.push(triple, ts)
-            }
+            Materializer::Rebuild { window }
+            | Materializer::Delta { window, .. }
+            | Materializer::Snapshot { window, .. } => window.push(triple, ts),
             Materializer::PersistentDict { dict, window, .. } => {
                 let d = dict.as_mut().expect("dict is always restored after evaluation");
                 let ids = [d.intern(&triple[0]), d.intern(&triple[1]), d.intern(&triple[2])];
@@ -233,28 +273,25 @@ impl WindowEval {
             }
             Materializer::Delta { window, graph, prev, churn } => {
                 for w in take(window, flush) {
-                    // Set-semantic diff against the previous window: a triple
-                    // present at several timestamps counts once, so inserts /
-                    // deletes are computed over the DISTINCT triple sets.
-                    let cur: FxHashSet<&[Term; 3]> = w.triples.iter().map(|t| &t.triple).collect();
-                    let old: FxHashSet<&[Term; 3]> = prev.iter().collect();
-                    let inserts: Vec<[Term; 3]> =
-                        cur.iter().filter(|t| !old.contains(**t)).map(|t| (*t).clone()).collect();
-                    let deletes: Vec<[Term; 3]> =
-                        old.iter().filter(|t| !cur.contains(**t)).map(|t| (*t).clone()).collect();
-                    let next_prev: Vec<[Term; 3]> = cur.iter().map(|t| (*t).clone()).collect();
-                    drop(cur);
-                    drop(old);
-                    *prev = next_prev;
-                    *churn += inserts.len() + deletes.len();
-                    graph.apply_delta(&inserts, &deletes)?;
-                    // Fold the overlay back into the base before it outgrows
-                    // the live window (overlay rows are re-sorted per scan).
-                    if *churn >= graph.len().max(MIN_COMPACT_CHURN) {
-                        graph.compact()?;
-                        *churn = 0;
-                    }
+                    apply_window_delta(&w, graph, prev, churn)?;
+                    // Delta hands the engine a direct borrow into the live graph:
+                    // it is read, then the next slide mutates it in place.
                     f(w.start, w.end, graph)?;
+                }
+            }
+            Materializer::Snapshot { window, graph, prev, churn } => {
+                for w in take(window, flush) {
+                    apply_window_delta(&w, graph, prev, churn)?;
+                    // [OPUS-4.8] (sq-j39) The true overlay-snapshot step: evaluate
+                    // this window over a cheap O(overlay) IMMUTABLE point-in-time
+                    // view of the live graph, not a borrow into it. The snapshot
+                    // `Arc`-shares the compacted base and copies only the small
+                    // pending delta, so it is logically independent of the next
+                    // slide's `apply_delta` — the engine (or the caller, through
+                    // the callback) could retain or publish it across windows. It
+                    // derefs to `&Graph`, so `f`'s `&Graph` contract is unchanged.
+                    let snap = graph.snapshot();
+                    f(w.start, w.end, &snap)?;
                 }
             }
         }
@@ -357,6 +394,41 @@ fn remap_id(id: Id, remap: &FxHashMap<Id, Id>) -> Id {
     }
 }
 
+/// [OPUS-4.8] (sq-j39) One slide of the live-graph maintenance shared by
+/// [`EvalMode::Delta`] and [`EvalMode::Snapshot`]: diff the closed window `w`
+/// against the previous window (`prev`) under RDF set semantics — a triple
+/// present at several timestamps counts once, so inserts/deletes are computed
+/// over the DISTINCT triple sets — apply the diff to the live `graph`, advance
+/// the diff base, and fold the overlay back into the base once cumulative churn
+/// outgrows the live window (overlay rows are re-sorted per scan). After this
+/// returns, `graph` holds exactly the distinct triples of `w`; the two modes
+/// differ only in WHAT they then hand the engine (a live borrow vs an immutable
+/// snapshot).
+fn apply_window_delta(
+    w: &Window<[Term; 3]>,
+    graph: &mut Graph,
+    prev: &mut Vec<[Term; 3]>,
+    churn: &mut usize,
+) -> Result<(), String> {
+    let cur: FxHashSet<&[Term; 3]> = w.triples.iter().map(|t| &t.triple).collect();
+    let old: FxHashSet<&[Term; 3]> = prev.iter().collect();
+    let inserts: Vec<[Term; 3]> =
+        cur.iter().filter(|t| !old.contains(**t)).map(|t| (*t).clone()).collect();
+    let deletes: Vec<[Term; 3]> =
+        old.iter().filter(|t| !cur.contains(**t)).map(|t| (*t).clone()).collect();
+    let next_prev: Vec<[Term; 3]> = cur.iter().map(|t| (*t).clone()).collect();
+    drop(cur);
+    drop(old);
+    *prev = next_prev;
+    *churn += inserts.len() + deletes.len();
+    graph.apply_delta(&inserts, &deletes)?;
+    if *churn >= graph.len().max(MIN_COMPACT_CHURN) {
+        graph.compact()?;
+        *churn = 0;
+    }
+    Ok(())
+}
+
 fn take<T: Clone>(window: &mut WindowedStream<T>, flush: bool) -> Vec<Window<T>> {
     if flush {
         window.flush()
@@ -376,4 +448,96 @@ fn materialize(w: &Window<[Term; 3]>) -> Graph {
         .map(|t| [dict.intern(&t.triple[0]), dict.intern(&t.triple[1]), dict.intern(&t.triple[2])])
         .collect();
     Graph::from_parts(dict, ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdf::NamedNode;
+    use sparq_core::GraphSnapshot;
+
+    fn triple(s: &str, p: &str, o: &str) -> [Term; 3] {
+        [
+            NamedNode::new_unchecked(format!("http://ex/{s}")).into(),
+            NamedNode::new_unchecked(format!("http://ex/{p}")).into(),
+            NamedNode::new_unchecked(format!("http://ex/{o}")).into(),
+        ]
+    }
+
+    /// [OPUS-4.8] (sq-j39) The graph `EvalMode::Snapshot` hands the engine per
+    /// closed window is a TRUE point-in-time IMMUTABLE view of the live master,
+    /// logically independent of every later slide — that is the whole point of
+    /// the mode (vs `Delta`'s live borrow). Test it on the REAL internal graph:
+    /// the `eval_closed` callback receives that snapshot as `&Graph`, so calling
+    /// `Graph::snapshot()` on it yields an owned, independent copy we move into a
+    /// `Vec`. Only AFTER the entire stream has driven the live master through
+    /// many `apply_delta` slides (each window has a distinct, growing vocabulary,
+    /// crossing the overlay-compaction threshold) do we check each captured
+    /// snapshot: it must STILL read exactly its own window's triple count. A view
+    /// that aliased the live store would report the FINAL window for every
+    /// capture; a `Delta`-style live borrow could not be retained past the
+    /// callback at all.
+    #[test]
+    fn snapshot_mode_yields_point_in_time_independent_views() {
+        let spec = WindowSpec::time(10, 10); // tumbling: disjoint windows
+        let mut ev = WindowEval::new(spec, EvalMode::Snapshot);
+
+        let mut captured: Vec<GraphSnapshot> = Vec::new();
+        let mut expected: Vec<usize> = Vec::new();
+
+        // Window k holds k+1 DISTINCT triples, all timestamped at the window's
+        // start `k*10` so they stay inside `[k*10, k*10+10)` (the distinctness
+        // is in the object, not the timestamp). The growing per-window size
+        // means the live master changes every slide and crosses
+        // MIN_COMPACT_CHURN, so the graph actually compacts mid-stream — and a
+        // stale view would read the wrong (final) count.
+        let windows = 40u64;
+        for k in 0..windows {
+            let n = k + 1;
+            for j in 0..n {
+                ev.push(triple("s", "p", &format!("o{k}_{j}")), k * 10);
+            }
+            expected.push(n as usize);
+        }
+
+        {
+            let captured = &mut captured;
+            ev.eval_closed(true, &mut |_start, _end, graph: &Graph| {
+                // Capture an OWNED snapshot of the exact graph the engine sees.
+                captured.push(graph.snapshot());
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        assert_eq!(captured.len(), expected.len(), "one snapshot per closed window");
+        let counts: Vec<usize> = captured.iter().map(|s| s.len()).collect();
+        assert_eq!(counts, expected, "a captured snapshot drifted from its window's content");
+        // The windows genuinely differ in size, so a stale/aliasing view would
+        // be caught (every capture would read the last window's count).
+        assert!(counts.windows(2).all(|w| w[0] < w[1]), "windows strictly grow, so views must differ");
+    }
+
+    /// `Snapshot` mode produces the same per-window triple counts as `Delta`
+    /// (and so the same content) — they share the live-graph maintenance and
+    /// differ only in borrow-vs-snapshot at the hand-off.
+    #[test]
+    fn snapshot_and_delta_agree_per_window() {
+        let spec = WindowSpec::time(10, 5); // sliding overlap
+        let counts = |mode: EvalMode| -> Vec<usize> {
+            let mut ev = WindowEval::new(spec, mode);
+            for ts in 0..40u64 {
+                ev.push(triple("s", "p", &format!("o{}", ts % 6)), ts);
+            }
+            let mut out = Vec::new();
+            ev.eval_closed(true, &mut |_s, _e, g: &Graph| {
+                out.push(g.len());
+                Ok(())
+            })
+            .unwrap();
+            out
+        };
+        assert_eq!(counts(EvalMode::Snapshot), counts(EvalMode::Delta));
+        assert!(!counts(EvalMode::Snapshot).is_empty());
+    }
 }

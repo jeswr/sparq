@@ -123,6 +123,11 @@ fn run_single_window_gate(sc: &Scenario, mode: EvalMode, script: &[([Term; 3], u
         EvalMode::Rebuild => "rebuild",
         EvalMode::PersistentDict => "pdict",
         EvalMode::Delta => "delta",
+        // [OPUS-4.8] (sq-j39) Snapshot is observationally identical to Delta
+        // (same per-window content), and the 4-way equivalence is pinned by the
+        // crate tests; the deterministic gate's golden output keeps the original
+        // three tags, so Snapshot is not added to the gate's iteration loop.
+        EvalMode::Snapshot => "snapshot",
     };
     let mut q = ContinuousQuery::register(sc.sparql, sc.spec)
         .expect("valid query")
