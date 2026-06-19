@@ -696,3 +696,351 @@ flag (the maintainer should green-light auto-arm going live).
 - **OQ-5.** Kill-switch ergonomics: a sentinel file vs a `needs:human-stop` bead vs
   both — which does the maintainer want as the canonical "stop the autonomy now"
   control?
+
+## 12. Multi-account agent fan-out — spilling overflow to a SECOND account `[OPUS-4.8]`
+
+> **Status:** DESIGN ONLY (bead sq-fi8v). The implementation needs a **second account
+> credential** the maintainer does not yet supply — that makes it `needs:user`. This
+> section designs the routing + isolation so that turning it on is a **clean
+> credential-flip** (§12.6): provide one secret, set one env var, and the spill path
+> activates with **zero code changes**. Until then the scheduler runs single-account
+> exactly as §§1–11 describe; account-B routing is dormant (the spill predicate is
+> always-false when the credential is absent). This is the standing answer to the
+> recurring **weekly-limit stall** the orchestration tick warns about — instead of
+> idling the fleet when account-A nears its cap, route the overflow to account-B.
+
+### 12.1 The problem + an HONEST correction to the brief's framing
+
+The brief asks to "launch headless `claude -p` subprocesses under a SEPARATE account
+credential … to scale past single-session **weekly** limits." Two corrections, both
+verified against the live harness rather than taken on faith:
+
+* **Verified (the mechanism is real).** The installed CLI is **`claude` v2.1.177** and
+  exposes headless print mode `-p` / `--print` plus **`--max-budget-usd <amount>`** (the
+  CLI help states the budget flag "only works with `--print`"). So a cost-capped
+  headless subprocess — `claude -p "<brief>" --max-budget-usd N …` — is a real,
+  callable primitive today, not aspirational. This section's spill mechanism is
+  therefore buildable; only the *second credential* is missing.
+* **Correction (what "limit" means + why a 2nd account, not a 2nd session).** The cap
+  the orchestration tick actually trips is the **account/plan usage limit** (the
+  weekly/whatever-window quota on the maintainer's plan), **not** a per-*session* limit.
+  A second *session* on the **same** account shares that same pooled quota, so it buys
+  nothing once the account is near its cap — it would just hit the same wall in
+  parallel. The only thing that genuinely adds headroom is a **distinct billing
+  identity**: a second Anthropic account / API key, or a 3P provider (Bedrock / Vertex /
+  Foundry) account, whose usage is metered **separately**. So the brief's instinct is
+  right but the precise framing is "route overflow to a **separately-metered account**,"
+  and the mechanism is a headless subprocess that authenticates as that other identity.
+  The headroom is bounded by **account-B's own plan limits** — this is *more capacity*,
+  not *unlimited* capacity (honest: it does not make the limit disappear, it adds a
+  second bucket).
+
+Why a subprocess and not the in-process `agent()` fan-out from §3: a Workflow `agent()`
+call (or any sub-agent the orchestrator spawns) runs under **this session's** credential
+— the *same* account that is near its cap. Authenticating as a *different* account from
+inside one process is fragile (the credential is read from the environment / settings at
+client construction; see §12.3). Spawning a **fresh `claude -p` process with a different
+environment block** is the clean isolation boundary: the child reads *its* env, never the
+parent's. So account-B work is always an OS subprocess, never an in-process agent.
+
+### 12.2 Where this slots into the scheduler loop (the routing point)
+
+The placement bin-packer of §4 gains a **third tier** beyond LOCAL and EC2: **ACCOUNT-B
+(headless-spill)**. The routing decision lives in the same `workload-triage` /
+`placeOnFarm` step, gated by a single spill predicate evaluated each pass:
+
+```text
+spill_to_B  ⇐  ACCOUNT_B_ENABLED                      // credential present (§12.6)
+            ∧  near_weekly_limit(account_A)            // §12.4 detector
+            ∧  frontier_nonempty_after_local_ec2       // there is overflow to place
+            ∧  not cost_ceiling_hit(account_B)         // §12.5 per-run + cumulative cap
+```
+
+When `spill_to_B` holds, the driver routes the **next eligible bead(s)** (LIGHT/medium,
+LOCAL-tier work — see §12.7 eligibility) to a headless `claude -p` subprocess
+authenticated as account-B, instead of launching an account-A agent. Account-A keeps
+draining the work it already holds; only *new* dispatch spills. This mirrors §3.1's
+"refill as agents land" discipline — B is just another sustainable lane with its own
+ceiling. Every spill decision is written to the §7.1 decision log
+(`event:"place"`, `decision:"dispatch ACCOUNT-B"`, `reason:"account-A near weekly cap;
+B enabled; under B cost ceiling"`) and the §7.2 STATUS surface gains a
+`acctB n ($x/cap)` field so the maintainer can see spill at a glance.
+
+### 12.3 Credential-isolation model (never co-mingled) — the load-bearing safety property
+
+The hard rule: **account-A and account-B credentials never share a process environment,
+never appear in the same settings file, and are never both resolvable at once.** Each
+headless child gets a **purpose-built, minimal environment block** containing exactly one
+identity. Verified credential-resolution facts from the CLI help (`claude --help`,
+v2.1.177) that this model relies on:
+
+* **First-party Anthropic auth is strictly `ANTHROPIC_API_KEY` (or `apiKeyHelper` via
+  `--settings`); OAuth and the keychain are *never* read in headless `-p` mode.** That is
+  exactly what we want for a subprocess: auth is a pure function of the child's
+  environment, with no ambient OAuth/keychain leakage from the parent session.
+* **3P providers (Bedrock / Vertex / Foundry) use their own credentials** (e.g. the AWS
+  credential chain for Bedrock, ADC for Vertex). So an account-B that is a *cloud
+  provider* is isolated by giving the child *only* that provider's env vars (and
+  `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` as applicable), with
+  `ANTHROPIC_API_KEY` **unset** in the child.
+* **A documented foot-gun we must defend against (from the auth precedence rules):** a
+  *set* `ANTHROPIC_API_KEY` shadows every other credential source, and an **empty**
+  `ANTHROPIC_API_KEY=""` still *wins its precedence slot* and authenticates with an empty
+  key (a guaranteed-failing request, not a fall-through). So the child env must either
+  carry account-B's key in `ANTHROPIC_API_KEY` **or have the variable truly unset**
+  (`env -u ANTHROPIC_API_KEY` / not present in the constructed block) — never set-to-empty.
+
+The isolation is built as a **launcher that constructs the child environment from
+scratch** rather than inheriting the parent's:
+
+```bash
+# scripts/spill-launch.sh  — intended Phase B launcher. [OPUS-4.8]
+# Builds a MINIMAL env block for account-B; never inherits account-A's credential.
+# Reads account-B's secret from a SECRET STORE, not from a file in the repo (§12.6).
+set -euo pipefail
+brief_file="$1"; budget_usd="$2"; worktree="$3"          # see §12.4 caller
+
+# 1. Resolve account-B's secret name (env var NAME only; value comes from the store).
+secret_name="${SPARQ_ACCT_B_SECRET_NAME:?account-B not configured}"   # e.g. "SPARQ_ACCT_B_ANTHROPIC_API_KEY"
+acct_b_key="$(load_secret "$secret_name")"               # from keychain/SM/CI secret — NEVER printed, NEVER logged
+
+# 2. Run the child with a SCRUBBED, single-identity environment.
+#    `env -i` starts empty; we add back only PATH/HOME and the ONE account-B credential.
+#    --max-budget-usd is the hard per-run cap (§12.5).
+env -i \
+    PATH="$PATH" HOME="$HOME" \
+    ANTHROPIC_API_KEY="$acct_b_key" \
+    claude -p "$(cat "$brief_file")" \
+      --max-budget-usd "$budget_usd" \
+      --output-format json \
+      --permission-mode acceptEdits \
+      --add-dir "$worktree" \
+    > "$worktree/.spill-run.json" 2>"$worktree/.spill-run.err"
+unset acct_b_key                                          # scrub from the launcher's own env
+```
+
+Key isolation invariants (all enforced by the launcher, none relying on the model):
+
+1. **`env -i` (start-from-empty) + explicit allowlist** guarantees account-A's
+   `ANTHROPIC_API_KEY` (and any OAuth / `ANTHROPIC_AUTH_TOKEN`) is **physically absent**
+   from the child — not merely overridden. This is the never-co-mingled property made
+   mechanical, and it is the reason a subprocess (not an in-process agent) is required.
+2. **The secret value is loaded at launch from a secret store and lives only in a shell
+   variable for the duration of the `env` call**, then is `unset`. It is never written to
+   a file in the repo, never echoed, never passed on a visible command line as a literal
+   (it's an env var, which does not appear in `ps`/argv), and never committed.
+3. **For a 3P-provider account-B**, swap the `ANTHROPIC_API_KEY=` line for the provider's
+   own credential vars (`AWS_*` + `CLAUDE_CODE_USE_BEDROCK=1`, or the Vertex/Foundry
+   equivalents) and **omit `ANTHROPIC_API_KEY` entirely** — the provider auth path is
+   self-contained per the verified precedence rules.
+4. **One child = one identity = one worktree** (§12.5). No child ever sees two accounts.
+
+### 12.4 Detecting the approaching weekly limit (the spill trigger)
+
+The detector `near_weekly_limit(account_A)` must be **conservative** (spill *before* the
+wall, not after) and must **not** itself burn account-A quota probing. Inputs, in
+priority order:
+
+* **The orchestration tick's own weekly-limit warning** is the *primary* signal — this
+  section is explicitly its standing answer. When the tick raises that warning, the
+  detector returns true. (The tick already surfaces "approaching weekly limit"; the
+  scheduler subscribes to it rather than re-deriving it.)
+* **A rate-limit / usage-exhaustion observation from account-A's own work** is the
+  *secondary* signal: when an account-A `claude` run returns a usage-limit / quota error
+  (the plan-limit analogue of the API's 429 `rate_limit_error`), the detector flips to
+  true for the rest of the window and the driver stops placing *new* account-A work
+  (in-flight account-A pipelines finish; §12.7).
+* **An explicit maintainer override** (`scripts/.scheduler/SPILL` sentinel, or a
+  `needs:spill` bead label) forces spill on regardless of the detector — the manual
+  counterpart to the §7.3 PAUSE/KILL controls.
+
+Honest caveat: there is **no programmatic plan-usage meter** exposed to the session (the
+usage-aware-shutdown memory note records exactly this — the plan meter is not pollable).
+So the detector is **event-driven** (tick warning + observed exhaustion), **not** a
+percentage gauge. The design does not pretend to read a remaining-quota number it cannot
+read; it reacts to the warning the harness *does* emit and to observed limit errors. This
+is the same "no daemon / event-driven" honesty as §1.3.
+
+### 12.5 Per-run `--max-budget-usd` cost cap + cumulative ceiling
+
+Two independent caps, both HARD, mirroring §4.3's EC2 ceiling discipline:
+
+* **Per-run cap (verified flag).** Every `claude -p` spill child is launched with
+  **`--max-budget-usd <amount>`** (the real, `--print`-gated flag verified in v2.1.177).
+  This bounds the **dollar spend of a single run** — the model stops when the run's API
+  spend would exceed the cap. Default conservative (e.g. a small per-bead cap; exact value
+  is OQ-7), tunable per tier. A LIGHT docs bead gets a smaller cap than a medium feature
+  bead. This is the blast-radius bound on any single mis-estimated spill.
+* **Cumulative daily ceiling (driver-enforced).** The driver tracks total account-B spend
+  this window (summing each child's reported spend from its `--output-format json`
+  result) against a `SCHED_ACCT_B_USD_DAY` ceiling. When cumulative B spend would breach
+  it, `cost_ceiling_hit(account_B)` returns true and the spill predicate (§12.2) goes
+  false — no further B children launch this window (account-A in-flight work continues).
+  This is the cost analogue of the §4.3 "the farm refuses a lease that would breach
+  ≤ $5/day" rule: **a ceiling breach means "do not spill," never "spill anyway."**
+
+Because `--max-budget-usd` is enforced by the child process itself, the per-run cap holds
+even if the driver crashes mid-run (the child still stops at its cap) — defence in depth,
+same shape as the §4.3 ≤ 45-min watchdog.
+
+**Honesty boundary (no perf/cost numbers baked in).** This section deliberately states
+**no concrete dollar figures** for the caps — they are configuration the maintainer sets
+(OQ-7), and any number measured on the work box is NON-canonical (the EC2/work-box rule).
+The doc gives the *mechanism* and the *ceiling discipline*, not a canonical price.
+
+### 12.6 EXACTLY what the maintainer must provide to activate it (the credential-flip)
+
+This is the `needs:user` step. Activation is **one secret + one env var name**, with
+**zero code changes** — the spill path is built dormant and flips live when the
+credential is present:
+
+1. **Provision the second identity.** Either (a) a second Anthropic account / API key
+   (a distinct billing identity — *not* a second key on the same account, which shares the
+   quota and buys no headroom — §12.1), or (b) a 3P-provider account (Bedrock / Vertex /
+   Foundry) with its own credentials.
+2. **Store the secret in a SECRET STORE — never in the repo.** Put account-B's key (or the
+   provider credential set) in the maintainer's chosen secret store: the OS keychain, a
+   secrets manager, or — for CI — a **GitHub Actions secret**. The repo holds **only the
+   secret's NAME**, never its value. Documented secret-NAME convention (the value is never
+   committed and this doc, in a public repo, contains no key):
+   * **Anthropic account-B:** secret name **`SPARQ_ACCT_B_ANTHROPIC_API_KEY`**, surfaced to
+     the launcher via the indirection var **`SPARQ_ACCT_B_SECRET_NAME`** (so the launcher
+     reads *which* secret to load, never an inline value).
+   * **Bedrock account-B:** the standard AWS credential env set (`AWS_ACCESS_KEY_ID`,
+     `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`) plus
+     `CLAUDE_CODE_USE_BEDROCK=1`; **Vertex:** ADC + `CLAUDE_CODE_USE_VERTEX=1`. Same rule:
+     names/flags live in config, values live in the store.
+3. **Flip the enable flag.** Set **`SPARQ_ACCT_B_ENABLED=1`** (the `ACCOUNT_B_ENABLED`
+   predicate input of §12.2). With it unset / `0`, the spill predicate is always false and
+   the scheduler behaves exactly as §§1–11 (single-account) — verified by a unit test that
+   asserts no `claude -p` child is ever launched when the flag is off.
+4. **(Optional) set the caps.** `SCHED_ACCT_B_USD_DAY` (cumulative ceiling, §12.5) and a
+   per-tier `--max-budget-usd` default; both have conservative built-in defaults so the
+   flip is safe even if the maintainer sets neither.
+
+That is the entire activation: **provide the secret to the store, set
+`SPARQ_ACCT_B_SECRET_NAME` (or the provider vars) + `SPARQ_ACCT_B_ENABLED=1`.** No code
+edit, no rebuild — a clean credential-flip. The doc **never hardcodes or prints any key**
+(this is a public repo); it documents only NAMES and the flip procedure.
+
+### 12.7 git + worktree coordination — account-B agents must not collide with account-A
+
+Account-B children are ordinary worktree agents from git's point of view; the collision
+guard is the **same conflict-partition the §1.4 frontier already enforces**, extended so
+that the *account dimension* never overlaps on a bead:
+
+* **One bead → one worktree → one account.** A spill child gets its **own fresh git
+  worktree** (the launcher's `--add-dir "$worktree"` + a `git worktree add` for a branch
+  named, e.g., `acctB/<bead-id>`), exactly as an account-A agent does. The
+  in-flight-reservation set of §1.4 (open PR or unpushed worktree branch) **already**
+  subtracts that bead from the frontier, so account-A can never simultaneously pick a bead
+  that a B child holds. **No bead is ever worked by both accounts at once** — the existing
+  reservation is the guarantee; the account dimension is just metadata on the reservation.
+* **The conflict-partition (§1.4) is applied across the COMBINED A+B in-flight set.** A B
+  child counts against the ≤ 1-per-crate / server+site→1 partition exactly like an A
+  agent. Two beads touching one crate's source never co-launch *regardless of which
+  account* runs them — the partition is account-agnostic, so a B child on `sparq-core` and
+  an A agent on `sparq-core` cannot both be live. This reuses the sq-6ip4
+  primary-code-crate inference verbatim; nothing new is needed for safety.
+* **B children obey the same merge gates (§6).** A B child opens a normal PR on its
+  `acctB/<bead-id>` branch; that PR passes through **adversarial-verify**, the
+  **`sparq-perf-reviewer` PreToolUse hook**, and **`ci-summary`** identically — the trust
+  model does not change because the *author* was a different account. The decision log
+  records the authoring account so a post-mortem can attribute work, but arming is
+  governed by verify-clean + non-perf exactly as in §6.
+* **Reconciliation + idempotency (§3.4) extends to B.** The single-flight lock,
+  `resumeFromRunId` reconciliation, and the worktree-GC sweep treat `acctB/*` branches the
+  same as account-A branches — a resume never re-dispatches a bead a B child already holds
+  (its worktree branch has unpushed commits → reserved). Orphaned B children are reaped
+  the same way orphaned EC2 leases are (PID + worktree-branch reconciliation at re-kick).
+* **API-rate-limit fleet cap is PER-ACCOUNT.** The ~10-concurrent ceiling (§1.4) is a
+  *per-account* throttle, so account-B has its **own** sustainable-fleet budget. Spilling
+  to B therefore genuinely widens total throughput (A's fleet + B's fleet) rather than
+  reshuffling a single shared budget — this is the actual scaling win, bounded by B's own
+  plan limits (§12.1).
+
+Eligibility (which beads spill): **LOCAL-tier (LIGHT/medium) beads** are the natural spill
+candidates — a headless `claude -p` child runs on the same work box and is cheapest to
+coordinate. HEAVY/EC2 beads stay on the §4 EC2 path (account identity is orthogonal to
+*where* the compute runs; a B child could in principle drive an EC2 lease, but Phase B
+scopes spill to LOCAL-tier to keep the first cut simple — OQ-8). Wall-clock-sensitive
+**benchmarks never spill** (the NON-canonical / quiet-box rules of §5 are unchanged).
+
+### 12.8 Honest risks + guards specific to multi-account spill
+
+* **The limit does not disappear — it doubles the bucket.** Account-B has its *own* plan
+  limit; spill adds a second metered bucket, it does not grant unlimited capacity. When
+  *both* near their caps, the scheduler is genuinely out of headroom and falls back to the
+  §3.2 frontier-drains / idle behaviour. *Stated plainly so no one over-claims.*
+* **Credential mishandling is the top risk.** *Guards:* `env -i` scrubbed child env
+  (§12.3); secret loaded from a store, never the repo; value never logged / echoed / argv'd;
+  truly-unset (never empty) `ANTHROPIC_API_KEY`; one-identity-per-child; a CI check that
+  greps the repo (and this doc) for anything key-shaped and fails the build (composes with
+  the existing code-scanning-at-zero posture).
+* **Cost runaway on B.** *Guards (defence in depth):* per-run `--max-budget-usd` enforced
+  by the child itself; driver-enforced cumulative `SCHED_ACCT_B_USD_DAY` ceiling that flips
+  the spill predicate off; both independent of the (fallible) tier estimate; the §7.3
+  KILL switch reaps B children alongside A work.
+* **Detector false-negative (spill too late).** If the detector misses the warning,
+  account-A simply hits its wall and the §12.4 secondary signal (observed exhaustion
+  error) flips spill on — late, but it recovers. False-*positive* (spill too early) just
+  spends a little B budget on work A could have done; bounded by the B cost ceiling.
+* **Wrong-account attribution in the audit trail.** *Guard:* the decision log (§7.1)
+  records the authoring account on every launch / arm so spill is always attributable; the
+  STATUS one-liner shows the live B fleet + spend.
+* **Verify gate is still an LLM (§8).** Unchanged — B's PRs pass the *same* independent
+  gates (adversarial-verify, roborev's non-Anthropic reviewer, `ci-summary`, the perf
+  hook); the authoring account changes nothing about the trust anchors.
+
+### 12.9 Phased plan (each phase = a future bead under the scheduler epic)
+
+These extend the §10 epic; they depend on the single-account loop (§10 Phase 4) existing
+first, but the **design** is complete now and activation is gated only on the
+`needs:user` credential.
+
+* **Phase B1 — spill launcher + credential-isolation harness.** Build
+  `scripts/spill-launch.sh` (§12.3): `env -i` scrubbed single-identity child,
+  secret-from-store loader, `claude -p --max-budget-usd … --output-format json` invocation,
+  result / err capture. Unit-test the isolation invariants with a **fake / sentinel key**
+  (no real credential): assert the child env contains exactly one identity, that
+  account-A's key is absent, and that `SPARQ_ACCT_B_ENABLED` unset ⇒ no child is launched.
+  Depends on: §10 Phase 1. Unblocks: B2.
+* **Phase B2 — weekly-limit detector + spill predicate.** Implement
+  `near_weekly_limit(account_A)` (§12.4: tick-warning subscription + observed-exhaustion
+  secondary + manual `SPILL` sentinel) and the §12.2 spill predicate, gated by
+  `ACCOUNT_B_ENABLED`. Wire into the `workload-triage` / `placeOnFarm` routing point as the
+  third (ACCOUNT-B) tier. Depends on: B1, §10 Phase 4. Unblocks: B3.
+* **Phase B3 — cost caps + cumulative ceiling.** Per-run `--max-budget-usd` defaults per
+  tier; driver-side cumulative `SCHED_ACCT_B_USD_DAY` tracking from child JSON results;
+  ceiling flips the spill predicate off. Depends on: B2. Unblocks: B4.
+* **Phase B4 — worktree / PR coordination + reconciliation.** `acctB/<bead-id>` worktrees,
+  combined-set conflict-partition (§12.7), B-author attribution in the decision log,
+  resume / orphan reconciliation of `acctB/*`. Depends on: B2 (and §10 Phase 5 for the
+  shared arm path). Unblocks: B5.
+* **Phase B5 — credential-flip activation (`needs:user`).** The maintainer provides the
+  second credential to the secret store and sets `SPARQ_ACCT_B_SECRET_NAME` (or the 3P
+  provider vars) + `SPARQ_ACCT_B_ENABLED=1` (§12.6). No code change — turn-key flip;
+  observe one live spill run end-to-end (verify-clean PR armed) before relying on it.
+  Depends on: B1–B4 and the credential. Closes the multi-account extension.
+
+Suggested labels: `scheduler`, `multi-account`, plus **`needs:user` on Phase B5** (the
+credential is the gate).
+
+### 12.10 Open questions for the maintainer (multi-account)
+
+* **OQ-6 (blocking B5).** Which account-B identity — a **second Anthropic account / API
+  key**, or a **3P provider** (Bedrock / Vertex / Foundry)? This sets which env block the
+  launcher constructs (§12.3) and which secret name to provision (§12.6). (Reminder: a
+  second key on the *same* account shares the quota and adds no headroom — §12.1.)
+* **OQ-7.** The cost caps: the per-run `--max-budget-usd` default(s) per tier and the
+  cumulative `SCHED_ACCT_B_USD_DAY` ceiling. The design states the mechanism; the dollar
+  values are the maintainer's policy (no canonical number is baked into the doc).
+* **OQ-8.** Spill eligibility: LOCAL-tier only for the first cut (§12.7), or should an
+  account-B child also be allowed to drive an EC2 lease (account identity is orthogonal to
+  compute location, but it widens the first implementation)?
+* **OQ-9.** Detector aggressiveness: how early before the weekly wall should spill engage
+  — strictly on the tick's warning, or also a maintainer-set earlier trigger? (No pollable
+  quota meter exists — §12.4 — so this is about which *event* trips it, not a percentage.)
+* **OQ-10.** Secret-store choice for the activation step: OS keychain, a secrets manager,
+  or GitHub Actions secret (for a CI-driven scheduler)? This decides what `load_secret`
+  binds to in `spill-launch.sh`.
