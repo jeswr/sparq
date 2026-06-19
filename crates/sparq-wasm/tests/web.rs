@@ -468,6 +468,42 @@ mod serialize {
             "an unrecognised format must return Err, not panic"
         );
     }
+
+    // ---- [OPUS-4.8] sq-ixc3.5: the JSON-LD serialise-out path, in real wasm ----
+
+    /// Pretty JSON-LD through the wasm `Store::serialize`, run in a genuine wasm32 runtime,
+    /// is byte-identical to the engine writer it delegates to
+    /// (`graph_to_jsonld_pretty_with`) — the load-bearing parity invariant proved across
+    /// the JS boundary, not just natively. Exercises all three forms.
+    #[wasm_bindgen_test]
+    fn serialize_jsonld_pretty_matches_engine() {
+        use sparq_engine::serialize::{
+            default_prefixes, graph_to_jsonld_pretty_with, JsonLdForm, JsonLdPrettyOptions,
+        };
+        use sparq_core::Graph;
+        let store = Store::load(DATA, "turtle").unwrap();
+        let g = Graph::load_str(DATA, "turtle").unwrap();
+        let opts = JsonLdPrettyOptions {
+            indent: "  ".to_string(),
+        };
+        for (fmt, form) in [
+            ("jsonld", JsonLdForm::Expanded),
+            ("jsonld-expanded", JsonLdForm::Expanded),
+            ("jsonld-flattened", JsonLdForm::Flattened),
+            ("jsonld-compacted", JsonLdForm::Compacted),
+        ] {
+            let got = store
+                .serialize(fmt, true, Some("  ".to_string()), true)
+                .unwrap();
+            let want = graph_to_jsonld_pretty_with(&g, form, &default_prefixes(), &opts);
+            assert_eq!(got, want, "wasm pretty JSON-LD ({fmt}) must equal the engine output");
+            assert!(got.contains('\n'), "pretty JSON-LD is indented: {got}");
+        }
+        // The compacted form carries a prefix `@context`; expanded does not — a quick
+        // shape check that the form selection actually reached the writer.
+        let compacted = store.serialize("jsonld-compacted", true, None, true).unwrap();
+        assert!(compacted.contains("@context"), "compacted has @context: {compacted}");
+    }
 }
 
 // ---- [OPUS-4.8] sq-yqi1 (#162): the opt-in SHACL `validate` binding, in real wasm ----
