@@ -10,6 +10,11 @@ pub mod backend;
 // [OPUS-4.8] (sq-7hx6) Filtered-ANN pre-filter vs post-filter cost model — `filtered-ann` only.
 #[cfg(feature = "filtered-ann")]
 pub mod cost;
+// [OPUS-4.8] (sq-pi44) Incremental add/remove/update of vectors against a finalized store via an
+// in-RAM delta sidecar (+ `compact`) — `delta` feature only. Additive and dependency-free; the
+// default build carries no delta code.
+#[cfg(feature = "delta")]
+pub mod delta;
 pub mod diskann;
 pub mod embed;
 #[cfg(feature = "filtered-ann")]
@@ -84,6 +89,10 @@ pub use rewrite::{prepare_vec_approx, query_vec_approx, query_vec_approx_with_bu
 // declare a direct `sparq-engine` dependency. [OPUS-4.8] (sq-k6ex; query_prepared added sq-z589)
 #[cfg(feature = "vec-predicate")]
 pub use sparq_engine::{query_prepared, PreparedQuery, QueryBudget, QueryResult};
+// [OPUS-4.8] (sq-pi44) The incremental delta sidecar value type — `delta` feature only. The
+// add/remove/update/compact APIs live on `VectorStore` (also `delta`-gated).
+#[cfg(feature = "delta")]
+pub use delta::VectorDelta;
 pub use store::{StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION};
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,

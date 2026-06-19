@@ -103,6 +103,18 @@ store.fingerprint() -> Option<Fingerprint>;  store.check_graph(&Graph) -> Result
 //   (Graph::open -- mmaps the FROZEN id order) to resolve query terms; NEVER re-parse the source RDF (Graph::load_str etc.).
 //   (Graph::save/open need sparq-core's `mmap` feature.) Round-trip vs re-parse trap pinned in tests/staleness_contract.rs.
 
+// --- incremental add/remove/update (src/delta.rs) --- feature = "delta" ONLY; LEAN, no new dep [OPUS-4.8] sq-pi44
+// In-RAM DELTA SIDECAR over the immutable base: append map + tombstone set. No file rebuild; a single graph change no
+// longer forces a full re-embed. get/iter/len (hence search) transparently union base+delta and honour tombstones.
+store.add(id, &[f32]) -> Result<(), String>      // NEW id; errs if id already present (use update) or on the put validation
+store.remove(id) -> bool                          // tombstone id (true if it had a vector); a removed id can be re-added
+store.update(id, &[f32]) -> Result<(), String>   // replace an EXISTING id's vector; errs if absent (use add)
+store.compact(out_path, &Graph) -> Result<VectorStore, String>  // fold delta into a FRESH base == a from-scratch rebuild
+store.has_delta() -> bool;  store.delta() -> Option<&VectorDelta>;  store.take_delta() -> Option<VectorDelta>
+store.apply_delta(VectorDelta) -> Result<(), String>  // GENERATION TIE: rejects a delta whose fingerprint != this base's
+// `put` is UNCHANGED (still errs after finalize) — `add` is the additive path. delta is IN-RAM ONLY (lost on drop; `compact`
+//   is the durability path) — persisted on-disk delta sidecar is a tracked follow-up. On a build-phase store add==put.
+
 // --- search (src/ann.rs) --- all return cosine in [-1,1], best first; zero query -> empty
 nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan
 nearest_term_exact(&VectorStore, &Graph, &Term, k) -> Vec<(Term, f32)>          // UNCHECKED: stale store -> silently wrong
@@ -634,6 +646,37 @@ stays < 1.0** (measured floor 0.90@10 in `tests/overfetch.rs`, NOT claimed as ex
 path (recipe 10), and does **not** transfer to this approximate path. Implement your own backend by
 `impl`-ing `AnnBackend` (one `candidates(query, fetch)` method + `len`).
 
+### 12. Incremental add / remove / update without a full rebuild (opt-in, feature = `delta`)
+
+A `.spqv` is build-once-immutable, so one new/removed entity would otherwise force a full re-embed +
+rebuild. The `delta` feature adds an in-RAM **delta sidecar** over the immutable base — `add` / `remove`
+/ `update` write an append map + tombstone set, and `get` / `iter` / `len` (hence search) transparently
+union base+delta and honour tombstones. `compact` folds it back into a fresh base. Lean (no new dep).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features delta
+use sparq_vectors::VectorStore;
+let mut store = VectorStore::open("graph.spqv")?;   // a finalized base
+
+store.add(new_id, &vec_for_new_id)?;                 // NEW id (errs if already present)
+store.update(existing_id, &new_vec)?;                // replace an existing id (errs if absent)
+store.remove(stale_id);                              // tombstone (returns bool; re-add allowed)
+
+// search transparently sees the delta — no rebuild, no extra API:
+let hits = sparq_vectors::nearest_exact(&store, &query, 10);
+
+// fold the delta into a fresh base == a from-scratch rebuild over the final vector set:
+let compacted = store.compact("graph.spqv", &graph)?;   // bound to graph's fingerprint generation
+# Ok::<(), String>(())
+```
+
+**Generation tie.** A delta carries the graph **generation** (the sq-32i5 fingerprint) it was built
+against; `apply_delta` rejects a delta whose generation differs from the receiving base, so its dict-ids
+can never mis-key onto a different graph. **Honesty (load-bearing):** the delta is **in-RAM only** — it
+is lost when the handle is dropped (the base file is unchanged until `compact` writes a new one). A
+*persisted* on-disk delta sidecar is a tracked follow-up; `compact` is the durability path today. `put`
+is unchanged (still errors after `finalize`) — `add` is the additive path.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
@@ -644,6 +687,11 @@ path (recipe 10), and does **not** transfer to this approximate path. Implement 
   dependency and the base engine/core query path is byte-identical (see recipe 8). There is
   still no `SERVICE`/function binding. Predicate-constrained (filtered) ANN (recipe 9) is a
   separate **non-default `filtered-ann`** feature — also lean (no new dep, no engine pull).
+- **Incremental add/remove/update is the non-default `delta` feature (sq-pi44).** Also lean (no new
+  dep, no engine pull). With it OFF the store is build-once-immutable as before (`put` errors after
+  `finalize`; no `add`/`remove`/`update`/`compact`); with it ON those methods write an in-RAM delta
+  the read paths consult transparently (recipe 12). The delta is **in-RAM only** (lost on handle drop;
+  `compact` is the durability path) — a persisted on-disk delta sidecar is a tracked follow-up.
 - **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
   index (`VectorIndex`/`HnswConfig`) and the `ApproxBackend` are gated behind it — it is the only
   thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force

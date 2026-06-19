@@ -74,6 +74,18 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   **necessary but not sufficient** — to serve a persisted store, `Graph::save` its graph
   and reopen **that** (`Graph::open`, frozen id order); **never** re-parse the source RDF
   (pinned in `tests/staleness_contract.rs`).
+- **Incremental add / remove / update (opt-in `delta`)** — a `.spqv` is build-once-immutable
+  (`put` errors after `finalize`), so today one new/removed entity forces a full re-embed +
+  rebuild. The `delta` feature adds an in-RAM **delta sidecar** over the immutable base:
+  `add` / `remove` / `update` write an append map + tombstone set, and `get` / `iter` / `len`
+  (hence search) transparently union base + delta and honour tombstones — no file rebuild.
+  `compact(out, graph)` folds the delta into a fresh base **equivalent to a from-scratch
+  rebuild** over the same final vector set. The delta is tied to the base's graph
+  **generation** (the sq-32i5 fingerprint): `apply_delta` rejects a delta built against a
+  different generation, so its ids can never mis-key. Lean (no new dependency). **Honest
+  boundary:** the delta is **in-RAM only** — it is lost when the handle is dropped (the base
+  file is unchanged until `compact` writes a new one); a *persisted* on-disk delta sidecar is
+  a tracked follow-up. `compact` is the durability path today.
 - **Verbalization, quantization, hybrid fusion** — `verbalize` / `embed_entities` render
   per-entity text (multilingual, char-budgeted, single named graph at a time);
   `ScalarQuantizer` (4×) and `ProductQuantizer` for large stores; `fuse_rrf` /
