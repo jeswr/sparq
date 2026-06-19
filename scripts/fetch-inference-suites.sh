@@ -19,6 +19,22 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# [OPUS-4.8] Retry a flaky network command (git clone/fetch) a few times with a
+# short backoff. GitHub and the Internet Archive both reset CI transfers
+# occasionally; one blip should not red-gate every engine PR (sq-y5dz).
+retry() {
+    local n=0 max=5
+    until "$@"; do
+        n=$((n + 1))
+        if [ "$n" -ge "$max" ]; then
+            echo "ERROR: '$*' failed after $max attempts." >&2
+            return 1
+        fi
+        echo "  attempt $n/$max failed; retrying in 5s…" >&2
+        sleep 5
+    done
+}
+
 # --- 1. w3c/rdf-tests (shared pin with the SPARQL conformance harness) -------
 "$ROOT/scripts/fetch-conformance.sh"
 
@@ -31,7 +47,7 @@ if [ -d "$N3_DEST/.git" ]; then
     HAVE="$(git -C "$N3_DEST" rev-parse HEAD)"
     if [ "$HAVE" != "$N3_PIN" ]; then
         echo "w3c/N3 present at $HAVE, re-pinning to $N3_PIN…"
-        git -C "$N3_DEST" fetch --depth 1 origin "$N3_PIN"
+        retry git -C "$N3_DEST" fetch --depth 1 origin "$N3_PIN"
         git -C "$N3_DEST" checkout --detach "$N3_PIN"
     else
         echo "w3c/N3 already at pinned commit $N3_PIN — nothing to do."
@@ -39,9 +55,9 @@ if [ -d "$N3_DEST/.git" ]; then
 else
     mkdir -p "$(dirname "$N3_DEST")"
     echo "Cloning w3c/N3 (shallow) into tests/w3c/n3…"
-    git clone --depth 1 https://github.com/w3c/N3 "$N3_DEST"
+    retry git clone --depth 1 https://github.com/w3c/N3 "$N3_DEST"
     if [ "$(git -C "$N3_DEST" rev-parse HEAD)" != "$N3_PIN" ]; then
-        git -C "$N3_DEST" fetch --depth 1 origin "$N3_PIN"
+        retry git -C "$N3_DEST" fetch --depth 1 origin "$N3_PIN"
         git -C "$N3_DEST" checkout --detach "$N3_PIN"
     fi
 fi
@@ -69,7 +85,29 @@ if [ -f "$OWL_DEST" ] && [ "$(sha256_of "$OWL_DEST")" = "$OWL_SHA256" ]; then
 else
     mkdir -p "$(dirname "$OWL_DEST")"
     echo "Downloading the OWL 2 test-case export (archived snapshot $OWL_SNAPSHOT)…"
-    curl -sSfL --retry 3 --retry-delay 5 -o "$OWL_DEST.tmp" "$OWL_URL"
+    # [OPUS-4.8] The Internet Archive (web.archive.org) regularly RESETS large
+    # transfers from CI runner IP ranges mid-stream: the symptom is
+    #   curl: (56) Recv failure: Connection reset by peer
+    # which exits 56. Plain `--retry` does NOT cover (56) — it only retries
+    # transient HTTP statuses (408/429/5xx) and connection-establishment
+    # failures, so the previous `--retry 3` never actually re-tried this
+    # reset and red-gated every engine PR (sq-y5dz). `--retry-all-errors`
+    # (curl ≥7.71, runner has 8.x) makes curl retry on ANY error incl. (56);
+    # `--retry-connrefused` covers a refused connect; the connect/max-time
+    # bounds keep a genuinely-dead source from hanging the lane. The sha256
+    # gate below still makes any payload drift loud, so retrying is safe.
+    if ! curl -sSfL \
+            --retry 5 --retry-delay 5 --retry-all-errors --retry-connrefused \
+            --connect-timeout 30 --max-time 300 \
+            -o "$OWL_DEST.tmp" "$OWL_URL"; then
+        rm -f "$OWL_DEST.tmp"
+        echo "ERROR: could not download the OWL 2 test-case export after retries." >&2
+        echo "  URL: $OWL_URL" >&2
+        echo "  This is the Internet Archive snapshot of the (offline) OWL WG wiki" >&2
+        echo "  export; transient connection resets are common. Re-run the job, or" >&2
+        echo "  if the archive is persistently unreachable, see scripts/fetch-inference-suites.sh." >&2
+        exit 1
+    fi
     HAVE_SHA="$(sha256_of "$OWL_DEST.tmp")"
     if [ "$HAVE_SHA" != "$OWL_SHA256" ]; then
         rm -f "$OWL_DEST.tmp"
