@@ -220,6 +220,17 @@ async fn unknown_route_is_permanent_404() {
     let status = resp.status().as_u16();
     assert_eq!(status, 404);
     assert!(!is_transient(status));
+    // [OPUS-4.8] (sq-pj6u) The unmatched-route 404 carries the SAME structured envelope as
+    // every other error, now with the CATEGORISED `not found` message (was the bare empty
+    // `{"error":""}`). It must NOT echo the requested path — leak-free.
+    let body = resp.text().await.unwrap();
+    assert_structured_error(&body);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"], "not found", "categorised, generic 404 message");
+    assert!(
+        !body.contains("no-such-route"),
+        "404 must not echo the requested path: {body}"
+    );
 }
 
 #[tokio::test]

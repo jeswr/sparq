@@ -997,7 +997,9 @@ identities and resource IRIs by design (see the privacy-boundary note above).
 - **Error bodies.** Every error is structured JSON `{"error": "..."}` with
   `Content-Type: application/json` (the `405` keeps its `Allow` header). POST query
   requires `Content-Type: application/sparql-query` or `application/x-www-form-urlencoded`
-  (else `415`); a GET without `query=` is `400`.
+  (else `415`); a GET without `query=` is `400`. An **unmatched route** is a `404` with the
+  categorised body `{"error":"not found"}` ([OPUS-4.8] sq-pj6u — previously the bare
+  `{"error":""}`); the message is server-constructed and never echoes the requested path.
 - **Transient vs permanent status contract (for retry classifiers — sq-r5bv / gh-50).** A retry
   classifier should treat **only `429` and `503` as transient** (a retry of the identical request
   may succeed): `429` is a concurrency shed (the request never ran), `503` is a query/UPDATE
