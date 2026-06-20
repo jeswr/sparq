@@ -5,8 +5,10 @@
 //! `sparq-conformance` binary), the inference suites (`sparq-inference-conformance`),
 //! the W3C SHACL core + SHACL-SPARQL suites (crate-local `cargo test` runners in
 //! `sparq-shacl`), the OGC GeoSPARQL topology ratchet (a crate-local `cargo test`
-//! in `sparq-geo`), and the Solid WAC + ACP library-level decision-parity suites
-//! (crate-local `cargo test` runners in `sparq-solid`). The drift-scanner
+//! in `sparq-geo`), the Solid WAC + ACP library-level decision-parity suites
+//! (crate-local `cargo test` runners in `sparq-solid`), and the SolidLab ODRL Test
+//! Suite (a crate-local `cargo test` runner in `sparq-policy`, sq-tmsd6). The
+//! drift-scanner
 //! (`scripts/drift-scan.py` §5.E `conformance-split`) flagged the SHACL + geo
 //! ratchets (sq-ncvq.16), then the Solid WAC/ACP ratchets (sq-j174), as living
 //! OUTSIDE the central scoreboard, so no single artifact answered "what conformance
@@ -135,6 +137,9 @@ pub struct Suite {
 ///   `DIVERGENCE_FLOOR = 0` (sq-t58w.8; a divergence-count floor, hard 0 — the WAC
 ///   and ACP differential rows share this one const).
 /// * Solid ACP differential 0 — same `DIVERGENCE_FLOOR = 0` (sq-t58w.8).
+/// * SolidLab ODRL 59 — `sparq-policy` `tests/odrl_test_suite.rs`
+///   `ODRL_SUITE_FLOOR = 59` (sq-tmsd6; 59 of 68 cases pass, 9 in a documented
+///   not-implemented bucket).
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -278,6 +283,26 @@ pub const SUITES: &[Suite] = &[
         floor_basis: "pass",
         note: "RDF → JSON-LD through the native serialize-rdf writer, compared by a \
                re-parse RDF-dataset round-trip (expanded + prefix-@context forms)",
+    },
+    // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite, wired as a crate-local
+    // decision-parity ratchet in sparq-policy (mirrors the Solid WAC/ACP pattern:
+    // the dev-only conformance crate must not take sparq-policy as a dep). Each of
+    // the 68 self-describing Turtle cases is driven through the REAL
+    // `parse_policy_str` + `evaluate` path; the oracle is the case's expected
+    // compliance report (`report:activationState` ⇒ ALLOW/DENY). The floor is the
+    // pass COUNT (59 at the pinned revision); the 9 remaining cases are a
+    // documented NOT-IMPLEMENTED bucket (LogicalConstraint/odrl:and, party/asset
+    // collections, the odrl:use umbrella-action divergence, duty-unknown) that
+    // does not fail the gate. Floor kept in lock-step by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "SolidLab ODRL Test Suite",
+        family: "SolidLab ODRL",
+        runner: Runner::CrateTest { krate: "sparq-policy", target: "odrl_test_suite" },
+        ci_job: "odrl-conformance",
+        ratchet_floor: 59,
+        floor_basis: "scenario",
+        note: "library-level allow/deny parity over the SolidLab self-describing ODRL \
+               cases through sparq-policy's real evaluate() path",
     },
 ];
 

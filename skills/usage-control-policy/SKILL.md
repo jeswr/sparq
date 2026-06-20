@@ -283,6 +283,35 @@ let (matched, retracted) =
 // ambiguous re-eval (no constraint evidence) → retracted == 0 (deny KEPT, fail-closed).
 ```
 
+## Conformance — SolidLab ODRL Test Suite — [OPUS-4.8] sq-tmsd6
+
+The evaluator is ratcheted against the MIT-licensed
+[SolidLab ODRL Test Suite](https://github.com/SolidLabResearch/ODRL-Test-Suite)
+(crate-local runner `crates/sparq-policy/tests/odrl_test_suite.rs`). Each of the 68
+self-describing Turtle cases references — by UUID — a policy / request /
+state-of-the-world / *expected compliance report*; the runner loads the policy
+through the real `parse_policy_str`, derives a real `Request`, evaluates it through
+the real `evaluate`, and asserts the decision matches the oracle the expected
+report encodes:
+
+| expected rule report | `report:activationState` | expected decision |
+|---|---|---|
+| `report:PermissionReport` | `report:Active` | ALLOW |
+| `report:ProhibitionReport` | `report:Active` | DENY (prohibition fires) |
+| either kind | `report:Inactive` | DENY |
+
+At the pinned suite revision **59/68 pass** (floor `ODRL_SUITE_FLOOR`, may only
+RISE; mirrored in the central conformance scoreboard). The remaining 9 are a
+documented **not-implemented** bucket — constructs outside the single-node base
+fragment: `odrl:LogicalConstraint` / `odrl:and` compound constraints,
+`odrl:PartyCollection` / `odrl:AssetCollection` membership, the `odrl:use`
+umbrella-action divergence (sparq treats `use` as a super-action; SolidLab
+requires an exact action match), and a duty whose discharge state is unknown
+(`report:NonSet` — sparq is fail-closed). They do NOT count as failures and do NOT
+gate. Fetch with `bash scripts/fetch-odrl-suite.sh` (the data is never committed);
+the runner self-skips cleanly when the fetched dir is absent. Run:
+`cargo test -p sparq-policy --test odrl_test_suite -- --nocapture`.
+
 ## Learn more
 
 - Crate README: [`crates/sparq-policy/README.md`](../../crates/sparq-policy/README.md)
