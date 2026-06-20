@@ -326,6 +326,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 config.persist_dir = Some(std::path::PathBuf::from(dir));
             }
+            // [OPUS-4.8] sq-o5bi: RESTORE-ON-START from a backup artifact (the bootstrap
+            // primitive for horizontal-scaling stage-2 + the base of PITR). Off by default
+            // (env SPARQ_RESTORE=<file>). Fail-closed: a corrupt artifact aborts startup.
+            #[cfg(feature = "backup")]
+            "--restore" => {
+                let file = args.next().ok_or("--restore requires an artifact file path")?;
+                if file.is_empty() {
+                    return Err("--restore must not be empty".into());
+                }
+                config.restore = Some(std::path::PathBuf::from(file));
+            }
             // [OPUS-4.8] sq-o4qf: opt in to binding a non-loopback address. Without this (and
             // without SPARQ_ALLOW_REMOTE), a non-loopback --addr is refused unless the whole
             // surface is authenticated (--auth-token AND --auth-token-read) — see bind_posture.
@@ -569,6 +580,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Graph::load_str("", "turtle").map_err(|e| format!("init: {e}"))?
         }
     };
+    // [OPUS-4.8] sq-o5bi: RESTORE-ON-START. When --restore <FILE> / SPARQ_RESTORE is set, the
+    // backup artifact REPLACES the seed graph (fail-closed: a corrupt/mismatched artifact aborts
+    // startup with a clean error). In-memory only in v1: the combination with --persist is
+    // refused (restoring into a live durable store needs its own crash-safe swap — a follow-up).
+    #[cfg(feature = "backup")]
+    let graph = match &config.restore {
+        Some(file) => {
+            if config.persist_dir.is_some() {
+                return Err(
+                    "--restore and --persist cannot be combined in v1 (restore replaces the \
+                     in-memory serving store only)"
+                        .into(),
+                );
+            }
+            eprintln!("restoring in-memory store from backup artifact {} ...", file.display());
+            let f = std::fs::File::open(file)
+                .map_err(|e| format!("--restore: cannot open {}: {e}", file.display()))?;
+            let (g, meta) = sparq_serve::backup_import(std::io::BufReader::new(f))
+                .map_err(|e| format!("--restore: rejected {} ({e})", file.display()))?;
+            eprintln!(
+                "restored from artifact taken at generation {} ({} triples)",
+                meta.generation, meta.triples
+            );
+            g
+        }
+        None => graph,
+    };
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
         "guards: query-timeout={} update-where-timeout={} header-read-timeout={} body-read-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
@@ -627,6 +665,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None => eprintln!("persistence: OFF — in-memory only (updates are LOST on restart; pass --persist DIR to enable)"),
     }
+    // [OPUS-4.8] sq-o5bi: surface the online backup/restore posture at startup.
+    #[cfg(feature = "backup")]
+    eprintln!(
+        "backup/restore: ON (admin routes POST /admin/backup + /admin/restore, write-gated; \
+         online snapshot, no stop-the-world){}",
+        match &config.restore {
+            Some(f) => format!(" — restored on start from {}", f.display()),
+            None => String::new(),
+        }
+    );
     // [OPUS-4.8] sq-4w18: surface the SERVICE egress posture at startup so an operator
     // sees whether (and where) federation can reach. Only meaningful with the `service`
     // build feature; without it a SERVICE clause errors at execution regardless.
