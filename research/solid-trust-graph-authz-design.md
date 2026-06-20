@@ -16,7 +16,13 @@ adversarial review (gh-940): corrected the hidden-issuer "not reached" factual e
 disentangled ZKAPs from IETF Privacy Pass, conceded the per-(source,type) novelty is
 integration not trust-model, and recorded the admission-vs-materialize / delegation-invocation
 / conflict-semantics / 3-part-ZK-composite open problems (sq-xc4y / sq-l5og / sq-tu4e /
-sq-wvne). -->
+sq-wvne). [OPUS-4.8] revision: §2.3 rewritten as the MINIMAL ORTHOGONAL ONTOLOGY (ten-term
+irreducible core + irreducibility argument + forPredicate→forShape desugaring as sugar, not a
+primitive); new §5.4 EXPRESSIVE-COMPLETENESS coverage tables (every ZKAPs + every RFC
+9576/9577/9578 concept → ontology / zk-comp / gap, honest per the audit); new §6.0 PoC SPEC
+(age>18 end-to-end admission+N3-merge over the shipped sparq-solid/-reason/-canon/-zk/-shacl
+estate + new opt-in `sparq-trust` crate); new §7.6 load-bearing-claims-a-skeptic-should-attack
+(de-dup-lossless / coverage-complete / soundness). -->
 
 GitHub issue: [#940](https://github.com/jeswr/sparq/issues/940).
 
@@ -179,29 +185,133 @@ unchanged. This is the strict-additivity property (G6, §7): **a pod with no tru
 behaves exactly as WAC/ACP do now.** Solid-OIDC is the *n = 1* case (one issuer, one
 statement-type: the identity assertion).
 
-### 2.3 Proposed ontology terms
+### 2.3 The minimal orthogonal ontology
 
 All IRIs below under `https://sparq.dev/ns/trust#` (prefix `trust:`) are **NON-STANDARD,
 invented for this proposal**; a WG would rename/rehome them. They are placeholders to make
 the semantics concrete, not a claim of standardisation.
 
+This subsection presents a **deliberately minimal** vocabulary. Before pinning the terms we
+ran a de-duplication pass that asks of every candidate term: *can this be expressed via a
+more-general primitive already in the set?* If yes, it is **not** a primitive — it is
+**syntactic sugar that desugars** to the primitive at load time, and is documented as such
+(§2.3.3), not added to the normative core. The discipline matters because every extra
+primitive is one more thing a WG must standardise, one more admission-rule shape the engine
+must evaluate soundly, and one more surface an adversary can probe. The minimal set is **ten
+terms**.
+
+#### 2.3.1 The minimal term set (irreducible core)
+
 | Term (proposed, non-standard) | Domain → Range | Meaning |
 |---|---|---|
-| `trust:TrustPolicy` | class | A set of admission rules scoping a resource/server. |
-| `trust:trustsSourceFor` | `trust:Source` → predicate/shape | Admit statements of this type from this source. |
+| `trust:TrustPolicy` | class | The policy container: a set of admission rules scoping a resource/server. |
+| `trust:TrustRule` | class | One reified admission rule, grouping a source/type/scope/freshness condition. |
+| `trust:trustsSourceFor` | `trust:Source` → shape | **The core relation:** admit statements of this type (shape) from this source. |
 | `trust:source` | rule → `trust:Source` | The attesting source a trust rule names. |
-| `trust:forPredicate` | rule → `rdf:Property` | Statement-type as a predicate IRI (coarse). |
-| `trust:forShape` | rule → `sh:NodeShape` | Statement-type as a SHACL shape (fine; uses shipped `sparq-shacl`). |
+| `trust:forShape` | rule → `sh:NodeShape` | Statement-type as a SHACL shape (the *one* statement-type primitive; uses shipped `sparq-shacl`). |
 | `trust:Source` | class | An attesting authority, identified by an issuer key / DID. |
 | `trust:issuerKey` | `trust:Source` → key/DID | Verification key the source signs with (aligns with `zk:issuerKey`). |
 | `trust:scope` | rule → resource/container | Where the trust rule applies (server-wide vs per-`.acr`). |
 | `trust:freshWithin` | rule → `xsd:duration` | Maximum staleness admitted (consulted against `Session.now`). |
 | `trust:admitted` | (internal) | Marks a fact that passed admission; analogous to `solidx:` internal vocab. |
 
-The choice between `trust:forPredicate` (predicate IRI) and `trust:forShape` (SHACL shape) is
-the **statement-type granularity open question** (§8). The design proposes predicate-IRI for
-v1 (cheap, decidable) with `trust:forShape` as the expressive upgrade, reusing the shipped
-`sparq-shacl` engine.
+#### 2.3.2 Why no term is redundant (the irreducibility argument)
+
+Each term occupies a **distinct, non-overlapping role**; none can be derived from a
+combination of the others, so the set is irreducible. Stated per term:
+
+1. **`trust:TrustPolicy`** — the policy *container*. There is no other way to group/scope a
+   set of rules as one administrable unit; collapsing it would scatter rules with no binding
+   entity.
+2. **`trust:TrustRule`** — the reified rule entity that *collects* one admission condition
+   (`source` + `forShape` + `scope` + `freshWithin`) under a single node. It could in
+   principle be inlined as flat properties on the policy, but then a policy with two rules
+   over the same source could not keep their type/scope/freshness conditions apart. The
+   reification is what makes a rule the unit of conflict, override, and audit.
+3. **`trust:trustsSourceFor`** — the **foundational primitive**: *"trust source S for
+   statement-type T."* It is the only way to express per-(source, statement-type) scoping;
+   every other term either *names a participant in* this relation or *constrains* it. It
+   cannot be synthesised from any combination of the rest.
+4. **`trust:source`** — connects a rule to a **named** `trust:Source` so one source can be
+   referenced across many rules. Inlining the issuer key directly onto each rule (eliminating
+   this term) would lose source identity-reuse and force key duplication.
+5. **`trust:forShape`** — the **sole** statement-type primitive. A SHACL shape is the most
+   general type constraint in the set: predicate-only, cardinality, value-range, and
+   conjunctive constraints are all shapes. Nothing else expresses fine-grained statement
+   typing, and (critically) `forShape` cannot be reduced *backward* to anything coarser
+   without losing expressivity. This is why the predicate-IRI convenience desugars *into*
+   `forShape` and not the reverse (§2.3.3).
+6. **`trust:Source`** — the named attesting-authority entity. It must be a distinct node
+   because it is simultaneously the **object** of `trust:source` and the **subject** of
+   `trust:issuerKey`; eliminating it would force inlining keys into rules and lose the
+   ability to refer to a source by name.
+7. **`trust:issuerKey`** — the **cryptographic binding** *"source S's verification key is
+   K."* It is the load-bearing gate for signature verification at admission (§3.3); there is
+   no alternative mechanism to bind a source to its key.
+8. **`trust:scope`** — the authorisation *boundary* (*"this rule applies to resource R /
+   container C / server-wide"*). It is **orthogonal** to source and type — the same
+   source/type pair may be trusted for resource A but not B — so it cannot be derived from
+   them.
+9. **`trust:freshWithin`** — the **temporal** gate (*"admit facts issued within duration
+   D"*). It is orthogonal to source/type/scope and, per §3.3, must be a per-request Rust
+   side-condition, **not** an in-reasoner predicate; it therefore cannot be synthesised from
+   the other (reasoner-level) terms.
+10. **`trust:admitted`** — the **stratum-boundary marker** that tags a fact which passed
+    admission, enabling the stratified separation of admission from derivation (§2.1). Remove
+    it and the two-stratum architecture collapses: admission gates become indistinguishable
+    from derivation rules and the soundness argument of §3.3 has nothing to hang on.
+
+**No further collapse is sound.** Two near-misses were considered and rejected:
+`trust:TrustRule` could be inlined into `trust:TrustPolicy` as flat triples — rejected because
+reification is what lets one policy hold multiple independently-overridable, independently-
+auditable rules; and `trust:source` could be folded into `trust:trustsSourceFor` via
+`rdf:subject`/`rdf:object` reification — rejected because it sacrifices named-source reuse for
+no expressivity gain. Every remaining term purchases distinct expressivity or a distinct
+soundness hook. The **only** purely-syntactic redundancy the de-dup found is
+`trust:forPredicate` → `trust:forShape`, handled next as sugar.
+
+#### 2.3.3 Conveniences that DESUGAR to primitives (sugar, not primitives)
+
+The de-dup pass found exactly **one** term in the prior draft that is *not* a primitive but a
+shorthand. It is kept for ergonomics, but **defined by its desugaring**, so a WG standardises
+only the primitive:
+
+- **`trust:forPredicate P` is SUGAR for a single-predicate `trust:forShape`.** A rule that
+  trusts a source for *all* triples on predicate `P` (the cheap, decidable, v1-default case)
+  is exactly the special case of a shape that targets the subjects of `P` and requires `P` to
+  be present. The load-time desugaring is:
+
+  ```n3
+  # surface syntax (convenience):
+  [] a trust:TrustRule ; trust:forPredicate schema:age .
+
+  # desugars to (normative primitive) — a single-predicate SHACL node-shape:
+  [] a trust:TrustRule ; trust:forShape [
+       a sh:NodeShape ;
+       sh:targetSubjectsOf schema:age ;            # target = subjects asserting the predicate
+       sh:property [ sh:path schema:age ; sh:minCount 1 ]
+     ] .
+  ```
+
+  The desugaring is **lossless in the predicate-only direction** (every `forPredicate P`
+  assertion maps to exactly this shape) and runs the shipped, terminating `sparq-shacl`
+  validator as the admission side-condition. The ergonomic reason to keep the sugar is that
+  forcing every predicate-granularity rule to carry an inline or external shape document is
+  boilerplate the common case does not need; the *semantic* reason it is **not** a primitive
+  is that it adds no expressivity `forShape` lacks. v1 ships `forPredicate` as the default
+  surface syntax and `forShape` as the expressive upgrade (the **statement-type granularity**
+  question, §8), but the **normative vocabulary is `forShape` alone** — `forPredicate` is
+  defined wholly by the rewrite above.
+
+  (Note: `sh:targetSubjectsOf` + an `sh:minCount 1` property shape is the real, shipped SHACL
+  idiom for "constrain to a single predicate"; there is no `sh:targetPredicate` term in SHACL,
+  so the desugaring uses the genuine target/path mechanism `sparq-shacl` already evaluates.)
+
+So the reader sees three things, by design: the **minimal vocabulary** (§2.3.1, ten
+primitives), **why no primitive is redundant** (§2.3.2), and **the desugaring of the one
+convenience** (§2.3.3). The skeptic's attack to mount is *"the de-dup is lossy"* — i.e. some
+`forPredicate` rule does **not** round-trip through the shape rewrite, or some "primitive" is
+secretly derivable; both are addressed above and listed as load-bearing claims in §7.6.
 
 ### 2.4 Relation to named-graph/quad trust and VC issuer trust
 
@@ -622,7 +732,212 @@ membership/possession in zero knowledge, enforce single-use). This composite is
 This is a *strictly weaker and true* claim than "superset of ZKaps", and is the one to take to
 the working groups. See §7 for the adversarial-review limitations.
 
+### 5.4 Expressive completeness vs ZKAPs and IETF Privacy Pass
+
+This subsection makes the coverage claim **checkable**: it maps **every** ZKAPs (Least
+Authority 2021) concept and **every** IETF Privacy Pass concept (RFC 9576 architecture / 9577
+HTTP authentication scheme / 9578 issuance protocols) to the trust-graph ontology term or
+structure that expresses it. The verdict per row is one of three, and the column is the
+**whole honesty of the argument**:
+
+- **ontology** — expressed *by the ontology / authorisation model itself*: the
+  structural/relationship concept maps to a term or admitted-fact structure, no ZK required.
+- **zk-comp** — expressible **only by composing the (unaudited) ZK estate**
+  (`sparq-zk`/`sparq-zk-compose`), captured by the ontology as a **named obligation** (the
+  three-part composite of §5.3), **not delivered by the ontology**. Hard-gated on external
+  sign-off `sq-qhy4`. A `zk-comp` row is *honest about being a promissory note.*
+- **gap** — **not** expressible today by either the ontology or the (built) ZK estate; the
+  minimal term(s)/primitive to close it are named in the row.
+
+#### 5.4.1 ZKAPs (Least Authority, 2021) — concept coverage
+
+| ZKAPs concept | Trust-graph term / structure | Verdict |
+|---|---|---|
+| Issuer role (mints tokens) | `trust:Source` + `trust:issuerKey` (issuer-signing via `zk:issuerKey`) | ontology |
+| Redeemer / verifier role | admission-stratum verifier checks issuer sig over RDFC-1.0 commitment (§3.1, §3.3) | ontology |
+| Client / holder role | `Session.agent` + `credentialSubject` holder binding (§3.4) | ontology |
+| Token issuance (as authorisation grant) | `trust:trustsSourceFor` + `trust:source` + VC Data Integrity / RDFC-1.0 signed-graph binding (§2, §3.1) | ontology |
+| Redemption (presentation verification) | `trust:admitted` facts after admission sig-verification (§3.3) | ontology |
+| Payment/grant binding (token tied to issuance event) | VC bound to issuer + `trust:freshWithin` (proof-of-payment captured as a VC attribute claim) | ontology |
+| Attestation / proof-of-property binding | `credentialSubject` claim admitted per `trust:forShape`/sugar (§2.3, §3.1) | ontology |
+| Authorisation decision / access control | admission → derivation strata; admitted facts merge with `.acl` via N3 (§2.1–2.2, §3.1) | ontology |
+| Non-delegability (deliberately non-transferable) | holder binding `credentialSubject == Session.agent` (§3.4) enforces single-subject use | ontology |
+| Issuer role (authority minting) | `trust:Source` + `trust:issuerKey` (§2.3) | ontology |
+| Issuer-client unlinkability (issuance↔redemption) | hidden-issuer set-membership (`sq-z9l`, built/not-yet-sound) — §5.3(1) | zk-comp |
+| Origin-client unlinkability (presentation privacy) | hidden-holder ZK PoP + nullifier (`sq-xqfg` built/not-yet-sound; nullifier ABSENT) — §5.3(2) | zk-comp |
+| Attester-origin / cross-site unlinkability | 3-part composite: hidden-issuer + hidden-holder + nullifier (§5.3) | zk-comp |
+| One-more-forgery security | in-circuit issuer-sig gadget (`sq-z9l`) not-yet-sound; audit `sq-qhy4` pending | zk-comp |
+| Concurrent / multi-session security | ZK estate multi-session security (in `sq-qhy4` audit scope) | zk-comp |
+| Redemption-context unlinkability (same holder, many redemptions) | nullifier + rate-limit **without** deanonymisation | **gap** (no nullifier/rate-limit primitive — §5.3(3)) |
+| Double-spend prevention / single-use enforcement | nullifier / single-use marker | **gap** (ABSENT in `sparq-zk`/`sparq-zk-compose`) |
+| Rate-limiting / bounded-use-per-epoch without deanon | ARC / rate-limited-token primitive | **gap** (Privacy-Pass ARC designed but absent) |
+| VOPRF / DLEQ blind-signature construction | (crypto protocol primitive) | **gap** (composition dependency, not an ontology concept) |
+| Unconditional input secrecy / blindness | (crypto protocol primitive: blind issuance) | **gap** (VOPRF/DLEQ-blind, external to the ontology) |
+
+#### 5.4.2 IETF Privacy Pass (RFC 9576 / 9577 / 9578) — concept coverage
+
+The four-party Privacy Pass trust architecture maps **precisely** onto the trust-graph roles:
+**Client ↔ `credentialSubject` (`Session.agent`)**, **Issuer ↔ `trust:Source` + `trust:issuerKey`**,
+**Attester ↔ `trust:Source`**, **Origin ↔ `trust:scope`**, **Property ↔ `trust:forShape`/sugar**.
+Both Privacy Pass and the trust graph are instances of the *same* foundational
+per-(source, type) trust pattern (RT/PERMIS; §2.2). Concept-by-concept:
+
+| Privacy Pass concept (RFC) | Trust-graph term / structure | Verdict |
+|---|---|---|
+| Client (9576 §3) | `credentialSubject` / `Session.agent`; authenticated requester | ontology |
+| Origin (9576 §3) | `trust:scope` resource; admission gate applies at the resource | ontology |
+| Attester (9576 §3) | `trust:Source` (entity generating attestation) | ontology |
+| Issuer (9576 §3) | `trust:Source` + `trust:issuerKey` | ontology |
+| Attestation property (age, humanness, …) (9576 §5) | `trust:forShape` (or `forPredicate` sugar) statement-type scoping | ontology |
+| Token = cryptographic proof of attestation (9576 §4.2, 9578 §3) | admitted fact after sig-verification; credential graph signed by `trust:source` | ontology |
+| Origin trusts Issuer for property-type (9576 §4.1) | `trust:trustsSourceFor` (per-source, per-statement-type) | ontology |
+| Issuer trusts Attester for attestation (9576 §4.1) | `trust:trustsSourceFor` at the issuer layer | ontology |
+| Non-colluding parties cannot share info (9576 §4.1) | source-scoped admission isolates different sources' facts | ontology |
+| TokenChallenge components (9577 §2) | admission-gate preconditions (token_type/issuer_name/redemption_context/origin_info → rule conditions) | ontology |
+| challenge_digest binding (replay prevention) (9577 §2) | digest verified inside the admission signature check | ontology |
+| redemption_context (origin-specific binding) (9577 §2) | `trust:scope` (resource-specific constraint) | ontology |
+| Context-bound tokens prevent cross-origin replay (9577 §2) | challenge_digest + redemption_context (`trust:scope`) verified at admission | ontology |
+| VOPRF tokens — Type 0x0001, private-key verify (9578 §4) | authenticator admitted after sig-verification (ontology admits *output*, not mechanism) | ontology |
+| Blind-RSA tokens — Type 0x0002, public-key verify (9578 §5) | authenticator admitted after public-key verification | ontology |
+| Key identification token_key_id (9578 §6.1) | `trust:issuerKey` (resolved during admission sig check) | ontology |
+| Key rotation / not-before (9578 §6.2) | `trust:issuerKey` with temporal metadata; `trust:freshWithin` | ontology |
+| Deployment models (Shared/Joint/Split, 9576 §5) | different `trust:trustsSourceFor` configurations | ontology |
+| Holder binding (credentialSubject↔presenter, 9576 §3) | `credentialSubject == Session.agent`, verified at admission (§3.4) | ontology |
+| Freshness check (9576 §4.2) | `trust:freshWithin`; per-request Rust check (`authindex.rs`) | ontology |
+| Revocation check (9576 §4.2) | W3C Bitstring Status List; input-stratified / per-request gate (§3.3) | ontology |
+| Issuer-scoped vs distributed verification (9578 §4/§5) | trust rule encodes issuer-only vs public-key trust | ontology |
+| Per-(Source, Statement-Type, Constraint) scoping (9576 §3–4) | `trust:trustsSourceFor` + `trust:freshWithin` | ontology |
+| Issuance unlinkability (issuer↔redemption, 9576 §4.1, 9578 §3) | hidden-issuer set-membership (`sq-z9l`, built/not-yet-sound) | zk-comp |
+| Presentation unlinkability (origins can't re-identify client, 9576 §4.1) | ZK holder-PoP + nullifier + hidden issuer; clear-WebID binding (§3.4) breaks it | zk-comp |
+| Redemption-context unlinkability (9576 §4.1) | single-use + ZK composite | zk-comp |
+| Cross-origin unlinkability (9576 §4.1) | presentation anonymity (ZK composite); plain trust graph leaks WebID | zk-comp |
+| Attestation reveals no identifying info (9576 §5) | ZK composite; plain credential disclosure is linkable | zk-comp |
+| Single-use / non-replayable token (9576 §5.1, 9578 §3) | nullifier / single-use marker | **gap** (no nullifier primitive — `sq-wvne`) |
+| Nullifier / double-spend prevention (9576 §5.1) | nullifier primitive | **gap** (absent, verified by grep) |
+| Issuer directory discovery (`.well-known/private-token-issuer-directory`, 9578 §7) | dynamic issuer-registry lookup | **gap** (static `trust:issuerKey`; needs P2 resolver `sq-pfae.3`) |
+| Issuance-endpoint discovery (9578 §7) | issuer-registry model | **gap** (no issuer registry; P2) |
+| Greasing / reserved token types (9577 §2) | statement-type versioning | **gap** (minor, design-only; not security-critical) |
+
+#### 5.4.3 Verdict, and the minimal terms to close the gaps
+
+**The honest thesis:** the trust-graph ontology **completely covers the structural /
+relationship concepts** of both ZKAPs and IETF Privacy Pass — every *role*, every *trust
+relation*, every *attestation/property/token/challenge/scope/freshness* concept maps to a term
+or admitted-fact structure (the `ontology` rows, which are the large majority of both tables).
+The **unlinkable-anonymous *presentation* property** is **not delivered by the ontology**; it
+is captured **as a named obligation** discharged by composing the (unaudited) ZK estate (the
+`zk-comp` rows = the three-part composite of §5.3, gated on `sq-qhy4`). This is exactly the
+"superset of policy expressivity, *composes with* — not supersedes — unlinkability" framing of
+§5.3, now made row-by-row checkable.
+
+**Coverage is therefore NOT unconditionally complete — there are genuine `gap` rows, and they
+are stated plainly rather than papered over.** They cluster into exactly **four primitives**,
+none of which is a *trust-relation* concept (the ontology's core), all of which are
+*presentation-mechanics* the ontology was never meant to be:
+
+1. **Single-use / nullifier / double-spend** — the load-bearing anti-replay primitive ZKAPs and
+   Privacy Pass both require, **absent** from the ZK estate. *Minimal term to close:* a
+   reserved internal marker `trust:nullifier` (a per-presentation unique tag the verifier
+   records and refuses to admit twice) plus the in-circuit nullifier-derivation gadget the ZK
+   estate must add. This is an **ontology + crypto** addition, not pure ontology. Tracked
+   `sq-wvne`.
+2. **Rate-limiting / bounded-use-per-epoch without deanonymisation** — the Privacy-Pass ARC
+   family. *Minimal term:* `trust:rateLimit` (max uses per epoch) on a `trust:TrustRule`,
+   enforced via the same nullifier ledger. Crypto primitive absent.
+3. **Issuer directory discovery** — dynamic resolution of `trust:issuerKey`. *No new term* — it
+   is closed by the **P2 DID/issuer resolver** (`sq-pfae.3`) feeding the existing signature
+   check; until then the binding is operator-asserted (§3.3, the live forgery vector D′).
+4. **Greasing / statement-type versioning** — a minor, non-security-critical gap. *Minimal
+   term:* a `trust:reservedType` registration on the policy; design-only.
+
+So the de-dup'd ten-term core (§2.3) + `forPredicate` sugar covers **all** the *trust-model and
+attestation structure* of both technologies, and the coverage table names the **four** missing
+**presentation-mechanics** primitives — three of which (`trust:nullifier`, `trust:rateLimit`,
+and the issuer-resolver) are *crypto-backed* obligations, not ontology expressivity. A skeptic
+should attack the claim *"coverage is complete"* precisely here: the `ontology` rows are
+defensible from the model, the `zk-comp` rows are **promissory** (unaudited, `sq-qhy4`), and the
+`gap` rows are **conceded, not hidden** — completeness holds **for the structural/relationship
+layer**, and is **explicitly not claimed** for the unlinkable-presentation layer (§7.6).
+
 ## 6. Prototype plan (decomposed; each phase a future bead)
+
+### 6.0 The next PoC to build — trust-graph EVALUATION, age>18 end-to-end
+
+This is the **single, concrete proof-of-concept to build next** on sparq's existing estate
+(it instantiates phases **P1+P3** of the decomposition below; P2/P4–P8 follow). It is a
+**research prototype**, not a shipped feature and not a security guarantee; its **privacy half
+is out of scope and its ZK estate is unaudited** (`sq-qhy4`). What it demonstrates: a single
+externally-attested fact is **admitted** through a trusted-source-scoped gate, then **merged
+by N3 reasoning** with an `.acl` rule to **derive `canAccess`** — the §3.1 worked example,
+running end-to-end.
+
+**Goal (the one demonstrable claim).** Given (a) the controller-authored `.acl` ABAC rule
+`{ ?x schema:age ?y . ?y math:greaterThan 18 } => { ?x auth:read <resourceX> }`, (b) a
+`trust:TrustRule` trusting `<https://gov.example/issuer>` for `schema:age` on `<resourceX>`,
+and (c) a VC-attested graph `<Jesse> schema:age 25` **signed by the gov issuer over its
+RDFC-1.0 commitment**, the PoC **admits** the age fact **iff** the issuer signature verifies,
+the statement-type is in scope, the credential is fresh, and the credential subject binds to
+the authenticated requester — then **derives** `<Jesse> auth:read <resourceX>` into
+`<urn:sparq:auth>`. The **negative** cases must *not* grant: a forged/absent signature, an
+out-of-scope predicate (e.g. an `acl:agent` triple smuggled in the same graph), a stale
+credential, and a third-party credential with no holder binding.
+
+**End-to-end pipeline (the §3.1 worked example, concretely).**
+
+1. **Parse + canonicalise** the presented credential graph G — `sparq-canon` (RDFC-1.0), the
+   *same* canonical unit the ZK estate already commits over.
+2. **Verify the issuer signature** over G's RDFC-1.0 commitment against the key the matching
+   `trust:TrustRule`'s `trust:issuerKey` names — `sparq-zk` `sig`/`commit` (the **checked**
+   signature, never a self-asserted "I am signed" triple; the load-bearing soundness
+   condition, §3.3). v1 supplies the verifying key **directly** (operator-asserted) because
+   there is **no DID resolver yet** (P2/`sq-pfae.3`); this is the honest, not-end-to-end
+   binding called out as the live forgery vector D′ (§3.3, §7.3).
+3. **Admission gate** — N3 admission rules + a Rust side-condition that together check: a
+   matching `trust:trustsSourceFor` (`trust:source` + `trust:forShape`/`forPredicate`-sugar)
+   whose `trust:scope` covers `<resourceX>`; freshness vs `Session.now` within
+   `trust:freshWithin` (a per-request Rust check, **not** an in-reasoner predicate); the
+   reserved-predicate guard (`solidx:`/`urn:sparq:`) stays in force so a source trusted for
+   `schema:age` cannot launder an `acl:`/`solidx:` triple; and the holder binding
+   `credentialSubject == Session.agent` (§3.4). On success the fact is injected **issuer-tagged
+   as `trust:admitted`** ahead of the materialiser.
+4. **Derivation** — the **shipped** `sparq-solid` materialiser runs the `.acl` rule via
+   `sparq-reason` (full `reason_n3`, which supports `math:greaterThan`) over the admitted fact;
+   `<Jesse> auth:read <resourceX>` lands in `<urn:sparq:auth>` exactly as today. The query is
+   rewritten to that allow-list with no engine change.
+
+**Crates it composes (all shipped) + the one new opt-in crate.**
+
+| Role in the PoC | Crate | Status |
+|---|---|---|
+| `.acl`/`.acr` ACP/WAC issuer rules + materialised `<urn:sparq:auth>` + reserved-predicate guard | `sparq-solid` | shipped |
+| N3 reasoning (admission + derivation; full `reason_n3`) | `sparq-reason` | shipped |
+| RDFC-1.0 canonicalisation of the credential graph | `sparq-canon` | shipped |
+| Issuer signature over the RDFC-1.0 commitment | `sparq-zk` (`sig`/`commit`) | shipped, **ZK estate unaudited** (`sq-qhy4`) |
+| Statement-type shape check (the `forShape` primitive; `forPredicate` desugars to it) | `sparq-shacl` | shipped |
+| **NEW: the admission stratum itself** — `trust:` vocab loader, the admission N3 rules, the Rust side-conditions (freshness, holder-binding, signature-call), `trust:admitted` injection ahead of the materialiser | **`sparq-trust`** (new, **opt-in cargo feature**, default-OFF) | to build |
+
+The new crate **`sparq-trust`** is the only new code; it is **opt-in (default-OFF cargo
+feature)** so the core (`sparq-solid`/`sparq-reason`) stays lean and a pod with no trust graph
+behaves exactly as WAC/ACP do now (the strict-additivity property, G6/§2.2). It adds **no new
+engine** — it wires the admission gate onto the shipped reasoner/canon/zk/shacl estate and
+hands admitted facts to the existing materialiser.
+
+**Acceptance (the adversarial forgery tests, mirroring `acp_forged_*_in_acr_document_does_not_grant`).**
+Positive: the age-25 credential grants `auth:read`. Negative (each must **deny**): (i) a graph
+with a tampered/absent signature; (ii) a source trusted for `schema:age` presenting an
+out-of-scope `acl:agent`/`solidx:creator` triple; (iii) a stale credential past
+`trust:freshWithin`; (iv) a third-party credential whose `credentialSubject != Session.agent`.
+These are the §7.3-E tests that **do not yet exist** and whose absence currently leaves
+statement-type-scoping / no-laundering / key-binding as *design intent, not verified property*
+(`sq-pfae.4`).
+
+**Explicit non-goals (honest scope).** No privacy / unlinkability (the §5.3 three-part ZK
+composite, hard-gated on `sq-qhy4`); no delegation (§4 is design-only, zero substrate); no DID
+resolver (P2; keys supplied directly); no incremental admission maintenance (re-materialise on
+change). The PoC proves **trusted-source-scoped admission + N3 merge → derived grant** and
+nothing stronger.
+
+### 6.1 Full phase decomposition (each phase a future bead)
 
 Build on sparq's existing estate; do not add a new engine. Sequencing: **P1→P2→P3→P4** is the
 core spine; **P5, P6, P7** depend on P3/P4; **P7 (privacy) is hard-gated on `sq-qhy4`**.
@@ -671,7 +986,7 @@ core spine; **P5, P6, P7** depend on P3/P4; **P7 (privacy) is hard-gated on `sq-
    confirm one-side-bound seeding everywhere; work-box timings are non-canonical. *Blocked-on:
    P1–P4.*
 
-### 6.1 LWS/Solid-WG proposal framing
+### 6.2 LWS/Solid-WG proposal framing
 
 Take to the WGs the **weaker true claim**: the trust graph is the *formal semantics ACP's
 unimplemented `acp:vc` always needed* — the missing "which issuer is trusted for which claim"
@@ -846,6 +1161,41 @@ The genuine **design gaps** (not mere caveats) surfaced above are tracked as bea
   corrected.
 - `sq-wvne` — ZKAPs-grade unlinkable presentation needs a 3-part ZK composite (hidden-issuer +
   ZK holder-PoP + nullifier); clear-WebID holder binding is in tension with anonymity.
+
+### 7.6 Load-bearing claims a skeptic should attack first
+
+The two claims added by this revision (§2.3 minimal ontology, §5.4 coverage) carry the most
+weight and are stated here as **falsifiable** targets, with the counter-evidence that would
+sink each:
+
+- **CLAIM 1 — "the de-dup is lossless."** Every term dropped from the prior draft is either a
+  primitive that survives in the ten-term core (§2.3.1) or a *convenience that desugars without
+  loss* into a primitive (§2.3.3). The only collapse is `trust:forPredicate` → `trust:forShape`.
+  **How to falsify:** exhibit a `trust:forPredicate P` rule whose §2.3.3 shape rewrite
+  (`sh:targetSubjectsOf P` + `sh:path P ; sh:minCount 1`) admits a **different** fact set than
+  the predicate rule would — i.e. the rewrite is *not* extensionally equal on some graph; **or**
+  show that one of the ten "primitives" is in fact derivable from the others (the §2.3.2
+  irreducibility argument is wrong for some term). *Known boundary (conceded):* the desugaring
+  is lossless **only in the predicate-only direction** — `forShape` is strictly more expressive
+  and does **not** reduce back to `forPredicate`; the claim is that `forPredicate` adds no
+  expressivity, not that the two are interchangeable.
+- **CLAIM 2 — "coverage is complete."** It is **deliberately bounded**: complete for the
+  **structural/relationship layer** of ZKAPs and IETF Privacy Pass (the `ontology` rows of
+  §5.4), and **explicitly NOT claimed** for the unlinkable-presentation layer (the `zk-comp`
+  rows are promissory, gated on `sq-qhy4`; the four `gap` rows are conceded). **How to falsify:**
+  name a ZKAPs or RFC 9576/9577/9578 *structural/trust-relation/attestation* concept that has
+  **no** `ontology` row — that would break the bounded completeness claim; **or** show that a row
+  marked `ontology` actually requires ZK composition (mis-classified as deliverable when it is
+  promissory), **or** that a `zk-comp` row is in fact a hard `gap` (the built-but-unsound status
+  of `sq-z9l`/`sq-xqfg` is overstated). The claim is **not** "the trust graph delivers ZKAPs'
+  privacy" — that is the `zk-comp`/`gap` half, and asserting it would be the dishonest overclaim
+  §5–§7 exist to prevent.
+- **CLAIM 3 (the original soundness claim, restated for completeness).** Admission re-opens the
+  §2.4 content/reasoner boundary safely **only if** it verifies real issuer signatures (never
+  self-asserted trust triples) and enforces statement-type scoping; **and** the adversarial
+  forgery tests that would establish this **do not yet exist** (§7.3-E, `sq-pfae.4`), so
+  scoping/no-laundering/key-binding are **design intent, not verified properties** — the PoC
+  (§6.0) exists to convert them into tested ones.
 
 ## 8. Open questions for the maintainer
 
