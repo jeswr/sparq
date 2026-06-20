@@ -189,6 +189,21 @@ When a feature or a performance goal is **blocked by an upstream dependency** (a
 
 **Proactive upstreaming, not just unblocking.** The rule above triggers on a blocker, but it also runs the other direction: when a fix or feature built here against a vendored or forked upstream (`spargebra`, the `hdt` crate, any `[patch.crates-io]` dependency) would be useful to that upstream even though nothing here was blocked, proactively offer it upstream (an issue + PR) rather than siloing it in the vendored copy. Record the upstream URL in the relevant bead and in the vendored copy's `*-PATCHES.md`. Keeping vendored deltas flowing upstream shrinks the patch set we carry.
 
+### Upstream contributions — how to open the PR (the N3.js practice)
+
+<!-- [OPUS-4.8] sq-758 (B5): codify @jeswr's verbatim standing practice for agent-opened upstream PRs (stated on sparq issue #758). Applies to EVERY outbound PR an agent opens on an external repo — KonradHoeffner/hdt, rossanoventurini/qwt, etc. -->
+
+Every upstream PR an agent opens on a third-party repo (`KonradHoeffner/hdt`, `rossanoventurini/qwt`, any external dependency) **must** follow @jeswr's standing N3.js upstream-contribution practice. This mirrors how he opens PRs against `rdfjs/N3.js`:
+
+1. **Open it as a DRAFT.** Never a ready-for-review PR.
+2. **Explicitly identify the author as an agent** — a 🤖 SPARQ-agent self-id line in the body, e.g. *"This PR was opened by an autonomous agent (a SPARQ agent) operating on @jeswr's behalf."*
+3. **Assign @jeswr as reviewer** (`gh pr edit <n> --add-reviewer jeswr`, and/or `--add-assignee jeswr`). If GitHub rejects this — the PR author IS @jeswr and you lack write/triage on the upstream repo, so `RequestReviewsByLogin` / `ReplaceActorsForAssignable` fail — **@-mention @jeswr in the body as the review gate instead** (the only available mechanism on a fork-based PR you authored). Note in the bead which mechanism was used.
+4. **Carry a "NOT yet ready for maintainer review" note** in the body — the PR is pending @jeswr's own review first; the upstream maintainers should not review/merge until he marks it ready. **Never mark a PR ready-for-maintainer-review yourself — that is @jeswr's call.**
+5. **Include a clear, concise "Why" section** — why this PR exists and why *this* repo needs it (e.g. "sparq vendors its own decoder purely to read every triple on bulk import; this provides that upstream so the wrapper can delete the vendored copy"). Why first, then What/How.
+6. **Keep it as minimal as possible**, and **split unrelated changes across separate PRs** — one self-contained feature/fix per PR. Do not bundle independent changes.
+
+When asked to revise such a PR, **edit the existing PR on its existing branch** — never open a new upstream PR, and never destructively force-push without flagging it. If a PR bundles unrelated changes, *note* which way it should split rather than silently rewriting it.
+
 ## Proactively maintain this file (and the skills)
 
 Do NOT wait to be told. Whenever you notice a **repeated behaviour, a standing rule, a convention, or a hard-won lesson** that future agents should follow, add it to this `AGENTS.md` (or the matching `skills/<surface>/SKILL.md`) as part of the same work — the same way you'd capture a follow-up as a bead. This file is the durable home for "how we work here"; keep it current without prompting.
