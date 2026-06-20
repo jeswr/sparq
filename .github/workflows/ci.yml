@@ -916,6 +916,62 @@ jobs:
             solid-conformance.out
             conformance-scoreboard.md
 
+  odrl-conformance:
+    # [OPUS-4.8] sq-tmsd6 — SolidLab ODRL Test Suite conformance RATCHET, a
+    # DEDICATED gating job alongside SPARQL / inference / SHACL / GeoSPARQL / Solid /
+    # JSON-LD. The runner is crate-local in sparq-policy
+    # (crates/sparq-policy/tests/odrl_test_suite.rs): each of the 68 self-describing
+    # ODRL cases is driven through the REAL parse_policy_str + evaluate path and
+    # compared against the case's expected compliance report (the oracle:
+    # report:activationState ⇒ ALLOW/DENY). The suite data is FETCHED (gitignored,
+    # mirroring the SPARQL/SHACL/JSON-LD fetch-then-run split), so this job clones
+    # the pinned suite, runs the runner with --nocapture, and re-checks the printed
+    # `ODRL suite scenarios pass N / fail M / not-implemented K (floor F)` line as
+    # the same belt-and-braces `>= floor` gate the other ratchet jobs use. The
+    # runner's own `assert!(pass >= ODRL_SUITE_FLOOR)` is the primary gate. Honest
+    # baseline: 59/68 pass; the 9 remaining are a documented not-implemented bucket
+    # (LogicalConstraint/odrl:and, party/asset collections, the odrl:use
+    # umbrella-action divergence, duty-unknown) that never fails the gate. Never
+    # lower the ratchet (raise ODRL_SUITE_FLOOR as the fragment grows).
+    name: SolidLab ODRL conformance (ratchet — pass >= 59)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Fetch SolidLab ODRL Test Suite (pinned)
+        run: bash scripts/fetch-odrl-suite.sh
+      - name: Run SolidLab ODRL decision-parity suite
+        # The runner asserts its own pinned floor; capture the output so the grep
+        # gate below re-checks the pass count.
+        run: |
+          cargo test -p sparq-policy --test odrl_test_suite -- --nocapture \
+            | tee odrl-conformance.out
+      - name: Enforce ratchet (pass count must not regress)
+        run: |
+          ODRL_FLOOR=59
+          # runner prints: "ODRL suite scenarios pass <n> / fail <m> / not-implemented <k> (floor <f>)"
+          ODRL_PASS=$(grep -oE 'ODRL suite scenarios pass [0-9]+ / fail' odrl-conformance.out | grep -oE '[0-9]+' | head -1)
+          echo "SolidLab ODRL scenarios pass: ${ODRL_PASS:-unknown} (floor $ODRL_FLOOR)"
+          [ -n "$ODRL_PASS" ] && [ "$ODRL_PASS" -ge "$ODRL_FLOOR" ] || { echo "::error::SolidLab ODRL regressed below the ratchet (${ODRL_PASS:-?} < $ODRL_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # Render the ONE central scoreboard index (all suites + floors across crates)
+        # into this job's step summary, so the ODRL job surfaces where it sits in the
+        # whole conformance picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: odrl-conformance
+          path: |
+            odrl-conformance.out
+            conformance-scoreboard.md
+
   jsonld-conformance:
     # [OPUS-4.8] sq-oy1f.2 — W3C JSON-LD 1.1 conformance RATCHET (toRdf + fromRdf),
     # a DEDICATED gating job alongside SPARQL / inference / SHACL / GeoSPARQL /

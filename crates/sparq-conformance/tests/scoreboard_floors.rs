@@ -118,6 +118,16 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/jsonld_suite.rs",
         "FROMRDF_FLOOR",
     ),
+    // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
+    // The floor const (`pub const ODRL_SUITE_FLOOR`) lives top-level in
+    // `sparq-policy`'s `tests/odrl_test_suite.rs`; the guard reads it textually
+    // (the `pub ` prefix is already tolerated) so the central scoreboard's
+    // `ratchet_floor` can never drift from what the runner asserts.
+    (
+        "SolidLab ODRL Test Suite",
+        "crates/sparq-policy/tests/odrl_test_suite.rs",
+        "ODRL_SUITE_FLOOR",
+    ),
 ];
 
 #[test]
@@ -194,4 +204,6 @@ fn scoreboard_renders_all_suites() {
     // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 toRdf + fromRdf ratchets.
     assert!(md.contains("W3C JSON-LD 1.1 toRdf"));
     assert!(md.contains("W3C JSON-LD 1.1 fromRdf"));
+    // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
+    assert!(md.contains("SolidLab ODRL Test Suite"));
 }

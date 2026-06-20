@@ -11,15 +11,17 @@ result-comparison machinery:
   N3, SPARQL entailment regimes) run against `sparq-reason`.
 - `sparq-conformance-scoreboard` — the consolidated index of every ratchet
   (SPARQL, inference, W3C SHACL, OGC GeoSPARQL, Solid WAC + ACP, **W3C JSON-LD 1.1
-  toRdf + fromRdf**).
+  toRdf + fromRdf**, **SolidLab ODRL Test Suite**).
 
 A crate-local `cargo test` ratchet behind the **opt-in `jsonld-suite`** feature
-(OFF by default) drives the official `w3c/json-ld-api` suite (toRdf + fromRdf) with
-rising pass-floors; honest divergences + the not-yet-implemented Compaction/Framing
-buckets are reported, never inflated. See the data-formats SKILL to run it.
+drives the `w3c/json-ld-api` suite (toRdf + fromRdf); honest divergences +
+not-yet-implemented buckets are reported, never inflated. The **SolidLab ODRL Test
+Suite** ratchet (sq-tmsd6) is crate-local in `sparq-policy` — this dev-only crate
+must not depend on it, so only its FLOOR is mirrored here (59/68; see the SKILL).
 
 > **Internal dev-only harness — not published** (`publish = false`). Test data is
-> fetched by `scripts/fetch-conformance.sh` / `scripts/fetch-jsonld-tests.sh`.
+> fetched by `scripts/fetch-conformance.sh` / `scripts/fetch-jsonld-tests.sh` /
+> `scripts/fetch-odrl-suite.sh`.
 
 Contributing: [`AGENTS.md`](../../AGENTS.md).
 
