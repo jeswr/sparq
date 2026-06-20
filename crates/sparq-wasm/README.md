@@ -66,7 +66,18 @@ const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, n
   lines) and get byte-parity output. It calls straight through to `sparq-engine`'s writers,
   so the output is byte-identical to the native serialiser; the lean bundle carries no
   serializer code. JSON-LD serialise-OUT needs only `serialize-rdf` (the `jsonld` feature is
-  for INGEST).
+  for INGEST). The sibling `Store.serializeCompact(context, pretty, indent?)` (same feature)
+  runs the **full W3C JSON-LD 1.1 Compaction Algorithm** against a caller `@context` JSON
+  string (term defs / `@vocab` / coercion / `@reverse`) — richer than the prefix-only
+  `jsonld-compacted` form, and lossless; a non-object `context` throws.
+- **Opt-in SHACL Compact Syntax parse.** The `scs` feature (OFF by default; implies
+  `shacl` + `serialize-rdf`) exposes `Store.parseShaclCompact(text, base?)` — parses a
+  [SHACL Compact Syntax](https://www.w3.org/TR/shacl12-compact-syntax/) document into the
+  equivalent SHACL **shapes graph** and returns it as a pretty **Turtle** string (the SCS
+  *input* direction for the playground's "Compact → shapes" mode). It REUSES the
+  `Store.serialize` engine writer above (no second serialiser), so the bytes match
+  `serialize("turtle", true, "  ", true)`; the parsed shapes validate data identically to
+  the equivalent Turtle shapes. A malformed document throws a `JsError` with the source line.
 - **Persistence is native-only** — the native `Graph::save` / `open` /
   `save_compressed` family and the mmap-backed map-in path are **deliberately not
   exported**: they need a POSIX filesystem and `mmap`, which a browser/edge wasm

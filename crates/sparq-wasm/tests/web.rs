@@ -593,6 +593,46 @@ mod serialize {
             "a malformed prefixes entry must return Err, not panic or silently drop"
         );
     }
+
+    // ---- [OPUS-4.8] sq-oy1f.5: full JSON-LD 1.1 Compaction (caller `@context`), real wasm ----
+
+    /// `serializeCompact(context, …)` in a genuine wasm32 runtime: a `@vocab` `@context`
+    /// drives the full Compaction Algorithm (bare `@vocab`-relative predicate keys the
+    /// prefix-only form cannot produce), the output is byte-identical to the engine writer,
+    /// and — the load-bearing invariant — the compacted document round-trips back through the
+    /// JSON-LD parser to the SAME triples. The parity assertion runs unconditionally; the
+    /// round-trip is guarded by `jsonld` (the INGEST parser).
+    #[wasm_bindgen_test]
+    fn serialize_compact_round_trips() {
+        use sparq_core::Graph;
+        use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
+        let data = r#"<http://schema.org/x> <http://schema.org/name> "Alice" ;
+                       <http://schema.org/knows> <http://schema.org/y> ."#;
+        let store = Store::load(data, "turtle").unwrap();
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let ctx_text = r#"{"@vocab":"http://schema.org/"}"#;
+        // The pretty form is multi-line (the indenter inserts a space after each colon, so
+        // the exact no-space substrings are asserted on the MINIFIED doc below).
+        let got = store.serialize_compact(ctx_text, true, Some("  ".to_string())).unwrap();
+        assert!(got.contains('\n'), "pretty compaction is multi-line: {got}");
+        let ctx = parse_context_json(ctx_text).unwrap();
+        // Minified parity with the engine writer across the JS boundary + the @vocab shape.
+        let minified = store.serialize_compact(ctx_text, false, None).unwrap();
+        assert!(minified.contains("\"@vocab\":\"http://schema.org/\""), "context echoed: {minified}");
+        assert!(minified.contains("\"name\":"), "predicate is @vocab-relative bare term: {minified}");
+        assert_eq!(minified, graph_to_jsonld_compact(&g, &ctx), "wasm compaction == engine");
+        // A non-object context surfaces as the Err arm across the boundary, not a trap.
+        assert!(
+            store.serialize_compact("[\"not an object\"]", false, None).is_err(),
+            "a malformed @context must Err",
+        );
+        // Round-trip: the compacted doc re-parses to the same triple count (jsonld ingest).
+        #[cfg(feature = "jsonld")]
+        {
+            let reparsed = Graph::load_str(&minified, "jsonld").unwrap();
+            assert_eq!(reparsed.len(), store.size(), "compaction round-trips to the same triples");
+        }
+    }
 }
 
 // ---- [OPUS-4.8] sq-yqi1 (#162): the opt-in SHACL `validate` binding, in real wasm ----
@@ -674,5 +714,83 @@ mod shacl {
         let store = Store::load("", "turtle").unwrap();
         let bad = store.validate("@prefix ex: <http://ex/> . ex:a ex:p", SHAPES, "turtle");
         assert!(bad.is_err(), "a truncated data graph must return Err");
+    }
+}
+
+// ---- [OPUS-4.8] sq-quly (#796): the opt-in SCS parse binding, in real wasm ----
+//
+// These exercise the REAL exported `Store::parseShaclCompact(text, base?)` through the
+// wasm/JS boundary — both the shapes-graph Turtle string it returns AND the JsError arm
+// for a malformed SCS document (which DOES touch `JsError::new`, untestable natively).
+// Compiled only under the `scs` feature, exactly as the binding is. The native
+// `#[cfg(test)]` tests in src/scs.rs assert the engine-writer parity + that the parsed
+// shapes drive validation; this proves the method actually exports to and runs in wasm.
+#[cfg(feature = "scs")]
+mod scs {
+    use super::*;
+
+    // SCS document exercising a shapeClass + property shapes with a path, datatype and
+    // a `[1..1]` cardinality (the playground "Compact → shapes" input shape).
+    const SCS: &str = "\
+PREFIX ex: <http://example.org/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+shapeClass ex:Person {
+\tex:name xsd:string [1..1] .
+\tex:age xsd:integer .
+}
+";
+
+    /// `parseShaclCompact` parses an SCS document and returns the shapes graph as a
+    /// Turtle string carrying the key shape triples (the node-shape type, the Person
+    /// shape IRI, and both property paths) — proved across the JS boundary in a real
+    /// wasm32 runtime. The returned document re-parses through `Store.load`.
+    #[wasm_bindgen_test]
+    fn parse_shacl_compact_round_trips() {
+        let store = Store::load("", "turtle").expect("empty store loads");
+        let ttl = store
+            .parse_shacl_compact(SCS, None)
+            .expect("SCS must parse + serialise across the boundary");
+        // Key shape triples present.
+        assert!(ttl.contains("sh:NodeShape"), "node shape type: {ttl}");
+        assert!(
+            ttl.contains("<http://example.org/Person>"),
+            "Person shape IRI: {ttl}"
+        );
+        assert!(
+            ttl.contains("<http://example.org/name>"),
+            "ex:name path: {ttl}"
+        );
+        assert!(
+            ttl.contains("<http://example.org/age>"),
+            "ex:age path: {ttl}"
+        );
+        // The returned Turtle re-parses (a real, loadable shapes graph) — round-trip.
+        let reparsed = Store::load(&ttl, "turtle").expect("shapes Turtle re-parses");
+        assert!(reparsed.size() > 0, "shapes graph is non-empty");
+    }
+
+    /// The explicit `base` argument resolves a relative shape IRI when the SCS document
+    /// declares no `BASE` — the optional second arg crosses the boundary correctly.
+    #[wasm_bindgen_test]
+    fn parse_shacl_compact_uses_base_argument() {
+        let store = Store::load("", "turtle").unwrap();
+        let ttl = store
+            .parse_shacl_compact("shape <#S> {\n}\n", Some("http://b.example/".to_string()))
+            .unwrap();
+        assert!(
+            ttl.contains("<http://b.example/#S>"),
+            "base argument resolves the relative IRI: {ttl}"
+        );
+    }
+
+    /// A malformed SCS document surfaces as the `JsError` Err arm across the boundary,
+    /// not a trap — the error path JS relies on (`try { store.parseShaclCompact(...) }`).
+    #[wasm_bindgen_test]
+    fn scs_parse_error_is_err() {
+        let store = Store::load("", "turtle").unwrap();
+        // An unterminated shape block is a parse error.
+        let bad = store.parse_shacl_compact("shape <#S> {\n", None);
+        assert!(bad.is_err(), "a malformed SCS document must return Err, not panic");
     }
 }

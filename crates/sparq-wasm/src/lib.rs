@@ -85,6 +85,15 @@ mod shacl;
 #[cfg(feature = "serialize-rdf")]
 mod serialize;
 
+// [OPUS-4.8] sq-quly (#796): the opt-in `Store::parseShaclCompact(text, base?)`
+// SHACL-Compact-Syntax parse binding. Behind the non-default `scs` feature (which
+// implies `shacl` + `serialize-rdf`) so the lean bundle carries zero SCS/serializer
+// code; the module adds a `#[wasm_bindgen] impl Store` method that parses SCS into a
+// shapes Graph via `sparq-shacl` and emits it through the existing `Store::serialize`
+// engine-writer path (no new serialiser).
+#[cfg(feature = "scs")]
+mod scs;
+
 /// An immutable, dictionary-encoded RDF store queryable with SPARQL.
 #[wasm_bindgen]
 pub struct Store {

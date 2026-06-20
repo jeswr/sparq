@@ -50,7 +50,11 @@ fn linked_bnode_graph(x: &str, y: &str, swap_order: bool) -> CanonicalGraph {
         iri("http://ex/q"),
         Term::Literal(Literal::new_simple_literal("v")),
     );
-    let triples = if swap_order { vec![t2, t1] } else { vec![t1, t2] };
+    let triples = if swap_order {
+        vec![t2, t1]
+    } else {
+        vec![t1, t2]
+    };
     canonicalize_triples(&triples).expect("canonicalize")
 }
 
@@ -174,12 +178,22 @@ fn canon_error_display_is_distinct_and_nonempty_per_variant() {
     let br = CanonError::Bridge("parse boom".into()).to_string();
     let cz = CanonError::Canonicalization("hndq limit".into()).to_string();
 
-    for (label, msg) in [("TripleTerm", &tt), ("Bridge", &br), ("Canonicalization", &cz)] {
+    for (label, msg) in [
+        ("TripleTerm", &tt),
+        ("Bridge", &br),
+        ("Canonicalization", &cz),
+    ] {
         assert!(!msg.is_empty(), "{label} Display must be non-empty");
     }
     // The wrapped detail must be carried through, and the three messages must differ.
-    assert!(br.contains("parse boom"), "Bridge must carry its detail: {br}");
-    assert!(cz.contains("hndq limit"), "Canon must carry its detail: {cz}");
+    assert!(
+        br.contains("parse boom"),
+        "Bridge must carry its detail: {br}"
+    );
+    assert!(
+        cz.contains("hndq limit"),
+        "Canon must carry its detail: {cz}"
+    );
     assert_ne!(tt, br);
     assert_ne!(tt, cz);
     assert_ne!(br, cz);

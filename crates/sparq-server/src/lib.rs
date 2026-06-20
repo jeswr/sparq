@@ -93,6 +93,20 @@ pub mod descriptors;
 #[cfg(feature = "tpf")]
 pub mod tpf;
 
+/// [OPUS-4.8] (sq-hj4n, gh-916) OPT-IN Solid-style **N3-Patch** parsing (`text/n3`) for the
+/// Graph-Store-Protocol `PATCH` method — the `solid:InsertDeletePatch` dialect (`solid:where` /
+/// `solid:deletes` / `solid:inserts` formulas), translated into ONE atomic graph-scoped SPARQL
+/// Update. Pure (no async; the async dispatch is in [`http`]). Compiled ONLY behind the `n3-patch`
+/// feature, and served only when [`ServerConfig::n3_patch`] is also set (`--n3-patch` /
+/// `SPARQ_N3_PATCH=1`) — the same double-opt-in as [`tpf`]. The N3 parsing rides the `oxttl`
+/// `N3Parser` (already a server dependency for the GSP read-side Turtle serialiser), so it pulls
+/// NO new dependency. With the feature off this module and its dispatch arm are `#[cfg]`-stripped:
+/// a `text/n3` `PATCH` body is then a plain `415`, byte-identical to before. The OTHER `PATCH`
+/// dialect (`application/sparql-update` body) is always-on, in [`http`], and NOT behind this
+/// feature.
+#[cfg(feature = "n3-patch")]
+pub mod n3_patch;
+
 /// Prometheus metrics — hand-rolled text exposition at `GET /metrics` (T22).
 #[cfg(feature = "server")]
 pub mod metrics;

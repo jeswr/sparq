@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML), Graph Store read AND write (PUT/POST/DELETE on graph resources, RDF/XML bodies accepted), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -347,6 +347,23 @@ curl -X POST 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
 # DELETE = DROP the graph (204; 404 if a named graph is absent; ?default → CLEAR DEFAULT, always 204):
 curl -X DELETE 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'
 
+# PATCH = atomic, graph-scoped in-place MODIFY (sq-hj4n; 204 on success). Two body dialects:
+#   1) application/sparql-update (ALWAYS-ON) — the body IS a SPARQL Update, applied atomically
+#      through the same writer, with its WHERE dataset scoped to the addressed graph:
+curl -X PATCH 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
+     -H 'content-type: application/sparql-update' \
+     --data 'DELETE DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } } ;
+             INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o2> } }'
+#   2) text/n3 (Solid N3-Patch, OPT-IN: needs the `n3-patch` build feature AND --n3-patch / SPARQ_N3_PATCH=1;
+#      else 415). A solid:InsertDeletePatch translated into ONE atomic graph-scoped DELETE/INSERT … WHERE:
+curl -X PATCH 'http://127.0.0.1:3030/sparql/graph?default' \
+     -H 'content-type: text/n3' --data '@prefix solid: <http://www.w3.org/ns/solid/terms#>.
+@prefix ex: <http://ex/>.
+_:p a solid:InsertDeletePatch;
+  solid:where   { ?s ex:name "Alice" . };
+  solid:deletes { ?s ex:age 30 . };
+  solid:inserts { ?s ex:age 31 . }.'
+
 curl http://127.0.0.1:3030/health                               # -> "ok"
 curl http://127.0.0.1:3030/metrics                              # Prometheus text exposition (gated by --auth-token-read; sq-9jrx)
 
@@ -392,8 +409,34 @@ DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot
 consistency, blocking-on-commit semantics, the `Sparq-Generation` header (time-travel
 feature), AND its **auth gate** (a GSP write is as powerful as an UPDATE, so `PUT`/`POST`/
-`DELETE` are gated by `--auth-token` exactly like an UPDATE; `GET`/`HEAD` are reads). A
+`DELETE`/`PATCH` are gated by `--auth-token` exactly like an UPDATE; `GET`/`HEAD` are reads). A
 malformed body → `400`; an unsupported body Content-Type → `415`.
+
+**`PATCH` — atomic, graph-scoped in-place modify (`sq-hj4n`, gh-916).** A `PATCH` on a graph
+resource applies an atomic modify to the addressed graph, with two body dialects:
+
+- **`application/sparql-update` (ALWAYS-ON, no feature):** the body IS a SPARQL Update, applied
+  atomically through the shared writer. It is **scoped** to the addressed graph by defaulting the
+  update's WHERE dataset to that graph (the SPARQL 1.1 Protocol §2.2 `using-graph-uri` mechanism).
+  **Honest scope:** this scopes what the WHERE *reads*; an operation that explicitly names a
+  *different* graph (`INSERT DATA { GRAPH <other> { … } }`, or an in-body `WITH`/`USING`) still
+  targets where it says — and supplying the override alongside an in-body `USING`/`WITH` on a
+  *named*-graph PATCH is the §2.2 conflict `400`. For `?default` the scoping is a no-op (the default
+  graph is already the WHERE default). Success → `204`.
+- **`text/n3` (OPT-IN — the `n3-patch` build feature AND `--n3-patch` / `SPARQ_N3_PATCH=1`):** a
+  Solid-style **N3-Patch** (`solid:InsertDeletePatch` with `solid:where` / `solid:deletes` /
+  `solid:inserts` formulas), translated into ONE atomic graph-scoped SPARQL Update (every block
+  wrapped in `GRAPH <g> { … }` for a named graph). With a `solid:where` it is a pattern-based
+  `DELETE/INSERT … WHERE`; without one it is ground `DELETE DATA`/`INSERT DATA` — either way one
+  writer submission. Validation: exactly one patch resource, each formula property at most once, at
+  least one of `deletes`/`inserts`, and no blank node in `deletes`/`where` (only `inserts` may mint
+  one) → otherwise `400`. **Double opt-in** (build feature + runtime flag) mirrors `tpf`/`shacl`:
+  with the feature **off** the N3-Patch parser + dispatch are `#[cfg]`-stripped (a `text/n3` body is
+  then a plain `415`, byte-identical to before, and no new dependency / no `sparq-core` /
+  `sparq-engine` / wasm impact); with the feature **on** but the flag **off** a `text/n3` body is
+  also `415`. The N3 parsing rides `oxttl`'s `N3Parser` — already a server dependency — so even
+  feature-on adds NO new crate. Success → `204`. `PATCH` is a WRITE, gated by `--auth-token` like an
+  UPDATE.
 
 **5b. Container (ghcr.io).** Published on every release tag (`ghcr.io/jeswr/sparq-server`,
 distroless). The image sets `SPARQ_ALLOW_REMOTE=1` so the `0.0.0.0` bind it needs (loopback

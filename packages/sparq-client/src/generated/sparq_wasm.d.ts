@@ -181,6 +181,36 @@ export class Store {
      */
     static loadDataset(text: string, format: string): Store;
     /**
+     * [OPUS-4.8] sq-quly (#796): parses a **SHACL Compact Syntax (SCS)** document
+     * into the equivalent SHACL **shapes graph** and returns it as a **pretty
+     * Turtle** string.
+     *
+     * `text` is an SCS document (the W3C compact syntax — `shape`/`shapeClass`,
+     * path expressions, `[min..max]`, `nodeKind`, `@`shape-refs, `param=value`,
+     * `!`/`|`, nested `{…}` and `[…]`, directives). `base` (optional) is the base
+     * IRI that relative IRIs and the `owl:Ontology` subject resolve against; pass
+     * `undefined`/`null` for the SCS no-`BASE` convention
+     * (`urn:x-base:default`). A document-level `BASE` directive overrides it.
+     *
+     * The returned Turtle is byte-for-byte what [`serialize`](Self::serialize)
+     * produces for the same graph with `("turtle", pretty=true, indent="  ",
+     * abbreviate=true)` — a sorted, blank-line-separated, `@prefix`-headed document
+     * (the `sh:` / `rdf:` / `rdfs:` / `xsd:` / `owl:` well-known prefixes are
+     * compacted). It re-parses as standard Turtle, and the shapes it carries
+     * validate data **identically** to the equivalent hand-written Turtle shapes —
+     * it is the same triples [`validate`](Self::validate) consumes. This is the
+     * SCS *input* counterpart for the playground's "Compact → shapes" mode.
+     *
+     * This is a **stateless** one-shot — it does not consult the receiver's stored
+     * triples (build a throwaway store with `Store.load("", "turtle")` to call it).
+     * Errors only when SCS parsing fails (a `JsError` carrying the parser's message
+     * + 1-based line); serialising the parsed graph is infallible. Available only
+     * when the crate is built with the OPT-IN `scs` feature (which implies `shacl`
+     * + `serialize-rdf`) — the site REPL bundle enables it; the lean default bundle
+     * does not.
+     */
+    parseShaclCompact(text: string, base?: string | null): string;
+    /**
      * Runs a SELECT query and returns the results as a SPARQL 1.1 JSON string
      * (`application/sparql-results+json`). Benefits from the engine's streaming
      * optimisations: LIMIT stops the scan early, numeric FILTERs are pushed into
@@ -283,6 +313,41 @@ export class Store {
      */
     serialize(format: string, pretty: boolean, indent: string | null | undefined, abbreviate: boolean, prefixes?: Array<any> | null): string;
     /**
+     * [OPUS-4.8] sq-oy1f.5: serialises the store as a **full W3C JSON-LD 1.1 Compaction**
+     * document against a caller-supplied `@context`.
+     *
+     * Where [`serialize`](Self::serialize)`("jsonld-compacted", …)` only abbreviates IRIs
+     * to `prefix:local` CURIEs from a `[prefix, iri]` map (a *prefix-only* `@context`), this
+     * applies the real **W3C JSON-LD 1.1 Compaction Algorithm** against the `@context` JSON
+     * you pass: **term definitions** (`{"name":"http://…/name"}` or the expanded
+     * `{"@id"/"@reverse","@type","@language","@container"}` form), **`@vocab`**, **type
+     * coercion** (a term `@type` matching a datatype collapses the value object;
+     * `@type":"@id"`/`@vocab` collapse a node reference to a bare IRI string), **language
+     * coercion**, **`@container`** (`@set`/`@list`/`@language`/`@index`), **`@reverse`**
+     * terms, and `@id`/`@type` keyword aliasing — value + node + IRI compaction against the
+     * active context. The whole dataset is emitted (named graphs as nested `@graph` nodes).
+     *
+     * `context` is the `@context` **JSON text** — e.g. `'{"@vocab":"http://schema.org/"}'`
+     * or `'{"name":"http://xmlns.com/foaf/0.1/name"}'`. It must be a JSON **object** (a
+     * JSON-LD `@context` value); an empty `{}` yields an expanded-shaped document with no
+     * abbreviation. A non-object or malformed JSON is rejected with a `JsError` (never a
+     * silently-wrong document).
+     *
+     * `pretty` selects the indented multi-line shape (whitespace-only re-indentation of the
+     * minified document); `indent` is the indent unit (`undefined`/`null` ⇒ two spaces,
+     * ignored when `pretty` is `false`).
+     *
+     * The compaction is **lossless** — every coercion it applies is invertible against the
+     * same `@context`, so a JSON-LD-to-RDF round-trip of the output reconstructs the original
+     * triples. Routes through the SAME engine writer
+     * (`sparq_engine::serialize::graph_to_jsonld_compact`) the native CLI surface uses, so
+     * the bytes match. Still **dependency-free** (a hand-rolled `Json` AST — no `serde_json`,
+     * no json-ld crate). Available only when the crate is built with the OPT-IN
+     * `serialize-rdf` feature (the JSON-LD *serialise-out* path needs no `jsonld` feature —
+     * that one is INGEST-only); on the lean default bundle this method is absent.
+     */
+    serializeCompact(context: string, pretty: boolean, indent?: string | null): string;
+    /**
      * Applies a SPARQL 1.1 Update (`INSERT DATA`, `DELETE DATA`, `CLEAR`,
      * `DELETE/INSERT … WHERE` on the default graph) and returns the **new** store —
      * the receiver is immutable and remains valid. Mirrors `sparq_engine::update`'s
@@ -355,12 +420,14 @@ export interface InitOutput {
     readonly store_load: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_loadCompressed: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_loadDataset: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly store_parseShaclCompact: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly store_query: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_queryChunks: (a: number, b: number, c: number) => [number, number, number];
     readonly store_queryCursor: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_queryQuads: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_queryQuadsChunks: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_serialize: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+    readonly store_serializeCompact: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly store_size: (a: number) => number;
     readonly store_update: (a: number, b: number, c: number) => [number, number, number];
     readonly store_updateInPlace: (a: number, b: number, c: number) => [number, number];

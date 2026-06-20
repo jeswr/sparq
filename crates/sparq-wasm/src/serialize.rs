@@ -64,9 +64,10 @@
 //! document.
 
 use sparq_engine::serialize::{
-    default_prefixes, graph_to_jsonld_pretty_with, graph_to_jsonld_with, graph_to_trig_pretty_with,
-    graph_to_trig_with, graph_to_turtle_pretty_with, graph_to_turtle_with, prefixes_from_pairs,
-    JsonLdForm, JsonLdPrettyOptions, Prefixes, PrettyOptions,
+    default_prefixes, graph_to_jsonld_compact, graph_to_jsonld_compact_pretty,
+    graph_to_jsonld_pretty_with, graph_to_jsonld_with, graph_to_trig_pretty_with,
+    graph_to_trig_with, graph_to_turtle_pretty_with, graph_to_turtle_with, parse_context_json,
+    prefixes_from_pairs, JsonLdForm, JsonLdPrettyOptions, Prefixes, PrettyOptions,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -246,6 +247,66 @@ impl Store {
                 SerFormat::Trig => graph_to_trig_with(&self.graph, &Prefixes::new()),
                 SerFormat::JsonLd(_) => unreachable!("JSON-LD handled above"),
             }
+        };
+        Ok(out)
+    }
+
+    /// [OPUS-4.8] sq-oy1f.5: serialises the store as a **full W3C JSON-LD 1.1 Compaction**
+    /// document against a caller-supplied `@context`.
+    ///
+    /// Where [`serialize`](Self::serialize)`("jsonld-compacted", …)` only abbreviates IRIs
+    /// to `prefix:local` CURIEs from a `[prefix, iri]` map (a *prefix-only* `@context`), this
+    /// applies the real **W3C JSON-LD 1.1 Compaction Algorithm** against the `@context` JSON
+    /// you pass: **term definitions** (`{"name":"http://…/name"}` or the expanded
+    /// `{"@id"/"@reverse","@type","@language","@container"}` form), **`@vocab`**, **type
+    /// coercion** (a term `@type` matching a datatype collapses the value object;
+    /// `@type":"@id"`/`@vocab` collapse a node reference to a bare IRI string), **language
+    /// coercion**, **`@container`** (`@set`/`@list`/`@language`/`@index`), **`@reverse`**
+    /// terms, and `@id`/`@type` keyword aliasing — value + node + IRI compaction against the
+    /// active context. The whole dataset is emitted (named graphs as nested `@graph` nodes).
+    ///
+    /// `context` is the `@context` **JSON text** — e.g. `'{"@vocab":"http://schema.org/"}'`
+    /// or `'{"name":"http://xmlns.com/foaf/0.1/name"}'`. It must be a JSON **object** (a
+    /// JSON-LD `@context` value); an empty `{}` yields an expanded-shaped document with no
+    /// abbreviation. A non-object or malformed JSON is rejected with a `JsError` (never a
+    /// silently-wrong document).
+    ///
+    /// `pretty` selects the indented multi-line shape (whitespace-only re-indentation of the
+    /// minified document); `indent` is the indent unit (`undefined`/`null` ⇒ two spaces,
+    /// ignored when `pretty` is `false`).
+    ///
+    /// The compaction is **lossless** — every coercion it applies is invertible against the
+    /// same `@context`, so a JSON-LD-to-RDF round-trip of the output reconstructs the original
+    /// triples. Routes through the SAME engine writer
+    /// (`sparq_engine::serialize::graph_to_jsonld_compact`) the native CLI surface uses, so
+    /// the bytes match. Still **dependency-free** (a hand-rolled `Json` AST — no `serde_json`,
+    /// no json-ld crate). Available only when the crate is built with the OPT-IN
+    /// `serialize-rdf` feature (the JSON-LD *serialise-out* path needs no `jsonld` feature —
+    /// that one is INGEST-only); on the lean default bundle this method is absent.
+    #[wasm_bindgen(js_name = serializeCompact)]
+    pub fn serialize_compact(
+        &self,
+        context: &str,
+        pretty: bool,
+        indent: Option<String>,
+    ) -> Result<String, JsError> {
+        // The caller `@context` must be a JSON object (a JSON-LD `@context` value). A
+        // non-object / malformed string surfaces as an `Err` rather than a wrong document.
+        let ctx = parse_context_json(context).ok_or_else(|| {
+            JsError::new(
+                "the `context` argument must be a JSON object (a JSON-LD @context); \
+                 got malformed JSON or a non-object value",
+            )
+        })?;
+        let out = if pretty {
+            // The indented multi-line shape, matching `serialize("jsonld-…", true, …)`'s
+            // JSON-LD indentation (whitespace-only re-indentation of the minified document).
+            let opts = JsonLdPrettyOptions {
+                indent: indent.unwrap_or_else(|| "  ".to_string()),
+            };
+            graph_to_jsonld_compact_pretty(&self.graph, &ctx, &opts)
+        } else {
+            graph_to_jsonld_compact(&self.graph, &ctx)
         };
         Ok(out)
     }
@@ -530,5 +591,78 @@ mod tests {
                 "JSON-LD ({fmt}) serialise->parse round-trip preserves triple count"
             );
         }
+    }
+
+    // ---- [OPUS-4.8] sq-oy1f.5: full W3C JSON-LD 1.1 Compaction (caller `@context`) ----
+    //
+    // `serializeCompact(context, pretty, indent)` exposes the engine's
+    // `graph_to_jsonld_compact` — the REAL Compaction Algorithm against a supplied `@context`,
+    // not the prefix-only `jsonld-compacted` form of `serialize`. The `Ok` arm runs natively
+    // (no `JsError::new`), so the load-bearing parity invariant is pinned here; the `Err` arm
+    // (a malformed context) and the wasm32 boundary are covered by `tests/web.rs`.
+
+    use sparq_engine::serialize::{
+        graph_to_jsonld_compact, graph_to_jsonld_compact_pretty, parse_context_json,
+    };
+
+    /// `serializeCompact` is byte-identical to the engine `graph_to_jsonld_compact` over the
+    /// same graph and `@context` — the parity invariant (the binding adds no reformatting),
+    /// and the compaction actually fires (an `@vocab` context drops the namespace from the
+    /// predicate keys, which the prefix-only `jsonld-compacted` form cannot do).
+    #[test]
+    fn serialize_compact_matches_engine() {
+        let data = r#"<http://schema.org/x> <http://schema.org/name> "Alice" ;
+                       <http://schema.org/knows> <http://schema.org/y> ."#;
+        let store = Store::load(data, "turtle").unwrap();
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let ctx_text = r#"{"@vocab":"http://schema.org/"}"#;
+        let got = store.serialize_compact(ctx_text, false, None).unwrap();
+        let ctx = parse_context_json(ctx_text).unwrap();
+        let want = graph_to_jsonld_compact(&g, &ctx);
+        assert_eq!(got, want, "serializeCompact must equal the engine writer");
+        // The `@vocab` term-compaction the prefix-only form CANNOT do: bare `name`/`knows`
+        // predicate keys (not `schema:name`), proving the full algorithm ran.
+        assert!(got.contains("\"@vocab\":\"http://schema.org/\""), "context echoed: {got}");
+        assert!(got.contains("\"name\":"), "predicate is @vocab-relative bare term: {got}");
+        // Contrast: the prefix-only `jsonld-compacted` form keeps a `schema:` CURIE, never a
+        // bare `name` key — so the new method genuinely exposes a richer surface.
+        let prefix_only = store.serialize("jsonld-compacted", false, None, true, None).unwrap();
+        assert!(!prefix_only.contains("\"name\":"), "prefix-only form is not @vocab: {prefix_only}");
+    }
+
+    /// The pretty arm equals `graph_to_jsonld_compact_pretty` and re-indents the minified
+    /// document (whitespace-only), and a custom indent flows through.
+    #[test]
+    fn serialize_compact_pretty_matches_engine() {
+        let data = r#"<http://ex/s> <http://ex/p> "v" ."#;
+        let store = Store::load(data, "turtle").unwrap();
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let ctx_text = r#"{"@vocab":"http://ex/"}"#;
+        let ctx = parse_context_json(ctx_text).unwrap();
+        let two = store.serialize_compact(ctx_text, true, Some("  ".to_string())).unwrap();
+        let opts = JsonLdPrettyOptions { indent: "  ".to_string() };
+        assert_eq!(two, graph_to_jsonld_compact_pretty(&g, &ctx, &opts));
+        assert!(two.contains('\n'), "pretty compaction is multi-line: {two}");
+        // A four-space indent differs; `None` defaults to two spaces.
+        let four = store.serialize_compact(ctx_text, true, Some("    ".to_string())).unwrap();
+        assert_ne!(two, four, "indent option must affect the output");
+        let dflt = store.serialize_compact(ctx_text, true, None).unwrap();
+        assert_eq!(dflt, two, "None indent uses the two-space default");
+    }
+
+    /// An empty `{}` IS a valid (no-op) `@context` — the `Ok` arm runs natively, so this
+    /// pins that the parser accepts it (an expanded-shaped, full-IRI document). The malformed
+    /// `@context` `Err` arm touches `JsError::new` (which traps off-wasm), so it lives in the
+    /// wasm32 `tests/web.rs::serialize_compact_round_trips`, not here.
+    #[test]
+    fn serialize_compact_empty_context_is_ok() {
+        let data = r#"<http://ex/s> <http://ex/p> "v" ."#;
+        let store = Store::load(data, "turtle").unwrap();
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let got = store.serialize_compact("{}", false, None).unwrap();
+        let ctx = parse_context_json("{}").unwrap();
+        assert_eq!(got, graph_to_jsonld_compact(&g, &ctx), "empty @context matches the engine");
+        // No abbreviation with an empty context: the predicate stays a full IRI.
+        assert!(got.contains("http://ex/p"), "full-IRI predicate with empty @context: {got}");
     }
 }

@@ -90,18 +90,18 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   `*_with` variants + `prefixes_from_pairs([(prefix, iri), …])` accept a caller's own prefix
   policy). Plus a deterministic **pretty** Turtle / TriG variant
   (`graph_to_turtle_pretty` / `graph_to_trig_pretty`, or `write_turtle_pretty` with
-  `PrettyOptions { indent, abbreviate }`): subject grouping, predicate-object lists (`;`), object
-  lists (`,`), `a` for `rdf:type`, used-only `@prefix` abbreviation, and *emission-order-independent*
-  output (sorted, so the same triple set always renders to the same bytes). It matches the
-  output shape of the site's `prettyTurtle` reshaper — the long-term engine home for that
-  TS formatter — and is round-trip-correct (re-parses to the same triple set). The JSON-LD
+  `PrettyOptions { indent, abbreviate }`): subject grouping, p-o/object lists, `a` for `rdf:type`,
+  used-only `@prefix`, *emission-order-independent* (sorted) — round-trip-correct. The JSON-LD
   writers have a matching **pretty** (indented) variant (`graph_to_jsonld_pretty` /
-  `write_jsonld_pretty` / the `*_with` wrappers taking `JsonLdPrettyOptions { indent }`): a
-  whitespace-only pass over the minified writer — same deterministic ordering, round-trips
-  identically, dependency-free (a hand-written JSON re-indenter, no `serde_json`). The N-Triples
-  writer (`triples_to_ntriples`) is always on. When the feature is off, zero serializer code
-  compiles, the default build is byte-identical, and **no new dependencies** are added (the
-  writers reuse the existing `oxrdf` term model). See
+  `write_jsonld_pretty`, `JsonLdPrettyOptions { indent }`): a whitespace-only re-indent. For
+  true **W3C JSON-LD 1.1 Compaction** against a caller `@context`,
+  `graph_to_jsonld_compact(&g, &ctx)` / `write_jsonld_compact` (+ the `_pretty` variants) apply
+  the full algorithm — term definitions, `@vocab`, type/language/`@container`
+  (`@set`/`@list`/`@language`/`@index`) coercion, `@reverse`, `@id`/`@type` aliasing, value +
+  node + IRI compaction — still hand-rolled, dependency-free (`parse_context_json` builds it).
+  `JsonLdForm::Compacted` remains the lighter prefix-only `@context`. The N-Triples writer
+  (`triples_to_ntriples`) is always on; off, zero serializer code compiles, the default build is
+  byte-identical, **no new dependencies** added. See
   [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 

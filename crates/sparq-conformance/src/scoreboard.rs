@@ -5,8 +5,10 @@
 //! `sparq-conformance` binary), the inference suites (`sparq-inference-conformance`),
 //! the W3C SHACL core + SHACL-SPARQL suites (crate-local `cargo test` runners in
 //! `sparq-shacl`), the OGC GeoSPARQL topology ratchet (a crate-local `cargo test`
-//! in `sparq-geo`), and the Solid WAC + ACP library-level decision-parity suites
-//! (crate-local `cargo test` runners in `sparq-solid`). The drift-scanner
+//! in `sparq-geo`), the Solid WAC + ACP library-level decision-parity suites
+//! (crate-local `cargo test` runners in `sparq-solid`), and the SolidLab ODRL Test
+//! Suite (a crate-local `cargo test` runner in `sparq-policy`, sq-tmsd6). The
+//! drift-scanner
 //! (`scripts/drift-scan.py` §5.E `conformance-split`) flagged the SHACL + geo
 //! ratchets (sq-ncvq.16), then the Solid WAC/ACP ratchets (sq-j174), as living
 //! OUTSIDE the central scoreboard, so no single artifact answered "what conformance
@@ -52,6 +54,20 @@ pub enum Runner {
         /// `--test <target>` name, e.g. `w3c_core`.
         target: &'static str,
     },
+    /// [OPUS-4.8] sq-oy1f.2 — a crate-local `cargo test` runner that is OFF by
+    /// default and only runs under an opt-in cargo `feature` (e.g. the JSON-LD
+    /// lane behind `jsonld-suite`). Same as [`CrateTest`](Runner::CrateTest) but
+    /// the rendered command names the required feature, so the scoreboard's
+    /// "how to run" column is correct for a feature-gated ratchet (the lane
+    /// compiles out / self-skips when the feature is off — the lean-core posture).
+    FeatureGatedCrateTest {
+        /// Crate the test lives in, e.g. `sparq-conformance`.
+        krate: &'static str,
+        /// `--test <target>` name, e.g. `jsonld_suite`.
+        target: &'static str,
+        /// The cargo `--features` flag the lane requires, e.g. `jsonld-suite`.
+        feature: &'static str,
+    },
 }
 
 impl Runner {
@@ -67,6 +83,9 @@ impl Runner {
             }
             Runner::CrateTest { krate, target } => {
                 format!("cargo test -p {krate} --test {target}")
+            }
+            Runner::FeatureGatedCrateTest { krate, target, feature } => {
+                format!("cargo test -p {krate} --features {feature} --test {target}")
             }
         }
     }
@@ -110,10 +129,17 @@ pub struct Suite {
 ///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
 /// * Solid ACP 12 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 12`
 ///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
+/// * JSON-LD toRdf 413 — `sparq-conformance` `tests/jsonld_suite.rs`
+///   `TORDF_FLOOR = 413` (sq-oy1f.2; opt-in `jsonld-suite` feature).
+/// * JSON-LD fromRdf 51 — `sparq-conformance` `tests/jsonld_suite.rs`
+///   `FROMRDF_FLOOR = 51` (sq-oy1f.2; opt-in `jsonld-suite` feature).
 /// * Solid WAC differential 0 — `sparq-solid` `tests/differential_oracle.rs`
 ///   `DIVERGENCE_FLOOR = 0` (sq-t58w.8; a divergence-count floor, hard 0 — the WAC
 ///   and ACP differential rows share this one const).
 /// * Solid ACP differential 0 — same `DIVERGENCE_FLOOR = 0` (sq-t58w.8).
+/// * SolidLab ODRL 59 — `sparq-policy` `tests/odrl_test_suite.rs`
+///   `ODRL_SUITE_FLOOR = 59` (sq-tmsd6; 59 of 68 cases pass, 9 in a documented
+///   not-implemented bucket).
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -217,6 +243,66 @@ pub const SUITES: &[Suite] = &[
         floor_basis: "0 divergences",
         note: "engine vs an independent reference evaluator vs the hand Expect table, \
                over the ACP parity corpus (zero divergence)",
+    },
+    // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 API conformance ratchets. The
+    // runner is crate-local here (`tests/jsonld_suite.rs`) but behind the OPT-IN
+    // `jsonld-suite` feature (forwards to sparq-core/jsonld + sparq-engine/
+    // serialize-rdf) so the default + `--workspace` builds neither link oxjsonld
+    // nor go red — the lean-core posture. Two gated categories: toRdf (JSON-LD →
+    // RDF through the real oxjsonld parse path) and fromRdf (RDF → JSON-LD through
+    // the native serialize-rdf writer, compared by a re-parse round-trip). The
+    // floors are the MEASURED pass counts at the pinned w3c/json-ld-api revision
+    // (NOT 100% — remote-context/option divergences are honest, recorded gaps);
+    // they may only RISE. Compaction/Framing/expand-out/flatten-out are the
+    // documented NOT-IMPLEMENTED buckets the runner reports separately (never
+    // failed). Floors kept in lock-step by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "W3C JSON-LD 1.1 toRdf",
+        family: "W3C JSON-LD",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "jsonld_suite",
+            feature: "jsonld-suite",
+        },
+        ci_job: "jsonld-conformance",
+        ratchet_floor: 413,
+        floor_basis: "pass",
+        note: "JSON-LD → RDF through the real oxjsonld parse path (jsonld feature); \
+               compaction/framing are documented not-implemented buckets",
+    },
+    Suite {
+        label: "W3C JSON-LD 1.1 fromRdf",
+        family: "W3C JSON-LD",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "jsonld_suite",
+            feature: "jsonld-suite",
+        },
+        ci_job: "jsonld-conformance",
+        ratchet_floor: 51,
+        floor_basis: "pass",
+        note: "RDF → JSON-LD through the native serialize-rdf writer, compared by a \
+               re-parse RDF-dataset round-trip (expanded + prefix-@context forms)",
+    },
+    // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite, wired as a crate-local
+    // decision-parity ratchet in sparq-policy (mirrors the Solid WAC/ACP pattern:
+    // the dev-only conformance crate must not take sparq-policy as a dep). Each of
+    // the 68 self-describing Turtle cases is driven through the REAL
+    // `parse_policy_str` + `evaluate` path; the oracle is the case's expected
+    // compliance report (`report:activationState` ⇒ ALLOW/DENY). The floor is the
+    // pass COUNT (59 at the pinned revision); the 9 remaining cases are a
+    // documented NOT-IMPLEMENTED bucket (LogicalConstraint/odrl:and, party/asset
+    // collections, the odrl:use umbrella-action divergence, duty-unknown) that
+    // does not fail the gate. Floor kept in lock-step by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "SolidLab ODRL Test Suite",
+        family: "SolidLab ODRL",
+        runner: Runner::CrateTest { krate: "sparq-policy", target: "odrl_test_suite" },
+        ci_job: "odrl-conformance",
+        ratchet_floor: 59,
+        floor_basis: "scenario",
+        note: "library-level allow/deny parity over the SolidLab self-describing ODRL \
+               cases through sparq-policy's real evaluate() path",
     },
 ];
 

@@ -51,6 +51,14 @@ shacl = ["dep:sparq-shacl"]
 # [OPUS-4.8] sq-yqi1: also compile SHACL Advanced Features (sh:rule) into the binding.
 # Implies `shacl`; OFF by default.
 shacl-af = ["shacl", "sparq-shacl/shacl-af"]
+# [OPUS-4.8] sq-quly (#796): expose `sparq-shacl`'s SHACL Compact Syntax (SCS) parser
+# as the `Store::parseShaclCompact(text, base?)` wasm binding — SCS text → the shapes
+# graph serialised as Turtle. OFF by default so the lean bundle is byte-identical to
+# before. Implies BOTH `shacl` (forwards to `sparq-shacl/scs`, which lives under that
+# dep) AND `serialize-rdf` (the binding REUSES the existing `Store::serialize` engine
+# writer to emit the shapes graph as Turtle — it rolls no new serializer). The site
+# REPL build (js `build:wasm`) turns it on.
+scs = ["shacl", "serialize-rdf", "sparq-shacl/scs"]
 # [OPUS-4.8] sq-dvyi: JSON-LD ingest in the browser, OPT-IN behind the `jsonld` feature
 # (OFF by default). Forwards to sparq-core's `jsonld` feature so the `oxjsonld` parser is
 # only linked when enabled. The DEFAULT (lean) bundle — the one scripts/ci-bench.sh tracks

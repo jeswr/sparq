@@ -577,6 +577,20 @@ pub struct ServerConfig {
     /// is a READ over the store, so the endpoint is gated by the read auth like any GET.
     #[cfg(feature = "shacl")]
     pub shacl: bool,
+    /// [OPUS-4.8] (sq-hj4n, gh-916) OPT-IN Solid-style **N3-Patch** (`text/n3`) dialect for the
+    /// Graph-Store-Protocol `PATCH` method. When `true`, a `PATCH` whose body is `text/n3` (a
+    /// `solid:InsertDeletePatch`) is parsed into its `solid:deletes` / `solid:inserts` /
+    /// `solid:where` formulas and applied as ONE atomic graph-scoped SPARQL Update through the same
+    /// sequenced writer the always-on `application/sparql-update` `PATCH` body uses. `false` (the
+    /// default) leaves it off: a `text/n3` `PATCH` body is `415` (the always-on
+    /// `application/sparql-update` `PATCH` dialect is unaffected — it never depends on this flag).
+    ///
+    /// This field exists only with the `n3-patch` cargo feature (like [`tpf`](Self::tpf) under
+    /// `tpf`); a build without that feature compiles no N3-Patch code and pays zero cost. Set by
+    /// the binary's `--n3-patch` flag / `SPARQ_N3_PATCH=1` env. A `PATCH` is a WRITE, so it is
+    /// gated by `--auth-token` exactly like an UPDATE.
+    #[cfg(feature = "n3-patch")]
+    pub n3_patch: bool,
 }
 
 impl Default for ServerConfig {
@@ -673,6 +687,11 @@ impl Default for ServerConfig {
             // SPARQ_SHACL=1).
             #[cfg(feature = "shacl")]
             shacl: false,
+            // [OPUS-4.8] sq-hj4n: safe default — the OPT-IN N3-Patch PATCH dialect is OFF even when
+            // the feature is compiled in (the operator opts in deliberately via --n3-patch /
+            // SPARQ_N3_PATCH=1). The always-on application/sparql-update PATCH dialect is unaffected.
+            #[cfg(feature = "n3-patch")]
+            n3_patch: false,
         }
     }
 }
@@ -902,6 +921,13 @@ impl ServerConfig {
         #[cfg(feature = "shacl")]
         if let Ok(v) = std::env::var("SPARQ_SHACL") {
             cfg.shacl = env_truthy(&v);
+        }
+        // [OPUS-4.8] sq-hj4n: SPARQ_N3_PATCH truthy ("1"/"true"/"yes"/"on") enables the OPT-IN
+        // Solid N3-Patch PATCH dialect (text/n3). Off by default. Only present with the
+        // `n3-patch` feature.
+        #[cfg(feature = "n3-patch")]
+        if let Ok(v) = std::env::var("SPARQ_N3_PATCH") {
+            cfg.n3_patch = env_truthy(&v);
         }
         Ok(cfg)
     }
@@ -4338,13 +4364,20 @@ async fn graph_store(
         Method::PUT => gsp_put(state, graph, headers, &body).await,
         Method::POST => gsp_post(state, graph, headers, &body).await,
         Method::DELETE => gsp_delete(state, graph).await,
-        // PATCH is not part of the Graph Store HTTP Protocol.
+        // [OPUS-4.8] (sq-hj4n, gh-916) PATCH = a graph-scoped, atomic in-place modify. Two body
+        // dialects: an always-on `application/sparql-update` body (executed atomically through the
+        // same sequenced writer the /sparql update path uses, scoped to this graph), and — only
+        // with the `n3-patch` feature AND the `--n3-patch` runtime flag — a Solid-style `text/n3`
+        // N3-Patch body. An unsupported PATCH content type is a `415`.
+        Method::PATCH => gsp_patch(state, graph, headers, &body).await,
+        // Any other method is not part of the Graph Store HTTP Protocol.
         _ => method_not_allowed(&[
             Method::GET,
             Method::HEAD,
             Method::PUT,
             Method::POST,
             Method::DELETE,
+            Method::PATCH,
         ]),
     };
     #[cfg(feature = "audit-log")]
@@ -4650,6 +4683,188 @@ async fn gsp_delete(state: &AppState, graph: GraphRef) -> Response {
             let update = format!("DROP GRAPH <{}>", escape_iri(iri));
             apply_gsp_update(state, update, StatusCode::NO_CONTENT).await
         }
+    }
+}
+
+/// [OPUS-4.8] (sq-hj4n, gh-916) `PATCH <graph>` — apply an ATOMIC, graph-scoped in-place modify
+/// to the addressed graph. Two body dialects, classified by `Content-Type`:
+///
+///   * **`application/sparql-update`** (ALWAYS-ON, no feature, no new dep) — the body IS a SPARQL
+///     Update. It is applied atomically through the SAME sequenced group-commit writer the
+///     `/sparql` `application/sparql-update` path uses, so the whole multi-operation body lands in
+///     ONE durable generation. It is **scoped** to the addressed graph by defaulting the update's
+///     WHERE dataset to that graph (the SPARQL 1.1 Protocol §2.2 `using-graph-uri` mechanism, via
+///     the in-tree [`rewrite_update`]). HONEST SCOPE: this scopes what the WHERE *reads*; an
+///     operation that names a DIFFERENT graph explicitly (`INSERT DATA { GRAPH <other> { … } }` /
+///     a `WITH`/`USING` clause) still writes/reads where it says, exactly as SPARQL specifies —
+///     supplying the override alongside an in-string `USING`/`WITH` is a `400` (§2.2), the existing
+///     protocol behaviour. For the default graph the override is a no-op (the default graph is
+///     already the WHERE default). Success → `204`.
+///
+///   * **`text/n3`** (OPT-IN, behind the `n3-patch` cargo feature AND the `--n3-patch` runtime
+///     flag) — a Solid-style N3-Patch (`solid:InsertDeletePatch`). Parsed into its
+///     `solid:deletes` / `solid:inserts` / `solid:where` formulas and translated into ONE atomic
+///     graph-scoped SPARQL Update (every block wrapped in `GRAPH <g> { … }` for a named graph),
+///     submitted through the same writer. Success → `204`. With the feature OFF this arm is
+///     `#[cfg]`-stripped entirely, so a `text/n3` body is a plain `415`. With the feature ON but
+///     the runtime flag OFF it is also `415` (double-opt-in, mirroring `tpf`/`shacl`).
+///
+/// Any other `Content-Type` is a `415`. A `PATCH` is a WRITE, gated like an UPDATE; the auth gate
+/// already ran in [`graph_store`] before this handler.
+async fn gsp_patch(
+    state: &AppState,
+    graph: GraphRef,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Response {
+    // [OPUS-4.8] sq-hj4n: inflate a `Content-Encoding: gzip` body under the decompression-ratio
+    // cap (zip-bomb guard) before parsing it, exactly as the GSP PUT/POST write paths do.
+    let body = match decode_request_body(body, headers, state.config()) {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+    let ct = content_type(headers);
+    let mt = ct.split(';').next().unwrap_or("").trim();
+    match mt {
+        // ----- ALWAYS-ON dialect: a SPARQL Update body, scoped to the addressed graph. -----
+        "application/sparql-update" => {
+            let update = match std::str::from_utf8(&body) {
+                Ok(u) => u,
+                Err(_) => return bad_request("request body is not valid UTF-8"),
+            };
+            // Scope the update's WHERE dataset to the addressed named graph (§2.2 using-graph-uri,
+            // reusing the in-tree rewrite). The default graph is already the WHERE default → no
+            // override. `rewrite_update` rejects a conflict with an in-string USING/WITH (400) and
+            // a malformed update (400), sanitizing the detail.
+            let over = match &graph {
+                GraphRef::Default => UsingOverride::default(),
+                GraphRef::Named(iri) => UsingOverride {
+                    default: vec![iri.clone()],
+                    named: Vec::new(),
+                },
+            };
+            match rewrite_update(update, &over) {
+                // Reuse the shared update path: atomic group-commit, 204 on success, the same
+                // budget/timeout/sanitized-rejection discipline as the /sparql update body.
+                Ok(rewritten) => run_update(state, rewritten).await,
+                Err(resp) => resp,
+            }
+        }
+        // ----- OPT-IN dialect: Solid N3-Patch. Compiled out entirely without the feature. -----
+        #[cfg(feature = "n3-patch")]
+        "text/n3" => gsp_patch_n3(state, graph, &body).await,
+        // Anything else (including `text/n3` when the feature is off) is an unsupported media type.
+        _ => json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            n3_patch_unsupported_media_msg(),
+        ),
+    }
+}
+
+/// [OPUS-4.8] (sq-hj4n) The `415` message for an unsupported `PATCH` body media type. With the
+/// `n3-patch` feature on, `text/n3` is offered (so it is named); with the feature off it is not.
+/// Two literals (not a runtime `if`) so the message is exactly right per build, and the
+/// feature-off message never advertises a dialect the build cannot serve.
+#[cfg(feature = "n3-patch")]
+fn n3_patch_unsupported_media_msg() -> &'static str {
+    "PATCH body must be a graph patch: Content-Type 'application/sparql-update' \
+     (always available) or 'text/n3' (Solid N3-Patch, when --n3-patch is enabled)"
+}
+
+/// [OPUS-4.8] (sq-hj4n) The feature-OFF `415` message — names only the always-on dialect.
+#[cfg(not(feature = "n3-patch"))]
+fn n3_patch_unsupported_media_msg() -> &'static str {
+    "PATCH body must be a graph patch: Content-Type 'application/sparql-update'"
+}
+
+/// [OPUS-4.8] (sq-hj4n, gh-916) Applies a Solid N3-Patch (`text/n3`) body to the addressed graph.
+/// Compiled ONLY behind the `n3-patch` feature. Honours the `--n3-patch` runtime flag: with it off
+/// the dialect is `415` even though the feature is compiled in (the double-opt-in posture). Parses
+/// the body, builds ONE atomic graph-scoped SPARQL Update, and submits it through the shared
+/// writer (atomic, 204 on success).
+#[cfg(feature = "n3-patch")]
+async fn gsp_patch_n3(state: &AppState, graph: GraphRef, body: &Bytes) -> Response {
+    // Double-opt-in: the feature is compiled in, but the operator must also flip the runtime flag.
+    if !state.config().n3_patch {
+        return json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "the Solid N3-Patch (text/n3) PATCH dialect is disabled on this server; enable it with \
+             --n3-patch / SPARQ_N3_PATCH=1, or send an 'application/sparql-update' PATCH body",
+        );
+    }
+    // The base IRI relative references resolve against — the addressed named graph's IRI (or None
+    // for the default graph), exactly as the GSP RDF-body write path does (`base_iri`).
+    let base = base_iri(&graph);
+    let patch = match crate::n3_patch::parse(body, base) {
+        Ok(p) => p,
+        // [OPUS-4.8] (sq-cz89/sq-j9zs) The parse error can quote the offending body token —
+        // withhold it from the client (the operator gets the detail in the server log) via the
+        // same sanitized-error discipline the other body-parse paths use.
+        Err(e) => {
+            return sanitized_error(
+                StatusCode::BAD_REQUEST,
+                "n3-patch-parse",
+                &e.to_string(),
+                &e.detail(),
+            )
+        }
+    };
+    // Build ONE atomic SPARQL Update from the parsed formulas, graph-scoped via the exact
+    // `graph_data_block` helper the rest of the GSP write path uses (so a named-graph patch wraps
+    // each block in `GRAPH <g> { … }`, the default graph is bare).
+    let update = build_n3_patch_update(&graph, &patch);
+    // Submit through the shared writer: atomic group-commit, 204 on success, the same
+    // budget/timeout/sanitized-rejection discipline as every other update entry point.
+    run_update(state, update).await
+}
+
+/// [OPUS-4.8] (sq-hj4n) Assembles the ATOMIC, graph-scoped SPARQL Update for a parsed N3-Patch.
+///
+/// * With a `solid:where` clause → a single pattern-based `DELETE { … } INSERT { … } WHERE { … }`
+///   (one atomic modify; the empty blocks are omitted). The `WHERE` block reads the addressed
+///   graph (`GRAPH <g> { … }` for a named graph), so the variables bind against that graph only.
+/// * Without a `where` clause (ground triples) → `DELETE DATA { … } ; INSERT DATA { … }` (the
+///   DATA-form the GSP write path already uses for concrete triples), the two ops in ONE update so
+///   they commit in ONE generation. The delete runs before the insert (an N3-Patch that deletes a
+///   triple and re-inserts a changed one is then correct).
+///
+/// Each block is wrapped in `GRAPH <g> { … }` for a named graph, or left bare for the default
+/// graph — reusing [`graph_data_block`], the exact helper `gsp_put`/`gsp_post` use.
+#[cfg(feature = "n3-patch")]
+fn build_n3_patch_update(graph: &GraphRef, patch: &crate::n3_patch::N3Patch) -> String {
+    if patch.has_where {
+        // Pattern-based modify: DELETE { … } INSERT { … } WHERE { … }. Omit empty templates.
+        let mut update = String::new();
+        if !patch.deletes.is_empty() {
+            update.push_str("DELETE { ");
+            update.push_str(&graph_data_block(graph, &patch.deletes));
+            update.push_str(" }\n");
+        }
+        if !patch.inserts.is_empty() {
+            update.push_str("INSERT { ");
+            update.push_str(&graph_data_block(graph, &patch.inserts));
+            update.push_str(" }\n");
+        }
+        update.push_str("WHERE { ");
+        update.push_str(&graph_data_block(graph, &patch.conditions));
+        update.push_str(" }");
+        update
+    } else {
+        // Ground DATA-form: DELETE DATA { … } ; INSERT DATA { … } — both in one atomic update.
+        let mut ops: Vec<String> = Vec::new();
+        if !patch.deletes.is_empty() {
+            ops.push(format!(
+                "DELETE DATA {{ {} }}",
+                graph_data_block(graph, &patch.deletes)
+            ));
+        }
+        if !patch.inserts.is_empty() {
+            ops.push(format!(
+                "INSERT DATA {{ {} }}",
+                graph_data_block(graph, &patch.inserts)
+            ));
+        }
+        ops.join(" ;\n")
     }
 }
 

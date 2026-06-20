@@ -108,7 +108,10 @@ corpus exercises (32/32 fixtures round-trip graph-isomorphically): directives,
 `shape`/`shapeClass`, full path expressions, `[min..max]`, `nodeKind`, bare-IRI
 `sh:datatype`-vs-`sh:class`, `@`shape-refs (`sh:node`), `param=value`, `!` (`sh:not`),
 `|` (`sh:or`), nested `{...}` shapes (`sh:node`), and `[ ... ]` arrays (`sh:in` /
-`sh:ignoredProperties`). The wasm `Store` binding is deferred (sq-quly).
+`sh:ignoredProperties`). The browser/JS surface exposes this as the opt-in
+`Store.parseShaclCompact(text, base?)` wasm binding (sq-quly) — SCS text → the shapes
+graph as a Turtle string, behind `sparq-wasm`'s non-default `scs` feature; see the
+`javascript-wasm` skill for the JS API.
 
 `ShapesModel` (`sparq_shacl::ShapesModel`):
 

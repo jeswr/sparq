@@ -263,6 +263,45 @@ ordering unchanged, round-trips to the identical RDF, and stays dependency-free 
 hand-written JSON re-indenter — no `serde_json`, which is dev-only). Indentation is presentation
 only; the document content is byte-for-byte the minified form plus newlines/indent.
 
+**Full W3C JSON-LD 1.1 Compaction (caller `@context`).** `JsonLdForm::Compacted` above is the
+*lighter* prefix-only `@context` (it just abbreviates IRIs to `prefix:local` CURIEs). For the
+real **W3C JSON-LD 1.1 Compaction Algorithm** against a caller-supplied `@context`, use
+`graph_to_jsonld_compact(&g, &ctx)` (or the slice-level `write_jsonld_compact(&named_graphs, &ctx)`)
+— still hand-rolled and **dependency-free** (a tiny internal `Json` AST — `JsonLdValue` — no
+`serde_json`, no json-ld crate). It implements: **term definitions** (`{"name":"http://…/name"}`
+or expanded `{"@id":…,"@type":…,"@language":…,"@container":…}`), **`@vocab`** (bare vocab-relative
+terms for predicates and `@type` values), **type coercion** (a term `@type` matching a value's
+datatype collapses the value object to a bare scalar; `@type:@id`/`@vocab` collapse a node
+reference to a bare IRI string), **language coercion** (a term `@language` or the document default
+`@language` drops a matching `@language`), **`@container`** — `@set` (always an array, no
+compact-arrays), `@list` (strips the `{"@list":…}` wrapper to a bare ordered array), `@language`
+(a `{lang: value}` map) and `@index` (a `{index: value}` map), **`@reverse`** terms (forward edges
+whose predicate a reverse term maps relocate into an `@reverse` block on the object node),
+**`@id`/`@type` keyword aliasing** (`{"id":"@id","type":"@type"}`), and **value + node + IRI
+compaction** against the active context. Build the context with `parse_context_json(r#"{…}"#)`
+(a string → `JsonLdValue`, returns `None` if not a JSON object) or construct the `JsonLdValue`
+directly; the parsed `ActiveContext` drives compaction. The output is a `{"@context":…,"@graph":[…]}`
+document and the compaction is **lossless** — every coercion is invertible against the same
+`@context`, so a JSON-LD-to-RDF round-trip reconstructs the original triples (verified by the
+crate's compaction round-trip tests). *Scope:* this is the fromRdf-then-compact (serialise) path —
+sparq always emits RDF, so the input is a `Graph`, not an arbitrary remote document; scoped/typed
+contexts, `@propagate`, remote `@context` fetching, `@import`, `@protected` and JSON-LD **Framing**
+are out of scope (Framing is a separate deferred bead).
+
+```rust
+use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
+let ctx = parse_context_json(r#"{
+    "@vocab": "http://schema.org/", "id": "@id", "type": "@type",
+    "knows": {"@id": "http://schema.org/knows", "@type": "@id"}
+}"#).expect("a JSON object");
+let doc = graph_to_jsonld_compact(&g, &ctx); // term defs + @vocab + @type:@id coercion applied
+// Indented (multi-line) variant — whitespace-only over the minified document, same triples:
+// graph_to_jsonld_compact_pretty(&g, &ctx, &JsonLdPrettyOptions::default()).
+```
+
+Exposed on the wasm `Store` as `serializeCompact(context, pretty, indent?)` (the JSON-LD
+SKILL note) and on the CLI as the `jsonld-compact[-pretty]` `dump` out-format (sq-oy1f.5).
+
 From the CLI (opt-in `serialize-rdf` feature) — re-serialize a loaded document to stdout:
 
 ```bash
@@ -271,9 +310,12 @@ cargo build -p sparq-cli --features serialize-rdf
 #   out-format: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples
 #              | jsonld[-expanded|-flattened|-compacted]
 #              | jsonld-pretty[-expanded|-flattened|-compacted]
+#              | jsonld-compact[-pretty]   (FULL W3C Compaction; needs --context <ctx.jsonld>)
 #   (bare `jsonld` == jsonld-expanded; `turtle-pretty`/`trig-pretty` emit the deterministic,
 #    idiomatic Turtle/TriG from recipe 6 — sorted, blank-line-separated subject blocks;
 #    the `jsonld-pretty*` forms emit indented JSON-LD, bare `jsonld-pretty` == expanded)
+# Full 1.1 Compaction against your own @context (term defs / @vocab / coercion / @reverse):
+./target/.../sparq-cli dump data.ttl turtle jsonld-compact --context ctx.jsonld
 ```
 
 ## Gotchas / feature flags / prerequisites
@@ -341,6 +383,23 @@ cargo build -p sparq-cli --features serialize-rdf
 - **`load_dataset` is in-memory only.** Numeric/temporal filter caches are built on load
   in all in-memory paths; `into_compressed()` / `load_str_compressed()` trade a small
   per-scan decode for ~2.5× more triples per byte of RAM (browser target).
+- **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
+  JSON-LD 1.1 API conformance gate (sq-oy1f.2) drives the official `w3c/json-ld-api` suite
+  through the real paths: **toRdf** through the `jsonld` parser (oxjsonld) and **fromRdf**
+  through the `serialize-rdf` writer (compared by a re-parse RDF-dataset round-trip). The
+  floors only RISE; they reflect ACTUAL current pass counts, not full conformance — the
+  remaining toRdf divergences are documented oxjsonld limits (remote/`@import` `@context`
+  needs a `LoadDocumentCallback`; `expandContext`/`rdfDirection` options not applied; a few
+  base-normalization edge cases + leniently-accepted negative tests), and fromRdf misses
+  lists whose cells are shared across graphs. **Compaction, Framing, and expand/flatten
+  output-document comparison are NOT-IMPLEMENTED buckets** the runner reports separately and
+  never fails on (they grow the ratchet as those land — full 1.1 Compaction is sq-ixc3.4,
+  Framing is sq-oy1f.6). The lane is the opt-in `jsonld-suite` feature on `sparq-conformance`
+  (forwards to `sparq-core/jsonld` + `sparq-engine/serialize-rdf`); OFF it compiles to a
+  self-skip. Reproduce with `scripts/fetch-jsonld-tests.sh` then
+  `cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite` (self-skips if
+  the gitignored suite is absent). It is registered in the central conformance scoreboard
+  (`sparq-conformance-scoreboard`).
 
 ## See also
 

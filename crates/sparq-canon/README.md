@@ -41,12 +41,51 @@ let map = sparq_canon::issued_identifiers(&[q]).unwrap();
   canonical triples). This is what the ZK per-graph commitment pipeline
   consumes (`leaf_index = line index`).
 - **Fail-closed on poison graphs** — RDFC-1.0's pathological blow-ups hit the
-  HNDQ call-limit guard and surface as `CanonError::Canonicalization`.
+  HNDQ call-limit guard and surface as `CanonError::Canonicalization`. RDF 1.2
+  triple terms are outside the standard data model, so the standard paths
+  **fail closed** with `CanonError::TripleTerm` unless the `rdf12-triple-terms`
+  profile (below) is enabled.
 - **W3C-conformant** — validated against the official [rdf-canon test suite]
   (eval + issued-map + negative cases, SHA-256 and SHA-384) through this crate's
   own public API (`tests/rdf_canon_suite.rs`).
 
 [rdf-canon test suite]: https://github.com/w3c/rdf-canon
+
+### ⚠️ Opt-in NON-STANDARD RDF 1.2 triple-term profile (`rdf12-triple-terms`)
+
+**OFF by default; NOT W3C RDFC-1.0.** RDFC-1.0 is defined for RDF 1.1 only and
+has no notion of triple terms; their canonicalization is **unsettled upstream**
+([w3c/rdf-star-wg#114](https://github.com/w3c/rdf-star-wg/issues/114)). With the
+feature OFF the crate is **byte-identical** to before — the standard paths still
+return `CanonError::TripleTerm` on triple terms and the W3C suite still passes.
+
+Enabling `rdf12-triple-terms` adds a **separate, clearly non-standard v2** profile
+that natively re-implements the RDFC-1.0 algorithm over oxrdf 0.3 and **descends
+the Hash-N-Degree-Quads gossip into `Term::Triple` objects**, so blank nodes
+nested inside triple terms get relabelled. It is byte-identical to the standard
+path on triple-term-free input (asserted against every W3C suite vector).
+
+```toml
+sparq-canon = { path = "crates/sparq-canon", features = ["rdf12-triple-terms"] }
+```
+
+```rust
+// NON-STANDARD — canonicalizes triple terms incl. nested blank nodes (SHA-256).
+let nq = sparq_canon::canonicalize_rdf12(&dataset)?;             // quads
+let cg = sparq_canon::canonicalize_triples_rdf12(&triples)?;     // single graph
+let m  = sparq_canon::issue_dataset_rdf12(&dataset)?;            // issuer map
+// Hash-profile parity with the standard path: pick a hash via `*_with::<D: Digest>`.
+let nq384 = sparq_canon::canonicalize_rdf12_with::<sha2::Sha384>(&dataset)?;
+```
+
+**Boundary:** SHA-256 is the default; a `*_with::<D: Digest>` sibling of each v2
+entry point (e.g. `canonicalize_rdf12_with`) selects another hash — notably
+`sha2::Sha384` — for parity with the standard path's `canonicalize_quads_with`.
+The non-generic entry points are SHA-256 and byte-identical to before; a
+different `D` may yield a different (still canonical, isomorphism-stable under
+that `D`) relabelling. Triple terms occur only as objects in oxrdf 0.3 (a
+triple's subject is `NamedOrBlankNode`), so nesting descends strictly through
+the object position; the HNDQ poison-graph limit still applies.
 
 ### Opt-in, single-sourced
 
