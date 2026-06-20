@@ -13,6 +13,26 @@ mod ring;
 mod scheduler;
 mod writer;
 
+// [OPUS-4.8] sq-jluc: the response-bytes result cache (research/concurrent-serving.md
+// §5 row 2 + §6.3) is OPT-IN and OFF by default — the `result-cache` cargo feature.
+// The default `sparq-serve` build (and every consumer that does not turn the feature
+// on) carries ZERO cache code: no module, no canonicalization, no extra dependency
+// (the cache reuses the in-tree `rustc-hash` and `std`). Gating the modules — not just
+// the re-exports — is what keeps the default build lean.
+//
+// LAYER DISTINCTION (do not conflate): `sparq-engine` ALSO has a feature named
+// `result-cache`, but it is a DIFFERENT crate and a DIFFERENT layer — the engine's is
+// the embedded whole-query algebra-keyed LRU inside one engine instance (caller bumps a
+// version on mutation). THIS cache is the SERVING-layer response-bytes cache: keyed on
+// the visibility scope and invalidated by the per-pod epoch bumps of the generation
+// ring, neither of which the engine layer knows about. Cargo features are per-package,
+// so the shared name is not a conflict; the module docs in `cache.rs` spell out the
+// boundary.
+#[cfg(feature = "result-cache")]
+mod cache;
+#[cfg(feature = "result-cache")]
+mod canon;
+
 pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use footprint::{Footprint, TargetGraph};
@@ -24,3 +44,15 @@ pub use writer::{
     ApplyUpdates, CommitGranularity, WriteError, Writer, WriterConfig, DEFAULT_MAX_BATCH,
     DEFAULT_WINDOW,
 };
+
+// [OPUS-4.8] sq-jluc: result-cache public surface (feature `result-cache`). The cache's
+// invalidation `Footprint` (the per-pod / unbounded READ footprint) is a DISTINCT type
+// from this crate's write-side `footprint::Footprint` (the commutativity conflict tag),
+// so it is re-exported under the disambiguating name `ReadFootprint`.
+#[cfg(feature = "result-cache")]
+pub use cache::{
+    Bytes, CacheConfig, CacheStats, Footprint as ReadFootprint, LeadGuard, LeaseOutcome,
+    ResultCache, ScopeKey, WaitGuard, WaitOutcome, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRY_BYTES,
+};
+#[cfg(feature = "result-cache")]
+pub use canon::{canonicalize, canonicalize_renamed};
