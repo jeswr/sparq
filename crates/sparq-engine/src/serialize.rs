@@ -3632,10 +3632,34 @@ ex:bob
                 }
                 let def = ctx.terms.get(k).cloned();
                 let pred = ctx.expand(k, true);
-                // @language container: { lang: value, … }. The reserved key `@none`
-                // ([OPUS-4.8] sq-oy1f.9) holds value(s) with NO language tag (a plain
-                // string, or a typed/native value object); those re-expand via the normal
-                // value path so they keep their datatype, not a bogus `@none` language tag.
+                // [OPUS-4.8] (sq-oy1f.12) A forward member whose term is a `@reverse` term
+                // INVERTS: `{subj: {children: O}}` (children is a @reverse term over
+                // `http://ex/parent`) means `O parent subj`, NOT `subj parent O`. The writer
+                // now emits relocated reverse edges as forward members keyed by the reverse
+                // term (never an `@reverse` block — that double-inverts for a strict
+                // processor), so the reader inverts here exactly once to recover the edge.
+                if def.as_ref().is_some_and(|d| d.reverse) {
+                    for o in as_array(v) {
+                        let mut aux = String::new();
+                        let obj = object_to_nt(o, def.as_ref(), ctx, graph, counter, &mut aux);
+                        let _ = writeln!(out, "{obj} <{pred}> {subj} {graph}.");
+                        out.push_str(&aux);
+                        if let Value::Object(om) = o {
+                            let has_id = om.iter().any(|(k, _)| ctx.keyword(k) == "@id");
+                            let has_value = om.iter().any(|(k, _)| ctx.keyword(k) == "@value");
+                            if has_id && om.len() > 1 && !has_value {
+                                node_to_nquads(om, graph, ctx, counter, out);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // @language container: { lang: value(s), … }. The reserved key `@none`
+                // ([OPUS-4.8] sq-oy1f.9) holds value(s) with NO language tag (a plain string,
+                // or a typed/native value object); those re-expand via the normal value path
+                // so they keep their datatype, not a bogus `@none` language tag. A language
+                // member's value may be an array ([OPUS-4.8] sq-oy1f.14 — several values share
+                // one language), so iterate strings via `as_array`.
                 if def.as_ref().and_then(|d| d.container.as_deref()) == Some("@language") {
                     if let Value::Object(langs) = v {
                         for (lang, lv) in langs {
@@ -3655,12 +3679,14 @@ ex:bob
                                 }
                                 continue;
                             }
-                            let lex = lv.as_str().expect("language map value");
-                            let _ = writeln!(
-                                out,
-                                "{subj} <{pred}> \"{}\"@{lang} {graph}.",
-                                escape(lex)
-                            );
+                            for sv in as_array(lv) {
+                                let lex = sv.as_str().expect("language map value");
+                                let _ = writeln!(
+                                    out,
+                                    "{subj} <{pred}> \"{}\"@{lang} {graph}.",
+                                    escape(lex)
+                                );
+                            }
                         }
                         continue;
                     }
@@ -4128,10 +4154,15 @@ ex:bob
         assert_compact_count_iso(&g, ctx);
     }
 
-    /// [OPUS-4.8] sq-oy1f.9 — an `@language`-container term must NOT drop a value lacking a
-    /// language tag (a plain string or a typed/numeric literal): per spec it falls under the
-    /// `@none` member (matching pyld), not into oblivion. The round-trip must preserve the
-    /// typed literal exactly.
+    /// [OPUS-4.8] sq-oy1f.9 (faithfulness-corrected by sq-oy1f.12) — an `@language`-container
+    /// term must NOT drop a value lacking a language tag. The ORIGINAL sq-oy1f.9 fix routed a
+    /// non-string value (the `xsd:integer` `42`) into the language map's `@none` member — but
+    /// that produces a document a STRICT third-party processor (pyld) REJECTS, because a
+    /// JSON-LD language map's values must be strings. sq-oy1f.12 corrects this: a non-string
+    /// value goes to a SEPARATE non-language key (the property IRI compacted without the
+    /// language term), which preserves the datatype on read-back. This test asserts the new
+    /// pyld-faithful shape. (A *plain string* with no language still correctly uses `@none`,
+    /// which IS valid — see `compact_language_none_plain_string`.)
     #[test]
     fn compact_language_container_keeps_nonlang_under_none() {
         let g = Graph::load_str(
@@ -4145,11 +4176,16 @@ ex:bob
         let doc = compact_doc(&g, ctx);
         // The language-tagged string keeps its language-map slot.
         assert!(doc.contains("\"en\":\"Hello\""), "language-map en slot:\n{doc}");
-        // The non-language-tagged integer is preserved under `@none` (pyld-faithful), as the
-        // native scalar — NOT dropped.
+        // The non-string integer is NOT placed in the language map (that would be invalid
+        // JSON-LD); it goes under the separate non-language key (the full IRI here), keeping
+        // its native form so the datatype survives.
         assert!(
-            doc.contains("\"@none\":42"),
-            "non-lang value preserved under @none:\n{doc}"
+            doc.contains("\"http://ex/labels\":42"),
+            "non-string value preserved under a separate non-language key:\n{doc}"
+        );
+        assert!(
+            !doc.contains("\"@none\":42"),
+            "a non-string value must NOT land in the language map (pyld rejects it):\n{doc}"
         );
         // Losslessness: both triples (incl. the xsd:integer 42) survive the round-trip.
         assert_compact_iso(&g, ctx);
@@ -4208,6 +4244,243 @@ ex:bob
             "full IRI must not be emitted for the predicate:\n{doc}"
         );
         // Lossless (this bug was output-quality only — confirm anyway).
+        assert_compact_iso(&g, ctx);
+    }
+
+    // =======================================================================
+    // [OPUS-4.8] sq-oy1f.12/.13/.14 — STRICT third-party (pyld) FAITHFULNESS
+    // regressions. The conformance suite's own oxjsonld self-reparse oracle
+    // MASKED these: the bytes below were each fed to the pyld W3C reference
+    // processor (expand + toRdf) and the reproduced N-Quads compared to the
+    // source. Each assertion pins the exact pyld-verified shape (NOT merely
+    // sparq's own round-trip) so a regression that re-introduces an
+    // invalid / inverted / lossy document is caught here. The
+    // `assert_compact_iso` guard additionally pins the sparq self-round-trip.
+    // =======================================================================
+
+    /// [OPUS-4.8] sq-oy1f.12 — a `@reverse`-term edge must be emitted as a FORWARD member
+    /// keyed by the reverse term, never inside an `@reverse` block. A reverse-term key inside
+    /// an `@reverse` block DOUBLE-INVERTS: pyld applies the block's inversion AND the term's
+    /// inversion, reading the edge backwards (`<alice> <parent> <bob>` instead of
+    /// `<bob> <parent> <alice>`). The forward-member shape inverts exactly once.
+    ///
+    /// pyld differential (verified): the doc below `toRdf`s to exactly the two source triples
+    /// `<bob> <parent> <alice>` + `<alice> <name> "Alice"`, NOT the inverted edge.
+    #[test]
+    fn compact_reverse_term_as_forward_member_not_block() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:bob ex:parent ex:alice .
+               ex:alice ex:name "Alice" ."#,
+            "turtle",
+        )
+        .unwrap();
+        // `children` is a @reverse term over ex:parent; the predicate has no plain @vocab
+        // spelling, so the ONLY way to express the edge is via the reverse term.
+        let ctx = r#"{"children":{"@reverse":"http://ex/parent","@type":"@id"},
+                      "name":"http://ex/name"}"#;
+        let doc = compact_doc(&g, ctx);
+        // Inspect the @graph body only (the @context legitimately mentions `@reverse` in the
+        // term definition; we are asserting on the emitted DATA, not the context).
+        let body = doc.split("\"@graph\":").nth(1).expect("doc has @graph");
+        // The reverse term appears as a FORWARD member of the object node (ex:alice), with
+        // the subject (ex:bob) as its value. The pyld-verified faithful shape.
+        assert!(
+            body.contains(r#""children":"http://ex/bob""#),
+            "reverse term emitted as forward member:\n{doc}"
+        );
+        // NO `@reverse` block is emitted in the data (that double-inverts for a strict
+        // processor); the only `@reverse` occurrence is the context term definition.
+        assert!(
+            !body.contains("@reverse"),
+            "no @reverse block in the @graph body (it would double-invert):\n{doc}"
+        );
+        // And the internal relocation sentinel never leaks into the document.
+        assert!(
+            !doc.contains("sparq-reverse"),
+            "internal sentinel must not appear:\n{doc}"
+        );
+        // Losslessness through sparq's own reader (the conformance oracle): exact-label match.
+        assert_compact_iso(&g, ctx);
+    }
+
+    /// [OPUS-4.8] sq-oy1f.12 — a non-string value (typed/numeric literal) must NOT be placed
+    /// in a `@language` container map (a strict processor rejects the whole document:
+    /// "language map values must be strings"). It goes to a SEPARATE non-language key, which
+    /// preserves its datatype on read-back.
+    ///
+    /// pyld differential (verified): with the integer under `@none` pyld THROWS
+    /// `invalid language map value`; with it under the separate key the doc `toRdf`s to
+    /// `"42"^^xsd:integer` (datatype preserved), not a `"42"` string.
+    #[test]
+    fn compact_language_nonstring_routes_to_separate_key() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:labels "Hello"@en .
+               ex:s ex:labels 42 ."#,
+            "turtle",
+        )
+        .unwrap();
+        let ctx = r#"{"labels":{"@id":"http://ex/labels","@container":"@language"}}"#;
+        let doc = compact_doc(&g, ctx);
+        // The language map holds ONLY the string-valued, language-tagged entry.
+        assert!(doc.contains(r#""labels":{"en":"Hello"}"#), "lang map en-only:\n{doc}");
+        // The integer is under the separate full-IRI key as a native scalar (datatype kept).
+        assert!(
+            doc.contains(r#""http://ex/labels":42"#),
+            "non-string under separate key:\n{doc}"
+        );
+        assert!(!doc.contains(r#""@none":42"#), "no invalid @none scalar:\n{doc}");
+        assert_compact_iso(&g, ctx);
+    }
+
+    /// [OPUS-4.8] sq-oy1f.12 — a PLAIN string (no language tag, xsd:string) under a
+    /// `@language` container IS validly placed in the `@none` member (a language map MAY hold
+    /// `@none` strings). This case must keep working — only NON-string values move out.
+    ///
+    /// pyld differential (verified): the `@none` plain string `toRdf`s to a plain `"plain"`
+    /// literal (xsd:string), round-tripping faithfully.
+    #[test]
+    fn compact_language_none_plain_string() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:labels "Hello"@en .
+               ex:s ex:labels "plain" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let ctx = r#"{"labels":{"@id":"http://ex/labels","@container":"@language"}}"#;
+        let doc = compact_doc(&g, ctx);
+        assert!(doc.contains(r#""en":"Hello""#), "lang slot:\n{doc}");
+        // The plain string stays in the language map under `@none` (valid, pyld-faithful).
+        assert!(doc.contains(r#""@none":"plain""#), "plain string under @none:\n{doc}");
+        assert_compact_iso(&g, ctx);
+    }
+
+    /// [OPUS-4.8] sq-oy1f.13 — a plain literal value under a `@type:@id`-coerced term must be
+    /// emitted under a NON-coerced key, else a strict processor reads the literal string as a
+    /// node IRI (a string literal silently becomes a node — data corruption).
+    ///
+    /// pyld differential (verified): with `lit` (a `@type:@id` term) carrying the literal
+    /// `"http://ex/target"`, pyld `toRdf`s it to the IRI `<http://ex/target>` (corruption);
+    /// under the full-IRI key it `toRdf`s to the string literal `"http://ex/target"`. The
+    /// co-located node reference (`ref`) stays under the coerced term (its `{"@id"}` collapses
+    /// to a bare IRI — the point of the coercion).
+    #[test]
+    fn compact_typeid_literal_kept_off_coerced_term() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:ref ex:target .
+               ex:s ex:lit "http://ex/target" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let ctx = r#"{"@vocab":"http://ex/",
+                      "ref":{"@id":"http://ex/ref","@type":"@id"},
+                      "lit":{"@id":"http://ex/lit","@type":"@id"}}"#;
+        let doc = compact_doc(&g, ctx);
+        // The literal goes under the full IRI key (a non-coerced spelling), staying a literal.
+        assert!(
+            doc.contains(r#""http://ex/lit":"http://ex/target""#),
+            "literal under non-coerced key:\n{doc}"
+        );
+        // The `lit` coerced term must NOT carry the literal string (that would read as an IRI).
+        assert!(
+            !doc.contains(r#""lit":"http://ex/target""#),
+            "literal must not use the @id-coerced term:\n{doc}"
+        );
+        // The genuine node reference still uses the coerced `ref` term (bare-IRI collapse).
+        assert!(
+            doc.contains(r#""ref":"http://ex/target""#),
+            "node ref keeps the @id-coerced term:\n{doc}"
+        );
+        assert_compact_iso(&g, ctx);
+    }
+
+    /// [OPUS-4.8] sq-oy1f.14 — several values sharing one language must each survive (an array
+    /// per language slot); the prior single-set clobbered all but the last.
+    ///
+    /// pyld differential (verified): the array-per-language doc `toRdf`s to all three triples
+    /// (`"Hi"@en`, `"Hello"@en`, `"Salut"@fr`); the clobbered single-value form lost `"Hi"@en`.
+    #[test]
+    fn compact_language_container_multivalue_per_language() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:labels "Hi"@en .
+               ex:s ex:labels "Hello"@en .
+               ex:s ex:labels "Salut"@fr ."#,
+            "turtle",
+        )
+        .unwrap();
+        let ctx = r#"{"labels":{"@id":"http://ex/labels","@container":"@language"}}"#;
+        let doc = compact_doc(&g, ctx);
+        // The `en` slot is an ARRAY of both English strings (order is first-seen).
+        assert!(
+            doc.contains(r#""en":["Hi","Hello"]"#),
+            "multi-value en array:\n{doc}"
+        );
+        assert!(doc.contains(r#""fr":"Salut""#), "single fr stays scalar:\n{doc}");
+        // Losslessness: all three triples survive the round-trip.
+        assert_compact_iso(&g, ctx);
+    }
+
+    /// [OPUS-4.8] sq-oy1f.14 — an `@id` / `@graph` container that fromRdf cannot losslessly
+    /// populate must FALL BACK to the default (no-container) framing, not emit a node ref
+    /// under the container term. Emitting `{"@id": …}` under a `@container:@id` term made a
+    /// strict processor reject the document (`illegal key … @id` on a value object).
+    ///
+    /// pyld differential (verified): the buggy container shape THROWS in pyld; the default
+    /// framing (node ref under the full IRI key) `toRdf`s to both source triples.
+    #[test]
+    fn compact_id_container_falls_back_to_default_framing() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:members ex:m1 .
+               ex:m1 ex:name "M1" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let ctx = r#"{"@vocab":"http://ex/","id":"@id",
+                      "members":{"@id":"http://ex/members","@container":"@id"}}"#;
+        let doc = compact_doc(&g, ctx);
+        // Inspect the @graph body (the @context legitimately defines the `members` term).
+        let body = doc.split("\"@graph\":").nth(1).expect("doc has @graph");
+        // The edge is emitted under the full-IRI key (default framing), NOT the `members`
+        // container term, so the value is a plain node reference pyld can read.
+        assert!(
+            body.contains(r#""http://ex/members":{"id":"http://ex/m1"}"#),
+            "default framing under full IRI key:\n{doc}"
+        );
+        // The `members` container term is NOT used as a key in the data (that yields a broken
+        // @id map a strict processor rejects).
+        assert!(
+            !body.contains(r#""members":"#),
+            "the @id-container term must not be a key:\n{doc}"
+        );
+        assert_compact_iso(&g, ctx);
+    }
+
+    /// [OPUS-4.8] sq-oy1f.14 — a multi-value `@index` container groups all values (fromRdf has
+    /// no per-value `@index`, so they share the reserved `@none` index slot as an array). The
+    /// document stays valid and every value survives.
+    ///
+    /// pyld differential (verified): the `{"@none": [...]}` index map `toRdf`s to both values.
+    #[test]
+    fn compact_index_container_multivalue_under_none() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:p "x" .
+               ex:s ex:p "y" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let ctx = r#"{"p":{"@id":"http://ex/p","@container":"@index"}}"#;
+        let doc = compact_doc(&g, ctx);
+        // Both values land under the reserved `@none` index slot as an array.
+        assert!(
+            doc.contains(r#""p":{"@none":["x","y"]}"#),
+            "multi-value @index under @none array:\n{doc}"
+        );
         assert_compact_iso(&g, ctx);
     }
 }

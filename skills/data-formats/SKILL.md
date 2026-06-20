@@ -276,30 +276,38 @@ reference to a bare IRI string), **language coercion** (a term `@language` or th
 `@language` drops a matching `@language`), **`@container`** — `@set` (always an array, no
 compact-arrays), `@list` (strips the `{"@list":…}` wrapper to a bare ordered array — but only the
 *pure* `{"@list":…}` value: any co-located non-list sibling stays under the property IRI, never
-dropped, sq-oy1f.8), `@language` (a `{lang: value}` map — a value with **no** language tag falls
-under the reserved `@none` member rather than being dropped, sq-oy1f.9) and `@index` (a
-`{index: value}` map), **`@reverse`** terms (forward edges whose predicate a reverse term maps
-relocate into an `@reverse` block on the object node — an edge whose object is *not* itself a
-subject is kept as a forward property, never stripped, sq-oy1f.10), **`@id`/`@type` keyword
-aliasing** (`{"id":"@id","type":"@type"}`), and **value + node + IRI compaction** against the
-active context (vocab-relative compaction emits the `@vocab`-stripped form even when the suffix
-contains `/` or `#` — only a `:` suffix is kept full, since it is ambiguous with a compact IRI on
-read-back, sq-oy1f.11). Build the context with `parse_context_json(r#"{…}"#)`
-(a string → `JsonLdValue`, returns `None` if not a JSON object) or construct the `JsonLdValue`
-directly; the parsed `ActiveContext` drives compaction. The output is a `{"@context":…,"@graph":[…]}`
-document and the compaction is **lossless** — every coercion is invertible against the same
-`@context`, so a JSON-LD-to-RDF round-trip reconstructs the original triples (verified by the
-crate's compaction round-trip tests). *Scope:* this is the fromRdf-then-compact (serialise) path —
-sparq always emits RDF, so the input is a `Graph`, not an arbitrary remote document; scoped/typed
-contexts, `@propagate`, remote `@context` fetching, `@import`, `@protected` and JSON-LD **Framing**
-are out of scope (Framing is a separate deferred bead). *Honest interop caveat:* the round-trip
-losslessness is verified against sparq's own JSON-LD→RDF reader. Two output shapes are **not**
-faithfully re-expandable by an external processor (e.g. pyld): a `@reverse`-term document emits the
-edge as both an `@reverse` block **and** a reverse-mapped term (a double inversion that a strict
-processor reads inverted — a tracked follow-up), and a non-string value placed under a language
-map's `@none` member is not a valid language-map value per the spec (language maps hold strings),
-though sparq preserves it. Prefer a non-`@reverse` context, and a non-`@language` container for
-typed values, when the document must be consumed by a third-party JSON-LD library.
+dropped, sq-oy1f.8), `@language` (a `{lang: value(s)}` map — a value with **no** language tag falls
+under the reserved `@none` member rather than being dropped, sq-oy1f.9; several values that share
+one language slot accumulate into an **array** so none is overwritten, and a **non-string** value —
+a typed/numeric literal — routes to a separate non-language key so a strict processor keeps its
+datatype rather than rejecting an invalid language-map value, sq-oy1f.12/.14) and `@index` (a
+`{index: value(s)}` map; fromRdf has no per-value index, so values share the reserved `@none`
+slot, accumulating into an array, sq-oy1f.14). `@id` / `@graph` containers — which the fromRdf
+model cannot losslessly populate — **fall back to the default (no-container) framing** rather than
+emit a container map a strict processor rejects (sq-oy1f.14). **`@reverse`** terms (forward edges
+whose predicate a reverse term maps relocate onto the object node and are emitted as a **forward
+member keyed by the reverse term**, NOT inside an `@reverse` block — a reverse-term key inside an
+`@reverse` block would double-invert and a strict processor reads the edge backwards, sq-oy1f.12;
+an edge whose object is *not* itself a subject is kept as a forward property, never stripped,
+sq-oy1f.10), **`@id`/`@type` keyword aliasing** (`{"id":"@id","type":"@type"}`), and **value + node
++ IRI compaction** against the active context (vocab-relative compaction emits the `@vocab`-stripped
+form even when the suffix contains `/` or `#` — only a `:` suffix is kept full, since it is ambiguous
+with a compact IRI on read-back, sq-oy1f.11; a plain **literal** value under a `@type:@id`-coerced
+term moves to a non-coerced key so it does not read back as a node IRI, sq-oy1f.13). Build the
+context with `parse_context_json(r#"{…}"#)` (a string → `JsonLdValue`, returns `None` if not a JSON
+object) or construct the `JsonLdValue` directly; the parsed `ActiveContext` drives compaction. The
+output is a `{"@context":…,"@graph":[…]}` document and the compaction is **lossless** — every
+coercion is invertible against the same `@context`, so a JSON-LD-to-RDF round-trip reconstructs the
+original triples. *Scope:* this is the fromRdf-then-compact (serialise) path — sparq always emits
+RDF, so the input is a `Graph`, not an arbitrary remote document; scoped/typed contexts,
+`@propagate`, remote `@context` fetching, `@import`, `@protected` and JSON-LD **Framing** are out of
+scope (Framing is a separate deferred bead). *Strict third-party faithfulness:* the compaction
+round-trip is verified both against sparq's own JSON-LD→RDF reader **and** differentially against the
+**pyld** W3C reference processor (`expand`/`toRdf`) for the `@reverse`, language-map, `@type:@id`,
+and multi-value-container shapes (sq-oy1f.12/.13/.14), so the emitted document re-expands to the
+original triples in a strict external processor, not only in sparq. (An `@id`/`@graph`-container
+*input* — i.e. compacting an already-indexed document, as distinct from the fromRdf graph sparq
+produces — remains out of scope and falls back to default framing as noted above.)
 
 ```rust
 use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
