@@ -102,6 +102,22 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-solid/tests/differential_oracle.rs",
         "DIVERGENCE_FLOOR",
     ),
+    // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 toRdf + fromRdf ratchets. The
+    // floor consts (`pub const TORDF_FLOOR` / `FROMRDF_FLOOR`) live in this same
+    // crate's `tests/jsonld_suite.rs` (behind the opt-in `jsonld-suite` feature);
+    // the guard reads them textually — exactly like the SHACL/geo/Solid floors —
+    // so the central scoreboard's `ratchet_floor` can never drift from what the
+    // runner asserts. (`const_floor_in` already tolerates the `pub ` prefix.)
+    (
+        "W3C JSON-LD 1.1 toRdf",
+        "crates/sparq-conformance/tests/jsonld_suite.rs",
+        "TORDF_FLOOR",
+    ),
+    (
+        "W3C JSON-LD 1.1 fromRdf",
+        "crates/sparq-conformance/tests/jsonld_suite.rs",
+        "FROMRDF_FLOOR",
+    ),
 ];
 
 #[test]
@@ -111,10 +127,16 @@ fn central_floors_match_crate_local_sources() {
             .iter()
             .find(|s| s.label == *label)
             .unwrap_or_else(|| panic!("scoreboard registry missing suite {label:?}"));
-        // It must be a crate-test suite (not a binary one).
+        // It must be a crate-test suite (not a binary one). [OPUS-4.8] sq-oy1f.2:
+        // the feature-gated JSON-LD lane is a `FeatureGatedCrateTest` — still a
+        // crate-local `cargo test` whose floor lives in source, so it is covered
+        // by the same textual floor-sync guard.
         assert!(
-            matches!(suite.runner, Runner::CrateTest { .. }),
-            "{label} should be a CrateTest suite in the registry"
+            matches!(
+                suite.runner,
+                Runner::CrateTest { .. } | Runner::FeatureGatedCrateTest { .. }
+            ),
+            "{label} should be a (feature-gated) CrateTest suite in the registry"
         );
         let source_floor = const_floor_in(src, const_name);
         assert_eq!(
@@ -132,7 +154,12 @@ fn central_floors_match_crate_local_sources() {
 #[test]
 fn all_crate_test_suites_are_guarded() {
     for suite in SUITES {
-        if matches!(suite.runner, Runner::CrateTest { .. }) {
+        // [OPUS-4.8] sq-oy1f.2: cover both the plain and the feature-gated
+        // crate-test runners — neither may escape the floor-sync guard.
+        if matches!(
+            suite.runner,
+            Runner::CrateTest { .. } | Runner::FeatureGatedCrateTest { .. }
+        ) {
             assert!(
                 CRATE_LOCAL_FLOORS.iter().any(|(label, _, _)| *label == suite.label),
                 "registry CrateTest suite {:?} has no floor-sync guard in CRATE_LOCAL_FLOORS",
@@ -164,4 +191,7 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("Solid ACP decision parity"));
     assert!(md.contains("Solid WAC differential oracle"));
     assert!(md.contains("Solid ACP differential oracle"));
+    // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 toRdf + fromRdf ratchets.
+    assert!(md.contains("W3C JSON-LD 1.1 toRdf"));
+    assert!(md.contains("W3C JSON-LD 1.1 fromRdf"));
 }
