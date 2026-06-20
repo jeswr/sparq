@@ -593,6 +593,46 @@ mod serialize {
             "a malformed prefixes entry must return Err, not panic or silently drop"
         );
     }
+
+    // ---- [OPUS-4.8] sq-oy1f.5: full JSON-LD 1.1 Compaction (caller `@context`), real wasm ----
+
+    /// `serializeCompact(context, …)` in a genuine wasm32 runtime: a `@vocab` `@context`
+    /// drives the full Compaction Algorithm (bare `@vocab`-relative predicate keys the
+    /// prefix-only form cannot produce), the output is byte-identical to the engine writer,
+    /// and — the load-bearing invariant — the compacted document round-trips back through the
+    /// JSON-LD parser to the SAME triples. The parity assertion runs unconditionally; the
+    /// round-trip is guarded by `jsonld` (the INGEST parser).
+    #[wasm_bindgen_test]
+    fn serialize_compact_round_trips() {
+        use sparq_core::Graph;
+        use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
+        let data = r#"<http://schema.org/x> <http://schema.org/name> "Alice" ;
+                       <http://schema.org/knows> <http://schema.org/y> ."#;
+        let store = Store::load(data, "turtle").unwrap();
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let ctx_text = r#"{"@vocab":"http://schema.org/"}"#;
+        // The pretty form is multi-line (the indenter inserts a space after each colon, so
+        // the exact no-space substrings are asserted on the MINIFIED doc below).
+        let got = store.serialize_compact(ctx_text, true, Some("  ".to_string())).unwrap();
+        assert!(got.contains('\n'), "pretty compaction is multi-line: {got}");
+        let ctx = parse_context_json(ctx_text).unwrap();
+        // Minified parity with the engine writer across the JS boundary + the @vocab shape.
+        let minified = store.serialize_compact(ctx_text, false, None).unwrap();
+        assert!(minified.contains("\"@vocab\":\"http://schema.org/\""), "context echoed: {minified}");
+        assert!(minified.contains("\"name\":"), "predicate is @vocab-relative bare term: {minified}");
+        assert_eq!(minified, graph_to_jsonld_compact(&g, &ctx), "wasm compaction == engine");
+        // A non-object context surfaces as the Err arm across the boundary, not a trap.
+        assert!(
+            store.serialize_compact("[\"not an object\"]", false, None).is_err(),
+            "a malformed @context must Err",
+        );
+        // Round-trip: the compacted doc re-parses to the same triple count (jsonld ingest).
+        #[cfg(feature = "jsonld")]
+        {
+            let reparsed = Graph::load_str(&minified, "jsonld").unwrap();
+            assert_eq!(reparsed.len(), store.size(), "compaction round-trips to the same triples");
+        }
+    }
 }
 
 // ---- [OPUS-4.8] sq-yqi1 (#162): the opt-in SHACL `validate` binding, in real wasm ----

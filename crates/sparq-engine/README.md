@@ -95,10 +95,10 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   writers have a matching **pretty** (indented) variant (`graph_to_jsonld_pretty` /
   `write_jsonld_pretty`, `JsonLdPrettyOptions { indent }`): a whitespace-only re-indent. For
   true **W3C JSON-LD 1.1 Compaction** against a caller `@context`,
-  `graph_to_jsonld_compact(&g, &ctx)` / `write_jsonld_compact` apply the full algorithm — term
-  definitions, `@vocab`, type/language/`@container` (`@set`/`@list`/`@language`/`@index`)
-  coercion, `@reverse`, `@id`/`@type` aliasing, value + node + IRI compaction — still hand-rolled
-  and dependency-free (a tiny internal `Json` AST; `parse_context_json` builds the context).
+  `graph_to_jsonld_compact(&g, &ctx)` / `write_jsonld_compact` (+ the `_pretty` variants) apply
+  the full algorithm — term definitions, `@vocab`, type/language/`@container`
+  (`@set`/`@list`/`@language`/`@index`) coercion, `@reverse`, `@id`/`@type` aliasing, value +
+  node + IRI compaction — still hand-rolled, dependency-free (`parse_context_json` builds it).
   `JsonLdForm::Compacted` remains the lighter prefix-only `@context`. The N-Triples writer
   (`triples_to_ntriples`) is always on; off, zero serializer code compiles, the default build is
   byte-identical, **no new dependencies** added. See

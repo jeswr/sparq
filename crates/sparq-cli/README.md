@@ -39,6 +39,11 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   `min_micros`, min-of-iters) to `<path>` as a machine-readable JSON document (the
   structured-benchmark-catalog shape); the STDOUT TSV is unchanged. Measured numbers are
   whatever the running host reports and are non-canonical — never commit them.
+- **`dump <file> <in-fmt> <out-fmt>`** (opt-in `serialize-rdf` feature) — re-serialize a loaded
+  document to stdout in the writer matrix: `turtle[-pretty]` / `trig[-pretty]` / `nquads` /
+  `ntriples` / `jsonld[-expanded|-flattened|-compacted]` / `jsonld-pretty…`. `jsonld-compact[-pretty]`
+  runs the **full W3C JSON-LD 1.1 Compaction** against a caller `@context` passed with
+  `--context <ctx.jsonld>` (richer than the prefix-only `jsonld-compacted`).
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
 - **Transparent decompression** — `.gz` / `.bz2` / `.zst` inputs detected by content.
   The gzip path defaults to the pure-Rust `miniz_oxide` backend; the opt-in, native-only

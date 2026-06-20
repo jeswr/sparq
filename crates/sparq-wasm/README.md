@@ -66,7 +66,10 @@ const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, n
   lines) and get byte-parity output. It calls straight through to `sparq-engine`'s writers,
   so the output is byte-identical to the native serialiser; the lean bundle carries no
   serializer code. JSON-LD serialise-OUT needs only `serialize-rdf` (the `jsonld` feature is
-  for INGEST).
+  for INGEST). The sibling `Store.serializeCompact(context, pretty, indent?)` (same feature)
+  runs the **full W3C JSON-LD 1.1 Compaction Algorithm** against a caller `@context` JSON
+  string (term defs / `@vocab` / coercion / `@reverse`) — richer than the prefix-only
+  `jsonld-compacted` form, and lossless; a non-object `context` throws.
 - **Opt-in SHACL Compact Syntax parse.** The `scs` feature (OFF by default; implies
   `shacl` + `serialize-rdf`) exposes `Store.parseShaclCompact(text, base?)` — parses a
   [SHACL Compact Syntax](https://www.w3.org/TR/shacl12-compact-syntax/) document into the

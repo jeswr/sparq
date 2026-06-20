@@ -295,7 +295,12 @@ let ctx = parse_context_json(r#"{
     "knows": {"@id": "http://schema.org/knows", "@type": "@id"}
 }"#).expect("a JSON object");
 let doc = graph_to_jsonld_compact(&g, &ctx); // term defs + @vocab + @type:@id coercion applied
+// Indented (multi-line) variant — whitespace-only over the minified document, same triples:
+// graph_to_jsonld_compact_pretty(&g, &ctx, &JsonLdPrettyOptions::default()).
 ```
+
+Exposed on the wasm `Store` as `serializeCompact(context, pretty, indent?)` (the JSON-LD
+SKILL note) and on the CLI as the `jsonld-compact[-pretty]` `dump` out-format (sq-oy1f.5).
 
 From the CLI (opt-in `serialize-rdf` feature) — re-serialize a loaded document to stdout:
 
@@ -305,9 +310,12 @@ cargo build -p sparq-cli --features serialize-rdf
 #   out-format: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples
 #              | jsonld[-expanded|-flattened|-compacted]
 #              | jsonld-pretty[-expanded|-flattened|-compacted]
+#              | jsonld-compact[-pretty]   (FULL W3C Compaction; needs --context <ctx.jsonld>)
 #   (bare `jsonld` == jsonld-expanded; `turtle-pretty`/`trig-pretty` emit the deterministic,
 #    idiomatic Turtle/TriG from recipe 6 — sorted, blank-line-separated subject blocks;
 #    the `jsonld-pretty*` forms emit indented JSON-LD, bare `jsonld-pretty` == expanded)
+# Full 1.1 Compaction against your own @context (term defs / @vocab / coercion / @reverse):
+./target/.../sparq-cli dump data.ttl turtle jsonld-compact --context ctx.jsonld
 ```
 
 ## Gotchas / feature flags / prerequisites
