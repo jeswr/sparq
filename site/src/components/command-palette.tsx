@@ -9,12 +9,15 @@
 // ships FIRST (this bead), BEFORE the sidebar is removed (sq-vw3ax.7).
 //
 // SINGLE SOURCE. Everything it indexes derives from the one canonical IA source
-// `@/data/surfaces` — the 5 capability THEMES (`GROUPS`), the flagship showcases
-// (`FLAGSHIPS`), and the /about utility page (`ABOUT_SURFACE`) — plus the fixed top-level
-// pages and a small set of actions. Re-grouping in surfaces.ts restructures this palette in
-// one edit, exactly like the sidebar and the Home grid.
+// `@/data/surfaces` — the 5 capability THEMES (`GROUPS`) and the flagship showcases
+// (`FLAGSHIPS`) — plus the fixed top-level pages and a small set of actions. Re-grouping in
+// surfaces.ts restructures this palette in one edit, exactly like the Home theme grid.
 //
-// ADDITIVE ONLY. This is a new overlay; it removes no existing nav. It is mounted once in the
+// POST-COLLAPSE (sq-vw3ax.7). With the sidebar removed, this palette is the 0-click fast path
+// to every surface, so it routes to each surface's POST-redesign home (surfaceHref): the 5
+// retained deep pages keep /surface/<slug>, every other surface jumps to /capabilities#<theme>.
+//
+// MOUNTED ONCE. It is a global overlay mounted once in the
 // AppShell so the ⌘K / Ctrl-K binding is global.
 
 import * as React from "react";
@@ -34,15 +37,29 @@ import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import {
-  ABOUT_SURFACE,
   FLAGSHIPS,
   GROUPS,
   TIER_LABEL,
   TIER_VARIANT,
   type Surface,
 } from "@/data/surfaces";
+import {
+  DEEP_PAGE_SLUGS,
+  capabilityAnchor,
+} from "@/data/capabilities";
 
 const REPO_URL = "https://github.com/jeswr/sparq";
+
+// [OPUS-4.8] sq-vw3ax.3 — the palette is the 0-click fast path now the sidebar is gone, so it
+// must jump to each surface's NEW home, not a removed /surface/* route that only redirects.
+// The 5 retained deep pages + /try keep their own route; every other surface lives as a row
+// under /capabilities#<theme>. Resolving here (not at the data source) keeps surfaces.ts a pure
+// structural source while the palette routes to the post-redesign IA.
+function surfaceHref(surface: Surface, groupId: string): string {
+  if (surface.slug === "try") return surface.href; // the live REPL keeps its own /try route
+  if (DEEP_PAGE_SLUGS.has(surface.slug)) return surface.href; // retained deep page
+  return capabilityAnchor(groupId); // a demo/soon row lives in the gallery
+}
 
 // A tiny context so a header trigger button (or anything else in the shell) can open the
 // palette without prop-drilling — the palette owns the state, exposes setOpen via context.
@@ -60,14 +77,19 @@ export function useCommandPalette() {
   return ctx;
 }
 
-// The fixed top-level destinations that are NOT capability surfaces (so they are not in
-// GROUPS): the home overview, the benchmark dashboard, the papers index. /try and /about
-// already live in the surface data (try is the first Query & data surface; about is the
-// ABOUT_SURFACE utility page), so they are not repeated here.
+// The fixed top-level destinations of the slim top bar that are NOT capability surfaces (so
+// they are not in GROUPS). /try lives in the surface data (the first Query & data surface), so
+// it is not repeated here; /about is folded into Home #how-it-runs (it redirects), so the
+// palette points there. /capabilities is the new gallery; /download + /gui are the discovery
+// gap the maintainer flagged.
 const TOP_PAGES: { href: string; title: string; blurb: string }[] = [
   { href: "/", title: "Home", blurb: "Overview — what sparq is, the live REPL, the flagships." },
+  { href: "/capabilities", title: "Capabilities", blurb: "Every surface in one gallery, by theme." },
   { href: "/benchmarks", title: "Benchmarks", blurb: "Per-commit, same-box benchmark dashboard." },
   { href: "/papers", title: "Papers", blurb: "The research papers behind sparq." },
+  { href: "/download", title: "Download", blurb: "Desktop GUI + CLI/server binaries (latest release)." },
+  { href: "/gui", title: "Try the GUI", blurb: "The hosted web GUI try-live page (coming soon)." },
+  { href: "/#how-it-runs", title: "How it runs", blurb: "The honest \"what runs where\" tier model." },
 ];
 
 /** A tier badge a surface carries (flagship / surface rows render this in the right gutter). */
@@ -268,14 +290,16 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
                       // The theme label + blurb are keywords so a theme search surfaces its
                       // members, without diluting the title-driven primary score.
                       keywords={[group.label, s.blurb]}
-                      onSelect={() => go(s.href)}
+                      // Jump to the surface's POST-redesign home: a retained deep page keeps
+                      // /surface/<slug>; every other surface lives at /capabilities#<theme>.
+                      onSelect={() => go(surfaceHref(s, group.id))}
                       trailing={<TierBadge surface={s} />}
                     />
                   ))}
                 </Command.Group>
               ))}
 
-              {/* Fixed top-level pages + the /about utility page. */}
+              {/* Fixed top-level pages (the slim top bar). */}
               <Command.Group
                 heading="Pages"
                 className="px-1 pb-1 text-xs font-medium text-muted-foreground [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5"
@@ -290,13 +314,6 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
                     onSelect={() => go(p.href)}
                   />
                 ))}
-                <PaletteItem
-                  icon={ABOUT_SURFACE.icon}
-                  title={ABOUT_SURFACE.title}
-                  blurb={ABOUT_SURFACE.blurb}
-                  keywords={["page", ABOUT_SURFACE.blurb]}
-                  onSelect={() => go(ABOUT_SURFACE.href)}
-                />
               </Command.Group>
 
               {/* Quick actions. */}
