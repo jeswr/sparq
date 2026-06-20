@@ -96,7 +96,8 @@
       "note": "[OPUS-4.8] sq-4vao: behavioural tests for the lowest-covered modules (subscription reevaluate_step/subscribe_init diff + refusal classes, budget->SSE-status + RDF-1.2 triple-term encoding, the json_error/sanitized_error info-leak envelope, the GSP escape_iri/body-decode helpers, and the SPARQL-Protocol dataset-override rewrite) lifted measured line% 86.38 -> 88.14; floor = floor(measured) - 2 margin."
     },
     "sparq-shacl": {
-      "floor": 90
+      "floor": 93,
+      "note": "[OPUS-4.8] sq-qcnn: measured with DEFAULT features (the per-commit tier — no measure() case arm; the opt-in shacl-af/scs surfaces are compiled out of a default build, so func.rs/scs.rs do not count toward this default-feature number). Raised 90 -> 93 after tests/sparql_edge_cases.rs added SHACL-SPARQL §5.2/§6 dark-branch coverage (non-SELECT skip, ?value-unbound, ?path IRI-vs-literal mapping, SELECT-validator row-message + template substitution, LeftJoin pre-binding push-down, mismatched-validator skip) — measured default-feature line% 95.88 (3280/3421); floor = floor(measured) - 2 margin. The shacl-af func.rs (56% -> 94%) and scs.rs (85% -> 92%) gains from tests/node_expr_operators.rs + tests/scs_error_paths.rs are behind their opt-in features and so do NOT lift this default-feature floor. Conservative work-box seed; CI's --check-robust is the ratchet of record."
     },
     "sparq-shacl-wasm": {
       "floor": 0,
