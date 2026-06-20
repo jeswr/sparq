@@ -69,6 +69,104 @@ survive into any GUI that ships:
   inherits this taxonomy unchanged; a `walkthrough` surface must never be silently
   dressed up as `live`.
 
+## A. The distinct operational design — a workbench, NOT the marketing site
+
+> Read this alongside the website redesign ([`research/website-redesign.md`](website-redesign.md))
+> and the shared method ([`.claude/skills/frontend-design/SKILL.md`](../.claude/skills/frontend-design/SKILL.md)).
+> The contrast between the two frontends is the **point**: the website *persuades and routes*
+> a curious developer; the GUI *operates the engine* for a developer who already decided. The
+> single biggest failure to avoid — and the one the current scaffold risks — is the GUI
+> becoming **a thin wrapper around the marketing website**.
+
+### A.1 The anti-goal: stop wrapping the marketing site
+
+Ground truth today: `gui/src-tauri/tauri.conf.json` sets `frontendDist` to `site/out` — the
+**whole static marketing site**. That is a deliberate scaffold placeholder (the GUI README
+says "a scaffold, not a shipped app"), **not** the design. If the GUI ships as a webview onto
+the marketing site, it inherits everything that makes the site the *wrong* tool for working:
+a hero, a 4-sentence honesty preamble, a `/capabilities` gallery of *previews*, `/about`,
+`/papers`, `/benchmarks`, prose that *describes* features instead of letting you *run* them.
+
+**The GUI must NOT render `Showcase` / `Benchmarks` / `About` / `Papers`.** Reference and
+marketing content does **not** ship in the app. A single **Help → "sparq on the web"** menu
+item opens the website / GitHub in the **system browser**. *The app is the tool; the website
+is the explainer.* When the GUI frontend is built (it is net-new — see §0), it imports the
+reusable **component logic** from `site/` (the editor, results, validation playgrounds,
+connect/health/subscriptions panels) into **operational hosts**, and ignores the site's
+hero/prose/nav shells entirely.
+
+### A.2 Primary model — a workbench shell, not a route tree
+
+The site's mental model is *pages you read*. The GUI's is *an IDE you work in*. The route
+tree is **dropped** in favour of a persistent shell with three fixed regions and a
+per-workspace tabbed work area:
+
+- **LEFT RAIL** (collapsible, `w-56` — denser than the site's `w-64`): a **stateful
+  navigator**, not a marketing nav. Three stacked sections:
+  1. **WORKSPACE SWITCHER** — current workspace + dropdown to switch/create/delete (drives
+     `@sparq/client` `createWorkspaceStore` → Tauri fs backend; the `sq-atb0` model), with a
+     `● saved to disk` / `○ unsaved` indicator reflecting the `WorkspaceBackend`.
+  2. **DATASETS tree** — the live store of the active workspace: default graph + each named
+     graph with per-graph triple counts (reuse `repl-dataset-panel` logic), an **Imports**
+     subgroup listing `WorkspaceSourceMeta` (file/URL, bytes, re-fetch for URL sources), and
+     a `+ Import` affordance.
+  3. **TOOLS list** — operational, **replacing the 16-surface marketing grid**: Query ·
+     Graph view · SHACL · Inference · Full-text · Vector · GeoSPARQL · Federation · ZK · MPC
+     · Server. Each is a **verb the user OPENS as a tab against the current store**, carrying
+     a small honesty-tier dot (live / native / research) — **NOT a page describing the
+     feature.**
+- **TOP BAR** (`h-10`, thin): the active connection target switch (**LOCAL ENGINE ⇄
+  ENDPOINT**, reusing `connect-panel`'s `ModeSwitch` idea) + store size + a Cmd-K hint +
+  theme + a status LED (engine ready / server reachable / proving). **No Showcase /
+  Benchmarks / About tabs.**
+- **WORK AREA** (center, fills remaining space, **no `max-w` cap — full bleed**): an IDE-style
+  **TAB STRIP** of open tools. Default tab is the Query editor. Tabs are dockable panes.
+- **BOTTOM STATUS BAR** (`h-6`): **measured** last-run latency (live `performance.now()`,
+  labelled), row count, active engine target, workspace persistence backend, errors.
+
+The density and full-bleed work area are deliberately the *opposite* of the website's roomy
+`max-w-6xl` marketing layout — the visual contrast reinforces "different product."
+
+### A.3 The command palette is the spine (Cmd-K / Ctrl-K)
+
+This is the keyboard-first model's backbone and the real answer to surface count. It indexes
+**every tool, every named graph, recent queries, import actions, connect actions, "run
+query", "run as EXPLAIN", "export CSV", "switch workspace"** — fuzzy. It **replaces the
+site's left-tree-as-discovery entirely**: there is no need to *see* every surface in the nav
+when any of them is one fuzzy keystroke away. (Note the parallel with the website redesign,
+which adds the same Cmd-K so it too can shrink its nav — the two frontends share the *pattern*
+but mount it in different shells.)
+
+### A.4 Tools, not pages — the surface-to-tool translation
+
+Every one of the website's 16 *surfaces* becomes a GUI *tool* that operates over the **live
+persistent native store**, not a fixture, and is mounted in an operational host stripped of
+the site's hero/prose wrappers:
+
+| Website surface (a *preview* that links to depth) | GUI tool (a *verb* run against the live store) |
+|---|---|
+| `/capabilities#sparql` page + sample-graph REPL | **Query tab** — full-height editor + multi-view results over the persistent store |
+| `/showcase/*` flagship detail page | the ZK / MPC / Solid **tools**, run on the user's own imported credentials/data |
+| `/surface/shacl` page + fixture | **SHACL tab** — validate the *active store* (or a pasted doc) operationally |
+| `/surface/inference` walkthrough | **Inference tab** — materialise closure over the active store; optionally COMMIT it back |
+| (no equivalent — the site cannot do this) | **Graph view tab**, **Import drawer** (real disk/URL ingest via the native loader), **Server health** over a *connected* endpoint |
+
+What the GUI adds that the site fundamentally cannot: a persistent local store across
+sessions, real disk/URL ingest through the **native** loader (threads, mmap, native-only HDT
+— no wasm ceiling), a live subscriptions stream off a connected `sparq-server`, and a graph
+visualisation of results. These are *operational* capabilities, not explanations of them.
+
+### A.5 What the GUI deliberately cuts from each migrated surface
+
+When a site component's *logic* is reused, its *marketing chrome* is cut: the intro
+paragraphs, the tier card, the 6-card capability grid, and the always-open "How this runs" /
+"Honest caveats" cards (the exact blocks the website redesign also collapses) are **all
+removed** in the GUI — the honesty-tier dot on the tool + a one-line status in the bottom bar
+carry the same truth in an operational register. The Query tab specifically drops the site
+REPL's built-in-dataset picker and explanatory captions (datasets live in the left rail now)
+and runs full-height with multiple co-resident result views (Table | Graph | Raw JSON |
+N-Triples/Turtle) against the persistent store rather than a sample graph.
+
 ## 0. Ground truth — what exists today
 
 <!-- [OPUS-4.8] sq-uau8 — CORRECTED. The earlier draft said "Nothing is built yet /

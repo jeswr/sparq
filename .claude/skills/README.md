@@ -6,6 +6,18 @@ top-level [`skills/`](../../skills/) tree, which documents how to *use* sparq's
 public surfaces. See the note in [`AGENTS.md`](../../AGENTS.md) ("Skills — how to
 USE sparq") — do not confuse the two.
 
+## First-party design / engineering skills
+
+- **`frontend-design/`** — the reusable methodology for sparq's **two** frontends:
+  the explanatory marketing-docs website (`site/`) and the operational desktop GUI
+  (`gui/`). Covers information architecture + content-reduction (fighting "too
+  much text"), explanatory-site vs operational-GUI patterns, the shared visual
+  system, and the a11y/perf budget. Grounded in
+  [`research/website-redesign.md`](../../research/website-redesign.md) and
+  [`research/gui-design.md`](../../research/gui-design.md). Use it whenever you
+  restructure the site nav, build/extend the GUI, or decide whether content
+  belongs on the site vs the GUI vs a `SKILL.md`.
+
 ## Vendored third-party skills
 
 - **`logo-designer/`** — vendored from
