@@ -56,6 +56,10 @@
     "**/target",
     "vendor",
     "**/vendor",
-    "zk/xpath/vendor"
+    "zk/xpath/vendor",
+    // Vendored third-party ontologies (sparql-zkp-ontologies, ISWC 2025). The
+    // LICENSE-DRAFT.md is reproduced VERBATIM and must not be reformatted; treat
+    // the whole vendored tree as third-party (same rationale as vendor/). [OPUS-4.8]
+    "crates/sparq-trust/ontologies/zkp-sparql"
   ]
 }
