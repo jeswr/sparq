@@ -13,18 +13,66 @@
 # (tar.gz / zip) containing the binary + README + LICENSE + CHANGELOG, plus a SHA256SUMS
 # manifest — produced by the reusable workflow's `archive` mode + the `release` job below.
 #
-# Triggers: version tags only. NO schedule, NO pull_request — releasing is a deliberate act.
+# Triggers: version tags AND manual workflow_dispatch — both are deliberate releasing acts. NO
+# schedule, NO pull_request, so this workflow NEVER runs as a PR check and never gates a PR (the
+# required branch-protection check is `ci-summary / gate`, which only ever evaluates PR/main
+# events — release.yml has no `pull_request` trigger, so it is invisible to that aggregator).
+#
+# [OPUS-4.8] sq-gl3cf: a `v*` tag push is the canonical release; `workflow_dispatch` is the
+# developer/test path that builds + attaches the SAME assets (GUI bundles, archives, SBOM/VEX,
+# docker image) WITHOUT pushing a real `v*` tag. On dispatch, `github.ref_name` is the BRANCH the
+# dispatch ran on (NOT a version), so every place asset identity / the release tag was derived
+# from `github.ref_name` is now threaded from the `setup` job's single `version` output
+# (`inputs.tag` on dispatch, `github.ref_name` on tag push). Dispatch builds are pre-release by
+# default. There is NO double-build on tag: a single event fires exactly one trigger, and `setup`
+# resolves the version for whichever fired.
 name: release
 
 on:
   push:
     tags: ["v*"]
+  # [OPUS-4.8] sq-gl3cf: manual path to build + attach the release assets (incl. the UNSIGNED
+  # Tauri desktop GUI bundles) without cutting a real `v*` tag — for developer/test releases.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Release tag the built assets attach to (e.g. v0.1.0-dev). A developer/test dispatch
+          SHOULD use a -dev / pre-release suffix so it is never mistaken for a canonical release.
+          This is the single source of asset naming + the GitHub Release tag on the dispatch path.
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the created GitHub Release as a pre-release (default true for dispatch builds)."
+        required: false
+        type: boolean
+        default: true
 
 # Default: read-only. Jobs that need more (release: contents, docker: packages) opt in below.
 permissions:
   contents: read
 
 jobs:
+  # ---- 0. resolve the single version string used for asset identity + the release tag ----
+  # [OPUS-4.8] sq-gl3cf: ONE source of truth for the version, consumed by EVERY job that names an
+  # asset or attaches to a tag. On a `v*` tag push, `inputs.tag` is empty and `github.ref_name` is
+  # the tag (e.g. `v0.1.0`). On `workflow_dispatch`, `inputs.tag` is the developer-supplied release
+  # tag and `github.ref_name` is the BRANCH (wrong for asset identity) — so `${{ inputs.tag ||
+  # github.ref_name }}` picks the dispatch input when present and the tag otherwise. This output is
+  # threaded into `gui-bundle`, `sbom`, `package` (via build-matrix.yml's `version` input), and
+  # `release` (tag_name + body links) so BOTH triggers name assets + tag the Release identically.
+  setup:
+    name: resolve release version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: v
+        run: echo "version=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
   # ---- 1. build + package per hardware tier ----
   # [OPUS-4.8] sq-v286.2: invoke the shared reusable matrix in `archive` mode. The 10-tier
   # runner-label matrix + build steps + the sq-zqq6 SLSA archive attestation all live in
@@ -33,6 +81,10 @@ jobs:
   # consumes those artifacts. `permissions:` here is the ceiling passed down to the called
   # workflow — it must grant the OIDC + attestation writes the attestation step needs.
   package:
+    # [OPUS-4.8] sq-gl3cf: thread the resolved version into the reusable matrix so the per-tier
+    # archives are named `sparq-cli-<version>-<tier>` on BOTH triggers (on dispatch, the matrix's
+    # own `github.ref_name` is the branch and would mis-name every archive).
+    needs: setup
     permissions:
       contents: read
       id-token: write
@@ -40,6 +92,7 @@ jobs:
     uses: ./.github/workflows/build-matrix.yml
     with:
       mode: archive
+      version: ${{ needs.setup.outputs.version }}
 
   # ---- 1b. per-release CycloneDX SBOM + VEX ----
   # [OPUS-4.8] sq-toze.3 (GX-2): emit a CycloneDX SBOM for each released binary plus a VEX
@@ -49,6 +102,9 @@ jobs:
   # this workflow run; verifiable with `gh attestation verify`).
   sbom:
     name: CycloneDX SBOM + VEX
+    # [OPUS-4.8] sq-gl3cf: needs the resolved version so the per-release SBOM/VEX filenames carry
+    # the dispatch tag (on dispatch the scripts' GITHUB_REF_NAME fallback is the branch).
+    needs: setup
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -66,13 +122,22 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
+      # [OPUS-4.8] sq-gl3cf: pass VERSION explicitly. gen-sbom-vex.sh honors $VERSION (falling
+      # back to GITHUB_REF_NAME), but on a workflow_dispatch GITHUB_REF_NAME is the BRANCH, so the
+      # SBOM/VEX filenames would be mis-stamped — thread the resolved version instead.
       - name: Generate per-release SBOM + VEX
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
         run: scripts/gen-sbom-vex.sh
       # [OPUS-4.8] sq-toze.27 (GS-3): per-release CycloneDX SBOM for the published npm
       # client (`js/` = @jeswr/sparq). Writes sbom/sparq-js-<ver>.sbom.cdx.json (runtime
       # tree) + sbom/sparq-js-dev-<ver>.sbom.cdx.json (full build tree) into the same
       # sbom/ dir, so they are attested + attached + checksummed alongside the Rust SBOMs.
+      # [OPUS-4.8] sq-gl3cf: gen-js-sbom.sh ALSO reads GITHUB_REF_NAME for the version-stamped
+      # filenames, so it needs the same VERSION thread for the dispatch path to name JS SBOMs right.
       - name: Generate per-release JS/npm SBOM (published WASM client)
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
         run: scripts/gen-js-sbom.sh
       - name: Attest build provenance (SBOM + VEX)
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
@@ -117,8 +182,34 @@ jobs:
   # Windows installer from an x64 host — so there is no win-arm64 GUI installer this pass (an
   # honest gap, not a silent drop). Mobile (Android .aab / iOS .ipa) is the separate net-new
   # bead sq-v286.9 — no rows here.
+  #
+  # ====================================================================================
+  # [OPUS-4.8] sq-gl3cf: STABLE, PREDICTABLE per-OS asset names — the /download page can
+  # hardcode these. The `Stage GUI bundles` step below maps each matrix `label` to ONE canonical
+  # `{arch}` token and emits `sparq-gui_<version>_<arch>.<ext>` per produced bundle EXT (NOT the
+  # old nested `sparq-gui-<ver>-<label>-<tauri's own sparq_<ver>_<arch>.<ext>>` double-version).
+  # `<version>` is the resolved release tag (needs.setup.outputs.version: the `v*` tag on a tag
+  # push, the dispatch `inputs.tag` on dispatch). EXACT emitted names per row:
+  #
+  #   label=arm64-darwin (macOS arm64):  sparq-gui_<version>_aarch64.dmg
+  #   label=x64-darwin   (macOS x64):    sparq-gui_<version>_x86_64.dmg
+  #   label=win-x64      (Windows x64):  sparq-gui_<version>_x64.msi
+  #                                      sparq-gui_<version>_x64-setup.exe   (NSIS)
+  #   label=x64-linux    (Linux x64):    sparq-gui_<version>_amd64.AppImage
+  #                                      sparq-gui_<version>_amd64.deb
+  #   label=arm64-linux  (Linux arm64):  sparq-gui_<version>_arm64.AppImage
+  #                                      sparq-gui_<version>_arm64.deb
+  #
+  # A label maps to ONE arch token, but Windows/Linux emit TWO files (different ext) per label;
+  # both carry the same `<arch>` token, differing only by ext (and `-setup.exe` disambiguates the
+  # NSIS installer from any future plain `.exe`). The per-EXT glob + `found==0 -> fail` guard are
+  # preserved. The SLSA attest `subject-path: gui-bundles/*` and the `pkg-gui-<label>` upload name
+  # are UNCHANGED.
+  # ====================================================================================
   gui-bundle:
     name: "GUI desktop bundle ${{ matrix.label }} (unsigned)"
+    # [OPUS-4.8] sq-gl3cf: the resolved version is the asset-name token for every bundle.
+    needs: setup
     runs-on: ${{ matrix.os }}
     # SLSA build-provenance attestation over the produced bundles needs the OIDC token +
     # attestation write; read-only on the repo otherwise (uploads a workflow artifact, the
@@ -214,30 +305,73 @@ jobs:
         working-directory: gui/src-tauri
         run: cargo tauri build --ci --verbose
 
-      # Collect every produced installer into a flat staging dir under a stable, tier-keyed
-      # name so the release SHA256SUMS / Release assets are predictable. Tauri names bundles
-      # `<productName>_<version>_<arch>.<ext>` (e.g. `sparq_0.1.0_amd64.deb`), so we glob the
-      # bundle tree (resilient to the exact arch token) and prefix each with the matrix label.
+      # Collect every produced installer into a flat staging dir under a STABLE, PREDICTABLE
+      # per-OS name (the scheme the /download page hardcodes — see the documented names in the
+      # job header). Tauri names bundles `<productName>_<version>_<tauri-arch>.<ext>` (e.g.
+      # `sparq_0.1.0_amd64.deb`), which nests Tauri's OWN version + arch token; we DISCARD that
+      # raw basename and re-emit `sparq-gui_<version>_<arch>.<ext>` where <version> is the
+      # resolved release tag and <arch> is the matrix label mapped to a single canonical token.
+      # The EXT selects the suffix; the label selects the arch token. Windows/Linux emit two
+      # files (different ext) per label, both with the same arch token (NSIS gets `-setup.exe`).
       # `if-no-files-found: error` on the upload + this `set -e` glob guard mean a bundler that
       # silently produced nothing FAILS the job rather than shipping an empty release row.
+      # [OPUS-4.8] sq-gl3cf: VERSION is the resolved release tag (threaded via env so the SAME
+      # bash works on both the tag-push and workflow_dispatch paths).
       - name: Stage GUI bundles
         shell: bash
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
         run: |
           set -euo pipefail
           BUNDLE_DIR="gui/src-tauri/target/release/bundle"
           OUT="gui-bundles"
           mkdir -p "$OUT"
           shopt -s nullglob globstar
+
+          # matrix label -> ONE canonical arch token for the emitted asset name.
+          case "${{ matrix.label }}" in
+            arm64-darwin) ARCH="aarch64" ;;
+            x64-darwin)   ARCH="x86_64" ;;
+            win-x64)      ARCH="x64" ;;
+            x64-linux)    ARCH="amd64" ;;
+            arm64-linux)  ARCH="arm64" ;;
+            *)
+              echo "ERROR: no arch mapping for label '${{ matrix.label }}'" >&2
+              exit 1
+              ;;
+          esac
+
           found=0
-          # .dmg/.app (macOS), .deb/.AppImage/.rpm (Linux), .msi/.exe (Windows NSIS+WiX).
+          # Glob each bundle EXT directory; the directory (dmg/deb/appimage/rpm/msi/nsis) tells us
+          # the ext + suffix. We re-name to sparq-gui_<version>_<arch>.<suffix> regardless of
+          # Tauri's own basename. NSIS .exe gets a `-setup.exe` suffix to disambiguate it from any
+          # future plain .exe; everything else uses its native extension.
+          #   dir       suffix
+          #   dmg       <arch>.dmg
+          #   deb       <arch>.deb
+          #   appimage  <arch>.AppImage
+          #   rpm       <arch>.rpm            (not produced by default; kept for resilience)
+          #   msi       <arch>.msi
+          #   nsis      <arch>-setup.exe
           for f in "$BUNDLE_DIR"/dmg/*.dmg \
                    "$BUNDLE_DIR"/deb/*.deb \
                    "$BUNDLE_DIR"/appimage/*.AppImage \
                    "$BUNDLE_DIR"/rpm/*.rpm \
                    "$BUNDLE_DIR"/msi/*.msi \
                    "$BUNDLE_DIR"/nsis/*.exe; do
-            base="$(basename "$f")"
-            cp "$f" "$OUT/sparq-gui-${GITHUB_REF_NAME}-${{ matrix.label }}-${base}"
+            case "$f" in
+              *.dmg)      suffix="${ARCH}.dmg" ;;
+              *.deb)      suffix="${ARCH}.deb" ;;
+              *.AppImage) suffix="${ARCH}.AppImage" ;;
+              *.rpm)      suffix="${ARCH}.rpm" ;;
+              *.msi)      suffix="${ARCH}.msi" ;;
+              *.exe)      suffix="${ARCH}-setup.exe" ;;  # NSIS installer
+              *)
+                echo "ERROR: unexpected bundle ext for '$f'" >&2
+                exit 1
+                ;;
+            esac
+            cp "$f" "$OUT/sparq-gui_${VERSION}_${suffix}"
             found=$((found + 1))
           done
           if [ "$found" -eq 0 ]; then
@@ -245,7 +379,7 @@ jobs:
             find "$BUNDLE_DIR" -maxdepth 2 -type f 2>/dev/null || true
             exit 1
           fi
-          echo "staged $found GUI bundle(s) for ${{ matrix.label }}:"
+          echo "staged $found GUI bundle(s) for ${{ matrix.label }} (arch=$ARCH, version=$VERSION):"
           ls -1 "$OUT"
 
       # SLSA build-provenance over EVERY produced bundle (the subject-path) — this is the
@@ -266,7 +400,10 @@ jobs:
   # ---- 2. checksums + GitHub Release ----
   release:
     name: create GitHub Release
-    needs: [package, sbom, gui-bundle]
+    # [OPUS-4.8] sq-gl3cf: `setup` added so the Release attaches to the resolved tag (tag_name
+    # below) on BOTH triggers — on dispatch, action-gh-release's default tag_name is `github.ref`,
+    # which is the BRANCH, so we must override it explicitly.
+    needs: [setup, package, sbom, gui-bundle]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release + upload assets — the only write this pipeline needs
@@ -287,17 +424,27 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
+          # [OPUS-4.8] sq-gl3cf: attach to the RESOLVED tag. The action defaults tag_name to
+          # `github.ref`, which on a workflow_dispatch is the branch (wrong) — pin it to the
+          # version the rest of the pipeline named assets with so dispatch + tag agree.
+          tag_name: ${{ needs.setup.outputs.version }}
+          # [OPUS-4.8] sq-gl3cf: dispatch builds are developer/test releases — mark them
+          # pre-release by default (the dispatch `prerelease` input; true unless overridden). A
+          # tag push has no such input, so `inputs.prerelease` is empty -> not a pre-release.
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
           files: assets/*
           generate_release_notes: true
-          # CHANGELOG.md is the curated source of truth; point readers at it.
+          # CHANGELOG.md is the curated source of truth; point readers at it. Body links use the
+          # resolved version (needs.setup.outputs.version), not github.ref_name, so dispatch
+          # builds (where github.ref_name is the branch) link to the right tag.
           body: |
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md) for the curated changelog.
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ needs.setup.outputs.version }}/CHANGELOG.md) for the curated changelog.
 
             `SHA256SUMS` covers every attached archive plus the CycloneDX SBOM + VEX: `shasum -a 256 -c SHA256SUMS`.
 
-            **Desktop GUI bundles (UNSIGNED).** This release also includes cross-platform [sparq GUI](https://github.com/${{ github.repository }}/tree/${{ github.ref_name }}/gui) desktop installers (`sparq-gui-${{ github.ref_name }}-*`): macOS `.dmg`, Windows `.msi` + NSIS `.exe`, and Linux `.deb` + `.AppImage`. **These bundles are NOT code-signed or notarized.** On macOS, Gatekeeper will quarantine them; on Windows, SmartScreen will warn. OS-level code-signing (Apple Developer ID notarization + Windows Authenticode) requires maintainer-held credentials and is tracked separately — until then, treat the GUI bundles as developer/test installs. The SLSA attestation below proves *who built* each bundle (build provenance); it is not a substitute for OS code-signing. (No `win-arm64` GUI installer yet — the Tauri bundler cannot cross-bundle it from the x64 Windows runner; no mobile app bundles yet.)
+            **Desktop GUI bundles (UNSIGNED).** This release also includes cross-platform [sparq GUI](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) desktop installers (`sparq-gui_${{ needs.setup.outputs.version }}_*`): macOS `.dmg`, Windows `.msi` + NSIS `.exe`, and Linux `.deb` + `.AppImage`. **These bundles are NOT code-signed or notarized.** On macOS, Gatekeeper will quarantine them; on Windows, SmartScreen will warn — see [/download](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) for the install bypass instructions (Gatekeeper/SmartScreen). OS-level code-signing (Apple Developer ID notarization + Windows Authenticode) requires maintainer-held credentials and is tracked separately — until then, treat the GUI bundles as developer/test installs. The SLSA attestation below proves *who built* each bundle (build provenance); it is not a substitute for OS code-signing. (No `win-arm64` GUI installer yet — the Tauri bundler cannot cross-bundle it from the x64 Windows runner; no mobile app bundles yet.)
 
-            **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ github.ref_name }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ github.ref_name }}.sbom.cdx.json`), a CycloneDX SBOM for the published npm/WASM client (`sparq-js-${{ github.ref_name }}.sbom.cdx.json` runtime tree + `sparq-js-dev-${{ github.ref_name }}.sbom.cdx.json` full build tree), and a VEX (`sparq-${{ github.ref_name }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
+            **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ needs.setup.outputs.version }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ needs.setup.outputs.version }}.sbom.cdx.json`), a CycloneDX SBOM for the published npm/WASM client (`sparq-js-${{ needs.setup.outputs.version }}.sbom.cdx.json` runtime tree + `sparq-js-dev-${{ needs.setup.outputs.version }}.sbom.cdx.json` full build tree), and a VEX (`sparq-${{ needs.setup.outputs.version }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
           fail_on_unmatched_files: true
 
   # ---- 3. server container -> ghcr.io ----
