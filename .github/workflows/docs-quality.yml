@@ -380,10 +380,20 @@ jobs:
       # which BOTH `npm ls --omit=dev` and the full `npm ls` exit 0, while the runtime (--omit=dev)
       # closure stays exactly the real runtime dep set (no dev-link leak into the published SBOM
       # surface). HARD job (no "advisory" token) — a regression reds the ci-summary gate.
-      - name: shellcheck gen-js-sbom.sh + the derive-lock self-test
-        run: shellcheck scripts/gen-js-sbom.sh scripts/tests/test_derive_workspace_member_lock.sh
+      - name: shellcheck gen-js-sbom.sh + the derive-lock self-tests
+        run: shellcheck scripts/gen-js-sbom.sh scripts/tests/test_derive_workspace_member_lock.sh scripts/tests/test_js_sbom_external_devdep.sh
       - name: "Self-test derive-workspace-member-lock.mjs (workspace-link materialization — sq-f04e)"
         run: bash scripts/tests/test_derive_workspace_member_lock.sh
+      # [OPUS-4.8] sq-pl1p (sq-f04e/#887 + #922 class): sq-f04e hardened only the workspace-LINK
+      # dep case. An EXTERNAL (registry) devDependency added to a PUBLISHED member (js/) projects its
+      # full transitive closure into the derived lock; a real dev-dep tree's unsatisfied peerDeps make
+      # cyclonedx-npm's FULL `npm ls` exit 254 (the #922 break). The fix keeps the runtime SBOM strict
+      # (--omit=dev prunes the dev tree) and passes --ignore-npm-errors on the DEV SBOM only (still
+      # enumerating the full set; superset honesty guard in gen-js-sbom.sh). This hermetic self-test
+      # (synthetic root lock, no network, node+npm only) pins the runtime-strict + dev-break-is-real +
+      # runtime-honesty teeth. HARD job (no "advisory" token) — a regression reds the ci-summary gate.
+      - name: "Self-test js-sbom lane vs external dev-deps on a published member (sq-pl1p)"
+        run: bash scripts/tests/test_js_sbom_external_devdep.sh
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:

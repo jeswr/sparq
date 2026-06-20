@@ -34,7 +34,10 @@ pub use eval::{
     PurposeMatch, RecipientMatch, Request, SpatialMatch, ODRL_COUNT, ODRL_DATETIME, ODRL_PURPOSE,
     ODRL_RECIPIENT, ODRL_SPATIAL,
 };
-pub use model::{Action, Constraint, Duty, Operator, Policy, Rule, Value, ODRL_NS};
+pub use model::{
+    Action, Constraint, ConstraintNode, Duty, LogicalConstraint, LogicalOperator, Operator, Policy,
+    Rule, Value, ODRL_NS,
+};
 pub use parse::{parse_policy, parse_policy_str};
 
 // [OPUS-4.8] sq-zi5w: re-export the count-enforcement surface at the crate root when the

@@ -111,13 +111,36 @@ echo "    -> runtime tree (--omit dev): $runtime_out"
     --mc-type library \
     --output-file "$runtime_out" )
 
-# Full build-time tree (incl. devDependencies) — parity with the Rust full-tree SBOM.
+# [OPUS-4.8] sq-pl1p (sq-f04e/#887 + #922 class): full build-time tree (incl. devDependencies)
+# — parity with the Rust full-tree SBOM. `--ignore-npm-errors` is REQUIRED here, and ONLY here.
+#
+# WHY (the exact #922 break mechanism): cyclonedx-npm shells out to
+# `npm ls --json --long --all --package-lock-only` (NO `--omit`) to enumerate the FULL tree, then
+# THROWS (exit 254) if that npm ls exits non-zero AND --ignore-npm-errors is unset (its default;
+# cyclonedx-npm builders.js fetchNpmLs). When a PUBLISHED member (js/ = @jeswr/sparq) declares an
+# EXTERNAL (registry) devDependency, derive-workspace-member-lock.mjs projects that dep's full
+# transitive closure into the standalone lock. A real dev-dep closure (e.g. @solid/acl-check ->
+# rdflib -> undici/cross-fetch, or n3) routinely carries UNSATISFIED `peerDependencies` and
+# version-overlap that `npm ls --package-lock-only` validates and flags as `missing`/`invalid`
+# (ELSPROBLEMS). That is INSTALL-FREE lock-VALIDATION noise — npm never actually installs here —
+# not a real defect, but the FULL view trips it (the runtime `--omit dev` view does NOT: it prunes
+# the entire dev subtree BEFORE validation, so it stays strict, see above). #922 worked around
+# this by relocating 3 test-only dev-deps to the repo-root package.json; this is the PROPER fix so
+# any future external dev-dep on a published member can't re-trip exit 254.
+#
+# HONESTY: --ignore-npm-errors only suppresses npm ls's NON-ZERO EXIT; cyclonedx still consumes
+# npm ls's STDOUT, so the FULL component set (every dev dep + its closure) is still enumerated —
+# nothing is dropped from the build-time SBOM. The runtime SBOM above keeps STRICT validation (NO
+# --ignore-npm-errors) so a genuine runtime-graph version conflict still reds the lane. And the
+# superset guard below asserts the dev SBOM still contains every runtime component, so this flag
+# can never silently hide a real runtime supply-chain surface.
 echo "    -> full build tree (incl. dev): $dev_out"
 ( cd "$JS_DIR" && npx --yes "$CDX_NPM" \
     --spec-version 1.5 \
     --output-format JSON \
     --package-lock-only \
     --no-workspaces \
+    --ignore-npm-errors \
     --mc-type library \
     --output-file "$dev_out" )
 
@@ -145,6 +168,27 @@ for f in "$runtime_out" "$dev_out"; do
     console.log("    OK", process.argv[1], "—", (d.components||[]).length, "component(s), specVersion", d.specVersion);
   ' "$f"
 done
+
+# [OPUS-4.8] sq-pl1p: HONESTY GUARD for the --ignore-npm-errors on the dev SBOM. Assert the dev
+# (full) SBOM is a SUPERSET of the runtime SBOM by purl — i.e. the relaxed dev pass can never
+# silently DROP a real runtime supply-chain component (which would understate the shipped surface).
+# If a runtime purl is missing from the dev tree, fail LOUDLY rather than emit a dishonest SBOM.
+echo "    -> honesty guard: dev SBOM must contain every runtime component"
+node -e '
+  const fs = require("fs");
+  const purls = (p) => new Set((JSON.parse(fs.readFileSync(p, "utf8")).components || [])
+    .map(c => c.purl).filter(Boolean));
+  const runtime = purls(process.argv[1]);
+  const dev = purls(process.argv[2]);
+  const missing = [...runtime].filter(p => !dev.has(p));
+  if (missing.length) {
+    console.error("ERROR: dev SBOM is NOT a superset of the runtime SBOM — runtime purl(s) absent");
+    console.error("       from the dev tree (the --ignore-npm-errors pass dropped a real runtime");
+    console.error("       component): " + JSON.stringify(missing));
+    process.exit(1);
+  }
+  console.log("    OK runtime SBOM (" + runtime.size + " purl) is a subset of the dev SBOM (" + dev.size + " purl)");
+' "$runtime_out" "$dev_out"
 
 echo "==> done. JS SBOMs in $OUT_DIR/:"
 for f in "$OUT_DIR"/sparq-js*.cdx.json; do

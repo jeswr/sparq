@@ -180,11 +180,37 @@ shacl = ["server", "dep:sparq-shacl"]
 # AT RUNTIME by default even when compiled in — the operator must additionally set `--n3-patch` /
 # `SPARQ_N3_PATCH=1` (`ServerConfig::n3_patch`), mirroring `tpf` / `shacl` / `federation-descriptors`.
 n3-patch = ["server"]
+# [OPUS-4.8] (sq-o5bi) `backup` (default OFF) mounts the OPT-IN ONLINE consistent-snapshot
+# backup/restore admin routes: `POST /admin/backup` streams a single self-describing artifact
+# of the CURRENTLY-PINNED generation (triples + per-pod epoch vectors + writer seq) WHILE
+# SERVING (no stop-the-world — the export reads an already-immutable `Arc<Generation>`, so
+# readers never block the writer and the writer never blocks readers), and `POST /admin/restore`
+# atomically installs a freshly-built ring+writer rehydrated from such an artifact (fail-closed on
+# a corrupt/mismatched artifact). A `--restore <FILE>` / `SPARQ_RESTORE` startup setting runs the
+# same restore on start (the bootstrap primitive for horizontal-scaling stage-2 + the base of
+# PITR). The feature turns on sparq-serve's own `backup` feature (the artifact format +
+# export/import live there); it adds no new dependency beyond that. DISTINCT from the offline
+# `sparq-cli save` (stop-the-world, index rebuild) and from the `--persist` per-graph WAL.
+# At-rest ENCRYPTION of the artifact is a SEPARATE concern, out of scope. Both routes are
+# WRITE/admin-gated (the existing `--auth-token` admin gate). Without the feature the routes +
+# the restore setting are `#[cfg]`-stripped, so a build without it is byte-identical to before.
+# Needs `server`.
+# [OPUS-4.8] (sq-0g6g) `dep:arc-swap` is brought in ONLY here — the swappable serving core
+# (`ArcSwap<ServingCore>`) that enables the atomic online restore exists solely under `backup`.
+# The default `server` build holds the ring/writer directly (byte-identical to pre-#941) and
+# never depends on arc-swap, so the default serving read path stays lean.
+backup = ["server", "dep:arc-swap", "sparq-serve/backup"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
+# [OPUS-4.8] (sq-o5bi, sq-0g6g) The swappable serving core (ring + writer) lives behind an
+# `ArcSwap` so an online restore can atomically install a rehydrated core while readers load
+# lock-free — the same arc-swap the ring uses internally. `backup`-feature ONLY: the default
+# serving path holds ring/writer directly (byte-identical to pre-#941), so without `backup` the
+# server never depends on arc-swap. The serialiser-only build and the wasm graph never see it.
+arc-swap = { version = "1", optional = true }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 # The concurrent-serving core (Wave A, research/concurrent-serving.md §6): the
 # lock-free generation ring pins read snapshots; the single sequenced writer

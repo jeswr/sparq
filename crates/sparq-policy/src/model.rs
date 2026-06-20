@@ -3,8 +3,9 @@
 //! This is a faithful-but-scoped Rust rendering of the [ODRL 2.2 Information
 //! Model](https://www.w3.org/TR/odrl-model/): a [`Policy`] is a container of
 //! deontic [`Rule`]s (Permission / Prohibition), each carrying an [`Action`], a
-//! `target` asset, optional `assignee`/`assigner` parties, zero or more
-//! [`Constraint`]s, and (for permissions) zero or more [`Duty`] obligations.
+//! `target` asset, optional `assignee`/`assigner` parties, zero or more atomic
+//! [`Constraint`]s and compound [`LogicalConstraint`]s (`odrl:and`/`odrl:or`/
+//! `odrl:xone`), and (for permissions) zero or more [`Duty`] obligations.
 //!
 //! Scope (the single-node base case — see the crate README): the evaluator
 //! supports `Permission` and `Prohibition` rules with the common
@@ -51,9 +52,18 @@ pub struct Rule {
     /// The party issuing the rule (`odrl:assigner`). Informational for single-node
     /// evaluation; carried for justification + audit.
     pub assigner: Option<String>,
-    /// Constraints (`odrl:constraint`) that must all hold for the rule to be
-    /// *satisfied* (logical AND, per the ODRL default `odrl:and`).
+    /// Atomic constraints (`odrl:constraint` that names a direct
+    /// `leftOperand`/`operator`/`rightOperand` block) that must all hold for the
+    /// rule to be *satisfied* (logical AND, per the ODRL default `odrl:and`).
     pub constraints: Vec<Constraint>,
+    /// Compound `odrl:LogicalConstraint` refinements (`odrl:and` / `odrl:or` /
+    /// `odrl:xone` over a *set* of sub-constraints — [OPUS-4.8] sq-a0zef). A rule's
+    /// atomic [`constraints`](Rule::constraints) **and** its `logical_constraints`
+    /// are ALL ANDed together: the rule is satisfied only when every atomic
+    /// constraint holds AND every logical constraint holds. Empty for a rule whose
+    /// `odrl:constraint` objects are all direct (non-`LogicalConstraint`) blocks —
+    /// the common single-node base case.
+    pub logical_constraints: Vec<LogicalConstraint>,
     /// Duties (`odrl:duty`) — obligations that must be discharged for a
     /// *permission* to be exercisable. Ignored on prohibitions (a prohibition
     /// has no pre-condition duty in this base case).
@@ -64,9 +74,22 @@ pub struct Rule {
 /// `odrl:distribute`, `odrl:aggregate`, `odrl:anonymize`, …).
 ///
 /// Stored as the full IRI. The well-known `odrl:use` action is the ODRL
-/// "umbrella" action: a permission for `odrl:use` matches a request for any
-/// action (per the ODRL action hierarchy, `use` is a super-action). All other
-/// actions match by exact IRI equality in this base case.
+/// "umbrella" action: a permission for `odrl:use` matches a request for any action
+/// **that the ODRL 2.2 action hierarchy places under `use`** (`odrl:includedIn`).
+/// All other actions match by exact IRI equality in this base case.
+///
+/// **The `use` umbrella reconciliation ([OPUS-4.8] sq-euhr3).** sparq-policy
+/// previously treated `odrl:use` as subsuming *every* action; the SolidLab ODRL Test
+/// Suite (and the ODRL 2.2 vocabulary) is more precise — `use` includes its proper
+/// sub-actions (`read`, `display`, `print`, `modify`, `delete`, … — 39 actions are
+/// `includedIn use` transitively in [ODRL 2.2](https://www.w3.org/TR/odrl-vocab/)),
+/// but **NOT** the ownership-`transfer` subtree: `odrl:sell` / `odrl:give` are
+/// `includedIn odrl:transfer`, not `use`, so a `use` permission does **not** authorise
+/// selling. The canonical reading is therefore: `use` permits a requested action that
+/// is `use` itself or any action *not provably in the `transfer` subtree* (the one
+/// disjoint top-level branch the vocabulary defines) — which makes a `use` permission
+/// Active for `read`/`write` and Inactive for `sell`/`give`, matching the suite's
+/// cases 007/008/009 (Active) vs 010/017 (Inactive). See [`permits`](Action::permits).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Action(pub String);
 
@@ -76,11 +99,38 @@ impl Action {
         Action(format!("{ODRL_NS}use"))
     }
 
-    /// True iff this action permits a request for `requested`: exact-IRI match,
-    /// or this action is the `odrl:use` umbrella (which subsumes every action).
+    /// True iff this action permits a request for `requested`: exact-IRI match, or
+    /// this action is the `odrl:use` umbrella and `requested` is **included in `use`**
+    /// under the ODRL 2.2 action hierarchy (i.e. `requested` is not in the disjoint
+    /// `odrl:transfer` ownership subtree). [OPUS-4.8] sq-euhr3.
+    ///
+    /// The transfer subtree (`odrl:sell`, `odrl:give`, `odrl:transfer`) is the one
+    /// well-defined top-level branch the ODRL vocabulary places *outside* `use`, so it
+    /// is excluded explicitly; every other action — including non-vocabulary actions
+    /// such as `odrl:write` — is treated as a use-subtree action (the broad "use this
+    /// asset" reading), matching the SolidLab reference evaluator.
     pub fn permits(&self, requested: &Action) -> bool {
-        self == requested || self.0 == format!("{ODRL_NS}use")
+        if self == requested {
+            return true;
+        }
+        self.0 == format!("{ODRL_NS}use") && !is_transfer_subtree(&requested.0)
     }
+}
+
+/// Whether `action_iri` is in the ODRL 2.2 ownership-`transfer` subtree — the one
+/// top-level action branch the vocabulary places *outside* `odrl:use`. These actions
+/// are `odrl:includedIn odrl:transfer` (or are `odrl:transfer` itself), so a `use`
+/// permission does **not** subsume them. [OPUS-4.8] sq-euhr3.
+///
+/// The transfer subtree is finite and closed in ODRL 2.2: `transfer` plus its
+/// included actions `sell` and `give`. Encoded as an explicit set so the `use`
+/// umbrella excludes exactly this branch (and nothing else); any action not here is
+/// treated as a use-subtree action.
+fn is_transfer_subtree(action_iri: &str) -> bool {
+    let Some(local) = action_iri.strip_prefix(ODRL_NS) else {
+        return false;
+    };
+    matches!(local, "transfer" | "sell" | "give")
 }
 
 impl fmt::Display for Action {
@@ -105,6 +155,81 @@ pub struct Constraint {
     /// The value to compare against (`odrl:rightOperand`), as a typed
     /// [`Value`].
     pub right: Value,
+}
+
+/// A compound `odrl:LogicalConstraint` — a logical combinator (`odrl:and` /
+/// `odrl:or` / `odrl:xone`) over a *set* of sub-[`Constraint`]s. [OPUS-4.8] sq-a0zef.
+///
+/// ODRL expresses a compound constraint as an `odrl:LogicalConstraint` node whose
+/// `odrl:and` / `odrl:or` / `odrl:xone` property points at a *refining set* of
+/// operand constraints (each itself an `odrl:Constraint` **or** a nested
+/// `odrl:LogicalConstraint`). In the suite (and the common compact serialisation) the
+/// operands are several objects of that one property (`odrl:and <c1>, <c2>`),
+/// evaluated as:
+///
+/// * `odrl:and`  — satisfied iff **every** operand is satisfied (conjunction).
+/// * `odrl:or`   — satisfied iff **at least one** operand is satisfied (disjunction).
+/// * `odrl:xone` — satisfied iff **exactly one** operand is satisfied (exclusive-or).
+///
+/// Operands may themselves be compound ([`ConstraintNode`] is atomic-or-compound), so a
+/// nested shape such as an `or` of `and`s (a disjunction of time windows) is supported.
+///
+/// **Fail-closed:** an operand whose dimension the request supplies no evidence for
+/// is *unprovable* (not silently satisfied); see [`crate::evaluate`] for how the
+/// three-valued operand verdict folds into each combinator (an `and`/`xone` is never
+/// claimed on an unprovable operand).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalConstraint {
+    /// The compound node IRI/blank-id (for justification in the decision).
+    pub id: String,
+    /// The logical combinator over the operands.
+    pub operator: LogicalOperator,
+    /// The operand (sub-)constraints the combinator ranges over — each atomic or itself
+    /// compound ([`ConstraintNode`]). An **empty** operand set is treated fail-closed (an
+    /// `or`/`xone` with no operand can never be satisfied; an `and` with no operand is
+    /// vacuously *not asserted* — see eval).
+    pub operands: Vec<ConstraintNode>,
+}
+
+/// One operand of a [`LogicalConstraint`] — either an atomic [`Constraint`] or a nested
+/// compound [`LogicalConstraint`]. [OPUS-4.8] sq-a0zef.
+///
+/// This makes compound constraints arbitrarily nestable (an `odrl:or` of `odrl:and`s,
+/// etc.) while keeping the *atomic* [`Constraint`] type — used pervasively by the
+/// evaluator, the static analyser, and count enforcement — unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstraintNode {
+    /// A leaf atomic constraint (`leftOperand`/`operator`/`rightOperand`).
+    Atomic(Constraint),
+    /// A nested compound `odrl:LogicalConstraint`.
+    Compound(LogicalConstraint),
+}
+
+/// The logical combinator of an [`odrl:LogicalConstraint`](LogicalConstraint).
+/// [OPUS-4.8] sq-a0zef.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LogicalOperator {
+    /// `odrl:and` — conjunction: every operand must hold.
+    And,
+    /// `odrl:or` — disjunction: at least one operand must hold.
+    Or,
+    /// `odrl:xone` — exclusive-or: exactly one operand must hold.
+    Xone,
+}
+
+impl LogicalOperator {
+    /// Parse an `odrl:` logical-combinator IRI into a [`LogicalOperator`]. Unknown
+    /// combinators (e.g. the deprecated `odrl:andSequence`) return `None`, and the
+    /// enclosing compound constraint then fails closed.
+    pub fn from_iri(iri: &str) -> Option<LogicalOperator> {
+        let local = iri.strip_prefix(ODRL_NS)?;
+        Some(match local {
+            "and" => LogicalOperator::And,
+            "or" => LogicalOperator::Or,
+            "xone" => LogicalOperator::Xone,
+            _ => return None,
+        })
+    }
 }
 
 /// The constraint comparison operators sparq-policy supports (the common ODRL
