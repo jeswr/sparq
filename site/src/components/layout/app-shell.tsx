@@ -93,6 +93,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <nav className="hidden items-center gap-1 lg:flex" aria-label="Primary">
               <TopTab href="/">Showcase</TopTab>
               <TopTab href="/benchmarks">Benchmarks</TopTab>
+              {/* [OPUS-4.8] sq-gl3cf — discoverable /download entry (the GUI/CLI download page). */}
+              <TopTab href="/download">Download</TopTab>
               <TopTab href="/about">About</TopTab>
             </nav>
 
