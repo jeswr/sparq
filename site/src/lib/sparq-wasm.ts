@@ -50,6 +50,10 @@ export {
   loadSparq,
   matchQuads,
   prewarmSparq,
+  // [OPUS-4.8] sq-4296 (#935 / #981) — the IDLE-deferred pre-warm: schedule the wasm fetch on
+  // the next browser-idle slot so the ~300 kB+ engine never blocks the initial page paint.
+  prewarmSparqWhenIdle,
+  type IdlePrewarmHandle,
   sparqShaclValidate,
   streamQueryRows,
   // [OPUS-4.8] sq-x0kp — the framework-agnostic results-formatting core (table extraction,

@@ -27,7 +27,7 @@ import {
 import { cn } from "@/lib/utils";
 import { RdfHighlight } from "@/components/rdf-highlight";
 import {
-  prewarmSparq,
+  prewarmSparqWhenIdle,
   loadSparq,
   loadIntoStore,
   matchQuads,
@@ -112,24 +112,29 @@ export function ShaclPlayground() {
   const [activeExample, setActiveExample] = React.useState<string>(DEFAULT.id);
   const [view, setView] = React.useState<View>("results");
 
-  // Pre-warm the wasm engine on mount (off the render path) so the first "Validate"
-  // pays no cold start. A failure resets the indicator; validate() retries the load.
+  // [OPUS-4.8] sq-4296 (#935 / #981) — pre-warm the wasm engine on the next browser-IDLE
+  // slot, not synchronously during mount, so the ~300 kB+ engine wasm never blocks the
+  // initial page paint. The first "Validate" still awaits the memoised `loadSparq()`, so an
+  // interaction before the idle warm-up completes joins the in-flight load (no cold-start
+  // double-load, no call into an uninitialised wasm). A failure resets the indicator.
   React.useEffect(() => {
     let cancelled = false;
     setEngine("warming");
-    prewarmSparq()
-      .then(() => {
+    const handle = prewarmSparqWhenIdle({
+      onReady: () => {
         if (!cancelled) setEngine("ready");
-      })
-      .catch((e) => {
+      },
+      onError: (e) => {
         if (cancelled) return;
         setEngine("error");
         toast.error("Engine failed to load", {
           description: e instanceof Error ? e.message : String(e),
         });
-      });
+      },
+    });
     return () => {
       cancelled = true;
+      handle.cancel();
     };
   }, []);
 

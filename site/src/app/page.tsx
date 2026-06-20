@@ -1,7 +1,11 @@
 import Link from "next/link";
 import { ArrowRight, Cpu, ShieldCheck, Boxes } from "lucide-react";
 
-import { Repl } from "@/components/repl";
+// [OPUS-4.8] sq-4296 (#935 / #981) — the REPL is code-split into its own async chunk so it
+// does not sit in the home route's first-load JS bundle; the page shell renders + becomes
+// interactive first, then the REPL streams in (and only then does its idle-deferred wasm
+// engine warm up). See src/components/repl-lazy.tsx.
+import { ReplLazy } from "@/components/repl-lazy";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -45,7 +49,7 @@ export default function HomePage() {
 
       {/* Marquee live demo */}
       <section className="space-y-3">
-        <Repl />
+        <ReplLazy />
         <p className="text-xs text-muted-foreground">
           This REPL loads the lean sparq wasm bundle (~1.2 MB) and runs your
           SPARQL against the sample graph using the real Rust engine — the same

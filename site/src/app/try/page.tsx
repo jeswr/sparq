@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 
-import { Repl } from "@/components/repl";
+// [OPUS-4.8] sq-4296 (#935 / #981) — code-split the REPL out of the /try route's first-load
+// bundle (see src/components/repl-lazy.tsx) so the page shell renders before the heavy REPL
+// chunk + its idle-deferred wasm engine load.
+import { ReplLazy } from "@/components/repl-lazy";
 
 export const metadata: Metadata = {
   title: "Live SPARQL REPL",
@@ -33,7 +36,7 @@ export default function TryPage() {
           SERVICE clause the server refuses by default) and never bypasses a server gate.
         </p>
       </header>
-      <Repl />
+      <ReplLazy />
     </div>
   );
 }
