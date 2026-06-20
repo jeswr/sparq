@@ -289,6 +289,11 @@ jobs:
         with:
           files: assets/*
           generate_release_notes: true
+          # [OPUS-4.8] sq-v286: a hyphenated semver tag (v*-dev.N / v*-rc.N / v*-beta.N) is a
+          # pre-release; a bare vX.Y.Z is a full release. Lets us cut unsigned dev previews
+          # without flagging them "Latest". softprops/action-gh-release does NOT infer this from
+          # the tag, so it is set explicitly here.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           # CHANGELOG.md is the curated source of truth; point readers at it.
           body: |
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md) for the curated changelog.
