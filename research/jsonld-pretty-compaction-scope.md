@@ -153,7 +153,10 @@ Turtle chain sq-ixc3.2 / sq-fe1s / sq-lxej):
    expose JSON-LD (incl. the new pretty option) through it so the site never
    hand-formats JSON-LD; depends on `sq-fe1s` + `sq-ixc3.3`.
 
-Framing is intentionally NOT a bead (no consumer; out of scope).
+JSON-LD 1.1 Framing was subsequently scoped and implemented (hand-rolled,
+`crates/sparq-engine/src/serialize/frame.rs`, `graph_to_jsonld_framed`) under
+bead `sq-oy1f.17` / PR #984 — so it is no longer out of scope here. (The earlier
+deferral decision lives in `sq-oy1f.6`.) [OPUS-4.8]
 
 ## Open questions for the maintainer
 
