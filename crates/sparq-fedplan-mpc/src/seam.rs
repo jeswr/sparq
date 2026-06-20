@@ -1,30 +1,33 @@
-//! The typed, panic-free **stubs** for the deferred seam phases (design record §4.3 / §8).
+//! The seam's shared error/phase types and the **still-deferred** phase stubs (design record
+//! §4.3 / §8).
 //!
-//! Phase 1 (this bead, sq-2q1x) lands the *shape* of the untrusted-planner → MPC-routing
-//! seam — real input/output types wired to the actual upstream crates — but **none of the
-//! privacy-bearing logic**. Each deferred phase is a function with its real signature that
-//! returns `Err(`[`SeamError::Deferred`]`)` naming the phase and the gate it waits on. The
-//! functions **compile and are callable**, perform NO MPC, reveal NOTHING, and never panic
-//! (no `todo!()` / `unimplemented!()`): a caller that invokes one gets an honest typed
-//! "deferred" error, not a crash and not a fabricated result.
+//! Phase 1 (sq-2q1x) landed the *shape* of the untrusted-planner → MPC-routing seam — real
+//! input/output types wired to the actual upstream crates — with **none of the privacy-bearing
+//! logic**. Phase 2 (sq-fix4) makes the **source-selection adapter** real (it lives in
+//! [`crate::selection`]). The remaining phases stay deferred stubs here: each is a function with
+//! its real signature returning `Err(`[`SeamError::Deferred`]`)` naming the phase and the gate it
+//! waits on. The stubs **compile and are callable**, perform NO MPC, reveal NOTHING, and never
+//! panic (no `todo!()` / `unimplemented!()`): a caller gets an honest typed "deferred" error, not
+//! a crash and not a fabricated result.
 //!
 //! The phases (from the design record's phased plan):
-//! * [`select_private_sources`] — Phase 2: wrap [`sparq_fedplan::select_sources`] and prune by
-//!   the per-source [`crate::SourcePrivacyDescriptor`] (participation / authorisation).
-//! * [`route_operators`] — Phase 3: the policy-parameterised disclosed/hidden partition,
-//!   emitting the [`sparq_mpc::pipeline::OperatorRouting`] vector the pipeline consumes.
-//! * [`assemble_leakage_envelope`] — Phase 4: collect what the chosen routing reveals into a
-//!   declared envelope for the holder/verifier dual ratification.
+//! * [`select_private_sources`](crate::select_private_sources) — Phase 2 (**implemented**, sq-fix4):
+//!   wraps [`sparq_fedplan::select_sources`] and prunes by the per-source
+//!   [`crate::SourcePrivacyDescriptor`] (participation / authorisation). See [`crate::selection`].
+//! * [`route_operators`] — Phase 3 (deferred): the policy-parameterised disclosed/hidden
+//!   partition, emitting the [`sparq_mpc::pipeline::OperatorRouting`] vector the pipeline consumes.
+//! * [`assemble_leakage_envelope`] — Phase 4 (deferred): collect what the chosen routing reveals
+//!   into a declared envelope for the holder/verifier dual ratification.
 //!
 //! NONE of these makes a soundness/privacy claim; the privacy-bearing work is deferred and
 //! audit-gated (sq-9hrn / sq-qhy4). See the crate `README.md` and
 //! `research/mpc-untrusted-planner-routing-design.md`.
 //!
-//! [OPUS-4.8] sq-2q1x.
+//! [OPUS-4.8] sq-2q1x / sq-fix4.
 
-use sparq_fedplan::{Bgp, SourceDescriptor};
 use sparq_mpc::pipeline::OperatorRouting;
 
+use crate::selection::SelectedPrivateSources;
 use crate::SourcePrivacyDescriptor;
 
 /// Which deferred seam phase a [`SeamError::Deferred`] came from. Naming the phase in the
@@ -32,7 +35,8 @@ use crate::SourcePrivacyDescriptor;
 /// the same honesty discipline as `sparq-mpc`'s `MpcError::NotYetImplemented`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeamPhase {
-    /// Phase 2 — privacy/authorisation-aware source selection ([`select_private_sources`]).
+    /// Phase 2 — privacy/authorisation-aware source selection
+    /// ([`select_private_sources`](crate::select_private_sources)).
     SourceSelection,
     /// Phase 3 — the disclosed/hidden routing partition ([`route_operators`]).
     Routing,
@@ -51,11 +55,13 @@ impl SeamPhase {
     }
 }
 
-/// The seam's error type. Phase 1 has exactly one variant — [`SeamError::Deferred`] — the
-/// honest typed channel every deferred-phase stub returns. It carries the [`SeamPhase`] and
-/// the `gated_on` issues/audits, so a caller learns WHY the phase is unavailable rather than
-/// hitting a panic or a fabricated result. (The enum is `#[non_exhaustive]` so the
-/// privacy-bearing phases can add real error variants without a breaking change.)
+/// The seam's error type. [`SeamError::Deferred`] is the honest typed channel every *deferred*
+/// phase stub returns (it carries the [`SeamPhase`] and the `gated_on` issues/audits, so a caller
+/// learns WHY the phase is unavailable rather than hitting a panic or a fabricated result).
+/// [`SeamError::DescriptorMismatch`] is the first *real* error variant — the implemented
+/// source-selection adapter (Phase 2) returns it on an ambiguous / inconsistent privacy
+/// declaration. (The enum is `#[non_exhaustive]` so later phases can add variants without a
+/// breaking change.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SeamError {
@@ -67,6 +73,18 @@ pub enum SeamError {
         phase: SeamPhase,
         /// The gate(s) the phase waits on (issues / audits), as a human-readable string.
         gated_on: &'static str,
+    },
+    /// A privacy descriptor set was inconsistent — e.g. two
+    /// [`crate::SourcePrivacyDescriptor`]s declared for the same source id (an ambiguous
+    /// authorisation policy). The adapter **refuses** (fail-closed) rather than guessing which
+    /// one binds. Returned by [`select_private_sources`](crate::select_private_sources).
+    DescriptorMismatch {
+        /// Which phase raised it.
+        phase: SeamPhase,
+        /// The offending source id.
+        source_id: String,
+        /// A short human-readable explanation of the inconsistency.
+        detail: &'static str,
     },
 }
 
@@ -86,20 +104,22 @@ impl std::fmt::Display for SeamError {
                 phase.label(),
                 gated_on
             ),
+            SeamError::DescriptorMismatch {
+                phase,
+                source_id,
+                detail,
+            } => write!(
+                f,
+                "sparq-fedplan-mpc {} privacy-descriptor mismatch for source {}: {}",
+                phase.label(),
+                source_id,
+                detail
+            ),
         }
     }
 }
 
 impl std::error::Error for SeamError {}
-
-/// The output of the (deferred) privacy-aware source-selection phase: per-pattern candidate
-/// sources, restricted by what each source is willing/authorised to expose. A typed
-/// PLACEHOLDER for Phase 2 — its internal shape is intentionally minimal (the phase that
-/// builds it will fill it from [`sparq_fedplan::PatternSources`]); it carries no data in
-/// Phase 1 and is never produced (the stub returns [`SeamError::Deferred`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SelectedPrivateSources {}
 
 /// The output of the (deferred) routing phase: the per-operator disclosed-vs-hidden routing
 /// the `sparq-mpc` pipeline consumes. A typed PLACEHOLDER for Phase 3 — it wraps the real
@@ -121,26 +141,6 @@ pub struct PrivateRouting {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LeakageEnvelope {}
-
-/// **Phase 2 (deferred)** — privacy/authorisation-aware source selection.
-///
-/// The built phase will run [`sparq_fedplan::select_sources`] over `bgp` + `sources` and then
-/// prune the per-pattern candidates by each source's [`SourcePrivacyDescriptor`] (dropping a
-/// source that will not participate or is not authorised). **This skeleton performs none of
-/// that** — it returns [`SeamError::Deferred`]. It runs NO MPC and reveals NOTHING.
-///
-/// The arguments are taken (and named with `_`) so the seam's real input shape is fixed now;
-/// the signature will not change when the phase is implemented.
-pub fn select_private_sources(
-    _bgp: &Bgp,
-    _sources: &[SourceDescriptor],
-    _privacy: &[SourcePrivacyDescriptor],
-) -> Result<SelectedPrivateSources, SeamError> {
-    Err(SeamError::deferred(
-        SeamPhase::SourceSelection,
-        "sq-2q1x Phase 2 (source-selection adapter); see research/mpc-untrusted-planner-routing-design.md §4.3",
-    ))
-}
 
 /// **Phase 3 (deferred)** — the disclosed/hidden routing partition.
 ///
@@ -181,27 +181,12 @@ mod tests {
     use super::*;
     use sparq_fedplan::SourceId;
 
-    fn descriptor() -> SourceDescriptor {
-        SourceDescriptor::builder(SourceId::new("http://s/")).build()
-    }
     fn privacy() -> SourcePrivacyDescriptor {
         SourcePrivacyDescriptor::deny_all(SourceId::new("http://s/"))
     }
 
-    #[test]
-    fn source_selection_is_deferred_not_a_panic() {
-        let bgp = Bgp::default();
-        let err = select_private_sources(&bgp, &[descriptor()], &[privacy()]).unwrap_err();
-        assert!(matches!(
-            err,
-            SeamError::Deferred {
-                phase: SeamPhase::SourceSelection,
-                ..
-            }
-        ));
-        // The error names its gate (honest deferral, not a crash).
-        assert!(format!("{}", err).contains("source selection"));
-    }
+    // Phase 2 (`select_private_sources`) is IMPLEMENTED — its tests live in `crate::selection`.
+    // Phases 3 + 4 are still deferred stubs; the tests below pin their honest deferral.
 
     #[test]
     fn routing_is_deferred_not_a_panic() {
@@ -219,8 +204,7 @@ mod tests {
 
     #[test]
     fn leakage_envelope_is_deferred_not_a_panic() {
-        let err =
-            assemble_leakage_envelope(&PrivateRouting::default(), &[privacy()]).unwrap_err();
+        let err = assemble_leakage_envelope(&PrivateRouting::default(), &[privacy()]).unwrap_err();
         match err {
             SeamError::Deferred { phase, gated_on } => {
                 assert_eq!(phase, SeamPhase::LeakageEnvelope);
@@ -228,6 +212,10 @@ mod tests {
                 assert!(gated_on.contains("sq-9hrn"));
                 assert!(gated_on.contains("sq-qhy4"));
             }
+            other => panic!(
+                "expected a Deferred leakage-envelope error, got {:?}",
+                other
+            ),
         }
     }
 
@@ -238,7 +226,26 @@ mod tests {
             SeamPhase::Routing.label(),
             SeamPhase::LeakageEnvelope.label(),
         ];
-        // All three deferred phases carry a distinct human label.
-        assert_eq!(labels.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        // All three seam phases carry a distinct human label.
+        assert_eq!(
+            labels
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn descriptor_mismatch_displays_the_offending_source() {
+        // The new Phase-2 error variant renders the source id + phase in its Display.
+        let err = SeamError::DescriptorMismatch {
+            phase: SeamPhase::SourceSelection,
+            source_id: "http://dup/".to_string(),
+            detail: "duplicate descriptor",
+        };
+        let shown = format!("{}", err);
+        assert!(shown.contains("http://dup/"));
+        assert!(shown.contains("source selection"));
     }
 }
