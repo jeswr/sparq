@@ -43,6 +43,22 @@
 //! `@vocab`, type/language/`@container` (`@set`/`@list`/`@language`/`@index`), `@reverse`,
 //! keyword aliasing, value compaction, node compaction and IRI compaction are all
 //! covered. See the crate README + `skills/data-formats/SKILL.md` for the boundary.
+//!
+//! ## Faithful to a strict third-party processor (sq-oy1f.12/.13/.14)
+//!
+//! [OPUS-4.8] The emitted compacted document is differentially verified against the pyld
+//! W3C reference processor, so a strict third-party consumer re-expands it to the same
+//! graph. The four faithfulness fixes that close that gap:
+//!
+//! - **`@reverse` edges** are emitted as a *forward member of the reverse term*, not inside
+//!   an `@reverse` block — emitting the block on an already-reversed edge would double-invert
+//!   (see [`relocate_reverse`] / [`REVERSE_RELOC`] and `compact_node`).
+//! - **Non-string values never land in a `@language` map** — a language container only
+//!   accumulates language-tagged strings; other values fall through to the normal path.
+//! - **Multi-value `@language` / `@index` containers accumulate** every value rather than
+//!   overwriting, so no member is lost when several values share a key.
+//! - **A literal under a `@type: @id` term stays a literal** — type coercion to `@id` applies
+//!   only to node references, never to a value that is already a literal.
 
 use super::{
     coerce_native, detect_lists, json_escape, ListInfo, NamedGraph, RDF_LANG_STRING, RDF_TYPE, XSD,
