@@ -151,8 +151,10 @@ security-property vocabulary (`sparql-zkp-ontologies`), and this design builds o
    `Unlinkability`, `SourceCredentialDisclosure`, `PostQuantumForgery`,
    `PostQuantumSnooping`, `SignatureTypeLeakage`, `ProofSizeLeakage`, `CircuitAudit`,
    `ValidityPeriodLeakage`. **KEEP wholesale — reuse the eight IRIs and the
-   threat/defence/openQuestion structure.** (Caveat: IRIs are `w3id.org` placeholders
-   pending a public-release decision — see open question §10.1.)
+   threat/defence/openQuestion structure.** (The IRIs are now **bound hard**: per the
+   2026-06-20 decision (§10.1) these ontologies are **vendored into sparq** at
+   `crates/sparq-trust/ontologies/zkp-sparql/` and the `w3id.org/zkp-sparql/` IRIs are
+   kept as-is — stable under the external repo's archive.)
 2. **`sig-impl:Assertion` — the reified per-(implementation, property) verdict pattern**
    (`vocab/sig-impl.yaml.ld`). Each (scheme, property) verdict is a node with
    `sig-impl:yes`/`no`/`partial` + a justification string + provenance. **KEEP the
@@ -236,11 +238,13 @@ his IRIs; the new orthogonal dimensions (§3.3) are added **under the same names
 new `sec-prop:` individuals/classes; the per-method annotation graph (§5a) lives in
 sparq under the existing `zk:` namespace it keys on.
 
-The only nuance — an **open question for the maintainer** (§10.1): his `w3id.org`
-placeholder IRIs are **not yet public** (the `sparql-zkp-ontologies` repo is private). So
-v1 in sparq should reference them through a thin indirection (`rdfs:seeAlso` to the
-canonical `sec-prop:` IRI, with a sparq-local mirror only if the repo stays private),
-and the *public release* of `sparql-zkp-ontologies` is the trigger to bind hard. The
+The earlier nuance here (§10.1) is now **RESOLVED (2026-06-20)**: rather than make the
+`sparql-zkp-ontologies` repo public, the maintainer chose to **vendor its ontologies
+verbatim into sparq** at `crates/sparq-trust/ontologies/zkp-sparql/` (from SHA
+`0fe80ea7`) and archive the external repo. The `w3id.org/zkp-sparql/` IRIs are **kept
+as-is and bound hard** — w3id IRIs redirect via the permanent-identifier service
+independently of the source repo's visibility, so they resolve and stay stable under
+archive; no thin indirection or sparq-local mirror is needed. The
 prose in this document uses the `sec-prop:` prefix for reused terms and a `secx:`
 ("sec-prop extension") prefix for *new* terms the design adds, so it is visible which
 came from him vs which are new — but both resolve under his namespace once released:
@@ -925,24 +929,50 @@ The N3 admissibility rules (`strongerThan`-closure, `atLeast`, `overDimension`,
 
 ## 10. Open questions that genuinely need the maintainer
 
-1. **Namespace + public release of `sparql-zkp-ontologies`.** This design extends your
-   existing `https://w3id.org/zkp-sparql/sec-prop#` namespace — but that repo is **private**
-   and the IRIs are placeholders. To wire the annotation graph into sparq we need the
-   namespace to resolve. Options: (a) **make `sparql-zkp-ontologies` public** and bind hard
-   (preferred — it is the natural companion to the ISWC paper + the VC Data Integrity
-   registry); (b) keep it private and have sparq mirror the terms under a sparq-local
-   namespace with `rdfs:seeAlso` back to `w3id.org/zkp-sparql/` (loses the single-source
-   benefit). Which?
-2. **Assurance default.** Should the *shipped default* admissibility policy require
-   `assurance gteq Proven` (admit nothing from the unaudited estate — maximally
-   conservative, but admits nothing) or `gteq Claimed` (admit on an explicitly-unaudited
-   basis with the decision recorded)? This is a product/safety call, not a technical one.
-3. **DPV alignment depth.** The survey confirmed DPV core (not `dpv-tech`) is the sole
-   reusable crypto-method vocabulary, but it stops at applied techniques
+> **Maintainer decision (2026-06-20) — vendor, do not publicise.** The maintainer
+> decided **not** to make the private `jeswr/sparql-zkp-ontologies` repo public.
+> Instead its CI-validated, SHACL-shaped ontologies are **vendored verbatim into the
+> sparq codebase** (with the license + attribution intact) at
+> `crates/sparq-trust/ontologies/zkp-sparql/` — vendored from SHA
+> `0fe80ea7d858de9f02bd29df29f6e50cdada14a0` — and the external repo is **archived**
+> afterward. This **resolves open question #1 below** (release publicly? → **no,
+> vendored**). The **`https://w3id.org/zkp-sparql/...` namespace is kept as-is**: w3id
+> IRIs resolve via the permanent-identifier redirect, independent of the repo's
+> visibility, so they remain stable under archive — no re-minting into a sparq-local
+> namespace. The two remaining maintainer decisions (#2 assurance default, #3 DPV
+> alignment depth) are tracked as GitHub issues **#1001** and **#1002** respectively.
+> See the vendored `PROVENANCE.md` for the full provenance/attribution record.
+
+1. ~~**Namespace + public release of `sparql-zkp-ontologies`.**~~ **RESOLVED
+   (2026-06-20): NO — vendored, not publicised.** This design extends the maintainer's
+   existing `https://w3id.org/zkp-sparql/sec-prop#` namespace. The original repo was
+   private with placeholder IRIs; the maintainer chose neither option (a) "make it
+   public" nor option (b) "mirror under a sparq-local namespace with `rdfs:seeAlso`",
+   but a **third path: vendor the ontologies into sparq verbatim and keep the
+   `w3id.org/zkp-sparql/` IRIs**. w3id IRIs are independent of the source repo's
+   visibility (they redirect via the w3id permanent-identifier service), so they
+   resolve and stay stable even after the external repo is archived — preserving the
+   single-source benefit without publishing the repo. The vendored copy lives at
+   `crates/sparq-trust/ontologies/zkp-sparql/`; this design **binds hard** against
+   those IRIs.
+2. **Assurance default → tracked as issue [#1001](https://github.com/jeswr/sparq/issues/1001).**
+   Should the *shipped default* admissibility policy require `assurance gteq Proven`
+   (admit nothing from the unaudited estate — maximally conservative, but admits
+   nothing) or `gteq Claimed` (admit on an explicitly-unaudited basis with the decision
+   recorded)? This is a product/safety call, not a technical one. **Decision pending in
+   #1001** (the SPARQ agent's recommendation there is **default `Claimed`**, promoting
+   to `Proven` only after the external audit `sq-qhy4` or a real formal proof). The
+   vocab extension (`sq-5oru9`) is **blocked** on this answer.
+3. **DPV alignment depth → tracked as issue [#1002](https://github.com/jeswr/sparq/issues/1002).**
+   The survey confirmed DPV core (not `dpv-tech`) is the sole reusable crypto-method
+   vocabulary, but it stops at applied techniques
    (`dpv:ZeroKnowledgeAuthentication`, `dpv:PostQuantumCryptography`) and has no per-proof
    property terms. Anchor each minted property to DPV with `skos:closeMatch` only (the
    plan), or push harder to get the per-proof terms *into* DPV (a DPVCG contribution)?
    The latter is more work but standardises the gap rather than mirroring it.
+   **Decision pending in #1002** (the SPARQ agent's recommendation there is **Light** —
+   `skos:closeMatch`/`rdfs:seeAlso` cross-reference only, no full regulation→requirement
+   chain yet).
 4. **Source-layer property transfer.** Confirm the §5a.2 rule (a source cryptosuite's
    unlinkability never satisfies a query-proof constraint) is the behaviour you want —
    it is conservative and correct given the off-circuit ingest, but it means a BBS-issued
