@@ -20,18 +20,42 @@
 //!   suite's `expect.jsonld` is one valid layout; ours differs syntactically but
 //!   must encode the SAME RDF — so the load-bearing invariant is the round-trip
 //!   `reparse(write(D)) ≡ D`, not byte equality.
+//! * **compact** (RDF → compacted JSON-LD) — [OPUS-4.8] sq-3uos5: each
+//!   `jld:CompactTest` input is parsed to RDF (the real oxjsonld path), compacted
+//!   against the case `@context` through the native hand-rolled **Compaction
+//!   Algorithm** — `sparq_engine::serialize::graph_to_jsonld_compact` (the
+//!   `serialize-rdf` feature) — then that compacted document is RE-PARSED through
+//!   `oxjsonld` and required to reconstruct the SAME RDF dataset:
+//!   `reparse(compact(D, ctx)) ≡ D`. sparq compacts RDF, not arbitrary documents,
+//!   so the case input is first reduced to its RDF; the suite's `expect.jsonld`
+//!   layout is NOT compared byte-wise (ours differs) — the load-bearing invariant
+//!   is **lossless compaction**. See `run_compact` for the honest below-floor
+//!   divergences + the SKIP buckets (negatives sparq does not raise,
+//!   JSON-LD-1.0-only, non-inline/remote `@context`, empty-RDF inputs).
+//!
+//! ### Oracle caveat (the same one toRdf/fromRdf carry)
+//!
+//! The comparison oracle is **oxjsonld self-reparse equivalence** — sparq's output
+//! is read back by the SAME parser that produced the input's RDF. A compact case
+//! where sparq's `@reverse` compaction double-inverts vs a strict third-party
+//! processor (pyld), or a non-string `@language`/`@none` value, can therefore PASS
+//! here if our own re-parse round-trips it, even though pyld would read it
+//! inverted. Strict third-party (pyld) faithfulness for `@reverse` /
+//! non-string-language shapes is NOT claimed by this ratchet and is tracked
+//! separately (a child of sq-oy1f).
 //!
 //! ## Honest known-gap buckets (NOT failed, recorded as not-implemented)
 //!
-//! `expand`, `compact`, `flatten`, `html`, `remote-doc`, and `frame` are the
-//! algorithm categories sparq does **not** yet ship as gateable surfaces:
-//! Compaction/Framing are unimplemented (sq-ixc3.4 / sq-oy1f.6); expand/flatten
-//! as *output* algorithms are subsumed by the writer but have no W3C
-//! expected-document comparison here yet; html/remote-doc need an HTML extractor
-//! / a remote `@context` loader. These categories are reported in a separate
-//! **not-implemented** column of the scoreboard and DO NOT fail the gate, so the
-//! ratchet measures only what is shipped and GROWS as those land. The scoreboard
-//! prints them honestly as not-implemented — it does not inflate the pass count.
+//! `expand`, `flatten`, `html`, `remote-doc`, and `frame` are the algorithm
+//! categories sparq does **not** yet ship as gateable surfaces: Framing is deferred
+//! (a separate W3C rec, sq-oy1f.6); expand/flatten as *output* algorithms are
+//! subsumed by the writer but have no W3C expected-document comparison here yet;
+//! html/remote-doc need an HTML extractor / a remote `@context` loader. (`compact`
+//! GRADUATED out of this bucket under sq-3uos5 — it is now a gated category above.)
+//! These categories are reported in a separate **not-implemented** column of the
+//! scoreboard and DO NOT fail the gate, so the ratchet measures only what is
+//! shipped and GROWS as those land. The scoreboard prints them honestly as
+//! not-implemented — it does not inflate the pass count.
 //!
 //! ## Feature gating (both states)
 //!
@@ -92,6 +116,27 @@ mod gated {
     /// failures are lists whose cells are shared across graphs, which the
     /// writer's `@list` collapsing renames).
     pub const FROMRDF_FLOOR: usize = 51;
+    /// [OPUS-4.8] sq-3uos5 — compact (RDF → compacted JSON-LD via the native
+    /// hand-rolled Compaction Algorithm, round-trip) pass floor. RATCHET: may
+    /// only RISE. This is the MEASURED pass count at the pinned revision — the
+    /// number of `jld:CompactTest` cases for which compacting the input's RDF
+    /// against the case `@context` and re-parsing the compacted document
+    /// reconstructs the SAME RDF dataset (`reparse(compact(D, ctx)) ≡ D`). It is
+    /// NOT the suite total: many cases exercise input-document compaction
+    /// features sparq's fromRdf-then-compact writer does not target (scoped/typed
+    /// contexts, `@nest`, `@index`/`@id` maps the writer never emits, `@protected`
+    /// redefinition errors, processing-mode error-raising), and those are SKIPPED
+    /// (not failed) — see `run_compact` for the honest skip buckets.
+    ///
+    /// Measured 163/246 at the pinned revision: 163 lossless round-trips, 58 honest
+    /// compaction divergences (the `@type:@id`-coerced-key-vs-plain-string IRI
+    /// confusion; `@graph`/`@index`/`@id`/`@language` container round-trips the
+    /// hand-rolled writer does not fully reproduce; scoped/typed-context shapes), and
+    /// 25 SKIP (negatives sparq does not raise, JSON-LD-1.0-only cases, non-inline /
+    /// remote / multi `@context`, and empty-RDF inputs). The 58 divergences are real
+    /// writer gaps below the floor, not harness artefacts — they are tracked for a
+    /// future floor RISE (a child of sq-oy1f).
+    pub const COMPACT_FLOOR: usize = 163;
 
     /// The suite's declared base for resolving each test's input path into the
     /// document IRI (the toRdf base when `option.base` is absent).
@@ -164,6 +209,18 @@ mod gated {
         /// `CompoundLiteral`); sparq does not opt into these, so such entries are
         /// SKIPPED (not failed) — they are out of the current gated surface.
         requires: Option<String>,
+        /// [OPUS-4.8] sq-3uos5 — the `compact` manifest's top-level `context`
+        /// member: a path (relative to the suite root) to the sibling
+        /// `*-context.jsonld` file holding the caller `@context` to compact
+        /// against. (The toRdf/fromRdf manifests have no such member; it stays
+        /// `None` there.)
+        context: Option<String>,
+        /// [OPUS-4.8] sq-3uos5 — `option.specVersion` (`json-ld-1.0`/`-1.1`) and
+        /// `option.processingMode`, recorded so the compact runner can SKIP the
+        /// JSON-LD-1.0-only error-raising negatives sparq's 1.1 writer does not
+        /// model (it is not a faithful pass for a 1.1 processor to "reject" them).
+        spec_version: Option<String>,
+        processing_mode: Option<String>,
     }
 
     /// Read `<cat>-manifest.jsonld` and return its `sequence` entries.
@@ -211,6 +268,19 @@ mod gated {
                 .get("requires")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            // [OPUS-4.8] sq-3uos5 — compact-only manifest members (None elsewhere).
+            let context = e
+                .get("context")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let spec_version = opt
+                .and_then(|o| o.get("specVersion"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let processing_mode = opt
+                .and_then(|o| o.get("processingMode"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
             out.push(Entry {
                 id,
                 is_negative,
@@ -218,6 +288,9 @@ mod gated {
                 expect,
                 base_override,
                 requires,
+                context,
+                spec_version,
+                processing_mode,
             });
         }
         Ok(out)
@@ -402,13 +475,227 @@ mod gated {
         s
     }
 
+    /// [OPUS-4.8] sq-3uos5 — serialise an oxrdf [`Dataset`] to N-Quads text. The
+    /// `compact` input documents are JSON-LD; to drive sparq's RDF→compacted-JSON-LD
+    /// writer (which takes a [`Graph`]) the input is first parsed to RDF (via the
+    /// REAL oxjsonld path) and re-emitted as N-Quads, then loaded into a `Graph`
+    /// preserving named graphs — exactly the bridge `run_fromrdf` uses, but with the
+    /// input coming from a JSON-LD document rather than an `.nq` fixture. `oxrdf`'s
+    /// `Quad` Display is canonical N-Quads, so this is loss-free.
+    fn dataset_to_nquads(ds: &Dataset) -> String {
+        let mut out = String::new();
+        for q in ds.iter() {
+            let owned: Quad = q.into_owned();
+            // [OPUS-4.8] positional format arg (avoids the CodeQL rust/unused-variable
+            // false positive on inline-captured identifiers).
+            out.push_str(&format!("{} .\n", owned));
+        }
+        out
+    }
+
+    /// [OPUS-4.8] sq-3uos5 — read a `compact` test's context file and extract the
+    /// caller `@context` value as the writer's [`JsonLdValue`]. The suite's
+    /// `*-context.jsonld` files wrap the context in `{"@context": …}`; sparq's
+    /// `ActiveContext::parse` (and so `graph_to_jsonld_compact`) expects the INNER
+    /// value (the term-definition object), so we unwrap one `@context` layer. When
+    /// the inner value is an object we hand it straight to the writer; an
+    /// array/string form (a remote-context reference or multi-context array) is NOT
+    /// resolved here (no network, and the writer takes a single inline object) — the
+    /// caller SKIPS such cases.
+    fn read_context_member(path: &Path) -> Result<sparq_engine::serialize::JsonLdValue, String> {
+        use sparq_engine::serialize::{parse_context_json, JsonLdValue};
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("read context {}: {e}", path.display()))?;
+        // Parse the whole context document with the writer's own tiny JSON reader,
+        // then pull out the `@context` member (the value the writer compacts against).
+        let doc = parse_context_json(&text)
+            .ok_or_else(|| "context file is not a JSON object".to_string())?;
+        match doc {
+            JsonLdValue::Obj(members) => {
+                let inner = members
+                    .into_iter()
+                    .find(|(k, _)| k == "@context")
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| "context file has no @context member".to_string())?;
+                // Only a single inline object context is drivable through the writer.
+                match inner {
+                    JsonLdValue::Obj(_) => Ok(inner),
+                    _ => {
+                        Err("non-object @context (array/string/remote) — not drivable".to_string())
+                    }
+                }
+            }
+            _ => Err("context document is not an object".to_string()),
+        }
+    }
+
+    /// [OPUS-4.8] sq-3uos5 — run the W3C JSON-LD `compact` category against sparq's
+    /// hand-rolled Compaction Algorithm (`sparq_engine::serialize::
+    /// graph_to_jsonld_compact`, the `serialize-rdf` feature).
+    ///
+    /// ## Pipeline (the REAL compaction path)
+    ///
+    /// 1. Parse the case `input` (`.jsonld`) → RDF via the real oxjsonld ingest path
+    ///    (`parse_jsonld_dataset`); this dataset is the losslessness ORACLE.
+    /// 2. Re-emit that dataset as N-Quads and load it into a sparq [`Graph`]
+    ///    (preserving named graphs) — the writer takes a `Graph`, not a JSON-LD doc,
+    ///    because sparq compacts RDF, not arbitrary documents.
+    /// 3. Read the case `@context` (`read_context_member`) and run
+    ///    `graph_to_jsonld_compact(&graph, &ctx)`.
+    /// 4. **Invariant (answer-safety):** re-parse the compacted document through
+    ///    oxjsonld back to a canonical [`Dataset`] and require it equals the input
+    ///    dataset — `reparse(compact(D, ctx)) ≡ D`. Compaction must be LOSSLESS
+    ///    w.r.t. the RDF. This is the SAME round-trip oracle `run_fromrdf` uses
+    ///    (oxjsonld self-reparse equivalence), NOT a JSON-structural diff against the
+    ///    suite's `expect.jsonld` (whose layout sparq's writer does not reproduce
+    ///    byte-for-byte).
+    ///
+    /// ## Honest oracle caveat
+    ///
+    /// The oracle is *oxjsonld self-reparse equivalence*, exactly like toRdf/fromRdf.
+    /// A case where sparq's `@reverse` compaction double-inverts, or where a
+    /// non-string `@language`/`@none` value is mis-shaped, can still PASS here when
+    /// our OWN re-parse round-trips it (oxjsonld reads back what oxjsonld would emit)
+    /// even though a strict third-party processor (pyld) would read it inverted.
+    /// Strict third-party (pyld) faithfulness for those shapes is tracked separately
+    /// (a child of sq-oy1f) and is NOT claimed by this ratchet — see the runner
+    /// header + the crate README.
+    ///
+    /// ## Honest SKIP buckets (recorded, not passed, not failed)
+    ///
+    /// * `requires` optional-feature cases — out of the gated surface.
+    /// * Non-object / remote / array `@context` — not drivable through the inline
+    ///   single-object writer (no network).
+    /// * NegativeEvaluationTests — sparq's compaction is TOTAL (it never raises the
+    ///   spec's compaction/context errors: list-of-lists, invalid term definition,
+    ///   `@protected` redefinition, processing-mode conflict, …). A 1.1 writer that
+    ///   does not model those errors cannot honestly "pass" by rejecting, so these
+    ///   are SKIPPED rather than counted.
+    /// * Positive cases whose input → RDF is EMPTY (free-floating-node drops, pure
+    ///   `@context`/`@graph` framing with no triples): there is no RDF to compact, so
+    ///   the round-trip is vacuous and tells us nothing about the algorithm — SKIP.
+    fn run_compact(root: &Path) -> Score {
+        use sparq_engine::serialize::graph_to_jsonld_compact;
+        let mut s = Score::default();
+        let entries = match read_manifest(root, "compact") {
+            Ok(e) => e,
+            Err(why) => {
+                s.fail("compact-manifest", why);
+                return s;
+            }
+        };
+        for e in &entries {
+            if e.requires.is_some() {
+                s.skip();
+                continue;
+            }
+            // NegativeEvaluationTest: sparq's compaction does not raise the spec's
+            // compaction/context errors, so a faithful 1.1 writer cannot "pass" by
+            // rejecting — SKIP (honest), never count as a pass.
+            if e.is_negative {
+                s.skip();
+                continue;
+            }
+            // JSON-LD-1.0-only positives (processing-mode shape differences a 1.1
+            // writer is not obliged to reproduce): SKIP.
+            if e.spec_version.as_deref() == Some("json-ld-1.0")
+                || e.processing_mode.as_deref() == Some("json-ld-1.0")
+            {
+                s.skip();
+                continue;
+            }
+            let Some(ctx_rel) = &e.context else {
+                s.skip();
+                continue;
+            };
+
+            // 1. Parse the input JSON-LD → RDF (the oracle dataset). Skip remote
+            //    inputs (no network).
+            if e.input.starts_with("http://") || e.input.starts_with("https://") {
+                s.skip();
+                continue;
+            }
+            let input_path = root.join(&e.input);
+            let in_text = match std::fs::read_to_string(&input_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read input: {why}"));
+                    continue;
+                }
+            };
+            let base = doc_base(e);
+            let want = match parse_jsonld_dataset(&in_text, &base) {
+                Ok(ds) => ds,
+                // An input the real oxjsonld path rejects is out of scope for the
+                // compaction round-trip (the toRdf lane already gates ingest); SKIP.
+                Err(_) => {
+                    s.skip();
+                    continue;
+                }
+            };
+            // No triples → nothing to compact; the round-trip is vacuous. SKIP.
+            if want.is_empty() {
+                s.skip();
+                continue;
+            }
+
+            // 2. Read the case @context (skip non-inline / remote / multi forms).
+            let ctx_path = root.join(ctx_rel);
+            let ctx = match read_context_member(&ctx_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    s.skip();
+                    continue;
+                }
+            };
+
+            // 3. Load the input RDF into a sparq Graph (named graphs preserved) and
+            //    run the REAL compaction writer.
+            let nq = dataset_to_nquads(&want);
+            let graph = match Graph::load_dataset(&nq, "nquads") {
+                Ok(g) => g,
+                Err(why) => {
+                    s.fail(&e.id, format!("load input rdf into graph: {why}"));
+                    continue;
+                }
+            };
+            let compacted = graph_to_jsonld_compact(&graph, &ctx);
+
+            // 4. The losslessness invariant: re-parse the compacted document and
+            //    require RDF-dataset equivalence with the input.
+            let got = match jsonld_to_canonical_dataset(&compacted, &base) {
+                Ok(ds) => ds,
+                Err(why) => {
+                    s.fail(&e.id, format!("re-parse compacted output: {why}"));
+                    continue;
+                }
+            };
+            if got == want {
+                s.pass();
+            } else {
+                s.fail(
+                    &e.id,
+                    format!(
+                        "compaction not lossless ({} vs {} quads)",
+                        got.len(),
+                        want.len()
+                    ),
+                );
+            }
+        }
+        s
+    }
+
     /// The known-gap categories: present in the W3C suite but NOT a sparq-shipped
     /// gateable surface yet. Reported as not-implemented (never failed). The size
     /// is read from each manifest so the scoreboard shows the real backlog and
     /// shrinks honestly as categories light up.
+    ///
+    /// [OPUS-4.8] sq-3uos5 — `compact` GRADUATED out of this bucket: it is now a
+    /// gated category (`run_compact`, `COMPACT_FLOOR`). `frame` stays deferred
+    /// (a separate W3C rec, sq-oy1f.6).
     const NOT_IMPLEMENTED_CATS: &[(&str, &str)] = &[
         ("expand", "Expansion — output-vs-W3C-document comparison not wired (sq-oy1f)"),
-        ("compact", "Compaction algorithm not implemented (sq-ixc3.4)"),
         ("flatten", "Flattening — output-vs-W3C-document comparison not wired (sq-oy1f)"),
         ("html", "HTML script extraction not implemented"),
         ("remote-doc", "remote @context loader not wired (oxjsonld needs a LoadDocumentCallback)"),
@@ -436,6 +723,7 @@ mod gated {
 
         let tordf = run_tordf(&root);
         let fromrdf = run_fromrdf(&root);
+        let compact = run_compact(&root);
         let not_impl = not_implemented_counts(&root);
 
         println!("\nW3C JSON-LD 1.1 conformance scoreboard (pinned w3c/json-ld-api)");
@@ -448,6 +736,12 @@ mod gated {
         println!(
             "TOTAL fromRdf {} {} {} (floor {})",
             fromrdf.pass, fromrdf.fail, fromrdf.skip, FROMRDF_FLOOR
+        );
+        // [OPUS-4.8] sq-3uos5 — the compact ratchet. The CI grep depends on this
+        // exact `^TOTAL compact ` prefix with the pass count in field $3.
+        println!(
+            "TOTAL compact {} {} {} (floor {})",
+            compact.pass, compact.fail, compact.skip, COMPACT_FLOOR
         );
         println!("\nknown-gap (NOT-IMPLEMENTED — not gated, grows the ratchet as they land):");
         for (cat, why) in NOT_IMPLEMENTED_CATS {
@@ -467,6 +761,12 @@ mod gated {
                 println!("  {}: {}", id, why);
             }
         }
+        if !compact.failures.is_empty() {
+            println!("\ncompact failures (first 40):");
+            for (id, why) in compact.failures.iter().take(40) {
+                println!("  {}: {}", id, why);
+            }
+        }
 
         // The ratchet: pass counts may only RISE. A regression below the pinned
         // floor fails the build.
@@ -481,6 +781,13 @@ mod gated {
             "JSON-LD fromRdf pass count regressed: {} < floor {} — see failures above",
             fromrdf.pass,
             FROMRDF_FLOOR
+        );
+        // [OPUS-4.8] sq-3uos5 — the compact ratchet (lossless round-trip floor).
+        assert!(
+            compact.pass >= COMPACT_FLOOR,
+            "JSON-LD compact pass count regressed: {} < floor {} — see failures above",
+            compact.pass,
+            COMPACT_FLOOR
         );
     }
 }

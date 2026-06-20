@@ -133,6 +133,9 @@ pub struct Suite {
 ///   `TORDF_FLOOR = 413` (sq-oy1f.2; opt-in `jsonld-suite` feature).
 /// * JSON-LD fromRdf 51 — `sparq-conformance` `tests/jsonld_suite.rs`
 ///   `FROMRDF_FLOOR = 51` (sq-oy1f.2; opt-in `jsonld-suite` feature).
+/// * JSON-LD compact 163 — `sparq-conformance` `tests/jsonld_suite.rs`
+///   `COMPACT_FLOOR = 163` (sq-3uos5; opt-in `jsonld-suite` feature; RDF →
+///   compacted JSON-LD via the native Compaction Algorithm, lossless round-trip).
 /// * Solid WAC differential 0 — `sparq-solid` `tests/differential_oracle.rs`
 ///   `DIVERGENCE_FLOOR = 0` (sq-t58w.8; a divergence-count floor, hard 0 — the WAC
 ///   and ACP differential rows share this one const).
@@ -268,7 +271,7 @@ pub const SUITES: &[Suite] = &[
         ratchet_floor: 413,
         floor_basis: "pass",
         note: "JSON-LD → RDF through the real oxjsonld parse path (jsonld feature); \
-               compaction/framing are documented not-implemented buckets",
+               framing is a documented not-implemented bucket (compact is now gated)",
     },
     Suite {
         label: "W3C JSON-LD 1.1 fromRdf",
@@ -283,6 +286,32 @@ pub const SUITES: &[Suite] = &[
         floor_basis: "pass",
         note: "RDF → JSON-LD through the native serialize-rdf writer, compared by a \
                re-parse RDF-dataset round-trip (expanded + prefix-@context forms)",
+    },
+    // [OPUS-4.8] sq-3uos5 — the W3C JSON-LD 1.1 `compact` ratchet (extends sq-oy1f.2,
+    // epic sq-oy1f). Each `jld:CompactTest` input is parsed to RDF (the real oxjsonld
+    // path), compacted against the case `@context` through the native hand-rolled
+    // Compaction Algorithm (`graph_to_jsonld_compact`, serialize-rdf), then the
+    // compacted document is re-parsed and required to reconstruct the SAME RDF dataset
+    // (`reparse(compact(D, ctx)) ≡ D` — the lossless-compaction invariant, the same
+    // oxjsonld self-reparse oracle toRdf/fromRdf use). The floor is the MEASURED pass
+    // count at the pinned revision; the remaining cases are honest compaction
+    // divergences (below the floor, to RISE) or documented SKIP buckets (negatives
+    // sparq does not raise, JSON-LD-1.0-only, non-inline/remote @context, empty RDF).
+    // Floor kept in lock-step by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "W3C JSON-LD 1.1 compact",
+        family: "W3C JSON-LD",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "jsonld_suite",
+            feature: "jsonld-suite",
+        },
+        ci_job: "jsonld-conformance",
+        ratchet_floor: 163,
+        floor_basis: "pass",
+        note: "RDF → compacted JSON-LD through the native Compaction Algorithm \
+               (serialize-rdf), compared by a re-parse RDF-dataset round-trip \
+               (lossless-compaction invariant)",
     },
     // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite, wired as a crate-local
     // decision-parity ratchet in sparq-policy (mirrors the Solid WAC/ACP pattern:
