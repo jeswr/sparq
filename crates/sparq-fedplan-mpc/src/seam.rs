@@ -4,18 +4,20 @@
 //! Phase 1 (sq-2q1x) landed the *shape* of the untrusted-planner → MPC-routing seam — real
 //! input/output types wired to the actual upstream crates — with **none of the privacy-bearing
 //! logic**. Phase 2 (sq-fix4) makes the **source-selection adapter** real (it lives in
-//! [`crate::selection`]). The remaining phases stay deferred stubs here: each is a function with
-//! its real signature returning `Err(`[`SeamError::Deferred`]`)` naming the phase and the gate it
-//! waits on. The stubs **compile and are callable**, perform NO MPC, reveal NOTHING, and never
-//! panic (no `todo!()` / `unimplemented!()`): a caller gets an honest typed "deferred" error, not
-//! a crash and not a fabricated result.
+//! [`crate::selection`]). Phase 3 (sq-i1wh2) makes the **disclosed/hidden routing pass** real
+//! (it lives in [`crate::routing`]). Phase 4 stays a deferred stub here: a function with its real
+//! signature returning `Err(`[`SeamError::Deferred`]`)` naming the phase and the gate it waits on.
+//! The stub **compiles and is callable**, performs NO MPC, reveals NOTHING, and never panics (no
+//! `todo!()` / `unimplemented!()`): a caller gets an honest typed "deferred" error, not a crash
+//! and not a fabricated result.
 //!
 //! The phases (from the design record's phased plan):
 //! * [`select_private_sources`](crate::select_private_sources) — Phase 2 (**implemented**, sq-fix4):
 //!   wraps [`sparq_fedplan::select_sources`] and prunes by the per-source
 //!   [`crate::SourcePrivacyDescriptor`] (participation / authorisation). See [`crate::selection`].
-//! * [`route_operators`] — Phase 3 (deferred): the policy-parameterised disclosed/hidden
-//!   partition, emitting the [`sparq_mpc::pipeline::OperatorRouting`] vector the pipeline consumes.
+//! * [`route_operators`](crate::route_operators) — Phase 3 (**implemented**, sq-i1wh2): the
+//!   policy-parameterised disclosed/hidden partition, emitting the
+//!   [`sparq_mpc::pipeline::OperatorRouting`] vector the pipeline consumes. See [`crate::routing`].
 //! * [`assemble_leakage_envelope`] — Phase 4 (deferred): collect what the chosen routing reveals
 //!   into a declared envelope for the holder/verifier dual ratification.
 //!
@@ -23,11 +25,10 @@
 //! audit-gated (sq-9hrn / sq-qhy4). See the crate `README.md` and
 //! `research/mpc-untrusted-planner-routing-design.md`.
 //!
-//! [OPUS-4.8] sq-2q1x / sq-fix4.
+//! [OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2.
 
 use sparq_mpc::pipeline::OperatorRouting;
 
-use crate::selection::SelectedPrivateSources;
 use crate::SourcePrivacyDescriptor;
 
 /// Which deferred seam phase a [`SeamError::Deferred`] came from. Naming the phase in the
@@ -38,7 +39,8 @@ pub enum SeamPhase {
     /// Phase 2 — privacy/authorisation-aware source selection
     /// ([`select_private_sources`](crate::select_private_sources)).
     SourceSelection,
-    /// Phase 3 — the disclosed/hidden routing partition ([`route_operators`]).
+    /// Phase 3 — the disclosed/hidden routing partition
+    /// ([`route_operators`](crate::route_operators)).
     Routing,
     /// Phase 4 — the leakage-envelope assembly + dual ratification ([`assemble_leakage_envelope`]).
     LeakageEnvelope,
@@ -59,9 +61,9 @@ impl SeamPhase {
 /// phase stub returns (it carries the [`SeamPhase`] and the `gated_on` issues/audits, so a caller
 /// learns WHY the phase is unavailable rather than hitting a panic or a fabricated result).
 /// [`SeamError::DescriptorMismatch`] is the first *real* error variant — the implemented
-/// source-selection adapter (Phase 2) returns it on an ambiguous / inconsistent privacy
-/// declaration. (The enum is `#[non_exhaustive]` so later phases can add variants without a
-/// breaking change.)
+/// source-selection adapter (Phase 2) and the routing pass (Phase 3) both return it on an
+/// ambiguous / inconsistent privacy declaration. (The enum is `#[non_exhaustive]` so later phases
+/// can add variants without a breaking change.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SeamError {
@@ -79,7 +81,8 @@ pub enum SeamError {
     /// authorisation policy). The adapter **refuses** (fail-closed) rather than guessing which
     /// one binds. Returned by [`select_private_sources`](crate::select_private_sources).
     DescriptorMismatch {
-        /// Which phase raised it.
+        /// Which phase raised it ([`SeamPhase::SourceSelection`] for Phase 2,
+        /// [`SeamPhase::Routing`] for Phase 3).
         phase: SeamPhase,
         /// The offending source id.
         source_id: String,
@@ -121,16 +124,15 @@ impl std::fmt::Display for SeamError {
 
 impl std::error::Error for SeamError {}
 
-/// The output of the (deferred) routing phase: the per-operator disclosed-vs-hidden routing
-/// the `sparq-mpc` pipeline consumes. A typed PLACEHOLDER for Phase 3 — it wraps the real
-/// [`sparq_mpc::pipeline::OperatorRouting`] vector so the output type is the genuine seam
-/// shape, but the routing decision itself is deferred (the stub returns
-/// [`SeamError::Deferred`], so `routing` is only ever the empty vector here).
+/// The output of the **Phase-3 routing pass** ([`route_operators`](crate::route_operators)): the
+/// per-operator disclosed-vs-hidden routing the `sparq-mpc` pipeline consumes. It wraps the real
+/// [`sparq_mpc::pipeline::OperatorRouting`] vector so the output is the genuine seam shape — the
+/// structure the pipeline today receives hand-written. The routing decision is computed by the
+/// pass (default-deny, policy-parameterised); see [`crate::routing`].
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct PrivateRouting {
-    /// The per-operator routing the `sparq-mpc` pipeline accepts. Empty in Phase 1 (never
-    /// produced — the routing decision is deferred).
+    /// The per-operator routing the `sparq-mpc` pipeline accepts, in input-operator order.
     pub routing: Vec<OperatorRouting>,
 }
 
@@ -141,23 +143,6 @@ pub struct PrivateRouting {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LeakageEnvelope {}
-
-/// **Phase 3 (deferred)** — the disclosed/hidden routing partition.
-///
-/// The built phase will, per operator, route `Disclosed` when every operand is a
-/// source-declared-public term ([`SourcePrivacyDescriptor::may_disclose`]) and
-/// `Hidden(class)` otherwise — emitting the [`sparq_mpc::pipeline::OperatorRouting`] vector
-/// the pipeline consumes. **This skeleton performs none of that** — it returns
-/// [`SeamError::Deferred`]. It runs NO MPC, makes NO disclosure decision, and reveals NOTHING.
-pub fn route_operators(
-    _selected: &SelectedPrivateSources,
-    _privacy: &[SourcePrivacyDescriptor],
-) -> Result<PrivateRouting, SeamError> {
-    Err(SeamError::deferred(
-        SeamPhase::Routing,
-        "sq-2q1x Phase 3 (disclosed/hidden routing pass); §4.3 pass 2",
-    ))
-}
 
 /// **Phase 4 (deferred)** — leakage-envelope assembly + dual ratification.
 ///
@@ -186,21 +171,8 @@ mod tests {
     }
 
     // Phase 2 (`select_private_sources`) is IMPLEMENTED — its tests live in `crate::selection`.
-    // Phases 3 + 4 are still deferred stubs; the tests below pin their honest deferral.
-
-    #[test]
-    fn routing_is_deferred_not_a_panic() {
-        let err = route_operators(&SelectedPrivateSources::default(), &[privacy()]).unwrap_err();
-        assert!(matches!(
-            err,
-            SeamError::Deferred {
-                phase: SeamPhase::Routing,
-                ..
-            }
-        ));
-        // The placeholder output type wraps the REAL pipeline routing vector (empty here).
-        assert!(PrivateRouting::default().routing.is_empty());
-    }
+    // Phase 3 (`route_operators`) is IMPLEMENTED — its tests live in `crate::routing`.
+    // Phase 4 is still a deferred stub; the tests below pin its honest deferral.
 
     #[test]
     fn leakage_envelope_is_deferred_not_a_panic() {
