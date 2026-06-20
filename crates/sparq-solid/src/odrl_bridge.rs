@@ -43,11 +43,13 @@
 //! | anything else (incl. the `odrl:use` umbrella)           | **unmapped → no grant** |
 //!
 //! The `odrl:use` umbrella is intentionally **not** mapped to a write/control mode:
-//! `use` subsumes every action in the ODRL hierarchy, so materializing it as a
-//! single WAC mode would have to pick the widest, violating fail-closed. A caller
-//! that wants `use → Read` should request `odrl:read` explicitly (a `use` permission
-//! in the policy still *grants* a `read` request — `odrl:use` permits any action in
-//! the evaluator — so the bridge maps the **request** action, which is concrete).
+//! `use` subsumes its sub-actions in the ODRL hierarchy (`read`/`write`/`modify`/… —
+//! everything except the disjoint `transfer` ownership subtree, [OPUS-4.8] sq-euhr3),
+//! so materializing it as a single WAC mode would have to pick the widest, violating
+//! fail-closed. A caller that wants `use → Read` should request `odrl:read` explicitly
+//! (a `use` permission in the policy still *grants* a `read` request — `odrl:use`
+//! permits its sub-actions in the evaluator — so the bridge maps the **request**
+//! action, which is concrete).
 //!
 //! # Prohibitions → `auth:deny<Mode>` (deny-overrides) — [OPUS-4.8] sq-w693
 //!

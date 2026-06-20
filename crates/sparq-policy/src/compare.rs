@@ -303,6 +303,16 @@ fn permission_subsumes(op: &Rule, ip: &Rule) -> SubsumeOne {
             return SubsumeOne::No;
         }
     }
+    // [OPUS-4.8] sq-a0zef — the static analyser does not model compound
+    // `LogicalConstraint`s. A compound constraint on `op` may make `op` strictly
+    // narrower than its atomic+structural footprint suggests, so we cannot PROVE
+    // `op ⊇ ip`: degrade a would-be `Yes` to `Indeterminate` (never over-claim
+    // subsumption — fail-OPEN would be claiming `op` covers an `ip` request it might
+    // actually carve out). A compound on `ip` only makes `ip` narrower, which can only
+    // help subsumption, so it needs no guard here.
+    if !op.logical_constraints.is_empty() {
+        any_indeterminate = true;
+    }
     if any_indeterminate {
         SubsumeOne::Indeterminate
     } else {
@@ -455,10 +465,16 @@ fn rule_overlap(perm: &Rule, proh: &Rule) -> Option<Overlap> {
     // prohibition constraint must be implied by some permission constraint, OR the
     // permission is unconstrained on a dimension the prohibition restricts, in which
     // case we cannot prove the prohibition always fires → Possible.)
-    let certain = proh
-        .constraints
-        .iter()
-        .all(|pc| perm.constraints.iter().any(|qc| constraint_implies(qc, pc)));
+    //
+    // [OPUS-4.8] sq-a0zef — a compound `LogicalConstraint` on the PROHIBITION is not
+    // modelled here, and it may make the prohibition fire only conditionally; so a
+    // prohibition carrying any compound constraint can never be proven to carve out the
+    // *whole* permission → degrade to `Possible` (never over-claim `Certain`).
+    let certain = proh.logical_constraints.is_empty()
+        && proh
+            .constraints
+            .iter()
+            .all(|pc| perm.constraints.iter().any(|qc| constraint_implies(qc, pc)));
     Some(if certain {
         Overlap::Certain
     } else {

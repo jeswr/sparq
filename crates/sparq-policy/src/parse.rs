@@ -17,7 +17,10 @@
 //! if none is typed — whichever subject carries `odrl:permission`/`prohibition`.
 //! [OPUS-4.8]
 
-use crate::model::{Action, Constraint, Duty, Operator, Policy, Rule, Value, ODRL_NS};
+use crate::model::{
+    Action, Constraint, ConstraintNode, Duty, LogicalConstraint, LogicalOperator, Operator, Policy,
+    Rule, Value, ODRL_NS,
+};
 use oxrdf::{Literal, Term};
 use sparq_core::Graph;
 use std::collections::BTreeMap;
@@ -154,6 +157,7 @@ fn rules(graph: &Graph, kind: &str, with_duties: bool) -> Result<Vec<Rule>, Stri
     )?;
 
     let constraints = constraints_for(graph, kind, "constraint")?;
+    let logical_constraints = logical_constraints_for(graph, kind)?;
     let duties = if with_duties {
         duties_for(graph, kind)?
     } else {
@@ -173,6 +177,10 @@ fn rules(graph: &Graph, kind: &str, with_duties: bool) -> Result<Vec<Rule>, Stri
             assignee: first_str(&assignees, &rule_key),
             assigner: first_str(&assigners, &rule_key),
             constraints: constraints.get(&rule_key).cloned().unwrap_or_default(),
+            logical_constraints: logical_constraints
+                .get(&rule_key)
+                .cloned()
+                .unwrap_or_default(),
             duties: duties.get(&rule_key).cloned().unwrap_or_default(),
         });
     }
@@ -183,25 +191,36 @@ fn first_str(m: &BTreeMap<String, Vec<Term>>, key: &str) -> Option<String> {
     m.get(key).and_then(|v| v.first()).map(term_str)
 }
 
-/// Parse the constraints attached (via `odrl:<pred>`) to each rule of `kind`,
-/// keyed by rule node. Constraint *nodes* are bound by variable, so blank-node
-/// constraints are handled correctly.
+/// Parse the *atomic* constraints attached (via `odrl:<pred>`) to each rule of
+/// `kind`, keyed by rule node. Constraint *nodes* are bound by variable, so
+/// blank-node constraints are handled correctly.
+///
+/// A `?c` that is a compound `odrl:LogicalConstraint` (it carries an
+/// `odrl:and`/`odrl:or`/`odrl:xone` refining set rather than a direct
+/// `leftOperand`/`operator`/`rightOperand`) is **skipped here** — it is parsed by
+/// [`logical_constraints_for`] into the rule's `logical_constraints` instead, so it
+/// is *not* mis-read as a structurally-incomplete atomic constraint (which would
+/// wrongly fail the whole rule closed). [OPUS-4.8] sq-a0zef.
 fn constraints_for(
     graph: &Graph,
     kind: &str,
     pred: &str,
 ) -> Result<BTreeMap<String, Vec<Constraint>>, String> {
-    // One row per (rule, constraint-node, left, operator, right). LEFT/OP/RIGHT
-    // are OPTIONAL so a structurally incomplete constraint still surfaces (and is
-    // turned into an unsatisfiable guard — fail-closed).
+    // One row per (rule, constraint-node, left, operator, right, is-logical).
+    // LEFT/OP/RIGHT are OPTIONAL so a structurally incomplete constraint still
+    // surfaces (and is turned into an unsatisfiable guard — fail-closed). `?and`
+    // binds iff the node is a LogicalConstraint (any of the three combinators), so
+    // such a node is routed to logical_constraints_for instead of here.
     let q = format!(
-        "SELECT ?rule ?c ?left ?op ?right WHERE {{ \
+        "SELECT ?rule ?c ?left ?op ?right ?and WHERE {{ \
            ?policy <{ODRL_NS}{kind}> ?rule . \
            ?rule <{ODRL_NS}{pred}> ?c . \
            OPTIONAL {{ ?c <{ODRL_NS}leftOperand> ?left }} \
            OPTIONAL {{ ?c <{ODRL_NS}operator> ?op }} \
            OPTIONAL {{ ?c <{ODRL_NS}rightOperand> ?right }} \
            OPTIONAL {{ ?c <{ODRL_NS}rightOperandReference> ?right }} \
+           OPTIONAL {{ ?c ?logop ?and . \
+             VALUES ?logop {{ <{ODRL_NS}and> <{ODRL_NS}or> <{ODRL_NS}xone> }} }} \
          }}"
     );
     let res = sparq_engine::query(graph, &q)?;
@@ -215,12 +234,18 @@ fn constraints_for(
         let left = it.next().flatten();
         let op = it.next().flatten();
         let right = it.next().flatten();
+        let is_logical = it.next().flatten().is_some();
         let (Some(rule_t), Some(c_t)) = (rule_t, c_t) else {
             continue;
         };
         let rkey = node_key(&rule_t);
         let ckey = format!("{rkey}|{}", node_key(&c_t));
         if seen.insert(ckey, ()).is_some() {
+            continue;
+        }
+        // A compound LogicalConstraint is parsed by logical_constraints_for, not as
+        // a malformed atomic constraint. [OPUS-4.8] sq-a0zef.
+        if is_logical {
             continue;
         }
         out.entry(rkey)
@@ -230,20 +255,185 @@ fn constraints_for(
     Ok(out)
 }
 
-/// Build a [`Constraint`], turning anything malformed/unknown into an
-/// unsatisfiable guard (fail-closed): the enclosing rule can then never match.
-fn build_constraint(left: Option<Term>, op: Option<Term>, right: Option<Term>) -> Constraint {
-    let unsat = || Constraint {
+/// Parse the compound `odrl:LogicalConstraint` refinements attached (via
+/// `odrl:constraint`) to each rule of `kind`, keyed by rule node. [OPUS-4.8] sq-a0zef.
+///
+/// A parsed `odrl:LogicalConstraint` node's combinator + operand node-keys, before
+/// recursive assembly into a [`LogicalConstraint`]. [OPUS-4.8] sq-a0zef.
+struct LcDef {
+    operator: LogicalOperator,
+    /// Operand node-keys in graph order (de-duplicated).
+    operands: Vec<String>,
+    /// De-dup set for the operand node-keys.
+    seen: BTreeMap<String, ()>,
+}
+
+/// A `LogicalConstraint` node carries one combinator property
+/// (`odrl:and`/`odrl:or`/`odrl:xone`) whose objects are the operand nodes (`odrl:and
+/// <c1>, <c2>` — several objects of the one property). Each operand is parsed into a
+/// [`ConstraintNode`]: a nested `LogicalConstraint` recurses, anything else becomes an
+/// atomic [`Constraint`] via [`build_constraint`] (a structurally-incomplete atomic
+/// operand becomes the unsatisfiable guard — fail-closed, never a silent pass).
+///
+/// Two bulk queries build node tables for the *whole* policy graph (all combinator
+/// edges; all atomic constraint fields); the per-rule compound constraints are then
+/// assembled recursively in-memory, with cycle protection so a malformed self-/mutually
+/// referential `LogicalConstraint` cannot loop (it short-circuits to the unsatisfiable
+/// guard — fail-closed).
+fn logical_constraints_for(
+    graph: &Graph,
+    kind: &str,
+) -> Result<BTreeMap<String, Vec<LogicalConstraint>>, String> {
+    // (1) Every combinator edge in the graph: (lc-node, combinator, operand-node), in
+    // graph order. A node appearing as a subject here is a LogicalConstraint.
+    let edges_q = format!(
+        "SELECT ?lc ?logop ?operand WHERE {{ \
+           ?lc ?logop ?operand . \
+           VALUES ?logop {{ <{ODRL_NS}and> <{ODRL_NS}or> <{ODRL_NS}xone> }} \
+         }}"
+    );
+    let edges_res = sparq_engine::query(graph, &edges_q)?;
+    let mut lc_defs: BTreeMap<String, LcDef> = BTreeMap::new();
+    for row in edges_res.rows {
+        let mut it = row.into_iter();
+        let (Some(Some(lc_t)), Some(Some(logop_t)), Some(Some(operand_t))) =
+            (it.next(), it.next(), it.next())
+        else {
+            continue;
+        };
+        let Some(operator) = LogicalOperator::from_iri(&term_str(&logop_t)) else {
+            continue;
+        };
+        let lckey = node_key(&lc_t);
+        let okey = node_key(&operand_t);
+        let def = lc_defs.entry(lckey).or_insert_with(|| LcDef {
+            operator,
+            operands: Vec::new(),
+            seen: BTreeMap::new(),
+        });
+        if def.seen.insert(okey.clone(), ()).is_none() {
+            def.operands.push(okey);
+        }
+    }
+
+    // (2) Every atomic constraint node's fields, keyed by node. A node with no
+    // combinator edge but with these fields is an atomic operand.
+    let atoms_q = format!(
+        "SELECT ?c ?left ?op ?right WHERE {{ \
+           ?c <{ODRL_NS}leftOperand> ?left . \
+           OPTIONAL {{ ?c <{ODRL_NS}operator> ?op }} \
+           OPTIONAL {{ ?c <{ODRL_NS}rightOperand> ?right }} \
+           OPTIONAL {{ ?c <{ODRL_NS}rightOperandReference> ?right }} \
+         }}"
+    );
+    let atoms_res = sparq_engine::query(graph, &atoms_q)?;
+    let mut atoms: BTreeMap<String, Constraint> = BTreeMap::new();
+    for row in atoms_res.rows {
+        let mut it = row.into_iter();
+        let c_t = it.next().flatten();
+        let left = it.next().flatten();
+        let op = it.next().flatten();
+        let right = it.next().flatten();
+        let Some(c_t) = c_t else { continue };
+        let ckey = node_key(&c_t);
+        // First binding wins (a rightOperand/rightOperandReference pair can double rows).
+        atoms
+            .entry(ckey)
+            .or_insert_with(|| build_constraint(left, op.clone(), right.clone()));
+    }
+
+    // (3) The rule → direct-constraint-node map (which of a rule's `odrl:constraint`
+    // objects are LogicalConstraint nodes), in rule/graph order.
+    let rule_lc_q = format!(
+        "SELECT ?rule ?c WHERE {{ \
+           ?policy <{ODRL_NS}{kind}> ?rule . \
+           ?rule <{ODRL_NS}constraint> ?c . \
+         }}"
+    );
+    let rule_lc_res = sparq_engine::query(graph, &rule_lc_q)?;
+    let mut out: BTreeMap<String, Vec<LogicalConstraint>> = BTreeMap::new();
+    let mut seen_rule_c: BTreeMap<String, ()> = BTreeMap::new();
+    for row in rule_lc_res.rows {
+        let mut it = row.into_iter();
+        let (Some(Some(rule_t)), Some(Some(c_t))) = (it.next(), it.next()) else {
+            continue;
+        };
+        let rkey = node_key(&rule_t);
+        let ckey = node_key(&c_t);
+        if seen_rule_c.insert(format!("{rkey}|{ckey}"), ()).is_some() {
+            continue;
+        }
+        // Only assemble compound nodes here (atomic direct constraints are handled by
+        // constraints_for); a node is compound iff it has a combinator edge.
+        if lc_defs.contains_key(&ckey) {
+            let mut stack = BTreeMap::new();
+            let lc = assemble_logical(&ckey, &lc_defs, &atoms, &mut stack);
+            out.entry(rkey).or_default().push(lc);
+        }
+    }
+    Ok(out)
+}
+
+/// Recursively assemble a [`LogicalConstraint`] from the pre-built node tables, with
+/// cycle protection (`active` tracks the ancestor chain). A malformed node — not in the
+/// combinator table and not a known atomic, or part of a cycle — becomes the
+/// unsatisfiable-guard atomic constraint (fail-closed). [OPUS-4.8] sq-a0zef.
+fn assemble_logical(
+    lc_key: &str,
+    lc_defs: &BTreeMap<String, LcDef>,
+    atoms: &BTreeMap<String, Constraint>,
+    active: &mut BTreeMap<String, ()>,
+) -> LogicalConstraint {
+    let def = lc_defs
+        .get(lc_key)
+        .expect("assemble_logical called on a non-LC node");
+    active.insert(lc_key.to_owned(), ());
+    let mut operands = Vec::with_capacity(def.operands.len());
+    for okey in &def.operands {
+        let node = if lc_defs.contains_key(okey) {
+            if active.contains_key(okey) {
+                // A cycle in the LogicalConstraint graph — fail closed rather than loop.
+                ConstraintNode::Atomic(unsatisfiable_constraint())
+            } else {
+                ConstraintNode::Compound(assemble_logical(okey, lc_defs, atoms, active))
+            }
+        } else if let Some(c) = atoms.get(okey) {
+            ConstraintNode::Atomic(c.clone())
+        } else {
+            // An operand that is neither a recognised compound nor a well-formed atomic
+            // constraint → unsatisfiable guard (fail-closed).
+            ConstraintNode::Atomic(unsatisfiable_constraint())
+        };
+        operands.push(node);
+    }
+    active.remove(lc_key);
+    LogicalConstraint {
+        id: lc_key.to_owned(),
+        operator: def.operator,
+        operands,
+    }
+}
+
+/// The unsatisfiable-guard atomic constraint used for a malformed/unknown operand
+/// (a constraint that can never be satisfied — fail-closed). Shared by [`build_constraint`]
+/// and the compound-operand assembler. [OPUS-4.8] sq-a0zef.
+fn unsatisfiable_constraint() -> Constraint {
+    Constraint {
         left: "urn:sparq-policy:malformed".to_owned(),
         operator: Operator::Neq,
         right: Value::Iri("urn:sparq-policy:malformed".to_owned()),
-    };
+    }
+}
+
+/// Build a [`Constraint`], turning anything malformed/unknown into an
+/// unsatisfiable guard (fail-closed): the enclosing rule can then never match.
+fn build_constraint(left: Option<Term>, op: Option<Term>, right: Option<Term>) -> Constraint {
     let (Some(left), Some(op), Some(right)) = (left, op, right) else {
-        return unsat();
+        return unsatisfiable_constraint();
     };
     let operator = match Operator::from_iri(&term_str(&op)) {
         Some(o) => o,
-        None => return unsat(),
+        None => return unsatisfiable_constraint(),
     };
     Constraint {
         left: term_str(&left),
