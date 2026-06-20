@@ -20,7 +20,7 @@
 //! per-pod epoch vectors, the triple count, and an integrity digest of the body) followed by
 //! the full dataset serialised as **N-Quads** (default graph + every named graph — the
 //! self-describing, lossless, format-stable body that round-trips through
-//! [`Graph::load_dataset`]). Choosing a self-describing body (over reusing the WAL-backed
+//! `Graph::load_dataset`). Choosing a self-describing body (over reusing the WAL-backed
 //! directory layout) is deliberate: the artifact does not couple to the on-disk persisted
 //! layout, so it stays a stable interchange + the base half of the future change-stream /
 //! point-in-time-recovery companions.
@@ -32,7 +32,7 @@
 //!
 //! ## Fail-closed restore
 //!
-//! [`import`] rejects — never partially loads — an artifact whose magic, version, header
+//! `import` rejects — never partially loads — an artifact whose magic, version, header
 //! shape or body digest does not check out. A corrupt or mismatched artifact yields a
 //! [`BackupError`], so a restore-on-start that fails leaves the operator with a clean error
 //! rather than a silently-wrong store.
@@ -64,7 +64,7 @@ const FORMAT_VERSION: u32 = 1;
 pub struct BackupMeta {
     /// The generation number the backup was taken at — the single sequenced writer's seq, and
     /// the read-your-writes token a client round-trips. A restored ring is re-seeded so its
-    /// generation 0 *carries* these epochs (see [`import`]); the recorded number lets an
+    /// generation 0 *carries* these epochs (see `import`); the recorded number lets an
     /// operator/PITR layer correlate the artifact with the writer history it came from.
     pub generation: u64,
     /// The per-pod epoch vector as of the backed-up generation. Restored verbatim onto the
