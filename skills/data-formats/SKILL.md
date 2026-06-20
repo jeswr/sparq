@@ -263,6 +263,40 @@ ordering unchanged, round-trips to the identical RDF, and stays dependency-free 
 hand-written JSON re-indenter — no `serde_json`, which is dev-only). Indentation is presentation
 only; the document content is byte-for-byte the minified form plus newlines/indent.
 
+**Full W3C JSON-LD 1.1 Compaction (caller `@context`).** `JsonLdForm::Compacted` above is the
+*lighter* prefix-only `@context` (it just abbreviates IRIs to `prefix:local` CURIEs). For the
+real **W3C JSON-LD 1.1 Compaction Algorithm** against a caller-supplied `@context`, use
+`graph_to_jsonld_compact(&g, &ctx)` (or the slice-level `write_jsonld_compact(&named_graphs, &ctx)`)
+— still hand-rolled and **dependency-free** (a tiny internal `Json` AST — `JsonLdValue` — no
+`serde_json`, no json-ld crate). It implements: **term definitions** (`{"name":"http://…/name"}`
+or expanded `{"@id":…,"@type":…,"@language":…,"@container":…}`), **`@vocab`** (bare vocab-relative
+terms for predicates and `@type` values), **type coercion** (a term `@type` matching a value's
+datatype collapses the value object to a bare scalar; `@type:@id`/`@vocab` collapse a node
+reference to a bare IRI string), **language coercion** (a term `@language` or the document default
+`@language` drops a matching `@language`), **`@container`** — `@set` (always an array, no
+compact-arrays), `@list` (strips the `{"@list":…}` wrapper to a bare ordered array), `@language`
+(a `{lang: value}` map) and `@index` (a `{index: value}` map), **`@reverse`** terms (forward edges
+whose predicate a reverse term maps relocate into an `@reverse` block on the object node),
+**`@id`/`@type` keyword aliasing** (`{"id":"@id","type":"@type"}`), and **value + node + IRI
+compaction** against the active context. Build the context with `parse_context_json(r#"{…}"#)`
+(a string → `JsonLdValue`, returns `None` if not a JSON object) or construct the `JsonLdValue`
+directly; the parsed `ActiveContext` drives compaction. The output is a `{"@context":…,"@graph":[…]}`
+document and the compaction is **lossless** — every coercion is invertible against the same
+`@context`, so a JSON-LD-to-RDF round-trip reconstructs the original triples (verified by the
+crate's compaction round-trip tests). *Scope:* this is the fromRdf-then-compact (serialise) path —
+sparq always emits RDF, so the input is a `Graph`, not an arbitrary remote document; scoped/typed
+contexts, `@propagate`, remote `@context` fetching, `@import`, `@protected` and JSON-LD **Framing**
+are out of scope (Framing is a separate deferred bead).
+
+```rust
+use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
+let ctx = parse_context_json(r#"{
+    "@vocab": "http://schema.org/", "id": "@id", "type": "@type",
+    "knows": {"@id": "http://schema.org/knows", "@type": "@id"}
+}"#).expect("a JSON object");
+let doc = graph_to_jsonld_compact(&g, &ctx); // term defs + @vocab + @type:@id coercion applied
+```
+
 From the CLI (opt-in `serialize-rdf` feature) — re-serialize a loaded document to stdout:
 
 ```bash
