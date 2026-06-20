@@ -695,6 +695,43 @@ to a crash-durable `.spqd` (write-tmp + `fsync` + atomic rename) that `open_with
 detected (an exact-length check) and rejected, never read out of bounds. `put` is unchanged (still errors
 after `finalize`) — `add` is the additive path.
 
+### 13. Structure-aware preprocessing — closure + type-constrained negatives (opt-in, feature = `structure`)
+
+<!-- [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §5.A/§2). -->
+Research-grade **P0** of the structure-aware-vectorisation epic. Two additive, buildable primitives an
+**out-of-process** KGE trainer consumes — this crate **trains nothing** (embeddings are produced
+outside it) and serves no exact answer.
+
+1. **Closure-before-vectorise** — run the `sparq-reason` RDFS/OWL-RL closure **before** the
+   vectoriser sees the graph, so entailed `rdf:type`/`subClassOf`/domain/range triples are *real
+   facts* the encoder, type extractor, and sampler read (design §5.A; the reasoner is sound+complete
+   for its profile, incremental closure property-tested == from-scratch).
+2. **Type-constrained negative sampling** (Krompass et al. 2015) — a `NegativeSampler` corrupts a
+   positive triple's head only to **domain**-consistent entities and its tail only to **range**-consistent
+   ones, reading declared+observed domain/range from `sparq-introspect`. The `SamplingMode`
+   (`Unconstrained` / `TypeConstrained`) is the **on/off ablation switch** (design §6.B) — a harness
+   measures Hits@k/MRR both ways on the same seed. **No benchmark numbers exist; none are claimed.**
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_reason::Profile;
+use sparq_vectors::{close_for_vectorise, Corrupt, NegativeSampler, SamplingMode, TypeConstraints};
+
+let closed = close_for_vectorise(turtle_src, "turtle", Profile::Rdfs)?;  // materialise entailed facts
+let constraints = TypeConstraints::mine(&closed.graph);                  // declared+observed domain/range
+let sampler = NegativeSampler::new(&closed.graph, &constraints, SamplingMode::TypeConstrained);
+let negatives = sampler.sample([h, r, t], Corrupt::Tail, 16, /*seed*/ 42);  // type-valid tail corruptions
+# Ok::<(), String>(())
+```
+
+**Fail-open by design.** A predicate with no known domain (or range) class degrades to uniform
+corruption for that side — a missing/wrong schema never deadlocks the sampler. The sampler is
+deterministic for a fixed `(seed, mode, triple)` and applies the standard "filtered" guard (never
+emits a corruption that is itself a true triple). **Honesty:** the empirical benefit of either prior is
+**unproven** — both ship behind the ablation precisely because the literal/type-aware KGE literature
+reports inconsistent gains; this slice is the buildable inputs, the trainer that consumes them is a
+tracked follow-up.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
@@ -711,6 +748,12 @@ after `finalize`) — `add` is the additive path.
   methods write a delta the read paths consult transparently (recipe 12). The delta lives in RAM on the
   handle; `save_delta` persists it to a crash-durable `.spqd` sidecar and `open_with_delta` replays it,
   so mutations survive a restart without a `compact` (the two durability paths).
+- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1).** It is the
+  ONLY feature pulling `sparq-reason` + `sparq-introspect` into this crate, both **optional**, so
+  with it OFF the default build compiles zero structure-prep code and gains no new required deps. With
+  it ON it exposes `close_for_vectorise` / `materialise_closure` / `ClosedGraph`, `TypeConstraints`,
+  and the `NegativeSampler` + `SamplingMode` (on/off ablation) of recipe 13. It TRAINS NOTHING and
+  serves no exact answer; benefit is **unproven** (research-grade, no accuracy claim, no numbers).
 - **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
   index (`VectorIndex`/`HnswConfig`) and the `ApproxBackend` are gated behind it — it is the only
   thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force

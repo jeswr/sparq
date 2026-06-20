@@ -3734,6 +3734,8 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-introspect",
+ "sparq-reason",
  "sparq-sim",
 ]
 
