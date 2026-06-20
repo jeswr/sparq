@@ -63,19 +63,10 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 
 By default: **no auth, loopback-only.** Hardening is opt-in but honest where it matters.
 
-- **Auth × bind matrix.** A non-loopback bind is refused unless `--allow-remote` is set, and a
-  write-token counts as "auth present" for that decision **only when reads are also gated**
-  (`--auth-token-read`) — a write-token alone still leaves reads open on a remote bind. The 401 is
-  byte-identical for a missing vs a wrong token. The Bearer gate is one shared secret with no
-  per-user identity — for real authz front it with a gateway or [`sparq-solid`](../sparq-solid), over TLS.
+- **Auth × bind matrix.** A non-loopback bind is refused unless `--allow-remote` is set, and a write-token counts as "auth present" for that decision **only when reads are also gated** (`--auth-token-read`) — a write-token alone still leaves reads open on a remote bind. The 401 is byte-identical for a missing vs a wrong token. The Bearer gate is one shared secret with no per-user identity — for real authz front it with a gateway or [`sparq-solid`](../sparq-solid), over TLS.
 - **Error responses do not leak internals** — every error is a generic `{"error":"…"}` class (never the caller's input, an RDF fragment, a path, or a token); detail to the log, class to the body (regression-guarded by `tests/hardening.rs`). An unmatched route is a categorised `404 {"error":"not found"}` (the message never echoes the requested path).
-- **Stable retry contract** — **transient** (`429`/`503`): retry; **permanent** (`4xx`): fix the
-  request — a `413` row/byte cap is a permanent honest refusal, **not** a silent truncation;
-  **defect** (`500`): surface, don't hot-retry. Versioned table in the `status_contract` crate doc.
-- **SERVICE federation** is OFF in the default build; with `--features service` it is
-  **default-DENY-all** (egress allowlist enforced before any socket, on the resolved IP —
-  DNS-rebinding-safe). DoS guards on by default (query timeout, body cap, concurrency shed, 20×
-  gzip-ratio cap, panic→`500`); **no rate limit** — add one in the gateway.
+- **Stable retry contract** — **transient** (`429`/`503`): retry; **permanent** (`4xx`): fix the request — a `413` row/byte cap is a permanent honest refusal, **not** a silent truncation; **defect** (`500`): surface, don't hot-retry. Versioned table in the `status_contract` crate doc.
+- **SERVICE federation** is OFF in the default build; with `--features service` it is **default-DENY-all** (egress allowlist enforced before any socket, on the resolved IP — DNS-rebinding-safe). DoS guards on by default (query timeout, body cap, concurrency shed, 20× gzip-ratio cap, panic→`500`); **no rate limit** — add one in the gateway.
 - **Request-log redaction (ON by default with `--verbose`)** — a `GET /sparql?query=…` URL can
   carry PII, so the query string becomes a length + non-reversible fingerprint
   (`--log-full-requests` opts out). **Honest boundary:** this is log-CONTENT redaction, **not**
