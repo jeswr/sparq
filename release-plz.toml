@@ -58,10 +58,17 @@ git_tag_name = "v{{ version }}"
 # release-plz config docs). It is SAFE here and does NOT mask a release regression: the four
 # offending paths are committed-but-ignored, so there is no diff content to fold into the
 # Release-PR — release-plz still computes versions from the conventional-commit history exactly
-# as before, it just stops treating the ignore-rule shadow as a blocker. The genuine root-cause
-# repo-hygiene fix (untrack the 3 generated artifacts; remove inference-conformance-report.md
-# from .gitignore since AGENTS.md §"Conformance" says it IS committed) is out of this CI lane's
-# staging scope and is filed as a follow-up bead for the maintainer.
+# as before, it just stops treating the ignore-rule shadow as a blocker.
+#
+# [OPUS-4.8] sq-l8imt UPDATE: the root-cause repo-hygiene fix has now landed for 3 of the 4
+# paths — bench/wikidata-8b/STATUS.md and zk/compose/STATUS.md are untracked (git rm --cached,
+# still .gitignore'd as generated reports), and inference-conformance-report.md is removed from
+# .gitignore (AGENTS.md §"Conformance" says it IS committed). The 4th, .beads/interactions.jsonl,
+# is a runtime log under the orchestrator/maintainer-only .beads/ tree; untracking it (git rm
+# --cached .beads/interactions.jsonl) is left as a maintainer action. UNTIL that single remaining
+# untrack is done, this file is still committed-AND-ignored, so allow_dirty stays as the safety
+# net (harmless to keep — see sq-l8imt). After the maintainer untracks it, `git ls-files -ci
+# --exclude-standard` will be empty and allow_dirty may optionally be reverted.
 allow_dirty = true
 
 # --- Tag-only handoff to release.yml (activated by the release-plz WORKFLOW) -----------
