@@ -33,6 +33,8 @@ import {
   resultsToCsv,
   resultsToTsv,
   formatSparqlJson,
+  serializeGraphAsJsonLd,
+  type JsonLdMode,
   type SparqlResults,
   type WasmStore,
 } from "@/lib/sparq-wasm";
@@ -57,6 +59,9 @@ import { SparqlEditor } from "@/components/sparql-editor";
 // [OPUS-4.8] sq-8uew — Turtle/N-Triples syntax highlighting for the CONSTRUCT/DESCRIBE graph.
 // [OPUS-4.8] sq-gb4o (#805) — pretty/indented Turtle (with a raw N-Triples toggle) for the graph.
 import { TurtleResult } from "@/components/rdf-highlight";
+// [OPUS-4.8] sq-oy1f.7 — JSON-LD output mode: the read-only JSON-LD syntax-highlight renderer
+// for the CONSTRUCT/DESCRIBE graph serialised via the wasm engine's JSON-LD writer.
+import { JsonLdHighlight } from "@/components/jsonld-editor";
 // [OPUS-4.8] sq-2mke — endpoint mode: the Connect panel + the SPARQL 1.1 Protocol client.
 import { ConnectPanel } from "@/components/connect-panel";
 // [OPUS-4.8] sq-9ij6 — endpoint mode: the live subscriptions view (SSE result deltas).
@@ -976,10 +981,10 @@ function ResultPanel({ state }: { state: RunState }) {
       );
     }
     return (
-      <TurtleResult
-        text={state.ntriples}
+      <GraphResult
+        ntriples={state.ntriples}
         query={state.query}
-        className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
+        triples={state.triples}
       />
     );
   }
@@ -993,6 +998,192 @@ function ResultPanel({ state }: { state: RunState }) {
   if (state.kind !== "select") return null;
 
   return <SelectResult results={state.results} />;
+}
+
+// [OPUS-4.8] sq-oy1f.3 / sq-oy1f.7 — the CONSTRUCT / DESCRIBE result-graph view with an
+// OUTPUT-FORMAT selector. The default is the existing pretty-Turtle / raw-N-Triples view
+// (`TurtleResult`). The JSON-LD modes serialise the SAME result triples through the wasm
+// engine's OWN JSON-LD writer (never a TS reshaper): "Expanded" / "Flattened" / "Compacted
+// (prefixes)" drive `Store.serialize`'s document forms (#900/#923); "Compaction (@context)"
+// drives `Store.serializeCompact` — the full W3C JSON-LD 1.1 Compaction Algorithm against a
+// user-supplied `@context` (sq-oy1f.5, #957). Both bindings are in the site's `serialize-rdf`
+// bundle. The serialise runs lazily on format switch (off the query path) and is memoised, so
+// re-selecting a format never re-serialises; a serialise error surfaces inline (the
+// `serializeCompact` binding rejects a non-object `@context` with a clear message).
+type GraphFormat =
+  | "turtle"
+  | JsonLdMode; // "expanded" | "flattened" | "compacted" | "compact"
+
+const GRAPH_FORMAT_TABS: { value: GraphFormat; label: string; title: string }[] = [
+  { value: "turtle", label: "Turtle", title: "Pretty Turtle / raw N-Triples (the engine's graph result)" },
+  { value: "expanded", label: "JSON-LD (expanded)", title: "W3C JSON-LD 1.1 expanded document form" },
+  { value: "flattened", label: "JSON-LD (flattened)", title: "W3C JSON-LD 1.1 flattened document form" },
+  { value: "compacted", label: "JSON-LD (prefixes)", title: "JSON-LD with a prefix-only @context (CURIE abbreviation)" },
+  { value: "compact", label: "JSON-LD (Compaction)", title: "Full W3C JSON-LD 1.1 Compaction against your @context" },
+];
+
+// A sensible starting @context for the full-Compaction mode: the well-known vocabularies the
+// built-in datasets use. The user edits it freely; an empty `{}` yields an expanded-shaped
+// document with no abbreviation (the wasm binding still runs the algorithm, losslessly).
+const DEFAULT_COMPACTION_CONTEXT = `{
+  "@vocab": "http://xmlns.com/foaf/0.1/",
+  "ex": "http://example.org/",
+  "knows": { "@id": "http://xmlns.com/foaf/0.1/knows", "@type": "@id" }
+}`;
+
+type JsonLdRender =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "ready"; doc: string }
+  | { kind: "error"; message: string };
+
+function GraphResult({
+  ntriples,
+  query,
+  triples,
+}: {
+  ntriples: string;
+  query: string;
+  triples: number;
+}) {
+  const [format, setFormat] = React.useState<GraphFormat>("turtle");
+  const [context, setContext] = React.useState(DEFAULT_COMPACTION_CONTEXT);
+  const [render, setRender] = React.useState<JsonLdRender>({ kind: "idle" });
+
+  // A fresh result graph (a re-run yields new `ntriples`): snap back to the Turtle view and
+  // drop any cached JSON-LD render, so a new result never shows the previous query's output.
+  React.useEffect(() => {
+    setFormat("turtle");
+    setRender({ kind: "idle" });
+  }, [ntriples]);
+
+  // Serialise on demand whenever a JSON-LD format is active (or the @context changes for the
+  // full-Compaction mode). The serialise is async (it spins up an ephemeral wasm store), so a
+  // stale-result guard (`cancelled`) prevents an out-of-order render landing after a re-select.
+  React.useEffect(() => {
+    if (format === "turtle") return;
+    let cancelled = false;
+    setRender({ kind: "running" });
+    serializeGraphAsJsonLd(ntriples, format, context)
+      .then((doc) => {
+        if (!cancelled) setRender({ kind: "ready", doc });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setRender({
+          kind: "error",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `context` only feeds the "compact" mode, but keying off it for every JSON-LD format is
+    // harmless (the other modes ignore it) and keeps the dependency list honest.
+  }, [ntriples, format, context]);
+
+  return (
+    <div className="space-y-2" data-result-kind="graph">
+      <GraphFormatTabs format={format} onChange={setFormat} />
+
+      {/* The full-Compaction mode is driven by a caller-supplied @context; the others are not. */}
+      {format === "compact" ? (
+        <div className="space-y-1">
+          <label
+            htmlFor="repl-jsonld-context"
+            className="text-xs font-medium text-muted-foreground"
+          >
+            JSON-LD <code className="font-mono">@context</code> (full W3C 1.1 Compaction)
+          </label>
+          <textarea
+            id="repl-jsonld-context"
+            value={context}
+            onChange={(e) => setContext(e.target.value)}
+            spellCheck={false}
+            rows={6}
+            aria-label="JSON-LD @context for full Compaction"
+            className="w-full resize-y rounded-lg border bg-muted/40 p-2.5 font-mono text-[12.5px] leading-relaxed outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+          />
+          <p className="text-[11px] text-muted-foreground">
+            The engine applies the full W3C JSON-LD 1.1 Compaction Algorithm against this{" "}
+            <code className="font-mono">@context</code> — term definitions,{" "}
+            <code className="font-mono">@vocab</code>, type / language /{" "}
+            <code className="font-mono">@container</code> coercion,{" "}
+            <code className="font-mono">@reverse</code>, and{" "}
+            <code className="font-mono">@id</code>/<code className="font-mono">@type</code>{" "}
+            aliasing. It must be a JSON object; an empty{" "}
+            <code className="font-mono">{"{}"}</code> yields an expanded-shaped document.
+          </p>
+        </div>
+      ) : null}
+
+      {format === "turtle" ? (
+        <TurtleResult
+          text={ntriples}
+          query={query}
+          className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
+        />
+      ) : render.kind === "error" ? (
+        <pre
+          data-graph-view="error"
+          className="overflow-x-auto rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"
+        >
+          {render.message}
+        </pre>
+      ) : render.kind === "ready" ? (
+        <JsonLdHighlight
+          text={render.doc}
+          data-graph-view="jsonld"
+          className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
+        />
+      ) : (
+        <p
+          data-graph-view="running"
+          className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground"
+        >
+          Serialising {triples} triple{triples === 1 ? "" : "s"} as JSON-LD on the wasm engine…
+        </p>
+      )}
+    </div>
+  );
+}
+
+// [OPUS-4.8] sq-oy1f.7 — the graph output-format selector. Same `role="tablist"` design-token
+// pattern as the Run/EXPLAIN ModeTabs + the SELECT ResultViewTabs, so every selector in the
+// REPL reads as one family.
+function GraphFormatTabs({
+  format,
+  onChange,
+}: {
+  format: GraphFormat;
+  onChange: (f: GraphFormat) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Graph output format"
+      className="inline-flex flex-wrap gap-0.5 rounded-lg border bg-muted/40 p-0.5"
+    >
+      {GRAPH_FORMAT_TABS.map((t) => (
+        <button
+          key={t.value}
+          type="button"
+          role="tab"
+          aria-selected={format === t.value}
+          title={t.title}
+          onClick={() => onChange(t.value)}
+          className={cn(
+            "rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+            format === t.value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 // [OPUS-4.8] sq-x0kp — the structured SELECT results view (GUI MVP item 2). It carries a

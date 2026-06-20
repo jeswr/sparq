@@ -21,13 +21,17 @@
 //! Every policy in the suite is an `odrl:Set` of `odrl:permission` /
 //! `odrl:prohibition` rules carrying `odrl:action` / `odrl:target` /
 //! `odrl:assignee` and optional `odrl:constraint` blocks over `odrl:dateTime`
-//! (`odrl:eq|lt|lteq|gt|gteq`) plus `odrl:duty` obligations. That is EXACTLY the
-//! ODRL fragment `sparq-policy`'s `parse_policy_str` + `evaluate` already support
-//! (the single-node base case). The runner loads each policy FILE through the
+//! (`odrl:eq|lt|lteq|gt|gteq`) plus `odrl:duty` obligations. The
+//! constraint-matching batch ([OPUS-4.8] sq-euhr3 / sq-k7itg / sq-a0zef) extended
+//! the supported fragment to also cover: compound `odrl:LogicalConstraint`
+//! (`odrl:and`/`odrl:or`/`odrl:xone`, incl. nesting), `odrl:PartyCollection` /
+//! `odrl:AssetCollection` membership (`odrl:partOf` evidence from the sotw), and the
+//! `odrl:use` action hierarchy (`use` subsumes its sub-actions but not the
+//! ownership-`transfer` subtree). The runner loads each policy FILE through the
 //! REAL parse path (`sparq_policy::parse_policy_str`), derives a real
-//! `sparq_policy::Request` from the request + sotw files, and evaluates it
-//! through the REAL `sparq_policy::evaluate` — this is a genuine differential
-//! oracle, not a mock.
+//! `sparq_policy::Request` from the request + sotw files (including the membership
+//! edges), and evaluates it through the REAL `sparq_policy::evaluate` — this is a
+//! genuine differential oracle, not a mock.
 //!
 //! ## The oracle (load-bearing invariant)
 //!
@@ -64,20 +68,24 @@ use std::path::{Path, PathBuf};
 // helper (which matches `pub const NAME: usize = N;`) can read it. [OPUS-4.8]
 //
 /// Pass-count floor for the SolidLab ODRL Test Suite. RATCHET: may only RISE.
-/// At the pinned revision 59 of the 68 self-describing cases pass through the
-/// real `parse_policy_str` + `evaluate` path; the remaining 9 are in the
-/// documented NOT-IMPLEMENTED bucket — constructs outside sparq-policy's
-/// supported single-node base fragment: `odrl:LogicalConstraint`/`odrl:and`
-/// compound constraints, `odrl:PartyCollection`/`odrl:AssetCollection`
-/// membership, the `odrl:use` umbrella-action divergence (sparq treats `use` as
-/// a super-action; SolidLab requires exact match), and a duty whose discharge
-/// state is unknown/NonSet (sparq is fail-closed). Raise this as those land.
-pub const ODRL_SUITE_FLOOR: usize = 59;
+/// At the pinned revision 67 of the 68 self-describing cases pass through the
+/// real `parse_policy_str` + `evaluate` path. The ODRL constraint-matching
+/// conformance batch ([OPUS-4.8] sq-euhr3 / sq-k7itg / sq-a0zef) raised this
+/// from 59 to 67 by implementing, through the real evaluate path: `odrl:LogicalConstraint`
+/// (`odrl:and`/`odrl:or`/`odrl:xone`) compound constraints (cases 048/062/065, sq-a0zef);
+/// `odrl:PartyCollection`/`odrl:AssetCollection` membership matching (cases 051/053/055,
+/// sq-k7itg); and the `odrl:use` action hierarchy (cases 007/008/009 Active vs 010/017
+/// Inactive — `use` subsumes its sub-actions but not the transfer subtree, sq-euhr3).
+/// The single remaining NOT-IMPLEMENTED case is a duty whose discharge state is
+/// unknown/`report:NonSet` (sparq is fail-closed; SolidLab treats a not-violated
+/// duty as active — a documented semantic divergence). Raise this as that lands.
+pub const ODRL_SUITE_FLOOR: usize = 67;
 
 /// The size of the documented not-implemented bucket at the pinned revision. The
 /// runner pins it so the bucket cannot silently GROW (a new regression hidden as
-/// "not-implemented") — it must SHRINK as the fragment grows.
-const NOT_IMPLEMENTED_CEILING: usize = 9;
+/// "not-implemented") — it must SHRINK as the fragment grows. Shrunk from 9 to 1
+/// by the constraint-matching batch (sq-euhr3 / sq-k7itg / sq-a0zef).
+const NOT_IMPLEMENTED_CEILING: usize = 1;
 
 const ODRL_NS: &str = "http://www.w3.org/ns/odrl/2/";
 const REPORT_NS: &str = "https://w3id.org/force/compliance-report#";
@@ -241,6 +249,10 @@ fn build_request(
         .ok_or("request has no odrl:permission")?;
     let action = first_iri_object(&rgraph, &perm, &format!("{ODRL_NS}action"))
         .ok_or("request permission has no odrl:action")?;
+    // The `odrl:use` umbrella now follows the ODRL 2.2 action hierarchy — it subsumes
+    // its sub-actions (read/write/…) but NOT the ownership-transfer subtree (sell/give),
+    // matching the SolidLab oracle (cases 007/008/009 Active; 010/017 Inactive). No
+    // evaluation mode needed. [OPUS-4.8] sq-euhr3.
     let mut req = Request::new(action);
     if let Some(target) = first_iri_object(&rgraph, &perm, &format!("{ODRL_NS}target")) {
         req = req.on(target);
@@ -249,7 +261,8 @@ fn build_request(
         req = req.by(assignee);
     }
 
-    // sotw: evaluation instant (temp:currentTime dct:issued "…") + duty discharge.
+    // sotw: evaluation instant (temp:currentTime dct:issued "…") + duty discharge +
+    // collection membership (party/asset odrl:partOf collection — sq-k7itg).
     let sgraph = Graph::load_str(sotw_ttl, "turtle").map_err(|e| e.to_string())?;
     if let Some(instant) = first_literal_object(
         &sgraph,
@@ -257,6 +270,29 @@ fn build_request(
         &format!("{DCT_NS}issued"),
     ) {
         req = req.at(instant);
+    }
+    // Collection membership: every `<member> odrl:partOf <collection>` edge the sotw
+    // asserts becomes membership evidence. The request's own party is supplied as a
+    // PARTY membership edge and its target as an ASSET membership edge (the same IRI
+    // can only be one of the two for a given request, so feeding both channels the
+    // full edge set is harmless — only the matching channel is consulted). [OPUS-4.8]
+    // sq-k7itg.
+    {
+        let q = format!("SELECT ?m ?c WHERE {{ ?m <{ODRL_NS}partOf> ?c }}");
+        if let Ok(res) = sparq_engine::query(&sgraph, &q) {
+            for row in res.rows {
+                let mut it = row.into_iter();
+                let (Some(Some(oxrdf::Term::NamedNode(m))), Some(Some(oxrdf::Term::NamedNode(c)))) =
+                    (it.next(), it.next())
+                else {
+                    continue;
+                };
+                let (m, c) = (m.into_string(), c.into_string());
+                req = req
+                    .with_party_membership(m.clone(), c.clone())
+                    .with_asset_membership(m, c);
+            }
+        }
     }
     // If the sotw asserts ANY duty fulfilled, discharge every duty action named
     // in the policy's permissions (the suite's duty cases have a single duty).
@@ -286,7 +322,7 @@ fn build_request(
 /// "mismatch ⇒ not-implemented"). [OPUS-4.8]
 fn unsupported_construct(
     policy_graph: &Graph,
-    request_action: &str,
+    _request_action: &str,
     duty_state_unknown: bool,
 ) -> Option<&'static str> {
     let ask = |q: &str| {
@@ -294,35 +330,18 @@ fn unsupported_construct(
             .map(|r| !r.rows.is_empty())
             .unwrap_or(false)
     };
-    // (a) Compound/logical constraints — `odrl:LogicalConstraint` + `odrl:and`.
-    // The parser models a direct `odrl:constraint [ leftOperand … ]` block, not
-    // the LogicalConstraint indirection, so the compound constraint is not
-    // evaluated. (sq-tmsd6 follow-up.)
-    if ask(&format!("ASK {{ ?s a <{ODRL_NS}LogicalConstraint> }}"))
-        || ask(&format!("ASK {{ ?s <{ODRL_NS}and> ?o }}"))
-    {
-        return Some("odrl:LogicalConstraint / odrl:and compound constraint (unsupported)");
-    }
-    // (b) Party/asset COLLECTION membership — assignee/target is a collection and
-    // the requester/resource is a member (`odrl:partOf` / `odrl:source`). The base
-    // case matches assignee/target by IRI equality, not collection membership.
-    if ask(&format!("ASK {{ ?s a <{ODRL_NS}PartyCollection> }}"))
-        || ask(&format!("ASK {{ ?s a <{ODRL_NS}AssetCollection> }}"))
-    {
-        return Some("odrl:PartyCollection / odrl:AssetCollection membership (unsupported)");
-    }
-    // (c) The `odrl:use` umbrella-action SEMANTIC DIVERGENCE. sparq-policy treats
-    // `odrl:use` as the ODRL super-action that permits any action; the SolidLab
-    // oracle requires an exact action match (a `use` permission is Inactive for a
-    // `sell`/`read`/… request). Documented divergence, not a bug in either.
-    if request_action != format!("{ODRL_NS}use")
-        && ask(&format!("ASK {{ ?perm <{ODRL_NS}action> <{ODRL_NS}use> }}"))
-    {
-        return Some("odrl:use umbrella-action vs exact-match divergence (documented)");
-    }
-    // (d) A duty whose discharge state is UNKNOWN/NonSet. sparq-policy is
-    // fail-closed (a duty must be explicitly discharged); the SolidLab oracle
-    // treats a not-VIOLATED (unknown) duty as active. Documented divergence.
+    // [OPUS-4.8] The previously-not-implemented constructs are now SUPPORTED and so
+    // are NO LONGER excused here (they must PASS, not route to the bucket):
+    //   * `odrl:LogicalConstraint` (`odrl:and`/`odrl:or`/`odrl:xone`) — sq-a0zef.
+    //   * `odrl:PartyCollection` / `odrl:AssetCollection` membership — sq-k7itg.
+    //   * the `odrl:use` umbrella-action vs exact-match divergence — sq-euhr3 (the
+    //     runner now evaluates in exact-action-match mode, mirroring the oracle).
+    // The bucket retains ONLY the genuine semantic divergence below; if any of the
+    // now-supported cases regress it surfaces as a real, gating FAIL.
+    //
+    // A duty whose discharge state is UNKNOWN/NonSet. sparq-policy is fail-closed (a
+    // duty must be explicitly discharged); the SolidLab oracle treats a not-VIOLATED
+    // (unknown) duty as active. Documented divergence (fail-closed vs not-violated).
     if duty_state_unknown && ask(&format!("ASK {{ ?perm <{ODRL_NS}duty> ?d }}")) {
         return Some("duty discharge unknown/NonSet (fail-closed vs not-violated divergence)");
     }

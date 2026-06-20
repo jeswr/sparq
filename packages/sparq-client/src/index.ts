@@ -364,7 +364,13 @@ export async function sparqShaclValidate(
         "Rebuild sparq-wasm with --features shacl.",
     );
   }
-  return JSON.parse(validate(data, shapes, format)) as ShaclReport;
+  // [OPUS-4.8] sq-800o — LOST-RECEIVER fix. The line above only EXISTENCE-checks a detached
+  // method reference (so a lean, no-`shacl` bundle still yields the clear error above). It must
+  // NOT be the thing we CALL: wasm-bindgen's `Store.validate` body does
+  // `wasm.store_validate(this.__wbg_ptr, …)`, so invoking the detached `validate(…)` runs with
+  // `this === undefined` and throws `Cannot read properties of undefined (reading '__wbg_ptr')`.
+  // Invoke it BOUND to the `store` receiver so `this.__wbg_ptr` resolves to the live store.
+  return JSON.parse(store.validate(data, shapes, format)) as ShaclReport;
 }
 
 // ---------------------------------------------------------------------------

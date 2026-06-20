@@ -7,6 +7,14 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod applier;
+/// [OPUS-4.8] (sq-o5bi) ONLINE consistent-snapshot backup + restore for the serving store
+/// — export an already-immutable pinned [`Generation`] to a single self-describing artifact
+/// WHILE SERVING (no stop-the-world), and re-hydrate a [`sparq_core::Graph`] from one
+/// (fail-closed on a corrupt/mismatched artifact). Compiled only behind the opt-in `backup`
+/// feature (default OFF); the serving core is fully buildable without it. See the module docs
+/// for the Option-A artifact format and the at-rest-encryption out-of-scope boundary.
+#[cfg(feature = "backup")]
+pub mod backup;
 mod epoch;
 mod footprint;
 mod ring;
@@ -33,6 +41,8 @@ mod cache;
 #[cfg(feature = "result-cache")]
 mod canon;
 
+#[cfg(feature = "backup")]
+pub use backup::{export as backup_export, import as backup_import, BackupError, BackupMeta};
 pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use footprint::{Footprint, TargetGraph};

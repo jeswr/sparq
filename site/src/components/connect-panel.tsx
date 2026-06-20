@@ -68,11 +68,25 @@ export function ConnectPanel({
 }: ConnectPanelProps) {
   const [test, setTest] = React.useState<TestState>({ kind: "idle" });
 
+  // [OPUS-4.8] sq-800o — defer the ORIGIN-dependent safety findings to after hydration.
+  // `connectionSafetyWarnings` reads `window.location.origin` (endpoint.ts): on the server it
+  // is undefined (so it emits the `service-allowlist` info), on the client the cross-origin
+  // default endpoint emits `cors-required` instead. Computing it during the first client render
+  // therefore disagreed with the server-rendered HTML → a React HYDRATION MISMATCH console
+  // error on /try (surfaced by the e2e "zero console errors" gate). Gating on a post-mount flag
+  // makes the FIRST client render match the server (no warnings list yet), then the effect
+  // flips `mounted` and the real, origin-aware findings render — no SSR/client divergence.
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
   // The honest safety findings for the current config — recomputed as the user types.
-  // Pure + synchronous (no network), so it is cheap to run on every render.
+  // Pure + synchronous (no network), so it is cheap to run on every render. Empty until mount
+  // so server and first client render agree (see the hydration note above).
   const warnings = React.useMemo(
-    () => connectionSafetyWarnings(config),
-    [config],
+    () => (mounted ? connectionSafetyWarnings(config) : []),
+    [config, mounted],
   );
   const blocked = hasBlockingWarning(warnings);
   const urlValid = parseEndpointUrl(config.url) !== null;

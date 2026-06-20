@@ -372,6 +372,13 @@ curl http://127.0.0.1:3030/metrics                              # Prometheus tex
 # on-disk store so a logical erasure is followed by real erasure. 200 ok; 409 if in-memory
 # (no --persist, nothing to purge); 503 on a transient durable-write error (retryable):
 curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/compact
+
+# Online consistent-snapshot backup + restore (feature `backup`, default OFF). POST-only, WRITE-gated.
+# Backup streams a single self-describing artifact of the LIVE store WHILE SERVING (no stop-the-world):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/backup -o snapshot.spqb
+# Restore atomically installs a store rehydrated from that artifact (in-memory server only; fail-closed):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' --data-binary @snapshot.spqb http://127.0.0.1:3030/admin/restore
+# Restore on start (bootstrap a fresh node / PITR base):  sparq-server --restore snapshot.spqb
 ```
 
 `/metrics` is hand-rolled Prometheus text exposition (no metrics dependency); the
@@ -403,6 +410,29 @@ server and run `sparq-cli compact <persist-dir>` (see the `cli` skill). **Honest
 scrubs the engine's own on-disk segments + dictionary; it cannot reach bytes already copied off-box
 (filesystem snapshots, COW history, external backups) — those are the operator's responsibility
 (see `compliance/privacy/retention-erasure-runbook.md` §7a/§7b).
+
+**`POST /admin/backup` + `POST /admin/restore` — online consistent snapshot backup/restore
+(feature `backup`, default OFF; `sq-o5bi`).** An ONLINE point-in-time backup of the live serving
+store, distinct from the offline `sparq-cli save` (stop-the-world, index rebuild) and from the
+`--persist` per-graph WAL. **`/admin/backup`** pins the CURRENT generation lock-free and serialises
+it off the immutable `Arc` — so it runs **while serving**: readers never block the writer and the
+writer never blocks readers throughout. The response is **one self-describing artifact** (Stardog
+backup-ID model, "Option A"): a small textual header recording the generation number (= the single
+writer's seq), the per-pod epoch vectors, the triple count and a body integrity digest, then the
+full dataset (default + named graphs) as N-Quads. **`/admin/restore`** imports such an artifact and
+**atomically installs** a freshly-built ring+writer rehydrated from it — readers in flight keep
+serving from the old store until they release their pin; every read/update after the swap sees the
+restored store. **Fail-closed:** a corrupt / truncated / version-mismatched / non-artifact body is
+rejected (`400`) and the live store is left **untouched** (the new core is built fully before the
+swap). Both routes are **POST-only** and gated by the **write** token (the admin gate). Responses:
+backup `200` (`application/octet-stream`); restore `200` on success, `400` on a rejected artifact,
+`409` on a `--persist` server (in-memory restore only in v1 — replacing a live durable directory is
+a recorded follow-up). **Restore-on-start:** `--restore <FILE>` / `SPARQ_RESTORE` seeds the
+in-memory store from an artifact before binding (the bootstrap primitive for horizontal-scaling
+stage-2 + the base of point-in-time recovery; refused together with `--persist`). **Honest scope:**
+**at-rest encryption of the artifact is out of scope** — the integrity digest detects accidental
+corruption, not tampering, and is not a confidentiality or authenticity guarantee; protect the
+artifact at the storage tier.
 
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
@@ -1050,6 +1080,19 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   published snapshot, and a recovered write is durable across a restart — covered for a transient
   burst, a permanent jam, AND (sq-bif.14) an INTERLEAVED recover→fail→recover sequence whose final
   durable set is exactly the successful writes (no refused write resurrects).
+- **Online backup/restore — opt-in `backup` feature (default OFF).** Build with
+  `--features backup` to mount the WRITE-gated, POST-only `/admin/backup` (stream a
+  self-describing snapshot artifact of the live store WITHOUT stopping the world) and
+  `/admin/restore` (atomically install a store rehydrated from one, **fail-closed** on a
+  corrupt/mismatched artifact, in-memory server only in v1 — a `--persist` server gets `409`).
+  `--restore <FILE>` / `SPARQ_RESTORE` runs the same restore on start (bootstrap a fresh
+  replica / PITR base; refused together with `--persist`). DISTINCT from the offline `sparq-cli
+  save` and from the `--persist` WAL. **At-rest encryption of the artifact is out of scope** —
+  the body digest detects accidental corruption, not tampering. Without the feature the routes +
+  the `--restore` setting are compiled out AND the serving core stays the plain `ring`/`writer`
+  pair — the `ArcSwap<ServingCore>` that backs the atomic online restore is `backup`-gated, so the
+  DEFAULT read path is byte-identical to before #941 (no extra atomic load when `backup` is OFF;
+  sq-0g6g resolved in the lean direction). (sq-o5bi.)
 - **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
   (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.
 - **Error bodies.** Every error is structured JSON `{"error": "..."}` with
