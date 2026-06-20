@@ -54,15 +54,13 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
   (`POST /shacl/validate`), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
-  `backup` (online snapshot `/admin/backup` + incremental PITR delta `/admin/backup/delta` + `/admin/restore`),
-  `audit-log`/`access-audit` (access trails), `zlib-ng` (faster gzip).
-- **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, user-prioritised epic sq-oy1f) — the `jsonld`
-  feature is in the server's **default** set (a maintainer-directed exception to opt-in-by-default):
-  `application/ld+json` joins the q-value-aware RDF content negotiation out of the box, **both
-  directions** — EMIT a CONSTRUCT/DESCRIBE or GSP-read graph as flattened JSON-LD, and ACCEPT an
-  `application/ld+json` GSP write body (`oxjsonld`). Toggleable off via `--no-default-features
-  --features server` (then `application/ld+json` → 406-fallback on read, 415 on write). Default-on
-  now: parse + serialise (flattened) + conneg; full conneg-conformance ratcheting is roadmap (sq-oy1f).
+  `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
+  `/admin/restore`; on `--persist`, `?persist=true`/`--restore-persist` writes the restore through to
+  disk crash-safely so it survives a restart), `audit-log`/`access-audit`, `zlib-ng`.
+- **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, epic sq-oy1f) — the `jsonld` feature is in the
+  server's **default** set: `application/ld+json` joins q-value-aware RDF conneg out of the box, **both
+  directions** (flattened JSON-LD on CONSTRUCT/DESCRIBE/GSP-read; `oxjsonld` GSP write body). Off via
+  `--no-default-features --features server` (→ 406 read, 415 write). Full conneg ratcheting is roadmap.
 
 ## Security posture (essentials — full detail in the SKILL)
 
@@ -99,6 +97,8 @@ distributed/sharded writer is an **explicit Phase-2 non-goal**; the external-top
 `--persist <DIR>` makes the on-disk index the durable source of truth (QLever's `--persist-updates`):
 every update is WAL-fsync'd **before the `204` ack** (restart replays the WAL, no rebuild); a rejected
 update is never persisted, a durable-write failure refuses with a **retryable `503`** (fail-closed), and WAL compaction (`POST /admin/compact` / `sparq-cli compact`) purges deleted bytes for erasure-completeness but **cannot** reach off-box copies (snapshots/backups) — see the SKILL.
+
+**Restore into a live durable store** (`backup` feature): a `POST /admin/restore?persist=true` (or `--restore FILE --restore-persist` on start) REPLACES the durable store's contents with a backup artifact, written through to `DIR` so it survives a restart. The swap runs on the single writer thread, crash-safely (a two-rename directory swap healed deterministically on the next open), and is **fail-closed**: a corrupt artifact is rejected with the live store untouched. Without `?persist=true`, a `--persist` server refuses the restore (`409`) — an in-memory-only restore would be silently lost on restart.
 
 ## 📚 Learn more
 

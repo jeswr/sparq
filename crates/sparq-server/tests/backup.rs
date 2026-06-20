@@ -498,21 +498,57 @@ async fn delta_route_is_gated_and_validates_from() {
     );
 }
 
-/// PERSIST REFUSAL: a `--persist` durable server refuses restore (409) in v1.
-#[tokio::test]
-async fn restore_refuses_on_persist_server() {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "sparq-backup-persist-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed),
-    ));
-    let cl = reqwest::Client::new();
-    let config = ServerConfig {
-        persist_dir: Some(dir.clone()),
-        ..ServerConfig::default()
+/// A unique scratch persist directory removed on drop (the persist.rs hygiene pattern).
+struct ScratchDir(std::path::PathBuf);
+impl ScratchDir {
+    fn new() -> Self {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        ScratchDir(std::env::temp_dir().join(format!(
+            "sparq-backup-persist-{}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )))
+    }
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn persist_config(dir: &std::path::Path) -> ServerConfig {
+    ServerConfig { persist_dir: Some(dir.to_path_buf()), ..ServerConfig::default() }
+}
+
+/// POSTs a restore artifact to `/admin/restore`, optionally with `?persist=true`, returning the
+/// status. `persist == true` is the write-through opt-in (sq-ft7u).
+async fn post_restore(cl: &reqwest::Client, base: &str, artifact: Vec<u8>, persist: bool) -> reqwest::StatusCode {
+    let url = if persist {
+        format!("{base}/admin/restore?persist=true")
+    } else {
+        format!("{base}/admin/restore")
     };
-    let base = spawn_with(Graph::load_str("", "turtle").unwrap(), config).await;
+    cl.post(url).body(artifact).send().await.unwrap().status()
+}
+
+/// PERSIST CONTRACT (sq-ft7u): a `--persist` durable server refuses an in-memory-only restore
+/// (no `?persist=true`) with 409, but ACCEPTS a restore that opts into write-through
+/// (`?persist=true`) with 200. (The 200 path's durability is proven by
+/// `restore_persist_survives_restart` below; this test pins the status contract.)
+#[tokio::test]
+async fn restore_refuses_on_persist_server_without_opt_in_accepts_with_it() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+    let base = spawn_with(Graph::load_str("", "turtle").unwrap(), persist_config(scratch.path())).await;
+
+    // WITHOUT the persist opt-in → 409 (an in-memory-only restore would be lost on restart).
     let resp = cl
         .post(format!("{base}/admin/restore"))
         .body("anything")
@@ -522,7 +558,232 @@ async fn restore_refuses_on_persist_server() {
     assert_eq!(
         resp.status(),
         reqwest::StatusCode::CONFLICT,
-        "restore is refused on a --persist server in v1"
+        "an in-memory-only restore on a --persist server must be refused (409)"
     );
-    let _ = std::fs::remove_dir_all(&dir);
+
+    // WITH ?persist=true, a VALID artifact → 200 (write-through accepted).
+    let artifact = make_artifact(&cl).await;
+    assert_eq!(
+        post_restore(&cl, &base, artifact, true).await,
+        reqwest::StatusCode::OK,
+        "a write-through restore (?persist=true) on a --persist server must be accepted (200)"
+    );
+}
+
+/// Produces a valid backup artifact from a small populated in-memory source server.
+async fn make_artifact(cl: &reqwest::Client) -> Vec<u8> {
+    let src = spawn_with(
+        Graph::load_str("<http://ex/a> <http://ex/p> <http://ex/b> .", "turtle").unwrap(),
+        ServerConfig::default(),
+    )
+    .await;
+    post_update(cl, &src, "INSERT DATA { <http://ex/c> <http://ex/p> <http://ex/d> }").await;
+    post_update(
+        cl,
+        &src,
+        "INSERT DATA { GRAPH <http://ex/g> { <http://ex/n> <http://ex/q> <http://ex/w> } }",
+    )
+    .await;
+    backup(cl, &src).await
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-ft7u) RESTORE-INTO-LIVE-DURABLE-STORE (--persist write-through).
+//
+// The load-bearing proof: a restore opted into write-through (?persist=true) on a --persist
+// server is written THROUGH to the durable directory, so it SURVIVES A RESTART (reopen the same
+// dir → restored triples present). We reuse the persist.rs restart pattern: a Server we can DROP
+// (so its writer thread joins + every WAL handle releases), then REOPEN the same persist_dir.
+// We also pin: corrupt-artifact still fail-closes WITHOUT touching the durable store; the route
+// stays write-gated.
+// ---------------------------------------------------------------------------
+
+/// A running server we can SHUT DOWN cleanly (mirrors persist.rs): on `stop()` the serve task
+/// resolves, dropping the `AppState` so the writer thread joins and the durable dir's WAL handle
+/// releases — modelling a clean process restart.
+struct Server {
+    base: String,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Server {
+    async fn start(config: ServerConfig) -> Self {
+        // Empty seed; an existing persist dir is opened (seed ignored), an empty one created.
+        let graph = Graph::load_str("", "turtle").unwrap();
+        let state = AppState::try_with_config(graph, config).expect("durable open");
+        let app = router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        Server { base: format!("http://{addr}"), shutdown: Some(tx), task: Some(task) }
+    }
+
+    async fn stop(mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.await.expect("server serve task panicked / failed");
+        }
+    }
+}
+
+/// THE CORE PROOF (sq-ft7u). On a `--persist` server, a `?persist=true` restore is written through
+/// to the durable directory and SURVIVES A RESTART: after restoring an artifact captured from a
+/// SEPARATE in-memory source, the restored triples are present; after dropping the server and
+/// REOPENING the same persist_dir, they are STILL present (the on-disk base IS the restored image).
+#[tokio::test]
+async fn restore_persist_survives_restart() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+
+    // An artifact captured from a SEPARATE source server (default-graph + a named graph).
+    let artifact = make_artifact(&cl).await;
+
+    // A fresh --persist server, initially with its OWN distinct data (proves the restore REPLACES).
+    let s1 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(
+        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/preexisting> <http://ex/p> <http://ex/o> }").await,
+        reqwest::StatusCode::NO_CONTENT
+    );
+    assert_eq!(count_all(&cl, &s1.base).await, 1, "the durable server starts with its own one triple");
+
+    // Restore WITH write-through → 200, and the restored content replaces the pre-existing data.
+    assert_eq!(
+        post_restore(&cl, &s1.base, artifact.clone(), true).await,
+        reqwest::StatusCode::OK,
+        "write-through restore must be accepted on a --persist server"
+    );
+    // make_artifact's source = 1 seed + 1 default insert + 1 named insert = 3 quads.
+    assert_eq!(count_all(&cl, &s1.base).await, 3, "the restored quad set is live after restore");
+    assert_eq!(
+        count_rows(&cl, &s1.base, "SELECT * WHERE { <http://ex/preexisting> ?p ?o }").await,
+        0,
+        "the restore REPLACED the pre-existing durable content"
+    );
+    assert_eq!(
+        count_rows(&cl, &s1.base, "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }").await,
+        1,
+        "the named graph from the artifact is live after the restore"
+    );
+
+    // The restored durable server is still WRITABLE (the writer survived; new WAL on the new base).
+    assert_eq!(
+        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/postrestore> <http://ex/p> <http://ex/o> }").await,
+        reqwest::StatusCode::NO_CONTENT
+    );
+    assert_eq!(count_all(&cl, &s1.base).await, 4, "a post-restore update is visible");
+
+    // RESTART: drop the server (writer joins, WAL handle released), reopen the SAME dir.
+    s1.stop().await;
+    let s2 = Server::start(persist_config(scratch.path())).await;
+
+    // The restored triples — AND the post-restore update — survived the restart (durable).
+    assert_eq!(
+        count_all(&cl, &s2.base).await,
+        4,
+        "the restored dataset + the post-restore update must survive the restart (written through)"
+    );
+    assert_eq!(
+        count_rows(&cl, &s2.base, "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }").await,
+        1,
+        "the restored named graph survives the restart"
+    );
+    assert_eq!(
+        count_rows(&cl, &s2.base, "SELECT * WHERE { <http://ex/preexisting> ?p ?o }").await,
+        0,
+        "the replaced pre-existing content must NOT resurrect after a restart"
+    );
+    s2.stop().await;
+}
+
+/// FAIL-CLOSED on a `--persist` server: a CORRUPT artifact restore (?persist=true) is rejected
+/// (400) and the durable store + dir are UNTOUCHED — reopening the dir shows the original data,
+/// with no `.compact-new`/`.compact-old` swap leftovers that would mis-heal on the next open.
+#[tokio::test]
+async fn restore_persist_corrupt_artifact_leaves_durable_store_untouched() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+
+    let s1 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(
+        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/keep> <http://ex/p> \"ORIGINAL\" }").await,
+        reqwest::StatusCode::NO_CONTENT
+    );
+    assert_eq!(count_all(&cl, &s1.base).await, 1);
+
+    // Corrupt a valid artifact (flip the last body byte) and restore it WITH write-through.
+    let mut artifact = make_artifact(&cl).await;
+    let last = artifact.len() - 1;
+    artifact[last] ^= 0xff;
+    assert_eq!(
+        post_restore(&cl, &s1.base, artifact, true).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a corrupt write-through restore must fail closed (400)"
+    );
+    // The live durable store is unchanged (the import failed before any swap began).
+    assert_eq!(count_all(&cl, &s1.base).await, 1, "live durable store intact after a corrupt restore");
+
+    // No swap-sibling leftovers next to the persist dir (a stray .compact-new/-old could mis-heal).
+    let new_sib = scratch.path().with_extension("compact-new");
+    let old_sib = scratch.path().with_extension("compact-old");
+    assert!(!new_sib.exists(), "no .compact-new leftover after a failed restore");
+    assert!(!old_sib.exists(), "no .compact-old leftover after a failed restore");
+
+    // And the original survives a restart (the corrupt restore truly touched nothing on disk).
+    s1.stop().await;
+    let s2 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(count_all(&cl, &s2.base).await, 1, "original durable data survives a restart");
+    assert_eq!(
+        count_rows(&cl, &s2.base, "SELECT * WHERE { <http://ex/keep> ?p ?o }").await,
+        1,
+        "the original (un-restored-over) triple is still present after a restart"
+    );
+    s2.stop().await;
+}
+
+/// AUTH: the write-through restore route stays WRITE-gated — an unauthenticated ?persist=true
+/// restore is 401 (the auth gate runs before the persist-posture checks).
+#[tokio::test]
+async fn restore_persist_route_is_write_gated() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+    let config = ServerConfig { auth_token: Some("s3cret".into()), ..persist_config(scratch.path()) };
+    let s = Server::start(config).await;
+
+    let resp = cl
+        .post(format!("{}/admin/restore?persist=true", s.base))
+        .body("anything")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "an unauthenticated write-through restore must be 401"
+    );
+    s.stop().await;
+}
+
+/// An IN-MEMORY server (no --persist) refuses ?persist=true with 409 — there is no durable dir to
+/// write the restore through to. (The in-memory restore path stays available WITHOUT ?persist.)
+#[tokio::test]
+async fn restore_persist_on_in_memory_server_is_409() {
+    let cl = reqwest::Client::new();
+    let base = spawn_with(Graph::load_str("", "turtle").unwrap(), ServerConfig::default()).await;
+    let artifact = make_artifact(&cl).await;
+    assert_eq!(
+        post_restore(&cl, &base, artifact, true).await,
+        reqwest::StatusCode::CONFLICT,
+        "?persist=true on an in-memory server must be 409 (no durable dir to write through)"
+    );
 }
