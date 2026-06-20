@@ -2892,4 +2892,229 @@ mod tests {
             "direct inverseOf must remain on the monotone fast path"
         );
     }
+
+    // [OPUS-4.8] sq-wtjol (sq-qcnn): RDF-list helper + targeted clash tests that pin the
+    // list-PAIR-enumeration arithmetic in `inconsistencies()` (owl.rs §AllDisjointProperties /
+    // §AllDisjointClasses / §AllDifferent). Each assertion is a hand-derived OWL-RL entailment
+    // (prp-adp, cax-adc, eq-diff2/3 of the W3C OWL 2 RL/RDF rules), NOT a mere line-exercise:
+    // the CONSISTENT variants prove the `i+1` upper-triangular offset and the strict pair
+    // predicate (`a == b`, `count >= 2`) are EXACT — a self-pair (`ms[i..]`) or a flipped
+    // comparison would manufacture a spurious clash that these `is_empty()` checks catch.
+
+    /// Append an RDF collection `( m0 m1 … )` rooted at fresh blank-ish IRIs to `triples`,
+    /// returning the head node id (or `rdf:nil` for the empty list). Mirrors the
+    /// `rdf:first`/`rdf:rest`/`rdf:nil` shape that `inconsistencies()`'s `list()` walks.
+    fn rdf_list(dict: &mut Dict, triples: &mut Vec<[Id; 3]>, members: &[Id]) -> Id {
+        let first = rdf(dict, "first");
+        let rest = rdf(dict, "rest");
+        let nil = rdf(dict, "nil");
+        let mut next = nil;
+        // Build tail-first so each cons cell points at the already-constructed remainder.
+        for (i, &m) in members.iter().enumerate().rev() {
+            let cell = dict.intern_iri(&format!("http://ex/_lst{}_{}", members.len(), i));
+            triples.push([cell, first, m]);
+            triples.push([cell, rest, next]);
+            next = cell;
+        }
+        next
+    }
+
+    #[test]
+    fn all_disjoint_classes_three_members_pairwise() {
+        // cax-adc over a 3-member AllDisjointClasses { :A :B :C }: an individual typed by
+        // ANY TWO distinct members is a clash; one typed by a SINGLE member is consistent.
+        // This pins `cs.iter().filter(...).count() >= 2` (a `>= → <` or `count` miscount
+        // would flip both directions) and exercises the `list()` walk over 3 cells.
+        let mut dict = Dict::new();
+        let ty = rdf(&mut dict, "type");
+        let (adc_set, adc_ty, members) = (
+            ex(&mut dict, "DisjClasses"),
+            owl(&mut dict, "AllDisjointClasses"),
+            owl(&mut dict, "members"),
+        );
+        let (ca, cb, cc) = (ex(&mut dict, "A"), ex(&mut dict, "B"), ex(&mut dict, "C"));
+        let (x, y) = (ex(&mut dict, "x"), ex(&mut dict, "y"));
+        let mut triples = vec![[adc_set, ty, adc_ty]];
+        let head = rdf_list(&mut dict, &mut triples, &[ca, cb, cc]);
+        triples.push([adc_set, members, head]);
+        // :x typed by the FIRST and the LAST list members (a (0,2) pair, the offset the
+        // mutated `i*1`/`i-1` arithmetic gets wrong) — a genuine cax-adc clash.
+        triples.push([x, ty, ca]);
+        triples.push([x, ty, cc]);
+        // :y typed by exactly ONE member — must stay consistent.
+        triples.push([y, ty, cb]);
+
+        let clashes = inconsistencies(&dict, &triples);
+        let x_iri = dict.term(x).to_string();
+        let y_iri = dict.term(y).to_string();
+        assert!(
+            clashes.iter().any(|c| c.contains(&x_iri)),
+            "cax-adc: :x typed by two AllDisjointClasses members is a clash; got {:?}",
+            clashes
+        );
+        assert!(
+            !clashes.iter().any(|c| c.contains(&y_iri)),
+            "single-member :y must NOT be reported (no self-pair manufactured); got {:?}",
+            clashes
+        );
+    }
+
+    #[test]
+    fn all_disjoint_classes_single_membership_consistent() {
+        // A 3-member AllDisjointClasses where every individual is typed by AT MOST one
+        // member is fully consistent. A self-pair bug (`>= 2` weakened, or a (i,i) pair)
+        // would falsely report each singly-typed individual — this `is_empty()` forbids it.
+        let mut dict = Dict::new();
+        let ty = rdf(&mut dict, "type");
+        let (adc_set, adc_ty, members) = (
+            ex(&mut dict, "DisjClasses"),
+            owl(&mut dict, "AllDisjointClasses"),
+            owl(&mut dict, "members"),
+        );
+        let (ca, cb, cc) = (ex(&mut dict, "A"), ex(&mut dict, "B"), ex(&mut dict, "C"));
+        let (p, q, r) = (ex(&mut dict, "p"), ex(&mut dict, "q"), ex(&mut dict, "r"));
+        let mut triples = vec![[adc_set, ty, adc_ty]];
+        let head = rdf_list(&mut dict, &mut triples, &[ca, cb, cc]);
+        triples.push([adc_set, members, head]);
+        triples.push([p, ty, ca]);
+        triples.push([q, ty, cb]);
+        triples.push([r, ty, cc]);
+        assert!(
+            inconsistencies(&dict, &triples).is_empty(),
+            "disjoint classes with one-each membership is consistent"
+        );
+    }
+
+    #[test]
+    fn all_different_three_members_distinct_consistent() {
+        // eq-diff2: a 3-member owl:AllDifferent of three DISTINCT individuals (no sameAs)
+        // is consistent. This is the load-bearing negative for the AllDifferent pair loop:
+        // a `xs[i..]` self-pair would fire `a == b`, and an `a == b → a != b` flip would
+        // fire on every distinct pair — both would break this `is_empty()`.
+        let mut dict = Dict::new();
+        let ty = rdf(&mut dict, "type");
+        let (set, all_diff, members) = (
+            ex(&mut dict, "Diff"),
+            owl(&mut dict, "AllDifferent"),
+            owl(&mut dict, "members"),
+        );
+        let (a, b, c) = (ex(&mut dict, "alice"), ex(&mut dict, "bob"), ex(&mut dict, "carol"));
+        let mut triples = vec![[set, ty, all_diff]];
+        let head = rdf_list(&mut dict, &mut triples, &[a, b, c]);
+        triples.push([set, members, head]);
+        assert!(
+            inconsistencies(&dict, &triples).is_empty(),
+            "three distinct AllDifferent members are consistent"
+        );
+    }
+
+    #[test]
+    fn all_different_sameas_pair_clashes() {
+        // eq-diff3: a 3-member owl:AllDifferent whose FIRST and THIRD members are owl:sameAs
+        // is inconsistent — the asserted distinctness is contradicted. Pins the `(0,2)`
+        // upper-triangular pair (offset arithmetic) AND the `|| same.contains(..)` branch:
+        // the same/sameAs check uses (min,max)-canonicalised pairs.
+        let mut dict = Dict::new();
+        let ty = rdf(&mut dict, "type");
+        let same_as = owl(&mut dict, "sameAs");
+        let (set, all_diff, members) = (
+            ex(&mut dict, "Diff"),
+            owl(&mut dict, "AllDifferent"),
+            owl(&mut dict, "members"),
+        );
+        let (a, b, c) = (ex(&mut dict, "p1"), ex(&mut dict, "p2"), ex(&mut dict, "p3"));
+        let mut triples = vec![[set, ty, all_diff]];
+        let head = rdf_list(&mut dict, &mut triples, &[a, b, c]);
+        triples.push([set, members, head]);
+        // p1 sameAs p3 — the (0,2) pair of a 3-element list.
+        triples.push([a, same_as, c]);
+        let clashes = inconsistencies(&dict, &triples);
+        assert!(
+            clashes.iter().any(|c| c.contains("are the same")),
+            "AllDifferent members forced sameAs must clash; got {:?}",
+            clashes
+        );
+    }
+
+    #[test]
+    fn all_different_distinct_members_predicate() {
+        // eq-diff: owl:AllDifferent declared via owl:distinctMembers (the alternate
+        // list predicate the loop also scans). Identical first/last ids are a clash.
+        let mut dict = Dict::new();
+        let ty = rdf(&mut dict, "type");
+        let (set, all_diff, distinct) = (
+            ex(&mut dict, "Diff"),
+            owl(&mut dict, "AllDifferent"),
+            owl(&mut dict, "distinctMembers"),
+        );
+        let same_as = owl(&mut dict, "sameAs");
+        let (a, b, c) = (ex(&mut dict, "q1"), ex(&mut dict, "q2"), ex(&mut dict, "q3"));
+        let mut triples = vec![[set, ty, all_diff]];
+        let head = rdf_list(&mut dict, &mut triples, &[a, b, c]);
+        triples.push([set, distinct, head]);
+        // Make the (1,2) pair sameAs to also pin a NON-(0,k) offset.
+        triples.push([b, same_as, c]);
+        let clashes = inconsistencies(&dict, &triples);
+        assert!(
+            clashes.iter().any(|c| c.contains("are the same")),
+            "distinctMembers list with a sameAs pair clashes; got {:?}",
+            clashes
+        );
+    }
+
+    #[test]
+    fn all_disjoint_properties_three_members_shared_pair() {
+        // prp-adp over a 3-member owl:AllDisjointProperties { :p :q :r }: two DISTINCT
+        // members sharing a (subject,object) pair is a clash; a single property used
+        // alone is consistent. Pins the AllDisjointProperties pair-enumeration `ms[i+1..]`
+        // (a `ms[i..]` self-pair would manufacture a (p,p) "disjoint" pair, falsely
+        // flagging ANY used property as self-disjoint).
+        let mut dict = Dict::new();
+        let ty = rdf(&mut dict, "type");
+        let (set, adp_ty, members) = (
+            ex(&mut dict, "DisjProps"),
+            owl(&mut dict, "AllDisjointProperties"),
+            owl(&mut dict, "members"),
+        );
+        let (p, q, r) = (ex(&mut dict, "p"), ex(&mut dict, "q"), ex(&mut dict, "r"));
+        let (s, o) = (ex(&mut dict, "s"), ex(&mut dict, "o"));
+        let mut triples = vec![[set, ty, adp_ty]];
+        let head = rdf_list(&mut dict, &mut triples, &[p, q, r]);
+        triples.push([set, members, head]);
+        // :s :p :o AND :s :r :o — p and r are the (0,2) disjoint pair sharing (s,o): clash.
+        triples.push([s, p, o]);
+        triples.push([s, r, o]);
+        let clashes = inconsistencies(&dict, &triples);
+        assert!(
+            clashes.iter().any(|c| c.contains("disjoint properties")),
+            "prp-adp: disjoint :p and :r sharing (s,o) is a clash; got {:?}",
+            clashes
+        );
+    }
+
+    #[test]
+    fn all_disjoint_properties_single_use_consistent() {
+        // A 3-member AllDisjointProperties where only ONE property is ever used, on a single
+        // (s,o) pair, is consistent — no two DISTINCT disjoint properties share the pair.
+        // The strict upper-triangular offset (`i+1`) must NOT pair :p with itself; this
+        // `is_empty()` is exactly the negative that a `ms[i..]` self-pair mutant breaks.
+        let mut dict = Dict::new();
+        let ty = rdf(&mut dict, "type");
+        let (set, adp_ty, members) = (
+            ex(&mut dict, "DisjProps"),
+            owl(&mut dict, "AllDisjointProperties"),
+            owl(&mut dict, "members"),
+        );
+        let (p, q, r) = (ex(&mut dict, "p"), ex(&mut dict, "q"), ex(&mut dict, "r"));
+        let (s, o) = (ex(&mut dict, "s"), ex(&mut dict, "o"));
+        let mut triples = vec![[set, ty, adp_ty]];
+        let head = rdf_list(&mut dict, &mut triples, &[p, q, r]);
+        triples.push([set, members, head]);
+        // Only :p is used. No two DISTINCT disjoint properties coincide.
+        triples.push([s, p, o]);
+        assert!(
+            inconsistencies(&dict, &triples).is_empty(),
+            "a single used disjoint property is not self-disjoint"
+        );
+    }
 }
