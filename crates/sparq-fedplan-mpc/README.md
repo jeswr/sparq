@@ -7,7 +7,18 @@ to each other. Behind the **`fedplan-mpc` cargo feature, OFF by default**; the
 default build compiles an empty crate and pulls in neither upstream. Design:
 [`research/mpc-untrusted-planner-routing-design.md`](../../research/mpc-untrusted-planner-routing-design.md).
 
-## What's implemented
+## 🚀 Quickstart
+
+Internal crate (`publish = false`); enable the feature in the workspace and call the
+Phase-2 adapter over a BGP plus the per-source descriptors:
+
+```rust
+// behind `--features fedplan-mpc`
+let selection = sparq_fedplan_mpc::select_private_sources(&bgp, &descriptors)?;
+// selection.candidates — retained per-pattern sources; selection.pruned — audit trail
+```
+
+## ✨ Features
 
 - **`SourcePrivacyDescriptor`** (Phase 1, sq-2q1x) — the per-source privacy
   declaration. Posture is **default-deny**: a predicate is disclosable only when the
@@ -22,12 +33,9 @@ default build compiles an empty crate and pulls in neither upstream. Design:
   candidate (its in-clear-vs-MPC routing is the Phase-3 decision), so the adapter is
   recall-safe and loses no answers. Duplicate descriptors for one source id are
   refused (`SeamError::DescriptorMismatch`) rather than silently resolved.
-
-## What's still deferred
-
-- `route_operators` (Phase 3, disclosed/hidden routing) and
-  `assemble_leakage_envelope` (Phase 4, leakage envelope + dual ratification) are
-  typed, panic-free stubs returning `SeamError::Deferred { phase, gated_on }`.
+- **Deferred (typed, panic-free stubs)** — `route_operators` (Phase 3,
+  disclosed/hidden routing) and `assemble_leakage_envelope` (Phase 4, leakage envelope
+  + dual ratification) return `SeamError::Deferred { phase, gated_on }`.
 
 > **Internal crate — not published** (`publish = false`). **No soundness or privacy
 > claim.** Phase 2 is **plumbing — source-selection routing, not a cryptographic
@@ -40,18 +48,18 @@ default build compiles an empty crate and pulls in neither upstream. Design:
 > dual ratification, authenticated-input attestation) are **deferred and
 > audit-gated**; nothing here is a working protocol.
 
-### Threat-model / leakage note (Phase 2, honest)
+**Threat-model / leakage note (Phase 2, honest).** The adapter reads each source's
+*own* declared `SourcePrivacyDescriptor` to decide participation; it enforces nothing
+cryptographic. Per the design record's constraint C-B (§2.2), the descriptor is the
+source's declaration — a later phase has each source **re-enforce** it fail-closed, so
+a lying planner cannot widen disclosure. Phase 2 itself only routes public metadata
+(the candidate set and a participation flag); it makes no claim about what is or is not
+learned by any party once a query executes, because no query executes here.
 
-The adapter reads each source's *own* declared `SourcePrivacyDescriptor` to decide
-participation; it enforces nothing cryptographic. Per the design record's constraint
-C-B (§2.2), the descriptor is the source's declaration — a later phase has each source
-**re-enforce** it fail-closed, so a lying planner cannot widen disclosure. Phase 2
-itself only routes public metadata (the candidate set and a participation flag); it
-makes no claim about what is or is not learned by any party once a query executes,
-because no query executes here.
+## 📚 Learn more
 
-Design: [`research/mpc-untrusted-planner-routing-design.md`](../../research/mpc-untrusted-planner-routing-design.md).
-Contributing: [`AGENTS.md`](../../AGENTS.md).
+- Design: [`research/mpc-untrusted-planner-routing-design.md`](../../research/mpc-untrusted-planner-routing-design.md).
+- Contributing: [`AGENTS.md`](../../AGENTS.md).
 
 ## License
 
