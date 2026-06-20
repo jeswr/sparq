@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-# [OPUS-4.8] ADVISORY README length-cap + required-sections check (bead sq-5fd1).
+# [OPUS-4.8] README length-cap + required-sections check (bead sq-5fd1).
 #
 # Pairs with the crate-README template from the doc-overhaul design (bead sq-9jw5):
 # a concise (<=120-line) per-crate README with three emoji section markers —
-# "## 🚀 Quickstart", "## ✨ Features", "## 📚 Learn more" — plus a License line.
-# `publish=false` crates get a short stub instead (no section requirement).
+# "## 🚀 Quickstart", "## ✨ Features", "## 📚 Learn more" — plus a License section.
+# `publish=false` crates may instead use a <=30-line stub carrying the explicit
+# `<!-- internal-stub -->` HTML-comment directive (no section requirement).
 #
-# STATUS: ADVISORY (run with --advisory). Today most crate READMEs predate the
-# template and exceed the cap; the overhaul (sq-9jw5) brings them into line per-crate.
-# Until then this check only REPORTS (into the job summary) so the gap stays visible
-# without blocking. Once a README adopts the template it passes; once ALL do, flip the
-# workflow step to --enforce to ratchet it HARD.
+# STATUS: HARD / REQUIRED GATE (bead sq-8ic6 — promoted from advisory). The
+# sq-9jw5 overhaul brought every crate README into line and sq-ixsf tightened the
+# stub classifier, so docs-quality.yml now runs this with --enforce (exit non-zero
+# on any deviation) and the ci-summary aggregator GATES on the job
+# "readme-template (template)" — its name carries no advisory/informational token.
+# Net: EVERY crate README must conform, or the build fails. When you create or edit
+# a crate README, run `python3 scripts/check-readme-template.py` and make it pass:
+# <=120 lines + "## 🚀 Quickstart" / "## ✨ Features" / "## 📚 Learn more" + a
+# License section (or, for a `publish=false` crate, a <=30-line README carrying the
+# `<!-- internal-stub -->` directive). Put verbose/incidental API detail in rustdoc,
+# not the README. `--advisory` (report-only, always exit 0) remains for local
+# preview, but CI no longer uses it.
 
 from __future__ import annotations
 
@@ -150,9 +158,9 @@ def _self_test() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--advisory", action="store_true",
-                    help="report only, always exit 0 (default while sq-9jw5 lands)")
+                    help="report only, always exit 0 (local preview; CI uses --enforce)")
     ap.add_argument("--enforce", action="store_true",
-                    help="exit non-zero on any template deviation (ratchet to HARD)")
+                    help="exit non-zero on any template deviation (the HARD CI gate, sq-8ic6)")
     ap.add_argument("--self-test", action="store_true",
                     help="run the hermetic stub-classification self-test and exit")
     ap.add_argument("paths", nargs="*",
@@ -179,10 +187,12 @@ def main() -> int:
             if total == 0:
                 fh.write("### readme-template: all conform ✅\n")
             else:
-                fh.write(f"### readme-template (ADVISORY): {total} deviation(s) ⚠️\n\n")
-                fh.write("Crate READMEs should follow the concise template from sq-9jw5 "
+                fh.write(f"### readme-template: {total} deviation(s) ❌ (GATING — sq-8ic6)\n\n")
+                fh.write("Crate READMEs MUST follow the concise template from sq-9jw5 "
                          f"(<= {MAX_LINES} lines; 🚀 Quickstart / ✨ Features / 📚 Learn more; "
-                         "License). The overhaul (sq-9jw5) brings them into line.\n\n")
+                         "License) — or be a <=30-line `<!-- internal-stub -->` stub for a "
+                         "`publish=false` crate. This is a HARD gate (--enforce); fix the "
+                         "README(s) below to unblock the merge.\n\n")
                 for ln in summary[:60]:
                     fh.write(ln + "\n")
 
