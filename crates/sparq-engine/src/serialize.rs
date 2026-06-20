@@ -3607,9 +3607,17 @@ ex:bob
                     for (rk, rv) in rev {
                         let pred = ctx.expand(rk, true);
                         for o in as_array(rv) {
+                            // The object's `@id` may be a keyword alias (e.g. `{"id": …}`),
+                            // so resolve it through `ctx.keyword` ([OPUS-4.8] sq-oy1f.10),
+                            // not a hard-coded `@id` key, before falling back to a bare IRI
+                            // string (the `@type:@id`-coerced node-ref form).
                             let oid = o
-                                .get("@id")
-                                .and_then(Value::as_str)
+                                .as_object()
+                                .and_then(|om| {
+                                    om.iter()
+                                        .find(|(k, _)| ctx.keyword(k) == "@id")
+                                        .and_then(|(_, v)| v.as_str())
+                                })
                                 .or_else(|| o.as_str())
                                 .map(|s| id_term(&ctx.expand(s, false)))
                                 .expect("reverse object @id");
@@ -3624,10 +3632,29 @@ ex:bob
                 }
                 let def = ctx.terms.get(k).cloned();
                 let pred = ctx.expand(k, true);
-                // @language container: { lang: value, … }.
+                // @language container: { lang: value, … }. The reserved key `@none`
+                // ([OPUS-4.8] sq-oy1f.9) holds value(s) with NO language tag (a plain
+                // string, or a typed/native value object); those re-expand via the normal
+                // value path so they keep their datatype, not a bogus `@none` language tag.
                 if def.as_ref().and_then(|d| d.container.as_deref()) == Some("@language") {
                     if let Value::Object(langs) = v {
                         for (lang, lv) in langs {
+                            if lang == "@none" {
+                                for o in as_array(lv) {
+                                    let mut aux = String::new();
+                                    let obj = object_to_nt(
+                                        o,
+                                        def.as_ref(),
+                                        ctx,
+                                        graph,
+                                        counter,
+                                        &mut aux,
+                                    );
+                                    let _ = writeln!(out, "{subj} <{pred}> {obj} {graph}.");
+                                    out.push_str(&aux);
+                                }
+                                continue;
+                            }
                             let lex = lv.as_str().expect("language map value");
                             let _ = writeln!(
                                 out,
@@ -4059,5 +4086,128 @@ ex:bob
         let ctx = parse_context_json(r#"{"@vocab":"http://ex/"}"#).unwrap();
         let doc = write_jsonld_compact(&view, &ctx);
         assert!(doc.contains("\"p\":\"v\""), "slice API compaction:\n{doc}");
+    }
+
+    // =======================================================================
+    // [OPUS-4.8] Regression guards for the four JSON-LD 1.1 Compaction
+    // correctness bugs found by the adversarial audit of PR #950 and
+    // differential-tested against the pyld W3C reference processor
+    // (sq-oy1f.8/.9/.10/.11). Each asserts the spec-correct (pyld-verified)
+    // shape AND the losslessness round-trip the original tests lacked.
+    // =======================================================================
+
+    /// [OPUS-4.8] sq-oy1f.8 — an `@list`-container term carrying BOTH a list value and a
+    /// co-located non-list sibling must keep the sibling, not silently drop it. pyld emits
+    /// the list under the container term as a bare array and the sibling under the property
+    /// IRI compacted without the list term (here the full IRI, no `@vocab`). The round-trip
+    /// must preserve every triple.
+    #[test]
+    fn compact_list_container_keeps_colocated_sibling() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:prop ( "a" "b" ) .
+               ex:s ex:prop "c" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let ctx = r#"{"items":{"@id":"http://ex/prop","@container":"@list"}}"#;
+        let doc = compact_doc(&g, ctx);
+        // The list survives under the container term as a bare ordered array.
+        assert!(
+            doc.contains("\"items\":[\"a\",\"b\"]"),
+            "list under @list-container term:\n{doc}"
+        );
+        // The sibling "c" survives under the full property IRI (pyld's choice when no
+        // non-list term / @vocab is available) — it is NOT swallowed by the list term.
+        assert!(
+            doc.contains("\"http://ex/prop\":\"c\""),
+            "co-located sibling preserved under full IRI:\n{doc}"
+        );
+        // Losslessness: the list-cell blank nodes are renamed on re-materialisation, so the
+        // triple count is the round-trip guard (the structural asserts above pin the shape).
+        assert_compact_count_iso(&g, ctx);
+    }
+
+    /// [OPUS-4.8] sq-oy1f.9 — an `@language`-container term must NOT drop a value lacking a
+    /// language tag (a plain string or a typed/numeric literal): per spec it falls under the
+    /// `@none` member (matching pyld), not into oblivion. The round-trip must preserve the
+    /// typed literal exactly.
+    #[test]
+    fn compact_language_container_keeps_nonlang_under_none() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:s ex:labels "Hello"@en .
+               ex:s ex:labels 42 ."#,
+            "turtle",
+        )
+        .unwrap();
+        let ctx = r#"{"labels":{"@id":"http://ex/labels","@container":"@language"}}"#;
+        let doc = compact_doc(&g, ctx);
+        // The language-tagged string keeps its language-map slot.
+        assert!(doc.contains("\"en\":\"Hello\""), "language-map en slot:\n{doc}");
+        // The non-language-tagged integer is preserved under `@none` (pyld-faithful), as the
+        // native scalar — NOT dropped.
+        assert!(
+            doc.contains("\"@none\":42"),
+            "non-lang value preserved under @none:\n{doc}"
+        );
+        // Losslessness: both triples (incl. the xsd:integer 42) survive the round-trip.
+        assert_compact_iso(&g, ctx);
+    }
+
+    /// [OPUS-4.8] sq-oy1f.10 — with two reverse-coverable edges where one object IS a
+    /// subject and the other is a pure object, the bulk strip used to drop the edge to the
+    /// non-subject object. Every edge must survive: the relocated one through node
+    /// inversion, the un-relocated one as a forward property.
+    #[test]
+    fn compact_reverse_keeps_edge_to_nonsubject_object() {
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> .
+               ex:alice ex:knows ex:bob .
+               ex:bob ex:name "Bob" .
+               ex:eve ex:knows ex:frank ."#,
+            "turtle",
+        )
+        .unwrap();
+        // A @reverse term over ex:knows. The eve->frank edge (frank is never a subject) must
+        // not be dropped when the alice->bob edge relocates.
+        let ctx = r#"{"@vocab":"http://ex/","id":"@id","name":"http://ex/name",
+                      "knownBy":{"@reverse":"http://ex/knows"}}"#;
+        let doc = compact_doc(&g, ctx);
+        // eve still carries its forward knows edge to frank (a non-subject object).
+        assert!(
+            doc.contains("http://ex/frank"),
+            "edge to non-subject object frank preserved:\n{doc}"
+        );
+        // Losslessness: all three triples survive (no blank nodes, exact label match).
+        assert_compact_iso(&g, ctx);
+    }
+
+    /// [OPUS-4.8] sq-oy1f.11 — `@vocab`-relative compaction must emit the vocab-relative
+    /// form even when the stripped suffix contains a fragment (`#`) or slash (`/`); the
+    /// prior `!rest.contains([':', '/', '#'])` guard over-restricted it to a full IRI. (The
+    /// `:` case is deliberately still excluded — see `compact_iri` — because it is
+    /// ambiguous with a compact IRI on read-back, so emitting it would be lossy.)
+    #[test]
+    fn compact_vocab_relative_with_fragment() {
+        let g = Graph::load_str(
+            r#"<http://example.org/subject> <http://example.org/ns#value> "test" ."#,
+            "ntriples",
+        )
+        .unwrap();
+        let ctx = r#"{"@vocab":"http://example.org/","other":"http://example.org/other"}"#;
+        let doc = compact_doc(&g, ctx);
+        // The fragment-bearing predicate compacts to the @vocab-relative `ns#value`, not the
+        // full IRI (matching pyld).
+        assert!(
+            doc.contains("\"ns#value\":\"test\""),
+            "vocab-relative fragment form:\n{doc}"
+        );
+        assert!(
+            !doc.contains("\"http://example.org/ns#value\""),
+            "full IRI must not be emitted for the predicate:\n{doc}"
+        );
+        // Lossless (this bug was output-quality only — confirm anyway).
+        assert_compact_iso(&g, ctx);
     }
 }

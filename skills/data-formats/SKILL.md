@@ -274,11 +274,17 @@ terms for predicates and `@type` values), **type coercion** (a term `@type` matc
 datatype collapses the value object to a bare scalar; `@type:@id`/`@vocab` collapse a node
 reference to a bare IRI string), **language coercion** (a term `@language` or the document default
 `@language` drops a matching `@language`), **`@container`** — `@set` (always an array, no
-compact-arrays), `@list` (strips the `{"@list":…}` wrapper to a bare ordered array), `@language`
-(a `{lang: value}` map) and `@index` (a `{index: value}` map), **`@reverse`** terms (forward edges
-whose predicate a reverse term maps relocate into an `@reverse` block on the object node),
-**`@id`/`@type` keyword aliasing** (`{"id":"@id","type":"@type"}`), and **value + node + IRI
-compaction** against the active context. Build the context with `parse_context_json(r#"{…}"#)`
+compact-arrays), `@list` (strips the `{"@list":…}` wrapper to a bare ordered array — but only the
+*pure* `{"@list":…}` value: any co-located non-list sibling stays under the property IRI, never
+dropped, sq-oy1f.8), `@language` (a `{lang: value}` map — a value with **no** language tag falls
+under the reserved `@none` member rather than being dropped, sq-oy1f.9) and `@index` (a
+`{index: value}` map), **`@reverse`** terms (forward edges whose predicate a reverse term maps
+relocate into an `@reverse` block on the object node — an edge whose object is *not* itself a
+subject is kept as a forward property, never stripped, sq-oy1f.10), **`@id`/`@type` keyword
+aliasing** (`{"id":"@id","type":"@type"}`), and **value + node + IRI compaction** against the
+active context (vocab-relative compaction emits the `@vocab`-stripped form even when the suffix
+contains `/` or `#` — only a `:` suffix is kept full, since it is ambiguous with a compact IRI on
+read-back, sq-oy1f.11). Build the context with `parse_context_json(r#"{…}"#)`
 (a string → `JsonLdValue`, returns `None` if not a JSON object) or construct the `JsonLdValue`
 directly; the parsed `ActiveContext` drives compaction. The output is a `{"@context":…,"@graph":[…]}`
 document and the compaction is **lossless** — every coercion is invertible against the same
@@ -286,7 +292,14 @@ document and the compaction is **lossless** — every coercion is invertible aga
 crate's compaction round-trip tests). *Scope:* this is the fromRdf-then-compact (serialise) path —
 sparq always emits RDF, so the input is a `Graph`, not an arbitrary remote document; scoped/typed
 contexts, `@propagate`, remote `@context` fetching, `@import`, `@protected` and JSON-LD **Framing**
-are out of scope (Framing is a separate deferred bead).
+are out of scope (Framing is a separate deferred bead). *Honest interop caveat:* the round-trip
+losslessness is verified against sparq's own JSON-LD→RDF reader. Two output shapes are **not**
+faithfully re-expandable by an external processor (e.g. pyld): a `@reverse`-term document emits the
+edge as both an `@reverse` block **and** a reverse-mapped term (a double inversion that a strict
+processor reads inverted — a tracked follow-up), and a non-string value placed under a language
+map's `@none` member is not a valid language-map value per the spec (language maps hold strings),
+though sparq preserves it. Prefer a non-`@reverse` context, and a non-`@language` container for
+typed values, when the document must be consumed by a third-party JSON-LD library.
 
 ```rust
 use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};

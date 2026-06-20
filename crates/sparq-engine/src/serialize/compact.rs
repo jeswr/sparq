@@ -396,12 +396,23 @@ impl ActiveContext {
                 return t.to_string();
             }
             // 2. `@vocab`-relative: strip the @vocab namespace if no other term shadows it.
+            // [OPUS-4.8] (sq-oy1f.11) The W3C IRI-Compaction algorithm (Step 2.2) requires
+            // ONLY that the stripped suffix is non-empty and is not shadowed by a term
+            // definition; it does NOT exclude suffixes containing '/' or '#'. A prior
+            // `!rest.contains([':', '/', '#'])` guard suppressed the spec-mandated vocab-
+            // relative form for predicates whose local part contains a fragment (e.g.
+            // `<…/ns#value>` against `@vocab: …/` → `ns#value`), emitting the full IRI
+            // instead. Re-expanding `rest` against `@vocab` (concatenation) reproduces the
+            // IRI exactly for '/'/'#' suffixes, so dropping those keeps the round-trip
+            // lossless (verified against pyld). We DELIBERATELY keep the ':' exclusion:
+            // a vocab-relative term whose suffix contains ':' is indistinguishable from a
+            // compact IRI / absolute IRI on read-back (`a:b` re-expands to `<a:b>`, not
+            // `<@vocab>a:b`), so emitting it would be a LOSSY round-trip — this guard is a
+            // losslessness requirement, not the spec over-restriction the bead removes.
             if !reverse {
                 if let Some(v) = &self.vocab {
                     if let Some(rest) = iri.strip_prefix(v.as_str()) {
-                        if !rest.is_empty()
-                            && !rest.contains([':', '/', '#'])
-                            && self.term_def(rest).is_none()
+                        if !rest.is_empty() && !rest.contains(':') && self.term_def(rest).is_none()
                         {
                             return rest.to_string();
                         }
@@ -426,6 +437,55 @@ impl ActiveContext {
             return format!("{}:{}", prefix, suffix);
         }
         // 4. No compaction possible — keep the absolute IRI.
+        iri.to_string()
+    }
+
+    /// [OPUS-4.8] (sq-oy1f.8) Compacts a property `iri` in vocab position while IGNORING any
+    /// term that carries a `@container` mapping — so a co-located non-list sibling of an
+    /// `@list`-container term gets a key the reader will NOT re-interpret as the ordered
+    /// list. It prefers a plain (container-free) term match for the IRI, then falls through
+    /// to the same `@vocab`-relative / prefix / full-IRI choices as [`compact_iri`]. This
+    /// mirrors pyld: with `@vocab` it yields the vocab-relative form, with a plain alternate
+    /// term that term, otherwise the full IRI.
+    fn compact_iri_no_list(&self, iri: &str, reverse: bool) -> String {
+        for (t, def) in &self.terms {
+            if def.iri == iri
+                && def.reverse == reverse
+                && def.container.is_none()
+                && !t.contains(':')
+            {
+                return t.to_string();
+            }
+        }
+        // No container-free exact term: reuse the @vocab-relative / prefix / full-IRI
+        // fallbacks. `compact_iri` only returns a *container-bearing* term via its step-1
+        // exact-match branch, which we have already shown has no container-free hit here;
+        // but a coerced (container) term could still win there, so strip the @vocab/prefix
+        // tail by hand rather than recursing.
+        if !reverse {
+            if let Some(v) = &self.vocab {
+                if let Some(rest) = iri.strip_prefix(v.as_str()) {
+                    if !rest.is_empty() && !rest.contains(':') && self.term_def(rest).is_none() {
+                        return rest.to_string();
+                    }
+                }
+            }
+        }
+        let mut best: Option<(&str, &str)> = None;
+        for (prefix, ns) in &self.prefixes {
+            if let Some(suffix) = iri.strip_prefix(ns.as_str()) {
+                if suffix.is_empty() {
+                    continue;
+                }
+                match best {
+                    Some((_, bns)) if bns.len() >= ns.len() => {}
+                    _ => best = Some((prefix, suffix)),
+                }
+            }
+        }
+        if let Some((prefix, suffix)) = best {
+            return format!("{}:{}", prefix, suffix);
+        }
         iri.to_string()
     }
 
@@ -641,8 +701,18 @@ impl ActiveContext {
                 index.entry(id).or_insert(i);
             }
         }
-        // Collect (object_id, predicate_iri, subject_id) edges to relocate, then apply.
+        // Collect (object_pos, predicate_iri, subject_id) edges to relocate, plus the exact
+        // set of relocated (subject_id, predicate_iri, object_id) edges so we strip ONLY
+        // those — never an edge that stays a forward property.
         let mut moves: Vec<(usize, String, String)> = Vec::new();
+        // [OPUS-4.8] (sq-oy1f.10) Track the precise edges relocated, keyed by
+        // (subject, predicate, object). A forward edge whose object is NOT itself a subject
+        // in this graph (no `index` entry) is never relocated, so it must survive as a
+        // forward property. The prior code bulk-`retain`-stripped EVERY reverse-IRI property
+        // from EVERY subject once any edge moved, dropping the un-relocated edge entirely —
+        // silent data loss that violated losslessness.
+        let mut relocated: std::collections::BTreeSet<(String, String, String)> =
+            std::collections::BTreeSet::new();
         for n in nodes.iter() {
             let Some(subj) = id_of(n) else { continue };
             let Json::Obj(members) = n else { continue };
@@ -654,6 +724,7 @@ impl ActiveContext {
                     if let Some(oid) = o.get("@id").and_then(Json::as_str) {
                         if let Some(&pos) = index.get(oid) {
                             moves.push((pos, key.clone(), subj.clone()));
+                            relocated.insert((subj.clone(), key.clone(), oid.to_string()));
                         }
                     }
                 }
@@ -662,11 +733,37 @@ impl ActiveContext {
         if moves.is_empty() {
             return;
         }
-        // Remove the relocated forward edges from every subject node.
+        // Remove ONLY the relocated edges from each subject node: for a reverse-IRI property,
+        // keep object-values whose (subject, predicate, object) edge was NOT relocated, and
+        // drop the property entirely only when every one of its values moved. Non-node-ref
+        // values (no `@id`) are never relocated, so they are always kept.
         for n in nodes.iter_mut() {
-            if let Json::Obj(members) = n {
-                members.retain(|(k, _)| !reverse_iris.iter().any(|r| r == k));
-            }
+            let Some(subj) = id_of(n) else { continue };
+            let Json::Obj(members) = n else { continue };
+            members.retain_mut(|(k, vals)| {
+                if !reverse_iris.iter().any(|r| r == k) {
+                    return true;
+                }
+                let mut kept: Vec<Json> = flatten(vals)
+                    .into_iter()
+                    .filter(|o| match o.get("@id").and_then(Json::as_str) {
+                        Some(oid) => {
+                            !relocated.contains(&(subj.clone(), k.clone(), oid.to_string()))
+                        }
+                        None => true,
+                    })
+                    .cloned()
+                    .collect();
+                if kept.is_empty() {
+                    return false; // every edge relocated — drop the forward property
+                }
+                *vals = if kept.len() == 1 {
+                    kept.pop().expect("len 1")
+                } else {
+                    Json::Arr(kept)
+                };
+                true
+            });
         }
         // Attach each edge onto the object node's `@reverse` member.
         for (pos, pred, subj) in moves {
@@ -720,27 +817,103 @@ impl ActiveContext {
 
         // @list container: the term implies the values are an ordered list — strip the
         // {"@list": …} wrapper and emit a bare array.
+        //
+        // [OPUS-4.8] (sq-oy1f.8) Unwrap ONLY the pure `@list` value(s) (a `{"@list": …}`
+        // object with no co-located keys). The W3C Compaction Algorithm scopes the
+        // `@list`-container framing to the list value itself; a property carrying BOTH a
+        // list and sibling non-list values (e.g. `ex:s ex:prop ( "a" "b" )` AND
+        // `ex:s ex:prop "c"`) must NOT drop the siblings. A prior
+        // `items.iter().find_map(|v| v.get("@list"))` returned the first `@list` found in
+        // ANY item and silently discarded every other value — silent data loss that
+        // violated losslessness.
+        //
+        // pyld (the W3C reference) keeps the list under the container term as a bare array
+        // and emits the siblings under the property IRI compacted WITHOUT the
+        // `@list`-container term (here: the full / `@vocab`-relative / prefix form, via
+        // `compact_iri_no_list`). When there is exactly one pure-list value and no sibling
+        // we take the bare-array fast path; otherwise we split and emit both homes so the
+        // round-trip stays lossless.
         if container.as_deref() == Some("@list") {
-            if let Some(Json::Arr(elems)) = items.iter().find_map(|v| v.get("@list")) {
-                let compacted: Vec<Json> = elems
-                    .iter()
-                    .map(|e| self.compact_value(Some(&term), e))
-                    .collect();
-                result.set(&term, Json::Arr(compacted));
-                return;
+            let is_pure_list = |v: &Json| -> bool {
+                matches!(v, Json::Obj(m) if m.len() == 1) && v.get("@list").is_some()
+            };
+            let lists: Vec<&Json> = items.iter().filter(|v| is_pure_list(v)).collect();
+            let siblings: Vec<Json> = items.iter().filter(|v| !is_pure_list(v)).cloned().collect();
+            // Emit the list value(s) under the container term as a bare ordered array. A
+            // single list collapses to its bare array; multiple lists (rare on the fromRdf
+            // path) stay as an array of explicit `{"@list": …}` objects so each survives.
+            if !lists.is_empty() {
+                if lists.len() == 1 {
+                    if let Some(Json::Arr(elems)) = lists[0].get("@list") {
+                        let compacted: Vec<Json> = elems
+                            .iter()
+                            .map(|e| self.compact_value(Some(&term), e))
+                            .collect();
+                        result.set(&term, Json::Arr(compacted));
+                    }
+                } else {
+                    let arr: Vec<Json> = lists
+                        .iter()
+                        .filter_map(|v| match v.get("@list") {
+                            Some(Json::Arr(elems)) => {
+                                let inner: Vec<Json> = elems
+                                    .iter()
+                                    .map(|e| self.compact_value(Some(&term), e))
+                                    .collect();
+                                let mut lo = Json::obj();
+                                lo.set(&self.compact_keyword("@list"), Json::Arr(inner));
+                                Some(lo)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    result.set(&term, Json::Arr(arr));
+                }
             }
+            // Emit any co-located non-list values under a NON-list key for this IRI, so they
+            // are never dropped (matches pyld). The key is the IRI compacted while ignoring
+            // any `@list`-container term (here the full / `@vocab`-relative / prefix form);
+            // the siblings are then value/node-compacted with the default "compact arrays"
+            // framing under that key.
+            if !siblings.is_empty() {
+                let sib_key = self.compact_iri_no_list(iri, reverse_only);
+                let value = self.compact_values_default(&sib_key, &siblings, false);
+                result.set(&sib_key, value);
+            }
+            return;
         }
 
         // @language container: { "<lang>": "<value>", … } grouping language-tagged strings.
+        //
+        // [OPUS-4.8] (sq-oy1f.9) A value that lacks a usable `@language` (a plain string
+        // with no tag, or a typed/numeric literal whose `@value` is not a JSON string) must
+        // NOT be dropped: per the W3C Compaction Algorithm a value that does not fit the
+        // language map falls under the `@none` member (matching pyld), it is not discarded.
+        // The prior loop inserted ONLY items with BOTH a string `@value` AND a `@language`,
+        // so `ex:s ex:labels 42` (and any non-tagged string) vanished — silent data loss
+        // violating losslessness. We now route every non-language-tagged value into the
+        // `@none` bucket via `compact_value` (preserving native scalars / typed value
+        // objects), accumulating multiple into an array. The reader re-expands `@none`
+        // entries with no language tag, so the round-trip is lossless.
         if container.as_deref() == Some("@language") {
             let mut map = Json::obj();
+            let mut none_bucket: Vec<Json> = Vec::new();
             for v in &items {
-                if let (Some(val), Some(lang)) = (
+                match (
                     v.get("@value").and_then(Json::as_str),
                     v.get("@language").and_then(Json::as_str),
                 ) {
-                    map.set(lang, Json::Str(val.to_string()));
+                    (Some(val), Some(lang)) => map.set(lang, Json::Str(val.to_string())),
+                    _ => none_bucket.push(self.compact_value(Some(&term), v)),
                 }
+            }
+            if !none_bucket.is_empty() {
+                let none_val = if none_bucket.len() == 1 {
+                    none_bucket.into_iter().next().expect("len 1")
+                } else {
+                    Json::Arr(none_bucket)
+                };
+                map.set("@none", none_val);
             }
             result.set(&term, map);
             return;
@@ -767,13 +940,25 @@ impl ActiveContext {
         }
 
         // Default: compact each value, then apply "compact arrays".
+        let force_array = matches!(container.as_deref(), Some("@set"));
+        let value = self.compact_values_default(&term, &items, force_array);
+        result.set(&term, value);
+    }
+
+    /// Compacts a list of expanded values under `term` with the default ("no special
+    /// container") framing — value/node compaction per item, an explicit `{"@list": …}`
+    /// wrapper for any list value, then "compact arrays" (a single value collapses to a
+    /// scalar unless `force_array`). Shared by the default property path and by the
+    /// sibling path of the `@list`-container split ([OPUS-4.8] sq-oy1f.8) so co-located
+    /// non-list values are emitted, never dropped.
+    fn compact_values_default(&self, term: &str, items: &[Json], force_array: bool) -> Json {
         let mut compacted: Vec<Json> = Vec::with_capacity(items.len());
-        for v in &items {
+        for v in items {
             if let Some(Json::Arr(elems)) = v.get("@list") {
                 // A list value with no @list-container term keeps an explicit {"@list": …}.
                 let inner: Vec<Json> = elems
                     .iter()
-                    .map(|e| self.compact_value(Some(&term), e))
+                    .map(|e| self.compact_value(Some(term), e))
                     .collect();
                 let mut lo = Json::obj();
                 lo.set(&self.compact_keyword("@list"), Json::Arr(inner));
@@ -783,24 +968,22 @@ impl ActiveContext {
             if v.is_obj() && v.get("@id").is_some() && v.get("@value").is_none() {
                 // A node reference: compact_value handles @id/@vocab coercion; otherwise it
                 // is reduced to a node object.
-                let cv = self.compact_value(Some(&term), v);
+                let cv = self.compact_value(Some(term), v);
                 if cv.is_obj() {
                     compacted.push(self.compact_node(&cv));
                 } else {
                     compacted.push(cv);
                 }
             } else {
-                compacted.push(self.compact_value(Some(&term), v));
+                compacted.push(self.compact_value(Some(term), v));
             }
         }
 
-        let force_array = matches!(container.as_deref(), Some("@set"));
-        let value = if compacted.len() == 1 && !force_array {
+        if compacted.len() == 1 && !force_array {
             compacted.into_iter().next().expect("len 1")
         } else {
             Json::Arr(compacted)
-        };
-        result.set(&term, value);
+        }
     }
 }
 
