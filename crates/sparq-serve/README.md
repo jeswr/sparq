@@ -49,6 +49,12 @@ cargo run -p sparq-server -- --format turtle data.ttl
   one new immutable generation; serialisability is by construction.
 - **Sync, runtime-agnostic, library-first** — no HTTP or async-runtime types;
   consumers wrap it. It must never enter `sparq-wasm`'s dependency graph.
+- **Online backup/restore** (opt-in `backup` feature, default OFF) — `backup::export`
+  serialises an already-immutable pinned `Generation` (triples + per-pod epoch vectors +
+  writer seq) to one self-describing artifact **while serving** (no stop-the-world);
+  `backup::import` re-hydrates a `Graph` from one, **fail-closed** on a corrupt/mismatched
+  artifact. Distinct from the offline `sparq-cli save` and the `--persist` WAL. At-rest
+  encryption is out of scope. `sparq-server` mounts `/admin/backup` + `/admin/restore` on it.
 
 ## 📚 Learn more
 

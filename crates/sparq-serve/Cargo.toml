@@ -25,6 +25,24 @@ categories.workspace = true
 # so the rustdoc front page == the crates.io README (parity, like sparq-server).
 readme = "README.md"
 
+[features]
+# [OPUS-4.8] (sq-o5bi) `backup` (default OFF): compiles the ONLINE consistent-snapshot
+# backup/restore surface (`backup::export` / `backup::import` + the `BackupMeta` /
+# `BackupError` types). It exports an already-immutable pinned `Generation` to a single
+# self-describing artifact WHILE SERVING (no stop-the-world) and re-hydrates a `Graph` from
+# one (fail-closed on a corrupt/mismatched artifact). The serving core (the ring + the
+# sequenced writer) is fully buildable WITHOUT it — the module + its one crate-private
+# `PodEpochs::set` reconstruction hook are `#[cfg]`-stripped, so a build without the feature
+# is byte-identical to before. No new dependency: the body uses the N-Quads serialiser already
+# in sparq-engine and the loader already in sparq-core; the integrity digest is a self-contained
+# (non-cryptographic) checksum. At-rest ENCRYPTION of the artifact is a SEPARATE concern, out of
+# scope here. sparq-server's opt-in `backup` feature mounts the HTTP `/admin/backup` +
+# `/admin/restore` routes on top of this.
+default = []
+# Pulls sparq-engine's (dependency-free) `serialize-rdf` so the artifact body can be written
+# as N-Quads via `sparq_engine::serialize::graph_to_nquads`.
+backup = ["sparq-engine/serialize-rdf"]
+
 [dependencies]
 # Lock-free current-generation pointer (§6.4): readers `load()` without blocking
 # the writer. Deliberately a direct dependency of THIS crate only (not

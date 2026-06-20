@@ -38,6 +38,7 @@ use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 
+use arc_swap::ArcSwap;
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 use sparq_serve::{
@@ -515,6 +516,17 @@ pub struct ServerConfig {
     /// ALL updates. `None` (the default) is the historical purely in-memory server — updates are
     /// lost on restart. Set by the binary's `--persist <DIR>` flag / `SPARQ_PERSIST_DIR` env.
     pub persist_dir: Option<std::path::PathBuf>,
+    /// [OPUS-4.8] (sq-o5bi) RESTORE-ON-START artifact path. When `Some(file)`, the binary
+    /// imports the backup artifact at `file` and seeds the in-memory serving store from it
+    /// BEFORE binding (fail-closed: a corrupt/mismatched artifact aborts startup with a clean
+    /// error). This is the bootstrap primitive for horizontal-scaling stage-2 (a fresh replica
+    /// hydrates from a backup) and the base of point-in-time recovery. `None` (the default) is
+    /// the historical behaviour (seed from the data file / empty). Mutually exclusive with an
+    /// existing `--persist` durable store in v1 (the binary refuses the combination). This field
+    /// exists only with the `backup` cargo feature; a build without it compiles no restore code.
+    /// Set by the binary's `--restore <FILE>` flag / `SPARQ_RESTORE` env.
+    #[cfg(feature = "backup")]
+    pub restore: Option<std::path::PathBuf>,
     /// [OPUS-4.8] (sq-d3d8, epic sq-3183) OPT-IN federation discovery descriptors. When
     /// `true`, the server serves a W3C VoID dataset description at `GET /.well-known/void`
     /// and a SPARQL 1.1 Service Description for a `GET /sparql` with no `query` parameter
@@ -666,6 +678,9 @@ impl Default for ServerConfig {
             cors_allow: crate::cors_config::CorsAllowlist::default(),
             // [OPUS-4.8] sq-7cxr: safe default — no persistence dir = in-memory (back-compat).
             persist_dir: None,
+            // [OPUS-4.8] sq-o5bi: no restore-on-start by default (seed from data file / empty).
+            #[cfg(feature = "backup")]
+            restore: None,
             // [OPUS-4.8] sq-d3d8: safe default — federation discovery descriptors OFF even
             // when the feature is compiled in (the operator opts in deliberately).
             #[cfg(feature = "federation-descriptors")]
@@ -891,6 +906,13 @@ impl ServerConfig {
         // directory (the binary's --persist flag overrides it). An empty value is "unset".
         if let Ok(v) = std::env::var("SPARQ_PERSIST_DIR") {
             cfg.persist_dir = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+        }
+        // [OPUS-4.8] sq-o5bi: SPARQ_RESTORE seeds the in-memory store from a backup artifact
+        // at startup (the binary's --restore flag overrides it). An empty value is "unset".
+        // Only present with the `backup` feature.
+        #[cfg(feature = "backup")]
+        if let Ok(v) = std::env::var("SPARQ_RESTORE") {
+            cfg.restore = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
         }
         // [OPUS-4.8] sq-d3d8: SPARQ_FEDERATION_DESCRIPTORS truthy ("1"/"true"/"yes"/"on")
         // serves the VoID + Service-Description discovery endpoints. Off by default. Only
@@ -1803,14 +1825,49 @@ impl ApplyUpdates for ServerApplier {
 /// §4.3/§4.4 pathologies: the 5.4 s/32 s pinned-snapshot writer stall and reclaim-poll
 /// degradation under reader churn. `compact_every` went with it: the writer's per-batch
 /// fork rebuilds a folded base, so overlays never accumulate across batches.
-#[derive(Clone)]
-pub struct AppState {
+/// [OPUS-4.8] (sq-o5bi) The swappable serving core: the generation ring + the single
+/// sequenced writer that publishes onto it. Held behind an [`ArcSwap`] in [`AppState`] so an
+/// online RESTORE (`backup` feature) can atomically install a freshly-built ring+writer
+/// rehydrated from a backup artifact while readers keep loading lock-free — the same
+/// lock-free-read discipline the ring itself uses internally. Without a restore it is built
+/// once at startup and never swapped (the historical behaviour), so the read path pays only
+/// one extra `ArcSwap::load` — the same cost class as the ring's own `current()`.
+struct ServingCore {
     /// The generation ring (Wave A1): lock-free `current()`, bounded retention.
     ring: Arc<GenerationRing<Graph>>,
     /// The single sequenced writer (Wave A2): the sole publisher of generations.
     /// `submit` blocks for the group-commit window + batch application, so update
     /// handlers call it on the blocking pool.
     writer: Arc<Writer<String>>,
+}
+
+/// [OPUS-4.8] (sq-o5bi) Builds the ring's retention config from the server config — the default
+/// concurrency-only retention, or, under the `time-travel` feature, the extended retention so
+/// `?generation=N` has history to serve. Shared by the constructor and the online restore so a
+/// restored ring inherits exactly the same retention posture as the original.
+fn build_ring_config(config: &ServerConfig) -> sparq_serve::RingConfig {
+    #[cfg(not(feature = "time-travel"))]
+    {
+        let _ = config; // the default config ignores the server config
+        sparq_serve::RingConfig::default()
+    }
+    #[cfg(feature = "time-travel")]
+    {
+        sparq_serve::RingConfig {
+            time_travel: Some(sparq_serve::TimeTravelConfig {
+                max_generations: config.time_travel_generations,
+                max_age: config.time_travel_max_age,
+            }),
+            ..sparq_serve::RingConfig::default()
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    /// The swappable serving core (ring + writer). See [`ServingCore`]. Loaded lock-free on
+    /// every read/update; replaced atomically only by an online restore (`backup` feature).
+    core: Arc<ArcSwap<ServingCore>>,
     config: Arc<ServerConfig>,
     /// Committed generation number, advanced after every successful update. Subscription
     /// connections hold a `watch::Receiver` and re-evaluate when it changes; the watch
@@ -1900,16 +1957,7 @@ impl AppState {
 
         // Default ring (concurrency retention only); the opt-in `time-travel`
         // feature extends retention so `?generation=N` has history to serve.
-        #[cfg(not(feature = "time-travel"))]
-        let ring_config = sparq_serve::RingConfig::default();
-        #[cfg(feature = "time-travel")]
-        let ring_config = sparq_serve::RingConfig {
-            time_travel: Some(sparq_serve::TimeTravelConfig {
-                max_generations: config.time_travel_generations,
-                max_age: config.time_travel_max_age,
-            }),
-            ..sparq_serve::RingConfig::default()
-        };
+        let ring_config = build_ring_config(&config);
         let ring = Arc::new(GenerationRing::with_config(seed, ring_config));
         // [OPUS-4.8] sq-4w18: share the config Arc with the writer so its update path
         // enforces the same SERVICE egress allowlist (a federated `INSERT … WHERE` is
@@ -1948,8 +1996,7 @@ impl AppState {
             None => None,
         };
         Ok(Self {
-            ring,
-            writer,
+            core: Arc::new(ArcSwap::from_pointee(ServingCore { ring, writer })),
             config,
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
@@ -1968,7 +2015,16 @@ impl AppState {
     /// by an in-flight update. Hold the returned `Arc` for as long as the response is
     /// being produced; `gen.snapshot()` is the immutable [`Graph`] to evaluate against.
     pub fn current(&self) -> PinnedGen {
-        self.ring.current()
+        self.core.load().ring.current()
+    }
+
+    /// [OPUS-4.8] (sq-o5bi) Pins the current generation for an ONLINE backup export: a
+    /// lock-free `Arc<Generation>` the `backup` route serialises off-thread while the writer
+    /// keeps publishing forward (the snapshot is frozen by its `Arc`, never by a lock). Same
+    /// pin as [`current`](Self::current); a distinct name makes the backup call site explicit.
+    #[cfg(feature = "backup")]
+    pub fn pin_for_backup(&self) -> PinnedGen {
+        self.core.load().ring.current()
     }
 
     /// Pins the retained generation numbered `number` (time travel): `None` when it
@@ -1976,7 +2032,7 @@ impl AppState {
     /// [`sparq_serve::GenerationRing::at`].
     #[cfg(feature = "time-travel")]
     pub fn at(&self, number: u64) -> Option<PinnedGen> {
-        self.ring.at(number)
+        self.core.load().ring.at(number)
     }
 
     /// Applies a SPARQL Update through the sequenced writer: the update joins the
@@ -2000,7 +2056,7 @@ impl AppState {
         // default-graph / dynamically-scoped writes still fall back to the global pod
         // (conservative, never under-invalidating). See [`touched_pods`].
         let touched = touched_pods(sparql);
-        match self.writer.submit(sparql.to_string(), touched) {
+        match self.core.load().writer.submit(sparql.to_string(), touched) {
             Ok(number) => {
                 // Monotonic max: batch-mates share a generation number and may ack in
                 // any order relative to a later batch's submitters.
@@ -2039,12 +2095,63 @@ impl AppState {
     /// stays alive and reads keep being served from the last published snapshot. Blocking: call
     /// it on the blocking pool.
     pub fn compact(&self) -> Result<(), String> {
-        match self.writer.maintain() {
+        match self.core.load().writer.maintain() {
             Ok(res) => res,
             Err(WriteError::Shutdown) => Err("update writer has shut down".to_string()),
             // `maintain` only ever returns `Ok(_)` or `Shutdown` from the writer.
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// [OPUS-4.8] (sq-o5bi) Exports an ONLINE consistent snapshot of the current generation to
+    /// `out` as a single self-describing backup artifact (sparq-serve's Option-A format). It
+    /// pins the current generation lock-free ([`pin_for_backup`](Self::pin_for_backup)) and
+    /// serialises off that immutable `Arc` — so it runs **while serving**, never stopping the
+    /// writer and never blocking readers. CPU/IO-bound (serialises the whole dataset): call it
+    /// on the blocking pool.
+    #[cfg(feature = "backup")]
+    pub fn export_backup<W: std::io::Write>(&self, out: &mut W) -> Result<(), String> {
+        let pin = self.pin_for_backup();
+        sparq_serve::backup_export(&pin, out).map_err(|e| e.to_string())
+    }
+
+    /// [OPUS-4.8] (sq-o5bi) ONLINE RESTORE: rehydrates the serving store from a backup artifact
+    /// and atomically installs the freshly-built ring+writer into the swappable serving core.
+    /// Readers in flight keep serving from the OLD core (its `Arc` survives until they release
+    /// their pin); every read/update issued AFTER the swap loads the new core. **Fail-closed**:
+    /// a corrupt/mismatched artifact returns `Err` and the live store is left UNTOUCHED (the new
+    /// core is built fully — import + ring + writer spawn — before the swap; if import fails
+    /// there is nothing to swap in).
+    ///
+    /// **Scope (v1, honest):** in-memory restore only. A `--persist` durable server is refused
+    /// here (`Err`) — replacing a live WAL-backed durable directory needs its own crash-safe
+    /// swap and is a recorded follow-up; the in-memory restore is the bootstrap primitive the
+    /// horizontal-scaling stage-2 + PITR base want. Blocking (import parses + indexes the whole
+    /// dataset, then spawns a writer thread): call it on the blocking pool.
+    #[cfg(feature = "backup")]
+    pub fn restore_from<R: std::io::Read>(&self, input: R) -> Result<u64, String> {
+        if self.config.persist_dir.is_some() {
+            return Err(
+                "restore is not supported on a --persist (durable) server in v1; \
+                 it replaces the in-memory serving store only"
+                    .to_string(),
+            );
+        }
+        // Build the entire new core BEFORE touching the live one — fail-closed.
+        let (graph, meta) = sparq_serve::backup_import(input).map_err(|e| e.to_string())?;
+        let ring_config = build_ring_config(&self.config);
+        let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
+        let applier = ServerApplier::new(self.config.clone());
+        let writer = Arc::new(Writer::spawn(ring.clone(), applier, WriterConfig::default()));
+        // Atomic swap: subsequent loads see the new ring+writer; the old core's writer thread
+        // joins once its last in-flight reader/Arc drops (Writer's Drop drains + joins).
+        self.core.store(Arc::new(ServingCore { ring, writer }));
+        // Advance the commit watch so active subscriptions re-evaluate against the restored
+        // store. The restored ring restarts at generation 0; the recorded source generation
+        // (the writer seq the artifact was taken at) is returned for operator correlation.
+        let restored_gen = self.current().number();
+        self.commits.send_replace(restored_gen);
+        Ok(meta.generation)
     }
 
     /// A receiver of the committed generation number for a subscription connection (T23).
@@ -2098,6 +2205,16 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/compact", post(admin_compact))
         // Prometheus metrics (T22).
         .route("/metrics", get(metrics_endpoint));
+    // [OPUS-4.8] sq-o5bi: OPT-IN online consistent-snapshot backup/restore admin routes.
+    // Compiled only with the `backup` feature; both are POST-only + WRITE/admin-gated.
+    // `/admin/backup` streams a self-describing artifact of the live store WITHOUT stopping
+    // the world; `/admin/restore` atomically installs a ring+writer rehydrated from one
+    // (fail-closed on a corrupt/mismatched artifact, in-memory server only). See [`admin_backup`]
+    // / [`admin_restore`].
+    #[cfg(feature = "backup")]
+    let routes = routes
+        .route("/admin/backup", post(admin_backup))
+        .route("/admin/restore", post(admin_restore));
     // [OPUS-4.8] sq-d3d8 (epic sq-3183): OPT-IN federation discovery — the VoID dataset
     // description at /.well-known/void. Compiled only with the `federation-descriptors`
     // feature; even then the handler refuses (404) unless the config flag is set. The SD is
@@ -3216,13 +3333,15 @@ fn resolve_pin(
     if number == current.number() {
         return Ok(current);
     }
-    state.ring.at(number).ok_or_else(|| {
+    // [OPUS-4.8] sq-o5bi: the ring is loaded once from the swappable serving core.
+    let core = state.core.load();
+    core.ring.at(number).ok_or_else(|| {
         json_error(
             StatusCode::GONE,
             &format!(
                 "generation {number} has aged out of the retention window (oldest retained: {}, current: {}); \
                  raise --time-travel-generations / --time-travel-max-age to keep more history",
-                state.ring.oldest_retained(),
+                core.ring.oldest_retained(),
                 current.number()
             ),
         )
@@ -3737,6 +3856,109 @@ async fn admin_compact(State(state): State<AppState>, headers: HeaderMap) -> Res
             StatusCode::INTERNAL_SERVER_ERROR,
             "compaction worker panicked",
         ),
+    }
+}
+
+/// [OPUS-4.8] (sq-o5bi) `POST /admin/backup` — ONLINE consistent snapshot backup of the live
+/// serving store. Returns a single self-describing backup artifact (sparq-serve's Option-A
+/// format: a textual header recording the generation/writer-seq + per-pod epoch vectors + the
+/// triple count + a body digest, then the full dataset as N-Quads) as
+/// `application/octet-stream`.
+///
+/// - **Online — no stop-the-world.** The export pins the CURRENT generation lock-free and
+///   serialises off that immutable `Arc` on the blocking pool, so readers never block the
+///   writer and the writer never blocks readers throughout.
+/// - **Gated** behind the WRITE auth token (the existing admin gate) — it reads the WHOLE
+///   dataset, so it is treated as a privileged admin operation, not an open read.
+/// - POST-only (the route is registered POST-only; other verbs get a 405).
+///
+/// Distinct from the offline `sparq-cli save` (stop-the-world, index rebuild) and from the
+/// `--persist` per-graph WAL. At-rest ENCRYPTION of the artifact is a separate concern, out
+/// of scope.
+#[cfg(feature = "backup")]
+async fn admin_backup(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
+        return resp;
+    }
+    let st = state.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let mut buf = Vec::new();
+        st.export_backup(&mut buf).map(|()| buf)
+    });
+    match task.await {
+        Ok(Ok(bytes)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, bytes.len())
+            .header(
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"sparq-backup.spqb\"",
+            )
+            .body(axum::body::Body::from(bytes))
+            .unwrap(),
+        // A serialisation/IO failure: the live store is untouched (export only reads).
+        // [OPUS-4.8] (sq-kfel) the error may embed internals; withhold from the body.
+        Ok(Err(e)) => sanitized_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backup",
+            "backup export failed",
+            &e,
+        ),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "backup worker panicked"),
+    }
+}
+
+/// [OPUS-4.8] (sq-o5bi) `POST /admin/restore` — ONLINE restore of the serving store from a
+/// backup artifact POSTed in the request body. On success it atomically installs a freshly
+/// rehydrated ring+writer into the swappable serving core; readers in flight keep serving from
+/// the old core until they release their pin, and every read/update after the swap sees the
+/// restored store.
+///
+/// - **Fail-closed.** A corrupt/mismatched/non-artifact body is rejected (400) and the live
+///   store is left UNTOUCHED — the new core is built fully (import + ring + writer) before the
+///   swap, so a failed import swaps nothing in.
+/// - **Gated** behind the WRITE auth token (the existing admin gate); POST-only.
+/// - **In-memory only (v1).** A `--persist` durable server is refused (409) — replacing a live
+///   WAL-backed durable directory needs its own crash-safe swap (a recorded follow-up). The
+///   in-memory restore is the bootstrap primitive for horizontal-scaling stage-2 + PITR.
+#[cfg(feature = "backup")]
+async fn admin_restore(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
+        return resp;
+    }
+    if state.config().persist_dir.is_some() {
+        return json_error(
+            StatusCode::CONFLICT,
+            "restore is not supported on a --persist (durable) server in v1; \
+             it replaces the in-memory serving store only",
+        );
+    }
+    let st = state.clone();
+    let task = tokio::task::spawn_blocking(move || st.restore_from(&body[..]));
+    match task.await {
+        Ok(Ok(source_generation)) => text_response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            format!(
+                "restore complete (artifact taken at generation {})\n",
+                source_generation
+            ),
+            false,
+        ),
+        // A fail-closed import error (corrupt / mismatched / non-artifact): the live store is
+        // unchanged. It is a client-supplied-body problem, so a 400. The detail is withheld
+        // from the body (it may quote artifact internals); the operator gets it in the log.
+        Ok(Err(e)) => sanitized_error(
+            StatusCode::BAD_REQUEST,
+            "restore",
+            "restore rejected (corrupt or incompatible backup artifact)",
+            &e,
+        ),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "restore worker panicked"),
     }
 }
 
