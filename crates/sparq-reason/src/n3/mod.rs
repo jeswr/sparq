@@ -3515,4 +3515,217 @@ mod tests {
         assert!(has(&d, &s, "http://ex/alice", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Adult"), "alice is adult");
         assert!(!has(&d, &s, "http://ex/bob", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Adult"), "bob is NOT adult");
     }
+
+    // [OPUS-4.8] sq-fodw5 (sq-qcnn): correctness tests for the dark backward-chaining
+    // (`<=`) projection + standardize-apart paths and the IEEE INF/NaN math fallback.
+    // Every assertion is an EYE-semantics entailment derived by hand, not a line-exercise.
+
+    #[test]
+    fn backward_rule_binds_goal_to_list() {
+        // A backward (`<=`) rule whose proof binds a GOAL variable to a LIST value, driving
+        // the deep-resolve projection in `backward_prove` (walk the chain, then substitute
+        // inside list structure) and `rename_vars`/`unify_walked` over `Term::List`.
+        // :alice has a children list; the backward rule projects that list onto the query
+        // goal's variable, and a forward query rule consumes it.
+        let src = r#"
+            @prefix : <http://ex/> .
+            :alice :childrenList ( :kid1 :kid2 ) .
+            { ?p :family ?kids } <= { ?p :childrenList ?kids } .
+            { :alice :family ?ks } => { :alice :hasFamily ?ks . :marker a :Proven } .
+        "#;
+        let (d, s) = closure(src);
+        // The backward proof must have bound ?ks to the ( :kid1 :kid2 ) list and projected it,
+        // so the forward query rule fires and asserts the marker.
+        assert!(
+            has(&d, &s, "http://ex/marker", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Proven"),
+            "backward rule projects a list-valued binding onto the goal variable"
+        );
+    }
+
+    #[test]
+    fn backward_chain_three_steps_within_depth() {
+        // A 3-link backward chain (transitive ancestor) proven goal-directed: each recursive
+        // link consumes one of the REMAINING depth budget (`depth - 1`), exercising the
+        // depth-decrement path distinctly from the cyclic-cutoff test. Finite, well within
+        // BW_DEPTH.
+        let src = r#"
+            @prefix : <http://ex/> .
+            :a :parent :b . :b :parent :c . :c :parent :d .
+            { ?x :ancestor ?y } <= { ?x :parent ?y } .
+            { ?x :ancestor ?y } <= { ?x :parent ?z . ?z :ancestor ?y } .
+            { :a :ancestor :d } => { :a :reaches :d } .
+        "#;
+        let (d, s) = closure(src);
+        // a→b→c→d: a is an ancestor of d only via THREE recursive backward applications.
+        assert!(
+            has(&d, &s, "http://ex/a", "http://ex/reaches", "http://ex/d"),
+            "transitive ancestor proven through a 3-deep backward recursion"
+        );
+    }
+
+    #[test]
+    fn backward_premise_reads_fact_store_list() {
+        // The backward rule's premise contains a builtin (list:member) over a list that lives
+        // in the FACT STORE (asserted as rdf:first/rest data, reached through a bound var) —
+        // driving `fact_list`. The goal binds ?item from the data collection.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            :bag :holds ( :apple :pear :plum ) .
+            { :bag :contains ?item } <= { :bag :holds ?l . ?l list:member ?item } .
+            { :bag :contains :pear } => { :pear a :Found } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(
+            has(&d, &s, "http://ex/pear", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Found"),
+            "backward premise iterates a fact-store list to prove membership"
+        );
+    }
+
+    #[test]
+    fn math_quotient_double_division_propagates_inf_nan() {
+        // cwm math/inf.n3 test5: under DOUBLE arithmetic, division by zero does NOT fail — it
+        // yields IEEE ±INF (and 0.0/0.0 → NaN), which PROPAGATE as xsd:double literals. The
+        // exact-arithmetic path (`b == 0 && !any_double`) would instead fail the premise; the
+        // e-notation operands force `any_double`, taking the IEEE branch.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :seed :p :o .
+            { ( 1.0e0 0.0e0 ) math:quotient ?pos } => { :s :posInf ?pos } .
+            { ( -1.0e0 0.0e0 ) math:quotient ?neg } => { :s :negInf ?neg } .
+            { ( 0.0e0 0.0e0 ) math:quotient ?nan } => { :s :nan ?nan } .
+        "#;
+        let (mut d, s) = closure(src);
+        let dbl = "http://www.w3.org/2001/XMLSchema#double";
+        let st = id(&d, "http://ex/s");
+        let pinf = d.intern_lit("INF", dbl, None);
+        let ninf = d.intern_lit("-INF", dbl, None);
+        let nan = d.intern_lit("NaN", dbl, None);
+        assert!(s.contains(&[st, id(&d, "http://ex/posInf"), pinf]), "1.0/0.0 → INF (double)");
+        assert!(s.contains(&[st, id(&d, "http://ex/negInf"), ninf]), "-1.0/0.0 → -INF (double)");
+        assert!(s.contains(&[st, id(&d, "http://ex/nan"), nan]), "0.0/0.0 → NaN propagates (not premise failure)");
+    }
+
+    #[test]
+    fn math_inf_input_propagates_through_sum() {
+        // An INF-valued (xsd:double) input propagates through arithmetic without tripping the
+        // NaN domain-error guard: INF + 1 = INF (the guard only fires when a NaN result arises
+        // from FINITE inputs). Pins the `!nums.iter().any(|x| x.is_nan() || x.is_infinite())`
+        // exemption that lets INF/NaN inputs flow through.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :seed :p :o .
+            { ( "INF"^^<http://www.w3.org/2001/XMLSchema#double> 1.0e0 ) math:sum ?x }
+                => { :s :infPlus ?x } .
+        "#;
+        let (mut d, s) = closure(src);
+        let dbl = "http://www.w3.org/2001/XMLSchema#double";
+        let inf = d.intern_lit("INF", dbl, None);
+        assert!(
+            s.contains(&[id(&d, "http://ex/s"), id(&d, "http://ex/infPlus"), inf]),
+            "INF + 1 = INF (infinite input propagates, no domain-error)"
+        );
+    }
+
+    #[test]
+    fn math_finite_nan_result_fails_premise_not_propagated() {
+        // The COMPLEMENT of propagation: a NaN arising from FINITE inputs (acos 2, outside
+        // [-1,1]) is a domain error — the premise FAILS rather than emitting a NaN literal.
+        // This pins the guard's positive case against the INF/NaN-exemption above.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :seed :p :o .
+            { 2.0e0 math:acos ?x } => { :s :bad ?x } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(
+            !s.iter().any(|[a, p, _]| *a == id(&d, "http://ex/s") && *p == id(&d, "http://ex/bad")),
+            "acos 2 (finite NaN) fails the premise — no NaN literal emitted"
+        );
+    }
+
+    #[test]
+    fn includes_virtual_first_rest_over_list() {
+        // [OPUS-4.8] sq-fodw5: log:includes containment where the OBJECT pattern probes
+        // `rdf:first`/`rdf:rest` of a LIST VALUE that lives in the scope (cwm builtins.n3
+        // test2/4 shape). The list structure is virtual — there are no rdf:first/rest triples
+        // in the scope — so `containment_search` must synthesise the head/tail from the
+        // first-class list term. Drives the `Term::List` virtual-first/rest branch.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+            :seed :p :o .
+            { { :s :list ( :a :b :c ) }
+              log:includes
+              { :s :list ?l . ?l rdf:first ?h . ?l rdf:rest ?t . ?t rdf:first ?h2 } }
+            => { ?h a :Head . ?h2 a :Second } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        // head = first member :a ; rest's head = :b — virtual list walk inside containment.
+        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Head"), "virtual rdf:first = list head");
+        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/Second"), "virtual rdf:rest then rdf:first = 2nd");
+    }
+
+    #[test]
+    fn includes_virtual_first_deferred_binding() {
+        // Same virtual-first/rest containment, but the list-bearing triple is written BEFORE
+        // the triple that binds the list subject — so `containment_search` must DEFER the
+        // first/rest pattern (rotate it behind the binding triple) and retry once `?l` is
+        // bound. Drives the `Term::Var if defers_left > 0` rotation branch.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+            :seed :p :o .
+            { { :s :list ( :x :y ) }
+              log:includes
+              { ?l rdf:first ?h . :s :list ?l } }
+            => { ?h a :DeferredHead } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(
+            has(&d, &s, "http://ex/x", ty, "http://ex/DeferredHead"),
+            "first/rest pattern deferred until the list subject binds, then resolved"
+        );
+    }
+
+    #[test]
+    fn forward_rule_existential_conclusion_skolemized_per_firing() {
+        // [OPUS-4.8] sq-fodw5: a forward (`=>`) rule whose CONCLUSION introduces a blank node
+        // (`[ … ]`) is an EXISTENTIAL — each distinct firing must mint a FRESH skolem, never
+        // share one node across firings (cwm/EYE existential-introduction semantics). Drives
+        // the per-firing skolemization block (the `__sk{n}_` rename keyed on the firing's
+        // distinct binding). Two :Person individuals ⇒ two distinct :Parent blanks.
+        let src = r#"
+            @prefix : <http://ex/> .
+            :alice a :Person . :bob a :Person .
+            { ?p a :Person } => { ?p :hasParent [ a :Parent ] } .
+        "#;
+        let mut dict = Dict::new();
+        let triples = reason_n3(&mut dict, src).unwrap();
+        let hp = dict.intern_iri("http://ex/hasParent");
+        let ty = dict.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+        let parent = dict.intern_iri("http://ex/Parent");
+        let alice = dict.intern_iri("http://ex/alice");
+        let bob = dict.intern_iri("http://ex/bob");
+
+        // alice and bob each get a :hasParent edge to a node typed :Parent.
+        let parent_of = |who: Id| -> Option<Id> {
+            triples.iter().find(|[s, p, _]| *s == who && *p == hp).map(|[_, _, o]| *o)
+        };
+        let (ap, bp) = (parent_of(alice).expect("alice has a parent"), parent_of(bob).expect("bob has a parent"));
+        assert!(triples.contains(&[ap, ty, parent]), "alice's parent is typed :Parent");
+        assert!(triples.contains(&[bp, ty, parent]), "bob's parent is typed :Parent");
+        // The load-bearing existential invariant: the two firings mint DISTINCT blanks.
+        assert_ne!(ap, bp, "each rule firing mints a fresh existential, not a shared node");
+        // Exactly two :Parent existentials exist (no spurious extra / no collapse to one).
+        let n_parents = triples.iter().filter(|[_, p, o]| *p == ty && *o == parent).count();
+        assert_eq!(n_parents, 2, "one fresh :Parent per firing — two firings, two parents");
+    }
 }
