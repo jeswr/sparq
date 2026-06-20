@@ -13,6 +13,33 @@ pub mod cs;
 mod cs_gate;
 mod dataset;
 mod exec;
+// [OPUS-4.8] (sq-p6p6) Opt-in LOCAL adaptive divergence-triggered re-planner — the port of
+// sparq-fedplan's `adaptive-replan` to the local greedy BGP join loop in `exec.rs`. NON-DEFAULT
+// `adaptive-replan-local` feature; when off, zero adaptive code compiles, the static planner is
+// byte-identical, and the only new dependency (the pure `sparq-replan-policy` policy core) is not
+// pulled in. The result multiset is identical to the static plan regardless of re-order.
+#[cfg(feature = "adaptive-replan-local")]
+mod adaptive;
+// [OPUS-4.8] (sq-p6p6) Benchmark-only shim: run a closure with the local adaptive re-planner
+// forced OFF (the STATIC baseline) from the SAME feature-on build, so the indicative
+// micro-benchmark (`tests/adaptive_replan_bench.rs`) can time adaptive-vs-static apples-to-apples.
+// Gated on the opt-in feature; NOT part of the query API (the static-plan path is never reachable
+// through `query`/`ask`/…). Production always runs adaptive.
+#[cfg(feature = "adaptive-replan-local")]
+pub mod adaptive_bench {
+    /// Run `f` with the local adaptive re-planner forced OFF on this thread (the static-plan
+    /// baseline), then restore. For benchmarking the adaptive win against the static plan from one
+    /// feature-on binary. Affects ONLY join ORDER — never results.
+    pub fn with_static_plan<R>(f: impl FnOnce() -> R) -> R {
+        crate::adaptive::with_static_plan(f)
+    }
+
+    /// Run `f`, returning its result and how many adaptive re-plan SWITCHES it adopted — so the
+    /// benchmark can confirm the fixture actually exercised the re-planner (a non-vacuous run).
+    pub fn count_switches<R>(f: impl FnOnce() -> R) -> (R, usize) {
+        crate::adaptive::count_switches(f)
+    }
+}
 mod explain;
 pub mod json;
 // SPARQL 1.1 federated query (SERVICE). NON-DEFAULT `service` feature; pulls a

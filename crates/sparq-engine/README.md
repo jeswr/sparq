@@ -42,21 +42,14 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   see [`docs/extension-functions.md`](../../docs/extension-functions.md).
 - **Custom aggregates + window functions** *(opt-in `window-functions` feature, OFF by default)* —
   register a named user aggregate (`CustomAggregateRegistry`) callable from a real SPARQL `GROUP BY`,
-  and a window-function surface (`ROW_NUMBER` / `RANK` / `DENSE_RANK`, the offset/positional
-  `LAG`/`LEAD`/`NTILE` (sq-hqhc), + the windowed aggregates `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, with
-  `PARTITION BY` + `ORDER BY` and an optional `ROWS`/`RANGE` frame)
-  available two ways: a programmatic pass (`window::apply_window` over a `QueryResult`) and an inline
-  `OVER(…)` query syntax (`query_over` — e.g. `(SUM(?x) OVER (ORDER BY ?y ROWS BETWEEN UNBOUNDED
-  PRECEDING AND CURRENT ROW) AS ?run)` in the SELECT, and a reusable `WINDOW w AS (…)` clause with
-  `OVER w`). **Window functions are a NON-STANDARD extension**
-  — SPARQL has no W3C-REC `OVER` syntax. The inline form is a *source rewrite* in front of the engine
-  recognised ONLY on `query_over` (it does NOT change the vendored parser), so the standard
-  `query`/`ask`/… surface stays exactly SPARQL 1.1 and conformance is unaffected. Inline covers the three
-  ranking functions, the five windowed aggregates, `ROWS`/`RANGE` frames (sq-imj8), the offset/positional
-  `LAG`/`LEAD`/`NTILE` and a named `WINDOW` clause (sq-hqhc); `DISTINCT`/computed-expression function
-  arguments, numeric `RANGE` offsets, and a computed-expression `PARTITION BY` are inline-deferred
-  (use the programmatic API). When the feature is off, zero window/aggregate-registry code compiles and
-  the default build is byte-identical (no new deps).
+  plus a window surface: `ROW_NUMBER`/`RANK`/`DENSE_RANK`, the offset `LAG`/`LEAD`/`NTILE`, and the
+  windowed aggregates `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` with `PARTITION BY`/`ORDER BY` and optional
+  `ROWS`/`RANGE` frames — both as a programmatic pass (`window::apply_window`) and an inline `OVER(…)`
+  syntax (`query_over`, incl. a reusable `WINDOW w AS (…)` clause). **NON-STANDARD** (SPARQL has no
+  W3C-REC `OVER`): the inline form is a source rewrite recognised ONLY on `query_over`, so the standard
+  `query`/`ask`/… surface stays exactly SPARQL 1.1 and conformance is unaffected (`DISTINCT`/computed
+  function args, numeric `RANGE` offsets, computed `PARTITION BY` are programmatic-only). When off, zero
+  window/aggregate-registry code compiles and the default build is byte-identical (no new deps).
 - **Materialised-view / query-result cache** *(opt-in `result-cache` feature, OFF by default)* —
   a bounded, version-aware LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed
   by `(parsed query algebra, caller graph-version)`, so an endpoint that re-serves the same read
@@ -92,17 +85,24 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   (`graph_to_turtle_pretty` / `graph_to_trig_pretty`, or `write_turtle_pretty` with
   `PrettyOptions { indent, abbreviate }`): subject grouping, predicate-object lists (`;`), object
   lists (`,`), `a` for `rdf:type`, used-only `@prefix` abbreviation, and *emission-order-independent*
-  output (sorted, so the same triple set always renders to the same bytes). It matches the
-  output shape of the site's `prettyTurtle` reshaper — the long-term engine home for that
-  TS formatter — and is round-trip-correct (re-parses to the same triple set). The JSON-LD
+  output (sorted, so the same triple set always renders to the same bytes), round-trip-correct
+  (re-parses to the same triple set) and matching the site's `prettyTurtle` reshaper. The JSON-LD
   writers have a matching **pretty** (indented) variant (`graph_to_jsonld_pretty` /
-  `write_jsonld_pretty` / the `*_with` wrappers taking `JsonLdPrettyOptions { indent }`): a
-  whitespace-only pass over the minified writer — same deterministic ordering, round-trips
-  identically, dependency-free (a hand-written JSON re-indenter, no `serde_json`). The N-Triples
+  `write_jsonld_pretty` / `*_with` wrappers taking `JsonLdPrettyOptions { indent }`): a whitespace-only
+  pass over the minified writer — deterministic, round-trips identically, dependency-free. The N-Triples
   writer (`triples_to_ntriples`) is always on. When the feature is off, zero serializer code
   compiles, the default build is byte-identical, and **no new dependencies** are added (the
   writers reuse the existing `oxrdf` term model). See
   [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
+- **Local adaptive re-planning** *(opt-in `adaptive-replan-local`, OFF by default)* — the local port
+  of `sparq-fedplan`'s `adaptive-replan`. The greedy BGP loop materialises every join, so the TRUE
+  running cardinality is known for free; on a divergence past the shared `ReplanPolicy::divergence_factor`
+  the not-yet-joined patterns are re-ordered with the observed selectivities (same cost model, adopted
+  only past the `improvement_margin` hysteresis). **Result-equivalent to the static plan** (the
+  `replan_result_equals_static` oracle). **HONEST STATUS:** correctness-complete, but the work-box
+  micro-benchmark shows **no perf win** (slight regression when it fires, ~1.0× when inert) — the local
+  planner's exact estimates leave little to gain; pending a canonical-host result / redesign. When off,
+  zero adaptive code compiles and the default build is byte-identical.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more

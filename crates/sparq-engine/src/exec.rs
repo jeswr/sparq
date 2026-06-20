@@ -3975,9 +3975,53 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     let mut var_ndv: FxHashMap<Variable, f64> = FxHashMap::default();
     record_pattern_ndv(graph, &prepared, seed, cur_card, &mut var_ndv, &cs_ctx);
 
+    // [OPUS-4.8] sq-p6p6 — local adaptive divergence-triggered re-planner state (opt-in
+    // `adaptive-replan-local`, off by default). `replan` holds the SHARED divergence/hysteresis
+    // policy + the re-plan budget; `corrected_ndv` carries the OBSERVED per-variable distinct
+    // counts (read off the materialised result of a stage whose true cardinality diverged from
+    // the estimate) forward to the NEXT pick. When the feature is off, both bindings — and every
+    // `#[cfg]`-gated call site below — are compiled out, so this loop is the byte-identical
+    // static planner.
+    #[cfg(feature = "adaptive-replan-local")]
+    let mut replan = crate::adaptive::LocalReplan::new();
+    #[cfg(feature = "adaptive-replan-local")]
+    let mut corrected_ndv: Option<FxHashMap<Variable, f64>> = None;
+
     for _ in 1..prepared.len() {
         // Pick the connected candidate with the smallest estimated output.
-        let (i, new_card, _connected) = goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
+        let (i, new_card, _connected) = {
+            // The estimate-path pick (the static plan's choice).
+            let (bi, bcard, bconn) = goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
+            // [OPUS-4.8] sq-p6p6: if the PREVIOUS stage's true cardinality diverged, re-pick with
+            // the OBSERVED selectivities (`corrected_ndv`) substituted over the estimates and adopt
+            // the corrected pick over the estimate-path pick only when it wins by the hysteresis
+            // margin (anti-thrash). Both picks score with the SAME `goo_pick` cost model — only the
+            // selectivity inputs differ — so adoption is a pure reorder of the not-yet-joined
+            // patterns (result-equivalent; proved by `replan_result_equals_static`).
+            #[cfg(feature = "adaptive-replan-local")]
+            let chosen = match corrected_ndv.take() {
+                Some(obs_ndv) if crate::adaptive::enabled() => {
+                    // Overlay the observed ndvs onto the estimate map (observed wins where present),
+                    // then re-derive the pick. The overlay is a throwaway scratch map — the running
+                    // `var_ndv` keeps its accumulated estimate model untouched.
+                    let mut merged = var_ndv.clone();
+                    for (v, n) in &obs_ndv {
+                        merged.insert(v.clone(), *n);
+                    }
+                    let (ci, ccard, cconn) = goo_pick(graph, &prepared, &done, &merged, cur_card, &cs_ctx);
+                    if ci != bi && replan.should_adopt(bcard, ccard) {
+                        crate::adaptive::note_switch();
+                        (ci, ccard, cconn)
+                    } else {
+                        (bi, bcard, bconn)
+                    }
+                }
+                _ => (bi, bcard, bconn),
+            };
+            #[cfg(not(feature = "adaptive-replan-local"))]
+            let chosen = (bi, bcard, bconn);
+            chosen
+        };
         cur_card = new_card;
         done[i] = true;
         cs_ctx.note_done(i);
@@ -3998,6 +4042,12 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
             let pp = var_pos(i, jv).unwrap();
             result = bind_join(graph, result, &prepared[i].id_pat, &prepared[i].pos_vars, rk, pp, pfilter(i));
             record_pattern_ndv(graph, &prepared, i, cur_card, &mut var_ndv, &cs_ctx);
+            // [OPUS-4.8] sq-p6p6: stage boundary — the materialised running cardinality is now
+            // known; arm the next pick's re-plan if it diverged from the prediction `new_card`.
+            #[cfg(feature = "adaptive-replan-local")]
+            {
+                corrected_ndv = maybe_arm_replan(&mut replan, new_card, &result, &done);
+            }
             if result.rows.is_empty() {
                 break;
             }
@@ -4021,12 +4071,111 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
             result = cross_product(result, rhs);
         }
         record_pattern_ndv(graph, &prepared, i, cur_card, &mut var_ndv, &cs_ctx);
+        // [OPUS-4.8] sq-p6p6: stage boundary — re-plan trigger (see the bind-join branch).
+        #[cfg(feature = "adaptive-replan-local")]
+        {
+            corrected_ndv = maybe_arm_replan(&mut replan, new_card, &result, &done);
+        }
 
         if result.rows.is_empty() {
             break;
         }
     }
     Ok(result)
+}
+
+/// [OPUS-4.8] sq-p6p6. The stage-boundary re-plan TRIGGER for the local adaptive re-planner.
+///
+/// Called after a join has fully MATERIALISED, when the executor knows both the planner's
+/// *estimated* output `predicted` and the *true* output (`result.rows.len()`). If they diverge
+/// past the shared [`crate::adaptive::LocalReplan`] policy factor — and the re-plan budget
+/// permits, and ≥ 2 patterns remain unjoined — it reads the OBSERVED per-variable distinct
+/// counts off the materialised result and returns them, so the NEXT pick re-derives the
+/// remaining order against reality (the correction). Returns `None` when the estimate held (or
+/// re-planning is exhausted / pointless), in which case the next pick uses the static estimates
+/// unchanged. Affects ONLY the order of the not-yet-joined patterns — never the result multiset.
+#[cfg(feature = "adaptive-replan-local")]
+fn maybe_arm_replan(
+    replan: &mut crate::adaptive::LocalReplan,
+    predicted: f64,
+    result: &Bindings,
+    done: &[bool],
+) -> Option<FxHashMap<Variable, f64>> {
+    if !crate::adaptive::enabled() {
+        return None;
+    }
+    let observed = result.rows.len() as f64;
+    // Trigger: did the planner's running-cardinality estimate diverge from reality?
+    if !replan.diverges(predicted, observed) {
+        return None;
+    }
+    let remaining = done.iter().filter(|d| !**d).count();
+    // Budget + ≥2-remaining gate (fewer is nothing to reorder).
+    if !replan.try_consume_budget(remaining) {
+        return None;
+    }
+    // The correction: the TRUE per-variable selectivities, read off the materialised result.
+    Some(crate::adaptive::observed_var_ndv(&result.vars, &result.rows))
+}
+
+// ---- [OPUS-4.8] sq-p6p6 local-adaptive-replan differential oracle support -------
+//
+// In-crate helpers so `crate::adaptive`'s `replan_result_equals_static` oracle can drive the
+// STATIC plan and the ADAPTIVE plan from the SAME feature-on build and assert their result
+// multisets are identical (the load-bearing gate). Both go through the real `eval_bgp_binary`
+// via the public `crate::query`; the static run forces the re-planner off with the adaptive
+// module's thread-local, the adaptive run leaves it on (and counts the switches it adopts).
+// Compiled ONLY for the test build with the feature on — zero production surface.
+#[cfg(all(test, feature = "adaptive-replan-local"))]
+pub(crate) mod adaptive_oracle {
+    use crate::QueryResult;
+    use oxrdf::Term;
+    use sparq_core::Graph;
+
+    /// One result row rendered to a stable key (column order preserved) for multiset
+    /// comparison — `None` (unbound) renders as a sentinel that no term produces.
+    fn row_key(vars: &[oxrdf::Variable], row: &[Option<Term>]) -> Vec<String> {
+        let mut parts: Vec<String> = vars
+            .iter()
+            .zip(row.iter())
+            .map(|(v, cell)| match cell {
+                Some(t) => format!("{}={}", v.as_str(), t),
+                None => format!("{}=\u{1}UNBOUND", v.as_str()),
+            })
+            .collect();
+        parts.sort();
+        parts
+    }
+
+    /// `true` iff the two query results are the SAME row MULTISET (variable set + per-row
+    /// bindings + multiplicities), independent of row order.
+    pub(crate) fn multiset_rows_eq(a: &QueryResult, b: &QueryResult) -> bool {
+        let mut av: Vec<&str> = a.vars.iter().map(|v| v.as_str()).collect();
+        let mut bv: Vec<&str> = b.vars.iter().map(|v| v.as_str()).collect();
+        av.sort_unstable();
+        bv.sort_unstable();
+        if av != bv {
+            return false;
+        }
+        let mut ak: Vec<Vec<String>> = a.rows.iter().map(|r| row_key(&a.vars, r)).collect();
+        let mut bk: Vec<Vec<String>> = b.rows.iter().map(|r| row_key(&b.vars, r)).collect();
+        ak.sort();
+        bk.sort();
+        ak == bk
+    }
+
+    /// Run `sparql` over `g` with the adaptive re-planner forced OFF — the STATIC baseline.
+    pub(crate) fn eval_bgp_static(g: &Graph, sparql: &str) -> QueryResult {
+        crate::adaptive::with_static_plan(|| crate::query(g, sparql).expect("static query"))
+    }
+
+    /// Run `sparql` over `g` with the adaptive re-planner ON, returning the result and how many
+    /// re-plan switches it adopted (so the oracle can assert the fixture is non-vacuous).
+    pub(crate) fn bgp_binary_with_replan(g: &Graph, sparql: &str) -> (QueryResult, bool) {
+        let (res, switches) =
+            crate::adaptive::count_switches(|| crate::query(g, sparql).expect("adaptive query"));
+        (res, switches > 0)
+    }
 }
 
 // ---- Shared GOO planning decisions (executor + T22 EXPLAIN dry run) -----------

@@ -444,6 +444,24 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   }
   # Ok::<(), String>(())
   ```
+- **Local adaptive re-planning** is the non-default `adaptive-replan-local` cargo feature (bead
+  `sq-p6p6`) — the local port of `sparq-fedplan`'s `adaptive-replan`. The greedy BGP join loop
+  materialises every intermediate join, so the TRUE running cardinality is known for free at each
+  stage boundary; when it diverges from the planner's independence-model estimate past the **shared**
+  `sparq_replan_policy::ReplanPolicy::divergence_factor` (default 4×), the not-yet-joined patterns are
+  re-ordered with the observed selectivities (re-using the same `goo_pick` cost model — no new model),
+  adopting the corrected order only when it wins by the `improvement_margin` hysteresis (anti-thrash).
+  **The output multiset is identical to the static plan regardless of re-order** (BGP join is
+  order-independent — verified by the `replan_result_equals_static` oracle). There is NO new public
+  query API — `query`/`ask`/… are unchanged whether the feature is on or off; when off, zero adaptive
+  code compiles and the default build is byte-identical. **HONEST STATUS (do not rely on it for
+  speed):** correctness-complete, but the work-box micro-benchmark shows **no perf win** — a slight
+  regression when the re-plan fires (the reorder flips two multiplicative arms without reducing total
+  materialised work) and ~1.0× / no degradation when inert. The local planner's exact per-pattern
+  estimates leave little for a divergence-triggered reorder to gain; the benchmark gate is **UNMET**
+  pending a canonical-host result or a redesign. The divergence + hysteresis policy is the shared,
+  dependency-free `sparq-replan-policy` crate so the local and federated re-planners cannot diverge on
+  the rule (the federated crate keeps its own richer policy with the extra latency knobs).
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`
   powers MD5/SHA*; `parallel` enables rayon scan/join/sort/aggregate. The **wasm** crate
   (`sparq-wasm`) disables defaults, so on `wasm32-unknown-unknown` REGEX/hash builtins and

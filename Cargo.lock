@@ -3384,6 +3384,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-introspect",
+ "sparq-replan-policy",
  "ureq",
  "uuid",
 ]
@@ -3573,6 +3574,10 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
+
+[[package]]
+name = "sparq-replan-policy"
+version = "0.1.0"
 
 [[package]]
 name = "sparq-rsp"

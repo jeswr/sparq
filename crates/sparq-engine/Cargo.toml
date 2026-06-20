@@ -113,8 +113,26 @@ result-cache = []
 # `update_in_place_capturing` write-set capture; oxrdf/rustc-hash are already direct deps)
 # and contains no `unsafe`.
 txn = []
+# [OPUS-4.8] (sq-p6p6) LOCAL adaptive divergence-triggered re-planner — the port of
+# sparq-fedplan's `adaptive-replan` to the local greedy BGP join loop in `exec.rs`. The local
+# path fully MATERIALISES every intermediate join, so the TRUE running cardinality (and the
+# observed per-variable distinct-value count) is known for free at each stage boundary; when it
+# diverges from the planner's independence-model estimate past the shared
+# `ReplanPolicy::divergence_factor`, the not-yet-joined patterns are re-picked with the observed
+# selectivities substituted in, adopting the corrected pick only when it wins by the
+# `improvement_margin` hysteresis band. The divergence + hysteresis POLICY is the shared
+# `sparq-replan-policy` crate, so this and the federated re-planner cannot diverge on the rule.
+# BGP join is order-independent, so re-ordering the unexecuted suffix yields the IDENTICAL
+# result multiset (the load-bearing `replan_result_equals_static` oracle). OPT-IN and OFF by
+# default: when off, zero adaptive code compiles, the static planner is byte-identical, and the
+# pure (dependency-free, no-`unsafe`) `sparq-replan-policy` core is not pulled in.
+adaptive-replan-local = ["dep:sparq-replan-policy"]
 
 [dependencies]
+# [OPUS-4.8] (sq-p6p6) The shared divergence/hysteresis re-plan policy core — pulled in ONLY by
+# the opt-in `adaptive-replan-local` feature (off by default). Pure f64 arithmetic, zero deps,
+# no `unsafe`; the federated re-planner shares the same policy core so the two cannot diverge.
+sparq-replan-policy = { path = "../sparq-replan-policy", optional = true }
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }

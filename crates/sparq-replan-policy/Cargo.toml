@@ -1,0 +1,27 @@
+# [OPUS-4.8] sq-p6p6 — the SHARED divergence/hysteresis re-plan POLICY core, factored
+# out so the federated (sparq-fedplan `adaptive-replan`) and the LOCAL (sparq-engine
+# `adaptive-replan-local`) adaptive re-planners CANNOT DIVERGE on the trigger + adoption
+# rule. Pure f64 arithmetic — no RDF/term/IO/dep surface at all, no `unsafe`. The two
+# executors are otherwise unrelated (the fed path plans over served source DESCRIPTORS;
+# the local path materialises real joins), so ONLY this small policy core is shared.
+[package]
+name = "sparq-replan-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Shared divergence-trigger + hysteresis adoption policy for sparq's adaptive query re-planners (federated + local) — pure, dependency-free, no I/O"
+publish = false
+
+# OPT-IN at the dependency level. NOTHING in the workspace's default build depends on
+# this crate: it is pulled in ONLY by `sparq-fedplan`'s `adaptive-replan` feature and
+# `sparq-engine`'s `adaptive-replan-local` feature, both OFF by default. `sparq-core`'s
+# default build and the wasm artifact are byte-identical with or without it. Zero deps,
+# zero `unsafe`. A `publish = false` pure-policy crate (no runtime data path) is
+# bench-exempt under gate G1.
+
+[dependencies]
