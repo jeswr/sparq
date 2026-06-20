@@ -515,3 +515,47 @@ fn consistent_ontology_reports_nothing() {
         reports
     );
 }
+
+#[test]
+fn max_qualified_cardinality_nonzero_with_a_value_is_consistent() {
+    // A maxQualifiedCardinality of 1 (NOT 0) on a typed value is satisfiable with a single
+    // value — it must NOT clash. This pins the value==0 GUARD on the qualified-cardinality
+    // collection: only the 0-valued restrictions are clash candidates; a >0 restriction with
+    // one conforming value is consistent. (If the `p == maxQualifiedCardinality && value==0`
+    // guard degraded to an OR, this exact graph would spuriously clash.)
+    let mut d = Dict::new();
+    let (p, c, u, y, r) = (
+        ex(&mut d, "parent"),
+        ex(&mut d, "Mother"),
+        ex(&mut d, "u"),
+        ex(&mut d, "mom"),
+        ex(&mut d, "RQ"),
+    );
+    let (t, on_prop, mqc, on_class) = (
+        ty(&mut d),
+        owl(&mut d, "onProperty"),
+        owl(&mut d, "maxQualifiedCardinality"),
+        owl(&mut d, "onClass"),
+    );
+    let one = d.intern_lit(
+        "1",
+        "http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+        None,
+    );
+    let ok = clashes(
+        &mut d,
+        vec![
+            [r, on_prop, p],
+            [r, mqc, one],
+            [r, on_class, c],
+            [u, t, r],
+            [u, p, y],
+            [y, t, c],
+        ],
+    );
+    assert!(
+        ok.is_empty(),
+        "maxQualifiedCardinality 1 with a single conforming value is consistent; got {:?}",
+        ok
+    );
+}
