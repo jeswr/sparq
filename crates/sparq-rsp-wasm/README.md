@@ -65,6 +65,12 @@ const tail = JSON.parse(q.flush()); // end-of-stream: close the remaining open w
 
   Each closed window is `{"start":S,"end":E,"results":<SPARQL-1.1-JSON>}`: half-open
   `[S,E)` bounds plus the R2S-filtered SELECT table in standard SPARQL 1.1 JSON.
+- **Numeric args are plain JS `number`s.** `range` / `step` / `maxDelay` / `ts` (and the
+  `lateDropped()` return) are JS `number`s, *not* `BigInt`s — pass `60`, not `60n`. Each is
+  a whole logical-time value in `[0, 2^53-1]` (`Number.MAX_SAFE_INTEGER`, the exact-integer
+  range of a `number`); a fractional / negative / out-of-range value is a clean error, not a
+  thrown coercion. (They map to the native crate's `u64` ticks; the boundary takes `number`
+  so the demo can pass ordinary JS numbers.)
 - **Thin wrapper, native semantics.** Window semantics — boundary inclusivity,
   sliding overlap, lateness, empty-window reporting, R2S multiset diffs — are exactly
   [`sparq-rsp`'s](../sparq-rsp/README.md), pinned by that crate's tests; this bundle

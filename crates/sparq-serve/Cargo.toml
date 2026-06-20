@@ -42,6 +42,13 @@ default = []
 # Pulls sparq-engine's (dependency-free) `serialize-rdf` so the artifact body can be written
 # as N-Quads via `sparq_engine::serialize::graph_to_nquads`.
 backup = ["sparq-engine/serialize-rdf"]
+# [OPUS-4.8] sq-jluc: the response-bytes result cache (research/concurrent-serving.md
+# §5 row 2 + §6.3) — OPT-IN and OFF by default. It is a LEAN feature: it adds NO new
+# dependency (the cache key/map reuse the in-tree `rustc-hash` and `std::hash`; the
+# values are `Arc<[u8]>` response bodies) and pulls in neither HTTP nor async machinery
+# (library-first §6.1: the cache stores opaque bytes + a caller-derived visibility-scope
+# key and never depends on `sparq-solid`). The default build carries zero cache code.
+result-cache = []
 
 [dependencies]
 # Lock-free current-generation pointer (§6.4): readers `load()` without blocking

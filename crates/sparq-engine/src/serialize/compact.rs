@@ -1,0 +1,1189 @@
+//! [OPUS-4.8] (sq-ixc3.4) Full **W3C JSON-LD 1.1 Compaction** — hand-rolled, dependency-free.
+//!
+//! The existing JSON-LD writer in the parent module (`super`) emits the **expanded**
+//! / **flattened** / *prefix-`@context`* forms (sq-ixc3.5/#900, sq-l5kr/#923). That
+//! prefix-only "compacted" form abbreviates IRIs to `prefix:local` CURIEs but does
+//! **not** implement the actual W3C Compaction Algorithm: it has no term definitions,
+//! no `@vocab`, no datatype/language/container coercion, no `@reverse`, no
+//! `@id`/`@type` keyword aliasing, and no value/node compaction against a
+//! caller-supplied `@context`.
+//!
+//! This module adds that — the **full JSON-LD 1.1 Compaction Algorithm**
+//! (<https://www.w3.org/TR/json-ld11-api/#compaction-algorithms>) applied to an RDF
+//! graph plus a caller `@context`. It stays inside the **dependency-free**
+//! `serialize-rdf` feature: it pulls in **zero** new crates (it defines its own tiny
+//! [`Json`] value type rather than `serde_json`, exactly like the rest of the writer).
+//!
+//! ## Pipeline (faithful to the spec)
+//!
+//! 1. **fromRdf** ([`graph_to_expanded`]) — build an *expanded* JSON-LD model (a `Vec<Json>`
+//!    of node objects) from the graph's triples. This reuses the parent writer's RDF→JSON-LD
+//!    mapping semantics (`@value`/`@type`/`@language`, `@list` collapse, native scalar
+//!    coercion) but materialises a [`Json`] AST instead of bytes, because the Compaction
+//!    Algorithm operates over the expanded *document*, not over raw triples.
+//! 2. **Context processing** ([`ActiveContext::parse`]) — turn the caller `@context` JSON
+//!    into an *active context*: term definitions (IRI mapping + `@type`/`@language`/
+//!    `@container`/`@reverse` coercions), `@vocab`, `@base`, default `@language`, and prefix
+//!    mappings. Keyword aliases (`@id`/`@type`/etc.) are recognised.
+//! 3. **Compaction** ([`ActiveContext::compact`]) — the recursive Compaction Algorithm:
+//!    IRI compaction against the active context (term → compact-IRI/`@vocab`-relative →
+//!    full IRI), value compaction (drop `@value`/`@type`/`@language` made redundant by a
+//!    term's coercion), node compaction, `@reverse`, and `@container` framing
+//!    (`@set`/`@list`/`@language`/`@index`).
+//! 4. **Serialize** ([`Json::write`]) — emit the compacted document as canonical JSON.
+//!
+//! ## Honest scope
+//!
+//! This targets the **serialise / fromRdf-then-compact** path — sparq emits RDF, so the
+//! input is always a graph, never an arbitrary remote JSON-LD document. The full
+//! *general* compaction (compacting an already-expanded document with `@reverse` already
+//! present, scoped/typed contexts, `@propagate`, remote `@context` fetching, `@import`,
+//! `@protected`) is **not** needed here and is deliberately out of scope: the input
+//! expanded model is the one *we* produce, so its shape is known. Term definitions,
+//! `@vocab`, type/language/`@container` (`@set`/`@list`/`@language`/`@index`), `@reverse`,
+//! keyword aliasing, value compaction, node compaction and IRI compaction are all
+//! covered. See the crate README + `skills/data-formats/SKILL.md` for the boundary.
+
+use super::{
+    coerce_native, detect_lists, json_escape, ListInfo, NamedGraph, RDF_LANG_STRING, RDF_TYPE, XSD,
+};
+use oxrdf::{NamedOrBlankNode, Term, Triple};
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+// ===========================================================================
+// A tiny, dependency-free JSON value model.
+//
+// `serialize-rdf` must stay free of new deps (serde_json is dev-only), so the
+// Compaction Algorithm — which is naturally expressed over a JSON AST — gets its
+// own minimal value type. Object members preserve insertion order (the JSON-LD
+// writer is order-deterministic), so we key on a `Vec<(String, Json)>` rather
+// than a hash map.
+// ===========================================================================
+
+/// A minimal JSON value used as the working representation for compaction. Object
+/// members preserve insertion order so the emitted document is deterministic.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Json {
+    /// A JSON string.
+    Str(String),
+    /// A pre-rendered JSON scalar token (`true`, `false`, a number). Stored verbatim so
+    /// the writer's lossless native-coercion text is preserved byte-for-byte.
+    Raw(String),
+    /// A JSON array.
+    Arr(Vec<Json>),
+    /// A JSON object, members in insertion order.
+    Obj(Vec<(String, Json)>),
+}
+
+impl Default for Json {
+    /// The default JSON value is an empty object — the natural "no context" value for
+    /// the active context's raw `@context` (`ActiveContext::raw_context`).
+    fn default() -> Json {
+        Json::Obj(Vec::new())
+    }
+}
+
+impl Json {
+    fn obj() -> Json {
+        Json::Obj(Vec::new())
+    }
+
+    /// Inserts/overwrites a member, preserving first-insertion position for an existing key.
+    fn set(&mut self, key: &str, val: Json) {
+        if let Json::Obj(members) = self {
+            if let Some(slot) = members.iter_mut().find(|(k, _)| k == key) {
+                slot.1 = val;
+            } else {
+                members.push((key.to_string(), val));
+            }
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Obj(members) => members.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Json::Str(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    fn is_obj(&self) -> bool {
+        matches!(self, Json::Obj(_))
+    }
+
+    /// Serialises this value as canonical minified JSON into `out`.
+    pub fn write(&self, out: &mut String) {
+        match self {
+            Json::Str(s) => {
+                out.push('"');
+                json_escape(s, out);
+                out.push('"');
+            }
+            Json::Raw(r) => out.push_str(r),
+            Json::Arr(items) => {
+                out.push('[');
+                for (i, it) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    it.write(out);
+                }
+                out.push(']');
+            }
+            Json::Obj(members) => {
+                out.push('{');
+                for (i, (k, v)) in members.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push('"');
+                    json_escape(k, out);
+                    out.push_str("\":");
+                    v.write(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Active context — the processed caller `@context`.
+// ===========================================================================
+
+/// One term definition from the active context (a member of the caller `@context` whose
+/// value is an IRI string or an expanded `{ "@id": …, "@type": …, … }` object).
+#[derive(Clone, Debug, Default)]
+struct TermDefinition {
+    /// The IRI this term maps to (`@id`). For a keyword alias this is the keyword
+    /// (e.g. `"@type"`); for a normal term it is an absolute IRI.
+    iri: String,
+    /// `@type` coercion: an absolute IRI, or the keywords `"@id"` / `"@vocab"` / `"@json"`.
+    type_mapping: Option<String>,
+    /// `@language` coercion (may be the empty string to *clear* a default `@language`,
+    /// distinct from "no mapping").
+    language: Option<String>,
+    /// `@container` mapping: one of `@set` / `@list` / `@language` / `@index` (the subset
+    /// this writer supports). A single container covers the cases sparq emits.
+    container: Option<String>,
+    /// True when the term definition is a `@reverse` property.
+    reverse: bool,
+}
+
+/// The processed caller `@context`: the inverse of context-processing applied to a
+/// JSON-LD `@context`, used to drive compaction. Built by [`ActiveContext::parse`].
+#[derive(Clone, Debug, Default)]
+pub struct ActiveContext {
+    /// term string → its definition (insertion order preserved for deterministic IRI choice).
+    terms: Vec<(String, TermDefinition)>,
+    /// prefix → namespace IRI (a term whose definition is a bare IRI ending in a gen-delim,
+    /// usable as a compact-IRI prefix). Tracked separately for the IRI-compaction fallback.
+    prefixes: Vec<(String, String)>,
+    /// `@vocab` IRI, against which vocab-relative terms (predicates, `@type` values) compact.
+    vocab: Option<String>,
+    /// `@base` IRI (document base) — reserved; sparq emits absolute `@id`s so this is unused
+    /// for output but parsed for completeness.
+    base: Option<String>,
+    /// Default `@language` applied to plain string values lacking a per-term `@language`.
+    default_language: Option<String>,
+    /// The verbatim `@context` JSON to echo back into the compacted document's `@context`.
+    raw_context: Json,
+}
+
+/// Recognised JSON-LD keywords (used to tell a keyword/alias from a normal term/IRI).
+fn is_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "@base"
+            | "@container"
+            | "@context"
+            | "@direction"
+            | "@graph"
+            | "@id"
+            | "@import"
+            | "@included"
+            | "@index"
+            | "@json"
+            | "@language"
+            | "@list"
+            | "@nest"
+            | "@none"
+            | "@prefix"
+            | "@propagate"
+            | "@protected"
+            | "@reverse"
+            | "@set"
+            | "@type"
+            | "@value"
+            | "@version"
+            | "@vocab"
+    )
+}
+
+/// True when `iri`'s last character is an RDF gen-delim (`:` `/` `?` `#` `[` `]` `@`) — the
+/// shape of a namespace IRI that may serve as a compact-IRI prefix.
+fn ends_in_gen_delim(iri: &str) -> bool {
+    matches!(
+        iri.chars().last(),
+        Some(':' | '/' | '?' | '#' | '[' | ']' | '@')
+    )
+}
+
+impl ActiveContext {
+    /// Processes a caller `@context` JSON value into an active context. The input is the
+    /// value of the document's `@context` member (an object); a string/array form (remote
+    /// reference) is **not** resolved (sparq supplies the context inline). Unknown members
+    /// are ignored. This is the subset of Context Processing the Compaction path needs.
+    pub fn parse(context: &Json) -> ActiveContext {
+        let mut ctx = ActiveContext {
+            raw_context: context.clone(),
+            ..ActiveContext::default()
+        };
+        let Json::Obj(members) = context else {
+            return ctx;
+        };
+        // First pass: the context-level keywords (@vocab/@base/@language), so that term
+        // definitions referencing @vocab resolve correctly.
+        for (k, v) in members {
+            match k.as_str() {
+                "@vocab" => ctx.vocab = v.as_str().map(str::to_string),
+                "@base" => ctx.base = v.as_str().map(str::to_string),
+                "@language" => ctx.default_language = v.as_str().map(str::to_string),
+                _ => {}
+            }
+        }
+        // Second pass: term definitions.
+        for (term, v) in members {
+            if term.starts_with('@') {
+                continue; // a context keyword, already handled
+            }
+            if let Some(def) = ctx.parse_term_definition(term, v) {
+                // A bare-IRI term ending in a gen-delim doubles as a compact-IRI prefix.
+                if def.type_mapping.is_none()
+                    && def.language.is_none()
+                    && def.container.is_none()
+                    && !def.reverse
+                    && ends_in_gen_delim(&def.iri)
+                    && !is_keyword(&def.iri)
+                {
+                    ctx.prefixes.push((term.clone(), def.iri.clone()));
+                }
+                ctx.terms.push((term.clone(), def));
+            }
+        }
+        ctx
+    }
+
+    /// Builds a single term definition. `value` is either an IRI string or an expanded
+    /// `{ "@id"/"@reverse": …, "@type": …, "@language": …, "@container": … }` object.
+    fn parse_term_definition(&self, term: &str, value: &Json) -> Option<TermDefinition> {
+        let mut def = TermDefinition::default();
+        match value {
+            Json::Str(iri) => {
+                if is_keyword(iri) {
+                    // A keyword alias: a term mapping to a keyword (e.g. {"id": "@id"}).
+                    def.iri = iri.clone();
+                    return Some(def);
+                }
+                def.iri = self.expand_context_iri(iri);
+            }
+            Json::Obj(_) => {
+                if let Some(rev) = value.get("@reverse").and_then(Json::as_str) {
+                    def.iri = self.expand_context_iri(rev);
+                    def.reverse = true;
+                } else if let Some(id) = value.get("@id").and_then(Json::as_str) {
+                    if is_keyword(id) {
+                        def.iri = id.to_string();
+                    } else {
+                        def.iri = self.expand_context_iri(id);
+                    }
+                } else if let Some(vocab) = &self.vocab {
+                    // No explicit @id: the term IRI is @vocab + term (vocab-relative).
+                    def.iri = format!("{}{}", vocab, term);
+                } else {
+                    def.iri = term.to_string();
+                }
+                if let Some(t) = value.get("@type").and_then(Json::as_str) {
+                    def.type_mapping = Some(match t {
+                        "@id" | "@vocab" | "@json" | "@none" => t.to_string(),
+                        other => self.expand_context_iri(other),
+                    });
+                }
+                if let Some(l) = value.get("@language") {
+                    def.language = match l {
+                        Json::Str(s) => Some(s.clone()),
+                        _ => Some(String::new()), // null clears the default language
+                    };
+                }
+                if let Some(c) = value.get("@container").and_then(Json::as_str) {
+                    def.container = Some(c.to_string());
+                }
+            }
+            _ => {
+                // null term definition (removes a term) — empty IRI never matches.
+                def.iri = String::new();
+            }
+        }
+        Some(def)
+    }
+
+    /// Expands an IRI *within context processing*: a compact IRI `prefix:local` against an
+    /// already-defined prefix term, a `@vocab`-relative bare term, or an absolute IRI. Used
+    /// only while building the context.
+    fn expand_context_iri(&self, value: &str) -> String {
+        if is_keyword(value) || value.starts_with("_:") {
+            return value.to_string();
+        }
+        if let Some((prefix, suffix)) = value.split_once(':') {
+            if suffix.starts_with("//") {
+                return value.to_string(); // already absolute (scheme://…)
+            }
+            // Compact IRI against a previously-defined term whose IRI we know.
+            for (t, def) in &self.terms {
+                if t == prefix {
+                    return format!("{}{}", def.iri, suffix);
+                }
+            }
+            return value.to_string();
+        }
+        // No colon: a vocab-relative term if @vocab is set, else verbatim.
+        match &self.vocab {
+            Some(v) => format!("{}{}", v, value),
+            None => value.to_string(),
+        }
+    }
+
+    /// Looks up a term definition by exact term string.
+    fn term_def(&self, term: &str) -> Option<&TermDefinition> {
+        self.terms.iter().find(|(t, _)| t == term).map(|(_, d)| d)
+    }
+
+    // -----------------------------------------------------------------------
+    // IRI Compaction (https://www.w3.org/TR/json-ld11-api/#iri-compaction).
+    // -----------------------------------------------------------------------
+
+    /// Compacts an absolute `iri` against the active context. `vocab` is true when the IRI
+    /// is in *vocabulary-relative* position (a predicate or a `@type` value), enabling term
+    /// and `@vocab` compaction; false for `@id` values (only compact-IRI applies).
+    /// `reverse` selects only `@reverse` term definitions.
+    fn compact_iri(&self, iri: &str, vocab: bool, reverse: bool) -> String {
+        if vocab {
+            // 1. An exact term whose IRI mapping equals the IRI (respecting reverse-ness),
+            //    preferring a "plain" term (no coercion) so the inverse mapping is
+            //    unambiguous; otherwise any matching term. Skip prefix-shaped terms here.
+            let mut plain: Option<&str> = None;
+            let mut coerced: Option<&str> = None;
+            for (t, def) in &self.terms {
+                if def.iri == iri && def.reverse == reverse && !t.contains(':') {
+                    let is_plain = def.type_mapping.is_none()
+                        && def.language.is_none()
+                        && def.container.is_none();
+                    if is_plain && plain.is_none() {
+                        plain = Some(t);
+                    } else if coerced.is_none() {
+                        coerced = Some(t);
+                    }
+                }
+            }
+            if let Some(t) = plain.or(coerced) {
+                return t.to_string();
+            }
+            // 2. `@vocab`-relative: strip the @vocab namespace if no other term shadows it.
+            if !reverse {
+                if let Some(v) = &self.vocab {
+                    if let Some(rest) = iri.strip_prefix(v.as_str()) {
+                        if !rest.is_empty()
+                            && !rest.contains([':', '/', '#'])
+                            && self.term_def(rest).is_none()
+                        {
+                            return rest.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        // 3. Compact IRI `prefix:suffix` against the longest matching prefix namespace.
+        let mut best: Option<(&str, &str)> = None;
+        for (prefix, ns) in &self.prefixes {
+            if let Some(suffix) = iri.strip_prefix(ns.as_str()) {
+                if suffix.is_empty() {
+                    continue;
+                }
+                match best {
+                    Some((_, bns)) if bns.len() >= ns.len() => {}
+                    _ => best = Some((prefix, suffix)),
+                }
+            }
+        }
+        if let Some((prefix, suffix)) = best {
+            return format!("{}:{}", prefix, suffix);
+        }
+        // 4. No compaction possible — keep the absolute IRI.
+        iri.to_string()
+    }
+
+    /// The compacted spelling of a keyword (e.g. `@type`), honouring a keyword *alias*
+    /// term in the context (`{"type": "@type"}` → `"type"`). Falls back to the keyword.
+    fn compact_keyword(&self, keyword: &str) -> String {
+        for (t, def) in &self.terms {
+            if def.iri == keyword {
+                return t.clone();
+            }
+        }
+        keyword.to_string()
+    }
+
+    // -----------------------------------------------------------------------
+    // Value Compaction (https://www.w3.org/TR/json-ld11-api/#value-compaction).
+    // -----------------------------------------------------------------------
+
+    /// Compacts a JSON-LD *expanded value* (`{"@value": …}` or a node reference
+    /// `{"@id": …}`) under the coercion rules of `active_property`'s term definition.
+    /// Returns the most compact form the term's `@type`/`@language` mapping permits (a bare
+    /// scalar/string when the value's type/language is fully implied), else a reduced value
+    /// object.
+    fn compact_value(&self, active_property: Option<&str>, value: &Json) -> Json {
+        let def = active_property.and_then(|p| self.term_def(p));
+
+        // A *pure* node reference `{"@id": iri}` with @type:@id / @type:@vocab coercion
+        // compacts to the bare (compacted) IRI string.
+        if let Some(id) = value.get("@id").and_then(Json::as_str) {
+            let lone_id = matches!(value, Json::Obj(m) if m.len() == 1);
+            if lone_id {
+                if let Some(tm) = def.and_then(|d| d.type_mapping.as_deref()) {
+                    if tm == "@id" {
+                        return Json::Str(self.compact_iri(id, false, false));
+                    }
+                    if tm == "@vocab" {
+                        return Json::Str(self.compact_iri(id, true, false));
+                    }
+                }
+            }
+            // Otherwise leave the node object for node compaction to reduce.
+            return value.clone();
+        }
+
+        let Some(val) = value.get("@value") else {
+            return value.clone();
+        };
+        let v_type = value.get("@type").and_then(Json::as_str);
+        let v_lang = value.get("@language").and_then(Json::as_str);
+
+        let type_mapping = def.and_then(|d| d.type_mapping.as_deref());
+        let lang_mapping = def.and_then(|d| d.language.as_deref());
+        let default_lang = self.default_language.as_deref();
+
+        // @type:@json — keep the value verbatim (sparq does not emit @json, but be safe).
+        if type_mapping == Some("@json") {
+            let mut o = Json::obj();
+            o.set(&self.compact_keyword("@value"), val.clone());
+            o.set(&self.compact_keyword("@type"), Json::Str("@json".to_string()));
+            return o;
+        }
+
+        // The value's datatype matches the term's @type coercion → the @type is redundant.
+        if let (Some(vt), Some(tm)) = (v_type, type_mapping) {
+            if vt == tm {
+                return val.clone();
+            }
+        }
+        // A language-tagged value whose language matches the term's @language (or the
+        // default @language when the term has no override) → the @language is redundant.
+        if let Some(vl) = v_lang {
+            let effective = lang_mapping.or(default_lang);
+            if effective == Some(vl) {
+                return val.clone();
+            }
+        }
+        // A plain string (no @type, no @language): bare iff no default @language is in
+        // force, or the term explicitly clears it (@language: null / "").
+        if v_type.is_none() && v_lang.is_none() {
+            let term_clears_lang = lang_mapping == Some("");
+            if default_lang.is_none() || term_clears_lang {
+                return val.clone();
+            }
+        }
+
+        // Otherwise emit a reduced value object with compacted keyword keys + a compacted
+        // @type IRI (if the @type is not coerced away).
+        let mut o = Json::obj();
+        o.set(&self.compact_keyword("@value"), val.clone());
+        if let Some(vt) = v_type {
+            if Some(vt) != type_mapping {
+                o.set(
+                    &self.compact_keyword("@type"),
+                    Json::Str(self.compact_iri(vt, true, false)),
+                );
+            }
+        }
+        if let Some(vl) = v_lang {
+            let effective = lang_mapping.or(default_lang);
+            if effective != Some(vl) {
+                o.set(&self.compact_keyword("@language"), Json::Str(vl.to_string()));
+            }
+        }
+        o
+    }
+
+    // -----------------------------------------------------------------------
+    // Node / document Compaction.
+    // -----------------------------------------------------------------------
+
+    /// Compacts an *expanded element* (array of node objects / a single node object / a
+    /// value object) into its compacted JSON-LD form. This is the recursive Compaction
+    /// Algorithm specialised to the document shapes [`graph_to_expanded`] produces.
+    fn compact(&self, element: &Json) -> Json {
+        match element {
+            Json::Arr(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    out.push(self.compact(it));
+                }
+                Json::Arr(out)
+            }
+            Json::Obj(_) => self.compact_node(element),
+            other => other.clone(),
+        }
+    }
+
+    /// Compacts one node object (or value object / `@list`) and its members.
+    fn compact_node(&self, node: &Json) -> Json {
+        // A top-level value object (rare for a node array) is handled by compact_value.
+        if node.get("@value").is_some() {
+            return self.compact_value(None, node);
+        }
+        let mut result = Json::obj();
+
+        // @id keyword.
+        if let Some(id) = node.get("@id").and_then(Json::as_str) {
+            result.set(
+                &self.compact_keyword("@id"),
+                Json::Str(self.compact_iri(id, false, false)),
+            );
+        }
+        // @type keyword (array of IRIs → compacted, vocab-relative). A single type compacts
+        // to a scalar; multiple to an array (the spec's "compact arrays" rule).
+        if let Some(Json::Arr(types)) = node.get("@type") {
+            let compacted: Vec<Json> = types
+                .iter()
+                .filter_map(Json::as_str)
+                .map(|t| Json::Str(self.compact_iri(t, true, false)))
+                .collect();
+            let value = if compacted.len() == 1 {
+                compacted.into_iter().next().expect("len 1")
+            } else {
+                Json::Arr(compacted)
+            };
+            result.set(&self.compact_keyword("@type"), value);
+        }
+        // @graph member (named-graph sub-object or the top-level dataset graph).
+        if let Some(graph) = node.get("@graph") {
+            result.set(&self.compact_keyword("@graph"), self.compact(graph));
+        }
+
+        // Ordinary forward properties.
+        if let Json::Obj(members) = node {
+            for (key, vals) in members {
+                if key.starts_with('@') {
+                    continue; // keywords handled above (incl. @reverse below)
+                }
+                self.compact_property(key, vals, false, &mut result);
+            }
+        }
+        // An `@reverse` member (placed by `relocate_reverse` on the object node): each member
+        // key is a forward-predicate IRI; compact it via the matching `@reverse` term and its
+        // object array via value/node compaction.
+        if let Some(Json::Obj(rev_members)) = node.get("@reverse") {
+            let mut rev = Json::obj();
+            for (iri, vals) in rev_members {
+                self.compact_property(iri, vals, true, &mut rev);
+            }
+            if let Json::Obj(m) = &rev {
+                if !m.is_empty() {
+                    result.set(&self.compact_keyword("@reverse"), rev);
+                }
+            }
+        }
+        result
+    }
+
+    /// Relocates forward edges into `@reverse` blocks per the active context's `@reverse`
+    /// term definitions. For every node `S` with a property `P` (where `P` is the IRI of a
+    /// `@reverse` term) whose objects are node references, the edge is *moved* onto each
+    /// object node `O` as an `@reverse` member `{ P: [{"@id": S}] }`, and removed from `S`.
+    /// This is the fromRdf-side preparation that lets node compaction express the edge
+    /// through the reverse term — keeping the round-trip exact (the reader re-inverts it).
+    ///
+    /// Only applied within a single graph scope (the caller passes one graph's node array).
+    fn relocate_reverse(&self, nodes: &mut [Json]) {
+        // The set of forward-predicate IRIs that a reverse term covers.
+        let reverse_iris: Vec<String> = self
+            .terms
+            .iter()
+            .filter(|(_, d)| d.reverse)
+            .map(|(_, d)| d.iri.clone())
+            .collect();
+        if reverse_iris.is_empty() {
+            return;
+        }
+        // Index node position by @id so we can attach to the object node.
+        let id_of = |n: &Json| n.get("@id").and_then(Json::as_str).map(str::to_string);
+        let mut index: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            if let Some(id) = id_of(n) {
+                index.entry(id).or_insert(i);
+            }
+        }
+        // Collect (object_id, predicate_iri, subject_id) edges to relocate, then apply.
+        let mut moves: Vec<(usize, String, String)> = Vec::new();
+        for n in nodes.iter() {
+            let Some(subj) = id_of(n) else { continue };
+            let Json::Obj(members) = n else { continue };
+            for (key, vals) in members {
+                if !reverse_iris.iter().any(|r| r == key) {
+                    continue;
+                }
+                for o in flatten(vals) {
+                    if let Some(oid) = o.get("@id").and_then(Json::as_str) {
+                        if let Some(&pos) = index.get(oid) {
+                            moves.push((pos, key.clone(), subj.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        if moves.is_empty() {
+            return;
+        }
+        // Remove the relocated forward edges from every subject node.
+        for n in nodes.iter_mut() {
+            if let Json::Obj(members) = n {
+                members.retain(|(k, _)| !reverse_iris.iter().any(|r| r == k));
+            }
+        }
+        // Attach each edge onto the object node's `@reverse` member.
+        for (pos, pred, subj) in moves {
+            let node = &mut nodes[pos];
+            let mut subj_ref = Json::obj();
+            subj_ref.set("@id", Json::Str(subj));
+            let rev = match node.get("@reverse").cloned() {
+                Some(Json::Obj(mut m)) => {
+                    if let Some(slot) = m.iter_mut().find(|(k, _)| *k == pred) {
+                        if let Json::Arr(a) = &mut slot.1 {
+                            a.push(subj_ref);
+                        }
+                    } else {
+                        m.push((pred.clone(), Json::Arr(vec![subj_ref])));
+                    }
+                    Json::Obj(m)
+                }
+                _ => {
+                    let mut o = Json::obj();
+                    o.set(&pred, Json::Arr(vec![subj_ref]));
+                    o
+                }
+            };
+            node.set("@reverse", rev);
+        }
+    }
+
+    /// Compacts one property `iri` with its expanded object array `vals` into `result`,
+    /// applying the term's `@container` framing (`@set`/`@list`/`@language`/`@index`) and
+    /// "compact arrays" (a single-element array collapses to a scalar unless `@container`
+    /// forces an array). When `reverse_only` is true, only a reverse term is emitted (used
+    /// for the `@reverse` block in [`ActiveContext::compact_node`]); when false, reverse
+    /// terms are skipped.
+    fn compact_property(&self, iri: &str, vals: &Json, reverse_only: bool, result: &mut Json) {
+        // Choose the active term for this IRI in vocab position.
+        let term = self.compact_iri(iri, true, reverse_only);
+        let def = self.term_def(&term).cloned();
+
+        if !reverse_only && def.as_ref().is_some_and(|d| d.reverse) {
+            return; // a reverse term — handled via the @reverse block
+        }
+        if reverse_only && !def.as_ref().is_some_and(|d| d.reverse) {
+            return;
+        }
+
+        let container = def.as_ref().and_then(|d| d.container.clone());
+        let items: Vec<Json> = match vals {
+            Json::Arr(a) => a.clone(),
+            single => vec![single.clone()],
+        };
+
+        // @list container: the term implies the values are an ordered list — strip the
+        // {"@list": …} wrapper and emit a bare array.
+        if container.as_deref() == Some("@list") {
+            if let Some(Json::Arr(elems)) = items.iter().find_map(|v| v.get("@list")) {
+                let compacted: Vec<Json> = elems
+                    .iter()
+                    .map(|e| self.compact_value(Some(&term), e))
+                    .collect();
+                result.set(&term, Json::Arr(compacted));
+                return;
+            }
+        }
+
+        // @language container: { "<lang>": "<value>", … } grouping language-tagged strings.
+        if container.as_deref() == Some("@language") {
+            let mut map = Json::obj();
+            for v in &items {
+                if let (Some(val), Some(lang)) = (
+                    v.get("@value").and_then(Json::as_str),
+                    v.get("@language").and_then(Json::as_str),
+                ) {
+                    map.set(lang, Json::Str(val.to_string()));
+                }
+            }
+            result.set(&term, map);
+            return;
+        }
+
+        // @index container: { "<index>": <value>, … }. fromRdf does not emit @index, but a
+        // context may declare it; group by the value's @index member if present.
+        if container.as_deref() == Some("@index") {
+            let mut map = Json::obj();
+            for v in &items {
+                let idx = v.get("@index").and_then(Json::as_str).unwrap_or("@none");
+                let compacted = self.compact_value(Some(&term), v);
+                match map.get(idx).cloned() {
+                    Some(Json::Arr(mut existing)) => {
+                        existing.push(compacted);
+                        map.set(idx, Json::Arr(existing));
+                    }
+                    Some(other) => map.set(idx, Json::Arr(vec![other, compacted])),
+                    None => map.set(idx, compacted),
+                }
+            }
+            result.set(&term, map);
+            return;
+        }
+
+        // Default: compact each value, then apply "compact arrays".
+        let mut compacted: Vec<Json> = Vec::with_capacity(items.len());
+        for v in &items {
+            if let Some(Json::Arr(elems)) = v.get("@list") {
+                // A list value with no @list-container term keeps an explicit {"@list": …}.
+                let inner: Vec<Json> = elems
+                    .iter()
+                    .map(|e| self.compact_value(Some(&term), e))
+                    .collect();
+                let mut lo = Json::obj();
+                lo.set(&self.compact_keyword("@list"), Json::Arr(inner));
+                compacted.push(lo);
+                continue;
+            }
+            if v.is_obj() && v.get("@id").is_some() && v.get("@value").is_none() {
+                // A node reference: compact_value handles @id/@vocab coercion; otherwise it
+                // is reduced to a node object.
+                let cv = self.compact_value(Some(&term), v);
+                if cv.is_obj() {
+                    compacted.push(self.compact_node(&cv));
+                } else {
+                    compacted.push(cv);
+                }
+            } else {
+                compacted.push(self.compact_value(Some(&term), v));
+            }
+        }
+
+        let force_array = matches!(container.as_deref(), Some("@set"));
+        let value = if compacted.len() == 1 && !force_array {
+            compacted.into_iter().next().expect("len 1")
+        } else {
+            Json::Arr(compacted)
+        };
+        result.set(&term, value);
+    }
+}
+
+// ===========================================================================
+// fromRdf — build an expanded JSON-LD model (a Vec<Json> of node objects).
+// ===========================================================================
+
+/// Builds the *expanded* JSON-LD value for one object [`Term`], honouring collapsed
+/// `@list` heads (`lists`). Mirrors the parent writer's `write_jsonld_object` semantics but
+/// yields a [`Json`] AST.
+fn term_to_json(term: &Term, lists: &ListInfo) -> Json {
+    match term {
+        Term::NamedNode(n) => {
+            let mut o = Json::obj();
+            o.set("@id", Json::Str(n.as_str().to_string()));
+            o
+        }
+        Term::BlankNode(b) => {
+            if let Some(elems) = lists.heads.get(b) {
+                let mut o = Json::obj();
+                let arr: Vec<Json> = elems.iter().map(|e| term_to_json(e, lists)).collect();
+                o.set("@list", Json::Arr(arr));
+                return o;
+            }
+            let mut o = Json::obj();
+            o.set("@id", Json::Str(format!("_:{}", b.as_str())));
+            o
+        }
+        Term::Literal(l) => literal_to_json(l),
+        Term::Triple(t) => {
+            // RDF 1.2 triple term — no standard JSON-LD encoding; preserve the canonical
+            // N-Triples spelling as an opaque @id (same choice as the parent writer).
+            let mut o = Json::obj();
+            let mut nt = String::new();
+            let _ = write!(nt, "{}", Term::Triple(t.clone()));
+            o.set("@id", Json::Str(nt));
+            o
+        }
+    }
+}
+
+/// Yields the elements of a `Json::Arr`, or the single value itself otherwise. A small
+/// helper for iterating an expanded object array (which is always an array in our model,
+/// but stays total).
+fn flatten(v: &Json) -> Vec<&Json> {
+    match v {
+        Json::Arr(a) => a.iter().collect(),
+        other => vec![other],
+    }
+}
+
+/// Builds the *expanded* value object for a literal: `{"@value": …}` with `@language`
+/// (language-tagged) or `@type` (any non-string datatype). Mirrors the parent writer's
+/// `write_jsonld_literal`, including the lossless native-scalar coercion.
+fn literal_to_json(lit: &oxrdf::Literal) -> Json {
+    let dt = lit.datatype().as_str();
+    let mut o = Json::obj();
+    if lit.language().is_none() {
+        if let Some(native) = coerce_native(lit.value(), dt) {
+            o.set("@value", Json::Raw(native));
+            return o;
+        }
+    }
+    o.set("@value", Json::Str(lit.value().to_string()));
+    if let Some(lang) = lit.language() {
+        o.set("@language", Json::Str(lang.to_string()));
+    } else if dt != format!("{}string", XSD) && dt != RDF_LANG_STRING {
+        o.set("@type", Json::Str(dt.to_string()));
+    }
+    o
+}
+
+/// Builds the expanded node-object array for one graph's triples (the `fromRdf` output for
+/// that graph), reusing the parent writer's list detection + first-seen ordering.
+fn graph_to_expanded(triples: &[Triple]) -> Vec<Json> {
+    let lists = detect_lists(triples);
+    // Per-node: @type IRIs + predicate→objects (first-seen predicate order).
+    struct Node {
+        subject: NamedOrBlankNode,
+        types: Vec<String>,
+        pred_order: Vec<String>,
+        preds: BTreeMap<String, Vec<Term>>,
+    }
+    let mut order_idx: BTreeMap<String, usize> = BTreeMap::new();
+    let mut nodes: Vec<Node> = Vec::new();
+    let key = |s: &NamedOrBlankNode| -> String {
+        match s {
+            NamedOrBlankNode::NamedNode(n) => format!("I{}", n.as_str()),
+            NamedOrBlankNode::BlankNode(b) => format!("B{}", b.as_str()),
+        }
+    };
+    for t in triples {
+        if let NamedOrBlankNode::BlankNode(b) = &t.subject {
+            if lists.cells.contains(b) {
+                continue; // list cell — content lives inside the @list head
+            }
+        }
+        let k = key(&t.subject);
+        let i = *order_idx.entry(k).or_insert_with(|| {
+            nodes.push(Node {
+                subject: t.subject.clone(),
+                types: Vec::new(),
+                pred_order: Vec::new(),
+                preds: BTreeMap::new(),
+            });
+            nodes.len() - 1
+        });
+        let node = &mut nodes[i];
+        if t.predicate.as_str() == RDF_TYPE {
+            if let Term::NamedNode(n) = &t.object {
+                node.types.push(n.as_str().to_string());
+                continue;
+            }
+        }
+        let p = t.predicate.as_str().to_string();
+        if !node.preds.contains_key(&p) {
+            node.pred_order.push(p.clone());
+        }
+        node.preds.entry(p).or_default().push(t.object.clone());
+    }
+    // `nodes` is already in first-seen subject order (we push on first sight); `order_idx`
+    // only deduplicates. No re-sort.
+
+    let mut result = Vec::with_capacity(nodes.len());
+    for node in &nodes {
+        let mut obj = Json::obj();
+        match &node.subject {
+            NamedOrBlankNode::NamedNode(n) => obj.set("@id", Json::Str(n.as_str().to_string())),
+            NamedOrBlankNode::BlankNode(b) => {
+                obj.set("@id", Json::Str(format!("_:{}", b.as_str())))
+            }
+        }
+        if !node.types.is_empty() {
+            let arr: Vec<Json> = node.types.iter().map(|t| Json::Str(t.clone())).collect();
+            obj.set("@type", Json::Arr(arr));
+        }
+        for p in &node.pred_order {
+            let arr: Vec<Json> = node.preds[p].iter().map(|o| term_to_json(o, &lists)).collect();
+            obj.set(p, Json::Arr(arr));
+        }
+        result.push(obj);
+    }
+    result
+}
+
+// ===========================================================================
+// Public entry points.
+// ===========================================================================
+
+/// Serialises an RDF dataset (default + named graphs) as a **compacted** JSON-LD 1.1
+/// document against the caller-supplied `context`, applying the full W3C Compaction
+/// Algorithm (term definitions, `@vocab`, type/language/`@container` coercion, `@reverse`,
+/// `@id`/`@type` keyword aliasing, value + node + IRI compaction).
+///
+/// The output is a `{"@context": …, "@graph": […]}` document. Round-tripping it through a
+/// JSON-LD-to-RDF processor reconstructs the same triples (the compaction is lossless —
+/// every coercion it applies is invertible against the same `@context`).
+pub fn write_jsonld_compact(graphs: &[NamedGraph<'_>], context: &Json) -> String {
+    let active = ActiveContext::parse(context);
+
+    // Build the expanded fromRdf model: default-graph node objects, plus a node object per
+    // named graph carrying its own `@graph` array (the JSON-LD dataset shape).
+    let default_triples: &[Triple] = graphs
+        .iter()
+        .find(|(n, _)| n.is_none())
+        .map(|(_, ts)| *ts)
+        .unwrap_or(&[]);
+    let named: Vec<&NamedGraph<'_>> = graphs.iter().filter(|(n, _)| n.is_some()).collect();
+
+    let mut expanded: Vec<Json> = graph_to_expanded(default_triples);
+    // Relocate forward edges covered by `@reverse` terms onto their object nodes (per graph
+    // scope), so node compaction can express them through the reverse term.
+    active.relocate_reverse(&mut expanded);
+    for (name, ts) in &named {
+        let g = name.as_ref().expect("named graph has a name");
+        let mut node = Json::obj();
+        match g {
+            Term::NamedNode(n) => node.set("@id", Json::Str(n.as_str().to_string())),
+            Term::BlankNode(b) => node.set("@id", Json::Str(format!("_:{}", b.as_str()))),
+            other => {
+                let mut s = String::new();
+                let _ = write!(s, "{other}");
+                node.set("@id", Json::Str(s));
+            }
+        }
+        let mut inner = graph_to_expanded(ts);
+        active.relocate_reverse(&mut inner);
+        node.set("@graph", Json::Arr(inner));
+        expanded.push(node);
+    }
+
+    // Compact the expanded array under the active context.
+    let compacted = active.compact(&Json::Arr(expanded));
+
+    // Build the output document: {"@context": <raw context>, "@graph": [...]}. We keep the
+    // `@graph` envelope (rather than collapsing a single node) so the `@context` always has
+    // a home and named graphs round-trip.
+    let mut doc = Json::obj();
+    if !matches!(&active.raw_context, Json::Obj(m) if m.is_empty()) {
+        doc.set("@context", active.raw_context.clone());
+    }
+    let graph_key = active.compact_keyword("@graph");
+    match compacted {
+        Json::Arr(items) => doc.set(&graph_key, Json::Arr(items)),
+        other => doc.set(&graph_key, Json::Arr(vec![other])),
+    }
+
+    let mut out = String::new();
+    doc.write(&mut out);
+    out
+}
+
+/// Parses a caller `@context` from its JSON text into the [`Json`] model used by
+/// [`write_jsonld_compact`]. A convenience for callers that hold the context as a string
+/// (a CLI flag, an HTTP request profile). Returns `None` if the text is not a JSON object.
+/// Dependency-free — a tiny recursive-descent JSON parser, no serde_json.
+pub fn parse_context_json(text: &str) -> Option<Json> {
+    let mut p = JsonParser {
+        bytes: text.as_bytes(),
+        pos: 0,
+    };
+    p.skip_ws();
+    let v = p.parse_value()?;
+    p.skip_ws();
+    if p.pos != p.bytes.len() {
+        return None;
+    }
+    matches!(v, Json::Obj(_)).then_some(v)
+}
+
+/// A minimal recursive-descent JSON parser (objects/arrays/strings/numbers/true/false/null)
+/// used only to read a caller `@context` string. Numbers/bools/null become [`Json::Raw`]
+/// (we only ever read string-valued context members, but the parser stays total).
+struct JsonParser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl JsonParser<'_> {
+    fn skip_ws(&mut self) {
+        while self.pos < self.bytes.len()
+            && matches!(self.bytes[self.pos], b' ' | b'\t' | b'\n' | b'\r')
+        {
+            self.pos += 1;
+        }
+    }
+
+    fn parse_value(&mut self) -> Option<Json> {
+        self.skip_ws();
+        match self.bytes.get(self.pos)? {
+            b'{' => self.parse_object(),
+            b'[' => self.parse_array(),
+            b'"' => self.parse_string().map(Json::Str),
+            b't' => self.parse_lit("true").then(|| Json::Raw("true".into())),
+            b'f' => self.parse_lit("false").then(|| Json::Raw("false".into())),
+            b'n' => self.parse_lit("null").then(|| Json::Raw("null".into())),
+            _ => self.parse_number(),
+        }
+    }
+
+    fn parse_lit(&mut self, lit: &str) -> bool {
+        if self.bytes[self.pos..].starts_with(lit.as_bytes()) {
+            self.pos += lit.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_number(&mut self) -> Option<Json> {
+        let start = self.pos;
+        while self.pos < self.bytes.len()
+            && matches!(
+                self.bytes[self.pos],
+                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'
+            )
+        {
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return None;
+        }
+        std::str::from_utf8(&self.bytes[start..self.pos])
+            .ok()
+            .map(|s| Json::Raw(s.to_string()))
+    }
+
+    fn parse_string(&mut self) -> Option<String> {
+        if self.bytes.get(self.pos) != Some(&b'"') {
+            return None;
+        }
+        self.pos += 1;
+        let mut s = String::new();
+        while self.pos < self.bytes.len() {
+            let c = self.bytes[self.pos];
+            self.pos += 1;
+            match c {
+                b'"' => return Some(s),
+                b'\\' => {
+                    let e = *self.bytes.get(self.pos)?;
+                    self.pos += 1;
+                    match e {
+                        b'"' => s.push('"'),
+                        b'\\' => s.push('\\'),
+                        b'/' => s.push('/'),
+                        b'n' => s.push('\n'),
+                        b't' => s.push('\t'),
+                        b'r' => s.push('\r'),
+                        b'b' => s.push('\u{08}'),
+                        b'f' => s.push('\u{0C}'),
+                        b'u' => {
+                            let hex = self.bytes.get(self.pos..self.pos + 4)?;
+                            self.pos += 4;
+                            let cp = u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+                            s.push(char::from_u32(cp)?);
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => {
+                    // Re-decode the UTF-8 byte sequence starting at the previous position.
+                    let start = self.pos - 1;
+                    let mut end = self.pos;
+                    while end < self.bytes.len() && (self.bytes[end] & 0xC0) == 0x80 {
+                        end += 1;
+                    }
+                    s.push_str(std::str::from_utf8(&self.bytes[start..end]).ok()?);
+                    self.pos = end;
+                }
+            }
+        }
+        None
+    }
+
+    fn parse_array(&mut self) -> Option<Json> {
+        self.pos += 1; // '['
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.bytes.get(self.pos) == Some(&b']') {
+            self.pos += 1;
+            return Some(Json::Arr(items));
+        }
+        loop {
+            items.push(self.parse_value()?);
+            self.skip_ws();
+            match self.bytes.get(self.pos)? {
+                b',' => self.pos += 1,
+                b']' => {
+                    self.pos += 1;
+                    return Some(Json::Arr(items));
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn parse_object(&mut self) -> Option<Json> {
+        self.pos += 1; // '{'
+        let mut members = Vec::new();
+        self.skip_ws();
+        if self.bytes.get(self.pos) == Some(&b'}') {
+            self.pos += 1;
+            return Some(Json::Obj(members));
+        }
+        loop {
+            self.skip_ws();
+            let key = self.parse_string()?;
+            self.skip_ws();
+            if self.bytes.get(self.pos) != Some(&b':') {
+                return None;
+            }
+            self.pos += 1;
+            let val = self.parse_value()?;
+            members.push((key, val));
+            self.skip_ws();
+            match self.bytes.get(self.pos)? {
+                b',' => self.pos += 1,
+                b'}' => {
+                    self.pos += 1;
+                    return Some(Json::Obj(members));
+                }
+                _ => return None,
+            }
+        }
+    }
+}

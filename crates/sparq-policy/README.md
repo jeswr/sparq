@@ -20,10 +20,9 @@ lives in [`skills/usage-control-policy/SKILL.md`](../../skills/usage-control-pol
 > **deferred** — it would inherit the MPC honest-majority/LAN envelope and the
 > open ZK-soundness remediation. <!-- privacy-claims-allow: NEGATIVE — names the deferred ZK/MPC composition + its open soundness remediation; sq-qhy4 -->
 
-How-to: [`skills/usage-control-policy/SKILL.md`](../../skills/usage-control-policy/SKILL.md).
-Design: [`research/feature-research-odrl-policy.md`](../../research/feature-research-odrl-policy.md).
-Sibling access-control crate: [`sparq-solid`](../sparq-solid/README.md).
-Contributing: [`AGENTS.md`](../../AGENTS.md).
+**Conformance:** ratcheted against the MIT-licensed [SolidLab ODRL Test Suite](https://github.com/SolidLabResearch/ODRL-Test-Suite) through the real `evaluate` path (`tests/odrl_test_suite.rs`, sq-tmsd6; 59/68 pass + a documented not-implemented bucket — the SKILL has the oracle).
+
+How-to: [`skills/usage-control-policy/SKILL.md`](../../skills/usage-control-policy/SKILL.md) · Design: [`research/feature-research-odrl-policy.md`](../../research/feature-research-odrl-policy.md) · Sibling: [`sparq-solid`](../sparq-solid/README.md) · Contributing: [`AGENTS.md`](../../AGENTS.md).
 
 ## License
 

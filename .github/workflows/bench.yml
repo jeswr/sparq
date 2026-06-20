@@ -302,6 +302,39 @@ jobs:
               benchmark-data:benchmark-data
             echo "Created and pushed orphan benchmark-data branch."
           fi
+      # [OPUS-4.8] sq-owci — clean the working tree before github-action-benchmark switches branches.
+      # ROOT CAUSE: the "Run benchmarks" step (scripts/ci-bench.sh) does `cd bench/zk && cargo bench`
+      # and `cd bench/zk-trace && cargo bench` (two STANDALONE cargo projects, run WITHOUT --locked),
+      # so Cargo re-resolves and REWRITES their committed bench/zk{,-trace}/Cargo.lock. That leaves the
+      # working tree dirty. The Store step below then runs with auto-push=true (main only), and the
+      # action internally does `git fetch ... benchmark-data:benchmark-data` + `git switch benchmark-data`,
+      # which ABORTS: "Your local changes to the following files would be overwritten by checkout:
+      # bench/zk-trace/Cargo.lock, bench/zk/Cargo.lock ... Aborting" (live: Benchmarks run 27867742598).
+      # That failed the whole (non-gating) Benchmarks job on every main push and masked real CI signal.
+      # It only ever bit main because on PRs auto-push=false, so the action never switches branches.
+      #
+      # FIX: restore exactly the TRACKED files the build/bench dirtied, so the action's branch switch is
+      # clean. `git checkout --` only touches tracked paths, so the UNtracked run outputs the next step
+      # reads (bench-results.json, prev-data.js) are left intact. Enumerating via `git diff --name-only`
+      # (tracked-modified only) future-proofs this against any other lockfile a future bench may rewrite.
+      # This does NOT alter the measurement — bench-results.json is already written; we only drop the
+      # incidental lockfile churn. main-guarded to mirror the auto-push gate (the only path that switches).
+      - name: Clean bench-induced tracked churn before history switch (main only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          dirty="$(git diff --name-only)"
+          if [ -n "$dirty" ]; then
+            echo "Restoring tracked files the benchmark run modified (incidental Cargo.lock re-resolve):"
+            while IFS= read -r f; do echo "  $f"; done <<< "$dirty"
+            # Restore ALL tracked modifications. `git checkout -- .` only rewrites TRACKED paths,
+            # so the untracked run outputs the next step reads (bench-results.json, prev-data.js)
+            # are left intact — and it is whitespace-safe (no word-splitting of the path list).
+            git checkout -- .
+          else
+            echo "Working tree clean — no tracked churn to restore."
+          fi
+          git status --porcelain
       - name: Store + compare against history
         uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         with:

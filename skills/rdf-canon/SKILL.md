@@ -121,13 +121,23 @@ sparq-canon = { path = "crates/sparq-canon", features = ["rdf12-triple-terms"] }
 let nq = sparq_canon::canonicalize_rdf12(&dataset)?;          // quads -> N-Quads
 let cg = sparq_canon::canonicalize_triples_rdf12(&triples)?;  // one graph
 let m  = sparq_canon::issue_dataset_rdf12(&dataset)?;         // issuer map
+
+// Hash-profile parity with the standard path: each v2 entry point has a
+// `*_with::<D: Digest>` sibling (SHA-384 = parity target).
+let nq384 = sparq_canon::canonicalize_rdf12_with::<sha2::Sha384>(&dataset)?;
+let cg384 = sparq_canon::canonicalize_triples_rdf12_with::<sha2::Sha384>(&triples)?;
+let m384  = sparq_canon::issue_dataset_rdf12_with::<sha2::Sha384>(&dataset)?;
 ```
 
-**Boundary / honesty:** SHA-256 only (no `*_with` hash profile for v2 yet);
-triple terms appear only as objects in oxrdf 0.3 (a triple's subject is
-`NamedOrBlankNode`), so nesting descends strictly through the object position; the
-HNDQ poison-graph call limit still fails closed. This is a sparq-local extension,
-**not** a W3C standard — do not represent its output as W3C RDFC-1.0.
+**Boundary / honesty:** SHA-256 is the default; a `*_with::<D: Digest>` sibling of
+each v2 entry point selects another hash (notably `sha2::Sha384`) for parity with
+the standard path's `canonicalize_quads_with`. The non-generic entry points are
+SHA-256 and byte-identical to before; a different `D` may produce a different
+(still canonical, isomorphism-stable under that `D`) relabelling. Triple terms
+appear only as objects in oxrdf 0.3 (a triple's subject is `NamedOrBlankNode`), so
+nesting descends strictly through the object position; the HNDQ poison-graph call
+limit still fails closed. This is a sparq-local extension, **not** a W3C standard
+— do not represent its output as W3C RDFC-1.0.
 
 ## Conformance
 
@@ -149,6 +159,8 @@ Verified against `sparq-canon` 0.1.0 source. The standard RDFC-1.0 path is
 `rdf-canon` 0.15.3 (W3C-suite validated); `sparq-canon` is the single-sourced
 bridge + public API. The opt-in, off-by-default `rdf12-triple-terms` profile
 (sq-hslb [OPUS-4.8]) is a native RDFC-1.0 re-implementation extended to RDF 1.2
-triple terms — **non-standard** (W3C RDFC-1.0 is RDF-1.1-only). `publish = false`,
+triple terms — **non-standard** (W3C RDFC-1.0 is RDF-1.1-only) — now with a
+`*_with::<D: Digest>` hash-profile sibling on every entry point for SHA-384
+parity (sq-5i1d [OPUS-4.8]). `publish = false`,
 non-default workspace member — nothing in sparq's default graph depends on it, so
 the default build and wasm artifact are byte-identical with or without it.

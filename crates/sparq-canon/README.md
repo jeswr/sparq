@@ -74,12 +74,18 @@ sparq-canon = { path = "crates/sparq-canon", features = ["rdf12-triple-terms"] }
 let nq = sparq_canon::canonicalize_rdf12(&dataset)?;             // quads
 let cg = sparq_canon::canonicalize_triples_rdf12(&triples)?;     // single graph
 let m  = sparq_canon::issue_dataset_rdf12(&dataset)?;            // issuer map
+// Hash-profile parity with the standard path: pick a hash via `*_with::<D: Digest>`.
+let nq384 = sparq_canon::canonicalize_rdf12_with::<sha2::Sha384>(&dataset)?;
 ```
 
-**Boundary:** SHA-256 only (no `*_with` for v2 yet); triple terms occur only as
-objects in oxrdf 0.3 (a triple's subject is `NamedOrBlankNode`), so nesting
-descends strictly through the object position; the HNDQ poison-graph limit still
-applies.
+**Boundary:** SHA-256 is the default; a `*_with::<D: Digest>` sibling of each v2
+entry point (e.g. `canonicalize_rdf12_with`) selects another hash — notably
+`sha2::Sha384` — for parity with the standard path's `canonicalize_quads_with`.
+The non-generic entry points are SHA-256 and byte-identical to before; a
+different `D` may yield a different (still canonical, isomorphism-stable under
+that `D`) relabelling. Triple terms occur only as objects in oxrdf 0.3 (a
+triple's subject is `NamedOrBlankNode`), so nesting descends strictly through
+the object position; the HNDQ poison-graph limit still applies.
 
 ### Opt-in, single-sourced
 
