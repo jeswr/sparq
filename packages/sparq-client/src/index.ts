@@ -364,7 +364,13 @@ export async function sparqShaclValidate(
         "Rebuild sparq-wasm with --features shacl.",
     );
   }
-  return JSON.parse(validate(data, shapes, format)) as ShaclReport;
+  // [OPUS-4.8] sq-800o — LOST-RECEIVER fix. The line above only EXISTENCE-checks a detached
+  // method reference (so a lean, no-`shacl` bundle still yields the clear error above). It must
+  // NOT be the thing we CALL: wasm-bindgen's `Store.validate` body does
+  // `wasm.store_validate(this.__wbg_ptr, …)`, so invoking the detached `validate(…)` runs with
+  // `this === undefined` and throws `Cannot read properties of undefined (reading '__wbg_ptr')`.
+  // Invoke it BOUND to the `store` receiver so `this.__wbg_ptr` resolves to the live store.
+  return JSON.parse(store.validate(data, shapes, format)) as ShaclReport;
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +538,41 @@ export {
   parsePrometheusMetrics,
   shortenIri,
 } from "./server-health.js";
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-atb0 — the persistent cross-session WORKSPACE model + persistence
+// abstraction. The framework-agnostic data shape of a named workspace (its imported sources,
+// the whole-dataset N-Quads save/open snapshot, and the saved SPARQL editor state) plus the
+// ONE `WorkspaceStore` interface with three runtime-selected backends — Tauri on-disk (when a
+// Tauri webview exposes the fs plugin), browser `localStorage` (the static-export path), and
+// an in-memory session fallback. No Tauri/DOM dependency: each tier is feature-detected. No
+// secret (a bearer token) is ever persisted. Consumed by the site's REPL workspace panel and
+// portable to the Tauri GUI unchanged.
+// ---------------------------------------------------------------------------
+
+export {
+  type Workspace,
+  type WorkspaceSummary,
+  type WorkspaceSourceMeta,
+  type WorkspaceEditorState,
+  type WorkspaceRunMode,
+  type WorkspaceBackend,
+  type WorkspaceStore,
+  type WorkspaceStoreOptions,
+  type KeyValueStorage,
+  type TauriFsApi,
+  WORKSPACE_SCHEMA,
+  WebWorkspaceStore,
+  MemoryWorkspaceStore,
+  TauriWorkspaceStore,
+  createWorkspaceStore,
+  detectWebStorage,
+  isTauriRuntime,
+  newWorkspace,
+  parseWorkspace,
+  workspaceId,
+  workspaceSummary,
+} from "./workspace.js";
 
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {

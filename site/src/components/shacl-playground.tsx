@@ -392,7 +392,11 @@ function ResultPanel({
   const { report } = state;
 
   return (
-    <div className="space-y-3">
+    // [OPUS-4.8] sq-800o — stable e2e anchor: the validation report panel. The Playwright
+    // SHACL spec waits on `[data-testid="shacl-report"]` (and reads `data-conforms` off the
+    // banner below) rather than scraping copy, so it catches a regression where the report
+    // never renders (e.g. the lost-receiver `__wbg_ptr` throw this bead fixes).
+    <div className="space-y-3" data-testid="shacl-report">
       <ConformanceBanner conforms={report.conforms} summary={reportSummary(report)} />
       {view === "turtle" ? (
         <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed">
@@ -469,6 +473,9 @@ function ConformanceBanner({
 }) {
   return (
     <div
+      // [OPUS-4.8] sq-800o — expose conformance as a stable `data-conforms` boolean attr so the
+      // e2e SHACL spec asserts `sh:conforms` without reading the localized banner copy.
+      data-conforms={conforms ? "true" : "false"}
       className={cn(
         "flex items-center gap-2 rounded-lg p-3 text-sm font-medium",
         conforms
@@ -502,6 +509,11 @@ function ResultList({ report }: { report: ShaclReport }) {
       {report.results.map((r, i) => (
         <li
           key={i}
+          // [OPUS-4.8] sq-800o — per-violation e2e anchor + the constraint component as a
+          // stable `data-component` attr (the DatatypeConstraintComponent the default example
+          // produces), so the spec asserts the violation without scraping the badge label.
+          data-testid="shacl-violation"
+          data-component={componentName(r.sourceConstraintComponent)}
           className="rounded-lg border bg-muted/30 p-3 text-sm"
         >
           <div className="mb-1.5 flex flex-wrap items-center gap-2">

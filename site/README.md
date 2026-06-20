@@ -16,6 +16,18 @@ Inter, `--radius 0.7rem`. Design record: `research/feature-showcase-site-design.
 - **Live SPARQL REPL** (`/try` and the landing marquee) — loads the lean sparq wasm
   bundle and runs **real SPARQL** against a sample graph via the actual Rust engine
   compiled to WebAssembly. Not a fixture; nothing is sent to a server.
+- **Persistent cross-session workspaces** (`sq-atb0`) — the REPL's workspace panel
+  saves a named workspace: a **snapshot** of the loaded dataset (the whole default+named-graph
+  content as N-Quads — a save/open cache, not a re-ingest-from-source), the imported-source
+  list (local + URL, with the URL kept so a remote source can be re-fetched), and the SPARQL
+  editor state (query text + run mode + endpoint URL — never a bearer token). The persistence
+  is **one abstraction, three runtime-selected backends** (`@sparq/client` `workspace.ts`):
+  Tauri local-disk on the desktop app (when the shell grants the `fs` capability), browser
+  `localStorage` on GitHub Pages (the static-export path), and an in-memory session fallback —
+  feature-detected, so the static export never depends on a Tauri API. The last workspace
+  re-hydrates on startup. **Honest limitation**: a previously chosen local file cannot be
+  silently re-read across sessions (the browser keeps no persistent handle), so the snapshot is
+  a local import's durable copy; the panel says so plainly.
 - **/about** — the honest "what runs where" matrix.
 
 The per-surface interactive demos and the three flagship demos (ZK car-hire, MPC £100k,

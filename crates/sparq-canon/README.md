@@ -87,6 +87,15 @@ that `D`) relabelling. Triple terms occur only as objects in oxrdf 0.3 (a
 triple's subject is `NamedOrBlankNode`), so nesting descends strictly through
 the object position; the HNDQ poison-graph limit still applies.
 
+**Distinguishing power (regression-tested).** An adversarial soundness audit of
+the nested-bnode descent (sq-mu1cd / sq-63g0) found the profile **sound** (0
+confirmed defects / 5 refuted suspicions): distinct nested structure never
+collapses, because the serialization re-renders the real `Term::Triple` with c14n
+labels. The audit's sharper non-isomorphic vectors are landed as permanent
+regression tests in `tests/rdf12_triple_term_canon.rs` §5 — each **brute-force-proven
+non-isomorphic** by an independent oracle before asserting the canon differs, so a
+future false-equal is caught. That comment block carries the full per-vector detail.
+
 ### Opt-in, single-sourced
 
 Nothing in sparq's default build or the wasm artifact depends on this crate —

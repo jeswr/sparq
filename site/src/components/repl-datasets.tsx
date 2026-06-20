@@ -58,12 +58,17 @@ export interface DatasetControlsProps {
   activeBuiltinId: string | null;
   /** Replace the store from a built-in dataset. */
   onSelectBuiltin: (id: string) => void;
-  /** Replace OR add a custom RDF document (text + format). */
+  /**
+   * Replace OR add a custom RDF document (text + format). [OPUS-4.8] sq-atb0 — the optional
+   * `origin` captures whether this came from a local file upload or a URL (with that URL), so
+   * the workspace model can record the import as source metadata (and re-fetch a URL source).
+   */
   onLoadText: (
     text: string,
     format: string,
     label: string,
     mode: "replace" | "add",
+    origin?: { kind: "local" | "url"; url?: string },
   ) => Promise<void>;
   /** Disable controls while the engine is still cold. */
   disabled?: boolean;
@@ -90,7 +95,11 @@ export function DatasetControls({
       e.target.value = "";
       if (!file) return;
       const text = await file.text();
-      await onLoadText(text, guessFormat(file.name), file.name, mode);
+      // [OPUS-4.8] sq-atb0 — a local file import: record the origin so the workspace lists it
+      // (it cannot be silently re-read across sessions — the snapshot is its durable copy).
+      await onLoadText(text, guessFormat(file.name), file.name, mode, {
+        kind: "local",
+      });
     },
     [onLoadText, mode],
   );
@@ -222,7 +231,11 @@ function UrlLoadDialog({
         format === "__auto__"
           ? (formatFromContentType(res.headers.get("content-type")) ?? guessFormat(target))
           : format;
-      await onLoadText(text, fmt, shortName(target), defaultMode);
+      // [OPUS-4.8] sq-atb0 — a URL import: record the origin URL so a workspace can re-fetch it.
+      await onLoadText(text, fmt, shortName(target), defaultMode, {
+        kind: "url",
+        url: target,
+      });
       onOpenChange(false);
       setUrl("");
     } catch (e) {
