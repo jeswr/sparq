@@ -52,6 +52,20 @@ pub enum Runner {
         /// `--test <target>` name, e.g. `w3c_core`.
         target: &'static str,
     },
+    /// [OPUS-4.8] sq-oy1f.2 — a crate-local `cargo test` runner that is OFF by
+    /// default and only runs under an opt-in cargo `feature` (e.g. the JSON-LD
+    /// lane behind `jsonld-suite`). Same as [`CrateTest`](Runner::CrateTest) but
+    /// the rendered command names the required feature, so the scoreboard's
+    /// "how to run" column is correct for a feature-gated ratchet (the lane
+    /// compiles out / self-skips when the feature is off — the lean-core posture).
+    FeatureGatedCrateTest {
+        /// Crate the test lives in, e.g. `sparq-conformance`.
+        krate: &'static str,
+        /// `--test <target>` name, e.g. `jsonld_suite`.
+        target: &'static str,
+        /// The cargo `--features` flag the lane requires, e.g. `jsonld-suite`.
+        feature: &'static str,
+    },
 }
 
 impl Runner {
@@ -67,6 +81,9 @@ impl Runner {
             }
             Runner::CrateTest { krate, target } => {
                 format!("cargo test -p {krate} --test {target}")
+            }
+            Runner::FeatureGatedCrateTest { krate, target, feature } => {
+                format!("cargo test -p {krate} --features {feature} --test {target}")
             }
         }
     }
@@ -110,6 +127,10 @@ pub struct Suite {
 ///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
 /// * Solid ACP 12 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 12`
 ///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
+/// * JSON-LD toRdf 413 — `sparq-conformance` `tests/jsonld_suite.rs`
+///   `TORDF_FLOOR = 413` (sq-oy1f.2; opt-in `jsonld-suite` feature).
+/// * JSON-LD fromRdf 51 — `sparq-conformance` `tests/jsonld_suite.rs`
+///   `FROMRDF_FLOOR = 51` (sq-oy1f.2; opt-in `jsonld-suite` feature).
 /// * Solid WAC differential 0 — `sparq-solid` `tests/differential_oracle.rs`
 ///   `DIVERGENCE_FLOOR = 0` (sq-t58w.8; a divergence-count floor, hard 0 — the WAC
 ///   and ACP differential rows share this one const).
@@ -217,6 +238,46 @@ pub const SUITES: &[Suite] = &[
         floor_basis: "0 divergences",
         note: "engine vs an independent reference evaluator vs the hand Expect table, \
                over the ACP parity corpus (zero divergence)",
+    },
+    // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 API conformance ratchets. The
+    // runner is crate-local here (`tests/jsonld_suite.rs`) but behind the OPT-IN
+    // `jsonld-suite` feature (forwards to sparq-core/jsonld + sparq-engine/
+    // serialize-rdf) so the default + `--workspace` builds neither link oxjsonld
+    // nor go red — the lean-core posture. Two gated categories: toRdf (JSON-LD →
+    // RDF through the real oxjsonld parse path) and fromRdf (RDF → JSON-LD through
+    // the native serialize-rdf writer, compared by a re-parse round-trip). The
+    // floors are the MEASURED pass counts at the pinned w3c/json-ld-api revision
+    // (NOT 100% — remote-context/option divergences are honest, recorded gaps);
+    // they may only RISE. Compaction/Framing/expand-out/flatten-out are the
+    // documented NOT-IMPLEMENTED buckets the runner reports separately (never
+    // failed). Floors kept in lock-step by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "W3C JSON-LD 1.1 toRdf",
+        family: "W3C JSON-LD",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "jsonld_suite",
+            feature: "jsonld-suite",
+        },
+        ci_job: "jsonld-conformance",
+        ratchet_floor: 413,
+        floor_basis: "pass",
+        note: "JSON-LD → RDF through the real oxjsonld parse path (jsonld feature); \
+               compaction/framing are documented not-implemented buckets",
+    },
+    Suite {
+        label: "W3C JSON-LD 1.1 fromRdf",
+        family: "W3C JSON-LD",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "jsonld_suite",
+            feature: "jsonld-suite",
+        },
+        ci_job: "jsonld-conformance",
+        ratchet_floor: 51,
+        floor_basis: "pass",
+        note: "RDF → JSON-LD through the native serialize-rdf writer, compared by a \
+               re-parse RDF-dataset round-trip (expanded + prefix-@context forms)",
     },
 ];
 

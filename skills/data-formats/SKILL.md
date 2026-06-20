@@ -341,6 +341,23 @@ cargo build -p sparq-cli --features serialize-rdf
 - **`load_dataset` is in-memory only.** Numeric/temporal filter caches are built on load
   in all in-memory paths; `into_compressed()` / `load_str_compressed()` trade a small
   per-scan decode for ~2.5× more triples per byte of RAM (browser target).
+- **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
+  JSON-LD 1.1 API conformance gate (sq-oy1f.2) drives the official `w3c/json-ld-api` suite
+  through the real paths: **toRdf** through the `jsonld` parser (oxjsonld) and **fromRdf**
+  through the `serialize-rdf` writer (compared by a re-parse RDF-dataset round-trip). The
+  floors only RISE; they reflect ACTUAL current pass counts, not full conformance — the
+  remaining toRdf divergences are documented oxjsonld limits (remote/`@import` `@context`
+  needs a `LoadDocumentCallback`; `expandContext`/`rdfDirection` options not applied; a few
+  base-normalization edge cases + leniently-accepted negative tests), and fromRdf misses
+  lists whose cells are shared across graphs. **Compaction, Framing, and expand/flatten
+  output-document comparison are NOT-IMPLEMENTED buckets** the runner reports separately and
+  never fails on (they grow the ratchet as those land — full 1.1 Compaction is sq-ixc3.4,
+  Framing is sq-oy1f.6). The lane is the opt-in `jsonld-suite` feature on `sparq-conformance`
+  (forwards to `sparq-core/jsonld` + `sparq-engine/serialize-rdf`); OFF it compiles to a
+  self-skip. Reproduce with `scripts/fetch-jsonld-tests.sh` then
+  `cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite` (self-skips if
+  the gitignored suite is absent). It is registered in the central conformance scoreboard
+  (`sparq-conformance-scoreboard`).
 
 ## See also
 

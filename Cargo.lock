@@ -3339,6 +3339,7 @@ dependencies = [
 name = "sparq-conformance"
 version = "0.1.0"
 dependencies = [
+ "oxjsonld",
  "oxrdf 0.3.3",
  "oxrdfxml",
  "oxttl 0.2.3",
