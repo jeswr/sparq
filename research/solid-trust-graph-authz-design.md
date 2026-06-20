@@ -22,7 +22,21 @@ primitive); new §5.4 EXPRESSIVE-COMPLETENESS coverage tables (every ZKAPs + eve
 9576/9577/9578 concept → ontology / zk-comp / gap, honest per the audit); new §6.0 PoC SPEC
 (age>18 end-to-end admission+N3-merge over the shipped sparq-solid/-reason/-canon/-zk/-shacl
 estate + new opt-in `sparq-trust` crate); new §7.6 load-bearing-claims-a-skeptic-should-attack
-(de-dup-lossless / coverage-complete / soundness). -->
+(de-dup-lossless / coverage-complete / soundness). [OPUS-4.8] FINAL revision (two-lens
+adversarial fold-in, gh-940): RECLASSIFIED every *presentation*-unlinkability coverage row
+(§5.4.1 Origin-client/Attester-origin, §5.4.2 Presentation/Redemption-context/Cross-origin/
+Attestation-reveals-no-identifying-info) from `zk-comp` to `gap` — they are blocked by the §3.4
+clear-WebID holder binding (an ARCHITECTURE change, not a ZK-composition step), per the
+privacy-layer-deliverability lens; added the §5.4.3 item-5 architecture-change gap + the
+privacy-layer "promissory/blocked/aspirational, NOT achievable under current design" footnote;
+clarified the §5.4.1 Issuer-client row (in-the-clear current / undisclosed-key `sq-z9l` built-
+but-not-yet-sound); strengthened §7.1-B to an architecture-change blocker; reframed §7.6 to flag
+the doc as SELF-ADVERSARIAL (the primary load-bearing claims to attack are the §7.1–7.4
+concessions audited for adequacy — sq-xc4y/l5og/tu4e/wvne — NOT invented losslessness/complete-
+ness claims); sharpened §6.0 into an exact build brief (sparq-trust module surface + admission
+evaluation algorithm pseudocode + open-problem hooks the PoC must respect, not silently solve).
+The de-dup/coverage claims are kept bounded (predicate-only direction; structural-layer only),
+NOT overclaimed. -->
 
 GitHub issue: [#940](https://github.com/jeswr/sparq/issues/940).
 
@@ -716,6 +730,10 @@ in **direct tension** with ZKAPs anonymity, and a ZKAPs-equivalent presentation 
 clear-WebID holder binding** with an **in-ZK holder-PoP plus nullifier** (bind to a key, prove
 membership/possession in zero knowledge, enforce single-use). This composite is
 **designed / partially-prototyped, NOT shipped or sound** — tracked as open problem `sq-wvne`.
+Because the blocker is an **architectural property of the request path** (a clear WebID), and
+not merely a missing ZK gadget, the *presentation*-unlinkability rows of the §5.4 coverage
+tables are classified `gap` (architecture change required), **not** `zk-comp`: composing the
+existing ZK estate does **not** close them.
 
 **Therefore the honest framing for the WGs is:**
 
@@ -763,9 +781,9 @@ structure that expresses it. The verdict per row is one of three, and the column
 | Authorisation decision / access control | admission → derivation strata; admitted facts merge with `.acl` via N3 (§2.1–2.2, §3.1) | ontology |
 | Non-delegability (deliberately non-transferable) | holder binding `credentialSubject == Session.agent` (§3.4) enforces single-subject use | ontology |
 | Issuer role (authority minting) | `trust:Source` + `trust:issuerKey` (§2.3) | ontology |
-| Issuer-client unlinkability (issuance↔redemption) | hidden-issuer set-membership (`sq-z9l`, built/not-yet-sound) — §5.3(1) | zk-comp |
-| Origin-client unlinkability (presentation privacy) | hidden-holder ZK PoP + nullifier (`sq-xqfg` built/not-yet-sound; nullifier ABSENT) — §5.3(2) | zk-comp |
-| Attester-origin / cross-site unlinkability | 3-part composite: hidden-issuer + hidden-holder + nullifier (§5.3) | zk-comp |
+| Issuer-client unlinkability (issuance↔redemption) | hidden-issuer set-membership (in-the-clear issuer check current `sig.rs`; undisclosed-key variant `sq-z9l` **built but not-yet-sound**, `sq-qhy4`) — §5.3(1) | zk-comp |
+| Origin-client unlinkability (presentation privacy) | **NOT achievable under the current design**: §3.4 authenticates the WebID in the clear, so presentations stay linkable by requester identity even with hidden-holder ZK PoP + nullifier. Requires the **architecture change** of §5.3 (replace §3.4 clear-WebID holder binding with an in-ZK holder-PoP); nullifier also **absent** — §5.3(2) | **gap** (architecture change required + absent primitive — `sq-wvne`) |
+| Attester-origin / cross-site unlinkability | 3-part composite over the §3.4 architecture change (hidden-issuer + in-ZK holder-PoP + nullifier); blocked by the same clear-WebID binding (§5.3) | **gap** (same §3.4 architecture change + absent nullifier — `sq-wvne`) |
 | One-more-forgery security | in-circuit issuer-sig gadget (`sq-z9l`) not-yet-sound; audit `sq-qhy4` pending | zk-comp |
 | Concurrent / multi-session security | ZK estate multi-session security (in `sq-qhy4` audit scope) | zk-comp |
 | Redemption-context unlinkability (same holder, many redemptions) | nullifier + rate-limit **without** deanonymisation | **gap** (no nullifier/rate-limit primitive — §5.3(3)) |
@@ -808,10 +826,10 @@ per-(source, type) trust pattern (RT/PERMIS; §2.2). Concept-by-concept:
 | Issuer-scoped vs distributed verification (9578 §4/§5) | trust rule encodes issuer-only vs public-key trust | ontology |
 | Per-(Source, Statement-Type, Constraint) scoping (9576 §3–4) | `trust:trustsSourceFor` + `trust:freshWithin` | ontology |
 | Issuance unlinkability (issuer↔redemption, 9576 §4.1, 9578 §3) | hidden-issuer set-membership (`sq-z9l`, built/not-yet-sound) | zk-comp |
-| Presentation unlinkability (origins can't re-identify client, 9576 §4.1) | ZK holder-PoP + nullifier + hidden issuer; clear-WebID binding (§3.4) breaks it | zk-comp |
-| Redemption-context unlinkability (9576 §4.1) | single-use + ZK composite | zk-comp |
-| Cross-origin unlinkability (9576 §4.1) | presentation anonymity (ZK composite); plain trust graph leaks WebID | zk-comp |
-| Attestation reveals no identifying info (9576 §5) | ZK composite; plain credential disclosure is linkable | zk-comp |
+| Presentation unlinkability (origins can't re-identify client, 9576 §4.1) | **NOT achievable under the current design**: even with hidden-issuer + ZK holder-PoP + nullifier, §3.4 authenticates the requester's WebID *in the clear*, so presentations stay trivially linkable by requester identity. Requires an **architecture change** — replace §3.4 clear-WebID holder binding with an **in-ZK holder-PoP**; the nullifier primitive is also **absent** | **gap** (architecture change required + absent primitive — `sq-wvne`) |
+| Redemption-context unlinkability (9576 §4.1) | single-use + ZK composite (presupposes presentation unlinkability above — same §3.4 blocker) | **gap** (nullifier absent + §3.4 architecture change — `sq-wvne`) |
+| Cross-origin unlinkability (9576 §4.1) | presentation anonymity (ZK composite); plain trust graph leaks WebID via §3.4 clear binding | **gap** (same §3.4 architecture change — `sq-wvne`) |
+| Attestation reveals no identifying info (9576 §5) | ZK composite; plain credential disclosure is linkable and §3.4 discloses the WebID | **gap** (same §3.4 architecture change — `sq-wvne`) |
 | Single-use / non-replayable token (9576 §5.1, 9578 §3) | nullifier / single-use marker | **gap** (no nullifier primitive — `sq-wvne`) |
 | Nullifier / double-spend prevention (9576 §5.1) | nullifier primitive | **gap** (absent, verified by grep) |
 | Issuer directory discovery (`.well-known/private-token-issuer-directory`, 9578 §7) | dynamic issuer-registry lookup | **gap** (static `trust:issuerKey`; needs P2 resolver `sq-pfae.3`) |
@@ -820,20 +838,23 @@ per-(source, type) trust pattern (RT/PERMIS; §2.2). Concept-by-concept:
 
 #### 5.4.3 Verdict, and the minimal terms to close the gaps
 
-**The honest thesis:** the trust-graph ontology **completely covers the structural /
-relationship concepts** of both ZKAPs and IETF Privacy Pass — every *role*, every *trust
-relation*, every *attestation/property/token/challenge/scope/freshness* concept maps to a term
-or admitted-fact structure (the `ontology` rows, which are the large majority of both tables).
-The **unlinkable-anonymous *presentation* property** is **not delivered by the ontology**; it
-is captured **as a named obligation** discharged by composing the (unaudited) ZK estate (the
-`zk-comp` rows = the three-part composite of §5.3, gated on `sq-qhy4`). This is exactly the
-"superset of policy expressivity, *composes with* — not supersedes — unlinkability" framing of
-§5.3, now made row-by-row checkable.
+**The honest thesis (scoped to one layer only):** the trust-graph ontology **completely covers
+the structural / relationship concepts** of both ZKAPs and IETF Privacy Pass — every *role*,
+every *trust relation*, every *attestation/property/token/challenge/scope/freshness* concept
+maps to a term or admitted-fact structure (the `ontology` rows, which are the large majority of
+both tables). That is the **only** completeness this document claims. The
+**unlinkable-anonymous *presentation* property** is **not delivered by the ontology** and is
+**not** completable under the current design: it is captured **as a named obligation** that is
+partly a ZK-composition note (the `zk-comp` rows of §5.4.1 — the one-more-forgery /
+multi-session / issuer-side hidden-issuer pieces, gated on `sq-qhy4`) and partly a **hard `gap`
+requiring an architecture change** (see below). This is exactly the "superset of policy
+expressivity, *composes with* — not supersedes — unlinkability" framing of §5.3, now made
+row-by-row checkable.
 
 **Coverage is therefore NOT unconditionally complete — there are genuine `gap` rows, and they
-are stated plainly rather than papered over.** They cluster into exactly **four primitives**,
-none of which is a *trust-relation* concept (the ontology's core), all of which are
-*presentation-mechanics* the ontology was never meant to be:
+are stated plainly rather than papered over.** They cluster into **five** items, none of which
+is a *trust-relation* concept (the ontology's core), all of which are *presentation-mechanics*
+the ontology was never meant to be:
 
 1. **Single-use / nullifier / double-spend** — the load-bearing anti-replay primitive ZKAPs and
    Privacy Pass both require, **absent** from the ZK estate. *Minimal term to close:* a
@@ -849,15 +870,37 @@ none of which is a *trust-relation* concept (the ontology's core), all of which 
    check; until then the binding is operator-asserted (§3.3, the live forgery vector D′).
 4. **Greasing / statement-type versioning** — a minor, non-security-critical gap. *Minimal
    term:* a `trust:reservedType` registration on the policy; design-only.
+5. **Presentation / origin-client / cross-origin unlinkability — an ARCHITECTURE-CHANGE gap, not
+   a ZK-composition gap.** This is the item the prior draft mis-marked `zk-comp`. Even with the
+   full three-part ZK composite (hidden issuer + ZK holder-PoP + nullifier — all unaudited),
+   §3.4's holder binding authenticates the requester's **WebID in the clear** at the derivation
+   stratum, so presentations remain **trivially linkable by requester identity**. Closing it
+   requires **replacing §3.4 clear-WebID holder binding with an in-ZK holder-PoP + nullifier**
+   (the nullifier of item 1 is itself absent) — a *design change to the admission/holder-binding
+   architecture*, not merely "compose the existing ZK estate". Tracked `sq-wvne`. The §5.4.1
+   `Origin-client`/`Attester-origin` and §5.4.2 `Presentation`/`Redemption-context`/
+   `Cross-origin`/`Attestation-reveals-no-identifying-info` rows are now marked `gap` for this
+   reason (they were `zk-comp` in the prior draft, which overstated deliverability).
+
+> **Footnote on the privacy layer (do not skip).** The `zk-comp` rows assume **both** an
+> external audit (`sq-qhy4`) **and** — for any *presentation*-unlinkability row — the
+> architectural replacement of §3.4 holder binding (item 5 above), neither of which is shipped.
+> The hidden-issuer variant (`sq-z9l`) and the holder-PoK member (`sq-xqfg`) are **built but
+> not-yet-sound**; the nullifier is **absent**. **Completeness for the privacy layer is
+> therefore promissory, blocked, and partly aspirational — it is NOT achievable under the
+> current design** and is **not claimed** here. Only the structural/relationship-layer
+> completeness (the `ontology` rows, CLAIM 2 in §7.6) is asserted.
 
 So the de-dup'd ten-term core (§2.3) + `forPredicate` sugar covers **all** the *trust-model and
-attestation structure* of both technologies, and the coverage table names the **four** missing
-**presentation-mechanics** primitives — three of which (`trust:nullifier`, `trust:rateLimit`,
-and the issuer-resolver) are *crypto-backed* obligations, not ontology expressivity. A skeptic
-should attack the claim *"coverage is complete"* precisely here: the `ontology` rows are
-defensible from the model, the `zk-comp` rows are **promissory** (unaudited, `sq-qhy4`), and the
-`gap` rows are **conceded, not hidden** — completeness holds **for the structural/relationship
-layer**, and is **explicitly not claimed** for the unlinkable-presentation layer (§7.6).
+attestation structure* of both technologies (the `ontology` rows), and the coverage table names
+the missing **presentation-mechanics** items — the crypto-backed obligations
+(`trust:nullifier`, `trust:rateLimit`, the issuer-resolver) **and** the §3.4 holder-binding
+architecture change that no amount of ZK composition fixes. A skeptic should attack the claim
+*"coverage is complete"* precisely here: the `ontology` rows are defensible from the model, the
+`zk-comp` rows are **promissory** (unaudited, `sq-qhy4`), and the `gap` rows — including every
+*presentation*-unlinkability row — are **conceded, not hidden**. Completeness holds **only for
+the structural/relationship layer**, and is **explicitly not claimed** for the
+unlinkable-presentation layer (§7.6, CLAIM 2).
 
 ## 6. Prototype plan (decomposed; each phase a future bead)
 
@@ -921,6 +964,51 @@ feature)** so the core (`sparq-solid`/`sparq-reason`) stays lean and a pod with 
 behaves exactly as WAC/ACP do now (the strict-additivity property, G6/§2.2). It adds **no new
 engine** — it wires the admission gate onto the shipped reasoner/canon/zk/shacl estate and
 hands admitted facts to the existing materialiser.
+
+**`sparq-trust` crate surface (the build brief — implement exactly this).** New crate
+`crates/sparq-trust`, behind a `sparq-solid` cargo feature `trust-graph` (default-OFF; the only
+edge `sparq-solid` gains is one feature-gated call into the admission gate before it
+materialises). Modules:
+
+- **`vocab.rs`** — the `trust:` IRIs of §2.3.1 as constants; the **one** desugaring
+  `forPredicate P → forShape (sh:targetSubjectsOf P + sh:path P ; sh:minCount 1)` (§2.3.3),
+  applied at load.
+- **`policy.rs`** — parse a trust policy graph (`.acr`-channel) into `TrustRule { source,
+  issuer_key, shape, scope, fresh_within }`; reject a policy that is not Control-gated (§3.2).
+- **`admit.rs`** — the admission gate (the algorithm below). Input: presented credential graph
+  `G`, the parsed `Vec<TrustRule>`, and the live `Session { agent, now }`. Output:
+  `Vec<AdmittedFact>` (issuer-tagged, `trust:admitted`).
+- **`wire.rs`** — feed `AdmittedFact`s into the existing `sparq-solid` assertion graph **ahead
+  of** the materialiser; everything downstream is unchanged shipped code.
+
+**Admission evaluation algorithm (`admit.rs` — the load-bearing logic).** For each credential
+graph `G` and each candidate `TrustRule r`, admit a triple `t = (s,p,o) ∈ G` **iff all** hold
+(short-circuit on first failure; default-deny):
+
+```text
+admit(G, rules, session) -> admitted:
+  cG   := canonicalise(G)                              # sparq-canon RDFC-1.0
+  for r in rules:
+    if not scope_covers(r.scope, target_resource):     continue            # §3.2 scope
+    if not verify_sig(cG.commitment, r.issuer_key):     continue            # §3.3 (1) CHECKED sig
+    if session.now - issued_at(G) > r.fresh_within:     continue            # §3.3 (B′) per-request Rust
+    if revoked(G):                                      continue            # input-stratified guard
+    for t=(s,p,o) in G:
+      if is_reserved(p):                                continue            # solidx:/urn:sparq: guard stays in force
+      if not shape_admits(r.shape, t, G):               continue            # §2.3.2 forShape / forPredicate-sugar (sparq-shacl)
+      if subject_of(t) != session.agent (no holder PoP):continue            # §3.4 holder binding
+      emit AdmittedFact{ t, issuer: r.source, mark: trust:admitted }
+```
+
+`verify_sig`, `revoked`, freshness, and holder-binding are **Rust side-conditions** (per-request,
+not in-reasoner — §3.3 B′); `shape_admits` runs the shipped, terminating `sparq-shacl` validator;
+`scope_covers` is a containment check. The emitted facts then enter the **unchanged** `sparq-solid`
+materialiser, which runs the `.acl` rule via `sparq-reason` `reason_n3`. **Open-problem hooks the
+PoC must respect** (do not silently "solve" them — wire them as the documented degraded path):
+`sq-xc4y` (holder-binding/freshness are per-request → run admission **per request** for
+credential-gated resources, not in the materialise-once view); `sq-tu4e` (no in-reasoner NAF over
+derived facts → `revoked` is an **input-only** seeded predicate; no deny-on-disagreement rule);
+`sq-l5og` / `sq-wvne` are **out of PoC scope** (no delegation, no ZK/privacy).
 
 **Acceptance (the adversarial forgery tests, mirroring `acp_forged_*_in_acr_document_does_not_grant`).**
 Positive: the age-25 credential grants `auth:read`. Negative (each must **deny**): (i) a graph
@@ -1024,14 +1112,19 @@ prior draft phrased as settled are open problems.
   **wrongly** said "the hidden-issuer set-membership upgrade is not yet reached" — corrected
   here: it IS built, the limitation is *soundness/audit*, not *absence*. MPC is semi-honest
   only. No line asserts a settled ZK/MPC privacy or soundness property. Tracked: `sq-wvne`.
-- **B — Hiding the issuer is necessary but NOT sufficient; §3.4 holder binding is in TENSION
-  with anonymity.** Even with a hidden issuer + selective-disclosure predicate proof, §3.4's
-  holder binding (`credentialSubject == Session.agent`) authenticates the requester's WebID
-  **in the clear** at the derivation stratum, so presentations are **trivially linkable by
-  requester identity** and access is **not anonymous**. A ZKAPs-equivalent presentation must
-  **replace clear-WebID holder binding** with an **in-ZK holder-PoP + nullifier** (bind to a
-  key, prove membership/possession in zero knowledge, enforce single-use). This composite is
-  **designed / partially-prototyped, NOT shipped or sound** (`sq-wvne`).
+- **B — Hiding the issuer is necessary but NOT sufficient; §3.4 holder binding is an
+  ARCHITECTURE-CHANGE blocker, not merely a ZK-composition gap.** Even with a hidden issuer +
+  selective-disclosure predicate proof + the full ZK composite, §3.4's holder binding
+  (`credentialSubject == Session.agent`) authenticates the requester's WebID **in the clear** at
+  the derivation stratum, so presentations are **trivially linkable by requester identity** and
+  access is **not anonymous** — no amount of ZK composition over the *credential* fixes a *clear
+  WebID* on the *request*. A ZKAPs-equivalent presentation must therefore **replace clear-WebID
+  holder binding** with an **in-ZK holder-PoP + nullifier** (bind to a key, prove
+  membership/possession in zero knowledge, enforce single-use): a **change to the
+  admission/holder-binding architecture**, not a compose-the-estate step. Accordingly the
+  *presentation*-unlinkability rows of §5.4 are now classified `gap` (architecture change
+  required), **not** `zk-comp`. This composite is **designed / partially-prototyped, NOT shipped
+  or sound**, and the nullifier is **absent** (`sq-wvne`).
 - **C — The superset claim is authorisation-model-level only.** It is *not* a standalone
   cryptographic superset; the unlinkable-presentation half is composition with the un-audited
   ZK layer (§5).
@@ -1164,9 +1257,19 @@ The genuine **design gaps** (not mere caveats) surfaced above are tracked as bea
 
 ### 7.6 Load-bearing claims a skeptic should attack first
 
-The two claims added by this revision (§2.3 minimal ontology, §5.4 coverage) carry the most
-weight and are stated here as **falsifiable** targets, with the counter-evidence that would
-sink each:
+**What this document does and does NOT claim (read before attacking).** This record is
+**self-adversarial**: it opens in design-for-review status and spends all of §7 dismantling its
+own prior draft's overclaims. The *primary* load-bearing claims a reviewer should attack are the
+**concessions of §7.1–7.4**, audited for *adequacy* — i.e. is each gap conceded honestly and
+fully, or does residual overclaim survive? Those concessions are specific and falsifiable, and
+are framed as **open problems, not settled claims**: admission-vs-materialise-once (`sq-xc4y`),
+delegation invocation-binding (`sq-l5og`), conflict / deny-on-disagreement reachability and the
+in-reasoner-NAF / freshness / issuer-key limits (`sq-tu4e`), and the ZK-presentation composite +
+§3.4-holder-binding architecture blocker (`sq-wvne`). The document makes **no claim** to
+cryptographic losslessness, to a *proven* minimal set, or to ZKAPs-grade unlinkability; the only
+two *constructive* completeness claims it stakes are the two below (de-dup losslessness scoped to
+the predicate-only direction, and coverage scoped to the structural/relationship layer). Both are
+stated as **falsifiable** targets, with the counter-evidence that would sink each:
 
 - **CLAIM 1 — "the de-dup is lossless."** Every term dropped from the prior draft is either a
   primitive that survives in the ten-term core (§2.3.1) or a *convenience that desugars without
@@ -1182,14 +1285,18 @@ sink each:
 - **CLAIM 2 — "coverage is complete."** It is **deliberately bounded**: complete for the
   **structural/relationship layer** of ZKAPs and IETF Privacy Pass (the `ontology` rows of
   §5.4), and **explicitly NOT claimed** for the unlinkable-presentation layer (the `zk-comp`
-  rows are promissory, gated on `sq-qhy4`; the four `gap` rows are conceded). **How to falsify:**
-  name a ZKAPs or RFC 9576/9577/9578 *structural/trust-relation/attestation* concept that has
-  **no** `ontology` row — that would break the bounded completeness claim; **or** show that a row
-  marked `ontology` actually requires ZK composition (mis-classified as deliverable when it is
-  promissory), **or** that a `zk-comp` row is in fact a hard `gap` (the built-but-unsound status
-  of `sq-z9l`/`sq-xqfg` is overstated). The claim is **not** "the trust graph delivers ZKAPs'
-  privacy" — that is the `zk-comp`/`gap` half, and asserting it would be the dishonest overclaim
-  §5–§7 exist to prevent.
+  rows are promissory, gated on `sq-qhy4`; the `gap` rows — *including every presentation-
+  unlinkability row* — are conceded). The privacy-layer completeness is **not achievable under
+  the current design**: every *presentation*-unlinkability row of §5.4 is now a `gap`, not a
+  `zk-comp` row, because §3.4 clear-WebID holder binding leaks the requester identity regardless
+  of the ZK composite (the §5.4.3 item-5 architecture-change gap). **How to falsify:** name a
+  ZKAPs or RFC 9576/9577/9578 *structural/trust-relation/attestation* concept that has **no**
+  `ontology` row — that would break the bounded completeness claim; **or** show that a row marked
+  `ontology` actually requires ZK composition (mis-classified as deliverable when it is
+  promissory or blocked), **or** that a `zk-comp` row is in fact a hard `gap` (the
+  built-but-unsound status of `sq-z9l`/`sq-xqfg` is overstated). The claim is **not** "the trust
+  graph delivers ZKAPs' privacy" — that is the `zk-comp`/`gap` half, and asserting it would be
+  the dishonest overclaim §5–§7 exist to prevent.
 - **CLAIM 3 (the original soundness claim, restated for completeness).** Admission re-opens the
   §2.4 content/reasoner boundary safely **only if** it verifies real issuer signatures (never
   self-asserted trust triples) and enforces statement-type scoping; **and** the adversarial
