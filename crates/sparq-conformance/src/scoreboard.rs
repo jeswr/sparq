@@ -137,8 +137,9 @@ pub struct Suite {
 ///   `DIVERGENCE_FLOOR = 0` (sq-t58w.8; a divergence-count floor, hard 0 — the WAC
 ///   and ACP differential rows share this one const).
 /// * Solid ACP differential 0 — same `DIVERGENCE_FLOOR = 0` (sq-t58w.8).
-/// * SolidLab ODRL 59 — `sparq-policy` `tests/odrl_test_suite.rs`
-///   `ODRL_SUITE_FLOOR = 59` (sq-tmsd6; 59 of 68 cases pass, 9 in a documented
+/// * SolidLab ODRL 67 — `sparq-policy` `tests/odrl_test_suite.rs`
+///   `ODRL_SUITE_FLOOR = 67` (sq-tmsd6 wired it at 59; the constraint-matching batch
+///   sq-euhr3/sq-k7itg/sq-a0zef raised it to 67 of 68 cases pass, 1 in a documented
 ///   not-implemented bucket).
 pub const SUITES: &[Suite] = &[
     Suite {
@@ -290,16 +291,18 @@ pub const SUITES: &[Suite] = &[
     // the 68 self-describing Turtle cases is driven through the REAL
     // `parse_policy_str` + `evaluate` path; the oracle is the case's expected
     // compliance report (`report:activationState` ⇒ ALLOW/DENY). The floor is the
-    // pass COUNT (59 at the pinned revision); the 9 remaining cases are a
-    // documented NOT-IMPLEMENTED bucket (LogicalConstraint/odrl:and, party/asset
-    // collections, the odrl:use umbrella-action divergence, duty-unknown) that
-    // does not fail the gate. Floor kept in lock-step by `tests/scoreboard_floors.rs`.
+    // pass COUNT (67 at the pinned revision after the constraint-matching batch
+    // sq-euhr3/sq-k7itg/sq-a0zef — `odrl:LogicalConstraint`, party/asset collection
+    // membership, and the `odrl:use` action hierarchy now PASS); the 1 remaining
+    // case is a documented NOT-IMPLEMENTED divergence (a duty whose discharge state
+    // is unknown/`report:NonSet` — sparq is fail-closed) that does not fail the gate.
+    // Floor kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "SolidLab ODRL Test Suite",
         family: "SolidLab ODRL",
         runner: Runner::CrateTest { krate: "sparq-policy", target: "odrl_test_suite" },
         ci_job: "odrl-conformance",
-        ratchet_floor: 59,
+        ratchet_floor: 67,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over the SolidLab self-describing ODRL \
                cases through sparq-policy's real evaluate() path",

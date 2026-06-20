@@ -15,7 +15,10 @@
 //!
 //! [OPUS-4.8]
 
-use crate::model::{Action, Constraint, Operator, Policy, Rule, Value};
+use crate::model::{
+    Action, Constraint, ConstraintNode, LogicalConstraint, LogicalOperator, Operator, Policy, Rule,
+    Value,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The `odrl:purpose` left-operand IRI — the dimension a *purpose constraint*
@@ -100,6 +103,24 @@ pub struct Request {
     /// byte-for-byte the exact-IRI base case and access is never widened on an unproven
     /// relation. [OPUS-4.8] sq-z3ve / sq-wukl.
     pub(crate) purpose_subsumes: BTreeSet<(String, String)>,
+    /// **Party-collection** membership evidence the request supplies: `(party,
+    /// collection)` pairs asserting `party odrl:partOf collection` (an
+    /// `odrl:PartyCollection`). A rule whose `assignee` names a collection matches a
+    /// request whose [`party`](Request::party) is a member of that collection. Populated
+    /// only via [`Request::with_party_membership`] / [`Request::with_party_memberships`].
+    /// [OPUS-4.8] sq-k7itg.
+    ///
+    /// **Soundness:** membership draws ONLY on this caller-supplied set (read out of the
+    /// state-of-the-world graph), never inferred — with an empty set, assignee matching is
+    /// byte-for-byte the exact-IRI base case and access is never widened.
+    pub(crate) party_memberships: BTreeSet<(String, String)>,
+    /// **Asset-collection** membership evidence: `(asset, collection)` pairs asserting
+    /// `asset odrl:partOf collection` (an `odrl:AssetCollection`). A rule whose `target`
+    /// names a collection matches a request whose [`target`](Request::target) is a member
+    /// of that collection. Populated only via [`Request::with_asset_membership`] /
+    /// [`Request::with_asset_memberships`]. Same soundness contract as
+    /// [`party_memberships`](Request::party_memberships). [OPUS-4.8] sq-k7itg.
+    pub(crate) asset_memberships: BTreeSet<(String, String)>,
 }
 
 impl Request {
@@ -252,6 +273,100 @@ impl Request {
     /// [OPUS-4.8] sq-idnv.
     pub fn request_time(&self) -> Option<&Value> {
         self.context.get(ODRL_DATETIME)
+    }
+
+    /// Declare one **party-collection membership** edge `party odrl:partOf
+    /// collection` (chainable) — read out of the request's state-of-the-world.
+    /// [OPUS-4.8] sq-k7itg.
+    ///
+    /// With one or more such edges supplied, a rule whose `odrl:assignee` names an
+    /// `odrl:PartyCollection` is matched by a request whose [`party`](Request::party) is
+    /// a *member* of that collection — not only by a request whose party IS the
+    /// collection IRI. The membership relation is the **caller-supplied** set only (read
+    /// from the sotw, never inferred), so with no edge supplied assignee matching is the
+    /// exact-IRI base case and access is never widened.
+    pub fn with_party_membership(
+        mut self,
+        party: impl Into<String>,
+        collection: impl Into<String>,
+    ) -> Request {
+        self.party_memberships
+            .insert((party.into(), collection.into()));
+        self
+    }
+
+    /// Declare many **party-collection membership** edges `(party, collection)` at once
+    /// (chainable) — the bulk form of [`Request::with_party_membership`]. [OPUS-4.8]
+    /// sq-k7itg.
+    pub fn with_party_memberships<P, C, I>(mut self, edges: I) -> Request
+    where
+        P: Into<String>,
+        C: Into<String>,
+        I: IntoIterator<Item = (P, C)>,
+    {
+        for (p, c) in edges {
+            self.party_memberships.insert((p.into(), c.into()));
+        }
+        self
+    }
+
+    /// Declare one **asset-collection membership** edge `asset odrl:partOf collection`
+    /// (chainable) — the asset twin of [`Request::with_party_membership`]. A rule whose
+    /// `odrl:target` names an `odrl:AssetCollection` is then matched by a request whose
+    /// [`target`](Request::target) is a member of that collection. [OPUS-4.8] sq-k7itg.
+    pub fn with_asset_membership(
+        mut self,
+        asset: impl Into<String>,
+        collection: impl Into<String>,
+    ) -> Request {
+        self.asset_memberships
+            .insert((asset.into(), collection.into()));
+        self
+    }
+
+    /// Declare many **asset-collection membership** edges `(asset, collection)` at once
+    /// (chainable) — the bulk form of [`Request::with_asset_membership`]. [OPUS-4.8]
+    /// sq-k7itg.
+    pub fn with_asset_memberships<A, C, I>(mut self, edges: I) -> Request
+    where
+        A: Into<String>,
+        C: Into<String>,
+        I: IntoIterator<Item = (A, C)>,
+    {
+        for (a, c) in edges {
+            self.asset_memberships.insert((a.into(), c.into()));
+        }
+        self
+    }
+
+    /// Whether the request's party is `target` or a member of the collection `target`
+    /// (`party odrl:partOf target`) under the supplied membership evidence. [OPUS-4.8]
+    /// sq-k7itg.
+    pub(crate) fn party_matches(&self, target: &str) -> bool {
+        match self.party.as_deref() {
+            Some(p) => {
+                p == target
+                    || self
+                        .party_memberships
+                        .contains(&(p.to_owned(), target.to_owned()))
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the request's target asset is `target` or a member of the collection
+    /// `target` (`asset odrl:partOf target`) under the supplied membership evidence.
+    /// [OPUS-4.8] sq-k7itg.
+    pub(crate) fn asset_matches(&self, target: &str) -> bool {
+        match self.target.as_deref() {
+            Some(a) => {
+                a == target
+                    || self
+                        .asset_memberships
+                        .contains(&(a.to_owned(), target.to_owned()))
+            }
+            None => false,
+        }
     }
 }
 
@@ -899,26 +1014,37 @@ enum RuleClass {
 /// *unprovable* (no evidence for the dimension — ambiguous). [OPUS-4.8] sq-2pcf.
 fn classify_prohibition(rule: &Rule, request: &Request, req_action: &Action) -> RuleClass {
     // Structural attributes are definite: if any disagrees the rule no longer names
-    // this request at all (a genuine withdrawal of *this* carve-out).
+    // this request at all (a genuine withdrawal of *this* carve-out). Action/target/
+    // assignee use the SAME action-hierarchy + collection-membership matching as the
+    // grant path (sq-euhr3 / sq-k7itg) so a deny carved by a collection/`use` rule is
+    // classified consistently.
     if !rule.action.permits(req_action) {
         return RuleClass::DefinitelyNo;
     }
     if let Some(t) = &rule.target {
-        if request.target.as_deref() != Some(t.as_str()) {
+        if !request.asset_matches(t) {
             return RuleClass::DefinitelyNo;
         }
     }
     if let Some(a) = &rule.assignee {
-        if request.party.as_deref() != Some(a.as_str()) {
+        if !request.party_matches(a) {
             return RuleClass::DefinitelyNo;
         }
     }
     // Structural attributes agree — the constraints decide. A constraint that is
     // *definitely* false (we have evidence and it fails) is a definite no; one that is
     // unprovable for lack of evidence is ambiguous (a deny must NOT be retracted on it).
+    // Atomic and compound (logical) constraints fold in identically.
     let mut any_ambiguous = false;
     for c in &rule.constraints {
         match constraint_status(c, request) {
+            ConstraintStatus::Satisfied => {}
+            ConstraintStatus::DefinitelyUnsatisfied => return RuleClass::DefinitelyNo,
+            ConstraintStatus::Unprovable => any_ambiguous = true,
+        }
+    }
+    for lc in &rule.logical_constraints {
+        match logical_constraint_status(lc, request) {
             ConstraintStatus::Satisfied => {}
             ConstraintStatus::DefinitelyUnsatisfied => return RuleClass::DefinitelyNo,
             ConstraintStatus::Unprovable => any_ambiguous = true,
@@ -934,6 +1060,7 @@ fn classify_prohibition(rule: &Rule, request: &Request, req_action: &Action) -> 
 /// Whether one constraint is satisfied, *definitely* unsatisfied, or *unprovable* for
 /// lack of evidence — the three-valued refinement of [`constraint_satisfied`] that
 /// deny-retraction needs (a plain bool conflates the last two). [OPUS-4.8] sq-2pcf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConstraintStatus {
     /// The request supplies evidence and the comparison holds.
     Satisfied,
@@ -951,6 +1078,83 @@ fn constraint_status(c: &Constraint, request: &Request) -> ConstraintStatus {
                 ConstraintStatus::Satisfied
             } else {
                 ConstraintStatus::DefinitelyUnsatisfied
+            }
+        }
+    }
+}
+
+/// The three-valued verdict of one [`ConstraintNode`] operand — an atomic constraint
+/// goes through [`constraint_status`], a nested compound recurses through
+/// [`logical_constraint_status`]. [OPUS-4.8] sq-a0zef.
+fn constraint_node_status(node: &ConstraintNode, request: &Request) -> ConstraintStatus {
+    match node {
+        ConstraintNode::Atomic(c) => constraint_status(c, request),
+        ConstraintNode::Compound(lc) => logical_constraint_status(lc, request),
+    }
+}
+
+/// The three-valued verdict of a compound `odrl:LogicalConstraint` against a request —
+/// each operand's three-valued [`constraint_status`] folded through the combinator,
+/// **fail-closed** (an indeterminate operand never silently satisfies an `and`/`xone`).
+/// [OPUS-4.8] sq-a0zef.
+///
+/// Combinator semantics (operands carry one of `Satisfied` / `DefinitelyUnsatisfied` /
+/// `Unprovable`):
+///
+/// - **`and`** — `Satisfied` iff EVERY operand is `Satisfied`; `DefinitelyUnsatisfied`
+///   iff ANY operand is `DefinitelyUnsatisfied` (one definite false sinks the
+///   conjunction regardless of unprovable siblings); else `Unprovable` (some operand is
+///   unprovable, none definitely false). An **empty** operand set is `Unprovable`
+///   (a compound that asserts nothing is not a positive grant — fail-closed).
+/// - **`or`** — `Satisfied` iff ANY operand is `Satisfied`; `DefinitelyUnsatisfied` iff
+///   EVERY operand is `DefinitelyUnsatisfied`; else `Unprovable`. An empty operand set is
+///   `DefinitelyUnsatisfied` (a disjunction with no operand can never hold).
+/// - **`xone`** — exclusive-or, `Satisfied` iff EXACTLY ONE operand is `Satisfied` AND
+///   no operand is `Unprovable` (an unprovable operand could be the disqualifying second
+///   true, so the exact-one count is not provable → `Unprovable`, never silently
+///   `Satisfied`). `DefinitelyUnsatisfied` iff the count of `Satisfied` is provably ≠ 1
+///   (0 with no unprovable operand, or ≥ 2). Otherwise `Unprovable`.
+fn logical_constraint_status(lc: &LogicalConstraint, request: &Request) -> ConstraintStatus {
+    use ConstraintStatus::*;
+    let mut n_sat = 0usize;
+    let mut n_unsat = 0usize;
+    let mut n_unprov = 0usize;
+    for operand in &lc.operands {
+        match constraint_node_status(operand, request) {
+            Satisfied => n_sat += 1,
+            DefinitelyUnsatisfied => n_unsat += 1,
+            Unprovable => n_unprov += 1,
+        }
+    }
+    match lc.operator {
+        LogicalOperator::And => {
+            if n_unsat > 0 {
+                DefinitelyUnsatisfied
+            } else if n_unprov > 0 || lc.operands.is_empty() {
+                Unprovable
+            } else {
+                Satisfied
+            }
+        }
+        LogicalOperator::Or => {
+            if n_sat > 0 {
+                Satisfied
+            } else if n_unprov > 0 {
+                Unprovable
+            } else {
+                // every operand definitely-unsatisfied (incl. the empty set)
+                DefinitelyUnsatisfied
+            }
+        }
+        LogicalOperator::Xone => {
+            if n_unprov > 0 {
+                // An unprovable operand could flip the satisfied-count → not provable.
+                Unprovable
+            } else if n_sat == 1 {
+                Satisfied
+            } else {
+                // provably 0 or ≥2 satisfied (no unprovable operands)
+                DefinitelyUnsatisfied
             }
         }
     }
@@ -1039,7 +1243,8 @@ struct Match {
 fn rule_matches(rule: &Rule, request: &Request, req_action: &Action) -> Match {
     let mut reasons = Vec::new();
 
-    // Action: the rule's action must permit the requested action.
+    // Action: the rule's action must permit the requested action (the ODRL action
+    // hierarchy — `use` subsumes its sub-actions but not the transfer subtree, sq-euhr3).
     if !rule.action.permits(req_action) {
         reasons.push(format!(
             "rule {} action {} != requested {}",
@@ -1051,9 +1256,10 @@ fn rule_matches(rule: &Rule, request: &Request, req_action: &Action) -> Match {
         };
     }
 
-    // Target: if the rule names a target, it must equal the request target.
+    // Target: if the rule names a target, the request target must equal it OR be a
+    // member of it (an odrl:AssetCollection — sq-k7itg).
     if let Some(t) = &rule.target {
-        if request.target.as_deref() != Some(t.as_str()) {
+        if !request.asset_matches(t) {
             reasons.push(format!(
                 "rule {} target {t} != requested {:?}",
                 rule.id, request.target
@@ -1065,12 +1271,28 @@ fn rule_matches(rule: &Rule, request: &Request, req_action: &Action) -> Match {
         }
     }
 
-    // Assignee: if the rule names an assignee party, it must equal the requester.
+    // Assignee: if the rule names an assignee party, the requester must equal it OR be
+    // a member of it (an odrl:PartyCollection — sq-k7itg).
     if let Some(a) = &rule.assignee {
-        if request.party.as_deref() != Some(a.as_str()) {
+        if !request.party_matches(a) {
             reasons.push(format!(
                 "rule {} assignee {a} != requester {:?}",
                 rule.id, request.party
+            ));
+            return Match {
+                is_match: false,
+                reasons,
+            };
+        }
+    }
+
+    // Compound logical constraints: every one must be satisfied (logical AND with the
+    // atomic constraints — sq-a0zef). Fail-closed: an indeterminate compound is unsat.
+    for lc in &rule.logical_constraints {
+        if logical_constraint_status(lc, request) != ConstraintStatus::Satisfied {
+            reasons.push(format!(
+                "rule {} logical constraint {} ({:?}) unsatisfied",
+                rule.id, lc.id, lc.operator
             ));
             return Match {
                 is_match: false,
