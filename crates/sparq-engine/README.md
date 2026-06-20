@@ -99,6 +99,11 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   the full algorithm — term definitions, `@vocab`, type/language/`@container`
   (`@set`/`@list`/`@language`/`@index`) coercion, `@reverse`, `@id`/`@type` aliasing, value +
   node + IRI compaction — still hand-rolled, dependency-free (`parse_context_json` builds it).
+  The emitted document is **faithful to a strict third-party processor** (differentially verified
+  against the pyld W3C reference): a `@reverse` edge is emitted as a forward member of the reverse
+  term (not an `@reverse` block, which would double-invert); non-string values never land in a
+  language map; multi-value `@language`/`@index` containers accumulate (no value lost); and a
+  literal under a `@type:@id` term stays a literal (sq-oy1f.12/.13/.14).
   `JsonLdForm::Compacted` remains the lighter prefix-only `@context`. The N-Triples writer
   (`triples_to_ntriples`) is always on; off, zero serializer code compiles, the default build is
   byte-identical, **no new dependencies** added. See
