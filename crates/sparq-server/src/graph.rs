@@ -88,6 +88,33 @@ pub fn triples_to_rdfxml(triples: &[Triple]) -> String {
     serialize_with(ser.for_writer(Vec::new()), triples, |w, t| w.serialize_triple(t), |w| w.finish())
 }
 
+/// [OPUS-4.8] sq-oy1f.1: Serialises an RDF graph (triple list) as **JSON-LD 1.1**
+/// (`application/ld+json`) in the engine's *flattened* document form: a
+/// `{"@graph": [ … node objects … ]}` envelope with subjects merged into one node object
+/// each and a stable node ordering. We pick the flattened form (over expanded or compacted)
+/// as the negotiated default because it is the safest interop target — node-merged, no
+/// `@context` to negotiate against, and round-trips losslessly back to the same RDF graph
+/// (the JSON-LD `toRdf` of a `fromRdf`-flattened document reconstructs the source triples,
+/// asserted by the server-level round-trip test).
+///
+/// The result graph for a CONSTRUCT / DESCRIBE / GSP read is a flat list of default-graph
+/// triples (no named graphs — GSP scopes one graph per request, named by the URL), so we
+/// hand the engine writer a single default-graph view `[(None, triples)]`. The prefixes
+/// argument is only consulted by the compacted form, which we do not use here, so the
+/// engine's `default_prefixes` are inert.
+///
+/// OPT-IN: only compiled when the server's `jsonld` feature is on (it links the engine's
+/// `serialize-rdf` JSON-LD writer); without the feature this function does not exist and the
+/// `GraphFormat::JsonLd` variant it serves is never constructed.
+#[cfg(feature = "jsonld")]
+pub fn triples_to_jsonld(triples: &[Triple]) -> String {
+    use sparq_engine::serialize::{default_prefixes, write_jsonld, JsonLdForm, NamedGraph};
+    // One default-graph view over the triple list. `NamedGraph = (Option<&Term>, &[Triple])`;
+    // `None` is the default graph.
+    let view: [NamedGraph<'_>; 1] = [(None, triples)];
+    write_jsonld(&view, JsonLdForm::Flattened, &default_prefixes())
+}
+
 /// Shared driver for the `oxttl` / `oxrdfxml` writers, which share the
 /// `serialize_triple(TripleRef) -> io::Result<()>` + `finish() -> io::Result<W>` shape.
 /// Writing to an in-memory `Vec<u8>` is infallible, so an `io::Error` here is genuinely

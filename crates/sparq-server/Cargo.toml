@@ -200,6 +200,21 @@ n3-patch = ["server"]
 # The default `server` build holds the ring/writer directly (byte-identical to pre-#941) and
 # never depends on arc-swap, so the default serving read path stays lean.
 backup = ["server", "dep:arc-swap", "sparq-serve/backup"]
+# [OPUS-4.8] (sq-oy1f.1, epic sq-oy1f) `jsonld` (default OFF) wires JSON-LD 1.1
+# (`application/ld+json`) into the server's RDF content negotiation, both directions:
+#   * EMIT — a SPARQL CONSTRUCT/DESCRIBE or a Graph-Store-Protocol GET with
+#     `Accept: application/ld+json` is served as JSON-LD (the engine's *flattened* form),
+#     participating in the existing q-value-aware Accept negotiation; and
+#   * ACCEPT — a GSP PUT/POST (or the SHACL shapes-body reader, which shares the same media-type
+#     matrix) with `Content-Type: application/ld+json` is parsed into the store via the engine's
+#     JSON-LD parser.
+# It turns on `sparq-core/jsonld` (the `oxjsonld` parser that `Graph::load_str` dispatches the
+# "jsonld" token to) and `sparq-engine/serialize-rdf` (the `write_jsonld` serialiser). Both are
+# native-pure (no wasm impact — sparq-wasm depends on sparq-core/-engine directly, never on
+# sparq-server). Without the feature the `GraphFormat::JsonLd` variant, its negotiation arm and
+# its write-body arm are `#[cfg]`-stripped, so an `application/ld+json` request gets the same
+# 406/415 it did before and the default build is byte-identical. Needs `server`.
+jsonld = ["server", "sparq-core/jsonld", "sparq-engine/serialize-rdf"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

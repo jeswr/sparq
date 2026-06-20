@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML, plus JSON-LD behind the opt-in jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + opt-in JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -225,7 +225,7 @@ CONSTRUCT/DESCRIBE):
 | --- | --- | --- |
 | SELECT | `application/sparql-results+json` (default) / `+xml` / `text/csv` / `text/tab-separated-values` | matching results media |
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
-| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` | matching RDF media; N-Triples, prefix-compacting Turtle, or RDF/XML <!-- [OPUS-4.8] sq-rt6v --> |
+| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (opt-in `jsonld` feature) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1 --> |
 
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \
@@ -236,7 +236,20 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: text/turtle' \
 # RDF/XML:
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/rdf+xml' \
      --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
+# JSON-LD (flattened) — requires a `--features jsonld` build: [OPUS-4.8] sq-oy1f.1
+curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
+     --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
 ```
+
+> **JSON-LD content negotiation (opt-in `jsonld` feature).** With the server built
+> `--features jsonld`, `application/ld+json` joins the q-value-aware RDF negotiation in BOTH
+> directions: a CONSTRUCT/DESCRIBE or a Graph-Store-Protocol read with `Accept:
+> application/ld+json` is served as the engine's *flattened* JSON-LD (a `{"@graph": […]}`
+> node-object document that `toRdf`-round-trips to the same graph), and a GSP `PUT`/`POST`
+> with `Content-Type: application/ld+json` is parsed into the store via the engine's JSON-LD
+> parser. Without the feature, `application/ld+json` is unrecognised: an `Accept` for it falls
+> back to N-Triples (never a 406 — the endpoint always has a representation), and a write body
+> in it is a plain `415`. The default build is byte-identical to before.
 
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)
@@ -330,14 +343,17 @@ gauge count SSE streams and WS subscriptions together.
 
 ```sh
 # READ (GET/HEAD): serialises the addressed graph in the Accept-negotiated RDF syntax
-# (default N-Triples; also text/turtle = prefix-compacting Turtle, application/rdf+xml = RDF/XML)
+# (default N-Triples; also text/turtle = prefix-compacting Turtle, application/rdf+xml = RDF/XML,
+#  and application/ld+json = flattened JSON-LD with `--features jsonld` [OPUS-4.8] sq-oy1f.1)
 curl http://127.0.0.1:3030/sparql/graph?default                 # GSP indirect (default graph)
 curl 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'     # GSP indirect (named graph)
 curl http://127.0.0.1:3030/graphs/whatever                      # GSP direct (request URI is the graph IRI)
 curl -H 'Accept: application/rdf+xml' http://127.0.0.1:3030/sparql/graph?default   # RDF/XML read [OPUS-4.8] sq-rt6v
+curl -H 'Accept: application/ld+json' http://127.0.0.1:3030/sparql/graph?default   # JSON-LD read (--features jsonld) [OPUS-4.8] sq-oy1f.1
 
 # WRITE (sq-gxsj): body is RDF, format by Content-Type
-#   (turtle | n-triples | n-quads | trig | application/rdf+xml [OPUS-4.8] sq-rt6v)
+#   (turtle | n-triples | n-quads | trig | application/rdf+xml [OPUS-4.8] sq-rt6v
+#    | application/ld+json with `--features jsonld` [OPUS-4.8] sq-oy1f.1)
 # PUT = REPLACE graph contents (201 if created, 204 if replaced):
 curl -X PUT 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
      -H 'content-type: text/turtle' --data '<http://ex/s> <http://ex/p> <http://ex/o> .'
