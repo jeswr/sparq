@@ -1685,6 +1685,52 @@ pub fn graph_to_jsonld_compact(graph: &Graph, context: &JsonLdValue) -> String {
 }
 
 // ===========================================================================
+// [OPUS-4.8] (sq-oy1f.17) W3C JSON-LD 1.1 Framing.
+//
+// The `frame` submodule implements the W3C JSON-LD 1.1 Framing Algorithm: it
+// reshapes an RDF dataset into a deterministic tree matching a caller-supplied
+// **frame** document — node-pattern matching (`@type`/property presence/value/
+// wildcard `{}`/match-none `[]`), recursive subtree framing with the `@embed`
+// link table (breaking blank-node cycles), `@explicit` pruning, `@default`/
+// `@omitDefault` fill, `@requireAll` (AND vs OR), and list / named-graph framing
+// — then compacts the framed model against the frame's `@context`. Hand-rolled
+// and dependency-free, reusing the `compact` submodule's `Json` AST + fromRdf
+// model builder (no `serde_json`, no `json-ld` crate), inside `serialize-rdf`.
+// ===========================================================================
+mod frame;
+pub use frame::write_jsonld_framed;
+
+/// Frames a [`Graph`] (dataset) against a caller-supplied JSON-LD **frame** document,
+/// applying the full W3C JSON-LD 1.1 Framing Algorithm, and returns the framed + compacted
+/// JSON-LD 1.1 document.
+///
+/// Framing reshapes the input into a deterministic tree matching the frame: it selects the
+/// subjects whose node pattern matches the frame (`@type` / property presence / specific
+/// value / wildcard `{}` / match-none `[]`, combined with AND under `@requireAll: true` else OR),
+/// embeds referenced nodes inline per the `@embed` flag (`@once`/`@always`/`@never`; `@link`
+/// treated as `@always`) while the blank-node link table breaks circular references, prunes
+/// each matched node to the framed properties when `@explicit: true`, and fills `@default` /
+/// a preserve-`null` marker for framed properties absent from the matched node (suppressed by
+/// `@omitDefault: true`). The framed model is then compacted against the frame's `@context`.
+///
+/// `frame` is the parsed frame JSON (build it with [`parse_context_json`] from a frame string,
+/// or construct the [`JsonLdValue`] directly). The output is a `{"@context": …, "@graph": […]}`
+/// document, collapsing to the bare framed node merged with `@context` for a single matched
+/// root (the `omitGraph` default). Named graphs in the dataset are each framed against the
+/// same pattern.
+///
+/// Hand-rolled and **dependency-free** — no `json-ld` crate, no `serde_json` (the same tiny
+/// `Json` AST as [`graph_to_jsonld_compact`]).
+pub fn graph_to_jsonld_framed(graph: &Graph, frame: &JsonLdValue) -> String {
+    let owned = dataset_graphs(graph);
+    let view: Vec<NamedGraph<'_>> = owned
+        .iter()
+        .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+        .collect();
+    write_jsonld_framed(&view, frame)
+}
+
+// ===========================================================================
 // [OPUS-4.8] (sq-ixc3.3) PRETTY (indented) JSON-LD.
 //
 // The minified writers above assemble their document into a flat `String` token by
