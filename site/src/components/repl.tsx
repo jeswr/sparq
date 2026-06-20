@@ -63,7 +63,21 @@ import { ConnectPanel } from "@/components/connect-panel";
 import { SubscriptionsView } from "@/components/subscriptions-view";
 // [OPUS-4.8] sq-he72 — endpoint mode: the server health / capabilities panel (metrics + VoID/SD).
 import { ServerHealthPanel } from "@/components/server-health-panel";
-import { type EndpointConfig, runEndpointQuery } from "@sparq/client";
+import {
+  type EndpointConfig,
+  type Workspace,
+  type WorkspaceSourceMeta,
+  newWorkspace,
+  runEndpointQuery,
+} from "@sparq/client";
+// [OPUS-4.8] sq-atb0 — the persistent cross-session workspace panel + its hook + the
+// site-side wasm-Store ⇄ snapshot bridge.
+import { WorkspacePanel } from "@/components/workspace-panel";
+import { useWorkspaces } from "@/lib/use-workspaces";
+import {
+  snapshotStore,
+  restoreStoreFromSnapshot,
+} from "@/lib/workspace-snapshot";
 
 // [OPUS-4.8] sq-vfbm — the REPL now dispatches across the whole lean-bundle query
 // surface, so the result state carries one variant per shape of answer: a solution
@@ -130,6 +144,21 @@ export function Repl() {
     url: "http://127.0.0.1:3030/sparql",
     token: "",
   });
+
+  // [OPUS-4.8] sq-atb0 — the persistent cross-session workspace state. `workspaces` owns the
+  // resolved persistence backend (Tauri disk / browser localStorage / in-memory) and the CRUD
+  // surface; `currentWorkspaceId` is the open workspace (null = an unsaved scratch session);
+  // `sources` accumulates the import metadata (local + url) of every source loaded this session
+  // so a saved workspace can re-draw its source list and re-fetch its URL sources. The dataset
+  // itself is persisted as an N-Quads SNAPSHOT (the save/open cache), not re-ingested on open.
+  const workspaces = useWorkspaces();
+  const [currentWorkspaceId, setCurrentWorkspaceId] = React.useState<string | null>(
+    null,
+  );
+  const [sources, setSources] = React.useState<WorkspaceSourceMeta[]>([]);
+  const [workspaceBusy, setWorkspaceBusy] = React.useState(false);
+  // Guards the one-shot startup re-hydration so it runs at most once per mount.
+  const rehydratedRef = React.useRef(false);
 
   // Build (or rebuild) the store from RDF text + format. Centralises error handling so
   // every load path (default, picker, upload, URL) reports failures the same way.
@@ -312,6 +341,9 @@ export function Repl() {
         await buildStore(ds.text, ds.format);
         setActiveBuiltinId(ds.id);
         setActive({ label: ds.label, description: ds.description });
+        // [OPUS-4.8] sq-atb0 — a built-in dataset REPLACES the store, so it resets the imported-
+        // source list: there are no user imports to re-list (the data lives in the snapshot).
+        setSources([]);
         setState({ kind: "idle" });
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -329,6 +361,7 @@ export function Repl() {
       format: string,
       label: string,
       mode: "replace" | "add",
+      origin?: { kind: "local" | "url"; url?: string },
     ) => {
       try {
         const Store = await loadSparq();
@@ -356,6 +389,21 @@ export function Repl() {
           });
         }
         setActiveBuiltinId(null);
+        // [OPUS-4.8] sq-atb0 — record this import as workspace source metadata. A "replace"
+        // load starts a fresh source list; an "add" appends. `origin` defaults to a local file
+        // when the caller did not say (the only callers that omit it are programmatic loads).
+        const meta: WorkspaceSourceMeta = {
+          kind: origin?.kind ?? "local",
+          label,
+          url: origin?.kind === "url" ? origin.url : undefined,
+          format,
+          bytes:
+            typeof TextEncoder !== "undefined"
+              ? new TextEncoder().encode(text).length
+              : text.length,
+          importedAt: Date.now(),
+        };
+        setSources((prev) => (mode === "add" ? [...prev, meta] : [meta]));
         setState({ kind: "idle" });
         toast.success("Dataset loaded", {
           // Count the WHOLE dataset (default + named graphs), not just the default.
@@ -369,6 +417,206 @@ export function Repl() {
     },
     [buildStore, size],
   );
+
+  // [OPUS-4.8] sq-atb0 — apply a loaded workspace to the live REPL: re-hydrate the wasm store
+  // from the workspace's N-Quads SNAPSHOT (the save/open cache — no re-ingest from source),
+  // restore the editor state (query + run mode + endpoint view, never a bearer token), and
+  // re-draw the imported-source list. Becomes the open workspace.
+  const applyWorkspace = React.useCallback(
+    async (ws: Workspace) => {
+      const store = await restoreStoreFromSnapshot(ws.dataSnapshot);
+      storeRef.current = store;
+      setSize(datasetSize(store));
+      setDatasetVersion((v) => v + 1);
+      setActiveBuiltinId(null);
+      setActive({
+        label: ws.name,
+        description: `Restored from workspace "${ws.name}" (${ws.sources.length} source${
+          ws.sources.length === 1 ? "" : "s"
+        }).`,
+      });
+      setSources(ws.sources);
+      setSparql(ws.editor.query);
+      setMode(ws.editor.mode);
+      setEndpointActive(ws.editor.endpointActive);
+      if (ws.editor.endpointUrl) {
+        // Restore the endpoint URL but NEVER a token — a restored endpoint session re-prompts.
+        setEndpointConfig((c) => ({ url: ws.editor.endpointUrl ?? c.url, token: "" }));
+      }
+      setCurrentWorkspaceId(ws.id);
+      setState({ kind: "idle" });
+    },
+    [],
+  );
+
+  // [OPUS-4.8] sq-atb0 — assemble a Workspace record from the current REPL state: the
+  // whole-dataset N-Quads snapshot, the imported-source metadata, and the editor state (no
+  // token). Reused by both Save (overwrite) and Save-as (new id).
+  const buildWorkspaceRecord = React.useCallback(
+    (base: Workspace): Workspace => {
+      const store = storeRef.current;
+      return {
+        ...base,
+        sources,
+        dataSnapshot: store ? snapshotStore(store) : undefined,
+        editor: {
+          query: sparql,
+          mode,
+          endpointActive,
+          endpointUrl: endpointActive ? endpointConfig.url : undefined,
+        },
+      };
+    },
+    [sources, sparql, mode, endpointActive, endpointConfig.url],
+  );
+
+  // Open a stored workspace by id (from the switcher).
+  const openWorkspace = React.useCallback(
+    async (id: string) => {
+      setWorkspaceBusy(true);
+      try {
+        const ws = await workspaces.load(id);
+        if (!ws) {
+          toast.error("Workspace not found", {
+            description: "It may have been deleted in another tab.",
+          });
+          return;
+        }
+        await applyWorkspace(ws);
+        await workspaces.setLastOpened(ws.id);
+        toast.success("Workspace opened", { description: ws.name });
+      } catch (e) {
+        toast.error("Could not open workspace", {
+          description: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        setWorkspaceBusy(false);
+      }
+    },
+    [workspaces, applyWorkspace],
+  );
+
+  // Overwrite the open workspace with the current state.
+  const saveWorkspace = React.useCallback(async () => {
+    if (currentWorkspaceId === null) return;
+    setWorkspaceBusy(true);
+    try {
+      const existing = await workspaces.load(currentWorkspaceId);
+      const base = existing ?? newWorkspace("Workspace", sparql);
+      await workspaces.save(buildWorkspaceRecord({ ...base, id: currentWorkspaceId }));
+      toast.success("Workspace saved");
+    } catch (e) {
+      toast.error("Could not save workspace", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }, [currentWorkspaceId, workspaces, buildWorkspaceRecord, sparql]);
+
+  // Save the current state as a NEW named workspace (becomes the open one).
+  const saveWorkspaceAs = React.useCallback(
+    async (name: string) => {
+      setWorkspaceBusy(true);
+      try {
+        const record = buildWorkspaceRecord(newWorkspace(name, sparql));
+        await workspaces.save(record);
+        setCurrentWorkspaceId(record.id);
+        toast.success("Workspace created", { description: name });
+      } catch (e) {
+        toast.error("Could not save workspace", {
+          description: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        setWorkspaceBusy(false);
+      }
+    },
+    [buildWorkspaceRecord, workspaces, sparql],
+  );
+
+  // Rename the open workspace.
+  const renameWorkspace = React.useCallback(
+    async (name: string) => {
+      if (currentWorkspaceId === null) return;
+      setWorkspaceBusy(true);
+      try {
+        const existing = await workspaces.load(currentWorkspaceId);
+        if (!existing) return;
+        await workspaces.save({ ...existing, name });
+        toast.success("Workspace renamed", { description: name });
+      } catch (e) {
+        toast.error("Could not rename workspace", {
+          description: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        setWorkspaceBusy(false);
+      }
+    },
+    [currentWorkspaceId, workspaces],
+  );
+
+  // Delete a stored workspace; if it was the open one, drop back to a scratch session.
+  const deleteWorkspace = React.useCallback(
+    async (id: string) => {
+      setWorkspaceBusy(true);
+      try {
+        await workspaces.remove(id);
+        if (id === currentWorkspaceId) {
+          setCurrentWorkspaceId(null);
+          await workspaces.setLastOpened(null);
+        }
+        toast.success("Workspace deleted");
+      } catch (e) {
+        toast.error("Could not delete workspace", {
+          description: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        setWorkspaceBusy(false);
+      }
+    },
+    [workspaces, currentWorkspaceId],
+  );
+
+  // Start a fresh scratch session: reload the default dataset, reset the editor + sources, and
+  // detach from any open workspace (nothing is deleted).
+  const newScratchSession = React.useCallback(async () => {
+    setCurrentWorkspaceId(null);
+    await workspaces.setLastOpened(null);
+    setSources([]);
+    setSparql(EXAMPLE_QUERIES[0].sparql);
+    setMode("run");
+    setActiveBuiltinId(DEFAULT_DATASET.id);
+    setActive({
+      label: DEFAULT_DATASET.label,
+      description: DEFAULT_DATASET.description,
+    });
+    try {
+      await buildStore(DEFAULT_DATASET.text, DEFAULT_DATASET.format);
+    } catch {
+      // The pre-warm effect / ensureStore will rebuild the default on the next run.
+    }
+    setState({ kind: "idle" });
+  }, [workspaces, buildStore]);
+
+  // [OPUS-4.8] sq-atb0 — startup re-hydration: once the persistence backend has resolved, if a
+  // last-opened workspace exists, restore it (its snapshot + editor state). Runs at most once
+  // per mount (the ref guard), and only after the engine pre-warm has built the default store,
+  // so applying the snapshot replaces a known-good store. A failure is non-fatal — the user
+  // keeps the default scratch session.
+  React.useEffect(() => {
+    if (rehydratedRef.current) return;
+    if (!workspaces.ready || workspaces.initialId === null) return;
+    if (engine !== "ready") return;
+    rehydratedRef.current = true;
+    void (async () => {
+      try {
+        const ws = await workspaces.load(workspaces.initialId as string);
+        if (ws) await applyWorkspace(ws);
+      } catch {
+        // Keep the scratch session if re-hydration fails.
+      }
+    })();
+  }, [workspaces.ready, workspaces.initialId, engine, workspaces, applyWorkspace]);
 
   const busy = state.kind === "running";
   const controlsDisabled = engine === "warming" || engine === "cold";
@@ -430,6 +678,24 @@ export function Repl() {
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {/* [OPUS-4.8] sq-atb0 — the persistent cross-session workspace panel: save / open the
+            loaded dataset (as a snapshot) + the imported-source list + the SPARQL editor state,
+            so a session survives an app/browser restart. Backend resolves to Tauri disk on the
+            desktop app, browser localStorage on GitHub Pages, or an in-memory session fallback. */}
+        <WorkspacePanel
+          ready={workspaces.ready}
+          backend={workspaces.backend}
+          list={workspaces.list}
+          currentId={currentWorkspaceId}
+          onOpen={(id) => void openWorkspace(id)}
+          onSave={() => void saveWorkspace()}
+          onSaveAs={(name) => void saveWorkspaceAs(name)}
+          onNew={() => void newScratchSession()}
+          onRename={(name) => void renameWorkspace(name)}
+          onDelete={(id) => void deleteWorkspace(id)}
+          busy={workspaceBusy}
+        />
+
         <ConnectPanel
           config={endpointConfig}
           onConfigChange={setEndpointConfig}
