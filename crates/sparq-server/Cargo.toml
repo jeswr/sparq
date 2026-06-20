@@ -75,7 +75,7 @@ access-audit = ["server"]
 # equivalent. Feature unification means the `sparq-core` `sparq-engine` resolves also gains `mmap`,
 # so the WAL-durable `apply_delta` path is live on the shared graph. Without `--persist` the server
 # is in-memory exactly as before (the flag, not the feature, selects durability).
-server = ["dep:sparq-serve", "dep:arc-swap", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
+server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library) for the server's `Content-Encoding: gzip` request
 # inflate (MultiGzDecoder) — a measured 1.5–3× at ~zero code change. The weak
@@ -195,16 +195,21 @@ n3-patch = ["server"]
 # WRITE/admin-gated (the existing `--auth-token` admin gate). Without the feature the routes +
 # the restore setting are `#[cfg]`-stripped, so a build without it is byte-identical to before.
 # Needs `server`.
-backup = ["server", "sparq-serve/backup"]
+# [OPUS-4.8] (sq-0g6g) `dep:arc-swap` is brought in ONLY here — the swappable serving core
+# (`ArcSwap<ServingCore>`) that enables the atomic online restore exists solely under `backup`.
+# The default `server` build holds the ring/writer directly (byte-identical to pre-#941) and
+# never depends on arc-swap, so the default serving read path stays lean.
+backup = ["server", "dep:arc-swap", "sparq-serve/backup"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
-# [OPUS-4.8] (sq-o5bi) The swappable serving core (ring + writer) lives behind an `ArcSwap` so an
-# online restore can atomically install a rehydrated core while readers load lock-free — the same
-# arc-swap the ring uses internally. Server-feature only (the in-memory serving path); the
-# serialiser-only build and the wasm graph never see it.
+# [OPUS-4.8] (sq-o5bi, sq-0g6g) The swappable serving core (ring + writer) lives behind an
+# `ArcSwap` so an online restore can atomically install a rehydrated core while readers load
+# lock-free — the same arc-swap the ring uses internally. `backup`-feature ONLY: the default
+# serving path holds ring/writer directly (byte-identical to pre-#941), so without `backup` the
+# server never depends on arc-swap. The serialiser-only build and the wasm graph never see it.
 arc-swap = { version = "1", optional = true }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 # The concurrent-serving core (Wave A, research/concurrent-serving.md §6): the

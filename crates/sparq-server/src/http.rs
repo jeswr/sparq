@@ -38,6 +38,10 @@ use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 
+// [OPUS-4.8] (sq-o5bi, sq-0g6g) `ArcSwap` is the swap mechanism for the ONLINE restore and is
+// pulled in ONLY under the `backup` feature — the default serving core is the plain
+// `ring`/`writer` pair (byte-identical to pre-#941), so the default read path never touches it.
+#[cfg(feature = "backup")]
 use arc_swap::ArcSwap;
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
@@ -1825,13 +1829,18 @@ impl ApplyUpdates for ServerApplier {
 /// §4.3/§4.4 pathologies: the 5.4 s/32 s pinned-snapshot writer stall and reclaim-poll
 /// degradation under reader churn. `compact_every` went with it: the writer's per-batch
 /// fork rebuilds a folded base, so overlays never accumulate across batches.
-/// [OPUS-4.8] (sq-o5bi) The swappable serving core: the generation ring + the single
-/// sequenced writer that publishes onto it. Held behind an [`ArcSwap`] in [`AppState`] so an
-/// online RESTORE (`backup` feature) can atomically install a freshly-built ring+writer
-/// rehydrated from a backup artifact while readers keep loading lock-free — the same
-/// lock-free-read discipline the ring itself uses internally. Without a restore it is built
-/// once at startup and never swapped (the historical behaviour), so the read path pays only
-/// one extra `ArcSwap::load` — the same cost class as the ring's own `current()`.
+/// [OPUS-4.8] (sq-o5bi, sq-0g6g) The swappable serving core: the generation ring + the single
+/// sequenced writer that publishes onto it. **`backup`-feature only.** It exists solely so an
+/// online RESTORE can atomically install a freshly-built ring+writer rehydrated from a backup
+/// artifact while readers keep loading lock-free — the same lock-free-read discipline the ring
+/// itself uses internally. Under `backup`, [`AppState`] holds this behind an [`ArcSwap`], so a
+/// read pays one extra `ArcSwap::load` (the same cost class as the ring's own `current()`).
+///
+/// Without `backup` (the DEFAULT) there is no swap mechanism at all: [`AppState`] holds the
+/// `ring`/`writer` pair directly, exactly as it did before #941, so the default read path is
+/// byte-identical to `main` and never loads an `ArcSwap` in `AppState` (sq-0g6g resolved in the
+/// lean direction — the cost is paid only when you opt into `backup`).
+#[cfg(feature = "backup")]
 struct ServingCore {
     /// The generation ring (Wave A1): lock-free `current()`, bounded retention.
     ring: Arc<GenerationRing<Graph>>,
@@ -1865,8 +1874,23 @@ fn build_ring_config(config: &ServerConfig) -> sparq_serve::RingConfig {
 
 #[derive(Clone)]
 pub struct AppState {
-    /// The swappable serving core (ring + writer). See [`ServingCore`]. Loaded lock-free on
-    /// every read/update; replaced atomically only by an online restore (`backup` feature).
+    /// The generation ring (Wave A1): lock-free `current()`, bounded retention.
+    ///
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) DEFAULT representation — held directly, byte-identical to
+    /// pre-#941. Under the `backup` feature the ring (and the writer below) move behind the
+    /// swappable [`ServingCore`] so an online restore can atomically install a rehydrated pair.
+    #[cfg(not(feature = "backup"))]
+    ring: Arc<GenerationRing<Graph>>,
+    /// The single sequenced writer (Wave A2): the sole publisher of generations.
+    /// `submit` blocks for the group-commit window + batch application, so update
+    /// handlers call it on the blocking pool.
+    #[cfg(not(feature = "backup"))]
+    writer: Arc<Writer<String>>,
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) `backup`-only: the swappable serving core (ring + writer).
+    /// See [`ServingCore`]. Loaded lock-free on every read/update; replaced atomically only by an
+    /// online restore. This `ArcSwap` indirection exists solely to enable that atomic swap and is
+    /// compiled out of the default build entirely.
+    #[cfg(feature = "backup")]
     core: Arc<ArcSwap<ServingCore>>,
     config: Arc<ServerConfig>,
     /// Committed generation number, advanced after every successful update. Subscription
@@ -1996,6 +2020,13 @@ impl AppState {
             None => None,
         };
         Ok(Self {
+            // [OPUS-4.8] (sq-o5bi, sq-0g6g) DEFAULT: hold ring+writer directly (pre-#941). Under
+            // `backup`: wrap them in the swappable `ServingCore` so an online restore can swap.
+            #[cfg(not(feature = "backup"))]
+            ring,
+            #[cfg(not(feature = "backup"))]
+            writer,
+            #[cfg(feature = "backup")]
             core: Arc::new(ArcSwap::from_pointee(ServingCore { ring, writer })),
             config,
             commits: Arc::new(tokio::sync::watch::channel(0).0),
@@ -2015,7 +2046,7 @@ impl AppState {
     /// by an in-flight update. Hold the returned `Arc` for as long as the response is
     /// being produced; `gen.snapshot()` is the immutable [`Graph`] to evaluate against.
     pub fn current(&self) -> PinnedGen {
-        self.core.load().ring.current()
+        self.ring().current()
     }
 
     /// [OPUS-4.8] (sq-o5bi) Pins the current generation for an ONLINE backup export: a
@@ -2024,7 +2055,45 @@ impl AppState {
     /// pin as [`current`](Self::current); a distinct name makes the backup call site explicit.
     #[cfg(feature = "backup")]
     pub fn pin_for_backup(&self) -> PinnedGen {
-        self.core.load().ring.current()
+        self.ring().current()
+    }
+
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) The generation ring. DEFAULT: a direct reference to the
+    /// `ring` field — byte-identical to pre-#941 (no `ArcSwap` on the read path). Under `backup`:
+    /// resolved through the swappable [`ServingCore`], whose loaded `Arc` lives for the call. Every
+    /// ring read (`current`, `at`) routes through here, so the two representations stay behind one
+    /// accessor and the call sites are identical in both feature states. `#[inline(always)]` makes
+    /// the default accessor a zero-cost field borrow.
+    #[cfg(not(feature = "backup"))]
+    #[inline(always)]
+    fn ring(&self) -> &GenerationRing<Graph> {
+        &self.ring
+    }
+
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) `backup`-only ring accessor: clones the ring `Arc` out of the
+    /// loaded serving core so the returned handle outlives the transient `ArcSwap` load guard. The
+    /// clone is one atomic refcount bump (the swap mechanism's marginal cost); it exists only on the
+    /// opt-in path.
+    #[cfg(feature = "backup")]
+    #[inline(always)]
+    fn ring(&self) -> Arc<GenerationRing<Graph>> {
+        self.core.load().ring.clone()
+    }
+
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) The sequenced writer. DEFAULT: a direct reference to the
+    /// `writer` field — byte-identical to pre-#941. Under `backup`: cloned out of the swappable
+    /// [`ServingCore`] (one atomic refcount bump) so the handle outlives the load guard.
+    #[cfg(not(feature = "backup"))]
+    #[inline(always)]
+    fn writer(&self) -> &Writer<String> {
+        &self.writer
+    }
+
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) `backup`-only writer accessor (see [`ring`](Self::ring)).
+    #[cfg(feature = "backup")]
+    #[inline(always)]
+    fn writer(&self) -> Arc<Writer<String>> {
+        self.core.load().writer.clone()
     }
 
     /// Pins the retained generation numbered `number` (time travel): `None` when it
@@ -2032,7 +2101,7 @@ impl AppState {
     /// [`sparq_serve::GenerationRing::at`].
     #[cfg(feature = "time-travel")]
     pub fn at(&self, number: u64) -> Option<PinnedGen> {
-        self.core.load().ring.at(number)
+        self.ring().at(number)
     }
 
     /// Applies a SPARQL Update through the sequenced writer: the update joins the
@@ -2056,7 +2125,7 @@ impl AppState {
         // default-graph / dynamically-scoped writes still fall back to the global pod
         // (conservative, never under-invalidating). See [`touched_pods`].
         let touched = touched_pods(sparql);
-        match self.core.load().writer.submit(sparql.to_string(), touched) {
+        match self.writer().submit(sparql.to_string(), touched) {
             Ok(number) => {
                 // Monotonic max: batch-mates share a generation number and may ack in
                 // any order relative to a later batch's submitters.
@@ -2095,7 +2164,7 @@ impl AppState {
     /// stays alive and reads keep being served from the last published snapshot. Blocking: call
     /// it on the blocking pool.
     pub fn compact(&self) -> Result<(), String> {
-        match self.core.load().writer.maintain() {
+        match self.writer().maintain() {
             Ok(res) => res,
             Err(WriteError::Shutdown) => Err("update writer has shut down".to_string()),
             // `maintain` only ever returns `Ok(_)` or `Shutdown` from the writer.
@@ -3333,15 +3402,17 @@ fn resolve_pin(
     if number == current.number() {
         return Ok(current);
     }
-    // [OPUS-4.8] sq-o5bi: the ring is loaded once from the swappable serving core.
-    let core = state.core.load();
-    core.ring.at(number).ok_or_else(|| {
+    // [OPUS-4.8] (sq-o5bi, sq-0g6g) Resolve the ring once via the accessor: DEFAULT this is a
+    // direct field reference (byte-identical to pre-#941); under `backup` it is one clone out of
+    // the swappable serving core. Binding it locally keeps `at` + `oldest_retained` on one ring.
+    let ring = state.ring();
+    ring.at(number).ok_or_else(|| {
         json_error(
             StatusCode::GONE,
             &format!(
                 "generation {number} has aged out of the retention window (oldest retained: {}, current: {}); \
                  raise --time-travel-generations / --time-travel-max-age to keep more history",
-                core.ring.oldest_retained(),
+                ring.oldest_retained(),
                 current.number()
             ),
         )

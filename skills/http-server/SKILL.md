@@ -1089,7 +1089,10 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   replica / PITR base; refused together with `--persist`). DISTINCT from the offline `sparq-cli
   save` and from the `--persist` WAL. **At-rest encryption of the artifact is out of scope** —
   the body digest detects accidental corruption, not tampering. Without the feature the routes +
-  the `--restore` setting are compiled out (byte-identical to before). (sq-o5bi.)
+  the `--restore` setting are compiled out AND the serving core stays the plain `ring`/`writer`
+  pair — the `ArcSwap<ServingCore>` that backs the atomic online restore is `backup`-gated, so the
+  DEFAULT read path is byte-identical to before #941 (no extra atomic load when `backup` is OFF;
+  sq-0g6g resolved in the lean direction). (sq-o5bi.)
 - **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
   (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.
 - **Error bodies.** Every error is structured JSON `{"error": "..."}` with
