@@ -85,12 +85,14 @@ impl Default for Json {
 }
 
 impl Json {
-    fn obj() -> Json {
+    /// Constructs an empty JSON object. `pub(super)` so the sibling `frame` module
+    /// ([OPUS-4.8] sq-oy1f.17) can build framed node objects over the same AST.
+    pub(super) fn obj() -> Json {
         Json::Obj(Vec::new())
     }
 
     /// Inserts/overwrites a member, preserving first-insertion position for an existing key.
-    fn set(&mut self, key: &str, val: Json) {
+    pub(super) fn set(&mut self, key: &str, val: Json) {
         if let Json::Obj(members) = self {
             if let Some(slot) = members.iter_mut().find(|(k, _)| k == key) {
                 slot.1 = val;
@@ -100,21 +102,21 @@ impl Json {
         }
     }
 
-    fn get(&self, key: &str) -> Option<&Json> {
+    pub(super) fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Obj(members) => members.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
 
-    fn as_str(&self) -> Option<&str> {
+    pub(super) fn as_str(&self) -> Option<&str> {
         match self {
             Json::Str(s) => Some(s.as_str()),
             _ => None,
         }
     }
 
-    fn is_obj(&self) -> bool {
+    pub(super) fn is_obj(&self) -> bool {
         matches!(self, Json::Obj(_))
     }
 
@@ -360,6 +362,25 @@ impl ActiveContext {
         }
     }
 
+    /// Expands a vocab-position IRI (a frame property key, `@type` value, or `@id` value)
+    /// against this context: a defined term → its IRI, a compact IRI `prefix:local` → the
+    /// prefix's namespace + local, a `@vocab`-relative bare term → `@vocab` + term, else
+    /// the value verbatim. `pub(super)` so the sibling `frame` module ([OPUS-4.8] sq-oy1f.17)
+    /// can expand a caller frame against its `@context` before node-pattern matching (the
+    /// node map keys are absolute IRIs). Keywords and already-absolute IRIs pass through.
+    pub(super) fn expand_vocab_iri(&self, value: &str) -> String {
+        if is_keyword(value) {
+            return value.to_string();
+        }
+        // A defined term maps directly to its IRI.
+        if let Some(def) = self.term_def(value) {
+            if !def.iri.is_empty() {
+                return def.iri.clone();
+            }
+        }
+        self.expand_context_iri(value)
+    }
+
     /// Looks up a term definition by exact term string.
     fn term_def(&self, term: &str) -> Option<&TermDefinition> {
         self.terms.iter().find(|(t, _)| t == term).map(|(_, d)| d)
@@ -491,13 +512,20 @@ impl ActiveContext {
 
     /// The compacted spelling of a keyword (e.g. `@type`), honouring a keyword *alias*
     /// term in the context (`{"type": "@type"}` → `"type"`). Falls back to the keyword.
-    fn compact_keyword(&self, keyword: &str) -> String {
+    pub(super) fn compact_keyword(&self, keyword: &str) -> String {
         for (t, def) in &self.terms {
             if def.iri == keyword {
                 return t.clone();
             }
         }
         keyword.to_string()
+    }
+
+    /// The verbatim caller `@context` JSON, echoed into a compacted / framed document's
+    /// `@context` member. `pub(super)` for the sibling `frame` module ([OPUS-4.8] sq-oy1f.17),
+    /// which builds the framed output document's envelope.
+    pub(super) fn raw_context(&self) -> &Json {
+        &self.raw_context
     }
 
     // -----------------------------------------------------------------------
@@ -599,7 +627,7 @@ impl ActiveContext {
     /// Compacts an *expanded element* (array of node objects / a single node object / a
     /// value object) into its compacted JSON-LD form. This is the recursive Compaction
     /// Algorithm specialised to the document shapes [`graph_to_expanded`] produces.
-    fn compact(&self, element: &Json) -> Json {
+    pub(super) fn compact(&self, element: &Json) -> Json {
         match element {
             Json::Arr(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -1028,7 +1056,7 @@ fn term_to_json(term: &Term, lists: &ListInfo) -> Json {
 /// Yields the elements of a `Json::Arr`, or the single value itself otherwise. A small
 /// helper for iterating an expanded object array (which is always an array in our model,
 /// but stays total).
-fn flatten(v: &Json) -> Vec<&Json> {
+pub(super) fn flatten(v: &Json) -> Vec<&Json> {
     match v {
         Json::Arr(a) => a.iter().collect(),
         other => vec![other],
@@ -1058,7 +1086,7 @@ fn literal_to_json(lit: &oxrdf::Literal) -> Json {
 
 /// Builds the expanded node-object array for one graph's triples (the `fromRdf` output for
 /// that graph), reusing the parent writer's list detection + first-seen ordering.
-fn graph_to_expanded(triples: &[Triple]) -> Vec<Json> {
+pub(super) fn graph_to_expanded(triples: &[Triple]) -> Vec<Json> {
     let lists = detect_lists(triples);
     // Per-node: @type IRIs + predicate→objects (first-seen predicate order).
     struct Node {

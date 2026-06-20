@@ -291,8 +291,8 @@ document and the compaction is **lossless** — every coercion is invertible aga
 `@context`, so a JSON-LD-to-RDF round-trip reconstructs the original triples (verified by the
 crate's compaction round-trip tests). *Scope:* this is the fromRdf-then-compact (serialise) path —
 sparq always emits RDF, so the input is a `Graph`, not an arbitrary remote document; scoped/typed
-contexts, `@propagate`, remote `@context` fetching, `@import`, `@protected` and JSON-LD **Framing**
-are out of scope (Framing is a separate deferred bead). *Honest interop caveat:* the round-trip
+contexts, `@propagate`, remote `@context` fetching, `@import`, `@protected` are out of scope
+(JSON-LD **Framing** is its own recipe below, sq-oy1f.17). *Honest interop caveat:* the round-trip
 losslessness is verified against sparq's own JSON-LD→RDF reader. Two output shapes are **not**
 faithfully re-expandable by an external processor (e.g. pyld): a `@reverse`-term document emits the
 edge as both an `@reverse` block **and** a reverse-mapped term (a double inversion that a strict
@@ -314,6 +314,42 @@ let doc = graph_to_jsonld_compact(&g, &ctx); // term defs + @vocab + @type:@id c
 
 Exposed on the wasm `Store` as `serializeCompact(context, pretty, indent?)` (the JSON-LD
 SKILL note) and on the CLI as the `jsonld-compact[-pretty]` `dump` out-format (sq-oy1f.5).
+
+**W3C JSON-LD 1.1 Framing (caller frame).** `graph_to_jsonld_framed(&g, &frame)` (or the
+slice-level `write_jsonld_framed(&named_graphs, &frame)`) reshapes the graph into a deterministic
+tree matching a caller **frame** document, then compacts it against the frame's `@context`. Build
+the frame with `parse_context_json` (a frame is a JSON-LD document). Hand-rolled and
+dependency-free, same `Json` AST as compaction — no `serde_json`, no `json-ld` crate (no Rust
+JSON-LD crate ships framing). It implements:
+
+* **Node-pattern matching** — `@type` (explicit list / wildcard `{}` / match-none `[]`), property
+  *presence* (`{}`), *absence* (`[]`), specific `@value` / `@id` match, and `@id` selection.
+  `@requireAll: true` combines the frame's properties with AND; the default with OR (a `{}` frame matches all).
+* **`@embed`** — `@once` (default: embed a node the first time it is reached result-wide, a
+  `{"@id":…}` reference thereafter), `@always` (re-embed every reference), `@never` (always a
+  reference); `@link` is treated as `@always`. A blank-node cycle (`a→b→a`) terminates via the
+  embed link table (the back-edge becomes a reference).
+* **`@explicit: true`** — keep only the properties the frame names. **`@default`** — the value
+  emitted for a framed property absent from the matched node (`@default: @null` → a preserve-`null`
+  marker). **`@omitDefault: true`** — drop an absent framed property instead of emitting its
+  default/null. **List framing** keeps the `{"@list":…}` wrapper, framing each element.
+
+Output is a `{"@context":…,"@graph":[…]}` document, collapsing to the bare framed node merged with
+`@context` for a single matched root (the `omitGraph` default). Each named graph in the dataset is
+framed against the same pattern (wrapped `{"@id":<graph>,"@graph":[…]}`). The framed shape is
+**differential-tested byte-for-byte against the pyld reference processor's `frame`** across the
+flag matrix (sq-oy1f.17). *Scope:* the serialise (fromRdf-then-frame) path — sparq supplies the
+graph + an inline frame; `@reverse` frames, scoped/typed frame contexts, and exact pyld
+`@graph`-frame semantics over an arbitrary expanded document are out of scope (follow-up beads).
+
+```rust
+use sparq_engine::serialize::{graph_to_jsonld_framed, parse_context_json};
+let frame = parse_context_json(r#"{
+    "@context": {"@vocab": "http://schema.org/"},
+    "@type": "Person", "knows": {"@embed": "@never"}
+}"#).expect("a JSON object");
+let doc = graph_to_jsonld_framed(&g, &frame); // selects Person nodes; knows → bare {"@id":…}
+```
 
 From the CLI (opt-in `serialize-rdf` feature) — re-serialize a loaded document to stdout:
 
