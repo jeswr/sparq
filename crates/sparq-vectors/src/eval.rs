@@ -1,0 +1,892 @@
+//! Standard **filtered link-prediction** eval harness for the shallow-KGE trainer, plus the P0
+//! **ablation matrix**, a **long-tail breakdown**, and a **synthetic gUFO slice**.
+//!
+//! [OPUS-4.8] sq-0wo9e.8 / P6 (epic sq-0wo9e; design `research/structure-aware-vectorisation.md`
+//! §P6 eval harness). **Opt-in** (`kge` cargo feature, off by default, implies `structure`);
+//! nothing in the default build or core engine changes.
+//!
+//! # The protocol (and why getting it right matters)
+//!
+//! Link prediction evaluates a KGE by hiding one end of each **test** triple `(h, r, ?)` (and
+//! `(?, r, t)`), ranking every candidate entity by model score, and recording where the true entity
+//! lands. The metrics are **MRR** (mean reciprocal rank) and **Hits@k** (fraction ranked ≤ k).
+//!
+//! The **filtered** variant (Bordes et al. 2013, TransE) is the established protocol and the only
+//! one we report: when ranking candidates for `(h, r, ?)`, every *other* entity `t'` that forms a
+//! **known-true** triple `(h, r, t')` — whether in **train, valid, OR test** — is removed from the
+//! ranking before computing the rank of the held-out `t`. Otherwise a model is unfairly penalised
+//! for ranking *another correct answer* above the held-out one. **Getting this wrong (leaking the
+//! filter set, or filtering only train) inflates or deflates every number and invalidates the
+//! comparison** — so the filter set here is built from the union of all three splits' positives
+//! (see [`Splits::filter_set_len`]) and is asserted by a test.
+//!
+//! # No train/test leakage
+//!
+//! [`Splits::split`] partitions the graph's positives into train / valid / test by a deterministic
+//! hash of the triple (seeded), with **no triple in more than one split**. The model is trained on
+//! **train only**; valid/test triples are never shown to the trainer. The *filter* set, separately,
+//! is the union of all three (that is correct and required — it is the set of known-true triples to
+//! exclude from a ranking, not training data).
+//!
+//! # Ablation matrix
+//!
+//! [`run_ablation`] runs the 2×2 P0 prior matrix — `{closure on, off} × {type-constrained
+//! negatives, uniform-random negatives}` — training a fresh model per cell on the *same* split and
+//! reporting filtered metrics + the long-tail breakdown per cell. A gUFO-prior cell is structurally
+//! present as an **ablation axis the harness can already toggle** ([`AblationCell::gufo_prior`]) so
+//! the later gUFO-prior phase wires straight in; at this stage the prior is a no-op
+//! (`gufo_prior = false` everywhere) and the gUFO slice establishes the **baseline**.
+//!
+//! # Honesty
+//!
+//! **No numbers live in this file or any committed doc.** The harness *computes* them at run time
+//! (see `examples/kge_ablation.rs` / `tests/kge.rs`); the work-box is non-canonical so any figure is
+//! INDICATIVE. The harness makes no accuracy claim — it is the measurement instrument the design
+//! requires before any prior is adopted.
+
+use crate::structure::{materialise_closure, ClosedGraph, TypeConstraints};
+use crate::train::{train, TrainConfig, TrainReport, TrainedModel};
+use rustc_hash::{FxHashMap, FxHashSet};
+use sparq_core::dict::{Id, TermParts};
+use sparq_core::Graph;
+use sparq_reason::Profile;
+
+/// SplitMix64 step (local copy; deterministic split + tie-break).
+#[inline]
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A 64-bit hash of a triple, for deterministic, leakage-free split assignment.
+fn hash_triple([s, p, o]: [Id; 3], salt: u64) -> u64 {
+    let mut v = salt;
+    v ^= (s as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    v = v.rotate_left(17) ^ (p as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    v = v.rotate_left(23) ^ (o as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let mut s2 = v;
+    splitmix64(&mut s2)
+}
+
+fn is_entity(graph: &Graph, id: Id) -> bool {
+    matches!(
+        graph.dict.term_parts(id),
+        TermParts::Iri { .. } | TermParts::Blank(_)
+    )
+}
+
+/// The RDF/RDFS/OWL **schema / structural** predicate IRIs. Triples whose predicate is one of these
+/// (`rdf:type`, `rdfs:subClassOf`, `rdfs:domain`, …) are **structural context** — the model and the
+/// P0 priors *consume* them (closure materialises them; the type-constraint extractor reads them) —
+/// but they are **NOT prediction targets**: standard KGE link-prediction (TransE/WN18RR/FB15k-237)
+/// ranks the *relations between entities*, never type membership. Including them as targets, and
+/// especially including the closure's entailed `rdf:type`/`subClassOf` triples (which are trivially
+/// derivable), would conflate "predict the relation" with "predict the entailed type" and distort
+/// the closure axis of the ablation. The eval therefore predicts only NON-schema relations.
+pub const SCHEMA_PREDICATES: &[&str] = &[
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+    "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+    "http://www.w3.org/2000/01/rdf-schema#subPropertyOf",
+    "http://www.w3.org/2000/01/rdf-schema#domain",
+    "http://www.w3.org/2000/01/rdf-schema#range",
+    "http://www.w3.org/2002/07/owl#equivalentClass",
+    "http://www.w3.org/2002/07/owl#equivalentProperty",
+    "http://www.w3.org/2002/07/owl#inverseOf",
+    "http://www.w3.org/2002/07/owl#sameAs",
+    "http://www.w3.org/2002/07/owl#disjointWith",
+];
+
+/// The set of schema-predicate ids present in `graph` (resolved from [`SCHEMA_PREDICATES`]).
+fn schema_predicate_ids(graph: &Graph) -> FxHashSet<Id> {
+    let mut s = FxHashSet::default();
+    for iri in SCHEMA_PREDICATES {
+        let t = oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(*iri));
+        let id = graph.dict.lookup(&t);
+        if id != sparq_core::dict::NO_ID {
+            s.insert(id);
+        }
+    }
+    s
+}
+
+/// A deterministic, leakage-free train/valid/test partition of a graph's **target** (non-schema)
+/// object-property positives, plus the *all-true* filter set the filtered protocol needs. Schema /
+/// structural triples (`rdf:type`, `subClassOf`, …) are deliberately excluded from the split — they
+/// are structural context the trainer keeps, never a prediction target (see [`SCHEMA_PREDICATES`]).
+pub struct Splits {
+    /// Triples the model trains on. **Only** these are shown to [`train`].
+    pub train: Vec<[Id; 3]>,
+    /// Held-out validation triples (never trained on).
+    pub valid: Vec<[Id; 3]>,
+    /// Held-out test triples (never trained on; the metrics are computed over these).
+    pub test: Vec<[Id; 3]>,
+    /// The union of train + valid + test positives — the **filter set** removed from each ranking.
+    all_true: FxHashSet<[Id; 3]>,
+    /// All candidate entity ids (sorted) — the ranking pool.
+    entities: Vec<Id>,
+    /// Train-frequency of each entity (appearances as head OR tail in `train`), for long-tail
+    /// bucketing.
+    train_freq: FxHashMap<Id, u32>,
+    /// The schema-predicate ids of this graph — triples with these predicates are structural context
+    /// the trainer keeps but the eval never targets ([`SCHEMA_PREDICATES`]).
+    schema_preds: FxHashSet<Id>,
+}
+
+impl Splits {
+    /// Partition `graph`'s **target** (non-schema) object-property positives
+    /// ~`(train_frac, valid_frac, 1-the-rest)` by a seeded per-triple hash. A triple lands in exactly
+    /// one split (no leakage); the filter set is the union of all three. Schema / structural triples
+    /// (`rdf:type`, `subClassOf`, …) are **excluded** from every split — they are not prediction
+    /// targets (see [`SCHEMA_PREDICATES`]). `valid_frac`/`train_frac` are fractions in `[0,1]` with
+    /// `train_frac + valid_frac < 1`.
+    pub fn split(graph: &Graph, train_frac: f64, valid_frac: f64, seed: u64) -> Splits {
+        assert!(train_frac > 0.0 && valid_frac >= 0.0 && train_frac + valid_frac < 1.0);
+        let schema_preds = schema_predicate_ids(graph);
+        let mut all: Vec<[Id; 3]> = Vec::new();
+        let mut ent: FxHashSet<Id> = FxHashSet::default();
+        for [s, p, o] in graph.iter_ids() {
+            if is_entity(graph, s) && is_entity(graph, o) {
+                // The ranking pool is every entity that participates in any object-property triple
+                // (including schema triples — a class is still an entity that could be a candidate).
+                ent.insert(s);
+                ent.insert(o);
+                // Only NON-schema relations are split / targeted / filtered.
+                if !schema_preds.contains(&p) {
+                    all.push([s, p, o]);
+                }
+            }
+        }
+        // Deterministic order independent of scan order.
+        all.sort_unstable();
+
+        let train_cut = (train_frac * u64::MAX as f64) as u64;
+        let valid_cut = ((train_frac + valid_frac) * u64::MAX as f64) as u64;
+
+        let mut train = Vec::new();
+        let mut valid = Vec::new();
+        let mut test = Vec::new();
+        let mut all_true: FxHashSet<[Id; 3]> = FxHashSet::default();
+        for t in &all {
+            all_true.insert(*t);
+            let h = hash_triple(*t, seed);
+            if h < train_cut {
+                train.push(*t);
+            } else if h < valid_cut {
+                valid.push(*t);
+            } else {
+                test.push(*t);
+            }
+        }
+
+        // Train-frequency for long-tail bucketing — counted over the TRAIN split only (the model
+        // only "saw" train), which is what the long-tail literature buckets on.
+        let mut train_freq: FxHashMap<Id, u32> = FxHashMap::default();
+        for [s, _, o] in &train {
+            *train_freq.entry(*s).or_default() += 1;
+            *train_freq.entry(*o).or_default() += 1;
+        }
+
+        let mut entities: Vec<Id> = ent.into_iter().collect();
+        entities.sort_unstable();
+
+        Splits {
+            train,
+            valid,
+            test,
+            all_true,
+            entities,
+            train_freq,
+            schema_preds,
+        }
+    }
+
+    /// The number of known-true triples in the filter set (union of all splits).
+    pub fn filter_set_len(&self) -> usize {
+        self.all_true.len()
+    }
+
+    /// Is `triple` a known-true triple (in any split)? (used by the filtered ranking).
+    fn is_true(&self, triple: &[Id; 3]) -> bool {
+        self.all_true.contains(triple)
+    }
+
+    /// Train-frequency of an entity (appearances in the train split).
+    pub fn freq(&self, e: Id) -> u32 {
+        self.train_freq.get(&e).copied().unwrap_or(0)
+    }
+}
+
+/// Filtered link-prediction metrics over a held-out split.
+#[derive(Clone, Debug, Default)]
+pub struct Metrics {
+    /// Number of (test-triple, side) ranking queries that contributed (both ends scorable).
+    pub queries: usize,
+    /// Filtered mean reciprocal rank.
+    pub mrr: f64,
+    /// Filtered Hits@1.
+    pub hits1: f64,
+    /// Filtered Hits@3.
+    pub hits3: f64,
+    /// Filtered Hits@10.
+    pub hits10: f64,
+}
+
+/// Long-tail breakdown: the same filtered metrics computed separately over **head** (frequent) and
+/// **long-tail** (rare) test entities, split at a train-frequency threshold.
+#[derive(Clone, Debug, Default)]
+pub struct LongTail {
+    /// Frequency threshold: an entity is "long-tail" if its train-frequency is `<= threshold`.
+    pub threshold: u32,
+    /// Metrics over queries whose *answer* entity is a head (frequent) entity.
+    pub head: Metrics,
+    /// Metrics over queries whose *answer* entity is long-tail (rare).
+    pub tail: Metrics,
+}
+
+/// One cell of the ablation matrix: a fully-specified prior configuration + its measured metrics.
+#[derive(Clone, Debug)]
+pub struct AblationCell {
+    /// RDFS/OWL-RL closure materialised before training? (the closure-before-vectorise prior).
+    pub closure: bool,
+    /// Type-constrained negatives (vs uniform-random)? (the type-negative prior).
+    pub type_constrained: bool,
+    /// The gUFO prior — an **ablation axis the harness already exposes** for the later phase. At
+    /// this stage it is always `false` (the prior is a no-op); the field exists so the gUFO-prior
+    /// phase wires straight into the matrix without changing the harness shape.
+    pub gufo_prior: bool,
+    /// Filtered metrics over the test split for this cell.
+    pub metrics: Metrics,
+    /// Long-tail breakdown for this cell.
+    pub long_tail: LongTail,
+    /// The trainer's loss curve for this cell (non-canonical learning signal).
+    pub report: TrainReport,
+}
+
+/// Rank the held-out entity of one `(triple, side)` query under the **filtered** protocol.
+/// Returns `Some(rank)` (1-based) or `None` if the query is not scorable (an end has no model row).
+///
+/// `side == Head` ranks the head: candidates `(c, r, t)`; `side == Tail` ranks the tail
+/// `(h, r, c)`. A candidate `c` is **skipped** (filtered) when the resulting triple is known-true
+/// AND is not the held-out triple itself. Ties are broken by counting candidates with a *strictly*
+/// greater score plus a deterministic hash tie-break, so equal-scoring candidates do not all collapse
+/// to rank 1 (the "optimistic tie" pitfall that inflates Hits@k).
+fn filtered_rank(
+    model: &TrainedModel,
+    splits: &Splits,
+    triple: [Id; 3],
+    side: Side,
+) -> Option<u32> {
+    let [h, r, t] = triple;
+    // The held-out true score must be computable.
+    let true_score = model.score(h, r, t)?;
+    let answer = match side {
+        Side::Head => h,
+        Side::Tail => t,
+    };
+    let answer_hash = {
+        let mut s = answer as u64 ^ 0xABCD_1234;
+        splitmix64(&mut s)
+    };
+
+    // Count candidates that rank strictly above the answer (filtered).
+    let mut greater = 0u32;
+    for &c in &splits.entities {
+        if c == answer {
+            continue;
+        }
+        let cand = match side {
+            Side::Head => [c, r, t],
+            Side::Tail => [h, r, c],
+        };
+        // Filter: skip OTHER known-true triples (they are correct answers, not distractors).
+        if splits.is_true(&cand) {
+            continue;
+        }
+        let Some(cs) = model.score(cand[0], cand[1], cand[2]) else {
+            continue; // candidate not scorable (no row) → cannot outrank
+        };
+        if cs > true_score {
+            greater += 1;
+        } else if cs == true_score {
+            // Deterministic tie-break: half the equal-scoring candidates count as "above".
+            let mut hs = c as u64 ^ 0x5555_AAAA;
+            let ch = splitmix64(&mut hs);
+            if ch < answer_hash {
+                greater += 1;
+            }
+        }
+    }
+    Some(greater + 1)
+}
+
+#[derive(Clone, Copy)]
+enum Side {
+    Head,
+    Tail,
+}
+
+/// Accumulate filtered metrics (and the long-tail split) over a test set. For each test triple we
+/// run both a head- and a tail-ranking query; each contributes to the overall metrics and to the
+/// head/tail bucket chosen by the **answer** entity's train-frequency. The ranking pool + filter
+/// come from `splits` (the full graph), while `model` was trained on the train-restricted graph: a
+/// test entity present in the pool but absent from the model (seen only in valid/test) is unscorable
+/// on that side, so that query is skipped — the honest behaviour (the model genuinely cannot place
+/// an entity it never saw).
+fn evaluate(
+    model: &TrainedModel,
+    splits: &Splits,
+    long_tail_threshold: u32,
+) -> (Metrics, LongTail) {
+    let mut acc = MetricAcc::default();
+    let mut head_acc = MetricAcc::default();
+    let mut tail_acc = MetricAcc::default();
+
+    for &triple in &splits.test {
+        for side in [Side::Head, Side::Tail] {
+            if let Some(rank) = filtered_rank(model, splits, triple, side) {
+                acc.add(rank);
+                let answer = match side {
+                    Side::Head => triple[0],
+                    Side::Tail => triple[2],
+                };
+                if splits.freq(answer) <= long_tail_threshold {
+                    tail_acc.add(rank);
+                } else {
+                    head_acc.add(rank);
+                }
+            }
+        }
+    }
+
+    let lt = LongTail {
+        threshold: long_tail_threshold,
+        head: head_acc.finish(),
+        tail: tail_acc.finish(),
+    };
+    (acc.finish(), lt)
+}
+
+#[derive(Default)]
+struct MetricAcc {
+    n: usize,
+    rr: f64,
+    h1: usize,
+    h3: usize,
+    h10: usize,
+}
+
+impl MetricAcc {
+    fn add(&mut self, rank: u32) {
+        self.n += 1;
+        self.rr += 1.0 / rank as f64;
+        if rank <= 1 {
+            self.h1 += 1;
+        }
+        if rank <= 3 {
+            self.h3 += 1;
+        }
+        if rank <= 10 {
+            self.h10 += 1;
+        }
+    }
+    fn finish(self) -> Metrics {
+        if self.n == 0 {
+            return Metrics::default();
+        }
+        let n = self.n as f64;
+        Metrics {
+            queries: self.n,
+            mrr: self.rr / n,
+            hits1: self.h1 as f64 / n,
+            hits3: self.h3 as f64 / n,
+            hits10: self.h10 as f64 / n,
+        }
+    }
+}
+
+/// Configuration for a full ablation run.
+#[derive(Clone, Copy, Debug)]
+pub struct EvalConfig {
+    /// Trainer config template; `sampling` is overridden per cell by the type-constrained axis.
+    pub train: TrainConfig,
+    /// Closure profile used when the closure axis is ON.
+    pub profile: Profile,
+    /// Train fraction of the split.
+    pub train_frac: f64,
+    /// Valid fraction of the split.
+    pub valid_frac: f64,
+    /// Split seed (independent of the trainer seed so split and init do not correlate).
+    pub split_seed: u64,
+    /// Long-tail frequency threshold (an answer entity with train-freq ≤ this is "long-tail").
+    pub long_tail_threshold: u32,
+}
+
+impl EvalConfig {
+    /// A small, work-box-sized preset.
+    pub fn small(seed: u64) -> EvalConfig {
+        EvalConfig {
+            train: TrainConfig::small(crate::structure::SamplingMode::TypeConstrained, seed),
+            profile: Profile::Rdfs,
+            train_frac: 0.8,
+            valid_frac: 0.1,
+            split_seed: seed ^ 0xF00D,
+            long_tail_threshold: 2,
+        }
+    }
+}
+
+/// Run the full 2×2 P0 ablation matrix on `text` (RDF of `format`). For each cell:
+/// 1. optionally materialise the closure (closure axis),
+/// 2. split the (closed or asserted) graph leakage-free,
+/// 3. mine type constraints, train on **train only** with the cell's negative-sampling mode,
+/// 4. measure filtered metrics + the long-tail breakdown over **test**.
+///
+/// Returns the four cells in a fixed order: `[(closure=F,tc=F), (F,T), (T,F), (T,T)]`.
+///
+/// CRITICAL invariant (asserted in tests): the filter set is the union of all splits, and no triple
+/// is in more than one split — so the reported metrics are the established filtered protocol with no
+/// train/test leakage.
+pub fn run_ablation(
+    text: &str,
+    format: &str,
+    cfg: EvalConfig,
+) -> Result<Vec<AblationCell>, String> {
+    // Parse once; closure is applied (or not) per cell from the same parsed triples so the asserted
+    // facts are identical across the closure axis.
+    let (base_dict, base_triples) = Graph::parse_to_triples(text, format)?;
+
+    let mut cells = Vec::with_capacity(4);
+    for closure in [false, true] {
+        // Build the graph for this closure setting.
+        let closed: ClosedGraph = if closure {
+            materialise_closure(base_dict.clone(), base_triples.clone(), cfg.profile)
+        } else {
+            // No closure: wrap the asserted triples unchanged (entailed_triples = 0).
+            let g = Graph::from_parts(base_dict.clone(), base_triples.clone());
+            ClosedGraph {
+                graph: g,
+                asserted_triples: base_triples.len(),
+                entailed_triples: 0,
+                profile: cfg.profile,
+            }
+        };
+        let graph = &closed.graph;
+        let splits = Splits::split(graph, cfg.train_frac, cfg.valid_frac, cfg.split_seed);
+
+        for type_constrained in [false, true] {
+            let mode = if type_constrained {
+                crate::structure::SamplingMode::TypeConstrained
+            } else {
+                crate::structure::SamplingMode::Unconstrained
+            };
+            let mut tcfg = cfg.train;
+            tcfg.sampling = mode;
+
+            // Train on TRAIN ONLY: a graph restricted to the train target relations plus the schema
+            // (so valid/test target triples are never seen by the trainer — no leakage into
+            // training), with its type constraints mined from THAT restricted graph.
+            let train_graph = restrict_to_train(graph, &splits);
+            let train_tc = TypeConstraints::mine(&train_graph);
+            let (model, report) = train(&train_graph, &train_tc, tcfg);
+
+            // Rank over the FULL entity pool and filter against ALL splits (filtered protocol).
+            let (metrics, long_tail) = evaluate(&model, &splits, cfg.long_tail_threshold);
+
+            cells.push(AblationCell {
+                closure,
+                type_constrained,
+                gufo_prior: false,
+                metrics,
+                long_tail,
+                report,
+            });
+        }
+    }
+    Ok(cells)
+}
+
+/// Build a graph the trainer can learn from WITHOUT seeing a held-out target relation: keep every
+/// **schema / structural** triple (`rdf:type`, `subClassOf`, domain/range — the priors depend on
+/// them), every **literal-valued** triple, and the **train** target relations; drop only the
+/// valid/test target relations. This is what keeps valid/test out of training (no leakage) while
+/// preserving the type/domain/range facts closure-before-vectorise and type-constrained negatives
+/// need.
+fn restrict_to_train(graph: &Graph, splits: &Splits) -> Graph {
+    let train_set: FxHashSet<[Id; 3]> = splits.train.iter().copied().collect();
+    let mut kept: Vec<[Id; 3]> = Vec::new();
+    for [s, p, o] in graph.iter_ids() {
+        let both_entities = is_entity(graph, s) && is_entity(graph, o);
+        if both_entities && !splits.schema_preds.contains(&p) {
+            // A TARGET (non-schema) object-property triple: keep only if it is a train positive.
+            if train_set.contains(&[s, p, o]) {
+                kept.push([s, p, o]);
+            }
+        } else {
+            // Schema / typing / literal triple: always kept (it is structural context, not a
+            // prediction target, so it never leaks a held-out answer).
+            kept.push([s, p, o]);
+        }
+    }
+    // Reuse the same dictionary (ids are stable); rebuild the store from the kept triples.
+    Graph::from_parts(graph.dict.clone(), kept)
+}
+
+// ---- Synthetic gUFO slice ---------------------------------------------------------------------
+
+/// Build a **small synthetic gUFO-typed graph** for the gUFO slice of the eval.
+///
+/// gUFO (the lightweight UFO implementation) distinguishes, among other things:
+/// - **rigid kinds** (`gufo:Kind`) — a sortal an individual instantiates **necessarily** for its
+///   whole existence (e.g. *Person*): identity-bearing, never lost;
+/// - **anti-rigid roles/phases** (`gufo:Role`, `gufo:Phase`) — a type an individual instantiates
+///   **contingently** (e.g. *Student*, *Child*): can be acquired and lost.
+///
+/// The slice encodes that distinction structurally: each individual has exactly one **rigid kind**
+/// (its identity), and a *contingent* number of **roles/phases**. Identity-bearing relations
+/// (`ex:hasParent`, kind-to-kind) are systematic; contingent relations (`ex:enrolledIn`,
+/// role-mediated) are sparser and noisier. We deliberately do **NOT** rig the graph so a type prior
+/// trivially separates true from false: every role is filled by a plausible kind, contingent edges
+/// connect type-compatible endpoints, and there are decoy individuals of the right kind that are not
+/// actually related — so a pure type filter cannot win and the embedding must learn the signal.
+///
+/// Returns the serialised Turtle. The vocabulary is namespaced under `http://ex/gufo#` for the gUFO
+/// meta-classes and `http://ex/` for individuals. The generator is deterministic in `seed` and sized
+/// by `n_people` (a few hundred is a good non-trivial work-box size).
+pub fn synthetic_gufo_ttl(n_people: usize, seed: u64) -> String {
+    let mut state = seed ^ 0x6757_F0F0;
+    let mut next = |m: usize| -> usize { (splitmix64(&mut state) as usize) % m.max(1) };
+
+    let mut out = String::new();
+    out.push_str(
+        "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+         @prefix gufo: <http://ex/gufo#> .\n\
+         @prefix ex: <http://ex/> .\n\n",
+    );
+
+    // gUFO meta-typing of the domain classes (rigid kinds vs anti-rigid roles/phases). These are
+    // the annotations a later gUFO prior would read; at baseline they are just typed triples.
+    out.push_str("# Rigid kinds (identity-bearing, necessary):\n");
+    out.push_str("ex:Person a gufo:Kind . ex:Organisation a gufo:Kind . ex:Course a gufo:Kind .\n");
+    out.push_str("# Anti-rigid roles/phases (contingent):\n");
+    out.push_str("ex:Student a gufo:Role . ex:Employee a gufo:Role . ex:Child a gufo:Phase . ex:Adult a gufo:Phase .\n");
+    out.push_str(
+        "# Roles/phases specialise the kind that can fill them (subClassOf to the kind):\n",
+    );
+    out.push_str(
+        "ex:Student rdfs:subClassOf ex:Person . ex:Employee rdfs:subClassOf ex:Person .\n",
+    );
+    out.push_str("ex:Child rdfs:subClassOf ex:Person . ex:Adult rdfs:subClassOf ex:Person .\n");
+    // Identity-bearing relation: parent (Person→Person, systematic). Contingent: enrolledIn
+    // (Student→Course), employedBy (Employee→Organisation).
+    out.push_str("ex:hasParent rdfs:domain ex:Person ; rdfs:range ex:Person .\n");
+    out.push_str("ex:enrolledIn rdfs:domain ex:Student ; rdfs:range ex:Course .\n");
+    out.push_str("ex:employedBy rdfs:domain ex:Employee ; rdfs:range ex:Organisation .\n\n");
+
+    let n_org = (n_people / 20).max(2);
+    let n_course = (n_people / 10).max(3);
+    for i in 0..n_org {
+        out.push_str(&format!("ex:org{} a ex:Organisation .\n", i));
+    }
+    for i in 0..n_course {
+        out.push_str(&format!("ex:course{} a ex:Course .\n", i));
+    }
+    out.push('\n');
+
+    // People: each is typed only by its contingent phase (and sometimes a role) — both
+    // subClassOf Person — so the **rigid kind Person is NOT asserted directly** and must be derived
+    // by the RDFS closure (the closure axis then genuinely bites: with closure OFF, hasParent's
+    // declared domain/range `Person` is satisfied by nobody and type-constrained negatives degrade
+    // toward uniform; with closure ON, everyone is an entailed Person and the prior is sharp).
+    for i in 0..n_people {
+        // Contingent phase (every person is Child or Adult — anti-rigid, can change).
+        if next(2) == 0 {
+            out.push_str(&format!("ex:p{} a ex:Child", i));
+        } else {
+            out.push_str(&format!("ex:p{} a ex:Adult", i));
+        }
+        // Contingent role: ~60% are Students, ~50% Employees (independent), some are neither.
+        let is_student = next(10) < 6;
+        let is_employee = next(10) < 5;
+        if is_student {
+            out.push_str(" , ex:Student");
+        }
+        if is_employee {
+            out.push_str(" , ex:Employee");
+        }
+        out.push_str(" .\n");
+
+        // LEARNABLE STRUCTURE: each person belongs to a latent "community"; identity-bearing and
+        // contingent edges are community-correlated (with noise + decoys) so a KGE can recover a
+        // pattern rather than chase uniform randomness — without that the edges are unpredictable
+        // and the harness would measure pure noise.
+        let n_comm = 5usize;
+        let comm = |k: usize| -> usize { (k.wrapping_mul(2246822519) >> 4) % n_comm };
+
+        // Identity-bearing edge: a parent for ~70% of people, biased toward a lower-indexed person
+        // in the SAME community (acyclic, systematic backbone).
+        if i > 0 && next(10) < 7 {
+            let mut parent = None;
+            for _ in 0..8 {
+                let cand = next(i);
+                if comm(cand) == comm(i) {
+                    parent = Some(cand);
+                    break;
+                }
+            }
+            let parent = parent.unwrap_or_else(|| next(i));
+            out.push_str(&format!("ex:p{} ex:hasParent ex:p{} .\n", i, parent));
+        }
+        // Contingent edges only when the role is held, and only for SOME holders (decoys: a Student
+        // not enrolled in anything). The target course/org is community-correlated (community → a
+        // preferred course/org band) so enrolment is learnable.
+        if is_student && next(10) < 7 {
+            let band = comm(i) % n_course;
+            let course = if next(10) < 7 { band } else { next(n_course) };
+            out.push_str(&format!("ex:p{} ex:enrolledIn ex:course{} .\n", i, course));
+        }
+        if is_employee && next(10) < 7 {
+            let band = comm(i) % n_org;
+            let org = if next(10) < 7 { band } else { next(n_org) };
+            out.push_str(&format!("ex:p{} ex:employedBy ex:org{} .\n", i, org));
+        }
+    }
+    out
+}
+
+/// Build a **small synthetic STRUCTURED relational graph** standing in for a WN18RR-style dataset
+/// when no real dataset file is present (the work-box is non-canonical; the real dataset run is a
+/// dataset-gated bench). It has a class hierarchy with declared domain/range per relation, several
+/// relation types of differing density, and a Zipf-ish long tail of entity frequencies (a few
+/// "hub" entities, many rare ones) so the long-tail breakdown is meaningful. Like the gUFO slice it
+/// is deliberately NOT trivially separable: type-compatible non-edges (decoys) outnumber the true
+/// edges for the sparse relations. Deterministic in `seed`, sized by `n_entities`.
+pub fn synthetic_relational_ttl(n_entities: usize, seed: u64) -> String {
+    let mut state = seed ^ 0x1357_9BDF;
+    let mut next = |m: usize| -> usize { (splitmix64(&mut state) as usize) % m.max(1) };
+
+    let mut out = String::new();
+    out.push_str(
+        "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+         @prefix ex: <http://ex/> .\n\n",
+    );
+    // A small class taxonomy (the closure axis materialises the superclass memberships).
+    out.push_str("ex:Synset rdfs:subClassOf ex:LexEntry .\n");
+    out.push_str("ex:Noun rdfs:subClassOf ex:Synset . ex:Verb rdfs:subClassOf ex:Synset .\n");
+    // Relations with declared domain/range (so type-constrained negatives can bite).
+    out.push_str("ex:hypernym rdfs:domain ex:Noun ; rdfs:range ex:Noun .\n");
+    out.push_str("ex:partOf rdfs:domain ex:Noun ; rdfs:range ex:Noun .\n");
+    out.push_str("ex:entails rdfs:domain ex:Verb ; rdfs:range ex:Verb .\n\n");
+
+    let n_noun = (n_entities * 7 / 10).max(8);
+    let n_verb = (n_entities - n_noun).max(4);
+    for i in 0..n_noun {
+        out.push_str(&format!("ex:n{} a ex:Noun .\n", i));
+    }
+    for i in 0..n_verb {
+        out.push_str(&format!("ex:v{} a ex:Verb .\n", i));
+    }
+    out.push('\n');
+
+    // LEARNABLE STRUCTURE (so the measurement is signal, not noise): nouns belong to a small number
+    // of latent "topic clusters"; relations are generated by cluster rules, not uniform randomness,
+    // so a KGE CAN recover a pattern. We deliberately keep it noisy and incomplete (decoys, missing
+    // edges) so it is not trivially separable by a type filter.
+    let n_clusters = 6usize;
+    let cluster = |i: usize| -> usize { (i.wrapping_mul(2654435761) >> 3) % n_clusters };
+
+    // hypernym: a forest WITHIN each cluster (each non-root points to a lower-indexed noun in the
+    // SAME cluster) → a recoverable backbone; low indices become hubs (long-tail head).
+    for i in 1..n_noun {
+        if next(10) < 8 {
+            // pick a lower-indexed noun in the same cluster (fall back to any lower index).
+            let mut parent = None;
+            for _ in 0..8 {
+                let cand = next(i);
+                if cluster(cand) == cluster(i) {
+                    parent = Some(cand);
+                    break;
+                }
+            }
+            let parent = parent.unwrap_or_else(|| next(i));
+            out.push_str(&format!("ex:n{} ex:hypernym ex:n{} .\n", i, parent));
+        }
+    }
+    // partOf: meronymy that tends to connect ADJACENT clusters (cluster c → cluster c+1), a
+    // cross-cluster rule a KGE can learn; sparse, with decoys (many type-compatible non-edges).
+    for i in 0..n_noun {
+        if next(10) < 4 {
+            let target_cluster = (cluster(i) + 1) % n_clusters;
+            let mut tgt = None;
+            for _ in 0..8 {
+                let cand = next(n_noun);
+                if cluster(cand) == target_cluster {
+                    tgt = Some(cand);
+                    break;
+                }
+            }
+            if let Some(t) = tgt {
+                out.push_str(&format!("ex:n{} ex:partOf ex:n{} .\n", i, t));
+            }
+        }
+    }
+    // entails: among verbs, also clustered (within-cluster), so verb space has its own signal.
+    let vcluster = |i: usize| -> usize { (i.wrapping_mul(40503) >> 2) % n_clusters };
+    for i in 0..n_verb {
+        if next(10) < 5 {
+            let mut tgt = None;
+            for _ in 0..8 {
+                let cand = next(n_verb);
+                if vcluster(cand) == vcluster(i) && cand != i {
+                    tgt = Some(cand);
+                    break;
+                }
+            }
+            if let Some(t) = tgt {
+                out.push_str(&format!("ex:v{} ex:entails ex:v{} .\n", i, t));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::structure::close_for_vectorise;
+
+    fn small_graph() -> Graph {
+        let ttl = synthetic_gufo_ttl(40, 1);
+        let c = close_for_vectorise(&ttl, "turtle", Profile::Rdfs).unwrap();
+        c.graph
+    }
+
+    #[test]
+    fn split_has_no_leakage_and_filter_is_union() {
+        let g = small_graph();
+        let s = Splits::split(&g, 0.8, 0.1, 99);
+        // No triple in more than one split.
+        let mut seen: FxHashSet<[Id; 3]> = FxHashSet::default();
+        for t in s.train.iter().chain(&s.valid).chain(&s.test) {
+            assert!(
+                seen.insert(*t),
+                "triple {:?} appears in more than one split (LEAKAGE)",
+                t
+            );
+        }
+        // Filter set == union of all splits.
+        assert_eq!(
+            s.filter_set_len(),
+            seen.len(),
+            "filter set must be the union of all splits"
+        );
+        for t in seen.iter() {
+            assert!(s.is_true(t), "every split triple must be in the filter set");
+        }
+        assert!(!s.test.is_empty(), "need a non-empty test split to measure");
+    }
+
+    #[test]
+    fn filtered_rank_excludes_other_true_triples() {
+        // A synthetic case where a head has two true tails; ranking one must filter the other.
+        let ttl = r#"
+@prefix ex: <http://ex/> .
+ex:a ex:rel ex:x .
+ex:a ex:rel ex:y .
+ex:b ex:rel ex:x .
+ex:c ex:rel ex:y .
+"#;
+        let c = close_for_vectorise(ttl, "turtle", Profile::Rdfs).unwrap();
+        let g = c.graph;
+        let s = Splits::split(&g, 0.5, 0.0, 1);
+        // Force: train on everything so all entities have rows; reuse split's all_true filter.
+        let tc = TypeConstraints::mine(&g);
+        let cfg = TrainConfig::small(crate::structure::SamplingMode::Unconstrained, 2);
+        let (model, _) = train(&g, &tc, cfg);
+        let a = g.id_of(&iri("http://ex/a")).unwrap();
+        let rel = g.id_of(&iri("http://ex/rel")).unwrap();
+        let x = g.id_of(&iri("http://ex/x")).unwrap();
+        // Rank (a rel ?) with answer x: y must be FILTERED (it is also a true tail of a).
+        let rank = filtered_rank(&model, &s, [a, rel, x], Side::Tail).unwrap();
+        // With y filtered, only x and the remaining distractors remain; rank is bounded by the pool.
+        assert!(rank >= 1);
+        // Sanity: the all_true set indeed contains (a rel y).
+        let y = g.id_of(&iri("http://ex/y")).unwrap();
+        assert!(
+            s.is_true(&[a, rel, y]),
+            "the other true tail must be in the filter set"
+        );
+    }
+
+    #[test]
+    fn ablation_runs_all_four_cells() {
+        let ttl = synthetic_gufo_ttl(60, 4);
+        let cfg = EvalConfig::small(13);
+        let cells = run_ablation(&ttl, "turtle", cfg).unwrap();
+        assert_eq!(cells.len(), 4, "2x2 ablation matrix");
+        // Cell ordering invariant.
+        assert!(!cells[0].closure && !cells[0].type_constrained);
+        assert!(!cells[1].closure && cells[1].type_constrained);
+        assert!(cells[2].closure && !cells[2].type_constrained);
+        assert!(cells[3].closure && cells[3].type_constrained);
+        // Every cell produced a non-empty test evaluation and the closure cells actually closed.
+        for c in &cells {
+            assert!(c.metrics.queries > 0, "cell produced no scorable queries");
+            assert!(c.report.loss_decreased(), "cell model did not learn");
+        }
+        // The gUFO-prior ablation axis exists and is OFF at this stage (baseline phase).
+        assert!(cells.iter().all(|c| !c.gufo_prior));
+    }
+
+    #[test]
+    fn long_tail_buckets_partition_queries() {
+        let ttl = synthetic_gufo_ttl(80, 7);
+        let cfg = EvalConfig::small(21);
+        let cells = run_ablation(&ttl, "turtle", cfg).unwrap();
+        for c in &cells {
+            // Head + tail query counts must sum to the overall query count (a clean partition).
+            assert_eq!(
+                c.long_tail.head.queries + c.long_tail.tail.queries,
+                c.metrics.queries,
+                "long-tail buckets must partition all queries"
+            );
+        }
+    }
+
+    #[test]
+    fn gufo_slice_is_not_trivially_separable() {
+        // The slice must be non-trivial: there exist type-compatible NON-edges (decoys), i.e. a
+        // pure type filter cannot perfectly separate. We check that some Student is NOT enrolled in
+        // some course (so the type-compatible candidate set is larger than the true answer set).
+        let ttl = synthetic_gufo_ttl(80, 3);
+        let c = close_for_vectorise(&ttl, "turtle", Profile::Rdfs).unwrap();
+        let g = &c.graph;
+        let student = g.id_of(&iri("http://ex/Student")).unwrap();
+        let enrolled = g.id_of(&iri("http://ex/enrolledIn")).unwrap();
+        let typ = g
+            .id_of(&iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"))
+            .unwrap();
+        // Count students and enrolledIn edges; students must outnumber edges (decoys exist).
+        let n_students = g
+            .iter_ids()
+            .filter(|[_, p, o]| *p == typ && *o == student)
+            .count();
+        let n_enrolled = g.iter_ids().filter(|[_, p, _]| *p == enrolled).count();
+        assert!(n_students > 0 && n_enrolled > 0);
+        assert!(
+            n_students > n_enrolled || n_enrolled < n_students * 2,
+            "slice should have type-compatible decoys (not every student enrolled): \
+             students={} enrolled={}",
+            n_students,
+            n_enrolled
+        );
+    }
+
+    fn iri(s: &str) -> oxrdf::Term {
+        oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+    }
+}

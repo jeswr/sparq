@@ -14,9 +14,9 @@ One f32 embedding per dictionary term id, in a flat memory-mapped `.spqv` file (
 design). Query top-`k` by cosine with an exact brute-force scan or a persistent on-disk
 DiskANN/Vamana graph by default, or an in-RAM HNSW index behind the opt-in `approx-ann`
 feature (the only third-party ANN dependency; **recall < 1.0**). Embeddings are produced
-**outside** the engine; the crate verbalizes entities to text, embeds via a
-provider-agnostic trait, and fuses with another ranked signal for hybrid search. It is a
-**separate crate** — nothing in the workspace (or the wasm build) depends on it.
+**outside** the engine; the crate verbalizes entities to text, embeds via a provider-agnostic
+trait, and fuses with another ranked signal for hybrid search. It is a **separate crate** —
+nothing in the workspace (or the wasm build) depends on it.
 
 ## 🚀 Quickstart
 
@@ -85,16 +85,17 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   in-process, no new dependency). **Fail-closed**: any dtype / byte-order / shape /
   length / non-finite-row mismatch is an `Err`, never a silent reinterpretation; the
   declared `.npy` header is bounded before any body allocation.
-- **Live embeddings (opt-in)** — the default build is **socket-free**. The non-default
-  `provider` feature carries the OpenAI-compatible `/v1/embeddings` shape with a
-  caller-supplied `Transport`; `embeddings` adds a concrete reqwest client +
-  `RemoteEmbedder::from_env(dim)`. Never enters the wasm bundle.
-- **Structure-aware preprocessing (opt-in `structure`)** — research-grade P0:
-  `close_for_vectorise` materialises the `sparq-reason` RDFS/OWL-RL closure **before**
-  vectorising (entailed type/`subClassOf`/domain/range become real facts); a `NegativeSampler`
-  emits type-constrained corruptions (Krompass 2015) from `sparq-introspect`, with an
-  `Unconstrained`/`TypeConstrained` **on/off ablation**. This crate has **no KGE trainer** —
-  reusable inputs a trainer consumes; **empirical benefit unproven (no accuracy claim)**.
+- **Live embeddings (opt-in)** — the default build is **socket-free**. The non-default `provider`
+  feature carries the OpenAI-compatible `/v1/embeddings` shape with a caller-supplied `Transport`;
+  `embeddings` adds a concrete reqwest client + `RemoteEmbedder::from_env(dim)`. Never enters wasm.
+- **Structure-aware vectorisation (opt-in `structure`; measurement behind `kge`)** — research-grade
+  P0: `close_for_vectorise` materialises the `sparq-reason` RDFS/OWL-RL closure **before** vectorising
+  and a `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an on/off ablation.
+  `kge` (implies `structure`, no new dependency — hand-rolled SGD) adds a thin CPU-only **DistMult**
+  trainer + a standard **filtered link-prediction** harness (`run_ablation`): filtered MRR /
+  Hits@1/3/10, the `{closure}×{type-neg}` **ablation matrix**, a **long-tail** breakdown, and a
+  synthetic **gUFO** slice (`examples/kge_ablation.rs`, `SPARQ_KGE_DATASET`) — **no accuracy claim**,
+  numbers INDICATIVE only, never baked into docs.
 
 ## 📚 Learn more
 
@@ -105,8 +106,7 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
 - **Design** — [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md).
 - **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ / throughput
   gates are `cargo test`s (`tests/recall.rs`, `tests/diskann.rs`, `tests/quant.rs`,
-  `tests/throughput.rs`), with live numbers on the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  `tests/throughput.rs`), with live numbers on the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
 - **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs`
   anchors recall against **hnswlib** (the FAISS/hnswlib reference) via a committed capture
   (`tests/fixtures/hnswlib_ref.tsv`): `nearest_exact` reproduces the numpy exact-kNN oracle,

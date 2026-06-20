@@ -729,8 +729,56 @@ corruption for that side — a missing/wrong schema never deadlocks the sampler.
 deterministic for a fixed `(seed, mode, triple)` and applies the standard "filtered" guard (never
 emits a corruption that is itself a true triple). **Honesty:** the empirical benefit of either prior is
 **unproven** — both ship behind the ablation precisely because the literal/type-aware KGE literature
-reports inconsistent gains; this slice is the buildable inputs, the trainer that consumes them is a
-tracked follow-up.
+reports inconsistent gains; this slice is the buildable inputs. **The trainer that consumes them now
+exists** behind the `kge` feature (recipe 14).
+
+### 14. KGE measurement foundation — DistMult trainer + filtered link-prediction ablation (opt-in, feature = `kge`)
+
+<!-- [OPUS-4.8] sq-0wo9e.8 / P6 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §P6 + sq-0wo9e.8). -->
+The `kge` feature (implies `structure`) is the **measurement foundation** for the epic: a **thin,
+CPU-only, deterministically-seeded DistMult** that *consumes* the P0 closure + type-constrained
+negatives to produce embeddings, plus the standard **filtered link-prediction** harness that measures
+them. It is the *instrument* — it makes **no accuracy claim**; DistMult is symmetric (an honest
+limitation for directional relations). No new dependency (hand-rolled SGD, no ML crate).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{close_for_vectorise, train, TrainConfig, SamplingMode, TypeConstraints};
+use sparq_reason::Profile;
+
+let closed = close_for_vectorise(turtle_src, "turtle", Profile::Rdfs)?;   // closure-before-vectorise
+let tc = TypeConstraints::mine(&closed.graph);
+let cfg = TrainConfig::small(SamplingMode::TypeConstrained, /*seed*/ 7);  // tiny, reproducible
+let (model, report) = train(&closed.graph, &tc, cfg);
+assert!(report.loss_decreased());                  // it learns
+let score = model.score(h, r, t);                  // DistMult trilinear score (Option)
+# Ok::<(), String>(())
+```
+
+The **eval harness** runs the 2×2 P0 ablation matrix and reports filtered MRR / Hits@1/3/10 with a
+long-tail breakdown:
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{run_ablation, synthetic_relational_ttl, EvalConfig};
+let ttl = synthetic_relational_ttl(400, /*seed*/ 42);   // or your own KG text
+let cells = run_ablation(&ttl, "turtle", EvalConfig::small(13))?;   // [(F,F),(F,T),(T,F),(T,T)]
+for c in &cells {
+    println!("closure={} type-neg={} MRR={:.4} H@10={:.4}  tail-H@10={:.4}",
+        c.closure, c.type_constrained, c.metrics.mrr, c.metrics.hits10, c.long_tail.tail.hits10);
+}
+# Ok::<(), String>(())
+```
+
+**Filtered protocol (load-bearing).** Each ranking removes **every** known-true triple (train + valid +
+test) before scoring the held-out one — the established Bordes 2013 protocol; getting it wrong
+invalidates every number. Train/valid/test are a leakage-free partition (a triple is in exactly one
+split); the trainer sees **train only**. Only **non-schema relations** are prediction targets
+(`SCHEMA_PREDICATES` — `rdf:type`/`subClassOf`/domain/range are *structural context*, never targets,
+so the closure axis is not distorted by trivially-derivable entailed types). The runnable ablation is
+`examples/kge_ablation.rs` (a real dataset goes behind `SPARQ_KGE_DATASET=/path/to/kg.nt`). **All
+numbers are INDICATIVE only** (the work-box is non-canonical) and are **never** baked into docs — the
+gUFO-prior cell (`AblationCell::gufo_prior`) is an exposed ablation axis the later phase wires into.
 
 ## Gotchas / feature flags / prerequisites
 
@@ -752,8 +800,15 @@ tracked follow-up.
   ONLY feature pulling `sparq-reason` + `sparq-introspect` into this crate, both **optional**, so
   with it OFF the default build compiles zero structure-prep code and gains no new required deps. With
   it ON it exposes `close_for_vectorise` / `materialise_closure` / `ClosedGraph`, `TypeConstraints`,
-  and the `NegativeSampler` + `SamplingMode` (on/off ablation) of recipe 13. It TRAINS NOTHING and
-  serves no exact answer; benefit is **unproven** (research-grade, no accuracy claim, no numbers).
+  and the `NegativeSampler` + `SamplingMode` (on/off ablation) of recipe 13. It serves no exact
+  answer; benefit is **unproven** (research-grade, no accuracy claim, no numbers).
+- **The KGE measurement foundation is the non-default `kge` feature (sq-0wo9e.8 / P6).** It **implies
+  `structure`** and adds **no new dependency** (a hand-rolled CPU-only DistMult — no ML crate). With it
+  OFF the default build compiles zero trainer/eval code; with it ON it exposes `train` / `TrainConfig`
+  / `TrainedModel`, the filtered link-prediction harness (`run_ablation` / `EvalConfig` / `Splits` /
+  `Metrics` / `LongTail` / `AblationCell`), the synthetic-graph generators, and `SCHEMA_PREDICATES`
+  (recipe 14). It is the *measurement instrument* the design requires before any prior is adopted —
+  **no accuracy claim**, indicative numbers only (work-box non-canonical).
 - **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
   index (`VectorIndex`/`HnswConfig`) and the `ApproxBackend` are gated behind it — it is the only
   thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force
