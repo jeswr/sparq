@@ -21,6 +21,19 @@
   'use strict';
 
   var SERIES = 'sparq engine';
+  // [OPUS-4.8] sq-aas7 (design sq-i0nm §E): the EC2/nightly heavy-benchmark series. github-action-
+  // benchmark writes it to a SEPARATE data dir (dev/bench-ec2/data.js) under the series NAME below
+  // (see .github/workflows/bench-ec2.yml `name: sparq engine (EC2)`). The per-commit gh-runner
+  // series (SERIES) is the dense history that drives the trend/family/scaling views; the EC2 series
+  // is a quieter, full-scale, higher-fidelity tier. When it is present we PREFER it for the FEATURED
+  // block (the at-a-glance public-suite comparison) because it runs on the SAME c7g Graviton arm64
+  // instance FAMILY as the competitor gathers. NB (sq-c0kd): same family is NOT same box — the
+  // nightly tier runs a larger SIZE (c7g.4xlarge, 16 vCPU) than the ephemeral competitor gathers
+  // (c7g.xlarge, 4 vCPU), so absolute µs are NOT directly comparable across the two sizes; we tag the
+  // chosen tier so the reader sees the provenance and we never place a nightly sparq number beside a
+  // competitor cell as a same-box speedup. Graceful: when the EC2 series is absent (not yet live),
+  // everything falls back to the per-commit series.
+  var EC2_SERIES = 'sparq engine (EC2)';
 
   // ---- competitor reference data (sq-i0nm parent) --------------------------
   // [OPUS-4.8] Versioned STATIC competitor data, EMBEDDED so the live GitHub Pages page renders it
@@ -30,32 +43,57 @@
   // two in sync (the file carries the full rationale + HONESTY note). render() loads it into
   // window.COMPETITORS unless one was already injected externally (a future competitors.js/fetch can
   // still override). The featured table reads `engines`/`values` (the sq-xvow seam); `references`
-  // drives a per-suite external-reference baseline note. NO fabricated numbers: `values` is EMPTY by
-  // design (no in-repo competitor was measured at the dashboard's CI scale+machine+regime, so every
-  // per-metric cell shows "n/a (not gathered)"); `references` carries the real cited numbers that DO
-  // exist (QLever synthetic on a 2020 M1; EYE DeepTaxonomy closures on an M1) with their OWN
-  // scale/machine/source, shown SEPARATELY so a mismatched figure is never aligned into a same-row
-  // comparison. Sources: bench/qlever-baselines.md, bench/inference/eye-comparison.md, Cargo.lock
-  // (oxigraph 0.5.8), research/inference-sota.md (RDFox citations only). Gathered: 2026-06-15.
+  // drives a per-suite external-reference baseline note. NO fabricated numbers: the ONLY populated
+  // `values` cells are the SHACL columns (pyshacl + jena-shacl), MEASURED same-machine on a one-shot
+  // ephemeral EC2 box (sq-ays7, re-measuring sq-8dp3) against the SAME data x shapes as the dashboard
+  // SHACL suite, with #violations cross-checked per workload before recording timing. Every OTHER
+  // per-metric cell stays "n/a (not gathered)" — no in-repo competitor was measured at the dashboard's
+  // CI scale+machine+regime for the SPARQL suites (oxigraph WAS gathered live but only on the
+  // sparq-bench synthetic-compare path — different dataset/query-name set; qlever needs a multi-GB
+  // server not auto-started). `references` carries the real cited numbers that DO exist (QLever
+  // synthetic on a 2020 M1; EYE DeepTaxonomy closures on an M1) with their OWN scale/machine/source,
+  // shown SEPARATELY so a mismatched figure is never aligned into a same-row comparison. Sources:
+  // bench/qlever-baselines.md, bench/inference/eye-comparison.md, Cargo.lock (oxigraph 0.5.8),
+  // research/inference-sota.md (RDFox citations only). SHACL values gathered same-machine: 2026-06-16.
   var COMPETITORS_DATA = {
     schema_version: 1,
-    gathered_at_utc: '2026-06-15',
-    gathered_by: 'static curation from in-repo sources (no live gather); see `source` on each engine/reference',
+    gathered_at_utc: '2026-06-16',
+    gathered_by: 'in-repo references (qlever/eye) + a LIVE ephemeral-EC2 gather of the SHACL engines (sq-ays7, re-measuring the earlier sq-8dp3 point at the current HEAD): ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), quiet_box=true, commit f271b74, against the committed bench/shacl suite (LUBM(1) ABox x 5 shape graphs). EPHEMERAL GATHER POINT for cross-engine ordering, NOT the pinned gh-runner CI band. HONEST-N/A: oxigraph + qlever stay absent from values (oxigraph gathered live but only on the sparq-bench synthetic-compare path — different dataset/query-name set; qlever needs a multi-GB on-disk server not auto-started — only the M1 references exist). See competitors.json.',
     engines: [
       { id: 'qlever', label: 'QLever', version: '0.5.47',
         env: '2020 MacBook Air M1, 16GB, native', source: 'bench/qlever-baselines.md' },
       { id: 'oxigraph', label: 'Oxigraph', version: '0.5.8',
-        env: 'embedded Rust dev-dep (Cargo.lock); no committed dashboard-scale numbers',
+        env: 'embedded Rust dev-dep (Cargo.lock); gathered on ephemeral c7g.xlarge but on the in-process sparq-bench synthetic graph (50k entities) — a DIFFERENT dataset/regime/query-name set from any dashboard metric, so NO same-row value cell (would be apples-to-oranges); see oxigraph_compare_note',
         source: 'crates/sparq-bench Cargo.toml + Cargo.lock' },
       { id: 'eye', label: 'EYE', version: 'v11.24.4 (2026-05-12), SWI-Prolog 10.0.2',
         env: 'Apple M1 (fanless), macOS 25.4.0', source: 'bench/inference/eye-comparison.md' },
       { id: 'rdfox', label: 'RDFox',
         version: 'not gathered (vendor/paper figures only — Oxford Semantic; AAAI-2014/ISWC-2015)',
-        env: 'n/a — no head-to-head run in-repo', source: 'research/inference-sota.md §1.1' }
+        env: 'n/a — no head-to-head run in-repo', source: 'research/inference-sota.md §1.1' },
+      { id: 'pyshacl', label: 'pySHACL', version: '0.31.0',
+        env: 'ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)',
+        source: 'live gather — scripts/gather-ec2.sh + report_cli_adapter.py' },
+      { id: 'jena-shacl', label: 'Apache Jena SHACL', version: '5.2.0',
+        env: 'ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, OpenJDK (default-jdk), quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)',
+        source: 'live gather — scripts/gather-ec2.sh + report_cli_adapter.py' }
     ],
-    // EMPTY BY DESIGN — see the comment above + competitors.json HONESTY note. Every per-metric
-    // competitor cell renders "n/a (not gathered)" until a same-scale quiet-box gather fills it.
-    values: {},
+    // [OPUS-4.8] sq-8dp3: SHACL per-workload validate latency (µs) from the live ephemeral-EC2 gather,
+    // against the SAME data x shapes as the dashboard SHACL suite. Keyed by metric STEM (name minus
+    // _us; competitorsFor matches that). Unit µs (matches shacl_*_validate_us). #violations were
+    // cross-checked per workload before timing: sparq/jena/pyshacl AGREE on cardinality/class_nodekind/
+    // datatype_range/sparql_constraint; on node_paths sparq+jena=1802 (per-occurrence) while pyshacl=3604
+    // (different sh:node decomposition — a SEMANTIC count diff, see bench/shacl/expected.tsv), so
+    // pyshacl's node_paths timing is for a DIFFERENT result count. Absolute µs are 4-vCPU Graviton, NOT
+    // the gh-runner band — for cross-engine ORDERING, not an absolute reference. (Keep byte-for-meaning
+    // in sync with bench/dashboard/competitors.json.) oxigraph gathered too but on a different
+    // dataset/regime -> no same-row cell (see competitors.json oxigraph_compare_note).
+    values: {
+      'shacl_cardinality_validate':       { pyshacl: 2770805, 'jena-shacl': 1468099 },
+      'shacl_class_nodekind_validate':    { pyshacl: 2774018, 'jena-shacl': 1482460 },
+      'shacl_datatype_range_validate':    { pyshacl: 3600595, 'jena-shacl': 1666635 },
+      'shacl_node_paths_validate':        { pyshacl: 4467148, 'jena-shacl': 1788495 },
+      'shacl_sparql_constraint_validate': { pyshacl: 27661760, 'jena-shacl': 2248361 }
+    },
     references: [
       { suite: 'Synthetic (qlever-style)', engine: 'qlever', version: '0.5.47',
         env: '2020 MacBook Air M1, 16GB, native', scale: '10M synthetic (1.25M entities × 8)',
@@ -93,6 +131,54 @@
         metric: 'forward closure, wall-clock', value: null, unit: 's',
         regime: 'not run (extrapolated ≈9h at EYE’s observed ≈N^1.95 DT scaling)',
         source: 'bench/inference/eye-comparison.md', caveat: 'n/a (not gathered) — EYE was not run at dt100k. NOT fabricated.' }
+    ],
+    // [OPUS-4.8] sq-ays7 — SAME-BOX SPARQL comparison (PHASE 2). sparq + Oxigraph (+ QLever
+    // best-effort) on ONE ephemeral AWS EC2 box against the SAME SP2Bench-250k corpus + bench/sp2b
+    // queries in the SAME min-of-5 COUNT regime. renderSameBox() draws this in the #same-box card,
+    // DISTINCT from the gh-runner CI-band featured `values` (different machine) and the cross-machine
+    // `references`. HONESTY: the gather captured sparq's TSV but the instance hit its orphan-safe
+    // cleanup trap right AFTER the Oxigraph (`sparq-bench bench-corpus`) command was invoked and
+    // BEFORE its TSV reached the pulled log — so Oxigraph + QLever timings were NOT captured. They
+    // stay null (-> "n/a"); count_match stays null (no Oxigraph rows to cross-check against). Only
+    // sparq's real per-query (rows, best_us) are recorded. Byte-for-meaning mirror of
+    // bench/dashboard/competitors.json same_box_comparisons (re-run the gather to completion to fill
+    // the Oxigraph column + enable the count_match check).
+    same_box_comparisons: [
+      {
+        suite: 'SP2Bench',
+        scale: 'SP2Bench 250k triples (bench/sp2b/gen.sh 250000; 27,219,138-byte Turtle)',
+        iters: 5,
+        git_commit: '681047f',
+        gathered_at_utc: '2026-06-16',
+        source: 'live ephemeral-EC2 gather — scripts/gather-ec2-sparql.sh (sparq via `sparq-cli bench … 5 count`; Oxigraph via `sparq-bench bench-corpus … 5`)',
+        env: {
+          host_class: 'ephemeral AWS EC2 c7g.xlarge (4 vCPU arm64 Graviton, Ubuntu 24.04)',
+          quiet_box: true,
+          gathered_at_utc: '2026-06-16',
+          note: 'Requested c7g.2xlarge fell back to c7g.xlarge (account vCPU limit of 16). Oxigraph 0.5.8 (Cargo.lock). QLever was requested (QLEVER=1) but produced no numbers on this run.'
+        },
+        engines: [
+          { id: 'sparq', label: 'sparq', version: 'git 681047f', env: 'ephemeral c7g.xlarge (4 vCPU Graviton), release build, min-of-5 COUNT' },
+          { id: 'oxigraph', label: 'Oxigraph', version: '0.5.8', env: 'same box — n/a: bench-corpus TSV not captured before the orphan-safe cleanup trap fired' },
+          { id: 'qlever', label: 'QLever', version: 'n/a', env: 'requested (QLEVER=1) but no QLever timing produced on this run — honest n/a, not fabricated' }
+        ],
+        rows: [
+          { query: 'q01',  unit: 'µs', rows: 1,      values: { sparq: 9.2,      oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q02',  unit: 'µs', rows: 6067,   values: { sparq: 6618.2,   oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q03a', unit: 'µs', rows: 15823,  values: { sparq: 14525.7,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q03b', unit: 'µs', rows: 114,    values: { sparq: 14355.4,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q03c', unit: 'µs', rows: 0,      values: { sparq: 14140.6,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q04',  unit: 'µs', rows: 541911, values: { sparq: 358604.1, oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q05b', unit: 'µs', rows: 6933,   values: { sparq: 15317.7,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q07',  unit: 'µs', rows: 48,     values: { sparq: 23383.4,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q08',  unit: 'µs', rows: 358,    values: { sparq: 212938.1, oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q09',  unit: 'µs', rows: 4,      values: { sparq: 23091.2,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q10',  unit: 'µs', rows: 452,    values: { sparq: 3.8,      oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q11',  unit: 'µs', rows: 10,     values: { sparq: 18652.1,  oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q12b', unit: 'µs', rows: 1,      values: { sparq: 213513.8, oxigraph: null, qlever: null }, count_match: null },
+          { query: 'q12c', unit: 'µs', rows: 0,      values: { sparq: 4.9,      oxigraph: null, qlever: null }, count_match: null }
+        ]
+      }
     ]
   };
 
@@ -139,6 +225,45 @@
       if (rec.query) parts.push('query: ' + rec.query);
     }
     return parts.join('\n');
+  }
+
+  // [OPUS-4.8] sq-19z8: per-metric SEMANTIC badges derived from the label record (sq-ocuf already
+  // emits `regime` for LUBM — extensional vs entailed OWL-RL closure — and `mode` for the result
+  // shape — count/materialize/json/…). These two fields previously surfaced ONLY in the title-attr
+  // tooltip; this returns small badge descriptors so the renderer can show them as muted pills next
+  // to the metric label, making the reasoning delta + serialization mode visible at a glance.
+  //
+  // Returns an ordered array of { kind, text, title } (empty when the metric has neither field, e.g.
+  // a load/store/dict metric, so most rows stay badge-free). `kind` is a CSS-class suffix:
+  //   - regime -> 'badge-entailed' (LUBM reasoning, OWL-RL closure) or 'badge-extensional' (asserted
+  //     triples only, no entailment). The entailed/extensional split is the reasoning delta.
+  //   - mode   -> 'badge-mode' (count / materialize / json / closure / validate / …), the result
+  //     serialization/consumption mode the latency was measured under.
+  // Pure + node-testable. We DO NOT invent badges for unlabelled metrics (lookup() returns null ->
+  // []), so the structural-fallback path never sprouts a misleading pill.
+  function semanticBadges(name) {
+    var rec = lookup(name);
+    if (!rec) return [];
+    var out = [];
+    if (rec.regime) {
+      var entailed = rec.regime === 'entailed';
+      out.push({
+        kind: entailed ? 'badge-entailed' : 'badge-extensional',
+        text: rec.regime,
+        title: entailed
+          ? 'entailed — measured over the OWL-RL closure (materialised entailments), so this is the reasoning-on path'
+          : 'extensional — measured over the asserted triples only (no entailment / closure)'
+      });
+    }
+    if (rec.mode) {
+      out.push({
+        kind: 'badge-mode',
+        text: rec.mode,
+        title: 'result mode: ' + rec.mode +
+          ' — the serialization/consumption mode this latency was measured under'
+      });
+    }
+    return out;
   }
 
   // The suite a metric belongs to (drives table sections + chart groups). Falls back to the old
@@ -272,6 +397,9 @@
     { key: 'WatDiv',        title: 'WatDiv',        aliases: ['watdiv'] },
     { key: 'SP2Bench',      title: 'SP2Bench',      aliases: ['sp2bench', 'sp2b'] },
     { key: 'Deep Taxonomy', title: 'Deep Taxonomy', aliases: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy'] },
+    // [OPUS-4.8] sq-msl6: OWL sameAs equality micro-suite (sameas_size<N>_* — the owl:sameAs
+    // closure-correctness analogue of Deep Taxonomy). `sameas` is the metric-name prefix.
+    { key: 'OWL sameAs', title: 'OWL sameAs', aliases: ['owl sameas', 'owl-sameas', 'sameas'] },
     // [OPUS-4.8] sq-7iai: SHACL validation suite (LUBM ABox x 5 hand-authored shape graphs).
     { key: 'SHACL',         title: 'SHACL validation', aliases: ['shacl', 'shacl validation'] },
     // [OPUS-4.8] sq-ustq: Full-text-search suite (synthetic BM25 corpus; text:matches/phrase/near).
@@ -280,6 +408,37 @@
     { key: 'GeoSPARQL',     title: 'GeoSPARQL',     aliases: ['geosparql', 'geo'] },
     // [OPUS-4.8] sq-v02y: Vector / ANN suite (HNSW / Vamana / PQ recall@10 deficits vs exact-kNN).
     { key: 'Vector / ANN',  title: 'Vector / ANN', aliases: ['vector / ann', 'vector', 'vectors', 'ann'] },
+    // [OPUS-4.8] sq-b1hn: RSP-QL streaming suite. Metrics are `rsp_*` (per-window row-count gate +
+    // SRBench oracle + advisory rsp_persistentdict_triples_per_s) — the `rsp` alias prefix-matches the
+    // whole family. Correctness/expressivity card; perf head-to-head OUT OF SCOPE (clock-free vs the
+    // wall-clock RSP peers C-SPARQL/CQELS/RSP4J — different time model). No competitor perf column.
+    { key: 'RSP-QL',        title: 'RSP-QL streaming', aliases: ['rsp-ql', 'rsp', 'rspql'] },
+    // [OPUS-4.8] sq-lrp9: HDT load-and-decode suite. Metrics are the deterministic snikmeta_*
+    // counts (load-and-decode gate) + advisory hdt_load_s / hdt_vs_ntgz_load_s. The `hdt` /
+    // `snikmeta` aliases prefix-match the whole family. Load-decode-vs-hdt-cpp is the ONLY
+    // like-for-like axis (query-over-HDT is a NON-goal — different data structure); the
+    // hdt-cpp competitor (bench/competitors.json) is decode-only, gather-only via docker.
+    { key: 'HDT',           title: 'HDT load-and-decode', aliases: ['hdt', 'snikmeta'] },
+    // [OPUS-4.8] sq-5o5.3: PROMOTE the ZK estate to a featured card (the maintainer treats ZK as a
+    // genuine differentiator, unlike the trend-only suites). One card groups the whole estate: the
+    // `zk-compose` circuit-gate counts (zk_compose_<member>_gates) + the `zk` commitment-pipeline
+    // and `zk-trace` overhead criterion means (zk_commit_* / zk_canon_* / zk_poseidon2_* / zk_trace_*).
+    // `key` matches the metric-labels.json suite ("Zero-knowledge"); the aliases also carry the bare
+    // `zk` family token (which clears scripts/drift-scan.py::scan_dashboard_row's `dashboard-row:zk`)
+    // and the per-bench slugs, plus the metric-name prefixes for the structural fallback.
+    //
+    // HONESTY (sq-5o5.3): the headline ZK figures are `bb gates -s ultra_honk` CIRCUIT-SIZE counts
+    // (unit `gates`, from the committed bench/zk-compose/gate_counts_latest.json snapshot) — a
+    // circuit-COST measurement, NOT throughput/speed. The zk_commit_*/zk_trace_* rows are µs
+    // criterion MEANS (NON-canonical trend signals). `note` frames the card as circuit-cost and
+    // states ZK is research-grade / not externally audited, so the card never implies a speed claim
+    // or an audited guarantee. No numbers live here — the rows come from the registered bench feed.
+    { key: 'Zero-knowledge', title: 'Zero-knowledge (commit · trace · circuit)',
+      aliases: ['zero-knowledge', 'zk', 'zk-trace', 'zk-compose', 'zktrace', 'zkcompose'],
+      note: 'Circuit-COST card: the headline figures are bb gates -s ultra_honk circuit-size '
+          + '(gate-count) measurements — NOT speed/throughput. The µs rows are non-canonical '
+          + 'criterion trend means. The ZK estate is research-grade and not externally audited; '
+          + 'smaller circuit size is better.' },
     { key: 'BSBM',          title: 'BSBM',          aliases: ['bsbm'] },
     { key: 'DBPSB',         title: 'DBPSB',         aliases: ['dbpsb', 'dbpedia sparql benchmark'] },
     // [OPUS-4.8] sq-i0nm: the synthetic qlever-style suite carries the one in-repo competitor
@@ -321,7 +480,52 @@
   //   { engines:[{id,label,version,env}], values:{ "<metric stem or name>": { "<engineId>": <µs> } } }
   // We match on the raw metric NAME first, then the stem (name minus _us), so the competitor file
   // can key either way. We never invent numbers — a missing key is simply absent.
-  function buildFeatured(entries, competitors) {
+  // [OPUS-4.8] sq-aas7 (design sq-i0nm §E): choose which series feeds the FEATURED block, PREFERRING
+  // the EC2/nightly tier when it is present + non-empty, else falling back to the per-commit
+  // gh-runner tier. Returns { tier, seriesName, entries, hasEc2 }:
+  //   - tier        — 'nightly' (EC2, same c7g instance family as the competitor gathers — larger
+  //                   size, NOT same box) or 'per-commit'
+  //                   (gh-runner CI band — noisier, cross-env vs the gathered competitor numbers).
+  //   - seriesName  — the github-action-benchmark series name actually used.
+  //   - entries     — that series' chronological entries array (>= 1 element when non-empty).
+  //   - hasEc2      — whether an EC2/nightly series with data was available at all (drives the
+  //                   "EC2 absent" graceful note in the renderer).
+  // `data` is the merged BENCHMARK_DATA shape ({ entries: { "<series>": [...] } }). Pure +
+  // node-testable; tolerant of a missing data / entries object (-> per-commit, empty).
+  function pickFeaturedSeries(data) {
+    var allEntries = (data && data.entries) || {};
+    var ec2 = allEntries[EC2_SERIES];
+    var commit = allEntries[SERIES];
+    var hasEc2 = Array.isArray(ec2) && ec2.length > 0;
+    if (hasEc2) {
+      return { tier: 'nightly', seriesName: EC2_SERIES, entries: ec2, hasEc2: true };
+    }
+    return {
+      tier: 'per-commit', seriesName: SERIES,
+      entries: Array.isArray(commit) ? commit : [], hasEc2: false
+    };
+  }
+
+  // [OPUS-4.8] sq-aas7: a display descriptor for a featured tier — { kind, text, title }. `kind` is a
+  // CSS-class suffix (tier-nightly / tier-per-commit). Pure + node-testable; the renderer turns it
+  // into a .pill tier badge in the featured header. The nightly tier runs on the same c7g Graviton
+  // arm64 instance FAMILY as the competitor gathers — but a larger SIZE (c7g.4xlarge vs the gathers'
+  // c7g.xlarge), so it is NOT same-box and the two are not directly comparable; the per-commit tier
+  // is the noisier gh-runner CI band.
+  function tierDescriptor(tier) {
+    if (tier === 'nightly') {
+      return { kind: 'tier-nightly', text: 'nightly · EC2',
+        title: 'featured numbers are from the weekly EC2/nightly heavy-benchmark series '
+             + '(sparq engine (EC2)) — a quiet, full-scale tier on the same c7g instance family as '
+             + 'the competitor gathers, but a larger instance size, so not directly comparable to '
+             + 'the competitor cells; preferred over the per-commit gh-runner band when present' };
+    }
+    return { kind: 'tier-per-commit', text: 'per-commit · gh-runner',
+      title: 'featured numbers are from the per-commit gh-runner CI series (sparq engine) — the '
+           + 'EC2/nightly series is not present yet, so this noisier CI band is shown' };
+  }
+
+  function buildFeatured(entries, competitors, opts) {
     var latest = entries[entries.length - 1];
     var bySuite = {};
     latest.benches.forEach(function (b) {
@@ -345,10 +549,20 @@
       // the comparison table — never aligned into a same-row competitor cell (those stay n/a unless a
       // same-scale gather fills `values`). A suite with rows but no references just omits the note.
       if (bySuite[f.key]) groups.push({ suite: f.key, title: f.title,
+        // [OPUS-4.8] sq-5o5.3: carry the optional FEATURED_SUITES `note` (the ZK estate's
+        // circuit-cost / research-grade framing) through to renderFeatured's caption.
+        note: f.note,
         rows: sortRows(bySuite[f.key].rows), references: referencesForSuite(competitors, f.key) });
     });
+    // [OPUS-4.8] sq-aas7: carry the chosen-tier provenance so renderFeatured can show a tier badge
+    // and an env-match note. `opts` is { tier, seriesName, hasEc2 } from pickFeaturedSeries(); when
+    // omitted (legacy callers / tests passing only entries) it defaults to the per-commit tier so the
+    // existing behaviour is unchanged.
+    var tier = (opts && opts.tier) || 'per-commit';
     return { commit: latest.commit, date: latest.date, groups: groups,
-             competitorEngines: competitorEngines(competitors) };
+             competitorEngines: competitorEngines(competitors),
+             tier: tier, seriesName: (opts && opts.seriesName) || SERIES,
+             hasEc2: !!(opts && opts.hasEc2) };
   }
 
   // SEAM helper (sq-t0c3): read the per-engine competitor numbers for one metric, or {} when the
@@ -371,6 +585,189 @@
   function referencesForSuite(competitors, suiteKey) {
     if (!competitors || !Array.isArray(competitors.references)) return [];
     return competitors.references.filter(function (r) { return r.suite === suiteKey; });
+  }
+
+  // ---- suite FAMILIES (sq-rltn) --------------------------------------------
+  // [OPUS-4.8] sq-rltn: the dashboard must VISIBLY COVER ALL QUERY TYPES, not feel SPARQL-only.
+  // The published data is dominated (~16k points) by the SPARQL suites (SP2Bench/WatDiv/LUBM/BSBM/
+  // DBPSB), which buries the capability surfaces (SHACL / GeoSPARQL / Full-Text / Vector-ANN /
+  // Reasoning). FAMILIES groups the fine-grained suiteFor() suites into a small set of TOP-LEVEL
+  // capability families, in a fixed display order, so every family renders as its own prominent
+  // section + appears in the family nav — even a family with NO data yet shows as "not yet
+  // reported" (HONEST coverage, never a fabricated row). `suites` are matched against suiteFor()
+  // (normalised lower-case); `prefixes` are a structural fallback matched against the raw metric
+  // name's leading token so a not-yet-labelled metric (e.g. a future `vectors_*`) still lands in
+  // the right family. Pure + node-testable.
+  //
+  // [OPUS-4.8] sq-ncvq.15 / drift-scan §5.D: the dashboard previously covered only the suites that
+  // already FLOW to benchmark-data via scripts/ci-bench.sh (core/sparql + the four capability
+  // surfaces + reasoning). The drift scan flagged that MANY registered benchmark families
+  // (bench/benchmarks.toml) had NO dashboard row at all — most notably the entire ZK estate
+  // (zk / zk-trace / zk-compose), plus Solid/WAC access-control, HDT ingest, RSP streaming,
+  // GenAI (similarity / introspection / NL→SPARQL) and the GPU kernel experiment. So the rows below
+  // render as "not yet reported" until a ci-bench hook lands — exactly the dashboard's HONEST
+  // graceful-degradation contract (buildFamilies keeps every family, count 0 -> a nav chip + a "not
+  // yet reported" section). When a hook DOES start emitting, the metric lands in the right family
+  // automatically via these prefixes — no further dashboard change.
+  //
+  // [OPUS-4.8] sq-k0km UPDATE — ci-bench hooks have since LANDED for: ZK (zk_compose_*_gates +
+  // zk_commit_*/zk_trace_* criterion means), HDT (snikmeta_* load-decode counts + hdt_load_s), RSP
+  // (rsp_*_rows per-window counts), Solid (solid_* WAC/ACP auth-view counts) and GenAI's NL→SPARQL
+  // (nlq_* offline-loop counts). Those families now render REAL data. STILL "not yet reported" (and
+  // HONESTLY so): GenAI's sim/introspect suites (need the gitignored 1.78M-triple olympics.nt — NOT
+  // in CI), the GPU experiment (no GPU on gh runners) and MPC (modelled tier). Those are
+  // EC2/dataset-gathered and intentionally not in the per-commit feed.
+  var FAMILIES = [
+    { key: 'core',     title: 'Core (load · dict · memory)', kind: 'core',
+      suites: ['pipeline', 'memory / size'],
+      prefixes: ['load', 'parse', 'store', 'dict', 'wasm', 'rdfs'] },
+    { key: 'sparql',   title: 'SPARQL query suites', kind: 'sparql',
+      // [OPUS-4.8] sq-ncvq.15: selective (index-nested-loop / bind join) + u64 (inline value-id /
+      // dict-resolve) are SPARQL micro-suites run through the same cli `bench` runner (q01_* stems).
+      // They emit no dashboard metric today; recognise their suite names + `selective`/`u64` prefixes
+      // so a future hook groups them under SPARQL, not orphaned.
+      suites: ['sp2bench', 'watdiv', 'lubm (reasoning)', 'bsbm', 'dbpsb',
+               'synthetic (qlever-style)', 'operators', 'selective', 'u64 / value-ids'],
+      prefixes: ['sp2b', 'watdiv', 'lubm', 'bsbm', 'dbpsb', 'op', 'selective', 'u64',
+                 'q01', 'q02', 'q03', 'q04',
+                 'q05', 'q06', 'q07', 'q08', 'q09', 'q10', 'q11', 'q12'] },
+    { key: 'shacl',    title: 'SHACL validation', kind: 'capability',
+      suites: ['shacl validation', 'shacl'], prefixes: ['shacl'] },
+    { key: 'geo',      title: 'GeoSPARQL', kind: 'capability',
+      suites: ['geosparql', 'geo'], prefixes: ['geo'] },
+    { key: 'fts',      title: 'Full-Text search', kind: 'capability',
+      suites: ['full-text', 'fulltext', 'fts', 'text'], prefixes: ['text', 'fts'] },
+    { key: 'vector',   title: 'Vector / ANN', kind: 'capability',
+      suites: ['vector', 'vector / ann', 'vectors', 'ann'],
+      prefixes: ['vector', 'vectors', 'vec', 'ann', 'knn', 'hnsw', 'diskann'] },
+    { key: 'reasoning', title: 'Reasoning (N3 · RDFS · OWL-RL)', kind: 'capability',
+      // [OPUS-4.8] sq-ncvq.15: broaden beyond Deep Taxonomy — the inference estate also has the
+      // RDFS/OWL-RL materialization (owl-bench) + incremental-maintenance benches. Recognise their
+      // likely hook prefixes so they share the Reasoning section if/when they start emitting.
+      // NB: `rdfs_infer_s` stays in Core — its label-map suite is "Pipeline" (suiteFor wins over the
+      // prefix pass), and we deliberately do NOT claim the bare `rdfs` token here to avoid ambiguity.
+      // [OPUS-4.8] sq-msl6: the OWL sameAs equality micro-suite (sameas_size<N>_*) is part of the
+      // reasoning estate — recognise its `sameas` hook prefix so it shares the Reasoning section.
+      suites: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy', 'owl sameas', 'reasoning', 'inference'],
+      prefixes: ['deeptax', 'deep', 'owl', 'sameas', 'infer', 'incremental', 'reason'] },
+    // ---- newly-promoted capability families (sq-ncvq.15 / drift-scan §5.D) ------------------------
+    // [OPUS-4.8] ZK is the HEADLINE gap: the whole commitment + trace + circuit estate (the zk,
+    // zk-trace and zk-compose benchmark suites) had no dashboard presence at all. Prefixes cover the
+    // likely ci-bench emit names (zk_commit_us / zk_canon_* / zktrace_* / zkcompose_gates / …).
+    { key: 'zk', title: 'Zero-knowledge (commit · trace · circuit)', kind: 'capability',
+      suites: ['zk', 'zk-trace', 'zk trace', 'zk-compose', 'zk compose', 'zero-knowledge'],
+      prefixes: ['zk', 'zktrace', 'zkcompose', 'poseidon2', 'rdfc10', 'commitment'] },
+    { key: 'solid', title: 'Solid / access control (WAC · ACP)', kind: 'capability',
+      suites: ['solid', 'wac', 'acp', 'access control'],
+      prefixes: ['solid', 'wac', 'acp'] },
+    { key: 'hdt', title: 'HDT archive ingest', kind: 'capability',
+      suites: ['hdt'], prefixes: ['hdt'] },
+    { key: 'rsp', title: 'RDF Stream Processing (continuous queries)', kind: 'capability',
+      suites: ['rsp', 'rdf stream processing', 'streaming'],
+      prefixes: ['rsp', 'stream', 'window'] },
+    { key: 'genai', title: 'GenAI (similarity · introspection · NL→SPARQL)', kind: 'capability',
+      // [OPUS-4.8] sq-5o5.5-.7 (featured = false trend-only disposition): the sim
+      // (sim-olympics-eval), introspect (introspect-olympics) AND nlq (nlq-offline-bench)
+      // bench families are part of the GenAI estate. Their benchmarks.toml entries are
+      // flagged `featured = false` — a trend-only DISPOSITION, NOT a head-to-head
+      // competitor card (promote-to-card would make a perf claim + needs a same-scale
+      // canonical-host gather; deferred to the maintainer). They route here so the
+      // dashboard renders them as a GenAI trend row (or "not yet reported" until a
+      // ci-bench hook emits, the same HONEST graceful-degradation contract as the other
+      // capability families). NL→SPARQL adds the `nlq`/`nl→sparql` suite + `nlq` prefix.
+      suites: ['similarity', 'introspect', 'introspection', 'genai', 'nlq', 'nl→sparql', 'nl-to-sparql'],
+      prefixes: ['sim', 'similarity', 'introspect', 'nlq'] },
+    { key: 'gpu', title: 'GPU kernels (experimental)', kind: 'capability',
+      suites: ['gpu'], prefixes: ['gpu'] },
+    // [OPUS-4.8] sq-5o5.8 (featured = false trend-only disposition): the mpc family
+    // (mpc-bench-matrix). HONESTY: this is a DETERMINISTIC MODELLED-cost counting tier
+    // (bytes/party · rounds · multiplications), NOT a measured wall-clock competitor
+    // card, and MPC here is semi-honest-only with a ZK estate that is NOT externally
+    // audited — so it is registered as its OWN trend row (never swallowed into Core /
+    // never a head-to-head perf card), and its benchmarks.toml entry is `featured = false`.
+    // Prefixes cover the likely ci-bench emit names (mpc_*_bytes / mpc_rounds / mpc_mults /
+    // mpcmatrix_*); the row renders "not yet reported" until such a hook lands.
+    { key: 'mpc', title: 'Secure MPC (modelled counting tier · semi-honest)', kind: 'capability',
+      suites: ['mpc', 'secure mpc', 'multi-party computation'],
+      prefixes: ['mpc', 'mpcmatrix'] }
+  ];
+
+  // The top-level family a metric belongs to. Consults suiteFor() (label-map driven) FIRST, then a
+  // leading-token prefix match on the raw name (so an unlabelled capability metric still lands).
+  // Returns a FAMILIES entry; falls back to the SPARQL family only if a metric truly matches no
+  // family AND looks query-shaped, else 'core' — so nothing is orphaned. Pure + node-testable.
+  function familyOf(name) {
+    var suite = (suiteFor(name) || '').toLowerCase();
+    var token = (name || '').toLowerCase().split('_')[0];
+    // [OPUS-4.8] sq-5o5.8: suiteFor()'s STRUCTURAL fallback groups (assigned to an unlabelled
+    // metric by shape, not a deliberate label-map placement) are too generic to bucket a metric
+    // that ALSO carries an explicit capability token. e.g. a modelled-MPC `mpc_join_bytes` gets the
+    // structural "Memory / Size" group purely from its `_bytes` suffix — that must NOT silently sink
+    // it into Core when its `mpc` prefix names a real capability family. So a structural-fallback
+    // suite does NOT win over a capability prefix; a REAL (label-map) suite still does.
+    var STRUCTURAL_FALLBACK = { 'memory / size': 1, 'pipeline': 1, 'other': 1 };
+    var suiteIsStructural = Object.prototype.hasOwnProperty.call(STRUCTURAL_FALLBACK, suite);
+    // suite match first (the source of truth) — but only when it is a REAL label-map suite.
+    if (!suiteIsStructural) {
+      for (var i = 0; i < FAMILIES.length; i++) {
+        if (FAMILIES[i].suites.indexOf(suite) !== -1) return FAMILIES[i];
+      }
+    }
+    // structural prefix fallback. We must check CAPABILITY families (shacl/geo/fts/vector/
+    // reasoning/mpc) BEFORE core+sparql so a capability metric is never mis-bucketed into SPARQL by a
+    // generic `op`/`q` prefix NOR into Core by a generic `_bytes` structural suite. FAMILIES is
+    // declared in DISPLAY order (core, sparql, then the capability families), so a single forward
+    // pass would hit core/sparql first; do an explicit two-pass scan — capability families first
+    // (kind === 'capability'), then the rest.
+    for (var j = 0; j < FAMILIES.length; j++) {
+      if (FAMILIES[j].kind === 'capability' && FAMILIES[j].prefixes.indexOf(token) !== -1) return FAMILIES[j];
+    }
+    // A structural-fallback suite that maps to core/sparql still applies here (it was deferred above
+    // ONLY to let a capability prefix win) — e.g. `rdfs_infer_s`'s "Pipeline" group keeps it in Core.
+    if (suiteIsStructural) {
+      for (var s = 0; s < FAMILIES.length; s++) {
+        if (FAMILIES[s].suites.indexOf(suite) !== -1) return FAMILIES[s];
+      }
+    }
+    for (var k = 0; k < FAMILIES.length; k++) {
+      if (FAMILIES[k].kind !== 'capability' && FAMILIES[k].prefixes.indexOf(token) !== -1) return FAMILIES[k];
+    }
+    // last resort: query-shaped -> SPARQL, else core.
+    if (/^(q\d+|op)_/.test((name || '').toLowerCase())) return FAMILIES[1];
+    return FAMILIES[0];
+  }
+
+  // Build the FAMILY view from the latest commit: one entry per family in FAMILIES order, each with
+  // its rows (latest value per metric + Δ-vs-best) sorted by suite then label, and a `suites` list
+  // of the distinct sub-suites present. A family with NO metrics is KEPT (empty rows) so the family
+  // nav + "not yet reported" section make coverage visible. Pure + node-testable — this is what the
+  // synchronous summary-first first-paint renders (NO charts, NO label fetch needed). sq-rltn.
+  function buildFamilies(entries) {
+    var byKey = {};
+    FAMILIES.forEach(function (f) { byKey[f.key] = { family: f, rows: [], suites: {} }; });
+    // [OPUS-4.8] Empty/absent series: keep the docstring promise (every family kept, zero-count)
+    // instead of throwing on entries[-1]. Return the same shape with empty rows.
+    var latest = (entries && entries.length) ? entries[entries.length - 1] : null;
+    (latest ? latest.benches : []).forEach(function (b) {
+      var f = familyOf(b.name);
+      var best = bestOf(entries, b.name);
+      var suite = suiteFor(b.name);
+      byKey[f.key].rows.push({
+        name: b.name, label: labelFor(b.name), title: titleFor(b.name),
+        value: b.value, unit: b.unit || '', suite: suite,
+        best: best, delta: deltaVsBest(b.value, best)
+      });
+      byKey[f.key].suites[suite] = true;
+    });
+    return FAMILIES.map(function (f) {
+      var g = byKey[f.key];
+      g.rows.sort(function (a, b) {
+        if (a.suite !== b.suite) return a.suite < b.suite ? -1 : 1;
+        return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
+      });
+      return { key: f.key, title: f.title, kind: f.kind, rows: g.rows,
+               count: g.rows.length, suites: Object.keys(g.suites).sort() };
+    });
   }
 
   // ---- scaling comparison charts (sq-viby) ---------------------------------
@@ -459,11 +856,16 @@
                        trendPoints: trendPoints, GROUP_ORDER: GROUP_ORDER,
                        labelFor: labelFor, labelForBare: labelForBare,
                        suiteFor: suiteFor, titleFor: titleFor,
-                       lookup: lookup,
+                       lookup: lookup, semanticBadges: semanticBadges,
                        // sq-xvow (featured well-known suites + competitor seam)
                        FEATURED_SUITES: FEATURED_SUITES, featuredSuiteOf: featuredSuiteOf,
                        buildFeatured: buildFeatured, competitorsFor: competitorsFor,
                        competitorEngines: competitorEngines,
+                       // sq-aas7 (nightly-priority featured tier + tier badge)
+                       SERIES: SERIES, EC2_SERIES: EC2_SERIES,
+                       pickFeaturedSeries: pickFeaturedSeries, tierDescriptor: tierDescriptor,
+                       // sq-rltn (top-level capability families + summary-first family view)
+                       FAMILIES: FAMILIES, familyOf: familyOf, buildFamilies: buildFamilies,
                        // sq-i0nm (embedded versioned competitor data + per-suite references)
                        COMPETITORS_DATA: COMPETITORS_DATA, referencesForSuite: referencesForSuite,
                        // sq-viby (scaling comparison)
@@ -492,102 +894,95 @@
       title: 'vs all-time best' });
   }
 
-  function renderSummary(summary) {
-    var host = document.getElementById('summary');
-    host.innerHTML = '';
-    var c = summary.commit;
-    var shortId = c.id.slice(0, 7);
-    var msg = (c.message || '').split('\n')[0];
-    host.appendChild(el('div', { 'class': 'commit-meta' }, [
-      el('a', { 'class': 'sha', href: c.url, target: '_blank', text: shortId }),
-      el('span', { 'class': 'msg', text: msg, title: c.message || '' }),
-      el('span', { 'class': 'when', text: new Date(summary.date).toLocaleString() })
-    ]));
-
-    var table = el('table', { 'class': 'summary-table' });
-    var thead = el('thead', null, [el('tr', null, [
-      el('th', { text: 'Metric' }), el('th', { 'class': 'num', text: 'Latest' }),
-      el('th', { text: 'Unit' }), el('th', { 'class': 'num', text: 'Δ vs best' })
-    ])]);
-    table.appendChild(thead);
-    var tbody = el('tbody');
-    summary.groups.forEach(function (g) {
-      tbody.appendChild(el('tr', { 'class': 'group-row' }, [
-        el('th', { 'class': 'group', colspan: '4', text: g.group })
-      ]));
-      g.rows.forEach(function (r) {
-        // Readable label + a muted raw stem (transparency); the full title attr (raw stem +
-        // dataset + query) shows on hover. sq-ocuf.
-        var metricCell = el('td', { 'class': 'metric', title: r.title }, [
-          el('span', { 'class': 'metric-label', text: r.label }),
-          el('code', { 'class': 'metric-stem', text: r.name })
-        ]);
-        var tr = el('tr', null, [
-          metricCell,
-          el('td', { 'class': 'num', text: fmtNum(r.value) }),
-          el('td', { 'class': 'unit', text: r.unit }),
-          el('td', { 'class': 'num delta' })
-        ]);
-        tr.lastChild.appendChild(pill(r.delta));
-        tbody.appendChild(tr);
-      });
+  // [OPUS-4.8] sq-19z8: render the per-metric semantic badges (regime + mode) as muted .pill spans,
+  // wrapped in a .metric-badges inline row. Returns null when a metric has no badges (most rows), so
+  // the caller can skip appending. Reuses the .pill base class; the kind-specific class (sq-19z8
+  // CSS) gives each its muted colour.
+  function badges(name) {
+    var bs = semanticBadges(name);
+    if (!bs.length) return null;
+    var wrap = el('span', { 'class': 'metric-badges' });
+    bs.forEach(function (b) {
+      wrap.appendChild(el('span', { 'class': 'pill metric-badge ' + b.kind, text: b.text, title: b.title }));
     });
-    table.appendChild(tbody);
-    host.appendChild(table);
+    return wrap;
   }
 
   var PALETTE = ['#2563eb', '#16a34a', '#dc2626', '#9333ea', '#ea580c', '#0891b2', '#ca8a04', '#db2777'];
 
-  function renderCharts(entries, summary) {
-    var host = document.getElementById('charts');
-    host.innerHTML = '';
+  function themeColors() {
     var darkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    var grid = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)';
-    var tick = darkMode ? '#9aa4b2' : '#586069';
-    summary.groups.forEach(function (g) {
-      var section = el('section', { 'class': 'chart-group' }, [el('h3', { text: g.group })]);
-      var gridEl = el('div', { 'class': 'chart-grid' });
-      g.rows.forEach(function (r, i) {
-        // Chart title = readable label; raw stem on a second muted line + full title-attr hover.
-        var card = el('div', { 'class': 'chart-card' }, [
-          el('div', { 'class': 'chart-title', title: r.title, text: r.label + ' (' + r.unit + ')' }),
-          el('code', { 'class': 'chart-stem', title: r.title, text: r.name })
-        ]);
-        var canvas = el('canvas');
-        card.appendChild(canvas);
-        gridEl.appendChild(card);
-        var color = PALETTE[i % PALETTE.length];
-        var pts = trendPoints(entries, r.name);
-        // eslint-disable-next-line no-new
-        new Chart(canvas.getContext('2d'), {
-          type: 'line',
-          data: { datasets: [{
-            label: r.label, data: pts, borderColor: color,
-            backgroundColor: color + '22', borderWidth: 2, pointRadius: 0,
-            pointHoverRadius: 4, fill: true, lineTension: 0.2
-          }] },
-          options: {
-            responsive: true, maintainAspectRatio: false,
-            legend: { display: false },
-            tooltips: {
-              mode: 'index', intersect: false,
-              callbacks: {
-                title: function (items) { return new Date(items[0].xLabel).toLocaleDateString(); },
-                label: function (item) { return fmtNum(item.yLabel) + ' ' + r.unit; }
-              }
-            },
-            scales: {
-              xAxes: [{ type: 'time', time: { tooltipFormat: 'll' },
-                        gridLines: { color: grid }, ticks: { fontColor: tick, maxTicksLimit: 4 } }],
-              yAxes: [{ gridLines: { color: grid },
-                        ticks: { fontColor: tick, maxTicksLimit: 4, callback: function (v) { return fmtNum(v); } } }]
+    return { grid: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)',
+             tick: darkMode ? '#9aa4b2' : '#586069' };
+  }
+
+  // [OPUS-4.8] sq-rltn: build ONE trend chart card for a metric row. Factored out of renderCharts so
+  // the same card can be created LAZILY (one metric at a time as a section scrolls into view) — the
+  // first paint never instantiates thousands of Chart.js series. The actual Chart() is only built
+  // when `mountChart` is invoked (deferred by the IntersectionObserver), keeping first paint cheap.
+  function trendCard(entries, r, i) {
+    var card = el('div', { 'class': 'chart-card' }, [
+      el('div', { 'class': 'chart-title', title: r.title, text: r.label + ' (' + r.unit + ')' }),
+      el('code', { 'class': 'chart-stem', title: r.title, text: r.name })
+    ]);
+    var canvas = el('canvas');
+    card.appendChild(canvas);
+    card._mountChart = function () {
+      if (card._mounted || typeof Chart === 'undefined') return;
+      card._mounted = true;
+      var t = themeColors();
+      var color = PALETTE[i % PALETTE.length];
+      var pts = trendPoints(entries, r.name);
+      // eslint-disable-next-line no-new
+      new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { datasets: [{
+          label: r.label, data: pts, borderColor: color,
+          backgroundColor: color + '22', borderWidth: 2, pointRadius: 0,
+          pointHoverRadius: 4, fill: true, lineTension: 0.2
+        }] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          legend: { display: false },
+          tooltips: {
+            mode: 'index', intersect: false,
+            callbacks: {
+              title: function (items) { return new Date(items[0].xLabel).toLocaleDateString(); },
+              label: function (item) { return fmtNum(item.yLabel) + ' ' + r.unit; }
             }
+          },
+          scales: {
+            xAxes: [{ type: 'time', time: { tooltipFormat: 'll' },
+                      gridLines: { color: t.grid }, ticks: { fontColor: t.tick, maxTicksLimit: 4 } }],
+            yAxes: [{ gridLines: { color: t.grid },
+                      ticks: { fontColor: t.tick, maxTicksLimit: 4, callback: function (v) { return fmtNum(v); } } }]
           }
-        });
+        }
       });
-      section.appendChild(gridEl);
-      host.appendChild(section);
-    });
+    };
+    return card;
+  }
+
+  // [OPUS-4.8] sq-rltn: lazily mount a chart card when it scrolls into view. A shared
+  // IntersectionObserver mounts each card's chart the first time it is ~visible; if IO is
+  // unavailable (old browser / node), we mount eagerly so behaviour degrades gracefully.
+  var _chartObserver = null;
+  function chartObserver() {
+    if (_chartObserver || typeof IntersectionObserver === 'undefined') return _chartObserver;
+    _chartObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting && en.target._mountChart) {
+          en.target._mountChart();
+          _chartObserver.unobserve(en.target);
+        }
+      });
+    }, { rootMargin: '200px' });
+    return _chartObserver;
+  }
+  function observeChartCard(card) {
+    var obs = chartObserver();
+    if (obs) obs.observe(card);
+    else if (card._mountChart) card._mountChart();  // graceful fallback (no IO)
   }
 
   // ---- featured well-known suites: DOM (sq-xvow / sq-i0nm) -----------------
@@ -607,11 +1002,34 @@
         text: 'No recognised public-suite metrics in the latest commit yet.' }));
       return;
     }
+    // [OPUS-4.8] sq-aas7: TIER BADGE — show which series these featured numbers came from (the
+    // EC2/nightly tier when present, else the per-commit gh-runner band) so the provenance is
+    // visible at a glance. The competitor cells (gathered on ephemeral c7g.xlarge EC2) share the
+    // nightly tier's c7g instance FAMILY but not its SIZE (nightly is c7g.4xlarge), so we say "same
+    // family" not "same box" and never present the two as a direct speedup; when we fell back to the
+    // per-commit band they are cross-env, so the note says so.
+    var td = tierDescriptor(featured.tier);
+    var tierRow = el('div', { 'class': 'featured-tier' }, [
+      el('span', { 'class': 'pill tier-badge ' + td.kind, text: td.text, title: td.title })
+    ]);
+    tierRow.appendChild(el('span', { 'class': 'featured-tier-note',
+      text: featured.tier === 'nightly'
+        ? 'EC2/nightly heavy-benchmark series — same c7g instance family as the competitor gathers, '
+          + 'but a larger size (not same box), so not a direct competitor comparison.'
+        : (featured.hasEc2
+            ? 'per-commit gh-runner CI band.'
+            : 'per-commit gh-runner CI band — the EC2/nightly series is not present yet, so '
+              + 'competitor numbers below were gathered on a different (EC2) box.') }));
+    host.appendChild(tierRow);
     var engines = featured.competitorEngines; // [] until sq-t0c3 lands
     featured.groups.forEach(function (g) {
       var section = el('section', { 'class': 'featured-suite' }, [
         el('h3', { 'class': 'featured-title', text: g.title })
       ]);
+      // [OPUS-4.8] sq-5o5.3: optional per-suite NOTE — an honest framing caption shown under the
+      // suite title (e.g. the ZK estate's "circuit-COST, not speed; research-grade / not audited"
+      // disclaimer). Pure DOM, only rendered when the FEATURED_SUITES entry carries `note`.
+      if (g.note) section.appendChild(el('p', { 'class': 'featured-suite-note', text: g.note }));
       var table = el('table', { 'class': 'summary-table featured-table' });
       var headCells = [
         // [OPUS-4.8] Header is "Metric" (matching the summary table) — the cell holds a general
@@ -636,8 +1054,12 @@
       table.appendChild(el('thead', null, [el('tr', null, headCells)]));
       var tbody = el('tbody');
       g.rows.forEach(function (r) {
+        // [OPUS-4.8] sq-19z8: label-line carries any regime/mode semantic badges inline.
+        var labelLine = el('span', { 'class': 'metric-label', text: r.label });
+        var bdg = badges(r.name);
+        if (bdg) labelLine.appendChild(bdg);
         var metricCell = el('td', { 'class': 'metric', title: r.title }, [
-          el('span', { 'class': 'metric-label', text: r.label }),
+          labelLine,
           el('code', { 'class': 'metric-stem', text: r.name })
         ]);
         var cells = [
@@ -688,6 +1110,81 @@
         refBox.appendChild(refList);
         section.appendChild(refBox);
       }
+      host.appendChild(section);
+    });
+  }
+
+  // ---- same-box SPARQL comparison: DOM (sq-ays7) ---------------------------
+  // [OPUS-4.8] Renders the #same-box host (a card BELOW the featured suites). This is the HONEST
+  // same-box SPARQL competitor comparison (PHASE 2 of sq-ays7): sparq + Oxigraph (+ QLever
+  // best-effort) measured ON ONE ephemeral EC2 box, against the SAME generated featured corpus and
+  // the SAME query files, in the SAME min-of-N COUNT regime. It is rendered DISTINCTLY from both
+  //   (a) the featured-suites `values` cells — those are the gh-runner CI band (sparq-only here);
+  //       injecting a competitor number from a DIFFERENT host next to a CI-band sparq number would
+  //       be cross-machine and misleading, so we DO NOT touch them; and
+  //   (b) the `references` baselines — those are cited numbers at their OWN scale/machine.
+  // Reads competitors.same_box_comparisons (an array of {suite,scale,env,git_commit,iters,engines,
+  // rows}). Each row: {query, unit, values:{<engineId>:µs|null}, rows:<count|null>, count_match}.
+  // A null per-engine µs renders "n/a" (e.g. a query the engine could not run, or QLever skipped).
+  function renderSameBox(competitors) {
+    var host = document.getElementById('same-box');
+    if (!host) return;
+    host.innerHTML = '';
+    var cmps = (competitors && competitors.same_box_comparisons) || [];
+    if (!cmps.length) {
+      host.appendChild(el('p', { 'class': 'hint',
+        text: 'No same-box competitor comparison gathered yet. Run scripts/gather-ec2-sparql.sh '
+            + 'to measure sparq + Oxigraph (+ QLever best-effort) on one box at a bounded corpus scale.' }));
+      return;
+    }
+    cmps.forEach(function (c) {
+      var engines = c.engines || [];
+      var section = el('section', { 'class': 'featured-suite same-box-suite' }, [
+        el('h3', { 'class': 'featured-title',
+          text: (c.suite || 'SPARQL') + ' — same-box comparison' })
+      ]);
+      // Provenance caption: scale + box + date + commit + iters, so this block is never confused
+      // with the cross-machine gh-runner CI band.
+      section.appendChild(el('div', { 'class': 'featured-refs-head same-box-caption',
+        title: (c.env && c.env.cpu_model ? 'cpu: ' + c.env.cpu_model + '\n' : '')
+             + (c.env && c.env.kernel ? 'kernel: ' + c.env.kernel + '\n' : '')
+             + (c.source ? 'source: ' + c.source : ''),
+        text: 'Single ' + ((c.env && c.env.host_class) || 'quiet box') + ', quiet_box='
+            + (c.env && c.env.quiet_box ? 'true' : 'false') + ' · corpus: ' + (c.scale || '?')
+            + ' · min-of-' + (c.iters || '?') + ', COUNT mode · gathered '
+            + ((c.env && c.env.gathered_at_utc) || c.gathered_at_utc || '?')
+            + ' @ ' + (c.git_commit || '?')
+            + ' — NOT the gh-runner CI band; absolute µs are this box only, for cross-engine ordering.' }));
+      var table = el('table', { 'class': 'summary-table featured-table' });
+      var headCells = [el('th', { text: 'Query' })];
+      engines.forEach(function (e) {
+        var th = el('th', { 'class': 'num',
+          title: (e.label || e.id) + (e.version ? ' ' + e.version : '') }, [
+          el('span', { 'class': 'competitor-name', text: e.label || e.id })
+        ]);
+        if (e.version) th.appendChild(el('code', { 'class': 'competitor-version', text: e.version }));
+        headCells.push(th);
+      });
+      headCells.push(el('th', { 'class': 'num', text: 'rows' }));
+      headCells.push(el('th', { text: 'counts agree' }));
+      table.appendChild(el('thead', null, [el('tr', null, headCells)]));
+      var tbody = el('tbody');
+      (c.rows || []).forEach(function (r) {
+        var cells = [el('td', { 'class': 'metric',
+          title: 'unit: ' + (r.unit || 'µs') }, [el('code', { 'class': 'metric-stem', text: r.query })])];
+        engines.forEach(function (e) {
+          var v = r.values && r.values[e.id];
+          cells.push(el('td', { 'class': 'num' + (v == null ? ' competitor-na' : ''),
+            text: v == null ? 'n/a' : fmtNum(v) + ' µs',
+            title: v == null ? 'n/a — this engine did not produce a timing for this query on this box' : '' }));
+        });
+        cells.push(el('td', { 'class': 'num', text: r.rows == null ? '—' : fmtNum(r.rows) }));
+        cells.push(el('td', { text: r.count_match == null ? '—' : (r.count_match ? '✓' : 'DIFF'),
+          title: r.count_match === false ? 'engines disagreed on the solution count for this query' : '' }));
+        tbody.appendChild(el('tr', null, cells));
+      });
+      table.appendChild(tbody);
+      section.appendChild(table);
       host.appendChild(section);
     });
   }
@@ -762,48 +1259,255 @@
     host.appendChild(gridEl);
   }
 
-  function render() {
-    var data = window.BENCHMARK_DATA;
-    if (!data || !data.entries || !data.entries[SERIES] || !data.entries[SERIES].length) {
-      document.getElementById('summary').textContent =
-        'No benchmark data yet — the chart populates after the first push to main.';
-      return;
-    }
-    var entries = data.entries[SERIES];
-    var summary = buildSummary(entries);
-    // [OPUS-4.8] sq-i0nm: competitor data comes from window.COMPETITORS. Prefer an EXTERNALLY
-    // injected object (a future competitors.js/fetch can override), else fall back to the EMBEDDED
-    // versioned COMPETITORS_DATA (the byte-for-meaning mirror of bench/dashboard/competitors.json) —
-    // embedded because the Pages seed step doesn't serve a separate JSON. This populates the
-    // competitor reference COLUMNS (with explicit versions) + per-suite external-reference baselines;
-    // per-metric cells stay "n/a (not gathered)" until a same-scale gather fills `values`.
-    var competitors = (typeof window !== 'undefined' && window.COMPETITORS) || COMPETITORS_DATA;
-    if (typeof window !== 'undefined' && !window.COMPETITORS) window.COMPETITORS = competitors;
-    var featured = buildFeatured(entries, competitors);
-    var families = buildScalingFamilies(entries);
-    document.getElementById('updated').textContent =
-      'last updated ' + new Date(data.lastUpdate).toLocaleString() +
-      ' · ' + entries.length + ' commits';
-    var repo = el('a', { href: data.repoUrl, target: '_blank', text: data.repoUrl.replace(/^https?:\/\//, '') });
-    document.getElementById('repo').appendChild(repo);
-    renderFeatured(featured);                 // sq-xvow — TOP
-    renderSummary(summary);
-    if (typeof Chart !== 'undefined') renderCharts(entries, summary);
-    renderScaling(families);                  // sq-viby — BOTTOM
+  // ---- summary-first capability families: DOM (sq-rltn) --------------------
+  // [OPUS-4.8] sq-rltn. The PRIMARY render. It paints SYNCHRONOUSLY from BENCHMARK_DATA (no
+  // Chart.js, no metric-labels.json fetch needed) so the user sees the WHOLE picture immediately:
+  //   1) a family NAV (one chip per capability family) so all query types are visible at a glance;
+  //   2) one collapsible SECTION per family with a latest-value-per-metric SUMMARY TABLE.
+  // Trend CHARTS are NOT built here — each section carries a lazily-mounted chart grid that fills
+  // only when the section is expanded / scrolls into view (IntersectionObserver). A family with NO
+  // metrics in the latest commit still renders (nav chip + a "not yet reported" section) so the
+  // coverage is honest and never SPARQL-only-feeling, even though SPARQL dominates the data volume.
+  function renderFamilies(familyView, entries) {
+    var host = document.getElementById('families');
+    if (!host) return;
+    host.innerHTML = '';
+
+    // family nav: a chip per family with its metric count. The chip is an anchor (href="#fam-…") so
+    // it scrolls to the section AND a click handler OPENS that family's <details> trends disclosure
+    // (so the chip both jumps to and reveals the trends, the intended UX). The anchor href keeps it
+    // keyboard/middle-click friendly; the handler is purely additive enhancement.
+    var nav = el('nav', { 'class': 'family-nav', 'aria-label': 'benchmark families' });
+    familyView.forEach(function (fam) {
+      var chip = el('a', { 'class': 'family-chip' + (fam.count ? '' : ' family-chip-empty'),
+        href: '#fam-' + fam.key,
+        title: fam.count ? fam.suites.join(' · ') : 'not yet reported' }, [
+        el('span', { 'class': 'family-chip-name', text: fam.title }),
+        el('span', { 'class': 'family-chip-count', text: fam.count ? String(fam.count) : '—' })
+      ]);
+      chip.addEventListener('click', function () {
+        // open the target section's <details> Trends disclosure so the chip reveals, not just jumps.
+        var sec = document.getElementById('fam-' + fam.key);
+        var det = sec && typeof sec.querySelector === 'function' && sec.querySelector('details.family-trends');
+        if (det) det.open = true;
+      });
+      nav.appendChild(chip);
+    });
+    host.appendChild(nav);
+
+    familyView.forEach(function (fam) {
+      var section = el('section', { 'class': 'family-section family-' + fam.kind, id: 'fam-' + fam.key });
+      var head = el('div', { 'class': 'family-head' }, [
+        el('h3', { 'class': 'family-title', text: fam.title }),
+        el('span', { 'class': 'family-meta',
+          text: fam.count
+            ? fam.count + ' metric' + (fam.count === 1 ? '' : 's') +
+              (fam.suites.length > 1 ? ' · ' + fam.suites.length + ' suites' : '')
+            : 'not yet reported' })
+      ]);
+      section.appendChild(head);
+
+      if (!fam.count) {
+        section.appendChild(el('p', { 'class': 'hint family-empty',
+          text: 'No metrics for this family in the latest commit yet — the section fills in once '
+              + 'the suite reports to the dashboard.' }));
+        host.appendChild(section);
+        return;
+      }
+
+      // summary table (synchronous first paint) — latest value per metric + Δ-vs-best.
+      var table = el('table', { 'class': 'summary-table' });
+      table.appendChild(el('thead', null, [el('tr', null, [
+        el('th', { text: 'Metric' }), el('th', { 'class': 'num', text: 'Latest' }),
+        el('th', { text: 'Unit' }), el('th', { 'class': 'num', text: 'Δ vs best' })
+      ])]));
+      var tbody = el('tbody');
+      fam.rows.forEach(function (r) {
+        // [OPUS-4.8] sq-19z8: label-line carries any regime/mode semantic badges inline.
+        var labelLine = el('span', { 'class': 'metric-label', text: r.label });
+        var bdg = badges(r.name);
+        if (bdg) labelLine.appendChild(bdg);
+        var metricCell = el('td', { 'class': 'metric', title: r.title }, [
+          labelLine,
+          el('code', { 'class': 'metric-stem', text: r.name })
+        ]);
+        var tr = el('tr', null, [
+          metricCell,
+          el('td', { 'class': 'num', text: fmtNum(r.value) }),
+          el('td', { 'class': 'unit', text: r.unit }),
+          el('td', { 'class': 'num delta' })
+        ]);
+        tr.lastChild.appendChild(pill(r.delta));
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      section.appendChild(table);
+
+      // lazy trend charts: a <details> whose chart grid is built ON FIRST EXPAND (cheap first paint;
+      // also wired to the IntersectionObserver so an in-view open section mounts as it scrolls).
+      var details = el('details', { 'class': 'family-trends' });
+      details.appendChild(el('summary', { text: 'Trends (' + fam.count + ')' }));
+      var gridEl = el('div', { 'class': 'chart-grid' });
+      details.appendChild(gridEl);
+      var built = false;
+      function buildGrid() {
+        if (built) return; built = true;
+        fam.rows.forEach(function (r, i) {
+          var card = trendCard(entries, r, i);
+          gridEl.appendChild(card);
+          observeChartCard(card);
+        });
+      }
+      details.addEventListener('toggle', function () { if (details.open) buildGrid(); });
+      section.appendChild(details);
+      host.appendChild(section);
+    });
   }
 
-  // [OPUS-4.8] sq-ocuf: load metric-labels.json (readable labels) BEFORE rendering. The file is
-  // the canonical, committed artifact (generated by scripts/gen-metric-labels.py); we fetch it at
-  // boot so there is no build/codegen step in the Pages job. The fetch is GRACEFUL — if it 404s
-  // or fails (e.g. opened over file:// with no server), render() still runs with humanize()
-  // fallback labels and structural grouping, so the dashboard never breaks on a missing file.
+  // [OPUS-4.8] sq-rltn: the synchronous FIRST PAINT — family nav + summary tables, drawn from
+  // BENCHMARK_DATA alone. Does NOT touch metric-labels.json or Chart.js, so it is instant even with
+  // a multi-MB data.js. Re-runnable: enhance() re-invokes it once readable labels land.
+  function paintSummary() {
+    var data = window.BENCHMARK_DATA;
+    var sumHost = document.getElementById('families') || document.getElementById('summary');
+    if (!data || !data.entries || !data.entries[SERIES] || !data.entries[SERIES].length) {
+      if (sumHost) sumHost.textContent =
+        'No benchmark data yet — the capability-family summary populates after the first push to main.';
+      return null;
+    }
+    var entries = data.entries[SERIES];
+    // [OPUS-4.8] Preserve user state across a REPAINT (e.g. when metric-labels.json resolves and we
+    // re-run to swap in readable labels). renderFamilies() does host.innerHTML = '' which wipes any
+    // expanded <details> + scroll. Capture which family sections were open BEFORE the rebuild so we
+    // can restore them AFTER, so a relabel doesn't collapse what the user opened.
+    var openFams = {};
+    if (sumHost && typeof sumHost.querySelectorAll === 'function') {
+      var openDetails = sumHost.querySelectorAll('section.family-section[id] > details.family-trends[open]');
+      for (var oi = 0; oi < openDetails.length; oi++) {
+        var parentSec = openDetails[oi].parentNode;
+        if (parentSec && parentSec.id) openFams[parentSec.id] = true;
+      }
+    }
+    var updated = document.getElementById('updated');
+    if (updated) updated.textContent =
+      'last updated ' + new Date(data.lastUpdate).toLocaleString() + ' · ' + entries.length + ' commits';
+    var repoHost = document.getElementById('repo');
+    if (repoHost && !repoHost.firstChild) repoHost.appendChild(
+      el('a', { href: data.repoUrl, target: '_blank', text: data.repoUrl.replace(/^https?:\/\//, '') }));
+    renderFamilies(buildFamilies(entries), entries);   // <-- summary-first, lazy charts
+    // [OPUS-4.8] Restore the <details> the user had expanded before this repaint (state preserved
+    // across the relabel repaint). Setting .open fires the `toggle` listener, which lazily builds
+    // that section's trend chart grid — so re-opened sections re-mount their charts too.
+    if (sumHost && typeof sumHost.querySelector === 'function') {
+      Object.keys(openFams).forEach(function (secId) {
+        var sec = document.getElementById(secId);
+        var det = sec && typeof sec.querySelector === 'function' && sec.querySelector('details.family-trends');
+        if (det) det.open = true;
+      });
+    }
+    return entries;
+  }
+
+  // [OPUS-4.8] sq-rltn: the featured-suites + scaling cards (these read competitor data). Split out
+  // so they can render once competitors.json resolves, without re-blocking the summary first paint.
+  function paintFeaturedAndScaling(entries, competitors) {
+    if (!entries) return;
+    // [OPUS-4.8] sq-aas7: the FEATURED block prefers the EC2/nightly series when present (same c7g
+    // instance family as the competitor gathers, larger size — not same box); the families/scaling
+    // views below keep using the dense per-commit
+    // history (`entries`). pickFeaturedSeries() reads the merged BENCHMARK_DATA so it sees the EC2
+    // series merged in by boot()'s fetch; graceful fall-back to per-commit when EC2 is absent.
+    var picked = pickFeaturedSeries(typeof window !== 'undefined' ? window.BENCHMARK_DATA : null);
+    var featEntries = picked.entries.length ? picked.entries : entries;
+    renderFeatured(buildFeatured(featEntries, competitors, picked));  // sq-xvow + sq-aas7 tier
+    renderSameBox(competitors);                           // sq-ays7 (same-box SPARQL comparison)
+    renderScaling(buildScalingFamilies(entries));         // sq-viby
+  }
+
+  // ---- boot: summary-first, then enhance off the critical path (sq-rltn) ---
+  // [OPUS-4.8] sq-rltn. ORDER OF OPERATIONS for a fast, all-coverage page:
+  //   (1) PAINT the family summary IMMEDIATELY from BENCHMARK_DATA — structural labels, no fetch,
+  //       no charts. The user sees every query-type family at once.
+  //   (2) FETCH metric-labels.json (~100KB) OFF the critical path; when it resolves, REPAINT the
+  //       summary with readable labels (graceful: a 404/file:// failure just keeps structural labels).
+  //   (3) FETCH competitors.json (the SINGLE competitor sink — replacing the embedded mirror as the
+  //       PREFERRED source); fall back to the embedded COMPETITORS_DATA if the fetch fails. Then
+  //       render the featured-suites + scaling cards. Keeps the embedded copy ONLY as a fallback so
+  //       the live Pages page still works if the JSON is not served.
+  // [OPUS-4.8] sq-aas7: fetch + extract the EC2/nightly series from the sibling dev/bench-ec2/data.js.
+  // That file is a github-action-benchmark `data.js` that does `window.BENCHMARK_DATA = {…}`; we run
+  // it in a SHADOWED scope with a throwaway `window` so it cannot clobber the page's real global,
+  // then read the EC2 series out of the captured object. Returns a Promise<entries[]|null>; resolves
+  // null on ANY failure (no EC2 data dir yet, fetch/CORS error, parse/shape error) so the caller
+  // degrades to the per-commit series. The path is RELATIVE to dev/bench/ (where the dashboard is
+  // served), so `../bench-ec2/data.js` reaches the EC2 dir on the published Pages site.
+  function fetchEc2Series() {
+    return window.fetch('../bench-ec2/data.js', { cache: 'no-cache' })
+      .then(function (r) { return r.ok ? r.text() : null; })
+      .then(function (src) {
+        if (!src) return null;
+        var sandbox = { BENCHMARK_DATA: null };
+        // eslint-disable-next-line no-new-func
+        (new Function('window', src))(sandbox);
+        var data = sandbox.BENCHMARK_DATA;
+        var ec2 = data && data.entries && data.entries[EC2_SERIES];
+        return (Array.isArray(ec2) && ec2.length) ? ec2 : null;
+      })
+      .catch(function () { return null; });
+  }
+
   function boot() {
-    if (typeof window === 'undefined' || typeof window.fetch !== 'function') { render(); return; }
+    var entries = paintSummary();                        // (1) instant first paint
+
+    if (typeof window === 'undefined' || typeof window.fetch !== 'function') {
+      // node/old-browser: no fetch — render featured/scaling from the embedded mirror, eagerly.
+      paintFeaturedAndScaling(entries, COMPETITORS_DATA);
+      return;
+    }
+
+    // (2) readable labels — deferred; repaint the summary when they arrive.
     window.fetch('metric-labels.json', { cache: 'no-cache' })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (json) { if (json) window.METRIC_LABELS = json; })
-      .catch(function () { /* graceful: fall back to humanize()/structural grouping */ })
-      .then(render);
+      .then(function (json) { if (json) { window.METRIC_LABELS = json; paintSummary(); } })
+      .catch(function () { /* graceful: keep structural labels */ });
+
+    // [OPUS-4.8] sq-aas7 (design sq-i0nm §E): pull the EC2/nightly series so the featured block can
+    // PREFER it. github-action-benchmark writes that series to a SIBLING data dir
+    // (dev/bench-ec2/data.js) whose script REASSIGNS window.BENCHMARK_DATA — so we cannot simply
+    // <script src> it (it would clobber the per-commit series). Instead fetch it as TEXT and run it
+    // with a captured global, then merge ONLY its `sparq engine (EC2)` entry back into the live
+    // BENCHMARK_DATA. GRACEFUL on every failure (404 when EC2 not live, file:// CORS, parse error):
+    // we keep the per-commit series and the featured block falls back to it. The featured repaint in
+    // (3)'s competitor handler runs AFTER this resolves only by luck of ordering, so we ALSO repaint
+    // featured here once the merge lands (idempotent — renderFeatured wipes its host first).
+    fetchEc2Series().then(function (ec2Entries) {
+      if (ec2Entries && ec2Entries.length && window.BENCHMARK_DATA && window.BENCHMARK_DATA.entries) {
+        window.BENCHMARK_DATA.entries[EC2_SERIES] = ec2Entries;
+        // repaint featured with whatever competitor data is currently resolved (embedded or fetched).
+        paintFeaturedAndScaling(entries, window.COMPETITORS || COMPETITORS_DATA);
+      }
+    });
+
+    // (3) competitors — fetch competitors.json (single sink), fall back to the embedded mirror.
+    window.fetch('competitors.json', { cache: 'no-cache' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (json) {
+        var competitors = json || window.COMPETITORS || COMPETITORS_DATA;
+        window.COMPETITORS = competitors;
+        paintFeaturedAndScaling(entries, competitors);
+      })
+      .catch(function () {
+        var competitors = window.COMPETITORS || COMPETITORS_DATA;
+        window.COMPETITORS = competitors;
+        paintFeaturedAndScaling(entries, competitors);
+      });
+  }
+
+  // [OPUS-4.8] Copilot #200: test-only hook so the node smoke-test can drive the REAL relabel
+  // repaint (paintSummary re-run) and assert user state (expanded <details>) survives — exercising
+  // the actual code path, not a copy. Guarded by an explicit flag, so it is inert in production.
+  if (typeof window !== 'undefined' && window.__SPARQ_DASHBOARD_TEST__) {
+    window.__sparqDashboardTest = { paintSummary: paintSummary };
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
