@@ -31,6 +31,14 @@ sparq-reason = { path = "../sparq-reason", version = "0.1.0", default-features =
 # deps, or runtime cost — sparq-policy is NOT forced onto the default build. Research
 # track (the single-node bridge of epic sq-3183), NOT a production cutover.
 sparq-policy = { path = "../sparq-policy", version = "0.1.0", default-features = false, optional = true }
+# [OPUS-4.8] sq-pfae PoC (issue #940): the trust-graph admission gate. OPTIONAL +
+# behind the `trust-graph` feature (OFF by default), so the default sparq-solid build
+# carries ZERO trust-graph code, deps, or runtime cost — it behaves EXACTLY as WAC/ACP
+# do now (strict additivity, design §2.2 G6). RESEARCH prototype (`sparq-trust` is
+# publish=false; the ZK estate it composes with is externally unaudited, sq-qhy4), NOT
+# a production cutover. Path-only (no crates.io version): the `trust-graph` feature is a
+# research-only feature and is not part of sparq-solid's published feature set.
+sparq-trust = { path = "../sparq-trust", optional = true }
 oxrdf.workspace = true
 spargebra.workspace = true
 rustc-hash.workspace = true
@@ -49,3 +57,22 @@ odrl-bridge = ["dep:sparq-policy"]
 # refresh/retraction ledger (sq-dpk4): the count is consumed atomically at exercise and
 # re-checked (read-only) on refresh, dropping the grant once the budget is spent.
 count-enforcement = ["odrl-bridge", "sparq-policy/count-enforcement"]
+
+# [OPUS-4.8] sq-pfae PoC (issue #940): the trust-graph admission stratum. OFF by
+# default — with the feature off, sparq-solid is BYTE-IDENTICAL to WAC/ACP today (the
+# strict-additivity property G6, design §2.2). With it on, `PodStore` gains ONE new
+# feature-gated method ([`PodStore::admit_trust_credential_and_materialize`]) that runs
+# the `sparq-trust` admission gate over a presented credential and injects the
+# issuer-tagged admitted-fact-derived `auth:*` grants into `<urn:sparq:auth>` AHEAD of
+# (on top of) the unchanged materialiser — exactly the ODRL-bridge grant-injection
+# pattern. RESEARCH prototype, NOT a security guarantee; no privacy/unlinkability (the
+# ZK estate is externally unaudited, sq-qhy4). See the crate README + the access-control
+# SKILL for the honest scope.
+trust-graph = ["dep:sparq-trust"]
+
+[dev-dependencies]
+# [OPUS-4.8] sq-pfae PoC: the trust-graph end-to-end test (tests/trust_graph.rs, fully
+# `#![cfg(feature = "trust-graph")]`) drives the admission gate through the real
+# PodStore. These are dev-only — they do not touch the default build or publish.
+sparq-trust = { path = "../sparq-trust" }
+sparq-zk = { path = "../sparq-zk" }

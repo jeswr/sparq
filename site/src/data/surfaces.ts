@@ -1,6 +1,14 @@
 // [OPUS-4.8] sq-8thu — the canonical site IA, derived from the feature-showcase
 // design doc (research/feature-showcase-site-design.md §2). One source for the
 // sidebar nav AND the landing surface grid. `tier` drives the honesty badge.
+//
+// [OPUS-4.8] sq-vw3ax.2 — re-grouped ONCE here into the 5 capability THEMES from the
+// website-redesign record (research/website-redesign.md §2). Every consumer — the
+// sidebar nav, the Home theme grid, the future /capabilities gallery, and the Cmd-K
+// command palette — derives from this single GROUPS source, so one edit restructures
+// all of them. This commit is a STRUCTURAL regroup only: no surface, blurb, tier, or
+// route was added, removed, or reworded — only their grouping (and per-theme metadata)
+// changed.
 
 import type { LucideIcon } from "lucide-react";
 import {
@@ -44,7 +52,11 @@ export interface Surface {
 }
 
 export interface SurfaceGroup {
+  /** Stable anchor id — `/capabilities#<id>` + the Home theme grid + Cmd-K group key. */
+  id: string;
   label: string;
+  /** One-line theme description (the capability the surfaces under it deliver). */
+  description: string;
   surfaces: Surface[];
 }
 
@@ -104,9 +116,24 @@ export const FLAGSHIPS: Surface[] = [
   },
 ];
 
+// [OPUS-4.8] sq-vw3ax.2 — the 5 capability THEMES (research/website-redesign.md §2).
+// Surfaces are mapped to themes by what they DO, keeping every existing surface, route,
+// blurb and tier verbatim:
+//   1. Query & data      — the REPL + SPARQL + the data-format/JS-WASM/geo query surfaces
+//   2. Reason & validate — inference + SHACL
+//   3. Search & GenAI    — full-text BM25, vector, GenAI/NLQ
+//   4. Privacy (ZK / MPC)— ZK query proofs + MPC federation (the Solid flagship sits in
+//      /showcase; it is surfaced via FLAGSHIPS, not duplicated as a /surface row here)
+//   5. Serve & embed     — HTTP server, CLI, Python, streaming RSP-QL
+// The redesign's aspirational extra rows (structural-similarity, a federation surface
+// page) are NOT invented here — there is no such route today, and this regroup adds no
+// content. They become beads, not fabricated nav entries.
 export const GROUPS: SurfaceGroup[] = [
   {
-    label: "Core engine",
+    id: "query-data",
+    label: "Query & data",
+    description:
+      "Run SPARQL 1.1/1.2 over RDF — the live REPL, the query engine, and the formats it ingests.",
     surfaces: [
       {
         slug: "try",
@@ -144,10 +171,28 @@ export const GROUPS: SurfaceGroup[] = [
         icon: Boxes,
         built: true,
       },
+      {
+        slug: "geosparql",
+        href: "/surface/geosparql",
+        title: "GeoSPARQL",
+        blurb: "geof: functions + sf*/eh*/rcc8* + R-tree GeoIndex with a map overlay.",
+        // [OPUS-4.8] sq-ndaz: tier-e. sparq-geo is an opt-in native crate (the core engine
+        // + lean wasm bundle carry zero geometry code; the server exposes geof: only behind
+        // its non-default `geo` feature), and the static Pages site has no backend — so the
+        // honest surface is a captured-output walkthrough (the real London–Paris distance
+        // < 400 km query, within-polygon spatial join, topology-property rewrite, and R-tree
+        // GeoIndex metres, all answer-exact), not a live hosted endpoint.
+        tier: "walkthrough",
+        icon: MapPin,
+        built: true,
+      },
     ],
   },
   {
-    label: "Reasoning & validation",
+    id: "reason-validate",
+    label: "Reason & validate",
+    description:
+      "Derive new triples and check graphs against shapes — RDFS / OWL 2 RL / N3 closure and SHACL.",
     surfaces: [
       {
         slug: "inference",
@@ -170,7 +215,10 @@ export const GROUPS: SurfaceGroup[] = [
     ],
   },
   {
-    label: "Search & retrieval",
+    id: "search-genai",
+    label: "Search & GenAI",
+    description:
+      "Find and generate over RDF — BM25 full-text, vector k-NN, and a natural-language → SPARQL loop.",
     surfaces: [
       {
         slug: "full-text",
@@ -213,36 +261,10 @@ export const GROUPS: SurfaceGroup[] = [
     ],
   },
   {
-    label: "Spatial & streaming",
-    surfaces: [
-      {
-        slug: "geosparql",
-        href: "/surface/geosparql",
-        title: "GeoSPARQL",
-        blurb: "geof: functions + sf*/eh*/rcc8* + R-tree GeoIndex with a map overlay.",
-        // [OPUS-4.8] sq-ndaz: tier-e. sparq-geo is an opt-in native crate (the core engine
-        // + lean wasm bundle carry zero geometry code; the server exposes geof: only behind
-        // its non-default `geo` feature), and the static Pages site has no backend — so the
-        // honest surface is a captured-output walkthrough (the real London–Paris distance
-        // < 400 km query, within-polygon spatial join, topology-property rewrite, and R-tree
-        // GeoIndex metres, all answer-exact), not a live hosted endpoint.
-        tier: "walkthrough",
-        icon: MapPin,
-        built: true,
-      },
-      {
-        slug: "streaming-rsp",
-        href: "/surface/streaming-rsp",
-        title: "Streaming RSP",
-        blurb: "RSP-QL windows (sliding / tumbling, R/I/DSTREAM).",
-        tier: "live-new-wasm",
-        icon: Radio,
-        built: true,
-      },
-    ],
-  },
-  {
-    label: "Privacy (ZK + MPC)",
+    id: "privacy",
+    label: "Privacy (ZK / MPC)",
+    description:
+      "Answer queries without revealing the data — zero-knowledge query proofs and threshold MPC federation. Research-grade: the v1 verifier is not externally audited.",
     surfaces: [
       {
         slug: "zk",
@@ -265,7 +287,10 @@ export const GROUPS: SurfaceGroup[] = [
     ],
   },
   {
-    label: "Serving & hosts",
+    id: "serve-embed",
+    label: "Serve & embed",
+    description:
+      "Run sparq as a service or embed it — the HTTP endpoint, the CLI, Python bindings, and streaming RSP-QL.",
     surfaces: [
       {
         slug: "http-server",
@@ -277,6 +302,15 @@ export const GROUPS: SurfaceGroup[] = [
         // subscription firing on a committed UPDATE), not a live hosted endpoint.
         tier: "walkthrough",
         icon: Server,
+        built: true,
+      },
+      {
+        slug: "streaming-rsp",
+        href: "/surface/streaming-rsp",
+        title: "Streaming RSP",
+        blurb: "RSP-QL windows (sliding / tumbling, R/I/DSTREAM).",
+        tier: "live-new-wasm",
+        icon: Radio,
         built: true,
       },
       {
@@ -297,20 +331,24 @@ export const GROUPS: SurfaceGroup[] = [
       },
     ],
   },
-  {
-    label: "About",
-    surfaces: [
-      {
-        slug: "about",
-        href: "/about",
-        title: "About",
-        blurb: "Architecture and the honest \"what runs where\" matrix.",
-        tier: "live",
-        icon: Info,
-        built: true,
-      },
-    ],
-  },
 ];
 
+// [OPUS-4.8] sq-vw3ax.2 — /about is a UTILITY destination (the "what runs where" matrix),
+// not a capability theme, so it is kept OUT of GROUPS (which is now strictly the 5 themes)
+// and exported separately. Consumers that previously walked GROUPS for the About entry
+// (the sidebar, the About-page table) read this instead, so no route is lost.
+export const ABOUT_SURFACE: Surface = {
+  slug: "about",
+  href: "/about",
+  title: "About",
+  blurb: 'Architecture and the honest "what runs where" matrix.',
+  tier: "live",
+  icon: Info,
+  built: true,
+};
+
+/** Every capability surface across the 5 themes (excludes the /about utility page). */
 export const ALL_SURFACES: Surface[] = GROUPS.flatMap((g) => g.surfaces);
+
+/** Capability surfaces + the /about utility page — the complete navigable surface set. */
+export const ALL_SURFACES_WITH_ABOUT: Surface[] = [...ALL_SURFACES, ABOUT_SURFACE];

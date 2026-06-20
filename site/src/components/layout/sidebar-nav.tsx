@@ -6,7 +6,13 @@ import { usePathname } from "next/navigation";
 
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { FLAGSHIPS, GROUPS, TIER_LABEL, TIER_VARIANT } from "@/data/surfaces";
+import {
+  ABOUT_SURFACE,
+  FLAGSHIPS,
+  GROUPS,
+  TIER_LABEL,
+  TIER_VARIANT,
+} from "@/data/surfaces";
 
 // [OPUS-4.8] Hover/focus-intent prefetch of the in-browser ZK prover.
 //
@@ -110,8 +116,11 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
         ))}
       </Section>
 
+      {/* [OPUS-4.8] sq-vw3ax.2 — the 5 capability THEMES, derived from the single
+          GROUPS source. Re-grouping there restructures this sidebar (and the Home grid,
+          the future /capabilities, and Cmd-K) in one edit. */}
       {GROUPS.map((group) => (
-        <Section key={group.label} label={group.label}>
+        <Section key={group.id} label={group.label}>
           {group.surfaces.map((s) => (
             <NavLink
               key={s.href}
@@ -133,6 +142,16 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
           ))}
         </Section>
       ))}
+
+      {/* [OPUS-4.8] sq-vw3ax.2 — /about is a utility destination, not a capability
+          theme, so it is kept out of GROUPS and rendered here so the link is retained. */}
+      <NavLink
+        href={ABOUT_SURFACE.href}
+        active={isActive(ABOUT_SURFACE.href)}
+        onNavigate={onNavigate}
+      >
+        {ABOUT_SURFACE.title}
+      </NavLink>
     </nav>
   );
 }

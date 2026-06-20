@@ -18,6 +18,11 @@ mod provenance;
 // default, so the core sparq-solid build carries zero ODRL/sparq-policy code.
 #[cfg(feature = "odrl-bridge")]
 pub mod odrl_bridge;
+// [OPUS-4.8] sq-pfae PoC (issue #940): trust-graph admission → AUTH_GRAPH wiring —
+// opt-in (`trust-graph` feature), OFF by default, so the core sparq-solid build carries
+// zero trust-graph/sparq-trust code and is byte-identical to WAC/ACP today (G6).
+#[cfg(feature = "trust-graph")]
+pub mod trust_wire;
 mod rewrite;
 mod update; // [OPUS-4.8] sq-xor3: write/update-path enforcement
 // [OPUS-4.8] sq-3jtd.8: library-level WAC conformance harness — the table-driven
@@ -43,6 +48,9 @@ pub use odrl_bridge::{
 };
 #[cfg(feature = "odrl-bridge")]
 pub use odrl_bridge::{BridgeEntry, BridgeKind, BridgeLedger};
+// [OPUS-4.8] sq-pfae PoC: the trust-graph admission outcome type (feature-gated).
+#[cfg(feature = "trust-graph")]
+pub use trust_wire::TrustAdmissionOutcome;
 pub use rewrite::{rewrite_for, wrap_for_view};
 
 use oxrdf::{NamedNode, Term};

@@ -38,13 +38,12 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 ## ✨ Features
 
 - **WAC + ACP** — Web Access Control (`.acl`) and Access Control Policy (`.acr`): inheritance, agent
-  classes, groups, `allOf`/`anyOf`/`noneOf`, the ACP matcher's three-dimensional `(agent, client,
-  issuer)` principal, `acp:CreatorAgent`/`acp:OwnerAgent`, normative deny-overrides (matrix in the design doc).
+  classes, groups, `allOf`/`anyOf`/`noneOf`, the ACP `(agent, client, issuer)` principal,
+  `acp:CreatorAgent`/`acp:OwnerAgent`, normative deny-overrides (matrix in the design doc).
 - **Trusted creator/owner provenance** — `acp:CreatorAgent`/`acp:OwnerAgent` resolve only against
   per-resource WebIDs the storage layer supplies through the trusted `AccessProvenance` channel,
-  **never** graph content. The loader hard-rejects any control-document triple in the
-  derivation-internal `solidx:` namespace, so a writer cannot embed `solidx:creator` to self-grant.
-  Each grant is resource-scoped; with no provenance, no such matcher grants (fail-closed).
+  **never** graph content. The loader hard-rejects any control-document triple in the derivation-internal
+  `solidx:` namespace, so a writer cannot self-grant; with no provenance, no such matcher grants.
 - **Triples-native + zero-copy enforcement** — pods, ACL/ACR docs, and the auth view are all
   ordinary named graphs ("who can read G?" is one SPARQL pattern); the default path evaluates
   through the engine's zero-copy dataset view, with a v1 `FROM NAMED` rewrite kept as a portability
@@ -54,6 +53,9 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 - **ODRL bridge (opt-in `odrl-bridge`, research-track — not a production cutover)** — runs the
   [`sparq-policy`](../sparq-policy) ODRL evaluator and materializes the equivalent WAC/ACP grant (or
   dual `auth:deny*`) into the auth view, no new enforcement engine (zero ODRL code by default). See below.
+- **Trust-graph admission PoC (opt-in `trust-graph`, research — NOT a security guarantee)** — an admission
+  stratum ([`sparq-trust`](../sparq-trust)) admits an issuer-signed, trusted-source-scoped credential fact
+  ahead of the materialiser; OFF = byte-identical WAC/ACP. No privacy/ZK (`sq-qhy4` unaudited).
 
 ## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge`)
 
@@ -72,8 +74,7 @@ bounds have **no** stateless analogue, so they stay **one-shot** (checked once v
 `sparq_policy::evaluate` — a missing value is *unprovable* → fail-closed, **no DPV purpose-hierarchy
 subsumption**; a lapsed bound is caught on the next `refresh_odrl_grant`). A mixed rule with any
 unmappable constraint falls back **entirely** to one-shot (never drop a bound and over-grant).
-**`odrl:count` is stateful, ACP is stateless** — it stays one-shot; real stateful enforcement is
-`sparq-policy`'s opt-in `count-enforcement` feature (deferred bead). Full mapping detail in the SKILL.
+**`odrl:count` is stateful, ACP is stateless** — it stays one-shot; real stateful enforcement is the opt-in `count-enforcement` feature. Full mapping detail in the SKILL.
 
 **Refresh / revocation.** Bridged grants are tracked in a ledger; `refresh_odrl_grant(s)` rebuilds
 the view from the static baseline plus a replay of still-valid entries, retracting any that no longer
@@ -107,12 +108,11 @@ so refresh can't widen or drop them.
   API, WAC/ACP notes, conformance harnesses + the differential oracle, ODRL-bridge mapping detail).
 - **Design + threat model** —
   [`research/solid-access-control-design.md`](../../research/solid-access-control-design.md) (model,
-  matrix, strata, boundaries) + scope [`research/sparq-solid-scope.md`](../../research/sparq-solid-scope.md).
+  matrix, strata, boundaries) + [scope](../../research/sparq-solid-scope.md).
 - **API reference** — [docs.rs/sparq-solid](https://docs.rs/sparq-solid); walk-through
   `cargo run -p sparq-solid --example quickstart --release`.
-- **Performance** — not baked into docs; the two query paths are measured via
-  `cargo run -p sparq-solid --example bench --release` + the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+- **Performance** — not baked into docs; measured via `cargo run -p sparq-solid --example bench
+  --release` + the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md), [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

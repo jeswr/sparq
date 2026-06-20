@@ -16,6 +16,10 @@ import {
 import { Logo } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
+import {
+  CommandPalette,
+  CommandPaletteTrigger,
+} from "@/components/command-palette";
 
 const REPO_URL = "https://github.com/jeswr/sparq";
 
@@ -42,6 +46,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = React.useState(false);
 
   return (
+    // [OPUS-4.8] sq-vw3ax.1 — the whole shell is wrapped in <CommandPalette> so the global
+    // ⌘K / Ctrl-K binding and the header trigger button share one palette instance, mounted
+    // once. This is purely additive: it removes nothing from the existing sidebar/top-tab nav
+    // (the redesign sequences sidebar-removal in sq-vw3ax.7, AFTER Cmd-K ships).
+    <CommandPalette>
     <div className="flex min-h-svh flex-col">
       <div className="flex flex-1">
         {/* Persistent desktop sidebar (w-64) */}
@@ -99,6 +108,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </nav>
 
             <div className="ml-auto flex items-center gap-1">
+              {/* [OPUS-4.8] sq-vw3ax.1 — the Cmd-K affordance in the utility cluster. */}
+              <CommandPaletteTrigger className="mr-1 hidden sm:inline-flex" />
               <Button variant="ghost" size="icon" asChild>
                 <a
                   href={REPO_URL}
@@ -121,5 +132,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </div>
     </div>
+    </CommandPalette>
   );
 }
