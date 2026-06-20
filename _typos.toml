@@ -88,6 +88,7 @@ Fo = "Fo"               # wrapped "For/Of" fragment in a table
 Thm = "Thm"             # "Theorem" abbreviation
 IST = "IST"             # acronym in a table
 Rotat = "Rotat"         # "RotatE" KG-embedding model name (wraps to "Rotat")
+struc = "struc"         # [OPUS-4.8] "struc2vec" structural-role embedding method name (typos splits on the digit, flags "struc"->"struct")
 criticals = "criticals"  # audit jargon: "the audit's criticals"
 unparseable = "unparseable" # accepted variant spelling used in skills docs
 unstalled = "unstalled"  # "proceeding unstalled" (= not stalled) — intentional
