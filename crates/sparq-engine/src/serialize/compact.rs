@@ -78,7 +78,7 @@ pub enum Json {
 
 impl Default for Json {
     /// The default JSON value is an empty object — the natural "no context" value for
-    /// [`ActiveContext::raw_context`].
+    /// the active context's raw `@context` (`ActiveContext::raw_context`).
     fn default() -> Json {
         Json::Obj(Vec::new())
     }
