@@ -27,6 +27,12 @@ pub mod quant;
 #[cfg(feature = "vec-predicate")]
 pub mod rewrite;
 pub mod store;
+// [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e): the P0 structure-aware-vectorisation preprocessing +
+// sampling-logic layer — closure-before-vectorise + type-constrained negative sampling. `structure`
+// feature only; the only feature pulling sparq-reason + sparq-introspect, so the default build
+// carries zero structure-prep code.
+#[cfg(feature = "structure")]
+pub mod structure;
 pub mod verbalize;
 
 /// The `vec:` vocabulary — magic predicates recognised by `rewrite`
@@ -96,6 +102,14 @@ pub use sparq_engine::{query_prepared, PreparedQuery, QueryBudget, QueryResult};
 #[cfg(feature = "delta")]
 pub use delta::{VectorDelta, SPQD_MAGIC, SPQD_VERSION};
 pub use store::{StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION};
+// [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e): the structure-aware-vectorisation P0 surface — the
+// closure-before-vectorise step, the type-constraint extractor, and the type-constrained negative
+// sampler with its on/off ablation switch. `structure` feature only.
+#[cfg(feature = "structure")]
+pub use structure::{
+    close_for_vectorise, materialise_closure, ClosedGraph, Corrupt, NegativeSampler, SamplingMode,
+    TypeConstraints,
+};
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
     ObjectKind, PropertyGroup,
