@@ -369,7 +369,15 @@ every built-in (`concat`/`count`/`sum`/`min`/`max`/`distinct`/`if`/`exists`/`lim
 `eval_node_expression` seam and asserts hand-derived result sets — so the operator
 semantics are gated even when the suite is absent. The SCS parser's fail-closed
 error paths and the SHACL-SPARQL §5.2/§6 edge cases get the same treatment
-(`tests/scs_error_paths.rs` under `scs`, `tests/sparql_edge_cases.rs`).
+(`tests/scs_error_paths.rs` under `scs`, `tests/sparql_edge_cases.rs`). The
+pre-binding's deep-algebra arms (`push_values_down` over Group / Slice / Distinct /
+Reduced / OrderBy / Minus-left / LeftJoin-left) and the fail-closed runtime-error
+paths (an inexpressible blank-node focus, a `SERVICE`-clause runtime query error) are
+pinned directly by the in-`src/sparql.rs` unit module (`sparql::tests`, sq-qcnn.1):
+each modifier arm is asserted both structurally (the `VALUES` table lands BELOW the
+modifier at the deepest leaf, so `$this`/`$value`/`$param` stays in scope) and
+semantically (a real validator over real data yields the SHACL-spec-correct
+conforms/violations).
 
 ## Gotchas / feature flags / prerequisites
 
