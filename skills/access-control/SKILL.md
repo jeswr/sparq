@@ -364,8 +364,9 @@ RDFC-1.0 canonicalise (`sparq-canon`) → a **checked** issuer signature over th
 (`sparq-shacl`) → freshness (a per-request Rust check) → the clear-WebID holder binding. The
 public surface is `sparq_trust::{vocab, policy, admit, wire}` — see
 [`crates/sparq-trust/README.md`](../../crates/sparq-trust/README.md) and the design record
-[`research/solid-trust-graph-authz-design.md`](../../research/solid-trust-graph-authz-design.md)
-§6.0.
+`research/solid-trust-graph-authz-design.md` §6.0 (tracked in
+[issue #940](https://github.com/jeswr/sparq/issues/940); landing via design PR
+<https://github.com/jeswr/sparq/pull/951>).
 
 **Honest scope (read first).** This is a RESEARCH prototype, **NOT a security guarantee**. It
 does **not** provide privacy, unlinkability, or anonymity: the credential is admitted in the

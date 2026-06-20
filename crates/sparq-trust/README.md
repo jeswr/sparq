@@ -6,8 +6,9 @@
 </p>
 
 The **proof-of-concept** for trust-graph authorisation over [sparq-solid](../sparq-solid/README.md)
-(design record [`research/solid-trust-graph-authz-design.md`](../../research/solid-trust-graph-authz-design.md)
-§6.0; issue #940, epic `sq-pfae`). It adds the **admission stratum** ahead of the shipped
+(design record §6.0 — tracked in [issue #940](https://github.com/jeswr/sparq/issues/940) and
+landing via design PR <https://github.com/jeswr/sparq/pull/951>; epic `sq-pfae`). It adds the
+**admission stratum** ahead of the shipped
 WAC/ACP derivation stratum: *"is this externally-attested fact from a source I trust for this
 statement-type?"* — and on success injects the issuer-tagged fact so the existing N3 reasoner
 merges it with the `.acr` rules to derive access.
@@ -18,6 +19,8 @@ merges it with the `.acr` rules to derive access.
 > `canAccess`. It does **not** provide privacy, unlinkability, or anonymity (see *Honest scope*).
 > The ZK estate it composes with is externally **unaudited** (`sq-qhy4`) and is pending external
 > accredited-cryptographer sign-off.
+
+<!-- separate blockquote (MD028): the model-provenance note is a distinct callout. [OPUS-4.8] -->
 
 > Model: Opus 4.8 (Fable unavailable — flag for re-review when Fable returns).
 
@@ -83,8 +86,9 @@ unchanged WAC/ACP view.
 
 ## 📚 Learn more
 
-- The design record: [`research/solid-trust-graph-authz-design.md`](../../research/solid-trust-graph-authz-design.md)
-  (§6.0 is the PoC spec; §7 the honest limitations).
+- The design record `research/solid-trust-graph-authz-design.md` (§6.0 is the PoC spec; §7 the
+  honest limitations) — tracked in [issue #940](https://github.com/jeswr/sparq/issues/940) and
+  landing via design PR <https://github.com/jeswr/sparq/pull/951>.
 - The host crate: [`sparq-solid`](../sparq-solid/README.md) (the WAC/ACP substrate this extends).
 - `cargo doc -p sparq-trust` for the full module-level docs.
 
