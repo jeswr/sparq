@@ -139,6 +139,22 @@ nesting descends strictly through the object position; the HNDQ poison-graph cal
 limit still fails closed. This is a sparq-local extension, **not** a W3C standard
 — do not represent its output as W3C RDFC-1.0.
 
+**Soundness audit + distinguishing-power regression (sq-mu1cd / sq-63g0).** An
+adversarial audit of the nested-bnode descent found the profile **sound** on every
+constructed nested-bnode case (0 defects / 5 refuted suspicions): triple-term-
+internal bnodes share one HNDQ position marker (object position + the outer
+predicate), yet distinct nested structure never collapses, because the final
+serialization re-renders the real `Term::Triple` with c14n labels and the issuer
+map separates genuinely-distinct bnodes via the first-degree descent. The audit's
+sharper non-isomorphic vectors are pinned as permanent regression tests
+(`tests/rdf12_triple_term_canon.rs` §5) — asymmetric / anchored inner swap,
+inner-subject vs inner-object leaf, depth-1 vs depth-2 nesting, self-loop
+inner-subject vs inner-object — each first **brute-force-proven non-isomorphic** by
+an independent oracle before asserting the canon differs, so a future
+`hash_n_degree_quads` / `hash_related_blank_node` refactor that introduced a
+false-equal would be caught. The whether-the-marker-needs-a-sub-discriminator
+question is a spec-clarity / robustness matter, not a latent defect.
+
 ## Conformance
 
 Validated against the official [W3C rdf-canon test
