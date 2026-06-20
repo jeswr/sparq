@@ -8,18 +8,22 @@ result-comparison machinery: `sparq-conformance` (W3C SPARQL query/update/syntax
 `sparq-inference-conformance` (RDF Semantics, OWL 2 RL, N3, entailment regimes via
 `sparq-reason`), and `sparq-conformance-scoreboard` (consolidated index of every
 ratchet — SPARQL, inference, W3C SHACL, OGC GeoSPARQL, Solid WAC + ACP, **W3C
-JSON-LD 1.1 toRdf + fromRdf + compact**, **SolidLab ODRL Test Suite**).
+JSON-LD 1.1 toRdf + fromRdf + compact + frame**, **SolidLab ODRL Test Suite**).
 
 A crate-local `cargo test` ratchet behind the **opt-in `jsonld-suite`** feature
-drives the `w3c/json-ld-api` suite (toRdf + fromRdf + compact); honest divergences
-are reported, never inflated. The **compact** lane (sq-3uos5) parses each
-`jld:CompactTest` input to RDF, runs Compaction against the case `@context`, and
-requires lossless self-reparse (`reparse(compact(D, ctx)) ≡ D`). The ODRL Test
-Suite ratchet (sq-tmsd6) lives in `sparq-policy`; only its FLOOR is mirrored here.
+drives the `w3c/json-ld-api` suite (toRdf + fromRdf + **compact**, lossless
+self-reparse `reparse(compact(D,ctx)) ≡ D`; floor raised 163→186 by sq-oy1f.16) and
+the SEPARATE `w3c/json-ld-framing` suite (**frame**, sq-oy1f.19): each `jld:FrameTest`
+EXPANDED input is framed via the native Framing Algorithm and compared by
+RDF-equivalence to the suite's NORMATIVE expected output (framing is a SELECT+RESHAPE,
+so the oracle anchors on `expected`, not the input). Honest divergences are reported,
+never inflated. The ODRL ratchet (sq-tmsd6) lives in `sparq-policy`; only its FLOOR is
+mirrored here.
 
 > **Internal dev-only harness — not published** (`publish = false`). Test data is
 > fetched by `scripts/fetch-conformance.sh`, `fetch-jsonld-tests.sh`,
-> `fetch-odrl-suite.sh`. Contributing: [`AGENTS.md`](../../AGENTS.md).
+> `fetch-jsonld-framing-tests.sh`, `fetch-odrl-suite.sh`. Contributing:
+> [`AGENTS.md`](../../AGENTS.md).
 
 ## License
 

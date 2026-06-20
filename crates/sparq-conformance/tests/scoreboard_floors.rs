@@ -127,6 +127,15 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/jsonld_suite.rs",
         "COMPACT_FLOOR",
     ),
+    // [OPUS-4.8] sq-oy1f.19 — the W3C JSON-LD 1.1 `frame` ratchet over the SEPARATE
+    // w3c/json-ld-framing suite. `pub const FRAME_FLOOR` lives in the same
+    // `tests/jsonld_suite.rs`; the guard reads it textually so the central
+    // scoreboard's `ratchet_floor` can never drift from what the runner asserts.
+    (
+        "W3C JSON-LD 1.1 frame",
+        "crates/sparq-conformance/tests/jsonld_suite.rs",
+        "FRAME_FLOOR",
+    ),
     // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
     // The floor const (`pub const ODRL_SUITE_FLOOR`) lives top-level in
     // `sparq-policy`'s `tests/odrl_test_suite.rs`; the guard reads it textually
