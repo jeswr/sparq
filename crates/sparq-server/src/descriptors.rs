@@ -149,6 +149,10 @@ fn serialise(triples: &[Triple], fmt: GraphFormat) -> (&'static str, String) {
         GraphFormat::NTriples => crate::graph::triples_to_ntriples(triples),
         GraphFormat::Turtle => crate::graph::triples_to_turtle(triples),
         GraphFormat::RdfXml => crate::graph::triples_to_rdfxml(triples),
+        // [OPUS-4.8] sq-oy1f.1: a descriptor may be requested as JSON-LD too (only matchable
+        // when the `jsonld` feature is on; the variant does not exist otherwise).
+        #[cfg(feature = "jsonld")]
+        GraphFormat::JsonLd => crate::graph::triples_to_jsonld(triples),
     };
     (fmt.content_type(), body)
 }

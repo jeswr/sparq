@@ -37,7 +37,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   dataset scoped to the addressed graph), and — behind the OPT-IN `n3-patch` feature + `--n3-patch`
   flag — a Solid-style `text/n3` **N3-Patch** (`solid:InsertDeletePatch`).
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
-  GSP read in N-Triples / prefix-Turtle / RDF-XML; streamed SELECT bodies. Plus **EXPLAIN /
+  GSP read in N-Triples / prefix-Turtle / RDF-XML (plus **JSON-LD** behind the opt-in `jsonld`
+  feature, both emit and accept — see "Opt-in features"); streamed SELECT bodies. Plus **EXPLAIN /
   EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket + SSE** live SELECT diffs.
 - **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
   default, in-memory). See "Durable persistence".
@@ -52,6 +53,9 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
   (`POST /shacl/validate`), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  `jsonld` (`application/ld+json` in content negotiation — EMIT a CONSTRUCT/DESCRIBE or GSP-read
+  graph as flattened JSON-LD on `Accept: application/ld+json`, and ACCEPT an `application/ld+json`
+  GSP write body; off by default, links `oxjsonld` + the engine's JSON-LD writer),
   `backup` (online snapshot `POST /admin/backup` + `/admin/restore`, no stop-the-world),
   `audit-log`/`access-audit` (access trails), `zlib-ng` (faster gzip).
 

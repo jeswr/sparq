@@ -2600,7 +2600,14 @@ fn negotiate_tpf(accept: Option<&str>) -> GraphFormat {
             let f = negotiate_graph(Some(a));
             // negotiate_graph defaults to N-Triples on an unrecognised header; for TPF a bare
             // `*/*` (or anything unmatched) should land on Turtle.
-            if a.contains("n-triples") || a.contains("turtle") || a.contains("rdf+xml") {
+            // [OPUS-4.8] sq-oy1f.1: an explicit JSON-LD request is honoured too (only matchable
+            // when the `jsonld` feature is on; `negotiate_graph` returns Turtle/N-Triples without
+            // it, so the substring is harmless when the feature is off).
+            if a.contains("n-triples")
+                || a.contains("turtle")
+                || a.contains("rdf+xml")
+                || a.contains("ld+json")
+            {
                 f
             } else {
                 GraphFormat::Turtle
@@ -2763,11 +2770,9 @@ async fn tpf_endpoint(
     );
 
     let fmt = negotiate_tpf(headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()));
-    let body = match fmt {
-        GraphFormat::NTriples => crate::graph::triples_to_ntriples(&triples),
-        GraphFormat::Turtle => crate::graph::triples_to_turtle(&triples),
-        GraphFormat::RdfXml => crate::graph::triples_to_rdfxml(&triples),
-    };
+    // [OPUS-4.8] sq-oy1f.1: route through the shared graph serialiser so the JSON-LD arm is
+    // covered uniformly (and the match stays exhaustive when the `jsonld` feature is on).
+    let body = serialise_graph_triples(&triples, fmt);
     text_response(StatusCode::OK, fmt.content_type(), body, head_only)
 }
 
@@ -4707,6 +4712,12 @@ fn rdf_format_for(content_type: &str) -> Option<BodyFormat> {
         "application/n-triples" | "text/plain" => Some(BodyFormat::Core("ntriples")),
         "application/n-quads" => Some(BodyFormat::Core("nquads")),
         "application/trig" => Some(BodyFormat::Core("trig")),
+        // [OPUS-4.8] sq-oy1f.1: JSON-LD request body, OPT-IN behind the `jsonld` feature (which
+        // turns on `sparq-core/jsonld`, the `oxjsonld` parser `Graph::load_str` dispatches the
+        // "jsonld" token to). Without the feature this arm is compiled out, so an
+        // `application/ld+json` body is a plain `415` — byte-identical to before.
+        #[cfg(feature = "jsonld")]
+        "application/ld+json" => Some(BodyFormat::Core("jsonld")),
         // [OPUS-4.8] sq-rt6v: RDF/XML request body.
         "application/rdf+xml" => Some(BodyFormat::RdfXml),
         // No explicit Content-Type: default to Turtle (a superset of N-Triples), matching
@@ -4715,6 +4726,20 @@ fn rdf_format_for(content_type: &str) -> Option<BodyFormat> {
         _ => None,
     }
 }
+
+/// [OPUS-4.8] sq-oy1f.1: the `415` message for an unsupported GSP write-body media type. With
+/// the `jsonld` feature ON it names `application/ld+json` among the accepted dialects; OFF it
+/// names only the always-available RDF syntaxes (an `application/ld+json` body is then a plain
+/// `415`), so the advertised contract matches what the build actually parses.
+#[cfg(feature = "jsonld")]
+const GSP_WRITE_BODY_415: &str =
+    "GSP write body must be RDF: Content-Type 'text/turtle', 'application/n-triples', \
+     'application/n-quads', 'application/trig', 'application/rdf+xml' or 'application/ld+json'";
+/// [OPUS-4.8] sq-oy1f.1: the feature-OFF `415` message — JSON-LD is not parseable in this build.
+#[cfg(not(feature = "jsonld"))]
+const GSP_WRITE_BODY_415: &str =
+    "GSP write body must be RDF: Content-Type 'text/turtle', 'application/n-triples', \
+     'application/n-quads', 'application/trig' or 'application/rdf+xml'";
 
 /// Parses a GSP request body into canonical N-Triples (the term syntax accepted verbatim
 /// inside a SPARQL `INSERT DATA` block), validating the RDF in the process. The `sparq-core`
@@ -4735,7 +4760,7 @@ fn body_to_ntriples(
         None => {
             return Err(json_error(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "GSP write body must be RDF: Content-Type 'text/turtle', 'application/n-triples', 'application/n-quads', 'application/trig' or 'application/rdf+xml'",
+                GSP_WRITE_BODY_415,
             ))
         }
     };
@@ -5223,6 +5248,10 @@ fn serialise_graph_triples(triples: &[oxrdf::Triple], gfmt: GraphFormat) -> Stri
         GraphFormat::NTriples => crate::graph::triples_to_ntriples(triples),
         GraphFormat::Turtle => crate::graph::triples_to_turtle(triples),
         GraphFormat::RdfXml => crate::graph::triples_to_rdfxml(triples),
+        // [OPUS-4.8] sq-oy1f.1: JSON-LD (flattened) — only reachable when the `jsonld` feature
+        // is on (the variant does not exist otherwise, so the match stays exhaustive).
+        #[cfg(feature = "jsonld")]
+        GraphFormat::JsonLd => crate::graph::triples_to_jsonld(triples),
     }
 }
 
