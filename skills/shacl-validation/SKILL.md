@@ -360,7 +360,16 @@ the conformance primitive `conforms(data, shapes, shape_node) -> ConformanceChec
 drives the `sht:EvalNodeExpr` suite — all evaluation entries pass; a companion
 harness (`tests/w3c_node_expr_constraints.rs`) drives the suite's two `sht:Validate`
 entries (`sh:expression` / `sh:nodeByExpression`) end-to-end (both self-skip when
-the suite is not fetched).
+the suite is not fetched). Because those W3C harnesses self-skip on a fresh
+checkout, the node-expression **function operators** are also pinned by a
+fixture-independent unit suite (`tests/node_expr_operators.rs`, sq-qcnn) that drives
+every built-in (`concat`/`count`/`sum`/`min`/`max`/`distinct`/`if`/`exists`/`limit`/
+`offset`/`flatMap`/`orderBy`/`findFirst`/`matchAll`/`remove`/`instancesOf`/
+`nodesMatching`/`var` + custom `sh:SPARQLFunction`) through the public
+`eval_node_expression` seam and asserts hand-derived result sets — so the operator
+semantics are gated even when the suite is absent. The SCS parser's fail-closed
+error paths and the SHACL-SPARQL §5.2/§6 edge cases get the same treatment
+(`tests/scs_error_paths.rs` under `scs`, `tests/sparql_edge_cases.rs`).
 
 ## Gotchas / feature flags / prerequisites
 
