@@ -732,6 +732,52 @@ emits a corruption that is itself a true triple). **Honesty:** the empirical ben
 reports inconsistent gains; this slice is the buildable inputs, the trainer that consumes them is a
 tracked follow-up.
 
+### 14. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
+
+<!-- [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §3.1/§3.2/§6.A). -->
+Research-grade **P1**: the typed-literal encoders that turn a node vector into a **structured
+partitioned object** (design §3). All are **pure functions keyed by datatype** in the `encode`
+module — no training, no graph state, no I/O.
+
+- **Datatype `route`r** — the datatype IRI alone selects the encoder family
+  (`Encoder::{Numeric,Boolean,Date,Other}`). Exact, free.
+- **`NumericEncoder`** — the **order-preserving** magnitude encoder (the one the design gates as
+  formally provable): per-predicate quantile-normalise + a strictly-monotone **thermometer** code
+  whose **L2 distance is monotone in value distance over the whole observed range** (NOT a periodic
+  Fourier code). `metamorphic_monotone` is the provable gate; a sine code FAILS it by design.
+- **`BooleanEncoder`** — one ±1 sign dimension, **exact, 2-valued**, round-trips (`true`→+1,
+  `false`→−1; `decode(encode(b)) == b`).
+- **`DateEncoder`** — maps `xsd:date`/`dateTime`/`dateTimeStamp`/`gYear` to an order-preserving
+  epoch lane (via `sparq-core`'s `Timeline`) and reuses the numeric encoder, so chronological order
+  is preserved.
+- **`SchemaHeader`** — the self-describing `.spqv` partition descriptor: contiguous `Block`s
+  (encoder + `Metric` + dim span) with a **metric-correctness guard** (`check_euclidean`) so a whole-row
+  L2/cosine search never silently runs over a non-Euclidean (e.g. future taxonomy) block. Round-trips
+  to bytes (`SPQS` magic) for a sidecar.
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{route, Encoder, NumericEncoder, BooleanEncoder, DateEncoder,
+    SchemaHeader, Block, Metric};
+
+assert_eq!(route("http://www.w3.org/2001/XMLSchema#integer"), Encoder::Numeric);
+let enc = NumericEncoder::fit([1.0, 30.0, 31.0, 70.0, 5000.0], /*dim*/ 16); // per-predicate fit
+let v30 = enc.encode(30.0);                                                 // order-preserving block
+assert_eq!(BooleanEncoder::decode(BooleanEncoder::encode(true)[0]), true);  // exact round-trip
+let header = SchemaHeader::new(vec![
+    Block { encoder: Encoder::Numeric, metric: Metric::Euclidean, offset: 0, width: 16 },
+])?;
+header.check_euclidean()?;  // every block is L2-searchable
+# Ok::<(), String>(())
+```
+
+**Honesty.** Order-preservation, boolean exactness, datatype-dispatch correctness, and the metric
+guard are **proven** (`encode.rs` tests). Whether the typed encoders raise downstream
+link-prediction / retrieval is **empirical and dataset-dependent** (design §6.B/§9) — no accuracy
+claim is made. The encoder-quality ablation runner is `examples/bench_typed_encoders.rs` (P1 ON vs
+OFF, with a long-tail slice); its numbers are **work-box NON-CANONICAL**. This crate still has **no
+KGE trainer** — the encoders are inputs a trainer would consume.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
@@ -748,12 +794,14 @@ tracked follow-up.
   methods write a delta the read paths consult transparently (recipe 12). The delta lives in RAM on the
   handle; `save_delta` persists it to a crash-durable `.spqd` sidecar and `open_with_delta` replays it,
   so mutations survive a restart without a `compact` (the two durability paths).
-- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1).** It is the
-  ONLY feature pulling `sparq-reason` + `sparq-introspect` into this crate, both **optional**, so
+- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1 P0, sq-0wo9e.2 P1).**
+  It is the ONLY feature pulling `sparq-reason` + `sparq-introspect` into this crate, both **optional**, so
   with it OFF the default build compiles zero structure-prep code and gains no new required deps. With
-  it ON it exposes `close_for_vectorise` / `materialise_closure` / `ClosedGraph`, `TypeConstraints`,
-  and the `NegativeSampler` + `SamplingMode` (on/off ablation) of recipe 13. It TRAINS NOTHING and
-  serves no exact answer; benefit is **unproven** (research-grade, no accuracy claim, no numbers).
+  it ON it exposes the **P0** closure + sampler (`close_for_vectorise` / `materialise_closure` /
+  `ClosedGraph`, `TypeConstraints`, `NegativeSampler` + `SamplingMode`, recipe 13) AND the **P1**
+  typed-literal encoders (`route`, `NumericEncoder`, `BooleanEncoder`, `DateEncoder`, `SchemaHeader`,
+  recipe 14). It TRAINS NOTHING and serves no exact answer; encoder invariants are proven but
+  embedding-quality benefit is **unproven** (research-grade, no accuracy claim, no canonical numbers).
 - **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
   index (`VectorIndex`/`HnswConfig`) and the `ApproxBackend` are gated behind it — it is the only
   thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force
