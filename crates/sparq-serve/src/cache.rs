@@ -14,7 +14,7 @@
 //!
 //! # The key: `(canonical-query, visibility-scope, epoch-vector)` — §6.3
 //!
-//! - **Canonical-query** ([`canon`](crate::canon)): cheap whitespace (and opt-in
+//! - **Canonical-query** ([`canonicalize`](crate::canonicalize)): cheap whitespace (and opt-in
 //!   variable) normalization, hashed. So `SELECT ?x WHERE{…}` and the same query
 //!   reindented share an entry.
 //! - **Visibility-scope** ([`ScopeKey`]): the identity of the *accessible graph
@@ -54,9 +54,9 @@
 //! On a miss the first caller takes a **lease** for the key; concurrent callers for
 //! the same key **wait** on that lease rather than each re-executing (a stampede
 //! becomes one execution, N waiters). [`ResultCache::lease`] returns either
-//! [`Lease::Hit`] (bytes already cached and fresh), [`Lease::Lead`] (you execute,
-//! then [`LeadGuard::fulfill`] publishes the bytes and wakes waiters), or
-//! [`Lease::Wait`] (block on [`WaitGuard::wait`] for the leader's bytes).
+//! [`LeaseOutcome::Hit`] (bytes already cached and fresh), [`LeaseOutcome::Lead`] (you
+//! execute, then [`LeadGuard::fulfill`] publishes the bytes and wakes waiters), or
+//! [`LeaseOutcome::Wait`] (block on [`WaitGuard::wait`] for the leader's bytes).
 //!
 //! # Bounds: byte-budget LRU + admission (§6.3)
 //!
@@ -215,10 +215,10 @@ pub struct CacheConfig {
     /// Bodies larger than this are never admitted (oversize/streaming, §6.3).
     pub max_entry_bytes: usize,
     /// Use the label-unsafe variable-renaming canonicalization
-    /// ([`canon::canonicalize_renamed`]). **OFF by default** — only sound when the
-    /// consumer re-labels cached bytes to the request's projection (see
-    /// [`canon`](crate::canon)). The label-safe whitespace-only form is the
-    /// default.
+    /// ([`canonicalize_renamed`](crate::canonicalize_renamed)). **OFF by default** —
+    /// only sound when the consumer re-labels cached bytes to the request's projection
+    /// (see [`canonicalize`](crate::canonicalize) for the label-safe default). The
+    /// label-safe whitespace-only form is the default.
     pub rename_variables: bool,
 }
 
