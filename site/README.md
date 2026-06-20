@@ -13,9 +13,10 @@ Inter, `--radius 0.7rem`. Design record: `research/feature-showcase-site-design.
 - **Landing / overview** — what sparq is, the live REPL, the three flagship cards, and
   the full surface grid (each card links to its page; unbuilt pages render an honest
   "coming soon" placeholder that states the planned execution tier).
-- **Live SPARQL REPL** (`/try` and the landing marquee) — loads the lean sparq wasm
-  bundle and runs **real SPARQL** against a sample graph via the actual Rust engine
-  compiled to WebAssembly. Not a fixture; nothing is sent to a server.
+- **Live SPARQL REPL** (`/try` and the landing marquee) — runs **real SPARQL** against a
+  sample graph via the actual Rust engine compiled to WebAssembly. Not a fixture; nothing is
+  sent to a server. The component is code-split and the wasm engine loads lazily on browser
+  idle, so it never blocks the initial page load (see *Lazy wasm loading* below — `sq-4296`).
 - **Persistent cross-session workspaces** (`sq-atb0`) — the REPL's workspace panel
   saves a named workspace: a **snapshot** of the loaded dataset (the whole default+named-graph
   content as N-Quads — a save/open cache, not a re-ingest-from-source), the imported-source
@@ -51,6 +52,44 @@ npm run test:e2e   # Playwright — headless browser smoke tests (see below)
 `public/wasm/` is generated (git-ignored): `scripts/sync-wasm.mjs` copies the
 wasm-pack `--target web` output from `js/wasm/`. The `prebuild` script runs it
 automatically before `next build`.
+
+### Lazy wasm loading — keeping the engine off the critical path — `sq-4296` (#935 / #981)
+
+The sparq engine wasm is heavy, so it is kept **out of the initial page load** in three
+layers — the page paints and becomes interactive before any of it has finished loading:
+
+1. **The wasm binary is never bundled into JS.** `@sparq/client`'s `loadSparq()`
+   dynamic-imports the wasm-pack glue with a `/* webpackIgnore: true */` hint, so the glue
+   (`public/wasm/sparq_wasm.js`) is fetched as a plain ESM module at runtime and the
+   `sparq_wasm_bg.wasm` binary is a static asset — neither enters a webpack chunk. (Verify:
+   no `_next` JS chunk embeds the `.wasm`; the loader chunk only holds the *URL string*.)
+2. **The REPL component is code-split.** `site/src/components/repl-lazy.tsx` wraps the heavy
+   `Repl` in `next/dynamic(..., { ssr: false })` with a skeleton fallback, so the home page
+   (`/`) and `/try` render their shell first and stream the REPL chunk in afterwards. The
+   server pages render `<ReplLazy />` rather than `<Repl />`.
+3. **The engine warm-up is deferred to browser idle.** Components call
+   `prewarmSparqWhenIdle()` (not the eager `prewarmSparq()`), which schedules the
+   fetch+instantiate via `requestIdleCallback` (with a `setTimeout` fallback) so the wasm
+   loads *after* first paint. The first interaction (`Run query` / `Validate`) still
+   `await`s the **memoised** `loadSparq()`, so it joins the in-flight load rather than
+   re-paying a cold start — and never calls into an uninitialised wasm.
+
+**ESM `<script type="module">` import (#981).** The wasm-pack `--target web` glue is a real
+ESM module, so it can be imported directly — instantiate it (its default `init`) before using
+`Store`, and the ~MB `.wasm` is fetched lazily by that init, not by the script tag:
+
+```html
+<script type="module">
+  // basePath-aware: '/sparq/...' on GitHub Pages, '/...' under the Tauri webview root.
+  import init, { Store } from "https://jeswr.github.io/sparq/wasm/sparq_wasm.js";
+  await init(); // lazily fetches + instantiates sparq_wasm_bg.wasm (off the critical path)
+  const store = Store.load("<a> <b> <c> .", "ntriples");
+  console.log(store.query("SELECT * WHERE { ?s ?p ?o }"));
+</script>
+```
+
+In an app, prefer `@sparq/client`'s `loadSparq()` (memoised, basePath-defaulted) over a
+hand-rolled `init()` so the cold start happens at most once across the whole page.
 
 ### Build modes — `basePath` (Pages vs Tauri) — `sq-9vw5`
 

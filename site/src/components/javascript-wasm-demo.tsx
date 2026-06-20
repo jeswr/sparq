@@ -39,7 +39,7 @@ import { cn } from "@/lib/utils";
 import {
   loadSparq,
   loadIntoStore,
-  prewarmSparq,
+  prewarmSparqWhenIdle,
   formatTerm,
   matchQuads,
   countQuads,
@@ -100,18 +100,24 @@ export function JavascriptWasmDemo() {
     setVersion((v) => v + 1);
   }, []);
 
+  // [OPUS-4.8] sq-4296 (#935 / #981) — pre-warm + seed on the next browser-IDLE slot (not
+  // synchronously during mount) so the ~300 kB+ engine never blocks the initial page paint.
+  // `rebuild` awaits the memoised loadSparq, so a user interaction before the idle warm-up
+  // completes joins the in-flight load rather than calling into an uninitialised wasm.
   React.useEffect(() => {
     let cancelled = false;
     setEngine("warming");
-    prewarmSparq()
-      .then(() => {
-        if (!cancelled) return rebuild();
-      })
-      .catch(() => {
+    const handle = prewarmSparqWhenIdle({
+      onReady: () => {
+        if (!cancelled) void rebuild();
+      },
+      onError: () => {
         if (!cancelled) setEngine("error");
-      });
+      },
+    });
     return () => {
       cancelled = true;
+      handle.cancel();
     };
   }, [rebuild]);
 

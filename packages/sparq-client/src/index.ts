@@ -213,9 +213,100 @@ export async function loadSparq(opts: LoadSparqOptions = {}): Promise<WasmStoreC
  * {@link loadSparq} promise, so the cold start happens at most once. Returns a promise that
  * resolves when the engine is ready (or rejects on a load failure, which resets the cache
  * so a later call can retry).
+ *
+ * Note this kicks the fetch off IMMEDIATELY (synchronously from the call site). For the
+ * "load async AFTER the page paints" posture the maintainer asked for (#935 / #981 — keep
+ * the ~300 kB wasm off the critical path so the page is interactive FIRST), prefer
+ * {@link prewarmSparqWhenIdle}, which defers the fetch to the next browser-idle slot.
  */
 export function prewarmSparq(opts: LoadSparqOptions = {}): Promise<unknown> {
   return loadSparq(opts);
+}
+
+/** The handle {@link prewarmSparqWhenIdle} returns so a caller can cancel a not-yet-fired
+ * idle prewarm (e.g. a React effect cleanup on unmount). Calling it before the idle slot
+ * fires prevents the wasm fetch from being kicked off; calling it after is a no-op. */
+export interface IdlePrewarmHandle {
+  /** Cancel the pending idle prewarm if it has not fired yet. */
+  cancel(): void;
+}
+
+/**
+ * [OPUS-4.8] sq-4296 (#935 / #981) — pre-warm the wasm engine LAZILY, on the next
+ * browser-idle slot, so the ~300 kB engine wasm never competes with the initial page paint.
+ *
+ * This is the "load async after the page loads" mechanism: instead of firing the wasm fetch
+ * synchronously while a wasm-using component mounts (which the maintainer flagged as blocking
+ * page load), it schedules the fetch via `requestIdleCallback` — so the browser finishes
+ * layout / paint / first-input readiness FIRST, then fetches + instantiates the wasm in the
+ * background. The page is interactive before the wasm finishes loading; the (memoised)
+ * {@link loadSparq} promise is reused, so any later on-demand `await loadSparq()` (e.g. the
+ * first "Run query") simply joins the in-flight or already-resolved load — never a second
+ * cold start, never a call into an uninitialised wasm.
+ *
+ * `requestIdleCallback` is feature-detected: where it is unavailable (Safari < 16.4, the SSR
+ * pass, the static-export prerender) it falls back to a short `setTimeout(…, 1)`, which still
+ * yields to the paint before fetching. The optional `timeout` (default 2000 ms) caps how long
+ * the idle wait may stretch under sustained main-thread work, so the engine still warms on a
+ * busy page. Returns an {@link IdlePrewarmHandle} whose `cancel()` unschedules a not-yet-fired
+ * prewarm — pass it to a React effect cleanup so an unmount before the idle slot does no work.
+ *
+ * `onReady` / `onError` are optional readiness callbacks the (memoised) load resolves into, so
+ * a component can flip its engine pill to "ready" / "error" without re-importing `loadSparq`.
+ */
+export function prewarmSparqWhenIdle(
+  opts: LoadSparqOptions & {
+    timeout?: number;
+    onReady?: () => void;
+    onError?: (err: unknown) => void;
+  } = {},
+): IdlePrewarmHandle {
+  const { timeout = 2000, onReady, onError, ...loadOpts } = opts;
+  let cancelled = false;
+
+  const fire = (): void => {
+    if (cancelled) return;
+    loadSparq(loadOpts).then(
+      () => {
+        if (!cancelled) onReady?.();
+      },
+      (err) => {
+        if (!cancelled) onError?.(err);
+      },
+    );
+  };
+
+  // Schedule on the next idle slot so the page paints / becomes interactive first. Outside a
+  // browser (SSR / static prerender) `requestIdleCallback` is undefined; a short timeout
+  // there still yields to any paint before the fetch is kicked off.
+  type RIC = (cb: () => void, opts?: { timeout?: number }) => number;
+  type CIC = (handle: number) => void;
+  const ric =
+    typeof window !== "undefined"
+      ? (window as unknown as { requestIdleCallback?: RIC }).requestIdleCallback
+      : undefined;
+  const cic =
+    typeof window !== "undefined"
+      ? (window as unknown as { cancelIdleCallback?: CIC }).cancelIdleCallback
+      : undefined;
+
+  if (typeof ric === "function") {
+    const id = ric(fire, { timeout });
+    return {
+      cancel() {
+        cancelled = true;
+        if (typeof cic === "function") cic(id);
+      },
+    };
+  }
+
+  const id = setTimeout(fire, 1);
+  return {
+    cancel() {
+      cancelled = true;
+      clearTimeout(id);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ import { cn } from "@/lib/utils";
 import {
   loadSparq,
   loadIntoStore,
-  prewarmSparq,
+  prewarmSparqWhenIdle,
   storeToNQuads,
   datasetSize,
   extractTable,
@@ -184,29 +184,47 @@ export function Repl() {
     [],
   );
 
-  // Pre-warm the engine AND parse the default dataset eagerly on mount, off the render
-  // path. The first "Run query" then runs against an already-built store with no cold
-  // start. A failure resets the indicator so a later run can retry via ensureStore.
+  // [OPUS-4.8] sq-4296 (#935 / #981) — pre-warm the engine AND parse the default dataset on
+  // the next browser-IDLE slot, not synchronously during mount. The REPL renders on the home
+  // page and /try; firing the ~2.8 MB engine wasm fetch while the component mounts would
+  // compete with the initial paint / first-input readiness. `prewarmSparqWhenIdle` defers the
+  // fetch via `requestIdleCallback` (with a `setTimeout` fallback) so the page is interactive
+  // FIRST, then the wasm loads in the background. The first "Run query" still awaits the
+  // memoised `loadSparq()` via `ensureStore`, so an interaction before the idle warm-up
+  // completes joins the in-flight load — it never calls into an uninitialised wasm.
   React.useEffect(() => {
     let cancelled = false;
     setEngine("warming");
-    prewarmSparq()
-      .then(async () => {
-        if (cancelled || storeRef.current) return;
-        await buildStore(DEFAULT_DATASET.text, DEFAULT_DATASET.format);
-      })
-      .then(() => {
-        if (!cancelled) setEngine("ready");
-      })
-      .catch((e) => {
+    const handle = prewarmSparqWhenIdle({
+      onReady: () => {
+        if (cancelled || storeRef.current) {
+          if (!cancelled) setEngine("ready");
+          return;
+        }
+        // The engine is ready; build the default dataset off the render path, then mark ready.
+        buildStore(DEFAULT_DATASET.text, DEFAULT_DATASET.format)
+          .then(() => {
+            if (!cancelled) setEngine("ready");
+          })
+          .catch((e) => {
+            if (cancelled) return;
+            setEngine("error");
+            toast.error("Engine failed to load", {
+              description: e instanceof Error ? e.message : String(e),
+            });
+          });
+      },
+      onError: (e) => {
         if (cancelled) return;
         setEngine("error");
         toast.error("Engine failed to load", {
           description: e instanceof Error ? e.message : String(e),
         });
-      });
+      },
+    });
     return () => {
       cancelled = true;
+      handle.cancel();
     };
   }, [buildStore]);
 
