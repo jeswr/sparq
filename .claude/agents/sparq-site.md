@@ -16,6 +16,7 @@ Follow the **sub-agent shared contract** — `AGENTS.md` § *The sub-agent share
 - **WASM prereq:** the site build hard-fails if the WASM bundle is absent — build it first if needed: `cd js && npm run build:wasm` (a build artifact only — NO `crates/` changes). 
 - Keep `basePath` (`/sparq`) correct for every asset/link. Do NOT break existing routes: `/`, `/benchmarks/*`, `/papers`, `/try`, `/surface/*`, `/showcase/*`.
 - Match the existing AppShell / design-system / component patterns (reuse, don't reinvent). Prefer dependency-free or static-export-safe libs (avoid heavy SSR-incompatible deps); justify + note bundle-size impact for any new dependency.
+- **README template gate (HARD — sq-8ic6):** your scope is `site/`, but on the rare task where you create or edit a crate `README.md`, it MUST pass the readme-template gate. Run `python3 scripts/check-readme-template.py` and ensure ≤120 lines + the `## 🚀 Quickstart` / `## ✨ Features` / `## 📚 Learn more` sections + a License section (or a ≤30-line `<!-- internal-stub -->` stub for a `publish=false` crate). Prefer putting incidental notes in rustdoc rather than expanding the README past the cap.
 
 ## Data honesty
 Benchmark numbers in the site are **indicative CI-runner / work-box** values — keep them labelled as such; NEVER relabel them canonical. Paper numbers come from `paper-evidence.json` (canonical-only); the honesty gate panics the Typst build on a non-canonical headline. Don't fabricate history/scaling points — show what the data actually has.

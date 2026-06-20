@@ -43,6 +43,22 @@
 //! `@vocab`, type/language/`@container` (`@set`/`@list`/`@language`/`@index`), `@reverse`,
 //! keyword aliasing, value compaction, node compaction and IRI compaction are all
 //! covered. See the crate README + `skills/data-formats/SKILL.md` for the boundary.
+//!
+//! ## Faithful to a strict third-party processor (sq-oy1f.12/.13/.14)
+//!
+//! [OPUS-4.8] The emitted compacted document is differentially verified against the pyld
+//! W3C reference processor, so a strict third-party consumer re-expands it to the same
+//! graph. The four faithfulness fixes that close that gap:
+//!
+//! - **`@reverse` edges** are emitted as a *forward member of the reverse term*, not inside
+//!   an `@reverse` block — emitting the block on an already-reversed edge would double-invert
+//!   (see [`relocate_reverse`] / [`REVERSE_RELOC`] and `compact_node`).
+//! - **Non-string values never land in a `@language` map** — a language container only
+//!   accumulates language-tagged strings; other values fall through to the normal path.
+//! - **Multi-value `@language` / `@index` containers accumulate** every value rather than
+//!   overwriting, so no member is lost when several values share a key.
+//! - **A literal under a `@type: @id` term stays a literal** — type coercion to `@id` applies
+//!   only to node references, never to a value that is already a literal.
 
 use super::{
     coerce_native, detect_lists, json_escape, ListInfo, NamedGraph, RDF_LANG_STRING, RDF_TYPE, XSD,
@@ -50,6 +66,15 @@ use super::{
 use oxrdf::{NamedOrBlankNode, Term, Triple};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+
+/// [OPUS-4.8] (sq-oy1f.12) Internal sentinel member key under which [`relocate_reverse`]
+/// stashes the edges it moves onto an object node. It is NOT a JSON-LD keyword (it does not
+/// start with `@` so it never collides with a real keyword, and the leading marker bytes make
+/// it impossible for it to be a real predicate IRI). [`ActiveContext::compact_node`] consumes
+/// it and emits each stashed edge through the matching `@reverse` *term as a forward member*
+/// (the spec-faithful, pyld-verified shape) rather than an `@reverse` block (which would
+/// double-invert). It never appears in the emitted document.
+const REVERSE_RELOC: &str = "\u{0}sparq-reverse";
 
 // ===========================================================================
 // A tiny, dependency-free JSON value model.
@@ -462,31 +487,40 @@ impl ActiveContext {
     }
 
     /// [OPUS-4.8] (sq-oy1f.8) Compacts a property `iri` in vocab position while IGNORING any
-    /// term that carries a `@container` mapping — so a co-located non-list sibling of an
-    /// `@list`-container term gets a key the reader will NOT re-interpret as the ordered
-    /// list. It prefers a plain (container-free) term match for the IRI, then falls through
-    /// to the same `@vocab`-relative / prefix / full-IRI choices as [`compact_iri`]. This
-    /// mirrors pyld: with `@vocab` it yields the vocab-relative form, with a plain alternate
-    /// term that term, otherwise the full IRI.
+    /// term that carries a `@container` mapping OR an `@id`/`@vocab` `@type` coercion — so a
+    /// co-located sibling that must NOT be re-interpreted (an `@list` sibling, a non-string
+    /// language-map value, or a plain literal alongside a `@type:@id` node ref — [OPUS-4.8]
+    /// sq-oy1f.8/.12/.13) gets a "plain" key. It prefers a plain (container- and `@id`/`@vocab`-
+    /// coercion-free) term match for the IRI, then falls through to the `@vocab`-relative /
+    /// prefix / full-IRI choices. This mirrors pyld: with `@vocab` it yields the vocab-relative
+    /// form, with a plain alternate term that term, otherwise the full IRI.
     fn compact_iri_no_list(&self, iri: &str, reverse: bool) -> String {
+        // A term is "re-coercing" if it would change how the sibling reads back: an `@list` /
+        // `@language` / `@index` etc. container, or an `@id`/`@vocab` type coercion (which
+        // turns a string value into a node IRI). Such a term is skipped here.
+        let recoerces = |def: &TermDefinition| -> bool {
+            def.container.is_some()
+                || def
+                    .type_mapping
+                    .as_deref()
+                    .is_some_and(|t| t == "@id" || t == "@vocab")
+        };
         for (t, def) in &self.terms {
-            if def.iri == iri
-                && def.reverse == reverse
-                && def.container.is_none()
-                && !t.contains(':')
-            {
+            if def.iri == iri && def.reverse == reverse && !recoerces(def) && !t.contains(':') {
                 return t.to_string();
             }
         }
-        // No container-free exact term: reuse the @vocab-relative / prefix / full-IRI
-        // fallbacks. `compact_iri` only returns a *container-bearing* term via its step-1
-        // exact-match branch, which we have already shown has no container-free hit here;
-        // but a coerced (container) term could still win there, so strip the @vocab/prefix
-        // tail by hand rather than recursing.
+        // No plain exact term: reuse the @vocab-relative / prefix / full-IRI fallbacks. A term
+        // that re-coerces (container or @id/@vocab) could still win `compact_iri`'s step-1
+        // exact-match branch, so strip the @vocab/prefix tail by hand rather than recursing.
         if !reverse {
             if let Some(v) = &self.vocab {
                 if let Some(rest) = iri.strip_prefix(v.as_str()) {
-                    if !rest.is_empty() && !rest.contains(':') && self.term_def(rest).is_none() {
+                    // A @vocab-relative bare term `rest` is safe only if no term definition
+                    // shadows it with a re-coercion (an un-coerced shadow re-expands the same
+                    // way, so it is fine; a re-coercing shadow would change the read-back).
+                    let shadow_recoerces = self.term_def(rest).is_some_and(recoerces);
+                    if !rest.is_empty() && !rest.contains(':') && !shadow_recoerces {
                         return rest.to_string();
                     }
                 }
@@ -679,35 +713,44 @@ impl ActiveContext {
         // Ordinary forward properties.
         if let Json::Obj(members) = node {
             for (key, vals) in members {
+                if key == REVERSE_RELOC {
+                    continue; // the relocated-reverse sentinel — emitted via reverse terms below
+                }
                 if key.starts_with('@') {
-                    continue; // keywords handled above (incl. @reverse below)
+                    continue; // keywords handled above
                 }
                 self.compact_property(key, vals, false, &mut result);
             }
         }
-        // An `@reverse` member (placed by `relocate_reverse` on the object node): each member
-        // key is a forward-predicate IRI; compact it via the matching `@reverse` term and its
-        // object array via value/node compaction.
-        if let Some(Json::Obj(rev_members)) = node.get("@reverse") {
-            let mut rev = Json::obj();
+        // [OPUS-4.8] (sq-oy1f.12) Relocated reverse edges (placed by `relocate_reverse` on the
+        // object node under the `REVERSE_RELOC` sentinel): each member key is a forward-
+        // predicate IRI, and the matching `@reverse` term is emitted as a *forward member* of
+        // this node — NOT inside an `@reverse` block. A `@reverse` BLOCK whose key is itself a
+        // `@reverse` term double-inverts (a strict third-party processor like pyld reads the
+        // edge backwards: it applies the block's inversion AND the term's inversion). Emitting
+        // the reverse term as a forward member (`{"children": <subject>}`) applies the
+        // inversion exactly once, so pyld reconstructs the original edge direction.
+        if let Some(Json::Obj(rev_members)) = node.get(REVERSE_RELOC) {
             for (iri, vals) in rev_members {
-                self.compact_property(iri, vals, true, &mut rev);
-            }
-            if let Json::Obj(m) = &rev {
-                if !m.is_empty() {
-                    result.set(&self.compact_keyword("@reverse"), rev);
-                }
+                self.compact_property(iri, vals, true, &mut result);
             }
         }
         result
     }
 
-    /// Relocates forward edges into `@reverse` blocks per the active context's `@reverse`
-    /// term definitions. For every node `S` with a property `P` (where `P` is the IRI of a
-    /// `@reverse` term) whose objects are node references, the edge is *moved* onto each
-    /// object node `O` as an `@reverse` member `{ P: [{"@id": S}] }`, and removed from `S`.
-    /// This is the fromRdf-side preparation that lets node compaction express the edge
-    /// through the reverse term — keeping the round-trip exact (the reader re-inverts it).
+    /// Relocates forward edges that a `@reverse` term covers onto their object node, so node
+    /// compaction can express each through the reverse term. For every node `S` with a
+    /// property `P` (where `P` is the IRI of a `@reverse` term) whose objects are node
+    /// references, the edge is *moved* onto each object node `O` under the internal
+    /// [`REVERSE_RELOC`] sentinel as `{ P: [{"@id": S}] }`, and removed from `S`.
+    ///
+    /// [OPUS-4.8] (sq-oy1f.12) `compact_node` then emits each relocated edge as a **forward
+    /// member keyed by the reverse term** (e.g. `{"children": <S>}` on `O`) — NOT inside an
+    /// `@reverse` block. A reverse-term key *inside* an `@reverse` block double-inverts: a
+    /// strict third-party processor (pyld) applies the block's inversion AND the term's
+    /// inversion, reading the edge backwards. The forward-member shape inverts exactly once,
+    /// so the round-trip is faithful. (The sentinel — not `@reverse` — is used precisely so a
+    /// downstream `@reverse` block is never emitted.)
     ///
     /// Only applied within a single graph scope (the caller passes one graph's node array).
     fn relocate_reverse(&self, nodes: &mut [Json]) {
@@ -793,12 +836,14 @@ impl ActiveContext {
                 true
             });
         }
-        // Attach each edge onto the object node's `@reverse` member.
+        // Attach each edge onto the object node's `REVERSE_RELOC` sentinel member (consumed by
+        // `compact_node` and emitted via the reverse term as a forward member — never as an
+        // `@reverse` block, which would double-invert).
         for (pos, pred, subj) in moves {
             let node = &mut nodes[pos];
             let mut subj_ref = Json::obj();
             subj_ref.set("@id", Json::Str(subj));
-            let rev = match node.get("@reverse").cloned() {
+            let rev = match node.get(REVERSE_RELOC).cloned() {
                 Some(Json::Obj(mut m)) => {
                     if let Some(slot) = m.iter_mut().find(|(k, _)| *k == pred) {
                         if let Json::Arr(a) = &mut slot.1 {
@@ -815,16 +860,16 @@ impl ActiveContext {
                     o
                 }
             };
-            node.set("@reverse", rev);
+            node.set(REVERSE_RELOC, rev);
         }
     }
 
     /// Compacts one property `iri` with its expanded object array `vals` into `result`,
     /// applying the term's `@container` framing (`@set`/`@list`/`@language`/`@index`) and
     /// "compact arrays" (a single-element array collapses to a scalar unless `@container`
-    /// forces an array). When `reverse_only` is true, only a reverse term is emitted (used
-    /// for the `@reverse` block in [`ActiveContext::compact_node`]); when false, reverse
-    /// terms are skipped.
+    /// forces an array). When `reverse_only` is true, only a reverse term is emitted (the
+    /// relocated-reverse edges from [`ActiveContext::compact_node`], emitted as forward
+    /// members keyed by the reverse term); when false, reverse terms are skipped.
     fn compact_property(&self, iri: &str, vals: &Json, reverse_only: bool, result: &mut Json) {
         // Choose the active term for this IRI in vocab position.
         let term = self.compact_iri(iri, true, reverse_only);
@@ -911,44 +956,79 @@ impl ActiveContext {
             return;
         }
 
-        // @language container: { "<lang>": "<value>", … } grouping language-tagged strings.
+        // @language container: { "<lang>": "<value(s)>", … } grouping language-tagged strings.
         //
-        // [OPUS-4.8] (sq-oy1f.9) A value that lacks a usable `@language` (a plain string
-        // with no tag, or a typed/numeric literal whose `@value` is not a JSON string) must
-        // NOT be dropped: per the W3C Compaction Algorithm a value that does not fit the
-        // language map falls under the `@none` member (matching pyld), it is not discarded.
-        // The prior loop inserted ONLY items with BOTH a string `@value` AND a `@language`,
-        // so `ex:s ex:labels 42` (and any non-tagged string) vanished — silent data loss
-        // violating losslessness. We now route every non-language-tagged value into the
-        // `@none` bucket via `compact_value` (preserving native scalars / typed value
-        // objects), accumulating multiple into an array. The reader re-expands `@none`
-        // entries with no language tag, so the round-trip is lossless.
+        // [OPUS-4.8] (sq-oy1f.9) A value that lacks a usable `@language` (a plain string with
+        // no tag, or a typed/numeric literal) must NOT be dropped.
+        //
+        // [OPUS-4.8] (sq-oy1f.12) But a language map's VALUES must be STRINGS per the W3C
+        // JSON-LD 1.1 spec (and a strict third-party processor like pyld REJECTS the whole
+        // document — `language map values must be strings` — if a non-string lands under
+        // `@none`). The prior code put a native scalar (`42`) under `@none`, producing a
+        // document pyld throws on. So:
+        //   * a language-TAGGED string → its language-map slot;
+        //   * a PLAIN string (string `@value`, no tag) → the `@none` member (valid, faithful);
+        //   * a NON-string value (number/bool/typed literal) → a SEPARATE non-language key
+        //     (the IRI compacted ignoring the language term), which preserves the datatype on
+        //     read-back (pyld reads `42`^^xsd:integer, not a `"42"` string).
+        //
+        // [OPUS-4.8] (sq-oy1f.14) Several values may share one language (or `@none`); each
+        // language slot accumulates into an ARRAY of strings so none is overwritten/lost (the
+        // prior `map.set(lang, …)` silently clobbered an earlier same-language value).
         if container.as_deref() == Some("@language") {
             let mut map = Json::obj();
-            let mut none_bucket: Vec<Json> = Vec::new();
+            let mut nonstring: Vec<Json> = Vec::new();
+            // Accumulate string values per key (language tag or `@none`); a key with one
+            // string stays a scalar, a key with several becomes an array (spec + pyld).
+            let push_str = |map: &mut Json, key: &str, s: &str| match map.get(key).cloned() {
+                Some(Json::Arr(mut a)) => {
+                    a.push(Json::Str(s.to_string()));
+                    map.set(key, Json::Arr(a));
+                }
+                Some(existing) => map.set(key, Json::Arr(vec![existing, Json::Str(s.to_string())])),
+                None => map.set(key, Json::Str(s.to_string())),
+            };
             for v in &items {
                 match (
                     v.get("@value").and_then(Json::as_str),
                     v.get("@language").and_then(Json::as_str),
                 ) {
-                    (Some(val), Some(lang)) => map.set(lang, Json::Str(val.to_string())),
-                    _ => none_bucket.push(self.compact_value(Some(&term), v)),
+                    // A language-tagged string → its language slot.
+                    (Some(val), Some(lang)) => push_str(&mut map, lang, val),
+                    // A plain (untyped) string with no language → the `@none` slot. The
+                    // value is a JSON string AND the expanded model carries no `@type`
+                    // (untyped strings are emitted as a bare `@value` string by fromRdf).
+                    (Some(val), None) if v.get("@type").is_none() => {
+                        push_str(&mut map, "@none", val)
+                    }
+                    // Anything else (a native scalar `Json::Raw`, or a typed value object) is
+                    // NOT a valid language-map value — route it to a separate non-language key
+                    // so its datatype survives. `compact_value(None, …)` keeps the value
+                    // object as-is (no language-term coercion).
+                    _ => nonstring.push(self.compact_value(None, v)),
                 }
             }
-            if !none_bucket.is_empty() {
-                let none_val = if none_bucket.len() == 1 {
-                    none_bucket.into_iter().next().expect("len 1")
-                } else {
-                    Json::Arr(none_bucket)
-                };
-                map.set("@none", none_val);
+            if let Json::Obj(m) = &map {
+                if !m.is_empty() {
+                    result.set(&term, map);
+                }
             }
-            result.set(&term, map);
+            if !nonstring.is_empty() {
+                // The IRI compacted WITHOUT the language-container term (the full /
+                // `@vocab`-relative / prefix form), so the reader does not re-read these
+                // through the language map. Reuse `compact_iri_no_list` — it already skips any
+                // container-bearing term and yields exactly that fallback spelling.
+                let key = self.compact_iri_no_list(iri, reverse_only);
+                let value = self.compact_values_default(&key, &nonstring, false);
+                result.set(&key, value);
+            }
             return;
         }
 
-        // @index container: { "<index>": <value>, … }. fromRdf does not emit @index, but a
-        // context may declare it; group by the value's @index member if present.
+        // @index container: { "<index>": <value>, … }. fromRdf does not emit a per-value
+        // `@index`, so every value falls under the reserved `@none` member. [OPUS-4.8]
+        // (sq-oy1f.14) Several `@none` values accumulate into an array (the index-map value
+        // form pyld round-trips), never overwriting one another.
         if container.as_deref() == Some("@index") {
             let mut map = Json::obj();
             for v in &items {
@@ -964,6 +1044,61 @@ impl ActiveContext {
                 }
             }
             result.set(&term, map);
+            return;
+        }
+
+        // [OPUS-4.8] (sq-oy1f.14) `@id` / `@graph` containers: the fromRdf model has no
+        // per-value `@index`/`@id` map key and does not nest a named-graph under a property,
+        // so sparq cannot LOSSLESSLY populate these container maps. Emitting a node reference
+        // under an `@id`/`@graph` container produced a `{"@id": …}` map *value* that a strict
+        // processor (pyld) rejects (`illegal key … @id` on a value object) — an invalid
+        // document. Falling back to the DEFAULT (no-container) framing emits a plain node
+        // reference / value that round-trips faithfully through pyld. (`@id`/`@graph`
+        // container framing for an already-indexed input is out of scope — see the module
+        // "Honest scope" note; sparq's input is always a graph it produced.)
+        if matches!(container.as_deref(), Some("@id") | Some("@graph")) {
+            // Emit under a key that does NOT carry the `@id`/`@graph` container, so the reader
+            // (and pyld) does not try to read the value as a container map. `compact_iri_no_list`
+            // skips container-bearing terms, yielding the `@vocab`-relative / prefix / full-IRI
+            // spelling — exactly the plain key we need.
+            let key = self.compact_iri_no_list(iri, reverse_only);
+            let value = self.compact_values_default(&key, &items, false);
+            result.set(&key, value);
+            return;
+        }
+
+        // [OPUS-4.8] (sq-oy1f.13) `@type:@id` / `@type:@vocab` coercion vs a literal value.
+        // A term coerced to `@id`/`@vocab` makes a *bare string* value read back as a node
+        // IRI, not a literal. If the chosen term carries that coercion but this IRI also has a
+        // plain literal object (a `{"@value": …}` with no `@id`), emitting that literal under
+        // the coerced term CORRUPTS it on read-back (a strict processor like pyld reads
+        // `"http://ex/x"` as the IRI `<http://ex/x>` — a string literal silently becomes a
+        // node). Split: node references stay under the coerced term (their `{"@id"}` collapses
+        // to a bare IRI, the point of the coercion); literal values move to a NON-coerced key
+        // (the IRI compacted ignoring the coerced term), where they re-expand as literals.
+        let coerces_id = def
+            .as_ref()
+            .and_then(|d| d.type_mapping.as_deref())
+            .is_some_and(|t| t == "@id" || t == "@vocab");
+        if coerces_id {
+            let is_literal = |v: &Json| v.get("@value").is_some();
+            let (lits, refs): (Vec<Json>, Vec<Json>) =
+                items.into_iter().partition(|v| is_literal(v));
+            if !lits.is_empty() {
+                // Literals under a non-coerced key (full / @vocab-relative / prefix IRI).
+                let lit_key = self.compact_iri_no_list(iri, reverse_only);
+                // Guard: if the only available spelling for the IRI IS the coerced term
+                // (no alternate), `compact_iri_no_list` still returns the @vocab-relative /
+                // full IRI, which is distinct from the term — so the literal key never
+                // collides with the coerced term key.
+                let lit_val = self.compact_values_default(&lit_key, &lits, false);
+                result.set(&lit_key, lit_val);
+            }
+            if !refs.is_empty() {
+                let force_array = matches!(container.as_deref(), Some("@set"));
+                let ref_val = self.compact_values_default(&term, &refs, force_array);
+                result.set(&term, ref_val);
+            }
             return;
         }
 

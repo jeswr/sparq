@@ -276,30 +276,38 @@ reference to a bare IRI string), **language coercion** (a term `@language` or th
 `@language` drops a matching `@language`), **`@container`** — `@set` (always an array, no
 compact-arrays), `@list` (strips the `{"@list":…}` wrapper to a bare ordered array — but only the
 *pure* `{"@list":…}` value: any co-located non-list sibling stays under the property IRI, never
-dropped, sq-oy1f.8), `@language` (a `{lang: value}` map — a value with **no** language tag falls
-under the reserved `@none` member rather than being dropped, sq-oy1f.9) and `@index` (a
-`{index: value}` map), **`@reverse`** terms (forward edges whose predicate a reverse term maps
-relocate into an `@reverse` block on the object node — an edge whose object is *not* itself a
-subject is kept as a forward property, never stripped, sq-oy1f.10), **`@id`/`@type` keyword
-aliasing** (`{"id":"@id","type":"@type"}`), and **value + node + IRI compaction** against the
-active context (vocab-relative compaction emits the `@vocab`-stripped form even when the suffix
-contains `/` or `#` — only a `:` suffix is kept full, since it is ambiguous with a compact IRI on
-read-back, sq-oy1f.11). Build the context with `parse_context_json(r#"{…}"#)`
-(a string → `JsonLdValue`, returns `None` if not a JSON object) or construct the `JsonLdValue`
-directly; the parsed `ActiveContext` drives compaction. The output is a `{"@context":…,"@graph":[…]}`
-document and the compaction is **lossless** — every coercion is invertible against the same
-`@context`, so a JSON-LD-to-RDF round-trip reconstructs the original triples (verified by the
-crate's compaction round-trip tests). *Scope:* this is the fromRdf-then-compact (serialise) path —
-sparq always emits RDF, so the input is a `Graph`, not an arbitrary remote document; scoped/typed
-contexts, `@propagate`, remote `@context` fetching, `@import`, `@protected` are out of scope
-(JSON-LD **Framing** is its own recipe below, sq-oy1f.17). *Honest interop caveat:* the round-trip
-losslessness is verified against sparq's own JSON-LD→RDF reader. Two output shapes are **not**
-faithfully re-expandable by an external processor (e.g. pyld): a `@reverse`-term document emits the
-edge as both an `@reverse` block **and** a reverse-mapped term (a double inversion that a strict
-processor reads inverted — a tracked follow-up), and a non-string value placed under a language
-map's `@none` member is not a valid language-map value per the spec (language maps hold strings),
-though sparq preserves it. Prefer a non-`@reverse` context, and a non-`@language` container for
-typed values, when the document must be consumed by a third-party JSON-LD library.
+dropped, sq-oy1f.8), `@language` (a `{lang: value(s)}` map — a value with **no** language tag falls
+under the reserved `@none` member rather than being dropped, sq-oy1f.9; several values that share
+one language slot accumulate into an **array** so none is overwritten, and a **non-string** value —
+a typed/numeric literal — routes to a separate non-language key so a strict processor keeps its
+datatype rather than rejecting an invalid language-map value, sq-oy1f.12/.14) and `@index` (a
+`{index: value(s)}` map; fromRdf has no per-value index, so values share the reserved `@none`
+slot, accumulating into an array, sq-oy1f.14). `@id` / `@graph` containers — which the fromRdf
+model cannot losslessly populate — **fall back to the default (no-container) framing** rather than
+emit a container map a strict processor rejects (sq-oy1f.14). **`@reverse`** terms (forward edges
+whose predicate a reverse term maps relocate onto the object node and are emitted as a **forward
+member keyed by the reverse term**, NOT inside an `@reverse` block — a reverse-term key inside an
+`@reverse` block would double-invert and a strict processor reads the edge backwards, sq-oy1f.12;
+an edge whose object is *not* itself a subject is kept as a forward property, never stripped,
+sq-oy1f.10), **`@id`/`@type` keyword aliasing** (`{"id":"@id","type":"@type"}`), and **value + node
++ IRI compaction** against the active context (vocab-relative compaction emits the `@vocab`-stripped
+form even when the suffix contains `/` or `#` — only a `:` suffix is kept full, since it is ambiguous
+with a compact IRI on read-back, sq-oy1f.11; a plain **literal** value under a `@type:@id`-coerced
+term moves to a non-coerced key so it does not read back as a node IRI, sq-oy1f.13). Build the
+context with `parse_context_json(r#"{…}"#)` (a string → `JsonLdValue`, returns `None` if not a JSON
+object) or construct the `JsonLdValue` directly; the parsed `ActiveContext` drives compaction. The
+output is a `{"@context":…,"@graph":[…]}` document and the compaction is **lossless** — every
+coercion is invertible against the same `@context`, so a JSON-LD-to-RDF round-trip reconstructs the
+original triples. *Scope:* this is the fromRdf-then-compact (serialise) path — sparq always emits
+RDF, so the input is a `Graph`, not an arbitrary remote document; scoped/typed contexts,
+`@propagate`, remote `@context` fetching, `@import`, `@protected` are out of scope (JSON-LD
+**Framing** is its own recipe below, sq-oy1f.17). *Strict third-party faithfulness:* the compaction
+round-trip is verified both against sparq's own JSON-LD→RDF reader **and** differentially against the
+**pyld** W3C reference processor (`expand`/`toRdf`) for the `@reverse`, language-map, `@type:@id`,
+and multi-value-container shapes (sq-oy1f.12/.13/.14), so the emitted document re-expands to the
+original triples in a strict external processor, not only in sparq. (An `@id`/`@graph`-container
+*input* — i.e. compacting an already-indexed document, as distinct from the fromRdf graph sparq
+produces — remains out of scope and falls back to default framing as noted above.)
 
 ```rust
 use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
@@ -433,19 +441,30 @@ cargo build -p sparq-cli --features serialize-rdf
   in all in-memory paths; `into_compressed()` / `load_str_compressed()` trade a small
   per-scan decode for ~2.5× more triples per byte of RAM (browser target).
 - **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
-  JSON-LD 1.1 API conformance gate (sq-oy1f.2) drives the official `w3c/json-ld-api` suite
-  through the real paths: **toRdf** through the `jsonld` parser (oxjsonld) and **fromRdf**
-  through the `serialize-rdf` writer (compared by a re-parse RDF-dataset round-trip). The
-  floors only RISE; they reflect ACTUAL current pass counts, not full conformance — the
-  remaining toRdf divergences are documented oxjsonld limits (remote/`@import` `@context`
-  needs a `LoadDocumentCallback`; `expandContext`/`rdfDirection` options not applied; a few
+  JSON-LD 1.1 API conformance gate (sq-oy1f.2 + sq-3uos5) drives the official `w3c/json-ld-api`
+  suite through the real paths: **toRdf** through the `jsonld` parser (oxjsonld), **fromRdf**
+  through the `serialize-rdf` writer, and **compact** through the native Compaction Algorithm
+  (`graph_to_jsonld_compact`) — each compared by a re-parse RDF-dataset round-trip
+  (`reparse(out) ≡ in`, the same oxjsonld self-reparse oracle for all three). The floors only
+  RISE; they reflect ACTUAL current pass counts, not full conformance — the remaining toRdf
+  divergences are documented oxjsonld limits (remote/`@import` `@context` needs a
+  `LoadDocumentCallback`; `expandContext`/`rdfDirection` options not applied; a few
   base-normalization edge cases + leniently-accepted negative tests), and fromRdf misses
-  lists whose cells are shared across graphs. **Compaction, Framing, and expand/flatten
-  output-document comparison are NOT-IMPLEMENTED buckets** the runner reports separately and
-  never fails on (they grow the ratchet as those land — full 1.1 Compaction is sq-ixc3.4,
-  Framing is sq-oy1f.6). The lane is the opt-in `jsonld-suite` feature on `sparq-conformance`
-  (forwards to `sparq-core/jsonld` + `sparq-engine/serialize-rdf`); OFF it compiles to a
-  self-skip. Reproduce with `scripts/fetch-jsonld-tests.sh` then
+  lists whose cells are shared across graphs. The **compact** lane gates on **lossless
+  compaction** (parse input → RDF, compact against the case `@context`, require the
+  re-parse to reconstruct the SAME RDF); at the pinned revision a documented share of cases
+  is below the floor (the `@type:@id`-coerced-key-vs-plain-string IRI confusion; the
+  `@graph`/`@index`/`@id`/`@language` multi-value container round-trips the hand-rolled
+  writer does not yet reproduce) and several are SKIPPED (negatives sparq's TOTAL compaction
+  does not raise; JSON-LD-1.0-only; non-inline/remote `@context`; empty-RDF inputs). The
+  compact oracle is oxjsonld self-reparse, so the `@reverse` double-inversion /
+  non-string-language interop gap documented above (the compaction interop caveat) is NOT
+  caught by it and is tracked separately. **Framing, and expand/flatten output-document
+  comparison remain NOT-IMPLEMENTED buckets** the runner reports separately and never fails on
+  (they grow the ratchet as those land — Framing is sq-oy1f.6). The lane is the opt-in
+  `jsonld-suite` feature on `sparq-conformance` (forwards to `sparq-core/jsonld` +
+  `sparq-engine/serialize-rdf`); OFF it compiles to a self-skip. Reproduce with
+  `scripts/fetch-jsonld-tests.sh` then
   `cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite` (self-skips if
   the gitignored suite is absent). It is registered in the central conformance scoreboard
   (`sparq-conformance-scoreboard`).

@@ -581,6 +581,465 @@ fn sha384_distinguishes_non_isomorphic() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 5) Nested-bnode DISTINGUISHING-POWER regression vectors (sq-mu1cd, from the
+//    adversarial soundness audit of #933/#960 — see the comment on sq-63g0).
+//
+//    The audit found the canon SOUND (0 confirmed / 5 refuted): the HNDQ
+//    position-marker collapse the reviewers flagged (all triple-term-internal
+//    bnodes hashed with `Position::Object` + the OUTER predicate, with no inner
+//    subject/object/depth sub-discriminator — rdf12.rs `hash_n_degree_quads` /
+//    `hash_related_blank_node`) is a real LOSS of distinguishing power in the
+//    marker, but NOT a soundness defect, because the final serialization
+//    re-renders the actual `Term::Triple` structure with c14n labels and the
+//    issuer map still separates genuinely-distinct bnodes via the first-degree
+//    descent. These are the audit's SHARPER non-isomorphic vectors landed as
+//    permanent regression tests: a future refactor of `hash_n_degree_quads` /
+//    `hash_related_blank_node` that DID introduce a false-equal would be caught
+//    here. [OPUS-4.8]
+//
+//    CAUTION (the audit's own): one hand-authored audit pair had a WRONG
+//    isomorphism premise (it was non-isomorphic, not isomorphic), so its
+//    "failure" was a TEST bug, not a canon bug. To make this class of mistake
+//    impossible, every "must DIFFER" vector below FIRST proves its pair is
+//    genuinely non-isomorphic with the independent brute-force oracle
+//    `is_isomorphic` (a structural bnode-bijection search that does NOT use the
+//    canon under test), then asserts the canon distinguishes it. The oracle is
+//    sanity-checked against a known automorphism in `oracle_detects_automorphism`.
+// ---------------------------------------------------------------------------
+
+use std::collections::{BTreeSet, HashMap};
+
+fn lit(s: &str) -> Term {
+    Term::Literal(Literal::new_simple_literal(s))
+}
+
+/// Brute-force RDF-1.2 isomorphism oracle — INDEPENDENT of the canon under test.
+/// Two single-graph triple slices are isomorphic iff some bijection of `g1`'s
+/// blank nodes onto `g2`'s (recursing through triple-term subject/object) makes
+/// their triple SETS equal (IRIs / literals are fixed). Worst case is `n!` in the
+/// shared bnode count; all vectors here have ≤ 3 bnodes, so this is trivial. This
+/// is the load-bearing premise-checker for every `must DIFFER` assertion below —
+/// we never assert NE on a pair we have not first proven non-isomorphic.
+fn is_isomorphic(g1: &[Triple], g2: &[Triple]) -> bool {
+    fn collect_subject(s: &NamedOrBlankNode, out: &mut BTreeSet<String>) {
+        if let NamedOrBlankNode::BlankNode(b) = s {
+            out.insert(b.as_str().to_string());
+        }
+    }
+    fn collect_term(t: &Term, out: &mut BTreeSet<String>) {
+        match t {
+            Term::BlankNode(b) => {
+                out.insert(b.as_str().to_string());
+            }
+            Term::Triple(tr) => {
+                collect_subject(&tr.subject, out);
+                collect_term(&tr.object, out);
+            }
+            _ => {}
+        }
+    }
+    fn graph_bnodes(g: &[Triple]) -> Vec<String> {
+        let mut s = BTreeSet::new();
+        for t in g {
+            collect_subject(&t.subject, &mut s);
+            collect_term(&t.object, &mut s);
+        }
+        s.into_iter().collect()
+    }
+    fn remap_subject(s: &NamedOrBlankNode, m: &HashMap<String, String>) -> NamedOrBlankNode {
+        match s {
+            NamedOrBlankNode::BlankNode(b) => {
+                NamedOrBlankNode::BlankNode(bn(m.get(b.as_str()).unwrap()))
+            }
+            other => other.clone(),
+        }
+    }
+    fn remap_term(t: &Term, m: &HashMap<String, String>) -> Term {
+        match t {
+            Term::BlankNode(b) => Term::BlankNode(bn(m.get(b.as_str()).unwrap())),
+            Term::Triple(tr) => Term::Triple(Box::new(Triple::new(
+                remap_subject(&tr.subject, m),
+                tr.predicate.clone(),
+                remap_term(&tr.object, m),
+            ))),
+            other => other.clone(),
+        }
+    }
+    // Canonical line via oxrdf-0.3 Display (the same token form the canon uses),
+    // optionally under a bnode relabelling.
+    fn lines(g: &[Triple], m: Option<&HashMap<String, String>>) -> BTreeSet<String> {
+        g.iter()
+            .map(|t| {
+                let nt = match m {
+                    Some(m) => Triple::new(
+                        remap_subject(&t.subject, m),
+                        t.predicate.clone(),
+                        remap_term(&t.object, m),
+                    ),
+                    None => t.clone(),
+                };
+                format!("{} {} {} .", nt.subject, nt.predicate, nt.object)
+            })
+            .collect()
+    }
+    fn perms(items: &[String]) -> Vec<Vec<String>> {
+        if items.is_empty() {
+            return vec![vec![]];
+        }
+        let mut out = Vec::new();
+        for i in 0..items.len() {
+            let mut rest = items.to_vec();
+            let head = rest.remove(i);
+            for mut p in perms(&rest) {
+                p.insert(0, head.clone());
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    let b1 = graph_bnodes(g1);
+    let b2 = graph_bnodes(g2);
+    if b1.len() != b2.len() {
+        return false;
+    }
+    let target = lines(g2, None);
+    if b1.is_empty() {
+        return lines(g1, None) == target;
+    }
+    for perm in perms(&b2) {
+        let mut m = HashMap::new();
+        for (a, c) in b1.iter().zip(perm.iter()) {
+            m.insert(a.clone(), c.clone());
+        }
+        if lines(g1, Some(&m)) == target {
+            return true;
+        }
+    }
+    false
+}
+
+/// Sanity: the oracle is not trivially returning `false`. A genuine automorphism
+/// (the symmetric inner swap, where the two inner leaf bnodes carry the SAME
+/// anchor predicate) must be reported isomorphic — this is the case the canon
+/// correctly canonicalizes to EQUAL output, and it guards against the oracle
+/// silently rejecting everything (which would make the NE premises vacuous).
+#[test]
+fn oracle_detects_automorphism() {
+    let sym = |swap: bool| -> Vec<Triple> {
+        let (s, o) = if swap { ("c", "b") } else { ("b", "c") };
+        vec![
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("a")),
+                iri("http://ex/p"),
+                tt(
+                    NamedOrBlankNode::BlankNode(bn(s)),
+                    iri("http://ex/q"),
+                    Term::BlankNode(bn(o)),
+                ),
+            ),
+            // SAME anchor predicate on both inner leaves => a real automorphism.
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("b")),
+                iri("http://ex/t"),
+                lit("x"),
+            ),
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("c")),
+                iri("http://ex/t"),
+                lit("x"),
+            ),
+        ]
+    };
+    assert!(
+        is_isomorphic(&sym(false), &sym(true)),
+        "oracle must detect the symmetric-swap automorphism"
+    );
+    // And the canon agrees: the automorphic pair canonicalizes to EQUAL output.
+    let a = sparq_canon::canonicalize_triples_rdf12(&sym(false)).unwrap();
+    let b = sparq_canon::canonicalize_triples_rdf12(&sym(true)).unwrap();
+    assert_eq!(a.lines, b.lines, "automorphic pair must canonicalize equal");
+}
+
+/// Vector 1 — asymmetric inner swap. The inner subject/object carries the ONLY
+/// distinguishing role: `_:b`/`_:c` are pinned to DISTINCT leaf predicates
+/// (`ex:t1` / `ex:t2`), so swapping which sits in the inner-subject vs the
+/// inner-object slot is NOT an automorphism. Brute-force oracle: NON-isomorphic.
+/// The canon must DIFFER (the inner subject/object position must reach the label).
+#[test]
+fn vec1_asymmetric_inner_swap_differs() {
+    let g = |swap: bool| -> Vec<Triple> {
+        let (s, o) = if swap { ("c", "b") } else { ("b", "c") };
+        vec![
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("a")),
+                iri("http://ex/p"),
+                tt(
+                    NamedOrBlankNode::BlankNode(bn(s)),
+                    iri("http://ex/q"),
+                    Term::BlankNode(bn(o)),
+                ),
+            ),
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("b")),
+                iri("http://ex/t1"),
+                lit("x"),
+            ),
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("c")),
+                iri("http://ex/t2"),
+                lit("x"),
+            ),
+        ]
+    };
+    let g1 = g(false);
+    let g2 = g(true);
+    assert!(
+        !is_isomorphic(&g1, &g2),
+        "premise: asymmetric inner swap must be non-isomorphic"
+    );
+    let c1 = sparq_canon::canonicalize_triples_rdf12(&g1).unwrap();
+    let c2 = sparq_canon::canonicalize_triples_rdf12(&g2).unwrap();
+    assert_ne!(
+        c1.lines, c2.lines,
+        "asymmetric inner swap must canonicalize differently"
+    );
+}
+
+/// Vector 2 — inner-SUBJECT vs inner-OBJECT leaf bnode. `_:a ex:p <<( _:b ex:q
+/// "lit" )>>` (bnode in the inner SUBJECT, literal object) vs `_:x ex:p <<( ex:s
+/// ex:q _:y )>>` (IRI subject, bnode in the inner OBJECT). Different ground
+/// skeleton — even bnode-erased these are not the same graph — so NON-isomorphic.
+/// The canon must DIFFER. Exercises the exact position the audit flagged.
+#[test]
+fn vec2_inner_subject_vs_inner_object_leaf_differs() {
+    let g1 = vec![Triple::new(
+        NamedOrBlankNode::BlankNode(bn("a")),
+        iri("http://ex/p"),
+        tt(
+            NamedOrBlankNode::BlankNode(bn("b")),
+            iri("http://ex/q"),
+            lit("lit"),
+        ),
+    )];
+    let g2 = vec![Triple::new(
+        NamedOrBlankNode::BlankNode(bn("x")),
+        iri("http://ex/p"),
+        tt(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/q"),
+            Term::BlankNode(bn("y")),
+        ),
+    )];
+    assert!(
+        !is_isomorphic(&g1, &g2),
+        "premise: inner-subject vs inner-object leaf must be non-isomorphic"
+    );
+    let c1 = sparq_canon::canonicalize_triples_rdf12(&g1).unwrap();
+    let c2 = sparq_canon::canonicalize_triples_rdf12(&g2).unwrap();
+    assert_ne!(
+        c1.lines, c2.lines,
+        "inner-subject vs inner-object leaf bnode must canonicalize differently"
+    );
+}
+
+/// Vector 3 — depth-1 vs depth-2 nesting of the SAME bnode set `{_:a,_:b,_:c}`.
+/// depth-1: `_:a ex:p <<( _:b ex:q _:c )>>`. depth-2: `_:a ex:p <<( _:b ex:q
+/// <<( _:c ex:r "z" )>> )>>` — `_:c` now sits one level deeper, inside a second
+/// triple term. Different nesting structure => NON-isomorphic. The canon must
+/// DIFFER (depth must not collapse under the object marker).
+#[test]
+fn vec3_depth1_vs_depth2_nesting_differs() {
+    let depth1 = vec![Triple::new(
+        NamedOrBlankNode::BlankNode(bn("a")),
+        iri("http://ex/p"),
+        tt(
+            NamedOrBlankNode::BlankNode(bn("b")),
+            iri("http://ex/q"),
+            Term::BlankNode(bn("c")),
+        ),
+    )];
+    let depth2 = vec![Triple::new(
+        NamedOrBlankNode::BlankNode(bn("a")),
+        iri("http://ex/p"),
+        tt(
+            NamedOrBlankNode::BlankNode(bn("b")),
+            iri("http://ex/q"),
+            tt(
+                NamedOrBlankNode::BlankNode(bn("c")),
+                iri("http://ex/r"),
+                lit("z"),
+            ),
+        ),
+    )];
+    assert!(
+        !is_isomorphic(&depth1, &depth2),
+        "premise: depth-1 vs depth-2 nesting must be non-isomorphic"
+    );
+    let c1 = sparq_canon::canonicalize_triples_rdf12(&depth1).unwrap();
+    let c2 = sparq_canon::canonicalize_triples_rdf12(&depth2).unwrap();
+    assert_ne!(
+        c1.lines, c2.lines,
+        "depth-1 vs depth-2 nesting of the same bnode set must canonicalize differently"
+    );
+}
+
+/// Vector 4 — anchored inner swap with DISTINCT anchor predicates (`ex:A` /
+/// `ex:B`), so there is NO automorphism: `_:b` and `_:c` are individually
+/// pinned. Swapping them across the inner subject/object slot is non-isomorphic.
+/// Also asserts the load-bearing audit observation (M2): the issuer map assigns
+/// 3 DISTINCT c14n labels to `{_:a,_:b,_:c}`, i.e. the descent separates all
+/// three genuinely-distinct bnodes even though the inner two share the object
+/// position marker. The canon must DIFFER.
+#[test]
+fn vec4_anchored_inner_swap_differs_and_three_distinct_labels() {
+    let g = |swap: bool| -> Vec<Triple> {
+        let (s, o) = if swap { ("c", "b") } else { ("b", "c") };
+        vec![
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("a")),
+                iri("http://ex/p"),
+                tt(
+                    NamedOrBlankNode::BlankNode(bn(s)),
+                    iri("http://ex/q"),
+                    Term::BlankNode(bn(o)),
+                ),
+            ),
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("b")),
+                iri("http://ex/A"),
+                lit("1"),
+            ),
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("c")),
+                iri("http://ex/B"),
+                lit("2"),
+            ),
+        ]
+    };
+    let g1 = g(false);
+    let g2 = g(true);
+    assert!(
+        !is_isomorphic(&g1, &g2),
+        "premise: anchored inner swap (distinct anchors) must be non-isomorphic"
+    );
+    let c1 = sparq_canon::canonicalize_triples_rdf12(&g1).unwrap();
+    let c2 = sparq_canon::canonicalize_triples_rdf12(&g2).unwrap();
+    assert_ne!(
+        c1.lines, c2.lines,
+        "anchored inner swap must canonicalize differently"
+    );
+    // (M2) issuer map separates ALL THREE distinct bnodes into 3 distinct labels.
+    let map = sparq_canon::issue_dataset_rdf12(
+        &g1.iter()
+            .map(|t| {
+                Quad::new(
+                    t.subject.clone(),
+                    t.predicate.clone(),
+                    t.object.clone(),
+                    GraphName::DefaultGraph,
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let labels: BTreeSet<&str> = ["a", "b", "c"]
+        .iter()
+        .map(|k| map.get(*k).map(String::as_str).unwrap())
+        .collect();
+    assert_eq!(
+        labels.len(),
+        3,
+        "issuer map must assign 3 DISTINCT c14n labels to a,b,c: {:?}",
+        map
+    );
+}
+
+/// Vector 5 — self-loop inner-SUBJECT vs inner-OBJECT pair. Both graphs reuse the
+/// top-level subject `_:a` inside the triple term, but on opposite sides:
+/// G1 `_:a ex:p <<( _:a ex:q _:b )>>` (the loop is on the inner SUBJECT) vs
+/// G2 `_:a ex:p <<( _:b ex:q _:a )>>` (the loop is on the inner OBJECT), each
+/// with `_:b ex:t "x"`. Brute-force-verified NON-isomorphic. The canon must
+/// DIFFER — the inner subject-vs-object asymmetry of the self-loop is preserved.
+#[test]
+fn vec5_self_loop_inner_subject_vs_object_differs() {
+    let g1 = vec![
+        Triple::new(
+            NamedOrBlankNode::BlankNode(bn("a")),
+            iri("http://ex/p"),
+            tt(
+                NamedOrBlankNode::BlankNode(bn("a")),
+                iri("http://ex/q"),
+                Term::BlankNode(bn("b")),
+            ),
+        ),
+        Triple::new(
+            NamedOrBlankNode::BlankNode(bn("b")),
+            iri("http://ex/t"),
+            lit("x"),
+        ),
+    ];
+    let g2 = vec![
+        Triple::new(
+            NamedOrBlankNode::BlankNode(bn("a")),
+            iri("http://ex/p"),
+            tt(
+                NamedOrBlankNode::BlankNode(bn("b")),
+                iri("http://ex/q"),
+                Term::BlankNode(bn("a")),
+            ),
+        ),
+        Triple::new(
+            NamedOrBlankNode::BlankNode(bn("b")),
+            iri("http://ex/t"),
+            lit("x"),
+        ),
+    ];
+    assert!(
+        !is_isomorphic(&g1, &g2),
+        "premise: self-loop inner-subject vs inner-object must be non-isomorphic"
+    );
+    let c1 = sparq_canon::canonicalize_triples_rdf12(&g1).unwrap();
+    let c2 = sparq_canon::canonicalize_triples_rdf12(&g2).unwrap();
+    assert_ne!(
+        c1.lines, c2.lines,
+        "self-loop inner-subject vs inner-object must canonicalize differently"
+    );
+}
+
+/// Vector 6 — boundary: there is NO SHA-384 rdf12 path. The generic STANDARD
+/// dataset entry point `canonicalize_quads_with::<Sha384>` fails closed with
+/// `CanonError::TripleTerm` on triple-term input (the rdf12 profile is SHA-256
+/// only via `canonicalize_rdf12` / `..._with`; the SHA-384 *standard* path never
+/// reaches a triple-term canonicalizer). This pins the audit's confirmed
+/// boundary: a `*_with::<Sha384>` generic cannot be coaxed into mis-canonicalizing
+/// a triple term, because it rejects it before hashing.
+#[test]
+fn vec6_sha384_standard_path_rejects_triple_terms() {
+    let q = Quad::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+        iri("http://ex/asserts"),
+        tt(
+            NamedOrBlankNode::BlankNode(bn("n")),
+            iri("http://ex/p"),
+            lit("v"),
+        ),
+        GraphName::DefaultGraph,
+    );
+    assert!(
+        matches!(
+            sparq_canon::canonicalize_quads_with::<Sha384>(std::slice::from_ref(&q)),
+            Err(sparq_canon::CanonError::TripleTerm)
+        ),
+        "standard SHA-384 path must reject triple terms with CanonError::TripleTerm"
+    );
+    // The rdf12 SHA-384 profile, by contrast, DOES canonicalize the same input
+    // (proving the rejection above is the standard path's boundary, not a global
+    // SHA-384 limitation).
+    assert!(sparq_canon::canonicalize_rdf12_with::<Sha384>(std::slice::from_ref(&q)).is_ok());
+}
+
 /// REAL-PATH PROOF that `D` is load-bearing (not a no-op generic): on the
 /// symmetric two-bnode cycle, SHA-256 and SHA-384 issue the SAME canonical
 /// labels to OPPOSITE input bnodes, so the two relabelling maps differ. If the

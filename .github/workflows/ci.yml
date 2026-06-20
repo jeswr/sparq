@@ -973,22 +973,26 @@ jobs:
             conformance-scoreboard.md
 
   jsonld-conformance:
-    # [OPUS-4.8] sq-oy1f.2 — W3C JSON-LD 1.1 conformance RATCHET (toRdf + fromRdf),
-    # a DEDICATED gating job alongside SPARQL / inference / SHACL / GeoSPARQL /
-    # Solid. The runner is crate-local (crates/sparq-conformance/tests/jsonld_suite.rs)
-    # but behind the OPT-IN `jsonld-suite` feature (forwards to sparq-core/jsonld +
+    # [OPUS-4.8] sq-oy1f.2 / sq-3uos5 — W3C JSON-LD 1.1 conformance RATCHET (toRdf +
+    # fromRdf + compact), a DEDICATED gating job alongside SPARQL / inference / SHACL
+    # / GeoSPARQL / Solid. The runner is crate-local
+    # (crates/sparq-conformance/tests/jsonld_suite.rs) but behind the OPT-IN
+    # `jsonld-suite` feature (forwards to sparq-core/jsonld +
     # sparq-engine/serialize-rdf), so it runs ONLY here — the generic
     # `cargo test --workspace` shards build it feature-OFF (a single self-SKIP test,
     # zero oxjsonld/writer code linked: the lean-core posture). This job fetches the
     # pinned w3c/json-ld-api suite (mirroring the SPARQL/SHACL fetch-then-run split),
     # runs the runner with the feature ON + --nocapture, and re-checks the printed
-    # `TOTAL toRdf|fromRdf <pass> …` lines as the same belt-and-braces `>= floor`
-    # gate. The runner's own `assert!(pass >= FLOOR)` is the primary gate. Honest
-    # baseline: NOT 100% conformant (remote-context / option / negative divergences
-    # are documented gaps); compaction/framing are reported as not-implemented
-    # buckets and never fail the gate. Never lower the ratchet (raise TORDF_FLOOR /
-    # FROMRDF_FLOOR as oxjsonld + the native writer improve).
-    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 51)
+    # `TOTAL toRdf|fromRdf|compact <pass> …` lines as the same belt-and-braces
+    # `>= floor` gate. The runner's own `assert!(pass >= FLOOR)` is the primary gate.
+    # Honest baseline: NOT 100% conformant (remote-context / option / negative
+    # divergences are documented gaps; compact is RDF→compacted-JSON-LD via the native
+    # Compaction Algorithm, gated on a lossless round-trip, with its own honest
+    # below-floor divergence + skip buckets); expand/flatten/framing are reported as
+    # not-implemented buckets and never fail the gate. Never lower the ratchet (raise
+    # TORDF_FLOOR / FROMRDF_FLOOR / COMPACT_FLOOR as oxjsonld + the native
+    # writer/compactor improve).
+    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 51, compact >= 163)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -998,7 +1002,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C JSON-LD 1.1 test suite (pinned)
         run: ./scripts/fetch-jsonld-tests.sh
-      - name: Run JSON-LD toRdf + fromRdf suites (jsonld-suite feature ON)
+      - name: Run JSON-LD toRdf + fromRdf + compact suites (jsonld-suite feature ON)
         # The runner asserts its own pinned floors; capture the scoreboard so the
         # grep gate below re-checks the pass counts.
         run: |
@@ -1008,12 +1012,17 @@ jobs:
         run: |
           TORDF_FLOOR=413
           FROMRDF_FLOOR=51
+          # [OPUS-4.8] sq-3uos5 — the compact ratchet (RDF → compacted JSON-LD,
+          # lossless round-trip). Mirror the toRdf/fromRdf belt-and-braces grep gate.
+          COMPACT_FLOOR=163
           # runner prints: "TOTAL toRdf <pass> <fail> <skip> (floor F)"
           TORDF_PASS=$(grep -E '^TOTAL toRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)
           FROMRDF_PASS=$(grep -E '^TOTAL fromRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)
-          echo "JSON-LD toRdf pass: ${TORDF_PASS:-unknown} (floor $TORDF_FLOOR); fromRdf pass: ${FROMRDF_PASS:-unknown} (floor $FROMRDF_FLOOR)"
+          COMPACT_PASS=$(grep -E '^TOTAL compact ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          echo "JSON-LD toRdf pass: ${TORDF_PASS:-unknown} (floor $TORDF_FLOOR); fromRdf pass: ${FROMRDF_PASS:-unknown} (floor $FROMRDF_FLOOR); compact pass: ${COMPACT_PASS:-unknown} (floor $COMPACT_FLOOR)"
           [ -n "$TORDF_PASS" ] && [ "$TORDF_PASS" -ge "$TORDF_FLOOR" ] || { echo "::error::JSON-LD toRdf regressed below the ratchet (${TORDF_PASS:-?} < $TORDF_FLOOR)"; exit 1; }
           [ -n "$FROMRDF_PASS" ] && [ "$FROMRDF_PASS" -ge "$FROMRDF_FLOOR" ] || { echo "::error::JSON-LD fromRdf regressed below the ratchet (${FROMRDF_PASS:-?} < $FROMRDF_FLOOR)"; exit 1; }
+          [ -n "$COMPACT_PASS" ] && [ "$COMPACT_PASS" -ge "$COMPACT_FLOOR" ] || { echo "::error::JSON-LD compact regressed below the ratchet (${COMPACT_PASS:-?} < $COMPACT_FLOOR)"; exit 1; }
       - name: Emit consolidated conformance scoreboard
         # Render the ONE central scoreboard index (all suites + floors across crates)
         # into this job's step summary, so the JSON-LD job surfaces where it sits in

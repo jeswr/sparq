@@ -48,6 +48,14 @@ pub enum GraphFormat {
     Turtle,
     /// `application/rdf+xml` — RDF/XML. [OPUS-4.8] sq-rt6v.
     RdfXml,
+    /// `application/ld+json` — JSON-LD 1.1 (the engine's flattened serialisation).
+    /// [OPUS-4.8] sq-oy1f.1. OPT-IN: only a participant in negotiation when the server is
+    /// built with the `jsonld` feature (which links the engine's `serialize-rdf` writer);
+    /// without it the variant does not exist, so `application/ld+json` is unrecognised and
+    /// negotiation never selects it (it falls through to the default, exactly like any other
+    /// unsupported media type).
+    #[cfg(feature = "jsonld")]
+    JsonLd,
 }
 
 impl GraphFormat {
@@ -58,6 +66,11 @@ impl GraphFormat {
             // [OPUS-4.8] sq-rt6v: RDF/XML registers `charset=utf-8` like the others; the
             // document's own XML declaration also pins UTF-8.
             GraphFormat::RdfXml => "application/rdf+xml; charset=utf-8",
+            // [OPUS-4.8] sq-oy1f.1: JSON-LD is UTF-8 JSON; the IANA `application/ld+json`
+            // registration carries no charset parameter (JSON is UTF-8 by RFC 8259), but we
+            // annotate it like the others so a strict client never mis-decodes.
+            #[cfg(feature = "jsonld")]
+            GraphFormat::JsonLd => "application/ld+json; charset=utf-8",
         }
     }
 }
@@ -79,6 +92,11 @@ pub fn negotiate_graph(accept: Option<&str>) -> GraphFormat {
             // some clients send for RDF/XML — kept lower-specificity so an exact match wins).
             "application/rdf+xml" => (Some(GraphFormat::RdfXml), 2),
             "application/xml" | "text/xml" => (Some(GraphFormat::RdfXml), 1),
+            // [OPUS-4.8] sq-oy1f.1: JSON-LD, OPT-IN behind the `jsonld` feature. When the
+            // feature is off this arm is compiled out, so `application/ld+json` matches no arm
+            // and falls through to the default (N-Triples) like any unsupported type.
+            #[cfg(feature = "jsonld")]
+            "application/ld+json" => (Some(GraphFormat::JsonLd), 2),
             "*/*" => (Some(GraphFormat::NTriples), 0),
             _ => (None, 0),
         };
@@ -219,5 +237,38 @@ mod tests {
         assert_eq!(negotiate_graph(Some("application/rdf+xml;q=0, text/turtle")), GraphFormat::Turtle);
         // An unsupported type still falls back to N-Triples.
         assert_eq!(negotiate_graph(Some("application/pdf")), GraphFormat::NTriples);
+    }
+
+    // [OPUS-4.8] sq-oy1f.1: JSON-LD negotiation is only compiled with the `jsonld` feature.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn graph_format_jsonld() {
+        assert_eq!(negotiate_graph(Some("application/ld+json")), GraphFormat::JsonLd);
+        assert_eq!(GraphFormat::JsonLd.content_type(), "application/ld+json; charset=utf-8");
+        // q-values decide between JSON-LD and the other graph formats.
+        assert_eq!(
+            negotiate_graph(Some("text/turtle;q=0.5, application/ld+json;q=0.9")),
+            GraphFormat::JsonLd
+        );
+        // q=0 rejects JSON-LD, so Turtle wins.
+        assert_eq!(
+            negotiate_graph(Some("application/ld+json;q=0, text/turtle")),
+            GraphFormat::Turtle
+        );
+        // Exact JSON-LD beats a wildcard.
+        assert_eq!(negotiate_graph(Some("application/ld+json, */*")), GraphFormat::JsonLd);
+    }
+
+    // [OPUS-4.8] sq-oy1f.1: WITHOUT the feature, `application/ld+json` is just another
+    // unsupported type — negotiation must fall through to the default (N-Triples).
+    #[cfg(not(feature = "jsonld"))]
+    #[test]
+    fn graph_format_jsonld_unsupported_without_feature() {
+        assert_eq!(negotiate_graph(Some("application/ld+json")), GraphFormat::NTriples);
+        // Even alongside a supported type, the JSON-LD range is ignored and Turtle is picked.
+        assert_eq!(
+            negotiate_graph(Some("application/ld+json;q=0.9, text/turtle;q=0.5")),
+            GraphFormat::Turtle
+        );
     }
 }

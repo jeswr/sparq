@@ -1,29 +1,65 @@
-<!-- [OPUS-4.8] sq-2q1x: internal-stub README for a publish=false crate; full design lives in research/mpc-untrusted-planner-routing-design.md. -->
+<!-- [OPUS-4.8] sq-2q1x / sq-fix4: internal README for a publish=false crate; full design lives in research/mpc-untrusted-planner-routing-design.md. -->
 # sparq-fedplan-mpc
 
-**Phase-1 skeleton** of the opt-in seam between cost-based federated source
-selection (`sparq-fedplan`) and MPC-over-federated-SPARQL routing (`sparq-mpc`) —
-without coupling the two upstreams to each other. Behind the **`fedplan-mpc` cargo
-feature, OFF by default**; the default build compiles an empty crate and pulls in
-neither upstream. Design: [`research/mpc-untrusted-planner-routing-design.md`](../../research/mpc-untrusted-planner-routing-design.md).
+The opt-in seam between cost-based federated source selection (`sparq-fedplan`) and
+MPC-over-federated-SPARQL routing (`sparq-mpc`) — without coupling the two upstreams
+to each other. Behind the **`fedplan-mpc` cargo feature, OFF by default**; the
+default build compiles an empty crate and pulls in neither upstream. Design:
+[`research/mpc-untrusted-planner-routing-design.md`](../../research/mpc-untrusted-planner-routing-design.md).
 
-What lands here: the **`SourcePrivacyDescriptor`** (posture is **default-deny** — a
-predicate is disclosable only when the source explicitly marks it `Public`; a
-planner cannot widen it, the source re-enforces fail-closed) plus typed, panic-free
-stubs (`select_private_sources` / `route_operators` / `assemble_leakage_envelope`)
-that return an honest `SeamError::Deferred { phase, gated_on }`.
+## 🚀 Quickstart
+
+Internal crate (`publish = false`); enable the feature in the workspace and call the
+Phase-2 adapter over a BGP plus the per-source descriptors:
+
+```rust
+// behind `--features fedplan-mpc`
+let selection = sparq_fedplan_mpc::select_private_sources(&bgp, &descriptors)?;
+// selection.candidates — retained per-pattern sources; selection.pruned — audit trail
+```
+
+## ✨ Features
+
+- **`SourcePrivacyDescriptor`** (Phase 1, sq-2q1x) — the per-source privacy
+  declaration. Posture is **default-deny**: a predicate is disclosable only when the
+  source explicitly marks it `Public`; a planner cannot widen it, the source
+  re-enforces fail-closed.
+- **`select_private_sources`** (Phase 2, sq-fix4) — the **source-selection adapter**.
+  It runs `sparq-fedplan::select_sources` over the BGP + descriptors, then **prunes**
+  any source whose descriptor declares it will not participate
+  (`participates == Some(false)`), and surfaces the retained per-pattern candidate set
+  plus an **audit trail** (`pruned`) of what was dropped and why. The **only** prune
+  rule is participation/authorisation — a source holding a *private* predicate stays a
+  candidate (its in-clear-vs-MPC routing is the Phase-3 decision), so the adapter is
+  recall-safe and loses no answers. Duplicate descriptors for one source id are
+  refused (`SeamError::DescriptorMismatch`) rather than silently resolved.
+- **Deferred (typed, panic-free stubs)** — `route_operators` (Phase 3,
+  disclosed/hidden routing) and `assemble_leakage_envelope` (Phase 4, leakage envelope
+  + dual ratification) return `SeamError::Deferred { phase, gated_on }`.
 
 > **Internal crate — not published** (`publish = false`). **No soundness or privacy
-> claim.** It performs **no** MPC and runs **no** privacy-bearing logic. The MPC
-> estate (`sparq-mpc`) is **research-grade, honest-majority semi-honest only, and
-> NOT externally audited** — the cryptographer sign-off (`sq-qhy4`) and coZK
-> re-audit (`sq-9hrn`) are pending. <!-- privacy-claims-allow: NEGATIVE/scoped — denies any privacy/soundness property; audits sq-qhy4 / sq-9hrn pending -->
-> The privacy-bearing phases (source-selection pruning, disclosed/hidden routing,
-> leakage-envelope assembly, authenticated-input attestation) are **deferred and
+> claim.** Phase 2 is **plumbing — source-selection routing, not a cryptographic
+> guarantee**: it performs **no** MPC, runs **no** privacy-bearing logic, and reveals
+> nothing it was not already given in the clear (the descriptors are the caller's own
+> inputs). The MPC estate (`sparq-mpc`) is **research-grade, honest-majority
+> semi-honest only, and NOT externally audited** — the cryptographer sign-off
+> (`sq-qhy4`) and coZK re-audit (`sq-9hrn`) are pending. <!-- privacy-claims-allow: NEGATIVE/scoped — denies any privacy/soundness property; audits sq-qhy4 / sq-9hrn pending -->
+> The privacy-bearing phases (disclosed/hidden routing, leakage-envelope assembly +
+> dual ratification, authenticated-input attestation) are **deferred and
 > audit-gated**; nothing here is a working protocol.
 
-Design: [`research/mpc-untrusted-planner-routing-design.md`](../../research/mpc-untrusted-planner-routing-design.md).
-Contributing: [`AGENTS.md`](../../AGENTS.md).
+**Threat-model / leakage note (Phase 2, honest).** The adapter reads each source's
+*own* declared `SourcePrivacyDescriptor` to decide participation; it enforces nothing
+cryptographic. Per the design record's constraint C-B (§2.2), the descriptor is the
+source's declaration — a later phase has each source **re-enforce** it fail-closed, so
+a lying planner cannot widen disclosure. Phase 2 itself only routes public metadata
+(the candidate set and a participation flag); it makes no claim about what is or is not
+learned by any party once a query executes, because no query executes here.
+
+## 📚 Learn more
+
+- Design: [`research/mpc-untrusted-planner-routing-design.md`](../../research/mpc-untrusted-planner-routing-design.md).
+- Contributing: [`AGENTS.md`](../../AGENTS.md).
 
 ## License
 
