@@ -13,6 +13,7 @@ Follow the **sub-agent shared contract** — `AGENTS.md` § *The sub-agent share
 
 ## Your gates (HARD — never weaken to pass)
 - `cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo test` — GREEN in BOTH feature states: default (feature OFF) AND with your feature ON. Name the exact feature flags in your report.
+- **rustdoc all-features gate (HARD — the bundled half of the gating `clippy (gate)` lane):** run `cargo doc --workspace --no-deps --all-features` with `RUSTDOCFLAGS="-D warnings"` — MUST be clean before opening the PR; a public doc-comment must not `[link]` to a private/`pub(crate)` item (demote to a plain `` `code span` ``) — this is the bundled rustdoc half of the gating `clippy (gate)` lane and has bitten 4 PRs (#926/#936/#950/#954). `cargo clippy` alone does NOT run it, so feature-gated doc-link breakage only surfaces on CI unless you run this in-worktree. [OPUS-4.8]
 - Tests exercise the REAL path (not a mock that bypasses the logic), including the load-bearing invariant for the feature (e.g. result-equivalence, answer-safety, fail-closed). For `sparq-core` `unsafe`, run Miri/the fuzz lane if the change touches it.
 - `rustfmt`: the workspace has an intentionally-deferred reformat (CI fmt is informational; clippy is the hard gate). Match the surrounding committed style; do NOT run `cargo fmt` over untouched files (it creates huge unrelated diffs).
 - Update the crate `README.md` + the relevant `skills/<surface>/SKILL.md` (the public-API → SKILL.md rule). Document the feature, its semantics, and any honest boundary/caveat.

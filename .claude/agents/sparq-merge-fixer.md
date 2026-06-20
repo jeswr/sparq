@@ -20,6 +20,7 @@ Follow the **sub-agent shared contract** (`AGENTS.md` § *The sub-agent shared c
 
 ## Gates after resolving (HARD — never weaken)
 - For a CODE conflict (esp. the auth path): re-run `cargo build` + `cargo clippy --all-targets -- -D warnings` + `cargo test` for the touched crate in BOTH feature states, and confirm ALL the composing features' tests still pass (that's the proof you preserved every side). For doc/CI conflicts: markdownlint / YAML-valid as applicable.
+- **rustdoc all-features gate (HARD — the bundled half of the gating `clippy (gate)` lane):** if the conflict touched Rust source/doc-comments, run `cargo doc --workspace --no-deps --all-features` with `RUSTDOCFLAGS="-D warnings"` — MUST be clean before re-pushing; a public doc-comment must not `[link]` to a private/`pub(crate)` item (demote to a plain `` `code span` ``) — this is the bundled rustdoc half of the gating `clippy (gate)` lane and has bitten 4 PRs (#926/#936/#950/#954). `cargo clippy` alone does NOT run it, so feature-gated doc-link breakage only surfaces on CI unless you run this in-worktree. [OPUS-4.8]
 - If resolving reveals a GENUINE incompatibility (not just textual), STOP and report it — do not force a broken merge.
 
 ## Report
