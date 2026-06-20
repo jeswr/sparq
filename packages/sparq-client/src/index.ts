@@ -533,6 +533,41 @@ export {
   shortenIri,
 } from "./server-health.js";
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-atb0 — the persistent cross-session WORKSPACE model + persistence
+// abstraction. The framework-agnostic data shape of a named workspace (its imported sources,
+// the whole-dataset N-Quads save/open snapshot, and the saved SPARQL editor state) plus the
+// ONE `WorkspaceStore` interface with three runtime-selected backends — Tauri on-disk (when a
+// Tauri webview exposes the fs plugin), browser `localStorage` (the static-export path), and
+// an in-memory session fallback. No Tauri/DOM dependency: each tier is feature-detected. No
+// secret (a bearer token) is ever persisted. Consumed by the site's REPL workspace panel and
+// portable to the Tauri GUI unchanged.
+// ---------------------------------------------------------------------------
+
+export {
+  type Workspace,
+  type WorkspaceSummary,
+  type WorkspaceSourceMeta,
+  type WorkspaceEditorState,
+  type WorkspaceRunMode,
+  type WorkspaceBackend,
+  type WorkspaceStore,
+  type WorkspaceStoreOptions,
+  type KeyValueStorage,
+  type TauriFsApi,
+  WORKSPACE_SCHEMA,
+  WebWorkspaceStore,
+  MemoryWorkspaceStore,
+  TauriWorkspaceStore,
+  createWorkspaceStore,
+  detectWebStorage,
+  isTauriRuntime,
+  newWorkspace,
+  parseWorkspace,
+  workspaceId,
+  workspaceSummary,
+} from "./workspace.js";
+
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {
   if (!t) return "";
