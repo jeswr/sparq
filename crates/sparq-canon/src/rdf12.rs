@@ -39,19 +39,29 @@
 //!
 //! ## Boundary
 //!
-//! - SHA-256 only (the spec default). The non-default-hash `*_with` profile is
-//!   not (yet) exposed for the v2 path.
+//! - SHA-256 is the default (the spec hash). A `*_with::<D: Digest>` profile
+//!   (e.g. [`canonicalize_rdf12_with`]) lets a caller select a different hash —
+//!   notably SHA-384 (`sha2::Sha384`) for parity with the standard delegated
+//!   path's [`crate::canonicalize_quads_with`]. The non-generic entry points
+//!   are SHA-256 and produce byte-identical output to before. Because all
+//!   intermediate RDFC-1.0 hashes are emitted as lowercase hex of the full
+//!   digest, the chosen `D` flows through first-degree, related, and n-degree
+//!   hashing uniformly; the canonical *labels* (`c14nN`) and their *order* are
+//!   determined by hash comparison, so a different `D` can yield a different
+//!   relabelling while every input remains isomorphism-stable under that `D`.
 //! - Dataset-level (quads, named graphs) and single-graph (triples) entry
-//!   points are both provided.
+//!   points are both provided, each with a `*_with` hash-generic sibling.
 //! - The HNDQ poison-graph call limit is enforced (default 4000) and surfaces as
 //!   [`CanonError::Canonicalization`], so pathological inputs fail closed.
 //!
-//! [OPUS-4.8] sq-hslb — full non-standard RDF-1.2 triple-term canon profile.
+//! [OPUS-4.8] sq-hslb — full non-standard RDF-1.2 triple-term canon profile;
+//! sq-5i1d — `*_with::<D: Digest>` hash-profile parity (SHA-384).
 //! Fable unavailable; flag for re-review when Fable returns.
 
 use crate::CanonError;
+use digest::Digest;
 use oxrdf::{BlankNode, GraphName, NamedOrBlankNode, Quad, Term, Triple};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::collections::BTreeMap;
 
 /// The default HNDQ call limit (matches the standard `rdf-canon` path's guard).
@@ -72,22 +82,41 @@ const DEFAULT_HNDQ_CALL_LIMIT: usize = 4000;
 /// This is **not** W3C RDFC-1.0 (RDF-1.2 canonicalization is unsettled
 /// upstream); see the [module docs](self).
 pub fn canonicalize_rdf12(dataset: &[Quad]) -> Result<String, CanonError> {
-    let issued = issue_dataset_rdf12(dataset)?;
+    canonicalize_rdf12_with::<Sha256>(dataset)
+}
+
+/// **NON-STANDARD.** Like [`canonicalize_rdf12`] but parameterized over the
+/// RDFC-1.0 hash function `D` ([`crate::Digest`]). The profile default is
+/// SHA-256 ([`canonicalize_rdf12`]); pass `sha2::Sha384` to select the SHA-384
+/// profile, for parity with the standard delegated path's
+/// [`crate::canonicalize_quads_with`].
+///
+/// The relabelling and line order are determined by hash comparison, so a
+/// different `D` may produce a different (but still canonical and
+/// isomorphism-stable) `c14nN` assignment; the SHA-256 default
+/// ([`canonicalize_rdf12`]) is byte-identical to before.
+pub fn canonicalize_rdf12_with<D: Digest>(dataset: &[Quad]) -> Result<String, CanonError> {
+    let issued = issue_dataset_rdf12_with::<D>(dataset)?;
     Ok(serialize_canonical(dataset, &issued))
 }
 
 /// **NON-STANDARD.** The issued-identifier map (input blank-node label →
 /// canonical `c14nN` label) for an RDF-1.2 dataset under the
-/// `rdf12-triple-terms` profile. See [`canonicalize_rdf12`].
+/// `rdf12-triple-terms` profile (SHA-256). See [`canonicalize_rdf12`].
 pub fn issue_dataset_rdf12(
     dataset: &[Quad],
 ) -> Result<std::collections::HashMap<String, String>, CanonError> {
-    let state = CanonState::compute(dataset)?;
-    Ok(state
-        .canonical_issuer
-        .issued
-        .into_iter()
-        .collect())
+    issue_dataset_rdf12_with::<Sha256>(dataset)
+}
+
+/// **NON-STANDARD.** Like [`issue_dataset_rdf12`] but parameterized over the
+/// RDFC-1.0 hash function `D` ([`crate::Digest`]). See
+/// [`canonicalize_rdf12_with`].
+pub fn issue_dataset_rdf12_with<D: Digest>(
+    dataset: &[Quad],
+) -> Result<std::collections::HashMap<String, String>, CanonError> {
+    let state = CanonState::compute::<D>(dataset)?;
+    Ok(state.canonical_issuer.issued.into_iter().collect())
 }
 
 /// **NON-STANDARD.** Canonicalizes one graph's content (a slice of [`Triple`]s,
@@ -97,7 +126,14 @@ pub fn issue_dataset_rdf12(
 /// On triple-term-free input this agrees byte-for-byte with the standard
 /// [`crate::canonicalize_triples`]. See the [module docs](self) for the
 /// non-standard caveat.
-pub fn canonicalize_triples_rdf12(
+pub fn canonicalize_triples_rdf12(triples: &[Triple]) -> Result<crate::CanonicalGraph, CanonError> {
+    canonicalize_triples_rdf12_with::<Sha256>(triples)
+}
+
+/// **NON-STANDARD.** Like [`canonicalize_triples_rdf12`] but parameterized over
+/// the RDFC-1.0 hash function `D` ([`crate::Digest`]). See
+/// [`canonicalize_rdf12_with`].
+pub fn canonicalize_triples_rdf12_with<D: Digest>(
     triples: &[Triple],
 ) -> Result<crate::CanonicalGraph, CanonError> {
     let dataset: Vec<Quad> = triples
@@ -111,7 +147,7 @@ pub fn canonicalize_triples_rdf12(
             )
         })
         .collect();
-    let issued = issue_dataset_rdf12(&dataset)?;
+    let issued = issue_dataset_rdf12_with::<D>(&dataset)?;
     let lines = canonical_lines(&dataset, &issued);
     // Re-parse each canonical default-graph line back into a triple so the
     // returned `triples` carry the canonical (`c14nN`) labels, matching the
@@ -124,7 +160,10 @@ pub fn canonicalize_triples_rdf12(
             parsed = Some(Triple::new(q.subject, q.predicate, q.object));
         }
         triples_out.push(parsed.ok_or_else(|| {
-            CanonError::Bridge(format!("canonical line did not parse as one quad: {}", line))
+            CanonError::Bridge(format!(
+                "canonical line did not parse as one quad: {}",
+                line
+            ))
         })?);
     }
     Ok(crate::CanonicalGraph {
@@ -139,12 +178,21 @@ pub fn canonicalize_triples_rdf12(
 pub fn canonicalize_graph_content_rdf12(
     g: &sparq_core::Graph,
 ) -> Result<crate::CanonicalGraph, CanonError> {
+    canonicalize_graph_content_rdf12_with::<Sha256>(g)
+}
+
+/// **NON-STANDARD.** Like [`canonicalize_graph_content_rdf12`] but parameterized
+/// over the RDFC-1.0 hash function `D` ([`crate::Digest`]). See
+/// [`canonicalize_rdf12_with`].
+pub fn canonicalize_graph_content_rdf12_with<D: Digest>(
+    g: &sparq_core::Graph,
+) -> Result<crate::CanonicalGraph, CanonError> {
     // `graph_triples` materializes the stored triples as-is, keeping any
     // triple-term objects intact (the standard *canonicalize* paths reject
     // triple terms downstream, not here), so it is the right source for the v2
     // profile too.
     let triples = crate::graph_triples(g)?;
-    canonicalize_triples_rdf12(&triples)
+    canonicalize_triples_rdf12_with::<D>(&triples)
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +254,7 @@ struct CanonState {
 }
 
 impl CanonState {
-    fn compute(dataset: &[Quad]) -> Result<Self, CanonError> {
+    fn compute<D: Digest>(dataset: &[Quad]) -> Result<Self, CanonError> {
         let mut state = CanonState {
             bnode_to_quads: BTreeMap::new(),
             canonical_issuer: IdentifierIssuer::new("c14n"),
@@ -216,7 +264,7 @@ impl CanonState {
         // §4.4(3) first-degree hashes.
         let mut hash_to_bnodes: HashToBnodes = BTreeMap::new();
         for n in state.bnode_to_quads.keys() {
-            let h = state.hash_first_degree_quads(n)?;
+            let h = state.hash_first_degree_quads::<D>(n)?;
             hash_to_bnodes.entry(h).or_default().push(n.clone());
         }
 
@@ -240,7 +288,7 @@ impl CanonState {
                 }
                 let mut temp = IdentifierIssuer::new("b");
                 temp.issue(n);
-                let result = state.hash_n_degree_quads(n, &temp, &mut counter)?;
+                let result = state.hash_n_degree_quads::<D>(n, &temp, &mut counter)?;
                 hash_path_list.push(result);
             }
             hash_path_list.sort_by(|a, b| a.hash.cmp(&b.hash));
@@ -280,7 +328,7 @@ impl CanonState {
 
     // ---- §4.6 Hash First Degree Quads (triple-term aware) ----
 
-    fn hash_first_degree_quads(&self, reference: &str) -> Result<String, CanonError> {
+    fn hash_first_degree_quads<D: Digest>(&self, reference: &str) -> Result<String, CanonError> {
         let quads = self
             .quads_for(reference)
             .ok_or_else(|| CanonError::Canonicalization("quads not found for bnode".into()))?;
@@ -292,12 +340,12 @@ impl CanonState {
             })
             .collect();
         nquads.sort();
-        Ok(hash_hex(nquads.concat().as_bytes()))
+        Ok(hash_hex::<D>(nquads.concat().as_bytes()))
     }
 
     // ---- §4.8 Hash N-Degree Quads (triple-term aware) ----
 
-    fn hash_n_degree_quads(
+    fn hash_n_degree_quads<D: Digest>(
         &self,
         identifier: &str,
         path_issuer: &IdentifierIssuer,
@@ -320,8 +368,12 @@ impl CanonState {
             collect_bnodes_subject(&quad.subject, &mut subj_bnodes);
             for related in &subj_bnodes {
                 if related != identifier {
-                    let h =
-                        self.hash_related_blank_node(related, quad, &issuer, Position::Subject)?;
+                    let h = self.hash_related_blank_node::<D>(
+                        related,
+                        quad,
+                        &issuer,
+                        Position::Subject,
+                    )?;
                     h_n.entry(h).or_default().push(related.clone());
                 }
             }
@@ -330,8 +382,12 @@ impl CanonState {
             collect_bnodes_term(&quad.object, &mut obj_bnodes);
             for related in &obj_bnodes {
                 if related != identifier {
-                    let h =
-                        self.hash_related_blank_node(related, quad, &issuer, Position::Object)?;
+                    let h = self.hash_related_blank_node::<D>(
+                        related,
+                        quad,
+                        &issuer,
+                        Position::Object,
+                    )?;
                     h_n.entry(h).or_default().push(related.clone());
                 }
             }
@@ -340,7 +396,7 @@ impl CanonState {
                 let related = b.as_str();
                 if related != identifier {
                     let h =
-                        self.hash_related_blank_node(related, quad, &issuer, Position::Graph)?;
+                        self.hash_related_blank_node::<D>(related, quad, &issuer, Position::Graph)?;
                     h_n.entry(h).or_default().push(related.to_string());
                 }
             }
@@ -382,7 +438,7 @@ impl CanonState {
                 }
 
                 for related in &recursion_list {
-                    let result = self.hash_n_degree_quads(related, &issuer_copy, counter)?;
+                    let result = self.hash_n_degree_quads::<D>(related, &issuer_copy, counter)?;
                     path.push_str(&format!("_:{}", issuer_copy.issue(related)));
                     path.push('<');
                     path.push_str(&result.hash);
@@ -413,14 +469,14 @@ impl CanonState {
         }
 
         Ok(HndqResult {
-            hash: hash_hex(data_to_hash.as_bytes()),
+            hash: hash_hex::<D>(data_to_hash.as_bytes()),
             issuer,
         })
     }
 
     // ---- §4.7 Hash Related Blank Node ----
 
-    fn hash_related_blank_node(
+    fn hash_related_blank_node<D: Digest>(
         &self,
         related: &str,
         quad: &Quad,
@@ -436,11 +492,11 @@ impl CanonState {
             Some(id) => format!("_:{}", id),
             None => match issuer.get(related) {
                 Some(id) => format!("_:{}", id),
-                None => self.hash_first_degree_quads(related)?,
+                None => self.hash_first_degree_quads::<D>(related)?,
             },
         };
         input.push_str(&identifier);
-        Ok(hash_hex(input.as_bytes()))
+        Ok(hash_hex::<D>(input.as_bytes()))
     }
 }
 
@@ -636,10 +692,7 @@ fn relabel_subject_canonical(
     }
 }
 
-fn relabel_term_canonical(
-    term: &Term,
-    issued: &std::collections::HashMap<String, String>,
-) -> Term {
+fn relabel_term_canonical(term: &Term, issued: &std::collections::HashMap<String, String>) -> Term {
     match term {
         Term::BlankNode(b) => Term::BlankNode(issued_label(b.as_str(), issued)),
         Term::Triple(t) => Term::Triple(Box::new(Triple::new(
@@ -683,8 +736,14 @@ fn serialize_quad_line(quad: &Quad) -> String {
 // Small helpers.
 // ---------------------------------------------------------------------------
 
-fn hash_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
+/// Lowercase-hex of `D`'s digest over `data`. The RDFC-1.0 algorithm is
+/// parameterized over its hash function; `D` is threaded through every hashing
+/// step (first-degree, related, n-degree) so the canonical labels are computed
+/// entirely under the caller's chosen hash. SHA-256 (`canonicalize_rdf12`) is
+/// the spec default; SHA-384 (`canonicalize_rdf12_with::<Sha384>`) the parity
+/// target.
+fn hash_hex<D: Digest>(data: &[u8]) -> String {
+    let digest = D::digest(data);
     let mut s = String::with_capacity(digest.len() * 2);
     for byte in digest.iter() {
         s.push_str(&format!("{:02x}", byte));

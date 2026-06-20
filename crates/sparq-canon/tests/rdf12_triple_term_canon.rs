@@ -12,7 +12,7 @@
 //!     standard path rejects with `TripleTerm` that now canonicalizes.
 #![cfg(feature = "rdf12-triple-terms")]
 
-use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Quad, Term, Triple, GraphName};
+use oxrdf::{BlankNode, GraphName, Literal, NamedNode, NamedOrBlankNode, Quad, Term, Triple};
 use std::path::{Path, PathBuf};
 
 fn testdata() -> PathBuf {
@@ -117,7 +117,10 @@ fn v2_single_graph_agrees_with_standard() {
     entries.sort();
     for path in entries {
         let quads = load_quads(&path);
-        if !quads.iter().all(|q| q.graph_name == GraphName::DefaultGraph) {
+        if !quads
+            .iter()
+            .all(|q| q.graph_name == GraphName::DefaultGraph)
+        {
             continue;
         }
         let triples: Vec<Triple> = quads
@@ -130,18 +133,23 @@ fn v2_single_graph_agrees_with_standard() {
         };
         let v2_out = sparq_canon::canonicalize_triples_rdf12(&triples).unwrap();
         assert_eq!(
-            std_out.lines, v2_out.lines,
+            std_out.lines,
+            v2_out.lines,
             "single-graph lines disagree on {:?}",
             path.file_name().unwrap()
         );
         assert_eq!(
-            std_out.triples, v2_out.triples,
+            std_out.triples,
+            v2_out.triples,
             "single-graph triples disagree on {:?}",
             path.file_name().unwrap()
         );
         compared += 1;
     }
-    assert!(compared >= 30, "expected most eval inputs default-graph, got {compared}");
+    assert!(
+        compared >= 30,
+        "expected most eval inputs default-graph, got {compared}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +180,10 @@ fn ground_triple_term_is_order_invariant() {
     );
     let forward = sparq_canon::canonicalize_triples_rdf12(&[t1.clone(), t2.clone()]).unwrap();
     let reverse = sparq_canon::canonicalize_triples_rdf12(&[t2, t1]).unwrap();
-    assert_eq!(forward.lines, reverse.lines, "ground TT must be order-invariant");
+    assert_eq!(
+        forward.lines, reverse.lines,
+        "ground TT must be order-invariant"
+    );
     // Sanity: triple-term token form is present in the canonical output.
     assert!(
         forward.lines.iter().any(|l| l.contains("<<(")),
@@ -296,7 +307,11 @@ fn nested_bnode_distinguishes_non_isomorphic() {
             Term::BlankNode(bn("b")),
         );
         vec![
-            Triple::new(NamedOrBlankNode::BlankNode(bn("a")), iri("http://ex/says"), inner),
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("a")),
+                iri("http://ex/says"),
+                inner,
+            ),
             Triple::new(
                 NamedOrBlankNode::BlankNode(bn("b")),
                 iri("http://ex/t"),
@@ -312,7 +327,11 @@ fn nested_bnode_distinguishes_non_isomorphic() {
             Term::BlankNode(bn("b")),
         );
         vec![
-            Triple::new(NamedOrBlankNode::BlankNode(bn("a")), iri("http://ex/says"), inner),
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("a")),
+                iri("http://ex/says"),
+                inner,
+            ),
             Triple::new(
                 NamedOrBlankNode::BlankNode(bn("b")),
                 iri("http://ex/t"),
@@ -350,8 +369,9 @@ fn dataset_named_graph_nested_bnode() {
 /// canonical RDF-1.2 `@lang--dir` token form (single-sourced via oxrdf Display).
 #[test]
 fn directional_language_string_in_triple_term() {
-    let dir_lit = Literal::new_directional_language_tagged_literal("שלום", "he", oxrdf::BaseDirection::Rtl)
-        .unwrap();
+    let dir_lit =
+        Literal::new_directional_language_tagged_literal("שלום", "he", oxrdf::BaseDirection::Rtl)
+            .unwrap();
     let inner = tt(
         NamedOrBlankNode::NamedNode(iri("http://ex/s")),
         iri("http://ex/p"),
@@ -368,4 +388,219 @@ fn directional_language_string_in_triple_term() {
         "directional language token form expected: {}",
         c.lines[0]
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4) Hash-profile parity: `*_with::<D: Digest>` (SHA-384) + back-compat guard
+//    (sq-5i1d). The non-generic default stays byte-identical to today; SHA-384
+//    is purely additive.
+// ---------------------------------------------------------------------------
+
+use sha2::{Sha256, Sha384};
+
+/// A symmetric two-bnode cycle whose c14n order is decided by the n-degree hash
+/// (the two bnodes share a first-degree hash), so the choice of hash function is
+/// observable in the relabelling. Shared by the parity tests below.
+fn symmetric_cycle_dataset() -> Vec<Quad> {
+    let mk = |s: &str, o: &str| {
+        Quad::new(
+            NamedOrBlankNode::BlankNode(bn(s)),
+            iri("http://ex/p"),
+            Term::BlankNode(bn(o)),
+            GraphName::DefaultGraph,
+        )
+    };
+    vec![
+        mk("a", "b"),
+        mk("b", "a"),
+        Quad::new(
+            NamedOrBlankNode::BlankNode(bn("a")),
+            iri("http://ex/t"),
+            Term::Literal(Literal::new_simple_literal("x")),
+            GraphName::DefaultGraph,
+        ),
+        Quad::new(
+            NamedOrBlankNode::BlankNode(bn("b")),
+            iri("http://ex/u"),
+            Term::Literal(Literal::new_simple_literal("y")),
+            GraphName::DefaultGraph,
+        ),
+    ]
+}
+
+/// BACK-COMPAT GUARD: the non-generic default (`canonicalize_rdf12`) must be
+/// byte-identical to the explicit SHA-256 profile (`canonicalize_rdf12_with::<
+/// Sha256>`) across every entry point. This is the load-bearing back-compat
+/// invariant: the SHA-384 variant is purely additive.
+#[test]
+fn default_is_sha256_byte_identical() {
+    let ds = symmetric_cycle_dataset();
+    assert_eq!(
+        sparq_canon::canonicalize_rdf12(&ds).unwrap(),
+        sparq_canon::canonicalize_rdf12_with::<Sha256>(&ds).unwrap(),
+        "non-generic default must equal the explicit SHA-256 profile"
+    );
+    assert_eq!(
+        sparq_canon::issue_dataset_rdf12(&ds).unwrap(),
+        sparq_canon::issue_dataset_rdf12_with::<Sha256>(&ds).unwrap(),
+        "issuer maps must match"
+    );
+    let triples: Vec<Triple> = ds
+        .iter()
+        .map(|q| Triple::new(q.subject.clone(), q.predicate.clone(), q.object.clone()))
+        .collect();
+    let g_default = sparq_canon::canonicalize_triples_rdf12(&triples).unwrap();
+    let g_sha256 = sparq_canon::canonicalize_triples_rdf12_with::<Sha256>(&triples).unwrap();
+    assert_eq!(g_default.lines, g_sha256.lines);
+    assert_eq!(g_default.triples, g_sha256.triples);
+}
+
+/// On a ground (blank-node-free) dataset no hash feeds into a relabelling, so the
+/// canonical OUTPUT is identical under any hash. This guards against an
+/// accidental hash leak into the serialized line text: the hash only ever shows
+/// up in intermediate labelling, never in the output bytes.
+#[test]
+fn sha384_ground_output_equals_sha256() {
+    let inner = tt(
+        NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+        iri("http://ex/p"),
+        Term::NamedNode(iri("http://ex/o")),
+    );
+    let t = Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+        iri("http://ex/says"),
+        inner,
+    );
+    let sha256 =
+        sparq_canon::canonicalize_triples_rdf12_with::<Sha256>(std::slice::from_ref(&t)).unwrap();
+    let sha384 =
+        sparq_canon::canonicalize_triples_rdf12_with::<Sha384>(std::slice::from_ref(&t)).unwrap();
+    assert_eq!(
+        sha256.lines, sha384.lines,
+        "ground (bnode-free) output must not depend on the hash function"
+    );
+}
+
+/// The SHA-384 profile is DETERMINISTIC: the same dataset canonicalizes to the
+/// same bytes on repeated runs.
+#[test]
+fn sha384_is_deterministic() {
+    let ds = symmetric_cycle_dataset();
+    let a = sparq_canon::canonicalize_rdf12_with::<Sha384>(&ds).unwrap();
+    let b = sparq_canon::canonicalize_rdf12_with::<Sha384>(&ds).unwrap();
+    assert_eq!(a, b, "SHA-384 profile must be deterministic");
+}
+
+/// The SHA-384 profile is ISOMORPHISM-STABLE under that hash: two isomorphic
+/// graphs (relabelled bnodes + permuted quad order) canonicalize byte-identically
+/// — including a nested-bnode triple term.
+#[test]
+fn sha384_isomorphism_stable() {
+    let build = |shared: &str, other: &str, swap: bool| -> Vec<Triple> {
+        let inner = tt(
+            NamedOrBlankNode::BlankNode(bn(shared)),
+            iri("http://ex/p"),
+            Term::BlankNode(bn(other)),
+        );
+        let t1 = Triple::new(
+            NamedOrBlankNode::BlankNode(bn(shared)),
+            iri("http://ex/says"),
+            inner,
+        );
+        let t2 = Triple::new(
+            NamedOrBlankNode::BlankNode(bn(other)),
+            iri("http://ex/t"),
+            Term::Literal(Literal::new_simple_literal("leaf")),
+        );
+        if swap {
+            vec![t2, t1]
+        } else {
+            vec![t1, t2]
+        }
+    };
+    let a =
+        sparq_canon::canonicalize_triples_rdf12_with::<Sha384>(&build("shared", "other", false))
+            .unwrap();
+    let b =
+        sparq_canon::canonicalize_triples_rdf12_with::<Sha384>(&build("xxx", "yyy", true)).unwrap();
+    assert_eq!(
+        a.lines, b.lines,
+        "SHA-384 profile must be isomorphism-stable\n a={:?}\n b={:?}",
+        a.lines, b.lines
+    );
+    assert!(a.lines.iter().any(|l| l.contains("<<(")));
+}
+
+/// SHA-384 still DISTINGUISHES non-isomorphic graphs (the descent isn't
+/// collapsing distinct structure under the wider hash).
+#[test]
+fn sha384_distinguishes_non_isomorphic() {
+    let g1 = {
+        let inner = tt(
+            NamedOrBlankNode::BlankNode(bn("a")),
+            iri("http://ex/p"),
+            Term::BlankNode(bn("b")),
+        );
+        vec![
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("a")),
+                iri("http://ex/says"),
+                inner,
+            ),
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("b")),
+                iri("http://ex/t"),
+                Term::Literal(Literal::new_simple_literal("x")),
+            ),
+        ]
+    };
+    let g2 = {
+        let inner = tt(
+            NamedOrBlankNode::BlankNode(bn("b")),
+            iri("http://ex/p"),
+            Term::BlankNode(bn("b")),
+        );
+        vec![
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("a")),
+                iri("http://ex/says"),
+                inner,
+            ),
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bn("b")),
+                iri("http://ex/t"),
+                Term::Literal(Literal::new_simple_literal("x")),
+            ),
+        ]
+    };
+    let c1 = sparq_canon::canonicalize_triples_rdf12_with::<Sha384>(&g1).unwrap();
+    let c2 = sparq_canon::canonicalize_triples_rdf12_with::<Sha384>(&g2).unwrap();
+    assert_ne!(
+        c1.lines, c2.lines,
+        "non-isomorphic graphs must differ under SHA-384"
+    );
+}
+
+/// REAL-PATH PROOF that `D` is load-bearing (not a no-op generic): on the
+/// symmetric two-bnode cycle, SHA-256 and SHA-384 issue the SAME canonical
+/// labels to OPPOSITE input bnodes, so the two relabelling maps differ. If the
+/// hash were ever dropped (e.g. a hardcoded `Sha256` left in a call site), this
+/// assertion would fail.
+#[test]
+fn sha384_relabels_differently_from_sha256_on_symmetric_cycle() {
+    let ds = symmetric_cycle_dataset();
+    let m256 = sparq_canon::issue_dataset_rdf12_with::<Sha256>(&ds).unwrap();
+    let m384 = sparq_canon::issue_dataset_rdf12_with::<Sha384>(&ds).unwrap();
+    assert_ne!(
+        m256, m384,
+        "the chosen hash must actually drive the relabelling (D is load-bearing)"
+    );
+    // Both are still valid bijections onto {c14n0, c14n1}.
+    let labels256: std::collections::BTreeSet<_> = m256.values().cloned().collect();
+    let labels384: std::collections::BTreeSet<_> = m384.values().cloned().collect();
+    let expected: std::collections::BTreeSet<_> = ["c14n0".to_string(), "c14n1".to_string()]
+        .into_iter()
+        .collect();
+    assert_eq!(labels256, expected);
+    assert_eq!(labels384, expected);
 }
