@@ -7,13 +7,16 @@
     feature = "fedplan-mpc",
     doc = r#"sparq-fedplan-mpc: the opt-in **glue** between cost-based federated source
 selection (`sparq-fedplan`) and MPC-over-federated-SPARQL routing (`sparq-mpc`) — the
-untrusted-planner → MPC-routing seam (beads sq-2q1x + sq-fix4, epics sq-pwr / sq-0jsc;
-`research/mpc-untrusted-planner-routing-design.md`).
+untrusted-planner → MPC-routing seam (beads sq-2q1x + sq-fix4 + sq-i1wh2 + sq-pwr.2, epics
+sq-pwr / sq-0jsc; `research/mpc-untrusted-planner-routing-design.md`).
 
 # What is delivered so far
 
-Phase 1 (sq-2q1x) landed the **seam scaffold**; Phase 2 (sq-fix4) lands the
-**source-selection adapter**. Phases 3–4 remain typed, panic-free, deferred stubs.
+Phase 1 (sq-2q1x) landed the **seam scaffold**; Phase 2 (sq-fix4) the **source-selection
+adapter**; Phase 3 (sq-i1wh2) the **disclosed/hidden routing pass**; Phase 4 (sq-pwr.2) the
+**leakage-envelope assembly + dual ratification**. The remaining privacy-bearing phases
+(untrusted-plan soundness re-validation, authenticated-input attestation) stay deferred and
+audit-gated.
 
 * [`SourcePrivacyDescriptor`] — the per-source privacy declaration the routing pass reads:
   which predicates a source is **willing to disclose in the clear**, the opaque attestation-key
@@ -37,24 +40,38 @@ Phase 1 (sq-2q1x) landed the **seam scaffold**; Phase 2 (sq-fix4) lands the
   [`RoutingPolicy`] knob selects the cheap default (disclose global-IRI operands) or the strict
   "hide even a public term" route. It is routing plumbing — **not** a cryptographic guarantee; it
   runs NO MPC and computes only the *proposed* partition. See [`routing`].
-* [`SeamPhase`] + [`SeamError`] — the shared error/phase types plus the still-deferred Phase-4
-  ([`assemble_leakage_envelope`]) stub, returning `Err(`[`SeamError::Deferred`]`)` naming its gate.
-  It **compiles and is callable**; it performs NO MPC and reveals NOTHING.
+* [`assemble_leakage_envelope`] + [`ratify_envelope`] (**Phase 4, implemented**) — the
+  leakage-envelope assembly + **dual-ratification** gate. `assemble_leakage_envelope` derives,
+  from the Phase-3 [`PrivateRouting`] and the [`QueryOperator`]s it was computed over, a declared
+  [`LeakageEnvelope`] that **honestly enumerates** what the plan reveals: the operator structure
+  (count, per-operator class + label), the disclose/hide partition, the operands each `Disclosed`
+  operator exposes in the clear, and which sources participate — **over-counting, never
+  under-counting** the leak. `ratify_envelope` then runs the dual gate: each **holder**
+  fail-closed-rejects a plan that would disclose one of its own private predicates (constraint
+  C-B), AND the **verifier** rejects an over-leaking envelope (one whose disclosed-operand count
+  exceeds its declared budget). It is **leakage-accounting + a plan-time policy gate — not a
+  cryptographic enforcement**: it runs NO MPC and makes NO soundness/privacy claim. See
+  [`envelope`].
+* [`SeamPhase`] + [`SeamError`] — the shared error/phase types. The [`SeamError::Deferred`] channel
+  is retained for a future gated phase (e.g. the untrusted-plan soundness re-validation, Phase 5);
+  no phase is deferred today.
 
 # What this crate does NOT do (honest boundary)
 
-It performs **no** MPC, **no** secret-sharing, and runs **no** privacy-bearing logic — the
-Phase-2 adapter only routes the caller's own (public) descriptors, and the Phase-3 routing pass
-only computes a *proposed* partition over typed operators (it opens nothing and verifies nothing).
-It makes **no** soundness, privacy, or security claim. The leakage of the routing pass itself (it
-reveals the query's operator structure and the disclose/hide partition — **not** operand values or
-result cardinalities) is documented honestly in [`routing`]. The remaining privacy-bearing phases
-(the leakage-envelope assembly + dual ratification, and the authenticated-input attestation) are
-**deferred** and **audit-gated**: the MPC estate is research-grade, honest-majority semi-honest
-only, and is **not** externally audited — the external accredited-cryptographer sign-off
-(sq-qhy4) and the collaborative-coZK re-audit (sq-9hrn) are pending. Do not present anything here
-as providing a privacy or soundness guarantee. See `README.md` and the design record for the
-full caveat.
+It performs **no** MPC, **no** secret-sharing, and runs **no** privacy-bearing cryptographic logic
+— the Phase-2 adapter only routes the caller's own (public) descriptors, the Phase-3 routing pass
+only computes a *proposed* partition over typed operators, and the Phase-4 envelope+ratification is
+a *declaration* of what the plan reveals plus a *plan-time policy check* over it (it opens nothing
+and verifies nothing cryptographic). It makes **no** soundness, privacy, or security claim. The
+leakage of the routing pass itself (it reveals the query's operator structure and the disclose/hide
+partition — **not** operand values or result cardinalities) is enumerated honestly in the Phase-4
+[`LeakageEnvelope`]. The dual ratification is a plan-time gate, not a runtime guarantee that a
+malicious holder/verifier honours it. The further privacy-bearing phases (the untrusted-plan
+soundness re-validation, the authenticated-input attestation) remain **deferred** and
+**audit-gated**: the MPC estate is research-grade, honest-majority semi-honest only, and is **not**
+externally audited — the external accredited-cryptographer sign-off (sq-qhy4) and the
+collaborative-coZK re-audit (sq-9hrn) are pending. Do not present anything here as providing a
+privacy or soundness guarantee. See `README.md` and the design record for the full caveat.
 
 # Opt-in (hard constraint)
 
@@ -64,7 +81,7 @@ on it, so the default engine build and the WASM artifact are byte-identical with
 it; a build that does not enable `fedplan-mpc` compiles an empty crate and pulls in neither
 `sparq-fedplan` nor `sparq-mpc`. Neither upstream gains a cross-dependency on the other.
 
-[OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 — flagged for Fable re-review."#
+[OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 / sq-pwr.2 — flagged for Fable re-review."#
 )]
 // Default (feature OFF) build: a concise, link-free crate doc. None of the gated items above
 // exist in this build, so the doc is plain text only (no intra-doc links). [OPUS-4.8] sq-2q1x.
@@ -72,19 +89,20 @@ it; a build that does not enable `fedplan-mpc` compiles an empty crate and pulls
     not(feature = "fedplan-mpc"),
     doc = r#"sparq-fedplan-mpc: the opt-in glue between cost-based federated source selection
 (`sparq-fedplan`) and MPC-over-federated-SPARQL routing (`sparq-mpc`) — the untrusted-planner →
-MPC-routing seam (beads sq-2q1x + sq-fix4 + sq-i1wh2). See `README.md` and `skills/mpc/SKILL.md`
-for the full design.
+MPC-routing seam (beads sq-2q1x + sq-fix4 + sq-i1wh2 + sq-pwr.2). See `README.md` and
+`skills/mpc/SKILL.md` for the full design.
 
 **This is the default build with the `fedplan-mpc` feature OFF, so the crate is empty** — the
 whole surface (the `SourcePrivacyDescriptor`, the Phase-2 `select_private_sources` adapter, the
-Phase-3 `route_operators` routing pass, and the deferred Phase-4 stub) is gated behind the
+Phase-3 `route_operators` routing pass, and the Phase-4 `assemble_leakage_envelope` +
+`ratify_envelope` gate) is gated behind the
 **`fedplan-mpc` cargo feature, OFF by default**. Build with `--features fedplan-mpc` to see the
 seam API. The crate is a standalone `publish = false` workspace member; `sparq-core` /
 `sparq-engine` never depend on it, and a feature-off build pulls in neither `sparq-fedplan` nor
 `sparq-mpc`. The crate performs no MPC and makes no privacy/soundness claim; the remaining
 privacy-bearing phases are deferred and audit-gated (sq-9hrn / sq-qhy4).
 
-[OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 — flagged for Fable re-review."#
+[OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 / sq-pwr.2 — flagged for Fable re-review."#
 )]
 #![forbid(unsafe_code)]
 // [OPUS-4.8] sq-2q1x: crate has zero `unsafe`.
@@ -96,6 +114,10 @@ privacy-bearing phases are deferred and audit-gated (sq-9hrn / sq-qhy4).
 #![cfg_attr(not(feature = "fedplan-mpc"), allow(dead_code, unused_imports))]
 
 // The whole seam surface is feature-gated; a feature-off build compiles an empty crate.
+// [OPUS-4.8] sq-pwr.2: Phase 4 leakage-envelope assembly + dual ratification lives in its own
+// module (mirroring the Phase-2 `selection` / Phase-3 `routing` splits).
+#[cfg(feature = "fedplan-mpc")]
+pub mod envelope;
 #[cfg(feature = "fedplan-mpc")]
 mod privacy;
 // [OPUS-4.8] sq-i1wh2: Phase 3 disclosed/hidden routing pass lives in its own module (mirroring
@@ -111,12 +133,17 @@ pub mod selection;
 
 #[cfg(feature = "fedplan-mpc")]
 pub use privacy::{Disclosability, SourcePrivacyDescriptor, SourcePrivacyDescriptorBuilder};
+// [OPUS-4.8] sq-pwr.2: Phase 4 — the implemented leakage-envelope assembly + dual-ratification gate.
+#[cfg(feature = "fedplan-mpc")]
+pub use envelope::{assemble_leakage_envelope, ratify_envelope};
 // [OPUS-4.8] sq-i1wh2: Phase 3 — the implemented disclosed/hidden routing pass + its input types.
 #[cfg(feature = "fedplan-mpc")]
 pub use routing::{route_operators, Operand, QueryOperator, RoutingPolicy};
-// [OPUS-4.8] sq-fix4: the shared seam error/phase types + the deferred Phase-4 stub.
+// [OPUS-4.8] sq-fix4 / sq-pwr.2: the shared seam error/phase types + the Phase-4 envelope/outcome types.
 #[cfg(feature = "fedplan-mpc")]
-pub use seam::{assemble_leakage_envelope, LeakageEnvelope, PrivateRouting, SeamError, SeamPhase};
+pub use seam::{
+    LeakageEnvelope, OperatorDisclosure, PrivateRouting, RatificationOutcome, SeamError, SeamPhase,
+};
 // [OPUS-4.8] sq-fix4: Phase 2 — the implemented privacy/authorisation-aware source-selection
 // adapter and its result types.
 #[cfg(feature = "fedplan-mpc")]

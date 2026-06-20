@@ -1,4 +1,4 @@
-<!-- [OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2: internal README for a publish=false crate; full design lives in research/mpc-untrusted-planner-routing-design.md. -->
+<!-- [OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 / sq-pwr.2: internal README for a publish=false crate; full design lives in research/mpc-untrusted-planner-routing-design.md. -->
 # sparq-fedplan-mpc
 
 The opt-in seam between cost-based federated source selection (`sparq-fedplan`) and
@@ -10,8 +10,8 @@ default build compiles an empty crate and pulls in neither upstream. Design:
 ## 🚀 Quickstart
 
 Internal crate (`publish = false`); enable the feature in the workspace, select the
-participating sources (Phase 2), then partition the query operators disclosed-vs-hidden
-(Phase 3):
+participating sources (Phase 2), partition the query operators disclosed-vs-hidden
+(Phase 3), assemble the declared leakage envelope and dual-ratify it (Phase 4):
 
 ```rust
 // behind `--features fedplan-mpc`
@@ -20,6 +20,12 @@ let routing = sparq_fedplan_mpc::route_operators(
     &selected, &privacy, &operators, RoutingPolicy::Default,
 )?;
 // routing.routing — Vec<OperatorRouting> the sparq-mpc pipeline consumes
+let envelope = sparq_fedplan_mpc::assemble_leakage_envelope(&routing, &operators, &selected)?;
+// dual ratification: each holder fail-closed + the verifier's disclosed-operand budget
+match sparq_fedplan_mpc::ratify_envelope(&envelope, &privacy, Some(budget)) {
+    RatificationOutcome::Ratified => { /* cleared for execution */ }
+    rejected => { /* a holder vetoed a private-term disclosure, or the verifier rejected an over-leak */ }
+}
 ```
 
 ## ✨ Features
@@ -46,31 +52,47 @@ let routing = sparq_fedplan_mpc::route_operators(
   operands) or the strict "hide even a public term" route. The most-private contributing
   source wins per operand. Duplicate descriptors are refused
   (`SeamError::DescriptorMismatch`).
-- **Deferred (typed, panic-free stub)** — `assemble_leakage_envelope` (Phase 4, leakage
-  envelope + dual ratification) returns `SeamError::Deferred { phase, gated_on }`.
+- **`assemble_leakage_envelope` + `ratify_envelope`** (Phase 4, sq-pwr.2) — the
+  **leakage-envelope assembly + dual-ratification** gate. `assemble_leakage_envelope`
+  derives, from the Phase-3 routing and the `QueryOperator`s it was computed over, a
+  declared `LeakageEnvelope` that **honestly enumerates** what the plan reveals — the
+  operator structure (count, per-operator class + label), the disclose/hide partition,
+  the operands each `Disclosed` operator exposes in the clear, and which sources
+  participate — **over-counting, never under-counting** the leak; a routing/operator
+  mismatch is fail-closed (`SeamError::DescriptorMismatch`). `ratify_envelope` then runs
+  the dual gate: each **holder** fail-closed-rejects a plan disclosing one of its own
+  private predicates (constraint C-B — the most-private holder wins), AND the
+  **verifier** rejects an over-leaking envelope (distinct disclosed operands exceeding
+  its declared budget). The result is a `RatificationOutcome` naming *which* ratification
+  failed and *why*.
 
 > **Internal crate — not published** (`publish = false`). **No soundness or privacy
-> claim.** Phases 2 and 3 are **plumbing — source-selection + disclosed/hidden routing,
-> not a cryptographic guarantee**: they perform **no** MPC, run **no** privacy-bearing
-> logic, open nothing, and verify nothing — the descriptors and operators are the
-> caller's own inputs. The MPC estate (`sparq-mpc`) is **research-grade, honest-majority
-> semi-honest only, and NOT externally audited** — the cryptographer sign-off
-> (`sq-qhy4`) and coZK re-audit (`sq-9hrn`) are pending. <!-- privacy-claims-allow: NEGATIVE/scoped — denies any privacy/soundness property; audits sq-qhy4 / sq-9hrn pending -->
-> The remaining privacy-bearing phases (leakage-envelope assembly + dual ratification,
+> claim.** Phases 2–4 are **plumbing — source-selection + disclosed/hidden routing +
+> leakage-accounting/ratification, not a cryptographic guarantee**: they perform **no**
+> MPC, run **no** privacy-bearing cryptographic logic, open nothing, and verify nothing
+> cryptographic — the descriptors and operators are the caller's own inputs, the envelope
+> is a *declaration* of what the plan reveals, and the dual ratification is a *plan-time
+> policy gate* (not a runtime guarantee a malicious holder/verifier honours it). The MPC
+> estate (`sparq-mpc`) is **research-grade, honest-majority semi-honest only, and NOT
+> externally audited** — the cryptographer sign-off (`sq-qhy4`) and coZK re-audit
+> (`sq-9hrn`) are pending. <!-- privacy-claims-allow: NEGATIVE/scoped — denies any privacy/soundness property; audits sq-qhy4 / sq-9hrn pending -->
+> The further privacy-bearing phases (untrusted-plan soundness re-validation,
 > authenticated-input attestation) are **deferred and audit-gated**; nothing here is a
 > working protocol.
 
 **Threat-model / leakage note (honest).** Phase 2 reads each source's *own* declared
 `SourcePrivacyDescriptor` to decide participation; Phase 3 reads `may_disclose` per
-operand to decide the route. Neither enforces anything cryptographic. Per the design
-record's constraint C-B (§2.2), the descriptor is the source's declaration — a later
-phase (Phase 4) has each source **re-enforce** it fail-closed and the verifier ratify
-the leakage envelope, so a lying planner that over-discloses is rejected, not honoured;
-this crate does not yet perform that ratification. The Phase-3 routing output **itself
-reveals** the query's **operator structure** (count, class, order) and the
-**disclose/hide partition** — but **not** operand values or result cardinalities (those
-live in the later evaluation, not in this typed plan). It makes no claim about what is
-learned once a query executes, because no query executes here.
+operand to decide the route. Per the design record's constraint C-B (§2.2), the
+descriptor is the source's declaration — Phase 4's `ratify_envelope` has each holder
+**re-enforce** it fail-closed and the verifier ratify the declared leakage envelope, so
+a lying planner that over-discloses is **rejected here, not honoured**. This is a
+*plan-time policy gate*, not a cryptographic enforcement. The plan **itself reveals**
+the query's **operator structure** (count, class, order), the **disclose/hide partition**,
+the **disclosed operands** of each disclosed operator, and the **participating sources**
+— and the leakage envelope enumerates exactly that, honestly (over-counting). It does
+**not** reveal hidden-operand values or result cardinalities (those live in the later
+evaluation, not in this typed plan), and it makes no claim about what is learned once a
+query executes, because no query executes here.
 
 ## 📚 Learn more
 
