@@ -617,6 +617,28 @@ jobs:
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # [OPUS-4.8] sq-4sbk: clippy -D warnings, WORKSPACE-WIDE, with `--all-features` — the
+      # clippy sibling of the two-state rustdoc gate below. The default-features clippy above
+      # NEVER compiles code inside default-OFF `#[cfg(feature = "…")]` modules (result-cache,
+      # txn, vectorized, service, fedplan, fedclient, odrl-bridge, …), so a clippy lint inside
+      # an opt-in feature module slips the central gate and only surfaces — if at all — via a
+      # feature-matrix.yml leg that happens to enable that exact feature (the legs there clippy
+      # per-crate `-p <crate> --features <set>`). This workspace-wide `--all-features` pass
+      # catches such lints centrally AND the cross-crate feature-unification interactions that a
+      # per-crate `-p` leg structurally cannot see (a default-feature edit that only mis-lints
+      # once the unified all-features build turns another crate's feature on). VERIFIED SOUND on
+      # main before being made gating (sq-4sbk crux check): the workspace has NO `compile_error!`
+      # mutual-exclusion guard and NO `not(feature=…)` *compile-time* assert that breaks under
+      # unification — `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+      # compiles every opt-in crate (sparq-hdt/-gpu/-py/-fedplan-mpc included) and is CLEAN.
+      # The network features (`live`/`embeddings`) only COMPILE reqwest here; no socket is
+      # opened (clippy does not run tests), so they are safe in this lint-only pass. Cost: the
+      # lint job already builds the workspace twice over (default clippy + two rustdoc passes);
+      # this adds only the off-by-default feature code on a warm target dir — a modest increment,
+      # not a second full build (the bulk of the dependency + first-party graph is already
+      # compiled by the default-features clippy above).
+      - name: clippy (deny warnings, workspace — all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # [OPUS-4.8] sq-8gsv: rustdoc -D warnings, WORKSPACE-WIDE. A broken/private intra-doc
       # link (e.g. a public item linking to a crate-private const/fn, or an unresolved
       # `[`Foo`]` that renders as literal text) is a rustdoc warning — NOT a clippy/build
