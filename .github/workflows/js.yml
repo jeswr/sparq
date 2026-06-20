@@ -43,7 +43,19 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
-      - name: Install npm dependencies
+      # [OPUS-4.8] sq-fvz8: install the FULL workspace from the repo ROOT, not just the
+      # `js/` member. The cross-language Solid differential oracle (test/solid-differential
+      # .test.mjs, PR #922) imports n3 / @solid/acl-check / @solidlab/policy-engine / rdflib,
+      # which are declared as ROOT devDependencies (deliberately NOT in js/package.json — the
+      # js-sbom lane derives the published @jeswr/sparq SBOM from js/package.json's deps, so
+      # putting test-only deps there would pollute the runtime SBOM, sq-f04e/#887). A member-
+      # scoped `npm ci` (working-directory: js) installs ONLY @jeswr/sparq's own closure and
+      # NOT the root workspace devDeps, so those imports were ERR_MODULE_NOT_FOUND -> red `js`
+      # gate. A root install hoists them into the workspace node_modules where the test (and
+      # the `js`-member build) both resolve them. js/package.json is untouched, so the
+      # published-client SBOM stays clean (runtime tree = {fzstd} only).
+      - name: Install npm dependencies (full workspace, from repo root)
+        working-directory: .
         run: npm ci
 
       - name: Build (wasm-pack + tsc)
