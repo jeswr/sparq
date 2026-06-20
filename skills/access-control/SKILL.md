@@ -345,6 +345,38 @@ CLOSED — it cannot impersonate a minted pair/triple principal. (Again: this is
 *authorization* boundary — authenticating the WebID **and verifying the issuer↔WebID
 binding** are the relying application's job.)
 
+## Trust-graph authorisation PoC — [OPUS-4.8] sq-pfae (issue #940, opt-in `trust-graph`)
+
+The **`sparq-trust`** crate (`crates/sparq-trust`) is a **research proof-of-concept** that adds
+an **admission stratum** ahead of the WAC/ACP derivation stratum: *"is this externally-attested
+fact from a source I trust for this statement-type?"* On success it injects the issuer-tagged
+fact so the shipped N3 reasoner merges it with the `.acr` rules to derive access — the age>18
+worked example (a trusted-government VC `<Jesse> age 25` + a trust policy + the `.acr` rule
+`{ ?x age ?y . ?y math:greaterThan 18 } => { ?x auth:read R }` ⇒ `<Jesse>` gains read).
+
+It is wired into `sparq-solid` behind the **default-OFF `trust-graph` cargo feature**. With the
+feature off, `sparq-solid` is byte-identical to WAC/ACP today (**strict additivity**); with it
+on, `PodStore` gains one method — `admit_trust_credential_with_rule(credential, rules, session,
+target, abac_rule_n3)` — that runs the gate and installs the derived `auth:*` grants on top of
+the unchanged auth view (the ODRL-bridge precedent). The admission gate is the §6.0 algorithm:
+RDFC-1.0 canonicalise (`sparq-canon`) → a **checked** issuer signature over the commitment
+(`sparq-zk`, never a self-asserted triple) → statement-type scoping via a real SHACL shape
+(`sparq-shacl`) → freshness (a per-request Rust check) → the clear-WebID holder binding. The
+public surface is `sparq_trust::{vocab, policy, admit, wire}` — see
+[`crates/sparq-trust/README.md`](../../crates/sparq-trust/README.md) and the design record
+[`research/solid-trust-graph-authz-design.md`](../../research/solid-trust-graph-authz-design.md)
+§6.0.
+
+**Honest scope (read first).** This is a RESEARCH prototype, **NOT a security guarantee**. It
+does **not** provide privacy, unlinkability, or anonymity: the credential is admitted in the
+clear and the holder binding authenticates the WebID in the clear (the non-anonymous degraded
+path, `sq-wvne` / `sq-xc4y`). The ZK estate it composes with is externally **unaudited**
+(`sq-qhy4`, pending external accredited-cryptographer sign-off). Issuer keys are
+operator-asserted (no DID resolver yet — `sq-pfae.3`, the live forgery vector D′). Open problems
+are respected as documented limitations, never solved: `sq-xc4y` (per-request admission vs
+materialise-once), `sq-tu4e` (no in-reasoner NAF over derived facts; `revoked` is input-only; no
+deny-on-disagreement), `sq-l5og` (delegation) and `sq-wvne` (ZK privacy) are out of PoC scope.
+
 ## Related skills
 
 - [`http-server`](../http-server/SKILL.md) — the sparq SPARQL HTTP server has **no**
