@@ -44,6 +44,44 @@ use wasm_bindgen::prelude::*;
 // PANICS off-wasm — so every `JsError` is constructed only inside a `#[wasm_bindgen]` method
 // (which never runs natively), exactly the discipline the sibling wasm bundles follow.
 
+/// [OPUS-4.8] sq-734a — converts a JS-supplied numeric argument (`range` / `step` /
+/// `max_delay` / `ts`) to the `u64` the underlying `sparq-rsp` window API uses.
+///
+/// The wasm-boundary parameters are typed `f64` — a plain JS `Number` — NOT `u64`. A `u64`
+/// wasm-bindgen parameter is a JS `BigInt`, and the release glue marshals it with
+/// `BigInt.asUintN(64, n)`, which **throws** `TypeError: Cannot convert <n> to a BigInt`
+/// when handed an ordinary JS `Number` (it does not coerce one). The site (and every other
+/// caller) naturally passes Numbers — `Rsp.select(q, 60, 60, 0, "rstream")` — so the page
+/// threw `Cannot convert 60 to a BigInt` on load. Taking `f64` here accepts the Number and
+/// this helper does the checked narrowing in Rust instead, where a bad value is a clean
+/// `JsError` rather than a thrown wasm-glue `TypeError`.
+///
+/// `name` labels the argument in the error. The value must be a non-negative, finite,
+/// integral `f64` no larger than 2⁵³−1 (`Number.MAX_SAFE_INTEGER`) — the range over which a
+/// JS `Number` represents every integer EXACTLY, so the `u64` round-trips losslessly. A
+/// fractional, negative, NaN/∞, or too-large value is rejected (a silent truncation of a
+/// logical timestamp would corrupt window membership, so this fails closed).
+fn u64_arg(name: &str, v: f64) -> Result<u64, String> {
+    // 2^53 - 1 = Number.MAX_SAFE_INTEGER — the largest f64 with exact integer round-trip.
+    const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
+    if !v.is_finite() {
+        return Err(format!("{} must be a finite number, got {}", name, v));
+    }
+    if v.fract() != 0.0 {
+        return Err(format!("{} must be a whole number, got {}", name, v));
+    }
+    if v < 0.0 {
+        return Err(format!("{} must be >= 0, got {}", name, v));
+    }
+    if v > MAX_SAFE {
+        return Err(format!(
+            "{} must be <= 2^53-1 (Number.MAX_SAFE_INTEGER), got {}",
+            name, v
+        ));
+    }
+    Ok(v as u64)
+}
+
 /// Parses the JS-supplied relation-to-stream operator name (`"rstream"` | `"istream"` |
 /// `"dstream"`, case-insensitive, plus the one-letter aliases) or returns an error message
 /// naming the accepted values — the single place the R2S string is validated.
@@ -135,21 +173,30 @@ impl Rsp {
     /// Registers a continuous SELECT over a TIME window. `sparql` is a standard SPARQL
     /// SELECT (validated NOW — a malformed or non-SELECT query is rejected here, not at the
     /// first push). `range` / `step` are the RSP-QL window parameters in the same logical
-    /// `u64` time unit the pushes use: `step == range` is tumbling, `step < range` sliding.
+    /// time unit the pushes use: `step == range` is tumbling, `step < range` sliding.
     /// `max_delay` is the out-of-order tolerance (the watermark lags the newest timestamp by
     /// this much; 0 = no tolerance). `r2s` is `"rstream"` (full result per window — the
     /// default), `"istream"` (rows added vs. the previous window) or `"dstream"` (rows
     /// removed).
     ///
-    /// Errors if the SPARQL is malformed / not a SELECT, the R2S name is unknown, or
-    /// `range`/`step` is zero (a zero-width or non-advancing window is meaningless).
+    /// `range` / `step` / `max_delay` are plain JS `Number`s ([OPUS-4.8] sq-734a). They are
+    /// the integer logical-time unit the pushes use; each must be a whole number in
+    /// `[0, 2^53-1]` (negative / fractional / NaN / too-large is a clean error). See
+    /// `u64_arg` for why the boundary is `f64` and not `u64`.
+    ///
+    /// Errors if the SPARQL is malformed / not a SELECT, the R2S name is unknown,
+    /// `range`/`step` is zero (a zero-width or non-advancing window is meaningless), or a
+    /// numeric argument is out of range.
     pub fn select(
         sparql: &str,
-        range: u64,
-        step: u64,
-        max_delay: u64,
+        range: f64,
+        step: f64,
+        max_delay: f64,
         r2s: &str,
     ) -> Result<Rsp, JsError> {
+        let range = u64_arg("range", range).map_err(|e| JsError::new(&e))?;
+        let step = u64_arg("step", step).map_err(|e| JsError::new(&e))?;
+        let max_delay = u64_arg("maxDelay", max_delay).map_err(|e| JsError::new(&e))?;
         if range == 0 {
             return Err(JsError::new("window RANGE must be > 0"));
         }
@@ -169,9 +216,14 @@ impl Rsp {
     /// `"hi"@en`, `"v"^^<…#decimal>`, `_:b`. Returns the windows this push CLOSED — a JSON
     /// ARRAY of `{"start","end","results"}` objects, oldest first, possibly empty (`[]`).
     ///
-    /// Errors if a term fails to parse as Turtle, or the engine errors evaluating a closed
-    /// window (the query itself was validated at registration).
-    pub fn push(&mut self, s: &str, p: &str, o: &str, ts: u64) -> Result<String, JsError> {
+    /// `ts` is a plain JS `Number` ([OPUS-4.8] sq-734a) — a whole logical timestamp in
+    /// `[0, 2^53-1]` (see `u64_arg`); a fractional / negative / too-large `ts` is a clean
+    /// error.
+    ///
+    /// Errors if a term fails to parse as Turtle, `ts` is out of range, or the engine errors
+    /// evaluating a closed window (the query itself was validated at registration).
+    pub fn push(&mut self, s: &str, p: &str, o: &str, ts: f64) -> Result<String, JsError> {
+        let ts = u64_arg("ts", ts).map_err(|e| JsError::new(&e))?;
         let triple = parse_triple(s, p, o).map_err(|e| JsError::new(&e))?;
         let mut closed = Vec::new();
         self.query
@@ -195,9 +247,13 @@ impl Rsp {
     /// The number of arrivals dropped as TOO LATE (every covering window had already
     /// closed) — the observability counter the page surfaces so a late push that lands in no
     /// window is visible rather than silently swallowed.
+    ///
+    /// Returned as a JS `Number` ([OPUS-4.8] sq-734a) — symmetric with the `f64` inputs, so
+    /// the page reads it without a `BigInt`. The count is bounded by the number of pushes, so
+    /// it stays within `Number`'s exact-integer range in every realistic stream.
     #[wasm_bindgen(js_name = lateDropped)]
-    pub fn late_dropped(&self) -> u64 {
-        self.query.late_dropped()
+    pub fn late_dropped(&self) -> f64 {
+        self.query.late_dropped() as f64
     }
 
     /// The registered SPARQL text (echo, for the UI).
@@ -295,5 +351,28 @@ mod tests {
     #[test]
     fn empty_batch_is_empty_array() {
         assert_eq!(windows_json(&[]), "[]");
+    }
+
+    /// [OPUS-4.8] sq-734a — the `f64 → u64` boundary narrowing accepts the JS-`Number`
+    /// values the streaming page sends (a whole `60.0`) and the boundary cases (`0`,
+    /// `Number.MAX_SAFE_INTEGER`), and rejects fractional / negative / non-finite / too-large
+    /// values cleanly. This is the regression guard for the `Cannot convert 60 to a BigInt`
+    /// page-load failure: the page passes Numbers, so the boundary must take Numbers.
+    #[test]
+    fn u64_arg_narrows_js_numbers() {
+        // The exact value from the issue: `Rsp.select(q, 60, 60, 0, "rstream")`.
+        assert_eq!(u64_arg("range", 60.0).unwrap(), 60);
+        assert_eq!(u64_arg("max_delay", 0.0).unwrap(), 0);
+        // Boundaries: 2^53-1 round-trips exactly through an f64; one past it does not.
+        assert_eq!(
+            u64_arg("ts", 9_007_199_254_740_991.0).unwrap(),
+            9_007_199_254_740_991
+        );
+        assert!(u64_arg("ts", 9_007_199_254_740_992.0).is_err());
+        // Rejected: fractional, negative, NaN, +inf.
+        assert!(u64_arg("ts", 10.5).is_err());
+        assert!(u64_arg("ts", -1.0).is_err());
+        assert!(u64_arg("ts", f64::NAN).is_err());
+        assert!(u64_arg("ts", f64::INFINITY).is_err());
     }
 }
