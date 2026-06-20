@@ -48,6 +48,12 @@
 
 pub mod canon;
 pub mod commit;
+// [OPUS-4.8] sq-xojl: DUAL-LEAF value-lane host encoding (VALUE_HOOK + lexical
+// leaf). OPT-IN behind the `dual-leaf` cargo feature (OFF by default): the
+// default string-canonical pipeline is byte-unchanged. Carries the documented
+// INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4); NOT externally audited.
+#[cfg(feature = "dual-leaf")]
+pub mod dual_leaf;
 pub mod encode;
 pub mod field;
 pub mod ingest;

@@ -18,7 +18,7 @@ v3, §S4.E). Drives the per-property Noir circuit family at
 > verifier's soundness is the subject of the open external audit
 > ([`research/zk-soundness-audit.md`](../../research/zk-soundness-audit.md)). The
 > cryptography is **not** FIPS-approved
-> ([`compliance/cryptoreview/fips-posture.md`](../../compliance/cryptoreview/fips-posture.md)).
+> ([`compliance/cryptoreview/fips-posture.md`](../../compliance/cryptoreview/fips-posture.md)). The opt-in `dual-leaf` value lane (`filter_value_dl_int` + the `dispatch` fail-closed `(method × circuit)` matrix; sq-xojl/sq-cfmv) carries the #769-accepted **INV-VL downgrade**, an open audit obligation (**CR-G8** / `sq-qhy4`) — no soundness/privacy claim (API in the SKILL). <!-- [OPUS-4.8] privacy-claims-allow: opt-in dual-leaf value lane + fail-closed dispatch matrix; INV-VL downgrade framed as an OPEN audit obligation; asserts no soundness/privacy property; sq-qhy4 / CR-G8 -->
 > Authored by Opus 4.8 (Fable 5 unavailable) — flag for re-review when Fable returns.
 
 How-to + the covered/deferred matrix: [`skills/zk-query-proofs/SKILL.md`](../../skills/zk-query-proofs/SKILL.md).

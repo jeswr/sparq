@@ -38,6 +38,15 @@ pub enum ProverTomlError {
     // [OPUS-4.8] sq-7lrq: signed/decimal proving path; witness-omitted recoverable
     // failure (no panic in a public fn).
     FilterSignedMissingWitness,
+    /// A [`ProofInputs::FilterValueDl`] (DUAL-LEAF value lane) was passed to the
+    /// general `prover_toml_for`: its private witness is two FIELD elements
+    /// (`value_hook` + `lexical_component`), a different shape from the digit-byte
+    /// witnesses the general entry threads, so the value-lane Prover.toml is
+    /// emitted by the DEDICATED [`filter_value_dl_prover_toml`] instead. This keeps
+    /// the general entry's signature unchanged (the value lane is opt-in,
+    /// `dual-leaf` feature). [OPUS-4.8] sq-xojl.
+    #[cfg(feature = "dual-leaf")]
+    FilterValueDlUseDedicatedFn,
 }
 
 impl std::fmt::Display for ProverTomlError {
@@ -56,8 +65,50 @@ impl std::fmt::Display for ProverTomlError {
                  it from build_filter_signed_int / build_filter_decimal and pass it \
                  via prover_toml_for's filter_signed_witness arg"
             ),
+            #[cfg(feature = "dual-leaf")]
+            ProverTomlError::FilterValueDlUseDedicatedFn => write!(
+                f,
+                "dual-leaf value-lane FILTER Prover.toml is emitted by the dedicated \
+                 filter_value_dl_prover_toml(challenge, operand_enc, op, bound, \
+                 datatype_const, expected, value_hook, lexical_component) — its private \
+                 witness is two field elements, not digit bytes"
+            ),
         }
     }
+}
+
+/// Render the `Prover.toml` body for a DUAL-LEAF value-lane FILTER proof
+/// (`filter_value_dl_int`, [OPUS-4.8] sq-xojl). Order MUST match
+/// `zk/compose/filter_value_dl_int/src/main.nr`:
+/// challenge, operand_enc, op, bound, datatype_const, expected (public), then
+/// value_hook, lexical_component (private). The two private witnesses are FIELD
+/// elements: `value_hook` is the numeric value handle, `lexical_component` is the
+/// OFF-circuit blake3 lexical hash carried as a free witness (the member binds it
+/// via the leaf, never hashes it — the gate win). DOCUMENTED RISK: this carries
+/// the INV-VL downgrade (value↔lexical agreement is trusted-issuer-honesty; #769
+/// accepted, CR-G8 / sq-qhy4); NOT externally audited.
+#[cfg(feature = "dual-leaf")]
+#[allow(clippy::too_many_arguments)]
+pub fn filter_value_dl_prover_toml(
+    challenge: &FieldHex,
+    operand_enc: &FieldHex,
+    op: u32,
+    bound: u64,
+    datatype_const: &FieldHex,
+    expected: bool,
+    value_hook: &FieldHex,
+    lexical_component: &FieldHex,
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", challenge.0));
+    s.push_str(&format!("operand_enc = \"{}\"\n", operand_enc.0));
+    s.push_str(&format!("op = \"{}\"\n", op));
+    s.push_str(&format!("bound = \"{}\"\n", bound));
+    s.push_str(&format!("datatype_const = \"{}\"\n", datatype_const.0));
+    s.push_str(&format!("expected = {}\n", expected));
+    s.push_str(&format!("value_hook = \"{}\"\n", value_hook.0));
+    s.push_str(&format!("lexical_component = \"{}\"\n", lexical_component.0));
+    s
 }
 
 impl std::error::Error for ProverTomlError {}
@@ -501,6 +552,16 @@ pub fn prover_toml_for(
                 &w.frac_digits,
             );
             (id.clone(), toml)
+        }
+        // [OPUS-4.8] sq-xojl: DUAL-LEAF value-lane FILTER. Its private witness is two
+        // FIELD elements (value_hook + lexical_component), a different shape from the
+        // digit-byte witnesses this general entry threads, so the value-lane
+        // Prover.toml is emitted by the dedicated `filter_value_dl_prover_toml` (which
+        // keeps this signature unchanged for the opt-in `dual-leaf` feature). Surface
+        // a recoverable error here, never a panic.
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDl { .. } => {
+            return Err(ProverTomlError::FilterValueDlUseDedicatedFn);
         }
         // [OPUS-4.8] sq-bwwl / sq-r2s8 (step 4 proving path): hidden cross-credential
         // JOIN. The public inputs (commit_a/commit_b/join_commitment/slot_a/slot_b)

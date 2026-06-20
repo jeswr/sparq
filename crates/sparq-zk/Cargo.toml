@@ -26,6 +26,16 @@ default = []
 # name is the warning. LEAN: adds NO dependency. (`string-canonical` and
 # `dual-leaf` are always available; only the research dial is gated.)
 commitment-value-only = []
+# [OPUS-4.8] sq-xojl: the DUAL-LEAF value-lane HOST ENCODING (`dual_leaf` module)
+# — VALUE_HOOK + lexical-identity hash in one leaf, the host mirror of the
+# `filter_value_dl_int` Noir circuit member. OFF by default: the default
+# string-canonical pipeline (`encode.rs`/`commit.rs`) is byte-unchanged and the
+# `dual_leaf` module is compiled out. The `DualLeafV1` commitment METHOD (the
+# config seam, sq-zzxt) is always present; this feature gates the value-lane
+# ENCODER + components used by the verifier/circuit cross-check. Carries the
+# documented INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4); NOT externally
+# audited. LEAN: adds NO dependency (reuses the existing blake3 / poseidon2).
+dual-leaf = []
 
 [dependencies]
 # sparq term model / store / engine. The engine dep turns on its non-default

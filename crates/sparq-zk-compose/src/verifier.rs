@@ -1917,6 +1917,21 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
             };
             derive_filter_decimal_id(id, fd)
         }
+        // [OPUS-4.8] sq-xojl: DUAL-LEAF value-lane FILTER. DIGIT-COUNT-FREE — the
+        // member id carries no `d`/`md`/`(id,fd)` parameter (the per-digit family
+        // collapses), so the derive only confirms the declared id is the single
+        // `FilterValueDl` member. The full CircuitId is what the public-input
+        // reconstruction + canonical-vk recompute pin. The fail-closed legality of
+        // this member against the recorded COMMITMENT METHOD (it is LEGAL only for
+        // `DualLeafV1` / the `ValueOnlyV1` research dial, never `string-canonical`)
+        // is the dispatch matrix `crate::dispatch::resolve_circuit` (sq-cfmv) — the
+        // host-encoding wiring that gives the verifier the method is sq-j506, gated
+        // behind sq-qhy4. Here the derive only confirms the member identity.
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDl { .. } => match inputs.circuit_id() {
+            CircuitId::FilterValueDl => Some(CircuitId::FilterValueDl),
+            _ => None,
+        },
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN. The
         // two graph sizes are PRIVATE (the witnessed graph contents are not public
         // inputs — only the commitments are), so — exactly as scan trusts the
@@ -4881,6 +4896,25 @@ fn reconstruct_public_inputs(
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, u64::from(*bound_neg));
             push_uint(&mut out, *bound_scaled);
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-xojl: filter_value_dl_int (DUAL-LEAF value lane) public
+        // inputs, in `main` declaration order: challenge (pushed above),
+        // operand_enc, op, bound, datatype_const, expected. Cross-reference
+        // `zk/compose/filter_value_dl_int/src/main.nr`. `operand_enc` is the
+        // DUAL-LEAF leaf `h3(h3(VALUE_HOOK, datatype_const, LANG_NONE),
+        // lexical_component, TYPE_CODE_LITERAL)`; the verifier reconstructs the
+        // SAME public-input vector the prover serialized, so a `filter_value_dl_int`
+        // sub-proof's bb verification runs. (Like the other FILTER members, this is
+        // the public-input SERIALIZATION; the `(method, circuit)` legality + the
+        // scan-binding gate are the dispatch matrix `crate::dispatch` (sq-cfmv) and
+        // the host-encoding wiring (sq-j506), gated behind sq-qhy4.)
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDl { operand_enc, op, bound, datatype_const, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, *bound);
+            push_field(&mut out, datatype_const, proof, "datatype_const")?;
             push_uint(&mut out, u64::from(*expected));
         }
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN

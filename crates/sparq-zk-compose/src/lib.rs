@@ -23,6 +23,12 @@
 pub mod build;
 // [OPUS-4.8] sq-314: derivation steps + entailment-regime enforcement.
 pub mod derivation;
+// [OPUS-4.8] sq-cfmv: fail-closed (commitment-method × circuit) dispatch matrix.
+// OPT-IN behind the `dual-leaf` feature (OFF by default). Rejects an
+// unsupported / mismatched (method, circuit) pair, never silently mis-dispatches.
+// NOT externally audited (sq-qhy4); enforces structural legality only.
+#[cfg(feature = "dual-leaf")]
+pub mod dispatch;
 pub mod driver;
 // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK host-side wiring (B2).
 pub mod holder;
@@ -39,6 +45,9 @@ pub use manifest::{
 };
 // [OPUS-4.8] sq-314: derivation-step capability + entailment regime end-to-end.
 pub use derivation::{regime_admits, DerivationStep, EntailmentRule};
+// [OPUS-4.8] sq-cfmv: the fail-closed (method × circuit) dispatch resolver.
+#[cfg(feature = "dual-leaf")]
+pub use dispatch::{resolve_circuit, resolve_circuit_for_scheme, DispatchError};
 pub use verifier::EntailmentPolicy;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
