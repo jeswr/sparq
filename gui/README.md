@@ -23,7 +23,7 @@ targets, selected by the single `NEXT_PUBLIC_BASE_PATH` switch (the same switch 
 | Target | Command (`gui/app`) | `basePath` | Where it runs |
 |---|---|---|---|
 | **Tauri desktop** | `npm run build:tauri` | `""` (root-relative) | embedded in the desktop webview (serves from the `tauri://` root) |
-| **Hosted "Try the GUI live" web** | `npm run build:web` | `/sparq/gui` (default; overridable) | a static page so the site's "Try the GUI" link has a real target (bead `sq-wt4s3`; the hosting/Pages-root slot is `sq-svtt`) |
+| **Hosted "Try the GUI live" web** | `npm run build:web` | `/sparq/app` (default; overridable) | a static page hosted at the site's **App** destination so the live-GUI link has a real target (beads `sq-wt4s3` + `sq-vnd0i`; `/try` stays the lightweight REPL) |
 
 The desktop bundle is wired via `gui/src-tauri/tauri.conf.json` — `frontendDist: "../app/out"`
 and `beforeBuildCommand: cd ../app && npm run build:tauri`. **`frontendDist` is no longer
