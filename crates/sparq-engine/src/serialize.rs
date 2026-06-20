@@ -1843,6 +1843,36 @@ pub fn graph_to_jsonld_pretty_with(
     write_jsonld_pretty(&view, form, prefixes, opts)
 }
 
+/// [OPUS-4.8] (sq-oy1f.5) The PRETTY (indented) form of [`write_jsonld_compact`]: the full
+/// W3C JSON-LD 1.1 Compaction document against `context`, re-indented (whitespace only) with
+/// `opts`. The byte content is exactly [`write_jsonld_compact`]'s output run through the same
+/// presentation pass as [`write_jsonld_pretty`], so it parses back to the same RDF.
+pub fn write_jsonld_compact_pretty(
+    graphs: &[NamedGraph<'_>],
+    context: &JsonLdValue,
+    opts: &JsonLdPrettyOptions,
+) -> String {
+    let minified = write_jsonld_compact(graphs, context);
+    reindent_json(&minified, &opts.indent)
+}
+
+/// [OPUS-4.8] (sq-oy1f.5) The PRETTY (indented) analogue of [`graph_to_jsonld_compact`]:
+/// serialises a [`Graph`] as a full W3C JSON-LD 1.1 Compaction document against `context`
+/// and re-indents it with `opts`. Whitespace-only over [`graph_to_jsonld_compact`] (the same
+/// document, multi-line), so the round-trip and losslessness properties are identical.
+pub fn graph_to_jsonld_compact_pretty(
+    graph: &Graph,
+    context: &JsonLdValue,
+    opts: &JsonLdPrettyOptions,
+) -> String {
+    let owned = dataset_graphs(graph);
+    let view: Vec<NamedGraph<'_>> = owned
+        .iter()
+        .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+        .collect();
+    write_jsonld_compact_pretty(&view, context, opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

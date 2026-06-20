@@ -313,6 +313,41 @@ export class Store {
      */
     serialize(format: string, pretty: boolean, indent: string | null | undefined, abbreviate: boolean, prefixes?: Array<any> | null): string;
     /**
+     * [OPUS-4.8] sq-oy1f.5: serialises the store as a **full W3C JSON-LD 1.1 Compaction**
+     * document against a caller-supplied `@context`.
+     *
+     * Where [`serialize`](Self::serialize)`("jsonld-compacted", …)` only abbreviates IRIs
+     * to `prefix:local` CURIEs from a `[prefix, iri]` map (a *prefix-only* `@context`), this
+     * applies the real **W3C JSON-LD 1.1 Compaction Algorithm** against the `@context` JSON
+     * you pass: **term definitions** (`{"name":"http://…/name"}` or the expanded
+     * `{"@id"/"@reverse","@type","@language","@container"}` form), **`@vocab`**, **type
+     * coercion** (a term `@type` matching a datatype collapses the value object;
+     * `@type":"@id"`/`@vocab` collapse a node reference to a bare IRI string), **language
+     * coercion**, **`@container`** (`@set`/`@list`/`@language`/`@index`), **`@reverse`**
+     * terms, and `@id`/`@type` keyword aliasing — value + node + IRI compaction against the
+     * active context. The whole dataset is emitted (named graphs as nested `@graph` nodes).
+     *
+     * `context` is the `@context` **JSON text** — e.g. `'{"@vocab":"http://schema.org/"}'`
+     * or `'{"name":"http://xmlns.com/foaf/0.1/name"}'`. It must be a JSON **object** (a
+     * JSON-LD `@context` value); an empty `{}` yields an expanded-shaped document with no
+     * abbreviation. A non-object or malformed JSON is rejected with a `JsError` (never a
+     * silently-wrong document).
+     *
+     * `pretty` selects the indented multi-line shape (whitespace-only re-indentation of the
+     * minified document); `indent` is the indent unit (`undefined`/`null` ⇒ two spaces,
+     * ignored when `pretty` is `false`).
+     *
+     * The compaction is **lossless** — every coercion it applies is invertible against the
+     * same `@context`, so a JSON-LD-to-RDF round-trip of the output reconstructs the original
+     * triples. Routes through the SAME engine writer
+     * (`sparq_engine::serialize::graph_to_jsonld_compact`) the native CLI surface uses, so
+     * the bytes match. Still **dependency-free** (a hand-rolled `Json` AST — no `serde_json`,
+     * no json-ld crate). Available only when the crate is built with the OPT-IN
+     * `serialize-rdf` feature (the JSON-LD *serialise-out* path needs no `jsonld` feature —
+     * that one is INGEST-only); on the lean default bundle this method is absent.
+     */
+    serializeCompact(context: string, pretty: boolean, indent?: string | null): string;
+    /**
      * Applies a SPARQL 1.1 Update (`INSERT DATA`, `DELETE DATA`, `CLEAR`,
      * `DELETE/INSERT … WHERE` on the default graph) and returns the **new** store —
      * the receiver is immutable and remains valid. Mirrors `sparq_engine::update`'s
@@ -392,6 +427,7 @@ export interface InitOutput {
     readonly store_queryQuads: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_queryQuadsChunks: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_serialize: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+    readonly store_serializeCompact: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly store_size: (a: number) => number;
     readonly store_update: (a: number, b: number, c: number) => [number, number, number];
     readonly store_updateInPlace: (a: number, b: number, c: number) => [number, number];
