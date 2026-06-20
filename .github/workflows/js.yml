@@ -1,13 +1,47 @@
-# Informational CI for the npm package (js/) wrapping crates/sparq-wasm.
-# Builds the wasm artifact with wasm-pack, compiles the TypeScript wrapper,
-# runs the node:test suite, and checks that `npm pack` stays publishable.
+# [OPUS-4.8] sq-5lof — GATING CI for the npm package (js/) wrapping crates/sparq-wasm.
+# Builds the wasm artifact with wasm-pack, compiles the TypeScript wrapper, runs the
+# node:test suite (incl. the cross-language Solid differential oracle), and checks that
+# `npm pack` stays publishable.
+#
+# THIS GATES (it is NOT informational). The check name is `js` and carries NO
+# `advisory`/`informational` token, so the `ci-summary / gate` aggregator
+# (.github/workflows/ci-summary.yml — it excludes only names matching the whole word
+# `\b(advisory|informational)\b`) treats `js` as a HARD required gate. Gating is correct:
+# this lane caught a real regression (PR #922's undeclared-npm-dep break, surfaced as a
+# red main and fixed in #953 / sq-fvz8). The old "Informational CI" header was stale.
+#
+# WHY a `pull_request` trigger (sq-5lof): js.yml USED to trigger on `push: branches:[main]`
+# ONLY, so the gating `js` check never ran on a PR — it only went green/red AFTER merge to
+# main. That is exactly how #922's regression reached main undetected (no PR-time js
+# validation). The `pull_request` trigger below validates the `js` gate BEFORE merge.
+#
+# SCOPE: PRs that touch the js/wasm/package surfaces (paths below) — a docs-only or pure-
+# Rust-engine PR skips this lane (no run, so the required `ci-summary / gate` simply never
+# waits on it; cross-workflow `needs:` is impossible — see site-e2e.yml / gui.yml). This
+# keeps the heavy wasm-pack + full-workspace install off unrelated PRs. It is NOT a
+# `merge_group` lane (ci-summary.yml never cross-workflow needs js.yml), matching
+# site-e2e.yml / gui.yml. The unfiltered `push: branches:[main]` trigger is KEPT for
+# post-merge cover on every main push (this is the leg #953 fixed — left untouched).
 name: js
 
 on:
+  pull_request:
+    # The surfaces that can affect the js build/test: the js package itself, the npm
+    # workspace members + root lockfile/manifest it installs from (the #953 root install),
+    # every sparq-*-wasm crate the build compiles (sparq-wasm + reason/rsp/shacl/text-wasm),
+    # and this workflow file. A pure-Rust-engine or docs-only PR matches none of these.
+    paths:
+      - "js/**"
+      - "packages/**"
+      - "crates/sparq-wasm/**"
+      - "crates/sparq-*-wasm/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/js.yml"
   push:
     branches: [main]
 
-# [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions): this informational
+# [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions): this gating
 # build/test job only reads the repo; grant nothing more. Jobs needing writes opt in per-job.
 permissions:
   contents: read
