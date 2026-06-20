@@ -806,6 +806,14 @@ fn cmd_query_mmap(args: &[String]) {
 /// `parse_to_triples` falls back to Turtle for ANY unrecognised string, so the CLI must
 /// gate on this set itself to honour the "unsupported format → non-zero exit" contract.
 fn is_known_format(format: &str) -> bool {
+    // [OPUS-4.8] (sq-oy1f.4) JSON-LD input is recognised in the DEFAULT build (the `jsonld`
+    // feature is in the CLI default set — a maintainer-directed exception). Without the feature
+    // (`--no-default-features`) the `oxjsonld` parser is not linked, so the JSON-LD tokens are
+    // NOT "known" and a `jsonld` input format errors (exit 2) rather than mis-parsing as Turtle.
+    #[cfg(feature = "jsonld")]
+    if matches!(format, "jsonld" | "json-ld" | "application/ld+json") {
+        return true;
+    }
     matches!(
         format,
         "hdt"
@@ -828,8 +836,12 @@ fn is_known_format(format: &str) -> bool {
 
 /// [OPUS-4.8] Report an unknown `--format` value and exit 2 (usage error).
 fn die_unknown_format(format: &str) -> ! {
+    // [OPUS-4.8] (sq-oy1f.4) `jsonld` is named in the default build (the `jsonld` feature is in
+    // the CLI default set); a `--no-default-features` build omits it from the list.
     eprintln!(
-        "unknown format '{format}' (known: turtle | ntriples | nquads | trig{})",
+        "unknown format '{}' (known: turtle | ntriples | nquads | trig{}{})",
+        format,
+        if cfg!(feature = "jsonld") { " | jsonld" } else { "" },
         if cfg!(feature = "hdt") { " | hdt" } else { "" }
     );
     std::process::exit(2);
@@ -885,8 +897,18 @@ fn load_quiet(path: &str, format: &str) -> sparq_core::Graph {
         use std::io::Read;
         let mut text = String::new();
         open_reader(path).and_then(|mut r| r.read_to_string(&mut text)).unwrap_or_else(|e| die(e.to_string()));
-        // N-Quads / TriG carry named graphs — load them as a dataset so GRAPH queries work.
-        if matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
+        // N-Quads / TriG (and — [OPUS-4.8] sq-oy1f.4 — JSON-LD, whose `@graph` carries named
+        // graphs) load as a DATASET so GRAPH queries and full-dataset re-serialisation (`dump …
+        // jsonld`) see the named graphs instead of folding them into the default graph.
+        #[cfg(feature = "jsonld")]
+        let dataset = matches!(
+            format,
+            "nquads" | "n-quads" | "trig" | "application/trig"
+                | "jsonld" | "json-ld" | "application/ld+json"
+        );
+        #[cfg(not(feature = "jsonld"))]
+        let dataset = matches!(format, "nquads" | "n-quads" | "trig" | "application/trig");
+        if dataset {
             sparq_core::Graph::load_dataset(&text, format).unwrap_or_else(|e| die(e))
         } else {
             sparq_core::Graph::load_str(&text, format).unwrap_or_else(|e| die(e))

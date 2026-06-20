@@ -12,11 +12,12 @@
 //!     `q=0` rejects it, an unknown `Accept` does not 406 (the server has a default), and an
 //!     unsupported write `Content-Type` is a `415`.
 //!
-//! The positive tests compile only with the `jsonld` feature (`cargo test -p sparq-server
-//! --features jsonld`). A separate block under `#[cfg(not(feature = "jsonld"))]` asserts the
-//! feature-OFF contract: an `application/ld+json` write body is a plain `415`, and an
-//! `Accept: application/ld+json` query falls back to a supported graph format (NOT a 406) —
-//! so the default build is byte-identical to before.
+//! The positive tests compile with the `jsonld` feature — which, as of sq-oy1f.4, is in the
+//! server's DEFAULT set (a maintainer-directed exception to opt-in-by-default), so the plain
+//! `cargo test -p sparq-server` runs them. A separate block under `#[cfg(not(feature =
+//! "jsonld"))]` asserts the feature-OFF contract (`--no-default-features --features server`): an
+//! `application/ld+json` write body is a plain `415`, and an `Accept: application/ld+json` query
+//! falls back to a supported graph format (NOT a 406) — so a JSON-LD-disabled build is unchanged.
 
 use sparq_core::Graph;
 use sparq_server::{router, AppState};

@@ -35,7 +35,14 @@ required-features = ["server"]
 # sparq-engine directly — see crates/sparq-wasm/Cargo.toml), so the heavy async deps
 # are never part of the bundle. Kept behind a feature so a consumer can depend on the
 # pure serializer library (XML/CSV/TSV) without dragging in the runtime.
-default = ["server"]
+# [OPUS-4.8] (sq-oy1f.4, MAINTAINER-DIRECTED DEFAULT-ON EXCEPTION) `jsonld` is in the default
+# set: the server speaks `application/ld+json` in BOTH directions (CONSTRUCT/DESCRIBE + GSP-read
+# EMIT, GSP-write ACCEPT) out of the box (the user-prioritised sq-oy1f epic). Deliberate exception
+# to opt-in-by-default — JSON-LD is the dominant linked-data interchange format and the server
+# binary has no bundle-size floor. Still TOGGLEABLE: `--no-default-features --features server`
+# (or just `server`) drops JSON-LD and `application/ld+json` becomes unrecognised (406/415) as
+# before. The `--no-default-features` (pure serialiser library) build is unaffected.
+default = ["server", "jsonld"]
 # [OPUS-4.8] (sq-vpx4) Compiles internal TEST SEAMS — currently the durable-write
 # failure-injection hook on the `--persist` seal path, exposed via
 # `AppState::with_config_inject_durable_failure` for the graceful-degradation
