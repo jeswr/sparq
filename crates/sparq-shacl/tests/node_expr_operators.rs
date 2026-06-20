@@ -412,6 +412,35 @@ fn match_all_universal_quantifier() {
     assert_eq!(lexes(&eval(&data, &shapes, "ma", &iri("b"))), vec!["false"]);
 }
 
+/// `matchAll` must use the SPECIFIC named filter shape, not just "a" shape: with
+/// two distinct shapes registered, the discriminating one flips the boolean. (This
+/// pins `inline_or_named_shape` to the real `by_node` lookup — a constant shape-id
+/// would mis-route to the wrong shape and give the opposite answer.)
+#[test]
+fn match_all_uses_the_named_filter_shape_not_an_arbitrary_one() {
+    let data = g(r#"
+        ex:a ex:item ex:i1 , ex:i2 .
+        ex:i1 ex:tag "x" .
+        ex:i2 ex:tag "y" .
+        # Neither item carries ex:other, so the OtherShape filter fails for all.
+    "#);
+    let shapes = g(r#"
+        # Two distinct named shapes. HasTag conforms for both items; HasOther for
+        # neither. matchAll over the SAME nodes must give opposite booleans.
+        ex:HasTag   a sh:NodeShape ; sh:property [ sh:path ex:tag   ; sh:minCount 1 ] .
+        ex:HasOther a sh:NodeShape ; sh:property [ sh:path ex:other ; sh:minCount 1 ] .
+        ex:Decl
+          ex:maTag   [ shnex:nodes [ sh:path ex:item ] ; shnex:matchAll ex:HasTag ] ;
+          ex:maOther [ shnex:nodes [ sh:path ex:item ] ; shnex:matchAll ex:HasOther ] .
+    "#);
+    let f = iri("a");
+    // All items have a tag -> { true }; none have ex:other -> { false }. If the
+    // filter-shape id were a constant (the survivor), both would collapse to the
+    // SAME boolean — so the two assertions together kill that mutant.
+    assert_eq!(lexes(&eval(&data, &shapes, "maTag", &f)), vec!["true"]);
+    assert_eq!(lexes(&eval(&data, &shapes, "maOther", &f)), vec!["false"]);
+}
+
 /// `matchAll` over an EMPTY input set is vacuously `{ true }`.
 #[test]
 fn match_all_empty_input_is_vacuously_true() {
