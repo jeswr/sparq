@@ -87,6 +87,26 @@ that `D`) relabelling. Triple terms occur only as objects in oxrdf 0.3 (a
 triple's subject is `NamedOrBlankNode`), so nesting descends strictly through
 the object position; the HNDQ poison-graph limit still applies.
 
+**Distinguishing power (regression-tested).** An adversarial soundness audit of
+the nested-bnode descent (sq-mu1cd / sq-63g0) confirmed the profile is **sound**
+on every constructed nested-bnode case (0 confirmed defects / 5 refuted
+suspicions): although triple-term-internal bnodes share one HNDQ position marker
+(object position + the outer predicate, with no inner subject/object/depth
+sub-discriminator), distinct nested structure never collapses, because the final
+serialization re-renders the actual `Term::Triple` structure with c14n labels and
+the issuer map separates genuinely-distinct bnodes via the first-degree descent.
+The audit's sharper non-isomorphic vectors are landed as permanent regression
+tests (`tests/rdf12_triple_term_canon.rs` §5): asymmetric / anchored inner swap,
+inner-subject vs inner-object leaf, depth-1 vs depth-2 nesting, and a self-loop
+inner-subject vs inner-object pair — each first **brute-force-proven
+non-isomorphic** by an independent oracle before asserting the canon differs, so a
+future refactor of `hash_n_degree_quads` / `hash_related_blank_node` that
+introduced a false-equal would be caught. The `*_with::<Sha384>` *standard* path
+still fails closed on triple terms (there is no SHA-384 rdf12 canonicalizer to
+mis-canonicalize). The open spec question of whether the nested-bnode marker
+should carry a sub-discriminator is a robustness/spec-clarity matter, not a
+latent defect here.
+
 ### Opt-in, single-sourced
 
 Nothing in sparq's default build or the wasm artifact depends on this crate —
