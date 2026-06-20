@@ -14,9 +14,9 @@ sq-pwr / sq-0jsc; `research/mpc-untrusted-planner-routing-design.md`).
 
 Phase 1 (sq-2q1x) landed the **seam scaffold**; Phase 2 (sq-fix4) the **source-selection
 adapter**; Phase 3 (sq-i1wh2) the **disclosed/hidden routing pass**; Phase 4 (sq-pwr.2) the
-**leakage-envelope assembly + dual ratification**. The remaining privacy-bearing phases
-(untrusted-plan soundness re-validation, authenticated-input attestation) stay deferred and
-audit-gated.
+**leakage-envelope assembly + dual ratification**; Phase 6 (sq-pwr.3) the **result-aware
+source-combination prune**. The remaining privacy-bearing phases (untrusted-plan soundness
+re-validation, authenticated-input attestation) stay deferred and audit-gated.
 
 * [`SourcePrivacyDescriptor`] — the per-source privacy declaration the routing pass reads:
   which predicates a source is **willing to disclose in the clear**, the opaque attestation-key
@@ -52,6 +52,20 @@ audit-gated.
   exceeds its declared budget). It is **leakage-accounting + a plan-time policy gate — not a
   cryptographic enforcement**: it runs NO MPC and makes NO soundness/privacy claim. See
   [`envelope`].
+* [`prune_source_combinations`] (**Phase 6, implemented**) — the FedUP-style **result-aware
+  source-combination prune** over the Phase-2 selection. A full federated query executes a
+  *conjunction* of patterns, and the seam's secure-join cost grows with the number of source
+  *combinations* (one source per pattern) it considers. This pass surfaces which combinations
+  **provably contribute no answer** so the seam routes fewer toward MPC. The one recall-safe,
+  summary-expressible rule is **unsatisfiable-conjunct collapse**: if any pattern's Phase-2
+  candidate list is empty, that conjunct is a proved-empty relation, so the whole conjunction is
+  unsatisfiable and **every** source-combination is dead (`∅ ⋈ R = ∅`). It carries the Phase-2
+  selection through unchanged (advisory + auditable, never silently dropping), reporting
+  `bgp_satisfiable`, the empty-pattern witnesses, the BGP join components, and a
+  combination-dead audit trail. The value-overlap / bound-IRI-propagation prune is **declined**
+  as not recall-safely expressible from the public summary (documented in [`combination`]). It
+  is selection plumbing — **not** a cryptographic guarantee; runs NO MPC, makes NO
+  privacy/soundness claim. See [`combination`].
 * [`SeamPhase`] + [`SeamError`] — the shared error/phase types. The [`SeamError::Deferred`] channel
   is retained for a future gated phase (e.g. the untrusted-plan soundness re-validation, Phase 5);
   no phase is deferred today.
@@ -81,7 +95,7 @@ on it, so the default engine build and the WASM artifact are byte-identical with
 it; a build that does not enable `fedplan-mpc` compiles an empty crate and pulls in neither
 `sparq-fedplan` nor `sparq-mpc`. Neither upstream gains a cross-dependency on the other.
 
-[OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 / sq-pwr.2 — flagged for Fable re-review."#
+[OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 / sq-pwr.2 / sq-pwr.3 — flagged for Fable re-review."#
 )]
 // Default (feature OFF) build: a concise, link-free crate doc. None of the gated items above
 // exist in this build, so the doc is plain text only (no intra-doc links). [OPUS-4.8] sq-2q1x.
@@ -89,20 +103,21 @@ it; a build that does not enable `fedplan-mpc` compiles an empty crate and pulls
     not(feature = "fedplan-mpc"),
     doc = r#"sparq-fedplan-mpc: the opt-in glue between cost-based federated source selection
 (`sparq-fedplan`) and MPC-over-federated-SPARQL routing (`sparq-mpc`) — the untrusted-planner →
-MPC-routing seam (beads sq-2q1x + sq-fix4 + sq-i1wh2 + sq-pwr.2). See `README.md` and
-`skills/mpc/SKILL.md` for the full design.
+MPC-routing seam (beads sq-2q1x + sq-fix4 + sq-i1wh2 + sq-pwr.2 + sq-pwr.3). See `README.md`
+and `skills/mpc/SKILL.md` for the full design.
 
 **This is the default build with the `fedplan-mpc` feature OFF, so the crate is empty** — the
 whole surface (the `SourcePrivacyDescriptor`, the Phase-2 `select_private_sources` adapter, the
-Phase-3 `route_operators` routing pass, and the Phase-4 `assemble_leakage_envelope` +
-`ratify_envelope` gate) is gated behind the
+Phase-3 `route_operators` routing pass, the Phase-4 `assemble_leakage_envelope` +
+`ratify_envelope` gate, and the Phase-6 `prune_source_combinations` result-aware combination
+prune) is gated behind the
 **`fedplan-mpc` cargo feature, OFF by default**. Build with `--features fedplan-mpc` to see the
 seam API. The crate is a standalone `publish = false` workspace member; `sparq-core` /
 `sparq-engine` never depend on it, and a feature-off build pulls in neither `sparq-fedplan` nor
 `sparq-mpc`. The crate performs no MPC and makes no privacy/soundness claim; the remaining
 privacy-bearing phases are deferred and audit-gated (sq-9hrn / sq-qhy4).
 
-[OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 / sq-pwr.2 — flagged for Fable re-review."#
+[OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 / sq-pwr.2 / sq-pwr.3 — flagged for Fable re-review."#
 )]
 #![forbid(unsafe_code)]
 // [OPUS-4.8] sq-2q1x: crate has zero `unsafe`.
@@ -114,6 +129,10 @@ privacy-bearing phases are deferred and audit-gated (sq-9hrn / sq-qhy4).
 #![cfg_attr(not(feature = "fedplan-mpc"), allow(dead_code, unused_imports))]
 
 // The whole seam surface is feature-gated; a feature-off build compiles an empty crate.
+// [OPUS-4.8] sq-pwr.3: Phase 6 result-aware source-combination prune lives in its own module
+// (mirroring the Phase-2 `selection` / Phase-3 `routing` / Phase-4 `envelope` splits).
+#[cfg(feature = "fedplan-mpc")]
+pub mod combination;
 // [OPUS-4.8] sq-pwr.2: Phase 4 leakage-envelope assembly + dual ratification lives in its own
 // module (mirroring the Phase-2 `selection` / Phase-3 `routing` splits).
 #[cfg(feature = "fedplan-mpc")]
@@ -133,6 +152,12 @@ pub mod selection;
 
 #[cfg(feature = "fedplan-mpc")]
 pub use privacy::{Disclosability, SourcePrivacyDescriptor, SourcePrivacyDescriptorBuilder};
+// [OPUS-4.8] sq-pwr.3: Phase 6 — the result-aware source-combination prune + its result types.
+#[cfg(feature = "fedplan-mpc")]
+pub use combination::{
+    prune_source_combinations, BgpComponent, CombinationPruneReason, PrunedCombination,
+    PrunedCombinations,
+};
 // [OPUS-4.8] sq-pwr.2: Phase 4 — the implemented leakage-envelope assembly + dual-ratification gate.
 #[cfg(feature = "fedplan-mpc")]
 pub use envelope::{assemble_leakage_envelope, ratify_envelope};
