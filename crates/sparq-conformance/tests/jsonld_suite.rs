@@ -3,7 +3,8 @@
 //! conformance gate that mirrors the SPARQL / SHACL / GeoSPARQL / Solid ratchets
 //! in this crate (crate-local `cargo test` + a pinned pass-count FLOOR that may
 //! only RISE, registered in the central `scoreboard::SUITES` and guarded by
-//! `tests/jsonld_floors.rs`).
+//! `tests/scoreboard_floors.rs` — the textual floor-sync guard that pins each
+//! registry `ratchet_floor` to the `const … FLOOR` the runner asserts here).
 //!
 //! ## What is gated (v1) — only what sparq runs TODAY
 //!
@@ -44,18 +45,28 @@
 //! non-string-language shapes is NOT claimed by this ratchet and is tracked
 //! separately (a child of sq-oy1f).
 //!
+//! * **frame** (RDF → framed JSON-LD) — [OPUS-4.8] sq-oy1f.19: each
+//!   `jld:FrameTest` from the SEPARATE `w3c/json-ld-framing` suite (an arbitrary
+//!   EXPANDED JSON-LD input) is parsed to RDF (the real oxjsonld path), framed
+//!   against the case frame document through the native **Framing Algorithm** —
+//!   `sparq_engine::serialize::graph_to_jsonld_framed` (the `serialize-rdf`
+//!   feature) — then re-parsed and required to reconstruct the SAME RDF dataset as
+//!   the suite's NORMATIVE expected output: `reparse(frame(D, F)) ≡ reparse(expected)`.
+//!   Framing is a SELECT + RESHAPE (it prunes/fills/drops), so the oracle anchors on
+//!   the expected document, NOT the input. See `run_frame` for the SKIP buckets (the
+//!   3 frame-validation negatives sparq's TOTAL framer does not raise).
+//!
 //! ## Honest known-gap buckets (NOT failed, recorded as not-implemented)
 //!
-//! `expand`, `flatten`, `html`, `remote-doc`, and `frame` are the algorithm
-//! categories sparq does **not** yet ship as gateable surfaces: Framing is deferred
-//! (a separate W3C rec, sq-oy1f.6); expand/flatten as *output* algorithms are
-//! subsumed by the writer but have no W3C expected-document comparison here yet;
+//! `expand`, `flatten`, `html`, and `remote-doc` are the algorithm categories sparq
+//! does **not** yet ship as gateable surfaces: expand/flatten as *output* algorithms
+//! are subsumed by the writer but have no W3C expected-document comparison here yet;
 //! html/remote-doc need an HTML extractor / a remote `@context` loader. (`compact`
-//! GRADUATED out of this bucket under sq-3uos5 — it is now a gated category above.)
-//! These categories are reported in a separate **not-implemented** column of the
-//! scoreboard and DO NOT fail the gate, so the ratchet measures only what is
-//! shipped and GROWS as those land. The scoreboard prints them honestly as
-//! not-implemented — it does not inflate the pass count.
+//! GRADUATED out of this bucket under sq-3uos5, and `frame` under sq-oy1f.19 — both
+//! are now gated categories above.) These categories are reported in a separate
+//! **not-implemented** column of the scoreboard and DO NOT fail the gate, so the
+//! ratchet measures only what is shipped and GROWS as those land. The scoreboard
+//! prints them honestly as not-implemented — it does not inflate the pass count.
 //!
 //! ## Feature gating (both states)
 //!
@@ -64,9 +75,11 @@
 //! feature OFF this file compiles to a single self-SKIP `#[test]` (no oxjsonld /
 //! writer code links), so the default `cargo test -p sparq-conformance` and the
 //! `--workspace` shards stay green and lean. With it ON the runner executes and
-//! asserts the pinned floors. The suite fixtures are fetched by
-//! `scripts/fetch-jsonld-tests.sh` into the gitignored `tests/w3c/json-ld-api/`;
-//! when absent the runner SKIPS itself so a fresh offline checkout stays green.
+//! asserts the pinned floors. The toRdf/fromRdf/compact fixtures are fetched by
+//! `scripts/fetch-jsonld-tests.sh` into the gitignored `tests/w3c/json-ld-api/`,
+//! and the frame fixtures by `scripts/fetch-jsonld-framing-tests.sh` into
+//! `tests/w3c/json-ld-framing/`; when either is absent the runner SKIPS that lane
+//! so a fresh offline checkout stays green.
 //!
 //! Manifest-walking helpers are modelled on this crate's SPARQL machinery and on
 //! `sparq-shacl`'s W3C runner (copied, not shared). Comparison uses oxrdf's
@@ -94,13 +107,14 @@ mod gated {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
-    // ---- Floors (the RATCHET). Calibrated against the pinned suite revision in
-    // scripts/fetch-jsonld-tests.sh; MIRRORED in the central scoreboard
+    // ---- Floors (the RATCHET). Calibrated against the pinned suite revisions in
+    // scripts/fetch-jsonld-tests.sh (toRdf/fromRdf/compact) + scripts/
+    // fetch-jsonld-framing-tests.sh (frame); MIRRORED in the central scoreboard
     // (scoreboard::SUITES) and read textually by the guard test
-    // tests/jsonld_floors.rs. They may only RISE — never lower them (raise as
+    // tests/scoreboard_floors.rs. They may only RISE — never lower them (raise as
     // oxjsonld coverage / the native writer improve). These are the ACTUAL
-    // current pass counts at the pinned revision, not aspirational targets.
-    // The `tests/jsonld_floors.rs` floor-sync guard reads these `const … : usize
+    // current pass counts at the pinned revisions, not aspirational targets.
+    // The `tests/scoreboard_floors.rs` floor-sync guard reads these `const … : usize
     // = N;` lines textually (the same shape as SHACL's `BASELINE_PASS`), so the
     // central scoreboard can never silently drift from what this runner asserts.
 
@@ -128,15 +142,71 @@ mod gated {
     /// redefinition errors, processing-mode error-raising), and those are SKIPPED
     /// (not failed) — see `run_compact` for the honest skip buckets.
     ///
-    /// Measured 163/246 at the pinned revision: 163 lossless round-trips, 58 honest
-    /// compaction divergences (the `@type:@id`-coerced-key-vs-plain-string IRI
-    /// confusion; `@graph`/`@index`/`@id`/`@language` container round-trips the
-    /// hand-rolled writer does not fully reproduce; scoped/typed-context shapes), and
-    /// 25 SKIP (negatives sparq does not raise, JSON-LD-1.0-only cases, non-inline /
-    /// remote / multi `@context`, and empty-RDF inputs). The 58 divergences are real
-    /// writer gaps below the floor, not harness artefacts — they are tracked for a
-    /// future floor RISE (a child of sq-oy1f).
-    pub const COMPACT_FLOOR: usize = 163;
+    /// [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after the compaction faithfulness
+    /// fixes (#978, sq-oy1f.12/.13/.14: `@reverse` double-invert, non-string
+    /// `@language`/`@none`, `@type:@id`-coerced-key-vs-plain-string IRI confusion,
+    /// container round-trips) landed on main. Re-MEASURED on current main at the
+    /// pinned revision: compact 186 pass / 35 fail / 25 skip (was 163/58/25). The
+    /// +23 FAIL→PASS are the cases those writer fixes made lossless. The 35
+    /// remaining failures are real writer gaps below the floor (scoped/typed
+    /// contexts, `@nest`, `@index`/`@id` map shapes the writer does not emit),
+    /// tracked for a future RISE; the 25 SKIP are unchanged (negatives sparq does
+    /// not raise, JSON-LD-1.0-only, non-inline/remote/multi `@context`, empty-RDF).
+    pub const COMPACT_FLOOR: usize = 186;
+
+    /// [OPUS-4.8] sq-oy1f.19 — `frame` (RDF → framed+compacted JSON-LD via the
+    /// native hand-rolled Framing Algorithm) pass floor over the SEPARATE
+    /// `w3c/json-ld-framing` suite (`scripts/fetch-jsonld-framing-tests.sh`).
+    /// RATCHET: may only RISE. This is the MEASURED pass count at the pinned
+    /// framing-suite revision — the number of `jld:FrameTest` cases for which
+    /// framing the input's RDF against the case frame document and re-parsing the
+    /// framed output reconstructs the SAME RDF dataset as re-parsing the suite's
+    /// NORMATIVE expected output (`reparse(frame(D, F)) ≡ reparse(expected)`).
+    ///
+    /// ## Why compare against `expect`, not the input
+    ///
+    /// Framing is a SELECT + RESHAPE, not a lossless transform: `@explicit` prunes
+    /// properties, an unmatched frame yields an empty `@graph`, `@default` fills a
+    /// value not in the input. So `reparse(frame(D)) ≡ D` is the WRONG oracle (the
+    /// framed RDF legitimately differs from the input). The normative answer is the
+    /// suite's `*-out.jsonld`; sparq must produce the SAME RDF as that expected
+    /// document. Comparing the two as canonical RDF datasets is envelope-insensitive
+    /// (both the bare-node `omitGraph` collapse and the `{"@graph":[…]}` envelope
+    /// re-parse to the same triples) and value-faithful, while NOT requiring sparq's
+    /// JSON layout to match pyld byte-for-byte (it does not — the same posture as
+    /// the toRdf/fromRdf/compact lanes).
+    ///
+    /// ## Honest SKIP buckets (recorded, not passed, not failed)
+    ///
+    /// * NegativeEvaluationTests (`expectErrorCode`) — sparq's framer is TOTAL; it
+    ///   never raises the spec's frame-validation errors (`invalid frame`, out-of-
+    ///   range `@embed`). A 1.1 framer that does not model those errors cannot
+    ///   honestly "pass" by rejecting, so these are SKIPPED (the compact-lane posture).
+    /// * A positive case with no `expect`, a non-object `frame`, an `input` the real
+    ///   oxjsonld path rejects, or a remote `input`/`frame` URL — out of the gated
+    ///   surface (SKIP, never a counted pass).
+    ///
+    /// Note: the `ordered` option (1 case) governs JSON-array element ORDER, a
+    /// concern the RDF-level oracle is blind to by design — such a case is still
+    /// gated on RDF equality and passes iff the framed RDF matches the expected RDF,
+    /// the honest verdict an RDF oracle can give.
+    ///
+    /// MEASURED 61/92 at the pinned framing-suite revision: 61 normative
+    /// RDF-equivalent frames, 28 honest framer divergences (value-pattern matching
+    /// over `@value` alternative arrays, `@explicit`/`@default` fill differences,
+    /// named-graph `@graph` framing shapes, `@list`/`@set` re-emit, blank-node
+    /// `@embed` table edge cases), and 3 SKIP (the suite's 3 NegativeEvaluationTests
+    /// — sparq's TOTAL framer does not raise the spec's frame-validation errors).
+    /// The 28 divergences are real framer gaps below the floor (tracked for a future
+    /// RISE — a child of sq-oy1f); SKIP is reserved for genuinely-unsupported cases,
+    /// never used to hide a divergence.
+    pub const FRAME_FLOOR: usize = 61;
+
+    /// [OPUS-4.8] sq-oy1f.19 — the framing suite's declared base (its
+    /// `baseIri`), used to resolve each frame test's input path into the document
+    /// IRI. Distinct from `SUITE_BASE` (the json-ld-api base) — framing is a
+    /// separate W3C repo.
+    const FRAME_SUITE_BASE: &str = "https://w3c.github.io/json-ld-framing/tests/";
 
     /// The suite's declared base for resolving each test's input path into the
     /// document IRI (the toRdf base when `option.base` is absent).
@@ -146,6 +216,14 @@ mod gated {
         // CARGO_MANIFEST_DIR = crates/sparq-conformance; the workspace root is two up.
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/w3c/json-ld-api/tests")
+    }
+
+    /// [OPUS-4.8] sq-oy1f.19 — the SEPARATE `w3c/json-ld-framing` suite root
+    /// (`scripts/fetch-jsonld-framing-tests.sh`). Framing lives in its own W3C
+    /// repo, not under `json-ld-api`.
+    fn frame_suite_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/w3c/json-ld-framing/tests")
     }
 
     #[derive(Default)]
@@ -221,6 +299,17 @@ mod gated {
         /// model (it is not a faithful pass for a 1.1 processor to "reject" them).
         spec_version: Option<String>,
         processing_mode: Option<String>,
+        /// [OPUS-4.8] sq-oy1f.19 — the `frame` manifest's top-level `frame`
+        /// member: a path (relative to the suite root) to the sibling
+        /// `*-frame.jsonld` document (the frame pattern + its `@context`) to frame
+        /// the input against. `None` for the toRdf/fromRdf/compact manifests.
+        frame: Option<String>,
+        /// [OPUS-4.8] sq-oy1f.19 — a NegativeEvaluationTest's expected JSON-LD
+        /// error code (`invalid frame`, `invalid @embed value`, …). Recorded so the
+        /// frame runner can SKIP the error-raising negatives sparq's TOTAL framer
+        /// does not model (it never raises the spec's frame-validation errors), the
+        /// same honesty posture the compact lane takes toward its negatives.
+        expect_error_code: Option<String>,
     }
 
     /// Read `<cat>-manifest.jsonld` and return its `sequence` entries.
@@ -281,6 +370,15 @@ mod gated {
                 .and_then(|o| o.get("processingMode"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            // [OPUS-4.8] sq-oy1f.19 — frame-only manifest members (None elsewhere).
+            let frame = e
+                .get("frame")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let expect_error_code = e
+                .get("expectErrorCode")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             out.push(Entry {
                 id,
                 is_negative,
@@ -291,6 +389,8 @@ mod gated {
                 context,
                 spec_version,
                 processing_mode,
+                frame,
+                expect_error_code,
             });
         }
         Ok(out)
@@ -686,14 +786,184 @@ mod gated {
         s
     }
 
+    /// [OPUS-4.8] sq-oy1f.19 — the base/document IRI for a `frame` test: the
+    /// `option.base` override if given, else the framing suite base joined with the
+    /// input path. (Distinct from `doc_base`, which uses the json-ld-api base.)
+    fn frame_doc_base(e: &Entry) -> String {
+        e.base_override
+            .clone()
+            .unwrap_or_else(|| format!("{}{}", FRAME_SUITE_BASE, e.input))
+    }
+
+    /// [OPUS-4.8] sq-oy1f.19 — run the SEPARATE W3C `w3c/json-ld-framing` suite
+    /// against sparq's hand-rolled Framing Algorithm (`sparq_engine::serialize::
+    /// graph_to_jsonld_framed`, the `serialize-rdf` feature).
+    ///
+    /// ## Pipeline (the REAL framing path)
+    ///
+    /// 1. Parse the case `input` (an arbitrary EXPANDED/`@graph` JSON-LD document) →
+    ///    RDF via the real oxjsonld ingest path (`parse_jsonld_dataset`). This is the
+    ///    expanded-document framing ENTRY PATH the bead asked for: the framer takes a
+    ///    `Graph`, not a JSON-LD doc, so the suite's expanded input is reduced to its
+    ///    RDF and loaded into a `Graph` — exactly the bridge `run_compact` uses.
+    /// 2. Read the case `frame` document (`*-frame.jsonld`: the frame pattern + its
+    ///    `@context`) with the writer's own JSON reader.
+    /// 3. Run `graph_to_jsonld_framed(&graph, &frame)`.
+    /// 4. **Invariant (normative answer-equivalence):** re-parse BOTH sparq's framed
+    ///    output AND the suite's NORMATIVE expected output (`*-out.jsonld`) to
+    ///    canonical [`Dataset`]s and require they are equal —
+    ///    `reparse(frame(D, F)) ≡ reparse(expected)`. Framing is a SELECT + RESHAPE
+    ///    (it legitimately prunes / fills / drops), so the oracle anchors on the
+    ///    W3C-expected framed document, NOT the input (see `FRAME_FLOOR`). This is
+    ///    envelope-insensitive and value-faithful while not requiring byte-identical
+    ///    JSON layout (the same oxjsonld self-reparse oracle the other lanes use).
+    ///
+    /// ## Honest SKIP buckets (recorded, not passed, not failed)
+    ///
+    /// * `requires` optional-feature cases — out of the gated surface.
+    /// * NegativeEvaluationTests (`expectErrorCode`) — sparq's framer is TOTAL and
+    ///   never raises the spec's frame-validation errors, so it cannot honestly
+    ///   "pass" by rejecting. SKIP (the compact-lane posture), never a counted pass.
+    /// * A positive case with no `expect` document, or whose `expect` the real
+    ///   oxjsonld path cannot re-parse (out of the gated surface) — SKIP.
+    /// * Remote `input`/`frame` URLs — none in the pinned suite, but guarded (SKIP).
+    fn run_frame(root: &Path) -> Score {
+        use sparq_engine::serialize::{graph_to_jsonld_framed, parse_context_json};
+        let mut s = Score::default();
+        let entries = match read_manifest(root, "frame") {
+            Ok(e) => e,
+            Err(why) => {
+                s.fail("frame-manifest", why);
+                return s;
+            }
+        };
+        for e in &entries {
+            if e.requires.is_some() {
+                s.skip();
+                continue;
+            }
+            // NegativeEvaluationTest: sparq's framer does not raise the spec's
+            // frame-validation errors, so a faithful 1.1 framer cannot "pass" by
+            // rejecting — SKIP (honest), never count as a pass.
+            if e.is_negative || e.expect_error_code.is_some() {
+                s.skip();
+                continue;
+            }
+            let Some(frame_rel) = &e.frame else {
+                s.skip();
+                continue;
+            };
+            let Some(expect_rel) = &e.expect else {
+                s.skip();
+                continue;
+            };
+            // Remote input/frame (no network) — none in the pinned suite; guard.
+            if e.input.starts_with("http://")
+                || e.input.starts_with("https://")
+                || frame_rel.starts_with("http://")
+                || frame_rel.starts_with("https://")
+            {
+                s.skip();
+                continue;
+            }
+
+            // 1. Parse the EXPANDED input document → RDF (the framing input).
+            let input_path = root.join(&e.input);
+            let in_text = match std::fs::read_to_string(&input_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read input: {why}"));
+                    continue;
+                }
+            };
+            let base = frame_doc_base(e);
+            let input_ds = match parse_jsonld_dataset(&in_text, &base) {
+                Ok(ds) => ds,
+                // An input the real oxjsonld path rejects is out of scope for the
+                // framing round-trip (the toRdf lane gates ingest) — SKIP.
+                Err(_) => {
+                    s.skip();
+                    continue;
+                }
+            };
+
+            // 2. Read the frame document (the whole frame JSON: pattern + @context).
+            let frame_path = root.join(frame_rel);
+            let frame_text = match std::fs::read_to_string(&frame_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read frame: {why}"));
+                    continue;
+                }
+            };
+            let Some(frame) = parse_context_json(&frame_text) else {
+                // A non-object frame (array/string) is not drivable through the
+                // single-object framer entry — SKIP.
+                s.skip();
+                continue;
+            };
+
+            // 3. Load the input RDF into a sparq Graph (named graphs preserved) and
+            //    run the REAL framing writer over the expanded-document-derived RDF.
+            let nq = dataset_to_nquads(&input_ds);
+            let graph = match Graph::load_dataset(&nq, "nquads") {
+                Ok(g) => g,
+                Err(why) => {
+                    s.fail(&e.id, format!("load input rdf into graph: {why}"));
+                    continue;
+                }
+            };
+            let framed = graph_to_jsonld_framed(&graph, &frame);
+
+            // 4. The normative answer-equivalence invariant: re-parse BOTH sparq's
+            //    framed output and the suite's expected output, require RDF equality.
+            let got = match jsonld_to_canonical_dataset(&framed, &base) {
+                Ok(ds) => ds,
+                Err(why) => {
+                    s.fail(&e.id, format!("re-parse framed output: {why}"));
+                    continue;
+                }
+            };
+            let expect_path = root.join(expect_rel);
+            let exp_text = match std::fs::read_to_string(&expect_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read expect: {why}"));
+                    continue;
+                }
+            };
+            let want = match jsonld_to_canonical_dataset(&exp_text, &base) {
+                Ok(ds) => ds,
+                Err(why) => {
+                    s.fail(&e.id, format!("re-parse expected output: {why}"));
+                    continue;
+                }
+            };
+            if got == want {
+                s.pass();
+            } else {
+                s.fail(
+                    &e.id,
+                    format!(
+                        "framed RDF != expected RDF ({} vs {} quads)",
+                        got.len(),
+                        want.len()
+                    ),
+                );
+            }
+        }
+        s
+    }
+
     /// The known-gap categories: present in the W3C suite but NOT a sparq-shipped
     /// gateable surface yet. Reported as not-implemented (never failed). The size
     /// is read from each manifest so the scoreboard shows the real backlog and
     /// shrinks honestly as categories light up.
     ///
     /// [OPUS-4.8] sq-3uos5 — `compact` GRADUATED out of this bucket: it is now a
-    /// gated category (`run_compact`, `COMPACT_FLOOR`). `frame` stays deferred
-    /// (a separate W3C rec, sq-oy1f.6).
+    /// gated category (`run_compact`, `COMPACT_FLOOR`). [OPUS-4.8] sq-oy1f.19 —
+    /// `frame` likewise GRADUATED: it is now a gated category (`run_frame`,
+    /// `FRAME_FLOOR`) over the separate `w3c/json-ld-framing` suite.
     const NOT_IMPLEMENTED_CATS: &[(&str, &str)] = &[
         ("expand", "Expansion — output-vs-W3C-document comparison not wired (sq-oy1f)"),
         ("flatten", "Flattening — output-vs-W3C-document comparison not wired (sq-oy1f)"),
@@ -726,7 +996,16 @@ mod gated {
         let compact = run_compact(&root);
         let not_impl = not_implemented_counts(&root);
 
-        println!("\nW3C JSON-LD 1.1 conformance scoreboard (pinned w3c/json-ld-api)");
+        // [OPUS-4.8] sq-oy1f.19 — framing lives in the SEPARATE w3c/json-ld-framing
+        // suite (scripts/fetch-jsonld-framing-tests.sh), which a checkout may have
+        // independently of json-ld-api. Run it only when present; otherwise the
+        // `frame` line reports "suite absent" and the frame ratchet is not asserted
+        // (a fresh offline checkout stays green). When present, the FRAME_FLOOR
+        // ratchet is asserted below.
+        let frame_root = frame_suite_root();
+        let frame = frame_root.exists().then(|| run_frame(&frame_root));
+
+        println!("\nW3C JSON-LD 1.1 conformance scoreboard (pinned w3c/json-ld-api + json-ld-framing)");
         println!("{:<10} {:>5} {:>5} {:>5}", "category", "pass", "fail", "skip");
         // [OPUS-4.8] The CI ratchet greps these `TOTAL <cat>` lines.
         println!(
@@ -743,11 +1022,24 @@ mod gated {
             "TOTAL compact {} {} {} (floor {})",
             compact.pass, compact.fail, compact.skip, COMPACT_FLOOR
         );
+        // [OPUS-4.8] sq-oy1f.19 — the frame ratchet. The CI grep depends on this
+        // exact `^TOTAL frame ` prefix with the pass count in field $3 (same shape
+        // as the other lanes). Printed only when the framing suite is present.
+        if let Some(frame) = &frame {
+            println!(
+                "TOTAL frame {} {} {} (floor {})",
+                frame.pass, frame.fail, frame.skip, FRAME_FLOOR
+            );
+        } else {
+            println!(
+                "frame      (suite absent — run scripts/fetch-jsonld-framing-tests.sh; floor {})",
+                FRAME_FLOOR
+            );
+        }
         println!("\nknown-gap (NOT-IMPLEMENTED — not gated, grows the ratchet as they land):");
         for (cat, why) in NOT_IMPLEMENTED_CATS {
             println!("  {:<10} {:>4} tests — {}", cat, not_impl.get(cat).copied().unwrap_or(0), why);
         }
-        println!("  frame      (separate W3C rec — deferred, sq-oy1f.6)");
 
         if !tordf.failures.is_empty() {
             println!("\ntoRdf failures (first 40):");
@@ -765,6 +1057,14 @@ mod gated {
             println!("\ncompact failures (first 40):");
             for (id, why) in compact.failures.iter().take(40) {
                 println!("  {}: {}", id, why);
+            }
+        }
+        if let Some(frame) = &frame {
+            if !frame.failures.is_empty() {
+                println!("\nframe failures (first 40):");
+                for (id, why) in frame.failures.iter().take(40) {
+                    println!("  {}: {}", id, why);
+                }
             }
         }
 
@@ -789,5 +1089,15 @@ mod gated {
             compact.pass,
             COMPACT_FLOOR
         );
+        // [OPUS-4.8] sq-oy1f.19 — the frame ratchet (normative answer-equivalence
+        // floor), asserted only when the separate framing suite is present.
+        if let Some(frame) = &frame {
+            assert!(
+                frame.pass >= FRAME_FLOOR,
+                "JSON-LD frame pass count regressed: {} < floor {} — see failures above",
+                frame.pass,
+                FRAME_FLOOR
+            );
+        }
     }
 }

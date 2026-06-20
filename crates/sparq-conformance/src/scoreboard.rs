@@ -133,9 +133,14 @@ pub struct Suite {
 ///   `TORDF_FLOOR = 413` (sq-oy1f.2; opt-in `jsonld-suite` feature).
 /// * JSON-LD fromRdf 51 — `sparq-conformance` `tests/jsonld_suite.rs`
 ///   `FROMRDF_FLOOR = 51` (sq-oy1f.2; opt-in `jsonld-suite` feature).
-/// * JSON-LD compact 163 — `sparq-conformance` `tests/jsonld_suite.rs`
-///   `COMPACT_FLOOR = 163` (sq-3uos5; opt-in `jsonld-suite` feature; RDF →
-///   compacted JSON-LD via the native Compaction Algorithm, lossless round-trip).
+/// * JSON-LD compact 186 — `sparq-conformance` `tests/jsonld_suite.rs`
+///   `COMPACT_FLOOR = 186` (sq-3uos5; RAISED 163→186 by sq-oy1f.16 after #978's
+///   faithfulness fixes; opt-in `jsonld-suite` feature; RDF → compacted JSON-LD via
+///   the native Compaction Algorithm, lossless round-trip).
+/// * JSON-LD frame 61 — `sparq-conformance` `tests/jsonld_suite.rs`
+///   `FRAME_FLOOR = 61` (sq-oy1f.19; opt-in `jsonld-suite` feature; RDF → framed
+///   JSON-LD via the native Framing Algorithm over the SEPARATE w3c/json-ld-framing
+///   suite, compared by re-parse RDF-equivalence to the normative expected output).
 /// * Solid WAC differential 0 — `sparq-solid` `tests/differential_oracle.rs`
 ///   `DIVERGENCE_FLOOR = 0` (sq-t58w.8; a divergence-count floor, hard 0 — the WAC
 ///   and ACP differential rows share this one const).
@@ -248,18 +253,21 @@ pub const SUITES: &[Suite] = &[
         note: "engine vs an independent reference evaluator vs the hand Expect table, \
                over the ACP parity corpus (zero divergence)",
     },
-    // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 API conformance ratchets. The
-    // runner is crate-local here (`tests/jsonld_suite.rs`) but behind the OPT-IN
-    // `jsonld-suite` feature (forwards to sparq-core/jsonld + sparq-engine/
+    // [OPUS-4.8] sq-oy1f.2 / sq-3uos5 / sq-oy1f.19 — the W3C JSON-LD 1.1 conformance
+    // ratchets. The runner is crate-local here (`tests/jsonld_suite.rs`) but behind
+    // the OPT-IN `jsonld-suite` feature (forwards to sparq-core/jsonld + sparq-engine/
     // serialize-rdf) so the default + `--workspace` builds neither link oxjsonld
-    // nor go red — the lean-core posture. Two gated categories: toRdf (JSON-LD →
-    // RDF through the real oxjsonld parse path) and fromRdf (RDF → JSON-LD through
-    // the native serialize-rdf writer, compared by a re-parse round-trip). The
-    // floors are the MEASURED pass counts at the pinned w3c/json-ld-api revision
-    // (NOT 100% — remote-context/option divergences are honest, recorded gaps);
-    // they may only RISE. Compaction/Framing/expand-out/flatten-out are the
-    // documented NOT-IMPLEMENTED buckets the runner reports separately (never
-    // failed). Floors kept in lock-step by `tests/scoreboard_floors.rs`.
+    // nor go red — the lean-core posture. Four gated categories: toRdf (JSON-LD →
+    // RDF through the real oxjsonld parse path), fromRdf (RDF → JSON-LD through the
+    // native serialize-rdf writer, re-parse round-trip), compact (RDF → compacted
+    // JSON-LD via the native Compaction Algorithm, lossless round-trip), and frame
+    // (RDF → framed JSON-LD via the native Framing Algorithm over the SEPARATE
+    // w3c/json-ld-framing suite, RDF-equivalence to the normative expected output).
+    // The floors are the MEASURED pass counts at the pinned suite revisions (NOT
+    // 100% — remote-context/option divergences are honest, recorded gaps); they may
+    // only RISE. expand-out/flatten-out remain the documented NOT-IMPLEMENTED
+    // buckets the runner reports separately (never failed). Floors kept in lock-step
+    // by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 toRdf",
         family: "W3C JSON-LD",
@@ -272,7 +280,7 @@ pub const SUITES: &[Suite] = &[
         ratchet_floor: 413,
         floor_basis: "pass",
         note: "JSON-LD → RDF through the real oxjsonld parse path (jsonld feature); \
-               framing is a documented not-implemented bucket (compact is now gated)",
+               compact + frame are now gated; expand/flatten remain not-implemented buckets",
     },
     Suite {
         label: "W3C JSON-LD 1.1 fromRdf",
@@ -308,11 +316,41 @@ pub const SUITES: &[Suite] = &[
             feature: "jsonld-suite",
         },
         ci_job: "jsonld-conformance",
-        ratchet_floor: 163,
+        // [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after the #978 compaction
+        // faithfulness fixes landed (re-measured on current main: 186 pass).
+        ratchet_floor: 186,
         floor_basis: "pass",
         note: "RDF → compacted JSON-LD through the native Compaction Algorithm \
                (serialize-rdf), compared by a re-parse RDF-dataset round-trip \
                (lossless-compaction invariant)",
+    },
+    // [OPUS-4.8] sq-oy1f.19 — the W3C JSON-LD 1.1 `frame` ratchet (epic sq-oy1f),
+    // over the SEPARATE w3c/json-ld-framing suite (fetch-jsonld-framing-tests.sh).
+    // Each `jld:FrameTest` input (an arbitrary EXPANDED JSON-LD document) is parsed
+    // to RDF (the real oxjsonld path), framed against the case frame document
+    // through the native hand-rolled Framing Algorithm (`graph_to_jsonld_framed`,
+    // serialize-rdf), then the framed output is re-parsed and required to
+    // reconstruct the SAME RDF dataset as the suite's NORMATIVE expected output
+    // (`reparse(frame(D, F)) ≡ reparse(expected)` — framing is a SELECT+RESHAPE, so
+    // the oracle anchors on the expected document, NOT the input). The floor is the
+    // MEASURED pass count; the remaining cases are honest framer divergences (below
+    // the floor, to RISE) or documented SKIP (the 3 frame-validation negatives
+    // sparq's TOTAL framer does not raise). Floor kept in lock-step by
+    // `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "W3C JSON-LD 1.1 frame",
+        family: "W3C JSON-LD",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "jsonld_suite",
+            feature: "jsonld-suite",
+        },
+        ci_job: "jsonld-conformance",
+        ratchet_floor: 61,
+        floor_basis: "pass",
+        note: "RDF → framed JSON-LD through the native Framing Algorithm \
+               (serialize-rdf) over the w3c/json-ld-framing suite, compared by a \
+               re-parse RDF-equivalence to the normative expected output",
     },
     // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite, wired as a crate-local
     // decision-parity ratchet in sparq-policy (mirrors the Solid WAC/ACP pattern:
