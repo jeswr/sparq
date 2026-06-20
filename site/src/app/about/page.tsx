@@ -7,7 +7,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { ALL_SURFACES, TIER_LABEL, TIER_VARIANT } from "@/data/surfaces";
+import {
+  ALL_SURFACES_WITH_ABOUT,
+  TIER_LABEL,
+  TIER_VARIANT,
+} from "@/data/surfaces";
 
 export const metadata: Metadata = {
   title: "About",
@@ -50,7 +54,7 @@ export default function AboutPage() {
               </tr>
             </thead>
             <tbody>
-              {ALL_SURFACES.map((s) => (
+              {ALL_SURFACES_WITH_ABOUT.map((s) => (
                 <tr key={s.slug} className="border-t">
                   <td className="px-4 py-2.5 font-medium">{s.title}</td>
                   <td className="px-4 py-2.5">
