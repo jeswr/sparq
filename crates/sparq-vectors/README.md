@@ -91,11 +91,11 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
 - **Structure-aware vectorisation (opt-in `structure`; measurement behind `kge`)** — research-grade
   P0: `close_for_vectorise` materialises the `sparq-reason` RDFS/OWL-RL closure **before** vectorising
   and a `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an on/off ablation.
-  `kge` (implies `structure`, no new dependency — hand-rolled SGD) adds a thin CPU-only **DistMult**
-  trainer + a standard **filtered link-prediction** harness (`run_ablation`): filtered MRR /
-  Hits@1/3/10, the `{closure}×{type-neg}` **ablation matrix**, a **long-tail** breakdown, and a
-  synthetic **gUFO** slice (`examples/kge_ablation.rs`, `SPARQ_KGE_DATASET`) — **no accuracy claim**,
-  numbers INDICATIVE only, never baked into docs.
+  `kge` (implies `structure`, no new dependency — hand-rolled SGD) adds a thin CPU-only KGE trainer
+  (`ModelKind`: symmetric **DistMult** or asymmetric **ComplEx**) + a **filtered link-prediction**
+  harness (`run_ablation` / `run_ablation_multiseed`): the `{closure}×{type-neg}` **ablation matrix**,
+  a **long-tail** breakdown, a synthetic **gUFO** slice. **No accuracy claim**; numbers INDICATIVE only.
+  DistMult is near-random on directional data → read deltas off ComplEx, multi-seed, real dataset.
 
 ## 📚 Learn more
 

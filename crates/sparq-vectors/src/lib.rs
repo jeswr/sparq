@@ -33,9 +33,10 @@ pub mod store;
 // carries zero structure-prep code.
 #[cfg(feature = "structure")]
 pub mod structure;
-// [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e): the MEASUREMENT FOUNDATION — a thin DistMult KGE trainer
-// (`train`) over the P0 closure + type-constrained negatives, and the filtered link-prediction eval
-// harness (`eval`) with the {closure}×{type-neg} ablation matrix, long-tail breakdown, and synthetic
+// [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e): the MEASUREMENT FOUNDATION — a thin shallow-KGE trainer
+// (`train`; symmetric DistMult or asymmetric ComplEx via `ModelKind`) over the P0 closure +
+// type-constrained negatives, and the filtered link-prediction eval harness (`eval`) with the
+// {closure}×{type-neg} ablation matrix (single- and multi-seed), long-tail breakdown, and synthetic
 // gUFO slice. `kge` feature only (implies `structure`); the default build carries zero trainer/eval
 // code and no new dependency.
 #[cfg(feature = "kge")]
@@ -123,11 +124,12 @@ pub use structure::{
 // harness surface — `kge` feature only.
 #[cfg(feature = "kge")]
 pub use eval::{
-    run_ablation, synthetic_gufo_ttl, synthetic_relational_ttl, AblationCell, EvalConfig, LongTail,
-    Metrics, Splits, SCHEMA_PREDICATES,
+    run_ablation, run_ablation_multiseed, synthetic_gufo_ttl, synthetic_relational_ttl,
+    AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, Splits,
+    SCHEMA_PREDICATES,
 };
 #[cfg(feature = "kge")]
-pub use train::{train, TrainConfig, TrainReport, TrainedModel};
+pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
     ObjectKind, PropertyGroup,

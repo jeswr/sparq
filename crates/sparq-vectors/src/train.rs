@@ -18,15 +18,27 @@
 //! parallelism, no learning-rate schedule beyond a fixed step, no early stopping). It is **not** a
 //! claim that sparq ships SOTA KGE.
 //!
-//! # Why DistMult (the simplest sound choice)
+//! # Two scoring models: DistMult and ComplEx (the asymmetry axis)
 //!
 //! DistMult (Yang et al. 2015, *Embedding Entities and Relations for Learning and Inference in
 //! Knowledge Bases*) scores a triple `(h, r, t)` as the trilinear product
 //! `score = Σ_i e_h[i] · w_r[i] · e_t[i]` — one entity matrix and one (diagonal) relation vector,
-//! the fewest parameters of any standard bilinear KGE. It is symmetric in `h`/`t` (it cannot model
-//! asymmetric relations) — an honest limitation we accept because the point here is a *measurement
-//! substrate for the P0 priors*, not relation-pattern coverage. (ComplEx/RotatE would fix the
-//! asymmetry at more code; deferred.)
+//! the fewest parameters of any standard bilinear KGE. **It is symmetric in `h`/`t`** (its score is
+//! identical for `(h, r, t)` and `(t, r, h)`), so on a relation whose true edges are **directional**
+//! it is structurally near-random *by construction* — it cannot place the head above the tail.
+//!
+//! ComplEx (Trouillon et al. 2016, *Complex Embeddings for Simple Link Prediction*) is the minimal
+//! asymmetric extension: embeddings are complex, and the score is the real part of the Hermitian
+//! trilinear product `Re(⟨e_h, w_r, conj(e_t)⟩)`. Splitting each complex vector into a real and an
+//! imaginary half (`e = e_re + i·e_im`), the score is
+//! `Σ_i [ h_re·r_re·t_re + h_re·r_im·t_im + h_im·r_re·t_im − h_im·r_im·t_re ]`. The final term
+//! flips sign when `h` and `t` are swapped, so **ComplEx breaks the DistMult symmetry** and can
+//! model directional relations. Picking the model is the [`ModelKind`] axis on [`TrainConfig`].
+//!
+//! **Why this matters for the ablation (adversarial-review finding):** both synthetic eval slices
+//! are ~100 % directional (no `(a,r,b)` ever has a reverse `(b,r,a)`), so a DistMult ablation runs
+//! entirely in a near-random regime where the inter-cell deltas are noise. The ablation **must** be
+//! re-run with [`ModelKind::ComplEx`] before any prior is adopted; the example runs both models.
 //!
 //! # Training objective
 //!
@@ -80,12 +92,53 @@ fn sigmoid(x: f32) -> f32 {
     }
 }
 
+/// ComplEx score `Re(⟨e_h, w_r, conj(e_t)⟩)` for three `dim`-float rows interpreted as complex
+/// vectors (first `dim/2` real, last `dim/2` imaginary). Expanding the Hermitian trilinear product
+/// over the `half = dim/2` complex components:
+/// `Σ_i [ h_re·r_re·t_re + h_re·r_im·t_im + h_im·r_re·t_im − h_im·r_im·t_re ]`. The last term flips
+/// sign under an `h ↔ t` swap, which is exactly what makes ComplEx **asymmetric** (DistMult is the
+/// real-only case `r_im = h_im = t_im = 0`, which collapses to the symmetric `Σ h·r·t`).
+#[inline]
+fn score_complex(h: &[f32], r: &[f32], t: &[f32], dim: usize) -> f32 {
+    let half = dim / 2;
+    let mut s = 0.0f32;
+    for i in 0..half {
+        let (h_re, h_im) = (h[i], h[half + i]);
+        let (r_re, r_im) = (r[i], r[half + i]);
+        let (t_re, t_im) = (t[i], t[half + i]);
+        s += h_re * r_re * t_re + h_re * r_im * t_im + h_im * r_re * t_im - h_im * r_im * t_re;
+    }
+    s
+}
+
+/// Which bilinear KGE scoring function the trainer uses — the **asymmetry axis**.
+///
+/// [`ModelKind::DistMult`] is symmetric in head/tail (cannot model directional relations);
+/// [`ModelKind::ComplEx`] is the minimal asymmetric extension (complex embeddings, Hermitian
+/// product). On directional data the symmetric model is structurally near-random, so the ablation
+/// must be re-run with `ComplEx` before any prior is adopted — see the module docs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ModelKind {
+    /// Yang et al. 2015 trilinear product `Σ e_h·w_r·e_t` — **symmetric** in `h`/`t`.
+    DistMult,
+    /// Trouillon et al. 2016 Hermitian product `Re(⟨e_h, w_r, conj(e_t)⟩)` — **asymmetric**. The
+    /// `dim` floats are interpreted as `dim/2` complex components (real half then imaginary half);
+    /// `dim` must be even (the trainer rounds an odd `dim` down to the nearest even value).
+    #[default]
+    ComplEx,
+}
+
 /// Hyper-parameters for the [`train`] loop. All fields are explicit (no hidden defaults) so a run
 /// is fully reproducible from its config; [`TrainConfig::small`] gives a sane, work-box-sized
 /// preset for tests and the indicative ablation.
 #[derive(Clone, Copy, Debug)]
 pub struct TrainConfig {
-    /// Embedding dimensionality (entity vectors and the diagonal relation vector share it).
+    /// The scoring model — the asymmetry axis ([`ModelKind`]). Defaults to the asymmetric
+    /// [`ModelKind::ComplEx`] in [`TrainConfig::small`] (the directional-slice-safe choice).
+    pub model: ModelKind,
+    /// Embedding dimensionality (entity vectors and the diagonal relation vector share it). For
+    /// [`ModelKind::ComplEx`] it is the number of `f32`s, i.e. `dim/2` complex components, and must
+    /// be even (an odd value is rounded down).
     pub dim: usize,
     /// Number of full passes over the positive triples.
     pub epochs: usize,
@@ -104,10 +157,20 @@ pub struct TrainConfig {
 }
 
 impl TrainConfig {
-    /// A small, work-box-sized preset: 32-dim, a handful of epochs, modest LR. Sized to train a
-    /// few-thousand-triple graph in seconds on a CPU — **not** a tuned production configuration.
+    /// A small, work-box-sized preset: the asymmetric [`ModelKind::ComplEx`] model, 32-dim, a
+    /// handful of epochs, modest LR. Sized to train a few-thousand-triple graph in seconds on a CPU
+    /// — **not** a tuned production configuration. ComplEx is the default because both eval slices
+    /// are directional, where the symmetric DistMult is near-random (see the module docs).
     pub fn small(sampling: SamplingMode, seed: u64) -> TrainConfig {
+        Self::small_with_model(ModelKind::ComplEx, sampling, seed)
+    }
+
+    /// Like [`TrainConfig::small`] but with an explicit [`ModelKind`] — used by the ablation to run
+    /// the **same** config under both the symmetric (DistMult) and asymmetric (ComplEx) model so
+    /// the asymmetry's effect is itself measurable.
+    pub fn small_with_model(model: ModelKind, sampling: SamplingMode, seed: u64) -> TrainConfig {
         TrainConfig {
+            model,
             dim: 32,
             epochs: 50,
             lr: 0.1,
@@ -123,7 +186,11 @@ impl TrainConfig {
 /// dictionary id into a parameter row. Scoring ([`TrainedModel::score`]) and the eval harness read
 /// only this struct, so a model is self-contained once trained.
 pub struct TrainedModel {
-    /// Embedding dimensionality.
+    /// The scoring model — [`ModelKind::DistMult`] (symmetric) or [`ModelKind::ComplEx`]
+    /// (asymmetric). [`TrainedModel::score`] dispatches on it.
+    pub model: ModelKind,
+    /// Embedding dimensionality (number of `f32`s per row). For [`ModelKind::ComplEx`] the first
+    /// `dim/2` are the real components and the last `dim/2` the imaginary components.
     pub dim: usize,
     /// `entity_emb[row*dim .. row*dim+dim]` is the embedding of the entity whose row is `row`.
     pub entity_emb: Vec<f32>,
@@ -168,17 +235,24 @@ impl TrainedModel {
         &self.rel_emb[row * self.dim..row * self.dim + self.dim]
     }
 
-    /// DistMult score `Σ_i e_h[i] · w_r[i] · e_t[i]` for parameter rows `(h_row, r_row, t_row)`.
+    /// The model score for parameter rows `(h_row, r_row, t_row)`. Dispatches on [`TrainedModel::model`]:
+    /// DistMult `Σ_i e_h[i]·w_r[i]·e_t[i]` (symmetric) or ComplEx `Re(⟨e_h, w_r, conj(e_t)⟩)`
+    /// (asymmetric, see [`score_complex`]).
     #[inline]
     pub fn score_rows(&self, h_row: usize, r_row: usize, t_row: usize) -> f32 {
         let h = self.entity_vec(h_row);
         let r = self.rel_vec(r_row);
         let t = self.entity_vec(t_row);
-        let mut s = 0.0f32;
-        for i in 0..self.dim {
-            s += h[i] * r[i] * t[i];
+        match self.model {
+            ModelKind::DistMult => {
+                let mut s = 0.0f32;
+                for i in 0..self.dim {
+                    s += h[i] * r[i] * t[i];
+                }
+                s
+            }
+            ModelKind::ComplEx => score_complex(h, r, t, self.dim),
         }
-        s
     }
 
     /// DistMult score for a triple of dict-ids, or `None` if any element is unknown to the model
@@ -331,7 +405,12 @@ pub fn train(
     config: TrainConfig,
 ) -> (TrainedModel, TrainReport) {
     let (positives, entity_row, rel_row) = collect_positives(graph);
-    let dim = config.dim;
+    // ComplEx needs an even `dim` (real + imaginary halves); round an odd value down. DistMult is
+    // unconstrained. `dim.max(2)` keeps a degenerate dim=0 config from producing empty rows.
+    let dim = match config.model {
+        ModelKind::DistMult => config.dim.max(1),
+        ModelKind::ComplEx => (config.dim & !1usize).max(2),
+    };
     let n_ent = entity_row.len();
     let n_rel = rel_row.len();
 
@@ -384,14 +463,15 @@ pub fn train(
 
             // The training batch: 1 positive (label 1) + negatives (label 0).
             // Positive step.
-            let (l, _) = step(&mut entity_emb, &mut rel_emb, dim, hr, rr, tr, 1.0, lr, l2);
+            let (l, _) = step(config.model, &mut entity_emb, &mut rel_emb, dim, hr, rr, tr, 1.0, lr, l2);
             loss_sum += l as f64;
             loss_terms += 1;
 
             // Tail-corrupted negatives.
             for neg in sampler.sample([h, r, t], Corrupt::Tail, half_neg, neg_seed) {
                 let ntr = entity_row[&neg[2]];
-                let (l, _) = step(&mut entity_emb, &mut rel_emb, dim, hr, rr, ntr, 0.0, lr, l2);
+                let (l, _) =
+                    step(config.model, &mut entity_emb, &mut rel_emb, dim, hr, rr, ntr, 0.0, lr, l2);
                 loss_sum += l as f64;
                 loss_terms += 1;
             }
@@ -403,7 +483,8 @@ pub fn train(
                 neg_seed ^ 0xDEAD_BEEF,
             ) {
                 let nhr = entity_row[&neg[0]];
-                let (l, _) = step(&mut entity_emb, &mut rel_emb, dim, nhr, rr, tr, 0.0, lr, l2);
+                let (l, _) =
+                    step(config.model, &mut entity_emb, &mut rel_emb, dim, nhr, rr, tr, 0.0, lr, l2);
                 loss_sum += l as f64;
                 loss_terms += 1;
             }
@@ -424,6 +505,7 @@ pub fn train(
         relations: n_rel,
     };
     let model = TrainedModel {
+        model: config.model,
         dim,
         entity_emb,
         rel_emb,
@@ -433,14 +515,34 @@ pub fn train(
     (model, report)
 }
 
-/// One SGD step on a single labelled triple (rows `h,r,t`, `label ∈ {0,1}`).
-///
-/// DistMult score `s = Σ_i e_h[i]·w_r[i]·e_t[i]`; BCE loss `L = -[y·log σ(s) + (1-y)·log(1-σ(s))]`.
-/// The gradient of `L` w.r.t. `s` is `σ(s) - y`; the parameter partials are the standard trilinear
-/// products. We add an L2 penalty `½·l2·‖θ‖²` (gradient `l2·θ`) to the three touched rows.
-/// Returns `(loss, score)`.
+/// One SGD step on a single labelled triple (rows `h,r,t`, `label ∈ {0,1}`), dispatched on the
+/// [`ModelKind`]. BCE loss `L = -[y·log σ(s) + (1-y)·log(1-σ(s))]` over the model score `s`; the
+/// gradient w.r.t. `s` is `σ(s) - y`; an L2 penalty `½·l2·‖θ‖²` (gradient `l2·θ`) is added to the
+/// touched rows. Returns `(loss, score)`.
 #[allow(clippy::too_many_arguments)]
 fn step(
+    model: ModelKind,
+    entity_emb: &mut [f32],
+    rel_emb: &mut [f32],
+    dim: usize,
+    h_row: usize,
+    r_row: usize,
+    t_row: usize,
+    label: f32,
+    lr: f32,
+    l2: f32,
+) -> (f32, f32) {
+    match model {
+        ModelKind::DistMult => step_distmult(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2),
+        ModelKind::ComplEx => step_complex(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2),
+    }
+}
+
+/// DistMult SGD step. Score `s = Σ_i e_h[i]·w_r[i]·e_t[i]`; the parameter partials are the standard
+/// trilinear products: `dL/de_h[i] = g·w_r[i]·e_t[i]`, `dL/dw_r[i] = g·e_h[i]·e_t[i]`,
+/// `dL/de_t[i] = g·e_h[i]·w_r[i]` where `g = σ(s) - y`.
+#[allow(clippy::too_many_arguments)]
+fn step_distmult(
     entity_emb: &mut [f32],
     rel_emb: &mut [f32],
     dim: usize,
@@ -460,19 +562,10 @@ fn step(
     for i in 0..dim {
         s += entity_emb[hb + i] * rel_emb[rb + i] * entity_emb[tb + i];
     }
-    let p = sigmoid(s);
-    // Numerically-stable BCE.
-    let eps = 1e-7f32;
-    let pc = p.clamp(eps, 1.0 - eps);
-    let loss = -(label * pc.ln() + (1.0 - label) * (1.0 - pc).ln());
-
-    // dL/ds = σ(s) - y.
-    let g = p - label;
+    let (g, loss) = bce_grad(s, label);
 
     // Parameter gradients (note h_row could equal t_row for a self-loop; we read into locals
     // first so the simultaneous update is consistent, then write back).
-    // dL/de_h[i] = g · w_r[i] · e_t[i]; dL/dw_r[i] = g · e_h[i] · e_t[i];
-    // dL/de_t[i] = g · e_h[i] · w_r[i].
     for i in 0..dim {
         let eh = entity_emb[hb + i];
         let et = entity_emb[tb + i];
@@ -492,6 +585,84 @@ fn step(
     }
 
     (loss, s)
+}
+
+/// ComplEx SGD step. Each row holds `half = dim/2` complex components (real half `[0..half]`,
+/// imaginary half `[half..dim]`). Score `s = Re(⟨e_h, w_r, conj(e_t)⟩)` (see [`score_complex`]).
+/// With `g = σ(s) - y`, the closed-form partials of each component pair are derived directly from
+/// `s = Σ_i [ h_re·r_re·t_re + h_re·r_im·t_im + h_im·r_re·t_im − h_im·r_im·t_re ]`:
+/// the asymmetry lives entirely in the sign of the `h_im·r_im·t_re` term, which is why the head and
+/// tail gradients are NOT interchangeable (unlike DistMult).
+#[allow(clippy::too_many_arguments)]
+fn step_complex(
+    entity_emb: &mut [f32],
+    rel_emb: &mut [f32],
+    dim: usize,
+    h_row: usize,
+    r_row: usize,
+    t_row: usize,
+    label: f32,
+    lr: f32,
+    l2: f32,
+) -> (f32, f32) {
+    let half = dim / 2;
+    let hb = h_row * dim;
+    let rb = r_row * dim;
+    let tb = t_row * dim;
+
+    // Forward.
+    let mut s = 0.0f32;
+    for i in 0..half {
+        let (h_re, h_im) = (entity_emb[hb + i], entity_emb[hb + half + i]);
+        let (r_re, r_im) = (rel_emb[rb + i], rel_emb[rb + half + i]);
+        let (t_re, t_im) = (entity_emb[tb + i], entity_emb[tb + half + i]);
+        s += h_re * r_re * t_re + h_re * r_im * t_im + h_im * r_re * t_im - h_im * r_im * t_re;
+    }
+    let (g, loss) = bce_grad(s, label);
+
+    // Component-wise gradients. We read ALL six components into locals first (h and t may be the
+    // same row — a self-loop — so a pre-read keeps the simultaneous update consistent; the separate
+    // subtractions then compose to the correct combined step exactly as in the DistMult case).
+    for i in 0..half {
+        let h_re = entity_emb[hb + i];
+        let h_im = entity_emb[hb + half + i];
+        let r_re = rel_emb[rb + i];
+        let r_im = rel_emb[rb + half + i];
+        let t_re = entity_emb[tb + i];
+        let t_im = entity_emb[tb + half + i];
+
+        // ∂s/∂h_re = r_re·t_re + r_im·t_im ; ∂s/∂h_im = r_re·t_im − r_im·t_re
+        let d_h_re = g * (r_re * t_re + r_im * t_im) + l2 * h_re;
+        let d_h_im = g * (r_re * t_im - r_im * t_re) + l2 * h_im;
+        // ∂s/∂r_re = h_re·t_re + h_im·t_im ; ∂s/∂r_im = h_re·t_im − h_im·t_re
+        let d_r_re = g * (h_re * t_re + h_im * t_im) + l2 * r_re;
+        let d_r_im = g * (h_re * t_im - h_im * t_re) + l2 * r_im;
+        // ∂s/∂t_re = h_re·r_re − h_im·r_im ; ∂s/∂t_im = h_re·r_im + h_im·r_re
+        let d_t_re = g * (h_re * r_re - h_im * r_im) + l2 * t_re;
+        let d_t_im = g * (h_re * r_im + h_im * r_re) + l2 * t_im;
+
+        entity_emb[hb + i] = h_re - lr * d_h_re;
+        entity_emb[hb + half + i] = h_im - lr * d_h_im;
+        rel_emb[rb + i] = r_re - lr * d_r_re;
+        rel_emb[rb + half + i] = r_im - lr * d_r_im;
+        // Read-then-write per index: if h_row == t_row these subtractions land on the same cell and
+        // compose to the correct combined head+tail gradient (the locals were read pre-update).
+        entity_emb[tb + i] -= lr * d_t_re;
+        entity_emb[tb + half + i] -= lr * d_t_im;
+    }
+
+    (loss, s)
+}
+
+/// Shared BCE forward+backward at the score level: returns `(dL/ds = σ(s) − y, loss)` with a
+/// numerically-stable, eps-clamped log.
+#[inline]
+fn bce_grad(s: f32, label: f32) -> (f32, f32) {
+    let p = sigmoid(s);
+    let eps = 1e-7f32;
+    let pc = p.clamp(eps, 1.0 - eps);
+    let loss = -(label * pc.ln() + (1.0 - label) * (1.0 - pc).ln());
+    (p - label, loss)
 }
 
 #[cfg(test)]
@@ -588,6 +759,109 @@ ex:alice ex:owns ex:milo .
             pos,
             neg
         );
+    }
+
+    /// A purely DIRECTIONAL relation: a chain `a0 -> a1 -> a2 -> ...` under `ex:next`, never the
+    /// reverse. This is the structure on which a symmetric model is provably near-random.
+    fn directional_chain_ttl(n: usize) -> String {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..n - 1 {
+            ttl.push_str(&format!("ex:a{} ex:next ex:a{} .\n", i, i + 1));
+        }
+        ttl
+    }
+
+    #[test]
+    fn complex_breaks_distmult_symmetry() {
+        // The load-bearing must_fix #2 invariant: on a directional relation the SYMMETRIC DistMult
+        // scores (a next b) == (b next a) by construction, while the ASYMMETRIC ComplEx can make
+        // them differ. We verify the symmetry property directly (it is exact for DistMult and must
+        // be broken by ComplEx), not via a noisy metric.
+        let ttl = directional_chain_ttl(40);
+        let c = close_for_vectorise(&ttl, "turtle", Profile::Rdfs).unwrap();
+        let tc = TypeConstraints::mine(&c.graph);
+        let next = c.graph.id_of(&iri("http://ex/next")).unwrap();
+        let a0 = c.graph.id_of(&iri("http://ex/a0")).unwrap();
+        let a1 = c.graph.id_of(&iri("http://ex/a1")).unwrap();
+
+        // DistMult: the forward and reverse scores are MATHEMATICALLY identical (structural
+        // symmetry); they differ only by f32 summation-order rounding, which is exactly the point —
+        // DistMult cannot represent any directional preference, so it is near-random on this slice.
+        let dm_cfg = TrainConfig::small_with_model(ModelKind::DistMult, SamplingMode::Unconstrained, 7);
+        let (dm, _) = train(&c.graph, &tc, dm_cfg);
+        let fwd = dm.score(a0, next, a1).unwrap();
+        let rev = dm.score(a1, next, a0).unwrap();
+        assert!(
+            (fwd - rev).abs() <= 1e-5 * fwd.abs().max(1.0),
+            "DistMult MUST be (mathematically) symmetric: (a0 next a1)={} vs (a1 next a0)={}",
+            fwd, rev
+        );
+
+        // ComplEx: trained on the forward-only chain, it must learn to score the forward edge above
+        // its reverse on average over the chain (the asymmetry it exists to capture).
+        let cx_cfg = TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 7);
+        let (cx, _) = train(&c.graph, &tc, cx_cfg);
+        let mut wins = 0usize;
+        let mut nontrivial_gap = 0usize;
+        let mut total = 0usize;
+        for i in 0..39 {
+            let x = c.graph.id_of(&iri(&format!("http://ex/a{}", i))).unwrap();
+            let y = c.graph.id_of(&iri(&format!("http://ex/a{}", i + 1))).unwrap();
+            let f = cx.score(x, next, y).unwrap();
+            let r = cx.score(y, next, x).unwrap();
+            if f > r {
+                wins += 1;
+            }
+            // The forward/reverse scores must differ by a NON-TRIVIAL margin for most edges — the
+            // asymmetry is structural in ComplEx and must not collapse to float noise.
+            if (f - r).abs() > 1e-3 {
+                nontrivial_gap += 1;
+            }
+            total += 1;
+        }
+        // ComplEx must DISTINGUISH direction on a clear majority of edges (not float noise) and
+        // PREFER the trained forward direction on a clear majority.
+        assert!(
+            nontrivial_gap * 2 > total,
+            "ComplEx must distinguish direction with a real gap on most edges: {}/{}",
+            nontrivial_gap,
+            total
+        );
+        assert!(
+            wins * 2 > total,
+            "ComplEx should rank forward > reverse for most directional edges: {}/{}",
+            wins,
+            total
+        );
+    }
+
+    #[test]
+    fn complex_trains_and_is_non_degenerate_and_deterministic() {
+        let c = close_for_vectorise(TTL, "turtle", Profile::Rdfs).unwrap();
+        let tc = TypeConstraints::mine(&c.graph);
+        let cfg = TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::TypeConstrained, 5);
+        let (m1, r1) = train(&c.graph, &tc, cfg);
+        assert!(r1.loss_decreased(), "ComplEx loss must decrease");
+        assert!(m1.row_spread() > 1e-3, "ComplEx rows collapsed");
+        assert!(m1.mean_entity_norm() > 1e-3, "ComplEx norms collapsed");
+        assert_eq!(m1.model, ModelKind::ComplEx);
+        // Even dim is enforced.
+        assert_eq!(m1.dim % 2, 0, "ComplEx dim must be even");
+        // Determinism.
+        let (m2, r2) = train(&c.graph, &tc, cfg);
+        assert_eq!(r1.epoch_loss, r2.epoch_loss);
+        assert_eq!(m1.entity_emb, m2.entity_emb);
+        assert_eq!(m1.rel_emb, m2.rel_emb);
+    }
+
+    #[test]
+    fn complex_odd_dim_rounds_down_to_even() {
+        let c = close_for_vectorise(TTL, "turtle", Profile::Rdfs).unwrap();
+        let tc = TypeConstraints::mine(&c.graph);
+        let mut cfg = TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 1);
+        cfg.dim = 31; // odd → rounded to 30
+        let (m, _) = train(&c.graph, &tc, cfg);
+        assert_eq!(m.dim, 30, "odd ComplEx dim must round down to even");
     }
 
     fn iri(s: &str) -> oxrdf::Term {

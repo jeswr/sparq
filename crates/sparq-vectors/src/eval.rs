@@ -32,17 +32,36 @@
 //!
 //! [`run_ablation`] runs the 2×2 P0 prior matrix — `{closure on, off} × {type-constrained
 //! negatives, uniform-random negatives}` — training a fresh model per cell on the *same* split and
-//! reporting filtered metrics + the long-tail breakdown per cell. A gUFO-prior cell is structurally
-//! present as an **ablation axis the harness can already toggle** ([`AblationCell::gufo_prior`]) so
-//! the later gUFO-prior phase wires straight in; at this stage the prior is a no-op
+//! reporting filtered metrics + the long-tail breakdown per cell. The **scoring model** is the
+//! [`ModelKind`](crate::train::ModelKind) on [`EvalConfig::train`]; it is the same for all four
+//! cells of a single run so the deltas isolate the prior. A gUFO-prior cell is structurally present
+//! as an **ablation axis the harness can already toggle** ([`AblationCell::gufo_prior`]) so the
+//! later gUFO-prior phase wires straight in; at this stage the prior is a no-op
 //! (`gufo_prior = false` everywhere) and the gUFO slice establishes the **baseline**.
+//!
+//! # The model axis is load-bearing (adversarial-review finding)
+//!
+//! The default symmetric DistMult model is **structurally near-random** on a relation whose true
+//! edges are directional — and both synthetic slices here are ~100 % directional. An ablation run
+//! under DistMult therefore lives in a near-random regime where the inter-cell deltas are noise. The
+//! default model is now the **asymmetric** [`ModelKind::ComplEx`](crate::train::ModelKind::ComplEx)
+//! (see [`EvalConfig::small`]); the example runs **both** models so the asymmetry's effect is itself
+//! visible. Any ablation verdict must be read off the asymmetric model, not DistMult.
+//!
+//! # Single-seed deltas are not signal (adversarial-review finding)
+//!
+//! A single run's inter-cell delta can be a handful of rank hits over a small bucket — noise. Use
+//! [`run_ablation_multiseed`] to report each cell's metric as a **mean ± std over several seeds**
+//! before treating any delta as real; a delta smaller than the combined spread is not yet evidence.
 //!
 //! # Honesty
 //!
 //! **No numbers live in this file or any committed doc.** The harness *computes* them at run time
 //! (see `examples/kge_ablation.rs` / `tests/kge.rs`); the work-box is non-canonical so any figure is
 //! INDICATIVE. The harness makes no accuracy claim — it is the measurement instrument the design
-//! requires before any prior is adopted.
+//! requires before any prior is adopted, and adoption is additionally gated on a **real-dataset**
+//! (`SPARQ_KGE_DATASET`) run on a **canonical machine** with the **asymmetric model** and
+//! **multi-seed** reporting — never on these synthetic, work-box, single-seed figures.
 
 use crate::structure::{materialise_closure, ClosedGraph, TypeConstraints};
 use crate::train::{train, TrainConfig, TrainReport, TrainedModel};
@@ -508,6 +527,159 @@ pub fn run_ablation(
     Ok(cells)
 }
 
+/// A mean and (population) standard deviation over a sample — the unit of a multi-seed report.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MeanStd {
+    /// Sample mean.
+    pub mean: f64,
+    /// Population standard deviation (0 for a single sample).
+    pub std: f64,
+    /// Number of samples the mean/std were computed over.
+    pub n: usize,
+}
+
+impl MeanStd {
+    /// Compute the mean and population std of `xs`.
+    fn of(xs: &[f64]) -> MeanStd {
+        let n = xs.len();
+        if n == 0 {
+            return MeanStd::default();
+        }
+        let mean = xs.iter().sum::<f64>() / n as f64;
+        let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n as f64;
+        MeanStd { mean, std: var.sqrt(), n }
+    }
+}
+
+/// The per-cell aggregate of a multi-seed ablation: the same filtered metrics, each as a
+/// [`MeanStd`] over the seeds. (`queries` is reported as a mean because a different split seed can
+/// vary how many test triples are scorable.)
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CellStats {
+    /// Mean number of scorable queries per seed.
+    pub queries: MeanStd,
+    /// Filtered MRR, mean ± std over seeds.
+    pub mrr: MeanStd,
+    /// Filtered Hits@1, mean ± std.
+    pub hits1: MeanStd,
+    /// Filtered Hits@3, mean ± std.
+    pub hits3: MeanStd,
+    /// Filtered Hits@10, mean ± std.
+    pub hits10: MeanStd,
+}
+
+/// One cell of a multi-seed ablation: the prior configuration plus the metric aggregates.
+#[derive(Clone, Copy, Debug)]
+pub struct MultiSeedCell {
+    /// Closure prior on?
+    pub closure: bool,
+    /// Type-constrained negatives on?
+    pub type_constrained: bool,
+    /// The overall-test metric aggregate over seeds.
+    pub metrics: CellStats,
+    /// The long-tail (rare-answer) aggregate over seeds.
+    pub tail: CellStats,
+    /// The head (frequent-answer) aggregate over seeds.
+    pub head: CellStats,
+}
+
+/// Run the 2×2 ablation once per seed in `seeds` and aggregate each cell's metrics to a mean ± std.
+///
+/// This is the **adversarial-review answer to single-seed noise**: the harness is deterministic per
+/// seed, so varying the seed (the split seed, the trainer init, and the negative draws all derive
+/// from it) gives independent samples of each cell's metric. A reported inter-cell delta is only
+/// evidence when it exceeds the combined spread of the two cells. The model used is
+/// `template.train.model` (use the asymmetric
+/// [`ModelKind::ComplEx`](crate::train::ModelKind::ComplEx) — see the module docs).
+///
+/// Returns the four cells in the fixed `run_ablation` order, each with overall/head/tail aggregates.
+pub fn run_ablation_multiseed(
+    text: &str,
+    format: &str,
+    template: EvalConfig,
+    seeds: &[u64],
+) -> Result<Vec<MultiSeedCell>, String> {
+    assert!(!seeds.is_empty(), "need at least one seed");
+    // Per-cell samples: 4 cells, each accumulating one value per seed for every metric/bucket.
+    let mut samples: Vec<CellSamples> = (0..4).map(|_| CellSamples::default()).collect();
+    let mut shape: Vec<(bool, bool)> = Vec::with_capacity(4);
+
+    for (si, &seed) in seeds.iter().enumerate() {
+        let mut cfg = template;
+        // Re-seed BOTH the split and the trainer from this seed so the samples are genuinely
+        // independent draws (init + negatives + split partition all move with the seed).
+        cfg.split_seed = seed ^ 0xF00D;
+        cfg.train.seed = seed;
+        let cells = run_ablation(text, format, cfg)?;
+        if cells.len() != 4 {
+            return Err(format!("expected 4 cells, got {}", cells.len()));
+        }
+        for (ci, cell) in cells.iter().enumerate() {
+            if si == 0 {
+                shape.push((cell.closure, cell.type_constrained));
+            }
+            samples[ci].push(cell);
+        }
+    }
+
+    Ok((0..4)
+        .map(|ci| {
+            let (closure, type_constrained) = shape[ci];
+            MultiSeedCell {
+                closure,
+                type_constrained,
+                metrics: samples[ci].overall.finish(),
+                tail: samples[ci].tail.finish(),
+                head: samples[ci].head.finish(),
+            }
+        })
+        .collect())
+}
+
+/// Per-cell accumulator of one metric sample per seed, for the overall/head/tail buckets.
+#[derive(Default)]
+struct CellSamples {
+    overall: BucketSamples,
+    head: BucketSamples,
+    tail: BucketSamples,
+}
+
+impl CellSamples {
+    fn push(&mut self, cell: &AblationCell) {
+        self.overall.push(&cell.metrics);
+        self.head.push(&cell.long_tail.head);
+        self.tail.push(&cell.long_tail.tail);
+    }
+}
+
+#[derive(Default)]
+struct BucketSamples {
+    queries: Vec<f64>,
+    mrr: Vec<f64>,
+    hits1: Vec<f64>,
+    hits3: Vec<f64>,
+    hits10: Vec<f64>,
+}
+
+impl BucketSamples {
+    fn push(&mut self, m: &Metrics) {
+        self.queries.push(m.queries as f64);
+        self.mrr.push(m.mrr);
+        self.hits1.push(m.hits1);
+        self.hits3.push(m.hits3);
+        self.hits10.push(m.hits10);
+    }
+    fn finish(&self) -> CellStats {
+        CellStats {
+            queries: MeanStd::of(&self.queries),
+            mrr: MeanStd::of(&self.mrr),
+            hits1: MeanStd::of(&self.hits1),
+            hits3: MeanStd::of(&self.hits3),
+            hits10: MeanStd::of(&self.hits10),
+        }
+    }
+}
+
 /// Build a graph the trainer can learn from WITHOUT seeing a held-out target relation: keep every
 /// **schema / structural** triple (`rdf:type`, `subClassOf`, domain/range — the priors depend on
 /// them), every **literal-valued** triple, and the **train** target relations; drop only the
@@ -859,31 +1031,105 @@ ex:c ex:rel ex:y .
 
     #[test]
     fn gufo_slice_is_not_trivially_separable() {
-        // The slice must be non-trivial: there exist type-compatible NON-edges (decoys), i.e. a
-        // pure type filter cannot perfectly separate. We check that some Student is NOT enrolled in
-        // some course (so the type-compatible candidate set is larger than the true answer set).
-        let ttl = synthetic_gufo_ttl(80, 3);
+        // The slice must be non-trivial: a pure type filter cannot separate true from false edges,
+        // because MANY type-compatible NON-edges (decoys) exist. We guard the property DIRECTLY by
+        // counting the Students who are NOT enrolled in any course at all: those are genuine
+        // type-compatible decoys (a type prior would admit them as candidates, yet they hold no
+        // enrolledIn edge), so a non-trivial fraction of them must exist AND there must be several
+        // courses (so the candidate pool per query dwarfs the true-answer set).
+        let ttl = synthetic_gufo_ttl(120, 3);
         let c = close_for_vectorise(&ttl, "turtle", Profile::Rdfs).unwrap();
         let g = &c.graph;
         let student = g.id_of(&iri("http://ex/Student")).unwrap();
+        let course_cls = g.id_of(&iri("http://ex/Course")).unwrap();
         let enrolled = g.id_of(&iri("http://ex/enrolledIn")).unwrap();
         let typ = g
             .id_of(&iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"))
             .unwrap();
-        // Count students and enrolledIn edges; students must outnumber edges (decoys exist).
-        let n_students = g
+
+        // Set of student individuals (entities typed ex:Student — directly or via closure).
+        let students: FxHashSet<Id> = g
             .iter_ids()
             .filter(|[_, p, o]| *p == typ && *o == student)
+            .map(|[s, _, _]| s)
+            .collect();
+        // Students that hold at least one enrolledIn edge.
+        let enrolled_students: FxHashSet<Id> = g
+            .iter_ids()
+            .filter(|[s, p, _]| *p == enrolled && students.contains(s))
+            .map(|[s, _, _]| s)
+            .collect();
+        let n_courses = g
+            .iter_ids()
+            .filter(|[_, p, o]| *p == typ && *o == course_cls)
             .count();
-        let n_enrolled = g.iter_ids().filter(|[_, p, _]| *p == enrolled).count();
-        assert!(n_students > 0 && n_enrolled > 0);
+
+        let n_students = students.len();
+        let n_decoys = n_students - enrolled_students.len(); // students with NO enrolment.
         assert!(
-            n_students > n_enrolled || n_enrolled < n_students * 2,
-            "slice should have type-compatible decoys (not every student enrolled): \
-             students={} enrolled={}",
-            n_students,
-            n_enrolled
+            n_students >= 10,
+            "need a non-trivial student population: {}",
+            n_students
         );
+        assert!(
+            n_courses >= 3,
+            "need several courses so the candidate pool dwarfs the answer set: {}",
+            n_courses
+        );
+        // The load-bearing non-separability guard: a SUBSTANTIAL fraction of type-compatible
+        // students hold no enrolment edge (>= 15% here), so a pure type filter cannot win — these
+        // are real decoys the embedding must rank below the true tails. (The generator enrols a
+        // student only ~70% of the time and only ~70% of students hold the Student role, so a large
+        // decoy set is structural, not incidental.)
+        assert!(
+            n_decoys * 100 >= n_students * 15,
+            "slice must have a substantial decoy set (type-compatible students with no enrolment): \
+             students={} enrolled={} decoys={} (need >=15%)",
+            n_students,
+            enrolled_students.len(),
+            n_decoys,
+        );
+    }
+
+    #[test]
+    fn multiseed_aggregates_mean_and_std() {
+        // The multi-seed harness must produce a per-cell mean ± std over the seeds, and (because the
+        // seed moves split + init + negatives) the variance across seeds must be observable — that
+        // is the whole point: a single-seed delta could be noise.
+        let ttl = synthetic_relational_ttl(200, 5);
+        let template = EvalConfig::small(0);
+        let seeds = [1u64, 2, 3, 4, 5];
+        let cells = run_ablation_multiseed(&ttl, "turtle", template, &seeds).unwrap();
+        assert_eq!(cells.len(), 4, "2x2 matrix");
+        let mut any_variance = false;
+        for c in &cells {
+            assert_eq!(c.metrics.mrr.n, seeds.len(), "all seeds contribute");
+            assert!(c.metrics.mrr.mean >= 0.0 && c.metrics.mrr.mean <= 1.0);
+            assert!(c.metrics.queries.mean > 0.0);
+            if c.metrics.mrr.std > 0.0 {
+                any_variance = true;
+            }
+        }
+        assert!(
+            any_variance,
+            "across 5 seeds at least one cell's MRR must show variance (single-seed deltas are noisy)"
+        );
+    }
+
+    #[test]
+    fn multiseed_uses_the_configured_model() {
+        // The model is carried by the template's TrainConfig; the asymmetric ComplEx default is used
+        // unless overridden. We just confirm the run completes for an explicit DistMult template too
+        // (the symmetric path must still aggregate cleanly).
+        use crate::train::ModelKind;
+        let ttl = synthetic_relational_ttl(150, 9);
+        let mut template = EvalConfig::small(0);
+        template.train.model = ModelKind::DistMult;
+        let cells = run_ablation_multiseed(&ttl, "turtle", template, &[7, 8]).unwrap();
+        assert_eq!(cells.len(), 4);
+        for c in &cells {
+            assert_eq!(c.metrics.mrr.n, 2);
+        }
     }
 
     fn iri(s: &str) -> oxrdf::Term {
