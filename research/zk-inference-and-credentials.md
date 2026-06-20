@@ -177,6 +177,45 @@ has a HIDDEN committed-graph membership proof."* Concretely, a **new in-circuit
 A derivation DAG proves SOUNDNESS but **not** completeness, and **not** that
 leaves are themselves true unless each leaf is anchored — hence (3) is mandatory.
 
+**The C(G)-membership story and its cost (the SOUNDNESS-lens correction — read
+carefully).** Step (3) must NOT be misread as "reuse the hidden-issuer / holder-set
+Poseidon2-Merkle gadget verbatim to prove a hidden antecedent is a *Merkle member of*
+`C(G)`." It cannot, because of a concrete primitive mismatch: `C(G)` is committed as a
+**flat Poseidon2 sponge** over the leaf sequence (`crates/sparq-zk/src/commit.rs`: "`C(G)`
+= one Poseidon2 sponge over the leaf sequence"; "the per-graph Merkle fallback … is a
+later deliverable"), so it has **no per-leaf authentication paths** to prove membership
+against. The issuer/holder Merkle gadget (`issuer.nr key_set_membership`) proves
+membership in a **separate** relying-party-owned key/holder tree (`key_set_root`), **not**
+in `C(G)`. The one **sound** way to bind an *undisclosed* antecedent to `C(G)` on the
+current substrate is therefore the **whole-graph-in-circuit scan-equality** path
+`scan.nr` already uses ("the whole graph is in-circuit, so membership is equality against
+witnessed slots … no Merkle machinery"). The cost consequence must be stated explicitly,
+not glossed:
+
+> - **Disclosed-antecedent inference** (row P4) = cheap, proof-tree-sized, already
+>   shipped, sound-by-recheck — with **zero** antecedent privacy.
+> - **Hidden-antecedent inference** (row A1) via the `scan.nr` accumulator = cost
+>   proportional to **|C(G)|** (the whole graph is in-circuit), **not** proof-tree-sized.
+>   The per-node `~10²`-gate figure above is for the rule-shape equalities only; the
+>   leaf-grounding term scales with the committed graph and dominates.
+
+To make the *hidden* path proof-tree-sized (one Poseidon2-Merkle path per hidden
+antecedent), the commitment to `C(G)` must itself be a **per-graph Merkle tree with
+authentication paths** — the deferred `commit.rs` "shape-2". That is an **explicit
+PREREQUISITE deliverable** (its own bead under the epic); **every claim of
+proof-tree-sized hidden grounding is conditional on it landing.** Until then, A1 is sound
+but `|C(G)|`-cost.
+
+**Schema-as-public is an ASSUMED downgrade, never silently used.** A tempting cost cut is
+to treat the ontology schema (`subClassOf`/`subPropertyOf`/`domain`/`range`) as PUBLIC
+inputs from a trusted/`explain`-checked reasoner and spend ZK gates only on instance
+firings. This is **not** an optimisation — it is a **soundness assumption** (PROVEN =
+false / ASSUMED): the schema antecedents are then *trusted*, not proven in `C(G)`, and the
+residual attack is a prover supplying a schema edge the credential does not contain. This
+design therefore grounds schema antecedents the same way as any other (above); a
+schema-as-public dial is offered only as an opt-in, `EntailmentRegime`-recorded
+**documented assumption**, never the default and never silent.
+
 ### 3.4 Witness source (reused, not reimplemented)
 
 `sparq-reason`'s `explain` feature already emits the exact shape: `why()` returns
