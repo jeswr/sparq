@@ -182,7 +182,7 @@ impl Rsp {
     /// `range` / `step` / `max_delay` are plain JS `Number`s ([OPUS-4.8] sq-734a). They are
     /// the integer logical-time unit the pushes use; each must be a whole number in
     /// `[0, 2^53-1]` (negative / fractional / NaN / too-large is a clean error). See
-    /// [`u64_arg`] for why the boundary is `f64` and not `u64`.
+    /// `u64_arg` for why the boundary is `f64` and not `u64`.
     ///
     /// Errors if the SPARQL is malformed / not a SELECT, the R2S name is unknown,
     /// `range`/`step` is zero (a zero-width or non-advancing window is meaningless), or a
@@ -217,7 +217,7 @@ impl Rsp {
     /// ARRAY of `{"start","end","results"}` objects, oldest first, possibly empty (`[]`).
     ///
     /// `ts` is a plain JS `Number` ([OPUS-4.8] sq-734a) — a whole logical timestamp in
-    /// `[0, 2^53-1]` (see [`u64_arg`]); a fractional / negative / too-large `ts` is a clean
+    /// `[0, 2^53-1]` (see `u64_arg`); a fractional / negative / too-large `ts` is a clean
     /// error.
     ///
     /// Errors if a term fails to parse as Turtle, `ts` is out of range, or the engine errors
@@ -364,7 +364,10 @@ mod tests {
         assert_eq!(u64_arg("range", 60.0).unwrap(), 60);
         assert_eq!(u64_arg("max_delay", 0.0).unwrap(), 0);
         // Boundaries: 2^53-1 round-trips exactly through an f64; one past it does not.
-        assert_eq!(u64_arg("ts", 9_007_199_254_740_991.0).unwrap(), 9_007_199_254_740_991);
+        assert_eq!(
+            u64_arg("ts", 9_007_199_254_740_991.0).unwrap(),
+            9_007_199_254_740_991
+        );
         assert!(u64_arg("ts", 9_007_199_254_740_992.0).is_err());
         // Rejected: fractional, negative, NaN, +inf.
         assert!(u64_arg("ts", 10.5).is_err());
