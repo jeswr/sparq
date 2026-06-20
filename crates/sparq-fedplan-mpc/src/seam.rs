@@ -48,6 +48,9 @@ pub enum SeamPhase {
     /// Phase 4 — the leakage-envelope assembly + dual ratification
     /// ([`assemble_leakage_envelope`](crate::assemble_leakage_envelope)).
     LeakageEnvelope,
+    /// Phase 6 — the result-aware source-combination prune
+    /// ([`prune_source_combinations`](crate::prune_source_combinations)).
+    SourceCombination,
 }
 
 impl SeamPhase {
@@ -57,6 +60,7 @@ impl SeamPhase {
             SeamPhase::SourceSelection => "privacy-aware source selection (Phase 2)",
             SeamPhase::Routing => "disclosed/hidden routing partition (Phase 3)",
             SeamPhase::LeakageEnvelope => "leakage-envelope assembly + ratification (Phase 4)",
+            SeamPhase::SourceCombination => "result-aware source-combination prune (Phase 6)",
         }
     }
 }
@@ -88,7 +92,8 @@ pub enum SeamError {
     /// one binds. Returned by [`select_private_sources`](crate::select_private_sources).
     DescriptorMismatch {
         /// Which phase raised it ([`SeamPhase::SourceSelection`] for Phase 2,
-        /// [`SeamPhase::Routing`] for Phase 3, [`SeamPhase::LeakageEnvelope`] for Phase 4).
+        /// [`SeamPhase::Routing`] for Phase 3, [`SeamPhase::LeakageEnvelope`] for Phase 4,
+        /// [`SeamPhase::SourceCombination`] for Phase 6).
         phase: SeamPhase,
         /// The offending source id.
         source_id: String,
@@ -324,14 +329,15 @@ mod tests {
             SeamPhase::SourceSelection.label(),
             SeamPhase::Routing.label(),
             SeamPhase::LeakageEnvelope.label(),
+            SeamPhase::SourceCombination.label(),
         ];
-        // All three seam phases carry a distinct human label.
+        // All seam phases carry a distinct human label.
         assert_eq!(
             labels
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            3
+            4
         );
     }
 
