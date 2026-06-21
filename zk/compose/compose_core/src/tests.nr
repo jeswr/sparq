@@ -743,7 +743,9 @@ fn revoke_committed_wrong_index_commitment_rejected() {
 // signature by seed200 (a key NOT in K).
 // ---------------------------------------------------------------------------
 
-use crate::issuer::{hidden_issuer_attestation, key_set_membership, Point, schnorr_verify};
+use crate::issuer::{
+    hidden_issuer_attestation, key_set_membership, Point, reduction_range_bind, schnorr_verify,
+};
 
 // In-set signer (seed102, index 2 in K).
 global IV_M: Field = 0x18bca25b3980838a520d97b3d360b9d88fa497367d04d73db872ad86f05b9bab;
@@ -878,6 +880,56 @@ fn hidden_issuer_identity_key_rejected() {
 fn hidden_issuer_off_curve_key_rejected() {
     // (1, 1) is not on Baby-JubJub (1 + 1 != 1 + d).
     schnorr_verify(Point { x: 1, y: 1 }, in_set_r(), IV_S, IV_E, IV_E_K, IV_M);
+}
+
+// [OPUS-4.8] sq-ru0yx (internal re-audit finding M-1): the challenge-reduction
+// NO-WRAP regression suite. The bare reduction identity `e + e_k*L == e_base` plus
+// `e < L` and `e_k < 8` does NOT uniquely pin `e = e_base mod L`: for `e_k == 7`
+// the FIELD identity also accepts the wrap alternative `e' in [q_base-7L, L)`. The
+// fix (`reduction_range_bind` step 4) forbids that window. These exercise the
+// range-bind in isolation with explicit `(e, e_k)` (a genuine Poseidon2 preimage
+// with tiny `e_base`, the only `e_base` for which the wrap window is reachable, is
+// infeasible to grind; so the regression pins the constraint directly).
+
+// The reduction constants this test wires (mirrors `issuer.nr`):
+//   L     = BJJ_L                  (scalar-field order, ~2^251)
+//   TOP   = q_base - 7*L           (REDUCTION_TOP_BOUND, the e_k==7 no-wrap bound)
+global RW_L_MINUS_1: Field =
+    0x060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f0; // L - 1
+global RW_TOP: Field =
+    0x060c89ce5c263405370a08b6d0302b0b797b683ee9d2ee486fbfce8e6017ef6a; // q_base - 7*L
+global RW_TOP_MINUS_1: Field =
+    0x060c89ce5c263405370a08b6d0302b0b797b683ee9d2ee486fbfce8e6017ef69; // (q_base - 7*L) - 1
+
+// (M-1a) ACCEPT: for `e_k < 7` the full `[0, L)` range is honest (bound == L), so
+// the largest canonical scalar `e = L - 1` passes the range bind.
+#[test]
+fn reduction_no_wrap_accepts_max_e_for_low_quotient() {
+    reduction_range_bind(RW_L_MINUS_1, 6);
+}
+
+// (M-1b) ACCEPT: for `e_k == 7` the honest window is `[0, q_base - 7L)`, so
+// `e = (q_base - 7L) - 1` (the largest honest value) passes -- the fix does NOT
+// reject any honest witness.
+#[test]
+fn reduction_no_wrap_accepts_top_boundary_honest_e() {
+    reduction_range_bind(RW_TOP_MINUS_1, 7);
+}
+
+// (M-1c) REJECT (the forge this fix closes): for `e_k == 7`, the FIRST value of the
+// previously-admitted wrap window `e = q_base - 7L` is now rejected by the no-wrap
+// upper bound. Without the fix this `e` satisfied `e < L` and (for the matching
+// small `e_base`) the bare identity, forging a second valid challenge scalar.
+#[test(should_fail_with = "call to assert_max_bit_size")]
+fn reduction_no_wrap_rejects_wrap_window_e_at_top_quotient() {
+    reduction_range_bind(RW_TOP, 7);
+}
+
+// (M-1d) REJECT: the very top of the old wrap window, `e = L - 1`, with `e_k == 7`
+// is also excluded by the no-wrap bound (it is `>= q_base - 7L`).
+#[test(should_fail_with = "call to assert_max_bit_size")]
+fn reduction_no_wrap_rejects_max_e_at_top_quotient() {
+    reduction_range_bind(RW_L_MINUS_1, 7);
 }
 
 // [OPUS-4.8] sq-ayv: pin the index-commitment cross-vector so the Rust

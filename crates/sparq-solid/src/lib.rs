@@ -48,9 +48,10 @@ pub use odrl_bridge::{
 };
 #[cfg(feature = "odrl-bridge")]
 pub use odrl_bridge::{BridgeEntry, BridgeKind, BridgeLedger};
-// [OPUS-4.8] sq-pfae PoC: the trust-graph admission outcome type (feature-gated).
+// [OPUS-4.8] sq-pfae PoC: the trust-graph admission outcome types (feature-gated).
+// `TrustStaticOutcome` is the materialise-time (static/dynamic split, sq-xc4y) result.
 #[cfg(feature = "trust-graph")]
-pub use trust_wire::TrustAdmissionOutcome;
+pub use trust_wire::{TrustAdmissionOutcome, TrustStaticOutcome};
 pub use rewrite::{rewrite_for, wrap_for_view};
 
 use oxrdf::{NamedNode, Term};

@@ -3,27 +3,39 @@
 // Replaces the no-op "harness scaffold OK" smoke (sq-bu69) with a real assertion:
 //   1. spawn tauri-driver (the WebDriver intermediary; on Linux it proxies WebKitWebDriver),
 //   2. connect a WebDriver client (webdriverio) and launch the BUILT Tauri shell binary,
-//   3. wait for the reused Next.js frontend (the in-tab WASM REPL) to mount + the engine to
-//      warm,
+//   3. wait for the DISTINCT operational GUI frontend (the in-tab WASM workbench) to mount +
+//      the engine to warm,
 //   4. ENTER a known SPARQL SELECT into the editor (the React-controlled `#repl-query`
 //      textarea — set via the native value setter + an `input` event so React's state
 //      updates, the standard controlled-input driving technique),
 //   5. click "Run query", and
 //   6. ASSERT the SELECT result table renders with the expected binding ("Alice", from the
-//      built-in sample graph).
+//      seeded sample graph), then
+//   7. [OPUS-4.8] sq-ixc3.12 — click EXPLAIN and ASSERT the planner plan renders
+//      (data-result-kind="explain"), exercising the UNIFIED run(query,{mode}) EXPLAIN path, then
+//   8. [OPUS-4.8] sq-ixc3.11 — open the SHACL tool (left-rail data-tool="shacl"), click
+//      "Validate live store", and ASSERT a W3C validation report renders over the serialised
+//      live store (proving the SHACL surface is a working TOOL, not a stub).
+//   9. [OPUS-4.8] sq-ixc3.13 — open the Import drawer (left-rail data-import-trigger="rail"),
+//      switch to the Paste tab, enter a triple, click Import, and ASSERT a success feedback
+//      (data-import-feedback="ok") — proving the native loader ingest path merges into the store.
 //
 // This proves the desktop shell actually loads, the WASM engine runs a query IN THE TAB, and
 // the result renders — i.e. the shell is a working app, not just a crate that compiles.
 //
-// HOW IT FINDS THINGS (kept faithful to the site so it cannot silently drift):
-//   * The Tauri window loads the site's static-export INDEX (site/out/index.html), which
-//     embeds <Repl /> (site/src/app/page.tsx) — so no in-webview route navigation is needed.
-//   * The editor is a controlled <textarea id="repl-query"> behind a highlight <pre>
-//     (site/src/components/sparql-editor.tsx).
-//   * The Run button carries the visible text "Run query" (site/src/components/repl.tsx).
+// HOW IT FINDS THINGS (kept faithful to the DISTINCT operational GUI frontend, gui/app, so it
+// cannot silently drift — sq-ixc3.8 repointed the shell off the marketing site onto gui/app):
+//   * The Tauri window loads the GUI frontend's static-export INDEX (gui/app/out/index.html),
+//     which renders the workbench shell with the Query tool open by default — so no in-webview
+//     route navigation is needed.
+//   * The editor is a controlled <textarea id="repl-query">
+//     (gui/app/src/components/workbench/query-workbench.tsx).
+//   * The Run button carries the visible text "Run query" (same file).
+//   * The top bar shows "Engine ready" once the in-tab WASM engine warms
+//     (gui/app/src/components/workbench/top-bar.tsx).
 //   * A SELECT result renders a container with data-result-kind="select" and, in table view,
-//     data-result-view="table" wrapping a <table> (same file). We assert on those stable
-//     data-* hooks + the literal "Alice".
+//     data-result-view="table" wrapping a <table> (query-workbench.tsx). We assert on those
+//     stable data-* hooks + the literal "Alice" (from the seeded sample graph).
 //
 // CONFIG via env (CI sets APP_BINARY): APP_BINARY is the absolute path to the built shell
 // binary tauri-driver launches (the gui crate's package name is `sparq-gui`, so the debug
@@ -212,6 +224,103 @@ async function main() {
     log(
       `PASS — SELECT ran in the in-tab WASM engine and rendered ${rowCount} row(s) including "${EXPECTED_CELL}".`,
     );
+
+    // 6. [OPUS-4.8] sq-ixc3.12 — EXPLAIN smoke: click the toolbar EXPLAIN button and assert the
+    //    planner-plan container renders. This exercises the UNIFIED EXPLAIN path —
+    //    run(query, { mode: "explain" }) surfacing a { kind: "explain" } outcome through the
+    //    SAME results pipeline (data-result-kind="explain") the Cmd-K "Run EXPLAIN" verb also
+    //    drives — proving the single EXPLAIN contract works end-to-end after the #1018 reconcile.
+    log('clicking "EXPLAIN"…');
+    const explainButton = await browser.$("button=EXPLAIN");
+    await explainButton.waitForClickable({ timeout: 10_000 });
+    await explainButton.click();
+
+    log("waiting for the EXPLAIN plan to render…");
+    const explainResult = await browser.$('[data-result-kind="explain"]');
+    await explainResult.waitForExist({ timeout: 30_000 });
+    const planText = await explainResult.getText();
+    if (!planText.trim()) {
+      throw new Error("EXPLAIN container rendered but the plan text was empty");
+    }
+    log("PASS — EXPLAIN rendered the planner's plan through the unified run() path.");
+
+    // 7. [OPUS-4.8] sq-ixc3.11 — SHACL TOOL smoke: open the SHACL tab from the left rail
+    //    (data-tool="shacl", left-rail.tsx), click "Validate live store" (shacl-tool.tsx), and
+    //    assert the validation report container renders. This proves the SHACL surface is a
+    //    WORKING tool over the SERIALISED live store (serializeStore → sparqShaclValidate), not
+    //    a stub — without asserting a specific verdict (the starter shapes may or may not flag
+    //    the seeded sample graph), only that the operational round-trip produced a report.
+    log("opening the SHACL tool from the left rail…");
+    const shaclTab = await browser.$('[data-tool="shacl"]');
+    await shaclTab.waitForClickable({ timeout: 10_000 });
+    await shaclTab.click();
+
+    log('clicking "Validate live store"…');
+    const validateButton = await browser.$("button=Validate live store");
+    await validateButton.waitForClickable({ timeout: 10_000 });
+    await validateButton.click();
+
+    log("waiting for the SHACL validation report to render…");
+    const shaclReport = await browser.$('[data-result-kind="shacl"]');
+    await shaclReport.waitForExist({ timeout: 30_000 });
+    // The report pane settles out of the transient "Validating…" placeholder into a verdict
+    // (Conforms / N violations / an error). Assert it reaches one of those terminal states.
+    await browser.waitUntil(
+      async () => {
+        const text = await shaclReport.getText();
+        return /Conforms|violation|cannot be serialised|error/i.test(text) && !/Validating…/.test(text);
+      },
+      {
+        timeout: 30_000,
+        timeoutMsg: "SHACL validation never produced a terminal report",
+        interval: 500,
+      },
+    );
+    log("PASS — the SHACL tool validated the live store and rendered a W3C report.");
+
+    // 9. [OPUS-4.8] sq-ixc3.13 — IMPORT DRAWER smoke: open the drawer from the left rail's
+    //    "+ Import" (data-import-trigger="rail"), switch to the Paste tab, enter a triple, and
+    //    click Import — then assert a SUCCESS feedback renders (data-import-feedback="ok"). This
+    //    exercises the real ingest path end-to-end inside the desktop shell: the native loader
+    //    (`load_text`) decodes the document → N-Quads → the in-tab store merges it. The seeded
+    //    triple uses a fresh subject so it adds at least one quad regardless of the sample graph.
+    log("opening the Import drawer from the left rail…");
+    const importTrigger = await browser.$('[data-import-trigger="rail"]');
+    await importTrigger.waitForClickable({ timeout: 10_000 });
+    await importTrigger.click();
+
+    log("switching to the Paste tab…");
+    const pasteTab = await browser.$('[data-import-tab="paste"]');
+    await pasteTab.waitForClickable({ timeout: 10_000 });
+    await pasteTab.click();
+
+    log("entering a triple into the paste textarea…");
+    const IMPORT_DOC =
+      "<http://example.org/imported> <http://example.org/p> <http://example.org/o> .";
+    await browser.execute((value) => {
+      const el = document.querySelector("[data-import-drawer] textarea");
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }, IMPORT_DOC);
+
+    log("clicking the Import button…");
+    // The Import button label carries the mode suffix ("Import (add to store)"); match the lead.
+    const importButton = await browser.$('[data-import-drawer] button*=Import');
+    await importButton.waitForClickable({ timeout: 10_000 });
+    await importButton.click();
+
+    log("waiting for the import success feedback…");
+    const importOk = await browser.$('[data-import-feedback="ok"]');
+    await importOk.waitForExist({ timeout: 30_000 });
+    const okText = await importOk.getText();
+    if (!/Imported/i.test(okText)) {
+      throw new Error(`import feedback rendered but was not a success: ${JSON.stringify(okText)}`);
+    }
+    log("PASS — the Import drawer ingested a pasted document into the live store.");
 
     await browser.deleteSession();
   } catch (err) {

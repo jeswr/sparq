@@ -4,12 +4,13 @@
   "version": "0.1.0",
   "identifier": "io.github.jeswr.sparq",
   "build": {
-    "beforeDevCommand": "cd ../../site && npm run dev",
-    "beforeBuildCommand": "cd ../../site && npm run build:tauri",
-    "devUrl": "http://localhost:3000/sparq",
-    "frontendDist": "../../site/out"
+    "beforeDevCommand": "cd ../app && npm run dev",
+    "beforeBuildCommand": "cd ../app && npm run build:tauri",
+    "devUrl": "http://localhost:3001",
+    "frontendDist": "../app/out"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "sparq — RDF + SPARQL workbench",
@@ -22,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: http: ipc: http://ipc.localhost"
     }
   },
   "bundle": {
@@ -32,7 +33,7 @@
       "icons/icon.png"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "RDF + SPARQL workbench (MVP scaffold)",
-    "longDescription": "A cross-platform desktop workbench for the sparq RDF + SPARQL engine. Reuses the sparq web frontend in a native webview and links the engine directly as native Rust (full native store, not the WASM read-replica). MVP scaffold."
+    "shortDescription": "RDF + SPARQL operational workbench",
+    "longDescription": "A cross-platform desktop workbench for the sparq RDF + SPARQL engine. A DISTINCT operational frontend (left rail · tab strip · status bar) — not the marketing site in a window — running a live in-tab engine. The same frontend also static-exports as a hosted 'Try the GUI live' web target."
   }
 }

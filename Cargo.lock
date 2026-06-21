@@ -3727,6 +3727,7 @@ name = "sparq-trust"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "oxttl 0.2.3",
  "sparq-canon",
  "sparq-core",
  "sparq-reason",
@@ -3750,6 +3751,7 @@ dependencies = [
  "sparq-engine",
  "sparq-introspect",
  "sparq-reason",
+ "sparq-shacl",
  "sparq-sim",
 ]
 

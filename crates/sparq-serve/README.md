@@ -55,6 +55,12 @@ cargo run -p sparq-server -- --format turtle data.ttl
   `backup::import` re-hydrates a `Graph` from one, **fail-closed** on a corrupt/mismatched
   artifact. Distinct from the offline `sparq-cli save` and the `--persist` WAL. At-rest
   encryption is out of scope. `sparq-server` mounts `/admin/backup` + `/admin/restore` on it.
+- **Incremental change-stream / PITR** (same `backup` feature) — `backup_delta::export_delta`
+  captures the quad-set change between two **same-lineage** generations as a self-describing
+  delta artifact keyed off the generation/writer-seq range; `backup_delta::replay` applies an
+  ordered chain forward onto a restored base to reach a chosen recovery point (fail-closed on a
+  corrupt or discontinuous chain). `sparq-server` adds `/admin/backup/delta?from=N` +
+  `--restore-delta` for point-in-time recovery.
 - **Response-bytes result cache** *(opt-in: `--features result-cache`, OFF by
   default)* — see below.
 

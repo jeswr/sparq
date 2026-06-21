@@ -23,16 +23,29 @@ rustdoc-args = ["--cfg", "docsrs"]
 # Out-of-core querying (memory-mapped on-disk indexes) — on by default for the CLI.
 # mimalloc: the global allocator (T1.0). On by default; `--no-default-features --features mmap`
 # falls back to the system allocator for A/B measurement of allocator contention.
-default = ["mmap", "mimalloc", "dict-spill"]
+# [OPUS-4.8] (sq-oy1f.4, MAINTAINER-DIRECTED DEFAULT-ON EXCEPTION) `jsonld` is in the default
+# set: the native CLI parses AND re-serialises JSON-LD out of the box (the user-prioritised
+# sq-oy1f epic). This is a deliberate exception to sparq's opt-in-by-default principle — JSON-LD
+# is the dominant linked-data interchange format and the native binary has no bundle-size floor.
+# Still TOGGLEABLE: `--no-default-features --features mmap,mimalloc,dict-spill` drops it.
+default = ["mmap", "mimalloc", "dict-spill", "jsonld"]
 mmap = ["sparq-core/mmap"]
 # Spillable build-time term dictionary for `build` (bounded peak RSS; env-gated at
 # runtime via SPARQ_DICT_SPILL — default behavior is unchanged when the vars are unset).
 dict-spill = ["sparq-core/dict-spill"]
 mimalloc = ["dep:mimalloc"]
+# [OPUS-4.8] (sq-oy1f.4, epic sq-oy1f) `jsonld` — JSON-LD ingest + re-serialisation, DEFAULT ON
+# (maintainer-directed exception to opt-in-by-default; see `default` above). Forwards
+# `sparq-core/jsonld` (the `oxjsonld` parser `dump <file> jsonld …` / `load <file> jsonld` use to
+# READ a JSON-LD document) and implies `serialize-rdf` (the engine's hand-rolled JSON-LD WRITER, so
+# `dump … jsonld[-…]` EMITS one). Toggleable: drop it via `--no-default-features` to omit the
+# `oxjsonld` parser. Native-only; the lean wasm bundle keeps JSON-LD opt-in (sparq-wasm/jsonld).
+jsonld = ["sparq-core/jsonld", "serialize-rdf"]
 # [OPUS-4.8] (sq-678h) `dump <file> <in-format> <out-format>` — load an RDF document and
-# re-serialize it as Turtle / TriG / N-Quads (the writer matrix). OFF by default so the
-# default CLI build carries zero serializer code; forwards sparq-engine's opt-in
-# `serialize-rdf` feature (no new dependencies). Enable with `--features serialize-rdf`.
+# re-serialize it as Turtle / TriG / N-Quads / JSON-LD (the writer matrix). Forwards sparq-engine's
+# `serialize-rdf` feature (no new dependencies — the JSON-LD writer is a hand-rolled emitter).
+# Pulled into the default build by `jsonld` (above); a `--no-default-features` build that wants ONLY
+# the Turtle/TriG/N-Quads writers (no JSON-LD parser) can enable `serialize-rdf` on its own.
 serialize-rdf = ["sparq-engine/serialize-rdf"]
 # HDT ingestion (`<file>.hdt[.gz]` / format "hdt") via the opt-in sparq-hdt crate.
 # OFF by default for two deliberate reasons: (1) sparq-hdt's MSRV is 1.87 (the

@@ -50,8 +50,10 @@ npm run test:e2e   # Playwright — headless browser smoke tests (see below)
 ```
 
 `public/wasm/` is generated (git-ignored): `scripts/sync-wasm.mjs` copies the
-wasm-pack `--target web` output from `js/wasm/`. The `prebuild` script runs it
-automatically before `next build`.
+wasm-pack `--target web` output from `js/wasm/`, then `scripts/bundle-wasm-esm.mjs`
+([`esbuild`](https://esbuild.github.io/)) bundles the `@jeswr/sparq` RDF/JS surface
+(`js/src`) into a single self-hosted `public/wasm/sparq.js` (see below). The `prebuild`
+script runs both automatically before `next build`.
 
 ### Lazy wasm loading — keeping the engine off the critical path — `sq-4296` (#935 / #981)
 
@@ -74,9 +76,29 @@ layers — the page paints and becomes interactive before any of it has finished
    `await`s the **memoised** `loadSparq()`, so it joins the in-flight load rather than
    re-paying a cold start — and never calls into an uninitialised wasm.
 
-**ESM `<script type="module">` import (#981).** The wasm-pack `--target web` glue is a real
-ESM module, so it can be imported directly — instantiate it (its default `init`) before using
-`Store`, and the ~MB `.wasm` is fetched lazily by that init, not by the script tag:
+**Self-hosted ESM `<script type="module">` import — named `Dataset` (#981, `sq-55w5a`).**
+`scripts/bundle-wasm-esm.mjs` bundles the `@jeswr/sparq` RDF/JS surface into a single
+self-contained `public/wasm/sparq.js`, published into the static export — so the named
+`Dataset` entry can be imported directly from this project's **own** GitHub Pages origin, with
+**no third-party CDN**. The bundle keeps the ~MB engine `.wasm` **external** (it re-exports the
+sibling wasm-pack glue), so it is fetched lazily by the first `await Dataset.…`, never by the
+import line — the #981 lazy-load posture:
+
+```html
+<script type="module">
+  import { Dataset, DataFactory as DF } from "https://jeswr.github.io/sparq/wasm/sparq.js";
+  const ds = await Dataset.fromString('<a> <b> "x" .', "ntriples"); // wasm lazy-fetched HERE
+  ds.add(DF.quad(DF.namedNode("a"), DF.namedNode("b"), DF.literal("y")));
+  console.log(ds.size, ds.store.queryBoolean("ASK { ?s ?p ?o }"));
+</script>
+```
+
+The same named entry is also available from an ESM CDN (the published `@jeswr/sparq` npm
+package): `import { Dataset } from "https://esm.sh/@jeswr/sparq"`.
+
+**Low-level glue (`Store`).** The wasm-pack `--target web` glue is itself a real ESM module, so
+the engine `Store` class can be imported directly — instantiate it (its default `init`) before
+use; the ~MB `.wasm` is fetched lazily by that init, not by the script tag:
 
 ```html
 <script type="module">

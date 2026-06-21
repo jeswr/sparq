@@ -1,0 +1,1115 @@
+//! Flexible **minimal-and-complete grounding** selector + verbaliser (structure-aware
+//! vectorisation **P4**).
+//!
+//! [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e; design `research/structure-aware-vectorisation.md`
+//! §4 "Flexible grounding — modality chosen per request, minimal AND complete"). This module is
+//! the **fourth** additive slice of the structure-aware-vectorisation epic, on top of P0
+//! ([`crate::structure`]: closure-before-vectorise + type-constrained negatives) and P1
+//! ([`crate::encode`]: typed-literal encoders). It is **opt-in** (the same `structure` cargo
+//! feature, off by default) and changes **nothing** in the default `sparq-vectors` build or the
+//! core engine.
+//!
+//! # What this is
+//!
+//! Grounding is a function `(node, graph) -> minimal-and-complete OBJECT` whose **modality is
+//! chosen per request** by a dispatcher on the *consumer's declared output type* — the same node
+//! projected into whichever object the consumer needs:
+//!
+//! 1. [`Modality::Subgraph`] — the smallest connected sub-BGP describing the node, bounded to the
+//!    predicates the node's **effective (minimal) type** actually carries (ABSTAT-style minimal
+//!    type patterns; Spahiu et al., ESWC 2016). For an LLM tool that needs verifiable facts.
+//! 2. [`Modality::TypedSubVector`] — only the *relevant blocks* of the node's stored vector
+//!    (numeric for similar-magnitude, text for lexical), projected via the `.spqv`
+//!    [`SchemaHeader`](crate::encode::SchemaHeader). For a vector tool. Minimal by construction.
+//! 3. [`Modality::NlString`] — a token-budgeted natural-language rendering (the
+//!    [`verbalize`](mod@crate::verbalize) machinery, extended here to render **typed values** —
+//!    unit-typed quantities and enum labels). For an LLM.
+//! 4. [`Modality::TypedValue`] — a single typed slot filled directly (the enum member, the
+//!    unit-typed quantity, or the boolean), exact (no cosine threshold, no recall loss). For a
+//!    typed tool-call argument.
+//!
+//! # Minimality and completeness — both PROFILE-RELATIVE (design §4, load-bearing)
+//!
+//! Both properties are stated **relative to a criterion**, never as absolutes:
+//!
+//! - **Minimality** is *relative to a stated criterion*: the subgraph is the smallest sub-BGP
+//!   under the node's *effective type's characteristic set* (fewest predicates the type actually
+//!   has — not every asserted triple); the typed sub-vector is the smallest projection that
+//!   contains the requested blocks. It is **not** an absolute minimum.
+//! - **Completeness** is *relative to a profile*: the caller materialises the deductive closure
+//!   ([`crate::structure::close_for_vectorise`]) **before** grounding, so entailed-but-not-asserted
+//!   facts are present; the grounding is then complete **relative to that materialised entailment
+//!   profile (RDFS / OWL-RL / N3) and the declared shapes**. It is **NOT** end-task
+//!   answer-completeness, and this module makes **no answer-completeness claim**. A node grounded
+//!   over an un-closed graph is silently incomplete outside the asserted facts — the honest
+//!   contract is "complete relative to whatever you closed under".
+//!
+//! **Ambiguous default = subgraph (exact, re-validated).** When the consumer's needs are unclear,
+//! the design's default is subgraph grounding: it is built directly from the graph's own triples
+//! (never an approximate signal), so it is exact and re-checkable. This module never serves an
+//! approximate signal as a final answer — the ANN candidate seam is the [`crate::filter`] /
+//! `vec:`-predicate path the *exact engine* re-evaluates, not this projector.
+//!
+//! # What is NOT here (honest scope)
+//!
+//! - **No ANN re-ranking.** This module *projects* an already-identified node into a modality. The
+//!   "structure-aware ANN proposes candidates the exact engine re-validates" loop is the existing
+//!   `filtered-ann` / `vec-predicate` path; P4 is the **projection** half, deliberately decoupled.
+//! - **This module renders quantities AS DECLARED; cross-unit normalisation is wired separately.**
+//!   The typed-value / NL paths recognise the QUDT `qudt:numericValue` + `qudt:unit` shape and
+//!   render the magnitude *as declared* (value + unit label), deliberately **not** converting
+//!   between units (e.g. miles→km) — a grounding object stays faithful to the underlying triple.
+//!   The P2 SHACL/QUDT slice (sq-0wo9e.3) has since landed: [`crate::units::normalise`] now
+//!   converts `(value, unit_iri)` to a canonical SI value + [`crate::units::QuantityKind`] for the
+//!   *encoder* layout. Threading that converter into the grounding *render* path (so a consumer can
+//!   opt into reconciled units, while the default stays as-declared) is the tracked follow-up
+//!   **sq-t80n4** — until then two quantities in different units are rendered in their own units.
+
+use crate::encode::{numeric_value, route, temporal_value, Encoder};
+use crate::store::VectorStore;
+use crate::verbalize::{verbalize, EntityTextConfig};
+use rustc_hash::{FxHashMap, FxHashSet};
+use sparq_core::dict::{self, Id, TermParts};
+use sparq_core::Graph;
+use sparq_introspect::Introspection;
+
+/// `rdf:type` — an entity's declared classes.
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+/// `rdfs:subClassOf` — the subsumption edge used for effective-type minimalisation.
+const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+/// `xsd:boolean` datatype IRI.
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+/// QUDT `qudt:numericValue` — the numeric magnitude of a quantity value.
+const QUDT_NUMERIC_VALUE: &str = "http://qudt.org/schema/qudt/numericValue";
+/// QUDT `qudt:value` — an alternative magnitude predicate seen in QUDT data.
+const QUDT_VALUE: &str = "http://qudt.org/schema/qudt/value";
+/// QUDT `qudt:unit` — the unit IRI of a quantity value.
+const QUDT_UNIT: &str = "http://qudt.org/schema/qudt/unit";
+
+/// The grounding **modality** — the kind of object the consumer's declared output type wants. A
+/// dispatcher selects it ([`Modality::for_output`]); [`ground`] produces the matching
+/// [`Grounding`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Modality {
+    /// The smallest connected sub-BGP describing the node (verifiable facts / exact answer).
+    Subgraph,
+    /// Only the relevant typed blocks of the node's stored vector (a vector tool).
+    TypedSubVector,
+    /// A token-budgeted NL rendering (an LLM consumer).
+    NlString,
+    /// A single typed slot filled directly: enum member / unit-typed quantity / boolean (a typed
+    /// tool-call argument).
+    TypedValue,
+}
+
+/// The consumer's **declared output type** — the dispatcher input. A tiny taxonomy of what a tool
+/// slot expects, mapped to a [`Modality`] by [`Modality::for_output`] so callers express *intent*
+/// ("I need a boolean") rather than picking the modality machinery by hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputType {
+    /// Verifiable facts / an exact answer → [`Modality::Subgraph`].
+    Facts,
+    /// A vector / typed sub-vector for a vector tool → [`Modality::TypedSubVector`].
+    Vector,
+    /// Free-form natural language for an LLM → [`Modality::NlString`].
+    Text,
+    /// A single typed value (boolean / number+unit / enum member) → [`Modality::TypedValue`].
+    Value,
+    /// The intent is unclear → the design's safe default, [`Modality::Subgraph`] (exact,
+    /// re-validatable), because an approximate signal must never be the final answer.
+    Ambiguous,
+}
+
+impl Modality {
+    /// The design's dispatcher: map a consumer's declared [`OutputType`] to the modality. Ambiguous
+    /// requests fall back to [`Modality::Subgraph`] (design §4 "Default for ambiguous NL queries").
+    pub fn for_output(output: OutputType) -> Modality {
+        match output {
+            OutputType::Facts => Modality::Subgraph,
+            OutputType::Vector => Modality::TypedSubVector,
+            OutputType::Text => Modality::NlString,
+            OutputType::Value => Modality::TypedValue,
+            OutputType::Ambiguous => Modality::Subgraph,
+        }
+    }
+}
+
+/// A typed value extracted from one of a node's literal objects — the [`Grounding::TypedValue`]
+/// payload. **Exact**: the value is the literal's own value (boolean / number / number+unit / enum
+/// member), never an approximate cosine match.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TypedValue {
+    /// An `xsd:boolean` rendered to its two-valued truth.
+    Boolean(bool),
+    /// A numeric literal's value (any `xsd` numeric subtype), with the datatype IRI it carried.
+    Number { value: f64, datatype: String },
+    /// A unit-typed quantity: a magnitude plus the unit IRI it was declared with. **Rendered as
+    /// declared — NOT converted** (cross-unit normalisation via the landed [`crate::units::normalise`]
+    /// is the tracked render-path follow-up sq-t80n4).
+    Quantity { value: f64, unit: String },
+    /// An enum member — an IRI object rendered by its own label (the closed-world enum slot). The
+    /// `member` is the IRI; `label` its rendered name when one was found.
+    Enum {
+        member: String,
+        label: Option<String>,
+    },
+}
+
+/// The minimal-and-complete grounding object — one variant per [`Modality`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Grounding {
+    /// The smallest sub-BGP describing the node: `(predicate, object)` pairs in stable order, each
+    /// a fact present in the (possibly closed) graph. The subject is the grounded node itself.
+    Subgraph(Vec<GroundFact>),
+    /// The relevant typed blocks of the node's stored vector, concatenated in block order, plus
+    /// which encoder families they came from.
+    TypedSubVector {
+        values: Vec<f32>,
+        blocks: Vec<Encoder>,
+    },
+    /// The token-budgeted NL rendering.
+    NlString(String),
+    /// The typed values extracted for the requested predicate(s) — usually one, but a multi-valued
+    /// predicate yields several. Empty when the node carries no such typed value.
+    TypedValue(Vec<TypedValue>),
+}
+
+/// One fact in a [`Grounding::Subgraph`]: a `(predicate, object)` describing the grounded node.
+/// Strings are rendered once (IRIs bare, literals lexical) so the object is a serialisable,
+/// re-checkable fact rather than an opaque id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroundFact {
+    /// The predicate IRI.
+    pub predicate: String,
+    /// The object rendered to text: an IRI bare, a literal as its lexical value.
+    pub object: String,
+    /// Whether the object was a literal (`true`) or an IRI/blank entity (`false`).
+    pub object_is_literal: bool,
+}
+
+/// Configuration for [`ground`]: the minimality + completeness criteria and the budgets.
+#[derive(Clone, Debug)]
+pub struct GroundingConfig {
+    /// Restrict the subgraph to the predicates the node's **effective (minimal) type's
+    /// characteristic set** carries (ABSTAT-style minimality). When `false`, every asserted
+    /// predicate of the node is included (still bounded by `max_facts`). Default `true`.
+    pub minimal_type_pattern: bool,
+    /// Cap the number of facts in a [`Grounding::Subgraph`] (a `k`-budget). `0` = unbounded.
+    /// Default 64.
+    pub max_facts: usize,
+    /// The NL rendering template + char (token-proxy) budget for [`Modality::NlString`].
+    pub text: EntityTextConfig,
+    /// Append **typed-value** renderings to the [`Modality::NlString`] output — unit-typed
+    /// quantities (`"300 km/h"`-style, value + unit label) and enum labels — after the base
+    /// [`verbalize`] passage, within the `text.max_chars` budget (design §4.3 "extended to render
+    /// unit-normalised quantities and enum labels"). The base verbaliser leaves raw numbers OUT of
+    /// the embedded text on purpose; this flag is for an LLM-facing NL grounding where a typed slot
+    /// IS the useful content, distinct from the text that gets embedded. **Quantities are rendered
+    /// as declared, NOT unit-converted** (the landed QUDT normalisation table is wired in via the
+    /// render-path follow-up sq-t80n4). Default `false` (the base passage only).
+    pub render_typed_values: bool,
+    /// For [`Modality::TypedSubVector`], which encoder families to keep. Empty = keep all blocks.
+    /// Default empty (keep all).
+    pub keep_blocks: Vec<Encoder>,
+}
+
+impl Default for GroundingConfig {
+    fn default() -> Self {
+        GroundingConfig {
+            minimal_type_pattern: true,
+            max_facts: 64,
+            text: EntityTextConfig::default(),
+            render_typed_values: false,
+            keep_blocks: Vec::new(),
+        }
+    }
+}
+
+/// Ground `node` of `graph` into the object the consumer's `modality` needs, under `cfg`.
+///
+/// **Completeness is profile-relative**: pass a graph whose closure was materialised
+/// ([`crate::structure::close_for_vectorise`]) for completeness over that entailment profile; over
+/// an un-closed graph the grounding is complete only over the asserted facts. **No
+/// answer-completeness claim is made.**
+///
+/// `introspection` is the mined schema (`Introspection::build`) — used only by
+/// [`Modality::Subgraph`] under `minimal_type_pattern` to find the node's effective-type
+/// characteristic set; pass `None` to skip minimalisation (every asserted predicate is kept). The
+/// other modalities ignore it.
+///
+/// `store` supplies the stored vector for [`Modality::TypedSubVector`] (with `header` describing
+/// the blocks); pass `None` for the other modalities. Returns `None` when the node is absent /
+/// inline, or when the requested modality has nothing to ground (e.g. `TypedSubVector` with no
+/// stored vector, `TypedValue` with no typed object).
+pub fn ground(
+    graph: &Graph,
+    node: &oxrdf::Term,
+    modality: Modality,
+    cfg: &GroundingConfig,
+    introspection: Option<&Introspection>,
+    store: Option<(&VectorStore, &crate::encode::SchemaHeader)>,
+) -> Option<Grounding> {
+    let id = graph.id_of(node)?;
+    if dict::is_inline(id) {
+        return None;
+    }
+    match modality {
+        Modality::Subgraph => Some(Grounding::Subgraph(subgraph_facts(
+            graph,
+            id,
+            cfg,
+            introspection,
+        ))),
+        Modality::NlString => nl_string(graph, node, id, cfg).map(Grounding::NlString),
+        Modality::TypedSubVector => {
+            let (store, header) = store?;
+            typed_sub_vector(store, header, id, &cfg.keep_blocks)
+                .map(|(values, blocks)| Grounding::TypedSubVector { values, blocks })
+        }
+        Modality::TypedValue => {
+            let vals = typed_values(graph, id);
+            if vals.is_empty() {
+                None
+            } else {
+                Some(Grounding::TypedValue(vals))
+            }
+        }
+    }
+}
+
+// ---- NL-string modality -----------------------------------------------------------------------
+
+/// The token-budgeted NL grounding: the base [`verbalize`] passage, optionally extended with
+/// **typed-value** clauses (unit-typed quantities + enum labels) when
+/// [`GroundingConfig::render_typed_values`] is set. The whole result is held within
+/// `cfg.text.max_chars`. `None` when the node has no usable text at all.
+fn nl_string(graph: &Graph, node: &oxrdf::Term, id: Id, cfg: &GroundingConfig) -> Option<String> {
+    let base = verbalize(graph, node, &cfg.text);
+    if !cfg.render_typed_values {
+        return base;
+    }
+    let typed = typed_value_clauses(graph, id);
+    match (base, typed.is_empty()) {
+        (base, true) => base,
+        (None, false) => {
+            // No base passage (e.g. a node with no label/description) but it carries typed values
+            // — still ground it from those, within budget.
+            Some(truncate_chars(&typed.join(". "), cfg.text.max_chars))
+        }
+        (Some(b), false) => {
+            let extra = typed.join(". ");
+            let sep = &cfg.text.separator;
+            let joined = format!("{b}{sep}{extra}");
+            Some(truncate_chars(&joined, cfg.text.max_chars))
+        }
+    }
+}
+
+/// Render each typed value to a short NL clause: `"colour: Red"`, `"top speed: 300 unit:KiloM-PER-HR"`,
+/// `"electric: true"`. Deterministic order (the [`typed_values`] order). Unit quantities are
+/// rendered AS DECLARED (the unit label is the unit IRI's local name — no cross-unit conversion).
+fn typed_value_clauses(graph: &Graph, id: Id) -> Vec<String> {
+    typed_values(graph, id)
+        .into_iter()
+        .map(|v| match v {
+            TypedValue::Boolean(b) => b.to_string(),
+            TypedValue::Number { value, .. } => format_number(value),
+            TypedValue::Quantity { value, unit } => {
+                format!("{} {}", format_number(value), local_name(&unit))
+            }
+            TypedValue::Enum { member, label } => label.unwrap_or_else(|| local_name(&member)),
+        })
+        .collect()
+}
+
+/// Render an `f64` value without a trailing `.0` for whole numbers (so `2.0` → `"2"`, `2.5` → `"2.5"`).
+fn format_number(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
+}
+
+/// The local name of an IRI (the part after the last `#` or `/`), for a human-readable unit /
+/// member label when no `rdfs:label` was found.
+fn local_name(iri: &str) -> String {
+    let local = iri.rsplit(['#', '/']).next().unwrap_or(iri);
+    if local.is_empty() {
+        iri.to_string()
+    } else {
+        local.to_string()
+    }
+}
+
+/// Truncate `s` at a char boundary to at most `max` chars (the same budget discipline as
+/// [`verbalize`]).
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect()
+    }
+}
+
+// ---- subgraph modality ------------------------------------------------------------------------
+
+/// The smallest sub-BGP describing `id`: its `(predicate, object)` facts, optionally restricted to
+/// the predicates of `id`'s effective-type characteristic set (ABSTAT-style minimality), in stable
+/// (predicate IRI, object text) order, capped at `cfg.max_facts`.
+fn subgraph_facts(
+    graph: &Graph,
+    id: Id,
+    cfg: &GroundingConfig,
+    introspection: Option<&Introspection>,
+) -> Vec<GroundFact> {
+    // The minimal predicate allow-list, when minimalisation is requested AND an introspection is
+    // available AND the node's effective type matched a characteristic set. None ⇒ keep all.
+    let allow: Option<FxHashSet<String>> = if cfg.minimal_type_pattern {
+        introspection.and_then(|i| minimal_predicate_set(graph, id, i))
+    } else {
+        None
+    };
+
+    let mut facts: Vec<GroundFact> = Vec::new();
+    // One contiguous SPO range over the node's own triples (the node is the subject).
+    let scan = graph.store.scan(&[Some(id), None, None]);
+    for row in scan.rows.iter() {
+        let [_, p, o] = scan.to_spo(row);
+        let Some(predicate) = render_iri(graph, p) else {
+            continue;
+        };
+        if let Some(allowset) = &allow {
+            if !allowset.contains(&predicate) {
+                continue;
+            }
+        }
+        let (object, object_is_literal) = render_object(graph, o);
+        facts.push(GroundFact {
+            predicate,
+            object,
+            object_is_literal,
+        });
+    }
+    // Stable, deterministic order independent of dictionary-id layout.
+    facts.sort_by(|a, b| a.predicate.cmp(&b.predicate).then(a.object.cmp(&b.object)));
+    facts.dedup();
+    if cfg.max_facts != 0 && facts.len() > cfg.max_facts {
+        facts.truncate(cfg.max_facts);
+    }
+    facts
+}
+
+/// The predicate allow-list for `id` under ABSTAT-style minimality: find `id`'s **most-specific
+/// (minimal) type(s)**, then the introspection characteristic set whose declared `classes` best
+/// match — its `predicates` are the minimal pattern. `None` when the node has no type, no matching
+/// characteristic set, or the introspection carries no usable set (so the caller keeps all facts —
+/// the honest fail-open behaviour: minimalisation only *narrows* when it can prove a type pattern).
+fn minimal_predicate_set(
+    graph: &Graph,
+    id: Id,
+    introspection: &Introspection,
+) -> Option<FxHashSet<String>> {
+    let minimal_types = minimal_types_of(graph, id);
+    if minimal_types.is_empty() {
+        return None;
+    }
+    // Pick the characteristic set whose `classes` overlap the node's minimal types the most (ties
+    // broken toward the larger subject count — the dominant pattern for that type). The set's
+    // predicate list is the minimal pattern.
+    let mut best: Option<(usize, u64, &[String])> = None;
+    for cs in &introspection.characteristic_sets.sets {
+        let overlap = cs
+            .classes
+            .iter()
+            .filter(|c| minimal_types.contains(&c.iri))
+            .count();
+        if overlap == 0 {
+            continue;
+        }
+        let cand = (overlap, cs.subjects, cs.predicates.as_slice());
+        if best
+            .as_ref()
+            .is_none_or(|(bo, bs, _)| (overlap, cs.subjects) > (*bo, *bs))
+        {
+            best = Some(cand);
+        }
+    }
+    let preds = best?.2;
+    // `rdf:type` is always part of a useful minimal pattern (it carries the type the pattern is
+    // keyed on), so include it even if a CS omits it.
+    let mut set: FxHashSet<String> = preds.iter().cloned().collect();
+    set.insert(RDF_TYPE.to_string());
+    Some(set)
+}
+
+/// The most-specific (minimal) `rdf:type` class IRIs of `id`: its declared types, minus any that
+/// are a proper superclass of another declared type via `rdfs:subClassOf` in `graph`. Mirrors the
+/// ABSTAT minimalisation [`sparq_introspect`] does, but scoped to one node so the caller need not
+/// rebuild a minimalised introspection.
+fn minimal_types_of(graph: &Graph, id: Id) -> FxHashSet<String> {
+    let Some(type_pid) = graph.id_of(&named(RDF_TYPE)) else {
+        return FxHashSet::default();
+    };
+    let mut type_ids: Vec<Id> = Vec::new();
+    let scan = graph.store.scan(&[Some(id), Some(type_pid), None]);
+    for row in scan.rows.iter() {
+        let [_, _, o] = scan.to_spo(row);
+        if !dict::is_inline(o) && matches!(graph.dict.term_parts(o), TermParts::Iri { .. }) {
+            type_ids.push(o);
+        }
+    }
+    if type_ids.is_empty() {
+        return FxHashSet::default();
+    }
+    // Build the (subclass -> superclasses) closure-by-one-step map only over the node's own types,
+    // then drop any type that is a proper superclass of another of the node's types.
+    let supers = superclasses_of(graph, &type_ids);
+    let mut minimal: FxHashSet<String> = FxHashSet::default();
+    for &t in &type_ids {
+        let is_proper_super = type_ids
+            .iter()
+            .any(|&other| other != t && supers.get(&other).is_some_and(|s| s.contains(&t)));
+        if !is_proper_super {
+            if let Some(iri) = render_iri(graph, t) {
+                minimal.insert(iri);
+            }
+        }
+    }
+    minimal
+}
+
+/// For each class id in `classes`, its set of (transitive) superclass ids via `rdfs:subClassOf` in
+/// `graph`. Transitive so a multi-step chain `A ⊑ B ⊑ C` makes both `B` and `C` superclasses of
+/// `A`. Bounded to avoid a cycle spinning (a malformed `subClassOf` cycle terminates).
+fn superclasses_of(graph: &Graph, classes: &[Id]) -> FxHashMap<Id, FxHashSet<Id>> {
+    let mut out: FxHashMap<Id, FxHashSet<Id>> = FxHashMap::default();
+    let Some(sco_pid) = graph.id_of(&named(RDFS_SUBCLASS_OF)) else {
+        return out;
+    };
+    for &c in classes {
+        let mut acc: FxHashSet<Id> = FxHashSet::default();
+        let mut frontier = vec![c];
+        // Bounded BFS over subClassOf; the visited guard makes a cycle terminate.
+        while let Some(cur) = frontier.pop() {
+            let scan = graph.store.scan(&[Some(cur), Some(sco_pid), None]);
+            for row in scan.rows.iter() {
+                let [_, _, sup] = scan.to_spo(row);
+                if sup != cur && acc.insert(sup) {
+                    frontier.push(sup);
+                }
+            }
+        }
+        out.insert(c, acc);
+    }
+    out
+}
+
+// ---- typed-value modality ---------------------------------------------------------------------
+
+/// Every typed value `id` carries: booleans, numbers, unit-typed quantities (the QUDT
+/// `qudt:numericValue`/`qudt:value` + `qudt:unit` shape on a directly-attached quantity-value
+/// node), and enum members (IRI objects of predicates whose object is an entity). Deterministic
+/// order (predicate IRI, then value). **Exact** — each value is the literal's own value.
+fn typed_values(graph: &Graph, id: Id) -> Vec<TypedValue> {
+    let mut out: Vec<(String, TypedValue)> = Vec::new();
+    let scan = graph.store.scan(&[Some(id), None, None]);
+    for row in scan.rows.iter() {
+        let [_, p, o] = scan.to_spo(row);
+        let Some(pred) = render_iri(graph, p) else {
+            continue;
+        };
+        // A unit-typed quantity: the object is a blank/IRI quantity-value node with a magnitude +
+        // a unit. Recognised before the literal path so a QUDT structured value renders as a
+        // Quantity, not as the raw blank node.
+        if let Some(q) = quantity_value(graph, o) {
+            out.push((pred, q));
+            continue;
+        }
+        match literal_typed_value(graph, o) {
+            Some(v) => out.push((pred, v)),
+            None => {
+                // An IRI object → an enum member (the closed-world enum slot). Only entities, not
+                // structured quantity nodes already handled above.
+                if !dict::is_inline(o) {
+                    if let TermParts::Iri { .. } = graph.dict.term_parts(o) {
+                        let member = render_iri(graph, o).unwrap_or_default();
+                        let label = enum_label(graph, o);
+                        out.push((pred, TypedValue::Enum { member, label }));
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(typed_value_key(&a.1).cmp(&typed_value_key(&b.1)))
+    });
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
+/// A boolean / numeric literal object as a [`TypedValue`], or `None` for a non-literal / a string /
+/// an ill-formed numeric.
+fn literal_typed_value(graph: &Graph, o: Id) -> Option<TypedValue> {
+    if dict::is_inline(o) {
+        // Inline-integer ids decode to an `xsd:integer` literal.
+        let oxrdf::Term::Literal(l) = graph.dict.term(o) else {
+            return None;
+        };
+        let value = numeric_value(l.value())?;
+        return Some(TypedValue::Number {
+            value,
+            datatype: l.datatype().as_str().to_string(),
+        });
+    }
+    let TermParts::Lit {
+        value,
+        datatype,
+        lang,
+    } = graph.dict.term_parts(o)
+    else {
+        return None;
+    };
+    if lang.is_some() {
+        return None; // a language-tagged string is text, not a typed value
+    }
+    if datatype == XSD_BOOLEAN {
+        return match value.trim() {
+            "true" | "1" => Some(TypedValue::Boolean(true)),
+            "false" | "0" => Some(TypedValue::Boolean(false)),
+            _ => None,
+        };
+    }
+    match route(datatype) {
+        Encoder::Numeric => numeric_value(value).map(|v| TypedValue::Number {
+            value: v,
+            datatype: datatype.to_string(),
+        }),
+        Encoder::Date => temporal_value(value, datatype).map(|v| TypedValue::Number {
+            value: v,
+            datatype: datatype.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// Recognise a directly-attached **QUDT quantity value**: `o` is a blank/IRI node carrying a
+/// magnitude (`qudt:numericValue` or `qudt:value`) and a `qudt:unit`. Returns the
+/// [`TypedValue::Quantity`] **as declared** — the value is not converted between units. The landed
+/// P2 `units::normalise` could canonicalise it; wiring that into this render path is the tracked
+/// follow-up sq-t80n4. `None` when `o` is not such a node.
+fn quantity_value(graph: &Graph, o: Id) -> Option<TypedValue> {
+    if dict::is_inline(o) {
+        return None;
+    }
+    if !matches!(
+        graph.dict.term_parts(o),
+        TermParts::Iri { .. } | TermParts::Blank(_)
+    ) {
+        return None;
+    }
+    let value = first_numeric(graph, o, QUDT_NUMERIC_VALUE)
+        .or_else(|| first_numeric(graph, o, QUDT_VALUE))?;
+    let unit = first_iri_object(graph, o, QUDT_UNIT)?;
+    Some(TypedValue::Quantity { value, unit })
+}
+
+/// The first numeric object of `(subject, predicate)`, parsed to `f64`, or `None`.
+fn first_numeric(graph: &Graph, subject: Id, predicate: &str) -> Option<f64> {
+    let pid = graph.id_of(&named(predicate))?;
+    let scan = graph.store.scan(&[Some(subject), Some(pid), None]);
+    for row in scan.rows.iter() {
+        let [_, _, o] = scan.to_spo(row);
+        if dict::is_inline(o) {
+            if let oxrdf::Term::Literal(l) = graph.dict.term(o) {
+                if let Some(v) = numeric_value(l.value()) {
+                    return Some(v);
+                }
+            }
+            continue;
+        }
+        if let TermParts::Lit { value, .. } = graph.dict.term_parts(o) {
+            if let Some(v) = numeric_value(value) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// The first IRI object of `(subject, predicate)` rendered to text, or `None`.
+fn first_iri_object(graph: &Graph, subject: Id, predicate: &str) -> Option<String> {
+    let pid = graph.id_of(&named(predicate))?;
+    let scan = graph.store.scan(&[Some(subject), Some(pid), None]);
+    for row in scan.rows.iter() {
+        let [_, _, o] = scan.to_spo(row);
+        if !dict::is_inline(o) && matches!(graph.dict.term_parts(o), TermParts::Iri { .. }) {
+            return render_iri(graph, o);
+        }
+    }
+    None
+}
+
+/// A stable, comparable key for a [`TypedValue`] so [`typed_values`] is deterministic across
+/// dictionary-id layouts.
+fn typed_value_key(v: &TypedValue) -> String {
+    match v {
+        TypedValue::Boolean(b) => format!("0bool:{}", b),
+        TypedValue::Number { value, datatype } => format!("1num:{}:{}", datatype, value),
+        TypedValue::Quantity { value, unit } => format!("2qty:{}:{}", unit, value),
+        TypedValue::Enum { member, .. } => format!("3enum:{}", member),
+    }
+}
+
+// ---- typed-sub-vector modality ----------------------------------------------------------------
+
+/// Project `id`'s stored vector to only the blocks in `keep` (empty = all), concatenated in block
+/// order, plus the encoder families kept. `None` when the store has no vector for `id`, or the kept
+/// projection is empty.
+fn typed_sub_vector(
+    store: &VectorStore,
+    header: &crate::encode::SchemaHeader,
+    id: Id,
+    keep: &[Encoder],
+) -> Option<(Vec<f32>, Vec<Encoder>)> {
+    let full = store.get(id)?;
+    let mut values: Vec<f32> = Vec::new();
+    let mut blocks: Vec<Encoder> = Vec::new();
+    for block in header.blocks() {
+        if !keep.is_empty() && !keep.contains(&block.encoder) {
+            continue;
+        }
+        let end = block.offset.saturating_add(block.width);
+        if end > full.len() {
+            continue; // header/store mismatch on this block — skip rather than panic
+        }
+        values.extend_from_slice(&full[block.offset..end]);
+        blocks.push(block.encoder);
+    }
+    if values.is_empty() {
+        None
+    } else {
+        Some((values, blocks))
+    }
+}
+
+// ---- shared helpers ---------------------------------------------------------------------------
+
+/// An IRI named-node term.
+fn named(iri: &str) -> oxrdf::Term {
+    oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(iri))
+}
+
+/// Render an id that should be an IRI to its full IRI string, or `None` if it is not an IRI.
+fn render_iri(graph: &Graph, id: Id) -> Option<String> {
+    if dict::is_inline(id) {
+        return None;
+    }
+    match graph.dict.term_parts(id) {
+        TermParts::Iri { prefix, suffix } => Some(format!("{}{}", prefix, suffix)),
+        _ => None,
+    }
+}
+
+/// Render an object id to `(text, is_literal)`: an IRI bare, a literal as its lexical value, a
+/// blank node as `_:label`. Inline integers decode to their lexical value.
+fn render_object(graph: &Graph, id: Id) -> (String, bool) {
+    if dict::is_inline(id) {
+        if let oxrdf::Term::Literal(l) = graph.dict.term(id) {
+            return (l.value().to_string(), true);
+        }
+    }
+    match graph.dict.term_parts(id) {
+        TermParts::Iri { prefix, suffix } => (format!("{}{}", prefix, suffix), false),
+        TermParts::Lit { value, .. } => (value.to_string(), true),
+        TermParts::Blank(b) => (format!("_:{}", b), false),
+        TermParts::Triple(_) => (String::new(), false),
+    }
+}
+
+/// The label of an enum-member IRI: the first `rdfs:label` / `skos:prefLabel` literal, else the
+/// IRI's local name.
+fn enum_label(graph: &Graph, id: Id) -> Option<String> {
+    for pred in [
+        "http://www.w3.org/2000/01/rdf-schema#label",
+        "http://www.w3.org/2004/02/skos/core#prefLabel",
+    ] {
+        if let Some(pid) = graph.id_of(&named(pred)) {
+            let scan = graph.store.scan(&[Some(id), Some(pid), None]);
+            for row in scan.rows.iter() {
+                let [_, _, o] = scan.to_spo(row);
+                if let TermParts::Lit { value, .. } = graph.dict.term_parts(o) {
+                    let v = value.trim();
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    // Fall back to the IRI's local name.
+    let iri = render_iri(graph, id)?;
+    let local = iri.rsplit(['#', '/']).next().unwrap_or(&iri);
+    (!local.is_empty()).then(|| local.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::structure::close_for_vectorise;
+    use sparq_reason::Profile;
+
+    fn iri(s: &str) -> oxrdf::Term {
+        oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+    }
+
+    // A schema-rich graph: a subclass hierarchy, a typed entity with enum + numeric + boolean +
+    // quantity properties, plus the labels enum members and types carry.
+    const TTL: &str = r#"
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix qudt: <http://qudt.org/schema/qudt/> .
+@prefix unit: <http://qudt.org/vocab/unit/> .
+@prefix ex:   <http://ex/> .
+
+ex:SportsCar rdfs:subClassOf ex:Car .
+ex:Car       rdfs:subClassOf ex:Vehicle .
+
+ex:Red   rdfs:label "Red" .
+ex:Green rdfs:label "Green" .
+
+ex:bolt a ex:SportsCar, ex:Car ;
+        rdfs:label "Bolt" ;
+        ex:seats 2 ;
+        ex:electric true ;
+        ex:colour ex:Red ;
+        ex:topSpeed ex:bolt-speed .
+
+ex:bolt-speed qudt:numericValue "300"^^xsd:decimal ;
+              qudt:unit unit:KiloM-PER-HR .
+
+ex:other a ex:Car ;
+         rdfs:label "Other" ;
+         ex:seats 4 ;
+         ex:electric false .
+"#;
+
+    fn closed() -> sparq_core::Graph {
+        close_for_vectorise(TTL, "turtle", Profile::Rdfs)
+            .unwrap()
+            .graph
+    }
+
+    #[test]
+    fn dispatcher_maps_output_type_to_modality() {
+        assert_eq!(Modality::for_output(OutputType::Facts), Modality::Subgraph);
+        assert_eq!(
+            Modality::for_output(OutputType::Vector),
+            Modality::TypedSubVector
+        );
+        assert_eq!(Modality::for_output(OutputType::Text), Modality::NlString);
+        assert_eq!(
+            Modality::for_output(OutputType::Value),
+            Modality::TypedValue
+        );
+        // The load-bearing default: an ambiguous request grounds as the EXACT subgraph.
+        assert_eq!(
+            Modality::for_output(OutputType::Ambiguous),
+            Modality::Subgraph
+        );
+    }
+
+    #[test]
+    fn subgraph_grounds_to_facts_present_in_the_graph() {
+        let g = closed();
+        let cfg = GroundingConfig {
+            minimal_type_pattern: false,
+            ..Default::default()
+        };
+        let Some(Grounding::Subgraph(facts)) = ground(
+            &g,
+            &iri("http://ex/bolt"),
+            Modality::Subgraph,
+            &cfg,
+            None,
+            None,
+        ) else {
+            panic!("expected a subgraph grounding");
+        };
+        // Every fact must be a real triple of the graph (re-checkable, never approximate).
+        let bolt = g.id_of(&iri("http://ex/bolt")).unwrap();
+        for f in &facts {
+            let pid = g.id_of(&named(&f.predicate)).expect("predicate in graph");
+            let scan = g.store.scan(&[Some(bolt), Some(pid), None]);
+            let hit = scan.rows.iter().any(|row| {
+                let [_, _, o] = scan.to_spo(row);
+                let (txt, _) = render_object(&g, o);
+                txt == f.object
+            });
+            assert!(hit, "grounded fact not present in graph: {:?}", f);
+        }
+        // The closure made `ex:bolt a ex:Vehicle` a real fact → completeness over the RDFS profile.
+        assert!(
+            facts
+                .iter()
+                .any(|f| f.predicate == RDF_TYPE && f.object == "http://ex/Vehicle"),
+            "closure-before-grounding should surface the entailed Vehicle type"
+        );
+    }
+
+    #[test]
+    fn minimal_type_pattern_narrows_the_subgraph() {
+        let g = closed();
+        let introspection = Introspection::build(&g);
+        let full_cfg = GroundingConfig {
+            minimal_type_pattern: false,
+            ..Default::default()
+        };
+        let min_cfg = GroundingConfig {
+            minimal_type_pattern: true,
+            ..Default::default()
+        };
+
+        let Some(Grounding::Subgraph(full)) = ground(
+            &g,
+            &iri("http://ex/bolt"),
+            Modality::Subgraph,
+            &full_cfg,
+            Some(&introspection),
+            None,
+        ) else {
+            panic!()
+        };
+        let Some(Grounding::Subgraph(min)) = ground(
+            &g,
+            &iri("http://ex/bolt"),
+            Modality::Subgraph,
+            &min_cfg,
+            Some(&introspection),
+            None,
+        ) else {
+            panic!()
+        };
+        // Minimality is relative to a criterion: the minimal pattern is a SUBSET of the full set,
+        // and never larger. (It may equal it when the CS already covers every predicate.)
+        let min_preds: FxHashSet<&String> = min.iter().map(|f| &f.predicate).collect();
+        let full_preds: FxHashSet<&String> = full.iter().map(|f| &f.predicate).collect();
+        assert!(
+            min_preds.is_subset(&full_preds),
+            "minimal pattern must be a subset of all facts"
+        );
+    }
+
+    #[test]
+    fn typed_value_extracts_boolean_number_quantity_enum() {
+        let g = closed();
+        let Some(Grounding::TypedValue(vals)) = ground(
+            &g,
+            &iri("http://ex/bolt"),
+            Modality::TypedValue,
+            &GroundingConfig::default(),
+            None,
+            None,
+        ) else {
+            panic!("expected typed values");
+        };
+        // Boolean (electric true) — exact, two-valued.
+        assert!(
+            vals.contains(&TypedValue::Boolean(true)),
+            "missing boolean: {:?}",
+            vals
+        );
+        // Number (seats 2) — exact.
+        assert!(
+            vals.iter()
+                .any(|v| matches!(v, TypedValue::Number { value, .. } if *value == 2.0)),
+            "missing seats number: {:?}",
+            vals
+        );
+        // Unit-typed quantity rendered AS DECLARED (300 km/h, not converted).
+        assert!(
+            vals.iter()
+                .any(|v| matches!(v, TypedValue::Quantity { value, unit }
+                if *value == 300.0 && unit == "http://qudt.org/vocab/unit/KiloM-PER-HR")),
+            "missing quantity: {:?}",
+            vals
+        );
+        // Enum member (colour Red) with its label.
+        assert!(
+            vals.iter()
+                .any(|v| matches!(v, TypedValue::Enum { member, label }
+                if member == "http://ex/Red" && label.as_deref() == Some("Red"))),
+            "missing enum member: {:?}",
+            vals
+        );
+    }
+
+    #[test]
+    fn nl_string_grounds_via_verbalize() {
+        let g = closed();
+        let Some(Grounding::NlString(s)) = ground(
+            &g,
+            &iri("http://ex/bolt"),
+            Modality::NlString,
+            &GroundingConfig::default(),
+            None,
+            None,
+        ) else {
+            panic!("expected an NL string");
+        };
+        assert!(
+            s.contains("Bolt"),
+            "NL grounding should carry the label: {s:?}"
+        );
+    }
+
+    #[test]
+    fn nl_string_renders_typed_values_when_requested() {
+        let g = closed();
+        let cfg = GroundingConfig {
+            render_typed_values: true,
+            ..Default::default()
+        };
+        let Some(Grounding::NlString(s)) = ground(
+            &g,
+            &iri("http://ex/bolt"),
+            Modality::NlString,
+            &cfg,
+            None,
+            None,
+        ) else {
+            panic!("expected an NL string");
+        };
+        // Base passage survives.
+        assert!(
+            s.contains("Bolt"),
+            "NL grounding should carry the label: {s:?}"
+        );
+        // Enum label rendered (design §4.3 "enum labels").
+        assert!(
+            s.contains("Red"),
+            "typed-value NL should render the enum label: {s:?}"
+        );
+        // Unit-typed quantity rendered AS DECLARED (value + unit local name, not converted).
+        assert!(
+            s.contains("300 KiloM-PER-HR"),
+            "typed-value NL should render the quantity: {s:?}"
+        );
+        // Without the flag, the base passage carries NO raw number (design: numbers out of embeds).
+        let plain = GroundingConfig::default();
+        let Some(Grounding::NlString(p)) = ground(
+            &g,
+            &iri("http://ex/bolt"),
+            Modality::NlString,
+            &plain,
+            None,
+            None,
+        ) else {
+            panic!()
+        };
+        assert!(
+            !p.contains("300 KiloM-PER-HR"),
+            "default NL must omit the typed quantity: {p:?}"
+        );
+    }
+
+    #[test]
+    fn nl_typed_values_respect_char_budget() {
+        let g = closed();
+        let mut text = EntityTextConfig {
+            max_chars: 8,
+            ..Default::default()
+        };
+        text.languages = vec!["en".into(), String::new()];
+        let cfg = GroundingConfig {
+            render_typed_values: true,
+            text,
+            ..Default::default()
+        };
+        let Some(Grounding::NlString(s)) = ground(
+            &g,
+            &iri("http://ex/bolt"),
+            Modality::NlString,
+            &cfg,
+            None,
+            None,
+        ) else {
+            panic!()
+        };
+        assert!(
+            s.chars().count() <= 8,
+            "budget must cap the typed-value NL: {s:?}"
+        );
+    }
+
+    #[test]
+    fn ground_rejects_absent_and_inline_nodes() {
+        let g = closed();
+        // Absent node.
+        assert!(ground(
+            &g,
+            &iri("http://ex/nope"),
+            Modality::Subgraph,
+            &GroundingConfig::default(),
+            None,
+            None
+        )
+        .is_none());
+        // A node with no typed value grounds to None for TypedValue.
+        assert!(ground(
+            &g,
+            &iri("http://ex/Red"),
+            Modality::TypedValue,
+            &GroundingConfig::default(),
+            None,
+            None
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn subgraph_respects_max_facts_budget() {
+        let g = closed();
+        let cfg = GroundingConfig {
+            minimal_type_pattern: false,
+            max_facts: 2,
+            ..Default::default()
+        };
+        let Some(Grounding::Subgraph(facts)) = ground(
+            &g,
+            &iri("http://ex/bolt"),
+            Modality::Subgraph,
+            &cfg,
+            None,
+            None,
+        ) else {
+            panic!()
+        };
+        assert_eq!(facts.len(), 2, "k-budget must cap the subgraph");
+    }
+
+    #[test]
+    fn minimal_types_drops_superclasses() {
+        let g = closed();
+        let bolt = g.id_of(&iri("http://ex/bolt")).unwrap();
+        // bolt is asserted/entailed SportsCar, Car, Vehicle; minimal = {SportsCar} (Car, Vehicle
+        // are proper superclasses).
+        let minimal = minimal_types_of(&g, bolt);
+        assert!(
+            minimal.contains("http://ex/SportsCar"),
+            "minimal must keep SportsCar: {:?}",
+            minimal
+        );
+        assert!(
+            !minimal.contains("http://ex/Vehicle"),
+            "minimal must drop Vehicle superclass: {:?}",
+            minimal
+        );
+        assert!(
+            !minimal.contains("http://ex/Car"),
+            "minimal must drop Car superclass: {:?}",
+            minimal
+        );
+    }
+}

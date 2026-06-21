@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML, plus JSON-LD behind the opt-in jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + opt-in JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -225,7 +225,7 @@ CONSTRUCT/DESCRIBE):
 | --- | --- | --- |
 | SELECT | `application/sparql-results+json` (default) / `+xml` / `text/csv` / `text/tab-separated-values` | matching results media |
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
-| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (opt-in `jsonld` feature) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1 --> |
+| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (the `jsonld` feature — **default-on**) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1/.4 --> |
 
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \
@@ -236,20 +236,23 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: text/turtle' \
 # RDF/XML:
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/rdf+xml' \
      --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
-# JSON-LD (flattened) — requires a `--features jsonld` build: [OPUS-4.8] sq-oy1f.1
+# JSON-LD (flattened) — default-on, works on the standard build: [OPUS-4.8] sq-oy1f.1/.4
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
      --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
 ```
 
-> **JSON-LD content negotiation (opt-in `jsonld` feature).** With the server built
-> `--features jsonld`, `application/ld+json` joins the q-value-aware RDF negotiation in BOTH
-> directions: a CONSTRUCT/DESCRIBE or a Graph-Store-Protocol read with `Accept:
-> application/ld+json` is served as the engine's *flattened* JSON-LD (a `{"@graph": […]}`
-> node-object document that `toRdf`-round-trips to the same graph), and a GSP `PUT`/`POST`
-> with `Content-Type: application/ld+json` is parsed into the store via the engine's JSON-LD
-> parser. Without the feature, `application/ld+json` is unrecognised: an `Accept` for it falls
-> back to N-Triples (never a 406 — the endpoint always has a representation), and a write body
-> in it is a plain `415`. The default build is byte-identical to before.
+> **JSON-LD content negotiation (`jsonld` feature — default-on, [OPUS-4.8] sq-oy1f.4).** The
+> server speaks `application/ld+json` out of the box (the `jsonld` feature is in the default set —
+> a maintainer-directed exception to opt-in-by-default). `application/ld+json` joins the
+> q-value-aware RDF negotiation in BOTH directions: a CONSTRUCT/DESCRIBE or a Graph-Store-Protocol
+> read with `Accept: application/ld+json` is served as the engine's *flattened* JSON-LD (a
+> `{"@graph": […]}` node-object document that `toRdf`-round-trips to the same graph), and a GSP
+> `PUT`/`POST` with `Content-Type: application/ld+json` is parsed into the store via the engine's
+> JSON-LD parser. Toggleable off via `--no-default-features --features server`: then
+> `application/ld+json` is unrecognised — an `Accept` for it falls back to a supported graph format
+> (never a 406 — the endpoint always has a representation), and a write body in it is a plain `415`
+> — byte-identical to a JSON-LD-disabled build. What is default-on now: JSON-LD parse + serialise
+> (flattened) + content-negotiation; full conneg-conformance ratcheting is on the sq-oy1f roadmap.
 
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)
@@ -395,6 +398,11 @@ curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/back
 # Restore atomically installs a store rehydrated from that artifact (in-memory server only; fail-closed):
 curl -X POST -H 'Authorization: Bearer <TOKEN>' --data-binary @snapshot.spqb http://127.0.0.1:3030/admin/restore
 # Restore on start (bootstrap a fresh node / PITR base):  sparq-server --restore snapshot.spqb
+# Incremental change-stream / point-in-time recovery (PITR): a DELTA between a retained
+# generation N and the current generation (replayed forward onto the matching base):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' 'http://127.0.0.1:3030/admin/backup/delta?from=0' -o d0.spqd
+# Recover to the chosen point: restore the base, then replay the delta chain (oldest first):
+sparq-server --restore snapshot.spqb --restore-delta d0.spqd --restore-delta d1.spqd
 ```
 
 `/metrics` is hand-rolled Prometheus text exposition (no metrics dependency); the
@@ -449,6 +457,24 @@ stage-2 + the base of point-in-time recovery; refused together with `--persist`)
 **at-rest encryption of the artifact is out of scope** — the integrity digest detects accidental
 corruption, not tampering, and is not a confidentiality or authenticity guarantee; protect the
 artifact at the storage tier.
+
+**`POST /admin/backup/delta?from=N` + `--restore-delta` — incremental change-stream / PITR
+(same `backup` feature; `sq-bu1a`).** The Option-A backup above is the BASE half of a
+point-in-time-recovery story; this is the incremental companion. **`/admin/backup/delta`** streams
+a single self-describing **delta artifact** (distinct magic `SPARQ-BACKUP-DELTA`) keyed off the
+generation/writer-seq: a header recording the `from-generation` N → the current `to-generation`
+plus the per-pod epoch vector at `to`, then the **quad-set change** (inserted + deleted quads, each
+as N-Quads) between those two generations. `from` must still be **retained** by the ring — without
+the `time-travel` feature only the last few generations (the concurrency window) are retained, so a
+`from` older than that is `410 Gone` (widen retention with `time-travel`); a missing/invalid `from`
+is `400`. To recover to a chosen point, restore the base then **replay the delta chain forward**:
+`sparq-server --restore base.spqb --restore-delta d0.spqd --restore-delta d1.spqd …` (oldest
+first; or `SPARQ_RESTORE_DELTA`). **Fail-closed:** a corrupt / version-mismatched / out-of-order /
+gapped delta aborts the whole recovery and the live store is untouched (import + full replay happen
+before any swap). **Honest scope:** deltas are **same-lineage** only — the chain must be the writer
+history of that base (blank-node labels are stable within a lineage, which is what the quad-set diff
+relies on); cross-lineage diffing is unsupported. At-rest encryption is out of scope, same as the
+base.
 
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
@@ -1109,6 +1135,16 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   pair — the `ArcSwap<ServingCore>` that backs the atomic online restore is `backup`-gated, so the
   DEFAULT read path is byte-identical to before #941 (no extra atomic load when `backup` is OFF;
   sq-0g6g resolved in the lean direction). (sq-o5bi.)
+- **Incremental change-stream / PITR — same `backup` feature (sq-bu1a).** The base backup above
+  is the BASE half of point-in-time recovery; `/admin/backup/delta?from=N` streams an incremental
+  **delta artifact** (distinct `SPARQ-BACKUP-DELTA` kind) — the quad-set change between a *retained*
+  generation N and the current one, keyed off the generation/writer-seq range + the epoch vector at
+  `to`. Recover to a chosen point by restoring the base then replaying the chain forward:
+  `--restore base --restore-delta d0 --restore-delta d1 …` (oldest first; or `SPARQ_RESTORE_DELTA`).
+  **Fail-closed** on a corrupt / out-of-order / gapped chain (import + full replay before any swap);
+  `from` not retained is `410` (widen retention with `time-travel`). **Same-lineage only** — the
+  chain must be the writer history of that base (the diff relies on lineage-stable blank-node
+  labels). At-rest encryption out of scope, same as the base.
 - **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
   (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.
 - **Error bodies.** Every error is structured JSON `{"error": "..."}` with

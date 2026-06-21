@@ -27,6 +27,11 @@ pub fn run() {
         .manage(EngineState::new())
         .invoke_handler(tauri::generate_handler![
             engine::load,
+            // [OPUS-4.8] sq-ixc3.13 — the Import drawer's native loader: decode a pasted
+            // document (`load_text`) or a disk file (`load_path`, incl. compressed + native-
+            // only HDT) into N-Quads for the in-tab store to merge.
+            engine::load_text,
+            engine::load_path,
             engine::query,
             engine::query_quads,
             engine::update_in_place,

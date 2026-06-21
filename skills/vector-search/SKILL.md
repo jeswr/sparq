@@ -729,8 +729,258 @@ corruption for that side — a missing/wrong schema never deadlocks the sampler.
 deterministic for a fixed `(seed, mode, triple)` and applies the standard "filtered" guard (never
 emits a corruption that is itself a true triple). **Honesty:** the empirical benefit of either prior is
 **unproven** — both ship behind the ablation precisely because the literal/type-aware KGE literature
-reports inconsistent gains; this slice is the buildable inputs, the trainer that consumes them is a
-tracked follow-up.
+reports inconsistent gains; this slice is the buildable inputs. **The trainer that consumes them now
+exists** behind the `kge` feature (recipe 14).
+
+### 14. KGE measurement foundation — DistMult/ComplEx trainer + filtered link-prediction ablation (opt-in, feature = `kge`)
+
+<!-- [OPUS-4.8] sq-0wo9e.8 / P6 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §P6 + sq-0wo9e.8). -->
+The `kge` feature (implies `structure`) is the **measurement foundation** for the epic: a **thin,
+CPU-only, deterministically-seeded shallow KGE** that *consumes* the P0 closure + type-constrained
+negatives to produce embeddings, plus the standard **filtered link-prediction** harness that measures
+them. It is the *instrument* — it makes **no accuracy claim**. Two scoring models behind the
+`ModelKind` axis: **DistMult** (Yang 2015, symmetric) and **ComplEx** (Trouillon 2016, asymmetric).
+No new dependency (hand-rolled SGD, no ML crate).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{close_for_vectorise, train, ModelKind, TrainConfig, SamplingMode, TypeConstraints};
+use sparq_reason::Profile;
+
+let closed = close_for_vectorise(turtle_src, "turtle", Profile::Rdfs)?;   // closure-before-vectorise
+let tc = TypeConstraints::mine(&closed.graph);
+// small() defaults to the ASYMMETRIC ComplEx; small_with_model(..) selects DistMult explicitly.
+let cfg = TrainConfig::small(SamplingMode::TypeConstrained, /*seed*/ 7);  // tiny, reproducible
+let (model, report) = train(&closed.graph, &tc, cfg);
+assert!(report.loss_decreased());                  // it learns
+let score = model.score(h, r, t);                  // model.model is ModelKind::{DistMult,ComplEx}
+# Ok::<(), String>(())
+```
+
+**The model axis is load-bearing.** DistMult scores `(h,r,t)` and `(t,r,h)` identically, so on a
+relation whose true edges are **directional** it is structurally near-random — it cannot place the
+head above the tail. Both synthetic eval slices here are ~100 % directional, so a DistMult ablation
+runs in a near-random regime where the inter-cell deltas are noise. **`EvalConfig::small` defaults to
+the asymmetric ComplEx**, and any ablation delta must be read off the ComplEx run, not DistMult.
+
+The **eval harness** runs the 2×2 P0 ablation matrix and reports filtered MRR / Hits@1/3/10 with a
+long-tail breakdown. Because a single seed's inter-cell delta can be a handful of rank hits (noise),
+report each cell as a **mean ± std over several seeds** with `run_ablation_multiseed`:
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{run_ablation_multiseed, synthetic_relational_ttl, EvalConfig};
+let ttl = synthetic_relational_ttl(400, /*seed*/ 42);   // or your own KG text
+let template = EvalConfig::small(13);                    // ComplEx by default
+let cells = run_ablation_multiseed(&ttl, "turtle", template, &[1,2,3,4,5])?;  // [(F,F),(F,T),(T,F),(T,T)]
+for c in &cells {
+    println!("closure={} type-neg={} MRR={:.4}+/-{:.4}",
+        c.closure, c.type_constrained, c.metrics.mrr.mean, c.metrics.mrr.std);
+}
+# Ok::<(), String>(())
+// A delta smaller than the combined spread of the two cells is NOT yet evidence.
+```
+
+**Filtered protocol (load-bearing).** Each ranking removes **every** known-true triple (train + valid +
+test) before scoring the held-out one — the established Bordes 2013 protocol; getting it wrong
+invalidates every number. Train/valid/test are a leakage-free partition (a triple is in exactly one
+split); the trainer sees **train only**. Only **non-schema relations** are prediction targets
+(`SCHEMA_PREDICATES` — `rdf:type`/`subClassOf`/domain/range are *structural context*, never targets,
+so the closure axis is not distorted by trivially-derivable entailed types). The runnable ablation is
+`examples/kge_ablation.rs` (runs BOTH models, multi-seed; a real dataset goes behind
+`SPARQ_KGE_DATASET=/path/to/kg.nt`). **All numbers are INDICATIVE only** (the work-box is
+non-canonical) and are **never** baked into docs. **Adoption gate:** no prior is adopted from these
+synthetic, work-box, single-seed figures — adoption requires a **real dataset** (WN18RR/FB15k-237
+subset), on a **canonical machine**, under the **asymmetric model**, with **multi-seed** reporting.
+The gUFO-prior cell (`AblationCell::gufo_prior`) is an exposed ablation axis the later phase wires into.
+
+### 15. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
+
+<!-- [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §3.1/§3.2/§6.A). -->
+Research-grade **P1**: the typed-literal encoders that turn a node vector into a **structured
+partitioned object** (design §3). All are **pure functions keyed by datatype** in the `encode`
+module — no training, no graph state, no I/O.
+
+- **Datatype `route`r** — the datatype IRI alone selects the encoder family
+  (`Encoder::{Numeric,Boolean,Date,Other}`). Exact, free.
+- **`NumericEncoder`** — the **order-preserving** magnitude encoder (the one the design gates as
+  formally provable): per-predicate quantile-normalise + a strictly-monotone **thermometer** code
+  whose **L2 distance is monotone in value distance over the whole observed range** (NOT a periodic
+  Fourier code). `metamorphic_monotone` is the provable gate; a sine code FAILS it by design.
+- **`BooleanEncoder`** — one ±1 sign dimension, **exact, 2-valued**, round-trips (`true`→+1,
+  `false`→−1; `decode(encode(b)) == b`).
+- **`DateEncoder`** — maps `xsd:date`/`dateTime`/`dateTimeStamp`/`gYear` to an order-preserving
+  epoch lane (via `sparq-core`'s `Timeline`) and reuses the numeric encoder, so chronological order
+  is preserved.
+- **`SchemaHeader`** — the self-describing `.spqv` partition descriptor: contiguous `Block`s
+  (encoder + `Metric` + dim span) with a **metric-correctness guard** (`check_euclidean`) so a whole-row
+  L2/cosine search never silently runs over a non-Euclidean (e.g. future taxonomy) block. Round-trips
+  to bytes (`SPQS` magic) for a sidecar.
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{route, Encoder, NumericEncoder, BooleanEncoder, DateEncoder,
+    SchemaHeader, Block, Metric};
+
+assert_eq!(route("http://www.w3.org/2001/XMLSchema#integer"), Encoder::Numeric);
+let enc = NumericEncoder::fit([1.0, 30.0, 31.0, 70.0, 5000.0], /*dim*/ 16); // per-predicate fit
+let v30 = enc.encode(30.0);                                                 // order-preserving block
+assert_eq!(BooleanEncoder::decode(BooleanEncoder::encode(true)[0]), true);  // exact round-trip
+let header = SchemaHeader::new(vec![
+    Block { encoder: Encoder::Numeric, metric: Metric::Euclidean, offset: 0, width: 16 },
+])?;
+header.check_euclidean()?;  // every block is L2-searchable
+# Ok::<(), String>(())
+```
+
+**Honesty.** Order-preservation, boolean exactness, datatype-dispatch correctness, and the metric
+guard are **proven** (`encode.rs` tests). Whether the typed encoders raise downstream
+link-prediction / retrieval is **empirical and dataset-dependent** (design §6.B/§9) — no accuracy
+claim is made. The encoder-quality ablation runner is `examples/bench_typed_encoders.rs` (P1 ON vs
+OFF, with a long-tail slice); its numbers are **work-box NON-CANONICAL**. The encoders are inputs a
+trainer would consume — the thin KGE trainer that consumes them now exists behind the `kge` feature
+(recipe 14). <!-- [OPUS-4.8] sq-0wo9e.8 -->
+
+### 16. SHACL/OWL priors + QUDT unit-normalisation — enum codebook / cardinality pooling / SI magnitudes (opt-in, `structure` + `structure-shacl`)
+
+<!-- [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §2 + §7). -->
+Research-grade **P2**: read the schema sparq already holds — `sh:in` enums, `sh:datatype`,
+`sh:min/maxCount`, `owl:FunctionalProperty`, and QUDT units — as **priors over the encoder layout**,
+not post-hoc filters. Two slices:
+
+- **QUDT unit-normalisation (`structure`, pure — no SHACL dep)** — `units::normalise(value, unit_iri)`
+  converts a unit-annotated magnitude to its **canonical SI value + `QuantityKind`** via a bundled
+  affine table, **before** the order-preserving `NumericEncoder`, so `1000 m` and `1 km` map to the
+  **identical** code (design §2 "unit-normalise-before-magnitude"). `same_quantity(a, b)` makes a
+  length-vs-mass mismatch a **detectable error** (a length never shares a numeric block with a mass).
+  Unknown unit / non-finite value → `None` (**fail-closed**, never silently dimensionless).
+- **Enum `Codebook` (`structure`, pure)** — a one-hot block over a closed enum: slot `0` is the
+  reserved **out-of-enum / invalid** code, slots `1..=n` the members. **Enum equality is a slot match,
+  not a cosine threshold** (design §2 "no recall loss"); a non-member encodes to the invalid slot a
+  closed-world `sh:in` shape rejects. `encode`/`decode` round-trip every member.
+- **`ShaclPriors` reader (`structure-shacl`, pulls `sparq-shacl`)** — `ShaclPriors::from_model` /
+  `from_model_and_data` mine, **per predicate** from a parsed `ShapesModel` (read-only — no SHACL
+  changes): the enum `Codebook` (`sh:in`), the router-confirmed `Encoder` (`sh:datatype`), and the
+  **pooling rule** `Cardinality::{Functional,Multi}` (`sh:maxCount 1` or `owl:FunctionalProperty` from
+  the data graph → one deterministic slot; else a permutation-invariant pooled block).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure-shacl
+use sparq_vectors::{normalise, QuantityKind, NumericEncoder, ShaclPriors, Cardinality};
+use sparq_shacl::model::ShapesModel;
+
+// unit-normalise before the magnitude encoder: 1000 m == 1 km share a code.
+let m = normalise(1000.0, "http://qudt.org/vocab/unit/M").unwrap();
+let km = normalise(1.0, "http://qudt.org/vocab/unit/KiloM").unwrap();
+assert_eq!(m.canonical_value, km.canonical_value);          // same physical length
+let enc = NumericEncoder::fit([m.canonical_value], 16);
+assert_eq!(enc.encode(m.canonical_value), enc.encode(km.canonical_value));
+
+// SHACL priors: sh:in → codebook (slot match), sh:maxCount 1 → functional pooling.
+let model = ShapesModel::parse(&shapes_graph);
+let priors = ShaclPriors::from_model(&model);
+if let Some(p) = priors.get("http://ex/status") {
+    let cb = p.enum_codebook.as_ref().unwrap();             // out-of-enum → reserved invalid slot
+    assert!(matches!(p.cardinality, Cardinality::Functional | Cardinality::Multi));
+    let _ = cb.member_count();
+}
+```
+
+**Honesty.** Enum/boolean exactness (slot match), the affine unit conversion, and the
+SHACL-detectable mismatch are **proven** (`codebook.rs` / `units.rs` / `shacl_priors.rs` tests +
+`tests/structure_shacl.rs`). The QUDT table is a **curated, deliberately small** subset (common SI +
+a few customary units); an absent unit fails closed — extending it is additive. Whether these priors
+raise downstream retrieval is **empirical, ablation-gated** — no accuracy claim. A predicate with no
+declared shape simply gets **no** prior (fail-open, the encoder falls back to the datatype router).
+
+### 17. Taxonomy block + disjointness repulsion/mask (opt-in, feature = `structure`)
+
+<!-- [OPUS-4.8] sq-0wo9e.4 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §2/§3.3/§6.A/§9). -->
+Research-grade **P3**: two priors over the `rdfs:subClassOf` DAG, in the `taxonomy` module. Read them
+over a **closed** graph (`close_for_vectorise` first, recipe 13) so the `subClassOf` closure and
+entailed disjointness are materialised.
+
+- **`TaxonomyDag::build`** — extracts the `subClassOf` DAG (cycle-safe `ancestors`/`depth`/
+  `graph_distance`).
+- **`EuclideanTaxonomyEncoder`** — the **default** taxonomy block (normalised-depth lane + hashed
+  ancestor bag), tagged `Metric::Euclidean` so whole-row L2/cosine is correct: classes sharing more
+  ancestry are closer. A `HyperbolicTaxonomyEncoder` (Poincaré candidate, tagged `NonEuclidean`)
+  exists **only** as the gate's second arm.
+- **`GeometryGate`** — the load-bearing must-fix: it **measures** Euclidean-vs-hyperbolic distortion
+  on the *actual* DAG and adopts non-Euclidean **only** when it strictly beats Euclidean by a margin
+  (never on a density heuristic; design §3.3/§9.4).
+- **`DisjointnessOracle`** — mines `owl:disjointWith`/`AllDisjointClasses`/`complementOf`, propagates
+  down the `subClassOf` closure, and yields **train-time** `repulsion_pairs` + a **serve-time**
+  `mask_candidates` hard mask. The mask is **answer-safe**: it drops only candidates whose type is
+  *provably* disjoint from a query type (∀ output ⊆ input).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{close_for_vectorise, TaxonomyDag, EuclideanTaxonomyEncoder, GeometryGate,
+    Geometry, DisjointnessOracle};
+use sparq_reason::Profile;
+
+let closed = close_for_vectorise(turtle_src, "turtle", Profile::Rdfs)?;   // materialise the closure
+let dag = TaxonomyDag::build(&closed.graph);
+let report = GeometryGate::default().choose(&dag);                        // measured-distortion gate
+assert_eq!(report.chosen, Geometry::Euclidean);                          // default unless hyperbolic wins
+let enc = EuclideanTaxonomyEncoder::new(&dag, /*bag_dim*/ 16);            // the default taxonomy block
+let oracle = DisjointnessOracle::mine(&closed.graph);                     // answer-safe disjointness
+let kept = oracle.mask_candidates(&query_types, &candidates);            // drops only provably-disjoint
+# Ok::<(), String>(())
+```
+
+**Honesty.** Mask answer-safety (removes only provably-disjoint, never invents), the metric guard on a
+hyperbolic block, and the gate's decision rule are **proven** (`taxonomy.rs` tests). Whether the
+taxonomy block (or hyperbolic geometry) raises retrieval is **empirical/dataset-dependent** — no
+accuracy claim; the gate adopts non-Euclidean only on **measured** lift. The gUFO rigid/role split
+(design §2/§9.5, rare annotations) is the optional/last prior and is **deferred**.
+
+### 18. Flexible minimal-complete grounding — modality chosen per request (opt-in, feature = `structure`)
+
+<!-- [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §4). -->
+Research-grade **P4**: grounding is a function `(node, graph) -> minimal-and-complete OBJECT` whose
+**modality is chosen per request** by a dispatcher on the *consumer's declared output type* — the
+same node projected into whichever object a tool needs. `ground` (the `grounding` module) returns a
+`Grounding` enum:
+
+- **`Modality::Subgraph`** — the smallest sub-BGP describing the node, bounded to the predicates of
+  the node's **effective (minimal) type's** characteristic set (ABSTAT-style minimality; Spahiu et
+  al. ESWC 2016, via `sparq-introspect`). Verifiable facts only — every fact is a real triple of the
+  graph, never an approximate signal.
+- **`Modality::TypedSubVector`** — only the relevant `SchemaHeader` blocks of the node's stored
+  vector (e.g. just the numeric block). Minimal by construction.
+- **`Modality::NlString`** — the token-budgeted `verbalize` passage, optionally **extended to render
+  typed values** (unit-typed quantities + enum labels) via `render_typed_values`.
+- **`Modality::TypedValue`** — a single typed slot filled directly: `TypedValue::{Boolean, Number,
+  Quantity, Enum}`. **Exact** (no cosine threshold, no recall loss).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{ground, Grounding, GroundingConfig, Modality, OutputType};
+use sparq_vectors::structure::close_for_vectorise;
+use sparq_reason::Profile;
+
+// Completeness is PROFILE-RELATIVE: close the graph FIRST so entailed facts are present.
+let g = close_for_vectorise(ttl, "turtle", Profile::Rdfs)?.graph;
+let node = oxrdf::NamedNode::new("http://ex/bolt")?.into();
+
+// A dispatcher maps the consumer's declared output type to a modality (ambiguous → subgraph).
+let modality = Modality::for_output(OutputType::Facts);
+if let Some(Grounding::Subgraph(facts)) =
+    ground(&g, &node, modality, &GroundingConfig::default(), None, None)
+{
+    // each `facts[i]` is a (predicate, object) re-checkable against the graph
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+**Honesty.** Both minimality (smallest pattern under the *stated* criterion) and completeness
+(relative to the *materialised entailment profile* + declared shapes) are **profile-relative, not
+absolute** — and **NOT** end-task answer-completeness (no answer-completeness claim is made). This is
+the **projection** half only: the "ANN proposes, exact engine re-validates" loop is the
+`filtered-ann` / `vec-predicate` path (recipes 8–9). Quantities render **as declared** (value + unit
+label); cross-unit normalisation reuses the P2 QUDT `normalise` (recipe 16; sq-0wo9e.3).
 
 ## Gotchas / feature flags / prerequisites
 
@@ -748,12 +998,36 @@ tracked follow-up.
   methods write a delta the read paths consult transparently (recipe 12). The delta lives in RAM on the
   handle; `save_delta` persists it to a crash-durable `.spqd` sidecar and `open_with_delta` replays it,
   so mutations survive a restart without a `compact` (the two durability paths).
-- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1).** It is the
-  ONLY feature pulling `sparq-reason` + `sparq-introspect` into this crate, both **optional**, so
+- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1 P0, sq-0wo9e.2 P1, sq-0wo9e.3 P2, sq-0wo9e.4 P3, sq-0wo9e.5 P4).**
+  It is the ONLY feature pulling `sparq-reason` + `sparq-introspect` into this crate, both **optional**, so
   with it OFF the default build compiles zero structure-prep code and gains no new required deps. With
-  it ON it exposes `close_for_vectorise` / `materialise_closure` / `ClosedGraph`, `TypeConstraints`,
-  and the `NegativeSampler` + `SamplingMode` (on/off ablation) of recipe 13. It TRAINS NOTHING and
-  serves no exact answer; benefit is **unproven** (research-grade, no accuracy claim, no numbers).
+  it ON it exposes the **P0** closure + sampler (`close_for_vectorise` / `materialise_closure` /
+  `ClosedGraph`, `TypeConstraints`, `NegativeSampler` + `SamplingMode`, recipe 13), the **P1**
+  typed-literal encoders (`route`, `NumericEncoder`, `BooleanEncoder`, `DateEncoder`, `SchemaHeader`,
+  recipe 15), the **P2** enum `Codebook` + QUDT unit-`normalise` (recipe 16), the **P3** taxonomy
+  block + disjointness (`TaxonomyDag`, `EuclideanTaxonomyEncoder`, `GeometryGate`, `DisjointnessOracle`,
+  recipe 17), AND the **P4** flexible-grounding selector (`ground` / `Grounding` / `Modality` /
+  `OutputType` / `TypedValue`, recipe 18). `structure` itself serves no exact answer; the disjointness
+  mask is **answer-safe** (drops only provably-disjoint), encoder invariants are proven, and grounding
+  minimality/completeness are **profile-relative**, but embedding-quality benefit is **unproven**
+  (research-grade, no accuracy claim, no canonical numbers).
+- **The SHACL/OWL prior reader is the non-default `structure-shacl` feature (sq-0wo9e.3 P2).** It
+  **implies `structure`** and is the ONLY feature pulling `sparq-shacl` (and transitively, on native,
+  the engine) into this crate's graph — so neither the default build nor the lean `structure` feature
+  gains a SHACL/engine dependency. With it ON it exposes `ShaclPriors` / `PredicatePrior` /
+  `Cardinality` (recipe 16): a **read-only** reader that mines enum/datatype/cardinality priors out of
+  a parsed `ShapesModel` (no SHACL behaviour change). The enum codebook + QUDT normaliser themselves
+  ship under plain `structure` (pure, no SHACL dep) — only the *reader* needs `structure-shacl`.
+- **The KGE measurement foundation is the non-default `kge` feature (sq-0wo9e.8 / P6).** It **implies
+  `structure`** and adds **no new dependency** (a hand-rolled CPU-only trainer — no ML crate). With it
+  OFF the default build compiles zero trainer/eval code; with it ON it exposes `train` / `TrainConfig`
+  / `TrainedModel` / `ModelKind` (DistMult **or** the asymmetric ComplEx), the filtered
+  link-prediction harness (`run_ablation` / `run_ablation_multiseed` / `EvalConfig` / `Splits` /
+  `Metrics` / `LongTail` / `AblationCell` / `MultiSeedCell` / `CellStats` / `MeanStd`), the
+  synthetic-graph generators, and `SCHEMA_PREDICATES` (recipe 14). It is the *measurement instrument*
+  the design requires before any prior is adopted — **no accuracy claim**, indicative numbers only
+  (work-box non-canonical). **DistMult is symmetric → near-random on directional relations; read
+  ablation deltas off the asymmetric ComplEx, multi-seed.**
 - **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
   index (`VectorIndex`/`HnswConfig`) and the `ApproxBackend` are gated behind it — it is the only
   thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force

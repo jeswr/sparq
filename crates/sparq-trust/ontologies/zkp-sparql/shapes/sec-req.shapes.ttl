@@ -1,0 +1,77 @@
+@prefix sh:       <http://www.w3.org/ns/shacl#> .
+@prefix sec-req:  <https://w3id.org/zkp-sparql/sec-req#> .
+@prefix sec-prop: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix prov:     <http://www.w3.org/ns/prov#> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:      <http://www.w3.org/2001/XMLSchema#> .
+
+sec-req:RequirementShape
+  a sh:NodeShape ;
+  sh:targetClass sec-req:Requirement ;
+
+  sh:property [
+    sh:path rdfs:label ;
+    sh:minCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:message "Every requirement must have an English-language rdfs:label."
+  ] ;
+
+  sh:property [
+    sh:path sec-req:jurisdiction ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:string ;
+    sh:message "Every requirement must declare a single jurisdiction string (e.g. EU, US, GB)."
+  ] ;
+
+  sh:property [
+    sh:path sec-req:rationale ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:message "Every requirement must carry exactly one English-language rationale."
+  ] ;
+
+  sh:property [
+    sh:path sec-req:pulls ;
+    sh:minCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:class sec-prop:SecurityProperty ;
+    sh:message "Every requirement must pull on at least one sec-prop:SecurityProperty."
+  ] ;
+
+  sh:property [
+    sh:path sec-req:hasDeadline ;
+    sh:minCount 1 ;
+    sh:nodeKind sh:BlankNodeOrIRI ;
+    sh:class sec-req:Deadline ;
+    sh:message "Every requirement must declare at least one sec-req:Deadline."
+  ] ;
+
+  sh:property [
+    sh:path prov:wasDerivedFrom ;
+    sh:minCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:message "Every requirement must cite at least one provenance source."
+  ] .
+
+sec-req:DeadlineShape
+  a sh:NodeShape ;
+  sh:targetClass sec-req:Deadline ;
+
+  sh:property [
+    sh:path sec-req:on ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:date ;
+    sh:message "Every deadline must carry exactly one xsd:date."
+  ] ;
+
+  sh:property [
+    sh:path sec-req:obligation ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:message "Every deadline must carry exactly one English-language obligation string."
+  ] .

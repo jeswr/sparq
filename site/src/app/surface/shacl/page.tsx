@@ -10,6 +10,9 @@ export const metadata: Metadata = {
     "Validate RDF against SHACL shapes with the sparq engine — SHACL Core constraints, SHACL-SPARQL, custom constraint components, the W3C validation report, and a SHACL Compact Syntax view, live in your tab.",
 };
 
+// [OPUS-4.8] sq-vw3ax.8 — condensed to the scan-first template: demo first, one-line lead,
+// ≤5 capabilities, single-sentence runs note + reproduce, caveats behind <details>, plus the
+// universal README + SKILL.md links. The compact-syntax boundary detail moves to the SKILL.
 export default function ShaclSurfacePage() {
   return (
     <SurfaceContent
@@ -18,35 +21,18 @@ export default function ShaclSurfacePage() {
       statement="Validate RDF data against shapes — SHACL Core, SHACL-SPARQL, the W3C validation report, and a live SHACL Compact Syntax view."
       tier="live"
       intro={
-        <>
-          <p>
-            <code className="font-mono text-foreground">sparq-shacl</code> validates
-            a <code className="font-mono">sparq_core::Graph</code> against SHACL
-            shapes and produces a{" "}
-            <strong className="text-foreground">W3C validation report</strong>{" "}
-            (conformance plus per-violation results) as Turtle or human-readable
-            text. It implements SHACL Core constraints, SHACL-SPARQL{" "}
-            <code className="font-mono">sh:sparql</code> constraints, and custom
-            SPARQL-based constraint components.
-          </p>
-          <p>
-            Because it is pure Rust over <code className="font-mono">sparq-engine</code>
-            , it is wasm-portable. The SHACL-enabled wasm bundle — the same one the
-            published <code className="font-mono text-foreground">@jeswr/sparq</code>{" "}
-            ships — runs the validator in this tab: paste data + shapes below and the
-            conformance flag and per-violation report come back with no network
-            round-trip.
-          </p>
-        </>
+        <p>
+          <code className="font-mono text-foreground">sparq-shacl</code> validates a
+          graph against SHACL Core + SHACL-SPARQL constraints and returns a W3C
+          validation report (conformance plus per-violation results); the playground
+          above runs the validator in your tab via the SHACL-enabled wasm bundle that{" "}
+          <code className="font-mono text-foreground">@jeswr/sparq</code> ships.
+        </p>
       }
       capabilities={[
         {
           title: "SHACL Core constraints",
-          body: "class, datatype, cardinality, value ranges, node/property shapes, paths.",
-        },
-        {
-          title: "Logical & qualified shapes",
-          body: "and / or / not / xone, qualified value shapes, closed shapes, in / hasValue.",
+          body: "class, datatype, cardinality, value ranges, node/property shapes, paths, plus and / or / not / xone, qualified & closed shapes.",
         },
         {
           title: "SHACL-SPARQL (§5.2)",
@@ -61,55 +47,34 @@ export default function ShaclSurfacePage() {
           body: "Conformance boolean + sh:result violations, as Turtle or human text.",
         },
         {
-          title: "Path expressions",
-          body: "Property paths in shape targets and constraints, reusing the engine's path evaluator.",
-        },
-        {
           title: "SHACL Compact Syntax (display)",
-          body: "Render the shapes graph in the W3C compact notation — node/property shapes, paths, counts and value constraints — beside the W3C report.",
+          body: "Render the shapes graph in the W3C compact notation beside the validation report.",
         },
       ]}
-      runsNote={
-        <>
-          <p>
-            <strong className="text-foreground">Live in your browser tab.</strong>{" "}
-            The validator is pure Rust over the engine, compiled to wasm in the
-            SHACL-enabled bundle (the published{" "}
-            <code className="font-mono">@jeswr/sparq</code> ships it). The playground
-            calls the bundle&rsquo;s{" "}
-            <code className="font-mono text-foreground">Store.validate(data, shapes)</code>{" "}
-            binding, parses the two graphs, and renders the conformance flag plus the
-            per-violation W3C report — nothing is sent to a server.
-          </p>
-        </>
-      }
+      runsNote="Live in your browser tab — the validator is pure Rust over the engine compiled to the SHACL-enabled wasm bundle, so the conformance flag and per-violation report come back with no network round-trip."
+      reproduce="cargo test -p sparq-shacl"
       caveat={
         <>
           <p>
-            SHACL-SPARQL constraints rely on the engine&rsquo;s REGEX. The lean SPARQL
-            REPL bundle compiles REGEX out, but the SHACL bundle keeps it, so{" "}
-            <code className="font-mono">sh:sparql</code> constraints validate in-tab
-            too. The in-tab validator is sized for small documents (~10–100 triples);
-            validate large graphs server-side via the{" "}
-            <code className="font-mono">sparq-server</code> HTTP{" "}
-            <code className="font-mono">validate</code> path.
+            SHACL-SPARQL constraints rely on the engine&rsquo;s REGEX, which the SHACL
+            bundle keeps (the lean SPARQL REPL bundle compiles it out), so{" "}
+            <code className="font-mono">sh:sparql</code> validates in-tab too. The in-tab
+            validator is sized for small documents (~10–100 triples); validate large
+            graphs server-side via the <code className="font-mono">sparq-server</code>{" "}
+            HTTP <code className="font-mono">validate</code> path.
           </p>
           <p>
-            The <strong className="text-foreground">Compact syntax</strong> view is
-            the <em>display</em> direction only (shapes &rarr; compact). It is
-            best-effort: SHACL Compact Syntax has no form for logical constraints
-            (<code className="font-mono">sh:and</code> /{" "}
-            <code className="font-mono">sh:or</code> /{" "}
-            <code className="font-mono">sh:xone</code> /{" "}
-            <code className="font-mono">sh:not</code>) or shape references{" "}
-            (<code className="font-mono">sh:node</code>), which the view lists
-            explicitly rather than dropping. The <em>parse</em> direction (compact
-            text &rarr; shapes) is a full grammar that belongs in the{" "}
-            <code className="font-mono">sparq-shacl</code> engine and is tracked
-            separately.
+            The <strong className="text-foreground">Compact syntax</strong> view is the
+            display direction only (shapes &rarr; compact) and best-effort: the notation
+            has no form for logical constraints or shape references, which the view lists
+            explicitly rather than dropping. The parse direction (compact text &rarr;
+            shapes) belongs in the <code className="font-mono">sparq-shacl</code> engine
+            and is tracked separately.
           </p>
         </>
       }
+      readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-shacl"
+      skillHref="https://github.com/jeswr/sparq/blob/main/skills/shacl-validation/SKILL.md"
     >
       <ShaclPlayground />
     </SurfaceContent>

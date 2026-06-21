@@ -1139,6 +1139,13 @@ fn jj_scalar_to_base(s: &JjScalar) -> Fr {
 /// `s`, and the challenge reduction `(e, e_k)` such that
 /// `e_base = e + e_k * L` with `e < L` and `e_k < 8` (the soundness binding the
 /// circuit re-checks). All as base-field [`Fr`] elements (= Noir `Field`).
+///
+/// [OPUS-4.8] sq-ru0yx (internal re-audit M-1): the circuit's reduction binding
+/// ALSO enforces a no-wrap bound (`issuer.nr::challenge_scalar` step 4) — when
+/// `e_k == 7` it requires `e < q_base - 7*L`, closing the field-wrap alternative
+/// `(e_base + q_base - 7*L, 7)` that the bare `e + e_k*L == e_base` identity would
+/// otherwise admit. This honest witness (`e = e_base mod L`, `e_k = floor(e_base /
+/// L)`) always satisfies it, so the host helper is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InCircuitSchnorrWitness {
     /// Issuer public-key affine coordinates.

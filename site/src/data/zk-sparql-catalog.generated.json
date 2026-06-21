@@ -371,11 +371,11 @@
       "zk_members": [
         "hidden_issuer_d4"
       ],
-      "circuit_size": 16932,
+      "circuit_size": 16946,
       "status": "covered",
       "flag": null,
       "circuit_size_per_member": {
-        "hidden_issuer_d4": 16932
+        "hidden_issuer_d4": 16946
       },
       "reduction_target": "scalar-mul projective coords (research/zk-age-gatecount-reduction.md §3.3; bead sq-hb75)",
       "note": "Hidden-issuer Schnorr verification; the scalar-mul is the dominant cost (reduction target)."

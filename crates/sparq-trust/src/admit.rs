@@ -24,12 +24,40 @@
 //! (per-request, NOT in-reasoner — §3.3 B′); `shape_admits` runs the shipped,
 //! terminating `sparq-shacl` validator; `scope_covers` is a containment check.
 //!
+//! ## The static / dynamic admission split (the `sq-xc4y` resolution)
+//!
+//! Admission has TWO classes of condition with DIFFERENT lifetimes (design §3.3
+//! ADMISSION-VS-MATERIALIZE-ONCE GAP):
+//!
+//! - **STATIC** — the issuer signature over the RDFC-1.0 commitment, the
+//!   statement-type scope (SHACL shape), the reserved-predicate guard, and the
+//!   `trust:scope` containment. These depend ONLY on the credential + the policy, NOT
+//!   on the request. They are session-independent and can be decided **once, at
+//!   materialise-time**, exactly like the WAC/ACP derivation stratum.
+//! - **DYNAMIC** — the holder binding (`credentialSubject == Session.agent`) and
+//!   freshness (`Session.now - issued_at ≤ freshWithin`). These are **per-request**
+//!   facts. They MUST be re-evaluated on every request and must NOT be frozen into the
+//!   session-independent materialise-once view.
+//!
+//! [`admit`] runs BOTH classes against a single live [`Session`] (the snapshot path:
+//! the decision is valid for *that* request only). [`admit_static`] runs ONLY the
+//! static class and returns each fact carrying the dynamic conditions it still owes
+//! ([`StaticAdmittedFact::holder`] and [`StaticAdmittedFact::not_after_unix_secs`]) so
+//! the caller can install a **conditional grant** whose holder/freshness are re-checked
+//! per request at query time — the shipped sq-0q7n `auth:notBefore`/`auth:notAfter`
+//! conditional-grant precedent (`sparq-solid` `AuthIndex::cond_applies`). This is the
+//! `sq-xc4y` decision **(a) split static-admission from dynamic-admission**, NOT
+//! **(b) per-request re-materialise**: the static stratum composes with the epoch
+//! cache, the dynamic conditions ride the existing per-request conditional-grant path.
+//!
 //! ## Open-problem hooks this gate RESPECTS (does not silently solve)
 //!
-//! - **`sq-xc4y`** (holder-binding/freshness are per-request) — this gate IS the
-//!   per-request admission decision: it takes the live [`Session`] and must be run
-//!   per request for a credential-gated resource, NOT frozen into the
-//!   materialise-once view. [`crate::wire`] re-runs it per request.
+//! - **`sq-xc4y`** (holder-binding/freshness are per-request) — RESOLVED by the
+//!   static/dynamic split above: [`admit_static`] emits the static decision once and
+//!   defers holder/freshness to the per-request conditional-grant check, so a stale or
+//!   wrong-holder credential is denied at query time WITHOUT a re-materialise and is
+//!   never frozen into the materialise-once view. The combined [`admit`] remains the
+//!   per-request snapshot path for a single request.
 //! - **`sq-wvne` / `sq-xc4y` (holder binding)** — the holder binding is the
 //!   **clear-WebID v1 path** (`credentialSubject == Session.agent`), the
 //!   **non-anonymous degraded path**. It authenticates the requester's WebID in the
@@ -111,6 +139,33 @@ pub struct AdmittedFact {
     pub issuer: NamedNode,
 }
 
+/// A fact that passed the **STATIC** admission class (signature + statement-type scope +
+/// reserved-predicate guard + `trust:scope`), carrying the **DYNAMIC** conditions it
+/// still owes so the caller can defer them to a per-request check (`sq-xc4y`).
+///
+/// The static decision is session-independent — it depends only on the credential and
+/// the policy — so it can be made **once, at materialise-time**. The dynamic conditions
+/// ([`holder`](Self::holder) and [`not_after_unix_secs`](Self::not_after_unix_secs))
+/// MUST NOT be frozen into the materialise-once view; they ride the shipped sq-0q7n
+/// conditional-grant path (`auth:agent` re-checked against `Session.agent`,
+/// `auth:notAfter` re-checked against `Session.now`) and are re-evaluated per request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticAdmittedFact {
+    /// The admitted triple (e.g. `<Jesse> schema:age 25`).
+    pub triple: Triple,
+    /// `trust:source` — the issuer this fact is tagged with.
+    pub issuer: NamedNode,
+    /// The bound holder: the credential subject the fact may only be used on behalf of.
+    /// The per-request holder binding is `holder == Session.agent`, deferred to query
+    /// time (NEVER frozen into the view — `sq-xc4y` / `sq-wvne` clear-WebID path).
+    pub holder: NamedNode,
+    /// The freshness deadline as a Unix timestamp (seconds): `issued_at + freshWithin`.
+    /// The per-request freshness check is `Session.now ≤ not_after_unix_secs`, deferred
+    /// to query time so a credential that lapses denies *that request* without a
+    /// re-materialise (`sq-xc4y`; the sq-0q7n `auth:notAfter` precedent).
+    pub not_after_unix_secs: i64,
+}
+
 /// Run the admission gate over a presented credential. Returns the admitted facts
 /// (possibly empty — default-deny). NEVER panics on adversarial input: a malformed
 /// signature, an uncanonicalisable graph, or a bad shape all fail closed (no admit).
@@ -185,6 +240,96 @@ pub fn admit(
             let fact = AdmittedFact {
                 triple: t.clone(),
                 issuer: r.source.clone(),
+            };
+            if !admitted.contains(&fact) {
+                admitted.push(fact);
+            }
+        }
+    }
+    admitted
+}
+
+/// Run ONLY the **static** admission class over a presented credential, returning the
+/// statically-admitted facts each tagged with the **dynamic** conditions it still owes
+/// (the bound holder + the freshness deadline). This is the materialise-time half of
+/// the `sq-xc4y` static/dynamic split: it decides everything that is session-
+/// independent (signature, statement-type scope, reserved-predicate guard, `trust:scope`)
+/// and DEFERS holder-binding + freshness to a per-request conditional-grant check.
+///
+/// Unlike [`admit`], this takes **no `Session`**: a static decision must not depend on
+/// the request. The credential subject becomes the [`StaticAdmittedFact::holder`] the
+/// grant is pinned to; the freshness deadline becomes
+/// [`StaticAdmittedFact::not_after_unix_secs`]. The caller installs a conditional grant
+/// that re-checks both per request — so a stale or wrong-holder credential is denied at
+/// query time WITHOUT a re-materialise and is never frozen into the materialise-once
+/// view.
+///
+/// Returns the statically-admitted facts (possibly empty — default-deny). NEVER panics
+/// on adversarial input: a malformed signature, an uncanonicalisable graph, or a bad
+/// shape all fail closed (no admit). The static class fails closed exactly as [`admit`]
+/// does; only the holder/freshness checks move to query time.
+pub fn admit_static(
+    cred: &PresentedCredential,
+    rules: &[TrustRule],
+    target: &NamedNode,
+) -> Vec<StaticAdmittedFact> {
+    let mut admitted: Vec<StaticAdmittedFact> = Vec::new();
+
+    // Step 1: canonicalise + commit G (the same canonical unit the ZK estate commits
+    // over). A graph that cannot be committed admits nothing.
+    let salt = salt_from_bytes(&cred.salt);
+    let Ok(commitment) = commit_triples(&cred.graph, salt) else {
+        return admitted; // fail closed
+    };
+    let commitment_fr: Fr = commitment.commitment;
+
+    let Some(signature) = signature_from_hex(&cred.issuer_signature_hex) else {
+        return admitted;
+    };
+
+    for r in rules {
+        // §3.2 scope (STATIC: policy + credential only).
+        if !scope_covers(&r.scope, target) {
+            continue;
+        }
+        // §3.3 (1) CHECKED issuer signature (STATIC).
+        let msg = commitment_message(&commitment_fr);
+        if !verify(&r.issuer_key, &msg, &signature) {
+            continue;
+        }
+        // §3.3 input-stratified revocation guard. Revocation is a per-credential input
+        // fact (not request-dependent), so a credential KNOWN revoked at materialise is
+        // dropped here too; a credential revoked LATER is handled by re-materialise
+        // (epoch bump on trust-graph/status change — design §3.3 / G5).
+        if cred.revoked {
+            continue;
+        }
+        // The freshness deadline this rule imposes: issued_at + freshWithin. Carried as
+        // a per-request DYNAMIC condition (NOT checked here against any `now`).
+        let not_after_unix_secs = cred.issued_at_unix_secs.saturating_add(r.fresh_within_secs);
+
+        for t in &cred.graph {
+            // The reserved-predicate guard stays in force UNDER admission (STATIC).
+            if is_reserved_predicate(&t.predicate) {
+                continue;
+            }
+            // §2.3.2 statement-type scoping via the SHACL shape (STATIC).
+            if !shape_admits(&r.shape, t, &cred.graph) {
+                continue;
+            }
+            // The bound holder is the credential subject — pinned into the grant's
+            // `auth:agent` head, re-checked against `Session.agent` per request (the
+            // DYNAMIC holder binding, deferred — §3.4 / sq-xc4y). A triple whose subject
+            // is a blank node cannot be holder-bound (no stable WebID), so it is not
+            // statically admissible for a credential-gated grant: fail closed.
+            let NamedOrBlankNode::NamedNode(holder) = &t.subject else {
+                continue;
+            };
+            let fact = StaticAdmittedFact {
+                triple: t.clone(),
+                issuer: r.source.clone(),
+                holder: holder.clone(),
+                not_after_unix_secs,
             };
             if !admitted.contains(&fact) {
                 admitted.push(fact);

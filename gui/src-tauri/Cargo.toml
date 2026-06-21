@@ -45,6 +45,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# [OPUS-4.8] sq-ixc3.13 — native-only HDT (Header-Dictionary-Triples) ingest via the opt-in
+# sparq-hdt crate. OFF by default for the SAME reasons the CLI keeps it opt-in (crates/
+# sparq-cli/Cargo.toml): sparq-hdt's MSRV (1.87, the wrapped `hdt` crate) and the dead-weight
+# decode stack. The desktop release build turns it ON (`cargo build --features hdt`) so the
+# Import drawer can ingest `.hdt` / `.hdt.gz` archives the wasm read-replica fundamentally
+# cannot. The webview-target build (Pages "Try the GUI live") never links this crate at all.
+default = []
+hdt = ["dep:sparq-hdt"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
@@ -55,8 +65,23 @@ serde_json = "1"
 # shell (research/gui-design.md §1). The desktop app IS a Rust binary, so it depends on the
 # engine library crates by path and runs the FULL native store (threads, no wasm ceiling),
 # not the WASM read-replica. `jsonld` matches the formats the site's wasm bundle ingests.
+# [OPUS-4.8] sq-ixc3.13 — `serialize-rdf` turns on the engine's N-Quads writer
+# (`graph_to_nquads`), the named-graph-preserving wire format the Import drawer's native
+# loader hands a parsed disk/URL/HDT document back to the in-tab store as.
 sparq-core = { path = "../../crates/sparq-core", features = ["jsonld"] }
-sparq-engine = { path = "../../crates/sparq-engine" }
+sparq-engine = { path = "../../crates/sparq-engine", features = ["serialize-rdf"] }
+
+# [OPUS-4.8] sq-ixc3.13 — opt-in native-only HDT reader (loads .hdt[.gz] straight into a
+# sparq Graph; the wasm read-replica cannot). Pulled in only under this crate's `hdt` feature.
+sparq-hdt = { path = "../../crates/sparq-hdt", optional = true }
+
+# [OPUS-4.8] sq-ixc3.13 — streaming decompression for the native disk loader: gzip + bzip2 +
+# zstd, the SAME codec matrix the CLI's `open_reader` handles (crates/sparq-cli/src/main.rs).
+# This is the "compressed" half of the bead — a `.nt.gz` / `.ttl.bz2` / `.nq.zst` file is
+# decoded by the native engine (no ~2 GiB wasm-tab ceiling) before it is parsed.
+flate2 = "1"
+bzip2 = "0.6"
+zstd = "0.13"
 
 # Inherit the workspace memory-safety posture (the unsafe-rust-attestation skill): this
 # crate writes no `unsafe`.

@@ -17,9 +17,40 @@ pub mod cost;
 pub mod delta;
 pub mod diskann;
 pub mod embed;
+// [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the P1 structure-aware-vectorisation TYPED-LITERAL
+// ENCODERS — the datatype router + order-preserving numeric + boolean-sign + date encoders, plus
+// the self-describing `.spqv` SchemaHeader (per-block metric tags + metric-correctness guard).
+// `structure` feature only; pure, dependency-light functions keyed by datatype (only `temporal_value`
+// / the date encoder touch sparq-core, already in the tree). The default build carries zero encoder code.
+#[cfg(feature = "structure")]
+pub mod encode;
+// [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e): P2 — the categorical CODEBOOK encoder for `sh:in`/`owl:oneOf`
+// enum members (slot-match exactness, reserved out-of-enum invalid code) and the QUDT UNIT
+// normaliser (`1000 m` and `1 km` share a code before the order-preserving numeric encoder).
+// `structure` feature only; pure, dependency-light (no SHACL/engine dep — the SHACL *reader* below
+// is the only thing that pulls sparq-shacl). The default build carries zero P2 code.
+#[cfg(feature = "structure")]
+pub mod codebook;
+#[cfg(feature = "structure")]
+pub mod units;
+// [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e): P2 — the SHACL/OWL PRIOR EXTRACTOR. Reads enum (`sh:in`) /
+// datatype (`sh:datatype`) / cardinality (`sh:min,maxCount`, `owl:FunctionalProperty`) priors out of
+// a parsed `sparq-shacl` shapes model (no SHACL changes — a read-only reader). `structure-shacl`
+// feature only: it is the ONLY feature pulling `sparq-shacl` into this crate's graph, so neither the
+// default build nor the lean `structure` feature gains a SHACL/engine dependency.
+#[cfg(feature = "structure-shacl")]
+pub mod shacl_priors;
 #[cfg(feature = "filtered-ann")]
 pub mod filter;
 pub mod fingerprint;
+// [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e): the P4 structure-aware-vectorisation FLEXIBLE
+// MINIMAL-AND-COMPLETE GROUNDING selector + verbaliser — a modality dispatcher on the consumer's
+// declared output type producing the minimal-and-complete object (subgraph / typed sub-vector / NL
+// string / typed value), with PROFILE-RELATIVE completeness and ABSTAT-style minimality. `structure`
+// feature only (reuses `encode`/`structure`/`verbalize` + `sparq-introspect`); the default build
+// carries zero grounding code.
+#[cfg(feature = "structure")]
+pub mod grounding;
 pub mod fuse;
 pub mod import;
 pub mod labels;
@@ -33,6 +64,22 @@ pub mod store;
 // carries zero structure-prep code.
 #[cfg(feature = "structure")]
 pub mod structure;
+// [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e): the MEASUREMENT FOUNDATION — a thin shallow-KGE trainer
+// (`train`; symmetric DistMult or asymmetric ComplEx via `ModelKind`) over the P0 closure +
+// type-constrained negatives, and the filtered link-prediction eval harness (`eval`) with the
+// {closure}×{type-neg} ablation matrix (single- and multi-seed), long-tail breakdown, and synthetic
+// gUFO slice. `kge` feature only (implies `structure`); the default build carries zero trainer/eval
+// code and no new dependency.
+#[cfg(feature = "kge")]
+pub mod eval;
+#[cfg(feature = "kge")]
+pub mod train;
+// [OPUS-4.8] sq-0wo9e.4 (epic sq-0wo9e): the P3 structure-aware-vectorisation TAXONOMY block
+// (Euclidean default; hyperbolic only past a measured-distortion gate) + the answer-safe
+// disjointness repulsion/mask. Same `structure` feature (off by default); reads sparq-reason's
+// materialised closure via the P0 `close_for_vectorise` path and adds no new dependency.
+#[cfg(feature = "structure")]
+pub mod taxonomy;
 pub mod verbalize;
 
 /// The `vec:` vocabulary — magic predicates recognised by `rewrite`
@@ -109,6 +156,53 @@ pub use store::{StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION};
 pub use structure::{
     close_for_vectorise, materialise_closure, ClosedGraph, Corrupt, NegativeSampler, SamplingMode,
     TypeConstraints,
+};
+// [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e): the DistMult trainer + filtered link-prediction eval
+// harness surface — `kge` feature only.
+#[cfg(feature = "kge")]
+pub use eval::{
+    run_ablation, run_ablation_multiseed, synthetic_gufo_ttl, synthetic_relational_ttl,
+    AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, Splits,
+    SCHEMA_PREDICATES,
+};
+#[cfg(feature = "kge")]
+pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};
+// [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the structure-aware-vectorisation P1 surface — the typed
+// literal encoders (datatype router + order-preserving numeric + boolean-sign + date) and the
+// self-describing `.spqv` SchemaHeader (block partition + per-block metric tag + cosine guard).
+// `structure` feature only.
+#[cfg(feature = "structure")]
+pub use encode::{
+    metamorphic_monotone, numeric_value, route, temporal_value, Block, BooleanEncoder, DateEncoder,
+    Encoder, Metric, NumericEncoder, SchemaHeader, SPQS_MAGIC, SPQS_VERSION,
+};
+// [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e): the P2 enum codebook + QUDT unit-normaliser surface —
+// `structure` feature only (pure, no SHACL dep).
+#[cfg(feature = "structure")]
+pub use codebook::{Codebook, INVALID_SLOT};
+#[cfg(feature = "structure")]
+pub use units::{
+    is_known, normalise, normalise_lexical, quantity_kind, same_quantity, Normalised, QuantityKind,
+    QUDT_UNIT_NS,
+};
+// [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e): the P2 SHACL/OWL prior-extractor surface —
+// `structure-shacl` feature only (the only feature pulling sparq-shacl).
+#[cfg(feature = "structure-shacl")]
+pub use shacl_priors::{Cardinality, PredicatePrior, ShaclPriors};
+// [OPUS-4.8] sq-0wo9e.4 (epic sq-0wo9e): the structure-aware-vectorisation P3 surface — the
+// `subClassOf` taxonomy DAG + Euclidean (default) / hyperbolic (candidate) encoders, the
+// measured-distortion `GeometryGate`, and the answer-safe `DisjointnessOracle` (train-time
+// repulsion pairs + serve-time hard mask). `structure` feature only.
+#[cfg(feature = "structure")]
+pub use taxonomy::{
+    DisjointnessOracle, DistortionReport, EuclideanTaxonomyEncoder, Geometry, GeometryGate,
+    HyperbolicTaxonomyEncoder, TaxonomyDag,
+};
+// [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e): the structure-aware-vectorisation P4 surface — the
+// flexible minimal-and-complete grounding selector + verbaliser. `structure` feature only.
+#[cfg(feature = "structure")]
+pub use grounding::{
+    ground, GroundFact, Grounding, GroundingConfig, Modality, OutputType, TypedValue,
 };
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,

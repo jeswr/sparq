@@ -14,9 +14,9 @@ One f32 embedding per dictionary term id, in a flat memory-mapped `.spqv` file (
 design). Query top-`k` by cosine with an exact brute-force scan or a persistent on-disk
 DiskANN/Vamana graph by default, or an in-RAM HNSW index behind the opt-in `approx-ann`
 feature (the only third-party ANN dependency; **recall < 1.0**). Embeddings are produced
-**outside** the engine; the crate verbalizes entities to text, embeds via a
-provider-agnostic trait, and fuses with another ranked signal for hybrid search. It is a
-**separate crate** — nothing in the workspace (or the wasm build) depends on it.
+**outside** the engine; the crate verbalizes entities to text, embeds via a provider-agnostic
+trait, and fuses with another ranked signal for hybrid search. It is a **separate crate** —
+nothing in the workspace (or the wasm build) depends on it.
 
 ## 🚀 Quickstart
 
@@ -89,30 +89,30 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   `provider` feature carries the OpenAI-compatible `/v1/embeddings` shape with a
   caller-supplied `Transport`; `embeddings` adds a concrete reqwest client +
   `RemoteEmbedder::from_env(dim)`. Never enters the wasm bundle.
-- **Structure-aware preprocessing (opt-in `structure`)** — research-grade P0:
-  `close_for_vectorise` materialises the `sparq-reason` RDFS/OWL-RL closure **before**
-  vectorising (entailed type/`subClassOf`/domain/range become real facts); a `NegativeSampler`
-  emits type-constrained corruptions (Krompass 2015) from `sparq-introspect`, with an
-  `Unconstrained`/`TypeConstrained` **on/off ablation**. This crate has **no KGE trainer** —
-  reusable inputs a trainer consumes; **empirical benefit unproven (no accuracy claim)**.
+- **Structure-aware vectorisation (opt-in `structure` / `structure-shacl`; measurement behind `kge`)** — research-grade.
+  **P0:** `close_for_vectorise` materialises the `sparq-reason` closure **before** vectorising; a `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an **on/off ablation**.
+  **P1/P2:** typed-literal encoders — `route`r, **order-preserving** `NumericEncoder`, `BooleanEncoder`,
+  `DateEncoder`, enum `Codebook`, `SchemaHeader` (metric guard); QUDT unit-`normalise` (`1000 m` ≡ `1 km`);
+  **`structure-shacl`** adds the `ShaclPriors` reader (enum/datatype/cardinality from `sparq-shacl`).
+  **P3:** `TaxonomyDag` + `EuclideanTaxonomyEncoder` (Euclidean default; hyperbolic **only past** the measured-distortion `GeometryGate`) + an **answer-safe** `DisjointnessOracle` (train-time repulsion + serve-time hard mask dropping *provably-disjoint* candidates only).
+  **P4:** `ground` — a per-request modality dispatcher (subgraph / typed sub-vector / NL / typed value), **profile-relative** completeness + ABSTAT-style minimality; ambiguous → the exact subgraph.
+  **`kge`** (implies `structure`, no new dep — hand-rolled SGD): a thin CPU-only trainer (symmetric
+  **DistMult** / asymmetric **ComplEx**) + a **filtered link-prediction** `{closure}×{type-neg}` ablation (`run_ablation*`). **No accuracy claim**; INDICATIVE only — read deltas off ComplEx (DistMult is symmetric → near-random on directional data).
 
 ## 📚 Learn more
 
-- **How-to** — [`skills/vector-search/SKILL.md`](../../skills/vector-search/SKILL.md)
-  (label / verbalized / hybrid pipelines, DiskANN, quantization, bulk import, the full
-  API surface and the `.spqv` / `.spqg` formats).
+- **How-to** — [`skills/vector-search/SKILL.md`](../../skills/vector-search/SKILL.md) (label /
+  verbalized / hybrid pipelines, DiskANN, quantization, bulk import, API surface, `.spqv`/`.spqg`).
 - **API reference** — [docs.rs/sparq-vectors](https://docs.rs/sparq-vectors).
 - **Design** — [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md).
-- **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ / throughput
-  gates are `cargo test`s (`tests/recall.rs`, `tests/diskann.rs`, `tests/quant.rs`,
-  `tests/throughput.rs`), with live numbers on the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
-- **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs`
-  anchors recall against **hnswlib** (the FAISS/hnswlib reference) via a committed capture
-  (`tests/fixtures/hnswlib_ref.tsv`): `nearest_exact` reproduces the numpy exact-kNN oracle,
-  and DiskANN (and HNSW under `approx-ann`) clears hnswlib's recall on it. Runs in CI with **no
-  native deps** (corpus regenerated deterministically); the live re-capture
-  (`scripts/capture_hnswlib_ref.py`) is `#[ignore]`d. Recall figures are NON-CANONICAL.
+- **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ / throughput gates
+  are `cargo test`s (`tests/recall.rs`, `diskann.rs`, `quant.rs`, `throughput.rs`), with live
+  numbers on the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+- **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs` anchors
+  recall against **hnswlib** via a committed capture (`tests/fixtures/hnswlib_ref.tsv`):
+  `nearest_exact` reproduces the numpy exact-kNN oracle, and DiskANN (and HNSW under `approx-ann`)
+  clears hnswlib's recall. Runs in CI with **no native deps** (deterministic corpus); the live
+  re-capture (`scripts/capture_hnswlib_ref.py`) is `#[ignore]`d. Recall figures NON-CANONICAL.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

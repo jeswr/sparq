@@ -1,6 +1,6 @@
 ---
 name: python
-description: "Use the sparq RDF + SPARQL engine from Python (PyPI distribution `sparq-rdf`; `import sparq`). Reach for this when an agent or developer needs to load RDF (Turtle/N-Triples/N-Quads/TriG), run SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE, apply SPARQL Update, do opt-in RDFS/OWL-RL/Notation3 reasoning + OWL inconsistency checks, run BM25 full-text search (text: magic predicates), or persist/memory-map a triplestore — all via the pyo3 sparq.Graph class."
+description: "Use the sparq RDF + SPARQL engine from Python (PyPI distribution `sparq-rdf`; `import sparq`). Reach for this when an agent or developer needs to load RDF (Turtle/N-Triples/N-Quads/TriG/JSON-LD), run SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE, apply SPARQL Update, do opt-in RDFS/OWL-RL/Notation3 reasoning + OWL inconsistency checks, run BM25 full-text search (text: magic predicates), or persist/memory-map a triplestore — all via the pyo3 sparq.Graph class."
 ---
 
 # sparq (Python)
@@ -45,7 +45,7 @@ for row in res:                        # QueryResult is iterable/indexable (sequ
 
 All on the `sparq.Graph` class (the only entry point). Constructors are static methods:
 
-- `Graph.load(source, format=None) -> Graph` — `source` is an RDF string OR a file path (`str` is a path only if a file with that name exists and the string has no newline; `os.PathLike`/`pathlib.Path` is always a path). `format` ∈ `"turtle"` | `"ntriples"` | `"nquads"` | `"trig"` (default: inferred from extension `.nt`/`.nq`/`.trig`, else `"turtle"`). Named graphs from N-Quads/TriG are preserved and queryable via `GRAPH`.
+- `Graph.load(source, format=None) -> Graph` — `source` is an RDF string OR a file path (`str` is a path only if a file with that name exists and the string has no newline; `os.PathLike`/`pathlib.Path` is always a path). `format` ∈ `"turtle"` | `"ntriples"` | `"nquads"` | `"trig"` | `"jsonld"` (default: inferred from extension `.nt`/`.nq`/`.trig`/`.jsonld`, else `"turtle"`). Named graphs from N-Quads/TriG/JSON-LD are preserved and queryable via `GRAPH`. **JSON-LD is on by default** in the wheel (`format="jsonld"`, `"json-ld"`, or `"application/ld+json"`; a `.jsonld` path); a wheel built `--no-default-features` drops it and `format="jsonld"` then errors (fail-closed, not mis-parsed as Turtle).
 - `Graph.load_n3(text) -> Graph` — parse an N3 document (facts + `{ premise } => { conclusion }` rules) and forward-chain to fixpoint; the result holds the ground closure.
 - `Graph.open(dir) -> Graph` — reopen a graph persisted by `save()`; permutation indexes are memory-mapped (paged on demand, so larger-than-RAM is fine).
 - `g.save(dir) -> None` — persist indexes + dictionary into `dir` for later `Graph.open`.

@@ -38,3 +38,9 @@ sparq-zk = { path = "../sparq-zk" }
 # The `forShape` statement-type primitive (forPredicate desugars to it; step 3).
 sparq-shacl = { path = "../sparq-shacl", default-features = false }
 oxrdf.workspace = true
+
+# Test-only: parse-validate the published machine-readable vocabulary
+# `ontologies/trust/trust.ttl` so the Turtle a working group reads stays valid
+# Turtle (sq-pfae.2). Not a runtime dependency — the lean default build is unaffected.
+[dev-dependencies]
+oxttl.workspace = true

@@ -84,7 +84,8 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   (`Graph::fork`/`snapshot`/`apply_delta` + `update_in_place_capturing`/`apply_effects`); when the
   feature is off, zero transaction code compiles, the default build is byte-identical, and no new
   dependencies are added.
-- **RDF writer matrix** *(opt-in `serialize-rdf` feature, OFF by default)* — write a `Graph` (or
+- **RDF writer matrix** *(`serialize-rdf` feature — OFF for a library embedder, but the `sparq-cli`/`sparq-server`
+  BINARIES enable it via their default-on `jsonld` feature, [OPUS-4.8] sq-oy1f.4)* — write a `Graph` (or
   `&[oxrdf::Triple]`) back out as Turtle / TriG / N-Quads / JSON-LD 1.1
   (`serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads, graph_to_jsonld, …}`; the `*_with`
   variants + `prefixes_from_pairs([(prefix, iri), …])` accept a caller's own prefix policy). Plus
@@ -95,14 +96,13 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   JSON-LD 1.1 Compaction** against a caller `@context`, `graph_to_jsonld_compact(&g, &ctx)` /
   `write_jsonld_compact` (+ the `_pretty` variants) apply the full algorithm — term definitions,
   `@vocab`, type/language/`@container` (`@set`/`@list`/`@language`/`@index`) coercion, `@reverse`,
-  `@id`/`@type` aliasing, value/node/IRI compaction — plus **W3C JSON-LD 1.1 Framing**
+  `@id`/`@type` aliasing, value/node/IRI compaction — plus **JSON-LD 1.1 Framing**
   (`graph_to_jsonld_framed(&g, &frame)`: node-pattern matching +
   `@embed`/`@explicit`/`@default`/`@omitDefault`/`@requireAll`) — hand-rolled, dependency-free
   (`parse_context_json` builds the context/frame). Compaction is **pyld-faithful** (differentially
   verified; fixes sq-oy1f.12/.13/.14, see the `serialize::compact` rustdoc). `JsonLdForm::Compacted`
   remains the lighter prefix-only `@context`. The N-Triples writer (`triples_to_ntriples`) is always
-  on; off, zero serializer code compiles, the default build is byte-identical, **no new
-  dependencies**. See [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
+  on; off, zero serializer code compiles, **no new dependencies**. See [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
