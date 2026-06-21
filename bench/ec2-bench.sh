@@ -9,6 +9,16 @@
 # between `=== SPARQ_BENCH_RESULT === ... === END SPARQ_BENCH_RESULT ===` markers to
 # /dev/console, and we pull them with `aws ec2 get-console-output`. NO inbound rules.
 #
+# 64KB-BUFFER DISCIPLINE (sq-6tley): get-console-output retains only the LAST ~64KB of the
+# serial buffer. An invoke that streams a lot of output (notably `cargo run`, which emits a
+# "Compiling <dep>" line for every dependency before the program even starts) will push its
+# OWN result lines out of that window and the results are LOST even though the run succeeded.
+# So a chatty benchmark MUST: (1) BUILD first with a tiny tail (`cargo build ... | tail -3`),
+# (2) run the PREBUILT binary to a FILE, and (3) echo back ONLY the compact final table. Use
+# per-dataset sub-markers `=== SPARQ_BENCH_RESULT <ds> ===` / `=== END SPARQ_BENCH_RESULT <ds> ===`
+# (NOTE the trailing `<ds> ===`, not a bare `===`, so they do NOT close the outer harness range
+# below). See the `kge-ablation` entry in benchmarks.toml for the canonical pattern.
+#
 # ORPHAN-SAFETY (paramount — a prior session orphaned a billing instance), BOTH ways:
 #   (a) every instance launches with --instance-initiated-shutdown-behavior terminate;
 #   (b) user-data's FIRST action backgrounds a hard watchdog `( sleep WATCHDOG; shutdown -h now ) &`
