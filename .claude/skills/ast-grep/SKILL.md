@@ -22,15 +22,19 @@ view: tree-sitter structural matching with `file:line` hits, zero runtime deps.
 > (see the bottom of this file), not by this skill. Use the recipes; do **not**
 > cite an unmeasured saving.
 >
-> **Honest scope (a directional pilot already found this — §5).** ast-grep's edge
-> over a *competent* `grep -rn` is **precision and expressiveness, not raw bytes**:
-> it skips the same token inside comments/strings and matches *shapes* a line-regex
-> cannot (`$X.map($$$).collect()`, a call with a specific arg). On a flat
-> "list every X" question the byte cost is about the same as `grep -rn`. The large
-> file-read saving comes from the **outline-before-read discipline** (§2.1, §4) —
-> reading a 1683-line file's signatures instead of its 75 KB — which applies with
-> or without ast-grep. Reach for ast-grep when grep's false positives (or its
-> inability to express a structure) actually bite; reach for the outline always.
+> **Honest scope (a firm real-token A/B has now settled this — §5).** ast-grep +
+> outline are **precision / completeness tools, measured NOT to save tokens** — the
+> firm A/B (`bench/pkg-dogfood/RESULTS-astgrep.md`) found going outline/ast-grep-FIRST
+> on a code-structure question is **slightly MORE expensive end-to-end** than a scoped
+> `Read`. ast-grep's edge over a *competent* `grep -rn` is **precision and
+> completeness**: it skips the same token inside comments/strings and matches *shapes*
+> a line-regex cannot (`$X.map($$$).collect()`, a call with a specific arg), and in the
+> A/B that bought a small **quality** nudge on call-site completeness — **not** a raw
+> byte/token cut. The **one** lever that survives the firm A/B is outlining **only**
+> the skeleton of a *very large single file* to avoid reading it whole (§2.1, §4) — a
+> genuine per-file reduction. Reach for ast-grep when grep's false positives or its
+> inability to express a structure actually bite, or when you must NOT miss an
+> impl/call-site; do **not** reach for it to cut tokens.
 
 ## 0. Install + verify FIRST (and the `sg` collision — non-negotiable)
 
@@ -234,12 +238,16 @@ the diff and re-run the build/clippy gate (`AGENTS.md`) afterwards.
 
 ## 4. Outline-before-read discipline (applies with or without ast-grep)
 
-Independent of any tool, and the **largest** of the two levers (the §5 pilot: a
-1683-line file's signatures are ~0.75 KB vs ~75 KB read whole):
+Independent of any tool, and the **one lever the firm §5 A/B leaves standing** —
+outlining **only** the skeleton of a *very large single file* to avoid reading it
+whole is a genuine per-file reduction (a 1683-line file's signatures are a small
+fraction of its body). Note the firm A/B's scope: this is about *one large file*; the
+broader "outline/ast-grep-FIRST as a standing strategy" was measured **more** expensive
+end-to-end (§5), so do not over-extend this into "outlining always saves tokens".
 
-> **For a file > ~200 lines, get an outline/skeleton (functions + signatures)
-> FIRST and read only the section(s) you need — do not `Read` the whole file to
-> answer a "where/what is X" question.**
+> **For one *large* file (> ~200 lines) whose relevant span you must locate, get an
+> outline/skeleton (functions + signatures) FIRST and read only the section(s) you
+> need — do not `Read` the whole file to answer a "where/what is X" question.**
 
 When to outline vs read whole:
 
@@ -260,40 +268,39 @@ signature recipe (the dependency-free, workspace-wide fallback).
 > change tracked as its own bead — that surface is protected (auto-mode blocks
 > agent-config self-modification), so do **not** edit it from here.
 
-## 5. Is this actually worth it? — the A/B (runtime-only verdict)
+## 5. Is this actually worth it? — the firm A/B verdict
 
-Whether ast-grep + outline beats the `Grep` + full-`Read` baseline on *agent
-tokens* for this repo is decided by the **shared A/B protocol**
-(`research/dogfooding-sparq-knowledge-graph.md` §5.1–§5.6), judged on the
-verdict object `{ token_win, token_delta_median_pct, token_delta_ci,
-quality_delta, break_even_N, honest, recommend_adopt }`, and metrics rows in the
-`scripts/agent-telemetry/metrics_row.py` schema (effective input tokens with the
-`1.0*fresh + 0.1*cache_read + 1.25*cache_write` cache discount, plus a quality
-pair). Every number is **non-canonical** (work-box) and is **never** frozen into
-committed markdown — the "20–40% file-read reduction" floated in
-`research/agent-effectiveness-program.md` §2.2 is a third-party advisory estimate
-with **no weight** in the decision.
+**The firm real-token A/B has now RUN (sq-0fb3f), and the verdict is: NOT a
+token-saver.** The sanctioned record is
+[`bench/pkg-dogfood/RESULTS-astgrep.md`](../../../bench/pkg-dogfood/RESULTS-astgrep.md)
+(numbers live there; non-canonical work-box telemetry, never frozen into this file).
+N=16 code-structure questions, Opus both arms, real cache-discounted effective input
+tokens (`1.0·fresh + 0.1·cache_read + 1.25·cache_creation`) with a paired quality grade:
 
-**A directional pilot has been RUN (small N, advisory only).** A model-free
-file-read byte comparison over three representative "where/how is X" tasks on this
-workspace (every impl of a trait; a large file's public surface; every call site
-of a fn) found two distinct, honest signals — recorded at runtime in the opening
-PR, not frozen here:
+- **Arm A = normal full `Read`** was **cheaper** at the median and on **11 / 16** tasks.
+- **Arm B = outline / ast-grep-FIRST** cost **more** at the median (~21k more effective
+  input tokens) and was cheaper on only **5 / 16** tasks — **more expensive across
+  every question kind** (call-sites, structure, signature, trait-impls).
+- B's only edge was a **small quality nudge** on call-site **completeness** (A→B on
+  that one kind). Completeness, not cost.
 
-1. **Outline-vs-full-Read is the real byte lever** — reading a large file's
-   signatures instead of its whole body is a *large* reduction on that file. This
-   is the §4 discipline and it is robust.
-2. **ast-grep-vs-*competent*-`grep -rn` is roughly byte-neutral on flat "list every
-   X" questions.** ast-grep's genuine edge is **precision/expressiveness** (it
-   filtered a non-call that `grep` counted; it matches shapes a line-regex cannot),
-   **not** a raw token cut. So: use ast-grep when grep's false positives or its
-   inability to express a structure actually bite; do not expect a byte win over
-   skilled grep on a simple enumeration.
+**Conclusion:** outline/ast-grep-FIRST is **not** a token-saver end-to-end — the
+install + structural queries + verification reads cost more than a scoped `Read`. Use
+ast-grep + outline as **precision / completeness** tools (enumerate ALL impls/call-sites
+where a `Read`/`grep` might miss one; express a shape a line-regex cannot), not to cut
+tokens. The **narrow exception** that survives: outlining ONLY the skeleton of a *very
+large single file* beats reading it whole (§4).
 
-The pilot is **advisory** — it is byte-cost, not the cache-discounted *effective
-input tokens* the verdict requires, and it has **no quality pair** and N≪30, so it
-does **not** clear the §5.4 bar. The firm (≥30-task, counterbalanced, Wilcoxon +
-bootstrap, quality-paired) A/B with the verdict object is **DEFERRED** to its own
-bead. Adopt as standing practice only on a `recommend_adopt` verdict from that A/B;
-until then, treat this skill as a measured-trial tool whose outline lever is the
-part the pilot already supports directionally.
+**History — the 2nd proxy reversal.** Before the firm A/B, a directional **byte
+proxy** (sq-lhwo.2) — a model-free file-read byte comparison over a few "where/how is
+X" tasks — produced an "outline is the big lever" signal. That proxy **overstated** it:
+counting outline-skeleton bytes vs whole-file bytes ignores the install cost, the
+multiple structural queries, the re-reads, and the verification reads the real strategy
+pays, and it had no quality pair. The firm real-token A/B corrected the verdict — the
+second time a charitable byte/char proxy inverted a verdict that real-transcript
+measurement then fixed (the first: the #1078 PKG-query char-proxy; see
+[`RESULTS.md`](../../../bench/pkg-dogfood/RESULTS.md)). **Takeaway:** a byte proxy is a
+direction-finder, not a substitute for mining the tokens the model actually consumed.
+The "20–40% file-read reduction" floated in
+`research/agent-effectiveness-program.md` §2.2 is a third-party advisory estimate with
+**no weight** in the decision.
