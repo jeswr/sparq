@@ -16,6 +16,9 @@
 //   8. [OPUS-4.8] sq-ixc3.11 — open the SHACL tool (left-rail data-tool="shacl"), click
 //      "Validate live store", and ASSERT a W3C validation report renders over the serialised
 //      live store (proving the SHACL surface is a working TOOL, not a stub).
+//   9. [OPUS-4.8] sq-ixc3.13 — open the Import drawer (left-rail data-import-trigger="rail"),
+//      switch to the Paste tab, enter a triple, click Import, and ASSERT a success feedback
+//      (data-import-feedback="ok") — proving the native loader ingest path merges into the store.
 //
 // This proves the desktop shell actually loads, the WASM engine runs a query IN THE TAB, and
 // the result renders — i.e. the shell is a working app, not just a crate that compiles.
@@ -274,6 +277,50 @@ async function main() {
       },
     );
     log("PASS — the SHACL tool validated the live store and rendered a W3C report.");
+
+    // 9. [OPUS-4.8] sq-ixc3.13 — IMPORT DRAWER smoke: open the drawer from the left rail's
+    //    "+ Import" (data-import-trigger="rail"), switch to the Paste tab, enter a triple, and
+    //    click Import — then assert a SUCCESS feedback renders (data-import-feedback="ok"). This
+    //    exercises the real ingest path end-to-end inside the desktop shell: the native loader
+    //    (`load_text`) decodes the document → N-Quads → the in-tab store merges it. The seeded
+    //    triple uses a fresh subject so it adds at least one quad regardless of the sample graph.
+    log("opening the Import drawer from the left rail…");
+    const importTrigger = await browser.$('[data-import-trigger="rail"]');
+    await importTrigger.waitForClickable({ timeout: 10_000 });
+    await importTrigger.click();
+
+    log("switching to the Paste tab…");
+    const pasteTab = await browser.$('[data-import-tab="paste"]');
+    await pasteTab.waitForClickable({ timeout: 10_000 });
+    await pasteTab.click();
+
+    log("entering a triple into the paste textarea…");
+    const IMPORT_DOC =
+      "<http://example.org/imported> <http://example.org/p> <http://example.org/o> .";
+    await browser.execute((value) => {
+      const el = document.querySelector("[data-import-drawer] textarea");
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }, IMPORT_DOC);
+
+    log("clicking the Import button…");
+    // The Import button label carries the mode suffix ("Import (add to store)"); match the lead.
+    const importButton = await browser.$('[data-import-drawer] button*=Import');
+    await importButton.waitForClickable({ timeout: 10_000 });
+    await importButton.click();
+
+    log("waiting for the import success feedback…");
+    const importOk = await browser.$('[data-import-feedback="ok"]');
+    await importOk.waitForExist({ timeout: 30_000 });
+    const okText = await importOk.getText();
+    if (!/Imported/i.test(okText)) {
+      throw new Error(`import feedback rendered but was not a success: ${JSON.stringify(okText)}`);
+    }
+    log("PASS — the Import drawer ingested a pasted document into the live store.");
 
     await browser.deleteSession();
   } catch (err) {

@@ -4,6 +4,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { EngineProvider } from "@/lib/engine-context";
+import { WorkspaceProvider } from "@/lib/workspace-context";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -38,8 +39,12 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          {/* The engine context provides the ONE live store the whole workbench shares. */}
-          <EngineProvider>{children}</EngineProvider>
+          {/* The engine context provides the ONE live store the whole workbench shares; the
+              workspace context tracks the active workspace's imported sources + persists the
+              save/open snapshot (sq-atb0) the Import drawer (sq-ixc3.13) writes on each import. */}
+          <EngineProvider>
+            <WorkspaceProvider>{children}</WorkspaceProvider>
+          </EngineProvider>
         </ThemeProvider>
       </body>
     </html>

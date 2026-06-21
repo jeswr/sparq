@@ -9,11 +9,12 @@
 
 import * as React from "react";
 import { useTheme } from "next-themes";
-import { Moon, Sun, Command, ExternalLink } from "lucide-react";
+import { Moon, Sun, Command, ExternalLink, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useEngine } from "@/lib/engine-context";
 import { useCommandPalette } from "@/components/workbench/command-palette";
+import { useImportDrawer } from "@/components/workbench/import-drawer";
 
 /** The honesty-website link target (the marketing site, opened in a NEW tab / system browser). */
 const WEBSITE_URL = "https://jeswr.github.io/sparq/";
@@ -64,6 +65,8 @@ function ThemeToggle() {
 export function TopBar() {
   const { storeSize } = useEngine();
   const { setOpen } = useCommandPalette();
+  // [OPUS-4.8] sq-ixc3.13 — the top-bar "+ Import" affordance (opens the Import drawer).
+  const { setOpen: setImportOpen } = useImportDrawer();
   return (
     <header className="flex h-10 shrink-0 items-center gap-3 border-b bg-card px-3">
       <span className="font-mono text-sm font-semibold tracking-tight">sparq</span>
@@ -91,6 +94,18 @@ export function TopBar() {
       <span className="tabular text-xs text-muted-foreground">
         {storeSize.toLocaleString()} quads
       </span>
+
+      {/* [OPUS-4.8] sq-ixc3.13 — "+ Import": real disk/URL/paste ingest via the native loader. */}
+      <Button
+        variant="outline"
+        size="sm"
+        className="ml-1"
+        onClick={() => setImportOpen(true)}
+        title="Import RDF from a disk file (compressed / HDT), a URL, or pasted text"
+        data-import-trigger="topbar"
+      >
+        <Upload className="size-3.5" /> Import
+      </Button>
 
       <div className="ml-auto flex items-center gap-1.5">
         {/* ⌘K — opens the keyboard-first command palette (the spine). */}
