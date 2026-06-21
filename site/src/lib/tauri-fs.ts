@@ -9,13 +9,20 @@
 // (feature-detected by `isTauriRuntime()` in `@sparq/client`). On the GitHub Pages build the
 // import line is never reached, the module is never bundled, and nothing Tauri-shaped ships.
 //
-// HONEST LIMITATION. The Tauri shell's current capability set (`gui/src-tauri/capabilities/
-// default.json`) grants only `core:default` + `dialog:allow-open` — it does NOT yet grant the
-// `fs` capability. Until the desktop shell adds the `fs:` permissions for the app-local-data
-// scope, this loader returns `null` at runtime and the GUI cleanly degrades to the web
-// (localStorage) backend even inside the Tauri webview. Wiring the `fs` capability + the
-// plugin into the Rust shell is tracked as follow-up bead sq-atb0-fs (a `gui/src-tauri`
-// change, out of the site lane).
+// HOW IT RESOLVES AT RUNTIME (sq-ixc3.6). The desktop shell registers `tauri_plugin_fs` and
+// sets `app.withGlobalTauri = true` (gui/src-tauri), so the plugin is injected onto
+// `window.__TAURI__.fs`. We resolve the fs API from THAT runtime global FIRST — the robust
+// path for a pre-bundled static export that never imports a Tauri package — and only fall back
+// to a (webpack-ignored, unbundled) bare `import()` for a hypothetical bundler-based host. On
+// the GitHub Pages build neither the global nor the import resolves, so the loader returns
+// `null` and the GUI cleanly degrades to the web (localStorage) backend — exactly as on a
+// plain browser.
+//
+// CAPABILITY SCOPE (sq-ixc3.6). The fs grant is LEAST-PRIVILEGE: the shell's capability
+// (gui/src-tauri/capabilities/default.json) scopes every fs permission to
+// `$APPLOCALDATA/workspaces` ONLY — read/write text file, remove, mkdir, exists, read dir, and
+// NO arbitrary FS. A call outside that scope is denied by Tauri and rejects, which this loader
+// treats the same as an absent plugin (returns `null`).
 
 "use client";
 
@@ -38,11 +45,29 @@ interface TauriFsModule {
 }
 
 /**
+ * Read the fs plugin off the Tauri runtime global, when present. The desktop shell sets
+ * `app.withGlobalTauri = true` and registers `tauri_plugin_fs`, so Tauri injects the plugin at
+ * `window.__TAURI__.fs` — the resolution path that works for a PRE-BUNDLED static export that
+ * never imports a Tauri npm package. Returns `undefined` in a plain browser (no `__TAURI__`),
+ * where the caller falls through to the web/localStorage backend. No import, so nothing
+ * Tauri-shaped is ever bundled.
+ */
+function readGlobalTauriFs(): TauriFsModule | undefined {
+  if (typeof window === "undefined") return undefined;
+  const fs = (window as unknown as { __TAURI__?: { fs?: unknown } }).__TAURI__?.fs;
+  if (fs && typeof (fs as { writeTextFile?: unknown }).writeTextFile === "function") {
+    return fs as TauriFsModule;
+  }
+  return undefined;
+}
+
+/**
  * Dynamically import `@tauri-apps/plugin-fs` at runtime. Isolated in its own one-line helper so
  * the single `@ts-expect-error` for the intentionally-absent module specifier lands precisely
  * on the import expression (it is NOT a site dependency — the static build must not bundle a
- * Tauri package). `webpackIgnore` keeps it out of the bundle graph; it is fetched only inside
- * the Tauri webview, never on the GitHub Pages build.
+ * Tauri package). `webpackIgnore` keeps it out of the bundle graph. This is only the SECONDARY
+ * path (a hypothetical bundler-based Tauri host); the primary path is the runtime global above,
+ * which is what the current pre-bundled static-export shell uses.
  */
 function importTauriFsPlugin(): Promise<unknown> {
   // @ts-expect-error — optional Tauri-only module, intentionally absent from the static build.
@@ -51,34 +76,46 @@ function importTauriFsPlugin(): Promise<unknown> {
 
 /**
  * Resolve the Tauri filesystem API scoped to the app's local-data dir, or `null` if the plugin
- * is not importable / the fs capability was not granted. Passed to
- * `createWorkspaceStore({ loadTauriFs })`, which only calls it inside a Tauri webview. A failed
- * import (no plugin) or a permission error resolves to `null` so the store factory falls back
- * to the web backend rather than throwing.
+ * is not present / the fs capability was not granted. Passed to
+ * `createWorkspaceStore({ loadTauriFs })`, which only calls it inside a Tauri webview.
+ *
+ * Resolution order: (1) the `window.__TAURI__.fs` runtime global injected by the desktop shell
+ * (`withGlobalTauri` + registered `tauri_plugin_fs`) — the path the pre-bundled static export
+ * uses; (2) a webpack-ignored bare `import()` for a hypothetical bundler-based host. Either way,
+ * a missing plugin / permission error / unusable shape resolves to `null` so the store factory
+ * falls back to the web backend rather than throwing.
  */
 export async function loadTauriFs(): Promise<TauriFsApi | null> {
+  // (1) Prefer the runtime global injected by the desktop shell. No import, so the static build
+  // never bundles a Tauri package; on a plain browser `__TAURI__` is absent and this is skipped.
+  const global = readGlobalTauriFs();
+  if (global) return adaptFsModule(global);
+
+  // (2) Fallback: a bundler-based host that can resolve the bare specifier at runtime. On the
+  // GitHub Pages build the specifier is unresolvable, the import rejects, and we return `null`.
   try {
-    // webpackIgnore keeps the Tauri plugin out of the static bundle entirely: it is fetched as
-    // a plain ESM module from the Tauri runtime only when this code path actually runs (inside
-    // the desktop webview). On the GitHub Pages build this line is never reached.
-    //
-    // `@tauri-apps/plugin-fs` is deliberately NOT a site dependency (the static build must not
-    // depend on a Tauri package), so `tsc` cannot resolve the specifier — the import is a pure
-    // runtime concern guarded by `isTauriRuntime()`. The expect-error documents that the
-    // missing-module diagnostic is intentional; the cast pins the runtime shape we use.
+    // webpackIgnore keeps the Tauri plugin out of the static bundle entirely. `@tauri-apps/
+    // plugin-fs` is deliberately NOT a site dependency, so `tsc` cannot resolve the specifier —
+    // the import is a pure runtime concern. The expect-error in `importTauriFsPlugin` documents
+    // that the missing-module diagnostic is intentional; the cast pins the runtime shape.
     const mod = (await importTauriFsPlugin()) as unknown as TauriFsModule;
     if (typeof mod?.writeTextFile !== "function") return null;
-    return {
-      baseDir: mod.BaseDirectory.AppLocalData,
-      readTextFile: mod.readTextFile,
-      writeTextFile: mod.writeTextFile,
-      remove: mod.remove,
-      exists: mod.exists,
-      mkdir: mod.mkdir,
-      readDir: mod.readDir,
-    };
+    return adaptFsModule(mod);
   } catch {
     // No plugin / capability not granted — the web (localStorage) backend takes over.
     return null;
   }
+}
+
+/** Project a resolved `@tauri-apps/plugin-fs` module onto the `TauriFsApi` the store consumes. */
+function adaptFsModule(mod: TauriFsModule): TauriFsApi {
+  return {
+    baseDir: mod.BaseDirectory.AppLocalData,
+    readTextFile: mod.readTextFile,
+    writeTextFile: mod.writeTextFile,
+    remove: mod.remove,
+    exists: mod.exists,
+    mkdir: mod.mkdir,
+    readDir: mod.readDir,
+  };
 }
