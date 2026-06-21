@@ -11,6 +11,13 @@ import {
   Braces,
   Download,
   PlugZap,
+  Telescope,
+  Gauge,
+  History,
+  Layers,
+  FolderOpen,
+  FilePlus2,
+  Save,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -43,6 +50,10 @@ import {
   classifyQueryForm,
   isGraphForm,
   modeSupportsForm,
+  NAMED_GRAPH_STATS_QUERY,
+  DEFAULT_GRAPH_COUNT_QUERY,
+  parseGraphStats,
+  type GraphStat,
   type QueryForm,
   type RunMode,
 } from "@/lib/repl-dataset";
@@ -83,6 +94,19 @@ import {
   snapshotStore,
   restoreStoreFromSnapshot,
 } from "@/lib/workspace-snapshot";
+// [OPUS-4.8] sq-ixc3.10 — the keyboard-first spine. The REPL is the workbench, so it
+// CONTRIBUTES its operational verbs (run / EXPLAIN / connect / export / import / switch-
+// workspace) plus the live named graphs + recent queries to the Cmd-K command palette via the
+// shell-mounted registry. The pure command-model helpers (recent-query ring, graph/query
+// labels) live in the unit-tested `@/lib/palette-commands`.
+import { useRegisterPaletteCommands } from "@/components/palette-commands";
+import {
+  pushRecentQuery,
+  previewQuery,
+  graphLabel,
+  type PaletteCommand,
+  type RecentQuery,
+} from "@/lib/palette-commands";
 
 // [OPUS-4.8] sq-vfbm — the REPL now dispatches across the whole lean-bundle query
 // surface, so the result state carries one variant per shape of answer: a solution
@@ -139,6 +163,16 @@ export function Repl() {
     DEFAULT_DATASET.id,
   );
   const storeRef = React.useRef<WasmStore | null>(null);
+
+  // [OPUS-4.8] sq-ixc3.10 — the keyboard-first spine's live inputs.
+  //   • recentQueries: a session-only ring of the most-recently-RUN distinct queries, newest
+  //     first (pure ring in `@/lib/palette-commands`). Re-selecting one drops it back into the
+  //     editor. Session-only by design: it is workbench scratch, not persisted state.
+  //   • namedGraphs: the dataset's NAMED graph IRIs, re-read from the live store off the same
+  //     `datasetVersion` the dataset panel uses, so the palette's "Named graphs" group tracks
+  //     the loaded data. The palette command opens the dataset viewer focused on the data.
+  const [recentQueries, setRecentQueries] = React.useState<RecentQuery[]>([]);
+  const [namedGraphs, setNamedGraphs] = React.useState<GraphStat[]>([]);
 
   // [OPUS-4.8] sq-2mke — endpoint mode. When `endpointActive`, queries route to a running
   // SPARQL 1.1 Protocol endpoint over the shared `@sparq/client` HTTP client instead of the
@@ -280,12 +314,27 @@ export function Repl() {
     }
   }, [endpointConfig, sparql]);
 
+  // [OPUS-4.8] sq-ixc3.10 — remember a just-run query for the command palette's "Recent
+  // queries" group. De-duplicated + capped + session-only by the pure ring helper.
+  const recordRecent = React.useCallback((query: string) => {
+    setRecentQueries((prev) => pushRecentQuery(prev, query, Date.now()));
+  }, []);
+
   // [OPUS-4.8] sq-vfbm — dispatch across the whole lean-bundle query surface. EXPLAIN /
   // ANALYZE modes render the planner's plan text (every form for EXPLAIN; SELECT/ASK for
   // ANALYZE). Otherwise we classify the SPARQL form and route to the matching wasm export:
   // SELECT/ASK -> query (JSON), CONSTRUCT/DESCRIBE -> queryQuads (N-Triples), and an Update
   // keyword -> updateInPlace (mutates the in-tab store; we re-count the dataset after).
-  const run = React.useCallback(async () => {
+  const run = React.useCallback(async (overrideMode?: RunMode) => {
+    // [OPUS-4.8] sq-ixc3.10 — the command palette runs a SPECIFIC mode (Run / EXPLAIN /
+    // ANALYZE) without first flipping the mode-tab state and racing this read; an explicit
+    // `overrideMode` wins over the current tab. The button path calls `run()` with no
+    // argument, so it keeps using the selected tab exactly as before.
+    const runMode = overrideMode ?? mode;
+    // [OPUS-4.8] sq-ixc3.10 — record the query text in the recent ring for the spine. Done
+    // up front (covers run / EXPLAIN / ANALYZE / endpoint) so the palette always offers what
+    // you actually ran, even if the run then errors.
+    recordRecent(sparql);
     // [OPUS-4.8] sq-2mke — when endpoint mode is active, the query runs on the remote
     // server, not the in-tab store. EXPLAIN / ANALYZE remain a WASM-only planner view, so
     // a "run" in endpoint mode always executes the query (the mode tabs are grayed).
@@ -304,8 +353,8 @@ export function Repl() {
       const form = classifyQueryForm(sparql);
       setState({ kind: "running" });
 
-      if (mode === "explain" || mode === "analyze") {
-        const analyze = mode === "analyze";
+      if (runMode === "explain" || runMode === "analyze") {
+        const analyze = runMode === "analyze";
         const t0 = performance.now();
         const plan = analyze ? store.explainAnalyze(sparql) : store.explain(sparql);
         const ms = performance.now() - t0;
@@ -349,11 +398,11 @@ export function Repl() {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setState({ kind: "error", message });
-      toast.error(mode === "run" ? "Query failed" : "EXPLAIN failed", {
+      toast.error(runMode === "run" ? "Query failed" : "EXPLAIN failed", {
         description: message,
       });
     }
-  }, [ensureStore, sparql, mode, endpointActive, runEndpoint]);
+  }, [ensureStore, sparql, mode, endpointActive, runEndpoint, recordRecent]);
 
   // Switch to a built-in dataset: reload the store, reset the count + active descriptor.
   const selectBuiltin = React.useCallback(
@@ -664,6 +713,236 @@ export function Repl() {
     if (endpointActive && mode !== "run") setMode("run");
   }, [endpointActive, mode]);
 
+  // [OPUS-4.8] sq-ixc3.10 — keep the palette's "Named graphs" group in sync with the live
+  // store. We re-read the NAMED graph IRIs (+ counts) off the same `datasetVersion` the dataset
+  // panel keys off, using the engine's own queries (no new Store API, no baked figure). In
+  // endpoint mode the remote server owns its data, so there are no in-tab named graphs to list.
+  React.useEffect(() => {
+    const store = storeRef.current;
+    if (!store || endpointActive) {
+      setNamedGraphs([]);
+      return;
+    }
+    try {
+      const namedJson = JSON.parse(store.query(NAMED_GRAPH_STATS_QUERY)) as SparqlResults;
+      const defaultJson = JSON.parse(store.query(DEFAULT_GRAPH_COUNT_QUERY)) as SparqlResults;
+      // parseGraphStats returns the default graph first, then named graphs; the palette only
+      // lists the NAMED ones (the default graph is opened via the "Browse dataset" action).
+      const stats = parseGraphStats(defaultJson, namedJson).filter((s) => !s.isDefault);
+      setNamedGraphs(stats);
+    } catch {
+      setNamedGraphs([]);
+    }
+  }, [datasetVersion, endpointActive]);
+
+  // [OPUS-4.8] sq-ixc3.10 — assemble the OPERATIONAL command set the REPL contributes to the
+  // Cmd-K spine and register it for as long as the REPL is mounted. The list is memoised off the
+  // live state it reads, so the palette always reflects the current workbench (mode availability,
+  // open workspace, loaded graphs, recent queries) without prop-drilling. `runQuery` jumps to a
+  // mode then runs; the editor/import/connect/export verbs reuse the SAME callbacks the panels do.
+  const runWithMode = React.useCallback(
+    (m: RunMode) => {
+      // Reflect the chosen mode in the tab strip AND run it immediately — `run` takes the mode
+      // explicitly, so there is no state-then-run race.
+      setMode(m);
+      void run(m);
+    },
+    [run],
+  );
+
+  const paletteCommands = React.useMemo<PaletteCommand[]>(() => {
+    const cmds: PaletteCommand[] = [];
+
+    // ── Actions: the verbs (run / EXPLAIN / connect / export / import / workspace) ──────────
+    cmds.push({
+      id: "repl.run",
+      group: "Actions",
+      title: "Run query",
+      blurb: endpointActive ? "Execute on the connected endpoint" : "Execute on the in-tab engine",
+      keywords: ["run", "execute", "query", "go"],
+      icon: Play,
+      disabled: busy,
+      run: () => runWithMode("run"),
+    });
+    // EXPLAIN / ANALYZE drive the in-tab planner — unavailable in endpoint mode or for Updates.
+    const planUnsupported = endpointActive || !modeSupportsForm("explain", form);
+    cmds.push({
+      id: "repl.explain",
+      group: "Actions",
+      title: "Run EXPLAIN",
+      blurb: "Show the query plan without executing it",
+      keywords: ["explain", "plan", "planner", "optimize"],
+      icon: Telescope,
+      disabled: busy || planUnsupported,
+      run: () => runWithMode("explain"),
+    });
+    cmds.push({
+      id: "repl.analyze",
+      group: "Actions",
+      title: "Run EXPLAIN ANALYZE",
+      blurb: "Plan + execute with a per-operator trace (SELECT/ASK)",
+      keywords: ["analyze", "analyse", "trace", "profile", "explain"],
+      icon: Gauge,
+      disabled: busy || endpointActive || !modeSupportsForm("analyze", form),
+      run: () => runWithMode("analyze"),
+    });
+    cmds.push({
+      id: "repl.connect",
+      group: "Actions",
+      title: endpointActive ? "Disconnect from endpoint" : "Connect to a SPARQL endpoint",
+      blurb: endpointActive
+        ? "Switch back to the in-tab WASM engine"
+        : "Run against a running sparq-server (SPARQL 1.1 Protocol)",
+      keywords: ["connect", "disconnect", "endpoint", "server", "remote", "http"],
+      icon: PlugZap,
+      run: () => setEndpointActive((v) => !v),
+    });
+    // Export the current SELECT result set (only when one is on screen).
+    const haveSelect = state.kind === "select";
+    cmds.push({
+      id: "repl.export.csv",
+      group: "Actions",
+      title: "Export results as CSV",
+      blurb: haveSelect ? undefined : "Run a SELECT first to export its rows",
+      keywords: ["export", "download", "csv", "results", "save"],
+      icon: Download,
+      disabled: !haveSelect,
+      run: () => {
+        if (state.kind === "select")
+          downloadText("sparql-results.csv", resultsToCsv(state.results), "text/csv");
+      },
+    });
+    cmds.push({
+      id: "repl.export.tsv",
+      group: "Actions",
+      title: "Export results as TSV",
+      blurb: haveSelect ? undefined : "Run a SELECT first to export its rows",
+      keywords: ["export", "download", "tsv", "results", "save"],
+      icon: Download,
+      disabled: !haveSelect,
+      run: () => {
+        if (state.kind === "select")
+          downloadText(
+            "sparql-results.tsv",
+            resultsToTsv(state.results),
+            "text/tab-separated-values",
+          );
+      },
+    });
+    cmds.push({
+      id: "repl.export.json",
+      group: "Actions",
+      title: "Export results as JSON",
+      blurb: haveSelect ? undefined : "Run a SELECT first to export its rows",
+      keywords: ["export", "download", "json", "results", "save", "sparql-results"],
+      icon: Download,
+      disabled: !haveSelect,
+      run: () => {
+        if (state.kind === "select")
+          downloadText(
+            "sparql-results.json",
+            formatSparqlJson(state.results),
+            "application/sparql-results+json",
+          );
+      },
+    });
+    cmds.push({
+      id: "repl.browse",
+      group: "Actions",
+      title: "Browse the loaded dataset",
+      blurb: "Open the dataset viewer (default + named graphs)",
+      keywords: ["browse", "view", "dataset", "data", "triples", "import"],
+      icon: Database,
+      disabled: endpointActive || size === null,
+      run: () => setViewerOpen(true),
+    });
+    cmds.push({
+      id: "repl.new",
+      group: "Actions",
+      title: "New scratch session",
+      blurb: "Reset to the default dataset + example query",
+      keywords: ["new", "scratch", "reset", "fresh", "clear"],
+      icon: FilePlus2,
+      run: () => void newScratchSession(),
+    });
+    cmds.push({
+      id: "repl.save",
+      group: "Actions",
+      title: "Save workspace",
+      blurb:
+        currentWorkspaceId === null
+          ? "No open workspace — use Save as instead"
+          : "Overwrite the open workspace",
+      keywords: ["save", "workspace", "persist", "store"],
+      icon: Save,
+      disabled: !workspaces.ready || workspaceBusy || currentWorkspaceId === null,
+      run: () => void saveWorkspace(),
+    });
+
+    // ── Recent queries: re-load a recently-run query into the editor ───────────────────────
+    for (const r of recentQueries) {
+      const preview = previewQuery(r.query);
+      cmds.push({
+        id: `repl.recent.${r.ranAt}`,
+        group: "Recent queries",
+        title: preview,
+        keywords: ["recent", "history", "query", preview],
+        icon: History,
+        run: () => setSparql(r.query),
+      });
+    }
+
+    // ── Named graphs: open the dataset viewer focused on the loaded data ────────────────────
+    for (const g of namedGraphs) {
+      if (g.iri === null) continue; // named graphs always carry an IRI (default filtered out)
+      const iri = g.iri;
+      cmds.push({
+        id: `repl.graph.${iri}`,
+        group: "Named graphs",
+        title: graphLabel(iri),
+        blurb: `${iri} · ${g.count} triple${g.count === 1 ? "" : "s"}`,
+        keywords: ["graph", "named graph", iri],
+        icon: Layers,
+        run: () => setViewerOpen(true),
+      });
+    }
+
+    // ── Workspaces: switch to any stored workspace by name ─────────────────────────────────
+    for (const w of workspaces.list) {
+      if (w.id === currentWorkspaceId) continue; // already open
+      cmds.push({
+        id: `repl.workspace.${w.id}`,
+        group: "Workspaces",
+        title: `Switch to “${w.name}”`,
+        blurb: w.approxTriples > 0 ? `${w.approxTriples} triples` : undefined,
+        keywords: ["workspace", "switch", "open", w.name],
+        icon: FolderOpen,
+        disabled: !workspaces.ready || workspaceBusy,
+        run: () => void openWorkspace(w.id),
+      });
+    }
+
+    return cmds;
+  }, [
+    endpointActive,
+    busy,
+    form,
+    state,
+    size,
+    currentWorkspaceId,
+    workspaceBusy,
+    workspaces.ready,
+    workspaces.list,
+    recentQueries,
+    namedGraphs,
+    runWithMode,
+    newScratchSession,
+    saveWorkspace,
+    openWorkspace,
+  ]);
+
+  useRegisterPaletteCommands("repl", paletteCommands);
+
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
@@ -776,7 +1055,7 @@ export function Repl() {
         />
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={run} disabled={busy}>
+          <Button onClick={() => void run()} disabled={busy}>
             {busy ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (

@@ -68,6 +68,14 @@ export interface EngineContextValue {
   lastRowCount: number | null;
   /** Run a query/update against the live store; resolves with the outcome + measured latency. */
   run: (query: string) => Promise<RunResult>;
+  /**
+   * [OPUS-4.8] sq-ixc3.10 — render the planner's EXPLAIN (or EXPLAIN ANALYZE) plan text for a
+   * query WITHOUT executing it (ANALYZE also executes). This is an in-tab planner introspection
+   * the Cmd-K spine drives ("Run EXPLAIN"); it returns the plan text or throws on a parse error
+   * (e.g. an Update form, which the planner rejects). Separate from `run` because it produces
+   * plan text, not a result set.
+   */
+  explain: (query: string, analyze?: boolean) => string;
 }
 
 const EngineContext = React.createContext<EngineContextValue | null>(null);
@@ -234,9 +242,18 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     [refreshSummary],
   );
 
+  // [OPUS-4.8] sq-ixc3.10 — the EXPLAIN / ANALYZE planner introspection the Cmd-K spine drives.
+  // Throws if the store is cold or the planner rejects the form (e.g. an Update), so the caller
+  // surfaces a clear message rather than silently no-op'ing.
+  const explain = React.useCallback((query: string, analyze = false): string => {
+    const store = storeRef.current;
+    if (!store) throw new Error("The engine is not ready yet — wait for the store to warm.");
+    return analyze ? store.explainAnalyze(query) : store.explain(query);
+  }, []);
+
   const value = React.useMemo<EngineContextValue>(
-    () => ({ status, storeSize, graphs, lastLatencyMs, lastRowCount, run }),
-    [status, storeSize, graphs, lastLatencyMs, lastRowCount, run],
+    () => ({ status, storeSize, graphs, lastLatencyMs, lastRowCount, run, explain }),
+    [status, storeSize, graphs, lastLatencyMs, lastRowCount, run, explain],
   );
 
   return <EngineContext.Provider value={value}>{children}</EngineContext.Provider>;
