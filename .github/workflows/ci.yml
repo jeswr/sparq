@@ -98,6 +98,12 @@ jobs:
             docker:
               - 'Dockerfile'
               - '**/Dockerfile'
+              # [OPUS-4.8] sq-5f1s4 — `.dockerignore` shapes the `context: .` build the
+              # docker-smoke job runs (it decides what `COPY . .` includes). A
+              # `.dockerignore`-only PR that breaks the build context would otherwise set
+              # docker_changed=false and skip the smoke at PR time (the gui.yml/#1081
+              # blind-spot class). container-scan.yml already lists it; match that here.
+              - '.dockerignore'
               - 'scripts/docker-smoke.sh'
               - '.github/workflows/ci.yml'
       - name: Decide rust_changed (safe-by-default off the PR path)
