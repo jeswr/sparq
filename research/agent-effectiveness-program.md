@@ -5,6 +5,22 @@
 
 **Status: design-only / proposed. Nothing in this doc is adopted yet.**
 
+> **STATUS / OUTCOME (2026-06-21).** [OPUS-4.8] The shared §5 measurement protocol this
+> program adopts (single-sourced in `dogfooding-sparq-knowledge-graph.md` §5) has had its
+> **first instance RUN**: the sparq-PKG token A/B. The sanctioned results record is
+> **[`bench/pkg-dogfood/RESULTS.md`](../bench/pkg-dogfood/RESULTS.md)** (`bench/` is the
+> only home for the measured numbers — they are not repeated here). That run is direct
+> evidence the backbone in §1 works end-to-end and that the shared verdict object returns
+> a real, non-borrowed result on THIS repo: for the PKG-answerable question class it came
+> back **`recommend_adopt = true`** — having Opus run `pkg-query` itself roughly halves
+> its effective input tokens versus reading docs, and a cheap Haiku NL-tool is far cheaper
+> at equal or better quality and safely abstains off-PKG. This **does not** retroactively
+> adopt the *other* levers in §2 (ast-grep, Serena, the prose semantic index) — each
+> still needs its own §5 A/B — but it falsifies the "no baseline was ever captured" gap
+> below and proves the measurement-first discipline is exercisable. All numbers stay
+> NON-CANONICAL (work-box); see `RESULTS.md` for the caveats. The design content is
+> retained; statements that pre-date the run are corrected inline.
+
 This record extends — does **not** duplicate — the cost-side survey in
 [`agent-efficiency-tooling.md`](./agent-efficiency-tooling.md) (epic **sq-lhwo**, #430).
 That doc establishes the cost model and ranks levers; this doc adds a concrete, phased
@@ -548,8 +564,13 @@ Hard-coded perf numbers are non-canonical (hardware + thermal state matter).
 
 **The gaps (ranked by measurable-win-per-effort):**
 
-1. **No baseline was ever captured** — the instrument shipped, the *measurement* did not;
-   every %-claim remains borrowed. **This is the gate on every other adoption.**
+1. **~~No baseline was ever captured~~ — PARTLY CLOSED (2026-06-21).** [OPUS-4.8] The
+   first instance of the shared §5 A/B has now been RUN on this repo (the sparq-PKG token
+   A/B — [`bench/pkg-dogfood/RESULTS.md`](../bench/pkg-dogfood/RESULTS.md)), so the
+   instrument is no longer un-exercised and that track's %-claim is no longer borrowed.
+   The §2 effectiveness levers (ast-grep, Serena, the prose index) still have **no**
+   captured baseline and remain gated on their own §5 A/B. **A measured baseline is still
+   the gate on each remaining adoption.**
 2. **AGENTS.md prefix bloat** (105,185 bytes at HEAD, sharply up from a pinned 17,405 B on
    2026-06-14, no budget guard) — actively fighting the cache hygiene it preaches.
 3. **Explore-vs-general-purpose decision not in AGENTS.md** — read-only scheduler legs run
@@ -630,11 +651,13 @@ the data-source join + the query→tool decision-map only.
 
 ## 6. Risks & hype to avoid
 
-- **Borrowed numbers.** Every % here and in the cited docs is someone else's repo, and in
-  this doc they are **advisory ranking aids only** — they carry no weight in an adoption
-  decision; only the shared §5.6 verdict object does. The closed Phase-1/Phase-2 beads must
-  **not** create the impression a sparq-specific saving was proven — the instrument shipped,
-  the measurement did not.
+- **Borrowed numbers.** Every % here and in the cited docs (other than the sparq-PKG
+  A/B in [`bench/pkg-dogfood/RESULTS.md`](../bench/pkg-dogfood/RESULTS.md)) is someone
+  else's repo, and in this doc they are **advisory ranking aids only** — they carry no
+  weight in an adoption decision; only the shared §5.6 verdict object does. As of
+  2026-06-21 one sparq-specific saving HAS been measured (the PKG token A/B); the closed
+  Phase-1/Phase-2 beads and that single run must **not** be over-read as proving a saving
+  for the *other* §2 levers — those instruments shipped, their measurements did not.
 - **Self-fighting bloat.** AGENTS.md's "proactively maintain" rule grows the always-cached
   prefix monotonically (17,405 B → 105,185 B in a week) while the same file preaches cache
   hygiene; trim by relocation.
