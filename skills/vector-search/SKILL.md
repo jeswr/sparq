@@ -936,6 +936,52 @@ taxonomy block (or hyperbolic geometry) raises retrieval is **empirical/dataset-
 accuracy claim; the gate adopts non-Euclidean only on **measured** lift. The gUFO rigid/role split
 (design §2/§9.5, rare annotations) is the optional/last prior and is **deferred**.
 
+### 18. Flexible minimal-complete grounding — modality chosen per request (opt-in, feature = `structure`)
+
+<!-- [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §4). -->
+Research-grade **P4**: grounding is a function `(node, graph) -> minimal-and-complete OBJECT` whose
+**modality is chosen per request** by a dispatcher on the *consumer's declared output type* — the
+same node projected into whichever object a tool needs. `ground` (the `grounding` module) returns a
+`Grounding` enum:
+
+- **`Modality::Subgraph`** — the smallest sub-BGP describing the node, bounded to the predicates of
+  the node's **effective (minimal) type's** characteristic set (ABSTAT-style minimality; Spahiu et
+  al. ESWC 2016, via `sparq-introspect`). Verifiable facts only — every fact is a real triple of the
+  graph, never an approximate signal.
+- **`Modality::TypedSubVector`** — only the relevant `SchemaHeader` blocks of the node's stored
+  vector (e.g. just the numeric block). Minimal by construction.
+- **`Modality::NlString`** — the token-budgeted `verbalize` passage, optionally **extended to render
+  typed values** (unit-typed quantities + enum labels) via `render_typed_values`.
+- **`Modality::TypedValue`** — a single typed slot filled directly: `TypedValue::{Boolean, Number,
+  Quantity, Enum}`. **Exact** (no cosine threshold, no recall loss).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{ground, Grounding, GroundingConfig, Modality, OutputType};
+use sparq_vectors::structure::close_for_vectorise;
+use sparq_reason::Profile;
+
+// Completeness is PROFILE-RELATIVE: close the graph FIRST so entailed facts are present.
+let g = close_for_vectorise(ttl, "turtle", Profile::Rdfs)?.graph;
+let node = oxrdf::NamedNode::new("http://ex/bolt")?.into();
+
+// A dispatcher maps the consumer's declared output type to a modality (ambiguous → subgraph).
+let modality = Modality::for_output(OutputType::Facts);
+if let Some(Grounding::Subgraph(facts)) =
+    ground(&g, &node, modality, &GroundingConfig::default(), None, None)
+{
+    // each `facts[i]` is a (predicate, object) re-checkable against the graph
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+**Honesty.** Both minimality (smallest pattern under the *stated* criterion) and completeness
+(relative to the *materialised entailment profile* + declared shapes) are **profile-relative, not
+absolute** — and **NOT** end-task answer-completeness (no answer-completeness claim is made). This is
+the **projection** half only: the "ANN proposes, exact engine re-validates" loop is the
+`filtered-ann` / `vec-predicate` path (recipes 8–9). Quantities render **as declared** (value + unit
+label); cross-unit normalisation reuses the P2 QUDT `normalise` (recipe 16; sq-0wo9e.3).
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
@@ -952,17 +998,19 @@ accuracy claim; the gate adopts non-Euclidean only on **measured** lift. The gUF
   methods write a delta the read paths consult transparently (recipe 12). The delta lives in RAM on the
   handle; `save_delta` persists it to a crash-durable `.spqd` sidecar and `open_with_delta` replays it,
   so mutations survive a restart without a `compact` (the two durability paths).
-- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1 P0, sq-0wo9e.2 P1, sq-0wo9e.3 P2, sq-0wo9e.4 P3).**
+- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1 P0, sq-0wo9e.2 P1, sq-0wo9e.3 P2, sq-0wo9e.4 P3, sq-0wo9e.5 P4).**
   It is the ONLY feature pulling `sparq-reason` + `sparq-introspect` into this crate, both **optional**, so
   with it OFF the default build compiles zero structure-prep code and gains no new required deps. With
   it ON it exposes the **P0** closure + sampler (`close_for_vectorise` / `materialise_closure` /
   `ClosedGraph`, `TypeConstraints`, `NegativeSampler` + `SamplingMode`, recipe 13), the **P1**
   typed-literal encoders (`route`, `NumericEncoder`, `BooleanEncoder`, `DateEncoder`, `SchemaHeader`,
-  recipe 15), the **P2** enum `Codebook` + QUDT unit-`normalise` (recipe 16), AND the **P3** taxonomy
+  recipe 15), the **P2** enum `Codebook` + QUDT unit-`normalise` (recipe 16), the **P3** taxonomy
   block + disjointness (`TaxonomyDag`, `EuclideanTaxonomyEncoder`, `GeometryGate`, `DisjointnessOracle`,
-  recipe 17). `structure` itself serves no exact answer; the disjointness mask is **answer-safe** (drops
-  only provably-disjoint) and encoder invariants are proven, but embedding-quality benefit is
-  **unproven** (research-grade, no accuracy claim, no canonical numbers).
+  recipe 17), AND the **P4** flexible-grounding selector (`ground` / `Grounding` / `Modality` /
+  `OutputType` / `TypedValue`, recipe 18). `structure` itself serves no exact answer; the disjointness
+  mask is **answer-safe** (drops only provably-disjoint), encoder invariants are proven, and grounding
+  minimality/completeness are **profile-relative**, but embedding-quality benefit is **unproven**
+  (research-grade, no accuracy claim, no canonical numbers).
 - **The SHACL/OWL prior reader is the non-default `structure-shacl` feature (sq-0wo9e.3 P2).** It
   **implies `structure`** and is the ONLY feature pulling `sparq-shacl` (and transitively, on native,
   the engine) into this crate's graph — so neither the default build nor the lean `structure` feature

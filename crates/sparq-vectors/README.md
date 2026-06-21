@@ -95,9 +95,9 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   `DateEncoder`, enum `Codebook`, `SchemaHeader` (metric guard); QUDT unit-`normalise` (`1000 m` ≡ `1 km`);
   **`structure-shacl`** adds the `ShaclPriors` reader (enum/datatype/cardinality from `sparq-shacl`).
   **P3:** `TaxonomyDag` + `EuclideanTaxonomyEncoder` (Euclidean default; hyperbolic **only past** the measured-distortion `GeometryGate`) + an **answer-safe** `DisjointnessOracle` (train-time repulsion + serve-time hard mask dropping *provably-disjoint* candidates only).
+  **P4:** `ground` — a per-request modality dispatcher (subgraph / typed sub-vector / NL / typed value), **profile-relative** completeness + ABSTAT-style minimality; ambiguous → the exact subgraph.
   **`kge`** (implies `structure`, no new dep — hand-rolled SGD): a thin CPU-only trainer (symmetric
-  **DistMult** / asymmetric **ComplEx**) + a **filtered link-prediction** `{closure}×{type-neg}`
-  ablation (`run_ablation*`). **No accuracy claim**; INDICATIVE only — read deltas off ComplEx (DistMult is symmetric → near-random on directional data).
+  **DistMult** / asymmetric **ComplEx**) + a **filtered link-prediction** `{closure}×{type-neg}` ablation (`run_ablation*`). **No accuracy claim**; INDICATIVE only — read deltas off ComplEx (DistMult is symmetric → near-random on directional data).
 
 ## 📚 Learn more
 
