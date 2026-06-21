@@ -210,6 +210,92 @@ fn stolen_chain_without_the_terminal_key_is_denied() {
 }
 
 #[test]
+fn stolen_chain_with_substituted_terminal_key_is_denied() {
+    // THE KEY-SUBSTITUTION REPLAY (sq-l5og soundness fix). This is the exploit the
+    // adversarial review proved: stronger than `stolen_chain_without_the_terminal_key_*`
+    // (which covers the wrong-key-IN-the-same-slot case). Here Mallory does NOT merely
+    // sign with the wrong key against the genuine terminal key — she SUBSTITUTES her own
+    // public key into the terminal hop's `delegate_key` slot, keeps the GENUINE delegator
+    // signature untouched, claims the genuine delegate's WebID, and signs the fresh
+    // challenge with HER key.
+    //
+    // Pre-fix, this CONFERRED the capability: `hop_message` excluded `delegate_key`, so
+    // the genuine delegator signature still verified over the tampered hop, and the PoP
+    // verified under Mallory's substituted key. Post-fix, `delegate_key` is folded into
+    // `hop_message`, so swapping the terminal key changes the signed preimage ⇒ the
+    // delegator's signature over the terminal hop no longer verifies ⇒ DENIED at step 2.
+    let (mut chain, roots, _agent_sk) = canonical_chain();
+    let (mallory_sk, mallory_pk) = key(0xBEEF);
+
+    // Capture-and-substitute: replace the TERMINAL hop's delegate_key with Mallory's,
+    // WITHOUT re-signing the hop (the genuine delegator signature stays as-is — Mallory
+    // does not hold alice's key, so she cannot re-sign).
+    let terminal_idx = chain.hops.len() - 1;
+    chain.hops[terminal_idx].delegate_key = mallory_pk;
+
+    // She claims the genuine delegate's WebID and PoPs with her OWN key (which now sits in
+    // the terminal delegate_key slot, so leg-2 alone would have passed pre-fix).
+    let inv = Invocation {
+        agent: iri(AGENT),
+        challenge: CHALLENGE,
+        pop_hex: pop_over(&mallory_sk, &CHALLENGE),
+        now_unix_secs: NOW,
+    };
+
+    let err = invoke(&chain, &roots, &inv, &iri(DOC_X)).unwrap_err();
+    assert_eq!(
+        err,
+        InvocationDenied::HopSignatureInvalid {
+            hop: terminal_idx
+        },
+        "substituting the terminal delegate_key must break the delegator's hop signature \
+         (sq-l5og: the key is bound into the signed preimage), denying the stolen chain"
+    );
+
+    // Belt-and-braces: the gate must NOT have admitted anything — a denial confers nothing.
+    assert!(
+        invoke(&chain, &roots, &inv, &iri(DOC_X)).is_err(),
+        "the key-substituted chain is rejected, fail-closed"
+    );
+}
+
+#[test]
+fn substituted_terminal_key_on_a_single_hop_chain_is_denied() {
+    // Same key-substitution attack on the degenerate one-hop (root→agent) chain, to prove
+    // the binding holds for the TERMINAL hop even when it is also the ROOT hop (the
+    // linkage check constrains zero key pairs here, so the binding is the ONLY defence).
+    let (root_sk, root_pk) = key(0x1001);
+    let (_agent_sk, agent_pk) = key(0x1003);
+    let mut hop0 = signed_hop(
+        ROOT,
+        &root_sk,
+        &root_pk,
+        AGENT,
+        &agent_pk,
+        cap(vec![read()], DOC_X),
+        FAR_FUTURE,
+    );
+    // Substitute Mallory's key as the (terminal == root) delegate_key, keep the genuine
+    // root signature.
+    let (mallory_sk, mallory_pk) = key(0xBEEF);
+    hop0.delegate_key = mallory_pk;
+    let chain = DelegationChain { hops: vec![hop0] };
+
+    let inv = Invocation {
+        agent: iri(AGENT),
+        challenge: CHALLENGE,
+        pop_hex: pop_over(&mallory_sk, &CHALLENGE),
+        now_unix_secs: NOW,
+    };
+    let err = invoke(&chain, &[root_pk], &inv, &iri(DOC_X)).unwrap_err();
+    assert_eq!(
+        err,
+        InvocationDenied::HopSignatureInvalid { hop: 0 },
+        "on a single-hop chain the terminal key binding is the sole defence and must hold"
+    );
+}
+
+#[test]
 fn replayed_pop_over_a_different_challenge_is_denied() {
     // The agent's PoP from an EARLIER request (a different challenge) is replayed against
     // a NEW challenge. The PoP is bound to the challenge it signed, so it does not verify

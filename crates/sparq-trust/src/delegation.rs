@@ -21,8 +21,11 @@
 //!   # 1. ANCHOR. The chain's root delegator must be a trust-anchored root key.
 //!   if chain.root_key not in trusted_roots:                 DENY  # §4.1 anchor
 //!   # 2. CHAIN INTEGRITY. Each hop is signed by its DELEGATOR's key over the hop
-//!   #    message (delegator ‖ delegate ‖ capability ‖ expiry), checked — never a
-//!   #    self-asserted "I am delegated" triple (the §3.3-item-1 soundness condition).
+//!   #    message (delegator ‖ delegator_key ‖ delegate ‖ delegate_key ‖ capability ‖
+//!   #    expiry), checked — never a self-asserted "I am delegated" triple (the
+//!   #    §3.3-item-1 soundness condition). Binding delegate_key means the delegator
+//!   #    ATTESTS which key the delegate holds — a substituted terminal key (the
+//!   #    sq-l5og stolen-chain key-substitution vector) breaks this signature.
 //!   for hop in chain.hops:
 //!     if not verify_sig(hop.delegator_key, hop_message(hop), hop.sig):  DENY
 //!   # 3. ATTENUATION (monotone narrowing, §4.2). Each hop may only RESTRICT: its
@@ -44,21 +47,40 @@
 //!   emit EffectiveCapability{ capability: terminal.capability, delegate: terminal.delegate }
 //! ```
 //!
-//! ## Why this makes an admitted delegation NON-replayable
+//! ## Why this defeats stolen-chain replay (and the residual it does NOT close)
 //!
 //! The replay vector (§4.1 / §7.4-K′) is: an attacker reads an admitted delegation (a
-//! standing graph fact) and "rides" it. Step 6 closes it on **two** independent legs,
-//! either of which alone defeats replay:
+//! standing graph fact, or captures it off the wire) and "rides" it. Defeating it rests
+//! on **three** legs working together — step 6's two PoP legs PLUS the key being bound
+//! into the signed chain (step 2):
 //!
 //! - **invoker == terminal delegate** — the request must authenticate AS the terminal
 //!   delegate's WebID, not merely *reach* the delegation graph. Anyone else is denied.
 //! - **fresh-challenge key-proof (PoP)** — even a session authenticated as the terminal
 //!   delegate must sign a **per-request, server-issued challenge** with the terminal
-//!   key. A delegation document captured off the wire (or read from the ambient graph)
-//!   carries no signing key, so it cannot produce the PoP over a *new* challenge. This
-//!   is the GNAP/DPoP proof-of-possession the design names in §4.3(b) — modelled here on
-//!   the SAME challenge-response Schnorr PoP the holder binding uses (`sparq-zk::sig`
-//!   `holder_pop_message` / `sign_holder_pop`), so no new crypto is invented.
+//!   key. This is the GNAP/DPoP proof-of-possession the design names in §4.3(b) —
+//!   modelled here on the SAME challenge-response Schnorr PoP the holder binding uses
+//!   (`sparq-zk::sig` `holder_pop_message` / `sign_holder_pop`), so no new crypto is
+//!   invented.
+//! - **delegate_key bound into the signed hop (step 2, the `sq-l5og` soundness fix)** —
+//!   the terminal `delegate_key` is folded into [`hop_message`], so the DELEGATOR's
+//!   signature attests exactly which key the delegate holds. WITHOUT this, the PoP leg
+//!   alone was bypassable: an attacker could substitute its OWN public key as the
+//!   terminal `delegate_key` (the genuine WebID + the genuine delegator signature still
+//!   verified, because the old preimage excluded the key), claim the genuine delegate's
+//!   WebID, and produce a valid PoP under its *own* key. Binding the key makes any such
+//!   substitution break the delegator's signature ⇒ the chain is rejected at step 2.
+//!
+//! **Residual (do NOT overclaim full non-replayability).** With the key bound, a chain
+//! captured off the wire cannot have its terminal key swapped, so a captured chain alone
+//! no longer yields a usable PoP under an attacker key. BUT the property is only as sound
+//! as the trust in the delegate's key in the first place: the delegate key is attested by
+//! the delegator's signature, and the delegator's OWN key is still **operator-/chain-
+//! asserted** — there is no DID resolver binding a WebID to a key yet (`sq-pfae.3`, the
+//! live forgery vector D′). So this gate defeats stolen-chain **key-substitution** replay;
+//! it does NOT close the upstream key-trust gap. An adversary who can mint a chain rooted
+//! at a key the relying party (wrongly) anchors, or who controls the delegator's asserted
+//! key, is out of scope here and tracked by `sq-pfae.3`.
 //!
 //! ## Object-capability discipline — resolves the §4.1↔§4.3 ambient-authority tension (item M)
 //!
@@ -114,17 +136,19 @@ use sparq_zk::encode::{encode_term, salt_from_bytes};
 use sparq_zk::field::{field_from_hash_bytes, Fr};
 use sparq_zk::poseidon2;
 use sparq_zk::sig::{
-    commitment_message, holder_pop_message, public_key_to_hex, signature_from_hex, verify,
-    PublicKey,
+    commitment_message, holder_key_digest, holder_pop_message, public_key_to_hex,
+    signature_from_hex, verify, PublicKey,
 };
 
 /// A single delegation hop: *delegator → delegate*, granting (an attenuation of) a
 /// capability, signed by the **delegator's** key over the hop message.
 ///
 /// The signature is over [`hop_message`] — `Poseidon2`-bound over the structural fields
-/// (delegator ‖ delegate ‖ capability ‖ expiry) — a **checked** signature, never a
-/// self-asserted "I am delegated" triple (the §3.3-item-1 soundness condition applied to
-/// delegation).
+/// (delegator ‖ delegator_key ‖ delegate ‖ delegate_key ‖ capability ‖ expiry) — a
+/// **checked** signature, never a self-asserted "I am delegated" triple (the §3.3-item-1
+/// soundness condition applied to delegation). Binding `delegate_key` is the `sq-l5og`
+/// soundness fix: it attests which key the delegate holds, so a substituted terminal key
+/// breaks the delegator's signature.
 #[derive(Debug, Clone)]
 pub struct DelegationHop {
     /// The delegator's WebID/DID (the principal granting authority on this hop).
@@ -138,7 +162,10 @@ pub struct DelegationHop {
     /// the authenticated invoker (`Session.agent`) — the invocation-binding rule.
     pub delegate: NamedNode,
     /// The delegate's verification key — the **terminal** hop's `delegate_key` is the
-    /// one the per-request PoP must verify under (the key-proof leg of step 6).
+    /// one the per-request PoP must verify under (the key-proof leg of step 6). It is
+    /// folded into [`hop_message`], so the delegator's hop signature ATTESTS this key
+    /// (the `sq-l5og` key-substitution fix): an attacker cannot swap in its own key on a
+    /// captured chain without breaking the delegator's signature.
     pub delegate_key: PublicKey,
     /// The capability this hop grants (an attenuation of the parent's — see
     /// [`Capability`]). The chain must be monotone: `child ⊆ parent` (§4.2).
@@ -419,8 +446,10 @@ pub fn invoke(
     }
 
     // Step 6, leg 2: KEY-PROOF — the invoker proves possession of the terminal key on
-    // THIS request by signing the fresh challenge (DPoP/GNAP PoP). A captured chain
-    // carries no key, so it cannot produce this PoP over a new challenge.
+    // THIS request by signing the fresh challenge (DPoP/GNAP PoP). The terminal
+    // `delegate_key` this verifies under is itself ATTESTED by the delegator's hop
+    // signature (step 2 binds it via `hop_message`), so an attacker cannot substitute its
+    // own key on a captured chain and then PoP under it — the sq-l5og soundness fix.
     let challenge_fr: Fr = field_from_hash_bytes(&inv.challenge);
     let pop_msg = holder_pop_message(&challenge_fr);
     let Some(pop_sig) = signature_from_hex(&inv.pop_hex) else {
@@ -460,9 +489,25 @@ pub fn effective_against_current(
 
 /// The hop message a delegator signs (and the gate verifies): a domain-separated
 /// `Poseidon2` hash over the hop's structural fields
-/// (`delegator ‖ delegate ‖ capability ‖ expiry`). Binding ALL of these means a forger
-/// cannot lift a signature from one hop onto a different delegate / capability / expiry —
-/// the hop signature attests the WHOLE hop, not just its existence.
+/// (`delegator ‖ delegator_key ‖ delegate ‖ delegate_key ‖ capability ‖ expiry`).
+/// Binding ALL of these means a forger cannot lift a signature from one hop onto a
+/// different delegate / KEY / capability / expiry — the hop signature attests the WHOLE
+/// hop, not just its existence.
+///
+/// ## Why the keys MUST be in the signed preimage (`sq-l5og` soundness fix)
+///
+/// Binding `delegate_key` (and `delegator_key`) is **load-bearing**, not cosmetic. If the
+/// delegate's key were excluded, the TERMINAL hop's `delegate_key` would be attested by NO
+/// signature: the linkage check only constrains the keys of NON-terminal hops (`hops[i]`'s
+/// delegate-key == `hops[i+1]`'s delegator-key), and the per-request PoP merely verifies a
+/// signature *against* whatever `delegate_key` is presented. An attacker could then capture
+/// the chain off the wire, substitute its OWN public key as the terminal `delegate_key`
+/// (the genuine WebID + the genuine delegator signature would still verify, because they
+/// would not cover the key), set `inv.agent` to the genuine delegate's WebID, and sign the
+/// fresh challenge with its own key — riding the stolen chain. Folding `delegate_key` into
+/// `hop_message` closes this: substituting the terminal key now breaks the *delegator's*
+/// signature over the hop, so the chain is rejected at step 2 (`HopSignatureInvalid`).
+/// Every hop (including the terminal) binds its key, so the property holds chain-wide.
 ///
 /// This is the delegation analogue of `sparq_zk::sig::commitment_message`: a
 /// domain-separated message so a delegation signature can never be confused with a
@@ -471,17 +516,29 @@ pub fn effective_against_current(
 /// The delegator signs this via `SecretKey::sign_commitment` (which wraps it in
 /// `commitment_message` before signing), and [`invoke`] verifies against the same
 /// wrapped form — so the value returned here is the *pre-wrap* hop message.
+///
+/// ## Wire-format / back-compat note
+///
+/// Folding the keys CHANGES the signed preimage: a `signature_hex` produced over the
+/// pre-fix message (keys excluded) will NOT verify under this message, and vice versa.
+/// This is intentional — the pre-fix preimage was forgeable (see above). There is no
+/// shipped on-wire delegation format yet (this is a research prototype, `sq-l5og`), so no
+/// migration is required; any future serialisation MUST sign over THIS preimage.
 pub fn hop_message(hop: &DelegationHop) -> Fr {
     // Domain tag "TRUSTDLG" so a hop signature is never confused with a commitment or
     // PoP signature (cross-protocol message-confusion defence).
     const SIG_DOMAIN_DELEGATION_HOP: u64 = 0x5452_5553_5444_4c47; // "TRUSTDLG"
                                                                   // Hash the structural fields into field elements. IRIs/actions go through the SAME
                                                                   // domain-separated `encode_term` embedding the rest of the estate uses (salt is
-                                                                  // irrelevant for IRIs — they are salt-independent in `encode_term`).
+                                                                  // irrelevant for IRIs — they are salt-independent in `encode_term`). The keys are
+                                                                  // folded as their domain-separated coordinate digests so the delegator's signature
+                                                                  // ATTESTS exactly which keys this hop is for (the sq-l5og key-substitution fix).
     let mut inputs: Vec<Fr> = vec![
         Fr::from(SIG_DOMAIN_DELEGATION_HOP),
         iri_to_field(&hop.delegator),
+        key_to_field(&hop.delegator_key),
         iri_to_field(&hop.delegate),
+        key_to_field(&hop.delegate_key),
         iri_to_field(&hop.capability.target),
         Fr::from(hop.expires_at_unix_secs.unsigned_abs()),
         // Sign over the expiry SIGN too, so a negative expiry can't be lifted to positive.
@@ -494,6 +551,21 @@ pub fn hop_message(hop: &DelegationHop) -> Fr {
         inputs.push(iri_to_field(a));
     }
     poseidon2::hash(&inputs)
+}
+
+/// Fold a delegation key into the signed hop preimage as its domain-separated coordinate
+/// digest, so the delegator's hop signature ATTESTS the exact key. Uses the estate's
+/// `sparq_zk::sig::holder_key_digest` (`Poseidon2([ZKSIG_HK, x, y])`) — no new hashing
+/// primitive is introduced. The curve identity has no affine coordinates and is never a
+/// usable signing key (`verify`/`sign_holder_pop` reject it independently); rather than
+/// silently folding `(0, 0)`, it is bound here as a FIXED sentinel field value so an
+/// identity-key hop is still deterministically signed/verified, and the Schnorr layer's
+/// own identity rejection keeps the path fail-closed.
+fn key_to_field(pk: &PublicKey) -> Fr {
+    // Distinct from any real `holder_key_digest` output (that folds `ZKSIG_HK ‖ x ‖ y`
+    // over genuine coordinates), so an identity key can never collide with a real one.
+    const IDENTITY_KEY_SENTINEL: u64 = 0x5452_5553_544b_4944; // "TRUSTKID"
+    holder_key_digest(pk).unwrap_or_else(|_| Fr::from(IDENTITY_KEY_SENTINEL))
 }
 
 /// Embed an IRI as a field element via the estate's domain-separated `encode_term`

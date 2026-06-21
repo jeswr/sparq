@@ -66,15 +66,17 @@ unchanged WAC/ACP view.
   of the materialiser; the `.acr` ABAC rule `{ ?x age ?y . ?y math:greaterThan 18 } => { ?x
   auth:read R }` derives the grant. The age>18 worked example runs end-to-end (see the tests).
 - **The invocation-binding gate** (`delegation`, `sq-l5og`) — verify a carried ZCAP/UCAN-style
-  delegation chain (each hop a CHECKED delegator signature), enforce monotone attenuation
-  (`child ⊆ parent` actions + expiry), and bind **authenticated invoker == the chain's terminal
-  delegate, key-proven per request** via a fresh-challenge proof-of-possession (DPoP/GNAP-style,
-  modelled on the same `sparq-zk` challenge-response PoP the holder binding uses). This makes an
-  admitted delegation **non-replayable**: a session that merely *reaches* a stored delegation,
-  or that captured the chain off the wire, cannot ride it without the live terminal key and the
-  live challenge. The chain is carried *with* the invocation (object-capability discipline), and
-  the intersection invariant binds the **current** delegator grant, never a delegation-time
-  snapshot. The delegation-replay forgery matrix runs end-to-end (see the tests).
+  delegation chain (each hop a CHECKED delegator signature over the hop's delegator/delegate
+  **keys** + capability + expiry), enforce monotone attenuation (`child ⊆ parent` actions +
+  expiry), and bind **authenticated invoker == the chain's terminal delegate, key-proven per
+  request** via a fresh-challenge proof-of-possession (DPoP/GNAP-style, on the same `sparq-zk`
+  challenge-response PoP the holder binding uses). Folding each hop's `delegate_key` into the
+  signed preimage is the load-bearing soundness step: it stops an attacker from capturing the
+  chain off the wire, substituting its **own** key as the terminal `delegate_key`, and PoP-ing
+  under it (the key-substitution replay an adversarial review proved against an earlier revision
+  — see *Honest scope*). The chain is carried *with* the invocation (object-capability
+  discipline); the intersection invariant binds the **current** delegator grant, never a
+  snapshot. The delegation-replay forgery matrix (including key-substitution) runs end-to-end.
 
 ## Honest scope — what this does and does NOT do
 
@@ -89,10 +91,14 @@ unchanged WAC/ACP view.
   end-to-end trust path.
 - **Delegation invocation is the clear-WebID, non-anonymous path too** (`sq-l5og`): the
   invocation-binding gate authenticates the invoker AS the terminal delegate's WebID in the
-  clear and proves possession of that key — it is **not** an anonymous/unlinkable invocation.
-  What stays open and documented (not solved): deep-chain *incremental* revocation (full
-  re-materialisation only, so the stale-authority window is bounded, not closed) and DID-resolver
-  delegate-key binding (`sq-pfae.3`).
+  clear and proves possession of that key — **not** an anonymous/unlinkable invocation. The gate
+  binds each hop's `delegate_key` into the delegator-signed preimage, defeating the
+  **key-substitution** stolen-chain replay (swapping in your own terminal key breaks the
+  delegator's signature). It does **not** claim full non-replayability: the delegate key is only
+  as trustworthy as the delegator's key that attests it, and that key is still operator-asserted
+  — there is no DID resolver yet (`sq-pfae.3`, the live forgery vector D′); an adversary
+  controlling an anchored/delegator key is out of scope (`sq-pfae.3`). Also open (not solved):
+  deep-chain *incremental* revocation (full re-materialisation only — window bounded, not closed).
 - **Open problems respected as documented limitations, never solved:** `sq-xc4y` (per-request
   admission vs materialise-once), `sq-tu4e` (no in-reasoner NAF over derived facts; `revoked` is
   input-only; no deny-on-disagreement) and `sq-wvne` (ZK privacy) are **out of PoC scope**.

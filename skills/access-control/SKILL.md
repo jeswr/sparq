@@ -376,7 +376,11 @@ path, `sq-wvne` / `sq-xc4y`). The ZK estate it composes with is externally **una
 operator-asserted (no DID resolver yet — `sq-pfae.3`, the live forgery vector D′). Open problems
 are respected as documented limitations, never solved: `sq-xc4y` (per-request admission vs
 materialise-once), `sq-tu4e` (no in-reasoner NAF over derived facts; `revoked` is input-only; no
-deny-on-disagreement), `sq-l5og` (delegation) and `sq-wvne` (ZK privacy) are out of PoC scope.
+deny-on-disagreement) and `sq-wvne` (ZK privacy) are out of PoC scope. `sq-l5og` (the delegation
+invocation-binding gate, `sparq_trust::delegation`) IS implemented: it binds each hop's
+`delegate_key` into the delegator-signed preimage, defeating the key-substitution stolen-chain
+replay — but it does **not** claim full non-replayability, because the delegator's own key is
+still operator-asserted (`sq-pfae.3`); see the crate README *Honest scope*.
 
 ## Related skills
 
