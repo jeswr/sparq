@@ -564,6 +564,30 @@ pub enum CircuitId {
     /// fixed-point decimal fragment, not that parser.
     // [OPUS-4.8] sq-7lrq: xsd:decimal FILTER is now manifest-composable.
     FilterDecimal { id: u32, fd: u32 },
+    /// `filter_value_dl_int` — DUAL-LEAF value-lane FILTER over a committed
+    /// NON-NEGATIVE `xsd:integer` ([OPUS-4.8] sq-xojl). Unlike the blake3-bound
+    /// `FilterInt` family (which re-hashes the canonical token in-circuit), this
+    /// member binds the operand to the DUAL-LEAF commitment via two Poseidon2
+    /// permutations over the witnessed `VALUE_HOOK` and carries
+    /// `lexical_component` as a FREE witness — NO in-circuit blake3 (the measured
+    /// gate win: 3033 vs 17416, `gate_count_snapshot.json`). It is DIGIT-COUNT-FREE
+    /// (no `[u8; D]` witness), so the per-`d` family collapses to ONE member per
+    /// datatype class and the member selection no longer leaks `ceil(log10(value))`.
+    ///
+    /// LEGAL ONLY against the `DualLeafV1` commitment method (and the
+    /// feature-gated `ValueOnlyV1` research dial) — a graph committed
+    /// `string-canonical` has no `value_component`, so this member is unprovable
+    /// against it. The `(method, circuit)` legality is enforced FAIL-CLOSED by
+    /// [`crate::dispatch`] (sq-cfmv).
+    ///
+    /// DOCUMENTED RISK: this member carries the INV-VL downgrade — value↔lexical
+    /// agreement on the value-FILTER lane is TRUSTED-ISSUER-HONESTY, not
+    /// machine-enforced (#769 accepted at research grade; gap CR-G8 / sq-qhy4).
+    /// The whole ZK estate is NOT externally audited; no soundness / privacy claim.
+    // [OPUS-4.8] sq-xojl: dual-leaf value-lane FILTER member. Opt-in (`dual-leaf`
+    // feature), research-grade, NOT externally audited.
+    #[cfg(feature = "dual-leaf")]
+    FilterValueDl,
     /// `revoke_unset_d{depth}` — hidden-index status-list inclusion + bit-unset
     /// proof over a depth-`depth` Poseidon2 Merkle tree (sq-3e5 / sq-h2v). The
     /// proof's PUBLIC inputs are `challenge` + the status-list Merkle `root`; the
@@ -652,6 +676,10 @@ impl CircuitId {
             // [OPUS-4.8] sq-7lrq: the `(id, fd)` integer/fraction digit counts name
             // the compiled decimal member, e.g. `filter_decimal_i3_f2`.
             CircuitId::FilterDecimal { id, fd } => format!("filter_decimal_i{id}_f{fd}"),
+            // [OPUS-4.8] sq-xojl: digit-count-free dual-leaf value member (one
+            // package per datatype class; the integer class is this slice).
+            #[cfg(feature = "dual-leaf")]
+            CircuitId::FilterValueDl => "filter_value_dl_int".to_string(),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
             CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
             // [OPUS-4.8] sq-xqfg (HolderPoP T5): depth-free single member.
@@ -779,6 +807,44 @@ pub enum ProofInputs {
         /// The disclosed verdict.
         expected: bool,
     },
+    /// filter_value_dl_int: DUAL-LEAF value-lane FILTER over a committed
+    /// NON-NEGATIVE xsd:integer ([OPUS-4.8] sq-xojl). These fields are EXACTLY the
+    /// `pub` parameters of the `filter_value_dl_int` member `main`
+    /// (`zk/compose/filter_value_dl_int/src/main.nr`), in declaration order AFTER
+    /// the prepended `challenge`:
+    ///
+    /// ```text
+    /// [challenge, operand_enc, op, bound, datatype_const, expected]
+    /// ```
+    ///
+    /// The hidden operand is bound to the committed literal by `operand_enc` (the
+    /// scan-proof anchor, same edge as `filter_int`) — but `operand_enc` here is
+    /// the DUAL-LEAF `Enc = h3(h3(VALUE_HOOK, datatype_const, LANG_NONE),
+    /// lexical_component, TYPE_CODE_LITERAL)` (`sparq_zk::dual_leaf`), bound via two
+    /// Poseidon2 permutations over the witnessed `VALUE_HOOK` with NO in-circuit
+    /// blake3. The `VALUE_HOOK` and `lexical_component` are PRIVATE witnesses; the
+    /// `datatype_const = blake3(datatype IRI)` is PUBLIC (it folds the datatype so
+    /// a cross-datatype value collision cannot occur).
+    ///
+    /// DOCUMENTED RISK: this carries the INV-VL downgrade (value↔lexical agreement
+    /// is trusted-issuer-honesty, not machine-enforced; #769 accepted, CR-G8 /
+    /// sq-qhy4). NOT externally audited; no soundness / privacy claim.
+    // [OPUS-4.8] sq-xojl: dual-leaf value-lane FILTER inputs. Opt-in, NOT-yet-sound.
+    #[cfg(feature = "dual-leaf")]
+    #[serde(rename = "filter_value_dl")]
+    FilterValueDl {
+        id: CircuitId,
+        /// The hidden column's DUAL-LEAF term encoding (the scan-proof anchor).
+        operand_enc: FieldHex,
+        op: FilterOp,
+        /// The FILTER's constant operand (a non-negative integer).
+        bound: u64,
+        /// `blake3(datatype IRI)` as a field — the public `DATATYPE_CONST` folded
+        /// into `value_component`.
+        datatype_const: FieldHex,
+        /// The disclosed verdict.
+        expected: bool,
+    },
     /// `join_eq_na{n_a}_nb{n_b}`: hidden cross-credential JOIN
     /// (sq-bwwl / sq-fi03, `research/zk-hidden-join-design.md` §2.2/§3.2). These
     /// fields are EXACTLY the `pub` parameters of the `join_eq` member `main`, in
@@ -832,6 +898,9 @@ impl ProofInputs {
             // [OPUS-4.8] sq-7lrq: signed xsd:integer / xsd:decimal composable FILTERs.
             ProofInputs::FilterSignedInt { id, .. } => id,
             ProofInputs::FilterDecimal { id, .. } => id,
+            // [OPUS-4.8] sq-xojl: dual-leaf value-lane FILTER.
+            #[cfg(feature = "dual-leaf")]
+            ProofInputs::FilterValueDl { id, .. } => id,
             // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN.
             ProofInputs::JoinEq { id, .. } => id,
         }

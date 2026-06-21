@@ -16,6 +16,7 @@
     "filter_signed_int_d2": { "circuit_size": 17416 },
     "filter_signed_int_d4": { "circuit_size": 17416 },
     "filter_decimal_i3_f2": { "circuit_size": 17416 },
+    "filter_value_dl_int": { "circuit_size": 3033 },
     "hidden_issuer_d4": { "circuit_size": 16946 },
     "holder_pok": { "circuit_size": 10334 },
     "holder_set_d4": { "circuit_size": 10650 },
