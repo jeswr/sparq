@@ -1,22 +1,49 @@
 "use client";
 
-// [OPUS-4.8] sq-ixc3.9 — the WORKING Query tool: a full-height editor over the live store + a
-// co-resident results panel (Table | Raw JSON | N-Triples). This is the foundation slice of the
-// query workbench (sq-ixc3.12 adds the Graph view + streaming + the richer multi-view layout);
-// it runs SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE live in-tab and measures each run's latency.
+// [OPUS-4.8] sq-ixc3.12 — the QUERY WORKBENCH: the default work surface (research/gui-design.md
+// §A.4 + §A.5). A vertical split:
+//   TOP    = the full-height SPARQL editor (the ported `WorkbenchSparqlEditor`, reusing the
+//            `@sparq/client` tokenizer + prefix helper) + a thin ACTION ROW:
+//            Run (⌘↵) · EXPLAIN · ANALYZE · Stop · a target chip (LOCAL / ENDPOINT).
+//   BOTTOM = a tabbed RESULTS panel with FOUR co-resident views — Table · Graph · Raw JSON ·
+//            N-Triples/Turtle — over the SAME run, plus CSV / TSV / JSON export.
+// SELECT rows STREAM through the wasm cursor (`streamQueryRows` in the engine context) so a large
+// result never materialises whole in JS; Stop cancels cooperatively between batches. Each run's
+// MEASURED `performance.now()` latency is shown, labelled — never a benchmark claim.
 //
-// E2E CONTRACT (gui/e2e/run-e2e.mjs asserts these stable hooks, kept faithful so the harness
+// DISTINCT from the site /try (§A.5): NO hero / prose / dataset picker (datasets live in the left
+// rail) — it is a dense, full-height operational tool over the PERSISTENT live store.
+//
+// E2E CONTRACT (gui/e2e/run-e2e.mjs asserts these stable hooks — kept faithful so the harness
 // cannot silently drift): the editing <textarea id="repl-query">, a "Run query" button, the
-// "Engine ready" status copy (in the top bar), and the result container's
-// data-result-kind="select" + data-result-view="table" wrapping a <table> with the binding.
+// "Engine ready" status copy (top bar), and the result container's data-result-kind="select" +
+// data-result-view="table" wrapping a <table> with the binding.
 
 import * as React from "react";
-import { Play, Loader2, Telescope, Gauge, History } from "lucide-react";
+import { Play, Loader2, Square, Network, Activity, Telescope, Gauge, History } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { useEngine, type QueryOutcome } from "@/lib/engine-context";
-import { extractTable, type SparqlResults } from "@sparq/client";
+import { downloadText } from "@/lib/download";
+import {
+  useEngine,
+  DEFAULT_ROW_CAP,
+  type QueryOutcome,
+  type RunMode,
+} from "@/lib/engine-context";
+import {
+  extractTable,
+  resultsToCsv,
+  resultsToTsv,
+  formatSparqlJson,
+  prettyTurtle,
+  tokenizeTurtle,
+  type SparqlResults,
+  type TurtleToken,
+} from "@sparq/client";
+import { WorkbenchSparqlEditor } from "@/components/workbench/sparql-editor";
+import { GraphView } from "@/components/workbench/graph-view";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
 // [OPUS-4.8] sq-ixc3.10 — the Query tool contributes its operational verbs (run / EXPLAIN /
 // EXPLAIN ANALYZE / re-run a recent query) to the Cmd-K spine while it is mounted.
@@ -29,7 +56,19 @@ import {
   type RecentQuery,
 } from "@/lib/palette-commands";
 
-type ResultView = "table" | "json" | "ntriples";
+/** The co-resident result views the panel toggles between (all over the same run). */
+type ResultView = "table" | "graph" | "json" | "ntriples";
+
+const VIEWS: { id: ResultView; label: string }[] = [
+  { id: "table", label: "Table" },
+  { id: "graph", label: "Graph" },
+  { id: "json", label: "Raw JSON" },
+  { id: "ntriples", label: "N-Triples / Turtle" },
+];
+
+// ---------------------------------------------------------------------------
+// View bodies.
+// ---------------------------------------------------------------------------
 
 function SelectTable({ results }: { results: SparqlResults }) {
   const table = extractTable(results);
@@ -78,13 +117,111 @@ function SelectTable({ results }: { results: SparqlResults }) {
   );
 }
 
-function ResultBody({
-  outcome,
-  view,
-}: {
-  outcome: QueryOutcome;
-  view: ResultView;
-}) {
+const TURTLE_TOKEN_CLASS: Record<TurtleToken["type"], string> = {
+  keyword: "sq-tok-keyword",
+  variable: "sq-tok-variable",
+  iri: "sq-tok-iri",
+  prefixed: "sq-tok-prefixed",
+  string: "sq-tok-string",
+  number: "sq-tok-number",
+  comment: "sq-tok-comment",
+  punctuation: "",
+  plain: "",
+};
+
+/** A highlighted RDF document (pretty Turtle by default, raw N-Triples otherwise). */
+function RdfDocument({ ntriples, pretty }: { ntriples: string; pretty: boolean }) {
+  const text = React.useMemo(() => {
+    if (!pretty) return ntriples;
+    try {
+      return prettyTurtle(ntriples);
+    } catch {
+      // The serialiser never throws by design, but degrade to the raw form if it ever does.
+      return ntriples;
+    }
+  }, [ntriples, pretty]);
+  const tokens = React.useMemo(() => tokenizeTurtle(text), [text]);
+  return (
+    <pre className="overflow-auto whitespace-pre p-3 font-mono text-xs">
+      {tokens.map((t, i) => {
+        const cls = TURTLE_TOKEN_CLASS[t.type];
+        return cls ? (
+          <span key={i} className={cls}>
+            {t.text}
+          </span>
+        ) : (
+          <React.Fragment key={i}>{t.text}</React.Fragment>
+        );
+      })}
+    </pre>
+  );
+}
+
+/** The N-Triples / Turtle view, with a pretty-Turtle ⇄ raw-N-Triples toggle. */
+function GraphTextView({ ntriples }: { ntriples: string }) {
+  const [pretty, setPretty] = React.useState(true);
+  if (!ntriples.trim()) {
+    return <p className="p-3 text-sm text-muted-foreground">(empty graph)</p>;
+  }
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-1 border-b bg-card px-3 py-1">
+        {[
+          { id: true, label: "Turtle" },
+          { id: false, label: "N-Triples" },
+        ].map((opt) => (
+          <button
+            key={String(opt.id)}
+            onClick={() => setPretty(opt.id)}
+            className={cn(
+              "rounded px-2 py-0.5 text-[11px]",
+              pretty === opt.id
+                ? "bg-primary/10 font-medium text-primary"
+                : "text-muted-foreground hover:bg-accent/40",
+            )}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <RdfDocument ntriples={ntriples} pretty={pretty} />
+      </div>
+    </div>
+  );
+}
+
+function ExportRow({ results }: { results: SparqlResults }) {
+  return (
+    <div className="ml-auto flex items-center gap-1">
+      {(
+        [
+          ["CSV", "sparql-results.csv", "text/csv", resultsToCsv],
+          ["TSV", "sparql-results.tsv", "text/tab-separated-values", resultsToTsv],
+          [
+            "JSON",
+            "sparql-results.json",
+            "application/sparql-results+json",
+            formatSparqlJson,
+          ],
+        ] as const
+      ).map(([label, file, mime, fn]) => (
+        <Button
+          key={label}
+          variant="outline"
+          size="sm"
+          className="h-6 px-2 text-[11px]"
+          onClick={() => downloadText(file, fn(results), mime)}
+          title={`Download the kept rows as ${label}`}
+        >
+          {label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView }) {
   if (outcome.kind === "error") {
     return (
       <pre
@@ -92,6 +229,23 @@ function ResultBody({
         data-result-kind="error"
       >
         {outcome.message}
+      </pre>
+    );
+  }
+  if (outcome.kind === "cancelled") {
+    return (
+      <p className="p-3 text-sm text-muted-foreground" data-result-kind="cancelled">
+        Run stopped.
+      </p>
+    );
+  }
+  if (outcome.kind === "explain") {
+    return (
+      <pre
+        className="overflow-auto whitespace-pre p-3 font-mono text-xs"
+        data-result-kind="explain"
+      >
+        {outcome.plan || "(no plan)"}
       </pre>
     );
   }
@@ -109,13 +263,29 @@ function ResultBody({
     );
   }
   if (outcome.kind === "graph") {
+    if (view === "graph") return <GraphView ntriples={outcome.ntriples} />;
+    if (view === "table") {
+      return (
+        <p className="p-3 text-sm text-muted-foreground" data-result-kind="graph">
+          This is a graph result (CONSTRUCT / DESCRIBE). Use the Graph or N-Triples / Turtle view.
+        </p>
+      );
+    }
+    if (view === "json") {
+      return (
+        <pre
+          className="overflow-auto whitespace-pre p-3 font-mono text-xs"
+          data-result-kind="graph"
+          data-result-view="json"
+        >
+          {outcome.ntriples || "(empty graph)"}
+        </pre>
+      );
+    }
     return (
-      <pre
-        className="overflow-auto whitespace-pre p-3 font-mono text-xs"
-        data-result-kind="graph"
-      >
-        {outcome.ntriples || "(empty graph)"}
-      </pre>
+      <div className="h-full" data-result-kind="graph">
+        <GraphTextView ntriples={outcome.ntriples} />
+      </div>
     );
   }
   if (outcome.kind === "update") {
@@ -128,38 +298,52 @@ function ResultBody({
   }
   // select
   return (
-    <div className="h-full" data-result-kind="select">
-      {view === "table" ? (
-        <SelectTable results={outcome.results} />
-      ) : view === "ntriples" ? (
-        <p className="p-3 text-sm text-muted-foreground">
-          N-Triples view applies to CONSTRUCT/DESCRIBE results.
+    <div className="flex h-full flex-col" data-result-kind="select">
+      {outcome.truncated && (
+        <p className="border-b bg-warning/10 px-3 py-1 text-[11px] text-muted-foreground">
+          Showing the first {outcome.rowCount.toLocaleString()} of{" "}
+          {outcome.totalRows.toLocaleString()} rows (display cap{" "}
+          {DEFAULT_ROW_CAP.toLocaleString()}). The full result streamed through the engine; the
+          CSV / TSV / JSON export covers the kept rows.
         </p>
-      ) : (
-        <pre className="overflow-auto p-3 font-mono text-xs" data-result-view="json">
-          {outcome.rawJson}
-        </pre>
       )}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {view === "table" ? (
+          <SelectTable results={outcome.results} />
+        ) : view === "json" ? (
+          <pre className="overflow-auto p-3 font-mono text-xs" data-result-view="json">
+            {outcome.rawJson}
+          </pre>
+        ) : view === "graph" ? (
+          <p className="p-3 text-sm text-muted-foreground">
+            The Graph view renders CONSTRUCT / DESCRIBE results. A SELECT is a solution table —
+            use the Table or Raw JSON view.
+          </p>
+        ) : (
+          <p className="p-3 text-sm text-muted-foreground">
+            N-Triples / Turtle applies to CONSTRUCT / DESCRIBE results.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
 
-const VIEWS: { id: ResultView; label: string }[] = [
-  { id: "table", label: "Table" },
-  { id: "json", label: "Raw JSON" },
-  { id: "ntriples", label: "N-Triples" },
-];
+// ---------------------------------------------------------------------------
+// The workbench.
+// ---------------------------------------------------------------------------
 
 export function QueryWorkbench() {
-  const { run, explain, status } = useEngine();
+  // [OPUS-4.8] sq-ixc3.10/.12 — EXPLAIN is the canonical run(query, { mode }) path (no standalone
+  // explain() method); the Cmd-K verbs and the EXPLAIN/ANALYZE buttons both drive it.
+  const { run, status } = useEngine();
   const workbench = useWorkbench();
   const [query, setQuery] = React.useState(DEFAULT_QUERY);
   const [outcome, setOutcome] = React.useState<QueryOutcome | null>(null);
-  // [OPUS-4.8] sq-ixc3.10 — the EXPLAIN plan text (or its error), shown in the results pane when the
-  // user runs EXPLAIN / EXPLAIN ANALYZE from the Cmd-K spine. Cleared by the next ordinary run.
-  const [plan, setPlan] = React.useState<{ text: string; error: boolean } | null>(null);
   const [view, setView] = React.useState<ResultView>("table");
   const [running, setRunning] = React.useState(false);
+  const [runLatencyMs, setRunLatencyMs] = React.useState<number | null>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
   // [OPUS-4.8] sq-ixc3.10 — a session-only ring of recently-run queries for the palette.
   const [recentQueries, setRecentQueries] = React.useState<RecentQuery[]>([]);
 
@@ -167,47 +351,52 @@ export function QueryWorkbench() {
     setRecentQueries((prev) => pushRecentQuery(prev, q, Date.now()));
   }, []);
 
-  const onRun = React.useCallback(async () => {
-    recordRecent(query);
-    setPlan(null); // a fresh execution clears any prior EXPLAIN plan
-    setRunning(true);
-    try {
-      const result = await run(query);
-      setOutcome(result.outcome);
-      // A CONSTRUCT/DESCRIBE answer is graph-shaped → default its view to N-Triples.
-      if (result.outcome.kind === "graph") setView("ntriples");
-      else if (result.outcome.kind === "select" && view === "ntriples") setView("table");
-    } finally {
-      setRunning(false);
-    }
-  }, [run, query, view, recordRecent]);
-
-  // [OPUS-4.8] sq-ixc3.10 — EXPLAIN / EXPLAIN ANALYZE: the in-tab planner introspection the Cmd-K
-  // spine drives. It renders the plan text (or a clear error — the planner rejects Update forms)
-  // in the results pane WITHOUT producing a result set. ANALYZE also executes the query.
-  const onExplain = React.useCallback(
-    (analyze: boolean) => {
+  // [OPUS-4.8] sq-ixc3.10/.12 — the SINGLE run path: plain run, EXPLAIN (plan only), or EXPLAIN
+  // ANALYZE (plan + run), each surfaced as a { kind } outcome through the same RunResult pipeline.
+  // The Cmd-K spine verbs and the EXPLAIN/ANALYZE toolbar buttons both call this with a mode.
+  const onRun = React.useCallback(
+    async (mode: RunMode = "run") => {
+      // A run already in flight: ignore (Stop is the way to cancel).
+      if (abortRef.current) return;
       recordRecent(query);
-      setOutcome(null);
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setRunning(true);
       try {
-        const text = explain(query, analyze);
-        setPlan({ text, error: false });
-      } catch (e) {
-        setPlan({ text: e instanceof Error ? e.message : String(e), error: true });
+        const result = await run(query, { mode, signal: controller.signal });
+        setOutcome(result.outcome);
+        setRunLatencyMs(result.latencyMs);
+        // Pick the most useful default view for the result shape.
+        if (result.outcome.kind === "graph") {
+          if (view === "table" || view === "json") setView("graph");
+        } else if (result.outcome.kind === "select" || result.outcome.kind === "ask") {
+          if (view === "graph" || view === "ntriples") setView("table");
+        }
+      } finally {
+        abortRef.current = null;
+        setRunning(false);
       }
     },
-    [explain, query, recordRecent],
+    [run, query, view, recordRecent],
   );
 
-  // ⌘/Ctrl-Enter runs the query (the keyboard-first spine; the full Cmd-K palette is the ⌘K binding).
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-      e.preventDefault();
-      void onRun();
-    }
-  };
+  const onStop = React.useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  // ⌘/Ctrl-Enter runs the query (the keyboard-first spine; the full Cmd-K palette is sq-ixc3.10).
+  const onKeyDown = React.useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        void onRun("run");
+      }
+    },
+    [onRun],
+  );
 
   const ready = status.kind === "ready";
+  const canExport = outcome?.kind === "select";
 
   // [OPUS-4.8] sq-ixc3.10 — register the Query tool's operational commands on the Cmd-K spine. A
   // palette verb focuses the Query tab first (so the result lands where the user looks), then acts.
@@ -234,10 +423,10 @@ export function QueryWorkbench() {
         blurb: "Show the query plan without executing it",
         keywords: ["explain", "plan", "planner", "optimize"],
         icon: Telescope,
-        disabled: !ready,
+        disabled: !ready || running,
         run: () => {
           focusQuery();
-          onExplain(false);
+          void onRun("explain");
         },
       },
       {
@@ -247,10 +436,10 @@ export function QueryWorkbench() {
         blurb: "Plan + execute with a per-operator trace (SELECT/ASK)",
         keywords: ["analyze", "analyse", "trace", "profile", "explain"],
         icon: Gauge,
-        disabled: !ready,
+        disabled: !ready || running,
         run: () => {
           focusQuery();
-          onExplain(true);
+          void onRun("analyze");
         },
       },
     ];
@@ -269,36 +458,68 @@ export function QueryWorkbench() {
       });
     }
     return cmds;
-  }, [ready, running, recentQueries, onRun, onExplain, workbench]);
+  }, [ready, running, recentQueries, onRun, workbench]);
 
   useRegisterPaletteCommands("query", paletteCommands);
 
   return (
     <div className="flex h-full flex-col">
-      {/* Editor pane. */}
+      {/* Editor pane (the bigger half). */}
       <div className="flex min-h-0 flex-[3] flex-col border-b">
+        {/* Action row. */}
         <div className="flex items-center gap-2 border-b bg-card px-3 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">SPARQL</span>
-          <Button
-            size="sm"
-            onClick={() => void onRun()}
-            disabled={!ready || running}
-            className="ml-auto"
-          >
-            {running ? <Loader2 className="animate-spin" /> : <Play />}
-            Run query
-          </Button>
-          <span className="text-[11px] text-muted-foreground">⌘↵</span>
+          <Badge variant="outline" className="h-5 gap-1 text-[10px]" title="Where this query runs">
+            LOCAL · in-tab WASM
+          </Badge>
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button
+              size="sm"
+              onClick={() => void onRun("run")}
+              disabled={!ready || running}
+              title="Run the query against the live store (⌘↵)"
+            >
+              {running ? <Loader2 className="animate-spin" /> : <Play />}
+              Run query
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void onRun("explain")}
+              disabled={!ready || running}
+              title="Show the planner's chosen plan (does not execute)"
+            >
+              <Network className="size-3.5" />
+              EXPLAIN
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void onRun("analyze")}
+              disabled={!ready || running}
+              title="Execute and trace the plan (EXPLAIN ANALYZE)"
+            >
+              <Activity className="size-3.5" />
+              ANALYZE
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={onStop}
+              disabled={!running}
+              title="Stop the current run"
+            >
+              <Square className="size-3.5" />
+              Stop
+            </Button>
+            <span className="ml-1 text-[11px] text-muted-foreground">⌘↵</span>
+          </div>
         </div>
-        <textarea
+        <WorkbenchSparqlEditor
           id="repl-query"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={setQuery}
           onKeyDown={onKeyDown}
-          spellCheck={false}
-          className="min-h-0 flex-1 resize-none bg-background p-3 font-mono text-sm outline-none"
-          placeholder="Write a SPARQL query…"
-          aria-label="SPARQL query editor"
         />
       </div>
 
@@ -319,23 +540,25 @@ export function QueryWorkbench() {
               {v.label}
             </button>
           ))}
+          {/* MEASURED per-run latency (performance.now), labelled — never a benchmark. */}
+          {runLatencyMs !== null && (
+            <span
+              className="tabular ml-3 text-[11px] text-muted-foreground"
+              title="Wall-clock latency of the last run (performance.now) — measured, not a benchmark"
+            >
+              {runLatencyMs.toFixed(1)} ms
+            </span>
+          )}
+          {canExport && outcome.kind === "select" && <ExportRow results={outcome.results} />}
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
-          {plan !== null ? (
-            // [OPUS-4.8] sq-ixc3.10 — the EXPLAIN / ANALYZE plan text (Cmd-K spine).
-            <pre
-              className={cn(
-                "overflow-auto whitespace-pre p-3 font-mono text-xs",
-                plan.error && "text-destructive",
-              )}
-              data-result-kind="explain"
-            >
-              {plan.text}
-            </pre>
-          ) : outcome === null ? (
+          {/* [OPUS-4.8] sq-ixc3.10/.12 — EXPLAIN / ANALYZE plans render through ResultBody as the
+              { kind: "explain" } outcome (data-result-kind="explain"), the same pipeline as every
+              other run — there is no separate plan pane. */}
+          {outcome === null ? (
             <p className="p-3 text-sm text-muted-foreground">
               {ready
-                ? "Run a query to see results."
+                ? "Run a query to see results. SELECT rows stream so large results stay bounded; EXPLAIN / ANALYZE show the plan."
                 : "Waiting for the engine to warm…"}
             </p>
           ) : (
