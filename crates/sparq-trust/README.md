@@ -56,6 +56,12 @@ unchanged WAC/ACP view.
 - **The 10-term minimal ontology** (`vocab`) — `trust:TrustPolicy`, `TrustRule`,
   `trustsSourceFor`, `source`, `forShape`, `Source`, `issuerKey`, `scope`, `freshWithin`,
   `admitted` — plus the one `forPredicate → forShape` desugaring (sugar, not a primitive).
+  Published in machine-readable Turtle as
+  [`ontologies/trust/trust.ttl`](ontologies/trust/trust.ttl) (with the two-stratum
+  semantics, degenerate-`.acl` equivalence, and strict-additivity property pinned in
+  [`ontologies/trust/SEMANTICS.md`](ontologies/trust/SEMANTICS.md)); a sync test keeps
+  the Turtle and the Rust constants from drifting. **All `trust:` IRIs are NON-STANDARD,
+  invented for this proposal** — a WG would rename/rehome them.
 - **Fail-closed policy parsing** (`policy`) — a trust policy not presented through the
   Control-gated channel admits nothing (a type-level `ControlGate`).
 - **The admission gate** (`admit`) — canonicalise (`sparq-canon` RDFC-1.0), verify the issuer
@@ -86,6 +92,9 @@ unchanged WAC/ACP view.
 
 ## 📚 Learn more
 
+- The machine-readable vocabulary [`ontologies/trust/trust.ttl`](ontologies/trust/trust.ttl)
+  and its [`ontologies/trust/SEMANTICS.md`](ontologies/trust/SEMANTICS.md) normative
+  two-stratum semantics note (the `sq-pfae.2` doc + vocab artifact).
 - The design record `research/solid-trust-graph-authz-design.md` (§6.0 is the PoC spec; §7 the
   honest limitations) — tracked in [issue #940](https://github.com/jeswr/sparq/issues/940) and
   landing via design PR <https://github.com/jeswr/sparq/pull/951>.
