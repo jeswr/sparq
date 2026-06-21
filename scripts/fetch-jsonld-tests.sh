@@ -7,32 +7,19 @@
 # is absent, so a fresh checkout stays green offline.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# [OPUS-4.8] sq-nj0pd: retry the shallow clone/fetch (shared helper) so a transient
+# GitHub reset doesn't red-gate the JSON-LD conformance lane. Pin check unchanged.
+# shellcheck source=scripts/lib/fetch-retry.sh
+. "$ROOT/scripts/lib/fetch-retry.sh"
+
 # Pinned w3c/json-ld-api commit (main, 2026-06). Bump deliberately: the
 # JSON-LD conformance pass-count floors (toRdf / fromRdf) in
 # crates/sparq-conformance/tests/jsonld_floors.rs are calibrated against THIS
 # suite revision — they are only comparable across runs when the suite is fixed.
 PIN="8654ac22b6cf4f441d2fee915ae634d36b5a8067"
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/tests/w3c/json-ld-api"
 
-if [ -d "$DEST/.git" ]; then
-    HAVE="$(git -C "$DEST" rev-parse HEAD)"
-    if [ "$HAVE" = "$PIN" ]; then
-        echo "json-ld-api already at pinned commit $PIN — nothing to do."
-        exit 0
-    fi
-    echo "json-ld-api present at $HAVE, re-pinning to $PIN…"
-    git -C "$DEST" fetch --depth 1 origin "$PIN"
-    git -C "$DEST" checkout --detach "$PIN"
-    exit 0
-fi
-
-mkdir -p "$(dirname "$DEST")"
-echo "Cloning w3c/json-ld-api (shallow) into tests/w3c/json-ld-api…"
-git clone --depth 1 https://github.com/w3c/json-ld-api "$DEST"
-if [ "$(git -C "$DEST" rev-parse HEAD)" != "$PIN" ]; then
-    git -C "$DEST" fetch --depth 1 origin "$PIN"
-    git -C "$DEST" checkout --detach "$PIN"
-fi
+retry_git_clone_pinned "https://github.com/w3c/json-ld-api" "$DEST" "$PIN"
 echo "json-ld-api pinned at $PIN."

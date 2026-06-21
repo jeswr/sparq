@@ -4,30 +4,20 @@
 # committed to this repo — run this script before `cargo run -p sparq-conformance`.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# [OPUS-4.8] sq-nj0pd: retry the shallow clone/fetch — a transient GitHub reset on
+# this (the FIRST network op the SPARQL + inference conformance lanes run) used to
+# red-gate the required check in ~18s with no real conformance error, stalling
+# --auto merges on unrelated PRs. The pin check below is unchanged, so a retry can
+# never substitute drifted test data.
+# shellcheck source=scripts/lib/fetch-retry.sh
+. "$ROOT/scripts/lib/fetch-retry.sh"
+
 # Pinned w3c/rdf-tests commit (main, 2026-06). Bump deliberately: pass-rates are
 # only comparable across runs when the suite revision is fixed.
 PIN="f25dbc092c654d792974848e81bb519d7328f0e8"
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/tests/w3c/rdf-tests"
 
-if [ -d "$DEST/.git" ]; then
-    HAVE="$(git -C "$DEST" rev-parse HEAD)"
-    if [ "$HAVE" = "$PIN" ]; then
-        echo "rdf-tests already at pinned commit $PIN — nothing to do."
-        exit 0
-    fi
-    echo "rdf-tests present at $HAVE, re-pinning to $PIN…"
-    git -C "$DEST" fetch --depth 1 origin "$PIN"
-    git -C "$DEST" checkout --detach "$PIN"
-    exit 0
-fi
-
-mkdir -p "$(dirname "$DEST")"
-echo "Cloning w3c/rdf-tests (shallow) into tests/w3c/rdf-tests…"
-git clone --depth 1 https://github.com/w3c/rdf-tests "$DEST"
-if [ "$(git -C "$DEST" rev-parse HEAD)" != "$PIN" ]; then
-    git -C "$DEST" fetch --depth 1 origin "$PIN"
-    git -C "$DEST" checkout --detach "$PIN"
-fi
+retry_git_clone_pinned "https://github.com/w3c/rdf-tests" "$DEST" "$PIN"
 echo "rdf-tests pinned at $PIN."

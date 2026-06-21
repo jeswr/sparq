@@ -9,31 +9,18 @@
 # crate-local runner evaluates through sparq-policy's real evaluate() path.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# [OPUS-4.8] sq-nj0pd: retry the shallow clone/fetch (shared helper) so a transient
+# GitHub reset doesn't red-gate the ODRL conformance lane. Pin check unchanged.
+# shellcheck source=scripts/lib/fetch-retry.sh
+. "$ROOT/scripts/lib/fetch-retry.sh"
+
 # Pinned SolidLabResearch/ODRL-Test-Suite commit (main, 2025-10-15). Bump
 # deliberately: pass-rates are only comparable across runs when the suite
 # revision is fixed (same discipline as the W3C suite pin).
 PIN="7958238e72511059478e43ec9e57b053504cfd2c"
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/tests/odrl-test-suite"
 
-if [ -d "$DEST/.git" ]; then
-    HAVE="$(git -C "$DEST" rev-parse HEAD)"
-    if [ "$HAVE" = "$PIN" ]; then
-        echo "ODRL-Test-Suite already at pinned commit $PIN — nothing to do."
-        exit 0
-    fi
-    echo "ODRL-Test-Suite present at $HAVE, re-pinning to $PIN…"
-    git -C "$DEST" fetch --depth 1 origin "$PIN"
-    git -C "$DEST" checkout --detach "$PIN"
-    exit 0
-fi
-
-mkdir -p "$(dirname "$DEST")"
-echo "Cloning SolidLabResearch/ODRL-Test-Suite (shallow) into tests/odrl-test-suite…"
-git clone --depth 1 https://github.com/SolidLabResearch/ODRL-Test-Suite "$DEST"
-if [ "$(git -C "$DEST" rev-parse HEAD)" != "$PIN" ]; then
-    git -C "$DEST" fetch --depth 1 origin "$PIN"
-    git -C "$DEST" checkout --detach "$PIN"
-fi
+retry_git_clone_pinned "https://github.com/SolidLabResearch/ODRL-Test-Suite" "$DEST" "$PIN"
 echo "ODRL-Test-Suite pinned at $PIN."
