@@ -307,6 +307,16 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [OPUS-4.8] sq-u59rq: the stacked-PR arm guard. A deterministic PreToolUse command-hook
+      # (.claude/settings.json, sibling to the perf-reviewer) that DENIES `gh pr merge … --auto`
+      # when the PR's baseRefName ≠ main — so we never squash-merge a stacked PR into its base
+      # branch (content misses main, head branch auto-deletes; observed #1023 → re-landed as
+      # #1028). The guard's logic lives only in the harness hook (it is not a file lint), so it
+      # is validated HERE by its hermetic self-test — command-parsing + base-comparison +
+      # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
+      # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
+      - name: Self-test stacked-PR arm guard (command parse + base check + fail-open)
+        run: python3 scripts/check-pr-arm-base.py --self-test
       # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
       # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
       # dashboard" step (a HAND-CODED `for f in …` copy list onto benchmark-data) then
