@@ -2601,6 +2601,10 @@ fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option
 ///     feature that is sparq-geo's `geof:` registry, read back through
 ///     [`sparq_engine::FunctionRegistry::iris`] so the list can never drift from what runs;
 ///     without it, no extension functions are registered, so the list is empty.
+///   * `sparql_versions` (sq-2msb) — the `sparql:version-*` IRIs the engine conformance-verifies
+///     (`descriptors::CONFORMANCE_VERIFIED_VERSIONS`), advertised via `sd:supportedVersion`. There
+///     is NO `sparql12`/`rdf12` cargo feature — SPARQL 1.2 evaluation is in the base engine — so
+///     this is keyed off the DOCUMENTED conformance state, not a `cfg!`; see that constant.
 #[cfg(feature = "federation-descriptors")]
 fn service_capabilities(config: &ServerConfig) -> crate::descriptors::Capabilities {
     // Anonymous Update is possible iff no write-token gates the write surface.
@@ -2624,11 +2628,20 @@ fn service_capabilities(config: &ServerConfig) -> crate::descriptors::Capabiliti
     // genuinely serves lineage can flip this honestly without a vocabulary change; until then it
     // stays `false`. Set explicitly (not via `..default()`) so the honesty stays visible here.
     let provenance = false;
+    // [OPUS-4.8] sq-2msb (gh-917): the SPARQL language versions to advertise via
+    // `sd:supportedVersion`. Sourced from the single documented conformance constant (not a
+    // `cfg!` — SPARQL 1.2 is always compiled into the base engine), so the honesty gate lives in
+    // exactly one place and this binary advertises precisely the versions its W3C suites pass.
+    let sparql_versions = crate::descriptors::CONFORMANCE_VERIFIED_VERSIONS
+        .iter()
+        .map(|v| (*v).to_string())
+        .collect();
     crate::descriptors::Capabilities {
         update,
         federated_query,
         extension_functions,
         provenance,
+        sparql_versions,
     }
 }
 

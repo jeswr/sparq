@@ -55,6 +55,45 @@ const SD_SPARQL11_QUERY: &str = "http://www.w3.org/ns/sparql-service-description
 /// `sd:SPARQL11Update` — the SPARQL 1.1 Update language the protocol's write path executes.
 const SD_SPARQL11_UPDATE: &str = "http://www.w3.org/ns/sparql-service-description#SPARQL11Update";
 
+/// [OPUS-4.8] sq-2msb (gh-917): the SPARQL 1.2 Service Description (ED) version-agnostic
+/// language terms. SPARQL 1.2 SD splits the old "language AND version" `sd:Language`
+/// individuals (`sd:SPARQL11Query`/`sd:SPARQL11Update`) so that `sd:Language` now names only
+/// the LANGUAGE (`sd:SPARQLQuery`/`sd:SPARQLUpdate`) and the VERSION moves to a separate
+/// `sd:supportedVersion`. We advertise BOTH the version-agnostic 1.2 terms and the legacy 1.1
+/// terms via `sd:supportedLanguage`, so a 1.1-only client still recognises the endpoint and a
+/// 1.2-aware client also reads the version posture. See
+/// <https://w3c.github.io/sparql-service-description/spec/> §Versioning.
+const SD_SPARQL_QUERY: &str = "http://www.w3.org/ns/sparql-service-description#SPARQLQuery";
+/// [OPUS-4.8] sq-2msb: the SPARQL 1.2 SD version-agnostic Update language term.
+const SD_SPARQL_UPDATE: &str = "http://www.w3.org/ns/sparql-service-description#SPARQLUpdate";
+
+/// [OPUS-4.8] sq-2msb (gh-917): the SPARQL language-version individuals in the `sparql:`
+/// namespace (`http://www.w3.org/ns/sparql#`), advertised via `sd:supportedVersion`. These are
+/// the version IRIs the SPARQL 1.2 SD (ED) defines: `version-1.0`, `version-1.1`,
+/// `version-1.2-basic` (SPARQL 1.2 Query with RDF 1.2 BASIC conformance) and `version-1.2` (full
+/// RDF 1.2 conformance). sparq advertises exactly the versions whose W3C conformance suite this
+/// build genuinely passes — see [`Capabilities::sparql_versions`] for the honesty gate.
+const SPARQL_VERSION_1_0: &str = "http://www.w3.org/ns/sparql#version-1.0";
+/// [OPUS-4.8] sq-2msb: `sparql:version-1.1`.
+const SPARQL_VERSION_1_1: &str = "http://www.w3.org/ns/sparql#version-1.1";
+/// [OPUS-4.8] sq-2msb: `sparql:version-1.2` — FULL SPARQL 1.2 / RDF 1.2 conformance.
+const SPARQL_VERSION_1_2: &str = "http://www.w3.org/ns/sparql#version-1.2";
+
+/// [OPUS-4.8] sq-2msb (gh-917): the SPARQL language VERSIONS this build conformance-verifies, in
+/// ascending order — the single documented source of truth for the `sd:supportedVersion`
+/// posture, so the honesty gate lives in ONE place.
+///
+/// HONESTY GATE: this advertises `version-1.0`, `version-1.1` AND the FULL `version-1.2` (not the
+/// `version-1.2-basic` profile) because the engine PASSES the complete official W3C suites for
+/// all three — SPARQL 1.0/1.1 query+update and the SPARQL 1.2 evaluation + syntax groups (triple
+/// terms, `dir`-tagged literals, codepoint escapes, the version functions) — at 100% in this
+/// repo's tracked `conformance-report.md`. SPARQL 1.2 evaluation is compiled into the base engine
+/// (no `sparql12`/`rdf12` cargo feature to key off), so the gate IS this conformance state, not a
+/// `cfg!`. If any 1.2 group ever regressed to a partial pass, the honest edit is to drop
+/// `version-1.2` to `version-1.2-basic` (or remove it) HERE — never to keep over-promising.
+pub const CONFORMANCE_VERIFIED_VERSIONS: &[&str] =
+    &[SPARQL_VERSION_1_0, SPARQL_VERSION_1_1, SPARQL_VERSION_1_2];
+
 /// [OPUS-4.8] sq-qfcb: `sd:BasicFederatedQuery` — the SPARQL 1.1 Federated Query feature
 /// (the `SERVICE` clause). Advertised ONLY when the server is built with the `service`
 /// cargo feature (the engine's `SERVICE` evaluation is compiled in); without it a `SERVICE`
@@ -226,6 +265,24 @@ pub struct Capabilities {
     /// surface). FALSE unless the node genuinely serves lineage, so the advertisement is never a
     /// fiction. The advertised feature IRI is `<http://sparq.dev/ns/prov#lineage>`.
     pub provenance: bool,
+    /// [OPUS-4.8] sq-2msb (gh-917): the `sparql:version-*` IRIs to advertise via
+    /// `sd:supportedVersion` — the SPARQL language VERSIONS this build conformance-verifies.
+    ///
+    /// HONESTY GATE (load-bearing): there is NO `sparql12`/`rdf12` cargo feature — SPARQL 1.2
+    /// evaluation (triple terms, `dir`-tagged literals, the version functions) is compiled into
+    /// the BASE `sparq-engine` and always on, so this is NOT keyed off a `cfg!(feature = …)`.
+    /// Instead it is keyed off the engine's DOCUMENTED, conformance-verified state: this list
+    /// must name exactly the versions whose official W3C suites this build PASSES, never an
+    /// aspiration. A blanket `version-1.2` may be advertised ONLY while the full `sparql12`
+    /// suite is green (it is — see `conformance-report.md`); were any 1.2 group to fall to a
+    /// partial pass, the honest move is to drop to `version-1.2-basic` or omit 1.2 here, NOT to
+    /// keep over-promising. The caller ([`service_capabilities`](crate::descriptors)) sources it
+    /// from a single documented constant so the gate stays visible in one place.
+    ///
+    /// EMPTY by [`Default`] (the same fail-closed default as every other capability), so a unit
+    /// test that builds a bare profile advertises no version unless it opts in. The HTTP layer
+    /// populates the real, conformance-verified list.
+    pub sparql_versions: Vec<String>,
 }
 
 /// [OPUS-4.8] sq-optl: one named graph of the served dataset, for the Service Description's
@@ -285,12 +342,14 @@ pub fn named_graph_descriptions(graph: &Graph) -> Vec<NamedGraphDesc> {
 ///   `sd:name` (the `FROM NAMED`-referenceable IRI) and an `sd:graph` `sd:Graph` carrying the
 ///   per-graph `void:triples` count. An empty slice (no named graphs) emits nothing extra.
 ///
-/// The SD advertises: the endpoint, `sd:Service` typing, the supported query language(s)
-/// (`sd:SPARQL11Query`, plus `sd:SPARQL11Update` when [`Capabilities::update`]), the supported
-/// result + input RDF formats (`SD_RESULT_FORMATS` / `SD_INPUT_FORMATS`), the federated-query
-/// feature when compiled in, the registered extension functions, and the default dataset — its
-/// default graph (linked to the VoID dataset IRI) plus an `sd:namedGraph` enumeration of every
-/// IRI-named graph.
+/// The SD advertises: the endpoint, `sd:Service` typing, the supported query language(s) — both
+/// the legacy `sd:SPARQL11Query` and the SPARQL-1.2-SD version-agnostic `sd:SPARQLQuery` (plus
+/// `sd:SPARQL11Update`/`sd:SPARQLUpdate` when [`Capabilities::update`]) — the supported SPARQL
+/// language VERSIONS via `sd:supportedVersion` ([`Capabilities::sparql_versions`], sq-2msb), the
+/// supported result + input RDF formats (`SD_RESULT_FORMATS` / `SD_INPUT_FORMATS`), the
+/// federated-query feature when compiled in, the registered extension functions, and the default
+/// dataset — its default graph (linked to the VoID dataset IRI) plus an `sd:namedGraph`
+/// enumeration of every IRI-named graph.
 pub fn service_description(
     service_iri: &str,
     endpoint_iri: &str,
@@ -342,11 +401,23 @@ fn sd_ntriples(
 
     // ---- Supported query language(s). SPARQL 1.1 Query is always supported; SPARQL 1.1
     // Update is advertised only when an anonymous client can actually run one (no write gate).
+    // [OPUS-4.8] sq-2msb: we advertise BOTH the legacy "language+version" `sd:SPARQL11Query`/
+    // `sd:SPARQL11Update` terms AND the SPARQL 1.2 SD version-AGNOSTIC `sd:SPARQLQuery`/
+    // `sd:SPARQLUpdate` terms — a 1.1-only client recognises the legacy ones, a 1.2-aware client
+    // recognises the version-agnostic ones and reads the precise version off `sd:supportedVersion`
+    // (below). Both are honest: Query is always evaluable, Update follows the same anonymous-write
+    // gate as before.
     let _ = writeln!(
         out,
         "{svc} <{}> {} .",
         sd("supportedLanguage"),
         iri(SD_SPARQL11_QUERY)
+    );
+    let _ = writeln!(
+        out,
+        "{svc} <{}> {} .",
+        sd("supportedLanguage"),
+        iri(SD_SPARQL_QUERY)
     );
     if caps.update {
         let _ = writeln!(
@@ -355,6 +426,23 @@ fn sd_ntriples(
             sd("supportedLanguage"),
             iri(SD_SPARQL11_UPDATE)
         );
+        let _ = writeln!(
+            out,
+            "{svc} <{}> {} .",
+            sd("supportedLanguage"),
+            iri(SD_SPARQL_UPDATE)
+        );
+    }
+
+    // ---- [OPUS-4.8] sq-2msb (gh-917): supported SPARQL language VERSIONS. SPARQL 1.2 SD moves
+    // version negotiation off `sd:Language` onto `sd:supportedVersion <sparql:version-X>`. We
+    // emit EXACTLY the versions this build conformance-verifies (`caps.sparql_versions`, sourced
+    // from the documented constant in `service_capabilities`), so a 1.2-aware federation client
+    // can discover triple-term / dir-lang support without probing. The list is pre-built (already
+    // deterministic) and EMPTY in the default `Capabilities`, so a profile that opts out of the
+    // version posture emits nothing here (no over-promise, byte-stable).
+    for v in &caps.sparql_versions {
+        let _ = writeln!(out, "{svc} <{}> {} .", sd("supportedVersion"), iri(v));
     }
 
     // ---- Result formats the server can RETURN, and input RDF formats it can PARSE.
@@ -768,6 +856,133 @@ mod tests {
     }
 
     #[test]
+    fn sd_supported_version_only_when_set() {
+        // [OPUS-4.8] sq-2msb (gh-917): the load-bearing invariant — `sd:supportedVersion` is
+        // emitted IFF `Capabilities::sparql_versions` is non-empty (the honesty gate). The
+        // version-agnostic SPARQL 1.2 language term `sd:SPARQLQuery` is always present (Query is
+        // always evaluable); the legacy `sd:SPARQL11Query` stays too (1.1-client back-compat).
+        let absent = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &read_only_caps(), // default ⇒ empty sparql_versions
+            &[],
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        assert!(
+            !absent.body.contains("supportedVersion"),
+            "no sparql_versions ⇒ NO sd:supportedVersion triple: {}",
+            absent.body
+        );
+        assert!(
+            !absent.body.contains("/ns/sparql#version-"),
+            "no sparql_versions ⇒ NO sparql:version-* IRI: {}",
+            absent.body
+        );
+        // The version-agnostic 1.2 language term + the legacy 1.1 term are BOTH advertised.
+        assert!(
+            absent
+                .body
+                .contains("<http://www.w3.org/ns/sparql-service-description#SPARQLQuery>"),
+            "the 1.2-SD version-agnostic sd:SPARQLQuery must be advertised: {}",
+            absent.body
+        );
+        assert!(
+            absent
+                .body
+                .contains("<http://www.w3.org/ns/sparql-service-description#SPARQL11Query>"),
+            "the legacy sd:SPARQL11Query must still be advertised (1.1 back-compat): {}",
+            absent.body
+        );
+
+        // With the conformance-verified versions set, each `sparql:version-*` IRI is emitted via
+        // `sd:supportedVersion`, and the document re-parses cleanly.
+        let present = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &Capabilities {
+                sparql_versions: CONFORMANCE_VERIFIED_VERSIONS
+                    .iter()
+                    .map(|v| (*v).to_string())
+                    .collect(),
+                ..Capabilities::default()
+            },
+            &[],
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        let b = &present.body;
+        let sv = "<http://www.w3.org/ns/sparql-service-description#supportedVersion>";
+        for ver in CONFORMANCE_VERIFIED_VERSIONS {
+            assert!(
+                b.contains(&format!("{sv} <{ver}>")),
+                "must advertise sd:supportedVersion <{ver}>: {b}"
+            );
+        }
+        // Full SPARQL 1.2 (not the -basic profile) is advertised — the engine passes the full
+        // sparql12 suite (see CONFORMANCE_VERIFIED_VERSIONS). The -basic IRI must NOT appear.
+        assert!(
+            b.contains("<http://www.w3.org/ns/sparql#version-1.2>"),
+            "full version-1.2 must be advertised: {b}"
+        );
+        assert!(
+            !b.contains("version-1.2-basic"),
+            "must advertise full version-1.2, NOT the -basic profile: {b}"
+        );
+        for r in oxttl::NTriplesParser::new().for_slice(b.as_bytes()) {
+            r.expect("SD with sd:supportedVersion must be valid N-Triples");
+        }
+    }
+
+    #[test]
+    fn sd_update_emits_version_agnostic_language_term() {
+        // [OPUS-4.8] sq-2msb: when anonymous Update is possible, BOTH the legacy sd:SPARQL11Update
+        // and the 1.2-SD version-agnostic sd:SPARQLUpdate are advertised; when it is not, NEITHER
+        // is (the same anonymous-write gate as before, extended to the new term).
+        let writable = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &Capabilities {
+                update: true,
+                ..Capabilities::default()
+            },
+            &[],
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        assert!(
+            writable
+                .body
+                .contains("<http://www.w3.org/ns/sparql-service-description#SPARQLUpdate>"),
+            "writable profile must advertise the version-agnostic sd:SPARQLUpdate: {}",
+            writable.body
+        );
+        assert!(
+            writable.body.contains("SPARQL11Update"),
+            "writable profile must still advertise legacy sd:SPARQL11Update: {}",
+            writable.body
+        );
+
+        let read_only = service_description(
+            "http://host/sparql",
+            "http://host/sparql",
+            "http://host/ds",
+            &read_only_caps(),
+            &[],
+            Some("application/n-triples"),
+        )
+        .unwrap();
+        assert!(
+            !read_only.body.contains("SPARQLUpdate") && !read_only.body.contains("SPARQL11Update"),
+            "read-only profile must advertise NO Update language term: {}",
+            read_only.body
+        );
+    }
+
+    #[test]
     fn sd_reparses_as_turtle() {
         // Turtle serialisation must be well-formed (round-trips through oxttl). Use the
         // richest profile so every advertised triple shape is exercised.
@@ -785,6 +1000,12 @@ mod tests {
                 // [OPUS-4.8] sq-yyy3: richest profile also advertises PROV-O lineage, so the
                 // extra sd:feature triple is exercised through the Turtle re-parse too.
                 provenance: true,
+                // [OPUS-4.8] sq-2msb: richest profile also advertises the full version posture, so
+                // the sd:supportedVersion triple shape is exercised through the Turtle re-parse.
+                sparql_versions: CONFORMANCE_VERIFIED_VERSIONS
+                    .iter()
+                    .map(|v| (*v).to_string())
+                    .collect(),
             },
             // [OPUS-4.8] sq-optl: include named graphs so the namedGraph triple shape
             // (blank-node NamedGraph + Graph + void:triples literal) is exercised in Turtle too.
