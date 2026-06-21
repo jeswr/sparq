@@ -18,6 +18,16 @@ USE sparq") — do not confuse the two.
   restructure the site nav, build/extend the GUI, or decide whether content
   belongs on the site vs the GUI vs a `SKILL.md`.
 
+- **`ast-grep/`** — read code **structure**, not whole files: outline a large
+  file to its signatures, structural-grep every impl of a trait or every call
+  site of a fn, and know **when** to reach for ast-grep vs Grep vs LSP vs a full
+  `Read` (the query-type → tool map). Ships a verified Display-impl rule and the
+  `sg`↔`newgrp` collision guard. Grounded in
+  [`research/agent-effectiveness-program.md`](../../research/agent-effectiveness-program.md)
+  §2.2; the adoption verdict is gated on the shared A/B (`SKILL.md` §5). Use it
+  whenever a question is about code *shape* rather than an exact string, or before
+  reading a file > ~200 lines.
+
 ## Vendored third-party skills
 
 - **`logo-designer/`** — vendored from
