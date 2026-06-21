@@ -71,22 +71,31 @@ unchanged WAC/ACP view.
 - **N3 merge** (`wire`) — feed the admitted facts into the shipped `sparq-reason` reasoner ahead
   of the materialiser; the `.acr` ABAC rule `{ ?x age ?y . ?y math:greaterThan 18 } => { ?x
   auth:read R }` derives the grant. The age>18 worked example runs end-to-end (see the tests).
+- **Static / dynamic admission split** (`admit_static` + `derive_conditional_grants`, `sq-xc4y`)
+  — the materialise-time half. `admit_static` decides the **session-independent** class
+  (signature, type-scope, scope) once and carries the **per-request** class (holder + freshness)
+  as conditions; `sparq-solid`'s `admit_trust_credential_static` installs them as an
+  `auth:ConditionalGrant` re-checked per request via the shipped sq-0q7n
+  `auth:agent` / `auth:notAfter` path — so holder/freshness are never frozen into the
+  materialise-once view (a stale or wrong-holder request is denied at query time).
 
 ## Honest scope — what this does and does NOT do
 
 - **No privacy / unlinkability / anonymity.** The credential is admitted **in the clear**; the
   verifier learns the exact value (`age 25`, not "≥ 18"). This does **not** match ZKAPs-grade
   unlinkable presentation.
-- **Holder binding is the clear-WebID, non-anonymous degraded path** (`sq-wvne` / `sq-xc4y`):
+- **Holder binding is the clear-WebID, non-anonymous degraded path** (`sq-wvne`):
   `credentialSubject == Session.agent` authenticates the WebID in the clear — documented, not
-  silently "solved". Presentations stay linkable by requester identity.
+  silently "solved". Presentations stay linkable by requester identity. (Its materialise-time
+  composition — `sq-xc4y` — is RESOLVED by the static/dynamic split above; the *clear-WebID*
+  privacy limitation is separate and remains, `sq-wvne`.)
 - **Issuer keys are operator-asserted** — sparq has no DID resolver yet (`sq-pfae.3`), so the
   `trust:issuerKey → verifying-key` binding is the live forgery vector D′ (§3.3), not an
   end-to-end trust path.
-- **Open problems respected as documented limitations, never solved:** `sq-xc4y` (per-request
-  admission vs materialise-once), `sq-tu4e` (no in-reasoner NAF over derived facts; `revoked` is
-  input-only; no deny-on-disagreement), `sq-l5og` (delegation) and `sq-wvne` (ZK privacy) are
-  **out of PoC scope**.
+- **Open problems respected as documented limitations, never solved:** `sq-tu4e` (no in-reasoner
+  NAF over derived facts; `revoked` is input-only; no deny-on-disagreement), `sq-l5og`
+  (delegation) and `sq-wvne` (ZK privacy) are **out of PoC scope**. (`sq-xc4y`, per-request
+  admission vs materialise-once, is RESOLVED — see the static/dynamic split above.)
 - **Strict additivity (G6):** with `sparq-solid`'s `trust-graph` feature OFF, the crate is not
   compiled and `sparq-solid` behaves exactly as WAC/ACP do today.
 

@@ -30,9 +30,12 @@
 //!   (fail-closed: a policy not Control-gated admits nothing).
 //! - [`mod@admit`] — the admission gate: canonicalise (RDFC-1.0), verify the issuer
 //!   signature, enforce statement-type scoping (SHACL shape), freshness, and holder
-//!   binding; output [`admit::AdmittedFact`]s.
+//!   binding; output [`admit::AdmittedFact`]s. [`admit::admit_static`] runs only the
+//!   session-independent (STATIC) class and defers holder/freshness to a per-request
+//!   conditional-grant check — the `sq-xc4y` static/dynamic split.
 //! - [`wire`] — feed admitted facts into the N3 reasoner ahead of the materialiser;
-//!   read off the derived `auth:*` grants.
+//!   read off the derived `auth:*` grants ([`wire::derive_grants`]) OR the per-grant
+//!   DYNAMIC conditions for a conditional grant ([`wire::derive_conditional_grants`]).
 //!
 //! ## Opt-in by construction (strict additivity — design §2.2 G6)
 //!
@@ -72,9 +75,15 @@
 //! ## Open problems this PoC RESPECTS as documented limitations (never silently solved)
 //!
 //! - **`sq-xc4y`** — per-request holder-binding / freshness vs the
-//!   session-independent materialise-once auth view: admission MUST be re-run per
-//!   request for credential-gated resources (this gate takes the live `Session`), it
-//!   cannot sit frozen ahead of a materialise-once view.
+//!   session-independent materialise-once auth view: RESOLVED by the **static/dynamic
+//!   admission split** (decision (a)). The static class (signature, statement-type
+//!   scope, reserved-predicate guard, `trust:scope`) is session-independent and runs
+//!   ONCE at materialise-time ([`admit::admit_static`]); the dynamic class (holder
+//!   binding + freshness) is deferred to a **per-request conditional grant** re-checked
+//!   at query time via the shipped sq-0q7n `auth:agent` / `auth:notAfter` path — so a
+//!   stale or wrong-holder credential is denied per request WITHOUT a re-materialise
+//!   and is never frozen into the view. (The combined [`admit::admit`] remains the
+//!   single-request snapshot path.)
 //! - **`sq-l5og`** — delegation invocation-binding: **out of PoC scope** (no
 //!   delegation substrate exists; §4 of the design is design-only).
 //! - **`sq-tu4e`** — no in-reasoner NAF over derived facts: `revoked` is an
@@ -93,6 +102,8 @@ pub mod policy;
 pub mod vocab;
 pub mod wire;
 
-pub use admit::{admit, AdmittedFact, PresentedCredential, Session};
+pub use admit::{
+    admit, admit_static, AdmittedFact, PresentedCredential, Session, StaticAdmittedFact,
+};
 pub use policy::{parse_policy, ControlGate, PolicyError, ShapeRef, TrustRule};
-pub use wire::derive_grants;
+pub use wire::{derive_conditional_grants, derive_grants, ConditionalGrant};

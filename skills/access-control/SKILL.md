@@ -356,12 +356,24 @@ worked example (a trusted-government VC `<Jesse> age 25` + a trust policy + the 
 
 It is wired into `sparq-solid` behind the **default-OFF `trust-graph` cargo feature**. With the
 feature off, `sparq-solid` is byte-identical to WAC/ACP today (**strict additivity**); with it
-on, `PodStore` gains one method — `admit_trust_credential_with_rule(credential, rules, session,
-target, abac_rule_n3)` — that runs the gate and installs the derived `auth:*` grants on top of
-the unchanged auth view (the ODRL-bridge precedent). The admission gate is the §6.0 algorithm:
+on, `PodStore` gains two install methods. The admission gate is the §6.0 algorithm:
 RDFC-1.0 canonicalise (`sparq-canon`) → a **checked** issuer signature over the commitment
 (`sparq-zk`, never a self-asserted triple) → statement-type scoping via a real SHACL shape
-(`sparq-shacl`) → freshness (a per-request Rust check) → the clear-WebID holder binding. The
+(`sparq-shacl`) → freshness (a per-request check) → the clear-WebID holder binding.
+
+- **`admit_trust_credential_static(credential, rules, target, abac_rule_n3)`** — the
+  **materialise-time** path (the `sq-xc4y` static/dynamic split). It runs only the
+  session-INDEPENDENT class (signature, type-scope, scope) and installs each derived grant as an
+  `auth:ConditionalGrant` whose holder (`auth:agent`) and freshness (`auth:notAfter`) are
+  re-checked **per request** by the shipped sq-0q7n `cond_applies` path — so holder/freshness are
+  never frozen into the materialise-once view (a stale or wrong-holder request is denied at query
+  time). **Use this for a long-lived view.**
+- **`admit_trust_credential_with_rule(credential, rules, session, target, abac_rule_n3)`** — the
+  single-request **snapshot** path: it runs the COMBINED gate against one live `Session` and
+  installs an UNCONDITIONAL grant valid for that request only (do not use it to populate a
+  long-lived view).
+
+Both install on top of the unchanged auth view (the ODRL-bridge precedent). The
 public surface is `sparq_trust::{vocab, policy, admit, wire}` — see
 [`crates/sparq-trust/README.md`](../../crates/sparq-trust/README.md) and the design record
 `research/solid-trust-graph-authz-design.md` §6.0 (tracked in
@@ -371,12 +383,14 @@ public surface is `sparq_trust::{vocab, policy, admit, wire}` — see
 **Honest scope (read first).** This is a RESEARCH prototype, **NOT a security guarantee**. It
 does **not** provide privacy, unlinkability, or anonymity: the credential is admitted in the
 clear and the holder binding authenticates the WebID in the clear (the non-anonymous degraded
-path, `sq-wvne` / `sq-xc4y`). The ZK estate it composes with is externally **unaudited**
+path, `sq-wvne`). The ZK estate it composes with is externally **unaudited**
 (`sq-qhy4`, pending external accredited-cryptographer sign-off). Issuer keys are
 operator-asserted (no DID resolver yet — `sq-pfae.3`, the live forgery vector D′). Open problems
-are respected as documented limitations, never solved: `sq-xc4y` (per-request admission vs
-materialise-once), `sq-tu4e` (no in-reasoner NAF over derived facts; `revoked` is input-only; no
-deny-on-disagreement), `sq-l5og` (delegation) and `sq-wvne` (ZK privacy) are out of PoC scope.
+are respected as documented limitations, never solved: `sq-tu4e` (no in-reasoner NAF over
+derived facts; `revoked` is input-only; no deny-on-disagreement), `sq-l5og` (delegation) and
+`sq-wvne` (ZK privacy) are out of PoC scope. (`sq-xc4y` — per-request holder/freshness admission
+vs the materialise-once view — is **RESOLVED** by the static/dynamic split: see
+`admit_trust_credential_static` above and design §3.3 A′.)
 
 ## Related skills
 
