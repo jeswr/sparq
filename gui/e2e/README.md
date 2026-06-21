@@ -4,9 +4,10 @@
 
 A **real** end-to-end test for the Tauri desktop shell: it launches the built shell binary
 through [`tauri-driver`](https://v2.tauri.app/develop/tests/webdriver/) (WebDriver), drives the
-reused Next.js frontend in the native webview, **runs a SPARQL query in the in-tab WASM REPL**,
-and asserts the result table renders. It replaces the earlier no-op harness smoke (`sq-bu69`),
-which only confirmed that `tauri-driver` / `WebKitWebDriver` / `xvfb` were on `PATH`.
+DISTINCT operational GUI frontend (`gui/app`, NOT the marketing site — `sq-ixc3.8`) in the
+native webview, **runs a SPARQL query in the in-tab WASM workbench**, and asserts the result
+table renders. It replaces the earlier no-op harness smoke (`sq-bu69`), which only confirmed
+that `tauri-driver` / `WebKitWebDriver` / `xvfb` were on `PATH`.
 
 ## What it does (`run-e2e.mjs`)
 
@@ -15,15 +16,16 @@ which only confirmed that `tauri-driver` / `WebKitWebDriver` / `xvfb` were on `P
    shell binary via the `tauri:options.application` capability.
 3. Waits for the SPARQL editor (`#repl-query`) to mount and the WASM engine to report
    **Engine ready**.
-4. **Enters** a deterministic `SELECT ?name` over the built-in sample graph (set through the
+4. **Enters** a deterministic `SELECT ?name` over the seeded sample graph (set through the
    native `<textarea>` value setter + a bubbling `input` event, so the React-controlled editor
    updates).
 5. Clicks **Run query**.
 6. **Asserts** a `data-result-kind="select"` table renders containing the binding `"Alice"`
    and at least one data row.
 
-The Tauri window loads the site's static-export **index** (`site/out/index.html`), which embeds
-`<Repl />`, so the REPL is present on load with no in-webview route navigation.
+The Tauri window loads the GUI frontend's static-export **index** (`gui/app/out/index.html`),
+which renders the workbench shell with the Query tool open by default, so the editor is present
+on load with no in-webview route navigation.
 
 ## Run it locally (Linux)
 
@@ -31,12 +33,13 @@ Requires the webview system libraries (`libwebkit2gtk-4.1-dev`, …), `webkit2gt
 (provides `WebKitWebDriver`), and `xvfb`. Then:
 
 ```bash
-# 1. Build the frontend the webview embeds (root-relative, as the GUI consumes it).
-cd js && npm install && npm run build:wasm:lean
-cd ../site && npm install && npm run build:tauri   # = cross-env NEXT_PUBLIC_BASE_PATH= npm run build (root-relative)
+# 1. Build the frontend the webview embeds (root-relative, as the GUI consumes it). The
+#    workbench needs the shacl,jsonld bundle (its SHACL tool + JSON-LD ingest).
+cd js && npm install && npm run build:wasm
+cd ../gui/app && npm install && npm run build:tauri   # = NEXT_PUBLIC_BASE_PATH= next build (root-relative)
 
-# 2. Build the shell binary (embeds site/out at compile time).
-cd ../gui/src-tauri && cargo build
+# 2. Build the shell binary (embeds gui/app/out at compile time).
+cd ../src-tauri && cargo build
 
 # 3. Install the e2e deps + the driver, then run under a virtual display.
 cd ../e2e && npm ci
