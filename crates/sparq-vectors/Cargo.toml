@@ -195,6 +195,15 @@ required-features = ["vec-predicate"]
 name = "kge_ablation"
 required-features = ["kge"]
 
+# [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the P1 typed-encoder ablation harness uses the
+# `structure`-gated `encode` module, so it needs the `structure` feature. Registering the
+# requirement keeps `cargo build --all-targets` (default features) green when the feature is out of
+# the build (the body would otherwise fail to resolve `sparq_vectors::encode`). It is an
+# encoder-quality ablation runner only — no library code, no new dependency.
+[[example]]
+name = "bench_typed_encoders"
+required-features = ["structure"]
+
 # [OPUS-4.8] sq-hkud (epic sq-toze, gap MS-G4) — register the `kani` cfg so the
 # `#[cfg(kani)]` bounded-proof harness in `store.rs` does not trip `-D warnings`
 # (unexpected_cfgs) on the NORMAL build. `cargo kani` sets this cfg itself when it

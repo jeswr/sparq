@@ -3,27 +3,31 @@
 // Replaces the no-op "harness scaffold OK" smoke (sq-bu69) with a real assertion:
 //   1. spawn tauri-driver (the WebDriver intermediary; on Linux it proxies WebKitWebDriver),
 //   2. connect a WebDriver client (webdriverio) and launch the BUILT Tauri shell binary,
-//   3. wait for the reused Next.js frontend (the in-tab WASM REPL) to mount + the engine to
-//      warm,
+//   3. wait for the DISTINCT operational GUI frontend (the in-tab WASM workbench) to mount +
+//      the engine to warm,
 //   4. ENTER a known SPARQL SELECT into the editor (the React-controlled `#repl-query`
 //      textarea — set via the native value setter + an `input` event so React's state
 //      updates, the standard controlled-input driving technique),
 //   5. click "Run query", and
 //   6. ASSERT the SELECT result table renders with the expected binding ("Alice", from the
-//      built-in sample graph).
+//      seeded sample graph).
 //
 // This proves the desktop shell actually loads, the WASM engine runs a query IN THE TAB, and
 // the result renders — i.e. the shell is a working app, not just a crate that compiles.
 //
-// HOW IT FINDS THINGS (kept faithful to the site so it cannot silently drift):
-//   * The Tauri window loads the site's static-export INDEX (site/out/index.html), which
-//     embeds <Repl /> (site/src/app/page.tsx) — so no in-webview route navigation is needed.
-//   * The editor is a controlled <textarea id="repl-query"> behind a highlight <pre>
-//     (site/src/components/sparql-editor.tsx).
-//   * The Run button carries the visible text "Run query" (site/src/components/repl.tsx).
+// HOW IT FINDS THINGS (kept faithful to the DISTINCT operational GUI frontend, gui/app, so it
+// cannot silently drift — sq-ixc3.8 repointed the shell off the marketing site onto gui/app):
+//   * The Tauri window loads the GUI frontend's static-export INDEX (gui/app/out/index.html),
+//     which renders the workbench shell with the Query tool open by default — so no in-webview
+//     route navigation is needed.
+//   * The editor is a controlled <textarea id="repl-query">
+//     (gui/app/src/components/workbench/query-workbench.tsx).
+//   * The Run button carries the visible text "Run query" (same file).
+//   * The top bar shows "Engine ready" once the in-tab WASM engine warms
+//     (gui/app/src/components/workbench/top-bar.tsx).
 //   * A SELECT result renders a container with data-result-kind="select" and, in table view,
-//     data-result-view="table" wrapping a <table> (same file). We assert on those stable
-//     data-* hooks + the literal "Alice".
+//     data-result-view="table" wrapping a <table> (query-workbench.tsx). We assert on those
+//     stable data-* hooks + the literal "Alice" (from the seeded sample graph).
 //
 // CONFIG via env (CI sets APP_BINARY): APP_BINARY is the absolute path to the built shell
 // binary tauri-driver launches (the gui crate's package name is `sparq-gui`, so the debug

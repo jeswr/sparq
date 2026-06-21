@@ -17,6 +17,13 @@ pub mod cost;
 pub mod delta;
 pub mod diskann;
 pub mod embed;
+// [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the P1 structure-aware-vectorisation TYPED-LITERAL
+// ENCODERS — the datatype router + order-preserving numeric + boolean-sign + date encoders, plus
+// the self-describing `.spqv` SchemaHeader (per-block metric tags + metric-correctness guard).
+// `structure` feature only; pure, dependency-light functions keyed by datatype (only `temporal_value`
+// / the date encoder touch sparq-core, already in the tree). The default build carries zero encoder code.
+#[cfg(feature = "structure")]
+pub mod encode;
 #[cfg(feature = "filtered-ann")]
 pub mod filter;
 pub mod fingerprint;
@@ -130,6 +137,15 @@ pub use eval::{
 };
 #[cfg(feature = "kge")]
 pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};
+// [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the structure-aware-vectorisation P1 surface — the typed
+// literal encoders (datatype router + order-preserving numeric + boolean-sign + date) and the
+// self-describing `.spqv` SchemaHeader (block partition + per-block metric tag + cosine guard).
+// `structure` feature only.
+#[cfg(feature = "structure")]
+pub use encode::{
+    metamorphic_monotone, numeric_value, route, temporal_value, Block, BooleanEncoder, DateEncoder,
+    Encoder, Metric, NumericEncoder, SchemaHeader, SPQS_MAGIC, SPQS_VERSION,
+};
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
     ObjectKind, PropertyGroup,

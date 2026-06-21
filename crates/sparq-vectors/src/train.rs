@@ -237,7 +237,7 @@ impl TrainedModel {
 
     /// The model score for parameter rows `(h_row, r_row, t_row)`. Dispatches on [`TrainedModel::model`]:
     /// DistMult `Σ_i e_h[i]·w_r[i]·e_t[i]` (symmetric) or ComplEx `Re(⟨e_h, w_r, conj(e_t)⟩)`
-    /// (asymmetric, see [`score_complex`]).
+    /// (asymmetric, computed by the private `score_complex` helper). [OPUS-4.8] sq-0wo9e.8
     #[inline]
     pub fn score_rows(&self, h_row: usize, r_row: usize, t_row: usize) -> f32 {
         let h = self.entity_vec(h_row);

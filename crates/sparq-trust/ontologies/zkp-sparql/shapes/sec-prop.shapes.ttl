@@ -1,0 +1,69 @@
+@prefix sh:       <http://www.w3.org/ns/shacl#> .
+@prefix sec-prop: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix prov:     <http://www.w3.org/ns/prov#> .
+@prefix bibo:     <http://purl.org/ontology/bibo/> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:      <http://www.w3.org/2001/XMLSchema#> .
+
+# Shape for the eight security properties from §7.7.
+
+sec-prop:SecurityPropertyShape
+  a sh:NodeShape ;
+  sh:targetClass sec-prop:SecurityProperty ;
+
+  sh:property [
+    sh:path rdfs:label ;
+    sh:minCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:message "Every sec-prop:SecurityProperty must have an English-language rdfs:label."
+  ] ;
+
+  sh:property [
+    sh:path sec-prop:threat ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:message "Every sec-prop:SecurityProperty must have exactly one sec-prop:threat (en-GB)."
+  ] ;
+
+  sh:property [
+    sh:path sec-prop:defence ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:message "Every sec-prop:SecurityProperty must have exactly one sec-prop:defence (en-GB)."
+  ] ;
+
+  sh:property [
+    sh:path sec-prop:openQuestion ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:message "Every sec-prop:SecurityProperty must have exactly one sec-prop:openQuestion (en-GB)."
+  ] ;
+
+  sh:property [
+    sh:path sec-prop:category ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:class sec-prop:Category ;
+    sh:message "Every sec-prop:SecurityProperty must reference exactly one sec-prop:Category."
+  ] ;
+
+  sh:property [
+    sh:path sec-prop:paperSection ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:string ;
+    sh:pattern "^§" ;
+    sh:message "paperSection must be a string starting with the section sigil (e.g. '§7.7 #1')."
+  ] ;
+
+  sh:property [
+    sh:path prov:wasDerivedFrom ;
+    sh:minCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:message "Every sec-prop:SecurityProperty must cite at least one provenance source (prov:wasDerivedFrom)."
+  ] .
