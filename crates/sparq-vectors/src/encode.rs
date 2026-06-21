@@ -111,10 +111,15 @@ pub enum Encoder {
     /// A temporal literal (`xsd:date`/`dateTime`/`dateTimeStamp`/`gYear`) → the order-preserving
     /// epoch lane of [`DateEncoder`].
     Date,
-    /// Anything else — a plain string, a language-tagged literal, an enum member, an IRI. P1 does
-    /// **not** encode these: strings go to the existing out-of-process text lane
-    /// (the [`verbalize`](mod@crate::verbalize) module); enums are P2 (codebook). The router reports them as `Other` so a
-    /// caller routes them to the correct (non-P1) lane rather than mis-encoding them numerically.
+    /// An **enumeration member** — a value drawn from a closed set declared by `sh:in` / `owl:oneOf`
+    /// → the [`Codebook`](crate::codebook::Codebook) block (P2, the `structure-shacl` reader).
+    /// Encoded by **slot match**, not a cosine threshold: membership is exact and out-of-enum is a
+    /// reserved invalid code (design §2 "enum equality is a slot match … no recall loss").
+    Enum,
+    /// Anything else — a plain string, a language-tagged literal, a free IRI. The router does
+    /// **not** encode these: strings go to the existing out-of-process text lane (the
+    /// [`verbalize`](mod@crate::verbalize) module). The router reports them as `Other` so a caller
+    /// routes them to the correct lane rather than mis-encoding them numerically.
     Other,
 }
 
@@ -607,6 +612,9 @@ fn encoder_tag(e: Encoder) -> u8 {
         Encoder::Boolean => 2,
         Encoder::Date => 3,
         Encoder::Other => 4,
+        // [OPUS-4.8] sq-0wo9e.3 (P2): tag 5 is additive — a header written by P1 never used it, so
+        // older serialised headers still parse and new ones round-trip the enum (codebook) block.
+        Encoder::Enum => 5,
     }
 }
 
@@ -616,6 +624,7 @@ fn encoder_of_tag(t: u8) -> Result<Encoder, String> {
         2 => Ok(Encoder::Boolean),
         3 => Ok(Encoder::Date),
         4 => Ok(Encoder::Other),
+        5 => Ok(Encoder::Enum),
         _ => Err(format!("SchemaHeader: unknown encoder tag {}", t)),
     }
 }
@@ -1007,7 +1016,7 @@ mod tests {
     #[test]
     fn schema_header_tags_are_total() {
         // Every encoder/metric tag round-trips (guards against an unmapped variant).
-        for e in [Encoder::Numeric, Encoder::Boolean, Encoder::Date, Encoder::Other] {
+        for e in [Encoder::Numeric, Encoder::Boolean, Encoder::Date, Encoder::Other, Encoder::Enum] {
             assert_eq!(encoder_of_tag(encoder_tag(e)).unwrap(), e);
         }
         for m in [Metric::Euclidean, Metric::NonEuclidean] {
