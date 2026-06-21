@@ -203,7 +203,13 @@ impl QueryResult {
 /// Resolve `(text, format)` for `Graph.load`: `os.PathLike` is always a file;
 /// a `str` is a file iff it names an existing file (no newline in it), else it
 /// is parsed as RDF content. The format defaults from the file extension
-/// (`.ttl` / `.nt` / `.nq` / `.trig`), falling back to `"turtle"`.
+/// (`.ttl` / `.nt` / `.nq` / `.trig` / `.jsonld`), falling back to `"turtle"`.
+///
+/// [OPUS-4.8] sq-oy1f.20: the `.jsonld` extension maps to `"jsonld"` unconditionally
+/// (it is not behind a `#[cfg]`), so the mapping is feature-agnostic. With the default
+/// `jsonld` feature ON, `sparq-core` parses it; under `--no-default-features` the same
+/// `"jsonld"` string reaches `sparq-core`, which rejects the unknown format — a clean
+/// fail-closed error rather than feeding JSON to the Turtle parser.
 fn resolve_source(source: &Bound<'_, PyAny>, format: Option<&str>) -> PyResult<(String, String)> {
     let from_file = |path: &std::path::Path, format: Option<&str>| -> PyResult<(String, String)> {
         let text = std::fs::read_to_string(path)
@@ -214,6 +220,7 @@ fn resolve_source(source: &Bound<'_, PyAny>, format: Option<&str>) -> PyResult<(
                 Some("nt") => "ntriples".into(),
                 Some("nq") => "nquads".into(),
                 Some("trig") => "trig".into(),
+                Some("jsonld") => "jsonld".into(),
                 _ => "turtle".into(),
             },
         };
@@ -302,8 +309,10 @@ impl Graph {
     ///
     /// `source`: RDF content (e.g. a Turtle document), a path to an RDF file
     /// (`str` or `os.PathLike`), and `format` one of `"turtle"`, `"ntriples"`,
-    /// `"nquads"`, `"trig"` (default: from the file extension, else `"turtle"`).
-    /// N-Quads / TriG named graphs are preserved and queryable via `GRAPH`.
+    /// `"nquads"`, `"trig"`, `"jsonld"` (default: from the file extension, else
+    /// `"turtle"`). N-Quads / TriG / JSON-LD named graphs are preserved and
+    /// queryable via `GRAPH`. JSON-LD support is on by default; a wheel built with
+    /// `--no-default-features` drops it and `format="jsonld"` then errors.
     #[staticmethod]
     #[pyo3(signature = (source, format=None))]
     fn load(py: Python<'_>, source: &Bound<'_, PyAny>, format: Option<&str>) -> PyResult<Graph> {
