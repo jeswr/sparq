@@ -11,7 +11,7 @@
 // re-word of a flagship's title/blurb/tier in surfaces.ts flows straight into this gallery, the
 // Home "See it work" row, and Cmd-K together — no second source to drift.
 
-import { PlayCircle, type LucideIcon } from "lucide-react";
+import { PlayCircle, FileLock2, type LucideIcon } from "lucide-react";
 
 import { FLAGSHIPS, type Tier } from "@/data/surfaces";
 
@@ -59,5 +59,19 @@ const REPL_CARD: ExampleCard = {
   flagship: false,
 };
 
-/** The curated example gallery: the 3 flagships + the live REPL, in display order. */
-export const EXAMPLE_CARDS: ExampleCard[] = [...FLAGSHIP_CARDS, REPL_CARD];
+// [OPUS-4.8] sq-3p0z (#822) — the Verifiable-Credentials import-and-query demo. A `live`
+// data/query capability (not a privacy flagship — it does no crypto), so it sits beside the
+// REPL rather than in FLAGSHIPS: drag-drop / paste / fetch a VC and run SPARQL over its claims,
+// in-tab. The import-vs-verify honesty lives on the page itself (and in the page's caveat).
+const VC_CARD: ExampleCard = {
+  href: "/showcase/verifiable-credentials",
+  title: "Import & query Verifiable Credentials",
+  outcome:
+    "Drag in a W3C VC (JSON-LD / Turtle) and run real SPARQL over its claims — imported & queried in your tab (not verified).",
+  tier: "live",
+  icon: FileLock2,
+  flagship: false,
+};
+
+/** The curated example gallery: the 3 flagships + the live REPL + the VC import demo. */
+export const EXAMPLE_CARDS: ExampleCard[] = [...FLAGSHIP_CARDS, REPL_CARD, VC_CARD];
