@@ -94,11 +94,16 @@ impl std::error::Error for DispatchError {}
 
 /// Whether a `CircuitId` is a VALUE-LANE member — one that binds the operand via
 /// the `value_component` (the numeric handle), available ONLY against a method
-/// that committed a value handle (`dual-leaf` / `value-only`). Today the only
-/// value-lane member is the dual-leaf integer FILTER; this is the seam the
-/// decimal/double value-lane members extend.
+/// that committed a value handle (`dual-leaf` / `value-only`). The dual-leaf
+/// FILTER members for the integer (sq-xojl), double, and decimal datatype classes
+/// (sq-2ezsx) are all value-lane members.
 fn is_value_lane_member(id: &CircuitId) -> bool {
-    matches!(id, CircuitId::FilterValueDl)
+    matches!(
+        id,
+        CircuitId::FilterValueDl
+            | CircuitId::FilterValueDlF64
+            | CircuitId::FilterValueDlDecimal
+    )
 }
 
 /// Whether a `CircuitId` is an IDENTITY-sensitive member — one whose correctness
@@ -208,6 +213,30 @@ mod tests {
         // legal against AND that keeps term identity (via lexical_component).
         let r = resolve_circuit(CommitmentMethod::DualLeafV1, &CircuitId::FilterValueDl);
         assert_eq!(r, Ok(CircuitId::FilterValueDl));
+    }
+
+    #[test]
+    fn dual_leaf_admits_the_double_and_decimal_value_lane_siblings() {
+        // [OPUS-4.8] sq-2ezsx: the double + decimal datatype-class value-lane
+        // members are legal against dual-leaf, exactly like the integer member.
+        assert_eq!(
+            resolve_circuit(CommitmentMethod::DualLeafV1, &CircuitId::FilterValueDlF64),
+            Ok(CircuitId::FilterValueDlF64)
+        );
+        assert_eq!(
+            resolve_circuit(CommitmentMethod::DualLeafV1, &CircuitId::FilterValueDlDecimal),
+            Ok(CircuitId::FilterValueDlDecimal)
+        );
+    }
+
+    #[test]
+    fn string_canonical_rejects_the_double_and_decimal_value_lane_siblings() {
+        // [OPUS-4.8] sq-2ezsx: a string-canonical graph has no value handle, so the
+        // double + decimal value-lane members are UNPROVABLE against it — fail-closed.
+        for id in [CircuitId::FilterValueDlF64, CircuitId::FilterValueDlDecimal] {
+            let r = resolve_circuit(CommitmentMethod::StringCanonicalV1, &id);
+            assert!(matches!(r, Err(DispatchError::IllegalPair { .. })));
+        }
     }
 
     #[test]
@@ -324,6 +353,8 @@ mod tests {
             CircuitId::Scan { k: 1, n: 16, r: 4 },
             CircuitId::FilterInt { d: 2 },
             CircuitId::FilterValueDl,
+            CircuitId::FilterValueDlF64,
+            CircuitId::FilterValueDlDecimal,
             CircuitId::JoinEq { n_a: 16, n_b: 16 },
         ];
         for m in &methods {
@@ -347,6 +378,11 @@ mod tests {
         // asserts the guard exists and the current members are correctly classified.
         assert!(is_value_lane_member(&CircuitId::FilterValueDl));
         assert!(!is_identity_op_member(&CircuitId::FilterValueDl));
+        // [OPUS-4.8] sq-2ezsx: the double + decimal siblings are value-lane, not identity.
+        assert!(is_value_lane_member(&CircuitId::FilterValueDlF64));
+        assert!(is_value_lane_member(&CircuitId::FilterValueDlDecimal));
+        assert!(!is_identity_op_member(&CircuitId::FilterValueDlF64));
+        assert!(!is_identity_op_member(&CircuitId::FilterValueDlDecimal));
         assert!(is_identity_op_member(&CircuitId::Scan { k: 1, n: 16, r: 4 }));
         assert!(is_identity_op_member(&CircuitId::JoinEq { n_a: 16, n_b: 16 }));
         assert!(!is_value_lane_member(&CircuitId::Scan { k: 1, n: 16, r: 4 }));

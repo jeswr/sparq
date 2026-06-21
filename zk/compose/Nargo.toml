@@ -30,6 +30,17 @@ members = [
     # (method x circuit) dispatch sq-cfmv), like the filter_f64 building-block
     # precedent. NOT externally audited.
     "filter_value_dl_int",
+    # [OPUS-4.8] sq-2ezsx: DUAL-LEAF value-lane FILTER members for the xsd:double
+    # and xsd:decimal datatype CLASSES (sibling members of filter_value_dl_int).
+    # These are MANY-TO-ONE on the term (IEEE -0.0/+0.0, NaN payloads; decimal
+    # 5.0/5.00 at a fixed scale), so unlike the integer class they instantiate B4
+    # IN-CIRCUIT: f64 canonicalises the IEEE bits before the value bind; decimal
+    # folds the canonical scale into the public datatype_const. Same OFF-by-default
+    # `dual-leaf` feature, INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4),
+    # NOT externally audited. Verifier-composability wiring (verify_manifest
+    # dispatch) is the same follow-up as the integer member (design bead 6 / sq-j506).
+    "filter_value_dl_f64",
+    "filter_value_dl_decimal",
     "filter_f64",
     "filter_f64_d1",
     "filter_f64_d2",

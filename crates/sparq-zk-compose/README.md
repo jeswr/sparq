@@ -19,7 +19,7 @@ v3, §S4.E). Drives the per-property Noir circuit family at
 > ([external](../../research/zk-soundness-audit.md); internal re-audits:
 > [binding](../../research/zk-verifier-reaudit.md) +
 > [membership/PoK](../../research/zk-membership-pok-reaudit.md)). Not FIPS-approved
-> ([fips-posture](../../compliance/cryptoreview/fips-posture.md)). The opt-in `dual-leaf` value lane (`filter_value_dl_int` + the `dispatch` fail-closed `(method × circuit)` matrix; sq-xojl/sq-cfmv) carries the #769-accepted **INV-VL downgrade**, an open audit obligation (**CR-G8** / `sq-qhy4`) — no soundness/privacy claim (API in the SKILL). Opus 4.8 — re-review when Fable returns. <!-- [OPUS-4.8] privacy-claims-allow: opt-in dual-leaf value lane + fail-closed dispatch matrix; INV-VL downgrade framed as an OPEN audit obligation; asserts no soundness/privacy property; sq-qhy4 / CR-G8 -->
+> ([fips-posture](../../compliance/cryptoreview/fips-posture.md)). The opt-in `dual-leaf` value lane (`filter_value_dl_{int,f64,decimal}` datatype-class members + the `dispatch` fail-closed `(method × circuit)` matrix; sq-xojl/sq-cfmv/sq-2ezsx) carries the #769-accepted **INV-VL downgrade**, an open audit obligation (**CR-G8** / `sq-qhy4`) — no soundness/privacy claim (API in the SKILL). Opus 4.8 — re-review when Fable returns. <!-- [OPUS-4.8] privacy-claims-allow: opt-in dual-leaf value lane + fail-closed dispatch matrix; INV-VL downgrade framed as an OPEN audit obligation; asserts no soundness/privacy property; sq-qhy4 / CR-G8 -->
 
 How-to + the covered/deferred matrix: [`skills/zk-query-proofs/SKILL.md`](../../skills/zk-query-proofs/SKILL.md).
 Benchmarks (gate counts, timing): [`bench/zk-compose/`](../../bench/zk-compose).
