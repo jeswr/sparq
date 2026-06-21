@@ -44,6 +44,12 @@ SPARQL (always — for verification) and the result rows. Add `--features close`
 owl:inverseOf pkg:blockedBy` pair and `pkg:couldBeMergedWith` symmetry — the design's
 "always close first" step).
 
+`--extra-graph <path>` (repeatable) loads extra Turtle file(s) alongside the PKG before
+querying — their triples become visible to the query and participate in `--close owl-rl`.
+This is the seam the FO-KM benchmark (epic `sq-mztg8`, Metric 1) uses to load a
+foundational-ontology overlay so its `rdfs:subClassOf` axioms entail FO-typed facts; the
+arms, overlays, and tasks live in `bench/fo-km/`.
+
 ## Cheap-model NL-tool — the DEFAULT path (delegate to Haiku)
 
 [OPUS-4.8] **For a PKG-answerable question, do NOT run the round-trip yourself in the

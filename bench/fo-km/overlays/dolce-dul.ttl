@@ -1,0 +1,66 @@
+# dolce-dul.ttl — the DOLCE+DnS-Ultralite (DUL) foundational-ontology overlay.
+#
+# [OPUS-4.8] FO-KM benchmark, Metric 1 (epic sq-mztg8). Design record:
+# research/foundational-ontology-km-benchmark.md §4 (PR #1106). 🤖 SPARQ agent.
+#
+# Types the four PKG classes under DUL's top categories + inlines the MINIMAL DUL
+# class-taxonomy fragment so an rdfs/owl-rl closure ENTAILS the DUL-typed facts.
+#
+# FO source: DOLCE+DnS Ultralite (DUL), the lightweight OWL realisation of DOLCE +
+# Descriptions-and-Situations. Namespace
+# http://www.ontologydesignpatterns.org/ont/dul/DUL.owl# .
+# Taxonomy verified against the DUL specification (ontologydesignpatterns.org pyLODE doc):
+#   dul:Action            rdfs:subClassOf dul:Event rdfs:subClassOf dul:Entity
+#   dul:Object            rdfs:subClassOf dul:Entity
+#   dul:SocialObject      rdfs:subClassOf dul:Object
+#   dul:Description       rdfs:subClassOf dul:SocialObject
+#   dul:InformationObject rdfs:subClassOf dul:SocialObject, dul:InformationEntity
+#   dul:InformationEntity rdfs:subClassOf dul:Entity
+#   dul:Method            rdfs:subClassOf dul:Description
+# Only the fragment used by the FO-KM tasks is inlined (not the full DUL.owl).
+#
+# THE CATEGORIAL SPLIT this overlay draws (and the no-FO arm does NOT):
+#   pkg:Task     -> dul:Action            (occurrent: an Action IS-A Event)
+#   pkg:Finding  -> dul:Description       (descriptive/propositional content = truth-bearer)
+#   pkg:Source   -> dul:InformationObject (the information-bearer)
+#   pkg:Technique-> dul:Method            (a Method IS-A Description = method-spec)
+# DUL gives the richest "for-free" vocab: Finding/Source/Technique are all
+# dul:SocialObject by entailment (the information-artifact union for TH1), while Task is
+# the occurrent (dul:Event) — and Finding (Description, truth-bearer) is distinguishable
+# from Source (InformationObject, info-bearer) for the TH3 split.
+
+@prefix pkg:  <https://sparq.dev/ns/pkg#> .
+@prefix dul:  <http://www.ontologydesignpatterns.org/ont/dul/DUL.owl#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix pkgfo: <https://sparq.dev/ns/pkg/fo#> .
+
+pkgfo:dolce-dul-overlay a owl:Ontology ;
+  rdfs:label "DOLCE-DUL overlay for the PKG"@en-GB ;
+  rdfs:comment "Foundational typing of the PKG classes under DOLCE+DnS-Ultralite (DUL); inlines the minimal DUL taxonomy fragment for closure."@en-GB ;
+  rdfs:seeAlso <http://www.ontologydesignpatterns.org/ont/dul/DUL.owl> .
+
+# --- the minimal DUL taxonomy fragment (TBox) -------------------------------
+dul:Entity            a owl:Class ; rdfs:label "Entity"@en .
+dul:Event             a owl:Class ; rdfs:label "Event"@en ;
+  rdfs:subClassOf dul:Entity .
+dul:Action            a owl:Class ; rdfs:label "Action"@en ;
+  rdfs:subClassOf dul:Event .
+dul:Object            a owl:Class ; rdfs:label "Object"@en ;
+  rdfs:subClassOf dul:Entity .
+dul:SocialObject      a owl:Class ; rdfs:label "Social object"@en ;
+  rdfs:subClassOf dul:Object .
+dul:InformationEntity a owl:Class ; rdfs:label "Information entity"@en ;
+  rdfs:subClassOf dul:Entity .
+dul:Description       a owl:Class ; rdfs:label "Description"@en ;
+  rdfs:subClassOf dul:SocialObject .
+dul:InformationObject a owl:Class ; rdfs:label "Information object"@en ;
+  rdfs:subClassOf dul:SocialObject , dul:InformationEntity .
+dul:Method            a owl:Class ; rdfs:label "Method"@en ;
+  rdfs:subClassOf dul:Description .
+
+# --- the PKG-class -> DUL-category overlay (the lever) ----------------------
+pkg:Task      rdfs:subClassOf dul:Action .
+pkg:Finding   rdfs:subClassOf dul:Description .
+pkg:Source    rdfs:subClassOf dul:InformationObject .
+pkg:Technique rdfs:subClassOf dul:Method .
