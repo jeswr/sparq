@@ -17,7 +17,8 @@
 //!   handed back). A `V("phrase")` construct in the default build fails loudly with
 //!   [`TerseError::FeatureRequired`].
 //! - **Phase 2 (`vectors` feature):** `V("phrase")` lexical-first concept resolution behind
-//!   the §6 soundness envelope — [`terse_to_sparql_with`] expands each `V("phrase")` to the
+//!   the §6 soundness envelope — `terse_to_sparql_with` (the `vectors`-gated entry point)
+//!   expands each `V("phrase")` to the
 //!   canonical `<iri>` it resolves to, echoing IRI + score + runner-up + confidence +
 //!   method in [`Expansion::resolutions`], confidence-gated and staleness-guarded.
 

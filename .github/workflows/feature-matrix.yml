@@ -419,20 +419,20 @@ jobs:
             features: query
             test: true
           # [OPUS-4.8] sq-leg8n: the sparq-terse opt-in LLM-ergonomic SPARQL surface
-          # (epic sq-2m6zm, design research/llm-ergonomic-sparql-surface.md). The DEFAULT
-          # build is the lean verifiable transpiler (only spargebra) — its 12 in-module
-          # tests cover the silent-rewrite canary + the V() detector + pass-through identity.
-          # The `vectors` leg pulls sparq-core/sparq-nlq/sparq-vectors and runs the V()
-          # lexical-first concept-resolution integration suite (tests/v_resolution.rs is
+          # (epic sq-2m6zm, design research/llm-ergonomic-sparql-surface.md). Only the
+          # `vectors` leg lives here: it pulls sparq-core/sparq-nlq/sparq-vectors and runs the
+          # V() lexical-first concept-resolution integration suite (tests/v_resolution.rs is
           # `#![cfg(feature = "vectors")]`, so it ONLY runs with the feature ON): the §6
           # envelope — splice-canonical-IRI, confidence/ambiguity gate, mandatory staleness
-          # guard, lexical-first. Both legs run `clippy --all-targets -D warnings` (the real
-          # gate) in their feature state. NOTE: empty `features:` is intentional for the
-          # default leg (the build/clippy/test steps below pass `--features ''`, a no-op).
-          - name: sparq-terse (default — lean transpiler skeleton)
-            crate: sparq-terse
-            features: ""
-            test: true
+          # guard, lexical-first — and `clippy --all-targets -D warnings` in that state.
+          # NOTE: the DEFAULT (no-feature) build — the lean verifiable transpiler over only
+          # spargebra, with its in-module canary/V()-detector/pass-through tests — is already
+          # exercised by the workspace-wide default lane in ci.yml (`cargo nextest archive
+          # --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`,
+          # `cargo doc --workspace --no-deps`), so a dedicated default leg here would be
+          # redundant. (A matrix leg cannot pass an EMPTY `features:` — the shared steps
+          # interpolate `--features ${{ matrix.features }}`, and cargo rejects a bare
+          # `--features` with no value; the default build belongs in the workspace lane.)
           - name: sparq-terse (vectors — V() lexical-first concept resolution)
             crate: sparq-terse
             features: vectors

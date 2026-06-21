@@ -67,8 +67,8 @@ impl Expansion {
 /// and any `V("phrase")` construct is rejected with [`TerseError::FeatureRequired`] — the
 /// surface never silently drops or mis-expands a terse construct it cannot resolve.
 ///
-/// With the `vectors` feature plus a resolution [`crate::resolve::ResolveCtx`], use
-/// [`terse_to_sparql_with`] instead; this entry point keeps the no-context, pass-through
+/// With the `vectors` feature plus a resolution context (`crate::resolve::ResolveCtx`), use
+/// `terse_to_sparql_with` instead; this entry point keeps the no-context, pass-through
 /// contract that is always available.
 ///
 /// # Errors
