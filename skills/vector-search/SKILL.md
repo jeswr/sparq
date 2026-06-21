@@ -893,6 +893,49 @@ a few customary units); an absent unit fails closed — extending it is additive
 raise downstream retrieval is **empirical, ablation-gated** — no accuracy claim. A predicate with no
 declared shape simply gets **no** prior (fail-open, the encoder falls back to the datatype router).
 
+### 17. Taxonomy block + disjointness repulsion/mask (opt-in, feature = `structure`)
+
+<!-- [OPUS-4.8] sq-0wo9e.4 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §2/§3.3/§6.A/§9). -->
+Research-grade **P3**: two priors over the `rdfs:subClassOf` DAG, in the `taxonomy` module. Read them
+over a **closed** graph (`close_for_vectorise` first, recipe 13) so the `subClassOf` closure and
+entailed disjointness are materialised.
+
+- **`TaxonomyDag::build`** — extracts the `subClassOf` DAG (cycle-safe `ancestors`/`depth`/
+  `graph_distance`).
+- **`EuclideanTaxonomyEncoder`** — the **default** taxonomy block (normalised-depth lane + hashed
+  ancestor bag), tagged `Metric::Euclidean` so whole-row L2/cosine is correct: classes sharing more
+  ancestry are closer. A `HyperbolicTaxonomyEncoder` (Poincaré candidate, tagged `NonEuclidean`)
+  exists **only** as the gate's second arm.
+- **`GeometryGate`** — the load-bearing must-fix: it **measures** Euclidean-vs-hyperbolic distortion
+  on the *actual* DAG and adopts non-Euclidean **only** when it strictly beats Euclidean by a margin
+  (never on a density heuristic; design §3.3/§9.4).
+- **`DisjointnessOracle`** — mines `owl:disjointWith`/`AllDisjointClasses`/`complementOf`, propagates
+  down the `subClassOf` closure, and yields **train-time** `repulsion_pairs` + a **serve-time**
+  `mask_candidates` hard mask. The mask is **answer-safe**: it drops only candidates whose type is
+  *provably* disjoint from a query type (∀ output ⊆ input).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{close_for_vectorise, TaxonomyDag, EuclideanTaxonomyEncoder, GeometryGate,
+    Geometry, DisjointnessOracle};
+use sparq_reason::Profile;
+
+let closed = close_for_vectorise(turtle_src, "turtle", Profile::Rdfs)?;   // materialise the closure
+let dag = TaxonomyDag::build(&closed.graph);
+let report = GeometryGate::default().choose(&dag);                        // measured-distortion gate
+assert_eq!(report.chosen, Geometry::Euclidean);                          // default unless hyperbolic wins
+let enc = EuclideanTaxonomyEncoder::new(&dag, /*bag_dim*/ 16);            // the default taxonomy block
+let oracle = DisjointnessOracle::mine(&closed.graph);                     // answer-safe disjointness
+let kept = oracle.mask_candidates(&query_types, &candidates);            // drops only provably-disjoint
+# Ok::<(), String>(())
+```
+
+**Honesty.** Mask answer-safety (removes only provably-disjoint, never invents), the metric guard on a
+hyperbolic block, and the gate's decision rule are **proven** (`taxonomy.rs` tests). Whether the
+taxonomy block (or hyperbolic geometry) raises retrieval is **empirical/dataset-dependent** — no
+accuracy claim; the gate adopts non-Euclidean only on **measured** lift. The gUFO rigid/role split
+(design §2/§9.5, rare annotations) is the optional/last prior and is **deferred**.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
@@ -909,15 +952,17 @@ declared shape simply gets **no** prior (fail-open, the encoder falls back to th
   methods write a delta the read paths consult transparently (recipe 12). The delta lives in RAM on the
   handle; `save_delta` persists it to a crash-durable `.spqd` sidecar and `open_with_delta` replays it,
   so mutations survive a restart without a `compact` (the two durability paths).
-- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1 P0, sq-0wo9e.2 P1, sq-0wo9e.3 P2).**
+- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1 P0, sq-0wo9e.2 P1, sq-0wo9e.3 P2, sq-0wo9e.4 P3).**
   It is the ONLY feature pulling `sparq-reason` + `sparq-introspect` into this crate, both **optional**, so
   with it OFF the default build compiles zero structure-prep code and gains no new required deps. With
   it ON it exposes the **P0** closure + sampler (`close_for_vectorise` / `materialise_closure` /
   `ClosedGraph`, `TypeConstraints`, `NegativeSampler` + `SamplingMode`, recipe 13), the **P1**
   typed-literal encoders (`route`, `NumericEncoder`, `BooleanEncoder`, `DateEncoder`, `SchemaHeader`,
-  recipe 15), AND the **P2** enum `Codebook` + QUDT unit-`normalise` (recipe 16). `structure` itself
-  serves no exact answer; encoder invariants are proven but embedding-quality benefit is **unproven**
-  (research-grade, no accuracy claim, no canonical numbers).
+  recipe 15), the **P2** enum `Codebook` + QUDT unit-`normalise` (recipe 16), AND the **P3** taxonomy
+  block + disjointness (`TaxonomyDag`, `EuclideanTaxonomyEncoder`, `GeometryGate`, `DisjointnessOracle`,
+  recipe 17). `structure` itself serves no exact answer; the disjointness mask is **answer-safe** (drops
+  only provably-disjoint) and encoder invariants are proven, but embedding-quality benefit is
+  **unproven** (research-grade, no accuracy claim, no canonical numbers).
 - **The SHACL/OWL prior reader is the non-default `structure-shacl` feature (sq-0wo9e.3 P2).** It
   **implies `structure`** and is the ONLY feature pulling `sparq-shacl` (and transitively, on native,
   the engine) into this crate's graph — so neither the default build nor the lean `structure` feature

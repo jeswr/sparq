@@ -66,6 +66,12 @@ pub mod structure;
 pub mod eval;
 #[cfg(feature = "kge")]
 pub mod train;
+// [OPUS-4.8] sq-0wo9e.4 (epic sq-0wo9e): the P3 structure-aware-vectorisation TAXONOMY block
+// (Euclidean default; hyperbolic only past a measured-distortion gate) + the answer-safe
+// disjointness repulsion/mask. Same `structure` feature (off by default); reads sparq-reason's
+// materialised closure via the P0 `close_for_vectorise` path and adds no new dependency.
+#[cfg(feature = "structure")]
+pub mod taxonomy;
 pub mod verbalize;
 
 /// The `vec:` vocabulary — magic predicates recognised by `rewrite`
@@ -175,6 +181,15 @@ pub use units::{
 // `structure-shacl` feature only (the only feature pulling sparq-shacl).
 #[cfg(feature = "structure-shacl")]
 pub use shacl_priors::{Cardinality, PredicatePrior, ShaclPriors};
+// [OPUS-4.8] sq-0wo9e.4 (epic sq-0wo9e): the structure-aware-vectorisation P3 surface — the
+// `subClassOf` taxonomy DAG + Euclidean (default) / hyperbolic (candidate) encoders, the
+// measured-distortion `GeometryGate`, and the answer-safe `DisjointnessOracle` (train-time
+// repulsion pairs + serve-time hard mask). `structure` feature only.
+#[cfg(feature = "structure")]
+pub use taxonomy::{
+    DisjointnessOracle, DistortionReport, EuclideanTaxonomyEncoder, Geometry, GeometryGate,
+    HyperbolicTaxonomyEncoder, TaxonomyDag,
+};
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
     ObjectKind, PropertyGroup,
