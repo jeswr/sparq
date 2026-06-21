@@ -15,9 +15,10 @@ import {
   loadSparq,
   prewarmSparq,
   formatSparqlJson,
-  extractTable,
   isAskResult,
   askValue,
+  streamQueryRows,
+  type SparqlBinding,
   type SparqlResults,
   type WasmStore,
   type WasmStoreCtor,
@@ -25,6 +26,18 @@ import {
 
 import { basePath } from "@/lib/base-path";
 import { SAMPLE_TURTLE, SAMPLE_FORMAT } from "@/data/sample-graph";
+
+/**
+ * Internal sentinel thrown out of the streaming loop when the caller's {@link AbortSignal} fires,
+ * so a Stop is distinguishable from a real engine error in the `catch` below. Named so the
+ * instanceof check is robust to minification.
+ */
+class AbortError extends Error {
+  constructor() {
+    super("aborted");
+    this.name = "AbortError";
+  }
+}
 
 /** The engine warm lifecycle. `error` carries a load/parse failure message. */
 export type EngineStatus =
@@ -41,12 +54,32 @@ export interface GraphSummary {
   count: number;
 }
 
+/**
+ * The SELECT result the workbench renders. A streamed SELECT keeps at most {@link RunOptions.rowCap}
+ * rows in JS (so a large result cannot blow the tab's memory); `truncated` records whether the
+ * full result exceeded that cap. `rawJson` is a SPARQL-1.1-JSON document over the KEPT rows.
+ */
+export interface SelectOutcome {
+  kind: "select";
+  /** The SPARQL-JSON results doc over the kept rows (for the Table / Raw JSON views + export). */
+  results: SparqlResults;
+  rawJson: string;
+  /** Rows kept in JS (≤ rowCap). */
+  rowCount: number;
+  /** Total rows the engine produced (may exceed `rowCount` when streamed + capped). */
+  totalRows: number;
+  /** True when the engine produced more rows than were kept in JS. */
+  truncated: boolean;
+}
+
 /** What a run produced — discriminated by SPARQL form so the results panel can branch. */
 export type QueryOutcome =
-  | { kind: "select"; results: SparqlResults; rawJson: string; rowCount: number }
+  | SelectOutcome
   | { kind: "ask"; value: boolean; rawJson: string }
   | { kind: "graph"; ntriples: string; tripleCount: number }
   | { kind: "update"; sizeAfter: number }
+  | { kind: "explain"; mode: "explain" | "analyze"; plan: string }
+  | { kind: "cancelled" }
   | { kind: "error"; message: string };
 
 /** A completed run + its MEASURED latency (performance.now delta, ms). */
@@ -55,6 +88,32 @@ export interface RunResult {
   /** Wall-clock latency of THIS run, measured with performance.now() (ms). Labelled, not a benchmark. */
   latencyMs: number;
 }
+
+/** How to run a query — plain execution, EXPLAIN (plan only), or EXPLAIN ANALYZE (plan + run). */
+export type RunMode = "run" | "explain" | "analyze";
+
+/** Optional per-run controls. */
+export interface RunOptions {
+  /** plain run / EXPLAIN / EXPLAIN ANALYZE. Defaults to `"run"`. */
+  mode?: RunMode;
+  /**
+   * Max SELECT rows to keep in JS when streaming (the cap that bounds peak memory). Rows beyond
+   * this are counted but dropped; the outcome is marked `truncated`. Defaults to {@link DEFAULT_ROW_CAP}.
+   */
+  rowCap?: number;
+  /** A cooperative cancel signal — checked between streamed batches (the Stop button). */
+  signal?: AbortSignal;
+}
+
+/**
+ * The default cap on SELECT rows kept in JS for the table/JSON views (streaming bounds peak
+ * memory at one batch + this many displayed rows; exports re-stream the WHOLE result). This is a
+ * UI display bound, not a result bound — it is labelled in the results panel, not a benchmark.
+ */
+export const DEFAULT_ROW_CAP = 5_000;
+
+/** The batch size {@link streamQueryRows} pulls per cursor step (one batch held at a time). */
+const STREAM_BATCH_SIZE = 1_000;
 
 export interface EngineContextValue {
   status: EngineStatus;
@@ -66,16 +125,15 @@ export interface EngineContextValue {
   lastLatencyMs: number | null;
   /** The row count of the most recent SELECT run, or null. */
   lastRowCount: number | null;
-  /** Run a query/update against the live store; resolves with the outcome + measured latency. */
-  run: (query: string) => Promise<RunResult>;
   /**
-   * [OPUS-4.8] sq-ixc3.10 — render the planner's EXPLAIN (or EXPLAIN ANALYZE) plan text for a
-   * query WITHOUT executing it (ANALYZE also executes). This is an in-tab planner introspection
-   * the Cmd-K spine drives ("Run EXPLAIN"); it returns the plan text or throws on a parse error
-   * (e.g. an Update form, which the planner rejects). Separate from `run` because it produces
-   * plan text, not a result set.
+   * Run a query/update against the live store; resolves with the outcome + measured latency.
+   * [OPUS-4.8] sq-ixc3.10/.12 — this is the SINGLE EXPLAIN entry point: pass
+   * {@link RunOptions.mode} `"explain"` / `"analyze"` to render the planner's plan (the canonical
+   * EXPLAIN path the Cmd-K spine AND the workbench EXPLAIN/ANALYZE buttons both drive — there is
+   * no separate `explain()` method). Pass {@link RunOptions.signal} to make the run cancellable
+   * (Stop), and {@link RunOptions.rowCap} to bound the kept SELECT rows.
    */
-  explain: (query: string, analyze?: boolean) => string;
+  run: (query: string, opts?: RunOptions) => Promise<RunResult>;
   /**
    * [OPUS-4.8] sq-ixc3.11 — serialise the LIVE store to TriG so an operational tool (e.g. the
    * SHACL validator) can run over the actual imported store rather than a fixture. TriG (not
@@ -187,7 +245,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const run = React.useCallback(
-    async (query: string): Promise<RunResult> => {
+    async (query: string, opts: RunOptions = {}): Promise<RunResult> => {
       const store = storeRef.current;
       if (!store) {
         const outcome: QueryOutcome = {
@@ -196,11 +254,20 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         };
         return { outcome, latencyMs: 0 };
       }
+      const mode = opts.mode ?? "run";
+      const rowCap = opts.rowCap ?? DEFAULT_ROW_CAP;
+      const signal = opts.signal;
       const form = classifyQuery(query);
       const t0 = performance.now();
       let outcome: QueryOutcome;
       try {
-        if (form === "ask") {
+        if (mode === "explain" || mode === "analyze") {
+          // EXPLAIN renders the planner's chosen plan; EXPLAIN ANALYZE also EXECUTES it and
+          // traces the per-operator work (the wasm `explain` / `explainAnalyze` bindings, which
+          // mirror `sparq_engine::explain[_analyze]` and the server's `explain=plan|analyze`).
+          const plan = mode === "analyze" ? store.explainAnalyze(query) : store.explain(query);
+          outcome = { kind: "explain", mode, plan };
+        } else if (form === "ask") {
           const json = store.query(query);
           const parsed = JSON.parse(json) as SparqlResults;
           outcome = isAskResult(parsed)
@@ -218,27 +285,58 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           const { size } = summariseGraphs(store);
           outcome = { kind: "update", sizeAfter: size };
         } else {
-          const json = store.query(query);
-          const parsed = JSON.parse(json) as SparqlResults;
-          const table = extractTable(parsed);
-          outcome = {
-            kind: "select",
-            results: parsed,
-            rawJson: formatSparqlJson(parsed),
-            rowCount: table.rows.length,
-          };
+          // SELECT — STREAM the rows one batch at a time through the wasm cursor so a large
+          // result never materialises whole in JS. We keep at most `rowCap` rows for the views;
+          // rows beyond the cap are counted but dropped (the outcome records `truncated`). The
+          // cooperative `signal` is checked between batches so Stop actually halts the pull.
+          const kept: SparqlBinding[] = [];
+          let total = 0;
+          let cancelled = false;
+          const meta = streamQueryRows(store, query, STREAM_BATCH_SIZE, (batch) => {
+            if (signal?.aborted) {
+              cancelled = true;
+              // Throw to break streamQueryRows' loop; the cursor is freed in its `finally`.
+              throw new AbortError();
+            }
+            total += batch.rows.length;
+            for (const row of batch.rows) {
+              if (kept.length < rowCap) kept.push(row);
+            }
+          });
+          if (cancelled) {
+            outcome = { kind: "cancelled" };
+          } else {
+            const parsed: SparqlResults = {
+              head: { vars: meta.vars },
+              results: { bindings: kept },
+            };
+            // `meta.rowCount` is the cursor's own total; prefer it (it covers an empty result's
+            // single empty batch correctly), falling back to the counted total.
+            const totalRows = meta.rowCount || total;
+            outcome = {
+              kind: "select",
+              results: parsed,
+              rawJson: formatSparqlJson(parsed),
+              rowCount: kept.length,
+              totalRows,
+              truncated: totalRows > kept.length,
+            };
+          }
         }
       } catch (err) {
-        outcome = {
-          kind: "error",
-          message: err instanceof Error ? err.message : String(err),
-        };
+        outcome =
+          err instanceof AbortError || signal?.aborted
+            ? { kind: "cancelled" }
+            : {
+                kind: "error",
+                message: err instanceof Error ? err.message : String(err),
+              };
       }
       const latencyMs = performance.now() - t0;
       setLastLatencyMs(latencyMs);
       setLastRowCount(
         outcome.kind === "select"
-          ? outcome.rowCount
+          ? outcome.totalRows
           : outcome.kind === "graph"
             ? outcome.tripleCount
             : null,
@@ -250,14 +348,11 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     [refreshSummary],
   );
 
-  // [OPUS-4.8] sq-ixc3.10 — the EXPLAIN / ANALYZE planner introspection the Cmd-K spine drives.
-  // Throws if the store is cold or the planner rejects the form (e.g. an Update), so the caller
-  // surfaces a clear message rather than silently no-op'ing.
-  const explain = React.useCallback((query: string, analyze = false): string => {
-    const store = storeRef.current;
-    if (!store) throw new Error("The engine is not ready yet — wait for the store to warm.");
-    return analyze ? store.explainAnalyze(query) : store.explain(query);
-  }, []);
+  // [OPUS-4.8] sq-ixc3.10/.12 — EXPLAIN / EXPLAIN ANALYZE is NOT a separate context method: it is
+  // run(query, { mode: "explain" | "analyze" }) above, which surfaces an { kind: "explain" }
+  // outcome through the SAME RunResult + measured-latency pipeline every other run uses. The Cmd-K
+  // "Run EXPLAIN" verb and the workbench EXPLAIN/ANALYZE buttons both drive that single path, so
+  // there is one EXPLAIN contract (this consolidates the standalone explain() #1018 had shipped).
 
   // [OPUS-4.8] sq-ixc3.11 — TriG dump of the live store, the input an operational tool (SHACL
   // validate-the-active-store) consumes. TriG (the serialise binding does NOT accept
@@ -276,8 +371,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value = React.useMemo<EngineContextValue>(
-    () => ({ status, storeSize, graphs, lastLatencyMs, lastRowCount, run, explain, serializeStore }),
-    [status, storeSize, graphs, lastLatencyMs, lastRowCount, run, explain, serializeStore],
+    () => ({ status, storeSize, graphs, lastLatencyMs, lastRowCount, run, serializeStore }),
+    [status, storeSize, graphs, lastLatencyMs, lastRowCount, run, serializeStore],
   );
 
   return <EngineContext.Provider value={value}>{children}</EngineContext.Provider>;

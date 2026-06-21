@@ -11,7 +11,9 @@
 //   5. click "Run query", and
 //   6. ASSERT the SELECT result table renders with the expected binding ("Alice", from the
 //      seeded sample graph), then
-//   7. [OPUS-4.8] sq-ixc3.11 — open the SHACL tool (left-rail data-tool="shacl"), click
+//   7. [OPUS-4.8] sq-ixc3.12 — click EXPLAIN and ASSERT the planner plan renders
+//      (data-result-kind="explain"), exercising the UNIFIED run(query,{mode}) EXPLAIN path, then
+//   8. [OPUS-4.8] sq-ixc3.11 — open the SHACL tool (left-rail data-tool="shacl"), click
 //      "Validate live store", and ASSERT a W3C validation report renders over the serialised
 //      live store (proving the SHACL surface is a working TOOL, not a stub).
 //
@@ -220,7 +222,26 @@ async function main() {
       `PASS — SELECT ran in the in-tab WASM engine and rendered ${rowCount} row(s) including "${EXPECTED_CELL}".`,
     );
 
-    // 6. [OPUS-4.8] sq-ixc3.11 — SHACL TOOL smoke: open the SHACL tab from the left rail
+    // 6. [OPUS-4.8] sq-ixc3.12 — EXPLAIN smoke: click the toolbar EXPLAIN button and assert the
+    //    planner-plan container renders. This exercises the UNIFIED EXPLAIN path —
+    //    run(query, { mode: "explain" }) surfacing a { kind: "explain" } outcome through the
+    //    SAME results pipeline (data-result-kind="explain") the Cmd-K "Run EXPLAIN" verb also
+    //    drives — proving the single EXPLAIN contract works end-to-end after the #1018 reconcile.
+    log('clicking "EXPLAIN"…');
+    const explainButton = await browser.$("button=EXPLAIN");
+    await explainButton.waitForClickable({ timeout: 10_000 });
+    await explainButton.click();
+
+    log("waiting for the EXPLAIN plan to render…");
+    const explainResult = await browser.$('[data-result-kind="explain"]');
+    await explainResult.waitForExist({ timeout: 30_000 });
+    const planText = await explainResult.getText();
+    if (!planText.trim()) {
+      throw new Error("EXPLAIN container rendered but the plan text was empty");
+    }
+    log("PASS — EXPLAIN rendered the planner's plan through the unified run() path.");
+
+    // 7. [OPUS-4.8] sq-ixc3.11 — SHACL TOOL smoke: open the SHACL tab from the left rail
     //    (data-tool="shacl", left-rail.tsx), click "Validate live store" (shacl-tool.tsx), and
     //    assert the validation report container renders. This proves the SHACL surface is a
     //    WORKING tool over the SERIALISED live store (serializeStore → sparqShaclValidate), not

@@ -156,3 +156,37 @@
 @utility tabular {
   font-variant-numeric: tabular-nums;
 }
+
+@layer components {
+  /* [OPUS-4.8] sq-ixc3.12 — SPARQL/Turtle syntax-highlight token colours for the workbench
+     editor + the result-document views, ported from the site's globals.css. One class per
+     `SparqlTokenType` from `@sparq/client` (the same token classes style `tokenizeSparql` AND
+     `tokenizeTurtle`). The site keys these off `--chart-*`; the workbench theme has no chart
+     ramp, so they reuse the workbench's own existing tokens (`--primary`, `--accent-foreground`,
+     `--success`, `--warning`, `--destructive`, `--muted-foreground`) — which already carry
+     light + dark variants, so highlighting follows the theme automatically and adds no new
+     palette. `plain`/`punctuation` inherit `--foreground` (no class needed). */
+  .sq-tok-keyword {
+    color: var(--primary);
+    font-weight: 600;
+  }
+  .sq-tok-variable {
+    color: var(--accent-foreground);
+  }
+  .sq-tok-iri {
+    color: var(--success);
+  }
+  .sq-tok-prefixed {
+    color: var(--warning);
+  }
+  .sq-tok-string {
+    color: var(--destructive);
+  }
+  .sq-tok-number {
+    color: var(--primary);
+  }
+  .sq-tok-comment {
+    color: var(--muted-foreground);
+    font-style: italic;
+  }
+}
