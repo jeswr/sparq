@@ -567,15 +567,49 @@ per request**. Without that gate, an admitted delegation becomes a **standing gr
 session reaching that graph could ride** — the exact replay / re-delegation vector — which is
 a privilege-escalation of the **same severity class as the §2.4 boundary re-opening** and
 needs the same kind of adversarial forgery test (a delegation-replay analogue of
-`acp_forged_*_in_acr_document_does_not_grant`). This is an **open problem**, `sq-l5og`; it is
-NOT settled in v1, and §7 (item K) concedes it explicitly.
+`acp_forged_*_in_acr_document_does_not_grant`). This was an **open problem**, `sq-l5og`.
 
-**Ambient-authority tension (unresolved in v1).** This §4.1 "admitted as a graph fact" storage
-model **is** an ambient lookup, which is precisely what §4.3(a)'s object-capability discipline
-("carry the chain *with* the invocation, do not look it up ambiently") warns against. The two
-halves of §4 are in **direct tension**: storing delegations as ambient graph facts
-re-introduces ambient authority **unless** the invocation binding (above) gates **every** read.
-v1 does not yet resolve which model it takes; §7 (item M) records this as open.
+> **[OPUS-4.8] sq-l5og — RESOLVED in the PoC** (`crates/sparq-trust/src/delegation.rs`,
+> tests `crates/sparq-trust/tests/delegation_replay.rs`). The missing rule is now **specified,
+> enforced, and tested**: `invoke()` gates the carried chain on (1) trust-anchored root,
+> (2) a CHECKED delegator signature per hop over a domain-separated `hop_message` that binds the
+> hop's delegator/delegate **keys** alongside the capability + expiry, (3) monotone attenuation
+> (`child ⊆ parent` actions + expiry), (4) terminal-hop expiry vs `now`, (5) scope, and (6) the
+> **invocation binding** — *authenticated invoker == terminal delegate* **AND** a per-request
+> fresh-challenge proof-of-possession under the terminal key (DPoP/GNAP-style, modelled on the
+> shipped `sparq-zk` `holder_pop_message` / `sign_holder_pop`).
+>
+> **Soundness fix (adversarial review, [OPUS-4.8]).** An earlier revision excluded `delegate_key`
+> from `hop_message`, so the terminal hop's `delegate_key` was attested by NO signature: an
+> attacker could capture the chain, substitute its OWN key as the terminal `delegate_key` (the
+> genuine WebID + genuine delegator signature still verified, and the PoP verified under the
+> attacker key), and ride the chain — a confirmed key-substitution replay BYPASS. Folding each
+> hop's `delegate_key` (and `delegator_key`) into the signed preimage closes it: a substituted
+> terminal key breaks the delegator's signature ⇒ rejected at step 2. The matrix now includes the
+> key-substitution negative test (`stolen_chain_with_substituted_terminal_key_is_denied`, plus
+> the single-hop variant). The delegation-replay forgery matrix (third-party replay,
+> stolen-chain-without-key, **key-substitution**, replayed-PoP-over-old-challenge, forged/lifted
+> hop signature, escalating attenuation, broken link, expired, out-of-scope) all DENY.
+>
+> **Honest scope — do NOT overclaim full non-replayability.** With the key bound, a chain captured
+> off the wire cannot have its terminal key swapped, so it no longer yields a usable PoP under an
+> attacker key. But the property is only as sound as the trust in the keys themselves: the delegate
+> key is attested by the delegator's signature, and the delegator's OWN key is still
+> operator-/chain-asserted — there is no DID resolver binding a WebID to a key yet (`sq-pfae.3`,
+> the live forgery vector D′). So the gate defeats stolen-chain **key-substitution** replay; it does
+> NOT close the upstream key-trust gap. Still open and documented (not solved): deep-chain
+> *incremental* revocation (full re-materialisation only — §4.4 stale-window bounded, not closed)
+> and DID-resolver delegate-key binding (`sq-pfae.3`). This is a research PoC, **not** a shipped
+> security guarantee.
+
+**Ambient-authority tension — RESOLVED in the PoC ([OPUS-4.8] item M).** This §4.1 "admitted as
+a graph fact" storage model **is** an ambient lookup, which is precisely what §4.3(a)'s
+object-capability discipline ("carry the chain *with* the invocation, do not look it up
+ambiently") warns against. The PoC takes the **obj-cap side explicitly**: `invoke()` gates on a
+chain **carried with the invocation** plus the live PoP, never an ambient graph lookup; storing
+a delegation as a graph fact (the §4.1 model) is demoted to an OPTIONAL audit record, never the
+authority source. This is the design choice the PoC makes for `sq-l5og` (flagged to the
+maintainer to steer — see the gh issue opened on PR-open).
 
 ### 4.2 Attenuation and on-behalf-of
 
@@ -1069,7 +1103,10 @@ core spine; **P5, P6, P7** depend on P3/P4; **P7 (privacy) is hard-gated on `sq-
    invariant **enforced against the *current* delegator grant**, and — the prerequisite the
    prior draft omitted — the **invocation-binding gate** (authenticated invoker == chain
    terminal delegate, **key-proven per request** via a DPoP/GNAP layer that does **not exist
-   today**) so an admitted delegation is **not replayable**. **NOTE: there is ZERO delegation /
+   today**) so an admitted delegation is **not replayable under key substitution** (each hop's
+   `delegate_key` bound into the delegator-signed preimage — the `sq-l5og` soundness fix; this is
+   NOT full non-replayability, since the delegator's key is still operator-asserted, `sq-pfae.3`).
+   **NOTE: there is ZERO delegation /
    key-proof substrate in the repo today** (no zcap/ucan/dpop/gnap/`actedOnBehalfOf`); this
    phase is design-only at the start, not "build on existing seams". Add delegation-replay
    adversarial forgery tests. `revocation.rs` is a status-list primitive, **not**
@@ -1231,13 +1268,22 @@ prior draft phrased as settled are open problems.
   **single-agent** `prov:wasAssociatedWith`, **not** an `actedOnBehalfOf` delegation chain. §4.3's
   "PROV-O records the chain" and "key-proofing" are reclassified from **implied-shipped to
   proposed**.
-- **K′ — Invocation is distinct from delegation; the invocation-binding gate is UNSPECIFIED in
-  v1.** The missing rule: **authenticated invoker == the carried chain's terminal delegate,
-  key-proven per request** (the delegation analogue of §3.4 holder binding). Until it is
-  specified and tested, an admitted delegation is **replayable by any session that can read
-  it** — a privilege-escalation of the same severity class as the §2.4 boundary re-opening,
-  needing the same adversarial forgery tests (a delegation-replay analogue of
-  `acp_forged_*_in_acr_document_does_not_grant`). Tracked: `sq-l5og`.
+- **K′ — Invocation is distinct from delegation; the invocation-binding gate — `sq-l5og` —
+  is now SPECIFIED, ENFORCED, and TESTED in the PoC ([OPUS-4.8]).** The rule
+  **authenticated invoker == the carried chain's terminal delegate, key-proven per request**
+  (the delegation analogue of §3.4 holder binding) is implemented in
+  `crates/sparq-trust/src/delegation.rs` (`invoke()`), with the delegation-replay forgery
+  matrix — the analogue of `acp_forged_*_in_acr_document_does_not_grant` — in
+  `crates/sparq-trust/tests/delegation_replay.rs`. The per-request fresh-challenge
+  proof-of-possession (DPoP/GNAP-style, on the shipped `sparq-zk` PoP primitive) — together with
+  binding each hop's `delegate_key` into the delegator-signed `hop_message` (the soundness fix an
+  adversarial review forced, after a confirmed key-substitution BYPASS where the terminal
+  `delegate_key` was attested by no signature) — defeats stolen-chain **key-substitution** replay.
+  Do **not** overclaim full non-replayability: the delegate key is only as trustworthy as the
+  delegator's key that attests it, and that key is still operator-asserted (`sq-pfae.3`).
+  **Still open** (documented, not solved): deep-chain *incremental* revocation (full
+  re-materialisation only) and DID-resolver delegate-key binding (`sq-pfae.3`, the live forgery
+  vector D′). It is a research PoC, **not** a shipped security guarantee.
 - **M — Ambient-authority self-contradiction.** §4.1's "admitted-as-graph-fact" model **is** the
   ambient lookup §4.3 warns against; storing delegations as ambient graph facts re-introduces
   ambient authority **unless** the invocation binding (K′) gates **every** read. v1 does not yet
@@ -1269,9 +1315,14 @@ The genuine **design gaps** (not mere caveats) surfaced above are tracked as bea
   materialise-once auth view: **RESOLVED** — decision (a), the static/dynamic split, shipped in
   `sparq-trust` (`admit_static` / `derive_conditional_grants`) + `sparq-solid`
   (`admit_trust_credential_static`, conditional-grant install on the sq-0q7n path); §3.3 A′.
-- `sq-l5og` — delegation invocation-binding gate (invoker == terminal delegate, key-proven);
-  admitted delegation is replayable without it; ambient-authority + intersection-snapshot +
-  stale-window sub-problems.
+- `sq-l5og` — delegation invocation-binding gate (invoker == terminal delegate, key-proven).
+  **[OPUS-4.8] RESOLVED in the PoC** (`crates/sparq-trust/src/delegation.rs` + the
+  `delegation_replay` forgery tests): the gate defeats stolen-chain **key-substitution** replay
+  (each hop's `delegate_key` is bound into the delegator-signed `hop_message` — the soundness fix
+  after a confirmed bypass), takes the obj-cap side of the ambient-authority tension (item M), and
+  binds the intersection to the *current* delegator grant (item N). It does NOT claim full
+  non-replayability — the delegator's key is still operator-asserted. Residual open: deep-chain
+  incremental revocation + DID-resolver key binding (`sq-pfae.3`).
 - `sq-tu4e` — conflicting-issuer-fact deny-on-disagreement may be unreachable under input-only
   stratified NAF; freshness/revocation/issuer-key are not in-reasoner; seeding mis-citation
   corrected.
