@@ -1,6 +1,6 @@
 ---
 name: query-pkg
-description: Answer a "what does the repo say about X, where was Y decided, what is the status or provenance of Z, which sources are still unexplored, what depends on bead W" question by running a SPARQL query over the ingested Project-Knowledge-Graph (PKG) instead of reading whole documents. Use when an agent working on sparq needs a sourced, answer-sized fact from AGENTS.md, the skills, or the bd backlog and would otherwise Read or Grep a large doc. The mechanism is introspect then ground then ask via the pkg-query helper in crates/sparq-kb. NOTE this is the MECHANISM; whether it actually cuts agent tokens is measured by bead sq-2m6zm.4, not claimed here.
+description: Answer a "what does the repo say about X, where was Y decided, what is the status or provenance of Z, which sources are still unexplored, what depends on bead W" question by running a SPARQL query over the ingested Project-Knowledge-Graph (PKG) instead of reading whole documents. Use when an agent working on sparq needs a sourced, answer-sized fact from AGENTS.md, the skills, or the bd backlog and would otherwise Read or Grep a large doc. The mechanism is introspect then ground then ask via the pkg-query helper in crates/sparq-kb. DEFAULT path is to DELEGATE the round-trip to a model:haiku sub-agent as a natural-language tool call (measured cheaper at equal quality, sq-zbyo7; see bench/pkg-dogfood/RESULTS.md); plain in-context pkg-query is the fallback.
 ---
 
 # Query the PKG — introspect → ground → ask
@@ -18,12 +18,15 @@ computed by sparq's own engine over the ingested graph — within the store the 
 cannot fabricate a fact the data does not contain (the engine bounds the result set), and
 an empty result is the honest "I don't know / none outstanding" answer.
 
-> **Honesty.** This skill is the *mechanism*. **Whether querying the PKG actually cuts an
-> agent's token spend versus reading the source document is MEASURED by bead sq-2m6zm.4,
-> not claimed here.** This file contains NO unmeasured token-saving number. The PKG is a
-> Phase-1 *head slice* (the AGENTS.md finding set + a mechanical bd→Task projection + the
-> heaviest skills' front-matter), not the whole corpus — a miss means "not in the head
-> slice yet", so fall back to Read/Grep.
+> **Honesty.** This skill is the *mechanism*. The cost saving versus reading the source
+> document is now **MEASURED** (bead **sq-zbyo7**, the agent-flavour cheap-model NL-tool:
+> ≈ 30× cheaper in $ than read-docs at equal quality on PKG-answerable tasks); the full
+> table, method, and honest caveats live in `bench/pkg-dogfood/RESULTS.md` (the sanctioned
+> measurement record) — this file only points at the headline. The win is scoped to
+> **PKG-answerable** questions by construction. The PKG is a Phase-1 *head slice* (the
+> AGENTS.md finding set + a mechanical bd→Task projection + the heaviest skills'
+> front-matter), not the whole corpus — a miss means "not in the head slice yet", so fall
+> back to Read/Grep.
 
 ## The helper
 
@@ -40,6 +43,43 @@ SPARQL (always — for verification) and the result rows. Add `--features close`
 `--close owl-rl` to materialise the RDFS/OWL-RL closure first (entails the `pkg:dependsOn
 owl:inverseOf pkg:blockedBy` pair and `pkg:couldBeMergedWith` symmetry — the design's
 "always close first" step).
+
+## Cheap-model NL-tool — the DEFAULT path (delegate to Haiku)
+
+[OPUS-4.8] **For a PKG-answerable question, do NOT run the round-trip yourself in the
+expensive orchestrator. DELEGATE it as a natural-language tool call to a `model:haiku`
+sub-agent.** The cheap model does the whole `introspect → ground → SPARQL → run → NL`
+loop; the orchestrator (Opus) only emits the question and reads the answer back. It
+never sees the schema card, the SPARQL, or the raw rows.
+
+**Why this is the default.** The verbose NL→SPARQL→run→NL middle is exactly the part a
+~15×-cheaper model handles fine, and pushing it off the expensive orchestrator is a
+large **model-price-weighted** saving. The agent-flavour cheap-model NL-tool was
+measured (bead **sq-zbyo7**, N=30 frozen PKG-answerable tasks) at **≈ 30× cheaper in $
+than Opus reading the docs, and ≈ 16× cheaper than Opus running `pkg-query` itself, at
+equal answer quality.** Full table + method + caveats: `bench/pkg-dogfood/RESULTS.md`.
+(The decision metric is $, not raw tokens — that is why the cheap-model arm wins even
+though its raw-token count is similar.)
+
+**The brief to give the Haiku sub-agent** (it must return a self-checkable answer):
+
+> Use the `query-pkg` skill. Answer this question over the PKG by `introspect → ground →
+> ask` via `pkg-query`. Question: «…». Return (1) a concise NL answer, (2) the **exact
+> executed SPARQL**, and (3) the **provenance + confidence** of each fact (the
+> `dcterms:source` section anchor and `pkg:confidence` each row carries). If the query
+> returns 0 rows, say so — an empty result is the honest "not in the head slice / none
+> outstanding" answer; do not invent rows.
+
+**The verification echo (the guardrail).** Because the sub-agent returns the executed
+SPARQL + resolved IRIs + the per-row provenance/confidence, the caller can **verify**
+the answer was computed from a real query over the data, not guessed — the soundness
+echo. If the returned SPARQL does not match the question, re-ask or fall back; never
+accept a bare NL answer with no query behind it.
+
+**Fallback — plain Opus `pkg-query`.** When sub-agent delegation is not available (e.g.
+you are already inside a leaf sub-agent, or the dispatch path is unavailable), run
+`pkg-query` yourself in-context as described below. That is arm **B** of the measurement
+— still cheaper than reading the docs, just not as cheap as the Haiku NL-tool.
 
 ## (a) INTROSPECT — what can I ask about?
 

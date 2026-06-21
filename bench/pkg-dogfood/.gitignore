@@ -4,3 +4,7 @@
 results.json
 grades.json
 verdict.json
+# [OPUS-4.8] sq-ve5dy — real-transcript 3-arm A/B runtime artifacts (regenerable).
+tok_*.json
+answers*.json
+tokens_real_out.json
