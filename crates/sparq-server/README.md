@@ -37,9 +37,10 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   dataset scoped to the addressed graph), and — behind the OPT-IN `n3-patch` feature + `--n3-patch`
   flag — a Solid-style `text/n3` **N3-Patch** (`solid:InsertDeletePatch`).
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
-  GSP read in N-Triples / prefix-Turtle / RDF-XML (plus **JSON-LD** behind the opt-in `jsonld`
-  feature, both emit and accept — see "Opt-in features"); streamed SELECT bodies. Plus **EXPLAIN /
-  EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket + SSE** live SELECT diffs.
+  GSP read in N-Triples / prefix-Turtle / RDF-XML / **JSON-LD** (`application/ld+json` — the
+  `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); streamed
+  SELECT bodies. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style
+  **WebSocket + SSE** live SELECT diffs.
 - **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
   default, in-memory). See "Durable persistence".
 - **Authentication** — optional `--auth-token <TOKEN>` Bearer write gate (constant-time; mirrors
@@ -53,11 +54,15 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
   (`POST /shacl/validate`), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
-  `jsonld` (`application/ld+json` in content negotiation — EMIT a CONSTRUCT/DESCRIBE or GSP-read
-  graph as flattened JSON-LD on `Accept: application/ld+json`, and ACCEPT an `application/ld+json`
-  GSP write body; off by default, links `oxjsonld` + the engine's JSON-LD writer),
   `backup` (online snapshot `POST /admin/backup` + `/admin/restore`, no stop-the-world),
   `audit-log`/`access-audit` (access trails), `zlib-ng` (faster gzip).
+- **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, user-prioritised epic sq-oy1f) — the `jsonld`
+  feature is in the server's **default** set (a maintainer-directed exception to opt-in-by-default):
+  `application/ld+json` joins the q-value-aware RDF content negotiation out of the box, **both
+  directions** — EMIT a CONSTRUCT/DESCRIBE or GSP-read graph as flattened JSON-LD, and ACCEPT an
+  `application/ld+json` GSP write body (`oxjsonld`). Toggleable off via `--no-default-features
+  --features server` (then `application/ld+json` → 406-fallback on read, 415 on write). Default-on
+  now: parse + serialise (flattened) + conneg; full conneg-conformance ratcheting is roadmap (sq-oy1f).
 
 ## Security posture (essentials — full detail in the SKILL)
 

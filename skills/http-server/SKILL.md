@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML, plus JSON-LD behind the opt-in jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + opt-in JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -225,7 +225,7 @@ CONSTRUCT/DESCRIBE):
 | --- | --- | --- |
 | SELECT | `application/sparql-results+json` (default) / `+xml` / `text/csv` / `text/tab-separated-values` | matching results media |
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
-| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (opt-in `jsonld` feature) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1 --> |
+| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (the `jsonld` feature — **default-on**) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1/.4 --> |
 
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \
@@ -236,20 +236,23 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: text/turtle' \
 # RDF/XML:
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/rdf+xml' \
      --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
-# JSON-LD (flattened) — requires a `--features jsonld` build: [OPUS-4.8] sq-oy1f.1
+# JSON-LD (flattened) — default-on, works on the standard build: [OPUS-4.8] sq-oy1f.1/.4
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
      --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
 ```
 
-> **JSON-LD content negotiation (opt-in `jsonld` feature).** With the server built
-> `--features jsonld`, `application/ld+json` joins the q-value-aware RDF negotiation in BOTH
-> directions: a CONSTRUCT/DESCRIBE or a Graph-Store-Protocol read with `Accept:
-> application/ld+json` is served as the engine's *flattened* JSON-LD (a `{"@graph": […]}`
-> node-object document that `toRdf`-round-trips to the same graph), and a GSP `PUT`/`POST`
-> with `Content-Type: application/ld+json` is parsed into the store via the engine's JSON-LD
-> parser. Without the feature, `application/ld+json` is unrecognised: an `Accept` for it falls
-> back to N-Triples (never a 406 — the endpoint always has a representation), and a write body
-> in it is a plain `415`. The default build is byte-identical to before.
+> **JSON-LD content negotiation (`jsonld` feature — default-on, [OPUS-4.8] sq-oy1f.4).** The
+> server speaks `application/ld+json` out of the box (the `jsonld` feature is in the default set —
+> a maintainer-directed exception to opt-in-by-default). `application/ld+json` joins the
+> q-value-aware RDF negotiation in BOTH directions: a CONSTRUCT/DESCRIBE or a Graph-Store-Protocol
+> read with `Accept: application/ld+json` is served as the engine's *flattened* JSON-LD (a
+> `{"@graph": […]}` node-object document that `toRdf`-round-trips to the same graph), and a GSP
+> `PUT`/`POST` with `Content-Type: application/ld+json` is parsed into the store via the engine's
+> JSON-LD parser. Toggleable off via `--no-default-features --features server`: then
+> `application/ld+json` is unrecognised — an `Accept` for it falls back to a supported graph format
+> (never a 406 — the endpoint always has a representation), and a write body in it is a plain `415`
+> — byte-identical to a JSON-LD-disabled build. What is default-on now: JSON-LD parse + serialise
+> (flattened) + content-negotiation; full conneg-conformance ratcheting is on the sq-oy1f roadmap.
 
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)
