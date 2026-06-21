@@ -27,6 +27,14 @@ pub mod encode;
 #[cfg(feature = "filtered-ann")]
 pub mod filter;
 pub mod fingerprint;
+// [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e): the P4 structure-aware-vectorisation FLEXIBLE
+// MINIMAL-AND-COMPLETE GROUNDING selector + verbaliser — a modality dispatcher on the consumer's
+// declared output type producing the minimal-and-complete object (subgraph / typed sub-vector / NL
+// string / typed value), with PROFILE-RELATIVE completeness and ABSTAT-style minimality. `structure`
+// feature only (reuses `encode`/`structure`/`verbalize` + `sparq-introspect`); the default build
+// carries zero grounding code.
+#[cfg(feature = "structure")]
+pub mod grounding;
 pub mod fuse;
 pub mod import;
 pub mod labels;
@@ -145,6 +153,12 @@ pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};
 pub use encode::{
     metamorphic_monotone, numeric_value, route, temporal_value, Block, BooleanEncoder, DateEncoder,
     Encoder, Metric, NumericEncoder, SchemaHeader, SPQS_MAGIC, SPQS_VERSION,
+};
+// [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e): the structure-aware-vectorisation P4 surface — the
+// flexible minimal-and-complete grounding selector + verbaliser. `structure` feature only.
+#[cfg(feature = "structure")]
+pub use grounding::{
+    ground, GroundFact, Grounding, GroundingConfig, Modality, OutputType, TypedValue,
 };
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,

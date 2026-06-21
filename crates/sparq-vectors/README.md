@@ -94,6 +94,7 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an **on/off ablation**.
   **P1:** typed-literal encoders — `route`r, **order-preserving** `NumericEncoder`, `BooleanEncoder`,
   `DateEncoder`, self-describing `SchemaHeader` (metric guard).
+  **P4:** `ground` — a per-request modality dispatcher (subgraph / typed sub-vector / NL / typed value), **profile-relative** completeness + ABSTAT-style minimality; ambiguous → the exact subgraph.
   **`kge`** (implies `structure`, no new dep — hand-rolled SGD): a thin CPU-only trainer (symmetric
   **DistMult** / asymmetric **ComplEx**) + a **filtered link-prediction** `{closure}×{type-neg}`
   ablation (`run_ablation*`). **No accuracy claim**; INDICATIVE only — read deltas off ComplEx (DistMult is symmetric → near-random on directional data).
