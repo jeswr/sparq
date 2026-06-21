@@ -55,9 +55,19 @@ export function classify(surface: Surface): CapabilityKind {
   return "demo";
 }
 
-/** The /capabilities anchor for a surface (e.g. "/capabilities#privacy"). */
+/** The /capabilities anchor for a surface (e.g. "/capabilities/#privacy").
+ *
+ * [OPUS-4.8] sq-bpoey — the trailing slash BEFORE the fragment is load-bearing. With
+ * next.config.ts `trailingSlash:true` the page is emitted to out/capabilities/index.html;
+ * a slashless `/capabilities#id` link is remapped by scripts/check-site-links.sh to
+ * file://<out>/capabilities (a bare path with no index.html), so lychee --include-fragments
+ * cannot find the `#id` heading and the pages.yml link-check fails. The `/capabilities/#id`
+ * form remaps to file://<out>/capabilities/ -> out/capabilities/index.html where the
+ * `<section id="id">` lives, matching every other internal link's basePath+trailingSlash shape.
+ * Browsers resolve `/capabilities/#id` to the same page+anchor, so the client redirect is
+ * unaffected. */
 export function capabilityAnchor(themeId: string): string {
-  return `/capabilities#${themeId}`;
+  return `/capabilities/#${themeId}`;
 }
 
 /**

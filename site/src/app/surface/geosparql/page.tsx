@@ -5,6 +5,7 @@ import type { Metadata } from "next";
 // (research §7), so this is a CLIENT REDIRECT STUB that sends inbound links to the surface's
 // new home under the "Query & data" theme.
 import { RedirectStub } from "@/components/redirect-stub";
+import { capabilityAnchor } from "@/data/capabilities";
 
 export const metadata: Metadata = {
   title: "Moved to Capabilities",
@@ -14,6 +15,6 @@ export const metadata: Metadata = {
 
 export default function geosparqlRedirectPage() {
   return (
-    <RedirectStub to="/capabilities#query-data" label="Capabilities · Query & data" />
+    <RedirectStub to={capabilityAnchor("query-data")} label="Capabilities · Query & data" />
   );
 }

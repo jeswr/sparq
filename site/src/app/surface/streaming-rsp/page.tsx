@@ -5,6 +5,7 @@ import type { Metadata } from "next";
 // (research §7), so this is a CLIENT REDIRECT STUB that sends inbound links to the surface's
 // new home under the "Serve & embed" theme.
 import { RedirectStub } from "@/components/redirect-stub";
+import { capabilityAnchor } from "@/data/capabilities";
 
 export const metadata: Metadata = {
   title: "Moved to Capabilities",
@@ -14,6 +15,6 @@ export const metadata: Metadata = {
 
 export default function streaming_rspRedirectPage() {
   return (
-    <RedirectStub to="/capabilities#serve-embed" label="Capabilities · Serve & embed" />
+    <RedirectStub to={capabilityAnchor("serve-embed")} label="Capabilities · Serve & embed" />
   );
 }

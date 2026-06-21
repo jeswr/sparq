@@ -5,6 +5,7 @@ import type { Metadata } from "next";
 // (research §7), so this is a CLIENT REDIRECT STUB that sends inbound links to the surface's
 // new home under the "Search & GenAI" theme.
 import { RedirectStub } from "@/components/redirect-stub";
+import { capabilityAnchor } from "@/data/capabilities";
 
 export const metadata: Metadata = {
   title: "Moved to Capabilities",
@@ -14,6 +15,6 @@ export const metadata: Metadata = {
 
 export default function vectorRedirectPage() {
   return (
-    <RedirectStub to="/capabilities#search-genai" label="Capabilities · Search & GenAI" />
+    <RedirectStub to={capabilityAnchor("search-genai")} label="Capabilities · Search & GenAI" />
   );
 }
