@@ -34,17 +34,18 @@
 //! ```
 
 use oxrdf::Term;
+use sparq_core::Graph;
 use sparq_engine::QueryResult;
-use sparq_kb::query::{ask_pkg, canned, load_pkg};
+use sparq_kb::query::{ask_pkg, canned, load_pkg, nl_tool};
 
 fn usage() -> &'static str {
     "\
-pkg-query — introspect → ground → ask over the ingested PKG (sq-2m6zm.3)
+pkg-query — introspect → ground → ask over the ingested PKG (sq-2m6zm.3, sq-ve5dy)
 
 USAGE:
   pkg-query --list
-  pkg-query --query <name> [--arg <value>] [--close rdfs|owl-rl] [--sparql-only]
-  pkg-query --sparql '<SPARQL SELECT/ASK>' [--close rdfs|owl-rl]
+  pkg-query --query <name> [--arg <value>] [--close rdfs|owl-rl] [--sparql-only] [--json]
+  pkg-query --sparql '<SPARQL SELECT/ASK>' [--close rdfs|owl-rl] [--json]
 
 OPTIONS:
   --list             list the canned introspect/ground queries and exit
@@ -53,6 +54,9 @@ OPTIONS:
   --sparql <query>   run a raw SPARQL SELECT/ASK string
   --close <profile>  materialise RDFS or OWL-RL closure first (needs --features close)
   --sparql-only      print the executed SPARQL but do not run it (for verification)
+  --json             emit the NL-tool envelope as JSON (answer + executed SPARQL +
+                     resolved IRIs + grounding confidence) — the agent-flavor tool
+                     output (sq-ve5dy)
   -h, --help         show this help
 "
 }
@@ -82,6 +86,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut arg: Option<&str> = None;
     let mut close: Option<&str> = None;
     let mut sparql_only = false;
+    let mut json = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -107,6 +112,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 close = Some(next(args, &mut i, "--close")?);
             }
             "--sparql-only" => sparql_only = true,
+            "--json" => json = true,
             other => return Err(format!("unknown argument `{other}`")),
         }
         i += 1;
@@ -135,37 +141,52 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    // Load the store (optionally closed), then run.
-    let result = run_query(&sparql, close)?;
+    // Load the store (optionally closed).
+    let graph = load_graph(close)?;
+
+    // --json: emit the NL-tool envelope (sq-ve5dy) — answer + executed SPARQL +
+    // resolved IRIs + grounding confidence — the agent-flavor tool output. Canned
+    // queries carry `Confidence::Canned`; a raw query's confidence is derived from its
+    // dictionary grounding.
+    if json {
+        let envelope = match query_name {
+            Some(name) => nl_tool::run_canned(&graph, name, arg)?,
+            None => nl_tool::run_raw(&graph, &sparql)?,
+        };
+        println!("{}", envelope.to_json());
+        return Ok(());
+    }
+
+    // Default human/table output.
+    let result = ask_pkg(&graph, &sparql)?;
     print_table(&result);
     eprintln!("\n{} row(s).", result.rows.len());
     Ok(())
 }
 
-/// Run `sparql` over the PKG, optionally under an RDFS/OWL-RL closure. The closure path
-/// is only available when the crate is built with `--features close`.
-fn run_query(sparql: &str, close: Option<&str>) -> Result<QueryResult, String> {
+/// Load the PKG store, optionally under an RDFS/OWL-RL closure. The closure path is only
+/// available when the crate is built with `--features close`. Shared by both the table
+/// output and the `--json` NL-tool envelope so the two cannot diverge on what data they
+/// answer over.
+fn load_graph(close: Option<&str>) -> Result<Graph, String> {
     match close {
-        None => {
-            let g = load_pkg()?;
-            ask_pkg(&g, sparql)
-        }
-        Some(profile) => run_closed(sparql, profile),
+        None => load_pkg(),
+        Some(profile) => load_closed(profile),
     }
 }
 
 #[cfg(feature = "close")]
-fn run_closed(sparql: &str, profile: &str) -> Result<QueryResult, String> {
+fn load_closed(profile: &str) -> Result<Graph, String> {
     use sparq_kb::query::close::{load_pkg_closed, Profile};
     let profile = Profile::parse(profile)
         .ok_or_else(|| format!("unknown closure profile `{profile}` (use rdfs|owl-rl)"))?;
     let (g, entailed) = load_pkg_closed(profile)?;
     eprintln!("--- closure: {entailed} entailed triple(s) materialised ---");
-    ask_pkg(&g, sparql)
+    Ok(g)
 }
 
 #[cfg(not(feature = "close"))]
-fn run_closed(_sparql: &str, _profile: &str) -> Result<QueryResult, String> {
+fn load_closed(_profile: &str) -> Result<Graph, String> {
     Err("--close needs the `close` feature: rebuild with --features close".into())
 }
 

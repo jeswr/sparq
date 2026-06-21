@@ -213,6 +213,47 @@ cargo run -p sparq-kb --features close --bin pkg-query -- --close owl-rl \
             SELECT (COUNT(*) AS ?n) WHERE { ?b dcterms:identifier "sq-8thu" . ?b pkg:blockedBy ?d }'
 ```
 
+## The natural-language tool (agent flavor) — `sq-ve5dy`
+
+Instead of writing the SPARQL yourself, you can delegate the whole round-trip to a
+**cheap-model (Haiku) sub-agent** so the expensive orchestrator only emits a plain-English
+question and reads a short answer. The sub-agent (`.claude/agents/sparq-pkg-nl.md`,
+`model: haiku`) does NL → introspect → ground → SPARQL → run → NL answer itself.
+
+**Soundness guardrail (load-bearing):** the tool ALWAYS returns the **executed SPARQL +
+resolved IRIs + grounding confidence** so the caller can verify the answer was *computed*,
+not guessed — it never silently answers from a guessed query. `pkg-query --json` emits this
+**NL-tool envelope** (`crates/sparq-kb/src/query/nl_tool.rs`):
+
+```bash
+cargo run -q -p sparq-kb --features query --bin pkg-query -- --query schema-classes --json
+```
+
+```json
+{
+  "answer": "5 row(s). Columns: class, instances.\n- Task | 1255\n- Finding | 11 …",
+  "executed_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> SELECT ?class …",
+  "resolved_iris": ["http://www.w3.org/1999/02/22-rdf-syntax-ns#type"],
+  "ungrounded_iris": [],
+  "hints": [],
+  "row_count": 5,
+  "confidence": "canned"
+}
+```
+
+`confidence` is a **query-grounding** signal (NOT an answer-correctness claim): `canned` =
+a curated template; `grounded` = a raw query whose every term exists in the data;
+`ungrounded` = a raw query that used a term the data lacks (so it matched nothing — the
+`hints` give same-namespace repair candidates; re-ground and re-run before trusting it). The
+deterministic `answer` is the engine's computed rows; the cheap model rephrases it. The
+**PRODUCT flavor** (sparq calling a configurable cheap-model endpoint as a real GenAI
+integration) needs sparq's own API key (an external-credential dependency) and is a
+follow-up — only the **agent flavor** (no API key) ships here.
+
+> **Honesty.** Whether routing PKG access through a cheap-model sub-agent actually cuts the
+> orchestrator's *model-price-weighted* cost is **measured by sq-2m6zm.4 / sq-jgi97**, not
+> claimed here.
+
 ## When NOT to use this
 
 - The fact is **not in the head slice** (PKG is a Phase-1 subset) → an empty/partial
@@ -226,12 +267,16 @@ cargo run -p sparq-kb --features close --bin pkg-query -- --close owl-rl \
 
 ## Where this lives
 
-- Helper binary: `crates/sparq-kb/src/bin/pkg_query.rs` (`--bin pkg-query`).
+- Helper binary: `crates/sparq-kb/src/bin/pkg_query.rs` (`--bin pkg-query`; `--json`
+  emits the NL-tool envelope).
 - Canned queries (the library the binary + the test share):
   `crates/sparq-kb/src/query/canned.rs`.
+- NL-tool envelope (`sq-ve5dy`): `crates/sparq-kb/src/query/nl_tool.rs`
+  (`run_canned` / `run_raw` → `NlToolResult`).
+- Agent-flavor sub-agent (`model: haiku`): `.claude/agents/sparq-pkg-nl.md`.
 - Loader + optional closure: `crates/sparq-kb/src/lib.rs` (`query` / `query::close` modules).
-- Rot-guard test: `crates/sparq-kb/tests/query_canned.rs`
-  (`cargo test -p sparq-kb --features query --test query_canned`; add `--features close`
-  for the closure test).
+- Rot-guard tests: `crates/sparq-kb/tests/query_canned.rs` and
+  `crates/sparq-kb/tests/nl_tool.rs`
+  (`cargo test -p sparq-kb --features query`; add `--features close` for the closure test).
 - Ontology + data: `crates/sparq-kb/ontology/pkg/pkg.ttl`,
   `crates/sparq-kb/ingest/pkg-instances.ttl`.

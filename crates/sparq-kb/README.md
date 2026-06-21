@@ -79,6 +79,11 @@ the §4.1 ready-frontier — returning the minimal triples computed by the engin
 - **Opt-in by construction** — default build is data + constants only; the
   `validate` feature is the only thing that pulls in `sparq-core` + `sparq-shacl`.
 - **No-drift guard** — `vocab.rs` is byte-pinned against `pkg.ttl` by a sync test.
+- **NL-tool envelope** (`query` feature, `sq-ve5dy`) — `query::nl_tool` runs a query
+  and returns the **executed SPARQL + resolved IRIs + grounding confidence** so the
+  caller can verify the answer was computed, not guessed; `pkg-query --json` emits it.
+  The `model: haiku` agent-flavor sub-agent (`.claude/agents/sparq-pkg-nl.md`) drives
+  it so the orchestrator pays cheap-model tokens for the verbose middle.
 
 ## 📚 Learn more
 
