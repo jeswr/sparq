@@ -10,6 +10,7 @@
     "frontendDist": "../app/out"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "sparq — RDF + SPARQL workbench",
@@ -22,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: http: ipc: http://ipc.localhost"
     }
   },
   "bundle": {

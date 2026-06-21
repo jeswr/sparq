@@ -20,12 +20,19 @@ import {
   streamQueryRows,
   type SparqlBinding,
   type SparqlResults,
+  type SparqlTerm,
   type WasmStore,
   type WasmStoreCtor,
 } from "@sparq/client";
 
 import { basePath } from "@/lib/base-path";
 import { SAMPLE_TURTLE, SAMPLE_FORMAT } from "@/data/sample-graph";
+import {
+  hasNativeLoader,
+  nativeLoadPath,
+  nativeLoadText,
+  type LoadedDocument,
+} from "@/lib/tauri-ipc";
 
 /**
  * Internal sentinel thrown out of the streaming loop when the caller's {@link AbortSignal} fires,
@@ -115,6 +122,51 @@ export const DEFAULT_ROW_CAP = 5_000;
 /** The batch size {@link streamQueryRows} pulls per cursor step (one batch held at a time). */
 const STREAM_BATCH_SIZE = 1_000;
 
+/** Where an import came from — drives the source kind recorded in the workspace metadata. */
+export type ImportKind = "file" | "url" | "paste";
+
+/** Whether an import REPLACES the live store or ADDS (merges) into it. */
+export type ImportMode = "replace" | "add";
+
+/** A request to bring RDF into the live store via the Import drawer. */
+export interface ImportRequest {
+  kind: ImportKind;
+  /** REPLACE the store, or merge into it. */
+  mode: ImportMode;
+  /** Preserve named graphs (route quad-bearing formats through the dataset loader). */
+  preserveGraphs: boolean;
+  /** A human label for the source (filename / URL tail / "pasted document"). */
+  label: string;
+  /** The RDF serialisation to parse the document as (e.g. `turtle` / `nquads` / `hdt`). */
+  format: string;
+  /**
+   * For `kind: "file"` — the disk path (the native loader reads + decodes it, incl. compressed
+   * + native-only HDT). Mutually exclusive with `text`.
+   */
+  path?: string;
+  /**
+   * For `kind: "paste"` / `"url"` — the document body. Mutually exclusive with `path`. (The URL
+   * fetch happens in the drawer; the fetched body is passed here.)
+   */
+  text?: string;
+  /** For `kind: "url"` — the source URL, recorded so the workspace source is re-fetchable. */
+  url?: string;
+}
+
+/** The outcome of a successful import — what the drawer reports + records as workspace metadata. */
+export interface ImportResult {
+  /** Quads ADDED by this import (the parsed document's whole-dataset count). */
+  added: number;
+  /** Total quads in the live store after the import. */
+  storeSize: number;
+  /** Whether the native (Tauri) loader handled it, or the in-tab WASM fallback did. */
+  loadedNatively: boolean;
+  /** The format the document was actually parsed as. */
+  format: string;
+  /** UTF-8 byte length of the imported document body (best-effort; for an "≈N bytes" note). */
+  bytes: number;
+}
+
 export interface EngineContextValue {
   status: EngineStatus;
   /** Total quads in the live store (default + all named graphs). */
@@ -142,6 +194,26 @@ export interface EngineContextValue {
    * bundle lacks the serialise binding. The serialise-rdf binding is in the GUI's wasm bundle.
    */
   serializeStore: () => string | null;
+  /**
+   * [OPUS-4.8] sq-ixc3.13 — bring RDF into the live store via the Import drawer. A `file` import
+   * (a disk path) goes through the NATIVE loader (`load_path`: threads, no wasm-tab ceiling,
+   * compressed streams, native-only HDT) when running inside the Tauri desktop shell; `paste` /
+   * `url` documents go through the native `load_text` there too, so named graphs are preserved by
+   * the SAME engine path. On the hosted web target (no native loader) `paste` / `url` parse in
+   * the in-tab WASM engine (no disk / compressed-file / HDT path — the drawer says so honestly).
+   * `mode: "add"` MERGES into the current store (named-graph-preserving) instead of replacing it.
+   * Resolves with the import outcome; rejects with the loader's error message on a parse failure.
+   */
+  importRdf: (req: ImportRequest) => Promise<ImportResult>;
+  /** True when the native loader IPC is available (inside the Tauri desktop shell). */
+  nativeLoaderAvailable: boolean;
+  /**
+   * [OPUS-4.8] sq-ixc3.13 — the whole-dataset N-QUADS snapshot of the live store (default graph +
+   * every named graph), the save/open cache a workspace persists as its `dataSnapshot` (sq-atb0).
+   * N-Quads (not the TriG `serializeStore` emits) because that is the workspace snapshot format,
+   * and it agrees byte-for-byte with the "add to current" merge path. `null` before warm.
+   */
+  snapshotStore: () => string | null;
 }
 
 const EngineContext = React.createContext<EngineContextValue | null>(null);
@@ -161,6 +233,69 @@ function classifyQuery(q: string): "select" | "ask" | "construct" | "describe" |
   if (["INSERT", "DELETE", "LOAD", "CLEAR", "CREATE", "DROP", "COPY", "MOVE", "ADD"].includes(kw))
     return "update";
   return "select";
+}
+
+// [OPUS-4.8] sq-ixc3.13 — the all-quads N-Quads (de)serialisation the Import drawer's MERGE
+// path uses. The wasm `Store.serialize` binding does NOT emit N-Triples/N-Quads (only
+// turtle/trig/jsonld — see `serializeStore` below), and the framework-agnostic `@sparq/client`
+// deliberately leaves the dataset-format opinion (which formats carry named graphs) to the
+// host. So this small, well-understood serialiser lives here: SELECT every quad over the live
+// store and emit one N-Quads line per solution, exactly the shape the site's `storeToNQuads`
+// (site/src/lib/repl-dataset.ts) produces. The merge then concatenates this with the incoming
+// document's N-Quads and re-loads with `loadDataset(_, "nquads")`, so BOTH stores' named graphs
+// survive the round-trip.
+
+/** SELECT every quad (default graph as the unbound `?g`, plus every named graph). */
+const ALL_QUADS_QUERY =
+  "SELECT ?s ?p ?o ?g WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }";
+
+const XSD_STRING = "http://www.w3.org/2001/XMLSchema#string";
+
+/** Escape a literal lexical form for an N-Triples/N-Quads double-quoted string. */
+function escapeNTLiteral(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+}
+
+/**
+ * Emit a single canonical N-Triples/N-Quads TERM (IRI / blank node / literal) from a SPARQL-JSON
+ * term. Unlike `formatTerm` (a DISPLAY helper that abbreviates the datatype to `xsd:…`, which is
+ * NOT valid N-Triples), this writes the FULL datatype IRI and escapes the lexical form, so the
+ * re-load of the merged N-Quads parses losslessly.
+ */
+function termToNT(t: SparqlTerm): string {
+  if (t.type === "uri") return `<${t.value}>`;
+  if (t.type === "bnode") return `_:${t.value}`;
+  // Literal.
+  const lex = `"${escapeNTLiteral(t.value)}"`;
+  if (t["xml:lang"]) return `${lex}@${t["xml:lang"]}`;
+  if (t.datatype && t.datatype !== XSD_STRING) return `${lex}^^<${t.datatype}>`;
+  return lex;
+}
+
+/**
+ * Serialise the WHOLE dataset of the live store (default graph + every named graph) to N-Quads,
+ * one line per quad. Used as the LEFT side of the "add to current" merge. An empty store yields
+ * `""`.
+ */
+function storeToNQuads(store: WasmStore): string {
+  const json = store.query(ALL_QUADS_QUERY);
+  const parsed = JSON.parse(json) as SparqlResults;
+  const lines: string[] = [];
+  for (const b of parsed.results?.bindings ?? []) {
+    const s = b["s"];
+    const p = b["p"];
+    const o = b["o"];
+    if (!s || !p || !o) continue;
+    const g = b["g"];
+    const tail = g ? ` ${termToNT(g)}` : "";
+    lines.push(`${termToNT(s)} ${termToNT(p)} ${termToNT(o)}${tail} .`);
+  }
+  return lines.join("\n");
 }
 
 /** Summarise the live store into per-graph counts via a single grouped query. */
@@ -243,6 +378,83 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     setStoreSize(size);
     setGraphs(gs);
   }, []);
+
+  // [OPUS-4.8] sq-ixc3.13 — the Import drawer's ingest. A `file` import (a disk path) goes
+  // through the NATIVE loader IPC (`load_path`: compressed + native-only HDT, no wasm-tab
+  // ceiling) inside the Tauri shell; `paste`/`url` documents go through native `load_text` there
+  // too. Either way the loader hands back the document as N-QUADS (named-graph-preserving), which
+  // we MERGE (concatenate with the live store's N-Quads) or REPLACE, then re-load with
+  // `loadDataset(_, "nquads")` so every named graph of both sides survives. On the hosted web
+  // target (no native loader), `paste`/`url` parse directly in the in-tab WASM engine; a `file`
+  // import is rejected there with a clear message (browsers cannot read an arbitrary disk path).
+  const importRdf = React.useCallback(
+    async (req: ImportRequest): Promise<ImportResult> => {
+      const Store = ctorRef.current;
+      if (!Store) {
+        throw new Error("The engine is not ready yet — wait for the store to warm.");
+      }
+
+      // 1. Decode the incoming document to N-Quads (native loader when available, else in-tab).
+      let incomingNQuads: string;
+      let added: number;
+      let format = req.format;
+      let loadedNatively = false;
+      let bytes = req.text ? new Blob([req.text]).size : 0;
+
+      const native = hasNativeLoader();
+      if (req.kind === "file") {
+        if (!native || !req.path) {
+          throw new Error(
+            "Importing a file from disk needs the desktop app (the native loader). On the web " +
+              "target, paste the document or load it by URL instead.",
+          );
+        }
+        const doc = await nativeLoadPath(req.path, req.format, req.preserveGraphs);
+        if (!doc) throw new Error("The native loader is unavailable.");
+        incomingNQuads = doc.nquads;
+        added = doc.count;
+        format = doc.format;
+        loadedNatively = true;
+        bytes = new Blob([incomingNQuads]).size;
+      } else {
+        // paste / url — a document body in `req.text`.
+        const text = req.text ?? "";
+        const doc: LoadedDocument | null = native
+          ? await nativeLoadText(text, req.format, req.preserveGraphs)
+          : null;
+        if (doc) {
+          incomingNQuads = doc.nquads;
+          added = doc.count;
+          format = doc.format;
+          loadedNatively = true;
+        } else {
+          // In-tab WASM parse: build a store from the incoming doc, then serialise to N-Quads.
+          const incomingStore = req.preserveGraphs
+            ? Store.loadDataset(text, req.format)
+            : Store.load(text, req.format);
+          incomingNQuads = storeToNQuads(incomingStore);
+          added = incomingNQuads === "" ? 0 : incomingNQuads.split("\n").length;
+        }
+      }
+
+      // 2. Merge (add) or replace, then re-load the whole dataset as N-Quads.
+      let combined = incomingNQuads;
+      if (req.mode === "add" && storeRef.current) {
+        const current = storeToNQuads(storeRef.current);
+        combined = current === "" ? incomingNQuads : `${current}\n${incomingNQuads}`;
+      }
+      const merged = Store.loadDataset(combined, "nquads");
+      storeRef.current = merged;
+
+      // 3. Refresh the datasets tree + store size from the new store.
+      const { size, graphs: gs } = summariseGraphs(merged);
+      setStoreSize(size);
+      setGraphs(gs);
+
+      return { added, storeSize: size, loadedNatively, format, bytes };
+    },
+    [],
+  );
 
   const run = React.useCallback(
     async (query: string, opts: RunOptions = {}): Promise<RunResult> => {
@@ -370,9 +582,46 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     return store.serialize("trig", false, null, false, null);
   }, []);
 
+  // [OPUS-4.8] sq-ixc3.13 — the N-Quads whole-dataset snapshot the workspace persists (sq-atb0).
+  const snapshotStore = React.useCallback((): string | null => {
+    const store = storeRef.current;
+    if (!store) return null;
+    return storeToNQuads(store);
+  }, []);
+
+  // [OPUS-4.8] sq-ixc3.13 — whether the native loader IPC is reachable (inside the Tauri shell).
+  // Computed once on mount (the runtime never changes mid-session) so the status bar / drawer can
+  // label the loader honestly without re-detecting on every render.
+  const [nativeLoaderAvailable, setNativeLoaderAvailable] = React.useState(false);
+  React.useEffect(() => {
+    setNativeLoaderAvailable(hasNativeLoader());
+  }, []);
+
   const value = React.useMemo<EngineContextValue>(
-    () => ({ status, storeSize, graphs, lastLatencyMs, lastRowCount, run, serializeStore }),
-    [status, storeSize, graphs, lastLatencyMs, lastRowCount, run, serializeStore],
+    () => ({
+      status,
+      storeSize,
+      graphs,
+      lastLatencyMs,
+      lastRowCount,
+      run,
+      serializeStore,
+      importRdf,
+      nativeLoaderAvailable,
+      snapshotStore,
+    }),
+    [
+      status,
+      storeSize,
+      graphs,
+      lastLatencyMs,
+      lastRowCount,
+      run,
+      serializeStore,
+      importRdf,
+      nativeLoaderAvailable,
+      snapshotStore,
+    ],
   );
 
   return <EngineContext.Provider value={value}>{children}</EngineContext.Provider>;

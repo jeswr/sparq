@@ -19,7 +19,7 @@
 // system browser (the design's rule: the GUI never renders the site, it links to it).
 
 import * as React from "react";
-import { PanelsTopLeft, X, Layers } from "lucide-react";
+import { PanelsTopLeft, X, Layers, Upload } from "lucide-react";
 
 import { LeftRail } from "@/components/workbench/left-rail";
 import { TopBar } from "@/components/workbench/top-bar";
@@ -37,6 +37,12 @@ import {
 } from "@/components/workbench/command-palette";
 import { WorkbenchProvider, type WorkbenchActions } from "@/components/workbench/workbench-context";
 import { graphLabel, type PaletteCommand } from "@/lib/palette-commands";
+// [OPUS-4.8] sq-ixc3.13 — the Import drawer (real disk/URL/paste ingest via the native loader)
+// is mounted once here and opened from the rail's "+ Import", the top bar, and Cmd-K.
+import {
+  ImportDrawerProvider,
+  useImportDrawer,
+} from "@/components/workbench/import-drawer";
 
 /** An open tab in the IDE tab strip — keyed by tool id (a tool opens at most once). */
 export interface OpenTab {
@@ -87,6 +93,7 @@ export function Workbench() {
     // keyboard-first spine) + the shell-actions provider, both mounted ONCE here.
     <CommandPaletteProvider>
       <WorkbenchProvider actions={actions}>
+        <ImportDrawerProvider>
         <ShellPaletteCommands
           tabs={tabs}
           activeId={activeId}
@@ -121,6 +128,7 @@ export function Workbench() {
             </main>
           </div>
         </div>
+        </ImportDrawerProvider>
       </WorkbenchProvider>
     </CommandPaletteProvider>
   );
@@ -144,9 +152,22 @@ function ShellPaletteCommands({
   onCloseTab: (toolId: string) => void;
 }) {
   const { graphs } = useEngine();
+  // [OPUS-4.8] sq-ixc3.13 — the Cmd-K entry point for the Import drawer.
+  const { setOpen: setImportOpen } = useImportDrawer();
 
   const commands = React.useMemo<PaletteCommand[]>(() => {
     const cmds: PaletteCommand[] = [];
+
+    // [OPUS-4.8] sq-ixc3.13 — the lead ACTION: open the Import drawer (real disk/URL/paste ingest).
+    cmds.push({
+      id: "action.import",
+      group: "Actions",
+      title: "Import data…",
+      blurb: "Load RDF from a file (compressed / HDT), a URL, or pasted text into the store.",
+      keywords: ["import", "load", "data", "file", "url", "paste", "rdf", "hdt", "open dataset"],
+      icon: Upload,
+      run: () => setImportOpen(true),
+    });
 
     // Every TOOL as an "open …" command. A `built` tool opens its working tab; a stub still opens
     // (the panel states its tier + what it will do honestly — no fabricated result).
@@ -202,7 +223,7 @@ function ShellPaletteCommands({
     }
 
     return cmds;
-  }, [tabs, activeId, graphs, onOpenTool, onSelectTab, onCloseTab]);
+  }, [tabs, activeId, graphs, onOpenTool, onSelectTab, onCloseTab, setImportOpen]);
 
   useRegisterPaletteCommands("shell", commands);
   return null;

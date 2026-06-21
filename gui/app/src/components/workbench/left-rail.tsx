@@ -10,10 +10,12 @@
 //   (3) TOOLS list — each a VERB opened as a tab with an honesty-tier dot (NOT a page).
 
 import * as React from "react";
-import { ChevronDown, Plus, Circle, Database, FolderTree } from "lucide-react";
+import { ChevronDown, Plus, Circle, Database, FolderTree, FileUp, Link2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useEngine } from "@/lib/engine-context";
+import { useWorkspace } from "@/lib/workspace-context";
+import { useImportDrawer } from "@/components/workbench/import-drawer";
 import { TIER_META, type ToolDef } from "@/data/tools";
 
 interface LeftRailProps {
@@ -31,6 +33,10 @@ function shortenGraph(iri: string | null): string {
 
 function DatasetsTree() {
   const { graphs, status } = useEngine();
+  // [OPUS-4.8] sq-ixc3.13 — the live Imports subgroup (WorkspaceSourceMeta) + the working
+  // "+ Import" entry point that opens the Import drawer.
+  const { sources } = useWorkspace();
+  const { setOpen } = useImportDrawer();
   return (
     <div className="px-1 pb-2">
       {status.kind !== "ready" ? (
@@ -56,11 +62,48 @@ function DatasetsTree() {
           ))}
         </ul>
       )}
-      {/* Imports subgroup placeholder — the real WorkspaceSourceMeta list is sq-ixc3.13. */}
+
+      {/* [OPUS-4.8] sq-ixc3.13 — the Imports subgroup: the active workspace's WorkspaceSourceMeta
+          list (local files + re-fetchable URL sources), most recent first. */}
+      {sources.length > 0 && (
+        <div className="mt-2">
+          <h3 className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Imports
+          </h3>
+          <ul className="space-y-0.5">
+            {[...sources]
+              .sort((a, b) => b.importedAt - a.importedAt)
+              .map((s) => (
+                <li
+                  key={`${s.kind}-${s.label}-${s.importedAt}`}
+                  className="flex items-center gap-1.5 rounded px-2 py-1 text-xs hover:bg-sidebar-accent/40"
+                  title={
+                    s.kind === "url" && s.url
+                      ? `${s.url} · ${s.format}`
+                      : `${s.label} · ${s.format} (re-hydrated from the workspace snapshot)`
+                  }
+                >
+                  {s.kind === "url" ? (
+                    <Link2 className="size-3 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <FileUp className="size-3 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate">{s.label}</span>
+                  <span className="tabular text-[10px] uppercase text-muted-foreground">
+                    {s.format}
+                  </span>
+                </li>
+              ))}
+          </ul>
+        </div>
+      )}
+
+      {/* [OPUS-4.8] sq-ixc3.13 — the working "+ Import" entry point (opens the Import drawer). */}
       <button
-        className="mt-1 flex w-full cursor-not-allowed items-center gap-1.5 rounded px-2 py-1 text-xs text-muted-foreground"
-        title="Import RDF from disk / URL / paste — the import drawer is a later phase"
-        disabled
+        onClick={() => setOpen(true)}
+        className="mt-1 flex w-full items-center gap-1.5 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-sidebar-accent/40 hover:text-foreground"
+        title="Import RDF from a disk file (compressed / HDT), a URL, or pasted text"
+        data-import-trigger="rail"
       >
         <Plus className="size-3" /> Import
       </button>

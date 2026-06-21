@@ -6,10 +6,11 @@ epic `sq-ixc3`). It is a **DISTINCT app, not the marketing site in a window**: a
 workbench (left rail · thin top bar · IDE tab strip · status bar) over a live engine, where the
 showcase capabilities are TOOLS you run, not pages that describe them.
 
-> **Foundation shell.** This PR stands up the distinct frontend + app shell with a working Query
-> tool over the live in-tab engine; the other TOOLS open as honest stubs the later phases fill
-> (Cmd-K palette `sq-ixc3.10`, the multi-view query workbench `sq-ixc3.12`, the import drawer
-> `sq-ixc3.13`, surfaces-as-tools `sq-ixc3.11`). The full per-platform desktop `cargo tauri build`
+> **Foundation shell.** The distinct frontend + app shell stands up a working Query tool over the
+> live in-tab engine, the Cmd-K palette (`sq-ixc3.10`), the multi-view query workbench
+> (`sq-ixc3.12`), surfaces-as-tools (`sq-ixc3.11`), and the **Import drawer** (`sq-ixc3.13` — real
+> disk/URL/paste ingest via the native loader); the remaining TOOLS open as honest stubs the later
+> phases fill. The full per-platform desktop `cargo tauri build`
 > needs the webview **system libraries** (webkit2gtk on Linux, WebView2 on Windows, WKWebView on
 > macOS) validated in CI ([`.github/workflows/gui.yml`](../.github/workflows/gui.yml)), not
 > necessarily on every dev box.
@@ -61,7 +62,8 @@ gui/
     src/
       main.rs           # desktop binary -> sparq_gui_lib::run()
       lib.rs            # Tauri builder: manages EngineState, registers the command handlers
-      engine.rs         # the DIRECT native engine link: load/query/queryQuads/update/explain/count/ask
+      engine.rs         # the DIRECT native engine link: load/query/.../ask + the Import drawer's
+                        #   native loader (load_path/load_text: compressed + native-only HDT)
 ```
 
 ## The app shell (sq-ixc3.9)
@@ -70,8 +72,9 @@ gui/
 
 - **Left rail** (`w-56`): a workspace switcher (the persistent model is `sq-atb0`; foundation =
   default), a **datasets tree of the live store** (default + named graphs with per-graph counts)
-  with an `+ Import` entry point, and the **TOOLS** list — each a VERB opened as a tab with an
-  honesty-tier dot, never a page describing the feature.
+  with an **Imports** subgroup (the active workspace's `WorkspaceSourceMeta` — file + re-fetchable
+  URL sources) and a working `+ Import` entry point (opens the Import drawer), and the **TOOLS**
+  list — each a VERB opened as a tab with an honesty-tier dot, never a page describing the feature.
 - **Top bar** (`h-10`): a LOCAL⇄ENDPOINT target switch, the store size, a ⌘K hint, a theme toggle,
   and an engine status LED.
 - **IDE tab strip** + a full-bleed work area (default = Query).
@@ -84,9 +87,18 @@ gui/
 `sparq_core::Graph` behind a `Mutex`, with Tauri commands that mirror the wasm `Store` surface
 (`load` / `query` / `query_quads` / `update_in_place` / `explain` / `explain_analyze` / `count` /
 `ask` / `store_size`) but backed by the full native store. Its `#[cfg(test)]` tests exercise the
-engine calls directly. The foundation frontend runs the in-tab WASM engine in BOTH targets (the
-honest, working-today path); swapping the desktop target onto this IPC command layer is a later
-phase (`sq-ixc3.6`).
+engine calls directly. The foundation frontend runs the in-tab WASM engine in BOTH targets for
+**query** (the honest, working-today path).
+
+For **ingest**, the Import drawer (`sq-ixc3.13`) calls the engine's **native loader** IPC
+(`load_path` / `load_text`) when running in the desktop shell: a disk file — including
+**compressed** (`.gz` / `.bz2` / `.zst`) streams and **native-only HDT** (`.hdt` / `.hdt.gz`,
+behind the crate's opt-in `hdt` feature) — is decoded by the native engine (threads, no ~2 GiB
+wasm-tab ceiling) and handed back as N-Quads for the in-tab store to merge (named-graph-
+preserving). On the hosted web target, the drawer's paste/URL tabs parse in the in-tab WASM
+engine instead (no compressed-file / HDT path — the drawer says so). A successful import records a
+`WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full on-disk
+workspace persistence path activates once the shell grants the `fs` capability (`sq-ixc3.6`).
 
 ## Shared TS client
 
