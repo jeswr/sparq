@@ -54,6 +54,22 @@
 //! [`run_ablation_multiseed`] to report each cell's metric as a **mean ± std over several seeds**
 //! before treating any delta as real; a delta smaller than the combined spread is not yet evidence.
 //!
+//! # Paired deltas: the variance-reduction that lets a real effect clear the spread (sq-4891y)
+//!
+//! Reporting two cells as `mean ± std` and eyeballing whether the *means* differ by more than the
+//! *spreads* is the **unpaired** comparison — and it is needlessly noisy here. The four cells of one
+//! seed are trained on the **same split with the same negatives draw and the same init stream**
+//! (common random numbers): the bulk of the per-seed variance is *shared* between the closure-ON and
+//! closure-OFF cells and **cancels in their difference**. The correct statistic is therefore the
+//! **paired** per-seed delta `Δ_s = MRR(closure ON) − MRR(closure OFF)`, aggregated as a mean ± std
+//! over seeds. Its standard error `std(Δ)/√n` shrinks with `n`, and because the shared noise
+//! cancels, `std(Δ)` is typically **far smaller** than `std(cellA) + std(cellB)` — so a real effect
+//! that the unpaired view cannot distinguish from noise can clear the *paired* spread. [`run_ablation_multiseed_paired`]
+//! returns the per-axis [`PairedDelta`]s alongside the per-cell aggregates, with a
+//! [`PairedDelta::significant_at`] gate (mean − k·SE > 0). **The honesty posture is unchanged:** a
+//! prior is adopted only when the paired delta is significant *on a schema-bearing KG under the
+//! asymmetric model*, never on a single seed and never on a schema-free slice the prior cannot bite.
+//!
 //! # Honesty
 //!
 //! **No numbers live in this file or any committed doc.** The harness *computes* them at run time
@@ -589,6 +605,78 @@ pub struct MultiSeedCell {
     pub head: CellStats,
 }
 
+/// A **paired** per-seed delta of one metric between two cells, aggregated over seeds (sq-4891y).
+///
+/// Because the four ablation cells of a single seed share the split, init stream, and negative draws
+/// (common random numbers), the per-seed difference `Δ_s = metric(on) − metric(off)` cancels the
+/// shared noise. The mean of `Δ` estimates the true effect; `std(Δ)` is the *paired* spread — almost
+/// always much smaller than the sum of the two cells' unpaired stds — and `se = std(Δ)/√n` is the
+/// standard error of the mean. This is the statistic the firm-up gate ([`significant_at`]) reads:
+/// the effect is evidence only when its mean clears a multiple of its **paired** spread, not the
+/// inflated unpaired one. **No threshold is hard-coded** — the caller chooses `k`.
+///
+/// [`significant_at`]: PairedDelta::significant_at
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PairedDelta {
+    /// Mean of the per-seed paired delta `metric(on) − metric(off)` (the effect estimate).
+    pub mean: f64,
+    /// Population standard deviation of the per-seed paired delta (the **paired** spread).
+    pub std: f64,
+    /// Standard error of the mean: `std / √n` (0 for a single seed — undefined spread).
+    pub se: f64,
+    /// Number of seeds (paired samples).
+    pub n: usize,
+}
+
+impl PairedDelta {
+    /// Aggregate per-seed paired deltas `xs[s] = metric(on)_s − metric(off)_s` into mean/std/se.
+    fn of(xs: &[f64]) -> PairedDelta {
+        let ms = MeanStd::of(xs);
+        let se = if ms.n > 0 {
+            ms.std / (ms.n as f64).sqrt()
+        } else {
+            0.0
+        };
+        PairedDelta {
+            mean: ms.mean,
+            std: ms.std,
+            se,
+            n: ms.n,
+        }
+    }
+
+    /// Is the (positive) effect significant at `k` standard errors — i.e. `mean − k·se > 0`?
+    ///
+    /// This is the firm-up gate the bead (sq-4891y) requires before adopting the closure prior: the
+    /// *paired* effect must clear `k` standard errors of its own (variance-reduced) spread. With a
+    /// single seed `se == 0`, so any strictly-positive mean is trivially "significant" — which is
+    /// exactly why the gate is meaningful **only** for `n ≥ 2` (assert it in the caller). `k = 1` is
+    /// a one-SE screen; `k = 2` is the conventional ≈95% one-sided bar. The threshold is the
+    /// caller's policy, never baked in.
+    pub fn significant_at(&self, k: f64) -> bool {
+        self.n >= 2 && self.mean - k * self.se > 0.0
+    }
+}
+
+/// The full result of a paired multi-seed ablation (sq-4891y): the per-cell aggregates **plus** the
+/// variance-reduced paired deltas for each prior axis, so a caller can apply a significance gate
+/// without re-deriving the pairing.
+#[derive(Clone, Debug)]
+pub struct PairedAblation {
+    /// The four per-cell aggregates, in the fixed [`run_ablation`] order.
+    pub cells: Vec<MultiSeedCell>,
+    /// Paired MRR delta of the **closure** axis, averaged over the two negative-sampling settings:
+    /// per seed, `½[(MRR(C=on,N=unif) − MRR(C=off,N=unif)) + (MRR(C=on,N=type) − MRR(C=off,N=type))]`.
+    /// This is the headline "closure-prior lift" the firm-up test gates on.
+    pub closure_mrr: PairedDelta,
+    /// Paired MRR delta of the closure axis on the **long-tail** (rare-answer) bucket — where the
+    /// closure-materialised types most plausibly help cold/rare entities.
+    pub closure_mrr_tail: PairedDelta,
+    /// Paired MRR delta of the **type-constrained-negatives** axis, averaged over the two closure
+    /// settings (the other P0 prior, reported for completeness).
+    pub type_neg_mrr: PairedDelta,
+}
+
 /// Run the 2×2 ablation once per seed in `seeds` and aggregate each cell's metrics to a mean ± std.
 ///
 /// This is the **adversarial-review answer to single-seed noise**: the harness is deterministic per
@@ -640,6 +728,79 @@ pub fn run_ablation_multiseed(
             }
         })
         .collect())
+}
+
+/// Run the 2×2 ablation per seed and return BOTH the per-cell aggregates and the **paired**
+/// per-axis MRR deltas (sq-4891y) — the variance-reduced statistic the firm-up gate reads.
+///
+/// For each seed the four cells are produced by a single [`run_ablation`] call, so they share the
+/// split / init / negative draws (common random numbers). We therefore form, **per seed**, the
+/// paired closure delta (closure ON − OFF, averaged over the two negative settings) and the paired
+/// type-negative delta, then aggregate each over seeds with its own (small) paired spread. The
+/// cell order is the fixed `[(C=F,N=F), (F,T), (T,F), (T,T)]` of [`run_ablation`].
+///
+/// Use `template.train.model = ModelKind::ComplEx` (the asymmetric model — DistMult is near-random
+/// on directional slices). Pass several seeds; [`PairedDelta::significant_at`] is meaningful only
+/// for `n ≥ 2`.
+pub fn run_ablation_multiseed_paired(
+    text: &str,
+    format: &str,
+    template: EvalConfig,
+    seeds: &[u64],
+) -> Result<PairedAblation, String> {
+    assert!(!seeds.is_empty(), "need at least one seed");
+    let mut samples: Vec<CellSamples> = (0..4).map(|_| CellSamples::default()).collect();
+    let mut shape: Vec<(bool, bool)> = Vec::with_capacity(4);
+
+    // Per-seed paired deltas (one value per seed).
+    let mut closure_overall: Vec<f64> = Vec::with_capacity(seeds.len());
+    let mut closure_tail: Vec<f64> = Vec::with_capacity(seeds.len());
+    let mut type_neg_overall: Vec<f64> = Vec::with_capacity(seeds.len());
+
+    for (si, &seed) in seeds.iter().enumerate() {
+        let mut cfg = template;
+        cfg.split_seed = seed ^ 0xF00D;
+        cfg.train.seed = seed;
+        let cells = run_ablation(text, format, cfg)?;
+        if cells.len() != 4 {
+            return Err(format!("expected 4 cells, got {}", cells.len()));
+        }
+        // Fixed order: 0=(C off,N unif) 1=(C off,N type) 2=(C on,N unif) 3=(C on,N type).
+        let m = |i: usize| cells[i].metrics.mrr;
+        let mt = |i: usize| cells[i].long_tail.tail.mrr;
+        // Closure axis = on − off, averaged over the two negative settings (paired within seed).
+        closure_overall.push(0.5 * ((m(2) - m(0)) + (m(3) - m(1))));
+        closure_tail.push(0.5 * ((mt(2) - mt(0)) + (mt(3) - mt(1))));
+        // Type-negative axis = type − unif, averaged over the two closure settings.
+        type_neg_overall.push(0.5 * ((m(1) - m(0)) + (m(3) - m(2))));
+
+        for (ci, cell) in cells.iter().enumerate() {
+            if si == 0 {
+                shape.push((cell.closure, cell.type_constrained));
+            }
+            samples[ci].push(cell);
+        }
+    }
+
+    let cells = (0..4)
+        .map(|ci| {
+            let (closure, type_constrained) = shape[ci];
+            MultiSeedCell {
+                closure,
+                type_constrained,
+                metrics: samples[ci].overall.finish(),
+                tail: samples[ci].tail.finish(),
+                head: samples[ci].head.finish(),
+            }
+        })
+        .collect();
+
+    Ok(PairedAblation {
+        cells,
+        closure_mrr: PairedDelta::of(&closure_overall),
+        closure_mrr_tail: PairedDelta::of(&closure_tail),
+        type_neg_mrr: PairedDelta::of(&type_neg_overall),
+    })
 }
 
 /// Per-cell accumulator of one metric sample per seed, for the overall/head/tail buckets.
@@ -733,7 +894,27 @@ fn restrict_to_train(graph: &Graph, splits: &Splits) -> Graph {
 /// Returns the serialised Turtle. The vocabulary is namespaced under `http://ex/gufo#` for the gUFO
 /// meta-classes and `http://ex/` for individuals. The generator is deterministic in `seed` and sized
 /// by `n_people` (a few hundred is a good non-trivial work-box size).
+///
+/// This is the default-density slice. For the firm-up test (sq-4891y) use
+/// [`synthetic_gufo_ttl_sized`], which adds a **density** multiplier: a larger, denser test set
+/// shrinks per-seed sampling variance (more held-out triples ⇒ a tighter MRR estimate per seed) and,
+/// importantly, keeps the slice **schema-bearing but less FB237-overfit-prone** — the closure must
+/// still derive the rigid `Person` kind, so the closure axis genuinely bites.
 pub fn synthetic_gufo_ttl(n_people: usize, seed: u64) -> String {
+    synthetic_gufo_ttl_sized(n_people, 1, seed)
+}
+
+/// Density-parameterised [`synthetic_gufo_ttl`] (sq-4891y).
+///
+/// `density` (clamped to `≥ 1`) multiplies the per-person edge propensity and the course/org pools so
+/// the slice carries **more learnable, schema-bearing signal per held-out triple**. The aim is the
+/// firm-up bead's two requirements at once: a *larger/denser* test set (lower per-seed variance, the
+/// (a) ask) on a graph that is *still schema-bearing and not trivially separable* — the rigid
+/// `Person` kind is asserted on **nobody** and must be materialised by the RDFS closure, so closure
+/// genuinely changes the type-constrained negatives (the (b) ask). `density = 1` reproduces
+/// [`synthetic_gufo_ttl`] exactly. Deterministic in `seed`.
+pub fn synthetic_gufo_ttl_sized(n_people: usize, density: usize, seed: u64) -> String {
+    let density = density.max(1);
     let mut state = seed ^ 0x6757_F0F0;
     let mut next = |m: usize| -> usize { (splitmix64(&mut state) as usize) % m.max(1) };
 
@@ -764,8 +945,10 @@ pub fn synthetic_gufo_ttl(n_people: usize, seed: u64) -> String {
     out.push_str("ex:enrolledIn rdfs:domain ex:Student ; rdfs:range ex:Course .\n");
     out.push_str("ex:employedBy rdfs:domain ex:Employee ; rdfs:range ex:Organisation .\n\n");
 
-    let n_org = (n_people / 20).max(2);
-    let n_course = (n_people / 10).max(3);
+    // A denser slice gets a proportionally larger course/org pool so the candidate set per query
+    // still dwarfs the answer set (non-triviality preserved as density grows).
+    let n_org = (n_people / 20).max(2) * density;
+    let n_course = (n_people / 10).max(3) * density;
     for i in 0..n_org {
         out.push_str(&format!("ex:org{} a ex:Organisation .\n", i));
     }
@@ -820,16 +1003,35 @@ pub fn synthetic_gufo_ttl(n_people: usize, seed: u64) -> String {
         }
         // Contingent edges only when the role is held, and only for SOME holders (decoys: a Student
         // not enrolled in anything). The target course/org is community-correlated (community → a
-        // preferred course/org band) so enrolment is learnable.
-        if is_student && next(10) < 7 {
-            let band = comm(i) % n_course;
-            let course = if next(10) < 7 { band } else { next(n_course) };
-            out.push_str(&format!("ex:p{} ex:enrolledIn ex:course{} .\n", i, course));
+        // preferred course/org band) so enrolment is learnable. A `density>1` slice draws up to
+        // `density` DISTINCT such edges per holder (a person can enrol in several courses), which
+        // multiplies the held-out test triples per seed — shrinking the per-seed MRR variance the
+        // firm-up bead targets — while the per-edge ~70% propensity and community bands keep the
+        // decoy set (and thus non-triviality) intact.
+        let n_comm_band = 5usize;
+        if is_student {
+            let mut emitted = std::collections::BTreeSet::new();
+            for d in 0..density {
+                if next(10) < 7 {
+                    let band = (comm(i) + d) % n_comm_band % n_course;
+                    let course = if next(10) < 7 { band } else { next(n_course) };
+                    if emitted.insert(course) {
+                        out.push_str(&format!("ex:p{} ex:enrolledIn ex:course{} .\n", i, course));
+                    }
+                }
+            }
         }
-        if is_employee && next(10) < 7 {
-            let band = comm(i) % n_org;
-            let org = if next(10) < 7 { band } else { next(n_org) };
-            out.push_str(&format!("ex:p{} ex:employedBy ex:org{} .\n", i, org));
+        if is_employee {
+            let mut emitted = std::collections::BTreeSet::new();
+            for d in 0..density {
+                if next(10) < 7 {
+                    let band = (comm(i) + d) % n_comm_band % n_org;
+                    let org = if next(10) < 7 { band } else { next(n_org) };
+                    if emitted.insert(org) {
+                        out.push_str(&format!("ex:p{} ex:employedBy ex:org{} .\n", i, org));
+                    }
+                }
+            }
         }
     }
     out
@@ -1119,6 +1321,121 @@ ex:c ex:rel ex:y .
         assert!(
             any_variance,
             "across 5 seeds at least one cell's MRR must show variance (single-seed deltas are noisy)"
+        );
+    }
+
+    #[test]
+    fn paired_delta_reduces_variance_vs_unpaired() {
+        // The firm-up bead (sq-4891y) rests on this property: the PAIRED closure delta (computed
+        // within each seed, where the four cells share the split/init/negatives) has a SMALLER spread
+        // than the UNPAIRED comparison (the sum of the two cells' independent stds), because the
+        // shared per-seed noise cancels in the difference. We verify the variance reduction directly
+        // on the schema-bearing gUFO slice under the asymmetric model, over enough seeds to estimate
+        // both spreads.
+        use crate::train::ModelKind;
+        let ttl = synthetic_gufo_ttl_sized(200, 3, 0xBEEF);
+        let mut template = EvalConfig::small(0);
+        template.train.model = ModelKind::ComplEx;
+        template.train.epochs = 80;
+        template.train.dim = 48;
+        template.train.negatives_per_positive = 12;
+        let seeds: Vec<u64> = (0..8).map(|i| 100 + i).collect();
+        let r = run_ablation_multiseed_paired(&ttl, "turtle", template, &seeds).unwrap();
+
+        // The unpaired spread proxy: sum of the closure-OFF and closure-ON cells' MRR stds, averaged
+        // over the two negative settings (mirrors how `closure_mrr` averages the two settings).
+        let unpaired = 0.5
+            * ((r.cells[0].metrics.mrr.std + r.cells[2].metrics.mrr.std)
+                + (r.cells[1].metrics.mrr.std + r.cells[3].metrics.mrr.std));
+        assert_eq!(
+            r.closure_mrr.n,
+            seeds.len(),
+            "all seeds contribute to the paired delta"
+        );
+        assert!(
+            r.closure_mrr.std > 0.0 && unpaired > 0.0,
+            "both spreads must be observable (paired std={}, unpaired proxy={})",
+            r.closure_mrr.std,
+            unpaired
+        );
+        // The whole point of pairing: the paired spread is strictly smaller than the unpaired sum.
+        assert!(
+            r.closure_mrr.std < unpaired,
+            "paired delta std ({}) must be smaller than the unpaired sum-of-stds ({}) — common \
+             random numbers cancel the shared per-seed noise",
+            r.closure_mrr.std,
+            unpaired
+        );
+        // The standard error must shrink as std/√n (the variance-reduction mechanism the gate uses).
+        let expected_se = r.closure_mrr.std / (seeds.len() as f64).sqrt();
+        assert!(
+            (r.closure_mrr.se - expected_se).abs() < 1e-9,
+            "se must equal std/√n"
+        );
+    }
+
+    #[test]
+    fn paired_delta_significance_gate_is_honest() {
+        // `significant_at` must be a genuine gate, not a rubber stamp: it requires n>=2 (a single
+        // seed has undefined spread, so the gate must REFUSE to certify), and a larger k must be a
+        // STRICTLY stronger bar (monotone). We use a deterministic synthetic PairedDelta so the
+        // assertion is about the gate logic, not a noisy run.
+        // Single seed: se is 0 and the gate must refuse regardless of a positive mean.
+        let one = PairedDelta {
+            mean: 0.05,
+            std: 0.0,
+            se: 0.0,
+            n: 1,
+        };
+        assert!(!one.significant_at(0.0), "n<2 must never be certified");
+        assert!(!one.significant_at(2.0));
+        // A real multi-seed delta: mean 0.02, se 0.005 → clears 1·se and 2·se, not 5·se.
+        let d = PairedDelta {
+            mean: 0.02,
+            std: 0.005 * 4.0,
+            se: 0.005,
+            n: 16,
+        };
+        assert!(d.significant_at(1.0), "0.02 > 1·0.005");
+        assert!(d.significant_at(2.0), "0.02 > 2·0.005");
+        assert!(!d.significant_at(5.0), "0.02 < 5·0.005 — must NOT certify");
+        // A negative effect is never significant.
+        let neg = PairedDelta {
+            mean: -0.01,
+            std: 0.02,
+            se: 0.005,
+            n: 16,
+        };
+        assert!(
+            !neg.significant_at(0.0),
+            "a negative effect is never a positive win"
+        );
+    }
+
+    #[test]
+    fn denser_gufo_slice_has_more_test_triples_and_still_bites() {
+        // Density must (a) increase the number of held-out test triples per seed (the variance lever)
+        // and (b) keep the closure axis live (the rigid Person kind is still asserted on nobody, so
+        // closure must derive entailed triples). Both are load-bearing for the firm-up.
+        let cfg = EvalConfig::small(7);
+        let sparse = run_ablation(&synthetic_gufo_ttl_sized(200, 1, 9), "turtle", cfg).unwrap();
+        let dense = run_ablation(&synthetic_gufo_ttl_sized(200, 4, 9), "turtle", cfg).unwrap();
+        assert!(
+            dense[0].metrics.queries > sparse[0].metrics.queries,
+            "a denser slice must yield more scorable test queries: dense={} sparse={}",
+            dense[0].metrics.queries,
+            sparse[0].metrics.queries
+        );
+        // Closure still bites on the dense slice (entailed Person memberships derived).
+        let c = close_for_vectorise(
+            &synthetic_gufo_ttl_sized(200, 4, 9),
+            "turtle",
+            Profile::Rdfs,
+        )
+        .unwrap();
+        assert!(
+            c.entailed_triples > 0,
+            "dense gUFO slice closure must still derive entailed triples"
         );
     }
 
