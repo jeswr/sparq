@@ -338,6 +338,27 @@ seeds; per-prior on/off matrix; the formal properties (6.A) as unit/property/met
 that run in CI; the empirical numbers (6.B) as a separate, dataset-gated bench that publishes to
 the dashboard (never baked into markdown — AGENTS.md *No hard-coded performance numbers*).
 
+**Variance reduction & the firm-verdict gate (sq-4891y).** The per-cell mean ± std over seeds is
+*not* the figure to gate on: it is dominated by **common-mode** seed noise (which train/test split
+and init a seed draws moves every cell together), so on a schema-bearing slice a cell's std can be
+≈ its mean even when a prior has a real effect. Each seed draws all four ablation cells from the
+*same* split+init, so the **paired** contrast — closure-on − closure-off computed *within a seed*
+and aggregated — cancels that common-mode term (the textbook paired-difference variance reduction,
+`Var(b−a) = Var(a)+Var(b)−2·Cov(a,b)`). The harness (`crates/sparq-vectors/src/eval.rs`:
+`run_ablation_multiseed_full` → `PairedContrast` / `ClosureVerdict`) reports the paired delta, its
+paired std, the standard error (`∝ 1/√n` — more seeds shrink it), and a **`firm`** flag:
+`|delta| ≥ t·std_error` at a *small-sample Student-t* threshold (`firm_z_for`, honest about the
+handful of seeds a work-box runs) **AND** a unanimous per-seed sign. A prior is adopted only on a
+firm, sign-positive lift. **Measured (NON-CANONICAL, work-box, INDICATIVE — re-measure on a
+canonical machine + real schema-bearing KG):** on the synthetic gUFO slice the closure lift is
+**real but direction-UNSTABLE** — its *sign flips across generator slices* (asserted by the
+`closure_lift_sign_is_unstable_across_generator_seeds` characterisation test), and even where it is
+large and unanimous-in-sign the paired standard error at a handful of seeds does not clear the
+firm-verdict bar. So variance reduction **did not firm up** the synthetic gUFO closure claim: the
+instrument now *exists and is honest*, and the verdict on synthetic data is "not firmly adoptable —
+needs a real schema-bearing KG to settle". The firm-verdict gate is the mechanism that would let a
+real-dataset run on a canonical machine settle it.
+
 ---
 
 ## 7. sparq integration — opt-in crate over sparq-vectors + sparq-shacl + sparq-reason

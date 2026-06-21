@@ -161,10 +161,14 @@ pub use structure::{
 // harness surface — `kge` feature only.
 #[cfg(feature = "kge")]
 pub use eval::{
-    run_ablation, run_ablation_multiseed, synthetic_gufo_ttl, synthetic_relational_ttl,
-    AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, Splits,
+    firm_z_for, run_ablation, run_ablation_multiseed, run_ablation_multiseed_full,
+    synthetic_gufo_ttl, synthetic_relational_ttl, AblationCell, Bucket, CellStats, ClosureVerdict,
+    EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, MultiSeedResult, PairedContrast, Splits,
     SCHEMA_PREDICATES,
 };
+// NOTE: `eval::Metric` (which ablation metric — MRR/Hits@k) is intentionally NOT re-exported at the
+// crate root: the name collides with the existing `encode::Metric` (a vector distance metric). It is
+// reachable via the full path `sparq_vectors::eval::Metric`. [OPUS-4.8] sq-4891y
 #[cfg(feature = "kge")]
 pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};
 // [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the structure-aware-vectorisation P1 surface — the typed
