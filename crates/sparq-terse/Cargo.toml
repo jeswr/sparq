@@ -1,0 +1,70 @@
+# [OPUS-4.8] sq-leg8n: the LLM-ergonomic SPARQL surface (research/llm-ergonomic-sparql-surface.md,
+# sq-9cxo0, PR #1074). A SEPARATE, opt-in crate so the core engine carries ZERO terse-surface
+# code; nothing in the workspace depends on it and the default workspace build does not even
+# compile it. The single public contract is a VERIFIABLE TRANSPILER: a terse / LLM-friendly query
+# is expanded — PRE-PARSE, as text — into CANONICAL SPARQL that the unmodified vendored spargebra
+# parser accepts. It NEVER touches `vendor/spargebra` (which carries the W3C-conformance patches);
+# the engine only ever sees standard SPARQL. The governing principle is the §6 soundness envelope:
+# opt-in, verifiable (always echo the canonical expansion + every concept resolution), loud-failing
+# (confidence-gate, never silently bind a low-confidence guess).
+
+[package]
+name = "sparq-terse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in LLM-ergonomic SPARQL surface for the sparq RDF engine: a verifiable pre-parse transpiler that always emits canonical SPARQL, plus lexical-first V(\"phrase\") concept resolution behind a soundness envelope (echo + confidence-gate)"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# [OPUS-4.8] Render README as the docs.rs front page (lib.rs uses include_str!), build all
+# features so the `link`/`vectors` V()-resolution surface is documented, and expose the `docsrs`
+# cfg for the feature-gated `#[cfg_attr(docsrs, doc(cfg(...)))]` items.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+# `link` enables V("phrase") concept resolution, LEXICAL-FIRST: the deterministic, no-model,
+# no-network exact/substring label match reusing sparq-nlq's `link.rs` entity linker. This is
+# the ONLY feature that pulls `sparq-nlq` (and, transitively, the engine) into this crate's
+# graph, so the default `sparq-terse` build (the verifiable transpiler skeleton, Phase 1) carries
+# zero resolution code and depends only on spargebra.
+link = ["dep:sparq-nlq", "dep:sparq-core", "dep:oxrdf"]
+# `vectors` adds the VECTOR FALLBACK for V("phrase") — used ONLY when the lexical path returns
+# nothing — via `sparq-vectors`' staleness-guarded `nearest_term_exact_checked` and an injected
+# `Embedder` (the live phrase-embedding model is the caller's concern; this crate never opens a
+# socket). Implies `link` (lexical-first is mandatory). OFF by default: the vector path adds the
+# embedding dependency surface and the silent-drift risk, both paid only on opt-in.
+vectors = ["link", "dep:sparq-vectors"]
+
+[dependencies]
+# Pre-parse expansion VALIDATES its canonical output by re-parsing it with the unmodified
+# vendored spargebra (the same parser the engine uses) — never by changing the grammar. This is
+# the crate's only mandatory dependency; the Phase-1 skeleton is otherwise dependency-light.
+spargebra.workspace = true
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io.
+# All three are OPTIONAL and only pulled in by `link`/`vectors`, so the default build never
+# compiles the engine — the lean-core constraint holds and the skeleton stays pure.
+sparq-core = { path = "../sparq-core", version = "0.1.0", optional = true }
+sparq-nlq = { path = "../sparq-nlq", version = "0.1.0", optional = true }
+sparq-vectors = { path = "../sparq-vectors", version = "0.1.0", optional = true }
+# Term types for the resolution surface (resolved concepts are oxrdf NamedNodes); workspace-pinned
+# so the term type is byte-identical to sparq-core's. OPTIONAL, only pulled in by `link`.
+oxrdf = { workspace = true, optional = true }
+
+# [OPUS-4.8] sq-leg8n: DEV-only. The `vectors`-feature integration test
+# (tests/vector_fallback.rs) builds a REAL graph + vector store + embedder to exercise the
+# lexical-first / staleness-guarded fallback (no mock that bypasses the logic). These are
+# already in the graph under the `vectors` feature; listing them here makes them available
+# to the test target. The test file is itself `#![cfg(feature = "vectors")]`, so the
+# default-feature `cargo test` compiles it to an empty harness.
+[dev-dependencies]
+sparq-core = { path = "../sparq-core" }
+sparq-vectors = { path = "../sparq-vectors" }
+oxrdf = { workspace = true }
