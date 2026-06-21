@@ -109,6 +109,10 @@ pub mod query {
     use sparq_engine::{query, QueryResult};
 
     pub mod canned;
+    /// The PKG **natural-language tool** envelope (agent flavor, sq-ve5dy): run a query
+    /// and return the executed SPARQL + resolved IRIs + grounding confidence so the
+    /// caller can verify the answer was computed, not guessed. [OPUS-4.8] sq-ve5dy
+    pub mod nl_tool;
 
     /// Load the PKG ontology + the ingested instances into one queryable [`Graph`].
     /// The `kb:` instances use absolute IRIs, so no base is needed.

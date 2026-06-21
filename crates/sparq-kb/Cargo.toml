@@ -31,10 +31,13 @@ default = []
 validate = ["dep:sparq-core", "dep:sparq-shacl", "dep:oxttl", "dep:oxrdf"]
 # OPT-IN (default-OFF). Enables the SPARQL-query proof over the ingested PKG graph
 # (sq-2m6zm.2): the example-lookup answers (`Graph::load_str` + `sparq_engine::query`),
-# the introspect→ground→ask `query` module, the named canned queries, and the
-# `pkg-query` binary (sq-2m6zm.3). Pulls in the SPARQL engine; keep it off the lean
-# default build.
-query = ["validate", "dep:sparq-engine"]
+# the introspect→ground→ask `query` module, the named canned queries, the
+# `pkg-query` binary (sq-2m6zm.3) and the natural-language tool envelope (sq-ve5dy:
+# `query::nl_tool` — run a query and return the executed SPARQL + resolved IRIs +
+# confidence so the caller can verify the answer was not fabricated). Pulls in the
+# SPARQL engine + spargebra (algebra walk for the resolved-IRI provenance) + serde
+# (JSON envelope); keep it off the lean default build. [OPUS-4.8] sq-ve5dy
+query = ["validate", "dep:sparq-engine", "dep:spargebra", "dep:serde", "dep:serde_json"]
 # OPT-IN (default-OFF). Adds the optional RDFS/OWL-RL closure step the design record
 # (§3.1) calls for before querying — materialise the `pkg:dependsOn owl:inverseOf
 # pkg:blockedBy` and `pkg:couldBeMergedWith` symmetry so a query over the inverse /
@@ -58,6 +61,16 @@ sparq-reason = { path = "../sparq-reason", default-features = false, optional = 
 # Turtle parser + term model (only behind `validate`, to build the data graph).
 oxttl = { workspace = true, optional = true }
 oxrdf = { workspace = true, optional = true }
+# SPARQL algebra parser (only behind `query`): the NL-tool envelope (sq-ve5dy) walks
+# the parsed query to collect the predicate/class IRIs the answer actually relied on,
+# so the returned `resolved_iris` provenance is exact, not a string scrape. Workspace-
+# pinned to the same vendored spargebra the engine uses. [OPUS-4.8] sq-ve5dy
+spargebra = { workspace = true, optional = true }
+# JSON envelope for the NL tool (only behind `query`): the `--json` output mode of
+# `pkg-query` and the serde-derived `NlToolResult` the agent-flavor sub-agent returns.
+# [OPUS-4.8] sq-ve5dy
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 # The `pkg-query` helper binary (sq-2m6zm.3): one command to introspect → ground →
 # ask over the ingested PKG. It needs the `query` module (engine), so it is only
