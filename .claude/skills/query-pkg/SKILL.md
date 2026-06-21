@@ -76,6 +76,25 @@ the answer was computed from a real query over the data, not guessed — the sou
 echo. If the returned SPARQL does not match the question, re-ask or fall back; never
 accept a bare NL answer with no query behind it.
 
+**Abstain → fall back (the safe-default rule).** [OPUS-4.8] The PKG is a Phase-1 head
+slice, so it cannot answer every question — and the safe behaviour is to **abstain, not
+guess**. An empty / 0-row result (or an explicit `NOT_IN_PKG` from the sub-agent) is the
+honest "not in the head slice / none outstanding" answer; the sub-agent brief above
+already forbids inventing rows. **On an abstain, fall back to `Read`/`Grep` on the actual
+docs/code for that question** — the measured win in `bench/pkg-dogfood/RESULTS.md` is
+scoped to PKG-answerable questions *by construction*, so a miss is expected and is not a
+failure of the flow. Never paper over an abstain with a fabricated answer.
+
+**Tier escalation — Haiku by default, escalate only when accuracy is critical.**
+[OPUS-4.8] The cheap-model NL-tool (Haiku, arm **C**) is the default precisely because
+it is the cheapest arm at equal quality on PKG-answerable tasks. For an
+**accuracy-critical** lookup — one where a cheap-model misread would be costly — escalate
+a model tier: run the round-trip on a Sonnet/Opus `pkg-query` (this is arm **B**, which
+is still cheaper than Opus reading the docs, just not as cheap as the Haiku arm). Use the
+verification echo as the trigger: if the returned SPARQL does not match the question, or
+the answer looks off, re-ask, escalate a tier, or fall back to reading — do not lower the
+bar to make the cheap arm "work".
+
 **Fallback — plain Opus `pkg-query`.** When sub-agent delegation is not available (e.g.
 you are already inside a leaf sub-agent, or the dispatch path is unavailable), run
 `pkg-query` yourself in-context as described below. That is arm **B** of the measurement
