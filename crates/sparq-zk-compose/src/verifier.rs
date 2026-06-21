@@ -1932,6 +1932,23 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
             CircuitId::FilterValueDl => Some(CircuitId::FilterValueDl),
             _ => None,
         },
+        // [OPUS-4.8] sq-2ezsx: the DUAL-LEAF double + decimal value-lane FILTERs.
+        // Like the integer member they are DIGIT-COUNT-FREE (the per-digit family
+        // collapses; the decimal class is even scale-agnostic — the scale lives in
+        // the public `datatype_const`, not the member id), so the derive only
+        // confirms the declared id is the single member of its datatype class. The
+        // full CircuitId is what the reconstruction + canonical-vk pin. The
+        // fail-closed `(method × circuit)` legality is `crate::dispatch` (sq-cfmv).
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlF64 { .. } => match inputs.circuit_id() {
+            CircuitId::FilterValueDlF64 => Some(CircuitId::FilterValueDlF64),
+            _ => None,
+        },
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlDecimal { .. } => match inputs.circuit_id() {
+            CircuitId::FilterValueDlDecimal => Some(CircuitId::FilterValueDlDecimal),
+            _ => None,
+        },
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN. The
         // two graph sizes are PRIVATE (the witnessed graph contents are not public
         // inputs — only the commitments are), so — exactly as scan trusts the
@@ -4914,6 +4931,43 @@ fn reconstruct_public_inputs(
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, *bound);
+            push_field(&mut out, datatype_const, proof, "datatype_const")?;
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-2ezsx: filter_value_dl_f64 (DUAL-LEAF double value lane)
+        // public inputs, in `main` declaration order: challenge (pushed above),
+        // operand_enc, op, b_bits (the FILTER constant as IEEE-754 bits),
+        // datatype_const, expected. Cross-reference
+        // `zk/compose/filter_value_dl_f64/src/main.nr`. `operand_enc` is the
+        // DUAL-LEAF leaf over the CANONICAL IEEE bits.
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlF64 { operand_enc, op, b_bits, datatype_const, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, *b_bits);
+            push_field(&mut out, datatype_const, proof, "datatype_const")?;
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-2ezsx: filter_value_dl_decimal (DUAL-LEAF decimal value
+        // lane) public inputs, in `main` declaration order: challenge (pushed
+        // above), operand_enc, op, bound_neg (bool -> {0,1}), bound_scaled (the
+        // host-prescaled constant magnitude at the canonical scale), datatype_const
+        // (folds the datatype AND the scale), expected. Cross-reference
+        // `zk/compose/filter_value_dl_decimal/src/main.nr`.
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlDecimal {
+            operand_enc,
+            op,
+            bound_neg,
+            bound_scaled,
+            datatype_const,
+            expected,
+            ..
+        } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, u64::from(*bound_neg));
+            push_uint(&mut out, *bound_scaled);
             push_field(&mut out, datatype_const, proof, "datatype_const")?;
             push_uint(&mut out, u64::from(*expected));
         }

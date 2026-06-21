@@ -66,9 +66,21 @@ use oxrdf::Literal;
 /// reserved value) so a value component can never collide a language-tagged one.
 pub const LANG_NONE: u64 = 1;
 
-/// The `xsd:integer` datatype IRI (the only value-lane datatype class this slice
-/// implements; decimal/double are a documented follow-up).
+/// The `xsd:integer` datatype IRI (the integer value-lane datatype class,
+/// sq-xojl).
 pub const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+/// The `xsd:double` datatype IRI (the IEEE-754 value-lane class, sq-2ezsx).
+pub const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+/// The `xsd:decimal` datatype IRI (the fixed-scale value-lane class, sq-2ezsx).
+pub const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+
+/// The canonical IEEE-754 quiet-NaN bit pattern the double value lane folds ALL
+/// NaN payloads to — mirrors the Noir `filter_value::F64_CANONICAL_NAN`. Every
+/// NaN is one SPARQL-numeric unordered class, so the value handle must not
+/// distinguish payloads.
+pub const F64_CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
 
 fn blake3_field(bytes: &[u8]) -> Fr {
     field_from_hash_bytes(blake3::hash(bytes).as_bytes())
@@ -81,13 +93,46 @@ pub fn datatype_const(datatype_iri: &str) -> Fr {
     blake3_field(datatype_iri.as_bytes())
 }
 
-/// The dual-leaf failure for a non-value-lane literal.
+/// The `DATATYPE_CONST` for an `xsd:decimal` value handle at a fixed fraction
+/// SCALE: `blake3_field("<xsd:decimal IRI>@scale=<fd>")` — mirrors the Noir
+/// `filter_value_dl_decimal` member's public `datatype_const` (which folds BOTH
+/// the datatype AND the scale). This is the explicit canonical-SCALE bind (B4):
+/// `"5.0"` (scale 1) and `"5.00"` (scale 2) have the SAME numeric value but are
+/// DIFFERENT value handles because the scale is folded in, so a value at one scale
+/// can never collide a value at another. `fd` is the fraction-digit count of the
+/// canonical decimal lexical form.
+pub fn decimal_datatype_const(fd: u32) -> Fr {
+    blake3_field(format!("{}@scale={}", XSD_DECIMAL, fd).as_bytes())
+}
+
+/// Fold an `xsd:double` IEEE-754 bit pattern to its SPARQL-numeric CANONICAL bit
+/// pattern — the host mirror of the Noir `filter_value::canonical_f64_bits`: any
+/// NaN -> [`F64_CANONICAL_NAN`], `-0.0` -> `+0.0`, everything else unchanged. This
+/// is the explicit IEEE-bit bind (B4) the dual-leaf double class needs so the
+/// value handle is single-valued per SPARQL-numeric value.
+pub fn canonical_f64_bits(bits: u64) -> u64 {
+    let exp_all_ones = bits & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000;
+    let mantissa_nonzero = bits & 0x000f_ffff_ffff_ffff != 0;
+    if exp_all_ones && mantissa_nonzero {
+        // NaN (exponent all ones, non-zero mantissa) -> the canonical qNaN.
+        F64_CANONICAL_NAN
+    } else if bits == 0x8000_0000_0000_0000 {
+        // -0.0 -> +0.0 (numerically equal).
+        0
+    } else {
+        bits
+    }
+}
+
+/// The dual-leaf failure for a literal that cannot be encoded on the requested
+/// value lane.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DualLeafError {
-    /// The literal is not an `xsd:integer` (this slice's only value-lane class).
+    /// The literal's datatype is not the one the called encoder handles (e.g.
+    /// passing an `xsd:double` to [`encode_literal`], which is `xsd:integer`-only).
     NotValueLane(String),
-    /// The lexical form does not canonically parse to a non-negative `u64`
-    /// integer value — fail closed (same-leaf co-binding, §6). This is the host
+    /// The lexical form does not canonically parse to the value lane's value
+    /// handle — fail closed (same-leaf co-binding, §6). This is the host
     /// mitigation that keeps sparq's own commitments INV-VL-consistent; it does
     /// NOT bind a malicious external issuer.
     NonCanonicalValue(String),
@@ -97,7 +142,7 @@ impl std::fmt::Display for DualLeafError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DualLeafError::NotValueLane(t) => {
-                write!(f, "not a value-lane literal (xsd:integer only): {}", t)
+                write!(f, "not the expected value-lane datatype: {}", t)
             }
             DualLeafError::NonCanonicalValue(t) => {
                 write!(f, "non-canonical value-lane literal (fail-closed co-binding): {}", t)
@@ -186,6 +231,124 @@ fn canonical_nonneg_u64(lexical: &str) -> Option<u64> {
         return None;
     }
     lexical.parse::<u64>().ok()
+}
+
+/// Encodes an `xsd:double` literal under the dual-leaf method (sq-2ezsx), with
+/// fail-closed same-leaf co-binding (§6): the value handle is the SPARQL-numeric
+/// CANONICAL IEEE-754 bit pattern of the SAME lexical form the `lexical_component`
+/// hashes, and a lexical form that does not parse as a finite/inf/NaN `xsd:double`
+/// is REJECTED (so sparq's own ingest cannot self-desync). Returns the three
+/// components; `.leaf()` is the committed `Enc`.
+///
+/// The value handle is [`canonical_f64_bits`]`(parsed.to_bits())` — exactly the
+/// `filter_value_dl_f64` member's in-circuit canonical bind: `-0.0`/`+0.0` and all
+/// NaN payloads collapse to ONE handle, the many-to-one-on-the-term property the
+/// `lexical_component` disambiguates for identity ops.
+///
+/// Honest scope: any `xsd:double` Rust's `f64` lexical parser accepts (the same
+/// floating fragment the SPARQL/XPath F&O semantics cover). The general fractional
+/// /scientific in-circuit decimal→IEEE parse the blake3 lane defers is SIDESTEPPED
+/// here: the value handle is the IEEE bits, committed off-circuit.
+pub fn encode_double(literal: &Literal) -> Result<DualLeafComponents, DualLeafError> {
+    if literal.datatype().as_str() != XSD_DOUBLE {
+        return Err(DualLeafError::NotValueLane(literal.to_string()));
+    }
+    // Same-leaf co-binding: parse the lexical form once. `f64::from_str` accepts
+    // the xsd:double lexical fragment (incl. "INF"/"-INF"/"NaN" via a small map);
+    // a form it rejects is fail-closed (sparq cannot self-desync).
+    let bits = parse_xsd_double_bits(literal.value())
+        .ok_or_else(|| DualLeafError::NonCanonicalValue(literal.to_string()))?;
+    Ok(DualLeafComponents {
+        value_hook: Fr::from(canonical_f64_bits(bits)),
+        datatype_const: datatype_const(XSD_DOUBLE),
+        lexical_component: blake3_field(literal.to_string().as_bytes()),
+    })
+}
+
+/// Encodes an `xsd:decimal` literal under the dual-leaf method (sq-2ezsx), with
+/// fail-closed same-leaf co-binding (§6): the value handle is the SIGNED SCALED
+/// MAGNITUDE `sign * round(|v| * 10^fd)` of the SAME lexical form the
+/// `lexical_component` hashes, where `fd` is the fraction-digit count of that
+/// lexical form; a non-canonical form is REJECTED. Returns the three components;
+/// `.leaf()` is the committed `Enc`.
+///
+/// The B4 canonical-SCALE bind: `fd` is folded into `datatype_const`
+/// ([`decimal_datatype_const`]), so `"5.0"` (fd=1) and `"5.00"` (fd=2) — the SAME
+/// value, distinct lexical forms — get DIFFERENT handles (the scale is part of the
+/// handle); within one scale the handle is canonical, and the `lexical_component`
+/// disambiguates for identity ops. The sign is folded into the value handle (a
+/// negative is the field negation), so a sign flip changes the leaf.
+///
+/// Honest scope: a canonical `xsd:decimal` lexical form `[-]?<int>.<frac>` whose
+/// scaled magnitude `round(|v| * 10^fd)` fits `u64` (`fd >= 1`; the member's
+/// fixed-point domain). An integer-only decimal (`"5"`, no point) or `>u64`
+/// scaled magnitude is rejected fail-closed.
+pub fn encode_decimal(literal: &Literal) -> Result<DualLeafComponents, DualLeafError> {
+    if literal.datatype().as_str() != XSD_DECIMAL {
+        return Err(DualLeafError::NotValueLane(literal.to_string()));
+    }
+    let (neg, scaled, fd) = canonical_decimal_scaled(literal.value())
+        .ok_or_else(|| DualLeafError::NonCanonicalValue(literal.to_string()))?;
+    let mag = Fr::from(scaled);
+    let signed = if neg { -mag } else { mag };
+    Ok(DualLeafComponents {
+        value_hook: signed,
+        datatype_const: decimal_datatype_const(fd),
+        lexical_component: blake3_field(literal.to_string().as_bytes()),
+    })
+}
+
+/// Parse an `xsd:double` lexical form to its IEEE-754 `u64` bit pattern. Accepts
+/// the lexical fragment Rust's `f64` parser handles plus the xsd-canonical
+/// `INF`/`-INF`/`NaN` spellings; returns `None` for any other form (fail-closed).
+fn parse_xsd_double_bits(lexical: &str) -> Option<u64> {
+    let v: f64 = match lexical {
+        "INF" | "+INF" => f64::INFINITY,
+        "-INF" => f64::NEG_INFINITY,
+        "NaN" => f64::NAN,
+        // Reject the bare integer-less forms Rust accepts but xsd:double does not
+        // need special-casing here; `f64::from_str` covers "1.0E1", "42", "-0.0".
+        other => other.parse::<f64>().ok()?,
+    };
+    Some(v.to_bits())
+}
+
+/// Parse a canonical `xsd:decimal` lexical form `[-]?<int>.<frac>` to `(neg,
+/// round(|v| * 10^fd), fd)`. Canonical = optional leading `-`, integer part with
+/// no leading zero (except the lone `0`), a `.`, and `fd >= 1` fraction digits;
+/// `-0...` is rejected (no `-0`); the scaled magnitude must fit `u64`. Returns
+/// `None` for any non-canonical / integer-only / overflowing form (the §6
+/// fail-closed predicate, mirroring the `filter_signed::filter_decimal_check`
+/// canonical-form discipline).
+fn canonical_decimal_scaled(lexical: &str) -> Option<(bool, u64, u32)> {
+    let (neg, rest) = match lexical.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, lexical),
+    };
+    let (int_part, frac_part) = rest.split_once('.')?;
+    // Integer + fraction parts: ASCII digits, fraction non-empty.
+    if int_part.is_empty() || frac_part.is_empty() {
+        return None;
+    }
+    if !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac_part.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    // Canonical integer part: no leading zero unless it is the lone "0".
+    if int_part.len() > 1 && int_part.starts_with('0') {
+        return None;
+    }
+    let fd = frac_part.len() as u32;
+    let int_val: u64 = int_part.parse().ok()?;
+    let frac_val: u64 = frac_part.parse().ok()?;
+    let scale = 10u64.checked_pow(fd)?;
+    let scaled = int_val.checked_mul(scale)?.checked_add(frac_val)?;
+    // No "-0.0...0": a negative sign on a zero scaled magnitude is not canonical.
+    if neg && scaled == 0 {
+        return None;
+    }
+    Some((neg, scaled, fd))
 }
 
 #[cfg(test)]
@@ -280,5 +443,150 @@ mod tests {
         let a = encode_literal(&int_lit("17")).unwrap().leaf();
         let b = encode_literal(&int_lit("18")).unwrap().leaf();
         assert_ne!(a, b);
+    }
+
+    // ---- xsd:double class (sq-2ezsx) ----
+
+    fn dbl_lit(v: &str) -> Literal {
+        Literal::new_typed_literal(v, NamedNode::new(XSD_DOUBLE).unwrap())
+    }
+
+    #[test]
+    fn double_round_trips_to_a_dual_leaf() {
+        let c = encode_double(&dbl_lit("2.5E0")).unwrap();
+        assert_eq!(c.value_hook, Fr::from(2.5f64.to_bits()));
+        assert_eq!(c.datatype_const, datatype_const(XSD_DOUBLE));
+        assert_eq!(c.leaf(), c.leaf());
+    }
+
+    #[test]
+    fn double_host_leaf_matches_the_circuit_construction() {
+        // h3(h3(canon_bits, dt, LANG_NONE), lexical, TYPE_CODE_LITERAL) — exactly
+        // the filter_value_dl_f64 member's construction.
+        let lit = dbl_lit("1.0E1");
+        let c = encode_double(&lit).unwrap();
+        let vc = poseidon2::hash(&[c.value_hook, c.datatype_const, Fr::from(LANG_NONE)]);
+        let leaf = poseidon2::hash(&[vc, c.lexical_component, Fr::from(TYPE_CODE_LITERAL)]);
+        assert_eq!(c.leaf(), leaf);
+    }
+
+    #[test]
+    fn double_neg_zero_collapses_to_pos_zero_value_handle() {
+        // THE B4 INVARIANT (double): -0.0 and +0.0 are numerically equal, so the
+        // CANONICAL value handle is identical (both fold to +0.0 bits). The lexical
+        // forms differ, so the leaves still differ (identity ops disambiguated).
+        let neg = encode_double(&dbl_lit("-0.0E0")).unwrap();
+        let pos = encode_double(&dbl_lit("0.0E0")).unwrap();
+        assert_eq!(neg.value_hook, Fr::from(0u64));
+        assert_eq!(pos.value_hook, Fr::from(0u64));
+        assert_eq!(neg.value_component(), pos.value_component());
+        // The lexical_component differs ("-0.0E0" vs "0.0E0"), so leaves differ.
+        assert_ne!(neg.lexical_component, pos.lexical_component);
+        assert_ne!(neg.leaf(), pos.leaf());
+    }
+
+    #[test]
+    fn double_nan_payloads_share_the_value_handle() {
+        // THE B4 INVARIANT (double): every NaN is one SPARQL-numeric class, so the
+        // canonical handle is the same regardless of payload. The host canonicalises
+        // the bits before the value handle.
+        let c = encode_double(&dbl_lit("NaN")).unwrap();
+        assert_eq!(c.value_hook, Fr::from(F64_CANONICAL_NAN));
+    }
+
+    #[test]
+    fn double_canonical_bits_helper() {
+        assert_eq!(canonical_f64_bits(0x8000_0000_0000_0000), 0); // -0.0 -> +0.0
+        assert_eq!(canonical_f64_bits(0x7ff0_0000_0000_0001), F64_CANONICAL_NAN); // sNaN
+        assert_eq!(canonical_f64_bits(0x7ff8_0000_0000_0000), F64_CANONICAL_NAN); // qNaN
+        // +inf and a finite value are unchanged.
+        assert_eq!(canonical_f64_bits(0x7ff0_0000_0000_0000), 0x7ff0_0000_0000_0000);
+        assert_eq!(canonical_f64_bits(2.5f64.to_bits()), 2.5f64.to_bits());
+    }
+
+    #[test]
+    fn double_rejects_non_double_and_bad_lexical() {
+        assert!(matches!(
+            encode_double(&int_lit("5")),
+            Err(DualLeafError::NotValueLane(_))
+        ));
+        assert!(matches!(
+            encode_double(&dbl_lit("not-a-number")),
+            Err(DualLeafError::NonCanonicalValue(_))
+        ));
+    }
+
+    // ---- xsd:decimal class (sq-2ezsx) ----
+
+    fn dec_lit(v: &str) -> Literal {
+        Literal::new_typed_literal(v, NamedNode::new(XSD_DECIMAL).unwrap())
+    }
+
+    #[test]
+    fn decimal_round_trips_to_a_dual_leaf() {
+        // "123.45" at fd=2 -> scaled 12345, non-negative.
+        let c = encode_decimal(&dec_lit("123.45")).unwrap();
+        assert_eq!(c.value_hook, Fr::from(12345u64));
+        assert_eq!(c.datatype_const, decimal_datatype_const(2));
+        assert_eq!(c.leaf(), c.leaf());
+    }
+
+    #[test]
+    fn decimal_host_leaf_matches_the_circuit_construction() {
+        let c = encode_decimal(&dec_lit("2.50")).unwrap();
+        // Mirror the circuit: signed_value = scaled (non-negative).
+        let vc = poseidon2::hash(&[c.value_hook, c.datatype_const, Fr::from(LANG_NONE)]);
+        let leaf = poseidon2::hash(&[vc, c.lexical_component, Fr::from(TYPE_CODE_LITERAL)]);
+        assert_eq!(c.leaf(), leaf);
+    }
+
+    #[test]
+    fn decimal_negative_folds_sign_into_value_handle() {
+        // -2.50 (scaled 250, neg) — the value handle is the field negation of 250.
+        let c = encode_decimal(&dec_lit("-2.50")).unwrap();
+        assert_eq!(c.value_hook, -Fr::from(250u64));
+        // The negative and positive of the same magnitude give DIFFERENT handles.
+        let pos = encode_decimal(&dec_lit("2.50")).unwrap();
+        assert_ne!(c.value_hook, pos.value_hook);
+        assert_ne!(c.leaf(), pos.leaf());
+    }
+
+    #[test]
+    fn decimal_scale_is_folded_so_5_0_and_5_00_differ() {
+        // THE B4 CANONICAL-SCALE INVARIANT: "5.0" (fd=1) and "5.00" (fd=2) are the
+        // SAME numeric value but DIFFERENT value handles (the scale is folded into
+        // datatype_const), so a value at one scale cannot collide a value at another.
+        let a = encode_decimal(&dec_lit("5.0")).unwrap();
+        let b = encode_decimal(&dec_lit("5.00")).unwrap();
+        assert_eq!(a.value_hook, Fr::from(50u64)); // 5.0 * 10^1
+        assert_eq!(b.value_hook, Fr::from(500u64)); // 5.00 * 10^2
+        assert_ne!(a.datatype_const, b.datatype_const);
+        assert_ne!(a.value_component(), b.value_component());
+        assert_ne!(a.leaf(), b.leaf());
+    }
+
+    #[test]
+    fn decimal_rejects_non_canonical_forms() {
+        assert!(matches!(
+            encode_decimal(&int_lit("5")),
+            Err(DualLeafError::NotValueLane(_))
+        ));
+        // Integer-only decimal (no point) is rejected (fixed-point member needs fd>=1).
+        assert!(matches!(
+            encode_decimal(&dec_lit("5")),
+            Err(DualLeafError::NonCanonicalValue(_))
+        ));
+        // Leading zero on the integer part is non-canonical.
+        assert!(matches!(
+            encode_decimal(&dec_lit("05.0")),
+            Err(DualLeafError::NonCanonicalValue(_))
+        ));
+        // "-0.0" is rejected (no negative zero).
+        assert!(matches!(
+            encode_decimal(&dec_lit("-0.0")),
+            Err(DualLeafError::NonCanonicalValue(_))
+        ));
+        // Lone "0.0" is canonical (non-negative zero).
+        assert_eq!(encode_decimal(&dec_lit("0.0")).unwrap().value_hook, Fr::from(0u64));
     }
 }
