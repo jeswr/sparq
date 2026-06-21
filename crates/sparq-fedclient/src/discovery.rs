@@ -84,6 +84,19 @@ const SD_BASIC_FEDERATED_QUERY: &str =
 /// recall-safe `false` default; it is never inferred from anything but this exact IRI.
 const PROV_LINEAGE_FEATURE_IRI: &str = "http://sparq.dev/ns/prov#lineage";
 
+/// [OPUS-4.8] sq-ym6kf: the `sd:supportedVersion` predicate — the SPARQL 1.2 Service Description
+/// (ED) move that splits the version-agnostic LANGUAGE (`sd:SPARQLQuery`/`sd:SPARQLUpdate`) from
+/// the language VERSION. A `sparq-server` (sq-2msb / gh-917) advertises the SPARQL language
+/// versions it conformance-verifies via `sd:supportedVersion <sparql:version-*>`. The CLIENT
+/// reads them into [`Capability::sparql_versions`].
+const SD_SUPPORTED_VERSION: &str =
+    "http://www.w3.org/ns/sparql-service-description#supportedVersion";
+
+/// [OPUS-4.8] sq-ym6kf: the `sparql:` namespace (`http://www.w3.org/ns/sparql#`) the
+/// `sparql:version-*` version IRIs live in. MUST match `sparq-server/src/descriptors.rs`
+/// (the writer this parser consumes).
+const SPARQL_NS: &str = "http://www.w3.org/ns/sparql#";
+
 // ─── The capability model (§4.1) ─────────────────────────────────────────────────────
 //
 // NOTE on module ownership: the design names `Capability` / `Interface` / `BindJoin` etc. as
@@ -115,6 +128,74 @@ pub enum SparqlVersion {
     Sparql10,
     /// `sd:SPARQL11Query`.
     Sparql11,
+}
+
+/// [OPUS-4.8] sq-ym6kf: one SPARQL language VERSION a source advertises via the SPARQL 1.2
+/// Service Description (ED) `sd:supportedVersion <sparql:version-*>` predicate — the
+/// version-agnostic-language / explicit-version split sq-2msb's server side emits.
+///
+/// These are the `sparql:` (`http://www.w3.org/ns/sparql#`) version IRIs the SD ED defines.
+/// **[`SparqlLanguageVersion::Full12`]** (`sparql:version-1.2`) is the one a 1.2-aware
+/// federation client checks for to decide a source supports the **full** SPARQL 1.2 / RDF 1.2
+/// surface — **triple terms** and **`dir`-tagged (base-direction) literals** — *without
+/// probing*, which is the discovery use case sq-2msb's server-side advertisement enables.
+/// **[`SparqlLanguageVersion::Basic12`]** (`sparql:version-1.2-basic`) is the narrower
+/// SPARQL-1.2-Query-with-RDF-1.2-BASIC profile; an [`SparqlLanguageVersion::Other`] carries any
+/// future / unrecognised `sparql:version-*` IRI verbatim so it round-trips rather than being
+/// silently dropped.
+///
+/// HONEST BOUNDARY (load-bearing): **absence** of `sd:supportedVersion` from a source's SD means
+/// the version set is **UNKNOWN, not unsupported** — older endpoints predate the SD ED's
+/// `sd:supportedVersion` term entirely. [`Capability::sparql_versions`] is therefore an empty
+/// `Vec` in that case (distinguished from "advertises a non-empty set that omits 1.2"), and
+/// [`Capability::advertises_full_sparql_1_2`] returns `false` only because the source made **no
+/// claim** — never read it as a positive "does not support 1.2".
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SparqlLanguageVersion {
+    /// `sparql:version-1.0`.
+    V10,
+    /// `sparql:version-1.1`.
+    V11,
+    /// `sparql:version-1.2-basic` — SPARQL 1.2 Query with RDF 1.2 **BASIC** conformance.
+    Basic12,
+    /// `sparql:version-1.2` — **full** SPARQL 1.2 / RDF 1.2 (triple terms + `dir`-tagged literals).
+    Full12,
+    /// Any other / future `sparql:version-*` IRI, carried verbatim (the part after the `sparql:`
+    /// namespace, e.g. `"version-2.0"`), so a client can surface it without this enum being a
+    /// closed set.
+    Other(String),
+}
+
+impl SparqlLanguageVersion {
+    /// Parses a `sparql:version-*` named-node IRI (full IRI string) into a
+    /// [`SparqlLanguageVersion`]. Returns `None` for an IRI outside the `sparql:`
+    /// (`http://www.w3.org/ns/sparql#`) namespace or whose local name is not a `version-*` term.
+    pub fn from_version_iri(iri: &str) -> Option<SparqlLanguageVersion> {
+        let local = iri.strip_prefix(SPARQL_NS)?;
+        if !local.starts_with("version-") {
+            return None;
+        }
+        Some(match local {
+            "version-1.0" => SparqlLanguageVersion::V10,
+            "version-1.1" => SparqlLanguageVersion::V11,
+            "version-1.2-basic" => SparqlLanguageVersion::Basic12,
+            "version-1.2" => SparqlLanguageVersion::Full12,
+            other => SparqlLanguageVersion::Other(other.to_string()),
+        })
+    }
+
+    /// The full `sparql:version-*` IRI this version denotes (the inverse of
+    /// [`from_version_iri`](SparqlLanguageVersion::from_version_iri); round-trips losslessly).
+    pub fn iri(&self) -> String {
+        let local = match self {
+            SparqlLanguageVersion::V10 => "version-1.0",
+            SparqlLanguageVersion::V11 => "version-1.1",
+            SparqlLanguageVersion::Basic12 => "version-1.2-basic",
+            SparqlLanguageVersion::Full12 => "version-1.2",
+            SparqlLanguageVersion::Other(local) => local,
+        };
+        format!("{SPARQL_NS}{local}")
+    }
 }
 
 /// How much of a `FILTER` a source can evaluate remotely. Phase 1 reads only the *language*
@@ -168,6 +249,16 @@ pub struct Capability {
     pub interface: Interface,
     /// The SPARQL query language advertised (`sd:supportedLanguage`), if any.
     pub sparql_version: Option<SparqlVersion>,
+    /// [OPUS-4.8] sq-ym6kf: the SPARQL language VERSIONS the source advertises via the SPARQL 1.2
+    /// SD `sd:supportedVersion <sparql:version-*>` predicate (sorted + de-duplicated). This is the
+    /// CLIENT consumer of the server-side advertisement sq-2msb added: a 1.2-aware federation
+    /// client reads it to detect full-1.2 (triple-term / `dir`-lang) support **without probing**.
+    ///
+    /// HONEST BOUNDARY: an **empty** `Vec` means the source published **no** `sd:supportedVersion`
+    /// — its version posture is **UNKNOWN** (older endpoints predate the term), NOT a claim of
+    /// "no version supported". Use [`Capability::advertises_full_sparql_1_2`] (which is `false` for
+    /// "unknown") and treat absence as "probe / assume the conservative path", never as a negative.
+    pub sparql_versions: Vec<SparqlLanguageVersion>,
     /// Which FILTER expressions evaluate remotely.
     pub pushable_filters: FilterClass,
     /// The bind-join mode (VALUES / maxMpR(n) / none).
@@ -204,6 +295,9 @@ impl Capability {
         Capability {
             interface: Interface::Endpoint,
             sparql_version: Some(SparqlVersion::Sparql11),
+            // [OPUS-4.8] sq-ym6kf: an ASK-only endpoint published no SD, so it advertises NO
+            // `sd:supportedVersion` — its version posture is UNKNOWN (empty), never an over-claim.
+            sparql_versions: Vec::new(),
             pushable_filters: FilterClass::Full,
             bind_join: BindJoin::Values,
             aggregates: false,
@@ -226,6 +320,29 @@ impl Capability {
             .iter()
             .any(MediaType::is_sparql_results_json)
     }
+
+    /// [OPUS-4.8] sq-ym6kf: whether the source **advertises** the FULL SPARQL 1.2 / RDF 1.2
+    /// language version (`sd:supportedVersion <sparql:version-1.2>`) — i.e. triple terms and
+    /// `dir`-tagged literals — so a 1.2-aware federation client can push those constructs to it
+    /// without first probing.
+    ///
+    /// HONEST BOUNDARY: this is `false` when the source advertises a non-empty version set that
+    /// omits `version-1.2` AND when the source advertises **nothing** at all (an older endpoint
+    /// that predates `sd:supportedVersion`). The two cases are distinguished by
+    /// [`Capability::advertises_sparql_versions`] (which is `false` only in the latter), so a
+    /// caller can tell "explicitly not 1.2" from "unknown — probe or assume conservatively".
+    /// `version-1.2-basic` alone does NOT satisfy this (it is the narrower RDF-1.2-BASIC profile).
+    pub fn advertises_full_sparql_1_2(&self) -> bool {
+        self.sparql_versions
+            .contains(&SparqlLanguageVersion::Full12)
+    }
+
+    /// [OPUS-4.8] sq-ym6kf: whether the source advertised **any** `sd:supportedVersion` at all.
+    /// `false` means its language-version posture is **UNKNOWN** (the source predates the SPARQL
+    /// 1.2 SD term, or simply omitted it) — never read `false` as "no version supported".
+    pub fn advertises_sparql_versions(&self) -> bool {
+        !self.sparql_versions.is_empty()
+    }
 }
 
 // ─── The Service-Description parser (THE net-new parser) ──────────────────────────────
@@ -237,6 +354,9 @@ impl Capability {
 /// Recognised triples (subject = the `sd:Service`):
 ///   * `sd:supportedLanguage` → [`Capability::sparql_version`] (SPARQL11 wins over 10) and
 ///     the [`Capability::update`] flag (`sd:SPARQL11Update`);
+///   * `sd:supportedVersion <sparql:version-*>` → [`Capability::sparql_versions`] (sorted +
+///     de-duplicated) — the SPARQL 1.2 SD language-VERSION advertisement (sq-ym6kf, consuming
+///     the server side sq-2msb added). Absence ⇒ empty `Vec` ⇒ version posture **UNKNOWN**;
 ///   * `sd:resultFormat` → [`Capability::result_formats`] (sorted + de-duplicated);
 ///   * `sd:feature sd:BasicFederatedQuery` → [`Capability::federated_query`];
 ///   * `sd:feature <http://sparq.dev/ns/prov#lineage>` → [`Capability::provenance_lineage`]
@@ -323,6 +443,22 @@ pub fn parse_service_description(nt: &str) -> Result<Option<Capability>, String>
     result_formats.sort();
     result_formats.dedup();
 
+    // --- [OPUS-4.8] sq-ym6kf: sd:supportedVersion → the SPARQL language VERSIONS the source
+    // advertises (the SPARQL 1.2 SD predicate sq-2msb's server side emits). Only `sparql:version-*`
+    // named-node objects are recognised; a non-`sparql:` IRI / literal / blank node is ignored, and
+    // ABSENCE leaves the Vec empty (version posture UNKNOWN, never read as "no version supported").
+    let mut sparql_versions: Vec<SparqlLanguageVersion> = props
+        .get(SD_SUPPORTED_VERSION)
+        .into_iter()
+        .flatten()
+        .filter_map(|t| match t {
+            OxTerm::NamedNode(n) => SparqlLanguageVersion::from_version_iri(n.as_str()),
+            _ => None,
+        })
+        .collect();
+    sparql_versions.sort();
+    sparql_versions.dedup();
+
     // --- sd:feature IRIs. Read once, then test for each known feature so a future feature is a
     // one-line add. BasicFederatedQuery (SERVICE-clause) and the sparq PROV-O lineage extension.
     let features = props.get(&sd("feature"));
@@ -347,6 +483,7 @@ pub fn parse_service_description(nt: &str) -> Result<Option<Capability>, String>
     Ok(Some(Capability {
         interface: Interface::Endpoint,
         sparql_version: version,
+        sparql_versions,
         pushable_filters,
         bind_join: BindJoin::Values,
         // SD does not enumerate per-feature push-ability beyond the feature IRIs above; the
@@ -806,6 +943,170 @@ _:c1 <http://rdfs.org/ns/void#entities> "100"^^<http://www.w3.org/2001/XMLSchema
             !cap.provenance_lineage,
             "no sd:feature <…/prov#lineage> ⇒ provenance_lineage must be false"
         );
+    }
+
+    // ---- [OPUS-4.8] sq-ym6kf: sd:supportedVersion (the SPARQL 1.2 SD version advertisement) ----
+
+    /// A served-shape SD fragment carrying the EXACT `sd:supportedVersion <sparql:version-*>`
+    /// triples `sparq-server/src/descriptors.rs` emits for a build that conformance-verifies
+    /// SPARQL 1.0 / 1.1 / FULL 1.2 (sq-2msb / `CONFORMANCE_VERIFIED_VERSIONS`).
+    const SERVED_SD_WITH_VERSIONS_NT: &str = concat!(
+        "<http://host/sparql> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/sparql-service-description#Service> .\n",
+        "<http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedLanguage> <http://www.w3.org/ns/sparql-service-description#SPARQL11Query> .\n",
+        "<http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedVersion> <http://www.w3.org/ns/sparql#version-1.0> .\n",
+        "<http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedVersion> <http://www.w3.org/ns/sparql#version-1.1> .\n",
+        "<http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedVersion> <http://www.w3.org/ns/sparql#version-1.2> .\n",
+    );
+
+    #[test]
+    fn sparql_language_version_round_trips_known_iris() {
+        // Every known `sparql:version-*` IRI parses to its typed variant and renders back.
+        for (iri, v) in [
+            (
+                "http://www.w3.org/ns/sparql#version-1.0",
+                SparqlLanguageVersion::V10,
+            ),
+            (
+                "http://www.w3.org/ns/sparql#version-1.1",
+                SparqlLanguageVersion::V11,
+            ),
+            (
+                "http://www.w3.org/ns/sparql#version-1.2-basic",
+                SparqlLanguageVersion::Basic12,
+            ),
+            (
+                "http://www.w3.org/ns/sparql#version-1.2",
+                SparqlLanguageVersion::Full12,
+            ),
+        ] {
+            assert_eq!(
+                SparqlLanguageVersion::from_version_iri(iri),
+                Some(v.clone())
+            );
+            assert_eq!(v.iri(), iri, "iri() must round-trip {iri}");
+        }
+    }
+
+    #[test]
+    fn sparql_language_version_carries_unknown_iri_verbatim() {
+        // A FUTURE `sparql:version-*` IRI is carried in `Other` (not dropped) and round-trips.
+        let v = SparqlLanguageVersion::from_version_iri("http://www.w3.org/ns/sparql#version-2.0")
+            .expect("a sparql:version-* IRI must parse");
+        assert_eq!(v, SparqlLanguageVersion::Other("version-2.0".to_string()));
+        assert_eq!(v.iri(), "http://www.w3.org/ns/sparql#version-2.0");
+        // A non-`sparql:` namespace or a non-version local name is NOT a version IRI.
+        assert_eq!(
+            SparqlLanguageVersion::from_version_iri(
+                "http://www.w3.org/ns/sparql-service-description#SPARQL11Query"
+            ),
+            None,
+            "an sd: language term is not a sparql:version-* IRI"
+        );
+        assert_eq!(
+            SparqlLanguageVersion::from_version_iri("http://www.w3.org/ns/sparql#feature-x"),
+            None,
+            "a sparql: IRI that is not version-* is not a version"
+        );
+    }
+
+    #[test]
+    fn parse_sd_extracts_supported_versions() {
+        // [OPUS-4.8] sq-ym6kf: the CLIENT consumes the server-side `sd:supportedVersion`
+        // advertisement (sq-2msb): the version set is parsed, sorted, and a 1.2-aware client can
+        // detect FULL 1.2 (triple-term / dir-lang) support without probing.
+        let cap = parse_service_description(SERVED_SD_WITH_VERSIONS_NT)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cap.sparql_versions,
+            vec![
+                SparqlLanguageVersion::V10,
+                SparqlLanguageVersion::V11,
+                SparqlLanguageVersion::Full12,
+            ],
+            "supportedVersion IRIs parsed + sorted by variant order (V10 < V11 < Full12)"
+        );
+        assert!(
+            cap.advertises_sparql_versions(),
+            "a non-empty sd:supportedVersion set ⇒ version posture is KNOWN"
+        );
+        assert!(
+            cap.advertises_full_sparql_1_2(),
+            "version-1.2 advertised ⇒ full SPARQL 1.2 detectable without probing"
+        );
+        // The legacy `sd:supportedLanguage` parse is unaffected by the new predicate.
+        assert_eq!(cap.sparql_version, Some(SparqlVersion::Sparql11));
+    }
+
+    #[test]
+    fn parse_sd_absent_supported_version_is_unknown_not_unsupported() {
+        // HONEST BOUNDARY (load-bearing): the base served fixture predates `sd:supportedVersion`
+        // (an older endpoint). Its version posture must be UNKNOWN — an EMPTY set — NOT a claim of
+        // "no 1.2". `advertises_full_sparql_1_2()` is `false`, but ONLY because no claim was made,
+        // which `advertises_sparql_versions()` (also `false`) lets a caller distinguish.
+        let cap = parse_service_description(SERVED_SD_NT).unwrap().unwrap();
+        assert!(
+            cap.sparql_versions.is_empty(),
+            "no sd:supportedVersion ⇒ empty version set (UNKNOWN, not unsupported)"
+        );
+        assert!(
+            !cap.advertises_sparql_versions(),
+            "absence ⇒ version posture is unknown"
+        );
+        assert!(
+            !cap.advertises_full_sparql_1_2(),
+            "absence is NOT a positive '1.2' — false here means 'no claim', see advertises_sparql_versions()"
+        );
+    }
+
+    #[test]
+    fn parse_sd_basic_1_2_does_not_satisfy_full_1_2() {
+        // A source advertising ONLY `version-1.2-basic` (the narrower RDF-1.2-BASIC profile) has a
+        // KNOWN version posture, but `advertises_full_sparql_1_2()` is false — Basic12 ≠ Full12.
+        let nt = format!(
+            "{SERVED_SD_NT}<http://host/sparql> \
+             <http://www.w3.org/ns/sparql-service-description#supportedVersion> \
+             <http://www.w3.org/ns/sparql#version-1.2-basic> .\n"
+        );
+        let cap = parse_service_description(&nt).unwrap().unwrap();
+        assert_eq!(cap.sparql_versions, vec![SparqlLanguageVersion::Basic12]);
+        assert!(
+            cap.advertises_sparql_versions(),
+            "version-1.2-basic IS a claim ⇒ posture known"
+        );
+        assert!(
+            !cap.advertises_full_sparql_1_2(),
+            "version-1.2-basic alone does NOT prove full 1.2 (triple-term / dir-lang)"
+        );
+    }
+
+    #[test]
+    fn parse_sd_ignores_non_version_supported_version_objects() {
+        // Robustness: a non-`sparql:version-*` object on `sd:supportedVersion` (a literal, or an
+        // IRI outside the sparql: namespace) is ignored — it never invents a version, and a
+        // genuine version IRI alongside it is still read.
+        let nt = format!(
+            "{SERVED_SD_NT}\
+             <http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedVersion> \"1.1\" .\n\
+             <http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedVersion> <http://example.org/not-a-version> .\n\
+             <http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedVersion> <http://www.w3.org/ns/sparql#version-1.1> .\n"
+        );
+        let cap = parse_service_description(&nt).unwrap().unwrap();
+        assert_eq!(
+            cap.sparql_versions,
+            vec![SparqlLanguageVersion::V11],
+            "only the genuine sparql:version-* IRI is kept; junk objects ignored"
+        );
+    }
+
+    #[test]
+    fn ask_fallback_has_unknown_version_set() {
+        // [OPUS-4.8] sq-ym6kf: an ASK-only endpoint published no SD, so it advertises no version —
+        // the fallback capability's set is empty (UNKNOWN), never an over-claim of 1.2 support.
+        let cap = Capability::ask_fallback();
+        assert!(cap.sparql_versions.is_empty());
+        assert!(!cap.advertises_sparql_versions());
+        assert!(!cap.advertises_full_sparql_1_2());
     }
 
     #[test]

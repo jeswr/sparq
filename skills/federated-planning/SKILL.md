@@ -245,7 +245,13 @@ since:
 
 - **Phase 1 discovery** (`sq-nfxl`) — Service-Description parser + VoID/`scs:` reuse + an
   SSRF-guarded fetch seam + ASK-probe fallback → a `Capability` (+ optional
-  `SourceDescriptor` for *this* planner).
+  `SourceDescriptor` for *this* planner). The `Capability` also reads the SPARQL 1.2 SD
+  `sd:supportedVersion <sparql:version-*>` advertisement (`sq-ym6kf`, consuming the server side
+  `sq-2msb` emits) into `sparql_versions: Vec<SparqlLanguageVersion>`, so a 1.2-aware client can
+  detect full-1.2 (triple-term / `dir`-lang) support via `Capability::advertises_full_sparql_1_2()`
+  **without probing**. Honest boundary: an empty set means the source published no
+  `sd:supportedVersion` ⇒ version posture **UNKNOWN** (older endpoints predate the term), not
+  unsupported — distinguish the two with `Capability::advertises_sparql_versions()`.
 - **Phase 2 source abstraction** (`sq-rsxf`) — the `Endpoint` adapter over the engine's
   transport seam behind a default-deny SSRF guard.
 - **Phase 3 planner bridge + single-source interpreter** (`sq-j27p`) — the consumer of THIS
