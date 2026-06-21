@@ -53,6 +53,17 @@ Then edit the corresponding `skills/<surface>/SKILL.md` (sparql-query / data-for
 
 If you add a brand-new public surface, add a new `skills/<surface>/` (dir name == the skill's `name` frontmatter) and link it from the list above and from the README.
 
+## STANDING RULE — proceed without waiting for the maintainer's greenlight (2026-06-21)
+
+**Never stall the autonomous loop waiting for the maintainer to greenlight a design or make a decision.**
+
+- **Blocked on greenlighting a DESIGN?** Proceed with implementation *without* the greenlight, then open a GitHub issue (🤖 SPARQ-agent self-id) so he can review and steer *after* it is built.
+- **A DECISION you'd otherwise ask about?** Make the best-judgment choice, **document it** (PR body / bead / issue), and proceed. He corrects later if needed.
+- **Drop "needs-user / awaiting greenlight" as a blocking state.** Convert it to "proceeded with default X — see issue #N." The only still-valid blocker is an **external credential/access an agent literally cannot obtain** (OS code-signing certs `sq-v286.8`, npm/PyPI publish tokens, the external cryptographer audit `sq-qhy4`).
+- **EXCEPTION — this does NOT override honesty/soundness discipline.** Never label an unaudited ZK/MPC capability "sound/proven" (that is gated on `sq-qhy4`, a credential/access block, not a greenlight). Proceed on the *build*; keep the honest "not-yet-sound / research-grade / not externally audited" labels.
+
+This rule binds the orchestrator, every sub-agent, and the autonomous-scheduler (`.claude/workflows/autonomous-scheduler.js`): impl/verify agents PROCEED on design/decision-blocked beads (best-judgment + document + a short feedback issue) rather than parking them for the maintainer.
+
 ## Fix a shared issue everywhere it applies — cross-crate/cross-surface parity
 
 <!-- [OPUS-4.8] charter cross-poll from PSS #173 -->

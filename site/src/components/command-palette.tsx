@@ -47,6 +47,16 @@ import {
   DEEP_PAGE_SLUGS,
   capabilityAnchor,
 } from "@/data/capabilities";
+// [OPUS-4.8] sq-ixc3.10 — the live OPERATIONAL command layer the workbench (the REPL)
+// contributes: run / EXPLAIN / connect / export / import / switch-workspace / named-graph /
+// recent-query. The website palette stays navigational; this is the GUI design's keyboard-first
+// SPINE (research/gui-design.md §A.3) layered on top, rendered above the navigation so the live
+// verbs lead. When no workbench is mounted the list is empty and the palette is pure navigation.
+import {
+  usePaletteCommands,
+  type PaletteCommand,
+} from "@/components/palette-commands";
+import { PALETTE_COMMAND_GROUP_ORDER } from "@/lib/palette-commands";
 
 const REPO_URL = "https://github.com/jeswr/sparq";
 
@@ -127,6 +137,19 @@ function scoreItem(value: string, search: string, keywords?: string[]): number {
   return 0; // no substring match → hidden
 }
 
+// [OPUS-4.8] sq-ixc3.10 — bucket the flat operational command list into its fixed-order
+// groups, dropping empties. The groups always render ABOVE the navigation so the live verbs
+// lead the spine. A `<Command.Group>` with no children would render a stray heading, so we
+// filter those out here rather than in the JSX.
+function groupOperationalCommands(
+  commands: readonly PaletteCommand[],
+): { group: string; commands: PaletteCommand[] }[] {
+  return PALETTE_COMMAND_GROUP_ORDER.map((group) => ({
+    group,
+    commands: commands.filter((c) => c.group === group),
+  })).filter((g) => g.commands.length > 0);
+}
+
 /** A single selectable row. `value` is the title; cmdk scores it via our custom filter. */
 function PaletteItem({
   icon: Icon,
@@ -135,6 +158,13 @@ function PaletteItem({
   keywords,
   onSelect,
   trailing,
+  // [OPUS-4.8] sq-ixc3.10 — operational rows may be temporarily unavailable (e.g. "Save
+  // workspace" with no open workspace, EXPLAIN on an Update form). They render greyed and
+  // non-selectable rather than disappearing, so the spine is a stable, discoverable surface.
+  disabled,
+  // A stable disambiguator appended to cmdk's `value` so two rows with the SAME title (a
+  // recent query and a graph could both be "default", say) do not collide in cmdk's value map.
+  valueKey,
 }: {
   icon: LucideIcon;
   title: string;
@@ -146,15 +176,22 @@ function PaletteItem({
   keywords?: string[];
   onSelect: () => void;
   trailing?: React.ReactNode;
+  disabled?: boolean;
+  valueKey?: string;
 }) {
   return (
     <Command.Item
-      value={title}
+      // cmdk fuzzy-scores the `value`. We keep the human title as the leading token (so the
+      // scorer still matches on it) and append an invisible disambiguator for uniqueness.
+      value={valueKey ? `${title} ${valueKey}` : title}
       keywords={keywords}
+      disabled={disabled}
       onSelect={onSelect}
       className={cn(
-        "flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm",
-        "text-foreground/90 data-[selected=true]:bg-sidebar-accent data-[selected=true]:text-sidebar-accent-foreground",
+        "flex items-center gap-3 rounded-md px-3 py-2 text-sm",
+        disabled
+          ? "cursor-not-allowed opacity-50"
+          : "cursor-pointer text-foreground/90 data-[selected=true]:bg-sidebar-accent data-[selected=true]:text-sidebar-accent-foreground",
       )}
     >
       <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -175,6 +212,14 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = React.useState(false);
   const router = useRouter();
   const { theme, setTheme, resolvedTheme } = useTheme();
+
+  // [OPUS-4.8] sq-ixc3.10 — the live operational commands the mounted workbench contributes,
+  // bucketed into their fixed-order groups. Empty off the workbench (pure navigation then).
+  const operationalCommands = usePaletteCommands();
+  const operationalGroups = React.useMemo(
+    () => groupOperationalCommands(operationalCommands),
+    [operationalCommands],
+  );
 
   const ctx = React.useMemo(() => ({ open, setOpen }), [open]);
 
@@ -257,6 +302,30 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
               <Command.Empty className="px-3 py-6 text-center text-sm text-muted-foreground">
                 No matches. Try a surface name, &ldquo;benchmarks&rdquo;, or &ldquo;theme&rdquo;.
               </Command.Empty>
+
+              {/* [OPUS-4.8] sq-ixc3.10 — the live OPERATIONAL spine FIRST: whatever the mounted
+                  workbench contributes (run / EXPLAIN / connect / export / import / switch-
+                  workspace / named-graph / recent-query). Empty off the workbench. */}
+              {operationalGroups.map(({ group, commands }) => (
+                <Command.Group
+                  key={group}
+                  heading={group}
+                  className="px-1 pb-1 text-xs font-medium text-muted-foreground [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5"
+                >
+                  {commands.map((c) => (
+                    <PaletteItem
+                      key={c.id}
+                      valueKey={c.id}
+                      icon={c.icon}
+                      title={c.title}
+                      blurb={c.blurb}
+                      keywords={c.keywords}
+                      disabled={c.disabled}
+                      onSelect={() => runAction(c.run)}
+                    />
+                  ))}
+                </Command.Group>
+              ))}
 
               {/* Flagship showcases first — the strongest proof artifacts. */}
               <Command.Group

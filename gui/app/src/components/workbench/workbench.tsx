@@ -19,6 +19,7 @@
 // system browser (the design's rule: the GUI never renders the site, it links to it).
 
 import * as React from "react";
+import { PanelsTopLeft, X, Layers } from "lucide-react";
 
 import { LeftRail } from "@/components/workbench/left-rail";
 import { TopBar } from "@/components/workbench/top-bar";
@@ -26,6 +27,16 @@ import { TabStrip } from "@/components/workbench/tab-strip";
 import { StatusBar } from "@/components/workbench/status-bar";
 import { ToolPanel } from "@/components/workbench/tool-panel";
 import { TOOLS, toolById } from "@/data/tools";
+import { useEngine } from "@/lib/engine-context";
+// [OPUS-4.8] sq-ixc3.10 — the keyboard-first spine: the Cmd-K palette provider + the shell's own
+// contributed commands (open every tool, switch / close open tabs). Tools register their OWN verbs
+// (the Query tool: run / EXPLAIN / recent queries) from inside their panels.
+import {
+  CommandPaletteProvider,
+  useRegisterPaletteCommands,
+} from "@/components/workbench/command-palette";
+import { WorkbenchProvider, type WorkbenchActions } from "@/components/workbench/workbench-context";
+import { graphLabel, type PaletteCommand } from "@/lib/palette-commands";
 
 /** An open tab in the IDE tab strip — keyed by tool id (a tool opens at most once). */
 export interface OpenTab {
@@ -69,33 +80,130 @@ export function Workbench() {
     [activeId],
   );
 
+  const actions = React.useMemo<WorkbenchActions>(() => ({ openTool }), [openTool]);
+
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-      <TopBar />
-      <div className="flex min-h-0 flex-1">
-        <LeftRail tools={TOOLS} activeId={activeId} onOpenTool={openTool} />
-        <main className="flex min-w-0 flex-1 flex-col">
-          <TabStrip
-            tabs={tabs}
-            activeId={activeId}
-            onSelect={setActiveId}
-            onClose={closeTab}
-          />
-          <div className="min-h-0 flex-1 overflow-hidden">
-            {tabs.map((tab) => (
-              <div
-                key={tab.id}
-                hidden={tab.id !== activeId}
-                className="h-full"
-                data-tab={tab.id}
-              >
-                <ToolPanel toolId={tab.id} />
+    // [OPUS-4.8] sq-ixc3.10 — the whole workbench is wrapped in the Cmd-K palette provider (the
+    // keyboard-first spine) + the shell-actions provider, both mounted ONCE here.
+    <CommandPaletteProvider>
+      <WorkbenchProvider actions={actions}>
+        <ShellPaletteCommands
+          tabs={tabs}
+          activeId={activeId}
+          onOpenTool={openTool}
+          onSelectTab={setActiveId}
+          onCloseTab={closeTab}
+        />
+        <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
+          <TopBar />
+          <div className="flex min-h-0 flex-1">
+            <LeftRail tools={TOOLS} activeId={activeId} onOpenTool={openTool} />
+            <main className="flex min-w-0 flex-1 flex-col">
+              <TabStrip
+                tabs={tabs}
+                activeId={activeId}
+                onSelect={setActiveId}
+                onClose={closeTab}
+              />
+              <div className="min-h-0 flex-1 overflow-hidden">
+                {tabs.map((tab) => (
+                  <div
+                    key={tab.id}
+                    hidden={tab.id !== activeId}
+                    className="h-full"
+                    data-tab={tab.id}
+                  >
+                    <ToolPanel toolId={tab.id} />
+                  </div>
+                ))}
               </div>
-            ))}
+              <StatusBar />
+            </main>
           </div>
-          <StatusBar />
-        </main>
-      </div>
-    </div>
+        </div>
+      </WorkbenchProvider>
+    </CommandPaletteProvider>
   );
+}
+
+// [OPUS-4.8] sq-ixc3.10 — the SHELL's contributed Cmd-K commands: open any tool as a tab, switch
+// to / close an open tab, and jump to a named graph (read from the live engine). The per-tool verbs
+// (run / EXPLAIN / recent queries for the Query tool) are registered by the tool panels themselves.
+// Rendered as a sibling (returns null) so it can call the registration hook inside the provider.
+function ShellPaletteCommands({
+  tabs,
+  activeId,
+  onOpenTool,
+  onSelectTab,
+  onCloseTab,
+}: {
+  tabs: OpenTab[];
+  activeId: string;
+  onOpenTool: (toolId: string) => void;
+  onSelectTab: (toolId: string) => void;
+  onCloseTab: (toolId: string) => void;
+}) {
+  const { graphs } = useEngine();
+
+  const commands = React.useMemo<PaletteCommand[]>(() => {
+    const cmds: PaletteCommand[] = [];
+
+    // Every TOOL as an "open …" command. A `built` tool opens its working tab; a stub still opens
+    // (the panel states its tier + what it will do honestly — no fabricated result).
+    for (const tool of TOOLS) {
+      cmds.push({
+        id: `tool.${tool.id}`,
+        group: "Tools",
+        title: `Open ${tool.label}`,
+        blurb: tool.blurb,
+        keywords: ["open", "tool", "tab", tool.label, tool.blurb],
+        icon: tool.icon,
+        run: () => onOpenTool(tool.id),
+      });
+    }
+
+    // Open tabs: switch to any non-active open tab, or close the active one.
+    for (const tab of tabs) {
+      if (tab.id === activeId) continue;
+      cmds.push({
+        id: `tab.switch.${tab.id}`,
+        group: "Open tabs",
+        title: `Switch to ${tab.label}`,
+        keywords: ["switch", "tab", "focus", tab.label],
+        icon: PanelsTopLeft,
+        run: () => onSelectTab(tab.id),
+      });
+    }
+    cmds.push({
+      id: "tab.close-active",
+      group: "Open tabs",
+      title: "Close the active tab",
+      blurb: tabs.length <= 1 ? "Cannot close the last tab" : undefined,
+      keywords: ["close", "tab"],
+      icon: X,
+      disabled: tabs.length <= 1,
+      run: () => onCloseTab(activeId),
+    });
+
+    // Named graphs (live, from the engine summary): focus the Query tool so the user can scope a
+    // query to the graph. The default graph (graph === null) is not listed (it has no IRI).
+    for (const g of graphs) {
+      if (g.graph === null) continue;
+      const iri = g.graph;
+      cmds.push({
+        id: `graph.${iri}`,
+        group: "Named graphs",
+        title: graphLabel(iri),
+        blurb: `${iri} · ${g.count.toLocaleString()} quad${g.count === 1 ? "" : "s"}`,
+        keywords: ["graph", "named graph", iri],
+        icon: Layers,
+        run: () => onOpenTool("query"),
+      });
+    }
+
+    return cmds;
+  }, [tabs, activeId, graphs, onOpenTool, onSelectTab, onCloseTab]);
+
+  useRegisterPaletteCommands("shell", commands);
+  return null;
 }
