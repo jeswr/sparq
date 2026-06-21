@@ -781,6 +781,31 @@ for c in &cells {
 // A delta smaller than the combined spread of the two cells is NOT yet evidence.
 ```
 
+**Read the effect off the PAIRED delta, not the unpaired means (sq-4891y).** Comparing two cells'
+`mean ± std` and eyeballing the gap is the *unpaired* view — needlessly noisy, because the four cells
+of one seed share the split / init / negatives, so most per-seed variance is *shared* and cancels in
+their difference. `run_ablation_multiseed_paired` returns the **paired** per-seed closure delta (and
+type-negative delta) as a `PairedDelta { mean, std, se, n }` whose paired `std` is far smaller than
+the unpaired sum-of-stds, with a `significant_at(k)` gate (`mean − k·se > 0`, requires `n ≥ 2`):
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{run_ablation_multiseed_paired, synthetic_gufo_ttl_sized, EvalConfig};
+let ttl = synthetic_gufo_ttl_sized(400, /*density*/ 3, 9); // denser → more held-out triples/seed
+let template = EvalConfig::small(13);                       // ComplEx; bump epochs for a tighter run
+let r = run_ablation_multiseed_paired(&ttl, "turtle", template, &(0..12).collect::<Vec<_>>())?;
+let d = r.closure_mrr; // headline closure-prior lift, variance-reduced
+println!("closure delta={:.4} se={:.4} sig@2se={}", d.mean, d.se, d.significant_at(2.0));
+# Ok::<(), String>(())
+// Firm-up bar: a positive PAIRED delta clearing 2·se on a SCHEMA-BEARING slice under ComplEx.
+```
+
+`synthetic_gufo_ttl_sized(n, density, seed)` is the **schema-bearing** firm-up slice: the rigid
+`Person` kind is asserted on **nobody**, so the RDFS closure must materialise it (the closure axis
+genuinely bites — unlike schema-free WN18RR/FB237). A higher `density` adds more learnable held-out
+triples per seed, shrinking the per-seed MRR variance, while keeping the decoy set (non-triviality)
+intact. `examples/kge_ablation.rs` prints the paired delta + an LR sweep.
+
 **Filtered protocol (load-bearing).** Each ranking removes **every** known-true triple (train + valid +
 test) before scoring the held-out one — the established Bordes 2013 protocol; getting it wrong
 invalidates every number. Train/valid/test are a leakage-free partition (a triple is in exactly one

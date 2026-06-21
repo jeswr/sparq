@@ -161,8 +161,9 @@ pub use structure::{
 // harness surface — `kge` feature only.
 #[cfg(feature = "kge")]
 pub use eval::{
-    run_ablation, run_ablation_multiseed, synthetic_gufo_ttl, synthetic_relational_ttl,
-    AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, Splits,
+    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, synthetic_gufo_ttl,
+    synthetic_gufo_ttl_sized, synthetic_relational_ttl, AblationCell, CellStats, EvalConfig,
+    LongTail, MeanStd, Metrics, MultiSeedCell, PairedAblation, PairedDelta, Splits,
     SCHEMA_PREDICATES,
 };
 #[cfg(feature = "kge")]
