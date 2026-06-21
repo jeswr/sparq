@@ -339,6 +339,7 @@ This is the standing orchestration loop that ties the sections above together. R
 1. **Charter cross-pollination.** *Pull:* fetch each sibling charter (`gh api repos/<sibling>/contents/AGENTS.md --jq .content | base64 -d`) + the open cross-pollination issues on this repo; fold genuinely-portable conventions into THIS file — **adapted to sparq** (cargo/clippy `-D warnings` + the W3C-conformance + best-ever-perf ratchets as the gate; roborev/codex as the reviewer; beads; the crate/wasm/CLI/HTTP/Py/JS surfaces) — via a PR, conservatively; then close/comment the issue. *Push:* for any convention this charter gains that a sibling lacks, file an issue (or PR) on the sibling repo. *Watch:* poll the cross-repo threads YOU opened/commented on (the sibling's issues + PRs) for follow-up replies and answer them, self-identifying as the SPARQ agent. No-op when there is no charter drift and no open thread awaits a reply. (See *Cross-pollinate the charter with sibling repos*.)
 2. **Screen + triage inbound work — open issues, code-scanning alerts, deps, roborev.**
    - **Open issues** (`gh issue list`): screen every one. Many are filed by the **PSS agent** — the agent developing the private sibling `jeswr/prod-solid-server`, which consumes sparq as its triplestore/server; **"PSS" anywhere in an issue refers to that codebase.** For each actionable issue: capture it as a bead (`bd create` with the issue as `--external-ref`, priority by the issue's stated severity — a "SHOWSTOPPER" → P0/P1) and drive it through the loop; comment on the issue with the bead id + status; close it when the work lands (referencing the merged PR). If an issue is **unclear, do not guess — post a clarifying reply on the issue** (the PSS agent monitors and responds), and leave it open.
+   - **Issue-close policy (maintainer's standing rule).** <!-- [OPUS-4.8] standing issue-close policy --> **Close a GitHub issue once code resolving it is on `main`; ALWAYS comment a link to the resolving PR before closing.** Do not close on PR-open or on a green-but-unmerged PR (the fix is not yet on `main`), and never close silently — the linking comment is how the owner and sibling agents trace resolution. (This is the triage-side restatement of *Contribution workflow* step 5.)
      - **Issue triage → beads is a RECURRING sweep, not a one-off.** Each maintenance pass, walk the *whole* open-issue list and **categorise every issue against the beads tracker + the live code**, then act on the category: <!-- [OPUS-4.8] codify recurring issue↔bead reconciliation -->
        - *resolved-closeable* — already fixed on `main`: **close it, citing the merged PR/commit** (`git log`/`git grep` to confirm the fix actually landed before closing).
        - *has-bead* — already tracked: comment the bead id + current status, leave open.
@@ -431,6 +432,19 @@ no network); the Python close-script carries a `--self-test`.
   two beads on the same crate launch and conflict (this gap once dispatched two
   sparq-server beads at once — sq-8rpq). Carries an `--explain` (per-bead keep/drop
   reasons) and a hermetic `--dry-run-self-test`.
+- **`.claude/workflows/autonomous-scheduler.js`** (epic sq-sgu1) — the **self-driving
+  bead-frontier loop**, MATERIALISED as a committed, re-runnable harness Workflow so it
+  survives a session restart. <!-- [OPUS-4.8] durable scheduler --> Each wave it reads the
+  launchable frontier (`scripts/push-frontier.sh`), dispatches one isolated-worktree impl
+  agent per dispatchable ready bead, adversarially verifies each PR, **arms only the clean
+  low-risk ones** (honesty/soundness-sensitive surfaces stay OPEN for the maintainer), then
+  re-reads the frontier (newly-unblocked beads appear) and repeats until the frontier is dry
+  or the per-run cap / token budget is hit. Run it any tick with
+  `Workflow({ name: "autonomous-scheduler" })`; override the per-run cap or focus list via
+  `args` — e.g. `Workflow({ name: "autonomous-scheduler", args: { maxBeads: 6 } })` (also
+  takes `only: ["sq-…", …]`). It **codifies** loop steps 3–4 (drive `bd ready` → land each
+  PR) so the orchestrator stays out of the per-agent dispatch loop; it is bounded by
+  `maxBeads` so it cannot flood, and impl agents never branch-switch the shared checkout.
 - **`scripts/worktree-gc.sh [--dry-run | --apply]`** (sq-6xdr) — a **manual / idle-time**
   broom for the harness's `.claude/worktrees/` dirs. The harness creates one git worktree
   per agent but never auto-removes a finished one, so they pile up (366+ this session) and
