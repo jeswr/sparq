@@ -90,35 +90,28 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   caller-supplied `Transport`; `embeddings` adds a concrete reqwest client +
   `RemoteEmbedder::from_env(dim)`. Never enters the wasm bundle.
 - **Structure-aware vectorisation (opt-in `structure`; measurement behind `kge`)** — research-grade.
-  **P0:** `close_for_vectorise` materialises the `sparq-reason` RDFS/OWL-RL closure **before**
-  vectorising; a `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an
-  **on/off ablation**.
-  **P1:** typed-literal encoders — datatype `route`r, **order-preserving** `NumericEncoder`
-  (provable, metamorphic-tested), 2-valued `BooleanEncoder`, `DateEncoder`, self-describing
-  `SchemaHeader` (metric guard).
-  **Measurement (`kge`, implies `structure`, no new dependency — hand-rolled SGD):** a thin CPU-only
-  KGE trainer (`ModelKind`: symmetric **DistMult** or asymmetric **ComplEx**) + a **filtered
-  link-prediction** harness (`run_ablation` / `run_ablation_multiseed`): the `{closure}×{type-neg}`
-  **ablation matrix**, a **long-tail** breakdown, a synthetic **gUFO** slice. **No accuracy claim**;
-  numbers INDICATIVE only — DistMult is near-random on directional data, so read deltas off ComplEx,
-  multi-seed, on a real dataset.
+  **P0:** `close_for_vectorise` materialises the `sparq-reason` closure **before** vectorising; a
+  `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an **on/off ablation**.
+  **P1:** typed-literal encoders — `route`r, **order-preserving** `NumericEncoder`, `BooleanEncoder`,
+  `DateEncoder`, self-describing `SchemaHeader` (metric guard).
+  **`kge`** (implies `structure`, no new dep — hand-rolled SGD): a thin CPU-only trainer (symmetric
+  **DistMult** / asymmetric **ComplEx**) + a **filtered link-prediction** `{closure}×{type-neg}`
+  ablation (`run_ablation*`). **No accuracy claim**; INDICATIVE only — read deltas off ComplEx (DistMult is symmetric → near-random on directional data).
 
 ## 📚 Learn more
 
-- **How-to** — [`skills/vector-search/SKILL.md`](../../skills/vector-search/SKILL.md)
-  (label / verbalized / hybrid pipelines, DiskANN, quantization, bulk import, the full
-  API surface and the `.spqv` / `.spqg` formats).
+- **How-to** — [`skills/vector-search/SKILL.md`](../../skills/vector-search/SKILL.md) (label /
+  verbalized / hybrid pipelines, DiskANN, quantization, bulk import, API surface, `.spqv`/`.spqg`).
 - **API reference** — [docs.rs/sparq-vectors](https://docs.rs/sparq-vectors).
 - **Design** — [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md).
-- **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ / throughput
-  gates are `cargo test`s (`tests/recall.rs`, `tests/diskann.rs`, `tests/quant.rs`,
-  `tests/throughput.rs`), with live numbers on the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
-- **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs`
-  anchors recall against **hnswlib** (the FAISS/hnswlib reference) via a committed capture
-  (`tests/fixtures/hnswlib_ref.tsv`): `nearest_exact` reproduces the numpy exact-kNN oracle,
-  and DiskANN (and HNSW under `approx-ann`) clears hnswlib's recall on it. Runs in CI with **no
-  native deps** (corpus regenerated deterministically); the live re-capture
-  (`scripts/capture_hnswlib_ref.py`) is `#[ignore]`d. Recall figures are NON-CANONICAL.
+- **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ / throughput gates
+  are `cargo test`s (`tests/recall.rs`, `diskann.rs`, `quant.rs`, `throughput.rs`), with live
+  numbers on the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+- **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs` anchors
+  recall against **hnswlib** via a committed capture (`tests/fixtures/hnswlib_ref.tsv`):
+  `nearest_exact` reproduces the numpy exact-kNN oracle, and DiskANN (and HNSW under `approx-ann`)
+  clears hnswlib's recall. Runs in CI with **no native deps** (deterministic corpus); the live
+  re-capture (`scripts/capture_hnswlib_ref.py`) is `#[ignore]`d. Recall figures NON-CANONICAL.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
