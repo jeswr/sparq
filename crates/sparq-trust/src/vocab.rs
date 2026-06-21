@@ -9,8 +9,16 @@
 //! All `trust:` IRIs are **NON-STANDARD, invented for this proposal** (a placeholder
 //! namespace to make the semantics concrete); a WG would rename/rehome them.
 //!
-//! [OPUS-4.8] sq-pfae PoC (issue #940). Flag for re-review when Fable returns.
-//! 🤖 SPARQ agent — trust-graph authorisation PoC.
+//! The canonical, machine-readable form of this vocabulary is
+//! [`ontologies/trust/trust.ttl`](https://github.com/jeswr/sparq/blob/main/crates/sparq-trust/ontologies/trust/trust.ttl)
+//! (Turtle, with `rdfs:label`/`rdfs:comment`/`rdfs:domain`/`rdfs:range`), and its
+//! two-stratum semantics — admission/derivation, the degenerate-`.acl` equivalence,
+//! and the strict-additivity property (G6) — are pinned in the companion
+//! `ontologies/trust/SEMANTICS.md`. The `ttl_pins_match_rust_constants` test below
+//! keeps the published Turtle and these Rust constants from drifting.
+//!
+//! [OPUS-4.8] sq-pfae PoC (issue #940); vocab/semantics note pinned in sq-pfae.2.
+//! Flag for re-review when Fable returns. 🤖 SPARQ agent — trust-graph authorisation.
 
 use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 
@@ -169,5 +177,79 @@ mod tests {
         let (a, _) = desugar_for_predicate(&p);
         let (b, _) = desugar_for_predicate(&p);
         assert_ne!(a, b, "fresh blank nodes — desugarings never collide");
+    }
+
+    /// No-drift guard for sq-pfae.2: every `trust:` IRI these Rust constants name
+    /// MUST appear (as a subject) in the published machine-readable vocabulary
+    /// `ontologies/trust/trust.ttl`, and vice-versa. If a term is renamed/added in
+    /// one and not the other this test fails — the published Turtle a working group
+    /// reads and the constants the admission gate uses cannot silently diverge.
+    #[test]
+    fn ttl_pins_match_rust_constants() {
+        // The published Turtle vocabulary (Doc + vocab artifact of sq-pfae.2).
+        const TTL: &str = include_str!("../ontologies/trust/trust.ttl");
+
+        // The full set of `trust:` IRIs the Rust core + the one sugar name.
+        let constants: &[&str] = &[
+            TRUST_POLICY,
+            TRUST_RULE,
+            TRUSTS_SOURCE_FOR,
+            SOURCE,
+            FOR_SHAPE,
+            SOURCE_CLASS,
+            ISSUER_KEY,
+            SCOPE,
+            FRESH_WITHIN,
+            ADMITTED,
+            FOR_PREDICATE,
+        ];
+
+        // Every constant must be declared in the Turtle (as `trust:LocalName a …`).
+        for &iri in constants {
+            let local = iri
+                .strip_prefix(TRUST_NS)
+                .expect("every constant is in the trust: namespace");
+            let decl = format!("trust:{local} a ");
+            assert!(
+                TTL.contains(&decl),
+                "trust.ttl is missing a declaration for `trust:{local}` ({iri}) — \
+                 the published vocabulary drifted from the Rust constants (sq-pfae.2)",
+            );
+        }
+
+        // And every `trust:LocalName a` declaration in the Turtle must be backed by a
+        // Rust constant — no published term without a constant. Scan declaration lines.
+        let declared_locals: Vec<&str> = TTL
+            .lines()
+            .filter_map(|line| {
+                let t = line.trim_start();
+                let rest = t.strip_prefix("trust:")?;
+                // `trust: a owl:Ontology` is the ontology-node line (bare namespace IRI):
+                // the char right after the colon is whitespace, so it has no local name —
+                // it is metadata, not a term. Skip it.
+                if rest.starts_with(char::is_whitespace) {
+                    return None;
+                }
+                // A term declaration line looks like `trust:Foo a …`.
+                let name = rest.split_whitespace().next()?;
+                if rest[name.len()..].trim_start().starts_with("a ") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            !declared_locals.is_empty(),
+            "no trust: term declarations found in trust.ttl — parser/format drift",
+        );
+        for local in declared_locals {
+            let full = format!("{TRUST_NS}{local}");
+            assert!(
+                constants.contains(&full.as_str()),
+                "trust.ttl declares `trust:{local}` but no Rust constant names it — \
+                 add the constant or remove the term (sq-pfae.2)",
+            );
+        }
     }
 }

@@ -61,3 +61,18 @@ oxrdf.workspace = true
 # Used only to classify the query form in `Graph.ask` (ASK runs the engine's
 # native early-exiting entry point; SELECT is answered via the lazy count).
 spargebra.workspace = true
+
+[features]
+# [OPUS-4.8] sq-oy1f.20: JSON-LD is DEFAULT-ON in the Python wheel — the maintainer-
+# directed exception to sparq's opt-in-by-default principle for the user-prioritised
+# JSON-LD epic (sq-oy1f), mirroring the native CLI + server (sq-oy1f.4). The Python
+# wheel has no bundle-size floor (unlike the lean wasm bundle, where JSON-LD stays
+# opt-in), so wiring `oxjsonld` in by default costs nothing the wheel cares about while
+# making `Graph.load(..., format="jsonld")` and a `.jsonld` path work out of the box.
+# LEAN INVARIANT PRESERVED: this only enables `oxjsonld` via THIS leaf crate's edge —
+# the sparq-core / sparq-engine LIBRARY defaults stay lean, so the engine/wasm graphs
+# are untouched. Toggleable: `cargo build -p sparq-py --no-default-features` (and a
+# `--no-default-features` wheel) drops the oxjsonld parser; then `format="jsonld"`
+# fails closed (sparq-core rejects the unknown format rather than mis-parsing it).
+default = ["jsonld"]
+jsonld = ["sparq-core/jsonld"]

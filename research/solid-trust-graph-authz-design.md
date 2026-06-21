@@ -429,21 +429,36 @@ is gated correctly. The design's safety argument:
 negation-as-failure** (sparq-reason; the AC design's stratification discipline). Several
 consequences the design must honour — and one architectural gap the prior draft glossed:
 
-- **ADMISSION-VS-MATERIALIZE-ONCE GAP (open; top-priority — `sq-xc4y`).** The prior draft
+- **ADMISSION-VS-MATERIALIZE-ONCE GAP — RESOLVED: decision (a), the static/dynamic split
+  (`sq-xc4y`, shipped in `sparq-trust` + `sparq-solid` `trust_wire`).** The prior draft
   presented admission as a clean stratum *ahead of* derivation. But the shipped `sparq-solid`
   auth view is materialised **once, session-independently** (`PodStore`, `lib.rs`) and then
   queried **per-session** by principal expansion — whereas admission gates on
   `credentialSubject == Session.agent` (holder binding, §3.4) and `trust:freshWithin` vs
   `Session.now`, which are **per-request** facts. A per-request, identity-bound admission
   decision **cannot** simply sit ahead of derivation inside a session-independent
-  materialise-once view: either admission **re-runs per request** (negating the P4 epoch-cache
-  composition) **or** holder binding **degrades to a query-time principal match**. (A partial
-  precedent exists: per-request `now` *is* already consulted for time-windowed conditional
-  grants — `authindex.rs`, `sq-0q7n` — re-checked per request rather than frozen at
-  materialise; but per-request *identity*-bound admission ahead of derivation is unspecified.)
-  This is an **open soundness question**, not settled stratification: split static-admission
-  (signature / type-scope, materialise-time) from dynamic-admission (holder-binding /
-  freshness, query-time), or per-request re-materialise for credential-gated resources.
+  materialise-once view: either admission re-runs per request (negating the P4 epoch-cache
+  composition) **or** holder binding degrades to a query-time principal match. **The decision
+  taken is (a):** SPLIT admission into a **STATIC** class (issuer signature, statement-type
+  scope, reserved-predicate guard, `trust:scope`) decided **once at materialise-time**
+  (`sparq_trust::admit_static`), and a **DYNAMIC** class (holder binding + freshness) **deferred
+  to a per-request conditional grant**. The static decision emits an `auth:ConditionalGrant`
+  whose `auth:agent` is the credential subject and whose `auth:notAfter` is
+  `issued_at + freshWithin`; both are re-checked **per request** by the shipped sq-0q7n
+  `AuthIndex::cond_applies` path (`auth:agent` against `Session.agent`, `auth:notAfter` against
+  `Session.now`). So holder binding does NOT degrade to a static principal match — it is a live
+  per-request check — and freshness lapses at query time **without** a re-materialise; the
+  dynamic verdict is never frozen into the view, while the static stratum composes with the
+  epoch cache. (This generalises the sq-0q7n precedent — which already does this for time
+  windows — to the identity dimension. Option (b) per-request re-materialise was rejected: it
+  negates the epoch cache and the existing conditional-grant machinery already gives the
+  per-request semantics for free.) The load-bearing soundness test
+  (`sparq-solid/tests/trust_graph.rs::static_admission_defers_holder_and_freshness_to_query_time`)
+  drives this through the REAL `PodStore`: a stale `now` and a wrong-holder request are each
+  denied at query time. **Honest residue:** revocation that occurs AFTER materialise is still a
+  re-materialise event (epoch bump, G5/§8) — only holder + freshness are deferred, because they
+  are pure functions of the per-request `Session`; revocation is an external-state change, not a
+  request fact.
 - Admission rules must be **stratified ahead of** derivation: all *static* admission decisions
   for a predicate complete before any derivation rule reads it, so scoped-NAF stays sound.
 - **Freshness/revocation are NOT in the reasoner; the §2.1 diagram is reworded accordingly.**
@@ -1039,8 +1054,10 @@ not in-reasoner — §3.3 B′); `shape_admits` runs the shipped, terminating `s
 `scope_covers` is a containment check. The emitted facts then enter the **unchanged** `sparq-solid`
 materialiser, which runs the `.acl` rule via `sparq-reason` `reason_n3`. **Open-problem hooks the
 PoC must respect** (do not silently "solve" them — wire them as the documented degraded path):
-`sq-xc4y` (holder-binding/freshness are per-request → run admission **per request** for
-credential-gated resources, not in the materialise-once view); `sq-tu4e` (no in-reasoner NAF over
+`sq-xc4y` (holder-binding/freshness are per-request → **RESOLVED** by the static/dynamic split:
+`admit_static` decides the session-independent class once and defers holder/freshness to a
+per-request conditional grant, §3.3 A′ — never frozen into the materialise-once view);
+`sq-tu4e` (no in-reasoner NAF over
 derived facts → `revoked` is an **input-only** seeded predicate; no deny-on-disagreement rule);
 `sq-l5og` / `sq-wvne` are **out of PoC scope** (no delegation, no ZK/privacy).
 
@@ -1086,7 +1103,10 @@ core spine; **P5, P6, P7** depend on P3/P4; **P7 (privacy) is hard-gated on `sq-
    invariant **enforced against the *current* delegator grant**, and — the prerequisite the
    prior draft omitted — the **invocation-binding gate** (authenticated invoker == chain
    terminal delegate, **key-proven per request** via a DPoP/GNAP layer that does **not exist
-   today**) so an admitted delegation is **not replayable**. **NOTE: there is ZERO delegation /
+   today**) so an admitted delegation is **not replayable under key substitution** (each hop's
+   `delegate_key` bound into the delegator-signed preimage — the `sq-l5og` soundness fix; this is
+   NOT full non-replayability, since the delegator's key is still operator-asserted, `sq-pfae.3`).
+   **NOTE: there is ZERO delegation /
    key-proof substrate in the repo today** (no zcap/ucan/dpop/gnap/`actedOnBehalfOf`); this
    phase is design-only at the start, not "build on existing seams". Add delegation-replay
    adversarial forgery tests. `revocation.rs` is a status-list primitive, **not**
@@ -1189,15 +1209,19 @@ prior draft phrased as settled are open problems.
 
 ### 7.3 Evaluation soundness (the trust-scoping / reasoner half)
 
-- **A′ — ADMISSION-VS-MATERIALIZE-ONCE GAP (new; top priority — `sq-xc4y`).** Holder binding +
-  freshness are **per-request**, but the shipped auth view is materialised **once,
-  session-independently** (`PodStore`, `lib.rs`) and queried per-session. v1 has **NOT
-  specified** how per-request identity-bound admission composes with the materialise-once /
-  epoch-cache model: either admission **re-runs per request** (negating P4) **or** holder
-  binding **degrades to a query-time principal match**. This is an **open soundness question**,
-  not the clean pre-derivation stratification the prior draft implied. (Partial precedent:
-  per-request `now` is already consulted for time-windowed conditional grants, `authindex.rs`
-  `sq-0q7n`; but identity-bound admission ahead of derivation is unspecified.)
+- **A′ — ADMISSION-VS-MATERIALIZE-ONCE GAP — RESOLVED (decision (a); `sq-xc4y`, shipped).**
+  Holder binding + freshness are **per-request**, but the shipped auth view is materialised
+  **once, session-independently** (`PodStore`, `lib.rs`) and queried per-session. The decision:
+  **split static admission (signature / type-scope / scope, materialise-time) from dynamic
+  admission (holder-binding / freshness, query-time)**, with the dynamic class deferred to a
+  **conditional grant** re-checked per request by the shipped sq-0q7n `cond_applies` path
+  (`auth:agent`↔`Session.agent`, `auth:notAfter`↔`Session.now`). Holder binding does NOT degrade
+  to a frozen static match — it is a live per-request check — and freshness lapses at query time
+  without a re-materialise. This generalises the sq-0q7n time-window precedent to the identity
+  dimension; option (b) per-request re-materialise was rejected (negates P4, redundant with the
+  conditional-grant machinery). See §3.3 for the full rationale and the soundness test. Residue:
+  post-materialise *revocation* is still a re-materialise event (external-state change, not a
+  request fact) — only the two pure-`Session` conditions are deferred.
 - **B′ — Freshness/revocation are NOT in the reasoner.** Time is a per-request Rust check
   (`authindex.rs`); the shipped reasoner permits NAF **only over input-only predicates** and
   rejects NAF over **derived** predicates. Any `not-revoked` guard must be **input-stratified**
@@ -1288,7 +1312,9 @@ The genuine **design gaps** (not mere caveats) surfaced above are tracked as bea
 `gh-940`, to be sequenced by the orchestrator:
 
 - `sq-xc4y` — per-request holder-binding/freshness admission vs session-independent
-  materialise-once auth view (top-priority soundness question).
+  materialise-once auth view: **RESOLVED** — decision (a), the static/dynamic split, shipped in
+  `sparq-trust` (`admit_static` / `derive_conditional_grants`) + `sparq-solid`
+  (`admit_trust_credential_static`, conditional-grant install on the sq-0q7n path); §3.3 A′.
 - `sq-l5og` — delegation invocation-binding gate (invoker == terminal delegate, key-proven).
   **[OPUS-4.8] RESOLVED in the PoC** (`crates/sparq-trust/src/delegation.rs` + the
   `delegation_replay` forgery tests): the gate defeats stolen-chain **key-substitution** replay
@@ -1310,7 +1336,8 @@ The genuine **design gaps** (not mere caveats) surfaced above are tracked as bea
 own prior draft's overclaims. The *primary* load-bearing claims a reviewer should attack are the
 **concessions of §7.1–7.4**, audited for *adequacy* — i.e. is each gap conceded honestly and
 fully, or does residual overclaim survive? Those concessions are specific and falsifiable, and
-are framed as **open problems, not settled claims**: admission-vs-materialise-once (`sq-xc4y`),
+are framed as **open problems, not settled claims** (with the exception of
+admission-vs-materialise-once `sq-xc4y`, now RESOLVED by the static/dynamic split, §3.3 A′):
 delegation invocation-binding (`sq-l5og`), conflict / deny-on-disagreement reachability and the
 in-reasoner-NAF / freshness / issuer-key limits (`sq-tu4e`), and the ZK-presentation composite +
 §3.4-holder-binding architecture blocker (`sq-wvne`). The document makes **no claim** to

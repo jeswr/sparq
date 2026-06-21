@@ -729,10 +729,72 @@ corruption for that side — a missing/wrong schema never deadlocks the sampler.
 deterministic for a fixed `(seed, mode, triple)` and applies the standard "filtered" guard (never
 emits a corruption that is itself a true triple). **Honesty:** the empirical benefit of either prior is
 **unproven** — both ship behind the ablation precisely because the literal/type-aware KGE literature
-reports inconsistent gains; this slice is the buildable inputs, the trainer that consumes them is a
-tracked follow-up.
+reports inconsistent gains; this slice is the buildable inputs. **The trainer that consumes them now
+exists** behind the `kge` feature (recipe 14).
 
-### 14. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
+### 14. KGE measurement foundation — DistMult/ComplEx trainer + filtered link-prediction ablation (opt-in, feature = `kge`)
+
+<!-- [OPUS-4.8] sq-0wo9e.8 / P6 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §P6 + sq-0wo9e.8). -->
+The `kge` feature (implies `structure`) is the **measurement foundation** for the epic: a **thin,
+CPU-only, deterministically-seeded shallow KGE** that *consumes* the P0 closure + type-constrained
+negatives to produce embeddings, plus the standard **filtered link-prediction** harness that measures
+them. It is the *instrument* — it makes **no accuracy claim**. Two scoring models behind the
+`ModelKind` axis: **DistMult** (Yang 2015, symmetric) and **ComplEx** (Trouillon 2016, asymmetric).
+No new dependency (hand-rolled SGD, no ML crate).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{close_for_vectorise, train, ModelKind, TrainConfig, SamplingMode, TypeConstraints};
+use sparq_reason::Profile;
+
+let closed = close_for_vectorise(turtle_src, "turtle", Profile::Rdfs)?;   // closure-before-vectorise
+let tc = TypeConstraints::mine(&closed.graph);
+// small() defaults to the ASYMMETRIC ComplEx; small_with_model(..) selects DistMult explicitly.
+let cfg = TrainConfig::small(SamplingMode::TypeConstrained, /*seed*/ 7);  // tiny, reproducible
+let (model, report) = train(&closed.graph, &tc, cfg);
+assert!(report.loss_decreased());                  // it learns
+let score = model.score(h, r, t);                  // model.model is ModelKind::{DistMult,ComplEx}
+# Ok::<(), String>(())
+```
+
+**The model axis is load-bearing.** DistMult scores `(h,r,t)` and `(t,r,h)` identically, so on a
+relation whose true edges are **directional** it is structurally near-random — it cannot place the
+head above the tail. Both synthetic eval slices here are ~100 % directional, so a DistMult ablation
+runs in a near-random regime where the inter-cell deltas are noise. **`EvalConfig::small` defaults to
+the asymmetric ComplEx**, and any ablation delta must be read off the ComplEx run, not DistMult.
+
+The **eval harness** runs the 2×2 P0 ablation matrix and reports filtered MRR / Hits@1/3/10 with a
+long-tail breakdown. Because a single seed's inter-cell delta can be a handful of rank hits (noise),
+report each cell as a **mean ± std over several seeds** with `run_ablation_multiseed`:
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{run_ablation_multiseed, synthetic_relational_ttl, EvalConfig};
+let ttl = synthetic_relational_ttl(400, /*seed*/ 42);   // or your own KG text
+let template = EvalConfig::small(13);                    // ComplEx by default
+let cells = run_ablation_multiseed(&ttl, "turtle", template, &[1,2,3,4,5])?;  // [(F,F),(F,T),(T,F),(T,T)]
+for c in &cells {
+    println!("closure={} type-neg={} MRR={:.4}+/-{:.4}",
+        c.closure, c.type_constrained, c.metrics.mrr.mean, c.metrics.mrr.std);
+}
+# Ok::<(), String>(())
+// A delta smaller than the combined spread of the two cells is NOT yet evidence.
+```
+
+**Filtered protocol (load-bearing).** Each ranking removes **every** known-true triple (train + valid +
+test) before scoring the held-out one — the established Bordes 2013 protocol; getting it wrong
+invalidates every number. Train/valid/test are a leakage-free partition (a triple is in exactly one
+split); the trainer sees **train only**. Only **non-schema relations** are prediction targets
+(`SCHEMA_PREDICATES` — `rdf:type`/`subClassOf`/domain/range are *structural context*, never targets,
+so the closure axis is not distorted by trivially-derivable entailed types). The runnable ablation is
+`examples/kge_ablation.rs` (runs BOTH models, multi-seed; a real dataset goes behind
+`SPARQ_KGE_DATASET=/path/to/kg.nt`). **All numbers are INDICATIVE only** (the work-box is
+non-canonical) and are **never** baked into docs. **Adoption gate:** no prior is adopted from these
+synthetic, work-box, single-seed figures — adoption requires a **real dataset** (WN18RR/FB15k-237
+subset), on a **canonical machine**, under the **asymmetric model**, with **multi-seed** reporting.
+The gUFO-prior cell (`AblationCell::gufo_prior`) is an exposed ablation axis the later phase wires into.
+
+### 15. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
 
 <!-- [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §3.1/§3.2/§6.A). -->
 Research-grade **P1**: the typed-literal encoders that turn a node vector into a **structured
@@ -775,8 +837,9 @@ header.check_euclidean()?;  // every block is L2-searchable
 guard are **proven** (`encode.rs` tests). Whether the typed encoders raise downstream
 link-prediction / retrieval is **empirical and dataset-dependent** (design §6.B/§9) — no accuracy
 claim is made. The encoder-quality ablation runner is `examples/bench_typed_encoders.rs` (P1 ON vs
-OFF, with a long-tail slice); its numbers are **work-box NON-CANONICAL**. This crate still has **no
-KGE trainer** — the encoders are inputs a trainer would consume.
+OFF, with a long-tail slice); its numbers are **work-box NON-CANONICAL**. The encoders are inputs a
+trainer would consume — the thin KGE trainer that consumes them now exists behind the `kge` feature
+(recipe 14). <!-- [OPUS-4.8] sq-0wo9e.8 -->
 
 ## Gotchas / feature flags / prerequisites
 
@@ -800,8 +863,18 @@ KGE trainer** — the encoders are inputs a trainer would consume.
   it ON it exposes the **P0** closure + sampler (`close_for_vectorise` / `materialise_closure` /
   `ClosedGraph`, `TypeConstraints`, `NegativeSampler` + `SamplingMode`, recipe 13) AND the **P1**
   typed-literal encoders (`route`, `NumericEncoder`, `BooleanEncoder`, `DateEncoder`, `SchemaHeader`,
-  recipe 14). It TRAINS NOTHING and serves no exact answer; encoder invariants are proven but
+  recipe 15). `structure` itself serves no exact answer; encoder invariants are proven but
   embedding-quality benefit is **unproven** (research-grade, no accuracy claim, no canonical numbers).
+- **The KGE measurement foundation is the non-default `kge` feature (sq-0wo9e.8 / P6).** It **implies
+  `structure`** and adds **no new dependency** (a hand-rolled CPU-only trainer — no ML crate). With it
+  OFF the default build compiles zero trainer/eval code; with it ON it exposes `train` / `TrainConfig`
+  / `TrainedModel` / `ModelKind` (DistMult **or** the asymmetric ComplEx), the filtered
+  link-prediction harness (`run_ablation` / `run_ablation_multiseed` / `EvalConfig` / `Splits` /
+  `Metrics` / `LongTail` / `AblationCell` / `MultiSeedCell` / `CellStats` / `MeanStd`), the
+  synthetic-graph generators, and `SCHEMA_PREDICATES` (recipe 14). It is the *measurement instrument*
+  the design requires before any prior is adopted — **no accuracy claim**, indicative numbers only
+  (work-box non-canonical). **DistMult is symmetric → near-random on directional relations; read
+  ablation deltas off the asymmetric ComplEx, multi-seed.**
 - **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
   index (`VectorIndex`/`HnswConfig`) and the `ApproxBackend` are gated behind it — it is the only
   thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force

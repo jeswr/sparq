@@ -229,6 +229,98 @@ fn age_16_admitted_but_no_grant_through_podstore() {
     );
 }
 
+// --- the static/dynamic admission split (sq-xc4y) ---------------------------
+
+/// `now` as an `xsd:dateTime` lexical, for a per-request `Session.now`.
+fn at(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (h, mi, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    // Hinnant civil_from_days, inline for the test (matches trust_wire's formatter).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let (yy, mm) = if m <= 2 { (y + 1, m) } else { (y, m) };
+    format!("{yy:04}-{mm:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+fn read_at(store: &mut PodStore, agent: &str, now: &str) -> bool {
+    let s = Session {
+        agent: Some(agent),
+        client: None,
+        issuer: None,
+        now: Some(now),
+    };
+    store
+        .accessible(&s, Mode::Read)
+        .iter()
+        .any(|n| n.as_str() == RESOURCE_X)
+}
+
+/// THE LOAD-BEARING sq-xc4y SOUNDNESS TEST. Static admission installs a CONDITIONAL
+/// grant whose holder + freshness are re-checked PER REQUEST — so the per-request
+/// decision is NOT frozen into the materialise-once view:
+/// 1. as Jesse, before the deadline → GRANTED;
+/// 2. as Jesse, AFTER the freshness deadline → DENIED (the freshness lapsed at query
+///    time, without any re-materialise);
+/// 3. as a DIFFERENT requester (Mallory), before the deadline → DENIED (the holder
+///    binding is re-checked against Session.agent, not frozen as Jesse's allow).
+#[test]
+fn static_admission_defers_holder_and_freshness_to_query_time() {
+    let (sk, pk) = gov_key();
+    let mut store = PodStore::new(Graph::load_dataset(&pod_nquads(), "nquads").unwrap());
+    store.materialize_wac().unwrap();
+
+    // Credential issued at NOW-1day, P30D window ⇒ deadline = NOW - 1day + 30days.
+    let cred = signed_cred(&sk, "25");
+    let rules = gov_age_rules(GOV_ISSUER, &pk);
+    let outcome = store
+        .admit_trust_credential_static(&cred, &rules, &iri(RESOURCE_X), ACR_ABAC_RULE)
+        .unwrap();
+    assert_eq!(
+        outcome.installed_count, 1,
+        "one conditional grant installed for the age fact"
+    );
+    let deadline = cred.issued_at_unix_secs + 30 * 86_400;
+
+    // (1) Jesse, well before the deadline → GRANTED.
+    let before = at(NOW);
+    assert!(
+        read_at(&mut store, JESSE, &before),
+        "static admission ⇒ Jesse is granted read while the credential is fresh"
+    );
+
+    // (2) Jesse, AFTER the freshness deadline → DENIED, without a re-materialise. This
+    // is the proof the freshness is NOT frozen into the view.
+    let after = at(deadline + 86_400);
+    assert!(
+        !read_at(&mut store, JESSE, &after),
+        "a request past trust:freshWithin is denied at QUERY TIME — the freshness was \
+         deferred to the per-request conditional check, not frozen into the view (sq-xc4y)"
+    );
+
+    // (3) Mallory (a different requester), before the deadline → DENIED. The holder
+    // binding is re-checked against Session.agent; the grant is pinned to Jesse.
+    let mallory = "https://mallory.ex/card#me";
+    assert!(
+        !read_at(&mut store, mallory, &before),
+        "a different requester (Mallory) is denied — the holder binding is re-checked \
+         per request against Session.agent, never frozen as a bare allow (sq-xc4y)"
+    );
+
+    // (4) And the fresh-Jesse request still works (idempotent, repeatable check).
+    assert!(
+        read_at(&mut store, JESSE, &before),
+        "still granted for fresh Jesse"
+    );
+}
+
 /// STRICT ADDITIVITY (G6): with the `trust-graph` feature compiled in but NO admission
 /// call made, the store's auth view is IDENTICAL to a plain WAC materialise — the
 /// feature is additive, never a behaviour change to the WAC/ACP path. (The byte-level

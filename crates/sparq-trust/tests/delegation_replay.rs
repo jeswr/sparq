@@ -245,9 +245,7 @@ fn stolen_chain_with_substituted_terminal_key_is_denied() {
     let err = invoke(&chain, &roots, &inv, &iri(DOC_X)).unwrap_err();
     assert_eq!(
         err,
-        InvocationDenied::HopSignatureInvalid {
-            hop: terminal_idx
-        },
+        InvocationDenied::HopSignatureInvalid { hop: terminal_idx },
         "substituting the terminal delegate_key must break the delegator's hop signature \
          (sq-l5og: the key is bound into the signed preimage), denying the stolen chain"
     );

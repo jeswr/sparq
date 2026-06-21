@@ -57,4 +57,13 @@ if (!hasWasmPack) {
 }
 
 console.log('prepare: building @jeswr/sparq (wasm-pack + tsc) for the git-pin install...');
-execFileSync('npm', ['run', 'build'], { cwd: pkgDir, stdio: 'inherit' });
+// [OPUS-4.8] sq-gl3cf — `shell: true` so this resolves the `npm` launcher on WINDOWS too.
+// Without it, execFileSync('npm', …) does no PATHEXT/`.cmd` resolution and dies with
+// `spawnSync npm ENOENT` (errno -4058) on Windows — which is what failed the win-x64
+// `GUI desktop bundle` row in release.yml at root `npm install` (run 27890097353): the
+// root install runs this `prepare` hook for the @jeswr/sparq workspace member, and its
+// crash also triggered npm's rollback `EPERM rmdir node_modules/next` cleanup warnings.
+// `shell: true` spawns via `cmd /c` on Windows (resolves `npm.cmd`) and `/bin/sh -c` on
+// POSIX (unchanged behavior there). The args are a fixed literal list with no shell
+// metacharacters, so there is no injection surface.
+execFileSync('npm', ['run', 'build'], { cwd: pkgDir, stdio: 'inherit', shell: true });

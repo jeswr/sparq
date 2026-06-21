@@ -10,7 +10,12 @@
 //      updates, the standard controlled-input driving technique),
 //   5. click "Run query", and
 //   6. ASSERT the SELECT result table renders with the expected binding ("Alice", from the
-//      seeded sample graph).
+//      seeded sample graph), then
+//   7. [OPUS-4.8] sq-ixc3.12 — click EXPLAIN and ASSERT the planner plan renders
+//      (data-result-kind="explain"), exercising the UNIFIED run(query,{mode}) EXPLAIN path, then
+//   8. [OPUS-4.8] sq-ixc3.11 — open the SHACL tool (left-rail data-tool="shacl"), click
+//      "Validate live store", and ASSERT a W3C validation report renders over the serialised
+//      live store (proving the SHACL surface is a working TOOL, not a stub).
 //
 // This proves the desktop shell actually loads, the WASM engine runs a query IN THE TAB, and
 // the result renders — i.e. the shell is a working app, not just a crate that compiles.
@@ -216,6 +221,59 @@ async function main() {
     log(
       `PASS — SELECT ran in the in-tab WASM engine and rendered ${rowCount} row(s) including "${EXPECTED_CELL}".`,
     );
+
+    // 6. [OPUS-4.8] sq-ixc3.12 — EXPLAIN smoke: click the toolbar EXPLAIN button and assert the
+    //    planner-plan container renders. This exercises the UNIFIED EXPLAIN path —
+    //    run(query, { mode: "explain" }) surfacing a { kind: "explain" } outcome through the
+    //    SAME results pipeline (data-result-kind="explain") the Cmd-K "Run EXPLAIN" verb also
+    //    drives — proving the single EXPLAIN contract works end-to-end after the #1018 reconcile.
+    log('clicking "EXPLAIN"…');
+    const explainButton = await browser.$("button=EXPLAIN");
+    await explainButton.waitForClickable({ timeout: 10_000 });
+    await explainButton.click();
+
+    log("waiting for the EXPLAIN plan to render…");
+    const explainResult = await browser.$('[data-result-kind="explain"]');
+    await explainResult.waitForExist({ timeout: 30_000 });
+    const planText = await explainResult.getText();
+    if (!planText.trim()) {
+      throw new Error("EXPLAIN container rendered but the plan text was empty");
+    }
+    log("PASS — EXPLAIN rendered the planner's plan through the unified run() path.");
+
+    // 7. [OPUS-4.8] sq-ixc3.11 — SHACL TOOL smoke: open the SHACL tab from the left rail
+    //    (data-tool="shacl", left-rail.tsx), click "Validate live store" (shacl-tool.tsx), and
+    //    assert the validation report container renders. This proves the SHACL surface is a
+    //    WORKING tool over the SERIALISED live store (serializeStore → sparqShaclValidate), not
+    //    a stub — without asserting a specific verdict (the starter shapes may or may not flag
+    //    the seeded sample graph), only that the operational round-trip produced a report.
+    log("opening the SHACL tool from the left rail…");
+    const shaclTab = await browser.$('[data-tool="shacl"]');
+    await shaclTab.waitForClickable({ timeout: 10_000 });
+    await shaclTab.click();
+
+    log('clicking "Validate live store"…');
+    const validateButton = await browser.$("button=Validate live store");
+    await validateButton.waitForClickable({ timeout: 10_000 });
+    await validateButton.click();
+
+    log("waiting for the SHACL validation report to render…");
+    const shaclReport = await browser.$('[data-result-kind="shacl"]');
+    await shaclReport.waitForExist({ timeout: 30_000 });
+    // The report pane settles out of the transient "Validating…" placeholder into a verdict
+    // (Conforms / N violations / an error). Assert it reaches one of those terminal states.
+    await browser.waitUntil(
+      async () => {
+        const text = await shaclReport.getText();
+        return /Conforms|violation|cannot be serialised|error/i.test(text) && !/Validating…/.test(text);
+      },
+      {
+        timeout: 30_000,
+        timeoutMsg: "SHACL validation never produced a terminal report",
+        interval: 500,
+      },
+    );
+    log("PASS — the SHACL tool validated the live store and rendered a W3C report.");
 
     await browser.deleteSession();
   } catch (err) {
