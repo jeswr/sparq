@@ -32,14 +32,23 @@
 name: docs
 
 on:
+  # [OPUS-4.8] sq-5f1s4 — self-guarding path filter: the build embeds source it does NOT
+  # live next to. `book/src/getting-started/install.md` does
+  # `{{#rustdoc_include ../../../crates/sparq-engine/examples/quickstart.rs:quickstart}}`,
+  # so `mdbook build` / `mdbook test` COMPILE that example. If it stopped compiling (or the
+  # `quickstart` anchor were renamed/removed) and the filter only watched `book/**`, the
+  # break would land on main undetected — no `book/`-touching commit would re-run this lane
+  # to catch it (the gui.yml/#1081 blind-spot class). So the included example is listed too.
   push:
     branches: [main]
     paths:
       - "book/**"
+      - "crates/sparq-engine/examples/quickstart.rs"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "book/**"
+      - "crates/sparq-engine/examples/quickstart.rs"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
