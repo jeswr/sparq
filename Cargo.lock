@@ -3487,6 +3487,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "sparq-core",
+ "sparq-engine",
  "sparq-shacl",
 ]
 

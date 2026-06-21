@@ -29,6 +29,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 # Enables the `validate` module (load PKG ontology + instances, run the SHACL shapes).
 validate = ["dep:sparq-core", "dep:sparq-shacl", "dep:oxttl", "dep:oxrdf"]
+# OPT-IN (default-OFF). Enables the SPARQL-query proof over the ingested PKG graph
+# (sq-2m6zm.2): the example-lookup answers (`Graph::load_str` + `sparq_engine::query`).
+# Pulls in the SPARQL engine; keep it off the lean default build.
+query = ["validate", "dep:sparq-engine"]
 
 [dependencies]
 # Engine graph type (only behind `validate`). default-features=false keeps it lean.
@@ -37,6 +41,8 @@ sparq-core = { path = "../sparq-core", default-features = false, optional = true
 # which is all the PKG shapes use; SHACL-AF `sh:rule` is NOT needed). Only behind
 # `validate`.
 sparq-shacl = { path = "../sparq-shacl", default-features = false, optional = true }
+# The SPARQL query/update engine (only behind `query`, for the example-lookup proof).
+sparq-engine = { path = "../sparq-engine", default-features = false, optional = true }
 # Turtle parser + term model (only behind `validate`, to build the data graph).
 oxttl = { workspace = true, optional = true }
 oxrdf = { workspace = true, optional = true }

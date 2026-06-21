@@ -9,7 +9,7 @@
 //! write-time guardrails are in
 //! [`shapes/pkg.shapes.ttl`](https://github.com/jeswr/sparq/blob/main/crates/sparq-kb/shapes/pkg.shapes.ttl),
 //! and the reuse + alignment-verification record is in `ontology/pkg/PROVENANCE.md`.
-//! The [`ttl_pins_match_rust_constants`] test below keeps the published Turtle and
+//! The `ttl_pins_match_rust_constants` test below keeps the published Turtle and
 //! these Rust constants from drifting (exactly the `sparq-trust` discipline).
 //!
 //! Reuse-first: PKG mints almost NO net-new terms. The genuinely net-new ones are
