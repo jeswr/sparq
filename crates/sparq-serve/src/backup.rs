@@ -111,7 +111,9 @@ impl From<io::Error> for BackupError {
 /// Total quad count of a [`Graph`] = the default-graph triples ([`Graph::len`], which counts
 /// ONLY the default graph) plus every named graph's triples. This is the count the N-Quads
 /// body has one line for, so it is what `triples` records and cross-checks on restore.
-fn total_quads(graph: &Graph) -> u64 {
+/// `pub(crate)` so the delta companion (`backup_delta`) cross-checks a replayed graph's quad
+/// count the same way.
+pub(crate) fn total_quads(graph: &Graph) -> u64 {
     let mut n = graph.len() as u64;
     for (_name, g) in &graph.named {
         n += g.len() as u64;
@@ -125,7 +127,10 @@ fn total_quads(graph: &Graph) -> u64 {
 /// two separate processes needs. NOT cryptographic: it detects accidental
 /// corruption/truncation, not tampering (at-rest authenticity is out of scope — see the
 /// module docs).
-fn body_digest(bytes: &[u8]) -> u64 {
+///
+/// `pub(crate)` so the delta-stream companion (`backup_delta`) digests its insert / delete
+/// bodies with the SAME function — one integrity scheme across the whole backup family.
+pub(crate) fn body_digest(bytes: &[u8]) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut h = OFFSET;
@@ -311,8 +316,9 @@ pub fn import<R: Read>(input: R) -> Result<(Graph, BackupMeta), BackupError> {
 }
 
 /// Reads one trimmed line (without the trailing newline). An EOF mid-header is a format
-/// error (the header must be blank-line terminated).
-fn read_line<R: BufRead>(reader: &mut R) -> Result<String, BackupError> {
+/// error (the header must be blank-line terminated). `pub(crate)` so the delta companion
+/// (`backup_delta`) parses its header with the exact same line discipline.
+pub(crate) fn read_line<R: BufRead>(reader: &mut R) -> Result<String, BackupError> {
     let mut s = String::new();
     let n = reader.read_line(&mut s)?;
     if n == 0 {
@@ -327,7 +333,10 @@ fn read_line<R: BufRead>(reader: &mut R) -> Result<String, BackupError> {
     Ok(s)
 }
 
-fn parse_u64(val: &str, field: &str) -> Result<u64, BackupError> {
+/// Parses a `u64` header value, mapping a parse failure to a [`BackupError::Format`].
+/// `pub(crate)` so the delta companion (`backup_delta`) parses its numeric header fields
+/// with identical error reporting.
+pub(crate) fn parse_u64(val: &str, field: &str) -> Result<u64, BackupError> {
     val.parse()
         .map_err(|_| BackupError::Format(format!("invalid `{}` header value {:?}", field, val)))
 }

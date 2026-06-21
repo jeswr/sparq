@@ -54,7 +54,7 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
   (`POST /shacl/validate`), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
-  `backup` (online snapshot `POST /admin/backup` + `/admin/restore`, no stop-the-world),
+  `backup` (online snapshot `/admin/backup` + incremental PITR delta `/admin/backup/delta` + `/admin/restore`),
   `audit-log`/`access-audit` (access trails), `zlib-ng` (faster gzip).
 - **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, user-prioritised epic sq-oy1f) — the `jsonld`
   feature is in the server's **default** set (a maintainer-directed exception to opt-in-by-default):

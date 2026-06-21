@@ -301,6 +301,203 @@ async fn admin_routes_are_write_gated() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }
 
+/// Downloads a DELTA artifact from `POST /admin/backup/delta?from=N`, returning (status, bytes).
+async fn backup_delta(
+    cl: &reqwest::Client,
+    base: &str,
+    from: u64,
+) -> (reqwest::StatusCode, Vec<u8>) {
+    let resp = cl
+        .post(format!("{base}/admin/backup/delta"))
+        .query(&[("from", from.to_string())])
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.bytes().await.unwrap().to_vec())
+}
+
+/// [OPUS-4.8] (sq-bu1a) PITR ROUND TRIP via the real HTTP delta route: take a BASE backup at
+/// generation 0, move the store forward, export a DELTA(0→current) over HTTP, then restore the
+/// base + replay the delta — the recovered store equals the moved-on source.
+#[tokio::test]
+async fn pitr_base_plus_http_delta_recovers_the_moved_on_store() {
+    let cl = reqwest::Client::new();
+    let src = spawn_with(
+        Graph::load_str("<http://ex/s0> <http://ex/p> <http://ex/o0> .", "turtle").unwrap(),
+        ServerConfig::default(),
+    )
+    .await;
+    // BASE @ generation 0 (before any update).
+    let base_artifact = backup(&cl, &src).await;
+
+    // Move forward: a default insert + a named-graph insert + a delete of the seed.
+    post_update(
+        &cl,
+        &src,
+        "INSERT DATA { <http://ex/s1> <http://ex/p> <http://ex/o1> }",
+    )
+    .await;
+    post_update(
+        &cl,
+        &src,
+        "INSERT DATA { GRAPH <http://ex/g> { <http://ex/s2> <http://ex/p> <http://ex/o2> } }",
+    )
+    .await;
+    post_update(
+        &cl,
+        &src,
+        "DELETE DATA { <http://ex/s0> <http://ex/p> <http://ex/o0> }",
+    )
+    .await;
+    let src_total = count_all(&cl, &src).await;
+    assert_eq!(src_total, 2, "seed deleted, 2 inserts remain");
+
+    // DELTA(0 -> current) over HTTP.
+    let (status, delta_artifact) = backup_delta(&cl, &src, 0).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "delta export must be 200");
+    assert!(
+        delta_artifact.starts_with(b"SPARQ-BACKUP-DELTA "),
+        "delta is the distinct self-describing kind"
+    );
+
+    // RESTORE base + replay delta into a fresh server (via the AppState PITR primitive the
+    // binary's --restore + --restore-delta uses).
+    let state = AppState::with_config(Graph::load_str("", "turtle").unwrap(), ServerConfig::default());
+    let recovered_gen = state
+        .restore_from_with_deltas(&base_artifact, &[delta_artifact])
+        .expect("base + delta restore");
+    assert_eq!(recovered_gen, 3, "recovered to the source's writer-seq (3)");
+    let app = sparq_server::router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let dst = format!("http://{addr}");
+
+    assert_eq!(
+        count_all(&cl, &dst).await,
+        src_total,
+        "PITR-recovered quad count equals the moved-on source"
+    );
+    assert_eq!(
+        count_rows(&cl, &dst, "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }").await,
+        1,
+        "the named-graph insert was replayed"
+    );
+    // The deleted seed triple is absent after replay (counted as a SELECT, not an ASK).
+    assert_eq!(
+        count_rows(
+            &cl,
+            &dst,
+            "SELECT * WHERE { <http://ex/s0> <http://ex/p> <http://ex/o0> }"
+        )
+        .await,
+        0,
+        "the deleted seed triple is absent after replay"
+    );
+}
+
+/// [OPUS-4.8] (sq-bu1a) FAIL-CLOSED: `restore_from_with_deltas` rejects a corrupt delta and the
+/// base install never happens (the whole op is atomic — import + replay before any swap).
+#[tokio::test]
+async fn pitr_rejects_corrupt_delta_in_chain() {
+    let cl = reqwest::Client::new();
+    let src = spawn_with(
+        Graph::load_str("<http://ex/s0> <http://ex/p> <http://ex/o0> .", "turtle").unwrap(),
+        ServerConfig::default(),
+    )
+    .await;
+    let base_artifact = backup(&cl, &src).await;
+    post_update(
+        &cl,
+        &src,
+        "INSERT DATA { <http://ex/s1> <http://ex/p> <http://ex/o1> }",
+    )
+    .await;
+    let (status, mut delta_artifact) = backup_delta(&cl, &src, 0).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    // Corrupt the delta body (flip the last byte).
+    let last = delta_artifact.len() - 1;
+    delta_artifact[last] ^= 0xff;
+
+    let state = AppState::with_config(Graph::load_str("", "turtle").unwrap(), ServerConfig::default());
+    let res = state.restore_from_with_deltas(&base_artifact, &[delta_artifact]);
+    assert!(res.is_err(), "a corrupt delta must fail the whole restore closed");
+}
+
+/// [OPUS-4.8] (sq-bu1a) The delta route is WRITE-gated, POST-only, and 400s a missing/invalid
+/// `from`; an aged-out `from` is 410 Gone (mirroring time-travel).
+#[tokio::test]
+async fn delta_route_is_gated_and_validates_from() {
+    let cl = reqwest::Client::new();
+    // Auth-gated server: unauthenticated delta -> 401.
+    let gated = spawn_with(
+        Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap(),
+        ServerConfig {
+            auth_token: Some("s3cret".into()),
+            ..ServerConfig::default()
+        },
+    )
+    .await;
+    let resp = cl
+        .post(format!("{gated}/admin/backup/delta"))
+        .query(&[("from", "0")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Open server: missing `from` -> 400.
+    let open = spawn_with(
+        Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap(),
+        ServerConfig::default(),
+    )
+    .await;
+    let resp = cl
+        .post(format!("{open}/admin/backup/delta"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a missing `from` is a 400"
+    );
+    // Non-numeric `from` -> 400.
+    let resp = cl
+        .post(format!("{open}/admin/backup/delta"))
+        .query(&[("from", "abc")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // `from` >= current (no movement yet, current is 0): from=0 is not earlier than current=0,
+    // so the range check rejects with 400.
+    let (status, _b) = backup_delta(&cl, &open, 0).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "from must be earlier than the current generation"
+    );
+
+    // An aged-out `from` (never retained without time-travel; far beyond current) -> 410 Gone.
+    post_update(
+        &cl,
+        &open,
+        "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> }",
+    )
+    .await;
+    let (status, _b) = backup_delta(&cl, &open, 999).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::GONE,
+        "a `from` generation that is not retained is 410 Gone"
+    );
+}
+
 /// PERSIST REFUSAL: a `--persist` durable server refuses restore (409) in v1.
 #[tokio::test]
 async fn restore_refuses_on_persist_server() {
