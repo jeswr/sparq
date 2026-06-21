@@ -1,0 +1,48 @@
+[package]
+name = "sparq-kb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Project-Knowledge-Graph (PKG) ontology + SHACL write-time guardrails for dogfooding sparq as a queryable store of its own research findings, sources, techniques, and bd task model (Phase-1 data artifacts; research prototype)"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# Phase-1 dogfooding artifacts (epic sq-2m6zm, task sq-2m6zm.1, design PR #1063).
+# The ontology/shapes/example are DATA; the default build is a pure data + Rust-vocab
+# crate. NOT published — adoption is gated on the Phase-1 token-A/B verdict.
+publish = false
+
+# [OPUS-4.8] docs.rs: build with all features + the `docsrs` cfg.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# OPT-IN by construction (strict additivity). The DEFAULT build is a pure data +
+# constants crate (only `include_str!` + `&str` constants); it pulls in NO engine or
+# SHACL code. The SHACL validation helpers + the dogfooding test are gated behind the
+# default-OFF `validate` feature, which is the only thing that pulls in sparq-core +
+# sparq-shacl. Nothing in the workspace's default build depends on this crate.
+[features]
+default = []
+# Enables the `validate` module (load PKG ontology + instances, run the SHACL shapes).
+validate = ["dep:sparq-core", "dep:sparq-shacl", "dep:oxttl", "dep:oxrdf"]
+# OPT-IN (default-OFF). Enables the SPARQL-query proof over the ingested PKG graph
+# (sq-2m6zm.2): the example-lookup answers (`Graph::load_str` + `sparq_engine::query`).
+# Pulls in the SPARQL engine; keep it off the lean default build.
+query = ["validate", "dep:sparq-engine"]
+
+[dependencies]
+# Engine graph type (only behind `validate`). default-features=false keeps it lean.
+sparq-core = { path = "../sparq-core", default-features = false, optional = true }
+# The SHACL validator (base build includes SHACL-Core + SHACL-SPARQL `sh:sparql`,
+# which is all the PKG shapes use; SHACL-AF `sh:rule` is NOT needed). Only behind
+# `validate`.
+sparq-shacl = { path = "../sparq-shacl", default-features = false, optional = true }
+# The SPARQL query/update engine (only behind `query`, for the example-lookup proof).
+sparq-engine = { path = "../sparq-engine", default-features = false, optional = true }
+# Turtle parser + term model (only behind `validate`, to build the data graph).
+oxttl = { workspace = true, optional = true }
+oxrdf = { workspace = true, optional = true }

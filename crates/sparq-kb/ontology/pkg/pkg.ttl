@@ -1,0 +1,264 @@
+# pkg.ttl — the Project-Knowledge-Graph (PKG) vocabulary (machine-readable form)
+#
+# [OPUS-4.8] sq-2m6zm.1 (epic sq-2m6zm). 🤖 SPARQ agent — dogfooding sparq as a
+# project knowledge graph. Written while Fable unavailable; flag for re-review when
+# Fable returns.
+#
+# This is the canonical, machine-readable rendering of the reuse-first ontology of
+# `research/dogfooding-sparq-knowledge-graph.md` §2.3 (design record on PR #1063).
+# It is byte-pinned against the Rust constants in `crates/sparq-kb/src/vocab.rs` by
+# the `ttl_pins_match_rust_constants` sync test in that module — the two MUST NOT
+# drift.
+#
+# DESIGN PRINCIPLE (copied from the maintainer's own `sec-prop` discipline,
+# research/security-properties-ontology-design.md): the PKG mints almost NO net-new
+# terms. PROV-O carries who/what/when/derived-from; SKOS carries concepts/topics;
+# DCAT + FaBiO/FRBR + DC carry the source catalog; schema.org fills gaps; and the
+# vendored `zkp-sparql` ontologies already define the Claim + Evidence + Confidence +
+# Source pattern as `sig-impl:Assertion`. `pkg:Finding` GENERALISES that pattern; it
+# does not fork it. Only FOUR terms are genuinely net-new (`pkg:exploredStatus`,
+# `pkg:followUpPriority`, `pkg:confidence`, `pkg:couldBeMergedWith`) plus the single
+# `pkg:dependsOn` owl:inverseOf `pkg:blockedBy` pair, plus the bd-task / source /
+# technique scaffolding the design names. See PROVENANCE.md for the full reuse table
+# and the live-ontology alignment verification.
+#
+# The `pkg:` namespace (https://sparq.dev/ns/pkg#) is a sparq-local namespace,
+# consistent with `trust:` (https://sparq.dev/ns/trust#) and `zk:`
+# (https://sparq.dev/ns/zk#). It is NOT minted/resolvable today; a future
+# standardisation pass would rehome the net-new terms.
+
+@prefix pkg:     <https://sparq.dev/ns/pkg#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcat:    <http://www.w3.org/ns/dcat#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix fabio:   <http://purl.org/spar/fabio/> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix frbr:    <http://purl.org/vocab/frbr/core#> .
+@prefix bibo:    <http://purl.org/ontology/bibo/> .
+@prefix schema:  <http://schema.org/> .
+@prefix np:      <http://www.nanopub.org/nschema#> .
+@prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix secx:    <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+# --- ontology metadata -------------------------------------------------------
+
+pkg: a owl:Ontology ;
+  rdfs:label "Project Knowledge Graph (PKG) vocabulary"@en-GB ;
+  dcterms:description """A reuse-first vocabulary for storing a software project's own
+knowledge — research findings with provenance + confidence, sources with an
+explored-status, concepts, algorithms/techniques (supersedes / alternative-to /
+mergeable-with / implemented-by), and the bd task model — as RDF behind a SPARQL +
+SHACL + reasoning surface. Generalises the vendored zkp-sparql sig-impl:Assertion
+reified-claim pattern into pkg:Finding; reuses PROV-O, SKOS, DCAT, FaBiO/FRBR/DC,
+CiTO, schema.org, and nanopublications. Companion: PROVENANCE.md (reuse table +
+live-ontology alignment verification) and research/dogfooding-sparq-knowledge-graph.md
+(design record, PR #1063)."""@en-GB ;
+  rdfs:seeAlso <https://github.com/jeswr/sparq/issues/1063> ;
+  rdfs:comment "sparq-local namespace; the net-new terms would be rehomed by a standardisation pass."@en-GB .
+
+# =============================================================================
+# Source / Document — the source catalog (DCAT + FaBiO/FRBR + DC; mint only the
+# explored-status + follow-up-priority axes)
+# =============================================================================
+
+pkg:Source a owl:Class ;
+  rdfs:label "Source"@en-GB ;
+  rdfs:comment "A bibliographic / documentary source of project knowledge (a paper, a research/ design record, a spec). Reuses fabio:Expression (the FRBR realisation of a work's content) and dcat:CatalogRecord (the catalog entry)."@en-GB ;
+  rdfs:subClassOf fabio:Expression , dcat:CatalogRecord .
+
+pkg:Document a owl:Class ;
+  rdfs:label "Document"@en-GB ;
+  rdfs:comment "A concrete document realising a Source (an in-repo file, a PDF, a web page). Reuses fabio:Expression; a pkg:Source frbr:realizationOf the work, a pkg:Document the in-repo/dereferenceable realisation."@en-GB ;
+  rdfs:subClassOf fabio:Expression .
+
+# --- NET-NEW: the explored-status axis (a SKOS scheme so it is queryable +
+#     extensible). Aligned to schema.org ActionStatusType via skos:closeMatch.
+pkg:ExplorationStatus a skos:ConceptScheme ;
+  rdfs:label "Source exploration status scheme"@en-GB ;
+  dcterms:description "How far a source has been explored, so follow-up can be targeted at the un-explored ones."@en-GB .
+
+pkg:exploredStatus a owl:ObjectProperty ;
+  rdfs:label "explored status"@en-GB ;
+  rdfs:comment "NET-NEW. The exploration state of a source (pkg:Unexplored | pkg:Exploring | pkg:Explored | pkg:DeadEnd) — the targeted-follow-up lever. No FAIR-friendly term in DCAT/DC carries the explored-vs-unexplored role for project knowledge, so it is minted."@en-GB ;
+  rdfs:domain pkg:Source ;
+  rdfs:range skos:Concept .
+
+pkg:followUpPriority a owl:DatatypeProperty ;
+  rdfs:label "follow-up priority"@en-GB ;
+  rdfs:comment "NET-NEW. Integer ordering for which un-explored sources to read next (lower = sooner)."@en-GB ;
+  rdfs:domain pkg:Source ;
+  rdfs:range xsd:integer .
+
+pkg:Unexplored a skos:Concept ; skos:inScheme pkg:ExplorationStatus ;
+  skos:prefLabel "Unexplored"@en-GB ;
+  skos:closeMatch schema:PotentialActionStatus .
+pkg:Exploring a skos:Concept ; skos:inScheme pkg:ExplorationStatus ;
+  skos:prefLabel "Exploring"@en-GB ;
+  skos:closeMatch schema:ActiveActionStatus .
+pkg:Explored a skos:Concept ; skos:inScheme pkg:ExplorationStatus ;
+  skos:prefLabel "Explored"@en-GB ;
+  skos:closeMatch schema:CompletedActionStatus .
+pkg:DeadEnd a skos:Concept ; skos:inScheme pkg:ExplorationStatus ;
+  skos:prefLabel "Dead end"@en-GB ;
+  skos:closeMatch schema:FailedActionStatus .
+
+# =============================================================================
+# Concept / Topic — pure SKOS (no mint)
+# =============================================================================
+
+pkg:Topics a skos:ConceptScheme ;
+  dcterms:title "sparq project topics"@en-GB .
+# Every Finding/Source/Technique/Task tags itself with dcterms:subject -> a skos:Concept.
+
+# =============================================================================
+# Finding / Claim — GENERALISE sig-impl:Assertion (Claim + Evidence + Confidence
+# + Source); PROV-O + CiTO; mint only the numeric confidence axis
+# =============================================================================
+
+pkg:Finding a owl:Class ;
+  rdfs:label "Finding"@en-GB ;
+  rdfs:comment "A reified discovery / claim about the project's domain — a generalisation of the vendored sig-impl:Assertion reified-verdict pattern from (signature-impl, security-property) verdicts to (any subject, any claim). Carries a verdict + justification + evidence (supporting/refuting sources) + a numeric confidence + an assurance basis + PROV-O lineage. SHACL (FindingShape) makes the source + confidence + assurance + non-filler justification MANDATORY."@en-GB ;
+  rdfs:subClassOf sigimpl:Assertion , skos:Concept .
+
+pkg:about a owl:ObjectProperty ;
+  rdfs:label "about"@en-GB ;
+  rdfs:comment "The subject the Finding is about (a pkg:Technique, a pkg:Source, a topic, …). rdfs:subPropertyOf dcterms:subject."@en-GB ;
+  rdfs:subPropertyOf dcterms:subject ;
+  rdfs:domain pkg:Finding .
+
+pkg:verdict a owl:ObjectProperty ;
+  rdfs:label "verdict"@en-GB ;
+  rdfs:comment "The Finding's verdict, reusing sig-impl:yes / sig-impl:no / sig-impl:partial (per the design's reuse decision; §2.5 flags that a research verdict space may later diverge, in which case a pkg:-specific enum subclasses this without forking the pattern)."@en-GB ;
+  rdfs:subPropertyOf sigimpl:verdict ;
+  rdfs:domain pkg:Finding ;
+  rdfs:range sigimpl:Verdict .
+
+# --- NET-NEW: numeric confidence axis (0..1). Aligned to schema:Rating.
+pkg:confidence a owl:DatatypeProperty ;
+  rdfs:label "confidence"@en-GB ;
+  rdfs:comment "NET-NEW. The numeric confidence (0.0..1.0) attached to a Finding (epistemic weight) or a Source (reliability). schema:Rating is rating-of-a-creative-work and DPV has no 0..1 confidence literal, so a bounded decimal is minted; aligned to schema:Rating via skos:closeMatch. Orthogonal to pkg:assurance (the epistemic-basis enum)."@en-GB ;
+  rdfs:range xsd:decimal ;
+  skos:closeMatch schema:Rating .
+
+pkg:assurance a owl:ObjectProperty ;
+  rdfs:label "assurance"@en-GB ;
+  rdfs:comment "The epistemic basis of a Finding, reusing the sec-prop extension assurance axis secx:Proven / secx:Claimed / secx:Conjectured (research/security-properties-ontology-design.md §4.2.2, epic sq-0dksu). NOTE: those secx: IRIs are defined in that DESIGN record and are not yet shipped as a committed .ttl; they are referenced here by their stable w3id namespace so they unify when sq-0dksu ships. See PROVENANCE.md."@en-GB ;
+  rdfs:domain pkg:Finding .
+
+pkg:discoveredFrom a owl:ObjectProperty ;
+  rdfs:label "discovered from"@en-GB ;
+  rdfs:comment "The source / activity a Finding (or Task) was discovered from. rdfs:subPropertyOf prov:wasDerivedFrom so the SHACL minCount-1 source guardrail is satisfied by either form."@en-GB ;
+  rdfs:subPropertyOf prov:wasDerivedFrom .
+
+# =============================================================================
+# Algorithm / Technique — reuse dcterms:replaces / skos:related /
+# schema:SoftwareSourceCode; mint only couldBeMergedWith
+# =============================================================================
+
+pkg:Technique a owl:Class ;
+  rdfs:label "Technique"@en-GB ;
+  rdfs:comment "An algorithm / technique / method the project knows about. supersedes = dcterms:replaces (inverse dcterms:isReplacedBy); alternative-to = skos:related; could-be-merged-with = pkg:couldBeMergedWith; implemented-by = pkg:implementedBy -> schema:SoftwareSourceCode."@en-GB ;
+  rdfs:subClassOf skos:Concept .
+
+pkg:implementedBy a owl:ObjectProperty ;
+  rdfs:label "implemented by"@en-GB ;
+  rdfs:comment "The code (a crate / module / PR) that implements a Technique. Range schema:SoftwareSourceCode; the implementing PR is recorded as a prov:Activity via prov:wasGeneratedBy."@en-GB ;
+  rdfs:domain pkg:Technique ;
+  rdfs:range schema:SoftwareSourceCode .
+
+# --- NET-NEW: symmetric merge hint between two Techniques.
+pkg:couldBeMergedWith a owl:ObjectProperty , owl:SymmetricProperty ;
+  rdfs:label "could be merged with"@en-GB ;
+  rdfs:comment "NET-NEW. A forward-looking, symmetric hint that two Techniques might be merged into one. No established precedent (skos:related is weaker / not symmetric-by-design for a merge-candidacy claim), so it is minted as an owl:SymmetricProperty. Per the design §2.5, prefer asserting it AS a pkg:Finding (carrying evidence + confidence) over a bare triple."@en-GB ;
+  rdfs:domain pkg:Technique ;
+  rdfs:range pkg:Technique .
+
+# =============================================================================
+# Task — the bd model -> RDF (schema.org status + DC structure); the SINGLE
+# dependency inverse pair, fixed once (§2.2)
+# =============================================================================
+
+pkg:Task a owl:Class ;
+  rdfs:label "Task"@en-GB ;
+  rdfs:comment "A unit of project work — the RDF projection of a bd issue (tasks + dependsOn/blockedBy + status + type + priority + parent-child + discovered-from + related). rdfs:subClassOf schema:Action. The PKG MIRRORS bd as a read-model; bd remains the source-of-record (design §4)."@en-GB ;
+  rdfs:subClassOf schema:Action .
+
+# --- the single inverse pair (§2.2). pkg:dependsOn (a task waits on its
+#     dependency) and its OWL inverse pkg:blockedBy. There is NO pkg:blocks:
+#     bd's `blocks` edge is the inverse-of-dependsOn direction, modelled as
+#     pkg:blockedBy. Every constraint / query names ONLY these two predicates.
+pkg:dependsOn a owl:ObjectProperty ;
+  rdfs:label "depends on"@en-GB ;
+  rdfs:comment "NET-NEW. This task waits on its dependency (the dependency must close first). owl:inverseOf pkg:blockedBy. bd's `blocks` edge is modelled in this direction; there is deliberately NO pkg:blocks predicate."@en-GB ;
+  owl:inverseOf pkg:blockedBy ;
+  rdfs:domain pkg:Task ;
+  rdfs:range pkg:Task .
+
+pkg:blockedBy a owl:ObjectProperty ;
+  rdfs:label "blocked by"@en-GB ;
+  rdfs:comment "NET-NEW. The OWL inverse of pkg:dependsOn: this task is blocked by another. (?a pkg:blockedBy ?b) <=> (?b pkg:dependsOn ?a)."@en-GB ;
+  rdfs:domain pkg:Task ;
+  rdfs:range pkg:Task .
+
+pkg:status a owl:ObjectProperty ;
+  rdfs:label "status"@en-GB ;
+  rdfs:comment "The task status (pkg:Open | pkg:InProgress | pkg:Blocked | pkg:Deferred | pkg:Closed). A SKOS-scheme concept; aligned to schema.org ActionStatusType."@en-GB ;
+  rdfs:domain pkg:Task ;
+  rdfs:range skos:Concept .
+
+pkg:issueType a owl:ObjectProperty ;
+  rdfs:label "issue type"@en-GB ;
+  rdfs:comment "The bd issue_type (pkg:Bug | pkg:Feature | pkg:Task | pkg:Epic | pkg:Chore | pkg:Decision | pkg:Milestone | pkg:Spike)."@en-GB ;
+  rdfs:domain pkg:Task ;
+  rdfs:range skos:Concept .
+
+pkg:priority a owl:DatatypeProperty ;
+  rdfs:label "priority"@en-GB ;
+  rdfs:comment "The bd priority (integer; lower = higher priority). The SHACL TaskShape bounds it to 0..4."@en-GB ;
+  rdfs:domain pkg:Task ;
+  rdfs:range xsd:integer .
+
+pkg:surface a owl:ObjectProperty ;
+  rdfs:label "surface"@en-GB ;
+  rdfs:comment "The project surface a Task touches (mirrors a bd area:* label). A skos:Concept in pkg:Surfaces."@en-GB ;
+  rdfs:domain pkg:Task ;
+  rdfs:range skos:Concept .
+
+pkg:label a owl:DatatypeProperty ;
+  rdfs:label "label"@en-GB ;
+  rdfs:comment "A free-form bd label string (e.g. \"needs:human-review\"). The §4.1 frontier query filters human-gated tasks via STRSTARTS over these."@en-GB ;
+  rdfs:domain pkg:Task ;
+  rdfs:range xsd:string .
+
+# --- status scheme (skos; aligned to schema.org ActionStatusType) ---
+pkg:Statuses a skos:ConceptScheme ; rdfs:label "Task status scheme"@en-GB .
+pkg:Open a skos:Concept ; skos:inScheme pkg:Statuses ; skos:prefLabel "Open"@en-GB ;
+  skos:closeMatch schema:PotentialActionStatus .
+pkg:InProgress a skos:Concept ; skos:inScheme pkg:Statuses ; skos:prefLabel "In progress"@en-GB ;
+  skos:closeMatch schema:ActiveActionStatus .
+pkg:Blocked a skos:Concept ; skos:inScheme pkg:Statuses ; skos:prefLabel "Blocked"@en-GB .
+pkg:Deferred a skos:Concept ; skos:inScheme pkg:Statuses ; skos:prefLabel "Deferred"@en-GB .
+pkg:Closed a skos:Concept ; skos:inScheme pkg:Statuses ; skos:prefLabel "Closed"@en-GB ;
+  skos:closeMatch schema:CompletedActionStatus .
+
+# --- issue-type scheme (skos) ---
+pkg:IssueTypes a skos:ConceptScheme ; rdfs:label "Issue type scheme"@en-GB .
+pkg:Bug a skos:Concept ; skos:inScheme pkg:IssueTypes ; skos:prefLabel "Bug"@en-GB .
+pkg:Feature a skos:Concept ; skos:inScheme pkg:IssueTypes ; skos:prefLabel "Feature"@en-GB .
+pkg:Chore a skos:Concept ; skos:inScheme pkg:IssueTypes ; skos:prefLabel "Chore"@en-GB .
+pkg:Decision a skos:Concept ; skos:inScheme pkg:IssueTypes ; skos:prefLabel "Decision"@en-GB .
+pkg:Milestone a skos:Concept ; skos:inScheme pkg:IssueTypes ; skos:prefLabel "Milestone"@en-GB .
+pkg:Spike a skos:Concept ; skos:inScheme pkg:IssueTypes ; skos:prefLabel "Spike"@en-GB .
+pkg:Epic a skos:Concept ; skos:inScheme pkg:IssueTypes ; skos:prefLabel "Epic"@en-GB .
+# NOTE: pkg:Task (the issue-type individual "task") would collide with the pkg:Task
+# CLASS, so the bd "task" issue_type is modelled as the class itself being the default;
+# a Task with no pkg:issueType is an ordinary task. The named individuals above cover
+# the non-default bd types.
+
+# --- surface scheme (skos; mirrors bd area:* labels) ---
+pkg:Surfaces a skos:ConceptScheme ; rdfs:label "Project surface scheme"@en-GB .
