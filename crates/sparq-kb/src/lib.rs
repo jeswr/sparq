@@ -91,14 +91,24 @@ pub mod validate {
     }
 }
 
-/// SPARQL-query helpers over the ingested PKG graph. OPT-IN behind the default-OFF
-/// `query` cargo feature (pulls in the SPARQL engine), used for the sq-2m6zm.2
-/// example-lookup proof — the answers are computed deterministically by the engine,
-/// not generated.
+/// SPARQL-query helpers over the ingested PKG graph — the **introspect → ground →
+/// ask** mechanism of the dogfooding epic (sq-2m6zm.3). OPT-IN behind the default-OFF
+/// `query` cargo feature (pulls in the SPARQL engine); the optional [`close`](query::close)
+/// step is gated behind the further default-OFF `close` feature (pulls in
+/// `sparq-reason`). The answers are computed deterministically by the engine, not
+/// generated, so within the store the agent cannot fabricate a fact the data does not
+/// contain.
+///
+/// > **Honesty (per the design record §1).** This module is the *mechanism*. Whether
+/// > querying the PKG actually cuts an agent's token spend versus reading the source
+/// > document is **measured by sq-2m6zm.4**, not claimed here — this code carries no
+/// > token-saving number.
 #[cfg(feature = "query")]
 pub mod query {
     use sparq_core::Graph;
     use sparq_engine::{query, QueryResult};
+
+    pub mod canned;
 
     /// Load the PKG ontology + the ingested instances into one queryable [`Graph`].
     /// The `kb:` instances use absolute IRIs, so no base is needed.
@@ -110,5 +120,36 @@ pub mod query {
     /// Run a SPARQL `SELECT` over the ingested PKG graph and return the result set.
     pub fn ask_pkg(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
         query(graph, sparql)
+    }
+
+    /// The optional RDFS / OWL-RL **closure-before-query** step the design record
+    /// (§3.1: "always close first") calls for. Materialising the OWL-RL closure makes
+    /// the `pkg:dependsOn owl:inverseOf pkg:blockedBy` pair and the
+    /// `pkg:couldBeMergedWith` symmetry *entailed*, so a query written over the inverse
+    /// / symmetric direction sees edges that were only asserted the other way round.
+    /// OPT-IN behind the default-OFF `close` feature (pulls in `sparq-reason`).
+    ///
+    /// [OPUS-4.8] sq-2m6zm.3
+    #[cfg(feature = "close")]
+    pub mod close {
+        use sparq_core::Graph;
+        pub use sparq_reason::Profile;
+
+        /// Load the PKG (ontology + instances), materialise the `profile` closure
+        /// ([`Profile::Rdfs`] or [`Profile::OwlRl`]) in place, and return the closed
+        /// [`Graph`] together with the number of entailed triples added.
+        ///
+        /// The closure step never fails (materialisation only *adds* triples); the
+        /// only error path is the Turtle parse.
+        pub fn load_pkg_closed(profile: Profile) -> Result<(Graph, usize), String> {
+            let combined = format!(
+                "{}\n{}",
+                super::super::PKG_ONTOLOGY,
+                super::super::PKG_INSTANCES
+            );
+            let (mut dict, mut triples) = Graph::parse_to_triples(&combined, "turtle")?;
+            let entailed = sparq_reason::materialize(profile, &mut dict, &mut triples);
+            Ok((Graph::from_parts(dict, triples), entailed))
+        }
     }
 }

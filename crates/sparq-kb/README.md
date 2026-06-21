@@ -90,8 +90,10 @@ the §4.1 ready-frontier — returning the minimal triples computed by the engin
 - The precedent it follows: `crates/sparq-trust/ontologies/zkp-sparql/` and
   `crates/sparq-trust/src/vocab.rs` (the ship-an-ontology + Rust-constants pattern).
 - Epic `sq-2m6zm`: the ontology/shapes are `sq-2m6zm.1`; the ingestion PoC above is
-  `sq-2m6zm.2`. Next: the query-the-PKG skill (`sq-2m6zm.3`) + the token-A/B harness
-  (`sq-2m6zm.4`).
+  `sq-2m6zm.2`; the **query-the-PKG** helper + skill is `sq-2m6zm.3` —
+  `cargo run -p sparq-kb --features query --bin pkg-query -- --list` runs the
+  introspect→ground→ask canned queries (`.claude/skills/query-pkg/SKILL.md`). Next:
+  the token-A/B harness (`sq-2m6zm.4`).
 
 ## License
 

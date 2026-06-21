@@ -30,9 +30,18 @@ default = []
 # Enables the `validate` module (load PKG ontology + instances, run the SHACL shapes).
 validate = ["dep:sparq-core", "dep:sparq-shacl", "dep:oxttl", "dep:oxrdf"]
 # OPT-IN (default-OFF). Enables the SPARQL-query proof over the ingested PKG graph
-# (sq-2m6zm.2): the example-lookup answers (`Graph::load_str` + `sparq_engine::query`).
-# Pulls in the SPARQL engine; keep it off the lean default build.
+# (sq-2m6zm.2): the example-lookup answers (`Graph::load_str` + `sparq_engine::query`),
+# the introspect→ground→ask `query` module, the named canned queries, and the
+# `pkg-query` binary (sq-2m6zm.3). Pulls in the SPARQL engine; keep it off the lean
+# default build.
 query = ["validate", "dep:sparq-engine"]
+# OPT-IN (default-OFF). Adds the optional RDFS/OWL-RL closure step the design record
+# (§3.1) calls for before querying — materialise the `pkg:dependsOn owl:inverseOf
+# pkg:blockedBy` and `pkg:couldBeMergedWith` symmetry so a query over the inverse /
+# symmetric direction sees the entailed edges. Pulls in only `sparq-reason` (which
+# itself depends solely on `sparq-core`, already in the `query` build), so it stays
+# light. `close` implies `query`. [OPUS-4.8] sq-2m6zm.3
+close = ["query", "dep:sparq-reason"]
 
 [dependencies]
 # Engine graph type (only behind `validate`). default-features=false keeps it lean.
@@ -43,6 +52,19 @@ sparq-core = { path = "../sparq-core", default-features = false, optional = true
 sparq-shacl = { path = "../sparq-shacl", default-features = false, optional = true }
 # The SPARQL query/update engine (only behind `query`, for the example-lookup proof).
 sparq-engine = { path = "../sparq-engine", default-features = false, optional = true }
+# Forward-chaining RDFS/OWL-RL closure (only behind `close`). Depends solely on
+# sparq-core (already in the `query` build), so it adds no new third-party weight.
+sparq-reason = { path = "../sparq-reason", default-features = false, optional = true }
 # Turtle parser + term model (only behind `validate`, to build the data graph).
 oxttl = { workspace = true, optional = true }
 oxrdf = { workspace = true, optional = true }
+
+# The `pkg-query` helper binary (sq-2m6zm.3): one command to introspect → ground →
+# ask over the ingested PKG. It needs the `query` module (engine), so it is only
+# built when the default-OFF `query` feature is on — `required-features` keeps the
+# default `cargo build` lean (pure data + constants crate) and excludes the binary.
+# [OPUS-4.8]
+[[bin]]
+name = "pkg-query"
+path = "src/bin/pkg_query.rs"
+required-features = ["query"]
