@@ -787,6 +787,31 @@ pinning     = "N=50000, DIM=32, K=10, QUERIES=200 consts in the test; seeds fixe
 records_to  = "stderr (--nocapture); source of the sparq-vectors README numbers"
 status      = "ok"
 
+# [OPUS-4.8] sq-6tley (relates sq-0wo9e.8/sq-0wo9e.9): the KGE P0 ablation on EC2.
+# RESULT-CAPTURE is the whole point of this entry. A prior run (i-09e73) trained all three
+# datasets fine but the results were LOST: `cargo run` streams hundreds of "Compiling <dep>"
+# lines through ec2-bench's line-by-line console emitter, which overflows the 64KB serial
+# buffer that `get-console-output` retains, pushing the final MRR/Hits@k tables out. So this
+# invoke (a) BUILDS the example first (compile noise off the result path), (b) runs the
+# PREBUILT binary to a file per dataset, (c) emits ONLY the compact final ablation table for
+# each dataset between `=== SPARQ_BENCH_RESULT <ds> ===` / `=== END SPARQ_BENCH_RESULT <ds> ===`
+# sub-markers via grep, so the bytes that reach the console fit the buffer with room to spare.
+# Datasets: synthetic always; optionally a colon-separated SPARQ_KGE_DATASETS list of real KG
+# files (e.g. WN18RR / FB15k-237 N-Triples), each run via the example's SPARQ_KGE_DATASET arm.
+[[benchmark]]
+id          = "kge-ablation"
+name        = "Structure-aware KGE — P0 closure x type-constrained-negatives link-prediction ablation (sq-0wo9e)"
+category    = "query"
+measures    = "filtered link-prediction MRR / Hits@1 / Hits@3 / Hits@10 (mean +/- std over 5 seeds) across the 2x2 P0 ablation matrix {closure on/off} x {uniform, type-constrained negatives}, under both DistMult (symmetric) and ComplEx (asymmetric — read deltas here), with a head-vs-tail breakdown, per dataset"
+invoke      = "cargo build -p sparq-vectors --release --features kge --example kge_ablation 2>&1 | tail -3\nKGEBIN=target/release/examples/kge_ablation\nrun_kge() { ds=$1; tag=$(basename $ds); out=/root/kge-$tag.out; echo === SPARQ_BENCH_RESULT kge $tag ===; if [ $ds = synthetic ]; then $KGEBIN >$out 2>&1; else SPARQ_KGE_DATASET=$ds $KGEBIN >$out 2>&1; fi; grep -E '^(#|==|closure=|    head |  [(]ablation failed)' $out || tail -40 $out; echo === END SPARQ_BENCH_RESULT $tag ===; }\nrun_kge synthetic\nIFS=: ; for d in ${SPARQ_KGE_DATASETS:-}; do case $d in ?*) run_kge $d;; esac; done"
+source      = "crates/sparq-vectors/examples/kge_ablation.rs (the runnable P0 ablation); crates/sparq-vectors/src/{train,eval}.rs (DistMult/ComplEx trainer + filtered link-prediction harness); feature = kge (implies structure); design research/structure-aware-vectorisation.md (P0/P6)"
+dataset     = "SYNTHETIC always (in-process: a WN18RR-style structured-relational slice + a gUFO slice from seeded PRNGs, no download). REAL datasets are OPT-IN via SPARQ_KGE_DATASETS=/path/a.nt:/path/b.nt (e.g. WN18RR + FB15k-237 N-Triples); absent it, only the synthetic arm runs"
+quiet_box_sensitive = true  # MRR/Hits@k are INDICATIVE on a non-canonical box; no figure is baked into a committed doc (per the example's own header). Re-measure on a canonical machine, on a REAL dataset, under ComplEx, multi-seed, before adopting any prior.
+pinning     = "5 seeds from seed0=20260620 (args: [entities] [people] [seed0]); EvalConfig::small with epochs=150 dim=64 negatives_per_positive=16 (set in the example); read inter-cell deltas off the ASYMMETRIC ComplEx run only (DistMult is near-random on these ~100%-directional slices)"
+records_to  = "serial console only (no SSH key / no S3 on pss): the FULL per-dataset run goes to /root/kge-<ds>.out on the box; ONLY the compact final ablation table per dataset is echoed between '=== SPARQ_BENCH_RESULT <ds> ===' / '=== END SPARQ_BENCH_RESULT <ds> ===' so it fits the 64KB get-console-output buffer (the fix for sq-6tley). NOT a perf-gate input"
+featured    = false  # research measurement harness for epic sq-0wo9e (INDICATIVE, non-canonical, no baked figure) — intentionally NOT a capability dashboard card (G3 escape hatch, design §2.1)
+status      = "ok"
+
 [[benchmark]]
 id          = "gpu-bench"
 name        = "CPU vs GPU hot-path kernels (T24d experiment)"
