@@ -935,8 +935,9 @@ fn unique_values_for_no_values_conforms() {
 // The sq-qap0 datatype/pattern tests exercised only WELL-FORMED literals and a
 // VALID regex. These pin the still-dark conjuncts: the `&& well_formed(l)` FALSE
 // branch in `Component::Datatype` (right datatype IRI, ill-formed lexical value)
-// and the `regex_for(..) == None` branch in `Component::Pattern` (an invalid
-// pattern compiles to no regex, so every value violates — fail-closed/lenient).
+// and the `regex_for(..) == None` branch in `Component::Pattern` (an uncompilable
+// pattern yields no regex — the constraint is SKIPPED with a diagnostic, sq-lz99x,
+// NOT fail-closed flagging every value).
 
 /// `sh:datatype` is NOT satisfied by a literal that carries the right datatype IRI
 /// but whose lexical value is ill-formed for it — the `well_formed(l)` conjunct.
@@ -995,23 +996,109 @@ fn datatype_rejects_out_of_range_bounded_integer() {
     );
 }
 
-/// An invalid `sh:pattern` (a regex that fails to compile) yields NO compiled
-/// regex, so `Component::Pattern` flags EVERY value (fail-closed). This pins the
-/// `regex_for(..) == None` branch, never reached by a valid pattern. The unbalanced
-/// `[` is a lexical regex error.
+/// [OPUS-4.8] (sq-lz99x) An uncompilable `sh:pattern` (a regex that fails to
+/// compile) yields NO regex, so the `Component::Pattern` `regex_for(..) == None`
+/// branch SKIPS the constraint (the crate's lenient ill-formed-shape policy) and
+/// records a diagnostic — it does NOT fail-closed by flagging every value. The
+/// unbalanced `[` is a lexical regex error. Before sq-lz99x both values here were
+/// (wrongly) reported as violations.
 #[test]
-fn pattern_with_invalid_regex_flags_all_values() {
+fn pattern_with_invalid_regex_is_skipped_with_diagnostic() {
     let shapes = r#"
         ex:S a sh:NodeShape ; sh:targetNode ex:n ;
           sh:property [ sh:path ex:code ; sh:pattern "[" ] .
     "#;
-    // Two values; both are flagged because the pattern never compiles.
+    // Two values; the (only) constraint is uncompilable, so NEITHER is flagged.
     let r = run(r#"ex:n ex:code "ab" , "cd" ."#, shapes);
-    assert!(!r.conforms, "{}", r.to_text());
+    assert!(
+        r.conforms,
+        "a skipped uncompilable pattern reports no violations: {}",
+        r.to_text()
+    );
     assert_eq!(
         count_component(&r, "PatternConstraintComponent"),
-        2,
-        "an uncompilable pattern fails every value: {}",
+        0,
+        "{}",
+        r.to_text()
+    );
+    // The skip is surfaced, once, as a diagnostic naming the component.
+    assert_eq!(r.diagnostics.len(), 1, "{}", r.to_text());
+    let d = &r.diagnostics[0];
+    assert!(
+        d.source_component.ends_with("PatternConstraintComponent"),
+        "{}",
+        d.source_component
+    );
+    assert!(d.message.contains("SKIPPED"), "{}", d.message);
+    // to_text surfaces the diagnostic even though the report conforms.
+    assert!(r.to_text().contains("diagnostic"), "{}", r.to_text());
+}
+
+/// [OPUS-4.8] (sq-lz99x) The bead's exact repro: a negative-lookahead pattern
+/// `^(?!(TODO|TBD)).*` with `sh:flags "i"`. The Rust `regex` crate (like the XML
+/// Schema regex flavour the SHACL spec ties `sh:pattern` to) has NO lookahead, so
+/// the pattern does not compile. Pre-fix this flagged EVERY conformant string as a
+/// violation; now the constraint is SKIPPED with a diagnostic and a conformant
+/// value passes. (Express such a check as a POSITIVE-match `sh:sparql` REGEX
+/// constraint instead — see the bead.)
+#[test]
+fn pattern_lookahead_is_skipped_not_fail_closed() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:title ; sh:pattern "^(?!(TODO|TBD)).*" ; sh:flags "i" ] .
+    "#;
+    let r = run(r#"ex:n ex:title "A real title" ."#, shapes);
+    assert!(
+        r.conforms,
+        "an unsupported-lookahead pattern must not fail-close a conformant value: {}",
+        r.to_text()
+    );
+    assert_eq!(count_component(&r, "PatternConstraintComponent"), 0);
+    assert_eq!(r.diagnostics.len(), 1, "{}", r.to_text());
+    // The diagnostic carries the regex crate's own error (names look-around) and
+    // notes the flags it was compiled with.
+    let m = &r.diagnostics[0].message;
+    assert!(m.contains("flags \"i\""), "{m}");
+    assert!(m.to_lowercase().contains("look"), "{m}");
+}
+
+/// [OPUS-4.8] (sq-lz99x) A WELL-FORMED `sh:pattern` is unaffected by the
+/// skip-on-uncompilable change: real violations are still reported and no spurious
+/// diagnostic is recorded.
+#[test]
+fn pattern_valid_still_reports_violations_and_no_diagnostic() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "^ab" ] .
+    "#;
+    let r = run(r#"ex:n ex:code "abc" , "xyz" ."#, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "PatternConstraintComponent"), 1);
+    assert_eq!(flagged_values(&r), vec!["\"xyz\"".to_string()]);
+    assert!(r.diagnostics.is_empty(), "{}", r.to_text());
+}
+
+/// [OPUS-4.8] (sq-lz99x) A diagnostic is recorded ONCE per (shape, pattern), not
+/// once per focus node or value — so a shape with many targets does not flood the
+/// report.
+#[test]
+fn pattern_skip_diagnostic_is_deduplicated() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+          sh:property [ sh:path ex:code ; sh:pattern "[" ] .
+    "#;
+    // Three focus nodes, each with two values: 6 (focus, value) pairs total.
+    let data = r#"
+        ex:a a ex:T ; ex:code "x" , "y" .
+        ex:b a ex:T ; ex:code "p" , "q" .
+        ex:c a ex:T ; ex:code "m" , "n" .
+    "#;
+    let r = run(data, shapes);
+    assert!(r.conforms, "{}", r.to_text());
+    assert_eq!(
+        r.diagnostics.len(),
+        1,
+        "the skip is reported once, not per focus/value: {}",
         r.to_text()
     );
 }

@@ -36,19 +36,59 @@ pub struct ValidationResult {
     pub details: Vec<ValidationResult>,
 }
 
+/// [OPUS-4.8] (sq-lz99x) A non-fatal author-time diagnostic: a constraint the
+/// validator could not evaluate and therefore SKIPPED (the crate's lenient
+/// ill-formed-shape policy), surfaced so the skip is not silent. Currently the
+/// only producer is an uncompilable `sh:pattern` regex — the Rust `regex` crate
+/// has no lookahead/lookbehind (neither does XML Schema regex, which the W3C SHACL
+/// spec ties `sh:pattern` to), so a `(?!...)` pattern fails to compile. A
+/// diagnostic never affects `conforms`: a skipped constraint reports no
+/// violations.
+#[derive(Debug, Clone)]
+pub struct ShapeDiagnostic {
+    /// The shape whose constraint was skipped (`sh:sourceShape`).
+    pub source_shape: Term,
+    /// The constraint-component IRI of the skipped constraint (e.g.
+    /// `sh:PatternConstraintComponent`).
+    pub source_component: String,
+    /// A human-readable explanation of why the constraint was skipped.
+    pub message: String,
+}
+
 /// The outcome of validating a data graph against a shapes graph.
 #[derive(Debug)]
 pub struct ValidationReport {
     /// True iff there are no validation results.
     pub conforms: bool,
     pub results: Vec<ValidationResult>,
+    /// [OPUS-4.8] (sq-lz99x) Non-fatal author-time diagnostics for constraints
+    /// that could not be evaluated and were therefore SKIPPED (e.g. an
+    /// uncompilable `sh:pattern` regex). These never affect `conforms` — a
+    /// skipped constraint contributes no results — but surface the skip so it is
+    /// not silent. Empty in the common (well-formed) case.
+    pub diagnostics: Vec<ShapeDiagnostic>,
 }
 
 impl ValidationReport {
+    // [OPUS-4.8] (sq-lz99x) Test-only convenience: the report tests below build
+    // reports from hand-rolled results (no diagnostics). Production code calls
+    // `with_diagnostics`, so gate this to `test` to avoid a dead-code warning in
+    // the plain lib build.
+    #[cfg(test)]
     pub(crate) fn new(results: Vec<ValidationResult>) -> Self {
+        Self::with_diagnostics(results, Vec::new())
+    }
+
+    /// [OPUS-4.8] (sq-lz99x) Build a report carrying both validation results and
+    /// skipped-constraint diagnostics (e.g. an uncompilable `sh:pattern`).
+    pub(crate) fn with_diagnostics(
+        results: Vec<ValidationResult>,
+        diagnostics: Vec<ShapeDiagnostic>,
+    ) -> Self {
         ValidationReport {
             conforms: results.is_empty(),
             results,
+            diagnostics,
         }
     }
 
@@ -92,10 +132,11 @@ impl ValidationReport {
 
     /// A human-readable rendering of the report.
     pub fn to_text(&self) -> String {
-        if self.conforms {
-            return "Conforms: data graph satisfies all shapes.\n".into();
-        }
-        let mut out = format!("Does not conform: {} result(s)\n", self.results.len());
+        let mut out = if self.conforms {
+            "Conforms: data graph satisfies all shapes.\n".to_string()
+        } else {
+            format!("Does not conform: {} result(s)\n", self.results.len())
+        };
         for r in &self.results {
             let sev = r.severity.rsplit(['#', '/']).next().unwrap_or(&r.severity);
             let comp = r
@@ -128,6 +169,17 @@ impl ValidationReport {
                 }
                 let _ = writeln!(out);
             }
+        }
+        // [OPUS-4.8] (sq-lz99x) Surface skipped-constraint diagnostics so the
+        // lenient skip is not silent. They never affect `conforms`.
+        for d in &self.diagnostics {
+            let comp = d
+                .source_component
+                .rsplit(['#', '/'])
+                .next()
+                .unwrap_or(&d.source_component);
+            let _ = writeln!(out, "! [diagnostic] shape {} | {comp}", d.source_shape);
+            let _ = writeln!(out, "    {}", d.message);
         }
         out
     }
