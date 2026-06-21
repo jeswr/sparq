@@ -347,6 +347,7 @@ This is the standing orchestration loop that ties the sections above together. R
 > To stay event-driven, **keep a CI watcher armed on every in-flight PR** (`gh run watch <run-id> --exit-status` in the background) so its completion notifies you and you can act immediately — do not let a green PR sit undiscovered until the next sweep. If you ever find yourself thinking "the next loop tick will merge this," that's the bug: merge it now. When a sweep does fire, it should usually find little to do because the event-driven path already handled it.
 
 0. **Reconcile first (cheap, every pass).** `git worktree list` + `gh pr list`; reap finished-but-unnotified worktree agents (a committed branch + no live `cargo` process = done → open its PR); merge any PR that is `ci-summary`-green **and** has all review threads resolved (squash, delete branch, then watch main CI); rebase any PR gone stale/red. (See *Orchestration cadence* + *Contribution workflow*.)
+   - **Disk guard (run EVERY tick — `scripts/disk-guard.sh --apply`).** <!-- [OPUS-4.8] sq-4vo9m per-tick disk guard --> The autonomous loop spawns one worktree-isolated agent per bead, each accumulating a multi-GB `target/`, so disk re-fills every wave — left unguarded the work box hit 99% / ENOSPC and crashed a `--workspace` verify build mid-run. So each tick run `scripts/disk-guard.sh --apply`: it `df`-checks `/` (warns when **< 20 G** free, escalates **< 10 G**), then **delegates the merged-worktree prune to `worktree-gc.sh`** (which only ever removes a worktree whose HEAD is in `origin/main` or whose branch is gone-on-origin, with no dirty/unpushed work — **never an active one**, never the main checkout). When the disk is genuinely **CRITICAL** (< 10 G) and you opt in (`--reclaim-main-target`), it also drops the **orchestrator main checkout's `target/`** — regenerable, because impl agents build in their OWN worktrees — but only after confirming no live `cargo`/`rustc` build references the main checkout (so it can never abort an in-flight build). It is **non-fatal** (a guard tick never aborts the sweep) and **dry-run by default** (it only mutates with `--apply`); its advisory exit code encodes the disk state (0 OK / 10 WARN / 20 CRITICAL). The `autonomous-scheduler` runs this same guard before each wave and **backs off dispatch under pressure** (WARN → ≤ 1 new agent; CRITICAL → dispatch nothing that wave, let the prune/reclaim take effect, re-measure next tick). (See the script catalog below; supersedes the bare "run `worktree-gc.sh --apply` at idle" advice — the guard wraps it and adds the per-tick `df` check + escalation.)
 1. **Charter cross-pollination.** *Pull:* fetch each sibling charter (`gh api repos/<sibling>/contents/AGENTS.md --jq .content | base64 -d`) + the open cross-pollination issues on this repo; fold genuinely-portable conventions into THIS file — **adapted to sparq** (cargo/clippy `-D warnings` + the W3C-conformance + best-ever-perf ratchets as the gate; roborev/codex as the reviewer; beads; the crate/wasm/CLI/HTTP/Py/JS surfaces) — via a PR, conservatively; then close/comment the issue. *Push:* for any convention this charter gains that a sibling lacks, file an issue (or PR) on the sibling repo. *Watch:* poll the cross-repo threads YOU opened/commented on (the sibling's issues + PRs) for follow-up replies and answer them, self-identifying as the SPARQ agent. No-op when there is no charter drift and no open thread awaits a reply. (See *Cross-pollinate the charter with sibling repos*.)
 2. **Screen + triage inbound work — open issues, code-scanning alerts, deps, roborev.**
    - **Open issues** (`gh issue list`): screen every one. Many are filed by the **PSS agent** — the agent developing the private sibling `jeswr/prod-solid-server`, which consumes sparq as its triplestore/server; **"PSS" anywhere in an issue refers to that codebase.** For each actionable issue: capture it as a bead (`bd create` with the issue as `--external-ref`, priority by the issue's stated severity — a "SHOWSTOPPER" → P0/P1) and drive it through the loop; comment on the issue with the bead id + status; close it when the work lands (referencing the merged PR). If an issue is **unclear, do not guess — post a clarifying reply on the issue** (the PSS agent monitors and responds), and leave it open.
@@ -456,6 +457,10 @@ no network); the Python close-script carries a `--self-test`.
   takes `only: ["sq-…", …]`). It **codifies** loop steps 3–4 (drive `bd ready` → land each
   PR) so the orchestrator stays out of the per-agent dispatch loop; it is bounded by
   `maxBeads` so it cannot flood, and impl agents never branch-switch the shared checkout.
+  **Before each wave it runs `scripts/disk-guard.sh --apply --reclaim-main-target`** (sq-4vo9m)
+  and **backs off dispatch under disk pressure** — WARN caps the wave to ≤ 1 new agent,
+  CRITICAL skips dispatch entirely that wave (the guard already pruned/reclaimed; it
+  re-measures next tick) — so the loop's own per-agent `target/` dirs cannot ENOSPC the box.
 - **`scripts/worktree-gc.sh [--dry-run | --apply]`** (sq-6xdr) — a **manual / idle-time**
   broom for the harness's `.claude/worktrees/` dirs. The harness creates one git worktree
   per agent but never auto-removes a finished one, so they pile up (366+ this session) and
@@ -472,6 +477,24 @@ no network); the Python close-script carries a `--self-test`.
   the safe set then `git worktree prune`. Run `--apply` **at idle, not while sibling agents
   are building** (the predicate cannot misclassify a busy worktree, but removing one
   mid-build aborts that build). When in doubt it KEEPS.
+- **`scripts/disk-guard.sh [--dry-run | --apply] [--reclaim-main-target]`** (sq-4vo9m) — the
+  **per-tick disk guard**: the floor that stops the autonomous loop from filling the work box
+  (one worktree-isolated agent per bead, each a multi-GB `target/`, re-fills disk every wave;
+  unguarded it hit 99% / ENOSPC and crashed a verify build). Each invocation (1) reads
+  `df -BG /` and classifies **OK / WARN (< 20 G) / CRITICAL (< 10 G)**; (2) **delegates** the
+  merged-worktree prune to `worktree-gc.sh` — it does **not** reimplement that safe predicate,
+  so the "never an active/unmerged/dirty worktree, never the main checkout" guarantees are the
+  same; and (3) only when **CRITICAL** *and* you pass `--reclaim-main-target` *and* no live
+  `cargo`/`rustc` build references the main checkout, drops the orchestrator main checkout's
+  regenerable `target/`. **Default is dry-run** (measures + dry-run-prunes + prints the plan);
+  `--apply` performs the prune (and, gated as above, the reclaim). It is **non-fatal** (runs
+  `set -uo pipefail`, never `-e`-aborts its caller — an absent `df`/`worktree-gc.sh` or a busy
+  main `target/` degrades to a logged skip); its **advisory exit code encodes the disk state**
+  (0 OK / 10 WARN / 20 CRITICAL) for a scheduler to read. Carries a hermetic
+  `--dry-run-self-test`; the end-to-end behaviour (gated escalation, the busy-build guard, the
+  state→exit mapping, non-fatal delegation) is pinned by `scripts/tests/test_disk_guard.sh`.
+  The maintenance loop runs `--apply` each tick (step 0) and the `autonomous-scheduler` runs it
+  before every wave (`--apply --reclaim-main-target`) and backs off dispatch under pressure.
 
 See `research/orchestration-automation-design.md` §1.3 (the five judgment behaviours that
 must stay with the orchestrator), §6 (failure modes + the guardrail behind each), and §5

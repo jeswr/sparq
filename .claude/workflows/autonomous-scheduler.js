@@ -33,6 +33,12 @@ const FRONTIER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    // [OPUS-4.8] sq-4vo9m: per-tick disk guard. The frontier agent runs
+    // `scripts/disk-guard.sh --apply` BEFORE reading the frontier (its safe worktree prune
+    // is harmless when disk is fine and frees the most when it is not) and reports the
+    // resulting disk state so the scheduler can back off dispatch under disk pressure.
+    disk_state: { type: 'string', enum: ['OK', 'WARN', 'CRITICAL', 'UNKNOWN'] },
+    disk_free_gb: { type: 'number' },
     beads: {
       type: 'array',
       items: {
@@ -116,7 +122,17 @@ while (opened.length < MAX_BEADS && dry < 2) {
   }
   phase('Frontier')
   const fr = await agent(
-    'Read the launchable-bead frontier: `export PATH=$PATH:/home/ubuntu/.local/bin && cd /home/ubuntu/sparq && bash scripts/push-frontier.sh` (READ-ONLY; do NOT git-checkout). ' +
+    // [OPUS-4.8] sq-4vo9m: DISK GUARD each tick — run BEFORE reading the frontier so we prune
+    // merged worktrees and measure free space every wave (the autonomous loop's per-agent
+    // target/ dirs re-fill the disk; an unguarded loop hit 99%/ENOSPC and crashed a verify
+    // build). The guard's worktree prune is SAFE (it keeps anything unmerged/dirty), so --apply
+    // it unconditionally; the main-checkout target/ reclaim is opt-in + CRITICAL-only + gated on
+    // no live build, so passing --reclaim-main-target is safe (it only fires when truly starved).
+    'FIRST run the per-tick disk guard (READ-ONLY repo; do NOT git-checkout): ' +
+    '`cd /home/ubuntu/sparq && bash scripts/disk-guard.sh --apply --reclaim-main-target`. ' +
+    'Capture its final `[disk-guard] done (state=..., advisory exit=N)` line: report disk_state ' +
+    '(OK/WARN/CRITICAL/UNKNOWN) and disk_free_gb (the "Xg free" it printed, as a number). ' +
+    'Then read the launchable-bead frontier: `export PATH=$PATH:/home/ubuntu/.local/bin && cd /home/ubuntu/sparq && bash scripts/push-frontier.sh` (READ-ONLY; do NOT git-checkout). ' +
     'Each line is `bead-id  surface  title`. Return up to 6 DISPATCHABLE ready beads as {beads:[{id,surface,title}]}. ' +
     'EXCLUDE: epics; anything needs-user / requiring a maintainer decision; in-progress; and these already-handled ids: ' + JSON.stringify([...seen]) + '. ' +
     // [OPUS-4.8] sq-7mwun: belt-and-suspenders open-PR exclusion. push-frontier.sh already
@@ -131,9 +147,24 @@ while (opened.length < MAX_BEADS && dry < 2) {
     'Prefer well-scoped feature/task/bug beads an implementation agent can finish autonomously. If the frontier has no dispatchable beads, return {beads:[]}.',
     { label: 'frontier', phase: 'Frontier', schema: FRONTIER_SCHEMA, agentType: 'general-purpose' }
   )
+  // [OPUS-4.8] sq-4vo9m: disk-pressure backoff. The guard already pruned + (if CRITICAL)
+  // reclaimed before this point; we still THROTTLE new dispatch under pressure because each
+  // dispatched impl agent allocates a fresh multi-GB target/. WARN → cap the wave to 1 new
+  // agent; CRITICAL → dispatch NOTHING this wave (let the just-run prune/reclaim take effect
+  // and re-measure next tick) rather than pour more target/ dirs onto a near-full disk.
+  const diskState = (fr && fr.disk_state) || 'UNKNOWN'
+  if (typeof fr === 'object' && fr) {
+    log('disk: state=' + diskState + (fr.disk_free_gb != null ? ' (~' + fr.disk_free_gb + 'G free)' : ''))
+  }
+  if (diskState === 'CRITICAL') {
+    log('disk CRITICAL — skipping dispatch this wave (guard pruned/reclaimed; re-measuring next tick)')
+    dry++
+    continue
+  }
+  const diskCap = diskState === 'WARN' ? 1 : 6
   const beads = ((fr && fr.beads) || [])
     .filter(b => b && b.id && !seen.has(b.id))
-    .slice(0, Math.min(6, MAX_BEADS - opened.length))
+    .slice(0, Math.min(diskCap, MAX_BEADS - opened.length))
   if (!beads.length) { dry++; log('frontier dry (round ' + dry + ')'); continue }
   dry = 0
   beads.forEach(b => seen.add(b.id))
