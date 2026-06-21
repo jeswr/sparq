@@ -6,6 +6,23 @@ stack to store, query, and govern sparq's own project knowledge — research
 findings, sources, concepts, techniques, and the `bd` task backlog — and to
 serve that knowledge to LLM agents working on the repo.
 
+> **STATUS / OUTCOME (2026-06-21).** [OPUS-4.8] Phase 1 of this plan was BUILT
+> (`crates/sparq-kb`, the PKG ontology + SHACL shapes, the ingestion PoC, the
+> `query-pkg` skill, and the `bench/pkg-dogfood/` A/B harness — all on `origin/main`)
+> and the §5 token A/B was **RUN**. The measured verdict supersedes the pre-measurement
+> *expectations* below: it is **positive, not "modest"**. The sanctioned results record
+> is **[`bench/pkg-dogfood/RESULTS.md`](../bench/pkg-dogfood/RESULTS.md)** (`bench/` is
+> the only home for the measured numbers — they are not repeated here). In a real N=30
+> cache-discounted 3-arm transcript A/B, having Opus run `pkg-query` itself roughly
+> halves its effective input tokens versus reading the source docs, and a cheap
+> Haiku NL-tool answers the same PKG-answerable questions far more cheaply at equal or
+> better quality (it also **safely abstains off-PKG**). So `recommend_adopt = true` for
+> the PKG-answerable question class on THIS corpus. The DESIGN content below is retained
+> as the historical plan; statements that pre-date the run are corrected inline with a
+> pointer to `RESULTS.md`. The load-bearing caveats survive: the win is scoped to the
+> PKG-answerable class, every number is NON-CANONICAL (work-box, list-price), and the
+> result is one directional N=30 run, not a significance study — see `RESULTS.md`.
+
 This is a design-for-review. Every empirical claim is tagged `[established]` /
 `[claimed]` / `[measured]` per the project's empirical-honesty rule, and every
 performance number is reported at runtime only (never frozen into this doc, per
@@ -182,10 +199,21 @@ benchmark; the dominant lever was **prompt-cache hygiene + brief discipline**,
 not a memory product (an AGENTS.md flat-file study measured a modest output-token
 and runtime reduction `[independent]`; the exact figures live in
 `research/agent-efficiency-tooling.md`, reported at source and not frozen here).
-**Conclusion: a queryable PKG can help, but the honest expected magnitude for
-agent memory is modest and contingent on first measuring a real re-derivation
-problem.** A flat structured file often matches it at lower overhead. This is why
-§5 exists and why adoption is gated on a verdict, not a gut read.
+**Pre-measurement conclusion (now superseded for this case): a queryable PKG can
+help, but the honest expected magnitude for agent memory is modest and contingent
+on first measuring a real re-derivation problem.** A flat structured file often
+matches it at lower overhead. This is why §5 exists and why adoption is gated on a
+verdict, not a gut read.
+
+> **MEASURED UPDATE (2026-06-21).** [OPUS-4.8] The §5 A/B has since been RUN, and for
+> the PKG-answerable question class the win is **larger than this "modest" prior**: see
+> [`bench/pkg-dogfood/RESULTS.md`](../bench/pkg-dogfood/RESULTS.md). The general
+> counter-case above still stands — graph-memory MCP products without a controlled
+> benchmark remain unproven, and a flat structured file is the right baseline — but for
+> *this* scoped use (answer-sized SPARQL facts over the head-slice corpus) the verdict
+> came back `recommend_adopt = true`, not "status-quo wins". The earlier `agent-efficiency-tooling.md`
+> verdict was about agent-memory *products* on a different workload, not this PKG-query
+> mechanism.
 
 ### 1.5 What is genuinely novel vs me-too
 
@@ -885,6 +913,12 @@ ingestion. Deliverables:
 verdict. Proceed to Phase 2 **only if** `recommend_adopt = true`. Otherwise record
 the negative result and stop — this is the honest off-ramp.
 
+> **GATE CLEARED (2026-06-21).** [OPUS-4.8] The A/B was run; the verdict is
+> `recommend_adopt = true` for the PKG-answerable question class. The measured record
+> is [`bench/pkg-dogfood/RESULTS.md`](../bench/pkg-dogfood/RESULTS.md) (numbers live
+> there, not here). The off-ramp was not taken. The caveats in `RESULTS.md` bound the
+> claim: PKG-answerable questions only, NON-CANONICAL numbers, one directional N=30 run.
+
 ### Phase 2 — full ingestion + the live-state graph (gated on Phase 1)
 
 - Extend ingestion to crate feature graph (`Cargo.toml` + README), research design
@@ -942,15 +976,21 @@ the negative result and stop — this is the honest off-ramp.
   only — query-construction + verbalisation hallucination is *reduced*, not
   removed); that confidence-weighted querying is first-class (store+FILTER works;
   join-propagation does not); that any of this is wired over the network (in-process
-  Rust + raw SPARQL/VoID today); that the context-window-win mechanism has been
-  sparq-measured (it leans on *external* GraphRAG/arXiv prior art, not an in-tree
-  benchmark); or that a queryable PKG is an automatic win for agent memory (the
-  project measured the counter-case; the win is modest and contingent, which is
-  exactly why Phase 1 ends in a verdict, not a commitment).
-- **Not built yet:** the `sparq-kb` crate, the ontology/SHACL files, the ingestion
-  PoC, the query-the-PKG skill, the A/B harness, the live-state graph, the
-  research↔bead rule. These are Phase-1/2/3 beads, not claimed-as-done. No
-  falsification has been RUN; §5's thresholds are pre-registered, not results.
+  Rust + raw SPARQL/VoID today); or that a queryable PKG is an automatic win for
+  agent memory in general (the project measured the counter-case for memory
+  *products* on a different workload).
+- **Now MEASURED (2026-06-21):** the context-window-win mechanism HAS since been
+  sparq-measured for the PKG-answerable question class — the §5 A/B was run and
+  `recommend_adopt = true`; the numbers live in
+  [`bench/pkg-dogfood/RESULTS.md`](../bench/pkg-dogfood/RESULTS.md). The win is
+  **larger than the "modest" prior expectation**, but scoped (PKG-answerable
+  questions, NON-CANONICAL numbers, one directional N=30 run). The original
+  pre-measurement framing above is retained as the historical plan.
+- **Built since (2026-06-21):** Phase 1 LANDED on `origin/main` — the `sparq-kb`
+  crate, the PKG ontology/SHACL files, the ingestion PoC, the `query-pkg` skill, and
+  the `bench/pkg-dogfood/` A/B harness. The §5 falsification **has been RUN**; its
+  pre-registered thresholds now have a result — [`bench/pkg-dogfood/RESULTS.md`](../bench/pkg-dogfood/RESULTS.md).
+  Still Phase-2/3 beads, not built: the live-state graph and the research↔bead N3 rule.
 - **Read against `origin/main`:** the §2 ontology-reuse foundation, the §3
   structure-aware vector surfaces, and the §3.2 KGE-ablation verdict are on
   `origin/main` only — a behind local `main` lacks them; they are not fabricated.
