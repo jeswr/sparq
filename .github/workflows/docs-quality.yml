@@ -276,6 +276,20 @@ jobs:
         run: shellcheck scripts/ci-free-disk.sh scripts/tests/test_ci_free_disk.sh
       - name: Self-test ci-free-disk.sh (set -u safety + existence guards + #462 fold)
         run: bash scripts/tests/test_ci_free_disk.sh
+      # [OPUS-4.8] sq-4vo9m: the per-tick disk guard (df-check + merged-worktree prune +
+      # gated main-target reclaim) that stops the autonomous loop from filling the work box
+      # to ENOSPC. Validated HERE (hermetic: the harness PATH-shadows df/pgrep and sandboxes
+      # the main checkout / worktree-gc, so it touches no real disk/worktree) — it has no
+      # runtime in CI itself, but a regression in its gated-escalation / busy-build-guard /
+      # state→exit / non-fatal-delegation logic must be caught before it is trusted to broom
+      # the work box. Both the script's own pure-predicate self-test AND the end-to-end
+      # harness run; HARD (no "advisory"/"informational") so ci-summary gates on it.
+      - name: shellcheck disk-guard.sh + its self-test
+        run: shellcheck scripts/disk-guard.sh scripts/tests/test_disk_guard.sh
+      - name: Self-test disk-guard.sh (threshold math + state→exit-code, hermetic)
+        run: bash scripts/disk-guard.sh --dry-run-self-test
+      - name: Self-test disk-guard.sh (gated escalation + busy-build guard, end-to-end)
+        run: bash scripts/tests/test_disk_guard.sh
       # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
       # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
       # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.
