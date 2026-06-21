@@ -3711,6 +3711,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-terse"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "spargebra",
+ "sparq-core",
+ "sparq-nlq",
+ "sparq-vectors",
+]
+
+[[package]]
 name = "sparq-text"
 version = "0.1.0"
 dependencies = [

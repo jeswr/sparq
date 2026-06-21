@@ -346,6 +346,49 @@ regression set is itself CI-gated (`recorded_session_saves_and_replays_as_regres
 in `tests/exec_accuracy.rs`). (No claim is made here about NL→SPARQL quality beyond what
 the fixtures encode.)
 
+## sparq-terse — the verifiable LLM-ergonomic query surface (opt-in)
+
+[OPUS-4.8] `sparq-terse` (epic `sq-2m6zm`, design `research/llm-ergonomic-sparql-surface.md`,
+PR #1074) is a **pre-parse transpiler** layered over this stack: it lets an agent write the
+*concept it means* instead of guessing an opaque IRI, while only ever executing canonical,
+conformant SPARQL. It **never** touches the vendored `spargebra` grammar — the engine sees
+standard SPARQL it can inspect ("a convenience that shows its work, not an oracle").
+
+```rust,ignore
+use sparq_terse::{terse_to_sparql, terse_to_sparql_with, ResolveCtx, Method};
+use sparq_core::Graph;
+
+// Phase 1 (default build, lean: only spargebra). Canonical SPARQL passes through
+// byte-identical AFTER the silent-rewrite canary re-parses the emission; a non-parsing
+// output is TerseError::CanaryFailed, never handed back.
+let exp = terse_to_sparql("SELECT ?s WHERE { ?s <http://ex/p> ?o }")?;
+assert_eq!(exp.canonical_sparql, "SELECT ?s WHERE { ?s <http://ex/p> ?o }");
+
+// Phase 2 (feature = "vectors"). V("phrase") concept resolution, lexical-FIRST.
+let graph = Graph::load_str(turtle, "turtle")?;
+let ctx = ResolveCtx::lexical(&graph);                 // no model, no network (the default)
+let exp = terse_to_sparql_with(
+    "SELECT ?f WHERE { ?f <http://ex/about> V(\"cardinality estimation\") }",
+    &ctx,
+    |_phrase| None,                                    // embedder: vector fallback only
+)?;
+for r in &exp.resolutions {                            // every bind is echoed for the agent
+    println!("V(\"{}\") -> <{}>  score {:.3} conf {:.3} via {}",
+             r.phrase, r.iri, r.score, r.confidence, r.method.as_str());
+}
+# Ok::<(), sparq_terse::TerseError>(())
+```
+
+The **§6 soundness envelope** is enforced, all opt-in and none silent: always-canonical
+output (the silent-rewrite canary); echo IRI + score + runner-up + confidence + method;
+**confidence-gated** (below the floor or inside the ambiguity margin `V()` returns
+`TerseError::Unresolved` with candidates — loud-fail beats silent-wrong, never auto-accept
+the uncertain); **lexical-first, vector-fallback** (the `sparq-nlq` lexical linker is
+primary; the staleness-guarded `sparq-vectors` search is the fuzzy fallback); and a
+**mandatory staleness guard** (a store built against a different graph generation is a hard
+`TerseError::StaleStore`). It reuses, not reinvents: `sparq-nlq::link::EntityLinker`
+(lexical) + `VectorStore::check_graph` + `ann::nearest_exact` (vector).
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in crates.** Neither crate is in the default build; add `sparq-introspect` /
@@ -403,4 +446,4 @@ the fixtures encode.)
   `sparql-formal-semantics` — the verifiable/private query estate, orthogonal to this
   retrieval surface.
 </skill_md>
-<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::to_shacl(&self) -> String  (characteristic sets → W3C SHACL node shapes, N-Triples; sq-bde)", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "Introspection::save(&self, path: impl AsRef<Path>) -> io::Result<()>", "Introspection::load(path: impl AsRef<Path>) -> io::Result<Introspection>", "Introspection::from_json(json: &str) -> serde_json::Result<Introspection>", "sparq_introspect::sidecar_path_for(dataset: impl AsRef<Path>) -> PathBuf", "sparq_introspect::SIDECAR_EXTENSION: &str", "ClassPredicate { predicate, subjects, triples, coverage, samples: Vec<String> }  (samples = per-class sample labels, sq-3n4)", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples, ground, link_entities, link_expand_k, max_links, check_dictionary }", "sparq_nlq::link::EntityLinker::build(graph: &Graph, expand_k: usize, max_links: usize)", "EntityLinker::link(&self, question: &str) -> Linking", "sparq_nlq::link::Linking { entities: Vec<LinkedEntity>, relations: Vec<LinkedRelation> } ; Linking::to_prompt_section(&self) -> Option<String>", "sparq_nlq::constrain::unknown_terms(graph: &Graph, query: &spargebra::Query) -> Vec<UnknownTerm>", "sparq_nlq::constrain::dictionary_repair_message(unknowns: &[UnknownTerm]) -> String", "sparq_nlq::constrain::UnknownTerm { iri, role: TermRole, suggestions }", "sparq_nlq::eval::EvalCase::new(question, gold_sparql)", "sparq_nlq::eval::run_config(graph, cases, llm, config, Linking) -> Report", "sparq_nlq::eval::run_comparison(graph, cases, base_config, make_llm) -> Comparison", "Comparison::headline_grounding_pays() -> bool / summary() -> String", "F1::score(&AnswerSet, &AnswerSet) -> F1 / is_exact() -> bool ; AnswerSet::from_result(&QueryResult)", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")"]
+<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::to_shacl(&self) -> String  (characteristic sets → W3C SHACL node shapes, N-Triples; sq-bde)", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "Introspection::save(&self, path: impl AsRef<Path>) -> io::Result<()>", "Introspection::load(path: impl AsRef<Path>) -> io::Result<Introspection>", "Introspection::from_json(json: &str) -> serde_json::Result<Introspection>", "sparq_introspect::sidecar_path_for(dataset: impl AsRef<Path>) -> PathBuf", "sparq_introspect::SIDECAR_EXTENSION: &str", "ClassPredicate { predicate, subjects, triples, coverage, samples: Vec<String> }  (samples = per-class sample labels, sq-3n4)", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples, ground, link_entities, link_expand_k, max_links, check_dictionary }", "sparq_nlq::link::EntityLinker::build(graph: &Graph, expand_k: usize, max_links: usize)", "EntityLinker::link(&self, question: &str) -> Linking", "sparq_nlq::link::Linking { entities: Vec<LinkedEntity>, relations: Vec<LinkedRelation> } ; Linking::to_prompt_section(&self) -> Option<String>", "sparq_nlq::constrain::unknown_terms(graph: &Graph, query: &spargebra::Query) -> Vec<UnknownTerm>", "sparq_nlq::constrain::dictionary_repair_message(unknowns: &[UnknownTerm]) -> String", "sparq_nlq::constrain::UnknownTerm { iri, role: TermRole, suggestions }", "sparq_nlq::eval::EvalCase::new(question, gold_sparql)", "sparq_nlq::eval::run_config(graph, cases, llm, config, Linking) -> Report", "sparq_nlq::eval::run_comparison(graph, cases, base_config, make_llm) -> Comparison", "Comparison::headline_grounding_pays() -> bool / summary() -> String", "F1::score(&AnswerSet, &AnswerSet) -> F1 / is_exact() -> bool ; AnswerSet::from_result(&QueryResult)", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")", "sparq_terse::terse_to_sparql(src: &str) -> Result<Expansion, TerseError>  (Phase 1: identity pass-through + silent-rewrite canary; V() rejected loudly)", "sparq_terse::terse_to_sparql_with(src, ctx: &ResolveCtx, embed: impl FnMut(&str) -> Option<Vec<f32>>) -> Result<Expansion, TerseError>  (feature = \"vectors\")", "sparq_terse::Expansion { canonical_sparql: String, resolutions: Vec<Resolution>, warnings: Vec<String> }", "sparq_terse::Resolution { phrase, iri, score, runner_up, runner_up_score, confidence, method: Method }", "sparq_terse::ResolveCtx::lexical(graph: &Graph) / .with_vector_store(&VectorStore) / .with_gate(ResolveGate)  (feature = \"vectors\")", "sparq_terse::ResolveGate { min_score, min_confidence }  (feature = \"vectors\")", "sparq_terse::TerseError::{FeatureRequired, CanaryFailed, Unresolved, StaleStore}"]
