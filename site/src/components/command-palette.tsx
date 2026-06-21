@@ -96,6 +96,9 @@ export function useCommandPalette() {
 // /download + /app are the discovery gaps the maintainer flagged.
 const TOP_PAGES: { href: string; title: string; blurb: string }[] = [
   { href: "/", title: "Home", blurb: "Overview — what sparq is, the live REPL, the flagships." },
+  // [OPUS-4.8] sq-vw3ax.6 — the curated "show me it working" gallery (3 flagships + Live REPL).
+  // Discoverable here in Cmd-K (0 clicks) without bloating the slim top bar — the bar stays at 6.
+  { href: "/examples", title: "Examples", blurb: "The curated 'show me it working' demo gallery." },
   { href: "/capabilities", title: "Capabilities", blurb: "Every surface in one gallery, by theme." },
   { href: "/app", title: "App", blurb: "The live operational GUI (hosted web app coming soon)." },
   { href: "/benchmarks", title: "Benchmarks", blurb: "Per-commit, same-box benchmark dashboard." },
