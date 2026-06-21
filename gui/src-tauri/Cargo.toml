@@ -58,6 +58,15 @@ hdt = ["dep:sparq-hdt"]
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# [OPUS-4.8] sq-ixc3.6 (epic sq-ixc3) — the Tauri filesystem plugin ACTIVATES the durable
+# on-disk workspace-persistence path (@sparq/client `TauriWorkspaceStore`, packages/sparq-
+# client/src/workspace.ts). It is registered in `lib.rs` and its capability is scoped
+# (capabilities/default.json) to `$APPLOCALDATA/workspaces` + `/**` ONLY — least-privilege:
+# NO arbitrary FS, no other base dir. Without it the desktop GUI cleanly degrades to the
+# browser localStorage backend even inside the webview. Already present in Cargo.lock as a
+# TRANSITIVE dep of tauri-plugin-dialog; promoting it to a direct dependency lets us `init()`
+# it. (No perf claim — bench/work-box numbers are non-canonical.)
+tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
