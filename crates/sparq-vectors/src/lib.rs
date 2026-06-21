@@ -40,6 +40,16 @@ pub mod store;
 // carries zero structure-prep code.
 #[cfg(feature = "structure")]
 pub mod structure;
+// [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e): the MEASUREMENT FOUNDATION — a thin shallow-KGE trainer
+// (`train`; symmetric DistMult or asymmetric ComplEx via `ModelKind`) over the P0 closure +
+// type-constrained negatives, and the filtered link-prediction eval harness (`eval`) with the
+// {closure}×{type-neg} ablation matrix (single- and multi-seed), long-tail breakdown, and synthetic
+// gUFO slice. `kge` feature only (implies `structure`); the default build carries zero trainer/eval
+// code and no new dependency.
+#[cfg(feature = "kge")]
+pub mod eval;
+#[cfg(feature = "kge")]
+pub mod train;
 pub mod verbalize;
 
 /// The `vec:` vocabulary — magic predicates recognised by `rewrite`
@@ -117,6 +127,16 @@ pub use structure::{
     close_for_vectorise, materialise_closure, ClosedGraph, Corrupt, NegativeSampler, SamplingMode,
     TypeConstraints,
 };
+// [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e): the DistMult trainer + filtered link-prediction eval
+// harness surface — `kge` feature only.
+#[cfg(feature = "kge")]
+pub use eval::{
+    run_ablation, run_ablation_multiseed, synthetic_gufo_ttl, synthetic_relational_ttl,
+    AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, Splits,
+    SCHEMA_PREDICATES,
+};
+#[cfg(feature = "kge")]
+pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};
 // [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the structure-aware-vectorisation P1 surface — the typed
 // literal encoders (datatype router + order-preserving numeric + boolean-sign + date) and the
 // self-describing `.spqv` SchemaHeader (block partition + per-block metric tag + cosine guard).

@@ -40,6 +40,17 @@ default = []
 # It TRAINS NOTHING (sparq-vectors has no KGE training path — embeddings are out-of-process) and
 # serves no exact answer; the trainer that consumes these negatives is a tracked follow-up.
 structure = ["dep:sparq-reason", "dep:sparq-introspect"]
+# [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §P6 +
+# sq-0wo9e.8): the MEASUREMENT FOUNDATION on top of the P0 structure-prep layer — a THIN in-tree
+# shallow-KGE trainer (DistMult) that CONSUMES the P0 closure + type-constrained NegativeSampler to
+# produce embeddings, plus the P6 EVAL HARNESS (standard FILTERED link-prediction MRR/Hits@k, the
+# {closure}×{type-neg vs uniform} ON/OFF ablation matrix, a long-tail frequency breakdown, and a
+# synthetic gUFO slice). OPT-IN and OFF by default; it IMPLIES `structure` (so it reuses the same
+# sparq-reason + sparq-introspect deps and adds NO new dependency — the trainer is hand-rolled
+# CPU-only SGD, no ML crate). With it OFF the default `sparq-vectors` build (and the core query path)
+# carry ZERO trainer/eval code and gain no new deps. It TRAINS a research-grade model only to
+# MEASURE the priors — it makes no accuracy claim and serves no exact answer.
+kge = ["structure"]
 # [OPUS-4.8] sq-1wc1: predicate-constrained (filtered) ANN — the RDF-native vector
 # differentiator. A SPARQL BGP carves out a candidate dict-id set (the "visit mask") and the
 # nearest-neighbour search returns only neighbours inside it. OPT-IN and OFF by default; it is a
@@ -176,6 +187,13 @@ required-features = ["approx-ann"]
 [[example]]
 name = "capture_surface_vector"
 required-features = ["vec-predicate"]
+
+# [OPUS-4.8] sq-0wo9e.8: the P0 ablation runner exercises the `kge` trainer + eval harness, so it
+# needs `kge`. Registering the requirement keeps `cargo build --all-targets` (default features) green
+# when the feature is out of the build — the example body is gated behind `#[cfg(feature = "kge")]`.
+[[example]]
+name = "kge_ablation"
+required-features = ["kge"]
 
 # [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the P1 typed-encoder ablation harness uses the
 # `structure`-gated `encode` module, so it needs the `structure` feature. Registering the
