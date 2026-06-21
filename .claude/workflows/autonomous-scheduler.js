@@ -6,11 +6,18 @@
 // frontier (newly-unblocked beads appear) and repeats until the frontier is dry or the
 // per-run cap / token budget is reached.
 //
-// DURABLE: this file is committed to .claude/workflows/ and linked from AGENTS.md so it is
+// DURABLE: this file is committed to .claude/workflows/ and linked from AGENTS.md (the
+// Maintenance-loop step "Drive bd ready" + the script catalog entry for this file) so it is
 // NOT lost on a session restart. Re-run it any time with:
 //   Workflow({ name: "autonomous-scheduler" })            // resolves this file by name
 // or override the per-run cap / focus list via args:
 //   Workflow({ name: "autonomous-scheduler", args: { maxBeads: 6, only: ["sq-...", "sq-..."] } })
+//
+// The recurring per-agent briefs below DELEGATE their judgment rule to a committed SKILL
+// rather than re-stating it inline (so a hand-dispatched agent inherits the same rule):
+// the proceed-on-decision standing rule is the `proceed-and-document` skill
+// (.claude/skills/proceed-and-document/SKILL.md). Durability contract for any such durable
+// workflow/skill: committed under .claude/ + linked from AGENTS.md + a one-line description.
 //
 // SAFETY: impl agents run in ISOLATED worktrees (never branch-switch the shared checkout).
 // The verify step arms ONLY clean, low-risk PRs; honesty/soundness-sensitive surfaces
@@ -92,7 +99,7 @@ function pickAgent(surface) {
 function implPrompt(b) {
   return 'Implement bead ' + b.id + ' ("' + b.title + '", surface: ' + b.surface + '). ' +
     '`export PATH=$PATH:/home/ubuntu/.local/bin && bd show ' + b.id + '`. You are in an ISOLATED git worktree — work there; NEVER git-checkout/branch-switch the shared /home/ubuntu/sparq checkout. ' +
-    'FIRST decide if this is genuinely implementable autonomously: if it is an EPIC, is already done on main, or needs an EXTERNAL credential/access you cannot obtain (OS signing certs, npm/PyPI tokens, an external auditor), do NOT implement — return {bead, skipped:true, reason}. If it merely needs a DESIGN/JUDGMENT decision or is somewhat underspecified, PROCEED anyway (STANDING RULE — do not block on the maintainer greenlight): make the best-judgment choice, DOCUMENT it in the PR body + a one-line bead note, and open a short GitHub issue (🤖 SPARQ self-id) flagging the decision for the maintainer to steer later. ' +
+    'FIRST decide if this is genuinely implementable autonomously: if it is an EPIC, is already done on main, or needs an EXTERNAL credential/access you cannot obtain (OS signing certs, npm/PyPI tokens, an external auditor), do NOT implement — return {bead, skipped:true, reason}. If it merely needs a DESIGN/JUDGMENT decision or is somewhat underspecified, PROCEED anyway per the `proceed-and-document` skill (.claude/skills/proceed-and-document/SKILL.md): make the best-judgment choice, DOCUMENT it in the PR body + a one-line bead note, and open a short GitHub issue (🤖 SPARQ self-id) flagging the decision for the maintainer to steer later. (STANDING RULE — do not block on the maintainer greenlight; the skill is the single source of this procedure, AGENTS.md "STANDING RULE …" is its authority.) ' +
     'Otherwise implement per the bead + AGENTS.md conventions: new capability => opt-in/feature-gated (keep sparq-core/engine lean); gate BOTH feature states (clippy --all-targets --all-features -D warnings + tests in default AND feature-on), rustdoc --all-features -D warnings, cargo fmt, check-readme-template.py if you touch a crate README, check-privacy-claims.sh clean, no hard-coded perf numbers. Tag [OPUS-4.8] + Opus trailer. ' +
     'Close the bead on PR-open; do NOT stage .beads/ into the PR. Open ONE PR vs main, auto-merge OFF, with the 🤖 SPARQ-agent self-id blockquote. ' +
     'Return {bead, pr_url, gates_green, skipped:false}. If you hit a weekly limit, STOP and return {bead, skipped:true, reason:"weekly limit"}.'
@@ -135,7 +142,7 @@ while (opened.length < MAX_BEADS && dry < 2) {
     'Then read the launchable-bead frontier: `export PATH=$PATH:/home/ubuntu/.local/bin && cd /home/ubuntu/sparq && bash scripts/push-frontier.sh` (READ-ONLY; do NOT git-checkout). ' +
     'Each line is `bead-id  surface  title`. Return up to 6 DISPATCHABLE ready beads as {beads:[{id,surface,title}]}. ' +
     'EXCLUDE: epics; in-progress; and beads needing an EXTERNAL credential/access an agent cannot obtain (OS signing certs, npm/PyPI publish tokens, the external cryptographer audit); and these already-handled ids: ' + JSON.stringify([...seen]) + '. ' +
-    'INCLUDE beads that merely need a DESIGN/JUDGMENT decision — the impl agent decides with best judgment + documents it (STANDING RULE: proceed without the maintainer greenlight, steer post-hoc). ' +
+    'INCLUDE beads that merely need a DESIGN/JUDGMENT decision — the impl agent decides with best judgment + documents it per the `proceed-and-document` skill (.claude/skills/proceed-and-document/SKILL.md): proceed without the maintainer greenlight, document the choice, steer post-hoc. ' +
     // [OPUS-4.8] sq-7mwun: belt-and-suspenders open-PR exclusion. push-frontier.sh already
     // subtracts in-flight beads, but it matches a bead id as a SUBSTRING of an open-PR
     // branch/title, which over/under-matches dotted CHILD ids (sq-ixc3.11 vs sq-ixc3.12) and
