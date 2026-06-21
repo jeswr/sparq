@@ -76,6 +76,14 @@ export interface EngineContextValue {
    * plan text, not a result set.
    */
   explain: (query: string, analyze?: boolean) => string;
+  /**
+   * [OPUS-4.8] sq-ixc3.11 — serialise the LIVE store to TriG so an operational tool (e.g. the
+   * SHACL validator) can run over the actual imported store rather than a fixture. TriG (not
+   * N-Triples — the serialise binding does not emit N-Triples) preserves every named graph as
+   * well as the default graph. Returns `null` before the engine is ready or if the loaded
+   * bundle lacks the serialise binding. The serialise-rdf binding is in the GUI's wasm bundle.
+   */
+  serializeStore: () => string | null;
 }
 
 const EngineContext = React.createContext<EngineContextValue | null>(null);
@@ -251,9 +259,25 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     return analyze ? store.explainAnalyze(query) : store.explain(query);
   }, []);
 
+  // [OPUS-4.8] sq-ixc3.11 — TriG dump of the live store, the input an operational tool (SHACL
+  // validate-the-active-store) consumes. TriG (the serialise binding does NOT accept
+  // "ntriples" — only turtle/trig/jsonld) preserves the default graph AND every named graph,
+  // and is unabbreviated (`abbreviate=false`) so no caller-supplied prefix map can disagree.
+  // `null` until the store warms or if a lean bundle lacks the binding.
+  const serializeStore = React.useCallback((): string | null => {
+    const store = storeRef.current;
+    if (!store) return null;
+    // The GUI bundle is built with `serialize-rdf`, but the runtime-loaded bundle decides
+    // whether the binding exists; keep a defensive view so a lean bundle yields a clear empty
+    // result rather than a `serialize is not a function` crash.
+    const serialize = (store as { serialize?: WasmStore["serialize"] }).serialize;
+    if (typeof serialize !== "function") return null;
+    return store.serialize("trig", false, null, false, null);
+  }, []);
+
   const value = React.useMemo<EngineContextValue>(
-    () => ({ status, storeSize, graphs, lastLatencyMs, lastRowCount, run, explain }),
-    [status, storeSize, graphs, lastLatencyMs, lastRowCount, run, explain],
+    () => ({ status, storeSize, graphs, lastLatencyMs, lastRowCount, run, explain, serializeStore }),
+    [status, storeSize, graphs, lastLatencyMs, lastRowCount, run, explain, serializeStore],
   );
 
   return <EngineContext.Provider value={value}>{children}</EngineContext.Provider>;

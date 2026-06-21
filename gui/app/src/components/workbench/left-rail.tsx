@@ -117,7 +117,10 @@ export function LeftRail({ tools, activeId, onOpenTool }: LeftRailProps) {
             const isActive = tool.id === activeId;
             return (
               <li key={tool.id}>
+                {/* [OPUS-4.8] sq-ixc3.11 — `data-tool` is a stable e2e/test hook for selecting a
+                    tool in the rail (the tauri-driver smoke clicks data-tool="shacl"). */}
                 <button
+                  data-tool={tool.id}
                   onClick={() => onOpenTool(tool.id)}
                   className={cn(
                     "group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-sidebar-accent/50",
