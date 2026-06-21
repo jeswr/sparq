@@ -82,8 +82,10 @@ Rules:
   projection + the heaviest skills' front-matter). A miss means "not in the head slice
   yet" — tell the orchestrator to fall back to Read/Grep, do not invent.
 - **bd is the source-of-record** for tasks; the `pkg:Task`s are a read-model mirror.
-- **No hard-coded performance numbers.** Whether this actually saves tokens is measured by
-  bead sq-2m6zm.4 / sq-jgi97, not claimed by you.
+- **No hard-coded performance numbers, no cost claims in your answer.** The cost win of this
+  NL-tool was measured separately (beads sq-zbyo7 / sq-jgi97; see `bench/pkg-dogfood/RESULTS.md`)
+  — it is NOT your job to assert it. Answer the question from the rows; never editorialise
+  about tokens or cost.
 
 ## Honesty
 
