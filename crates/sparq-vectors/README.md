@@ -89,12 +89,12 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   `provider` feature carries the OpenAI-compatible `/v1/embeddings` shape with a
   caller-supplied `Transport`; `embeddings` adds a concrete reqwest client +
   `RemoteEmbedder::from_env(dim)`. Never enters the wasm bundle.
-- **Structure-aware preprocessing (opt-in `structure`)** — research-grade P0:
-  `close_for_vectorise` materialises the `sparq-reason` RDFS/OWL-RL closure **before**
-  vectorising (entailed type/`subClassOf`/domain/range become real facts); a `NegativeSampler`
-  emits type-constrained corruptions (Krompass 2015) from `sparq-introspect`, with an
-  `Unconstrained`/`TypeConstrained` **on/off ablation**. This crate has **no KGE trainer** —
-  reusable inputs a trainer consumes; **empirical benefit unproven (no accuracy claim)**.
+- **Structure-aware preprocessing + typed encoders (opt-in `structure`)** — research-grade.
+  **P0:** `close_for_vectorise` materialises the `sparq-reason` closure **before** vectorising; a
+  `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an **on/off ablation**.
+  **P1:** typed-literal encoders — datatype `route`r, **order-preserving** `NumericEncoder`
+  (provable, metamorphic-tested), 2-valued `BooleanEncoder`, `DateEncoder`, self-describing
+  `SchemaHeader` (metric guard). **No KGE trainer**; **empirical benefit unproven (no claim)**.
 
 ## 📚 Learn more
 
