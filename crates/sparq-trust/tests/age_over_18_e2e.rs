@@ -21,10 +21,10 @@
 //! [OPUS-4.8] sq-pfae PoC. 🤖 SPARQ agent — trust-graph authorisation PoC.
 
 use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
-use sparq_trust::admit::{admit, PresentedCredential, Session};
+use sparq_trust::admit::{admit, admit_static, PresentedCredential, Session};
 use sparq_trust::policy::{parse_policy, ControlGate, ShapeRef, TrustRule};
 use sparq_trust::vocab::{self, desugar_for_predicate};
-use sparq_trust::wire::derive_grants;
+use sparq_trust::wire::{derive_conditional_grants, derive_grants};
 use sparq_zk::commit::commit_triples;
 use sparq_zk::encode::salt_from_bytes;
 use sparq_zk::sig::{public_key_to_hex, PublicKey, SecretKey};
@@ -356,6 +356,117 @@ fn out_of_scope_resource_is_not_covered() {
     assert!(
         admitted.is_empty(),
         "a rule scoped to resourceX does not cover a request for resourceY (§3.2 scope)"
+    );
+}
+
+// --- the static/dynamic admission split (sq-xc4y) ---------------------------
+
+#[test]
+fn static_admission_is_session_independent_and_carries_dynamic_conditions() {
+    // admit_static() takes NO session: it decides only the STATIC class (signature,
+    // type-scope, reserved-predicate guard, scope) and carries the DYNAMIC conditions
+    // (the bound holder + the freshness deadline) for a per-request check.
+    let (sk, pk) = gov_key();
+    let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
+    let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
+    let statics = admit_static(&cred, &rules, &iri(RESOURCE_X));
+    assert_eq!(statics.len(), 1, "the age fact passes static admission");
+    let f = &statics[0];
+    assert_eq!(
+        f.holder.as_str(),
+        JESSE,
+        "the bound holder is the credential subject"
+    );
+    assert_eq!(
+        f.not_after_unix_secs,
+        ISSUED_FRESH + 30 * 86_400,
+        "the freshness deadline is issued_at + freshWithin (P30D), carried for the \
+         per-request check — NOT evaluated at static-admission time"
+    );
+}
+
+#[test]
+fn static_admission_admits_a_stale_credential_but_defers_the_freshness_check() {
+    // A credential past freshWithin is STILL statically admitted (freshness is a
+    // DYNAMIC, per-request condition, not a static one) — but the carried deadline is
+    // in the past, so the per-request conditional check would deny it. The point of the
+    // split: the static decision is session-independent; the freshness verdict is
+    // re-evaluated per request, never frozen.
+    let (sk, pk) = gov_key();
+    let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
+    let graph = age_credential_graph(JESSE, "25");
+    let sig = sign_graph(&sk, &graph);
+    let issued = NOW - 60 * 86_400; // 60 days ago — past P30D
+    let cred = PresentedCredential {
+        graph,
+        issuer_signature_hex: sig,
+        salt: SALT_BYTES,
+        issued_at_unix_secs: issued,
+        revoked: false,
+    };
+    let statics = admit_static(&cred, &rules, &iri(RESOURCE_X));
+    assert_eq!(
+        statics.len(),
+        1,
+        "a stale credential STILL passes static admission (signature + type-scope hold)"
+    );
+    let deadline = statics[0].not_after_unix_secs;
+    assert!(
+        deadline < NOW,
+        "but the carried freshness deadline ({deadline}) is in the past, so the \
+         per-request check denies it at query time — NOT frozen into the view"
+    );
+}
+
+#[test]
+fn static_admission_then_conditional_grant_carries_holder_and_deadline() {
+    // The materialise-time half end-to-end: static admission → derive_conditional_grants
+    // → a conditional grant tagged with the holder + deadline for the per-request check.
+    let (sk, pk) = gov_key();
+    let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
+    let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
+    let statics = admit_static(&cred, &rules, &iri(RESOURCE_X));
+    let cgs = derive_conditional_grants(&statics, ACR_ABAC_RULE).expect("derivation runs");
+    assert_eq!(
+        cgs.len(),
+        1,
+        "age 25 > 18 derives one conditional read grant"
+    );
+    let cg = &cgs[0];
+    assert_eq!(
+        cg.grant.predicate.as_str(),
+        "https://sparq.dev/ns/auth#read"
+    );
+    assert_eq!(cg.holder.as_str(), JESSE);
+    assert_eq!(cg.not_after_unix_secs, ISSUED_FRESH + 30 * 86_400);
+}
+
+#[test]
+fn static_admission_drops_a_blank_node_subject() {
+    // A credential triple whose subject is a blank node has no stable WebID to bind the
+    // holder to, so it cannot be holder-bound for a credential-gated grant: fail closed.
+    let (sk, pk) = gov_key();
+    let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
+    let graph = vec![Triple::new(
+        NamedOrBlankNode::BlankNode(oxrdf::BlankNode::new("b0").unwrap()),
+        iri(SCHEMA_AGE),
+        Term::Literal(Literal::new_typed_literal(
+            "25",
+            iri("http://www.w3.org/2001/XMLSchema#integer"),
+        )),
+    )];
+    let sig = sign_graph(&sk, &graph);
+    let cred = PresentedCredential {
+        graph,
+        issuer_signature_hex: sig,
+        salt: SALT_BYTES,
+        issued_at_unix_secs: ISSUED_FRESH,
+        revoked: false,
+    };
+    let statics = admit_static(&cred, &rules, &iri(RESOURCE_X));
+    assert!(
+        statics.is_empty(),
+        "a blank-node-subject triple cannot be holder-bound ⇒ not statically admitted"
     );
 }
 
