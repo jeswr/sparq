@@ -1,21 +1,34 @@
 // [OPUS-4.8] sq-3hrc — shared layout for a real (non-placeholder) surface page.
-// Renders a consistent structure per research/feature-showcase-site-design.md §2:
-// capability statement → tier badge → capability list → "how this works" →
-// honest caveat → CTAs. Content is grounded in each surface's skills/*/SKILL.md.
+//
+// [OPUS-4.8] sq-vw3ax.8 — REBUILT to the scan-first, disclosure-based template from the
+// website-redesign record (research/website-redesign.md §4 "CAPABILITY DEEP PAGE"):
+//
+//   1. title + tier badge + ONE-sentence statement (the badge carries the per-page truth,
+//      so prose does not have to repeat it);
+//   2. the interactive demo IMMEDIATELY (children) — show-don't-tell, before any prose;
+//   3. an OPTIONAL one-line lead (`intro`) — deep pages trim their old multi-paragraph
+//      intros to a single sentence; the long form moves to the crate README / SKILL.md;
+//   4. a TIGHT capabilities list (bolded lead term + short clause, max ~5) — NOT the old
+//      always-open 6 ring-cards;
+//   5. "How this runs" as a SINGLE sentence whose authority is the badge, with an optional
+//      reproduce-it line — NOT an always-open co-equal card;
+//   6. caveats behind a CLOSED <details> ("Caveats & limitations") — the qualifier is
+//      preserved (scripts/check-privacy-claims.sh stays green), just relocated off the
+//      first screen;
+//   7. UNIVERSAL depth links — every deep page links its crate README + SKILL.md (the
+//      reference material moved off-site lives there), alongside any page-specific CTAs.
+//
+// Every content block is an OPTIONAL prop: a simple surface renders just statement + demo +
+// a one-line note. Reference-grade detail (full capability matrices, edge-case boundaries,
+// feature-gating minutiae) belongs in the README / SKILL.md / research, NOT here.
 
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { ArrowLeft, Check, Info, TriangleAlert } from "lucide-react";
+import { ArrowLeft, BookOpen, Check, ExternalLink, FileText } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { type Tier, TIER_LABEL, TIER_VARIANT } from "@/data/surfaces";
 
 export interface SurfaceContentProps {
@@ -26,17 +39,31 @@ export interface SurfaceContentProps {
   tier: Tier;
   /** Optional extra badge label (e.g. "Native-only", "Research-grade"). */
   extraBadge?: string;
-  /** Lead paragraphs of prose. */
-  intro: ReactNode;
-  /** The concrete capabilities this surface offers (bullet list). */
-  capabilities: { title: string; body: string }[];
-  /** "How this runs" honest note. */
-  runsNote: ReactNode;
-  /** Honest caveat / what is NOT covered. */
-  caveat: ReactNode;
-  /** Optional CTA links beyond the source link. */
+  /**
+   * Optional one-line (1–2 sentence) lead. Keep it short — the long-form intro,
+   * full matrices and edge-case boundaries move to the crate README / SKILL.md.
+   */
+  intro?: ReactNode;
+  /** The concrete capabilities this surface offers — keep to ≤5, bolded lead term. */
+  capabilities?: { title: string; body: string }[];
+  /** "How this runs" — a SINGLE sentence; its authority is the tier badge. */
+  runsNote?: ReactNode;
+  /** Optional reproduce-it line shown beside the runs note (e.g. a cargo command). */
+  reproduce?: string;
+  /**
+   * Honest caveat / what is NOT covered — rendered behind a CLOSED <details>.
+   * The qualifier is preserved (privacy-claims gate), just off the first screen.
+   */
+  caveat?: ReactNode;
+  /** Label for the caveat disclosure (default "Caveats & limitations"). */
+  caveatLabel?: string;
+  /** Crate README link — the moved-off-site reference material lives here. */
+  readmeHref?: string;
+  /** SKILL.md link — the usage guide for this surface. */
+  skillHref?: string;
+  /** Optional CTA links beyond the README / SKILL / source links. */
   links?: { href: string; label: string; external?: boolean }[];
-  /** Anything extra (e.g. an embedded REPL or table). */
+  /** Anything extra (e.g. an embedded REPL or table) — shown IMMEDIATELY after the header. */
   children?: ReactNode;
 }
 
@@ -49,16 +76,20 @@ export function SurfaceContent({
   intro,
   capabilities,
   runsNote,
+  reproduce,
   caveat,
+  caveatLabel = "Caveats & limitations",
+  readmeHref,
+  skillHref,
   links,
   children,
 }: SurfaceContentProps) {
   return (
-    <div className="space-y-10">
+    <div className="space-y-8">
       <Button variant="ghost" size="sm" asChild className="-ml-2">
-        <Link href="/">
+        <Link href="/capabilities">
           <ArrowLeft className="size-4" aria-hidden="true" />
-          Back to overview
+          Back to Capabilities
         </Link>
       </Button>
 
@@ -78,54 +109,56 @@ export function SurfaceContent({
         </div>
       </header>
 
-      <section className="measure space-y-3 text-muted-foreground">{intro}</section>
-
-      <section className="space-y-4">
-        <h2 className="text-xl font-semibold">Capabilities</h2>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {capabilities.map((c) => (
-            <div
-              key={c.title}
-              className="flex gap-3 rounded-xl bg-muted/40 p-4 ring-1 ring-foreground/10"
-            >
-              <Check
-                className="mt-0.5 size-4 shrink-0 text-[var(--success)]"
-                aria-hidden="true"
-              />
-              <div>
-                <div className="text-sm font-semibold">{c.title}</div>
-                <div className="text-sm text-muted-foreground">{c.body}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-
+      {/* Show, then tell: the interactive demo comes IMMEDIATELY after the header. */}
       {children}
 
-      <section className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader className="flex-row items-center gap-2 space-y-0">
-            <Info className="size-5 text-primary" aria-hidden="true" />
-            <CardTitle className="text-base">How this runs</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm text-muted-foreground">
-            {runsNote}
-          </CardContent>
-        </Card>
-        <Card className="ring-[var(--warning)]/30">
-          <CardHeader className="flex-row items-center gap-2 space-y-0">
-            <TriangleAlert
-              className="size-5 text-[var(--warning)]"
-              aria-hidden="true"
-            />
-            <CardTitle className="text-base">Honest caveats</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm text-muted-foreground">
-            {caveat}
-          </CardContent>
-        </Card>
-      </section>
+      {intro && (
+        <section className="measure space-y-3 text-muted-foreground">{intro}</section>
+      )}
+
+      {capabilities && capabilities.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-lg font-semibold">What it does</h2>
+          <ul className="space-y-2">
+            {capabilities.map((c) => (
+              <li key={c.title} className="flex gap-2.5 text-sm">
+                <Check
+                  className="mt-0.5 size-4 shrink-0 text-[var(--success)]"
+                  aria-hidden="true"
+                />
+                <span className="text-muted-foreground">
+                  <span className="font-semibold text-foreground">{c.title}</span>
+                  {" — "}
+                  {c.body}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {(runsNote || reproduce) && (
+        <section className="space-y-2 text-sm text-muted-foreground">
+          {runsNote && <p>{runsNote}</p>}
+          {reproduce && (
+            <p>
+              Reproduce:{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[12px] text-foreground">
+                {reproduce}
+              </code>
+            </p>
+          )}
+        </section>
+      )}
+
+      {caveat && (
+        <details className="group rounded-xl border bg-muted/30 px-4 py-3 text-sm">
+          <summary className="cursor-pointer select-none font-medium text-foreground/90">
+            {caveatLabel}
+          </summary>
+          <div className="mt-3 space-y-2 text-muted-foreground">{caveat}</div>
+        </details>
+      )}
 
       <section className="flex flex-wrap gap-2">
         {links?.map((l) =>
@@ -140,6 +173,24 @@ export function SurfaceContent({
               <Link href={l.href}>{l.label}</Link>
             </Button>
           ),
+        )}
+        {readmeHref && (
+          <Button asChild variant="outline" size="sm">
+            <a href={readmeHref} target="_blank" rel="noopener noreferrer">
+              <FileText className="size-4" aria-hidden="true" />
+              Crate README
+              <ExternalLink className="size-3.5 opacity-60" aria-hidden="true" />
+            </a>
+          </Button>
+        )}
+        {skillHref && (
+          <Button asChild variant="outline" size="sm">
+            <a href={skillHref} target="_blank" rel="noopener noreferrer">
+              <BookOpen className="size-4" aria-hidden="true" />
+              SKILL.md
+              <ExternalLink className="size-3.5 opacity-60" aria-hidden="true" />
+            </a>
+          </Button>
         )}
         <Button asChild variant="outline" size="sm">
           <a
