@@ -40,6 +40,20 @@ import sys
 PKG = "https://sparq.dev/ns/pkg#"
 KB = "https://sparq.dev/ns/pkg/kb#"
 
+# [OPUS-4.8] sq-2m6zm.5 (bd-bridge eval). A `research/<doc>.md` reference inside a
+# bead's `design` / `description` is the bd `--spec-id` style knowledge link. Project
+# it as `pkg:Task dcterms:relation kb:doc-<doc>` + mint the research doc as a
+# pkg:Source. This materialises the design's KILLER cross-link — the knowledge<->task
+# JOIN that bd CANNOT express (bd has no model of the research corpus). The match is
+# deterministic (a regex over the structured fields), not LLM-extracted.
+RESEARCH_DOC_RE = re.compile(r"research/([a-z0-9][a-z0-9-]*\.md)")
+
+
+def research_doc_iri(doc: str) -> str:
+    # doc is e.g. "structure-aware-vectorisation.md"; strip the .md for the local part.
+    stem = doc[:-3] if doc.endswith(".md") else doc
+    return "kb:doc-research-" + stem.replace(".", "_")
+
 # bd status -> pkg status individual (the SHACL TaskShape enum).
 STATUS = {
     "open": "pkg:Open",
@@ -120,6 +134,8 @@ def project_beads(path):
     lines = []
     stale = []  # (a_dependsOn_b) edges that are stale: b closed, a not closed
     emitted_deps = 0
+    research_docs = {}  # doc -> count of beads linking it (drives the pkg:Source mint)
+    spec_links = 0  # total pkg:Task -> research-doc edges emitted
     for bead_id, o in sorted(issues.items()):
         iri = task_iri(bead_id)
         lines.append(f"\n{iri} a pkg:Task ;")
@@ -166,14 +182,43 @@ def project_beads(path):
                 lines.append(f"  pkg:discoveredFrom {b_iri} ;")
             elif dtype == "related":
                 lines.append(f"  skos:related {b_iri} ;")
+        # The research-doc spec link (the knowledge<->task JOIN). A research/<doc>.md
+        # named in the bead's structured design/description fields becomes a
+        # dcterms:relation edge to the minted research-doc Source. Deterministic regex,
+        # NOT LLM extraction.
+        blob = (o.get("design") or "") + " " + (o.get("description") or "")
+        docs = sorted(set(RESEARCH_DOC_RE.findall(blob)))
+        for doc in docs:
+            lines.append(f"  dcterms:relation {research_doc_iri(doc)} ;")
+            research_docs[doc] = research_docs.get(doc, 0) + 1
+            spec_links += 1
         # close the statement: replace the trailing ' ;' of the last line with ' .'
         lines[-1] = lines[-1].rstrip()[:-1] + "."
+
+    # Mint each referenced research doc as a pkg:Source (so the cross-link query joins
+    # tasks <-> a typed source node, not a bare IRI). SourceShape requires a title +
+    # an explored-status, so emit both. confidence reflects that these are the project's
+    # OWN design records (high reliability); explored-status defaults to Explored.
+    if research_docs:
+        lines.append("\n\n# === Research-doc Sources (bd spec-link targets; sq-2m6zm.5) ===\n")
+    for doc in sorted(research_docs):
+        diri = research_doc_iri(doc)
+        title = f"research/{doc} — sparq design record"
+        lines.append(f"\n{diri} a pkg:Source , pkg:Document , fabio:Expression ;")
+        lines.append(f'  dcterms:title "{esc(title)}" ;')
+        lines.append(f'  dcterms:identifier "research/{doc}" ;')
+        lines.append(f'  dcterms:format "text/markdown" ;')
+        lines.append(f"  pkg:exploredStatus pkg:Explored ;")
+        lines.append(f"  pkg:followUpPriority 2 ;")
+        lines.append(f"  pkg:confidence 0.9 .")
 
     stats = {
         "tasks": len(issues),
         "deps_emitted": emitted_deps,
         "stale_excluded": len(stale),
         "stale": stale,
+        "research_docs": len(research_docs),
+        "spec_links": spec_links,
     }
     return lines, stats
 
@@ -295,8 +340,9 @@ def main():
 
     print(
         f"[ingest] tasks={bstats['tasks']} deps_emitted={bstats['deps_emitted']} "
-        f"stale_excluded={bstats['stale_excluded']} skills={sstats['skills']} "
-        f"-> {args.out}",
+        f"stale_excluded={bstats['stale_excluded']} "
+        f"research_docs={bstats['research_docs']} spec_links={bstats['spec_links']} "
+        f"skills={sstats['skills']} -> {args.out}",
         file=sys.stderr,
     )
     print(f"[ingest] stale-edge sidecar -> {sidecar}", file=sys.stderr)
