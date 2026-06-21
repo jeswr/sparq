@@ -1,13 +1,21 @@
-<!-- [OPUS-4.8] sq-2m6zm.4 (epic sq-2m6zm). 🤖 SPARQ agent — the PKG-query token A/B
-harness. Written while Fable unavailable; flag for re-review when Fable returns. -->
-# PKG-query token A/B (`sq-2m6zm.4`)
+<!-- [OPUS-4.8] sq-2m6zm.4 / sq-ve5dy / sq-zbyo7 (epic sq-2m6zm). 🤖 SPARQ agent — the
+PKG-query token A/B harness. Written while Fable unavailable; flag for re-review when
+Fable returns. -->
+# PKG-query token A/B (`sq-2m6zm.4` → `sq-ve5dy`)
 
 The **scientific gate** on dogfooding sparq as a project knowledge graph (epic
 `sq-2m6zm`, Phases 2–4). It measures whether answering a project-knowledge lookup
 via the **`pkg-query`** skill (`introspect → ground → ask`, PR #1075) costs fewer
 **cache-discounted effective input tokens** than reading the source document(s) —
-and whether answer **quality** holds — then emits the `§5.6` verdict object.
+and whether answer **quality** holds — then emits the verdict.
 Protocol + kill-criteria: `research/dogfooding-sparq-knowledge-graph.md` §5.
+
+> **The real measurement is `RESULTS.md`.** The original harness below (`run.py` /
+> `tokens.py`) was a **char/byte PROXY** PoC (N=12), which honestly flagged itself as
+> lower-fidelity. It has been **superseded** by the **real-transcript 3-arm A/B**
+> (`tokens_real.py` + `analyze3.py` + `tasks/abm_tasks.json`, N=30) — see
+> **[`RESULTS.md`](./RESULTS.md)** for the measured table, method, and the CRITICAL
+> LESSON (the proxy inverted the verdict; prefer real measurement).
 
 ## What it does
 
@@ -27,8 +35,24 @@ Protocol + kill-criteria: `research/dogfooding-sparq-knowledge-graph.md` §5.
   the frozen bar + kill criteria, emits `verdict.json`.
 
 ```bash
-bench/pkg-dogfood/run.sh   # build → drive → grade → verdict
+bench/pkg-dogfood/run.sh   # build → drive → grade → verdict (the char-proxy PoC)
 ```
+
+## The real-transcript 3-arm A/B (sq-ve5dy — supersedes the proxy)
+
+The proven measurement (`RESULTS.md`) mines the tokens the model **actually
+consumed** from real sub-agent transcripts and adds a third, cheaper arm:
+
+- **`tasks/abm_tasks.json`** — the frozen **30-task** set (`id` / `stratum` /
+  `question` / `gold_keys` / `armB`), 4 strata, PKG-answerable by construction.
+- **`tokens_real.py <transcript-dir> [out.json]`** — the REAL-transcript
+  effective-token miner: per `agent-*.jsonl` it attributes by the `[ABM task= arm=]`
+  tag and sums `1.0·input + 0.1·cache_read + 1.25·cache_creation` straight from
+  `message.usage` (**no `count_tokens`, no char proxy**).
+- **`analyze3.py --tasks … --tokens … --answers … [--out verdict.json]`** — the
+  3-arm **$-weighted** verdict (A = Opus read-docs, B = Opus pkg-query, C = Haiku
+  pkg-query NL-tool). The decision metric is **model-price-weighted cost**, since
+  arm C runs the verbose middle on a model ~15× cheaper per token.
 
 ## Honesty (load-bearing)
 
