@@ -10,100 +10,59 @@ export const metadata: Metadata = {
     "Parse and load RDF into a sparq Graph — Turtle, N-Triples, N-Quads, TriG, JSON-LD, compressed dumps, and the binary HDT archive format.",
 };
 
+// [OPUS-4.8] sq-vw3ax.4 — scan-first deep page: statement + the format-picker demo
+// first, then a tight capabilities list, a one-sentence "how this runs", caveats
+// closed.
 export default function DataFormatsSurfacePage() {
   return (
     <SurfaceContent
       icon={Database}
       title="Data formats"
-      statement="Getting RDF into a sparq Graph: the four text formats, compressed ingest, and HDT."
+      statement="Getting RDF into a sparq Graph — the four text formats plus JSON-LD parse live in your tab; compressed ingest and HDT load natively."
       tier="live"
-      intro={
-        <>
-          <p>
-            sparq parses the four standard RDF text formats —{" "}
-            <strong className="text-foreground">Turtle, N-Triples, N-Quads</strong>{" "}
-            and <strong className="text-foreground">TriG</strong> — in{" "}
-            <code className="font-mono text-foreground">sparq-core</code>, with
-            in-memory, streaming, parallel and external-memory loaders for large
-            dumps. The binary{" "}
-            <strong className="text-foreground">HDT</strong> archive format (and its
-            content-sniffed <code className="font-mono">.hdt.gz</code> /{" "}
-            <code className="font-mono">.hdt.zst</code> /{" "}
-            <code className="font-mono">.hdt.bz2</code> variants) lives in the
-            opt-in <code className="font-mono text-foreground">sparq-hdt</code>{" "}
-            crate.
-          </p>
-          <p>
-            <strong className="text-foreground">JSON-LD 1.1</strong> (JSON for
-            linked data) parses through the opt-in{" "}
-            <code className="font-mono text-foreground">jsonld</code> feature
-            (oxjsonld) — which the site&apos;s wasm bundle enables, so the picker
-            below reads it too.
-          </p>
-          <p>
-            These crates parse RDF <em>in</em>; to write RDF <em>out</em>, the
-            engine ships a writer matrix (Turtle / TriG / N-Quads / JSON-LD 1.1)
-            behind its <code className="font-mono">serialize-rdf</code> feature,
-            with the N-Triples writer always on.
-          </p>
-        </>
-      }
       capabilities={[
         {
-          title: "Turtle / N-Triples / N-Quads / TriG",
+          term: "Turtle / N-Triples / N-Quads / TriG",
           body: "All four text formats, with named-graph preservation for the quad formats.",
         },
         {
-          title: "JSON-LD 1.1",
+          term: "JSON-LD 1.1",
           body: "JSON for linked data — parsed via the opt-in jsonld feature (oxjsonld), which the site bundle enables.",
         },
         {
-          title: "Compressed ingest",
-          body: "gzip / zstd / bzip2 RDF dumps decode-and-load natively (fused decompress + parallel parse); gzip also decodes live in the browser.",
+          term: "Compressed ingest",
+          body: "gzip / zstd / bzip2 dumps decode-and-load natively (fused decompress + parallel parse); gzip also decodes live in the browser.",
         },
         {
-          title: "Streaming & parallel loaders",
-          body: "Chunk-parallel parsing for large N-Triples dumps; external-memory ingest (native).",
+          term: "HDT archives",
+          body: "Load .hdt and content-sniffed .hdt.gz/.zst/.bz2 via the opt-in sparq-hdt crate (native).",
         },
         {
-          title: "HDT archives",
-          body: "Load .hdt and content-sniffed .hdt.gz/.zst/.bz2 via the opt-in sparq-hdt crate.",
-        },
-        {
-          title: "Copy-on-write snapshots",
-          body: "Cheap immutable Graph snapshots for concurrent serving.",
-        },
-        {
-          title: "RDF writer matrix",
-          body: "Serialize back out to Turtle / TriG / N-Quads / JSON-LD (engine serialize-rdf feature).",
+          term: "RDF writer matrix",
+          body: "Serialize back out to Turtle / TriG / N-Quads / JSON-LD (engine serialize-rdf feature; the N-Triples writer is always on).",
         },
       ]}
       runsNote={
         <>
-          <p>
-            <strong className="text-foreground">Live in your tab</strong> for the
-            four text formats and JSON-LD — the demo above runs the same{" "}
-            <code className="font-mono">Store.load</code> /{" "}
-            <code className="font-mono">loadDataset</code> loaders that ship in{" "}
-            <code className="font-mono">@jeswr/sparq</code>, compiled to wasm. The
-            gzip-ingest panel decodes with the browser&apos;s native{" "}
-            <code className="font-mono">DecompressionStream</code> before parsing —
-            no codec library, no server.
-          </p>
+          Runs live in your tab for the four text formats and JSON-LD — the demo calls
+          the same <code className="font-mono">Store.load</code> /{" "}
+          <code className="font-mono">loadDataset</code> loaders that ship in{" "}
+          <code className="font-mono">@jeswr/sparq</code>, and gzip decodes with the
+          browser&apos;s native <code className="font-mono">DecompressionStream</code>,
+          with no network round-trip. Reproduce:{" "}
+          <code className="font-mono">cargo test -p sparq-core</code>.
         </>
       }
       caveat={
-        <>
-          <p>
-            Only <strong className="text-foreground">gzip</strong> decodes in the
-            browser (via <code className="font-mono">DecompressionStream</code>);{" "}
-            <strong className="text-foreground">zstd</strong> and{" "}
-            <strong className="text-foreground">bzip2</strong> ingest, HDT loading,
-            the mmap / external-memory path, and the fully-parallel fast loaders are{" "}
-            <strong className="text-foreground">native-only</strong> — in the
-            browser the in-memory streaming loader is used.
-          </p>
-        </>
+        <p>
+          Only <strong className="text-foreground">gzip</strong> decodes in the browser
+          (via <code className="font-mono">DecompressionStream</code>);{" "}
+          <strong className="text-foreground">zstd</strong> and{" "}
+          <strong className="text-foreground">bzip2</strong> ingest, HDT loading, the
+          mmap / external-memory path, and the fully-parallel fast loaders are{" "}
+          <strong className="text-foreground">native-only</strong> — in the browser the
+          in-memory streaming loader is used.
+        </p>
       }
       links={[{ href: "/try", label: "Open the full SPARQL REPL" }]}
     >

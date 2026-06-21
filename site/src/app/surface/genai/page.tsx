@@ -64,27 +64,27 @@ export default function GenaiSurfacePage() {
       }
       capabilities={[
         {
-          title: "Schema-card grounding (real introspection)",
+          term: "Schema-card grounding (real introspection)",
           body: "sparq-introspect's to_text_summary builds a token-budgeted deck — exact class/predicate counts, datatype ranges, characteristic sets — from the store's indexes, not guesses.",
         },
         {
-          title: "Validate before execute",
+          term: "Validate before execute",
           body: "The extracted query is parsed with the real spargebra parser before the engine sees it, so a malformed query becomes a concrete repair signal rather than a silent failure.",
         },
         {
-          title: "Bounded repair loop",
+          term: "Bounded repair loop",
           body: "Parse and execution errors (unsupported forms, budget trips) are fed back with the failed query; a capped number of rounds, then the loop gives up honestly.",
         },
         {
-          title: "Budgeted execution",
+          term: "Budgeted execution",
           body: "LLM-generated queries are untrusted input — every query runs under a QueryBudget (default 10 s wall clock, 1M materialised rows); opting out is explicit.",
         },
         {
-          title: "Record / replay — offline CI",
+          term: "Record / replay — offline CI",
           body: "The Llm trait records (prompt, completion) pairs to a fixture and replays them by exact-prompt match, so the whole loop is deterministic and network-free in tests.",
         },
         {
-          title: "Index-grounded entity linking (opt-in)",
+          term: "Index-grounded entity linking (opt-in)",
           body: "Optionally resolve a question's proper nouns to concrete IRIs in this store (label index + sparq-sim structural siblings) and surface them in the prompt — off by default.",
         },
       ]}

@@ -52,27 +52,27 @@ export default function StreamingRspSurfacePage() {
       }
       capabilities={[
         {
-          title: "Tumbling & sliding time windows",
+          term: "Tumbling & sliding time windows",
           body: "RANGE / STEP in your own logical time unit — step == range tumbles, step < range slides with overlap.",
         },
         {
-          title: "Per-window aggregates",
+          term: "Per-window aggregates",
           body: "AVG / COUNT / SUM / MIN / MAX over each window's triples; integer AVG comes back as xsd:decimal per SPARQL typing.",
         },
         {
-          title: "RSTREAM / ISTREAM / DSTREAM",
+          term: "RSTREAM / ISTREAM / DSTREAM",
           body: "Full result per window, only rows that newly appeared (ISTREAM), or only rows that disappeared (DSTREAM).",
         },
         {
-          title: "Watermark + out-of-order tolerance",
+          term: "Watermark + out-of-order tolerance",
           body: "A window closes when max_ts − maxDelay reaches its end; late arrivals past every covering window are counted, not silently dropped.",
         },
         {
-          title: "Empty windows reported",
+          term: "Empty windows reported",
           body: "When the watermark jumps a gap, the window still fires (with no rows) — so DSTREAM can observe results disappear.",
         },
         {
-          title: "Flush at end-of-stream",
+          term: "Flush at end-of-stream",
           body: "Flush closes every remaining open window up to the last timestamp seen, ignoring maxDelay.",
         },
       ]}

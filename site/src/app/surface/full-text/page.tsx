@@ -50,27 +50,27 @@ export default function FullTextSurfacePage() {
       }
       capabilities={[
         {
-          title: "text:matches (AND) + BM25 score",
+          term: "text:matches (AND) + BM25 score",
           body: "Keyword search: literals containing every token, ranked by BM25 relevance bound with text:score.",
         },
         {
-          title: "text:matchesAny (OR)",
+          term: "text:matchesAny (OR)",
           body: "Literals containing at least one token — the inclusive variant, also BM25-ranked.",
         },
         {
-          title: "Prefix tokens (foo*)",
+          term: "Prefix tokens (foo*)",
           body: "A token ending in '*' is a prefix query: 'fox*' matches 'fox' and 'foxes' — autocomplete-style.",
         },
         {
-          title: "text:phrase (adjacent, in order)",
+          term: "text:phrase (adjacent, in order)",
           body: "Exact phrase match over the positions-enabled index this bundle always builds; order is significant.",
         },
         {
-          title: "text:near + text:slop (proximity)",
+          term: "text:near + text:slop (proximity)",
           body: "Bounded-gap, in-order proximity match, ranked tightest-first (score = 1/(1+gap)); slop sets the gap budget.",
         },
         {
-          title: "Index footprint reported",
+          term: "Index footprint reported",
           body: "Indexed-literal and distinct-token counts plus an in-memory heap estimate — the index-build-memory surface, shown per run.",
         },
       ]}

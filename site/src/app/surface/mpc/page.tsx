@@ -42,27 +42,27 @@ export default function MpcSurfacePage() {
       }
       capabilities={[
         {
-          title: "Per-holder local evaluation",
+          term: "Per-holder local evaluation",
           body: "Each holder runs its own SELECT fragment over its own graph; the raw graph never leaves.",
         },
         {
-          title: "Disclosed-key global join",
+          term: "Disclosed-key global join",
           body: "Crypto-free inner join on shared global IRIs, equal to union-store evaluation.",
         },
         {
-          title: "Secure cumulative aggregate",
+          term: "Secure cumulative aggregate",
           body: "Sum private integers over Shamir shares (free local addition), reveal only the total.",
         },
         {
-          title: "Secure threshold verdict",
+          term: "Secure threshold verdict",
           body: "Open only the bit `sum ≥ threshold` — the £100k flatmates example — never the operands.",
         },
         {
-          title: "Hidden-value join",
+          term: "Hidden-value join",
           body: "Join on a private key via secret-shared equality; only matched payload columns disclosed.",
         },
         {
-          title: "Fail-closed backend selection",
+          term: "Fail-closed backend selection",
           body: "A federation states its security floor up front; an over-strong request is truthfully refused.",
         },
       ]}

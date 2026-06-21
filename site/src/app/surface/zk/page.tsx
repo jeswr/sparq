@@ -41,27 +41,27 @@ export default function ZkSurfacePage() {
       }
       capabilities={[
         {
-          title: "Per-graph Poseidon2 commitments",
+          term: "Per-graph Poseidon2 commitments",
           body: "Commit a credential graph to a single field element the proof binds against.",
         },
         {
-          title: "BGP scan + integer FILTER",
+          term: "BGP scan + integer FILTER",
           body: "Prove a basic graph pattern matched and a numeric predicate (e.g. age ≥ 25) held.",
         },
         {
-          title: "Issuer attestation",
+          term: "Issuer attestation",
           body: "Schnorr signatures, incl. hidden-key set membership (prove a trusted issuer without naming it).",
         },
         {
-          title: "Revocation",
+          term: "Revocation",
           body: "Status-list non-revocation at a clear or hidden index.",
         },
         {
-          title: "Equality join",
+          term: "Equality join",
           body: "Prove two credentials share a holder term without disclosing it.",
         },
         {
-          title: "Replay defence",
+          term: "Replay defence",
           body: "Verifier-supplied nonces make each presentation single-use.",
         },
       ]}

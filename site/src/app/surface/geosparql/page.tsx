@@ -74,27 +74,27 @@ export default function GeosparqlSurfacePage() {
       }
       capabilities={[
         {
-          title: "WKT + GML geometry literals",
+          term: "WKT + GML geometry literals",
           body: "Parses geo:wktLiteral and geo:gmlLiteral (GML Simple-Features: Point / LineString / Polygon with rings / Multi*), an optional leading CRS IRI, EPSG:4326 axis-swap, and the OGC R9 geo: metadata properties (dimension / isEmpty / isSimple / …).",
         },
         {
-          title: "geof: inside plain SPARQL",
+          term: "geof: inside plain SPARQL",
           body: "geof_registry() packages the functions as a sparq-engine FunctionRegistry, so distance / the relation families / envelope / buffer / set ops run inside real FILTER / BIND / SELECT expressions — and chain (geof:buffer feeds straight into geof:sfWithin).",
         },
         {
-          title: "Three DE-9IM relation families",
+          term: "Three DE-9IM relation families",
           body: "sf* (Simple Features), eh* (Egenhofer) and rcc8* (RCC8) topology predicates, plus a generic 9-char DE-9IM relate(). Relations are planar (coordinate-space), not geodesic.",
         },
         {
-          title: "Topology-property query rewrite",
+          term: "Topology-property query rewrite",
           body: "geosparql_rewrite expands ?a geo:sfWithin ?b triple patterns into (hasDefaultGeometry|hasGeometry)/asWKT resolution joins + the matching geof: FILTER — opt-in, so W3C conformance of the default entry points is unaffected.",
         },
         {
-          title: "R-tree GeoIndex (nearest / radius / intersects)",
+          term: "R-tree GeoIndex (nearest / radius / intersects)",
           body: "GeoIndex::build scans geo:asWKT / geo:asGML into an rstar R-tree; nearest (k-NN), within_distance (radius) and intersects answer great-circle metre queries, with incremental apply_delta to stay in sync with graph updates.",
         },
         {
-          title: "Opt-in everywhere",
+          term: "Opt-in everywhere",
           body: "A separate crate (the core engine + lean wasm carry no geometry code); the server installs geof: only behind its non-default `geo` feature; the `reproject` module (a small curated EPSG table → CRS84) is itself opt-in.",
         },
       ]}

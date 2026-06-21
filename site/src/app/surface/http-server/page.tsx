@@ -60,27 +60,27 @@ export default function HttpServerSurfacePage() {
       }
       capabilities={[
         {
-          title: "SPARQL 1.1 Protocol query + update",
+          term: "SPARQL 1.1 Protocol query + update",
           body: "GET (URL param) or POST (direct body / url-encoded form) at /sparql; updates are atomic — failure → 400 with no partial effect, success → 204.",
         },
         {
-          title: "Accept-driven content negotiation",
+          term: "Accept-driven content negotiation",
           body: "SELECT/ASK as JSON / XML / CSV / TSV; CONSTRUCT/DESCRIBE + Graph-Store reads as N-Triples / prefix-compacting Turtle / RDF/XML — q-value aware.",
         },
         {
-          title: "Graph Store HTTP Protocol (read + write)",
+          term: "Graph Store HTTP Protocol (read + write)",
           body: "GET/HEAD read a graph; PUT replaces (201/204), POST merges, DELETE drops — bodies parsed by Content-Type, routed through the same atomic writer as UPDATE.",
         },
         {
-          title: "Live WebSocket + SSE subscriptions",
+          term: "Live WebSocket + SSE subscriptions",
           body: "Subscribe to a SELECT; get a sequence-0 snapshot then per-commit added/removed diffs. Both transports share one registry; close the stream to unsubscribe.",
         },
         {
-          title: "EXPLAIN + Prometheus /metrics",
+          term: "EXPLAIN + Prometheus /metrics",
           body: "?explain=true returns the join plan with cardinality estimates (no execution); /metrics exposes triple count, applied-update counter and active-subscription gauge.",
         },
         {
-          title: "Hardened by default",
+          term: "Hardened by default",
           body: "Loopback-only bind, optional Bearer write/read gate, per-request timeouts, body / concurrency / decompress caps, slow-loris guards, and a fixed security-header set on every response.",
         },
       ]}

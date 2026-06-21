@@ -69,27 +69,27 @@ export default function VectorSurfacePage() {
       }
       capabilities={[
         {
-          title: "Memory-mapped per-term-id store (.spqv)",
+          term: "Memory-mapped per-term-id store (.spqv)",
           body: "One f32 vector per dictionary id; get is one binary search + a contiguous slice. Sparse by design, corrupt files rejected up front, build bigger than RAM with StreamingWriter.",
         },
         {
-          title: "Exact + approximate search",
+          term: "Exact + approximate search",
           body: "nearest_exact is the answer-exact ground truth; the on-disk DiskANN/Vamana graph (build once, reopen with no rebuild) and the opt-in in-RAM HNSW trade recall (< 1.0) for speed at scale.",
         },
         {
-          title: "k-NN inside plain SPARQL (opt-in vec-predicate)",
+          term: "k-NN inside plain SPARQL (opt-in vec-predicate)",
           body: "vec:nearest / vec:search run vector k-NN via a spargebra-algebra rewrite that inlines the hits as a VALUES table — the engine, planner and wasm bundle are unchanged.",
         },
         {
-          title: "Predicate-constrained (filtered) ANN (opt-in filtered-ann)",
+          term: "Predicate-constrained (filtered) ANN (opt-in filtered-ann)",
           body: "Restrict the search to the graph nodes a SPARQL BGP admits — the join-connected sub-BGP of the neighbour variable derives the candidate mask; a cost model picks pre- vs post-filter, both byte-identical.",
         },
         {
-          title: "Hybrid fusion + quantization",
+          term: "Hybrid fusion + quantization",
           body: "fuse_rrf / fuse_scores combine text vectors with another ranked signal (e.g. structural similarity); ScalarQuantizer (4×) and ProductQuantizer (8–32×) shrink large stores.",
         },
         {
-          title: "Bring-your-own embeddings",
+          term: "Bring-your-own embeddings",
           body: "Embeddings are out-of-process: import a matrix computed elsewhere (NumPy .npy / flat f32 dump) keyed by dict id, or wire a real OpenAI-compatible endpoint behind the opt-in embeddings feature. The default build opens no sockets.",
         },
       ]}
