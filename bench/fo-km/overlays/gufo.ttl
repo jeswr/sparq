@@ -1,0 +1,55 @@
+# gufo.ttl — the gUFO foundational-ontology overlay for the PKG.
+#
+# [OPUS-4.8] FO-KM benchmark, Metric 1 (epic sq-mztg8). Design record:
+# research/foundational-ontology-km-benchmark.md §4 (PR #1106). 🤖 SPARQ agent.
+#
+# Types the four PKG classes under gUFO's top categories + inlines the MINIMAL gUFO
+# class-taxonomy fragment needed so an rdfs/owl-rl closure ENTAILS the gUFO-typed facts
+# (rdfs9: (c subClassOf d),(s type c) => (s type d); rdfs11: transitive subClassOf).
+#
+# FO source: gUFO — "A Gentle Foundational Ontology for Semantic Web Knowledge Graphs"
+# (Almeida, Falbo, Guizzardi; NEMO/UFES). Namespace http://purl.org/nemo/gufo# .
+# Taxonomy verified against the gUFO specification (nemo-ufes.github.io/gufo):
+#   gufo:Object  rdfs:subClassOf gufo:Endurant rdfs:subClassOf gufo:ConcreteIndividual
+#   gufo:Event   rdfs:subClassOf gufo:ConcreteIndividual          (the occurrent branch)
+#   gufo:AbstractIndividual rdfs:subClassOf gufo:Individual        (propositions live here)
+#   gufo:ConcreteIndividual rdfs:subClassOf gufo:Individual
+# Only the fragment used by the FO-KM tasks is inlined (not the whole ~self-contained TTL).
+#
+# THE CATEGORIAL SPLIT this overlay draws (and the no-FO arm does NOT):
+#   pkg:Task     -> gufo:Event              (occurrent / perdurant work-occurrence)
+#   pkg:Finding  -> gufo:AbstractIndividual (abstract truth-bearer / proposition)
+#   pkg:Source   -> gufo:Object            (concrete information artifact = endurant)
+#   pkg:Technique-> gufo:Object            (documented method-spec content artifact)
+# After --close owl-rl every pkg:Task instance is also a gufo:Event, etc., so a query
+# over the gufo: category returns the union by entailment.
+
+@prefix pkg:  <https://sparq.dev/ns/pkg#> .
+@prefix gufo: <http://purl.org/nemo/gufo#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix pkgfo: <https://sparq.dev/ns/pkg/fo#> .
+
+pkgfo:gufo-overlay a owl:Ontology ;
+  rdfs:label "gUFO overlay for the PKG"@en-GB ;
+  rdfs:comment "Foundational typing of the PKG classes under gUFO (http://purl.org/nemo/gufo#); inlines the minimal gUFO taxonomy fragment for closure."@en-GB ;
+  rdfs:seeAlso <http://purl.org/nemo/gufo> .
+
+# --- the minimal gUFO taxonomy fragment (TBox) ------------------------------
+gufo:Individual         a owl:Class ; rdfs:label "Individual"@en .
+gufo:ConcreteIndividual a owl:Class ; rdfs:label "Concrete individual"@en ;
+  rdfs:subClassOf gufo:Individual .
+gufo:AbstractIndividual a owl:Class ; rdfs:label "Abstract individual"@en ;
+  rdfs:subClassOf gufo:Individual .
+gufo:Endurant a owl:Class ; rdfs:label "Endurant"@en ;
+  rdfs:subClassOf gufo:ConcreteIndividual .
+gufo:Object a owl:Class ; rdfs:label "Object"@en ;
+  rdfs:subClassOf gufo:Endurant .
+gufo:Event a owl:Class ; rdfs:label "Event"@en ;
+  rdfs:subClassOf gufo:ConcreteIndividual .
+
+# --- the PKG-class -> gUFO-category overlay (the lever) ----------------------
+pkg:Task      rdfs:subClassOf gufo:Event .
+pkg:Finding   rdfs:subClassOf gufo:AbstractIndividual .
+pkg:Source    rdfs:subClassOf gufo:Object .
+pkg:Technique rdfs:subClassOf gufo:Object .

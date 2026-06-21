@@ -1,0 +1,28 @@
+# no-fo.ttl — the no-FO baseline overlay (intentionally a no-op).
+#
+# [OPUS-4.8] FO-KM benchmark, Metric 1 (epic sq-mztg8). Design record:
+# research/foundational-ontology-km-benchmark.md (PR #1106). 🤖 SPARQ agent.
+#
+# This is the INCUMBENT arm: the shipped PKG already types every instance directly
+# (pkg:Task / pkg:Finding / pkg:Source / pkg:Technique) with parents to DOMAIN
+# vocabularies (schema:Action, sig-impl:Assertion, fabio:Expression, skos:Concept) —
+# it imports NO foundational/upper ontology (verified: `grep -ri gufo crates/sparq-kb`
+# returns nothing). So the "no-FO" arm is the PKG with NO overlay loaded; this file
+# adds NOTHING.
+#
+# It exists so the per-arm `pkg-query` command is uniform across arms (every arm passes
+# exactly one `--extra-graph overlays/<arm>.ttl`), and so an FO-EXERCISING task that
+# asks "which entities are perdurants/processes?" returns ZERO rows here (the no-FO arm
+# genuinely lacks the foundational category) while an FO arm answers it — the
+# discrimination the benchmark is built on.
+#
+# Deliberately empty (one harmless ontology-metadata triple only, so the file is valid
+# non-empty Turtle that loads + closes cleanly under --close owl-rl).
+
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix pkgfo: <https://sparq.dev/ns/pkg/fo#> .
+
+pkgfo:no-fo-overlay a owl:Ontology ;
+  rdfs:label "no-FO baseline overlay (no-op)"@en-GB ;
+  rdfs:comment "Adds no foundational typing — the shipped-PKG incumbent arm."@en-GB .

@@ -117,8 +117,35 @@ pub mod query {
     /// Load the PKG ontology + the ingested instances into one queryable [`Graph`].
     /// The `kb:` instances use absolute IRIs, so no base is needed.
     pub fn load_pkg() -> Result<Graph, String> {
-        let combined = format!("{}\n{}", super::PKG_ONTOLOGY, super::PKG_INSTANCES);
+        load_pkg_with_extra(&[])
+    }
+
+    /// Load the PKG ontology + the ingested instances **plus** any number of
+    /// caller-supplied extra Turtle documents into one queryable [`Graph`].
+    ///
+    /// Each extra document is appended to the combined Turtle source verbatim, so it
+    /// MUST declare its own `@prefix` lines — Turtle prefix scope is per the running
+    /// parse, and a document that relies on a prefix from an earlier document is not
+    /// self-contained. The `kb:` / `pkg:` instances use absolute IRIs, so no base is
+    /// needed. This is the seam the FO-KM benchmark (epic sq-mztg8, Metric 1) uses to
+    /// load a foundational-ontology overlay TTL alongside the PKG before querying — the
+    /// overlay's `rdfs:subClassOf` axioms then participate in `close`'s OWL-RL / RDFS
+    /// closure so the FO-typed facts are entailed. [OPUS-4.8]
+    pub fn load_pkg_with_extra(extra_docs: &[&str]) -> Result<Graph, String> {
+        let combined = combine_pkg_docs(extra_docs);
         Graph::load_str(&combined, "turtle")
+    }
+
+    /// Concatenate the PKG ontology + instances + any `extra_docs` into one Turtle
+    /// source. Shared by the plain and (under `close`) the closure loaders so both
+    /// paths see exactly the same document set.
+    fn combine_pkg_docs(extra_docs: &[&str]) -> String {
+        let mut combined = format!("{}\n{}", super::PKG_ONTOLOGY, super::PKG_INSTANCES);
+        for doc in extra_docs {
+            combined.push('\n');
+            combined.push_str(doc);
+        }
+        combined
     }
 
     /// Run a SPARQL `SELECT` over the ingested PKG graph and return the result set.
@@ -146,11 +173,22 @@ pub mod query {
         /// The closure step never fails (materialisation only *adds* triples); the
         /// only error path is the Turtle parse.
         pub fn load_pkg_closed(profile: Profile) -> Result<(Graph, usize), String> {
-            let combined = format!(
-                "{}\n{}",
-                super::super::PKG_ONTOLOGY,
-                super::super::PKG_INSTANCES
-            );
+            load_pkg_closed_with_extra(profile, &[])
+        }
+
+        /// [`load_pkg_closed`] with extra caller-supplied Turtle documents loaded
+        /// alongside the PKG before the closure runs — the FO-KM benchmark seam (epic
+        /// sq-mztg8, Metric 1). A foundational-ontology overlay's `rdfs:subClassOf`
+        /// axioms are part of the schema the closure saturates, so after this call the
+        /// FO-typed `rdf:type` facts (e.g. `?task a fo:Process`) are **entailed** and
+        /// directly queryable — the very thing the no-FO arm (which loads no overlay)
+        /// cannot answer. Each extra document must declare its own `@prefix` lines (see
+        /// [`super::load_pkg_with_extra`]). [OPUS-4.8]
+        pub fn load_pkg_closed_with_extra(
+            profile: Profile,
+            extra_docs: &[&str],
+        ) -> Result<(Graph, usize), String> {
+            let combined = super::combine_pkg_docs(extra_docs);
             let (mut dict, mut triples) = Graph::parse_to_triples(&combined, "turtle")?;
             let entailed = sparq_reason::materialize(profile, &mut dict, &mut triples);
             Ok((Graph::from_parts(dict, triples), entailed))

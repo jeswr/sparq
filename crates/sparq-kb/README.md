@@ -109,11 +109,11 @@ Asserted in `part2_four_criterion_replacement_gate` so no future change silently
 - `ontology/pkg/PROVENANCE.md` — the per-term reuse + verified `skos:closeMatch`
   alignment record; precedent: `crates/sparq-trust/ontologies/zkp-sparql/` +
   `crates/sparq-trust/src/vocab.rs` (ship-an-ontology + Rust-constants pattern).
-- Epic `sq-2m6zm`: the ontology/shapes are `sq-2m6zm.1`; the ingestion PoC above is
-  `sq-2m6zm.2`; the **query-the-PKG** helper + skill (introspect→ground→ask canned
-  queries via `pkg-query`, `.claude/skills/query-pkg/SKILL.md`) is `sq-2m6zm.3`; the
-  bd-bridge eval + four-criterion replacement gate above is `sq-2m6zm.5`. Next: the
-  token-A/B harness (`sq-2m6zm.4`).
+- Epic `sq-2m6zm`: ontology/shapes `.1`; ingestion PoC above `.2`; the **query-the-PKG**
+  helper + skill (introspect→ground→ask via `pkg-query`, `.claude/skills/query-pkg/SKILL.md`)
+  `.3`; the bd-bridge eval + replacement gate above `.5`. Next: token-A/B (`.4`).
+- `pkg-query --extra-graph <path>` (repeatable) loads extra Turtle alongside the PKG; its
+  triples join `--close owl-rl` — the FO-KM benchmark seam (`sq-mztg8` Metric 1; `bench/fo-km/`).
 
 ## License
 

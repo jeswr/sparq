@@ -31,12 +31,19 @@
 //!
 //! # optionally materialise the RDFS/OWL-RL closure first (needs --features close):
 //! cargo run -p sparq-kb --features close --bin pkg-query -- --close owl-rl --query task-blocks --arg sq-8thu
+//!
+//! # load extra graph(s) — e.g. a foundational-ontology overlay — alongside the PKG
+//! # before (optionally) closing + querying (repeatable; the FO-KM benchmark seam,
+//! # epic sq-mztg8 Metric 1):
+//! cargo run -p sparq-kb --features close --bin pkg-query -- \
+//!     --extra-graph bench/fo-km/overlays/gufo.ttl --close owl-rl \
+//!     --sparql 'PREFIX gufo: <http://purl.org/nemo/gufo#> SELECT (COUNT(*) AS ?n) WHERE { ?x a gufo:Event }'
 //! ```
 
 use oxrdf::Term;
 use sparq_core::Graph;
 use sparq_engine::QueryResult;
-use sparq_kb::query::{ask_pkg, canned, load_pkg, nl_tool};
+use sparq_kb::query::{ask_pkg, canned, load_pkg_with_extra, nl_tool};
 
 fn usage() -> &'static str {
     "\
@@ -44,14 +51,17 @@ pkg-query — introspect → ground → ask over the ingested PKG (sq-2m6zm.3, s
 
 USAGE:
   pkg-query --list
-  pkg-query --query <name> [--arg <value>] [--close rdfs|owl-rl] [--sparql-only] [--json]
-  pkg-query --sparql '<SPARQL SELECT/ASK>' [--close rdfs|owl-rl] [--json]
+  pkg-query --query <name> [--arg <value>] [--extra-graph <path>]… [--close rdfs|owl-rl] [--sparql-only] [--json]
+  pkg-query --sparql '<SPARQL SELECT/ASK>' [--extra-graph <path>]… [--close rdfs|owl-rl] [--json]
 
 OPTIONS:
   --list             list the canned introspect/ground queries and exit
   --query <name>     run a canned query by name (see --list)
   --arg <value>      argument for a parameterised canned query ({ARG} substitution)
   --sparql <query>   run a raw SPARQL SELECT/ASK string
+  --extra-graph <p>  load an extra Turtle file alongside the PKG before querying
+                     (repeatable; e.g. an FO overlay — epic sq-mztg8 Metric 1).
+                     Its triples participate in --close.
   --close <profile>  materialise RDFS or OWL-RL closure first (needs --features close)
   --sparql-only      print the executed SPARQL but do not run it (for verification)
   --json             emit the NL-tool envelope as JSON (answer + executed SPARQL +
@@ -87,6 +97,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut close: Option<&str> = None;
     let mut sparql_only = false;
     let mut json = false;
+    let mut extra_paths: Vec<&str> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -107,6 +118,9 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             "--arg" => {
                 arg = Some(next(args, &mut i, "--arg")?);
+            }
+            "--extra-graph" => {
+                extra_paths.push(next(args, &mut i, "--extra-graph")?);
             }
             "--close" => {
                 close = Some(next(args, &mut i, "--close")?);
@@ -141,8 +155,26 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    // Load the store (optionally closed).
-    let graph = load_graph(close)?;
+    // Read any --extra-graph files (e.g. an FO overlay) into owned Turtle docs to load
+    // alongside the PKG. Read once here so both the table and --json paths see the same
+    // data; a missing/unreadable file is a hard error, not a silent skip.
+    let extra_docs: Vec<String> = extra_paths
+        .iter()
+        .map(|p| {
+            std::fs::read_to_string(p)
+                .map_err(|e| format!("cannot read --extra-graph `{}`: {}", p, e))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if !extra_docs.is_empty() {
+        eprintln!(
+            "--- {} extra graph(s) loaded: {} ---",
+            extra_docs.len(),
+            extra_paths.join(", ")
+        );
+    }
+
+    // Load the store (optionally closed), with any extra graphs merged in first.
+    let graph = load_graph(close, &extra_docs)?;
 
     // --json: emit the NL-tool envelope (sq-ve5dy) — answer + executed SPARQL +
     // resolved IRIs + grounding confidence — the agent-flavor tool output. Canned
@@ -164,29 +196,30 @@ fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Load the PKG store, optionally under an RDFS/OWL-RL closure. The closure path is only
-/// available when the crate is built with `--features close`. Shared by both the table
-/// output and the `--json` NL-tool envelope so the two cannot diverge on what data they
-/// answer over.
-fn load_graph(close: Option<&str>) -> Result<Graph, String> {
+/// Load the PKG store (plus any `extra_docs`), optionally under an RDFS/OWL-RL closure.
+/// The closure path is only available when the crate is built with `--features close`.
+/// Shared by both the table output and the `--json` NL-tool envelope so the two cannot
+/// diverge on what data they answer over.
+fn load_graph(close: Option<&str>, extra_docs: &[String]) -> Result<Graph, String> {
+    let extra: Vec<&str> = extra_docs.iter().map(String::as_str).collect();
     match close {
-        None => load_pkg(),
-        Some(profile) => load_closed(profile),
+        None => load_pkg_with_extra(&extra),
+        Some(profile) => load_closed(profile, &extra),
     }
 }
 
 #[cfg(feature = "close")]
-fn load_closed(profile: &str) -> Result<Graph, String> {
-    use sparq_kb::query::close::{load_pkg_closed, Profile};
+fn load_closed(profile: &str, extra: &[&str]) -> Result<Graph, String> {
+    use sparq_kb::query::close::{load_pkg_closed_with_extra, Profile};
     let profile = Profile::parse(profile)
         .ok_or_else(|| format!("unknown closure profile `{profile}` (use rdfs|owl-rl)"))?;
-    let (g, entailed) = load_pkg_closed(profile)?;
+    let (g, entailed) = load_pkg_closed_with_extra(profile, extra)?;
     eprintln!("--- closure: {entailed} entailed triple(s) materialised ---");
     Ok(g)
 }
 
 #[cfg(not(feature = "close"))]
-fn load_closed(_profile: &str) -> Result<Graph, String> {
+fn load_closed(_profile: &str, _extra: &[&str]) -> Result<Graph, String> {
     Err("--close needs the `close` feature: rebuild with --features close".into())
 }
 
