@@ -67,6 +67,12 @@ test("re-collapsing then re-expanding a demo does not re-fetch its chunk", async
   await toggle.click();
   await expect(page.locator('[data-demo-body="full-text"]')).toBeVisible();
   await page.waitForTimeout(500);
+  // [OPUS-4.8] sq-rclb8 — snapshot the chunk set AFTER the first expand, then assert that the
+  // re-collapse/re-expand cycle fires NO new .js request. We compare the request set DELTA, not
+  // the total count: under `next dev` a stray Next.js <Link> prefetch / HMR chunk can land at any
+  // moment (more so now the slim bar has more visible links to prefetch), which drifts the total
+  // count by ±1 without ever being a demo re-fetch. The load-bearing invariant is that NOTHING
+  // new is fetched on re-expand (the body stays mounted, CSS-hidden) — exactly the delta below.
   const afterFirstExpand = jsRequests.length;
 
   // Collapse, then re-expand. The body stays mounted (CSS-hidden) so no NEW chunk is fetched.
@@ -75,5 +81,6 @@ test("re-collapsing then re-expanding a demo does not re-fetch its chunk", async
   await toggle.click();
   await expect(page.locator('[data-demo-body="full-text"]')).toBeVisible();
   await page.waitForTimeout(500);
-  expect(jsRequests.length).toBe(afterFirstExpand);
+  // No request fired during the re-collapse/re-expand cycle — the demo chunk was not re-fetched.
+  expect(jsRequests.slice(afterFirstExpand)).toEqual([]);
 });

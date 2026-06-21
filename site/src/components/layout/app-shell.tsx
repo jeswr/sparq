@@ -9,15 +9,21 @@
 // is the Cmd-K palette (sq-vw3ax.1), which is WHY removing the sidebar is now safe — Cmd-K
 // shipped first. A mobile Sheet drawer mirrors the same slim links (no full tree).
 //
-// Destinations (research §2 + the maintainer's discoverability gap):
-//   Home · Capabilities · Benchmarks · Papers · Download   +   Try the GUI
+// OPTION-B (the maintainer's decision after #1004 opened, sq-rclb8). Two DISTINCT destinations,
+// not one "Try the GUI": "Try" → /try is the lightweight in-browser SPARQL REPL playground (kept
+// unchanged); "App" → /app is the live operational GUI (a placeholder today; the GUI track fills
+// it). The old single "Try the GUI" → /gui slot is dropped (/gui now client-redirects to /app).
+//
+// Destinations (research §2 + the maintainer's discoverability gaps), slim at 6:
+//   Home · Capabilities · Try · App · Benchmarks · Download
 //   utility cluster: { Cmd-K · GitHub · theme }
+// Papers stays a real route but lives in Cmd-K (overflow) to keep the bar slim, not bloated.
 // (/examples and the deep-page rebuild are sequenced in sq-vw3ax.6 / .4 — not this PR.)
 
 import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Github, Menu, MonitorPlay } from "lucide-react";
+import { Github, Menu } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -37,13 +43,16 @@ import {
 const REPO_URL = "https://github.com/jeswr/sparq";
 
 // The slim top bar's content destinations. Capabilities is the single gallery that replaces
-// the collapsed /surface/* tree; Download surfaces the desktop GUI + CLI binaries (the
-// maintainer's discoverability ask). Each is a real, built route.
+// the collapsed /surface/* tree; Try is the lightweight in-browser SPARQL REPL playground; App
+// is the live operational GUI destination; Download surfaces the desktop GUI + CLI binaries (the
+// maintainer's discoverability ask). Each is a real, built route. Papers is intentionally NOT in
+// the bar (it stays a route, reachable via Cmd-K) so the bar stays slim at 6, not bloated.
 const NAV_ITEMS: { href: string; label: string }[] = [
   { href: "/", label: "Home" },
   { href: "/capabilities", label: "Capabilities" },
+  { href: "/try", label: "Try" },
+  { href: "/app", label: "App" },
   { href: "/benchmarks", label: "Benchmarks" },
-  { href: "/papers", label: "Papers" },
   { href: "/download", label: "Download" },
 ];
 
@@ -126,13 +135,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     {item.label}
                   </NavLink>
                 ))}
-                <NavLink
-                  href="/gui"
-                  active={isActive("/gui")}
-                  onNavigate={() => setMobileOpen(false)}
-                >
-                  Try the GUI
-                </NavLink>
               </nav>
             </SheetContent>
           </Sheet>
@@ -154,20 +156,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </nav>
 
           <div className="ml-auto flex items-center gap-1">
-            {/* "Try the GUI" — the hosted web GUI try-live destination (a placeholder page
-                today; the GUI track fills /gui). Prominent because the maintainer flagged GUI
-                discoverability as a gap. */}
-            <Button
-              asChild
-              variant="outline"
-              size="sm"
-              className="mr-1 hidden sm:inline-flex"
-            >
-              <Link href="/gui" aria-current={isActive("/gui") ? "page" : undefined}>
-                <MonitorPlay className="size-4" aria-hidden />
-                Try the GUI
-              </Link>
-            </Button>
+            {/* Try (/try, the REPL) and App (/app, the live GUI) are both first-class slim-bar
+                destinations now (Option-B), so the utility cluster is just Cmd-K · GitHub · theme. */}
             {/* The Cmd-K affordance — the fast path to every surface now the sidebar is gone. */}
             <CommandPaletteTrigger className="mr-1 hidden lg:inline-flex" />
             <Button variant="ghost" size="icon" asChild>

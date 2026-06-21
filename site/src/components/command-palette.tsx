@@ -78,17 +78,19 @@ export function useCommandPalette() {
 }
 
 // The fixed top-level destinations of the slim top bar that are NOT capability surfaces (so
-// they are not in GROUPS). /try lives in the surface data (the first Query & data surface), so
-// it is not repeated here; /about is folded into Home #how-it-runs (it redirects), so the
-// palette points there. /capabilities is the new gallery; /download + /gui are the discovery
-// gap the maintainer flagged.
+// they are not in GROUPS). Option-B (sq-rclb8): "Try" (the live REPL) lives in the surface data
+// (the first Query & data surface), so it is not repeated here; "App" is the SEPARATE live
+// operational GUI destination (a placeholder today; the GUI track fills it) — it replaces the old
+// "/gui · Try the GUI" entry, which now client-redirects to /app. /about is folded into Home
+// #how-it-runs (it redirects), so the palette points there. /capabilities is the new gallery;
+// /download + /app are the discovery gaps the maintainer flagged.
 const TOP_PAGES: { href: string; title: string; blurb: string }[] = [
   { href: "/", title: "Home", blurb: "Overview — what sparq is, the live REPL, the flagships." },
   { href: "/capabilities", title: "Capabilities", blurb: "Every surface in one gallery, by theme." },
+  { href: "/app", title: "App", blurb: "The live operational GUI (hosted web app coming soon)." },
   { href: "/benchmarks", title: "Benchmarks", blurb: "Per-commit, same-box benchmark dashboard." },
   { href: "/papers", title: "Papers", blurb: "The research papers behind sparq." },
   { href: "/download", title: "Download", blurb: "Desktop GUI + CLI/server binaries (latest release)." },
-  { href: "/gui", title: "Try the GUI", blurb: "The hosted web GUI try-live page (coming soon)." },
   { href: "/#how-it-runs", title: "How it runs", blurb: "The honest \"what runs where\" tier model." },
 ];
 
