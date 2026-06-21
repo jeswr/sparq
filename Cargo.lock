@@ -3481,6 +3481,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-kb"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "oxttl 0.2.3",
+ "sparq-core",
+ "sparq-shacl",
+]
+
+[[package]]
 name = "sparq-mpc"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,83 @@
+//! # sparq-kb — the Project-Knowledge-Graph (PKG) ontology + SHACL guardrails
+//!
+//! [OPUS-4.8] sq-2m6zm.1 (epic sq-2m6zm); design record
+//! `research/dogfooding-sparq-knowledge-graph.md` (PR #1063). 🤖 SPARQ agent —
+//! dogfooding sparq as a project knowledge graph. Written while Fable unavailable;
+//! flag for re-review when Fable returns.
+//!
+//! This crate ships the **data artifacts** of Phase 1 of the PKG dogfooding design:
+//!
+//! - [`PKG_ONTOLOGY`] — the reuse-first PKG vocabulary (Turtle), generalising the
+//!   vendored `zkp-sparql` `sig-impl:Assertion` reified-claim pattern into
+//!   `pkg:Finding` and reusing PROV-O / SKOS / DCAT / FaBiO-FRBR-DC / CiTO /
+//!   schema.org / nanopublications. Only ~4 terms are net-new plus the single
+//!   `pkg:dependsOn owl:inverseOf pkg:blockedBy` pair (there is NO `pkg:blocks`).
+//! - [`PKG_SHAPES`] — the SHACL **write-time guardrails**: every `pkg:Finding` must
+//!   carry a source + a confidence value + an assurance basis + non-filler content,
+//!   and every `pkg:Task` must have a valid status / bounded priority / no stale
+//!   `pkg:blockedBy` edge.
+//! - [`PKG_EXAMPLE`] — a tiny hand-written instance file (valid Findings/Tasks plus
+//!   deliberately invalid ones) used to dogfood the guardrails.
+//! - [`vocab`] — the `pkg:` IRIs as Rust constants, byte-pinned against the Turtle.
+//!
+//! The crate is `publish = false` and pulls in `sparq-shacl` only as a dev-dependency
+//! for the dogfooding validation test, so it does not change any shipped build (the
+//! ontology files are data, not code). The validation helpers below are gated behind
+//! the default-OFF `validate` feature so the lean default build of this crate is a
+//! pure data + constants crate.
+
+pub mod vocab;
+
+/// The PKG ontology (Turtle), `ontology/pkg/pkg.ttl`.
+pub const PKG_ONTOLOGY: &str = include_str!("../ontology/pkg/pkg.ttl");
+
+/// The PKG SHACL guardrail shapes (Turtle), `shapes/pkg.shapes.ttl`.
+pub const PKG_SHAPES: &str = include_str!("../shapes/pkg.shapes.ttl");
+
+/// A tiny hand-written PKG instance file (valid + deliberately-invalid nodes),
+/// `examples/pkg-example.ttl`.
+pub const PKG_EXAMPLE: &str = include_str!("../examples/pkg-example.ttl");
+
+/// Validation helpers over `sparq-shacl`. OPT-IN behind the default-OFF `validate`
+/// cargo feature so the default build of this crate carries no engine/SHACL code.
+#[cfg(feature = "validate")]
+pub mod validate {
+    use oxrdf::Triple;
+    use sparq_core::Graph;
+    use sparq_shacl::{validate, ValidationReport};
+
+    /// Parse one Turtle document into a `Vec<Triple>`, resolving relative IRIs
+    /// against `base`. Errors carry the parser message.
+    pub fn parse_turtle(text: &str, base: &str) -> Result<Vec<Triple>, String> {
+        let parser = oxttl::TurtleParser::new()
+            .with_base_iri(base)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for t in parser.for_slice(text.as_bytes()) {
+            out.push(t.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    /// Build one [`Graph`] from the concatenation of several Turtle documents
+    /// (each parsed independently so prefix scopes do not leak across documents),
+    /// resolving relative IRIs against `base`.
+    pub fn graph_from_turtle_docs(docs: &[&str], base: &str) -> Result<Graph, String> {
+        let mut triples = Vec::new();
+        for d in docs {
+            triples.extend(parse_turtle(d, base)?);
+        }
+        Ok(sparq_shacl::graph_from_triples(triples))
+    }
+
+    /// Load the PKG ontology + a set of instance documents into one data graph and
+    /// validate it against the PKG SHACL shapes. Returns the [`ValidationReport`].
+    pub fn validate_instances(instance_docs: &[&str]) -> Result<ValidationReport, String> {
+        let base = "https://sparq.dev/ns/pkg/example#";
+        let mut docs = vec![super::PKG_ONTOLOGY];
+        docs.extend_from_slice(instance_docs);
+        let data = graph_from_turtle_docs(&docs, base)?;
+        let shapes = graph_from_turtle_docs(&[super::PKG_SHAPES], base)?;
+        Ok(validate(&data, &shapes))
+    }
+}
