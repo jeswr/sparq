@@ -398,6 +398,11 @@ curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/back
 # Restore atomically installs a store rehydrated from that artifact (in-memory server only; fail-closed):
 curl -X POST -H 'Authorization: Bearer <TOKEN>' --data-binary @snapshot.spqb http://127.0.0.1:3030/admin/restore
 # Restore on start (bootstrap a fresh node / PITR base):  sparq-server --restore snapshot.spqb
+# Incremental change-stream / point-in-time recovery (PITR): a DELTA between a retained
+# generation N and the current generation (replayed forward onto the matching base):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' 'http://127.0.0.1:3030/admin/backup/delta?from=0' -o d0.spqd
+# Recover to the chosen point: restore the base, then replay the delta chain (oldest first):
+sparq-server --restore snapshot.spqb --restore-delta d0.spqd --restore-delta d1.spqd
 ```
 
 `/metrics` is hand-rolled Prometheus text exposition (no metrics dependency); the
@@ -452,6 +457,24 @@ stage-2 + the base of point-in-time recovery; refused together with `--persist`)
 **at-rest encryption of the artifact is out of scope** — the integrity digest detects accidental
 corruption, not tampering, and is not a confidentiality or authenticity guarantee; protect the
 artifact at the storage tier.
+
+**`POST /admin/backup/delta?from=N` + `--restore-delta` — incremental change-stream / PITR
+(same `backup` feature; `sq-bu1a`).** The Option-A backup above is the BASE half of a
+point-in-time-recovery story; this is the incremental companion. **`/admin/backup/delta`** streams
+a single self-describing **delta artifact** (distinct magic `SPARQ-BACKUP-DELTA`) keyed off the
+generation/writer-seq: a header recording the `from-generation` N → the current `to-generation`
+plus the per-pod epoch vector at `to`, then the **quad-set change** (inserted + deleted quads, each
+as N-Quads) between those two generations. `from` must still be **retained** by the ring — without
+the `time-travel` feature only the last few generations (the concurrency window) are retained, so a
+`from` older than that is `410 Gone` (widen retention with `time-travel`); a missing/invalid `from`
+is `400`. To recover to a chosen point, restore the base then **replay the delta chain forward**:
+`sparq-server --restore base.spqb --restore-delta d0.spqd --restore-delta d1.spqd …` (oldest
+first; or `SPARQ_RESTORE_DELTA`). **Fail-closed:** a corrupt / version-mismatched / out-of-order /
+gapped delta aborts the whole recovery and the live store is untouched (import + full replay happen
+before any swap). **Honest scope:** deltas are **same-lineage** only — the chain must be the writer
+history of that base (blank-node labels are stable within a lineage, which is what the quad-set diff
+relies on); cross-lineage diffing is unsupported. At-rest encryption is out of scope, same as the
+base.
 
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
@@ -1112,6 +1135,16 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   pair — the `ArcSwap<ServingCore>` that backs the atomic online restore is `backup`-gated, so the
   DEFAULT read path is byte-identical to before #941 (no extra atomic load when `backup` is OFF;
   sq-0g6g resolved in the lean direction). (sq-o5bi.)
+- **Incremental change-stream / PITR — same `backup` feature (sq-bu1a).** The base backup above
+  is the BASE half of point-in-time recovery; `/admin/backup/delta?from=N` streams an incremental
+  **delta artifact** (distinct `SPARQ-BACKUP-DELTA` kind) — the quad-set change between a *retained*
+  generation N and the current one, keyed off the generation/writer-seq range + the epoch vector at
+  `to`. Recover to a chosen point by restoring the base then replaying the chain forward:
+  `--restore base --restore-delta d0 --restore-delta d1 …` (oldest first; or `SPARQ_RESTORE_DELTA`).
+  **Fail-closed** on a corrupt / out-of-order / gapped chain (import + full replay before any swap);
+  `from` not retained is `410` (widen retention with `time-travel`). **Same-lineage only** — the
+  chain must be the writer history of that base (the diff relies on lineage-stable blank-node
+  labels). At-rest encryption out of scope, same as the base.
 - **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
   (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.
 - **Error bodies.** Every error is structured JSON `{"error": "..."}` with

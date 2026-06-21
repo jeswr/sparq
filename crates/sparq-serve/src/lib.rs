@@ -15,6 +15,14 @@ mod applier;
 /// for the Option-A artifact format and the at-rest-encryption out-of-scope boundary.
 #[cfg(feature = "backup")]
 pub mod backup;
+/// [OPUS-4.8] (sq-bu1a) The INCREMENTAL DELTA-STREAM / point-in-time-recovery companion to the
+/// Option-A base backup ([`backup`]): export the change between two same-lineage generations as a
+/// self-describing delta artifact keyed off generation/writer-seq, and replay an ordered chain of
+/// deltas forward onto a restored base to reach a chosen recovery point (fail-closed on a corrupt
+/// or discontinuous stream). Compiled only behind the opt-in `backup` feature (default OFF). See
+/// the module docs for the delta artifact format and the same-lineage boundary.
+#[cfg(feature = "backup")]
+pub mod backup_delta;
 mod epoch;
 mod footprint;
 mod ring;
@@ -43,6 +51,15 @@ mod canon;
 
 #[cfg(feature = "backup")]
 pub use backup::{export as backup_export, import as backup_import, BackupError, BackupMeta};
+// [OPUS-4.8] (sq-bu1a) The change-stream / PITR delta companion (feature `backup`):
+// `export_delta` between two same-lineage generations, `import_delta` to decode one (fail-closed),
+// and `replay` to apply an ordered chain forward onto a restored base. `DELTA_MAGIC` is the
+// artifact's distinguishing magic line; `Delta`/`DeltaMeta` are the decoded forms.
+#[cfg(feature = "backup")]
+pub use backup_delta::{
+    export_delta as backup_export_delta, import_delta as backup_import_delta,
+    replay as backup_replay, Delta, DeltaMeta, DELTA_MAGIC,
+};
 pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use footprint::{Footprint, TargetGraph};

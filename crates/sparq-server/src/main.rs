@@ -189,6 +189,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the CLI only ever widens what env granted (never silently narrows it).
     let mut service_allow_cli: Vec<String> = Vec::new();
     let mut service_allow_file: Option<String> = None;
+    // [OPUS-4.8] sq-bu1a: track whether --restore-delta was given on the CLI so the FIRST flag
+    // OVERRIDES any SPARQ_RESTORE_DELTA env list (matching --restore's flag-overrides-env contract)
+    // rather than appending to it.
+    #[cfg(feature = "backup")]
+    let mut restore_delta_from_cli = false;
     // [OPUS-4.8] sq-o7o0: collect first-party CORS origin allowlist entries from the CLI;
     // UNIONed with the SPARQ_CORS_ALLOW_ORIGIN env baseline + an optional
     // --cors-allow-origin-file, after the arg loop (additive — CLI only widens).
@@ -336,6 +341,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err("--restore must not be empty".into());
                 }
                 config.restore = Some(std::path::PathBuf::from(file));
+            }
+            // [OPUS-4.8] sq-bu1a: POINT-IN-TIME-RECOVERY — replay an incremental DELTA artifact
+            // forward onto the --restore base. Repeatable (oldest first); each must be a
+            // sparq delta artifact. Requires --restore. Fail-closed: a corrupt / out-of-order /
+            // gapped delta aborts startup. Off by default (env SPARQ_RESTORE_DELTA=<files>).
+            #[cfg(feature = "backup")]
+            "--restore-delta" => {
+                let file = args.next().ok_or("--restore-delta requires an artifact file path")?;
+                if file.is_empty() {
+                    return Err("--restore-delta must not be empty".into());
+                }
+                // First CLI flag clears any env-provided list (flag overrides env).
+                if !restore_delta_from_cli {
+                    config.restore_delta.clear();
+                    restore_delta_from_cli = true;
+                }
+                config.restore_delta.push(std::path::PathBuf::from(file));
             }
             // [OPUS-4.8] sq-o4qf: opt in to binding a non-loopback address. Without this (and
             // without SPARQ_ALLOW_REMOTE), a non-loopback --addr is refused unless the whole
@@ -597,15 +619,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("restoring in-memory store from backup artifact {} ...", file.display());
             let f = std::fs::File::open(file)
                 .map_err(|e| format!("--restore: cannot open {}: {e}", file.display()))?;
-            let (g, meta) = sparq_serve::backup_import(std::io::BufReader::new(f))
+            let (mut g, meta) = sparq_serve::backup_import(std::io::BufReader::new(f))
                 .map_err(|e| format!("--restore: rejected {} ({e})", file.display()))?;
             eprintln!(
                 "restored from artifact taken at generation {} ({} triples)",
                 meta.generation, meta.triples
             );
+            // [OPUS-4.8] sq-bu1a: POINT-IN-TIME RECOVERY — replay the --restore-delta chain forward
+            // onto the base. Fail-closed: a corrupt / out-of-order / gapped delta aborts startup.
+            if !config.restore_delta.is_empty() {
+                let mut decoded = Vec::with_capacity(config.restore_delta.len());
+                for d in &config.restore_delta {
+                    let df = std::fs::File::open(d)
+                        .map_err(|e| format!("--restore-delta: cannot open {}: {e}", d.display()))?;
+                    let delta = sparq_serve::backup_import_delta(std::io::BufReader::new(df))
+                        .map_err(|e| format!("--restore-delta: rejected {} ({e})", d.display()))?;
+                    decoded.push(delta);
+                }
+                let recovered = sparq_serve::backup_replay(&mut g, &meta, decoded.iter())
+                    .map_err(|e| format!("--restore-delta: replay failed ({e})"))?;
+                eprintln!(
+                    "replayed {} delta artifact(s) — recovered to generation {} ({} triples)",
+                    config.restore_delta.len(),
+                    recovered.generation,
+                    recovered.triples
+                );
+            }
             g
         }
-        None => graph,
+        None => {
+            // [OPUS-4.8] sq-bu1a: --restore-delta is meaningless without a --restore base; refuse
+            // it loudly rather than silently ignoring an operator's PITR intent.
+            if !config.restore_delta.is_empty() {
+                return Err("--restore-delta requires --restore (a base artifact to replay onto)".into());
+            }
+            graph
+        }
     };
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
@@ -668,11 +717,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // [OPUS-4.8] sq-o5bi: surface the online backup/restore posture at startup.
     #[cfg(feature = "backup")]
     eprintln!(
-        "backup/restore: ON (admin routes POST /admin/backup + /admin/restore, write-gated; \
-         online snapshot, no stop-the-world){}",
+        "backup/restore: ON (admin routes POST /admin/backup + /admin/backup/delta + \
+         /admin/restore, write-gated; online snapshot, no stop-the-world){}{}",
         match &config.restore {
             Some(f) => format!(" — restored on start from {}", f.display()),
             None => String::new(),
+        },
+        // [OPUS-4.8] sq-bu1a: surface a replayed PITR delta chain in the posture line.
+        if config.restore_delta.is_empty() {
+            String::new()
+        } else {
+            format!(" + {} delta(s) replayed (PITR)", config.restore_delta.len())
         }
     );
     // [OPUS-4.8] sq-4w18: surface the SERVICE egress posture at startup so an operator

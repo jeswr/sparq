@@ -531,6 +531,18 @@ pub struct ServerConfig {
     /// Set by the binary's `--restore <FILE>` flag / `SPARQ_RESTORE` env.
     #[cfg(feature = "backup")]
     pub restore: Option<std::path::PathBuf>,
+    /// [OPUS-4.8] (sq-bu1a) POINT-IN-TIME-RECOVERY delta chain replayed forward onto the
+    /// `restore` base on start. When non-empty (and `restore` is `Some`), the binary imports the
+    /// base, then replays these incremental delta artifacts in order BEFORE binding, so the
+    /// in-memory store starts at the chain's last `to-generation` — a chosen recovery point.
+    /// Fail-closed: a corrupt / version-mismatched / out-of-order / gapped delta aborts startup
+    /// with a clean error (the same discipline as the base restore). Each path is one
+    /// `sparq_serve::backup_export_delta` output, oldest first. Empty (the default) = restore the
+    /// base only. Ignored unless `restore` is also set. This field exists only with the `backup`
+    /// cargo feature. Set by the binary's repeatable `--restore-delta <FILE>` flag /
+    /// `SPARQ_RESTORE_DELTA` env (a path list).
+    #[cfg(feature = "backup")]
+    pub restore_delta: Vec<std::path::PathBuf>,
     /// [OPUS-4.8] (sq-d3d8, epic sq-3183) OPT-IN federation discovery descriptors. When
     /// `true`, the server serves a W3C VoID dataset description at `GET /.well-known/void`
     /// and a SPARQL 1.1 Service Description for a `GET /sparql` with no `query` parameter
@@ -685,6 +697,9 @@ impl Default for ServerConfig {
             // [OPUS-4.8] sq-o5bi: no restore-on-start by default (seed from data file / empty).
             #[cfg(feature = "backup")]
             restore: None,
+            // [OPUS-4.8] sq-bu1a: no PITR delta chain by default (base-only restore).
+            #[cfg(feature = "backup")]
+            restore_delta: Vec::new(),
             // [OPUS-4.8] sq-d3d8: safe default — federation discovery descriptors OFF even
             // when the feature is compiled in (the operator opts in deliberately).
             #[cfg(feature = "federation-descriptors")]
@@ -917,6 +932,15 @@ impl ServerConfig {
         #[cfg(feature = "backup")]
         if let Ok(v) = std::env::var("SPARQ_RESTORE") {
             cfg.restore = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+        }
+        // [OPUS-4.8] sq-bu1a: SPARQ_RESTORE_DELTA is a platform-path-separator-delimited list of
+        // incremental delta artifacts replayed forward onto the --restore base (PITR), oldest
+        // first. Repeated --restore-delta flags override it. Only present with the `backup` feature.
+        #[cfg(feature = "backup")]
+        if let Ok(v) = std::env::var("SPARQ_RESTORE_DELTA") {
+            cfg.restore_delta = std::env::split_paths(&v)
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect();
         }
         // [OPUS-4.8] sq-d3d8: SPARQ_FEDERATION_DESCRIPTORS truthy ("1"/"true"/"yes"/"on")
         // serves the VoID + Service-Description discovery endpoints. Off by default. Only
@@ -2199,6 +2223,52 @@ impl AppState {
     /// dataset, then spawns a writer thread): call it on the blocking pool.
     #[cfg(feature = "backup")]
     pub fn restore_from<R: std::io::Read>(&self, input: R) -> Result<u64, String> {
+        self.guard_restore_supported()?;
+        // Build the entire new core BEFORE touching the live one — fail-closed.
+        let (graph, meta) = sparq_serve::backup_import(input).map_err(|e| e.to_string())?;
+        self.install_restored_graph(graph);
+        Ok(meta.generation)
+    }
+
+    /// [OPUS-4.8] (sq-bu1a) ONLINE point-in-time RESTORE: rehydrates from a BASE artifact, then
+    /// REPLAYS an ordered chain of incremental DELTA artifacts forward onto it to reach a chosen
+    /// recovery point, and atomically installs the result — the change-stream / PITR companion to
+    /// [`restore_from`](Self::restore_from). `base` is the base artifact; `deltas` is the ordered
+    /// sequence of delta artifact byte-blobs (each [`sparq_serve::backup_export_delta`] output),
+    /// oldest first.
+    ///
+    /// **Fail-closed, same discipline as the base restore:** the base is imported, every delta is
+    /// decoded and the whole chain is replayed onto a private graph BEFORE any swap. A corrupt /
+    /// version-mismatched / out-of-order / gapped artifact aborts the whole operation (`Err`) and
+    /// the LIVE store is left untouched — there is no partial install. The chain must be
+    /// same-lineage with the base (see `sparq_serve::backup_delta` for that boundary). Returns the
+    /// recovered SOURCE generation/writer-seq (the last delta's `to`, or the base's generation for
+    /// an empty chain) for operator correlation. In-memory only (a `--persist` server is refused),
+    /// blocking: call on the blocking pool.
+    #[cfg(feature = "backup")]
+    pub fn restore_from_with_deltas(
+        &self,
+        base: &[u8],
+        deltas: &[Vec<u8>],
+    ) -> Result<u64, String> {
+        self.guard_restore_supported()?;
+        // Import + replay onto a PRIVATE graph first — fail-closed before any swap.
+        let (mut graph, base_meta) = sparq_serve::backup_import(base).map_err(|e| e.to_string())?;
+        let decoded: Vec<sparq_serve::Delta> = deltas
+            .iter()
+            .map(|d| sparq_serve::backup_import_delta(&d[..]))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        let recovered = sparq_serve::backup_replay(&mut graph, &base_meta, decoded.iter())
+            .map_err(|e| e.to_string())?;
+        self.install_restored_graph(graph);
+        Ok(recovered.generation)
+    }
+
+    /// [OPUS-4.8] (sq-bu1a) Shared restore precondition: in-memory-only in v1 (a `--persist`
+    /// durable directory needs its own crash-safe swap, a recorded follow-up).
+    #[cfg(feature = "backup")]
+    fn guard_restore_supported(&self) -> Result<(), String> {
         if self.config.persist_dir.is_some() {
             return Err(
                 "restore is not supported on a --persist (durable) server in v1; \
@@ -2206,8 +2276,16 @@ impl AppState {
                     .to_string(),
             );
         }
-        // Build the entire new core BEFORE touching the live one — fail-closed.
-        let (graph, meta) = sparq_serve::backup_import(input).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-bu1a) Shared restore install: builds a fresh ring+writer around the
+    /// rehydrated `graph` and atomically swaps it in. Readers in flight keep serving from the OLD
+    /// core (its `Arc` survives until they release their pin); every read/update after the swap
+    /// loads the new core. The restored ring restarts at generation 0; the recorded source
+    /// generation is returned by the callers for operator correlation.
+    #[cfg(feature = "backup")]
+    fn install_restored_graph(&self, graph: Graph) {
         let ring_config = build_ring_config(&self.config);
         let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
         let applier = ServerApplier::new(self.config.clone());
@@ -2215,12 +2293,45 @@ impl AppState {
         // Atomic swap: subsequent loads see the new ring+writer; the old core's writer thread
         // joins once its last in-flight reader/Arc drops (Writer's Drop drains + joins).
         self.core.store(Arc::new(ServingCore { ring, writer }));
-        // Advance the commit watch so active subscriptions re-evaluate against the restored
-        // store. The restored ring restarts at generation 0; the recorded source generation
-        // (the writer seq the artifact was taken at) is returned for operator correlation.
+        // Advance the commit watch so active subscriptions re-evaluate against the restored store.
         let restored_gen = self.current().number();
         self.commits.send_replace(restored_gen);
-        Ok(meta.generation)
+    }
+
+    /// [OPUS-4.8] (sq-bu1a) Exports an INCREMENTAL DELTA between a RETAINED generation `from` and
+    /// the CURRENT generation to `out` (sparq-serve's self-describing delta format) — the
+    /// change-stream / PITR producer. Pins both generations lock-free (so it runs **while
+    /// serving**) and serialises the quad-set difference off those immutable `Arc`s.
+    ///
+    /// `from` must still be RETAINED by the ring: with `time-travel` OFF only the last K
+    /// generations are retained (the concurrency window), so practical incremental backup wants
+    /// the `time-travel` feature to widen the retention window. `Ok(None)` means `from` is no
+    /// longer retained (aged out, or never published) — the caller maps that to a 410/404, exactly
+    /// like `?generation=N`. `Ok(Some(meta))` is the exported delta's metadata. CPU/IO-bound
+    /// (serialises both generations): call on the blocking pool.
+    #[cfg(feature = "backup")]
+    pub fn export_delta_from<W: std::io::Write>(
+        &self,
+        from: u64,
+        out: &mut W,
+    ) -> Result<Option<sparq_serve::DeltaMeta>, String> {
+        let to = self.pin_for_backup();
+        // The current generation is always retained; `from` must be too. `ring().at` needs the
+        // retention window — without `time-travel` only the K-generation concurrency floor is kept.
+        let from_gen = match self.ring().at(from) {
+            Some(g) => g,
+            None => return Ok(None),
+        };
+        if from >= to.number() {
+            return Err(format!(
+                "delta `from` generation {} must be earlier than the current generation {}",
+                from,
+                to.number()
+            ));
+        }
+        sparq_serve::backup_export_delta(&from_gen, &to, out)
+            .map(Some)
+            .map_err(|e| e.to_string())
     }
 
     /// A receiver of the committed generation number for a subscription connection (T23).
@@ -2283,7 +2394,11 @@ pub fn router(state: AppState) -> Router {
     #[cfg(feature = "backup")]
     let routes = routes
         .route("/admin/backup", post(admin_backup))
-        .route("/admin/restore", post(admin_restore));
+        .route("/admin/restore", post(admin_restore))
+        // [OPUS-4.8] sq-bu1a: the INCREMENTAL change-stream / PITR producer. `?from=N` streams the
+        // delta between RETAINED generation N and the current generation; restore-forward replay is
+        // driven by the binary's `--restore` + `--restore-delta` (see main.rs), not a route.
+        .route("/admin/backup/delta", post(admin_backup_delta));
     // [OPUS-4.8] sq-d3d8 (epic sq-3183): OPT-IN federation discovery — the VoID dataset
     // description at /.well-known/void. Compiled only with the `federation-descriptors`
     // feature; even then the handler refuses (404) unless the config flag is set. The SD is
@@ -4035,6 +4150,86 @@ async fn admin_restore(
             &e,
         ),
         Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "restore worker panicked"),
+    }
+}
+
+/// [OPUS-4.8] (sq-bu1a) `POST /admin/backup/delta?from=N` — the INCREMENTAL change-stream / PITR
+/// producer. Streams a single self-describing DELTA artifact (sparq-serve's delta format: a header
+/// keying the `from-generation` N → the current `to-generation`, plus the per-pod epoch vector at
+/// `to` and the inserted/deleted quad bodies as N-Quads) as `application/octet-stream`. Replayed
+/// forward onto the matching base artifact, the delta advances a restore to a later point in the
+/// writer history — point-in-time recovery.
+///
+/// - **Online — no stop-the-world.** Both generations are pinned lock-free and the diff is
+///   serialised off those immutable `Arc`s on the blocking pool.
+/// - **`from` must be a RETAINED generation.** Without the `time-travel` feature only the last few
+///   generations (the concurrency window) are retained, so a `from` older than that yields 410 Gone
+///   (aged out) — exactly like `?generation=N` on `/sparql`. The `time-travel` feature widens the
+///   retention window so further-back deltas are available.
+/// - **Gated** behind the WRITE admin token (it reads the whole dataset); POST-only.
+///
+/// At-rest ENCRYPTION of the artifact is a separate concern, out of scope (same as the base).
+#[cfg(feature = "backup")]
+async fn admin_backup_delta(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
+        return resp;
+    }
+    let from = match params.get("from").map(|s| s.trim().parse::<u64>()) {
+        Some(Ok(n)) => n,
+        Some(Err(_)) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "delta backup requires a numeric `from` generation",
+            )
+        }
+        None => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "delta backup requires a `from` generation query parameter (?from=N)",
+            )
+        }
+    };
+    let st = state.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let mut buf = Vec::new();
+        st.export_delta_from(from, &mut buf).map(|meta| (meta, buf))
+    });
+    match task.await {
+        // `from` is no longer retained (aged out / never published): 410 Gone, mirroring time-travel.
+        Ok(Ok((None, _))) => json_error(
+            StatusCode::GONE,
+            "the `from` generation is no longer retained (aged out of the retention window); \
+             enable the time-travel feature to widen retention",
+        ),
+        Ok(Ok((Some(meta), bytes))) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, bytes.len())
+            // [OPUS-4.8] positional format args (CodeQL rust/unused-variable false-positive).
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"sparq-delta-{}-{}.spqd\"",
+                    meta.from_generation, meta.to_generation
+                ),
+            )
+            .body(axum::body::Body::from(bytes))
+            .unwrap(),
+        // A range/serialisation error (e.g. `from` >= current): the store is untouched (read-only).
+        Ok(Err(e)) => sanitized_error(
+            StatusCode::BAD_REQUEST,
+            "backup-delta",
+            "delta backup rejected",
+            &e,
+        ),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backup-delta worker panicked",
+        ),
     }
 }
 
