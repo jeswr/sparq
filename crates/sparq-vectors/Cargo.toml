@@ -51,6 +51,16 @@ structure = ["dep:sparq-reason", "dep:sparq-introspect"]
 # carry ZERO trainer/eval code and gain no new deps. It TRAINS a research-grade model only to
 # MEASURE the priors — it makes no accuracy claim and serves no exact answer.
 kge = ["structure"]
+# [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §2 + §7):
+# P2 — the SHACL/OWL PRIOR EXTRACTOR (`shacl_priors.rs`). Reads enum (`sh:in`) / datatype
+# (`sh:datatype`) / cardinality (`sh:min,maxCount`, `owl:FunctionalProperty`) priors out of a parsed
+# `sparq-shacl` shapes model (read-only — no SHACL changes) into the codebook + pooling layout the
+# structure-aware encoders consume. OPT-IN and OFF by default; it IMPLIES `structure` and is the ONLY
+# feature that pulls `sparq-shacl` (and, transitively, the engine on native) into this crate's graph,
+# so neither the default build nor the lean `structure` feature gains a SHACL/engine dependency. The
+# enum CODEBOOK encoder and the QUDT UNIT normaliser themselves ship under `structure` (pure, no
+# SHACL dep); only the *reader* that mines them from shapes needs sparq-shacl.
+structure-shacl = ["structure", "dep:sparq-shacl"]
 # [OPUS-4.8] sq-1wc1: predicate-constrained (filtered) ANN — the RDF-native vector
 # differentiator. A SPARQL BGP carves out a candidate dict-id set (the "visit mask") and the
 # nearest-neighbour search returns only neighbours inside it. OPT-IN and OFF by default; it is a
@@ -140,6 +150,11 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # mines declared + observed domain/range. Neither pulls the engine.
 sparq-reason = { path = "../sparq-reason", version = "0.1.0", optional = true }
 sparq-introspect = { path = "../sparq-introspect", version = "0.1.0", optional = true }
+# [OPUS-4.8] sq-0wo9e.3: the P2 SHACL/OWL prior extractor reads a parsed shapes model. OPTIONAL and
+# ONLY pulled in by `structure-shacl`, so the default build (and the lean `structure` feature) never
+# compile it — `sparq-vectors` stays free of any SHACL/engine dependency unless this reader is opted
+# in. sparq-shacl is itself an opt-in crate that nothing in the workspace depends on by default.
+sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
 
 # [OPUS-4.8] sq-88c6: DEV-only. The `hybrid_search` example/tests fuse this crate's ANN
 # (`VectorIndex::nearest_term`) with `sparq-sim`'s structural similarity

@@ -119,6 +119,14 @@ while (opened.length < MAX_BEADS && dry < 2) {
     'Read the launchable-bead frontier: `export PATH=$PATH:/home/ubuntu/.local/bin && cd /home/ubuntu/sparq && bash scripts/push-frontier.sh` (READ-ONLY; do NOT git-checkout). ' +
     'Each line is `bead-id  surface  title`. Return up to 6 DISPATCHABLE ready beads as {beads:[{id,surface,title}]}. ' +
     'EXCLUDE: epics; anything needs-user / requiring a maintainer decision; in-progress; and these already-handled ids: ' + JSON.stringify([...seen]) + '. ' +
+    // [OPUS-4.8] sq-7mwun: belt-and-suspenders open-PR exclusion. push-frontier.sh already
+    // subtracts in-flight beads, but it matches a bead id as a SUBSTRING of an open-PR
+    // branch/title, which over/under-matches dotted CHILD ids (sq-ixc3.11 vs sq-ixc3.12) and
+    // misses worktree-named branches (worktree-wf_...) whose PR title omits the exact id token.
+    // Those leaks let already-in-flight beads (and already-merged-but-bd-still-open ones) get
+    // re-picked + re-skipped every wave, wasting agent slots. So the frontier agent ALSO does an
+    // explicit, EXACT per-candidate open-PR check before returning each bead.
+    'For EACH candidate bead the frontier script emitted, run `gh pr list --search "<bead-id>" --state open --json number,title,headRefName` and DROP the bead if any returned PR matches it (its EXACT id token appears in a PR title or head-branch name) — that work is already in flight, so re-dispatching it would re-implement in-flight work. Only return beads with NO matching open PR. ' +
     (ONLY ? 'RESTRICT to only these bead ids if present on the frontier: ' + JSON.stringify(ONLY) + '. ' : '') +
     'Prefer well-scoped feature/task/bug beads an implementation agent can finish autonomously. If the frontier has no dispatchable beads, return {beads:[]}.',
     { label: 'frontier', phase: 'Frontier', schema: FRONTIER_SCHEMA, agentType: 'general-purpose' }

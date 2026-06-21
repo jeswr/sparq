@@ -55,12 +55,15 @@
 //! - **No ANN re-ranking.** This module *projects* an already-identified node into a modality. The
 //!   "structure-aware ANN proposes candidates the exact engine re-validates" loop is the existing
 //!   `filtered-ann` / `vec-predicate` path; P4 is the **projection** half, deliberately decoupled.
-//! - **Full QUDT unit normalisation is a follow-up.** The typed-value / NL paths render a
-//!   unit-typed quantity *as declared* (value + unit label), recognising the QUDT
-//!   `qudt:numericValue` + `qudt:unit` shape, but do **not** convert between units (e.g. miles→km).
-//!   Cross-unit normalisation is the P2 SHACL/QUDT slice (sq-0wo9e.3) and is tracked as a follow-up
-//!   bead — until it lands, two quantities in different units are rendered in their own units, not
-//!   reconciled.
+//! - **This module renders quantities AS DECLARED; cross-unit normalisation is wired separately.**
+//!   The typed-value / NL paths recognise the QUDT `qudt:numericValue` + `qudt:unit` shape and
+//!   render the magnitude *as declared* (value + unit label), deliberately **not** converting
+//!   between units (e.g. miles→km) — a grounding object stays faithful to the underlying triple.
+//!   The P2 SHACL/QUDT slice (sq-0wo9e.3) has since landed: [`crate::units::normalise`] now
+//!   converts `(value, unit_iri)` to a canonical SI value + [`crate::units::QuantityKind`] for the
+//!   *encoder* layout. Threading that converter into the grounding *render* path (so a consumer can
+//!   opt into reconciled units, while the default stays as-declared) is the tracked follow-up
+//!   **sq-t80n4** — until then two quantities in different units are rendered in their own units.
 
 use crate::encode::{numeric_value, route, temporal_value, Encoder};
 use crate::store::VectorStore;
@@ -141,7 +144,8 @@ pub enum TypedValue {
     /// A numeric literal's value (any `xsd` numeric subtype), with the datatype IRI it carried.
     Number { value: f64, datatype: String },
     /// A unit-typed quantity: a magnitude plus the unit IRI it was declared with. **Rendered as
-    /// declared — NOT converted** (cross-unit normalisation is the tracked QUDT follow-up).
+    /// declared — NOT converted** (cross-unit normalisation via the landed [`crate::units::normalise`]
+    /// is the tracked render-path follow-up sq-t80n4).
     Quantity { value: f64, unit: String },
     /// An enum member — an IRI object rendered by its own label (the closed-world enum slot). The
     /// `member` is the IRI; `label` its rendered name when one was found.
@@ -201,8 +205,8 @@ pub struct GroundingConfig {
     /// unit-normalised quantities and enum labels"). The base verbaliser leaves raw numbers OUT of
     /// the embedded text on purpose; this flag is for an LLM-facing NL grounding where a typed slot
     /// IS the useful content, distinct from the text that gets embedded. **Quantities are rendered
-    /// as declared, NOT unit-converted** (the QUDT normalisation table is a follow-up). Default
-    /// `false` (the base passage only).
+    /// as declared, NOT unit-converted** (the landed QUDT normalisation table is wired in via the
+    /// render-path follow-up sq-t80n4). Default `false` (the base passage only).
     pub render_typed_values: bool,
     /// For [`Modality::TypedSubVector`], which encoder families to keep. Empty = keep all blocks.
     /// Default empty (keep all).
@@ -591,9 +595,9 @@ fn literal_typed_value(graph: &Graph, o: Id) -> Option<TypedValue> {
 
 /// Recognise a directly-attached **QUDT quantity value**: `o` is a blank/IRI node carrying a
 /// magnitude (`qudt:numericValue` or `qudt:value`) and a `qudt:unit`. Returns the
-/// [`TypedValue::Quantity`] **as declared** — the value is not converted between units (the
-/// cross-unit QUDT normalisation table is the tracked follow-up). `None` when `o` is not such a
-/// node.
+/// [`TypedValue::Quantity`] **as declared** — the value is not converted between units. The landed
+/// P2 `units::normalise` could canonicalise it; wiring that into this render path is the tracked
+/// follow-up sq-t80n4. `None` when `o` is not such a node.
 fn quantity_value(graph: &Graph, o: Id) -> Option<TypedValue> {
     if dict::is_inline(o) {
         return None;

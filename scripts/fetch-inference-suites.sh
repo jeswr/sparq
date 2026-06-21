@@ -19,21 +19,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# [OPUS-4.8] Retry a flaky network command (git clone/fetch) a few times with a
-# short backoff. GitHub and the Internet Archive both reset CI transfers
-# occasionally; one blip should not red-gate every engine PR (sq-y5dz).
-retry() {
-    local n=0 max=5
-    until "$@"; do
-        n=$((n + 1))
-        if [ "$n" -ge "$max" ]; then
-            echo "ERROR: '$*' failed after $max attempts." >&2
-            return 1
-        fi
-        echo "  attempt $n/$max failed; retrying in 5s…" >&2
-        sleep 5
-    done
-}
+# [OPUS-4.8] sq-nj0pd: `retry` + the pinned-clone idiom now live in the shared
+# lib so every conformance suite-fetch retries identically (sq-y5dz seeded this
+# resilience here; centralising it also covers the delegated fetch-conformance.sh
+# in step 1 below — the w3c/rdf-tests clone that was the remaining un-retried
+# network op in the inference lane). GitHub and the Internet Archive both reset CI
+# transfers occasionally; one blip should not red-gate every engine PR.
+# shellcheck source=scripts/lib/fetch-retry.sh
+. "$ROOT/scripts/lib/fetch-retry.sh"
 
 # --- 1. w3c/rdf-tests (shared pin with the SPARQL conformance harness) -------
 "$ROOT/scripts/fetch-conformance.sh"
@@ -43,24 +36,7 @@ retry() {
 N3_PIN="23ccf3d56b25cb60a68878a04aae0d52493080f0"
 N3_DEST="$ROOT/tests/w3c/n3"
 
-if [ -d "$N3_DEST/.git" ]; then
-    HAVE="$(git -C "$N3_DEST" rev-parse HEAD)"
-    if [ "$HAVE" != "$N3_PIN" ]; then
-        echo "w3c/N3 present at $HAVE, re-pinning to $N3_PIN…"
-        retry git -C "$N3_DEST" fetch --depth 1 origin "$N3_PIN"
-        git -C "$N3_DEST" checkout --detach "$N3_PIN"
-    else
-        echo "w3c/N3 already at pinned commit $N3_PIN — nothing to do."
-    fi
-else
-    mkdir -p "$(dirname "$N3_DEST")"
-    echo "Cloning w3c/N3 (shallow) into tests/w3c/n3…"
-    retry git clone --depth 1 https://github.com/w3c/N3 "$N3_DEST"
-    if [ "$(git -C "$N3_DEST" rev-parse HEAD)" != "$N3_PIN" ]; then
-        retry git -C "$N3_DEST" fetch --depth 1 origin "$N3_PIN"
-        git -C "$N3_DEST" checkout --detach "$N3_PIN"
-    fi
-fi
+retry_git_clone_pinned "https://github.com/w3c/N3" "$N3_DEST" "$N3_PIN"
 echo "w3c/N3 pinned at $N3_PIN."
 
 # --- 3. OWL 2 test cases (W3C OWL WG export, archived) -------------------------
