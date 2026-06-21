@@ -5,10 +5,12 @@
 // dot inherited from the engine's existing tier taxonomy (site/src/data/surfaces.ts) so a
 // `walkthrough`/`soon` capability is never silently dressed up as `live`.
 //
-// The foundation shell (this PR) ships the Query tool as a working tab and registers the rest
-// as honest STUBS the later phases fill (sq-ixc3.11 turns surfaces into live tools;
-// sq-ixc3.12 the query workbench; sq-ixc3.13 the import drawer). A stub tab states plainly
-// what it will do and its current tier — it does not fabricate a result.
+// The Query (sq-ixc3.9) and SHACL (sq-ixc3.11) tools are working tabs that RUN over the live
+// store with the marketing chrome cut. Every tool whose capability is not genuinely in the
+// GUI's in-tab wasm bundle (`--features shacl,jsonld,serialize-rdf,scs`) stays an honest STUB
+// the later phases fill (sq-ixc3.12 the query workbench multi-view; sq-ixc3.13 the import
+// drawer; sq-zeai the native-only vector/geo wasm spike). A stub tab states plainly what it
+// will do and its current tier — it does not fabricate a result.
 
 import type { LucideIcon } from "lucide-react";
 import {
@@ -80,7 +82,7 @@ export const TOOLS: ToolDef[] = [
     blurb: "Validate the live store against SHACL shapes; W3C report with sh:detail.",
     tier: "live",
     icon: ShieldCheck,
-    built: false,
+    built: true,
   },
   {
     id: "inference",

@@ -1,24 +1,29 @@
 "use client";
 
-// [OPUS-4.8] sq-ixc3.9 — an HONEST tool stub. The foundation shell registers every TOOL but
-// only the Query tool is wired; the rest open a panel that states plainly what the tool WILL do
-// over the live store, its honesty tier, and which bead lands it. It NEVER fabricates a result
-// or dresses a walkthrough/soon capability up as live.
+// [OPUS-4.8] sq-ixc3.9 / sq-ixc3.11 — an HONEST tool stub. The Query + SHACL tools are wired as
+// live verbs over the store; every tool whose capability is NOT genuinely in the GUI's in-tab
+// wasm bundle opens this panel, which states plainly what the tool WILL do over the live store,
+// its honesty tier, and which bead lands it. It NEVER fabricates a result or dresses a
+// walkthrough/soon capability up as live.
 
 import { Badge } from "@/components/ui/badge";
 import { toolById, TIER_META } from "@/data/tools";
 
-/** Which bead lands each tool (so the stub is self-documenting, not a dead placeholder). */
+/**
+ * Which bead lands each remaining stub (so the stub is self-documenting, not a dead
+ * placeholder). The `live-new-wasm` tools (inference/full-text/streaming) need a NEW wasm
+ * bundle the lean GUI engine does not yet carry — that portability spike is sq-zeai's lane; the
+ * ZK/MPC tools need the bb.js / in-tab-sim bundles, also not in this engine.
+ */
 const TOOL_BEAD: Record<string, string> = {
   "graph-view": "sq-lyp8",
-  shacl: "sq-ixc3.11",
-  inference: "sq-ixc3.11",
-  "full-text": "sq-ixc3.11",
+  inference: "sq-zeai",
+  "full-text": "sq-zeai",
   vector: "sq-zeai",
   geosparql: "sq-zeai",
-  streaming: "sq-ixc3.11",
-  zk: "sq-ixc3.11",
-  mpc: "sq-ixc3.11",
+  streaming: "sq-zeai",
+  zk: "sq-99dd",
+  mpc: "sq-99dd",
   server: "sq-2mke",
 };
 
