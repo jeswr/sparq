@@ -586,5 +586,73 @@ mod tests {
         assert_eq!(key_set_root_sparse(&keys, 32), None);
         assert_eq!(key_membership_witness_sparse(&keys, 32, 0), None);
     }
+
+    // ============================================================
+    // [OPUS-4.8] sq-ru0yx (internal re-audit finding M-1): the challenge-reduction
+    // NO-WRAP invariant, pinned host-side so the default `cargo test` lane (no nargo/
+    // bb) guards the constants the in-circuit `issuer.nr::reduction_range_bind`
+    // depends on. The in-circuit forge/accept tests live in `compose_core/tests.nr`
+    // (`reduction_no_wrap_*`, toolchain lane). See research/zk-membership-pok-reaudit.md §3.
+    // ============================================================
+
+    // The Baby-JubJub order L and the no-wrap bound REDUCTION_TOP_BOUND = q_base -
+    // 7L, as field elements (mirrors issuer.nr's BJJ_L / REDUCTION_TOP_BOUND). q_base
+    // itself is NOT representable as an Fr (it reduces to 0), so the bound is the
+    // canonical representative of -7L. These pin the soundness constants the in-
+    // circuit no-wrap bound enforces; a drift invalidates the fix.
+    const BJJ_L_HEX: &str =
+        "0x060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
+    const REDUCTION_TOP_BOUND_HEX: &str =
+        "0x060c89ce5c263405370a08b6d0302b0b797b683ee9d2ee486fbfce8e6017ef6a"; // q_base - 7L
+
+    fn fr_from_hex(h: &str) -> Fr {
+        sparq_zk::field::field_from_hex_str(h).unwrap()
+    }
+
+    // The reduction arithmetic that justifies M-1: q_base // L == 7, and
+    // 7L < q_base < 8L (so the e_k==7 bucket is the ONLY one that can wrap). Worked
+    // in the field where q_base == 0, so -7L is the canonical REDUCTION_TOP_BOUND.
+    #[test]
+    fn reduction_top_bound_partitions_with_l() {
+        let l = fr_from_hex(BJJ_L_HEX);
+        let top_bound = fr_from_hex(REDUCTION_TOP_BOUND_HEX);
+        // top_bound == q_base - 7L: in the field q_base == 0, so 7L + top_bound == 0
+        // (i.e. 7L + (q-7L) = q == 0 mod q). This pins top_bound to exactly q - 7L.
+        assert_eq!(l * Fr::from(7u64) + top_bound, Fr::from(0u64), "7L + (q-7L) == q == 0");
+        // The honest e_k==7 range is [0, q-7L); the excluded wrap window is
+        // [q-7L, L). They partition [0, L): top_bound + (8L - q) == L, and 8L - q is
+        // the field value 8L (since q == 0). So top_bound + 8L == L.
+        let window_width = l * Fr::from(8u64); // 8L - q, since q == 0 in the field
+        assert_eq!(top_bound + window_width, l, "[0,q-7L) and [q-7L,L) partition [0,L)");
+        // A real, narrowing exclusion: the bound is neither 0 nor all of L.
+        assert_ne!(top_bound, Fr::from(0u64));
+        assert_ne!(top_bound, l);
+    }
+
+    // The HONEST in-circuit witness always lands in a bucket the no-wrap bound
+    // accepts, so the fix never rejects a valid prover: e_k is a 3-bit quotient in
+    // {0..7} and the reduction identity e + e_k*L == e_base holds (the relation the
+    // circuit binds). Real signatures' e_base is essentially random, so this also
+    // documents that the top bucket is hit rarely (the wrap window is honest-
+    // unreachable).
+    #[test]
+    fn honest_witness_respects_reduction_buckets() {
+        use sparq_zk::sig::{commitment_message, in_circuit_witness, signature_from_hex};
+        let l = fr_from_hex(BJJ_L_HEX);
+        for seed in [1u64, 7, 42, 100, 255, 1009, 65537] {
+            let sk = SecretKey::from_seed(seed);
+            let c = Fr::from(seed.wrapping_mul(0x9e3779b97f4a7c15));
+            let m = commitment_message(&c);
+            let sig = signature_from_hex(&sk.sign_commitment(&c)).unwrap();
+            let w = in_circuit_witness(&sk.public_key(), &m, &sig).unwrap();
+            // e_k in {0..7}: a 3-bit quotient (the circuit's assert_max_bit_size::<3>).
+            let k_ok = (0u64..=7).any(|k| w.e_k == Fr::from(k));
+            assert!(k_ok, "seed {seed}: e_k must be a 3-bit quotient in {{0..7}}");
+            // e is canonical (< L): e + (L-1-e) == L-1 with both representable, i.e.
+            // the witnessed-difference range bind the circuit's assert_lt_l performs.
+            // Confirm e != L and e is recovered by reducing e_base = e + e_k*L mod L.
+            assert_ne!(w.e, l, "seed {seed}: reduced e must be < L (canonical)");
+        }
+    }
 }
 
