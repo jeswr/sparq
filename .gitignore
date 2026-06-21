@@ -60,3 +60,10 @@ node_modules/
 .beads/*.db-shm
 .beads-credential-key
 .beads/proxieddb/
+
+# [OPUS-4.8] Agent-metrics RUNTIME rows (bead sq-lhwo.1): per-PR/per-task metrics
+# rows carry NON-CANONICAL session-local numbers (and may reference session
+# transcripts), so the live append-only log is git-ignored. The COMMITTED data is the
+# reproducible cross-PR baseline at metrics/baseline.jsonl (GitHub/git/roborev-derived
+# columns only — no session tokens), which is regenerable via capture_baseline.py.
+metrics/runtime/

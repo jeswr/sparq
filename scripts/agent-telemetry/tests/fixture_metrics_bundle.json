@@ -1,0 +1,62 @@
+{
+  "pr": 4242,
+  "bead": "sq-test.1",
+  "arm": "treatment",
+  "agent_type": "sparq-rust-feature",
+  "repo": "example/repo",
+  "github": {
+    "number": 4242,
+    "title": "synthetic fixture PR (no real data)",
+    "headRefName": "feat/synthetic-fixture",
+    "createdAt": "2026-06-20T10:05:00Z",
+    "mergedAt": "2026-06-20T12:00:00Z",
+    "mergeCommit": { "oid": "merge000000000000000000000000000000000000" },
+    "additions": 120,
+    "deletions": 8,
+    "changedFiles": 4,
+    "state": "MERGED",
+    "reviewDecision": "APPROVED",
+    "commits": [
+      { "oid": "commit10000000000000000000000000000000000", "committedDate": "2026-06-20T10:00:00Z" },
+      { "oid": "commit20000000000000000000000000000000000", "committedDate": "2026-06-20T11:30:00Z" }
+    ],
+    "reviews": [
+      { "state": "APPROVED" }
+    ],
+    "statusCheckRollup": [
+      { "name": "test (blocking)", "status": "COMPLETED", "conclusion": "SUCCESS" },
+      { "name": "GUI e2e (Linux, advisory)", "status": "COMPLETED", "conclusion": "FAILURE" }
+    ],
+    "_timeline": [
+      { "event": "committed" },
+      { "event": "head_ref_force_pushed", "created_at": "2026-06-20T11:00:00Z" },
+      { "event": "committed" },
+      { "event": "reviewed" },
+      { "event": "merged" }
+    ]
+  },
+  "roborev": {
+    "roborev_findings": { "high": 0, "med": 1, "low": 2 },
+    "roborev_verdict": "F",
+    "roborev_reviews_found": 1,
+    "roborev_available": true
+  },
+  "bead_info": {
+    "bead": "sq-test.1",
+    "bead_type": "task",
+    "surface": "sparq-engine"
+  },
+  "telemetry": {
+    "rollup": {
+      "input_tokens": 1000,
+      "output_tokens": 300,
+      "cache_read_input_tokens": 5000,
+      "cache_creation_input_tokens": 2000,
+      "cache_hit_ratio": 0.714
+    },
+    "wave_duration_seconds": 95.0,
+    "agent_count": 2,
+    "subagent_count": 1,
+    "session_ids": ["synthetic-session-0001"]
+  }
+}
