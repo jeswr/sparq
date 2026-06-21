@@ -25,11 +25,11 @@ them. It is the companion ontology to the **ISWC 2025** ZKP-SPARQL paper.
   token).
 - **Vendored-from commit SHA:** `0fe80ea7d858de9f02bd29df29f6e50cdada14a0`
   (authored 2026-05-04).
-- **Authorship:** the unpublished prior ontology work of **Jesse Wright** (the
-  sparq maintainer) and the co-authors of the accompanying ISWC 2025 paper,
-  which include **Nigel Shadbolt, Jun Zhao, and Rui Zhao**. See the upstream
-  `LICENSE-DRAFT.md` (copied verbatim alongside this file) and the paper for the
-  full author and acknowledgement set.
+- **Authorship:** the prior ontology work of **Jesse Wright** (the sparq
+  maintainer) and the co-authors of the accompanying ISWC 2025 paper, which
+  include **Nigel Shadbolt, Jun Zhao, and Rui Zhao**. See the paper for the full
+  author and acknowledgement set. (The vendored copy is now MIT-licensed — see
+  *License handling* below.)
 
 ## Why it is here (the maintainer's 2026-06-20 decision)
 
@@ -48,26 +48,38 @@ On **2026-06-20** the maintainer **resolved that question** and directed:
 sparq is a **public** repository, so this content becomes public — that is the
 maintainer's **explicit intent**: the ontology accompanies a published (ISWC
 2025) paper and is ready to be cited. The "do not redistribute / publish / cite"
-language in the vendored `LICENSE-DRAFT.md` reflects the *pre-publication private*
-state of the source repo; it is superseded for this vendored copy by the
-maintainer's authoritative 2026-06-20 publication decision. The maintainer
-(Jesse Wright) is the sole copyright holder and the licensor named in that draft,
-so the decision to publish is itself the grant. The draft is preserved verbatim
-for historical fidelity, not as an active prohibition on this copy.
+language in the source repo's old `LICENSE-DRAFT.md` reflected the
+*pre-publication private* state of that repo; it was **superseded** for this
+vendored copy by the maintainer's authoritative publication decision, and the
+follow-on **2026-06-21 open-licensing decision** (see *License handling*) makes
+that explicit — the draft and its caveat are now **void** for this copy. The
+maintainer (Jesse Wright) is the sole copyright holder and the licensor named in
+that draft, so the decision to publish and to apply MIT is itself the grant.
 
 ## License handling
 
-The upstream license was a **draft** (`LICENSE-DRAFT.md`) — an MIT placeholder
-that was *"pending public release"* and *"not in force"* while the source repo
-was private. Per the maintainer's instruction this vendoring **does NOT
-relicense** the content: the original `LICENSE-DRAFT.md` is copied **verbatim**
-into this directory (including its pending-MIT text and its private-state
-caveats) so the original author intent and licensing trail are preserved intact.
+**Current state (2026-06-21): MIT.** This vendored copy is licensed under the
+**MIT License** — see [`LICENSE`](./LICENSE) in this directory, a **verbatim copy
+of the sparq repository-root `LICENSE`** (MIT, Copyright (c) 2026 Jesse Wright).
+The ontology files in this directory are covered by those MIT terms.
 
-The maintainer's 2026-06-20 decision is the authoritative act that authorises
-this content's publication under sparq's public repository; activating the
-pending MIT terms (or any other relicensing) is the maintainer's prerogative and
-is **not** performed here.
+**The 2026-06-21 open-licensing decision.** On **2026-06-21** the maintainer
+**open-licensed this vendored copy under MIT — the same license as the rest of
+the sparq repository.** This **activates** the MIT terms that the source repo's
+`LICENSE-DRAFT.md` had held *"pending public release"*, and it **supersedes and
+voids** that draft's private-state caveat (its *"do not redistribute / publish /
+cite / rely on"* prohibition). The maintainer (Jesse Wright) is the sole
+copyright holder and the licensor named in that draft, so this decision is itself
+the grant. The pending question the draft tracked is now **resolved: MIT, in
+force.**
+
+**Draft removed.** The source repo's `LICENSE-DRAFT.md` — an MIT *placeholder*
+that was *"pending public release"* and *"not in force"* while that repo was
+private — was carried verbatim into this directory at vendoring time (2026-06-20)
+to preserve the licensing trail. With the 2026-06-21 decision its private-state
+caveat is void, so it has been **deleted** and **replaced** with the real
+in-force MIT `LICENSE` above. This `PROVENANCE.md` retains the full history of the
+draft and the decisions so the licensing chain stays auditable.
 
 ## Namespace resolution (open question — RESOLVED)
 
