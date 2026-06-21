@@ -1,0 +1,87 @@
+@prefix sh:       <http://www.w3.org/ns/shacl#> .
+@prefix sig-impl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix sec-prop: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix prov:     <http://www.w3.org/ns/prov#> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:      <http://www.w3.org/2001/XMLSchema#> .
+
+sig-impl:SignatureImplementationShape
+  a sh:NodeShape ;
+  sh:targetClass sig-impl:SignatureImplementation ;
+
+  sh:property [
+    sh:path rdfs:label ;
+    sh:minCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:message "Every signature implementation must have an English-language rdfs:label."
+  ] ;
+
+  sh:property [
+    sh:path sig-impl:family ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:class sig-impl:Family ;
+    sh:message "Every signature implementation must reference exactly one sig-impl:Family."
+  ] ;
+
+  sh:property [
+    sh:path sig-impl:postQuantum ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:boolean ;
+    sh:message "sig-impl:postQuantum is a required xsd:boolean (treat round-1 as static; PQ migrations are tracked elsewhere)."
+  ] ;
+
+  sh:property [
+    sh:path sig-impl:achieves ;
+    sh:minCount 1 ;
+    sh:nodeKind sh:BlankNodeOrIRI ;
+    sh:class sig-impl:Assertion ;
+    sh:message "Every signature implementation must record at least one sig-impl:achieves Assertion."
+  ] ;
+
+  sh:property [
+    sh:path prov:wasDerivedFrom ;
+    sh:minCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:message "Every signature implementation must cite at least one provenance source."
+  ] .
+
+sig-impl:AssertionShape
+  a sh:NodeShape ;
+  sh:targetClass sig-impl:Assertion ;
+
+  sh:property [
+    sh:path sig-impl:property ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:class sec-prop:SecurityProperty ;
+    sh:message "Every assertion must reference exactly one sec-prop:SecurityProperty."
+  ] ;
+
+  sh:property [
+    sh:path sig-impl:verdict ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:in ( sig-impl:yes sig-impl:no sig-impl:partial ) ;
+    sh:message "verdict must be one of sig-impl:yes / no / partial."
+  ] ;
+
+  sh:property [
+    sh:path sig-impl:justification ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:message "Every assertion must carry a single English-language justification."
+  ] ;
+
+  sh:property [
+    sh:path prov:wasDerivedFrom ;
+    sh:minCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:message "Every assertion must cite at least one provenance source."
+  ] .

@@ -56,6 +56,11 @@
     "**/target",
     "vendor",
     "**/vendor",
-    "zk/xpath/vendor"
+    "zk/xpath/vendor",
+    // Vendored third-party ontologies (sparql-zkp-ontologies, ISWC 2025;
+    // MIT-licensed as of 2026-06-21, see the directory LICENSE + PROVENANCE.md).
+    // Reproduced verbatim and not reformatted; treat the whole vendored tree as
+    // third-party (same rationale as vendor/). [OPUS-4.8]
+    "crates/sparq-trust/ontologies/zkp-sparql"
   ]
 }

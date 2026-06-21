@@ -135,3 +135,52 @@ fn dump_context_flag_missing_value_errors() {
     assert_eq!(code, 2, "--context with no value must exit 2: {err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// [OPUS-4.8] (sq-oy1f.4) DEFAULT-ON JSON-LD round-trip — the load-bearing invariant for making
+/// `jsonld` a default feature of the native CLI: with NO `--features` flag, the binary must both
+/// READ a JSON-LD input document (the `oxjsonld` parser, `sparq-core/jsonld`) and WRITE one back
+/// (the engine's JSON-LD writer, `sparq-engine/serialize-rdf`). This test is gated on the `jsonld`
+/// feature — which is in the CLI default set — so the default `cargo test -p sparq-cli` exercises
+/// the real JSON-LD parse path, while a `--no-default-features --features serialize-rdf` build (no
+/// JSON-LD parser) skips it cleanly. A `dump in.jsonld jsonld jsonld-expanded` is a full
+/// parse→intern→re-serialise round-trip through both ends of the JSON-LD surface.
+#[cfg(feature = "jsonld")]
+#[test]
+fn dump_jsonld_input_roundtrips_default_build() {
+    let dir = scratch("jsonld-input");
+    // An expanded-form JSON-LD input document (one node, two predicates).
+    let jsonld_in = r#"[
+      {
+        "@id": "http://schema.org/alice",
+        "http://schema.org/name": [{"@value": "Alice"}],
+        "http://schema.org/knows": [{"@id": "http://schema.org/bob"}]
+      }
+    ]"#;
+    let data = write(&dir, "g.jsonld", jsonld_in);
+    // Read JSON-LD in (oxjsonld parser), re-emit as expanded JSON-LD (engine writer).
+    let (code, out, err) = run3(&["dump", s(&data), "jsonld", "jsonld-expanded"]);
+    assert_eq!(code, 0, "JSON-LD in -> JSON-LD out must succeed in the default build; stderr: {err}");
+    // The output is a JSON-LD node-object array carrying the parsed triples.
+    assert!(out.trim_start().starts_with('['), "re-serialised as a JSON-LD array: {out}");
+    assert!(out.contains("http://schema.org/alice"), "subject survived the round-trip: {out}");
+    assert!(out.contains("http://schema.org/name"), "name predicate survived: {out}");
+    assert!(out.contains("Alice"), "literal value survived: {out}");
+    assert!(out.contains("http://schema.org/bob"), "object IRI survived: {out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// [OPUS-4.8] (sq-oy1f.4) The default build also accepts the `application/ld+json` media-type token
+/// (and `json-ld`) as an input format alias for the JSON-LD parser — same dispatch as the HTTP
+/// surface. Proves the alias set is wired in the default (no-flag) build.
+#[cfg(feature = "jsonld")]
+#[test]
+fn dump_jsonld_input_media_type_alias_default_build() {
+    let dir = scratch("jsonld-alias");
+    let jsonld_in = r#"{"@id":"http://ex/s","http://ex/p":[{"@value":"v"}]}"#;
+    let data = write(&dir, "g.jsonld", jsonld_in);
+    let (code, out, err) = run3(&["dump", s(&data), "application/ld+json", "ntriples"]);
+    assert_eq!(code, 0, "the `application/ld+json` input alias parses in the default build; stderr: {err}");
+    assert!(out.contains("<http://ex/s>"), "parsed subject present: {out}");
+    assert!(out.contains("<http://ex/p>"), "parsed predicate present: {out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

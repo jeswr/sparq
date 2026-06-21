@@ -21,6 +21,10 @@ extend-exclude = [
   "Cargo.lock",
   "zk/xpath/vendor",
   "*.svg",
+  # Vendored third-party ontologies (sparql-zkp-ontologies, ISWC 2025; MIT-licensed
+  # as of 2026-06-21): reproduced verbatim with British spelling + many author
+  # surnames; treat as vendored. [OPUS-4.8]
+  "crates/sparq-trust/ontologies/zkp-sparql",
 ]
 
 [default]

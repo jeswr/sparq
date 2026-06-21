@@ -36,7 +36,10 @@ use sparq_core::Graph;
 //   "ntriples"|"n-triples"|"nt"|"application/n-triples" | "nquads"|"n-quads"|"nq"|"application/n-quads" |
 //   "trig"|"application/trig". An UNRECOGNISED format string is an `Err` — NOT silently
 //   parsed as Turtle (sq-m2pc). JSON-LD ("jsonld"/"json-ld"/"application/ld+json") needs the
-//   opt-in `jsonld` feature; without it those strings also error rather than mis-parsing.
+//   `jsonld` feature on the `sparq-core` LIBRARY dep (OFF by default — the library stays lean);
+//   without it those strings also error rather than mis-parsing. [OPUS-4.8] sq-oy1f.4: the
+//   `sparq-cli` and `sparq-server` BINARIES enable `jsonld` by DEFAULT (a maintainer-directed
+//   exception), so they read/write JSON-LD out of the box; a library embedder opts in explicitly.
 let ttl = r#"@prefix ex: <http://ex/> .
 ex:alice ex:knows ex:bob ."#;
 let g = Graph::load_str(ttl, "turtle").expect("parse");
@@ -192,11 +195,14 @@ let mutable_copy = master.snapshot().into_graph();  // a snapshot you can then m
 ```
 
 **6. Serialize a graph back out (the RDF writer matrix).** The Turtle / TriG / N-Quads /
-JSON-LD writers live in `sparq-engine` behind the opt-in **`serialize-rdf`** feature (it pulls
+JSON-LD writers live in `sparq-engine` behind the **`serialize-rdf`** feature (it pulls
 in ZERO new dependencies — the default dep graph is byte-for-byte unchanged when off, *and*
-unchanged even when on: the JSON-LD writer emits JSON by hand, no json-ld/serde crate). The
-N-Triples writer (`triples_to_ntriples`) is always on. Enable with
-`sparq-engine = { version = "0.1", features = ["serialize-rdf"] }`.
+unchanged even when on: the JSON-LD writer emits JSON by hand, no json-ld/serde crate). For a
+LIBRARY embedder it is opt-in (the engine library default stays lean): enable with
+`sparq-engine = { version = "0.1", features = ["serialize-rdf"] }`. The `sparq-cli` and
+`sparq-server` BINARIES pull it into their default build via the default-on `jsonld` feature
+([OPUS-4.8] sq-oy1f.4), so `dump …` and the server's `application/ld+json` work out of the box.
+The N-Triples writer (`triples_to_ntriples`) is always on.
 
 ```rust
 use sparq_engine::serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads,
