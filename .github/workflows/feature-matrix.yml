@@ -406,17 +406,41 @@ jobs:
           # `cargo test -p sparq-kb --features validate` runs 3 dogfood_shacl + 2 ingest_shacl
           # (+1 vocab unit) tests, `--features query` adds the 3 ingest_query tests, and
           # `clippy --all-targets -D warnings` is clean in every state.
-          # NOTE: the optional `close` feature (pulls sparq-reason) + the `query_canned`
-          # suite are NOT on main yet (they arrive with PR #1075, still open) — adding a
-          # `close` leg now would ENOENT (`does not have feature 'close'`), so it is
-          # deliberately omitted; extend with a `close` leg when #1075 lands.
+          # [OPUS-4.8] sq-8cuf8: the optional `close` feature (Cargo.toml: `close =
+          # ["query", "dep:sparq-reason"]`) landed on main with PR #1075, so the leg the
+          # NOTE above deferred is now wired below. `close` is a TRUE `not(feature=…)`
+          # divergence — NOT just an additive superset of `query` — so it gets its OWN
+          # isolated leg per rule (b) of the GUARD above, for two reasons:
+          #   (1) `tests/query_canned.rs` is `#![cfg(feature = "query")]` AND contains
+          #       `closure_materialises_the_blockedby_inverse`, an extra
+          #       `#[cfg(feature = "close")]` test. The `query` leg above COMPILES that
+          #       test body EMPTY (it passes `--features query`, not `close`), so the
+          #       inverse-/symmetric-edge closure proof ran ZERO times — the silent gap
+          #       this leg closes; and
+          #   (2) `src/bin/pkg_query.rs` has divergent `#[cfg(feature = "close")]` vs
+          #       `#[cfg(not(feature = "close"))]` arms of `load_closed` (real OWL-RL
+          #       closure vs the "--close needs the `close` feature" error). The `query`
+          #       leg exercises the `not(close)` arm; THIS leg compiles + clippies the
+          #       `close` arm (the one that actually pulls sparq-reason and materialises
+          #       the closure), so neither code path rots.
+          # `close` implies `query` (⊃ `validate`), so it is the crate's MAXIMAL feature
+          # set today and equivalent to `--all-features` for sparq-kb. It adds only the
+          # already-built sparq-reason dep (sparq-reason depends solely on sparq-core, in
+          # the `query` build), so the leg is cheap. Verified locally on this branch:
+          # `cargo test -p sparq-kb --features close` runs all of `query`'s suites PLUS
+          # the previously-skipped close test (query_canned: 9 vs 8 under `query`), and
+          # `clippy --all-targets -D warnings` is clean with the feature ON.
           - name: sparq-kb (validate)
             crate: sparq-kb
             features: validate
             test: true
-          - name: sparq-kb (query, implies validate — maximal feature set)
+          - name: sparq-kb (query, implies validate)
             crate: sparq-kb
             features: query
+            test: true
+          - name: sparq-kb (close, implies query — maximal feature set)
+            crate: sparq-kb
+            features: close
             test: true
           # [OPUS-4.8] sq-leg8n: the sparq-terse opt-in LLM-ergonomic SPARQL surface
           # (epic sq-2m6zm, design research/llm-ergonomic-sparql-surface.md). Only the
