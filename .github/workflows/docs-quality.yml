@@ -393,6 +393,19 @@ jobs:
       # trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
       - name: Self-test agent-telemetry harness (parser + cache-ratio + cost math)
         run: python3 scripts/agent-telemetry/tests/test_agent_telemetry.py
+      # [OPUS-4.8] sq-lhwo.4 (epic sq-lhwo): the firm ast-grep+outline token A/B harness
+      # (scripts/agent-telemetry/ast-grep-outline/) under the shared §5 protocol. Its
+      # statistics + §5.6 verdict-object emitter (Wilcoxon signed-rank + bootstrap CI +
+      # break-even N* + the kill criteria) and the read-payload measurer are
+      # regression-covered by hermetic stdlib-unittest suites (NO scipy/numpy, NO network,
+      # NO ast-grep needed — the live ast-grep smoke test self-skips if absent). Run here
+      # so a regression in the VERDICT GATING (e.g. a proxy/partial-quality run wrongly
+      # reaching recommend_adopt, or the Wilcoxon/break-even math) reds CI before the
+      # harness is trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
+      - name: Self-test ast-grep+outline A/B stats + verdict emitter (sq-lhwo.4)
+        run: python3 scripts/agent-telemetry/ast-grep-outline/tests/test_ab_stats.py
+      - name: Self-test ast-grep+outline A/B read-payload measurer (sq-lhwo.4)
+        run: python3 scripts/agent-telemetry/ast-grep-outline/tests/test_measure_ab.py
       # [OPUS-4.8] sq-f04e: gen-js-sbom.sh DERIVES a standalone per-member lock via
       # scripts/derive-workspace-member-lock.mjs, then cyclonedx-npm shells out to `npm ls
       # --omit=dev`. A workspace-to-workspace dep edge (a `link: true` node — a published member
