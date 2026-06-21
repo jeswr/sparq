@@ -33,6 +33,16 @@ validate = ["dep:sparq-core", "dep:sparq-shacl", "dep:oxttl", "dep:oxrdf"]
 # (sq-2m6zm.2): the example-lookup answers (`Graph::load_str` + `sparq_engine::query`).
 # Pulls in the SPARQL engine; keep it off the lean default build.
 query = ["validate", "dep:sparq-engine"]
+# [OPUS-4.8] sq-2m6zm.3 (epic sq-2m6zm). OPT-IN (default-OFF). Enables the
+# `skill` module — the Phase-1 "query-the-PKG" recipe (introspect → ground → ask):
+# load the ingested PKG, ALWAYS `close_for_vectorise(RDFS|OWL-RL)` first, mine a
+# token-budgeted schema card, run a §4.1-class verified-expressible SPARQL query, and
+# return the minimal answer rows + the ABSTAT-style minimal subgraphs that ground each
+# bound IRI, with the executed SPARQL surfaced for verification. IMPLIES `query`; the
+# only thing that pulls `sparq-vectors` (structure feature → grounding +
+# closure-before-vectorise), `sparq-introspect`, and `sparq-reason` into this crate.
+# With it OFF the default build is unchanged (pure data + constants).
+skill = ["query", "dep:sparq-vectors", "dep:sparq-introspect", "dep:sparq-reason"]
 
 [dependencies]
 # Engine graph type (only behind `validate`). default-features=false keeps it lean.
@@ -43,6 +53,14 @@ sparq-core = { path = "../sparq-core", default-features = false, optional = true
 sparq-shacl = { path = "../sparq-shacl", default-features = false, optional = true }
 # The SPARQL query/update engine (only behind `query`, for the example-lookup proof).
 sparq-engine = { path = "../sparq-engine", default-features = false, optional = true }
+# [OPUS-4.8] sq-2m6zm.3: the flexible grounding selector + closure-before-vectorise
+# (`structure` feature gates `grounding` + `structure::close_for_vectorise`). Only
+# behind `skill`. default-features=false keeps it lean.
+sparq-vectors = { path = "../sparq-vectors", default-features = false, features = ["structure"], optional = true }
+# [OPUS-4.8] sq-2m6zm.3: the token-budgeted schema-card miner. Only behind `skill`.
+sparq-introspect = { path = "../sparq-introspect", default-features = false, optional = true }
+# [OPUS-4.8] sq-2m6zm.3: the entailment `Profile` (RDFS / OWL-RL). Only behind `skill`.
+sparq-reason = { path = "../sparq-reason", default-features = false, optional = true }
 # Turtle parser + term model (only behind `validate`, to build the data graph).
 oxttl = { workspace = true, optional = true }
 oxrdf = { workspace = true, optional = true }

@@ -63,6 +63,21 @@ one. The example lookups (`--features query --test ingest_query`) answer real
 questions — *"merge discipline for a ZK PR?"*, *"standing rules for sub-agents?"*,
 the §4.1 ready-frontier — returning the minimal triples computed by the engine.
 
+## 🔎 Query-the-PKG skill (`sq-2m6zm.3`, opt-in `skill` feature)
+
+`skill::query_the_pkg` is the thin **introspect → ground → ask** recipe an agent
+calls to query the PKG instead of re-reading the prose corpus: it ALWAYS
+`close_for_vectorise(RDFS|OWL-RL)` first (so the `owl:inverseOf` + subclass edges
+materialise), mines a token-budgeted schema card (`sparq-introspect`), runs a
+**§4.1-class verified-expressible** SPARQL query (the `skill::recipes` catalogue),
+and returns the minimal answer rows + the ABSTAT-style **minimal subgraph**
+(`sparq-vectors` grounding) for each bound IRI — with the **executed SPARQL
+surfaced** for verification. The §4.2/§4.3 N3 rules are explicitly Phase-2/3.
+
+```text
+cargo test -p sparq-kb --features skill --test skill_recipe -- --nocapture
+```
+
 ## ✨ Features
 
 - **Reuse-first ontology** — generalises the vendored `zkp-sparql`
@@ -76,8 +91,9 @@ the §4.1 ready-frontier — returning the minimal triples computed by the engin
 - **SHACL guardrails** — `pkg.shapes.ttl` makes a source + a confidence value + an
   assurance basis + non-filler content **mandatory** on every `pkg:Finding`, and
   enforces a valid status / bounded priority / no-stale-edge on every `pkg:Task`.
-- **Opt-in by construction** — default build is data + constants only; the
-  `validate` feature is the only thing that pulls in `sparq-core` + `sparq-shacl`.
+- **Opt-in by construction** — default build is data + constants only; `validate`
+  adds `sparq-core` + `sparq-shacl`, `query` adds the engine, and `skill` adds the
+  grounding + introspect surface. None of it is in the default build.
 - **No-drift guard** — `vocab.rs` is byte-pinned against `pkg.ttl` by a sync test.
 
 ## 📚 Learn more
@@ -89,9 +105,9 @@ the §4.1 ready-frontier — returning the minimal triples computed by the engin
   verification of every `skos:closeMatch` alignment against the live ontology.
 - The precedent it follows: `crates/sparq-trust/ontologies/zkp-sparql/` and
   `crates/sparq-trust/src/vocab.rs` (the ship-an-ontology + Rust-constants pattern).
-- Epic `sq-2m6zm`: the ontology/shapes are `sq-2m6zm.1`; the ingestion PoC above is
-  `sq-2m6zm.2`. Next: the query-the-PKG skill (`sq-2m6zm.3`) + the token-A/B harness
-  (`sq-2m6zm.4`).
+- Epic `sq-2m6zm`: the ontology/shapes are `sq-2m6zm.1`; the ingestion PoC is
+  `sq-2m6zm.2`; the query-the-PKG skill above is `sq-2m6zm.3`. Next: the token-A/B
+  harness (`sq-2m6zm.4`) that measures whether this beats re-reading the corpus.
 
 ## License
 

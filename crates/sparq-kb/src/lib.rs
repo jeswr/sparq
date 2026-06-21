@@ -112,3 +112,12 @@ pub mod query {
         query(graph, sparql)
     }
 }
+
+/// The Phase-1 **"query-the-PKG"** recipe (introspect → ground → ask). OPT-IN behind
+/// the default-OFF `skill` cargo feature (pulls in `sparq-vectors`'s grounding +
+/// closure-before-vectorise, `sparq-introspect`, and `sparq-reason`): the thin
+/// in-process recipe an agent calls to query the ingested PKG and get back minimal
+/// subgraphs + the executed SPARQL, instead of re-reading the prose corpus
+/// (sq-2m6zm.3). See [`skill`] for the full design notes.
+#[cfg(feature = "skill")]
+pub mod skill;

@@ -37,7 +37,10 @@ fn ontology_and_shapes_parse_and_load() {
     // Both .ttl files must parse (load in sparq) — the first gate.
     let report = validate_instances(&[PKG_EXAMPLE]).expect("ontology + shapes + example load");
     // The report rendering is captured into the PR description as proof the guardrails fire.
-    eprintln!("=== sparq-shacl PKG guardrail report ===\n{}", report.to_text());
+    eprintln!(
+        "=== sparq-shacl PKG guardrail report ===\n{}",
+        report.to_text()
+    );
 }
 
 #[test]
@@ -52,12 +55,12 @@ fn valid_nodes_pass_and_invalid_nodes_are_reported() {
 
     // --- VALID nodes must NOT be reported -----------------------------------
     for ok in [
-        "find-cs-dual-use",      // sourced + confident + assured + non-filler
-        "find-kge-neutral",      // sourced refuting-edge finding
+        "find-cs-dual-use",           // sourced + confident + assured + non-filler
+        "find-kge-neutral",           // sourced refuting-edge finding
         "src-neumann-moerkotte-2011", // explored-status + title
         "tech-characteristic-sets",   // supersedes an existing Technique
-        "task-sq-2m6zm",         // open epic, sound dep edge
-        "task-sq-2m6zm-1",       // in-progress, bounded priority
+        "task-sq-2m6zm",              // open epic, sound dep edge
+        "task-sq-2m6zm-1",            // in-progress, bounded priority
     ] {
         assert!(
             !reported(&report, ok),

@@ -3488,7 +3488,10 @@ dependencies = [
  "oxttl 0.2.3",
  "sparq-core",
  "sparq-engine",
+ "sparq-introspect",
+ "sparq-reason",
  "sparq-shacl",
+ "sparq-vectors",
 ]
 
 [[package]]

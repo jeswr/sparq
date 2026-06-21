@@ -11,8 +11,8 @@
 #![cfg(feature = "query")]
 
 use oxrdf::Term;
-use sparq_kb::query::{ask_pkg, load_pkg};
 use sparq_engine::QueryResult;
+use sparq_kb::query::{ask_pkg, load_pkg};
 
 /// Pretty-print a result set so the proof appears in the PR description.
 fn dump(label: &str, q: &str, r: &QueryResult) {
@@ -21,10 +21,19 @@ fn dump(label: &str, q: &str, r: &QueryResult) {
         let cells: Vec<String> = row
             .iter()
             .map(|c| match c {
-                Some(Term::NamedNode(n)) => n.as_str().rsplit(['#', '/']).next().unwrap_or("").to_string(),
+                Some(Term::NamedNode(n)) => n
+                    .as_str()
+                    .rsplit(['#', '/'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
                 Some(Term::Literal(l)) => {
                     let s = l.value();
-                    if s.len() > 110 { format!("{}…", &s[..110]) } else { s.to_string() }
+                    if s.len() > 110 {
+                        format!("{}…", &s[..110])
+                    } else {
+                        s.to_string()
+                    }
                 }
                 Some(t) => t.to_string(),
                 None => "(unbound)".into(),
@@ -73,17 +82,23 @@ SELECT ?label ?section ?conf WHERE {
         "Q1 must surface the ci-summary gate; got {labels:?}"
     );
     assert!(
-        labels.iter().any(|l| l.contains("circuit") || l.contains("gate-count")),
+        labels
+            .iter()
+            .any(|l| l.contains("circuit") || l.contains("gate-count")),
         "Q1 must surface the ZK-circuit gate; got {labels:?}"
     );
     assert!(
-        labels.iter().any(|l| l.contains("privacy") || l.contains("soundness")),
+        labels
+            .iter()
+            .any(|l| l.contains("privacy") || l.contains("soundness")),
         "Q1 must surface the privacy-claims gate; got {labels:?}"
     );
     // Every returned Finding carries a section anchor (its provenance) — that is the
     // citation half of the guardrail, queryable.
     assert!(
-        r.rows.iter().all(|row| matches!(&row[1], Some(Term::Literal(_)))),
+        r.rows
+            .iter()
+            .all(|row| matches!(&row[1], Some(Term::Literal(_)))),
         "every Q1 Finding must carry its dcterms:source section anchor"
     );
 }
@@ -117,7 +132,10 @@ SELECT ?label ?section ?conf WHERE {
             _ => None,
         })
         .collect();
-    assert!(labels.len() >= 5, "Q2 should surface the sub-agent rule set; got {labels:?}");
+    assert!(
+        labels.len() >= 5,
+        "Q2 should surface the sub-agent rule set; got {labels:?}"
+    );
     assert!(
         labels.iter().any(|l| l.contains("shared contract")),
         "Q2 must surface the shared contract; got {labels:?}"
@@ -152,10 +170,18 @@ SELECT (COUNT(DISTINCT ?t) AS ?ready) WHERE {
     let r = ask_pkg(&g, q).expect("frontier query runs");
     dump("Q3: §4.1 ready-frontier (dependency half)", q, &r);
     // The frontier is non-empty over a real backlog of 1255 tasks.
-    let n = match &r.rows.first().and_then(|row| row.first()).and_then(|c| c.clone()) {
+    let n = match &r
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|c| c.clone())
+    {
         Some(Term::Literal(l)) => l.value().parse::<i64>().unwrap_or(0),
         _ => 0,
     };
-    assert!(n > 0, "the ready-frontier must be non-empty over the bd backlog; got {n}");
+    assert!(
+        n > 0,
+        "the ready-frontier must be non-empty over the bd backlog; got {n}"
+    );
     eprintln!("\nQ3 ready-frontier count = {n}");
 }
