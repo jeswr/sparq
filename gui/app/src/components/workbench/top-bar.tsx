@@ -1,11 +1,11 @@
 "use client";
 
 // [OPUS-4.8] sq-ixc3.9 — the thin TOP BAR (h-10, research/gui-design.md §A.2):
-// LOCAL⇄ENDPOINT target switch · store size · ⌘K hint · theme toggle · engine status LED.
+// LOCAL⇄ENDPOINT target switch · store size · ⌘K · theme toggle · engine status LED.
 //
-// The target switch + Cmd-K are STUBS in this foundation shell (the endpoint/connect tool is
-// sq-ixc3.11/the Server tab; the command palette is sq-ixc3.10). They render and are honestly
-// labelled "soon" so the bar is complete chrome — they don't fabricate behaviour.
+// [OPUS-4.8] sq-ixc3.10 — the ⌘K hint is now a LIVE trigger that opens the keyboard-first command
+// palette (the spine). The target switch remains a stub (the endpoint/Server tool is a later
+// phase) and stays honestly labelled.
 
 import * as React from "react";
 import { useTheme } from "next-themes";
@@ -13,6 +13,7 @@ import { Moon, Sun, Command, ExternalLink } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useEngine } from "@/lib/engine-context";
+import { useCommandPalette } from "@/components/workbench/command-palette";
 
 /** The honesty-website link target (the marketing site, opened in a NEW tab / system browser). */
 const WEBSITE_URL = "https://jeswr.github.io/sparq/";
@@ -62,6 +63,7 @@ function ThemeToggle() {
 
 export function TopBar() {
   const { storeSize } = useEngine();
+  const { setOpen } = useCommandPalette();
   return (
     <header className="flex h-10 shrink-0 items-center gap-3 border-b bg-card px-3">
       <span className="font-mono text-sm font-semibold tracking-tight">sparq</span>
@@ -91,13 +93,16 @@ export function TopBar() {
       </span>
 
       <div className="ml-auto flex items-center gap-1.5">
-        {/* ⌘K hint — the command palette is sq-ixc3.10. */}
-        <span
-          className="hidden items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] text-muted-foreground sm:flex"
-          title="Command palette — coming in a later phase"
+        {/* ⌘K — opens the keyboard-first command palette (the spine). */}
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          aria-label="Open command palette (Command-K)"
+          className="hidden items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground sm:flex"
+          title="Command palette (⌘K / Ctrl-K)"
         >
           <Command className="size-3" />K
-        </span>
+        </button>
         <StatusLed />
         <ThemeToggle />
         <Button

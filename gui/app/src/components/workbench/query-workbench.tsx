@@ -11,13 +11,23 @@
 // data-result-kind="select" + data-result-view="table" wrapping a <table> with the binding.
 
 import * as React from "react";
-import { Play, Loader2 } from "lucide-react";
+import { Play, Loader2, Telescope, Gauge, History } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useEngine, type QueryOutcome } from "@/lib/engine-context";
 import { extractTable, type SparqlResults } from "@sparq/client";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
+// [OPUS-4.8] sq-ixc3.10 — the Query tool contributes its operational verbs (run / EXPLAIN /
+// EXPLAIN ANALYZE / re-run a recent query) to the Cmd-K spine while it is mounted.
+import { useRegisterPaletteCommands } from "@/components/workbench/command-palette";
+import { useWorkbench } from "@/components/workbench/workbench-context";
+import {
+  pushRecentQuery,
+  previewQuery,
+  type PaletteCommand,
+  type RecentQuery,
+} from "@/lib/palette-commands";
 
 type ResultView = "table" | "json" | "ntriples";
 
@@ -141,13 +151,25 @@ const VIEWS: { id: ResultView; label: string }[] = [
 ];
 
 export function QueryWorkbench() {
-  const { run, status } = useEngine();
+  const { run, explain, status } = useEngine();
+  const workbench = useWorkbench();
   const [query, setQuery] = React.useState(DEFAULT_QUERY);
   const [outcome, setOutcome] = React.useState<QueryOutcome | null>(null);
+  // [OPUS-4.8] sq-ixc3.10 — the EXPLAIN plan text (or its error), shown in the results pane when the
+  // user runs EXPLAIN / EXPLAIN ANALYZE from the Cmd-K spine. Cleared by the next ordinary run.
+  const [plan, setPlan] = React.useState<{ text: string; error: boolean } | null>(null);
   const [view, setView] = React.useState<ResultView>("table");
   const [running, setRunning] = React.useState(false);
+  // [OPUS-4.8] sq-ixc3.10 — a session-only ring of recently-run queries for the palette.
+  const [recentQueries, setRecentQueries] = React.useState<RecentQuery[]>([]);
+
+  const recordRecent = React.useCallback((q: string) => {
+    setRecentQueries((prev) => pushRecentQuery(prev, q, Date.now()));
+  }, []);
 
   const onRun = React.useCallback(async () => {
+    recordRecent(query);
+    setPlan(null); // a fresh execution clears any prior EXPLAIN plan
     setRunning(true);
     try {
       const result = await run(query);
@@ -158,9 +180,26 @@ export function QueryWorkbench() {
     } finally {
       setRunning(false);
     }
-  }, [run, query, view]);
+  }, [run, query, view, recordRecent]);
 
-  // ⌘/Ctrl-Enter runs the query (the keyboard-first spine; the full Cmd-K palette is sq-ixc3.10).
+  // [OPUS-4.8] sq-ixc3.10 — EXPLAIN / EXPLAIN ANALYZE: the in-tab planner introspection the Cmd-K
+  // spine drives. It renders the plan text (or a clear error — the planner rejects Update forms)
+  // in the results pane WITHOUT producing a result set. ANALYZE also executes the query.
+  const onExplain = React.useCallback(
+    (analyze: boolean) => {
+      recordRecent(query);
+      setOutcome(null);
+      try {
+        const text = explain(query, analyze);
+        setPlan({ text, error: false });
+      } catch (e) {
+        setPlan({ text: e instanceof Error ? e.message : String(e), error: true });
+      }
+    },
+    [explain, query, recordRecent],
+  );
+
+  // ⌘/Ctrl-Enter runs the query (the keyboard-first spine; the full Cmd-K palette is the ⌘K binding).
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
@@ -169,6 +208,70 @@ export function QueryWorkbench() {
   };
 
   const ready = status.kind === "ready";
+
+  // [OPUS-4.8] sq-ixc3.10 — register the Query tool's operational commands on the Cmd-K spine. A
+  // palette verb focuses the Query tab first (so the result lands where the user looks), then acts.
+  const paletteCommands = React.useMemo<PaletteCommand[]>(() => {
+    const focusQuery = () => workbench?.openTool("query");
+    const cmds: PaletteCommand[] = [
+      {
+        id: "query.run",
+        group: "Actions",
+        title: "Run query",
+        blurb: "Execute the editor's SPARQL over the live store",
+        keywords: ["run", "execute", "query", "go"],
+        icon: Play,
+        disabled: !ready || running,
+        run: () => {
+          focusQuery();
+          void onRun();
+        },
+      },
+      {
+        id: "query.explain",
+        group: "Actions",
+        title: "Run EXPLAIN",
+        blurb: "Show the query plan without executing it",
+        keywords: ["explain", "plan", "planner", "optimize"],
+        icon: Telescope,
+        disabled: !ready,
+        run: () => {
+          focusQuery();
+          onExplain(false);
+        },
+      },
+      {
+        id: "query.analyze",
+        group: "Actions",
+        title: "Run EXPLAIN ANALYZE",
+        blurb: "Plan + execute with a per-operator trace (SELECT/ASK)",
+        keywords: ["analyze", "analyse", "trace", "profile", "explain"],
+        icon: Gauge,
+        disabled: !ready,
+        run: () => {
+          focusQuery();
+          onExplain(true);
+        },
+      },
+    ];
+    for (const r of recentQueries) {
+      const preview = previewQuery(r.query);
+      cmds.push({
+        id: `query.recent.${r.ranAt}`,
+        group: "Recent queries",
+        title: preview,
+        keywords: ["recent", "history", "query", preview],
+        icon: History,
+        run: () => {
+          focusQuery();
+          setQuery(r.query);
+        },
+      });
+    }
+    return cmds;
+  }, [ready, running, recentQueries, onRun, onExplain, workbench]);
+
+  useRegisterPaletteCommands("query", paletteCommands);
 
   return (
     <div className="flex h-full flex-col">
@@ -218,7 +321,18 @@ export function QueryWorkbench() {
           ))}
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
-          {outcome === null ? (
+          {plan !== null ? (
+            // [OPUS-4.8] sq-ixc3.10 — the EXPLAIN / ANALYZE plan text (Cmd-K spine).
+            <pre
+              className={cn(
+                "overflow-auto whitespace-pre p-3 font-mono text-xs",
+                plan.error && "text-destructive",
+              )}
+              data-result-kind="explain"
+            >
+              {plan.text}
+            </pre>
+          ) : outcome === null ? (
             <p className="p-3 text-sm text-muted-foreground">
               {ready
                 ? "Run a query to see results."

@@ -39,6 +39,10 @@ import {
   CommandPalette,
   CommandPaletteTrigger,
 } from "@/components/command-palette";
+// [OPUS-4.8] sq-ixc3.10 — the operational-command registry. Mounted once inside the palette so
+// the workbench (the REPL) can contribute live run / EXPLAIN / connect / export / import /
+// switch-workspace / named-graph / recent-query commands to the keyboard-first spine.
+import { PaletteCommandsProvider } from "@/components/palette-commands";
 
 const REPO_URL = "https://github.com/jeswr/sparq";
 
@@ -98,7 +102,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // The whole shell is wrapped in <CommandPalette> so the global ⌘K / Ctrl-K binding and the
     // header trigger share one palette instance, mounted once. With the sidebar removed, this
     // palette is the discoverability backstop for every surface (sq-vw3ax.1 → .7).
+    // [OPUS-4.8] sq-ixc3.10 — <PaletteCommandsProvider> nests inside so the palette (read side)
+    // and the workbench (register side) share one operational-command registry.
     <CommandPalette>
+      <PaletteCommandsProvider>
       <div className="flex min-h-svh flex-col">
         {/* Sticky slim top bar (h-16, backdrop blur) — the ONE navigation. */}
         <header className="sticky top-0 z-30 flex h-16 items-center gap-2 border-b bg-background/90 px-4 backdrop-blur md:px-6">
@@ -180,6 +187,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </main>
       </div>
+      </PaletteCommandsProvider>
     </CommandPalette>
   );
 }
