@@ -259,10 +259,12 @@ jobs:
         with:
           node-version: 22
 
-      # The Tauri `beforeBuildCommand` (tauri.conf.json) builds the site static export, whose
-      # `prebuild` hook (site/scripts/sync-wasm.mjs) needs the wasm bundle present in js/wasm/.
-      # Mirror gui.yml's site-build job: build the lean shacl,jsonld wasm bundle FIRST, then
-      # `cargo tauri build` drives the site export + the native bundle.
+      # [OPUS-4.8] sq-gl3cf — the Tauri `beforeBuildCommand` (gui/src-tauri/tauri.conf.json) now
+      # builds the DISTINCT operational GUI frontend (`cd ../app && npm run build:tauri`, repointed
+      # off the marketing site by PR #1003 / sq-ixc3.8), whose `prebuild` hook
+      # (gui/app/scripts/sync-wasm.mjs) needs the lean shacl,jsonld wasm bundle present in js/wasm/.
+      # Mirror gui.yml's `gui-app`/`tauri-e2e` jobs: build the wasm bundle FIRST, then
+      # `cargo tauri build` drives the gui/app export → gui/app/out (`frontendDist`) + the bundle.
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
@@ -270,11 +272,20 @@ jobs:
         working-directory: js
         run: npm run build:wasm
 
-      - name: Install @sparq/client + site dependencies
-        shell: bash
-        run: |
-          (cd packages/sparq-client && npm install)
-          (cd site && npm install)
+      # [OPUS-4.8] sq-gl3cf — the GUI frontend (gui/app) is a repo-ROOT npm-workspace member
+      # (root package.json `workspaces` lists `gui/app`, alongside `packages/*`, `site`, `js`).
+      # A workspace-aware repo-root `npm install` installs gui/app's deps (next, cross-env, …)
+      # into the hoisted root node_modules — so the `beforeBuildCommand`'s `cd ../app && npm run
+      # build:tauri` resolves `next`/`cross-env` from root .bin. This is EXACTLY the install the
+      # proven-green gui.yml `gui-app` ("Install workspace dependencies") + `tauri-e2e` jobs use;
+      # the previous per-dir `(cd packages/sparq-client && npm install)` + `(cd site && npm install)`
+      # NEVER installed gui/app and is why the first cut (run 27887762864) failed at
+      # `beforeBuildCommand`. `cross-env` (a gui/app devDependency) makes `build:tauri`'s inline
+      # `NEXT_PUBLIC_BASE_PATH=''` portable to the Windows shell, so no platform needs a special
+      # case. (`npm install`, not `npm ci`, matches gui.yml — tolerant of a not-yet-regenerated
+      # workspace lock.)
+      - name: Install workspace dependencies (incl. gui/app)
+        run: npm install
 
       # tauri-cli (the `cargo tauri build` driver). Installed via `cargo install … --locked`,
       # the SAME pattern gui.yml uses for wasm-pack / tauri-driver (a cargo install is not a
@@ -284,23 +295,26 @@ jobs:
         run: cargo install tauri-cli --version "^2.0.0" --locked
 
       # Build the UNSIGNED desktop bundle. `cargo tauri build` runs from gui/src-tauri, drives
-      # the `beforeBuildCommand` (the root-relative site export, NEXT_PUBLIC_BASE_PATH=''),
-      # compiles the native Rust shell, and bundles installers for the host platform into
+      # the `beforeBuildCommand` (`cd ../app && npm run build:tauri` → the root-relative gui/app
+      # export, NEXT_PUBLIC_BASE_PATH=''), compiles the native Rust shell embedding gui/app/out
+      # (`frontendDist`), and bundles installers for the host platform into
       # gui/src-tauri/target/release/bundle/<format>/. `--ci` disables interactive prompts;
       # no signing env vars are set, so the bundles are produced UNSIGNED (see the job header
       # — signing is needs:user sq-v286.8). `--verbose` aids first-CI-run diagnosis.
       #
       # PROVEN vs DOCUMENTED-UNTESTED (honest status — this workflow is tag-triggered, so it
       # does NOT run on this PR; validate on the first real `v*` tag):
+      #   * The `beforeBuildCommand` chain (wasm bundle → root `npm install` → gui/app
+      #     `build:tauri` → gui/app/out) is REPRODUCED locally on this work box (x64-linux):
+      #     it produces gui/app/out with ROOT-RELATIVE assets, the path `frontendDist` reads.
       #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): the GUI crate build + webkit deps are
       #     already proven green in gui.yml; the .deb/.AppImage bundle step is the new surface.
       #   * macOS rows: WKWebView ships with the OS; the .dmg/.app bundle is documented-untested.
-      #   * Windows row: WebView2 ships with the OS, BUT tauri.conf.json's beforeBuildCommand
-      #     (`cd ../../site && NEXT_PUBLIC_BASE_PATH='' npm run build`) uses a Unix inline
-      #     env-var prefix that the default Windows shell (cmd) does NOT support. Making that
-      #     command Windows-portable is a gui/ (tauri.conf.json) change OUT OF SCOPE for this
-      #     release-workflow bead and is captured as a follow-up; the Windows row is therefore
-      #     documented-untested and may need that conf fix before its .msi/.exe row goes green.
+      #   * Windows row: WebView2 ships with the OS. The earlier Windows blocker (a Unix inline
+      #     env-var prefix in the OLD `cd ../../site` beforeBuildCommand, unsupported by the
+      #     Windows shell) is GONE — PR #1003 made `build:tauri` set NEXT_PUBLIC_BASE_PATH via
+      #     `cross-env` (a gui/app devDependency installed by the workspace install above), which
+      #     is shell-portable. The .msi/.exe bundle step itself is still documented-untested.
       - name: Build Tauri desktop bundle (unsigned)
         working-directory: gui/src-tauri
         run: cargo tauri build --ci --verbose
