@@ -97,7 +97,14 @@ export default function HomePage() {
         <div>
           <h2 className="text-2xl font-semibold">See it work</h2>
           <p className="text-sm text-muted-foreground">
-            Three end-to-end privacy demonstrations, each runnable.
+            Three end-to-end privacy demonstrations, each runnable —{" "}
+            <Link
+              href="/examples"
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              browse the examples gallery
+            </Link>
+            .
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-3">
