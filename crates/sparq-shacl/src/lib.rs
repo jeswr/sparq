@@ -22,7 +22,9 @@ pub mod view;
 
 pub use model::{Component, Shape, ShapesModel, Target};
 pub use path::Path;
-pub use report::{ValidationReport, ValidationResult};
+// [OPUS-4.8] (sq-lz99x) `ShapeDiagnostic` surfaces a constraint the validator
+// SKIPPED because it could not be evaluated (e.g. an uncompilable `sh:pattern`).
+pub use report::{ShapeDiagnostic, ValidationReport, ValidationResult};
 
 // [OPUS-4.8] (sq-v0b8) SHACL Compact Syntax parser public surface (feature `scs`).
 #[cfg(feature = "scs")]
@@ -49,7 +51,8 @@ pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport {
 /// [`validate`] against an already-parsed shapes model (amortises shape
 /// parsing across many data graphs).
 pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationReport {
-    ValidationReport::new(eval::validate_graph(data, model))
+    let (results, diagnostics) = eval::validate_graph(data, model);
+    ValidationReport::with_diagnostics(results, diagnostics)
 }
 
 /// Builds a queryable [`Graph`] from already-parsed triples. The seam for

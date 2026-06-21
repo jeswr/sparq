@@ -124,6 +124,7 @@ pub fn ShapesModel::parse(shapes_graph: &Graph) -> ShapesModel;   // parse once,
 ```rust
 pub conforms: bool;                         // true iff results is empty (spec sh:conforms — counts EVERY result)
 pub results: Vec<ValidationResult>;
+pub diagnostics: Vec<ShapeDiagnostic>;      // skipped-constraint diagnostics (e.g. uncompilable sh:pattern); never affect `conforms`
 pub fn conforms_violations_only(&self) -> bool;                       // ignore sh:Warning / sh:Info
 pub fn results_with_severity<'a>(&'a self, severity: &'a str)         // full IRI, e.g. ".../shacl#Warning"
     -> impl Iterator<Item = &'a ValidationResult>;
@@ -413,6 +414,14 @@ conforms/violations).
   contributes no results; the rest of validation still runs. `validate` never returns
   a `Result`/panics on bad shapes — so a silently-empty report can mean "no targets"
   rather than "conforms".
+- **An uncompilable `sh:pattern` is SKIPPED, not fail-closed (sq-lz99x).** The Rust
+  `regex` crate has no lookahead/lookbehind — neither does the XML Schema regex flavour
+  the SHACL spec ties `sh:pattern` to — so e.g. `^(?!(TODO|TBD)).*` does not compile.
+  That constraint is skipped (it reports no violations) and surfaced once in
+  `report.diagnostics` (a `ShapeDiagnostic` carrying the shape, component, and the
+  `regex` crate's error), so the skip is not silent. Earlier this wrongly flagged
+  EVERY value. To express a "must NOT start with X" check, use a POSITIVE-match
+  `sh:sparql` `REGEX(?str, "^\\s*(TODO|...)")` constraint (flag when it matches) instead.
 - **Results are NOT deduplicated** across traversal routes / component occurrences — a
   nested shape reached via two parents reports twice (intentional, matches the suite).
 - **Recursion is treated as conforming.** Re-entering the same (focus, shape) pair

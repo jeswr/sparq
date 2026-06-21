@@ -109,7 +109,10 @@ The remaining out-of-scope item is the full `sparql/pre-binding` semantics (reje
 variable re-binding, `$shapesGraph`) — see `bd list -l area:sparq-shacl`. Validation
 results are **not deduplicated** across traversal routes (matching the test suite: a
 nested shape reached through two parents reports twice), and re-entrant recursion on the
-same focus/shape pair counts as conforming (SHACL leaves recursion undefined).
+same focus/shape pair counts as conforming (SHACL leaves recursion undefined). An
+**uncompilable `sh:pattern`** (e.g. a `(?!…)` lookahead — unsupported by Rust `regex`
+*and* by XML Schema regex) is **skipped**, surfaced in `report.diagnostics`, never
+fail-closed onto every value.
 
 ## License
 
