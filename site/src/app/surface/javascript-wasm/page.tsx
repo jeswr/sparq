@@ -3,11 +3,12 @@ import { Boxes } from "lucide-react";
 
 import { SurfaceContent } from "@/components/surface-content";
 import { JavascriptWasmDemo } from "@/components/javascript-wasm-demo";
+import { EsmImportSnippet } from "./esm-import-snippet";
 
 export const metadata: Metadata = {
   title: "JavaScript / WASM",
   description:
-    "Use the sparq engine from JavaScript/TypeScript via @jeswr/sparq — an idiomatic RDF/JS surface over the ~886 KB WebAssembly build, in Node or the browser.",
+    "Use the sparq engine from JavaScript/TypeScript via @jeswr/sparq — an idiomatic RDF/JS surface (SparqStore + a named Dataset DatasetCore entry, importable from a <script type=module>) over the ~886 KB WebAssembly build, in Node or the browser.",
 };
 
 export default function JavascriptWasmSurfacePage() {
@@ -38,12 +39,31 @@ export default function JavascriptWasmSurfacePage() {
             materialisation. The panels below call the API directly against one seeded
             store, in your tab.
           </p>
+          <p>
+            For an RDF/JS{" "}
+            <a className="text-primary underline-offset-4 hover:underline" href="https://rdf.js.org/dataset-spec/" target="_blank" rel="noopener noreferrer">
+              <code className="font-mono">DatasetCore</code>
+            </a>{" "}
+            surface, the package exports a named{" "}
+            <code className="font-mono">Dataset</code> — importable directly in a{" "}
+            <code className="font-mono">&lt;script type=&quot;module&quot;&gt;</code> from
+            any ESM CDN. Its async factories (
+            <code className="font-mono">Dataset.fromString</code> /{" "}
+            <code className="font-mono">.create</code> /{" "}
+            <code className="font-mono">.fromQuads</code>) instantiate the wasm engine on
+            first use, so the ~MB binary loads lazily — never on import (see the snippet
+            below).
+          </p>
         </>
       }
       capabilities={[
         {
           title: "SparqStore (RDF/JS)",
           body: "fromString / fromCompressed, query() yielding Map-like Bindings, idiomatic terms.",
+        },
+        {
+          title: "Dataset — RDF/JS DatasetCore",
+          body: "Named ESM entry: add / delete / has / match / size / iterate, lazily wasm-initialised; .store drops to the full SPARQL surface.",
         },
         {
           title: "Streaming cursors",
@@ -109,6 +129,7 @@ export default function JavascriptWasmSurfacePage() {
       ]}
     >
       <JavascriptWasmDemo />
+      <EsmImportSnippet />
     </SurfaceContent>
   );
 }

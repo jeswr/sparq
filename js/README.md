@@ -159,6 +159,51 @@ for (const r of report.results) {
 store.free(); // release wasm memory (also `using store = …` via Symbol.dispose)
 ```
 
+### `Dataset` — the RDF/JS `DatasetCore` entry, importable from a `<script type="module">`
+
+For an RDF/JS-`DatasetCore`-shaped surface (rather than the SPARQL-first
+`SparqStore`), import the named **`Dataset`** export. It is a thin wrapper over
+`SparqStore` exposing the four `DatasetCore` members (`add` / `delete` / `has` /
+`match`) plus `size` and `[Symbol.iterator]`, with the **full SPARQL surface one
+accessor away** (`dataset.store`). Because `DatasetCore`'s instance methods are
+synchronous, you obtain an instance through an **async factory** —
+`Dataset.create()` / `Dataset.fromString()` / `Dataset.fromQuads()` — each of
+which `await`s the wasm engine first. That is the lazy-load point: the
+~MB `.wasm` is fetched on the first `await Dataset.…`, never on import, and the
+cold start is paid at most once per page.
+
+This is what makes the GitHub-issue ESM snippet (#981) work — you can import the
+name directly in a browser `<script type="module">` from any ESM CDN, and the
+engine streams in only when you first build a dataset:
+
+```html
+<script type="module">
+  // From an ESM CDN (or a bundler import) — the ~MB wasm is lazily fetched by
+  // the first `Dataset.fromString(...)`, not by the import below.
+  import { Dataset, DataFactory as DF } from "https://esm.sh/@jeswr/sparq";
+
+  const ds = await Dataset.fromString(
+    "<http://ex/a> <http://ex/name> \"Alice\" .",
+    "ntriples",
+  );
+  console.log(ds.size); // 1
+
+  ds.add(DF.quad(DF.namedNode("http://ex/b"), DF.namedNode("http://ex/name"), DF.literal("Bob")));
+  for (const q of ds.match(null, DF.namedNode("http://ex/name"), null)) {
+    console.log(q.subject.value, q.object.value);
+  }
+
+  // Drop to the SPARQL engine when DatasetCore is not enough:
+  console.log(ds.store.queryBoolean("ASK { ?s ?p ?o }")); // true
+  ds.free();
+</script>
+```
+
+If you only need the low-level engine handle, the wasm-pack `--target web` glue
+is itself a real ESM module — `import init, { Store } from ".../wasm/sparq_wasm.js";
+await init();` — but `Dataset` (and `SparqStore`) is the ergonomic, memoised-init
+entry to prefer in an app.
+
 ### Talking to a sparq server: dictionary-fetch protocol
 
 Sparq servers compress small SPARQL responses with shared zstd *vocabulary

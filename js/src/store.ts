@@ -122,6 +122,34 @@ export class SparqStore {
     return new SparqStore(inner);
   }
 
+  /**
+   * [OPUS-4.8] sq-lii76: parses an RDF document into a store SYNCHRONOUSLY — the same as
+   * {@link fromString} but WITHOUT the `await init()`. The wasm engine must ALREADY be
+   * initialised (a prior `await init()` / `await SparqStore.fromString(...)` has resolved),
+   * otherwise the wasm binding throws. This is the building block for the synchronous RDF/JS
+   * `DatasetCore` members ({@link Dataset.match}), where the engine is guaranteed already up;
+   * prefer the async {@link fromString} for first construction.
+   */
+  static fromStringSync(data: string, format: RdfFormat = 'turtle', options: SparqStoreOptions = {}): SparqStore {
+    if (options.dataset && options.compressed) {
+      throw new Error('options.dataset cannot be combined with options.compressed (no compressed dataset loader yet)');
+    }
+    const inner = options.dataset
+      ? WasmStore.loadDataset(data, format)
+      : options.compressed
+        ? WasmStore.loadCompressed(data, format)
+        : WasmStore.load(data, format);
+    return new SparqStore(inner);
+  }
+
+  /**
+   * [OPUS-4.8] sq-lii76: builds a store from RDF/JS quads SYNCHRONOUSLY (see
+   * {@link fromStringSync} — the wasm engine must already be initialised).
+   */
+  static fromQuadsSync(quads: Iterable<RDF.Quad>, options: SparqStoreOptions = {}): SparqStore {
+    return SparqStore.fromStringSync(quadsToNQuads(quads), 'nquads', options);
+  }
+
   /** Builds a store from RDF/JS quads (serialised internally to N-Quads). */
   static async fromQuads(quads: Iterable<RDF.Quad>, options: SparqStoreOptions = {}): Promise<SparqStore> {
     return SparqStore.fromString(quadsToNQuads(quads), 'nquads', options);
