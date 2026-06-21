@@ -52,6 +52,15 @@
 //! equation for a forged `(R, s)` -- the classic "witnessed reduction not bound
 //! to its preimage" hole. The scalar `s` is range-checked `s < L` (it is a signer
 //! output, canonically `< L`); no reduction binding is needed for it.
+//!
+//! [OPUS-4.8] sq-ru0yx (internal re-audit finding M-1): `e_base == e + k*L` with
+//! `e < L` and `k < 8` is a FIELD identity (mod `q_base`) and does NOT, on its own,
+//! UNIQUELY pin `e`. Because `7*L < q_base < 8*L`, for `k == 7` it also admits the
+//! wrap alternative `e' = e_base + q_base - 7*L` (which has `e' < L`, yet
+//! `e' != e_base mod L`): `e' + 7*L` overflows past `q_base` and lands back on
+//! `e_base`. `reduction_range_bind` therefore adds a NO-WRAP bound forbidding the
+//! unreachable top window `e in [q_base - 7*L, L)` when `k == 7`. The honest
+//! reduction always lands below that window, so this never rejects a valid witness.
 
 use crate::hashes::h2;
 use poseidon::poseidon2::Poseidon2;
@@ -76,6 +85,18 @@ global BJJ_L: Field =
 global SCALAR_BITS: u32 = 251;
 // Reduction-quotient bound: q_base / L < 8, so `e_base = e + k*L` has `k in 0..7`.
 global REDUCTION_K_BITS: u32 = 3;
+// [OPUS-4.8] sq-ru0yx (internal re-audit finding M-1): the LARGEST honest
+// reduction quotient is `k_max = floor((q_base - 1) / L) = 7` (`7*L < q_base <
+// 8*L`). When `e_k == 7` the honest reduced scalar `e = e_base - 7*L` lies in
+// `[0, q_base - 7*L)`; the window `[q_base - 7*L, L)` (~2^126 wide) is reached by
+// NO honest `e_base < q_base`. The reduction identity `e + e_k*L == e_base` is a
+// FIELD equation (mod q_base), so without forbidding that window a prover could
+// witness the wrap alternative `(e', e_k') = (e_base + q_base - 7*L, 7)` -- which
+// also satisfies the field identity, has `e' < L`, yet `e' != e_base mod L`. The
+// no-wrap bound below closes it. `REDUCTION_TOP_BOUND = q_base - 7*L`.
+global REDUCTION_K_MAX: u32 = 7;
+global REDUCTION_TOP_BOUND: Field =
+    2736030358979909402780800718157159386010666595306063529296694559936676884330;
 
 // Domain separator for the commitment message challenge -- MUST equal
 // `sig::SIG_DOMAIN_COMMITMENT` ("ZKSIG_C1" = 0x5a4b5349475f4331).
@@ -153,15 +174,52 @@ pub fn assert_on_curve(p: Point) {
 fn challenge_scalar(r: Point, pk: Point, m: Field, e: Field, e_k: Field) -> Field {
     let e_base = Poseidon2::hash([SIG_DOMAIN_COMMITMENT, r.x, r.y, pk.x, pk.y, m], 6);
     // Bind e = e_base mod L: e_base == e + e_k*L, with e < L and e_k < 8.
-    // (1) e_k is a 3-bit quotient (q_base / L < 8).
-    e_k.assert_max_bit_size::<REDUCTION_K_BITS>();
-    // (2) e < L (canonical scalar). assert_lt_l does the range bind.
-    assert_lt_l(e);
-    // (3) the reduction identity. With e < L and e_k < 8 this uniquely pins e to
-    // e_base mod L (the same value sig::challenge computes), so a prover cannot
-    // substitute a different scalar that happens to satisfy the curve equation.
+    // (1)+(2)+(4) range-bind (e, e_k); (3) ties them to e_base. Split out so the
+    // no-wrap range binding is unit-testable without a Poseidon2 preimage (M-1).
+    reduction_range_bind(e, e_k);
+    // (3) the reduction identity (a FIELD equation, mod q_base).
     assert(e + e_k * BJJ_L == e_base, "challenge reduction not bound to its preimage");
     e
+}
+
+/// The range-binding half of the challenge reduction: bind `(e, e_k)` so that the
+/// reduction identity `e + e_k*L == e_base` (asserted by the caller) UNIQUELY pins
+/// `e` to `e_base mod L`. Asserts:
+///   (1) `e_k < 8` (a 3-bit quotient; `q_base / L < 8`),
+///   (2) `e < L` (canonical scalar), and
+///   (4) [OPUS-4.8] sq-ru0yx M-1: the NO-WRAP bound. (1)+(2)+(3) ALONE do NOT pin
+///       `e`: when `e_k == 7` the FIELD identity (mod `q_base`) also admits the wrap
+///       alternative `e' = e_base + q_base - 7*L` (`e' < L`) with `e' != e_base mod
+///       L`, because `e' + 7*L` wraps past `q_base` back to `e_base`. We forbid the
+///       unreachable top window `e in [q_base - 7*L, L)` by binding `e` to a
+///       PER-BUCKET upper bound `bound = (e_k == 7) ? (q_base - 7*L) : L` and
+///       asserting `e < bound`. For `e_k < 7` the sum `e + e_k*L <= 6*L + (L-1) =
+///       7*L - 1 < q_base` cannot wrap, so `bound = L` (step (2)'s guarantee); for
+///       `e_k == 7` the honest `e = e_base - 7*L` lies in `[0, q_base - 7*L)`, so
+///       `bound = q_base - 7*L` never rejects an honest witness but excludes the
+///       wrap window. `assert_lt_to` is the witnessed-difference range bind.
+// [OPUS-4.8] sq-ru0yx M-1: reduction range binding incl. the no-wrap fix. `pub` so
+// the in-crate Noir tests can exercise (4) with explicit (e, e_k) vectors.
+pub fn reduction_range_bind(e: Field, e_k: Field) {
+    e_k.assert_max_bit_size::<REDUCTION_K_BITS>();
+    assert_lt_l(e);
+    let is_top = (e_k == REDUCTION_K_MAX as Field) as Field;
+    let bound = BJJ_L - is_top * (BJJ_L - REDUCTION_TOP_BOUND);
+    assert_lt_to(e, bound);
+}
+
+/// Assert `value < bound` for a public-or-witnessed `bound <= L < 2^SCALAR_BITS`,
+/// via the canonical "witnessed difference" range bind: `value` and
+/// `bound - 1 - value` both decompose to `SCALAR_BITS` bits, so both lie in
+/// `[0, 2^SCALAR_BITS)` and sum to `bound - 1`, forcing `value <= bound - 1 <
+/// bound`. ([`assert_lt_l`] is the `bound == BJJ_L` specialisation.) The caller
+/// MUST pass `bound <= L` (true for the two reduction buckets `L` and
+/// `q_base - 7*L`), so `bound - 1 < 2^SCALAR_BITS` and the complement cannot wrap.
+// [OPUS-4.8] sq-ru0yx M-1: per-bucket upper-bound range bind for the no-wrap fix.
+fn assert_lt_to(value: Field, bound: Field) {
+    value.assert_max_bit_size::<SCALAR_BITS>();
+    let complement = bound - 1 - value;
+    complement.assert_max_bit_size::<SCALAR_BITS>();
 }
 
 /// Assert `value < BJJ_L` (the scalar-field order). Implemented as the
