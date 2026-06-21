@@ -26,20 +26,23 @@ levers are named to *evaluate, not assume*:
 3. **vector-backed concept resolution** `V("Cat")` that binds the nearest-concept IRI via
    `sparq-vectors` at parse/bind time.
 
-### Correction: there is no `crates/sparq-kb`
+### Note: `crates/sparq-kb` now exists — the Phase-0 dependency is satisfied
 
-The brief (and the bead title) say the PKG lives in `crates/sparq-kb`. **It does not.**
-A workspace scan (`ls crates/`, `grep -rl sparq-kb`) shows **no `sparq-kb` crate exists**.
-The name appears only as a *future, unbuilt* crate in
-`research/dogfooding-sparq-knowledge-graph.md` §6 Phase-1 ("the `sparq-kb` crate … Not
-built yet"). The PKG today is a **design**, not code: no ontology files, no ingestion, no
-A/B harness shipped. This matters for scoping — this surface cannot "touch `sparq-kb`"
-because there is nothing to touch; it would be a *new* opt-in crate (call it
-`sparq-terse`) layered over the existing query stack, and it is downstream of the PKG
-Phase-1 ingestion existing at all. The honest dependency order is: **PKG ingestion (the
-data) → this ergonomic surface (the query convenience) → the §5 A/B that measures whether
-the convenience pays.** Designing the surface now is fine (it is cheap, read-only design),
-but it must not be presented as wired to a store that does not yet exist.
+The brief (and the bead title) say the PKG lives in `crates/sparq-kb`. **It does** — this
+record's earlier draft was written off a stale local `main` and wrongly claimed the crate
+did not exist; corrected here. As of origin/main, `crates/sparq-kb` is built: the PKG
+ontology + SHACL guardrail shapes and the ingestion PoC are **merged** (sq-2m6zm.1 /
+sq-2m6zm.2, landed via PR #1069), shipping `ontology/pkg/pkg.ttl`, `shapes/pkg.shapes.ttl`,
+the `ingest/ingest_pkg.py` pipeline, and an ingested `ingest/pkg-instances.ttl` graph. A
+"query-the-PKG" skill (sq-2m6zm.3, PR #1075) is in flight on top of it. So the PKG is no
+longer a design-only artefact: the ontology, the ingestion, and a real ingested graph all
+exist as code. This matters for scoping — **this surface is downstream of an *existing*
+PKG**, not a hypothetical one. The honest dependency order still holds: **PKG ingestion
+(the data, now done) → this ergonomic surface (the query convenience) → the §5 A/B that
+measures whether the convenience pays** — but its first link is satisfied, so the surface
+can be prototyped now against the real `sparq-kb` graph. The surface itself remains a
+*new* opt-in crate (call it `sparq-terse`) layered over the existing query stack; it does
+not modify `sparq-kb`.
 
 ### The deeper reframe the brief invites — and the honest tension
 
@@ -510,12 +513,13 @@ uncertain." Treat lever 1 as a measure-first conditional and lever 2 as recommen
 
 ## 8. Phased plan (each phase = a future bead)
 
-Ordered; each gated on its predecessor and on the dogfooding PKG actually existing.
+Ordered; each gated on its predecessor.
 
-1. **Phase 0 — dependency: PKG ingestion must exist.** This surface is downstream of
-   `dogfooding-…md` Phase 1 (the `sparq-kb`/ingestion PoC + a real PKG graph). Until a PKG
-   graph exists there is nothing to query terser. *(Future bead: track as a blocker edge to
-   the dogfooding Phase-1 bead, not duplicated work.)*
+1. **Phase 0 — dependency: PKG ingestion (SATISFIED).** This surface is downstream of the
+   `sparq-kb` ingestion PoC + a real PKG graph — which now exist on `main` (sq-2m6zm.2,
+   PR #1069: `crates/sparq-kb` with `ontology/pkg/pkg.ttl` and an ingested
+   `ingest/pkg-instances.ttl`). There is a real graph to query terser, so this dependency
+   is no longer a blocker and Phase 1 can start immediately.
 2. **Phase 1 — the verifiable transpiler skeleton + soundness harness (do this first,
    cheaply).** New `sparq-terse` crate: `terse_to_sparql -> Expansion {canonical_sparql,
    resolutions, warnings}`; identity pass-through (canonical SPARQL in → out unchanged); the
@@ -581,8 +585,8 @@ markers; discovered work captured as beads.
   `src/labels.rs`/`src/verbalize.rs` (`embed_labels`/`verbalize`), `src/ann.rs`
   (`nearest_term_exact_checked`, sq-32i5 staleness guard).
 - `crates/sparq-introspect/src/lib.rs` (`to_text_summary` schema card).
-- `research/dogfooding-sparq-knowledge-graph.md` (§2 ontology, §5 eval protocol, §6 phases —
-  and the `sparq-kb` "not built yet" status that corrects this brief's premise).
+- `research/dogfooding-sparq-knowledge-graph.md` (§2 ontology, §5 eval protocol, §6 phases) —
+  now realised as the merged `crates/sparq-kb` (PKG ontology + ingested graph, PR #1069).
 - `research/agent-effectiveness-program.md` / `agent-efficiency-tooling.md` — cache hygiene
   as the dominant token lever; the measure-first / kill-criteria discipline.
 - `skills/{genai-retrieval,sparql-query,vector-search}/SKILL.md`.
