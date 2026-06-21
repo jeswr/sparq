@@ -841,6 +841,58 @@ OFF, with a long-tail slice); its numbers are **work-box NON-CANONICAL**. The en
 trainer would consume — the thin KGE trainer that consumes them now exists behind the `kge` feature
 (recipe 14). <!-- [OPUS-4.8] sq-0wo9e.8 -->
 
+### 16. SHACL/OWL priors + QUDT unit-normalisation — enum codebook / cardinality pooling / SI magnitudes (opt-in, `structure` + `structure-shacl`)
+
+<!-- [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §2 + §7). -->
+Research-grade **P2**: read the schema sparq already holds — `sh:in` enums, `sh:datatype`,
+`sh:min/maxCount`, `owl:FunctionalProperty`, and QUDT units — as **priors over the encoder layout**,
+not post-hoc filters. Two slices:
+
+- **QUDT unit-normalisation (`structure`, pure — no SHACL dep)** — `units::normalise(value, unit_iri)`
+  converts a unit-annotated magnitude to its **canonical SI value + `QuantityKind`** via a bundled
+  affine table, **before** the order-preserving `NumericEncoder`, so `1000 m` and `1 km` map to the
+  **identical** code (design §2 "unit-normalise-before-magnitude"). `same_quantity(a, b)` makes a
+  length-vs-mass mismatch a **detectable error** (a length never shares a numeric block with a mass).
+  Unknown unit / non-finite value → `None` (**fail-closed**, never silently dimensionless).
+- **Enum `Codebook` (`structure`, pure)** — a one-hot block over a closed enum: slot `0` is the
+  reserved **out-of-enum / invalid** code, slots `1..=n` the members. **Enum equality is a slot match,
+  not a cosine threshold** (design §2 "no recall loss"); a non-member encodes to the invalid slot a
+  closed-world `sh:in` shape rejects. `encode`/`decode` round-trip every member.
+- **`ShaclPriors` reader (`structure-shacl`, pulls `sparq-shacl`)** — `ShaclPriors::from_model` /
+  `from_model_and_data` mine, **per predicate** from a parsed `ShapesModel` (read-only — no SHACL
+  changes): the enum `Codebook` (`sh:in`), the router-confirmed `Encoder` (`sh:datatype`), and the
+  **pooling rule** `Cardinality::{Functional,Multi}` (`sh:maxCount 1` or `owl:FunctionalProperty` from
+  the data graph → one deterministic slot; else a permutation-invariant pooled block).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure-shacl
+use sparq_vectors::{normalise, QuantityKind, NumericEncoder, ShaclPriors, Cardinality};
+use sparq_shacl::model::ShapesModel;
+
+// unit-normalise before the magnitude encoder: 1000 m == 1 km share a code.
+let m = normalise(1000.0, "http://qudt.org/vocab/unit/M").unwrap();
+let km = normalise(1.0, "http://qudt.org/vocab/unit/KiloM").unwrap();
+assert_eq!(m.canonical_value, km.canonical_value);          // same physical length
+let enc = NumericEncoder::fit([m.canonical_value], 16);
+assert_eq!(enc.encode(m.canonical_value), enc.encode(km.canonical_value));
+
+// SHACL priors: sh:in → codebook (slot match), sh:maxCount 1 → functional pooling.
+let model = ShapesModel::parse(&shapes_graph);
+let priors = ShaclPriors::from_model(&model);
+if let Some(p) = priors.get("http://ex/status") {
+    let cb = p.enum_codebook.as_ref().unwrap();             // out-of-enum → reserved invalid slot
+    assert!(matches!(p.cardinality, Cardinality::Functional | Cardinality::Multi));
+    let _ = cb.member_count();
+}
+```
+
+**Honesty.** Enum/boolean exactness (slot match), the affine unit conversion, and the
+SHACL-detectable mismatch are **proven** (`codebook.rs` / `units.rs` / `shacl_priors.rs` tests +
+`tests/structure_shacl.rs`). The QUDT table is a **curated, deliberately small** subset (common SI +
+a few customary units); an absent unit fails closed — extending it is additive. Whether these priors
+raise downstream retrieval is **empirical, ablation-gated** — no accuracy claim. A predicate with no
+declared shape simply gets **no** prior (fail-open, the encoder falls back to the datatype router).
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
@@ -857,14 +909,22 @@ trainer would consume — the thin KGE trainer that consumes them now exists beh
   methods write a delta the read paths consult transparently (recipe 12). The delta lives in RAM on the
   handle; `save_delta` persists it to a crash-durable `.spqd` sidecar and `open_with_delta` replays it,
   so mutations survive a restart without a `compact` (the two durability paths).
-- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1 P0, sq-0wo9e.2 P1).**
+- **Structure-aware preprocessing is the non-default `structure` feature (sq-0wo9e.1 P0, sq-0wo9e.2 P1, sq-0wo9e.3 P2).**
   It is the ONLY feature pulling `sparq-reason` + `sparq-introspect` into this crate, both **optional**, so
   with it OFF the default build compiles zero structure-prep code and gains no new required deps. With
   it ON it exposes the **P0** closure + sampler (`close_for_vectorise` / `materialise_closure` /
-  `ClosedGraph`, `TypeConstraints`, `NegativeSampler` + `SamplingMode`, recipe 13) AND the **P1**
+  `ClosedGraph`, `TypeConstraints`, `NegativeSampler` + `SamplingMode`, recipe 13), the **P1**
   typed-literal encoders (`route`, `NumericEncoder`, `BooleanEncoder`, `DateEncoder`, `SchemaHeader`,
-  recipe 15). `structure` itself serves no exact answer; encoder invariants are proven but
-  embedding-quality benefit is **unproven** (research-grade, no accuracy claim, no canonical numbers).
+  recipe 15), AND the **P2** enum `Codebook` + QUDT unit-`normalise` (recipe 16). `structure` itself
+  serves no exact answer; encoder invariants are proven but embedding-quality benefit is **unproven**
+  (research-grade, no accuracy claim, no canonical numbers).
+- **The SHACL/OWL prior reader is the non-default `structure-shacl` feature (sq-0wo9e.3 P2).** It
+  **implies `structure`** and is the ONLY feature pulling `sparq-shacl` (and transitively, on native,
+  the engine) into this crate's graph — so neither the default build nor the lean `structure` feature
+  gains a SHACL/engine dependency. With it ON it exposes `ShaclPriors` / `PredicatePrior` /
+  `Cardinality` (recipe 16): a **read-only** reader that mines enum/datatype/cardinality priors out of
+  a parsed `ShapesModel` (no SHACL behaviour change). The enum codebook + QUDT normaliser themselves
+  ship under plain `structure` (pure, no SHACL dep) — only the *reader* needs `structure-shacl`.
 - **The KGE measurement foundation is the non-default `kge` feature (sq-0wo9e.8 / P6).** It **implies
   `structure`** and adds **no new dependency** (a hand-rolled CPU-only trainer — no ML crate). With it
   OFF the default build compiles zero trainer/eval code; with it ON it exposes `train` / `TrainConfig`

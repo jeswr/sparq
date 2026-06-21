@@ -89,11 +89,12 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   `provider` feature carries the OpenAI-compatible `/v1/embeddings` shape with a
   caller-supplied `Transport`; `embeddings` adds a concrete reqwest client +
   `RemoteEmbedder::from_env(dim)`. Never enters the wasm bundle.
-- **Structure-aware vectorisation (opt-in `structure`; measurement behind `kge`)** — research-grade.
+- **Structure-aware vectorisation (opt-in `structure` / `structure-shacl`; measurement behind `kge`)** — research-grade.
   **P0:** `close_for_vectorise` materialises the `sparq-reason` closure **before** vectorising; a
   `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an **on/off ablation**.
-  **P1:** typed-literal encoders — `route`r, **order-preserving** `NumericEncoder`, `BooleanEncoder`,
-  `DateEncoder`, self-describing `SchemaHeader` (metric guard).
+  **P1/P2:** typed-literal encoders — `route`r, **order-preserving** `NumericEncoder`, `BooleanEncoder`,
+  `DateEncoder`, enum `Codebook`, `SchemaHeader` (metric guard); QUDT unit-`normalise` (`1000 m` ≡ `1 km`);
+  **`structure-shacl`** adds the `ShaclPriors` reader (enum/datatype/cardinality from `sparq-shacl`).
   **`kge`** (implies `structure`, no new dep — hand-rolled SGD): a thin CPU-only trainer (symmetric
   **DistMult** / asymmetric **ComplEx**) + a **filtered link-prediction** `{closure}×{type-neg}`
   ablation (`run_ablation*`). **No accuracy claim**; INDICATIVE only — read deltas off ComplEx (DistMult is symmetric → near-random on directional data).

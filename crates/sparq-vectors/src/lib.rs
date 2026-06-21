@@ -24,6 +24,22 @@ pub mod embed;
 // / the date encoder touch sparq-core, already in the tree). The default build carries zero encoder code.
 #[cfg(feature = "structure")]
 pub mod encode;
+// [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e): P2 — the categorical CODEBOOK encoder for `sh:in`/`owl:oneOf`
+// enum members (slot-match exactness, reserved out-of-enum invalid code) and the QUDT UNIT
+// normaliser (`1000 m` and `1 km` share a code before the order-preserving numeric encoder).
+// `structure` feature only; pure, dependency-light (no SHACL/engine dep — the SHACL *reader* below
+// is the only thing that pulls sparq-shacl). The default build carries zero P2 code.
+#[cfg(feature = "structure")]
+pub mod codebook;
+#[cfg(feature = "structure")]
+pub mod units;
+// [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e): P2 — the SHACL/OWL PRIOR EXTRACTOR. Reads enum (`sh:in`) /
+// datatype (`sh:datatype`) / cardinality (`sh:min,maxCount`, `owl:FunctionalProperty`) priors out of
+// a parsed `sparq-shacl` shapes model (no SHACL changes — a read-only reader). `structure-shacl`
+// feature only: it is the ONLY feature pulling `sparq-shacl` into this crate's graph, so neither the
+// default build nor the lean `structure` feature gains a SHACL/engine dependency.
+#[cfg(feature = "structure-shacl")]
+pub mod shacl_priors;
 #[cfg(feature = "filtered-ann")]
 pub mod filter;
 pub mod fingerprint;
@@ -146,6 +162,19 @@ pub use encode::{
     metamorphic_monotone, numeric_value, route, temporal_value, Block, BooleanEncoder, DateEncoder,
     Encoder, Metric, NumericEncoder, SchemaHeader, SPQS_MAGIC, SPQS_VERSION,
 };
+// [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e): the P2 enum codebook + QUDT unit-normaliser surface —
+// `structure` feature only (pure, no SHACL dep).
+#[cfg(feature = "structure")]
+pub use codebook::{Codebook, INVALID_SLOT};
+#[cfg(feature = "structure")]
+pub use units::{
+    is_known, normalise, normalise_lexical, quantity_kind, same_quantity, Normalised, QuantityKind,
+    QUDT_UNIT_NS,
+};
+// [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e): the P2 SHACL/OWL prior-extractor surface —
+// `structure-shacl` feature only (the only feature pulling sparq-shacl).
+#[cfg(feature = "structure-shacl")]
+pub use shacl_priors::{Cardinality, PredicatePrior, ShaclPriors};
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
     ObjectKind, PropertyGroup,
