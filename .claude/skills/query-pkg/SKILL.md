@@ -270,8 +270,12 @@ integration) needs sparq's own API key (an external-credential dependency) and i
 follow-up — only the **agent flavor** (no API key) ships here.
 
 > **Honesty.** Whether routing PKG access through a cheap-model sub-agent actually cuts the
-> orchestrator's *model-price-weighted* cost is **measured by sq-2m6zm.4 / sq-jgi97**, not
-> claimed here.
+> orchestrator's *model-price-weighted* cost is now **MEASURED** (beads sq-zbyo7 / sq-jgi97,
+> the real-transcript N=30 3-arm A/B that superseded the sq-2m6zm.4 #1078 proxy): the Haiku
+> NL-tool was ≈ 30× cheaper in $ than read-docs at equal quality. The full table, method,
+> and caveats live in `bench/pkg-dogfood/RESULTS.md` (the sanctioned record); this file
+> only points at it. The win is scoped to **PKG-answerable** questions by construction —
+> a miss is an honest abstain, not a fabricated answer.
 
 ## When NOT to use this
 

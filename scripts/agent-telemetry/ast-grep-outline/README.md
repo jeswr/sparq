@@ -1,6 +1,19 @@
 <!-- [OPUS-4.8] sq-lhwo.4 (epic sq-lhwo). 🤖 SPARQ agent. -->
 # ast-grep + outline token A/B harness (sq-lhwo.4)
 
+> 🤖 **SPARQ agent — verdict already SETTLED; this is the runnable proxy harness, not the
+> canonical answer.** The load-bearing decision ("does outline/`ast-grep`-first save agent
+> tokens?") was settled by the **real-transcript** A/B, whose CONCLUSION is:
+> **ast-grep + outline are PRECISION / completeness tools, measured NOT to save tokens**
+> (slightly more expensive end-to-end). The **canonical record** is
+> [`bench/pkg-dogfood/RESULTS-astgrep.md`](../../../bench/pkg-dogfood/RESULTS-astgrep.md)
+> (cited qualitatively by `AGENTS.md` §2 and the `ast-grep` SKILL §5). This directory is the
+> **lower-fidelity read-payload PROXY** harness (the runnable code + the frozen PREREG/tasks);
+> by construction it **cannot** reach `recommend_adopt` (see below), and its predecessor
+> byte-proxy in fact **overstated** the saving — the real measurement corrected it. Keep this
+> harness for reproducible proxy runs and as the pre-registration of record; for the *verdict*,
+> read `RESULTS-astgrep.md`.
+
 The FIRM, runnable A/B for the **ast-grep + outline-before-read** intervention vs the
 competent `grep -rn` + full-`Read` baseline — deferred from `sq-lhwo.2` (where the
 skill shipped and a directional, advisory byte-cost pilot ran). It applies the SHARED
