@@ -377,6 +377,47 @@ jobs:
             crate: sparq-fedclient
             features: fedclient
             test: true
+          # [OPUS-4.8] sq-u6nmt: the sparq-kb Project-Knowledge-Graph dogfooding crate
+          # (added by PR #1069). The DEFAULT build is a pure data + Rust-vocab crate; its
+          # SHACL-dogfood + ingest suites are entirely behind default-OFF features:
+          #   • tests/dogfood_shacl.rs + tests/ingest_shacl.rs are `#![cfg(feature =
+          #     "validate")]` (load the PKG ontology/instances, run the SHACL shapes); and
+          #   • tests/ingest_query.rs is `#![cfg(feature = "query")]` (the SPARQL proof
+          #     over the ingested PKG graph).
+          # ci.yml's `cargo nextest archive --workspace --all-targets` passes NO
+          # `--features validate`/`query`, so it compiled all of those test bodies EMPTY and
+          # ran ZERO of them — the silent-skip gap this lane exists to close — and sparq-kb
+          # had NO leg here at all. TWO legs cover every suite + every documented opt-in
+          # state of the crate:
+          #   (1) `validate` runs dogfood_shacl + ingest_shacl (the suites gated on
+          #       `validate` but NOT `query`); and
+          #   (2) `query` IMPLIES `validate` (Cargo.toml: `query = ["validate", …]`) and is
+          #       the crate's MAXIMAL feature set, so this leg is equivalent to
+          #       `--all-features` for sparq-kb today: it runs ingest_query AND re-runs the
+          #       validate suites, and its `clippy --all-targets -D warnings` gates the full
+          #       feature surface. (The crate's `--all-features` clippy/build is ALSO already
+          #       covered workspace-wide by ci.yml's `cargo clippy --workspace --all-targets
+          #       --all-features` + `cargo doc --workspace --all-features`; what was missing
+          #       — and what these legs add — is the all-features TEST execution.)
+          # No `not(feature = …)` divergence in the crate, so two isolated legs (matching the
+          # per-feature convention above) suffice. Cheap: sparq-kb is tiny; `validate` pulls
+          # sparq-core + sparq-shacl (+ oxttl/oxrdf), `query` additionally sparq-engine, all
+          # already compiled by sibling legs / the warm cache. Verified locally on origin/main:
+          # `cargo test -p sparq-kb --features validate` runs 3 dogfood_shacl + 2 ingest_shacl
+          # (+1 vocab unit) tests, `--features query` adds the 3 ingest_query tests, and
+          # `clippy --all-targets -D warnings` is clean in every state.
+          # NOTE: the optional `close` feature (pulls sparq-reason) + the `query_canned`
+          # suite are NOT on main yet (they arrive with PR #1075, still open) — adding a
+          # `close` leg now would ENOENT (`does not have feature 'close'`), so it is
+          # deliberately omitted; extend with a `close` leg when #1075 lands.
+          - name: sparq-kb (validate)
+            crate: sparq-kb
+            features: validate
+            test: true
+          - name: sparq-kb (query, implies validate — maximal feature set)
+            crate: sparq-kb
+            features: query
+            test: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust (stable)
