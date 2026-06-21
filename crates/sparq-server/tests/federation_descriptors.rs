@@ -328,11 +328,36 @@ async fn sd_parses_and_carries_mandatory_terms() {
         endpoints[0]
     );
 
-    // sd:supportedLanguage includes SPARQL11Query (always).
+    // sd:supportedLanguage includes SPARQL11Query (always) AND the SPARQL-1.2-SD
+    // version-agnostic sd:SPARQLQuery (sq-2msb) — a 1.1-only client and a 1.2-aware client both
+    // recognise the endpoint.
     let langs = objects_of(&triples, &format!("{SD}supportedLanguage"));
     assert!(
         langs.contains(&format!("{SD}SPARQL11Query")),
         "SPARQL11Query advertised: {langs:?}"
+    );
+    assert!(
+        langs.contains(&format!("{SD}SPARQLQuery")),
+        "the 1.2-SD version-agnostic sd:SPARQLQuery advertised: {langs:?}"
+    );
+
+    // [OPUS-4.8] sq-2msb (gh-917): the REAL served SD (through `service_capabilities`) carries
+    // sd:supportedVersion for exactly the conformance-verified versions — 1.0, 1.1 and the FULL
+    // 1.2 (the engine passes the complete sparql12 suite, so version-1.2, not -basic).
+    let versions = objects_of(&triples, &format!("{SD}supportedVersion"));
+    for v in [
+        "http://www.w3.org/ns/sparql#version-1.0",
+        "http://www.w3.org/ns/sparql#version-1.1",
+        "http://www.w3.org/ns/sparql#version-1.2",
+    ] {
+        assert!(
+            versions.contains(&v.to_string()),
+            "sd:supportedVersion {v} advertised: {versions:?}"
+        );
+    }
+    assert!(
+        !versions.iter().any(|v| v.contains("version-1.2-basic")),
+        "must advertise FULL version-1.2, not the -basic profile: {versions:?}"
     );
 
     // sd:resultFormat advertises the four SPARQL-results serialisations + the three RDF ones.

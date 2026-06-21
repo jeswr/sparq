@@ -556,9 +556,21 @@ advertise itself as a discoverable federation node by serving two read-only RDF 
   Description](https://www.w3.org/TR/sparql11-service-description/) generated from the server's
   **actual** capabilities (sq-qfcb), never a hard-coded fiction:
     - `sd:Service` + `sd:endpoint` (the request `Host`'s `/sparql`);
-    - `sd:supportedLanguage` — `SPARQL11Query` always; `SPARQL11Update` **only when an anonymous
-      client can run one** (it is suppressed when a `--auth-token` write gate is configured,
+    - `sd:supportedLanguage` — `SPARQL11Query` always, **plus** the SPARQL-1.2-SD
+      version-agnostic `SPARQLQuery` (sq-2msb); `SPARQL11Update` + `SPARQLUpdate` **only when an
+      anonymous client can run one** (suppressed when a `--auth-token` write gate is configured,
       because then an unauthenticated SD reader cannot use Update);
+    - `sd:supportedVersion` (sq-2msb, gh-917) — the SPARQL language **versions** this build
+      conformance-verifies, as `sparql:version-*` IRIs (`http://www.w3.org/ns/sparql#`). SPARQL
+      1.2 SD moves version negotiation off `sd:Language` onto `sd:supportedVersion`, so a
+      1.2-aware federation client can discover triple-term / `dir`-lang support without probing.
+      sparq advertises `version-1.0`, `version-1.1` and the **full** `version-1.2` (not the
+      `version-1.2-basic` profile) because the engine passes the complete W3C SPARQL 1.0/1.1/1.2
+      suites at 100% (`conformance-report.md`). **HONESTY GATE**: there is no `sparql12`/`rdf12`
+      cargo feature — SPARQL 1.2 is compiled into the base engine — so this is keyed off the
+      DOCUMENTED conformance state (`descriptors::CONFORMANCE_VERIFIED_VERSIONS`), never a `cfg!`
+      or an aspiration; were any 1.2 group to regress to a partial pass, the honest edit is to
+      drop to `version-1.2-basic` (or omit 1.2) in that one constant;
     - `sd:resultFormat` — the four SPARQL-results serialisations (JSON/XML/CSV/TSV) plus the RDF
       graph serialisations the CONSTRUCT/DESCRIBE/GSP-read path emits (Turtle/N-Triples/RDF-XML),
       and `sd:inputFormat` — the RDF serialisations the GSP write path parses (Turtle/N-Triples/
