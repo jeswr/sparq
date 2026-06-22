@@ -76,8 +76,9 @@ soundness of each conjunct is §3.3.)
 2. **The issuer signature is CHECKED, never self-asserted.** *G* is verified to be
    signed by the key `trust:issuerKey` names for *S′*, over *G*'s RDFC-1.0 commitment.
    A graph merely *claiming* `trust:issuerKey …` proves nothing. *(Caveat: the
-   `issuerKey → verifying-key` binding is operator-asserted until a DID resolver lands —
-   `sq-pfae.3`; this is the live forgery vector D′, design §3.3.)*
+   `issuerKey → verifying-key` binding is operator-asserted by default — the live forgery
+   vector D′, design §3.3. The opt-in `did` resolver (`sq-pfae.3`) binds it from a
+   `trust:issuerDid` instead, narrowing — not eliminating — D′.)*
 3. **Freshness and revocation pass.** The credential is within `trust:freshWithin` of
    `Session.now` and is not revoked. Both are **per-request side-conditions** —
    freshness is a Rust check (time is not a reasoner fact); a `not-revoked` guard, if
@@ -187,8 +188,9 @@ This note pins **semantics and additivity**, nothing about privacy. In particula
   (`age 25`, not "≥ 18"). This is **not** ZKAPs-grade unlinkable presentation.
 - **Holder binding is the clear-WebID, non-anonymous degraded path** (`sq-wvne` /
   `sq-xc4y`).
-- **Issuer keys are operator-asserted** until a DID resolver lands (`sq-pfae.3`) — the
-  live forgery vector D′.
+- **Issuer keys are operator-asserted by default** — the live forgery vector D′. The
+  opt-in `did` resolver (`sq-pfae.3`) binds the key from a `trust:issuerDid`
+  (`did:key`/`did:web`), narrowing — not eliminating — D′.
 - The ZK estate this design *could* compose with (`sparq-zk` / `sparq-zk-compose`) is
   research-grade and **externally unaudited** — external accredited-cryptographer
   sign-off is **pending** (`sq-qhy4`); `sparq-mpc` is honest-majority semi-honest only.

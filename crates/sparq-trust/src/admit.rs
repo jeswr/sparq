@@ -71,9 +71,10 @@
 //!
 //! This gate verifies a CHECKED issuer signature; it does **NOT** provide privacy,
 //! unlinkability, anonymity, or any cryptographic guarantee. The ZK estate it
-//! composes with is research-grade and **externally UNAUDITED** (`sq-qhy4`). The
-//! issuer key is operator-asserted (no DID resolver — `sq-pfae.3`), so the
-//! `issuerKey → verifying-key` binding is the live forgery vector D′ of §3.3.
+//! composes with is research-grade and **externally UNAUDITED** (`sq-qhy4`). The issuer
+//! key is operator-asserted by default (the `issuerKey → verifying-key` binding is the
+//! live forgery vector D′ of §3.3); the opt-in `did` feature (`sq-pfae.3`, the `did`
+//! module) can bind it from a `trust:issuerDid` instead, narrowing — not eliminating — D′.
 //!
 //! [OPUS-4.8] sq-pfae PoC (issue #940). 🤖 SPARQ agent — trust-graph authorisation PoC.
 

@@ -93,7 +93,14 @@ trust:forShape a rdf:Property, owl:ObjectProperty ;
 
 trust:issuerKey a rdf:Property, owl:ObjectProperty ;
   rdfs:label "issuer key"@en ;
-  rdfs:comment "The cryptographic binding 'source S's verification key is K' — the load-bearing gate for signature verification at admission (§3.3 item 1). Aligns with zk:issuerKey on the existing sparq-zk estate. NB sparq has no DID resolver yet (sq-pfae.3): until then the binding is operator-asserted, the live forgery vector D' (§3.3)."@en ;
+  rdfs:comment "The cryptographic binding 'source S's verification key is K' — the load-bearing gate for signature verification at admission (§3.3 item 1). Aligns with zk:issuerKey on the existing sparq-zk estate. This OPERATOR-ASSERTED form is the live forgery vector D' (§3.3): the operator pastes the key directly. Prefer trust:issuerDid (sq-pfae.3) where a resolver can bind the key, which narrows D'."@en ;
+  rdfs:domain trust:Source ;
+  rdfs:range rdfs:Resource ;
+  rdfs:isDefinedBy trust: .
+
+trust:issuerDid a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "issuer DID"@en ;
+  rdfs:comment "The source's Decentralised Identifier (DID), resolved to its verifying key by a pluggable DID resolver (did:key offline self-cert / pluggable did:web). A rule may name its issuer by trust:issuerDid INSTEAD of the operator-asserted trust:issuerKey hex — the sq-pfae.3 issuer-key-binding term that narrows forgery vector D'. did:key is self-certifying (not a trust anchor); did:web is only as strong as host/TLS control. Resolution is opt-in (sparq-trust `did` cargo feature)."@en ;
   rdfs:domain trust:Source ;
   rdfs:range rdfs:Resource ;
   rdfs:isDefinedBy trust: .

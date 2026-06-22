@@ -155,7 +155,8 @@ pub struct DelegationHop {
     pub delegator: NamedNode,
     /// The delegator's verification key — the hop signature must verify under it. For
     /// the ROOT hop this is the trust-anchored root key (`anchor` step). Operator-/
-    /// chain-asserted (no DID resolver yet — `sq-pfae.3`, the live forgery vector D′).
+    /// chain-asserted by default (the live forgery vector D′); the root anchor is
+    /// DID-bindable via the opt-in `did` feature (`sq-pfae.3`), narrowing D′.
     pub delegator_key: PublicKey,
     /// The delegate's WebID/DID (the principal receiving authority on this hop). For
     /// the *next* hop this becomes the delegator; for the TERMINAL hop this must equal
